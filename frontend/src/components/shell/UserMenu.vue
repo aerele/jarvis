@@ -2,7 +2,7 @@
 	<Dropdown :options="menuOptions">
 		<template #trigger="{ open }">
 			<button
-				class="flex h-12 items-center rounded-md py-2 duration-300 ease-in-out"
+				class="relative flex h-12 items-center rounded-md py-2 duration-300 ease-in-out"
 				:class="
 					isCollapsed
 						? 'w-auto px-0'
@@ -17,6 +17,17 @@
 				     exactly what let the chat welcome mark drift to a different colour
 				     (design.md §2.2). -->
 				<JarvisMark :size="28" :radius="7" />
+				<!-- Resting badge: a waiting reply has to register while the user is
+				     heads-down in chat, without opening the menu. Mirrors the
+				     collapsed-sidebar dot in Sidebar.vue:57-62. -->
+				<div
+					v-if="supportOn && store.awaitingCount"
+					class="absolute left-7 top-1 size-2 rounded-full bg-surface-amber-2"
+					:aria-label="`${store.awaitingCount} support ${
+						store.awaitingCount === 1 ? 'reply' : 'replies'
+					} awaiting you`"
+					role="status"
+				/>
 				<div
 					class="flex flex-1 flex-col overflow-hidden text-left duration-300 ease-in-out"
 					:class="isCollapsed ? 'ml-0 w-0 opacity-0' : 'ml-2 w-auto opacity-100'"
@@ -39,35 +50,33 @@
 <script setup>
 // Sidebar header (DESIGN-V3 §3.2.1): brand + session user, HD's UserMenu
 // pattern. Dropdown: Settings (D9) · Switch to Desk · Change theme · Log out.
-import { computed, inject, ref, onMounted, onUnmounted } from "vue";
+import { computed, inject, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { Dropdown, FeatherIcon } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
 import { useShellStore } from "@/stores/shell";
+import { useSupportStore } from "@/stores/support";
 import { useJarvisTheme } from "@/theme";
-import { supportAwaitingCount } from "@/api";
 import { agentName } from "@/branding";
 
 defineProps({
 	isCollapsed: { type: Boolean, default: false },
 });
 
-const store = useShellStore();
+const shellStore = useShellStore();
 const session = inject("$session");
 const { effectiveDark, toggleTheme } = useJarvisTheme();
 
-// Support panel (Plan 3 C3/C4): dual kill-switch + an SPA-driven awaiting-count badge.
+// Support panel (Plan 3 C3/C4): dual kill-switch + a store-driven awaiting-count
+// badge. `store` is the shared support-store singleton (Task 1) — both this
+// resting dot and the list read the same value, so they can never disagree.
 const router = useRouter();
 const supportOn = window.support_available && window.has_support_access;
-const awaiting = ref(0);
+const store = useSupportStore();
 let pollTimer = null;
 async function pollAwaiting() {
-	try {
-		const r = await supportAwaitingCount();
-		awaiting.value = (r.data && r.data.count) || 0;
-	} catch (e) {
-		/* support is best-effort — never surface a boot error */
-	}
+	if (document.hidden) return;
+	await store.refreshAwaiting();
 }
 onMounted(() => {
 	if (!supportOn) return;
@@ -91,11 +100,13 @@ const menuOptions = computed(() => [
 		group: "Menu",
 		hideLabel: true,
 		items: [
-			{ label: "Settings", icon: "settings", onClick: () => store.openSettings() },
+			{ label: "Settings", icon: "settings", onClick: () => shellStore.openSettings() },
 			...(supportOn
 				? [
 						{
-							label: awaiting.value ? `Support (${awaiting.value})` : "Support",
+							label: store.awaitingCount
+								? `Support (${store.awaitingCount})`
+								: "Support",
 							icon: "life-buoy",
 							onClick: () => router.push({ name: "Support" }),
 						},

@@ -2484,6 +2484,45 @@
 								</svg>
 								<span v-if="groundNextTurn">Wiki</span>
 							</button>
+							<!-- "Get help from a human" — always-available chat hook into the
+							     standalone support space (Task 6). Gated on the same dual
+							     kill-switch the /support routes guard on. -->
+							<button
+								v-if="supportOn"
+								class="jv-iconbtn"
+								title="Get help from a human"
+								@click="getHumanHelp"
+								style="
+									width: 30px;
+									height: 30px;
+									display: flex;
+									align-items: center;
+									justify-content: center;
+									background: transparent;
+									border: none;
+									border-radius: 7px;
+									cursor: pointer;
+									color: var(--text-3);
+								"
+							>
+								<svg
+									width="17"
+									height="17"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.7"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<circle cx="12" cy="12" r="10" />
+									<circle cx="12" cy="12" r="4" />
+									<line x1="4.93" y1="4.93" x2="9.17" y2="9.17" />
+									<line x1="14.83" y1="14.83" x2="19.07" y2="19.07" />
+									<line x1="14.83" y1="9.17" x2="19.07" y2="4.93" />
+									<line x1="4.93" y1="19.07" x2="9.17" y2="14.83" />
+								</svg>
+							</button>
 						</template>
 					</Composer>
 				</div>
@@ -3889,6 +3928,23 @@ const modelsByProvider = computed(() => {
 const currentTitle = computed(
 	() => store.conversations.find((c) => c.name === currentId.value)?.title || "New chat"
 );
+
+// Same dual kill-switch the support routes guard on (router/index.js
+// supportGuard) — a dead button that redirects straight back to chat is worse
+// than no button.
+const supportOn = window.support_available && window.has_support_access;
+
+// "Get help from a human" — always available (v1). The conversation reference
+// is plain, readable, user-EDITABLE body text: create_ticket takes only
+// (subject, body), has no context params, and derives the tenant server-side
+// from the API key. An operator-actionable deep-link is v2.
+function getHumanHelp() {
+	const title = (currentTitle.value || "").trim();
+	// "New chat" is currentTitle's fallback, not a real title — carrying it
+	// would put a meaningless quote in front of a support agent.
+	const ref = title && title !== "New chat" ? `\n\n— From Jarvis chat: "${title}"` : "";
+	router.push({ name: "SupportNew", query: ref ? { body: ref } : {} });
+}
 const visibleMessages = computed(() =>
 	messages.value.filter((m) => {
 		// Receipt-chip rows (a confirmed / discarded / failed gated write) render
