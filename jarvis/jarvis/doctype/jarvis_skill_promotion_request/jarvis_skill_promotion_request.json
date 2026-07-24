@@ -10,6 +10,9 @@
   "field_order": [
     "skill",
     "skill_name",
+    "instructions_snapshot",
+    "description_snapshot",
+    "user_invocable_snapshot",
     "from_scope",
     "to_scope",
     "target_role",
@@ -38,6 +41,27 @@
       "read_only": 1,
       "in_list_view": 1,
       "description": "The skill's authored slug at request time (for the reviewer board)."
+    },
+    {
+      "fieldname": "instructions_snapshot",
+      "fieldtype": "Long Text",
+      "label": "Instructions Snapshot",
+      "read_only": 1,
+      "description": "Immutable full copy of the skill's instructions at request time. The reviewer decides on THIS (not a truncated live excerpt), and approval promotes exactly this snapshot - so an edit after review can never change what the Role/Org audience receives."
+    },
+    {
+      "fieldname": "description_snapshot",
+      "fieldtype": "Small Text",
+      "label": "Description Snapshot",
+      "read_only": 1,
+      "description": "The skill's description at request time (promoted alongside the instructions snapshot)."
+    },
+    {
+      "fieldname": "user_invocable_snapshot",
+      "fieldtype": "Check",
+      "label": "User Invocable Snapshot",
+      "read_only": 1,
+      "description": "The skill's user-invocable flag at request time (promoted alongside the snapshot)."
     },
     {
       "fieldname": "from_scope",

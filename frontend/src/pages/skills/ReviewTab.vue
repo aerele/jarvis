@@ -1798,9 +1798,11 @@ import {
 	triggerFollowupQuestion,
 	listSkillPromotions,
 	decideSkillPromotion,
+	preflightSkillPromotion,
 } from "@/api/review";
-// Org push-budget warning boundary (ruling 2) — a pure, node-tested module.
-import { orgPushBudgetWarning } from "./promotionBudget";
+// Org push-budget warning formatter (ruling 2 + CDX-SP-2) — a pure, node-tested
+// module that RENDERS the server's projection (never a client-side guess).
+import { formatPushProjection } from "./promotionBudget";
 // HTML-escape for every untrusted value interpolated into a confirm message
 // (ConfirmDialog renders `message` via v-html) — SAR-1 client belt.
 import { esc } from "./escapeHtml";
@@ -2255,30 +2257,37 @@ async function fetchSkillPromotions(mode = "reset") {
 function toggleSkillPromoBody(name) {
 	skillPromoExpanded[name] = !skillPromoExpanded[name];
 }
-// Loud, non-blocking Org push-budget warning (ruling 2): a promoted Org skill
-// only reaches the container on the next Apply, and the push is capped at
-// push_budget. This returns null (no warning) for Role targets or when there's
+// Loud, non-blocking Org push-budget warning (ruling 2 + CDX-SP-2): renders the
+// SERVER's per-row push_projection (which shares build_push_payload's exact logic)
+// — never a client-side count guess. Null for Role/User targets or when there's
 // room; the approval is ALWAYS allowed - the reviewer decides informed.
 function budgetWarn(p) {
-	return orgPushBudgetWarning({
-		toScope: p.to_scope,
-		pushCount: skillPromo.pushCount,
-		pushBudget: skillPromo.pushBudget,
-	});
+	return formatPushProjection(p.push_projection);
 }
-// Approve confirms with the concrete visibility implication + the budget warning
-// inline (the card already shows the loud banner; this repeats it at the point of
-// action). The widen is irreversible from the requester's side.
-function approveSkillPromotion(p) {
+// Approve confirms with the concrete visibility implication + a FRESH server
+// projection recomputed at the moment of decision (CDX-SP-2): the on-card banner
+// uses the list-load projection, but a concurrent promotion/edit could have moved
+// the budget since, so we re-preflight before the reviewer commits. Publishing the
+// snapshot is irreversible from the requester's side.
+async function approveSkillPromotion(p) {
 	const target = p.to_scope === "Role" ? `Role: ${esc(p.target_role || "—")}` : "Org";
 	const who = p.to_scope === "Role" ? "that role" : "everyone";
-	const warn = budgetWarn(p);
+	// Recompute the budget truth fresh; fall back to the list-load projection if the
+	// preflight call fails (never block the decision on a warning fetch).
+	let warn = budgetWarn(p);
+	try {
+		const pre = await preflightSkillPromotion(p.name);
+		warn = formatPushProjection(pre && pre.push_projection);
+	} catch (e) {
+		// keep the list-load warning; the server re-checks again at decide time
+	}
 	// Every untrusted value is HTML-escaped — the message renders through v-html
 	// (SAR-1). The budget warning folds in as plain "Note:" copy (no ⚠ glyph —
 	// design.md:563; the on-card banner already carries the colored warning).
 	let message =
-		`This widens “${esc(p.skill_name)}” to ${target} — usable by ${who}. ` +
-		"The requester's private skill stays intact.";
+		`This publishes “${esc(p.skill_name)}” to ${target} — usable by ${who} — as a shared ` +
+		"copy of exactly the reviewed content. Your original private skill stays intact and " +
+		"editable; the shared copy is locked to reviewers.";
 	if (warn) message += ` Note: ${esc(warn.message)}`;
 	confirmDialog({
 		title: "Approve skill promotion?",

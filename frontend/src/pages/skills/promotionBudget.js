@@ -1,51 +1,65 @@
 // Org-promotion push-budget warning (Skills-area promotion surfacing, Fable
-// ruling 2). Extracted as a PURE, importable, node-tested module (the
-// eventFence.js precedent) so the boundary logic is verified without a browser.
+// ruling 2 + Codex CDX-SP-2). Extracted as a PURE, importable, node-tested module
+// (the eventFence.js precedent) so the boundary logic is verified without a
+// browser.
 //
-// Only Org promotions reach the shared container push; Role and User promotions
-// never do (build_push_payload pushes ONLY scope=Org rows with no allowed_roles),
-// so a non-Org target never warns. `pushCount` is the CURRENT count of pushable
-// Org skills (the exact build_push_payload eligibility filter, UNCAPPED, from the
-// reviewer-gated list endpoint); `pushBudget` is the real MAX_SKILLS_PER_PUSH
-// constant. Approving an Org promotion adds exactly one pushable skill.
+// This ONLY FORMATS the server's projection — it never re-derives which skill is
+// dropped. `custom_skills.project_org_promotion_push` computes the truth on the
+// server, sharing `build_push_payload`'s exact eligibility + `skill_name asc`
+// ordering + 25-skill cap, and returns it per Pending Org row (list endpoint) and
+// fresh at approval time (`preflight_skill_promotion`). The old client-side
+// `count + 1 > budget` GUESS was wrong: it always claimed the newly promoted skill
+// "won't reach the container", but the interactive Apply actually REJECTS the whole
+// push, and the unattended sync keeps the first 25 by name — so the dropped skill
+// may be an EXISTING shared one, not the promoted one. We render the server's facts.
+//
+// The projection shape: { to_scope, promoted_slug, projected_count, budget,
+//   at_budget, over_budget, strict_would_fail, dropped_slugs[], promoted_dropped }.
 //
 // Levels (the approval is ALWAYS allowed — the reviewer decides informed):
-//   "over" — after approval the pushable count EXCEEDS the budget: the newly
-//            promoted skill is truncated out of the next container push until an
-//            Org skill is disabled/removed (loud, red).
-//   "near" — after approval the count EQUALS the budget: the last free push slot
-//            is taken (amber) — warned early so the NEXT approval isn't a surprise.
-//   null   — room to spare, or a non-Org target.
-export function orgPushBudgetWarning({ toScope, pushCount, pushBudget } = {}) {
-	if (toScope !== "Org") return null;
-	const budget = Number(pushBudget) || 0;
+//   "over" — after approval the pushable count EXCEEDS the budget: the next
+//            interactive Apply FAILS (nothing pushed) and the unattended sync drops
+//            the named ordered tail (red).
+//   "near" — after approval the count EQUALS the budget: the last free slot is
+//            taken (amber) — warned early so the NEXT approval isn't a surprise.
+//   null   — room to spare, or no projection (a Role/User target never pushes).
+export function formatPushProjection(projection) {
+	if (!projection) return null;
+	const budget = Number(projection.budget) || 0;
 	if (budget <= 0) return null;
-	const count = Math.max(Number(pushCount) || 0, 0);
-	const afterApprove = count + 1;
-	if (afterApprove > budget) {
+
+	if (projection.over_budget) {
+		const dropped = Array.isArray(projection.dropped_slugs) ? projection.dropped_slugs : [];
+		const droppedList = dropped.join(", ");
+		let tail = "";
+		if (projection.promoted_dropped) {
+			tail =
+				`On the next unattended sync the skill you're approving (${projection.promoted_slug}) ` +
+				`is the one dropped — skills sort by name and it falls past the ${budget}-skill cut.`;
+		} else if (dropped.length) {
+			tail =
+				`On the next unattended sync an EXISTING shared skill is dropped instead — ` +
+				`${droppedList} (skills sort by name), NOT the one you're approving.`;
+		}
 		return {
 			level: "over",
-			count,
-			budget,
-			afterApprove,
+			projection,
 			message:
-				`The shared container already holds ${count} of ${budget} pushable Org skills. ` +
-				`Approving makes ${afterApprove} — over the ${budget}-skill push budget, so this ` +
-				`newly promoted skill will NOT reach the container until another Org skill is ` +
-				`disabled or removed. You can still approve; the promotion takes effect immediately, ` +
-				`only the container push is capped.`,
+				`Approving takes the shared catalog to ${projection.projected_count} pushable Org ` +
+				`skills, over the ${budget}-skill push budget. The next interactive Apply will FAIL ` +
+				`(nothing is pushed) until an Org skill is disabled or removed. ${tail}`.trim(),
 		};
 	}
-	if (afterApprove === budget) {
+
+	if (projection.at_budget) {
 		return {
 			level: "near",
-			count,
-			budget,
-			afterApprove,
+			projection,
 			message:
-				`Approving fills the shared container to ${afterApprove} of ${budget} pushable Org ` +
-				`skills — the last free slot in the push budget.`,
+				`Approving fills the shared container to ${projection.projected_count} of ${budget} ` +
+				`pushable Org skills — the last free slot in the push budget.`,
 		};
 	}
+
 	return null;
 }

@@ -60,10 +60,13 @@ export const triggerFollowupQuestion = (name, ask) =>
 // ── skill-promotion queue (Skills-area promotion surfacing) ──────────────────
 // The reviewer queue for `Jarvis Skill Promotion Request`, the sibling of the
 // wiki promotions queue. Envelope parity ({rows, total, has_more, start,
-// page_length}) PLUS push-budget context {push_count, push_budget} so the Org
-// approve affordance can warn near/past the container cap. Rows: {name, skill,
-// skill_name, from_scope, to_scope, target_role, note, status, requested_by,
-// requested_by_name, created, reviewer, decided_at, decision_note, body_excerpt}.
+// page_length}) PLUS coarse push-budget context {push_count, push_budget}. Rows:
+// {name, skill, skill_name, from_scope, to_scope, target_role, note, status,
+// requested_by, requested_by_name, created, reviewer, decided_at, decision_note,
+// body_excerpt, push_projection}. `body_excerpt` is the FULL immutable content
+// snapshot for Pending rows (what approval promotes — not a truncated live
+// excerpt); `push_projection` is the server's truthful per-row Org push-budget
+// projection (render with formatPushProjection, never a client-side guess).
 export const listSkillPromotions = (p = {}) =>
 	call(CS + "list_skill_promotion_requests", {
 		status: p.status || "Pending",
@@ -73,8 +76,17 @@ export const listSkillPromotions = (p = {}) =>
 	});
 
 // Approve (truthy) or reject (falsy) a skill promotion. On approve the server
-// widens the skill's scope in place (four-eyes: a reviewer cannot approve their
-// OWN request → PermissionError; TOCTOU-safe). Returns {ok, status, skill} or
-// {ok:false, reason} for a stale/already-decided request. approve → 1/0.
+// PUBLISHES a new system-owned Role/Org skill from the request's immutable content
+// snapshot, leaving the requester's private skill intact (four-eyes: a reviewer
+// cannot approve their OWN request → PermissionError; TOCTOU-safe). Returns {ok,
+// status, skill, materialized, push_projection?} or {ok:false, reason} for a
+// stale/already-decided request. approve → 1/0.
 export const decideSkillPromotion = (name, approve, note = "") =>
 	call(CS + "decide_skill_promotion", { request_name: name, approve: approve ? 1 : 0, note });
+
+// Fresh push-budget projection for one Pending promotion, recomputed at the moment
+// the reviewer is about to decide (CDX-SP-2) — a list-load value goes stale under
+// concurrent promotions/edits. Returns {ok, to_scope, push_projection}; render
+// push_projection with formatPushProjection (never a client-side guess).
+export const preflightSkillPromotion = (name) =>
+	call(CS + "preflight_skill_promotion", { request_name: name });

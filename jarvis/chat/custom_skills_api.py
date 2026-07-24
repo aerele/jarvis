@@ -16,8 +16,10 @@ import frappe
 from frappe import _
 
 from jarvis.chat.custom_skills import (
+	MANAGED_OWNER,
 	MAX_SKILLS_PER_PUSH,
 	build_push_payload,
+	project_org_promotion_push,
 	pushable_org_skill_count,
 )
 from jarvis.permissions import require_jarvis_user
@@ -575,6 +577,14 @@ def request_skill_promotion(name: str, to_scope: str, target_role: str = "", not
 			"doctype": PROMO,
 			"skill": doc.name,
 			"skill_name": doc.skill_name,
+			# Immutable snapshot of the FULL content at request time (CDX-SP-1). The
+			# reviewer decides on this, and approval promotes exactly this — so a
+			# post-request edit, or content hidden past the old 300-char excerpt, can
+			# never change what the Role/Org audience ends up running. The requester
+			# owns ``doc`` (checked above), so this reads only their own content.
+			"instructions_snapshot": doc.instructions or "",
+			"description_snapshot": doc.description or "",
+			"user_invocable_snapshot": int(doc.user_invocable or 0),
 			"from_scope": from_scope,
 			"to_scope": to_scope,
 			"target_role": target_role if to_scope == "Role" else None,
@@ -592,12 +602,15 @@ def request_skill_promotion(name: str, to_scope: str, target_role: str = "", not
 def decide_skill_promotion(request_name: str, approve: int | str, note: str = "") -> dict:
 	"""Approve or reject a skill promotion request. Reviewer-gated
 	(``require_skill_reviewer``) + four-eyes (a reviewer cannot approve their own
-	request). On approve, widen the skill's scope in place under the reviewer's
-	authority (``ignore_permissions``; the controller ``_guard_scope_change``
-	admits a reviewer). TOCTOU-safe: the status is re-read under a row lock, and
-	the widening is re-validated against the LIVE skill scope, so two concurrent
-	approvals can't double-apply. The promoted Org skill joins the shared catalog
-	on the next explicit Apply (never auto-pushed here)."""
+	request). On approve, PUBLISH a new system-owned Role/Org skill from the
+	request's immutable content snapshot, leaving the requester's private skill
+	untouched (CDX-SP-1). The audience runs EXACTLY what the reviewer approved, and
+	the requester holds no edit rights over the shared copy (they don't own it, and
+	``_guard_content_change`` locks its content to reviewers), so the approval can
+	never be silently rewritten after review. TOCTOU-safe: the status is re-read
+	under a row lock, so two concurrent approvals can't double-publish. The promoted
+	skill joins the shared catalog on the next explicit Apply (never auto-pushed
+	here)."""
 	from jarvis.permissions import require_skill_reviewer
 
 	require_skill_reviewer()
@@ -615,16 +628,7 @@ def decide_skill_promotion(request_name: str, approve: int | str, note: str = ""
 	approved = str(approve).strip().lower() in ("1", "true", "yes", "on")
 	out: dict = {"ok": True, "status": "Approved" if approved else "Rejected"}
 	if approved:
-		skill = frappe.get_doc(SKILL, req.skill)
-		live = (skill.scope or "Org").strip() or "Org"
-		if live == "Personal":
-			live = "User"
-		if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(live, 0):
-			frappe.throw(_("The skill is already at or above the requested scope."))
-		skill.scope = req.to_scope
-		skill.target_role = req.target_role if req.to_scope == "Role" else None
-		skill.save(ignore_permissions=True)
-		out["skill"] = skill.skill_name
+		out.update(_materialize_promotion(req))
 
 	req.status = "Approved" if approved else "Rejected"
 	req.reviewer = reviewer
@@ -632,6 +636,77 @@ def decide_skill_promotion(request_name: str, approve: int | str, note: str = ""
 	req.decision_note = (note or "").strip()[:140] or None
 	req.save(ignore_permissions=True)
 	frappe.db.commit()
+	return out
+
+
+def _materialize_promotion(req) -> dict:
+	"""Publish the reviewed snapshot as a NEW system-owned Role/Org skill (the
+	approve path — CDX-SP-1). The requester's private (User/Role) skill is left
+	intact; the shared copy carries EXACTLY the request-time snapshot content, is
+	owned by the system identity (``MANAGED_OWNER``) rather than the requester, and
+	is content-locked to reviewers by the controller guard. Legacy pre-snapshot
+	rows fall back to the source's live content. Returns ``{skill, materialized,
+	push_projection?}`` folded into the decision result."""
+	src = frappe.get_doc(SKILL, req.skill)
+	live = (src.scope or "Org").strip() or "Org"
+	if live == "Personal":
+		live = "User"
+	if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(live, 0):
+		frappe.throw(_("The skill is already at or above the requested scope."))
+
+	# The container writes ONE custom-<slug> dir, so two shared skills can never
+	# carry the same authored slug. Refuse up front with a clear message rather than
+	# letting the insert throw a cryptic per-owner-uniqueness error (or silently
+	# minting a second Administrator-owned copy that would collide on the next push).
+	siblings = frappe.get_all(
+		SKILL,
+		filters={"skill_name": req.skill_name, "name": ["!=", req.skill or ""]},
+		fields=["scope"],
+	)
+	if any((s.scope or "Org").strip() not in ("User", "Personal") for s in siblings):
+		frappe.throw(
+			_("A shared skill named '{0}' already exists; remove or rename it before promoting.").format(
+				req.skill_name
+			)
+		)
+
+	snapshot = req.get("instructions_snapshot")
+	if snapshot is None:  # legacy request filed before the snapshot field existed
+		instructions = src.instructions or ""
+		description = src.description or ""
+		user_invocable = int(src.user_invocable or 0)
+	else:
+		instructions = snapshot
+		description = req.get("description_snapshot") or src.description or ""
+		user_invocable = int(req.get("user_invocable_snapshot") or 0)
+
+	prev_flag = frappe.flags.jarvis_promotion_materialize
+	frappe.flags.jarvis_promotion_materialize = True
+	try:
+		new = frappe.get_doc(
+			{
+				"doctype": SKILL,
+				"skill_name": req.skill_name,
+				"description": description,
+				"instructions": instructions,
+				"user_invocable": user_invocable,
+				"enabled": 1,
+				"scope": req.to_scope,
+				"target_role": req.target_role if req.to_scope == "Role" else None,
+			}
+		)
+		new.insert(ignore_permissions=True)
+	finally:
+		frappe.flags.jarvis_promotion_materialize = prev_flag
+	# Own the shared copy as the system identity, not the approving reviewer: the
+	# requester must not own what the audience runs (they'd keep edit rights), and a
+	# system owner survives reviewer account changes. Metadata-only, so a direct
+	# db write (update_modified=False) is the right tool.
+	frappe.db.set_value(SKILL, new.name, "owner", MANAGED_OWNER, update_modified=False)
+
+	out = {"skill": req.skill_name, "materialized": new.name}
+	if req.to_scope == "Org":
+		out["push_projection"] = project_org_promotion_push(new.name, req.skill_name)
 	return out
 
 
@@ -672,7 +747,8 @@ def list_skill_promotion_requests(
 	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params)[0][0]
 	rows = frappe.db.sql(
 		f"""SELECT name, skill, skill_name, from_scope, to_scope, target_role,
-			note, status, owner, creation, reviewer, decided_at, decision_note
+			note, status, owner, creation, reviewer, decided_at, decision_note,
+			instructions_snapshot
 		FROM `tab{PROMO}`
 		WHERE {where}
 		ORDER BY creation DESC, name ASC
@@ -690,30 +766,49 @@ def list_skill_promotion_requests(
 			else []
 		)
 	}
-	# Reviewer content preview (the wiki queue's ``body_excerpt`` parallel). The
-	# skill promotion request carries no body snapshot — it re-scopes the row in
-	# place — so the CURRENT skill instructions are the truth the reviewer is
-	# deciding on. Batch-fetch here (never per-row) under the reviewer gate: a
-	# reviewer cannot read a User-scope skill body via get_custom_skill
-	# (owner/shared-only), so this reviewer-gated raw fetch is the only surface
-	# that can show it — the same reason the list itself sidesteps if_owner.
-	# Strict-need (SAR-3): the CURRENT instructions are only decision-relevant
-	# for Pending rows. A decided (Approved/Rejected) row must NOT over-read the
-	# requester's now-private body, so both the perm-bypassing batch fetch AND the
-	# excerpt below are scoped to Pending skill names only.
-	pending_skill_names = list({r["skill"] for r in rows if r.get("skill") and r.get("status") == "Pending"})
-	instr = {
+	# Reviewer content preview: return the request's IMMUTABLE snapshot (the FULL
+	# content), not a 300-char live excerpt — the reviewer decides on EXACTLY what
+	# approval promotes, so nothing can be hidden past a truncation or edited after
+	# review (CDX-SP-1). Strict-need (SAR-3): the preview is only decision-relevant
+	# for Pending rows; a decided (Approved/Rejected) row must NOT re-surface the
+	# requester's content. Legacy rows filed before the snapshot field fall back to
+	# the live body via one reviewer-gated batch fetch (a reviewer cannot read a
+	# User-scope skill body via get_custom_skill, so this raw fetch is the only
+	# surface that can show it — the same reason the list itself sidesteps if_owner).
+	legacy_pending_skills = list(
+		{
+			r["skill"]
+			for r in rows
+			if r.get("skill") and r.get("status") == "Pending" and r.get("instructions_snapshot") is None
+		}
+	)
+	legacy_instr = {
 		s.name: s.instructions
 		for s in (
 			frappe.get_all(
 				SKILL,
-				filters={"name": ["in", pending_skill_names]},
+				filters={"name": ["in", legacy_pending_skills]},
 				fields=["name", "instructions"],
 			)
-			if pending_skill_names
+			if legacy_pending_skills
 			else []
 		)
 	}
+
+	def _preview(r) -> str:
+		if r.get("status") != "Pending":
+			return ""
+		snap = r.get("instructions_snapshot")
+		return snap if snap is not None else (legacy_instr.get(r.get("skill")) or "")
+
+	def _projection(r):
+		# Server-side push-budget projection for a Pending Org promotion, sharing
+		# build_push_payload's exact logic (CDX-SP-2). The client renders THIS, not
+		# a stale count-based guess. Role/User targets never touch the push.
+		if r.get("status") == "Pending" and r.get("to_scope") == "Org" and r.get("skill"):
+			return project_org_promotion_push(r["skill"], r.get("skill_name") or "")
+		return None
+
 	out_rows = [
 		{
 			"name": r["name"],
@@ -730,7 +825,8 @@ def list_skill_promotion_requests(
 			"reviewer": r.get("reviewer") or "",
 			"decided_at": str(r.get("decided_at") or ""),
 			"decision_note": r.get("decision_note") or "",
-			"body_excerpt": ((instr.get(r.get("skill")) or "")[:300] if r.get("status") == "Pending" else ""),
+			"body_excerpt": _preview(r),
+			"push_projection": _projection(r),
 		}
 		for r in rows
 	]
@@ -740,14 +836,32 @@ def list_skill_promotion_requests(
 		"has_more": start + len(out_rows) < total,
 		"start": start,
 		"page_length": pl,
-		# Container push-budget context so the reviewer's Org-approval affordance
-		# can warn (loud, non-blocking) when approving would take the shared
-		# catalog near/past the cap. ``push_count`` is the CURRENT pushable Org
-		# count (uncapped — the exact sync eligibility filter); ``push_budget`` is
-		# the real sync constant. The client decides the warning from these.
+		# Coarse container push-budget context (uncapped pushable Org count + the
+		# real cap). The AUTHORITATIVE per-row truth is each Pending Org row's
+		# ``push_projection`` (recomputed fresh at approval via
+		# ``preflight_skill_promotion``); these two stay for at-a-glance context.
 		"push_count": pushable_org_skill_count(),
 		"push_budget": MAX_SKILLS_PER_PUSH,
 	}
+
+
+@frappe.whitelist()
+def preflight_skill_promotion(request_name: str) -> dict:
+	"""Fresh, reviewer-gated push-budget projection for one Pending promotion,
+	recomputed at the moment the reviewer is about to decide (CDX-SP-2) — a
+	list-load value goes stale under concurrent promotions/edits. Returns
+	``{ok, to_scope, push_projection}``; ``push_projection`` is ``None`` for
+	Role/User targets (they never reach the container push) or a non-Pending row.
+	Shares :func:`build_push_payload`'s exact logic via
+	``project_org_promotion_push`` so the warning states the TRUTH, not a guess."""
+	from jarvis.permissions import require_skill_reviewer
+
+	require_skill_reviewer()
+	req = frappe.get_doc(PROMO, request_name)
+	projection = None
+	if req.status == "Pending" and req.to_scope == "Org":
+		projection = project_org_promotion_push(req.skill, req.skill_name or "")
+	return {"ok": True, "to_scope": req.to_scope or "", "push_projection": projection}
 
 
 @frappe.whitelist()

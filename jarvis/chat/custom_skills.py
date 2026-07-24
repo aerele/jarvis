@@ -272,6 +272,40 @@ def personal_skill_clause(user: str | None = None) -> str:
 	)
 
 
+def _pushable_org_rows(owner: str | None = None) -> list:
+	"""The enabled Org rows that WOULD be pushed to the shared container, in the
+	exact eligibility set + ``skill_name asc`` order :func:`build_push_payload`
+	renders — MINUS the ``MAX_SKILLS_PER_PUSH`` cap. Single source of truth shared
+	by :func:`build_push_payload`, :func:`pushable_org_skill_count` and
+	:func:`project_org_promotion_push`, so the reviewer's budget projection can
+	never drift from what Apply actually does. ``owner`` scopes tests only."""
+	# ("in", ("Org", "")) — not ("!=", "User") — because db_query wraps the
+	# "in" operator in ifnull(scope, ''), so legacy NULL-scope rows match ''.
+	filters = {"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))}
+	if owner:
+		filters["owner"] = owner
+	rows = frappe.get_all(
+		"Jarvis Custom Skill",
+		filters=filters,
+		fields=["name", "skill_name", "description", "user_invocable", "instructions"],
+		order_by="skill_name asc",
+	)
+	# TASK 11: drop role-restricted Org rows (any with allowed_roles) so a
+	# role-scoped body is never written to the shared, role-blind container.
+	restricted = {
+		r.parent
+		for r in frappe.get_all(
+			"Jarvis Custom Skill Allowed Role",
+			filters={
+				"parenttype": "Jarvis Custom Skill",
+				"parent": ["in", [r.name for r in rows] or [""]],
+			},
+			fields=["parent"],
+		)
+	}
+	return [r for r in rows if r.name not in restricted]
+
+
 def build_push_payload(owner: str | None = None, strict: bool = False) -> list[dict]:
 	"""Collect the enabled custom skills into the fleet push payload.
 
@@ -316,31 +350,7 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 	  ``frappe.log_error`` a loud warning naming the dropped slugs, so the
 	  truncation is never silent again.
 	"""
-	# ("in", ("Org", "")) — not ("!=", "User") — because db_query wraps the
-	# "in" operator in ifnull(scope, ''), so legacy NULL-scope rows match ''.
-	filters = {"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))}
-	if owner:
-		filters["owner"] = owner
-	rows = frappe.get_all(
-		"Jarvis Custom Skill",
-		filters=filters,
-		fields=["name", "skill_name", "description", "user_invocable", "instructions"],
-		order_by="skill_name asc",
-	)
-	# TASK 11: drop role-restricted Org rows (any with allowed_roles) so a
-	# role-scoped body is never written to the shared, role-blind container.
-	restricted = {
-		r.parent
-		for r in frappe.get_all(
-			"Jarvis Custom Skill Allowed Role",
-			filters={
-				"parenttype": "Jarvis Custom Skill",
-				"parent": ["in", [r.name for r in rows] or [""]],
-			},
-			fields=["parent"],
-		)
-	}
-	rows = [r for r in rows if r.name not in restricted]
+	rows = _pushable_org_rows(owner)
 	if len(rows) > MAX_SKILLS_PER_PUSH:
 		if strict:
 			frappe.throw(
@@ -386,22 +396,54 @@ def pushable_org_skill_count() -> int:
 	reviewer deserves to be told BEFORE approving). Non-blocking — the reviewer
 	still decides.
 	"""
-	rows = frappe.get_all(
-		"Jarvis Custom Skill",
-		filters={"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))},
-		fields=["name"],
-	)
-	if not rows:
-		return 0
-	restricted = {
-		r.parent
-		for r in frappe.get_all(
-			"Jarvis Custom Skill Allowed Role",
-			filters={
-				"parenttype": "Jarvis Custom Skill",
-				"parent": ["in", [r.name for r in rows]],
-			},
-			fields=["parent"],
-		)
+	return len(_pushable_org_rows())
+
+
+def project_org_promotion_push(skill_docname: str, skill_name: str) -> dict:
+	"""Server-side, single-source-of-truth projection of what the container push
+	does AFTER an Org promotion is approved — the honest replacement for the old
+	client-side ``count + 1 > budget`` guess (CDX-SP-2).
+
+	Shares :func:`_pushable_org_rows`' exact eligibility + ``skill_name asc``
+	ordering + cap with :func:`build_push_payload`, then simulates the promoted
+	skill joining the pushable Org set and reports BOTH real Apply behaviours:
+
+	- interactive STRICT Apply raises and pushes NOTHING over the cap
+	  (``strict_would_fail``);
+	- the unattended sync keeps the first ``MAX_SKILLS_PER_PUSH`` by ``skill_name``
+	  and DROPS the ordered tail (``dropped_slugs``) — which may be an EXISTING
+	  shared skill rather than the newly promoted one, depending on where the
+	  promoted slug sorts (``promoted_dropped`` says which).
+
+	``skill_docname`` identifies the source row so an already-pushable skill
+	(idempotent re-approve) is not double-counted; ``skill_name`` is the bare
+	authored slug the shared copy carries. Recompute this at approval time — a
+	list-load value goes stale under concurrent promotions/edits.
+	"""
+	rows = _pushable_org_rows()
+	entries = [(r.skill_name, r.name) for r in rows]
+	promoted_slug = prefixed_slug(skill_name)
+	# The promoted skill joins the pushable set unless this exact row is already
+	# pushable (re-approve of an already-Org skill). Stable skill_name-asc sort
+	# mirrors build_push_payload's order_by exactly (Python's sort is stable, so
+	# equal skill_names keep the DB order the payload would see).
+	already = any(name == skill_docname for _, name in entries)
+	if not already:
+		entries.append((skill_name, skill_docname))
+		entries.sort(key=lambda e: e[0])
+	projected = [prefixed_slug(sn) for sn, _ in entries]
+	budget = MAX_SKILLS_PER_PUSH
+	dropped = projected[budget:]
+	return {
+		"to_scope": "Org",
+		"promoted_slug": promoted_slug,
+		"projected_count": len(projected),
+		"budget": budget,
+		"at_budget": len(projected) == budget,
+		"over_budget": len(projected) > budget,
+		# interactive strict Apply raises + pushes NOTHING when over budget
+		"strict_would_fail": len(projected) > budget,
+		# unattended sync keeps the first `budget` (skill_name asc), drops the tail
+		"dropped_slugs": dropped,
+		"promoted_dropped": promoted_slug in dropped,
 	}
-	return sum(1 for r in rows if r.name not in restricted)

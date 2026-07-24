@@ -5,10 +5,18 @@ One row per "promote my private (User) or role skill up the scope ladder" ask,
 the Custom-Skill analogue of ``Jarvis Wiki Promotion Request``. Created by
 ``jarvis.chat.custom_skills_api.request_skill_promotion`` when a skill owner
 asks to widen a skill they own; decided by a skill reviewer
-(``custom_skills_api.decide_skill_promotion``), who approves (widening the
-skill's scope) or rejects. The ``All`` role only ever gets read/create-free
-here (create dropped, so the ownership-checked endpoint is the sole creation
-path); a requester can never self-approve or edit a decision after the fact.
+(``custom_skills_api.decide_skill_promotion``), who approves — PUBLISHING a new
+system-owned Role/Org skill from the request's immutable content snapshot,
+leaving the requester's private skill intact — or rejects. The ``All`` role only
+ever gets read/create-free here (create dropped, so the ownership-checked
+endpoint is the sole creation path); a requester can never self-approve or edit a
+decision after the fact.
+
+The request SNAPSHOTS the full content at request time (``instructions_snapshot``
+/ ``description_snapshot`` / ``user_invocable_snapshot``, mirroring the wiki
+request's ``body_snapshot``): the reviewer decides on exactly this, and approval
+promotes exactly this, so a post-request edit — or content hidden past a truncated
+preview — can never change what the Role/Org audience runs (CDX-SP-1).
 
 Promotion only ever WIDENS visibility: ``to_scope`` is Role/Org (never back to
 User, never sideways). ``from_scope`` is a point-in-time snapshot of the source

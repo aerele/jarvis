@@ -146,6 +146,7 @@ class JarvisCustomSkill(Document):
 		self._validate_scope()
 		self._guard_new_scope()
 		self._guard_scope_change()
+		self._guard_content_change()
 		self._validate_lengths()
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
@@ -249,6 +250,44 @@ class JarvisCustomSkill(Document):
 			frappe.PermissionError,
 		)
 
+	def _guard_content_change(self):
+		"""Only a reviewer (or the compiler) may change the CONTENT of an existing
+		Role/Org skill — the instructions, description or user-invocable flag the
+		shared audience runs. Without this, a promotion could be approved against a
+		reviewed body and then have its instructions rewritten afterwards (or a hidden
+		tail slipped in) with no second review — the four-eyes bypass Codex flagged
+		(CDX-SP-1). Siblings _guard_new_scope / _guard_scope_change bind the SCOPE to
+		review; this binds the CONTENT. Runs regardless of ignore_permissions (like
+		the scope guard) because the reviewer promotion / insight-apply writes save
+		with ignore_permissions=True. A private (User) skill is unguarded — its owner
+		edits it freely; only widening to Role/Org needs a reviewer, and the guard
+		then locks that reviewed content."""
+		if self.is_new():
+			return
+		if self.scope not in ("Role", "Org"):
+			return
+		if self._scope_change_authorized():
+			return
+		prev = frappe.db.get_value(
+			self.doctype, self.name, ["instructions", "description", "user_invocable"], as_dict=True
+		)
+		if not prev:
+			return
+		changed = (
+			(self.instructions or "") != (prev.instructions or "")
+			or (self.description or "") != (prev.description or "")
+			or int(self.user_invocable or 0) != int(prev.user_invocable or 0)
+		)
+		if not changed:
+			return
+		frappe.throw(
+			_(
+				"Only a reviewer can change the content of a shared (Role/Org) skill. "
+				"Narrow it back to private to edit it, then request a fresh promotion."
+			),
+			frappe.PermissionError,
+		)
+
 	def _validate_slug(self):
 		self.skill_name = (self.skill_name or "").strip().lower()
 		if not self.skill_name:
@@ -308,6 +347,13 @@ class JarvisCustomSkill(Document):
 
 	def _validate_owner_cap(self):
 		if not self.is_new():
+			return
+		# The reviewer-approved promotion materializes the shared Role/Org copy under
+		# a system owner (see custom_skills_api.decide_skill_promotion); that copy is
+		# not user hoarding, and the org-wide push budget (MAX_SKILLS_PER_PUSH) already
+		# bounds the shared catalog, so the per-owner cap must not block a legitimate
+		# approval once the system identity accumulates enough promoted skills.
+		if frappe.flags.jarvis_promotion_materialize:
 			return
 		owner = self.owner or frappe.session.user
 		count = frappe.db.count("Jarvis Custom Skill", {"owner": owner})

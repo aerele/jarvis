@@ -292,10 +292,14 @@ class TestApplyGate(Part2Base):
 class TestSkillPromotionWorkflow(Part2Base):
 	"""TASK 10 promotion workflow + TASK 19 four-eyes."""
 
-	def test_request_then_reviewer_widens_scope(self):
-		from jarvis.chat import custom_skills_api
+	def test_request_then_reviewer_publishes_shared_copy(self):
+		# CDX-SP-1 materialize model: approval PUBLISHES a new system-owned Org copy
+		# from the reviewed snapshot; the requester's OWN skill stays a private,
+		# intact User row (it is NOT re-scoped in place).
+		from jarvis.chat import custom_skills, custom_skills_api
 
 		skill = _mk_skill(USER_A, f"{PFX}-promote", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", "PROMOTE-BODY-v1")
 		with _as(USER_A):
 			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
 		self.assertTrue(req["ok"])
@@ -304,7 +308,23 @@ class TestSkillPromotionWorkflow(Part2Base):
 		with _as(REVIEWER):
 			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
 		self.assertTrue(out["ok"])
-		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "Org")
+		# The requester's OWN skill is untouched (private + still theirs).
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "owner"), USER_A)
+		# A SEPARATE system-owned Org copy carries EXACTLY the reviewed snapshot and
+		# is the one that reaches the shared container.
+		shared = frappe.get_all(
+			SKILL,
+			filters={"skill_name": f"{PFX}-promote", "scope": "Org"},
+			fields=["name", "owner", "instructions"],
+		)
+		self.assertEqual(len(shared), 1)
+		self.assertEqual(shared[0].owner, "Administrator")
+		self.assertEqual(shared[0].instructions, "PROMOTE-BODY-v1")
+		self.assertEqual(out["skill"], f"{PFX}-promote")
+		self.assertIn(
+			prefixed_slug(f"{PFX}-promote"), {p["slug"] for p in custom_skills.build_push_payload()}
+		)
 
 	def test_requester_cannot_self_approve(self):
 		from jarvis.chat import custom_skills_api
@@ -688,3 +708,203 @@ class TestSkillPromotionSurfacing(Part2Base):
 		self.assertEqual(first.get("status"), "Approved")
 		self.assertIs(second.get("ok"), False)
 		self.assertIn("reason", second)
+
+
+class TestSkillPromotionContentBinding(Part2Base):
+	"""CDX-SP-1: the approval is bound to an IMMUTABLE snapshot of the full content,
+	so the reviewer decides on exactly what the Role/Org audience ends up running —
+	no truncated excerpt, no edit-between-request-and-approval swap, no post-approval
+	rewrite by the requester. The four-eyes bypass Codex flagged is closed."""
+
+	def test_reviewer_sees_full_snapshot_past_truncation(self):
+		# Attack (a): content hidden past the old 300-char excerpt. The reviewer read
+		# now returns the FULL bound snapshot, so a marker at char 400 is visible.
+		from jarvis.chat import custom_skills_api
+
+		marker = "HIDDEN-PAST-300-e7c1"
+		body = ("x" * 400) + marker
+		skill = _mk_skill(USER_A, f"{PFX}-longbody", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", body)
+		with _as(USER_A):
+			custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			res = custom_skills_api.list_skill_promotion_requests(status="Pending")
+		row = next(r for r in res["rows"] if r["skill"] == skill.name)
+		self.assertIn(marker, row["body_excerpt"])
+		self.assertEqual(row["body_excerpt"], body)  # the FULL snapshot, not instr[:300]
+
+	def test_edit_between_request_and_approval_promotes_snapshot_not_live(self):
+		# Attack (b): the requester edits the skill AFTER filing the request. The
+		# audience must get the REVIEWED snapshot (v1), never the post-request edit
+		# (v2) — and the requester keeps their v2 privately (no data loss).
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-edited", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", "REVIEWED-v1")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+			custom_skills_api.update_custom_skill(name=skill.name, instructions="SNEAKED-v2")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		shared = frappe.get_all(
+			SKILL, filters={"skill_name": f"{PFX}-edited", "scope": "Org"}, fields=["instructions"]
+		)
+		self.assertEqual(len(shared), 1)
+		self.assertEqual(shared[0].instructions, "REVIEWED-v1")  # audience = reviewed content
+		# requester's private skill keeps their own edit, still User-scope + intact
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "instructions"), "SNEAKED-v2")
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+
+	def test_requester_cannot_edit_published_shared_skill(self):
+		# Attack (c): after approval, the requester tries to rewrite the shared copy.
+		# They do NOT own it (it is system-owned) → the write endpoint refuses them.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-nopost", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", "REVIEWED")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 1)
+		shared_name = frappe.get_all(
+			SKILL, filters={"skill_name": f"{PFX}-nopost", "scope": "Org"}, pluck="name"
+		)[0]
+		with _as(USER_A):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.update_custom_skill(name=shared_name, instructions="HACKED")
+		self.assertEqual(frappe.db.get_value(SKILL, shared_name, "instructions"), "REVIEWED")
+
+	def test_guard_blocks_nonreviewer_content_change_on_shared_skill(self):
+		# _guard_content_change: even the OWNER of a Role/Org skill cannot change the
+		# content the audience runs without a reviewer — they must narrow it back to
+		# private first (fewer viewers is always safe), then edit + re-request.
+		skill = _mk_skill(USER_A, f"{PFX}-locked", scope="Org")
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.instructions = "REWRITTEN without review"
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+		self.assertNotEqual(
+			frappe.db.get_value(SKILL, skill.name, "instructions"), "REWRITTEN without review"
+		)
+		# narrow to private (safe), then the owner may edit their now-User skill
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.scope = "User"
+			doc.save()
+			doc.instructions = "now editable as a private skill"
+			doc.save()
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+		self.assertEqual(
+			frappe.db.get_value(SKILL, skill.name, "instructions"), "now editable as a private skill"
+		)
+
+	def test_reviewer_may_change_shared_skill_content(self):
+		# The guard binds CONTENT to the four-eyes authority (a reviewer), mirroring
+		# _guard_scope_change — a reviewer/admin may still maintain a shared skill.
+		skill = _mk_skill(USER_A, f"{PFX}-revedit", scope="Org")
+		with _as(REVIEWER):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.instructions = "reviewer-maintained content"
+			doc.save(ignore_permissions=True)
+		self.assertEqual(
+			frappe.db.get_value(SKILL, skill.name, "instructions"), "reviewer-maintained content"
+		)
+
+	def test_preflight_endpoint_gated_and_scope_aware(self):
+		# CDX-SP-2: a fresh, reviewer-gated projection recomputed at decision time.
+		# Org → a projection; Role → None (never reaches the push); non-reviewer → 403.
+		from jarvis.chat import custom_skills_api
+
+		org_skill = _mk_skill(USER_A, f"{PFX}-preflight", scope="User")
+		role_skill = _mk_skill(USER_A, f"{PFX}-preflightrole", scope="User")
+		with _as(USER_A):
+			req_org = custom_skills_api.request_skill_promotion(org_skill.name, "Org")
+			req_role = custom_skills_api.request_skill_promotion(
+				role_skill.name, "Role", target_role="Sales User"
+			)
+		with _as(REVIEWER):
+			org_pre = custom_skills_api.preflight_skill_promotion(req_org["request"])
+			role_pre = custom_skills_api.preflight_skill_promotion(req_role["request"])
+		self.assertIsNotNone(org_pre["push_projection"])
+		self.assertEqual(org_pre["to_scope"], "Org")
+		self.assertIsNone(role_pre["push_projection"])
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.preflight_skill_promotion(req_org["request"])
+
+
+class TestPromotionPushProjection(FrappeTestCase):
+	"""CDX-SP-2: the server-side push projection tells the TRUTH per mode — the
+	interactive Apply FAILS over the cap (nothing pushed), and the unattended sync
+	drops the ``skill_name``-asc tail, which may be an EXISTING shared skill rather
+	than the newly promoted one. Unit-tested against a controlled pushable set + a
+	small cap so displacement vs omission is deterministic (no need to mint 25 rows)."""
+
+	def _rows(self, *skill_names):
+		return [frappe._dict(name=f"row-{s}", skill_name=s) for s in skill_names]
+
+	def test_promoted_sorts_after_existing_is_the_dropped_one(self):
+		from jarvis.chat import custom_skills
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa", "bbb")),
+		):
+			proj = custom_skills.project_org_promotion_push("row-zzz", "zzz")
+		self.assertTrue(proj["over_budget"])
+		self.assertTrue(proj["strict_would_fail"])
+		self.assertEqual(proj["dropped_slugs"], [prefixed_slug("zzz")])
+		self.assertTrue(proj["promoted_dropped"])  # the NEW skill is the one omitted
+
+	def test_promoted_sorts_before_drops_an_existing_skill(self):
+		from jarvis.chat import custom_skills
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("bbb", "ccc")),
+		):
+			proj = custom_skills.project_org_promotion_push("row-aaa", "aaa")
+		self.assertTrue(proj["over_budget"])
+		# sorted [aaa, bbb, ccc], cap 2 → drops ccc (an EXISTING skill), NOT aaa
+		self.assertEqual(proj["dropped_slugs"], [prefixed_slug("ccc")])
+		self.assertFalse(proj["promoted_dropped"])
+
+	def test_at_budget_is_not_over(self):
+		from jarvis.chat import custom_skills
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa")),
+		):
+			proj = custom_skills.project_org_promotion_push("row-bbb", "bbb")
+		self.assertFalse(proj["over_budget"])
+		self.assertTrue(proj["at_budget"])
+		self.assertEqual(proj["dropped_slugs"], [])
+
+	def test_recompute_catches_concurrent_change(self):
+		# A value captured when the catalog had room is WRONG after a concurrent
+		# promotion fills it; a fresh server recompute reflects the new state.
+		from jarvis.chat import custom_skills
+
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2):
+			with patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa")):
+				before = custom_skills.project_org_promotion_push("row-zzz", "zzz")
+			with patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa", "bbb")):
+				after = custom_skills.project_org_promotion_push("row-zzz", "zzz")
+		self.assertFalse(before["over_budget"])  # a stale client would say "fine"
+		self.assertTrue(after["over_budget"])  # the server recompute catches the truth
+
+	def test_idempotent_reapprove_not_double_counted(self):
+		# An already-pushable skill (its docname already in the set) is not added
+		# again, so re-projecting an already-Org skill never inflates the count.
+		from jarvis.chat import custom_skills
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa", "bbb")),
+		):
+			proj = custom_skills.project_org_promotion_push("row-aaa", "aaa")
+		self.assertEqual(proj["projected_count"], 2)
+		self.assertFalse(proj["over_budget"])
