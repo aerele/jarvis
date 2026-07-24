@@ -605,7 +605,9 @@ def decide_skill_promotion(request_name: str, approve: int | str, note: str = ""
 	req = frappe.get_doc(PROMO, request_name)
 	if reviewer == (req.owner or "") and reviewer != "Administrator":
 		frappe.throw(
-			_("You cannot approve your own promotion request; another reviewer must decide it."),
+			_(
+				"You cannot decide your own promotion request; another reviewer must approve or reject it."
+			),
 			frappe.PermissionError,
 		)
 	status = frappe.db.get_value(PROMO, request_name, "status", for_update=True)
@@ -697,16 +699,22 @@ def list_skill_promotion_requests(
 	# reviewer cannot read a User-scope skill body via get_custom_skill
 	# (owner/shared-only), so this reviewer-gated raw fetch is the only surface
 	# that can show it — the same reason the list itself sidesteps if_owner.
-	skill_names = list({r["skill"] for r in rows if r.get("skill")})
+	# Strict-need (SAR-3): the CURRENT instructions are only decision-relevant
+	# for Pending rows. A decided (Approved/Rejected) row must NOT over-read the
+	# requester's now-private body, so both the perm-bypassing batch fetch AND the
+	# excerpt below are scoped to Pending skill names only.
+	pending_skill_names = list(
+		{r["skill"] for r in rows if r.get("skill") and r.get("status") == "Pending"}
+	)
 	instr = {
 		s.name: s.instructions
 		for s in (
 			frappe.get_all(
 				SKILL,
-				filters={"name": ["in", skill_names]},
+				filters={"name": ["in", pending_skill_names]},
 				fields=["name", "instructions"],
 			)
-			if skill_names
+			if pending_skill_names
 			else []
 		)
 	}
@@ -726,7 +734,9 @@ def list_skill_promotion_requests(
 			"reviewer": r.get("reviewer") or "",
 			"decided_at": str(r.get("decided_at") or ""),
 			"decision_note": r.get("decision_note") or "",
-			"body_excerpt": (instr.get(r.get("skill")) or "")[:300],
+			"body_excerpt": (
+				(instr.get(r.get("skill")) or "")[:300] if r.get("status") == "Pending" else ""
+			),
 		}
 		for r in rows
 	]
@@ -797,6 +807,7 @@ def my_skill_promotion(name: str) -> dict:
 
 
 @frappe.whitelist()
+@require_jarvis_user
 def promotable_target_roles() -> dict:
 	"""Role options for the promotion requester's Role picker: the caller's OWN
 	desk roles, minus non-targetable system roles. A requester can only sensibly
@@ -806,8 +817,9 @@ def promotable_target_roles() -> dict:
 	reviewer-side ``manageable_roles`` is a CURATOR concept — empty for a plain
 	user — and is the wrong source for a requester). Returns ``{roles: [...]}``.
 
-	Safe to leave un-gated beyond the whitelist: it only ever reflects the
-	caller's own session roles."""
+	Gated with ``@require_jarvis_user`` (SAR-2) — no cross-user leak (it only
+	ever reflects the caller's OWN session roles), but it carries the module's
+	name-your-caller gate for surface uniformity with every sibling read."""
 	from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
 
 	me = frappe.session.user

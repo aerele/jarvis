@@ -3,8 +3,8 @@
 		<template #body-content>
 			<div class="flex flex-col gap-3">
 				<p class="text-sm text-ink-gray-6">
-					Promotion widens who can use this {{ noun }}. It stays private to you until a
-					reviewer approves the request.
+					Promotion widens who can {{ verb }} this {{ noun }}. It stays private to you
+					until a reviewer approves the request.
 				</p>
 				<FormControl
 					type="select"
@@ -13,7 +13,7 @@
 					:modelValue="toScope"
 					@update:modelValue="(v) => (toScope = v)"
 				/>
-				<p class="text-p-sm text-ink-gray-5">{{ SCOPE_HELP[toScope] }}</p>
+				<p class="text-p-sm text-ink-gray-5">{{ scopeHelp[toScope] }}</p>
 
 				<div v-if="toScope === 'Role'" class="flex flex-col gap-1">
 					<span class="block text-xs text-ink-gray-5">Role</span>
@@ -81,17 +81,16 @@ const TO_SCOPE_OPTIONS = [
 	{ label: "A role (a team)", value: "Role" },
 	{ label: "The whole organisation", value: "Org" },
 ];
-const SCOPE_HELP = {
-	Role: "Everyone who holds the chosen role will be able to use it.",
-	Org: "Everyone in your organisation will be able to use it.",
-};
+// noun-keyed verb so the shared dialog reads naturally for a skill ("use") and
+// for a wiki page ("view") — SPX-10.
+const VERB = { skill: "use", page: "view" };
 
 const show = computed({
 	get: () => props.modelValue,
 	set: (v) => emit("update:modelValue", v),
 });
 
-const toScope = ref("Role");
+const toScope = ref("Org");
 const targetRole = ref("");
 const note = ref("");
 const roles = ref([]);
@@ -102,6 +101,11 @@ const roleOptions = computed(() => roles.value.map((r) => ({ label: r, value: r 
 const canSubmit = computed(
 	() => !!toScope.value && (toScope.value !== "Role" || !!targetRole.value)
 );
+const verb = computed(() => VERB[props.noun] || "use");
+const scopeHelp = computed(() => ({
+	Role: `Everyone who holds the chosen role will be able to ${verb.value} it.`,
+	Org: `Everyone in your organisation will be able to ${verb.value} it.`,
+}));
 
 async function loadRoles() {
 	if (roles.value.length || rolesLoading.value) return;
@@ -117,11 +121,14 @@ async function loadRoles() {
 }
 
 // Reset the form each time the dialog opens (and lazily fetch the role list).
+// Default to Org (SPX-3): it's always submittable. Role pre-select was a dead
+// end for a plain user — promotable_target_roles excludes the baseline
+// Jarvis User role, so a Role default opened to an empty picker + disabled Send.
 watch(
 	() => props.modelValue,
 	(open) => {
 		if (!open) return;
-		toScope.value = "Role";
+		toScope.value = "Org";
 		targetRole.value = "";
 		note.value = "";
 		loadRoles();

@@ -43,6 +43,14 @@ WIKI_HAS_PAGES_CACHE_KEY = "jarvis:wiki_has_active_pages"
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
+# Complete HTML tags stripped out of stored TITLES. A title is a short Data field
+# (a name like "Acme Corp"), never markup — but it is org-user authored and gets
+# interpolated into the reviewer's promotion-approve confirm, which frappe-ui's
+# ConfirmDialog renders via v-html. Neutralizing at THIS write funnel (SAR-1
+# server belt) means a stored title can never carry a runnable element no matter
+# which writer set it; the SPA also escapes at the sink.
+_TAG_RE = re.compile(r"<[^>]*>")
+
 # Instruction shapes neutralized in stored BODIES. Bodies are markdown, so
 # headings/fences/--- stay (legitimate structure); these are pure injection
 # tokens: ignore-previous phrasing, a forged role prefix, a forged
@@ -93,6 +101,12 @@ class JarvisWikiPage(Document):
 		[Context:] clause inlines summaries; ``jarvis__read_wiki`` returns
 		bodies), so instruction-shaped content is neutralized at THIS write
 		funnel — every writer (ingest, update_wiki tool, SPA save) lands here."""
+		if self.title:
+			# Strip complete HTML tags, then drop any residual angle brackets, so a
+			# stored title can NEVER carry markup — even a malformed/unterminated
+			# tag (SAR-1 server belt). Titles are short Data, never HTML.
+			t = _CONTROL_RE.sub("", str(self.title))
+			self.title = _TAG_RE.sub("", t).replace("<", "").replace(">", "")
 		if self.summary:
 			s = _CONTROL_RE.sub("", str(self.summary))
 			self.summary = SANITIZED_PLACEHOLDER if scan_instruction_injection(s) else s

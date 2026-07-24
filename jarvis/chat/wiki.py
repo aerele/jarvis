@@ -1144,7 +1144,9 @@ def apply_promotion(request_name: str, approve, note: str = "", reviewer: str | 
 	# self-approval never mutates the target page.
 	if reviewer == (req.owner or "") and reviewer != "Administrator":
 		frappe.throw(
-			_("You cannot approve your own promotion request; another reviewer must decide it."),
+			_(
+				"You cannot decide your own promotion request; another reviewer must approve or reject it."
+			),
 			frappe.PermissionError,
 		)
 	# TOCTOU-safe claim: re-read the status under a row lock (for_update) before

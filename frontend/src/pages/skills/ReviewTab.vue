@@ -48,7 +48,11 @@
 					     count is its Pending list total (seeded from the access probe). -->
 					<div class="flex flex-wrap items-center gap-2">
 						<Button
-							label="Skill candidates"
+							:label="
+								pendingCandidates
+									? `Skill candidates · ${pendingCandidates}`
+									: 'Skill candidates'
+							"
 							:variant="queueType === 'candidates' ? 'solid' : 'subtle'"
 							@click="setQueueType('candidates')"
 						/>
@@ -959,14 +963,14 @@
 											theme="green"
 											label="Approve"
 											:loading="promoActing === p.name"
-											:disabled="!!promoActing"
+											:disabled="!!promoActing || isMyPromo(p)"
 											@click="approvePromotion(p)"
 										/>
 										<Button
 											variant="subtle"
 											theme="red"
 											label="Reject"
-											:disabled="!!promoActing"
+											:disabled="!!promoActing || isMyPromo(p)"
 											@click="openPromoReject(p)"
 										/>
 										<Button
@@ -983,6 +987,14 @@
 											:disabled="!!promoActing"
 											@click="goToChat('promotion', p.name)"
 										/>
+										<!-- Four-eyes: a reviewer can't decide their OWN request
+										     (the server enforces it); disable + explain up front. -->
+										<span
+											v-if="isMyPromo(p)"
+											class="basis-full text-sm text-ink-gray-5"
+										>
+											You requested this — another reviewer must decide it.
+										</span>
 									</template>
 									<template v-else>
 										<Badge
@@ -1138,16 +1150,24 @@
 											theme="green"
 											label="Approve"
 											:loading="skillPromoActing === p.name"
-											:disabled="!!skillPromoActing"
+											:disabled="!!skillPromoActing || isMyPromo(p)"
 											@click="approveSkillPromotion(p)"
 										/>
 										<Button
 											variant="subtle"
 											theme="red"
 											label="Reject"
-											:disabled="!!skillPromoActing"
+											:disabled="!!skillPromoActing || isMyPromo(p)"
 											@click="openSkillPromoReject(p)"
 										/>
+										<!-- Four-eyes: a reviewer can't decide their OWN request
+										     (the server enforces it); disable + explain up front. -->
+										<span
+											v-if="isMyPromo(p)"
+											class="basis-full text-sm text-ink-gray-5"
+										>
+											You requested this — another reviewer must decide it.
+										</span>
 									</template>
 									<template v-else>
 										<Badge
@@ -1781,6 +1801,12 @@ import {
 } from "@/api/review";
 // Org push-budget warning boundary (ruling 2) — a pure, node-tested module.
 import { orgPushBudgetWarning } from "./promotionBudget";
+// HTML-escape for every untrusted value interpolated into a confirm message
+// (ConfirmDialog renders `message` via v-html) — SAR-1 client belt.
+import { esc } from "./escapeHtml";
+// Session user: a reviewer who is ALSO the requester can't decide their own
+// request (four-eyes); we disable + explain up front (SAR-4 / SPX-4).
+import { session } from "@/data/session";
 
 const emit = defineEmits(["changed"]);
 const router = useRouter();
@@ -1853,6 +1879,11 @@ const staleRemovalCount = ref(0);
 const reviewActivity = ref({ decided: 0, total: 0, last_by_name: "" });
 const domain = ref("");
 const boardStatus = ref("Proposed");
+// Pending skill-candidate count for the "Skill candidates" chip — seeded from
+// the same get_review_access probe as the two promotion chips so all THREE inner
+// chips carry a count and visually reconcile against the outer tab badge (the
+// sum of the three). SPX-8: list-view completeness.
+const pendingCandidates = ref(0);
 
 // Decided log pane: fetched on mount alongside the board; afterAction refreshes
 // it so fresh decisions land without a manual reload.
@@ -2075,6 +2106,7 @@ async function loadStatus() {
 		selfHosted.value = !!st.self_hosted;
 		promo.total = st.pending_promotions || 0;
 		skillPromo.total = st.pending_skill_promotions || 0;
+		pendingCandidates.value = st.pending_patterns || 0;
 	} catch (e) {
 		// parent mounts this only for the reviewer set; a failure here = no access
 		selfHosted.value = false;
@@ -2135,15 +2167,22 @@ function togglePromoBody(name) {
 function toScopeLabel(p) {
 	return p.to_scope === "Role" ? `Role: ${p.target_role || "—"}` : p.to_scope || "Org";
 }
+// Four-eyes cue (shared by the wiki + skill queues): the viewing reviewer
+// authored this request, so the server will reject their own decide. Disable
+// Approve/Reject and say so up front rather than letting the doomed click 403.
+function isMyPromo(p) {
+	return !!p && !!p.requested_by && p.requested_by === session.user;
+}
 // The decision is irreversible from the user's side, so Approve confirms with
-// the concrete visibility implication (who can now read the page).
+// the concrete visibility implication (who can now read the page). Every
+// untrusted value is HTML-escaped — the message renders through v-html (SAR-1).
 function approvePromotion(p) {
-	const target = p.to_scope === "Role" ? `Role: ${p.target_role || "—"}` : "Org";
+	const target = p.to_scope === "Role" ? `Role: ${esc(p.target_role || "—")}` : "Org";
 	const who = p.to_scope === "Role" ? "that role" : "everyone";
 	confirmDialog({
 		title: "Approve promotion?",
 		message:
-			`This publishes “${p.page_title}” to ${target} — visible to ${who}. ` +
+			`This publishes “${esc(p.page_title)}” to ${target} — visible to ${who}. ` +
 			"The requester's personal page stays intact.",
 		onConfirm: async ({ hideDialog }) => {
 			hideDialog();
@@ -2166,7 +2205,10 @@ async function decidePromo(p, approve, note) {
 	try {
 		const r = await decidePromotion(p.name, approve, note);
 		if (r && r.ok === false) {
+			// stale / already-decided (TOCTOU-safe server re-read): also refresh so
+			// the stale card leaves the Pending list immediately, not just toast.
 			toast.error(r.reason || "Could not decide this promotion.");
+			fetchPromotions("reset");
 			return false;
 		}
 		toast.success(approve ? "Promotion approved" : "Promotion rejected");
@@ -2228,13 +2270,16 @@ function budgetWarn(p) {
 // inline (the card already shows the loud banner; this repeats it at the point of
 // action). The widen is irreversible from the requester's side.
 function approveSkillPromotion(p) {
-	const target = p.to_scope === "Role" ? `Role: ${p.target_role || "—"}` : "Org";
+	const target = p.to_scope === "Role" ? `Role: ${esc(p.target_role || "—")}` : "Org";
 	const who = p.to_scope === "Role" ? "that role" : "everyone";
 	const warn = budgetWarn(p);
+	// Every untrusted value is HTML-escaped — the message renders through v-html
+	// (SAR-1). The budget warning folds in as plain "Note:" copy (no ⚠ glyph —
+	// design.md:563; the on-card banner already carries the colored warning).
 	let message =
-		`This widens “${p.skill_name}” to ${target} — usable by ${who}. ` +
+		`This widens “${esc(p.skill_name)}” to ${target} — usable by ${who}. ` +
 		"The requester's private skill stays intact.";
-	if (warn) message += ` ⚠ ${warn.message}`;
+	if (warn) message += ` Note: ${esc(warn.message)}`;
 	confirmDialog({
 		title: "Approve skill promotion?",
 		message,
@@ -2263,8 +2308,10 @@ async function decideSkillPromo(p, approve, note) {
 	try {
 		const r = await decideSkillPromotion(p.name, approve, note);
 		if (r && r.ok === false) {
-			// stale / already-decided request (TOCTOU-safe server re-read)
+			// stale / already-decided request (TOCTOU-safe server re-read): also
+			// refresh so the stale card leaves the Pending list immediately.
 			toast.error(r.reason || "Could not decide this promotion.");
+			fetchSkillPromotions("reset");
 			return false;
 		}
 		toast.success(approve ? "Skill promotion approved" : "Skill promotion rejected");

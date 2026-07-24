@@ -598,4 +598,95 @@ class TestSkillPromotionSurfacing(Part2Base):
 		self.assertIn("Sales User", roles)  # USER_A holds Sales User
 		self.assertNotIn("All", roles)
 		self.assertNotIn("System Manager", roles)
+
+	# ── negative gates: the reviewer reads refuse a non-reviewer ────────────────
+	def test_non_reviewer_denied_on_reviewer_reads(self):
+		# USER_B holds only "Jarvis User" — NOT a reviewer role. Both the reviewer
+		# discovery list AND the Review-tab badge probe must refuse them (the
+		# review surface is reviewer-gated end to end).
+		from jarvis.chat import custom_skills_api, learned_api
+
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.list_skill_promotion_requests(status="Pending")
+			with self.assertRaises(frappe.PermissionError):
+				learned_api.get_review_access()
+
+	def test_get_custom_skill_denies_stranger_even_with_scope_fields(self):
+		# The new scope/target_role fields on get_custom_skill must NOT open a read
+		# path: a third user who is neither the owner nor a share target is still
+		# refused (owner/shared-only), fields or no fields.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-stranger", scope="User")
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.get_custom_skill(skill.name)
+
+	# ── SAR-1 server belt: a stored wiki title can never carry markup ───────────
+	def test_wiki_title_is_html_neutralized_at_write_funnel(self):
+		# The reviewer's promotion-approve confirm renders the wiki title via
+		# v-html; if a requester could store `<img onerror=…>` in a title, it would
+		# run in the reviewer's privileged session on Approve. The write-funnel
+		# sanitizer strips it, so the stored title is HTML-free. This is the
+		# authoritative server-side XSS-closed proof (not just a JS assertion).
+		with _as(USER_A):
+			doc = frappe.get_doc(
+				{
+					"doctype": WIKI,
+					"slug": f"{PFX}-xss",
+					"title": "Safe Title <img src=x onerror=alert(1)>",
+					"page_type": "Process",
+					"scope": "User",
+					"target_user": USER_A,
+					"body_md": "body",
+					"status": "Active",
+				}
+			)
+			doc.insert(ignore_permissions=True)
+		stored = frappe.db.get_value(WIKI, doc.name, "title")
+		self.assertNotIn("<img", stored)
+		self.assertNotIn("onerror", stored)
+		self.assertNotIn("<", stored)
+		self.assertNotIn(">", stored)
+		self.assertIn("Safe Title", stored)  # legitimate text is preserved
+
+	# ── SAR-3: body_excerpt over-reads only Pending private bodies ──────────────
+	def test_body_excerpt_only_for_pending_rows(self):
+		# A Pending row carries the current instructions excerpt (the reviewer
+		# needs it to decide); a decided (Rejected/Approved) row must NOT over-read
+		# the requester's now-private body — its excerpt is empty.
+		from jarvis.chat import custom_skills_api
+
+		secret = "SECRET-body-marker-4b2"
+		skill = _mk_skill(USER_A, f"{PFX}-decidedbody", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", secret)
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			pending = custom_skills_api.list_skill_promotion_requests(status="Pending")
+		prow = next(r for r in pending["rows"] if r["skill"] == skill.name)
+		self.assertIn(secret, prow["body_excerpt"])
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 0, note="no")
+			decided = custom_skills_api.list_skill_promotion_requests(status="Rejected")
+		drow = next(r for r in decided["rows"] if r["skill"] == skill.name)
+		self.assertEqual(drow["body_excerpt"], "")
+
+	# ── decide idempotency: an already-decided request is a no-op ───────────────
+	def test_decide_already_decided_is_noop(self):
+		# TOCTOU-safe re-read: the second decide of the same request returns
+		# {ok: False, reason: …} rather than re-applying — this is exactly the
+		# stale-card signal the SPA now refreshes on (SPX-6).
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-twice", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			first = custom_skills_api.decide_skill_promotion(req["request"], 1, note="ok")
+			second = custom_skills_api.decide_skill_promotion(req["request"], 0, note="again")
+		self.assertEqual(first.get("status"), "Approved")
+		self.assertIs(second.get("ok"), False)
+		self.assertIn("reason", second)
 		self.assertNotIn("Administrator", roles)
