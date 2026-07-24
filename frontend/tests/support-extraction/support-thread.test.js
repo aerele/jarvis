@@ -184,6 +184,10 @@ describe("SupportThreadPage", () => {
 		expect(chip.exists()).toBe(true);
 		expect(chip.text()).toContain("log.txt");
 		expect(chip.attributes("href")).toContain("jarvis.support.media.download");
+		// The clip icon must be an SVG (house design forbids emoji-as-icon), not
+		// the 📎 glyph this chip used to render — pin against a silent regression.
+		expect(chip.find("svg").exists()).toBe(true);
+		expect(chip.text()).not.toContain("📎");
 	});
 
 	it("falls back to the file_url basename when file_name is missing (minor)", () => {

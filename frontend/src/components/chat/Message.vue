@@ -105,7 +105,20 @@
 					target="_blank"
 					rel="noopener"
 				>
-					<span class="jv-file-clip" aria-hidden="true">📎</span>{{ cv.title }}
+					<svg
+						class="jv-file-clip"
+						aria-hidden="true"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.7"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path
+							d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"
+						/></svg
+					>{{ cv.title }}
 				</a>
 			</template>
 			<div class="jv-msgbar">
@@ -218,7 +231,20 @@
 							target="_blank"
 							rel="noopener"
 						>
-							<span class="jv-file-clip" aria-hidden="true">📎</span>{{ cv.title }}
+							<svg
+								class="jv-file-clip"
+								aria-hidden="true"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.7"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path
+									d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"
+								/></svg
+							>{{ cv.title }}
 						</a>
 					</template>
 					<div v-if="copyable" class="jv-msgbar">
@@ -421,8 +447,8 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 }
 .jv-file-clip {
 	flex: 0 0 auto;
-	font-size: 12px;
-	line-height: 1;
+	width: 13px;
+	height: 13px;
 }
 
 /* ===== variant="row" identity line (support-agent name + role + time) ===== */
