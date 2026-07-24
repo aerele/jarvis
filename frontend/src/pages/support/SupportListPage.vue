@@ -157,8 +157,13 @@ const filtered = computed(() => {
 	);
 	const { field, dir } = sort.value;
 	const mul = dir === "asc" ? 1 : -1;
+	// Status sorts by what the badge actually shows ("Awaiting you" / "Open" /
+	// "Closed"), not the raw Helpdesk value (Replied/Resolved/Paused/...) — the
+	// groups happen to line up today, but a new status could split two rows the
+	// user sees as the same group.
+	const sortKey = (t) => (field === "status" ? badgeFor(t.status).label : t[field]);
 	return [...out].sort(
-		(a, b) => String(a[field] || "").localeCompare(String(b[field] || "")) * mul
+		(a, b) => String(sortKey(a) || "").localeCompare(String(sortKey(b) || "")) * mul
 	);
 });
 
@@ -166,7 +171,13 @@ const filtered = computed(() => {
 // live controls rather than decoration.
 const rows = computed(() => filtered.value.slice(0, shown.value));
 
-watch(filtered, () => (shown.value = pageLength.value));
+// Reset paging only when the FILTER/SORT INPUTS change the meaning of the
+// result set — not whenever `filtered` merely recomputes. `filtered` also
+// recomputes on every store.tickets reassignment (loadTickets() always
+// assigns a fresh array), so watching it directly snapped a user's loaded
+// rows back to one page every time they hit Refresh (or a future background
+// poll landed) mid-scroll.
+watch([() => filters.status, () => filters.search, sort], () => (shown.value = pageLength.value));
 
 const emptyState = computed(() =>
 	filters.search || filters.status

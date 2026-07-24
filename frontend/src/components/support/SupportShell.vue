@@ -1,7 +1,7 @@
 <template>
 	<div class="jv-root jv-support" :class="{ 'jv-dark': effectiveDark }" :style="paletteVars">
 		<header class="jv-sup-bar">
-			<button class="jv-sup-back" @click="goBack">
+			<button class="jv-sup-back" aria-label="Back to Jarvis" @click="goBack">
 				<JarvisMark :size="24" :radius="6" />
 				<span class="jv-sup-backtext">Back to Jarvis</span>
 			</button>

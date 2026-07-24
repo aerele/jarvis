@@ -54,8 +54,8 @@ const routes = [
 	// Support is a STANDALONE, shell-less space: chromeless drops both the
 	// sidebar and the #app-header strip (AppShell.vue:18-33), and SupportShell
 	// supplies its own top bar in their place. Static /support/new is registered
-	// BEFORE /support/:ticket — house convention, and otherwise "new" matches as
-	// a ticket id.
+	// BEFORE /support/:ticket — house convention (static before dynamic; see the
+	// catch-all note below for why registration order doesn't actually matter here).
 	//
 	// Dual kill-switch (P2) on ALL THREE routes: support must be enabled
 	// fleet-wide AND the user must have access. Deep-linking straight to
