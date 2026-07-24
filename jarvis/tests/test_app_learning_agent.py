@@ -386,6 +386,71 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 1)
 		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), "SECOND")
 
+	def test_record_app_wiki_will_not_overwrite_human_edited_agent_page(self):
+		# CA-2: a page the SCRIBE created, then a HUMAN edited (a `manual` source is
+		# appended ALONGSIDE the retained agent source), must NOT be overwritten by
+		# the next run. Historical agent provenance does not authorize replacing a
+		# later human edit — the fence refuses after ANY human touch.
+		self._bind_scribe_run()
+		record_app_wiki(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "SCRIBE V1"}]
+		)
+		slug = "fakeapp-overview"
+		sources = json.loads(frappe.db.get_value(WIKI, slug, "sources") or "[]")
+		self.assertTrue(any(s["kind"].startswith("app-learning") for s in sources))  # agent-owned
+		sources.append({"kind": "manual", "date": frappe.utils.today(), "ref": None, "user": "Administrator"})
+		frappe.db.set_value(
+			WIKI, slug, {"sources": frappe.as_json(sources), "body_md": "HUMAN EDIT"}, update_modified=False
+		)
+		# the next scribe run tries to refresh the SAME key
+		sk2 = frappe.generate_hash(length=24)
+		self._extra_keys = {sk2}
+		self._bind_scribe_run(sk2)
+		res = record_app_wiki(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "SCRIBE V2"}]
+		)
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(res["failed"], 1)  # the refusal is counted as failed (CA-3)
+		self.assertEqual(res["slugs"], [])
+		# the human's body survives untouched
+		self.assertEqual(frappe.db.get_value(WIKI, slug, "body_md"), "HUMAN EDIT")
+
+	def test_record_app_wiki_mixed_batch_records_only_the_written_page(self):
+		# CA-3: a batch where the FIRST page collides with a human page (refused) and
+		# the SECOND is created must record ONLY the created page and count the
+		# refusal as failed — never mis-assign the write to the collided human slug.
+		frappe.get_doc(
+			{
+				"doctype": WIKI,
+				"slug": "fakeapp-overview",
+				"title": "Human Overview",
+				"page_type": "Process",
+				"body_md": "HUMAN",
+				"status": "Active",
+				"scope": "Org",
+				"sources": frappe.as_json(
+					[{"kind": "manual", "date": frappe.utils.today(), "ref": None, "user": "Administrator"}]
+				),
+			}
+		).insert(ignore_permissions=True)
+		run = self._bind_scribe_run()
+		res = record_app_wiki(
+			app="fakeapp",
+			pages=[
+				{"title": "Overview", "key": "overview", "body_md": "SCRIBE COLLIDE"},  # -> refused
+				{"title": "Gate Pass", "key": "doctype-gate-pass", "body_md": "SCRIBE NEW"},  # -> created
+			],
+		)
+		self.assertEqual(res["applied"], 1)
+		self.assertEqual(res["failed"], 1)
+		self.assertEqual(res["slugs"], ["fakeapp-doctype-gate-pass"])  # ONLY the page written
+		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), "HUMAN")  # untouched
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-doctype-gate-pass"}), 1)
+		# the run tally reflects ONLY the created page (feeds the completion summary)
+		self.assertEqual(frappe.db.get_value(RUN, run, "pages_written"), 1)
+		tally = json.loads(frappe.db.get_value(RUN, run, "pages_json") or "[]")
+		self.assertEqual({p["slug"] for p in tally}, {"fakeapp-doctype-gate-pass"})
+
 	# ------------------------------------------------------------------ #
 	# P0-2: a successful scribe run reaches TERMINAL "completed" on its own
 	# ------------------------------------------------------------------ #
@@ -421,6 +486,47 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(out["status"], "completed")
 		self.assertEqual(out["pages_written"], 0)
 		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
+
+	def test_finish_is_idempotent_on_an_already_terminal_run(self):
+		# CA-4: with completion now SERVER-owned, a late/duplicate finish must report
+		# the terminal state idempotently rather than raising "already finalized".
+		run = self._bind_scribe_run()
+		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		finish_app_learning_run()
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
+		# calling finish AGAIN on the same (now completed) run is a no-op fast-path
+		out = finish_app_learning_run()
+		self.assertEqual(out["status"], "completed")
+		self.assertEqual(out["pages_written"], 1)
+
+	def test_stale_scribe_run_with_pages_is_reconciled_completed(self):
+		# CA-4: a scribe run that wrote pages but never called finish must be
+		# reconciled to COMPLETED by the stale-run sweep (server-owned completion),
+		# NOT mislabeled failed — terminalization no longer depends on the model.
+		from jarvis.chat.agent_scheduler import STALE_RUN_AFTER_SECONDS, reap_stale_agent_runs
+
+		run = self._bind_scribe_run()
+		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self.assertEqual(frappe.db.get_value(RUN, run, "pages_written"), 1)
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "running")
+		old = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600))
+		frappe.db.set_value(RUN, run, "started_at", old, update_modified=False)
+		frappe.db.commit()
+		reap_stale_agent_runs()
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
+		self.assertTrue(frappe.db.get_value(RUN, run, "finished_at"))
+
+	def test_stale_scribe_run_without_pages_is_failed(self):
+		# A scribe run that produced NO durable pages is a genuinely dead run: the
+		# sweep still fails it (there is no success to reconcile).
+		from jarvis.chat.agent_scheduler import STALE_RUN_AFTER_SECONDS, reap_stale_agent_runs
+
+		run = self._bind_scribe_run()
+		old = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600))
+		frappe.db.set_value(RUN, run, "started_at", old, update_modified=False)
+		frappe.db.commit()
+		reap_stale_agent_runs()
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "failed")
 
 	def test_list_runs_page_stamps_scribe_nature_and_pages(self):
 		from jarvis.chat import agents_api

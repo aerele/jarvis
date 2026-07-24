@@ -133,6 +133,51 @@ class TestAppSource(FrappeTestCase):
 		self.assertTrue(app_source._is_contained(os.path.join(self.app_dir, "hooks.py"), app_real))
 		self.assertFalse(app_source._is_contained("/etc/passwd", app_real))
 
+	def test_symlinked_app_root_is_refused(self):
+		# CA-1: a symlinked app ROOT (apps/<app> -> <bench>/sites) defeats the
+		# per-file containment guard — every regular file beneath the link passes
+		# _is_contained AND os.path.islink (only the ROOT is the link), so site
+		# secrets could be served. The inner-symlink tests above cover files inside
+		# the tree, NOT this trust root. _resolve_app_root must reject it BEFORE any
+		# walk/read.
+		bench = os.path.join(self.tmp, "bench")
+		apps = os.path.join(bench, "apps")
+		sites = os.path.join(bench, "sites")
+		os.makedirs(apps)
+		os.makedirs(sites)
+		with open(os.path.join(sites, "common_site_config.json"), "w") as fh:
+			fh.write('{"encryption_key": "hunter2"}')
+		good = os.path.join(apps, "goodapp")
+		os.makedirs(good)
+		with open(os.path.join(good, "hooks.py"), "w") as fh:
+			fh.write("app_title = 'Good'\n")
+		os.symlink(sites, os.path.join(apps, "evilapp"))  # ROOT symlink to <bench>/sites
+		outside = os.path.join(self.tmp, "outside")  # out-of-tree target
+		os.makedirs(outside)
+		os.symlink(outside, os.path.join(apps, "escapee"))
+
+		with mock.patch.object(app_source, "_app_source_dir", side_effect=lambda a: os.path.join(apps, a)):
+			# a legit real root resolves to its own realpath
+			self.assertEqual(app_source._resolve_app_root("goodapp"), os.path.realpath(good))
+			# the symlinked-to-sites root is REFUSED
+			with self.assertRaises(ValueError):
+				app_source._resolve_app_root("evilapp")
+			# an out-of-tree symlinked root is REFUSED
+			with self.assertRaises(ValueError):
+				app_source._resolve_app_root("escapee")
+			# a name carrying a path separator never reaches the filesystem
+			for bad in ("../sites", "a/b", "..", "."):
+				with self.assertRaises(ValueError):
+					app_source._resolve_app_root(bad)
+			# end-to-end: read_source_file cannot serve the site secret through the
+			# symlinked root (src_dir=None routes through _resolve_app_root)
+			with self.assertRaises(ValueError):
+				app_source.read_source_file("evilapp", "common_site_config.json")
+			# the legit app still reads normally through the validated root
+			text, size = app_source.read_source_file("goodapp", "hooks.py")
+			self.assertIn("app_title", text)
+			self.assertGreater(size, 0)
+
 	# ------------------------------------------------------------------ #
 	# priority ordering
 	# ------------------------------------------------------------------ #

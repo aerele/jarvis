@@ -170,22 +170,54 @@ def run_due_agent_audits() -> None:
 # A8 stale-run reaper (backstop) — hooks cron
 # --------------------------------------------------------------------------- #
 def reap_stale_agent_runs() -> int:
-	"""Fail agent runs stuck ``running`` past ``STALE_RUN_AFTER_SECONDS`` and tear
-	down their orphaned per-run session rows (A8). Backstop only: a healthy run
+	"""Terminalize agent runs stuck ``running`` past ``STALE_RUN_AFTER_SECONDS`` and
+	tear down their orphaned per-run session rows (A8). Backstop only: a healthy run
 	finalizes via ``record_agent_run`` and a dead delegate fails itself via the
 	fleet worker (A15); this catches the crash that killed both. Returns the count
-	reaped. Runs as Administrator (scheduler); best-effort, never raises out."""
+	terminalized. Runs as Administrator (scheduler); best-effort, never raises out.
+
+	CA-4 (server-owned scribe completion): a Custom App Learning *scribe* delegate
+	writes wiki pages via ``record_app_wiki`` (which stamps ``pages_written`` on the
+	run) and is MEANT to call ``finish_app_learning_run`` to reach ``completed`` —
+	but the model may simply forget. Completion must not depend on model behavior:
+	a stuck scribe run whose durable page tally proves it SUCCEEDED is reconciled to
+	``completed`` here (not mislabeled ``failed``). Everything else is a genuinely
+	dead run and is failed as before."""
 	from jarvis.chat import agent_runs
 
 	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
 	stuck = frappe.get_all(
 		RUN,
 		filters={"status": "running", "started_at": ["<", cutoff]},
-		fields=["name", "session_key", "owner", "agent", "installation"],
+		fields=["name", "session_key", "owner", "agent", "installation", "pages_written"],
 	)
 	reaped = 0
 	for r in stuck:
 		try:
+			nature = (frappe.db.get_value(LISTING, r.agent, "nature") or "").strip().title()
+			pages = int(r.pages_written or 0)
+			if nature == "Scribe" and pages > 0:
+				# Server-owned terminalization: the pages are already durably written,
+				# so this is an honest SUCCESS the model merely never finalized. Complete
+				# it with its tally rather than failing real work.
+				frappe.db.set_value(
+					RUN,
+					r.name,
+					{"status": "completed", "finished_at": frappe.utils.now()},
+					update_modified=False,
+				)
+				agent_runs.teardown_run_session(r.session_key)
+				log_activity(
+					agent=r.agent,
+					agent_title=frappe.db.get_value(LISTING, r.agent, "title"),
+					installation=r.installation,
+					action="run_completed",
+					run=r.name,
+					detail=f"reconciled to completed: scribe wrote {pages} page(s); finish not called",
+					owner=r.owner,
+				)
+				reaped += 1
+				continue
 			frappe.db.set_value(
 				RUN,
 				r.name,

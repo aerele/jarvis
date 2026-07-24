@@ -99,11 +99,11 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	default_app = (app or "").strip()
 
 	raw = _as_list(pages)
-	# updates grouped BY resolved app so each app's pages are stamped with their
-	# own provenance source (``app-learning-agent:<app>``); ``pages`` preserves
-	# the flat (app, slug, title) order for the returned summary.
-	by_app: dict[str, list[dict]] = {}
-	page_meta: list[dict] = []
+	# Each accepted page is kept as a flat entry {app, slug, title, update} in
+	# arrival order, so an outcome can be mapped back to the EXACT page it wrote
+	# (see the writeback loop). ``update`` carries the funnel payload; app/slug/
+	# title are the summary/tally shape.
+	accepted: list[dict] = []
 	rejected = 0
 	for item in raw:
 		if not isinstance(item, dict):
@@ -135,10 +135,9 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 			update["append_md"] = body
 		else:
 			update["body_md"] = body
-		by_app.setdefault(page_app, []).append(update)
-		page_meta.append({"app": page_app, "slug": slug, "title": title})
+		accepted.append({"app": page_app, "slug": slug, "title": title, "update": update})
 
-	total = len(page_meta)
+	total = len(accepted)
 
 	# Per-run page cap: bound how many pages one run may write. A re-run gets a
 	# fresh session_key (fresh counter), so re-learning the same app is not
@@ -149,41 +148,50 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	dropped = 0
 	if truncated:
 		dropped = total - remaining
-		# Keep the FIRST ``remaining`` pages in order; drop the tail from BOTH the
-		# per-app buckets and the flat summary so counts stay consistent.
-		page_meta = page_meta[:remaining]
-		kept_slugs = {(m["app"], m["slug"]) for m in page_meta}
-		for a in list(by_app):
-			by_app[a] = [u for u in by_app[a] if (a, u["slug"]) in kept_slugs]
-			if not by_app[a]:
-				del by_app[a]
+		# Keep the FIRST ``remaining`` pages in order; drop the tail.
+		accepted = accepted[:remaining]
 		# Disclose the truncation on the last surviving page so the wiki itself is
 		# honest about partial coverage (reuse the coverage-caveat discipline).
-		if page_meta:
-			last_app, last_slug = page_meta[-1]["app"], page_meta[-1]["slug"]
-			for u in by_app.get(last_app, []):
-				if u["slug"] == last_slug:
-					key = "append_md" if "append_md" in u else "body_md"
-					marker = f"\n\n_Partial coverage: {dropped} further page(s) exceeded the per-run cap and were not written._"
-					u[key] = (u[key] + marker)[:_BODY_CLIP]
-					break
+		if accepted:
+			last = accepted[-1]["update"]
+			key = "append_md" if "append_md" in last else "body_md"
+			marker = f"\n\n_Partial coverage: {dropped} further page(s) exceeded the per-run cap and were not written._"
+			last[key] = (last[key] + marker)[:_BODY_CLIP]
 
+	# Group into per-app batches (order preserved) so each app's pages are stamped
+	# with their own provenance source (``app-learning-agent:<app>``).
+	by_app: dict[str, list[dict]] = {}
+	for entry in accepted:
+		by_app.setdefault(entry["app"], []).append(entry)
+
+	# Apply through the funnel and record ONLY the pages actually written: the
+	# per-update outcome is zipped back to its accepted entry, so a refused
+	# collision in the middle of a batch is counted as failed and never recorded
+	# as a page this run wrote (the tally feeds the completion summary).
 	applied = 0
 	failed = 0
-	for page_app, updates in by_app.items():
-		for i in range(0, len(updates), MAX_PAGES_PER_NOTE):
-			a, f = apply_extracted_page_updates(
-				updates[i : i + MAX_PAGES_PER_NOTE],
+	applied_pages: list[dict] = []
+	for page_app, entries in by_app.items():
+		for i in range(0, len(entries), MAX_PAGES_PER_NOTE):
+			chunk = entries[i : i + MAX_PAGES_PER_NOTE]
+			outcomes = apply_extracted_page_updates(
+				[e["update"] for e in chunk],
 				source=f"{PROVENANCE_KIND_PREFIX}{page_app}",
 				user=frappe.session.user,
 				ref=run["name"],
 				provenance_prefix=PROVENANCE_FENCE_PREFIX,
+				return_outcomes=True,
 			)
-			applied += a
-			failed += f
+			for entry, outcome in zip(chunk, outcomes, strict=True):
+				if outcome["ok"]:
+					applied += 1
+					applied_pages.append(
+						{"app": entry["app"], "slug": entry["slug"], "title": entry["title"]}
+					)
+				else:
+					failed += 1
 
 	ctx.add_pages_written(session_key, applied)
-	applied_pages = page_meta[:applied] if applied else []
 	_tally_run(run["name"], applied_pages, truncated, dropped)
 	return {
 		"run": run["name"],

@@ -85,6 +85,43 @@ def _app_source_dir(app: str) -> str:
 	return os.path.join(frappe.utils.get_bench_path(), "apps", app)
 
 
+def _resolve_app_root(app: str) -> str:
+	"""Canonical, containment-validated source ROOT for ``app`` — the ONLY safe
+	way to turn an app name into a directory to walk or read.
+
+	``_is_contained`` / ``read_source_file`` reject a symlinked *file* whose target
+	escapes the tree, but they TRUST the root they are handed. A symlinked *root*
+	(``apps/<app> -> <bench>/sites``) defeats that: every regular file beneath the
+	link passes containment AND ``os.path.islink`` (only the root is the link), so
+	``common_site_config.json`` could be listed and shipped to the LLM. This closes
+	that hole BEFORE any walk/read:
+
+	  * the app name must be a bare directory component (no path separator, ``.``
+	    or ``..``), so it can never resolve to a sibling of ``apps/``; and
+	  * the resolved root must be EXACTLY ``<realpath(apps)>/<app>`` — a real
+	    directory directly beneath the resolved apps root; a symlinked or relocated
+	    root resolves elsewhere and is refused.
+
+	Raises ``ValueError`` on any violation; returns the realpath on success. The
+	apps root is taken from ``_app_source_dir``'s parent so the tests' source-dir
+	seam still governs the layout."""
+	name = (app or "").strip()
+	if (
+		not name
+		or name in (os.curdir, os.pardir)
+		or name != os.path.basename(name)
+		or os.sep in name
+		or (os.altsep and os.altsep in name)
+	):
+		raise ValueError("invalid app name (must be a bare app directory name)")
+	candidate = _app_source_dir(name)
+	apps_real = os.path.realpath(os.path.dirname(candidate))
+	root_real = os.path.realpath(candidate)
+	if root_real != os.path.join(apps_real, name) or not os.path.isdir(root_real):
+		raise ValueError("app source root escapes the apps directory (symlinked or relocated root)")
+	return root_real
+
+
 def _app_title(app: str) -> str:
 	try:
 		titles = frappe.get_hooks("app_title", app_name=app)
@@ -278,7 +315,10 @@ def read_source_file(app: str, rel_path: str, src_dir: str | None = None) -> tup
 		raise ValueError("path must be a relative path inside the app source tree")
 	if os.path.splitext(rel)[1].lower() not in EXT_ALLOWLIST:
 		raise ValueError("file type not permitted for source reading")
-	src = src_dir or _app_source_dir(app)
+	# Canonicalize + validate the trust ROOT before any read: a symlinked app root
+	# (``apps/<app> -> <bench>/sites``) would otherwise make every regular file
+	# beneath it pass the per-file containment guard and exfiltrate site secrets.
+	src = src_dir or _resolve_app_root(app)
 	src_real = os.path.realpath(src)
 	full = os.path.join(src, rel)
 	# The realpath-containment + symlink guard is the load-bearing secret-exfil

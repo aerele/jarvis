@@ -31,7 +31,18 @@ def finish_app_learning_run() -> dict:
 	``record_app_wiki`` already stamped on the run — the count is server-authored,
 	not model-trusted. Returns ``{run, status, pages_written}``.
 	"""
-	run = ctx.resolve_scribe_run()  # self-gate: running scribe run + admin-tier or raise
+	# allow_terminal: this is the IDEMPOTENT fast-path. Completion is now
+	# SERVER-owned (a still-running scribe run that wrote pages is reconciled to
+	# ``completed`` by the stale-run sweep even if the model never calls finish),
+	# so a late/duplicate finish must report the terminal state, not error.
+	run = ctx.resolve_scribe_run(allow_terminal=True)  # self-gate: scribe run + admin-tier or raise
+	if run.get("status") != "running":
+		row = frappe.db.get_value(RUN, run["name"], ["status", "pages_written"], as_dict=True) or {}
+		return {
+			"run": run["name"],
+			"status": row.get("status") or "completed",
+			"pages_written": int(row.get("pages_written") or 0),
+		}
 	row = frappe.db.get_value(RUN, run["name"], ["pages_written", "coverage_note"], as_dict=True) or {}
 	pages_written = int(row.get("pages_written") or 0)
 	values = {"status": "completed", "finished_at": frappe.utils.now()}

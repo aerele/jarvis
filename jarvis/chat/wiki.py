@@ -833,22 +833,41 @@ def _parse_updates(raw: str) -> list | None:
 # --------------------------------------------------------------------------- #
 # the shared write path
 # --------------------------------------------------------------------------- #
-def _page_has_provenance(name: str, prefix: str) -> bool:
-	"""True when the wiki page ``name`` carries at least one ``sources`` entry
-	whose ``kind`` starts with ``prefix`` — i.e. the page is of the caller's
-	provenance. Used to FENCE a writer (the Custom App Learning scribe) to its
-	OWN pages: it may update a page a prior agent run created, but it can never
-	overwrite a human-authored Org page (chat/voice/edit/manual/promotion) on a
-	slug collision. A missing/corrupt ``sources`` reads as NOT of that
-	provenance, so the fence fails closed."""
-	raw = frappe.db.get_value(WIKI, name, "sources")
+# Provenance kinds that mean a HUMAN (or a human-driven pipeline) touched a page.
+# ANY of these on a page makes it non-updatable by the machine scribe — a page
+# that carries even one human touch is off-limits, so the scribe can never
+# clobber a person's edit.
+_HUMAN_SOURCE_KINDS = frozenset({"manual", "chat", "voice", "edit", "promotion", "tool"})
+
+
+def _sources_agent_updatable(raw, prefix: str) -> bool:
+	"""Predicate over a page's raw ``sources`` JSON: the page may be UPDATED in
+	place by the Custom App Learning scribe iff it is AGENT-OWNED (at least one
+	``kind`` starts with ``prefix``) AND has NO human/manual edit (no ``kind`` in
+	``_HUMAN_SOURCE_KINDS``).
+
+	The old predicate ("ANY source is agent") was defeated by a human edit: a
+	scribe-created page later edited via ``save_wiki_page`` retains the OLD
+	``app-learning*`` source ALONGSIDE the new ``manual`` one, so the next run
+	passed the fence and REPLACED the human body. Requiring the page to carry no
+	human touch closes that — only an exclusively-agent page is refreshable. A
+	missing/corrupt ``sources`` reads as NOT updatable (fails closed)."""
 	try:
 		sources = json.loads(raw) if raw else []
 	except Exception:
 		return False
 	if not isinstance(sources, list):
 		return False
-	return any(isinstance(s, dict) and str(s.get("kind") or "").startswith(prefix) for s in sources)
+	kinds = [str(s.get("kind") or "") for s in sources if isinstance(s, dict)]
+	if any(k in _HUMAN_SOURCE_KINDS for k in kinds):
+		return False
+	return any(k.startswith(prefix) for k in kinds)
+
+
+def _page_is_agent_updatable(name: str, prefix: str) -> bool:
+	"""``_sources_agent_updatable`` for a page by name (unlocked read — the cheap
+	early-out; the authoritative check is re-run under a row lock at save time)."""
+	return _sources_agent_updatable(frappe.db.get_value(WIKI, name, "sources"), prefix)
 
 
 def apply_extracted_page_updates(
@@ -859,7 +878,8 @@ def apply_extracted_page_updates(
 	default_scope: str | None = None,
 	target_user: str | None = None,
 	provenance_prefix: str | None = None,
-) -> tuple[int, int]:
+	return_outcomes: bool = False,
+) -> tuple[int, int] | list[dict]:
 	"""Create/update wiki pages from extracted updates (the note ingest above
 	and ``jarvis.learning.voice_facts`` both land here). At most
 	``MAX_PAGES_PER_NOTE`` updates apply per call; per-update failures are
@@ -881,23 +901,46 @@ def apply_extracted_page_updates(
 	``provenance_prefix`` (Custom App Learning scribe writeback): when set, an
 	UPDATE only lands on a page that already carries this provenance (a
 	``sources`` kind starting with the prefix). A slug that collides with a
-	human-authored / other-feature page is REFUSED (counted as failed) rather
-	than overwritten — a scribe can create/update only its OWN pages. None
-	(every other caller) preserves today's behavior byte-for-byte.
+	human-authored / other-feature page is REFUSED rather than overwritten — a
+	scribe can create/update only its OWN pages. None (every other caller)
+	preserves today's behavior byte-for-byte.
+
+	``return_outcomes=True`` (Custom App Learning scribe writeback): returns a
+	PER-UPDATE outcome list ``[{slug, ok, reason}]`` aligned to the accepted
+	updates instead of the ``(applied, failed)`` tuple, so the caller can record
+	EXACTLY the pages that were written and count a provenance REFUSAL (a
+	``_apply_one_update`` returning ``False``) as failed — the aggregate tuple
+	cannot distinguish "created page B" from "refused colliding page A". The
+	tuple path is unchanged for every existing caller (a refusal stays silently
+	dropped there, byte-for-byte).
 	"""
 	if not isinstance(updates, list):
-		return 0, 0
+		return [] if return_outcomes else (0, 0)
 	applied = 0
 	failed = 0
+	outcomes: list[dict] = []
 	for update in updates[:MAX_PAGES_PER_NOTE]:
 		if not isinstance(update, dict):
+			if return_outcomes:
+				outcomes.append({"slug": None, "ok": False, "reason": "skipped"})
 			continue
+		ok = False
+		reason = "refused"
 		try:
-			if _apply_one_update(update, source, user, ref, default_scope, target_user, provenance_prefix):
+			ok = bool(
+				_apply_one_update(update, source, user, ref, default_scope, target_user, provenance_prefix)
+			)
+			reason = "applied" if ok else "refused"
+			if ok:
 				applied += 1
 		except Exception:
 			failed += 1
+			reason = "error"
 			frappe.log_error(title="wiki: page update failed", message=frappe.get_traceback())
+		if return_outcomes:
+			outcomes.append({"slug": _normalize_slug(update.get("slug")), "ok": ok, "reason": reason})
+	if return_outcomes:
+		return outcomes
 	return applied, failed
 
 
@@ -968,23 +1011,41 @@ def _apply_one_update(
 				raise
 
 	# Provenance fence (scribe writeback): the slug resolved to an EXISTING page.
-	# Update it only if it is already of the caller's provenance; a collision with
-	# a human-authored / other-feature page is refused rather than overwritten.
-	if provenance_prefix and not _page_has_provenance(name, provenance_prefix):
+	# Update it only if it is agent-owned AND carries no human edit; a collision
+	# with a human-authored / human-edited / other-feature page is refused rather
+	# than overwritten. Unlocked early-out here; re-checked under a row lock at save.
+	if provenance_prefix and not _page_is_agent_updatable(name, provenance_prefix):
 		return False
 
 	try:
-		return _merge_update_into_page(name, update, source, user, ref)
+		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix)
 	except frappe.TimestampMismatchError:
 		# Concurrent save between our load and save: reload + re-merge once
 		# so ordinary concurrency doesn't drop the update.
-		return _merge_update_into_page(name, update, source, user, ref)
+		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix)
 
 
-def _merge_update_into_page(name: str, update: dict, source: str, user: str | None, ref: str | None) -> bool:
+def _merge_update_into_page(
+	name: str,
+	update: dict,
+	source: str,
+	user: str | None,
+	ref: str | None,
+	provenance_prefix: str | None = None,
+) -> bool:
 	body_md = update.get("body_md")
 	append_md = update.get("append_md")
 	contradiction = bool(update.get("contradiction"))
+
+	# TOCTOU close (scribe writeback): re-check ownership under a ROW LOCK on the
+	# page immediately before mutating it. A human edit that landed via
+	# ``save_wiki_page`` BETWEEN the unlocked pre-check above and this save would
+	# otherwise be clobbered; the ``for_update`` read serializes against that save,
+	# so a page that gained a human touch in the gap is refused here.
+	if provenance_prefix is not None:
+		locked_sources = frappe.db.get_value(WIKI, name, "sources", for_update=True)
+		if not _sources_agent_updatable(locked_sources, provenance_prefix):
+			return False
 
 	doc = frappe.get_doc(WIKI, name)
 	if update.get("summary"):

@@ -32,8 +32,11 @@ def list_app_modules(app: str | None = None) -> dict:
 	if not app or not str(app).strip():
 		apps: list[dict] = []
 		for name in app_source._installed_custom_apps():
-			src = app_source._app_source_dir(name)
-			if not os.path.isdir(src):
+			try:
+				# Canonicalize + validate the root; a symlinked/relocated app root is
+				# never walked (existence is part of the same check).
+				src = app_source._resolve_app_root(name)
+			except ValueError:
 				continue
 			approx_files, approx_kb = app_source._approx_size(src)
 			apps.append(
@@ -56,7 +59,7 @@ def list_app_modules(app: str | None = None) -> dict:
 
 	name = str(app).strip()
 	ctx.assert_custom_app(name)  # custom-apps allowlist (raises on a core/unknown app)
-	src = app_source._app_source_dir(name)
+	src = app_source._resolve_app_root(name)  # canonical + root-validated source dir
 	rels, notes = app_source._collect_files(src)
 	files: list[dict] = []
 	for rel in sorted(rels, key=lambda r: (app_source._priority(r), r)):

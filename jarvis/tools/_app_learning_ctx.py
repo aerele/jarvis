@@ -18,8 +18,6 @@ looping delegate bounded well inside the 90-minute run ceiling:
 
 from __future__ import annotations
 
-import os
-
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
@@ -40,15 +38,21 @@ PER_RUN_PAGE_CAP = 15  # wiki pages written per run
 _BUDGET_TTL_S = 3 * 60 * 60
 
 
-def resolve_scribe_run() -> dict:
+def resolve_scribe_run(allow_terminal: bool = False) -> dict:
 	"""Resolve + authorise the caller as a bona-fide app-learning scribe run.
 
-	Returns ``{name, agent, session_key}`` for the running ``Jarvis Agent Run``
+	Returns ``{name, agent, session_key, status}`` for the ``Jarvis Agent Run``
 	bound to the caller's session_key. Raises ``InvalidArgumentError`` when there
 	is no session_key, no run bound to it, the run has finalized, its agent's
 	nature is not ``Scribe``, or the impersonated identity is not admin-tier.
 	This is the identical resolution shape ``record_agent_run`` uses (never a
-	model-supplied id)."""
+	model-supplied id).
+
+	``allow_terminal=True`` keeps the same identity/nature gate but does NOT raise
+	on an already-finalized run — the IDEMPOTENT finish fast-path uses it so a
+	double-finish (or a server-reconciled run) returns the terminal state rather
+	than erroring. The source-read + writeback tools keep the default (a finalized
+	run cannot read source or write pages)."""
 	session_key = get_session_key()
 	if not session_key:
 		raise InvalidArgumentError(
@@ -63,7 +67,7 @@ def resolve_scribe_run() -> dict:
 	)
 	if not run_row:
 		raise InvalidArgumentError("no agent run is bound to this session")
-	if run_row.status != "running":
+	if run_row.status != "running" and not allow_terminal:
 		raise InvalidArgumentError("this agent run has already finalized")
 	nature = (frappe.db.get_value(LISTING, run_row.agent, "nature") or "").strip().title()
 	if nature != "Scribe":
@@ -77,7 +81,12 @@ def resolve_scribe_run() -> dict:
 	# an install were mis-configured.
 	if not has_jarvis_admin_access(frappe.session.user):
 		raise InvalidArgumentError("app-learning source access requires an admin-tier run-as identity")
-	return {"name": run_row.name, "agent": run_row.agent, "session_key": session_key}
+	return {
+		"name": run_row.name,
+		"agent": run_row.agent,
+		"session_key": session_key,
+		"status": run_row.status,
+	}
 
 
 def assert_custom_app(app: str) -> None:
@@ -92,8 +101,13 @@ def assert_custom_app(app: str) -> None:
 		raise InvalidArgumentError(
 			f"{name!r} is not a learnable custom app (core apps are never served)"
 		)
-	if not os.path.isdir(app_source._app_source_dir(name)):
-		raise InvalidArgumentError(f"no source directory found for app {name!r}")
+	# Canonicalize + validate the app's source ROOT here (existence + the
+	# symlinked/relocated-root rejection), so a defeated trust root is refused at
+	# the gate BEFORE any manifest walk or file read is even attempted.
+	try:
+		app_source._resolve_app_root(name)
+	except ValueError as e:
+		raise InvalidArgumentError(str(e))
 
 
 # --------------------------------------------------------------------------- #
