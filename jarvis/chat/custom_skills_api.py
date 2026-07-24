@@ -15,7 +15,11 @@ and flip the status to a terminal ``ok ...`` / ``failed: ...`` the SPA polls.
 import frappe
 from frappe import _
 
-from jarvis.chat.custom_skills import build_push_payload
+from jarvis.chat.custom_skills import (
+	MAX_SKILLS_PER_PUSH,
+	build_push_payload,
+	pushable_org_skill_count,
+)
 from jarvis.permissions import require_jarvis_user
 
 SKILL = "Jarvis Custom Skill"
@@ -294,6 +298,14 @@ def get_custom_skill(name: str) -> dict:
 	is_owner = doc.owner == me
 	if not is_owner and not frappe.db.exists(SHARE, {"parent": name, "user": me}):
 		frappe.throw(_("You don't have access to this skill."), frappe.PermissionError)
+	# ``scope`` / ``target_role`` / ``managed_by_learning`` let the SPA gate the
+	# "Request promotion…" affordance (owner + User-scope + not learned) and show
+	# the current scope on the promotion status chip — the requester UI can't
+	# reason about promotion without them. Read-only, still owner/shared-gated by
+	# the access check above (Skills-area promotion surfacing).
+	scope = (doc.scope or "Org") or "Org"
+	if scope == "Personal":
+		scope = "User"
 	return {
 		"name": doc.name,
 		"skill_name": doc.skill_name,
@@ -305,6 +317,9 @@ def get_custom_skill(name: str) -> dict:
 		"mine": int(is_owner),
 		"can_edit": int(is_owner),
 		"shared_by": "" if is_owner else _full_name(doc.owner),
+		"scope": scope,
+		"target_role": doc.get("target_role") or "",
+		"managed_by_learning": int(doc.get("managed_by_learning") or 0),
 	}
 
 
@@ -675,6 +690,26 @@ def list_skill_promotion_requests(
 			else []
 		)
 	}
+	# Reviewer content preview (the wiki queue's ``body_excerpt`` parallel). The
+	# skill promotion request carries no body snapshot — it re-scopes the row in
+	# place — so the CURRENT skill instructions are the truth the reviewer is
+	# deciding on. Batch-fetch here (never per-row) under the reviewer gate: a
+	# reviewer cannot read a User-scope skill body via get_custom_skill
+	# (owner/shared-only), so this reviewer-gated raw fetch is the only surface
+	# that can show it — the same reason the list itself sidesteps if_owner.
+	skill_names = list({r["skill"] for r in rows if r.get("skill")})
+	instr = {
+		s.name: s.instructions
+		for s in (
+			frappe.get_all(
+				SKILL,
+				filters={"name": ["in", skill_names]},
+				fields=["name", "instructions"],
+			)
+			if skill_names
+			else []
+		)
+	}
 	out_rows = [
 		{
 			"name": r["name"],
@@ -691,6 +726,7 @@ def list_skill_promotion_requests(
 			"reviewer": r.get("reviewer") or "",
 			"decided_at": str(r.get("decided_at") or ""),
 			"decision_note": r.get("decision_note") or "",
+			"body_excerpt": (instr.get(r.get("skill")) or "")[:300],
 		}
 		for r in rows
 	]
@@ -700,7 +736,83 @@ def list_skill_promotion_requests(
 		"has_more": start + len(out_rows) < total,
 		"start": start,
 		"page_length": pl,
+		# Container push-budget context so the reviewer's Org-approval affordance
+		# can warn (loud, non-blocking) when approving would take the shared
+		# catalog near/past the cap. ``push_count`` is the CURRENT pushable Org
+		# count (uncapped — the exact sync eligibility filter); ``push_budget`` is
+		# the real sync constant. The client decides the warning from these.
+		"push_count": pushable_org_skill_count(),
+		"push_budget": MAX_SKILLS_PER_PUSH,
 	}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def my_skill_promotion(name: str) -> dict:
+	"""The caller's MOST-RECENT promotion request for one of their OWN skills —
+	the requester-side status read (the reviewer list endpoint is reviewer-gated,
+	so a requester needs their own read to render the "requested → approved /
+	rejected" chip). Owner-scoped by the ``owner`` filter, so it can only ever
+	return the caller's own request. Returns ``{}`` when there is none.
+
+	Read-only, smallest addition (Skills-area promotion surfacing): the doctype
+	perms are ``All: read + if_owner``, but the SPA does not use generic
+	client.get_list anywhere, so this thin owner-scoped wrapper keeps the
+	house "one whitelisted method per read" idiom."""
+	me = frappe.session.user
+	rows = frappe.get_all(
+		PROMO,
+		filters={"skill": name, "owner": me},
+		fields=[
+			"name",
+			"status",
+			"from_scope",
+			"to_scope",
+			"target_role",
+			"note",
+			"reviewer",
+			"decided_at",
+			"decision_note",
+			"creation",
+		],
+		order_by="creation desc",
+		limit=1,
+	)
+	if not rows:
+		return {}
+	r = rows[0]
+	return {
+		"name": r.name,
+		"status": r.status or "",
+		"from_scope": r.from_scope or "",
+		"to_scope": r.to_scope or "",
+		"target_role": r.target_role or "",
+		"note": r.note or "",
+		"reviewer": r.reviewer or "",
+		"reviewer_name": _full_name(r.reviewer) if r.reviewer else "",
+		"decided_at": str(r.decided_at or ""),
+		"decision_note": r.decision_note or "",
+		"created": str(r.creation or ""),
+	}
+
+
+@frappe.whitelist()
+def promotable_target_roles() -> dict:
+	"""Role options for the promotion requester's Role picker: the caller's OWN
+	desk roles, minus non-targetable system roles. A requester can only sensibly
+	ask to widen a skill to a team they belong to; the reviewer makes the final
+	call. Reuses the wiki's ``_NON_TARGETABLE_ROLES`` vocabulary so skill- and
+	wiki-promotion requesters speak ONE consistent role language (the wiki
+	reviewer-side ``manageable_roles`` is a CURATOR concept — empty for a plain
+	user — and is the wrong source for a requester). Returns ``{roles: [...]}``.
+
+	Safe to leave un-gated beyond the whitelist: it only ever reflects the
+	caller's own session roles."""
+	from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
+
+	me = frappe.session.user
+	roles = sorted(r for r in frappe.get_roles(me) if r and r not in _NON_TARGETABLE_ROLES)
+	return {"roles": roles}
 
 
 # --------------------------------------------------------------------------- #

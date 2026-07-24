@@ -370,3 +370,38 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 			}
 		)
 	return payload
+
+
+def pushable_org_skill_count() -> int:
+	"""Count of enabled skills that WOULD be pushed to the shared container — the
+	EXACT :func:`build_push_payload` eligibility filter (enabled, not learned,
+	scope Org/legacy-empty, minus any ``allowed_roles``-narrowed row), but
+	UNCAPPED by ``MAX_SKILLS_PER_PUSH`` so a caller can tell "at the cap" (25)
+	apart from "over the cap" (e.g. 30).
+
+	The reviewer promotion UI uses this to warn when approving an Org promotion
+	would take the catalog near/past the push budget: an Org row promoted while
+	the container already holds ``MAX_SKILLS_PER_PUSH`` pushable skills is
+	silently truncated out of the next push (build_push_payload logs it, but the
+	reviewer deserves to be told BEFORE approving). Non-blocking — the reviewer
+	still decides.
+	"""
+	rows = frappe.get_all(
+		"Jarvis Custom Skill",
+		filters={"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))},
+		fields=["name"],
+	)
+	if not rows:
+		return 0
+	restricted = {
+		r.parent
+		for r in frappe.get_all(
+			"Jarvis Custom Skill Allowed Role",
+			filters={
+				"parenttype": "Jarvis Custom Skill",
+				"parent": ["in", [r.name for r in rows]],
+			},
+			fields=["parent"],
+		)
+	}
+	return sum(1 for r in rows if r.name not in restricted)
