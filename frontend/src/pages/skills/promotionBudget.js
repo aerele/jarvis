@@ -63,3 +63,26 @@ export function formatPushProjection(projection) {
 
 	return null;
 }
+
+// The decision-relevant fingerprint of a projection (mirrors the server's
+// `_projection_signature`, R2-SP-5). Two projections with the same signature warn
+// the reviewer identically; a changed signature means the shared catalog moved
+// under them. Only the fields that drive the warning are compared, so incidental
+// fields never register as a change.
+export function projectionSignature(projection) {
+	if (!projection) return null;
+	return JSON.stringify([
+		!!projection.over_budget,
+		!!projection.at_budget,
+		Number(projection.projected_count) || 0,
+		Array.isArray(projection.dropped_slugs) ? projection.dropped_slugs : [],
+		!!projection.promoted_dropped,
+	]);
+}
+
+// True when `fresh` warns the reviewer differently from `ack` — used to note "the
+// impact changed since the list loaded" before the reviewer confirms an approval
+// (the authoritative reconfirm is enforced server-side; this is the client cue).
+export function projectionChanged(ack, fresh) {
+	return projectionSignature(ack) !== projectionSignature(fresh);
+}

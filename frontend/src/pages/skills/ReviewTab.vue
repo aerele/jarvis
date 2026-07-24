@@ -1109,6 +1109,31 @@
 									{{ p.note }}
 								</p>
 
+								<!-- snapshot description + invocation policy: EVERY field the
+								     approval publishes, so the reviewer decides on the whole
+								     content, not just the body (R2-SP-2). -->
+								<div
+									v-if="
+										p.description_snapshot || p.user_invocable_snapshot != null
+									"
+									class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-gray-7"
+								>
+									<span v-if="p.description_snapshot">
+										<span class="text-ink-gray-5">Description:</span>
+										{{ p.description_snapshot }}
+									</span>
+									<Badge
+										v-if="p.user_invocable_snapshot != null"
+										variant="subtle"
+										:theme="p.user_invocable_snapshot ? 'green' : 'gray'"
+										:label="
+											p.user_invocable_snapshot
+												? 'Slash-invocable'
+												: 'Not slash-invocable'
+										"
+									/>
+								</div>
+
 								<!-- skill instructions preview (expandable) -->
 								<div v-if="p.body_excerpt" class="mt-2">
 									<div
@@ -1802,7 +1827,9 @@ import {
 } from "@/api/review";
 // Org push-budget warning formatter (ruling 2 + CDX-SP-2) — a pure, node-tested
 // module that RENDERS the server's projection (never a client-side guess).
-import { formatPushProjection } from "./promotionBudget";
+// `projectionChanged` cues a reviewer when the push impact moved since list-load
+// (R2-SP-5; the authoritative reconfirm is server-enforced).
+import { formatPushProjection, projectionChanged } from "./promotionBudget";
 // HTML-escape for every untrusted value interpolated into a confirm message
 // (ConfirmDialog renders `message` via v-html) — SAR-1 client belt.
 import { esc } from "./escapeHtml";
@@ -2267,34 +2294,46 @@ function budgetWarn(p) {
 // Approve confirms with the concrete visibility implication + a FRESH server
 // projection recomputed at the moment of decision (CDX-SP-2): the on-card banner
 // uses the list-load projection, but a concurrent promotion/edit could have moved
-// the budget since, so we re-preflight before the reviewer commits. Publishing the
-// snapshot is irreversible from the requester's side.
+// the budget since, so we re-preflight before the reviewer commits. The reviewer
+// then confirms against THAT fresh projection, which is passed to the decide call
+// as their acknowledgement — the server rebinds it under the decision transaction
+// and refuses to publish (asking for a fresh confirm) if the catalog moved again
+// (R2-SP-5). Publishing the snapshot is irreversible from the requester's side.
 async function approveSkillPromotion(p) {
 	const target = p.to_scope === "Role" ? `Role: ${esc(p.target_role || "—")}` : "Org";
 	const who = p.to_scope === "Role" ? "that role" : "everyone";
 	// Recompute the budget truth fresh; fall back to the list-load projection if the
 	// preflight call fails (never block the decision on a warning fetch).
-	let warn = budgetWarn(p);
+	let ackProjection = p.push_projection || null;
+	let moved = false;
 	try {
 		const pre = await preflightSkillPromotion(p.name);
-		warn = formatPushProjection(pre && pre.push_projection);
+		moved = projectionChanged(p.push_projection, pre && pre.push_projection);
+		ackProjection = (pre && pre.push_projection) || null;
 	} catch (e) {
-		// keep the list-load warning; the server re-checks again at decide time
+		// keep the list-load projection; the server re-checks again at decide time
 	}
+	const warn = formatPushProjection(ackProjection);
 	// Every untrusted value is HTML-escaped — the message renders through v-html
-	// (SAR-1). The budget warning folds in as plain "Note:" copy (no ⚠ glyph —
-	// design.md:563; the on-card banner already carries the colored warning).
+	// (SAR-1). The snapshot's description + user-invocable flag are shown so the
+	// reviewer confirms the WHOLE content their approval publishes (R2-SP-2). The
+	// budget warning folds in as plain "Note:" copy (no ⚠ glyph — design.md:563;
+	// the on-card banner already carries the colored warning).
 	let message =
 		`This publishes “${esc(p.skill_name)}” to ${target} — usable by ${who} — as a shared ` +
 		"copy of exactly the reviewed content. Your original private skill stays intact and " +
 		"editable; the shared copy is locked to reviewers.";
+	if (p.description_snapshot) message += ` Description: “${esc(p.description_snapshot)}”.`;
+	if (p.user_invocable_snapshot != null)
+		message += ` Slash-invocable: ${p.user_invocable_snapshot ? "yes" : "no"}.`;
+	if (moved) message += " The push impact changed since the list loaded.";
 	if (warn) message += ` Note: ${esc(warn.message)}`;
 	confirmDialog({
 		title: "Approve skill promotion?",
 		message,
 		onConfirm: async ({ hideDialog }) => {
 			hideDialog();
-			await decideSkillPromo(p, 1, "");
+			await decideSkillPromo(p, 1, "", ackProjection);
 		},
 	});
 }
@@ -2312,10 +2351,21 @@ async function submitSkillPromoReject() {
 	);
 	if (ok) skillPromoReject.show = false;
 }
-async function decideSkillPromo(p, approve, note) {
+async function decideSkillPromo(p, approve, note, ackProjection = null) {
 	skillPromoActing.value = p.name;
 	try {
-		const r = await decideSkillPromotion(p.name, approve, note);
+		const r = await decideSkillPromotion(p.name, approve, note, ackProjection);
+		if (r && r.needs_reconfirm) {
+			// R2-SP-5: the shared catalog moved since the reviewer's ack, so the
+			// server published NOTHING. Refresh the row's projection and re-open the
+			// approve confirm with the NEW impact — a fresh preflight + ack.
+			toast.error(r.reason || "The push impact changed — please confirm again.");
+			const merged = { ...p, push_projection: r.push_projection || p.push_projection };
+			const i = skillPromo.rows.findIndex((x) => x.name === p.name);
+			if (i !== -1) skillPromo.rows[i] = merged;
+			approveSkillPromotion(merged);
+			return false;
+		}
 		if (r && r.ok === false) {
 			// stale / already-decided request (TOCTOU-safe server re-read): also
 			// refresh so the stale card leaves the Pending list immediately.
@@ -2323,7 +2373,12 @@ async function decideSkillPromo(p, approve, note) {
 			fetchSkillPromotions("reset");
 			return false;
 		}
-		toast.success(approve ? "Skill promotion approved" : "Skill promotion rejected");
+		// On a successful APPROVE the server returns the FINAL projection — which
+		// skill (if any) the push actually drops — so we name it instead of a generic
+		// toast (R2-SP-5). A clean approval / any reject shows the plain success.
+		const done = formatPushProjection(r && r.push_projection);
+		if (approve && done) toast.success(`Skill promotion approved — ${done.message}`);
+		else toast.success(approve ? "Skill promotion approved" : "Skill promotion rejected");
 		fetchSkillPromotions("reset");
 		emit("changed");
 		return true;
