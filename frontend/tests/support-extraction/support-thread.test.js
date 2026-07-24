@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mount } from "@vue/test-utils";
+import { mount, flushPromises } from "@vue/test-utils";
 
 // vi.mock is HOISTED; vi.doMock is not. Mocking the store from inside a helper
 // would run AFTER the component's graph resolved, loading the real singleton
@@ -172,5 +172,49 @@ describe("SupportThreadPage", () => {
 		expect(link.attributes("href")).toContain("jarvis.support.media.download");
 		expect(link.attributes("href")).toContain("spec.pdf");
 		storeDouble.thread.attachments = [];
+	});
+
+	it("keeps the composer enabled on a resolved ticket and says replying reopens it", () => {
+		// There is no reopen endpoint — a reply is the ONLY way back. Disabling
+		// the composer here would strand the user with no path forward.
+		const w = mountWith([], { name: "T1", subject: "x", status: "Resolved" });
+		const c = w.findComponent({ name: "Composer" });
+		expect(c.props("disclaimer")).toContain("reopens");
+	});
+
+	it("arms Send for an attachment-only reply", () => {
+		const w = mountWith([]);
+		w.findComponent({ name: "Composer" }).vm.$emit("files-added", [
+			{ name: "a.png", type: "image/png" },
+		]);
+		return w.vm.$nextTick().then(() => {
+			expect(w.findComponent({ name: "Composer" }).props("canSend")).toBe(true);
+		});
+	});
+
+	it("posts the body BEFORE uploading, since upload needs the ticket to exist", async () => {
+		// media.upload attaches to an EXISTING ticket and posting the text is what
+		// reopens a resolved one — so this order is a correctness constraint, not
+		// a style preference. Reversed, an attachment-and-text reply to a resolved
+		// ticket uploads into a ticket that is still closed.
+		const order = [];
+		const w = mountWith([]);
+		storeDouble.reply = vi.fn(async () => {
+			order.push("reply");
+			return true;
+		});
+		storeDouble.uploadTo = vi.fn(async () => {
+			order.push("upload");
+			return 1;
+		});
+
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("update:modelValue", "here is the log");
+		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(order).toEqual(["reply", "upload"]);
 	});
 });

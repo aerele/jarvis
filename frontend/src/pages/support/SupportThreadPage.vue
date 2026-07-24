@@ -59,6 +59,23 @@
 				</Message>
 			</template>
 		</div>
+
+		<div class="jv-sup-composer">
+			<!-- `busy` is deliberately NOT passed: it swaps Send for a Stop button
+			     that emits `stop`, and support has nothing to stop — a reply is a
+			     single POST, not a stream. A dead Stop control is worse than none.
+			     `canSend` already goes false while sending, which disarms Send. -->
+			<Composer
+				v-model="draft"
+				:attachments="pending"
+				:can-send="canSend"
+				placeholder="Reply to Aerele Support…"
+				:disclaimer="disclaimer"
+				@files-added="onFiles"
+				@remove-attachment="removeFile"
+				@submit="send"
+			/>
+		</div>
 	</SupportShell>
 </template>
 
@@ -66,6 +83,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { Badge, Button, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
+import Composer from "@/components/chat/Composer.vue";
 import Message from "@/components/chat/Message.vue";
 import SupportShell from "@/components/support/SupportShell.vue";
 import { renderSupportHtml } from "@/lib/supportHtml";
@@ -82,10 +100,57 @@ import { useSupportStore } from "@/stores/support";
 const route = useRoute();
 const store = useSupportStore();
 const resolving = ref(false);
+const draft = ref("");
+const sending = ref(false);
+const files = ref([]); // local File objects — uploaded on submit, never before
 
 const ticketName = computed(() => String(route.params.ticket || ""));
 const row = computed(() => store.ticketRow(ticketName.value));
 const badge = computed(() => store.badgeFor(row.value && row.value.status));
+
+// Composer takes DISPLAY objects, never File objects. Object URLs are created
+// once per file and revoked on removal/submit so a long thread can't leak them.
+const previews = new Map();
+function previewFor(f) {
+	if (!previews.has(f)) {
+		previews.set(f, /^image\//.test(f.type) ? URL.createObjectURL(f) : "");
+	}
+	return previews.get(f);
+}
+function releasePreview(f) {
+	const url = previews.get(f);
+	if (url) URL.revokeObjectURL(url);
+	previews.delete(f);
+}
+
+const pending = computed(() =>
+	files.value.map((f, i) => ({
+		key: `${f.name}-${i}`,
+		file_name: f.name,
+		preview_url: previewFor(f),
+		removable: true,
+	}))
+);
+
+const canSend = computed(() => !sending.value && (!!draft.value.trim() || files.value.length > 0));
+
+// Reopen is reply-driven: there is no reopen endpoint, so the composer stays
+// ENABLED on a resolved/closed ticket and says what replying will do.
+const disclaimer = computed(() =>
+	row.value && (store.isClosed(row.value.status) || row.value.status === "Resolved")
+		? "Replying reopens this ticket."
+		: ""
+);
+
+function onFiles(added) {
+	files.value = files.value.concat(added);
+}
+
+function removeFile(i) {
+	const f = files.value[i];
+	if (f) releasePreview(f);
+	files.value = files.value.filter((_, n) => n !== i);
+}
 
 // "Sent" means the support side sent it (helpdesk_client.py queries
 // sent_or_received directly). Anything else — including a missing value — is
@@ -184,6 +249,31 @@ async function open(name) {
 	lastPrint = store.fingerprintOf(name);
 }
 
+async function send() {
+	if (!canSend.value) return;
+	sending.value = true;
+	const body = draft.value.trim();
+	const staged = files.value.slice();
+	try {
+		// Body first, attachments second: media.upload attaches to an existing
+		// ticket, and posting the text is what actually reopens a resolved one.
+		if (body) {
+			const ok = await store.reply(ticketName.value, body);
+			if (!ok) return; // store already toasted; keep the draft so it isn't lost
+		}
+		if (staged.length) await store.uploadTo(ticketName.value, staged);
+
+		draft.value = "";
+		staged.forEach(releasePreview);
+		files.value = [];
+		await store.loadTickets({ quiet: true });
+		await store.loadThread(ticketName.value);
+		lastPrint = store.fingerprintOf(ticketName.value);
+	} finally {
+		sending.value = false;
+	}
+}
+
 onMounted(async () => {
 	if (!store.tickets.length) await store.loadTickets({ quiet: true });
 	await open(ticketName.value);
@@ -196,6 +286,7 @@ onUnmounted(() => {
 	if (timer) clearInterval(timer);
 	window.removeEventListener("focus", onFocus);
 	document.removeEventListener("visibilitychange", onFocus);
+	files.value.forEach(releasePreview);
 });
 
 watch(ticketName, (n) => open(n));
@@ -210,6 +301,10 @@ watch(ticketName, (n) => open(n));
 	display: flex;
 	flex-direction: column;
 	gap: 4px;
+}
+.jv-sup-composer {
+	flex: 0 0 auto;
+	padding: 0 16px 16px;
 }
 .jv-sup-center {
 	display: flex;
