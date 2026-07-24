@@ -99,4 +99,35 @@ describe("SupportNewPage", () => {
 		const w = mount(SupportNewPage, opts);
 		expect(w.findComponent({ name: "Composer" }).props("modelValue")).toContain("Invoice run");
 	});
+
+	it("prefills the subject from the chat hook", async () => {
+		query = { subject: "Invoice total is wrong" };
+		const w = mount(SupportNewPage, opts);
+		expect(w.find("input").element.value).toBe("Invoice total is wrong");
+	});
+
+	it("keeps staged files pending when uploadTo reports fewer successes than requested", async () => {
+		// Proof of fix 1: uploadTo returns a COUNT, not per-file results. A
+		// silent `files.value = []` here would discard attachments the user
+		// still needs to retry after a transient upload failure, even though the
+		// ticket itself was created successfully.
+		// Reassign both fresh: earlier tests in this file mutate createTicket's
+		// mock via .mockImplementation/.mockResolvedValue, which — unlike
+		// vi.clearAllMocks() in beforeEach — outlives the test that set it. A
+		// stale `createTicket` resolving to null would short-circuit before
+		// uploadTo is ever reached and pass this test for the wrong reason.
+		storeDouble.createTicket = vi.fn(async () => "TKT-9");
+		storeDouble.uploadTo = vi.fn(async () => 0);
+		const w = mount(SupportNewPage, opts);
+		await w.find("input").setValue("Broken invoice");
+		w.findComponent({ name: "Composer" }).vm.$emit("files-added", [
+			{ name: "a.png", type: "image/png" },
+			{ name: "b.png", type: "image/png" },
+		]);
+		await w.vm.$nextTick();
+		w.findComponent({ name: "Composer" }).vm.$emit("submit");
+		await flushPromises();
+
+		expect(w.findComponent({ name: "Composer" }).props("attachments")).toHaveLength(2);
+	});
 });

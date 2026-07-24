@@ -28,16 +28,26 @@
 			</div>
 
 			<template v-else>
-				<div v-if="store.thread.attachments.length" class="jv-sup-files">
+				<div v-if="ticketAttachments.length" class="jv-sup-files">
 					<a
-						v-for="a in store.thread.attachments"
-						:key="a.file_url"
+						v-for="a in ticketAttachments"
+						:key="a.name"
 						class="jv-sup-file"
-						:href="downloadUrl(a.file_url)"
+						:class="{ 'jv-sup-file-img': a.type === 'image' }"
+						:href="a.file_url"
 						target="_blank"
 						rel="noopener"
 					>
-						<FeatherIcon name="paperclip" class="size-3.5" />{{ a.file_name }}
+						<img
+							v-if="a.type === 'image'"
+							:src="a.file_url"
+							:alt="a.title"
+							loading="lazy"
+							class="jv-sup-thumb"
+						/>
+						<template v-else>
+							<FeatherIcon name="paperclip" class="size-3.5" />{{ a.title }}
+						</template>
 					</a>
 				</div>
 
@@ -172,14 +182,28 @@ function fromSupport(m) {
 // Message's shape and classify by extension, as the page being replaced did.
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|bmp)$/i;
 
-function attachmentsOf(m) {
-	return ((m && m.attachments) || []).map((a) => ({
-		name: a.file_url, // Message's :key — file_url is unique per attachment
+// Shared by per-message attachments AND ticket-level ones below — both are the
+// identical {file_url, file_name} shape from the CP, so classifying them twice
+// would just be the same regex and proxy-URL call copy-pasted.
+function classifyAttachment(a) {
+	return {
+		name: a.file_url, // unique per attachment; used as the render key
 		title: a.file_name,
 		type: IMAGE_EXT.test(a.file_name || "") ? "image" : "file",
 		file_url: downloadUrl(a.file_url),
-	}));
+	};
 }
+
+function attachmentsOf(m) {
+	return ((m && m.attachments) || []).map(classifyAttachment);
+}
+
+// Ticket-level attachments (shown above the message list) used to render as a
+// plain download chip with no image check at all — a regression from the old
+// SupportPage, which did classify these. Message.vue already proves the image
+// vs. file split for per-message attachments; this brings ticket-level ones up
+// to the same standard instead of leaving them a second, worse code path.
+const ticketAttachments = computed(() => store.thread.attachments.map(classifyAttachment));
 
 function downloadUrl(fileUrl) {
 	return supportDownloadUrl(ticketName.value, fileUrl);
@@ -345,6 +369,21 @@ watch(ticketName, (n) => open(n));
 	color: var(--link);
 	font-size: 12px;
 	text-decoration: none;
+}
+/* Image variant: a thumbnail instead of the icon+filename pill, same border
+   treatment as Message's per-attachment image thumbnail so the two don't look
+   like unrelated features. */
+.jv-sup-file-img {
+	padding: 0;
+	border-radius: 8px;
+	overflow: hidden;
+	line-height: 0;
+}
+.jv-sup-thumb {
+	display: block;
+	width: 56px;
+	height: 56px;
+	object-fit: cover;
 }
 .jv-sup-avatar {
 	display: flex;

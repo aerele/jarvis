@@ -174,6 +174,30 @@ describe("SupportThreadPage", () => {
 		storeDouble.thread.attachments = [];
 	});
 
+	it("renders a ticket-level image attachment inline and a non-image as a chip", () => {
+		// Proof of fix 3: ticket-level attachments used to render as a plain
+		// download chip with no image check at all, unlike per-message
+		// attachments a few lines below (attachmentsOf) which already classify
+		// via IMAGE_EXT. Both shapes are {file_url, file_name} from the CP.
+		storeDouble.thread.attachments = [
+			{ file_url: "/files/shot.png", file_name: "shot.png" },
+			{ file_url: "/files/spec.pdf", file_name: "spec.pdf" },
+		];
+		const w = mountWith([{ sent_or_received: "Sent", content: "<p>hi</p>" }]);
+
+		const img = w.find(".jv-sup-thumb");
+		expect(img.exists()).toBe(true);
+		expect(img.attributes("src")).toContain("jarvis.support.media.download");
+		expect(img.attributes("src")).toContain("shot.png");
+
+		const links = w.findAll(".jv-sup-file");
+		expect(links).toHaveLength(2);
+		expect(links[1].text()).toContain("spec.pdf");
+		expect(links[1].find("img").exists()).toBe(false);
+
+		storeDouble.thread.attachments = [];
+	});
+
 	it("keeps the composer enabled on a resolved ticket and says replying reopens it", () => {
 		// There is no reopen endpoint — a reply is the ONLY way back. Disabling
 		// the composer here would strand the user with no path forward.

@@ -86,12 +86,38 @@ function removeFile(i) {
 async function create() {
 	if (!canSend.value) return;
 	creating.value = true;
+	// Snapshot BEFORE the awaited createTicket/uploadTo, exactly like send():
+	// otherwise a file the user attaches while this create() is in flight is
+	// never uploaded and gets silently revoked/dropped by the cleanup below,
+	// which operates on whatever `files.value` happens to be afterward.
+	const staged = files.value.slice();
 	try {
 		const name = await store.createTicket(subject.value.trim(), body.value.trim());
 		if (!name) return; // the store toasted; keep everything so nothing is lost
-		if (files.value.length) await store.uploadTo(name, files.value);
-		files.value.forEach(releasePreview);
-		files.value = [];
+
+		if (staged.length) {
+			const uploaded = await store.uploadTo(name, staged);
+			// Same reasoning as send(): uploadTo returns a COUNT of successes, not
+			// which files made it, and there is no un-attach to undo a partial
+			// batch — the store already toasted each failure. Only clear/revoke
+			// when EVERY staged file uploaded; on any shortfall, leave ALL staged
+			// files in place rather than guess which to drop. Remove by reference
+			// (never blanket `= []`) so a file attached WHILE this create() is in
+			// flight — never in `staged` — survives either branch untouched.
+			if (uploaded === staged.length) {
+				files.value = files.value.filter((f) => !staged.includes(f));
+				staged.forEach(releasePreview);
+			}
+		}
+
+		// Unlike send(), this page navigates away on success — so "leave staged
+		// files in place" cannot mean "retry here", this component unmounts
+		// either way. The ticket itself now exists regardless of the upload
+		// outcome (same as send() posting the body regardless of what upload
+		// does next), so navigation still happens; any shortfall was already
+		// surfaced per-file by the store's toasts (no double-toast here), and
+		// the un-uploaded local Files simply go away with the component instead
+		// of being resurrected on a page that can no longer submit them.
 		toast.success("Ticket created");
 		await store.loadTickets({ quiet: true });
 		router.replace({ name: "SupportTicket", params: { ticket: name } });
