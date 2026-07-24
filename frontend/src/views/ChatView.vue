@@ -3675,6 +3675,7 @@ import * as voice from "@/api/voice";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { useChunkedRecorder } from "@/composables/useChunkedRecorder";
 import { createVoiceChunkQueue } from "@/utils/voiceChunkQueue";
+import { promoteNewChatScope, planRejectedSend } from "@/utils/voiceSendGlue";
 import { createClipMirror, listOrphanClips, deleteOrphanClip } from "@/utils/clipMirror";
 import { setMacroPrefill } from "@/composables/macroPrefill";
 import { takeChatPrefill } from "@/composables/chatPrefill";
@@ -6791,6 +6792,22 @@ function notifyActionError(prefix, e) {
 		type: "error",
 	});
 }
+// Promote the unsaved new-chat composer to a real conversation id via the shared voiceSendGlue
+// helper: migrate the sentinel draft, the active recording take scope (_micConvId), and every
+// retained voice record + its mirror from _NEW_CHAT_SCOPE to `toId` BEFORE any later send or
+// navigation. ONE helper for BOTH newChat() and the send-path id adoption so a clip that commits
+// late under the sentinel (e.g. a failed clip the user retries after the send) is never stranded
+// there — a real-scope send/ack would otherwise never match it → guard armed forever, recovery
+// routed to the wrong draft (R3-2).
+function _promoteNewChatScope(toId) {
+	_micConvId = promoteNewChatScope({
+		queue: voiceQueue,
+		drafts: drafts.value,
+		fromScope: _NEW_CHAT_SCOPE,
+		toId,
+		takeScope: _micConvId,
+	});
+}
 async function newChat() {
 	// Create FIRST, mutate the UI only on success. If the backend 500s, we must
 	// not leave the user on a half-reset screen (blank draft + wiped run state
@@ -6808,13 +6825,10 @@ async function newChat() {
 	currentId.value = conv?.name || conv;
 	// This conversation IS the unsaved new-chat composer getting its id. The recovered/typed
 	// new-chat draft (already restored into `input` by swapDraft above) and its still-retained
-	// voice records lived under the _NEW_CHAT_SCOPE sentinel — migrate the records to the real
-	// id (and drop the now-stale sentinel draft) so the text follows the conversation and a
-	// later send can release the records by the real scope instead of stranding them (R2-2).
-	if (currentId.value) {
-		delete drafts.value[_NEW_CHAT_SCOPE];
-		voiceQueue?.reassignScope(_NEW_CHAT_SCOPE, currentId.value);
-	}
+	// voice records lived under the _NEW_CHAT_SCOPE sentinel — migrate draft + records + mirror +
+	// take scope to the real id via the shared promotion helper so the text follows the conversation
+	// and a later send can release the records by the real scope instead of stranding them (R2-2/R3-2).
+	if (currentId.value) _promoteNewChatScope(currentId.value);
 	messages.value = [];
 	// Reflect the new chat's own id in the URL (/c/:id) so it's refresh-persistent
 	// and shareable, instead of dropping to the id-less home. currentId already
@@ -7071,6 +7085,11 @@ async function send(textArg, resendAck) {
 			// (route.params.id outranks localStorage on boot).
 			if (r.conversation_id !== currentId.value) {
 				currentId.value = r.conversation_id;
+				// A new-chat (id-less) send just earned its real id: migrate any voice records +
+				// mirror + draft + take still under the sentinel to it BEFORE the user can retry a
+				// failed clip, whose late commit would otherwise strand under the sentinel where no
+				// real-scope send/ack ever reaches it (R3-2). Same helper newChat() uses.
+				if (_sentScope === _NEW_CHAT_SCOPE) _promoteNewChatScope(r.conversation_id);
 				if (route.params.id !== r.conversation_id)
 					router.replace("/c/" + r.conversation_id);
 			}
