@@ -13,6 +13,7 @@
     "instructions_snapshot",
     "description_snapshot",
     "user_invocable_snapshot",
+    "snapshotted",
     "from_scope",
     "to_scope",
     "target_role",
@@ -62,6 +63,14 @@
       "label": "User Invocable Snapshot",
       "read_only": 1,
       "description": "The skill's user-invocable flag at request time (promoted alongside the snapshot)."
+    },
+    {
+      "fieldname": "snapshotted",
+      "fieldtype": "Check",
+      "label": "Snapshotted",
+      "default": "0",
+      "read_only": 1,
+      "description": "Immutable full-snapshot presence marker (R3-SP-4): set to 1 at request time once all three content fields (instructions, description, user-invocable) were captured. A stored Check 0 is indistinguishable from 'omitted', so this marker — not the user_invocable_snapshot value — is what approval checks to tell a full snapshot from a legacy/partial request. Approval is refused unless the marker is present, exactly like a missing-instructions request."
     },
     {
       "fieldname": "from_scope",

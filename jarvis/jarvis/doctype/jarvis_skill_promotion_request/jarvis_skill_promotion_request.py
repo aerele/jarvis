@@ -54,25 +54,36 @@ class JarvisSkillPromotionRequest(Document):
 			frappe.throw(_("A promotion request must reference a skill."))
 
 	def _validate_snapshot_bound(self):
-		# R2-SP-1: every NEW request MUST carry a full content snapshot — approval
-		# publishes EXACTLY this snapshot (never live source content), so a null /
-		# partial snapshot is a request approval can never safely bind to. Enforced
-		# only on insert (is_new): a legacy pre-snapshot row already in the DB is
-		# never re-validated here, and its approval is refused separately by
-		# ``custom_skills_api._materialize_promotion`` with a resubmit message. The
-		# request endpoint fills these from the requester's own source at request
-		# time, so a well-formed request always passes.
+		# R2-SP-1 / R3-SP-4: every NEW request MUST carry a FULL content snapshot —
+		# approval publishes EXACTLY this snapshot (never live source content), so a
+		# null / partial snapshot is a request approval can never safely bind to. All
+		# THREE content fields (instructions, description, user-invocable) are required;
+		# the null->0 fill on user_invocable_snapshot is gone (R3-SP-4) — for a Check a
+		# stored 0 was indistinguishable from "omitted", so a partial snapshot slipped
+		# through as an approvable "invocable off". Enforced only on insert (is_new): a
+		# legacy pre-snapshot row already in the DB is never re-validated here, and its
+		# approval is refused separately by ``custom_skills_api._materialize_promotion``
+		# via the missing presence marker. The request endpoint fills all three from the
+		# requester's own source at request time, so a well-formed request always passes.
 		if not self.is_new():
 			return
-		if self.instructions_snapshot is None or self.description_snapshot is None:
+		if (
+			self.instructions_snapshot is None
+			or self.description_snapshot is None
+			or self.user_invocable_snapshot is None
+		):
 			frappe.throw(
 				_(
 					"A promotion request must snapshot the skill's content at request time. "
 					"Please refile the request."
 				)
 			)
-		if self.user_invocable_snapshot is None:
-			self.user_invocable_snapshot = 0
+		# Stamp the immutable full-snapshot presence marker (R3-SP-4): all three fields
+		# are present, so this request carries a complete snapshot. Approval keys on
+		# THIS marker — not the Check value — to tell a full snapshot from a legacy /
+		# partial row. Set only on insert, and the field is read_only, so it is
+		# immutable once written.
+		self.snapshotted = 1
 
 	def _validate_scopes(self):
 		self.from_scope = (self.from_scope or "").strip()
