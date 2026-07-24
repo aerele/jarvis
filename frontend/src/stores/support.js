@@ -81,19 +81,31 @@ async function loadTickets({ quiet = false } = {}) {
 
 async function loadThread(name, { quiet = false } = {}) {
 	if (!name) return;
+	// Set BEFORE the fetch, and re-check it AFTER: the ticket name is the
+	// monotonic request key here (same idea as useListPage's reqId counter,
+	// but the name is already the natural "which request is this" identity).
+	// Two loadThread calls can overlap (user opens T1, backs out, opens T2
+	// while T1's multi-second bench→CP→Helpdesk round-trip is still in
+	// flight) and resolve out of order — without the re-check below, a T1
+	// response landing AFTER T2's would overwrite T2's conversation with
+	// T1's under T2's title.
+	thread.ticket = name;
 	if (!quiet) thread.loading = true;
 	try {
 		const r = await supportGetThread(name);
+		if (thread.ticket !== name) return; // superseded by a later loadThread()
 		const d = (r && r.data) || {};
-		thread.ticket = name;
 		thread.messages = d.messages || [];
 		thread.attachments = d.ticket_attachments || [];
 		thread.error = "";
 	} catch (e) {
+		if (thread.ticket !== name) return; // superseded by a later loadThread()
 		thread.error = errMsg(e);
 		if (!quiet) toast.error(thread.error);
 	} finally {
-		thread.loading = false;
+		// Only THIS call's own ticket may clear loading — a superseded call's
+		// finally must not stomp the flag the newer call is still using.
+		if (thread.ticket === name) thread.loading = false;
 	}
 }
 

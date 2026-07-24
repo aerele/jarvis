@@ -129,6 +129,41 @@ describe("support store", () => {
 			expect(toast.error).toHaveBeenCalled();
 			expect(s.thread.error).toBe("boom");
 		});
+
+		it("keeps the newest ticket's data when an earlier fetch resolves out of order", async () => {
+			// The failure this pins: open T1 (a multi-second bench→CP→Helpdesk
+			// round-trip), back out and open T2 while T1 is still in flight, T2
+			// resolves first, then T1 resolves LAST. Without the ticket-name
+			// guard, T1's stale response unconditionally overwrites `thread` and
+			// T2's conversation would render under T1's stale data.
+			let resolveT1;
+			let resolveT2;
+			const p1 = new Promise((r) => (resolveT1 = r));
+			const p2 = new Promise((r) => (resolveT2 = r));
+			api.supportGetThread.mockImplementationOnce(() => p1).mockImplementationOnce(() => p2);
+			const s = useSupportStore();
+
+			const load1 = s.loadThread("T1");
+			const load2 = s.loadThread("T2");
+
+			// T2 — the LATER call — resolves FIRST.
+			resolveT2({
+				ok: true,
+				data: { messages: [{ id: "t2-msg" }], ticket_attachments: [] },
+			});
+			await load2;
+			expect(s.thread.ticket).toBe("T2");
+			expect(s.thread.messages).toEqual([{ id: "t2-msg" }]);
+
+			// T1 — the EARLIER call — resolves LAST and must be dropped.
+			resolveT1({
+				ok: true,
+				data: { messages: [{ id: "t1-msg" }], ticket_attachments: [] },
+			});
+			await load1;
+			expect(s.thread.ticket).toBe("T2");
+			expect(s.thread.messages).toEqual([{ id: "t2-msg" }]);
+		});
 	});
 
 	describe("createTicket", () => {

@@ -308,7 +308,11 @@ async function send() {
 
 		await store.loadTickets({ quiet: true });
 		await store.loadThread(ticketName.value);
-		lastPrint = store.fingerprintOf(ticketName.value);
+		// Same guard as pollSignal/onFocus/open: advance the watermark only after
+		// a successful refetch. Without it, a reply that posts fine but whose
+		// follow-up loadThread fails would swallow the change — the user's own
+		// reply stays invisible until the next focus-return refetch.
+		if (!store.thread.error) lastPrint = store.fingerprintOf(ticketName.value);
 	} finally {
 		sending.value = false;
 	}
