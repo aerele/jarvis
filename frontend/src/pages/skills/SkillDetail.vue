@@ -44,7 +44,7 @@
 							isNew
 								? `Lowercase letters, digits and hyphens - trigger it in chat with /${
 										form.skill_name || 'name'
-									}.`
+								  }.`
 								: 'Skill names can\'t be changed after creation.'
 						"
 						@update:modelValue="(v) => (form.skill_name = v)"

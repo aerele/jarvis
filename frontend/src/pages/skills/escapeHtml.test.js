@@ -17,7 +17,7 @@ test("escapes every HTML-significant character", () => {
 });
 
 test("neutralizes a full <img onerror> payload (no runnable markup survives)", () => {
-	const out = esc('<img src=x onerror=alert(1)>');
+	const out = esc("<img src=x onerror=alert(1)>");
 	assert.doesNotMatch(out, /<img/);
 	assert.doesNotMatch(out, /</);
 	assert.doesNotMatch(out, />/);

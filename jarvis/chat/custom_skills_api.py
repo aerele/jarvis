@@ -605,9 +605,7 @@ def decide_skill_promotion(request_name: str, approve: int | str, note: str = ""
 	req = frappe.get_doc(PROMO, request_name)
 	if reviewer == (req.owner or "") and reviewer != "Administrator":
 		frappe.throw(
-			_(
-				"You cannot decide your own promotion request; another reviewer must approve or reject it."
-			),
+			_("You cannot decide your own promotion request; another reviewer must approve or reject it."),
 			frappe.PermissionError,
 		)
 	status = frappe.db.get_value(PROMO, request_name, "status", for_update=True)
@@ -703,9 +701,7 @@ def list_skill_promotion_requests(
 	# for Pending rows. A decided (Approved/Rejected) row must NOT over-read the
 	# requester's now-private body, so both the perm-bypassing batch fetch AND the
 	# excerpt below are scoped to Pending skill names only.
-	pending_skill_names = list(
-		{r["skill"] for r in rows if r.get("skill") and r.get("status") == "Pending"}
-	)
+	pending_skill_names = list({r["skill"] for r in rows if r.get("skill") and r.get("status") == "Pending"})
 	instr = {
 		s.name: s.instructions
 		for s in (
@@ -734,9 +730,7 @@ def list_skill_promotion_requests(
 			"reviewer": r.get("reviewer") or "",
 			"decided_at": str(r.get("decided_at") or ""),
 			"decision_note": r.get("decision_note") or "",
-			"body_excerpt": (
-				(instr.get(r.get("skill")) or "")[:300] if r.get("status") == "Pending" else ""
-			),
+			"body_excerpt": ((instr.get(r.get("skill")) or "")[:300] if r.get("status") == "Pending" else ""),
 		}
 		for r in rows
 	]

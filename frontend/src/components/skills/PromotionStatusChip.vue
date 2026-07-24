@@ -37,7 +37,9 @@ const label = computed(() => {
 const tip = computed(() => {
 	const r = props.req || {};
 	if (status.value === "Pending")
-		return `Requested to promote this ${props.noun} to ${targetLabel(r)} — awaiting a reviewer.`;
+		return `Requested to promote this ${props.noun} to ${targetLabel(
+			r
+		)} — awaiting a reviewer.`;
 	const who = r.reviewer_name || r.reviewer || "a reviewer";
 	const when = r.decided_at ? ` ${timeAgo(r.decided_at)}` : "";
 	if (status.value === "Approved")

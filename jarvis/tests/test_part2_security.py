@@ -564,9 +564,7 @@ class TestSkillPromotionSurfacing(Part2Base):
 		skill = _mk_skill(USER_A, f"{PFX}-mine", scope="User")
 		with _as(USER_A):
 			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
-			req = custom_skills_api.request_skill_promotion(
-				skill.name, "Role", target_role="Sales User"
-			)
+			req = custom_skills_api.request_skill_promotion(skill.name, "Role", target_role="Sales User")
 			mine = custom_skills_api.my_skill_promotion(skill.name)
 		self.assertEqual(mine["name"], req["request"])
 		self.assertEqual(mine["status"], "Pending")
