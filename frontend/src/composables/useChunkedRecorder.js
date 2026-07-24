@@ -32,6 +32,10 @@ export function useChunkedRecorder(opts = {}) {
 	const state = ref("idle"); // 'idle' | 'recording' | 'error'
 	const error = ref("");
 	const durationS = ref(0); // total elapsed seconds across all cycles (for the clock)
+	// Exposed so the route/leave guard can see the permission-prompt window too: `state`
+	// stays 'idle' until getUserMedia is granted, so navigation DURING the prompt would slip
+	// past a guard that only watches `state === 'recording'` (finding 2).
+	const starting = ref(false);
 	const supported = !!(
 		typeof navigator !== "undefined" &&
 		navigator.mediaDevices &&
@@ -44,12 +48,14 @@ export function useChunkedRecorder(opts = {}) {
 	let recorder = null;
 	let chunks = [];
 	let mime = "";
-	// Synchronous re-entry guard (VAR-3): set the instant start() is entered, BEFORE the
-	// async getUserMedia, so a double-click — or an impatient second click while the mic
-	// permission prompt is open — cannot launch a second recorder + interval (a leaked hot
-	// mic + duplicate clips). The reactive `state` flips to 'recording' only after the
-	// grant, too late to guard the window on its own.
-	let starting = false;
+	// Cancellation generation covering the pending getUserMedia (finding 2). start() captures
+	// it before awaiting the permission prompt; cancel()/dispose() bump it. A grant that
+	// resolves AFTER a bump is recognised as STALE — its tracks are stopped instead of being
+	// wired into a recorder + timers on a torn-down / navigated-away component (a hot-mic
+	// leak). `starting` (the ref above) is the synchronous VAR-3 re-entry guard too: set the
+	// instant start() is entered, BEFORE the async getUserMedia, so a double-click — or an
+	// impatient second click while the prompt is open — cannot launch a second recorder.
+	let startGen = 0;
 	let cycleTimer = null; // fires _rotate() at each ~15 s boundary
 	let tick = null; // 250 ms clock updater
 	let startedAt = 0; // session start (for durationS)
@@ -83,7 +89,7 @@ export function useChunkedRecorder(opts = {}) {
 		}
 	}
 	function _fail(msg) {
-		starting = false;
+		starting.value = false;
 		_clearTimers();
 		_releaseStream();
 		state.value = "error";
@@ -181,15 +187,20 @@ export function useChunkedRecorder(opts = {}) {
 		}
 		// VAR-3: reject a re-entry synchronously — while already recording OR while a
 		// previous start() is mid-getUserMedia (the permission-prompt window).
-		if (state.value === "recording" || starting) return;
-		starting = true;
+		if (state.value === "recording" || starting.value) return;
+		starting.value = true;
+		// This attempt's cancellation token; cancel()/dispose() bump startGen to disown a
+		// getUserMedia that resolves after teardown/navigation (finding 2).
+		const gen = ++startGen;
 		error.value = "";
 		durationS.value = 0;
 		chunks = [];
 		action = null;
+		let acquired;
 		try {
-			stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			acquired = await navigator.mediaDevices.getUserMedia({ audio: true });
 		} catch (e) {
+			if (gen !== startGen) return; // cancelled/torn down during the prompt — nothing acquired
 			const name = (e && e.name) || "";
 			_fail(
 				name === "NotAllowedError" || name === "SecurityError"
@@ -200,6 +211,17 @@ export function useChunkedRecorder(opts = {}) {
 			);
 			return;
 		}
+		// Navigated away / cancelled while the prompt was open: this grant is STALE. STOP the
+		// tracks so the mic never stays hot on a dead component, and bail without a recorder.
+		if (gen !== startGen) {
+			try {
+				acquired.getTracks().forEach((t) => t.stop());
+			} catch (e) {
+				/* already stopped */
+			}
+			return;
+		}
+		stream = acquired;
 		mime = _pickMime();
 		try {
 			_newRecorder();
@@ -209,7 +231,7 @@ export function useChunkedRecorder(opts = {}) {
 		}
 		startedAt = Date.now();
 		state.value = "recording";
-		starting = false;
+		starting.value = false;
 		_armCycle();
 		tick = setInterval(() => {
 			durationS.value = Math.floor((Date.now() - startedAt) / 1000);
@@ -241,6 +263,10 @@ export function useChunkedRecorder(opts = {}) {
 	// Stop recording and DROP the current unsent snippet. Clips already emitted this
 	// session stay in the queue (their audio is captured) — Cancel is not "undo".
 	function cancel() {
+		// Disown any getUserMedia still awaiting the permission grant so a late resolve stops
+		// its tracks instead of starting a recorder on a torn-down component (finding 2).
+		startGen += 1;
+		starting.value = false;
 		if (state.value !== "recording" || !recorder || recorder.state !== "recording") {
 			_clearTimers();
 			_releaseStream();
@@ -265,5 +291,29 @@ export function useChunkedRecorder(opts = {}) {
 		});
 	}
 
-	return reactive({ state, error, durationS, supported, start, stop, cancel });
+	// Synchronous teardown for component unmount: disown any pending getUserMedia and release
+	// the mic immediately (no awaiting), so navigating away never leaves a track hot — even
+	// mid-permission-prompt (finding 2). The queue's own dispose() handles late transcripts.
+	function dispose() {
+		startGen += 1;
+		starting.value = false;
+		action = null;
+		_clearTimers();
+		_releaseStream();
+		recorder = null;
+		if (state.value !== "error") state.value = "idle";
+		_resolveSettle();
+	}
+
+	return reactive({
+		state,
+		error,
+		durationS,
+		starting,
+		supported,
+		start,
+		stop,
+		cancel,
+		dispose,
+	});
 }
