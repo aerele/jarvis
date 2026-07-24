@@ -35,14 +35,24 @@ function _frappeErr(data, status) {
 }
 
 // Recorded blob → verbatim transcript. Returns {ok, text, stt_ms, model}.
-export async function transcribeAudio(blob, { durationS = 0 } = {}) {
+//
+// timeoutMs is the PER-CHUNK budget (default 25 s): a hung STT call must not pin the
+// caller's mic UI for the server's full timeout. For chunked dictation the queue
+// (voiceChunkQueue) wraps this call and retries a rejected chunk exactly once, so a
+// single slow clip degrades to a Retry/Download chip rather than killing the session.
+// An optional `signal` lets the caller cancel an in-flight upload on teardown.
+export async function transcribeAudio(blob, { durationS = 0, timeoutMs = 25000, signal } = {}) {
 	const fd = new FormData();
 	fd.append("audio", blob, _audioFilename(blob));
 	fd.append("duration_s", String(Math.round(durationS || 0)));
-	// Client-side cap: a hung STT call must not pin the caller's mic UI on
-	// "Transcribing…" for the server's full timeout.
 	const ctrl = new AbortController();
-	const timer = setTimeout(() => ctrl.abort(), 25000);
+	const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+	// Compose an external cancel signal (component unmount) with the timeout abort.
+	const onExternalAbort = () => ctrl.abort();
+	if (signal) {
+		if (signal.aborted) ctrl.abort();
+		else signal.addEventListener("abort", onExternalAbort);
+	}
 	let r;
 	try {
 		r = await fetch("/api/method/jarvis.chat.voice.transcribe_audio", {
@@ -53,10 +63,12 @@ export async function transcribeAudio(blob, { durationS = 0 } = {}) {
 			signal: ctrl.signal,
 		});
 	} catch (e) {
+		if (signal && signal.aborted) throw new Error("transcription cancelled");
 		if (ctrl.signal.aborted) throw new Error("transcription timed out");
 		throw e;
 	} finally {
 		clearTimeout(timer);
+		if (signal) signal.removeEventListener("abort", onExternalAbort);
 	}
 	let data = null;
 	try {
