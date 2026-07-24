@@ -334,6 +334,18 @@ class JarvisCustomSkill(Document):
 		# (owner, skill_name) uniqueness here so two customers can both have a
 		# skill named "invoicing".
 		owner = self.owner or frappe.session.user
+		# R2-SP-3a: a reviewer-approved promotion materializes the shared copy under
+		# the SYSTEM identity (MANAGED_OWNER), but frappe's insert forces ``owner`` to
+		# the acting reviewer's session before this validate runs, then the endpoint
+		# reassigns it. Validate uniqueness against the FINAL system owner instead, so
+		# (a) the check catches a real duplicate Administrator-owned shared slug BEFORE
+		# commit (never insert-then-reassign into a collision), and (b) a reviewer who
+		# happens to own a private skill of the same slug does not spuriously block a
+		# legitimate promotion.
+		if frappe.flags.jarvis_promotion_materialize:
+			from jarvis.chat.custom_skills import MANAGED_OWNER
+
+			owner = MANAGED_OWNER
 		clash = frappe.db.exists(
 			"Jarvis Custom Skill",
 			{

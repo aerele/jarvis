@@ -47,10 +47,32 @@ class JarvisSkillPromotionRequest(Document):
 	def validate(self):
 		self._validate_skill()
 		self._validate_scopes()
+		self._validate_snapshot_bound()
 
 	def _validate_skill(self):
 		if not self.skill:
 			frappe.throw(_("A promotion request must reference a skill."))
+
+	def _validate_snapshot_bound(self):
+		# R2-SP-1: every NEW request MUST carry a full content snapshot — approval
+		# publishes EXACTLY this snapshot (never live source content), so a null /
+		# partial snapshot is a request approval can never safely bind to. Enforced
+		# only on insert (is_new): a legacy pre-snapshot row already in the DB is
+		# never re-validated here, and its approval is refused separately by
+		# ``custom_skills_api._materialize_promotion`` with a resubmit message. The
+		# request endpoint fills these from the requester's own source at request
+		# time, so a well-formed request always passes.
+		if not self.is_new():
+			return
+		if self.instructions_snapshot is None or self.description_snapshot is None:
+			frappe.throw(
+				_(
+					"A promotion request must snapshot the skill's content at request time. "
+					"Please refile the request."
+				)
+			)
+		if self.user_invocable_snapshot is None:
+			self.user_invocable_snapshot = 0
 
 	def _validate_scopes(self):
 		self.from_scope = (self.from_scope or "").strip()
