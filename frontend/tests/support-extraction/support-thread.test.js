@@ -217,4 +217,76 @@ describe("SupportThreadPage", () => {
 
 		expect(order).toEqual(["reply", "upload"]);
 	});
+
+	it("keeps the draft and the pending attachment when the reply fails", async () => {
+		// The regression this pins: `draft.value = ""` moving above the
+		// `if (!ok) return` guard. If that happens, modelValue below reverts to
+		// "" even though nothing was ever posted, and the user's text is gone.
+		storeDouble.reply = vi.fn(async () => false);
+		// Fresh spy: a prior test's uploadTo call history must not leak in here —
+		// nothing in this file resets mocks between tests.
+		storeDouble.uploadTo = vi.fn(async () => 1);
+		const w = mountWith([]);
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("update:modelValue", "please help");
+		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(c.props("modelValue")).toBe("please help");
+		expect(c.props("attachments")).toHaveLength(1);
+		expect(storeDouble.uploadTo).not.toHaveBeenCalled();
+	});
+
+	it("drops canSend while a reply is in flight and restores it once settled", async () => {
+		// This is the double-submit guard: Composer's `busy` prop is deliberately
+		// unused (see the template comment), so `canSend` going false while
+		// `sending` is true is the ONLY thing standing between the user and a
+		// second concurrent submit. Resolving to `false` here (reply failed, so
+		// the draft is kept per the fix above) gives an unambiguous "back to true"
+		// afterward without needing to re-type anything.
+		let resolveReply;
+		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
+		const w = mountWith([]);
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("update:modelValue", "hello");
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await w.vm.$nextTick();
+
+		expect(c.props("canSend")).toBe(false);
+
+		resolveReply(false);
+		await flushPromises();
+
+		expect(c.props("canSend")).toBe(true);
+	});
+
+	it("shows no disclaimer for an open (non-resolved, non-closed) ticket", () => {
+		// Only the Resolved positive case was covered before; an unconditional
+		// disclaimer (e.g. dropping the ternary's else branch) would pass that
+		// test and still be wrong for the common case.
+		const w = mountWith([], { name: "T1", subject: "x", status: "Open" });
+		const c = w.findComponent({ name: "Composer" });
+		expect(c.props("disclaimer")).toBe("");
+	});
+
+	it("keeps staged files pending when uploadTo reports fewer successes than requested", async () => {
+		// Proof of fix 1: uploadTo returns a COUNT, not per-file results. A
+		// silent `files.value = []` here would discard attachments the user
+		// still needs to retry after a transient upload failure.
+		storeDouble.uploadTo = vi.fn(async () => 0);
+		const w = mountWith([]);
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("files-added", [
+			{ name: "a.png", type: "image/png" },
+			{ name: "b.png", type: "image/png" },
+		]);
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(c.props("attachments")).toHaveLength(2);
+	});
 });

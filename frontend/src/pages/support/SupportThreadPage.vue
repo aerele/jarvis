@@ -260,12 +260,27 @@ async function send() {
 		if (body) {
 			const ok = await store.reply(ticketName.value, body);
 			if (!ok) return; // store already toasted; keep the draft so it isn't lost
+			draft.value = ""; // text is posted regardless of what upload does next
 		}
-		if (staged.length) await store.uploadTo(ticketName.value, staged);
 
-		draft.value = "";
-		staged.forEach(releasePreview);
-		files.value = [];
+		if (staged.length) {
+			const uploaded = await store.uploadTo(ticketName.value, staged);
+			// uploadTo returns a COUNT of successes, not which files made it — the
+			// store already toasted each failure, and Helpdesk's media.upload has
+			// no un-attach to undo a partial batch. Guessing which File to drop
+			// would be worse than doing nothing, so: only clear/revoke when EVERY
+			// staged file uploaded; on any shortfall, leave ALL staged files in
+			// place so the user can just hit Send again instead of re-picking
+			// from disk. Removing by reference (never `files.value = []`) means a
+			// file the user attaches WHILE this send is in flight — it is never in
+			// `staged` — survives either branch untouched, and its preview is
+			// never revoked out from under it.
+			if (uploaded === staged.length) {
+				files.value = files.value.filter((f) => !staged.includes(f));
+				staged.forEach(releasePreview);
+			}
+		}
+
 		await store.loadTickets({ quiet: true });
 		await store.loadThread(ticketName.value);
 		lastPrint = store.fingerprintOf(ticketName.value);
