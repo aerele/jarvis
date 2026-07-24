@@ -7036,11 +7036,24 @@ async function send(textArg, resendAck) {
 		if (r && r.ok === false) {
 			// The server rejected the send (e.g. the single-flight guard:
 			// "a reply is already in progress", or the monthly usage cap).
-			// Nothing was persisted, so drop the optimistic bubble and surface
-			// the reason — otherwise the spinner would hang forever (no
-			// run:start / run:error is coming).
-			messages.value = messages.value.filter((x) => x.name !== tmpName);
-			if (fromMain && !input.value) input.value = text;
+			// Nothing was persisted — recover it (below) so no work and no voice audio
+			// strands, then surface the reason — otherwise the spinner would hang forever
+			// (no run:start / run:error is coming).
+			const _bub = messages.value.find((x) => x.name === tmpName);
+			const _plan = planRejectedSend({
+				fromMain,
+				bubbleVoiceAck: _bub && _bub.voiceAck,
+			});
+			if (_plan.keepBubble && _bub) {
+				// A failed-bubble RESEND of committed voice clips: KEEP its bubble as failed carrying
+				// the SAME voiceAck so the user can resend again and eventually release those clips —
+				// dropping it would strand their `done` records behind an armed leave guard with no
+				// chip and no action (R3-3).
+				_bub.failed = true;
+			} else {
+				messages.value = messages.value.filter((x) => x.name !== tmpName);
+				if (_plan.restoreText && !input.value) input.value = text;
+			}
 			sending.value = false;
 			waiting.value = false;
 			// Lapsed sub: raise the persistent banner (with its Renew link)
