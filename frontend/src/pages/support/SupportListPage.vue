@@ -87,6 +87,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { useStorage } from "@vueuse/core";
 import { Badge, Button, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import SupportShell from "@/components/support/SupportShell.vue";
@@ -134,9 +135,20 @@ onMounted(() => {
 onUnmounted(() => {
 	if (narrowMq) narrowMq.removeEventListener("change", onNarrowChange);
 });
-const columns = computed(() =>
-	isNarrow.value ? ALL_COLUMNS.filter((c) => c.key !== "name") : ALL_COLUMNS
-);
+// Mirrors ColumnsButton's own persisted hide-list (jarvis-cols-<storage-key>,
+// storage-key="support" on the ListPage below) read-only — ColumnsButton/
+// ListPage own writing it. Needed so the mobile drop below can tell whether
+// dropping "name" too would leave zero visible columns: if the user already
+// hid Subject/Status/Updated so "Ticket" is the only column left, the mobile
+// drop must not remove it as well and render an empty grid.
+const userHiddenCols = useStorage("jarvis-cols-support", []);
+const columns = computed(() => {
+	if (!isNarrow.value) return ALL_COLUMNS;
+	const otherVisible = ALL_COLUMNS.some(
+		(c) => c.key !== "name" && !userHiddenCols.value.includes(c.key)
+	);
+	return otherVisible ? ALL_COLUMNS.filter((c) => c.key !== "name") : ALL_COLUMNS;
+});
 
 // Search rides the quick-filter strip as a text control, exactly as every other
 // list page does. Here it filters client-side: list_tickets takes no arguments.

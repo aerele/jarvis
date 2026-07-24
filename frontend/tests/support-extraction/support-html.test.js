@@ -73,4 +73,17 @@ describe("renderSupportHtml", () => {
 		expect(out).toContain("jarvis.support.media.download");
 		expect(out).toContain('target="_blank"');
 	});
+
+	it("forces rel on an <area href> too, not just <a> (defense-in-depth)", () => {
+		// The server already strips <map>/<area> before this ever runs, but
+		// ADD_ATTR:["target"] is global to the sanitize() call — without forcing
+		// `rel` on area[href] the same way as a[href], a surviving <area> would
+		// get target="_blank" with no rel, a reverse-tabnabbing gap.
+		const out = renderSupportHtml(
+			'<map name="m"><area shape="rect" coords="0,0,10,10" href="https://x.com"></map>',
+			"TKT-1"
+		);
+		expect(out).toContain('target="_blank"');
+		expect(out).toContain('rel="noopener noreferrer"');
+	});
 });

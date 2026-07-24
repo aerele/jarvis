@@ -383,6 +383,13 @@ async function send() {
 	const userBody = draft.value.trim();
 	// Snapshot BEFORE the awaited reply/uploadTo below — see useStagedFiles.
 	const staged = snapshotStaged();
+	// Snapshot the ticket too: `send()` awaits store.reply/uploadTo, and the
+	// user can switch tickets (route.params.ticket changes) while a reply is
+	// still in flight. Reading ticketName.value AFTER those awaits would then
+	// attach this reply's body/files to the NEW ticket — permanent, since
+	// there's no un-attach. Every ticket reference below this line uses tName,
+	// never ticketName.value.
+	const tName = ticketName.value;
 	// CRITICAL fix: canSend arms on files alone, but a reply Communication is
 	// what actually reopens a Resolved/Closed ticket AND notifies the agent
 	// (helpdesk_client.py's post_reply: "Received" => auto-reopen) — media.upload
@@ -394,7 +401,7 @@ async function send() {
 		// Body first, attachments second: media.upload attaches to an existing
 		// ticket, and posting the text is what actually reopens a resolved one.
 		if (body) {
-			const ok = await store.reply(ticketName.value, body);
+			const ok = await store.reply(tName, body);
 			if (!ok) return; // store already toasted; keep the draft so it isn't lost
 			// I2: only clear if the draft still holds exactly what was posted —
 			// a blanket clear would wipe text the user kept typing during the
@@ -405,17 +412,17 @@ async function send() {
 		}
 
 		if (staged.length) {
-			const uploaded = await store.uploadTo(ticketName.value, staged);
+			const uploaded = await store.uploadTo(tName, staged);
 			settleUpload(uploaded);
 		}
 
 		await store.loadTickets({ quiet: true });
-		await store.loadThread(ticketName.value);
+		await store.loadThread(tName);
 		// Same guard as pollSignal/onFocus/open: advance the watermark only after
 		// a successful refetch. Without it, a reply that posts fine but whose
 		// follow-up loadThread fails would swallow the change — the user's own
 		// reply stays invisible until the next focus-return refetch.
-		if (!store.thread.error) lastPrint = store.fingerprintOf(ticketName.value);
+		if (!store.thread.error) lastPrint = store.fingerprintOf(tName);
 	} finally {
 		sending.value = false;
 	}
@@ -456,16 +463,25 @@ watch(ticketName, (n) => open(n));
 }
 .jv-sup-composer {
 	flex: 0 0 auto;
-	padding: 0 16px 16px;
+	padding: 0 0 16px;
 }
 /* Same max-width/centering as jv-sup-thread-inner so the reply box aligns
-   under the conversation column instead of stretching edge-to-edge. */
+   under the conversation column instead of stretching edge-to-edge. The
+   horizontal padding is a deliberate mirror of jv-sup-thread-inner's (40px,
+   16px under the mobile breakpoint below) — it used to live on jv-sup-composer
+   instead, fixed at 16px with no breakpoint of its own, which put the
+   composer's inset out of step with the thread's in the 640-852px band. */
 .jv-sup-composer-inner {
 	max-width: 820px;
 	margin: 0 auto;
+	padding: 0 40px;
 }
 @media (max-width: 640px) {
 	.jv-sup-thread-inner {
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.jv-sup-composer-inner {
 		padding-left: 16px;
 		padding-right: 16px;
 	}

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
+import { reactive } from "vue";
 
 // vi.mock is HOISTED; vi.doMock is not. Mocking the store from inside a helper
 // would run AFTER the component's graph resolved, loading the real singleton
@@ -22,8 +23,19 @@ vi.mock("frappe-ui", () => ({
 // switch test below can mount with a different ticket than the rest of the
 // file, which all assume "T1".
 let routeTicket = "T1";
+// Each useRoute() call returns its OWN fresh reactive() proxy (never a shared
+// singleton) — real vue-router's route is reactive, and ticketName's computed
+// depends on route.params.ticket, so a plain object here would make that
+// computed cache its first value forever with no way to observe a mid-flight
+// route change. Per-call freshness keeps this isolated: only the CURRENTLY
+// mounting instance's object is tracked in `lastRouteState`, so a later
+// test's mutation can never reach an earlier test's still-mounted instance.
+let lastRouteState = null;
 vi.mock("vue-router", () => ({
-	useRoute: () => ({ params: { ticket: routeTicket } }),
+	useRoute: () => {
+		lastRouteState = reactive({ params: { ticket: routeTicket } });
+		return lastRouteState;
+	},
 	useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
 }));
 
@@ -468,6 +480,42 @@ describe("SupportThreadPage", () => {
 		expect(storeDouble.thread.messages).toEqual([]);
 		expect(storeDouble.thread.attachments).toEqual([]);
 		expect(storeDouble.thread.error).toBe("");
+	});
+
+	it("posts a reply/upload started before a ticket switch to the ORIGINAL ticket, not the one switched to mid-flight", async () => {
+		// The regression this pins: reading ticketName.value AFTER the awaited
+		// store.reply/uploadTo below (instead of a tName snapshot taken at
+		// send()'s entry) would attach this in-flight reply's body and files to
+		// whatever ticket the route has moved to by the time each await
+		// resolves — permanent, since there is no un-attach.
+		let resolveReply;
+		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
+		storeDouble.uploadTo = vi.fn(async (name, files) => files);
+		storeDouble.loadThread = vi.fn(async () => {});
+		storeDouble.loadTickets = vi.fn(async () => {});
+		storeDouble.fingerprintOf = vi.fn(() => "x");
+
+		const w = mountWith([]);
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("update:modelValue", "please help");
+		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
+		await w.vm.$nextTick();
+
+		c.vm.$emit("submit"); // send() starts: ticketName.value is "T1" right now
+		await w.vm.$nextTick();
+
+		// The user switches to a different ticket while the reply is still in
+		// flight — mutate the SAME reactive route object this mounted instance
+		// captured via useRoute() (lastRouteState), same as vue-router would.
+		lastRouteState.params.ticket = "T2";
+		await w.vm.$nextTick();
+
+		resolveReply(true);
+		await flushPromises();
+
+		expect(storeDouble.reply).toHaveBeenCalledWith("T1", "please help");
+		expect(storeDouble.uploadTo).toHaveBeenCalledWith("T1", expect.anything());
+		expect(storeDouble.uploadTo).not.toHaveBeenCalledWith("T2", expect.anything());
 	});
 
 	it("keeps text typed during an in-flight send instead of wiping it (I2)", async () => {

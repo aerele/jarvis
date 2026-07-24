@@ -23,7 +23,13 @@ export function renderSupportHtml(rawHtml, ticketName) {
 		// candidate from it over src, so it has to go, not be rewritten.
 		img.removeAttribute("srcset");
 	}
-	for (const a of doc.querySelectorAll("a[href]")) {
+	// area[href] too, not just a[href]: an image-map <area> can carry the same
+	// target/href pair as a link. The server already strips <map>/<area> before
+	// this ever runs, so this is belt-and-suspenders — but ADD_ATTR:["target"]
+	// below is global to the sanitize() call, so without forcing `rel` here too
+	// an <area> would pick up target="_blank" with no rel, a reverse-tabnabbing
+	// gap for whatever future path might let one through.
+	for (const a of doc.querySelectorAll("a[href], area[href]")) {
 		const href = a.getAttribute("href") || "";
 		if (LOCAL_FILE.test(href)) a.setAttribute("href", supportDownloadUrl(ticketName, href));
 		// Every link in an agent's reply — not just rewritten ones — opens in a

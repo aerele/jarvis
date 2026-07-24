@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount } from "@vue/test-utils";
 import { reactive } from "vue";
 
@@ -39,7 +39,7 @@ vi.mock("@/stores/support", () => ({
 import SupportListPage from "@/pages/support/SupportListPage.vue";
 
 const ListPageStub = {
-	props: ["rows", "total", "filters", "sort", "emptyState"],
+	props: ["rows", "total", "filters", "sort", "emptyState", "columns"],
 	template: "<div/>",
 };
 const opts = {
@@ -194,5 +194,52 @@ describe("SupportListPage", () => {
 		storeDouble.tickets = makeRows(60); // simulates store.loadTickets()'s refresh
 		await w.vm.$nextTick();
 		expect(w.findComponent(ListPageStub).props("rows")).toHaveLength(40);
+	});
+});
+
+describe("mobile column drop does not empty the grid (fix 4)", () => {
+	function stubNarrow() {
+		vi.stubGlobal("matchMedia", () => ({
+			matches: true, // simulates a <=640px viewport
+			addEventListener() {},
+			removeEventListener() {},
+		}));
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		localStorage.removeItem("jarvis-cols-support");
+	});
+
+	it("still drops the Ticket column on a narrow viewport when another column stays visible", async () => {
+		localStorage.removeItem("jarvis-cols-support"); // nothing hidden by the user
+		stubNarrow();
+		const w = mountList();
+		await w.vm.$nextTick();
+		const keys = w
+			.findComponent(ListPageStub)
+			.props("columns")
+			.map((c) => c.key);
+		expect(keys).not.toContain("name");
+	});
+
+	it("keeps the Ticket column on a narrow viewport when the user already hid every other column via ColumnsButton", async () => {
+		// ColumnsButton persists hidden keys at jarvis-cols-<storage-key>
+		// (storage-key="support" on the ListPage below) — simulate the user
+		// having hidden Subject/Status/Updated, leaving Ticket as the ONLY
+		// visible column. The mobile drop must not remove it too, or the grid
+		// renders with zero columns.
+		localStorage.setItem(
+			"jarvis-cols-support",
+			JSON.stringify(["subject", "status", "modified"])
+		);
+		stubNarrow();
+		const w = mountList();
+		await w.vm.$nextTick();
+		const keys = w
+			.findComponent(ListPageStub)
+			.props("columns")
+			.map((c) => c.key);
+		expect(keys).toContain("name");
 	});
 });
