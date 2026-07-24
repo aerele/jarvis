@@ -447,7 +447,7 @@ export function createVoiceChunkQueue(deps = {}) {
 			const at = _boundaryIndexOf(hay, needle);
 			if (at === -1) continue; // edited/deleted out of the payload → RETAIN (never-lose)
 			// Consume this occurrence so an identical later clip must find its OWN occurrence.
-			hay = hay.slice(0, at) + " " + hay.slice(at + needle.length);
+			hay = hay.slice(0, at) + " " + hay.slice(at + needle.length);
 			token.push(rec.seq);
 		}
 		return token;
