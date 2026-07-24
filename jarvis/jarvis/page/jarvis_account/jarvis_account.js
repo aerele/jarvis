@@ -17,9 +17,16 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 
 	// LLM provider defaults - mirror the onboarding wizard's PROVIDER_DEFAULTS
 	// so the section behaves identically there and here.
+	//
+	// The admin-managed catalog (api_key_models, fetched via get_chat_ui_settings
+	// below) carries no base-URL data, so `.baseUrl` here stays the source of
+	// truth. `.model` is this literal's FALLBACK only - providerDefaultModel()
+	// below prefers the catalog's is_default flag, which also fixes this file's
+	// own copy of the stale "gpt-4o" OpenAI default (see LlmPoolEditor.vue's
+	// identical fix).
 	const PROVIDER_DEFAULTS = {
 		Anthropic: { model: "claude-sonnet-4-6", baseUrl: "https://api.anthropic.com" },
-		OpenAI: { model: "gpt-4o", baseUrl: "https://api.openai.com/v1" },
+		OpenAI: { model: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
 		"Google Gemini": {
 			model: "gemini-2.5-pro",
 			baseUrl: "https://generativelanguage.googleapis.com",
@@ -79,42 +86,31 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 	// pickable while arbitrary IDs stay typeable (openai_compat / Ollama / shim
 	// need custom model ids). Suggestions are sourced per provider:
 	//   1) the already-loaded preset catalog (models grouped by vendor id), then
-	//   2) a small static fallback for providers the catalog omits, then
+	//   2) the admin-managed catalog (apiKeyModels, from get_chat_ui_settings), then
 	//   3) the provider's default model. Deduped, catalog-first.
-	// Static fallback keyed by the provider dropdown LABEL.
-	const STATIC_MODEL_SUGGESTIONS = {
-		Anthropic: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-		OpenAI: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o"],
-		"Google Gemini": ["gemini-2.5-pro", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
-		Mistral: ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest"],
-		Groq: [
-			"llama-3.3-70b-versatile",
-			"openai/gpt-oss-120b",
-			"openai/gpt-oss-20b",
-			"llama-3.1-8b-instant",
-		],
-		"Together AI": ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
-		DeepSeek: ["deepseek-chat"],
-		"Moonshot (Kimi)": ["kimi-k2.6"],
-		"xAI Grok": ["grok-4.5", "grok-4.3", "grok-build-0.1"],
-		"GLM / Z.ai": ["glm-4.6", "glm-4.7"],
-		"GLM / Z.ai (Coding Plan)": ["glm-4.6", "glm-4.7"],
-		OpenRouter: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.5"],
-		"Ollama (local)": ["qwen2.5:3b", "qwen2.5:0.5b", "llama3"],
-		"OpenAI-Compatible": ["claude-sonnet-4-6", "gpt-4o", "qwen2.5:3b", "llama3"],
-		// vLLM (local): no useful default → plain free-text input.
-	};
-	// Subscription rows suggest the upstream's chat models (keyed by upstream id).
-	const SUB_MODEL_SUGGESTIONS = {
-		openai: ["gpt-5.5", "gpt-5.4"],
-		google: ["gemini-2.5-pro", "gemini-3.5-flash"],
-	};
+	//
+	// STATIC_MODEL_SUGGESTIONS and SUB_MODEL_SUGGESTIONS (the old hardcoded
+	// per-provider datalists) are gone: a model added in the admin desk now
+	// shows up here with no deploy. SUB_MODEL_SUGGESTIONS previously carried
+	// only openai/google, so a tenant on a Grok or Kimi subscription saw no
+	// suggestions at all on this page; subscriptionModels (already fetched
+	// dynamically, see loadInitial) carries all four.
+	//
 	// Preset-catalog vendor ids -> provider dropdown label. The catalog uses
 	// "gemini"; the dropdown label is "Google Gemini" (stored id "google"), so
 	// alias both to the same label. Others fall through to providerLabel.
 	function catalogVendorLabel(vid) {
 		if (vid === "gemini") return "Google Gemini";
 		return providerLabel(vid);
+	}
+	// The api-key-tier model preselected for a provider. Prefers the admin-managed
+	// catalog's is_default flag; falls back to the PROVIDER_DEFAULTS literal when
+	// the catalog has no default for this label (fetch failed, or no api-key rows
+	// at all for it).
+	function providerDefaultModel(label) {
+		const rows = apiKeyModels[label] || [];
+		const flagged = rows.find((m) => m.is_default);
+		return (flagged && flagged.model_id) || (PROVIDER_DEFAULTS[label] || {}).model || "";
 	}
 	// Suggested model ids for an API-key row's provider (label or id).
 	function modelSuggestionsForProvider(provider) {
@@ -128,13 +124,23 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 				if (catalogVendorLabel(m.provider) === label) push(m.model);
 			})
 		);
-		(STATIC_MODEL_SUGGESTIONS[label] || []).forEach(push);
-		push((PROVIDER_DEFAULTS[label] || {}).model);
+		(apiKeyModels[label] || []).forEach((m) => push(m.model_id));
+		push(providerDefaultModel(label));
 		return out;
 	}
+	// Upstream id (openai/google/xai/kimi) -> the subscription-surface provider
+	// LABEL subscriptionModels is keyed by (get_chat_ui_settings /
+	// jarvis/_subscription_models.py). Mirrors LlmPoolEditor.vue's
+	// UPSTREAM_OAUTH_PROVIDER so the two never drift.
+	const UPSTREAM_TO_SUB_LABEL = {
+		openai: "OpenAI",
+		google: "Google Gemini",
+		xai: "xAI Grok",
+		kimi: "Kimi (Moonshot)",
+	};
 	// Suggested model ids for a subscription row's chosen upstream.
 	function subModelSuggestions(upstream) {
-		return SUB_MODEL_SUGGESTIONS[upstream] || [];
+		return subscriptionModels[UPSTREAM_TO_SUB_LABEL[upstream] || ""] || [];
 	}
 	// A <datalist> of model-id suggestions. Empty list → the bound input just
 	// behaves as a plain free-text field.
@@ -189,6 +195,10 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 	const CODE_ONLY_PASTE_PROVIDERS = ["xAI Grok"];
 	const isCodeOnlyPaste = (p) => CODE_ONLY_PASTE_PROVIDERS.indexOf(p) !== -1;
 	let defaultModels = {};
+	// Api-key-tier suggestions (provider label -> [{model_id, label, is_default}]),
+	// same get_chat_ui_settings response as subscriptionModels/defaultModels above.
+	// Replaces the old hardcoded STATIC_MODEL_SUGGESTIONS; see modelSuggestionsForProvider.
+	let apiKeyModels = {};
 	// Preset failover ladders (jarvis.onboarding.get_preset_catalog). Fetched in
 	// loadInitial alongside the pool config so the Preset tab is populated before
 	// the user opens it. Empty on fetch failure → Preset tab shows a fallback line.
@@ -304,6 +314,7 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 					const cui = (chatUi && chatUi.message) || {};
 					subscriptionModels = cui.subscription_models || {};
 					defaultModels = cui.default_models || {};
+					apiKeyModels = cui.api_key_models || {};
 					presetCatalog = (catalog && catalog.message) || [];
 					// First-paint seed: pick the canonical default for the
 					// initial subProvider so render() doesn't show an empty
@@ -613,7 +624,7 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 
 	function renderApiKeyPanel(editable, isActiveMode) {
 		const provider = settingsLocal.llm_provider || "Anthropic";
-		const model = settingsLocal.llm_model || (PROVIDER_DEFAULTS[provider] || {}).model || "";
+		const model = settingsLocal.llm_model || providerDefaultModel(provider);
 		const base =
 			settingsLocal.llm_base_url || (PROVIDER_DEFAULTS[provider] || {}).baseUrl || "";
 		const sync = settingsLocal.last_sync_status || "";
@@ -1490,13 +1501,14 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 			const i = +$(this).data("i");
 			const p = $(this).val();
 			const d = PROVIDER_DEFAULTS[p] || {};
+			const defaultModel = providerDefaultModel(p);
 			const row = ui.customRows[i] || {};
 			// A stored key (has_key) belongs to the OLD provider's key_ref - carry it
 			// forward and a switch to Ollama/vLLM with no retyped key would still send
 			// a blank api_key while has_key=true, hitting the exact "blank api_key"
 			// rejection this whole editor exists to avoid for local providers.
 			const patch = { provider: p, has_key: false, apiKey: "" };
-			if (!(row.model || "").trim() && d.model) patch.model = d.model;
+			if (!(row.model || "").trim() && defaultModel) patch.model = defaultModel;
 			if (!(row.baseUrl || "").trim() && d.baseUrl) patch.baseUrl = d.baseUrl;
 			ui.customRows[i] = Object.assign({}, row, patch);
 			rerenderAiCard(editable);
@@ -1888,7 +1900,7 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 		$prov.on("change", () => {
 			const p = $prov.val();
 			const d = PROVIDER_DEFAULTS[p] || {};
-			$body.find("#ja-model").val(d.model || "");
+			$body.find("#ja-model").val(providerDefaultModel(p));
 			$body.find("#ja-base").val(d.baseUrl || "");
 		});
 		$body.find("#ja-llm-save").on("click", () => {

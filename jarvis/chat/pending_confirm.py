@@ -43,6 +43,64 @@ def _owner_key(owner: str) -> str:
 	return _OWNER_PREFIX + owner
 
 
+# --------------------------------------------------------------------------- #
+# cards_open gauge (BUILD-DIRECTIVE §1 — the WP-0 C-series gap, wired here)
+# --------------------------------------------------------------------------- #
+#
+# A live count of open confirmation cards: mint +1, consume -1, and EXPIRY
+# auto-pruned. Backed by a single site-scoped Redis ZSET scored by each token's
+# expiry epoch — reading purges expired members (ZREMRANGEBYSCORE) then ZCARD, so
+# a card nobody clicks decrements the gauge exactly when its TTL lapses without any
+# code running on expiry. This is OBSERVABILITY, not authority (the token records
+# remain the source of truth), so every op is best-effort. Raw ``execute_command``
+# with an explicit site-scoped key (mirrors the pump wake-bus) so ZADD/ZREM/ZCARD
+# all agree regardless of RedisWrapper's key prefixing.
+
+_GAUGE_SUFFIX = "jarvis:pending_confirm:open"
+
+
+def _gauge_key() -> str:
+	local = getattr(frappe, "local", None)
+	db = (local.conf.get("db_name") if local else None) or getattr(local, "site", "") or ""
+	return f"{db}|{_GAUGE_SUFFIX}"
+
+
+def cards_open_gauge() -> int:
+	"""Live count of open confirmation cards (expired members pruned on read)."""
+	try:
+		cache = frappe.cache()
+		key = _gauge_key()
+		cache.execute_command("ZREMRANGEBYSCORE", key, 0, int(time.time()))
+		return int(cache.execute_command("ZCARD", key) or 0)
+	except Exception:
+		return 0
+
+
+def _gauge_add(token: str, expires_at: int) -> None:
+	try:
+		frappe.cache().execute_command("ZADD", _gauge_key(), int(expires_at), token)
+	except Exception:
+		pass
+
+
+def _gauge_remove(token: str) -> None:
+	try:
+		frappe.cache().execute_command("ZREM", _gauge_key(), token)
+	except Exception:
+		pass
+
+
+def _emit_cards_open(source: str) -> None:
+	"""Mirror the gauge to the latency channel (the pilot greps ``cards_open`` for
+	the C-series). Best-effort."""
+	try:
+		from jarvis.chat.latency import get_logger
+
+		get_logger().info("cards_open gauge=%d source=%s", cards_open_gauge(), source)
+	except Exception:
+		pass
+
+
 def args_hash(tool: str, args: dict) -> str:
 	"""Stable hash of the tool + its canonical args, so a token is bound to
 	the EXACT call. Canonical = json.dumps(args, sort_keys=True, default=str).
@@ -99,6 +157,9 @@ def mint(
 		"expires_at": expires_at if expires_at is not None else int(time.time()) + _TTL_S,
 	}
 	frappe.cache().set_value(_key(token), record, expires_in_sec=_TTL_S)
+	# cards_open gauge +1 (self-healing on expiry via the ZSET score).
+	_gauge_add(token, record["expires_at"])
+	_emit_cards_open("mint")
 	# Index the token under its owner so list_for_owner can re-surface it. Best
 	# effort: the token record is the source of truth (owner binding + execution
 	# both read it), so an index hiccup must never block the park.
@@ -181,6 +242,9 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	frappe.local.cache.pop(full_key, None)
 	if raw is None:
 		return None
+	# cards_open gauge -1 (the card was consumed).
+	_gauge_remove(token)
+	_emit_cards_open("consume")
 	# Drop the now-dead token from the owner index (best effort - list_for_owner
 	# also prunes dead members on read, so a miss here self-heals).
 	try:

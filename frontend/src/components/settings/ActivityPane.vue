@@ -1,36 +1,44 @@
 <template>
-	<div class="jv-settings-body">
-		<div class="jv-set-sec">Recent tool runs</div>
-		<div v-if="!recentActivity.length" class="jv-set-empty">
-			No tool activity in this chat yet.
+	<SettingsPane title="Activity" description="Recent tool calls in this chat.">
+		<h3 class="text-base font-semibold text-ink-gray-9">Recent tool runs</h3>
+
+		<div
+			v-if="!recentActivity.length"
+			class="flex flex-col items-center gap-2 py-12 text-center"
+		>
+			<FeatherIcon name="activity" class="size-8 text-ink-gray-4" />
+			<span class="text-base text-ink-gray-6">No tool activity in this chat yet.</span>
 		</div>
-		<div v-for="(a, i) in recentActivity" :key="i" class="jv-act">
-			<div class="jv-act-top">
-				<svg
-					width="13"
-					height="13"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="var(--text-3)"
-					stroke-width="1.8"
-					stroke-linecap="round"
-					stroke-linejoin="round"
+
+		<div v-else class="mt-2">
+			<div
+				v-for="(a, i) in recentActivity"
+				:key="i"
+				class="border-t py-2.5 first:border-t-0 first:pt-0"
+			>
+				<div class="flex items-center gap-2 text-p-sm text-ink-gray-7">
+					<FeatherIcon name="tool" class="size-4 text-ink-gray-5" />
+					<span>{{ a.tools }} tool{{ a.tools === 1 ? "" : "s" }}</span>
+					<span class="ml-auto tabular-nums text-ink-gray-5"
+						>{{ (a.ms / 1000).toFixed(1) }}s</span
+					>
+				</div>
+				<div
+					v-if="a.names.length"
+					class="mt-1 break-words font-mono text-xs text-ink-gray-5"
 				>
-					<path
-						d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 1 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
-					/>
-				</svg>
-				<span>{{ a.tools }} tool{{ a.tools === 1 ? "" : "s" }}</span>
-				<span class="jv-act-ms">{{ (a.ms / 1000).toFixed(1) }}s</span>
+					{{ a.names.join(", ") }}
+				</div>
 			</div>
-			<div v-if="a.names.length" class="jv-act-names">{{ a.names.join(" · ") }}</div>
 		</div>
-	</div>
+	</SettingsPane>
 </template>
 
 <script setup>
 import { computed } from "vue";
+import { FeatherIcon } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
+import SettingsPane from "@/components/settings/SettingsPane.vue";
 
 const shell = useShellStore();
 const recentActivity = computed(() => shell.chatContext?.sessionStats?.recentActivity || []);

@@ -31,3 +31,5 @@ jarvis.patches.v2_02_unique_model_usage_row
 jarvis.patches.v2_03_backfill_finding_result_class
 jarvis.patches.v2_03_backfill_installation_activation
 jarvis.patches.v2_03_backfill_approval_provenance
+jarvis.patches.v2_04_chat_turn_admission_indexes
+jarvis.patches.v2_05_relay_pump_transport_mode

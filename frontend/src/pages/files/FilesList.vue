@@ -120,6 +120,13 @@
 
 			<template #cell-status="{ row }">
 				<Badge
+					v-if="row.behind_chat && row.status === 'processing'"
+					variant="subtle"
+					theme="gray"
+					label="Waiting — behind chat"
+				/>
+				<Badge
+					v-else
 					variant="subtle"
 					:theme="(STATUS_BADGE[row.status] || {}).theme || 'gray'"
 					:label="(STATUS_BADGE[row.status] || {}).label || row.status"

@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 import frappe
 
-from jarvis.chat import user_settings_api
+from jarvis.chat import admission, user_settings_api
 from jarvis.chat.usage import current_month_key as _usage_month_key
 from jarvis.permissions import (
 	has_jarvis_access,
@@ -561,6 +561,7 @@ def get_conversation(conversation: str) -> dict:
 			"tool_status",
 			"action_outcome",
 			"canvas",
+			"reply_duration_ms",
 			"creation",
 			"modified",
 		],
@@ -929,7 +930,16 @@ def send_message(
 	# conversation (extra tab / double-send / a retry racing a live turn) -
 	# they would otherwise run in parallel on the same openclaw session. Placed
 	# after ownership so the reject is clean (no user row inserted yet).
-	if _conversation_busy(conversation):
+	#
+	# Phase-0 admission (flag ON): the busy case is no longer a reject - the
+	# second turn becomes a durable QUEUED turn with a visible position. So skip
+	# the legacy reject and let accept_or_queue serialize + queue it. We still
+	# reject up front on OVERLOAD (queue too deep) before inserting the user row,
+	# so an overloaded site never accretes orphaned messages.
+	if admission.turn_machine_enabled():
+		if admission.shard_overloaded(conversation):
+			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
+	elif _conversation_busy(conversation):
 		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 
 	# Apply model override BEFORE enqueueing so the worker sees the new value
@@ -1111,7 +1121,57 @@ def send_message(
 	# Dispatch the turn (see _dispatch_turn for the Node-RQ vs Python-pubsub
 	# routing rationale). `background` marks unattended turns (File Box
 	# drops) that must not jump ahead of a human's queued question.
-	_dispatch_turn(enqueue_kwargs, interactive=not int(background or 0))
+	#
+	# Phase-0 admission (flag ON): route the dispatch through the one
+	# accept_or_queue chokepoint. It inserts the durable Turn row under the
+	# shard+conversation locks and either dispatches now (a free credit) or
+	# leaves the turn QUEUED with a position. The seed Message is already
+	# committed above, so this is the OAR-3 "existing seed" branch.
+	_adm = None
+	_interactive = not int(background or 0)
+	if admission.turn_machine_enabled():
+		_dispatch_payload = {}
+		if atts:
+			_dispatch_payload["attachments"] = atts
+		if enqueue_kwargs.get("context"):
+			_dispatch_payload["context"] = enqueue_kwargs["context"]
+		_adm = admission.accept_or_queue(
+			conversation=conversation,
+			run_id=run_id,
+			seed_message=msg_doc.name,
+			turn_class="interactive" if _interactive else "background",
+			dispatch=lambda: _dispatch_turn(enqueue_kwargs, interactive=_interactive),
+			dispatch_payload=_dispatch_payload or None,
+		)
+		if _adm.get("overloaded"):
+			# Rare race: the cheap pre-check passed but the locked check found the
+			# queue full. The user Message is already committed (a separate txn,
+			# untouched by admission's rollback), so it would otherwise reappear on
+			# reload as a permanently-unanswered orphan send (SUXI-5/OARI-7). Delete
+			# it so an overloaded site leaves no dangling user row, then surface the
+			# busy copy so the composer doesn't hang on a reply that will never come.
+			try:
+				frappe.delete_doc(MSG, msg_doc.name, ignore_permissions=True, force=True)
+				frappe.db.commit()
+			except Exception:
+				frappe.log_error(title="send_message overload seed cleanup", message=frappe.get_traceback())
+			return {"ok": False, "reason": _adm.get("reason")}
+	else:
+		# CDX-19: the legacy path may REROUTE to the pump accept path under the cutover gate
+		# (if the site flipped to pump-ON since the entry check). _dispatch_turn then returns
+		# the admission result; merge it EXACTLY like the machine branch above — a full-queue
+		# reroute rejects (delete the orphan seed, no silent ok:true), and a queued reroute
+		# flows into the queued-chip block below via _adm. A normal legacy enqueue returns None.
+		_adm = _dispatch_turn(enqueue_kwargs, interactive=_interactive, cutover_gate=True)
+		# _dispatch_turn returns dict|None (a reroute's admission result, else None); the isinstance
+		# guard treats only a real dict as a result (None ⇒ normal legacy dispatch).
+		if isinstance(_adm, dict) and _adm.get("overloaded"):
+			try:
+				frappe.delete_doc(MSG, msg_doc.name, ignore_permissions=True, force=True)
+				frappe.db.commit()
+			except Exception:
+				frappe.log_error(title="send_message overload seed cleanup", message=frappe.get_traceback())
+			return {"ok": False, "reason": _adm.get("reason")}
 
 	# Latency telemetry (plan Phase 0): one line per send so the web-request
 	# segments are measurable. total_ms should now sit in the tens of ms even
@@ -1125,11 +1185,88 @@ def send_message(
 		int((time.monotonic() - t0) * 1000),
 	)
 
-	return {
+	result = {
 		"ok": True,
 		"run_id": run_id,
 		"message_id": msg_doc.name,
 		"conversation_id": conversation,
+	}
+	# Phase-0 admission: tell the SPA when the turn is queued (not yet
+	# streaming) so it renders the "~N ahead" chip + cancel affordance instead
+	# of a spinner that would otherwise wait for a run:start that only arrives
+	# on promotion.
+	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
+		result["queued"] = True
+		result["queued_position"] = _adm.get("queued_position")
+	return result
+
+
+def _api_key_models() -> dict[str, list[dict]]:
+	"""Provider label -> api-key-tier model rows for the pool editor's datalist.
+
+	Replaces the frontend's hardcoded STATIC_MODEL_SUGGESTIONS. Only display
+	fields cross the wire; the catalog carries no secrets by construction.
+	"""
+	from jarvis import admin_client
+
+	out: dict[str, list[dict]] = {}
+	for provider in admin_client.get_model_catalog() or []:
+		rows = [m for m in provider.get("models") or [] if m.get("tier") == "api_key"]
+		rows.sort(key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or ""))
+		out[provider.get("label") or provider.get("provider_id") or ""] = [
+			{
+				"model_id": m["model_id"],
+				"label": m.get("label") or m["model_id"],
+				"is_default": bool(m.get("is_default")),
+			}
+			for m in rows
+		]
+	return out
+
+
+def _subscription_connect_providers() -> list[dict]:
+	"""Providers offering DirectSubscriptionCard's paste-back OAuth connect flow.
+
+	Gated on a non-empty auth_profile_id (R7), NEVER on supports_subscription:
+	that flag is true for xai and moonshot too (cliproxy really does serve their
+	subscription models), but Kimi is device-code (no authorize URL to paste
+	back) and admin's push_oauth_blob rejects a direct xAI blob outright, so
+	both carry no auth_profile_id here. Filtering on supports_subscription
+	would render a connect button that can never succeed.
+	"""
+	from jarvis import admin_client
+
+	out: list[dict] = []
+	for provider in admin_client.get_model_catalog() or []:
+		if not (provider.get("auth_profile_id") or "").strip():
+			continue
+		label = provider.get("subscription_label") or provider.get("label") or ""
+		rows = [m for m in provider.get("models") or [] if m.get("tier") == "subscription"]
+		rows.sort(key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or ""))
+		models = [m["model_id"] for m in rows]
+		if label and models:
+			out.append({"provider": label, "models": models})
+	return out
+
+
+@frappe.whitelist()
+def get_model_catalog_ui() -> dict:
+	"""Catalog slice the pool editor and subscription card need, independent of
+	get_chat_ui_settings so the onboarding wizard (which never calls that) works.
+
+	Deliberately NOT on the chat hot path: mount-time only.
+	"""
+	require_jarvis_access()
+
+	# dict() is MANDATORY here (R9): SUBSCRIPTION_MODELS/DEFAULT_MODEL are Mapping
+	# subclasses, and frappe's json_handler serialises a bare Mapping to its KEYS
+	# with no error. _api_key_models() and _subscription_connect_providers()
+	# already return plain dict/list structures.
+	return {
+		"api_key_models": _api_key_models(),
+		"subscription_models": dict(_SUBSCRIPTION_MODELS),
+		"default_models": dict(_DEFAULT_MODEL),
+		"subscription_connect_providers": _subscription_connect_providers(),
 	}
 
 
@@ -1218,8 +1355,11 @@ def get_chat_ui_settings() -> dict:
 		"llm_auth_mode": settings.llm_auth_mode or "api_key",
 		"llm_provider": settings.llm_provider or "",
 		"llm_model": settings.llm_model or "",
-		"subscription_models": _SUBSCRIPTION_MODELS,
-		"default_models": _DEFAULT_MODEL,
+		"subscription_models": dict(_SUBSCRIPTION_MODELS),
+		"default_models": dict(_DEFAULT_MODEL),
+		# api-key-tier suggestions, replacing the frontend's hardcoded
+		# STATIC_MODEL_SUGGESTIONS. Provider label -> [{model_id, label, is_default}].
+		"api_key_models": _api_key_models(),
 		# Model/provider/effort picker (see ChatView.vue). ``pool`` is the
 		# configured multi-provider catalogue; ``providers`` is empty for a
 		# single-provider customer and the UI hides the provider group then.
@@ -1552,7 +1692,12 @@ def retry_message(message: str) -> dict:
 	# inserted by the RQ worker under a different session user, so the
 	# conversation's owner is the authority, not the message row's owner.
 	_get_owned_conversation(doc.conversation)
-	if _conversation_busy(doc.conversation):
+	# Flag ON: a retry racing a live turn QUEUES (accept_or_queue) rather than
+	# rejecting; flag OFF keeps the legacy single-flight reject.
+	if admission.turn_machine_enabled():
+		if admission.shard_overloaded(doc.conversation):
+			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
+	elif _conversation_busy(doc.conversation):
 		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 	if doc.role != "assistant":
 		return {"ok": False, "reason": _("only assistant messages can be retried")}
@@ -1585,8 +1730,36 @@ def retry_message(message: str) -> dict:
 		"run_id": run_id,
 		"enqueued_at_ms": int(time.time() * 1000),
 	}
-	_dispatch_turn(payload)
-	return {"ok": True, "run_id": run_id}
+	# Phase-0 admission / pump (ON): retry reuses the EXISTING user message as the
+	# seed (OAR-3) - no new user row, no seq allocation - and routes through the
+	# accept chokepoint so a retry at cap queues fairly.
+	if admission.turn_machine_enabled():
+		_adm = admission.accept_or_queue(
+			conversation=doc.conversation,
+			run_id=run_id,
+			seed_message=user_msg_id,
+			turn_class="interactive",
+			dispatch=lambda: _dispatch_turn(payload),
+		)
+		if _adm.get("overloaded"):
+			return {"ok": False, "reason": _adm.get("reason")}
+		out = {"ok": True, "run_id": run_id}
+		if not _adm.get("dispatched", True):
+			out["queued"] = True
+			out["queued_position"] = _adm.get("queued_position")
+		return out
+	# CDX-19: the legacy path may REROUTE to the pump accept path under the cutover gate; merge
+	# the returned admission result exactly like the machine branch (overload reject / queued
+	# chip). Retry reuses the existing user message as the seed, so — like the machine branch —
+	# there is no seed row to clean up on overload. A normal legacy enqueue returns None.
+	_adm = _dispatch_turn(payload, cutover_gate=True)
+	if isinstance(_adm, dict) and _adm.get("overloaded"):
+		return {"ok": False, "reason": _adm.get("reason")}
+	out = {"ok": True, "run_id": run_id}
+	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
+		out["queued"] = True
+		out["queued_position"] = _adm.get("queued_position")
+	return out
 
 
 @frappe.whitelist()
@@ -1599,6 +1772,28 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	abort RPC) - the UI stop stands alone there."""
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
+	# Phase-0 admission (flag ON): record cancel intent on this conversation's
+	# dispatching Turn row (D2's dispatching->cancel-intent transition). This is
+	# NOT terminal - the legacy worker observes openclaw's aborted-terminal and
+	# settles the Turn (cancelled) + promotes the next queued turn there. Marking
+	# intent here just makes support/telemetry honest. Best-effort + flag-gated.
+	admission.mark_cancel_requested(conversation)
+	# Relay-Pump mode: flag the conversation's in-flight pump turn for cancellation
+	# (D2 #17) and wake the pump so its cancel sweep drives the out-of-band abort +
+	# aborted-terminal + settle-cancelled. The direct chat.abort below still fires
+	# (§8-D: the bus is never the only abort route); the two are idempotent.
+	try:
+		from jarvis.chat import pump
+
+		# CDX-21 (Residual A): route the in-flight cancel by the AUTHORITATIVE shard ROW
+		# (``pump_lifecycle_configured``), NOT the config mirror — so a stale mirror never skips the
+		# pump's cancel wake for a row-authoritative pump turn (the direct chat.abort below is still
+		# the backstop, but the row-owned settle is driven through the bus). ``admission`` is the
+		# module-level import (used above); do not shadow it with a local one.
+		if pump.pump_lifecycle_configured(admission.relay_target_id(conversation)):
+			pump.request_cancel_conversation(conversation)
+	except Exception:
+		frappe.log_error(title="stop_run pump cancel", message=frappe.get_traceback())
 	# F6: a stopped run's parked cards must not linger or resurface on resync.
 	# Sweep this owner's live confirmation tokens for the conversation (best-effort).
 	try:
@@ -1696,26 +1891,95 @@ def _redispatch_orphan(
 	message_id: str,
 	attachments=None,
 	context=None,
-) -> None:
+) -> dict | None:
 	"""Re-dispatch a turn whose original RQ job never ran (orphan sweep in
 	stale_scan). Fresh run_id; the 10s probe re-routes to a live queue.
 	``attachments``/``context`` are recovered from the dead job's kwargs
 	when it still exists - they ride only the enqueue payload, so dropping
-	them would resume the turn blind to its own file."""
+	them would resume the turn blind to its own file.
+
+	CDX-19 (residual): RETURNS the admission result (accept_or_queue's dict, or
+	_dispatch_turn's reroute dict) so the stale-scan sweep can see an overload
+	rejection and NOT consume the one healing strike — it resets the recovery
+	marker so the next scan retries instead of surfacing a spurious second-strike
+	error. Returns None on the pure-legacy normal-dispatch path (nothing to merge)."""
+	run_id = uuid.uuid4().hex[:12]
 	payload = {
 		"conversation_id": conversation_id,
 		"message_id": message_id,
-		"run_id": uuid.uuid4().hex[:12],
+		"run_id": run_id,
 		"enqueued_at_ms": int(time.time() * 1000),
 	}
 	if attachments:
 		payload["attachments"] = attachments
 	if context:
 		payload["context"] = context
-	_dispatch_turn(payload, interactive=False)
+	# Phase-0 admission / pump (ON): the orphan re-dispatch reuses the EXISTING
+	# seed message (OAR-3) and goes through the accept gate at background class so a
+	# re-dispatch at cap queues instead of piling onto a full shard.
+	if admission.turn_machine_enabled():
+		_dispatch_payload = {}
+		if attachments:
+			_dispatch_payload["attachments"] = attachments
+		if context:
+			_dispatch_payload["context"] = context
+		return admission.accept_or_queue(
+			conversation=conversation_id,
+			run_id=run_id,
+			seed_message=message_id,
+			turn_class="background",
+			dispatch=lambda: _dispatch_turn(payload, interactive=False),
+			dispatch_payload=_dispatch_payload or None,
+		)
+	# Pure-legacy path: _dispatch_turn may itself reroute under the cutover gate and return an
+	# admission dict (queued/overloaded) — return it so the sweep sees an overload rejection.
+	return _dispatch_turn(payload, interactive=False, cutover_gate=True)
 
 
-def _dispatch_turn(enqueue_kwargs: dict, interactive: bool = True) -> None:
+def _reroute_legacy_to_pump(enqueue_kwargs: dict, interactive: bool, exempt_overload: bool = False) -> dict:
+	"""CDX-10: a PURE-LEGACY sender reached the enqueue boundary just as the cutover flipped
+	the site to pump-ON. Rather than drop an INVISIBLE legacy worker job the pump can't
+	coordinate (per-conversation ordering / container-cap violation), route the turn through
+	the ONE admission chokepoint so it becomes a durable Turn row the pump owns. Chosen over
+	failing the request with a retryable error because it is strictly safer — the turn is
+	never stranded, and the user's already-committed message gets an answer.
+
+	CDX-19: RETURNS the ``accept_or_queue`` result (queued/queued_position, or the honest
+	``{ok:false, overloaded:true}`` rejection) so ``_dispatch_turn`` and every pure-legacy
+	caller can merge it exactly like their machine branch — a queued reroute renders the chip,
+	a full-queue reroute is rejected (no orphan seed, no silent ok:true). ``exempt_overload``
+	is passed through so a confirm CONTINUATION keeps its overload EXEMPTION across the handoff
+	(R-7) — it always queues, never rejects."""
+	from jarvis.chat import admission
+
+	conversation = enqueue_kwargs.get("conversation_id")
+	run_id = enqueue_kwargs.get("run_id")
+	seed_message = enqueue_kwargs.get("message_id")
+	if not (conversation and run_id and seed_message):
+		# Without the identity to build a Turn row we cannot reroute — fail closed (retryable)
+		# rather than silently drop a legacy job into a pump-owned world.
+		raise frappe.ValidationError(frappe._("The chat is switching transports — please resend."))
+	payload = {}
+	if enqueue_kwargs.get("attachments"):
+		payload["attachments"] = enqueue_kwargs["attachments"]
+	if enqueue_kwargs.get("context"):
+		payload["context"] = enqueue_kwargs["context"]
+	return admission.accept_or_queue(
+		conversation=conversation,
+		run_id=run_id,
+		seed_message=seed_message,
+		turn_class="interactive" if interactive else "background",
+		# In pump mode accept_or_queue leaves the turn queued for the pump (this callback is
+		# unused); the phase-0 fallback dispatches the legacy worker WITHOUT re-gating.
+		dispatch=lambda: _dispatch_turn(enqueue_kwargs, interactive=interactive),
+		dispatch_payload=payload or None,
+		exempt_overload=exempt_overload,
+	)
+
+
+def _dispatch_turn(
+	enqueue_kwargs: dict, interactive: bool = True, cutover_gate: bool = False, exempt_overload: bool = False
+) -> dict | None:
 	"""Route a prepared turn to the worker. On the default Node socketio backend
 	we use the ``jarvis_chat`` RQ queue when the bench provisions one, else
 	``long`` (chat turns run up to ``_AGENT_TURN_WORKER_TIMEOUT``
@@ -1724,66 +1988,109 @@ def _dispatch_turn(enqueue_kwargs: dict, interactive: bool = True) -> None:
 	scheduled work). On the Python socketio backend we publish to Redis instead so
 	an in-process subscriber (``jarvis.realtime.handlers``) runs it via gevent,
 	removing the RQ concurrency cap. Shared by send_message, retry_message and the
-	macro engine so every turn dispatches identically."""
-	if (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
-		from jarvis.chat import dispatch
+	macro engine so every turn dispatches identically.
 
-		# Mismatch guard: pub/sub is fire-and-forget, so publishing with no
-		# live subscriber (config says python but the Node server is the one
-		# running - Frappe Cloud pins node in its supervisor template and
-		# does NOT blacklist this config key - or the realtime process is
-		# down) would strand the turn: hang, then ceiling-error. Verify a
-		# subscriber first; on zero, or any doubt (redis hiccup), fall back
-		# to the RQ path - both dispatch flows are first-class, so RQ is
-		# always a correct executor. The fallback logs loudly: it is a
-		# misconfiguration signal, not a normal mode.
-		listening = False
-		try:
-			listening = dispatch.subscriber_count() > 0
-		except Exception:
-			pass
-		if listening:
-			# Publish AFTER the request transaction commits. Pub/sub delivery
-			# is instant (unlike RQ dequeue latency), so publishing mid-
-			# transaction lets the subscriber greenlet start the turn before
-			# the conversation and user-message rows are visible -
-			# LinkValidationError on the placeholder insert. Mirrors enqueue-
-			# after-commit semantics; caught by the Stage A live smoke.
-			frappe.db.after_commit.add(lambda: dispatch.publish_chat_send(enqueue_kwargs))
-			return
-		frappe.log_error(
-			title="chat: Path B subscriber missing - dispatched via RQ",
-			message=(
-				"socketio_backend=python but no live subscriber on the chat "
-				"channel (config/process mismatch, or the Python realtime "
-				"process is down). The turn was routed to the RQ worker "
-				"instead, so chat keeps working - but fix the mismatch or "
-				"unset socketio_backend."
-			),
+	``cutover_gate`` (CDX-10): set by the PURE-LEGACY callers (the ``else`` branch of
+	``turn_machine_enabled()``). Before dispatching, re-validate the legacy/pump gate under
+	the per-shard control row FOR UPDATE — the SAME lock ``pump_cutover_execute`` holds across
+	its scan -> flip -> recheck. The gate reads the DB-AUTHORITATIVE shard ``transport_mode``
+	ROW (``from_db=True``), NOT the request-local conf (which can be stale across a cutover). If
+	the ROW says pump-ON since the branch decision, we do NOT enqueue an invisible legacy job
+	(the pump can't see it); the turn is rerouted to the pump accept path. If still legacy, the
+	lock is HELD through the enqueue below, so a concurrent cutover that acquires the lock next
+	scans the just-enqueued job and will NOT flip. The lock is released by the commit in the
+	``finally``.
+
+	CDX-19: when the gate reroutes, this RETURNS the admission result (``accept_or_queue``'s
+	dict — queued/queued_position or overloaded) so the pure-legacy caller can merge it exactly
+	like its machine branch (render the queued chip / friendly overload). On the normal legacy
+	enqueue path it returns ``None`` (dispatched). ``exempt_overload`` is threaded to the
+	reroute so a confirm CONTINUATION keeps its overload exemption through the handoff (R-7)."""
+	_gate_ts = None
+	if cutover_gate:
+		from jarvis.chat import admission
+		from jarvis.chat import turn_state as _gate_ts_mod
+
+		_gate_ts = _gate_ts_mod
+		_gate_target = admission.relay_target_id(enqueue_kwargs.get("conversation_id"))
+		_gate_ts._lock_shard(_gate_target)  # commit-first; the FOR UPDATE is the first statement
+		if admission.turn_machine_enabled(from_db=True, target=_gate_target):
+			# Flipped to pump-ON inside the window (per the DB-authoritative ROW): release the gate
+			# lock and reroute so no invisible legacy job lands after a cutover reached done=True.
+			# CDX-19: return the reroute's admission result so the caller merges queued/overloaded.
+			frappe.db.commit()
+			_gate_ts.reset_lock_tracking()
+			return _reroute_legacy_to_pump(enqueue_kwargs, interactive, exempt_overload=exempt_overload)
+	try:
+		if (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
+			from jarvis.chat import dispatch
+
+			# Mismatch guard: pub/sub is fire-and-forget, so publishing with no
+			# live subscriber (config says python but the Node server is the one
+			# running - Frappe Cloud pins node in its supervisor template and
+			# does NOT blacklist this config key - or the realtime process is
+			# down) would strand the turn: hang, then ceiling-error. Verify a
+			# subscriber first; on zero, or any doubt (redis hiccup), fall back
+			# to the RQ path - both dispatch flows are first-class, so RQ is
+			# always a correct executor. The fallback logs loudly: it is a
+			# misconfiguration signal, not a normal mode.
+			listening = False
+			try:
+				listening = dispatch.subscriber_count() > 0
+			except Exception:
+				pass
+			if listening:
+				# Publish AFTER the request transaction commits. Pub/sub delivery
+				# is instant (unlike RQ dequeue latency), so publishing mid-
+				# transaction lets the subscriber greenlet start the turn before
+				# the conversation and user-message rows are visible -
+				# LinkValidationError on the placeholder insert. Mirrors enqueue-
+				# after-commit semantics; caught by the Stage A live smoke. Under
+				# the cutover gate the finally commits (releasing the lock), which
+				# fires this after-commit publish.
+				frappe.db.after_commit.add(lambda: dispatch.publish_chat_send(enqueue_kwargs))
+				return
+			frappe.log_error(
+				title="chat: Path B subscriber missing - dispatched via RQ",
+				message=(
+					"socketio_backend=python but no live subscriber on the chat "
+					"channel (config/process mismatch, or the Python realtime "
+					"process is down). The turn was routed to the RQ worker "
+					"instead, so chat keeps working - but fix the mismatch or "
+					"unset socketio_backend."
+				),
+			)
+		queue = _turn_queue()
+		# Deterministic job id so the orphan sweep (stale_scan) can tell a
+		# queued-and-draining job from one lost in a dead queue. The attempt
+		# suffix comes from the user row's was_recovered flag (0 first
+		# dispatch, 1 after a sweeper re-dispatch) so an id is never reused
+		# for a live job.
+		job_id = None
+		message_id = enqueue_kwargs.get("message_id")
+		if message_id:
+			attempt = frappe.db.get_value(MSG, message_id, "was_recovered") or 0
+			job_id = f"jarvis-turn::{message_id}::a{int(attempt)}"
+		frappe.enqueue(
+			method="jarvis.chat.worker.run_agent_turn",
+			queue=queue,
+			timeout=_AGENT_TURN_WORKER_TIMEOUT,
+			# Interactive turns (typed message, retry, macro step) jump the
+			# queue; background turns (File Box batch drops) keep FIFO drop
+			# order on the dedicated chat queue. On the shared long queue
+			# everything stays at_front, as before, to beat scheduled work.
+			at_front=(queue == "long") or interactive,
+			job_id=job_id,
+			**enqueue_kwargs,
 		)
-	queue = _turn_queue()
-	# Deterministic job id so the orphan sweep (stale_scan) can tell a
-	# queued-and-draining job from one lost in a dead queue. The attempt
-	# suffix comes from the user row's was_recovered flag (0 first
-	# dispatch, 1 after a sweeper re-dispatch) so an id is never reused
-	# for a live job.
-	job_id = None
-	message_id = enqueue_kwargs.get("message_id")
-	if message_id:
-		attempt = frappe.db.get_value(MSG, message_id, "was_recovered") or 0
-		job_id = f"jarvis-turn::{message_id}::a{int(attempt)}"
-	frappe.enqueue(
-		method="jarvis.chat.worker.run_agent_turn",
-		queue=queue,
-		timeout=_AGENT_TURN_WORKER_TIMEOUT,
-		# Interactive turns (typed message, retry, macro step) jump the
-		# queue; background turns (File Box batch drops) keep FIFO drop
-		# order on the dedicated chat queue. On the shared long queue
-		# everything stays at_front, as before, to beat scheduled work.
-		at_front=(queue == "long") or interactive,
-		job_id=job_id,
-		**enqueue_kwargs,
-	)
+	finally:
+		if _gate_ts is not None:
+			# CDX-10: release the gate lock. The RQ enqueue above pushed the job to redis
+			# synchronously (enqueue_after_commit defaults False), and the pubsub after-commit
+			# publish fires on this commit — so a concurrent cutover that next acquires the
+			# lock sees the just-enqueued legacy job and will NOT flip.
+			frappe.db.commit()
+			_gate_ts.reset_lock_tracking()
 
 
 def _enqueue_turn(
@@ -1794,6 +2101,7 @@ def _enqueue_turn(
 	thinking_override: str | None = None,
 	hidden: bool = False,
 	interactive: bool = True,
+	exempt_overload: bool = False,
 ) -> dict:
 	"""Persist a user message + dispatch an agent turn for ``prompt`` (no
 	attachments / no auto-context). The macro engine (``jarvis.chat.macros``) uses
@@ -1840,15 +2148,71 @@ def _enqueue_turn(
 	frappe.db.commit()
 
 	run_id = uuid.uuid4().hex[:12]
-	_dispatch_turn(
-		{
-			"conversation_id": conversation,
-			"message_id": msg_doc.name,
-			"run_id": run_id,
-		},
-		interactive=interactive,
+	_kwargs = {
+		"conversation_id": conversation,
+		"message_id": msg_doc.name,
+		"run_id": run_id,
+	}
+	# Phase-0 admission (flag ON): macro steps AND confirm continuations run
+	# through this path. R-7 closes the continuation bypass - they take a normal
+	# admission credit and single-flight like any send, so two rapid confirms
+	# run one continuation and QUEUE the second with a visible position. The seed
+	# user Message is inserted+committed above, so this is the OAR-3 existing-seed
+	# branch. The admission result (queued/queued_position) is RETURNED (SUXI-2)
+	# so the caller (apply_action / confirm_tool) can render the standard queued
+	# chip instead of leaving the card to vanish into silence.
+	out = {"run_id": run_id, "message_id": msg_doc.name}
+	if admission.turn_machine_enabled():
+		_adm = admission.accept_or_queue(
+			conversation=conversation,
+			run_id=run_id,
+			seed_message=msg_doc.name,
+			turn_class="interactive" if interactive else "background",
+			dispatch=lambda: _dispatch_turn(_kwargs, interactive=interactive),
+			exempt_overload=exempt_overload,
+		)
+		# CDX-19 (residual): overload is an EXPLICIT branch — never inferred from a missing
+		# `dispatched` key. At MAX_QUEUE_DEPTH accept_or_queue returns {ok:False, overloaded:True}
+		# with NO Turn/job for the just-committed seed. Delete the orphan seed (the machine branch
+		# leaves nothing dangling) and RETURN a typed rejection so the internal workflow caller
+		# (macro step / app-learning batch) defers its run instead of advancing toward a terminal
+		# that can never arrive. A confirm continuation passes exempt_overload=True, so it never
+		# reaches this branch (accept_or_queue always queues it).
+		if _adm.get("overloaded"):
+			_delete_enqueue_seed(msg_doc.name)
+			return {"ok": False, "overloaded": True, "reason": _adm.get("reason")}
+		if not _adm.get("dispatched", True):
+			out["queued"] = True
+			out["queued_position"] = _adm.get("queued_position")
+		return out
+	# CDX-19: the legacy path may REROUTE under the cutover gate; merge the queued result exactly
+	# like the machine branch above. R-7: exempt_overload is threaded through so a confirm
+	# CONTINUATION keeps its overload EXEMPTION across the handoff (it always queues, never
+	# rejects). A normal legacy enqueue returns None.
+	_adm = _dispatch_turn(
+		_kwargs, interactive=interactive, cutover_gate=True, exempt_overload=exempt_overload
 	)
-	return {"run_id": run_id, "message_id": msg_doc.name}
+	if isinstance(_adm, dict) and _adm.get("overloaded"):
+		# CDX-19 (residual): a full-queue reroute is an HONEST rejection — clean the orphan seed
+		# and return the typed rejection, exactly like the machine branch.
+		_delete_enqueue_seed(msg_doc.name)
+		return {"ok": False, "overloaded": True, "reason": _adm.get("reason")}
+	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
+		out["queued"] = True
+		out["queued_position"] = _adm.get("queued_position")
+	return out
+
+
+def _delete_enqueue_seed(message_id: str) -> None:
+	"""Overload cleanup for the internal ``_enqueue_turn`` path: the seed user Message was
+	inserted + committed before admission, so an accept-time overload would otherwise leave a
+	dangling user row with no Turn/job (SUXI-5). Delete it in its own txn (mirrors send_message's
+	overload cleanup) so the deferred run re-attempts from a clean slate. Best-effort."""
+	try:
+		frappe.delete_doc(MSG, message_id, ignore_permissions=True, force=True)
+		frappe.db.commit()
+	except Exception:
+		frappe.log_error(title="_enqueue_turn overload seed cleanup", message=frappe.get_traceback())
 
 
 # The continuation prompt after a human Apply/Confirm. The scaffold is
@@ -1908,7 +2272,10 @@ def enqueue_continuation(conversation: str, receipt: str, *, failed: bool = Fals
 
 	safe = _safe_label_name(receipt)
 	scaffold = _CONTINUATION_PROMPT_FAILED if failed else _CONTINUATION_PROMPT
-	return _enqueue_turn(conversation, scaffold.format(receipt=safe), hidden=True)
+	# SUXI-2 ruling: a continuation of an already-committed write is EXEMPT from
+	# the accept-time overload rejection - it always queues (with a visible
+	# position), never silently drops. The front-door senders keep backpressure.
+	return _enqueue_turn(conversation, scaffold.format(receipt=safe), hidden=True, exempt_overload=True)
 
 
 def _ensure_session_key(user: str, sess: OpenclawSession | None = None) -> str:

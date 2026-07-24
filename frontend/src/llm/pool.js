@@ -62,22 +62,45 @@ export function reorder(list, from, to) {
 	a.splice(to, 0, x);
 	return a;
 }
-// Suggested chat-subscription model ids per upstream (index 0 = the default the
-// onboarding editor uses when it hides the model field). Single source of truth,
-// shared with LlmPoolEditor's datalist so the default + suggestions can't drift.
-export const SUB_MODEL_SUGGESTIONS = {
+// Built-in fallback for chat-subscription model ids per upstream. The catalog is
+// owned by admin now (Jarvis LLM Provider doctype) and arrives via
+// get_chat_ui_settings.subscription_models; this literal is the degraded-mode
+// floor used before the first response lands and when admin is unreachable.
+// Do NOT add models here to make them selectable: add them in the admin desk.
+const FALLBACK_SUB_MODELS = {
 	openai: ["gpt-5.5", "gpt-5.4"],
 	google: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-flash"],
-	// Model ids must exist in cli-proxy-api's v7.2.35 catalogue (grok-4.5 is NOT).
 	xai: ["grok-4.3", "grok-build-0.1"],
 	kimi: ["kimi-k2.7-code", "kimi-k2.6"],
 };
-// Default chat-subscription model for an upstream (SUB_MODEL_SUGGESTIONS[0], with
-// an openai fallback for unmapped upstreams). Onboarding hides the model field
-// (provider is enough), so the row still needs a model id for validatePool + save.
-// Pure + exported for unit tests.
-export function defaultSubscriptionModel(upstream) {
-	return (SUB_MODEL_SUGGESTIONS[upstream] || SUB_MODEL_SUGGESTIONS.openai)[0];
+
+// Provider label (as admin stores it) -> the upstream key the pool editor uses.
+const LABEL_TO_UPSTREAM = {
+	OpenAI: "openai",
+	"Google Gemini": "google",
+	"xAI Grok": "xai",
+	"Kimi (Moonshot)": "kimi",
+};
+
+// Map a get_chat_ui_settings.subscription_models payload (keyed by provider
+// LABEL) to the upstream keys this module uses. Falls back when empty.
+export function subModelSuggestions(apiSubscriptionModels) {
+	const src = apiSubscriptionModels || {};
+	const out = {};
+	for (const [label, models] of Object.entries(src)) {
+		const upstream = LABEL_TO_UPSTREAM[label];
+		if (upstream && Array.isArray(models) && models.length) out[upstream] = models;
+	}
+	return Object.keys(out).length ? out : FALLBACK_SUB_MODELS;
+}
+
+// Default chat-subscription model for an upstream. Synchronous by contract: the
+// onboarding editor calls it before any API response exists, so `catalog` is
+// optional and omitting it yields the built-in fallback.
+export function defaultSubscriptionModel(upstream, catalog) {
+	const table = catalog && Object.keys(catalog).length ? catalog : FALLBACK_SUB_MODELS;
+	const models = table[upstream] || FALLBACK_SUB_MODELS[upstream] || FALLBACK_SUB_MODELS.openai;
+	return models[0];
 }
 export function validatePool(models, preset) {
 	if (!Array.isArray(models) || models.length === 0)

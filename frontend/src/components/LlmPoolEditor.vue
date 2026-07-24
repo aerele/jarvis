@@ -1570,6 +1570,7 @@ import {
 	providerId,
 	seedRowsFromConfig,
 	defaultSubscriptionModel,
+	subModelSuggestions,
 	apiKeyModelHealth,
 	subscriptionAccountHealth,
 	dirtyAccountHealth,
@@ -1610,6 +1611,23 @@ const emit = defineEmits(["saved", "ready", "direct-changed"]);
 // ---- state ---------------------------------------------------------------
 const cfg = ref({ models: [], preset: "", routing_mode: "failover", proxy_active: false });
 const catalog = ref([]);
+// Admin-managed model catalog (jarvis.chat.api.get_model_catalog_ui): api-key
+// suggestions, subscription suggestions, and per-provider defaults. Fetched on
+// mount (see load()) independent of get_chat_ui_settings so this also works in
+// the onboarding wizard, which never calls that. Falls back to the built-in
+// literals below when the fetch fails or hasn't landed yet - never blank.
+const modelCatalog = ref({
+	api_key_models: {},
+	subscription_models: {},
+	default_models: {},
+});
+// Chat-subscription suggestion table derived from the fetched catalog (falls
+// back to pool.js's built-in FALLBACK_SUB_MODELS via subModelSuggestions when
+// empty/unfetched). Passed to every defaultSubscriptionModel(...) call site so
+// an admin-changed subscription default is honoured everywhere, not just here.
+const subscriptionSuggestions = computed(() =>
+	subModelSuggestions(modelCatalog.value.subscription_models)
+);
 const rows = ref([]); // canonical camelCase rows (single source of truth)
 const llmMode = ref("quick"); // "quick" | "preset" | "custom"
 const selectedPreset = ref("");
@@ -1708,31 +1726,19 @@ const pastePlaceholder = (u, ready) => {
 // display LABEL as `provider` (matches seedRowsFromConfig + the desk page).
 const providerOptions = PROVIDER_LABELS.map((p) => p.label);
 
-// ---- model-id suggestions (ported verbatim from jarvis_account.js) -------
-const STATIC_MODEL_SUGGESTIONS = {
-	Anthropic: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-	OpenAI: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o"],
-	"Google Gemini": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-flash"],
-	Mistral: ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest"],
-	Groq: [
-		"llama-3.3-70b-versatile",
-		"openai/gpt-oss-120b",
-		"openai/gpt-oss-20b",
-		"llama-3.1-8b-instant",
-	],
-	"Together AI": ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
-	DeepSeek: ["deepseek-chat"],
-	"Moonshot (Kimi)": ["kimi-k2.6"],
-	"xAI Grok": ["grok-4.5", "grok-4.3", "grok-build-0.1"],
-	"GLM / Z.ai": ["glm-4.6", "glm-4.7"],
-	"GLM / Z.ai (Coding Plan)": ["glm-4.6", "glm-4.7"],
-	OpenRouter: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.5"],
-	"Ollama (local)": ["qwen2.5:3b", "qwen2.5:0.5b", "llama3"],
-	"OpenAI-Compatible": ["claude-sonnet-4-6", "gpt-4o", "qwen2.5:3b", "llama3"],
-};
+// ---- model-id suggestions --------------------------------------------------
+// STATIC_MODEL_SUGGESTIONS (the hardcoded per-provider datalist) is gone: the
+// admin-managed catalog (modelCatalog.value.api_key_models, fetched in load())
+// is now the source, so a model added in the admin desk shows up here with no
+// deploy. See modelSuggestionsForProvider below.
 const PROVIDER_DEFAULTS = {
 	Anthropic: { model: "claude-sonnet-4-6", baseUrl: "https://api.anthropic.com" },
-	OpenAI: { model: "gpt-4o", baseUrl: "https://api.openai.com/v1" },
+	// "gpt-5.5" is this literal's FALLBACK value only, used before the catalog
+	// fetch lands or if it fails - providerDefaultModel() below prefers the
+	// catalog's is_default flag. Previously a stale "gpt-4o" here (fixed
+	// alongside the catalog wiring: PROVIDER_DEFAULTS.OpenAI predates the
+	// gpt-5.x rollout and was never updated).
+	OpenAI: { model: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
 	"Google Gemini": {
 		model: "gemini-2.5-pro",
 		baseUrl: "https://generativelanguage.googleapis.com",
@@ -1763,6 +1769,15 @@ const PROVIDER_DEFAULTS = {
 function catalogVendorLabel(vid) {
 	return vid === "gemini" ? "Google Gemini" : providerLabel(vid);
 }
+// The api-key-tier model preselected for a provider. Prefers the admin-managed
+// catalog's is_default flag; falls back to the PROVIDER_DEFAULTS literal when
+// the catalog has no default for this label (fetch still pending, failed, or
+// the label has no api-key rows at all).
+function providerDefaultModel(label) {
+	const rows = (modelCatalog.value.api_key_models || {})[label] || [];
+	const flagged = rows.find((m) => m.is_default);
+	return (flagged && flagged.model_id) || (PROVIDER_DEFAULTS[label] || {}).model || "";
+}
 function modelSuggestionsForProvider(provider) {
 	const label = providerLabel(provider || "");
 	const out = [];
@@ -1774,8 +1789,8 @@ function modelSuggestionsForProvider(provider) {
 			if (catalogVendorLabel(m.provider) === label) push(m.model);
 		})
 	);
-	(STATIC_MODEL_SUGGESTIONS[label] || []).forEach(push);
-	push((PROVIDER_DEFAULTS[label] || {}).model);
+	((modelCatalog.value.api_key_models || {})[label] || []).forEach((m) => push(m.model_id));
+	push(providerDefaultModel(label));
 	return out;
 }
 
@@ -2327,7 +2342,7 @@ function setCredType(m, type) {
 		// invalid one). validatePool + save still REQUIRE a model id, so derive it from
 		// the chosen provider. Dropping this would make every subscription save fail
 		// validation with "model is required".
-		m.model = defaultSubscriptionModel(m.upstream);
+		m.model = defaultSubscriptionModel(m.upstream, subscriptionSuggestions.value);
 	} else {
 		// Toggling back to API key: drop the subscription's model id so it doesn't
 		// linger under an API-key provider it does not belong to (a "gpt-5.5" left on
@@ -2335,7 +2350,7 @@ function setCredType(m, type) {
 		// the upstream). This used to be gated on singleMode -- but the SETTINGS editor
 		// hides the subscription model field too, so it needs the same reset; without it
 		// the stale id is invisible AND unsavable-by-hand.
-		m.model = (PROVIDER_DEFAULTS[m.provider] || {}).model || "";
+		m.model = providerDefaultModel(m.provider);
 	}
 }
 function onProviderChange(m, newProvider) {
@@ -2348,7 +2363,7 @@ function onProviderChange(m, newProvider) {
 	// not whatever model was there before. Providers with no default model
 	// (OpenAI-Compatible / vLLM) clear the field so the user types their own.
 	const d = PROVIDER_DEFAULTS[m.provider] || {};
-	m.model = d.model || "";
+	m.model = providerDefaultModel(m.provider);
 	m.baseUrl = d.baseUrl || "";
 	// A stored key (hasKey) belongs to the OLD provider's key_ref, not this one -
 	// carrying it forward would either merge the wrong provider's secret on save
@@ -2371,7 +2386,7 @@ function onUpstreamChange(m) {
 	// it needs the same derivation. Changing provider must also clear the accounts:
 	// an OAuth account is authorized against ONE provider, so keeping OpenAI accounts
 	// on a row switched to Anthropic would ship a pool whose credentials can't serve it.
-	m.model = defaultSubscriptionModel(m.upstream);
+	m.model = defaultSubscriptionModel(m.upstream, subscriptionSuggestions.value);
 	m.accounts = [];
 	m._connect = blankConnect();
 }
@@ -2524,7 +2539,7 @@ async function startConnect(m, reconnectIdx = null, opts = {}) {
 	// Simplified editor hides the model field - make sure a subscription row always
 	// carries a model id so the connect flow never dead-ends on an unfillable field.
 	if (singleMode.value && m.credentialType === "subscription" && !(m.model || "").trim()) {
-		m.model = defaultSubscriptionModel(m.upstream);
+		m.model = defaultSubscriptionModel(m.upstream, subscriptionSuggestions.value);
 	}
 	if (!(m.model || "").trim()) {
 		m._connect = {
@@ -2775,7 +2790,7 @@ function seedRows(config) {
 		// the editors use, so such a row is repairable instead of permanently stuck.
 		const model =
 			r.credentialType === "subscription" && !(r.model || "").trim()
-				? defaultSubscriptionModel(upstream)
+				? defaultSubscriptionModel(upstream, subscriptionSuggestions.value)
 				: r.model;
 		return {
 			...r,
@@ -2857,6 +2872,11 @@ async function load() {
 		catalog.value = (await api.getPresetCatalog()) || [];
 	} catch (e) {
 		/* backend bundled fallback */
+	}
+	try {
+		modelCatalog.value = (await api.getModelCatalogUi()) || modelCatalog.value;
+	} catch (e) {
+		/* built-in literal fallbacks below cover this */
 	}
 }
 

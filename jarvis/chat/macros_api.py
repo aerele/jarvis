@@ -471,7 +471,7 @@ def get_macro_run(run: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Run history dashboard (settings → Macro runs)
 # --------------------------------------------------------------------------- #
-_RUN_STATUSES = {"queued", "running", "completed", "failed", "stopped"}
+_RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed", "stopped"}
 
 
 @frappe.whitelist()
@@ -603,7 +603,22 @@ def summarize_macro(name: str) -> dict:
 	from jarvis.chat import api as chat_api
 
 	prompt = _MERGE_INSTRUCTION + frappe.as_json(payload) + "\n\nApply these skills: /macro-merge"
-	chat_api._enqueue_turn(conv.name, prompt)
+	out = chat_api._enqueue_turn(conv.name, prompt)
+	# CDX-19: the site's turn queue was momentarily full, so the merge turn was NOT dispatched
+	# (its seed was cleaned up). Do NOT mark the macro merge "pending" — that would strand it
+	# waiting on a summary turn that never runs (get_macro_merge would poll pending forever).
+	# The merge is a one-shot user action (not a chained run), so the honest disposition is a
+	# retryable rejection: tear down the throwaway conversation and let the user re-click.
+	if isinstance(out, dict) and out.get("overloaded"):
+		try:
+			frappe.delete_doc("Jarvis Conversation", conv.name, ignore_permissions=True, force=True)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+		return {
+			"ok": False,
+			"reason": out.get("reason") or _("The site is busy — please try again in a moment."),
+		}
 	# Hide from the sidebar (list_conversations skips Archived).
 	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
 	# Mark the macro "summarizing": run_macro refuses while pending, and the

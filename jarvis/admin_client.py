@@ -251,6 +251,89 @@ def get_preset_catalog() -> list:
 	return BUNDLED_PRESET_CATALOG
 
 
+# Admin-owned provider + model catalog. Same shape as the preset catalog above,
+# with two MANDATORY differences because this one is read on the CHAT HOT PATH
+# (chat/api.py:940 inside send_message, chat/api.py:1456 inside
+# set_conversation_model), whereas presets are only read at onboarding time.
+#
+#   1. A SHORT timeout. _post_guest defaults to DEFAULT_TIMEOUT_S = 150. An admin
+#      that hangs rather than refuses would block a chat send for 2.5 minutes.
+#   2. NEGATIVE CACHING. Caching only successes means every single request
+#      retries a dead admin. The failure marker makes an outage cost one slow
+#      request per _MODEL_CATALOG_FAIL_TTL_S, not one per chat turn.
+_MODEL_CATALOG_CACHE_KEY = "jarvis:model_catalog"
+_MODEL_CATALOG_TTL_S = 6 * 60 * 60
+_MODEL_CATALOG_FAIL_KEY = "jarvis:model_catalog:failed"
+_MODEL_CATALOG_FAIL_TTL_S = 60
+_MODEL_CATALOG_TIMEOUT_S = 5
+
+
+def get_model_catalog() -> list:
+	"""Fetch the provider + model catalog from admin (guest-safe), cache it, and
+	fall back to the bundled default so the picker never hard-fails.
+
+	NEVER raises, and never blocks a chat turn for more than
+	_MODEL_CATALOG_TIMEOUT_S. Callers on the chat hot path rely on both.
+	"""
+	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+
+	try:
+		return _fetch_model_catalog()
+	except Exception as e:
+		# The whole body is guarded, not just the HTTP call: the Redis
+		# get_value/set_value calls can raise too (a connection blip during a
+		# cache read), and this runs inside send_message. An unguarded cache
+		# error would turn a transient Redis hiccup into a 500 on every chat
+		# send, which is precisely the failure this function exists to avoid.
+		#
+		# frappe.logger(), NOT frappe.log_error: log_error writes an Error Log
+		# DOCUMENT, so it needs the DB (and the cache) to be healthy. This is the
+		# last-resort guard, reached exactly when infrastructure is unhealthy, so
+		# logging through it would raise from the handler and defeat the guard.
+		frappe.logger().warning("get_model_catalog degraded to the bundled catalog: %s", e)
+		return BUNDLED_MODEL_CATALOG
+
+
+def _fetch_model_catalog() -> list:
+	"""Cache-then-network body of get_model_catalog. May raise; the caller
+	converts any failure into the bundled fallback."""
+	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+
+	cache = frappe.cache()
+	cached = cache.get_value(_MODEL_CATALOG_CACHE_KEY)
+	if cached:
+		return cached
+	# A recent failure short-circuits the network entirely. Without this, a
+	# hanging admin costs every chat send a full timeout.
+	if cache.get_value(_MODEL_CATALOG_FAIL_KEY):
+		return BUNDLED_MODEL_CATALOG
+	try:
+		catalog = _post_guest(
+			path=_m("fleet.provider_catalog.get_provider_catalog"),
+			body={},
+			timeout_s=_MODEL_CATALOG_TIMEOUT_S,
+		)
+	except Exception:
+		# Degrade on ANY failure, not just the Admin* family: a scheme-less
+		# jarvis_admin_url raises requests.MissingSchema, which _do_post does not
+		# convert. Same reasoning as get_preset_catalog.
+		cache.set_value(_MODEL_CATALOG_FAIL_KEY, 1, expires_in_sec=_MODEL_CATALOG_FAIL_TTL_S)
+		frappe.log_error(title="get_model_catalog: admin unreachable")
+		return BUNDLED_MODEL_CATALOG
+	if isinstance(catalog, dict):
+		catalog = catalog.get("data") or []
+	if isinstance(catalog, list) and catalog:
+		cache.set_value(_MODEL_CATALOG_CACHE_KEY, catalog, expires_in_sec=_MODEL_CATALOG_TTL_S)
+		return catalog
+	# Admin answered but served nothing. Distinct from unreachable: log it
+	# separately so "admin is down" and "admin says zero enabled providers" are
+	# tellable apart in the logs. Still falls back, since an empty picker is
+	# worse for the customer than a slightly stale one.
+	cache.set_value(_MODEL_CATALOG_FAIL_KEY, 1, expires_in_sec=_MODEL_CATALOG_FAIL_TTL_S)
+	frappe.log_error(title="get_model_catalog: admin returned an empty catalog")
+	return BUNDLED_MODEL_CATALOG
+
+
 # Admin-owned speech-to-text config (voice features). Authenticated tenant
 # fetch, cached in per-site Redis so chat-UI loads / transcribe calls don't
 # pay an admin round-trip each time. The path is built per-call via _m() so the

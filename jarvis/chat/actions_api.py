@@ -308,15 +308,31 @@ def apply_action(action: dict | str | None = None) -> dict:
 		# The mutation is already committed - a receipt hiccup must not
 		# report failure (the SPA would retry and duplicate the create).
 		frappe.log_error(title="apply_action receipt failed", message=frappe.get_traceback())
+	# SUX-3: acknowledge the synchronous write IMMEDIATELY ("Change saved"),
+	# decoupled from the reply queue - the continuation turn below then renders
+	# the standard queued chip with its position. Flag-gated + best-effort.
+	from jarvis.chat import admission
+
+	admission.publish_action_confirmed(conversation)
+	_cont = None
 	if do_continue:
 		try:
-			enqueue_continuation(conversation, receipt)
+			_cont = enqueue_continuation(conversation, receipt)
 		except Exception:
 			# Best-effort like the receipt: the write is committed, and the
 			# user can always nudge the agent manually if dispatch hiccups.
 			frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
 	slug = doctype.lower().replace(" ", "-")
-	return {"ok": True, "verb": verb, "name": name, "doc_url": f"/app/{slug}/{name}"}
+	resp = {"ok": True, "verb": verb, "name": name, "doc_url": f"/app/{slug}/{name}"}
+	# SUX-3/SUXI-2: when the continuation turn queued (all slots taken), thread
+	# its run_id + position so the SPA renders the standard queued chip instead
+	# of the card vanishing into silence after the "Change saved" ack clears.
+	if _cont and _cont.get("queued"):
+		resp["queued"] = True
+		resp["queued_position"] = _cont.get("queued_position")
+		resp["run_id"] = _cont.get("run_id")
+		resp["message_id"] = _cont.get("message_id")
+	return resp
 
 
 _INVALID_CONFIRM = {
@@ -441,10 +457,27 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 		# continue flag here, and the post-write acknowledgment is part of
 		# the persona's write recipes. On failure the rolled-back-write scaffold
 		# makes the agent explain + stop instead of auto-retrying. Best-effort.
+		# SUX-3: on a SUCCESSFUL confirm, acknowledge the write immediately so
+		# the card doesn't vanish into silence while the continuation queues.
+		# A failed confirm skips this - the failed scaffold explains instead.
+		if ok:
+			from jarvis.chat import admission
+
+			admission.publish_action_confirmed(conv)
+		_cont = None
 		try:
-			enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
+			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
 		except Exception:
 			frappe.log_error(title="confirm_tool continuation failed", message=frappe.get_traceback())
+		# SUX-3/SUXI-2: thread the queued continuation's position onto a SUCCESSFUL
+		# confirm result so the SPA shows the queued chip (the card doesn't vanish
+		# into silence while the continuation sits queued). A failed confirm keeps
+		# its error envelope untouched.
+		if ok and isinstance(result, dict) and _cont and _cont.get("queued"):
+			result["queued"] = True
+			result["queued_position"] = _cont.get("queued_position")
+			result["run_id"] = _cont.get("run_id")
+			result["message_id"] = _cont.get("message_id")
 
 	return result
 

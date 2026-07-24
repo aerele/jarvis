@@ -719,6 +719,15 @@ class TestWorkspaceSearchAndContext(_DashboardsApiTestCase):
 		with (
 			patch("jarvis.chat.api.validate_can_send", return_value=(True, "")),
 			patch("jarvis.chat.api._dispatch_turn") as disp,
+			# This asserts the context/dashboards allow-list forwarding at the
+			# ``_dispatch_turn`` boundary. Since the Relay Pump's default-ON inversion,
+			# ``send_message`` routes an absent-flag managed bench (patterntest AND a
+			# fresh CI site) through ``accept_or_queue``'s pump branch, which leaves the
+			# turn queued and NEVER invokes the ``_dispatch_turn`` dispatch callback — so
+			# the mock stayed uncalled and ``call_args`` was None. Pin the pure-legacy
+			# route (``turn_machine_enabled()`` -> False) so ``send_message`` calls
+			# ``_dispatch_turn`` directly and the forwarding contract is exercised.
+			patch("jarvis.chat.admission.turn_machine_enabled", return_value=False),
 		):
 			r = send_message(
 				conv.name,

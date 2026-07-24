@@ -71,6 +71,12 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import OnboardingGate from "./OnboardingGate.vue";
 import UpdateNoticeGate from "./UpdateNoticeGate.vue";
 import { showNotice } from "@/noticeGate";
+// Unscoped global stylesheet. ChatView and OnboardingView render .jv-btn /
+// .jv-iconbtn from it, so it is imported here at the shell rather than left as
+// a side effect of whichever component happens to mount first (it used to ride
+// along with SettingsDialog, which only worked because both are always-mounted
+// siblings of this component).
+import "@/assets/settings.css";
 
 const route = useRoute();
 const router = useRouter();

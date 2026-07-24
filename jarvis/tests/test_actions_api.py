@@ -12,6 +12,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.actions_api import get_doctype_form_meta, load_doc
+from jarvis.tests._transport_helpers import provision_legacy_site
 
 
 class TestFormMeta(FrappeTestCase):
@@ -304,6 +305,11 @@ class TestContinuation(FrappeTestCase):
 	follow-up agent turn (a hidden user message carrying the receipt) so the
 	agent continues the plan without the user typing "continue"."""
 
+	def setUp(self):
+		super().setUp()
+		# CDX-10: these assert the LEGACY _dispatch_turn continuation dispatch — provision legacy.
+		provision_legacy_site(self)
+
 	def _cleanup_doc(self, doctype, name):
 		self.addCleanup(lambda: frappe.delete_doc(doctype, name, force=True, ignore_permissions=True))
 
@@ -471,6 +477,11 @@ class TestConfirmEmptyConversationToken(FrappeTestCase):
 	delivered to and rendered by the owner, so it must still be confirmable /
 	discardable, and its receipt + continuation must attach to the conversation
 	the click came from (the SPA's current id, passed in)."""
+
+	def setUp(self):
+		super().setUp()
+		# CDX-10: the receipt+continuation dispatch asserts the LEGACY path — provision legacy.
+		provision_legacy_site(self)
 
 	def _conv(self) -> str:
 		conv = _make_conversation()

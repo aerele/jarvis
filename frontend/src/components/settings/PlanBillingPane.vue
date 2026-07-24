@@ -1,201 +1,231 @@
 <template>
-	<div class="jv-settings-body">
-		<!-- ===== Plan & billing (design.md §4.2 — the dialog header owns the
-		     pane title; this pane renders the current-plan block, the upgrade
-		     cards and the manage-billing link) ===== -->
-		<section class="jv-acct-card">
-			<div v-if="accountLoading" class="jv-acct-muted">Loading…</div>
-			<div v-else-if="accountErr" class="jv-acct-err">
-				{{ accountErr }}
-				<button type="button" class="jv-mon-retry" @click="loadAccount">Retry</button>
-			</div>
+	<SettingsPane
+		title="Plan and billing"
+		description="Your subscription, renewal and upgrade options."
+		:error="accountErr"
+	>
+		<p v-if="accountLoading" class="text-p-base text-ink-gray-6">Loading…</p>
+
+		<!-- The error copy itself rides SettingsPane's :error prop; only the
+		     recovery control lives here, so retry is one pattern across the whole
+		     settings surface (design.md §5 anti-pattern 6). -->
+		<div v-else-if="accountErr">
+			<Button
+				variant="subtle"
+				label="Retry"
+				iconLeft="refresh-cw"
+				:loading="accountLoading"
+				@click="loadAccount"
+			/>
+		</div>
+
+		<template v-else>
+			<p v-if="!account.plan || !account.plan.plan_name" class="text-p-base text-ink-gray-6">
+				No active plan yet.
+			</p>
+
 			<template v-else>
-				<div v-if="!account.plan || !account.plan.plan_name" class="jv-acct-muted">
-					No active plan yet.
-				</div>
-				<template v-else>
-					<!-- current plan: name · price · status badge on one line -->
-					<div class="jv-acct-plan-row">
-						<div class="jv-acct-plan-name">{{ account.plan.plan_name }}</div>
-						<div class="jv-acct-plan-price">
-							{{
-								planPriceLabel(account.plan.price_inr, account.plan.billing_cycle)
-							}}
-						</div>
-						<span class="jv-acct-pill" :class="tone">{{
+				<!-- current plan: name, price, status badge on one line -->
+				<div class="flex flex-wrap items-center gap-3">
+					<span class="text-base font-medium text-ink-gray-8">
+						{{ account.plan.plan_name }}
+					</span>
+					<span class="text-base text-ink-gray-6">
+						{{ planPriceLabel(account.plan.price_inr, account.plan.billing_cycle) }}
+					</span>
+					<Badge
+						variant="subtle"
+						:theme="statusTheme"
+						:label="
 							cancelling
 								? cancelPillLabel(account.access_ends_on)
 								: statusLabel(account.subscription_status)
-						}}</span>
-					</div>
-					<div class="jv-acct-renewal">
-						{{ renewalLabel(account.current_period_end, account.days_remaining)
-						}}<template v-if="account.autorenew && !cancelling">
-							· Auto-renew on</template
-						>
-					</div>
-					<!-- Scheduled cancellation: state it plainly and put Resume right
-						 here, so the one affordance that undoes it is where the customer
-						 is already looking. -->
-					<div v-if="cancelling" class="jv-acct-notice jv-acct-notice--row">
-						<span>{{ cancellationNotice(account.access_ends_on) }}</span>
-						<button
-							type="button"
-							class="jv-btn jv-btn--sm jv-btn--ghost"
-							:disabled="busy"
-							@click="doResume"
-						>
-							Resume
-						</button>
-					</div>
-					<ul v-if="planFeatures.length" class="jv-acct-features">
-						<li v-for="(f, i) in planFeatures" :key="i">
-							<svg
-								width="14"
-								height="14"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="1.5"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<path d="M20 6 9 17l-5-5" />
-							</svg>
-							<span>{{ f }}</span>
-						</li>
-					</ul>
-				</template>
-
-				<!-- A downgrade already scheduled: state it plainly. Undoing an
-					 Annual one is a plain flag we clear, so it happens inline. A
-					 Monthly one already moved the mandate, so undoing needs a
-					 Checkout to re-arm the current price - and this pane has no
-					 Razorpay, so it deep-links to the Desk flow like upgrade/renew. -->
-				<div v-if="scheduledDowngrade" class="jv-acct-notice jv-acct-notice--row">
-					<span>{{ scheduledDowngradeNotice }}</span>
-					<button
-						v-if="account.scheduled_downgrade_revocable"
-						type="button"
-						class="jv-btn jv-btn--sm jv-btn--ghost"
-						:disabled="busy"
-						@click="doCancelDowngrade"
-					>
-						Keep current plan
-					</button>
-					<a v-else :href="billingUrl" class="jv-btn jv-btn--sm jv-btn--ghost">
-						Keep current plan
-					</a>
+						"
+					/>
 				</div>
+				<p class="mt-1 text-p-sm text-ink-gray-6">
+					{{ renewalLabel(account.current_period_end, account.days_remaining)
+					}}<template v-if="account.autorenew && !cancelling"> · Auto-renew on</template>
+				</p>
 
-				<!-- Upgrade / Renew — deep-links to the existing Desk billing flow
-					 (Razorpay checkout). No new payment logic in this phase; the
-					 wizard-driven upgrade UI is a Phase-2 item. -->
-				<!-- Hidden while cancelling: the server refuses upgrades with
-					 ResumeBeforeUpgrade, and offering a CTA that 400s is worse
-					 than offering none. -->
-				<div v-if="upgradePlans.length && !cancelling" class="jv-acct-upgrades">
-					<div class="jv-acct-upgrades-label">Upgrade options</div>
-					<div class="jv-acct-upgrade-grid">
-						<div v-for="p in upgradePlans" :key="p.name" class="jv-acct-upgrade-card">
-							<div class="jv-acct-upgrade-head">
-								<div class="jv-acct-upgrade-name">{{ p.plan_name || p.name }}</div>
-								<div class="jv-acct-upgrade-price">
-									{{ planPriceLabel(p.price_inr, p.billing_cycle) }}
-								</div>
-							</div>
-							<div class="jv-acct-upgrade-act">
-								<a :href="billingUrl" class="jv-acct-btn-sm">Upgrade</a>
-							</div>
-						</div>
-					</div>
-				</div>
-
-				<!-- Downgrade options — deep-link to the Desk billing flow like
-					 upgrade. Applies at the NEXT cycle (the customer keeps this
-					 plan until then), so it's presented quieter than upgrade.
-					 Hidden while cancelling or when one is already scheduled. -->
+				<!-- Scheduled cancellation: state it plainly and put Resume right
+				     here, so the one affordance that undoes it is where the customer
+				     is already looking. This is the pane's single solid button. -->
 				<div
-					v-if="downgradePlans.length && !cancelling && !scheduledDowngrade"
-					class="jv-acct-upgrades"
+					v-if="cancelling"
+					class="mt-4 flex items-center justify-between gap-4 rounded-md border p-4"
 				>
-					<div class="jv-acct-upgrades-label">Switch to a smaller plan</div>
-					<div class="jv-acct-upgrade-grid">
-						<div
-							v-for="p in downgradePlans"
-							:key="p.name"
-							class="jv-acct-upgrade-card"
-						>
-							<div class="jv-acct-upgrade-head">
-								<div class="jv-acct-upgrade-name">{{ p.plan_name || p.name }}</div>
-								<div class="jv-acct-upgrade-price">
-									{{ planPriceLabel(p.price_inr, p.billing_cycle) }}
-								</div>
-							</div>
-							<div class="jv-acct-upgrade-act">
-								<a :href="billingUrl" class="jv-acct-btn-sm">Downgrade</a>
-							</div>
-						</div>
-					</div>
+					<span class="text-p-sm text-ink-gray-7">
+						{{ cancellationNotice(account.access_ends_on) }}
+					</span>
+					<Button variant="solid" label="Resume" :loading="busy" @click="doResume" />
 				</div>
-				<!-- Lapsed: renewing is the point (where the chat suspension banner
-					 sends them), so keep it prominent. -->
-				<div v-if="ended" class="jv-acct-actions">
-					<a :href="billingUrl" class="jv-btn jv-btn--primary">Renew subscription</a>
-				</div>
-				<!-- Autopay off but re-armable. This MUST carry an action: a
-					 released mandate is terminal at Razorpay, so neither resume
-					 nor a one-shot renew brings auto-renewal back, and the notice
-					 alone left the customer told to "set up payment again" with
-					 nothing to click. -->
-				<div v-if="account.can_reauthorize" class="jv-acct-notice jv-acct-notice--row">
-					<span>{{ reauthBanner }}</span>
-					<a :href="billingUrl" class="jv-btn jv-btn--sm jv-btn--ghost"
-						>Set up auto-renewal</a
-					>
-				</div>
-				<div v-else-if="reauthNotice" class="jv-acct-notice">{{ reauthNotice }}</div>
 
-				<!-- Manage footer: the external billing link, with cancel tucked
-					 beside it as a quiet text link. It stays low-key because the confirm
-					 dialog (danger) owns the deliberate red step; a solid red button here
-					 just makes the pane hostile. Hidden while cancelling (Resume is above)
-					 or ended (nothing to cancel). -->
-				<div class="jv-acct-footer">
-					<a :href="billingUrl" class="jv-acct-link">
-						Manage plan &amp; billing
-						<svg
-							width="13"
-							height="13"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="1.5"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-						>
-							<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-							<path d="M15 3h6v6" />
-							<path d="M10 14 21 3" />
-						</svg>
-					</a>
-					<button
-						v-if="!cancelling && !ended"
-						type="button"
-						class="jv-acct-cancel"
-						:disabled="busy"
-						@click="doCancel"
+				<ul v-if="planFeatures.length" class="mt-4 flex flex-col gap-2">
+					<li
+						v-for="(f, i) in planFeatures"
+						:key="i"
+						class="flex items-center gap-2 text-p-sm text-ink-gray-7"
 					>
-						{{ cancelActionLabel(account.has_mandate) }}
-					</button>
+						<FeatherIcon name="check" class="size-4 shrink-0 text-ink-gray-5" />
+						<span>{{ f }}</span>
+					</li>
+				</ul>
+			</template>
+
+			<!-- A downgrade already scheduled: state it plainly, and put the one
+			     affordance that undoes it right here, mirroring the cancellation
+			     notice above. Undoing an Annual switch is a plain flag the server
+			     clears, so it happens inline; a Monthly one already migrated the
+			     mandate, so undoing needs a Razorpay checkout this pane does not
+			     host and it deep-links to Desk instead (anti-pattern 15).
+			     Subtle, never solid: Resume above is the pane's single solid
+			     button. -->
+			<div
+				v-if="scheduledDowngrade"
+				class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border p-4"
+			>
+				<span class="text-p-sm text-ink-gray-7">{{ scheduledDowngradeNotice }}</span>
+				<Button
+					v-if="account.scheduled_downgrade_revocable"
+					variant="subtle"
+					label="Keep current plan"
+					:loading="busy"
+					@click="doCancelDowngrade"
+				/>
+				<a v-else :href="billingUrl" class="text-base text-ink-blue-link hover:underline">
+					Keep current plan in Desk
+				</a>
+			</div>
+
+			<!-- Upgrade / Renew deep-link to the existing Desk billing flow
+			     (Razorpay checkout). Rendered as plain text links, not as buttons:
+			     they leave the SPA, and design.md §5 anti-pattern 15 keeps the Desk
+			     billing link a plain text link until the flow moves in-SPA.
+			     Hidden while cancelling: the server refuses upgrades with
+			     ResumeBeforeUpgrade, and a CTA that 400s is worse than none. -->
+			<template v-if="upgradePlans.length && !cancelling">
+				<hr class="my-8" />
+				<h3 class="text-base font-semibold text-ink-gray-9">Upgrade options</h3>
+				<div class="mt-3 grid grid-cols-2 gap-4">
+					<div
+						v-for="p in upgradePlans"
+						:key="p.name"
+						class="flex flex-col gap-1 rounded-md border p-4"
+					>
+						<span class="text-base font-medium text-ink-gray-8">
+							{{ p.plan_name || p.name }}
+						</span>
+						<span class="text-p-sm text-ink-gray-6">
+							{{ planPriceLabel(p.price_inr, p.billing_cycle) }}
+						</span>
+						<a
+							:href="billingUrl"
+							class="mt-2 text-base text-ink-blue-link hover:underline"
+						>
+							Upgrade in Desk
+						</a>
+					</div>
 				</div>
 			</template>
-		</section>
-	</div>
+
+			<!-- Switch to a smaller plan. Same card grid as Upgrade rather than a
+			     second invented layout; it reads quieter purely by sitting below.
+			     Applies at the NEXT cycle, so the heading says "switch", not
+			     "downgrade now". Hidden while cancelling, and once one is already
+			     scheduled the notice above replaces it. -->
+			<template v-if="downgradePlans.length && !cancelling && !scheduledDowngrade">
+				<hr class="my-8" />
+				<h3 class="text-base font-semibold text-ink-gray-9">Switch to a smaller plan</h3>
+				<p class="mt-1 text-p-sm text-ink-gray-6">
+					You keep your current plan until the end of this billing period.
+				</p>
+				<div class="mt-3 grid grid-cols-2 gap-4">
+					<div
+						v-for="p in downgradePlans"
+						:key="p.name"
+						class="flex flex-col gap-1 rounded-md border p-4"
+					>
+						<span class="text-base font-medium text-ink-gray-8">
+							{{ p.plan_name || p.name }}
+						</span>
+						<span class="text-p-sm text-ink-gray-6">
+							{{ planPriceLabel(p.price_inr, p.billing_cycle) }}
+						</span>
+						<a
+							:href="billingUrl"
+							class="mt-2 text-base text-ink-blue-link hover:underline"
+						>
+							Switch in Desk
+						</a>
+					</div>
+				</div>
+			</template>
+
+			<!-- Lapsed: renewing is the point (it is where the chat suspension
+			     banner sends them), so it gets its own section rather than being
+			     buried in the footer. -->
+			<template v-if="ended">
+				<hr class="my-8" />
+				<h3 class="text-base font-semibold text-ink-gray-9">Renew</h3>
+				<p class="mt-1 text-p-sm text-ink-gray-6">
+					Your subscription has ended. Renewing restores access straight away.
+				</p>
+				<a
+					:href="billingUrl"
+					class="mt-2 inline-block text-base text-ink-blue-link hover:underline"
+				>
+					Renew subscription in Desk
+				</a>
+			</template>
+
+			<!-- Autopay off but re-armable. This MUST carry an action: a released
+			     mandate is terminal at Razorpay, so neither resume nor a one-shot
+			     renew brings auto-renewal back, and the notice alone left the
+			     customer told to "set up payment again" with nothing to click. -->
+			<div
+				v-if="account.can_reauthorize"
+				class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border p-4"
+			>
+				<span class="text-p-sm text-ink-gray-7">{{ reauthBanner }}</span>
+				<a :href="billingUrl" class="text-base text-ink-blue-link hover:underline">
+					Set up auto-renewal in Desk
+				</a>
+			</div>
+			<p
+				v-else-if="reauthNotice"
+				class="mt-4 rounded-md border p-4 text-p-sm text-ink-gray-7"
+			>
+				{{ reauthNotice }}
+			</p>
+
+			<hr class="my-8" />
+
+			<!-- Manage footer. Cancel is a red SUBTLE button, never red solid: the
+			     confirm dialog owns the deliberate red step, and a solid red
+			     resting on the pane just makes it hostile (design.md §4.1 danger
+			     zone). Hidden while cancelling (Resume is above) or ended (there is
+			     nothing left to cancel). -->
+			<div class="flex items-center justify-between gap-4">
+				<a :href="billingUrl" class="text-base text-ink-blue-link hover:underline">
+					Manage plan and billing in Desk
+				</a>
+				<Button
+					v-if="!cancelling && !ended"
+					variant="subtle"
+					theme="red"
+					:label="cancelActionLabel(account.has_mandate)"
+					:loading="busy"
+					@click="doCancel"
+				/>
+			</div>
+		</template>
+	</SettingsPane>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from "vue";
+import { Badge, Button, FeatherIcon } from "frappe-ui";
 import { getAccount, cancelPlanAtPeriodEnd, resumePlan, cancelScheduledDowngrade } from "@/api";
 import {
 	statusLabel,
@@ -208,6 +238,7 @@ import {
 } from "@/account/format.js";
 import { useConfirm } from "@/composables/useConfirm";
 import { errMessage as errMsg } from "@/lib/errors";
+import SettingsPane from "@/components/settings/SettingsPane.vue";
 
 const { confirm } = useConfirm();
 
@@ -249,7 +280,18 @@ const cancelling = computed(() => !!account.value.cancel_at_period_end);
 // fresh payment restores service. Distinct from `cancelling` (still entitled).
 const ENDED_STATUSES = new Set(["Expired", "Cancelled"]);
 const ended = computed(() => ENDED_STATUSES.has(account.value.subscription_status));
-const tone = computed(() => pillTone(account.value.subscription_status, cancelling.value));
+// pillTone still returns the legacy jv-pill-* class names and is shared with
+// other surfaces, so map its verdict onto a Badge theme here rather than
+// changing the shared helper (design.md §3.8 status map).
+const PILL_THEME = {
+	"jv-pill-ok": "green",
+	"jv-pill-warn": "orange",
+	"jv-pill-bad": "red",
+	"jv-pill-muted": "gray",
+};
+const statusTheme = computed(
+	() => PILL_THEME[pillTone(account.value.subscription_status, cancelling.value)] || "gray"
+);
 const busy = ref(false);
 const reauthNotice = ref("");
 
@@ -325,7 +367,7 @@ async function doResume() {
 }
 
 async function doCancelDowngrade() {
-	// Constructive - no danger confirm. Only offered when the server says the
+	// Constructive, so no danger confirm. Only offered when the server says the
 	// scheduled downgrade is revocable (no committed mandate migration).
 	busy.value = true;
 	accountErr.value = "";

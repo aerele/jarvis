@@ -170,7 +170,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onBeforeUnmount } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import * as api from "@/api";
 import { errMessage as _err } from "@/lib/errors";
 import { isCodeOnlyPaste } from "@/llm/pool";
@@ -190,16 +190,43 @@ const props = defineProps({
 // sync). disconnected: the subscription was torn down.
 const emit = defineEmits(["reauthorized", "disconnected"]);
 
-// Subscription providers offered for a fresh DIRECT connect. Model lists mirror
+// Admin-managed model catalog (jarvis.chat.api.get_model_catalog_ui), fetched
+// on mount. subscription_connect_providers is gated on a non-empty
+// auth_profile_id (R7 - openai + google-gemini-cli today), never on
+// supports_subscription, so it never offers a provider whose OAuth blob admin
+// would reject. Falls back to the built-in SUB_PROVIDERS literal below when
+// the fetch fails or hasn't landed yet - never blank.
+const modelCatalog = ref({ subscription_connect_providers: [] });
+onMounted(async () => {
+	try {
+		modelCatalog.value = (await api.getModelCatalogUi()) || modelCatalog.value;
+	} catch (e) {
+		/* built-in SUB_PROVIDERS fallback below covers this */
+	}
+});
+
+// Built-in fallback: subscription providers offered for a fresh DIRECT connect
+// before the catalog fetch lands or if it fails. Model lists mirror
 // jarvis/_subscription_models.py (codex/gemini-cli catalog).
-const SUB_PROVIDERS = [
+const FALLBACK_SUB_PROVIDERS = [
 	{ provider: "OpenAI", models: ["gpt-5.5", "gpt-5.4"] },
 	{ provider: "Google Gemini", models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
 ];
+// Gated server-side on a non-empty auth_profile_id (R7): supports_subscription
+// is true for xai and moonshot too (cliproxy really does serve their
+// subscription models), but only openai/google-gemini-cli support this card's
+// paste-back connect flow - Kimi is device-code and admin's push_oauth_blob
+// rejects a direct xAI blob outright. Data now, not a literal; the rendered
+// list still stays two entries because the seed only sets auth_profile_id for
+// those two.
+const SUB_PROVIDERS = computed(() => {
+	const rows = modelCatalog.value.subscription_connect_providers || [];
+	return rows.length ? rows : FALLBACK_SUB_PROVIDERS;
+});
 function _defaultProvider() {
-	if (SUB_PROVIDERS.some((p) => p.provider === props.status.provider))
+	if (SUB_PROVIDERS.value.some((p) => p.provider === props.status.provider))
 		return props.status.provider;
-	const byModel = SUB_PROVIDERS.find((p) => p.models.includes(props.status.model));
+	const byModel = SUB_PROVIDERS.value.find((p) => p.models.includes(props.status.model));
 	return byModel ? byModel.provider : "OpenAI";
 }
 const pickProvider = ref(_defaultProvider());
@@ -207,9 +234,18 @@ const pickProvider = ref(_defaultProvider());
 // (which only gates NEW connections), so a tenant already stored as "xAI Grok"
 // can reach this flow. xAI shows a bare code, not a callback URL, so the step-2
 // copy has to follow. Shared with LlmPoolEditor via @/llm/pool.
-const codeOnly = computed(() => isCodeOnlyPaste(status.value.provider || pickProvider.value));
+// props.status, NOT status.value: there is no local `status` ref in this file, so the
+// bare name resolved to the browser global `window.status` (a string). `.value` on it
+// is undefined, so this computed threw every time it evaluated - i.e. whenever the
+// paste-back screen rendered, which is the entire xAI bare-code flow. Every other
+// reference here already uses props.status.
+const codeOnly = computed(() => isCodeOnlyPaste(props.status.provider || pickProvider.value));
 const pickModels = computed(
-	() => (SUB_PROVIDERS.find((p) => p.provider === pickProvider.value) || SUB_PROVIDERS[0]).models
+	() =>
+		(
+			SUB_PROVIDERS.value.find((p) => p.provider === pickProvider.value) ||
+			SUB_PROVIDERS.value[0]
+		).models
 );
 const pickModel = ref(
 	pickModels.value.includes(props.status.model) ? props.status.model : pickModels.value[0]
