@@ -95,4 +95,83 @@ describe("support store", () => {
 		s.tickets = [{ name: "T1", status: "Replied" }];
 		expect(s.fingerprintOf("T1")).not.toBe(before);
 	});
+
+	describe("loadThread", () => {
+		beforeEach(() => {
+			const s = useSupportStore();
+			s.tickets = [{ name: "T1", subject: "Help", status: "Open" }];
+		});
+
+		it("unwraps the {ok,data} envelope AND populates thread.ticket from the ticket list", async () => {
+			api.supportGetThread.mockResolvedValue({
+				ok: true,
+				data: {
+					messages: [{ id: 1 }],
+					ticket_attachments: [{ file_url: "/files/a.png" }],
+				},
+			});
+			const s = useSupportStore();
+			await s.loadThread("T1");
+			expect(s.thread.messages).toEqual([{ id: 1 }]);
+			expect(s.thread.attachments).toEqual([{ file_url: "/files/a.png" }]);
+			// The regression this covers: thread.ticket was declared but never
+			// assigned, so the page title/status badge would render blank forever.
+			expect(s.thread.ticket).toEqual({ name: "T1", subject: "Help", status: "Open" });
+		});
+
+		it("toasts on failure and records the error", async () => {
+			api.supportGetThread.mockRejectedValue(new Error("boom"));
+			const s = useSupportStore();
+			await s.loadThread("T1");
+			expect(toast.error).toHaveBeenCalled();
+			expect(s.thread.error).toBe("boom");
+		});
+	});
+
+	describe("createTicket", () => {
+		it("unwraps the ticket name from {ok,data} and returns it", async () => {
+			api.supportCreateTicket.mockResolvedValue({ ok: true, data: { ticket: "T9" } });
+			const s = useSupportStore();
+			const name = await s.createTicket("Subject", "Body");
+			expect(name).toBe("T9");
+		});
+
+		it("toasts and returns null on failure", async () => {
+			api.supportCreateTicket.mockRejectedValue(new Error("nope"));
+			const s = useSupportStore();
+			const name = await s.createTicket("Subject", "Body");
+			expect(name).toBeNull();
+			expect(toast.error).toHaveBeenCalled();
+		});
+	});
+
+	describe("reply", () => {
+		it("returns true on success", async () => {
+			api.supportReply.mockResolvedValue({ ok: true });
+			const s = useSupportStore();
+			expect(await s.reply("T1", "hello")).toBe(true);
+		});
+
+		it("toasts and returns false on failure", async () => {
+			api.supportReply.mockRejectedValue(new Error("fail"));
+			const s = useSupportStore();
+			expect(await s.reply("T1", "hello")).toBe(false);
+			expect(toast.error).toHaveBeenCalled();
+		});
+	});
+
+	describe("closeTicket", () => {
+		it("returns true on success", async () => {
+			api.supportCloseTicket.mockResolvedValue({ ok: true });
+			const s = useSupportStore();
+			expect(await s.closeTicket("T1")).toBe(true);
+		});
+
+		it("toasts and returns false on failure", async () => {
+			api.supportCloseTicket.mockRejectedValue(new Error("fail"));
+			const s = useSupportStore();
+			expect(await s.closeTicket("T1")).toBe(false);
+			expect(toast.error).toHaveBeenCalled();
+		});
+	});
 });

@@ -79,6 +79,9 @@ async function loadThread(name, { quiet = false } = {}) {
 	try {
 		const r = await supportGetThread(name);
 		const d = (r && r.data) || {};
+		// ticketRow can legitimately return null: the list is capped at the 50
+		// most-recently-touched tickets, so a deep-linked older ticket has no row.
+		thread.ticket = ticketRow(name);
 		thread.messages = d.messages || [];
 		thread.attachments = d.ticket_attachments || [];
 		thread.error = "";

@@ -13,7 +13,10 @@ export function renderSupportHtml(rawHtml, ticketName) {
 	if (!rawHtml) return "";
 	const doc = new DOMParser().parseFromString(String(rawHtml), "text/html");
 
-	for (const img of doc.querySelectorAll("img[src]")) {
+	// Iterate every img, not just img[src]: an <img> carrying only srcset and no
+	// src is valid HTML, and srcset is in DOMPurify's default ALLOWED_ATTR, so a
+	// src-only query would let it survive sanitization untouched.
+	for (const img of doc.querySelectorAll("img")) {
 		const src = img.getAttribute("src") || "";
 		if (LOCAL_FILE.test(src)) img.setAttribute("src", supportDownloadUrl(ticketName, src));
 		// srcset would bypass the proxy entirely — the browser may pick a

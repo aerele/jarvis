@@ -37,6 +37,15 @@ describe("renderSupportHtml", () => {
 		expect(out).not.toContain("srcset");
 	});
 
+	it("strips srcset even on an img with no src at all", () => {
+		// A src-less <img srcset> is valid HTML and srcset is in DOMPurify's
+		// default ALLOWED_ATTR, so a querySelectorAll("img[src]") scan would skip
+		// this element entirely and let the browser load straight from srcset,
+		// bypassing the authenticated proxy.
+		const out = renderSupportHtml('<img srcset="/files/x.png 2x">', "TKT-1");
+		expect(out).not.toContain("srcset");
+	});
+
 	it("sanitizes — and sanitizes LAST, so a rewritten node cannot smuggle script", () => {
 		const out = renderSupportHtml(
 			'<img src="/files/a.png" onerror="alert(1)"><script>alert(2)</script>',
