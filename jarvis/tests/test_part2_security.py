@@ -598,6 +598,7 @@ class TestSkillPromotionSurfacing(Part2Base):
 		self.assertIn("Sales User", roles)  # USER_A holds Sales User
 		self.assertNotIn("All", roles)
 		self.assertNotIn("System Manager", roles)
+		self.assertNotIn("Administrator", roles)
 
 	# ── negative gates: the reviewer reads refuse a non-reviewer ────────────────
 	def test_non_reviewer_denied_on_reviewer_reads(self):
@@ -689,4 +690,3 @@ class TestSkillPromotionSurfacing(Part2Base):
 		self.assertEqual(first.get("status"), "Approved")
 		self.assertIs(second.get("ok"), False)
 		self.assertIn("reason", second)
-		self.assertNotIn("Administrator", roles)
