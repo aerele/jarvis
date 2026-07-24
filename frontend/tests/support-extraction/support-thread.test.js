@@ -508,7 +508,17 @@ describe("SupportThreadPage", () => {
 		// flight — mutate the SAME reactive route object this mounted instance
 		// captured via useRoute() (lastRouteState), same as vue-router would.
 		lastRouteState.params.ticket = "T2";
+		// Simulate T2 having already opened (the route watcher's own open("T2")
+		// sets this too, but pin it explicitly so the guard's `!== tName` branch
+		// is deterministic and doesn't depend on watcher timing).
+		storeDouble.thread.ticket = "T2";
 		await w.vm.$nextTick();
+
+		// Snapshot the "T1" loadThread call count BEFORE the reply resolves: mount
+		// and the route-switch's own open("T2") both call loadThread already, so
+		// asserting "never called with T1" would be false regardless of the fix —
+		// only a count that does NOT grow proves the tail refresh was skipped.
+		const t1CallsBefore = storeDouble.loadThread.mock.calls.filter(([n]) => n === "T1").length;
 
 		resolveReply(true);
 		await flushPromises();
@@ -516,6 +526,13 @@ describe("SupportThreadPage", () => {
 		expect(storeDouble.reply).toHaveBeenCalledWith("T1", "please help");
 		expect(storeDouble.uploadTo).toHaveBeenCalledWith("T1", expect.anything());
 		expect(storeDouble.uploadTo).not.toHaveBeenCalledWith("T2", expect.anything());
+
+		// The regression: send()'s post-send DISPLAY refresh must not hijack the
+		// thread back to "T1" once the user is looking at "T2" — the guard
+		// (`store.thread.ticket === tName`) skips loadThread(tName) entirely when
+		// the two disagree. Without the guard this count would grow by one.
+		const t1CallsAfter = storeDouble.loadThread.mock.calls.filter(([n]) => n === "T1").length;
+		expect(t1CallsAfter).toBe(t1CallsBefore);
 	});
 
 	it("keeps text typed during an in-flight send instead of wiping it (I2)", async () => {

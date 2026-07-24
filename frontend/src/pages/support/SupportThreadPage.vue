@@ -417,12 +417,21 @@ async function send() {
 		}
 
 		await store.loadTickets({ quiet: true });
-		await store.loadThread(tName);
-		// Same guard as pollSignal/onFocus/open: advance the watermark only after
-		// a successful refetch. Without it, a reply that posts fine but whose
-		// follow-up loadThread fails would swallow the change — the user's own
-		// reply stays invisible until the next focus-return refetch.
-		if (!store.thread.error) lastPrint = store.fingerprintOf(tName);
+		// The reply/upload above correctly target tName (the ticket we replied
+		// to), but this DISPLAY refresh must not stomp the thread if the user has
+		// since navigated to a different ticket — if store.thread.ticket no
+		// longer matches tName, that other ticket already loaded itself, so skip
+		// the refresh entirely rather than overwrite it with tName's messages
+		// under the new ticket's URL/composer. Race-safe: the store's own
+		// out-of-order guard covers anything past this synchronous check.
+		if (store.thread.ticket === tName) {
+			await store.loadThread(tName);
+			// Same guard as pollSignal/onFocus/open: advance the watermark only after
+			// a successful refetch. Without it, a reply that posts fine but whose
+			// follow-up loadThread fails would swallow the change — the user's own
+			// reply stays invisible until the next focus-return refetch.
+			if (!store.thread.error) lastPrint = store.fingerprintOf(tName);
+		}
 	} finally {
 		sending.value = false;
 	}
