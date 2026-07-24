@@ -5,8 +5,10 @@ import { isWorkspaceReady } from "@/onboarding/readiness.js";
 import ChatView from "@/views/ChatView.vue";
 
 // Both flags are boot-time globals (jarvis/www/jarvis.py:90-95), frozen for the
-// page's life — so this is a plain function, not a reactive check.
-function supportGuard(to, from, next) {
+// page's life — so this is a plain function, not a reactive check. Exported
+// for direct unit testing (see support-guard.test.js) — importing this whole
+// module already pulls in the real vue-router + the two static imports below.
+export function supportGuard(to, from, next) {
 	next(window.support_available && window.has_support_access ? undefined : { name: "Chat" });
 }
 

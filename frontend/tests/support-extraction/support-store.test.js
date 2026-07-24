@@ -79,12 +79,18 @@ describe("support store", () => {
 		expect(s.awaitingCount).toBe(0);
 	});
 
-	it("uploads every file even when one fails", async () => {
+	it("uploads every file even when one fails, and returns the succeeded FILE REFERENCES (not a count)", async () => {
+		// Fix 2: the caller (useStagedFiles's settleUpload) needs to know exactly
+		// which files landed so a retry only re-sends the failures — Helpdesk's
+		// media.upload has no un-attach endpoint, so re-uploading a File that
+		// already succeeded would create a permanent duplicate attachment.
 		api.supportUpload.mockRejectedValueOnce(new Error("too big")).mockResolvedValueOnce({});
+		const fileA = { name: "a.png" };
+		const fileB = { name: "b.png" };
 		const s = useSupportStore();
-		const done = await s.uploadTo("T1", [{ name: "a.png" }, { name: "b.png" }]);
+		const done = await s.uploadTo("T1", [fileA, fileB]);
 		expect(api.supportUpload).toHaveBeenCalledTimes(2);
-		expect(done).toBe(1);
+		expect(done).toEqual([fileB]);
 		expect(toast.error).toHaveBeenCalledTimes(1);
 	});
 

@@ -1,7 +1,11 @@
 <template>
 	<SupportShell :title="row ? row.subject || 'Ticket' : 'Ticket'" :back-to="{ name: 'Support' }">
 		<template #actions>
-			<Badge variant="subtle" :theme="badge.theme" :label="badge.label" />
+			<!-- row is null for a deep-linked ticket outside the newest 50 (P2/out-of-list):
+			     get_thread carries no status at all, so the row is the ONLY source —
+			     rendering "Open" here would be an outright lie for a possibly-Closed
+			     ticket. Hide the badge entirely rather than guess. -->
+			<Badge v-if="row" variant="subtle" :theme="badge.theme" :label="badge.label" />
 			<Button
 				v-if="row && !store.isClosed(row.status)"
 				label="Resolve"
@@ -49,6 +53,14 @@
 							<FeatherIcon name="paperclip" class="size-3.5" />{{ a.title }}
 						</template>
 					</a>
+				</div>
+
+				<!-- Reachable: a brand-new ticket created with an empty body and no
+				     files has zero Communications (the initial text is the HD Ticket's
+				     `description`, not a reply) — without this, the thread area was
+				     just a blank void with no explanation. -->
+				<div v-if="!displayMessages.length" class="jv-sup-center">
+					<p>This is the start of your conversation.</p>
 				</div>
 
 				<Message
@@ -116,7 +128,8 @@ const draft = ref("");
 const sending = ref(false);
 
 // I4: staged-file / object-URL lifecycle shared with SupportNewPage.
-const { files, pending, onFiles, removeFile, snapshotStaged, settleUpload } = useStagedFiles();
+const { files, pending, onFiles, removeFile, snapshotStaged, settleUpload, reset } =
+	useStagedFiles();
 
 const ticketName = computed(() => String(route.params.ticket || ""));
 const row = computed(() => store.ticketRow(ticketName.value));
@@ -152,14 +165,26 @@ function fromSupport(m) {
 // Message's shape and classify by extension, as the page being replaced did.
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|bmp)$/i;
 
+// A File doctype record can legitimately have no file_name (e.g. an upload
+// that never got one attached server-side) — falling back to a blank string
+// would render Message's chip as an unlabeled "📎 " with nothing readable.
+// The URL's own basename is still a usable label; strip query/hash first.
+function basenameOf(url) {
+	if (!url) return "";
+	const clean = url.split("?")[0].split("#")[0];
+	const parts = clean.split("/");
+	return parts[parts.length - 1] || "";
+}
+
 // Shared by per-message attachments AND ticket-level ones below — both are the
 // identical {file_url, file_name} shape from the CP, so classifying them twice
 // would just be the same regex and proxy-URL call copy-pasted.
 function classifyAttachment(a) {
+	const label = a.file_name || basenameOf(a.file_url);
 	return {
 		name: a.file_url, // unique per attachment; used as the render key
-		title: a.file_name,
-		type: IMAGE_EXT.test(a.file_name || "") ? "image" : "file",
+		title: label,
+		type: IMAGE_EXT.test(label) ? "image" : "file",
 		file_url: downloadUrl(a.file_url),
 	};
 }
@@ -229,6 +254,16 @@ let lastPrint = "";
 async function pollSignal() {
 	if (document.hidden) return;
 	await store.loadTickets({ quiet: true });
+	// Out-of-list ticket (deep-linked, outside the newest 50 the list ever
+	// fetches): ticketRow(name) is null forever, so fingerprintOf returns "" and
+	// `print !== lastPrint` below can NEVER fire — the 30s poll would otherwise
+	// be permanently dead for it. Fall back to an unconditional quiet refetch,
+	// same as onFocus, so an agent reply still surfaces.
+	if (!store.ticketRow(ticketName.value)) {
+		await store.loadThread(ticketName.value, { quiet: true });
+		if (!store.thread.error) lastPrint = store.fingerprintOf(ticketName.value);
+		return;
+	}
 	const print = store.fingerprintOf(ticketName.value);
 	if (print && print !== lastPrint) {
 		await store.loadThread(ticketName.value, { quiet: true });
@@ -273,6 +308,10 @@ async function open(name) {
 		store.thread.messages = [];
 		store.thread.attachments = [];
 		store.thread.error = "";
+		// Composer state is per-TICKET: a draft or staged files left over from the
+		// PREVIOUS ticket must not silently ride along and post to this one.
+		draft.value = "";
+		reset();
 	}
 	store.thread.ticket = name;
 	await store.loadThread(name);
@@ -283,12 +322,29 @@ async function open(name) {
 	if (!store.thread.error) lastPrint = store.fingerprintOf(name);
 }
 
+// A synthesized reply for a files-only Send: brief and human — a note the
+// user would plausibly have typed themselves, not a robotic system notice.
+// Never blank: see send() for why an empty body here would skip the reply
+// Communication entirely.
+function synthesizedBodyFor(staged) {
+	return staged.length === 1
+		? `Sharing a file: ${staged[0].name}`
+		: `Sharing ${staged.length} files`;
+}
+
 async function send() {
 	if (!canSend.value) return;
 	sending.value = true;
-	const body = draft.value.trim();
+	const userBody = draft.value.trim();
 	// Snapshot BEFORE the awaited reply/uploadTo below — see useStagedFiles.
 	const staged = snapshotStaged();
+	// CRITICAL fix: canSend arms on files alone, but a reply Communication is
+	// what actually reopens a Resolved/Closed ticket AND notifies the agent
+	// (helpdesk_client.py's post_reply: "Received" => auto-reopen) — media.upload
+	// is a bare File attach with no Communication at all. Without this, an
+	// attachment-only Send looked like success but silently did neither.
+	const synthesized = !userBody && staged.length > 0;
+	const body = synthesized ? synthesizedBodyFor(staged) : userBody;
 	try {
 		// Body first, attachments second: media.upload attaches to an existing
 		// ticket, and posting the text is what actually reopens a resolved one.
@@ -298,12 +354,14 @@ async function send() {
 			// I2: only clear if the draft still holds exactly what was posted —
 			// a blanket clear would wipe text the user kept typing during the
 			// in-flight reply. Same reference-safety idea as the staged files.
-			if (draft.value.trim() === body) draft.value = "";
+			// A SYNTHESIZED body was never in the draft (the user typed nothing),
+			// so it must never be compared against or clear draft.value.
+			if (!synthesized && draft.value.trim() === body) draft.value = "";
 		}
 
 		if (staged.length) {
 			const uploaded = await store.uploadTo(ticketName.value, staged);
-			settleUpload(staged, uploaded);
+			settleUpload(uploaded);
 		}
 
 		await store.loadTickets({ quiet: true });

@@ -56,24 +56,32 @@ export function useStagedFiles() {
 		return files.value.slice();
 	}
 
-	// Call once the upload of a `snapshotStaged()` batch settles, with the
-	// COUNT of successes. uploadTo reports a count, not which files made it,
-	// and Helpdesk's media.upload has no un-attach to undo a partial batch —
-	// so guessing which File to drop would be worse than doing nothing. Only
-	// clear/revoke when EVERY staged file uploaded; on any shortfall, leave
-	// ALL staged files in place so the user can just hit Send/Create again
-	// instead of re-picking from disk. Removing by reference (never a blanket
-	// `files.value = []`) means a file attached WHILE the send was in flight —
-	// never in `staged` — survives either branch untouched, and its preview
-	// is never revoked out from under it.
-	function settleUpload(staged, uploadedCount) {
-		if (uploadedCount === staged.length) {
-			files.value = files.value.filter((f) => !staged.includes(f));
-			staged.forEach(releasePreview);
-		}
+	// Call once the upload of a `snapshotStaged()` batch settles, with the array
+	// of File REFERENCES that actually succeeded — not a count. uploadTo
+	// iterates per-file with its own try/catch, so it always knows exactly which
+	// ones landed; Helpdesk's media.upload has no un-attach endpoint, so
+	// re-uploading a File that already succeeded on a retry would create a
+	// PERMANENT duplicate attachment. Remove-and-revoke exactly the succeeded
+	// files by reference, leaving any failures still staged for the next
+	// Send/Create. A file attached WHILE the send was in flight — never in
+	// `uploaded` — survives untouched either way, and its preview is never
+	// revoked out from under it.
+	function settleUpload(uploaded) {
+		const succeeded = new Set(uploaded || []);
+		files.value = files.value.filter((f) => !succeeded.has(f));
+		(uploaded || []).forEach(releasePreview);
+	}
+
+	// Composer state is per-TICKET, not per-page: switching to a different
+	// ticket must not carry a draft or staged files over to it (see
+	// SupportThreadPage's open()) — otherwise text/files meant for the ticket
+	// just left can end up posted to the new one on the next Send.
+	function reset() {
+		files.value.forEach(releasePreview);
+		files.value = [];
 	}
 
 	onUnmounted(() => files.value.forEach(releasePreview));
 
-	return { files, pending, onFiles, removeFile, snapshotStaged, settleUpload };
+	return { files, pending, onFiles, removeFile, snapshotStaged, settleUpload, reset };
 }

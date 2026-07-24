@@ -38,7 +38,10 @@ vi.mock("@/stores/support", () => ({
 
 import SupportListPage from "@/pages/support/SupportListPage.vue";
 
-const ListPageStub = { props: ["rows", "total", "filters", "sort"], template: "<div/>" };
+const ListPageStub = {
+	props: ["rows", "total", "filters", "sort", "emptyState"],
+	template: "<div/>",
+};
 const opts = {
 	global: {
 		stubs: {
@@ -153,6 +156,26 @@ describe("SupportListPage", () => {
 		w.findComponent(ListPageStub).vm.$emit("update:page-length", 50);
 		await w.vm.$nextTick();
 		expect(w.findComponent(ListPageStub).props("rows")).toHaveLength(50);
+	});
+
+	it("adds a 50-cap disclaimer when a client search yields nothing and exactly 50 tickets are loaded (minor)", async () => {
+		// list_tickets is capped at the newest 50 server-side (helpdesk_client.py)
+		// and search is client-side over whatever's loaded — a zero-match search
+		// here must not read as "that ticket doesn't exist".
+		storeDouble.tickets = makeRows(50);
+		const w = mount(SupportListPage, opts);
+		await applyFilters(w, { search: "no-such-ticket-xyz" });
+		expect(w.findComponent(ListPageStub).props("emptyState").description).toContain(
+			"50 most recent"
+		);
+	});
+
+	it("does NOT add the 50-cap disclaimer when fewer than 50 tickets are loaded", async () => {
+		const w = mountList(); // 5 rows
+		await applyFilters(w, { search: "no-such-ticket-xyz" });
+		expect(w.findComponent(ListPageStub).props("emptyState").description).not.toContain(
+			"50 most recent"
+		);
 	});
 
 	it("a refresh (store.tickets reassigned) does not collapse pagination back to one page", async () => {

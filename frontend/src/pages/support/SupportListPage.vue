@@ -179,12 +179,20 @@ const rows = computed(() => filtered.value.slice(0, shown.value));
 // poll landed) mid-scroll.
 watch([() => filters.status, () => filters.search, sort], () => (shown.value = pageLength.value));
 
+// list_tickets is capped at the newest 50 (helpdesk_client.py) and search is
+// client-side over whatever's loaded — so a zero-match search when exactly 50
+// are loaded must not read as "that ticket doesn't exist": an older one may
+// simply be outside the window this page ever fetched.
+const CAP_NOTE = " Showing your 50 most recent tickets — an older one may not appear here.";
+
 const emptyState = computed(() =>
 	filters.search || filters.status
 		? {
 				icon: "life-buoy",
 				title: "No tickets match",
-				description: "Try a different search or status.",
+				description:
+					"Try a different search or status." +
+					(filters.search && store.tickets.length === 50 ? CAP_NOTE : ""),
 		  }
 		: {
 				icon: "life-buoy",

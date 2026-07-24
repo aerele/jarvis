@@ -11,7 +11,9 @@ vi.mock("frappe-ui", () => ({
 
 const storeDouble = {
 	createTicket: vi.fn(async () => "TKT-9"),
-	uploadTo: vi.fn(async () => 1),
+	// Fix 2: uploadTo returns the succeeded FILE REFERENCES, not a count — a
+	// realistic default double is "everything I was given succeeded".
+	uploadTo: vi.fn(async (name, files) => files),
 	loadTickets: vi.fn(),
 };
 vi.mock("@/stores/support", () => ({ useSupportStore: () => storeDouble }));
@@ -64,9 +66,9 @@ describe("SupportNewPage", () => {
 			order.push("create");
 			return "TKT-9";
 		});
-		storeDouble.uploadTo.mockImplementation(async () => {
+		storeDouble.uploadTo.mockImplementation(async (name, files) => {
 			order.push("upload");
-			return 1;
+			return files;
 		});
 		const w = mount(SupportNewPage, opts);
 		await w.find("input").setValue("Broken invoice");
@@ -106,8 +108,21 @@ describe("SupportNewPage", () => {
 		expect(w.find("input").element.value).toBe("Invoice total is wrong");
 	});
 
+	it("takes the first value when a query param is repeated (vue-router hands back an array)", () => {
+		// Minor: ?subject=a&subject=b makes vue-router's route.query.subject an
+		// ARRAY, not a string — String([...]) would silently join it with a
+		// comma instead of taking the first value.
+		query = {
+			subject: ["First subject", "Second subject"],
+			body: ["First body", "Second body"],
+		};
+		const w = mount(SupportNewPage, opts);
+		expect(w.find("input").element.value).toBe("First subject");
+		expect(w.findComponent({ name: "Composer" }).props("modelValue")).toBe("First body");
+	});
+
 	it("keeps staged files pending when uploadTo reports fewer successes than requested", async () => {
-		// Proof of fix 1: uploadTo returns a COUNT, not per-file results. A
+		// Proof of fix 2: uploadTo returns the succeeded FILE REFERENCES. A
 		// silent `files.value = []` here would discard attachments the user
 		// still needs to retry after a transient upload failure, even though the
 		// ticket itself was created successfully.
@@ -117,7 +132,7 @@ describe("SupportNewPage", () => {
 		// stale `createTicket` resolving to null would short-circuit before
 		// uploadTo is ever reached and pass this test for the wrong reason.
 		storeDouble.createTicket = vi.fn(async () => "TKT-9");
-		storeDouble.uploadTo = vi.fn(async () => 0);
+		storeDouble.uploadTo = vi.fn(async () => []); // nothing succeeded
 		const w = mount(SupportNewPage, opts);
 		await w.find("input").setValue("Broken invoice");
 		w.findComponent({ name: "Composer" }).vm.$emit("files-added", [

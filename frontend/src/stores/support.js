@@ -166,18 +166,21 @@ async function closeTicket(name) {
 
 // Uploads happen AFTER the ticket exists — media.upload takes a ticket name and
 // attaches server-side immediately, with no un-attach endpoint. Files are
-// uploaded one at a time so a single failure doesn't discard the rest.
+// uploaded one at a time so a single failure doesn't discard the rest. Returns
+// the File REFERENCES that actually succeeded (not a count) — the caller
+// (useStagedFiles's settleUpload) needs to know exactly which ones landed so a
+// retry re-sends only the failures, never the ones already attached.
 async function uploadTo(name, files) {
-	let done = 0;
+	const succeeded = [];
 	for (const f of files || []) {
 		try {
 			await supportUpload(name, f);
-			done += 1;
+			succeeded.push(f);
 		} catch (e) {
 			toast.error(`Couldn't attach ${f.name}: ${errMsg(e)}`);
 		}
 	}
-	return done;
+	return succeeded;
 }
 
 const store = reactive({

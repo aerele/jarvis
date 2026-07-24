@@ -46,8 +46,14 @@ const store = useSupportStore();
 // Arriving from chat: the reference is carried as READABLE, EDITABLE body text.
 // create_ticket takes only (subject, body) — there are no context params, and
 // the tenant is derived server-side from the API key.
-const subject = ref(String(route.query.subject || ""));
-const body = ref(String(route.query.body || ""));
+// A repeated query param (?subject=a&subject=b) makes vue-router hand back an
+// ARRAY, not a string — String([...]) would silently join it with commas
+// instead of taking the first value, so unwrap before stringifying.
+function firstOf(v) {
+	return Array.isArray(v) ? v[0] : v;
+}
+const subject = ref(String(firstOf(route.query.subject) || ""));
+const body = ref(String(firstOf(route.query.body) || ""));
 
 const creating = ref(false);
 
@@ -71,7 +77,7 @@ async function create() {
 
 		if (staged.length) {
 			const uploaded = await store.uploadTo(name, staged);
-			settleUpload(staged, uploaded);
+			settleUpload(uploaded);
 		}
 
 		// Unlike send(), this page navigates away on success — so "leave staged

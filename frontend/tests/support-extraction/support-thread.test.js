@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 // vi.mock is HOISTED; vi.doMock is not. Mocking the store from inside a helper
@@ -50,7 +50,9 @@ const storeDouble = {
 	loadThread: vi.fn(),
 	closeTicket: vi.fn(),
 	reply: vi.fn(async () => true),
-	uploadTo: vi.fn(async () => 1),
+	// Fix 2: uploadTo returns the succeeded FILE REFERENCES, not a count — a
+	// realistic default double is "everything I was given succeeded".
+	uploadTo: vi.fn(async (name, files) => files),
 };
 vi.mock("@/stores/support", () => ({ useSupportStore: () => storeDouble }));
 
@@ -179,6 +181,21 @@ describe("SupportThreadPage", () => {
 		expect(chip.attributes("href")).toContain("jarvis.support.media.download");
 	});
 
+	it("falls back to the file_url basename when file_name is missing (minor)", () => {
+		// A File record with no file_name would otherwise render Message's chip
+		// as an unlabeled "📎 " — the URL's own basename is still readable.
+		const w = mountWith([
+			{
+				sent_or_received: "Sent",
+				content: "<p>see attached</p>",
+				attachments: [{ file_url: "/files/abc123.pdf" }],
+			},
+		]);
+		const atts = w.findComponent({ name: "Message" }).props("attachments");
+		expect(atts[0].title).toBe("abc123.pdf");
+		expect(atts[0].type).toBe("file");
+	});
+
 	it("links ticket-level attachments through the authenticated proxy", () => {
 		storeDouble.thread.attachments = [{ file_url: "/files/spec.pdf", file_name: "spec.pdf" }];
 		const w = mountWith([{ sent_or_received: "Sent", content: "<p>hi</p>" }]);
@@ -213,6 +230,16 @@ describe("SupportThreadPage", () => {
 		storeDouble.thread.attachments = [];
 	});
 
+	it("shows an empty-conversation state instead of a blank void when there are no messages yet (minor)", () => {
+		// Reachable: a brand-new ticket created with an empty body and no files
+		// has zero Communications (the initial text is the HD Ticket's
+		// `description`, not a reply).
+		storeDouble.thread.loading = false;
+		storeDouble.thread.error = "";
+		const w = mountWith([]);
+		expect(w.text()).toContain("start of your conversation");
+	});
+
 	it("keeps the composer enabled on a resolved ticket and says replying reopens it", () => {
 		// There is no reopen endpoint — a reply is the ONLY way back. Disabling
 		// the composer here would strand the user with no path forward.
@@ -242,9 +269,9 @@ describe("SupportThreadPage", () => {
 			order.push("reply");
 			return true;
 		});
-		storeDouble.uploadTo = vi.fn(async () => {
+		storeDouble.uploadTo = vi.fn(async (name, files) => {
 			order.push("upload");
-			return 1;
+			return files;
 		});
 
 		const c = w.findComponent({ name: "Composer" });
@@ -264,7 +291,7 @@ describe("SupportThreadPage", () => {
 		storeDouble.reply = vi.fn(async () => false);
 		// Fresh spy: a prior test's uploadTo call history must not leak in here —
 		// nothing in this file resets mocks between tests.
-		storeDouble.uploadTo = vi.fn(async () => 1);
+		storeDouble.uploadTo = vi.fn(async (name, files) => files);
 		const w = mountWith([]);
 		const c = w.findComponent({ name: "Composer" });
 		c.vm.$emit("update:modelValue", "please help");
@@ -302,6 +329,30 @@ describe("SupportThreadPage", () => {
 		expect(c.props("canSend")).toBe(true);
 	});
 
+	it("hides the status badge and shows no reopen disclaimer for an out-of-list ticket (fix 3, row=null)", () => {
+		// A deep-linked ticket outside the newest 50 the list ever fetches has no
+		// row at all — get_thread carries no status, so the row is the ONLY
+		// source. Rendering "Open" (badgeFor(null)'s catch-all) would be an
+		// outright lie for a possibly-Closed ticket. mountWith() always wraps a
+		// row into `tickets`, so mount directly with an EMPTY list (matches the
+		// double's `ticketRow: () => tickets[0] || null`).
+		storeDouble.tickets = [];
+		storeDouble.thread.messages = [];
+		storeDouble.thread.loading = false;
+		storeDouble.thread.error = "";
+		storeDouble.loadThread = vi.fn(async () => {});
+		storeDouble.loadTickets = vi.fn(async () => {});
+		routeTicket = "T1";
+		const w = mount(SupportThreadPage, {
+			global: {
+				stubs: { SupportShell: { template: "<div><slot name='actions'/><slot/></div>" } },
+			},
+		});
+		expect(w.findComponent({ name: "Badge" }).exists()).toBe(false);
+		const c = w.findComponent({ name: "Composer" });
+		expect(c.props("disclaimer")).toBe("");
+	});
+
 	it("shows no disclaimer for an open (non-resolved, non-closed) ticket", () => {
 		// Only the Resolved positive case was covered before; an unconditional
 		// disclaimer (e.g. dropping the ternary's else branch) would pass that
@@ -312,10 +363,10 @@ describe("SupportThreadPage", () => {
 	});
 
 	it("keeps staged files pending when uploadTo reports fewer successes than requested", async () => {
-		// Proof of fix 1: uploadTo returns a COUNT, not per-file results. A
+		// Proof of fix 2: uploadTo returns the succeeded FILE REFERENCES. A
 		// silent `files.value = []` here would discard attachments the user
 		// still needs to retry after a transient upload failure.
-		storeDouble.uploadTo = vi.fn(async () => 0);
+		storeDouble.uploadTo = vi.fn(async () => []); // nothing succeeded
 		const w = mountWith([]);
 		const c = w.findComponent({ name: "Composer" });
 		c.vm.$emit("files-added", [
@@ -380,5 +431,253 @@ describe("SupportThreadPage", () => {
 		await flushPromises();
 
 		expect(c.props("modelValue")).toBe("please help more");
+	});
+});
+
+describe("attachment-only Send synthesizes a reply body (fix 1)", () => {
+	beforeEach(() => {
+		storeDouble.thread.ticket = "T1";
+		storeDouble.thread.messages = [];
+		storeDouble.thread.attachments = [];
+		storeDouble.thread.error = "";
+		storeDouble.loadThread = vi.fn(async () => {});
+		storeDouble.loadTickets = vi.fn(async () => {});
+		storeDouble.fingerprintOf = () => "x";
+	});
+
+	it("calls store.reply with a non-empty body BEFORE store.uploadTo when Send fires with files but no typed text", async () => {
+		// CRITICAL: canSend arms on files alone, but only the reply Communication
+		// reopens a Resolved/Closed ticket and notifies the agent — media.upload
+		// is a bare File attach with no Communication at all. Without the
+		// synthesized body, a files-only Send skipped `if (body)` entirely and
+		// never posted a reply, while still reporting "success".
+		const order = [];
+		storeDouble.reply = vi.fn(async (name, body) => {
+			order.push(["reply", body]);
+			return true;
+		});
+		storeDouble.uploadTo = vi.fn(async (name, files) => {
+			order.push(["upload"]);
+			return files;
+		});
+
+		const w = mountWith([]);
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("files-added", [{ name: "shot.png", type: "image/png" }]);
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(order[0][0]).toBe("reply");
+		expect(typeof order[0][1]).toBe("string");
+		expect(order[0][1].length).toBeGreaterThan(0);
+		expect(order[1][0]).toBe("upload");
+	});
+});
+
+describe("uploadTo returns succeeded File references, not a count (fix 2)", () => {
+	beforeEach(() => {
+		storeDouble.thread.ticket = "T1";
+		storeDouble.thread.messages = [];
+		storeDouble.thread.attachments = [];
+		storeDouble.thread.error = "";
+		storeDouble.loadThread = vi.fn(async () => {});
+		storeDouble.loadTickets = vi.fn(async () => {});
+		storeDouble.fingerprintOf = () => "x";
+		storeDouble.reply = vi.fn(async () => true);
+	});
+
+	it("keeps only the failed file staged after a partial failure, and a retry re-uploads just that one", async () => {
+		// media.upload creates a NEW File per call and there is no un-attach
+		// endpoint — re-uploading a file that already landed would be a
+		// permanent duplicate attachment. uploadTo already knows exactly which
+		// file failed; settleUpload must remove only the succeeded ones.
+		// Filter by NAME, not object identity: `files.value` is a Vue ref, so
+		// elements read back out of it are reactive proxies of what was staged —
+		// not the exact literal objects this test holds.
+		storeDouble.uploadTo = vi.fn(async (name, files) =>
+			files.filter((f) => f.name !== "b.png")
+		);
+
+		const w = mountWith([]);
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("files-added", [
+			{ name: "a.png", type: "image/png" },
+			{ name: "b.png", type: "image/png" },
+		]);
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(c.props("attachments")).toHaveLength(1);
+		expect(c.props("attachments")[0].file_name).toBe("b.png");
+
+		storeDouble.uploadTo.mockClear();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		const secondCall = storeDouble.uploadTo.mock.calls[0];
+		expect(secondCall[0]).toBe("T1");
+		expect(secondCall[1]).toHaveLength(1);
+		expect(secondCall[1][0].name).toBe("b.png");
+	});
+});
+
+describe("settleUpload full-success branch", () => {
+	it("clears the staged files and revokes every preview when the whole batch uploads", async () => {
+		// The shortfall branch is already pinned above; the success branch was
+		// not — deleting it (e.g. reverting to the old "only clear on exact
+		// count match" logic backwards) still passed every other test.
+		storeDouble.thread.ticket = "T1";
+		storeDouble.thread.messages = [];
+		storeDouble.thread.attachments = [];
+		storeDouble.thread.error = "";
+		storeDouble.loadThread = vi.fn(async () => {});
+		storeDouble.loadTickets = vi.fn(async () => {});
+		storeDouble.fingerprintOf = () => "x";
+		storeDouble.reply = vi.fn(async () => true);
+		storeDouble.uploadTo = vi.fn(async (name, files) => files);
+
+		const revoke = vi.fn();
+		URL.revokeObjectURL = revoke;
+
+		const w = mountWith([]);
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("files-added", [
+			{ name: "a.png", type: "image/png" },
+			{ name: "b.png", type: "image/png" },
+		]);
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(c.props("attachments")).toHaveLength(0);
+		expect(revoke).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("poll / focus / watermark subsystem (fix 3 + 4)", () => {
+	async function flushMicrotasks() {
+		// Fake timers don't touch the microtask queue — draining a few ticks
+		// lets the chained `await`s in onMounted/open/pollSignal settle without
+		// depending on @vue/test-utils' flushPromises, which is setTimeout-based
+		// and would otherwise never resolve while fake timers are active.
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+	}
+
+	beforeEach(() => {
+		storeDouble.tickets = [{ name: "T1", subject: "x", status: "Open" }];
+		storeDouble.thread.ticket = "T1";
+		storeDouble.thread.messages = [];
+		storeDouble.thread.attachments = [];
+		storeDouble.thread.error = "";
+		storeDouble.loadThread = vi.fn(async () => {});
+		storeDouble.loadTickets = vi.fn(async () => {});
+		storeDouble.fingerprintOf = vi.fn(() => "x");
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		Object.defineProperty(document, "hidden", { value: false, configurable: true });
+	});
+
+	async function mountAndSettle() {
+		const w = mountWith([]);
+		await vi.advanceTimersByTimeAsync(0);
+		return w;
+	}
+
+	it("fires loadTickets on the 30s interval, and refetches the thread only when the fingerprint changed", async () => {
+		const w = await mountAndSettle();
+		storeDouble.loadTickets.mockClear();
+		storeDouble.loadThread.mockClear();
+
+		await vi.advanceTimersByTimeAsync(30000);
+		expect(storeDouble.loadTickets).toHaveBeenCalledTimes(1);
+		expect(storeDouble.loadThread).not.toHaveBeenCalled(); // fingerprint unchanged ("x")
+
+		storeDouble.fingerprintOf = vi.fn(() => "y"); // the row changed
+		await vi.advanceTimersByTimeAsync(30000);
+		expect(storeDouble.loadThread).toHaveBeenCalledWith("T1", { quiet: true });
+		w.unmount();
+	});
+
+	it("skips the poll entirely while document.hidden is true", async () => {
+		const w = await mountAndSettle();
+		storeDouble.loadTickets.mockClear();
+		Object.defineProperty(document, "hidden", { value: true, configurable: true });
+
+		await vi.advanceTimersByTimeAsync(30000);
+		expect(storeDouble.loadTickets).not.toHaveBeenCalled();
+		w.unmount();
+	});
+
+	it("visibilitychange triggers an unconditional refetch even when the fingerprint is unchanged", async () => {
+		const w = await mountAndSettle();
+		// `document` is shared across the WHOLE test file, so other mounted (and
+		// not explicitly unmounted) instances may also react to this dispatch —
+		// assert THIS component's effect happened via a call-count delta and the
+		// expected args, not an exact global count.
+		const ticketsCallsBefore = storeDouble.loadTickets.mock.calls.length;
+		const threadCallsBefore = storeDouble.loadThread.mock.calls.length;
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushMicrotasks();
+
+		expect(storeDouble.loadTickets.mock.calls.length).toBeGreaterThan(ticketsCallsBefore);
+		expect(storeDouble.loadThread.mock.calls.length).toBeGreaterThan(threadCallsBefore);
+		expect(storeDouble.loadThread).toHaveBeenCalledWith("T1", { quiet: true });
+		w.unmount();
+	});
+
+	it("advances the watermark only when the refetch does not error, so a failed quiet poll doesn't stall it forever", async () => {
+		storeDouble.fingerprintOf = vi.fn(() => "y"); // always reads as "changed"
+		storeDouble.loadThread = vi.fn(async () => {
+			storeDouble.thread.error = "boom";
+		});
+		const w = await mountAndSettle();
+		storeDouble.loadThread.mockClear();
+
+		await vi.advanceTimersByTimeAsync(30000);
+		expect(storeDouble.loadThread).toHaveBeenCalledTimes(1);
+
+		// lastPrint never advanced past "" (the refetch errored), so the SAME
+		// fingerprint "y" must still register as "changed" on the next tick.
+		await vi.advanceTimersByTimeAsync(30000);
+		expect(storeDouble.loadThread).toHaveBeenCalledTimes(2);
+		storeDouble.thread.error = "";
+		w.unmount();
+	});
+
+	it("falls back to an unconditional quiet refetch for an out-of-list ticket (row=null), where the fingerprint can never change", async () => {
+		// fingerprintOf(name) returns "" forever when ticketRow(name) is null (a
+		// deep-linked ticket outside the newest 50) — `print !== lastPrint` can
+		// never fire, so without the row=null fallback this poll is permanently
+		// dead for exactly the ticket that most needs it (an agent reply is the
+		// only way it'd ever change).
+		// mountWith()/mountAndSettle() always force a truthy ticket into
+		// `storeDouble.tickets`, so mount directly instead — matches the double's
+		// `ticketRow: () => tickets[0] || null`.
+		storeDouble.tickets = [];
+		storeDouble.fingerprintOf = vi.fn(() => "");
+		const w = mount(SupportThreadPage, {
+			global: {
+				stubs: { SupportShell: { template: "<div><slot name='actions'/><slot/></div>" } },
+			},
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		storeDouble.loadThread.mockClear();
+
+		await vi.advanceTimersByTimeAsync(30000);
+		expect(storeDouble.loadThread).toHaveBeenCalledWith("T1", { quiet: true });
+		w.unmount();
+	});
+
+	it("clears the interval on unmount", async () => {
+		const clearSpy = vi.spyOn(global, "clearInterval");
+		const w = await mountAndSettle();
+		w.unmount();
+		expect(clearSpy).toHaveBeenCalled();
+		clearSpy.mockRestore();
 	});
 });
