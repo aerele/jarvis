@@ -30,9 +30,9 @@ vi.mock("@/stores/support", () => ({
 	useSupportStore: () => storeDouble,
 	badgeFor: (status) => {
 		if (status === "Replied" || status === "Resolved")
-			return { label: "Awaiting you", tone: "awaiting", theme: "orange" };
-		if (status === "Closed") return { label: "Closed", tone: "closed", theme: "gray" };
-		return { label: "Open", tone: "open", theme: "blue" };
+			return { label: "Awaiting you", theme: "orange" };
+		if (status === "Closed") return { label: "Closed", theme: "gray" };
+		return { label: "Open", theme: "blue" };
 	},
 }));
 

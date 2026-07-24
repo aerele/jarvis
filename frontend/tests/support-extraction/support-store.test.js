@@ -102,7 +102,7 @@ describe("support store", () => {
 			s.tickets = [{ name: "T1", subject: "Help", status: "Open" }];
 		});
 
-		it("unwraps the {ok,data} envelope AND populates thread.ticket from the ticket list", async () => {
+		it("unwraps the {ok,data} envelope AND sets thread.ticket to the ticket NAME", async () => {
 			api.supportGetThread.mockResolvedValue({
 				ok: true,
 				data: {
@@ -114,9 +114,12 @@ describe("support store", () => {
 			await s.loadThread("T1");
 			expect(s.thread.messages).toEqual([{ id: 1 }]);
 			expect(s.thread.attachments).toEqual([{ file_url: "/files/a.png" }]);
-			// The regression this covers: thread.ticket was declared but never
-			// assigned, so the page title/status badge would render blank forever.
-			expect(s.thread.ticket).toEqual({ name: "T1", subject: "Help", status: "Open" });
+			// M6: thread.ticket is the "which ticket is loaded" marker the page
+			// compares against to detect a switch (C1) — it must always be the
+			// NAME, never the row (ticketRow()/fingerprintOf() already cover row
+			// data, and a row object here broke that comparison for the next
+			// open() call).
+			expect(s.thread.ticket).toBe("T1");
 		});
 
 		it("toasts on failure and records the error", async () => {

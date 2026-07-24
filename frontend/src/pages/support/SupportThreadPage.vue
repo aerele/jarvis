@@ -5,8 +5,8 @@
 			<Button
 				v-if="row && !store.isClosed(row.status)"
 				label="Resolve"
-				:loading="resolving"
-				@click="resolve"
+				:loading="closing"
+				@click="closeThisTicket"
 			/>
 		</template>
 
@@ -52,18 +52,18 @@
 				</div>
 
 				<Message
-					v-for="m in store.thread.messages"
-					:key="m.name"
-					:variant="fromSupport(m) ? 'row' : 'bubble'"
-					:html="renderSupportHtml(m.content, ticketName)"
+					v-for="m in displayMessages"
+					:key="m.key"
+					:variant="m.variant"
+					:html="m.html"
 					body-class="jv-html"
-					:sender="fromSupport(m) ? 'Support' : ''"
-					:attachments="attachmentsOf(m)"
-					:timestamp="shortTime(m.creation)"
-					:timestamp-full="fullTime(m.creation)"
+					:sender="m.sender"
+					:attachments="m.attachments"
+					:timestamp="m.timestamp"
+					:timestamp-full="m.timestampFull"
 					:copyable="false"
 				>
-					<template v-if="fromSupport(m)" #avatar>
+					<template v-if="m.fromSupport" #avatar>
 						<div class="jv-sup-avatar">S</div>
 					</template>
 				</Message>
@@ -99,6 +99,8 @@ import SupportShell from "@/components/support/SupportShell.vue";
 import { renderSupportHtml } from "@/lib/supportHtml";
 import { supportDownloadUrl } from "@/api";
 import { useSupportStore } from "@/stores/support";
+import { useStagedFiles } from "@/composables/useStagedFiles";
+import { formatDate, exactDate } from "@/utils/datetime";
 
 // The #avatar slot renders a round human avatar, deliberately unlike Jarvis's
 // gradient square: human-vs-AI must never be ambiguous. The rationale lives
@@ -109,38 +111,16 @@ import { useSupportStore } from "@/stores/support";
 
 const route = useRoute();
 const store = useSupportStore();
-const resolving = ref(false);
+const closing = ref(false);
 const draft = ref("");
 const sending = ref(false);
-const files = ref([]); // local File objects — uploaded on submit, never before
+
+// I4: staged-file / object-URL lifecycle shared with SupportNewPage.
+const { files, pending, onFiles, removeFile, snapshotStaged, settleUpload } = useStagedFiles();
 
 const ticketName = computed(() => String(route.params.ticket || ""));
 const row = computed(() => store.ticketRow(ticketName.value));
 const badge = computed(() => store.badgeFor(row.value && row.value.status));
-
-// Composer takes DISPLAY objects, never File objects. Object URLs are created
-// once per file and revoked on removal/submit so a long thread can't leak them.
-const previews = new Map();
-function previewFor(f) {
-	if (!previews.has(f)) {
-		previews.set(f, /^image\//.test(f.type) ? URL.createObjectURL(f) : "");
-	}
-	return previews.get(f);
-}
-function releasePreview(f) {
-	const url = previews.get(f);
-	if (url) URL.revokeObjectURL(url);
-	previews.delete(f);
-}
-
-const pending = computed(() =>
-	files.value.map((f, i) => ({
-		key: `${f.name}-${i}`,
-		file_name: f.name,
-		preview_url: previewFor(f),
-		removable: true,
-	}))
-);
 
 const canSend = computed(() => !sending.value && (!!draft.value.trim() || files.value.length > 0));
 
@@ -151,16 +131,6 @@ const disclaimer = computed(() =>
 		? "Replying reopens this ticket."
 		: ""
 );
-
-function onFiles(added) {
-	files.value = files.value.concat(added);
-}
-
-function removeFile(i) {
-	const f = files.value[i];
-	if (f) releasePreview(f);
-	files.value = files.value.filter((_, n) => n !== i);
-}
 
 // "Sent" means the support side sent it (helpdesk_client.py queries
 // sent_or_received directly). Anything else — including a missing value — is
@@ -209,26 +179,43 @@ function downloadUrl(fileUrl) {
 	return supportDownloadUrl(ticketName.value, fileUrl);
 }
 
-function shortTime(v) {
-	if (!v) return "";
-	return new Date(v.replace(" ", "T")).toLocaleTimeString([], {
-		hour: "numeric",
-		minute: "2-digit",
-	});
-}
-function fullTime(v) {
-	if (!v) return "";
-	return new Date(v.replace(" ", "T")).toLocaleString();
-}
+// I3: display objects computed ONCE per messages/ticket change, not re-parsed
+// and re-sanitized inline in the v-for on every render — the template also
+// depends on `draft` and on `row`, so an inline call re-ran on every keystroke.
+// shortTime/fullTime route through datetime.js's dayjsLocal-backed helpers
+// (I5): Frappe's `creation` is a naive SITE-timezone string, and parsing it
+// with `new Date()` (the previous implementation) treats it as browser-local,
+// showing the wrong time for any viewer whose timezone differs from the site's
+// — the exact bug datetime.js exists to fix, same as the sibling list page.
+const displayMessages = computed(() =>
+	store.thread.messages.map((m) => {
+		const support = fromSupport(m);
+		return {
+			key: m.name,
+			variant: support ? "row" : "bubble",
+			html: renderSupportHtml(m.content, ticketName.value),
+			attachments: attachmentsOf(m),
+			sender: support ? "Support" : "",
+			timestamp: formatDate(m.creation, "h:mm A"),
+			timestampFull: exactDate(m.creation),
+			fromSupport: support,
+		};
+	})
+);
 
-async function resolve() {
-	resolving.value = true;
+// M10: named for what this actually does — it calls store.closeTicket and the
+// server sets status Closed — not the button's visible "Resolve" label.
+// "Resolved" is a distinct status in the awaiting-set contract (see the
+// store), so the two words are NOT interchangeable; the label-vs-action
+// wording mismatch is a deliberate, separate UX decision for a later pass.
+async function closeThisTicket() {
+	closing.value = true;
 	const ok = await store.closeTicket(ticketName.value);
 	if (ok) {
 		toast.success("Ticket resolved");
 		await store.loadTickets({ quiet: true });
 	}
-	resolving.value = false;
+	closing.value = false;
 }
 
 // ── live thread, cost-aware ────────────────────────────────────────────────
@@ -256,7 +243,9 @@ async function pollSignal() {
 // see what the list row exposes, and a second consecutive agent reply moves
 // `modified` but nothing the user would notice — worse, a reply that lands while
 // the ticket row is already "Replied" is invisible to it. Coming back to the tab
-// is the one moment the extra call is worth paying for.
+// is the one moment the extra call is worth paying for. Bound ONLY to
+// `visibilitychange` (M8) — it already covers tab return, and pairing it with
+// a `window "focus"` listener fired this same expensive refetch twice.
 async function onFocus() {
 	if (document.hidden) return;
 	await store.loadTickets({ quiet: true });
@@ -268,41 +257,53 @@ async function onFocus() {
 
 async function open(name) {
 	if (!name) return;
+	// thread.ticket is the NAME of whichever ticket is currently loaded/loading
+	// (see the store's comment) — compare BEFORE overwriting it, so a
+	// same-ticket refresh (route re-entering the same ticket) can be told apart
+	// from an actual switch.
+	if (store.thread.ticket !== name) {
+		// C1: a DIFFERENT ticket — drop the previous one's messages before this
+		// fetch starts. Otherwise the new ticket's title/composer sit over the
+		// old conversation for the whole fetch, and a failed fetch would never
+		// show the error branch (it's gated on `!thread.messages.length`),
+		// leaving the old ticket's conversation on the new ticket's URL with a
+		// composer that posts to the new ticket. A same-ticket refresh (the
+		// `if` above is false) keeps the in-place last-good messages so the
+		// quiet 30s poll doesn't flicker.
+		store.thread.messages = [];
+		store.thread.attachments = [];
+		store.thread.error = "";
+	}
 	store.thread.ticket = name;
 	await store.loadThread(name);
-	lastPrint = store.fingerprintOf(name);
+	// M9: advance the watermark only after a successful refetch — same guard
+	// as pollSignal/onFocus. Without it, a failed initial open() permanently
+	// no-ops the 30s poll (lastPrint would already match, so the poll never
+	// sees a "change").
+	if (!store.thread.error) lastPrint = store.fingerprintOf(name);
 }
 
 async function send() {
 	if (!canSend.value) return;
 	sending.value = true;
 	const body = draft.value.trim();
-	const staged = files.value.slice();
+	// Snapshot BEFORE the awaited reply/uploadTo below — see useStagedFiles.
+	const staged = snapshotStaged();
 	try {
 		// Body first, attachments second: media.upload attaches to an existing
 		// ticket, and posting the text is what actually reopens a resolved one.
 		if (body) {
 			const ok = await store.reply(ticketName.value, body);
 			if (!ok) return; // store already toasted; keep the draft so it isn't lost
-			draft.value = ""; // text is posted regardless of what upload does next
+			// I2: only clear if the draft still holds exactly what was posted —
+			// a blanket clear would wipe text the user kept typing during the
+			// in-flight reply. Same reference-safety idea as the staged files.
+			if (draft.value.trim() === body) draft.value = "";
 		}
 
 		if (staged.length) {
 			const uploaded = await store.uploadTo(ticketName.value, staged);
-			// uploadTo returns a COUNT of successes, not which files made it — the
-			// store already toasted each failure, and Helpdesk's media.upload has
-			// no un-attach to undo a partial batch. Guessing which File to drop
-			// would be worse than doing nothing, so: only clear/revoke when EVERY
-			// staged file uploaded; on any shortfall, leave ALL staged files in
-			// place so the user can just hit Send again instead of re-picking
-			// from disk. Removing by reference (never `files.value = []`) means a
-			// file the user attaches WHILE this send is in flight — it is never in
-			// `staged` — survives either branch untouched, and its preview is
-			// never revoked out from under it.
-			if (uploaded === staged.length) {
-				files.value = files.value.filter((f) => !staged.includes(f));
-				staged.forEach(releasePreview);
-			}
+			settleUpload(staged, uploaded);
 		}
 
 		await store.loadTickets({ quiet: true });
@@ -317,15 +318,12 @@ onMounted(async () => {
 	if (!store.tickets.length) await store.loadTickets({ quiet: true });
 	await open(ticketName.value);
 	timer = setInterval(pollSignal, POLL_MS);
-	window.addEventListener("focus", onFocus);
 	document.addEventListener("visibilitychange", onFocus);
 });
 
 onUnmounted(() => {
 	if (timer) clearInterval(timer);
-	window.removeEventListener("focus", onFocus);
 	document.removeEventListener("visibilitychange", onFocus);
-	files.value.forEach(releasePreview);
 });
 
 watch(ticketName, (n) => open(n));

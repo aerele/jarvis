@@ -31,12 +31,13 @@
 </template>
 
 <script setup>
-import { computed, onUnmounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { FormControl, toast } from "frappe-ui";
 import Composer from "@/components/chat/Composer.vue";
 import SupportShell from "@/components/support/SupportShell.vue";
 import { useSupportStore } from "@/stores/support";
+import { useStagedFiles } from "@/composables/useStagedFiles";
 
 const route = useRoute();
 const router = useRouter();
@@ -49,39 +50,12 @@ const subject = ref(String(route.query.subject || ""));
 const body = ref(String(route.query.body || ""));
 
 const creating = ref(false);
-const files = ref([]);
-const previews = new Map();
 
-function previewFor(f) {
-	if (!previews.has(f)) previews.set(f, /^image\//.test(f.type) ? URL.createObjectURL(f) : "");
-	return previews.get(f);
-}
-function releasePreview(f) {
-	const url = previews.get(f);
-	if (url) URL.revokeObjectURL(url);
-	previews.delete(f);
-}
-
-const pending = computed(() =>
-	files.value.map((f, i) => ({
-		key: `${f.name}-${i}`,
-		file_name: f.name,
-		preview_url: previewFor(f),
-		removable: true,
-	}))
-);
+// I4: staged-file / object-URL lifecycle shared with SupportThreadPage.
+const { files, pending, onFiles, removeFile, snapshotStaged, settleUpload } = useStagedFiles();
 
 // Subject is required — it is the ticket's identity in the list and in Helpdesk.
 const canSend = computed(() => !creating.value && !!subject.value.trim());
-
-function onFiles(added) {
-	files.value = files.value.concat(added);
-}
-function removeFile(i) {
-	const f = files.value[i];
-	if (f) releasePreview(f);
-	files.value = files.value.filter((_, n) => n !== i);
-}
 
 async function create() {
 	if (!canSend.value) return;
@@ -90,24 +64,14 @@ async function create() {
 	// otherwise a file the user attaches while this create() is in flight is
 	// never uploaded and gets silently revoked/dropped by the cleanup below,
 	// which operates on whatever `files.value` happens to be afterward.
-	const staged = files.value.slice();
+	const staged = snapshotStaged();
 	try {
 		const name = await store.createTicket(subject.value.trim(), body.value.trim());
 		if (!name) return; // the store toasted; keep everything so nothing is lost
 
 		if (staged.length) {
 			const uploaded = await store.uploadTo(name, staged);
-			// Same reasoning as send(): uploadTo returns a COUNT of successes, not
-			// which files made it, and there is no un-attach to undo a partial
-			// batch — the store already toasted each failure. Only clear/revoke
-			// when EVERY staged file uploaded; on any shortfall, leave ALL staged
-			// files in place rather than guess which to drop. Remove by reference
-			// (never blanket `= []`) so a file attached WHILE this create() is in
-			// flight — never in `staged` — survives either branch untouched.
-			if (uploaded === staged.length) {
-				files.value = files.value.filter((f) => !staged.includes(f));
-				staged.forEach(releasePreview);
-			}
+			settleUpload(staged, uploaded);
 		}
 
 		// Unlike send(), this page navigates away on success — so "leave staged
@@ -125,8 +89,6 @@ async function create() {
 		creating.value = false;
 	}
 }
-
-onUnmounted(() => files.value.forEach(releasePreview));
 </script>
 
 <style scoped>

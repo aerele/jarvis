@@ -39,9 +39,9 @@ export function isClosed(status) {
 // spec's AA-contrast workaround: the failure was raw --amber on --amber-bg, and
 // Badge's own token pairs are the system's answer to exactly that.
 export function badgeFor(status) {
-	if (isAwaiting(status)) return { label: "Awaiting you", tone: "awaiting", theme: "orange" };
-	if (isClosed(status)) return { label: "Closed", tone: "closed", theme: "gray" };
-	return { label: "Open", tone: "open", theme: "blue" };
+	if (isAwaiting(status)) return { label: "Awaiting you", theme: "orange" };
+	if (isClosed(status)) return { label: "Closed", theme: "gray" };
+	return { label: "Open", theme: "blue" };
 }
 
 const tickets = ref([]);
@@ -50,7 +50,13 @@ const ticketsError = ref("");
 const awaitingCount = ref(0);
 
 const thread = reactive({
-	ticket: null, // the ticket ROW (name/subject/status), not just the id
+	// The NAME of the ticket currently loaded/loading — not the row (read row
+	// data via ticketRow()/fingerprintOf()). This is the "which ticket is this"
+	// marker SupportThreadPage compares against before a fetch, to tell a real
+	// ticket switch apart from a same-ticket refresh (quiet poll/retry) and
+	// reset messages/attachments/error before a different ticket's fetch
+	// starts. Must always be a name string, never a row object — see loadThread.
+	ticket: null,
 	messages: [],
 	attachments: [],
 	loading: false,
@@ -79,9 +85,7 @@ async function loadThread(name, { quiet = false } = {}) {
 	try {
 		const r = await supportGetThread(name);
 		const d = (r && r.data) || {};
-		// ticketRow can legitimately return null: the list is capped at the 50
-		// most-recently-touched tickets, so a deep-linked older ticket has no row.
-		thread.ticket = ticketRow(name);
+		thread.ticket = name;
 		thread.messages = d.messages || [];
 		thread.attachments = d.ticket_attachments || [];
 		thread.error = "";

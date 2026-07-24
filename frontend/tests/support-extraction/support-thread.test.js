@@ -18,17 +18,31 @@ vi.mock("frappe-ui", () => ({
 }));
 
 // useRoute/useRouter are injection-based — global.mocks.$route does NOT feed
-// them; the module has to be mocked.
+// them; the module has to be mocked. `routeTicket` is mutable so the C1
+// switch test below can mount with a different ticket than the rest of the
+// file, which all assume "T1".
+let routeTicket = "T1";
 vi.mock("vue-router", () => ({
-	useRoute: () => ({ params: { ticket: "T1" } }),
+	useRoute: () => ({ params: { ticket: routeTicket } }),
 	useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+}));
+
+// datetime.js's formatDate/exactDate route through frappe-ui's dayjsLocal,
+// which needs a systemTimezone config this test never sets up. Mock it
+// directly so timestamp formatting is a pure, predictable pass-through here —
+// the real tz-conversion path is covered where it's actually exercised
+// (datetime.js has no dedicated suite yet, but nothing in this file asserts
+// on exact formatted output, only presence/absence).
+vi.mock("@/utils/datetime", () => ({
+	formatDate: (v) => (v ? String(v) : ""),
+	exactDate: (v) => (v ? String(v) : ""),
 }));
 
 const storeDouble = {
 	tickets: [],
 	thread: { ticket: "T1", messages: [], attachments: [], loading: false, error: "" },
 	ticketRow: () => storeDouble.tickets[0] || null,
-	badgeFor: () => ({ label: "Open", tone: "open", theme: "blue" }),
+	badgeFor: () => ({ label: "Open", theme: "blue" }),
 	isClosed: () => false,
 	isAwaiting: () => false,
 	fingerprintOf: () => "x",
@@ -52,6 +66,7 @@ beforeEach(() => {
 	// non-enumerable, so `{ ...URL }` is `{}` and would destroy the constructor.
 	URL.createObjectURL = () => "blob:x";
 	URL.revokeObjectURL = () => {};
+	routeTicket = "T1";
 });
 
 function mountWith(messages, ticket = { name: "T1", subject: "Broken", status: "Open" }) {
@@ -312,5 +327,58 @@ describe("SupportThreadPage", () => {
 		await flushPromises();
 
 		expect(c.props("attachments")).toHaveLength(2);
+	});
+
+	it("clears the previous ticket's messages before a different ticket's fetch resolves (C1)", () => {
+		// Without this reset, opening ticket B while A's messages are still in
+		// the singleton store would show A's conversation under B's title for
+		// the whole fetch — and if B's fetch failed, the error branch would
+		// never show (it's gated on !thread.messages.length), stranding A's
+		// conversation on B's URL with a composer that posts to B.
+		storeDouble.tickets = [{ name: "T2", subject: "B", status: "Open" }];
+		storeDouble.thread.ticket = "T1";
+		storeDouble.thread.messages = [
+			{ sent_or_received: "Sent", content: "<p>A's message</p>" },
+		];
+		storeDouble.thread.attachments = [{ file_url: "/files/a.png", file_name: "a.png" }];
+		storeDouble.thread.error = "";
+		// Never resolves within this test — proves the reset happens
+		// SYNCHRONOUSLY on mount, not only after B's fetch eventually settles.
+		storeDouble.loadThread = vi.fn(() => new Promise(() => {}));
+		routeTicket = "T2";
+
+		mount(SupportThreadPage, {
+			global: {
+				stubs: { SupportShell: { template: "<div><slot name='actions'/><slot/></div>" } },
+			},
+		});
+
+		expect(storeDouble.thread.messages).toEqual([]);
+		expect(storeDouble.thread.attachments).toEqual([]);
+		expect(storeDouble.thread.error).toBe("");
+	});
+
+	it("keeps text typed during an in-flight send instead of wiping it (I2)", async () => {
+		// The regression this pins: an unconditional `draft.value = ""` after
+		// reply() resolves wipes whatever the draft holds NOW, even if the user
+		// kept typing during the multi-second send. Only a draft that still
+		// equals the posted snapshot should be cleared.
+		let resolveReply;
+		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
+		const w = mountWith([]);
+		const c = w.findComponent({ name: "Composer" });
+		c.vm.$emit("update:modelValue", "please help");
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await w.vm.$nextTick();
+
+		// The user keeps typing while the reply is still in flight.
+		c.vm.$emit("update:modelValue", "please help more");
+		await w.vm.$nextTick();
+
+		resolveReply(true);
+		await flushPromises();
+
+		expect(c.props("modelValue")).toBe("please help more");
 	});
 });
