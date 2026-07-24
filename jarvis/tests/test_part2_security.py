@@ -495,3 +495,107 @@ class TestPersonaliseOriginProvenance(Part2Base):
 		with _as("Administrator"):
 			out = learned_api.approve_learned_pattern(p.name)
 		self.assertNotIn("scrub_warning", out)
+
+
+class TestSkillPromotionSurfacing(Part2Base):
+	"""Skills-area promotion SURFACING (wiring the existing backend to the UI): the
+	tab badge count, the reviewer content preview + push-budget context, and the
+	requester-side status read + role picker the SPA needs. The request/decide/list
+	endpoints already existed and are covered above; these are the smallest reads
+	added to make them usable, plus the badge count."""
+
+	def test_review_access_counts_pending_skill_promotions(self):
+		from jarvis.chat import custom_skills_api, learned_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-badge", scope="User")
+		with _as(REVIEWER):
+			before = learned_api.get_review_access().get("pending_skill_promotions", 0)
+		with _as(USER_A):
+			custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			after = learned_api.get_review_access()
+		self.assertEqual(after["pending_skill_promotions"], before + 1)
+
+	def test_get_custom_skill_exposes_scope_fields(self):
+		# The requester UI gates "Request promotion…" on scope=User + not-learned,
+		# so get_custom_skill must expose them.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-scopefield", scope="User")
+		with _as(USER_A):
+			out = custom_skills_api.get_custom_skill(skill.name)
+		self.assertEqual(out["scope"], "User")
+		self.assertEqual(out["managed_by_learning"], 0)
+		self.assertIn("target_role", out)
+
+	def test_reviewer_list_carries_body_excerpt_and_budget(self):
+		# A reviewer can read a User-scope skill's BODY via the gated list even
+		# though get_custom_skill denies them (owner/shared only) — the content
+		# preview the decide UI needs — plus the push-budget context for ruling 2.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		secret = "SECRET-INSTRUCTIONS-marker-9f3"
+		skill = _mk_skill(USER_A, f"{PFX}-excerpt", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", secret)
+		with _as(USER_A):
+			custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			res = custom_skills_api.list_skill_promotion_requests(status="Pending")
+		row = next(r for r in res["rows"] if r["skill"] == skill.name)
+		self.assertIn(secret, row["body_excerpt"])
+		self.assertEqual(res["push_budget"], custom_skills.MAX_SKILLS_PER_PUSH)
+		self.assertEqual(res["push_count"], custom_skills.pushable_org_skill_count())
+
+	def test_push_count_reflects_only_pushable_org_skills(self):
+		from jarvis.chat import custom_skills
+
+		base = custom_skills.pushable_org_skill_count()
+		_mk_skill(USER_A, f"{PFX}-org1", scope="Org", enabled=1)
+		_mk_skill(USER_A, f"{PFX}-org2", scope="Org", enabled=1)
+		# role-restricted Org row is NOT pushable (scope-exfil guard) → excluded
+		_mk_skill(USER_A, f"{PFX}-orgrestr", scope="Org", enabled=1, allowed_roles=["Sales User"])
+		# disabled Org row is NOT pushable → excluded
+		_mk_skill(USER_A, f"{PFX}-orgoff", scope="Org", enabled=0)
+		self.assertEqual(custom_skills.pushable_org_skill_count(), base + 2)
+
+	def test_my_skill_promotion_is_owner_scoped(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-mine", scope="User")
+		with _as(USER_A):
+			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
+			req = custom_skills_api.request_skill_promotion(
+				skill.name, "Role", target_role="Sales User"
+			)
+			mine = custom_skills_api.my_skill_promotion(skill.name)
+		self.assertEqual(mine["name"], req["request"])
+		self.assertEqual(mine["status"], "Pending")
+		self.assertEqual(mine["to_scope"], "Role")
+		self.assertEqual(mine["target_role"], "Sales User")
+		# another user gets nothing for the same skill (owner-scoped read)
+		with _as(USER_B):
+			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
+
+	def test_my_skill_promotion_reflects_decision(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-decided", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 1, note="looks good")
+		with _as(USER_A):
+			mine = custom_skills_api.my_skill_promotion(skill.name)
+		self.assertEqual(mine["status"], "Approved")
+		self.assertEqual(mine["reviewer"], REVIEWER)
+		self.assertEqual(mine["decision_note"], "looks good")
+
+	def test_promotable_target_roles_are_own_targetable_roles(self):
+		from jarvis.chat import custom_skills_api
+
+		with _as(USER_A):
+			roles = custom_skills_api.promotable_target_roles()["roles"]
+		self.assertIn("Sales User", roles)  # USER_A holds Sales User
+		self.assertNotIn("All", roles)
+		self.assertNotIn("System Manager", roles)
+		self.assertNotIn("Administrator", roles)
