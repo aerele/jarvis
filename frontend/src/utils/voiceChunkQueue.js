@@ -25,8 +25,10 @@
 //     enters the terminal `failed` state (the session is NEVER halted — the cursor
 //     advances PAST a failed chunk so later chunks keep committing).
 //   * a NEVER-LOST mirror — every clip is written to the injected `mirror` on
-//     enqueue and deleted only once its text is committed; a `failed` clip is
-//     RETAINED (for the Retry/Download chip and reload recovery).
+//     enqueue and deleted only once its text is durably captured: on commit by default,
+//     or (under `retainUntilSent`, which the composer sets because a draft is volatile
+//     until sent) on markSent()/discard. A `failed` clip is RETAINED either way (for the
+//     Retry/Download chip and reload recovery).
 //
 // Chunk record state machine (per seq):
 //
@@ -109,6 +111,12 @@ export function createVoiceChunkQueue(deps = {}) {
 	const mirror = deps.mirror || null;
 	const concurrency = Math.max(1, deps.concurrency || 2);
 	const maxAttempts = Math.max(1, deps.maxAttempts || 2);
+	// When set, a committed chunk's audio mirror is NOT dropped on commit — it is retained
+	// until markSent()/discard(). The composer opts in because its draft text is volatile
+	// (component-local, wiped on reload) until the message is actually SENT, so the audio
+	// must stay recoverable behind an un-sent draft (finding 6). Consumers that commit to a
+	// durable sink leave it off (default): the mirror is cleared the moment the text lands.
+	const retainUntilSent = !!deps.retainUntilSent;
 	const onCommit = deps.onCommit || noop;
 	const onFail = deps.onFail || noop;
 	const onGap = deps.onGap || noop;
@@ -176,20 +184,40 @@ export function createVoiceChunkQueue(deps = {}) {
 		}
 	}
 
+	// Emit a chunk's transcript (in cursor order, or in-place for a resurrected gap) and
+	// mark it committed. Its audio mirror is dropped NOW only when the consumer commits to a
+	// durable sink; under retainUntilSent the mirror survives until markSent()/discard so a
+	// reload can still recover the audio behind an un-sent, volatile draft (finding 6).
+	function _commit(rec, replace) {
+		_safe(onCommit, rec.seq, rec.text, rec.clip, replace);
+		rec.committed = true;
+		if (!retainUntilSent) _mirrorDelete(rec.seq);
+	}
+
 	function _onResolve(seq, text) {
 		if (disposed) return;
 		const rec = records.get(seq);
+		// A clip the user discarded mid-flight is a terminal tombstone — a late resolution
+		// must not resurrect it (its inflight slot was already freed by discard()).
+		if (rec && rec.state === "discarded") return;
+		// CONTRACT BELT (defense in depth): the `transcribe` adapter MUST resolve a STRING. A
+		// non-string (e.g. the raw {ok,text,...} response object) must NEVER be String()-
+		// coerced and committed as "[object Object]" behind deleted audio — route it through
+		// the failure path so the clip is retried, then RETAINED (never-lose-audio).
+		if (typeof text !== "string") {
+			_onReject(seq, new Error("transcribe resolved a non-string value"));
+			return; // _onReject owns the inflight decrement + retry/fail transition
+		}
 		inflight -= 1;
 		if (!rec) return; // dropped (shouldn't happen); keep the count honest
-		rec.text = typeof text === "string" ? text : text == null ? "" : String(text);
+		rec.text = text;
 		rec.state = "done";
 		if (nextToFlush !== null && seq < nextToFlush) {
 			// A RESURRECTED failed chunk (its slot was already skipped by the cursor, so
 			// its in-place placeholder token is already sitting in the composer). It can't
 			// rejoin the contiguous drain — commit it with `replace=true` so the glue swaps
 			// the placeholder for the text IN PLACE, not appended at the end.
-			_safe(onCommit, seq, rec.text, rec.clip, true);
-			_mirrorDelete(seq);
+			_commit(rec, true);
 		} else {
 			_drain();
 		}
@@ -200,6 +228,7 @@ export function createVoiceChunkQueue(deps = {}) {
 	function _onReject(seq, err) {
 		if (disposed) return;
 		const rec = records.get(seq);
+		if (rec && rec.state === "discarded") return;
 		inflight -= 1;
 		if (!rec) return;
 		if (rec.attempts < maxAttempts) {
@@ -226,13 +255,18 @@ export function createVoiceChunkQueue(deps = {}) {
 		while (records.has(nextToFlush)) {
 			const rec = records.get(nextToFlush);
 			if (rec.state === "done") {
-				_safe(onCommit, rec.seq, rec.text, rec.clip, false);
-				_mirrorDelete(rec.seq);
+				_commit(rec, false);
 				nextToFlush += 1;
 			} else if (rec.state === "failed") {
 				// Anchor the gap where it belongs (once — the cursor never revisits it).
 				_safe(onGap, rec.seq, rec.clip);
 				nextToFlush += 1; // fail-through: later chunks commit after the placeholder
+			} else if (rec.state === "discarded") {
+				// A user-discarded clip is a terminal tombstone: advance ACROSS it (no commit,
+				// no gap — its audio + placeholder are already gone) so later done chunks still
+				// flush. Deleting the seq instead would wedge the cursor at the hole forever
+				// and silently strand every later transcript (finding 4).
+				nextToFlush += 1;
 			} else {
 				break; // pending / inflight — the cursor waits (recording continues)
 			}
@@ -270,39 +304,88 @@ export function createVoiceChunkQueue(deps = {}) {
 	// post-reload; we only need them transcribed and appended in that order.
 	function recover(clips) {
 		if (disposed || !Array.isArray(clips) || !clips.length) return [];
-		const ordered = clips.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
+		// Preserve the session grouping/order the caller supplied (listOrphanClips already
+		// ordered sessions newest-first) and sort each session's clips by ORIGINAL seq so
+		// spoken order is restored WITHIN a session. A single global seq sort would
+		// interleave sessions — each session's seq restarts at 0 — rebuilding the dictation
+		// out of order (finding 3).
+		const bySession = new Map();
+		const order = [];
+		for (const c of clips) {
+			const sid = c.sessionId == null ? "" : String(c.sessionId);
+			if (!bySession.has(sid)) {
+				bySession.set(sid, []);
+				order.push(sid);
+			}
+			bySession.get(sid).push(c);
+		}
 		const seqs = [];
-		for (const c of ordered) {
-			// Drop the caller's stale seq before re-admitting under a fresh one.
-			const { seq: _staleSeq, ...rest } = c;
-			seqs.push(_admit({ ...rest, recovered: true }));
+		for (const sid of order) {
+			const group = bySession
+				.get(sid)
+				.slice()
+				.sort((a, b) => (a.seq || 0) - (b.seq || 0));
+			for (const c of group) {
+				// Drop the caller's stale seq + sessionId before re-admitting under a fresh seq
+				// off the single authority. `_adoptKey` (if present) rides through to the mirror
+				// so the prior-session copy is deleted in the SAME put transaction (finding 5).
+				const { seq: _staleSeq, sessionId: _sid, ...rest } = c;
+				seqs.push(_admit({ ...rest, recovered: true }));
+			}
 		}
 		_pump();
 		_safe(onChange);
 		return seqs;
 	}
 
-	// Drop a clip the user chose NOT to recover/retry (e.g. downloaded instead):
-	// remove it from the source of truth and the mirror so it stops blocking
-	// hasUnfinished()/the unload guard.
+	// Drop a clip the user chose NOT to recover/retry (e.g. downloaded instead): stop it
+	// blocking hasUnfinished()/the unload guard. It becomes a terminal TOMBSTONE rather than
+	// a deleted map entry — deleting an un-flushed seq would punch a hole the flush cursor
+	// stops at forever, silently stranding every later done transcript (finding 4).
 	function discard(seq) {
 		if (disposed) return;
 		const rec = records.get(seq);
-		if (!rec) return;
-		records.delete(seq);
-		_mirrorDelete(seq);
+		if (!rec || rec.state === "discarded") return;
 		if (rec.state === "inflight") inflight = Math.max(0, inflight - 1);
+		rec.state = "discarded";
+		rec.text = "";
+		rec.clip = null;
+		_mirrorDelete(seq);
 		if (nextToFlush !== null) _drain();
 		_pump();
 		_safe(onChange);
+	}
+
+	// The composer for `scope` was SENT — its voice-derived text is now durably in the
+	// conversation, so drop those committed clips and their retained audio mirror (finding
+	// 6): the leave guard/​recovery must no longer treat them as un-sent. Only committed
+	// clips for THIS scope are cleared; pending/inflight/failed clips (still un-transcribed)
+	// and other scopes' held drafts are untouched.
+	function markSent(scope) {
+		if (disposed) return;
+		let changed = false;
+		for (const rec of Array.from(records.values())) {
+			if (!rec.committed || rec.state === "discarded") continue;
+			const clipScope =
+				rec.clip && rec.clip.conversationId != null ? rec.clip.conversationId : null;
+			if (clipScope === (scope == null ? null : scope)) {
+				_mirrorDelete(rec.seq);
+				records.delete(rec.seq);
+				changed = true;
+			}
+		}
+		if (changed) _safe(onChange);
 	}
 
 	function snapshot() {
 		let pending = 0;
 		let running = 0;
 		let done = 0;
+		let total = 0;
 		const failed = [];
 		for (const rec of records.values()) {
+			if (rec.state === "discarded") continue; // a user-removed tombstone — invisible to the UI
+			total += 1;
 			if (rec.state === "pending") pending += 1;
 			else if (rec.state === "inflight") running += 1;
 			else if (rec.state === "done") done += 1;
@@ -313,17 +396,21 @@ export function createVoiceChunkQueue(deps = {}) {
 			inflight: running,
 			done,
 			failed, // [{seq, clip}] — drives the composer chips (Retry/Download)
-			total: records.size,
+			total,
 			hasUnfinished: pending + running + failed.length > 0,
 		};
 	}
 
-	// True while ANY clip is still pending / in flight / failed — the composer uses
-	// this to arm the beforeunload + route-leave guard so audio is never silently
-	// lost on navigation.
+	// True while ANY clip is still un-safe — the composer uses this to arm the beforeunload
+	// + route-leave guard so audio is never silently lost on navigation. Un-safe means:
+	// still pending / in flight / failed (transcription incomplete); OR, under
+	// retainUntilSent, committed but still mirrored — its transcript lives only in an
+	// un-sent, volatile draft (finding 6). A discarded tombstone is safe.
 	function hasUnfinished() {
 		for (const rec of records.values()) {
+			if (rec.state === "discarded") continue;
 			if (rec.state !== "done") return true;
+			if (retainUntilSent && rec.committed) return true;
 		}
 		return false;
 	}
@@ -350,6 +437,7 @@ export function createVoiceChunkQueue(deps = {}) {
 		retry,
 		recover,
 		discard,
+		markSent,
 		snapshot,
 		hasUnfinished,
 		getClip,

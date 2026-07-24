@@ -479,3 +479,225 @@ test("onCommit carries the clip; live and recovered clips keep the conversation 
 		"a recovered clip routes to the chat it was spoken in — never dumped into whatever is open"
 	);
 });
+
+// The EXACT adapter ChatView wraps around voice.transcribeAudio (ChatView.vue
+// _ensureVoiceSession): await the RESPONSE OBJECT, validate {ok,text}, hand back ONLY the
+// string. This is the seam the earlier unit tests missed — they fed the queue bare STRINGS
+// and never the real {ok,text,stt_ms,model} object, so the "[object Object]" commit slipped
+// through review (Codex critical, finding 1).
+function chatViewAdapter(transcribeAudio) {
+	return async (clip, signal) => {
+		const res = await transcribeAudio(clip.blob, { durationS: clip.durationS, signal });
+		if (res && res.ok === true && typeof res.text === "string") return res.text;
+		throw new Error((res && res.error) || "Transcription returned no usable text.");
+	};
+}
+
+// ── (12) INTEGRATION with the REAL transcribeAudio {ok,text,...} shape (finding 1) ──────
+test("integration: the real transcribeAudio response OBJECT commits its .text (not '[object Object]'), retains the mirror until sent, and retains a failed/missing-text clip", async () => {
+	// A fake transcribeAudio that returns the SERVER's real object shape, keyed by clip blob.
+	const responses = new Map(); // blob -> {ok,text,...}
+	const transcribeAudio = async (blob) => responses.get(blob);
+	const mirror = makeMirror();
+	const commits = [];
+	const q = createVoiceChunkQueue({
+		transcribe: chatViewAdapter(transcribeAudio),
+		mirror,
+		retainUntilSent: true,
+		concurrency: 2,
+		maxAttempts: 1, // one shot per clip so a bad payload lands in `failed` immediately
+		onCommit: (seq, text, clip) =>
+			commits.push({ seq, text, conv: clip && clip.conversationId }),
+	});
+
+	// (a) a GOOD clip: the real {ok:true, text:"hello", stt_ms, model} object.
+	responses.set("good", { ok: true, text: "hello", stt_ms: 42, model: "whisper-x" });
+	q.enqueue({ blob: "good", durationS: 15, conversationId: "chatA" });
+	await flush();
+	assert.deepEqual(
+		commits,
+		[{ seq: 0, text: "hello", conv: "chatA" }],
+		"the STRING 'hello' is committed — never the '[object Object]' the raw response would String()-coerce to"
+	);
+	assert.ok(
+		mirror.store.has(0),
+		"mirror RETAINED after commit (the draft is un-sent) — the audio is still recoverable"
+	);
+
+	// markSent → the draft is durably sent, so the mirror + leave guard clear.
+	q.markSent("chatA");
+	await flush();
+	assert.ok(!mirror.store.has(0), "mirror cleared once the containing draft is sent");
+	assert.equal(q.hasUnfinished(), false, "nothing un-sent left after markSent");
+
+	// (b) a FAILED payload: {ok:false} → the adapter throws → clip RETAINED as failed, no commit.
+	responses.set("bad", { ok: false });
+	const s1 = q.enqueue({ blob: "bad", durationS: 15, conversationId: "chatA" });
+	await flush();
+	assert.equal(commits.length, 1, "no commit for the ok:false payload");
+	let snap = q.snapshot();
+	assert.equal(snap.failed.length, 1, "the ok:false clip is a RETAINED failed clip (its chip)");
+	assert.equal(snap.failed[0].seq, s1);
+	assert.ok(mirror.store.has(s1), "the failed clip's audio is RETAINED (never lost)");
+	assert.equal(q.hasUnfinished(), true, "the failed clip keeps the leave guard armed");
+
+	// (c) a MISSING-TEXT payload ({ok:true} but no text) is ALSO a failure — retained, no commit.
+	responses.set("notext", { ok: true, stt_ms: 5 });
+	const s2 = q.enqueue({ blob: "notext", durationS: 15, conversationId: "chatA" });
+	await flush();
+	assert.equal(commits.length, 1, "still no new commit for the missing-text payload");
+	assert.ok(
+		q.snapshot().failed.some((f) => f.seq === s2),
+		"the missing-text clip is retained as failed too — nothing committed, audio kept"
+	);
+});
+
+// ── (13) belt: a non-string resolution is a FAILURE, never a String()-coerced commit ────
+test("belt: a transcribe that resolves the raw object (the old bug) is treated as a failure — no '[object Object]' commit, audio retained", async () => {
+	const mirror = makeMirror();
+	const commits = [];
+	const q = createVoiceChunkQueue({
+		// The ORIGINAL bug: an adapter that hands back the whole {ok,text} object, not text.
+		transcribe: async () => ({ ok: true, text: "hello" }),
+		mirror,
+		concurrency: 1,
+		maxAttempts: 2,
+		onCommit: (seq, text) => commits.push([seq, text]),
+	});
+	q.enqueue({ blob: "b0", durationS: 15 });
+	// Drive the auto-retry to exhaustion (each attempt resolves an object → belt → reject).
+	for (let i = 0; i < 6 && q.snapshot().failed.length === 0; i++) await flush();
+	assert.deepEqual(commits, [], "a non-string resolution NEVER commits — no '[object Object]'");
+	const snap = q.snapshot();
+	assert.equal(snap.failed.length, 1, "it lands in `failed`, retained for Retry/Download");
+	assert.ok(mirror.store.has(0), "the audio is RETAINED — never deleted behind garbage text");
+});
+
+// ── (14) discard leaves a tombstone the cursor drains ACROSS (finding 4) ────────────────
+test("discarding a failed later seq does not wedge the cursor: an earlier inflight clip still lets later done transcripts commit", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const commits = [];
+	const failed = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		concurrency: 3,
+		maxAttempts: 1, // a single reject → straight to failed
+		onCommit: (seq, text) => commits.push([seq, text]),
+		onFail: (seq) => failed.push(seq),
+	});
+	q.enqueue(clip(0)); // stays inflight — blocks the cursor at seq 0
+	q.enqueue(clip(1)); // will FAIL, then the user discards it
+	q.enqueue(clip(2)); // done, waits behind the gap
+	await flush();
+
+	tx.reject(1, new Error("dead")); // seq 1 → failed
+	await flush();
+	tx.resolve(2, "two"); // seq 2 done but held behind inflight seq 0
+	await flush();
+	assert.deepEqual(commits, [], "nothing commits yet — inflight seq 0 blocks the cursor");
+	assert.deepEqual(failed, [1], "seq 1 failed");
+
+	// User discards the failed seq 1. Under the OLD records.delete(seq) this punched a hole
+	// at seq 1 that wedged the flush cursor forever — seq 2 would NEVER commit (silent loss).
+	q.discard(1);
+	await flush();
+	assert.deepEqual(commits, [], "discard alone commits nothing — seq 0 is still inflight");
+
+	// seq 0 resolves → cursor drains 0, crosses the seq-1 TOMBSTONE, commits seq 2.
+	tx.resolve(0, "zero");
+	await flush();
+	assert.deepEqual(
+		commits,
+		[
+			[0, "zero"],
+			[2, "two"],
+		],
+		"later transcript committed across the discarded hole — no silent loss"
+	);
+	assert.ok(!mirror.store.has(1), "the discarded clip's mirror is gone");
+	assert.equal(q.hasUnfinished(), false, "everything committed or discarded — the guard clears");
+});
+
+// ── (15) retainUntilSent keeps the guard armed + mirror retained until markSent (finding 6) ─
+test("retainUntilSent: a committed clip keeps the leave guard armed and its audio retained until the draft is SENT", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 1,
+	});
+	q.enqueue({ blob: "b0", durationS: 15, conversationId: "chatX" });
+	await flush();
+	tx.resolve(0, "hello");
+	await flush();
+	assert.equal(
+		q.hasUnfinished(),
+		true,
+		"committed but UN-SENT text keeps the leave guard armed — the draft is volatile"
+	);
+	assert.ok(mirror.store.has(0), "audio mirror retained past commit so a reload can recover it");
+	assert.equal(q.snapshot().done, 1, "the clip shows as done in the snapshot");
+
+	q.markSent("chatX");
+	await flush();
+	assert.equal(
+		q.hasUnfinished(),
+		false,
+		"sending the draft makes it durable — the guard clears"
+	);
+	assert.ok(!mirror.store.has(0), "mirror cleared on send");
+	assert.equal(q.snapshot().total, 0, "the sent clip has left the queue");
+
+	// markSent for a DIFFERENT scope must never touch another scope's committed clips.
+	q.enqueue({ blob: "b1", durationS: 15, conversationId: "chatY" });
+	await flush();
+	tx.resolve(1, "world");
+	await flush();
+	q.markSent("chatZ"); // wrong scope
+	await flush();
+	assert.equal(
+		q.hasUnfinished(),
+		true,
+		"a clip for chatY is untouched by markSent('chatZ') — held drafts don't clear cross-scope"
+	);
+	assert.ok(mirror.store.has(1), "its audio stays retained");
+});
+
+// ── (16) recover() restores spoken order within a session under a shuffled arrival (finding 3) ─
+test("recover() restores spoken order WITHIN a session even when the clips arrive shuffled", async () => {
+	const tx = makeTranscriber();
+	const commits = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		concurrency: 5,
+		onCommit: (seq, text) => commits.push(text),
+	});
+	// listOrphanClips already grouped + ordered these; recover must keep the session together
+	// and sort by ORIGINAL seq. Pass them SHUFFLED to prove recover re-sorts within the session
+	// (a global seq sort across sessions would interleave — see the note in recover()).
+	const seqs = q.recover([
+		{ blob: "s0c2", durationS: 15, sessionId: "s0", seq: 2 },
+		{ blob: "s0c0", durationS: 15, sessionId: "s0", seq: 0 },
+		{ blob: "s0c1", durationS: 15, sessionId: "s0", seq: 1 },
+	]);
+	assert.deepEqual(
+		seqs,
+		[0, 1, 2],
+		"fresh contiguous seqs assigned in ascending ORIGINAL seq order within the session"
+	);
+	await flush();
+	// Resolve out of order; strict in-order commit still restores spoken order.
+	tx.resolve(2, "third");
+	tx.resolve(0, "first");
+	tx.resolve(1, "second");
+	await flush();
+	assert.deepEqual(
+		commits,
+		["first", "second", "third"],
+		"committed in spoken order, not arrival/shuffle/resolution order"
+	);
+});
