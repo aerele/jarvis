@@ -32,6 +32,28 @@ describe("SupportShell", () => {
 		expect(root.style.getPropertyValue("--cta")).toBeTruthy();
 	});
 
+	it("defaults the back button to 'Back to Jarvis' text AND aria-label", () => {
+		const w = mount(SupportShell, { global: { stubs } });
+		const back = w.find(".jv-sup-back");
+		expect(back.attributes("aria-label")).toBe("Back to Jarvis");
+		expect(back.find(".jv-sup-backtext").text()).toBe("Back to Jarvis");
+	});
+
+	it("uses the backLabel prop for both the visible text and the aria-label", () => {
+		// The thread/new-ticket pages pass this: they walk BACK UP the support
+		// hierarchy (to the ticket list) rather than exiting support, so "Back to
+		// Jarvis" would lie about the destination. aria-label has to match too —
+		// jv-sup-backtext is display:none on mobile, so it's the ONLY label a
+		// screen reader gets there.
+		const w = mount(SupportShell, {
+			props: { backLabel: "All tickets" },
+			global: { stubs },
+		});
+		const back = w.find(".jv-sup-back");
+		expect(back.attributes("aria-label")).toBe("All tickets");
+		expect(back.find(".jv-sup-backtext").text()).toBe("All tickets");
+	});
+
 	it("renders the title and the actions slot", () => {
 		const w = mount(SupportShell, {
 			props: { title: "Ticket #7" },

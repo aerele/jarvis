@@ -26,7 +26,15 @@ export function renderSupportHtml(rawHtml, ticketName) {
 	for (const a of doc.querySelectorAll("a[href]")) {
 		const href = a.getAttribute("href") || "";
 		if (LOCAL_FILE.test(href)) a.setAttribute("href", supportDownloadUrl(ticketName, href));
+		// Every link in an agent's reply — not just rewritten ones — opens in a
+		// new tab: clicking a plain https:// link in the HTML otherwise navigates
+		// the whole SPA away and drops the thread. `rel` is in DOMPurify's default
+		// ALLOWED_ATTR but `target` is NOT (verified against this repo's installed
+		// dompurify — it silently strips target with no config), so ADD_ATTR below
+		// is load-bearing, not defensive.
+		a.setAttribute("target", "_blank");
+		a.setAttribute("rel", "noopener noreferrer");
 	}
 
-	return DOMPurify.sanitize(doc.body.innerHTML);
+	return DOMPurify.sanitize(doc.body.innerHTML, { ADD_ATTR: ["target"] });
 }

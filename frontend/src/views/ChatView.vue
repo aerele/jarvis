@@ -3942,7 +3942,7 @@ function getHumanHelp() {
 	const title = (currentTitle.value || "").trim();
 	// "New chat" is currentTitle's fallback, not a real title — carrying it
 	// would put a meaningless quote in front of a support agent.
-	const ref = title && title !== "New chat" ? `\n\n— From Jarvis chat: "${title}"` : "";
+	const ref = title && title !== "New chat" ? `\n\n- From Jarvis chat: "${title}"` : "";
 	router.push({ name: "SupportNew", query: ref ? { body: ref } : {} });
 }
 const visibleMessages = computed(() =>

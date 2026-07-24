@@ -33,9 +33,14 @@ vi.mock("vue-router", () => ({
 // the real tz-conversion path is covered where it's actually exercised
 // (datetime.js has no dedicated suite yet, but nothing in this file asserts
 // on exact formatted output, only presence/absence).
+// dayLabel is mocked to a bare YYYY-MM-DD bucket (not the real "Today" /
+// "Yesterday" / weekday logic — that belongs to datetime.js's own suite) so
+// the day-divider tests below can assert on BUCKETING (same day vs. different
+// day) without depending on wall-clock "today".
 vi.mock("@/utils/datetime", () => ({
 	formatDate: (v) => (v ? String(v) : ""),
 	exactDate: (v) => (v ? String(v) : ""),
+	dayLabel: (v) => (v ? String(v).slice(0, 10) : ""),
 }));
 
 const storeDouble = {
@@ -196,6 +201,26 @@ describe("SupportThreadPage", () => {
 		expect(atts[0].type).toBe("file");
 	});
 
+	it("opens a message attachment in a new tab via its proxied file_url (CRITICAL fix)", () => {
+		// Message renders an image attachment as a <button @click="emit('open-attachment', cv)">
+		// — before this fix, nothing on this page listened, so an agent's
+		// screenshot was a dead, unopenable thumbnail (unlike ticket-level
+		// attachments, which are real <a> links).
+		const openSpy = vi.spyOn(window, "open").mockImplementation(() => {});
+		const w = mountWith([
+			{
+				sent_or_received: "Sent",
+				content: "<p>see attached</p>",
+				attachments: [{ file_url: "/files/shot.png", file_name: "shot.png" }],
+			},
+		]);
+		w.findComponent({ name: "Message" }).vm.$emit("open-attachment", {
+			file_url: "/proxied/shot.png",
+		});
+		expect(openSpy).toHaveBeenCalledWith("/proxied/shot.png", "_blank", "noopener");
+		openSpy.mockRestore();
+	});
+
 	it("links ticket-level attachments through the authenticated proxy", () => {
 		storeDouble.thread.attachments = [{ file_url: "/files/spec.pdf", file_name: "spec.pdf" }];
 		const w = mountWith([{ sent_or_received: "Sent", content: "<p>hi</p>" }]);
@@ -240,12 +265,44 @@ describe("SupportThreadPage", () => {
 		expect(w.text()).toContain("start of your conversation");
 	});
 
-	it("keeps the composer enabled on a resolved ticket and says replying reopens it", () => {
+	it("shows a day-divider before the first message of each new day, and none between same-day messages", () => {
+		const w = mountWith([
+			{ sent_or_received: "Sent", content: "<p>a</p>", creation: "2026-07-23 09:00:00" },
+			{ sent_or_received: "Received", content: "<p>b</p>", creation: "2026-07-23 09:05:00" },
+			{ sent_or_received: "Sent", content: "<p>c</p>", creation: "2026-07-24 08:00:00" },
+		]);
+		const dividers = w.findAll(".jv-sup-daydivider");
+		expect(dividers).toHaveLength(2);
+		expect(dividers[0].text()).toBe("2026-07-23");
+		expect(dividers[1].text()).toBe("2026-07-24");
+	});
+
+	it("renders no day-divider at all when every message is dateless", () => {
+		const w = mountWith([
+			{ sent_or_received: "Sent", content: "<p>a</p>" },
+			{ sent_or_received: "Received", content: "<p>b</p>" },
+		]);
+		expect(w.findAll(".jv-sup-daydivider")).toHaveLength(0);
+	});
+
+	it("keeps the composer enabled on a resolved ticket and states both the Resolve and reply paths", () => {
 		// There is no reopen endpoint — a reply is the ONLY way back. Disabling
-		// the composer here would strand the user with no path forward.
+		// the composer here would strand the user with no path forward. Resolved
+		// gets its OWN copy (not the bare "Replying reopens this ticket." the
+		// Closed case below uses): the header still shows "Awaiting you" AND the
+		// Resolve button here, so the disclaimer spells out both valid next steps
+		// instead of reading as if it contradicts the header.
 		const w = mountWith([], { name: "T1", subject: "x", status: "Resolved" });
 		const c = w.findComponent({ name: "Composer" });
-		expect(c.props("disclaimer")).toContain("reopens");
+		expect(c.props("disclaimer")).toBe("Resolve to confirm and close, or reply to reopen.");
+	});
+
+	it("shows the plain reopens disclaimer for a ticket the store considers closed (not Resolved)", () => {
+		storeDouble.isClosed = (s) => s === "Closed";
+		const w = mountWith([], { name: "T1", subject: "x", status: "Closed" });
+		const c = w.findComponent({ name: "Composer" });
+		expect(c.props("disclaimer")).toBe("Replying reopens this ticket.");
+		storeDouble.isClosed = () => false; // restore the file's default double
 	});
 
 	it("arms Send for an attachment-only reply", () => {

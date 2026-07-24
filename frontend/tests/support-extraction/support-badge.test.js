@@ -49,19 +49,22 @@ describe("UserMenu resting support badge", () => {
 	it("shows the dot with an accessible label when a reply is waiting", () => {
 		// The whole point of the resting dot: it must register while the user is
 		// heads-down in chat, WITHOUT opening the menu — and a bare coloured dot
-		// is invisible to a screen reader, so the label is not optional.
+		// is invisible to a screen reader, so the label is not optional. The
+		// count is TICKETS (Replied/Resolved), not individual replies — the
+		// original "N support reply/replies awaiting you" wording misnamed the
+		// unit.
 		store.awaitingCount = 2;
 		const w = mount(UserMenu, opts);
 		const dot = w.find('[role="status"]');
 		expect(dot.exists()).toBe(true);
-		expect(dot.attributes("aria-label")).toBe("2 support replies awaiting you");
+		expect(dot.attributes("aria-label")).toBe("2 tickets awaiting your reply");
 	});
 
-	it("singularises one reply", () => {
+	it("singularises one ticket", () => {
 		store.awaitingCount = 1;
 		const w = mount(UserMenu, opts);
 		expect(w.find('[role="status"]').attributes("aria-label")).toBe(
-			"1 support reply awaiting you"
+			"1 ticket awaiting your reply"
 		);
 	});
 

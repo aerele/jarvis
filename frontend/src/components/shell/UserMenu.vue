@@ -23,9 +23,9 @@
 				<div
 					v-if="supportOn && store.awaitingCount"
 					class="absolute left-7 top-1 size-2 rounded-full bg-surface-amber-2"
-					:aria-label="`${store.awaitingCount} support ${
-						store.awaitingCount === 1 ? 'reply' : 'replies'
-					} awaiting you`"
+					:aria-label="`${store.awaitingCount} ${
+						store.awaitingCount === 1 ? 'ticket' : 'tickets'
+					} awaiting your reply`"
 					role="status"
 				/>
 				<div

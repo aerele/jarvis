@@ -59,4 +59,18 @@ describe("renderSupportHtml", () => {
 		expect(renderSupportHtml("", "TKT-1")).toBe("");
 		expect(renderSupportHtml(null, "TKT-1")).toBe("");
 	});
+
+	it("opens every link in a new tab, so clicking a reply's link doesn't navigate the SPA away", () => {
+		// target is NOT in DOMPurify's default ALLOWED_ATTR (rel is) — this pins
+		// the ADD_ATTR config that keeps it from being silently stripped.
+		const out = renderSupportHtml('<a href="https://x.com">x</a>', "TKT-1");
+		expect(out).toContain('target="_blank"');
+		expect(out).toContain('rel="noopener noreferrer"');
+	});
+
+	it("adds target=_blank to a rewritten /files/ link too, not just external ones", () => {
+		const out = renderSupportHtml('<a href="/files/spec.pdf">spec</a>', "TKT-1");
+		expect(out).toContain("jarvis.support.media.download");
+		expect(out).toContain('target="_blank"');
+	});
 });

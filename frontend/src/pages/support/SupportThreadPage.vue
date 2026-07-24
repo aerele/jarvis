@@ -1,5 +1,9 @@
 <template>
-	<SupportShell :title="row ? row.subject || 'Ticket' : 'Ticket'" :back-to="{ name: 'Support' }">
+	<SupportShell
+		:title="row ? row.subject || 'Ticket' : 'Ticket'"
+		:back-to="{ name: 'Support' }"
+		back-label="All tickets"
+	>
 		<template #actions>
 			<!-- row is null for a deep-linked ticket outside the newest 50 (P2/out-of-list):
 			     get_thread carries no status at all, so the row is the ONLY source —
@@ -32,71 +36,85 @@
 			</div>
 
 			<template v-else>
-				<div v-if="ticketAttachments.length" class="jv-sup-files">
-					<a
-						v-for="a in ticketAttachments"
-						:key="a.name"
-						class="jv-sup-file"
-						:class="{ 'jv-sup-file-img': a.type === 'image' }"
-						:href="a.file_url"
-						target="_blank"
-						rel="noopener"
-					>
-						<img
-							v-if="a.type === 'image'"
-							:src="a.file_url"
-							:alt="a.title"
-							loading="lazy"
-							class="jv-sup-thumb"
-						/>
-						<template v-else>
-							<FeatherIcon name="paperclip" class="size-3.5" />{{ a.title }}
-						</template>
-					</a>
-				</div>
+				<!-- Centered column, same treatment as chat's jv-thread-inner (just
+				     narrower — 820px vs chat's 1280 — to suit a slimmer conversation)
+				     so bubbles/rows read as a chat thread instead of stretching
+				     full-bleed with the user's replies hugging the far edge. -->
+				<div class="jv-sup-thread-inner">
+					<div v-if="ticketAttachments.length" class="jv-sup-files">
+						<a
+							v-for="a in ticketAttachments"
+							:key="a.name"
+							class="jv-sup-file"
+							:class="{ 'jv-sup-file-img': a.type === 'image' }"
+							:href="a.file_url"
+							target="_blank"
+							rel="noopener"
+						>
+							<img
+								v-if="a.type === 'image'"
+								:src="a.file_url"
+								:alt="a.title"
+								loading="lazy"
+								class="jv-sup-thumb"
+							/>
+							<template v-else>
+								<FeatherIcon name="paperclip" class="size-3.5" />{{ a.title }}
+							</template>
+						</a>
+					</div>
 
-				<!-- Reachable: a brand-new ticket created with an empty body and no
-				     files has zero Communications (the initial text is the HD Ticket's
-				     `description`, not a reply) — without this, the thread area was
-				     just a blank void with no explanation. -->
-				<div v-if="!displayMessages.length" class="jv-sup-center">
-					<p>This is the start of your conversation.</p>
-				</div>
+					<!-- Reachable: a brand-new ticket created with an empty body and no
+					     files has zero Communications (the initial text is the HD Ticket's
+					     `description`, not a reply) — without this, the thread area was
+					     just a blank void with no explanation. -->
+					<div v-if="!displayMessages.length" class="jv-sup-center">
+						<p>This is the start of your conversation.</p>
+					</div>
 
-				<Message
-					v-for="m in displayMessages"
-					:key="m.key"
-					:variant="m.variant"
-					:html="m.html"
-					body-class="jv-html"
-					:sender="m.sender"
-					:attachments="m.attachments"
-					:timestamp="m.timestamp"
-					:timestamp-full="m.timestampFull"
-					:copyable="false"
-				>
-					<template v-if="m.fromSupport" #avatar>
-						<div class="jv-sup-avatar">S</div>
+					<template v-for="m in displayMessages" :key="m.key">
+						<div v-if="m.dayDivider" class="jv-sup-daydivider">
+							<span>{{ m.dayDivider }}</span>
+						</div>
+						<Message
+							:variant="m.variant"
+							:html="m.html"
+							body-class="jv-html"
+							:sender="m.sender"
+							:attachments="m.attachments"
+							:timestamp="m.timestamp"
+							:timestamp-full="m.timestampFull"
+							:copyable="false"
+							@open-attachment="openAttachment"
+						>
+							<template v-if="m.fromSupport" #avatar>
+								<div class="jv-sup-avatar" aria-hidden="true">S</div>
+							</template>
+						</Message>
 					</template>
-				</Message>
+				</div>
 			</template>
 		</div>
 
 		<div class="jv-sup-composer">
-			<!-- `busy` is deliberately NOT passed: it swaps Send for a Stop button
-			     that emits `stop`, and support has nothing to stop — a reply is a
-			     single POST, not a stream. A dead Stop control is worse than none.
-			     `canSend` already goes false while sending, which disarms Send. -->
-			<Composer
-				v-model="draft"
-				:attachments="pending"
-				:can-send="canSend"
-				placeholder="Reply to Aerele Support…"
-				:disclaimer="disclaimer"
-				@files-added="onFiles"
-				@remove-attachment="removeFile"
-				@submit="send"
-			/>
+			<!-- Same 820px column as jv-sup-thread-inner, so the reply box aligns
+			     under the conversation instead of stretching full-width. -->
+			<div class="jv-sup-composer-inner">
+				<!-- `busy` is deliberately NOT passed: it swaps Send for a Stop button
+				     that emits `stop`, and support has nothing to stop — a reply is a
+				     single POST, not a stream. A dead Stop control is worse than none.
+				     `canSend` already goes false while sending, which disarms Send. -->
+				<Composer
+					v-model="draft"
+					:attachments="pending"
+					:can-send="canSend"
+					placeholder="Reply to Aerele Support…"
+					:disclaimer="disclaimer"
+					@files-added="onFiles"
+					@remove-attachment="removeFile"
+					@submit="send"
+				/>
+			</div>
 		</div>
 	</SupportShell>
 </template>
@@ -112,7 +130,7 @@ import { renderSupportHtml } from "@/lib/supportHtml";
 import { supportDownloadUrl } from "@/api";
 import { useSupportStore } from "@/stores/support";
 import { useStagedFiles } from "@/composables/useStagedFiles";
-import { formatDate, exactDate } from "@/utils/datetime";
+import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 
 // The #avatar slot renders a round human avatar, deliberately unlike Jarvis's
 // gradient square: human-vs-AI must never be ambiguous. The rationale lives
@@ -138,12 +156,26 @@ const badge = computed(() => store.badgeFor(row.value && row.value.status));
 const canSend = computed(() => !sending.value && (!!draft.value.trim() || files.value.length > 0));
 
 // Reopen is reply-driven: there is no reopen endpoint, so the composer stays
-// ENABLED on a resolved/closed ticket and says what replying will do.
-const disclaimer = computed(() =>
-	row.value && (store.isClosed(row.value.status) || row.value.status === "Resolved")
-		? "Replying reopens this ticket."
-		: ""
-);
+// ENABLED on a resolved/closed ticket and says what replying will do. Resolved
+// gets its own wording: it's the one state where Resolve (still visible, see
+// the header Button's v-if) is ALSO a valid next step, so "Replying reopens
+// this ticket" alone reads as contradicting the "Awaiting you" header — this
+// spells out both paths instead.
+const disclaimer = computed(() => {
+	if (!row.value) return "";
+	if (row.value.status === "Resolved")
+		return "Resolve to confirm and close, or reply to reopen.";
+	if (store.isClosed(row.value.status)) return "Replying reopens this ticket.";
+	return "";
+});
+
+// Message emits the RAW attachment record it was given ({file_url, title,
+// type, name}) — file_url is already the proxied download URL (classifyAttachment
+// below), so this is a plain new-tab open, same as the real ticket-level
+// attachment links a few lines up in the template.
+function openAttachment(a) {
+	if (a && a.file_url) window.open(a.file_url, "_blank", "noopener");
+}
 
 // "Sent" means the support side sent it (helpdesk_client.py queries
 // sent_or_received directly). Anything else — including a missing value — is
@@ -212,9 +244,18 @@ function downloadUrl(fileUrl) {
 // with `new Date()` (the previous implementation) treats it as browser-local,
 // showing the wrong time for any viewer whose timezone differs from the site's
 // — the exact bug datetime.js exists to fix, same as the sibling list page.
-const displayMessages = computed(() =>
-	store.thread.messages.map((m) => {
+//
+// dayDivider mirrors ChatView's dayDividers computed (UX #23): a label shows
+// only on the first message of a new day, timezone-safe via dayLabel. A
+// dateless message is skipped WITHOUT resetting the running day (same as
+// chat) so it can never split a day group of its own accord.
+const displayMessages = computed(() => {
+	let prevDay = "";
+	return store.thread.messages.map((m) => {
 		const support = fromSupport(m);
+		const day = dayLabel(m.creation);
+		const dayDivider = day && day !== prevDay ? day : "";
+		if (day) prevDay = day;
 		return {
 			key: m.name,
 			variant: support ? "row" : "bubble",
@@ -224,20 +265,24 @@ const displayMessages = computed(() =>
 			timestamp: formatDate(m.creation, "h:mm A"),
 			timestampFull: exactDate(m.creation),
 			fromSupport: support,
+			dayDivider,
 		};
-	})
-);
+	});
+});
 
 // M10: named for what this actually does — it calls store.closeTicket and the
 // server sets status Closed — not the button's visible "Resolve" label.
 // "Resolved" is a distinct status in the awaiting-set contract (see the
-// store), so the two words are NOT interchangeable; the label-vs-action
-// wording mismatch is a deliberate, separate UX decision for a later pass.
+// store), so the two words are NOT interchangeable. The button keeps saying
+// "Resolve" (the customer's intent verb, mockup-blessed), but the toast now
+// names the actual resulting state AND pre-answers "can I still reply?" —
+// "Ticket resolved" followed a beat later by a "Closed" badge read as two
+// different outcomes in one second.
 async function closeThisTicket() {
 	closing.value = true;
 	const ok = await store.closeTicket(ticketName.value);
 	if (ok) {
-		toast.success("Ticket resolved");
+		toast.success("Ticket closed. Reply anytime to reopen it.");
 		await store.loadTickets({ quiet: true });
 	}
 	closing.value = false;
@@ -396,14 +441,49 @@ watch(ticketName, (n) => open(n));
 	flex: 1;
 	min-height: 0;
 	overflow-y: auto;
-	padding: 20px 16px 28px;
+}
+/* Centered column — the same treatment as ChatView's .jv-thread-inner, just
+   narrower (820px vs chat's 1280) to suit a slimmer support conversation.
+   gap:24px (was 4px on the old full-width flex) is what stops consecutive
+   bubbles/rows from visually fusing into one block. */
+.jv-sup-thread-inner {
+	max-width: 820px;
+	margin: 0 auto;
+	padding: 20px 40px 28px;
 	display: flex;
 	flex-direction: column;
-	gap: 4px;
+	gap: 24px;
 }
 .jv-sup-composer {
 	flex: 0 0 auto;
 	padding: 0 16px 16px;
+}
+/* Same max-width/centering as jv-sup-thread-inner so the reply box aligns
+   under the conversation column instead of stretching edge-to-edge. */
+.jv-sup-composer-inner {
+	max-width: 820px;
+	margin: 0 auto;
+}
+@media (max-width: 640px) {
+	.jv-sup-thread-inner {
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+}
+.jv-sup-daydivider {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	margin: 6px 0 2px;
+}
+.jv-sup-daydivider span {
+	font-size: 11px;
+	font-weight: 550;
+	color: var(--text-3);
+	background: var(--surface-1);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	padding: 2px 10px;
 }
 .jv-sup-center {
 	display: flex;

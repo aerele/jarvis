@@ -44,7 +44,10 @@
 						v-if="store.isAwaiting(row.status)"
 						text="Support replied - awaiting you"
 					>
-						<div class="size-1.5 shrink-0 rounded-full bg-surface-amber-2" />
+						<div
+							class="size-1.5 shrink-0 rounded-full bg-surface-amber-2"
+							aria-hidden="true"
+						/>
 					</Tooltip>
 					<div
 						class="truncate text-base font-medium text-ink-gray-9"
@@ -52,6 +55,12 @@
 					>
 						{{ row.subject || "(no subject)" }}
 					</div>
+				</div>
+			</template>
+
+			<template #cell-name="{ row }">
+				<div class="truncate text-base text-ink-gray-6" :title="`#${row.name}`">
+					#{{ row.name }}
 				</div>
 			</template>
 
@@ -76,7 +85,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { Badge, Button, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
@@ -99,12 +108,35 @@ const STATUS_OPTIONS = [
 	{ label: "Closed", value: "closed" },
 ];
 
-const columns = [
+const ALL_COLUMNS = [
 	{ label: "Subject", key: "subject", width: 3 },
 	{ label: "Ticket", key: "name", width: "9rem" },
 	{ label: "Status", key: "status", width: "8rem" },
 	{ label: "Updated", key: "modified", width: "8rem", align: "right" },
 ];
+
+// Below ~640px the fixed 9rem+8rem+8rem of Ticket/Status/Updated overflows a
+// phone-width viewport — mirrors the design reference, which hides this same
+// column at its own breakpoint. Dropping it from the `columns` prop (rather
+// than hiding cells with :deep() CSS against frappe-ui's internal ListView
+// grid) is the lever ListPage already exposes for exactly this.
+const isNarrow = ref(false);
+let narrowMq = null;
+function onNarrowChange(e) {
+	isNarrow.value = e.matches;
+}
+onMounted(() => {
+	if (typeof window === "undefined" || !window.matchMedia) return;
+	narrowMq = window.matchMedia("(max-width: 640px)");
+	isNarrow.value = narrowMq.matches;
+	narrowMq.addEventListener("change", onNarrowChange);
+});
+onUnmounted(() => {
+	if (narrowMq) narrowMq.removeEventListener("change", onNarrowChange);
+});
+const columns = computed(() =>
+	isNarrow.value ? ALL_COLUMNS.filter((c) => c.key !== "name") : ALL_COLUMNS
+);
 
 // Search rides the quick-filter strip as a text control, exactly as every other
 // list page does. Here it filters client-side: list_tickets takes no arguments.
@@ -183,7 +215,7 @@ watch([() => filters.status, () => filters.search, sort], () => (shown.value = p
 // client-side over whatever's loaded — so a zero-match search when exactly 50
 // are loaded must not read as "that ticket doesn't exist": an older one may
 // simply be outside the window this page ever fetched.
-const CAP_NOTE = " Showing your 50 most recent tickets — an older one may not appear here.";
+const CAP_NOTE = " Showing your 50 most recent tickets - an older one may not appear here.";
 
 const emptyState = computed(() =>
 	filters.search || filters.status

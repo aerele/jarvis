@@ -1,14 +1,18 @@
 <template>
-	<SupportShell title="New ticket" :back-to="{ name: 'Support' }">
+	<SupportShell title="New ticket" :back-to="{ name: 'Support' }" back-label="All tickets">
 		<div class="jv-sup-new">
 			<h1 class="jv-sup-h1">How can we help?</h1>
+			<p class="jv-sup-sub">
+				Start a ticket and the Aerele support team will pick it up - usually within a few
+				hours.
+			</p>
 
 			<label class="jv-sup-label" for="jv-sup-subject">Subject</label>
 			<FormControl
 				id="jv-sup-subject"
 				v-model="subject"
 				type="text"
-				placeholder="A short summary — e.g. Invoice total is wrong"
+				placeholder="A short summary - e.g. Invoice total is wrong"
 			/>
 
 			<!-- Guidance is the placeholder only: a persistent helper line was
@@ -20,7 +24,7 @@
 					v-model="body"
 					:attachments="pending"
 					:can-send="canSend"
-					placeholder="Describe the issue — what you expected, what happened, and where."
+					placeholder="Describe the issue - what you expected, what happened, and where."
 					@files-added="onFiles"
 					@remove-attachment="removeFile"
 					@submit="create"
@@ -105,10 +109,16 @@ async function create() {
 	padding: 40px 16px;
 }
 .jv-sup-h1 {
-	margin: 0 0 24px;
+	margin: 0 0 8px;
 	font-size: 24px;
 	font-weight: 600;
 	color: var(--text);
+}
+.jv-sup-sub {
+	margin: 0 0 24px;
+	font-size: 14px;
+	line-height: 1.5;
+	color: var(--text-2);
 }
 .jv-sup-label {
 	display: block;

@@ -1,11 +1,11 @@
 <template>
 	<div class="jv-root jv-support" :class="{ 'jv-dark': effectiveDark }" :style="paletteVars">
 		<header class="jv-sup-bar">
-			<button class="jv-sup-back" aria-label="Back to Jarvis" @click="goBack">
+			<button class="jv-sup-back" :aria-label="backLabel" @click="goBack">
 				<JarvisMark :size="24" :radius="6" />
-				<span class="jv-sup-backtext">Back to Jarvis</span>
+				<span class="jv-sup-backtext">{{ backLabel }}</span>
 			</button>
-			<div class="jv-sup-title">{{ title }}</div>
+			<div class="jv-sup-title" :title="title">{{ title }}</div>
 			<div class="jv-sup-actions"><slot name="actions" /></div>
 		</header>
 		<main class="jv-sup-body"><slot /></main>
@@ -35,6 +35,12 @@ const props = defineProps({
 	// Where "Back to Jarvis" goes. Chat by default; the thread page overrides it
 	// to the ticket list so Back walks the hierarchy rather than exiting support.
 	backTo: { type: Object, default: () => ({ name: "Chat" }) },
+	// Label paired with backTo — the list page keeps the default (exits support
+	// entirely), while the thread and new-ticket pages pass "All tickets" since
+	// they walk back UP the support hierarchy, not out of it. Drives both the
+	// visible text and the aria-label so mobile (which hides jv-sup-backtext)
+	// still announces the right destination.
+	backLabel: { type: String, default: "Back to Jarvis" },
 });
 
 const router = useRouter();
@@ -92,6 +98,9 @@ function goBack() {
 	font-weight: 600;
 	color: var(--text);
 	text-align: center;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .jv-sup-actions {
 	display: flex;
