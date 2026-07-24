@@ -2620,49 +2620,91 @@
 							style="display: none"
 							@change="onFilesPicked"
 						/>
+						<!-- voice recovery banner: a prior session left un-transcribed clips -->
+						<div
+							v-if="ui.stt_enabled && recoveryClips.length"
+							style="
+								display: flex;
+								flex-wrap: wrap;
+								align-items: center;
+								gap: 8px;
+								margin: 2px 4px 6px;
+								padding: 6px 10px;
+								border-radius: 8px;
+								font-size: 12px;
+								color: var(--text);
+								background: rgba(127, 127, 127, 0.1);
+								border: 1px solid rgba(127, 127, 127, 0.22);
+							"
+						>
+							<span
+								>{{ recoveryClips.length }} voice clip(s) from a previous session
+								weren't transcribed.</span
+							>
+							<button class="jv-voicechip-act" @click="recoverOrphans">
+								Transcribe
+							</button>
+							<button
+								class="jv-voicechip-act"
+								@click="recoveryClips.forEach(downloadOrphan)"
+							>
+								Download
+							</button>
+							<button class="jv-voicechip-act" @click="dismissOrphans">
+								Dismiss
+							</button>
+						</div>
+						<!-- failed-clip chips: a chunk exhausted its retry budget (Retry / Download) -->
+						<div
+							v-if="ui.stt_enabled && voiceQ.failed.length"
+							style="
+								display: flex;
+								flex-wrap: wrap;
+								align-items: center;
+								gap: 6px;
+								margin: 2px 4px 6px;
+							"
+						>
+							<span
+								v-for="f in voiceQ.failed"
+								:key="f.seq"
+								style="
+									display: inline-flex;
+									align-items: center;
+									gap: 6px;
+									padding: 3px 8px;
+									border-radius: 999px;
+									font-size: 12px;
+									color: var(--text);
+									background: rgba(220, 150, 40, 0.12);
+									border: 1px solid rgba(220, 150, 40, 0.32);
+								"
+							>
+								Clip {{ f.seq + 1 }} didn't transcribe
+								<button class="jv-voicechip-act" @click="retryClip(f.seq)">
+									Retry
+								</button>
+								<button class="jv-voicechip-act" @click="downloadClip(f.seq)">
+									Download
+								</button>
+							</span>
+						</div>
 						<div
 							style="display: flex; align-items: center; gap: 6px; padding: 2px 4px"
 						>
-							<!-- dictation mic (hidden unless the backend reports STT configured) -->
+							<!-- dictation mic (hidden unless the backend reports STT configured).
+							     Chunked long-dictation: recording and background transcription
+							     overlap, so there is no "transcribing" button state — the toggle
+							     starts/stops recording; a small spinner pill shows clips still
+							     transcribing after Stop. -->
 							<template v-if="ui.stt_enabled && micRec.supported">
 								<button
-									v-if="micState === 'transcribing'"
-									class="jv-iconbtn jv-micbtn"
-									title="Transcribing…"
-									disabled
-									style="
-										width: 30px;
-										height: 30px;
-										display: flex;
-										align-items: center;
-										justify-content: center;
-										background: transparent;
-										border: none;
-										border-radius: 7px;
-										color: var(--text-3);
-									"
-								>
-									<svg
-										class="jv-spin"
-										width="15"
-										height="15"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="var(--cta)"
-										stroke-width="2.4"
-										stroke-linecap="round"
-									>
-										<path d="M12 3a9 9 0 1 0 9 9" />
-									</svg>
-								</button>
-								<button
-									v-else
 									class="jv-iconbtn jv-micbtn"
 									:class="{ rec: micState === 'recording' }"
 									:title="
 										micState === 'recording'
-											? 'Stop and transcribe'
-											: 'Dictate (voice to text)'
+											? 'Stop dictation'
+											: 'Dictate (voice to text) — long dictation supported'
 									"
 									@click="micState === 'recording' ? stopMic() : startMic()"
 									style="
@@ -2719,6 +2761,32 @@
 										</svg>
 									</button>
 								</template>
+								<!-- background transcription still draining (during or after recording) -->
+								<span
+									v-if="voiceBusyCount > 0"
+									:title="voiceBusyCount + ' voice clip(s) transcribing'"
+									style="
+										display: inline-flex;
+										align-items: center;
+										gap: 4px;
+										font-size: 12px;
+										color: var(--text-3);
+									"
+								>
+									<svg
+										class="jv-spin"
+										width="12"
+										height="12"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="var(--cta)"
+										stroke-width="2.6"
+										stroke-linecap="round"
+									>
+										<path d="M12 3a9 9 0 1 0 9 9" />
+									</svg>
+									{{ voiceBusyCount }}
+								</span>
 							</template>
 							<button
 								class="jv-iconbtn"
@@ -3576,10 +3644,13 @@ import {
 	watch,
 	watchEffect,
 } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import * as api from "@/api";
 import * as voice from "@/api/voice";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
+import { useChunkedRecorder } from "@/composables/useChunkedRecorder";
+import { createVoiceChunkQueue } from "@/utils/voiceChunkQueue";
+import { createClipMirror, listOrphanClips, deleteOrphanClip } from "@/utils/clipMirror";
 import { setMacroPrefill } from "@/composables/macroPrefill";
 import { takeChatPrefill } from "@/composables/chatPrefill";
 import { useConfirm } from "@/composables/useConfirm";
@@ -7384,24 +7455,88 @@ async function refreshQueuePositionOnFocus() {
 	}
 }
 
-// ---- voice dictation (composer mic) ----
+// ---- voice dictation (composer mic) — CHUNKED long-dictation ----
 // Hidden unless get_chat_ui_settings reports stt_enabled AND the browser has
-// MediaRecorder. micState is the UI phase; the recorder itself lives in the
-// composable (300 s hard cap enforced there — onAutoStop still transcribes).
-const micRec = useAudioRecorder({
-	onAutoStop: (r) => {
-		notify("Recording stopped at the 5-minute limit — transcribing.", { type: "info" });
-		_transcribeToInput(r);
-	},
-});
-const micState = ref("idle"); // 'idle' | 'recording' | 'transcribing'
+// MediaRecorder. Long dictation is captured as self-contained ~15 s WebM clips
+// (useChunkedRecorder — header-trap-safe stop/restart cycles, NO 300 s cap), each
+// transcribed INDEPENDENTLY through the existing stateless endpoint and appended to
+// the composer in strict seq order by voiceChunkQueue (≤2 concurrent, per-chunk 25 s
+// budget + ONE auto-retry, then a Retry/Download chip). Audio is NEVER lost: every
+// clip is mirrored to IndexedDB until its text lands; failed clips are retained; a
+// beforeunload + route guard warns while anything is un-transcribed; a reload offers
+// recovery of orphaned clips.
+// SECURITY: transcript text is only ever APPENDED to the composer — it is never fed
+// back into a transcribe call or prompt (no rolling-context path, by design).
+const micState = ref("idle"); // 'idle' | 'recording' (transcription runs in the background)
+const _emptyVoiceSnap = {
+	pending: 0,
+	inflight: 0,
+	done: 0,
+	failed: [],
+	total: 0,
+	hasUnfinished: false,
+};
+const voiceQ = ref({ ..._emptyVoiceSnap });
+const recoveryClips = ref([]); // orphan clips from a prior session, offered on mount
 let _micConvId = null; // conversation the take was started in — transcript belongs to it
+let voiceQueue = null; // createVoiceChunkQueue — one per recording session
+let voiceMirror = null; // createClipMirror — IndexedDB, one per session
+let _voiceSessionId = null;
+
 function _fmtClock(s) {
 	return Math.floor(s / 60) + ":" + String(Math.max(0, s) % 60).padStart(2, "0");
 }
 const micClock = computed(() => _fmtClock(micRec.durationS || 0));
+// A background transcription is in flight/queued (drives the "transcribing N…" pill).
+const voiceBusyCount = computed(() => voiceQ.value.inflight + voiceQ.value.pending);
+
+function _voiceSnap() {
+	voiceQ.value = voiceQueue ? voiceQueue.snapshot() : { ..._emptyVoiceSnap };
+}
+
+// Append committed transcript text to the composer, routed to the conversation the
+// take was started in (append, never replace; if the user switched chats mid-take the
+// words merge into that chat's stashed draft, restored by swapDraft on return).
+function _appendTranscript(text) {
+	const t = (text || "").trim();
+	if (!t) return;
+	const forId = _micConvId;
+	if (currentId.value === forId) {
+		input.value = input.value.trim() ? input.value.replace(/\s+$/, "") + " " + t : t;
+		nextTick(() => {
+			inputEl.value?.focus();
+			autoGrow();
+		});
+	} else if (forId) {
+		const prev = drafts.value[forId] || "";
+		drafts.value[forId] = prev.trim() ? prev.replace(/\s+$/, "") + " " + t : t;
+	}
+}
+
+function _ensureVoiceSession() {
+	if (voiceQueue) return;
+	_voiceSessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	voiceMirror = createClipMirror(_voiceSessionId);
+	voiceQueue = createVoiceChunkQueue({
+		transcribe: (clip) => voice.transcribeAudio(clip.blob, { durationS: clip.durationS }),
+		mirror: voiceMirror,
+		concurrency: 2,
+		maxAttempts: 2, // the 25 s per-chunk abort lives in transcribeAudio; queue retries once
+		onCommit: (_seq, text) => _appendTranscript(text),
+		onChange: _voiceSnap,
+	});
+}
+
+const micRec = useChunkedRecorder({
+	chunkMs: 15000,
+	onClip: (clip) => {
+		if (voiceQueue) voiceQueue.enqueue(clip);
+	},
+});
+
 async function startMic() {
 	_micConvId = currentId.value;
+	_ensureVoiceSession();
 	await micRec.start();
 	if (micRec.state === "error") {
 		notify(micRec.error || "Couldn't start the microphone.", { type: "error" });
@@ -7411,50 +7546,103 @@ async function startMic() {
 }
 async function stopMic() {
 	if (micState.value !== "recording") return;
-	micState.value = "transcribing";
-	const r = await micRec.stop();
-	if (!r || !r.blob || !r.blob.size) {
-		micState.value = "idle";
-		if (micRec.state === "error")
-			notify(micRec.error || "Recording failed. Try again.", { type: "error" });
-		return;
-	}
-	await _transcribeToInput(r);
+	// Finalise: the last (partial) clip is emitted + enqueued; transcription of any
+	// outstanding clips continues in the background (the composer keeps filling).
+	await micRec.stop();
+	micState.value = "idle";
+	if (micRec.state === "error")
+		notify(micRec.error || "Recording failed. Try again.", { type: "error" });
 }
-async function _transcribeToInput(r) {
-	micState.value = "transcribing";
-	const forId = _micConvId;
-	try {
-		const res = await voice.transcribeAudio(r.blob, { durationS: r.durationS });
-		const text = ((res && res.text) || "").trim();
-		if (!text) {
-			notify("Nothing was transcribed — try again closer to the microphone.", {
-				type: "info",
-			});
-		} else if (currentId.value === forId) {
-			// fillInput pattern, but APPENDING: dictation adds to any typed draft.
-			input.value = input.value.trim() ? input.value.replace(/\s+$/, "") + " " + text : text;
-			nextTick(() => {
-				inputEl.value?.focus();
-				autoGrow();
-			});
-		} else if (forId) {
-			// The user switched chats mid-transcription: the words belong to the
-			// chat they were spoken in — merge into its stashed draft (swapDraft
-			// restores it when they return), never into the composer on screen.
-			const prev = drafts.value[forId] || "";
-			drafts.value[forId] = prev.trim() ? prev.replace(/\s+$/, "") + " " + text : text;
-		}
-	} catch (e) {
-		notifyActionError("Couldn't transcribe audio", e);
-	} finally {
-		micState.value = "idle";
-	}
-}
-function cancelMic() {
-	micRec.cancel();
+async function cancelMic() {
+	// Stop recording and drop ONLY the current unsent snippet; clips already emitted
+	// this session stay queued (their audio was captured — never dropped).
+	await micRec.cancel();
 	micState.value = "idle";
 }
+
+// ---- failed-clip chip actions ----
+function retryClip(seq) {
+	if (voiceQueue) voiceQueue.retry(seq);
+}
+function downloadClip(seq) {
+	const clip = voiceQueue && voiceQueue.getClip(seq);
+	if (clip && clip.blob) _downloadBlob(clip.blob, `voice-clip-${seq}.webm`);
+}
+function _downloadBlob(blob, filename) {
+	try {
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = filename;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 4000);
+	} catch (e) {
+		notify("Couldn't download the clip.", { type: "error" });
+	}
+}
+
+// ---- reload recovery (orphan clips left by a crashed/closed prior session) ----
+async function _loadRecovery() {
+	try {
+		const orphans = await listOrphanClips(_voiceSessionId);
+		recoveryClips.value = orphans || [];
+	} catch (e) {
+		recoveryClips.value = [];
+	}
+}
+function recoverOrphans() {
+	const orphans = recoveryClips.value.slice();
+	if (!orphans.length) return;
+	_micConvId = currentId.value;
+	_ensureVoiceSession();
+	voiceQueue.recover(
+		orphans.map((o) => ({
+			seq: o.seq,
+			blob: o.blob,
+			durationS: o.durationS,
+			mimeType: o.mimeType,
+		}))
+	);
+	// The clips are now owned by the live session's mirror; drop the stale keys.
+	orphans.forEach((o) => deleteOrphanClip(o.key));
+	recoveryClips.value = [];
+}
+function downloadOrphan(o) {
+	if (o && o.blob) _downloadBlob(o.blob, `voice-clip-${o.seq}.webm`);
+}
+function dismissOrphans() {
+	recoveryClips.value.forEach((o) => deleteOrphanClip(o.key));
+	recoveryClips.value = [];
+}
+
+// ---- never-lost navigation guard ----
+function _voiceHasUnfinished() {
+	return (
+		!!(voiceQueue && voiceQueue.hasUnfinished()) ||
+		micState.value === "recording" ||
+		recoveryClips.value.length > 0
+	);
+}
+function _beforeUnloadVoice(e) {
+	if (_voiceHasUnfinished()) {
+		e.preventDefault();
+		e.returnValue = "";
+		return "";
+	}
+}
+onBeforeRouteLeave(async () => {
+	if (!_voiceHasUnfinished()) return true;
+	return await confirm({
+		title: "Leave with un-transcribed audio?",
+		message:
+			"Some dictated voice clips haven't finished transcribing. Leaving now loses that audio. Leave anyway?",
+		danger: true,
+		confirmLabel: "Leave",
+		cancelLabel: "Stay",
+	});
+});
 
 // ---- wiki nudge ("anything worth remembering?") ----
 // Set by the realtime `wiki:nudge` event for the on-screen conversation; the
@@ -7834,11 +8022,17 @@ onMounted(async () => {
 		.catch(() => {});
 	document.addEventListener("pointerdown", onDocClick);
 	window.addEventListener("keydown", onGlobalKey);
+	// Never-lost guard: warn on tab close/reload while any dictated clip is
+	// un-transcribed (armed/disarmed dynamically by _voiceHasUnfinished()).
+	window.addEventListener("beforeunload", _beforeUnloadVoice);
 	_thinkTimer = setInterval(() => {
 		thinkTick.value = busy.value ? thinkTick.value + 1 : 0;
 		if (busy.value) nowMs.value = Date.now();
 	}, 1000);
 	ui.value = (await uiP) || {};
+	// Offer recovery of any voice clips a prior session left un-transcribed (a tab
+	// crash / accidental reload) — only when dictation is actually enabled.
+	if (ui.value && ui.value.stt_enabled && micRec.supported) _loadRecovery();
 	// Load custom skills so the "/" composer menu can offer them.
 	loadCustomSkills();
 	// "Discuss in chat" hand-off (Review tab → chatPrefill stash). Take the
@@ -7935,6 +8129,11 @@ onBeforeUnmount(() => {
 	// Release the mic — navigating to another route mid-take must not leave the
 	// track hot (and its duration interval ticking) behind the dead view.
 	micRec?.cancel();
+	// Stop the queue from poking a dead composer with late transcriptions; drop the
+	// unload guard. The IndexedDB mirror is left intact so a reload can still recover
+	// anything un-transcribed (the route guard already warned the user).
+	window.removeEventListener("beforeunload", _beforeUnloadVoice);
+	voiceQueue?.dispose();
 	if (nudge.value && (nudge.value.mode === "recording" || nudge.value.mode === "transcribing"))
 		nudgeRec?.cancel();
 	// ChatView is the sole writer of streamingConvId (§4 contract) and its
@@ -8338,6 +8537,20 @@ onUnmounted(() => {
 .jv-mic-cancel:hover {
 	background: var(--surface-2);
 	color: var(--text);
+}
+/* small text action buttons inside voice recovery banner + failed-clip chips */
+.jv-voicechip-act {
+	border: none;
+	background: transparent;
+	padding: 1px 4px;
+	border-radius: 5px;
+	cursor: pointer;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--cta);
+}
+.jv-voicechip-act:hover {
+	background: rgba(127, 127, 127, 0.16);
 }
 /* wiki nudge card — own block above the composer, never inside it */
 .jv-nudge {
