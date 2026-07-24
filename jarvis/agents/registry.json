@@ -72,6 +72,11 @@
       "slug": "measurement",
       "title": "Baseline Measurement",
       "blurb": "Baseline operational measurement across finance, inventory, helpdesk, and payroll."
+    },
+    {
+      "slug": "knowledge",
+      "title": "Knowledge & Documentation",
+      "blurb": "Turns your own custom Frappe apps into durable, business-first wiki knowledge."
     }
   ],
   "agents": [
@@ -135,6 +140,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -200,6 +206,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -255,6 +262,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -315,6 +323,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -374,6 +383,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -416,6 +426,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -461,6 +472,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -517,6 +529,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": "2026-2027"
     },
     {
@@ -568,7 +581,49 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": "2026-2027"
+    },
+    {
+      "agent_slug": "custom-app-learning",
+      "title": "Custom App Learning Scribe",
+      "domain": "knowledge",
+      "nature": "scribe",
+      "delivery": "delegate",
+      "version": "0.1.0",
+      "status": "Published",
+      "description": "Reads your installed CUSTOM Frappe apps' source and writes durable, business-first wiki pages about them — what each app does for the business, its doctypes and their purpose, workflows, validations and integrations — so the assistant and your team can rely on that knowledge later. Runs on demand in the Jarvis container (your bench never sees a source-laden chat), never reads core-app source, and only writes the org wiki (it holds no ERP write tool). Re-running updates the same pages in place. Restricted to System Manager / Jarvis Admin by default.",
+      "tools_required": [
+        "jarvis__list_app_modules",
+        "jarvis__read_app_source",
+        "jarvis__record_app_wiki",
+        "jarvis__read_wiki"
+      ],
+      "tools_allow": [
+        "jarvis__list_app_modules",
+        "jarvis__read_app_source",
+        "jarvis__record_app_wiki",
+        "jarvis__read_wiki",
+        "canvas",
+        "message"
+      ],
+      "doctypes_required": [
+        "Jarvis Wiki Page"
+      ],
+      "rule_tokens": [],
+      "writes": null,
+      "rule_pack": "knowledge",
+      "timeout_s": 5400,
+      "min_apps": [],
+      "default_schedule": {
+        "schedule_enabled": 0,
+        "schedule_frequency": "Monthly"
+      },
+      "default_allowed_roles": [
+        "System Manager",
+        "Jarvis Admin"
+      ],
+      "validated_for_fy": null
     },
     {
       "agent_slug": "cycle-count-planner-operator",
@@ -627,6 +682,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -679,6 +735,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -730,6 +787,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -789,6 +847,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -841,6 +900,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -895,6 +955,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -949,6 +1010,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1003,6 +1065,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": "2026-2027"
     },
     {
@@ -1059,6 +1122,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": "2026-2027"
     },
     {
@@ -1113,6 +1177,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1166,6 +1231,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1218,6 +1284,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": "2026-2027"
     },
     {
@@ -1276,6 +1343,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1336,6 +1404,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1398,6 +1467,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1448,6 +1518,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1504,6 +1575,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": "2026-2027"
     },
     {
@@ -1551,6 +1623,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": "2026-2027"
     },
     {
@@ -1598,6 +1671,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1655,6 +1729,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": "2026-2027"
     },
     {
@@ -1709,6 +1784,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     },
     {
@@ -1768,6 +1844,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
+      "default_allowed_roles": [],
       "validated_for_fy": null
     }
   ]

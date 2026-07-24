@@ -130,6 +130,15 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"create_custom_skill",
 	"read_wiki",
 	"update_wiki",
+	# Custom App Learning scribe delegate: self-gated source reads +
+	# audited-not-gated wiki writeback. list_app_modules / read_app_source only
+	# serve a running app-learning SCRIBE run (session-key-bound, admin-tier,
+	# custom-apps allowlist, realpath-containment + per-run byte budget);
+	# record_app_wiki applies pages server-side through apply_extracted_page_updates
+	# (in _WRITE_TOOLS, NOT _GATED_WRITES — like record_agent_run).
+	"list_app_modules",
+	"read_app_source",
+	"record_app_wiki",
 )
 
 

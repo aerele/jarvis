@@ -625,6 +625,34 @@ class TestAgentsMarketplace(unittest.TestCase):
 		# ... while registry-owned fields WERE re-synced (still Published).
 		self.assertEqual(frappe.db.get_value(LISTING, "close-auditor", "status"), "Published")
 
+	def test_sync_seeds_default_allowed_roles_on_insert_only(self):
+		# The Custom App Learning scribe ships its admin-only restriction ON BY
+		# DEFAULT via the manifest ``default_allowed_roles``. sync seeds it on the
+		# INSERT branch ONLY, and a re-sync must NEVER clobber an admin's later edit.
+		slug = "custom-app-learning"
+		_ensure_role("Jarvis Admin")
+		# Force the INSERT branch: drop the listing + any allowed_roles rows.
+		frappe.db.delete(ALLOWED_ROLE, {"parenttype": LISTING, "parent": slug})
+		if frappe.db.exists(LISTING, slug):
+			frappe.delete_doc(LISTING, slug, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+		agent_catalog.sync_agent_listings()  # INSERT → seed the default restriction
+		seeded = set(
+			frappe.get_all(
+				ALLOWED_ROLE, filters={"parenttype": LISTING, "parent": slug}, pluck="role"
+			)
+		)
+		self.assertEqual(seeded, {"System Manager", "Jarvis Admin"})
+
+		# An admin narrows it; a re-sync (UPDATE branch) must leave the edit intact.
+		self._restrict(slug, [ROLE_X])
+		agent_catalog.sync_agent_listings()
+		after = frappe.get_all(
+			ALLOWED_ROLE, filters={"parenttype": LISTING, "parent": slug}, pluck="role"
+		)
+		self.assertEqual(after, [ROLE_X])  # NOT re-seeded / clobbered
+
 	def test_push_payload_excludes_install_of_blocked_owner(self):
 		inst_name = _install_as(self.owner, "close-auditor")
 		frappe.db.set_value(INSTALLATION, inst_name, "enabled", 1)

@@ -550,9 +550,15 @@ _WRITE_TOOLS = frozenset(
 		# rows deterministically (validated, coverage-scoped) from a detached agent
 		# turn where nobody can click a confirm card, so it is audited but NEVER
 		# gated - the human review happens on the Findings board, not a card.
+		# record_app_wiki is the Custom App Learning scribe delegate's wiki
+		# writeback: like record_agent_run it lands its declared output (wiki
+		# pages) from a detached, unattended turn through a reviewed server funnel
+		# (apply_extracted_page_updates + the controller sanitizer), so it is
+		# audited but NEVER gated (and NOT the gated update_wiki card path).
 		"download_pdf",
 		"export_excel",
 		"record_agent_run",
+		"record_app_wiki",
 	}
 )
 _PREVIEWABLE = frozenset(

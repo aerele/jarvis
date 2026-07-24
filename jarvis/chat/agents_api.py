@@ -835,8 +835,10 @@ def run_agent_now(installation: str) -> dict:
 	from jarvis.chat.agent_installability import assert_installable
 
 	assert_installable(doc.agent)
-	if frappe.db.get_value(LISTING, doc.agent, "nature") != "Auditor":
-		frappe.throw(_("Only auditor agents run on demand; operators draft through the Approval Board."))
+	if frappe.db.get_value(LISTING, doc.agent, "nature") not in ("Auditor", "Scribe"):
+		frappe.throw(
+			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
+		)
 	from jarvis.chat.agent_scheduler import _launch_audit, _over_run_budget, _valid_owner
 
 	# A14: the manual path shares the SAME per-installation + per-tenant monthly

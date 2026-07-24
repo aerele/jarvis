@@ -103,10 +103,11 @@ def run_due_agent_audits() -> None:
 			_advance(row, now)
 			continue
 
-		# Only auditor agents run scheduled scans; an operator install with a
-		# schedule set just consumes its slot (it drafts through the board, not
-		# on a cron).
-		if frappe.db.get_value(LISTING, row.agent, "nature") != "Auditor":
+		# Only auditor + scribe agents run scheduled scans; an operator install
+		# with a schedule set just consumes its slot (it drafts through the board,
+		# not on a cron). A scribe's schedule is optional (manual run-now is the
+		# primary path) but honoured here when set, so periodic re-learning works.
+		if frappe.db.get_value(LISTING, row.agent, "nature") not in ("Auditor", "Scribe"):
 			_advance(row, now)
 			continue
 

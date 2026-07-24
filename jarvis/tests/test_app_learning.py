@@ -25,7 +25,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, add_to_date, now_datetime
 
-from jarvis.learning import app_analysis
+from jarvis.learning import app_analysis, app_source
 
 RUN = "Jarvis App Learning Run"
 CONV = "Jarvis Conversation"
@@ -229,7 +229,10 @@ class TestSnapshotZip(_AppLearningTestCase):
 				"README.md": "# r\n",
 			}
 		)
-		with mock.patch.object(app_analysis, "FILE_CAP", 3):
+		# FILE_CAP now lives in the shared jarvis.learning.app_source module (imported
+		# + re-exported by app_analysis); _collect_files reads it there, so the cap must
+		# be patched at its source module for the snapshot's file-cap subset to shrink.
+		with mock.patch.object(app_source, "FILE_CAP", 3):
 			snap = app_analysis._snapshot_zip("test-cap-run", "fakeapp")
 		self._zips.append(snap["zip_path"])
 		import zipfile

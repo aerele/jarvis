@@ -43,12 +43,34 @@ import zipfile
 import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
+# The source-collection machinery (custom-apps allowlist, extension allowlist,
+# the per-file/file-count/zip caps, the _is_contained symlink-containment guard,
+# the _priority ordering and the _collect_files walk) now lives in the shared
+# jarvis.learning.app_source module — ONE source of truth reused by the Custom
+# App Learning scribe delegate's source-read tools. Re-exported here so this
+# legacy pipeline (and its callers / tests referencing app_analysis.<name>) keep
+# working byte-for-byte; the legacy behaviour is unchanged.
+from jarvis.learning.app_source import (
+	APPROX_FILE_BAIL,
+	EXCLUDED_APPS,
+	EXT_ALLOWLIST,
+	FILE_CAP,
+	PER_FILE_CAP_BYTES,
+	ZIP_CAP_BYTES,
+	_app_source_dir,
+	_app_title,
+	_app_version,
+	_approx_size,
+	_collect_files,
+	_installed_custom_apps,
+	_is_contained,
+	_is_excluded_dir,
+	_priority,
+)
+
 RUN = "Jarvis App Learning Run"
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
-
-# Core apps whose knowledge Jarvis already has (or must never mine).
-EXCLUDED_APPS = frozenset({"frappe", "erpnext", "hrms", "india_compliance", "jarvis"})
 
 QUEUE = "long"
 TICK_JOB_ID = "jarvis_app_learning_tick"
@@ -62,41 +84,10 @@ NON_TERMINAL = ("Queued", "Zipping", "Analyzing", "Ingesting")
 ACTIVE = ("Zipping", "Analyzing", "Ingesting")
 TERMINAL = ("Completed", "Failed", "Cancelled")
 
-# --- snapshot caps -----------------------------------------------------------
-EXT_ALLOWLIST = frozenset(
-	{
-		".py",
-		".js",
-		".ts",
-		".vue",
-		".json",
-		".md",
-		".txt",
-		".html",
-		".css",
-		".toml",
-		".cfg",
-		".yml",
-		".yaml",
-	}
-)
-_EXCLUDE_DIR_NAMES = frozenset(
-	{
-		".git",
-		"node_modules",
-		"dist",
-		"build",
-		"__pycache__",
-		".venv",
-		"env",
-	}
-)
-_EXCLUDE_DIR_PATHS = frozenset({"public/frontend", "public/dist"})
-PER_FILE_CAP_BYTES = 200 * 1024
-FILE_CAP = 3000
-ZIP_CAP_BYTES = 25 * 1024 * 1024
-# Fast-probe bail for list_custom_apps (approx_files/approx_kb stop counting).
-APPROX_FILE_BAIL = 3000
+# --- snapshot caps ---------------------------------------------------------- #
+# EXT_ALLOWLIST / _EXCLUDE_DIR_* / PER_FILE_CAP_BYTES / FILE_CAP / ZIP_CAP_BYTES /
+# APPROX_FILE_BAIL are imported from jarvis.learning.app_source (see the import
+# block above) — one source of truth shared with the delegate source-read tools.
 
 # --- batching / analysis -----------------------------------------------------
 BATCH_CHAR_BUDGET = 20000
@@ -125,62 +116,12 @@ _ANALYSIS_RE = re.compile(r"```jarvis-app-analysis[ \t]*\n([\s\S]*?)```")
 
 
 # --------------------------------------------------------------------------- #
-# app discovery (the API's data source; factored so tests can patch)
+# app discovery + size probe: _installed_custom_apps / _app_source_dir /
+# _app_title / _app_version / _approx_size are imported from
+# jarvis.learning.app_source (shared with the delegate tools). The cached
+# wrapper + the API's row assembler stay here (they lean on frappe.cache +
+# the Jarvis App Learning Run doctype, both legacy-pipeline-specific).
 # --------------------------------------------------------------------------- #
-def _installed_custom_apps() -> list[str]:
-	"""Installed apps eligible for learning (install order kept)."""
-	return [a for a in frappe.get_installed_apps() if a not in EXCLUDED_APPS]
-
-
-def _app_source_dir(app: str) -> str:
-	"""Source dir of ``app`` on this bench. Factored (tests patch this)."""
-	return os.path.join(frappe.utils.get_bench_path(), "apps", app)
-
-
-def _app_title(app: str) -> str:
-	try:
-		titles = frappe.get_hooks("app_title", app_name=app)
-		return str(titles[0]) if titles else app
-	except Exception:
-		return app
-
-
-def _app_version(app: str) -> str:
-	try:
-		return str(frappe.get_attr(f"{app}.__version__") or "")
-	except Exception:
-		return ""
-
-
-def _approx_size(src_dir: str) -> tuple[int, int]:
-	"""(approx eligible file count, approx KB) — fast walk with a bail at
-	``APPROX_FILE_BAIL`` files so a huge tree can't stall the settings card."""
-	count = 0
-	total = 0
-	src_real = os.path.realpath(src_dir)
-	for root, dirs, files in os.walk(src_dir):
-		rel_root = os.path.relpath(root, src_dir)
-		dirs[:] = [
-			d for d in dirs if not _is_excluded_dir(rel_root, d) and not os.path.islink(os.path.join(root, d))
-		]
-		for fname in files:
-			if os.path.splitext(fname)[1].lower() not in EXT_ALLOWLIST:
-				continue
-			full = os.path.join(root, fname)
-			# Mirror the snapshot's symlink-containment guard so the probe count
-			# matches what will actually be zipped.
-			if os.path.islink(full) or not _is_contained(full, src_real):
-				continue
-			count += 1
-			try:
-				total += os.path.getsize(full)
-			except OSError:
-				pass
-			if count >= APPROX_FILE_BAIL:
-				return count, total // 1024
-	return count, total // 1024
-
-
 _SIZE_PROBE_TTL_S = 120
 
 
@@ -430,114 +371,13 @@ def process_due() -> None:
 
 # --------------------------------------------------------------------------- #
 # snapshot zip (read-only wrt the app source tree)
+#
+# The collection walk + its guards — _is_excluded_dir / _priority / _is_contained
+# / _collect_files — are imported from jarvis.learning.app_source (the import
+# block at the top) so the legacy zip path and the delegate source-read tools
+# share exactly one implementation of the symlink-containment guard, the caps and
+# the priority ordering. Only the zip/batch machinery below is pipeline-specific.
 # --------------------------------------------------------------------------- #
-def _is_excluded_dir(rel_root: str, dirname: str) -> bool:
-	if dirname in _EXCLUDE_DIR_NAMES:
-		return True
-	rel = os.path.join(rel_root, dirname) if rel_root not in (".", "") else dirname
-	return rel.replace(os.sep, "/") in _EXCLUDE_DIR_PATHS
-
-
-def _priority(rel_path: str) -> int:
-	"""Manifest / subset priority (lower = analysed first / kept under the cap):
-	hooks.py, doctype schemas, doctype controllers, report scripts, api-ish
-	python, workflow/fixture JSON, other python, js/ts/vue, md, rest.
-
-	Report scripts (``/report/<name>/*.py``) and fixture-style JSON
-	(``fixtures/*.json``, plus Workflow / Property Setter / Custom Field / Print
-	Format exports which often carry the real business logic in fixture-heavy
-	apps) are lifted ABOVE js/vue/md so they aren't the first things dropped when
-	a large app hits the file cap."""
-	p = rel_path.replace(os.sep, "/")
-	pp = f"/{p}"
-	base = os.path.basename(p)
-	if base == "hooks.py":
-		return 0
-	in_doctype = "/doctype/" in pp
-	if in_doctype and p.endswith(".json"):
-		return 1
-	if in_doctype and p.endswith(".py") and base != "__init__.py":
-		return 2
-	if "/report/" in pp and p.endswith(".py") and base != "__init__.py":
-		return 3
-	if p.endswith(".py") and "api" in base:
-		return 4
-	# fixture-ish JSON: /fixtures/ exports, or workflow/print-format/custom-field
-	# folders that store business config as JSON.
-	if p.endswith(".json") and (
-		"/fixtures/" in pp or "/workflow/" in pp or "/print_format/" in pp or "/custom/" in pp
-	):
-		return 5
-	if p.endswith(".py"):
-		return 6
-	if p.endswith((".js", ".ts", ".vue")):
-		return 7
-	if p.endswith(".md"):
-		return 8
-	return 9
-
-
-def _is_contained(full: str, root_real: str) -> bool:
-	"""True iff ``full`` resolves to a path INSIDE ``root_real`` (already a
-	realpath). Defends against symlinks in the app source that would otherwise
-	make ``open()``/``zipfile.write`` follow the link and ship the TARGET's
-	content — e.g. a ``config.json -> ../../sites/common_site_config.json`` link
-	exfiltrating site secrets to the external LLM. os.walk itself does not
-	descend symlinked dirs (followlinks=False), but a symlinked FILE is still
-	opened by name, so every file is realpath-checked here."""
-	try:
-		real = os.path.realpath(full)
-	except OSError:
-		return False
-	return real == root_real or real.startswith(root_real + os.sep)
-
-
-def _collect_files(src_dir: str) -> tuple[list[str], dict]:
-	"""Snapshot-eligible relative paths (sorted for determinism) + coverage
-	notes. Applies the extension allowlist, dir excludes, the per-file size
-	cap (skip + note), a symlink-containment guard (skip + note) and the total
-	file cap (prioritized subset + note)."""
-	rels: list[str] = []
-	skipped_large = 0
-	skipped_symlink = 0
-	src_real = os.path.realpath(src_dir)
-	for root, dirs, files in os.walk(src_dir):
-		rel_root = os.path.relpath(root, src_dir)
-		# Drop excluded AND symlinked directories (never descend a link out of
-		# the tree — os.walk keeps followlinks off, but excluding here also keeps
-		# such dirs out of the size probe / listing).
-		dirs[:] = sorted(
-			d for d in dirs if not _is_excluded_dir(rel_root, d) and not os.path.islink(os.path.join(root, d))
-		)
-		for fname in sorted(files):
-			if os.path.splitext(fname)[1].lower() not in EXT_ALLOWLIST:
-				continue
-			full = os.path.join(root, fname)
-			if os.path.islink(full) or not _is_contained(full, src_real):
-				skipped_symlink += 1
-				continue
-			try:
-				size = os.path.getsize(full)
-			except OSError:
-				continue
-			if size > PER_FILE_CAP_BYTES:
-				skipped_large += 1
-				continue
-			rel = fname if rel_root in (".", "") else os.path.join(rel_root, fname)
-			rels.append(rel.replace(os.sep, "/"))
-	dropped = 0
-	if len(rels) > FILE_CAP:
-		rels.sort(key=lambda r: (_priority(r), r))
-		dropped = len(rels) - FILE_CAP
-		rels = rels[:FILE_CAP]
-	notes = {
-		"skipped_large_files": skipped_large,
-		"skipped_symlinks": skipped_symlink,
-		"dropped_files": dropped,
-	}
-	return rels, notes
-
-
 def _snapshot_zip(run_name: str, app: str) -> dict:
 	"""Zip ``apps/<app>`` (filtered) into the site's private files under
 	``app_learning/<run>.zip``. Read-only wrt the source tree. Raises on any
