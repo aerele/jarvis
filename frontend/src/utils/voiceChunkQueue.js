@@ -394,6 +394,44 @@ export function createVoiceChunkQueue(deps = {}) {
 		return token;
 	}
 
+	// PAYLOAD-BOUND capture (R3-1): captureSent binds the release to every committed clip in
+	// `scope`, but the user may have EDITED or DELETED a clip's transcript out of the composer
+	// before sending — acknowledging that clip would delete audio whose text never left in the
+	// payload. This variant admits a committed clip's seq into the token ONLY when its contributed
+	// text is actually PRESENT in `payloadText` (normalized whitespace-collapse match). A clip whose
+	// text can't be matched (edited/deleted/empty) is NOT acknowledged, so its audio is RETAINED and
+	// stays actionable/recoverable — err toward never-lose. Occurrences are CONSUMED lowest-seq
+	// first so, when two clips contributed identical text and the user deleted ONE, only one seq
+	// matches the single surviving occurrence and the other's audio is kept. `normalize` is
+	// injectable for tests; it defaults to the composer's collapse-whitespace-and-trim.
+	function captureSentInPayload(scope, payloadText, normalize) {
+		const target = scope == null ? null : scope;
+		const norm =
+			typeof normalize === "function"
+				? normalize
+				: (s) => (s == null ? "" : String(s)).replace(/\s+/g, " ").trim();
+		let hay = norm(payloadText);
+		const committed = [];
+		for (const rec of records.values()) {
+			if (!rec.committed || rec.state === "discarded") continue;
+			const clipScope =
+				rec.clip && rec.clip.conversationId != null ? rec.clip.conversationId : null;
+			if (clipScope === target) committed.push(rec);
+		}
+		committed.sort((a, b) => a.seq - b.seq);
+		const token = [];
+		for (const rec of committed) {
+			const needle = norm(rec.text);
+			if (!needle) continue; // an empty contribution can't be matched → RETAIN
+			const at = hay.indexOf(needle);
+			if (at === -1) continue; // edited/deleted out of the payload → RETAIN (never-lose)
+			// Consume this occurrence so an identical later clip must find its OWN occurrence.
+			hay = hay.slice(0, at) + " " + hay.slice(at + needle.length);
+			token.push(rec.seq);
+		}
+		return token;
+	}
+
 	// The payload carrying EXACTLY these captured seqs (from captureSent) was SENT — its
 	// voice-derived text is now durable in the conversation, so drop just those committed clips
 	// and their retained audio mirror (finding 6): the leave guard/recovery must no longer treat
@@ -496,6 +534,7 @@ export function createVoiceChunkQueue(deps = {}) {
 		recover,
 		discard,
 		captureSent,
+		captureSentInPayload,
 		acknowledge,
 		reassignScope,
 		snapshot,

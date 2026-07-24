@@ -6939,17 +6939,20 @@ async function send(textArg, resendAck) {
 	// retained audio mirror + leave guard can be released (finding 6).
 	const _sentScope = _currentScope();
 	const fromMain = typeof textArg !== "string";
-	// Payload-bound voice release (R2-1): bind the release to the EXACT committed voice clips
-	// THIS payload carries — captured NOW, before the POST is even attempted. A resend reuses the
-	// ORIGINAL send's token (it rides on the failed bubble); a fresh main-composer send captures
-	// the clips currently in the draft. A same-scope clip that commits AFTER this capture is NOT
-	// in the token, so this send can never release its still-un-sent audio. A programmatic send
-	// that leaves the composer intact (no resend token, not fromMain) releases nothing.
-	const _voiceAck =
-		resendAck || (fromMain && voiceQueue ? voiceQueue.captureSent(_sentScope) : null);
 	// Strip any pending-gap placeholder tokens (⟦clip N⟧) so a failed clip's marker never
-	// rides out in a sent message; its chip stays, so the audio is still recoverable.
+	// rides out in a sent message; its chip stays, so the audio is still recoverable. `text` is the
+	// EXACT voice-derived payload the POST will carry — so it's what the release token binds to.
 	const text = _stripGapTokens(fromMain ? input.value : textArg);
+	// PAYLOAD-bound voice release (R2-1 + R3-1): bind the release to the committed voice clips whose
+	// transcript is ACTUALLY PRESENT in THIS outgoing payload — captured NOW, before the POST. A
+	// clip the user EDITED or DELETED out of the composer is absent from `text`, so captureSentInPayload
+	// leaves it OUT of the token and its audio is RETAINED (never acknowledged → never lost). A same-
+	// scope clip that commits AFTER this capture is likewise not in the token. A resend reuses the
+	// ORIGINAL send's token (it rides on the failed bubble). A programmatic send that leaves the
+	// composer intact (no resend token, not fromMain) releases nothing.
+	const _voiceAck =
+		resendAck ||
+		(fromMain && voiceQueue ? voiceQueue.captureSentInPayload(_sentScope, text) : null);
 	const attachments = fromMain ? pendingFiles.value.slice() : [];
 	if ((!text && !attachments.length) || sending.value) return;
 	if (text && promptHistory.value[promptHistory.value.length - 1] !== text) {

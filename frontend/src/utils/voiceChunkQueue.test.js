@@ -880,3 +880,96 @@ test("R2-3: an empty/whitespace transcription surfaces an actionable failed chip
 	assert.equal(q.hasUnfinished(), false, "Discard clears the guard — no forever-armed state");
 	assert.ok(!mirror.store.has(0), "and drops the mirror record");
 });
+
+// ── (21) R3-1: PAYLOAD-bound release — a clip whose transcript the user EDITED or DELETED out of
+//        the composer before sending is NOT acknowledged, so its audio is RETAINED. captureSent
+//        (scope-bound) would have released every committed clip regardless of the payload. ────────
+test("R3-1: captureSentInPayload acknowledges ONLY clips whose transcript is present in the outgoing payload", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 3,
+	});
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	q.enqueue({ blob: "b", durationS: 15, conversationId: "chatA" });
+	q.enqueue({ blob: "c", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.resolve(0, "alpha words");
+	tx.resolve(1, "bravo words");
+	tx.resolve(2, "charlie words");
+	await flush();
+
+	// The OLD scope-bound token released ALL THREE — the R3-1 bug: it deletes audio whose text the
+	// user removed from the composer.
+	assert.deepEqual(
+		q.captureSent("chatA"),
+		[0, 1, 2],
+		"captureSent is scope-bound — every committed clip, payload be damned"
+	);
+
+	// The user kept A verbatim, RETYPED over B (its exact text is gone), and DELETED C.
+	const payload = "alpha words and something I retyped instead of bravo";
+	const token = q.captureSentInPayload("chatA", payload);
+	assert.deepEqual(
+		token,
+		[0],
+		"only clip A — its transcript is present verbatim; B (edited) and C (deleted) are absent"
+	);
+
+	q.acknowledge(token);
+	await flush();
+	assert.ok(!mirror.store.has(0), "clip A (in the sent payload) is released");
+	assert.ok(
+		mirror.store.has(1) && mirror.store.has(2),
+		"clips B (edited) and C (deleted) are RETAINED — audio never lost without an explicit discard"
+	);
+	assert.equal(
+		q.hasUnfinished(),
+		true,
+		"the retained clips keep the leave guard armed + recoverable"
+	);
+});
+
+// ── (22) R3-1: normalized (whitespace-insensitive) match + duplicate transcripts consume ONE
+//        occurrence each — deleting one of two identical clips retains the other (never over-release). ─
+test("R3-1: captureSentInPayload normalizes whitespace and consumes duplicate occurrences", async () => {
+	const tx = makeTranscriber();
+	const q = createVoiceChunkQueue({ transcribe: tx.fn, retainUntilSent: true, concurrency: 4 });
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "s" });
+	q.enqueue({ blob: "b", durationS: 15, conversationId: "s" });
+	await flush();
+	// Two clips with IDENTICAL committed text; the server text carries messy whitespace.
+	tx.resolve(0, "  hello   there  ");
+	tx.resolve(1, "hello there");
+	await flush();
+
+	// One occurrence in the payload (the user deleted one of the two identical segments), collapsed
+	// whitespace: a NORMALIZED match still finds it, but only ONE clip is acknowledged.
+	assert.equal(
+		q.captureSentInPayload("s", "prefix hello there suffix").length,
+		1,
+		"one occurrence → exactly one clip acknowledged; the other is RETAINED"
+	);
+	// Both occurrences present → both acknowledged.
+	assert.deepEqual(
+		q.captureSentInPayload("s", "hello there and again hello there"),
+		[0, 1],
+		"two occurrences → both clips acknowledged"
+	);
+	// An empty / whitespace-only payload matches nothing → releases nothing (never-lose).
+	assert.deepEqual(q.captureSentInPayload("s", "   "), [], "an empty payload releases nothing");
+	assert.deepEqual(q.captureSentInPayload("s", ""), [], "no payload releases nothing");
+	// Scope isolation: a clip in another scope is never released by this scope's payload match.
+	q.enqueue({ blob: "z", durationS: 15, conversationId: "other" });
+	await flush();
+	tx.resolve(2, "hello there");
+	await flush();
+	assert.deepEqual(
+		q.captureSentInPayload("s", "hello there hello there hello there"),
+		[0, 1],
+		"even with a third identical occurrence present, the 'other'-scope clip is never matched"
+	);
+});
