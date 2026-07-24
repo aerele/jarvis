@@ -555,10 +555,15 @@ _WRITE_TOOLS = frozenset(
 		# pages) from a detached, unattended turn through a reviewed server funnel
 		# (apply_extracted_page_updates + the controller sanitizer), so it is
 		# audited but NEVER gated (and NOT the gated update_wiki card path).
+		# finish_app_learning_run is the scribe delegate's TERMINAL run finalizer:
+		# it flips the bound Jarvis Agent Run to completed (with the pages tally
+		# record_app_wiki stamped) from a detached turn — audited but NEVER gated
+		# (no card to click), like record_agent_run.
 		"download_pdf",
 		"export_excel",
 		"record_agent_run",
 		"record_app_wiki",
+		"finish_app_learning_run",
 	}
 )
 _PREVIEWABLE = frozenset(

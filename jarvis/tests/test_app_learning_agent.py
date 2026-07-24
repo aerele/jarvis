@@ -24,6 +24,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -36,6 +37,7 @@ from jarvis import api
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.learning import app_source
 from jarvis.tools import _agent_run_ctx, _app_learning_ctx as ctx
+from jarvis.tools.finish_app_learning_run import finish_app_learning_run
 from jarvis.tools.list_app_modules import list_app_modules
 from jarvis.tools.read_app_source import read_app_source
 from jarvis.tools.record_app_wiki import record_app_wiki
@@ -286,6 +288,153 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertTrue(res["truncated"])
 		self.assertLessEqual(res["applied"], ctx.PER_RUN_PAGE_CAP)
 
+	# ------------------------------------------------------------------ #
+	# P1: namespace integrity — app required, slug forced, provenance-fenced
+	# ------------------------------------------------------------------ #
+	def test_record_app_wiki_rejects_page_without_valid_app(self):
+		# no top-level app AND no page app -> the page resolves to no learnable
+		# custom app: REJECTED, never written un-prefixed.
+		self._bind_scribe_run()
+		res = record_app_wiki(pages=[{"title": "Company Leave Policy", "body_md": "x", "key": "overview"}])
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(res.get("rejected"), 1)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "company-leave-policy"}), 0)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "overview"}), 0)
+		# a core / unknown app is likewise rejected server-side
+		res2 = record_app_wiki(app="erpnext", pages=[{"title": "X", "body_md": "y", "key": "overview"}])
+		self.assertEqual(res2["applied"], 0)
+		self.assertEqual(res2.get("rejected"), 1)
+
+	def test_record_app_wiki_slug_is_forced_app_prefixed(self):
+		self._bind_scribe_run()
+		res = record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "b"}])
+		self.assertEqual(res["applied"], 1)
+		self.assertEqual(res["slugs"], ["fakeapp-overview"])
+		self.assertTrue(all(s.startswith("fakeapp-") for s in res["slugs"]))
+		# never an un-prefixed slug, even though the key alone is "overview"
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "overview"}), 0)
+
+	def test_record_app_wiki_cannot_overwrite_human_page(self):
+		# A human-authored Org page whose slug the scribe's forced slug collides with.
+		frappe.get_doc(
+			{
+				"doctype": WIKI,
+				"slug": "fakeapp-overview",
+				"title": "Fakeapp Overview",
+				"page_type": "Process",
+				"body_md": "HUMAN AUTHORED BODY",
+				"status": "Active",
+				"scope": "Org",
+				"sources": frappe.as_json(
+					[{"kind": "manual", "date": frappe.utils.today(), "ref": None, "user": "Administrator"}]
+				),
+			}
+		).insert(ignore_permissions=True)
+		self._bind_scribe_run()
+		res = record_app_wiki(
+			app="fakeapp",
+			pages=[{"title": "Overview", "key": "overview", "body_md": "SCRIBE OVERWRITE ATTEMPT"}],
+		)
+		# the provenance fence REFUSES the collision: nothing applied, human page untouched
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), "HUMAN AUTHORED BODY")
+
+	def test_record_app_wiki_may_refresh_legacy_pipeline_page(self):
+		# Migration reconciliation: a page the RETIRED chat-batch pipeline created
+		# (kind ``app-learning:<app>``) IS agent provenance, so the scribe MAY refresh
+		# it in place — the fence blocks only human-authored pages.
+		frappe.get_doc(
+			{
+				"doctype": WIKI,
+				"slug": "fakeapp-overview",
+				"title": "Fakeapp Overview",
+				"page_type": "Process",
+				"body_md": "LEGACY BODY",
+				"status": "Active",
+				"scope": "Org",
+				"sources": frappe.as_json(
+					[
+						{
+							"kind": "app-learning:fakeapp",
+							"date": frappe.utils.today(),
+							"ref": None,
+							"user": "Administrator",
+						}
+					]
+				),
+			}
+		).insert(ignore_permissions=True)
+		self._bind_scribe_run()
+		res = record_app_wiki(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "REFRESHED"}]
+		)
+		self.assertEqual(res["applied"], 1)
+		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), "REFRESHED")
+
+	def test_record_app_wiki_updates_its_own_prior_page(self):
+		# The fence must NOT break legit re-run-in-place: an agent updating a page a
+		# prior agent run created still works (its provenance matches).
+		self._bind_scribe_run()
+		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "FIRST"}])
+		sk2 = frappe.generate_hash(length=24)
+		self._extra_keys = {sk2}
+		self._bind_scribe_run(sk2)
+		res = record_app_wiki(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "SECOND"}]
+		)
+		self.assertEqual(res["applied"], 1)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 1)
+		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), "SECOND")
+
+	# ------------------------------------------------------------------ #
+	# P0-2: a successful scribe run reaches TERMINAL "completed" on its own
+	# ------------------------------------------------------------------ #
+	def test_finish_is_write_but_not_gated(self):
+		self.assertIn("finish_app_learning_run", api._WRITE_TOOLS)
+		self.assertNotIn("finish_app_learning_run", api._GATED_WRITES)
+
+	def test_finish_completes_run_with_pages_tally(self):
+		run = self._bind_scribe_run()
+		record_app_wiki(
+			app="fakeapp",
+			pages=[
+				{"title": "Overview", "key": "overview", "body_md": "a"},
+				{"title": "Gate Pass", "key": "doctype-gate-pass", "body_md": "b"},
+			],
+		)
+		# record_app_wiki tallies the pages on the run; still running until finalize
+		self.assertEqual(frappe.db.get_value(RUN, run, "pages_written"), 2)
+		tally = json.loads(frappe.db.get_value(RUN, run, "pages_json") or "[]")
+		self.assertEqual({p["slug"] for p in tally}, {"fakeapp-overview", "fakeapp-doctype-gate-pass"})
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "running")
+		# the delegate's terminal call finalizes to completed with the tally
+		out = finish_app_learning_run()
+		self.assertEqual(out["status"], "completed")
+		self.assertEqual(out["pages_written"], 2)
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
+		self.assertTrue(frappe.db.get_value(RUN, run, "finished_at"))
+
+	def test_finish_completes_run_with_no_pages(self):
+		# "no learnable custom app" is an honest SUCCESS, not a reaper-failed run.
+		run = self._bind_scribe_run()
+		out = finish_app_learning_run()
+		self.assertEqual(out["status"], "completed")
+		self.assertEqual(out["pages_written"], 0)
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
+
+	def test_list_runs_page_stamps_scribe_nature_and_pages(self):
+		from jarvis.chat import agents_api
+
+		run = self._bind_scribe_run()
+		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		finish_app_learning_run()
+		frappe.db.set_value(RUN, run, "owner", "Administrator", update_modified=False)
+		page = agents_api.list_runs_page(agent=SCRIBE_SLUG)
+		rows = [r for r in page["rows"] if r["name"] == run]
+		self.assertTrue(rows)
+		self.assertEqual(rows[0]["nature"], "Scribe")
+		self.assertEqual(rows[0]["pages_written"], 1)
+
 
 class TestRunAgentNowScribeGate(FrappeTestCase):
 	"""The ``run_agent_now`` nature gate admits Scribe (auditor stays valid,
@@ -343,3 +492,18 @@ class TestRunAgentNowScribeGate(FrappeTestCase):
 		inst = self._install()
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self._run_now(inst)
+
+
+class TestLegacyScheduleRetired(FrappeTestCase):
+	"""The legacy chat-batch pipeline entry point is truly dormant: the whitelisted
+	``schedule_app_learning`` REFUSES so no new chat-pipeline run can start by any
+	path (the cron tick is disabled + the doctype/engine stay present for rollback)."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def test_schedule_app_learning_refuses(self):
+		from jarvis.chat import app_learning_api
+
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			app_learning_api.schedule_app_learning(apps='["fakeapp"]', consent=1)

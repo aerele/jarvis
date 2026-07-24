@@ -833,6 +833,24 @@ def _parse_updates(raw: str) -> list | None:
 # --------------------------------------------------------------------------- #
 # the shared write path
 # --------------------------------------------------------------------------- #
+def _page_has_provenance(name: str, prefix: str) -> bool:
+	"""True when the wiki page ``name`` carries at least one ``sources`` entry
+	whose ``kind`` starts with ``prefix`` — i.e. the page is of the caller's
+	provenance. Used to FENCE a writer (the Custom App Learning scribe) to its
+	OWN pages: it may update a page a prior agent run created, but it can never
+	overwrite a human-authored Org page (chat/voice/edit/manual/promotion) on a
+	slug collision. A missing/corrupt ``sources`` reads as NOT of that
+	provenance, so the fence fails closed."""
+	raw = frappe.db.get_value(WIKI, name, "sources")
+	try:
+		sources = json.loads(raw) if raw else []
+	except Exception:
+		return False
+	if not isinstance(sources, list):
+		return False
+	return any(isinstance(s, dict) and str(s.get("kind") or "").startswith(prefix) for s in sources)
+
+
 def apply_extracted_page_updates(
 	updates,
 	source: str,
@@ -840,6 +858,7 @@ def apply_extracted_page_updates(
 	ref: str | None = None,
 	default_scope: str | None = None,
 	target_user: str | None = None,
+	provenance_prefix: str | None = None,
 ) -> tuple[int, int]:
 	"""Create/update wiki pages from extracted updates (the note ingest above
 	and ``jarvis.learning.voice_facts`` both land here). At most
@@ -858,6 +877,13 @@ def apply_extracted_page_updates(
 	page (audience-suffixed slug, invisible to others) instead of the Org page.
 	A per-update ``scope``/``target_user`` overrides the defaults. Both args
 	default to None, which preserves today's Org behavior byte-for-byte.
+
+	``provenance_prefix`` (Custom App Learning scribe writeback): when set, an
+	UPDATE only lands on a page that already carries this provenance (a
+	``sources`` kind starting with the prefix). A slug that collides with a
+	human-authored / other-feature page is REFUSED (counted as failed) rather
+	than overwritten — a scribe can create/update only its OWN pages. None
+	(every other caller) preserves today's behavior byte-for-byte.
 	"""
 	if not isinstance(updates, list):
 		return 0, 0
@@ -867,7 +893,7 @@ def apply_extracted_page_updates(
 		if not isinstance(update, dict):
 			continue
 		try:
-			if _apply_one_update(update, source, user, ref, default_scope, target_user):
+			if _apply_one_update(update, source, user, ref, default_scope, target_user, provenance_prefix):
 				applied += 1
 		except Exception:
 			failed += 1
@@ -882,6 +908,7 @@ def _apply_one_update(
 	ref: str | None,
 	default_scope: str | None = None,
 	target_user: str | None = None,
+	provenance_prefix: str | None = None,
 ) -> bool:
 	slug = _normalize_slug(update.get("slug"))
 	if not slug:
@@ -939,6 +966,12 @@ def _apply_one_update(
 			)
 			if not name:
 				raise
+
+	# Provenance fence (scribe writeback): the slug resolved to an EXISTING page.
+	# Update it only if it is already of the caller's provenance; a collision with
+	# a human-authored / other-feature page is refused rather than overwritten.
+	if provenance_prefix and not _page_has_provenance(name, provenance_prefix):
+		return False
 
 	try:
 		return _merge_update_into_page(name, update, source, user, ref)

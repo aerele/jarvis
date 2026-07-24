@@ -173,7 +173,13 @@
 						<div class="text-sm font-medium text-ink-gray-5">Nature</div>
 						<div class="mt-1 text-base text-ink-gray-8">
 							{{ agent.nature }} ·
-							{{ agent.nature === "Auditor" ? "read-only" : "writes drafts" }}
+							{{
+								agent.nature === "Auditor"
+									? "read-only"
+									: agent.nature === "Scribe"
+									? "writes wiki pages"
+									: "writes drafts"
+							}}
 						</div>
 					</div>
 					<div>
@@ -584,20 +590,24 @@ async function install() {
 }
 
 const running = ref(false);
+// On-demand run is offered for read-only auditors AND scribes (mirrors the
+// backend run_agent_now gate: nature in Auditor/Scribe); operators draft through
+// the Approval Board and never run on demand.
 const runDisabled = computed(
 	() =>
 		!installation.value ||
 		!installation.value.enabled ||
-		(agent.value && agent.value.nature !== "Auditor") ||
+		(agent.value && !["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed)
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
-	if (agent.value.nature !== "Auditor")
+	const nature = agent.value.nature;
+	if (nature !== "Auditor" && nature !== "Scribe")
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "Your roles do not permit this agent";
-	return "Run this audit now";
+	return nature === "Scribe" ? "Run this agent now" : "Run this audit now";
 });
 
 async function runNow() {
@@ -605,7 +615,9 @@ async function runNow() {
 	running.value = true;
 	try {
 		await api.runAgentNow(installation.value.name);
-		toast.success("Audit started");
+		toast.success(
+			agent.value && agent.value.nature === "Scribe" ? "Run started" : "Audit started"
+		);
 		setTab("runs");
 		await nextTick();
 		// jump the board to the freshly queued run (clears hiding facets)

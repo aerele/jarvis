@@ -1189,6 +1189,42 @@ def _count(doctype: str, filters: dict, or_filters: list | None = None) -> int:
 	return frappe.db.count(doctype, filters=filters)
 
 
+_RUN_LIST_FIELDS = [
+	"name",
+	"agent",
+	"installation",
+	"trigger",
+	"status",
+	"started_at",
+	"finished_at",
+	"conversation",
+	"findings_count",
+	"blocker_count",
+	"error",
+	"coverage_note",
+	# Custom App Learning scribe runs render a pages tally (+ links) instead of a
+	# findings count; empty/0 for auditor/operator runs.
+	"pages_written",
+	"pages_json",
+]
+
+
+def _stamp_run_nature(rows: list[dict]) -> list[dict]:
+	"""Stamp each run row with its agent's ``nature`` (one query for the whole
+	page) so the SPA can render a scribe run's pages tally instead of a findings
+	count without an N+1."""
+	agents = {r.get("agent") for r in rows if r.get("agent")}
+	if not agents:
+		return rows
+	natures = {
+		d.name: d.nature
+		for d in frappe.get_all(LISTING, filters={"name": ["in", list(agents)]}, fields=["name", "nature"])
+	}
+	for r in rows:
+		r["nature"] = natures.get(r.get("agent"))
+	return rows
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
@@ -1197,26 +1233,14 @@ def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	filters = {"owner": me}
 	if agent:
 		filters["agent"] = agent
-	return frappe.get_all(
+	rows = frappe.get_all(
 		RUN,
 		filters=filters,
-		fields=[
-			"name",
-			"agent",
-			"installation",
-			"trigger",
-			"status",
-			"started_at",
-			"finished_at",
-			"conversation",
-			"findings_count",
-			"blocker_count",
-			"error",
-			"coverage_note",
-		],
+		fields=list(_RUN_LIST_FIELDS),
 		order_by="creation desc",
 		limit=int(limit or 50),
 	)
+	return _stamp_run_nature(rows)
 
 
 @frappe.whitelist()
@@ -1254,24 +1278,12 @@ def list_runs_page(
 		RUN,
 		filters=filters,
 		or_filters=or_filters,
-		fields=[
-			"name",
-			"agent",
-			"installation",
-			"trigger",
-			"status",
-			"started_at",
-			"finished_at",
-			"conversation",
-			"findings_count",
-			"blocker_count",
-			"error",
-			"coverage_note",
-		],
+		fields=list(_RUN_LIST_FIELDS),
 		order_by="started_at desc, creation desc",
 		limit_start=start,
 		limit_page_length=pl,
 	)
+	_stamp_run_nature(rows)
 	return {
 		"rows": rows,
 		"total": total,

@@ -135,10 +135,14 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# serve a running app-learning SCRIBE run (session-key-bound, admin-tier,
 	# custom-apps allowlist, realpath-containment + per-run byte budget);
 	# record_app_wiki applies pages server-side through apply_extracted_page_updates
-	# (in _WRITE_TOOLS, NOT _GATED_WRITES — like record_agent_run).
+	# (in _WRITE_TOOLS, NOT _GATED_WRITES — like record_agent_run);
+	# finish_app_learning_run is the scribe's TERMINAL finalizer (flips the run to
+	# completed with the pages tally so a success never sits running until the
+	# stale-run reaper marks it failed) — same self-gate, audited-not-gated.
 	"list_app_modules",
 	"read_app_source",
 	"record_app_wiki",
+	"finish_app_learning_run",
 )
 
 

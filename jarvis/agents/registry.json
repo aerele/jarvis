@@ -592,17 +592,19 @@
       "delivery": "delegate",
       "version": "0.1.0",
       "status": "Published",
-      "description": "Reads your installed CUSTOM Frappe apps' source and writes durable, business-first wiki pages about them — what each app does for the business, its doctypes and their purpose, workflows, validations and integrations — so the assistant and your team can rely on that knowledge later. Runs on demand in the Jarvis container (your bench never sees a source-laden chat), never reads core-app source, and only writes the org wiki (it holds no ERP write tool). Re-running updates the same pages in place. Restricted to System Manager / Jarvis Admin by default.",
+      "description": "Reads your installed CUSTOM Frappe apps' source and writes business-first wiki pages about them — what each app does, its doctypes, workflows, validations and integrations — so your team and the assistant can rely on it later. Runs on demand in the Jarvis container (your bench never sees a source-laden chat), never reads core-app source, writes only the org wiki (no ERP write tool), and updates pages in place on re-run. Only run it on apps whose code you trust: source is treated as data, not instructions, but could still try to steer the agent. Admin-restricted (System Manager / Jarvis Admin).",
       "tools_required": [
         "jarvis__list_app_modules",
         "jarvis__read_app_source",
         "jarvis__record_app_wiki",
+        "jarvis__finish_app_learning_run",
         "jarvis__read_wiki"
       ],
       "tools_allow": [
         "jarvis__list_app_modules",
         "jarvis__read_app_source",
         "jarvis__record_app_wiki",
+        "jarvis__finish_app_learning_run",
         "jarvis__read_wiki",
         "canvas",
         "message"
@@ -612,7 +614,7 @@
       ],
       "rule_tokens": [],
       "writes": null,
-      "rule_pack": "knowledge",
+      "rule_pack": "",
       "timeout_s": 5400,
       "min_apps": [],
       "default_schedule": {

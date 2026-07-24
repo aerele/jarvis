@@ -287,11 +287,13 @@ scheduler_events = {
 		# Learn-from-custom-apps has been REPLACED by the Custom App Learning
 		# *scribe* delegate agent (marketplace slug ``custom-app-learning``): it
 		# reads custom-app source and writes the wiki in the container, on demand,
-		# instead of the chat-batch pipeline below. The old ``app_analysis.tick``
-		# scheduler hook is DISABLED so no NEW chat-pipeline runs ever start; the
-		# engine (``jarvis.learning.app_analysis``), its API and the ``Jarvis App
-		# Learning Run`` doctype stay physically present but dormant (rollback
-		# safety + historical run rows). Full removal is a tracked fast-follow.
+		# instead of the chat-batch pipeline below. BOTH entry points are now
+		# dormant: this ``app_analysis.tick`` scheduler hook is DISABLED, and the
+		# manual ``app_learning_api.schedule_app_learning`` endpoint REFUSES — so no
+		# NEW chat-pipeline run can start by any path. The engine
+		# (``jarvis.learning.app_analysis``), its API and the ``Jarvis App Learning
+		# Run`` doctype stay physically present but dormant (rollback safety +
+		# historical run rows). Full removal is a tracked fast-follow.
 		# "*/10 * * * *": ["jarvis.learning.app_analysis.tick"],
 		"*/15 * * * *": [
 			# Behavioural pattern learning tick. Hooks cron is app-static

@@ -254,9 +254,9 @@
 				<!-- ══════════════ Learn from custom apps (M2) ══════════════ -->
 				<!-- Below the Behavioural-learning settings card, same gate: this
 				     whole tab only mounts for admin/SM viewers (SkillsPage's
-				     caps.analysis probe - the gate the settings card above rides),
-				     and every app-learning endpoint re-checks manage rights
-				     server-side. Full-width row: it hosts the runs list. -->
+				     caps.analysis probe - the gate the settings card above rides).
+				     Full-width row: the card now points admins to the Custom App
+				     Learning agent (the chat-batch runs list was retired). -->
 				<AppLearningCard ref="appLearningCard" class="lg:col-span-2" />
 
 				<!-- ══════════════ Personalisation questions pointer ══════════════ -->

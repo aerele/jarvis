@@ -125,11 +125,21 @@ def get_app_learning_overview() -> dict:
 @frappe.whitelist()
 @require_jarvis_user
 def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
-	"""Queue one learning run per app. ``apps`` is a JSON list of installed
-	custom app names; ``when`` empty means now, else a future frappe datetime
-	(<= 30 days out). ``consent=1`` is mandatory — the run spends provider
-	tokens and writes wiki pages/skills directly."""
+	"""RETIRED. The chat-batch custom-app learning pipeline has been REPLACED by
+	the Custom App Learning *scribe* delegate agent (marketplace slug
+	``custom-app-learning``), which reads app source and writes the wiki in the
+	Jarvis container instead of feeding source through a chat transcript. This
+	endpoint now REFUSES so no new chat-pipeline run can start; the engine and the
+	``Jarvis App Learning Run`` doctype stay present (rollback + historical rows)
+	but dormant. Install/run the agent from the Agents page instead."""
 	_require_manage()
+	frappe.throw(
+		_(
+			"The chat-batch app-learning pipeline is retired. Install and run the "
+			"Custom App Learning agent from the Agents page instead."
+		)
+	)
+	# Unreachable (kept for rollback reference): the legacy scheduling body.
 	if cint(consent) != 1:
 		frappe.throw(_("Consent to the token cost and direct wiki/skill writes is required."))
 
