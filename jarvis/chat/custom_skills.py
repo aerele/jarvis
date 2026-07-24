@@ -29,6 +29,19 @@ MANAGED_OWNER = "Administrator"
 _INVOKE_RE = re.compile(r"(?:^|\s)/([a-z0-9]+(?:-[a-z0-9]+)*)")
 
 
+def _pushable_sort_key(skill_name: str, docname: str) -> tuple:
+	"""The ONE deterministic order the pushable Org set is ranked by — used
+	identically by :func:`build_push_payload` (which keeps the first
+	``MAX_SKILLS_PER_PUSH``) and :func:`project_org_promotion_push` (which
+	simulates the promoted skill joining that ranking). Ordering by a Python
+	comparator rather than the DB ``ORDER BY`` collation (CDX-SP-4 / R2-SP-4): the
+	DB collation folds hyphens/digits differently from Python, so a DB-ordered
+	payload could drop a DIFFERENT skill than a Python-ordered projection names.
+	``docname`` (the unique row hash) is the stable tie-breaker, making the order
+	a total one so both call sites are provably identical."""
+	return ((skill_name or "").lower(), docname or "")
+
+
 def prefixed_slug(skill_name: str) -> str:
 	"""Bare authored slug -> the namespaced slug used on disk and in openclaw."""
 	return f"{RESERVED_PREFIX}{(skill_name or '').strip().lower()}"
@@ -303,7 +316,13 @@ def _pushable_org_rows(owner: str | None = None) -> list:
 			fields=["parent"],
 		)
 	}
-	return [r for r in rows if r.name not in restricted]
+	kept = [r for r in rows if r.name not in restricted]
+	# One explicit deterministic comparator AFTER filtering (R2-SP-4): the DB
+	# ``order_by`` above is only a stable baseline — the authoritative rank both
+	# the payload and the projection consume is this Python sort, so the two can
+	# never name different dropped skills across the push cap.
+	kept.sort(key=lambda r: _pushable_sort_key(r.skill_name, r.name))
+	return kept
 
 
 def build_push_payload(owner: str | None = None, strict: bool = False) -> list[dict]:
@@ -424,13 +443,13 @@ def project_org_promotion_push(skill_docname: str, skill_name: str) -> dict:
 	entries = [(r.skill_name, r.name) for r in rows]
 	promoted_slug = prefixed_slug(skill_name)
 	# The promoted skill joins the pushable set unless this exact row is already
-	# pushable (re-approve of an already-Org skill). Stable skill_name-asc sort
-	# mirrors build_push_payload's order_by exactly (Python's sort is stable, so
-	# equal skill_names keep the DB order the payload would see).
+	# pushable (re-approve of an already-Org skill). The SAME ``_pushable_sort_key``
+	# build_push_payload ranks by is applied here (R2-SP-4), so the projection's
+	# dropped tail is provably the payload's dropped tail — never a different skill.
 	already = any(name == skill_docname for _, name in entries)
 	if not already:
 		entries.append((skill_name, skill_docname))
-		entries.sort(key=lambda e: e[0])
+	entries.sort(key=lambda e: _pushable_sort_key(e[0], e[1]))
 	projected = [prefixed_slug(sn) for sn, _ in entries]
 	budget = MAX_SKILLS_PER_PUSH
 	dropped = projected[budget:]
