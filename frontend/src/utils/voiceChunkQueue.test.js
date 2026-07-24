@@ -973,3 +973,93 @@ test("R3-1: captureSentInPayload normalizes whitespace and consumes duplicate oc
 		"even with a third identical occurrence present, the 'other'-scope clip is never matched"
 	);
 });
+
+// ── (23) VR4-4: BOUNDARY-aware match — an earlier "send it" must NOT match inside a later
+//        "resend it". The old raw indexOf acknowledged (then deleted) the WRONG clip's audio. ───
+test("VR4-4: captureSentInPayload matches on WORD BOUNDARIES — 'send it' never matches inside 'resend it' (order-independent)", async () => {
+	// Forward order: the deleted clip has the LOWER seq (it is processed first — the exact ordering
+	// that made the old indexOf consume the wrong occurrence).
+	{
+		const tx = makeTranscriber();
+		const mirror = makeMirror();
+		const q = createVoiceChunkQueue({
+			transcribe: tx.fn,
+			mirror,
+			retainUntilSent: true,
+			concurrency: 4,
+		});
+		q.enqueue({ blob: "x", durationS: 15, conversationId: "s" }); // seq 0 → "send it" (DELETED)
+		q.enqueue({ blob: "y", durationS: 15, conversationId: "s" }); // seq 1 → "resend it" (KEPT)
+		await flush();
+		tx.resolve(0, "send it");
+		tx.resolve(1, "resend it");
+		await flush();
+		const token = q.captureSentInPayload("s", "resend it");
+		assert.deepEqual(
+			token,
+			[1],
+			"only the KEPT clip ('resend it') is acknowledged; the deleted 'send it' is NOT matched inside it"
+		);
+		q.acknowledge(token);
+		await flush();
+		assert.ok(
+			mirror.store.has(0),
+			"the DELETED clip's audio is RETAINED (never lost — VR4-4)"
+		);
+		assert.ok(!mirror.store.has(1), "the SENT clip is released");
+	}
+	// Reverse order: the kept clip has the LOWER seq — must still never over-release.
+	{
+		const tx = makeTranscriber();
+		const mirror = makeMirror();
+		const q = createVoiceChunkQueue({
+			transcribe: tx.fn,
+			mirror,
+			retainUntilSent: true,
+			concurrency: 4,
+		});
+		q.enqueue({ blob: "y", durationS: 15, conversationId: "s" }); // seq 0 → "resend it" (KEPT)
+		q.enqueue({ blob: "x", durationS: 15, conversationId: "s" }); // seq 1 → "send it" (DELETED)
+		await flush();
+		tx.resolve(0, "resend it");
+		tx.resolve(1, "send it");
+		await flush();
+		const token = q.captureSentInPayload("s", "resend it");
+		assert.deepEqual(
+			token,
+			[0],
+			"the kept 'resend it' clip is acknowledged regardless of seq order"
+		);
+		q.acknowledge(token);
+		await flush();
+		assert.ok(
+			mirror.store.has(1),
+			"the deleted 'send it' clip is RETAINED (order-independent)"
+		);
+	}
+});
+
+// ── (24) VR4-4: a GENUINELY boundary-aligned occurrence still matches (the fix must not
+//        over-retain: a clip whose text really is present, whole-word, is released as before). ──
+test("VR4-4: a whole-word occurrence still matches — boundary-awareness never blocks a real send", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 4,
+	});
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "s" }); // "send it"
+	q.enqueue({ blob: "b", durationS: 15, conversationId: "s" }); // "now"
+	await flush();
+	tx.resolve(0, "send it");
+	tx.resolve(1, "now");
+	await flush();
+	// Both clips present at word boundaries in the payload → both acknowledged.
+	const token = q.captureSentInPayload("s", "please send it now thanks");
+	assert.deepEqual(token, [0, 1], "both whole-word clips are matched and released");
+	q.acknowledge(token);
+	await flush();
+	assert.ok(!mirror.store.has(0) && !mirror.store.has(1), "both released — no false retention");
+});

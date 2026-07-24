@@ -75,6 +75,25 @@ function _safe(fn, ...args) {
 	}
 }
 
+// Boundary-aware first-occurrence index of `needle` in the already-normalized `hay`: the match
+// must be flanked by WORD BOUNDARIES (string start/end or a single space) so an earlier clip's
+// "send it" can never match INSIDE a later clip's "resend it" and acknowledge — then DELETE — the
+// wrong clip's audio (VR4-4). `hay` is whitespace-collapsed + trimmed, so a boundary is exactly a
+// space or an edge. Returns -1 when no boundary-aligned occurrence exists → the caller RETAINS
+// (never-lose bias: an ambiguous / mid-word match is treated as "not present", never over-released).
+function _boundaryIndexOf(hay, needle) {
+	if (!needle) return -1;
+	const isBoundary = (ch) => ch === undefined || ch === " ";
+	let from = 0;
+	while (from <= hay.length) {
+		const at = hay.indexOf(needle, from);
+		if (at === -1) return -1;
+		if (isBoundary(hay[at - 1]) && isBoundary(hay[at + needle.length])) return at;
+		from = at + 1; // this occurrence sits mid-word — keep scanning for a bounded one
+	}
+	return -1;
+}
+
 // clip: an opaque, self-contained recorded unit — { blob, durationS, ... }. The
 // caller does NOT set `seq`; the queue assigns it (single authority). Extra fields
 // (e.g. conversationId) ride through untouched to `mirror` and to onCommit's 3rd arg.
@@ -423,7 +442,9 @@ export function createVoiceChunkQueue(deps = {}) {
 		for (const rec of committed) {
 			const needle = norm(rec.text);
 			if (!needle) continue; // an empty contribution can't be matched → RETAIN
-			const at = hay.indexOf(needle);
+			// BOUNDARY-aware (VR4-4): a raw indexOf matched a clip's text INSIDE a longer word (an
+			// earlier "send it" inside a later "resend it") and deleted the wrong clip's audio.
+			const at = _boundaryIndexOf(hay, needle);
 			if (at === -1) continue; // edited/deleted out of the payload → RETAIN (never-lose)
 			// Consume this occurrence so an identical later clip must find its OWN occurrence.
 			hay = hay.slice(0, at) + " " + hay.slice(at + needle.length);
