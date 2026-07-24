@@ -6917,6 +6917,10 @@ async function send(textArg) {
 		notify("Finishing dictation…", { type: "info" });
 		return;
 	}
+	// Capture the composer scope NOW, before a brand-new chat adopts its server id below: on
+	// a successful main-composer send its committed voice clips become durable, so their
+	// retained audio mirror + leave guard can be released (markSent, finding 6).
+	const _sentScope = _currentScope();
 	const fromMain = typeof textArg !== "string";
 	// Strip any pending-gap placeholder tokens (⟦clip N⟧) so a failed clip's marker never
 	// rides out in a sent message; its chip stays, so the audio is still recoverable.
@@ -7009,6 +7013,10 @@ async function send(textArg) {
 		}
 		// Send accepted — the one-shot grounding is now consumed.
 		if (groundWiki) groundNextTurn.value = false;
+		// The main composer's voice-derived text is now durably in the conversation —
+		// release its committed clips (audio mirror + leave guard) for this scope. A
+		// programmatic send(textArg) leaves input.value intact, so it must NOT clear them.
+		if (fromMain) voiceQueue?.markSent(_sentScope);
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
@@ -7507,7 +7515,16 @@ const _emptyVoiceSnap = {
 };
 const voiceQ = ref({ ..._emptyVoiceSnap });
 const recoveryClips = ref([]); // orphan clips from a prior session, offered on mount
-let _micConvId = null; // conversation the take was started in — transcript belongs to it
+// A STABLE draft-scope id for the unsaved "new chat" composer (which has no server id yet).
+// Voice clips recorded there are tagged with THIS instead of a bare null, so recovery routes
+// them back to the new-chat draft — never dumped into whatever real conversation happens to
+// be open. A missing conversationId must NEVER be read as "the current conversation" during
+// recovery (VAR-4 null-conv misroute, finding 7).
+const _NEW_CHAT_SCOPE = "__jarvis_new_chat__";
+// The scope of the composer currently on screen: a real conversation id, or the new-chat
+// draft scope when nothing is saved yet.
+const _currentScope = () => currentId.value || _NEW_CHAT_SCOPE;
+let _micConvId = null; // scope the take was started in — its transcript belongs to that scope
 let voiceQueue = null; // createVoiceChunkQueue — one per recording session
 let voiceMirror = null; // createClipMirror — IndexedDB, one per session
 let _voiceSessionId = null;
@@ -7559,7 +7576,11 @@ function _joinAppend(prev, t) {
 // elsewhere, and preserve the user's caret — follow the growing end only if the caret was
 // already there (and unchanged), otherwise keep an in-progress mid-string edit put.
 function _mutateComposerFor(forId, mutate) {
-	if (forId == null || currentId.value === forId) {
+	// A missing scope resolves to the new-chat draft, NEVER "the current conversation" — that
+	// fallback was the null-conv misroute (finding 7). Write to the live input only when the
+	// clip's scope IS the on-screen composer's scope; otherwise stash into that scope's draft.
+	const scope = forId == null ? _NEW_CHAT_SCOPE : forId;
+	if (scope === _currentScope()) {
 		const el = inputEl.value;
 		const focused = !!el && document.activeElement === el;
 		const atEnd = el
@@ -7584,11 +7605,11 @@ function _mutateComposerFor(forId, mutate) {
 			}
 		});
 	} else {
-		drafts.value[forId] = mutate(drafts.value[forId] || "");
+		drafts.value[scope] = mutate(drafts.value[scope] || "");
 	}
 }
 const _clipConvId = (clip) =>
-	clip && clip.conversationId != null ? clip.conversationId : _micConvId;
+	clip && clip.conversationId != null ? clip.conversationId : _NEW_CHAT_SCOPE;
 
 // A committed transcript, appended in spoken order.
 function _appendTranscript(text, clip) {
@@ -7633,11 +7654,28 @@ function _ensureVoiceSession() {
 	voiceQueue = createVoiceChunkQueue({
 		// `signal` (from the queue's own AbortController) aborts in-flight uploads on
 		// dispose() — no wasted fetches after unmount (VUX-12/VAR-8).
-		transcribe: (clip, signal) =>
-			voice.transcribeAudio(clip.blob, { durationS: clip.durationS, signal }),
+		//
+		// transcribeAudio resolves the RESPONSE OBJECT {ok,text,stt_ms,model} — NOT a bare
+		// string. The queue's `transcribe` contract is Promise<string>; returning the object
+		// let the queue String()-coerce it to "[object Object]", commit that, and delete the
+		// audio behind it. Await it, validate the shape, and hand back ONLY res.text; any
+		// malformed/failed payload THROWS so the queue retries then RETAINS the clip
+		// (never-lose-audio) instead of committing garbage (finding 1, the critical).
+		transcribe: async (clip, signal) => {
+			const res = await voice.transcribeAudio(clip.blob, {
+				durationS: clip.durationS,
+				signal,
+			});
+			if (res && res.ok === true && typeof res.text === "string") return res.text;
+			throw new Error((res && res.error) || "Transcription returned no usable text.");
+		},
 		mirror: voiceMirror,
 		concurrency: 2,
 		maxAttempts: 2, // the 25 s per-chunk abort lives in transcribeAudio; queue retries once
+		// A committed transcript lives only in a volatile composer draft until the message is
+		// SENT — retain the audio mirror (and the leave guard) until markSent()/discard so a
+		// reload can still recover it (finding 6).
+		retainUntilSent: true,
 		// replace=true is a RESURRECTED failed clip: swap its placeholder in place (VUX-2);
 		// otherwise a normal in-order append.
 		onCommit: (seq, text, clip, replace) =>
@@ -7659,7 +7697,9 @@ const micRec = useChunkedRecorder({
 });
 
 async function startMic() {
-	_micConvId = currentId.value;
+	// Tag the take with the on-screen scope — a real conversation id, or the stable new-chat
+	// draft scope when nothing is saved yet (so recovery can't misroute it; finding 7).
+	_micConvId = _currentScope();
 	_takeCommitted = 0;
 	_awaitingEmptySummary = false;
 	_ensureVoiceSession();
@@ -7753,10 +7793,11 @@ function recoverOrphans() {
 	const orphans = recoveryClips.value.slice();
 	if (!orphans.length) return;
 	_ensureVoiceSession();
-	// Each clip routes to the conversation it was spoken in (onCommit → _appendTranscript);
-	// warn once if any belong to a chat other than the one on screen.
+	// Each clip routes to the scope it was spoken in (onCommit → _appendTranscript); warn once
+	// if any belong to a scope other than the on-screen composer's (a real chat, or the
+	// new-chat draft). A missing conversationId maps to the new-chat scope, never "current".
 	const otherChat = orphans.some(
-		(o) => (o.conversationId != null ? o.conversationId : null) !== (currentId.value || null)
+		(o) => (o.conversationId != null ? o.conversationId : _NEW_CHAT_SCOPE) !== _currentScope()
 	);
 	voiceQueue.recover(
 		orphans.map((o) => ({
@@ -7764,10 +7805,17 @@ function recoverOrphans() {
 			durationS: o.durationS,
 			mimeType: o.mimeType,
 			conversationId: o.conversationId != null ? o.conversationId : null,
+			// Preserve session + original seq so recover() restores spoken order WITHIN a
+			// session rather than a global seq sort that interleaves sessions (finding 3).
+			sessionId: o.sessionId,
+			seq: o.seq,
+			// Adopt this prior-session copy ATOMICALLY: the mirror deletes o.key in the SAME
+			// transaction as the new put, so a failed transfer can never delete the only
+			// durable audio (finding 5). This replaces the old separate deleteOrphanClip()
+			// race that ran BEFORE the new put was confirmed durable.
+			_adoptKey: o.key,
 		}))
 	);
-	// The clips are now owned by the live session's mirror; drop the stale keys.
-	orphans.forEach((o) => deleteOrphanClip(o.key));
 	recoveryClips.value = [];
 	if (otherChat) {
 		notify("Recovered dictation was added to the draft of the chat it was spoken in.", {
@@ -7813,7 +7861,13 @@ async function discardOrphans() {
 // navigation loses nothing (the leave-confirm's "may lose audio" copy would be false
 // for them). Discard/Later resolve the banner explicitly instead.
 function _voiceHasUnfinished() {
-	return !!(voiceQueue && voiceQueue.hasUnfinished()) || micState.value === "recording";
+	return (
+		!!(voiceQueue && voiceQueue.hasUnfinished()) ||
+		micState.value === "recording" ||
+		// The permission prompt is open (getUserMedia pending): a take is starting but
+		// micState hasn't flipped to 'recording' yet — cover navigation during it (finding 2).
+		!!micRec.starting
+	);
 }
 function _beforeUnloadVoice(e) {
 	if (_voiceHasUnfinished()) {
@@ -8317,8 +8371,10 @@ onBeforeUnmount(() => {
 	window.removeEventListener("keydown", onGlobalKey);
 	clearInterval(_thinkTimer);
 	// Release the mic — navigating to another route mid-take must not leave the
-	// track hot (and its duration interval ticking) behind the dead view.
-	micRec?.cancel();
+	// track hot (and its duration interval ticking) behind the dead view. dispose() is
+	// synchronous and also disowns a getUserMedia still awaiting the permission grant, so
+	// a grant that resolves after unmount stops its tracks instead of leaking (finding 2).
+	micRec?.dispose();
 	// Stop the queue from poking a dead composer with late transcriptions; drop the
 	// unload guard. The IndexedDB mirror is left intact so a reload can still recover
 	// anything un-transcribed (the route guard already warned the user).
