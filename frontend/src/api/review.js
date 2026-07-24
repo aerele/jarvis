@@ -11,6 +11,9 @@
 import { call } from "frappe-ui";
 
 const LR = "jarvis.chat.learned_api.";
+// Skill-promotion decide/list live in custom_skills_api (the skill CRUD module),
+// NOT learned_api — the skill queue is a sibling of the wiki queue, not a fork.
+const CS = "jarvis.chat.custom_skills_api.";
 
 // Reviewer-set + self-host-aware access probe: {self_hosted, pending_promotions,
 // pending_patterns}. Defined in F1's learning.js; surfaced here so the Review tab
@@ -53,3 +56,25 @@ export const goToChatContext = (kind, name) => call(LR + "go_to_chat_context", {
 // Promotion Request (target = the requester). Returns {ok, name, question}.
 export const triggerFollowupQuestion = (name, ask) =>
 	call(LR + "trigger_followup_question", { name, ask });
+
+// ── skill-promotion queue (Skills-area promotion surfacing) ──────────────────
+// The reviewer queue for `Jarvis Skill Promotion Request`, the sibling of the
+// wiki promotions queue. Envelope parity ({rows, total, has_more, start,
+// page_length}) PLUS push-budget context {push_count, push_budget} so the Org
+// approve affordance can warn near/past the container cap. Rows: {name, skill,
+// skill_name, from_scope, to_scope, target_role, note, status, requested_by,
+// requested_by_name, created, reviewer, decided_at, decision_note, body_excerpt}.
+export const listSkillPromotions = (p = {}) =>
+	call(CS + "list_skill_promotion_requests", {
+		status: p.status || "Pending",
+		search: p.search || "",
+		start: p.start || 0,
+		page_length: p.page_length || 20,
+	});
+
+// Approve (truthy) or reject (falsy) a skill promotion. On approve the server
+// widens the skill's scope in place (four-eyes: a reviewer cannot approve their
+// OWN request → PermissionError; TOCTOU-safe). Returns {ok, status, skill} or
+// {ok:false, reason} for a stale/already-decided request. approve → 1/0.
+export const decideSkillPromotion = (name, approve, note = "") =>
+	call(CS + "decide_skill_promotion", { request_name: name, approve: approve ? 1 : 0, note });

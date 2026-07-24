@@ -57,6 +57,15 @@
 							:variant="queueType === 'promotions' ? 'solid' : 'subtle'"
 							@click="setQueueType('promotions')"
 						/>
+						<Button
+							:label="
+								skillPromo.total
+									? `Skill promotions · ${skillPromo.total}`
+									: 'Skill promotions'
+							"
+							:variant="queueType === 'skillpromotions' ? 'solid' : 'subtle'"
+							@click="setQueueType('skillpromotions')"
+						/>
 					</div>
 
 					<!-- ────────── Skill candidates (the existing board, unchanged) ────────── -->
@@ -850,7 +859,7 @@
 					</template>
 
 					<!-- ────────── Promotions (wiki User→Role/Org publish requests) ────────── -->
-					<template v-else>
+					<template v-else-if="queueType === 'promotions'">
 						<div class="min-w-0">
 							<div class="text-base font-semibold text-ink-gray-9">Promotions</div>
 							<div class="text-sm text-ink-gray-5">
@@ -1002,6 +1011,165 @@
 									label="Load more"
 									:loading="promo.loading"
 									@click="fetchPromotions('more')"
+								/>
+							</div>
+						</div>
+					</template>
+
+					<!-- ────────── Skill promotions (User→Role/Org widen requests) ────────── -->
+					<template v-else>
+						<div class="min-w-0">
+							<div class="text-base font-semibold text-ink-gray-9">
+								Skill promotions
+							</div>
+							<div class="text-sm text-ink-gray-5">
+								Requests to widen a private skill to a role or the whole org
+							</div>
+						</div>
+
+						<div
+							v-if="skillPromo.loading && !skillPromo.rows.length"
+							class="py-10 text-center"
+						>
+							<LoadingIndicator class="size-5 text-ink-gray-5" />
+						</div>
+						<div
+							v-else-if="!skillPromo.rows.length"
+							class="flex flex-col items-center gap-1 rounded-lg border border-dashed py-14 text-center"
+						>
+							<FeatherIcon name="git-pull-request" class="size-7 text-ink-gray-5" />
+							<span class="mt-1 text-base font-medium text-ink-gray-8">
+								No skill promotion requests
+							</span>
+							<span class="text-p-base text-ink-gray-6">
+								Users request promoting a private skill from the skill's page.
+							</span>
+						</div>
+
+						<div v-else class="flex flex-col gap-3">
+							<div
+								v-for="p in skillPromo.rows"
+								:key="`skillpromo-${p.name}`"
+								class="rounded-lg border p-4"
+							>
+								<!-- skill name + from→to scope -->
+								<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+									<span class="text-base font-medium text-ink-gray-9">{{
+										p.skill_name
+									}}</span>
+									<span class="flex items-center gap-1.5">
+										<Badge
+											variant="subtle"
+											theme="gray"
+											:label="p.from_scope || 'User'"
+										/>
+										<FeatherIcon
+											name="arrow-right"
+											class="size-3.5 text-ink-gray-5"
+										/>
+										<Badge
+											variant="subtle"
+											theme="blue"
+											:label="toScopeLabel(p)"
+										/>
+									</span>
+								</div>
+
+								<!-- requester + when -->
+								<div
+									class="mt-2 flex flex-wrap items-center gap-2 text-sm text-ink-gray-6"
+								>
+									<Avatar
+										size="sm"
+										:label="p.requested_by_name || p.requested_by || '?'"
+									/>
+									<span>{{ p.requested_by_name || p.requested_by }}</span>
+									<template v-if="p.created">
+										<span class="text-ink-gray-4">·</span>
+										<Tooltip :text="exactDate(p.created)">
+											<span>{{ timeAgo(p.created) }}</span>
+										</Tooltip>
+									</template>
+								</div>
+
+								<!-- requester's why -->
+								<p v-if="p.note" class="mt-2 text-sm text-ink-gray-7">
+									{{ p.note }}
+								</p>
+
+								<!-- skill instructions preview (expandable) -->
+								<div v-if="p.body_excerpt" class="mt-2">
+									<div
+										class="whitespace-pre-wrap rounded bg-surface-gray-1 px-3 py-2 text-sm text-ink-gray-7"
+										:class="skillPromoExpanded[p.name] ? '' : 'line-clamp-3'"
+									>
+										{{ p.body_excerpt }}
+									</div>
+									<button
+										v-if="p.body_excerpt.length > 160"
+										class="mt-1 text-sm text-ink-gray-6 hover:text-ink-gray-8"
+										@click="toggleSkillPromoBody(p.name)"
+									>
+										{{
+											skillPromoExpanded[p.name] ? "Show less" : "Show more"
+										}}
+									</button>
+								</div>
+
+								<!-- Org push-budget warning (loud, non-blocking): approval is still
+								     allowed; the reviewer decides informed (ruling 2). -->
+								<div
+									v-if="p.status === 'Pending' && budgetWarn(p)"
+									class="mt-3 rounded-lg border px-3 py-2 text-sm"
+									:class="
+										budgetWarn(p).level === 'over'
+											? 'border-outline-red-2 bg-surface-red-1 text-ink-red-4'
+											: 'border-outline-amber-2 bg-surface-amber-1 text-ink-amber-3'
+									"
+								>
+									{{ budgetWarn(p).message }}
+								</div>
+
+								<!-- actions -->
+								<div class="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
+									<template v-if="p.status === 'Pending'">
+										<Button
+											variant="solid"
+											theme="green"
+											label="Approve"
+											:loading="skillPromoActing === p.name"
+											:disabled="!!skillPromoActing"
+											@click="approveSkillPromotion(p)"
+										/>
+										<Button
+											variant="subtle"
+											theme="red"
+											label="Reject"
+											:disabled="!!skillPromoActing"
+											@click="openSkillPromoReject(p)"
+										/>
+									</template>
+									<template v-else>
+										<Badge
+											variant="subtle"
+											:theme="p.status === 'Approved' ? 'green' : 'red'"
+											:label="p.status"
+										/>
+									</template>
+								</div>
+							</div>
+
+							<!-- N of M + load more -->
+							<div class="flex flex-col items-center gap-2 pt-1">
+								<span class="text-sm text-ink-gray-5">
+									{{ skillPromo.rows.length }} of {{ skillPromo.total }}
+								</span>
+								<Button
+									v-if="skillPromo.hasMore"
+									variant="subtle"
+									label="Load more"
+									:loading="skillPromo.loading"
+									@click="fetchSkillPromotions('more')"
 								/>
 							</div>
 						</div>
@@ -1500,6 +1668,43 @@
 				</div>
 			</template>
 		</Dialog>
+
+		<!-- Skill-promotion reject modal (Skills-area promotion surfacing):
+		     mirrors the wiki promotion reject modal. The requester's private
+		     skill stays intact; the reason (optional) becomes the decision note. -->
+		<Dialog
+			v-model="skillPromoReject.show"
+			:options="{ title: 'Reject skill promotion', size: 'md' }"
+		>
+			<template #body-content>
+				<p class="text-sm text-ink-gray-6">
+					The requester's private skill stays intact. Let them know why this won't be
+					widened — they can revise and request again.
+				</p>
+				<FormControl
+					type="textarea"
+					class="mt-3"
+					label="Reason (optional)"
+					placeholder="Why not share this more widely?"
+					:modelValue="skillPromoReject.reason"
+					@update:modelValue="(v) => (skillPromoReject.reason = v)"
+				/>
+			</template>
+			<template #actions>
+				<div class="flex items-center gap-2">
+					<Button
+						variant="solid"
+						theme="red"
+						label="Reject"
+						:loading="
+							skillPromoActing === (skillPromoReject.p && skillPromoReject.p.name)
+						"
+						@click="submitSkillPromoReject"
+					/>
+					<Button label="Cancel" @click="skillPromoReject.show = false" />
+				</div>
+			</template>
+		</Dialog>
 	</div>
 </template>
 
@@ -1571,7 +1776,11 @@ import {
 	decidePromotion,
 	goToChatContext,
 	triggerFollowupQuestion,
+	listSkillPromotions,
+	decideSkillPromotion,
 } from "@/api/review";
+// Org push-budget warning boundary (ruling 2) — a pure, node-tested module.
+import { orgPushBudgetWarning } from "./promotionBudget";
 
 const emit = defineEmits(["changed"]);
 const router = useRouter();
@@ -1694,6 +1903,22 @@ const promoLoaded = ref(false);
 const promoActing = ref(""); // promotion request name currently deciding
 const promoExpanded = reactive({}); // name -> bool (un-clamp the body excerpt)
 const promoReject = reactive({ show: false, p: null, reason: "" });
+// Skill-promotion queue (sibling of the wiki promotions queue; the reviewer side
+// skills never had). Its own reqId-guarded envelope + Pending count for the chip,
+// plus the container push-budget context (pushCount/pushBudget) that drives the
+// ruling-2 Org-approval warning. Fetched lazily the first time its chip opens.
+const skillPromo = reactive({
+	rows: [],
+	total: 0,
+	hasMore: false,
+	loading: false,
+	pushCount: 0,
+	pushBudget: 0,
+});
+const skillPromoLoaded = ref(false);
+const skillPromoActing = ref(""); // skill promotion request name currently deciding
+const skillPromoExpanded = reactive({}); // name -> bool (un-clamp the instructions excerpt)
+const skillPromoReject = reactive({ show: false, p: null, reason: "" });
 // "Ask the user" follow-up dialog, shared by pattern + promotion cards. `name`
 // is the review-item name (a Jarvis Learned Pattern or a promotion request).
 const askDialog = reactive({ show: false, name: "", ask: "", sending: false });
@@ -1849,6 +2074,7 @@ async function loadStatus() {
 		const st = await getReviewAccess();
 		selfHosted.value = !!st.self_hosted;
 		promo.total = st.pending_promotions || 0;
+		skillPromo.total = st.pending_skill_promotions || 0;
 	} catch (e) {
 		// parent mounts this only for the reviewer set; a failure here = no access
 		selfHosted.value = false;
@@ -1901,6 +2127,7 @@ function setQueueType(v) {
 	if (queueType.value === v) return;
 	queueType.value = v;
 	if (v === "promotions" && !promoLoaded.value) fetchPromotions("reset");
+	if (v === "skillpromotions" && !skillPromoLoaded.value) fetchSkillPromotions("reset");
 }
 function togglePromoBody(name) {
 	promoExpanded[name] = !promoExpanded[name];
@@ -1951,6 +2178,106 @@ async function decidePromo(p, approve, note) {
 		return false;
 	} finally {
 		promoActing.value = "";
+	}
+}
+
+// ── skill-promotions queue (Skills-area promotion surfacing) ─────────────────
+// The sibling of the wiki promotions queue, its own reqId guard. Envelope also
+// carries push_count/push_budget so the Org approve affordance can warn near the
+// container cap (ruling 2). Fetched lazily on first open; refreshed after decide.
+let skillPromoReq = 0;
+async function fetchSkillPromotions(mode = "reset") {
+	const id = ++skillPromoReq;
+	const append = mode === "more";
+	skillPromo.loading = true;
+	try {
+		const res = await listSkillPromotions({
+			status: "Pending",
+			start: append ? skillPromo.rows.length : 0,
+			page_length: 20,
+		});
+		if (id !== skillPromoReq) return; // stale - a newer request superseded this one
+		skillPromo.rows = mergeRows(skillPromo.rows, res.rows || [], append);
+		skillPromo.total = res.total || 0;
+		skillPromo.hasMore = !!res.has_more;
+		skillPromo.pushCount = res.push_count || 0;
+		skillPromo.pushBudget = res.push_budget || 0;
+		skillPromoLoaded.value = true;
+	} catch (e) {
+		if (id !== skillPromoReq) return;
+		toast.error(errMsg(e));
+	} finally {
+		if (id === skillPromoReq) skillPromo.loading = false;
+	}
+}
+function toggleSkillPromoBody(name) {
+	skillPromoExpanded[name] = !skillPromoExpanded[name];
+}
+// Loud, non-blocking Org push-budget warning (ruling 2): a promoted Org skill
+// only reaches the container on the next Apply, and the push is capped at
+// push_budget. This returns null (no warning) for Role targets or when there's
+// room; the approval is ALWAYS allowed - the reviewer decides informed.
+function budgetWarn(p) {
+	return orgPushBudgetWarning({
+		toScope: p.to_scope,
+		pushCount: skillPromo.pushCount,
+		pushBudget: skillPromo.pushBudget,
+	});
+}
+// Approve confirms with the concrete visibility implication + the budget warning
+// inline (the card already shows the loud banner; this repeats it at the point of
+// action). The widen is irreversible from the requester's side.
+function approveSkillPromotion(p) {
+	const target = p.to_scope === "Role" ? `Role: ${p.target_role || "—"}` : "Org";
+	const who = p.to_scope === "Role" ? "that role" : "everyone";
+	const warn = budgetWarn(p);
+	let message =
+		`This widens “${p.skill_name}” to ${target} — usable by ${who}. ` +
+		"The requester's private skill stays intact.";
+	if (warn) message += ` ⚠ ${warn.message}`;
+	confirmDialog({
+		title: "Approve skill promotion?",
+		message,
+		onConfirm: async ({ hideDialog }) => {
+			hideDialog();
+			await decideSkillPromo(p, 1, "");
+		},
+	});
+}
+function openSkillPromoReject(p) {
+	skillPromoReject.p = p;
+	skillPromoReject.reason = "";
+	skillPromoReject.show = true;
+}
+async function submitSkillPromoReject() {
+	if (!skillPromoReject.p) return;
+	const ok = await decideSkillPromo(
+		skillPromoReject.p,
+		0,
+		(skillPromoReject.reason || "").trim()
+	);
+	if (ok) skillPromoReject.show = false;
+}
+async function decideSkillPromo(p, approve, note) {
+	skillPromoActing.value = p.name;
+	try {
+		const r = await decideSkillPromotion(p.name, approve, note);
+		if (r && r.ok === false) {
+			// stale / already-decided request (TOCTOU-safe server re-read)
+			toast.error(r.reason || "Could not decide this promotion.");
+			return false;
+		}
+		toast.success(approve ? "Skill promotion approved" : "Skill promotion rejected");
+		fetchSkillPromotions("reset");
+		emit("changed");
+		return true;
+	} catch (e) {
+		// Four-eyes (a reviewer cannot approve their OWN request) + reviewer-gate
+		// come back as a PermissionError - surface the honest server message.
+		toast.error(errMsg(e));
+		return false;
+	} finally {
+		skillPromoActing.value = "";
 	}
 }
 
