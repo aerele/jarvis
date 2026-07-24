@@ -12,6 +12,10 @@
 // existing stateless endpoint, so responses arrive OUT OF ORDER, some time out,
 // and the audio must NEVER be lost. This module guarantees:
 //
+//   * SINGLE seq authority — THE QUEUE stamps every clip's `seq` from one monotonic
+//     counter (enqueue AND recover), so the recorder and recovery can never collide
+//     on a seq and silently drop a live clip (the VAR-1 P0). Callers pass clips
+//     WITHOUT a seq; the queue assigns and returns it.
 //   * STRICT in-order commit — text is appended to the composer in `seq` order via
 //     a `nextToFlush` cursor, never a later seq before its predecessor, even when
 //     transcriptions resolve out of order.
@@ -35,17 +39,21 @@
 //                        attempts === maxAttempts (reject)           ▼
 //                     ┌──────────────►  failed  ◄──── retry(seq)     done
 //                     │                   │  (mirror RETAINED)        │
-//                     │                   └── retry → pending         │ _drain(): onCommit(seq,text)
+//                     │                   └── retry → pending         │ _drain(): onCommit(seq,text,clip)
 //                     │                                               │ in cursor order, mirror.delete
 //                     └───────────────────────────────────────────► (terminal)
 //
 // `done` and `failed` are BOTH drainable: _drain() advances `nextToFlush` while the
-// chunk at the cursor is done (commit its text) or failed (skip — the chip holds
-// the user's place; retried text appends at the composer end, the simpler correct
-// variant, documented in ChatView). A pending/inflight chunk at the cursor blocks
-// the cursor (its predecessors' words must not jump ahead of it) but does NOT halt
-// recording — the recorder keeps cycling; committed text merely lags that gap by
-// the retry window, then flushes contiguously the instant the gap goes terminal.
+// chunk at the cursor is done (commit its text) or failed. A failed chunk is NOT
+// dropped from the composed text — as the cursor crosses it, onGap(seq) fires so the
+// glue drops an IN-PLACE placeholder token at that ordered position (Fable ruling:
+// the chip anchors the gap's spot; retried text replaces the token where it belongs,
+// not bolted onto the end where it reads as broken prose). Later chunks then commit
+// AFTER the placeholder, so the composed text stays in strict spoken order across the
+// gap. A pending/inflight chunk at the cursor blocks the cursor (its predecessors'
+// words must not jump ahead of it) but does NOT halt recording — the recorder keeps
+// cycling; committed text merely lags that gap by the retry window, then flushes
+// contiguously the instant the gap goes terminal.
 //
 // SECURITY NOTE: transcription text flows OUT of this module (onCommit → composer)
 // only. It is NEVER fed back into any transcribe call or prompt — there is no
@@ -54,13 +62,26 @@
 
 const noop = () => {};
 
-// clip: an opaque, self-contained recorded unit — { seq, blob, durationS }. Only
-// `seq` (a monotonic integer assigned by the recorder) is read here; `blob` /
-// `durationS` are passed straight through to `transcribe` and `mirror`.
+// Invoke a caller callback WITHOUT letting a throw unwind the drain/pump chain — a
+// bug in onCommit (reactive writes, nextTick) must not wedge the cursor and freeze
+// every later commit for the rest of the session (VAR-7).
+function _safe(fn, ...args) {
+	try {
+		fn(...args);
+	} catch (e) {
+		/* a caller callback threw; swallow so the state machine keeps draining */
+	}
+}
+
+// clip: an opaque, self-contained recorded unit — { blob, durationS, ... }. The
+// caller does NOT set `seq`; the queue assigns it (single authority). Extra fields
+// (e.g. conversationId) ride through untouched to `mirror` and to onCommit's 3rd arg.
 //
 // deps:
-//   transcribe(clip)  -> Promise<string>   REQUIRED. Rejects on timeout/error; the
-//                                           25 s per-chunk abort lives INSIDE it.
+//   transcribe(clip, signal) -> Promise<string>   REQUIRED. Rejects on timeout/error;
+//                                           the 25 s per-chunk abort lives INSIDE it.
+//                                           `signal` (may be undefined) aborts on
+//                                           dispose() so in-flight uploads cancel.
 //   mirror { put(clip)->Promise?, delete(seq)->Promise?, all()->Promise<clip[]> }
 //                                           OPTIONAL crash-safety store (IndexedDB
 //                                           in prod, an in-memory Map in tests). All
@@ -69,9 +90,16 @@ const noop = () => {};
 //                                           the in-memory source of truth.
 //   concurrency       max in-flight requests (default 2)
 //   maxAttempts       total tries per chunk before `failed` (default 2 = 1 + 1 retry)
-//   onCommit(seq,text) called once per chunk, in strict cursor order, when its text
-//                      is ready to append to the composer.
+//   onCommit(seq,text,clip,replace) called once per chunk, in strict cursor order, when
+//                      its text is ready. `clip` carries the routing key (conversationId)
+//                      so the glue writes to the right conversation. `replace` is true
+//                      ONLY for a RESURRECTED failed chunk (retried after the cursor
+//                      passed it): the glue REPLACES that chunk's in-place placeholder
+//                      token with the text rather than appending at the end.
 //   onFail(seq)        called when a chunk reaches the terminal `failed` state.
+//   onGap(seq,clip)    called ONCE, as the drain cursor crosses a `failed` chunk, so the
+//                      glue can drop an in-place placeholder token at the gap's ordered
+//                      position (later chunks commit after it — order preserved).
 //   onChange()         called after every state transition (drive reactive UI).
 export function createVoiceChunkQueue(deps = {}) {
 	const transcribe = deps.transcribe;
@@ -83,15 +111,19 @@ export function createVoiceChunkQueue(deps = {}) {
 	const maxAttempts = Math.max(1, deps.maxAttempts || 2);
 	const onCommit = deps.onCommit || noop;
 	const onFail = deps.onFail || noop;
+	const onGap = deps.onGap || noop;
 	const onChange = deps.onChange || noop;
 
 	// seq -> { seq, clip, state, attempts, text }
 	//   state: 'pending' | 'inflight' | 'done' | 'failed'
 	const records = new Map();
 	let inflight = 0;
-	let nextToFlush = null; // the cursor; initialised to the first enqueued seq
-	let nextRecoverSeq = 0; // fresh contiguous seq space for recover() batches
+	let nextToFlush = null; // the cursor; initialised to the first assigned seq (0)
+	let _nextSeq = 0; // THE single seq authority (enqueue + recover both draw from it)
 	let disposed = false;
+	// Aborts every in-flight upload on dispose() so navigate-away doesn't leave
+	// fetches running to their 25 s timeout (VAR-8 / VUX-12).
+	const abort = typeof AbortController !== "undefined" ? new AbortController() : null;
 
 	function _mirrorPut(clip) {
 		try {
@@ -106,6 +138,17 @@ export function createVoiceChunkQueue(deps = {}) {
 		} catch (e) {
 			/* best-effort */
 		}
+	}
+
+	// Assign a record onto the single seq space and mirror it. Shared by enqueue and
+	// recover so no two producers can ever pick the same seq.
+	function _admit(clip) {
+		const seq = _nextSeq++;
+		const stored = { ...clip, seq };
+		records.set(seq, { seq, clip: stored, state: "pending", attempts: 0, text: "" });
+		if (nextToFlush === null) nextToFlush = seq; // seqs only ever increase from here
+		_mirrorPut(stored);
+		return seq;
 	}
 
 	// Start as many pending chunks as the concurrency budget allows, always the
@@ -125,7 +168,7 @@ export function createVoiceChunkQueue(deps = {}) {
 			const seq = pick.seq;
 			// Promise.resolve() tolerates a sync-throwing or non-promise transcribe.
 			Promise.resolve()
-				.then(() => transcribe(pick.clip))
+				.then(() => transcribe(pick.clip, abort ? abort.signal : undefined))
 				.then(
 					(text) => _onResolve(seq, text),
 					(err) => _onReject(seq, err)
@@ -141,17 +184,17 @@ export function createVoiceChunkQueue(deps = {}) {
 		rec.text = typeof text === "string" ? text : text == null ? "" : String(text);
 		rec.state = "done";
 		if (nextToFlush !== null && seq < nextToFlush) {
-			// A RESURRECTED failed chunk (its slot was already skipped by the cursor).
-			// It cannot rejoin the contiguous drain, so commit it directly — the glue
-			// appends it at the composer end (documented: retried gap text lands at the
-			// cursor position at retry time, not reinserted mid-draft).
-			onCommit(seq, rec.text);
+			// A RESURRECTED failed chunk (its slot was already skipped by the cursor, so
+			// its in-place placeholder token is already sitting in the composer). It can't
+			// rejoin the contiguous drain — commit it with `replace=true` so the glue swaps
+			// the placeholder for the text IN PLACE, not appended at the end.
+			_safe(onCommit, seq, rec.text, rec.clip, true);
 			_mirrorDelete(seq);
 		} else {
 			_drain();
 		}
 		_pump();
-		onChange();
+		_safe(onChange);
 	}
 
 	function _onReject(seq, err) {
@@ -167,26 +210,29 @@ export function createVoiceChunkQueue(deps = {}) {
 			// Mirror is RETAINED (never deleted here) — the clip survives for the
 			// Retry/Download chip and for reload recovery.
 			if (nextToFlush !== null && seq >= nextToFlush) _drain();
-			onFail(seq);
+			_safe(onFail, seq);
 		}
 		_pump();
-		onChange();
+		_safe(onChange);
 	}
 
 	// Advance the cursor over every contiguous terminal chunk: a `done` chunk
-	// commits its text; a `failed` chunk is skipped (fail-through) so it never
-	// halts later chunks. Stops at the first pending/inflight chunk (words must not
-	// overtake an as-yet-unresolved predecessor) or the first not-yet-seen seq.
+	// commits its text; a `failed` chunk drops an IN-PLACE placeholder (onGap) at its
+	// ordered position and is then skipped (fail-through) so it never halts later
+	// chunks. Stops at the first pending/inflight chunk (words must not overtake an
+	// as-yet-unresolved predecessor) or the first not-yet-seen seq.
 	function _drain() {
 		if (nextToFlush === null) return;
 		while (records.has(nextToFlush)) {
 			const rec = records.get(nextToFlush);
 			if (rec.state === "done") {
-				onCommit(rec.seq, rec.text);
+				_safe(onCommit, rec.seq, rec.text, rec.clip, false);
 				_mirrorDelete(rec.seq);
 				nextToFlush += 1;
 			} else if (rec.state === "failed") {
-				nextToFlush += 1; // fail-through: the chip holds the user's place
+				// Anchor the gap where it belongs (once — the cursor never revisits it).
+				_safe(onGap, rec.seq, rec.clip);
+				nextToFlush += 1; // fail-through: later chunks commit after the placeholder
 			} else {
 				break; // pending / inflight — the cursor waits (recording continues)
 			}
@@ -195,18 +241,15 @@ export function createVoiceChunkQueue(deps = {}) {
 
 	// ---- public surface ----
 
-	// Enqueue a freshly recorded clip. `clip.seq` MUST be a monotonic integer
-	// (the recorder guarantees contiguity within a live session).
+	// Enqueue a freshly recorded clip; the queue STAMPS its seq (returned). Callers
+	// must NOT pre-set `seq` — the single-authority counter is what makes a
+	// recorder/recovery collision structurally impossible.
 	function enqueue(clip) {
-		if (disposed || !clip) return;
-		const seq = clip.seq;
-		if (records.has(seq)) return; // idempotent guard
-		records.set(seq, { seq, clip, state: "pending", attempts: 0, text: "" });
-		if (nextToFlush === null || seq < nextToFlush) nextToFlush = seq;
-		if (seq >= nextRecoverSeq) nextRecoverSeq = seq + 1;
-		_mirrorPut(clip);
+		if (disposed || !clip) return null;
+		const seq = _admit(clip);
 		_pump();
-		onChange();
+		_safe(onChange);
+		return seq;
 	}
 
 	// User pressed Retry on a failed chunk's chip: give it a fresh attempt budget.
@@ -218,29 +261,24 @@ export function createVoiceChunkQueue(deps = {}) {
 		rec.error = undefined;
 		rec.state = "pending";
 		_pump();
-		onChange();
+		_safe(onChange);
 	}
 
-	// Re-enqueue clips read back from the mirror after a reload. They may be
-	// non-contiguous (only un-transcribed clips survive), so they are reindexed
-	// onto a fresh contiguous seq space and enqueued in ascending original order —
-	// their absolute original position is moot post-reload; we only need them
-	// transcribed and appended in their spoken order.
+	// Re-enqueue clips read back from the mirror after a reload. They are stamped
+	// with FRESH seqs off the same authority (in ascending original-seq order, so
+	// their spoken order is preserved) — their absolute original position is moot
+	// post-reload; we only need them transcribed and appended in that order.
 	function recover(clips) {
 		if (disposed || !Array.isArray(clips) || !clips.length) return [];
 		const ordered = clips.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
 		const seqs = [];
 		for (const c of ordered) {
-			const seq = nextRecoverSeq++;
-			const clip = { ...c, seq, recovered: true };
-			records.set(seq, { seq, clip, state: "pending", attempts: 0, text: "" });
-			if (nextToFlush === null || seq < nextToFlush) nextToFlush = seq;
-			_mirrorPut(clip); // rewrite under the new seq so its delete lands
-			if (c.seq != null && c.seq !== seq) _mirrorDelete(c.seq); // drop the stale key
-			seqs.push(seq);
+			// Drop the caller's stale seq before re-admitting under a fresh one.
+			const { seq: _staleSeq, ...rest } = c;
+			seqs.push(_admit({ ...rest, recovered: true }));
 		}
 		_pump();
-		onChange();
+		_safe(onChange);
 		return seqs;
 	}
 
@@ -256,7 +294,7 @@ export function createVoiceChunkQueue(deps = {}) {
 		if (rec.state === "inflight") inflight = Math.max(0, inflight - 1);
 		if (nextToFlush !== null) _drain();
 		_pump();
-		onChange();
+		_safe(onChange);
 	}
 
 	function snapshot() {
@@ -296,10 +334,15 @@ export function createVoiceChunkQueue(deps = {}) {
 	}
 
 	// Stop accepting callbacks (component unmount) — late transcribe resolutions
-	// must not poke a dead composer. The mirror is left intact so a reload can
-	// still recover anything un-transcribed.
+	// must not poke a dead composer — and ABORT in-flight uploads. The mirror is
+	// left intact so a reload can still recover anything un-transcribed.
 	function dispose() {
 		disposed = true;
+		try {
+			abort && abort.abort();
+		} catch (e) {
+			/* ignore */
+		}
 	}
 
 	return {

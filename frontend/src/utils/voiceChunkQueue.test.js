@@ -294,18 +294,22 @@ test("recover() re-enqueues mirrored clips onto a fresh seq space and drains the
 	assert.equal(mirror.store.size, 0, "recovered clips cleared from the mirror once transcribed");
 });
 
-// ── (7) fail-through: a failed chunk never halts the session; its retry commits ──
-test("a failed chunk does not block later chunks, and a manual retry re-commits it (never lost)", async () => {
+// ── (7) fail-through with an IN-PLACE gap: a failed chunk anchors a placeholder at its
+//        ordered position; later chunks commit AFTER it; a retry REPLACES it in place
+//        (VUX-2 — retried text lands where it belongs, not bolted onto the end). ──────
+test("a failed chunk anchors an in-place gap; later chunks commit after it; retry replaces it in place", async () => {
 	const tx = makeTranscriber();
 	const mirror = makeMirror();
-	const commits = [];
+	const events = []; // ordered log of onGap / onCommit(replace) so placement is provable
 	const failed = [];
 	const q = createVoiceChunkQueue({
 		transcribe: tx.fn,
 		mirror,
 		concurrency: 3,
 		maxAttempts: 2,
-		onCommit: (seq, text) => commits.push([seq, text]),
+		onCommit: (seq, text, clip, replace) =>
+			events.push({ k: replace ? "replace" : "commit", seq, text }),
+		onGap: (seq) => events.push({ k: "gap", seq }),
 		onFail: (seq) => failed.push(seq),
 	});
 	q.enqueue(clip(0));
@@ -321,38 +325,36 @@ test("a failed chunk does not block later chunks, and a manual retry re-commits 
 	tx.resolve(2, "two");
 	await flush();
 	assert.deepEqual(
-		commits,
+		events,
 		[],
 		"1 and 2 are done but held: the cursor waits on the retrying gap"
 	);
 
-	// seq 0 rejects a second time → failed → fail-through releases 1 and 2.
+	// seq 0 rejects a second time → failed → the cursor crosses it: gap FIRST, then 1,2.
 	tx.reject(0, new Error("t2"));
 	await flush();
 	assert.deepEqual(failed, [0], "seq 0 failed");
 	assert.deepEqual(
-		commits,
+		events,
 		[
-			[1, "one"],
-			[2, "two"],
+			{ k: "gap", seq: 0 }, // in-place placeholder dropped at the gap's ordered spot
+			{ k: "commit", seq: 1, text: "one" }, // then later chunks commit AFTER the gap
+			{ k: "commit", seq: 2, text: "two" },
 		],
-		"fail-through: later chunks commit the instant the gap goes terminal — session not halted"
+		"fail-through drops the gap FIRST, then commits later chunks after it — order preserved"
 	);
 	assert.ok(mirror.store.has(0), "failed clip retained for Retry/Download");
 
-	// User hits Retry on the chip; it succeeds and is re-committed (at the end).
+	// User hits Retry; it succeeds and commits with replace=true so the glue swaps the
+	// placeholder for the words IN PLACE (never at the end).
 	q.retry(0);
 	await flush();
 	tx.resolve(0, "zero");
 	await flush();
 	assert.deepEqual(
-		commits,
-		[
-			[1, "one"],
-			[2, "two"],
-			[0, "zero"],
-		],
-		"the resurrected failed chunk re-commits (appended at the end — documented) — audio never lost"
+		events[events.length - 1],
+		{ k: "replace", seq: 0, text: "zero" },
+		"the resurrected failed chunk commits with replace=true — the glue swaps its placeholder in place"
 	);
 	assert.ok(!mirror.store.has(0), "mirror cleared after the successful retry");
 	assert.equal(q.hasUnfinished(), false, "nothing left pending/failed after the retry");
@@ -403,4 +405,77 @@ test("after dispose(), a late transcribe resolution fires no onCommit", async ()
 	tx.resolve(0, "too late");
 	await flush();
 	assert.deepEqual(commits, [], "no commit after dispose — the dead composer is never touched");
+});
+
+// ── (10) SINGLE seq authority: record → recover → record can't collide (VAR-1 P0) ──
+test("the queue stamps every seq from one authority, so recover around live recording never drops a clip", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const commits = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		concurrency: 4,
+		onCommit: (seq) => commits.push(seq),
+	});
+	// The recorder emits live clips WITHOUT a seq — the queue assigns it. Under the old
+	// dual-counter design the recorder's next seq and recover()'s cursor were EQUAL at
+	// rest, so a recover() grabbed the value the next live clip would use → silent drop.
+	const a = q.enqueue({ blob: "live-a", durationS: 15 }); // -> 0
+	const b = q.enqueue({ blob: "live-b", durationS: 15 }); // -> 1
+	// A prior-session orphan whose STALE seq (1) collides with the recorder's counter.
+	const [r] = q.recover([{ blob: "orphan", durationS: 15, seq: 1 }]); // -> 2 (fresh)
+	const c = q.enqueue({ blob: "live-c", durationS: 15 }); // -> 3 (NOT 2)
+	assert.deepEqual(
+		[a, b, r, c],
+		[0, 1, 2, 3],
+		"four producers, four UNIQUE seqs from one authority"
+	);
+	assert.equal(
+		q.snapshot().total,
+		4,
+		"all four admitted — none silently dropped by a seq collision"
+	);
+	await flush();
+	tx.resolve(0, "a");
+	tx.resolve(1, "b");
+	tx.resolve(2, "orphan");
+	tx.resolve(3, "c");
+	await flush();
+	assert.deepEqual(
+		commits,
+		[0, 1, 2, 3],
+		"all four committed in order — the VAR-1 live-clip drop is impossible"
+	);
+});
+
+// ── (11) onCommit passes the clip so the glue routes by conversationId (VUX-4/VAR-4) ──
+test("onCommit carries the clip; live and recovered clips keep the conversation they were spoken in", async () => {
+	const tx = makeTranscriber();
+	const commits = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		concurrency: 2,
+		onCommit: (seq, text, clip) =>
+			commits.push({ seq, text, conv: clip && clip.conversationId }),
+	});
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.resolve(0, "hi");
+	await flush();
+	assert.deepEqual(
+		commits[0],
+		{ seq: 0, text: "hi", conv: "chatA" },
+		"a live clip's conversationId flows through onCommit for routing"
+	);
+	// A recovered clip carries its OWN conversation, not the one currently open.
+	q.recover([{ blob: "b", durationS: 15, conversationId: "chatB", seq: 9 }]);
+	await flush();
+	tx.resolve(1, "yo");
+	await flush();
+	assert.equal(
+		commits[1].conv,
+		"chatB",
+		"a recovered clip routes to the chat it was spoken in — never dumped into whatever is open"
+	);
 });
