@@ -40,9 +40,15 @@ MAX_SPEC_CHARS = 32_000
 
 _SCOPES = ("Org", "Role", "User")
 # "Custom" is the bespoke escape hatch: the save-time theme lint relaxes its
-# design rules (palette / font / spacing / light-dark) but keeps the safety bans.
+# design rules (palette / font / light-dark) but keeps the safety bans.
 _THEMES = ("Jarvis", "Insight", "Claude", "Graphite", "Custom")
 _SOURCE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+class ThemeStandardError(frappe.ValidationError):
+	"""A save rejected because the canvas HTML does not follow the selected
+	theme. A distinct type so the builder can offer 'Ask the assistant to fix
+	these' (surfaced as ``exc_type`` to the SPA) rather than a dead-end error."""
 
 
 class JarvisDashboard(Document):
@@ -74,14 +80,17 @@ class JarvisDashboard(Document):
 
 	def _validate_theme_standard(self):
 		"""Deterministic theme-standard lint on the canvas HTML (colors/fonts/
-		light-dark bans + the always-on safety bans). Runs ONLY when the html is
-		new or changed, so a metadata-only edit to a legacy dashboard (rename,
-		re-scope, theme-picker switch) never re-validates its body — the
-		grandfather rule. On pass, stamp the schema version; docs saved before
-		this landed carry 0/None and are legacy (never retro-enforced on read).
-		No auto-repair: a rejected save surfaces the reasons and the builder's
-		chat loop regenerates."""
-		if not (self.is_new() or self.has_value_changed("html")):
+		light-dark bans + the always-on safety bans). Runs when the html OR the
+		theme changed (or on insert), so switching a saved dashboard's theme
+		re-lints it against the NEW palette — a doc that conformed under one
+		theme's literals must re-conform (via tokens or a re-gen) under the next
+		(F7 / the owner's exact complaint). A pure metadata edit that touches
+		NEITHER html nor theme (rename, re-scope) never re-validates the body —
+		the grandfather rule for legacy (unstamped) docs. On pass, stamp the
+		schema version; docs saved before this landed carry 0/None and are legacy
+		(never retro-enforced on read). No auto-repair: a rejected save surfaces
+		the reasons and the builder's chat loop regenerates."""
+		if not (self.is_new() or self.has_value_changed("html") or self.has_value_changed("theme")):
 			return
 		from jarvis.dashboards.theme_validator import (
 			THEME_SCHEMA_VERSION,
@@ -96,6 +105,7 @@ class JarvisDashboard(Document):
 					"This dashboard's HTML does not follow the selected theme "
 					"('{0}'). Fix these, then regenerate:\n{1}"
 				).format(self.theme or "Jarvis", format_violations(violations)),
+				ThemeStandardError,
 				title=_("Dashboard does not match its theme"),
 			)
 		self.theme_schema_version = THEME_SCHEMA_VERSION

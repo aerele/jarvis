@@ -57,6 +57,12 @@
       "line_height": 1.3,
       "letter_spacing": "-0.005em"
     },
+    "h3": {
+      "px": 15,
+      "weight": 600,
+      "line_height": 1.35,
+      "letter_spacing": "0"
+    },
     "label": {
       "px": 13,
       "weight": 600,

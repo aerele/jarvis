@@ -15,10 +15,10 @@
     "#5856d6"
   ],
   "semantic": {
-    "positive": "#25b885",
-    "negative": "#e24c4c",
-    "warning": "#f5a623",
-    "info": "#2490ef"
+    "positive": "#197d5a",
+    "negative": "#c24141",
+    "warning": "#956515",
+    "info": "#1c71bc"
   },
   "render_tokens": {
     "bg": "#f3f3f3",
@@ -26,13 +26,13 @@
     "surface-2": "#f6f8fa",
     "ink": "#1f272e",
     "heading": "#1f272e",
-    "muted": "#6c7680",
+    "muted": "#667079",
     "line": "#e2e2e2",
     "accent": "#2490ef",
-    "positive": "#25b885",
-    "negative": "#e24c4c",
-    "warning": "#f5a623",
-    "info": "#2490ef",
+    "positive": "#197d5a",
+    "negative": "#c24141",
+    "warning": "#956515",
+    "info": "#1c71bc",
     "radius": "10px",
     "shadow": "0 1px 2px rgba(25,39,52,.06)",
     "font": "-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif",
@@ -56,6 +56,12 @@
       "weight": 600,
       "line_height": 1.3,
       "letter_spacing": "-0.005em"
+    },
+    "h3": {
+      "px": 15,
+      "weight": 600,
+      "line_height": 1.35,
+      "letter_spacing": "0"
     },
     "label": {
       "px": 13,
@@ -137,9 +143,13 @@
       "#ffffff",
       "#f6f8fa",
       "#1f272e",
-      "#6c7680",
+      "#667079",
       "#e2e2e2",
       "#2490ef",
+      "#197d5a",
+      "#c24141",
+      "#956515",
+      "#1c71bc",
       "#25b885",
       "#e24c4c",
       "#f5a623",

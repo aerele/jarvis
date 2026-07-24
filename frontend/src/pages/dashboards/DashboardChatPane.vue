@@ -477,7 +477,17 @@ function newChat() {
 	// the page clears its builder seed (canvas html, editing state) with us
 	emit("reset")
 }
-defineExpose({ newChat })
+
+// Post a message into this pane programmatically (the save dialog's "Ask the
+// assistant to fix these" hand-off). Ignored while a send is already in flight.
+function sendText(text) {
+	const t = String(text || "").trim()
+	if (!t || sending.value) return
+	draft.value = t
+	nextTick(autoGrow)
+	send()
+}
+defineExpose({ newChat, sendText })
 
 // ── realtime ──────────────────────────────────────────────────────────────────
 function onEvent(p) {

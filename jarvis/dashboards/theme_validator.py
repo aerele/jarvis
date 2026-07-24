@@ -1,37 +1,74 @@
 """Deterministic save-time validator for dashboard canvas HTML.
 
-Pure + frappe-free (import-safe without a bench) so it can be unit-tested
-standalone; the ``Jarvis Dashboard`` controller calls
-``validate_dashboard_html`` on every save and throws a structured error when it
-returns violations. NO auto-repair — a rejected save surfaces the reasons and
-the builder's chat loop regenerates.
+Pure + frappe-free (imports nothing from frappe, so it is unit-testable
+standalone); the ``Jarvis Dashboard`` controller calls ``validate_dashboard_html``
+on every save and throws a structured error when it returns violations. NO
+auto-repair — a rejected save surfaces the reasons and the builder's chat loop
+regenerates.
 
-What it enforces (a standard theme):
-  * off-palette color literals in CSS  (hex / rgb / hsl / named, outside the
-    theme's own hexes + an approved white/black/transparent neutral set)
-  * ``font-family`` (or ``font`` shorthand) naming a non-system face
+PARSE-BASED, not regex-over-raw-text. The browser tokenizes + decodes CSS and
+HTML before it applies them, so a raw-spelling regex is trivially bypassed
+(``\\6b``-escapes, ``&#58;`` entities, ``var()`` indirection, unbalanced braces).
+This validator therefore parses the same way the browser does:
+
+  * CSS is tokenized with **tinycss2** — which DECODES escapes (``o\\6b lch`` →
+    ``oklch``, ``@f\\6f nt-face`` → ``@font-face``), SEPARATES the selector prelude
+    from the declaration VALUES (so an id selector ``#abc`` is never read as a hex
+    color), exposes ``!important`` structurally, and reports parse errors so a
+    stray/misplaced ``}`` (which would break out of the ``@layer author {}``
+    wrapper) is detectable.
+  * HTML is parsed with **html5lib** (into an lxml tree) exactly like a browser —
+    it DECODES entities (``https&#58;//…`` → ``https://…``), reads EVERY ``style=``
+    attribute including UNQUOTED ones, reads an unclosed ``<style>`` to
+    end-of-document (raw-text parsing), and surfaces url-bearing attribute values.
+
+What it enforces (a standard theme) — the COLOR + FONT + light/dark contract:
+  * off-palette color VALUES in CSS, in ANY syntax. The policy is an allow-list
+    inversion: a color-valued token that is not (a) an allow-listed theme hex,
+    (b) a ``var(--jd-*)`` token, or (c) an approved white/black/transparent
+    neutral is off-palette — whether written as hex, ``rgb()``/``hsl()``, a modern
+    color function (``oklch/oklab/lab/lch/hwb/color()/color-mix()/device-cmyk()``),
+    or a named CSS color. A ``var()`` in a color value is allowed ONLY when it
+    references a ``--jd-*`` theme token; any other custom-property reference is
+    off-palette (it could resolve to any color).
+  * ``font-family`` (or ``font`` shorthand) naming a non-system face, INCLUDING
+    ``font-family:var(--x)`` where ``--x`` is not a theme font token.
+  * author redefinition of a ``--jd-*`` theme token (only the theme layer owns
+    them).
   * ``@media (prefers-color-scheme)`` and the ``color-scheme`` property
-    (light/dark is driven by the theme's ``data-theme`` ONLY)
-  * ``!important`` on a color/font declaration
-  * off-palette color in an inline ``style=`` attribute
+    (light/dark is driven by the theme's ``data-theme`` ONLY).
+  * ``!important`` ANYWHERE in author CSS (it escapes the theme layer; the theme
+    owns its layer, the author never needs it).
+  * structurally-malformed / brace-unbalanced author CSS (a stray/misplaced ``}``
+    that would break out of the injected ``@layer author {}`` wrapper).
+  * every rule above is applied to inline ``style=`` declarations too, not just
+    ``<style>`` blocks.
 Always enforced (a safety subset, even for the bespoke ``Custom`` theme):
-  * ``@font-face``
-  * external URLs (http/https/protocol-relative resource refs)
+  * ``@font-face`` (incl. escaped ``@f\\6f nt-face``).
+  * external URLs (http/https + protocol-relative ``//``) in any attribute value
+    (entity-decoded), CSS ``url()`` token, or ``@import``. Only the exact XML
+    namespace URIs (``http://www.w3.org/2000/svg`` / ``…/1999/xlink``) are exempt.
 
-Scope + honest limits: color/font rules scan CSS only — ``<style>`` blocks and
-inline ``style=`` attributes — NOT ``<script>`` bodies, so colors set in ECharts
-JS config are governed by the skill's "use window.JARVIS_THEME.palette"
-instruction, not this linter. Detection is regex over comment-stripped CSS
-(``/* */`` in CSS, ``<!-- -->`` in HTML are removed first); it targets the
-enumerable patterns above and is a standard/cleanliness gate layered under the
-hard CSP+sandbox boundary (which is what actually blocks network egress), not an
-exhaustive parser.
+Honest scope + limits: this validator enforces COLOR, font-family, no-``!important``,
+no-``prefers-color-scheme``, well-formed CSS, and the safety bans. It does NOT
+deterministically lint STRUCTURE (spacing / type scale / layout) — structural
+adherence comes from the winning named component classes (emitted in ``@layer
+theme``) plus the generation prompt, not a hard spacing rule. Color/font rules
+scan CSS only — ``<style>`` blocks and inline ``style=`` attributes — NOT
+``<script>`` bodies, so colors set in ECharts JS config are governed by the
+skill's "use window.JARVIS_THEME.palette" instruction, not this linter. It is a
+standard/cleanliness gate layered under the hard CSP+sandbox boundary (which is
+what actually blocks network egress), not an exhaustive engine.
 """
 
 from __future__ import annotations
 
 import re
 from typing import NamedTuple
+
+import html5lib
+import tinycss2
+from tinycss2 import ast
 
 from jarvis.dashboards import theme_spec
 
@@ -62,120 +99,314 @@ class Violation(NamedTuple):
 # Rule codes ------------------------------------------------------------------
 RULE_OFF_PALETTE = "off-palette-color"
 RULE_FONT_FAMILY = "font-family-override"
+RULE_TOKEN_REDEFINE = "token-redefinition"
 RULE_PREFERS_SCHEME = "prefers-color-scheme"
 RULE_COLOR_SCHEME = "color-scheme"
-RULE_IMPORTANT = "important-color-font"
+RULE_IMPORTANT = "important-declaration"
 RULE_INLINE_COLOR = "inline-style-color"
+RULE_MALFORMED = "malformed-css"  # a stray } that would escape @layer author
 RULE_FONT_FACE = "font-face"  # safety
 RULE_EXTERNAL_URL = "external-url"  # safety
 
-# Color-bearing CSS properties (shorthands included). Used for the named-color,
-# inline-color and !important checks.
-_COLOR_PROPS = frozenset({
-	"color", "background", "background-color", "background-image",
-	"border", "border-color", "border-top", "border-right", "border-bottom",
-	"border-left", "border-top-color", "border-right-color",
-	"border-bottom-color", "border-left-color", "outline", "outline-color",
-	"box-shadow", "text-shadow", "fill", "stroke", "caret-color",
-	"column-rule-color", "text-decoration-color", "accent-color",
-})
+# Color-bearing CSS properties (shorthands included). A named/functional color in
+# one of these declaration VALUES is inspected; a hex in any of them is caught too.
+_COLOR_PROPS = frozenset(
+	{
+		"color",
+		"background",
+		"background-color",
+		"background-image",
+		"border",
+		"border-color",
+		"border-top",
+		"border-right",
+		"border-bottom",
+		"border-left",
+		"border-top-color",
+		"border-right-color",
+		"border-bottom-color",
+		"border-left-color",
+		"outline",
+		"outline-color",
+		"box-shadow",
+		"text-shadow",
+		"fill",
+		"stroke",
+		"caret-color",
+		"column-rule",
+		"column-rule-color",
+		"text-decoration",
+		"text-decoration-color",
+		"accent-color",
+		"-webkit-text-fill-color",
+		"-webkit-text-stroke-color",
+		"-webkit-text-stroke",
+		"-webkit-tap-highlight-color",
+		"border-inline-color",
+		"border-block-color",
+		"border-inline-start-color",
+		"border-inline-end-color",
+		"border-block-start-color",
+		"border-block-end-color",
+		"scrollbar-color",
+		"text-emphasis-color",
+		"text-emphasis",
+		"stop-color",
+		"flood-color",
+		"lighting-color",
+	}
+)
 _FONT_PROPS = frozenset({"font-family", "font"})
 
 # Approved neutral hex values (always allowed regardless of theme).
 _APPROVED_HEXES = frozenset({"#ffffff", "#000000"})
 # Approved color keywords (values, not families).
-_APPROVED_COLOR_WORDS = frozenset({
-	"transparent", "currentcolor", "inherit", "initial", "unset", "revert",
-	"white", "black", "none",
-})
+_APPROVED_COLOR_WORDS = frozenset(
+	{
+		"transparent",
+		"currentcolor",
+		"inherit",
+		"initial",
+		"unset",
+		"revert",
+		"white",
+		"black",
+		"none",
+	}
+)
 # Generic font-family keywords (always allowed as families).
-_GENERIC_FAMILIES = frozenset({
-	"serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui",
-	"ui-sans-serif", "ui-serif", "ui-monospace", "ui-rounded", "math", "emoji",
-	"fangsong", "inherit", "initial", "unset", "revert",
-})
+_GENERIC_FAMILIES = frozenset(
+	{
+		"serif",
+		"sans-serif",
+		"monospace",
+		"cursive",
+		"fantasy",
+		"system-ui",
+		"ui-sans-serif",
+		"ui-serif",
+		"ui-monospace",
+		"ui-rounded",
+		"math",
+		"emoji",
+		"fangsong",
+		"inherit",
+		"initial",
+		"unset",
+		"revert",
+	}
+)
+# Modern color functions — never allow-listable, so any occurrence is off-palette.
+_MODERN_COLOR_FNS = frozenset(
+	{
+		"oklch",
+		"oklab",
+		"lab",
+		"lch",
+		"hwb",
+		"color-mix",
+		"device-cmyk",
+		"color",
+	}
+)
+# Exact XML namespace URIs that are identifiers, never fetched — the ONLY http(s)
+# values exempt from the external-URL safety ban (narrowed from "the w3.org host").
+_ALLOWED_XML_NS = frozenset(
+	{
+		"http://www.w3.org/2000/svg",
+		"http://www.w3.org/1999/xlink",
+	}
+)
 
 # Full CSS named-color set (minus the approved neutrals above), used to flag a
 # brand-y named color sitting in a color-bearing declaration value.
-_CSS_NAMED_COLORS = frozenset({
-	"aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige",
-	"bisque", "blanchedalmond", "blue", "blueviolet", "brown", "burlywood",
-	"cadetblue", "chartreuse", "chocolate", "coral", "cornflowerblue",
-	"cornsilk", "crimson", "cyan", "darkblue", "darkcyan", "darkgoldenrod",
-	"darkgray", "darkgrey", "darkgreen", "darkkhaki", "darkmagenta",
-	"darkolivegreen", "darkorange", "darkorchid", "darkred", "darksalmon",
-	"darkseagreen", "darkslateblue", "darkslategray", "darkslategrey",
-	"darkturquoise", "darkviolet", "deeppink", "deepskyblue", "dimgray",
-	"dimgrey", "dodgerblue", "firebrick", "floralwhite", "forestgreen",
-	"fuchsia", "gainsboro", "ghostwhite", "gold", "goldenrod", "gray", "grey",
-	"green", "greenyellow", "honeydew", "hotpink", "indianred", "indigo",
-	"ivory", "khaki", "lavender", "lavenderblush", "lawngreen", "lemonchiffon",
-	"lightblue", "lightcoral", "lightcyan", "lightgoldenrodyellow", "lightgray",
-	"lightgrey", "lightgreen", "lightpink", "lightsalmon", "lightseagreen",
-	"lightskyblue", "lightslategray", "lightslategrey", "lightsteelblue",
-	"lightyellow", "lime", "limegreen", "linen", "magenta", "maroon",
-	"mediumaquamarine", "mediumblue", "mediumorchid", "mediumpurple",
-	"mediumseagreen", "mediumslateblue", "mediumspringgreen", "mediumturquoise",
-	"mediumvioletred", "midnightblue", "mintcream", "mistyrose", "moccasin",
-	"navajowhite", "navy", "oldlace", "olive", "olivedrab", "orange",
-	"orangered", "orchid", "palegoldenrod", "palegreen", "paleturquoise",
-	"palevioletred", "papayawhip", "peachpuff", "peru", "pink", "plum",
-	"powderblue", "purple", "rebeccapurple", "red", "rosybrown", "royalblue",
-	"saddlebrown", "salmon", "sandybrown", "seagreen", "seashell", "sienna",
-	"silver", "skyblue", "slateblue", "slategray", "slategrey", "snow",
-	"springgreen", "steelblue", "tan", "teal", "thistle", "tomato", "turquoise",
-	"violet", "wheat", "whitesmoke", "yellow", "yellowgreen",
-})
+_CSS_NAMED_COLORS = frozenset(
+	{
+		"aliceblue",
+		"antiquewhite",
+		"aqua",
+		"aquamarine",
+		"azure",
+		"beige",
+		"bisque",
+		"blanchedalmond",
+		"blue",
+		"blueviolet",
+		"brown",
+		"burlywood",
+		"cadetblue",
+		"chartreuse",
+		"chocolate",
+		"coral",
+		"cornflowerblue",
+		"cornsilk",
+		"crimson",
+		"cyan",
+		"darkblue",
+		"darkcyan",
+		"darkgoldenrod",
+		"darkgray",
+		"darkgrey",
+		"darkgreen",
+		"darkkhaki",
+		"darkmagenta",
+		"darkolivegreen",
+		"darkorange",
+		"darkorchid",
+		"darkred",
+		"darksalmon",
+		"darkseagreen",
+		"darkslateblue",
+		"darkslategray",
+		"darkslategrey",
+		"darkturquoise",
+		"darkviolet",
+		"deeppink",
+		"deepskyblue",
+		"dimgray",
+		"dimgrey",
+		"dodgerblue",
+		"firebrick",
+		"floralwhite",
+		"forestgreen",
+		"fuchsia",
+		"gainsboro",
+		"ghostwhite",
+		"gold",
+		"goldenrod",
+		"gray",
+		"grey",
+		"green",
+		"greenyellow",
+		"honeydew",
+		"hotpink",
+		"indianred",
+		"indigo",
+		"ivory",
+		"khaki",
+		"lavender",
+		"lavenderblush",
+		"lawngreen",
+		"lemonchiffon",
+		"lightblue",
+		"lightcoral",
+		"lightcyan",
+		"lightgoldenrodyellow",
+		"lightgray",
+		"lightgrey",
+		"lightgreen",
+		"lightpink",
+		"lightsalmon",
+		"lightseagreen",
+		"lightskyblue",
+		"lightslategray",
+		"lightslategrey",
+		"lightsteelblue",
+		"lightyellow",
+		"lime",
+		"limegreen",
+		"linen",
+		"magenta",
+		"maroon",
+		"mediumaquamarine",
+		"mediumblue",
+		"mediumorchid",
+		"mediumpurple",
+		"mediumseagreen",
+		"mediumslateblue",
+		"mediumspringgreen",
+		"mediumturquoise",
+		"mediumvioletred",
+		"midnightblue",
+		"mintcream",
+		"mistyrose",
+		"moccasin",
+		"navajowhite",
+		"navy",
+		"oldlace",
+		"olive",
+		"olivedrab",
+		"orange",
+		"orangered",
+		"orchid",
+		"palegoldenrod",
+		"palegreen",
+		"paleturquoise",
+		"palevioletred",
+		"papayawhip",
+		"peachpuff",
+		"peru",
+		"pink",
+		"plum",
+		"powderblue",
+		"purple",
+		"rebeccapurple",
+		"red",
+		"rosybrown",
+		"royalblue",
+		"saddlebrown",
+		"salmon",
+		"sandybrown",
+		"seagreen",
+		"seashell",
+		"sienna",
+		"silver",
+		"skyblue",
+		"slateblue",
+		"slategray",
+		"slategrey",
+		"snow",
+		"springgreen",
+		"steelblue",
+		"tan",
+		"teal",
+		"thistle",
+		"tomato",
+		"turquoise",
+		"violet",
+		"wheat",
+		"whitesmoke",
+		"yellow",
+		"yellowgreen",
+	}
+)
 
-# ── regexes ──────────────────────────────────────────────────────────────────
-_STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>([\s\S]*?)</style>", re.I)
-_INLINE_STYLE_RE = re.compile(r"""\bstyle\s*=\s*("([^"]*)"|'([^']*)')""", re.I)
-_CSS_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
-_HTML_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
-# One CSS declaration: `prop: value` up to ; } or {. Skips selectors (their
-# "prop" is a tag/class name, never a color/font property we inspect).
-_DECL_RE = re.compile(r"([-a-zA-Z]+)\s*:\s*([^;{}]*)")
-_HEX_RE = re.compile(r"#[0-9a-fA-F]{3,8}\b")
+# At-rules whose body is a list of RULES (recurse into them for nested checks).
+_RULE_BODY_AT = frozenset(
+	{
+		"media",
+		"supports",
+		"layer",
+		"container",
+		"document",
+		"-moz-document",
+		"scope",
+		"keyframes",
+		"-webkit-keyframes",
+		"-moz-keyframes",
+		"-o-keyframes",
+	}
+)
+
+# Only used to parse an isolated rgb()/hsl() literal's numeric args.
 _RGB_RE = re.compile(r"\brgba?\(\s*([^)]*)\)", re.I)
 _HSL_RE = re.compile(r"\bhsla?\(\s*([^)]*)\)", re.I)
-_FONT_FACE_RE = re.compile(r"@font-face\b", re.I)
-_PREFERS_SCHEME_RE = re.compile(r"@media[^{]*prefers-color-scheme", re.I)
-# `color-scheme:` as its own property — the negative lookbehind keeps it from
-# matching the `color-scheme` tail of `prefers-color-scheme` (its own rule).
-_COLOR_SCHEME_RE = re.compile(r"(?<![-\w])color-scheme\s*:", re.I)
-_FONT_FACE_BLOCK_RE = re.compile(r"@font-face\s*\{[^{}]*\}", re.I)
-# http/https (except W3C XML namespaces, which are identifiers, not fetches).
-_HTTP_URL_RE = re.compile(r"""https?://(?!(?:www\.)?w3\.org/)[^\s"'()<>]+""", re.I)
-# protocol-relative resource references: src/href="//…" or url(//…).
-_PROTO_REL_RE = re.compile(r"""(?:\bsrc|\bhref|\burl\()\s*=?\s*["']?//[^\s"'()<>]+""", re.I)
+# An external/protocol-relative URL anywhere in a (decoded) attribute value.
+_URLISH_RE = re.compile(r"""(?:https?:)?//[^\s"'()<>]+""", re.I)
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
-def _strip_css_comments(css: str) -> str:
-	return _CSS_COMMENT_RE.sub(" ", css or "")
-
-
-def _style_css(html: str) -> str:
-	"""All author <style> CSS, comment-stripped and joined."""
-	return "\n".join(_strip_css_comments(m.group(1)) for m in _STYLE_BLOCK_RE.finditer(html))
-
-
-def _inline_styles(html: str) -> list[str]:
-	out = []
-	for m in _INLINE_STYLE_RE.finditer(html):
-		out.append(_strip_css_comments(m.group(2) if m.group(2) is not None else (m.group(3) or "")))
-	return out
-
-
+# ── color literal helpers (reused by both CSS and inline passes) ──────────────
 def _norm_hex(h: str) -> str:
-	"""Normalize a #rgb / #rgba / #rrggbb / #rrggbbaa literal to #rrggbb
-	(alpha dropped). Returns '' if not a clean 3/4/6/8-digit hex."""
+	"""Normalize a #rgb / #rgba / #rrggbb / #rrggbbaa literal to #rrggbb (alpha
+	dropped). Returns '' if not a clean 3/4/6/8-digit hex."""
 	s = h[1:]
 	if len(s) in (3, 4):
 		s = "".join(c * 2 for c in s[:3])
 	elif len(s) in (6, 8):
 		s = s[:6]
 	else:
+		return ""
+	if not re.fullmatch(r"[0-9a-fA-F]{6}", s):
 		return ""
 	return "#" + s.lower()
 
@@ -188,24 +419,24 @@ def _rgb_to_hex(inner: str) -> str:
 	if len(parts) < 3:
 		return ""
 	try:
-		rgb = [max(0, min(255, int(round(float(x))))) for x in parts[:3]]
+		rgb = [max(0, min(255, round(float(x)))) for x in parts[:3]]
 	except ValueError:
 		return ""
 	return "#" + "".join(f"{c:02x}" for c in rgb)
 
 
 def _hsl_is_neutral(inner: str) -> bool | None:
-	"""True if an hsl()/hsla() is achromatic black/white (s=0 & l∈{0,100}) —
-	an approved neutral. False if chromatic / non-neutral. None if unparseable."""
+	"""True if an hsl()/hsla() is achromatic black/white (s=0 & l∈{0,100}) — an
+	approved neutral. False if chromatic. None if unparseable."""
 	parts = [p.strip().rstrip("%") for p in re.split(r"[,\s/]+", inner.strip()) if p.strip()]
 	if len(parts) < 3:
 		return None
 	try:
 		s = float(parts[1])
-		l = float(parts[2])
+		lightness = float(parts[2])
 	except ValueError:
 		return None
-	return s == 0 and (l == 0 or l == 100)
+	return s == 0 and (lightness == 0 or lightness == 100)
 
 
 def _color_allowed(literal: str, allowed_hexes: frozenset) -> bool:
@@ -224,158 +455,401 @@ def _color_allowed(literal: str, allowed_hexes: frozenset) -> bool:
 	return False
 
 
-def _iter_decls(css: str):
-	"""Yield (prop_lower, value) declarations from a CSS string."""
-	for m in _DECL_RE.finditer(css):
-		yield m.group(1).lower(), m.group(2).strip()
+def _is_external_url(url: str) -> bool:
+	"""A decoded URL string that the browser would FETCH off-origin. data:/blob:/
+	relative/fragment are fine; the exact SVG/xlink namespaces are exempt."""
+	s = (url or "").strip().lower()
+	if not s or s in _ALLOWED_XML_NS:
+		return False
+	return s.startswith("http://") or s.startswith("https://") or s.startswith("//")
 
 
-def _family_tokens(value: str, shorthand: bool) -> list[str]:
-	"""Candidate font-family names from a font-family value (or a `font`
-	shorthand). For the shorthand, the leading size/line-height/weight tokens of
-	the first comma-segment are dropped (family is the trailing word group)."""
-	segs = [s.strip() for s in value.split(",") if s.strip()]
-	if not segs:
-		return []
-	fams = list(segs)
-	if shorthand:
-		# `font: 700 14px/1.5 "Segoe UI", sans-serif` -> first seg's family is
-		# after the last space run; keep the rest of the segments verbatim.
-		first = segs[0]
-		fams[0] = first.rsplit(" ", 1)[-1] if " " in first and '"' not in first and "'" not in first else first
-	return [f.strip().strip("\"'").lower() for f in fams if f.strip()]
-
-
-# ── individual checks ────────────────────────────────────────────────────────
-def _check_font_face(css: str, out: list) -> None:
-	if _FONT_FACE_RE.search(css):
-		out.append(Violation(
-			RULE_FONT_FACE, "<style>", "@font-face",
-			"@font-face is not allowed — the canvas has no network and must use the system font stack.",
-		))
-
-
-def _check_external_urls(html: str, out: list) -> None:
-	scan = _HTML_COMMENT_RE.sub(" ", html)
-	seen: set = set()
-	for m in _HTTP_URL_RE.finditer(scan):
-		url = m.group(0)[:120]
-		if url in seen:
+def _external_urls_in_text(text: str) -> list[str]:
+	"""External/protocol-relative URLs in a decoded attribute value (skips the
+	exact XML namespace URIs)."""
+	out = []
+	for m in _URLISH_RE.finditer(text or ""):
+		u = m.group(0)
+		if u.lower() in _ALLOWED_XML_NS:
 			continue
-		seen.add(url)
-		out.append(Violation(
-			RULE_EXTERNAL_URL, "html", url,
-			f"External URL '{url}' is not allowed — inline all resources (data: URIs only).",
-		))
-	for m in _PROTO_REL_RE.finditer(scan):
-		frag = m.group(0)[:120]
-		if frag in seen:
+		out.append(u)
+	return out
+
+
+# ── HTML parsing (html5lib → lxml) ────────────────────────────────────────────
+def _parse_html(html: str):
+	return html5lib.parse(html or "", treebuilder="lxml", namespaceHTMLElements=False)
+
+
+def _local_name(tag) -> str:
+	if not isinstance(tag, str):
+		return ""
+	return tag.rsplit("}", 1)[-1].lower()
+
+
+def _style_blocks(tree) -> list[str]:
+	"""Every <style> element's raw CSS text (an unclosed <style> already carries
+	its raw-text-to-EOF content, matching the browser)."""
+	return [(el.text or "") for el in tree.iter() if _local_name(el.tag) == "style"]
+
+
+def _inline_styles(tree) -> list[str]:
+	"""Every element's decoded ``style=`` attribute value (incl. unquoted)."""
+	out = []
+	for el in tree.iter():
+		if not isinstance(el.tag, str):
 			continue
-		seen.add(frag)
-		out.append(Violation(
-			RULE_EXTERNAL_URL, "html", frag,
-			f"Protocol-relative resource '{frag}' is not allowed — inline all resources.",
-		))
+		st = el.get("style")
+		if st:
+			out.append(st)
+	return out
 
 
-def _check_prefers_color_scheme(css: str, out: list) -> None:
-	if _PREFERS_SCHEME_RE.search(css):
-		out.append(Violation(
-			RULE_PREFERS_SCHEME, "<style>", "@media (prefers-color-scheme)",
-			"@media (prefers-color-scheme) is not allowed — light/dark follows the theme's data-theme only.",
-		))
-
-
-def _check_color_scheme(css: str, out: list) -> None:
-	if _COLOR_SCHEME_RE.search(css):
-		out.append(Violation(
-			RULE_COLOR_SCHEME, "<style>", "color-scheme",
-			"The color-scheme property is not allowed — light/dark follows the theme's data-theme only.",
-		))
-
-
-def _check_css_colors(css: str, allowed_hexes: frozenset, out: list) -> None:
-	# Pass A: hex + rgb/hsl literals anywhere in the CSS.
-	for m in _HEX_RE.finditer(css):
-		lit = m.group(0)
-		if not _color_allowed(lit, allowed_hexes):
-			out.append(_off_palette(lit))
-	for m in _RGB_RE.finditer(css):
-		lit = m.group(0)
-		if not _color_allowed(lit, allowed_hexes):
-			out.append(_off_palette(lit))
-	for m in _HSL_RE.finditer(css):
-		lit = m.group(0)
-		if not _color_allowed(lit, allowed_hexes):
-			out.append(_off_palette(lit))
-	# Pass B: named colors, only inside a color-bearing declaration value.
-	for prop, value in _iter_decls(css):
-		if prop not in _COLOR_PROPS:
+def _attr_values(tree):
+	for el in tree.iter():
+		if not isinstance(el.tag, str):
 			continue
-		for word in re.findall(r"[a-zA-Z]+", value):
-			w = word.lower()
-			if w in _CSS_NAMED_COLORS and w not in _APPROVED_COLOR_WORDS:
-				out.append(_off_palette(word))
+		for v in el.attrib.values():
+			if v:
+				yield v
 
 
-def _off_palette(token: str) -> Violation:
+# ── CSS parsing (tinycss2) ────────────────────────────────────────────────────
+def _decls(content):
+	return tinycss2.parse_declaration_list(content or [], skip_comments=True, skip_whitespace=True)
+
+
+def _rules(content):
+	return tinycss2.parse_rule_list(content or [], skip_comments=True, skip_whitespace=True)
+
+
+def _flatten_block(content):
+	"""Yield ('decl', Declaration) / ('atrule', AtRule) from a declaration-block
+	token list, recursing into nested rule bodies. Native CSS nesting puts a
+	nested rule's declarations inside a ``CurlyBracketsBlock`` token of the parent
+	block, so its selector prelude (which may itself contain an id ``#hash``) is
+	never read as a value — only the nested block's declarations are."""
+	for d in _decls(content):
+		if isinstance(d, ast.Declaration):
+			yield ("decl", d)
+		elif isinstance(d, ast.AtRule):
+			yield from _flatten([d])
+	for tok in content or []:
+		if type(tok).__name__ == "CurlyBracketsBlock":
+			yield from _flatten_block(tok.content)
+
+
+def _flatten(rules):
+	"""Depth-first walk yielding ('decl', Declaration) / ('atrule', AtRule) for
+	the whole (possibly nested) rule tree. @font-face is terminal (its body is the
+	face definition, flagged as a safety violation, never recursed)."""
+	for rule in rules:
+		if isinstance(rule, ast.QualifiedRule):
+			yield from _flatten_block(rule.content)
+		elif isinstance(rule, ast.AtRule):
+			yield ("atrule", rule)
+			kw = (rule.lower_at_keyword or "").lower()
+			if kw == "font-face" or rule.content is None:
+				continue
+			if kw in _RULE_BODY_AT:
+				yield from _flatten(_rules(rule.content))
+			else:
+				yield from _flatten_block(rule.content)
+
+
+def _has_structural_error(css: str) -> bool:
+	"""True if the CSS has a stray/misplaced close bracket — a top-level ``}``
+	(or ``)`` / ``]``) with no opener. Such a ``}`` would terminate the injected
+	``@layer author {}`` wrapper early and let the following rule render UNLAYERED,
+	outranking the theme (F#4). An unclosed ``{`` is NOT flagged: it stays
+	contained inside the wrapper, so it cannot escape."""
+	for tok in tinycss2.parse_component_value_list(css or ""):
+		if isinstance(tok, ast.ParseError) and tok.kind in ("}", ")", "]"):
+			return True
+	return False
+
+
+def _first_custom_prop(tokens) -> str | None:
+	for t in tokens:
+		if type(t).__name__ == "IdentToken" and (t.value or "").startswith("--"):
+			return t.value
+	return None
+
+
+def _url_strings(tokens) -> list[str]:
+	"""Every URL a declaration value would fetch: url() tokens and url("…")
+	function-string args, recursively (e.g. inside a gradient / image-set)."""
+	out = []
+	for tok in tokens:
+		tn = type(tok).__name__
+		if tn == "URLToken":
+			out.append(tok.value or "")
+		elif tn == "FunctionBlock":
+			if (tok.lower_name or "").lower() == "url":
+				out += [a.value for a in tok.arguments if type(a).__name__ == "StringToken"]
+			else:
+				out += _url_strings(tok.arguments)
+	return out
+
+
+def _import_urls(prelude) -> list[str]:
+	"""The URL of an @import (string form ``@import "…"`` or ``@import url(…)``)."""
+	out = []
+	for tok in prelude or []:
+		tn = type(tok).__name__
+		if tn == "StringToken":
+			out.append(tok.value or "")
+		elif tn == "URLToken":
+			out.append(tok.value or "")
+		elif tn == "FunctionBlock" and (tok.lower_name or "").lower() == "url":
+			out += [a.value for a in tok.arguments if type(a).__name__ == "StringToken"]
+	return out
+
+
+def _has_prefers_scheme(prelude) -> bool:
+	"""True if a media-query prelude references ``prefers-color-scheme`` (decoded,
+	so an escaped ``prefers-c\\6f lor-scheme`` is caught too)."""
+
+	def idents(tokens):
+		for t in tokens or []:
+			tn = type(t).__name__
+			if tn == "IdentToken":
+				yield (t.value or "").lower()
+			elif tn in ("ParenthesesBlock", "SquareBracketsBlock", "CurlyBracketsBlock"):
+				yield from idents(t.content)
+			elif tn == "FunctionBlock":
+				yield from idents(t.arguments)
+
+	return "prefers-color-scheme" in set(idents(prelude))
+
+
+# ── violation factories ───────────────────────────────────────────────────────
+def _color_violation(token: str, rule: str, location: str) -> Violation:
+	if rule == RULE_INLINE_COLOR:
+		msg = (
+			f"Off-theme color '{token}' in an inline style= — it escapes the theme "
+			"layer; use a var(--jd-*) token in a <style> rule."
+		)
+	else:
+		msg = f"Off-theme color '{token}' — use a var(--jd-*) token or a color from the selected theme."
+	return Violation(rule, location, token, msg)
+
+
+def _external_violation(url: str) -> Violation:
+	u = (url or "")[:120]
 	return Violation(
-		RULE_OFF_PALETTE, "<style>", token,
-		f"Off-theme color '{token}' — use a var(--jd-*) token or a color from the selected theme.",
+		RULE_EXTERNAL_URL,
+		"html",
+		u,
+		f"External URL '{u}' is not allowed — inline all resources (data: URIs only).",
 	)
 
 
-def _check_font_family(css: str, allowed_families: frozenset, out: list) -> None:
-	for prop, value in _iter_decls(css):
-		if prop not in _FONT_PROPS:
+# ── declaration + at-rule checks ──────────────────────────────────────────────
+def _scan_color_tokens(tokens, allowed_hexes, out, *, color_rule, location):
+	"""Flag any color VALUE that is not an allowed theme hex / var(--jd-*) /
+	approved neutral. Recurses into non-color functions (gradients, image-set)."""
+	for tok in tokens:
+		tn = type(tok).__name__
+		if tn == "HashToken":
+			lit = "#" + (tok.value or "")
+			if not _color_allowed(lit, allowed_hexes):
+				out.append(_color_violation(lit, color_rule, location))
+		elif tn == "FunctionBlock":
+			fname = (tok.lower_name or "").lower()
+			if fname in _MODERN_COLOR_FNS:
+				out.append(_color_violation(tinycss2.serialize([tok]).strip(), color_rule, location))
+			elif fname in ("rgb", "rgba", "hsl", "hsla"):
+				lit = tinycss2.serialize([tok]).strip()
+				if not _color_allowed(lit, allowed_hexes):
+					out.append(_color_violation(lit, color_rule, location))
+			elif fname == "var":
+				ref = _first_custom_prop(tok.arguments)
+				if not (ref and ref.lower().startswith("--jd-")):
+					out.append(_color_violation(tinycss2.serialize([tok]).strip(), color_rule, location))
+			else:
+				_scan_color_tokens(
+					tok.arguments, allowed_hexes, out, color_rule=color_rule, location=location
+				)
+		elif tn == "IdentToken":
+			w = (tok.value or "").lower()
+			if w in _CSS_NAMED_COLORS and w not in _APPROVED_COLOR_WORDS:
+				out.append(_color_violation(tok.value, color_rule, location))
+
+
+def _family_candidates(tokens, shorthand):
+	"""(kind, display, var_ref) per comma-separated font-family segment. ``kind``
+	is 'var' (a var() indirection) or 'name' (a literal family)."""
+	segments = [[]]
+	for t in tokens:
+		if type(t).__name__ == "LiteralToken" and t.value == ",":
+			segments.append([])
+		else:
+			segments[-1].append(t)
+	out = []
+	for idx, seg in enumerate(segments):
+		var_fn = next(
+			(t for t in seg if type(t).__name__ == "FunctionBlock" and (t.lower_name or "").lower() == "var"),
+			None,
+		)
+		if var_fn is not None:
+			out.append(("var", tinycss2.serialize([var_fn]).strip(), _first_custom_prop(var_fn.arguments)))
 			continue
-		for fam in _family_tokens(value, shorthand=(prop == "font")):
-			if not fam or fam.startswith("var(") or fam in _GENERIC_FAMILIES or fam in allowed_families:
+		strings = [t for t in seg if type(t).__name__ == "StringToken"]
+		if strings:
+			out.append(("name", strings[-1].value.strip().lower(), None))
+			continue
+		idents = [t for t in seg if type(t).__name__ == "IdentToken"]
+		if not idents:
+			continue
+		if shorthand and idx == 0:
+			# `font:` shorthand — the family is the trailing ident run after the
+			# last size / line-height / numeric token of the first segment.
+			last_num = -1
+			for i, t in enumerate(seg):
+				tn = type(t).__name__
+				if tn in ("NumberToken", "DimensionToken", "PercentageToken") or (
+					tn == "LiteralToken" and t.value == "/"
+				):
+					last_num = i
+			tail = [t.value for t in seg[last_num + 1 :] if type(t).__name__ == "IdentToken"]
+			name = " ".join(tail)
+		else:
+			name = " ".join(t.value for t in idents)
+		out.append(("name", name.strip().lower(), None))
+	return out
+
+
+def _check_font(tokens, shorthand, allowed_families, out, *, location):
+	for kind, display, ref in _family_candidates(tokens, shorthand):
+		if kind == "var":
+			if ref and ref.lower().startswith("--jd-font"):
 				continue
-			# A `font:` shorthand carries size/weight tokens we can't fully model;
-			# only flag a token that looks like a real family name (letters).
-			if prop == "font" and not re.search(r"[a-zA-Z]", fam):
-				continue
-			out.append(Violation(
-				RULE_FONT_FAMILY, "<style>", fam,
+			out.append(
+				Violation(
+					RULE_FONT_FAMILY,
+					location,
+					display,
+					f"Font family '{display}' is not allowed — reference var(--jd-font)/"
+					"var(--jd-font-display) or the system font stack, not another custom property.",
+				)
+			)
+			continue
+		fam = display
+		if not fam or not any(c.isalpha() for c in fam):
+			continue
+		if fam in _GENERIC_FAMILIES or fam in allowed_families:
+			continue
+		out.append(
+			Violation(
+				RULE_FONT_FAMILY,
+				location,
+				fam,
 				f"Font family '{fam}' is not allowed — use var(--jd-font)/var(--jd-font-display) "
 				"or the system font stack.",
-			))
+			)
+		)
 
 
-def _check_important(css: str, out: list) -> None:
-	for prop, value in _iter_decls(css):
-		if "!important" not in value.lower():
-			continue
-		if prop in _COLOR_PROPS or prop in _FONT_PROPS:
-			out.append(Violation(
-				RULE_IMPORTANT, "<style>", f"{prop}: … !important",
-				f"!important on '{prop}' is not allowed — it escapes the theme layer.",
-			))
+def _check_declaration(d, ctx, out, *, color_rule, location):
+	name = d.name or ""
+	lname = (d.lower_name or name).lower()
+
+	# External URLs in a declaration value — always (incl. Custom).
+	for u in _url_strings(d.value):
+		if _is_external_url(u):
+			out.append(_external_violation(u))
+
+	if not ctx["design"]:
+		return
+
+	if lname.startswith("--jd-"):
+		out.append(
+			Violation(
+				RULE_TOKEN_REDEFINE,
+				location,
+				name,
+				f"'{name}' is a theme token — do not redefine it; the selected theme owns "
+				"the --jd-* values. Reference it with var(--jd-*), never reassign it.",
+			)
+		)
+	if d.important:
+		out.append(
+			Violation(
+				RULE_IMPORTANT,
+				location,
+				f"{name}: … !important",
+				f"!important on '{name}' is not allowed — it escapes the theme layer; "
+				"remove it and rely on the theme's own styling.",
+			)
+		)
+	if lname == "color-scheme":
+		out.append(
+			Violation(
+				RULE_COLOR_SCHEME,
+				location,
+				"color-scheme",
+				"The color-scheme property is not allowed — light/dark follows the theme's data-theme only.",
+			)
+		)
+	if lname in _COLOR_PROPS:
+		_scan_color_tokens(d.value, ctx["allowed_hexes"], out, color_rule=color_rule, location=location)
+	if lname in _FONT_PROPS:
+		_check_font(d.value, lname == "font", ctx["allowed_families"], out, location=location)
 
 
-def _check_inline_styles(inline_styles: list, allowed_hexes: frozenset, out: list) -> None:
-	for css in inline_styles:
-		for prop, value in _iter_decls(css):
-			if prop not in _COLOR_PROPS:
-				continue
-			bad = None
-			for lit_m in list(_HEX_RE.finditer(value)) + list(_RGB_RE.finditer(value)) + list(_HSL_RE.finditer(value)):
-				if not _color_allowed(lit_m.group(0), allowed_hexes):
-					bad = lit_m.group(0)
-					break
-			if bad is None:
-				for word in re.findall(r"[a-zA-Z]+", value):
-					w = word.lower()
-					if w in _CSS_NAMED_COLORS and w not in _APPROVED_COLOR_WORDS:
-						bad = word
-						break
-			if bad is not None:
-				out.append(Violation(
-					RULE_INLINE_COLOR, "inline style=", bad,
-					f"Off-theme color '{bad}' in an inline style= — it escapes the theme layer; "
-					"use a var(--jd-*) token in a <style> rule.",
-				))
+def _check_at_rule(rule, ctx, out):
+	kw = (rule.lower_at_keyword or "").lower()
+	if kw == "font-face":
+		out.append(
+			Violation(
+				RULE_FONT_FACE,
+				"<style>",
+				"@font-face",
+				"@font-face is not allowed — the canvas has no network and must use the system font stack.",
+			)
+		)
+		return
+	if kw == "import":
+		for u in _import_urls(rule.prelude):
+			if _is_external_url(u):
+				out.append(_external_violation(u))
+	if ctx["design"] and kw == "media" and _has_prefers_scheme(rule.prelude):
+		out.append(
+			Violation(
+				RULE_PREFERS_SCHEME,
+				"<style>",
+				"@media (prefers-color-scheme)",
+				"@media (prefers-color-scheme) is not allowed — light/dark follows the theme's data-theme only.",
+			)
+		)
+
+
+def _check_style_block(css, ctx, out):
+	# A stray/misplaced } would break out of the @layer author {} wrapper (F#4);
+	# reject it (standard themes only — Custom author CSS is never layer-wrapped).
+	if ctx["design"] and _has_structural_error(css):
+		out.append(
+			Violation(
+				RULE_MALFORMED,
+				"<style>",
+				"unbalanced-braces",
+				"The CSS has unbalanced or misplaced braces — fix the syntax so it can "
+				"be enforced under the theme.",
+			)
+		)
+	rules = tinycss2.parse_stylesheet(css or "", skip_comments=True, skip_whitespace=True)
+	for kind, node in _flatten(rules):
+		if kind == "atrule":
+			_check_at_rule(node, ctx, out)
+		else:
+			_check_declaration(node, ctx, out, color_rule=RULE_OFF_PALETTE, location="<style>")
+
+
+def _check_inline_style(css, ctx, out):
+	for d in _decls(css):
+		if isinstance(d, ast.Declaration):
+			_check_declaration(d, ctx, out, color_rule=RULE_INLINE_COLOR, location="inline style=")
 
 
 # ── public entry point ───────────────────────────────────────────────────────
@@ -388,33 +862,62 @@ def validate_dashboard_html(html: str, theme: str) -> list[Violation]:
 	the default ('jarvis')."""
 	html = html or ""
 	key = theme_spec.theme_key(theme)
-	css = _style_css(html)
+	design = key != theme_spec.CUSTOM_KEY
+
+	try:
+		tree = _parse_html(html)
+	except Exception:
+		# html5lib parses any string like a browser, so this is effectively
+		# unreachable; fail closed (reject) rather than silently pass an
+		# un-scannable document.
+		return [
+			Violation(
+				RULE_MALFORMED,
+				"html",
+				"unparseable",
+				"The dashboard HTML could not be parsed — fix the markup and try again.",
+			)
+		]
+
 	violations: list = []
 
-	# Safety bans — always, including Custom.
-	_check_font_face(css, violations)
-	_check_external_urls(html, violations)
-	if key == theme_spec.CUSTOM_KEY:
-		return violations
+	# Safety: external URLs in any (entity-decoded) attribute value — always.
+	for value in _attr_values(tree):
+		for u in _external_urls_in_text(value):
+			violations.append(_external_violation(u))
 
-	spec = theme_spec.load_theme(key) or theme_spec.load_theme(theme_spec.DEFAULT_KEY)
-	allowed_hexes = frozenset(h.lower() for h in spec["validator"]["allowed_color_hexes"])
-	allowed_families = frozenset(f.lower() for f in spec["validator"]["allowed_font_families"])
+	allowed_hexes: frozenset = frozenset()
+	allowed_families: frozenset = frozenset()
+	if design:
+		spec = theme_spec.load_theme(key) or theme_spec.load_theme(theme_spec.DEFAULT_KEY)
+		allowed_hexes = frozenset(h.lower() for h in spec["validator"]["allowed_color_hexes"])
+		allowed_families = frozenset(f.lower() for f in spec["validator"]["allowed_font_families"])
+	ctx = {"allowed_hexes": allowed_hexes, "allowed_families": allowed_families, "design": design}
 
-	# @font-face is already flagged (safety); drop its block so its internal
-	# `font-family:<face-name>` and any data: src don't double-report as design
-	# violations.
-	css_design = _FONT_FACE_BLOCK_RE.sub(" ", css)
-	_check_prefers_color_scheme(css_design, violations)
-	_check_color_scheme(css_design, violations)
-	_check_css_colors(css_design, allowed_hexes, violations)
-	_check_font_family(css_design, allowed_families, violations)
-	_check_important(css_design, violations)
-	_check_inline_styles(_inline_styles(html), allowed_hexes, violations)
-	return violations
+	for css in _style_blocks(tree):
+		_check_style_block(css, ctx, violations)
+	for css in _inline_styles(tree):
+		_check_inline_style(css, ctx, violations)
+
+	return _dedupe(violations)
+
+
+def _dedupe(violations: list) -> list:
+	"""Drop identical (rule, offending) repeats so a value flagged by two passes
+	surfaces once. Order preserved."""
+	seen: set = set()
+	out: list = []
+	for v in violations:
+		key = (v.rule, v.offending)
+		if key in seen:
+			continue
+		seen.add(key)
+		out.append(v)
+	return out
 
 
 def format_violations(violations: list) -> str:
-	"""Render violations as the human message body for the save-time throw."""
-	lines = [f"- [{v.rule}] {v.message}" for v in violations]
-	return "\n".join(lines)
+	"""Render violations as the human message body for the save-time throw — the
+	human ``.message`` only (the machine-readable ``rule`` code stays in the
+	structured ``Violation`` for the feed-to-model path, never in the modal)."""
+	return "\n".join(f"- {v.message}" for v in violations)

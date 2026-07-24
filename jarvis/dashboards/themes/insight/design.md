@@ -15,8 +15,12 @@ recipe and the source for the generation cheatsheet injected into the
 ## 1. Color tokens
 
 Injected as CSS custom properties on `:root`; compose with `var(--jd-*)`, never
-hardcode a hex. The validator rejects any off-theme color literal (only these
-hexes, plus the approved neutrals white/black/transparent, are allowed).
+hardcode a hex. The validator rejects any off-theme color VALUE in any syntax —
+only these token hexes, the ordered chart palette below, and the approved
+neutrals white/black/transparent are allowed. The status tokens
+(`--jd-positive`/`--jd-negative`/`--jd-warning`/`--jd-info`) are the text-safe
+status colors (AA on `--jd-surface`), deliberately darker than the vivid
+chart-palette values used for series fills.
 
 | Token | Value | Role |
 | --- | --- | --- |
@@ -25,13 +29,13 @@ hexes, plus the approved neutrals white/black/transparent, are allowed).
 | `--jd-surface-2` | `#f6f8fa` | Subtle fill (table header, insets) |
 | `--jd-ink` | `#1f272e` | Body text |
 | `--jd-heading` | `#1f272e` | Headings |
-| `--jd-muted` | `#6c7680` | Secondary / labels |
+| `--jd-muted` | `#667079` | Secondary / labels |
 | `--jd-line` | `#e2e2e2` | Hairline borders |
 | `--jd-accent` | `#2490ef` | Primary accent |
-| `--jd-positive` | `#25b885` | Up / good status |
-| `--jd-negative` | `#e24c4c` | Down / bad status |
-| `--jd-warning` | `#f5a623` | Caution status |
-| `--jd-info` | `#2490ef` | Informational status |
+| `--jd-positive` | `#197d5a` | Up / good status (text) |
+| `--jd-negative` | `#c24141` | Down / bad status (text) |
+| `--jd-warning` | `#956515` | Caution status (text) |
+| `--jd-info` | `#1c71bc` | Informational status (text) |
 | `--jd-radius` | `10px` | Corner radius |
 | `--jd-shadow` | `0 1px 2px rgba(25,39,52,.06)` | Card shadow |
 
@@ -64,6 +68,7 @@ Exact type scale (px / weight / line-height / letter-spacing):
 | display | 32px | 700 | 1.15 | -0.02em |
 | h1 | 24px | 700 | 1.2 | -0.01em |
 | h2 | 18px | 600 | 1.3 | -0.005em |
+| h3 | 15px | 600 | 1.35 | 0 |
 | label | 13px | 600 | 1.3 | 0.01em |
 | body | 14px | 400 | 1.5 | 0 |
 | caption | 12px | 400 | 1.4 | 0 |
@@ -130,15 +135,29 @@ Minimal skeleton:
 
 ## 7. Accessibility
 
-- Text contrast AA 4.5:1; large text / UI 3:1. The token ramp already meets this
-  on `--jd-bg`/`--jd-surface`; keep body text on `--jd-ink`, secondary on
-  `--jd-muted` (do not drop muted onto colored fills).
+- Text contrast AA 4.5:1; large text / UI 3:1. The text tokens are tuned to clear
+  4.5:1 on both `--jd-bg` and `--jd-surface`: body on `--jd-ink`, headings on
+  `--jd-heading`, secondary/labels on `--jd-muted`, and the status tokens
+  `--jd-positive`/`--jd-negative`/`--jd-warning`/`--jd-info` as status TEXT. Those
+  status text tokens are deliberately darker than the vivid chart-palette values
+  (which are for series fills / dots, not body text) — keep them off colored
+  fills. A per-theme contrast test guards every recipe's fg/bg token pair.
 - Units on every number; an as-of date on static data.
 
 ## 8. Forbidden (the validator rejects these)
 
-- Off-theme color literals (any hex/rgb/hsl not in §1, beyond white/black/transparent).
-- `font-family` naming a non-system face (e.g. Inter); `@font-face`.
+- Any off-theme color VALUE, in ANY syntax — a hex/rgb/hsl not in §1, a modern
+  color function (`oklch`/`lab`/`lch`/`hwb`/`color()`/`color-mix()`), or a named
+  CSS color — beyond white/black/transparent. Compose `var(--jd-*)` instead.
+- `font-family` naming a non-system face (e.g. Inter), including a `var(--x)`
+  indirection to a non-theme font; any `@font-face`.
+- Redefining a `--jd-*` theme token (only the theme layer owns them).
 - `@media (prefers-color-scheme)` or `color-scheme` (use `data-theme`).
-- External URLs (http/https, protocol-relative); load nothing over the network.
-- Color in an inline `style=` attribute; `!important` on color/font.
+- External URLs (http/https, protocol-relative, `@import "//…"`); load nothing
+  over the network.
+- Color in an inline `style=` attribute; `!important` on ANY declaration.
+
+The validator enforces COLOR, font-family, no-`!important`, no-`prefers-color-scheme`
+and the safety bans — it does NOT lint STRUCTURE. Spacing, the type scale and
+layout stay consistent through the winning component classes (in `@layer theme`)
+and the generation prompt, not a hard spacing rule.

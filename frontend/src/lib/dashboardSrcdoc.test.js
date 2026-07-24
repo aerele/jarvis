@@ -217,6 +217,50 @@ test("@layer: multiple author <style> blocks are each wrapped; empty ones untouc
   assert.ok(out.includes("<style></style>"))
 })
 
+test("@layer: an UNCLOSED author <style> is still wrapped in @layer author (F2)", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  // no </style>: the browser applies the CSS to EOF, so it must be layered too or
+  // it beats @layer theme unlayered. We wrap it AND synthesize a closing tag.
+  const out = buildSrcdoc("<body><style>.k{color:#0f172a}</body>", { theme: THEMES.jarvis })
+  assert.ok(
+    out.includes("@layer author{.k{color:#0f172a}}</style>"),
+    "unclosed author style wrapped in @layer author and closed",
+  )
+  // the theme still declares author-before-theme + emits its own theme layer,
+  // so the theme wins the cascade over the now-layered author CSS
+  assert.ok(out.includes("@layer author, theme;"), "layer order declaration present")
+  assert.ok(out.includes("@layer theme{"), "theme layer still emitted")
+})
+
+test("@layer: malformed author CSS with a stray } cannot break out to outrank @layer theme (F#4)", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  // A LEADING stray } would close @layer author{} immediately, leaving .jd-card
+  // UNLAYERED and beating @layer theme. The wrapper must NOT emit it unlayered.
+  const out = buildSrcdoc("<body><style>}.jd-card{color:var(--jd-negative)}</style></body>", {
+    theme: THEMES.jarvis,
+  })
+  // the theme layer machinery is intact (theme still wins for well-formed CSS)
+  assert.ok(out.includes("@layer author, theme;"), "layer order declaration present")
+  assert.ok(out.includes("@layer theme{"), "theme layer emitted")
+  // the malicious author rule is dropped — never emitted unlayered, so it cannot
+  // outrank the theme (and it never rode inside @layer author either)
+  assert.ok(
+    !out.includes(".jd-card{color:var(--jd-negative)}"),
+    "stray-} author rule dropped, not emitted unlayered",
+  )
+  assert.ok(!/@layer author\{\}/.test(out), "no empty-then-escaped @layer author remains")
+  // EXCESS trailing } (closes @layer author early, then .after would be unlayered)
+  const out2 = buildSrcdoc(
+    "<body><style>.evil{color:var(--jd-negative)}} .after{color:var(--jd-accent)}</style></body>",
+    { theme: THEMES.jarvis },
+  )
+  assert.ok(!out2.includes("@layer author{.evil"), "excess-} block not wrapped")
+  assert.ok(!/\}\s*\.after\s*\{/.test(out2), "nothing left unlayered after the excess }")
+  // a WELL-FORMED author block under the same theme is still wrapped + layered
+  const ok = buildSrcdoc("<body><style>.jd-card{color:#0f172a}</style></body>", { theme: THEMES.jarvis })
+  assert.ok(ok.includes("@layer author{.jd-card{color:#0f172a}}"), "well-formed CSS still wrapped")
+})
+
 test("@layer: Custom (bespoke) theme does NOT wrap author styles — author design wins", async () => {
   const { THEMES } = await import("./dashboardThemes.js")
   const html = "<style>.jd-card{background:#0f172a}</style><p>x</p>"

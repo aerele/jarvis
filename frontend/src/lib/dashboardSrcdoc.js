@@ -343,16 +343,61 @@ export function buildSrcdoc(
 	)
 }
 
+// True if the CSS contains a `}` with no matching `{` before it — a stray/excess
+// close brace that, once interpolated into `@layer author{ … }`, would terminate
+// the layer early and let the following author rule render UNLAYERED, outranking
+// the theme (F#4). Strings, comments and CSS escapes are skipped so a `}` inside
+// them never counts. An UNCLOSED `{` (depth ends > 0) is safe — it stays contained
+// inside the wrapper — so it is NOT treated as an escape.
+function cssEscapesLayer(css) {
+	const s = String(css || "")
+	let depth = 0
+	for (let i = 0; i < s.length; i++) {
+		const c = s[i]
+		if (c === "\\") {
+			i++ // CSS escape: the next char is never structural
+			continue
+		}
+		if (c === "/" && s[i + 1] === "*") {
+			const end = s.indexOf("*/", i + 2)
+			i = end < 0 ? s.length : end + 1
+			continue
+		}
+		if (c === '"' || c === "'") {
+			i++
+			while (i < s.length && s[i] !== c) {
+				if (s[i] === "\\") i++
+				i++
+			}
+			continue
+		}
+		if (c === "{") depth++
+		else if (c === "}" && --depth < 0) return true
+	}
+	return false
+}
+
 // Wrap the inner CSS of every author <style> in `@layer author { … }` so a
 // standard theme's later-declared `@layer theme` wins the cascade regardless of
 // the author's source order or selector specificity. Non-greedy to the first
-// </style>; an empty style block is left untouched. Author `@import`, inline
-// `style=` colors and `!important` on color/font still beat layers by design —
-// the save-time validator bans exactly those.
+// </style>, the next <style, or end-of-string: an UNCLOSED <style> still applies
+// its CSS to EOF in the browser (raw-text parsing), so it must be layered too, or
+// it would beat `@layer theme` unlayered (F2). A synthesized `</style>` closes an
+// unclosed block so it can't swallow our shell's trailing tags. An empty style
+// block is left untouched. A block whose CSS has a stray `}` that would break OUT
+// of `@layer author{}` is DROPPED (emitted as an empty <style>) rather than let
+// through unlayered (F#4) — the save-time validator already rejects this, so this
+// only bites live previews + grandfathered docs that skip validation. Author
+// `@import`, inline `style=` colors and `!important` still beat layers by design —
+// the save-time validator bans those.
 function wrapAuthorStyles(html) {
 	return String(html || "").replace(
-		/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
-		(m, open, css, close) => (css.trim() ? `${open}@layer author{${css}}${close}` : m),
+		/(<style\b[^>]*>)([\s\S]*?)(<\/style>|(?=<style\b)|$)/gi,
+		(m, open, css, close) => {
+			if (!css.trim()) return m
+			if (cssEscapesLayer(css)) return `${open}${close || "</style>"}`
+			return `${open}@layer author{${css}}${close || "</style>"}`
+		},
 	)
 }
 

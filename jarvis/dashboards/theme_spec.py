@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
-from functools import lru_cache
+from functools import cache
 
 _THEMES_DIR = pathlib.Path(__file__).resolve().parent / "themes"
 
@@ -23,7 +23,7 @@ CUSTOM_KEY = "custom"
 DEFAULT_KEY = "jarvis"
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_theme(key: str) -> dict | None:
 	"""Return the parsed ``theme.json`` for a lowercase key, or ``None`` when
 	there is no spec (the bespoke ``custom`` theme, or an unknown key)."""

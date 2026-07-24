@@ -13,6 +13,13 @@ dependencies = [
     # PDF -> image rasterization for native LLM vision (jarvis/chat/vision.py).
     # Permissive license only: pypdfium2 (Apache/BSD), NOT PyMuPDF (AGPL).
     "pypdfium2>=4",
+    # Browser-accurate CSS/HTML parsing for the dashboard theme-conformance
+    # validator (jarvis/dashboards/theme_validator.py). A regex over untrusted
+    # canvas CSS/HTML is bypassable (escapes/entities/nesting); the validator must
+    # tokenize the way the browser does. tinycss2 + lxml are transitively present,
+    # but html5lib has no other requirer, so pin all three explicitly for the FC image.
+    "tinycss2>=1.1",
+    "html5lib>=1.1",
 ]
 
 [build-system]

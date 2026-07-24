@@ -37,6 +37,7 @@ const VARS = (v) => `:root{
 const BASE = `
 html,body{background:var(--jd-bg);color:var(--jd-ink);font-family:var(--jd-font);margin:0;}
 h1,h2,h3{font-family:var(--jd-font-display);color:var(--jd-heading,var(--jd-ink));}
+h3{font-size:15px;font-weight:600;line-height:1.35;}
 table{border-collapse:collapse;width:100%;}
 th{color:var(--jd-muted);font-weight:600;text-align:left;}
 th,td{padding:8px 12px;border-bottom:1px solid var(--jd-line);}
@@ -80,8 +81,8 @@ export const THEMES = {
 		css:
 			VARS({
 				bg: "#f8f8f8", surface: "#ffffff", surface2: "#f2f2f2", ink: "#383838",
-				heading: "#171717", muted: "#7c7c7c", line: "#ededed", accent: "#383838",
-				positive: "#4c9a7a", negative: "#c25d5d", warning: "#d9a53f", info: "#5d78d1",
+				heading: "#171717", muted: "#6e6e6e", line: "#ededed", accent: "#383838",
+				positive: "#3e7d63", negative: "#b25555", warning: "#8e6c29", info: "#556dbe",
 				shadow: "0 1px 2px rgba(0,0,0,.05)",
 				font: SANS, fontDisplay: SANS,
 			}) + BASE,
@@ -95,8 +96,8 @@ export const THEMES = {
 		css:
 			VARS({
 				bg: "#f3f3f3", surface: "#ffffff", surface2: "#f6f8fa", ink: "#1f272e",
-				heading: "#1f272e", muted: "#6c7680", line: "#e2e2e2", accent: "#2490ef",
-				positive: "#25b885", negative: "#e24c4c", warning: "#f5a623", info: "#2490ef",
+				heading: "#1f272e", muted: "#667079", line: "#e2e2e2", accent: "#2490ef",
+				positive: "#197d5a", negative: "#c24141", warning: "#956515", info: "#1c71bc",
 				shadow: "0 1px 2px rgba(25,39,52,.06)",
 				font: SANS, fontDisplay: SANS,
 			}) + BASE,
@@ -110,8 +111,8 @@ export const THEMES = {
 		css:
 			VARS({
 				bg: "#faf9f5", surface: "#ffffff", surface2: "#f5f3ec", ink: "#3d3929",
-				heading: "#3d3929", muted: "#83827d", line: "#e8e6dc", accent: "#d97757",
-				positive: "#7d9b76", negative: "#c2542e", warning: "#dfa32e", info: "#6a9bcc",
+				heading: "#3d3929", muted: "#6f6e6a", line: "#e8e6dc", accent: "#d97757",
+				positive: "#61785b", negative: "#bc512d", warning: "#926b1e", info: "#50759a",
 				shadow: "0 1px 2px rgba(61,57,41,.06)",
 				font: SANS, fontDisplay: `Georgia,"Times New Roman",serif`,
 			}) + BASE,
@@ -148,8 +149,8 @@ export const THEMES = {
 		css:
 			VARS({
 				bg: "#f8f8f8", surface: "#ffffff", surface2: "#f2f2f2", ink: "#383838",
-				heading: "#171717", muted: "#7c7c7c", line: "#ededed", accent: "#383838",
-				positive: "#4c9a7a", negative: "#c25d5d", warning: "#d9a53f", info: "#5d78d1",
+				heading: "#171717", muted: "#6e6e6e", line: "#ededed", accent: "#383838",
+				positive: "#3e7d63", negative: "#b25555", warning: "#8e6c29", info: "#556dbe",
 				shadow: "0 1px 2px rgba(0,0,0,.05)",
 				font: SANS, fontDisplay: SANS,
 			}) + BASE,
