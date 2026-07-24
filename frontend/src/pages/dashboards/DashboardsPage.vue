@@ -127,6 +127,7 @@
 					class="shrink-0 border-t"
 					:style="{ height: chatPct + '%' }"
 					:caps="caps"
+					:theme="builderTheme"
 					:editing-name="editingDetail ? editingDetail.name : ''"
 					@canvas="onCanvas"
 					@reset="resetBuilder"

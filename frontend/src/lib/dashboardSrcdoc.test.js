@@ -186,6 +186,59 @@ test("parseSourcesBlock: unwraps double-nested spec ({spec:{spec:{...}}})", () =
   assert.deepEqual(sources[0].spec, { from: "Sales Invoice" })
 })
 
+test("@layer: a standard theme wraps author <style> in @layer author and wins via @layer theme", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  const html =
+    "<html><head><style>.jd-card{background:#0f172a}</style></head><body><p>x</p></body></html>"
+  const out = buildSrcdoc(html, { theme: THEMES.jarvis })
+  // The theme block declares layer order author-before-theme; in CSS @layer the
+  // LAST-listed layer wins, so `author, theme` => theme beats author regardless
+  // of the author's source order or specificity.
+  assert.ok(out.includes("@layer author, theme;"), "layer order declaration present")
+  assert.ok(out.includes("@layer theme{"), "theme base emitted in @layer theme")
+  // the author's own <style> content is wrapped in @layer author (the loser)
+  assert.ok(
+    out.includes("@layer author{.jd-card{background:#0f172a}}"),
+    "author <style> wrapped in @layer author",
+  )
+  // the theme layer carries the tokens, so a jd-card in @layer theme wins color
+  assert.ok(out.indexOf("@layer theme{") < out.indexOf("--jd-bg:"))
+})
+
+test("@layer: multiple author <style> blocks are each wrapped; empty ones untouched", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  const html =
+    "<head><style>.a{color:var(--jd-ink)}</style></head>" +
+    "<body><style></style><style>.b{color:var(--jd-accent)}</style><p>x</p></body>"
+  const out = buildSrcdoc(html, { theme: THEMES.insight })
+  assert.ok(out.includes("@layer author{.a{color:var(--jd-ink)}}"))
+  assert.ok(out.includes("@layer author{.b{color:var(--jd-accent)}}"))
+  // an empty <style></style> is left as-is (no pointless @layer author{})
+  assert.ok(out.includes("<style></style>"))
+})
+
+test("@layer: Custom (bespoke) theme does NOT wrap author styles — author design wins", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  const html = "<style>.jd-card{background:#0f172a}</style><p>x</p>"
+  const out = buildSrcdoc(html, { theme: THEMES.custom })
+  // author CSS stays unlayered (unwrapped) so the bespoke look wins
+  assert.ok(out.includes(".jd-card{background:#0f172a}"))
+  assert.ok(!out.includes("@layer author{"), "no author layer for bespoke")
+  assert.ok(!out.includes("@layer theme{"), "no theme layer for bespoke")
+  // tokens are still injected (unlayered) so var(--jd-*) resolves, and the
+  // palette global is present
+  assert.ok(out.includes("--jd-bg:"))
+  assert.ok(out.includes('"name":"custom"'))
+})
+
+test("@layer: no-theme (legacy dark flag) path is unchanged — no layers, no theme block", () => {
+  const out = buildSrcdoc("<style>.a{color:red}</style><p>x</p>", { dark: true })
+  assert.ok(!out.includes("@layer"), "no @layer without a theme")
+  assert.ok(!out.includes("jarvis-theme"))
+  assert.ok(out.includes(".a{color:red}"), "author style passed through verbatim")
+  assert.ok(out.includes('data-theme="dark"'))
+})
+
 test("SECURITY: stale openclaw ws-client script is stripped, other scripts kept", () => {
   const html =
     "<html><head></head><body><div id=chart></div>" +

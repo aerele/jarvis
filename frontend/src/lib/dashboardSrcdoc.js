@@ -291,14 +291,25 @@ export function buildSrcdoc(
 	{ dark = false, echartsSource = "", theme: themeSpec = null } = {},
 ) {
 	// A named dashboard theme (from lib/dashboardThemes) owns the canvas look
-	// when provided: its CSS variables + base rules are injected BEFORE the
-	// dashboard's own styles (so those win conflicts), a JARVIS_THEME global
-	// exposes the chart palette, and data-theme follows the theme's own
-	// light/dark - independent of the app shell's mode. Without a theme the
-	// legacy dark flag drives data-theme only.
+	// when provided: its --jd-* variables + named component classes are emitted
+	// in a later-declared `@layer theme` while the author's own <style> is
+	// wrapped in `@layer author` (declared first), so the theme wins the CSS-vs-
+	// CSS battle regardless of author source order or specificity. A JARVIS_THEME
+	// global exposes the chart palette, and data-theme follows the theme's own
+	// light/dark - independent of the app shell's mode. A "Custom" (bespoke)
+	// theme is the opposite: the tokens are injected UNLAYERED and the author's
+	// <style> is left unlayered too, so the author's own design wins (the save-
+	// time validator relaxes the design rules for it but keeps the safety bans).
+	// Without a theme the legacy dark flag drives data-theme only.
 	const theme = themeSpec ? (themeSpec.dark ? "dark" : "light") : dark ? "dark" : "light"
+	const bespoke = !!(themeSpec && themeSpec.bespoke)
+	const themeCss = themeSpec
+		? bespoke
+			? themeSpec.css
+			: `@layer author, theme;@layer theme{${themeSpec.css}}`
+		: ""
 	const themeBlock = themeSpec
-		? `<style id="jarvis-theme">${themeSpec.css}</style>` +
+		? `<style id="jarvis-theme">${themeCss}</style>` +
 			`<script>window.JARVIS_THEME=${escInline(
 				JSON.stringify({
 					name: themeSpec.key,
@@ -315,15 +326,33 @@ export function buildSrcdoc(
 		`<script>${escInline(RUNTIME_JS)}<\/script>`
 
 	const { headInner, bodyInner } = splitAuthorHtml(String(html || ""))
+	// Under a standard (non-bespoke) theme, wrap the author's <style> contents in
+	// `@layer author` so the theme's `@layer theme` wins. Skipped for bespoke /
+	// no-theme, where author CSS stays unlayered and wins.
+	const prep = (s) =>
+		themeSpec && !bespoke ? wrapAuthorStyles(stripHostClient(s)) : stripHostClient(s)
 	return (
 		`<!DOCTYPE html><html data-theme="${theme}"><head>` +
 		CSP_META +
 		'<meta charset="utf-8">' +
 		scripts +
-		stripHostClient(headInner) +
+		prep(headInner) +
 		"</head><body>" +
-		stripHostClient(bodyInner) +
+		prep(bodyInner) +
 		"</body></html>"
+	)
+}
+
+// Wrap the inner CSS of every author <style> in `@layer author { … }` so a
+// standard theme's later-declared `@layer theme` wins the cascade regardless of
+// the author's source order or selector specificity. Non-greedy to the first
+// </style>; an empty style block is left untouched. Author `@import`, inline
+// `style=` colors and `!important` on color/font still beat layers by design —
+// the save-time validator bans exactly those.
+function wrapAuthorStyles(html) {
+	return String(html || "").replace(
+		/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
+		(m, open, css, close) => (css.trim() ? `${open}@layer author{${css}}${close}` : m),
 	)
 }
 

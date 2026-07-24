@@ -173,6 +173,9 @@ import { listPendingConfirmations, confirmTool, dismissTool } from "@/api"
 // dialog; stt_enabled - when the backend sends it - gates the mic)
 const props = defineProps({
 	caps: { type: Object, default: () => ({}) },
+	// the selected theme key (lowercase) — forwarded in the send context so the
+	// agent designs FOR that theme (the skill injects its token+recipe cheatsheet).
+	theme: { type: String, default: "jarvis" },
 	// when revising a saved dashboard, its name — forwarded in the send context
 	// so the agent knows which dashboard it is iterating on ("" = a new one).
 	editingName: { type: String, default: "" },
@@ -434,7 +437,13 @@ async function send() {
 	nextTick(scrollBottom)
 	try {
 		const r =
-			(await sendDashboardChat(conversation.value, text, dataMode.value, props.editingName)) || {}
+			(await sendDashboardChat(
+				conversation.value,
+				text,
+				dataMode.value,
+				props.editingName,
+				props.theme,
+			)) || {}
 		if (r.ok === false) {
 			// rejected (single-flight guard / usage cap) - nothing persisted
 			messages.value = messages.value.filter((m) => m.name !== tmpName)

@@ -84,10 +84,19 @@ export const callDashboardTool = (tool, args = {}) => {
 // dataMode: "static" | "live" | anything else = Auto (backend forwards only the
 // two literal values). editingName: when revising a saved dashboard, its name —
 // forwarded as {doctype, name} so the agent gets a [Viewing:] line and reads the
-// current html/sources before changing them.
-export const sendDashboardChat = (conversation, message, dataMode = "", editingName = "") => {
+// current html/sources before changing them. theme: the selected theme key
+// (lowercase) — forwarded so the backend tells the agent which theme to design
+// for and the dashboards skill injects that theme's token+recipe cheatsheet.
+export const sendDashboardChat = (
+	conversation,
+	message,
+	dataMode = "",
+	editingName = "",
+	theme = "",
+) => {
 	const context = { page: "dashboards" }
 	if (dataMode === "static" || dataMode === "live") context.data_mode = dataMode
+	if (theme) context.theme = theme
 	if (editingName) {
 		context.doctype = "Jarvis Dashboard"
 		context.name = editingName
