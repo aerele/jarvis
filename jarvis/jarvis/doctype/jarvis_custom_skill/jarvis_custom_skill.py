@@ -149,6 +149,7 @@ class JarvisCustomSkill(Document):
 		self._guard_content_change()
 		self._validate_lengths()
 		self._validate_unique_per_owner()
+		self._validate_shared_slug_unique()
 		self._validate_owner_cap()
 		self._guard_managed_flag()
 
@@ -356,6 +357,47 @@ class JarvisCustomSkill(Document):
 		)
 		if clash:
 			frappe.throw(_("You already have a skill named '{0}'.").format(self.skill_name))
+
+	def _validate_shared_slug_unique(self):
+		# R3-SP-1: GLOBAL uniqueness of ``skill_name`` among SHARED (Role/Org) skills.
+		# ``_validate_unique_per_owner`` above only enforces ``(owner, skill_name)``;
+		# but the container writes ONE ``custom-<slug>`` dir per authored slug, so at
+		# most one SHARED copy may carry a given slug REGARDLESS of owner. Two shared
+		# rows with the same slug reached through DIFFERENT authorized paths — a
+		# System-Manager-owned direct Org create + an Administrator-owned promoted copy,
+		# or an insight-apply-created Role row + a promotion — would collide on that one
+		# dir and corrupt the push budget. So enforce the true invariant here: it runs
+		# on EVERY shared-scope create/rename (not just promotion), since ``validate``
+		# fires on every insert/save through the SPA, the Desk, the tools or a test.
+		#
+		# Only a NEW duplicate is blocked; an in-place UPDATE of an existing shared row
+		# (insight-apply, a supersede-in-place promotion) excludes SELF via ``name !=``,
+		# so legitimately editing the one shared copy of a slug is never blocked.
+		#
+		# ``("in", ("Role", "Org", ""))`` — not ``("not in", ("User", "Personal"))`` —
+		# because db_query wraps the ``in`` operator in ``ifnull(scope, '')``, so a
+		# legacy NULL-scope row (which means Org) matches the ``""`` entry; a ``!=`` /
+		# ``not in`` would silently drop those NULL rows (NULL != 'User' is NULL, not
+		# true), letting a legacy-shadowed duplicate slip through.
+		if self.scope not in ("Role", "Org"):
+			return
+		clash = frappe.get_all(
+			SKILL_DOCTYPE,
+			filters={
+				"skill_name": self.skill_name,
+				"scope": ("in", ("Role", "Org", "")),
+				"name": ("!=", self.name or ""),
+			},
+			pluck="name",
+			limit=1,
+		)
+		if clash:
+			frappe.throw(
+				_(
+					"A shared skill named '{0}' already exists. Two Role/Org skills cannot "
+					"share a name — rename one, or edit the existing shared skill instead."
+				).format(self.skill_name)
+			)
 
 	def _validate_owner_cap(self):
 		if not self.is_new():
