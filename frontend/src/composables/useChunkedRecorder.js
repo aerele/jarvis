@@ -11,10 +11,12 @@
 // Cost: a tens-of-ms inter-cycle gap where a boundary word can clip — accepted per
 // the owner spec (chunking is what makes long sessions safe).
 //
-// Each finished clip is handed to opts.onClip({ seq, blob, durationS, mimeType })
-// with a monotonic `seq`; the composer feeds it straight into voiceChunkQueue. This
-// composable owns ONLY the browser recorder plumbing (unit-tested logic lives in
-// voiceChunkQueue.js; the recorder itself is validated by the real-mic QA script).
+// Each finished clip is handed to opts.onClip({ blob, durationS, mimeType }); the
+// composer feeds it straight into voiceChunkQueue, which STAMPS the monotonic `seq`
+// (single seq authority — the recorder deliberately does NOT number clips, so it can
+// never collide with recovery on a seq). This composable owns ONLY the browser
+// recorder plumbing (unit-tested logic lives in voiceChunkQueue.js; the recorder
+// itself is validated by the real-mic QA script).
 //
 // There is deliberately NO 300 s hard cap here (unlike useAudioRecorder) — chunking
 // makes long sessions safe, so the mic stays live until the user stops.
@@ -41,8 +43,13 @@ export function useChunkedRecorder(opts = {}) {
 	let stream = null;
 	let recorder = null;
 	let chunks = [];
-	let seq = 0;
 	let mime = "";
+	// Synchronous re-entry guard (VAR-3): set the instant start() is entered, BEFORE the
+	// async getUserMedia, so a double-click — or an impatient second click while the mic
+	// permission prompt is open — cannot launch a second recorder + interval (a leaked hot
+	// mic + duplicate clips). The reactive `state` flips to 'recording' only after the
+	// grant, too late to guard the window on its own.
+	let starting = false;
 	let cycleTimer = null; // fires _rotate() at each ~15 s boundary
 	let tick = null; // 250 ms clock updater
 	let startedAt = 0; // session start (for durationS)
@@ -76,6 +83,7 @@ export function useChunkedRecorder(opts = {}) {
 		}
 	}
 	function _fail(msg) {
+		starting = false;
 		_clearTimers();
 		_releaseStream();
 		state.value = "error";
@@ -146,7 +154,7 @@ export function useChunkedRecorder(opts = {}) {
 		}
 
 		if (built && built.size) {
-			onClip({ seq: seq++, blob: built, durationS: dur, mimeType });
+			onClip({ blob: built, durationS: dur, mimeType });
 		}
 
 		if (localAction === "rotate" && state.value === "recording") {
@@ -171,12 +179,12 @@ export function useChunkedRecorder(opts = {}) {
 			_fail("Voice recording isn't supported in this browser.");
 			return;
 		}
-		if (state.value === "recording") return;
+		// VAR-3: reject a re-entry synchronously — while already recording OR while a
+		// previous start() is mid-getUserMedia (the permission-prompt window).
+		if (state.value === "recording" || starting) return;
+		starting = true;
 		error.value = "";
 		durationS.value = 0;
-		// `seq` is NOT reset — it stays monotonic across start/stop cycles so a second
-		// dictation in the same mount can't re-emit seq 0,1,2 and collide with the reused
-		// voiceChunkQueue's dedup guard (which would silently drop the new clips).
 		chunks = [];
 		action = null;
 		try {
@@ -201,6 +209,7 @@ export function useChunkedRecorder(opts = {}) {
 		}
 		startedAt = Date.now();
 		state.value = "recording";
+		starting = false;
 		_armCycle();
 		tick = setInterval(() => {
 			durationS.value = Math.floor((Date.now() - startedAt) / 1000);

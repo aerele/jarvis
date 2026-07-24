@@ -84,17 +84,25 @@ function _tx(mode, fn) {
 
 // A per-session mirror handed to the queue. Methods return promises but the queue
 // treats them as fire-and-forget (best-effort), so a rejection is impossible here —
-// every path resolves.
-export function createClipMirror(sessionId) {
+// every path resolves. `userId` (the current Frappe user) is stamped on every record
+// so reload recovery can be scoped to the SAME user — IndexedDB is per-origin, not
+// per-login, so a shared browser profile must not offer user A's audio to user B.
+export function createClipMirror(sessionId, userId) {
 	const sid = String(sessionId || "session");
+	const uid = userId == null ? null : String(userId);
 	const key = (seq) => `${sid}:${seq}`;
 	return {
 		sessionId: sid,
+		userId: uid,
 		put(clip) {
-			// Store the blob and just enough metadata to recover + label it later.
+			// Store the blob and just enough metadata to recover + route it later.
 			const rec = {
 				key: key(clip.seq),
 				sessionId: sid,
+				userId: uid,
+				// The conversation the clip was SPOKEN in — recovery routes text back
+				// here, never dumping it into whatever chat happens to be open.
+				conversationId: clip.conversationId != null ? clip.conversationId : null,
 				seq: clip.seq,
 				blob: clip.blob,
 				durationS: clip.durationS || 0,
@@ -127,10 +135,29 @@ export function createClipMirror(sessionId) {
 	};
 }
 
-// Read back every mirrored clip from PRIOR sessions (anything still in the store when
-// the composer mounts is, by definition, un-transcribed leftover audio). Returns
-// [{ key, sessionId, seq, blob, durationS, mimeType, createdAt }] for the recovery UI.
-export function listOrphanClips(excludeSessionId) {
+// PURE, node-testable orphan filter (the browser-free heart of listOrphanClips). Keeps
+// only clips that (a) belong to a PRIOR session (not the live one) and (b) belong to the
+// SAME Frappe user — the cross-user safety gate (VAR-4). A record whose userId doesn't
+// exactly match (including a legacy record with no userId when a user IS logged in, or
+// vice-versa) is HIDDEN, never offered to whoever happens to be logged in. Sorted newest
+// session first, then spoken order within a session.
+export function filterOrphans(clips, opts = {}) {
+	const norm = (u) => (u == null ? null : String(u));
+	const want = norm(opts.userId);
+	const excludeSessionId = opts.excludeSessionId;
+	return (clips || [])
+		.filter((v) => {
+			if (excludeSessionId && v.sessionId === excludeSessionId) return false;
+			if (norm(v.userId) !== want) return false; // strict same-user; both-null is OK
+			return true;
+		})
+		.sort((a, b) => b.createdAt - a.createdAt || a.seq - b.seq);
+}
+
+// Read back every mirrored clip from PRIOR sessions belonging to `userId` (anything
+// still in the store when the composer mounts is un-transcribed leftover audio). Returns
+// [{ key, sessionId, userId, conversationId, seq, blob, durationS, mimeType, createdAt }].
+export function listOrphanClips(excludeSessionId, userId) {
 	const idb = _idb();
 	if (!idb) return Promise.resolve([]);
 	return _openDb().then((db) => {
@@ -144,8 +171,7 @@ export function listOrphanClips(excludeSessionId) {
 				cur.onsuccess = () => {
 					const c = cur.result;
 					if (c) {
-						const v = c.value;
-						if (!excludeSessionId || v.sessionId !== excludeSessionId) out.push(v);
+						out.push(c.value);
 						c.continue();
 					}
 				};
@@ -155,9 +181,7 @@ export function listOrphanClips(excludeSessionId) {
 					} catch (e) {
 						/* noop */
 					}
-					// Newest sessions first, then in spoken order within a session.
-					out.sort((a, b) => b.createdAt - a.createdAt || a.seq - b.seq);
-					resolve(out);
+					resolve(filterOrphans(out, { userId, excludeSessionId }));
 				};
 				tx.onerror = () => resolve([]);
 				tx.onabort = () => resolve([]);
