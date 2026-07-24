@@ -116,6 +116,9 @@ function makeChat() {
 		const voiceAck =
 			resendAck || (fromMain ? chat.queue.captureSentInPayload(sentScope, text) : null);
 		if (fromMain) chat.input = "";
+		// VR4-1: a fromMain send clears the composer, so any committed clip in scope NOT in the
+		// payload token (edited out) becomes an ACTIONABLE retained clip instead of a silent count.
+		if (fromMain) chat.queue.markUnsentOrphans(sentScope, voiceAck);
 		const tmp = {
 			name: `tmp-${chat.messages.length}`,
 			content: text,
@@ -418,4 +421,66 @@ test("R3-3 integration: a failed-bubble resend rejected (ok:false / usage_limit 
 			"guard clears — no forever-armed `done` record (R3-3)"
 		);
 	}
+});
+
+// ── (VR4-1) INTEGRATION: a clip edited out of a MAIN send becomes an ACTIONABLE retained clip;
+//        Download exposes the audio and Discard clears the guard (no forever-armed done record). ─
+test("VR4-1 integration: an edited-out clip surfaces as a retained (actionable) clip after a send; Discard clears the guard", async () => {
+	const chat = makeChat();
+	chat.queue.enqueue({ blob: "a", durationS: 15, conversationId: SENTINEL });
+	chat.queue.enqueue({ blob: "b", durationS: 15, conversationId: SENTINEL });
+	await flush();
+	chat.tx.resolve(0, "alpha words");
+	chat.tx.resolve(1, "bravo words");
+	await flush();
+	assert.deepEqual(
+		chat.queue.snapshot().retained,
+		[],
+		"nothing retained while both are in the draft"
+	);
+
+	// The user DELETES clip B's words, then sends → B can no longer be released by a payload match.
+	chat.input = "alpha words";
+	chat.send(undefined, undefined, { ok: true, conversation_id: "conv-1" });
+
+	const snap = chat.queue.snapshot();
+	assert.equal(
+		snap.retained.length,
+		1,
+		"the edited-out clip B is surfaced as an ACTIONABLE retained clip"
+	);
+	assert.equal(snap.retained[0].seq, 1, "it is clip B");
+	assert.equal(
+		snap.retained[0].text,
+		"bravo words",
+		"the retained entry carries B's transcript for Restore"
+	);
+	assert.ok(chat.mirror.store.has(1), "B's audio is still retained (never lost)");
+	assert.ok(chat.queue.getClip(1), "Download exposes the audio (getClip returns B's blob)");
+	assert.equal(
+		chat.queue.hasUnfinished(),
+		true,
+		"the guard is armed — but now with a visible resolution"
+	);
+	// clip A (sent) was released, and B rode the sentinel→real-id promotion still flagged retained.
+	assert.ok(!chat.mirror.store.has(0), "clip A (in the payload) was released");
+	assert.equal(
+		chat.currentId,
+		"conv-1",
+		"the new chat adopted its real id (B migrated with it)"
+	);
+
+	// Discard the retained clip: guard clears, audio dropped — the VR4-1 forever-armed gap is closed.
+	chat.queue.discard(1);
+	assert.deepEqual(
+		chat.queue.snapshot().retained,
+		[],
+		"Discard removes it from the retained list"
+	);
+	assert.equal(
+		chat.queue.hasUnfinished(),
+		false,
+		"Discard clears the guard — no forever-armed clip"
+	);
+	assert.ok(!chat.mirror.store.has(1), "and drops the audio mirror");
 });

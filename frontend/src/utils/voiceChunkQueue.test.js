@@ -1063,3 +1063,70 @@ test("VR4-4: a whole-word occurrence still matches — boundary-awareness never 
 	await flush();
 	assert.ok(!mirror.store.has(0) && !mirror.store.has(1), "both released — no false retention");
 });
+
+// ── (25) VR4-1: a committed clip edited OUT of a sent payload becomes an ACTIONABLE retained clip
+//        (snapshot.retained) rather than a silent `done` count; Discard clears the guard. ────────
+test("VR4-1: markUnsentOrphans surfaces an edited-out committed clip as retained; Restore/Discard resolve it", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 3,
+	});
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	q.enqueue({ blob: "b", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.resolve(0, "alpha words");
+	tx.resolve(1, "bravo words");
+	await flush();
+	assert.deepEqual(
+		q.snapshot().retained,
+		[],
+		"nothing retained yet — both clips just committed"
+	);
+
+	// The user sent only clip A's text (B edited out). Release A, then mark the unsent orphans.
+	const token = q.captureSentInPayload("chatA", "alpha words");
+	assert.deepEqual(token, [0], "only clip A is in the payload");
+	q.acknowledge(token);
+	q.markUnsentOrphans("chatA", token);
+
+	const snap = q.snapshot();
+	assert.equal(
+		snap.retained.length,
+		1,
+		"the edited-out clip B is now an ACTIONABLE retained clip"
+	);
+	assert.equal(snap.retained[0].seq, 1);
+	assert.equal(
+		snap.retained[0].text,
+		"bravo words",
+		"retained entry carries its transcript for Restore"
+	);
+	assert.ok(mirror.store.has(1), "its audio is still retained (never lost)");
+	assert.equal(q.hasUnfinished(), true, "the leave guard is armed — but now with a resolution");
+
+	// Restore clears the orphaned flag (its text is going back into the composer) — chip disappears,
+	// but it stays retained until sent (so a later send can release it).
+	q.unorphan(1);
+	assert.deepEqual(q.snapshot().retained, [], "Restore clears the retained chip");
+	assert.equal(
+		q.hasUnfinished(),
+		true,
+		"still un-sent until the restored text is actually sent"
+	);
+
+	// Discard the guard-armed clip: its audio drops and the guard clears (never forever-armed).
+	q.markUnsentOrphans("chatA", []); // re-orphan (the user edited it out again and didn't restore)
+	assert.equal(q.snapshot().retained.length, 1, "re-orphaned");
+	q.discard(1);
+	assert.deepEqual(q.snapshot().retained, [], "Discard removes it from the retained list");
+	assert.equal(
+		q.hasUnfinished(),
+		false,
+		"Discard clears the guard — the VR4-1 forever-armed gap"
+	);
+	assert.ok(!mirror.store.has(1), "and drops the mirror record");
+});

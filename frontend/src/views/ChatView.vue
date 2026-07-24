@@ -2714,6 +2714,56 @@
 								</button>
 							</span>
 						</div>
+						<!-- retained-clip chips (VR4-1): a committed clip whose transcript was edited
+						     OUT of the message before sending. Its audio is retained (never lost) but
+						     was otherwise actionless — Restore drops the words back into the composer,
+						     Download saves the audio, ✕ discards it (and clears the leave guard). -->
+						<div
+							v-if="ui.stt_enabled && voiceQ.retained && voiceQ.retained.length"
+							style="
+								display: flex;
+								flex-wrap: wrap;
+								align-items: center;
+								gap: 6px;
+								margin: 2px 4px 6px;
+							"
+						>
+							<span
+								v-for="r in voiceQ.retained"
+								:key="'ret-' + r.seq"
+								style="
+									display: inline-flex;
+									align-items: center;
+									gap: 6px;
+									padding: 3px 8px;
+									border-radius: 999px;
+									font-size: 12px;
+									color: var(--text);
+									background: rgba(90, 130, 200, 0.12);
+									border: 1px solid rgba(90, 130, 200, 0.32);
+								"
+							>
+								Clip {{ r.seq + 1 }} was edited out
+								<button
+									class="jv-voicechip-act"
+									title="Put this clip's transcript back into the message"
+									@click="restoreClip(r.seq)"
+								>
+									Restore
+								</button>
+								<button class="jv-voicechip-act" @click="downloadClip(r.seq)">
+									Download
+								</button>
+								<button
+									class="jv-voicechip-quiet"
+									title="Discard this clip"
+									aria-label="Discard this clip"
+									@click="discardRetainedClip(r.seq)"
+								>
+									✕
+								</button>
+							</span>
+						</div>
 						<div
 							style="display: flex; align-items: center; gap: 6px; padding: 2px 4px"
 						>
@@ -6980,6 +7030,13 @@ async function send(textArg, resendAck) {
 		mention.value = { ...mention.value, open: false };
 		nextTick(autoGrow);
 	}
+	// VR4-1: a fromMain send clears the composer, so any committed voice clip in this scope whose
+	// transcript the user EDITED OUT (absent from the payload token above) can no longer be released
+	// by a payload match — left alone it lingers as a silent retained `done` record, arming the leave
+	// guard forever with no chip. Mark those as ACTIONABLE retained clips now (Restore/Download/
+	// Discard chips render from voiceQ.retained); correct for every send outcome, since the edited-out
+	// text is gone from the composer whether the POST then succeeds, is rejected, or throws.
+	if (fromMain && voiceQueue) voiceQueue.markUnsentOrphans(_sentScope, _voiceAck);
 	// No awaited pre-flight for a brand-new chat (latency plan, Phase 1.3):
 	// the backend's send_message creates/focuses the empty conversation
 	// itself and returns conversation_id — two fewer round-trips before the
@@ -7576,6 +7633,7 @@ const _emptyVoiceSnap = {
 	inflight: 0,
 	done: 0,
 	failed: [],
+	retained: [],
 	total: 0,
 	hasUnfinished: false,
 };
@@ -7822,6 +7880,36 @@ async function discardClip(seq) {
 	});
 	if (!ok) return;
 	_removeGapPlaceholder(seq, clip); // clear its in-place placeholder from the composer
+	voiceQueue.discard(seq);
+}
+
+// ---- retained-clip chip actions (VR4-1) ----
+// A committed clip whose transcript the user edited OUT of a sent message. Its audio is retained
+// (never lost) but was actionless — these resolve it so the leave guard is never armed forever.
+// Restore: drop its transcript back into the composer for the scope it was spoken in, so the next
+// send's payload match releases it; clear the orphaned flag so its chip disappears.
+function restoreClip(seq) {
+	if (!voiceQueue) return;
+	const r = (voiceQ.value.retained || []).find((x) => x.seq === seq);
+	if (!r) return;
+	const t = (r.text || "").trim();
+	if (t) _mutateComposerFor(_clipConvId(r.clip), (prev) => _joinAppend(prev, t));
+	voiceQueue.unorphan(seq);
+}
+// Discard a retained clip: it DID transcribe (different copy from the failed-clip discard), so the
+// user is choosing to drop the audio + the words they removed. Confirmed; Download first to keep it.
+// discard() makes it a tombstone and drops the mirror, clearing the leave guard.
+async function discardRetainedClip(seq) {
+	if (!voiceQueue) return;
+	const ok = await confirm({
+		title: "Discard this clip?",
+		message:
+			"Its transcript was edited out of your message. Discard the audio too? Download it first if you want to keep it.",
+		danger: true,
+		confirmLabel: "Discard",
+		cancelLabel: "Keep",
+	});
+	if (!ok) return;
 	voiceQueue.discard(seq);
 }
 function _downloadBlob(blob, filename) {

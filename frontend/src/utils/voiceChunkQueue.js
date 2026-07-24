@@ -494,25 +494,68 @@ export function createVoiceChunkQueue(deps = {}) {
 		if (changed) _safe(onChange);
 	}
 
+	// VR4-1: mark every committed clip in `scope` that was NOT sent (its seq is absent from
+	// `keepToken` — the payload-matched set) as ORPHANED. Its transcript was edited/deleted out of
+	// the composer before the send, so a later payload match can never release it: without this it
+	// lingers as a silent `done` count that arms the leave guard forever with no chip. An orphaned
+	// clip surfaces in snapshot().retained as an ACTIONABLE retained clip (Restore/Download/Discard).
+	// Only committed, non-discarded, in-scope records that are not in the token are touched.
+	function markUnsentOrphans(scope, keepToken) {
+		if (disposed) return;
+		const target = scope == null ? null : scope;
+		const keep = keepToken && keepToken.length ? new Set(keepToken) : null;
+		let changed = false;
+		for (const rec of records.values()) {
+			if (!rec.committed || rec.state === "discarded") continue;
+			if (keep && keep.has(rec.seq)) continue;
+			const clipScope =
+				rec.clip && rec.clip.conversationId != null ? rec.clip.conversationId : null;
+			if (clipScope !== target) continue;
+			if (!rec.orphaned) {
+				rec.orphaned = true;
+				changed = true;
+			}
+		}
+		if (changed) _safe(onChange);
+	}
+
+	// VR4-1: the user chose Restore on a retained clip — its transcript is going back into the
+	// composer, so it is a normal un-sent draft clip again (the next send's payload match releases
+	// it). Clears the orphaned flag so its chip disappears; the audio is untouched.
+	function unorphan(seq) {
+		if (disposed) return;
+		const rec = records.get(seq);
+		if (!rec || !rec.orphaned) return;
+		rec.orphaned = false;
+		_safe(onChange);
+	}
+
 	function snapshot() {
 		let pending = 0;
 		let running = 0;
 		let done = 0;
 		let total = 0;
 		const failed = [];
+		// [{seq, clip, text}] — committed clips edited OUT of a sent message (VR4-1): actionable
+		// retained clips the composer renders Restore/Download/Discard for, so the audio is
+		// resolvable instead of arming the leave guard forever with no affordance.
+		const retained = [];
 		for (const rec of records.values()) {
 			if (rec.state === "discarded") continue; // a user-removed tombstone — invisible to the UI
 			total += 1;
 			if (rec.state === "pending") pending += 1;
 			else if (rec.state === "inflight") running += 1;
-			else if (rec.state === "done") done += 1;
-			else if (rec.state === "failed") failed.push({ seq: rec.seq, clip: rec.clip });
+			else if (rec.state === "done") {
+				done += 1;
+				if (rec.orphaned) retained.push({ seq: rec.seq, clip: rec.clip, text: rec.text });
+			} else if (rec.state === "failed") failed.push({ seq: rec.seq, clip: rec.clip });
 		}
 		return {
 			pending,
 			inflight: running,
 			done,
 			failed, // [{seq, clip}] — drives the composer chips (Retry/Download)
+			retained, // [{seq, clip, text}] — drives the retained-clip chips (Restore/Download/Discard)
 			total,
 			hasUnfinished: pending + running + failed.length > 0,
 		};
@@ -558,6 +601,8 @@ export function createVoiceChunkQueue(deps = {}) {
 		captureSentInPayload,
 		acknowledge,
 		reassignScope,
+		markUnsentOrphans,
+		unorphan,
 		snapshot,
 		hasUnfinished,
 		getClip,
