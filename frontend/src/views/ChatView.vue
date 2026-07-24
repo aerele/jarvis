@@ -2665,9 +2665,9 @@
 								Discard
 							</button>
 						</div>
-						<!-- failed-clip chips: a chunk exhausted its retry budget.
-						     Retry appends the recovered text at the END of the composer (VUX-2), so
-						     the copy forewarns where it lands. ✕ discards the clip (confirmed). -->
+						<!-- failed-clip chips: a chunk exhausted its retry budget. Retry drops the
+						     recovered words back into the in-place ⟦clip N⟧ placeholder where they
+						     belong (VUX-2), not at the composer end. ✕ discards the clip (confirmed). -->
 						<div
 							v-if="ui.stt_enabled && voiceQ.failed.length"
 							style="
@@ -7806,12 +7806,14 @@ async function discardOrphans() {
 }
 
 // ---- never-lost navigation guard ----
+// Fire ONLY for genuinely-volatile work (VUX-11 strict ruling): a live recording, or a
+// clip still pending/in-flight/failed in the in-memory queue. A recovery banner is
+// deliberately NOT counted — those clips are durably persisted in the IndexedDB mirror,
+// scoped to this user + conversation, and the banner re-offers them on return, so
+// navigation loses nothing (the leave-confirm's "may lose audio" copy would be false
+// for them). Discard/Later resolve the banner explicitly instead.
 function _voiceHasUnfinished() {
-	return (
-		!!(voiceQueue && voiceQueue.hasUnfinished()) ||
-		micState.value === "recording" ||
-		recoveryClips.value.length > 0
-	);
+	return !!(voiceQueue && voiceQueue.hasUnfinished()) || micState.value === "recording";
 }
 function _beforeUnloadVoice(e) {
 	if (_voiceHasUnfinished()) {
