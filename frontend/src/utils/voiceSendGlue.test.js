@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createVoiceChunkQueue } from "./voiceChunkQueue.js";
-import { promoteNewChatScope, planRejectedSend } from "./voiceSendGlue.js";
+import { promoteNewChatScope, planRejectedSend, createPendingSends } from "./voiceSendGlue.js";
 
 const SENTINEL = "__jarvis_new_chat__";
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -83,7 +83,9 @@ function makeChat() {
 		input: "", // the live composer
 		messages: [], // optimistic bubbles
 		queue: null,
+		pending: createPendingSends(), // VR4-2: origin-scoped failed bubbles (survive nav)
 	};
+	let _bubbleSeq = 0; // stable bubble names (a switch clears messages, so length would collide)
 	const scopeOf = () => chat.currentId || SENTINEL;
 	const clipScope = (clip) =>
 		clip && clip.conversationId != null ? clip.conversationId : SENTINEL;
@@ -113,6 +115,10 @@ function makeChat() {
 		chat.currentId = id; // a real id, or null for the id-less new-chat composer
 		chat.input = chat.drafts[scopeOf()] || "";
 		chat.messages = []; // (no server store here — the switch tests don't need persisted rows)
+		// VR4-2: loadConversation re-injects this scope's pending failed bubbles (dedupe by name),
+		// so a rejected send that happened while off-screen reappears with its token on return.
+		const have = new Set(chat.messages.map((m) => m.name));
+		for (const b of chat.pending.peek(scopeOf())) if (!have.has(b.name)) chat.messages.push(b);
 	};
 
 	// The ChatView send() path this round touched, driven by an injected `outcome` (the mock POST).
@@ -132,7 +138,7 @@ function makeChat() {
 		// payload token (edited out) becomes an ACTIONABLE retained clip instead of a silent count.
 		if (fromMain) chat.queue.markUnsentOrphans(sentScope, voiceAck);
 		const tmp = {
-			name: `tmp-${chat.messages.length}`,
+			name: `tmp-${_bubbleSeq++}`,
 			content: text,
 			voiceAck: voiceAck && voiceAck.length ? voiceAck : undefined,
 		};
@@ -141,17 +147,32 @@ function makeChat() {
 		// The POST is now "in flight": let the test navigate away / act before the server replies.
 		if (typeof midFlight === "function") midFlight();
 
+		// VR4-2: keep a failed bubble ORIGIN-scoped so it (and its token) survive a mid-send switch;
+		// show it now only if the origin is still on screen. loadConversation re-injects on return.
+		const _keepFailed = () => {
+			tmp.failed = true;
+			chat.pending.add(sentScope, tmp);
+			if (scopeOf() === sentScope && !chat.messages.some((m) => m.name === tmp.name))
+				chat.messages.push(tmp);
+		};
+
 		if (outcome && outcome.throw) {
-			tmp.failed = true; // the catch path keeps the bubble (unchanged behaviour)
+			_keepFailed(); // the catch path keeps the bubble (now origin-scoped — VR4-2)
 			return tmp;
 		}
 		if (outcome && outcome.ok === false) {
+			const originOnScreen = scopeOf() === sentScope;
 			const plan = planRejectedSend({ fromMain, bubbleVoiceAck: tmp.voiceAck });
 			if (plan.keepBubble) {
-				tmp.failed = true;
+				_keepFailed();
 			} else {
-				chat.messages = chat.messages.filter((m) => m.name !== tmp.name);
-				if (plan.restoreText && !chat.input) chat.input = text;
+				// Drop the bubble; restore its text to the ORIGIN composer (on screen) or draft (off).
+				if (originOnScreen) {
+					chat.messages = chat.messages.filter((m) => m.name !== tmp.name);
+					if (plan.restoreText && !chat.input) chat.input = text;
+				} else if (plan.restoreText && !chat.drafts[sentScope]) {
+					chat.drafts[sentScope] = text;
+				}
 			}
 			return tmp;
 		}
@@ -163,7 +184,7 @@ function makeChat() {
 			// VR4-3: the sentinel→real-id scope/record/mirror/draft/take migration is
 			// VISIBILITY-INDEPENDENT — run it whenever we sent from the sentinel and got a real id,
 			// REGARDLESS of the on-screen chat, else a mid-send switch strands the sentinel clips.
-			if (sentScope === SENTINEL && outcome.conversation_id !== SENTINEL)
+			if (sentScope === SENTINEL && outcome.conversation_id !== SENTINEL) {
 				chat.micConvId = promoteNewChatScope({
 					queue: chat.queue,
 					drafts: chat.drafts,
@@ -171,6 +192,9 @@ function makeChat() {
 					toId: outcome.conversation_id,
 					takeScope: chat.micConvId,
 				});
+				// VR4-2: a failed bubble queued under the sentinel follows the promoted conversation.
+				chat.pending.reassign(SENTINEL, outcome.conversation_id);
+			}
 			// Only currentId is gated on visibility — never yank a user who switched away.
 			if (stillOnSentChat && outcome.conversation_id !== chat.currentId)
 				chat.currentId = outcome.conversation_id;
@@ -178,9 +202,11 @@ function makeChat() {
 		return tmp;
 	};
 
-	// resendFailed(bubble): drop the failed bubble, resend its text carrying the SAME voiceAck.
+	// resendFailed(bubble): drop the failed bubble (from messages AND the pending store — it is being
+	// REPLACED by a fresh send), then resend its text carrying the SAME voiceAck.
 	chat.resendFailed = (bubble, outcome, midFlight) => {
 		chat.messages = chat.messages.filter((m) => m.name !== bubble.name);
+		chat.pending.remove(scopeOf(), bubble.name);
 		return chat.send(bubble.content, bubble.voiceAck || null, outcome, midFlight);
 	};
 	return chat;
@@ -564,4 +590,80 @@ test("VR4-3 integration: a mid-send chat switch still promotes the sentinel — 
 		"the real-scope send releases it — never stranded (VR4-3)"
 	);
 	assert.equal(chat.queue.hasUnfinished(), false, "guard clears end to end");
+});
+
+// ── (VR4-2) INTEGRATION: a resend REJECTED while the user switched conversations keeps the failed
+//        bubble + its voice token on the ORIGIN conversation (for EVERY rejection reason). ─────────
+test("VR4-2 integration: a resend rejected mid-send-switch keeps the bubble + token on the ORIGIN conversation (all reasons)", async () => {
+	for (const reason of [undefined, "usage_limit", "subscription_suspended", "single_flight"]) {
+		const chat = makeChat();
+		chat.currentId = "convR";
+		chat.micConvId = "convR";
+		chat.queue.enqueue({ blob: "a", durationS: 15, conversationId: "convR" });
+		await flush();
+		chat.tx.resolve(0, "spoken words");
+		await flush();
+		chat.input = "spoken words";
+		// The first send THROWS → a failed bubble on convR carrying the payload-bound token.
+		const failed1 = chat.send(undefined, undefined, { throw: true });
+		assert.deepEqual(failed1.voiceAck, [0], "the failed bubble carries the token");
+		assert.ok(chat.mirror.store.has(0), "audio retained after the failed send");
+
+		// The user hits Resend but SWITCHES to another conversation while the POST is in flight; the
+		// resend is then REJECTED with this reason.
+		chat.resendFailed(failed1, { ok: false, reason }, () => chat.navigateTo("other"));
+		assert.equal(chat.currentId, "other", "the user is on the OTHER conversation now");
+		assert.ok(
+			!chat.messages.some((m) => m.failed),
+			"the failed bubble is NOT shown on the unrelated conversation"
+		);
+		assert.ok(
+			chat.pending.has("convR"),
+			`the rejected resend survives ORIGIN-scoped, not in the rendered messages (reason=${reason})`
+		);
+		assert.ok(
+			chat.mirror.store.has(0),
+			"audio STILL retained across the mid-send switch + rejection — never lost (VR4-2)"
+		);
+		assert.equal(
+			chat.queue.hasUnfinished(),
+			true,
+			"guard armed — the words are not durably sent"
+		);
+
+		// Return to convR: loadConversation re-injects the failed bubble WITH its token.
+		chat.navigateTo("convR");
+		const shown = chat.messages.find((m) => m.failed);
+		assert.ok(shown, `returning to the origin shows the resend affordance (reason=${reason})`);
+		assert.deepEqual(shown.voiceAck, [0], "the re-injected bubble carries the SAME token");
+
+		// Resend once more (now on screen) succeeds → the clip is finally released, guard clears.
+		chat.resendFailed(shown, { ok: true });
+		assert.ok(!chat.mirror.store.has(0), "a successful resend releases the delivered clip");
+		assert.equal(chat.queue.hasUnfinished(), false, "guard clears — never stranded (VR4-2)");
+		assert.ok(
+			!chat.pending.has("convR"),
+			"the resolved bubble is dropped from the pending store"
+		);
+	}
+});
+
+// ── (VR4-2) a MAIN-composer send rejected off-origin restores its text to the ORIGIN draft, never
+//        into the conversation the user switched to (no cross-conversation text bleed). ────────────
+test("VR4-2: a main send rejected after a mid-send switch restores text to the ORIGIN draft, not the visible chat", async () => {
+	const chat = makeChat();
+	chat.currentId = "convR";
+	chat.micConvId = "convR";
+	chat.input = "typed in convR";
+	// A plain (no-voice) main send; the user switches to 'other' mid-POST; the server rejects it.
+	chat.send(undefined, undefined, { ok: false, reason: "single_flight" }, () =>
+		chat.navigateTo("other")
+	);
+	assert.equal(chat.currentId, "other", "the user switched conversations");
+	assert.equal(chat.input, "", "the VISIBLE (other) composer is not polluted with convR's text");
+	assert.equal(
+		chat.drafts["convR"],
+		"typed in convR",
+		"the origin's text is restored to ITS draft — no cross-conversation bleed (VR4-2)"
+	);
 });

@@ -3725,7 +3725,7 @@ import * as voice from "@/api/voice";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { useChunkedRecorder } from "@/composables/useChunkedRecorder";
 import { createVoiceChunkQueue } from "@/utils/voiceChunkQueue";
-import { promoteNewChatScope, planRejectedSend } from "@/utils/voiceSendGlue";
+import { promoteNewChatScope, planRejectedSend, createPendingSends } from "@/utils/voiceSendGlue";
 import { createClipMirror, listOrphanClips, deleteOrphanClip } from "@/utils/clipMirror";
 import { setMacroPrefill } from "@/composables/macroPrefill";
 import { takeChatPrefill } from "@/composables/chatPrefill";
@@ -6541,6 +6541,16 @@ async function loadConversation(id) {
 	// chat, switch away and back, it shows empty until I refresh".)
 	if (currentId.value !== id) return;
 	messages.value = d?.messages || [];
+	// VR4-2: re-inject any failed optimistic bubbles whose send was rejected while THIS conversation
+	// was off-screen (their rendered copy was dropped when messages was replaced). They are kept
+	// origin-scoped and carry the voice-release token, so the resend affordance survives a mid-send
+	// switch. Dedupe by name (a rejection that lands while we're on-screen already holds one).
+	const _pf = _pendingSends.peek(id);
+	if (_pf.length) {
+		const have = new Set(messages.value.map((m) => m.name));
+		const add = _pf.filter((b) => !have.has(b.name));
+		if (add.length) messages.value = [...messages.value, ...add];
+	}
 	// get_conversation returns {conversation: {...}, messages: [...]}. Reading
 	// d.model_override (one level too high) silently yielded undefined, so a
 	// saved pin always rendered as "Auto" after a reload.
@@ -6857,6 +6867,9 @@ function _promoteNewChatScope(toId) {
 		toId,
 		takeScope: _micConvId,
 	});
+	// VR4-2: a failed bubble that was queued under the sentinel follows the promoted conversation,
+	// so returning to the real id (not the transient sentinel) re-injects it with its token intact.
+	_pendingSends.reassign(_NEW_CHAT_SCOPE, toId);
 }
 async function newChat() {
 	// Create FIRST, mutate the UI only on success. If the backend 500s, we must
@@ -6978,6 +6991,10 @@ function resendFailed(m) {
 	const txt = (m.content || "").replace(/\n*📎[^\n]*$/, "").trim();
 	if (!txt) return;
 	messages.value = messages.value.filter((x) => x.name !== m.name);
+	// VR4-2: this failed bubble is being REPLACED by a fresh send — drop its origin-scoped pending
+	// record so it isn't re-injected as a stale duplicate on return. A new failure records a new one.
+	// The bubble is on screen, so its origin is the current scope.
+	_pendingSends.remove(_currentScope(), m.name);
 	// Carry the ORIGINAL send's voice-release token: the first send failed (so its committed
 	// clips were never released), and this resend delivers the SAME text — on success it must
 	// release exactly those records (R2-1 inverse: a failed-bubble resend has fromMain=false and
@@ -7063,20 +7080,21 @@ async function send(textArg, resendAck) {
 	// creation_browser: local send time so the hover timestamp shows before
 	// the server copy (with its site-tz creation) reconciles this tmp row
 	const tmpName = `tmp-${Date.now()}`;
-	messages.value = [
-		...messages.value,
-		{
-			name: tmpName,
-			role: "user",
-			content: optimistic,
-			creation_browser: Date.now(),
-			canvas: optCanvas.length ? optCanvas : undefined,
-			// Ride the payload's voice-release token on the bubble so, if this POST fails, a
-			// resend of this very bubble releases the SAME committed clips this send would have
-			// (R2-1). Omitted when there are no voice clips to release.
-			voiceAck: _voiceAck && _voiceAck.length ? _voiceAck : undefined,
-		},
-	];
+	// Hold a stable REFERENCE to the optimistic bubble (VR4-2): a mid-send conversation switch
+	// replaces messages.value, so on rejection we mutate/re-inject THIS object rather than a
+	// messages.value.find() that returns nothing once the array was swapped by loadConversation().
+	const _optBubble = {
+		name: tmpName,
+		role: "user",
+		content: optimistic,
+		creation_browser: Date.now(),
+		canvas: optCanvas.length ? optCanvas : undefined,
+		// Ride the payload's voice-release token on the bubble so, if this POST fails, a
+		// resend of this very bubble releases the SAME committed clips this send would have
+		// (R2-1). Omitted when there are no voice clips to release.
+		voiceAck: _voiceAck && _voiceAck.length ? _voiceAck : undefined,
+	};
+	messages.value = [...messages.value, _optBubble];
 	await nextTick();
 	scrollBottom();
 	try {
@@ -7096,20 +7114,33 @@ async function send(textArg, resendAck) {
 			// Nothing was persisted — recover it (below) so no work and no voice audio
 			// strands, then surface the reason — otherwise the spinner would hang forever
 			// (no run:start / run:error is coming).
-			const _bub = messages.value.find((x) => x.name === tmpName);
+			// Decide from the STABLE bubble reference (its token), not a messages.value lookup that a
+			// mid-send switch already invalidated (VR4-2). `_sentScope` is the ORIGIN conversation.
+			const _originOnScreen = _currentScope() === _sentScope;
 			const _plan = planRejectedSend({
 				fromMain,
-				bubbleVoiceAck: _bub && _bub.voiceAck,
+				bubbleVoiceAck: _optBubble.voiceAck,
 			});
-			if (_plan.keepBubble && _bub) {
+			if (_plan.keepBubble) {
 				// A failed-bubble RESEND of committed voice clips: KEEP its bubble as failed carrying
 				// the SAME voiceAck so the user can resend again and eventually release those clips —
 				// dropping it would strand their `done` records behind an armed leave guard with no
-				// chip and no action (R3-3).
-				_bub.failed = true;
+				// chip and no action (R3-3). Store it ORIGIN-scoped so it survives a mid-send switch,
+				// and show it now if the origin is still on screen (VR4-2).
+				_optBubble.failed = true;
+				_pendingSends.add(_sentScope, _optBubble);
+				if (_originOnScreen && !messages.value.some((x) => x.name === tmpName))
+					messages.value = [...messages.value, _optBubble];
 			} else {
-				messages.value = messages.value.filter((x) => x.name !== tmpName);
-				if (_plan.restoreText && !input.value) input.value = text;
+				// Drop the bubble (a main-composer send / a programmatic send). Restore its text to
+				// the ORIGIN composer when it is on screen, else that scope's draft — never bleed it
+				// into whatever chat the user switched to, nor lose it on a mid-send switch (VR4-2).
+				if (_originOnScreen) {
+					messages.value = messages.value.filter((x) => x.name !== tmpName);
+					if (_plan.restoreText && !input.value) input.value = text;
+				} else if (_plan.restoreText && !drafts.value[_sentScope]) {
+					drafts.value[_sentScope] = text;
+				}
 			}
 			sending.value = false;
 			waiting.value = false;
@@ -7180,12 +7211,15 @@ async function send(textArg, resendAck) {
 			}
 		}
 	} catch (e) {
-		// send_message threw (e.g. a 500). Stop the spinner and mark the bubble
-		// as not-sent with an inline Retry, instead of leaving it looking
-		// delivered. We keep the bubble (a post-ack timeout may have actually
-		// delivered it; a mid-send conversation switch shouldn't strand a draft).
-		const b = messages.value.find((x) => x.name === tmpName);
-		if (b) b.failed = true;
+		// send_message threw (e.g. a 500). Stop the spinner and mark the bubble as not-sent with an
+		// inline Retry, instead of leaving it looking delivered. Keep it (a post-ack timeout may have
+		// actually delivered it; a mid-send conversation switch shouldn't strand a draft). Store it
+		// ORIGIN-scoped (VR4-2) so it — and its voice token — survive a switch made during the POST,
+		// and show it now if the origin is still on screen.
+		_optBubble.failed = true;
+		_pendingSends.add(_sentScope, _optBubble);
+		if (_currentScope() === _sentScope && !messages.value.some((x) => x.name === tmpName))
+			messages.value = [...messages.value, _optBubble];
 		sending.value = false;
 		waiting.value = false;
 		notifyActionError("Couldn't send your message", e);
@@ -7656,6 +7690,10 @@ const _NEW_CHAT_SCOPE = "__jarvis_new_chat__";
 // The scope of the composer currently on screen: a real conversation id, or the new-chat
 // draft scope when nothing is saved yet.
 const _currentScope = () => currentId.value || _NEW_CHAT_SCOPE;
+// VR4-2: failed optimistic bubbles whose send was rejected, kept ORIGIN-scoped and DECOUPLED from
+// the rendered `messages` array so they (and the voice-release token they carry) survive a mid-send
+// conversation switch — loadConversation() re-injects a scope's entries when the user returns.
+const _pendingSends = createPendingSends();
 let _micConvId = null; // scope the take was started in — its transcript belongs to that scope
 let voiceQueue = null; // createVoiceChunkQueue — one per recording session
 let voiceMirror = null; // createClipMirror — IndexedDB, one per session
