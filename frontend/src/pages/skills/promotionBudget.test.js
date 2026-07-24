@@ -14,7 +14,11 @@
 // skill is dropped when the server says an existing one is.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatPushProjection } from "./promotionBudget.js";
+import {
+	formatPushProjection,
+	projectionSignature,
+	projectionChanged,
+} from "./promotionBudget.js";
 
 const BUDGET = 25;
 
@@ -119,4 +123,76 @@ test("over budget with multiple existing skills dropped → all are named", () =
 	});
 	assert.equal(w.level, "over");
 	assert.match(w.message, /custom-ccc, custom-ddd/);
+});
+
+// R2-SP-4 (client half): the formatter renders the server's dropped list in the
+// SERVER's order — it must never re-sort. The server ranks the pushable set by one
+// deterministic comparator (`_pushable_sort_key`) shared with the payload; the
+// client only displays it, so a non-alphabetical server order is preserved verbatim.
+test("dropped_slugs render in the SERVER order, never client-re-sorted", () => {
+	const w = formatPushProjection({
+		budget: 2,
+		projected_count: 4,
+		promoted_slug: "custom-aaa",
+		over_budget: true,
+		strict_would_fail: true,
+		// intentionally NOT alphabetical: this is exactly what the server computed.
+		dropped_slugs: ["custom-zero", "custom-alpha"],
+		promoted_dropped: false,
+	});
+	assert.equal(w.level, "over");
+	assert.match(w.message, /custom-zero, custom-alpha/);
+	assert.doesNotMatch(w.message, /custom-alpha, custom-zero/);
+});
+
+// R2-SP-5 (client half): the reconfirm signature ignores incidental fields and
+// trips only on decision-relevant change, so the reviewer is re-prompted exactly
+// when the push impact actually moved.
+test("projectionSignature: null/undefined → null", () => {
+	assert.equal(projectionSignature(null), null);
+	assert.equal(projectionSignature(undefined), null);
+});
+
+test("projectionChanged: identical decision-relevant fields → NOT changed", () => {
+	const a = {
+		over_budget: false,
+		at_budget: true,
+		projected_count: 25,
+		dropped_slugs: [],
+		promoted_dropped: false,
+		promoted_slug: "custom-x", // incidental
+	};
+	const b = { ...a, promoted_slug: "custom-DIFFERENT", to_scope: "Org" }; // incidental-only diff
+	assert.equal(projectionChanged(a, b), false);
+});
+
+test("projectionChanged: catalog moved from room to over-budget → changed", () => {
+	const ack = { over_budget: false, at_budget: false, projected_count: 10, dropped_slugs: [] };
+	const fresh = {
+		over_budget: true,
+		at_budget: false,
+		projected_count: 26,
+		dropped_slugs: ["custom-tail"],
+		promoted_dropped: false,
+	};
+	assert.equal(projectionChanged(ack, fresh), true);
+});
+
+test("projectionChanged: a DIFFERENT skill now dropped → changed", () => {
+	const ack = {
+		over_budget: true,
+		at_budget: false,
+		projected_count: 26,
+		dropped_slugs: ["custom-ccc"],
+		promoted_dropped: false,
+	};
+	const fresh = { ...ack, dropped_slugs: ["custom-ddd"] };
+	assert.equal(projectionChanged(ack, fresh), true);
+});
+
+test("projectionChanged: a null ack vs a real projection → changed (forces reconfirm)", () => {
+	assert.equal(
+		projectionChanged(null, { over_budget: true, dropped_slugs: ["custom-x"] }),
+		true
+	);
 });
