@@ -6757,10 +6757,14 @@ function resetRunState() {
 	histDraft.value = "";
 }
 // Stash the leaving chat's draft and restore the target chat's own, so unsent
-// text follows its conversation instead of bleeding into the next one.
+// text follows its conversation instead of bleeding into the next one. Both the
+// leaving and target scope are canonicalised through _currentScope()/the sentinel,
+// so a recovered or typed NEW-chat draft is stashed under (and restored from) the
+// stable _NEW_CHAT_SCOPE sentinel instead of being stranded under an unreachable
+// null key that swapDraft(null) could never restore (R2-2).
 function swapDraft(toId) {
-	if (currentId.value) drafts.value[currentId.value] = input.value;
-	input.value = (toId && drafts.value[toId]) || "";
+	drafts.value[_currentScope()] = input.value;
+	input.value = drafts.value[toId == null ? _NEW_CHAT_SCOPE : toId] || "";
 }
 async function selectConversation(id) {
 	if (id === currentId.value) return;
@@ -6802,6 +6806,15 @@ async function newChat() {
 	swapDraft(null);
 	resetRunState();
 	currentId.value = conv?.name || conv;
+	// This conversation IS the unsaved new-chat composer getting its id. The recovered/typed
+	// new-chat draft (already restored into `input` by swapDraft above) and its still-retained
+	// voice records lived under the _NEW_CHAT_SCOPE sentinel — migrate the records to the real
+	// id (and drop the now-stale sentinel draft) so the text follows the conversation and a
+	// later send can release the records by the real scope instead of stranding them (R2-2).
+	if (currentId.value) {
+		delete drafts.value[_NEW_CHAT_SCOPE];
+		voiceQueue?.reassignScope(_NEW_CHAT_SCOPE, currentId.value);
+	}
 	messages.value = [];
 	// Reflect the new chat's own id in the URL (/c/:id) so it's refresh-persistent
 	// and shareable, instead of dropping to the id-less home. currentId already
@@ -6901,13 +6914,17 @@ function resendFailed(m) {
 	const txt = (m.content || "").replace(/\n*📎[^\n]*$/, "").trim();
 	if (!txt) return;
 	messages.value = messages.value.filter((x) => x.name !== m.name);
-	send(txt);
+	// Carry the ORIGINAL send's voice-release token: the first send failed (so its committed
+	// clips were never released), and this resend delivers the SAME text — on success it must
+	// release exactly those records (R2-1 inverse: a failed-bubble resend has fromMain=false and
+	// otherwise never releases delivered voice audio → a mirror leak + a guard that never clears).
+	send(txt, m.voiceAck || null);
 }
 
 // One-shot viewing context from a "Discuss in chat" hand-off (chatPrefill's
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
-async function send(textArg) {
+async function send(textArg, resendAck) {
 	// Don't race an in-flight dictation: sending now would drop the spoken words
 	// (a background clip's transcript would land AFTER the message left the composer,
 	// as an orphaned fragment). Block on the real busy signal — recording OR any clip
@@ -6919,9 +6936,17 @@ async function send(textArg) {
 	}
 	// Capture the composer scope NOW, before a brand-new chat adopts its server id below: on
 	// a successful main-composer send its committed voice clips become durable, so their
-	// retained audio mirror + leave guard can be released (markSent, finding 6).
+	// retained audio mirror + leave guard can be released (finding 6).
 	const _sentScope = _currentScope();
 	const fromMain = typeof textArg !== "string";
+	// Payload-bound voice release (R2-1): bind the release to the EXACT committed voice clips
+	// THIS payload carries — captured NOW, before the POST is even attempted. A resend reuses the
+	// ORIGINAL send's token (it rides on the failed bubble); a fresh main-composer send captures
+	// the clips currently in the draft. A same-scope clip that commits AFTER this capture is NOT
+	// in the token, so this send can never release its still-un-sent audio. A programmatic send
+	// that leaves the composer intact (no resend token, not fromMain) releases nothing.
+	const _voiceAck =
+		resendAck || (fromMain && voiceQueue ? voiceQueue.captureSent(_sentScope) : null);
 	// Strip any pending-gap placeholder tokens (⟦clip N⟧) so a failed clip's marker never
 	// rides out in a sent message; its chip stays, so the audio is still recoverable.
 	const text = _stripGapTokens(fromMain ? input.value : textArg);
@@ -6972,6 +6997,10 @@ async function send(textArg) {
 			content: optimistic,
 			creation_browser: Date.now(),
 			canvas: optCanvas.length ? optCanvas : undefined,
+			// Ride the payload's voice-release token on the bubble so, if this POST fails, a
+			// resend of this very bubble releases the SAME committed clips this send would have
+			// (R2-1). Omitted when there are no voice clips to release.
+			voiceAck: _voiceAck && _voiceAck.length ? _voiceAck : undefined,
 		},
 	];
 	await nextTick();
@@ -7013,10 +7042,12 @@ async function send(textArg) {
 		}
 		// Send accepted — the one-shot grounding is now consumed.
 		if (groundWiki) groundNextTurn.value = false;
-		// The main composer's voice-derived text is now durably in the conversation —
-		// release its committed clips (audio mirror + leave guard) for this scope. A
-		// programmatic send(textArg) leaves input.value intact, so it must NOT clear them.
-		if (fromMain) voiceQueue?.markSent(_sentScope);
+		// The payload's voice-derived text is now durably in the conversation — release EXACTLY
+		// the committed clips this send captured (audio mirror + leave guard). Payload-bound, so
+		// a same-scope clip that committed while this POST was in flight is NOT released (R2-1),
+		// and a failed-bubble resend (carrying the original token) releases its delivered records
+		// here too. A programmatic send with no token leaves input.value intact and releases none.
+		if (_voiceAck) voiceQueue?.acknowledge(_voiceAck);
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
@@ -7673,7 +7704,7 @@ function _ensureVoiceSession() {
 		concurrency: 2,
 		maxAttempts: 2, // the 25 s per-chunk abort lives in transcribeAudio; queue retries once
 		// A committed transcript lives only in a volatile composer draft until the message is
-		// SENT — retain the audio mirror (and the leave guard) until markSent()/discard so a
+		// SENT — retain the audio mirror (and the leave guard) until acknowledge()/discard so a
 		// reload can still recover it (finding 6).
 		retainUntilSent: true,
 		// replace=true is a RESURRECTED failed clip: swap its placeholder in place (VUX-2);
@@ -7804,7 +7835,11 @@ function recoverOrphans() {
 			blob: o.blob,
 			durationS: o.durationS,
 			mimeType: o.mimeType,
-			conversationId: o.conversationId != null ? o.conversationId : null,
+			// Canonicalise a missing scope to the ONE new-chat representation BEFORE queue
+			// admission (never a bare null): the recovered clip routes to, is stored under, and
+			// is released by the SAME _NEW_CHAT_SCOPE sentinel the live new-chat composer uses —
+			// so a sent new-chat recovery actually clears its guard + mirror (R2-2).
+			conversationId: o.conversationId != null ? o.conversationId : _NEW_CHAT_SCOPE,
 			// Preserve session + original seq so recover() restores spoken order WITHIN a
 			// session rather than a global seq sort that interleaves sessions (finding 3).
 			sessionId: o.sessionId,

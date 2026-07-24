@@ -27,7 +27,7 @@
 //   * a NEVER-LOST mirror — every clip is written to the injected `mirror` on
 //     enqueue and deleted only once its text is durably captured: on commit by default,
 //     or (under `retainUntilSent`, which the composer sets because a draft is volatile
-//     until sent) on markSent()/discard. A `failed` clip is RETAINED either way (for the
+//     until sent) on acknowledge()/discard. A `failed` clip is RETAINED either way (for the
 //     Retry/Download chip and reload recovery).
 //
 // Chunk record state machine (per seq):
@@ -112,7 +112,7 @@ export function createVoiceChunkQueue(deps = {}) {
 	const concurrency = Math.max(1, deps.concurrency || 2);
 	const maxAttempts = Math.max(1, deps.maxAttempts || 2);
 	// When set, a committed chunk's audio mirror is NOT dropped on commit — it is retained
-	// until markSent()/discard(). The composer opts in because its draft text is volatile
+	// until acknowledge()/discard(). The composer opts in because its draft text is volatile
 	// (component-local, wiped on reload) until the message is actually SENT, so the audio
 	// must stay recoverable behind an un-sent draft (finding 6). Consumers that commit to a
 	// durable sink leave it off (default): the mirror is cleared the moment the text lands.
@@ -186,7 +186,7 @@ export function createVoiceChunkQueue(deps = {}) {
 
 	// Emit a chunk's transcript (in cursor order, or in-place for a resurrected gap) and
 	// mark it committed. Its audio mirror is dropped NOW only when the consumer commits to a
-	// durable sink; under retainUntilSent the mirror survives until markSent()/discard so a
+	// durable sink; under retainUntilSent the mirror survives until acknowledge()/discard so a
 	// reload can still recover the audio behind an un-sent, volatile draft (finding 6).
 	function _commit(rec, replace) {
 		_safe(onCommit, rec.seq, rec.text, rec.clip, replace);
@@ -211,6 +211,24 @@ export function createVoiceChunkQueue(deps = {}) {
 		inflight -= 1;
 		if (!rec) return; // dropped (shouldn't happen); keep the count honest
 		rec.text = text;
+		// A trimmed-empty successful transcription is UNCERTAIN — genuine silence OR a miss of
+		// real speech. Committing it would retain the audio behind an INVISIBLE done record (no
+		// chip, and an empty composer can't be sent to release it) → a leave guard armed forever
+		// with no way to clear it (R2-3). Treat it like a terminal failure instead: an ACTIONABLE
+		// clip (the Download/Discard/Retry chip), never auto-released (that could silently drop
+		// mis-heard real speech) and never looped (no auto-retry — re-sending silence just returns
+		// empty again). Discard is the user's explicit "it was silence".
+		if (rec.text.trim() === "") {
+			rec.state = "failed";
+			rec.error = "no speech detected";
+			// Mirror is RETAINED (failed clips are never dropped here) — the audio survives for
+			// the chip and reload recovery. Cross the cursor so later chunks keep committing.
+			if (nextToFlush !== null && seq >= nextToFlush) _drain();
+			_safe(onFail, seq);
+			_pump();
+			_safe(onChange);
+			return;
+		}
 		rec.state = "done";
 		if (nextToFlush !== null && seq < nextToFlush) {
 			// A RESURRECTED failed chunk (its slot was already skipped by the cursor, so
@@ -356,23 +374,63 @@ export function createVoiceChunkQueue(deps = {}) {
 		_safe(onChange);
 	}
 
-	// The composer for `scope` was SENT — its voice-derived text is now durably in the
-	// conversation, so drop those committed clips and their retained audio mirror (finding
-	// 6): the leave guard/​recovery must no longer treat them as un-sent. Only committed
-	// clips for THIS scope are cleared; pending/inflight/failed clips (still un-transcribed)
-	// and other scopes' held drafts are untouched.
-	function markSent(scope) {
-		if (disposed) return;
-		let changed = false;
-		for (const rec of Array.from(records.values())) {
+	// Capture the EXACT set of committed clip seqs for `scope` at THIS instant — the voice
+	// records a payload about to be sent is carrying. This is the release TOKEN: a clip that
+	// commits AFTER this capture is not in the returned set, so acknowledge()ing this token can
+	// never release that later, still-un-sent clip (R2-1 release race — the old scope sweep
+	// deleted every committed record for a scope, including one that committed while a send was
+	// in flight). The composer captures the token the instant a send begins and rides it on the
+	// optimistic bubble so a failed-send resend releases the SAME records. Scope match mirrors
+	// the clip's routing key (a missing conversationId == null).
+	function captureSent(scope) {
+		const target = scope == null ? null : scope;
+		const token = [];
+		for (const rec of records.values()) {
 			if (!rec.committed || rec.state === "discarded") continue;
 			const clipScope =
 				rec.clip && rec.clip.conversationId != null ? rec.clip.conversationId : null;
-			if (clipScope === (scope == null ? null : scope)) {
-				_mirrorDelete(rec.seq);
-				records.delete(rec.seq);
-				changed = true;
-			}
+			if (clipScope === target) token.push(rec.seq);
+		}
+		return token;
+	}
+
+	// The payload carrying EXACTLY these captured seqs (from captureSent) was SENT — its
+	// voice-derived text is now durable in the conversation, so drop just those committed clips
+	// and their retained audio mirror (finding 6): the leave guard/recovery must no longer treat
+	// them as un-sent. Only the still-committed, non-discarded records named in the token are
+	// cleared — a same-scope clip that committed AFTER the token was captured, a clip that has
+	// since failed/been retried, and every other scope's held draft are all untouched. This is
+	// the payload-bound release that replaces the racy scope sweep (R2-1).
+	function acknowledge(token) {
+		if (disposed || !token || !token.length) return;
+		let changed = false;
+		for (const seq of token) {
+			const rec = records.get(seq);
+			if (!rec || !rec.committed || rec.state === "discarded") continue;
+			_mirrorDelete(seq);
+			records.delete(seq);
+			changed = true;
+		}
+		if (changed) _safe(onChange);
+	}
+
+	// Migrate every non-discarded clip from one routing scope to another. Used when an unsaved
+	// new-chat composer (the caller's _NEW_CHAT_SCOPE sentinel) is promoted to a real conversation
+	// id: its still-retained voice records — and their mirror — follow the conversation so a later
+	// send can release them by the real scope instead of stranding them under the sentinel, where
+	// no send's captureSent would ever match them (R2-2). Committed records keep their committed
+	// flag; each moved clip is re-put to the mirror so a reload recovers it under the new scope.
+	function reassignScope(fromScope, toScope) {
+		if (disposed) return;
+		const from = fromScope == null ? null : fromScope;
+		let changed = false;
+		for (const rec of records.values()) {
+			if (rec.state === "discarded" || !rec.clip) continue;
+			const clipScope = rec.clip.conversationId != null ? rec.clip.conversationId : null;
+			if (clipScope !== from) continue;
+			rec.clip = { ...rec.clip, conversationId: toScope };
+			_mirrorPut(rec.clip);
+			changed = true;
 		}
 		if (changed) _safe(onChange);
 	}
@@ -437,7 +495,9 @@ export function createVoiceChunkQueue(deps = {}) {
 		retry,
 		recover,
 		discard,
-		markSent,
+		captureSent,
+		acknowledge,
+		reassignScope,
 		snapshot,
 		hasUnfinished,
 		getClip,

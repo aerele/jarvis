@@ -524,11 +524,11 @@ test("integration: the real transcribeAudio response OBJECT commits its .text (n
 		"mirror RETAINED after commit (the draft is un-sent) — the audio is still recoverable"
 	);
 
-	// markSent → the draft is durably sent, so the mirror + leave guard clear.
-	q.markSent("chatA");
+	// captureSent + acknowledge → the draft is durably sent, so the mirror + leave guard clear.
+	q.acknowledge(q.captureSent("chatA"));
 	await flush();
 	assert.ok(!mirror.store.has(0), "mirror cleared once the containing draft is sent");
-	assert.equal(q.hasUnfinished(), false, "nothing un-sent left after markSent");
+	assert.equal(q.hasUnfinished(), false, "nothing un-sent left after acknowledge");
 
 	// (b) a FAILED payload: {ok:false} → the adapter throws → clip RETAINED as failed, no commit.
 	responses.set("bad", { ok: false });
@@ -620,7 +620,7 @@ test("discarding a failed later seq does not wedge the cursor: an earlier inflig
 	assert.equal(q.hasUnfinished(), false, "everything committed or discarded — the guard clears");
 });
 
-// ── (15) retainUntilSent keeps the guard armed + mirror retained until markSent (finding 6) ─
+// ── (15) retainUntilSent keeps the guard armed + mirror retained until acknowledge (finding 6) ─
 test("retainUntilSent: a committed clip keeps the leave guard armed and its audio retained until the draft is SENT", async () => {
 	const tx = makeTranscriber();
 	const mirror = makeMirror();
@@ -642,7 +642,7 @@ test("retainUntilSent: a committed clip keeps the leave guard armed and its audi
 	assert.ok(mirror.store.has(0), "audio mirror retained past commit so a reload can recover it");
 	assert.equal(q.snapshot().done, 1, "the clip shows as done in the snapshot");
 
-	q.markSent("chatX");
+	q.acknowledge(q.captureSent("chatX"));
 	await flush();
 	assert.equal(
 		q.hasUnfinished(),
@@ -652,17 +652,17 @@ test("retainUntilSent: a committed clip keeps the leave guard armed and its audi
 	assert.ok(!mirror.store.has(0), "mirror cleared on send");
 	assert.equal(q.snapshot().total, 0, "the sent clip has left the queue");
 
-	// markSent for a DIFFERENT scope must never touch another scope's committed clips.
+	// acknowledge for a DIFFERENT scope must never touch another scope's committed clips.
 	q.enqueue({ blob: "b1", durationS: 15, conversationId: "chatY" });
 	await flush();
 	tx.resolve(1, "world");
 	await flush();
-	q.markSent("chatZ"); // wrong scope
+	q.acknowledge(q.captureSent("chatZ")); // wrong scope → empty token, releases nothing
 	await flush();
 	assert.equal(
 		q.hasUnfinished(),
 		true,
-		"a clip for chatY is untouched by markSent('chatZ') — held drafts don't clear cross-scope"
+		"a clip for chatY is untouched by acknowledge(captureSent('chatZ')) — held drafts don't clear cross-scope"
 	);
 	assert.ok(mirror.store.has(1), "its audio stays retained");
 });
@@ -700,4 +700,183 @@ test("recover() restores spoken order WITHIN a session even when the clips arriv
 		["first", "second", "third"],
 		"committed in spoken order, not arrival/shuffle/resolution order"
 	);
+});
+
+// ── (17) R2-1: payload-bound release — a clip that commits AFTER a send captured its token is
+//        NEVER deleted by that send (the old scope sweep deleted every committed record). ─────
+test("R2-1: a clip that commits after captureSent is never released by that send's acknowledge", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 4,
+	});
+	// Clip A commits — it is the payload the composer is about to send.
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.resolve(0, "alpha");
+	await flush();
+	// The composer captures this send's payload NOW (A only), before the POST is attempted.
+	const token = q.captureSent("chatA");
+	assert.deepEqual(token, [0], "the token is exactly the clip committed before the send began");
+
+	// While that POST is in flight the user keeps dictating: clip B commits into the SAME scope.
+	q.enqueue({ blob: "b", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.resolve(1, "bravo");
+	await flush();
+	assert.ok(
+		mirror.store.has(0) && mirror.store.has(1),
+		"both committed clips are mirror-retained (retainUntilSent)"
+	);
+
+	// The in-flight send resolves — it must release ONLY its captured clip (A), never B.
+	q.acknowledge(token);
+	await flush();
+	assert.ok(!mirror.store.has(0), "clip A (in the sent payload) is released");
+	assert.ok(
+		mirror.store.has(1),
+		"clip B (committed AFTER capture) is NOT released — audio kept"
+	);
+	assert.equal(q.hasUnfinished(), true, "B's still-un-sent text keeps the leave guard armed");
+	assert.equal(q.snapshot().total, 1, "B is still in the queue behind its volatile draft");
+});
+
+// ── (18) R2-1 inverse: a FAILED send releases nothing; the failed-bubble RESEND (carrying the
+//        same token) releases the delivered records — no mirror leak / stuck guard. ───────────
+test("R2-1 inverse: a failed send holds its clips; the resend carrying the same token releases them", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 2,
+	});
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.resolve(0, "alpha");
+	await flush();
+	// The first send captures its payload; then the POST FAILS — nothing is acknowledged.
+	const token = q.captureSent("chatA");
+	assert.deepEqual(token, [0]);
+	assert.ok(mirror.store.has(0), "audio still retained after the failed send");
+	assert.equal(q.hasUnfinished(), true, "the guard stays armed — nothing was durably sent");
+
+	// The user hits Retry on the failed bubble; the resend carries the ORIGINAL token and succeeds.
+	q.acknowledge(token);
+	await flush();
+	assert.ok(!mirror.store.has(0), "the delivered records ARE released on the resend");
+	assert.equal(q.hasUnfinished(), false, "the guard clears — no leak, no forever-armed state");
+});
+
+// ── (19) R2-2: a recovered new-chat clip lives under the ONE sentinel scope — a send from that
+//        scope releases it; reassignScope migrates it to a real id so a real-scope send releases
+//        it too (guard + mirror clear, nothing re-offered on reload). ─────────────────────────
+test("R2-2: recovered new-chat clip is releasable under the single sentinel scope; reassignScope moves it to a real id", async () => {
+	const SENTINEL = "__jarvis_new_chat__";
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 2,
+	});
+	// Recovery canonicalises a missing scope to the sentinel BEFORE admission (ChatView does this),
+	// so the clip is admitted, routed, and released all under the SAME representation.
+	q.recover([{ blob: "orphan", durationS: 15, conversationId: SENTINEL, seq: 4 }]);
+	await flush();
+	tx.resolve(0, "recovered words");
+	await flush();
+	assert.ok(
+		mirror.store.has(0),
+		"the recovered new-chat clip is retained until its draft is sent"
+	);
+	// A bare-null capture must NOT match a sentinel-scoped clip (proves the single representation).
+	assert.deepEqual(q.captureSent(null), [], "null is a DIFFERENT scope — no cross-release");
+	assert.deepEqual(q.captureSent(SENTINEL), [0], "the sentinel scope owns the recovered clip");
+
+	// Path A — sent straight from the id-less new-chat composer (scope stays the sentinel).
+	q.acknowledge(q.captureSent(SENTINEL));
+	await flush();
+	assert.ok(!mirror.store.has(0), "a sent new-chat recovery clears its mirror");
+	assert.equal(q.hasUnfinished(), false, "and its leave guard — nothing to re-offer on reload");
+
+	// Path B — newChat() promotes the sentinel to a REAL id: reassignScope moves the record so a
+	// real-scope send releases it (otherwise it would be stranded under the sentinel forever).
+	q.recover([{ blob: "orphan2", durationS: 15, conversationId: SENTINEL, seq: 7 }]);
+	await flush();
+	tx.resolve(1, "more words");
+	await flush();
+	q.reassignScope(SENTINEL, "conv-real");
+	assert.deepEqual(
+		q.captureSent(SENTINEL),
+		[],
+		"nothing left under the sentinel after migration"
+	);
+	assert.deepEqual(
+		q.captureSent("conv-real"),
+		[1],
+		"the record now belongs to the real conversation"
+	);
+	assert.ok(mirror.store.has(1), "still retained — migration must never drop audio");
+	q.acknowledge(q.captureSent("conv-real"));
+	await flush();
+	assert.ok(!mirror.store.has(1), "the real-scope send releases the migrated clip");
+	assert.equal(
+		q.hasUnfinished(),
+		false,
+		"guard clears end to end under the single representation"
+	);
+});
+
+// ── (20) R2-3: a trimmed-empty transcription is an ACTIONABLE failed clip, never an invisible
+//        retained done record — Download/Discard clears it, no forever-armed guard, no loop. ──
+test("R2-3: an empty/whitespace transcription surfaces an actionable failed chip, not a forever-armed guard", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const failed = [];
+	const commits = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 1,
+		maxAttempts: 2, // even with a retry budget available, an empty result must NOT loop
+		onCommit: (seq, text) => commits.push([seq, text]),
+		onFail: (seq) => failed.push(seq),
+	});
+	q.enqueue({ blob: "silence", durationS: 15, conversationId: "chatA" });
+	await flush();
+	// The endpoint returns a whitespace-only string (genuine silence OR a miss of real speech).
+	tx.resolve(0, "   ");
+	await flush();
+
+	assert.deepEqual(commits, [], "an empty transcription commits NO text (nothing to append)");
+	assert.deepEqual(failed, [0], "it is surfaced as a failed clip — the actionable chip");
+	const snap = q.snapshot();
+	assert.equal(snap.failed.length, 1, "the snapshot exposes it for Download/Discard/Retry");
+	assert.equal(snap.done, 0, "it is NOT an invisible done record");
+	assert.equal(tx.callCount(0), 1, "no auto-retry loop — silence is not re-uploaded");
+	assert.ok(mirror.store.has(0), "the audio is RETAINED (never silently dropped)");
+	assert.equal(q.hasUnfinished(), true, "the guard is armed — but now with an ACTIONABLE chip");
+	assert.ok(q.getClip(0), "getClip returns the blob so the chip's Download works");
+
+	// It must NEVER be auto-released by a send for its scope (it is failed, not committed).
+	q.acknowledge(q.captureSent("chatA"));
+	await flush();
+	assert.ok(
+		mirror.store.has(0),
+		"a send for the scope does not release an un-transcribed empty clip"
+	);
+	assert.equal(q.hasUnfinished(), true, "still armed until the user acts");
+
+	// The user's explicit "it was silence": Discard clears the guard (no forever-armed loop).
+	q.discard(0);
+	await flush();
+	assert.equal(q.hasUnfinished(), false, "Discard clears the guard — no forever-armed state");
+	assert.ok(!mirror.store.has(0), "and drops the mirror record");
 });
