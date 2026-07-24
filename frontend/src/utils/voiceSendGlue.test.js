@@ -105,11 +105,23 @@ function makeChat() {
 	});
 	chat.micConvId = scopeOf();
 
+	// Switch the on-screen conversation — the loadConversation() path: stash the leaving scope's
+	// live input into its draft, restore the target's, and REPLACE the rendered messages (the array
+	// loadConversation swaps, which is exactly what drops an optimistic bubble kept only there).
+	chat.navigateTo = (id) => {
+		chat.drafts[scopeOf()] = chat.input;
+		chat.currentId = id; // a real id, or null for the id-less new-chat composer
+		chat.input = chat.drafts[scopeOf()] || "";
+		chat.messages = []; // (no server store here — the switch tests don't need persisted rows)
+	};
+
 	// The ChatView send() path this round touched, driven by an injected `outcome` (the mock POST).
 	//   textArg: undefined == a main-composer send (fromMain); a string == a programmatic send / resend.
 	//   resendAck: the failed bubble's voiceAck (a resend); undefined otherwise.
 	//   outcome: { ok:true, conversation_id? } | { ok:false, reason? } | { throw:true }
-	chat.send = (textArg, resendAck, outcome) => {
+	//   midFlight: optional fn run AFTER the optimistic bubble is pushed but BEFORE the outcome is
+	//     processed — models the user navigating / acting while the POST is in flight (VR4-2/3).
+	chat.send = (textArg, resendAck, outcome, midFlight) => {
 		const sentScope = scopeOf();
 		const fromMain = typeof textArg !== "string";
 		const text = fromMain ? chat.input : textArg;
@@ -125,6 +137,9 @@ function makeChat() {
 			voiceAck: voiceAck && voiceAck.length ? voiceAck : undefined,
 		};
 		chat.messages.push(tmp);
+
+		// The POST is now "in flight": let the test navigate away / act before the server replies.
+		if (typeof midFlight === "function") midFlight();
 
 		if (outcome && outcome.throw) {
 			tmp.failed = true; // the catch path keeps the bubble (unchanged behaviour)
@@ -142,9 +157,13 @@ function makeChat() {
 		}
 		// Accepted: release exactly the captured clips, then adopt a returned id (promoting the scope).
 		if (voiceAck) chat.queue.acknowledge(voiceAck);
-		if (outcome && outcome.conversation_id && outcome.conversation_id !== chat.currentId) {
-			chat.currentId = outcome.conversation_id;
-			if (sentScope === SENTINEL)
+		if (outcome && outcome.conversation_id) {
+			// Whether the user is STILL on the chat we sent from — captured now, before any mutation.
+			const stillOnSentChat = scopeOf() === sentScope;
+			// VR4-3: the sentinel→real-id scope/record/mirror/draft/take migration is
+			// VISIBILITY-INDEPENDENT — run it whenever we sent from the sentinel and got a real id,
+			// REGARDLESS of the on-screen chat, else a mid-send switch strands the sentinel clips.
+			if (sentScope === SENTINEL && outcome.conversation_id !== SENTINEL)
 				chat.micConvId = promoteNewChatScope({
 					queue: chat.queue,
 					drafts: chat.drafts,
@@ -152,14 +171,17 @@ function makeChat() {
 					toId: outcome.conversation_id,
 					takeScope: chat.micConvId,
 				});
+			// Only currentId is gated on visibility — never yank a user who switched away.
+			if (stillOnSentChat && outcome.conversation_id !== chat.currentId)
+				chat.currentId = outcome.conversation_id;
 		}
 		return tmp;
 	};
 
 	// resendFailed(bubble): drop the failed bubble, resend its text carrying the SAME voiceAck.
-	chat.resendFailed = (bubble, outcome) => {
+	chat.resendFailed = (bubble, outcome, midFlight) => {
 		chat.messages = chat.messages.filter((m) => m.name !== bubble.name);
-		return chat.send(bubble.content, bubble.voiceAck || null, outcome);
+		return chat.send(bubble.content, bubble.voiceAck || null, outcome, midFlight);
 	};
 	return chat;
 }
@@ -483,4 +505,63 @@ test("VR4-1 integration: an edited-out clip surfaces as a retained (actionable) 
 		"Discard clears the guard — no forever-armed clip"
 	);
 	assert.ok(!chat.mirror.store.has(1), "and drops the audio mirror");
+});
+
+// ── (VR4-3) INTEGRATION: switching chats DURING an id-less send still promotes the sentinel scope,
+//        so a later retry routes to the REAL conversation and is releasable — never stranded. ─────
+test("VR4-3 integration: a mid-send chat switch still promotes the sentinel — a retried clip routes to the real id and releases", async () => {
+	const chat = makeChat();
+	// A clip dictated in the new-chat composer FAILS (both attempts reject) → a retained failed clip.
+	chat.queue.enqueue({ blob: "later", durationS: 15, conversationId: SENTINEL });
+	await flush();
+	chat.tx.reject(0, new Error("stt down 1"));
+	await flush();
+	chat.tx.reject(0, new Error("stt down 2"));
+	await flush();
+	assert.equal(chat.queue.snapshot().failed.length, 1, "the clip is a retained FAILED clip");
+
+	// The user types + sends the id-less new chat, but SWITCHES conversations while the POST is
+	// in flight. The server still created a real conversation and returned its id.
+	chat.input = "typed message";
+	chat.send(undefined, undefined, { ok: true, conversation_id: "conv-real" }, () => {
+		chat.navigateTo("other-conv"); // mid-POST conversation switch
+	});
+	assert.equal(chat.currentId, "other-conv", "we were NOT yanked back to the chat we sent from");
+	assert.deepEqual(
+		chat.queue.captureSent(SENTINEL),
+		[],
+		"the failed clip was migrated OFF the sentinel despite the switch (VR4-3)"
+	);
+	assert.ok(!chat.drafts[SENTINEL], "no stale sentinel draft left behind");
+
+	// The user hits Retry on the failed clip; it now commits under the REAL id. Since conv-real is
+	// off-screen, the late words land in ITS draft — routed to the real conversation, not stranded.
+	chat.queue.retry(0);
+	await flush();
+	chat.tx.resolve(0, "the late words");
+	await flush();
+	assert.equal(
+		chat.drafts["conv-real"],
+		"the late words",
+		"the retry routed to the REAL conversation's draft, not a stranded sentinel (VR4-3)"
+	);
+	assert.deepEqual(
+		chat.queue.captureSent("conv-real"),
+		[0],
+		"the migrated clip is releasable under the real id"
+	);
+
+	// Return to conv-real and send: the real-scope send releases the clip — the guard clears.
+	chat.navigateTo("conv-real");
+	assert.equal(
+		chat.input,
+		"the late words",
+		"returning restores conv-real's draft into the composer"
+	);
+	chat.send(undefined, undefined, { ok: true });
+	assert.ok(
+		!chat.mirror.store.has(0),
+		"the real-scope send releases it — never stranded (VR4-3)"
+	);
+	assert.equal(chat.queue.hasUnfinished(), false, "guard clears end to end");
 });

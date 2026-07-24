@@ -7147,29 +7147,37 @@ async function send(textArg, resendAck) {
 			};
 			waiting.value = false; // not streaming yet — the chip carries the state
 		}
-		if (r?.conversation_id && (currentId.value || "") === sentFrom) {
-			// Still on the chat we sent from — safe to reconcile it. Adopt the
-			// server's id when it differs (a brand-new chat that just got its id, or
-			// a stale/reaped conversation send_message fell back to a fresh one for),
-			// and keep the URL on it so a refresh doesn't restore a dead /c/:id
-			// (route.params.id outranks localStorage on boot).
-			if (r.conversation_id !== currentId.value) {
-				currentId.value = r.conversation_id;
-				// A new-chat (id-less) send just earned its real id: migrate any voice records +
-				// mirror + draft + take still under the sentinel to it BEFORE the user can retry a
-				// failed clip, whose late commit would otherwise strand under the sentinel where no
-				// real-scope send/ack ever reaches it (R3-2). Same helper newChat() uses.
-				if (_sentScope === _NEW_CHAT_SCOPE) _promoteNewChatScope(r.conversation_id);
-				if (route.params.id !== r.conversation_id)
-					router.replace("/c/" + r.conversation_id);
-			}
-			// Empties are hidden from the sidebar; surface the row now it has a message.
-			if (!store.conversations.some((c) => c.name === currentId.value))
+		if (r?.conversation_id) {
+			const _stillOnSentChat = (currentId.value || "") === sentFrom;
+			// VR4-3: promoting the new-chat SENTINEL scope to the server's real id — migrating the
+			// queued voice records + their mirror + the stashed draft + the take scope — is
+			// VISIBILITY-INDEPENDENT: the server created a real conversation whether or not the user is
+			// still looking at it. Run it WHENEVER we sent from the sentinel and got a real id back, so
+			// a mid-send chat switch can't leave those clips stranded under the sentinel (where no
+			// real-scope send/ack ever reaches them → guard armed forever, a later retry misrouted).
+			// Same helper newChat() uses. Only currentId + the URL below stay gated on visibility.
+			if (_sentScope === _NEW_CHAT_SCOPE && r.conversation_id !== _NEW_CHAT_SCOPE)
+				_promoteNewChatScope(r.conversation_id);
+			if (_stillOnSentChat) {
+				// Still on the chat we sent from — safe to reconcile it. Adopt the server's id when it
+				// differs (a brand-new chat that just got its id, or a stale/reaped conversation
+				// send_message fell back to a fresh one for), and keep the URL on it so a refresh
+				// doesn't restore a dead /c/:id (route.params.id outranks localStorage on boot). NEVER
+				// yank a user who switched away — that is the ONLY part gated on visibility.
+				if (r.conversation_id !== currentId.value) {
+					currentId.value = r.conversation_id;
+					if (route.params.id !== r.conversation_id)
+						router.replace("/c/" + r.conversation_id);
+				}
+				// Empties are hidden from the sidebar; surface the row now it has a message.
+				if (!store.conversations.some((c) => c.name === currentId.value))
+					store.loadConversations();
+			} else {
+				// The user switched conversations mid-send: don't yank them back — just refresh the
+				// sidebar so the chat we sent into (now non-empty) surfaces. The scope migration above
+				// already ran, so the sentinel-scoped clips followed the conversation regardless.
 				store.loadConversations();
-		} else if (r?.conversation_id) {
-			// The user switched conversations mid-send: don't yank them back — just
-			// refresh the sidebar so the chat we sent into (now non-empty) surfaces.
-			store.loadConversations();
+			}
 		}
 	} catch (e) {
 		// send_message threw (e.g. a 500). Stop the spinner and mark the bubble
