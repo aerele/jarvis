@@ -377,28 +377,112 @@ function cssEscapesLayer(css) {
 	return false
 }
 
+// Find the index of the `>` that ends a tag beginning at `from`, honoring quoted
+// attribute values so a quoted `>` (e.g. `<style data-x=">">`) never closes the
+// tag early. Returns -1 when the tag is unterminated. This is the DR2-2 fix: the
+// prior `<style[^>]*>` regex stopped at the FIRST `>`, even inside a quote, which
+// let `.jd-card{…}` render UNLAYERED and outrank `@layer theme`.
+function tagCloseIndex(src, from) {
+	let quote = ""
+	for (let j = from; j < src.length; j++) {
+		const c = src[j]
+		if (quote) {
+			if (c === quote) quote = ""
+		} else if (c === '"' || c === "'") {
+			quote = c
+		} else if (c === ">") {
+			return j
+		}
+	}
+	return -1
+}
+
+// Where a <style> element's RAW-TEXT content ends: the first case-insensitive
+// `</style` that is an appropriate end tag (followed by whitespace, `/`, `>` or
+// EOF). Returns -1 (content runs to EOF) when there is none — matching the
+// browser, which applies an UNCLOSED <style> to end-of-document.
+function styleRawTextEnd(lower, src, from) {
+	let k = from
+	for (;;) {
+		const e = lower.indexOf("</style", k)
+		if (e < 0) return -1
+		const nxt = src[e + 7]
+		if (nxt === undefined || /[\s/>]/.test(nxt)) return e
+		k = e + 7
+	}
+}
+
 // Wrap the inner CSS of every author <style> in `@layer author { … }` so a
 // standard theme's later-declared `@layer theme` wins the cascade regardless of
-// the author's source order or selector specificity. Non-greedy to the first
-// </style>, the next <style, or end-of-string: an UNCLOSED <style> still applies
-// its CSS to EOF in the browser (raw-text parsing), so it must be layered too, or
-// it would beat `@layer theme` unlayered (F2). A synthesized `</style>` closes an
-// unclosed block so it can't swallow our shell's trailing tags. An empty style
-// block is left untouched. A block whose CSS has a stray `}` that would break OUT
-// of `@layer author{}` is DROPPED (emitted as an empty <style>) rather than let
-// through unlayered (F#4) — the save-time validator already rejects this, so this
-// only bites live previews + grandfathered docs that skip validation. Author
-// `@import`, inline `style=` colors and `!important` still beat layers by design —
-// the save-time validator bans those.
+// the author's source order or selector specificity. This walks the HTML with a
+// quote- and raw-text-aware scan (NOT a regex — the client wrapper must parse the
+// same surface the iframe browser does, DR2-2): a real <style> start tag ends at
+// its first UNQUOTED `>`, and its content is raw text to the first `</style` (or
+// EOF). An UNCLOSED <style> still applies its CSS to EOF in the browser, so it is
+// layered too and closed with a synthesized `</style>` so it can't swallow our
+// shell's trailing tags (F2). An empty style block is left untouched. A block
+// whose CSS has a stray `}` that would break OUT of `@layer author{}` is DROPPED
+// (emitted as an empty <style>) rather than let through unlayered (F#4) — the
+// save-time validator already rejects this, so this only bites live previews +
+// grandfathered docs that skip validation. Author `@import`, inline `style=`
+// colors and `!important` still beat layers by design — the validator bans those.
 function wrapAuthorStyles(html) {
-	return String(html || "").replace(
-		/(<style\b[^>]*>)([\s\S]*?)(<\/style>|(?=<style\b)|$)/gi,
-		(m, open, css, close) => {
-			if (!css.trim()) return m
-			if (cssEscapesLayer(css)) return `${open}${close || "</style>"}`
-			return `${open}@layer author{${css}}${close || "</style>"}`
-		},
-	)
+	const src = String(html || "")
+	const lower = src.toLowerCase()
+	let out = ""
+	let i = 0
+	while (i < src.length) {
+		const start = lower.indexOf("<style", i)
+		if (start < 0) {
+			out += src.slice(i)
+			break
+		}
+		// `<style` must be followed by a tag-name terminator (whitespace, `/`, `>`
+		// or EOF) to be a real start tag; otherwise it is e.g. `<styles` — copy the
+		// literal through and keep scanning.
+		const after = src[start + 6]
+		if (after !== undefined && !/[\s/>]/.test(after)) {
+			out += src.slice(i, start + 6)
+			i = start + 6
+			continue
+		}
+		const tagEnd = tagCloseIndex(src, start + 6)
+		if (tagEnd < 0) {
+			// unterminated start tag (truncated) — nothing renders as CSS
+			out += src.slice(i)
+			break
+		}
+		out += src.slice(i, tagEnd + 1) // pre-style content + the opening tag
+		const contentStart = tagEnd + 1
+		const rawEnd = styleRawTextEnd(lower, src, contentStart)
+		let css
+		let close
+		let next
+		if (rawEnd < 0) {
+			css = src.slice(contentStart)
+			close = "</style>" // unclosed: synthesize a closer (F2)
+			next = src.length
+		} else {
+			css = src.slice(contentStart, rawEnd)
+			const closeEnd = tagCloseIndex(src, rawEnd + 7)
+			if (closeEnd < 0) {
+				close = src.slice(rawEnd)
+				next = src.length
+			} else {
+				close = src.slice(rawEnd, closeEnd + 1)
+				next = closeEnd + 1
+			}
+		}
+		if (!css.trim()) {
+			out += css + close // empty block: leave untouched
+		} else if (cssEscapesLayer(css)) {
+			out += close // stray-} block dropped, never emitted unlayered (F#4)
+		} else {
+			out += `@layer author{${css}}${close}`
+		}
+		i = next
+	}
+	return out
 }
 
 // Dashboards saved before the gateway host-client strip landed carry a dead

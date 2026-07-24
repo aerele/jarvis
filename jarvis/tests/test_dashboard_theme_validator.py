@@ -302,5 +302,96 @@ class TestThemeValidatorCodexRound1(unittest.TestCase):
 		)
 
 
+class TestThemeValidatorCodexRound2(unittest.TestCase):
+	"""Round-2 canonicalization regressions: token EXISTENCE + var() fallbacks,
+	CSS system colors, and browser URL preprocessing (control chars / special-
+	scheme backslashes) — the surfaces beyond raw tokenization."""
+
+	# ---- DR2-1 var() token-existence + fallback validation ---------------- #
+	def test_nonexistent_jd_token_with_fallback_rejected(self):
+		# `--jd-nonexistent` is NOT a render token; the browser renders the #ff0000
+		# fallback. Caught block-level AND inline.
+		self.assertEqual(codes("<style>.x{color:var(--jd-nonexistent,#ff0000)}</style>"), [RULE_OFF_PALETTE])
+		self.assertEqual(
+			codes('<div style="color:var(--jd-nonexistent,#ff0000)">x</div>'), [RULE_INLINE_COLOR]
+		)
+
+	def test_existing_jd_token_no_fallback_passes(self):
+		self.assertEqual(codes("<style>.x{color:var(--jd-ink)}</style>"), [])
+
+	def test_existing_jd_token_bad_fallback_rejected(self):
+		# the token exists, but a bad fallback (`red`) would still render.
+		self.assertEqual(codes("<style>.x{color:var(--jd-ink, red)}</style>"), [RULE_OFF_PALETTE])
+		# a system-color fallback is caught too.
+		self.assertEqual(codes("<style>.x{color:var(--jd-ink, Highlight)}</style>"), [RULE_OFF_PALETTE])
+
+	def test_existing_jd_token_good_fallback_passes(self):
+		# an approved-hex, benign-keyword, or nested-token fallback is fine.
+		self.assertEqual(codes("<style>.x{color:var(--jd-ink, #383838)}</style>"), [])
+		self.assertEqual(codes("<style>.x{color:var(--jd-line, currentColor)}</style>"), [])
+		self.assertEqual(codes("<style>.x{color:var(--jd-accent, var(--jd-ink))}</style>"), [])
+
+	def test_font_var_token_existence_and_fallback(self):
+		# non-existent font token → rejected.
+		self.assertEqual(codes("<style>body{font-family:var(--jd-nonexistent)}</style>"), [RULE_FONT_FAMILY])
+		# a non-font --jd token in a font-family is not a font token → rejected.
+		self.assertEqual(codes("<style>body{font-family:var(--jd-ink)}</style>"), [RULE_FONT_FAMILY])
+		# existing font token, bad fallback face → rejected.
+		self.assertEqual(
+			codes('<style>body{font-family:var(--jd-font, "Comic Sans MS")}</style>'), [RULE_FONT_FAMILY]
+		)
+		# existing font token, generic / nested-token fallback → passes.
+		self.assertEqual(codes("<style>body{font-family:var(--jd-font, sans-serif)}</style>"), [])
+		self.assertEqual(codes("<style>body{font-family:var(--jd-font, var(--jd-font-display))}</style>"), [])
+
+	# ---- DR2-3 CSS system colors ------------------------------------------ #
+	def test_system_colors_rejected(self):
+		for css in (
+			"<style>.k{color:Highlight}</style>",
+			"<style>.k{color:CanvasText}</style>",
+			"<style>.k{background:AccentColor}</style>",
+			"<style>.k{color:ButtonText}</style>",
+			"<style>.k{color:WindowText}</style>",  # deprecated set
+		):
+			self.assertEqual(codes(css), [RULE_OFF_PALETTE], css)
+
+	def test_benign_keywords_still_pass(self):
+		self.assertEqual(codes("<style>.k{color:currentColor;background:transparent}</style>"), [])
+		self.assertEqual(codes("<style>.k{color:inherit}</style>"), [])
+		# a non-color ident in a color-bearing shorthand is not flagged as a color.
+		self.assertEqual(codes("<style>.k{border:1px solid var(--jd-line)}</style>"), [])
+
+	# ---- DR2-4 URL control-char / backslash canonicalization -------------- #
+	def test_control_char_split_url_rejected_under_custom(self):
+		# src attribute (entity-decoded): https:/<TAB>/evil → https://evil
+		self.assertEqual(codes('<img src="https:/&#x09;/evil.example/x.png">', "Custom"), [RULE_EXTERNAL_URL])
+		# url() in an inline style (attribute is entity-decoded)
+		self.assertEqual(
+			codes("<div style=\"background:url('https:/&#x09;/evil.example/x.png')\">x</div>", "Custom"),
+			[RULE_EXTERNAL_URL],
+		)
+		# url() in a <style> block via a CSS escape (\9 = TAB; raw text isn't
+		# entity-decoded, but tinycss2 decodes the CSS escape).
+		self.assertEqual(
+			codes('<style>.x{background:url("https:/\\9 /evil.example/x.png")}</style>', "Custom"),
+			[RULE_EXTERNAL_URL],
+		)
+		# @import via a CSS escape.
+		self.assertEqual(
+			codes('<style>@import "https:/\\9 /evil.example/x.css";</style>', "Custom"), [RULE_EXTERNAL_URL]
+		)
+
+	def test_special_scheme_backslash_rejected_under_custom(self):
+		# browsers fold `\` to `/` for special schemes: https:\\evil → https://evil
+		self.assertEqual(codes('<img src="https:\\\\evil.example/x.png">', "Custom"), [RULE_EXTERNAL_URL])
+
+	def test_canonicalization_keeps_xml_namespace_exempt(self):
+		# the exemption is applied to the canonical value — svg xmlns still passes.
+		self.assertEqual(
+			codes('<svg xmlns="http://www.w3.org/2000/svg"><rect fill="var(--jd-accent)"/></svg>', "Custom"),
+			[],
+		)
+
+
 if __name__ == "__main__":
 	unittest.main()

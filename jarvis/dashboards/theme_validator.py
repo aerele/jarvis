@@ -28,11 +28,15 @@ What it enforces (a standard theme) — the COLOR + FONT + light/dark contract:
     (b) a ``var(--jd-*)`` token, or (c) an approved white/black/transparent
     neutral is off-palette — whether written as hex, ``rgb()``/``hsl()``, a modern
     color function (``oklch/oklab/lab/lch/hwb/color()/color-mix()/device-cmyk()``),
-    or a named CSS color. A ``var()`` in a color value is allowed ONLY when it
-    references a ``--jd-*`` theme token; any other custom-property reference is
-    off-palette (it could resolve to any color).
+    a named CSS color, or a CSS SYSTEM color (``CanvasText``/``Highlight``/…). A
+    ``var()`` in a color value is allowed ONLY when it references a ``--jd-*`` token
+    that EXISTS in the selected theme AND (if it carries a fallback after the first
+    comma) that fallback itself validates — so ``var(--jd-nope,#f00)`` and
+    ``var(--jd-ink, red)`` are both off-palette (the browser would render the bad
+    fallback), while ``var(--jd-ink)`` passes.
   * ``font-family`` (or ``font`` shorthand) naming a non-system face, INCLUDING
-    ``font-family:var(--x)`` where ``--x`` is not a theme font token.
+    ``font-family:var(--x)`` where ``--x`` is not an existing theme font token, or
+    a ``var(--jd-font, …)`` whose fallback names a non-system face.
   * author redefinition of a ``--jd-*`` theme token (only the theme layer owns
     them).
   * ``@media (prefers-color-scheme)`` and the ``color-scheme`` property
@@ -46,8 +50,11 @@ What it enforces (a standard theme) — the COLOR + FONT + light/dark contract:
 Always enforced (a safety subset, even for the bespoke ``Custom`` theme):
   * ``@font-face`` (incl. escaped ``@f\\6f nt-face``).
   * external URLs (http/https + protocol-relative ``//``) in any attribute value
-    (entity-decoded), CSS ``url()`` token, or ``@import``. Only the exact XML
-    namespace URIs (``http://www.w3.org/2000/svg`` / ``…/1999/xlink``) are exempt.
+    (entity-decoded), CSS ``url()`` token, or ``@import`` — after browser URL
+    canonicalization (ASCII TAB/LF/CR stripped, special-scheme backslashes folded)
+    so a control-char-split ``https:/<TAB>/evil`` still resolves + is caught. Only
+    the exact XML namespace URIs (``http://www.w3.org/2000/svg`` / ``…/1999/xlink``)
+    are exempt.
 
 Honest scope + limits: this validator enforces COLOR, font-family, no-``!important``,
 no-``prefers-color-scheme``, well-formed CSS, and the safety bans. It does NOT
@@ -371,6 +378,63 @@ _CSS_NAMED_COLORS = frozenset(
 	}
 )
 
+# CSS SYSTEM colors (current CSS Color 4 + the deprecated CSS2 set). These are
+# NOT in the conventional named-color list yet ARE valid <color> keywords that
+# render an OS/theme-derived color, so they must be rejected in a color context
+# exactly like a named color (DR2-3).
+_CSS_SYSTEM_COLORS = frozenset(
+	{
+		# current (CSS Color Module Level 4)
+		"accentcolor",
+		"accentcolortext",
+		"activetext",
+		"buttonborder",
+		"buttonface",
+		"buttontext",
+		"canvas",
+		"canvastext",
+		"field",
+		"fieldtext",
+		"graytext",
+		"highlight",
+		"highlighttext",
+		"linktext",
+		"mark",
+		"marktext",
+		"selecteditem",
+		"selecteditemtext",
+		"visitedtext",
+		# deprecated (CSS2 system colors)
+		"activeborder",
+		"activecaption",
+		"appworkspace",
+		"background",
+		"buttonhighlight",
+		"buttonshadow",
+		"captiontext",
+		"inactiveborder",
+		"inactivecaption",
+		"inactivecaptiontext",
+		"infobackground",
+		"infotext",
+		"menu",
+		"menutext",
+		"scrollbar",
+		"threeddarkshadow",
+		"threedface",
+		"threedhighlight",
+		"threedlightshadow",
+		"threedshadow",
+		"window",
+		"windowframe",
+		"windowtext",
+	}
+)
+
+# The two render tokens that carry a FONT stack (the only --jd-* a font-family
+# var() may reference); token existence in the theme is checked separately.
+_FONT_TOKEN_NAMES = frozenset({"--jd-font", "--jd-font-display"})
+
 # At-rules whose body is a list of RULES (recurse into them for nested checks).
 _RULE_BODY_AT = frozenset(
 	{
@@ -393,6 +457,13 @@ _RGB_RE = re.compile(r"\brgba?\(\s*([^)]*)\)", re.I)
 _HSL_RE = re.compile(r"\bhsla?\(\s*([^)]*)\)", re.I)
 # An external/protocol-relative URL anywhere in a (decoded) attribute value.
 _URLISH_RE = re.compile(r"""(?:https?:)?//[^\s"'()<>]+""", re.I)
+# Browser URL preprocessing (WHATWG): ASCII TAB / LF / CR are stripped from the
+# whole URL before parsing, so `https:/<TAB>/evil` resolves to `https://evil`.
+_URL_CONTROL_STRIP = {0x09: None, 0x0A: None, 0x0D: None}
+# http(s) is a "special scheme": the URL parser treats `\` as `/`. Normalize
+# only the separator run right after the scheme so `https:\\evil` / `https:/\evil`
+# surface, while an arbitrary `\\` elsewhere is never mistaken for a URL (DR2-4).
+_SCHEME_SLASH_RE = re.compile(r"(https?:)([\\/]+)", re.I)
 
 
 # ── color literal helpers (reused by both CSS and inline passes) ──────────────
@@ -455,10 +526,21 @@ def _color_allowed(literal: str, allowed_hexes: frozenset) -> bool:
 	return False
 
 
+def _canonicalize_url_text(text: str) -> str:
+	"""Apply the browser's URL preprocessing to a decoded string so obfuscated
+	external URLs surface before the external-URL test (DR2-4): strip ASCII
+	TAB/LF/CR (the WHATWG parser removes them anywhere in a URL) and fold a
+	special-scheme backslash run right after ``http(s):`` to ``/``."""
+	s = (text or "").translate(_URL_CONTROL_STRIP)
+	return _SCHEME_SLASH_RE.sub(lambda m: m.group(1) + m.group(2).replace("\\", "/"), s)
+
+
 def _is_external_url(url: str) -> bool:
 	"""A decoded URL string that the browser would FETCH off-origin. data:/blob:/
-	relative/fragment are fine; the exact SVG/xlink namespaces are exempt."""
-	s = (url or "").strip().lower()
+	relative/fragment are fine; the exact SVG/xlink namespaces are exempt. The
+	value is canonicalized (control chars stripped, special-scheme backslashes
+	folded) so the exemption + test run on what the browser would actually load."""
+	s = _canonicalize_url_text(url).strip().lower()
 	if not s or s in _ALLOWED_XML_NS:
 		return False
 	return s.startswith("http://") or s.startswith("https://") or s.startswith("//")
@@ -466,9 +548,11 @@ def _is_external_url(url: str) -> bool:
 
 def _external_urls_in_text(text: str) -> list[str]:
 	"""External/protocol-relative URLs in a decoded attribute value (skips the
-	exact XML namespace URIs)."""
+	exact XML namespace URIs). The text is canonicalized first so a URL split by
+	an entity-decoded control char (``https:/&#x09;/evil`` → ``https://evil``) or
+	a special-scheme backslash still matches."""
 	out = []
-	for m in _URLISH_RE.finditer(text or ""):
+	for m in _URLISH_RE.finditer(_canonicalize_url_text(text)):
 		u = m.group(0)
 		if u.lower() in _ALLOWED_XML_NS:
 			continue
@@ -576,6 +660,17 @@ def _first_custom_prop(tokens) -> str | None:
 	return None
 
 
+def _var_fallback_tokens(arguments) -> list:
+	"""The token list after the FIRST top-level comma in a ``var()``'s arguments —
+	its fallback expression (``[]`` when there is no fallback). The browser renders
+	this when the referenced custom property is unset, so it must be validated too
+	(DR2-1)."""
+	for idx, t in enumerate(arguments or []):
+		if type(t).__name__ == "LiteralToken" and t.value == ",":
+			return list(arguments[idx + 1 :])
+	return []
+
+
 def _url_strings(tokens) -> list[str]:
 	"""Every URL a declaration value would fetch: url() tokens and url("…")
 	function-string args, recursively (e.g. inside a gradient / image-set)."""
@@ -646,9 +741,10 @@ def _external_violation(url: str) -> Violation:
 
 
 # ── declaration + at-rule checks ──────────────────────────────────────────────
-def _scan_color_tokens(tokens, allowed_hexes, out, *, color_rule, location):
-	"""Flag any color VALUE that is not an allowed theme hex / var(--jd-*) /
-	approved neutral. Recurses into non-color functions (gradients, image-set)."""
+def _scan_color_tokens(tokens, allowed_hexes, allowed_tokens, out, *, color_rule, location):
+	"""Flag any color VALUE that is not an allowed theme hex / existing --jd-*
+	token / approved neutral. Recurses into non-color functions (gradients,
+	image-set) and into a var() fallback expression."""
 	for tok in tokens:
 		tn = type(tok).__name__
 		if tn == "HashToken":
@@ -664,22 +760,41 @@ def _scan_color_tokens(tokens, allowed_hexes, out, *, color_rule, location):
 				if not _color_allowed(lit, allowed_hexes):
 					out.append(_color_violation(lit, color_rule, location))
 			elif fname == "var":
+				# The referenced token must EXIST in the selected theme (a mere
+				# `--jd-` prefix on a non-existent name would render its fallback);
+				# and a fallback, if present, is validated recursively (DR2-1).
 				ref = _first_custom_prop(tok.arguments)
-				if not (ref and ref.lower().startswith("--jd-")):
+				if not (ref and ref.lower() in allowed_tokens):
 					out.append(_color_violation(tinycss2.serialize([tok]).strip(), color_rule, location))
+				else:
+					fb = _var_fallback_tokens(tok.arguments)
+					if fb:
+						_scan_color_tokens(
+							fb, allowed_hexes, allowed_tokens, out, color_rule=color_rule, location=location
+						)
 			else:
 				_scan_color_tokens(
-					tok.arguments, allowed_hexes, out, color_rule=color_rule, location=location
+					tok.arguments,
+					allowed_hexes,
+					allowed_tokens,
+					out,
+					color_rule=color_rule,
+					location=location,
 				)
 		elif tn == "IdentToken":
+			# Reject any <color> keyword that is not approved: a conventional named
+			# color OR a CSS system color (DR2-3). Non-color idents (`solid`,
+			# `center`, …) in a color-bearing shorthand are not <color> keywords and
+			# pass through untouched.
 			w = (tok.value or "").lower()
-			if w in _CSS_NAMED_COLORS and w not in _APPROVED_COLOR_WORDS:
+			if w not in _APPROVED_COLOR_WORDS and (w in _CSS_NAMED_COLORS or w in _CSS_SYSTEM_COLORS):
 				out.append(_color_violation(tok.value, color_rule, location))
 
 
 def _family_candidates(tokens, shorthand):
-	"""(kind, display, var_ref) per comma-separated font-family segment. ``kind``
-	is 'var' (a var() indirection) or 'name' (a literal family)."""
+	"""(kind, display, var_ref, var_fn) per comma-separated font-family segment.
+	``kind`` is 'var' (a var() indirection — ``var_fn`` is the FunctionBlock, so
+	its fallback can be validated) or 'name' (a literal family; ``var_fn`` None)."""
 	segments = [[]]
 	for t in tokens:
 		if type(t).__name__ == "LiteralToken" and t.value == ",":
@@ -693,11 +808,13 @@ def _family_candidates(tokens, shorthand):
 			None,
 		)
 		if var_fn is not None:
-			out.append(("var", tinycss2.serialize([var_fn]).strip(), _first_custom_prop(var_fn.arguments)))
+			out.append(
+				("var", tinycss2.serialize([var_fn]).strip(), _first_custom_prop(var_fn.arguments), var_fn)
+			)
 			continue
 		strings = [t for t in seg if type(t).__name__ == "StringToken"]
 		if strings:
-			out.append(("name", strings[-1].value.strip().lower(), None))
+			out.append(("name", strings[-1].value.strip().lower(), None, None))
 			continue
 		idents = [t for t in seg if type(t).__name__ == "IdentToken"]
 		if not idents:
@@ -716,14 +833,20 @@ def _family_candidates(tokens, shorthand):
 			name = " ".join(tail)
 		else:
 			name = " ".join(t.value for t in idents)
-		out.append(("name", name.strip().lower(), None))
+		out.append(("name", name.strip().lower(), None, None))
 	return out
 
 
-def _check_font(tokens, shorthand, allowed_families, out, *, location):
-	for kind, display, ref in _family_candidates(tokens, shorthand):
+def _check_font(tokens, shorthand, allowed_families, allowed_tokens, out, *, location):
+	for kind, display, ref, var_fn in _family_candidates(tokens, shorthand):
 		if kind == "var":
-			if ref and ref.lower().startswith("--jd-font"):
+			# Must reference an EXISTING font token (--jd-font / --jd-font-display);
+			# a fallback, if present, is validated as a font family too (DR2-1).
+			low = (ref or "").lower()
+			if low in _FONT_TOKEN_NAMES and low in allowed_tokens:
+				fb = _var_fallback_tokens(var_fn.arguments) if var_fn is not None else []
+				if fb:
+					_check_font(fb, False, allowed_families, allowed_tokens, out, location=location)
 				continue
 			out.append(
 				Violation(
@@ -793,9 +916,18 @@ def _check_declaration(d, ctx, out, *, color_rule, location):
 			)
 		)
 	if lname in _COLOR_PROPS:
-		_scan_color_tokens(d.value, ctx["allowed_hexes"], out, color_rule=color_rule, location=location)
+		_scan_color_tokens(
+			d.value,
+			ctx["allowed_hexes"],
+			ctx["allowed_tokens"],
+			out,
+			color_rule=color_rule,
+			location=location,
+		)
 	if lname in _FONT_PROPS:
-		_check_font(d.value, lname == "font", ctx["allowed_families"], out, location=location)
+		_check_font(
+			d.value, lname == "font", ctx["allowed_families"], ctx["allowed_tokens"], out, location=location
+		)
 
 
 def _check_at_rule(rule, ctx, out):
@@ -888,11 +1020,20 @@ def validate_dashboard_html(html: str, theme: str) -> list[Violation]:
 
 	allowed_hexes: frozenset = frozenset()
 	allowed_families: frozenset = frozenset()
+	allowed_tokens: frozenset = frozenset()
 	if design:
 		spec = theme_spec.load_theme(key) or theme_spec.load_theme(theme_spec.DEFAULT_KEY)
 		allowed_hexes = frozenset(h.lower() for h in spec["validator"]["allowed_color_hexes"])
 		allowed_families = frozenset(f.lower() for f in spec["validator"]["allowed_font_families"])
-	ctx = {"allowed_hexes": allowed_hexes, "allowed_families": allowed_families, "design": design}
+		# The EXACT --jd-* render-token names this theme emits (DR2-1): a var()
+		# color/font ref must name one that exists, not merely start with --jd-.
+		allowed_tokens = frozenset("--jd-" + str(name).lower() for name in (spec.get("render_tokens") or {}))
+	ctx = {
+		"allowed_hexes": allowed_hexes,
+		"allowed_families": allowed_families,
+		"allowed_tokens": allowed_tokens,
+		"design": design,
+	}
 
 	for css in _style_blocks(tree):
 		_check_style_block(css, ctx, violations)

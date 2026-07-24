@@ -283,6 +283,32 @@ test("@layer: no-theme (legacy dark flag) path is unchanged — no layers, no th
   assert.ok(out.includes('data-theme="dark"'))
 })
 
+test("@layer: a quoted `>` in a <style> attribute cannot escape @layer author (DR2-2)", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  // The exploit: `<style data-x=">">.jd-card{…}</style>` is valid HTML — the `>`
+  // sits INSIDE a quoted attribute, so the start tag really ends at the LAST `>`.
+  // The prior `<style[^>]*>` regex stopped at the first (quoted) `>`, wrapping it
+  // as `<style data-x=">@layer author{">.jd-card{…}` and leaving `.jd-card`
+  // UNLAYERED, outranking `@layer theme`. The scan-based wrapper keeps it layered.
+  const html = '<style data-x=">">.jd-card{background:var(--jd-negative)}</style>'
+  const out = buildSrcdoc(html, { theme: THEMES.jarvis })
+  // the author CSS is wrapped in @layer author with the quoted attribute intact
+  assert.ok(
+    out.includes('<style data-x=">">@layer author{.jd-card{background:var(--jd-negative)}}</style>'),
+    "quoted-> style content wrapped in @layer author",
+  )
+  // the old-regex escape (layer opener spliced into the attribute, `.jd-card`
+  // left unlayered) must NOT appear
+  assert.ok(!out.includes('data-x=">@layer author{'), "attribute value not mistaken for tag end")
+  assert.ok(out.includes("@layer author, theme;"), "layer order declaration present")
+})
+
+test("@layer: an UNQUOTED-attribute <style> is still wrapped (scan parity)", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  const out = buildSrcdoc("<style data-k=v>.a{color:var(--jd-ink)}</style>", { theme: THEMES.insight })
+  assert.ok(out.includes("<style data-k=v>@layer author{.a{color:var(--jd-ink)}}</style>"))
+})
+
 test("SECURITY: stale openclaw ws-client script is stripped, other scripts kept", () => {
   const html =
     "<html><head></head><body><div id=chart></div>" +
