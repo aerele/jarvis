@@ -2620,9 +2620,13 @@
 							style="display: none"
 							@change="onFilesPicked"
 						/>
-						<!-- voice recovery banner: a prior session left un-transcribed clips -->
+						<!-- voice recovery banner: a prior session left un-transcribed clips.
+						     HIDDEN while recording (VAR-1): recovering mid-take could collide the
+						     seq space and drop a live clip. -->
 						<div
-							v-if="ui.stt_enabled && recoveryClips.length"
+							v-if="
+								ui.stt_enabled && recoveryClips.length && micState !== 'recording'
+							"
 							style="
 								display: flex;
 								flex-wrap: wrap;
@@ -2650,11 +2654,20 @@
 							>
 								Download
 							</button>
-							<button class="jv-voicechip-act" @click="dismissOrphans">
-								Dismiss
+							<!-- non-destructive: hide + keep the audio (recoverable next reload) -->
+							<button class="jv-voicechip-act" @click="laterOrphans">Later</button>
+							<!-- destructive: quieter weight + confirm before deleting audio -->
+							<button
+								class="jv-voicechip-quiet"
+								title="Permanently delete the saved audio"
+								@click="discardOrphans"
+							>
+								Discard
 							</button>
 						</div>
-						<!-- failed-clip chips: a chunk exhausted its retry budget (Retry / Download) -->
+						<!-- failed-clip chips: a chunk exhausted its retry budget.
+						     Retry appends the recovered text at the END of the composer (VUX-2), so
+						     the copy forewarns where it lands. ✕ discards the clip (confirmed). -->
 						<div
 							v-if="ui.stt_enabled && voiceQ.failed.length"
 							style="
@@ -2681,11 +2694,23 @@
 								"
 							>
 								Clip {{ f.seq + 1 }} didn't transcribe
-								<button class="jv-voicechip-act" @click="retryClip(f.seq)">
+								<button
+									class="jv-voicechip-act"
+									title="Transcribe again — the words drop back into the ⟦clip⟧ placeholder in the message, where they belong"
+									@click="retryClip(f.seq)"
+								>
 									Retry
 								</button>
 								<button class="jv-voicechip-act" @click="downloadClip(f.seq)">
 									Download
+								</button>
+								<button
+									class="jv-voicechip-quiet"
+									title="Discard this clip"
+									aria-label="Discard this clip"
+									@click="discardClip(f.seq)"
+								>
+									✕
 								</button>
 							</span>
 						</div>
@@ -2704,7 +2729,7 @@
 									:title="
 										micState === 'recording'
 											? 'Stop dictation'
-											: 'Dictate (voice to text) — long dictation supported'
+											: 'Dictate (voice to text)'
 									"
 									@click="micState === 'recording' ? stopMic() : startMic()"
 									style="
@@ -2743,7 +2768,7 @@
 									>
 									<button
 										class="jv-mic-cancel"
-										title="Cancel recording (Esc)"
+										title="Cancel recording (Esc) — drops the current unsent clip; already-transcribed text is kept"
 										aria-label="Cancel recording"
 										@click="cancelMic"
 									>
@@ -6872,8 +6897,7 @@ function resendFailed(m) {
 	// active, or if there's no plain text (e.g. an attachment-only message,
 	// whose file can't be re-attached from the bubble). Then swap the failed
 	// bubble for a fresh optimistic one via send().
-	if (sending.value || micState.value === "recording" || micState.value === "transcribing")
-		return;
+	if (sending.value || micState.value === "recording" || voiceBusyCount.value > 0) return;
 	const txt = (m.content || "").replace(/\n*📎[^\n]*$/, "").trim();
 	if (!txt) return;
 	messages.value = messages.value.filter((x) => x.name !== m.name);
@@ -6884,14 +6908,19 @@ function resendFailed(m) {
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
 async function send(textArg) {
-	// Don't race an in-flight dictation: sending now would drop the spoken
-	// words (the transcript would land after the message left the composer).
-	if (micState.value === "recording" || micState.value === "transcribing") {
+	// Don't race an in-flight dictation: sending now would drop the spoken words
+	// (a background clip's transcript would land AFTER the message left the composer,
+	// as an orphaned fragment). Block on the real busy signal — recording OR any clip
+	// still pending/in-flight (voiceBusyCount) — NOT the dead 'transcribing' state or
+	// hasUnfinished() (which would also trap the user behind a terminally-failed chip).
+	if (micState.value === "recording" || voiceBusyCount.value > 0) {
 		notify("Finishing dictation…", { type: "info" });
 		return;
 	}
 	const fromMain = typeof textArg !== "string";
-	const text = (fromMain ? input.value : textArg).trim();
+	// Strip any pending-gap placeholder tokens (⟦clip N⟧) so a failed clip's marker never
+	// rides out in a sent message; its chip stays, so the audio is still recoverable.
+	const text = _stripGapTokens(fromMain ? input.value : textArg);
 	const attachments = fromMain ? pendingFiles.value.slice() : [];
 	if ((!text && !attachments.length) || sending.value) return;
 	if (text && promptHistory.value[promptHistory.value.length - 1] !== text) {
@@ -7482,60 +7511,157 @@ let _micConvId = null; // conversation the take was started in — transcript be
 let voiceQueue = null; // createVoiceChunkQueue — one per recording session
 let voiceMirror = null; // createClipMirror — IndexedDB, one per session
 let _voiceSessionId = null;
+let _takeCommitted = 0; // chars committed in the current take (VUX-6 empty-session summary)
+let _awaitingEmptySummary = false; // armed on Stop, fires once the queue fully drains
 
 function _fmtClock(s) {
 	return Math.floor(s / 60) + ":" + String(Math.max(0, s) % 60).padStart(2, "0");
 }
 const micClock = computed(() => _fmtClock(micRec.durationS || 0));
-// A background transcription is in flight/queued (drives the "transcribing N…" pill).
+// A background transcription is in flight/queued (drives the "transcribing N…" pill
+// AND the send-time block so a message can't leave the composer before its tail lands).
 const voiceBusyCount = computed(() => voiceQ.value.inflight + voiceQ.value.pending);
 
 function _voiceSnap() {
 	voiceQ.value = voiceQueue ? voiceQueue.snapshot() : { ..._emptyVoiceSnap };
+	// VUX-6: once a stopped take fully drains with nothing committed and no failed clip
+	// (every chunk transcribed empty — e.g. a muted/broken mic for the whole session),
+	// give the user the one signal the old single-shot flow gave.
+	if (_awaitingEmptySummary && voiceBusyCount.value === 0) {
+		_awaitingEmptySummary = false;
+		if (_takeCommitted === 0 && voiceQ.value.failed.length === 0) {
+			notify("Nothing was transcribed — try again closer to the microphone.", {
+				type: "info",
+			});
+		}
+	}
 }
 
-// Append committed transcript text to the composer, routed to the conversation the
-// take was started in (append, never replace; if the user switched chats mid-take the
-// words merge into that chat's stashed draft, restored by swapDraft on return).
-function _appendTranscript(text) {
+// A failed clip's IN-PLACE placeholder token (VUX-2 Fable ruling). The chip owns it:
+// onGap drops it at the gap's ordered position, a successful Retry replaces it with the
+// text there, Discard removes it. `seq+1` matches the chip's "Clip N" label exactly.
+const _gapToken = (seq) => `⟦clip ${seq + 1}⟧`;
+// Strip any placeholder tokens from text about to LEAVE the composer (send): a failed
+// clip doesn't block send (voiceBusyCount excludes failed), so the raw token must never
+// ride out in a message. The chip stays, so the audio is still recoverable.
+const _GAP_TOKEN_RE = /⟦clip \d+⟧/g;
+function _stripGapTokens(s) {
+	return (s || "").replace(_GAP_TOKEN_RE, "").replace(/ {2,}/g, " ").trim();
+}
+function _joinAppend(prev, t) {
+	return prev.trim() ? prev.replace(/\s+$/, "") + " " + t : t;
+}
+
+// Apply `mutate(oldText) -> newText` to the composer target for `forId` (the conversation
+// the clip was SPOKEN in): the live input when that chat is on screen, else its stashed
+// draft (restored by swapDraft on return) — never whatever chat merely happens to be open
+// (VUX-4/VAR-4). VUX-3: on the on-screen composer NEVER steal focus back in from
+// elsewhere, and preserve the user's caret — follow the growing end only if the caret was
+// already there (and unchanged), otherwise keep an in-progress mid-string edit put.
+function _mutateComposerFor(forId, mutate) {
+	if (forId == null || currentId.value === forId) {
+		const el = inputEl.value;
+		const focused = !!el && document.activeElement === el;
+		const atEnd = el
+			? el.selectionStart === el.value.length && el.selectionEnd === el.value.length
+			: true;
+		const selStart = el ? el.selectionStart : 0;
+		const selEnd = el ? el.selectionEnd : 0;
+		const next = mutate(input.value);
+		if (next === input.value) return;
+		input.value = next;
+		nextTick(() => {
+			autoGrow();
+			if (!focused || !el) return; // do NOT pull focus in when the user is elsewhere
+			try {
+				if (atEnd) el.selectionStart = el.selectionEnd = el.value.length;
+				else {
+					el.selectionStart = selStart;
+					el.selectionEnd = selEnd;
+				}
+			} catch (e) {
+				/* selection not settable — ignore */
+			}
+		});
+	} else {
+		drafts.value[forId] = mutate(drafts.value[forId] || "");
+	}
+}
+const _clipConvId = (clip) =>
+	clip && clip.conversationId != null ? clip.conversationId : _micConvId;
+
+// A committed transcript, appended in spoken order.
+function _appendTranscript(text, clip) {
 	const t = (text || "").trim();
 	if (!t) return;
-	const forId = _micConvId;
-	if (currentId.value === forId) {
-		input.value = input.value.trim() ? input.value.replace(/\s+$/, "") + " " + t : t;
-		nextTick(() => {
-			inputEl.value?.focus();
-			autoGrow();
-		});
-	} else if (forId) {
-		const prev = drafts.value[forId] || "";
-		drafts.value[forId] = prev.trim() ? prev.replace(/\s+$/, "") + " " + t : t;
-	}
+	_takeCommitted += t.length;
+	_mutateComposerFor(_clipConvId(clip), (prev) => _joinAppend(prev, t));
+}
+// The cursor crossed a failed clip: anchor its gap with an in-place placeholder token.
+function _insertGapPlaceholder(seq, clip) {
+	_mutateComposerFor(_clipConvId(clip), (prev) => _joinAppend(prev, _gapToken(seq)));
+}
+// A retried clip finally transcribed: swap its placeholder for the text WHERE IT BELONGS.
+// If the user deleted the token, fall back to appending so the audio is never lost.
+function _replaceGapPlaceholder(seq, text, clip) {
+	const t = (text || "").trim();
+	if (t) _takeCommitted += t.length;
+	const tok = _gapToken(seq);
+	_mutateComposerFor(_clipConvId(clip), (prev) => {
+		if (prev.includes(tok)) {
+			return t
+				? prev.split(tok).join(t)
+				: prev.split(tok).join(" ").replace(/ {2,}/g, " ").trim();
+		}
+		return t ? _joinAppend(prev, t) : prev;
+	});
+}
+// The user discarded a failed clip: drop its placeholder from the composer.
+function _removeGapPlaceholder(seq, clip) {
+	const tok = _gapToken(seq);
+	_mutateComposerFor(_clipConvId(clip), (prev) =>
+		prev.includes(tok) ? prev.split(tok).join(" ").replace(/ {2,}/g, " ").trim() : prev
+	);
 }
 
 function _ensureVoiceSession() {
 	if (voiceQueue) return;
 	_voiceSessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-	voiceMirror = createClipMirror(_voiceSessionId);
+	// Stamp the current Frappe user so reload recovery is scoped to THIS user only
+	// (IndexedDB is per-origin, not per-login — no cross-account audio exposure).
+	voiceMirror = createClipMirror(_voiceSessionId, session.user);
 	voiceQueue = createVoiceChunkQueue({
-		transcribe: (clip) => voice.transcribeAudio(clip.blob, { durationS: clip.durationS }),
+		// `signal` (from the queue's own AbortController) aborts in-flight uploads on
+		// dispose() — no wasted fetches after unmount (VUX-12/VAR-8).
+		transcribe: (clip, signal) =>
+			voice.transcribeAudio(clip.blob, { durationS: clip.durationS, signal }),
 		mirror: voiceMirror,
 		concurrency: 2,
 		maxAttempts: 2, // the 25 s per-chunk abort lives in transcribeAudio; queue retries once
-		onCommit: (_seq, text) => _appendTranscript(text),
+		// replace=true is a RESURRECTED failed clip: swap its placeholder in place (VUX-2);
+		// otherwise a normal in-order append.
+		onCommit: (seq, text, clip, replace) =>
+			replace ? _replaceGapPlaceholder(seq, text, clip) : _appendTranscript(text, clip),
+		// The cursor crossed a failed clip: drop its in-place placeholder token so later
+		// text commits after it and Retry can fill the words back at that exact spot.
+		onGap: (seq, clip) => _insertGapPlaceholder(seq, clip),
 		onChange: _voiceSnap,
 	});
 }
 
 const micRec = useChunkedRecorder({
 	chunkMs: 15000,
+	// The queue stamps `seq` (single authority); we tag each clip with the conversation
+	// it was spoken in so recovery/late commits route to the right chat.
 	onClip: (clip) => {
-		if (voiceQueue) voiceQueue.enqueue(clip);
+		if (voiceQueue) voiceQueue.enqueue({ ...clip, conversationId: _micConvId });
 	},
 });
 
 async function startMic() {
 	_micConvId = currentId.value;
+	_takeCommitted = 0;
+	_awaitingEmptySummary = false;
 	_ensureVoiceSession();
 	await micRec.start();
 	if (micRec.state === "error") {
@@ -7550,8 +7676,14 @@ async function stopMic() {
 	// outstanding clips continues in the background (the composer keeps filling).
 	await micRec.stop();
 	micState.value = "idle";
-	if (micRec.state === "error")
+	if (micRec.state === "error") {
 		notify(micRec.error || "Recording failed. Try again.", { type: "error" });
+		return;
+	}
+	// VUX-6: arm the empty-session summary; _voiceSnap fires it once the queue drains
+	// (call now in case everything already resolved during recording).
+	_awaitingEmptySummary = true;
+	_voiceSnap();
 }
 async function cancelMic() {
 	// Stop recording and drop ONLY the current unsent snippet; clips already emitted
@@ -7566,7 +7698,25 @@ function retryClip(seq) {
 }
 function downloadClip(seq) {
 	const clip = voiceQueue && voiceQueue.getClip(seq);
-	if (clip && clip.blob) _downloadBlob(clip.blob, `voice-clip-${seq}.webm`);
+	// seq is 0-based; the chip shows "Clip seq+1" — match the filename to it (VUX-5).
+	if (clip && clip.blob) _downloadBlob(clip.blob, `voice-clip-${seq + 1}.webm`);
+}
+// Drop a permanently-failed clip from its chip (VUX-9/VAR-5) — confirmed so recoverable
+// audio is never one-click-deleted, and it clears the unload-guard nag after Download.
+async function discardClip(seq) {
+	if (!voiceQueue) return;
+	const clip = voiceQueue.getClip(seq); // grab it BEFORE discard drops the record
+	const ok = await confirm({
+		title: "Discard this clip?",
+		message:
+			"This voice clip couldn't be transcribed. Discard it? Download it first if you want to keep the audio.",
+		danger: true,
+		confirmLabel: "Discard",
+		cancelLabel: "Keep",
+	});
+	if (!ok) return;
+	_removeGapPlaceholder(seq, clip); // clear its in-place placeholder from the composer
+	voiceQueue.discard(seq);
 }
 function _downloadBlob(blob, filename) {
 	try {
@@ -7586,33 +7736,71 @@ function _downloadBlob(blob, filename) {
 // ---- reload recovery (orphan clips left by a crashed/closed prior session) ----
 async function _loadRecovery() {
 	try {
-		const orphans = await listOrphanClips(_voiceSessionId);
+		const orphans = await listOrphanClips(_voiceSessionId, session.user);
 		recoveryClips.value = orphans || [];
 	} catch (e) {
 		recoveryClips.value = [];
 	}
 }
 function recoverOrphans() {
+	// VAR-1 P0: never recover while recording — mixing recovered clips into the live
+	// seq space would risk dropping a live clip (the banner is also hidden while
+	// recording; this is the belt-and-suspenders gate).
+	if (micState.value === "recording") {
+		notify("Finish the current dictation first.", { type: "info" });
+		return;
+	}
 	const orphans = recoveryClips.value.slice();
 	if (!orphans.length) return;
-	_micConvId = currentId.value;
 	_ensureVoiceSession();
+	// Each clip routes to the conversation it was spoken in (onCommit → _appendTranscript);
+	// warn once if any belong to a chat other than the one on screen.
+	const otherChat = orphans.some(
+		(o) => (o.conversationId != null ? o.conversationId : null) !== (currentId.value || null)
+	);
 	voiceQueue.recover(
 		orphans.map((o) => ({
-			seq: o.seq,
 			blob: o.blob,
 			durationS: o.durationS,
 			mimeType: o.mimeType,
+			conversationId: o.conversationId != null ? o.conversationId : null,
 		}))
 	);
 	// The clips are now owned by the live session's mirror; drop the stale keys.
 	orphans.forEach((o) => deleteOrphanClip(o.key));
 	recoveryClips.value = [];
+	if (otherChat) {
+		notify("Recovered dictation was added to the draft of the chat it was spoken in.", {
+			type: "info",
+		});
+	}
 }
 function downloadOrphan(o) {
-	if (o && o.blob) _downloadBlob(o.blob, `voice-clip-${o.seq}.webm`);
+	if (o && o.blob) _downloadBlob(o.blob, `voice-clip-${(o.seq || 0) + 1}.webm`);
 }
-function dismissOrphans() {
+// Non-destructive: hide the banner for this tab-session but KEEP the audio in IndexedDB
+// (recoverable next reload). Stops the guard nagging without losing anything (VUX-11).
+function laterOrphans() {
+	recoveryClips.value = [];
+}
+// Destructive: permanently delete the saved audio — confirmed, and never while recording
+// (VUX-1/VAR-6). The whole feature exists to prevent exactly a silent one-click loss.
+async function discardOrphans() {
+	if (micState.value === "recording") {
+		notify("Finish the current dictation first.", { type: "info" });
+		return;
+	}
+	const n = recoveryClips.value.length;
+	if (!n) return;
+	const ok = await confirm({
+		title: `Discard ${n} un-transcribed clip(s)?`,
+		message:
+			"This permanently deletes the saved audio and can't be undone. Download the clips first if you want to keep them.",
+		danger: true,
+		confirmLabel: "Discard",
+		cancelLabel: "Keep",
+	});
+	if (!ok) return;
 	recoveryClips.value.forEach((o) => deleteOrphanClip(o.key));
 	recoveryClips.value = [];
 }
@@ -7637,7 +7825,7 @@ onBeforeRouteLeave(async () => {
 	return await confirm({
 		title: "Leave with un-transcribed audio?",
 		message:
-			"Some dictated voice clips haven't finished transcribing. Leaving now loses that audio. Leave anyway?",
+			"Some dictated voice clips haven't finished transcribing. Leaving now may lose audio that hasn't been saved yet. Leave anyway?",
 		danger: true,
 		confirmLabel: "Leave",
 		cancelLabel: "Stay",
@@ -8551,6 +8739,22 @@ onUnmounted(() => {
 }
 .jv-voicechip-act:hover {
 	background: rgba(127, 127, 127, 0.16);
+}
+/* the ONE destructive voice action (Discard) — deliberately quieter than the safe
+   Transcribe/Download/Retry beside it, so it never sits at equal visual weight. */
+.jv-voicechip-quiet {
+	border: none;
+	background: transparent;
+	padding: 1px 4px;
+	border-radius: 5px;
+	cursor: pointer;
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--text-3);
+}
+.jv-voicechip-quiet:hover {
+	background: rgba(127, 127, 127, 0.16);
+	color: var(--text);
 }
 /* wiki nudge card — own block above the composer, never inside it */
 .jv-nudge {
