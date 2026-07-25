@@ -757,6 +757,46 @@ class TestAppLearningAgentTools(FrappeTestCase):
 			reap_stale_agent_runs()
 		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "running")  # left for retry
 
+	# ------------------------------------------------------------------ #
+	# Round-4 concurrency: the per-run page budget is read UNDER the run-row lock
+	# ------------------------------------------------------------------ #
+	def test_budget_read_under_run_row_lock_bounds_overlapping_writeback(self):
+		# CA4-1: the per-run page budget is read UNDER the run-row ``for_update`` lock, NOT
+		# before it. Two writebacks for the SAME run/session serialize on that lock, so the
+		# second reads the budget only AFTER the first's pages + after-commit counter (CA3-3)
+		# are durable — the two can never both reserve the full remaining allowance (a soft-cap
+		# overrun). Simulated single-connection: a PRIOR committed writeback of N pages becomes
+		# visible EXACTLY when this call acquires the run-row lock (as a real prior lock-holder's
+		# commit would), by advancing the session counter inside the ``for_update`` RUN read. A
+		# PRE-lock budget read would see 0 (and write all the pages); the UNDER-lock read sees N
+		# and truncates to the ``CAP - N`` that actually remains.
+		self._bind_scribe_run()  # binds the running run + session_key; its name is unused here
+		cap = ctx.PER_RUN_PAGE_CAP
+		prior = cap - 2  # a prior writeback consumed all but 2 of the per-run cap
+		real_get = frappe.db.get_value
+		armed = {"fired": False}
+
+		def _get(dt, *a, **k):
+			# the run-row for_update read IS the lock acquisition: make the prior holder's
+			# durable counter visible right here (never before it)
+			if dt == RUN and k.get("for_update") and not armed["fired"]:
+				armed["fired"] = True
+				ctx.add_pages_written(self.session_key, prior)
+			return real_get(dt, *a, **k)
+
+		# ask to write 6 pages: below the cap outright (so WITHOUT the prior batch nothing would
+		# truncate), but above the 2 that remain once the prior batch is seen under the lock.
+		pages = [{"title": f"Page {i}", "key": f"k-{i:02d}", "body_md": f"body {i}"} for i in range(6)]
+		with mock.patch.object(frappe.db, "get_value", side_effect=_get):
+			res = record_app_wiki(app="fakeapp", pages=pages)
+		self.assertTrue(armed["fired"])  # the lock read really fired the prior-batch counter
+		# the UNDER-lock read saw ``prior`` consumed -> only ``cap - prior`` (== 2) may be written
+		self.assertTrue(res["truncated"])
+		self.assertEqual(res["applied"], cap - prior)  # 2, the under-lock remaining, not 6
+		self.assertEqual(res["pages_remaining"], 0)
+		# exactly ``cap - prior`` pages actually landed -> no soft-cap overrun past the budget
+		self.assertEqual(frappe.db.count(WIKI, {"slug": ["like", "fakeapp-k-%"]}), cap - prior)
+
 
 class TestRunAgentNowScribeGate(FrappeTestCase):
 	"""The ``run_agent_now`` nature gate admits Scribe (auditor stays valid,

@@ -140,9 +140,37 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 
 	total = len(accepted)
 
-	# Per-run page cap: bound how many pages one run may write. A re-run gets a
-	# fresh session_key (fresh counter), so re-learning the same app is not
-	# penalised — the cap only stops one run flooding the wiki.
+	# CA3-1 + CA4-1: LOCK the run row + verify it is STILL ``running`` (``for_update``) BEFORE
+	# ANY budget/truncation work, and HOLD that lock through the page writes + tally + the
+	# request-end commit. Two properties ride on acquiring the lock FIRST:
+	#   * CA4-1 — the per-run page budget is read UNDER this lock (below), so two writebacks for
+	#     the SAME run/session serialize on this row: the second reads the budget only AFTER the
+	#     first's pages + after-commit counter (CA3-3) are durable, so they can never both
+	#     reserve the full remaining allowance (a soft-cap overrun);
+	#   * CA3-1 — it orders the writeback AHEAD of the stale-run sweep on the SAME row: a sweep
+	#     that reaches this run now BLOCKS on the row lock until we commit, then sees a running
+	#     run with our pages durably tallied — so it can never fail a run whose writeback is in
+	#     progress, and our pages can never land on a row it already terminalized.
+	# A run finalized (cancelled / reaped / finished) in the window between ``resolve_scribe_run``
+	# and here is refused with the normal shape: nothing is written, nothing tallied, no budget
+	# consumed — and its ``pages_remaining`` is read under the lock too, so it stays honest.
+	run_status = frappe.db.get_value(RUN, run_name, "status", for_update=True)
+	if run_status != "running":
+		return {
+			"run": run_name,
+			"applied": 0,
+			"failed": 0,
+			"rejected": rejected,
+			"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - ctx.pages_written(session_key)),
+			"truncated": False,  # nothing written -> nothing truncated
+			"slugs": [],
+		}
+
+	# Per-run page cap: bound how many pages one run may write. Read UNDER the run-row lock
+	# (above) so ``already`` reflects any prior writeback for this session that committed before
+	# we acquired the lock — the CA3-3 after-commit counter is durable by the time the prior
+	# holder released the row. A re-run gets a fresh session_key (fresh counter), so re-learning
+	# the same app is not penalised — the cap only stops one run flooding the wiki.
 	already = ctx.pages_written(session_key)
 	remaining = max(0, ctx.PER_RUN_PAGE_CAP - already)
 	truncated = total > remaining
@@ -164,26 +192,6 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	by_app: dict[str, list[dict]] = {}
 	for entry in accepted:
 		by_app.setdefault(entry["app"], []).append(entry)
-
-	# CA3-1: LOCK the run row + verify it is STILL ``running`` (``for_update``) BEFORE the
-	# FIRST page write, and HOLD that lock through the page writes + tally + the request-end
-	# commit. This orders the writeback AHEAD of the stale-run sweep on the SAME row: a sweep
-	# that reaches this run now BLOCKS on the row lock until we commit, then sees a running
-	# run with our pages durably tallied — so it can never fail a run whose writeback is in
-	# progress, and our pages can never land on a row it already terminalized. A run finalized
-	# (cancelled / reaped / finished) in the window between ``resolve_scribe_run`` and here is
-	# refused with the normal shape: nothing is written, nothing tallied, no budget consumed.
-	run_status = frappe.db.get_value(RUN, run_name, "status", for_update=True)
-	if run_status != "running":
-		return {
-			"run": run_name,
-			"applied": 0,
-			"failed": 0,
-			"rejected": rejected,
-			"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - already),
-			"truncated": truncated,
-			"slugs": [],
-		}
 
 	# Apply through the funnel and record ONLY the pages actually written: the
 	# per-update outcome is zipped back to its accepted entry, so a refused
