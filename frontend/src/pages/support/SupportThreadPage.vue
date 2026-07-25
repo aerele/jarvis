@@ -1,8 +1,10 @@
 <template>
 	<SupportShell
-		:title="row ? row.subject || 'Ticket' : 'Ticket'"
-		:back-to="{ name: 'Support' }"
-		back-label="All tickets"
+		chat-surface
+		:crumbs="[
+			{ label: 'Support', route: { name: 'Support' } },
+			{ label: row ? row.subject || 'Ticket' : 'Ticket' },
+		]"
 	>
 		<template #actions>
 			<!-- row is null for a deep-linked ticket outside the newest 50 (P2/out-of-list):

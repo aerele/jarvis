@@ -1,5 +1,8 @@
 <template>
-	<SupportShell title="New ticket" :back-to="{ name: 'Support' }" back-label="All tickets">
+	<SupportShell
+		chat-surface
+		:crumbs="[{ label: 'Support', route: { name: 'Support' } }, { label: 'New ticket' }]"
+	>
 		<div class="jv-sup-new">
 			<h1 class="jv-sup-h1">How can we help?</h1>
 			<p class="jv-sup-sub">

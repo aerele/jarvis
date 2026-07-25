@@ -42,7 +42,13 @@
 					:loading="loading"
 					@click="$emit('refresh')"
 				/>
+				<!-- A page with no filter dimensions (e.g. Support, where Status is the
+				     only facet and it already rides the quick-filter strip) would
+				     otherwise render a dead Filter button whose popover only says
+				     "Empty - Choose a field to filter by". Mirror ColumnsButton's own
+				     v-if and drop it entirely. -->
 				<FilterButton
+					v-if="filterDefs.length"
 					:filter-defs="filterDefs"
 					:filters="filters"
 					@update:filters="(f) => $emit('update:filters', f)"

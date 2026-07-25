@@ -1,5 +1,5 @@
 <template>
-	<SupportShell title="Support">
+	<SupportShell :crumbs="[{ label: 'Support' }]">
 		<template #actions>
 			<!-- The house puts the primary action in ListPage's #right-header, which
 			     renders inside LayoutHeader — but LayoutHeader teleports to
@@ -156,7 +156,16 @@ const quickFilters = [
 	{ key: "search", label: "Search tickets", type: "text" },
 	{ key: "status", label: "Status", type: "select", options: STATUS_OPTIONS },
 ];
-const filterDefs = [{ key: "status", label: "Status", type: "select", options: STATUS_OPTIONS }];
+// Filter popover mirrors the house pattern (Skills/Macros repeat their quick
+// filters here plus an extra dimension). Status alone would be a single-def
+// filter whose "+ Add Filter" control unmounts the instant you pick it — closing
+// the popover, the "vanishing" the user hit; pairing it with the Updated date
+// range always leaves a field unset after the first pick, exactly like Skills'
+// multi-column filter.
+const filterDefs = [
+	{ key: "status", label: "Status", type: "select", options: STATUS_OPTIONS },
+	{ key: "updated", label: "Updated", type: "daterange" },
+];
 
 const sortOptions = [
 	{ label: "Updated", value: "modified" },
@@ -190,11 +199,25 @@ function matchesStatus(t) {
 	return !store.isClosed(t.status) && !store.isAwaiting(t.status);
 }
 
+// FilterButton's daterange writes from_date/to_date (not the def key). Compare on
+// the naive YYYY-MM-DD prefix of `modified` (site-tz, per helpdesk_client) against
+// the picker's YYYY-MM-DD bounds — a lexical compare is correct for that format.
+function matchesDate(t) {
+	const { from_date: from, to_date: to } = filters;
+	if (!from && !to) return true;
+	const d = (t.modified || "").slice(0, 10);
+	if (!d) return false;
+	if (from && d < from) return false;
+	if (to && d > to) return false;
+	return true;
+}
+
 const filtered = computed(() => {
 	const q = (filters.search || "").trim().toLowerCase();
 	const out = store.tickets.filter(
 		(t) =>
 			matchesStatus(t) &&
+			matchesDate(t) &&
 			(!q ||
 				(t.subject || "").toLowerCase().includes(q) ||
 				(t.name || "").toLowerCase().includes(q))
@@ -221,7 +244,16 @@ const rows = computed(() => filtered.value.slice(0, shown.value));
 // assigns a fresh array), so watching it directly snapped a user's loaded
 // rows back to one page every time they hit Refresh (or a future background
 // poll landed) mid-scroll.
-watch([() => filters.status, () => filters.search, sort], () => (shown.value = pageLength.value));
+watch(
+	[
+		() => filters.status,
+		() => filters.search,
+		() => filters.from_date,
+		() => filters.to_date,
+		sort,
+	],
+	() => (shown.value = pageLength.value)
+);
 
 // list_tickets is capped at the newest 50 (helpdesk_client.py) and search is
 // client-side over whatever's loaded — so a zero-match search when exactly 50

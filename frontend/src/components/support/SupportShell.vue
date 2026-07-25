@@ -1,111 +1,126 @@
 <template>
-	<div class="jv-root jv-support" :class="{ 'jv-dark': effectiveDark }" :style="paletteVars">
+	<div class="jv-sup">
+		<!-- Frappe-ui-styled top bar that mirrors the app's LayoutHeader (Skills /
+		     Macros): a Breadcrumbs title on the left, then the standard
+		     "Open ERPNext Desk" outline button + the page's actions on the right.
+		     Uses frappe-ui semantic tokens (surface-white / ink-gray / outline-gray),
+		     NOT the chat palette, so the standalone support pages look and feel like
+		     any other page in the app. -->
 		<header class="jv-sup-bar">
-			<button class="jv-sup-back" :aria-label="backLabel" @click="goBack">
+			<button
+				class="jv-sup-home"
+				aria-label="Back to Jarvis"
+				title="Back to Jarvis"
+				@click="goHome"
+			>
 				<JarvisMark :size="24" :radius="6" />
-				<span class="jv-sup-backtext">{{ backLabel }}</span>
 			</button>
-			<div class="jv-sup-title" :title="title">{{ title }}</div>
-			<div class="jv-sup-actions"><slot name="actions" /></div>
+			<Breadcrumbs class="min-w-0" :items="crumbs" />
+			<div class="jv-sup-right">
+				<Button
+					variant="outline"
+					size="sm"
+					icon="external-link"
+					label="Open ERPNext Desk"
+					:tooltip="'Open ERPNext Desk'"
+					class="jv-deskbtn"
+					@click="openDesk"
+				/>
+				<slot name="actions" />
+			</div>
 		</header>
-		<main class="jv-sup-body"><slot /></main>
+
+		<main class="jv-sup-body">
+			<!-- Chat-surface pages (thread, new) reuse the chat Composer/Message, which
+			     need the jv-root palette-vars + the index.css forms reset. Wrap ONLY
+			     those. The list page renders bare so its reused frappe-ui ListPage
+			     controls keep their stock look (the forms reset would otherwise strip
+			     the search box down to a UA input). -->
+			<div
+				v-if="chatSurface"
+				class="jv-root jv-sup-chat"
+				:class="{ 'jv-dark': effectiveDark }"
+				:style="paletteVars"
+			>
+				<slot />
+			</div>
+			<slot v-else />
+		</main>
 	</div>
 </template>
 
 <script setup>
-// ALL THREE of jv-root / jv-dark / paletteVars on the template's root div are
-// load-bearing; see the plan's Global Constraint 2. jv-root alone carries
-// color-scheme, the ::placeholder color and the forms reset Composer's
-// textarea depends on, and none of those failures are visible in a
-// light-theme glance.
-//
-// That comment deliberately lives HERE and not as a `<!--  -->` directly
-// above the div in the template: a sibling comment at the template's root
-// level compiles to a two-node Fragment (comment + div), and
-// @vue/test-utils then resolves `wrapper.element` to the outer mount
-// container instead of this div — every classList/style assertion in
-// support-shell.test.js would silently read the wrong node
-// (VueWrapper#element: `hasMultipleRoots ? parentElement : vm.$el`).
+// SupportShell - the standalone support chrome. It is NOT a jv-root itself: the
+// bar is painted in frappe-ui tokens to match the app shell's header, and the
+// chat palette is applied only around chat-surface page bodies (see chatSurface).
 import { useRouter } from "vue-router";
+import { Breadcrumbs, Button } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
 import { useJarvisTheme } from "@/theme";
 
-const props = defineProps({
-	title: { type: String, default: "Support" },
-	// Where "Back to Jarvis" goes. Chat by default; the thread page overrides it
-	// to the ticket list so Back walks the hierarchy rather than exiting support.
-	backTo: { type: Object, default: () => ({ name: "Chat" }) },
-	// Label paired with backTo — the list page keeps the default (exits support
-	// entirely), while the thread and new-ticket pages pass "All tickets" since
-	// they walk back UP the support hierarchy, not out of it. Drives both the
-	// visible text and the aria-label so mobile (which hides jv-sup-backtext)
-	// still announces the right destination.
-	backLabel: { type: String, default: "Back to Jarvis" },
+defineProps({
+	// Breadcrumbs trail, e.g. [{label:'Support', route:{name:'Support'}}, {label:'#123'}].
+	// The last item renders as the current page; earlier items are links.
+	crumbs: { type: Array, default: () => [{ label: "Support" }] },
+	// true on pages that host the chat Composer/Message (thread, new) — wraps the
+	// body in a jv-root palette surface. Omitted on the frappe-ui list page.
+	chatSurface: { type: Boolean, default: false },
 });
 
 const router = useRouter();
 const { effectiveDark, paletteVars } = useJarvisTheme();
 
-function goBack() {
-	router.push(props.backTo);
+// The brand mark is the home affordance back to the Jarvis app (there is no
+// sidebar on the standalone route). Desk opens in a new tab, exactly like the
+// app header's Go-to-Desk button (LayoutHeader.openDesk).
+function goHome() {
+	router.push({ name: "Chat" });
+}
+function openDesk() {
+	window.open("/app", "_blank");
 }
 </script>
 
 <style scoped>
-.jv-support {
+.jv-sup {
 	display: flex;
 	flex-direction: column;
 	height: 100%;
 	width: 100%;
 	overflow: hidden;
-	color: var(--text);
-	background: var(--surface);
+	background: var(--surface-white);
+	color: var(--ink-gray-8);
 	font-family: "Inter", system-ui, sans-serif;
 }
 .jv-sup-bar {
 	display: flex;
 	align-items: center;
-	gap: 12px;
+	gap: 10px;
 	flex: 0 0 auto;
 	height: 52px;
-	padding: 0 16px;
-	border-bottom: 1px solid var(--border);
-	background: var(--surface-1);
+	padding: 0 20px;
+	border-bottom: 1px solid var(--outline-gray-1);
+	background: var(--surface-white);
 }
-.jv-sup-back {
+.jv-sup-home {
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	padding: 6px 10px 6px 6px;
+	flex: 0 0 auto;
+	padding: 2px;
 	border: 0;
-	border-radius: 8px;
+	border-radius: 6px;
 	background: transparent;
-	color: var(--text-2);
 	cursor: pointer;
-	font: inherit;
 }
-.jv-sup-back:hover {
-	background: var(--surface-2);
-	color: var(--text);
+.jv-sup-home:hover {
+	opacity: 0.82;
 }
-.jv-sup-backtext {
-	font-size: 13px;
-}
-.jv-sup-title {
-	flex: 1;
-	min-width: 0;
-	font-size: 15px;
-	font-weight: 600;
-	color: var(--text);
-	text-align: center;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.jv-sup-actions {
+.jv-sup-right {
+	margin-left: auto;
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	flex: 0 0 auto;
 }
 .jv-sup-body {
 	flex: 1;
@@ -114,12 +129,16 @@ function goBack() {
 	flex-direction: column;
 	overflow: hidden;
 }
-@media (max-width: 640px) {
-	.jv-sup-backtext {
-		display: none;
-	}
-	.jv-sup-title {
-		text-align: left;
-	}
+/* The list page passes its own `min-h-0 flex-1` to ListPage; the chat wrapper
+   fills via .jv-sup-chat below. */
+.jv-sup-chat {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	color: var(--text);
+	background: var(--surface);
+	font-family: "Inter", system-ui, sans-serif;
 }
 </style>
