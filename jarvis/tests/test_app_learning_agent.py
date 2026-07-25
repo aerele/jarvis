@@ -169,6 +169,11 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# anyway so a failing assertion cannot leak a live credential row into the site
 		if self._minted_sessions:
 			frappe.db.delete(SESSION, {"session_key": ["in", list(self._minted_sessions)]})
+		# COMMIT the cleanup. Several tests here commit deliberately (the sweep/reaper
+		# paths commit internally), so their rows survive the per-test rollback; without
+		# committing the cleanup too, a ``fakeapp-*`` wiki page outlives this module and
+		# breaks an unrelated suite's count assertion in the same DB.
+		frappe.db.commit()
 		frappe.set_user("Administrator")
 		shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -1245,14 +1250,20 @@ class TestRunAgentNowScribeGate(FrappeTestCase):
 	def test_app_learning_launch_stamps_and_persists_the_selection(self):
 		self._as_app_learning()
 		inst = self._install()
-		with mock.patch("jarvis.chat.agent_scheduler._launch_audit") as launch:
-			launch.return_value = {"run": "R", "conversation": "C", "session_key": "S"}
-			self._run_now(inst, options={"source_apps": ["fakeapp", "fakeapp"]}, launch=launch)
-		# the validated + de-duplicated selection reaches the launch...
-		self.assertEqual(launch.call_args.kwargs["source_apps"], ["fakeapp"])
-		# ... and is PERSISTED so the scheduled path has an explicit selection to reuse
-		stored = frappe.db.get_value("Jarvis Agent Installation", inst, "source_apps_json")
-		self.assertEqual(json.loads(stored), ["fakeapp"])
+		# both call shapes: a dict, and the JSON STRING the SPA actually sends over the
+		# whitelisted endpoint (frappe hands whitelisted args through as strings)
+		for options in ({"source_apps": ["fakeapp", "fakeapp"]}, json.dumps({"source_apps": ["fakeapp"]})):
+			frappe.db.set_value(
+				"Jarvis Agent Installation", inst, "source_apps_json", None, update_modified=False
+			)
+			with mock.patch("jarvis.chat.agent_scheduler._launch_audit") as launch:
+				launch.return_value = {"run": "R", "conversation": "C", "session_key": "S"}
+				self._run_now(inst, options=options, launch=launch)
+			# the validated + de-duplicated selection reaches the launch...
+			self.assertEqual(launch.call_args.kwargs["source_apps"], ["fakeapp"])
+			# ... and is PERSISTED so the scheduled path has an explicit selection to reuse
+			stored = frappe.db.get_value("Jarvis Agent Installation", inst, "source_apps_json")
+			self.assertEqual(json.loads(stored), ["fakeapp"])
 
 
 class TestScheduledAppLearningSelection(FrappeTestCase):
