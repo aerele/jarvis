@@ -784,3 +784,144 @@ class TestAgentsMarketplace(unittest.TestCase):
 		finally:
 			frappe.set_user("Administrator")
 		self.assertIsNone(frappe.db.get_value(INSTALLATION, inst, "run_as_user") or None)
+
+	# ------------------------------------------------------------------ #
+	# (k) R1-F3 — a blank run_as_user is REFUSED at every DISPATCH entry point
+	#
+	# ``reqd`` on run_as_user had to go (a disabled legacy row must stay
+	# DISABLEABLE) and the controller check that replaced it lives in validate(),
+	# which frappe skips WHOLESALE under ``flags.ignore_validate``
+	# (run_before_save_methods returns early; ``_validate`` — the reqd enforcer —
+	# is the one that always runs). An ENABLED install with no executing identity
+	# is therefore persistable by a future seeder/importer, and the old
+	# ``run_as_user or owner`` fallback would have silently bound its ERP reads to
+	# the row OWNER — an identity ``_validate_run_as_escalation`` never litigated.
+	# Every dispatch path must refuse instead, diagnosably.
+	# ------------------------------------------------------------------ #
+	def _no_dispatch(self, **kw):
+		raise AssertionError("an install with no run-as user must never reach dispatch")
+
+	def test_launch_audit_refuses_blank_run_as_user(self):
+		"""The shared choke point BOTH dispatch paths funnel through."""
+		import jarvis.admin_client as admin_client
+
+		inst_name = self._make_legacy_enabled(self.owner, "close-auditor")
+		inst = frappe.get_doc(INSTALLATION, inst_name)
+		convs_before = frappe.db.count("Jarvis Conversation")
+
+		orig_run = admin_client.post_agent_run
+		admin_client.post_agent_run = self._no_dispatch
+		try:
+			frappe.set_user(self.owner)
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				agent_scheduler._launch_audit(inst, trigger="manual")
+		finally:
+			frappe.set_user("Administrator")
+			admin_client.post_agent_run = orig_run
+
+		self.assertIn("run-as user", str(ctx.exception))
+		# Refused BEFORE anything is written — no orphan conversation, no orphan Run.
+		self.assertEqual(frappe.db.count("Jarvis Conversation"), convs_before)
+		self.assertEqual(frappe.get_all(RUN, filters={"installation": inst_name}, pluck="name"), [])
+
+	def test_run_agent_now_refuses_blank_run_as_user(self):
+		"""Manual entry point — refused, never silently run as the row owner."""
+		import jarvis.admin_client as admin_client
+
+		inst_name = self._make_legacy_enabled(self.owner, "close-auditor")
+		orig_run = admin_client.post_agent_run
+		admin_client.post_agent_run = self._no_dispatch
+		try:
+			frappe.set_user(self.owner)
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				agents_api.run_agent_now(inst_name)
+		finally:
+			frappe.set_user("Administrator")
+			admin_client.post_agent_run = orig_run
+
+		self.assertIn("run-as user", str(ctx.exception))
+		self.assertEqual(frappe.get_all(RUN, filters={"installation": inst_name}, pluck="name"), [])
+
+	def test_scheduler_refuses_blank_run_as_user_and_consumes_the_slot(self):
+		"""Scheduled entry point — skipped with a RECORDED reason (an operator has
+		to be able to diagnose it), and the slot is consumed so a misconfiguration
+		does not busy-retry every hour for ever."""
+		from frappe.utils import add_days, now_datetime
+
+		import jarvis.admin_client as admin_client
+
+		inst_name = self._make_legacy_enabled(self.owner, "close-auditor")
+		now = now_datetime()
+		frappe.db.set_value(
+			INSTALLATION,
+			inst_name,
+			{"schedule_enabled": 1, "schedule_frequency": "daily", "next_run_at": add_days(now, -1)},
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+		# Insulate from any OTHER due installation on this (dev) site: park their
+		# slots and restore afterwards, so the cron run only touches ours.
+		parked = {
+			r.name: r.next_run_at
+			for r in frappe.get_all(
+				INSTALLATION,
+				filters={
+					"enabled": 1,
+					"schedule_enabled": 1,
+					"next_run_at": ["<=", now],
+					"name": ["!=", inst_name],
+				},
+				fields=["name", "next_run_at"],
+			)
+		}
+		for n in parked:
+			frappe.db.set_value(INSTALLATION, n, "next_run_at", add_days(now, 2), update_modified=False)
+		frappe.db.commit()
+
+		orig_run = admin_client.post_agent_run
+		admin_client.post_agent_run = self._no_dispatch
+		try:
+			agent_scheduler.run_due_agent_audits()
+		finally:
+			admin_client.post_agent_run = orig_run
+			for n, ts in parked.items():
+				frappe.db.set_value(INSTALLATION, n, "next_run_at", ts, update_modified=False)
+			frappe.db.commit()
+
+		runs = frappe.get_all(
+			RUN, filters={"installation": inst_name}, fields=["owner", "status", "error"]
+		)
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0]["status"], "failed")  # never "running"
+		self.assertEqual(runs[0]["owner"], self.owner)  # the customer sees WHY
+		self.assertIn("no run-as user", runs[0]["error"])
+		# The slot was consumed: next_run_at advanced into the future.
+		row = frappe.db.get_value(INSTALLATION, inst_name, ["next_run_at", "last_run_at"], as_dict=True)
+		self.assertIsNotNone(row.last_run_at)
+		self.assertGreater(row.next_run_at, now)
+
+	def test_dispatch_paths_are_unchanged_for_a_valid_run_as_user(self):
+		"""The refusal must not perturb the normal case: an install carrying a
+		valid run-as user still dispatches, under THAT identity."""
+		import jarvis.admin_client as admin_client
+
+		inst_name = self._enable_for(self.owner, "close-auditor")
+		captured = {}
+		orig_run = admin_client.post_agent_run
+
+		def _cap(**kw):
+			captured["user"] = frappe.session.user
+			return {"run_id": kw.get("run_id"), "status": "queued"}
+
+		admin_client.post_agent_run = _cap
+		try:
+			frappe.set_user(self.owner)
+			res = agents_api.run_agent_now(inst_name)
+		finally:
+			frappe.set_user("Administrator")
+			admin_client.post_agent_run = orig_run
+
+		self.assertTrue(res["ok"])
+		self.assertEqual(captured.get("user"), self.owner)
+		self.assertEqual(frappe.db.get_value(RUN, res["data"]["run"], "status"), "running")

@@ -33,6 +33,7 @@ trigger takes the EXACT same code path as the scheduler.
 from datetime import timedelta
 
 import frappe
+from frappe import _
 from frappe.utils import now_datetime
 
 from jarvis.chat.agent_activity import log_activity
@@ -111,9 +112,22 @@ def run_due_agent_audits() -> None:
 			continue
 
 		# Phase 1 identity: the audit executes AS the install's run_as_user (its
-		# jarvis__* reads are permission-bounded to that user). Falls back to
-		# owner for installs from before run_as_user / the A13 backfill.
-		run_as = row.run_as_user or row.owner
+		# jarvis__* reads are permission-bounded to that user).
+		#
+		# R1-F3: there is deliberately NO ``or row.owner`` fallback. A blank
+		# run_as_user means the install is MISCONFIGURED, not that it should run as
+		# the row owner: the owner is an identity ``_validate_run_as_escalation``
+		# never litigated, so binding an unattended run to it would execute ERP
+		# reads under rights nobody vetted. Refuse, record WHY, and CONSUME the slot
+		# — retrying hourly would just relog the same failure 24x/day and can never
+		# fix itself; a human has to set a run-as user or disable the install.
+		run_as = (row.run_as_user or "").strip()
+		if not run_as:
+			_record_failed(
+				row, "scheduled audit skipped: no run-as user on this install (set one, or disable it)"
+			)
+			_advance(row, now)
+			continue
 
 		# S1 fail-closed identity guard — never bind a scheduled audit turn to
 		# Administrator / Guest / a disabled RUN-AS user.
@@ -232,7 +246,26 @@ def _launch_audit(inst, trigger: str) -> dict:
 	# run_agent_now) has already switched the session to this user, so
 	# frappe.session.user == run_as_user here — scope + watermark below are
 	# resolved AS the run-as user (permission-bounded).
-	run_as_user = inst.run_as_user or owner
+	#
+	# R1-F3: the LAST line of defence, and the reason no ``or owner`` fallback
+	# survives anywhere on the run path. ``run_as_user`` is no longer ``reqd`` (a
+	# legacy row carrying none must stay DISABLEABLE) and the controller check that
+	# replaced it lives in ``validate()``, which frappe skips WHOLESALE under
+	# ``flags.ignore_validate`` (``run_before_save_methods`` returns early;
+	# ``_validate`` — the ``reqd`` enforcer — is what always runs). So a future
+	# seeder/importer adopting that flag could persist an ENABLED install with no
+	# executing identity. Refuse to dispatch it rather than falling back to the row
+	# OWNER: that identity was never litigated by the escalation guard, so the
+	# fallback amounts to a privilege grant nobody reviewed. Thrown BEFORE any row
+	# is inserted, so a refused launch leaves no orphan conversation/run.
+	run_as_user = (inst.run_as_user or "").strip()
+	if not run_as_user:
+		frappe.throw(
+			_(
+				"This agent installation has no run-as user, so there is no identity to run "
+				"it as. Set a run-as user on the installation, or disable it."
+			)
+		)
 
 	# Fresh conversation. ROW ownership is the human owner (reassigned below) so
 	# if_owner visibility works; the ERP-read identity is the run-as user.
