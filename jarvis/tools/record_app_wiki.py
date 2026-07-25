@@ -205,33 +205,82 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 
 
 def _tally_run(run_name: str, applied_pages: list[dict], truncated: bool, dropped: int) -> None:
-	"""Accumulate this call's written pages onto the run row so the Runs tab can
-	show "N pages written" with links WITHOUT any findings shape, and so a
-	successful run has its tally even before the terminal
-	``finish_app_learning_run`` flips its status. Sequential within one delegate
-	turn, so read-modify-write is safe. Best-effort: a tally hiccup never fails a
-	landed write."""
+	"""Accumulate this call's written pages onto the run row so the Runs tab can show
+	"N pages written" with links WITHOUT any findings shape, and so a successful run has
+	its tally even before the terminal ``finish_app_learning_run`` flips its status.
+
+	CA2-3 — MANDATORY + ATOMIC + PROPAGATING: the run row is LOCKED (``for_update``) and
+	the tally is read-modify-written in the SAME transaction as the page writes (both
+	commit together at request end), so a committed page is never reported applied
+	without a durable tally. Any persistence failure (lock timeout / schema skew /
+	transient) is PROPAGATED — no longer swallowed — so the request rolls the pages back
+	too and retries, rather than leaving committed pages with no tally. The tally is ALSO
+	recoverable from page provenance: every written page carries a ``sources`` entry
+	stamped with this run id (``ref``), so ``reconcile_pages_written`` can rebuild the
+	count if a direct tally were ever lost. Only a parse error on a corrupt existing
+	``pages_json`` is tolerated (it resets, never aborts)."""
 	if not applied_pages and not truncated:
 		return
+	cur = (
+		frappe.db.get_value(RUN, run_name, ["pages_written", "pages_json"], as_dict=True, for_update=True)
+		or {}
+	)
 	try:
-		cur = frappe.db.get_value(RUN, run_name, ["pages_written", "pages_json"], as_dict=True) or {}
-		try:
-			existing = json.loads(cur.get("pages_json") or "[]")
-		except Exception:
-			existing = []
-		if not isinstance(existing, list):
-			existing = []
-		seen = {p.get("slug") for p in existing if isinstance(p, dict)}
-		for m in applied_pages:
-			if m["slug"] not in seen:
-				existing.append({"slug": m["slug"], "title": m["title"]})
-				seen.add(m["slug"])
-		values = {
-			"pages_written": int(cur.get("pages_written") or 0) + len(applied_pages),
-			"pages_json": frappe.as_json(existing[: ctx.PER_RUN_PAGE_CAP])[:60000],
-		}
-		if truncated and dropped:
-			values["coverage_note"] = f"partial coverage: {dropped} page(s) exceeded the per-run cap"[:140]
-		frappe.db.set_value(RUN, run_name, values, update_modified=False)
+		existing = json.loads(cur.get("pages_json") or "[]")
 	except Exception:
-		frappe.log_error(title="record_app_wiki: run tally failed", message=frappe.get_traceback())
+		existing = []
+	if not isinstance(existing, list):
+		existing = []
+	seen = {p.get("slug") for p in existing if isinstance(p, dict)}
+	for m in applied_pages:
+		if m["slug"] not in seen:
+			existing.append({"slug": m["slug"], "title": m["title"]})
+			seen.add(m["slug"])
+	values = {
+		"pages_written": int(cur.get("pages_written") or 0) + len(applied_pages),
+		"pages_json": frappe.as_json(existing[: ctx.PER_RUN_PAGE_CAP])[:60000],
+	}
+	if truncated and dropped:
+		values["coverage_note"] = f"partial coverage: {dropped} page(s) exceeded the per-run cap"[:140]
+	frappe.db.set_value(RUN, run_name, values, update_modified=False)
+
+
+def reconcile_pages_written(run_name: str) -> int:
+	"""Rebuild a run's written-page count from PAGE PROVENANCE (CA2-3 recovery).
+
+	Every page ``record_app_wiki`` wrote carries a ``sources`` entry stamped with this
+	run's id (``ref``) under an ``app-learning*`` kind, so the tally is recoverable from
+	the pages themselves even if the direct tally write were ever lost. The stale-run
+	reaper uses this as a fallback before failing a scribe run whose stored tally reads
+	zero. Bounded + best-effort: scans only Active pages whose ``sources`` mention the
+	(unique, hash-shaped) run id, verifies the provenance in Python, and returns the
+	reconciled count (0 when none found or on any error)."""
+	if not run_name:
+		return 0
+	from jarvis.chat.wiki import WIKI
+
+	try:
+		rows = frappe.get_all(
+			WIKI,
+			filters={"status": "Active", "sources": ["like", f"%{run_name}%"]},
+			fields=["sources"],
+			limit_page_length=ctx.PER_RUN_PAGE_CAP + 5,
+		)
+	except Exception:
+		return 0
+	count = 0
+	for r in rows:
+		try:
+			sources = json.loads(r.sources or "[]")
+		except Exception:
+			continue
+		if not isinstance(sources, list):
+			continue
+		if any(
+			isinstance(s, dict)
+			and s.get("ref") == run_name
+			and str(s.get("kind") or "").startswith(PROVENANCE_FENCE_PREFIX)
+			for s in sources
+		):
+			count += 1
+	return count

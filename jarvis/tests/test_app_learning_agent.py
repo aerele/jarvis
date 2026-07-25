@@ -575,6 +575,28 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# no phantom tally: nothing was recorded as written on the run
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
 
+	def test_tally_write_failure_propagates_and_rolls_back(self):
+		# CA2-3: a failed tally write must PROPAGATE (not be swallowed), so the request
+		# rolls the pages back too and retries rather than committing pages with no
+		# durable tally.
+		import pymysql
+
+		run = self._bind_scribe_run()
+		real_set = frappe.db.set_value
+
+		def _sv(dt, *a, **k):
+			if dt == RUN:  # the run-row tally write — simulate a lock-wait timeout
+				raise pymysql.err.OperationalError(1205, "Lock wait timeout exceeded")
+			return real_set(dt, *a, **k)
+
+		with mock.patch.object(frappe.db, "set_value", side_effect=_sv):
+			with self.assertRaises(pymysql.err.OperationalError):
+				record_app_wiki(
+					app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+				)
+		# the tally was never persisted (the write failed and propagated)
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
+
 
 class TestRunAgentNowScribeGate(FrappeTestCase):
 	"""The ``run_agent_now`` nature gate admits Scribe (auditor stays valid,
