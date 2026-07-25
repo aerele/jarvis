@@ -473,6 +473,7 @@ def get_agent_admin_overview() -> dict:
 			"name",
 			"agent",
 			"owner",
+			"run_as_user",
 			"enabled",
 			"schedule_enabled",
 			"schedule_frequency",
@@ -486,6 +487,11 @@ def get_agent_admin_overview() -> dict:
 			{
 				"installation": i.name,
 				"owner": i.owner,
+				# R1-S2: the EXECUTING identity, distinct from the row owner. A blank
+				# one is a legacy/misconfigured row — the dispatch paths refuse to run
+				# it (R1-F3) — so an admin reading an Apply or run failure needs to see
+				# WHICH row it is here, rather than having to open raw Desk.
+				"run_as_user": i.run_as_user or None,
 				"enabled": int(i.enabled or 0),
 				"schedule_enabled": int(i.schedule_enabled or 0),
 				"schedule_frequency": i.schedule_frequency,

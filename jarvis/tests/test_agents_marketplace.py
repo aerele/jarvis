@@ -532,6 +532,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(install_row["owner"], self.owner)
 		for key in (
 			"enabled",
+			"run_as_user",
 			"schedule_enabled",
 			"schedule_frequency",
 			"next_run_at",
@@ -539,6 +540,25 @@ class TestAgentsMarketplace(unittest.TestCase):
 			"sync_status",
 		):
 			self.assertIn(key, install_row)
+
+	def test_admin_overview_surfaces_run_as_user_including_blank(self):
+		"""R1-S2: the cross-owner Admin feed carries the EXECUTING identity, so an
+		admin reading an Apply/run failure can see WHICH install is misconfigured
+		without dropping to raw Desk. A blank one must arrive as a falsy value (the
+		badge case), not be omitted."""
+		good = self._enable_for(self.owner, "close-auditor")
+		legacy = self._make_legacy_enabled(self.other, "close-auditor")
+
+		frappe.set_user(self.admin)  # a System Manager
+		try:
+			out = agents_api.get_agent_admin_overview()
+		finally:
+			frappe.set_user("Administrator")
+
+		rows = {i["installation"]: i for lst in out["listings"] for i in lst["installs"]}
+		self.assertEqual(rows[good]["run_as_user"], self.owner)
+		self.assertIn(legacy, rows)
+		self.assertFalse(rows[legacy]["run_as_user"])
 
 	# ------------------------------------------------------------------ #
 	# (g) RBAC — scheduler skips an owner whose roles were revoked
