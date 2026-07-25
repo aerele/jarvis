@@ -20,7 +20,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createVoiceChunkQueue } from "./voiceChunkQueue.js";
-import { promoteNewChatScope, planRejectedSend, createPendingSends } from "./voiceSendGlue.js";
+import {
+	promoteNewChatScope,
+	planRejectedSend,
+	createPendingSends,
+	injectPendingBubbles,
+} from "./voiceSendGlue.js";
 
 const SENTINEL = "__jarvis_new_chat__";
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -666,4 +671,66 @@ test("VR4-2: a main send rejected after a mid-send switch restores text to the O
 		"typed in convR",
 		"the origin's text is restored to ITS draft — no cross-conversation bleed (VR4-2)"
 	);
+});
+
+// ── (VR5-3) newChat() promotes the sentinel scope then resets messages; the route watcher no-ops, so
+//        the promoted failed bubble + its token must be RE-INJECTED here or it stays hidden. ─────────
+test("VR5-3: after newChat promotes the sentinel, the failed bubble is re-injected (not hidden until another nav)", () => {
+	const pending = createPendingSends();
+	// A send from the id-less new-chat composer failed → a failed bubble carrying a voice token, kept
+	// origin-scoped under the sentinel.
+	const bubble = { name: "opt-7", content: "hello", failed: true, voiceAck: [3] };
+	pending.add(SENTINEL, bubble);
+
+	// newChat(): promote the sentinel to the real id (_promoteNewChatScope's queue/draft migration is a
+	// no-op here; the pending-store reassign is the part that matters for the bubble)...
+	promoteNewChatScope({
+		queue: null,
+		drafts: {},
+		fromScope: SENTINEL,
+		toId: "conv-real",
+		takeScope: SENTINEL,
+	});
+	pending.reassign(SENTINEL, "conv-real");
+	assert.deepEqual(
+		pending.peek(SENTINEL),
+		[],
+		"the failed bubble left the sentinel scope on promotion"
+	);
+	assert.deepEqual(pending.peek("conv-real"), [bubble], "…and now belongs to the real conversation");
+
+	// ...then newChat resets messages to [] and (the VR5-3 fix) re-injects the real scope's pending
+	// bubbles exactly as loadConversation does.
+	let messages = [];
+	messages = injectPendingBubbles(messages, pending.peek("conv-real"));
+	assert.deepEqual(
+		messages,
+		[bubble],
+		"the promoted failed bubble (with its voice-release token) is visible right after newChat"
+	);
+	assert.deepEqual(messages[0].voiceAck, [3], "its recovery token survives the promotion + hydrate");
+
+	// Idempotent: a subsequent hydrate (or a later loadConversation) must not double-inject.
+	messages = injectPendingBubbles(messages, pending.peek("conv-real"));
+	assert.equal(messages.length, 1, "dedupe by name — no duplicate bubble on re-hydrate");
+});
+
+// ── (VR5-3) injectPendingBubbles is a pure, defensive merge (dedupe by name, tolerant inputs). ──────
+test("VR5-3: injectPendingBubbles dedupes by name, ignores nameless entries, and tolerates empty input", () => {
+	const a = { name: "a", content: "A" };
+	const b = { name: "b", content: "B" };
+	// nothing to add → same array reference back (no needless reactive churn).
+	const base = [a];
+	assert.equal(injectPendingBubbles(base, []), base, "empty pending → the input array is returned as-is");
+	assert.equal(injectPendingBubbles(base, undefined), base, "missing pending → input returned as-is");
+	// dedupe: `a` is already present, only `b` is appended.
+	assert.deepEqual(
+		injectPendingBubbles([a], [a, b]),
+		[a, b],
+		"an already-present bubble (by name) is not duplicated; the new one is appended"
+	);
+	// defensive: a nameless / null entry is skipped, never appended.
+	assert.deepEqual(injectPendingBubbles([], [null, { content: "no name" }, b]), [b], "nameless/null entries are ignored");
+	// tolerates a non-array messages input.
+	assert.deepEqual(injectPendingBubbles(undefined, [b]), [b], "a non-array messages input degrades to []");
 });

@@ -63,6 +63,22 @@ export function planRejectedSend({ fromMain, bubbleVoiceAck }) {
 	return { keepBubble: false, restoreText: !!fromMain };
 }
 
+// VR5-3 / VR4-2: merge a scope's origin-kept failed optimistic bubbles into the rendered `messages`
+// array WITHOUT duplicating any already present (dedupe by bubble name). BOTH loadConversation() (on a
+// switch/return) and newChat() call this: newChat() promotes the new-chat sentinel to the real id and
+// then resets `messages`, but the route watcher no-ops (currentId already equals the new id), so
+// loadConversation()'s peek never runs — a failed bubble + its voice-release token would stay INVISIBLE
+// (and its leave guard unresolved) until some later away-and-back. Sharing one merge keeps newChat()
+// hydrating "exactly as loadConversation does". Pure + array-returning so it is node-testable; returns
+// the input array unchanged (same ref) when there is nothing new to inject.
+export function injectPendingBubbles(messages, pendingBubbles) {
+	const base = Array.isArray(messages) ? messages : [];
+	if (!pendingBubbles || !pendingBubbles.length) return base;
+	const have = new Set(base.map((m) => m && m.name));
+	const add = pendingBubbles.filter((b) => b && b.name && !have.has(b.name));
+	return add.length ? [...base, ...add] : base;
+}
+
 // R4-2 (VR4-2): an ORIGIN-conversation-scoped store of failed optimistic bubbles, DECOUPLED from the
 // rendered `messages` array. When a send is rejected while the user has navigated to a DIFFERENT
 // conversation, loadConversation() has already REPLACED `messages`, so a bubble kept only there is

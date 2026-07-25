@@ -3768,7 +3768,12 @@ import * as voice from "@/api/voice";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { useChunkedRecorder } from "@/composables/useChunkedRecorder";
 import { createVoiceChunkQueue } from "@/utils/voiceChunkQueue";
-import { promoteNewChatScope, planRejectedSend, createPendingSends } from "@/utils/voiceSendGlue";
+import {
+	promoteNewChatScope,
+	planRejectedSend,
+	createPendingSends,
+	injectPendingBubbles,
+} from "@/utils/voiceSendGlue";
 import { createClipMirror, listOrphanClips, deleteOrphanClip } from "@/utils/clipMirror";
 import { setMacroPrefill } from "@/composables/macroPrefill";
 import { takeChatPrefill } from "@/composables/chatPrefill";
@@ -6588,12 +6593,7 @@ async function loadConversation(id) {
 	// was off-screen (their rendered copy was dropped when messages was replaced). They are kept
 	// origin-scoped and carry the voice-release token, so the resend affordance survives a mid-send
 	// switch. Dedupe by name (a rejection that lands while we're on-screen already holds one).
-	const _pf = _pendingSends.peek(id);
-	if (_pf.length) {
-		const have = new Set(messages.value.map((m) => m.name));
-		const add = _pf.filter((b) => !have.has(b.name));
-		if (add.length) messages.value = [...messages.value, ...add];
-	}
+	messages.value = injectPendingBubbles(messages.value, _pendingSends.peek(id));
 	// get_conversation returns {conversation: {...}, messages: [...]}. Reading
 	// d.model_override (one level too high) silently yielded undefined, so a
 	// saved pin always rendered as "Auto" after a reload.
@@ -6936,6 +6936,13 @@ async function newChat() {
 	// and a later send can release the records by the real scope instead of stranding them (R2-2/R3-2).
 	if (currentId.value) _promoteNewChatScope(currentId.value);
 	messages.value = [];
+	// VR5-3: _promoteNewChatScope above moved any sentinel-scoped failed bubble (+ its voice-release
+	// token) onto the real id, but the route watcher no-ops here (currentId already equals this id),
+	// so loadConversation()'s pending-bubble peek never runs — re-inject them now, exactly as
+	// loadConversation does, so the failed bubble stays visible + resendable in-session and its leave
+	// guard is resolvable, instead of being hidden until some later away-and-back.
+	if (currentId.value)
+		messages.value = injectPendingBubbles(messages.value, _pendingSends.peek(currentId.value));
 	// Reflect the new chat's own id in the URL (/c/:id) so it's refresh-persistent
 	// and shareable, instead of dropping to the id-less home. currentId already
 	// equals this id, so the route watcher no-ops (no redundant load), and it
