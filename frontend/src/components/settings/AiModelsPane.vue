@@ -2,40 +2,52 @@
 	<!-- AI models pane (System Managers only — the dialog rail gates the section).
 	     Ported from views/AccountView.vue's "AI models" card: a segmented
 	     Chat-subscription | API-keys/failover control, a brief save note, and a
-	     retryable load. The dialog root supplies paletteVars + .jv-dark, so the
-	     shared jv-* classes resolve here without a local palette wrapper. -->
-	<!-- jv-pane-fill: the left rail (~516px) floors the dialog height, but this
-	     pane's content is only ~164px, so ~276px would sit as dead white space.
-	     Fill the column and let the Save bar sink to the bottom (see settings.css)
-	     so that space reads as a footer, matching the onboarding wizard. -->
-	<div class="jv-settings-body jv-pane-fill">
-		<!-- brief save acknowledgement (the editors persist themselves) -->
-		<div v-if="savedNote" style="display: flex; justify-content: flex-end; margin-bottom: 8px">
-			<span class="jv-acct-savednote">{{ savedNote }}</span>
+	     retryable load. SettingsDialog's CONTENT root binds paletteVars +
+	     .jv-dark, so the shared jv-* classes below resolve without a local
+	     palette wrapper. If that binding is ever dropped, every var(--) here and
+	     in LlmPoolEditor resolves to nothing (none of them carry fallbacks). -->
+	<!-- The dialog shell stopped rendering a shared header, so this pane supplies
+	     its own like every other one. Only the header is migrated here: the body
+	     below still uses the legacy jv-* markup because LlmPoolEditor (3,959
+	     lines, drives live tenant pool provisioning) is deliberately deferred to
+	     its own PR. -->
+	<div class="flex h-full flex-col gap-6 px-10 py-8 text-ink-gray-8">
+		<div class="flex items-start justify-between gap-4">
+			<div class="flex flex-col gap-1">
+				<h2 class="text-lg font-semibold text-ink-gray-8">AI models</h2>
+				<p class="max-w-md text-p-sm text-ink-gray-6">
+					The AI connection that powers {{ agentName }}.
+				</p>
+			</div>
+			<span v-if="savedNote" class="shrink-0 text-p-sm text-ink-gray-6">{{
+				savedNote
+			}}</span>
 		</div>
 
-		<div v-if="directSubLoading" class="jv-acct-muted">Loading…</div>
+		<div class="jv-settings-body jv-pane-fill min-h-0 flex-1">
+			<div v-if="directSubLoading" class="jv-acct-muted">Loading…</div>
 
-		<div v-else-if="directSubErr" class="jv-acct-err">
-			Couldn't load your AI connection.
-			<button type="button" class="jv-mon-retry" @click="loadDirectSub">Retry</button>
-		</div>
+			<div v-else-if="directSubErr" class="jv-acct-err">
+				Couldn't load your AI connection.
+				<button type="button" class="jv-mon-retry" @click="loadDirectSub">Retry</button>
+			</div>
 
-		<template v-else>
-			<!-- Unified failover-list editor: a chat subscription, API keys, and
+			<template v-else>
+				<!-- Unified failover-list editor: a chat subscription, API keys, and
 			     multi-model failover pools all live in one list + master-detail
 			     config section. A legacy DIRECT (flat-field, no-proxy) subscription
 			     is probed above and passed down as directStatus - LlmPoolEditor
 			     synthesizes a read-oriented row for it (Reconnect embeds
 			     DirectSubscriptionCard inline; Remove disconnects) without ever
 			     round-tripping it through save_llm_pool. -->
-			<LlmPoolEditor
-				:editable="isSM"
-				:directStatus="directSub"
-				@saved="onSaved"
-				@direct-changed="onDirectChanged"
-			/>
-		</template>
+				<LlmPoolEditor
+					:editable="isSM"
+					:directStatus="directSub"
+					@saved="onSaved"
+					@direct-changed="onDirectChanged"
+				/>
+			</template>
+		</div>
 	</div>
 </template>
 
@@ -43,6 +55,7 @@
 import { ref, onMounted } from "vue";
 import { getDirectSubscriptionStatus } from "@/api";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
+import { agentName } from "@/branding";
 
 // The rail already gates this section to the tenant-admin tier; this flag
 // additionally gates the editor's edit affordances + which probes fire. PART 4
@@ -105,7 +118,7 @@ async function onDirectChanged() {
 // synthesized direct row through save_llm_pool - but re-probing stays cheap
 // insurance against drift).
 async function onSaved(sync) {
-	savedNote.value = sync && sync.pending ? "Saved — syncing…" : "Saved";
+	savedNote.value = sync && sync.pending ? "Saved, syncing…" : "Saved";
 	clearTimeout(savedTimer);
 	savedTimer = setTimeout(() => {
 		savedNote.value = "";

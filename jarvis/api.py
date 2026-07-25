@@ -203,6 +203,10 @@ def _dispatch_from_session(
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
 	# never authors it — it is the delegate's opaque bearer, delivered over the
 	# HTTPS header). record_agent_run resolves its Jarvis Agent Run from it.
+	# R-6: the openclaw tool-call id, when the plugin sends it (forward-compatible
+	# header), keys the out-of-band receipt idempotency. Absent today => no dedupe,
+	# but the seq race is still fixed under the conversation lock.
+	tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
 	_agent_run_ctx.set_session_key(session_key)
 	try:
 		with impersonate(user):
@@ -218,6 +222,7 @@ def _dispatch_from_session(
 					tool=tool,
 					args={},
 					result=result,
+					tool_call_id=tool_call_id,
 				)
 				return result
 			# Pass the already-parsed dict back through _run_tool. _run_tool's
@@ -233,6 +238,7 @@ def _dispatch_from_session(
 				tool=tool,
 				args=parsed_args,
 				result=result,
+				tool_call_id=tool_call_id,
 			)
 			return result
 	finally:
@@ -245,6 +251,7 @@ def _persist_and_publish_tool_call(
 	tool: str,
 	args: dict,
 	result: dict,
+	tool_call_id: str | None = None,
 ) -> None:
 	"""Persist a Jarvis Chat Message (role=tool) and publish a realtime event.
 
@@ -265,11 +272,17 @@ def _persist_and_publish_tool_call(
 		conv_name = (turn or {}).get("conversation")
 		if not conv_name:
 			return
-	persist_tool_receipt(conv_name, tool, args, result)
+	persist_tool_receipt(conv_name, tool, args, result, tool_call_id=tool_call_id)
 
 
 def persist_tool_receipt(
-	conv_name: str, tool: str, args: dict, result: dict | None, *, action_outcome: str | None = None
+	conv_name: str,
+	tool: str,
+	args: dict,
+	result: dict | None,
+	*,
+	action_outcome: str | None = None,
+	tool_call_id: str | None = None,
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
@@ -282,7 +295,18 @@ def persist_tool_receipt(
 	renders it as an inline receipt chip instead of an Activity-accordion tool
 	row: "confirmed" (ran ok), "failed" (confirmed but errored), or "discarded"
 	(the user declined - nothing ran, so ``result`` may be None/empty). Ordinary
-	inline tool calls pass None and render unchanged."""
+	inline tool calls pass None and render unchanged.
+
+	R-6 (WP-1d) tool-receipt hardening — the receipt is a PRECIOUS out-of-band fact
+	(it must be written even mid-hop, so it stays OUT-of-band with NO epoch fence):
+	  * ``seq`` is allocated UNDER the conversation FOR UPDATE lock (shared with the
+	    assistant-placeholder + user-message seq, D3 Race 1 / D1 #7) so two
+	    concurrent receipts (or a receipt racing the placeholder) never collide on
+	    ``MAX(seq)+1``;
+	  * ``(conversation, tool_call_id)`` is the durable idempotency key — a duplicate
+	    callback for the SAME tool call dedupes instead of double-writing. ``tool_call_id``
+	    is null for legacy/self-host callbacks that carry no id (no dedupe then, but
+	    the seq race is still fixed)."""
 	result = result or {}
 	discarded = action_outcome == "discarded"
 	if discarded:
@@ -313,9 +337,31 @@ def persist_tool_receipt(
 	# caller's cookie session sid + data and log them out).
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
 	with impersonate(conv_owner):
-		from jarvis.chat.api import _next_seq
-
-		seq = _next_seq(conv_name)
+		# R-6: take the conversation FOR UPDATE (canonical rank 2, out-of-band, NO
+		# epoch fence) so the seq allocation + the (conversation, tool_call_id)
+		# dedupe are one serialized critical section — no receipt collides on seq
+		# with a concurrent receipt or the assistant placeholder, and a duplicate
+		# callback for the same tool call is a no-op. Commit-first so the FOR UPDATE
+		# is the first statement (REPEATABLE-READ discipline).
+		frappe.db.commit()
+		frappe.db.sql(
+			"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE",
+			{"c": conv_name},
+		)
+		if tool_call_id and frappe.db.exists(
+			"Jarvis Chat Message", {"conversation": conv_name, "tool_call_id": tool_call_id}
+		):
+			# Duplicate callback for the same tool call — already recorded. Release
+			# the lock and return; the out-of-band writer is idempotent (R-6).
+			frappe.db.commit()
+			return
+		seq = (
+			frappe.db.sql(
+				"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s",
+				{"c": conv_name},
+			)[0][0]
+			or 0
+		) + 1
 		doc = frappe.get_doc(
 			{
 				"doctype": "Jarvis Chat Message",
@@ -326,6 +372,7 @@ def persist_tool_receipt(
 				"tool_args": frappe.as_json(args),
 				"tool_result": frappe.as_json(result) if result else None,
 				"tool_status": status,
+				"tool_call_id": tool_call_id or None,
 				"action_outcome": action_outcome or None,
 				"ref_doctype": ref_doctype,
 				"ref_name": ref_name,

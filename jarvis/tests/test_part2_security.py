@@ -23,6 +23,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat.custom_skills import build_push_payload, prefixed_slug
 
 SKILL = "Jarvis Custom Skill"
+RESV = "Jarvis Shared Skill Slug"
 WIKI = "Jarvis Wiki Page"
 WIKI_PROMO = "Jarvis Wiki Promotion Request"
 SKILL_PROMO = "Jarvis Skill Promotion Request"
@@ -86,6 +87,12 @@ def _sweep():
 	otherwise pollute later runs (and trip the unique pattern_key). Roll back
 	uncommitted work first, then hard-delete + commit the committed residue."""
 	frappe.db.rollback()
+	# Reservation rows (SR4-2) are named after the bare slug, so a PFX-slug reservation
+	# is a p2sec-... row; drop them first so the skill delete below never trips over a
+	# lingering reservation and so a committed migration reservation is cleaned.
+	if frappe.db.table_exists(RESV):
+		for n in frappe.get_all(RESV, filters={"slug": ["like", f"{PFX}-%"]}, pluck="name"):
+			frappe.delete_doc(RESV, n, force=True, ignore_permissions=True)
 	for dt, filt in (
 		(SKILL, {"skill_name": ["like", f"{PFX}-%"]}),
 		(WIKI, {"slug": ["like", f"{PFX}-%"]}),
@@ -292,10 +299,14 @@ class TestApplyGate(Part2Base):
 class TestSkillPromotionWorkflow(Part2Base):
 	"""TASK 10 promotion workflow + TASK 19 four-eyes."""
 
-	def test_request_then_reviewer_widens_scope(self):
-		from jarvis.chat import custom_skills_api
+	def test_request_then_reviewer_publishes_shared_copy(self):
+		# CDX-SP-1 materialize model: approval PUBLISHES a new system-owned Org copy
+		# from the reviewed snapshot; the requester's OWN skill stays a private,
+		# intact User row (it is NOT re-scoped in place).
+		from jarvis.chat import custom_skills, custom_skills_api
 
 		skill = _mk_skill(USER_A, f"{PFX}-promote", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", "PROMOTE-BODY-v1")
 		with _as(USER_A):
 			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
 		self.assertTrue(req["ok"])
@@ -304,7 +315,23 @@ class TestSkillPromotionWorkflow(Part2Base):
 		with _as(REVIEWER):
 			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
 		self.assertTrue(out["ok"])
-		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "Org")
+		# The requester's OWN skill is untouched (private + still theirs).
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "owner"), USER_A)
+		# A SEPARATE system-owned Org copy carries EXACTLY the reviewed snapshot and
+		# is the one that reaches the shared container.
+		shared = frappe.get_all(
+			SKILL,
+			filters={"skill_name": f"{PFX}-promote", "scope": "Org"},
+			fields=["name", "owner", "instructions"],
+		)
+		self.assertEqual(len(shared), 1)
+		self.assertEqual(shared[0].owner, "Administrator")
+		self.assertEqual(shared[0].instructions, "PROMOTE-BODY-v1")
+		self.assertEqual(out["skill"], f"{PFX}-promote")
+		self.assertIn(
+			prefixed_slug(f"{PFX}-promote"), {p["slug"] for p in custom_skills.build_push_payload()}
+		)
 
 	def test_requester_cannot_self_approve(self):
 		from jarvis.chat import custom_skills_api
@@ -495,3 +522,1029 @@ class TestPersonaliseOriginProvenance(Part2Base):
 		with _as("Administrator"):
 			out = learned_api.approve_learned_pattern(p.name)
 		self.assertNotIn("scrub_warning", out)
+
+
+class TestSkillPromotionSurfacing(Part2Base):
+	"""Skills-area promotion SURFACING (wiring the existing backend to the UI): the
+	tab badge count, the reviewer content preview + push-budget context, and the
+	requester-side status read + role picker the SPA needs. The request/decide/list
+	endpoints already existed and are covered above; these are the smallest reads
+	added to make them usable, plus the badge count."""
+
+	def test_review_access_counts_pending_skill_promotions(self):
+		from jarvis.chat import custom_skills_api, learned_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-badge", scope="User")
+		with _as(REVIEWER):
+			before = learned_api.get_review_access().get("pending_skill_promotions", 0)
+		with _as(USER_A):
+			custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			after = learned_api.get_review_access()
+		self.assertEqual(after["pending_skill_promotions"], before + 1)
+
+	def test_get_custom_skill_exposes_scope_fields(self):
+		# The requester UI gates "Request promotion…" on scope=User + not-learned,
+		# so get_custom_skill must expose them.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-scopefield", scope="User")
+		with _as(USER_A):
+			out = custom_skills_api.get_custom_skill(skill.name)
+		self.assertEqual(out["scope"], "User")
+		self.assertEqual(out["managed_by_learning"], 0)
+		self.assertIn("target_role", out)
+
+	def test_reviewer_list_carries_body_excerpt_and_budget(self):
+		# A reviewer can read a User-scope skill's BODY via the gated list even
+		# though get_custom_skill denies them (owner/shared only) — the content
+		# preview the decide UI needs — plus the push-budget context for ruling 2.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		secret = "SECRET-INSTRUCTIONS-marker-9f3"
+		skill = _mk_skill(USER_A, f"{PFX}-excerpt", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", secret)
+		with _as(USER_A):
+			custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			res = custom_skills_api.list_skill_promotion_requests(status="Pending")
+		row = next(r for r in res["rows"] if r["skill"] == skill.name)
+		self.assertIn(secret, row["body_excerpt"])
+		self.assertEqual(res["push_budget"], custom_skills.MAX_SKILLS_PER_PUSH)
+		self.assertEqual(res["push_count"], custom_skills.pushable_org_skill_count())
+
+	def test_push_count_reflects_only_pushable_org_skills(self):
+		from jarvis.chat import custom_skills
+
+		base = custom_skills.pushable_org_skill_count()
+		_mk_skill(USER_A, f"{PFX}-org1", scope="Org", enabled=1)
+		_mk_skill(USER_A, f"{PFX}-org2", scope="Org", enabled=1)
+		# role-restricted Org row is NOT pushable (scope-exfil guard) → excluded
+		_mk_skill(USER_A, f"{PFX}-orgrestr", scope="Org", enabled=1, allowed_roles=["Sales User"])
+		# disabled Org row is NOT pushable → excluded
+		_mk_skill(USER_A, f"{PFX}-orgoff", scope="Org", enabled=0)
+		self.assertEqual(custom_skills.pushable_org_skill_count(), base + 2)
+
+	def test_my_skill_promotion_is_owner_scoped(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-mine", scope="User")
+		with _as(USER_A):
+			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
+			req = custom_skills_api.request_skill_promotion(skill.name, "Role", target_role="Sales User")
+			mine = custom_skills_api.my_skill_promotion(skill.name)
+		self.assertEqual(mine["name"], req["request"])
+		self.assertEqual(mine["status"], "Pending")
+		self.assertEqual(mine["to_scope"], "Role")
+		self.assertEqual(mine["target_role"], "Sales User")
+		# another user gets nothing for the same skill (owner-scoped read)
+		with _as(USER_B):
+			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
+
+	def test_my_skill_promotion_reflects_decision(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-decided", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 1, note="looks good")
+		with _as(USER_A):
+			mine = custom_skills_api.my_skill_promotion(skill.name)
+		self.assertEqual(mine["status"], "Approved")
+		self.assertEqual(mine["reviewer"], REVIEWER)
+		self.assertEqual(mine["decision_note"], "looks good")
+
+	def test_promotable_target_roles_are_own_targetable_roles(self):
+		from jarvis.chat import custom_skills_api
+
+		with _as(USER_A):
+			roles = custom_skills_api.promotable_target_roles()["roles"]
+		self.assertIn("Sales User", roles)  # USER_A holds Sales User
+		self.assertNotIn("All", roles)
+		self.assertNotIn("System Manager", roles)
+		self.assertNotIn("Administrator", roles)
+
+	# ── negative gates: the reviewer reads refuse a non-reviewer ────────────────
+	def test_non_reviewer_denied_on_reviewer_reads(self):
+		# USER_B holds only "Jarvis User" — NOT a reviewer role. Both the reviewer
+		# discovery list AND the Review-tab badge probe must refuse them (the
+		# review surface is reviewer-gated end to end).
+		from jarvis.chat import custom_skills_api, learned_api
+
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.list_skill_promotion_requests(status="Pending")
+			with self.assertRaises(frappe.PermissionError):
+				learned_api.get_review_access()
+
+	def test_get_custom_skill_denies_stranger_even_with_scope_fields(self):
+		# The new scope/target_role fields on get_custom_skill must NOT open a read
+		# path: a third user who is neither the owner nor a share target is still
+		# refused (owner/shared-only), fields or no fields.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-stranger", scope="User")
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.get_custom_skill(skill.name)
+
+	# ── SAR-1 server belt: a stored wiki title can never carry markup ───────────
+	def test_wiki_title_is_html_neutralized_at_write_funnel(self):
+		# The reviewer's promotion-approve confirm renders the wiki title via
+		# v-html; if a requester could store `<img onerror=…>` in a title, it would
+		# run in the reviewer's privileged session on Approve. The write-funnel
+		# sanitizer strips it, so the stored title is HTML-free. This is the
+		# authoritative server-side XSS-closed proof (not just a JS assertion).
+		with _as(USER_A):
+			doc = frappe.get_doc(
+				{
+					"doctype": WIKI,
+					"slug": f"{PFX}-xss",
+					"title": "Safe Title <img src=x onerror=alert(1)>",
+					"page_type": "Process",
+					"scope": "User",
+					"target_user": USER_A,
+					"body_md": "body",
+					"status": "Active",
+				}
+			)
+			doc.insert(ignore_permissions=True)
+		stored = frappe.db.get_value(WIKI, doc.name, "title")
+		self.assertNotIn("<img", stored)
+		self.assertNotIn("onerror", stored)
+		self.assertNotIn("<", stored)
+		self.assertNotIn(">", stored)
+		self.assertIn("Safe Title", stored)  # legitimate text is preserved
+
+	# ── SAR-3: body_excerpt over-reads only Pending private bodies ──────────────
+	def test_body_excerpt_only_for_pending_rows(self):
+		# A Pending row carries the current instructions excerpt (the reviewer
+		# needs it to decide); a decided (Rejected/Approved) row must NOT over-read
+		# the requester's now-private body — its excerpt is empty.
+		from jarvis.chat import custom_skills_api
+
+		secret = "SECRET-body-marker-4b2"
+		skill = _mk_skill(USER_A, f"{PFX}-decidedbody", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", secret)
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			pending = custom_skills_api.list_skill_promotion_requests(status="Pending")
+		prow = next(r for r in pending["rows"] if r["skill"] == skill.name)
+		self.assertIn(secret, prow["body_excerpt"])
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 0, note="no")
+			decided = custom_skills_api.list_skill_promotion_requests(status="Rejected")
+		drow = next(r for r in decided["rows"] if r["skill"] == skill.name)
+		self.assertEqual(drow["body_excerpt"], "")
+
+	# ── decide idempotency: an already-decided request is a no-op ───────────────
+	def test_decide_already_decided_is_noop(self):
+		# TOCTOU-safe re-read: the second decide of the same request returns
+		# {ok: False, reason: …} rather than re-applying — this is exactly the
+		# stale-card signal the SPA now refreshes on (SPX-6).
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-twice", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			first = custom_skills_api.decide_skill_promotion(req["request"], 1, note="ok")
+			second = custom_skills_api.decide_skill_promotion(req["request"], 0, note="again")
+		self.assertEqual(first.get("status"), "Approved")
+		self.assertIs(second.get("ok"), False)
+		self.assertIn("reason", second)
+
+
+class TestSkillPromotionContentBinding(Part2Base):
+	"""CDX-SP-1: the approval is bound to an IMMUTABLE snapshot of the full content,
+	so the reviewer decides on exactly what the Role/Org audience ends up running —
+	no truncated excerpt, no edit-between-request-and-approval swap, no post-approval
+	rewrite by the requester. The four-eyes bypass Codex flagged is closed."""
+
+	def test_reviewer_sees_full_snapshot_past_truncation(self):
+		# Attack (a): content hidden past the old 300-char excerpt. The reviewer read
+		# now returns the FULL bound snapshot, so a marker at char 400 is visible.
+		from jarvis.chat import custom_skills_api
+
+		marker = "HIDDEN-PAST-300-e7c1"
+		body = ("x" * 400) + marker
+		skill = _mk_skill(USER_A, f"{PFX}-longbody", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", body)
+		with _as(USER_A):
+			custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			res = custom_skills_api.list_skill_promotion_requests(status="Pending")
+		row = next(r for r in res["rows"] if r["skill"] == skill.name)
+		self.assertIn(marker, row["body_excerpt"])
+		self.assertEqual(row["body_excerpt"], body)  # the FULL snapshot, not instr[:300]
+
+	def test_edit_between_request_and_approval_promotes_snapshot_not_live(self):
+		# Attack (b): the requester edits the skill AFTER filing the request. The
+		# audience must get the REVIEWED snapshot (v1), never the post-request edit
+		# (v2) — and the requester keeps their v2 privately (no data loss).
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-edited", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", "REVIEWED-v1")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+			custom_skills_api.update_custom_skill(name=skill.name, instructions="SNEAKED-v2")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		shared = frappe.get_all(
+			SKILL, filters={"skill_name": f"{PFX}-edited", "scope": "Org"}, fields=["instructions"]
+		)
+		self.assertEqual(len(shared), 1)
+		self.assertEqual(shared[0].instructions, "REVIEWED-v1")  # audience = reviewed content
+		# requester's private skill keeps their own edit, still User-scope + intact
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "instructions"), "SNEAKED-v2")
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+
+	def test_requester_cannot_edit_published_shared_skill(self):
+		# Attack (c): after approval, the requester tries to rewrite the shared copy.
+		# They do NOT own it (it is system-owned) → the write endpoint refuses them.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-nopost", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", "REVIEWED")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 1)
+		shared_name = frappe.get_all(
+			SKILL, filters={"skill_name": f"{PFX}-nopost", "scope": "Org"}, pluck="name"
+		)[0]
+		with _as(USER_A):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.update_custom_skill(name=shared_name, instructions="HACKED")
+		self.assertEqual(frappe.db.get_value(SKILL, shared_name, "instructions"), "REVIEWED")
+
+	def test_guard_blocks_nonreviewer_content_change_on_shared_skill(self):
+		# _guard_content_change: even the OWNER of a Role/Org skill cannot change the
+		# content the audience runs without a reviewer — they must narrow it back to
+		# private first (fewer viewers is always safe), then edit + re-request.
+		skill = _mk_skill(USER_A, f"{PFX}-locked", scope="Org")
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.instructions = "REWRITTEN without review"
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+		self.assertNotEqual(
+			frappe.db.get_value(SKILL, skill.name, "instructions"), "REWRITTEN without review"
+		)
+		# narrow to private (safe), then the owner may edit their now-User skill
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.scope = "User"
+			doc.save()
+			doc.instructions = "now editable as a private skill"
+			doc.save()
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+		self.assertEqual(
+			frappe.db.get_value(SKILL, skill.name, "instructions"), "now editable as a private skill"
+		)
+
+	def test_reviewer_may_change_shared_skill_content(self):
+		# The guard binds CONTENT to the four-eyes authority (a reviewer), mirroring
+		# _guard_scope_change — a reviewer/admin may still maintain a shared skill.
+		skill = _mk_skill(USER_A, f"{PFX}-revedit", scope="Org")
+		with _as(REVIEWER):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.instructions = "reviewer-maintained content"
+			doc.save(ignore_permissions=True)
+		self.assertEqual(
+			frappe.db.get_value(SKILL, skill.name, "instructions"), "reviewer-maintained content"
+		)
+
+	def test_preflight_endpoint_gated_and_scope_aware(self):
+		# CDX-SP-2: a fresh, reviewer-gated projection recomputed at decision time.
+		# Org → a projection; Role → None (never reaches the push); non-reviewer → 403.
+		from jarvis.chat import custom_skills_api
+
+		org_skill = _mk_skill(USER_A, f"{PFX}-preflight", scope="User")
+		role_skill = _mk_skill(USER_A, f"{PFX}-preflightrole", scope="User")
+		with _as(USER_A):
+			req_org = custom_skills_api.request_skill_promotion(org_skill.name, "Org")
+			req_role = custom_skills_api.request_skill_promotion(
+				role_skill.name, "Role", target_role="Sales User"
+			)
+		with _as(REVIEWER):
+			org_pre = custom_skills_api.preflight_skill_promotion(req_org["request"])
+			role_pre = custom_skills_api.preflight_skill_promotion(req_role["request"])
+		self.assertIsNotNone(org_pre["push_projection"])
+		self.assertEqual(org_pre["to_scope"], "Org")
+		self.assertIsNone(role_pre["push_projection"])
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.preflight_skill_promotion(req_org["request"])
+
+
+class TestPromotionPushProjection(FrappeTestCase):
+	"""CDX-SP-2: the server-side push projection tells the TRUTH per mode — the
+	interactive Apply FAILS over the cap (nothing pushed), and the unattended sync
+	drops the ``skill_name``-asc tail, which may be an EXISTING shared skill rather
+	than the newly promoted one. Unit-tested against a controlled pushable set + a
+	small cap so displacement vs omission is deterministic (no need to mint 25 rows)."""
+
+	def _rows(self, *skill_names):
+		return [frappe._dict(name=f"row-{s}", skill_name=s) for s in skill_names]
+
+	def test_promoted_sorts_after_existing_is_the_dropped_one(self):
+		from jarvis.chat import custom_skills
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa", "bbb")),
+		):
+			proj = custom_skills.project_org_promotion_push("row-zzz", "zzz")
+		self.assertTrue(proj["over_budget"])
+		self.assertTrue(proj["strict_would_fail"])
+		self.assertEqual(proj["dropped_slugs"], [prefixed_slug("zzz")])
+		self.assertTrue(proj["promoted_dropped"])  # the NEW skill is the one omitted
+
+	def test_promoted_sorts_before_drops_an_existing_skill(self):
+		from jarvis.chat import custom_skills
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("bbb", "ccc")),
+		):
+			proj = custom_skills.project_org_promotion_push("row-aaa", "aaa")
+		self.assertTrue(proj["over_budget"])
+		# sorted [aaa, bbb, ccc], cap 2 → drops ccc (an EXISTING skill), NOT aaa
+		self.assertEqual(proj["dropped_slugs"], [prefixed_slug("ccc")])
+		self.assertFalse(proj["promoted_dropped"])
+
+	def test_at_budget_is_not_over(self):
+		from jarvis.chat import custom_skills
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa")),
+		):
+			proj = custom_skills.project_org_promotion_push("row-bbb", "bbb")
+		self.assertFalse(proj["over_budget"])
+		self.assertTrue(proj["at_budget"])
+		self.assertEqual(proj["dropped_slugs"], [])
+
+	def test_recompute_catches_concurrent_change(self):
+		# A value captured when the catalog had room is WRONG after a concurrent
+		# promotion fills it; a fresh server recompute reflects the new state.
+		from jarvis.chat import custom_skills
+
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2):
+			with patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa")):
+				before = custom_skills.project_org_promotion_push("row-zzz", "zzz")
+			with patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa", "bbb")):
+				after = custom_skills.project_org_promotion_push("row-zzz", "zzz")
+		self.assertFalse(before["over_budget"])  # a stale client would say "fine"
+		self.assertTrue(after["over_budget"])  # the server recompute catches the truth
+
+	def test_idempotent_reapprove_not_double_counted(self):
+		# An already-pushable skill (its docname already in the set) is not added
+		# again, so re-projecting an already-Org skill never inflates the count.
+		from jarvis.chat import custom_skills
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=self._rows("aaa", "bbb")),
+		):
+			proj = custom_skills.project_org_promotion_push("row-aaa", "aaa")
+		self.assertEqual(proj["projected_count"], 2)
+		self.assertFalse(proj["over_budget"])
+
+	def test_projection_orders_by_explicit_key_not_input_order(self):
+		# R2-SP-4: the projection ranks the pushable set by the ONE deterministic
+		# comparator (`_pushable_sort_key`), never the order rows happened to arrive
+		# in. Hyphen + digit boundary names where a raw DB collation and Python
+		# codepoint order can disagree, handed in a NON-sorted order:
+		from jarvis.chat import custom_skills
+
+		unsorted_rows = self._rows("ab", "a-2", "a1", "a-10")
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 2),
+			patch.object(custom_skills, "_pushable_org_rows", return_value=unsorted_rows),
+		):
+			proj = custom_skills.project_org_promotion_push("row-zz", "zz")
+		# Python order of the lowercased slugs: a-10 < a-2 < a1 < ab < zz; cap 2 keeps
+		# the first two and DROPS the ordered tail — proving the sort key, not input
+		# order, decides which skills are dropped.
+		self.assertEqual(proj["dropped_slugs"], [prefixed_slug(s) for s in ("a1", "ab", "zz")])
+		self.assertTrue(proj["promoted_dropped"])  # zz sorts last → the promoted one drops
+
+
+class TestSkillPromotionRound2(Part2Base):
+	"""Codex round-2 follow-ons on the promotion machinery: null-snapshot approval
+	is refused with NO live fallback (R2-SP-1), the reviewer read surfaces EVERY
+	field materialization publishes (R2-SP-2), materialization is atomic + lineage
+	aware — same-slug conflicts, same-lineage supersedes (R2-SP-3), the pushable
+	ranking is one shared comparator (R2-SP-4), and an Org approval rebinds the
+	budget projection to the decision (R2-SP-5)."""
+
+	# ── R2-SP-1: null / partial snapshot approval is refused, never live-read ────
+	def test_null_snapshot_approval_refused_no_live_fallback(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-legacy", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", "LIVE-BODY-must-not-publish")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		# Model a legacy pre-binding row by nulling the bound snapshot after the fact.
+		frappe.db.set_value(SKILL_PROMO, req["request"], "instructions_snapshot", None)
+		frappe.db.set_value(SKILL_PROMO, req["request"], "description_snapshot", None)
+		with _as(REVIEWER):
+			with self.assertRaises(frappe.ValidationError):
+				custom_skills_api.decide_skill_promotion(req["request"], 1)
+		# NOTHING is published — approval never falls back to the mutable live source.
+		self.assertEqual(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-legacy", "scope": "Org"}), [])
+		# The request is left Pending (not silently consumed), so a resubmit is possible.
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+
+	def test_new_request_must_carry_content_snapshot(self):
+		# The request-time guard (R2-SP-1): a fresh JSPR without content snapshots is
+		# refused at the controller, so no null-snapshot request can be filed anew.
+		skill = _mk_skill(USER_A, f"{PFX}-needsnap", scope="User")
+		with _as(USER_A):
+			with self.assertRaises(frappe.ValidationError):
+				frappe.get_doc(
+					{
+						"doctype": SKILL_PROMO,
+						"skill": skill.name,
+						"skill_name": skill.skill_name,
+						"from_scope": "User",
+						"to_scope": "Org",
+						"status": "Pending",
+						# deliberately NO instructions_snapshot / description_snapshot
+					}
+				).insert(ignore_permissions=True)
+
+	# ── R2-SP-2: reviewer read carries EVERY field the approval publishes ────────
+	def test_reviewer_read_carries_all_published_fields(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-allfields", scope="User")
+		frappe.db.set_value(
+			SKILL,
+			skill.name,
+			{
+				"instructions": "BODY-marker-11",
+				"description": "DESC-marker-22",
+				"user_invocable": 0,
+			},
+		)
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			res = custom_skills_api.list_skill_promotion_requests(status="Pending")
+		row = next(r for r in res["rows"] if r["skill"] == skill.name)
+		# EVERY field _materialize_promotion consumes is present in the reviewer read.
+		self.assertIn("BODY-marker-11", row["body_excerpt"])  # instructions_snapshot
+		self.assertEqual(row["description_snapshot"], "DESC-marker-22")
+		self.assertEqual(row["user_invocable_snapshot"], 0)
+		# Strict-need parity (SAR-3): a decided row does NOT re-surface any of them.
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 0, note="no")
+			decided = custom_skills_api.list_skill_promotion_requests(status="Rejected")
+		drow = next(r for r in decided["rows"] if r["skill"] == skill.name)
+		self.assertEqual(drow["body_excerpt"], "")
+		self.assertEqual(drow["description_snapshot"], "")
+		self.assertIsNone(drow["user_invocable_snapshot"])
+
+	# ── R2-SP-3: atomic same-slug conflict + same-lineage supersede ─────────────
+	def test_same_slug_different_lineage_conflicts_no_duplicate(self):
+		# Two owners each hold a private skill with the SAME authored slug (allowed —
+		# per-owner uniqueness). Promoting both to Org: the first publishes the one
+		# shared copy, the second is a hard conflict (one container dir per slug), so
+		# there is never a duplicate shared row.
+		from jarvis.chat import custom_skills_api
+
+		a = _mk_skill(USER_A, f"{PFX}-dup", scope="User")
+		b = _mk_skill(USER_B, f"{PFX}-dup", scope="User")
+		with _as(USER_A):
+			req_a = custom_skills_api.request_skill_promotion(a.name, "Org")
+		with _as(USER_B):
+			req_b = custom_skills_api.request_skill_promotion(b.name, "Org")
+		with _as(REVIEWER):
+			out_a = custom_skills_api.decide_skill_promotion(req_a["request"], 1)
+			self.assertTrue(out_a["ok"])
+			with self.assertRaises(frappe.ValidationError):
+				custom_skills_api.decide_skill_promotion(req_b["request"], 1)
+		shared = frappe.get_all(
+			SKILL, filters={"skill_name": f"{PFX}-dup", "scope": ["in", ["Role", "Org"]]}, fields=["name"]
+		)
+		self.assertEqual(len(shared), 1)  # exactly one wins; no duplicate slug
+		# The losing request is untouched (still Pending) — a clear conflict, not a
+		# double-publish and not a silent consume.
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req_b["request"], "status"), "Pending")
+
+	def test_reviewer_owning_same_slug_private_skill_does_not_block_promotion(self):
+		# R2-SP-3a: the shared copy's uniqueness is validated against the FINAL system
+		# owner, so a reviewer who happens to own a private skill of the same slug
+		# does NOT spuriously trip per-owner uniqueness on the insert.
+		from jarvis.chat import custom_skills_api
+
+		rev_own = _mk_skill(REVIEWER, f"{PFX}-collide", scope="User")  # reviewer's own private skill
+		skill = _mk_skill(USER_A, f"{PFX}-collide", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		shared = frappe.get_all(
+			SKILL,
+			filters={"skill_name": f"{PFX}-collide", "scope": "Org", "owner": "Administrator"},
+			fields=["name"],
+		)
+		self.assertEqual(len(shared), 1)
+		# the reviewer's own private skill is untouched (still User, still theirs)
+		self.assertEqual(frappe.db.get_value(SKILL, rev_own.name, "owner"), REVIEWER)
+		self.assertEqual(frappe.db.get_value(SKILL, rev_own.name, "scope"), "User")
+
+	def test_user_role_then_org_supersedes_in_place(self):
+		# R2-SP-3b: User->Role then User->Org from the intact private source leaves
+		# ONE shared copy at Org (superseded in place), no orphan Role copy, and no
+		# dead-end for the requester.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-ladder", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "instructions", "LADDER-v1")
+		with _as(USER_A):
+			req_role = custom_skills_api.request_skill_promotion(skill.name, "Role", target_role="Sales User")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req_role["request"], 1)
+		role_copies = frappe.get_all(
+			SKILL,
+			filters={"skill_name": f"{PFX}-ladder", "owner": "Administrator"},
+			fields=["name", "scope", "source_skill"],
+		)
+		self.assertEqual(len(role_copies), 1)
+		self.assertEqual(role_copies[0].scope, "Role")
+		self.assertEqual(role_copies[0].source_skill, skill.name)  # lineage persisted
+		role_copy_name = role_copies[0].name
+
+		# Now promote the SAME still-private source to Org.
+		with _as(USER_A):
+			req_org = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req_org["request"], 1)
+		self.assertTrue(out["ok"])
+		org_copies = frappe.get_all(
+			SKILL,
+			filters={"skill_name": f"{PFX}-ladder", "owner": "Administrator"},
+			fields=["name", "scope"],
+		)
+		self.assertEqual(len(org_copies), 1)  # ONE shared copy — no orphan Role copy
+		self.assertEqual(org_copies[0].scope, "Org")  # final scope Org
+		self.assertEqual(org_copies[0].name, role_copy_name)  # superseded IN PLACE
+		# The requester's private source is intact — still User, still theirs.
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "owner"), USER_A)
+		# The superseded Org copy is now pushable to the shared container.
+		self.assertIn(prefixed_slug(f"{PFX}-ladder"), {p["slug"] for p in custom_skills.build_push_payload()})
+
+	# ── R2-SP-4: pushable rows + payload share one comparator (real rows) ────────
+	def test_pushable_rows_and_payload_share_one_comparator(self):
+		from jarvis.chat import custom_skills
+
+		made = [f"{PFX}-a-2", f"{PFX}-a1", f"{PFX}-a-10", f"{PFX}-ab", f"{PFX}-a-b"]
+		for sn in made:
+			_mk_skill(USER_A, sn, scope="Org")
+		mineset = set(made)
+		expected = sorted(mineset, key=str.lower)
+		# _pushable_org_rows is returned in the explicit-comparator order (not the DB
+		# collation order), so build_push_payload inherits it.
+		rows = [r.skill_name for r in custom_skills._pushable_org_rows() if r.skill_name in mineset]
+		self.assertEqual(rows, expected)
+		myslugs = {prefixed_slug(s) for s in made}
+		payload = [p["slug"] for p in custom_skills.build_push_payload() if p["slug"] in myslugs]
+		self.assertEqual(payload, [prefixed_slug(s) for s in expected])
+
+	# ── R2-SP-5: an Org approval rebinds the budget projection to the decision ───
+	def test_org_approve_requires_reconfirm_when_catalog_moved(self):
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-reconf", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		# A stale ack claiming "room to spare" against an over-budget catalog (cap 0):
+		# the server recomputes fresh, sees the warning-worthy mismatch, and REFUSES
+		# to publish — returning needs_reconfirm + the fresh projection.
+		stale_ack = {
+			"over_budget": False,
+			"at_budget": False,
+			"projected_count": 0,
+			"dropped_slugs": [],
+			"promoted_dropped": False,
+		}
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 0):
+			with _as(REVIEWER):
+				r1 = custom_skills_api.decide_skill_promotion(req["request"], 1, ack_projection=stale_ack)
+		self.assertFalse(r1["ok"])
+		self.assertTrue(r1.get("needs_reconfirm"))
+		self.assertIsNotNone(r1["push_projection"])
+		self.assertEqual(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-reconf", "scope": "Org"}), [])
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+		# Reconfirming against the FRESH projection publishes exactly once.
+		fresh_ack = r1["push_projection"]
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 0):
+			with _as(REVIEWER):
+				r2 = custom_skills_api.decide_skill_promotion(req["request"], 1, ack_projection=fresh_ack)
+		self.assertTrue(r2["ok"])
+		self.assertEqual(
+			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-reconf", "scope": "Org"})), 1
+		)
+
+	def test_under_budget_org_approve_publishes_without_ack(self):
+		# The reconfirm gate is warning-scoped: a clear (room to spare) catalog needs
+		# no ack, so a well-formed under-budget approval publishes in one call.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-roomy", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)  # no ack
+		self.assertTrue(out["ok"])
+		self.assertEqual(
+			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-roomy", "scope": "Org"})), 1
+		)
+
+
+class TestSkillPromotionRound3(Part2Base):
+	"""Codex round-3: the promotion invariants are GLOBAL, not promotion-path-local.
+	Shared-slug uniqueness holds across EVERY shared-write path (R3-SP-1), lineage is
+	resolved by the immutable source link independent of the slug — Role sources and
+	renamed sources included (R3-SP-2), the push budget serializes under ONE
+	catalog-wide lock so different-slug approvals cannot both overshoot (R3-SP-3), and
+	an immutable presence marker refuses a partial snapshot at approval (R3-SP-4)."""
+
+	# ── R3-SP-1: GLOBAL shared-slug uniqueness across paths ─────────────────────
+	def test_two_shared_skills_cannot_share_a_slug_across_owners(self):
+		# A shared (Org) skill owned by USER_A blocks a SECOND shared skill of the same
+		# slug owned by USER_B — no matter which path mints it. The container writes ONE
+		# custom-<slug> dir, so this is the true invariant (owner-scoped uniqueness is
+		# not enough).
+		_mk_skill(USER_A, f"{PFX}-guniq", scope="Org")
+		with self.assertRaises(frappe.ValidationError):
+			_mk_skill(USER_B, f"{PFX}-guniq", scope="Org")
+		# A Role skill of the same slug is a shared skill too → also blocked.
+		with self.assertRaises(frappe.ValidationError):
+			_mk_skill(USER_B, f"{PFX}-guniq", scope="Role", target_role="Sales User")
+		# But a PRIVATE (User) skill of the same slug is fine — per-owner uniqueness
+		# still lets two people each keep a private "guniq".
+		priv = _mk_skill(USER_B, f"{PFX}-guniq", scope="User")
+		self.assertEqual(frappe.db.get_value(SKILL, priv.name, "scope"), "User")
+
+	def test_shared_slug_uniqueness_permits_in_place_update(self):
+		# The uniqueness excludes SELF, so a legitimate in-place UPDATE of the ONE shared
+		# row (the insight-apply / supersede path) is never blocked as a duplicate.
+		org = _mk_skill(USER_A, f"{PFX}-inplace", scope="Org")
+		with _engine_flag():
+			doc = frappe.get_doc(SKILL, org.name)
+			doc.description = "edited in place"
+			doc.instructions = "new body"
+			doc.save(ignore_permissions=True)
+		self.assertEqual(frappe.db.get_value(SKILL, org.name, "description"), "edited in place")
+
+	def test_direct_org_create_blocks_conflicting_promotion(self):
+		# The invariant holds across DIFFERENT paths: a directly-created shared Org skill
+		# blocks a promotion of a different lineage's private skill with the same slug —
+		# never a duplicate shared row.
+		from jarvis.chat import custom_skills_api
+
+		_mk_skill(REVIEWER, f"{PFX}-crosspath", scope="Org")  # direct shared create
+		priv = _mk_skill(USER_A, f"{PFX}-crosspath", scope="User")  # different lineage
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(priv.name, "Org")
+		with _as(REVIEWER):
+			with self.assertRaises(frappe.ValidationError):
+				custom_skills_api.decide_skill_promotion(req["request"], 1)
+		shared = frappe.get_all(
+			SKILL, filters={"skill_name": f"{PFX}-crosspath", "scope": ["in", ["Role", "Org"]]}
+		)
+		self.assertEqual(len(shared), 1)  # only the direct one; no duplicate minted
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+
+	# ── R3-SP-2: lineage by SOURCE link, not slug ───────────────────────────────
+	def test_role_source_to_org_widens_in_place_no_dup(self):
+		# Promoting a Role SOURCE to Org widens THAT row in place (the source itself is
+		# the existing shared copy) — never a second Org row leaving the Role row.
+		from jarvis.chat import custom_skills_api
+
+		role = _mk_skill(USER_A, f"{PFX}-r2org", scope="Role", target_role="Sales User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(role.name, "Org")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		shared = frappe.get_all(
+			SKILL,
+			filters={"skill_name": f"{PFX}-r2org", "scope": ["in", ["Role", "Org"]]},
+			fields=["name", "scope"],
+		)
+		self.assertEqual(len(shared), 1)  # widened in place — no duplicate
+		self.assertEqual(shared[0].scope, "Org")
+		self.assertEqual(shared[0].name, role.name)  # the SAME row
+		self.assertEqual(frappe.db.get_value(SKILL, role.name, "owner"), "Administrator")
+
+	def test_renamed_source_supersedes_role_copy_not_stranded(self):
+		# User->Role, then the private source's slug is RENAMED, then User->Org: the
+		# prior Role copy is found by its immutable source link (not the stale slug) and
+		# SUPERSEDED in place — no stranded Role copy, no duplicate Org row.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-ren1", scope="User")
+		with _as(USER_A):
+			req_role = custom_skills_api.request_skill_promotion(skill.name, "Role", target_role="Sales User")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req_role["request"], 1)
+		role_copies = frappe.get_all(
+			SKILL, filters={"source_skill": skill.name}, fields=["name", "scope", "skill_name"]
+		)
+		self.assertEqual(len(role_copies), 1)
+		self.assertEqual(role_copies[0].scope, "Role")
+		role_copy_name = role_copies[0].name
+
+		# Rename the still-private source's slug BEFORE the Org promotion.
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.skill_name = f"{PFX}-ren2"
+			doc.save()
+			req_org = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req_org["request"], 1)
+		self.assertTrue(out["ok"])
+		shared = frappe.get_all(
+			SKILL, filters={"source_skill": skill.name}, fields=["name", "scope", "skill_name"]
+		)
+		self.assertEqual(len(shared), 1)  # ONE shared copy — the Role copy was not stranded
+		self.assertEqual(shared[0].name, role_copy_name)  # superseded IN PLACE
+		self.assertEqual(shared[0].scope, "Org")
+		self.assertEqual(shared[0].skill_name, f"{PFX}-ren2")  # adopted the renamed slug
+		# The private source is intact — still User, still theirs, at the new slug.
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "owner"), USER_A)
+
+	# ── R3-SP-3: CATALOG-WIDE budget lock (different-slug serialization) ─────────
+	def test_catalog_wide_budget_serializes_different_slug_approvals(self):
+		# Two DIFFERENT-slug Org approvals at the budget boundary: the FIRST publishes on
+		# its matching (at-budget) ack; the SECOND — acked against the SAME pre-publish
+		# projection — must reconfirm, because the fresh recheck now runs UNDER the
+		# catalog-wide lock and sees the first's committed publish (now over budget). A
+		# slug-scoped lock would have let both commit.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		a = _mk_skill(USER_A, f"{PFX}-cw-a", scope="User")
+		b = _mk_skill(USER_B, f"{PFX}-cw-b", scope="User")
+		with _as(USER_A):
+			req_a = custom_skills_api.request_skill_promotion(a.name, "Org")
+		with _as(USER_B):
+			req_b = custom_skills_api.request_skill_promotion(b.name, "Org")
+		# Budget = current pushable + 1, so promoting EITHER one lands exactly at budget.
+		base = custom_skills.pushable_org_skill_count()
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", base + 1):
+			# Each reviewer confirms an at-budget projection computed BEFORE either commits.
+			ack_a = custom_skills.project_org_promotion_push(a.name, f"{PFX}-cw-a")
+			ack_b = custom_skills.project_org_promotion_push(b.name, f"{PFX}-cw-b")
+			self.assertTrue(ack_a["at_budget"])
+			self.assertTrue(ack_b["at_budget"])
+			with _as(REVIEWER):
+				r_a = custom_skills_api.decide_skill_promotion(req_a["request"], 1, ack_projection=ack_a)
+				r_b = custom_skills_api.decide_skill_promotion(req_b["request"], 1, ack_projection=ack_b)
+		self.assertTrue(r_a["ok"])  # first publishes without reconfirm
+		self.assertTrue(r_b.get("needs_reconfirm"))  # second must reconfirm the moved catalog
+		self.assertTrue(r_b["push_projection"]["over_budget"])  # now genuinely over budget
+		shared = frappe.get_all(
+			SKILL,
+			filters={"skill_name": ["in", [f"{PFX}-cw-a", f"{PFX}-cw-b"]], "scope": "Org"},
+			fields=["name"],
+		)
+		self.assertEqual(len(shared), 1)  # EXACTLY one published; the second held back
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req_b["request"], "status"), "Pending")
+
+	# ── R3-SP-4: the request path always mints a FULL snapshot + presence marker ─
+	def test_missing_invocable_snapshot_refused_at_request(self):
+		# user_invocable_snapshot is a Check (tinyint NOT NULL): it can never be "missing"
+		# — an omitted value is stored as 0, indistinguishable from a genuine False — so a
+		# field-level "missing" refusal is impossible. The real request-time protection is
+		# that request_skill_promotion ALWAYS captures a FULL snapshot from the source and
+		# stamps the presence marker, so a legit request is always marked (and the marker
+		# check at approval only ever trips a genuine legacy / partial row).
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-noinv", scope="User")
+		# A distinctive (non-default) source value proves the snapshot is copied from source.
+		frappe.db.set_value(SKILL, skill.name, "user_invocable", 0)
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		row = frappe.db.get_value(
+			SKILL_PROMO,
+			req["request"],
+			["snapshotted", "instructions_snapshot", "description_snapshot", "user_invocable_snapshot"],
+			as_dict=True,
+		)
+		self.assertEqual(row.snapshotted, 1)  # a legit request is always marked
+		self.assertEqual(row.instructions_snapshot, "body")
+		self.assertEqual(row.description_snapshot, f"{PFX}-noinv desc")
+		self.assertEqual(int(row.user_invocable_snapshot), 0)  # captured the source's False
+
+	def test_absent_marker_refused_at_approval(self):
+		# A request whose presence marker is absent (a legacy / pre-binding row) is refused
+		# at approval like a missing-instructions one — publishing nothing, leaving it Pending.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-marker", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "snapshotted"), 1)
+		# Model a legacy / pre-binding row by clearing the presence MARKER. The marker — not
+		# the Check value — is what proves a full snapshot: user_invocable_snapshot is a Check
+		# (tinyint NOT NULL) that can never be null, and an omitted value is stored as 0
+		# indistinguishable from a genuine False. So the marker's absence is what approval refuses.
+		frappe.db.set_value(SKILL_PROMO, req["request"], "snapshotted", 0)
+		with _as(REVIEWER):
+			with self.assertRaisesRegex(frappe.ValidationError, "resubmit"):
+				custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertEqual(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-marker", "scope": "Org"}), [])
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+
+	def test_explicit_false_invocable_snapshot_publishes_as_false(self):
+		# With the marker present and user_invocable explicitly False, approval publishes
+		# invocable=False FAITHFULLY (not conflated with "omitted"): the marker records a
+		# reviewed choice, so a full snapshot with a genuine False is honoured.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-markok", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "user_invocable", 0)
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "snapshotted"), 1)
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "user_invocable_snapshot"), 0)
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		mat = frappe.db.get_value(
+			SKILL, {"skill_name": f"{PFX}-markok", "scope": "Org"}, ["name", "user_invocable"], as_dict=True
+		)
+		self.assertIsNotNone(mat)
+		self.assertEqual(int(mat.user_invocable), 0)  # explicit False preserved end-to-end
+
+
+class TestSkillPromotionRound4(Part2Base):
+	"""Codex round-4: the shared-slug invariant is enforced at its TRUE scope - a
+	DB-unique reservation (row name == slug) plus the catalog-wide lock on EVERY shared
+	eligibility-changing write, not just the promotion path (SR4-2); and the v2_06
+	backfill no longer blesses an ambiguous legacy snapshot from the Check column
+	(SR4-1)."""
+
+	# ── SR4-1: the migration does not backfill the marker from the Check column ──
+	def test_migration_leaves_omitted_normalized_legacy_request_unmarked(self):
+		# An omitted user-invocable normalized to 0 is indistinguishable from a genuine
+		# False, so a non-NULL snapshot never proves capture. The v2_06 backfill must
+		# leave such a legacy row UNMARKED, and approval must still refuse it.
+		from jarvis.chat import custom_skills_api
+		from jarvis.patches import v2_06_skill_promotion_marker_and_shared_slug as patch_mod
+
+		skill = _mk_skill(USER_A, f"{PFX}-legacymark", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		# Model a legacy row: invocable snapshot 0 (as if omitted->0) + marker cleared.
+		frappe.db.set_value(SKILL_PROMO, req["request"], "user_invocable_snapshot", 0)
+		frappe.db.set_value(SKILL_PROMO, req["request"], "snapshotted", 0)
+		frappe.db.commit()
+		patch_mod.execute()  # run the migration - it must not bless the ambiguous row
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "snapshotted"), 0)
+		with _as(REVIEWER):
+			with self.assertRaises(frappe.ValidationError):
+				custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+		self.assertEqual(
+			frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-legacymark", "scope": "Org"}), []
+		)
+
+	# ── SR4-2: DB-unique slug reservation, kept in step on every write path ──────
+	def test_shared_create_reserves_slug_and_release_frees_it(self):
+		# A shared (Org) create RESERVES its slug (reservation name == slug). Narrowing
+		# back to User releases it; deleting a shared skill releases it on trash.
+		org = _mk_skill(USER_A, f"{PFX}-reserved", scope="Org")
+		self.assertTrue(frappe.db.exists(RESV, f"{PFX}-reserved"))
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-reserved", "skill"), org.name)
+		with _as(USER_A):  # owner self-demote (narrowing) is allowed without a reviewer
+			doc = frappe.get_doc(SKILL, org.name)
+			doc.scope = "User"
+			doc.save(ignore_permissions=True)
+		self.assertFalse(frappe.db.exists(RESV, f"{PFX}-reserved"))  # released on narrow
+		other = _mk_skill(USER_B, f"{PFX}-reserved2", scope="Org")
+		self.assertTrue(frappe.db.exists(RESV, f"{PFX}-reserved2"))
+		frappe.delete_doc(SKILL, other.name, force=True, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists(RESV, f"{PFX}-reserved2"))  # released on trash
+
+	def test_reservation_blocks_duplicate_shared_slug_at_db(self):
+		# The controller belt catches the SEQUENTIAL duplicate; the DB reservation is
+		# the concurrent backstop for two shared writes that both pass the belt SELECT
+		# before either commits. Neutralize the belt so the second create reaches the
+		# reservation and is refused there.
+		from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import JarvisCustomSkill
+
+		first = _mk_skill(USER_A, f"{PFX}-dbuniq", scope="Org")
+		with patch.object(JarvisCustomSkill, "_validate_shared_slug_unique", lambda self: None):
+			with self.assertRaises(frappe.ValidationError):
+				_mk_skill(USER_B, f"{PFX}-dbuniq", scope="Org")
+		# The duplicate was BLOCKED at the DB reservation: the slug's reservation still points
+		# at the FIRST skill — the meaningful invariant (one shared owner per slug). We assert
+		# the reservation holder, not a post-failure row count, which would depend on Frappe's
+		# insert/rollback timing for the refused second insert.
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-dbuniq", "skill"), first.name)
+
+	def test_rename_shared_skill_moves_reservation(self):
+		# Renaming a shared skill releases the old slug's reservation and reserves the
+		# new one, so the freed slug is available to a different shared skill.
+		org = _mk_skill(REVIEWER, f"{PFX}-oldname", scope="Org")
+		self.assertTrue(frappe.db.exists(RESV, f"{PFX}-oldname"))
+		with _as(REVIEWER):
+			doc = frappe.get_doc(SKILL, org.name)
+			doc.skill_name = f"{PFX}-newname"
+			doc.save(ignore_permissions=True)
+		self.assertFalse(frappe.db.exists(RESV, f"{PFX}-oldname"))  # old slug freed
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-newname", "skill"), org.name)
+		other = _mk_skill(USER_A, f"{PFX}-oldname", scope="Org")  # freed slug reusable
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-oldname", "skill"), other.name)
+
+	def test_insight_apply_inplace_update_does_not_refail_reservation(self):
+		# In-place shared UPDATE (insight-apply / a reviewer content re-save) re-reserves
+		# its OWN slug - idempotent, never a spurious duplicate failure.
+		org = _mk_skill(USER_A, f"{PFX}-idem", scope="Org")
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-idem", "skill"), org.name)
+		with _engine_flag():
+			doc = frappe.get_doc(SKILL, org.name)
+			doc.instructions = "reviewed new body"
+			doc.save(ignore_permissions=True)
+		self.assertEqual(frappe.db.get_value(SKILL, org.name, "instructions"), "reviewed new body")
+		self.assertEqual(len(frappe.get_all(RESV, filters={"slug": f"{PFX}-idem"})), 1)
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-idem", "skill"), org.name)
+
+	# ── SR4-2: the catalog-wide lock serializes non-promotion shared writes ──────
+	def test_shared_create_blocked_when_catalog_lock_held(self):
+		# A shared (Org) create takes the catalog-wide lock; when it is already held the
+		# create refuses (serialized with approvals). A PRIVATE create takes no lock.
+		import jarvis._redis_lock as rl
+		from jarvis.chat import custom_skills_api
+
+		@contextlib.contextmanager
+		def _busy(name, **kw):
+			yield False
+
+		with patch.object(rl, "redis_lock", _busy):
+			with _as(REVIEWER):
+				with self.assertRaises(frappe.ValidationError):
+					custom_skills_api._create_custom_skill_impl(
+						skill_name=f"{PFX}-locked",
+						description="d",
+						instructions="i",
+						scope="Org",
+						ignore_permissions=True,
+					)
+			with _as(USER_A):  # private create is lock-free even while the lock is held
+				out = custom_skills_api._create_custom_skill_impl(
+					skill_name=f"{PFX}-lockfree", description="d", instructions="i"
+				)
+		self.assertTrue(out["ok"])
+		self.assertEqual(frappe.db.get_value(SKILL, out["data"]["name"], "scope"), "User")
+		self.assertEqual(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-locked"}), [])
+
+	def test_direct_org_create_serializes_with_approval_budget(self):
+		# The cross-path budget race: a direct Org create and an approval serialize on
+		# the SAME catalog lock. Model the create-wins-the-lock ordering - a different-
+		# slug direct Org create commits first, so the approval's fresh under-lock
+		# projection SEES it and must reconfirm the now-over-budget catalog. Exactly one
+		# lands at the budget boundary; the approval holds back.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		src = _mk_skill(USER_A, f"{PFX}-b4race", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(src.name, "Org")
+		base = custom_skills.pushable_org_skill_count()
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", base + 1):
+			ack = custom_skills.project_org_promotion_push(src.name, f"{PFX}-b4race")
+			self.assertTrue(ack["at_budget"])  # acked BEFORE the direct create
+			with _as(REVIEWER):  # a different-slug direct Org create commits first
+				custom_skills_api._create_custom_skill_impl(
+					skill_name=f"{PFX}-b4race-x",
+					description="d",
+					instructions="i",
+					scope="Org",
+					ignore_permissions=True,
+				)
+				out = custom_skills_api.decide_skill_promotion(req["request"], 1, ack_projection=ack)
+		self.assertTrue(out.get("needs_reconfirm"))  # the committed create moved the budget
+		self.assertTrue(out["push_projection"]["over_budget"])
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+		self.assertEqual(
+			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-b4race", "scope": "Org"})), 0
+		)
+		self.assertEqual(
+			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-b4race-x", "scope": "Org"})), 1
+		)

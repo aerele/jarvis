@@ -102,6 +102,13 @@ APPROX_FILE_BAIL = 3000
 BATCH_CHAR_BUDGET = 20000
 MAX_BATCHES = 40
 STALE_TURN_MINUTES = 45
+# CDX-19: how many tick cycles (10 min each) a capacity-deferred analysis turn may be
+# re-attempted before the run fails honestly — ~200 min of sustained site overload.
+_MAX_CAPACITY_WAITS = 20
+# CDX-22: how long a cancel waits for the SAME per-run lock the chaining/recovery critical
+# sections hold. Those sections are fast (parse + a few writes + an enqueue), so this is ample.
+# Module-level so tests can shorten it.
+_CANCEL_LOCK_BLOCK_S = 10.0
 ZIP_RETENTION_DAYS = 7
 MAX_WIKI_PAGES = 8
 MAX_SKILLS = 5
@@ -257,8 +264,21 @@ def _fail_run(run_name: str, msg: str) -> None:
 def mark_cancelled(run_name: str) -> None:
 	"""Cancel a run (the API validates the transition). The turn-end hook and
 	``process_due`` both re-check status, so an in-flight turn finishes but
-	nothing further chains."""
-	_set_run(run_name, {"status": "Cancelled", "finished_at": now_datetime()})
+	nothing further chains.
+
+	CDX-22: acquire the SAME ``jarvis_app_learning_run:<run>`` lock the chaining (``on_turn_end``)
+	and capacity-resume (``_recover_stale_runs``) critical sections hold across their
+	recheck->enqueue window. So a cancel can no longer land BETWEEN a recovery/turn-end recheck of
+	``Analyzing`` and its enqueue of the next batch/final turn (which would start work after the
+	explicit cancel). The block body still writes ``Cancelled`` even if the lock is momentarily
+	unavailable — a user cancel must never be dropped; the turn-end recheck is the backstop for that
+	rare case."""
+	from jarvis._redis_lock import redis_lock
+
+	with redis_lock(
+		f"jarvis_app_learning_run:{run_name}", timeout_s=60, blocking_timeout_s=_CANCEL_LOCK_BLOCK_S
+	):
+		_set_run(run_name, {"status": "Cancelled", "finished_at": now_datetime()})
 
 
 def _load_notes(run) -> dict:
@@ -837,9 +857,10 @@ def start_run(run_name: str) -> None:
 		_enqueue_tick()
 
 
-def _send_batch_turn(run, k: int) -> None:
+def _send_batch_turn(run, k: int) -> bool:
 	"""Rebuild batch ``k`` from the run's zip and enqueue it as one agent turn
-	(the macros ``_run_step`` seam: ``jarvis.chat.api._enqueue_turn``)."""
+	(the macros ``_run_step`` seam: ``jarvis.chat.api._enqueue_turn``). Returns True
+	when dispatched, False when DEFERRED for capacity (CDX-19)."""
 	batches, _dropped = _plan_batches(_manifest_from_zip(run.zip_path))
 	if k < 1 or k > len(batches):
 		raise ValueError(f"batch {k} out of range (have {len(batches)})")
@@ -849,10 +870,11 @@ def _send_batch_turn(run, k: int) -> None:
 	# interactive=False: analysis turns run at BACKGROUND priority so an
 	# up-to-40-turn run never jumps ahead of a real user's chat on the shared
 	# queue (the owner's "must not affect day-to-day operations" requirement).
-	api._enqueue_turn(run.conversation, prompt, interactive=False)
+	out = api._enqueue_turn(run.conversation, prompt, interactive=False)
+	return _handle_enqueue_result(run, out, str(k))
 
 
-def _send_final_turn(run) -> None:
+def _send_final_turn(run) -> bool:
 	notes = _load_notes(run)
 	dropped = cint((notes.get("plan") or {}).get("dropped_batches"))
 	prompt = _final_prompt(run.app, cint(run.batches_total), dropped, notes.get("zip") or {})
@@ -861,7 +883,42 @@ def _send_final_turn(run) -> None:
 	# interactive=False: analysis turns run at BACKGROUND priority so an
 	# up-to-40-turn run never jumps ahead of a real user's chat on the shared
 	# queue (the owner's "must not affect day-to-day operations" requirement).
-	api._enqueue_turn(run.conversation, prompt, interactive=False)
+	out = api._enqueue_turn(run.conversation, prompt, interactive=False)
+	return _handle_enqueue_result(run, out, "final")
+
+
+def _handle_enqueue_result(run, out, current_key: str) -> bool:
+	"""CDX-19: interpret ``_enqueue_turn``'s result for the analysis chain. On an accept-gate
+	OVERLOAD the turn was NOT dispatched (its seed was cleaned up), so the run must NEITHER
+	advance NOR fail — it defers, and the tick's stale-recovery pass re-attempts the SAME
+	pending turn promptly (bounded by ``_MAX_CAPACITY_WAITS``, then Failed with an honest
+	reason). This is the run state machine's own retry semantics reused for capacity, so the
+	chain never waits forever for a terminal that can never arrive. Returns dispatched?"""
+	if isinstance(out, dict) and out.get("overloaded"):
+		_mark_capacity_wait(run, current_key)
+		return False
+	_clear_capacity_wait(run)
+	return True
+
+
+def _mark_capacity_wait(run, current_key: str) -> None:
+	"""Record that the pending analysis turn could not be admitted (site overloaded) and bump
+	the bounded attempt counter. The run stays Analyzing; the tick re-attempts ``current_key``."""
+	notes = _load_notes(run)
+	cw = notes.setdefault("capacity_wait", {})
+	cw["key"] = current_key
+	cw["count"] = int(cw.get("count") or 0) + 1
+	_set_run(run.name, {"notes": json.dumps(notes)})
+	run.notes = json.dumps(notes)
+
+
+def _clear_capacity_wait(run) -> None:
+	"""Drop the capacity-wait marker once a turn dispatches (or on the normal chain). Cheap
+	no-op when no marker is set, so the common path pays nothing."""
+	notes = _load_notes(run)
+	if notes.pop("capacity_wait", None) is not None:
+		_set_run(run.name, {"notes": json.dumps(notes)})
+		run.notes = json.dumps(notes)
 
 
 # --------------------------------------------------------------------------- #
@@ -1053,13 +1110,11 @@ def _recover_stale_runs() -> bool:
 	cutoff = add_to_date(now_datetime(), minutes=-STALE_TURN_MINUTES)
 	for r in rows:
 		if r.status == "Analyzing":
-			last = _last_turn_activity(r.conversation) or r.started_at or r.modified
-			if last and get_datetime(last) >= get_datetime(cutoff):
-				continue
 			# Take the SAME per-run lock on_turn_end uses, so a stale-recovery
 			# retry can never race a late-arriving turn-end event into a
 			# double-advance. Non-blocking: if a turn-end is mid-flight, skip
-			# this tick — it's making progress, so it isn't stale.
+			# this tick — it's making progress, so it isn't stale. (At most one
+			# non-terminal run exists bench-wide, so this is one lock per tick.)
 			from jarvis._redis_lock import redis_lock
 
 			with redis_lock(
@@ -1069,6 +1124,30 @@ def _recover_stale_runs() -> bool:
 					continue
 				run = frappe.get_doc(RUN, r.name)
 				if run.status != "Analyzing":
+					continue
+				# CDX-19: a capacity-DEFERRED turn (its enqueue hit a full admission queue) is
+				# re-attempted PROMPTLY every tick, independent of the 45-min silence window,
+				# bounded by _MAX_CAPACITY_WAITS then Failed with an honest capacity reason. The
+				# marker's count was bumped by _mark_capacity_wait on each overload.
+				notes = _load_notes(run)
+				cw = notes.get("capacity_wait")
+				if isinstance(cw, dict) and cw.get("key"):
+					if int(cw.get("count") or 0) > _MAX_CAPACITY_WAITS:
+						_fail_run(
+							run.name,
+							"the site stayed busy — analysis could not get capacity to continue",
+						)
+						_enqueue_tick()
+						continue
+					key = cw["key"]
+					if key == "final":
+						_send_final_turn(run)
+					else:
+						_send_batch_turn(run, int(key))
+					continue
+				# No capacity wait — apply the 45-min silence rule (retry once, then Failed).
+				last = _last_turn_activity(run.conversation) or run.started_at or run.modified
+				if last and get_datetime(last) >= get_datetime(cutoff):
 					continue
 				done, total = cint(run.batches_done), cint(run.batches_total)
 				current_key = "final" if done >= total else str(done + 1)

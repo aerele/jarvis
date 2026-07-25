@@ -246,6 +246,20 @@ scheduler_events = {
 	"cron": {
 		"*/5 * * * *": [
 			"jarvis.chat.stale_scan.scan_and_mark_errored",
+			# Phase-0 admission backstop (chat concurrency, WP-0): reclaim lost
+			# reservations, reconcile dispatching Turn rows against Message truth,
+			# age-out stale queued turns, then re-promote. Cheap no-op when no
+			# non-terminal Turn rows exist (so it costs one COUNT when the feature
+			# is off or idle).
+			"jarvis.chat.admission.sweep",
+			# Relay Pump backstop (chat concurrency, WP-1c): the LAST-RESORT
+			# recovery path for the one gap the sender-driven ensure_pump cannot
+			# cover — a turn committed, the pump then died, and no new send arrives
+			# to revive it. Scans ALL nonterminal Turn states per-shard (age-out,
+			# prepare-deadline reclaim, deadline park, finalize re-enqueue) then
+			# ensure_pump for any shard with live work. Cheap no-op (one DISTINCT)
+			# when no non-terminal Turn rows exist.
+			"jarvis.chat.pump.watchdog",
 			# Onboarding convergence safety net (review P0-2): when an LLM
 			# apply parked at "pending: admin applying config" (admin accepted
 			# it and its reconcile is converging server-side), probe
@@ -259,6 +273,13 @@ scheduler_events = {
 			# keeps the prefix warm continuously while there is recent chat
 			# activity (the function itself gates on activity).
 			"jarvis.chat.prewarm.keep_warm_if_active",
+			# Chat-concurrency CDX-19 backstop: re-attempt macro runs parked in
+			# `waiting_capacity` (a step could not be admitted because the site's turn
+			# queue was momentarily full). A deferred step dispatches no turn, so the
+			# turn-end chaining hook never fires for it — this cron is its ONLY resume
+			# path. Bounded per run (capacity_attempts), then the run fails honestly.
+			# Cheap no-op (one indexed status query) when nothing is parked.
+			"jarvis.chat.macros.resume_waiting_capacity_runs",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -400,6 +421,13 @@ doc_events["Jarvis Wiki Page"] = {
 # save, inactive rules no-op).
 doc_events["Jarvis Personalise Question Rule"] = {
 	"on_update": "jarvis.learning.questions.on_rule_update",
+}
+
+# Phase-0 admission (chat concurrency, WP-0): a deleted conversation must not
+# leave orphaned Jarvis Chat Turn rows behind (they would linger as ghost queued/
+# dispatching rows in the admission shard). Cascade-delete them on trash.
+doc_events["Jarvis Conversation"] = {
+	"on_trash": "jarvis.chat.admission.on_conversation_trash",
 }
 
 # ---------------------------------------------------------------------------

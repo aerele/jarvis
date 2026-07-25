@@ -1,0 +1,96 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:{turn}::{effect_name}",
+ "creation": "2026-07-23 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "turn",
+  "effect_name",
+  "status",
+  "attempts",
+  "claim_token",
+  "claimed_at",
+  "applied_at"
+ ],
+ "fields": [
+  {
+   "fieldname": "turn",
+   "fieldtype": "Link",
+   "label": "Turn",
+   "options": "Jarvis Chat Turn",
+   "reqd": 1,
+   "search_index": 1,
+   "in_list_view": 1,
+   "description": "The settled turn this effect belongs to (D2 §1a)."
+  },
+  {
+   "fieldname": "effect_name",
+   "fieldtype": "Data",
+   "label": "Effect Name",
+   "length": 64,
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "One of auto_title/rich_outputs/macro_advance/telemetry_flush/terminal_publish/usage; part of the UNIQUE (turn, effect_name) enforced via the composite doc name (D2 §1a)."
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "pending\nrunning\ndone",
+   "default": "pending",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "pending -> running (exclusively claimed for one finalize attempt) -> done. A failed attempt returns running -> pending; a stale running claim (claimed_at past the bound) is reclaimable; FORCE-DONE after FINALIZE_MAX_ATTEMPTS=3 (OAR-9 / CDX-4)."
+  },
+  {
+   "fieldname": "attempts",
+   "fieldtype": "Int",
+   "label": "Attempts",
+   "default": "0",
+   "description": "Incremented atomically on every EXCLUSIVE claim (pending/stale-running -> running) for this effect; the force-done budget (FINALIZE_MAX_ATTEMPTS=3) reads it (D2 §1a / CDX-4)."
+  },
+  {
+   "fieldname": "claim_token",
+   "fieldtype": "Data",
+   "label": "Claim Token",
+   "length": 32,
+   "description": "The current exclusive-claim token (CDX-4): stamped when a finalize attempt claims the effect (pending/stale-running -> running); complete_effect / release_effect fence on it so a stale finalizer cannot complete or release an effect another finalizer re-claimed."
+  },
+  {
+   "fieldname": "claimed_at",
+   "fieldtype": "Datetime",
+   "label": "Claimed At",
+   "description": "When the current running claim was taken (CDX-4). A running effect whose claimed_at is older than EFFECT_CLAIM_STALE_S is reclaimable by a fresh claim (the prior finalizer crashed)."
+  },
+  {
+   "fieldname": "applied_at",
+   "fieldtype": "Datetime",
+   "label": "Applied At",
+   "description": "Stamp for the effect completion (D2 §1a)."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-07-23 00:00:00.000000",
+ "module": "Jarvis",
+ "name": "Jarvis Turn Effect",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "Jarvis Admin"
+  }
+ ],
+ "quick_entry": 0,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

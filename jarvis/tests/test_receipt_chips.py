@@ -22,6 +22,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import pending_confirm
 from jarvis.chat.actions_api import confirm_tool, dismiss_tool
+from jarvis.tests._transport_helpers import provision_legacy_site
 
 
 def _make_conversation() -> str:
@@ -35,6 +36,11 @@ def _make_conversation() -> str:
 
 
 class _Base(FrappeTestCase):
+	def setUp(self):
+		super().setUp()
+		# CDX-10: receipt-chip tests assert the LEGACY continuation dispatch — provision legacy.
+		provision_legacy_site(self)
+
 	def _conv(self) -> str:
 		conv = _make_conversation()
 		self.addCleanup(

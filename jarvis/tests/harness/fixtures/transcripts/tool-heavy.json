@@ -1,0 +1,159 @@
+{
+  "name": "tool-heavy",
+  "description": "Assistant text interleaved with three tool call round-trips (two jarvis__, one built-in browser), terminal final.",
+  "ack": {
+    "status": "started"
+  },
+  "ack_behavior": "normal",
+  "frames": [
+    {
+      "op": "assistant",
+      "text": "Let me",
+      "delta": "Let me"
+    },
+    {
+      "op": "assistant",
+      "text": "Let me pull the",
+      "delta": " pull the"
+    },
+    {
+      "op": "assistant",
+      "text": "Let me pull the current figures",
+      "delta": " current figures"
+    },
+    {
+      "op": "assistant",
+      "text": "Let me pull the current figures for you.",
+      "delta": " for you."
+    },
+    {
+      "op": "tool_start",
+      "name": "jarvis__get_list",
+      "call_id": "t1",
+      "title": "get_list Sales Invoice"
+    },
+    {
+      "op": "pause",
+      "ms": 180
+    },
+    {
+      "op": "tool_end",
+      "call_id": "t1",
+      "status": "completed"
+    },
+    {
+      "op": "assistant",
+      "text": "Got the",
+      "delta": "Got the"
+    },
+    {
+      "op": "assistant",
+      "text": "Got the invoice list.",
+      "delta": " invoice list."
+    },
+    {
+      "op": "assistant",
+      "text": "Got the invoice list. Now checking",
+      "delta": " Now checking"
+    },
+    {
+      "op": "assistant",
+      "text": "Got the invoice list. Now checking the customer",
+      "delta": " the customer"
+    },
+    {
+      "op": "assistant",
+      "text": "Got the invoice list. Now checking the customer balances.",
+      "delta": " balances."
+    },
+    {
+      "op": "tool_start",
+      "name": "jarvis__query",
+      "call_id": "t2",
+      "title": "query Customer balances"
+    },
+    {
+      "op": "pause",
+      "ms": 220
+    },
+    {
+      "op": "tool_end",
+      "call_id": "t2",
+      "status": "completed"
+    },
+    {
+      "op": "tool_start",
+      "name": "browser",
+      "call_id": "t3",
+      "title": "open dashboard"
+    },
+    {
+      "op": "pause",
+      "ms": 150
+    },
+    {
+      "op": "tool_end",
+      "call_id": "t3",
+      "status": "completed"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the",
+      "delta": "Across the"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers",
+      "delta": " two customers"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have",
+      "delta": " you have"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have three open",
+      "delta": " three open"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have three open invoices worth",
+      "delta": " invoices worth"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have three open invoices worth forty two",
+      "delta": " forty two"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have three open invoices worth forty two thousand rupees.",
+      "delta": " thousand rupees."
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have three open invoices worth forty two thousand rupees. Acme is",
+      "delta": " Acme is"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have three open invoices worth forty two thousand rupees. Acme is the largest",
+      "delta": " the largest"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have three open invoices worth forty two thousand rupees. Acme is the largest exposure at",
+      "delta": " exposure at"
+    },
+    {
+      "op": "assistant",
+      "text": "Across the two customers you have three open invoices worth forty two thousand rupees. Acme is the largest exposure at thirty thousand.",
+      "delta": " thirty thousand."
+    }
+  ],
+  "terminal": {
+    "kind": "final",
+    "text": "Across the two customers you have three open invoices worth forty two thousand rupees. Acme is the largest exposure at thirty thousand."
+  }
+}

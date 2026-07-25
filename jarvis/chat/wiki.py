@@ -1070,6 +1070,63 @@ def request_wiki_promotion(page: str, to_scope: str, target_role: str = "", note
 	return {"ok": True, "request": req.name, "page": doc.slug}
 
 
+@frappe.whitelist()
+def my_wiki_promotion(page: str) -> dict:
+	"""The caller's MOST-RECENT promotion request for one of their OWN wiki pages
+	— the requester-side status read powering the "requested → approved /
+	rejected" chip on the page. The reviewer list endpoint is reviewer-gated, so
+	a requester needs their own owner-scoped read. Owner-scoped by the ``owner``
+	filter (can only return the caller's own request); ``page`` accepts a docname
+	or slug. Returns ``{}`` when there is none. Read-only, smallest addition
+	(Skills-area promotion surfacing — the wiki requester side was never wired)."""
+	_require_system_user()
+	me = frappe.session.user
+	page = (page or "").strip()
+	name = (
+		page
+		if page and frappe.db.exists(WIKI, page)
+		else (frappe.db.get_value(WIKI, {"slug": page.lower()}, "name") if page else None)
+	)
+	if not name:
+		return {}
+	rows = frappe.get_all(
+		PROMO,
+		filters={"page": name, "owner": me},
+		fields=[
+			"name",
+			"status",
+			"from_scope",
+			"to_scope",
+			"target_role",
+			"note",
+			"reviewer",
+			"decided_at",
+			"decision_note",
+			"creation",
+		],
+		order_by="creation desc",
+		limit=1,
+	)
+	if not rows:
+		return {}
+	r = rows[0]
+	return {
+		"name": r.name,
+		"status": r.status or "",
+		"from_scope": r.from_scope or "",
+		"to_scope": r.to_scope or "",
+		"target_role": r.target_role or "",
+		"note": r.note or "",
+		"reviewer": r.reviewer or "",
+		"reviewer_name": (frappe.db.get_value("User", r.reviewer, "full_name") or r.reviewer)
+		if r.reviewer
+		else "",
+		"decided_at": str(r.decided_at or ""),
+		"decision_note": r.decision_note or "",
+		"created": str(r.creation or ""),
+	}
+
+
 def apply_promotion(request_name: str, approve, note: str = "", reviewer: str | None = None) -> dict:
 	"""Decide a promotion request (called by ``jarvis.chat.learned_api``, which
 	owns the reviewer gate — this is NOT whitelisted). On approve, merge the
@@ -1087,7 +1144,7 @@ def apply_promotion(request_name: str, approve, note: str = "", reviewer: str | 
 	# self-approval never mutates the target page.
 	if reviewer == (req.owner or "") and reviewer != "Administrator":
 		frappe.throw(
-			_("You cannot approve your own promotion request; another reviewer must decide it."),
+			_("You cannot decide your own promotion request; another reviewer must approve or reject it."),
 			frappe.PermissionError,
 		)
 	# TOCTOU-safe claim: re-read the status under a row lock (for_update) before

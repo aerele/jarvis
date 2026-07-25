@@ -740,6 +740,21 @@ class TestRecoveryRateWatch(FrappeTestCase):
 		# stray recovered rows or a stray alarm left by an aborted earlier
 		# run would make these deterministic threshold tests flaky.
 		frappe.db.sql("UPDATE `tabJarvis Chat Message` SET was_recovered = 0 WHERE was_recovered = 1")
+		# DENOMINATOR control (the recurring dilution): the alarm's rate is
+		# recovered / ALL assistant rows in the last 24h (site-global by design).
+		# Committed assistant rows from sibling tests / prior runs that fall in the
+		# window inflate the denominator and push the rate under the threshold, so
+		# the alarm never fires (0 != 1) even though this test's own fixtures are
+		# well over it. Neutralizing only was_recovered fixes the NUMERATOR but not
+		# the denominator — so push every pre-existing in-window assistant row OUT of
+		# the 24h window; only this test's own rows (inserted after setUp) then count.
+		since_24h = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-24)
+		out_of_window = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-2)
+		frappe.db.sql(
+			"UPDATE `tabJarvis Chat Message` SET creation = %(old)s "
+			"WHERE role = 'assistant' AND creation >= %(since)s",
+			{"old": out_of_window, "since": since_24h},
+		)
 		frappe.db.delete("Error Log", {"method": self.TITLE})
 		self.conv = frappe.get_doc(
 			{

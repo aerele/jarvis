@@ -184,6 +184,10 @@
 			style="display: none"
 			@change="onFilesPicked"
 		/>
+		<!-- Host content directly below the input and above the toolbar row (chat's
+		     voice-clip chips: recovery / failed / retained / unpersisted). Full-width
+		     rows live here, not in #left-toolbar, so they don't disrupt the button row. -->
+		<slot name="below-input" />
 		<div style="display: flex; align-items: center; gap: 6px; padding: 2px 4px">
 			<!-- Host toolbar buttons on the left (chat: mic + 📎 + wiki-ground).
 			     `pickFiles` is handed down so a host that takes the slot over can

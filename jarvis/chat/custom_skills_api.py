@@ -12,16 +12,44 @@ synchronously, enqueue a deduped redis-locked worker that calls the admin app,
 and flip the status to a terminal ``ok ...`` / ``failed: ...`` the SPA polls.
 """
 
+import contextlib
+
 import frappe
 from frappe import _
 
-from jarvis.chat.custom_skills import build_push_payload
+from jarvis.chat.custom_skills import (
+	MANAGED_OWNER,
+	MAX_SKILLS_PER_PUSH,
+	build_push_payload,
+	project_org_promotion_push,
+	pushable_org_skill_count,
+)
 from jarvis.permissions import require_jarvis_user
 
 SKILL = "Jarvis Custom Skill"
 _SETTINGS = "Jarvis Settings"
 _PUSH_JOB_ID = "jarvis_custom_skills_push"
 _LOCK_NAME = "jarvis_custom_skills_push"
+# The catalog-wide serializer shared with decide_skill_promotion (SR4-2 / R3-SP-3):
+# the Org push budget is a catalog-wide resource, so every write that changes shared
+# push-eligibility takes the SAME lock the approval holds through commit.
+_CATALOG_LOCK = "skillpromo:org-catalog"
+
+
+@contextlib.contextmanager
+def _catalog_lock():
+	"""Serialize a shared-catalog-eligibility-changing write with promotion approvals
+	on the SAME catalog-wide lock ``decide_skill_promotion`` holds through commit
+	(SR4-2). A shared (Role/Org) create, a rename or an enable/disable moves the push
+	budget, so it must not commit between an approval's under-lock budget projection
+	and that approval's publication. Held THROUGH the caller's commit. These are
+	low-frequency reviewer / admin / insight-apply writes, so a short block is fine."""
+	from jarvis._redis_lock import redis_lock
+
+	with redis_lock(_CATALOG_LOCK, timeout_s=60, blocking_timeout_s=15.0) as acquired:
+		if not acquired:
+			frappe.throw(_("The shared skill catalog is busy right now; try again in a moment."))
+		yield
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +322,14 @@ def get_custom_skill(name: str) -> dict:
 	is_owner = doc.owner == me
 	if not is_owner and not frappe.db.exists(SHARE, {"parent": name, "user": me}):
 		frappe.throw(_("You don't have access to this skill."), frappe.PermissionError)
+	# ``scope`` / ``target_role`` / ``managed_by_learning`` let the SPA gate the
+	# "Request promotion…" affordance (owner + User-scope + not learned) and show
+	# the current scope on the promotion status chip — the requester UI can't
+	# reason about promotion without them. Read-only, still owner/shared-gated by
+	# the access check above (Skills-area promotion surfacing).
+	scope = (doc.scope or "Org") or "Org"
+	if scope == "Personal":
+		scope = "User"
 	return {
 		"name": doc.name,
 		"skill_name": doc.skill_name,
@@ -305,6 +341,9 @@ def get_custom_skill(name: str) -> dict:
 		"mine": int(is_owner),
 		"can_edit": int(is_owner),
 		"shared_by": "" if is_owner else _full_name(doc.owner),
+		"scope": scope,
+		"target_role": doc.get("target_role") or "",
+		"managed_by_learning": int(doc.get("managed_by_learning") or 0),
 	}
 
 
@@ -354,8 +393,18 @@ def _create_custom_skill_impl(
 	if scope:
 		fields["scope"] = scope
 	doc = frappe.get_doc(fields)
-	doc.insert(ignore_permissions=bool(ignore_permissions))
-	frappe.db.commit()
+	# SR4-2: a shared (Role/Org) create moves the push budget - the direct-Org create
+	# AND the reviewer insight-apply create (scope="Org") both land here - so serialize
+	# it with promotion approvals on the catalog-wide lock, held THROUGH commit, so it
+	# can never commit between an approval's under-lock projection and its publication.
+	# A private (User) create touches no shared budget, so it stays lock-free.
+	if (scope or "").strip() in ("Role", "Org"):
+		with _catalog_lock():
+			doc.insert(ignore_permissions=bool(ignore_permissions))
+			frappe.db.commit()
+	else:
+		doc.insert(ignore_permissions=bool(ignore_permissions))
+		frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "skill_name": doc.skill_name}}
 
 
@@ -382,8 +431,18 @@ def update_custom_skill(
 		doc.user_invocable = int(user_invocable)
 	if enabled is not None:
 		doc.enabled = int(enabled)
-	doc.save()
-	frappe.db.commit()
+	# SR4-2: editing a SHARED (Role/Org) skill - an enable/disable, a rename, a
+	# reviewer content edit - changes the shared push budget or the reserved slug, so
+	# serialize it with promotion approvals on the catalog-wide lock, held THROUGH
+	# commit. A private (User) edit touches no shared catalog, so it stays lock-free.
+	scope = (doc.scope or "Org").strip() or "Org"
+	if scope in ("Role", "Org"):
+		with _catalog_lock():
+			doc.save()
+			frappe.db.commit()
+	else:
+		doc.save()
+		frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
 
 
@@ -502,6 +561,36 @@ PROMO = "Jarvis Skill Promotion Request"
 _SCOPE_RANK = {"User": 0, "Personal": 0, "Role": 1, "Org": 2}
 
 
+def _parse_ack_projection(ack):
+	"""Coerce the reviewer's acknowledged push projection (a JSON string over HTTP,
+	or a dict from a python caller) to a dict, or ``None``."""
+	if isinstance(ack, str):
+		if not ack.strip():
+			return None
+		try:
+			ack = frappe.parse_json(ack)
+		except Exception:
+			return None
+	return ack if isinstance(ack, dict) else None
+
+
+def _projection_signature(proj) -> tuple | None:
+	"""The decision-relevant fingerprint of a push projection (R2-SP-5). Two
+	projections with the same signature warn the reviewer identically; a changed
+	signature means the shared catalog moved under them and they must reconfirm.
+	Only the fields that drive the warning are compared, so incidental fields never
+	force a spurious reconfirm."""
+	if not proj:
+		return None
+	return (
+		bool(proj.get("over_budget")),
+		bool(proj.get("at_budget")),
+		int(proj.get("projected_count") or 0),
+		tuple(proj.get("dropped_slugs") or []),
+		bool(proj.get("promoted_dropped")),
+	)
+
+
 def _notify_skill_reviewers(request_name: str | None = None) -> None:
 	"""Best-effort nudge to the skill-reviewer set that a promotion request
 	landed. Carries the request name so the reviewer client can deep-link to it.
@@ -560,6 +649,14 @@ def request_skill_promotion(name: str, to_scope: str, target_role: str = "", not
 			"doctype": PROMO,
 			"skill": doc.name,
 			"skill_name": doc.skill_name,
+			# Immutable snapshot of the FULL content at request time (CDX-SP-1). The
+			# reviewer decides on this, and approval promotes exactly this — so a
+			# post-request edit, or content hidden past the old 300-char excerpt, can
+			# never change what the Role/Org audience ends up running. The requester
+			# owns ``doc`` (checked above), so this reads only their own content.
+			"instructions_snapshot": doc.instructions or "",
+			"description_snapshot": doc.description or "",
+			"user_invocable_snapshot": int(doc.user_invocable or 0),
 			"from_scope": from_scope,
 			"to_scope": to_scope,
 			"target_role": target_role if to_scope == "Role" else None,
@@ -573,16 +670,52 @@ def request_skill_promotion(name: str, to_scope: str, target_role: str = "", not
 	return {"ok": True, "request": req.name, "skill": doc.skill_name}
 
 
+def _stamp_decision(req, reviewer: str, approved: bool, note: str) -> None:
+	"""Write the terminal decision fields and commit. Shared by the approve and
+	reject branches of :func:`decide_skill_promotion`; the approve branch calls it
+	INSIDE the slug lock so the commit that publishes the shared copy happens while
+	the lock is still held (R2-SP-3a)."""
+	req.status = "Approved" if approved else "Rejected"
+	req.reviewer = reviewer
+	req.decided_at = frappe.utils.now_datetime()
+	req.decision_note = (note or "").strip()[:140] or None
+	req.save(ignore_permissions=True)
+	frappe.db.commit()
+
+
 @frappe.whitelist()
-def decide_skill_promotion(request_name: str, approve: int | str, note: str = "") -> dict:
+def decide_skill_promotion(
+	request_name: str, approve: int | str, note: str = "", ack_projection: str | dict | None = None
+) -> dict:
 	"""Approve or reject a skill promotion request. Reviewer-gated
 	(``require_skill_reviewer``) + four-eyes (a reviewer cannot approve their own
-	request). On approve, widen the skill's scope in place under the reviewer's
-	authority (``ignore_permissions``; the controller ``_guard_scope_change``
-	admits a reviewer). TOCTOU-safe: the status is re-read under a row lock, and
-	the widening is re-validated against the LIVE skill scope, so two concurrent
-	approvals can't double-apply. The promoted Org skill joins the shared catalog
-	on the next explicit Apply (never auto-pushed here)."""
+	request). On approve, PUBLISH a new system-owned Role/Org skill from the
+	request's immutable content snapshot, leaving the requester's private skill
+	untouched (CDX-SP-1). The audience runs EXACTLY what the reviewer approved, and
+	the requester holds no edit rights over the shared copy (they don't own it, and
+	``_guard_content_change`` locks its content to reviewers), so the approval can
+	never be silently rewritten after review. TOCTOU-safe: the status is re-read
+	under a row lock, so two concurrent approvals can't double-publish.
+
+	R2-SP-5 / R3-SP-3 (budget binding, catalog-wide): for an Org approval the
+	push-budget projection is recomputed fresh — NOW while holding the catalog-wide
+	lock — and compared to what the reviewer acknowledged (``ack_projection``, the
+	fresh preflight they confirmed on). If a warning-worthy catalog moved under them,
+	nothing is published — the NEW projection is returned and the reviewer must
+	reconfirm against it. The push budget is a catalog-wide resource, so the recheck
+	+ publication serialize under ONE ``skillpromo:org-catalog`` lock (not a per-slug
+	one), held THROUGH commit: two DIFFERENT-slug approvals at the budget boundary can
+	no longer both confirm a 25-projection and both commit to 26.
+
+	R2-SP-3a / R3-SP-2 (atomic + lineage-by-source): the approve path holds that same
+	catalog-wide lock across the lineage/slug resolution + insert/supersede + commit,
+	so concurrent approvals serialize (the winner commits before releasing; a
+	contender sees the published copy and either supersedes its own lineage row or
+	refuses a different-lineage slug clash — never a duplicate shared row). Being
+	global, the one lock also covers BOTH the old and the new slug when a renamed
+	lineage copy is superseded. The promoted skill joins the shared catalog on the
+	next explicit Apply (never auto-pushed here)."""
+	from jarvis._redis_lock import redis_lock
 	from jarvis.permissions import require_skill_reviewer
 
 	require_skill_reviewer()
@@ -590,7 +723,7 @@ def decide_skill_promotion(request_name: str, approve: int | str, note: str = ""
 	req = frappe.get_doc(PROMO, request_name)
 	if reviewer == (req.owner or "") and reviewer != "Administrator":
 		frappe.throw(
-			_("You cannot approve your own promotion request; another reviewer must decide it."),
+			_("You cannot decide your own promotion request; another reviewer must approve or reject it."),
 			frappe.PermissionError,
 		)
 	status = frappe.db.get_value(PROMO, request_name, "status", for_update=True)
@@ -598,25 +731,193 @@ def decide_skill_promotion(request_name: str, approve: int | str, note: str = ""
 		return {"ok": False, "reason": _("Already {0}.").format((status or "").lower())}
 
 	approved = str(approve).strip().lower() in ("1", "true", "yes", "on")
-	out: dict = {"ok": True, "status": "Approved" if approved else "Rejected"}
-	if approved:
-		skill = frappe.get_doc(SKILL, req.skill)
-		live = (skill.scope or "Org").strip() or "Org"
-		if live == "Personal":
-			live = "User"
-		if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(live, 0):
-			frappe.throw(_("The skill is already at or above the requested scope."))
-		skill.scope = req.to_scope
-		skill.target_role = req.target_role if req.to_scope == "Role" else None
-		skill.save(ignore_permissions=True)
-		out["skill"] = skill.skill_name
 
-	req.status = "Approved" if approved else "Rejected"
-	req.reviewer = reviewer
-	req.decided_at = frappe.utils.now_datetime()
-	req.decision_note = (note or "").strip()[:140] or None
-	req.save(ignore_permissions=True)
-	frappe.db.commit()
+	out: dict = {"ok": True, "status": "Approved" if approved else "Rejected"}
+	if not approved:
+		_stamp_decision(req, reviewer, False, note)
+		return out
+
+	# R3-SP-3: serialize the WHOLE publish — the fresh budget recheck, the
+	# lineage/slug resolution, the materialize and the commit — under ONE CATALOG-WIDE
+	# lock held THROUGH commit. The Org push budget is a catalog-wide resource, not a
+	# per-slug one: a slug-scoped lock let two DIFFERENT-slug approvals each confirm a
+	# 25-projection, take different locks and both commit to 26, neither reconfirming
+	# over budget. A single serializer for the (low-frequency, reviewer-gated)
+	# promotions closes that, and — being global — also covers shared-slug uniqueness
+	# across BOTH the old and the new slug when a renamed lineage copy is superseded
+	# (R3-SP-2), subsuming the old same-slug lock. Role promotions take the same lock
+	# so their shared-slug lineage resolution serializes too.
+	with redis_lock("skillpromo:org-catalog", timeout_s=60, blocking_timeout_s=15.0) as acquired:
+		if not acquired:
+			return {
+				"ok": False,
+				"reason": _("Another skill promotion is being decided right now; try again in a moment."),
+			}
+		# R2-SP-5, now INSIDE the catalog lock (R3-SP-3): bind the budget projection to
+		# THIS decision against a projection recomputed while holding the lock, so a
+		# concurrent approval that already committed is reflected in it. A reconfirm is
+		# required only when the reviewer would publish INTO a budget warning without
+		# having acknowledged this exact (fresh, under-lock) projection. A clear (room
+		# to spare) catalog never needs a reconfirm, so a well-formed under-budget
+		# approval is unaffected.
+		if (req.to_scope or "") == "Org":
+			fresh = project_org_promotion_push(req.skill, req.skill_name or "")
+			warned = bool(fresh and (fresh.get("over_budget") or fresh.get("at_budget")))
+			if warned and _projection_signature(
+				_parse_ack_projection(ack_projection)
+			) != _projection_signature(fresh):
+				return {
+					"ok": False,
+					"needs_reconfirm": True,
+					"to_scope": "Org",
+					"push_projection": fresh,
+					"reason": _(
+						"The shared catalog changed since you last checked — review the updated "
+						"push impact and confirm again."
+					),
+				}
+		out.update(_materialize_promotion(req))
+		_stamp_decision(req, reviewer, True, note)
+	return out
+
+
+def _materialize_promotion(req) -> dict:
+	"""Publish the reviewed snapshot as a system-owned Role/Org skill (the approve
+	path — CDX-SP-1). The requester's private (User) skill is left intact; the shared
+	copy carries EXACTLY the request-time snapshot content, is owned by the system
+	identity (``MANAGED_OWNER``) rather than the requester, and is content-locked to
+	reviewers by the controller guard. Called INSIDE the catalog-wide lock held by
+	:func:`decide_skill_promotion`. Returns ``{skill, materialized, push_projection?}``
+	folded into the decision result."""
+	src = frappe.get_doc(SKILL, req.skill)
+	live = (src.scope or "Org").strip() or "Org"
+	if live == "Personal":
+		live = "User"
+	if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(live, 0):
+		frappe.throw(_("The skill is already at or above the requested scope."))
+
+	# R2-SP-1 + R3-SP-4: approval binds to the IMMUTABLE request-time snapshot and
+	# NEVER reads the (mutable) live source at decision time — a live fallback would
+	# reopen the CDX-SP-1 TOCTOU (reviewer sees v A, requester edits to v B, v B
+	# publishes). The ``snapshotted`` presence marker proves ALL THREE content fields
+	# were captured at request time; without it (a legacy pre-binding row, or a partial
+	# snapshot) approval is refused with a resubmit message — never a null->0 fill that
+	# would silently publish "invocable off" as if a reviewer had chosen it. A
+	# resubmission mints a fresh full snapshot + marker; new requests are guarded at
+	# request time, so this only ever trips a genuine pre-marker / partial row.
+	if (
+		not req.get("snapshotted")
+		or req.get("instructions_snapshot") is None
+		or req.get("description_snapshot") is None
+		or req.get("user_invocable_snapshot") is None
+	):
+		frappe.throw(
+			_(
+				"This promotion request predates content-binding and cannot be approved; "
+				"ask the requester to resubmit it."
+			)
+		)
+	instructions = req.get("instructions_snapshot")
+	description = req.get("description_snapshot") or ""
+	user_invocable = int(req.get("user_invocable_snapshot"))
+	target_role = req.target_role if req.to_scope == "Role" else None
+
+	# R3-SP-2 (lineage by SOURCE link, not slug). The container writes ONE
+	# custom-<slug> dir, so at most one SHARED (Role/Org) copy may carry a given slug —
+	# but the existing shared copy of THIS lineage must be found by its immutable
+	# source link, independent of the current slug, or a renamed source strands the
+	# prior copy and inserts a duplicate. Resolve it (under the caller's catalog-wide
+	# lock, committed before release):
+	#   * if the SOURCE itself is already a shared Role/Org row (a Role->Org widen),
+	#     THAT row is the existing shared copy — widen it in place, never a 2nd insert;
+	#   * otherwise (a private User source) find a prior shared copy materialized FROM
+	#     it (``source_skill == req.skill``), regardless of its current slug — so
+	#     User->Role then (rename) User->Org supersedes the ONE Role copy in place.
+	if live in ("Role", "Org"):
+		existing_name = src.name
+	else:
+		prior = frappe.get_all(
+			SKILL,
+			filters={"source_skill": req.skill, "scope": ("in", ("Role", "Org", ""))},
+			fields=["name"],
+			order_by="creation asc",
+		)
+		existing_name = prior[0].name if prior else None
+
+	# Any OTHER shared row already holding the target slug is a DIFFERENT-lineage author
+	# of the same slug — a hard conflict (one container dir per slug). The lineage copy
+	# we are about to widen in place is excluded via ``name !=``. The
+	# ``("in", ("Role", "Org", ""))`` form matches legacy NULL-scope (=Org) rows too
+	# (db_query wraps ``in`` in ifnull), mirroring the controller belt (R3-SP-1).
+	clash = frappe.get_all(
+		SKILL,
+		filters={
+			"skill_name": req.skill_name,
+			"scope": ("in", ("Role", "Org", "")),
+			"name": ("!=", existing_name or ""),
+		},
+		pluck="name",
+		limit=1,
+	)
+	if clash:
+		frappe.throw(
+			_("A shared skill named '{0}' already exists; remove or rename it before promoting.").format(
+				req.skill_name
+			)
+		)
+
+	prev_flag = frappe.flags.jarvis_promotion_materialize
+	frappe.flags.jarvis_promotion_materialize = True
+	try:
+		if existing_name is not None:
+			# Supersede the ONE prior shared copy of this lineage IN PLACE (atomic
+			# one-row widen). It adopts the request's (possibly renamed) slug + the new
+			# snapshot content, so the lineage keeps exactly one shared copy at the new
+			# scope — no orphan Role copy, no dead-end for the requester.
+			shared = frappe.get_doc(SKILL, existing_name)
+			existing_scope = (shared.scope or "Org").strip() or "Org"
+			if existing_scope == "Personal":
+				existing_scope = "User"
+			if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(existing_scope, 0):
+				frappe.throw(_("This skill is already shared at {0} scope or wider.").format(existing_scope))
+			shared.skill_name = req.skill_name
+			shared.scope = req.to_scope
+			shared.target_role = target_role
+			shared.description = description
+			shared.instructions = instructions
+			shared.user_invocable = user_invocable
+			shared.enabled = 1
+			shared.save(ignore_permissions=True)
+			new_name = shared.name
+		else:
+			new = frappe.get_doc(
+				{
+					"doctype": SKILL,
+					"skill_name": req.skill_name,
+					"description": description,
+					"instructions": instructions,
+					"user_invocable": user_invocable,
+					"enabled": 1,
+					"scope": req.to_scope,
+					"target_role": target_role,
+					"source_skill": req.skill,
+				}
+			)
+			new.insert(ignore_permissions=True)
+			new_name = new.name
+	finally:
+		frappe.flags.jarvis_promotion_materialize = prev_flag
+	# Own the shared copy as the system identity, not the approving reviewer: the
+	# requester must not own what the audience runs (they'd keep edit rights), and a
+	# system owner survives reviewer account changes. Metadata-only, so a direct db
+	# write (update_modified=False) is the right tool. Uniqueness was validated
+	# against this FINAL owner before commit (see _validate_unique_per_owner under
+	# the jarvis_promotion_materialize flag — R2-SP-3a).
+	frappe.db.set_value(SKILL, new_name, "owner", MANAGED_OWNER, update_modified=False)
+
+	out = {"skill": req.skill_name, "materialized": new_name}
+	if req.to_scope == "Org":
+		out["push_projection"] = project_org_promotion_push(new_name, req.skill_name)
 	return out
 
 
@@ -657,7 +958,8 @@ def list_skill_promotion_requests(
 	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params)[0][0]
 	rows = frappe.db.sql(
 		f"""SELECT name, skill, skill_name, from_scope, to_scope, target_role,
-			note, status, owner, creation, reviewer, decided_at, decision_note
+			note, status, owner, creation, reviewer, decided_at, decision_note,
+			instructions_snapshot, description_snapshot, user_invocable_snapshot
 		FROM `tab{PROMO}`
 		WHERE {where}
 		ORDER BY creation DESC, name ASC
@@ -675,6 +977,76 @@ def list_skill_promotion_requests(
 			else []
 		)
 	}
+	# Reviewer content preview: return the request's IMMUTABLE snapshot (the FULL
+	# content), not a 300-char live excerpt — the reviewer decides on EXACTLY what
+	# approval promotes, so nothing can be hidden past a truncation or edited after
+	# review (CDX-SP-1). R2-SP-2: materialization publishes the instructions AND the
+	# description AND the user-invocable flag from the snapshot, so ALL THREE are
+	# surfaced here — a reviewer must see every field their approval publishes.
+	# Strict-need (SAR-3): the preview is only decision-relevant for Pending rows; a
+	# decided (Approved/Rejected) row must NOT re-surface the requester's content.
+	# Legacy rows filed before the snapshot fields fall back to the live values via
+	# one reviewer-gated batch fetch (a reviewer cannot read a User-scope skill body
+	# via get_custom_skill, so this raw fetch is the only surface that can show it —
+	# the same reason the list itself sidesteps if_owner); such rows cannot actually
+	# be approved (R2-SP-1) but the preview still explains what to resubmit.
+	legacy_pending_skills = list(
+		{
+			r["skill"]
+			for r in rows
+			if r.get("skill") and r.get("status") == "Pending" and r.get("instructions_snapshot") is None
+		}
+	)
+	legacy_live = {
+		s.name: s
+		for s in (
+			frappe.get_all(
+				SKILL,
+				filters={"name": ["in", legacy_pending_skills]},
+				fields=["name", "instructions", "description", "user_invocable"],
+			)
+			if legacy_pending_skills
+			else []
+		)
+	}
+
+	def _preview(r) -> str:
+		if r.get("status") != "Pending":
+			return ""
+		snap = r.get("instructions_snapshot")
+		if snap is not None:
+			return snap
+		live = legacy_live.get(r.get("skill"))
+		return (live.instructions if live else "") or ""
+
+	def _desc_preview(r) -> str:
+		if r.get("status") != "Pending":
+			return ""
+		snap = r.get("description_snapshot")
+		if snap is not None:
+			return snap
+		live = legacy_live.get(r.get("skill"))
+		return (live.description if live else "") or ""
+
+	def _ui_preview(r):
+		# The user-invocable flag approval publishes (int 0/1), or None for a decided
+		# row (nothing to surface).
+		if r.get("status") != "Pending":
+			return None
+		snap = r.get("user_invocable_snapshot")
+		if snap is not None:
+			return int(snap or 0)
+		live = legacy_live.get(r.get("skill"))
+		return int(live.user_invocable or 0) if live else None
+
+	def _projection(r):
+		# Server-side push-budget projection for a Pending Org promotion, sharing
+		# build_push_payload's exact logic (CDX-SP-2). The client renders THIS, not
+		# a stale count-based guess. Role/User targets never touch the push.
+		if r.get("status") == "Pending" and r.get("to_scope") == "Org" and r.get("skill"):
+			return project_org_promotion_push(r["skill"], r.get("skill_name") or "")
+		return None
+
 	out_rows = [
 		{
 			"name": r["name"],
@@ -691,6 +1063,12 @@ def list_skill_promotion_requests(
 			"reviewer": r.get("reviewer") or "",
 			"decided_at": str(r.get("decided_at") or ""),
 			"decision_note": r.get("decision_note") or "",
+			"body_excerpt": _preview(r),
+			# R2-SP-2: the description + user-invocable flag approval ALSO publishes,
+			# so the reviewer card + approve confirm render them alongside the body.
+			"description_snapshot": _desc_preview(r),
+			"user_invocable_snapshot": _ui_preview(r),
+			"push_projection": _projection(r),
 		}
 		for r in rows
 	]
@@ -700,7 +1078,103 @@ def list_skill_promotion_requests(
 		"has_more": start + len(out_rows) < total,
 		"start": start,
 		"page_length": pl,
+		# Coarse container push-budget context (uncapped pushable Org count + the
+		# real cap). The AUTHORITATIVE per-row truth is each Pending Org row's
+		# ``push_projection`` (recomputed fresh at approval via
+		# ``preflight_skill_promotion``); these two stay for at-a-glance context.
+		"push_count": pushable_org_skill_count(),
+		"push_budget": MAX_SKILLS_PER_PUSH,
 	}
+
+
+@frappe.whitelist()
+def preflight_skill_promotion(request_name: str) -> dict:
+	"""Fresh, reviewer-gated push-budget projection for one Pending promotion,
+	recomputed at the moment the reviewer is about to decide (CDX-SP-2) — a
+	list-load value goes stale under concurrent promotions/edits. Returns
+	``{ok, to_scope, push_projection}``; ``push_projection`` is ``None`` for
+	Role/User targets (they never reach the container push) or a non-Pending row.
+	Shares :func:`build_push_payload`'s exact logic via
+	``project_org_promotion_push`` so the warning states the TRUTH, not a guess."""
+	from jarvis.permissions import require_skill_reviewer
+
+	require_skill_reviewer()
+	req = frappe.get_doc(PROMO, request_name)
+	projection = None
+	if req.status == "Pending" and req.to_scope == "Org":
+		projection = project_org_promotion_push(req.skill, req.skill_name or "")
+	return {"ok": True, "to_scope": req.to_scope or "", "push_projection": projection}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def my_skill_promotion(name: str) -> dict:
+	"""The caller's MOST-RECENT promotion request for one of their OWN skills —
+	the requester-side status read (the reviewer list endpoint is reviewer-gated,
+	so a requester needs their own read to render the "requested → approved /
+	rejected" chip). Owner-scoped by the ``owner`` filter, so it can only ever
+	return the caller's own request. Returns ``{}`` when there is none.
+
+	Read-only, smallest addition (Skills-area promotion surfacing): the doctype
+	perms are ``All: read + if_owner``, but the SPA does not use generic
+	client.get_list anywhere, so this thin owner-scoped wrapper keeps the
+	house "one whitelisted method per read" idiom."""
+	me = frappe.session.user
+	rows = frappe.get_all(
+		PROMO,
+		filters={"skill": name, "owner": me},
+		fields=[
+			"name",
+			"status",
+			"from_scope",
+			"to_scope",
+			"target_role",
+			"note",
+			"reviewer",
+			"decided_at",
+			"decision_note",
+			"creation",
+		],
+		order_by="creation desc",
+		limit=1,
+	)
+	if not rows:
+		return {}
+	r = rows[0]
+	return {
+		"name": r.name,
+		"status": r.status or "",
+		"from_scope": r.from_scope or "",
+		"to_scope": r.to_scope or "",
+		"target_role": r.target_role or "",
+		"note": r.note or "",
+		"reviewer": r.reviewer or "",
+		"reviewer_name": _full_name(r.reviewer) if r.reviewer else "",
+		"decided_at": str(r.decided_at or ""),
+		"decision_note": r.decision_note or "",
+		"created": str(r.creation or ""),
+	}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def promotable_target_roles() -> dict:
+	"""Role options for the promotion requester's Role picker: the caller's OWN
+	desk roles, minus non-targetable system roles. A requester can only sensibly
+	ask to widen a skill to a team they belong to; the reviewer makes the final
+	call. Reuses the wiki's ``_NON_TARGETABLE_ROLES`` vocabulary so skill- and
+	wiki-promotion requesters speak ONE consistent role language (the wiki
+	reviewer-side ``manageable_roles`` is a CURATOR concept — empty for a plain
+	user — and is the wrong source for a requester). Returns ``{roles: [...]}``.
+
+	Gated with ``@require_jarvis_user`` (SAR-2) — no cross-user leak (it only
+	ever reflects the caller's OWN session roles), but it carries the module's
+	name-your-caller gate for surface uniformity with every sibling read."""
+	from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
+
+	me = frappe.session.user
+	roles = sorted(r for r in frappe.get_roles(me) if r and r not in _NON_TARGETABLE_ROLES)
+	return {"roles": roles}
 
 
 # --------------------------------------------------------------------------- #
