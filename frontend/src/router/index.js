@@ -4,6 +4,14 @@ import { isWorkspaceReady } from "@/onboarding/readiness.js";
 // home, D33); every other page is a route-level dynamic import.
 import ChatView from "@/views/ChatView.vue";
 
+// Both flags are boot-time globals (jarvis/www/jarvis.py:90-95), frozen for the
+// page's life — so this is a plain function, not a reactive check. Exported
+// for direct unit testing (see support-guard.test.js) — importing this whole
+// module already pulls in the real vue-router + the two static imports below.
+export function supportGuard(to, from, next) {
+	next(window.support_available && window.has_support_access ? undefined : { name: "Chat" });
+}
+
 const routes = [
 	{ path: "/", name: "Chat", component: ChatView, meta: { chat: true } },
 	{ path: "/c/:id", name: "Conversation", component: ChatView, meta: { chat: true } },
@@ -45,18 +53,35 @@ const routes = [
 			);
 		},
 	},
+	// Support is a STANDALONE, shell-less space: chromeless drops both the
+	// sidebar and the #app-header strip (AppShell.vue:18-33), and SupportShell
+	// supplies its own top bar in their place. Static /support/new is registered
+	// BEFORE /support/:ticket — house convention (static before dynamic; see the
+	// catch-all note below for why registration order doesn't actually matter here).
+	//
+	// Dual kill-switch (P2) on ALL THREE routes: support must be enabled
+	// fleet-wide AND the user must have access. Deep-linking straight to
+	// /support/TKT-1 must not bypass what /support enforces.
 	{
 		path: "/support",
 		name: "Support",
-		component: () => import("@/pages/support/SupportPage.vue"),
-		// Dual kill-switch (P2): support must be enabled fleet-wide AND the user must have access.
-		beforeEnter: (to, from, next) => {
-			next(
-				window.support_available && window.has_support_access
-					? undefined
-					: { name: "Chat" }
-			);
-		},
+		component: () => import("@/pages/support/SupportListPage.vue"),
+		meta: { chromeless: true },
+		beforeEnter: supportGuard,
+	},
+	{
+		path: "/support/new",
+		name: "SupportNew",
+		component: () => import("@/pages/support/SupportNewPage.vue"),
+		meta: { chromeless: true },
+		beforeEnter: supportGuard,
+	},
+	{
+		path: "/support/:ticket",
+		name: "SupportTicket",
+		component: () => import("@/pages/support/SupportThreadPage.vue"),
+		meta: { chromeless: true },
+		beforeEnter: supportGuard,
 	},
 	{
 		path: "/macros",

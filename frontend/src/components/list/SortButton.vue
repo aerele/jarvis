@@ -1,23 +1,26 @@
 <template>
 	<div class="flex items-center">
+		<!-- Direction toggle is ALWAYS visible now, so a list can be flipped
+		     ascending/descending even at its page-default sort. Previously it only
+		     appeared once a non-default sort was active, which left no way to
+		     reverse the default column (e.g. oldest-first on a list that defaults
+		     to newest-first) without first switching to another field. Keeping it
+		     out of the popover also dodges the reka-Select-in-Popover dismissal
+		     (a select's portal counts as an outside click). -->
 		<Button
-			v-if="!isDefault"
-			:icon="sort.dir === 'asc' ? 'arrow-up' : 'arrow-down'"
+			:icon="dir === 'asc' ? 'arrow-up' : 'arrow-down'"
 			class="rounded-r-none border-r"
-			:tooltip="sort.dir === 'asc' ? 'Ascending' : 'Descending'"
+			:tooltip="
+				dir === 'asc'
+					? 'Sorted ascending - click for descending'
+					: 'Sorted descending - click for ascending'
+			"
 			@click="toggleDir"
 		/>
 		<Popover placement="bottom-end">
 			<template #target="{ togglePopover }">
 				<Button
-					v-if="isDefault"
-					label="Sort"
-					iconLeft="bar-chart-2"
-					@click="togglePopover()"
-				/>
-				<Button
-					v-else
-					:label="fieldLabel"
+					:label="isDefault ? 'Sort' : fieldLabel"
 					class="rounded-l-none"
 					@click="togglePopover()"
 				/>
@@ -55,9 +58,10 @@
 </template>
 
 <script setup>
-// SortButton - single field + direction (DESIGN-V3 §5.4, D15): plain "Sort"
-// button at the page default; split button (asc/desc toggle + field label +
-// ghost x reset) once a non-default sort is active. Emits update:sort {field, dir}.
+// SortButton - single field + direction (DESIGN-V3 §5.4, D15): an always-visible
+// asc/desc toggle joined to the field button ("Sort" at the page default, the
+// field label once chosen); a ghost x reset appears once a non-default sort is
+// active. Emits update:sort {field, dir}.
 import { computed } from "vue";
 import { Popover, Button, FormControl } from "frappe-ui";
 
@@ -75,15 +79,21 @@ const isDefault = computed(
 		(props.sort.dir || "") === (props.defaultSort.dir || "")
 );
 
+// Effective direction: the active sort's dir, else the page default, else desc.
+// The always-visible toggle needs a value even before the user has changed sort.
+const dir = computed(() => props.sort.dir || props.defaultSort.dir || "desc");
+
 const fieldLabel = computed(() => {
 	const opt = (props.sortOptions || []).find((o) => o.value === props.sort.field);
 	return (opt && opt.label) || props.sort.field || "Sort";
 });
 
 function toggleDir() {
+	// Fall back to the default field so toggling from the untouched default state
+	// (where sort.field may not yet be set by the page) still emits a real field.
 	emit("update:sort", {
-		field: props.sort.field,
-		dir: props.sort.dir === "asc" ? "desc" : "asc",
+		field: props.sort.field || props.defaultSort.field || "",
+		dir: dir.value === "asc" ? "desc" : "asc",
 	});
 }
 

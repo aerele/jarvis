@@ -108,7 +108,26 @@ class TestSupportBenchEndpoints(FrappeTestCase):
 			out = sapi.list_tickets()
 			self.assertTrue(out["ok"])
 			self.assertEqual(f.call_args.kwargs["scope"], "own")
-			self.assertEqual(f.call_args.kwargs["requesting_user"], frappe.session.user)
+			# requesting_user is forwarded as Helpdesk's raised_by (must be a valid
+			# email), so the endpoint resolves the User's email via _requesting_user,
+			# not the bare login name (see the dedicated tests below).
+			self.assertEqual(f.call_args.kwargs["requesting_user"], sapi._requesting_user())
+
+	def test_requesting_user_resolves_email_not_login_name(self):
+		"""_requesting_user forwards the User's email — Helpdesk's raised_by must
+		be a valid email, and the bare login name breaks system accounts like
+		Administrator, which Helpdesk 417s with InvalidEmailAddressError."""
+		from jarvis.support import api as sapi
+
+		with patch.object(sapi.frappe.db, "get_value", return_value="picked@email.com") as gv:
+			self.assertEqual(sapi._requesting_user(), "picked@email.com")
+		gv.assert_called_once_with("User", frappe.session.user, "email")
+
+	def test_requesting_user_falls_back_to_login_name_when_email_unset(self):
+		from jarvis.support import api as sapi
+
+		with patch.object(sapi.frappe.db, "get_value", return_value=None):
+			self.assertEqual(sapi._requesting_user(), frappe.session.user)
 
 	def test_download_returns_response(self):
 		from jarvis.support import media as smedia
@@ -119,11 +138,15 @@ class TestSupportBenchEndpoints(FrappeTestCase):
 				smedia.admin_client,
 				"support_download",
 				return_value=(b"png", "image/png", "inline; filename=x"),
-			),
+			) as dl,
 		):
 			out = smedia.download(ticket="T1", file_url="/f/x.png")
 			self.assertEqual(out.headers["Content-Type"], "image/png")
 			self.assertEqual(out.get_data(), b"png")
+			# C1: media must forward the SAME resolved identity as api.py (the email),
+			# not the bare login name — else own-scope attachment access 403s for any
+			# user whose email != login name.
+			self.assertEqual(dl.call_args.kwargs["requesting_user"], smedia._requesting_user())
 
 	def test_upload_forwards_b64(self):
 		import base64
@@ -144,6 +167,52 @@ class TestSupportBenchEndpoints(FrappeTestCase):
 			out = smedia.upload(ticket="T1")
 			self.assertTrue(out["ok"])
 			self.assertEqual(up.call_args.kwargs["content_b64"], base64.b64encode(b"hi").decode())
+			# C1: same resolved identity as api.py, not the bare login name.
+			self.assertEqual(up.call_args.kwargs["requesting_user"], smedia._requesting_user())
+
+	def test_create_ticket_rejects_a_user_with_no_valid_email(self):
+		"""raised_by must be a valid email; a blank/invalid one is caught here with
+		an actionable message instead of surfacing as an opaque Helpdesk 417."""
+		from jarvis.support import api as sapi
+
+		with (
+			patch("jarvis.support.api.support_scope", return_value="own"),
+			patch.object(
+				sapi.frappe.db, "get_value", return_value=None
+			),  # no email → falls back to login name
+			patch.object(sapi.admin_client, "support_create_ticket") as create,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				sapi.create_ticket(subject="S", body="B")
+			create.assert_not_called()  # never forwarded to the control plane
+
+	def test_create_ticket_forwards_the_resolved_email_when_valid(self):
+		from jarvis.support import api as sapi
+
+		with (
+			patch("jarvis.support.api.support_scope", return_value="own"),
+			patch.object(sapi.frappe.db, "get_value", return_value="real@user.com"),
+			patch.object(sapi.admin_client, "support_create_ticket", return_value={"ticket": "T9"}) as create,
+		):
+			out = sapi.create_ticket(subject="S", body="B")
+			self.assertTrue(out["ok"])
+			self.assertEqual(create.call_args.kwargs["requesting_user"], "real@user.com")
+
+	def test_upload_rejects_an_empty_file(self):
+		"""M1: a 0-byte file is rejected with a clear message, not forwarded to the
+		CP (which would reject it with an opaque 'content_b64 required')."""
+		from jarvis.support import media as smedia
+
+		req = MagicMock()
+		f = MagicMock()
+		f.filename = "empty.png"
+		f.read.return_value = b""
+		req.files.get.return_value = f
+		frappe.local.request = req
+		self.addCleanup(lambda: setattr(frappe.local, "request", None))
+		with patch("jarvis.support.media.support_scope", return_value="own"):
+			with self.assertRaises(frappe.ValidationError):
+				smedia.upload(ticket="T1")
 
 
 class TestSupportBoot(FrappeTestCase):

@@ -11,12 +11,31 @@
   Shared with the standalone Support page (PR2): a support customer message
   is also variant="bubble"; a support agent reply is variant="row" with a
   round human avatar via the #avatar slot (vs. chat's JarvisMark).
+
+  The bubble renders `html` when supplied (support passes DOMPurify'd Helpdesk
+  HTML) and `text` otherwise. Chat passes only `text`, so for chat `html` is
+  "", `v-if="text || html"` is identical to the old `v-if="text"`, and the text
+  branch renders verbatim. `white-space: normal` on the html div is required
+  because the bubble sets `pre-wrap` for chat's plain text, which would
+  otherwise render every newline *between* the tags of an email body as a
+  blank line.
+
+  Attachments render as an image thumbnail when they are one and as a file
+  chip when they are not — a support agent's PDF or log file is the primary
+  reply payload, and before the chip it rendered as nothing at all. Chat is
+  unaffected: its bubble attachments are image-only, and its row supplies
+  #below-body, which gates the built-in trailer off entirely.
+
+  Rationale lives HERE and not as a comment inside <template> on purpose:
+  Vue keeps template comments as real DOM comment nodes, and the
+  message-bubble/message-row snapshots assert on `w.html()` — a comment in
+  there would land in every snapshot.
 -->
 <template>
 	<template v-if="variant === 'bubble'">
 		<div class="jv-umsg" style="display: flex; flex-direction: column; align-items: flex-end">
 			<div
-				v-if="text"
+				v-if="text || html"
 				class="jv-ububble"
 				style="
 					max-width: 78%;
@@ -32,7 +51,14 @@
 					overflow-wrap: anywhere;
 				"
 			>
-				{{ text }}
+				<div
+					v-if="html"
+					class="jv-md-body"
+					:class="bodyClass"
+					style="white-space: normal"
+					v-html="html"
+				/>
+				<template v-else>{{ text }}</template>
 			</div>
 			<div
 				v-if="failed"
@@ -72,6 +98,28 @@
 				>
 					<img :src="cv.file_url" :alt="cv.title" loading="lazy" />
 				</button>
+				<a
+					v-else-if="cv.file_url"
+					class="jv-file-chip"
+					:href="cv.file_url"
+					target="_blank"
+					rel="noopener"
+				>
+					<svg
+						class="jv-file-clip"
+						aria-hidden="true"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.7"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path
+							d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"
+						/></svg
+					>{{ cv.title }}
+				</a>
 			</template>
 			<div class="jv-msgbar">
 				<!-- sent-time: revealed with the bar on hover; its own hover
@@ -176,6 +224,28 @@
 						>
 							<img :src="cv.file_url" :alt="cv.title" loading="lazy" />
 						</button>
+						<a
+							v-else-if="cv.file_url"
+							class="jv-file-chip"
+							:href="cv.file_url"
+							target="_blank"
+							rel="noopener"
+						>
+							<svg
+								class="jv-file-clip"
+								aria-hidden="true"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.7"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path
+									d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"
+								/></svg
+							>{{ cv.title }}
+						</a>
 					</template>
 					<div v-if="copyable" class="jv-msgbar">
 						<span v-if="timestamp" class="jv-msgtime" :title="timestampFull">{{
@@ -230,14 +300,17 @@ defineProps({
 	// 'bubble' (right-aligned chat/support-customer message) | 'row'
 	// (left-aligned assistant/support-agent message with identity + body).
 	variant: { type: String, default: "bubble" },
-	// Pre-rendered, sanitized HTML body for variant="row". Chat passes
-	// `render()` + linkify output; support passes DOMPurify'd Helpdesk
-	// Communication HTML (with the /files/ → proxy rewrite already applied).
+	// Pre-rendered, sanitized HTML body. Chat passes `render()` + linkify
+	// output to variant="row"; support passes DOMPurify'd Helpdesk
+	// Communication HTML (with the /files/ → proxy rewrite already applied) to
+	// BOTH variants — its customer-side messages are email-backed HTML too, and
+	// flattening them to text would collapse <p>a</p><p>b</p> into "ab".
 	html: { type: String, default: "" },
 	// Which body-style block `html` gets: 'jv-md' (markdown, chat) or
-	// 'jv-html' (bare element HTML, support tickets). variant="row" only.
+	// 'jv-html' (bare element HTML, support tickets). Both variants.
 	bodyClass: { type: String, default: "jv-md" },
-	// Plain bubble text. variant="bubble" only.
+	// Plain bubble text — the variant="bubble" body when no `html` is passed.
+	// Chat always uses this branch.
 	text: { type: String, default: "" },
 	// Canvas/attachment records: { name, type, title, file_url, ... }.
 	attachments: { type: Array, default: () => [] },
@@ -347,6 +420,35 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 	width: 100%;
 	max-height: 320px;
 	object-fit: cover;
+}
+
+/* non-image attachment (a support agent's PDF / log file) — a download chip
+   rather than a thumbnail. Plain scoped rules, not :deep(): unlike the Copy
+   bar above, this markup is only ever this component's own (both variants
+   render it), so it always carries this scope id. */
+.jv-file-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	margin-top: 8px;
+	padding: 6px 11px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--surface-2);
+	color: var(--link);
+	font-size: 12.5px;
+	line-height: 1.3;
+	text-decoration: none;
+	overflow-wrap: anywhere;
+}
+.jv-file-chip:hover {
+	text-decoration: underline;
+}
+.jv-file-clip {
+	flex: 0 0 auto;
+	width: 13px;
+	height: 13px;
 }
 
 /* ===== variant="row" identity line (support-agent name + role + time) ===== */

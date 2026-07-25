@@ -1,0 +1,46 @@
+// The support message-body pipeline: rewrite Helpdesk's inline /files/ URLs to
+// the bench's authenticated same-origin proxy, THEN sanitize.
+//
+// Order is load-bearing and non-negotiable: DOMPurify runs LAST, so nothing can
+// reintroduce an attribute after sanitization. (The page this replaces got the
+// order right and said so twice; keep it that way.)
+import DOMPurify from "dompurify";
+import { supportDownloadUrl } from "@/api";
+
+const LOCAL_FILE = /^\/(private\/)?files\//;
+
+export function renderSupportHtml(rawHtml, ticketName) {
+	if (!rawHtml) return "";
+	const doc = new DOMParser().parseFromString(String(rawHtml), "text/html");
+
+	// Iterate every img, not just img[src]: an <img> carrying only srcset and no
+	// src is valid HTML, and srcset is in DOMPurify's default ALLOWED_ATTR, so a
+	// src-only query would let it survive sanitization untouched.
+	for (const img of doc.querySelectorAll("img")) {
+		const src = img.getAttribute("src") || "";
+		if (LOCAL_FILE.test(src)) img.setAttribute("src", supportDownloadUrl(ticketName, src));
+		// srcset would bypass the proxy entirely — the browser may pick a
+		// candidate from it over src, so it has to go, not be rewritten.
+		img.removeAttribute("srcset");
+	}
+	// area[href] too, not just a[href]: an image-map <area> can carry the same
+	// target/href pair as a link. The server already strips <map>/<area> before
+	// this ever runs, so this is belt-and-suspenders — but ADD_ATTR:["target"]
+	// below is global to the sanitize() call, so without forcing `rel` here too
+	// an <area> would pick up target="_blank" with no rel, a reverse-tabnabbing
+	// gap for whatever future path might let one through.
+	for (const a of doc.querySelectorAll("a[href], area[href]")) {
+		const href = a.getAttribute("href") || "";
+		if (LOCAL_FILE.test(href)) a.setAttribute("href", supportDownloadUrl(ticketName, href));
+		// Every link in an agent's reply — not just rewritten ones — opens in a
+		// new tab: clicking a plain https:// link in the HTML otherwise navigates
+		// the whole SPA away and drops the thread. `rel` is in DOMPurify's default
+		// ALLOWED_ATTR but `target` is NOT (verified against this repo's installed
+		// dompurify — it silently strips target with no config), so ADD_ATTR below
+		// is load-bearing, not defensive.
+		a.setAttribute("target", "_blank");
+		a.setAttribute("rel", "noopener noreferrer");
+	}
+
+	return DOMPurify.sanitize(doc.body.innerHTML, { ADD_ATTR: ["target"] });
+}
