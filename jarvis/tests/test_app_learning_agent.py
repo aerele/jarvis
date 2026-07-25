@@ -541,6 +541,40 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(rows[0]["nature"], "Scribe")
 		self.assertEqual(rows[0]["pages_written"], 1)
 
+	# ------------------------------------------------------------------ #
+	# Round-2 concurrency: transaction-honest tally + finish-vs-sweep CAS
+	# ------------------------------------------------------------------ #
+	def test_deadlock_on_a_later_page_propagates_no_phantom_tally(self):
+		# CA2-2: a transaction-FATAL error (deadlock) on a later page must PROPAGATE, not
+		# be swallowed — the aborted InnoDB transaction rolled back the earlier saves, so
+		# they must never be tallied as written (a phantom tally). The tool raises and the
+		# run's pages_written stays 0.
+		import pymysql
+
+		from jarvis.chat import wiki
+
+		run = self._bind_scribe_run()
+		real = wiki._apply_one_update
+		calls = {"n": 0}
+
+		def _apply(update, *a, **k):
+			calls["n"] += 1
+			if calls["n"] >= 2:  # the SECOND page processed hits a deadlock
+				raise pymysql.err.OperationalError(1213, "Deadlock found when trying to get lock")
+			return real(update, *a, **k)
+
+		with mock.patch.object(wiki, "_apply_one_update", side_effect=_apply):
+			with self.assertRaises(pymysql.err.OperationalError):
+				record_app_wiki(
+					app="fakeapp",
+					pages=[
+						{"title": "Alpha", "key": "a-alpha", "body_md": "x"},  # deterministic order:
+						{"title": "Beta", "key": "b-beta", "body_md": "y"},  # a-alpha < b-beta
+					],
+				)
+		# no phantom tally: nothing was recorded as written on the run
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
+
 
 class TestRunAgentNowScribeGate(FrappeTestCase):
 	"""The ``run_agent_now`` nature gate admits Scribe (auditor stays valid,

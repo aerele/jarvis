@@ -840,6 +840,22 @@ def _parse_updates(raw: str) -> list | None:
 _HUMAN_SOURCE_KINDS = frozenset({"manual", "chat", "voice", "edit", "promotion", "tool"})
 
 
+def _is_txn_fatal(e: Exception) -> bool:
+	"""A transaction-FATAL DB error — a deadlock or a lock-wait timeout — aborts the
+	WHOLE InnoDB transaction (rolling back earlier in-transaction saves and releasing
+	every savepoint). It MUST propagate, never be swallowed: swallowing it would report
+	as-applied the earlier pages the abort just rolled back — a phantom tally (CA2-2). A
+	recoverable per-page error (a validation refusal, a stale-timestamp conflict) is
+	rolled back to that page's savepoint by the caller instead."""
+	db = getattr(frappe, "db", None)
+	if db is None:
+		return False
+	try:
+		return bool(db.is_deadlocked(e) or db.is_timedout(e))
+	except Exception:
+		return False
+
+
 def _sources_agent_updatable(raw, prefix: str) -> bool:
 	"""Predicate over a page's raw ``sources`` JSON: the page may be UPDATED in
 	place by the Custom App Learning scribe iff it is AGENT-OWNED (at least one
@@ -916,16 +932,35 @@ def apply_extracted_page_updates(
 	"""
 	if not isinstance(updates, list):
 		return [] if return_outcomes else (0, 0)
+
+	# Acquire page row locks in a DETERMINISTIC global order (by normalized slug) so two
+	# concurrent batches touching the same pages can never deadlock by locking them in
+	# opposite orders (CA2-2). Outcomes are returned in the CALLER's ORIGINAL order — the
+	# scribe writeback zips them back positionally to the accepted pages.
+	batch = list(enumerate(updates[:MAX_PAGES_PER_NOTE]))
+	order = sorted(
+		range(len(batch)),
+		key=lambda i: _normalize_slug(batch[i][1].get("slug")) if isinstance(batch[i][1], dict) else "",
+	)
+	results: list[dict | None] = [None] * len(batch)
 	applied = 0
 	failed = 0
-	outcomes: list[dict] = []
-	for update in updates[:MAX_PAGES_PER_NOTE]:
+	for i in order:
+		update = batch[i][1]
 		if not isinstance(update, dict):
-			if return_outcomes:
-				outcomes.append({"slug": None, "ok": False, "reason": "skipped"})
+			results[i] = {"slug": None, "ok": False, "reason": "skipped"}
 			continue
 		ok = False
 		reason = "refused"
+		# Per-page SAVEPOINT: a RECOVERABLE per-page failure (a validation refusal, a
+		# stale-timestamp conflict) rolls back ONLY this page and is counted failed, so
+		# one page's failure never discards the batch's earlier saves nor leaves a
+		# half-written page to be committed at request end. A transaction-FATAL error
+		# (deadlock / lock-wait timeout) already rolled the WHOLE InnoDB transaction back
+		# (releasing every savepoint), so it is NOT swallowed — it propagates and the
+		# request fails/retries instead of reporting success for lost work (CA2-2).
+		sp = f"aepu_{frappe.generate_hash(length=8)}"
+		frappe.db.savepoint(sp)
 		try:
 			ok = bool(
 				_apply_one_update(update, source, user, ref, default_scope, target_user, provenance_prefix)
@@ -933,14 +968,23 @@ def apply_extracted_page_updates(
 			reason = "applied" if ok else "refused"
 			if ok:
 				applied += 1
-		except Exception:
+			try:
+				frappe.db.release_savepoint(sp)
+			except Exception:
+				pass
+		except Exception as e:
+			if _is_txn_fatal(e):
+				raise
+			try:
+				frappe.db.rollback(save_point=sp)
+			except Exception:
+				pass
 			failed += 1
 			reason = "error"
 			frappe.log_error(title="wiki: page update failed", message=frappe.get_traceback())
-		if return_outcomes:
-			outcomes.append({"slug": _normalize_slug(update.get("slug")), "ok": ok, "reason": reason})
+		results[i] = {"slug": _normalize_slug(update.get("slug")), "ok": ok, "reason": reason}
 	if return_outcomes:
-		return outcomes
+		return [r if r is not None else {"slug": None, "ok": False, "reason": "skipped"} for r in results]
 	return applied, failed
 
 
