@@ -1,49 +1,30 @@
-"""Two additive backfills for the Codex round-3 skill-promotion hardening.
+"""Additive backfill for the Codex round-3/4 skill-promotion hardening.
 
-R3-SP-4 (snapshot presence marker): the ``snapshotted`` Check now records that a
-promotion request captured a FULL content snapshot (all three fields) at request
-time; approval refuses a request whose marker is absent, exactly like a
-missing-instructions one. A schema sync adds the column defaulting to 0, so an
-in-flight Pending request filed before this change — which already carries all
-three snapshots but has no marker — would be spuriously refused at approval. Stamp
-the marker on those complete Pending rows so no legitimate in-flight request is
-stranded. Rows that are genuinely partial (any snapshot NULL) are left unmarked, so
-they still refuse at approval and must be resubmitted.
+R3-SP-1 (shared-slug uniqueness): at most one SHARED (Role/Org) skill may carry a
+given ``skill_name`` - the container writes ONE ``custom-<slug>`` dir, so a second
+shared row with the same slug collides on it and corrupts the push budget. Expected
+count is ~0 (this is a new feature), so rather than delete data
+``_resolve_shared_slug_collisions`` keeps the OLDEST shared row of each colliding slug
+and DISABLES the newer duplicates (reversible, non-destructive), logging the action
+loudly for an operator to reconcile.
 
-R3-SP-1 (global shared-slug uniqueness): at most one SHARED (Role/Org) skill may
-carry a given ``skill_name`` — the container writes ONE ``custom-<slug>`` dir, so a
-second shared row with the same slug collides on it and corrupts the push budget.
-The controller now enforces this on every shared create/rename, but any collision
-that predates the guard must be resolved or ALTER-equivalent writes keep tripping.
-Expected count is ~0 (this is a new feature), so rather than delete data we keep the
-oldest shared row of each colliding slug and DISABLE the newer duplicates (reversible,
-non-destructive), logging the action loudly for an operator to reconcile.
+SR4-1 (snapshot presence marker): the ``snapshotted`` Check records that a promotion
+request captured a FULL content snapshot (all three fields) at request time; approval
+refuses a request whose marker is absent. The marker is DELIBERATELY NOT backfilled
+from the stored snapshot columns: the pre-marker controller normalized an OMITTED
+user-invocable value to 0, so a non-NULL ``user_invocable_snapshot`` does NOT prove
+the field was ever captured - stamping the marker from it would bless the exact
+ambiguity the marker exists to reject (publishing "invocable off" as if a reviewer
+had chosen it). No independent provenance signal proves all three fields were
+explicitly captured, so pre-marker Pending requests are left UNMARKED and must be
+resubmitted (a resubmission mints a fresh full snapshot + marker). This is safe: the
+feature is new, so ~0 in-flight requests exist, and an unmarked request is refused at
+approval rather than published wrong.
 """
 
 import frappe
 
 SKILL = "Jarvis Custom Skill"
-PROMO = "Jarvis Skill Promotion Request"
-
-
-def _backfill_snapshot_marker() -> None:
-	if not frappe.db.table_exists(PROMO):
-		return
-	complete = frappe.get_all(
-		PROMO,
-		filters={
-			"status": "Pending",
-			"snapshotted": 0,
-			"instructions_snapshot": ["is", "set"],
-			"description_snapshot": ["is", "set"],
-			"user_invocable_snapshot": ["is", "set"],
-		},
-		pluck="name",
-	)
-	for name in complete:
-		frappe.db.set_value(PROMO, name, "snapshotted", 1, update_modified=False)
-	if complete:
-		frappe.db.commit()
 
 
 def _resolve_shared_slug_collisions() -> None:
@@ -81,7 +62,7 @@ def _resolve_shared_slug_collisions() -> None:
 			message=(
 				f"Shared-slug collision on '{g.skill_name}' (R3-SP-1): kept {keep.name} "
 				f"({keep.scope}, owner {keep.owner}); disabled duplicate(s): {', '.join(disabled)}. "
-				"Reconcile manually — rename or delete the extras, then re-enable if intended."
+				"Reconcile manually - rename or delete the extras, then re-enable if intended."
 			),
 		)
 	if groups:
@@ -89,5 +70,4 @@ def _resolve_shared_slug_collisions() -> None:
 
 
 def execute():
-	_backfill_snapshot_marker()
 	_resolve_shared_slug_collisions()

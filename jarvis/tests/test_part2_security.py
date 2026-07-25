@@ -1377,3 +1377,36 @@ class TestSkillPromotionRound3(Part2Base):
 		)
 		self.assertIsNotNone(mat)
 		self.assertEqual(int(mat.user_invocable), 0)  # explicit False preserved end-to-end
+
+
+class TestSkillPromotionRound4(Part2Base):
+	"""Codex round-4: the shared-slug invariant is enforced at its TRUE scope - a
+	DB-unique reservation (row name == slug) plus the catalog-wide lock on EVERY shared
+	eligibility-changing write, not just the promotion path (SR4-2); and the v2_06
+	backfill no longer blesses an ambiguous legacy snapshot from the Check column
+	(SR4-1)."""
+
+	# ── SR4-1: the migration does not backfill the marker from the Check column ──
+	def test_migration_leaves_omitted_normalized_legacy_request_unmarked(self):
+		# An omitted user-invocable normalized to 0 is indistinguishable from a genuine
+		# False, so a non-NULL snapshot never proves capture. The v2_06 backfill must
+		# leave such a legacy row UNMARKED, and approval must still refuse it.
+		from jarvis.chat import custom_skills_api
+		from jarvis.patches import v2_06_skill_promotion_marker_and_shared_slug as patch_mod
+
+		skill = _mk_skill(USER_A, f"{PFX}-legacymark", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		# Model a legacy row: invocable snapshot 0 (as if omitted->0) + marker cleared.
+		frappe.db.set_value(SKILL_PROMO, req["request"], "user_invocable_snapshot", 0)
+		frappe.db.set_value(SKILL_PROMO, req["request"], "snapshotted", 0)
+		frappe.db.commit()
+		patch_mod.execute()  # run the migration - it must not bless the ambiguous row
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "snapshotted"), 0)
+		with _as(REVIEWER):
+			with self.assertRaises(frappe.ValidationError):
+				custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+		self.assertEqual(
+			frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-legacymark", "scope": "Org"}), []
+		)
