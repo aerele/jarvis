@@ -51,9 +51,13 @@ function _openDb() {
 	});
 }
 
+// Resolves TRUE only when the transaction actually COMMITTED (tx.oncomplete), FALSE on any failure
+// path — error, abort, a throw building the tx, or IndexedDB being unavailable (no db). The queue
+// observes put()'s result to know whether a clip's audio is durably saved (VR5-2, never-lose-audio):
+// an unconfirmed write must never be treated as safe.
 function _tx(mode, fn) {
 	return _openDb().then((db) => {
-		if (!db) return undefined;
+		if (!db) return false; // IndexedDB unavailable (private mode / unsupported) — NOT durable
 		return new Promise((resolve) => {
 			let store;
 			try {
@@ -65,12 +69,12 @@ function _tx(mode, fn) {
 					} catch (e) {
 						/* noop */
 					}
-					resolve();
+					resolve(true);
 				};
-				tx.onerror = () => resolve(undefined);
-				tx.onabort = () => resolve(undefined);
+				tx.onerror = () => resolve(false);
+				tx.onabort = () => resolve(false);
 			} catch (e) {
-				resolve(undefined);
+				resolve(false);
 				return;
 			}
 			try {
@@ -118,10 +122,11 @@ export function adoptionOps(clip, sessionId, userId) {
 	return ops;
 }
 
-// A per-session mirror handed to the queue. Methods return promises but the queue
-// treats them as fire-and-forget (best-effort), so a rejection is impossible here —
-// every path resolves. `userId` (the current Frappe user) is stamped on every record
-// so reload recovery can be scoped to the SAME user — IndexedDB is per-origin, not
+// A per-session mirror handed to the queue. Every method resolves (never rejects); put() resolves a
+// BOOLEAN durability signal (true = committed, false = write did not land) that the queue observes to
+// know whether a clip's audio is durably saved (VR5-2). delete()/clear() stay best-effort (a stale
+// record is harmless; their result is ignored). `userId` (the current Frappe user) is stamped on
+// every record so reload recovery can be scoped to the SAME user — IndexedDB is per-origin, not
 // per-login, so a shared browser profile must not offer user A's audio to user B.
 export function createClipMirror(sessionId, userId) {
 	const sid = String(sessionId || "session");
@@ -137,15 +142,17 @@ export function createClipMirror(sessionId, userId) {
 			// two transactions, a failure between them could delete the old audio before the
 			// new copy is durable — the never-lose-audio hole Codex flagged (finding 5).
 			const ops = adoptionOps(clip, sid, uid);
+			// Returns TRUE only when the write COMMITTED — the queue treats a non-true result as an
+			// unconfirmed (un-durable) clip and refuses to assume its audio is safe (VR5-2).
 			return _tx("readwrite", (store) => {
 				for (const op of ops) {
 					if (op.type === "put") store.put(op.rec);
 					else if (op.type === "delete") store.delete(op.key);
 				}
-			}).catch(() => undefined);
+			}).catch(() => false);
 		},
 		delete(seq) {
-			return _tx("readwrite", (store) => store.delete(key(seq))).catch(() => undefined);
+			return _tx("readwrite", (store) => store.delete(key(seq))).catch(() => false);
 		},
 		clear() {
 			// Drop every clip this session owns (clean teardown once all committed).

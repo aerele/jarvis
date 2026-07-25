@@ -135,10 +135,15 @@ function _rangesOverlap(a, b) {
 //                                           dispose() so in-flight uploads cancel.
 //   mirror { put(clip)->Promise?, delete(seq)->Promise?, all()->Promise<clip[]> }
 //                                           OPTIONAL crash-safety store (IndexedDB
-//                                           in prod, an in-memory Map in tests). All
-//                                           calls are best-effort (errors swallowed)
-//                                           so a mirror hiccup never drops audio from
-//                                           the in-memory source of truth.
+//                                           in prod, an in-memory Map in tests).
+//                                           put()'s durability is OBSERVED (VR5-2): it
+//                                           signals a FAILED write by rejecting OR by
+//                                           resolving the value `false`; any other
+//                                           resolution (incl. undefined) is treated as
+//                                           a confirmed write, so a best-effort in-memory
+//                                           mirror that never fails needs no change.
+//                                           delete() stays best-effort (a stale record is
+//                                           safe; a dropped one is not).
 //   concurrency       max in-flight requests (default 2)
 //   maxAttempts       total tries per chunk before `failed` (default 2 = 1 + 1 retry)
 //   onCommit(seq,text,clip,replace) called once per chunk, in strict cursor order, when
@@ -148,6 +153,10 @@ function _rangesOverlap(a, b) {
 //                      passed it): the glue REPLACES that chunk's in-place placeholder
 //                      token with the text rather than appending at the end.
 //   onFail(seq)        called when a chunk reaches the terminal `failed` state.
+//   onPersistFail(seq) called ONCE when a clip's durable mirror write could NOT be confirmed after
+//                      retries (VR5-2 — quota / private-mode / tx-failure / unavailable IndexedDB).
+//                      The composer STOPS recording and surfaces a Download/Retry chip: a clip whose
+//                      audio is not durably saved must never be silently treated as safe.
 //   onGap(seq,clip)    called ONCE, as the drain cursor crosses a `failed` chunk, so the
 //                      glue can drop an in-place placeholder token at the gap's ordered
 //                      position (later chunks commit after it — order preserved).
@@ -170,9 +179,16 @@ export function createVoiceChunkQueue(deps = {}) {
 	const onFail = deps.onFail || noop;
 	const onGap = deps.onGap || noop;
 	const onChange = deps.onChange || noop;
+	const onPersistFail = deps.onPersistFail || noop;
+	// Total mirror.put() attempts for one clip before its durability is declared UN-confirmable
+	// (VR5-2). >1 so a transient IndexedDB hiccup is retried before we stop recording.
+	const MIRROR_PUT_ATTEMPTS = Math.max(1, deps.mirrorPutAttempts || 3);
 
-	// seq -> { seq, clip, state, attempts, text }
-	//   state: 'pending' | 'inflight' | 'done' | 'failed'
+	// seq -> { seq, clip, state, attempts, text, persist }
+	//   state:   'pending' | 'inflight' | 'done' | 'failed' | 'discarded'
+	//   persist: 'persisting' | 'persisted' | 'failed'  (VR5-2 — durable-mirror write state; only
+	//            tracked when a mirror is injected; a clip is treated as crash-safe ONLY once
+	//            'persisted', never while 'persisting'/'failed')
 	const records = new Map();
 	let inflight = 0;
 	let nextToFlush = null; // the cursor; initialised to the first assigned seq (0)
@@ -197,14 +213,64 @@ export function createVoiceChunkQueue(deps = {}) {
 		}
 	}
 
+	// OBSERVABLE durable-mirror write for a freshly admitted clip (VR5-2). The old _mirrorPut
+	// swallowed sync + async failures while _admit proceeded as if the audio were protected — so
+	// under quota / private-mode / tx-failure / unavailable IndexedDB a crash or reload PERMANENTLY
+	// lost the clip while the UI showed nothing wrong. This tracks the write per clip: it retries a
+	// failed write, marks the record 'persisted' only when the mirror CONFIRMS durability, and — when
+	// durability can't be established — marks it 'failed' and fires onPersistFail so the composer
+	// surfaces a Download/Retry chip and STOPS recording rather than keep capturing un-protected audio.
+	// A mirror signals failure by rejecting or by resolving `false`; any other resolution is a confirm
+	// (so a best-effort in-memory mirror that never fails is 'persisted' on the first attempt).
+	function _persist(rec) {
+		if (!mirror) return; // no crash-safety store wired — nothing to confirm, nothing to gate
+		rec.persist = "persisting";
+		let attempt = 0;
+		const attemptPut = () => {
+			attempt += 1;
+			let p;
+			try {
+				p = Promise.resolve(mirror.put(rec.clip));
+			} catch (e) {
+				p = Promise.reject(e); // a SYNC throw is a failed write
+			}
+			p.then(
+				(res) => (res === false ? _persistMiss(rec, attempt, attemptPut) : _persistOk(rec)),
+				() => _persistMiss(rec, attempt, attemptPut)
+			);
+		};
+		attemptPut();
+	}
+	function _persistOk(rec) {
+		if (disposed) return;
+		if (records.get(rec.seq) !== rec || rec.state === "discarded") return; // gone/tombstoned
+		const was = rec.persist;
+		rec.persist = "persisted";
+		// Only churn the UI when this CLEARS a surfaced failure (a Retry that finally landed).
+		if (was === "failed") _safe(onChange);
+	}
+	function _persistMiss(rec, attempt, attemptPut) {
+		if (disposed) return;
+		if (records.get(rec.seq) !== rec || rec.state === "discarded") return; // gone/tombstoned
+		if (attempt < MIRROR_PUT_ATTEMPTS) {
+			attemptPut(); // retry the write — try hard to make the audio durable before we give up
+			return;
+		}
+		if (rec.persist === "failed") return;
+		rec.persist = "failed";
+		_safe(onPersistFail, rec.seq); // composer STOPS recording + surfaces the Download/Retry chip
+		_safe(onChange);
+	}
+
 	// Assign a record onto the single seq space and mirror it. Shared by enqueue and
 	// recover so no two producers can ever pick the same seq.
 	function _admit(clip) {
 		const seq = _nextSeq++;
 		const stored = { ...clip, seq };
-		records.set(seq, { seq, clip: stored, state: "pending", attempts: 0, text: "" });
+		const rec = { seq, clip: stored, state: "pending", attempts: 0, text: "" };
+		records.set(seq, rec);
 		if (nextToFlush === null) nextToFlush = seq; // seqs only ever increase from here
-		_mirrorPut(stored);
+		_persist(rec); // OBSERVABLE durable write (VR5-2) — replaces the fire-and-forget _mirrorPut
 		return seq;
 	}
 
@@ -362,6 +428,17 @@ export function createVoiceChunkQueue(deps = {}) {
 		rec.error = undefined;
 		rec.state = "pending";
 		_pump();
+		_safe(onChange);
+	}
+
+	// User pressed Retry on a clip whose durable mirror write failed (VR5-2): re-attempt the write.
+	// Only acts on a clip currently in the 'failed'-persistence state; a fresh attempt budget re-runs
+	// _persist, which flips it back to 'persisted' (chip clears) if the store now accepts the write.
+	function retryPersist(seq) {
+		if (disposed) return;
+		const rec = records.get(seq);
+		if (!rec || rec.state === "discarded" || rec.persist !== "failed") return;
+		_persist(rec);
 		_safe(onChange);
 	}
 
@@ -599,6 +676,9 @@ export function createVoiceChunkQueue(deps = {}) {
 		// retained clips the composer renders Restore/Download/Discard for, so the audio is
 		// resolvable instead of arming the leave guard forever with no affordance.
 		const retained = [];
+		// [{seq, clip}] — clips whose durable mirror write could NOT be confirmed (VR5-2): actionable
+		// Download/Retry chips. Orthogonal to the transcription state, so scanned independently.
+		const unpersisted = [];
 		for (const rec of records.values()) {
 			if (rec.state === "discarded") continue; // a user-removed tombstone — invisible to the UI
 			total += 1;
@@ -608,6 +688,7 @@ export function createVoiceChunkQueue(deps = {}) {
 				done += 1;
 				if (rec.orphaned) retained.push({ seq: rec.seq, clip: rec.clip, text: rec.text });
 			} else if (rec.state === "failed") failed.push({ seq: rec.seq, clip: rec.clip });
+			if (rec.persist === "failed") unpersisted.push({ seq: rec.seq, clip: rec.clip });
 		}
 		return {
 			pending,
@@ -615,8 +696,9 @@ export function createVoiceChunkQueue(deps = {}) {
 			done,
 			failed, // [{seq, clip}] — drives the composer chips (Retry/Download)
 			retained, // [{seq, clip, text}] — drives the retained-clip chips (Restore/Download/Discard)
+			unpersisted, // [{seq, clip}] — drives the un-saved-audio chips (Download/Retry) + stop-recording
 			total,
-			hasUnfinished: pending + running + failed.length > 0,
+			hasUnfinished: pending + running + failed.length + unpersisted.length > 0,
 		};
 	}
 
@@ -628,6 +710,9 @@ export function createVoiceChunkQueue(deps = {}) {
 	function hasUnfinished() {
 		for (const rec of records.values()) {
 			if (rec.state === "discarded") continue;
+			// VR5-2: a clip whose audio isn't confirmed durable is UN-safe regardless of its
+			// transcription state — the guard must stay armed until it persists or is discarded.
+			if (rec.persist === "failed") return true;
 			if (rec.state !== "done") return true;
 			if (retainUntilSent && rec.committed) return true;
 		}
@@ -654,6 +739,7 @@ export function createVoiceChunkQueue(deps = {}) {
 	return {
 		enqueue,
 		retry,
+		retryPersist,
 		recover,
 		discard,
 		captureSent,

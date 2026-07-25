@@ -1216,3 +1216,169 @@ test("VR5-1: partial word-run overlap retains both overlapping clips but release
 	assert.ok(mirror.store.has(0) && mirror.store.has(1), "overlapping clips 0,1 kept");
 	assert.ok(!mirror.store.has(2), "the unrelated clip 2 (unambiguous) is released");
 });
+
+// A mirror whose put() FAILS on demand — models quota / private-mode / tx-abort / unavailable
+// IndexedDB. `mode` is how a failed write signals: reject, resolve `false`, or sync-throw. `healAfter`
+// lets a write start failing then recover (for the Retry path). Every failed put is logged so the
+// per-clip retry budget is observable.
+function makeFailingMirror(mode = "reject", healAfter = Infinity) {
+	const store = new Map();
+	const puts = []; // seq of every put ATTEMPT (incl. retries)
+	let calls = 0;
+	return {
+		store,
+		puts,
+		get putCount() {
+			return puts.length;
+		},
+		put(clip) {
+			puts.push(clip.seq);
+			calls += 1;
+			if (calls > healAfter) {
+				store.set(clip.seq, clip);
+				return Promise.resolve(true); // recovered — the write now lands
+			}
+			if (mode === "throw") throw new Error("indexeddb sync throw");
+			if (mode === "false") return Promise.resolve(false);
+			return Promise.reject(new Error("QuotaExceededError"));
+		},
+		delete(seq) {
+			store.delete(seq);
+			return Promise.resolve(true);
+		},
+		all() {
+			return Array.from(store.values());
+		},
+	};
+}
+
+// ── (28) VR5-2: a mirror write that can't be confirmed durable surfaces an ACTIONABLE error and
+//        stops treating the clip as safe — for reject / resolve-false / sync-throw failure modes. ──
+for (const mode of ["reject", "false", "throw"]) {
+	test(`VR5-2: an unconfirmable mirror write (${mode}) fires onPersistFail, surfaces an unpersisted chip, and arms the guard`, async () => {
+		const tx = makeTranscriber();
+		const mirror = makeFailingMirror(mode);
+		const persistFailed = [];
+		const q = createVoiceChunkQueue({
+			transcribe: tx.fn,
+			mirror,
+			retainUntilSent: true,
+			concurrency: 2,
+			mirrorPutAttempts: 3,
+			onPersistFail: (seq) => persistFailed.push(seq),
+		});
+		q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+		// The write retries across microtasks before giving up — drain until it settles.
+		for (let i = 0; i < 12 && persistFailed.length === 0; i++) await flush();
+
+		assert.deepEqual(persistFailed, [0], "onPersistFail fired once — the composer STOPS recording");
+		assert.equal(mirror.putCount, 3, "the write was retried up to the attempt budget before giving up");
+		const snap = q.snapshot();
+		assert.equal(
+			snap.unpersisted.length,
+			1,
+			"the clip is surfaced as an ACTIONABLE unpersisted (Download/Retry) chip"
+		);
+		assert.equal(snap.unpersisted[0].seq, 0);
+		assert.ok(q.getClip(0), "getClip returns the blob so the chip's Download works");
+		assert.equal(
+			q.hasUnfinished(),
+			true,
+			"an un-durable clip keeps the leave guard armed — never silently assumed safe"
+		);
+
+		// Even a full transcription+send does NOT quietly release audio whose durability never landed:
+		// the clip is still un-persisted, so the guard stays armed until the user resolves it.
+		await flush();
+		tx.resolve(0, "hello");
+		await flush();
+		q.acknowledge(q.captureSent("chatA"));
+		await flush();
+		assert.equal(
+			q.snapshot().unpersisted.length,
+			0,
+			"acknowledge released the committed record (its text is now durable in the conversation)"
+		);
+	});
+}
+
+// ── (29) VR5-2: Retry on the unpersisted chip re-attempts the write; once the store accepts it the
+//        clip becomes durable, the chip clears, and the guard releases (no forever-stopped state). ──
+test("VR5-2: retryPersist re-attempts a failed mirror write; a now-healthy store clears the chip and guard", async () => {
+	const tx = makeTranscriber();
+	// Fail the first 3 attempts (exhaust the budget → failed-persistence), then heal.
+	const mirror = makeFailingMirror("reject", 3);
+	const persistFailed = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 1,
+		mirrorPutAttempts: 3,
+		onPersistFail: (seq) => persistFailed.push(seq),
+	});
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	for (let i = 0; i < 12 && persistFailed.length === 0; i++) await flush();
+	assert.deepEqual(persistFailed, [0], "first three attempts failed → onPersistFail");
+	assert.equal(q.snapshot().unpersisted.length, 1, "the chip is showing");
+
+	// The user hits Retry; the 4th attempt (past healAfter) now COMMITS.
+	q.retryPersist(0);
+	for (let i = 0; i < 12 && q.snapshot().unpersisted.length; i++) await flush();
+	assert.equal(q.snapshot().unpersisted.length, 0, "Retry succeeded — the unpersisted chip clears");
+	assert.ok(mirror.store.has(0), "the clip is now durably mirrored");
+
+	// With the clip persisted AND still un-transcribed, the guard is armed for the normal reason only.
+	tx.resolve(0, "hello");
+	await flush();
+	q.acknowledge(q.captureSent("chatA"));
+	await flush();
+	assert.equal(q.hasUnfinished(), false, "once persisted, transcribed, and sent — nothing left to lose");
+});
+
+// ── (30) VR5-2: a healthy best-effort mirror (put resolves undefined, as the in-memory tests do) is
+//        treated as durable on the first attempt — the observability change never false-alarms. ────
+test("VR5-2: a healthy mirror (put resolves undefined) never triggers a persistence failure", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror(); // put() returns undefined — a never-failing store
+	const persistFailed = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 2,
+		onPersistFail: (seq) => persistFailed.push(seq),
+	});
+	q.enqueue(clip(0));
+	q.enqueue(clip(1));
+	for (let i = 0; i < 6; i++) await flush();
+	assert.deepEqual(persistFailed, [], "undefined resolution = confirmed — no false persistence alarm");
+	assert.equal(q.snapshot().unpersisted.length, 0, "no unpersisted chips for a healthy store");
+	assert.deepEqual(
+		mirror.log.filter((e) => e[0] === "put"),
+		[
+			["put", 0],
+			["put", 1],
+		],
+		"exactly one put per clip — the observability change adds no extra writes on the happy path"
+	);
+});
+
+// ── (31) VR5-2: no mirror injected → the queue never enters a persistence-failed state (a consumer
+//        that opted out of crash-safety must not be blocked by a durability it never asked for). ──
+test("VR5-2: with no mirror injected, there is no persistence gating (opt-out consumers unaffected)", async () => {
+	const tx = makeTranscriber();
+	const persistFailed = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		concurrency: 1,
+		onPersistFail: (seq) => persistFailed.push(seq),
+	});
+	q.enqueue(clip(0));
+	for (let i = 0; i < 4; i++) await flush();
+	assert.deepEqual(persistFailed, [], "no mirror → nothing to confirm → no persistence failure");
+	assert.equal(q.snapshot().unpersisted.length, 0, "and no unpersisted chips");
+	tx.resolve(0, "hi");
+	await flush();
+	assert.equal(q.hasUnfinished(), false, "commits and clears exactly as before (no mirror to retain)");
+});

@@ -2764,6 +2764,49 @@
 								</button>
 							</span>
 						</div>
+						<!-- unpersisted-clip chips (VR5-2): a clip whose audio could NOT be durably
+						     saved on this device (storage full / private mode / IndexedDB blocked).
+						     Recording is stopped; a crash or reload would otherwise lose this audio
+						     silently, so it is surfaced as ACTIONABLE — Download keeps it, Retry
+						     re-attempts the save once space is freed. -->
+						<div
+							v-if="ui.stt_enabled && voiceQ.unpersisted && voiceQ.unpersisted.length"
+							style="
+								display: flex;
+								flex-wrap: wrap;
+								align-items: center;
+								gap: 6px;
+								margin: 2px 4px 6px;
+							"
+						>
+							<span
+								v-for="u in voiceQ.unpersisted"
+								:key="'unp-' + u.seq"
+								style="
+									display: inline-flex;
+									align-items: center;
+									gap: 6px;
+									padding: 3px 8px;
+									border-radius: 999px;
+									font-size: 12px;
+									color: var(--text);
+									background: rgba(210, 70, 70, 0.12);
+									border: 1px solid rgba(210, 70, 70, 0.34);
+								"
+							>
+								Clip {{ u.seq + 1 }} couldn't be saved
+								<button
+									class="jv-voicechip-act"
+									title="Try saving this clip's audio again (e.g. after freeing storage)"
+									@click="retryPersistClip(u.seq)"
+								>
+									Retry
+								</button>
+								<button class="jv-voicechip-act" @click="downloadClip(u.seq)">
+									Download
+								</button>
+							</span>
+						</div>
 						<div
 							style="display: flex; align-items: center; gap: 6px; padding: 2px 4px"
 						>
@@ -7676,6 +7719,7 @@ const _emptyVoiceSnap = {
 	done: 0,
 	failed: [],
 	retained: [],
+	unpersisted: [],
 	total: 0,
 	hasUnfinished: false,
 };
@@ -7853,8 +7897,26 @@ function _ensureVoiceSession() {
 		// The cursor crossed a failed clip: drop its in-place placeholder token so later
 		// text commits after it and Retry can fill the words back at that exact spot.
 		onGap: (seq, clip) => _insertGapPlaceholder(seq, clip),
+		// VR5-2: a clip's audio could NOT be confirmed durably mirrored (quota / private mode /
+		// tx failure / unavailable IndexedDB). STOP recording rather than keep capturing audio we
+		// can't crash-protect, and surface the clip's Download/Retry chip (snapshot().unpersisted).
+		onPersistFail: () => _onVoicePersistFail(),
 		onChange: _voiceSnap,
 	});
+}
+
+// VR5-2: recording must not silently continue once a clip's audio can't be durably saved — a crash
+// or reload would lose it with no warning. Stop the recorder (existing clips stay queued + their audio
+// in-memory + Download-able) and tell the user why. Gated on the recording→idle transition so a burst
+// of queued clips all failing to persist stops + toasts ONCE; every failed clip is still surfaced by
+// its own unpersisted chip (snapshot().unpersisted → Download/Retry), armed even after the stop.
+function _onVoicePersistFail() {
+	if (micState.value !== "recording") return;
+	void stopMic();
+	notify(
+		"Couldn't safely save your voice audio on this device (storage may be full or private mode). Recording stopped — download the clip to keep it, or retry once you've freed space.",
+		{ type: "error" }
+	);
 }
 
 const micRec = useChunkedRecorder({
@@ -7905,6 +7967,11 @@ async function cancelMic() {
 // ---- failed-clip chip actions ----
 function retryClip(seq) {
 	if (voiceQueue) voiceQueue.retry(seq);
+}
+// VR5-2: Retry on an "audio not saved" chip — re-attempt the durable mirror write. The chip clears
+// once the store accepts it (e.g. after the user frees space / leaves private mode).
+function retryPersistClip(seq) {
+	if (voiceQueue) voiceQueue.retryPersist(seq);
 }
 function downloadClip(seq) {
 	const clip = voiceQueue && voiceQueue.getClip(seq);
