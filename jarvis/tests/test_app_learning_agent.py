@@ -155,10 +155,8 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		for p in self._patches:
 			p.stop()
 		_agent_run_ctx.clear_session_key()
-		# clear per-run budget cache keys
-		for sk in {self.session_key, *getattr(self, "_extra_keys", set())}:
-			frappe.cache().delete_value(ctx._src_bytes_key(sk))
-			frappe.cache().delete_value(ctx._pages_key(sk))
+		# CX5-3: the per-run budgets are DURABLE columns on the run row (deleted below),
+		# so there is no cache state left to clear.
 		frappe.db.delete(WIKI, {"slug": ["like", "fakeapp-%"]})
 		for name in self._runs:
 			if frappe.db.exists(RUN, name):
@@ -260,14 +258,67 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertNotIn("config.py", {f["path"] for f in out["files"]})
 
 	def test_per_run_byte_budget_enforced(self):
-		self._bind_scribe_run()
-		# first read succeeds
+		run = self._bind_scribe_run()
+		# first read succeeds and ADVANCES the durable counter on the run row
 		out = read_app_source("fakeapp", "hooks.py")
 		self.assertIn("<untrusted-data", out["content"])  # fenced as DATA
-		# exhaust the budget, then the next read is refused
-		ctx.add_source_bytes(self.session_key, ctx.PER_RUN_SOURCE_BYTES_BUDGET)
+		self.assertEqual(
+			int(frappe.db.get_value(RUN, run, "source_bytes_read") or 0), out["size"]
+		)
+		# exhaust the budget on the ROW, then the next read is refused
+		frappe.db.set_value(
+			RUN, run, "source_bytes_read", ctx.PER_RUN_SOURCE_BYTES_BUDGET, update_modified=False
+		)
 		with self.assertRaises(InvalidArgumentError):
 			read_app_source("fakeapp", "mod/api.py")
+
+	def test_budgets_survive_a_cache_outage(self):
+		# CX5-3: the budgets used to live in the cache, so a redis outage silently reset
+		# them to zero — a fresh 5 MB + 15 pages for a looping delegate behind an
+		# intact-looking gate. With the counters on the run row, a cache that RAISES on
+		# every call changes nothing about enforcement.
+		run = self._bind_scribe_run()
+		frappe.db.set_value(
+			RUN,
+			run,
+			{"source_bytes_read": ctx.PER_RUN_SOURCE_BYTES_BUDGET, "pages_written": ctx.PER_RUN_PAGE_CAP},
+			update_modified=False,
+		)
+
+		def _boom(*a, **k):
+			raise RuntimeError("cache is down")
+
+		with mock.patch.object(frappe, "cache", side_effect=_boom):
+			with self.assertRaises(InvalidArgumentError):
+				read_app_source("fakeapp", "hooks.py")
+			res = record_app_wiki(
+				app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+			)
+		self.assertEqual(res["applied"], 0)  # page cap still exhausted
+		self.assertTrue(res["truncated"])
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 0)
+
+	def test_budget_read_fails_closed_when_the_run_row_is_unreadable(self):
+		# CX5-3: an unknown budget must REFUSE, never serve. A run row that cannot be
+		# read (deleted / lock timeout) raises out of both budgeted tools.
+		self._bind_scribe_run()
+		real_get = frappe.db.get_value
+
+		def _get(dt, *a, **k):
+			# ONLY the locked budget read vanishes; the gate's own lookups are untouched,
+			# so a pass here really is the budget refusing on an unknown row.
+			if dt == RUN and k.get("for_update"):
+				return None
+			return real_get(dt, *a, **k)
+
+		with mock.patch.object(frappe.db, "get_value", side_effect=_get):
+			for call in (
+				lambda: read_app_source("fakeapp", "hooks.py"),
+				lambda: record_app_wiki(app="fakeapp", pages=[{"title": "T", "key": "k", "body_md": "b"}]),
+			):
+				with self.assertRaises(InvalidArgumentError) as cm:
+					call()
+				self.assertIn("fail-closed", str(cm.exception))
 
 	def test_list_app_modules_roster_and_manifest(self):
 		self._bind_scribe_run()
@@ -744,8 +795,8 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(res["applied"], 0)
 		self.assertEqual(res["slugs"], [])
 		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 0)  # never written
+		# the durable page tally IS the budget (CX5-3), so this is "no budget consumed"
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
-		self.assertEqual(ctx.pages_written(self.session_key), 0)  # no budget consumed
 
 	def test_tally_run_refuses_terminal_row(self):
 		# CA3-1: ``_tally_run`` refuses to stamp pages onto a TERMINAL run (defense in depth
@@ -794,15 +845,16 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)
 
 	def test_budget_preserved_after_tally_commit_rollback(self):
-		# CA3-3: the page budget advances ONLY from an after-commit callback, so a tally /
-		# commit failure that rolls the request back never leaks budget — a retry sees the
-		# FULL remaining capacity. Simulated by failing the run-row tally write (propagates),
-		# then rolling back as the request/job wrapper would on the raised error.
+		# CA3-3 (CX5-3 shape): the page budget IS the durable ``pages_written`` tally, written
+		# in the SAME transaction as the pages — so a tally / commit failure that rolls the
+		# request back un-spends the budget WITH the pages and a retry sees the FULL remaining
+		# capacity. Simulated by failing the run-row tally write (propagates), then rolling
+		# back as the request/job wrapper would on the raised error.
 		import pymysql
 
-		self._bind_scribe_run()  # binds the session_key context + creates the running run
+		run = self._bind_scribe_run()  # binds the session_key context + creates the running run
 		frappe.db.commit()  # persist the run row so the rollback discards only the writeback
-		self.assertEqual(ctx.pages_written(self.session_key), 0)
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
 		real_set = frappe.db.set_value
 
 		def _sv(dt, *a, **k):
@@ -817,7 +869,8 @@ class TestAppLearningAgentTools(FrappeTestCase):
 				)
 		frappe.db.rollback()  # the request/job wrapper rolls back on the propagated error
 		# budget NOT leaked: the full per-run page capacity remains available for the retry
-		self.assertEqual(ctx.pages_written(self.session_key), 0)
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 0)
 
 	def test_stale_scribe_run_reconciles_and_persists_page_tally(self):
 		# CA3-4: a scribe run whose stored tally was LOST (reads 0) but whose pages ARE
@@ -857,26 +910,28 @@ class TestAppLearningAgentTools(FrappeTestCase):
 	# ------------------------------------------------------------------ #
 	def test_budget_read_under_run_row_lock_bounds_overlapping_writeback(self):
 		# CA4-1: the per-run page budget is read UNDER the run-row ``for_update`` lock, NOT
-		# before it. Two writebacks for the SAME run/session serialize on that lock, so the
-		# second reads the budget only AFTER the first's pages + after-commit counter (CA3-3)
-		# are durable — the two can never both reserve the full remaining allowance (a soft-cap
-		# overrun). Simulated single-connection: a PRIOR committed writeback of N pages becomes
-		# visible EXACTLY when this call acquires the run-row lock (as a real prior lock-holder's
-		# commit would), by advancing the session counter inside the ``for_update`` RUN read. A
-		# PRE-lock budget read would see 0 (and write all the pages); the UNDER-lock read sees N
-		# and truncates to the ``CAP - N`` that actually remains.
-		self._bind_scribe_run()  # binds the running run + session_key; its name is unused here
+		# before it. Two writebacks for the SAME run serialize on that lock, so the second
+		# reads the budget only AFTER the first's pages + durable ``pages_written`` tally
+		# (CX5-3) are committed — the two can never both reserve the full remaining allowance
+		# (a soft-cap overrun). Simulated single-connection: a PRIOR committed writeback of N
+		# pages becomes visible EXACTLY when this call acquires the run-row lock (as a real
+		# prior lock-holder's commit would), by advancing the row's durable tally immediately
+		# before the ``for_update`` RUN read returns. A PRE-lock budget read would see 0 (and
+		# write all the pages); the UNDER-lock read sees N and truncates to the ``CAP - N``
+		# that actually remains.
+		run = self._bind_scribe_run()  # binds the running run + session_key
 		cap = ctx.PER_RUN_PAGE_CAP
 		prior = cap - 2  # a prior writeback consumed all but 2 of the per-run cap
 		real_get = frappe.db.get_value
+		real_set = frappe.db.set_value
 		armed = {"fired": False}
 
 		def _get(dt, *a, **k):
 			# the run-row for_update read IS the lock acquisition: make the prior holder's
-			# durable counter visible right here (never before it)
+			# durable tally visible right here (never before it)
 			if dt == RUN and k.get("for_update") and not armed["fired"]:
 				armed["fired"] = True
-				ctx.add_pages_written(self.session_key, prior)
+				real_set(RUN, run, "pages_written", prior, update_modified=False)
 			return real_get(dt, *a, **k)
 
 		# ask to write 6 pages: below the cap outright (so WITHOUT the prior batch nothing would

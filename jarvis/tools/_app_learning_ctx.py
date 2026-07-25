@@ -24,10 +24,17 @@ model; the server validates + stamps that selection into the run's ``scope_json`
 The model can neither author nor widen the selection, and the roster tool shows
 only the selected apps.
 
-Two per-run budgets, tracked per ``session_key`` (a fresh key per run), keep a
-looping delegate bounded well inside the 90-minute run ceiling:
+Two per-run budgets keep a looping delegate bounded well inside the 90-minute run
+ceiling:
   * a source-BYTES budget so it cannot read source forever, and
   * a page cap so it cannot flood the wiki.
+
+CX5-3 — both counters are DURABLE COLUMNS on the run row (``source_bytes_read`` /
+``pages_written``), read under a ``for_update`` lock and advanced in the same
+transaction as the side effect they meter. They were cache-backed; a cache outage
+reset them to zero and silently handed a looping delegate a whole fresh budget.
+The row read FAILS CLOSED: an unreadable row refuses the call rather than
+defaulting to "nothing used yet".
 """
 
 from __future__ import annotations
@@ -53,9 +60,6 @@ APP_LEARNING_AGENT_SLUG = "custom-app-learning"
 # are the runaway guards under the 90-minute timeout + minimal tools_allow.
 PER_RUN_SOURCE_BYTES_BUDGET = 5 * 1024 * 1024  # ~5 MB of source per run
 PER_RUN_PAGE_CAP = 15  # wiki pages written per run
-# TTL > the 90-min run ceiling AND the 3-h stale-run reaper cutoff, so a live
-# run's budget never expires mid-run; a stale key self-evicts long after.
-_BUDGET_TTL_S = 3 * 60 * 60
 
 
 def resolve_scribe_run(allow_terminal: bool = False) -> dict:
@@ -189,43 +193,27 @@ def assert_custom_app(app: str, run_name: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# per-run budgets (cache-backed, keyed by session_key)
+# per-run budgets (DURABLE — counters on the run ROW, read under its lock)
 # --------------------------------------------------------------------------- #
-def _src_bytes_key(session_key: str) -> str:
-	return f"jarvis:app_learning:src_bytes:{session_key}"
+def lock_run_budget(run_name: str, fields: list[str]) -> frappe._dict:
+	"""Read the run row's budget counters UNDER a ``for_update`` ROW LOCK — the
+	authority for BOTH per-run budgets (CX5-3).
 
+	The counters used to live in the cache. A cache outage (or an evicted key)
+	silently reset them to zero, so a redis blip handed a looping delegate a fresh
+	5 MB source budget and a fresh 15-page allowance — an unbounded read/write
+	behind an intact-looking gate. They are now columns on ``Jarvis Agent Run``
+	(``source_bytes_read`` / ``pages_written``), advanced in the SAME transaction as
+	the side effect they meter, so a rollback un-spends them and a retry sees the
+	true remaining budget.
 
-def source_bytes_used(session_key: str) -> int:
-	try:
-		return int(frappe.cache().get_value(_src_bytes_key(session_key)) or 0)
-	except Exception:
-		return 0
-
-
-def add_source_bytes(session_key: str, n: int) -> int:
-	total = source_bytes_used(session_key) + int(n or 0)
-	try:
-		frappe.cache().set_value(_src_bytes_key(session_key), total, expires_in_sec=_BUDGET_TTL_S)
-	except Exception:
-		pass
-	return total
-
-
-def _pages_key(session_key: str) -> str:
-	return f"jarvis:app_learning:pages:{session_key}"
-
-
-def pages_written(session_key: str) -> int:
-	try:
-		return int(frappe.cache().get_value(_pages_key(session_key)) or 0)
-	except Exception:
-		return 0
-
-
-def add_pages_written(session_key: str, n: int) -> int:
-	total = pages_written(session_key) + int(n or 0)
-	try:
-		frappe.cache().set_value(_pages_key(session_key), total, expires_in_sec=_BUDGET_TTL_S)
-	except Exception:
-		pass
-	return total
+	FAIL-CLOSED: the read is NOT wrapped in a try. A lock timeout / connection loss
+	PROPAGATES, and a row that has vanished raises — never "0 used, go ahead". The
+	lock is held to the request-end commit, so two concurrent calls for the same run
+	serialize and cannot both reserve the same remaining allowance."""
+	row = frappe.db.get_value(RUN, run_name, ["status", *fields], as_dict=True, for_update=True)
+	if not row:
+		raise InvalidArgumentError(
+			"this agent run row could not be read — refusing (per-run budgets are fail-closed)"
+		)
+	return row

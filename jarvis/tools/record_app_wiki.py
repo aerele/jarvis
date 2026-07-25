@@ -23,8 +23,10 @@ Namespace integrity (all SERVER-SIDE, never model-trusted):
     (``PROVENANCE_KIND_PREFIX``), so a scribe can create/update only pages of its
     OWN provenance and can NEVER overwrite a human-authored Org page even on a
     slug collision.
-A per-run page cap (15) bounds a run; truncation is disclosed as a coverage
-caveat on the last written page and stamped on the run.
+A per-run page cap (15) bounds a run — metered by the DURABLE ``pages_written``
+tally on the run row, read under that row's lock (CX5-3), so a cache fault can
+never reset the cap. Truncation is disclosed as a coverage caveat on the last
+written page and stamped on the run.
 """
 
 from __future__ import annotations
@@ -96,7 +98,6 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	)
 
 	run = ctx.resolve_scribe_run()  # self-gate: scribe run + admin-tier or raise
-	session_key = run["session_key"]
 	run_name = run["name"]
 	default_app = (app or "").strip()
 
@@ -147,9 +148,9 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	# ANY budget/truncation work, and HOLD that lock through the page writes + tally + the
 	# request-end commit. Two properties ride on acquiring the lock FIRST:
 	#   * CA4-1 — the per-run page budget is read UNDER this lock (below), so two writebacks for
-	#     the SAME run/session serialize on this row: the second reads the budget only AFTER the
-	#     first's pages + after-commit counter (CA3-3) are durable, so they can never both
-	#     reserve the full remaining allowance (a soft-cap overrun);
+	#     the SAME run serialize on this row: the second reads the budget only AFTER the first's
+	#     pages + durable ``pages_written`` tally are committed, so they can never both reserve
+	#     the full remaining allowance (a soft-cap overrun);
 	#   * CA3-1 — it orders the writeback AHEAD of the stale-run sweep on the SAME row: a sweep
 	#     that reaches this run now BLOCKS on the row lock until we commit, then sees a running
 	#     run with our pages durably tallied — so it can never fail a run whose writeback is in
@@ -157,24 +158,27 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	# A run finalized (cancelled / reaped / finished) in the window between ``resolve_scribe_run``
 	# and here is refused with the normal shape: nothing is written, nothing tallied, no budget
 	# consumed — and its ``pages_remaining`` is read under the lock too, so it stays honest.
-	run_status = frappe.db.get_value(RUN, run_name, "status", for_update=True)
-	if run_status != "running":
+	locked = ctx.lock_run_budget(run_name, ["pages_written"])
+	# CX5-3: ``pages_written`` on the LOCKED row is the durable page tally — the same
+	# column ``_tally_run`` advances in this transaction. A cache outage can no longer
+	# reset the cap to zero, and ``lock_run_budget`` fails closed if the row is gone.
+	already = int(locked.get("pages_written") or 0)
+	if locked.get("status") != "running":
 		return {
 			"run": run_name,
 			"applied": 0,
 			"failed": 0,
 			"rejected": rejected,
-			"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - ctx.pages_written(session_key)),
+			"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - already),
 			"truncated": False,  # nothing written -> nothing truncated
 			"slugs": [],
 		}
 
 	# Per-run page cap: bound how many pages one run may write. Read UNDER the run-row lock
-	# (above) so ``already`` reflects any prior writeback for this session that committed before
-	# we acquired the lock — the CA3-3 after-commit counter is durable by the time the prior
-	# holder released the row. A re-run gets a fresh session_key (fresh counter), so re-learning
-	# the same app is not penalised — the cap only stops one run flooding the wiki.
-	already = ctx.pages_written(session_key)
+	# (above) so ``already`` reflects any prior writeback for this run that committed before
+	# we acquired the lock — that writeback's ``_tally_run`` increment is durable by the time
+	# the prior holder released the row. A re-run is a NEW run row (fresh counter), so
+	# re-learning the same app is not penalised — the cap only stops one run flooding the wiki.
 	remaining = max(0, ctx.PER_RUN_PAGE_CAP - already)
 	truncated = total > remaining
 	dropped = 0
@@ -223,23 +227,19 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 				else:
 					failed += 1
 
-	# CA3-3: advance the per-run page budget ONLY from an AFTER-COMMIT callback, so a
-	# rollback (a failed tally / audit / commit) never leaks budget — the pages, the tally
-	# and this increment all become durable together at the request-end commit, or none do.
-	# A retry of a rolled-back call then sees the FULL remaining capacity rather than a
-	# phantom-consumed budget that would make it write nothing (frappe.db.rollback resets
-	# after_commit, discarding the queued increment).
-	if applied:
-		frappe.db.after_commit.add(lambda n=applied: ctx.add_pages_written(session_key, n))
+	# CA3-3 (now structural): the page budget IS the durable ``pages_written`` tally that
+	# ``_tally_run`` advances below, in the SAME transaction as the pages themselves — so a
+	# rollback (a failed tally / audit / commit) un-spends the budget with the pages rather
+	# than leaking it, and a retry sees the FULL remaining capacity. The separate
+	# after-commit cache increment this replaced could diverge from the pages it metered.
 	_tally_run(run_name, applied_pages, truncated, dropped)
 	return {
 		"run": run_name,
 		"applied": applied,
 		"failed": failed,
 		"rejected": rejected,
-		# The budget increment above is deferred to commit, so ``pages_written`` still reads
-		# the pre-call total here; report the remaining from ``remaining - applied`` (the
-		# value it WILL have once this call commits), clamped at zero.
+		# ``remaining`` was read under the lock and ``applied`` pages were just tallied onto
+		# the same row, so this is the capacity the run really has left once we commit.
 		"pages_remaining": max(0, remaining - applied),
 		"truncated": truncated,
 		"slugs": [m["slug"] for m in applied_pages],

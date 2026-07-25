@@ -23,6 +23,7 @@
   "coverage_note",
   "session_key",
   "dashboard",
+  "source_bytes_read",
   "pages_written",
   "pages_json",
   "coverage_json",
@@ -119,6 +120,14 @@
    "label": "Dashboard",
    "options": "Jarvis Dashboard",
    "description": "The saved Jarvis Dashboard this run produced (programmatic Run->Dashboard, Phase 4)."
+  },
+  {
+   "default": "0",
+   "fieldname": "source_bytes_read",
+   "fieldtype": "Int",
+   "label": "Source Bytes Read",
+   "read_only": 1,
+   "description": "CX5-3 — Custom App Learning scribe run only: DURABLE running total of custom-app source bytes this run has been served. read_app_source enforces + advances the per-run byte budget against this row under a lock, so the budget survives a cache outage (fail-closed: an unreadable row refuses the read)."
   },
   {
    "default": "0",
