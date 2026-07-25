@@ -597,6 +597,41 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# the tally was never persisted (the write failed and propagated)
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
 
+	def test_sweep_leaves_a_concurrently_finished_run_alone(self):
+		# CA2-4: a run a concurrent finish already moved to "completed" between the sweep's
+		# scan and its transition must be LEFT ALONE — the sweep re-reads under a row lock
+		# and compare-and-sets on status='running', so it never flips a finished run to
+		# failed. Simulated by handing the reaper a STALE candidate snapshot (running, 0
+		# pages) while the real row is already completed.
+		from jarvis.chat import agent_scheduler
+
+		run = self._bind_scribe_run()
+		frappe.db.set_value(
+			RUN,
+			run,
+			{"status": "completed", "pages_written": 2, "finished_at": frappe.utils.now()},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		stale = [
+			{
+				"name": run,
+				"session_key": self.session_key,
+				"owner": "Administrator",
+				"agent": SCRIBE_SLUG,
+				"installation": None,
+				"pages_written": 0,  # the value the sweep saw at scan time
+			}
+		]
+		with (
+			mock.patch.object(agent_scheduler, "_stale_candidates", return_value=stale),
+			mock.patch("jarvis.chat.agent_runs.teardown_run_session") as td,
+		):
+			agent_scheduler.reap_stale_agent_runs()
+		# left alone: still completed (never flipped to failed); the session is not torn down
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
+		td.assert_not_called()
+
 
 class TestRunAgentNowScribeGate(FrappeTestCase):
 	"""The ``run_agent_now`` nature gate admits Scribe (auditor stays valid,

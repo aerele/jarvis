@@ -182,20 +182,42 @@ def reap_stale_agent_runs() -> int:
 	but the model may simply forget. Completion must not depend on model behavior:
 	a stuck scribe run whose durable page tally proves it SUCCEEDED is reconciled to
 	``completed`` here (not mislabeled ``failed``). Everything else is a genuinely
-	dead run and is failed as before."""
+	dead run and is failed as before.
+
+	CA2-4 (finish-vs-sweep race): the cached status/tally from the bulk scan may be
+	STALE — a concurrent ``record_app_wiki``/``finish`` can complete a run between the
+	scan and its transition here. Each candidate is therefore re-read under a ROW LOCK
+	and transitioned with a COMPARE-AND-SET on ``status='running'``: a row a concurrent
+	finish already moved off running is LEFT ALONE, and the per-run session is torn down
+	only AFTER the transition is won + committed."""
 	from jarvis.chat import agent_runs
+	from jarvis.tools.record_app_wiki import reconcile_pages_written
 
 	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
-	stuck = frappe.get_all(
-		RUN,
-		filters={"status": "running", "started_at": ["<", cutoff]},
-		fields=["name", "session_key", "owner", "agent", "installation", "pages_written"],
-	)
 	reaped = 0
-	for r in stuck:
+	for r in _stale_candidates(cutoff):
 		try:
-			nature = (frappe.db.get_value(LISTING, r.agent, "nature") or "").strip().title()
-			pages = int(r.pages_written or 0)
+			# Re-read under a ROW LOCK immediately before deciding. The row lock serializes
+			# against a concurrent record_app_wiki/finish (both write this row), so the
+			# status + tally we act on are current, not the possibly-stale scan snapshot.
+			cur = frappe.db.get_value(
+				RUN,
+				r.name,
+				["status", "pages_written", "agent", "session_key", "owner", "installation"],
+				as_dict=True,
+				for_update=True,
+			)
+			if not cur or cur.status != "running":
+				# A concurrent finish already moved it off running — leave it alone (never
+				# overwrite a completed run with failed). Release the lock and move on.
+				frappe.db.commit()
+				continue
+			nature = (frappe.db.get_value(LISTING, cur.agent, "nature") or "").strip().title()
+			pages = int(cur.pages_written or 0)
+			if nature == "Scribe" and pages == 0:
+				# CA2-3 fallback: rebuild the tally from page provenance before failing a
+				# scribe run whose stored tally reads zero, so real work is never lost.
+				pages = reconcile_pages_written(r.name)
 			if nature == "Scribe" and pages > 0:
 				# Server-owned terminalization: the pages are already durably written,
 				# so this is an honest SUCCESS the model merely never finalized. Complete
@@ -206,16 +228,18 @@ def reap_stale_agent_runs() -> int:
 					{"status": "completed", "finished_at": frappe.utils.now()},
 					update_modified=False,
 				)
-				agent_runs.teardown_run_session(r.session_key)
+				frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+				agent_runs.teardown_run_session(cur.session_key)
 				log_activity(
-					agent=r.agent,
-					agent_title=frappe.db.get_value(LISTING, r.agent, "title"),
-					installation=r.installation,
+					agent=cur.agent,
+					agent_title=frappe.db.get_value(LISTING, cur.agent, "title"),
+					installation=cur.installation,
 					action="run_completed",
 					run=r.name,
 					detail=f"reconciled to completed: scribe wrote {pages} page(s); finish not called",
-					owner=r.owner,
+					owner=cur.owner,
 				)
+				frappe.db.commit()
 				reaped += 1
 				continue
 			frappe.db.set_value(
@@ -228,26 +252,37 @@ def reap_stale_agent_runs() -> int:
 				},
 				update_modified=False,
 			)
+			frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
 			# A8: the session bearer must not outlive the (now-failed) run.
-			agent_runs.teardown_run_session(r.session_key)
+			agent_runs.teardown_run_session(cur.session_key)
 			log_activity(
-				agent=r.agent,
-				agent_title=frappe.db.get_value(LISTING, r.agent, "title"),
-				installation=r.installation,
+				agent=cur.agent,
+				agent_title=frappe.db.get_value(LISTING, cur.agent, "title"),
+				installation=cur.installation,
 				action="run_failed",
 				run=r.name,
 				detail="reaped: run exceeded max duration",
-				owner=r.owner,
+				owner=cur.owner,
 			)
+			frappe.db.commit()
 			reaped += 1
 		except Exception:
 			frappe.log_error(
 				title=f"jarvis agent: stale-run reap failed: {r.name}",
 				message=frappe.get_traceback(),
 			)
-	if reaped:
-		frappe.db.commit()
 	return reaped
+
+
+def _stale_candidates(cutoff) -> list:
+	"""Runs stuck ``running`` past ``cutoff`` — the reaper's candidate set. Factored so
+	the CA2-4 compare-and-set (re-read under a row lock before transitioning) can be
+	exercised against a deliberately-stale candidate snapshot in tests."""
+	return frappe.get_all(
+		RUN,
+		filters={"status": "running", "started_at": ["<", cutoff]},
+		fields=["name", "session_key", "owner", "agent", "installation", "pages_written"],
+	)
 
 
 # --------------------------------------------------------------------------- #
