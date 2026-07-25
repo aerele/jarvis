@@ -397,90 +397,224 @@ function tagCloseIndex(src, from) {
 	return -1
 }
 
-// Where a <style> element's RAW-TEXT content ends: the first case-insensitive
-// `</style` that is an appropriate end tag (followed by whitespace, `/`, `>` or
+// Where a raw-text / RCDATA element's content ends: the first case-insensitive
+// `</name` that is an appropriate end tag (followed by whitespace, `/`, `>` or
 // EOF). Returns -1 (content runs to EOF) when there is none — matching the
-// browser, which applies an UNCLOSED <style> to end-of-document.
-function styleRawTextEnd(lower, src, from) {
+// browser, which applies an UNCLOSED <style>/<script>/… to end-of-document.
+function rawTextEnd(lower, src, from, name) {
+	const needle = "</" + name
 	let k = from
 	for (;;) {
-		const e = lower.indexOf("</style", k)
+		const e = lower.indexOf(needle, k)
 		if (e < 0) return -1
-		const nxt = src[e + 7]
+		const nxt = src[e + needle.length]
 		if (nxt === undefined || /[\s/>]/.test(nxt)) return e
-		k = e + 7
+		k = e + needle.length
 	}
 }
 
+// HTML raw-text / RCDATA elements whose content is NOT parsed as markup, so a
+// `<style>` (or a fake `</style>`) appearing inside them is text, never a tag.
+// <style> is handled specially (its CSS is wrapped); the rest are skipped whole.
+// <plaintext> is special-cased in the scanner (it consumes to EOF).
+const RAWTEXT_ELEMENTS = new Set([
+	"script",
+	"style",
+	"textarea",
+	"title",
+	"xmp",
+	"iframe",
+	"noembed",
+	"noframes",
+	"noscript",
+])
+
 // Wrap the inner CSS of every author <style> in `@layer author { … }` so a
 // standard theme's later-declared `@layer theme` wins the cascade regardless of
-// the author's source order or selector specificity. This walks the HTML with a
-// quote- and raw-text-aware scan (NOT a regex — the client wrapper must parse the
-// same surface the iframe browser does, DR2-2): a real <style> start tag ends at
-// its first UNQUOTED `>`, and its content is raw text to the first `</style` (or
-// EOF). An UNCLOSED <style> still applies its CSS to EOF in the browser, so it is
-// layered too and closed with a synthesized `</style>` so it can't swallow our
-// shell's trailing tags (F2). An empty style block is left untouched. A block
-// whose CSS has a stray `}` that would break OUT of `@layer author{}` is DROPPED
-// (emitted as an empty <style>) rather than let through unlayered (F#4) — the
-// save-time validator already rejects this, so this only bites live previews +
-// grandfathered docs that skip validation. Author `@import`, inline `style=`
-// colors and `!important` still beat layers by design — the validator bans those.
+// the author's source order or selector specificity.
+//
+// The AI's HTML is untrusted, so this must find the SAME real <style> elements
+// the iframe browser tokenizes — a substring scan for "<style" desyncs on any
+// "<style" that is not actually a start tag (inside an attribute value, a
+// comment, or a <script>/<textarea> body), which lets a fake "<style" swallow the
+// real "</style>" and leave the real CSS UNLAYERED, outranking @layer theme
+// (DR3-1). So this is a proper HTML tokenizer-state walk, not a hand-scanner over
+// "<style": DATA state advances tag-by-tag; a start tag is consumed to its true
+// end `>` honoring quoted attributes (so a "<style" INSIDE an attribute is part of
+// its tag, never a token); comments (incl. the abrupt-closing `<!-->` / `<!--->`
+// and `--!>` forms), bogus comments and PIs are skipped as units; raw-text /
+// RCDATA elements (<script>, <textarea>, <title>, … and <plaintext> → to EOF) have
+// their bodies skipped whole, so a "<style" inside them is never a tag.
+//
+// Only real <style> elements are rewritten: the start tag ends at its first
+// UNQUOTED `>`, and its content is raw text to the first `</style` (or EOF). An
+// UNCLOSED <style> still applies its CSS to EOF in the browser, so it is layered
+// too and closed with a synthesized `</style>` so it can't swallow our shell's
+// trailing tags (F2). An empty style block is left untouched. A block whose CSS
+// has a stray `}` that would break OUT of `@layer author{}` is DROPPED (emitted as
+// an empty <style>) rather than let through unlayered (F#4) — the save-time
+// validator already rejects this, so this only bites live previews + grandfathered
+// docs that skip validation. Author `@import`, inline `style=` colors and
+// `!important` still beat layers by design — the validator bans those.
 function wrapAuthorStyles(html) {
 	const src = String(html || "")
 	const lower = src.toLowerCase()
+	const n = src.length
 	let out = ""
 	let i = 0
-	while (i < src.length) {
-		const start = lower.indexOf("<style", i)
-		if (start < 0) {
+	while (i < n) {
+		const lt = src.indexOf("<", i)
+		if (lt < 0) {
 			out += src.slice(i)
 			break
 		}
-		// `<style` must be followed by a tag-name terminator (whitespace, `/`, `>`
-		// or EOF) to be a real start tag; otherwise it is e.g. `<styles` — copy the
-		// literal through and keep scanning.
-		const after = src[start + 6]
-		if (after !== undefined && !/[\s/>]/.test(after)) {
-			out += src.slice(i, start + 6)
-			i = start + 6
+		const c1 = src[lt + 1]
+		if (c1 === undefined) {
+			// a trailing `<` is literal text
+			out += src.slice(i)
+			break
+		}
+
+		// `<!…` — comment or other markup declaration.
+		if (c1 === "!") {
+			let end
+			if (src[lt + 2] === "-" && src[lt + 3] === "-") {
+				// a comment: nothing inside is a tag. It ends at `-->` / `--!>`, or —
+				// for the abrupt-closing empty forms — a `>` right after `<!--` /
+				// `<!---`. Ending exactly where the browser does is what prevents a
+				// later real <style> from being swallowed (DR3-1).
+				const p = lt + 4
+				if (src[p] === ">") {
+					end = p + 1
+				} else if (src[p] === "-" && src[p + 1] === ">") {
+					end = p + 2
+				} else {
+					let e = -1
+					let len = 3
+					for (let k = p; k < n; k++) {
+						if (src[k] === "-" && src[k + 1] === "-") {
+							if (src[k + 2] === ">") {
+								e = k
+								len = 3
+								break
+							}
+							if (src[k + 2] === "!" && src[k + 3] === ">") {
+								e = k
+								len = 4
+								break
+							}
+						}
+					}
+					end = e < 0 ? n : e + len
+				}
+			} else {
+				// bogus comment / doctype / CDATA: to the first `>`.
+				const g = src.indexOf(">", lt + 2)
+				end = g < 0 ? n : g + 1
+			}
+			out += src.slice(i, end)
+			i = end
 			continue
 		}
-		const tagEnd = tagCloseIndex(src, start + 6)
+
+		// `</…>` end tag, or `<?…>` PI (a bogus comment): skip to the tag's `>`
+		// (quote-aware for the end tag so a quoted `>` can't close it early).
+		if (c1 === "/") {
+			const e = tagCloseIndex(src, lt + 2)
+			const end = e < 0 ? n : e + 1
+			out += src.slice(i, end)
+			i = end
+			continue
+		}
+		if (c1 === "?") {
+			const g = src.indexOf(">", lt + 2)
+			const end = g < 0 ? n : g + 1
+			out += src.slice(i, end)
+			i = end
+			continue
+		}
+
+		// A start tag must be `<` + ASCII letter; any other `<` is literal text.
+		if (!/[a-zA-Z]/.test(c1)) {
+			out += src.slice(i, lt + 1)
+			i = lt + 1
+			continue
+		}
+
+		// Start tag: read the tag name (to the first whitespace / `/` / `>`), then
+		// find the tag's true end `>` honoring quoted attribute values (so
+		// `<x a=">">` does not end at the quoted `>`, and a `<style` sitting INSIDE
+		// an attribute value is consumed as part of THIS tag — DR3-1).
+		let j = lt + 1
+		while (j < n && !/[\s/>]/.test(src[j])) j++
+		const name = lower.slice(lt + 1, j)
+		const tagEnd = tagCloseIndex(src, j)
 		if (tagEnd < 0) {
-			// unterminated start tag (truncated) — nothing renders as CSS
+			// unterminated start tag (truncated) — nothing after renders as markup
 			out += src.slice(i)
 			break
 		}
-		out += src.slice(i, tagEnd + 1) // pre-style content + the opening tag
-		const contentStart = tagEnd + 1
-		const rawEnd = styleRawTextEnd(lower, src, contentStart)
-		let css
-		let close
-		let next
-		if (rawEnd < 0) {
-			css = src.slice(contentStart)
-			close = "</style>" // unclosed: synthesize a closer (F2)
-			next = src.length
-		} else {
-			css = src.slice(contentStart, rawEnd)
-			const closeEnd = tagCloseIndex(src, rawEnd + 7)
-			if (closeEnd < 0) {
-				close = src.slice(rawEnd)
-				next = src.length
+
+		if (name === "style") {
+			out += src.slice(i, tagEnd + 1) // pre-style content + the opening tag
+			const contentStart = tagEnd + 1
+			const rawEnd = rawTextEnd(lower, src, contentStart, "style")
+			let css
+			let close
+			let next
+			if (rawEnd < 0) {
+				css = src.slice(contentStart)
+				close = "</style>" // unclosed: synthesize a closer (F2)
+				next = n
 			} else {
-				close = src.slice(rawEnd, closeEnd + 1)
-				next = closeEnd + 1
+				css = src.slice(contentStart, rawEnd)
+				const closeEnd = tagCloseIndex(src, rawEnd + "</style".length)
+				if (closeEnd < 0) {
+					close = src.slice(rawEnd)
+					next = n
+				} else {
+					close = src.slice(rawEnd, closeEnd + 1)
+					next = closeEnd + 1
+				}
 			}
+			if (!css.trim()) {
+				out += css + close // empty block: leave untouched
+			} else if (cssEscapesLayer(css)) {
+				out += close // stray-} block dropped, never emitted unlayered (F#4)
+			} else {
+				out += `@layer author{${css}}${close}`
+			}
+			i = next
+			continue
 		}
-		if (!css.trim()) {
-			out += css + close // empty block: leave untouched
-		} else if (cssEscapesLayer(css)) {
-			out += close // stray-} block dropped, never emitted unlayered (F#4)
-		} else {
-			out += `@layer author{${css}}${close}`
+
+		if (name === "plaintext") {
+			// after <plaintext> everything is raw text to EOF — no later tag exists
+			out += src.slice(i)
+			break
 		}
-		i = next
+
+		if (RAWTEXT_ELEMENTS.has(name)) {
+			// a raw-text / RCDATA body (<script>, <textarea>, …): its content is not
+			// markup, so skip it whole — a `<style>` inside is text, not a tag (DR3-1).
+			out += src.slice(i, tagEnd + 1)
+			const contentStart = tagEnd + 1
+			const rawEnd = rawTextEnd(lower, src, contentStart, name)
+			if (rawEnd < 0) {
+				out += src.slice(contentStart)
+				i = n
+				continue
+			}
+			const closeEnd = tagCloseIndex(src, rawEnd + ("</" + name).length)
+			const end = closeEnd < 0 ? n : closeEnd + 1
+			out += src.slice(contentStart, end)
+			i = end
+			continue
+		}
+
+		// Ordinary element: emit the start tag and resume DATA scanning after it.
+		out += src.slice(i, tagEnd + 1)
+		i = tagEnd + 1
 	}
 	return out
 }

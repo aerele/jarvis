@@ -161,6 +161,21 @@ _COLOR_PROPS = frozenset(
 		"stop-color",
 		"flood-color",
 		"lighting-color",
+		# color-bearing via drop-shadow() (DR3-3)
+		"filter",
+		"backdrop-filter",
+		"-webkit-filter",
+		"-webkit-backdrop-filter",
+		# color-bearing via a gradient image source (DR3-3)
+		"border-image",
+		"border-image-source",
+		# logical-property border shorthands (analogues of border / border-top…)
+		"border-block",
+		"border-inline",
+		"border-block-start",
+		"border-block-end",
+		"border-inline-start",
+		"border-inline-end",
 	}
 )
 _FONT_PROPS = frozenset({"font-family", "font"})
@@ -455,8 +470,12 @@ _RULE_BODY_AT = frozenset(
 # Only used to parse an isolated rgb()/hsl() literal's numeric args.
 _RGB_RE = re.compile(r"\brgba?\(\s*([^)]*)\)", re.I)
 _HSL_RE = re.compile(r"\bhsla?\(\s*([^)]*)\)", re.I)
-# An external/protocol-relative URL anywhere in a (decoded) attribute value.
-_URLISH_RE = re.compile(r"""(?:https?:)?//[^\s"'()<>]+""", re.I)
+# An external URL anywhere in a (decoded) attribute value: a special-scheme
+# (http/https) prefix followed by ANY number of slash/backslash separators —
+# including zero or one (`http:evil`, `http:/evil`), which the WHATWG URL parser
+# still resolves to an external authority for special schemes (DR3-2) — or a
+# bare protocol-relative `//`.
+_URLISH_RE = re.compile(r"""(?:https?:[\\/]*|//)[^\s"'()<>]+""", re.I)
 # Browser URL preprocessing (WHATWG): ASCII TAB / LF / CR are stripped from the
 # whole URL before parsing, so `https:/<TAB>/evil` resolves to `https://evil`.
 _URL_CONTROL_STRIP = {0x09: None, 0x0A: None, 0x0D: None}
@@ -539,11 +558,14 @@ def _is_external_url(url: str) -> bool:
 	"""A decoded URL string that the browser would FETCH off-origin. data:/blob:/
 	relative/fragment are fine; the exact SVG/xlink namespaces are exempt. The
 	value is canonicalized (control chars stripped, special-scheme backslashes
-	folded) so the exemption + test run on what the browser would actually load."""
+	folded) so the exemption + test run on what the browser would actually load.
+	Rejection is SCHEME-FIRST: any ``http:`` / ``https:`` scheme is external
+	regardless of how many (0, 1, or many) slash/backslash separators follow, since
+	a special scheme resolves to an authority either way (DR3-2)."""
 	s = _canonicalize_url_text(url).strip().lower()
 	if not s or s in _ALLOWED_XML_NS:
 		return False
-	return s.startswith("http://") or s.startswith("https://") or s.startswith("//")
+	return s.startswith("http:") or s.startswith("https:") or s.startswith("//")
 
 
 def _external_urls_in_text(text: str) -> list[str]:
@@ -741,10 +763,22 @@ def _external_violation(url: str) -> Violation:
 
 
 # ── declaration + at-rule checks ──────────────────────────────────────────────
-def _scan_color_tokens(tokens, allowed_hexes, allowed_tokens, out, *, color_rule, location):
+def _scan_color_tokens(
+	tokens, allowed_hexes, allowed_tokens, out, *, color_rule, location, literal_only=False
+):
 	"""Flag any color VALUE that is not an allowed theme hex / existing --jd-*
 	token / approved neutral. Recurses into non-color functions (gradients,
-	image-set) and into a var() fallback expression."""
+	image-set) and into a var() fallback expression.
+
+	``literal_only`` is the durability pass over declarations OUTSIDE the known
+	color-bearing properties (DR3-3): it flags only UNAMBIGUOUS color LITERALS —
+	a ``#hash``, an ``rgb()/hsl()``, or a modern color function — which are colors
+	wherever they appear. It deliberately skips ``var()`` (a bare ``--jd`` rule
+	only makes sense where a color is expected, so ``padding:var(--gap)`` must
+	pass) and bare color-word IDENTS (``background``/``highlight``/… double as
+	custom-idents in ``transition-property``/``animation-name``/…). Those
+	ambiguous forms are enforced only in the enumerated ``_COLOR_PROPS`` full
+	scan."""
 	for tok in tokens:
 		tn = type(tok).__name__
 		if tn == "HashToken":
@@ -760,11 +794,15 @@ def _scan_color_tokens(tokens, allowed_hexes, allowed_tokens, out, *, color_rule
 				if not _color_allowed(lit, allowed_hexes):
 					out.append(_color_violation(lit, color_rule, location))
 			elif fname == "var":
+				if literal_only:
+					continue  # var() is a <color> ref only in a color property (DR3-3)
 				# The referenced token must EXIST in the selected theme (a mere
 				# `--jd-` prefix on a non-existent name would render its fallback);
-				# and a fallback, if present, is validated recursively (DR2-1).
+				# the name is matched CASE-SENSITIVELY because CSS custom-property
+				# names are case-sensitive — `var(--JD-INK)` is unset in the browser
+				# (DR3-4). A fallback, if present, is validated recursively (DR2-1).
 				ref = _first_custom_prop(tok.arguments)
-				if not (ref and ref.lower() in allowed_tokens):
+				if not (ref and ref in allowed_tokens):
 					out.append(_color_violation(tinycss2.serialize([tok]).strip(), color_rule, location))
 				else:
 					fb = _var_fallback_tokens(tok.arguments)
@@ -780,8 +818,11 @@ def _scan_color_tokens(tokens, allowed_hexes, allowed_tokens, out, *, color_rule
 					out,
 					color_rule=color_rule,
 					location=location,
+					literal_only=literal_only,
 				)
 		elif tn == "IdentToken":
+			if literal_only:
+				continue  # bare color-word idents are ambiguous outside a color property
 			# Reject any <color> keyword that is not approved: a conventional named
 			# color OR a CSS system color (DR2-3). Non-color idents (`solid`,
 			# `center`, …) in a color-bearing shorthand are not <color> keywords and
@@ -840,10 +881,11 @@ def _family_candidates(tokens, shorthand):
 def _check_font(tokens, shorthand, allowed_families, allowed_tokens, out, *, location):
 	for kind, display, ref, var_fn in _family_candidates(tokens, shorthand):
 		if kind == "var":
-			# Must reference an EXISTING font token (--jd-font / --jd-font-display);
-			# a fallback, if present, is validated as a font family too (DR2-1).
-			low = (ref or "").lower()
-			if low in _FONT_TOKEN_NAMES and low in allowed_tokens:
+			# Must reference an EXISTING font token (--jd-font / --jd-font-display),
+			# matched CASE-SENSITIVELY — CSS custom-property names are case-sensitive,
+			# so `var(--JD-FONT)` is unset in the browser and must be rejected
+			# (DR3-4). A fallback, if present, is validated as a font family (DR2-1).
+			if ref in _FONT_TOKEN_NAMES and ref in allowed_tokens:
 				fb = _var_fallback_tokens(var_fn.arguments) if var_fn is not None else []
 				if fb:
 					_check_font(fb, False, allowed_families, allowed_tokens, out, location=location)
@@ -923,6 +965,22 @@ def _check_declaration(d, ctx, out, *, color_rule, location):
 			out,
 			color_rule=color_rule,
 			location=location,
+		)
+	elif lname not in _FONT_PROPS and not lname.startswith("--"):
+		# Durability (DR3-3): every OTHER declaration's value is swept for
+		# unambiguous off-palette color LITERALS (#hash / rgb()/hsl() / modern
+		# color functions), so a color-bearing property the enumerated
+		# _COLOR_PROPS list forgot (or a future one) can't reopen the hole. Font
+		# props go to _check_font; custom-property definitions are governed by the
+		# token-redefine + var()-usage rules, not this pass.
+		_scan_color_tokens(
+			d.value,
+			ctx["allowed_hexes"],
+			ctx["allowed_tokens"],
+			out,
+			color_rule=color_rule,
+			location=location,
+			literal_only=True,
 		)
 	if lname in _FONT_PROPS:
 		_check_font(
@@ -1027,7 +1085,9 @@ def validate_dashboard_html(html: str, theme: str) -> list[Violation]:
 		allowed_families = frozenset(f.lower() for f in spec["validator"]["allowed_font_families"])
 		# The EXACT --jd-* render-token names this theme emits (DR2-1): a var()
 		# color/font ref must name one that exists, not merely start with --jd-.
-		allowed_tokens = frozenset("--jd-" + str(name).lower() for name in (spec.get("render_tokens") or {}))
+		# Names are kept verbatim (no case-folding) so the membership test is
+		# case-sensitive against what the theme actually emits (DR3-4).
+		allowed_tokens = frozenset("--jd-" + str(name) for name in (spec.get("render_tokens") or {}))
 	ctx = {
 		"allowed_hexes": allowed_hexes,
 		"allowed_families": allowed_families,

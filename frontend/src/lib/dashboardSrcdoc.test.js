@@ -319,3 +319,55 @@ test("SECURITY: stale openclaw ws-client script is stripped, other scripts kept"
   assert.ok(out.includes("renderChart()"), "legit script kept")
   assert.ok(!out.includes("__openclaw__/ws"), "host ws-client stripped")
 })
+
+// DR3-1: a literal "<style" that is NOT a real start tag (inside an attribute
+// value, a <script>/<textarea> body, or a comment) must not desync the wrapper.
+// The prior hand-scanner searched for "<style" from the DATA position and could
+// treat a fake one as a start tag, swallowing the REAL "</style>" and leaving the
+// real rule UNLAYERED (outranking @layer theme). The tokenizer-state walk keeps
+// every real <style> layered regardless.
+const REAL = ".jd-card{background:var(--jd-negative)}"
+
+test("@layer DR3-1: a fake <style> in an ATTRIBUTE cannot desync — real rule stays layered", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  const html = `<div data-x="<style>"></div><style>${REAL}</style>`
+  const out = buildSrcdoc(html, { theme: THEMES.jarvis })
+  assert.ok(out.includes(`@layer author{${REAL}}`), "real <style> wrapped in @layer author")
+  // the attribute-borne "<style" is part of the <div> tag, never its own token
+  assert.ok(out.includes('<div data-x="<style>">'), "attribute value preserved intact")
+  // the real rule is NEVER emitted bare (unlayered), which would outrank @layer theme
+  assert.ok(!out.includes(`>${REAL}`) && !out.includes(`}${REAL}`), "real rule not left unlayered")
+  assert.ok(out.includes("@layer author, theme;"), "layer order declaration present")
+})
+
+test("@layer DR3-1: a fake <style>/</style> inside a <script> body is skipped — real rule stays layered", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  const html = `<script>var s="</style><style>evil{}";</script><style>${REAL}</style>`
+  const out = buildSrcdoc(html, { theme: THEMES.jarvis })
+  assert.ok(out.includes(`@layer author{${REAL}}`), "real <style> after the script stays wrapped")
+  // the script body's fake CSS is never wrapped as author CSS
+  assert.ok(!out.includes("@layer author{evil{}"), "fake in-script style not wrapped")
+  assert.ok(out.includes('var s="</style><style>evil{}";'), "script body preserved verbatim")
+})
+
+test("@layer DR3-1: attribute + script + comment fakes together, then a real style — still layered", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  const html =
+    `<div title="<style>x{}</style>"></div>` +
+    `<script>document.write("<style>y{}</style>")</script>` +
+    `<!-- <style>z{}</style> -->` +
+    `<style>${REAL}</style>`
+  const out = buildSrcdoc(html, { theme: THEMES.jarvis })
+  assert.ok(out.includes(`@layer author{${REAL}}`), "real rule stays layered past every fake")
+  for (const fake of ["x{}", "y{}", "z{}"]) {
+    assert.ok(!out.includes(`@layer author{${fake}}`), `fake ${fake} not wrapped as author CSS`)
+  }
+})
+
+test("@layer DR3-1: an abrupt-closing empty comment <!--> does not swallow the real style", async () => {
+  const { THEMES } = await import("./dashboardThemes.js")
+  // <!--> is a COMPLETE empty comment in HTML; the <style> after it is REAL, so it
+  // must be wrapped (a naive scan-to-`-->` would skip to EOF and miss it).
+  const out = buildSrcdoc(`<!--><style>${REAL}</style>`, { theme: THEMES.jarvis })
+  assert.ok(out.includes(`@layer author{${REAL}}`), "real style after <!--> stays layered")
+})

@@ -393,5 +393,91 @@ class TestThemeValidatorCodexRound2(unittest.TestCase):
 		)
 
 
+class TestThemeValidatorCodexRound3(unittest.TestCase):
+	"""Round-3 regressions: scheme-first URL rejection (any separator count),
+	generic off-palette color LITERALS in properties the enumerated list forgot,
+	and CASE-SENSITIVE custom-property existence."""
+
+	# ---- DR3-2 single/zero-separator special-scheme URLs ------------------ #
+	def test_zero_and_one_separator_http_url_rejected(self):
+		# Browsers resolve `http:evil` / `http:/evil` / `http:\evil` (and https) to
+		# an external authority — the ban must not require `//`. Checked under Custom
+		# (the safety bans still apply there) across src, url() and @import.
+		for html in (
+			'<img src="http:/evil.example/x.png">',
+			'<img src="http:evil.example/x.png">',
+			'<img src="http:\\evil.example/x.png">',
+			'<img src="https:/evil.example/x.png">',
+			'<style>.x{background:url("http:/evil.example/x.png")}</style>',
+			'<style>.x{background:url("http:evil.example/x.png")}</style>',
+			'<style>@import "http:/evil.example/x.css";</style>',
+			'<style>@import "https:evil.example/x.css";</style>',
+		):
+			self.assertEqual(codes(html, "Custom"), [RULE_EXTERNAL_URL], html)
+
+	def test_scheme_first_keeps_xml_namespace_and_relative_ok(self):
+		# the exact SVG/xlink namespaces and non-http(s) refs still pass.
+		self.assertEqual(
+			codes('<svg xmlns="http://www.w3.org/2000/svg"><rect fill="var(--jd-accent)"/></svg>'), []
+		)
+		self.assertEqual(codes("<style>.x{background:url(data:image/png;base64,AA)}</style>"), [])
+		self.assertEqual(codes('<style>.x{background:url("#grad")}</style>'), [])
+
+	# ---- DR3-3 color literals in properties beyond the enumerated list ----- #
+	def test_system_color_in_filter_rejected(self):
+		self.assertEqual(
+			codes("<style>.k{filter:drop-shadow(0 0 4px Highlight)}</style>"), [RULE_OFF_PALETTE]
+		)
+		self.assertEqual(
+			codes("<style>.k{backdrop-filter:drop-shadow(0 0 4px CanvasText)}</style>"), [RULE_OFF_PALETTE]
+		)
+
+	def test_off_palette_color_in_border_image_rejected(self):
+		self.assertEqual(
+			codes("<style>.k{border-image:linear-gradient(45deg,red,#0f172a) 30}</style>"), [RULE_OFF_PALETTE]
+		)
+		self.assertEqual(
+			codes("<style>.k{border-image-source:linear-gradient(Highlight,red)}</style>"), [RULE_OFF_PALETTE]
+		)
+
+	def test_generic_literal_scan_catches_uncovered_property(self):
+		# durability: a hex literal in a property NOT in the enumerated color list
+		# is still caught by the generic literal sweep.
+		self.assertEqual(
+			codes("<style>.k{-webkit-box-reflect:below 0 linear-gradient(transparent,#ff0000)}</style>"),
+			[RULE_OFF_PALETTE],
+		)
+
+	def test_generic_scan_does_not_false_positive_on_custom_idents(self):
+		# color-WORD idents double as custom-idents / keywords in these properties;
+		# the generic sweep must NOT flag them, nor a var() to an author custom prop.
+		for html in (
+			"<style>.k{transition-property:background}</style>",
+			"<style>.k{transition:background .2s}</style>",
+			"<style>.k{animation-name:red}</style>",
+			"<style>.k{will-change:background}</style>",
+			"<style>.k{padding:var(--gap)}</style>",
+			"<style>.k{--gap:16px;padding:var(--gap)}</style>",
+			"<style>.k{filter:blur(4px)}</style>",
+		):
+			self.assertEqual(codes(html), [], html)
+
+	# ---- DR3-4 CASE-SENSITIVE custom-property existence ------------------- #
+	def test_mismatched_case_jd_var_rejected(self):
+		# CSS custom-property names are case-sensitive; `var(--JD-INK)` is unset in
+		# the browser, so it must NOT be accepted as if `--jd-ink` existed.
+		self.assertEqual(codes("<style>.x{color:var(--JD-INK)}</style>"), [RULE_OFF_PALETTE])
+		self.assertEqual(codes("<style>.x{color:var(--Jd-Ink)}</style>"), [RULE_OFF_PALETTE])
+		self.assertEqual(codes('<div style="color:var(--JD-INK)">x</div>'), [RULE_INLINE_COLOR])
+
+	def test_mismatched_case_font_var_rejected(self):
+		self.assertEqual(codes("<style>body{font-family:var(--JD-FONT)}</style>"), [RULE_FONT_FAMILY])
+		self.assertEqual(codes("<style>body{font-family:var(--Jd-Font-Display)}</style>"), [RULE_FONT_FAMILY])
+
+	def test_exact_case_jd_var_still_passes(self):
+		self.assertEqual(codes("<style>.x{color:var(--jd-ink)}</style>"), [])
+		self.assertEqual(codes("<style>body{font-family:var(--jd-font)}</style>"), [])
+
+
 if __name__ == "__main__":
 	unittest.main()
