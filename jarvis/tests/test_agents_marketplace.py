@@ -720,6 +720,63 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(slugs, sorted(slugs))
 
 	# ------------------------------------------------------------------ #
+	# R1-F2 — the de-dupe short-circuits BEFORE the per-row queries
+	# ------------------------------------------------------------------ #
+	def test_push_payload_short_circuit_preserves_the_slug_set(self):
+		"""The short-circuit skips WORK, never an OUTCOME.
+
+		Oracle: a per-OWNER build can never short-circuit — (owner, agent) is
+		unique, so each such build sees at most one row per agent — which makes the
+		union of the per-owner builds an independent reference for what the
+		bench-global (short-circuiting) build must ship."""
+		self._enable_for(self.owner, "close-auditor")
+		self._enable_for(self.other, "close-auditor")
+		self._enable_for(self.other, "ledger-scrutiny-auditor")
+		# A blocked sibling that must not suppress the qualifying row (union).
+		blocked = self._enable_for(self.admin, "close-auditor")
+		frappe.db.set_value(
+			INSTALLATION,
+			blocked,
+			{"installable": 0, "not_installable_reason": "app_absent_or_ineligible"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+		owners = {r.owner for r in frappe.get_all(INSTALLATION, filters={"enabled": 1}, fields=["owner"])}
+		reference = set()
+		for o in owners:
+			reference |= {p["slug"] for p in agent_catalog.build_agent_push_payload(owner=o)}
+
+		payload = agent_catalog.build_agent_push_payload()
+		self.assertEqual({p["slug"] for p in payload}, reference)
+		# ...and still exactly one entry per slug.
+		slugs = [p["slug"] for p in payload]
+		self.assertEqual(len(slugs), len(set(slugs)), f"duplicate slug in payload: {slugs}")
+		self.assertIn("agent-close-auditor", reference)
+		self.assertIn("agent-ledger-scrutiny-auditor", reference)
+
+	def test_push_payload_short_circuit_skips_the_per_row_rbac_query(self):
+		"""The RBAC gate (an N+1 on the allowed-role child table) is evaluated once
+		per distinct AGENT, not once per install row."""
+		self._enable_for(self.owner, "close-auditor")
+		self._enable_for(self.other, "close-auditor")
+		self._enable_for(self.admin, "close-auditor")
+
+		calls = []
+		orig = agents_api._user_allowed_for_agent
+		agents_api._user_allowed_for_agent = lambda listing, user=None: (
+			calls.append(listing) or orig(listing, user)
+		)
+		try:
+			payload = agent_catalog.build_agent_push_payload()
+		finally:
+			agents_api._user_allowed_for_agent = orig
+
+		close_calls = [c for c in calls if c == "close-auditor"]
+		self.assertEqual(len(close_calls), 1, f"RBAC gate re-run per install row: {calls}")
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
+
+	# ------------------------------------------------------------------ #
 	# (j) P0-B part 2 — a legacy install (run_as_user NULL) must be DISABLEABLE
 	#
 	# Without this there is no UI escape from a bricked push: set_enabled saves

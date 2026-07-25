@@ -205,8 +205,38 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		order_by="agent asc, name asc",
 	)
 	payload = []
-	seen_slugs: set[str] = set()
+	# De-dupe key: the LISTING DOCNAME (``row.agent``), not the emitted slug, so the
+	# short-circuit below can run BEFORE any query. The two are the same key —
+	# ``Jarvis Agent Listing`` is named ``field:agent_slug`` and ``agent_slug`` is
+	# ``unique: 1`` (a DB index), so docname <-> agent_slug is a bijection, and
+	# frappe re-pins the field to the name on every ORM save
+	# (``base_document._sync_autoname_field``, called from ``_validate``). Deduping
+	# on either therefore ships exactly the same set of slugs.
+	seen_agents: set[str] = set()
 	for row in installs:
+		# De-dupe by AGENT. An install is per-(owner, agent) but the container's
+		# agent_skills namespace is per-slug, so two users who each install AND
+		# enable the same agent produce two rows for ONE slug. Admin REJECTS a
+		# payload carrying a duplicate slug outright ("invalid: duplicate agent
+		# skill slug '<x>'"), which kills EVERY agent push from the bench — not just
+		# the duplicated agent.
+		#
+		# Checked FIRST, before the listing lookup and the RBAC gate: once an agent
+		# has been emitted the outcome cannot change — no later row can add or
+		# remove it — so the work those gates do for a second row of the same agent
+		# is spent purely to reach a `continue`. That work is a ``get_value`` on the
+		# listing PLUS ``_user_allowed_for_agent``, which is itself an N+1 on the
+		# allowed-role child table; and this function runs TWICE per Apply (the
+		# endpoint and again in the background job), so at 20 owners x 20 installs
+		# the short-circuit saves ~800 round-trips.
+		#
+		# UNION semantics are unaffected: ``seen_agents`` is only added to AFTER
+		# every gate has passed, so a row blocked by one of them leaves its agent
+		# unseen and the next candidate is still evaluated in full. The slug ships
+		# as soon as ANY enabled install clears the gates.
+		if row.agent in seen_agents:
+			continue
+
 		# R5-J8: a reconcile marks an install ``installable=0`` (never deletes) when
 		# a min_apps dependency vanished AFTER install while it was still enabled.
 		# Its enablement signal must not reach the container — the run gates already
@@ -224,23 +254,13 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		if not _user_allowed_for_agent(row.agent, row.owner):
 			continue
 
-		# De-dupe by SLUG. An install is per-(owner, agent) but the container's
-		# agent_skills namespace is per-slug, so two users who each install AND
-		# enable the same agent produce two rows for ONE slug. Admin REJECTS a
-		# payload carrying a duplicate slug outright ("invalid: duplicate agent
-		# skill slug '<x>'"), which kills EVERY agent push from the bench — not
-		# just the duplicated agent. Emit each slug exactly once, with UNION
-		# semantics: the per-install gates above (installable / Published /
-		# owner-RBAC) are evaluated for every row, and the slug ships as soon as
-		# ANY of them clears. Safe to collapse because the entry below is derived
-		# purely from the listing row plus the bundled registry — it carries NO
-		# per-install data, and ``agent_slug`` is unique + the listing's docname
-		# (naming_rule By fieldname), so every row for a slug yields a byte-
-		# identical entry.
+		# Every gate has passed, so this agent is emitted and no later row for it can
+		# change that: mark it seen. Collapsing the rows is safe because the entry
+		# below is derived purely from the listing row plus the bundled registry —
+		# it carries NO per-install data — so every row for an agent would yield a
+		# byte-identical entry.
+		seen_agents.add(row.agent)
 		slug = f"{AGENT_PREFIX}{listing.agent_slug}"
-		if slug in seen_slugs:
-			continue
-		seen_slugs.add(slug)
 
 		# A2 enablement signal — body-free. Admin resolves the SKILL from the
 		# private bundle store by slug (Phase 2C). The body NEVER leaves it.
