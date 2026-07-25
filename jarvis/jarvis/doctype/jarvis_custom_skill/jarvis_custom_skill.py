@@ -155,9 +155,46 @@ class JarvisCustomSkill(Document):
 
 	def on_update(self):
 		_clear_personal_clause_cache(self.owner)
+		self._sync_slug_reservation()
 
 	def on_trash(self):
 		_clear_personal_clause_cache(self.owner)
+		self._release_slug_reservation()
+
+	def _sync_slug_reservation(self):
+		"""Keep the DB-unique shared-slug reservation (SR4-2) in step with this row on
+		EVERY write path - on_update fires on both insert and save, so the SPA, the
+		Desk, the tools, the promotion approval and the insight-apply create all pass
+		through here. A shared (Role/Org) skill RESERVES its slug: the reservation
+		doctype's name IS the slug, so the primary key makes a duplicate shared slug
+		impossible regardless of path or concurrency - the hard guarantee under the fast
+		belt query in ``_validate_shared_slug_unique``. A rename releases the old slug
+		and reserves the new one; narrowing back to User releases it via the old-slug
+		branch below. A merely-disabled shared skill KEEPS its reservation - the slug
+		stays claimed so re-enabling it can never collide."""
+		from jarvis.chat.custom_skills import release_shared_slug, reserve_shared_slug
+
+		new_slug = (self.skill_name or "").strip().lower()
+		new_shared = self.scope in ("Role", "Org")
+		before = self.get_doc_before_save()
+		if before is not None:
+			old_slug = (before.skill_name or "").strip().lower()
+			# On a rename, or when this row narrows out of the shared scopes, drop the
+			# reservation it previously held under its old slug. release_shared_slug is a
+			# no-op unless THIS row is the recorded holder, so a User row never releases a
+			# shared row's reservation.
+			if old_slug and (old_slug != new_slug or not new_shared):
+				release_shared_slug(old_slug, self.name)
+		if new_shared and new_slug:
+			reserve_shared_slug(new_slug, self.name)
+
+	def _release_slug_reservation(self):
+		"""Release this row's shared-slug reservation when it is deleted (SR4-2). Keyed
+		on the holder pointer, so deleting a User row that shadows a shared slug is a
+		safe no-op."""
+		from jarvis.chat.custom_skills import release_shared_slug
+
+		release_shared_slug((self.skill_name or "").strip().lower(), self.name)
 
 	def _validate_scope(self):
 		# Scope ladder {User, Role, Org} (security review PART 2 TASK 10). NEW rows

@@ -25,6 +25,59 @@ RESERVED_PREFIX = "custom-"
 # is only ever injected into every user's turn when Administrator owns it.
 MANAGED_OWNER = "Administrator"
 
+# --------------------------------------------------------------------------- #
+# Shared-slug reservation (SR4-2): a row whose ``name`` IS the slug, so two SHARED
+# (Role/Org) skills can never carry the same slug regardless of write path or
+# concurrency (the second insert fails on the primary key). The controller belt
+# ``JarvisCustomSkill._validate_shared_slug_unique`` catches the sequential case
+# fast; this is the hard floor for two writes that both pass that belt SELECT
+# before either commits.
+# --------------------------------------------------------------------------- #
+SHARED_SLUG = "Jarvis Shared Skill Slug"
+
+
+def reserve_shared_slug(slug: str, skill_docname: str) -> None:
+	"""Claim the DB-unique reservation (row name == slug) for a shared skill.
+
+	Idempotent for the slug this skill ALREADY holds - the in-place shared UPDATE,
+	the insight-apply re-save and the supersede-in-place promotion all re-save without
+	renaming, so a legitimate re-save never fails. A slug held by a DIFFERENT shared
+	skill is a hard clash, refused here (the controller belt normally catches it
+	first) and, for two genuinely concurrent creators that both pass that belt, by the
+	primary-key constraint when the second reservation row is inserted."""
+	slug = (slug or "").strip().lower()
+	if not slug or not skill_docname:
+		return
+	holder = frappe.db.get_value(SHARED_SLUG, slug, "skill")
+	if holder is not None:
+		if holder == skill_docname:
+			return
+		# A reservation whose holder skill no longer exists is stale - a raw/forced
+		# delete that bypassed the on_trash release. Reclaim it rather than block a
+		# legitimate new shared skill on a ghost; the primary key still serializes two
+		# genuinely-concurrent reclaimers (one insert wins, the other fails).
+		if frappe.db.exists("Jarvis Custom Skill", holder):
+			frappe.throw(
+				_("A shared skill named '{0}' already exists; rename one before sharing.").format(slug)
+			)
+		frappe.delete_doc(SHARED_SLUG, slug, ignore_permissions=True, force=True)
+	frappe.get_doc({"doctype": SHARED_SLUG, "slug": slug, "skill": skill_docname}).insert(
+		ignore_permissions=True
+	)
+
+
+def release_shared_slug(slug: str, skill_docname: str) -> None:
+	"""Release the reservation for ``slug`` IFF ``skill_docname`` currently holds it
+	- a shared skill deleted, narrowed back to User, or renamed off this slug. The
+	holder check means one lineage never yanks another's reservation (so releasing a
+	User skill whose slug happens to shadow a shared one is a safe no-op)."""
+	slug = (slug or "").strip().lower()
+	if not slug or not skill_docname:
+		return
+	if frappe.db.get_value(SHARED_SLUG, slug, "skill") == skill_docname:
+		frappe.delete_doc(SHARED_SLUG, slug, ignore_permissions=True, force=True)
+
+
 # Matches a /slug token the user typed in the composer to invoke a skill.
 _INVOKE_RE = re.compile(r"(?:^|\s)/([a-z0-9]+(?:-[a-z0-9]+)*)")
 

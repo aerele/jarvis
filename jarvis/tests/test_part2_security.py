@@ -23,6 +23,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat.custom_skills import build_push_payload, prefixed_slug
 
 SKILL = "Jarvis Custom Skill"
+RESV = "Jarvis Shared Skill Slug"
 WIKI = "Jarvis Wiki Page"
 WIKI_PROMO = "Jarvis Wiki Promotion Request"
 SKILL_PROMO = "Jarvis Skill Promotion Request"
@@ -86,6 +87,12 @@ def _sweep():
 	otherwise pollute later runs (and trip the unique pattern_key). Roll back
 	uncommitted work first, then hard-delete + commit the committed residue."""
 	frappe.db.rollback()
+	# Reservation rows (SR4-2) are named after the bare slug, so a PFX-slug reservation
+	# is a p2sec-... row; drop them first so the skill delete below never trips over a
+	# lingering reservation and so a committed migration reservation is cleaned.
+	if frappe.db.table_exists(RESV):
+		for n in frappe.get_all(RESV, filters={"slug": ["like", f"{PFX}-%"]}, pluck="name"):
+			frappe.delete_doc(RESV, n, force=True, ignore_permissions=True)
 	for dt, filt in (
 		(SKILL, {"skill_name": ["like", f"{PFX}-%"]}),
 		(WIKI, {"slug": ["like", f"{PFX}-%"]}),
@@ -1409,4 +1416,126 @@ class TestSkillPromotionRound4(Part2Base):
 		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
 		self.assertEqual(
 			frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-legacymark", "scope": "Org"}), []
+		)
+
+	# ── SR4-2: DB-unique slug reservation, kept in step on every write path ──────
+	def test_shared_create_reserves_slug_and_release_frees_it(self):
+		# A shared (Org) create RESERVES its slug (reservation name == slug). Narrowing
+		# back to User releases it; deleting a shared skill releases it on trash.
+		org = _mk_skill(USER_A, f"{PFX}-reserved", scope="Org")
+		self.assertTrue(frappe.db.exists(RESV, f"{PFX}-reserved"))
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-reserved", "skill"), org.name)
+		with _as(USER_A):  # owner self-demote (narrowing) is allowed without a reviewer
+			doc = frappe.get_doc(SKILL, org.name)
+			doc.scope = "User"
+			doc.save(ignore_permissions=True)
+		self.assertFalse(frappe.db.exists(RESV, f"{PFX}-reserved"))  # released on narrow
+		other = _mk_skill(USER_B, f"{PFX}-reserved2", scope="Org")
+		self.assertTrue(frappe.db.exists(RESV, f"{PFX}-reserved2"))
+		frappe.delete_doc(SKILL, other.name, force=True, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists(RESV, f"{PFX}-reserved2"))  # released on trash
+
+	def test_reservation_blocks_duplicate_shared_slug_at_db(self):
+		# The controller belt catches the SEQUENTIAL duplicate; the DB reservation is
+		# the concurrent backstop for two shared writes that both pass the belt SELECT
+		# before either commits. Neutralize the belt so the second create reaches the
+		# reservation and is refused there.
+		from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import JarvisCustomSkill
+
+		_mk_skill(USER_A, f"{PFX}-dbuniq", scope="Org")
+		with patch.object(JarvisCustomSkill, "_validate_shared_slug_unique", lambda self: None):
+			with self.assertRaises(frappe.ValidationError):
+				_mk_skill(USER_B, f"{PFX}-dbuniq", scope="Org")
+		self.assertEqual(
+			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-dbuniq", "scope": "Org"})), 1
+		)
+
+	def test_rename_shared_skill_moves_reservation(self):
+		# Renaming a shared skill releases the old slug's reservation and reserves the
+		# new one, so the freed slug is available to a different shared skill.
+		org = _mk_skill(REVIEWER, f"{PFX}-oldname", scope="Org")
+		self.assertTrue(frappe.db.exists(RESV, f"{PFX}-oldname"))
+		with _as(REVIEWER):
+			doc = frappe.get_doc(SKILL, org.name)
+			doc.skill_name = f"{PFX}-newname"
+			doc.save(ignore_permissions=True)
+		self.assertFalse(frappe.db.exists(RESV, f"{PFX}-oldname"))  # old slug freed
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-newname", "skill"), org.name)
+		other = _mk_skill(USER_A, f"{PFX}-oldname", scope="Org")  # freed slug reusable
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-oldname", "skill"), other.name)
+
+	def test_insight_apply_inplace_update_does_not_refail_reservation(self):
+		# In-place shared UPDATE (insight-apply / a reviewer content re-save) re-reserves
+		# its OWN slug - idempotent, never a spurious duplicate failure.
+		org = _mk_skill(USER_A, f"{PFX}-idem", scope="Org")
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-idem", "skill"), org.name)
+		with _engine_flag():
+			doc = frappe.get_doc(SKILL, org.name)
+			doc.instructions = "reviewed new body"
+			doc.save(ignore_permissions=True)
+		self.assertEqual(frappe.db.get_value(SKILL, org.name, "instructions"), "reviewed new body")
+		self.assertEqual(len(frappe.get_all(RESV, filters={"slug": f"{PFX}-idem"})), 1)
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-idem", "skill"), org.name)
+
+	# ── SR4-2: the catalog-wide lock serializes non-promotion shared writes ──────
+	def test_shared_create_blocked_when_catalog_lock_held(self):
+		# A shared (Org) create takes the catalog-wide lock; when it is already held the
+		# create refuses (serialized with approvals). A PRIVATE create takes no lock.
+		import jarvis._redis_lock as rl
+		from jarvis.chat import custom_skills_api
+
+		@contextlib.contextmanager
+		def _busy(name, **kw):
+			yield False
+
+		with patch.object(rl, "redis_lock", _busy):
+			with _as(REVIEWER):
+				with self.assertRaises(frappe.ValidationError):
+					custom_skills_api._create_custom_skill_impl(
+						skill_name=f"{PFX}-locked",
+						description="d",
+						instructions="i",
+						scope="Org",
+						ignore_permissions=True,
+					)
+			with _as(USER_A):  # private create is lock-free even while the lock is held
+				out = custom_skills_api._create_custom_skill_impl(
+					skill_name=f"{PFX}-lockfree", description="d", instructions="i"
+				)
+		self.assertTrue(out["ok"])
+		self.assertEqual(frappe.db.get_value(SKILL, out["data"]["name"], "scope"), "User")
+		self.assertEqual(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-locked"}), [])
+
+	def test_direct_org_create_serializes_with_approval_budget(self):
+		# The cross-path budget race: a direct Org create and an approval serialize on
+		# the SAME catalog lock. Model the create-wins-the-lock ordering - a different-
+		# slug direct Org create commits first, so the approval's fresh under-lock
+		# projection SEES it and must reconfirm the now-over-budget catalog. Exactly one
+		# lands at the budget boundary; the approval holds back.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		src = _mk_skill(USER_A, f"{PFX}-b4race", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(src.name, "Org")
+		base = custom_skills.pushable_org_skill_count()
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", base + 1):
+			ack = custom_skills.project_org_promotion_push(src.name, f"{PFX}-b4race")
+			self.assertTrue(ack["at_budget"])  # acked BEFORE the direct create
+			with _as(REVIEWER):  # a different-slug direct Org create commits first
+				custom_skills_api._create_custom_skill_impl(
+					skill_name=f"{PFX}-b4race-x",
+					description="d",
+					instructions="i",
+					scope="Org",
+					ignore_permissions=True,
+				)
+				out = custom_skills_api.decide_skill_promotion(req["request"], 1, ack_projection=ack)
+		self.assertTrue(out.get("needs_reconfirm"))  # the committed create moved the budget
+		self.assertTrue(out["push_projection"]["over_budget"])
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+		self.assertEqual(
+			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-b4race", "scope": "Org"})), 0
+		)
+		self.assertEqual(
+			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-b4race-x", "scope": "Org"})), 1
 		)

@@ -12,6 +12,8 @@ synchronously, enqueue a deduped redis-locked worker that calls the admin app,
 and flip the status to a terminal ``ok ...`` / ``failed: ...`` the SPA polls.
 """
 
+import contextlib
+
 import frappe
 from frappe import _
 
@@ -28,6 +30,26 @@ SKILL = "Jarvis Custom Skill"
 _SETTINGS = "Jarvis Settings"
 _PUSH_JOB_ID = "jarvis_custom_skills_push"
 _LOCK_NAME = "jarvis_custom_skills_push"
+# The catalog-wide serializer shared with decide_skill_promotion (SR4-2 / R3-SP-3):
+# the Org push budget is a catalog-wide resource, so every write that changes shared
+# push-eligibility takes the SAME lock the approval holds through commit.
+_CATALOG_LOCK = "skillpromo:org-catalog"
+
+
+@contextlib.contextmanager
+def _catalog_lock():
+	"""Serialize a shared-catalog-eligibility-changing write with promotion approvals
+	on the SAME catalog-wide lock ``decide_skill_promotion`` holds through commit
+	(SR4-2). A shared (Role/Org) create, a rename or an enable/disable moves the push
+	budget, so it must not commit between an approval's under-lock budget projection
+	and that approval's publication. Held THROUGH the caller's commit. These are
+	low-frequency reviewer / admin / insight-apply writes, so a short block is fine."""
+	from jarvis._redis_lock import redis_lock
+
+	with redis_lock(_CATALOG_LOCK, timeout_s=60, blocking_timeout_s=15.0) as acquired:
+		if not acquired:
+			frappe.throw(_("The shared skill catalog is busy right now; try again in a moment."))
+		yield
 
 
 # --------------------------------------------------------------------------- #
@@ -371,8 +393,18 @@ def _create_custom_skill_impl(
 	if scope:
 		fields["scope"] = scope
 	doc = frappe.get_doc(fields)
-	doc.insert(ignore_permissions=bool(ignore_permissions))
-	frappe.db.commit()
+	# SR4-2: a shared (Role/Org) create moves the push budget - the direct-Org create
+	# AND the reviewer insight-apply create (scope="Org") both land here - so serialize
+	# it with promotion approvals on the catalog-wide lock, held THROUGH commit, so it
+	# can never commit between an approval's under-lock projection and its publication.
+	# A private (User) create touches no shared budget, so it stays lock-free.
+	if (scope or "").strip() in ("Role", "Org"):
+		with _catalog_lock():
+			doc.insert(ignore_permissions=bool(ignore_permissions))
+			frappe.db.commit()
+	else:
+		doc.insert(ignore_permissions=bool(ignore_permissions))
+		frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "skill_name": doc.skill_name}}
 
 
@@ -399,8 +431,18 @@ def update_custom_skill(
 		doc.user_invocable = int(user_invocable)
 	if enabled is not None:
 		doc.enabled = int(enabled)
-	doc.save()
-	frappe.db.commit()
+	# SR4-2: editing a SHARED (Role/Org) skill - an enable/disable, a rename, a
+	# reviewer content edit - changes the shared push budget or the reserved slug, so
+	# serialize it with promotion approvals on the catalog-wide lock, held THROUGH
+	# commit. A private (User) edit touches no shared catalog, so it stays lock-free.
+	scope = (doc.scope or "Org").strip() or "Org"
+	if scope in ("Role", "Org"):
+		with _catalog_lock():
+			doc.save()
+			frappe.db.commit()
+	else:
+		doc.save()
+		frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
 
 
