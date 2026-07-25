@@ -93,22 +93,17 @@ def resolve_scribe_run(allow_terminal: bool = False) -> dict:
 		raise InvalidArgumentError("no agent run is bound to this session")
 	if run_row.status != "running" and not allow_terminal:
 		raise InvalidArgumentError("this agent run has already finalized")
-	listing = (
-		frappe.db.get_value(LISTING, run_row.agent, ["agent_slug", "nature"], as_dict=True) or {}
-	)
+	listing = frappe.db.get_value(LISTING, run_row.agent, ["agent_slug", "nature"], as_dict=True) or {}
 	# CX5-1 — THE authorization: this capability is bound to ONE agent slug. A
 	# different scribe (or a listing an admin re-natured to Scribe) gets nothing.
 	if (listing.get("agent_slug") or "").strip() != APP_LEARNING_AGENT_SLUG:
-		raise InvalidArgumentError(
-			f"app-source read is bound to the {APP_LEARNING_AGENT_SLUG} agent"
-		)
+		raise InvalidArgumentError(f"app-source read is bound to the {APP_LEARNING_AGENT_SLUG} agent")
 	# Defense in depth (the slug above is the real gate): the bound listing must
 	# still be a Scribe, so a mis-natured listing cannot reach the write path.
 	nature = (listing.get("nature") or "").strip().title()
 	if nature != "Scribe":
 		raise InvalidArgumentError(
-			"app-source read and wiki writeback are available only to app-learning "
-			"scribe agents"
+			"app-source read and wiki writeback are available only to app-learning scribe agents"
 		)
 	# Defense in depth: the install + run gates already refuse a non-admin run-as
 	# identity for this agent, but the tool ALSO checks the (impersonated) caller
@@ -175,9 +170,7 @@ def assert_custom_app(app: str, run_name: str) -> None:
 	if not name:
 		raise InvalidArgumentError("app is required")
 	if name in app_source.EXCLUDED_APPS or name not in app_source._installed_custom_apps():
-		raise InvalidArgumentError(
-			f"{name!r} is not a learnable custom app (core apps are never served)"
-		)
+		raise InvalidArgumentError(f"{name!r} is not a learnable custom app (core apps are never served)")
 	# Canonicalize + validate the app's source ROOT here (existence + the
 	# symlinked/relocated-root rejection), so a defeated trust root is refused at
 	# the gate BEFORE any manifest walk or file read is even attempted.

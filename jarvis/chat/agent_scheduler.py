@@ -609,9 +609,7 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	# not waste the run discovering that everything else is refused.
 	if scope and scope.get("source_apps"):
 		apps = ", ".join(str(a) for a in scope["source_apps"])
-		scope_block += (
-			f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
-		)
+		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
 	if scope and scope.get("company"):
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period): "

@@ -86,8 +86,7 @@ def list_app_modules(app: str | None = None) -> dict:
 	caveats = app_source.coverage_caveats(notes)
 	if skipped_sensitive:
 		caveats.append(
-			f"{skipped_sensitive} file(s) skipped: the filename indicates credentials "
-			"(never served)"
+			f"{skipped_sensitive} file(s) skipped: the filename indicates credentials (never served)"
 		)
 	return {
 		"app": name,

@@ -37,7 +37,8 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.learning import app_source
-from jarvis.tools import _agent_run_ctx, _app_learning_ctx as ctx
+from jarvis.tools import _agent_run_ctx
+from jarvis.tools import _app_learning_ctx as ctx
 from jarvis.tools.finish_app_learning_run import finish_app_learning_run
 from jarvis.tools.list_app_modules import list_app_modules
 from jarvis.tools.read_app_source import read_app_source
@@ -268,9 +269,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# first read succeeds and ADVANCES the durable counter on the run row
 		out = read_app_source("fakeapp", "hooks.py")
 		self.assertIn("<untrusted-data", out["content"])  # fenced as DATA
-		self.assertEqual(
-			int(frappe.db.get_value(RUN, run, "source_bytes_read") or 0), out["size"]
-		)
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "source_bytes_read") or 0), out["size"])
 		# exhaust the budget on the ROW, then the next read is refused
 		frappe.db.set_value(
 			RUN, run, "source_bytes_read", ctx.PER_RUN_SOURCE_BYTES_BUDGET, update_modified=False
@@ -456,18 +455,14 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		res = record_app_wiki(
 			app="fakeapp",
 			pages=[
-				{"title": "Creds", "key": "creds", "body_md": 'The app uses AKIAIOSFODNN7EXAMPLE.'},
+				{"title": "Creds", "key": "creds", "body_md": "The app uses AKIAIOSFODNN7EXAMPLE."},
 				{"title": "Header", "key": "hdr", "body_md": "Send X-Jarvis-Session with each call."},
 			],
 		)
 		self.assertEqual(res["applied"], 0)
 		self.assertEqual(res["rejected"], 2)
-		self.assertEqual(
-			set(res["guard_violations"]), {"credential-shaped value", "jarvis session header"}
-		)
-		self.assertIn(
-			"review required", frappe.db.get_value(RUN, run, "coverage_note") or ""
-		)
+		self.assertEqual(set(res["guard_violations"]), {"credential-shaped value", "jarvis session header"})
+		self.assertIn("review required", frappe.db.get_value(RUN, run, "coverage_note") or "")
 
 	# ------------------------------------------------------------------ #
 	# G2 CHECKPOINTS — the two the bundle manifest declares (injection, teardown)
@@ -520,9 +515,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(res["rejected"], 1)
 		self.assertIn("run session key", res["guard_violations"])
 		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-maint"}), 0)
-		self.assertIn(
-			"review required", frappe.db.get_value(RUN, run, "coverage_note") or ""
-		)
+		self.assertIn("review required", frappe.db.get_value(RUN, run, "coverage_note") or "")
 
 	def _mint_real_session(self, session_key: str) -> None:
 		"""A REAL ``Jarvis Chat Session`` bearer row, exactly as _launch_audit mints it."""
@@ -547,9 +540,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# a scribe reconciled to completed, and a run failed for exceeding its ceiling).
 		from jarvis.chat.agent_scheduler import STALE_RUN_AFTER_SECONDS, reap_stale_agent_runs
 
-		old = frappe.utils.add_to_date(
-			frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600)
-		)
+		old = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600))
 		# (1) wrote pages -> reconciled to completed
 		run = self._bind_scribe_run()
 		self._mint_real_session(self.session_key)
@@ -1327,16 +1318,14 @@ class TestScheduledAppLearningSelection(FrappeTestCase):
 		with mock.patch.object(agent_scheduler, "_launch_audit") as launch:
 			agent_scheduler.run_due_agent_audits()
 		launch.assert_not_called()  # never dispatched unbounded
-		row = frappe.get_all(
-			RUN, filters={"installation": inst}, fields=["status", "error"], limit=1
-		)[0]
+		row = frappe.get_all(RUN, filters={"installation": inst}, fields=["status", "error"], limit=1)[0]
 		self.assertEqual(row.status, "failed")
 		self.assertIn("no valid authorized app selection", row.error)
 
 	def test_scheduled_run_reuses_the_persisted_selection(self):
 		from jarvis.chat import agent_scheduler
 
-		inst = self._due_install(json.dumps(["fakeapp"]))
+		self._due_install(json.dumps(["fakeapp"]))
 		with mock.patch.object(agent_scheduler, "_launch_audit") as launch:
 			launch.return_value = {"run": "R", "conversation": "C", "session_key": "S"}
 			agent_scheduler.run_due_agent_audits()
@@ -1352,9 +1341,7 @@ class TestScheduledAppLearningSelection(FrappeTestCase):
 		with mock.patch.object(agent_scheduler, "_launch_audit") as launch:
 			agent_scheduler.run_due_agent_audits()
 		launch.assert_not_called()
-		row = frappe.get_all(
-			RUN, filters={"installation": inst}, fields=["status", "error"], limit=1
-		)[0]
+		row = frappe.get_all(RUN, filters={"installation": inst}, fields=["status", "error"], limit=1)[0]
 		self.assertEqual(row.status, "failed")
 		self.assertIn("promote the installation to live", row.error)
 

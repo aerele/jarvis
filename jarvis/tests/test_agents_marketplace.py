@@ -639,18 +639,14 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 		agent_catalog.sync_agent_listings()  # INSERT → seed the default restriction
 		seeded = set(
-			frappe.get_all(
-				ALLOWED_ROLE, filters={"parenttype": LISTING, "parent": slug}, pluck="role"
-			)
+			frappe.get_all(ALLOWED_ROLE, filters={"parenttype": LISTING, "parent": slug}, pluck="role")
 		)
 		self.assertEqual(seeded, {"System Manager", "Jarvis Admin"})
 
 		# An admin narrows it; a re-sync (UPDATE branch) must leave the edit intact.
 		self._restrict(slug, [ROLE_X])
 		agent_catalog.sync_agent_listings()
-		after = frappe.get_all(
-			ALLOWED_ROLE, filters={"parenttype": LISTING, "parent": slug}, pluck="role"
-		)
+		after = frappe.get_all(ALLOWED_ROLE, filters={"parenttype": LISTING, "parent": slug}, pluck="role")
 		self.assertEqual(after, [ROLE_X])  # NOT re-seeded / clobbered
 
 	def test_push_payload_excludes_install_of_blocked_owner(self):
