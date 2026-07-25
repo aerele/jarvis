@@ -343,7 +343,16 @@ def persist_agent_dashboard(
 			"description": (description or "").strip()[:255] or None,
 			"html": html,
 			"scope": "User",
-			"theme": "Jarvis",
+			# "Custom", not "Jarvis": an agent-run dashboard is bespoke, not a
+			# builder canvas. Its body is either _fallback_dashboard_html (this
+			# module's own hardcoded inline-styled attestation layout, with
+			# --jarvis-* fallbacks) or delegate-AUTHORED html that never saw the
+			# dashboards skill's theme cheatsheet - and either way the PP-4 shadow
+			# banner is injected into it server-side. None of that can satisfy a
+			# curated theme's design rules, so claiming one would make every run
+			# fail to save. Custom relaxes the design rules while keeping the
+			# safety bans (@font-face, external URLs) absolute.
+			"theme": "Custom",
 			"source_conversation": run_doc.get("conversation") or "",
 		}
 	)
