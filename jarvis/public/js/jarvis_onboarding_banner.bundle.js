@@ -3,10 +3,12 @@
 // user to finish setup and start easing their ERP workflows. Replaces the old
 // top banner with a friendlier, on-brand "Jarvis is chatting" bubble thread.
 //
-// Reads `frappe.boot.jarvis_onboarded` (set in jarvis.boot.set_jarvis_boot).
-// Shows only for a not-onboarded System Manager; dismissal is per-tab-session
-// (sessionStorage) so it returns next fresh session until setup is finished.
-// Loaded on every Desk page via hooks.app_include_js.
+// Reads `frappe.boot.jarvis_onboarded` (set in jarvis.boot.set_jarvis_boot)
+// and `frappe.boot.sysdefaults.setup_complete` (frappe.is_setup_complete()).
+// Shows only for a not-onboarded System Manager AFTER ERPNext's own setup
+// wizard is finished, so it never pops over the wizard. Dismissal is
+// per-tab-session (sessionStorage) so it returns next fresh session until
+// setup is finished. Loaded on every Desk page via hooks.app_include_js.
 
 (function () {
 	if (window.__jarvisOnboardingBanner) return;
@@ -21,6 +23,11 @@
 	function shouldShow() {
 		if (!window.frappe || !frappe.boot) return false;
 		if (frappe.boot.jarvis_onboarded !== false) return false;
+		// ERPNext's own setup wizard must be finished first: completing it
+		// creates the first Company. Until then the desk IS the setup wizard,
+		// so nudging the user to set up Jarvis on top of it is just noise.
+		// frappe.boot.sysdefaults.setup_complete is frappe.is_setup_complete().
+		if ((frappe.boot.sysdefaults || {}).setup_complete != 1) return false;
 		if (!frappe.user || !frappe.user.has_role || !frappe.user.has_role("System Manager"))
 			return false;
 		try {
@@ -137,7 +144,7 @@
 				cta.textContent = "Set up Jarvis →";
 				b.appendChild(cta);
 				return b;
-			})
+			}),
 		);
 
 		// Tail pointing down toward the chat launcher.
