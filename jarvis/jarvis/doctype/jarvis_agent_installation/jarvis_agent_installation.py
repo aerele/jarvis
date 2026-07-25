@@ -215,13 +215,32 @@ class JarvisAgentInstallation(Document):
 	# the bench trusts the per-run Jarvis Chat Session row and enforces NOTHING
 	# at call_tool, so install-time is the only place a low-priv installer can be
 	# stopped from mapping the agent to run as a high-priv user (data exfil).
+	#
+	# A NON-EMPTY mapping is litigated regardless of ``enabled``: a disabled row
+	# must never be usable to stage an unvetted run_as_user that a later enable
+	# would wave through (the "unchanged mapping" short-circuit below would skip
+	# it). Only the BLANK case is conditional on enabled.
 	# ------------------------------------------------------------------ #
 	def _validate_run_as_user(self):
 		target = (self.run_as_user or "").strip()
 		if not target:
-			# reqd:1 also enforces this; the explicit throw keeps the escalation
-			# block below from ever running against a None.
-			frappe.throw(_("Run-as user is required."))
+			# An ENABLED install must name the identity its runs execute as, so a
+			# blank one is still refused on that path (and the explicit throw keeps
+			# the escalation block below from ever running against a None). A
+			# DISABLED install runs nothing — the scheduler filters on enabled=1 —
+			# so it needs no executing identity, and refusing a blank one there had
+			# a real cost: legacy rows predate the field and carry NULL, and since
+			# ``agents_api.set_enabled`` disables through ``doc.save()`` -> validate(),
+			# an unconditional throw made such a row impossible to DISABLE through
+			# any supported surface. That is the only escape from a bench whose
+			# agent push a legacy row has broken, so it must stay open.
+			#
+			# NOTE: this is the authoritative check — the field's Desk-side
+			# ``mandatory_depends_on: eval:doc.enabled`` is a form cue only
+			# (frappe evaluates it in JS, never in _validate_mandatory).
+			if frappe.utils.cint(self.get("enabled")):
+				frappe.throw(_("Run-as user is required."))
+			return
 
 		# Only re-litigate the mapping when it is actually being (re)assigned.
 		# An unrelated save (enable / schedule / config) on a row whose

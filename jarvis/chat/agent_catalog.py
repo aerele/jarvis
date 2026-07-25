@@ -170,7 +170,12 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	RBAC (defense in depth): an enabled install whose OWNER's roles no longer
 	permit the agent is EXCLUDED from the push — the scheduler / run-now gates
 	already refuse to run it, but its enablement signal must not reach the
-	container either."""
+	container either.
+
+	Installs are per-(owner, agent) but the payload is bench-global and keyed by
+	SLUG, so two users each enabling the SAME agent are ONE entry, not two —
+	emitted with UNION semantics (the slug ships if ANY enabled install clears the
+	gates)."""
 	# Lazy import — agents_api imports build_agent_push_payload from this module
 	# at module level, so a top-level back-import would be circular.
 	from jarvis.chat.agents_api import _user_allowed_for_agent
@@ -192,9 +197,15 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		"Jarvis Agent Installation",
 		filters=filters,
 		fields=["agent", "owner", "installable"],
-		order_by="agent asc",
+		# ``agent`` alone is not a total order once two owners install the same
+		# agent; the ``name`` tiebreak makes the iteration — and therefore which
+		# install wins the de-dupe below — stable across runs. The payload is a
+		# FULL RECONCILE that admin/fleet diffs against the container's current
+		# roster, so a wobbling order would read as a change.
+		order_by="agent asc, name asc",
 	)
 	payload = []
+	seen_slugs: set[str] = set()
 	for row in installs:
 		# R5-J8: a reconcile marks an install ``installable=0`` (never deletes) when
 		# a min_apps dependency vanished AFTER install while it was still enabled.
@@ -213,12 +224,30 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		if not _user_allowed_for_agent(row.agent, row.owner):
 			continue
 
+		# De-dupe by SLUG. An install is per-(owner, agent) but the container's
+		# agent_skills namespace is per-slug, so two users who each install AND
+		# enable the same agent produce two rows for ONE slug. Admin REJECTS a
+		# payload carrying a duplicate slug outright ("invalid: duplicate agent
+		# skill slug '<x>'"), which kills EVERY agent push from the bench — not
+		# just the duplicated agent. Emit each slug exactly once, with UNION
+		# semantics: the per-install gates above (installable / Published /
+		# owner-RBAC) are evaluated for every row, and the slug ships as soon as
+		# ANY of them clears. Safe to collapse because the entry below is derived
+		# purely from the listing row plus the bundled registry — it carries NO
+		# per-install data, and ``agent_slug`` is unique + the listing's docname
+		# (naming_rule By fieldname), so every row for a slug yields a byte-
+		# identical entry.
+		slug = f"{AGENT_PREFIX}{listing.agent_slug}"
+		if slug in seen_slugs:
+			continue
+		seen_slugs.add(slug)
+
 		# A2 enablement signal — body-free. Admin resolves the SKILL from the
 		# private bundle store by slug (Phase 2C). The body NEVER leaves it.
 		meta = reg_by_slug.get(listing.agent_slug) or {}
 		payload.append(
 			{
-				"slug": f"{AGENT_PREFIX}{listing.agent_slug}",
+				"slug": slug,
 				"delivery": "delegate",
 				"tools_allow": meta.get("tools_allow") or [],
 				"model": meta.get("model") or None,

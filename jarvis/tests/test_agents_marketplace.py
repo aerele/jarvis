@@ -640,3 +640,147 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self._restrict("close-auditor", [])  # clear -> included again
 		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
 		self.assertTrue(any(p["slug"] == "agent-close-auditor" for p in payload))
+
+	# ------------------------------------------------------------------ #
+	# (i) P0-B — the payload is keyed by SLUG, installs are per-(owner, agent)
+	#
+	# Two users each enabling the same agent used to emit the slug TWICE; admin
+	# rejects a duplicate slug outright ("invalid: duplicate agent skill slug"),
+	# which killed EVERY agent push from the bench, not just that agent.
+	# ------------------------------------------------------------------ #
+	def _enable_for(self, owner: str, slug: str) -> str:
+		inst = _install_as(owner, slug)
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 1)
+		frappe.db.commit()
+		return inst
+
+	def _count_slug(self, payload: list, slug: str) -> int:
+		return sum(1 for p in payload if p["slug"] == slug)
+
+	def test_push_payload_emits_one_entry_per_slug_across_owners(self):
+		"""P0-B: two owners, same agent, both enabled -> the slug appears ONCE."""
+		self._enable_for(self.owner, "close-auditor")
+		self._enable_for(self.other, "close-auditor")
+
+		payload = agent_catalog.build_agent_push_payload()  # bench-global, as the push is
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
+		# ...and the payload as a whole carries no duplicate slug at all, which is
+		# exactly what admin validates.
+		slugs = [p["slug"] for p in payload]
+		self.assertEqual(len(slugs), len(set(slugs)), f"duplicate slug in payload: {slugs}")
+
+	def test_push_payload_dedupe_is_union_not_last_wins(self):
+		"""A slug ships if ANY enabled install clears the gates — a blocked or
+		non-installable sibling row must not suppress a qualifying one."""
+		self._enable_for(self.owner, "close-auditor")
+		blocked = self._enable_for(self.other, "close-auditor")
+
+		# (a) RBAC: only self.owner holds ROLE_X, so self.other's row is excluded.
+		self._restrict("close-auditor", [ROLE_X])
+		payload = agent_catalog.build_agent_push_payload()
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
+
+		# ...and once BOTH rows qualify again it is still ONE entry, not two.
+		self._restrict("close-auditor", [])
+		payload = agent_catalog.build_agent_push_payload()
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
+
+		# (b) installability: self.other's row is reconciled non-installable.
+		frappe.db.set_value(
+			INSTALLATION,
+			blocked,
+			{"installable": 0, "not_installable_reason": "app_absent_or_ineligible"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		payload = agent_catalog.build_agent_push_payload()
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
+
+	def test_push_payload_omits_slug_whose_only_install_is_unpublished(self):
+		self._enable_for(self.owner, "close-auditor")
+		frappe.set_user("Administrator")
+		try:
+			agents_api.set_listing_status("close-auditor", "Coming Soon")
+			payload = agent_catalog.build_agent_push_payload(owner=self.owner)
+			self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 0)
+		finally:
+			agents_api.set_listing_status("close-auditor", "Published")  # restore
+
+	def test_push_payload_order_is_deterministic(self):
+		"""The payload is a full reconcile that admin/fleet diffs, so a rebuild of
+		unchanged data must produce a byte-identical list."""
+		self._enable_for(self.owner, "close-auditor")
+		self._enable_for(self.other, "close-auditor")
+		self._enable_for(self.owner, "ledger-scrutiny-auditor")
+
+		first = agent_catalog.build_agent_push_payload()
+		second = agent_catalog.build_agent_push_payload()
+		self.assertEqual(first, second)
+		slugs = [p["slug"] for p in first]
+		self.assertEqual(slugs, sorted(slugs))
+
+	# ------------------------------------------------------------------ #
+	# (j) P0-B part 2 — a legacy install (run_as_user NULL) must be DISABLEABLE
+	#
+	# Without this there is no UI escape from a bricked push: set_enabled saves
+	# the doc, validate() demanded a run-as user, and reqd:1 blocked it too.
+	# ------------------------------------------------------------------ #
+	def _make_legacy_enabled(self, owner: str, slug: str) -> str:
+		"""An install as it exists on benches that predate run_as_user: enabled,
+		with a NULL executing identity."""
+		inst = _install_as(owner, slug)
+		frappe.db.set_value(INSTALLATION, inst, {"enabled": 1, "run_as_user": None}, update_modified=False)
+		frappe.db.commit()
+		return inst
+
+	def test_legacy_install_without_run_as_user_can_be_disabled(self):
+		inst = self._make_legacy_enabled(self.owner, "close-auditor")
+		frappe.set_user(self.owner)
+		try:
+			res = agents_api.set_enabled(inst, 0)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(res["data"]["enabled"], 0)
+		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "enabled"), 0)
+		# The escape actually clears the push: the slug is gone from the payload.
+		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 0)
+
+	def test_enabling_without_run_as_user_still_throws(self):
+		inst = self._make_legacy_enabled(self.owner, "close-auditor")
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 0, update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaises(frappe.ValidationError):
+				agents_api.set_enabled(inst, 1)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "enabled"), 0)
+
+	def test_run_as_escalation_guard_still_blocks_cross_user_mapping(self):
+		"""A4: a non-admin owner may map the agent only to THEMSELVES — unchanged
+		by the blank-is-ok-while-disabled relaxation."""
+		inst = _install_as(self.owner, "close-auditor")
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				agents_api.set_run_as_user(inst, self.other)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "run_as_user"), self.owner)
+
+	def test_run_as_escalation_guard_holds_on_a_disabled_legacy_row(self):
+		"""The blank short-circuit must not become a staging ground: assigning a
+		run_as_user to a DISABLED row is litigated exactly as on an enabled one,
+		so a later enable cannot wave an unvetted mapping through."""
+		inst = self._make_legacy_enabled(self.owner, "close-auditor")
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 0, update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				agents_api.set_run_as_user(inst, self.admin)  # a System Manager
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIsNone(frappe.db.get_value(INSTALLATION, inst, "run_as_user") or None)
