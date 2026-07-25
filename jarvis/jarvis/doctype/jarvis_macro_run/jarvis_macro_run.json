@@ -12,6 +12,7 @@
     "status",
     "current_step",
     "total_steps",
+    "capacity_attempts",
     "trigger",
     "started_at",
     "finished_at",
@@ -37,10 +38,11 @@
       "fieldname": "status",
       "fieldtype": "Select",
       "label": "Status",
-      "options": "queued\nrunning\ncompleted\nfailed\nstopped",
+      "options": "queued\nrunning\nwaiting_capacity\ncompleted\nfailed\nstopped",
       "default": "queued",
       "in_list_view": 1,
-      "search_index": 1
+      "search_index": 1,
+      "description": "waiting_capacity (chat-concurrency CDX-19): the step could not be admitted because the site's turn queue was momentarily full. The run does NOT advance; the capacity-resume cron re-attempts the same step next cycle (bounded by capacity_attempts, then failed)."
     },
     {
       "fieldname": "current_step",
@@ -53,6 +55,13 @@
       "fieldtype": "Int",
       "label": "Total Steps",
       "default": "0"
+    },
+    {
+      "fieldname": "capacity_attempts",
+      "fieldtype": "Int",
+      "label": "Capacity Attempts",
+      "default": "0",
+      "description": "CDX-19: how many times the capacity-resume cron has re-attempted a waiting_capacity step. Bounded — once it exceeds the ceiling the run fails with an honest 'site stayed busy' reason instead of retrying forever."
     },
     {
       "fieldname": "trigger",

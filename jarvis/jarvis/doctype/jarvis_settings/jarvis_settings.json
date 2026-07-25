@@ -106,6 +106,10 @@
   "activation_module_ceiling",
   "learned_skills_synced_at",
   "learned_skills_sync_status",
+  "release_notice_section",
+  "release_notice_active",
+  "latest_jarvis_version",
+  "release_notice_message",
   "agent_tools_section",
   "run_query_doctype_allowlist",
   "auto_apply_changes",
@@ -777,6 +781,30 @@
    "fieldname": "learned_skills_sync_status",
    "fieldtype": "Long Text",
    "label": "Learned Skills Sync Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_section",
+   "fieldtype": "Section Break",
+   "label": "Release Notice (synced)",
+   "description": "Mirror of the operator's release notice, pulled from the control plane. Read-only here."
+  },
+  {
+   "fieldname": "release_notice_active",
+   "fieldtype": "Check",
+   "label": "Release Notice Active",
+   "read_only": 1
+  },
+  {
+   "fieldname": "latest_jarvis_version",
+   "fieldtype": "Data",
+   "label": "Latest Jarvis Version",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_message",
+   "fieldtype": "Small Text",
+   "label": "Release Notice Message",
    "read_only": 1
   },
   {

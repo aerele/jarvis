@@ -59,6 +59,7 @@ SKILL = "Jarvis Custom Skill"
 # Skills-area rework surfaces the Review tab reads/writes.
 PQ = "Jarvis Personalise Question"
 PROMO = "Jarvis Wiki Promotion Request"
+SKILL_PROMO = "Jarvis Skill Promotion Request"
 WIKI = "Jarvis Wiki Page"
 VOICE = "Jarvis Voice Note"
 
@@ -1795,6 +1796,11 @@ def get_review_access() -> dict:
 	return {
 		"self_hosted": int(self_hosted),
 		"pending_promotions": frappe.db.count(PROMO, {"status": "Pending"}),
+		# Skill-promotion queue badge — mirrors the wiki ``pending_promotions``
+		# count plumbing exactly (Skills-area rework: skills get the reviewer queue
+		# the wiki already had). Feeds the Review-tab "Skill promotions" chip AND
+		# the outer tab badge (SkillsPage sums pending_patterns + both promotions).
+		"pending_skill_promotions": frappe.db.count(SKILL_PROMO, {"status": "Pending"}),
 		"pending_patterns": frappe.db.count(JLP, {"status": "Proposed", "surfaced": 1}),
 	}
 

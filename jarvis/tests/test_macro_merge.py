@@ -62,7 +62,28 @@ def _mk_conv(assistant=None, streaming=0, error=""):
 	return conv.name
 
 
-class TestSummarizeMacro(FrappeTestCase):
+class _MacroMergeBase(FrappeTestCase):
+	"""Isolation base for the macro-merge tests.
+
+	Several of these flows COMMIT mid-test — summarize/run dispatch through
+	``api._enqueue_turn`` (which commits) and ``_pending_macro_with_reply`` /
+	``advance_after_turn`` commit outright — so a macro created by ``_mk_macro`` is
+	made durable and survives the per-test rollback. Counted against the per-owner
+	cap (``MAX_MACROS_PER_OWNER`` = 25), leaked survivors from earlier tests/runs
+	eventually make EVERY ``_mk_macro`` insert throw "You can have at most 25
+	macros." Clear the committed test macros up front so the cap is never exhausted.
+	Transport-independent: the leak is the commit, not the pump."""
+
+	def setUp(self):
+		super().setUp()
+		for n in frappe.get_all(
+			"Jarvis Macro", filters={"macro_name": ["like", "merge-test-%"]}, pluck="name"
+		):
+			frappe.delete_doc("Jarvis Macro", n, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+
+class TestSummarizeMacro(_MacroMergeBase):
 	def test_enqueues_one_turn_with_steps_and_skill(self):
 		m = _mk_macro(
 			[
@@ -101,7 +122,7 @@ class TestSummarizeMacro(FrappeTestCase):
 			summarize_macro(m.name)
 
 
-class TestGetMacroMerge(FrappeTestCase):
+class TestGetMacroMerge(_MacroMergeBase):
 	def _cleanup_conv(self, conv):
 		self.addCleanup(
 			lambda: (
@@ -152,7 +173,7 @@ class TestGetMacroMerge(FrappeTestCase):
 			frappe.set_user("Administrator")
 
 
-class TestApplyMacroMerge(FrappeTestCase):
+class TestApplyMacroMerge(_MacroMergeBase):
 	def test_stores_summary_and_keeps_steps(self):
 		# The sequence stays as the editable source; the summary rides alongside
 		# and (see TestMergedRun) is what run_macro executes.
@@ -210,7 +231,7 @@ class TestApplyMacroMerge(FrappeTestCase):
 		self.assertEqual(get_macro(m.name)["merged_prompt"], "edited summary")
 
 
-class TestMergeApplyHook(FrappeTestCase):
+class TestMergeApplyHook(_MacroMergeBase):
 	"""The worker-side apply: advance_after_turn lands the summary on the macro
 	when the background summarize turn ends — no browser needed."""
 
@@ -278,7 +299,7 @@ class TestMergeApplyHook(FrappeTestCase):
 			macros.run_macro(m.name)
 
 
-class TestMergedRun(FrappeTestCase):
+class TestMergedRun(_MacroMergeBase):
 	def test_run_macro_uses_summary_as_single_turn(self):
 		from jarvis.chat import macros
 
@@ -333,3 +354,167 @@ class TestDiscardMacroMerge(FrappeTestCase):
 		discard_macro_merge(conv)
 		self.assertFalse(frappe.db.exists("Jarvis Conversation", conv))
 		self.assertEqual(frappe.db.count("Jarvis Chat Message", {"conversation": conv}), 0)
+
+
+class TestMacroCapacityDefer(_MacroMergeBase):
+	"""CDX-19 (residual) — when a macro step cannot be admitted (the site's turn queue is full,
+	`_enqueue_turn` returns overloaded), the run must NOT advance and must NOT wait forever for a
+	turn-end that never comes. It parks in `waiting_capacity`; the resume cron re-attempts the
+	SAME step, bounded by capacity_attempts, then fails honestly. `_enqueue_turn` is mocked here
+	to drive the run state machine deterministically (its own seed/Turn disposition is covered in
+	test_chat_admission)."""
+
+	RUN = "Jarvis Macro Run"
+
+	def _mk_two_step(self):
+		m = _mk_macro([{"label": "a", "prompt": "first"}, {"label": "b", "prompt": "second"}])
+		self.addCleanup(
+			lambda: frappe.delete_doc("Jarvis Macro", m.name, force=True, ignore_permissions=True)
+		)
+		return m
+
+	def _cleanup_run(self, run_name):
+		self.addCleanup(lambda: frappe.delete_doc(self.RUN, run_name, force=True, ignore_permissions=True))
+
+	def test_overloaded_step_parks_waiting_capacity_not_advanced(self):
+		from jarvis.chat import macros
+
+		m = self._mk_two_step()
+		overload = {
+			"ok": False,
+			"overloaded": True,
+			"reason": "The site is busy — please try again in a moment.",
+		}
+		with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
+			res = macros.run_macro(m.name)
+		run_name = res["data"]["macro_run"]
+		self._cleanup_run(run_name)
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "waiting_capacity")
+		# The step is NOT advanced — current_step still points at step 0 for the resume to retry.
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "current_step"), 0)
+
+	def test_resume_cron_heals_once_capacity_frees(self):
+		from jarvis.chat import macros
+
+		m = self._mk_two_step()
+		overload = {"ok": False, "overloaded": True, "reason": "busy"}
+		with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
+			res = macros.run_macro(m.name)
+		run_name = res["data"]["macro_run"]
+		self._cleanup_run(run_name)
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "waiting_capacity")
+		# Capacity frees: the resume cron re-attempts the SAME step, which now dispatches.
+		with patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r1", "message_id": "m1"}) as enq:
+			macros.resume_waiting_capacity_runs()
+		enq.assert_called_once()
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "running")
+		self.assertEqual(
+			frappe.db.get_value(self.RUN, run_name, "current_step"), 1, "step advanced on the heal"
+		)
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "capacity_attempts"), 1)
+
+	def test_resume_bounded_then_fails_honestly(self):
+		from jarvis.chat import macros
+
+		m = self._mk_two_step()
+		overload = {"ok": False, "overloaded": True, "reason": "busy"}
+		with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
+			res = macros.run_macro(m.name)
+		run_name = res["data"]["macro_run"]
+		self._cleanup_run(run_name)
+		# Fast-forward to the attempt ceiling; the next resume exceeds it and fails the run.
+		frappe.db.set_value(self.RUN, run_name, "capacity_attempts", macros._MAX_CAPACITY_ATTEMPTS)
+		frappe.db.commit()
+		with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
+			macros.resume_waiting_capacity_runs()
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "failed")
+		self.assertIn("busy", (frappe.db.get_value(self.RUN, run_name, "error") or "").lower())
+
+
+class TestMacroStopResumeSerialization(_MacroMergeBase):
+	"""CDX-22 — the capacity-resume critical section is serialized with stop (state-fenced flip +
+	pre-enqueue re-check), so neither ordering lets a resume erase a stop or start work after it.
+	CDX-23 — a resumed enqueue that RAISES is compensated so the run never strands ``running``."""
+
+	RUN = "Jarvis Macro Run"
+
+	def _mk_two_step(self):
+		m = _mk_macro([{"label": "a", "prompt": "first"}, {"label": "b", "prompt": "second"}])
+		self.addCleanup(
+			lambda: frappe.delete_doc("Jarvis Macro", m.name, force=True, ignore_permissions=True)
+		)
+		return m
+
+	def _parked_run(self):
+		from jarvis.chat import macros
+
+		overload = {"ok": False, "overloaded": True, "reason": "busy"}
+		with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
+			res = macros.run_macro(self._mk_two_step().name)
+		run_name = res["data"]["macro_run"]
+		self.addCleanup(lambda: frappe.delete_doc(self.RUN, run_name, force=True, ignore_permissions=True))
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "waiting_capacity")
+		return run_name
+
+	# ---- CDX-22 ordering A: stop lands BEFORE the resume flip ------------------- #
+	def test_stop_before_resume_write_aborts_no_enqueue(self):
+		from jarvis.chat import macros
+
+		run_name = self._parked_run()
+		macros.stop_macro_run(run_name)  # writes stopped under the SAME per-run lock
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "stopped")
+		with patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r", "message_id": "m"}) as enq:
+			macros.resume_waiting_capacity_runs()
+		# The state-fenced flip (WHERE status='waiting_capacity') matches 0 rows on a stopped run.
+		enq.assert_not_called()
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "stopped")
+
+	# ---- CDX-22 ordering B: stop lands AFTER the flip, before the enqueue ------- #
+	def test_stop_after_resume_write_before_enqueue_aborts(self):
+		from jarvis.chat import macros
+
+		run_name = self._parked_run()
+
+		def fake_status(rn):
+			# Simulate a stop landing after the flip-to-running commit and before the pre-enqueue
+			# eligibility re-check (e.g. the redis lock's TTL lapsed).
+			frappe.db.set_value(self.RUN, rn, {"status": "stopped"}, update_modified=True)
+			frappe.db.commit()
+			return "stopped"
+
+		with (
+			patch.object(macros, "_run_status_now", side_effect=fake_status),
+			patch("jarvis.chat.api._enqueue_turn") as enq,
+		):
+			macros.resume_waiting_capacity_runs()
+		enq.assert_not_called()
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "stopped")
+
+	# ---- CDX-23: a resumed enqueue that RAISES is compensated ------------------- #
+	def test_resume_enqueue_exception_restores_waiting_capacity_then_retries(self):
+		from jarvis.chat import macros
+
+		run_name = self._parked_run()
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("boom")):
+			macros.resume_waiting_capacity_runs()
+		# Compensated back to waiting_capacity (NOT stranded 'running'); the attempt was counted.
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "waiting_capacity")
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "capacity_attempts"), 1)
+		# Next cycle: capacity frees and the SAME step dispatches.
+		with patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r", "message_id": "m"}) as enq:
+			macros.resume_waiting_capacity_runs()
+		enq.assert_called_once()
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "running")
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "capacity_attempts"), 2)
+
+	def test_resume_enqueue_exception_at_cap_fails_honestly(self):
+		from jarvis.chat import macros
+
+		run_name = self._parked_run()
+		# One shy of the cap so THIS resume's attempt (=_MAX) is the last allowed one.
+		frappe.db.set_value(self.RUN, run_name, "capacity_attempts", macros._MAX_CAPACITY_ATTEMPTS - 1)
+		frappe.db.commit()
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("boom")):
+			macros.resume_waiting_capacity_runs()
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "failed")
+		self.assertIn("busy", (frappe.db.get_value(self.RUN, run_name, "error") or "").lower())

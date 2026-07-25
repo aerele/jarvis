@@ -1,129 +1,159 @@
 <template>
-	<div class="jv-settings-body">
+	<SettingsPane title="Usage" description="Message and token counts for this device.">
 		<template v-if="measured">
-			<div class="jv-set-sec">Measured usage</div>
-			<div class="jv-set-row">
-				<span>{{ usage.month_label || "This month" }}</span
-				><b>{{ fmtTokens(measured.month_tokens) }}</b>
-			</div>
-			<div class="jv-set-row">
-				<span>All time</span><b>{{ fmtTokens(measured.total_tokens) }}</b>
-			</div>
-			<div v-if="measured.last_usage_at" class="jv-set-row">
-				<span>Last activity</span><b>{{ timeAgo(measured.last_usage_at) }}</b>
+			<h3 class="text-base font-semibold text-ink-gray-9">Measured usage</h3>
+			<div class="mt-2">
+				<KvRow
+					:label="usage.month_label || 'This month'"
+					:value="fmtTokens(measured.month_tokens)"
+				/>
+				<KvRow label="All time" :value="fmtTokens(measured.total_tokens)" />
+				<KvRow
+					v-if="measured.last_usage_at"
+					label="Last activity"
+					:value="timeAgo(measured.last_usage_at)"
+				/>
 			</div>
 			<template v-if="measured.monthly_token_limit > 0">
-				<div class="jv-usage-bar">
-					<div class="jv-usage-fill" :style="{ width: measuredPct + '%' }"></div>
+				<div class="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
+					<div class="h-full bg-surface-gray-7" :style="{ width: measuredPct + '%' }" />
 				</div>
-				<div class="jv-set-hint">
-					{{ fmtTokens(measured.month_tokens) }} /
-					{{ fmtTokens(measured.monthly_token_limit) }} this month · {{ measuredPct }}%
-				</div>
+				<p class="mt-2 text-p-sm text-ink-gray-5">
+					{{ fmtTokens(measured.month_tokens) }} of
+					{{ fmtTokens(measured.monthly_token_limit) }} this month, {{ measuredPct }}%
+				</p>
 			</template>
-			<div v-else class="jv-set-hint">No monthly limit set on your account.</div>
+			<p v-else class="mt-2 text-p-sm text-ink-gray-5">
+				No monthly limit set on your account.
+			</p>
 
 			<template v-if="perModel.length">
-				<div class="jv-set-sec" style="margin-top: 20px">By model · this month</div>
-				<div v-for="m in perModel" :key="m.model" class="jv-model-row">
-					<div class="jv-model-head">
-						<span class="jv-model-name">{{ modelDisplayLabel(m.model) }}</span>
-						<span class="jv-model-tok"
-							>{{ fmtTokens(m.month_tokens)
-							}}<span class="jv-model-io">
-								· {{ fmtTokens(m.month_input_tokens) }} in /
-								{{ fmtTokens(m.month_output_tokens) }} out</span
-							></span
-						>
+				<h3 class="mt-6 text-base font-semibold text-ink-gray-9">By model, this month</h3>
+				<div class="mt-2">
+					<div v-for="m in perModel" :key="m.model" class="mt-3 first:mt-0">
+						<div class="flex items-baseline justify-between gap-4">
+							<span class="text-sm font-medium text-ink-gray-8">{{
+								modelDisplayLabel(m.model)
+							}}</span>
+							<span class="text-sm text-ink-gray-6">
+								{{ fmtTokens(m.month_tokens) }}
+								<span class="text-ink-gray-5">
+									({{ fmtTokens(m.month_input_tokens) }} in,
+									{{ fmtTokens(m.month_output_tokens) }} out)
+								</span>
+							</span>
+						</div>
+						<template v-if="m.monthly_token_limit > 0">
+							<div class="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
+								<div
+									class="h-full bg-surface-gray-7"
+									:style="{ width: modelPct(m) + '%' }"
+								/>
+							</div>
+							<p class="mt-1 text-p-sm text-ink-gray-5">
+								{{ fmtTokens(m.month_tokens) }} of
+								{{ fmtTokens(m.monthly_token_limit) }}, {{ modelPct(m) }}%
+							</p>
+						</template>
+						<p v-else class="mt-1 text-p-sm text-ink-gray-5">Unlimited</p>
 					</div>
-					<template v-if="m.monthly_token_limit > 0">
-						<div class="jv-usage-bar">
-							<div class="jv-usage-fill" :style="{ width: modelPct(m) + '%' }"></div>
-						</div>
-						<div class="jv-set-hint">
-							{{ fmtTokens(m.month_tokens) }} /
-							{{ fmtTokens(m.monthly_token_limit) }} · {{ modelPct(m) }}%
-						</div>
-					</template>
-					<div v-else class="jv-set-hint">unlimited</div>
 				</div>
 			</template>
+
+			<hr class="my-8" />
 		</template>
 
-		<div
-			style="font-size: 12px; color: var(--text-3); margin-bottom: 14px"
-			:style="{ marginTop: measured ? '20px' : '0' }"
-		>
+		<p class="flex flex-wrap items-center gap-2 text-p-sm text-ink-gray-6">
 			Estimated tokens, messages and tool activity for your workspace.
-			<span class="jv-est">est.</span>
-		</div>
-		<div class="jv-statgrid">
-			<div class="jv-stat">
-				<div class="jv-stat-label">Messages</div>
-				<div class="jv-stat-val">{{ s ? s.msgCount : "—" }}</div>
-				<div class="jv-stat-sub">
-					{{ s ? `${s.userMsgCount} you · ${s.assistantMsgCount} Jarvis` : "no chat" }}
+			<Badge label="est." theme="gray" variant="subtle" size="sm" />
+		</p>
+		<div class="mt-4 grid grid-cols-3 gap-4">
+			<div class="rounded-md border p-4">
+				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.msgCount : "—" }}</div>
+				<div class="mt-1 text-sm text-ink-gray-6">Messages</div>
+				<div class="mt-1 text-xs text-ink-gray-5">
+					{{ s ? `${s.userMsgCount} you, ${s.assistantMsgCount} Jarvis` : "no chat" }}
 				</div>
 			</div>
-			<div class="jv-stat">
-				<div class="jv-stat-label">Tool calls</div>
-				<div class="jv-stat-val">{{ s ? s.sessionToolCalls : "—" }}</div>
-				<div class="jv-stat-sub">this session</div>
+			<div class="rounded-md border p-4">
+				<div class="text-2xl font-medium text-ink-gray-8">
+					{{ s ? s.sessionToolCalls : "—" }}
+				</div>
+				<div class="mt-1 text-sm text-ink-gray-6">Tool calls</div>
+				<div class="mt-1 text-xs text-ink-gray-5">this session</div>
 			</div>
-			<div class="jv-stat">
-				<div class="jv-stat-label">Avg tokens / msg</div>
-				<div class="jv-stat-val">{{ s ? s.avgTokensPerMsg : "—" }}</div>
-				<div class="jv-stat-sub">this chat</div>
+			<div class="rounded-md border p-4">
+				<div class="text-2xl font-medium text-ink-gray-8">
+					{{ s ? s.avgTokensPerMsg : "—" }}
+				</div>
+				<div class="mt-1 text-sm text-ink-gray-6">Avg tokens per msg</div>
+				<div class="mt-1 text-xs text-ink-gray-5">this chat</div>
 			</div>
-			<div class="jv-stat">
-				<div class="jv-stat-label">Conversations</div>
-				<div class="jv-stat-val">{{ s ? s.convCount : "—" }}</div>
-				<div class="jv-stat-sub">{{ s ? `${s.starredCount} starred` : "no chat" }}</div>
+			<div class="rounded-md border p-4">
+				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.convCount : "—" }}</div>
+				<div class="mt-1 text-sm text-ink-gray-6">Conversations</div>
+				<div class="mt-1 text-xs text-ink-gray-5">
+					{{ s ? `${s.starredCount} starred` : "no chat" }}
+				</div>
 			</div>
-			<div class="jv-stat">
-				<div class="jv-stat-label">This chat</div>
-				<div class="jv-stat-val">{{ usage ? fmtTokens(usage.chat_tokens) : "—" }}</div>
-				<div class="jv-stat-sub">tokens</div>
+			<div class="rounded-md border p-4">
+				<div class="text-2xl font-medium text-ink-gray-8">
+					{{ usage ? fmtTokens(usage.chat_tokens) : "—" }}
+				</div>
+				<div class="mt-1 text-sm text-ink-gray-6">This chat</div>
+				<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
 			</div>
-			<div class="jv-stat">
-				<div class="jv-stat-label">{{ usage ? usage.month_label : "This month" }}</div>
-				<div class="jv-stat-val">{{ usage ? fmtTokens(usage.month_tokens) : "—" }}</div>
-				<div class="jv-stat-sub">tokens</div>
+			<div class="rounded-md border p-4">
+				<div class="text-2xl font-medium text-ink-gray-8">
+					{{ usage ? fmtTokens(usage.month_tokens) : "—" }}
+				</div>
+				<div class="mt-1 text-sm text-ink-gray-6">
+					{{ usage ? usage.month_label : "This month" }}
+				</div>
+				<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
 			</div>
-			<div class="jv-stat">
-				<div class="jv-stat-label">All time</div>
-				<div class="jv-stat-val">{{ usage ? fmtTokens(usage.total_tokens) : "—" }}</div>
-				<div class="jv-stat-sub">tokens</div>
+			<div class="rounded-md border p-4">
+				<div class="text-2xl font-medium text-ink-gray-8">
+					{{ usage ? fmtTokens(usage.total_tokens) : "—" }}
+				</div>
+				<div class="mt-1 text-sm text-ink-gray-6">All time</div>
+				<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
 			</div>
-			<div class="jv-stat">
-				<div class="jv-stat-label">Tools</div>
-				<div class="jv-stat-val">{{ s ? s.toolCount : "—" }}</div>
-				<div class="jv-stat-sub">available</div>
+			<div class="rounded-md border p-4">
+				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.toolCount : "—" }}</div>
+				<div class="mt-1 text-sm text-ink-gray-6">Tools</div>
+				<div class="mt-1 text-xs text-ink-gray-5">available</div>
 			</div>
 		</div>
+
+		<hr class="my-8" />
+
 		<template v-if="usage && usage.budget_monthly">
-			<div class="jv-set-sec" style="margin-top: 20px">
+			<h3 class="text-base font-semibold text-ink-gray-9">
 				Tenant monthly budget (informational)
+			</h3>
+			<div class="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
+				<div class="h-full bg-surface-gray-7" :style="{ width: usagePct + '%' }" />
 			</div>
-			<div class="jv-usage-bar">
-				<div class="jv-usage-fill" :style="{ width: usagePct + '%' }"></div>
-			</div>
-			<div class="jv-set-hint">
-				{{ fmtTokens(usage.month_tokens) }} / {{ fmtTokens(usage.budget_monthly) }} this
-				month · {{ usagePct }}%
-			</div>
+			<p class="mt-2 text-p-sm text-ink-gray-5">
+				{{ fmtTokens(usage.month_tokens) }} of {{ fmtTokens(usage.budget_monthly) }} this
+				month, {{ usagePct }}%
+			</p>
 		</template>
-		<div v-else class="jv-set-hint" style="margin-top: 14px">
-			No monthly budget set · token counts are estimated from message text.
-		</div>
-	</div>
+		<p v-else class="text-p-sm text-ink-gray-5">
+			No monthly budget set. Counts are estimated from message text.
+		</p>
+	</SettingsPane>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, watch } from "vue";
+import { Badge } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { timeAgo } from "@/utils/datetime";
 import { modelDisplayLabel } from "@/utils/usageModel";
+import SettingsPane from "@/components/settings/SettingsPane.vue";
+import KvRow from "@/components/settings/KvRow.vue";
 import * as api from "@/api";
 
 const shell = useShellStore();
@@ -177,27 +207,3 @@ const usagePct = computed(() => {
 onMounted(loadUsage);
 watch(() => shell.chatContext?.conversationId, loadUsage);
 </script>
-
-<style scoped>
-.jv-model-row {
-	margin-top: 12px;
-}
-.jv-model-head {
-	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
-	gap: 10px;
-}
-.jv-model-name {
-	font-size: 13px;
-	font-weight: 600;
-	color: var(--text);
-}
-.jv-model-tok {
-	font-size: 12px;
-	color: var(--text-2);
-}
-.jv-model-io {
-	color: var(--text-3);
-}
-</style>

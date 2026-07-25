@@ -1,5 +1,6 @@
 import frappe
 
+from jarvis import release_notice
 from jarvis.permissions import has_jarvis_access
 
 no_cache = 1
@@ -48,5 +49,7 @@ def get_context(context):
 	context.boot["agent_name"] = _brand.get("agent_name") or ""
 	context.boot["brand_logo_url"] = _brand.get("brand_logo") or ""
 	context.boot["brand_favicon_url"] = _brand.get("brand_favicon") or ""
+	# Release notice (operator-authored) — same interstitial on the PWA path.
+	context.boot["release_notice"] = release_notice.boot_payload()
 	frappe.db.commit()
 	return context

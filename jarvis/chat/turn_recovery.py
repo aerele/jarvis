@@ -181,6 +181,12 @@ def _finalize(row: dict, text: str) -> None:
 	):
 		return  # another cycle already finalized this row
 	conv, owner, name = row["conversation"], row["owner"], row["name"]
+	# Phase-0 admission: a recovered turn is a terminal settlement of the
+	# conversation's dispatching Turn row - close it (done) + promote the next
+	# queued turn. Flag-gated + best-effort inside admission (self-host / flag-off
+	# are unaffected). Keyed by conversation because recovery works off Message
+	# rows and per-conversation single-flight makes the dispatching turn unique.
+	_admission_settle_conv(conv, "done")
 	publish_to_user(
 		owner,
 		{
@@ -248,6 +254,16 @@ def _finalize(row: dict, text: str) -> None:
 		)
 
 
+def _admission_settle_conv(conversation: str, state: str, error: str | None = None) -> None:
+	"""Phase-0 admission recovery hook (flag-gated + best-effort)."""
+	try:
+		from jarvis.chat import admission
+
+		admission.settle_conversation_dispatching(conversation, state, error=error)
+	except Exception:
+		frappe.log_error(title="admission recovery settle", message=frappe.get_traceback())
+
+
 def _error(row: dict, message: str) -> None:
 	if not _conditional_clear(
 		row["name"],
@@ -259,6 +275,7 @@ def _error(row: dict, message: str) -> None:
 		},
 	):
 		return
+	_admission_settle_conv(row["conversation"], "errored", message)
 	publish_to_user(
 		row["owner"],
 		{

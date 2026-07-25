@@ -116,7 +116,16 @@ def fetch_fresh_session_row(sess, session_key: str, attempts: int = 3, delay_s: 
 	return row
 
 
-def record_turn_usage(session_key: str, row: dict | None) -> None:
+# CDX-6: record_turn_usage's explicit outcome, so the finalize usage effect can
+# tell an ACTUAL record (commit the guard) from a transient no-data read (roll the
+# guard back and retry) — the naked None-return silently marked usage recorded when
+# nothing was persisted, undercounting the soft cap forever.
+USAGE_RECORDED = "recorded"  # a real token delta was accrued (committed)
+USAGE_VALID_ZERO = "valid_zero"  # a fresh row that legitimately reports no usage
+USAGE_RETRY = "retry"  # stale/missing/no-fresh data — do NOT mark recorded, retry
+
+
+def record_turn_usage(session_key: str, row: dict | None) -> str:
 	"""Record one completed turn's token delta from a ``sessions.list`` row.
 
 	``row`` is the gateway row for THIS session (matched by ``key`` upstream).
@@ -124,32 +133,43 @@ def record_turn_usage(session_key: str, row: dict | None) -> None:
 	their sum; ``totalTokens`` is the context size (snapshot only). A row with
 	``totalTokensFresh`` false/missing, or null token fields, is do-not-record.
 
-	Increments (atomic SQL, not doc.save):
-	  * ``Jarvis User Settings``: month_* += delta with month rollover (a stale
-	    ``usage_month`` resets the month buckets to this delta), total_tokens
-	    += delta, usage_month/last_usage_at refreshed.
-	  * ``Jarvis Chat Session``: input_tokens/output_tokens += the run values,
-	    run_count += 1, last_total_tokens/last_usage_at snapshotted.
-
-	Resolves the user via ``Jarvis Chat Session``; silently no-ops when no
-	mapping exists. NEVER raises — a usage-accounting bug must not break chat."""
+	CDX-6 — returns an EXPLICIT outcome so a caller (finalize's usage effect) can
+	distinguish a real accrual from a transient no-data read instead of treating a
+	silent no-op as success:
+	  * ``USAGE_RECORDED``   — a positive delta was accrued AND committed here.
+	  * ``USAGE_VALID_ZERO`` — an ATTRIBUTED zero delta (a fresh row that legitimately
+	                           reports no usage): nothing to record and retrying will not
+	                           change that (mark done).
+	  * ``USAGE_RETRY``      — stale / missing / not-fresh data, OR a fresh POSITIVE
+	                           delta with no user mapping (unattributed real usage,
+	                           CDX-6): the caller must NOT mark usage recorded; leave the
+	                           effect pending to retry (force-done budget logs the loss).
+	Commits internally ONLY on the ``USAGE_RECORDED`` path (the standalone-caller
+	contract the usage tests rely on); the zero/retry paths do NOT commit, so a
+	finalize caller can roll back an uncommitted guard on retry. NEVER raises — a
+	usage-accounting bug must not break chat."""
 	try:
 		if not row or not row.get("totalTokensFresh"):
-			return
+			return USAGE_RETRY
 		raw_in = row.get("inputTokens")
 		raw_out = row.get("outputTokens")
 		if raw_in is None and raw_out is None:
-			return
+			return USAGE_RETRY
 		input_tokens = int(raw_in or 0)
 		output_tokens = int(raw_out or 0)
 		delta = input_tokens + output_tokens
 		if delta <= 0:
-			return
+			return USAGE_VALID_ZERO
 		context_tokens = int(row.get("totalTokens") or 0)
 
 		user = frappe.db.get_value(CHAT_SESSION, {"session_key": session_key}, "user")
 		if not user:
-			return
+			# CDX-6: a FRESH POSITIVE token delta with no `Jarvis Chat Session` user
+			# mapping is unattributed real usage, NOT legitimate zero — it must NOT be
+			# permanently marked recorded. RETRY so the finalize effect leaves its guard
+			# rolled back and re-attempts (the mapping may materialize on a later cycle);
+			# the bounded force-done budget logs the undercount loudly if it never does.
+			return USAGE_RETRY
 
 		# Ensure the per-user row exists (in this same transaction) before the
 		# atomic UPDATE targets it.
@@ -231,11 +251,15 @@ def record_turn_usage(session_key: str, row: dict | None) -> None:
 					message=frappe.get_traceback(),
 				)
 		frappe.db.commit()
+		return USAGE_RECORDED
 	except Exception:
 		frappe.log_error(
 			title="jarvis usage: record_turn_usage failed",
 			message=frappe.get_traceback(),
 		)
+		# A partial write is possible; treat a hard failure as retriable so the
+		# finalize usage effect leaves its guard rolled back and re-attempts.
+		return USAGE_RETRY
 
 
 def _next_child_idx(user: str) -> int:

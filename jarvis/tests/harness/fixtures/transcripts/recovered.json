@@ -1,0 +1,74 @@
+{
+  "name": "recovered",
+  "description": "Mid-stream drop whose durable transcript still holds the complete answer; snapshot recovery finalizes it (Stage-B recovery fixture).",
+  "ack": {
+    "status": "started"
+  },
+  "ack_behavior": "normal",
+  "frames": [
+    {
+      "op": "assistant",
+      "text": "The month-end",
+      "delta": "The month-end"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist",
+      "delta": " close checklist"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete:",
+      "delta": " is complete:"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete: all journals",
+      "delta": " all journals"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete: all journals are posted,",
+      "delta": " are posted,"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete: all journals are posted, the bank",
+      "delta": " the bank"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete: all journals are posted, the bank reconciliation ties",
+      "delta": " reconciliation ties"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete: all journals are posted, the bank reconciliation ties out, and",
+      "delta": " out, and"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete: all journals are posted, the bank reconciliation ties out, and the trial",
+      "delta": " the trial"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete: all journals are posted, the bank reconciliation ties out, and the trial balance is",
+      "delta": " balance is"
+    },
+    {
+      "op": "assistant",
+      "text": "The month-end close checklist is complete: all journals are posted, the bank reconciliation ties out, and the trial balance is in balance.",
+      "delta": " in balance."
+    }
+  ],
+  "terminal": {
+    "kind": "final",
+    "text": "The month-end close checklist is complete: all journals are posted, the bank reconciliation ties out, and the trial balance is in balance."
+  },
+  "inject": {
+    "drop_after_frame": 5,
+    "recover_via": "history",
+    "final_text": "The month-end close checklist is complete: all journals are posted, the bank reconciliation ties out, and the trial balance is in balance."
+  }
+}

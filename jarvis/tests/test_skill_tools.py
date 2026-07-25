@@ -332,9 +332,14 @@ class TestGetSkill(SkillToolsTestCase):
 				get_skill(f"{PFX}-role-tier-x")
 
 	def test_own_row_preferred_over_same_named_foreign_row(self):
-		# skill_name is unique per owner, not globally.
+		# skill_name is unique per owner, not globally. R3-SP-1 narrows that for
+		# SHARED rows only (at most one Role/Org row may carry a given slug), so
+		# the same-named pair is one shared row plus one private row rather than
+		# two Org rows. That is also the sharper form of this test: OWNER's Org
+		# row is genuinely VISIBLE to PEER, so the caller's own row has to
+		# actively win the tie instead of being the only usable candidate.
 		_make_skill(OWNER, f"{PFX}-dup-name", "sttool dup owner copy")
-		_make_skill(PEER, f"{PFX}-dup-name", "sttool dup peer copy")
+		_make_skill(PEER, f"{PFX}-dup-name", "sttool dup peer copy", scope="User")
 		with _as(PEER):
 			self.assertEqual(get_skill(f"{PFX}-dup-name")["description"], "sttool dup peer copy")
 

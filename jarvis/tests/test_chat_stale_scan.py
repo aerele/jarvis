@@ -111,3 +111,107 @@ class TestScanAndMarkErrored(FrappeTestCase):
 		self.assertEqual(doc.recovering, 1)  # handed to turn_recovery
 		self.assertIsNone(doc.error)
 		pub.assert_not_called()  # no false run:error
+
+
+class TestOrphanRedispatchOverload(FrappeTestCase):
+	"""CDX-19 (residual) — when the orphan sweep's re-dispatch hits a FULL admission queue, the
+	momentary overload must NOT consume the one healing strike: was_recovered is reset to 0 so a
+	later scan retries, and no spurious second-strike error is surfaced. Pump is pinned OFF so
+	the re-dispatch takes the deterministic phase-0 accept path (no pump start side effects)."""
+
+	TURN = "Jarvis Chat Turn"
+
+	def setUp(self):
+		_ensure_test_user()
+		self._orig_user = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations()
+		self.conv = create_conversation()
+		from jarvis.chat import pump
+
+		self._pump_patches = [
+			patch.dict(frappe.local.conf, {"jarvis_phase0_admission_enabled": 1}),
+			patch.object(pump, "pump_mode_active", return_value=False),
+			patch.object(pump, "pump_configured", return_value=False),
+			patch.object(pump, "pump_draining", return_value=False),
+			patch.object(
+				pump,
+				"transport_predicates_from_row",
+				return_value={"mode": "legacy", "pump_active": False, "configured": False},
+			),
+		]
+		for p in self._pump_patches:
+			p.start()
+
+	def tearDown(self):
+		for p in self._pump_patches:
+			p.stop()
+		frappe.db.delete(self.TURN, {"conversation": self.conv})
+		_cleanup_user_conversations()
+		frappe.set_user(self._orig_user)
+
+	def _mk_orphan(self, age_seconds: int = 300) -> str:
+		doc = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": self.conv,
+				"seq": 1,
+				"role": "user",
+				"content": "hi",
+				"streaming": 0,
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		old = now_datetime() - timedelta(seconds=age_seconds)
+		frappe.db.sql("UPDATE `tabJarvis Chat Message` SET creation=%s WHERE name=%s", (old, doc.name))
+		frappe.db.commit()
+		return doc.name
+
+	def test_overload_does_not_consume_healing_strike(self):
+		from jarvis.chat import admission, api, stale_scan
+
+		uid = self._mk_orphan()
+		with (
+			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+			patch.object(api, "_dispatch_turn", side_effect=lambda *a, **k: None),
+		):
+			stale_scan._sweep_orphan_turns(now_datetime())
+		self.assertEqual(int(frappe.db.get_value(MSG, uid, "was_recovered") or 0), 0, "strike reset")
+		self.assertEqual(
+			frappe.db.count(MSG, {"conversation": self.conv, "role": "assistant"}),
+			0,
+			"no second-strike error",
+		)
+		self.assertEqual(frappe.db.count(self.TURN, {"conversation": self.conv}), 0, "no replacement Turn")
+
+	def test_rescan_heals_once_capacity_frees(self):
+		from jarvis.chat import admission, api, stale_scan
+
+		uid = self._mk_orphan()
+		with (
+			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+			patch.object(api, "_dispatch_turn", side_effect=lambda *a, **k: None),
+		):
+			stale_scan._sweep_orphan_turns(now_datetime())
+		self.assertEqual(int(frappe.db.get_value(MSG, uid, "was_recovered") or 0), 0)
+		# Depth frees: the next scan re-dispatches the orphan into a durable Turn and consumes the strike.
+		with (
+			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(admission, "_max_inflight", return_value=4),
+			patch.object(api, "_dispatch_turn", side_effect=lambda *a, **k: None),
+		):
+			stale_scan._sweep_orphan_turns(now_datetime())
+		self.assertEqual(
+			int(frappe.db.get_value(MSG, uid, "was_recovered") or 0), 1, "heal consumed the strike"
+		)
+		self.assertEqual(
+			frappe.db.count(self.TURN, {"conversation": self.conv}), 1, "a replacement Turn exists"
+		)
+		self.assertEqual(
+			frappe.db.count(MSG, {"conversation": self.conv, "role": "assistant"}), 0, "no error surfaced"
+		)
