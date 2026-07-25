@@ -66,6 +66,7 @@ from jarvis.learning.app_source import (
 	_is_contained,
 	_is_excluded_dir,
 	_priority,
+	_resolve_app_root,
 )
 
 RUN = "Jarvis App Learning Run"
@@ -83,6 +84,28 @@ LOCK_NAME = "jarvis_app_learning_process"
 NON_TERMINAL = ("Queued", "Zipping", "Analyzing", "Ingesting")
 ACTIVE = ("Zipping", "Analyzing", "Ingesting")
 TERMINAL = ("Completed", "Failed", "Cancelled")
+
+
+class _LegacyRetired(RuntimeError):
+	"""Raised by a legacy transition-maker when the chat-batch pipeline is retired."""
+
+
+def _legacy_retired() -> bool:
+	"""The chat-batch pipeline is RETIRED (replaced by the Custom App Learning scribe
+	delegate) and FAIL-CLOSED: every legacy entry point + forward transition below
+	refuses unless it is DELIBERATELY re-enabled for rollback (conf
+	``jarvis_app_learning_reenable``). The doctype + engine stay present for rollback +
+	historical rows, but no live path can advance a run.
+
+	This is what makes retirement inert against an IN-FLIGHT worker (CA2-1): the cron
+	tick is unscheduled and ``schedule_app_learning`` refuses, but a ``process_due`` /
+	``ingest`` job already enqueued before the upgrade, or ``on_turn_end`` firing for a
+	conversation an old worker left ``Analyzing``, would otherwise still run. With this
+	guard the worker's NEXT step (its next enqueued job, or the new-code turn-end hook)
+	REFUSES, so it can never resurrect ``Analyzing`` on a row the retirement migration
+	Cancelled. Retired-by-default (no conf key present) so production is always closed."""
+	return not bool(frappe.conf.get("jarvis_app_learning_reenable"))
+
 
 # --- snapshot caps ---------------------------------------------------------- #
 # EXT_ALLOWLIST / _EXCLUDE_DIR_* / PER_FILE_CAP_BYTES / FILE_CAP / ZIP_CAP_BYTES /
@@ -191,6 +214,27 @@ def _set_run(run_name: str, fields: dict) -> None:
 		_bust_active_conversations()
 
 
+def _cas_status(run_name: str, expected: str, fields: dict) -> bool:
+	"""Compare-and-set a forward status transition (CA2-1): apply ``fields`` (which
+	must set ``status``) ONLY when the row is STILL at ``expected``. Returns True when
+	this call won the transition, False when the row had already moved (a cancel or the
+	retirement migration flipped it) and was left untouched.
+
+	The expected status is read under a row lock (``for_update``), so the read+write is
+	atomic against a concurrent ``mark_cancelled`` / retirement UPDATE (both block on the
+	row lock until this commits). This is what stops a mid-flight ``start_run`` from
+	restoring ``Analyzing`` on a row a cancel/retirement already moved to Cancelled."""
+	current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
+	if current != expected:
+		frappe.db.commit()  # release the row lock; nothing to change
+		return False
+	frappe.db.set_value(RUN, run_name, fields)
+	frappe.db.commit()
+	if "status" in fields:
+		_bust_active_conversations()
+	return True
+
+
 def _fail_run(run_name: str, msg: str) -> None:
 	_set_run(
 		run_name,
@@ -264,8 +308,8 @@ def _active_conversations() -> set[str]:
 def tick() -> None:
 	"""*/10 cron entry. Never raises. Cleanup + stale recovery always run;
 	new work starts only when a due Queued run exists and no run is active."""
-	if frappe.conf.get("jarvis_app_learning_disabled"):
-		return
+	if _legacy_retired():
+		return  # CA2-1: the pipeline is retired + fail-closed — never start/advance work
 	try:
 		_cleanup_zips()
 	except Exception:
@@ -350,6 +394,8 @@ def process_due() -> None:
 	"""Queue-``long`` worker behind ``TICK_JOB_ID``: single-flight on a redis
 	lock; starts the OLDEST due Queued run iff nothing is active (the
 	bench-wide one-non-terminal-run rule). Never raises."""
+	if _legacy_retired():
+		return  # CA2-1: a job enqueued before retirement refuses instead of starting a run
 	from jarvis._redis_lock import redis_lock
 
 	with redis_lock(LOCK_NAME, timeout_s=PROCESS_TIMEOUT_S, blocking_timeout_s=0) as acquired:
@@ -382,9 +428,17 @@ def _snapshot_zip(run_name: str, app: str) -> dict:
 	"""Zip ``apps/<app>`` (filtered) into the site's private files under
 	``app_learning/<run>.zip``. Read-only wrt the source tree. Raises on any
 	problem (missing source dir, zip over cap) — the caller fails the run."""
-	src = _app_source_dir(app)
-	if not os.path.isdir(src):
-		raise FileNotFoundError(f"app source directory not found: apps/{app}")
+	if _legacy_retired():
+		raise _LegacyRetired("app-learning snapshot is retired")
+	# CA2-1 belt: resolve the source ROOT through the canonical, containment-validated
+	# resolver (the round-1 scribe-path win) so the LEGACY walk cannot follow a
+	# symlinked/relocated app root (apps/<app> -> <bench>/sites) and ship site secrets
+	# to the LLM. A missing/unsafe root raises (surfaced as FileNotFoundError so the
+	# caller fails the run exactly as before).
+	try:
+		src = _resolve_app_root(app)
+	except ValueError as e:
+		raise FileNotFoundError(f"app source directory not found or unsafe: apps/{app}: {e}")
 	rels, notes = _collect_files(src)
 	if not rels:
 		raise ValueError(f"no snapshot-eligible source files found in apps/{app}")
@@ -601,10 +655,15 @@ def start_run(run_name: str) -> None:
 	(the ``macros.run_macro`` shape, owned by the requesting admin) and enqueue
 	batch 1. Any failure lands on the run row as Failed and lets the next
 	queued app proceed; the app source tree is never written to."""
+	if _legacy_retired():
+		raise _LegacyRetired("app-learning start_run is retired")
 	run = frappe.get_doc(RUN, run_name)
 	if run.status != "Queued":
 		return
-	_set_run(run_name, {"status": "Zipping", "started_at": now_datetime()})
+	# CA2-1: compare-and-set Queued -> Zipping. If a cancel / the retirement migration
+	# moved the row off Queued between the read above and here, abort rather than start.
+	if not _cas_status(run_name, "Queued", {"status": "Zipping", "started_at": now_datetime()}):
+		return
 	try:
 		snap = _snapshot_zip(run_name, run.app)
 	except Exception as e:
@@ -673,8 +732,12 @@ def start_run(run_name: str) -> None:
 		notes = _load_notes(run)
 		notes["zip"] = snap["notes"]
 		notes["plan"] = {"batches": len(batches), "dropped_batches": dropped_batches}
-		_set_run(
+		# CA2-1: compare-and-set Zipping -> Analyzing. A cancel / the retirement
+		# migration that landed while we snapshotted + planned moved the row off
+		# Zipping; do NOT resurrect Analyzing on it (the conversation is left inert).
+		if not _cas_status(
 			run_name,
+			"Zipping",
 			{
 				"status": "Analyzing",
 				"conversation": conv.name,
@@ -685,7 +748,8 @@ def start_run(run_name: str) -> None:
 				"batches_done": 0,
 				"notes": json.dumps(notes),
 			},
-		)
+		):
+			return
 		run.reload()
 		_send_batch_turn(run, 1)
 	except Exception as e:
@@ -701,6 +765,8 @@ def _send_batch_turn(run, k: int) -> bool:
 	"""Rebuild batch ``k`` from the run's zip and enqueue it as one agent turn
 	(the macros ``_run_step`` seam: ``jarvis.chat.api._enqueue_turn``). Returns True
 	when dispatched, False when DEFERRED for capacity (CDX-19)."""
+	if _legacy_retired():
+		raise _LegacyRetired("app-learning turn dispatch is retired")
 	batches, _dropped = _plan_batches(_manifest_from_zip(run.zip_path))
 	if k < 1 or k > len(batches):
 		raise ValueError(f"batch {k} out of range (have {len(batches)})")
@@ -715,6 +781,8 @@ def _send_batch_turn(run, k: int) -> bool:
 
 
 def _send_final_turn(run) -> bool:
+	if _legacy_retired():
+		raise _LegacyRetired("app-learning turn dispatch is retired")
 	notes = _load_notes(run)
 	dropped = cint((notes.get("plan") or {}).get("dropped_batches"))
 	prompt = _final_prompt(run.app, cint(run.batches_total), dropped, notes.get("zip") or {})
@@ -771,6 +839,12 @@ def on_turn_end(conversation_id: str, *, errored: bool) -> None:
 	parses the reply, stores notes, and chains the next batch / the final
 	consolidation / the ingest. Serialized per run via a redis lock so a
 	re-delivered event can't double-advance."""
+	if _legacy_retired():
+		# CA2-1 (load-bearing): the retirement guard interposes on the chaining step.
+		# Even if an old in-flight worker left a run Analyzing + enqueued a turn, when
+		# that turn completes this NEW-code hook refuses to advance it — so the run can
+		# never progress past that turn, staying inert instead of resurrecting.
+		return
 	if not conversation_id:
 		return
 	try:
@@ -944,6 +1018,8 @@ def _recover_stale_runs() -> bool:
 	turn), then Failed. A Zipping/Ingesting run whose worker died (no row
 	progress for >45 min — their jobs time out long before that) is failed /
 	re-enqueued once under a fresh hop job id."""
+	if _legacy_retired():
+		return False  # CA2-1: retired — never retry/re-enqueue a legacy run
 	rows = _active_runs()
 	if not rows:
 		return False
@@ -1021,6 +1097,10 @@ def ingest(run: str) -> None:
 	"""Queue-``long`` worker: land the final consolidation payload. Per-page /
 	per-skill failures are logged and counted; a wholesale failure marks the
 	run Failed. Never raises."""
+	if _legacy_retired():
+		# CA2-1: an ingest job enqueued before retirement fails CLOSED — the legacy
+		# wiki/skill writeback never runs post-retirement (the scribe owns writes now).
+		return
 	try:
 		doc = frappe.get_doc(RUN, run)
 	except Exception:
@@ -1098,6 +1178,7 @@ def _ingest_wiki_pages(doc, payload: dict) -> tuple[int, int]:
 		PAGE_TYPES,
 		apply_extracted_page_updates,
 	)
+	from jarvis.tools.record_app_wiki import PROVENANCE_FENCE_PREFIX
 
 	raw = payload.get("wiki_pages")
 	if not isinstance(raw, list):
@@ -1146,6 +1227,11 @@ def _ingest_wiki_pages(doc, payload: dict) -> tuple[int, int]:
 			source=f"app-learning:{doc.app}",
 			user=doc.requested_by,
 			ref=doc.name,
+			# CA2-1 belt: even under a deliberate rollback (un-retire), the legacy
+			# ingest can only create/refresh its OWN app-learning pages and can NEVER
+			# overwrite a human-authored / human-edited page on a slug collision. The
+			# legacy stamp (``app-learning:<app>``) shares the scribe's fence prefix.
+			provenance_prefix=PROVENANCE_FENCE_PREFIX,
 		)
 		applied += a
 		failed += f

@@ -75,6 +75,14 @@ class _AppLearningTestCase(FrappeTestCase):
 		self._patches = [
 			mock.patch.object(app_analysis, "_app_source_dir", side_effect=lambda app: self.app_dir),
 			mock.patch.object(app_analysis, "_installed_custom_apps", return_value=["fakeapp"]),
+			# _snapshot_zip now resolves the source ROOT through app_source._resolve_app_root
+			# (CA2-1), which reads app_source's OWN _app_source_dir binding — patch it there
+			# too so the shared resolver sees the temp app tree.
+			mock.patch.object(app_source, "_app_source_dir", side_effect=lambda app: self.app_dir),
+			mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp"]),
+			# The chat-batch pipeline is retired + fail-closed by default (CA2-1); un-retire
+			# it here so the engine-mechanics tests still exercise the rollback-present engine.
+			mock.patch.object(app_analysis, "_legacy_retired", return_value=False),
 		]
 		for p in self._patches:
 			p.start()
@@ -527,7 +535,9 @@ class TestIngest(_AppLearningTestCase):
 
 		captured: list[list[dict]] = []
 
-		def _apply(updates, source, user, ref=None, default_scope=None, target_user=None):
+		def _apply(
+			updates, source, user, ref=None, default_scope=None, target_user=None, provenance_prefix=None
+		):
 			captured.append(updates)
 			self.assertEqual(source, "app-learning:fakeapp")
 			self.assertEqual(user, ADMIN_USER)
@@ -883,3 +893,98 @@ class TestAppLearningCapacityDefer(_AppLearningTestCase):
 		):
 			app_analysis._recover_stale_runs()
 		enq2.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# CA2-1 — the retired pipeline is FAIL-CLOSED + the legacy walk is resolver-guarded
+# --------------------------------------------------------------------------- #
+class TestLegacyPipelineRetired(_AppLearningTestCase):
+	"""CA2-1: once the chat-batch pipeline is retired it is FAIL-CLOSED. Even a worker
+	that was mid-flight when the retirement landed refuses its NEXT transition, so it can
+	never resurrect Analyzing on a row the retirement migration Cancelled; and the legacy
+	snapshot walk is routed through the canonical containment resolver."""
+
+	def test_on_turn_end_refuses_after_retirement(self):
+		# The load-bearing interposition: a mid-flight worker's turn completes, but the
+		# NEW-code turn-end hook REFUSES to advance the run once the pipeline is retired.
+		run = self._analyzing_run()  # created while un-retired (base setUp)
+		conv = run.conversation
+		self._reply(conv, _fenced({"batch": 1, "notes": ["n1"]}))
+		with (
+			mock.patch.object(app_analysis, "_legacy_retired", return_value=True),
+			mock.patch("jarvis.chat.api._enqueue_turn") as enq,
+			mock.patch.object(app_analysis, "_enqueue_ingest") as ing,
+		):
+			app_analysis.on_turn_end(conv, errored=False)
+		run.reload()
+		self.assertEqual(run.status, "Analyzing")  # NOT advanced
+		self.assertEqual(int(run.batches_done), 0)  # the batch reply was NOT consumed
+		enq.assert_not_called()
+		ing.assert_not_called()
+
+	def test_snapshot_zip_refuses_after_retirement(self):
+		self._write({"hooks.py": "h\n"})
+		with mock.patch.object(app_analysis, "_legacy_retired", return_value=True):
+			with self.assertRaises(app_analysis._LegacyRetired):
+				app_analysis._snapshot_zip("retired-run", "fakeapp")
+
+	def test_snapshot_zip_walk_is_resolver_guarded(self):
+		# CA2-1 belt: the legacy walk goes through _resolve_app_root, so a symlinked app
+		# root (apps/<app> -> elsewhere) is refused before any file is zipped/shipped.
+		reallib = os.path.join(self.tmp, "reallib")
+		os.makedirs(reallib)
+		with open(os.path.join(reallib, "hooks.py"), "w") as fh:
+			fh.write("x = 1\n")
+		linkroot = os.path.join(self.tmp, "linkapp")
+		os.symlink(reallib, linkroot)
+		with mock.patch.object(app_source, "_app_source_dir", side_effect=lambda a: linkroot):
+			with self.assertRaises((FileNotFoundError, ValueError)):
+				app_analysis._snapshot_zip("symroot-run", "fakeapp")
+
+	def test_start_run_cas_does_not_resurrect_a_cancelled_row(self):
+		# A start_run whose row is Cancelled (by a concurrent cancel / the retirement
+		# migration) WHILE it snapshots must NOT restore Analyzing on it (compare-and-set).
+		self._write({"hooks.py": "h\n", "mod/api.py": "import frappe\n"})
+		run = self._mk_run()  # Queued
+		real_snap = app_analysis._snapshot_zip
+
+		def _snap_then_cancel(run_name, app):
+			out = real_snap(run_name, app)
+			self._zips.append(out["zip_path"])
+			frappe.db.set_value(RUN, run_name, {"status": "Cancelled", "finished_at": now_datetime()})
+			frappe.db.commit()
+			app_analysis._bust_active_conversations()
+			return out
+
+		with (
+			mock.patch.object(app_analysis, "_snapshot_zip", side_effect=_snap_then_cancel),
+			mock.patch("jarvis.chat.api._enqueue_turn") as enq,
+			mock.patch.object(app_analysis, "_enqueue_tick"),
+		):
+			app_analysis.start_run(run.name)
+		run.reload()
+		self.assertEqual(run.status, "Cancelled")  # NOT resurrected to Analyzing
+		enq.assert_not_called()
+
+	def test_cas_status_leaves_a_moved_row_alone(self):
+		run = self._mk_run(status="Analyzing", conversation="conv-cas-x")
+		frappe.db.set_value(RUN, run.name, "status", "Cancelled")
+		frappe.db.commit()
+		# expected=Zipping but the row is Cancelled -> the CAS loses, the row is untouched
+		self.assertFalse(app_analysis._cas_status(run.name, "Zipping", {"status": "Analyzing"}))
+		self.assertEqual(frappe.db.get_value(RUN, run.name, "status"), "Cancelled")
+
+	def test_process_due_and_ingest_refuse_after_retirement(self):
+		self._mk_run(status="Queued")
+		with (
+			mock.patch.object(app_analysis, "_legacy_retired", return_value=True),
+			mock.patch.object(app_analysis, "start_run") as sr,
+		):
+			app_analysis.process_due()
+			sr.assert_not_called()
+		# the legacy ingest fails CLOSED once retired — an enqueued job never runs
+		ing_run = self._mk_run(status="Ingesting", conversation=self._mk_conv())
+		with mock.patch.object(app_analysis, "_legacy_retired", return_value=True):
+			app_analysis.ingest(ing_run.name)
+		ing_run.reload()
+		self.assertEqual(ing_run.status, "Ingesting")  # untouched — the writeback never ran
