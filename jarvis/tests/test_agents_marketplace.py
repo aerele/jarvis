@@ -966,9 +966,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 				frappe.db.set_value(INSTALLATION, n, "next_run_at", ts, update_modified=False)
 			frappe.db.commit()
 
-		runs = frappe.get_all(
-			RUN, filters={"installation": inst_name}, fields=["owner", "status", "error"]
-		)
+		runs = frappe.get_all(RUN, filters={"installation": inst_name}, fields=["owner", "status", "error"])
 		self.assertEqual(len(runs), 1)
 		self.assertEqual(runs[0]["status"], "failed")  # never "running"
 		self.assertEqual(runs[0]["owner"], self.owner)  # the customer sees WHY
