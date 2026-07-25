@@ -47,6 +47,11 @@ RUN = "Jarvis Agent Run"
 WIKI = "Jarvis Wiki Page"
 
 SCRIBE_SLUG = "app-learn-test-scribe"
+# CX5-1: a SECOND, differently-slugged scribe listing. The tools bind to ONE
+# agent_slug (``ctx.APP_LEARNING_AGENT_SLUG``, patched to SCRIBE_SLUG in setUp so
+# the suite never touches the real marketplace listing); this one proves another
+# scribe gets nothing.
+OTHER_SCRIBE_SLUG = "app-learn-test-other-scribe"
 AUDITOR_SLUG = "app-learn-test-auditor"
 NON_ADMIN = "app-learn-plain@example.com"
 
@@ -111,6 +116,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")  # admin-tier by default (has_jarvis_admin_access bypass)
 		_mk_listing(SCRIBE_SLUG, "Scribe")
+		_mk_listing(OTHER_SCRIBE_SLUG, "Scribe")
 		_mk_listing(AUDITOR_SLUG, "Auditor")
 		_mk_user(NON_ADMIN, [])  # a plain enabled user, no admin roles
 		# temp custom-app source tree behind the shared _app_source_dir seam
@@ -121,6 +127,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self._patches = [
 			mock.patch.object(app_source, "_app_source_dir", side_effect=lambda a: self.app_dir),
 			mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp"]),
+			# CX5-1: bind the capability to the TEST listing's slug, so the suite never
+			# has to create/mutate the real ``custom-app-learning`` marketplace listing.
+			mock.patch.object(ctx, "APP_LEARNING_AGENT_SLUG", SCRIBE_SLUG),
 		]
 		for p in self._patches:
 			p.start()
@@ -139,7 +148,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		for name in self._runs:
 			if frappe.db.exists(RUN, name):
 				frappe.delete_doc(RUN, name, force=True, ignore_permissions=True)
-		frappe.db.delete(RUN, {"agent": ["in", [SCRIBE_SLUG, AUDITOR_SLUG]]})
+		frappe.db.delete(RUN, {"agent": ["in", [SCRIBE_SLUG, OTHER_SCRIBE_SLUG, AUDITOR_SLUG]]})
 		frappe.set_user("Administrator")
 		shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -176,6 +185,24 @@ class TestAppLearningAgentTools(FrappeTestCase):
 			read_app_source("fakeapp", "hooks.py")
 		with self.assertRaises(InvalidArgumentError):
 			list_app_modules("fakeapp")
+
+	def test_another_scribe_agent_is_denied(self):
+		# CX5-1: ``nature == Scribe`` is NOT the authorization — the exact capability
+		# slug is. A second, bona-fide scribe run (running, admin-tier, correct nature)
+		# bound to a DIFFERENT listing gets no source read and no wiki writeback.
+		run = _mk_run(OTHER_SCRIBE_SLUG, self.session_key)
+		self._runs.append(run)
+		_agent_run_ctx.set_session_key(self.session_key)
+		for call in (
+			lambda: list_app_modules(),
+			lambda: list_app_modules("fakeapp"),
+			lambda: read_app_source("fakeapp", "hooks.py"),
+			lambda: record_app_wiki(app="fakeapp", pages=[{"title": "T", "body_md": "b"}]),
+			lambda: finish_app_learning_run(),
+		):
+			with self.assertRaises(InvalidArgumentError) as cm:
+				call()
+			self.assertIn("bound to the", str(cm.exception))
 
 	def test_finalized_run_is_denied(self):
 		run = _mk_run(SCRIBE_SLUG, self.session_key, status="completed")

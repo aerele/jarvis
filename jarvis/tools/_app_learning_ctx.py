@@ -6,9 +6,16 @@ The gate mirrors ``jarvis.tools.record_agent_run`` EXACTLY: the run is resolved
 from the CALLER's opaque ``session_key`` (the delegate's HTTPS bearer, NEVER a
 model-supplied id — the LLM cannot author it, api._dispatch_from_session stashes
 it), and the tool refuses unless that session is bound to a RUNNING
-``Jarvis Agent Run`` whose listing ``nature`` is ``Scribe`` AND the impersonated
-run-as identity is admin-tier. So a source-read/wiki-write can only ever happen
-inside a bona-fide app-learning scribe run, and only for the admin tier.
+``Jarvis Agent Run`` whose listing is EXACTLY the Custom App Learning capability
+(``agent_slug == custom-app-learning``) AND the impersonated run-as identity is
+admin-tier. So a source-read/wiki-write can only ever happen inside a bona-fide
+app-learning run, and only for the admin tier.
+
+CX5-1 — the AUTHORIZATION is the exact ``agent_slug``, not the coarse ``nature``.
+``Scribe`` is a shared shape: any future scribe capability (or a listing an admin
+flips to ``Scribe``) would otherwise inherit whole-bench custom-app source-read.
+The nature + admin-tier checks are KEPT as defense in depth, but the slug is what
+binds the capability.
 
 Two per-run budgets, tracked per ``session_key`` (a fresh key per run), keep a
 looping delegate bounded well inside the 90-minute run ceiling:
@@ -28,6 +35,10 @@ from jarvis.tools._agent_run_ctx import get_session_key
 RUN = "Jarvis Agent Run"
 LISTING = "Jarvis Agent Listing"
 
+# CX5-1: the ONE marketplace capability these tools are bound to. Custom-app
+# source-read + Org-wiki writeback is granted to THIS agent, never to "any scribe".
+APP_LEARNING_AGENT_SLUG = "custom-app-learning"
+
 # Outer safety ceilings (module-level so tests can shrink them). Neither is a
 # target — the delegate is SELECTIVE (list, then read only what matters); these
 # are the runaway guards under the 90-minute timeout + minimal tools_allow.
@@ -43,10 +54,10 @@ def resolve_scribe_run(allow_terminal: bool = False) -> dict:
 
 	Returns ``{name, agent, session_key, status}`` for the ``Jarvis Agent Run``
 	bound to the caller's session_key. Raises ``InvalidArgumentError`` when there
-	is no session_key, no run bound to it, the run has finalized, its agent's
-	nature is not ``Scribe``, or the impersonated identity is not admin-tier.
-	This is the identical resolution shape ``record_agent_run`` uses (never a
-	model-supplied id).
+	is no session_key, no run bound to it, the run has finalized, its agent is not
+	the ``custom-app-learning`` capability, its nature is not ``Scribe``, or the
+	impersonated identity is not admin-tier. This is the identical resolution shape
+	``record_agent_run`` uses (never a model-supplied id).
 
 	``allow_terminal=True`` keeps the same identity/nature gate but does NOT raise
 	on an already-finalized run — the IDEMPOTENT finish fast-path uses it so a
@@ -69,7 +80,18 @@ def resolve_scribe_run(allow_terminal: bool = False) -> dict:
 		raise InvalidArgumentError("no agent run is bound to this session")
 	if run_row.status != "running" and not allow_terminal:
 		raise InvalidArgumentError("this agent run has already finalized")
-	nature = (frappe.db.get_value(LISTING, run_row.agent, "nature") or "").strip().title()
+	listing = (
+		frappe.db.get_value(LISTING, run_row.agent, ["agent_slug", "nature"], as_dict=True) or {}
+	)
+	# CX5-1 — THE authorization: this capability is bound to ONE agent slug. A
+	# different scribe (or a listing an admin re-natured to Scribe) gets nothing.
+	if (listing.get("agent_slug") or "").strip() != APP_LEARNING_AGENT_SLUG:
+		raise InvalidArgumentError(
+			f"app-source read is bound to the {APP_LEARNING_AGENT_SLUG} agent"
+		)
+	# Defense in depth (the slug above is the real gate): the bound listing must
+	# still be a Scribe, so a mis-natured listing cannot reach the write path.
+	nature = (listing.get("nature") or "").strip().title()
 	if nature != "Scribe":
 		raise InvalidArgumentError(
 			"app-source read and wiki writeback are available only to app-learning "
