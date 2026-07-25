@@ -24,6 +24,21 @@ _PASSWORD_FIELDS = {
 }
 
 
+# reset_onboarding also clears the OAuth / pool CONNECTION state OUTSIDE the
+# _RESET_CLEAR_FIELDS loop. Those were missing from the snapshot, so a run left
+# the site's Jarvis Settings with a BLANK MANDATORY llm_auth_mode - which breaks
+# any later test in the same shard that saves the whole singleton (frappe shards
+# per test FILE, so which tests share a site is not stable).
+_EXTRA_RESET_FIELDS = (
+	"llm_auth_mode",
+	"llm_oauth_account_email",
+	"llm_oauth_connected_at",
+	"preset",
+	"proxy_active",
+	"proxy_recommended",
+)
+
+
 def _read(s, field):
 	"""Read a Jarvis Settings field, password-safe."""
 	if field in _PASSWORD_FIELDS:
@@ -36,6 +51,9 @@ def _snapshot():
 	(not test_site) don't trash the operator's actual onboarded state."""
 	s = frappe.get_single(SETTINGS)
 	snap = {f: _read(s, f) for f in (*_RESET_CLEAR_FIELDS, "llm_provider")}
+	# Raw, NOT ""-coerced like _read: proxy_* are Check (int) and
+	# llm_oauth_connected_at is a Datetime - "" is not a valid value for either.
+	snap.update({f: s.get(f) for f in _EXTRA_RESET_FIELDS})
 	return snap
 
 
