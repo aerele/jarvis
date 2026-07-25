@@ -77,6 +77,7 @@ def run_due_agent_audits() -> None:
 			"schedule_time",
 			"installable",
 			"source_apps_json",
+			"activation_state",
 		],
 	)
 	if not due:
@@ -108,7 +109,20 @@ def run_due_agent_audits() -> None:
 		# with a schedule set just consumes its slot (it drafts through the board,
 		# not on a cron). A scribe's schedule is optional (manual run-now is the
 		# primary path) but honoured here when set, so periodic re-learning works.
-		if frappe.db.get_value(LISTING, row.agent, "nature") not in ("Auditor", "Scribe"):
+		nature = frappe.db.get_value(LISTING, row.agent, "nature")
+		if nature not in ("Auditor", "Scribe"):
+			_advance(row, now)
+			continue
+
+		# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so there is
+		# no such thing as a shadow scribe run — refuse it here exactly as the manual path
+		# does, and consume the slot so the cadence does not busy-retry.
+		if nature == "Scribe" and (row.get("activation_state") or "shadow") == "shadow":
+			_record_failed(
+				row,
+				"scheduled run skipped: this agent writes the wiki directly; promote the "
+				"installation to live to run it",
+			)
 			_advance(row, now)
 			continue
 

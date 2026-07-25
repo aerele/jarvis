@@ -846,9 +846,22 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	from jarvis.chat.agent_installability import assert_installable
 
 	assert_installable(doc.agent)
-	if frappe.db.get_value(LISTING, doc.agent, "nature") not in ("Auditor", "Scribe"):
+	nature = frappe.db.get_value(LISTING, doc.agent, "nature")
+	if nature not in ("Auditor", "Scribe"):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
+		)
+	# CX5-5: a SHADOW installation means "run it, but its output is not live yet" —
+	# an auditor's findings sit in a shadow set for a reviewer. A scribe has no such
+	# holding pen: it writes the LIVE Org wiki directly, with no confirmation gate,
+	# so letting one run in shadow would make the shadow state a lie. Refuse until
+	# the install is promoted.
+	if nature == "Scribe" and (doc.activation_state or "shadow") == "shadow":
+		frappe.throw(
+			_(
+				"This agent writes to the Org wiki directly, so it cannot run while the "
+				"installation is in shadow. Promote it to live to run it."
+			)
 		)
 	from jarvis.chat.agent_scheduler import (
 		_is_app_learning,

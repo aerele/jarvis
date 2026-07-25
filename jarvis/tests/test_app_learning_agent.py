@@ -1049,7 +1049,7 @@ class TestRunAgentNowScribeGate(FrappeTestCase):
 		frappe.db.delete(RUN, {"agent": SCRIBE_SLUG})
 		frappe.db.commit()
 
-	def _install(self) -> str:
+	def _install(self, activation_state: str = "live") -> str:
 		doc = frappe.get_doc(
 			{
 				"doctype": "Jarvis Agent Installation",
@@ -1061,7 +1061,15 @@ class TestRunAgentNowScribeGate(FrappeTestCase):
 		doc.owner = self.admin
 		doc.flags.ignore_permissions = True
 		doc.insert(ignore_permissions=True)
-		frappe.db.set_value("Jarvis Agent Installation", doc.name, "owner", self.admin, update_modified=False)
+		# An install is BORN shadow and the ORM guard (PP-4) refuses a plain flip, so a
+		# fixture that needs a promoted install writes the column directly. CX5-5 makes
+		# this load-bearing: a scribe run is refused while the install is in shadow.
+		frappe.db.set_value(
+			"Jarvis Agent Installation",
+			doc.name,
+			{"owner": self.admin, "activation_state": activation_state},
+			update_modified=False,
+		)
 		frappe.db.commit()
 		return doc.name
 
@@ -1101,6 +1109,14 @@ class TestRunAgentNowScribeGate(FrappeTestCase):
 		inst = self._install()
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self._run_now(inst)
+
+	def test_shadow_scribe_install_cannot_run(self):
+		# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so a
+		# "shadow" scribe install would be a lie. Refuse until it is promoted.
+		inst = self._install(activation_state="shadow")
+		with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+			self._run_now(inst)
+		self.assertIn("Promote it to live", str(cm.exception))
 
 	# ------------------------------------------------------------------ #
 	# CX5-2: the app-learning launch REQUIRES an explicit, validated selection
@@ -1169,7 +1185,7 @@ class TestScheduledAppLearningSelection(FrappeTestCase):
 		frappe.db.delete(RUN, {"agent": SCRIBE_SLUG})
 		frappe.db.commit()
 
-	def _due_install(self, source_apps_json: str | None) -> str:
+	def _due_install(self, source_apps_json: str | None, activation_state: str = "live") -> str:
 		doc = frappe.get_doc(
 			{
 				"doctype": "Jarvis Agent Installation",
@@ -1190,6 +1206,8 @@ class TestScheduledAppLearningSelection(FrappeTestCase):
 				"owner": self.admin,
 				"next_run_at": frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-1),
 				"source_apps_json": source_apps_json,
+				# born shadow; the PP-4 ORM guard refuses a plain flip, so write it directly
+				"activation_state": activation_state,
 			},
 			update_modified=False,
 		)
@@ -1218,6 +1236,21 @@ class TestScheduledAppLearningSelection(FrappeTestCase):
 			agent_scheduler.run_due_agent_audits()
 		self.assertEqual(launch.call_args.kwargs["source_apps"], ["fakeapp"])
 		self.assertEqual(launch.call_args.kwargs["trigger"], "scheduled")
+
+	def test_scheduled_shadow_scribe_is_skipped(self):
+		# CX5-5 on the cron path: a shadow scribe install never dispatches, and the slot
+		# is consumed with a recorded reason rather than busy-retrying every hour.
+		from jarvis.chat import agent_scheduler
+
+		inst = self._due_install(json.dumps(["fakeapp"]), activation_state="shadow")
+		with mock.patch.object(agent_scheduler, "_launch_audit") as launch:
+			agent_scheduler.run_due_agent_audits()
+		launch.assert_not_called()
+		row = frappe.get_all(
+			RUN, filters={"installation": inst}, fields=["status", "error"], limit=1
+		)[0]
+		self.assertEqual(row.status, "failed")
+		self.assertIn("promote the installation to live", row.error)
 
 
 class TestLegacyScheduleRetired(FrappeTestCase):
