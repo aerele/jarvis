@@ -5,9 +5,9 @@
 			Teach Jarvis the workflows your custom apps implement. This now runs as the
 			<span class="font-medium text-ink-gray-8">Custom App Learning</span> agent: it reads
 			the apps <span class="font-medium text-ink-gray-8">you select</span> and writes
-			business-first pages straight to the Org wiki, on demand, inside the Jarvis container
-			— so your chat is never filled with source. Re-running updates the same pages in
-			place. Restricted to admins.
+			business-first pages straight to the Org wiki, on demand, inside the Jarvis container —
+			so your chat is never filled with source. Re-running updates the same pages in place.
+			Restricted to admins.
 		</div>
 		<div
 			class="mt-3 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"

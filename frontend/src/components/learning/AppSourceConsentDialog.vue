@@ -21,8 +21,9 @@
 						model provider configured for this site.
 					</div>
 					<div>
-						What the agent writes lands in the <span class="font-medium">Org wiki</span>,
-						visible to everyone in your organisation.
+						What the agent writes lands in the
+						<span class="font-medium">Org wiki</span>, visible to everyone in your
+						organisation.
 					</div>
 					<div>Select only apps whose code you trust and are willing to share.</div>
 				</div>
@@ -37,8 +38,8 @@
 				v-else-if="!apps.length"
 				class="mt-4 rounded-lg border border-outline-gray-2 bg-surface-gray-1 px-3 py-6 text-center text-sm text-ink-gray-6"
 			>
-				No custom apps are installed on this site. Core apps (Frappe, ERPNext, HRMS,
-				India Compliance, Jarvis) are never learnable.
+				No custom apps are installed on this site. Core apps (Frappe, ERPNext, HRMS, India
+				Compliance, Jarvis) are never learnable.
 			</div>
 			<div v-else class="mt-4 max-h-64 space-y-1 overflow-y-auto">
 				<label
@@ -59,7 +60,9 @@
 						</span>
 						<span class="block truncate text-xs text-ink-gray-5">
 							{{ a.app
-							}}<template v-if="a.installed_version"> · v{{ a.installed_version }}</template>
+							}}<template v-if="a.installed_version">
+								· v{{ a.installed_version }}</template
+							>
 							<template v-if="a.path_ok">
 								· ~{{ a.approx_files }} files ({{ a.approx_kb }} KB)
 							</template>
