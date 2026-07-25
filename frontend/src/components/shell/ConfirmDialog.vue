@@ -1,40 +1,51 @@
 <template>
 	<!-- App-wide confirmation modal. Mounted ONCE in AppShell; driven entirely by
-       the shared useConfirm() state. Its own z-index is 200 so it clears the
-       settings overlay (z-index 60) — a Remove/Delete inside that modal is still
-       confirmable. Applies paletteVars + jv-dark on its root (jv- vars aren't
-       global). See composables/useConfirm.js for the promise-based API. -->
-	<transition name="jv-confirm-fade">
-		<div
-			v-if="state"
-			class="jv-confirm-overlay jv-root"
-			:class="{ 'jv-dark': dark }"
-			:style="paletteVars"
-			@click.self="settleConfirm(false)"
-		>
+       the shared useConfirm() state. Its own z-index is 200 so a Remove/Delete
+       inside the settings modal is still confirmable. Applies paletteVars +
+       jv-dark on its root (jv- vars aren't global). See composables/useConfirm.js
+       for the promise-based API.
+
+       Teleported to <body>: the settings dialog migrated to frappe-ui's Dialog
+       (reka DialogPortal renders into <body> at z-index 60, see main.css
+       .dialog-overlay). An overlay left inline in AppShell is trapped in the
+       app-root stacking context and paints BEHIND that body-level portal however
+       high its own z-index, so this overlay must live at <body> too. There it is
+       a sibling of the settings portal and z-index 200 > 60 actually wins.
+       Without it the confirm opens behind the settings dialog with its buttons
+       unclickable (jarvis#435). -->
+	<Teleport to="body">
+		<transition name="jv-confirm-fade">
 			<div
-				class="jv-cdialog"
-				role="alertdialog"
-				aria-modal="true"
-				aria-labelledby="jv-confirm-title"
+				v-if="state"
+				class="jv-confirm-overlay jv-root"
+				:class="{ 'jv-dark': dark }"
+				:style="paletteVars"
+				@click.self="settleConfirm(false)"
 			>
-				<div id="jv-confirm-title" class="jv-cdialog-title">{{ state.title }}</div>
-				<div v-if="state.message" class="jv-cdialog-msg">{{ state.message }}</div>
-				<div class="jv-cdialog-foot">
-					<button class="jv-btn jv-btn--ghost" @click="settleConfirm(false)">
-						{{ state.cancelLabel }}
-					</button>
-					<button
-						class="jv-btn"
-						:class="state.danger ? 'jv-btn--danger' : 'jv-btn--primary'"
-						@click="settleConfirm(true)"
-					>
-						{{ state.confirmLabel }}
-					</button>
+				<div
+					class="jv-cdialog"
+					role="alertdialog"
+					aria-modal="true"
+					aria-labelledby="jv-confirm-title"
+				>
+					<div id="jv-confirm-title" class="jv-cdialog-title">{{ state.title }}</div>
+					<div v-if="state.message" class="jv-cdialog-msg">{{ state.message }}</div>
+					<div class="jv-cdialog-foot">
+						<button class="jv-btn jv-btn--ghost" @click="settleConfirm(false)">
+							{{ state.cancelLabel }}
+						</button>
+						<button
+							class="jv-btn"
+							:class="state.danger ? 'jv-btn--danger' : 'jv-btn--primary'"
+							@click="settleConfirm(true)"
+						>
+							{{ state.confirmLabel }}
+						</button>
+					</div>
 				</div>
 			</div>
-		</div>
-	</transition>
+		</transition>
+	</Teleport>
 </template>
 
 <script setup>
