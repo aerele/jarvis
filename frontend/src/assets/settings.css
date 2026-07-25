@@ -258,7 +258,12 @@
 .jv-mon-kv .jv-ok { color: var(--green); }
 .jv-mon-kv .jv-warn { color: var(--amber); }
 
-/* Header close icon-button — quiet ghost hover (no colour inversion). */
+/* Header close icon-button — quiet ghost hover (no colour inversion).
+   This is the ONLY global `.jv-iconbtn`, and its hover is deliberately NOT the
+   invert used on the chat surface (see the copies scoped to views/ChatView.vue
+   and components/chat/Composer.vue, which carry !important and would beat this
+   rule if they were ever unscoped). Three copies is intentional: sync the two
+   chat ones with each other, leave this one alone. */
 .jv-iconbtn { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; background: transparent; border: none; border-radius: 8px; cursor: pointer; color: var(--text-3); transition: background-color .15s ease, color .15s ease; }
 .jv-iconbtn:hover { background: var(--surface-2); color: var(--text); }
 

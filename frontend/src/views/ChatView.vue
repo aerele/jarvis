@@ -705,143 +705,40 @@
 						     inline in place of the confirmation card that used to vanish -->
 						<ReceiptChip v-if="m.role === 'tool'" :message="m" />
 						<!-- user -->
-						<div
+						<Message
 							v-else-if="m.role === 'user'"
-							class="jv-umsg"
-							style="display: flex; flex-direction: column; align-items: flex-end"
-						>
-							<div
-								v-if="m.content"
-								class="jv-ububble"
-								style="
-									max-width: 78%;
-									min-width: 0;
-									background: var(--surface-2);
-									border: 1px solid var(--border);
-									border-radius: 14px 14px 4px 14px;
-									padding: 10px 14px;
-									font-size: 14px;
-									line-height: 1.5;
-									color: var(--text);
-									white-space: pre-wrap;
-									overflow-wrap: anywhere;
-								"
-							>
-								{{ m.content }}
-							</div>
-							<div
-								v-if="m.failed"
-								style="
-									display: flex;
-									align-items: center;
-									gap: 8px;
-									margin-top: 4px;
-									font-size: 11.5px;
-									color: var(--red);
-								"
-							>
-								<span>Not sent</span>
-								<button
-									@click="resendFailed(m)"
-									style="
-										background: none;
-										border: none;
-										color: var(--link);
-										font: inherit;
-										cursor: pointer;
-										padding: 0;
-										text-decoration: underline;
-									"
-								>
-									Retry
-								</button>
-							</div>
-							<!-- attached images → same clickable thumbnail + preview as generated ones -->
-							<template v-for="cv in m.canvas || []" :key="cv.name">
-								<button
-									v-if="cv.type === 'image' && cv.file_url"
-									class="jv-img-artifact"
-									@click="openArtifact(m, cv)"
-									:title="'Open ' + cv.title"
-									style="margin-top: 8px; cursor: zoom-in"
-								>
-									<img :src="cv.file_url" :alt="cv.title" loading="lazy" />
-								</button>
-							</template>
-							<div class="jv-msgbar">
-								<!-- sent-time: revealed with the bar on hover; its own hover
-								     (native title) gives the full day-date-month-year-time.
-								     Order: time → edit → copy (edit before copy). -->
-								<span
-									v-if="msgTime(m)"
-									class="jv-msgtime"
-									:title="msgTimeFull(m)"
-									>{{ msgTime(m) }}</span
-								>
-								<button
-									class="jv-msgbtn"
-									@click="editCommand(m)"
-									title="Edit & resend"
-								>
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path
-											d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"
-										/>
-										<path
-											d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"
-										/>
-									</svg>
-								</button>
-								<button
-									class="jv-msgbtn"
-									@click="copyMsg(m.name, m.content)"
-									:title="copiedId === m.name ? 'Copied' : 'Copy'"
-								>
-									<svg
-										v-if="copiedId === m.name"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="var(--green)"
-										stroke-width="2.2"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="M20 6 9 17l-5-5" />
-									</svg>
-									<svg
-										v-else
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<rect x="9" y="9" width="13" height="13" rx="2" />
-										<path
-											d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
-										/>
-									</svg>
-								</button>
-							</div>
-						</div>
+							variant="bubble"
+							:text="m.content"
+							:attachments="m.canvas"
+							:timestamp="msgTime(m)"
+							:timestampFull="msgTimeFull(m)"
+							editable
+							:copied="copiedId === m.name"
+							:failed="m.failed"
+							@edit="editCommand(m)"
+							@copy="copyMsg(m.name, m.content)"
+							@retry="resendFailed(m)"
+							@open-attachment="openArtifact(m, $event)"
+						/>
 						<!-- assistant -->
-						<div v-else class="jv-amsg" style="display: flex; gap: 12px">
-							<JarvisMark :size="28" :radius="7" style="margin-top: 2px" />
-							<div style="flex: 1; min-width: 0">
+						<!-- copied/@copy here drive Message's BUILT-IN trailer, which #below-body
+						     suppresses — chat's real Copy button is in the slotted metabar below.
+						     Kept so both call sites stay interface-identical. -->
+						<Message
+							v-else
+							variant="row"
+							:html="m.error ? '' : render(m.content)"
+							:attachments="m.canvas"
+							:timestamp="msgTime(m)"
+							:timestampFull="msgTimeFull(m)"
+							:copied="copiedId === m.name"
+							@copy="copyMsg(m.name, stripBlocks(m.content))"
+							@open-attachment="openArtifact(m, $event)"
+						>
+							<template #avatar>
+								<JarvisMark :size="28" :radius="7" style="margin-top: 2px" />
+							</template>
+							<template #above-body>
 								<!-- Activity: the tool calls (with input + output) that produced
 								     this answer — openclaw-style, collapsible. -->
 								<div
@@ -1085,12 +982,8 @@
 										</button>
 									</div>
 								</div>
-								<div
-									v-else
-									class="jv-md"
-									style="font-size: 14px; line-height: 1.6; color: var(--text)"
-									v-html="render(m.content)"
-								></div>
+							</template>
+							<template #below-body>
 								<!-- The user stopped this reply. A SIBLING of the body, not part of
 								     it: gated only on `stopped`, so it shows for a partial stop
 								     (content present) and an empty one alike, and the renderer can
@@ -1887,8 +1780,8 @@
 										</button>
 									</div>
 								</div>
-							</div>
-						</div>
+							</template>
+						</Message>
 					</template>
 
 					<!-- live tool activity + thinking (Claude Code style). Suppressed
@@ -2280,584 +2173,468 @@
 					</button>
 				</transition>
 				<div style="max-width: 1280px; margin: 0 auto">
-					<!-- wiki nudge: "anything worth remembering?" card (realtime wiki:nudge
-					     event, §voice/wiki). Own block ABOVE the composer so it never
-					     shifts the input while a reply is streaming. -->
-					<div v-if="nudge && nudge.conversationId === currentId" class="jv-nudge">
-						<div class="jv-nudge-head">
-							<div class="jv-nudge-q">
-								Anything worth remembering about <b>{{ nudgeLabels }}</b
-								>?
-							</div>
-							<button
-								class="jv-nudge-x"
-								title="Dismiss"
-								aria-label="Dismiss"
-								@click="dismissNudge"
+					<!-- DO NOT REMOVE `@submit="send()"`: the Send BUTTON's click is
+					     `emit('submit')` inside Composer, so this binding is the
+					     button's ONLY path to send(). (It is Composer's built-in
+					     Enter→submit that is unreachable for chat — onKey
+					     preventDefaults on Enter and calls send() itself — not the
+					     click.) Composer's own test asserts the emit, not this
+					     wiring, so deleting it would kill click-to-send silently. -->
+					<Composer
+						ref="composerRef"
+						v-model="input"
+						:attachments="composerAttachments"
+						:busy="busy"
+						:canSend="canSend"
+						:placeholder="`Ask ${agentName}…   @ to mention a user, / for a doctype or tool`"
+						:disclaimer="`${agentName} can make mistakes. Verify important actions before submitting to ERPNext.`"
+						@submit="send()"
+						@stop="stopRun"
+						@input="onInput"
+						@keydown="onKey"
+						@paste="onPaste"
+						@files-added="uploadFiles"
+						@remove-attachment="removeFile"
+					>
+						<template #above>
+							<!-- wiki nudge: "anything worth remembering?" card (realtime wiki:nudge
+							     event, §voice/wiki). Own block ABOVE the composer so it never
+							     shifts the input while a reply is streaming. -->
+							<div
+								v-if="nudge && nudge.conversationId === currentId"
+								class="jv-nudge"
 							>
-								<svg
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M18 6 6 18M6 6l12 12" />
-								</svg>
-							</button>
-						</div>
-						<div v-if="nudge.mode !== 'edit'" class="jv-nudge-actions">
-							<template v-if="ui.stt_enabled && nudgeRec.supported">
-								<button
-									v-if="nudge.mode === 'transcribing'"
-									class="jv-iconbtn jv-micbtn"
-									title="Transcribing…"
-									disabled
-									style="
-										width: 28px;
-										height: 28px;
-										display: flex;
-										align-items: center;
-										justify-content: center;
-										background: transparent;
-										border: none;
-										border-radius: 7px;
-										color: var(--text-3);
-									"
-								>
-									<svg
-										class="jv-spin"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="var(--cta)"
-										stroke-width="2.4"
-										stroke-linecap="round"
-									>
-										<path d="M12 3a9 9 0 1 0 9 9" />
-									</svg>
-								</button>
-								<!-- labeled, unlike the composer's dictate mic 40px below — two
-								     identical icon-only mics were indistinguishable at a glance -->
-								<button
-									v-else
-									class="jv-iconbtn jv-micbtn"
-									:class="{ rec: nudge.mode === 'recording' }"
-									:title="
-										nudge.mode === 'recording'
-											? 'Stop and transcribe'
-											: `Record a voice note (saved for ${agentName} to learn from)`
-									"
-									@click="
-										nudge.mode === 'recording'
-											? stopNudgeMic()
-											: startNudgeMic()
-									"
-									style="
-										height: 28px;
-										display: flex;
-										align-items: center;
-										justify-content: center;
-										gap: 5px;
-										background: transparent;
-										border: none;
-										border-radius: 7px;
-										cursor: pointer;
-										color: var(--text-3);
-										padding: 0 8px;
-										font-size: 12.5px;
-										font-weight: 600;
-									"
-								>
-									<svg
-										width="15"
-										height="15"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.7"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path
-											d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
-										/>
-										<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-										<path d="M12 19v3" />
-									</svg>
-									<span v-if="nudge.mode !== 'recording'">Record answer</span>
-								</button>
-								<template v-if="nudge.mode === 'recording'">
-									<span class="jv-mic-live"
-										><span class="jv-mic-dot"></span>{{ nudgeClock }}</span
-									>
+								<div class="jv-nudge-head">
+									<div class="jv-nudge-q">
+										Anything worth remembering about <b>{{ nudgeLabels }}</b
+										>?
+									</div>
 									<button
-										class="jv-mic-cancel"
-										title="Cancel recording (Esc)"
-										aria-label="Cancel recording"
-										@click="cancelNudgeMic"
+										class="jv-nudge-x"
+										title="Dismiss"
+										aria-label="Dismiss"
+										@click="dismissNudge"
 									>
 										<svg
-											width="12"
-											height="12"
+											width="13"
+											height="13"
 											viewBox="0 0 24 24"
 											fill="none"
 											stroke="currentColor"
-											stroke-width="2.2"
+											stroke-width="2"
 											stroke-linecap="round"
 											stroke-linejoin="round"
 										>
 											<path d="M18 6 6 18M6 6l12 12" />
 										</svg>
 									</button>
+								</div>
+								<div v-if="nudge.mode !== 'edit'" class="jv-nudge-actions">
+									<template v-if="ui.stt_enabled && nudgeRec.supported">
+										<button
+											v-if="nudge.mode === 'transcribing'"
+											class="jv-iconbtn jv-micbtn"
+											title="Transcribing…"
+											disabled
+											style="
+												width: 28px;
+												height: 28px;
+												display: flex;
+												align-items: center;
+												justify-content: center;
+												background: transparent;
+												border: none;
+												border-radius: 7px;
+												color: var(--text-3);
+											"
+										>
+											<svg
+												class="jv-spin"
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="var(--cta)"
+												stroke-width="2.4"
+												stroke-linecap="round"
+											>
+												<path d="M12 3a9 9 0 1 0 9 9" />
+											</svg>
+										</button>
+										<!-- labeled, unlike the composer's dictate mic 40px below — two
+										     identical icon-only mics were indistinguishable at a glance -->
+										<button
+											v-else
+											class="jv-iconbtn jv-micbtn"
+											:class="{ rec: nudge.mode === 'recording' }"
+											:title="
+												nudge.mode === 'recording'
+													? 'Stop and transcribe'
+													: `Record a voice note (saved for ${agentName} to learn from)`
+											"
+											@click="
+												nudge.mode === 'recording'
+													? stopNudgeMic()
+													: startNudgeMic()
+											"
+											style="
+												height: 28px;
+												display: flex;
+												align-items: center;
+												justify-content: center;
+												gap: 5px;
+												background: transparent;
+												border: none;
+												border-radius: 7px;
+												cursor: pointer;
+												color: var(--text-3);
+												padding: 0 8px;
+												font-size: 12.5px;
+												font-weight: 600;
+											"
+										>
+											<svg
+												width="15"
+												height="15"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.7"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path
+													d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
+												/>
+												<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+												<path d="M12 19v3" />
+											</svg>
+											<span v-if="nudge.mode !== 'recording'"
+												>Record answer</span
+											>
+										</button>
+										<template v-if="nudge.mode === 'recording'">
+											<span class="jv-mic-live"
+												><span class="jv-mic-dot"></span
+												>{{ nudgeClock }}</span
+											>
+											<button
+												class="jv-mic-cancel"
+												title="Cancel recording (Esc)"
+												aria-label="Cancel recording"
+												@click="cancelNudgeMic"
+											>
+												<svg
+													width="12"
+													height="12"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2.2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												>
+													<path d="M18 6 6 18M6 6l12 12" />
+												</svg>
+											</button>
+										</template>
+									</template>
+									<button
+										v-if="nudge.mode === 'idle'"
+										class="jv-nudge-type"
+										@click="typeNudge"
+									>
+										Type instead
+									</button>
+								</div>
+								<template v-else>
+									<textarea
+										ref="nudgeTaEl"
+										v-model="nudge.text"
+										rows="3"
+										class="jv-nudge-ta"
+										:placeholder="`What should ${agentName} remember?`"
+									></textarea>
+									<div class="jv-nudge-foot">
+										<button
+											class="jv-btn jv-btn--ghost"
+											style="height: 30px; padding: 0 12px"
+											:disabled="nudge.saving"
+											@click="nudge.mode = 'idle'"
+										>
+											Cancel
+										</button>
+										<button
+											class="jv-btn jv-btn--primary"
+											style="height: 30px; padding: 0 12px"
+											:disabled="nudge.saving || !nudge.text.trim()"
+											@click="saveNudgeNote"
+										>
+											{{ nudge.saving ? "Saving…" : "Save" }}
+										</button>
+									</div>
 								</template>
-							</template>
-							<button
-								v-if="nudge.mode === 'idle'"
-								class="jv-nudge-type"
-								@click="typeNudge"
-							>
-								Type instead
-							</button>
-						</div>
-						<template v-else>
-							<textarea
-								ref="nudgeTaEl"
-								v-model="nudge.text"
-								rows="3"
-								class="jv-nudge-ta"
-								:placeholder="`What should ${agentName} remember?`"
-							></textarea>
-							<div class="jv-nudge-foot">
-								<button
-									class="jv-btn jv-btn--ghost"
-									style="height: 30px; padding: 0 12px"
-									:disabled="nudge.saving"
-									@click="nudge.mode = 'idle'"
-								>
-									Cancel
-								</button>
-								<button
-									class="jv-btn jv-btn--primary"
-									style="height: 30px; padding: 0 12px"
-									:disabled="nudge.saving || !nudge.text.trim()"
-									@click="saveNudgeNote"
-								>
-									{{ nudge.saving ? "Saving…" : "Save" }}
-								</button>
 							</div>
 						</template>
-					</div>
-					<div
-						class="jv-composer"
-						@dragover.prevent
-						@dragenter.prevent="onDragEnter"
-						@dragleave.prevent="onDragLeave"
-						@drop.prevent="onDrop"
-						style="
-							position: relative;
-							border: 1.5px solid var(--text);
-							border-radius: 13px;
-							background: var(--surface);
-							box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
-							padding: 5px 6px 6px 6px;
-							transition: border-color 0.12s, box-shadow 0.12s;
-						"
-					>
-						<div
-							v-if="dragActive"
-							style="
-								position: absolute;
-								inset: 0;
-								z-index: 40;
-								display: flex;
-								align-items: center;
-								justify-content: center;
-								background: var(--cta-bg);
-								border: 2px dashed var(--cta);
-								border-radius: 13px;
-								color: var(--cta);
-								font-size: 13px;
-								font-weight: 600;
-								pointer-events: none;
-							"
-						>
-							Drop image or file to attach
-						</div>
-						<!-- mention dropdown (@ user, / doctype·tool) -->
-						<div
-							v-if="mention.open && mention.items.length"
-							style="
-								position: absolute;
-								bottom: calc(100% + 6px);
-								left: 0;
-								min-width: 248px;
-								max-height: 248px;
-								overflow-y: auto;
-								background: var(--surface);
-								border: 1px solid var(--border-2);
-								border-radius: 10px;
-								box-shadow: 0 10px 28px rgba(20, 20, 30, 0.16);
-								padding: 5px;
-								z-index: 30;
-							"
-						>
-							<button
-								v-for="(it, i) in mention.items"
-								:key="it.value"
-								class="jv-menuitem"
-								:class="{ on: i === mention.index }"
-								@click="applyMention(it)"
-								@mouseenter="mention.index = i"
+						<template #overlay>
+							<!-- mention dropdown (@ user, / doctype·tool) -->
+							<div
+								v-if="mention.open && mention.items.length"
+								style="
+									position: absolute;
+									bottom: calc(100% + 6px);
+									left: 0;
+									min-width: 248px;
+									max-height: 248px;
+									overflow-y: auto;
+									background: var(--surface);
+									border: 1px solid var(--border-2);
+									border-radius: 10px;
+									box-shadow: 0 10px 28px rgba(20, 20, 30, 0.16);
+									padding: 5px;
+									z-index: 30;
+								"
+							>
+								<button
+									v-for="(it, i) in mention.items"
+									:key="it.value"
+									class="jv-menuitem"
+									:class="{ on: i === mention.index }"
+									@click="applyMention(it)"
+									@mouseenter="mention.index = i"
+								>
+									<span
+										style="
+											flex: 1;
+											overflow: hidden;
+											text-overflow: ellipsis;
+											white-space: nowrap;
+										"
+										>{{ mention.type }}{{ it.value }}</span
+									>
+									<span
+										style="
+											font-size: 10px;
+											color: var(--text-3);
+											text-transform: uppercase;
+											letter-spacing: 0.03em;
+										"
+										>{{ it.sub }}</span
+									>
+								</button>
+							</div>
+							<!-- clipboard held only a file PATH, not the image bytes -->
+							<div
+								v-if="pasteHint"
+								style="
+									font-size: 11.5px;
+									color: var(--amber);
+									padding: 4px 8px;
+									line-height: 1.4;
+								"
+							>
+								{{ pasteHint }}
+							</div>
+						</template>
+						<template #below-input>
+							<!-- voice recovery banner: a prior session left un-transcribed clips.
+						     HIDDEN while recording (VAR-1): recovering mid-take could collide the
+						     seq space and drop a live clip. -->
+							<div
+								v-if="
+									ui.stt_enabled &&
+									recoveryClips.length &&
+									micState !== 'recording'
+								"
+								style="
+									display: flex;
+									flex-wrap: wrap;
+									align-items: center;
+									gap: 8px;
+									margin: 2px 4px 6px;
+									padding: 6px 10px;
+									border-radius: 8px;
+									font-size: 12px;
+									color: var(--text);
+									background: rgba(127, 127, 127, 0.1);
+									border: 1px solid rgba(127, 127, 127, 0.22);
+								"
 							>
 								<span
-									style="
-										flex: 1;
-										overflow: hidden;
-										text-overflow: ellipsis;
-										white-space: nowrap;
-									"
-									>{{ mention.type }}{{ it.value }}</span
+									>{{ recoveryClips.length }} voice clip(s) from a previous
+									session weren't transcribed.</span
 								>
-								<span
-									style="
-										font-size: 10px;
-										color: var(--text-3);
-										text-transform: uppercase;
-										letter-spacing: 0.03em;
-									"
-									>{{ it.sub }}</span
+								<button class="jv-voicechip-act" @click="recoverOrphans">
+									Transcribe
+								</button>
+								<button
+									class="jv-voicechip-act"
+									@click="recoveryClips.forEach(downloadOrphan)"
 								>
-							</button>
-						</div>
-						<!-- pending attachments: image thumbnails (Claude-style) + file chips -->
-						<div
-							v-if="pendingFiles.length || uploading"
-							style="display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 4px 2px"
-						>
-							<template v-for="(f, i) in pendingFiles" :key="i">
-								<span
-									v-if="isImageFile(f)"
-									:title="f.file_name"
-									style="
-										position: relative;
-										display: inline-block;
-										line-height: 0;
-									"
+									Download
+								</button>
+								<!-- non-destructive: hide + keep the audio (recoverable next reload) -->
+								<button class="jv-voicechip-act" @click="laterOrphans">
+									Later
+								</button>
+								<!-- destructive: quieter weight + confirm before deleting audio -->
+								<button
+									class="jv-voicechip-quiet"
+									title="Permanently delete the saved audio"
+									@click="discardOrphans"
 								>
-									<img
-										:src="f.file_url"
-										alt=""
-										style="
-											width: 52px;
-											height: 52px;
-											object-fit: cover;
-											border-radius: 9px;
-											border: 1px solid var(--border);
-											display: block;
-										"
-									/>
-									<button
-										@click="removeFile(i)"
-										title="Remove"
-										style="
-											position: absolute;
-											top: -7px;
-											right: -7px;
-											width: 18px;
-											height: 18px;
-											border-radius: 50%;
-											background: var(--text);
-											color: var(--surface);
-											border: none;
-											cursor: pointer;
-											font-size: 12px;
-											line-height: 1;
-											display: flex;
-											align-items: center;
-											justify-content: center;
-											padding: 0;
-										"
-									>
-										×
-									</button>
-								</span>
+									Discard
+								</button>
+							</div>
+							<!-- failed-clip chips: a chunk exhausted its retry budget. Retry drops the
+						     recovered words back into the in-place ⟦clip N⟧ placeholder where they
+						     belong (VUX-2), not at the composer end. ✕ discards the clip (confirmed). -->
+							<div
+								v-if="ui.stt_enabled && voiceQ.failed.length"
+								style="
+									display: flex;
+									flex-wrap: wrap;
+									align-items: center;
+									gap: 6px;
+									margin: 2px 4px 6px;
+								"
+							>
 								<span
-									v-else
+									v-for="f in voiceQ.failed"
+									:key="f.seq"
 									style="
 										display: inline-flex;
 										align-items: center;
-										gap: 5px;
-										font-size: 11.5px;
-										padding: 3px 5px 3px 9px;
+										gap: 6px;
+										padding: 3px 8px;
 										border-radius: 999px;
-										color: var(--text-2);
-										background: var(--surface-1);
-										border: 1px solid var(--border);
+										font-size: 12px;
+										color: var(--text);
+										background: rgba(220, 150, 40, 0.12);
+										border: 1px solid rgba(220, 150, 40, 0.32);
 									"
-									>📎 {{ f.file_name
-									}}<button
-										@click="removeFile(i)"
-										style="
-											border: none;
-											background: transparent;
-											cursor: pointer;
-											font-size: 14px;
-											line-height: 1;
-											color: var(--text-3);
-										"
+								>
+									Clip {{ f.seq + 1 }} didn't transcribe
+									<button
+										class="jv-voicechip-act"
+										title="Transcribe again — the words drop back into the ⟦clip⟧ placeholder in the message, where they belong"
+										@click="retryClip(f.seq)"
 									>
-										×
-									</button></span
-								>
-							</template>
-							<span
-								v-if="uploading"
-								style="font-size: 11.5px; color: var(--text-3); padding: 3px 6px"
-								>Uploading…</span
-							>
-						</div>
-						<div
-							v-if="pasteHint"
-							style="
-								font-size: 11.5px;
-								color: var(--amber);
-								padding: 4px 8px;
-								line-height: 1.4;
-							"
-						>
-							{{ pasteHint }}
-						</div>
-						<textarea
-							ref="inputEl"
-							v-model="input"
-							@input="onInput"
-							@keydown="onKey"
-							@paste="onPaste"
-							rows="1"
-							:placeholder="`Ask ${agentName}…   @ to mention a user, / for a doctype or tool`"
-							style="
-								width: 100%;
-								border: none;
-								outline: none;
-								resize: none;
-								font-family: inherit;
-								font-size: 14px;
-								line-height: 1.5;
-								color: var(--text);
-								background: transparent;
-								padding: 8px 8px 4px;
-								max-height: 140px;
-							"
-						></textarea>
-						<input
-							ref="fileInput"
-							type="file"
-							multiple
-							style="display: none"
-							@change="onFilesPicked"
-						/>
-						<!-- voice recovery banner: a prior session left un-transcribed clips.
-						     HIDDEN while recording (VAR-1): recovering mid-take could collide the
-						     seq space and drop a live clip. -->
-						<div
-							v-if="
-								ui.stt_enabled && recoveryClips.length && micState !== 'recording'
-							"
-							style="
-								display: flex;
-								flex-wrap: wrap;
-								align-items: center;
-								gap: 8px;
-								margin: 2px 4px 6px;
-								padding: 6px 10px;
-								border-radius: 8px;
-								font-size: 12px;
-								color: var(--text);
-								background: rgba(127, 127, 127, 0.1);
-								border: 1px solid rgba(127, 127, 127, 0.22);
-							"
-						>
-							<span
-								>{{ recoveryClips.length }} voice clip(s) from a previous session
-								weren't transcribed.</span
-							>
-							<button class="jv-voicechip-act" @click="recoverOrphans">
-								Transcribe
-							</button>
-							<button
-								class="jv-voicechip-act"
-								@click="recoveryClips.forEach(downloadOrphan)"
-							>
-								Download
-							</button>
-							<!-- non-destructive: hide + keep the audio (recoverable next reload) -->
-							<button class="jv-voicechip-act" @click="laterOrphans">Later</button>
-							<!-- destructive: quieter weight + confirm before deleting audio -->
-							<button
-								class="jv-voicechip-quiet"
-								title="Permanently delete the saved audio"
-								@click="discardOrphans"
-							>
-								Discard
-							</button>
-						</div>
-						<!-- failed-clip chips: a chunk exhausted its retry budget. Retry drops the
-						     recovered words back into the in-place ⟦clip N⟧ placeholder where they
-						     belong (VUX-2), not at the composer end. ✕ discards the clip (confirmed). -->
-						<div
-							v-if="ui.stt_enabled && voiceQ.failed.length"
-							style="
-								display: flex;
-								flex-wrap: wrap;
-								align-items: center;
-								gap: 6px;
-								margin: 2px 4px 6px;
-							"
-						>
-							<span
-								v-for="f in voiceQ.failed"
-								:key="f.seq"
-								style="
-									display: inline-flex;
-									align-items: center;
-									gap: 6px;
-									padding: 3px 8px;
-									border-radius: 999px;
-									font-size: 12px;
-									color: var(--text);
-									background: rgba(220, 150, 40, 0.12);
-									border: 1px solid rgba(220, 150, 40, 0.32);
-								"
-							>
-								Clip {{ f.seq + 1 }} didn't transcribe
-								<button
-									class="jv-voicechip-act"
-									title="Transcribe again — the words drop back into the ⟦clip⟧ placeholder in the message, where they belong"
-									@click="retryClip(f.seq)"
-								>
-									Retry
-								</button>
-								<button class="jv-voicechip-act" @click="downloadClip(f.seq)">
-									Download
-								</button>
-								<button
-									class="jv-voicechip-quiet"
-									title="Discard this clip"
-									aria-label="Discard this clip"
-									@click="discardClip(f.seq)"
-								>
-									✕
-								</button>
-							</span>
-						</div>
-						<!-- retained-clip chips (VR4-1): a committed clip whose transcript was edited
+										Retry
+									</button>
+									<button class="jv-voicechip-act" @click="downloadClip(f.seq)">
+										Download
+									</button>
+									<button
+										class="jv-voicechip-quiet"
+										title="Discard this clip"
+										aria-label="Discard this clip"
+										@click="discardClip(f.seq)"
+									>
+										✕
+									</button>
+								</span>
+							</div>
+							<!-- retained-clip chips (VR4-1): a committed clip whose transcript was edited
 						     OUT of the message before sending. Its audio is retained (never lost) but
 						     was otherwise actionless — Restore drops the words back into the composer,
 						     Download saves the audio, ✕ discards it (and clears the leave guard). -->
-						<div
-							v-if="ui.stt_enabled && voiceQ.retained && voiceQ.retained.length"
-							style="
-								display: flex;
-								flex-wrap: wrap;
-								align-items: center;
-								gap: 6px;
-								margin: 2px 4px 6px;
-							"
-						>
-							<span
-								v-for="r in voiceQ.retained"
-								:key="'ret-' + r.seq"
+							<div
+								v-if="ui.stt_enabled && voiceQ.retained && voiceQ.retained.length"
 								style="
-									display: inline-flex;
+									display: flex;
+									flex-wrap: wrap;
 									align-items: center;
 									gap: 6px;
-									padding: 3px 8px;
-									border-radius: 999px;
-									font-size: 12px;
-									color: var(--text);
-									background: rgba(90, 130, 200, 0.12);
-									border: 1px solid rgba(90, 130, 200, 0.32);
+									margin: 2px 4px 6px;
 								"
 							>
-								Clip {{ r.seq + 1 }} was edited out
-								<button
-									class="jv-voicechip-act"
-									title="Put this clip's transcript back into the message"
-									@click="restoreClip(r.seq)"
+								<span
+									v-for="r in voiceQ.retained"
+									:key="'ret-' + r.seq"
+									style="
+										display: inline-flex;
+										align-items: center;
+										gap: 6px;
+										padding: 3px 8px;
+										border-radius: 999px;
+										font-size: 12px;
+										color: var(--text);
+										background: rgba(90, 130, 200, 0.12);
+										border: 1px solid rgba(90, 130, 200, 0.32);
+									"
 								>
-									Restore
-								</button>
-								<button class="jv-voicechip-act" @click="downloadClip(r.seq)">
-									Download
-								</button>
-								<button
-									class="jv-voicechip-quiet"
-									title="Discard this clip"
-									aria-label="Discard this clip"
-									@click="discardRetainedClip(r.seq)"
-								>
-									✕
-								</button>
-							</span>
-						</div>
-						<!-- unpersisted-clip chips (VR5-2): a clip whose audio could NOT be durably
+									Clip {{ r.seq + 1 }} was edited out
+									<button
+										class="jv-voicechip-act"
+										title="Put this clip's transcript back into the message"
+										@click="restoreClip(r.seq)"
+									>
+										Restore
+									</button>
+									<button class="jv-voicechip-act" @click="downloadClip(r.seq)">
+										Download
+									</button>
+									<button
+										class="jv-voicechip-quiet"
+										title="Discard this clip"
+										aria-label="Discard this clip"
+										@click="discardRetainedClip(r.seq)"
+									>
+										✕
+									</button>
+								</span>
+							</div>
+							<!-- unpersisted-clip chips (VR5-2): a clip whose audio could NOT be durably
 						     saved on this device (storage full / private mode / IndexedDB blocked).
 						     Recording is stopped; a crash or reload would otherwise lose this audio
 						     silently, so it is surfaced as ACTIONABLE — Download keeps it, Retry
 						     re-attempts the save once space is freed. -->
-						<div
-							v-if="
-								ui.stt_enabled && voiceQ.unpersisted && voiceQ.unpersisted.length
-							"
-							style="
-								display: flex;
-								flex-wrap: wrap;
-								align-items: center;
-								gap: 6px;
-								margin: 2px 4px 6px;
-							"
-						>
-							<span
-								v-for="u in voiceQ.unpersisted"
-								:key="'unp-' + u.seq"
+							<div
+								v-if="
+									ui.stt_enabled &&
+									voiceQ.unpersisted &&
+									voiceQ.unpersisted.length
+								"
 								style="
-									display: inline-flex;
+									display: flex;
+									flex-wrap: wrap;
 									align-items: center;
 									gap: 6px;
-									padding: 3px 8px;
-									border-radius: 999px;
-									font-size: 12px;
-									color: var(--text);
-									background: rgba(210, 70, 70, 0.12);
-									border: 1px solid rgba(210, 70, 70, 0.34);
+									margin: 2px 4px 6px;
 								"
 							>
-								Clip {{ u.seq + 1 }} couldn't be saved
-								<button
-									class="jv-voicechip-act"
-									title="Try saving this clip's audio again (e.g. after freeing storage)"
-									@click="retryPersistClip(u.seq)"
+								<span
+									v-for="u in voiceQ.unpersisted"
+									:key="'unp-' + u.seq"
+									style="
+										display: inline-flex;
+										align-items: center;
+										gap: 6px;
+										padding: 3px 8px;
+										border-radius: 999px;
+										font-size: 12px;
+										color: var(--text);
+										background: rgba(210, 70, 70, 0.12);
+										border: 1px solid rgba(210, 70, 70, 0.34);
+									"
 								>
-									Retry
-								</button>
-								<button class="jv-voicechip-act" @click="downloadClip(u.seq)">
-									Download
-								</button>
-							</span>
-						</div>
-						<div
-							style="display: flex; align-items: center; gap: 6px; padding: 2px 4px"
-						>
-							<!-- dictation mic (hidden unless the backend reports STT configured).
-							     Chunked long-dictation: recording and background transcription
-							     overlap, so there is no "transcribing" button state — the toggle
-							     starts/stops recording; a small spinner pill shows clips still
-							     transcribing after Stop. -->
+									Clip {{ u.seq + 1 }} couldn't be saved
+									<button
+										class="jv-voicechip-act"
+										title="Try saving this clip's audio again (e.g. after freeing storage)"
+										@click="retryPersistClip(u.seq)"
+									>
+										Retry
+									</button>
+									<button class="jv-voicechip-act" @click="downloadClip(u.seq)">
+										Download
+									</button>
+								</span>
+							</div>
+						</template>
+						<template #left-toolbar="{ pickFiles }">
+							<!-- dictation mic (hidden unless the backend reports STT configured) -->
 							<template v-if="ui.stt_enabled && micRec.supported">
 								<button
 									class="jv-iconbtn jv-micbtn"
@@ -3025,84 +2802,8 @@
 								</svg>
 								<span v-if="groundNextTurn">Wiki</span>
 							</button>
-							<span
-								style="
-									margin-left: auto;
-									font-size: 11px;
-									color: var(--text-3);
-									margin-right: 4px;
-								"
-								>{{ busy ? "Stop" : "Enter ↵" }}</span
-							>
-							<button
-								v-if="busy"
-								@click="stopRun"
-								title="Stop generating"
-								style="
-									width: 32px;
-									height: 32px;
-									display: flex;
-									align-items: center;
-									justify-content: center;
-									background: var(--cta);
-									border: none;
-									border-radius: 8px;
-									cursor: pointer;
-								"
-							>
-								<svg
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="var(--cta-fg)"
-								>
-									<rect x="6" y="6" width="12" height="12" rx="2.5" />
-								</svg>
-							</button>
-							<button
-								v-else
-								class="jv-sendbtn"
-								:class="{ ready: canSend }"
-								@click="send()"
-								:disabled="!canSend"
-								:style="{
-									width: '32px',
-									height: '32px',
-									display: 'flex',
-									alignItems: 'center',
-									justifyContent: 'center',
-									background: canSend ? 'var(--cta)' : 'var(--surface-3)',
-									border: 'none',
-									borderRadius: '8px',
-									cursor: canSend ? 'pointer' : 'default',
-								}"
-							>
-								<svg
-									width="16"
-									height="16"
-									viewBox="0 0 24 24"
-									fill="none"
-									:stroke="canSend ? 'var(--cta-fg)' : 'var(--text-3)'"
-									stroke-width="2.1"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M12 19V5M5 12l7-7 7 7" />
-								</svg>
-							</button>
-						</div>
-					</div>
-					<div
-						style="
-							text-align: center;
-							font-size: 10.5px;
-							color: var(--text-3);
-							margin-top: 8px;
-						"
-					>
-						{{ agentName }} can make mistakes. Verify important actions before
-						submitting to ERPNext.
-					</div>
+						</template>
+					</Composer>
 				</div>
 			</div>
 		</main>
@@ -3834,6 +3535,8 @@ import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
+import Message from "@/components/chat/Message.vue";
+import Composer from "@/components/chat/Composer.vue";
 import { checkReady, readinessDetailOf } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner } from "@/account/format.js";
@@ -3935,7 +3638,11 @@ function dismissBillingAlert() {
 // THIS chat. autoApplyNote surfaces the admin-only-enable message.
 const convAutoApply = ref(false);
 const autoApplyNote = ref("");
-const inputEl = ref(null);
+// The <Composer> instance. It owns the textarea and auto-grow; this view still
+// owns everything around them, so it reaches in for the two things a parent
+// legitimately needs: `composerRef.value.el` (the raw textarea, for the caret
+// math behind mention insertion and edit-and-resend) and `focusInput()`.
+const composerRef = ref(null);
 const threadEl = ref(null);
 const threadInnerEl = ref(null);
 const rootEl = ref(null);
@@ -4530,7 +4237,6 @@ const runMeta = ref({}); // { [message_id]: { ms, tools, names } } — survives 
 const canvasContent = ref({}); // { `${msgName}::${canvasName}`: srcdoc html (html/svg) | data-url (pdf/image/file) }
 const pendingFiles = ref([]); // [{ file_url, file_name }] attachments to send
 const uploading = ref(false);
-const fileInput = ref(null);
 const mention = ref({ open: false, type: "", query: "", start: 0, items: [], index: 0 });
 // Tool names for the "Tools available" count + the /tool autocomplete. Seeded
 // with the core set as a fallback, then replaced on mount with the live bench
@@ -6401,8 +6107,7 @@ function copyMsg(id, text) {
 function editCommand(m) {
 	input.value = m.content || "";
 	nextTick(() => {
-		autoGrow();
-		const el = inputEl.value;
+		const el = composerRef.value?.el;
 		if (el) {
 			el.focus();
 			const p = input.value.length;
@@ -6559,12 +6264,8 @@ onBeforeUnmount(() => {
 		threadRO = null;
 	}
 });
-function autoGrow() {
-	const el = inputEl.value;
-	if (!el) return;
-	el.style.height = "auto";
-	el.style.height = Math.min(el.scrollHeight, 140) + "px";
-}
+// Auto-grow now lives in <Composer> (it watches modelValue), so every former
+// autoGrow() call here is gone — only the caret work around them remains.
 function onKey(e) {
 	const mn = mention.value;
 	if (mn.open && mn.items.length) {
@@ -6606,7 +6307,6 @@ function onKey(e) {
 			histIdx.value -= 1;
 			input.value = promptHistory.value[histIdx.value];
 			nextTick(() => {
-				autoGrow();
 				const p = input.value.length;
 				el.setSelectionRange(p, p);
 			});
@@ -6627,7 +6327,6 @@ function onKey(e) {
 			input.value = histDraft.value;
 		}
 		nextTick(() => {
-			autoGrow();
 			const p = input.value.length;
 			el.setSelectionRange(p, p);
 		});
@@ -6956,8 +6655,7 @@ async function selectConversation(id) {
 	if (route.params.id !== id) router.replace("/c/" + id);
 	await loadConversation(id);
 	await nextTick();
-	autoGrow();
-	inputEl.value?.focus();
+	composerRef.value?.focusInput();
 }
 // Surface a failed action (new chat, send, …) as an error toast. String()-coerces
 // the extracted reason so a non-string Frappe error payload can't throw inside the
@@ -7025,15 +6723,14 @@ async function newChat() {
 	// multiple of three - re-probe, but never await it (must never block chat).
 	probeGreeting();
 	await nextTick();
-	inputEl.value?.focus();
+	composerRef.value?.focusInput();
 }
 // Welcome cards drop the prompt into the input (don't send) so the user can
 // tweak it first.
 function fillInput(text) {
 	input.value = text;
 	nextTick(() => {
-		inputEl.value?.focus();
-		autoGrow();
+		composerRef.value?.focusInput();
 	});
 }
 function openErpDesk() {
@@ -7167,7 +6864,6 @@ async function send(textArg, resendAck) {
 		input.value = "";
 		pendingFiles.value = [];
 		mention.value = { ...mention.value, open: false };
-		nextTick(autoGrow);
 	}
 	// VR4-1: a fromMain send clears the composer, so any committed voice clip in this scope whose
 	// transcript the user EDITED OUT (absent from the payload token above) can no longer be released
@@ -7881,7 +7577,7 @@ function _mutateComposerFor(forId, mutate) {
 	// clip's scope IS the on-screen composer's scope; otherwise stash into that scope's draft.
 	const scope = forId == null ? _NEW_CHAT_SCOPE : forId;
 	if (scope === _currentScope()) {
-		const el = inputEl.value;
+		const el = composerRef.value?.el;
 		const focused = !!el && document.activeElement === el;
 		const atEnd = el
 			? el.selectionStart === el.value.length && el.selectionEnd === el.value.length
@@ -7892,7 +7588,7 @@ function _mutateComposerFor(forId, mutate) {
 		if (next === input.value) return;
 		input.value = next;
 		nextTick(() => {
-			autoGrow();
+			// auto-grow now lives in <Composer> (it watches modelValue); only the caret work remains
 			if (!focused || !el) return; // do NOT pull focus in when the user is elsewhere
 			try {
 				if (atEnd) el.selectionStart = el.selectionEnd = el.value.length;
@@ -8349,11 +8045,26 @@ function dismissNudge() {
 	notify("Okay — won't ask again in this chat for a week.");
 }
 
-// ---- file input ----
-function pickFiles() {
-	fileInput.value?.click();
-}
+// ---- attachments ----
+// Chat uploads EAGERLY, the moment a file is attached: send() posts the
+// uploaded `{file_url, file_name}` records straight through to the backend, so
+// `pendingFiles` must keep exactly that wire shape. <Composer> renders from
+// display-objects instead, so adapt here rather than reshaping the payload.
+// The in-flight "Uploading…" pill is just one more entry.
+const composerAttachments = computed(() => {
+	const chips = pendingFiles.value.map((f, i) => ({
+		key: i,
+		file_name: f.file_name,
+		// Only images get a preview; everything else renders as a 📎 chip.
+		preview_url: isImageFile(f) ? f.file_url : "",
+		removable: true,
+	}));
+	if (uploading.value) chips.push({ key: "uploading", uploading: true });
+	return chips;
+});
 // Shared upload path for the file picker, clipboard paste, and drag-and-drop.
+// The picker and drag-drop now live inside <Composer>, which hands us the raw
+// File[] via @files-added and never uploads anything itself.
 async function uploadFiles(list) {
 	const files = Array.from(list || []);
 	if (!files.length) return;
@@ -8366,29 +8077,7 @@ async function uploadFiles(list) {
 		}
 	}
 	uploading.value = false;
-	inputEl.value?.focus();
-}
-async function onFilesPicked(e) {
-	const picked = Array.from(e.target.files || []);
-	e.target.value = "";
-	await uploadFiles(picked);
-}
-// Drag-and-drop a file/image onto the composer (Claude-style). dragDepth guards
-// against the flicker from dragenter/leave firing on child elements.
-const dragActive = ref(false);
-let _dragDepth = 0;
-function onDragEnter() {
-	_dragDepth++;
-	dragActive.value = true;
-}
-function onDragLeave() {
-	_dragDepth = Math.max(0, _dragDepth - 1);
-	if (!_dragDepth) dragActive.value = false;
-}
-async function onDrop(e) {
-	_dragDepth = 0;
-	dragActive.value = false;
-	await uploadFiles((e.dataTransfer && e.dataTransfer.files) || []);
+	composerRef.value?.focusInput();
 }
 // Transient hint shown when the clipboard holds only a file PATH, not the image
 // bytes (e.g. copying an image FILE from a file manager - the OS exposes only
@@ -8452,7 +8141,7 @@ async function onPaste(e) {
 		}
 	}
 	uploading.value = false;
-	inputEl.value?.focus();
+	composerRef.value?.focusInput();
 }
 function removeFile(i) {
 	pendingFiles.value = pendingFiles.value.filter((_, idx) => idx !== i);
@@ -8465,8 +8154,7 @@ function isImageFile(f) {
 let _mentionSeq = 0;
 function onInput() {
 	histIdx.value = null; // typing exits prompt-history navigation
-	autoGrow();
-	const el = inputEl.value;
+	const el = composerRef.value?.el;
 	if (!el) return;
 	const caret = el.selectionStart;
 	const m = input.value.slice(0, caret).match(/(?:^|\s)([@/])([\w-]*)$/);
@@ -8514,14 +8202,13 @@ async function queryMentions(type, query) {
 }
 function applyMention(item) {
 	if (!item) return;
-	const el = inputEl.value;
+	const el = composerRef.value?.el;
 	const caret = el ? el.selectionStart : input.value.length;
 	const before = input.value.slice(0, mention.value.start);
 	const token = mention.value.type + item.value + " ";
 	input.value = before + token + input.value.slice(caret);
 	mention.value = { ...mention.value, open: false };
 	nextTick(() => {
-		autoGrow();
 		if (el) {
 			const pos = (before + token).length;
 			el.focus();
@@ -8738,10 +8425,9 @@ onMounted(async () => {
 		input.value = prefill.text;
 		_prefillSendContext = prefill.context || null; // rides send()'s context arg
 		await nextTick();
-		autoGrow();
 		if (prefill.autoSend) await send();
 	}
-	inputEl.value?.focus();
+	composerRef.value?.focusInput();
 });
 onBeforeUnmount(() => {
 	socket?.off("jarvis:event", onEvent);
@@ -8825,15 +8511,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* Native form controls (select dropdowns, date/time pickers, scrollbars)
-   follow the app theme instead of the OS default — without this, a dark app
-   pops white select menus and calendar popups. */
-.jv-root {
-	color-scheme: light;
-}
-.jv-root.jv-dark {
-	color-scheme: dark;
-}
 /* The brand mark is now <JarvisMark> everywhere on this surface (hero, assistant
    avatars, proactive toast), so it carries its own gradient in BOTH themes.
    Deleted with this comment: a `.jv-dark .jv-logo, .jv-dark .jv-toast-ic` rule
@@ -8843,46 +8520,12 @@ onUnmounted(() => {
    mark was near-black in light and gradient in dark: the same logo in two
    colours, and a third (flat bg-blue-500) in NotifyToaster. One mark, one
    gradient, no !important. */
-/* The send button inverts to black/white on hover (depends on its base color,
-   so the white icon flips to the surface color). !important beats the inline
-   background. */
-/* Send button: springy lift + arrow nudge on hover, press-in on click, and a
-   one-shot pop when it becomes ready (text entered). */
-.jv-sendbtn {
-	transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.14s ease;
-}
-.jv-sendbtn svg {
-	transition: transform 0.16s ease;
-}
-.jv-sendbtn:not(:disabled):hover {
-	transform: translateY(-2px) scale(1.07);
-}
-.jv-sendbtn:not(:disabled):hover svg {
-	transform: translateY(-2px);
-}
-.jv-sendbtn:not(:disabled):active {
-	transform: scale(0.9);
-}
-.jv-sendbtn.ready {
-	animation: jv-send-pop 0.3s ease;
-}
-@keyframes jv-send-pop {
-	0% {
-		transform: scale(0.7);
-	}
-	55% {
-		transform: scale(1.15);
-	}
-	100% {
-		transform: scale(1);
-	}
-}
-.jv-sendbtn:hover:not(:disabled) {
-	background: var(--text) !important;
-}
-.jv-sendbtn:hover:not(:disabled) svg {
-	stroke: var(--surface) !important;
-}
+/* The Send button's rules (.jv-sendbtn + the jv-send-pop keyframe) moved to
+   components/chat/Composer.vue with the button itself. `.jv-iconbtn` below did
+   NOT move — it is still worn by this view's header buttons and by the
+   mic/attach/wiki/nudge buttons it slots back into the Composer, which carry
+   THIS component's scope id. Composer keeps its own copy for its default
+   attach button. */
 .jv-menuitem-danger {
 	color: var(--red);
 }
@@ -8898,7 +8541,18 @@ onUnmounted(() => {
 }
 /* buttons invert to black/white on hover (theme-adaptive: black on light,
    white on dark) — var(--text)/var(--surface) flip, with an svg-stroke
-   override so the icon stays visible on the inverted background. */
+   override so the icon stays visible on the inverted background.
+
+   MUST STAY IN SYNC with the identical copy in
+   `components/chat/Composer.vue` (which styles that component's own default
+   attach button; slot content sent back into it carries THIS scope id, so
+   Composer's copy can't reach chat's mic/attach/wiki buttons). A third,
+   DELIBERATELY DIFFERENT `.jv-iconbtn` lives globally in
+   `assets/settings.css` — a quiet ghost hover for the settings dialog; do not
+   unify it with these. Hoisting these two into a shared sheet was evaluated
+   and rejected: unscoped, their `!important` would beat settings.css's
+   un-!important hover and restyle SettingsDialog's close button. Same applies
+   to the `:focus-visible` and `.jv-dark` copies further down this file. */
 .jv-iconbtn:hover {
 	background: var(--text) !important;
 	color: var(--surface) !important;
@@ -8941,12 +8595,9 @@ onUnmounted(() => {
 .jv-menuitem.on {
 	background: var(--surface-1);
 }
-/* black focus highlight on the composer */
-.jv-composer:focus-within {
-	border-color: var(--text);
-	box-shadow: 0 0 0 3px rgba(23, 23, 23, 0.07);
-}
-/* jump-to-latest arrow — floats just above the composer, centered */
+/* jump-to-latest arrow — floats just above the composer, centered.
+   It lives in .jv-composer-wrap (this view), NOT inside <Composer>, so it and
+   its .jv-sd-* transition stay here. */
 .jv-scrolldown {
 	position: absolute;
 	left: 50%;
@@ -9329,42 +8980,6 @@ onUnmounted(() => {
 	max-height: 320px;
 	overflow-y: auto;
 }
-/* per-message Copy/Edit bar — revealed on hover */
-.jv-msgbar {
-	display: flex;
-	align-items: center;
-	gap: 3px;
-	margin-top: 0;
-	opacity: 0;
-	transition: opacity 0.12s ease;
-}
-.jv-umsg:hover .jv-msgbar,
-.jv-amsg:hover .jv-msgbar {
-	opacity: 1;
-}
-.jv-msgtime {
-	font-size: 11.5px;
-	color: var(--text-3);
-	padding: 0 3px;
-	cursor: default;
-	user-select: none;
-}
-.jv-msgbtn {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	width: 26px;
-	height: 26px;
-	border: none;
-	background: transparent;
-	border-radius: 6px;
-	cursor: pointer;
-	color: var(--text-3);
-}
-.jv-msgbtn:hover {
-	background: var(--surface-2);
-	color: var(--text);
-}
 .jv-meta span {
 	display: inline-flex;
 	align-items: center;
@@ -9439,9 +9054,7 @@ onUnmounted(() => {
 }
 /* visible keyboard focus (UX #15) */
 .jv-suggest:focus-visible,
-.jv-sendbtn:focus-visible,
 .jv-iconbtn:focus-visible,
-.jv-msgbtn:focus-visible,
 .jv-retry:focus-visible,
 .jv-modelpill:focus-visible {
 	outline: 2px solid var(--cta);
@@ -9458,12 +9071,6 @@ onUnmounted(() => {
 	}
 	.jv-tool-dot.run,
 	.jv-mic-dot {
-		animation: none;
-	}
-	.jv-sendbtn.ready {
-		animation: none;
-	}
-	.jv-md :deep(.jv-mermaid:not([data-rendered]))::after {
 		animation: none;
 	}
 	.jv-settings,
@@ -9489,15 +9096,6 @@ onUnmounted(() => {
 	}
 	.jv-welcome-h1 {
 		font-size: 24px !important;
-	}
-	.jv-ububble {
-		max-width: 92% !important;
-	}
-}
-/* touch devices can't hover, so always show per-message actions/timestamps */
-@media (hover: none) {
-	.jv-msgbar {
-		opacity: 1 !important;
 	}
 }
 
@@ -9597,100 +9195,11 @@ onUnmounted(() => {
 	font-weight: 600;
 	color: var(--text);
 }
-/* mermaid diagrams + fenced code blocks in markdown */
-/* Narrow-window resilience: without min-width:0 a flex child refuses to shrink
-   below its content, so on minimize the layout "breaks"; wide content (tables,
-   code) must scroll INSIDE its own box, never squeeze the text around it. */
-.jv-md {
-	min-width: 0;
-	max-width: 100%;
-	overflow-wrap: anywhere;
-}
-.jv-md :deep(table) {
-	display: block;
-	max-width: 100%;
-	overflow-x: auto;
-	border-collapse: collapse;
-}
-.jv-md :deep(pre) {
-	max-width: 100%;
-	overflow-x: auto;
-}
-.jv-md :deep(img) {
-	max-width: 100%;
-	height: auto;
-}
 .jv-cards,
 .jv-action,
 .jv-email {
 	min-width: 0;
 	max-width: 100%;
-}
-.jv-md :deep(.jv-mermaid) {
-	position: relative;
-	margin: 8px 0 12px;
-	text-align: center;
-	overflow-x: auto;
-}
-.jv-md :deep(.jv-mermaid svg) {
-	max-width: 100%;
-	height: auto;
-}
-/* skeleton shimmer while a chart hasn't rendered to SVG yet (no data-rendered) —
-   hides the raw mermaid source so the user never sees the markup flash. */
-.jv-md :deep(.jv-mermaid:not([data-rendered])) {
-	min-height: 196px;
-	color: transparent !important;
-	user-select: none;
-	overflow: hidden;
-	border-radius: 10px;
-	border: 1px solid var(--border);
-	background: var(--surface-1);
-}
-.jv-md :deep(.jv-mermaid:not([data-rendered])) * {
-	color: transparent !important;
-}
-.jv-md :deep(.jv-mermaid:not([data-rendered]))::after {
-	content: "";
-	position: absolute;
-	inset: 0;
-	background: linear-gradient(100deg, transparent 20%, var(--surface-2) 50%, transparent 80%);
-	background-size: 220% 100%;
-	animation: jv-shimmer 1.25s ease-in-out infinite;
-}
-@keyframes jv-shimmer {
-	0% {
-		background-position: 180% 0;
-	}
-	100% {
-		background-position: -180% 0;
-	}
-}
-.jv-md :deep(.jv-chart-dl) {
-	position: absolute;
-	top: 6px;
-	right: 6px;
-	width: 26px;
-	height: 26px;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	padding: 0;
-	background: var(--surface);
-	color: var(--text-3);
-	border: 1px solid var(--border);
-	border-radius: 6px;
-	cursor: pointer;
-	opacity: 0;
-	transition: opacity 0.12s, color 0.12s, background 0.12s;
-}
-.jv-md :deep(.jv-mermaid:hover .jv-chart-dl) {
-	opacity: 1;
-}
-.jv-md :deep(.jv-chart-dl:hover) {
-	color: var(--text);
-	background: var(--surface-1);
-	border-color: var(--border-2);
 }
 .jv-switch {
 	width: 38px;
@@ -9721,73 +9230,6 @@ onUnmounted(() => {
 .jv-switch.on .jv-switch-knob {
 	left: 18px;
 }
-.jv-md :deep(.jv-md-pre) {
-	margin: 6px 0 12px;
-	padding: 12px 14px;
-	background: var(--surface-2);
-	border: 1px solid var(--border);
-	border-radius: 8px;
-	overflow-x: auto;
-}
-.jv-md :deep(.jv-md-pre code) {
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: 12px;
-	color: var(--text);
-	white-space: pre;
-}
-
-/* markdown content → the imported design's table look */
-.jv-md :deep(.jv-md-p) {
-	margin: 0 0 10px;
-}
-.jv-md :deep(.jv-md-p:last-child) {
-	margin-bottom: 0;
-}
-.jv-md :deep(.jv-md-h) {
-	margin: 14px 0 6px;
-	font-weight: 600;
-	color: var(--text);
-}
-.jv-md :deep(h3.jv-md-h) {
-	font-size: 15px;
-}
-.jv-md :deep(h4.jv-md-h) {
-	font-size: 14px;
-}
-.jv-md :deep(h5.jv-md-h),
-.jv-md :deep(h6.jv-md-h) {
-	font-size: 13px;
-}
-.jv-md :deep(.jv-md-h:first-child) {
-	margin-top: 0;
-}
-.jv-md :deep(.jv-md-list) {
-	margin: 0 0 10px;
-	padding-left: 20px;
-}
-.jv-md :deep(.jv-md-list li) {
-	margin: 2px 0;
-}
-.jv-md :deep(.jv-md-code) {
-	background: var(--surface-2);
-	padding: 1px 5px;
-	border-radius: 4px;
-	font-size: 12px;
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	overflow-wrap: anywhere;
-}
-.jv-md :deep(.jv-md-list .jv-md-list) {
-	margin: 2px 0;
-}
-.jv-md :deep(.jv-md-quote) {
-	margin: 0 0 10px;
-	padding: 2px 0 2px 12px;
-	border-left: 3px solid var(--border-2);
-	color: var(--text-2);
-}
-.jv-md :deep(del) {
-	opacity: 0.65;
-}
 /* day separators between message groups (UX #23) */
 .jv-daydivider {
 	display: flex;
@@ -9813,53 +9255,6 @@ onUnmounted(() => {
 	border-top: 1px solid var(--border);
 	font-size: 11.5px;
 	color: var(--text-3);
-}
-.jv-md :deep(.jv-md-link) {
-	color: var(--cta);
-	text-decoration: none;
-	font-weight: 500;
-}
-/* Auto-linked document IDs → open the record in ERPNext Desk. Dashed underline
-   marks them as record links, distinct from plain markdown links. */
-.jv-md :deep(.jv-doclink) {
-	color: var(--cta);
-	text-decoration: none;
-	font-weight: 550;
-	border-bottom: 1px dashed var(--cta);
-	cursor: pointer;
-	transition: background 0.12s;
-}
-.jv-md :deep(.jv-doclink:hover) {
-	border-bottom-style: solid;
-	background: var(--cta-bg);
-	border-radius: 3px;
-}
-.jv-md :deep(.jv-md-tablewrap) {
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	overflow: hidden;
-	margin: 4px 0 10px;
-}
-.jv-md :deep(.jv-md-table) {
-	width: 100%;
-	border-collapse: collapse;
-	font-size: 12.5px;
-}
-.jv-md :deep(.jv-md-table th) {
-	padding: 8px 13px;
-	font-weight: 550;
-	color: var(--text-3);
-	background: var(--surface-1);
-	border-bottom: 1px solid var(--border);
-}
-.jv-md :deep(.jv-md-table td) {
-	padding: 9px 13px;
-	border-bottom: 1px solid var(--border);
-	color: var(--text);
-	font-variant-numeric: tabular-nums;
-}
-.jv-md :deep(.jv-md-table tr:last-child td) {
-	border-bottom: 0;
 }
 
 /* ===== settings panel (slide-over console) ===== */
@@ -11019,41 +10414,6 @@ onUnmounted(() => {
 }
 
 /* artifact card (in the message) */
-/* generated-image artifact: clickable thumbnail */
-.jv-img-artifact {
-	display: block;
-	position: relative;
-	margin-top: 12px;
-	padding: 0;
-	border: 1px solid var(--border);
-	border-radius: 12px;
-	background: var(--surface-1);
-	cursor: zoom-in;
-	overflow: hidden;
-	max-width: 380px;
-	line-height: 0;
-}
-.jv-img-artifact:hover {
-	border-color: var(--border-2);
-}
-.jv-img-artifact img {
-	display: block;
-	width: 100%;
-	max-height: 320px;
-	object-fit: cover;
-}
-.jv-img-artifact-cap {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	padding: 7px 10px;
-	font-family: inherit;
-	font-size: 11.5px;
-	line-height: 1.3;
-	color: var(--text-3);
-	background: var(--surface);
-	border-top: 1px solid var(--border);
-}
 .jv-artifact {
 	display: flex;
 	align-items: center;
@@ -12001,16 +11361,12 @@ onUnmounted(() => {
 .jv-dark .jv-modelpill:hover span {
 	color: var(--text) !important;
 }
-.jv-dark .jv-sendbtn:hover:not(:disabled),
 .jv-dark .jv-confirm-yes:hover,
 .jv-dark .jv-action-primary:hover {
 	background: var(--cta) !important;
 	color: var(--cta-fg) !important;
 	border-color: var(--cta) !important;
 	filter: brightness(1.18);
-}
-.jv-dark .jv-sendbtn:hover:not(:disabled) svg {
-	stroke: var(--cta-fg) !important;
 }
 .jv-action-discard {
 	margin-left: auto;
