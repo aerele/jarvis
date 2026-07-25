@@ -7272,6 +7272,13 @@ async function send(textArg, resendAck) {
 				if (!suspendedNotice.value) suspendedNotice.value = SUSPENDED_FALLBACK;
 				return;
 			}
+			// A rollout started under this tab: the full-page gate only latches at
+			// boot, so reload to land on it rather than leave them retrying.
+			if (r.reason === "release_update_required") {
+				notify(`${agentName} is being updated. Reloading…`, { type: "error" });
+				setTimeout(() => window.location.reload(), 1500);
+				return;
+			}
 			notify(
 				r.reason === "usage_limit"
 					? `Monthly usage limit reached. Ask your ${agentName} admin to raise your limit.`

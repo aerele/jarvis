@@ -18,6 +18,25 @@ class TestValidateCanSend(FrappeTestCase):
 		self._gate = patch.object(account, "_admin_chat_gate", return_value=_ENTITLED)
 		self._gate.start()
 		self.addCleanup(self._gate.stop)
+		# Default: no release rollout, so these tests don't depend on whatever the
+		# site's mirrored notice happens to say.
+		self._rn = patch("jarvis.release_notice.boot_payload", return_value={"active": False})
+		self._rn.start()
+		self.addCleanup(self._rn.stop)
+
+	def test_release_notice_blocks_send(self):
+		"""Server-side half of the gate: the full-page block only latches at boot,
+		so an already-open tab must still be refused here."""
+		with patch("jarvis.release_notice.boot_payload", return_value={"active": True}):
+			ok, reason = validate_can_send("Administrator")
+		self.assertFalse(ok)
+		self.assertEqual(reason, "release_update_required")
+
+	def test_release_notice_check_fails_open(self):
+		with patch("jarvis.release_notice.boot_payload", side_effect=RuntimeError("boom")):
+			ok, reason = validate_can_send("Administrator")
+		self.assertTrue(ok)
+		self.assertIsNone(reason)
 
 	def test_administrator_can_send(self):
 		ok, reason = validate_can_send("Administrator")

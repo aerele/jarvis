@@ -640,6 +640,22 @@ class TestOnboardingClient(FrappeTestCase):
 			out = admin_client.get_connection()
 		self.assertEqual(out["agent_url"], "ws://localhost:19000")
 
+	def test_get_connection_reports_jarvis_version(self):
+		"""The control plane closes out a release rollout from this — a tenant that
+		has updated stops being served the release notice."""
+		from jarvis import __version__
+
+		_settings_for_admin()
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["body"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.get_connection()
+		self.assertEqual(captured["body"]["jarvis_version"], __version__)
+
 	def test_renew_posts_to_renew_and_unwraps_order(self):
 		_settings_for_admin(api_key="renew-key", api_secret="renew-secret")
 		captured = {}
