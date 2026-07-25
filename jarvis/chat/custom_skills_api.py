@@ -685,7 +685,7 @@ def _stamp_decision(req, reviewer: str, approved: bool, note: str) -> None:
 
 @frappe.whitelist()
 def decide_skill_promotion(
-	request_name: str, approve: int | str, note: str = "", ack_projection=None
+	request_name: str, approve: int | str, note: str = "", ack_projection: str | dict | None = None
 ) -> dict:
 	"""Approve or reject a skill promotion request. Reviewer-gated
 	(``require_skill_reviewer``) + four-eyes (a reviewer cannot approve their own
