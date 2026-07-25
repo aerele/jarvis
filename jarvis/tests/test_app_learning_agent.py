@@ -379,6 +379,91 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(res["rejected"], 1)
 
 	# ------------------------------------------------------------------ #
+	# CX5-4: outbound DLP — secret redaction, sensitive filenames, page guard
+	# ------------------------------------------------------------------ #
+	def test_planted_secrets_are_redacted_before_the_source_is_served(self):
+		self._bind_scribe_run()
+		self._write(
+			{
+				"mod/settings.py": (
+					"AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'\n"
+					'API_KEY = "AbCdEf0123456789AbCdEf"\n'
+					"KEY = '''-----BEGIN RSA PRIVATE KEY-----\n"
+					"MIIEowIBAAKCAQEAxfake\n"
+					"-----END RSA PRIVATE KEY-----'''\n"
+					"def get_password(user):\n"
+					"\treturn frappe.get_password(user)\n"
+				)
+			}
+		)
+		out = read_app_source("fakeapp", "mod/settings.py")
+		self.assertEqual(out["redactions"], 3)
+		self.assertIn("redacted", out["note"])
+		for secret in ("AKIAIOSFODNN7EXAMPLE", "AbCdEf0123456789AbCdEf", "BEGIN RSA PRIVATE KEY"):
+			self.assertNotIn(secret, out["content"])
+		self.assertIn("[REDACTED-SECRET]", out["content"])
+		# ordinary code is NOT mangled — the material stays learnable
+		self.assertIn("def get_password(user):", out["content"])
+		# the budget is charged the file's REAL size, not the redacted one
+		self.assertEqual(out["bytes_used"], out["size"])
+
+	def test_sensitive_filenames_are_never_served_or_listed(self):
+		self._bind_scribe_run()
+		self._write(
+			{
+				"mod/secrets.py": "TOKEN = 'x'\n",
+				"mod/credentials.json": "{}\n",
+				"mod/db_password.txt": "hunter2\n",
+			}
+		)
+		manifest = list_app_modules("fakeapp")
+		paths = {f["path"] for f in manifest["files"]}
+		for hidden in ("mod/secrets.py", "mod/credentials.json", "mod/db_password.txt"):
+			self.assertNotIn(hidden, paths)
+			with self.assertRaises(InvalidArgumentError) as cm:
+				read_app_source("fakeapp", hidden)
+			self.assertIn("indicates credentials", str(cm.exception))
+		self.assertIn("hooks.py", paths)  # ordinary files still listed
+		self.assertTrue(any("filename indicates credentials" in c for c in manifest["coverage_caveats"]))
+
+	def test_page_carrying_the_session_key_is_refused_and_flags_the_run(self):
+		run = self._bind_scribe_run()
+		res = record_app_wiki(
+			app="fakeapp",
+			pages=[
+				{"title": "Leak", "key": "leak", "body_md": f"Call with {self.session_key} to continue."},
+				{"title": "Clean", "key": "clean", "body_md": "The Gate Pass doctype drives receipt."},
+			],
+		)
+		self.assertEqual(res["rejected"], 1)
+		self.assertEqual(res["applied"], 1)  # the rest of the batch still lands
+		self.assertIn("run session key", res["guard_violations"])
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-leak"}), 0)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-clean"}), 1)
+		self.assertIn(
+			"review required: outbound guard tripped",
+			frappe.db.get_value(RUN, run, "coverage_note") or "",
+		)
+
+	def test_page_carrying_a_credential_is_refused(self):
+		run = self._bind_scribe_run()
+		res = record_app_wiki(
+			app="fakeapp",
+			pages=[
+				{"title": "Creds", "key": "creds", "body_md": 'The app uses AKIAIOSFODNN7EXAMPLE.'},
+				{"title": "Header", "key": "hdr", "body_md": "Send X-Jarvis-Session with each call."},
+			],
+		)
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(res["rejected"], 2)
+		self.assertEqual(
+			set(res["guard_violations"]), {"credential-shaped value", "jarvis session header"}
+		)
+		self.assertIn(
+			"review required", frappe.db.get_value(RUN, run, "coverage_note") or ""
+		)
+
+	# ------------------------------------------------------------------ #
 	# record_app_wiki: funnel + not-gated + in-place update
 	# ------------------------------------------------------------------ #
 	def test_record_app_wiki_is_write_but_not_gated(self):

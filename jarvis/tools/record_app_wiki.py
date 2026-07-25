@@ -22,7 +22,12 @@ Namespace integrity (all SERVER-SIDE, never model-trusted):
   * the funnel lookup is FENCED to this agent's own provenance
     (``PROVENANCE_KIND_PREFIX``), so a scribe can create/update only pages of its
     OWN provenance and can NEVER overwrite a human-authored Org page even on a
-    slug collision.
+    slug collision;
+  * CX5-4 OUTBOUND GUARD — the bodies are composed from UNTRUSTED source text, so
+    a page carrying the run's own session bearer, a Jarvis session header, or a
+    credential-shaped value is REFUSED (counted as rejected) and the run's
+    ``coverage_note`` is stamped "review required: outbound guard tripped". The
+    rest of the batch still lands.
 A per-run page cap (15) bounds a run — metered by the DURABLE ``pages_written``
 tally on the run row, read under that row's lock (CX5-3), so a cache fault can
 never reset the cap. Truncation is disclosed as a coverage caveat on the last
@@ -37,6 +42,7 @@ import re
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
+from jarvis.learning import source_guard
 from jarvis.tools import _app_learning_ctx as ctx
 
 # Body cap matches the wiki controller's MAX_BODY_LEN; the funnel clips too, but
@@ -88,8 +94,8 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	    call once per app). Every page's resolved app is validated against the
 	    custom-apps allowlist; a page with no valid app is rejected.
 
-	Returns ``{run, applied, failed, rejected, pages_remaining, truncated,
-	slugs}``.
+	Returns ``{run, applied, failed, rejected, guard_violations, pages_remaining,
+	truncated, slugs}``.
 	"""
 	from jarvis.chat.wiki import (
 		MAX_PAGES_PER_NOTE,
@@ -99,6 +105,7 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 
 	run = ctx.resolve_scribe_run()  # self-gate: scribe run + admin-tier or raise
 	run_name = run["name"]
+	session_key = run["session_key"]
 	default_app = (app or "").strip()
 
 	raw = _as_list(pages)
@@ -108,12 +115,23 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	# title are the summary/tally shape.
 	accepted: list[dict] = []
 	rejected = 0
+	guard_tripped: list[str] = []
 	for item in raw:
 		if not isinstance(item, dict):
 			continue
 		title = " ".join(str(item.get("title") or "").split())[:140]
 		body = str(item.get("body_md") or "").strip()[:_BODY_CLIP]
 		if not title or not body:
+			continue
+		# CX5-4 OUTBOUND GUARD: the delegate composes these bodies from UNTRUSTED source
+		# text, so a hostile app can try to steer it into publishing the run's own bearer
+		# or a credential it read into the ORG-VISIBLE wiki. Any such page is REFUSED
+		# (counted as rejected, exactly like an invalid app) and the run is flagged for
+		# review; the rest of the batch still lands.
+		violations = source_guard.outbound_violations(body, session_key)
+		if violations:
+			rejected += 1
+			guard_tripped.extend(violations)
 			continue
 		# REQUIRE + VALIDATE a resolved custom app per page (never model-trusted):
 		# a page with no valid learnable custom app — or one outside THIS RUN's
@@ -169,6 +187,7 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 			"applied": 0,
 			"failed": 0,
 			"rejected": rejected,
+			"guard_violations": sorted(set(guard_tripped)),
 			"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - already),
 			"truncated": False,  # nothing written -> nothing truncated
 			"slugs": [],
@@ -232,12 +251,15 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	# rollback (a failed tally / audit / commit) un-spends the budget with the pages rather
 	# than leaking it, and a retry sees the FULL remaining capacity. The separate
 	# after-commit cache increment this replaced could diverge from the pages it metered.
-	_tally_run(run_name, applied_pages, truncated, dropped)
+	_tally_run(run_name, applied_pages, truncated, dropped, guard_tripped=bool(guard_tripped))
 	return {
 		"run": run_name,
 		"applied": applied,
 		"failed": failed,
 		"rejected": rejected,
+		# CX5-4: which outbound-guard rules a refused page tripped, so the delegate is
+		# told WHY rather than silently retrying the same body.
+		"guard_violations": sorted(set(guard_tripped)),
 		# ``remaining`` was read under the lock and ``applied`` pages were just tallied onto
 		# the same row, so this is the capacity the run really has left once we commit.
 		"pages_remaining": max(0, remaining - applied),
@@ -246,7 +268,13 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	}
 
 
-def _tally_run(run_name: str, applied_pages: list[dict], truncated: bool, dropped: int) -> None:
+def _tally_run(
+	run_name: str,
+	applied_pages: list[dict],
+	truncated: bool,
+	dropped: int,
+	guard_tripped: bool = False,
+) -> None:
 	"""Accumulate this call's written pages onto the run row so the Runs tab can show
 	"N pages written" with links WITHOUT any findings shape, and so a successful run has
 	its tally even before the terminal ``finish_app_learning_run`` flips its status.
@@ -261,7 +289,7 @@ def _tally_run(run_name: str, applied_pages: list[dict], truncated: bool, droppe
 	stamped with this run id (``ref``), so ``reconcile_pages_written`` can rebuild the
 	count if a direct tally were ever lost. Only a parse error on a corrupt existing
 	``pages_json`` is tolerated (it resets, never aborts)."""
-	if not applied_pages and not truncated:
+	if not applied_pages and not truncated and not guard_tripped:
 		return
 	cur = (
 		frappe.db.get_value(
@@ -291,8 +319,16 @@ def _tally_run(run_name: str, applied_pages: list[dict], truncated: bool, droppe
 		"pages_written": int(cur.get("pages_written") or 0) + len(applied_pages),
 		"pages_json": frappe.as_json(existing[: ctx.PER_RUN_PAGE_CAP])[:60000],
 	}
+	notes: list[str] = []
+	# CX5-4: a tripped outbound guard is stamped FIRST — it is the fact a human must
+	# act on (a page tried to publish a credential / the run's own bearer), and the
+	# 140-char column must never drop it in favour of the truncation note.
+	if guard_tripped:
+		notes.append("review required: outbound guard tripped")
 	if truncated and dropped:
-		values["coverage_note"] = f"partial coverage: {dropped} page(s) exceeded the per-run cap"[:140]
+		notes.append(f"partial coverage: {dropped} page(s) exceeded the per-run cap")
+	if notes:
+		values["coverage_note"] = "; ".join(notes)[:140]
 	frappe.db.set_value(RUN, run_name, values, update_modified=False)
 
 
