@@ -1366,6 +1366,14 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			title=f"admin_client: unrecognised exc_type={exc_type!r}",
 			message=f"url={url!r} clean={clean!r}",
 		)
+		# A response carrying an exc_type means the admin was REACHED and raised
+		# an exception, so route by status exactly like the enveloped path below -
+		# NOT as "unreachable". A 4xx is a rejected request (e.g. Helpdesk's
+		# InvalidEmailAddressError, a ValidationError subclass that isn't on the
+		# allowlist above) and must surface its clean message; only a 5xx is a
+		# genuine admin fault.
+		if 400 <= resp.status_code < 500:
+			raise AdminValidationError(clean or f"admin returned {resp.status_code}")
 		raise AdminUnreachableError(clean or f"admin returned an unrecognised error: {exc_type}")
 	# Sprint-3 PR-8 (2026-06-16 review): a 4xx response with the
 	# structured envelope ({"ok": false, "error": {...}}) is a
