@@ -94,6 +94,36 @@ function _boundaryIndexOf(hay, needle) {
 	return -1;
 }
 
+// EVERY boundary-aligned occurrence of `needle` in `hay`, as half-open [start, end) ranges. Used by
+// the retain-on-ambiguity scan (VR5-1) to detect when two clips' contributions OVERLAP in the same
+// payload span (e.g. "send it" + "now" both sitting inside "send it now"). Same boundary rule as
+// _boundaryIndexOf, so a mid-word substring never counts as an occurrence.
+function _boundaryRanges(hay, needle) {
+	const out = [];
+	if (!needle) return out;
+	const isBoundary = (ch) => ch === undefined || ch === " ";
+	let from = 0;
+	while (from <= hay.length) {
+		const at = hay.indexOf(needle, from);
+		if (at === -1) break;
+		if (isBoundary(hay[at - 1]) && isBoundary(hay[at + needle.length])) {
+			out.push([at, at + needle.length]);
+		}
+		from = at + 1;
+	}
+	return out;
+}
+
+// Do any of `a`'s ranges overlap any of `b`'s ranges (half-open interval overlap)?
+function _rangesOverlap(a, b) {
+	for (const [s1, e1] of a) {
+		for (const [s2, e2] of b) {
+			if (s1 < e2 && s2 < e1) return true;
+		}
+	}
+	return false;
+}
+
 // clip: an opaque, self-contained recorded unit — { blob, durationS, ... }. The
 // caller does NOT set `seq`; the queue assigns it (single authority). Extra fields
 // (e.g. conversationId) ride through untouched to `mirror` and to onCommit's 3rd arg.
@@ -429,7 +459,7 @@ export function createVoiceChunkQueue(deps = {}) {
 			typeof normalize === "function"
 				? normalize
 				: (s) => (s == null ? "" : String(s)).replace(/\s+/g, " ").trim();
-		let hay = norm(payloadText);
+		const hay0 = norm(payloadText);
 		const committed = [];
 		for (const rec of records.values()) {
 			if (!rec.committed || rec.state === "discarded") continue;
@@ -438,17 +468,46 @@ export function createVoiceChunkQueue(deps = {}) {
 			if (clipScope === target) committed.push(rec);
 		}
 		committed.sort((a, b) => a.seq - b.seq);
-		const token = [];
-		for (const rec of committed) {
+		// Precompute every boundary-aligned occurrence RANGE of each clip's transcript in the ORIGINAL
+		// payload (before any consumption), so cross-clip overlaps are detectable.
+		const cand = committed.map((rec) => {
 			const needle = norm(rec.text);
-			if (!needle) continue; // an empty contribution can't be matched → RETAIN
+			return { rec, needle, ranges: needle ? _boundaryRanges(hay0, needle) : [] };
+		});
+		// RETAIN-ON-AMBIGUITY (VR5-1): boundary-alignment (VR4-4) still let MULTI-WORD prefix/suffix
+		// overlaps release the WRONG clip. Clips "send it", "now", "send it now" with a payload of
+		// "send it now": greedy lowest-seq consumption matched "send it" then "now" and acknowledged
+		// (deleted) those two, while the clip actually carrying "send it now" was kept — the opposite
+		// of what the user sent. The payload span is genuinely ambiguous: it could be attributed to
+		// {"send it" + "now"} OR to {"send it now"}, and we cannot tell which recording was really
+		// sent. So when two clips with DIFFERENT transcripts have boundary-aligned occurrences that
+		// OVERLAP in the payload, we acknowledge NEITHER — every affected clip stays RETAINED +
+		// actionable (surfaced as a retained chip via markUnsentOrphans / snapshot). This can only
+		// retain MORE audio, never delete the wrong clip's. Identical-transcript clips are NOT flagged
+		// here — they are the duplicate case resolved by consuming one occurrence each (R3-1).
+		const ambiguous = new Set();
+		for (let i = 0; i < cand.length; i++) {
+			for (let j = i + 1; j < cand.length; j++) {
+				if (cand[i].needle === cand[j].needle) continue; // duplicates → consume, not ambiguous
+				if (!cand[i].ranges.length || !cand[j].ranges.length) continue;
+				if (_rangesOverlap(cand[i].ranges, cand[j].ranges)) {
+					ambiguous.add(cand[i].rec.seq);
+					ambiguous.add(cand[j].rec.seq);
+				}
+			}
+		}
+		let hay = hay0;
+		const token = [];
+		for (const c of cand) {
+			if (!c.needle) continue; // an empty contribution can't be matched → RETAIN
+			if (ambiguous.has(c.rec.seq)) continue; // ambiguous attribution → RETAIN (never-lose)
 			// BOUNDARY-aware (VR4-4): a raw indexOf matched a clip's text INSIDE a longer word (an
 			// earlier "send it" inside a later "resend it") and deleted the wrong clip's audio.
-			const at = _boundaryIndexOf(hay, needle);
+			const at = _boundaryIndexOf(hay, c.needle);
 			if (at === -1) continue; // edited/deleted out of the payload → RETAIN (never-lose)
 			// Consume this occurrence so an identical later clip must find its OWN occurrence.
-			hay = hay.slice(0, at) + " " + hay.slice(at + needle.length);
-			token.push(rec.seq);
+			hay = hay.slice(0, at) + " " + hay.slice(at + c.needle.length);
+			token.push(c.rec.seq);
 		}
 		return token;
 	}

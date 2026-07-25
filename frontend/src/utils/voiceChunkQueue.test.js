@@ -1130,3 +1130,89 @@ test("VR4-1: markUnsentOrphans surfaces an edited-out committed clip as retained
 	);
 	assert.ok(!mirror.store.has(1), "and drops the mirror record");
 });
+
+// ── (26) VR5-1: RETAIN-ON-AMBIGUITY — a multi-word prefix/suffix overlap ("send it" + "now" ⊂
+//        "send it now") must delete NO clip; every affected clip is RETAINED (never the wrong one). ──
+test("VR5-1: overlapping multi-word clips (send it / now / send it now) are all RETAINED — no wrong-clip deletion, either seq order", async () => {
+	// The exact 3-clip trap the boundary matcher (VR4-4) did NOT cover. Prove BOTH enqueue orders:
+	// the single-word-first clips having the LOWER seqs (the greedy path that mis-consumed) AND the
+	// combined clip having the lower seq.
+	const orders = [
+		["send it", "now", "send it now"], // seq 0,1 are the prefix/suffix; seq 2 is the whole
+		["send it now", "send it", "now"], // seq 0 is the whole; seq 1,2 are the prefix/suffix
+	];
+	for (const texts of orders) {
+		const tx = makeTranscriber();
+		const mirror = makeMirror();
+		const q = createVoiceChunkQueue({
+			transcribe: tx.fn,
+			mirror,
+			retainUntilSent: true,
+			concurrency: 4,
+		});
+		for (let i = 0; i < texts.length; i++)
+			q.enqueue({ blob: `b${i}`, durationS: 15, conversationId: "s" });
+		await flush();
+		for (let i = 0; i < texts.length; i++) tx.resolve(i, texts[i]);
+		await flush();
+
+		// The user removed the two single-word clips and sent only the combined recording (or vice
+		// versa) — but "send it now" is exactly "send it" + "now", so the payload span is ambiguous.
+		const token = q.captureSentInPayload("s", "send it now");
+		assert.deepEqual(
+			token,
+			[],
+			`ambiguous overlap → acknowledge NOTHING (order ${JSON.stringify(texts)})`
+		);
+		q.acknowledge(token);
+		await flush();
+		for (let i = 0; i < texts.length; i++)
+			assert.ok(
+				mirror.store.has(i),
+				`clip ${i} ("${texts[i]}") RETAINED — the wrong clip's audio is never deleted`
+			);
+
+		// The affected clips surface as ACTIONABLE retained chips (VR4-1), never a silent forever-armed
+		// guard: markUnsentOrphans with the (empty) token flags every un-released committed clip.
+		q.markUnsentOrphans("s", token);
+		const snap = q.snapshot();
+		assert.equal(
+			snap.retained.length,
+			texts.length,
+			"all overlapping clips become actionable retained chips (Restore/Download/Discard)"
+		);
+		assert.equal(q.hasUnfinished(), true, "guard armed WITH an action, not silently lost");
+	}
+});
+
+// ── (27) VR5-1: a partial multi-word overlap ("play the song" vs "song of the year") still retains
+//        BOTH when their spans overlap in the payload; unrelated clips are unaffected. ─────────────
+test("VR5-1: partial word-run overlap retains both overlapping clips but releases an unrelated clip", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 4,
+	});
+	q.enqueue({ blob: "a", durationS: 15, conversationId: "s" }); // seq 0 "the song is"
+	q.enqueue({ blob: "b", durationS: 15, conversationId: "s" }); // seq 1 "song is great"
+	q.enqueue({ blob: "c", durationS: 15, conversationId: "s" }); // seq 2 "totally unrelated"
+	await flush();
+	tx.resolve(0, "the song is");
+	tx.resolve(1, "song is great");
+	tx.resolve(2, "totally unrelated");
+	await flush();
+	// Payload contains a span "the song is great" (0 and 1 overlap on "song is") plus the unrelated clip.
+	const token = q.captureSentInPayload("s", "the song is great and totally unrelated");
+	assert.deepEqual(
+		token,
+		[2],
+		"the two overlapping clips are RETAINED (ambiguous); the disjoint unrelated clip is released"
+	);
+	q.acknowledge(token);
+	await flush();
+	assert.ok(mirror.store.has(0) && mirror.store.has(1), "overlapping clips 0,1 kept");
+	assert.ok(!mirror.store.has(2), "the unrelated clip 2 (unambiguous) is released");
+});
