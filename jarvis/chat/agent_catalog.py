@@ -170,7 +170,9 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	RBAC (defense in depth): an enabled install whose OWNER's roles no longer
 	permit the agent is EXCLUDED from the push — the scheduler / run-now gates
 	already refuse to run it, but its enablement signal must not reach the
-	container either.
+	container either. Identity (CX1-1, the same reasoning): an enabled install with
+	a BLANK run-as user is EXCLUDED too — R1-F3 refuses it at every dispatch path,
+	so pushing it would advertise an agent this bench can never run.
 
 	Installs are per-(owner, agent) but the payload is bench-global and keyed by
 	SLUG, so two users each enabling the SAME agent are ONE entry, not two —
@@ -196,7 +198,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	installs = frappe.get_all(
 		"Jarvis Agent Installation",
 		filters=filters,
-		fields=["agent", "owner", "installable"],
+		fields=["agent", "owner", "installable", "run_as_user"],
 		# ``agent`` alone is not a total order once two owners install the same
 		# agent; the ``name`` tiebreak makes the iteration — and therefore which
 		# install wins the de-dupe below — stable across runs. The payload is a
@@ -243,6 +245,25 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		# refuse it, and pushing it would install a bundle whose data is absent.
 		if not frappe.utils.cint(row.installable):
 			continue
+
+		# CX1-1: an enabled install with a BLANK run-as user has no executing
+		# identity, so R1-F3 makes every dispatch path refuse it (the scheduler, the
+		# manual run-now, and ``_launch_audit`` — the choke point both funnel
+		# through). Its enablement signal must not reach the container either: the
+		# push would provision the delegate, seat it in the container roster and the
+		# tenant's agent_roster, and so advertise an agent this bench will NEVER run.
+		# Same reasoning as the installability gate above and the RBAC gate below —
+		# schema relaxation (``run_as_user`` is no longer ``reqd``, so a legacy row
+		# stays disableable) must not leave a misconfigured row eligible for the
+		# fleet reconcile just because it is still flagged enabled.
+		#
+		# A PER-ROW gate, like every other one here: it disqualifies THIS row only
+		# and ``continue``s before ``seen_agents.add``, so UNION semantics hold in
+		# both directions — a blank row never suppresses a valid install of the same
+		# agent by another owner, and a blank row alone never ships the slug.
+		if not (row.run_as_user or "").strip():
+			continue
+
 		listing = frappe.db.get_value(
 			LISTING,
 			row.agent,

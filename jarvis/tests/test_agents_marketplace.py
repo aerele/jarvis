@@ -1002,3 +1002,54 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertTrue(res["ok"])
 		self.assertEqual(captured.get("user"), self.owner)
 		self.assertEqual(frappe.db.get_value(RUN, res["data"]["run"], "status"), "running")
+
+	# ------------------------------------------------------------------ #
+	# (l) CX1-1 — a blank-identity install must not reach the CONTAINER either
+	#
+	# The gap left between the schema relaxation and global push eligibility:
+	# R1-F3 makes every RUN path refuse an enabled install with no run-as user,
+	# but the push payload never looked at the field, so the slug still shipped —
+	# provisioning the delegate, seating it in the container roster and the
+	# tenant's agent_roster, and advertising an agent the bench can never run.
+	# ------------------------------------------------------------------ #
+	def test_push_payload_omits_slug_whose_only_install_has_no_run_as_user(self):
+		"""An enabled-but-blank install is the ONLY install of the slug -> the slug
+		is absent from the payload entirely."""
+		inst = self._make_legacy_enabled(self.owner, "close-auditor")
+		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 0)
+
+		# ...and it is the BLANK IDENTITY that excluded it, not some unrelated gate:
+		# give the very same row a run-as user and the same build ships the slug.
+		frappe.db.set_value(INSTALLATION, inst, "run_as_user", self.owner, update_modified=False)
+		frappe.db.commit()
+		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
+
+	def test_push_payload_union_survives_a_blank_run_as_user_sibling(self):
+		"""UNION semantics: owner A valid + owner B blank, SAME slug -> the slug
+		still ships, exactly ONCE. The blank row must disqualify only itself."""
+		a = self._enable_for(self.owner, "close-auditor")
+		b = self._enable_for(self.other, "close-auditor")
+		# Installs are hash-named and the build iterates ``agent asc, name asc``, so
+		# blank whichever row sorts FIRST: that is the ordering in which a gate that
+		# wrongly suppressed the agent would actually bite (the blank row reached
+		# BEFORE the valid one).
+		frappe.db.set_value(INSTALLATION, min(a, b), "run_as_user", None, update_modified=False)
+		frappe.db.commit()
+
+		payload = agent_catalog.build_agent_push_payload()
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
+		slugs = [p["slug"] for p in payload]
+		self.assertEqual(len(slugs), len(set(slugs)), f"duplicate slug in payload: {slugs}")
+
+		# The surviving entry is the normal, complete enablement signal.
+		entry = next(p for p in payload if p["slug"] == "agent-close-auditor")
+		self.assertEqual(entry["delivery"], "delegate")
+
+		# Blanking the OTHER row too (no valid install left) drops the slug — proof
+		# the entry above came from the qualifying sibling, not from a leaky gate.
+		frappe.db.set_value(INSTALLATION, max(a, b), "run_as_user", None, update_modified=False)
+		frappe.db.commit()
+		payload = agent_catalog.build_agent_push_payload()
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 0)
