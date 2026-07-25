@@ -614,14 +614,16 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		)
 		frappe.db.commit()
 		stale = [
-			{
-				"name": run,
-				"session_key": self.session_key,
-				"owner": "Administrator",
-				"agent": SCRIBE_SLUG,
-				"installation": None,
-				"pages_written": 0,  # the value the sweep saw at scan time
-			}
+			frappe._dict(
+				{
+					"name": run,
+					"session_key": self.session_key,
+					"owner": "Administrator",
+					"agent": SCRIBE_SLUG,
+					"installation": None,
+					"pages_written": 0,  # the value the sweep saw at scan time
+				}
+			)
 		]
 		with (
 			mock.patch.object(agent_scheduler, "_stale_candidates", return_value=stale),
@@ -681,14 +683,16 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)
 		frappe.db.commit()  # the writeback's pages + tally are durable before the sweep runs
 		stale = [
-			{
-				"name": run,
-				"session_key": self.session_key,
-				"owner": "Administrator",
-				"agent": SCRIBE_SLUG,
-				"installation": None,
-				"pages_written": 0,  # the stale value the sweep saw at scan time
-			}
+			frappe._dict(
+				{
+					"name": run,
+					"session_key": self.session_key,
+					"owner": "Administrator",
+					"agent": SCRIBE_SLUG,
+					"installation": None,
+					"pages_written": 0,  # the stale value the sweep saw at scan time
+				}
+			)
 		]
 		with (
 			mock.patch.object(agent_scheduler, "_stale_candidates", return_value=stale),
