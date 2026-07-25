@@ -1325,41 +1325,48 @@ class TestSkillPromotionRound3(Part2Base):
 		self.assertEqual(len(shared), 1)  # EXACTLY one published; the second held back
 		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req_b["request"], "status"), "Pending")
 
-	# ── R3-SP-4: snapshot presence marker refuses a partial snapshot ────────────
+	# ── R3-SP-4: the request path always mints a FULL snapshot + presence marker ─
 	def test_missing_invocable_snapshot_refused_at_request(self):
-		# The null->0 normalization is gone: a NEW request missing user_invocable_snapshot
-		# is refused at the controller (a partial snapshot can never be filed anew).
+		# user_invocable_snapshot is a Check (tinyint NOT NULL): it can never be "missing"
+		# — an omitted value is stored as 0, indistinguishable from a genuine False — so a
+		# field-level "missing" refusal is impossible. The real request-time protection is
+		# that request_skill_promotion ALWAYS captures a FULL snapshot from the source and
+		# stamps the presence marker, so a legit request is always marked (and the marker
+		# check at approval only ever trips a genuine legacy / partial row).
+		from jarvis.chat import custom_skills_api
+
 		skill = _mk_skill(USER_A, f"{PFX}-noinv", scope="User")
+		# A distinctive (non-default) source value proves the snapshot is copied from source.
+		frappe.db.set_value(SKILL, skill.name, "user_invocable", 0)
 		with _as(USER_A):
-			with self.assertRaises(frappe.ValidationError):
-				frappe.get_doc(
-					{
-						"doctype": SKILL_PROMO,
-						"skill": skill.name,
-						"skill_name": skill.skill_name,
-						"instructions_snapshot": "i",
-						"description_snapshot": "d",
-						# deliberately NO user_invocable_snapshot
-						"from_scope": "User",
-						"to_scope": "Org",
-						"status": "Pending",
-					}
-				).insert(ignore_permissions=True)
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		row = frappe.db.get_value(
+			SKILL_PROMO,
+			req["request"],
+			["snapshotted", "instructions_snapshot", "description_snapshot", "user_invocable_snapshot"],
+			as_dict=True,
+		)
+		self.assertEqual(row.snapshotted, 1)  # a legit request is always marked
+		self.assertEqual(row.instructions_snapshot, "body")
+		self.assertEqual(row.description_snapshot, f"{PFX}-noinv desc")
+		self.assertEqual(int(row.user_invocable_snapshot), 0)  # captured the source's False
 
 	def test_absent_marker_refused_at_approval(self):
-		# A request whose presence marker is absent (a legacy / partial row) is refused at
-		# approval like a missing-instructions one — publishing nothing, leaving it Pending.
+		# A request whose presence marker is absent (a legacy / pre-binding row) is refused
+		# at approval like a missing-instructions one — publishing nothing, leaving it Pending.
 		from jarvis.chat import custom_skills_api
 
 		skill = _mk_skill(USER_A, f"{PFX}-marker", scope="User")
 		with _as(USER_A):
 			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
 		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "snapshotted"), 1)
-		# Model a legacy/partial row: drop the invocable snapshot AND clear the marker.
-		frappe.db.set_value(SKILL_PROMO, req["request"], "user_invocable_snapshot", None)
+		# Model a legacy / pre-binding row by clearing the presence MARKER. The marker — not
+		# the Check value — is what proves a full snapshot: user_invocable_snapshot is a Check
+		# (tinyint NOT NULL) that can never be null, and an omitted value is stored as 0
+		# indistinguishable from a genuine False. So the marker's absence is what approval refuses.
 		frappe.db.set_value(SKILL_PROMO, req["request"], "snapshotted", 0)
 		with _as(REVIEWER):
-			with self.assertRaises(frappe.ValidationError):
+			with self.assertRaisesRegex(frappe.ValidationError, "resubmit"):
 				custom_skills_api.decide_skill_promotion(req["request"], 1)
 		self.assertEqual(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-marker", "scope": "Org"}), [])
 		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
@@ -1442,13 +1449,15 @@ class TestSkillPromotionRound4(Part2Base):
 		# reservation and is refused there.
 		from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import JarvisCustomSkill
 
-		_mk_skill(USER_A, f"{PFX}-dbuniq", scope="Org")
+		first = _mk_skill(USER_A, f"{PFX}-dbuniq", scope="Org")
 		with patch.object(JarvisCustomSkill, "_validate_shared_slug_unique", lambda self: None):
 			with self.assertRaises(frappe.ValidationError):
 				_mk_skill(USER_B, f"{PFX}-dbuniq", scope="Org")
-		self.assertEqual(
-			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-dbuniq", "scope": "Org"})), 1
-		)
+		# The duplicate was BLOCKED at the DB reservation: the slug's reservation still points
+		# at the FIRST skill — the meaningful invariant (one shared owner per slug). We assert
+		# the reservation holder, not a post-failure row count, which would depend on Frappe's
+		# insert/rollback timing for the refused second insert.
+		self.assertEqual(frappe.db.get_value(RESV, f"{PFX}-dbuniq", "skill"), first.name)
 
 	def test_rename_shared_skill_moves_reservation(self):
 		# Renaming a shared skill releases the old slug's reservation and reserves the
