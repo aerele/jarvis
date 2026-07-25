@@ -122,6 +122,40 @@ def _resolve_app_root(app: str) -> str:
 	return root_real
 
 
+def validate_source_apps(names) -> list[str]:
+	"""Canonicalize + VALIDATE an admin's explicit app selection for one learning
+	run (CX5-2). Returns the de-duplicated selection in the caller's order.
+
+	Every name must be an INSTALLED learnable custom app with a containment-valid
+	source root — the same two checks the per-call tool gate applies — so a bad
+	selection is refused at LAUNCH (loudly, where a human can see it) rather than
+	silently narrowing the run. Raises ``ValueError`` naming the offending app on
+	an empty selection, a core app, an app that is not installed, or one whose
+	source root fails ``_resolve_app_root``."""
+	if isinstance(names, str):
+		import json as _json
+
+		try:
+			names = _json.loads(names)
+		except Exception:
+			names = [n.strip() for n in names.split(",")]
+	if not isinstance(names, list | tuple | set | frozenset):
+		raise ValueError("select at least one custom app to learn from")
+	installed = set(_installed_custom_apps())
+	out: list[str] = []
+	for raw in names:
+		name = str(raw or "").strip()
+		if not name or name in out:
+			continue
+		if name in EXCLUDED_APPS or name not in installed:
+			raise ValueError(f"{name!r} is not a learnable custom app on this bench")
+		_resolve_app_root(name)  # existence + symlinked/relocated-root rejection
+		out.append(name)
+	if not out:
+		raise ValueError("select at least one custom app to learn from")
+	return out
+
+
 def _app_title(app: str) -> str:
 	try:
 		titles = frappe.get_hooks("app_title", app_name=app)

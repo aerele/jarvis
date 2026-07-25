@@ -24,6 +24,7 @@ Run:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -96,7 +97,16 @@ def _mk_listing(slug: str, nature: str) -> str:
 	return slug
 
 
-def _mk_run(agent_slug: str, session_key: str, status: str = "running") -> str:
+def _mk_run(
+	agent_slug: str,
+	session_key: str,
+	status: str = "running",
+	source_apps: tuple[str, ...] | list[str] | None = ("fakeapp",),
+) -> str:
+	"""A ``Jarvis Agent Run`` fixture. ``source_apps`` is the CX5-2 admin
+	authorization the launch path stamps into ``scope_json``; the tools read it
+	back from there, so a fixture run needs it to be able to touch any app at all
+	(``None`` = a run with NO authorized apps — it must read/write nothing)."""
 	doc = frappe.get_doc(
 		{
 			"doctype": RUN,
@@ -105,6 +115,9 @@ def _mk_run(agent_slug: str, session_key: str, status: str = "running") -> str:
 			"status": status,
 			"started_at": frappe.utils.now(),
 			"session_key": session_key,
+			"scope_json": (
+				frappe.as_json({"source_apps": list(source_apps)}) if source_apps is not None else None
+			),
 		}
 	)
 	doc.flags.ignore_permissions = True
@@ -125,7 +138,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		os.makedirs(self.app_dir)
 		self._write({"hooks.py": "app_title = 'Fake'\n", "mod/api.py": "import frappe\n"})
 		self._patches = [
-			mock.patch.object(app_source, "_app_source_dir", side_effect=lambda a: self.app_dir),
+			# one source dir PER app under the temp bench root, so a second app name
+			# (CX5-2 selection tests) resolves to its own containment-valid root
+			mock.patch.object(app_source, "_app_source_dir", side_effect=lambda a: os.path.join(self.tmp, a)),
 			mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp"]),
 			# CX5-1: bind the capability to the TEST listing's slug, so the suite never
 			# has to create/mutate the real ``custom-app-learning`` marketplace listing.
@@ -159,9 +174,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 			with open(full, "w") as fh:
 				fh.write(content)
 
-	def _bind_scribe_run(self, session_key: str | None = None) -> str:
+	def _bind_scribe_run(self, session_key: str | None = None, **kw) -> str:
 		sk = session_key or self.session_key
-		run = _mk_run(SCRIBE_SLUG, sk)
+		run = _mk_run(SCRIBE_SLUG, sk, **kw)
 		self._runs.append(run)
 		_agent_run_ctx.set_session_key(sk)
 		return run
@@ -262,6 +277,55 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		paths = {f["path"] for f in manifest["files"]}
 		self.assertIn("hooks.py", paths)
 		self.assertIn("mod/api.py", paths)
+
+	# ------------------------------------------------------------------ #
+	# CX5-2: the run-scoped app authorization (installed is NOT consent)
+	# ------------------------------------------------------------------ #
+	def _install_second_app(self) -> None:
+		"""A SECOND installed learnable custom app with its own valid source root."""
+		other = os.path.join(self.tmp, "otherapp")
+		os.makedirs(other, exist_ok=True)
+		with open(os.path.join(other, "hooks.py"), "w") as fh:
+			fh.write("app_title = 'Other'\n")
+
+	def test_installed_but_unselected_app_is_refused_by_every_tool(self):
+		# ``otherapp`` is an installed learnable custom app, but the admin authorized
+		# only ``fakeapp`` for this run: nothing may read it or write about it.
+		self._install_second_app()
+		with mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp", "otherapp"]):
+			self._bind_scribe_run(source_apps=["fakeapp"])
+			for call in (
+				lambda: list_app_modules("otherapp"),
+				lambda: read_app_source("otherapp", "hooks.py"),
+			):
+				with self.assertRaises(InvalidArgumentError) as cm:
+					call()
+				self.assertIn("authorized app selection", str(cm.exception))
+			# the writeback rejects the page rather than namespacing it onto otherapp
+			res = record_app_wiki(app="otherapp", pages=[{"title": "X", "key": "overview", "body_md": "b"}])
+			self.assertEqual(res["applied"], 0)
+			self.assertEqual(res["rejected"], 1)
+			self.assertEqual(frappe.db.count(WIKI, {"slug": "otherapp-overview"}), 0)
+			# ... while the SELECTED app still works in the same run
+			self.assertEqual(read_app_source("fakeapp", "hooks.py")["app"], "fakeapp")
+
+	def test_roster_is_limited_to_the_run_selection(self):
+		self._install_second_app()
+		with mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp", "otherapp"]):
+			self._bind_scribe_run(source_apps=["fakeapp"])
+			roster = list_app_modules()
+			self.assertEqual({a["app"] for a in roster["apps"]}, {"fakeapp"})
+
+	def test_run_without_a_stamped_selection_reads_nothing(self):
+		# FAIL-CLOSED: a run whose scope_json carries no ``source_apps`` (a pre-CX5-2
+		# row, or one whose scope stamp failed) authorizes NOTHING — never everything.
+		self._bind_scribe_run(source_apps=None)
+		self.assertEqual(list_app_modules()["apps"], [])
+		with self.assertRaises(InvalidArgumentError):
+			read_app_source("fakeapp", "hooks.py")
+		res = record_app_wiki(app="fakeapp", pages=[{"title": "X", "key": "overview", "body_md": "b"}])
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(res["rejected"], 1)
 
 	# ------------------------------------------------------------------ #
 	# record_app_wiki: funnel + not-gated + in-place update
@@ -842,6 +906,7 @@ class TestRunAgentNowScribeGate(FrappeTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
 		frappe.db.delete("Jarvis Agent Installation", {"agent": SCRIBE_SLUG})
+		frappe.db.delete(RUN, {"agent": SCRIBE_SLUG})
 		frappe.db.commit()
 
 	def _install(self) -> str:
@@ -860,18 +925,29 @@ class TestRunAgentNowScribeGate(FrappeTestCase):
 		frappe.db.commit()
 		return doc.name
 
-	def _run_now(self, inst_name):
+	def _run_now(self, inst_name, options=None, launch=None):
 		from jarvis.chat import agents_api
 
-		with (
+		stack = [
 			mock.patch("jarvis.chat.agent_installability.assert_installable", return_value=None),
 			mock.patch("jarvis.chat.agent_scheduler._over_run_budget", return_value=(False, "")),
-			mock.patch("jarvis.chat.agent_scheduler._launch_audit", return_value={"run": "R", "conversation": "C", "session_key": "S"}),
-		):
+		]
+		if launch is None:
+			# the caller may supply its own _launch_audit mock (to inspect the CX5-2
+			# source_apps it was handed); otherwise stub it here
+			stack.append(
+				mock.patch(
+					"jarvis.chat.agent_scheduler._launch_audit",
+					return_value={"run": "R", "conversation": "C", "session_key": "S"},
+				)
+			)
+		with contextlib.ExitStack() as es:
+			for p in stack:
+				es.enter_context(p)
 			original = frappe.session.user
 			try:
 				frappe.set_user(self.admin)  # self-mapped run (run_as == triggerer)
-				return agents_api.run_agent_now(inst_name)
+				return agents_api.run_agent_now(inst_name, options=options)
 			finally:
 				frappe.set_user(original)
 
@@ -885,6 +961,123 @@ class TestRunAgentNowScribeGate(FrappeTestCase):
 		inst = self._install()
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self._run_now(inst)
+
+	# ------------------------------------------------------------------ #
+	# CX5-2: the app-learning launch REQUIRES an explicit, validated selection
+	# ------------------------------------------------------------------ #
+	def _as_app_learning(self):
+		"""Treat the test listing AS the Custom App Learning capability, and give it
+		one installed learnable custom app to select."""
+		self.tmp = tempfile.mkdtemp(prefix="jarvis-applearn-launch-test-")
+		os.makedirs(os.path.join(self.tmp, "fakeapp"))
+		self.addCleanup(shutil.rmtree, self.tmp, True)
+		for p in (
+			mock.patch.object(ctx, "APP_LEARNING_AGENT_SLUG", SCRIBE_SLUG),
+			mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp"]),
+			mock.patch.object(app_source, "_app_source_dir", side_effect=lambda a: os.path.join(self.tmp, a)),
+		):
+			p.start()
+			self.addCleanup(p.stop)
+
+	def test_app_learning_launch_refused_without_a_selection(self):
+		self._as_app_learning()
+		inst = self._install()
+		for opts in (None, {}, {"source_apps": []}, {"source_apps": ["nosuchapp"]}):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self._run_now(inst, options=opts)
+			self.assertIn("Select which custom apps", str(cm.exception))
+		# nothing was authorized on the installation either
+		self.assertFalse(frappe.db.get_value("Jarvis Agent Installation", inst, "source_apps_json"))
+
+	def test_app_learning_launch_stamps_and_persists_the_selection(self):
+		self._as_app_learning()
+		inst = self._install()
+		with mock.patch("jarvis.chat.agent_scheduler._launch_audit") as launch:
+			launch.return_value = {"run": "R", "conversation": "C", "session_key": "S"}
+			self._run_now(inst, options={"source_apps": ["fakeapp", "fakeapp"]}, launch=launch)
+		# the validated + de-duplicated selection reaches the launch...
+		self.assertEqual(launch.call_args.kwargs["source_apps"], ["fakeapp"])
+		# ... and is PERSISTED so the scheduled path has an explicit selection to reuse
+		stored = frappe.db.get_value("Jarvis Agent Installation", inst, "source_apps_json")
+		self.assertEqual(json.loads(stored), ["fakeapp"])
+
+
+class TestScheduledAppLearningSelection(FrappeTestCase):
+	"""CX5-2 on the CRON path: the scheduler has no human to ask, so it reuses the
+	durable selection ``run_agent_now`` persisted on the installation — and SKIPS
+	(with a recorded reason) rather than launching an unbounded source read when
+	there is none."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.admin = _mk_user("app-learn-cron-admin@example.com", ["System Manager"])
+		_mk_listing(SCRIBE_SLUG, "Scribe")
+		self.tmp = tempfile.mkdtemp(prefix="jarvis-applearn-cron-test-")
+		os.makedirs(os.path.join(self.tmp, "fakeapp"))
+		self.addCleanup(shutil.rmtree, self.tmp, True)
+		for p in (
+			mock.patch.object(ctx, "APP_LEARNING_AGENT_SLUG", SCRIBE_SLUG),
+			mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp"]),
+			mock.patch.object(app_source, "_app_source_dir", side_effect=lambda a: os.path.join(self.tmp, a)),
+		):
+			p.start()
+			self.addCleanup(p.stop)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.delete("Jarvis Agent Installation", {"agent": SCRIBE_SLUG})
+		frappe.db.delete(RUN, {"agent": SCRIBE_SLUG})
+		frappe.db.commit()
+
+	def _due_install(self, source_apps_json: str | None) -> str:
+		doc = frappe.get_doc(
+			{
+				"doctype": "Jarvis Agent Installation",
+				"agent": SCRIBE_SLUG,
+				"run_as_user": self.admin,
+				"enabled": 1,
+				"schedule_enabled": 1,
+				"schedule_frequency": "daily",
+				"schedule_time": "01:00:00",
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value(
+			"Jarvis Agent Installation",
+			doc.name,
+			{
+				"owner": self.admin,
+				"next_run_at": frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-1),
+				"source_apps_json": source_apps_json,
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return doc.name
+
+	def test_scheduled_run_without_a_selection_is_skipped(self):
+		from jarvis.chat import agent_scheduler
+
+		inst = self._due_install(None)
+		with mock.patch.object(agent_scheduler, "_launch_audit") as launch:
+			agent_scheduler.run_due_agent_audits()
+		launch.assert_not_called()  # never dispatched unbounded
+		row = frappe.get_all(
+			RUN, filters={"installation": inst}, fields=["status", "error"], limit=1
+		)[0]
+		self.assertEqual(row.status, "failed")
+		self.assertIn("no valid authorized app selection", row.error)
+
+	def test_scheduled_run_reuses_the_persisted_selection(self):
+		from jarvis.chat import agent_scheduler
+
+		inst = self._due_install(json.dumps(["fakeapp"]))
+		with mock.patch.object(agent_scheduler, "_launch_audit") as launch:
+			launch.return_value = {"run": "R", "conversation": "C", "session_key": "S"}
+			agent_scheduler.run_due_agent_audits()
+		self.assertEqual(launch.call_args.kwargs["source_apps"], ["fakeapp"])
+		self.assertEqual(launch.call_args.kwargs["trigger"], "scheduled")
 
 
 class TestLegacyScheduleRetired(FrappeTestCase):

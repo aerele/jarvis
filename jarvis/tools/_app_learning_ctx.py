@@ -17,6 +17,13 @@ flips to ``Scribe``) would otherwise inherit whole-bench custom-app source-read.
 The nature + admin-tier checks are KEPT as defense in depth, but the slug is what
 binds the capability.
 
+CX5-2 — the RUN SCOPE. "Installed custom app" is not consent. The admin who
+launches a run names the exact apps whose source may leave the bench for the
+model; the server validates + stamps that selection into the run's ``scope_json``
+(``source_apps``) at launch, and ``assert_custom_app`` refuses any app outside it.
+The model can neither author nor widen the selection, and the roster tool shows
+only the selected apps.
+
 Two per-run budgets, tracked per ``session_key`` (a fresh key per run), keep a
 looping delegate bounded well inside the 90-minute run ceiling:
   * a source-BYTES budget so it cannot read source forever, and
@@ -24,6 +31,8 @@ looping delegate bounded well inside the 90-minute run ceiling:
 """
 
 from __future__ import annotations
+
+import json
 
 import frappe
 
@@ -111,11 +120,53 @@ def resolve_scribe_run(allow_terminal: bool = False) -> dict:
 	}
 
 
-def assert_custom_app(app: str) -> None:
-	"""The custom-apps allowlist gate (ABSOLUTE): raise unless ``app`` is an
-	installed NON-core app with a source dir on this bench. Core apps
-	(frappe/erpnext/hrms/india_compliance/jarvis) are excluded via
-	``app_source.EXCLUDED_APPS`` and are NEVER served."""
+def is_app_learning_agent(agent: str) -> bool:
+	"""True iff the ``Jarvis Agent Listing`` ``agent`` IS the Custom App Learning
+	capability (CX5-1/CX5-2). The launch paths use this to decide whether a run
+	needs an explicit admin app selection."""
+	if not agent:
+		return False
+	slug = (frappe.db.get_value(LISTING, agent, "agent_slug") or "").strip()
+	return slug == APP_LEARNING_AGENT_SLUG
+
+
+def allowed_source_apps(run_name: str) -> frozenset:
+	"""The apps the ADMIN explicitly authorized for THIS run (CX5-2).
+
+	Server-authored at launch into ``Jarvis Agent Run.scope_json`` under
+	``source_apps``; the model can never author or widen it. FAIL-CLOSED by
+	construction: a missing run, an unreadable/unparseable ``scope_json``, a
+	missing ``source_apps`` key or a non-list value all yield the EMPTY set, and an
+	empty set refuses every app — so a run launched before this field existed (or
+	one whose scope stamp failed) reads nothing rather than everything."""
+	if not run_name:
+		return frozenset()
+	try:
+		raw = frappe.db.get_value(RUN, run_name, "scope_json")
+		scope = json.loads(raw or "{}")
+	except Exception:
+		return frozenset()
+	if not isinstance(scope, dict):
+		return frozenset()
+	apps = scope.get("source_apps")
+	if not isinstance(apps, list):
+		return frozenset()
+	return frozenset(str(a or "").strip() for a in apps if str(a or "").strip())
+
+
+def assert_custom_app(app: str, run_name: str) -> None:
+	"""The two-layer app gate (ABSOLUTE) applied by EVERY source-read and
+	wiki-writeback call:
+
+	  1. the custom-apps allowlist — ``app`` must be an installed NON-core app with
+	     a containment-valid source root on this bench. Core apps
+	     (frappe/erpnext/hrms/india_compliance/jarvis) are excluded via
+	     ``app_source.EXCLUDED_APPS`` and are NEVER served; and
+	  2. CX5-2 — ``app`` must be in THIS RUN's admin-authorized selection
+	     (``scope_json.source_apps``). "Installed" is not consent: an admin
+	     authorises the exact apps whose source may be shipped to the model, per
+	     run, and a run may never widen itself to a sibling app.
+	"""
 	name = (app or "").strip()
 	if not name:
 		raise InvalidArgumentError("app is required")
@@ -130,6 +181,11 @@ def assert_custom_app(app: str) -> None:
 		app_source._resolve_app_root(name)
 	except ValueError as e:
 		raise InvalidArgumentError(str(e))
+	if name not in allowed_source_apps(run_name):
+		raise InvalidArgumentError(
+			f"{name!r} is not in this run's authorized app selection — an admin must "
+			"select an app before its source can be read or written about"
+		)
 
 
 # --------------------------------------------------------------------------- #

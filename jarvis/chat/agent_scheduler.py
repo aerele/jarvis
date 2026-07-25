@@ -76,6 +76,7 @@ def run_due_agent_audits() -> None:
 			"schedule_frequency",
 			"schedule_time",
 			"installable",
+			"source_apps_json",
 		],
 	)
 	if not due:
@@ -110,6 +111,25 @@ def run_due_agent_audits() -> None:
 		if frappe.db.get_value(LISTING, row.agent, "nature") not in ("Auditor", "Scribe"):
 			_advance(row, now)
 			continue
+
+		# CX5-2: a Custom App Learning run may only read the apps an ADMIN authorized.
+		# The cron has no human to ask, so it REUSES the durable selection the last
+		# manual launch persisted on the installation (``source_apps_json``) — and when
+		# there is none (or the selected apps have since been uninstalled) it SKIPS with
+		# a recorded reason rather than launching a run that could read the whole bench.
+		source_apps = None
+		if _is_app_learning(row.agent):
+			from jarvis.learning import app_source
+
+			try:
+				source_apps = app_source.validate_source_apps(row.get("source_apps_json") or [])
+			except ValueError as e:
+				_record_failed(
+					row,
+					f"scheduled app-learning skipped: no valid authorized app selection ({e})",
+				)
+				_advance(row, now)
+				continue
 
 		# Phase 1 identity: the audit executes AS the install's run_as_user (its
 		# jarvis__* reads are permission-bounded to that user). Falls back to
@@ -148,7 +168,7 @@ def run_due_agent_audits() -> None:
 		try:
 			frappe.set_user(run_as)
 			inst = frappe.get_doc(INSTALLATION, row.name)
-			_launch_audit(inst, trigger="scheduled")
+			_launch_audit(inst, trigger="scheduled", source_apps=source_apps)
 			frappe.set_user(original_user)
 			_advance(row, now)  # O4: advance ONLY after a successful enqueue
 		except Exception:
@@ -300,12 +320,20 @@ def _stale_candidates(cutoff) -> list:
 # --------------------------------------------------------------------------- #
 # shared launch (scheduler + manual run_agent_now take the SAME path)
 # --------------------------------------------------------------------------- #
-def _launch_audit(inst, trigger: str) -> dict:
+def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> dict:
 	"""Create the audit conversation + a ``running`` Jarvis Agent Run + enqueue
 	the triggering turn. MUST run as the installation owner (the scheduler
 	set_user's it; run_agent_now is already the owner). Returns
 	``{run, conversation, session_key}``. Identity/budget guards + next_run_at
-	advancement are the caller's job."""
+	advancement are the caller's job.
+
+	``source_apps`` (CX5-2) is the Custom App Learning run's ADMIN-AUTHORIZED app
+	selection, already validated by the caller (``app_source.validate_source_apps``).
+	It is stamped SERVER-SIDE into the run's ``scope_json`` and is the ONLY thing
+	that authorises the source-read/wiki tools to touch an app — the model can
+	neither author nor widen it. Both launch paths (manual + cron) must supply it
+	for that agent; ``None`` leaves the run with no authorized apps, i.e. the tools
+	refuse everything."""
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -382,7 +410,7 @@ def _launch_audit(inst, trigger: str) -> dict:
 
 	# A6 explicit scope + A17 consistency watermark + A12 permission profile —
 	# all best-effort (never abort the launch) and computed AS the run-as user.
-	scope = _stamp_scope_and_watermark(run.name, inst, run_as_user)
+	scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
 
 	frappe.db.commit()
 
@@ -462,26 +490,37 @@ def _mint_run_session(session_key: str, user: str) -> None:
 	).insert(ignore_permissions=True)
 
 
-def _stamp_scope_and_watermark(run_name: str, inst, run_as_user: str) -> dict | None:
+def _stamp_scope_and_watermark(
+	run_name: str, inst, run_as_user: str, source_apps: list[str] | None = None
+) -> dict | None:
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
 
 	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
 	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
 	watermark + scope are resolved AS the run-as user (this runs under that
-	session). Returns the resolved scope dict (or None)."""
+	session). Returns the resolved scope dict (or None).
+
+	``source_apps`` (CX5-2) is folded into the SAME ``scope_json`` stamp OUTSIDE
+	the best-effort try, so an ERP scope-resolution failure can never drop the
+	authorization the source-read tools read back — a scribe run either carries its
+	admin-authorized app list or reads nothing."""
 	from jarvis.chat import agent_scope
 
 	values: dict = {}
 	scope = None
 	try:
 		scope = agent_scope.resolve_scope(inst)
-		values["scope_json"] = frappe.as_json(scope)
 	except Exception:
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
 		)
+	if source_apps is not None:
+		scope = dict(scope or {})
+		scope["source_apps"] = list(source_apps)
+	if scope is not None:
+		values["scope_json"] = frappe.as_json(scope)
 
 	if scope and scope.get("company") and scope.get("to_date"):
 		# A17: row-count + max(modified) over the scope's GL as-of window. The old
@@ -551,8 +590,16 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	Kept short: the delegate resolves the run/installation linkage for its Phase-3
 	writeback from the session_key the bench minted, not from this text."""
 	scope_block = ""
-	if scope:
-		scope_block = (
+	# CX5-2: name the admin-authorized apps explicitly. The bench ENFORCES the same
+	# list on every source-read/wiki call, so this is a courtesy so the delegate does
+	# not waste the run discovering that everything else is refused.
+	if scope and scope.get("source_apps"):
+		apps = ", ".join(str(a) for a in scope["source_apps"])
+		scope_block += (
+			f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
+		)
+	if scope and scope.get("company"):
+		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period): "
 			f'company="{scope.get("company")}", '
 			f'fiscal_year="{scope.get("fiscal_year")}", '
@@ -573,6 +620,14 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+def _is_app_learning(agent: str) -> bool:
+	"""True iff this listing is the Custom App Learning capability — the one agent
+	whose launch REQUIRES an explicit admin app selection (CX5-2)."""
+	from jarvis.tools import _app_learning_ctx
+
+	return _app_learning_ctx.is_app_learning_agent(agent)
+
+
 def _valid_owner(owner: str) -> bool:
 	if not owner or owner in ("Administrator", "Guest"):
 		return False

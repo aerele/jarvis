@@ -413,6 +413,16 @@
 				</section>
 			</div>
 		</div>
+
+		<!-- CX5-2: the Custom App Learning agent cannot run without an explicit,
+		     per-run app authorization + consent; Run Now opens this first. -->
+		<AppSourceConsentDialog
+			v-if="needsSourceApps"
+			v-model="appPickerOpen"
+			:busy="running"
+			confirm-label="Start learning"
+			@confirm="startRun"
+		/>
 	</div>
 </template>
 
@@ -452,6 +462,7 @@ import TabBar from "@/components/list/TabBar.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
+import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
@@ -610,11 +621,31 @@ const runTooltip = computed(() => {
 	return nature === "Scribe" ? "Run this agent now" : "Run this audit now";
 });
 
-async function runNow() {
+// CX5-2: the Custom App Learning agent reads customer SOURCE, so a run must name
+// the apps it is authorised to read. Run Now opens the consent dialog for it; the
+// server refuses a launch without a validated selection either way.
+const APP_LEARNING_SLUG = "custom-app-learning";
+const appPickerOpen = ref(false);
+const needsSourceApps = computed(() => props.slug === APP_LEARNING_SLUG);
+
+function runNow() {
+	if (running.value || runDisabled.value) return;
+	if (needsSourceApps.value) {
+		appPickerOpen.value = true;
+		return;
+	}
+	return startRun();
+}
+
+async function startRun(sourceApps) {
 	if (running.value || runDisabled.value) return;
 	running.value = true;
 	try {
-		await api.runAgentNow(installation.value.name);
+		await api.runAgentNow(
+			installation.value.name,
+			sourceApps && sourceApps.length ? { source_apps: sourceApps } : undefined
+		);
+		appPickerOpen.value = false;
 		toast.success(
 			agent.value && agent.value.nature === "Scribe" ? "Run started" : "Audit started"
 		);

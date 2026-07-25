@@ -13,8 +13,9 @@ applies pages SERVER-SIDE through ``jarvis.chat.wiki.apply_extracted_page_update
 the ``jarvis__`` -> ``jarvis-`` defang), Org scoping, provenance and page caps.
 
 Namespace integrity (all SERVER-SIDE, never model-trusted):
-  * every page MUST resolve to a real learnable custom app (``assert_custom_app``);
-    a page without one is rejected;
+  * every page MUST resolve to a real learnable custom app that is ALSO in this
+    run's admin-authorized selection (``assert_custom_app`` — allowlist + CX5-2
+    run scope); a page without one is rejected;
   * the slug is FORCED app-prefixed (``<app>-<key>``, keyed on a STABLE per-page
     ``key`` so a re-run reconciles deterministically) — the model never supplies
     the namespace prefix;
@@ -114,10 +115,12 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 		if not title or not body:
 			continue
 		# REQUIRE + VALIDATE a resolved custom app per page (never model-trusted):
-		# a page with no valid learnable custom app is rejected outright.
+		# a page with no valid learnable custom app — or one outside THIS RUN's
+		# admin-authorized selection (CX5-2) — is rejected outright, so the writeback
+		# can never namespace a page onto an app the admin did not consent to.
 		page_app = (str(item.get("app") or "").strip() or default_app).strip()
 		try:
-			ctx.assert_custom_app(page_app)
+			ctx.assert_custom_app(page_app, run_name)
 		except InvalidArgumentError:
 			rejected += 1
 			continue

@@ -803,10 +803,21 @@ def uninstall_agent(installation: str) -> dict:
 
 
 @frappe.whitelist()
-def run_agent_now(installation: str) -> dict:
+def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	"""Manual trigger: enqueue an audit turn NOW via the SAME code path the
 	scheduler uses (``agent_scheduler._launch_audit``), executed UNDER THE
 	INSTALLATION's RUN-AS USER identity — never the triggering user's.
+
+	``options`` is a small per-launch payload (JSON string or dict). The only key
+	today is ``source_apps`` — the list of custom apps this run may read source
+	from (CX5-2). It is REQUIRED for the ``custom-app-learning`` agent (whose whole
+	job is shipping customer source to the configured model provider) and every
+	name is validated against the installed learnable custom apps before launch:
+	"installed" is not consent, so an admin authorises the exact apps, per run. The
+	validated selection is stamped server-side into the run's ``scope_json`` (the
+	tools' authorization) and PERSISTED on the installation
+	(``source_apps_json``) so a scheduled re-learn reuses the same explicit
+	selection instead of running unbounded.
 
 	``check_permission`` gates WHO may trigger (owner, or a System Manager);
 	but the audit's ``jarvis__*`` tool calls must always be scoped to the
@@ -839,7 +850,38 @@ def run_agent_now(installation: str) -> dict:
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)
-	from jarvis.chat.agent_scheduler import _launch_audit, _over_run_budget, _valid_owner
+	from jarvis.chat.agent_scheduler import (
+		_is_app_learning,
+		_launch_audit,
+		_over_run_budget,
+		_valid_owner,
+	)
+
+	# CX5-2: the Custom App Learning agent's explicit, per-run app authorization.
+	# Refuse the launch outright when the admin named no app — a run with an empty
+	# selection would reach the container and read nothing, wasting a run and a
+	# budget slot while looking like a silent failure.
+	source_apps = None
+	if _is_app_learning(doc.agent):
+		from jarvis.learning import app_source
+
+		selection = (frappe.parse_json(options) if isinstance(options, str) else options) or {}
+		if not isinstance(selection, dict):
+			selection = {}
+		try:
+			source_apps = app_source.validate_source_apps(selection.get("source_apps") or [])
+		except ValueError as e:
+			frappe.throw(
+				_(
+					"Select which custom apps this run may read before starting it — {0}. "
+					"Their source code is sent to the configured AI model provider."
+				).format(str(e))
+			)
+		# Persist the validated selection so the SCHEDULED path has a durable, explicit
+		# authorization to reuse (it has no human to ask) instead of running unbounded.
+		frappe.db.set_value(
+			INSTALLATION, doc.name, "source_apps_json", frappe.as_json(source_apps), update_modified=False
+		)
 
 	# A14: the manual path shares the SAME per-installation + per-tenant monthly
 	# budget as the scheduler (counting manual + scheduled runs together), so a
@@ -872,7 +914,7 @@ def run_agent_now(installation: str) -> dict:
 	with impersonate(run_as if run_as != original_user else None):
 		if run_as != original_user:
 			doc = frappe.get_doc(INSTALLATION, installation)  # re-fetch under run_as
-		result = _launch_audit(doc, trigger="manual")
+		result = _launch_audit(doc, trigger="manual", source_apps=source_apps)
 	return {"ok": True, "data": result}
 
 

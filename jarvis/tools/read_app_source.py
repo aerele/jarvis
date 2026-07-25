@@ -6,8 +6,9 @@ fence (the source is DATA, never instructions). The guard stack, in order:
 
   1. Self-gate — resolve a running app-learning **scribe** ``Jarvis Agent Run``
      from the caller's session_key (never a model-supplied id) + admin-tier.
-  2. Custom-apps allowlist — ``app`` must be an installed non-core app
-     (``EXCLUDED_APPS`` is absolute).
+  2. Custom-apps allowlist + RUN SCOPE — ``app`` must be an installed non-core app
+     (``EXCLUDED_APPS`` is absolute) AND one the launching admin explicitly
+     selected for this run (CX5-2, ``scope_json.source_apps``).
   3. Per-run source-BYTES budget — refuse once the run has already read its
      budget, so a looping delegate cannot exhaust the run reading source.
   4. File-level guards (in ``app_source.read_source_file``): relative-path only,
@@ -35,7 +36,7 @@ def read_app_source(app: str, path: str) -> dict:
 	path = str(path or "").strip()
 	if not app or not path:
 		raise InvalidArgumentError("both app and path are required")
-	ctx.assert_custom_app(app)  # custom-apps allowlist (raises on a core/unknown app)
+	ctx.assert_custom_app(app, run["name"])  # allowlist + this run's authorized selection
 
 	# Per-run byte budget: refuse once the run has already read its budget. The
 	# per-file 200 KB cap bounds the overshoot from the file that tips it over.
