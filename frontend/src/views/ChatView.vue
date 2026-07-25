@@ -2770,7 +2770,9 @@
 						     silently, so it is surfaced as ACTIONABLE — Download keeps it, Retry
 						     re-attempts the save once space is freed. -->
 						<div
-							v-if="ui.stt_enabled && voiceQ.unpersisted && voiceQ.unpersisted.length"
+							v-if="
+								ui.stt_enabled && voiceQ.unpersisted && voiceQ.unpersisted.length
+							"
 							style="
 								display: flex;
 								flex-wrap: wrap;

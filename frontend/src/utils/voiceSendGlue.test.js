@@ -697,7 +697,11 @@ test("VR5-3: after newChat promotes the sentinel, the failed bubble is re-inject
 		[],
 		"the failed bubble left the sentinel scope on promotion"
 	);
-	assert.deepEqual(pending.peek("conv-real"), [bubble], "…and now belongs to the real conversation");
+	assert.deepEqual(
+		pending.peek("conv-real"),
+		[bubble],
+		"…and now belongs to the real conversation"
+	);
 
 	// ...then newChat resets messages to [] and (the VR5-3 fix) re-injects the real scope's pending
 	// bubbles exactly as loadConversation does.
@@ -708,7 +712,11 @@ test("VR5-3: after newChat promotes the sentinel, the failed bubble is re-inject
 		[bubble],
 		"the promoted failed bubble (with its voice-release token) is visible right after newChat"
 	);
-	assert.deepEqual(messages[0].voiceAck, [3], "its recovery token survives the promotion + hydrate");
+	assert.deepEqual(
+		messages[0].voiceAck,
+		[3],
+		"its recovery token survives the promotion + hydrate"
+	);
 
 	// Idempotent: a subsequent hydrate (or a later loadConversation) must not double-inject.
 	messages = injectPendingBubbles(messages, pending.peek("conv-real"));
@@ -721,8 +729,16 @@ test("VR5-3: injectPendingBubbles dedupes by name, ignores nameless entries, and
 	const b = { name: "b", content: "B" };
 	// nothing to add → same array reference back (no needless reactive churn).
 	const base = [a];
-	assert.equal(injectPendingBubbles(base, []), base, "empty pending → the input array is returned as-is");
-	assert.equal(injectPendingBubbles(base, undefined), base, "missing pending → input returned as-is");
+	assert.equal(
+		injectPendingBubbles(base, []),
+		base,
+		"empty pending → the input array is returned as-is"
+	);
+	assert.equal(
+		injectPendingBubbles(base, undefined),
+		base,
+		"missing pending → input returned as-is"
+	);
 	// dedupe: `a` is already present, only `b` is appended.
 	assert.deepEqual(
 		injectPendingBubbles([a], [a, b]),
@@ -730,7 +746,15 @@ test("VR5-3: injectPendingBubbles dedupes by name, ignores nameless entries, and
 		"an already-present bubble (by name) is not duplicated; the new one is appended"
 	);
 	// defensive: a nameless / null entry is skipped, never appended.
-	assert.deepEqual(injectPendingBubbles([], [null, { content: "no name" }, b]), [b], "nameless/null entries are ignored");
+	assert.deepEqual(
+		injectPendingBubbles([], [null, { content: "no name" }, b]),
+		[b],
+		"nameless/null entries are ignored"
+	);
 	// tolerates a non-array messages input.
-	assert.deepEqual(injectPendingBubbles(undefined, [b]), [b], "a non-array messages input degrades to []");
+	assert.deepEqual(
+		injectPendingBubbles(undefined, [b]),
+		[b],
+		"a non-array messages input degrades to []"
+	);
 });

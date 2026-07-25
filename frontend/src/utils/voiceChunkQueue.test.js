@@ -1271,8 +1271,16 @@ for (const mode of ["reject", "false", "throw"]) {
 		// The write retries across microtasks before giving up — drain until it settles.
 		for (let i = 0; i < 12 && persistFailed.length === 0; i++) await flush();
 
-		assert.deepEqual(persistFailed, [0], "onPersistFail fired once — the composer STOPS recording");
-		assert.equal(mirror.putCount, 3, "the write was retried up to the attempt budget before giving up");
+		assert.deepEqual(
+			persistFailed,
+			[0],
+			"onPersistFail fired once — the composer STOPS recording"
+		);
+		assert.equal(
+			mirror.putCount,
+			3,
+			"the write was retried up to the attempt budget before giving up"
+		);
 		const snap = q.snapshot();
 		assert.equal(
 			snap.unpersisted.length,
@@ -1325,7 +1333,11 @@ test("VR5-2: retryPersist re-attempts a failed mirror write; a now-healthy store
 	// The user hits Retry; the 4th attempt (past healAfter) now COMMITS.
 	q.retryPersist(0);
 	for (let i = 0; i < 12 && q.snapshot().unpersisted.length; i++) await flush();
-	assert.equal(q.snapshot().unpersisted.length, 0, "Retry succeeded — the unpersisted chip clears");
+	assert.equal(
+		q.snapshot().unpersisted.length,
+		0,
+		"Retry succeeded — the unpersisted chip clears"
+	);
 	assert.ok(mirror.store.has(0), "the clip is now durably mirrored");
 
 	// With the clip persisted AND still un-transcribed, the guard is armed for the normal reason only.
@@ -1333,7 +1345,11 @@ test("VR5-2: retryPersist re-attempts a failed mirror write; a now-healthy store
 	await flush();
 	q.acknowledge(q.captureSent("chatA"));
 	await flush();
-	assert.equal(q.hasUnfinished(), false, "once persisted, transcribed, and sent — nothing left to lose");
+	assert.equal(
+		q.hasUnfinished(),
+		false,
+		"once persisted, transcribed, and sent — nothing left to lose"
+	);
 });
 
 // ── (30) VR5-2: a healthy best-effort mirror (put resolves undefined, as the in-memory tests do) is
@@ -1352,7 +1368,11 @@ test("VR5-2: a healthy mirror (put resolves undefined) never triggers a persiste
 	q.enqueue(clip(0));
 	q.enqueue(clip(1));
 	for (let i = 0; i < 6; i++) await flush();
-	assert.deepEqual(persistFailed, [], "undefined resolution = confirmed — no false persistence alarm");
+	assert.deepEqual(
+		persistFailed,
+		[],
+		"undefined resolution = confirmed — no false persistence alarm"
+	);
 	assert.equal(q.snapshot().unpersisted.length, 0, "no unpersisted chips for a healthy store");
 	assert.deepEqual(
 		mirror.log.filter((e) => e[0] === "put"),
@@ -1380,5 +1400,9 @@ test("VR5-2: with no mirror injected, there is no persistence gating (opt-out co
 	assert.equal(q.snapshot().unpersisted.length, 0, "and no unpersisted chips");
 	tx.resolve(0, "hi");
 	await flush();
-	assert.equal(q.hasUnfinished(), false, "commits and clears exactly as before (no mirror to retain)");
+	assert.equal(
+		q.hasUnfinished(),
+		false,
+		"commits and clears exactly as before (no mirror to retain)"
+	);
 });

@@ -235,7 +235,8 @@ export function createVoiceChunkQueue(deps = {}) {
 				p = Promise.reject(e); // a SYNC throw is a failed write
 			}
 			p.then(
-				(res) => (res === false ? _persistMiss(rec, attempt, attemptPut) : _persistOk(rec)),
+				(res) =>
+					res === false ? _persistMiss(rec, attempt, attemptPut) : _persistOk(rec),
 				() => _persistMiss(rec, attempt, attemptPut)
 			);
 		};
