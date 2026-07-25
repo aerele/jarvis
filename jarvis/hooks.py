@@ -287,14 +287,19 @@ scheduler_events = {
 		# Learn-from-custom-apps has been REPLACED by the Custom App Learning
 		# *scribe* delegate agent (marketplace slug ``custom-app-learning``): it
 		# reads custom-app source and writes the wiki in the container, on demand,
-		# instead of the chat-batch pipeline below. BOTH entry points are now
-		# dormant: this ``app_analysis.tick`` scheduler hook is DISABLED, and the
-		# manual ``app_learning_api.schedule_app_learning`` endpoint REFUSES — so no
-		# NEW chat-pipeline run can start by any path. The engine
+		# instead of the chat-batch pipeline. The engine
 		# (``jarvis.learning.app_analysis``), its API and the ``Jarvis App Learning
-		# Run`` doctype stay physically present but dormant (rollback safety +
-		# historical run rows). Full removal is a tracked fast-follow.
-		# "*/10 * * * *": ["jarvis.learning.app_analysis.tick"],
+		# Run`` doctype stay physically present (rollback safety + historical run
+		# rows). Full removal is a tracked fast-follow.
+		#
+		# CA3-5 (rollback-operable): ``app_analysis.tick`` is registered but SELF-GATES
+		# on ``_legacy_retired()`` — it returns immediately while the pipeline is retired
+		# (the default), so this cron is a cheap no-op in production, and its only job is
+		# to make the rollback path (conf ``jarvis_app_learning_reenable``) actually
+		# operable: when re-enabled, this tick is the scheduler entry that starts due
+		# Queued runs and drives stale-run recovery. ``schedule_app_learning`` is
+		# likewise conditional (refuses while retired, schedules when re-enabled).
+		"*/10 * * * *": ["jarvis.learning.app_analysis.tick"],
 		"*/15 * * * *": [
 			# Behavioural pattern learning tick. Hooks cron is app-static
 			# (per-site rows are reset on migrate), so the window is

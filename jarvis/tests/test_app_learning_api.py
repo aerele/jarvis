@@ -122,6 +122,17 @@ class TestGating(_ApiTestCase):
 
 
 class TestSchedule(_ApiTestCase):
+	def setUp(self):
+		super().setUp()
+		# CA3-5: ``schedule_app_learning`` refuses ONLY while the legacy pipeline is retired
+		# (the default). These tests exercise the RETAINED scheduling body, which is reachable
+		# only when the pipeline is re-enabled for rollback — so run them un-retired. (The
+		# refuse-while-retired config is covered by test_app_learning_agent's
+		# TestLegacyScheduleRetired.)
+		p = mock.patch.object(app_analysis, "_legacy_retired", return_value=False)
+		p.start()
+		self.addCleanup(p.stop)
+
 	def test_consent_is_mandatory(self):
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):

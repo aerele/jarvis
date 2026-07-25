@@ -125,21 +125,29 @@ def get_app_learning_overview() -> dict:
 @frappe.whitelist()
 @require_jarvis_user
 def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
-	"""RETIRED. The chat-batch custom-app learning pipeline has been REPLACED by
-	the Custom App Learning *scribe* delegate agent (marketplace slug
-	``custom-app-learning``), which reads app source and writes the wiki in the
-	Jarvis container instead of feeding source through a chat transcript. This
-	endpoint now REFUSES so no new chat-pipeline run can start; the engine and the
-	``Jarvis App Learning Run`` doctype stay present (rollback + historical rows)
-	but dormant. Install/run the agent from the Agents page instead."""
+	"""RETIRED (rollback-operable). The chat-batch custom-app learning pipeline has been
+	REPLACED by the Custom App Learning *scribe* delegate agent (marketplace slug
+	``custom-app-learning``), which reads app source and writes the wiki in the Jarvis
+	container instead of feeding source through a chat transcript. This endpoint REFUSES
+	while the pipeline is retired (the default) so no new chat-pipeline run can start; the
+	engine and the ``Jarvis App Learning Run`` doctype stay present (rollback + historical
+	rows) but dormant. Install/run the agent from the Agents page instead.
+
+	CA3-5: the refusal is CONDITIONAL on ``app_analysis._legacy_retired()``. When an
+	operator DELIBERATELY re-enables the pipeline for rollback (conf
+	``jarvis_app_learning_reenable``), this endpoint executes the retained scheduling body
+	below, so a rollback can actually queue a run — the self-gating ``app_analysis.tick``
+	cron (re-registered in hooks, inert while retired) then drives it forward."""
 	_require_manage()
-	frappe.throw(
-		_(
-			"The chat-batch app-learning pipeline is retired. Install and run the "
-			"Custom App Learning agent from the Agents page instead."
+	if app_analysis._legacy_retired():
+		frappe.throw(
+			_(
+				"The chat-batch app-learning pipeline is retired. Install and run the "
+				"Custom App Learning agent from the Agents page instead."
+			)
 		)
-	)
-	# Unreachable (kept for rollback reference): the legacy scheduling body.
+	# Retained legacy scheduling body — operable ONLY when the pipeline is re-enabled for
+	# rollback (the refusal above is bypassed).
 	if cint(consent) != 1:
 		frappe.throw(_("Consent to the token cost and direct wiki/skill writes is required."))
 

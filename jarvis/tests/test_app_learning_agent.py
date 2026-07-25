@@ -825,7 +825,36 @@ class TestLegacyScheduleRetired(FrappeTestCase):
 		frappe.set_user("Administrator")
 
 	def test_schedule_app_learning_refuses(self):
+		# CA3-5, config A (absent key = retired by default): the endpoint REFUSES.
 		from jarvis.chat import app_learning_api
 
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			app_learning_api.schedule_app_learning(apps='["fakeapp"]', consent=1)
+
+	def test_schedule_app_learning_schedules_when_reenabled(self):
+		# CA3-5, config B (re-enabled for rollback): the retained scheduling body runs, so a
+		# rollback can actually QUEUE a run — the conditional throw is bypassed when
+		# ``_legacy_retired()`` is False. Both-configs coverage with the refuse test above.
+		from jarvis.chat import app_learning_api
+		from jarvis.learning import app_analysis
+
+		# schedule_app_learning writes the LEGACY doctype, not the agent-run RUN above.
+		legacy_run = "Jarvis App Learning Run"
+		created: list[str] = []
+		try:
+			with (
+				mock.patch.object(app_analysis, "_legacy_retired", return_value=False),
+				mock.patch.object(app_analysis, "_installed_custom_apps", return_value=["fakeapp"]),
+				mock.patch.object(app_analysis, "_enqueue_tick") as tick,
+			):
+				res = app_learning_api.schedule_app_learning(apps='["fakeapp"]', when="", consent=1)
+			self.assertTrue(res["ok"])
+			created = res["data"]["runs"]
+			self.assertEqual(len(created), 1)
+			self.assertEqual(frappe.db.get_value(legacy_run, created[0], "status"), "Queued")
+			tick.assert_called_once()  # an immediate run kicks the (now self-gating) tick
+		finally:
+			for name in created:
+				if frappe.db.exists(legacy_run, name):
+					frappe.delete_doc(legacy_run, name, force=True, ignore_permissions=True)
+			frappe.db.commit()
