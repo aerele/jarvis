@@ -112,7 +112,7 @@
 					:can-send="canSend"
 					placeholder="Reply to Aerele Support…"
 					:disclaimer="disclaimer"
-					@files-added="onFiles"
+					@files-added="(fs) => onFiles(withinSize(fs))"
 					@remove-attachment="removeFile"
 					@submit="send"
 				/>
@@ -131,7 +131,7 @@ import SupportShell from "@/components/support/SupportShell.vue";
 import { renderSupportHtml } from "@/lib/supportHtml";
 import { supportDownloadUrl } from "@/api";
 import { useSupportStore } from "@/stores/support";
-import { useStagedFiles } from "@/composables/useStagedFiles";
+import { useStagedFiles, withinSize } from "@/composables/useStagedFiles";
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 
 // The #avatar slot renders a round human avatar, deliberately unlike Jarvis's
@@ -414,8 +414,13 @@ async function send() {
 		}
 
 		if (staged.length) {
-			const uploaded = await store.uploadTo(tName, staged);
-			settleUpload(uploaded);
+			// Upload only files STILL staged: a chip removed during this in-flight
+			// send must not be uploaded (Helpdesk has no un-attach).
+			const live = staged.filter((f) => files.value.includes(f));
+			if (live.length) {
+				const uploaded = await store.uploadTo(tName, live);
+				settleUpload(uploaded);
+			}
 		}
 
 		await store.loadTickets({ quiet: true });

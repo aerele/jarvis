@@ -10,6 +10,29 @@
 // new-ticket navigates away on success) — only this file lifecycle is
 // shared.
 import { computed, onUnmounted, ref } from "vue";
+import { toast } from "frappe-ui";
+
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024; // matches the server cap (media.py _MAX_BYTES)
+function tooLarge(f) {
+	return typeof f.size === "number" && f.size > MAX_ATTACH_BYTES;
+}
+// Reject oversize files with an immediate message instead of shipping ~33MB of
+// base64 across two hops before the server's late "file too large". Files with no
+// numeric size (synthetic/jsdom) pass. Shared by EVERY attach surface — both
+// support pages' Attach button, paste/drop, and the editor slash command — so the
+// cap can't be applied to one entry point and forgotten on another.
+export function withinSize(list) {
+	const arr = Array.from(list || []);
+	const over = arr.filter(tooLarge);
+	if (over.length) {
+		toast.error(
+			over.length === 1
+				? `"${over[0].name}" is larger than 25 MB and wasn't attached.`
+				: `${over.length} files exceed 25 MB and weren't attached.`
+		);
+	}
+	return arr.filter((f) => !tooLarge(f));
+}
 
 export function useStagedFiles() {
 	const files = ref([]); // local File objects — uploaded on submit, never before
@@ -40,7 +63,9 @@ export function useStagedFiles() {
 	);
 
 	function onFiles(added) {
-		files.value = files.value.concat(added);
+		// Array.from so a raw FileList is spread element-by-element (concat would
+		// append the whole list as ONE nameless entry).
+		files.value = files.value.concat(Array.from(added || []));
 	}
 	function removeFile(i) {
 		const f = files.value[i];

@@ -187,6 +187,16 @@ describe("support store", () => {
 			expect(name).toBeNull();
 			expect(toast.error).toHaveBeenCalled();
 		});
+
+		it("toasts and returns null on a malformed 200 with no ticket name (I7)", async () => {
+			// The caller relies on "the store toasted" — a silent null leaves the
+			// spinner stopping with no message.
+			api.supportCreateTicket.mockResolvedValue({ ok: true, data: {} });
+			const s = useSupportStore();
+			const name = await s.createTicket("Subject", "Body");
+			expect(name).toBeNull();
+			expect(toast.error).toHaveBeenCalled();
+		});
 	});
 
 	describe("reply", () => {

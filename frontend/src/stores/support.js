@@ -137,7 +137,15 @@ async function refreshAwaiting() {
 async function createTicket(subject, body) {
 	try {
 		const r = await supportCreateTicket(subject, body);
-		return (r && r.data && r.data.ticket) || null;
+		const name = r && r.data && r.data.ticket;
+		if (!name) {
+			// A 200 with no ticket name is a malformed success — the caller's
+			// "the store toasted" contract must hold, so surface it here rather
+			// than returning null silently (spinner stops, nothing happens).
+			toast.error("The ticket couldn't be created. Please try again.");
+			return null;
+		}
+		return name;
 	} catch (e) {
 		toast.error(errMsg(e));
 		return null;
