@@ -191,7 +191,7 @@ def reap_stale_agent_runs() -> int:
 	finish already moved off running is LEFT ALONE, and the per-run session is torn down
 	only AFTER the transition is won + committed."""
 	from jarvis.chat import agent_runs
-	from jarvis.tools.record_app_wiki import reconcile_pages_written
+	from jarvis.tools.record_app_wiki import reconcile_run_pages
 
 	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
 	reaped = 0
@@ -214,20 +214,32 @@ def reap_stale_agent_runs() -> int:
 				continue
 			nature = (frappe.db.get_value(LISTING, cur.agent, "nature") or "").strip().title()
 			pages = int(cur.pages_written or 0)
+			pages_meta = None
 			if nature == "Scribe" and pages == 0:
 				# CA2-3 fallback: rebuild the tally from page provenance before failing a
 				# scribe run whose stored tally reads zero, so real work is never lost.
-				pages = reconcile_pages_written(r.name)
+				pages_meta = reconcile_run_pages(r.name)
+				if pages_meta is None:
+					# CA3-4: the provenance QUERY failed — the true page count is UNKNOWN.
+					# Neither terminalization is safe (completing with 0 would drop real
+					# pages; failing would mislabel a success), so leave the run running and
+					# retry on the next sweep. Release the row lock and move on.
+					frappe.db.commit()
+					continue
+				pages = pages_meta["count"]
 			if nature == "Scribe" and pages > 0:
 				# Server-owned terminalization: the pages are already durably written,
 				# so this is an honest SUCCESS the model merely never finalized. Complete
 				# it with its tally rather than failing real work.
-				frappe.db.set_value(
-					RUN,
-					r.name,
-					{"status": "completed", "finished_at": frappe.utils.now()},
-					update_modified=False,
-				)
+				values = {"status": "completed", "finished_at": frappe.utils.now()}
+				if pages_meta is not None:
+					# CA3-4: the tally was rebuilt from provenance (the stored one read 0) —
+					# PERSIST the reconciled ``pages_written`` + ``pages_json`` in the SAME
+					# locked terminalization write, so a run completed off provenance shows
+					# its real page count + list in the durable tally + the Runs UI, never 0.
+					values["pages_written"] = pages
+					values["pages_json"] = frappe.as_json(pages_meta["pages"])[:60000]
+				frappe.db.set_value(RUN, r.name, values, update_modified=False)
 				frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
 				agent_runs.teardown_run_session(cur.session_key)
 				log_activity(

@@ -96,6 +96,7 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 
 	run = ctx.resolve_scribe_run()  # self-gate: scribe run + admin-tier or raise
 	session_key = run["session_key"]
+	run_name = run["name"]
 	default_app = (app or "").strip()
 
 	raw = _as_list(pages)
@@ -164,6 +165,26 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	for entry in accepted:
 		by_app.setdefault(entry["app"], []).append(entry)
 
+	# CA3-1: LOCK the run row + verify it is STILL ``running`` (``for_update``) BEFORE the
+	# FIRST page write, and HOLD that lock through the page writes + tally + the request-end
+	# commit. This orders the writeback AHEAD of the stale-run sweep on the SAME row: a sweep
+	# that reaches this run now BLOCKS on the row lock until we commit, then sees a running
+	# run with our pages durably tallied — so it can never fail a run whose writeback is in
+	# progress, and our pages can never land on a row it already terminalized. A run finalized
+	# (cancelled / reaped / finished) in the window between ``resolve_scribe_run`` and here is
+	# refused with the normal shape: nothing is written, nothing tallied, no budget consumed.
+	run_status = frappe.db.get_value(RUN, run_name, "status", for_update=True)
+	if run_status != "running":
+		return {
+			"run": run_name,
+			"applied": 0,
+			"failed": 0,
+			"rejected": rejected,
+			"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - already),
+			"truncated": truncated,
+			"slugs": [],
+		}
+
 	# Apply through the funnel and record ONLY the pages actually written: the
 	# per-update outcome is zipped back to its accepted entry, so a refused
 	# collision in the middle of a batch is counted as failed and never recorded
@@ -191,14 +212,24 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 				else:
 					failed += 1
 
-	ctx.add_pages_written(session_key, applied)
-	_tally_run(run["name"], applied_pages, truncated, dropped)
+	# CA3-3: advance the per-run page budget ONLY from an AFTER-COMMIT callback, so a
+	# rollback (a failed tally / audit / commit) never leaks budget — the pages, the tally
+	# and this increment all become durable together at the request-end commit, or none do.
+	# A retry of a rolled-back call then sees the FULL remaining capacity rather than a
+	# phantom-consumed budget that would make it write nothing (frappe.db.rollback resets
+	# after_commit, discarding the queued increment).
+	if applied:
+		frappe.db.after_commit.add(lambda n=applied: ctx.add_pages_written(session_key, n))
+	_tally_run(run_name, applied_pages, truncated, dropped)
 	return {
-		"run": run["name"],
+		"run": run_name,
 		"applied": applied,
 		"failed": failed,
 		"rejected": rejected,
-		"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - ctx.pages_written(session_key)),
+		# The budget increment above is deferred to commit, so ``pages_written`` still reads
+		# the pre-call total here; report the remaining from ``remaining - applied`` (the
+		# value it WILL have once this call commits), clamped at zero.
+		"pages_remaining": max(0, remaining - applied),
 		"truncated": truncated,
 		"slugs": [m["slug"] for m in applied_pages],
 	}
@@ -222,9 +253,18 @@ def _tally_run(run_name: str, applied_pages: list[dict], truncated: bool, droppe
 	if not applied_pages and not truncated:
 		return
 	cur = (
-		frappe.db.get_value(RUN, run_name, ["pages_written", "pages_json"], as_dict=True, for_update=True)
+		frappe.db.get_value(
+			RUN, run_name, ["status", "pages_written", "pages_json"], as_dict=True, for_update=True
+		)
 		or {}
 	)
+	# CA3-1: NEVER tally onto a terminal run. ``record_app_wiki`` holds the run-row lock from
+	# before the first page write and verified ``running``, so this is defense-in-depth: if
+	# the row is somehow terminal (cancelled / reaped / completed), REFUSE the tally (no-op)
+	# rather than stamp pages onto it — a successful run is never reported failed and a
+	# terminal run is never overwritten.
+	if (cur.get("status") or "") != "running":
+		return
 	try:
 		existing = json.loads(cur.get("pages_json") or "[]")
 	except Exception:
@@ -245,30 +285,34 @@ def _tally_run(run_name: str, applied_pages: list[dict], truncated: bool, droppe
 	frappe.db.set_value(RUN, run_name, values, update_modified=False)
 
 
-def reconcile_pages_written(run_name: str) -> int:
-	"""Rebuild a run's written-page count from PAGE PROVENANCE (CA2-3 recovery).
+def reconcile_run_pages(run_name: str) -> dict | None:
+	"""Rebuild a run's written-page TALLY (count + ``[{slug, title}]``) from PAGE
+	PROVENANCE (CA2-3 recovery + CA3-4 durable-tally persistence).
 
 	Every page ``record_app_wiki`` wrote carries a ``sources`` entry stamped with this
 	run's id (``ref``) under an ``app-learning*`` kind, so the tally is recoverable from
-	the pages themselves even if the direct tally write were ever lost. The stale-run
-	reaper uses this as a fallback before failing a scribe run whose stored tally reads
-	zero. Bounded + best-effort: scans only Active pages whose ``sources`` mention the
-	(unique, hash-shaped) run id, verifies the provenance in Python, and returns the
-	reconciled count (0 when none found or on any error)."""
+	the pages themselves even if the direct tally write were ever lost. Returns
+	``{"count": int, "pages": [{"slug", "title"}]}``.
+
+	Returns ``None`` when the provenance QUERY ITSELF FAILED — the count is then UNKNOWN,
+	and a caller MUST NOT treat that as "zero pages" (failing/completing a run on a false
+	zero would either mislabel a success or drop its real pages; the caller leaves the run
+	running to retry). Bounded + best-effort: scans only Active pages whose ``sources``
+	mention the (unique, hash-shaped) run id and verifies the provenance in Python."""
 	if not run_name:
-		return 0
+		return {"count": 0, "pages": []}
 	from jarvis.chat.wiki import WIKI
 
 	try:
 		rows = frappe.get_all(
 			WIKI,
 			filters={"status": "Active", "sources": ["like", f"%{run_name}%"]},
-			fields=["sources"],
+			fields=["title", "slug", "sources"],
 			limit_page_length=ctx.PER_RUN_PAGE_CAP + 5,
 		)
 	except Exception:
-		return 0
-	count = 0
+		return None  # UNKNOWN — the provenance query failed; never a false zero
+	pages: list[dict] = []
 	for r in rows:
 		try:
 			sources = json.loads(r.sources or "[]")
@@ -282,5 +326,14 @@ def reconcile_pages_written(run_name: str) -> int:
 			and str(s.get("kind") or "").startswith(PROVENANCE_FENCE_PREFIX)
 			for s in sources
 		):
-			count += 1
-	return count
+			pages.append({"slug": r.slug, "title": r.title})
+	return {"count": len(pages), "pages": pages}
+
+
+def reconcile_pages_written(run_name: str) -> int:
+	"""The reconciled written-page COUNT (``reconcile_run_pages`` count, or 0 on a query
+	failure — preserving this helper's historical "0 on error" contract for callers that
+	only need a number). The stale-run reaper uses ``reconcile_run_pages`` directly so it
+	can distinguish an honest zero from an UNKNOWN (query failure)."""
+	meta = reconcile_run_pages(run_name)
+	return int((meta or {}).get("count") or 0)

@@ -632,6 +632,131 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
 		td.assert_not_called()
 
+	# ------------------------------------------------------------------ #
+	# Round-3 concurrency: writeback-vs-sweep lock ordering + commit-aware budget
+	# ------------------------------------------------------------------ #
+	def test_writeback_refuses_when_run_became_terminal(self):
+		# CA3-1: record_app_wiki LOCKS the run row + re-verifies it is still ``running``
+		# (for_update) BEFORE the first page write. A run finalized (cancel / reap /
+		# finish) between ``resolve_scribe_run`` and that lock is refused with the normal
+		# shape — nothing is written, nothing tallied, no budget consumed. Simulated by
+		# terminalizing the row after resolve returns a still-``running`` view of it.
+		run = self._bind_scribe_run()
+		frappe.db.set_value(RUN, run, "status", "cancelled", update_modified=False)
+		resolved = {"name": run, "agent": SCRIBE_SLUG, "session_key": self.session_key, "status": "running"}
+		with mock.patch.object(ctx, "resolve_scribe_run", return_value=resolved):
+			res = record_app_wiki(
+				app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+			)
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(res["slugs"], [])
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 0)  # never written
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
+		self.assertEqual(ctx.pages_written(self.session_key), 0)  # no budget consumed
+
+	def test_tally_run_refuses_terminal_row(self):
+		# CA3-1: ``_tally_run`` refuses to stamp pages onto a TERMINAL run (defense in depth
+		# for the sweep-vs-writeback race) — a straggling tally never lands on a failed run.
+		from jarvis.tools.record_app_wiki import _tally_run
+
+		run = self._bind_scribe_run()
+		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)
+		# a concurrent sweep failed the run; the straggler tally must NOT stamp onto it
+		frappe.db.set_value(RUN, run, "status", "failed", update_modified=False)
+		_tally_run(run, [{"slug": "fakeapp-extra", "title": "Extra"}], False, 0)
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)  # unchanged
+
+	def test_sweep_completes_a_running_writeback_never_fails_it(self):
+		# CA3-1: a run whose writeback COMMITTED its pages (running, pages_written>0) is
+		# never failed by the stale sweep — the sweep re-reads under the row lock and sees
+		# the durable tally, completing it. Simulated by a STALE candidate snapshot
+		# (running, 0 pages) while the real row is running with a committed tally, exactly
+		# as the writer-holds-lock-before-sweep ordering produces (a real two-connection
+		# block cannot be staged single-connection).
+		from jarvis.chat import agent_scheduler
+
+		run = self._bind_scribe_run()
+		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)
+		frappe.db.commit()  # the writeback's pages + tally are durable before the sweep runs
+		stale = [
+			{
+				"name": run,
+				"session_key": self.session_key,
+				"owner": "Administrator",
+				"agent": SCRIBE_SLUG,
+				"installation": None,
+				"pages_written": 0,  # the stale value the sweep saw at scan time
+			}
+		]
+		with (
+			mock.patch.object(agent_scheduler, "_stale_candidates", return_value=stale),
+			mock.patch("jarvis.chat.agent_runs.teardown_run_session"),
+		):
+			agent_scheduler.reap_stale_agent_runs()
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")  # NEVER failed
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)
+
+	def test_budget_preserved_after_tally_commit_rollback(self):
+		# CA3-3: the page budget advances ONLY from an after-commit callback, so a tally /
+		# commit failure that rolls the request back never leaks budget — a retry sees the
+		# FULL remaining capacity. Simulated by failing the run-row tally write (propagates),
+		# then rolling back as the request/job wrapper would on the raised error.
+		import pymysql
+
+		self._bind_scribe_run()  # binds the session_key context + creates the running run
+		frappe.db.commit()  # persist the run row so the rollback discards only the writeback
+		self.assertEqual(ctx.pages_written(self.session_key), 0)
+		real_set = frappe.db.set_value
+
+		def _sv(dt, *a, **k):
+			if dt == RUN:  # the run-row tally write — simulate a lock-wait timeout
+				raise pymysql.err.OperationalError(1205, "Lock wait timeout exceeded")
+			return real_set(dt, *a, **k)
+
+		with mock.patch.object(frappe.db, "set_value", side_effect=_sv):
+			with self.assertRaises(pymysql.err.OperationalError):
+				record_app_wiki(
+					app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+				)
+		frappe.db.rollback()  # the request/job wrapper rolls back on the propagated error
+		# budget NOT leaked: the full per-run page capacity remains available for the retry
+		self.assertEqual(ctx.pages_written(self.session_key), 0)
+
+	def test_stale_scribe_run_reconciles_and_persists_page_tally(self):
+		# CA3-4: a scribe run whose stored tally was LOST (reads 0) but whose pages ARE
+		# durably written is completed by the sweep with the tally REBUILT from provenance
+		# and PERSISTED — pages_written + pages_json show the real count/list, not 0.
+		from jarvis.chat.agent_scheduler import STALE_RUN_AFTER_SECONDS, reap_stale_agent_runs
+
+		run = self._bind_scribe_run()
+		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		# simulate a LOST durable tally: zero the stored count/list though the page exists
+		frappe.db.set_value(RUN, run, {"pages_written": 0, "pages_json": ""}, update_modified=False)
+		old = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600))
+		frappe.db.set_value(RUN, run, "started_at", old, update_modified=False)
+		frappe.db.commit()
+		reap_stale_agent_runs()
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)
+		tally = json.loads(frappe.db.get_value(RUN, run, "pages_json") or "[]")
+		self.assertEqual({p["slug"] for p in tally}, {"fakeapp-overview"})
+
+	def test_stale_scribe_run_left_running_when_reconcile_query_fails(self):
+		# CA3-4: if the provenance reconcile QUERY fails, the count is UNKNOWN — the sweep
+		# must NOT terminalize (completing with 0 would drop real pages; failing would
+		# mislabel a success). The run is left running to retry on the next sweep.
+		from jarvis.chat.agent_scheduler import STALE_RUN_AFTER_SECONDS, reap_stale_agent_runs
+
+		run = self._bind_scribe_run()  # pages_written 0 (no writeback)
+		old = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600))
+		frappe.db.set_value(RUN, run, "started_at", old, update_modified=False)
+		frappe.db.commit()
+		with mock.patch("jarvis.tools.record_app_wiki.reconcile_run_pages", return_value=None):
+			reap_stale_agent_runs()
+		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "running")  # left for retry
+
 
 class TestRunAgentNowScribeGate(FrappeTestCase):
 	"""The ``run_agent_now`` nature gate admits Scribe (auditor stays valid,
