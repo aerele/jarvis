@@ -236,6 +236,15 @@ def _cas_status(run_name: str, expected: str, fields: dict) -> bool:
 
 
 def _fail_run(run_name: str, msg: str) -> None:
+	# CA3-2: the failure transition is compare-and-set too. Read the status under a ROW
+	# LOCK and fail ONLY a still-NON-terminal run, so a run a concurrent cancel / the
+	# retirement migration already terminalized is NEVER overwritten to Failed (a Cancelled
+	# run must stay Cancelled, a Completed run must stay Completed). A terminal row is a
+	# no-op — the lock is released and the terminal state stands.
+	current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
+	if current in TERMINAL:
+		frappe.db.commit()  # release the row lock; a terminal row is left as-is
+		return
 	_set_run(
 		run_name,
 		{
@@ -263,6 +272,16 @@ def mark_cancelled(run_name: str) -> None:
 	with redis_lock(
 		f"jarvis_app_learning_run:{run_name}", timeout_s=60, blocking_timeout_s=_CANCEL_LOCK_BLOCK_S
 	):
+		# CA3-2: re-read cancellation eligibility under a ROW LOCK. Cancel ONLY a
+		# still-NON-terminal run, so a run that WON a concurrent forward transition
+		# (Ingesting -> Completed) or was already terminal is never overwritten Cancelled
+		# — the committed terminal state stands. A user cancel of a live run is never
+		# dropped: a non-terminal row is cancelled even if the redis lock was momentarily
+		# busy (the block still runs), and the turn-end recheck backstops the rare case.
+		current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
+		if current in TERMINAL:
+			frappe.db.commit()  # release the row lock; a terminal run is left as-is
+			return
 		_set_run(run_name, {"status": "Cancelled", "finished_at": now_datetime()})
 
 
@@ -915,7 +934,11 @@ def _advance_run(run, *, errored: bool) -> None:
 			return
 		notes = _load_notes(run)
 		notes["final"] = {"summary": str(parsed.get("summary") or "")[:1000]}
-		_set_run(run.name, {"status": "Ingesting", "notes": json.dumps(notes)})
+		# CA3-2: compare-and-set Analyzing -> Ingesting. If a cancel / the retirement
+		# migration moved the row off Analyzing while this final turn ran, do NOT
+		# resurrect it into Ingesting — leave the conversation inert (no ingest enqueued).
+		if not _cas_status(run.name, "Analyzing", {"status": "Ingesting", "notes": json.dumps(notes)}):
+			return
 		_enqueue_ingest(run.name)
 		return
 
@@ -1096,11 +1119,23 @@ def _recover_stale_runs() -> bool:
 def ingest(run: str) -> None:
 	"""Queue-``long`` worker: land the final consolidation payload. Per-page /
 	per-skill failures are logged and counted; a wholesale failure marks the
-	run Failed. Never raises."""
+	run Failed. Never raises.
+
+	CA3-2 (cancel-vs-ingest): the writeback is coordinated with the SAME per-run redis
+	lock the chaining/cancel critical sections hold, rechecks retirement + ``Ingesting``
+	status under it before any side effect, and terminalizes ``Ingesting -> Completed``
+	with a COMPARE-AND-SET under a row lock. The wiki-page writes ride in a SAVEPOINT and
+	commit together with the ``Completed`` status only when the CAS WINS; if the CAS LOSES
+	(a cancel / the retirement migration moved the row off Ingesting), the pages are ROLLED
+	BACK to the savepoint and no skills are created — a cancelled run never keeps this run's
+	pages or skills. Org skills (which commit internally) are created only AFTER the run is
+	durably Completed, so a lost CAS leaves nothing that needs undoing."""
 	if _legacy_retired():
 		# CA2-1: an ingest job enqueued before retirement fails CLOSED — the legacy
 		# wiki/skill writeback never runs post-retirement (the scribe owns writes now).
 		return
+	from jarvis._redis_lock import redis_lock
+
 	try:
 		doc = frappe.get_doc(RUN, run)
 	except Exception:
@@ -1111,57 +1146,98 @@ def ingest(run: str) -> None:
 		return
 	if doc.status != "Ingesting":
 		return
-	try:
-		payload = _parse_last_reply(doc.conversation)
-		if not isinstance(payload, dict):
-			_fail_run(run, "final reply unavailable or unparseable at ingest time")
-			_enqueue_tick()
+	with redis_lock(
+		f"jarvis_app_learning_run:{run}", timeout_s=INGEST_TIMEOUT_S, blocking_timeout_s=10.0
+	) as acquired:
+		if not acquired:
+			# Another critical section (chaining / cancel / a concurrent ingest) holds the
+			# run lock — do NOT double-write. The stale-run recovery re-enqueues ingest.
 			return
-		pages_written, pages_failed = _ingest_wiki_pages(doc, payload)
-		skills_created, skills_deferred, skills_failed = _ingest_skills(doc, payload)
-
-		notes = _load_notes(doc)
-		notes["ingest"] = {
-			"pages_written": pages_written,
-			"pages_failed": pages_failed,
-			"skills_created": skills_created,
-			"skills_deferred": skills_deferred,
-			"skills_failed": skills_failed,
-		}
-		_delete_zip_file(doc.zip_path)
-		_set_run(
-			run,
-			{
-				"status": "Completed",
-				"finished_at": now_datetime(),
-				"zip_path": "",
-				"pages_written": pages_written,
-				"skills_created": skills_created,
-				"skills_deferred": skills_deferred,
-				"notes": json.dumps(notes),
-			},
-		)
+		# CA3-2: recheck retirement + Ingesting eligibility UNDER the lock, immediately
+		# before any side effect. A cancel / retirement that landed after the pre-lock read
+		# is honoured here — no pages/skills are written.
+		if _legacy_retired():
+			return
 		try:
-			from jarvis.chat.events import publish_to_user
-
-			publish_to_user(
-				doc.requested_by,
+			doc = frappe.get_doc(RUN, run)
+		except Exception:
+			return
+		if doc.status != "Ingesting":
+			return
+		try:
+			payload = _parse_last_reply(doc.conversation)
+			if not isinstance(payload, dict):
+				_fail_run(run, "final reply unavailable or unparseable at ingest time")
+				return
+			# The wiki writes ride in a SAVEPOINT so a lost completion CAS can discard them
+			# cleanly — they are the ONLY pre-CAS side effect (skills come after the win).
+			sp = f"jal_ingest_{frappe.generate_hash(length=8)}"
+			frappe.db.savepoint(sp)
+			pages_written, pages_failed = _ingest_wiki_pages(doc, payload)
+			notes = _load_notes(doc)
+			notes["ingest"] = {"pages_written": pages_written, "pages_failed": pages_failed}
+			# CA3-2: CAS Ingesting -> Completed under a ROW LOCK, committing the pages with
+			# the status atomically. A row moved off Ingesting (cancel / retirement) LOSES
+			# the CAS: roll the pages back to the savepoint and leave the terminal row as-is
+			# — never complete a cancelled run, never keep its pages.
+			if frappe.db.get_value(RUN, run, "status", for_update=True) != "Ingesting":
+				frappe.db.rollback(save_point=sp)
+				frappe.db.commit()  # release the row lock; the terminal state stands
+				return
+			frappe.db.set_value(
+				RUN,
+				run,
 				{
-					"kind": "app_learning:done",
-					"run": run,
-					"app": doc.app,
+					"status": "Completed",
+					"finished_at": now_datetime(),
+					"pages_written": pages_written,
+					"notes": json.dumps(notes),
 				},
 			)
+			frappe.db.commit()  # pages + Completed land together, or (on loss above) neither
+			_bust_active_conversations()
+			# Post-completion side effects: the terminal transition is already durable, so
+			# the skill creates' internal commits are safe. A failure here logs + counts but
+			# never un-completes the run (``_fail_run`` no-ops on the now-terminal row).
+			_delete_zip_file(doc.zip_path)
+			frappe.db.set_value(RUN, run, "zip_path", "", update_modified=False)
+			skills_created, skills_deferred, skills_failed = _ingest_skills(doc, payload)
+			notes["ingest"].update(
+				{
+					"skills_created": skills_created,
+					"skills_deferred": skills_deferred,
+					"skills_failed": skills_failed,
+				}
+			)
+			_set_run(
+				run,
+				{
+					"skills_created": skills_created,
+					"skills_deferred": skills_deferred,
+					"notes": json.dumps(notes),
+				},
+			)
+			try:
+				from jarvis.chat.events import publish_to_user
+
+				publish_to_user(
+					doc.requested_by,
+					{
+						"kind": "app_learning:done",
+						"run": run,
+						"app": doc.app,
+					},
+				)
+			except Exception:
+				pass  # the run completed; a missed toast must not fail it
 		except Exception:
-			pass  # the run completed; a missed toast must not fail it
-	except Exception:
-		frappe.log_error(
-			title=f"jarvis app learning: ingest failed ({doc.app})",
-			message=frappe.get_traceback(),
-		)
-		_fail_run(run, "ingest failed; see Error Log")
-	finally:
-		_enqueue_tick()
+			frappe.log_error(
+				title=f"jarvis app learning: ingest failed ({doc.app})",
+				message=frappe.get_traceback(),
+			)
+			_fail_run(run, "ingest failed; see Error Log")
+		finally:
+			_enqueue_tick()
 
 
 def _slugify(text: str) -> str:

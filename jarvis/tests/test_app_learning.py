@@ -988,3 +988,99 @@ class TestLegacyPipelineRetired(_AppLearningTestCase):
 			app_analysis.ingest(ing_run.name)
 		ing_run.reload()
 		self.assertEqual(ing_run.status, "Ingesting")  # untouched — the writeback never ran
+
+
+# --------------------------------------------------------------------------- #
+# CA3-2 — full compare-and-set coverage on the legacy transitions + ingest rollback
+# --------------------------------------------------------------------------- #
+class TestLegacyTransitionCAS(_AppLearningTestCase):
+	"""CA3-2: EVERY forward + failure transition is a compare-and-set, so a cancel / the
+	retirement migration that terminalizes a run is never overwritten by a later transition,
+	and a lost completion CAS rolls back the ingest side effects (pages + skills)."""
+
+	def test_fail_run_does_not_overwrite_a_terminal_run(self):
+		# The failure transition is a CAS too — it never flips a terminal row to Failed, so
+		# a Cancelled run a concurrent cancel produced stays Cancelled.
+		run = self._mk_run(status="Cancelled", conversation="conv-fr-x", finished_at=now_datetime())
+		app_analysis._fail_run(run.name, "boom")
+		self.assertEqual(frappe.db.get_value(RUN, run.name, "status"), "Cancelled")
+
+	def test_mark_cancelled_does_not_overwrite_a_completed_run(self):
+		# mark_cancelled re-reads eligibility under a row lock — a run that already WON a
+		# forward transition (Completed) is never overwritten to Cancelled.
+		run = self._mk_run(status="Completed", conversation="conv-mc-x", finished_at=now_datetime())
+		app_analysis.mark_cancelled(run.name)
+		self.assertEqual(frappe.db.get_value(RUN, run.name, "status"), "Completed")
+
+	def test_final_transition_uses_cas_and_respects_a_lost_race(self):
+		# Analyzing -> Ingesting is a compare-and-set; if it LOSES (a cancel/retirement moved
+		# the row off Analyzing under us), the run is NOT pushed to Ingesting and no ingest
+		# is enqueued.
+		run = self._analyzing_run()
+		frappe.db.set_value(RUN, run.name, "batches_done", run.batches_total)
+		frappe.db.commit()
+		run.reload()
+		self._reply(run.conversation, _fenced({"wiki_pages": [], "skills": [], "summary": "done"}))
+		with (
+			mock.patch.object(app_analysis, "_cas_status", return_value=False) as cas,
+			mock.patch.object(app_analysis, "_enqueue_ingest") as ing,
+		):
+			app_analysis._advance_run(run, errored=False)
+		cas.assert_called_once()
+		self.assertEqual(cas.call_args[0][1], "Analyzing")  # expected=Analyzing
+		self.assertEqual(cas.call_args[0][2]["status"], "Ingesting")  # target=Ingesting
+		ing.assert_not_called()
+
+	def test_cancel_vs_ingest_cas_rolls_back_side_effects(self):
+		# When the completion CAS observes the run moved off Ingesting (a cancel / the
+		# retirement migration won the row before the CAS), the wiki pages written THIS
+		# ingest are ROLLED BACK to the savepoint and NO skills are created — a cancelled run
+		# never keeps this run's pages or skills. The concurrent cancel is simulated by
+		# making the CAS's for_update status read observe "Cancelled" (a single-connection
+		# test cannot stage a second connection's committed write); the real row stays
+		# Ingesting, so the assertion is that it is NEVER Completed and nothing durably lands.
+		self.addCleanup(
+			lambda: (
+				frappe.db.delete("Jarvis Wiki Page", {"slug": ["like", "fakeapp-%"]}),
+				frappe.db.commit(),
+			)
+		)
+		payload = {
+			"wiki_pages": [{"title": "Overview", "page_type": "Process", "body_md": "b", "mode": "create"}],
+			"skills": [
+				{
+					"skill_name": "fakeapp-cas-skill",
+					"description": "d",
+					"instructions": "i",
+					"user_invocable": False,
+				}
+			],
+			"summary": "s",
+		}
+		self._skills.append("fakeapp-cas-skill")
+		conv = self._mk_conv()
+		self._reply(conv, _fenced(payload))
+		run = self._mk_run(status="Ingesting", conversation=conv)
+		real_gv = frappe.db.get_value
+
+		def _gv(*args, **kwargs):
+			# intercept ONLY the completion CAS read; everything else passes through
+			if (
+				len(args) >= 3
+				and args[0] == RUN
+				and args[1] == run.name
+				and args[2] == "status"
+				and kwargs.get("for_update")
+			):
+				return "Cancelled"
+			return real_gv(*args, **kwargs)
+
+		with (
+			mock.patch.object(frappe.db, "get_value", side_effect=_gv),
+			mock.patch.object(app_analysis, "_enqueue_tick"),
+		):
+			app_analysis.ingest(run.name)
+		# NEVER completed the cancelled run; the page rolled back; no skill created
+		self.assertNotEqual(frappe.db.get_value(RUN, run.name, "status"), "Completed")
+		self.assertEqual(frappe.db.count("Jarvis Wiki Page", {"slug": "fakeapp-overview"}), 0)
+		self.assertEqual(frappe.db.count(SKILL, {"skill_name": "fakeapp-cas-skill"}), 0)
