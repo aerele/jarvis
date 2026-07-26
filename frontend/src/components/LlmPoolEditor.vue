@@ -2868,10 +2868,17 @@ async function load() {
 	} catch (e) {
 		/* non-fatal */
 	}
-	try {
-		catalog.value = (await api.getPresetCatalog()) || [];
-	} catch (e) {
-		/* backend bundled fallback */
+	// Onboarding (singleMode) never renders the preset picker (modes=['quick']
+	// hides the "From a preset" tab, which is disabled/"Soon" anyway) and
+	// nothing in the singleMode branch reads `catalog`, so skip the fetch
+	// there. The Account/Settings editor (!singleMode) still loads it for
+	// resilient-by-default backups (expandApiKeyBackups) and the preset tab.
+	if (!singleMode.value) {
+		try {
+			catalog.value = (await api.getPresetCatalog()) || [];
+		} catch (e) {
+			/* backend bundled fallback */
+		}
 	}
 	try {
 		modelCatalog.value = (await api.getModelCatalogUi()) || modelCatalog.value;
