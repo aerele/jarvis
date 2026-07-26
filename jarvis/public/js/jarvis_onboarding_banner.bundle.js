@@ -3,19 +3,21 @@
 // user to finish setup and start easing their ERP workflows. Replaces the old
 // top banner with a friendlier, on-brand "Jarvis is chatting" bubble thread.
 //
-// Reads `frappe.boot.jarvis_onboarded` (set in jarvis.boot.set_jarvis_boot).
-// Shows only for a not-onboarded System Manager; dismissal is per-tab-session
-// (sessionStorage) so it returns next fresh session until setup is finished.
-// Loaded on every Desk page via hooks.app_include_js.
+// Reads `frappe.boot.jarvis_onboarded` (set in jarvis.boot.set_jarvis_boot)
+// and `frappe.boot.sysdefaults.setup_complete` (frappe.is_setup_complete()).
+// Shows only for a not-onboarded System Manager AFTER ERPNext's own setup
+// wizard is finished, so it never pops over the wizard. Dismissal is
+// per-tab-session (sessionStorage) so it returns next fresh session until
+// setup is finished. Loaded on every Desk page via hooks.app_include_js.
 //
-// That boot flag is written ONCE per page load, so a Desk that stays open
-// across a setup finishing elsewhere keeps nagging until a hard reload. The
-// reported case: open the Desk, go to /jarvis, complete onboarding, press
-// Back. The browser restores the Desk from bfcache, no boot runs, and the
-// nudge is still sitting there on a workspace that is now set up. So the
-// nudge re-asks the server whenever the page is shown again, and only while
-// the flag still says not-onboarded, which leaves a set-up Desk at zero
-// extra round trips.
+// The jarvis_onboarded flag is written ONCE per page load, so a Desk that
+// stays open across a setup finishing elsewhere keeps nagging until a hard
+// reload. The reported case: open the Desk, go to /jarvis, complete
+// onboarding, press Back. The browser restores the Desk from bfcache, no boot
+// runs, and the nudge is still sitting there on a workspace that is now set
+// up. So the nudge re-asks the server whenever the page is shown again, and
+// only while the flag still says not-onboarded, which leaves a set-up Desk at
+// zero extra round trips.
 
 (function () {
 	if (window.__jarvisOnboardingBanner) return;
@@ -35,6 +37,15 @@
 	var RECHECK_MIN_MS = 30 * 1000;
 	var lastCheckAt = 0;
 	var checking = false;
+
+	// ERPNext's own setup wizard must be finished first: completing it creates
+	// the first Company. Until then the desk IS the setup wizard, so nudging the
+	// user to set up Jarvis on top of it is just noise.
+	// frappe.boot.sysdefaults.setup_complete is frappe.is_setup_complete().
+	function erpnextSetupComplete() {
+		if (!window.frappe || !frappe.boot) return false;
+		return (frappe.boot.sysdefaults || {}).setup_complete == 1;
+	}
 
 	function isSystemManager() {
 		return !!(
@@ -58,6 +69,7 @@
 	function shouldShow() {
 		if (!window.frappe || !frappe.boot) return false;
 		if (frappe.boot.jarvis_onboarded !== false) return false;
+		if (!erpnextSetupComplete()) return false;
 		if (!isSystemManager()) return false;
 		if (dismissed()) return false;
 		var route = (frappe.get_route && frappe.get_route()) || [];
@@ -73,7 +85,9 @@
 		if (!window.frappe || !frappe.boot) return;
 		if (frappe.boot.jarvis_onboarded !== false) return;
 		// Nobody would see the correction, so do not spend a round trip on it.
-		if (!isSystemManager() || dismissed()) return;
+		// Mid-ERPNext-setup-wizard is the same case: the nudge is suppressed
+		// there regardless of what the server would say about Jarvis.
+		if (!erpnextSetupComplete() || !isSystemManager() || dismissed()) return;
 		if (checking) return;
 		var now = new Date().getTime();
 		if (!force && now - lastCheckAt < RECHECK_MIN_MS) return;
