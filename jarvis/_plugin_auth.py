@@ -45,10 +45,17 @@ unsigned bearer-only requests). It exists only for self-hosted benches
 whose openclaw plugin has not been upgraded yet, it WARN-logs the
 sunset date on every request it lets through, and it bumps a per-day
 Redis counter (``jarvis:plugin_unsigned_allowed:<YYYY-MM-DD>``) so an
-operator can confirm the field is quiet before turning it off. Requests
-rejected while the flag is off land in the Error Log under
-"plugin_auth: unsigned request rejected". The flag itself is scheduled
-for removal on 2026-10-01 (``_UNSIGNED_SUNSET_DATE``).
+operator can confirm the field is quiet before turning it off. While the
+hatch is on, ``unsigned_escape_hatch_status`` surfaces that count as an
+advisory row in the self-host "Test connection" checks (jarvis.selfhost)
+so the operator sees it in the product, not only in the logs. The flag
+itself is scheduled for removal on 2026-10-01 (``_UNSIGNED_SUNSET_DATE``).
+
+Requests rejected while the flag is off land in the Error Log under
+"plugin_auth: unsigned request rejected", throttled to one row per
+session per minute: an un-upgraded plugin retries every tool call, so an
+unthrottled audit would fill the Error Log with thousands of copies of
+one fact. The reject itself is never throttled.
 """
 
 from __future__ import annotations
@@ -67,7 +74,10 @@ _NONCE_REDIS_PREFIX = "jarvis:plugin_nonce:"
 _ALLOW_UNSIGNED_CONF_KEY = "jarvis_plugin_allow_unsigned"
 _UNSIGNED_SUNSET_DATE = "2026-10-01"
 _UNSIGNED_COUNTER_PREFIX = "jarvis:plugin_unsigned_allowed:"
-_UNSIGNED_COUNTER_TTL_S = 7 * 24 * 60 * 60
+_UNSIGNED_COUNTER_DAYS = 7
+_UNSIGNED_COUNTER_TTL_S = _UNSIGNED_COUNTER_DAYS * 24 * 60 * 60
+_UNSIGNED_AUDIT_GATE_PREFIX = "jarvis:plugin_unsigned_audit:"
+_UNSIGNED_AUDIT_GATE_TTL_S = 60
 
 
 class PluginAuthError(Exception):
@@ -205,16 +215,20 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			"unknown" if allowed_today is None else allowed_today,
 		)
 	else:
-		_audit_log(
-			"plugin_auth: unsigned request rejected",
-			f"remote_ip={caller_ip!r} session={session_key!r}; no signature headers "
-			f"and {_ALLOW_UNSIGNED_CONF_KEY} is off",
-		)
+		if _should_audit_unsigned_reject(session_key):
+			_audit_log(
+				"plugin_auth: unsigned request rejected",
+				f"remote_ip={caller_ip!r} session={session_key!r}; no signature headers "
+				f"and {_ALLOW_UNSIGNED_CONF_KEY} is off",
+			)
 		raise PluginAuthError(
 			http_status=400,
 			code="InvalidArgumentError",
 			message="signature headers required; provide all of "
-			"X-Jarvis-Signature/X-Jarvis-Nonce/X-Jarvis-Timestamp",
+			"X-Jarvis-Signature/X-Jarvis-Nonce/X-Jarvis-Timestamp. Upgrade the "
+			"openclaw plugin to a signing build, or run `bench --site <site> "
+			f"set-config {_ALLOW_UNSIGNED_CONF_KEY} 1` as a stopgap until that "
+			f"flag is removed on {_UNSIGNED_SUNSET_DATE}.",
 		)
 
 	# 5. Rate limit per session_key (after signature validation so the
@@ -277,6 +291,65 @@ def _allow_unsigned() -> bool:
 	except Exception:
 		return False
 	return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _should_audit_unsigned_reject(session_key: str) -> bool:
+	"""One "unsigned request rejected" Error Log row per session per minute.
+
+	A bench whose plugin predates signing rejects EVERY tool call, so an
+	unthrottled audit turns one operator fact into thousands of rows. The
+	reject itself is unconditional; only the row is gated. Fails OPEN (log
+	it) when the cache is unreachable, so a Redis outage can never make the
+	audit trail quieter than it should be.
+	"""
+	try:
+		cache = frappe.cache()
+		key = _UNSIGNED_AUDIT_GATE_PREFIX + (session_key or "-")
+		return bool(cache.set(key, b"1", nx=True, ex=_UNSIGNED_AUDIT_GATE_TTL_S))
+	except Exception:
+		return True
+
+
+def unsigned_escape_hatch_status() -> dict | None:
+	"""Operator-facing state of the deprecated unsigned-plugin escape hatch.
+
+	Returns None when the hatch is off - the enforcing default, nothing to
+	advise about. When it is on, returns the conf key, the removal date, the
+	counter window and how many unsigned calls it let through over that
+	window (``recent_allowed`` is None when the cache is unreachable).
+	Consumed by jarvis.selfhost.config_checks so the sunset is visible in
+	the product, not only in the bench logs.
+	"""
+	if not _allow_unsigned():
+		return None
+	return {
+		"conf_key": _ALLOW_UNSIGNED_CONF_KEY,
+		"sunset_date": _UNSIGNED_SUNSET_DATE,
+		"window_days": _UNSIGNED_COUNTER_DAYS,
+		"recent_allowed": _unsigned_allowed_recent(),
+	}
+
+
+def _unsigned_allowed_recent() -> int | None:
+	"""Unsigned requests allowed across the counter's retention window.
+
+	Reads the same raw (un-pickled) keys ``_record_unsigned_allowed`` writes
+	with ``incr``, so it must use ``cache.get``, not ``get_value``. Returns
+	None when the cache is unreachable - the caller says "unknown" rather
+	than an untrue zero.
+	"""
+	try:
+		cache = frappe.cache()
+		total = 0
+		for offset in range(_UNSIGNED_COUNTER_DAYS):
+			day = frappe.utils.add_days(frappe.utils.today(), -offset)
+			raw = cache.get(_UNSIGNED_COUNTER_PREFIX + str(day))
+			if raw is None:
+				continue
+			total += int(raw.decode() if isinstance(raw, bytes) else raw)
+		return total
+	except Exception:
+		return None
 
 
 def _record_unsigned_allowed() -> int | None:
