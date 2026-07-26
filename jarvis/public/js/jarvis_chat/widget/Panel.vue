@@ -480,7 +480,7 @@ import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
 import { classifyReadiness, degradedMessage } from "./panel_readiness.mjs";
-import { emptyStream, applyEvent, visibleMessages } from "./chat_stream.mjs";
+import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
 import {
 	listConversations,
@@ -660,7 +660,11 @@ async function load() {
 function startNewChat() {
 	convId.value = "";
 	messages.value = [];
-	stream.value = emptyStream();
+	// Keep the fence watermarks: the panel can rebind to the SAME conversation
+	// (list[0]) on reopen, and a wiped fence would readmit a superseded pump's
+	// straggler — the dead-banner resurrection the fence exists to prevent.
+	// New runs get fresh entries; old entries are three ints per run_id.
+	stream.value = { ...emptyStream(), fence: stream.value.fence };
 	loadError.value = "";
 	draft.value = "";
 	nextTick(() => textareaEl.value?.focus());
@@ -843,9 +847,13 @@ function onRealtime(payload) {
 	const conv = payload?.conversation_id || payload?.conversation;
 	if (!conv || conv !== convId.value) return;
 
-	const next = applyEvent(stream.value, payload);
+	const { state: next, admitted } = applyEventEx(stream.value, payload);
 
-	stopPolling();
+	// Only an ADMITTED frame proves the winning pump's stream is reaching us.
+	// A fenced-out straggler must not stand the HTTP fallback down: after a
+	// handoff, stale frames can be the ONLY thing this socket ever sees, and
+	// polling is then the sole path to the finished reply.
+	if (admitted) stopPolling();
 	if (next.reload) {
 		// Clear the flag before reloading so a second frame cannot double-fetch.
 		stream.value = { ...next, reload: false, error: "" };
