@@ -82,33 +82,39 @@
 	// mid-session, and an expiring credential is the degraded path's problem,
 	// not this nudge's.
 	function reverify(force) {
-		if (!window.frappe || !frappe.boot) return;
-		if (frappe.boot.jarvis_onboarded !== false) return;
-		// Nobody would see the correction, so do not spend a round trip on it.
-		// Mid-ERPNext-setup-wizard is the same case: the nudge is suppressed
-		// there regardless of what the server would say about Jarvis.
-		if (!erpnextSetupComplete() || !isSystemManager() || dismissed()) return;
+		// The nudge's own visibility predicate, reused rather than re-listed.
+		// If the nudge would not be on screen (already onboarded, mid-ERPNext
+		// wizard, not a System Manager, dismissed, or on a hidden route) then
+		// correcting the flag changes nothing anyone can see, so it is not
+		// worth a round trip. Deriving it keeps the two from drifting apart
+		// the next time a guard is added to shouldShow().
+		if (!shouldShow()) return;
 		if (checking) return;
 		var now = new Date().getTime();
 		if (!force && now - lastCheckAt < RECHECK_MIN_MS) return;
 		lastCheckAt = now;
 		checking = true;
-		var req = frappe.call({
-			method: READY_METHOD,
-			callback: function (r) {
-				// Anything other than an explicit ready leaves the flag alone.
-				// A failed or malformed check must never clear a nudge the
-				// workspace still needs.
-				if (r && r.message && r.message.ready) {
-					frappe.boot.jarvis_onboarded = true;
-					sync();
-				}
-			},
-		});
-		// Release the in-flight guard on BOTH outcomes. A guard left stuck on
-		// would silently kill every later re-check in this tab.
-		if (req && req.always) req.always(releaseCheck);
-		else releaseCheck();
+		// Release the in-flight guard on EVERY outcome, including a synchronous
+		// throw out of frappe.call before it ever returns a promise. A guard
+		// left stuck on would silently kill every later re-check in this tab.
+		try {
+			var req = frappe.call({
+				method: READY_METHOD,
+				callback: function (r) {
+					// Anything other than an explicit ready leaves the flag
+					// alone. A failed or malformed check must never clear a
+					// nudge the workspace still needs.
+					if (r && r.message && r.message.ready) {
+						frappe.boot.jarvis_onboarded = true;
+						sync();
+					}
+				},
+			});
+			if (req && req.always) req.always(releaseCheck);
+			else releaseCheck();
+		} catch (e) {
+			releaseCheck();
+		}
 	}
 
 	function releaseCheck() {
