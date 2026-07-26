@@ -215,3 +215,138 @@ test("live text survives an unrelated event", () => {
   s = applyEvent(s, { kind: "action:pending", token: "t1", summary: "x" });
   assert.equal(s.live.text, "partial");
 });
+
+// ── JF-018: Relay-Pump epoch/seq fence ────────────────────────────────────────
+// The panel consumes the same pump-fenced frames as the desktop SPA. The shared
+// comparison ladder has its own exhaustive suite (../../shared/pump_fence.test.mjs
+// — including a parity walk against desktop's copy); these prove the REDUCER wires
+// it in: a straggler must not rewind the live text or re-close a settled turn.
+const pumped = (kind, epoch, seq, extra = {}) => ({
+  kind,
+  run_id: "r1",
+  pump_epoch: epoch,
+  event_seq: seq,
+  ...extra,
+});
+
+test("fence: a superseded pump's delta cannot rewind the live text", () => {
+  let s = applyEvent(
+    emptyStream(),
+    pumped("run:start", 2, 1, { message_id: "m1" })
+  );
+  s = applyEvent(s, pumped("assistant:delta", 2, 2, { text: "Hello there" }));
+  // Same run, older epoch, higher seq — the classic post-handoff straggler.
+  s = applyEvent(s, pumped("assistant:delta", 1, 99, { text: "Hel" }));
+  assert.equal(s.live.text, "Hello there");
+});
+
+test("fence: a replayed same-epoch delta is dropped", () => {
+  let s = applyEvent(
+    emptyStream(),
+    pumped("assistant:delta", 3, 5, { text: "full answer" })
+  );
+  s = applyEvent(s, pumped("assistant:delta", 3, 4, { text: "full" }));
+  s = applyEvent(s, pumped("assistant:delta", 3, 5, { text: "full" }));
+  assert.equal(s.live.text, "full answer");
+});
+
+test("fence: the FIRST terminal settles the turn, the backstop repeat does not re-fire", () => {
+  let s = applyEvent(
+    emptyStream(),
+    pumped("assistant:delta", 4, 7, { text: "done" })
+  );
+  // finalize reproduces the delta watermark's seq — this must still settle.
+  s = applyEvent(s, pumped("run:end", 4, 7));
+  assert.equal(s.live, null);
+  assert.equal(s.reload, true);
+  // Panel.vue clears `reload` the moment it acts on it; a re-published terminal
+  // must not set it again and cause a second fetch.
+  s = { ...s, reload: false };
+  s = applyEvent(s, pumped("run:end", 4, 7));
+  assert.equal(s.reload, false);
+});
+
+test("fence: a stale terminal cannot re-close a turn that has moved on", () => {
+  let s = applyEvent(
+    emptyStream(),
+    pumped("assistant:delta", 5, 1, { text: "a" })
+  );
+  s = applyEvent(s, pumped("run:end", 5, 1));
+  s = { ...s, reload: false };
+  // Recovery re-streams at E+1; seq restarts low, which is legitimate and must flow
+  // (the fence resets its watermark on an epoch bump).
+  s = applyEvent(s, pumped("run:start", 6, 1, { message_id: "m2" }));
+  s = applyEvent(
+    s,
+    pumped("assistant:delta", 6, 2, { text: "recovered answer" })
+  );
+  assert.equal(s.live.text, "recovered answer");
+  // Now the losing pump's late terminal arrives. It must NOT wipe the live turn.
+  s = applyEvent(s, pumped("run:end", 5, 9));
+  assert.equal(s.live.text, "recovered answer", "stale run:end dropped");
+  assert.equal(s.reload, false, "…and triggered no reload");
+  s = applyEvent(s, pumped("run:error", 5, 9, { error: "boom" }));
+  assert.equal(s.error, "", "stale run:error dropped");
+  assert.equal(s.live.text, "recovered answer");
+});
+
+test("fence: a stale run:start cannot re-open a settled turn", () => {
+  let s = applyEvent(
+    emptyStream(),
+    pumped("assistant:delta", 7, 3, { text: "final" })
+  );
+  s = applyEvent(s, pumped("run:end", 7, 3));
+  s = { ...s, reload: false };
+  s = applyEvent(s, pumped("run:start", 6, 1, { message_id: "ghost" }));
+  assert.equal(s.live, null);
+});
+
+test("fence: approvals and renames bypass it (they are not pump-sequenced)", () => {
+  let s = applyEvent(
+    emptyStream(),
+    pumped("assistant:delta", 2, 9, { text: "x" })
+  );
+  s = applyEvent(s, {
+    kind: "action:pending",
+    token: "t1",
+    pump_epoch: 1,
+    event_seq: 1,
+  });
+  assert.equal(s.pending.length, 1, "a parked write is never fenced away");
+  s = applyEvent(s, {
+    kind: "conversation:renamed",
+    pump_epoch: 1,
+    event_seq: 1,
+  });
+  assert.equal(s.reload, true);
+});
+
+test("fence: legacy frames with no pump_epoch behave exactly as before", () => {
+  let s = applyEvent(emptyStream(), {
+    kind: "assistant:delta",
+    run_id: "r1",
+    text: "one",
+  });
+  s = applyEvent(s, { kind: "assistant:delta", run_id: "r1", text: "two" });
+  assert.equal(s.live.text, "two");
+  assert.deepEqual(s.fence, {});
+});
+
+test("fence: state is copied, never mutated in place", () => {
+  const before = applyEvent(
+    emptyStream(),
+    pumped("assistant:delta", 1, 1, { text: "a" })
+  );
+  const snapshot = JSON.parse(JSON.stringify(before.fence));
+  applyEvent(before, pumped("assistant:delta", 1, 2, { text: "ab" }));
+  assert.deepEqual(before.fence, snapshot);
+});
+
+test("fence: a fresh stream (new conversation) starts unfenced", () => {
+  let s = applyEvent(emptyStream(), pumped("run:end", 9, 9));
+  assert.notDeepEqual(s.fence, {});
+  s = emptyStream();
+  assert.deepEqual(s.fence, {});
+  s = applyEvent(s, pumped("assistant:delta", 1, 1, { text: "new chat" }));
+  assert.equal(s.live.text, "new chat");
+});

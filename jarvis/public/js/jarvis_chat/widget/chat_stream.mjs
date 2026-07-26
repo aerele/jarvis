@@ -4,8 +4,20 @@
 //
 // Reference implementation: pwa/src/views/ChatView.vue (onEvent).
 
+import { admitEvent } from "../../shared/pump_fence.mjs";
+
+// `fence` is the Relay-Pump epoch/seq watermark, carried IN the reducer state so
+// this stays a pure function of (state, frame) — Panel.vue holds one state object
+// and never has to know the fence exists.
 export function emptyStream() {
-  return { live: null, busy: false, error: "", pending: [], reload: false };
+  return {
+    live: null,
+    busy: false,
+    error: "",
+    pending: [],
+    reload: false,
+    fence: {},
+  };
 }
 
 // A conversation's message list is not just user/assistant prose: `tool` rows
@@ -38,7 +50,16 @@ export function applyEvent(state, payload) {
     error: state.error,
     pending: state.pending.slice(),
     reload: state.reload,
+    // Shallow copy is enough: admitEvent REPLACES a run's entry, never mutates it.
+    fence: { ...(state.fence || {}) },
   };
+
+  // JF-018: drop a superseded pump's straggler before it can touch the projection.
+  // Deltas carry the FULL text so far, so an out-of-order one silently REWINDS the
+  // reply, and a stale run:end/run:error re-closes (or re-errors) a turn that has
+  // already moved on. Nothing user-visible is lost: the terminal path reloads the
+  // durable conversation over HTTP, which is what the panel actually renders.
+  if (!admitEvent(s.fence, p)) return s;
 
   switch (p.kind) {
     case "run:start":
