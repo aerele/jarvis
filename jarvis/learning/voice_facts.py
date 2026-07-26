@@ -229,6 +229,18 @@ def _housekeeping() -> None:
 # --------------------------------------------------------------------------- #
 # extraction
 # --------------------------------------------------------------------------- #
+def _is_personalise_note(source: str | None, question: str | None) -> bool:
+	"""The provenance test that decides a note's wiki SCOPE, in ONE place.
+
+	True = the note's facts stay PRIVATE to its owner (User-scope page); False =
+	they are an Org contribution and reach the shared Org page. Only an explicit
+	"Personalise" capture or an answer linked to a Personalise question is
+	private - every other capture surface (Business Tab / Chat Nudge / Mobile) is
+	Org-sourced. Adding a source to ``voice_notes_api._SOURCES`` therefore adds an
+	ORG contributor unless it is also named here."""
+	return (source == "Personalise") or bool(question)
+
+
 def _load_business_batches() -> tuple[list[dict], int]:
 	"""New Business notes grouped per (owner, personalise) into
 	<=MAX_NOTES_PER_BATCH chunks, capped at MAX_BATCHES_PER_RUN batches per run.
@@ -248,8 +260,7 @@ def _load_business_batches() -> tuple[list[dict], int]:
 	)
 	by_group: dict[tuple[str, bool], list] = {}
 	for r in rows:
-		personalise = (r.source == "Personalise") or bool(r.question)
-		by_group.setdefault((r.owner, personalise), []).append(r)
+		by_group.setdefault((r.owner, _is_personalise_note(r.source, r.question)), []).append(r)
 
 	batches: list[dict] = []
 	for key in sorted(by_group, key=lambda k: (k[0], k[1])):
@@ -430,7 +441,7 @@ def _merge_fact(facts: dict, fact: dict, batch: dict) -> None:
 			# Org page (crossing User->Org is an explicit Review promotion,
 			# DESIGN.md 1). Track the two provenance cohorts SEPARATELY (never a
 			# single collapsed flag) so a statement seen by both a Personalise
-			# owner and an Org source (Business Tab / Chat Nudge) fans each
+			# owner and an Org source (Business Tab / Chat Nudge / Mobile) fans each
 			# Personalise owner out to their own User page while only the
 			# Org-sourced contribution lands on the Org page.
 			"personalise_users": {owner} if personalise else set(),
@@ -601,7 +612,7 @@ def _apply_context_facts(context_facts: list[dict]) -> int:
 	to their OWN User-scope page (default_scope="User", target_user=owner -
 	invisible to others), and a fact may fan out to several such owners; a
 	Personalise contribution NEVER lands on the shared Org page. Only Org-sourced
-	contributions (Business Tab / Chat Nudge) keep today's Org behavior exactly
+	contributions (Business Tab / Chat Nudge / Mobile) keep today's Org behavior exactly
 	(the positional 3-arg call, unchanged). A statement seen by both cohorts
 	writes to BOTH targets - privately to each Personalise owner, and to Org for
 	the Org-sourced half."""

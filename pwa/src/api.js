@@ -65,14 +65,12 @@ const VN = "jarvis.chat.voice_notes_api.";
 export const getBusinessStatus = () => call(VN + "get_business_status");
 export const listVoiceNotes = (start = 0, page_length = 20, search = "") =>
 	call(VN + "list_my_voice_notes_page", { start, page_length, ...(search ? { search } : {}) });
-// `source` is deliberately NOT sent: the server allowlist is exactly
-// ("Business Tab", "Chat Nudge") — voice_notes_api._SOURCES — and anything else
-// is rejected with "Invalid source". Letting the server apply its own default
-// keeps this call correct even if that list changes.
-//
-// (The native app sends source: "Mobile" here, which this backend rejects — so
-// note capture is broken in jarvis_mobile against this bench. Reported, not
-// fixed here: different repo.)
+// `source` is deliberately NOT sent: it is a server allowlist
+// (voice_notes_api._SOURCES) and anything off it is rejected with "Invalid
+// source". Letting the server apply its own default keeps this call correct
+// even as that list changes. (The native app does send source: "Mobile", which
+// the allowlist now carries — see the contract test in
+// jarvis/tests/test_voice_notes_crud.py.)
 export const saveVoiceNote = (transcript, duration_s = 0) =>
 	call(VN + "save_voice_note", { transcript, context_type: "Business", duration_s });
 export const deleteVoiceNote = (name) => call(VN + "delete_voice_note", { name });
