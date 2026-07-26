@@ -7,6 +7,15 @@
 // Shows only for a not-onboarded System Manager; dismissal is per-tab-session
 // (sessionStorage) so it returns next fresh session until setup is finished.
 // Loaded on every Desk page via hooks.app_include_js.
+//
+// That boot flag is written ONCE per page load, so a Desk that stays open
+// across a setup finishing elsewhere keeps nagging until a hard reload. The
+// reported case: open the Desk, go to /jarvis, complete onboarding, press
+// Back. The browser restores the Desk from bfcache, no boot runs, and the
+// nudge is still sitting there on a workspace that is now set up. So the
+// nudge re-asks the server whenever the page is shown again, and only while
+// the flag still says not-onboarded, which leaves a set-up Desk at zero
+// extra round trips.
 
 (function () {
 	if (window.__jarvisOnboardingBanner) return;
@@ -17,20 +26,79 @@
 	var STYLE_ID = "jarvis-onboarding-nudge-style";
 	// No point nagging a user already mid-setup on the legacy desk page.
 	var HIDE_ON_ROUTES = ["jarvis-onboarding"];
+	// Same check the SPA gate and the widget popup use, so all three surfaces
+	// agree on what "set up" means.
+	var READY_METHOD = "jarvis.account.is_ready_for_chat";
+	// Floor between server re-checks for the chatty triggers (route change,
+	// tab focus). A bfcache restore bypasses it: that is the exact moment the
+	// flag is most likely stale and the user is looking straight at it.
+	var RECHECK_MIN_MS = 30 * 1000;
+	var lastCheckAt = 0;
+	var checking = false;
+
+	function isSystemManager() {
+		return !!(
+			window.frappe &&
+			frappe.user &&
+			frappe.user.has_role &&
+			frappe.user.has_role("System Manager")
+		);
+	}
+
+	function dismissed() {
+		try {
+			return !!sessionStorage.getItem(DISMISS_KEY);
+		} catch (e) {
+			// sessionStorage unavailable (privacy mode etc.), so treat it as
+			// not dismissed and show the nudge.
+			return false;
+		}
+	}
 
 	function shouldShow() {
 		if (!window.frappe || !frappe.boot) return false;
 		if (frappe.boot.jarvis_onboarded !== false) return false;
-		if (!frappe.user || !frappe.user.has_role || !frappe.user.has_role("System Manager"))
-			return false;
-		try {
-			if (sessionStorage.getItem(DISMISS_KEY)) return false;
-		} catch (e) {
-			// sessionStorage unavailable (privacy mode etc.) — show it anyway.
-		}
+		if (!isSystemManager()) return false;
+		if (dismissed()) return false;
 		var route = (frappe.get_route && frappe.get_route()) || [];
 		if (HIDE_ON_ROUTES.indexOf(route[0] || "") !== -1) return false;
 		return true;
+	}
+
+	// Ask the server whether setup finished since this page booted. Only ever
+	// corrects false to true: nothing can make a set-up workspace un-set-up
+	// mid-session, and an expiring credential is the degraded path's problem,
+	// not this nudge's.
+	function reverify(force) {
+		if (!window.frappe || !frappe.boot) return;
+		if (frappe.boot.jarvis_onboarded !== false) return;
+		// Nobody would see the correction, so do not spend a round trip on it.
+		if (!isSystemManager() || dismissed()) return;
+		if (checking) return;
+		var now = new Date().getTime();
+		if (!force && now - lastCheckAt < RECHECK_MIN_MS) return;
+		lastCheckAt = now;
+		checking = true;
+		var req = frappe.call({
+			method: READY_METHOD,
+			callback: function (r) {
+				// Anything other than an explicit ready leaves the flag alone.
+				// A failed or malformed check must never clear a nudge the
+				// workspace still needs.
+				if (r && r.message && r.message.ready) {
+					frappe.boot.jarvis_onboarded = true;
+					sync();
+				}
+			},
+		});
+		// Release the in-flight guard on BOTH outcomes. A guard left stuck on
+		// would silently kill every later re-check in this tab.
+		if (req && req.always) req.always(releaseCheck);
+		else releaseCheck();
+	}
+
+	function releaseCheck() {
+		checking = false;
 	}
 
 	function dismiss() {
@@ -153,10 +221,33 @@
 		else remove();
 	}
 
+	// Render from what this page already knows, then confirm it against the
+	// server. Wrapped at every call site rather than passed as a handler
+	// directly, because a listener's own argument (the route, the event) would
+	// land in `force` and defeat the throttle.
+	function syncAndVerify(force) {
+		sync();
+		reverify(force);
+	}
+
 	function start() {
 		if (!window.frappe) return;
-		sync();
-		if (frappe.router && frappe.router.on) frappe.router.on("change", sync);
+		syncAndVerify(false);
+		if (frappe.router && frappe.router.on)
+			frappe.router.on("change", function () {
+				syncAndVerify(false);
+			});
+		// bfcache restore, which is the Back-from-onboarding case: `persisted`
+		// means no boot ran, so the flag is whatever it was before the user
+		// left. Force past the throttle, the answer is the whole point of the
+		// navigation.
+		window.addEventListener("pageshow", function (e) {
+			if (e && e.persisted) syncAndVerify(true);
+		});
+		// Setup finished in another tab and the user came back to this one.
+		document.addEventListener("visibilitychange", function () {
+			if (document.visibilityState === "visible") syncAndVerify(false);
+		});
 	}
 
 	if (window.frappe && window.frappe.router) {
