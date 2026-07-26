@@ -79,6 +79,22 @@ from jarvis._subscription_models import (
 
 _ALLOWED_THINKING = {"", "low", "medium", "high"}
 
+
+def _allowed_pin_models(settings) -> set[str]:
+	"""Every model id a conversation may be pinned to for this tenant: the provider's
+	subscription allowlist unioned with every enabled row of the LLM pool
+	(Jarvis Settings.models). The pool matters because a subscription/pool customer
+	stores llm_provider="", for which _SUBSCRIPTION_MODELS yields [] -- so checking
+	only that rejects every pin. Single source of truth so the two write paths
+	(set_conversation_model and send_message) cannot drift apart again.
+	"""
+	allowed = set(_SUBSCRIPTION_MODELS.get(settings.llm_provider, []))
+	allowed |= {
+		(m.model or "").strip() for m in (settings.models or []) if m.enabled and (m.model or "").strip()
+	}
+	return allowed
+
+
 # Curated dashboard canvas theme keys (lowercase) the builder may forward in the
 # send context — a literal allow-list (not passthrough), mirrors the DocType
 # `theme` Select + frontend/src/lib/dashboardThemes.js.
@@ -952,8 +968,12 @@ def send_message(
 	# worker may pick up the run before the DB write commits.)
 	if model_override:
 		settings = frappe.get_single("Jarvis Settings")
-		allowed = _SUBSCRIPTION_MODELS.get(settings.llm_provider, [])
-		if model_override not in allowed:
+		# Union of subscription allowlist + enabled pool rows (see _allowed_pin_models).
+		# Previously this checked only _SUBSCRIPTION_MODELS, which is [] for a
+		# subscription/pool tenant (llm_provider=""), so every pin sent through this
+		# path -- the PWA new-chat path -- was rejected even though
+		# set_conversation_model already accepted it.
+		if model_override not in _allowed_pin_models(settings):
 			return {
 				"ok": False,
 				"reason": f"model {model_override!r} is not valid for {settings.llm_provider!r}",
@@ -1597,16 +1617,9 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 		frappe.db.commit()
 		return {"ok": True, "data": {"effective_model": settings.llm_model or ""}}
 
-	# A pin must name a model the customer actually has. Two sources, unioned:
-	# the provider's subscription allowlist, and every enabled row of the LLM
-	# pool (Jarvis Settings.models). The pool matters because a subscription
-	# customer stores llm_provider="", for which _SUBSCRIPTION_MODELS yields []
-	# - so before this union EVERY pin was rejected as "unknown_model" and the
-	# picker could not set a model at all.
-	allowed = set(_SUBSCRIPTION_MODELS.get(settings.llm_provider, []))
-	allowed |= {
-		(m.model or "").strip() for m in (settings.models or []) if m.enabled and (m.model or "").strip()
-	}
+	# A pin must name a model the customer actually has (subscription allowlist unioned
+	# with the enabled LLM-pool rows). send_message applies the identical check.
+	allowed = _allowed_pin_models(settings)
 	if model not in allowed:
 		return {
 			"ok": False,
