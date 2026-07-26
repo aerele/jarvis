@@ -280,9 +280,7 @@ def revoke(user: str, token_id: str, reason: str = "revoked by user") -> bool:
 	not exist — both raise PermissionError, so this can never be used to probe
 	another account's device inventory."""
 	row = (
-		frappe.db.get_value(
-			DEVICE_DOCTYPE, {"token_id": token_id}, ["name", "user", "enabled"], as_dict=True
-		)
+		frappe.db.get_value(DEVICE_DOCTYPE, {"token_id": token_id}, ["name", "user", "enabled"], as_dict=True)
 		if token_id
 		else None
 	)

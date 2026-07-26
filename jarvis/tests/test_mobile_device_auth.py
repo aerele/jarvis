@@ -16,7 +16,8 @@ Four things have to hold at once, and each has a test here:
    proves that is not hypothetical).
 3. Revoking one device kills exactly that device, leaving the user's other
    devices AND the untouched global keypair working.
-4. Nothing recoverable is at rest: only a salted SHA-256 of the secret.
+4. Nothing recoverable is at rest: only an HMAC-SHA256 of the secret, keyed by
+   the token id.
 """
 
 from __future__ import annotations
@@ -328,7 +329,11 @@ class TestAuthHook(MobileDeviceBase):
 		# Pre-stamp last_used so the throttled stamp short-circuits and this
 		# read-only request takes no write (and therefore no commit) path.
 		frappe.db.set_value(
-			DEVICE_DOCTYPE, {"token_id": minted["token_id"]}, "last_used", now_datetime(), update_modified=False
+			DEVICE_DOCTYPE,
+			{"token_id": minted["token_id"]},
+			"last_used",
+			now_datetime(),
+			update_modified=False,
 		)
 		with _request(f"token {minted['token']}", method="GET"):
 			device_auth.authenticate_device_token()
@@ -355,7 +360,10 @@ class TestRevocation(MobileDeviceBase):
 		self.assertEqual(device_auth.resolve(other_user["token"])["user"], USER_B)
 
 		row = frappe.db.get_value(
-			DEVICE_DOCTYPE, {"token_id": phone["token_id"]}, ["enabled", "revoked_at", "revoked_by"], as_dict=True
+			DEVICE_DOCTYPE,
+			{"token_id": phone["token_id"]},
+			["enabled", "revoked_at", "revoked_by"],
+			as_dict=True,
 		)
 		self.assertEqual(row.enabled, 0)
 		self.assertIsNotNone(row.revoked_at)
