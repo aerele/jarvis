@@ -176,7 +176,8 @@ def validate_connection(base_url: str, token: str, *, deep: bool = False) -> dic
 
 # --- deterministic config checks (no network, no LLM) --------------------
 # Surfaced in "Test connection" so a user sees the two most common self-host
-# tool failures (unset tool user / missing gateway token) BEFORE they chat.
+# tool failures (unset tool user / missing gateway token) BEFORE they chat,
+# plus the JF-014 unsigned-plugin escape hatch when an operator has it on.
 
 
 def _tool_user_ok(user: str) -> tuple[bool, str]:
@@ -191,6 +192,37 @@ def _tool_user_ok(user: str) -> tuple[bool, str]:
 	if not frappe.db.get_value("User", user, "enabled"):
 		return False, f"{user!r} is not an enabled Frappe user"
 	return True, f"tool user {user!r} (non-admin, enabled)"
+
+
+def _unsigned_plugin_check() -> dict | None:
+	"""Advisory row for the deprecated unsigned-plugin escape hatch (JF-014).
+
+	Returns None on an enforcing bench (the default) so the check list stays
+	quiet; a row only appears once an operator has turned
+	``jarvis_plugin_allow_unsigned`` on, which is a security downgrade with a
+	fixed removal date. Best-effort: never break "Test connection"."""
+	try:
+		from jarvis._plugin_auth import unsigned_escape_hatch_status
+
+		status = unsigned_escape_hatch_status()
+	except Exception:
+		return None
+	if not status:
+		return None
+	n = status.get("recent_allowed")
+	days = status.get("window_days")
+	if n is None:
+		seen = f"call count unavailable (cache unreachable), window {days}d"
+	elif n:
+		seen = f"{n} unsigned plugin call(s) allowed in the last {days} days"
+	else:
+		seen = f"no unsigned plugin calls in the last {days} days — safe to turn off"
+	return _check(
+		"plugin_signature_enforced",
+		False,
+		f"site_config {status['conf_key']} is ON: {seen}. Upgrade the openclaw "
+		f"plugin to a signing build — the flag is removed on {status['sunset_date']}.",
+	)
 
 
 def config_checks(token: str, tool_user: str = "") -> list[dict]:
@@ -209,6 +241,9 @@ def config_checks(token: str, tool_user: str = "") -> list[dict]:
 		user = (getattr(s, "selfhost_tool_user", "") or "").strip()
 	ok, detail = _tool_user_ok(user)
 	checks.append(_check("tool_user", ok, detail))
+	unsigned = _unsigned_plugin_check()
+	if unsigned:
+		checks.append(unsigned)
 	return checks
 
 
