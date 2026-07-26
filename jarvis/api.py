@@ -198,7 +198,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	from jarvis.tools import _agent_run_ctx
+	from jarvis.tools import _agent_run_ctx, _delegate_capability
 
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
 	# never authors it — it is the delegate's opaque bearer, delivered over the
@@ -210,6 +210,33 @@ def _dispatch_from_session(
 	_agent_run_ctx.set_session_key(session_key)
 	try:
 		with impersonate(user):
+			# JF-017 — the delegate capability gate, BEFORE anything is dispatched.
+			# When this session resolves to a marketplace-agent run, the only tools it
+			# may call are the ones its manifest declared and the bench snapshotted
+			# onto the run at launch. The container's tools.allow is configuration
+			# (fleet renders it into openclaw.json); it is not authorization, so a
+			# compromised container/plugin or a leaked run bearer would otherwise
+			# reach ANY registered tool the run-as user's Frappe roles permit. Fails
+			# closed: a run with no snapshot and no legacy marker is refused outright.
+			# Non-delegate sessions (ordinary chat) resolve to None and are untouched.
+			denial = _delegate_capability.tool_denial(session_key, tool)
+			if denial:
+				result = _error("CapabilityDeniedError", denial)
+				audit.record(
+					tool=tool,
+					args={},
+					ok=False,
+					error_code="CapabilityDeniedError",
+					error_message=denial,
+				)
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args={},
+					result=result,
+					tool_call_id=tool_call_id,
+				)
+				return result
 			# Parse args up front so persist_and_publish gets the same
 			# dict shape the tool ran against (or the empty dict on a
 			# malformed-args rejection).

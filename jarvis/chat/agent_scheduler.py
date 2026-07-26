@@ -38,6 +38,7 @@ from frappe.utils import now_datetime
 
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
+from jarvis.tools import _delegate_capability
 
 INSTALLATION = "Jarvis Agent Installation"
 LISTING = "Jarvis Agent Listing"
@@ -413,6 +414,14 @@ def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> d
 	preparation_mode = inst.activation_state or "shadow"
 	initiating_human = frappe.session.user if trigger == "manual" else None
 
+	# JF-017: the run's CAPABILITY CONTRACT, snapshotted in the same insert and
+	# under the same immutability guard — the declared ``tools_allow`` (bundled
+	# registry) plus the listing's ``nature``/``writes`` as they stand RIGHT NOW.
+	# From here on the bench authorises this run's tool calls against the snapshot,
+	# never against the mutable listing, so neither a listing edit mid-run nor a
+	# compromised container can widen what an in-flight run may do.
+	capability = _delegate_capability.contract_for_launch(listing)
+
 	run = frappe.get_doc(
 		{
 			"doctype": RUN,
@@ -425,6 +434,7 @@ def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> d
 			"bundle_version": bundle_version,
 			"preparation_mode": preparation_mode,
 			"initiating_human": initiating_human,
+			**capability,
 		}
 	)
 	run.flags.ignore_permissions = True
