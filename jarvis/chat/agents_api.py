@@ -16,7 +16,7 @@ Enable / schedule are pure DB writes (no container restart — O6); only Apply
 import frappe
 from frappe import _
 
-from jarvis._session import impersonate
+from jarvis._session import authenticated_user, impersonate
 from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.agent_catalog import build_agent_push_payload
@@ -831,7 +831,8 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	another owner's audit cannot run ERP reads with elevated rights. This mirrors
 	the scheduler's S1 identity hinge on the manual path. Run/finding ROW
 	ownership stays the human owner (``_launch_audit``); only the ERP-read
-	identity is the run-as user."""
+	identity is the run-as user; and the TRIGGERING human is recorded separately as
+	the run's immutable ``initiating_human`` (JF-021) — three distinct identities."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3: who may trigger
 	# R1-F3: no ``or doc.owner`` fallback. A blank run-as user is a MISCONFIGURED
@@ -938,6 +939,14 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 		frappe.throw(_("Cannot run this audit as its run-as user (identity guard)."))
 
 	original_user = frappe.session.user
+	# JF-021: the run's IMMUTABLE launch provenance identity, captured HERE — before
+	# the impersonation below — and passed EXPLICITLY into the launch. _launch_audit
+	# used to read frappe.session.user, which by then is the RUN-AS user: every manual
+	# run a System Manager triggered on someone else's install permanently recorded the
+	# wrong person in a field no correction can reach. This is never a client argument
+	# (run_agent_now takes no such parameter) and the launch re-derives + verifies it
+	# against the authenticated session user, so it can only confirm, never forge.
+	triggering_human = authenticated_user()
 	# impersonate is session-safe (a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session and log them out) and no-ops when
 	# the run-as user IS the caller (self-mapped manual run). get_doc does NOT
@@ -946,7 +955,9 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	with impersonate(run_as if run_as != original_user else None):
 		if run_as != original_user:
 			doc = frappe.get_doc(INSTALLATION, installation)  # re-fetch under run_as
-		result = _launch_audit(doc, trigger="manual", source_apps=source_apps)
+		result = _launch_audit(
+			doc, trigger="manual", source_apps=source_apps, initiating_human=triggering_human
+		)
 	return {"ok": True, "data": result}
 
 
