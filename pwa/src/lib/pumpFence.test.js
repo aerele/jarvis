@@ -48,10 +48,22 @@ function onEventBody() {
 test("ChatView imports the SHARED fence, not a local re-implementation", () => {
 	assert.match(
 		src,
-		/import \{ admitEvent, createFence \} from "@jsshared\/pump_fence\.mjs";/,
+		/import \{ admitEvent \} from "@jsshared\/pump_fence\.mjs";/,
 		"the fence must come from jarvis/public/js/shared so the widget and the PWA cannot drift"
 	);
-	assert.match(src, /createFence\(\)/, "ChatView must hold a fence instance");
+	assert.match(
+		src,
+		/import \{ eventFence \} from "\.\.\/lib\/pump_fence_state\.js";/,
+		"the fence instance must be the MODULE-scope singleton — a component-scope " +
+			"fence is destroyed on every route away from chat (no keep-alive) and " +
+			"readmits the stale frames it exists to drop"
+	);
+});
+
+test("the fence singleton is module-scope and built on the shared factory", () => {
+	const stateSrc = fs.readFileSync(path.join(HERE, "pump_fence_state.js"), "utf8");
+	assert.match(stateSrc, /import \{ createFence \} from "@jsshared\/pump_fence\.mjs";/);
+	assert.match(stateSrc, /export const eventFence = createFence\(\);/);
 });
 
 test("onEvent gates on the fence BEFORE the switch, and returns on a drop", () => {

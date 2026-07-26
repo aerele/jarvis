@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { emptyStream, applyEvent, visibleMessages } from "./chat_stream.mjs";
+import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
 
 // `tool` rows are the MOST common role in a real conversation (508 of 1201 on
 // the dev site) and their content is null or "get_doc -> completed" — machine
@@ -349,4 +349,37 @@ test("fence: a fresh stream (new conversation) starts unfenced", () => {
   assert.deepEqual(s.fence, {});
   s = applyEvent(s, pumped("assistant:delta", 1, 1, { text: "new chat" }));
   assert.equal(s.live.text, "new chat");
+});
+
+test("applyEventEx: reports admitted=true for a live frame, false for a fenced straggler", () => {
+  const r1 = applyEventEx(emptyStream(), pumped("assistant:delta", 3, 5, { text: "new" }));
+  assert.equal(r1.admitted, true);
+  // Older epoch after a handoff: dropped AND reported as dropped, so Panel.vue
+  // keeps its HTTP polling fallback armed — a stale-only stream must not stand
+  // the safety net down (Wave-B UX P1-2).
+  const r2 = applyEventEx(r1.state, pumped("assistant:delta", 2, 9, { text: "old" }));
+  assert.equal(r2.admitted, false);
+  assert.equal(r2.state.live.text, "new");
+});
+
+test("applyEventEx: the backstop terminal repeat is NOT admitted", () => {
+  let r = applyEventEx(emptyStream(), pumped("assistant:delta", 4, 7, { text: "done" }));
+  r = applyEventEx(r.state, pumped("run:end", 4, 7));
+  assert.equal(r.admitted, true);
+  const again = applyEventEx({ ...r.state, reload: false }, pumped("run:end", 4, 7));
+  assert.equal(again.admitted, false);
+  assert.equal(again.state.reload, false);
+});
+
+test("fence survives startNewChat's state reset (dead-banner resurrection guard)", () => {
+  // Panel.vue resets stream state on New Chat but carries the fence forward:
+  // reopening the SAME conversation must still drop a superseded pump's stale
+  // run:error instead of resurrecting a dead error banner.
+  let s = applyEvent(emptyStream(), pumped("assistant:delta", 6, 3, { text: "hi" }));
+  s = applyEvent(s, pumped("run:end", 6, 3));
+  const reset = { ...emptyStream(), fence: s.fence };
+  const r = applyEventEx(reset, pumped("run:error", 5, 9, { error: "Relay lost the connection." }));
+  assert.equal(r.admitted, false);
+  assert.equal(r.state.error, "");
+  assert.equal(r.state.reload, false);
 });

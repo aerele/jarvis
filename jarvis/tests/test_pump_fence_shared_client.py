@@ -39,6 +39,12 @@ class TestPumpFenceSharedClient(unittest.TestCase):
 	def _run_node_test(self, *relative_parts: str) -> None:
 		node = shutil.which("node")
 		if not node:
+			# In CI this suite is the ONLY automated proof of the client fence
+			# (jarvis CI never builds the frontends). A silent skip there would
+			# let the guard rot green — fail loudly instead. Local dev boxes
+			# without node still skip.
+			if os.environ.get("CI"):
+				self.fail("node is required in CI: the fence suites must actually run")
 			self.skipTest("node binary not available on this host")
 		test_file = os.path.join(_app_root(), *relative_parts)
 		self.assertTrue(

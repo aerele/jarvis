@@ -15,7 +15,8 @@ import { useRouter } from "vue-router";
 // The desktop SPA's renderer — dependency-free, and sharing it means an agent
 // reply reads identically on both surfaces.
 import { renderMarkdown } from "@shared/markdown.js";
-import { admitEvent, createFence } from "@jsshared/pump_fence.mjs";
+import { admitEvent } from "@jsshared/pump_fence.mjs";
+import { eventFence } from "../lib/pump_fence_state.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
@@ -66,13 +67,11 @@ const live = ref(null); // { runId, messageId, text, tools[] }
 // Stop is a UI-level cancel too — the backend may still finish the turn, so
 // ignore what comes back rather than letting a "stopped" reply reappear.
 const ignoredRuns = ref(new Set());
-// JF-018: the Relay-Pump epoch/seq watermark, one entry per run_id. A plain object,
-// not a ref — nothing renders from it, and every delta frame would otherwise pay for
-// a reactive proxy write. Deliberately NOT cleared when the route switches chats
-// (desktop does the same): the terminal marker has to outlive the view, or coming
-// back to a chat re-opens the stale-frame window it exists to close. Entries are
-// three integers keyed by run_id, so growth is a non-issue.
-const eventFence = createFence();
+// JF-018: the Relay-Pump epoch/seq watermark lives in a MODULE-scope singleton
+// (see ../lib/pump_fence_state.js for why): this component is route-mounted and
+// unmounts on /business, /files or /, so a component-scope fence would be wiped
+// on every route away and readmit the stale frames it exists to drop. The
+// singleton is what actually delivers "the terminal marker outlives the view".
 
 const decision = ref(null);
 const preview = ref(null);
