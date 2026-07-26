@@ -151,6 +151,7 @@
 					class="shrink-0 border-t"
 					:style="{ height: chatPct + '%' }"
 					:caps="caps"
+					:theme="builderTheme"
 					:editing-name="editingDetail ? editingDetail.name : ''"
 					@canvas="onCanvas"
 					@reset="resetBuilder"
@@ -169,6 +170,7 @@
 				:conversation="chatConv"
 				:theme="builderTheme"
 				@saved="onSaved"
+				@fix-in-chat="fixInChat"
 			/>
 		</template>
 	</div>
@@ -285,6 +287,14 @@ async function onCanvas({ message_id, items }) {
 function openSave() {
 	if (!builderHtml.value) return;
 	saveOpen.value = true;
+}
+
+// A theme-rejected save hands its violations back to the model: close the dialog
+// and post the message into the builder chat, so the agent regenerates on-theme
+// without the user relaying CSS jargon (P0-2).
+function fixInChat({ text }) {
+	saveOpen.value = false;
+	if (chatPane.value && chatPane.value.sendText) chatPane.value.sendText(text);
 }
 
 function onSaved(detail) {

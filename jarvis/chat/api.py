@@ -79,6 +79,11 @@ from jarvis._subscription_models import (
 
 _ALLOWED_THINKING = {"", "low", "medium", "high"}
 
+# Curated dashboard canvas theme keys (lowercase) the builder may forward in the
+# send context — a literal allow-list (not passthrough), mirrors the DocType
+# `theme` Select + frontend/src/lib/dashboardThemes.js.
+_DASHBOARD_THEME_KEYS = {"jarvis", "insight", "claude", "graphite", "custom"}
+
 
 @frappe.whitelist()
 def list_tools() -> list[str]:
@@ -1102,6 +1107,11 @@ def send_message(
 					# let the agent decide from the ask.
 					if ctx["page"] == "dashboards" and ctx.get("data_mode") in ("static", "live"):
 						enqueue_kwargs["context"]["data_mode"] = ctx["data_mode"]
+					# The selected canvas theme key — forwarded so the prompt tells
+					# the agent which theme to design FOR (the dashboards skill injects
+					# that theme's token+recipe cheatsheet). Literal allow-list.
+					if ctx["page"] == "dashboards" and ctx.get("theme") in _DASHBOARD_THEME_KEYS:
+						enqueue_kwargs["context"]["theme"] = ctx["theme"]
 				# Persist the viewing-context doc ref on the user message row
 				# so post-turn entity extraction (jarvis.chat.entities) sees
 				# what the user was looking at, not just what tools touched.

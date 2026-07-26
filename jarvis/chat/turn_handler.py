@@ -1361,6 +1361,50 @@ def _format_report_filters(filters: dict) -> str:
 	return f" with filters {{{body}}}"
 
 
+_THEME_TOKEN_ORDER = (
+	"bg",
+	"surface",
+	"surface-2",
+	"ink",
+	"heading",
+	"muted",
+	"line",
+	"accent",
+	"positive",
+	"negative",
+	"warning",
+	"info",
+)
+
+
+def _dashboard_theme_cheatsheet(theme_key: str) -> str:
+	"""Render the SELECTED curated theme's compact token+palette cheatsheet from
+	its canonical theme.json (jarvis/dashboards/themes/<key>/theme.json), inlined
+	per-turn into the dashboards [Context:] line. Only the chosen theme is
+	rendered — the skill carries the theme-agnostic mechanism, never all four
+	cheatsheets. Empty for an unknown/custom key (custom has no spec)."""
+	try:
+		from jarvis.dashboards import theme_spec
+
+		spec = theme_spec.load_theme(theme_key)
+	except Exception:
+		spec = None
+	if not spec:
+		return ""
+	rt = spec.get("render_tokens", {})
+	toks = " ".join(f"--jd-{k} {rt[k]}" for k in _THEME_TOKEN_ORDER if k in rt)
+	palette = " ".join(spec.get("palette", []))
+	mode = "dark" if spec.get("dark") else "light"
+	fdisp = (rt.get("font-display") or "").lower()
+	headings = "serif" if "serif" in fdisp and "sans-serif" not in fdisp else "system-sans"
+	return (
+		f" {spec.get('label', theme_key)} cheatsheet ({mode}; headings {headings}): "
+		f"tokens {toks}; chart series = window.JARVIS_THEME.palette in order "
+		f"[{palette}]. Compose var(--jd-*) (never hardcode these hexes); "
+		"--jd-muted for secondary/labels, --jd-positive/-negative for status text."
+	)
+
+
 def _prepend_doc_context(user_message: str, context) -> str:
 	"""Prepend the ERP doc / report the user was viewing (floating-widget
 	auto-context) as a leading ``[Viewing: ...]`` line, so questions like
@@ -1403,6 +1447,29 @@ def _prepend_doc_context(user_message: str, context) -> str:
 				f"jarvis__get_doc on Jarvis Dashboard {context['name']} to read its "
 				"current html and sources, then produce the full revised document."
 			)
+		# The selected canvas theme: name it so the agent designs FOR it, and
+		# inline THAT theme's compact token+palette cheatsheet (rendered per-turn
+		# from theme.json — the skill carries only the theme-agnostic mechanism).
+		# The save-time validator rejects off-theme output, so composing the jd-*
+		# classes + --jd-* tokens is the standard, not a suggestion.
+		theme_key = (context.get("theme") or "").strip().lower()
+		if theme_key == "custom":
+			theme_line = (
+				" The user chose the CUSTOM theme: build the bespoke look they "
+				"describe — their own design wins and no standard theme is enforced "
+				"(but never load external resources or @font-face webfonts)."
+			)
+		elif theme_key:
+			theme_line = (
+				f" The selected theme is '{theme_key}' — design FOR it: compose the "
+				"jd-* component classes and take every color/font from the injected "
+				"--jd-* variables and window.JARVIS_THEME.palette. The save-time "
+				"validator rejects off-theme colors/fonts, @font-face, external URLs "
+				"and prefers-color-scheme, so do not hardcode any of them."
+				+ _dashboard_theme_cheatsheet(theme_key)
+			)
+		else:
+			theme_line = ""
 		return (
 			"[Context: The user is on the Jarvis Dashboards builder page. They want to "
 			"create or iterate on a dashboard/report. Read and follow the "
@@ -1420,8 +1487,10 @@ def _prepend_doc_context(user_message: str, context) -> str:
 			'fetch with window.jarvis.data("<source_name>"). Style with the injected '
 			"--jd-* CSS variables (--jd-bg/-surface/-ink/-heading/-muted/-line/"
 			"-accent/-font) and the window.JARVIS_THEME.palette chart colors instead "
-			"of hardcoding design; only deviate when the user explicitly asks about "
-			f"the look.{mode_line}{edit_line}]"
+			"of hardcoding design. For a bespoke look the user switches to the Custom "
+			"theme via the theme picker — on a curated theme never hardcode off-theme "
+			"colors/fonts (the save-time validator rejects them); tell the user to "
+			f"pick Custom for a one-off deviation.{theme_line}{mode_line}{edit_line}]"
 			f"\n\n{user_message}"
 		)
 	if context.get("page") == "triggers":
