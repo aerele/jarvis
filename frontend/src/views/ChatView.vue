@@ -705,7 +705,7 @@
 						     e.g. a delegate refused on its very first call. Rendered here
 						     because the Activity accordion cannot hold it. -->
 						<div
-							v-if="m.role === 'tool' && !m.action_outcome"
+							v-if="m.role === 'tool' && orphanToolFailures[m.name]"
 							class="jv-toolfail"
 							role="alert"
 						>
@@ -729,10 +729,13 @@
 									{{ toolLabel(m.tool_name) }} didn't run
 								</div>
 								<div class="jv-toolfail-msg">
-									{{ toolFailParts(m).message }}
+									{{ orphanToolFailures[m.name].message }}
 								</div>
-								<div v-if="toolFailParts(m).hint" class="jv-toolfail-hint">
-									{{ toolFailParts(m).hint }}
+								<div
+									v-if="orphanToolFailures[m.name].hint"
+									class="jv-toolfail-hint"
+								>
+									{{ orphanToolFailures[m.name].hint }}
 								</div>
 							</div>
 						</div>
@@ -4350,20 +4353,37 @@ const modelsByProvider = computed(() => {
 const currentTitle = computed(
 	() => store.conversations.find((c) => c.name === currentId.value)?.title || "New chat"
 );
-// A FAILED tool call with no assistant turn ahead of it in the thread. The
-// Activity accordion is anchored to an assistant message, so a tool row that
-// arrives before any assistant text has nowhere to hang and renders NOWHERE —
-// which is exactly the shape an autonomous delegate produces when its very first
-// call is refused. Those rows are surfaced inline instead; everything else keeps
-// the accordion behaviour untouched.
-const orphanToolErrors = computed(() => {
-	const out = new Set();
+// A FAILED tool call with no assistant turn ahead of it in the thread, keyed by
+// message name → the copy to render. The Activity accordion is anchored to an
+// assistant message, so a tool row that arrives before any assistant text has
+// nowhere to hang and renders NOWHERE — which is exactly the shape an autonomous
+// delegate produces when its very first call is refused. Those rows are surfaced
+// inline instead; everything else keeps the accordion behaviour untouched. The
+// server writes plain, customer-facing text into error.message / error.hint for
+// this surface, so both are shown as-is.
+const orphanToolFailures = computed(() => {
+	const out = {};
 	let cur = null;
 	for (const m of messages.value) {
 		if (m.role === "user") cur = null;
 		else if (m.role === "assistant") cur = m.name;
-		else if (m.role === "tool" && !cur && !m.action_outcome && m.tool_status === "error")
-			out.add(m.name);
+		else if (m.role === "tool" && !cur && !m.action_outcome && m.tool_status === "error") {
+			let v = m.tool_result;
+			if (typeof v === "string") {
+				try {
+					v = JSON.parse(v);
+				} catch (e) {
+					v = null;
+				}
+			}
+			const err = (v && v.error) || {};
+			out[m.name] = {
+				message:
+					(typeof err.message === "string" && err.message.trim()) ||
+					"This step couldn't be completed.",
+				hint: (typeof err.hint === "string" && err.hint.trim()) || "",
+			};
+		}
 	}
 	return out;
 });
@@ -4373,7 +4393,7 @@ const visibleMessages = computed(() =>
 		// inline in the thread; every OTHER role=tool row belongs to the collapsed
 		// Activity accordion, not the main thread — except an orphaned FAILURE,
 		// which the accordion cannot hold.
-		if (m.role === "tool") return !!m.action_outcome || orphanToolErrors.value.has(m.name);
+		if (m.role === "tool") return !!m.action_outcome || !!orphanToolFailures.value[m.name];
 		if (m.role !== "user" && m.role !== "assistant") return false;
 		// Hide a blank streaming placeholder. The live "Working on it…" indicator
 		// below the thread already renders the assistant logo + status for the
@@ -4517,24 +4537,6 @@ function activityNames(assistantName) {
 	return (activityByAssistant.value[assistantName] || [])
 		.map((t) => toolLabel(t.tool_name))
 		.join(", ");
-}
-// The failure copy for an orphaned tool row: what happened, then the remedy. The
-// server writes plain, customer-facing text into error.message/error.hint for
-// exactly this surface, so both are shown as-is; the fallback covers a row whose
-// result won't parse.
-function toolFailParts(m) {
-	let v = m.tool_result;
-	if (typeof v === "string") {
-		try {
-			v = JSON.parse(v);
-		} catch (e) {
-			v = null;
-		}
-	}
-	const err = (v && v.error) || {};
-	const message = typeof err.message === "string" ? err.message.trim() : "";
-	const hint = typeof err.hint === "string" ? err.hint.trim() : "";
-	return { message: message || "This step couldn't be completed.", hint };
 }
 // args/result are stored as JSON strings — pretty-print, and trim very large
 // payloads so a 10k-row result doesn't blow up the chat.
