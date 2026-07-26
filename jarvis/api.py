@@ -550,9 +550,20 @@ _WRITE_TOOLS = frozenset(
 		# rows deterministically (validated, coverage-scoped) from a detached agent
 		# turn where nobody can click a confirm card, so it is audited but NEVER
 		# gated - the human review happens on the Findings board, not a card.
+		# record_app_wiki is the Custom App Learning scribe delegate's wiki
+		# writeback: like record_agent_run it lands its declared output (wiki
+		# pages) from a detached, unattended turn through a reviewed server funnel
+		# (apply_extracted_page_updates + the controller sanitizer), so it is
+		# audited but NEVER gated (and NOT the gated update_wiki card path).
+		# finish_app_learning_run is the scribe delegate's TERMINAL run finalizer:
+		# it flips the bound Jarvis Agent Run to completed (with the pages tally
+		# record_app_wiki stamped) from a detached turn — audited but NEVER gated
+		# (no card to click), like record_agent_run.
 		"download_pdf",
 		"export_excel",
 		"record_agent_run",
+		"record_app_wiki",
+		"finish_app_learning_run",
 	}
 )
 _PREVIEWABLE = frozenset(

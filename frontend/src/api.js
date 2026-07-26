@@ -357,7 +357,14 @@ export const setAgentSchedule = (installation, p) =>
 // rounding_step) read by the agent on its installation.
 export const setAgentConfig = (installation, config) =>
 	call(AG + "set_config", { installation, config: JSON.stringify(config || {}) });
-export const runAgentNow = (installation) => call(AG + "run_agent_now", { installation });
+// options: per-launch payload. `source_apps` (array of app names) is REQUIRED for
+// the custom-app-learning agent - the server refuses the launch without an
+// explicit selection and stamps it as the run's source-read authorization.
+export const runAgentNow = (installation, options) =>
+	call(AG + "run_agent_now", {
+		installation,
+		...(options ? { options: JSON.stringify(options) } : {}),
+	});
 export const applyAgents = () => call(AG + "apply_agents");
 export const getAgentsSyncStatus = () => call(AG + "get_agents_sync_status");
 export const listAgentRuns = (agent, limit) =>

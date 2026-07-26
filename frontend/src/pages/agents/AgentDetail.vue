@@ -173,7 +173,13 @@
 						<div class="text-sm font-medium text-ink-gray-5">Nature</div>
 						<div class="mt-1 text-base text-ink-gray-8">
 							{{ agent.nature }} ·
-							{{ agent.nature === "Auditor" ? "read-only" : "writes drafts" }}
+							{{
+								agent.nature === "Auditor"
+									? "read-only"
+									: agent.nature === "Scribe"
+									? "writes wiki pages"
+									: "writes drafts"
+							}}
 						</div>
 					</div>
 					<div>
@@ -407,6 +413,16 @@
 				</section>
 			</div>
 		</div>
+
+		<!-- CX5-2: the Custom App Learning agent cannot run without an explicit,
+		     per-run app authorization + consent; Run Now opens this first. -->
+		<AppSourceConsentDialog
+			v-if="needsSourceApps"
+			v-model="appPickerOpen"
+			:busy="running"
+			confirm-label="Start learning"
+			@confirm="startRun"
+		/>
 	</div>
 </template>
 
@@ -446,6 +462,7 @@ import TabBar from "@/components/list/TabBar.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
+import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
@@ -584,28 +601,54 @@ async function install() {
 }
 
 const running = ref(false);
+// On-demand run is offered for read-only auditors AND scribes (mirrors the
+// backend run_agent_now gate: nature in Auditor/Scribe); operators draft through
+// the Approval Board and never run on demand.
 const runDisabled = computed(
 	() =>
 		!installation.value ||
 		!installation.value.enabled ||
-		(agent.value && agent.value.nature !== "Auditor") ||
+		(agent.value && !["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed)
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
-	if (agent.value.nature !== "Auditor")
+	const nature = agent.value.nature;
+	if (nature !== "Auditor" && nature !== "Scribe")
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "Your roles do not permit this agent";
-	return "Run this audit now";
+	return nature === "Scribe" ? "Run this agent now" : "Run this audit now";
 });
 
-async function runNow() {
+// CX5-2: the Custom App Learning agent reads customer SOURCE, so a run must name
+// the apps it is authorised to read. Run Now opens the consent dialog for it; the
+// server refuses a launch without a validated selection either way.
+const APP_LEARNING_SLUG = "custom-app-learning";
+const appPickerOpen = ref(false);
+const needsSourceApps = computed(() => props.slug === APP_LEARNING_SLUG);
+
+function runNow() {
+	if (running.value || runDisabled.value) return;
+	if (needsSourceApps.value) {
+		appPickerOpen.value = true;
+		return;
+	}
+	return startRun();
+}
+
+async function startRun(sourceApps) {
 	if (running.value || runDisabled.value) return;
 	running.value = true;
 	try {
-		await api.runAgentNow(installation.value.name);
-		toast.success("Audit started");
+		await api.runAgentNow(
+			installation.value.name,
+			sourceApps && sourceApps.length ? { source_apps: sourceApps } : undefined
+		);
+		appPickerOpen.value = false;
+		toast.success(
+			agent.value && agent.value.nature === "Scribe" ? "Run started" : "Audit started"
+		);
 		setTab("runs");
 		await nextTick();
 		// jump the board to the freshly queued run (clears hiding facets)

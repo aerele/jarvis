@@ -126,6 +126,24 @@ def sync_agent_listings() -> dict:
 			updated += 1
 		else:
 			doc = frappe.get_doc({"doctype": LISTING, **values})
+			# Role restriction seed (INSERT branch ONLY): a manifest may declare
+			# ``default_allowed_roles`` to ship its install/run restriction ON BY
+			# DEFAULT (the Custom App Learning scribe seeds System Manager + Jarvis
+			# Admin, so it is admin-only out of the box). Seeded ONLY on first sync
+			# — the UPDATE branch above never touches ``allowed_roles``, so a
+			# re-sync can NEVER clobber an admin's later role edits (the
+			# bench-admin-state invariant, agent_catalog.py note above). Enforcement
+			# is unchanged (server-side at install AND run); this only sets the
+			# default. Unknown roles are skipped so a seed can never fail a migrate.
+			seed_roles = a.get("default_allowed_roles") or []
+			if isinstance(seed_roles, list):
+				rows = [
+					{"role": r}
+					for r in seed_roles
+					if isinstance(r, str) and r.strip() and frappe.db.exists("Role", r.strip())
+				]
+				if rows:
+					doc.set("allowed_roles", rows)
 			doc.flags.ignore_permissions = True
 			doc.insert()
 			created += 1

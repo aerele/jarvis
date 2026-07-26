@@ -19,6 +19,7 @@
   "installed_version",
   "installed_at",
   "config",
+  "source_apps_json",
   "sync_status",
   "synced_at",
   "schedule_section",
@@ -79,6 +80,13 @@
    "fieldtype": "Long Text",
    "label": "Config (JSON)",
    "description": "Engagement inputs for this install (benchmark, percentage, engagement_risk_level, company, ...). The delegate reads it on its installation on the next run."
+  },
+  {
+   "fieldname": "source_apps_json",
+   "fieldtype": "Small Text",
+   "label": "Authorized Source Apps (JSON)",
+   "read_only": 1,
+   "description": "CX5-2 — Custom App Learning only: the JSON list of custom apps an admin explicitly authorized this installation to read source from, set by run_agent_now from the launching admin's selection. Scheduled runs REUSE this selection and are SKIPPED when it is empty (a scribe never reads unbounded)."
   },
   {
    "fieldname": "sync_status",

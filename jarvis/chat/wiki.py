@@ -833,6 +833,59 @@ def _parse_updates(raw: str) -> list | None:
 # --------------------------------------------------------------------------- #
 # the shared write path
 # --------------------------------------------------------------------------- #
+# Provenance kinds that mean a HUMAN (or a human-driven pipeline) touched a page.
+# ANY of these on a page makes it non-updatable by the machine scribe — a page
+# that carries even one human touch is off-limits, so the scribe can never
+# clobber a person's edit.
+_HUMAN_SOURCE_KINDS = frozenset({"manual", "chat", "voice", "edit", "promotion", "tool"})
+
+
+def _is_txn_fatal(e: Exception) -> bool:
+	"""A transaction-FATAL DB error — a deadlock or a lock-wait timeout — aborts the
+	WHOLE InnoDB transaction (rolling back earlier in-transaction saves and releasing
+	every savepoint). It MUST propagate, never be swallowed: swallowing it would report
+	as-applied the earlier pages the abort just rolled back — a phantom tally (CA2-2). A
+	recoverable per-page error (a validation refusal, a stale-timestamp conflict) is
+	rolled back to that page's savepoint by the caller instead."""
+	db = getattr(frappe, "db", None)
+	if db is None:
+		return False
+	try:
+		return bool(db.is_deadlocked(e) or db.is_timedout(e))
+	except Exception:
+		return False
+
+
+def _sources_agent_updatable(raw, prefix: str) -> bool:
+	"""Predicate over a page's raw ``sources`` JSON: the page may be UPDATED in
+	place by the Custom App Learning scribe iff it is AGENT-OWNED (at least one
+	``kind`` starts with ``prefix``) AND has NO human/manual edit (no ``kind`` in
+	``_HUMAN_SOURCE_KINDS``).
+
+	The old predicate ("ANY source is agent") was defeated by a human edit: a
+	scribe-created page later edited via ``save_wiki_page`` retains the OLD
+	``app-learning*`` source ALONGSIDE the new ``manual`` one, so the next run
+	passed the fence and REPLACED the human body. Requiring the page to carry no
+	human touch closes that — only an exclusively-agent page is refreshable. A
+	missing/corrupt ``sources`` reads as NOT updatable (fails closed)."""
+	try:
+		sources = json.loads(raw) if raw else []
+	except Exception:
+		return False
+	if not isinstance(sources, list):
+		return False
+	kinds = [str(s.get("kind") or "") for s in sources if isinstance(s, dict)]
+	if any(k in _HUMAN_SOURCE_KINDS for k in kinds):
+		return False
+	return any(k.startswith(prefix) for k in kinds)
+
+
+def _page_is_agent_updatable(name: str, prefix: str) -> bool:
+	"""``_sources_agent_updatable`` for a page by name (unlocked read — the cheap
+	early-out; the authoritative check is re-run under a row lock at save time)."""
+	return _sources_agent_updatable(frappe.db.get_value(WIKI, name, "sources"), prefix)
+
+
 def apply_extracted_page_updates(
 	updates,
 	source: str,
@@ -840,7 +893,9 @@ def apply_extracted_page_updates(
 	ref: str | None = None,
 	default_scope: str | None = None,
 	target_user: str | None = None,
-) -> tuple[int, int]:
+	provenance_prefix: str | None = None,
+	return_outcomes: bool = False,
+) -> tuple[int, int] | list[dict]:
 	"""Create/update wiki pages from extracted updates (the note ingest above
 	and ``jarvis.learning.voice_facts`` both land here). At most
 	``MAX_PAGES_PER_NOTE`` updates apply per call; per-update failures are
@@ -858,20 +913,78 @@ def apply_extracted_page_updates(
 	page (audience-suffixed slug, invisible to others) instead of the Org page.
 	A per-update ``scope``/``target_user`` overrides the defaults. Both args
 	default to None, which preserves today's Org behavior byte-for-byte.
+
+	``provenance_prefix`` (Custom App Learning scribe writeback): when set, an
+	UPDATE only lands on a page that already carries this provenance (a
+	``sources`` kind starting with the prefix). A slug that collides with a
+	human-authored / other-feature page is REFUSED rather than overwritten — a
+	scribe can create/update only its OWN pages. None (every other caller)
+	preserves today's behavior byte-for-byte.
+
+	``return_outcomes=True`` (Custom App Learning scribe writeback): returns a
+	PER-UPDATE outcome list ``[{slug, ok, reason}]`` aligned to the accepted
+	updates instead of the ``(applied, failed)`` tuple, so the caller can record
+	EXACTLY the pages that were written and count a provenance REFUSAL (a
+	``_apply_one_update`` returning ``False``) as failed — the aggregate tuple
+	cannot distinguish "created page B" from "refused colliding page A". The
+	tuple path is unchanged for every existing caller (a refusal stays silently
+	dropped there, byte-for-byte).
 	"""
 	if not isinstance(updates, list):
-		return 0, 0
+		return [] if return_outcomes else (0, 0)
+
+	# Acquire page row locks in a DETERMINISTIC global order (by normalized slug) so two
+	# concurrent batches touching the same pages can never deadlock by locking them in
+	# opposite orders (CA2-2). Outcomes are returned in the CALLER's ORIGINAL order — the
+	# scribe writeback zips them back positionally to the accepted pages.
+	batch = list(enumerate(updates[:MAX_PAGES_PER_NOTE]))
+	order = sorted(
+		range(len(batch)),
+		key=lambda i: _normalize_slug(batch[i][1].get("slug")) if isinstance(batch[i][1], dict) else "",
+	)
+	results: list[dict | None] = [None] * len(batch)
 	applied = 0
 	failed = 0
-	for update in updates[:MAX_PAGES_PER_NOTE]:
+	for i in order:
+		update = batch[i][1]
 		if not isinstance(update, dict):
+			results[i] = {"slug": None, "ok": False, "reason": "skipped"}
 			continue
+		ok = False
+		reason = "refused"
+		# Per-page SAVEPOINT: a RECOVERABLE per-page failure (a validation refusal, a
+		# stale-timestamp conflict) rolls back ONLY this page and is counted failed, so
+		# one page's failure never discards the batch's earlier saves nor leaves a
+		# half-written page to be committed at request end. A transaction-FATAL error
+		# (deadlock / lock-wait timeout) already rolled the WHOLE InnoDB transaction back
+		# (releasing every savepoint), so it is NOT swallowed — it propagates and the
+		# request fails/retries instead of reporting success for lost work (CA2-2).
+		sp = f"aepu_{frappe.generate_hash(length=8)}"
+		frappe.db.savepoint(sp)
 		try:
-			if _apply_one_update(update, source, user, ref, default_scope, target_user):
+			ok = bool(
+				_apply_one_update(update, source, user, ref, default_scope, target_user, provenance_prefix)
+			)
+			reason = "applied" if ok else "refused"
+			if ok:
 				applied += 1
-		except Exception:
+			try:
+				frappe.db.release_savepoint(sp)
+			except Exception:
+				pass
+		except Exception as e:
+			if _is_txn_fatal(e):
+				raise
+			try:
+				frappe.db.rollback(save_point=sp)
+			except Exception:
+				pass
 			failed += 1
+			reason = "error"
 			frappe.log_error(title="wiki: page update failed", message=frappe.get_traceback())
+		results[i] = {"slug": _normalize_slug(update.get("slug")), "ok": ok, "reason": reason}
+	if return_outcomes:
+		return [r if r is not None else {"slug": None, "ok": False, "reason": "skipped"} for r in results]
 	return applied, failed
 
 
@@ -882,6 +995,7 @@ def _apply_one_update(
 	ref: str | None,
 	default_scope: str | None = None,
 	target_user: str | None = None,
+	provenance_prefix: str | None = None,
 ) -> bool:
 	slug = _normalize_slug(update.get("slug"))
 	if not slug:
@@ -940,18 +1054,42 @@ def _apply_one_update(
 			if not name:
 				raise
 
+	# Provenance fence (scribe writeback): the slug resolved to an EXISTING page.
+	# Update it only if it is agent-owned AND carries no human edit; a collision
+	# with a human-authored / human-edited / other-feature page is refused rather
+	# than overwritten. Unlocked early-out here; re-checked under a row lock at save.
+	if provenance_prefix and not _page_is_agent_updatable(name, provenance_prefix):
+		return False
+
 	try:
-		return _merge_update_into_page(name, update, source, user, ref)
+		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix)
 	except frappe.TimestampMismatchError:
 		# Concurrent save between our load and save: reload + re-merge once
 		# so ordinary concurrency doesn't drop the update.
-		return _merge_update_into_page(name, update, source, user, ref)
+		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix)
 
 
-def _merge_update_into_page(name: str, update: dict, source: str, user: str | None, ref: str | None) -> bool:
+def _merge_update_into_page(
+	name: str,
+	update: dict,
+	source: str,
+	user: str | None,
+	ref: str | None,
+	provenance_prefix: str | None = None,
+) -> bool:
 	body_md = update.get("body_md")
 	append_md = update.get("append_md")
 	contradiction = bool(update.get("contradiction"))
+
+	# TOCTOU close (scribe writeback): re-check ownership under a ROW LOCK on the
+	# page immediately before mutating it. A human edit that landed via
+	# ``save_wiki_page`` BETWEEN the unlocked pre-check above and this save would
+	# otherwise be clobbered; the ``for_update`` read serializes against that save,
+	# so a page that gained a human touch in the gap is refused here.
+	if provenance_prefix is not None:
+		locked_sources = frappe.db.get_value(WIKI, name, "sources", for_update=True)
+		if not _sources_agent_updatable(locked_sources, provenance_prefix):
+			return False
 
 	doc = frappe.get_doc(WIKI, name)
 	if update.get("summary"):
