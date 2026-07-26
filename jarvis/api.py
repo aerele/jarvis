@@ -559,11 +559,15 @@ _WRITE_TOOLS = frozenset(
 		# it flips the bound Jarvis Agent Run to completed (with the pages tally
 		# record_app_wiki stamped) from a detached turn — audited but NEVER gated
 		# (no card to click), like record_agent_run.
+		# save_agent_dashboard inserts the delegate's Jarvis Dashboard document
+		# (a real DB write of customer-derived audit output) from the same
+		# detached turn as record_agent_run beside it — audited, never gated.
 		"download_pdf",
 		"export_excel",
 		"record_agent_run",
 		"record_app_wiki",
 		"finish_app_learning_run",
+		"save_agent_dashboard",
 	}
 )
 _PREVIEWABLE = frozenset(

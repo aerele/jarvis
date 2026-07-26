@@ -83,3 +83,23 @@ class TestToolContract(FrappeTestCase):
 		with patch.dict(tc.BACKEND_ONLY, {"create_docs": "  "}, clear=False):
 			with self.assertRaises(ValueError):
 				tc.build_contract()
+
+
+class TestDelegateWritebackAudit(FrappeTestCase):
+	"""save_agent_dashboard writes a Jarvis Dashboard document from a detached
+	delegate turn; like record_agent_run beside it, that write must be AUDITED
+	(in _WRITE_TOOLS) and must never demand a confirmation card nobody can
+	click (not in _GATED_WRITES). Wave-B review follow-up: the descriptor
+	shipped without the audit entry, so the insert ran unaudited."""
+
+	def test_save_agent_dashboard_is_write_but_not_gated(self):
+		from jarvis import api
+
+		self.assertIn("save_agent_dashboard", api._WRITE_TOOLS)
+		self.assertNotIn("save_agent_dashboard", api._GATED_WRITES)
+
+	def test_record_agent_run_is_write_but_not_gated(self):
+		from jarvis import api
+
+		self.assertIn("record_agent_run", api._WRITE_TOOLS)
+		self.assertNotIn("record_agent_run", api._GATED_WRITES)
