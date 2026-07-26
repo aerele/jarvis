@@ -222,9 +222,17 @@ def _dispatch_from_session(
 			denial = _delegate_capability.tool_denial(session_key, tool)
 			if denial:
 				result = _error("CapabilityDeniedError", denial)
+				# What was ATTEMPTED is the forensic value of a refusal, so record the
+				# args too — scrubbed + truncated by audit.record. Parsed only here,
+				# inside the deny branch, so the gate itself stays the first thing that
+				# runs and a malformed-args call is still refused on the contract.
+				try:
+					attempted = _parse_args(args)
+				except JarvisError:
+					attempted = {}
 				audit.record(
 					tool=tool,
-					args={},
+					args=attempted,
 					ok=False,
 					error_code="CapabilityDeniedError",
 					error_message=denial,
@@ -232,7 +240,7 @@ def _dispatch_from_session(
 				_persist_and_publish_tool_call(
 					session_key=session_key,
 					tool=tool,
-					args={},
+					args=attempted,
 					result=result,
 					tool_call_id=tool_call_id,
 				)
