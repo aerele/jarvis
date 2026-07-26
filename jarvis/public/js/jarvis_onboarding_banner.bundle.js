@@ -144,7 +144,7 @@
 				cta.textContent = "Set up Jarvis →";
 				b.appendChild(cta);
 				return b;
-			}),
+			})
 		);
 
 		// Tail pointing down toward the chat launcher.
