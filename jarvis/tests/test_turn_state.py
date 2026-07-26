@@ -17,6 +17,10 @@ Covers the WP-1a acceptance set:
   released, prepare refs dropped); NOT NULL -> adopt (epoch re-stamp).
 * Effect-ledger idempotency + force-done at FINALIZE_MAX_ATTEMPTS=3 + the
   finalize_done all-effects-done guard.
+* JF-002: the ONE canonical effect vocabulary - EFFECT_NAMES is the single
+  authority (settlement's owed sets, finalize's run order + runners and the
+  DocType description all derive from it) and the insert seam fails CLOSED on
+  any name outside it.
 * The canonical lock-order dev assertion (OAR-6).
 * R-14 isolation-level assertion: the settlement CAS and dual-acquisition run
   under BOTH READ COMMITTED and REPEATABLE READ (set per-connection).
@@ -1134,6 +1138,79 @@ class TestEffectLedger(_TurnStateTestCase):
 		self.assertEqual(
 			ts.claim_effect(rid, "not_required")[0], "done", "no such required row => nothing owed"
 		)
+
+
+# --------------------------------------------------------------------------- #
+# JF-002: ONE canonical turn-effect vocabulary. EFFECT_NAMES is the single
+# authority; settlement, finalize and the DocType description all derive from it,
+# and the insert seam fails CLOSED on anything outside it.
+# --------------------------------------------------------------------------- #
+
+
+class TestEffectVocabulary(_TurnStateTestCase):
+	def test_insert_rejects_unknown_effect_and_writes_nothing(self):
+		# An effect name outside the canon is a caller bug: raise LOUDLY rather than
+		# leave a ledger row no finalize runner will ever claim.
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		rid = f"ts_vocab_{frappe.generate_hash(length=6)}"
+		self._mk_turn(conv, rid, seed, "finalizing", version=3)
+		with self.assertRaises(ValueError) as cm:
+			ts.insert_required_effects(rid, ("terminal_publish", "auto_titel"))
+		self.assertIn("auto_titel", str(cm.exception))
+		frappe.db.rollback()
+		# Validation runs BEFORE the first insert: the valid name that preceded the
+		# typo was NOT written (no partially-populated ledger).
+		self.assertEqual(frappe.db.count(EFFECT, {"turn": rid}), 0)
+		# The canonical names still insert normally.
+		self.assertEqual(ts.insert_required_effects(rid, ("terminal_publish",)), 1)
+		frappe.db.commit()
+
+	def test_validate_effect_names_accepts_the_whole_canon(self):
+		self.assertEqual(ts.validate_effect_names(ts.EFFECT_NAMES), tuple(ts.EFFECT_NAMES))
+		self.assertEqual(ts.validate_effect_names(None), ())
+		with self.assertRaises(ValueError):
+			ts.validate_effect_names(["usage", ""])
+
+	def test_settlement_owed_sets_are_drawn_from_the_canon(self):
+		# Adding a ninth effect to settlement without adding it to EFFECT_NAMES fails
+		# HERE (and at insert), instead of silently never running.
+		from jarvis.chat import settlement
+
+		self.assertEqual(tuple(settlement.FINAL_EFFECTS), tuple(ts.EFFECT_NAMES))
+		self.assertTrue(
+			set(settlement.TERMINAL_EFFECTS).issubset(set(ts.EFFECT_NAMES)),
+			f"TERMINAL_EFFECTS {settlement.TERMINAL_EFFECTS} escapes the canon {ts.EFFECT_NAMES}",
+		)
+		self.assertIn("terminal_publish", settlement.TERMINAL_EFFECTS, "CDX-12 backstop is always owed")
+
+	def test_finalize_runs_exactly_the_canon(self):
+		# Every canonical effect has a runner and every runner is canonical — a name
+		# in one and not the other is an effect that is owed but never applied (or a
+		# runner nothing can ever reach).
+		from jarvis.chat import finalize
+
+		self.assertEqual(set(finalize._RUNNERS), set(ts.EFFECT_NAMES))
+		self.assertEqual(tuple(finalize._EFFECT_ORDER), tuple(ts.EFFECT_NAMES))
+		self.assertEqual(ts.EFFECT_NAMES[0], "terminal_publish", "CDX-12: the backstop runs first")
+		self.assertEqual(len(set(ts.EFFECT_NAMES)), len(ts.EFFECT_NAMES), "no duplicate effect name")
+
+	def test_doctype_description_matches_the_canon(self):
+		# The Jarvis Turn Effect description enumerates the vocabulary for whoever
+		# reads the DocType; this pins it to EFFECT_NAMES so it cannot drift again.
+		import json as _json
+		import re
+
+		path = frappe.get_app_path(
+			"jarvis", "jarvis", "doctype", "jarvis_turn_effect", "jarvis_turn_effect.json"
+		)
+		with open(path) as fh:
+			meta = _json.load(fh)
+		desc = next(f for f in meta["fields"] if f["fieldname"] == "effect_name")["description"]
+		match = re.search(r"EFFECT_NAMES = \[([^\]]+)\]", desc)
+		self.assertIsNotNone(match, f"description must enumerate 'EFFECT_NAMES = [...]': {desc!r}")
+		listed = tuple(n.strip() for n in match.group(1).split(","))
+		self.assertEqual(listed, tuple(ts.EFFECT_NAMES))
 
 
 # --------------------------------------------------------------------------- #
