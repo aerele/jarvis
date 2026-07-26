@@ -38,6 +38,7 @@ from frappe.utils import now_datetime
 
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
+from jarvis.tools import _delegate_capability
 
 INSTALLATION = "Jarvis Agent Installation"
 LISTING = "Jarvis Agent Listing"
@@ -302,29 +303,18 @@ def reap_stale_agent_runs() -> int:
 				frappe.db.commit()
 				reaped += 1
 				continue
-			frappe.db.set_value(
-				RUN,
+			# The row lock is already held and the compare-and-set above has already
+			# established that the row is still ``running``, so this goes straight to
+			# the shared terminalization tail.
+			_terminalize_failed(
 				r.name,
-				{
-					"status": "failed",
-					"finished_at": frappe.utils.now(),
-					"error": "run exceeded max duration; reaped by the stale-run sweep (A8 backstop)",
-				},
-				update_modified=False,
-			)
-			frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
-			# A8: the session bearer must not outlive the (now-failed) run.
-			agent_runs.teardown_run_session(cur.session_key)
-			log_activity(
 				agent=cur.agent,
-				agent_title=frappe.db.get_value(LISTING, cur.agent, "title"),
 				installation=cur.installation,
-				action="run_failed",
-				run=r.name,
-				detail="reaped: run exceeded max duration",
+				session_key=cur.session_key,
 				owner=cur.owner,
+				error="run exceeded max duration; reaped by the stale-run sweep (A8 backstop)",
+				detail="reaped: run exceeded max duration",
 			)
-			frappe.db.commit()
 			reaped += 1
 		except Exception:
 			frappe.log_error(
@@ -343,6 +333,97 @@ def _stale_candidates(cutoff) -> list:
 		filters={"status": "running", "started_at": ["<", cutoff]},
 		fields=["name", "session_key", "owner", "agent", "installation", "pages_written"],
 	)
+
+
+def _terminalize_failed(
+	run_name: str,
+	*,
+	agent: str | None,
+	installation: str | None,
+	session_key: str | None,
+	owner: str | None,
+	error: str,
+	detail: str | None = None,
+) -> None:
+	"""Stamp a run ``failed`` + tear down its bearer + log the activity — the tail
+	shared by every path that kills a RUNNING run.
+
+	The caller must already have established that the row is still ``running``:
+	the reaper holds the row lock from its compare-and-set, ``fail_run`` takes one.
+	Ordering is load-bearing — the status write is committed (releasing the row
+	lock) BEFORE the session teardown, so a teardown never runs under the lock."""
+	from jarvis.chat import agent_runs
+
+	frappe.db.set_value(
+		RUN,
+		run_name,
+		{
+			"status": "failed",
+			"finished_at": frappe.utils.now(),
+			"error": (error or "")[:140],
+		},
+		update_modified=False,
+	)
+	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+	# A8: the session bearer must not outlive the (now-failed) run.
+	agent_runs.teardown_run_session(session_key)
+	log_activity(
+		agent=agent,
+		agent_title=frappe.db.get_value(LISTING, agent, "title") if agent else "",
+		installation=installation,
+		action="run_failed",
+		run=run_name,
+		detail=(detail or error or "")[:140],
+		owner=owner,
+	)
+	frappe.db.commit()
+
+
+def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
+	"""Terminalize a RUNNING agent run as ``failed`` with ``error``. Returns True
+	iff this call is the one that transitioned it.
+
+	The honest-failure entry point for a run that is provably dead before it can
+	finalize itself — today, a delegate whose capability contract authorises no
+	tool at all (JF-017), which is refused on every call INCLUDING the
+	``record_agent_run`` writeback. Without this the row would sit ``running``
+	until the 3h stale-run sweep relabelled it "exceeded max duration", sending
+	the customer after a timeout that never happened.
+
+	Same discipline as the sweep: commit first so the ``FOR UPDATE`` opens the
+	read view, compare-and-set on ``status='running'`` under the row lock so a
+	concurrent finish is never overwritten with ``failed``. Best-effort — a
+	failure to record the failure must never take down the caller's response."""
+	if not run_name:
+		return False
+	try:
+		frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
+		cur = frappe.db.get_value(
+			RUN,
+			run_name,
+			["status", "agent", "installation", "session_key", "owner"],
+			as_dict=True,
+			for_update=True,
+		)
+		if not cur or cur.status != "running":
+			frappe.db.commit()  # release the lock; a concurrent finish already won
+			return False
+		_terminalize_failed(
+			run_name,
+			agent=cur.agent,
+			installation=cur.installation,
+			session_key=cur.session_key,
+			owner=cur.owner,
+			error=error,
+			detail=detail,
+		)
+		return True
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis agent: run failure stamp failed: {run_name}",
+			message=frappe.get_traceback(),
+		)
+		return False
 
 
 # --------------------------------------------------------------------------- #
@@ -389,6 +470,26 @@ def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> d
 			)
 		)
 
+	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
+	# because an empty declared surface is not a runnable state: the bench would
+	# refuse every call the delegate makes — record_agent_run included — so the run
+	# could never finalize itself and would sit "running" until the 3h stale-run
+	# sweep relabelled it a timeout it never hit. Refuse the LAUNCH instead, with
+	# the real reason, and leave no orphan conversation/run behind (same discipline
+	# as the run_as_user guard above). Imported inside the function so the bundled
+	# registry stays the one seam tests inject a declared surface at.
+	from jarvis.chat.agent_catalog import registry_tools_allow
+
+	declared_tools = registry_tools_allow(listing.agent_slug)
+	if not declared_tools:
+		frappe.throw(
+			_(
+				"This agent's bundle declares no tools, so the run would be refused at "
+				"every step and could never finish. Reinstall or update the agent, or "
+				"contact support — nothing was started."
+			)
+		)
+
 	# Fresh conversation. ROW ownership is the human owner (reassigned below) so
 	# if_owner visibility works; the ERP-read identity is the run-as user.
 	# ignore_permissions matches the macro engine.
@@ -413,6 +514,14 @@ def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> d
 	preparation_mode = inst.activation_state or "shadow"
 	initiating_human = frappe.session.user if trigger == "manual" else None
 
+	# Stamped in the same insert and under the same immutability guard — the
+	# declared ``tools_allow`` resolved above plus the listing's ``nature``/
+	# ``writes`` as they stand RIGHT NOW. From here on the bench authorises this
+	# run's tool calls against the snapshot, never against the mutable listing, so
+	# neither a listing edit mid-run nor a compromised container can widen what an
+	# in-flight run may do.
+	capability = _delegate_capability.contract_for_launch(listing, declared_tools)
+
 	run = frappe.get_doc(
 		{
 			"doctype": RUN,
@@ -425,6 +534,7 @@ def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> d
 			"bundle_version": bundle_version,
 			"preparation_mode": preparation_mode,
 			"initiating_human": initiating_human,
+			**capability,
 		}
 	)
 	run.flags.ignore_permissions = True

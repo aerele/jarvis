@@ -339,6 +339,31 @@ def registry_timeout_s(agent_slug: str, default: int = 600) -> int:
 	return default
 
 
+def registry_tools_allow(agent_slug: str) -> list[str]:
+	"""The agent's DECLARED tool surface from the BUNDLED registry, verbatim.
+
+	The same metadata ``build_agent_push_payload`` echoes into the container's
+	enablement signal — the manifest's ``tools_allow``, openclaw-facing ids
+	(``jarvis__get_doc``) plus the container-side tools (``exec``/``canvas``/
+	``message``) the bench never serves. JF-017 snapshots this onto the run at
+	launch and enforces it bench-side, so it is no longer just the container's
+	configuration.
+
+	Returns ``[]`` for an unknown slug or a malformed entry — under a ``snapshot``
+	contract that authorises NOTHING, which is the intended fail-closed outcome for
+	a run whose bundle the bench cannot describe."""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return []
+	for a in _load_registry().get("agents") or []:
+		if (a.get("agent_slug") or "").strip() == slug:
+			declared = a.get("tools_allow")
+			if not isinstance(declared, list):
+				return []
+			return [str(t).strip() for t in declared if str(t or "").strip()]
+	return []
+
+
 def after_migrate() -> None:
 	"""hooks.after_migrate entry: keep the catalog in lockstep with the bundled
 	registry on every migrate. Best-effort — a catalog hiccup must never fail a
