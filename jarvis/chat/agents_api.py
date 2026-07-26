@@ -473,6 +473,7 @@ def get_agent_admin_overview() -> dict:
 			"name",
 			"agent",
 			"owner",
+			"run_as_user",
 			"enabled",
 			"schedule_enabled",
 			"schedule_frequency",
@@ -486,6 +487,11 @@ def get_agent_admin_overview() -> dict:
 			{
 				"installation": i.name,
 				"owner": i.owner,
+				# R1-S2: the EXECUTING identity, distinct from the row owner. A blank
+				# one is a legacy/misconfigured row — the dispatch paths refuse to run
+				# it (R1-F3) — so an admin reading an Apply or run failure needs to see
+				# WHICH row it is here, rather than having to open raw Desk.
+				"run_as_user": i.run_as_user or None,
 				"enabled": int(i.enabled or 0),
 				"schedule_enabled": int(i.schedule_enabled or 0),
 				"schedule_frequency": i.schedule_frequency,
@@ -828,11 +834,24 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	identity is the run-as user."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3: who may trigger
-	run_as = doc.run_as_user or doc.owner
+	# R1-F3: no ``or doc.owner`` fallback. A blank run-as user is a MISCONFIGURED
+	# install, and defaulting to the row owner would run this audit's ERP reads as
+	# an identity the A4 escalation guard never litigated — a privilege grant
+	# nobody reviewed. Refuse explicitly (and before the RBAC helper, which would
+	# otherwise be asked to rule on an empty user) so the operator sees WHICH row
+	# is wrong instead of getting a silent owner-privileged run.
+	run_as = (doc.run_as_user or "").strip()
+	if not run_as:
+		frappe.throw(
+			_(
+				"This agent has no run-as user, so there is no identity to run it as. Set a "
+				"run-as user on the installation, or disable it."
+			)
+		)
 	# RBAC: the audit executes AS the RUN-AS user, so it is THAT identity's roles
 	# that must permit the agent (gotcha #8 — the executing identity is gated, not
-	# the triggerer). Defaults to owner for installs from before run_as_user. SM
-	# run-as users pass via the System Manager bypass inside the helper.
+	# the triggerer). SM run-as users pass via the System Manager bypass inside the
+	# helper.
 	if not _user_allowed_for_agent(doc.agent, run_as):
 		frappe.throw(
 			_("The run-as user's roles do not permit running this agent."),

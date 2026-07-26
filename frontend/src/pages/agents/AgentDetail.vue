@@ -390,6 +390,18 @@
 								:label="row.enabled ? 'Enabled' : 'Disabled'"
 							/>
 							<div
+								v-else-if="column.key === 'run_as_user'"
+								class="truncate text-base"
+							>
+								<span v-if="row.run_as_user">{{ row.run_as_user }}</span>
+								<Badge
+									v-else
+									variant="subtle"
+									theme="orange"
+									label="No run-as user"
+								/>
+							</div>
+							<div
 								v-else-if="column.key === 'last_run_at'"
 								class="truncate text-base"
 							>
@@ -492,6 +504,10 @@ const FREQUENCY_OPTIONS = [
 ];
 const INSTALL_COLUMNS = [
 	{ label: "Owner", key: "owner", width: 2 },
+	// The EXECUTING identity, distinct from the owner. A blank one is a legacy /
+	// misconfigured row that every dispatch path refuses to run, so it is surfaced
+	// here (as a badge) to give an admin an in-product path to the offending row.
+	{ label: "Runs as", key: "run_as_user", width: 2 },
 	{ label: "Enabled", key: "enabled", width: "7rem" },
 	{ label: "Last run", key: "last_run_at", width: "8rem" },
 	{ label: "Sync", key: "sync_status", width: "7rem" },
