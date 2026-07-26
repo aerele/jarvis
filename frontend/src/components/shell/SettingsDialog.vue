@@ -8,8 +8,24 @@
 	     through DialogPortal into <body>, so the stacking order that used to
 	     come from .jv-settings-overlay's z-index:60 now comes from the
 	     .dialog-overlay rule in main.css. The shell ConfirmDialog stays at 200
-	     so a confirm still opens on top of settings. -->
-	<Dialog v-model="open" :options="{ size: '5xl' }">
+	     so a confirm still opens on top of settings.
+
+	     disable-outside-click-to-close is bound to confirmOpen, not hardcoded.
+	     ConfirmDialog is ALSO teleported to <body> (jarvis#438), so it is a DOM
+	     sibling of this dialog's content, not a descendant — reka's
+	     dismissable-layer treats any pointerdown on it, including Cancel, as
+	     "outside" and closes this dialog too (jarvis#452). Disabling
+	     outside-click-to-close only while a confirm is open keeps plain
+	     backdrop clicks closing Settings (the #405 e2e-verified behaviour)
+	     while a confirm is showing. Note: handling `@interact-outside`
+	     directly, as first suggested on #452, does not work — frappe-ui's
+	     Dialog.vue consumes that event internally on its own DialogContent and
+	     never forwards it to callers of <Dialog>. -->
+	<Dialog
+		v-model="open"
+		:options="{ size: '5xl' }"
+		:disable-outside-click-to-close="confirmOpen"
+	>
 		<template #body>
 			<!-- Overriding #body replaces Dialog's default content, which is where
 			     frappe-ui renders both its DialogClose (X) button and the
@@ -100,6 +116,10 @@ import { useShellStore } from "@/stores/shell";
 // MUST be @/theme's useJarvisTheme, the same singleton the header toggle
 // writes to. @/composables/useTheme was a separate instance and is deleted.
 import { useJarvisTheme } from "@/theme";
+// State only, not confirm() itself: this dialog never opens a confirm, it
+// just needs to know when one is open (see the disable-outside-click-to-close
+// comment on <Dialog> above).
+import { confirmState } from "@/composables/useConfirm";
 
 const store = useShellStore();
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
@@ -188,6 +208,8 @@ const open = computed({
 		store.settingsOpen = v;
 	},
 });
+
+const confirmOpen = computed(() => confirmState.value !== null);
 
 // A gated section requested by a user without the role falls back to General.
 const section = computed(() => {
