@@ -36,7 +36,7 @@ export function visibleMessages(messages) {
       m &&
       (m.role === "user" || m.role === "assistant") &&
       typeof m.content === "string" &&
-      m.content.trim() !== ""
+      m.content.trim() !== "",
   );
 }
 
