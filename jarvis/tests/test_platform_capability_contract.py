@@ -821,12 +821,19 @@ class TestRegistryToolsAllow(FrappeTestCase):
 		with mock.patch.object(agent_catalog, "_load_registry", return_value=synth):
 			self.assertEqual(agent_catalog.registry_tools_allow("cc-bad"), [])
 
-	def test_every_bundled_agent_declares_a_surface(self):
-		"""A bundled agent with no declared tools would be snapshotted as authorising
-		nothing — a launch that can never do anything. Catch it here, not in prod."""
+	def test_every_bundled_agent_declares_a_usable_bench_surface(self):
+		"""A bundled agent with no declared tools is now refused at LAUNCH, and one
+		that declares only container-side tools (``exec``/``canvas``/``message``)
+		launches but is fatally refused at its first call. Either is a shipped agent
+		nobody can run — catch it here, not in prod."""
 		for a in agent_catalog._load_registry().get("agents") or []:
 			slug = (a.get("agent_slug") or "").strip()
-			self.assertTrue(agent_catalog.registry_tools_allow(slug), f"{slug} declares no tools_allow")
+			declared = agent_catalog.registry_tools_allow(slug)
+			self.assertTrue(declared, f"{slug} declares no tools_allow")
+			self.assertTrue(
+				_delegate_capability.bench_tools(declared),
+				f"{slug} declares no jarvis__ tool, so every bench call would be refused",
+			)
 
 	def test_normalize_strips_only_the_jarvis_prefix(self):
 		self.assertEqual(_delegate_capability.normalize_tool("jarvis__get_doc"), "get_doc")
