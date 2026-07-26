@@ -36,6 +36,7 @@ import frappe
 from frappe import _
 from frappe.utils import now_datetime
 
+from jarvis._session import authenticated_user
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.tools import _delegate_capability
@@ -197,7 +198,9 @@ def run_due_agent_audits() -> None:
 		try:
 			frappe.set_user(run_as)
 			inst = frappe.get_doc(INSTALLATION, row.name)
-			_launch_audit(inst, trigger="scheduled", source_apps=source_apps)
+			# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
+			# it has no initiating human — the scheduler user (Administrator) is not one.
+			_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
 			frappe.set_user(original_user)
 			_advance(row, now)  # O4: advance ONLY after a successful enqueue
 		except Exception:
@@ -429,12 +432,64 @@ def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
 # --------------------------------------------------------------------------- #
 # shared launch (scheduler + manual run_agent_now take the SAME path)
 # --------------------------------------------------------------------------- #
-def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> dict:
+def _resolve_initiating_human(trigger: str, initiating_human: str | None) -> str | None:
+	"""JF-021 — the validated human to stamp as a run's immutable ``initiating_human``.
+
+	Provenance is PASSED IN, never read from ambient session state. By the time
+	``_launch_audit`` runs, BOTH launch paths have already switched the session to the
+	installation's ``run_as_user``, so ``frappe.session.user`` is the EXECUTING identity;
+	stamping it misattributed every manual run whose triggerer != run-as user, forever
+	(the field is immutable once inserted).
+
+	Fail-closed rules:
+
+	* **scheduled** — no human initiates a cron run, so the field stays empty. A caller
+	  that supplies one is REFUSED rather than believed (attributing an unattended run
+	  to a person is exactly the lie this field exists to prevent).
+	* **manual** — the identity must equal the AUTHENTICATED session user of this
+	  request (``jarvis._session.authenticated_user`` — the user as of BEFORE any
+	  ``impersonate`` switch). A supplied value can therefore only ever CONFIRM what the
+	  server already knows; it can never introduce a third identity, so nothing
+	  client-reachable can forge attribution. Omitting it resolves to that same
+	  authenticated user (the in-process callers that never impersonate).
+	* the resolved identity must be a real ENABLED User and never Guest — an
+	  unattributable "human" is refused, not stamped.
+	"""
+	if trigger != "manual":
+		if initiating_human:
+			frappe.throw(_("A scheduled agent run has no initiating human."))
+		return None
+
+	# The pre-impersonation session user: the server's own answer to "who triggered
+	# this", derived independently of whatever the caller passed.
+	actual = (authenticated_user() or "").strip()
+	human = (initiating_human or actual).strip()
+	if human != actual:
+		frappe.throw(
+			_("An agent run can only be attributed to the user who triggered it."),
+			frappe.PermissionError,
+		)
+	if human in ("", "Guest") or not frappe.db.get_value("User", human, "enabled"):
+		frappe.throw(_("A manual agent run must be attributable to an enabled user."))
+	return human
+
+
+def _launch_audit(
+	inst,
+	trigger: str,
+	source_apps: list[str] | None = None,
+	initiating_human: str | None = None,
+) -> dict:
 	"""Create the audit conversation + a ``running`` Jarvis Agent Run + enqueue
 	the triggering turn. MUST run as the installation owner (the scheduler
 	set_user's it; run_agent_now is already the owner). Returns
 	``{run, conversation, session_key}``. Identity/budget guards + next_run_at
 	advancement are the caller's job.
+
+	``initiating_human`` (JF-021) is the human who triggered a MANUAL run, captured by
+	the caller BEFORE it impersonated the run-as user and validated here by
+	``_resolve_initiating_human``. The scheduler passes ``None`` — a cron run has no
+	initiating human.
 
 	``source_apps`` (CX5-2) is the Custom App Learning run's ADMIN-AUTHORIZED app
 	selection, already validated by the caller (``app_source.validate_source_apps``).
@@ -469,6 +524,14 @@ def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> d
 				"it as. Set a run-as user on the installation, or disable it."
 			)
 		)
+
+	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
+	# for the same reason as the run-as guard above — a refused launch must leave no
+	# orphan conversation/run behind. Deliberately ORDERED BEFORE the capability
+	# check below: an unauthorized triggerer must be answered with the authorization
+	# refusal, never with a bundle-configuration diagnosis (merge ruling, 2026-07-26
+	# composition review).
+	initiating_human = _resolve_initiating_human(trigger, initiating_human)
 
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
@@ -506,13 +569,12 @@ def _launch_audit(inst, trigger: str, source_apps: list[str] | None = None) -> d
 	#     (shadow|live) at launch, so a run made in shadow is forever attributable as
 	#     such even after the install is later promoted.
 	#   * initiating_human — the human who triggered a MANUAL run; None for a
-	#     scheduled cron run (no human initiated it). On the manual path the caller has
-	#     switched the session to the run-as user, so frappe.session.user is the
-	#     triggering human ONLY on a self-mapped install (run_as == triggerer); see the
-	#     cross-file note for the run_as != triggerer case.
+	#     scheduled cron run (no human initiated it). Resolved above from the caller's
+	#     EXPLICIT argument, never from frappe.session.user: the session here is the
+	#     run-as user, which is a different person whenever the triggerer did not run
+	#     their own self-mapped install (JF-021).
 	bundle_version = inst.installed_version or listing.version or None
 	preparation_mode = inst.activation_state or "shadow"
-	initiating_human = frappe.session.user if trigger == "manual" else None
 
 	# Stamped in the same insert and under the same immutability guard — the
 	# declared ``tools_allow`` resolved above plus the listing's ``nature``/
