@@ -20,9 +20,17 @@ What is proven here:
   * auditor/operator write caps are driven by the run SNAPSHOT;
   * a legacy run (stamped by ``v2_07_agent_run_capability_snapshot``) still
     executes exactly as it did before the guard;
-  * a run with NO contract created after the cutover is refused (fail closed);
+  * a run with NO contract created after the cutover is refused (fail closed) —
+    but one created inside the bounded deploy window (migrate done, workers not
+    yet restarted) is NOT, because that run is a deploy artefact, not a forgery;
   * ``_launch_audit`` actually stamps the contract, and the controller refuses to
-    let it be edited afterwards.
+    let it be edited afterwards;
+  * a bundle that declares NO tool surface is refused at LAUNCH — no conversation,
+    no run, no bearer — and a run that somehow reaches dispatch with no usable
+    surface is FAILED at its first refusal with an honest error, never left
+    ``running`` for the 3h stale-run sweep to relabel as a timeout;
+  * the customer's transcript gets plain language while the delegate's envelope
+    keeps the contract wording plus the "retrying will not help" hint.
 
 Run:
   bench --site patterntest.localhost run-tests --app jarvis \
@@ -38,13 +46,17 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
 from jarvis.chat import agent_catalog, agent_scheduler
-from jarvis.exceptions import PermissionDeniedError
+from jarvis.exceptions import CapabilityDeniedError, JarvisError, PermissionDeniedError
 from jarvis.tools import _agent_run_ctx, _delegate_capability
 from jarvis.tools.create_doc import create_doc
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
+ACTIVITY = "Jarvis Agent Activity"
+CONVERSATION = "Jarvis Conversation"
+MESSAGE = "Jarvis Chat Message"
+SESSION = "Jarvis Chat Session"
 PATCH_LOG = "Patch Log"
 
 AUD_SLUG = "cc-auditor"
@@ -157,7 +169,9 @@ def _mk_todo(owner: str) -> str:
 
 def _wipe():
 	for slug in (AUD_SLUG, OP_SLUG):
-		for dt in (RUN, INSTALLATION):
+		# A fatal refusal terminalizes the run, which COMMITS and logs an activity row,
+		# so this fixture cannot rely on the test-case rollback for those two doctypes.
+		for dt in (ACTIVITY, RUN, INSTALLATION):
 			for n in frappe.get_all(dt, filters={"agent": slug}, pluck="name", ignore_permissions=True):
 				frappe.delete_doc(dt, n, force=True, ignore_permissions=True)
 		if frappe.db.exists(LISTING, slug):
@@ -190,6 +204,8 @@ class _DelegateCase(FrappeTestCase):
 	def tearDown(self):
 		_agent_run_ctx.clear_session_key()
 		frappe.set_user("Administrator")
+		for key in (self.aud_key, self.op_key):
+			frappe.db.delete(SESSION, {"session_key": key})
 		_wipe()
 
 	def _as_delegate(self, session_key: str):
@@ -282,6 +298,136 @@ class TestDelegateToolAllowGate(_DelegateCase):
 
 
 # --------------------------------------------------------------------------- #
+# a run that can never call anything is FAILED, not left hanging
+# --------------------------------------------------------------------------- #
+class TestBrickedRunIsFailedAtOnce(_DelegateCase):
+	"""A contract that authorises no bench tool refuses EVERY call — including the
+	``record_agent_run`` writeback that finalizes the run. Left alone the row would
+	sit ``running`` until the 3h stale-run sweep stamped "run exceeded max duration"
+	on it, which is false and sends the reader after a timeout that never happened.
+	It is terminalized at the first refusal instead, with the real reason."""
+
+	def _brick(self) -> None:
+		frappe.db.set_value(RUN, self.aud_run, "tools_allow_json", "[]", update_modified=False)
+
+	def test_the_first_refusal_fails_the_run_with_an_honest_error(self):
+		self._brick()
+		res = self._dispatch(self.aud_key, "get_schema", {"doctype": "ToDo"})
+		self.assertFalse(res["ok"], res)
+		row = frappe.db.get_value(RUN, self.aud_run, ["status", "error", "finished_at"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("authorises no tools", row.error)
+		# The reaper's wording is the LIE this replaces — it must not appear.
+		self.assertNotIn("max duration", row.error)
+		self.assertIsNotNone(row.finished_at)
+
+	def test_the_bearer_does_not_outlive_the_failed_run(self):
+		"""A8: terminalizing must take the per-run session row with it, so the
+		refused run's bearer stops resolving to the run-as user."""
+		agent_scheduler._mint_run_session(self.aud_key, self.run_as)
+		self.assertTrue(frappe.db.exists(SESSION, {"session_key": self.aud_key}))
+		self._brick()
+		self._dispatch(self.aud_key, "get_schema", {"doctype": "ToDo"})
+		self.assertFalse(frappe.db.exists(SESSION, {"session_key": self.aud_key}))
+
+	def test_a_merely_undeclared_tool_leaves_the_run_running(self):
+		"""The narrow case must stay narrow: an agent WITH a tool surface reaching for
+		one tool outside it is a model mistake, not a dead run. It keeps going."""
+		frappe.set_user("Administrator")
+		todo = _mk_todo(self.run_as)
+		res = self._dispatch(self.aud_key, "get_doc", {"doctype": "ToDo", "name": todo})
+		self.assertFalse(res["ok"], res)
+		self.assertEqual(frappe.db.get_value(RUN, self.aud_run, "status"), "running")
+
+	def test_fail_run_never_overwrites_a_finalized_run(self):
+		"""Compare-and-set: a run a concurrent ``record_agent_run`` already completed
+		is never flipped to failed by this path."""
+		frappe.db.set_value(
+			RUN,
+			self.aud_run,
+			{"status": "completed", "finished_at": frappe.utils.now()},
+			update_modified=False,
+		)
+		self.assertFalse(agent_scheduler.fail_run(self.aud_run, "should not land"))
+		row = frappe.db.get_value(RUN, self.aud_run, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "completed")
+		self.assertFalse(row.error)
+
+
+# --------------------------------------------------------------------------- #
+# what the CUSTOMER reads vs what the DELEGATE reads
+# --------------------------------------------------------------------------- #
+class TestDenialCopyAndVocabulary(_DelegateCase):
+	def test_capability_denied_is_in_the_error_vocabulary(self):
+		"""P2-5: the wire code names a real exception class and has a canon
+		``_ERROR_HINTS`` entry. It is NOT a permission denial — no administrator can
+		grant the tool mid-run, so the remedy is the bundle."""
+		self.assertTrue(issubclass(CapabilityDeniedError, JarvisError))
+		self.assertFalse(issubclass(CapabilityDeniedError, PermissionDeniedError))
+		hint = api._ERROR_HINTS.get(CapabilityDeniedError.__name__, "")
+		self.assertIn("bundle", hint)
+
+	def test_the_delegate_is_told_that_retrying_cannot_help(self):
+		"""The no-retry instruction has to be in the MESSAGE: the openclaw plugin
+		relays a failed tool call to the model as ``"<code>: <message>"`` and drops
+		every other envelope field, so a hint-only fix would never reach the delegate
+		and it would retry at the rate limit until the run timed out."""
+		frappe.set_user("Administrator")
+		todo = _mk_todo(self.run_as)
+		res = self._dispatch(self.aud_key, "get_doc", {"doctype": "ToDo", "name": todo})
+		self.assertEqual(res["error"]["code"], CapabilityDeniedError.__name__)
+		self.assertIn("capability contract", res["error"]["message"])
+		self.assertIn("will not help", res["error"]["message"])
+		self.assertIn("bundle", res["error"]["hint"])
+
+	def test_the_chat_receipt_is_plain_language_not_contract_jargon(self):
+		"""The transcript receipt renders verbatim in chat. "the tool is not in the
+		capability contract snapshotted for this run at launch" is implementation
+		vocabulary and must not be what a customer reads; the contract wording stays
+		in the delegate's envelope + the audit trail."""
+		frappe.set_user("Administrator")
+		conv = frappe.get_doc(
+			{
+				"doctype": CONVERSATION,
+				"title": "cc denial transcript",
+				"status": "Active",
+				"session_key": self.aud_key,
+			}
+		)
+		conv.flags.ignore_permissions = True
+		conv.insert(ignore_permissions=True)
+		# persist_tool_receipt COMMITS, so the rows outlive the test-case rollback.
+		self.addCleanup(self._drop_conversation, conv.name)
+		todo = _mk_todo(self.run_as)
+
+		res = self._dispatch(self.aud_key, "get_doc", {"doctype": "ToDo", "name": todo})
+
+		rows = frappe.get_all(
+			MESSAGE,
+			filters={"conversation": conv.name, "role": "tool"},
+			fields=["tool_status", "tool_result"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(len(rows), 1, rows)
+		self.assertEqual(rows[0].tool_status, "error")  # renders as a failure, not a success
+		envelope = json.loads(rows[0].tool_result)["error"]
+		self.assertNotIn("capability contract", envelope["message"])
+		self.assertNotIn("snapshot", envelope["message"].lower())
+		self.assertIn("isn't allowed to use", envelope["message"])
+		self.assertIn("administrator", envelope["hint"])  # and a remedy, not a dead end
+		# not lost, just relocated: the delegate still gets the precise reason
+		self.assertIn("capability contract", res["error"]["message"])
+
+	def _drop_conversation(self, name: str) -> None:
+		frappe.set_user("Administrator")
+		for m in frappe.get_all(MESSAGE, filters={"conversation": name}, pluck="name"):
+			frappe.delete_doc(MESSAGE, m, force=True, ignore_permissions=True)
+		if frappe.db.exists(CONVERSATION, name):
+			frappe.delete_doc(CONVERSATION, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+
+# --------------------------------------------------------------------------- #
 # legacy runs + the cutover boundary
 # --------------------------------------------------------------------------- #
 class TestLegacyRunFallback(_DelegateCase):
@@ -319,6 +465,51 @@ class TestLegacyRunFallback(_DelegateCase):
 			res = self._dispatch(self.aud_key, "get_schema", {"doctype": "ToDo"})
 		self.assertFalse(res["ok"], res)
 		self.assertEqual(res["error"]["code"], "CapabilityDeniedError")
+
+	def test_blank_contract_inside_the_deploy_window_is_legacy(self):
+		"""``bench migrate`` finishing and the LAST worker restarting are not the same
+		instant. A run launched by a still-old worker in between physically cannot
+		carry a snapshot, and it is not a forgery — refusing it bricks a real customer
+		run on every deploy. It is grandfathered for the bounded grace window."""
+		frappe.db.set_value(
+			RUN,
+			self.aud_run,
+			{"capability_contract": None, "tools_allow_json": None},
+			update_modified=False,
+		)
+		# patched 5h ago; the run (created now) is inside the 6h window
+		cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-5)
+		with mock.patch.object(_delegate_capability, "_legacy_cutoff", return_value=cutoff):
+			res = self._undeclared_call()
+		self.assertTrue(res["ok"], res)
+
+	def test_blank_contract_past_the_deploy_window_is_refused(self):
+		"""The grace is BOUNDED. Hours after the deploy a blank contract can only mean
+		a launch path that bypassed ``_launch_audit`` (or a planted row) — fail closed,
+		and kill the run rather than let it hang."""
+		frappe.db.set_value(
+			RUN,
+			self.aud_run,
+			{"capability_contract": None, "tools_allow_json": None},
+			update_modified=False,
+		)
+		cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-7)
+		with mock.patch.object(_delegate_capability, "_legacy_cutoff", return_value=cutoff):
+			res = self._dispatch(self.aud_key, "get_schema", {"doctype": "ToDo"})
+		self.assertFalse(res["ok"], res)
+		self.assertEqual(res["error"]["code"], "CapabilityDeniedError")
+		self.assertEqual(frappe.db.get_value(RUN, self.aud_run, "status"), "failed")
+
+	def test_the_grace_boundary_is_the_documented_six_hours(self):
+		"""The exact edge, without a dispatch in the way."""
+		self.assertEqual(_delegate_capability.LEGACY_GRACE_SECONDS, 6 * 3600)
+		cutoff = frappe.utils.now_datetime()
+		grace = _delegate_capability.LEGACY_GRACE_SECONDS
+		with mock.patch.object(_delegate_capability, "_legacy_cutoff", return_value=cutoff):
+			inside = frappe.utils.add_to_date(cutoff, seconds=grace - 60)
+			outside = frappe.utils.add_to_date(cutoff, seconds=grace + 60)
+			self.assertTrue(_delegate_capability._is_pre_patch(inside))
+			self.assertFalse(_delegate_capability._is_pre_patch(outside))
 
 	def test_blank_contract_before_the_cutover_is_legacy(self):
 		"""The deploy-race grace: a run created before the patch ran (new code already
@@ -516,7 +707,7 @@ class TestLaunchStampsTheContract(unittest.TestCase):
 			frappe.delete_doc(LISTING, self.SLUG, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
-	def _launch(self) -> str:
+	def _launch(self, declared: list | None = None) -> str:
 		import jarvis.admin_client as admin_client
 
 		inst = frappe.get_doc(
@@ -537,7 +728,8 @@ class TestLaunchStampsTheContract(unittest.TestCase):
 		admin_client.post_agent_run = lambda **kw: {"run_id": kw.get("run_id"), "status": "queued"}
 		frappe.set_user(self.OWNER)
 		try:
-			with mock.patch.object(agent_catalog, "registry_tools_allow", return_value=self.DECLARED):
+			surface = self.DECLARED if declared is None else declared
+			with mock.patch.object(agent_catalog, "registry_tools_allow", return_value=surface):
 				result = agent_scheduler._launch_audit(inst, trigger="manual")
 		finally:
 			frappe.set_user("Administrator")
@@ -585,6 +777,35 @@ class TestLaunchStampsTheContract(unittest.TestCase):
 		session_key = frappe.db.get_value(RUN, run, "session_key")
 		res = api._dispatch_from_session(self.OWNER, session_key, "get_schema", {"doctype": "ToDo"})
 		self.assertTrue(res["ok"], res)
+
+	# ------------------------------------------------------------------ #
+	# refuse at LAUNCH — the root cause of the bricked run
+	# ------------------------------------------------------------------ #
+	def test_launch_is_refused_when_the_bundle_declares_no_tools(self):
+		"""THE fix for the bricked run. A bundle with no declared surface produces a
+		run that is refused at every step, so it must never START: the human gets a
+		message they can act on instead of a blue "running" card that turns into a
+		false timeout three hours later."""
+		convs_before = frappe.db.count(CONVERSATION)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._launch(declared=[])
+		message = str(ctx.exception)
+		self.assertIn("declares no tools", message)
+		self.assertIn("nothing was started", message)
+		# and it is refused BEFORE any row exists — no orphan run, no orphan
+		# conversation, no orphan bearer to clean up.
+		self.assertEqual(frappe.get_all(RUN, filters={"agent": self.SLUG}, pluck="name"), [])
+		self.assertEqual(frappe.db.count(CONVERSATION), convs_before)
+
+	def test_the_launch_refusal_leaves_the_install_runnable_once_fixed(self):
+		"""The refusal is about the BUNDLE, not the install: a repaired/replaced
+		bundle launches the very same installation normally."""
+		with self.assertRaises(frappe.ValidationError):
+			self._launch(declared=[])
+		frappe.db.delete(INSTALLATION, {"agent": self.SLUG})
+		frappe.db.commit()
+		run = self._launch()
+		self.assertEqual(frappe.db.get_value(RUN, run, "capability_contract"), "snapshot")
 
 
 # --------------------------------------------------------------------------- #

@@ -701,9 +701,44 @@
 						<div v-if="dayDividers[mi]" class="jv-daydivider">
 							<span>{{ dayDividers[mi] }}</span>
 						</div>
+						<!-- an orphaned tool FAILURE (no assistant turn to hang it off) —
+						     e.g. a delegate refused on its very first call. Rendered here
+						     because the Activity accordion cannot hold it. -->
+						<div
+							v-if="m.role === 'tool' && !m.action_outcome"
+							class="jv-toolfail"
+							role="alert"
+						>
+							<svg
+								class="jv-toolfail-ico"
+								width="15"
+								height="15"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<circle cx="12" cy="12" r="9" />
+								<path d="M12 7.5v5.5M12 16.2v.2" />
+							</svg>
+							<div class="jv-toolfail-main">
+								<div class="jv-toolfail-title">
+									{{ toolLabel(m.tool_name) }} didn't run
+								</div>
+								<div class="jv-toolfail-msg">
+									{{ toolFailParts(m).message }}
+								</div>
+								<div v-if="toolFailParts(m).hint" class="jv-toolfail-hint">
+									{{ toolFailParts(m).hint }}
+								</div>
+							</div>
+						</div>
 						<!-- receipt chip: a confirmed / discarded / failed gated write, shown
 						     inline in place of the confirmation card that used to vanish -->
-						<ReceiptChip v-if="m.role === 'tool'" :message="m" />
+						<ReceiptChip v-else-if="m.role === 'tool'" :message="m" />
 						<!-- user -->
 						<Message
 							v-else-if="m.role === 'user'"
@@ -4315,12 +4350,30 @@ const modelsByProvider = computed(() => {
 const currentTitle = computed(
 	() => store.conversations.find((c) => c.name === currentId.value)?.title || "New chat"
 );
+// A FAILED tool call with no assistant turn ahead of it in the thread. The
+// Activity accordion is anchored to an assistant message, so a tool row that
+// arrives before any assistant text has nowhere to hang and renders NOWHERE —
+// which is exactly the shape an autonomous delegate produces when its very first
+// call is refused. Those rows are surfaced inline instead; everything else keeps
+// the accordion behaviour untouched.
+const orphanToolErrors = computed(() => {
+	const out = new Set();
+	let cur = null;
+	for (const m of messages.value) {
+		if (m.role === "user") cur = null;
+		else if (m.role === "assistant") cur = m.name;
+		else if (m.role === "tool" && !cur && !m.action_outcome && m.tool_status === "error")
+			out.add(m.name);
+	}
+	return out;
+});
 const visibleMessages = computed(() =>
 	messages.value.filter((m) => {
 		// Receipt-chip rows (a confirmed / discarded / failed gated write) render
 		// inline in the thread; every OTHER role=tool row belongs to the collapsed
-		// Activity accordion, not the main thread.
-		if (m.role === "tool") return !!m.action_outcome;
+		// Activity accordion, not the main thread — except an orphaned FAILURE,
+		// which the accordion cannot hold.
+		if (m.role === "tool") return !!m.action_outcome || orphanToolErrors.value.has(m.name);
 		if (m.role !== "user" && m.role !== "assistant") return false;
 		// Hide a blank streaming placeholder. The live "Working on it…" indicator
 		// below the thread already renders the assistant logo + status for the
@@ -4464,6 +4517,24 @@ function activityNames(assistantName) {
 	return (activityByAssistant.value[assistantName] || [])
 		.map((t) => toolLabel(t.tool_name))
 		.join(", ");
+}
+// The failure copy for an orphaned tool row: what happened, then the remedy. The
+// server writes plain, customer-facing text into error.message/error.hint for
+// exactly this surface, so both are shown as-is; the fallback covers a row whose
+// result won't parse.
+function toolFailParts(m) {
+	let v = m.tool_result;
+	if (typeof v === "string") {
+		try {
+			v = JSON.parse(v);
+		} catch (e) {
+			v = null;
+		}
+	}
+	const err = (v && v.error) || {};
+	const message = typeof err.message === "string" ? err.message.trim() : "";
+	const hint = typeof err.hint === "string" ? err.hint.trim() : "";
+	return { message: message || "This step couldn't be completed.", hint };
 }
 // args/result are stored as JSON strings — pretty-print, and trim very large
 // payloads so a 10k-row result doesn't blow up the chat.
@@ -8979,6 +9050,43 @@ onUnmounted(() => {
 	overflow-x: auto;
 	max-height: 320px;
 	overflow-y: auto;
+}
+/* an orphaned tool failure surfaced inline (no assistant turn to hang it off) */
+.jv-toolfail {
+	display: flex;
+	align-items: flex-start;
+	gap: 9px;
+	margin: 4px 0;
+	padding: 9px 13px;
+	border: 1px solid var(--red-bd, color-mix(in srgb, var(--red) 32%, var(--border)));
+	border-radius: 11px;
+	background: var(--red-bg, var(--surface-2));
+	font-size: 13px;
+	line-height: 1.45;
+	color: var(--text);
+}
+.jv-toolfail-ico {
+	flex: none;
+	margin-top: 1px;
+	color: var(--red);
+}
+.jv-toolfail-main {
+	min-width: 0;
+}
+.jv-toolfail-title {
+	font-weight: 550;
+	overflow-wrap: anywhere;
+}
+.jv-toolfail-msg {
+	margin-top: 2px;
+	color: var(--text-2);
+	overflow-wrap: anywhere;
+}
+.jv-toolfail-hint {
+	margin-top: 3px;
+	font-size: 12.5px;
+	color: var(--text-3);
+	overflow-wrap: anywhere;
 }
 .jv-meta span {
 	display: inline-flex;

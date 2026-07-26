@@ -8,7 +8,7 @@ from jarvis import audit, telemetry
 from jarvis._http import validate_bearer as _validate_bearer
 from jarvis._plugin_auth import PluginAuthError, validate_plugin_request
 from jarvis._session import impersonate
-from jarvis.exceptions import InvalidArgumentError, JarvisError
+from jarvis.exceptions import CapabilityDeniedError, InvalidArgumentError, JarvisError
 from jarvis.permissions import has_jarvis_access
 from jarvis.tools.registry import dispatch
 
@@ -221,7 +221,12 @@ def _dispatch_from_session(
 			# Non-delegate sessions (ordinary chat) resolve to None and are untouched.
 			denial = _delegate_capability.tool_denial(session_key, tool)
 			if denial:
-				result = _error("CapabilityDeniedError", denial)
+				code = CapabilityDeniedError.__name__
+				hint = _hint_for(code, "")
+				# The DELEGATE reads this one: the contract vocabulary, and (inside the
+				# message, the only field the plugin relays to the model) the fact that
+				# retrying can never help because the snapshot is fixed for the run.
+				result = _error(code, denial["message"], hint=hint)
 				# What was ATTEMPTED is the forensic value of a refusal, so record the
 				# args too — scrubbed + truncated by audit.record. Parsed only here,
 				# inside the deny branch, so the gate itself stays the first thing that
@@ -234,16 +239,27 @@ def _dispatch_from_session(
 					tool=tool,
 					args=attempted,
 					ok=False,
-					error_code="CapabilityDeniedError",
-					error_message=denial,
+					error_code=code,
+					error_message=denial["message"],
 				)
+				# The CUSTOMER reads this one. The transcript receipt renders verbatim
+				# in chat, so it carries plain language plus the remedy — the contract
+				# wording stays in the audit trail and the delegate's envelope above.
 				_persist_and_publish_tool_call(
 					session_key=session_key,
 					tool=tool,
 					args=attempted,
-					result=result,
+					result=_error(code, denial["chat_message"], hint=hint),
 					tool_call_id=tool_call_id,
 				)
+				if denial["fatal"]:
+					# This run's contract authorises NOTHING — record_agent_run included
+					# — so it can never finish itself. Terminalize it NOW with the real
+					# reason instead of leaving it "running" for the 3h stale-run sweep
+					# to mislabel as a timeout.
+					from jarvis.chat import agent_scheduler
+
+					agent_scheduler.fail_run(denial["run"], denial["run_error"])
 				return result
 			# Parse args up front so persist_and_publish gets the same
 			# dict shape the tool ran against (or the empty dict on a
@@ -884,6 +900,14 @@ _ERROR_HINTS = {
 	),
 	"InvalidArgumentError": (
 		"Some of the values need attention - check the highlighted fields and try again."
+	),
+	# JF-017. The agent's tool surface is fixed when it is published, so unlike a
+	# permission denial there is nothing the USER can change - the remedy is the
+	# bundle. (The delegate's own "retrying will not help" instruction rides in the
+	# message; the plugin relays only code + message to the model.)
+	"CapabilityDeniedError": (
+		"This agent can only use the tools it was published with. Ask your "
+		"administrator to review the agent's bundle if it needs another one."
 	),
 }
 # Frappe's User-Permission link denial reads "...not allowed to access this X

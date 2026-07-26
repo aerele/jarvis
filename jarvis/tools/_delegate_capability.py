@@ -37,8 +37,18 @@ The fix is one idea applied twice:
   * blank — a run created after the patch with no contract stamped. That can only
     mean a launch path that bypassed ``_launch_audit`` (or a forged row), so it is
     refused outright. The pre-patch grace is bounded by the patch's own
-    ``Patch Log`` timestamp: a blank-contract row created BEFORE the patch ran is
-    treated as legacy (it raced the deploy), one created after is not.
+    ``Patch Log`` timestamp plus ``LEGACY_GRACE_SECONDS``: a blank-contract row
+    created inside the deploy window is treated as legacy (it raced the migrate /
+    restart), one created after it is not.
+
+**A refused run is a DEAD run, and says so.** A contract that authorises no bench
+tool refuses everything, ``record_agent_run`` included, so the run could never
+finalize itself — it would sit ``running`` until the 3h stale-run sweep stamped
+"exceeded max duration" on it, which is false. So: ``_launch_audit`` refuses the
+LAUNCH outright when the bundled registry declares no tool surface (no
+conversation, no run row, an error the human can act on), and ``tool_denial``
+marks such a refusal ``fatal`` so the dispatcher terminalizes the run at the FIRST
+refused call with the honest reason.
 
 Non-delegate callers are untouched: a session_key with no bound
 ``Jarvis Agent Run`` resolves to None and every helper here is a no-op, so
@@ -64,6 +74,17 @@ CONTRACT_LEGACY = "legacy"
 # ONLY runs allowed the legacy fallback are the ones that already existed when the
 # guard landed.
 LEGACY_CUTOFF_PATCH = "jarvis.patches.v2_07_agent_run_capability_snapshot"
+
+# DEPLOY-WINDOW GRACE. ``bench migrate`` finishing and the LAST worker restarting
+# are not the same instant: in between, workers still running the old code launch
+# runs that physically cannot carry a snapshot (the stamping code isn't loaded),
+# and the reverse order is no better (a pre-migrate insert silently drops the new
+# columns because ``get_valid_columns`` reads the live schema). Either way the
+# window produces blank-contract rows that are NOT forgeries. Grandfather them for
+# a bounded 6h past the patch — far longer than any real rolling restart, far
+# shorter than the horizon on which a planted row would matter, and self-limiting
+# because the runs themselves are terminalized by the 3h stale-run reaper.
+LEGACY_GRACE_SECONDS = 6 * 3600
 
 # Registry/manifest tool ids are openclaw-facing (``jarvis__get_doc``); the bench
 # dispatches by the bare tool name (``get_doc``). Entries that are not jarvis tools
@@ -113,13 +134,15 @@ def parse_writes(raw) -> list:
 # --------------------------------------------------------------------------- #
 # launch-time snapshot
 # --------------------------------------------------------------------------- #
-def contract_for_launch(listing) -> dict:
+def contract_for_launch(listing, tools_allow: list | None = None) -> dict:
 	"""The capability contract to stamp on a run being launched for ``listing``.
 
 	``tools_allow`` comes from the BUNDLED registry (it is delegate metadata that
 	never enters the customer DB — the same source ``build_agent_push_payload``
 	echoes into the container's enablement signal), stored VERBATIM so the run
-	carries the exact declared list as provenance. ``nature``/``writes`` are the
+	carries the exact declared list as provenance. Pass it in when the caller has
+	already resolved it (``_launch_audit`` does, to refuse an empty surface before
+	any row exists); otherwise it is read here. ``nature``/``writes`` are the
 	listing's values AT THIS INSTANT — the whole point of the snapshot is that a
 	later edit cannot move them.
 
@@ -127,9 +150,10 @@ def contract_for_launch(listing) -> dict:
 	ready to splat into the insert."""
 	from jarvis.chat.agent_catalog import registry_tools_allow
 
+	declared = tools_allow if tools_allow is not None else registry_tools_allow(listing.agent_slug)
 	return {
 		"capability_contract": CONTRACT_SNAPSHOT,
-		"tools_allow_json": frappe.as_json(registry_tools_allow(listing.agent_slug)),
+		"tools_allow_json": frappe.as_json(declared),
 		"capability_nature": (listing.nature or "").strip().lower(),
 		"capability_writes_json": frappe.as_json(parse_writes(listing.writes)),
 	}
@@ -151,13 +175,16 @@ def _legacy_cutoff():
 
 
 def _is_pre_patch(run_creation) -> bool:
-	"""True iff a blank-contract run predates the guard and may use the legacy
-	fallback. Bounded by the patch's own timestamp so a run created AFTER the
-	cutover can never buy itself legacy authority by simply having no snapshot."""
+	"""True iff a blank-contract run predates the guard (plus the bounded
+	``LEGACY_GRACE_SECONDS`` deploy window) and may use the legacy fallback.
+
+	Anchored on the patch's own timestamp so a run created long AFTER the cutover
+	can never buy itself legacy authority by simply having no snapshot."""
 	cutoff = _legacy_cutoff()
 	if not cutoff or not run_creation:
 		return False
-	return frappe.utils.get_datetime(run_creation) < frappe.utils.get_datetime(cutoff)
+	deadline = frappe.utils.add_to_date(frappe.utils.get_datetime(cutoff), seconds=LEGACY_GRACE_SECONDS)
+	return frappe.utils.get_datetime(run_creation) < deadline
 
 
 def resolve(session_key: str | None = None) -> dict | None:
@@ -226,20 +253,78 @@ def resolve(session_key: str | None = None) -> dict | None:
 	}
 
 
-def tool_denial(session_key: str | None, tool: str) -> str | None:
-	"""The refusal reason when this delegate may not call ``tool``, else None.
+# The customer reads the chat transcript; the delegate and the audit trail read
+# ``message``. Neither audience is served by showing the other's copy, so the two
+# are written separately (UX P1-2 — "capability contract snapshotted at launch" is
+# implementation vocabulary and has no place in a customer's chat).
+# Message = what happened; the "what you can do" line is the envelope's ``hint``
+# (``api._ERROR_HINTS``), per the house convention.
+_CHAT_NOT_DECLARED = "This agent tried to use a tool it isn't allowed to use, so the step was skipped."
+_CHAT_NO_SURFACE = (
+	"This agent was started without a usable set of tools, so it couldn't do "
+	"anything and the run has been stopped."
+)
+# Stamped on the failed run and shown in the run's error banner. Short (the field
+# is displayed inline) and honest about the REAL cause — the whole point of
+# failing here rather than letting the 3h stale-run sweep call it a timeout.
+_RUN_ERROR_NO_SURFACE = "the agent's capability contract authorises no tools; refused at the first call"
+
+
+def tool_denial(session_key: str | None, tool: str) -> dict | None:
+	"""The refusal for this delegate's ``tool`` call, or None when it may proceed.
 
 	None is also returned for a NON-delegate caller (nothing to enforce) and for a
 	``legacy`` run (no snapshot to enforce against). Everything else is decided by
 	the snapshot alone: a tool absent from it — even one the run-as user's Frappe
-	roles would happily permit — is refused BEFORE dispatch."""
+	roles would happily permit — is refused BEFORE dispatch.
+
+	The refusal is a dict, not a string, because two of its facts are decisions the
+	caller has to make:
+
+	  * ``fatal`` — the contract authorises NO bench tool at all (a blank contract,
+	    an empty/unparseable snapshot, or a bundle whose declared surface is
+	    container-side only). Every call this run will ever make is refused,
+	    INCLUDING the ``record_agent_run`` writeback that finalizes it, so the run
+	    is not merely mistaken, it is dead. The caller must terminalize it rather
+	    than leave it ``running`` for the 3h reaper to mislabel as a timeout.
+	  * ``chat_message`` vs ``message`` — plain language for the customer-visible
+	    transcript, contract vocabulary for the delegate and the audit trail.
+	"""
 	cap = resolve(session_key)
 	if cap is None or cap["legacy"]:
 		return None
+	allowed = bench_tools(cap["tools_allow"])
 	name = normalize_tool(tool)
-	if name and name in bench_tools(cap["tools_allow"]):
+	if name and name in allowed:
 		return None
-	return (
-		f"agent '{cap['agent']}' is not permitted to call '{name or tool}': the tool is "
-		"not in the capability contract snapshotted for this run at launch"
-	)
+	base = {"run": cap["run"], "agent": cap["agent"], "tool": name or str(tool or "")}
+	if not allowed:
+		return {
+			**base,
+			"fatal": True,
+			"message": (
+				f"agent '{cap['agent']}' has no usable tool surface for this run: its "
+				f"capability contract authorises no bench tool, so '{name or tool}' — and "
+				"every other call — is refused. The run has been marked failed; no further "
+				"call can succeed."
+			),
+			"chat_message": _CHAT_NO_SURFACE,
+			"run_error": _RUN_ERROR_NO_SURFACE,
+		}
+	return {
+		**base,
+		"fatal": False,
+		# The no-retry instruction rides in the MESSAGE, not the envelope's ``hint``:
+		# the openclaw plugin relays a failed tool call to the model as
+		# ``"<code>: <message>"`` and drops every other field, so a hint the delegate
+		# must act on has to be in the message or it never arrives. ``hint`` keeps its
+		# usual role — the human-facing "what you can do" line.
+		"message": (
+			f"agent '{cap['agent']}' is not permitted to call '{name or tool}': the tool is "
+			"not in the capability contract snapshotted for this run at launch. That "
+			"contract is fixed for the whole run, so retrying, renaming the tool or "
+			"changing the arguments will not help — continue with the tools you do have."
+		),
+		"chat_message": _CHAT_NOT_DECLARED,
+		"run_error": "",
+	}
