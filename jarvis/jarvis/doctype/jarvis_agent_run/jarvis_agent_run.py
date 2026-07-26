@@ -19,10 +19,20 @@ from frappe.model.document import Document
 # triggered it. The engine stamps them at launch and updates run lifecycle via
 # raw ``db.set_value`` (which bypasses this controller); any ORM save that tries
 # to change a stamped launch fact is refused.
+#
+# JF-017 extends the same protection to the run's CAPABILITY CONTRACT (which tools
+# it may call, its nature, its declared writes). That contract is the run's
+# authorization, so it has to be at least as immutable as its provenance: if it
+# could be edited after launch, snapshotting it would buy nothing over reading the
+# mutable listing.
 _IMMUTABLE_LAUNCH_FIELDS = (
 	"bundle_version",
 	"preparation_mode",
 	"initiating_human",
+	"capability_contract",
+	"tools_allow_json",
+	"capability_nature",
+	"capability_writes_json",
 )
 
 

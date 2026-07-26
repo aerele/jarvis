@@ -8,7 +8,7 @@ from jarvis import audit, telemetry
 from jarvis._http import validate_bearer as _validate_bearer
 from jarvis._plugin_auth import PluginAuthError, validate_plugin_request
 from jarvis._session import impersonate
-from jarvis.exceptions import InvalidArgumentError, JarvisError
+from jarvis.exceptions import CapabilityDeniedError, InvalidArgumentError, JarvisError
 from jarvis.permissions import has_jarvis_access
 from jarvis.tools.registry import dispatch
 
@@ -198,7 +198,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	from jarvis.tools import _agent_run_ctx
+	from jarvis.tools import _agent_run_ctx, _delegate_capability
 
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
 	# never authors it — it is the delegate's opaque bearer, delivered over the
@@ -210,6 +210,57 @@ def _dispatch_from_session(
 	_agent_run_ctx.set_session_key(session_key)
 	try:
 		with impersonate(user):
+			# JF-017 — the delegate capability gate, BEFORE anything is dispatched.
+			# When this session resolves to a marketplace-agent run, the only tools it
+			# may call are the ones its manifest declared and the bench snapshotted
+			# onto the run at launch. The container's tools.allow is configuration
+			# (fleet renders it into openclaw.json); it is not authorization, so a
+			# compromised container/plugin or a leaked run bearer would otherwise
+			# reach ANY registered tool the run-as user's Frappe roles permit. Fails
+			# closed: a run with no snapshot and no legacy marker is refused outright.
+			# Non-delegate sessions (ordinary chat) resolve to None and are untouched.
+			denial = _delegate_capability.tool_denial(session_key, tool)
+			if denial:
+				code = CapabilityDeniedError.__name__
+				hint = _hint_for(code, "")
+				# The DELEGATE reads this one: the contract vocabulary, and (inside the
+				# message, the only field the plugin relays to the model) the fact that
+				# retrying can never help because the snapshot is fixed for the run.
+				result = _error(code, denial["message"], hint=hint)
+				# What was ATTEMPTED is the forensic value of a refusal, so record the
+				# args too — scrubbed + truncated by audit.record. Parsed only here,
+				# inside the deny branch, so the gate itself stays the first thing that
+				# runs and a malformed-args call is still refused on the contract.
+				try:
+					attempted = _parse_args(args)
+				except JarvisError:
+					attempted = {}
+				audit.record(
+					tool=tool,
+					args=attempted,
+					ok=False,
+					error_code=code,
+					error_message=denial["message"],
+				)
+				# The CUSTOMER reads this one. The transcript receipt renders verbatim
+				# in chat, so it carries plain language plus the remedy — the contract
+				# wording stays in the audit trail and the delegate's envelope above.
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=attempted,
+					result=_error(code, denial["chat_message"], hint=hint),
+					tool_call_id=tool_call_id,
+				)
+				if denial["fatal"]:
+					# This run's contract authorises NOTHING — record_agent_run included
+					# — so it can never finish itself. Terminalize it NOW with the real
+					# reason instead of leaving it "running" for the 3h stale-run sweep
+					# to mislabel as a timeout.
+					from jarvis.chat import agent_scheduler
+
+					agent_scheduler.fail_run(denial["run"], denial["run_error"])
+				return result
 			# Parse args up front so persist_and_publish gets the same
 			# dict shape the tool ran against (or the empty dict on a
 			# malformed-args rejection).
@@ -849,6 +900,14 @@ _ERROR_HINTS = {
 	),
 	"InvalidArgumentError": (
 		"Some of the values need attention - check the highlighted fields and try again."
+	),
+	# JF-017. The agent's tool surface is fixed when it is published, so unlike a
+	# permission denial there is nothing the USER can change - the remedy is the
+	# bundle. (The delegate's own "retrying will not help" instruction rides in the
+	# message; the plugin relays only code + message to the model.)
+	"CapabilityDeniedError": (
+		"This agent can only use the tools it was published with. Ask your "
+		"administrator to review the agent's bundle if it needs another one."
 	),
 }
 # Frappe's User-Permission link denial reads "...not allowed to access this X

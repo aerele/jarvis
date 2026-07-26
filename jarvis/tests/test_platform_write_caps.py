@@ -10,6 +10,10 @@ agent's declared ``writes[]`` contract BEFORE any Frappe permission check —
   * a NON-delegate caller (standard chat / macro / test — no bound Run) is left
     completely untouched.
 
+JF-017: the contract the gate reads is the run's LAUNCH SNAPSHOT, so the fixtures
+here stamp one exactly as ``_launch_audit`` does. The snapshot-vs-live-listing
+behaviour itself is covered in ``test_platform_capability_contract``.
+
 R5-P1-02 (``_verify_reviewer_two_pack_capacity`` slug fallback): the reviewer
 two-pack activation-ceiling gate now counts DISTINCT non-empty canonical
 ``rule_pack`` values and never infers a pack from the agent slug, so two agents in
@@ -31,7 +35,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_catalog, agents_api
 from jarvis.exceptions import PermissionDeniedError
-from jarvis.tools import _agent_run_ctx
+from jarvis.tools import _agent_run_ctx, _delegate_capability
 from jarvis.tools.create_doc import create_doc
 from jarvis.tools.update_doc import update_doc
 
@@ -82,9 +86,11 @@ def _mk_listing(slug: str, nature: str, writes, rule_pack: str = "") -> None:
 	).insert(ignore_permissions=True)
 
 
-def _mk_install_and_run(slug: str, run_as: str, session_key: str) -> str:
+def _mk_install_and_run(slug: str, run_as: str, session_key: str, legacy: bool = False) -> str:
 	"""A running Jarvis Agent Run bound to ``session_key`` (the delegate identity
-	the write tools resolve). Returns the run name."""
+	the write tools resolve), carrying the JF-017 capability snapshot ``_launch_audit``
+	stamps. ``legacy=True`` instead marks it a pre-JF-017 run (no snapshot), whose
+	write caps resolve against the LIVE listing. Returns the run name."""
 	inst = frappe.get_doc(
 		{
 			"doctype": INSTALLATION,
@@ -96,6 +102,10 @@ def _mk_install_and_run(slug: str, run_as: str, session_key: str) -> str:
 	inst.owner = run_as
 	inst.flags.ignore_permissions = True
 	inst.insert(ignore_permissions=True)
+	if legacy:
+		contract = {"capability_contract": "legacy"}
+	else:
+		contract = _delegate_capability.contract_for_launch(frappe.get_doc(LISTING, slug))
 	run = frappe.get_doc(
 		{
 			"doctype": RUN,
@@ -105,6 +115,7 @@ def _mk_install_and_run(slug: str, run_as: str, session_key: str) -> str:
 			"status": "running",
 			"started_at": frappe.utils.now(),
 			"session_key": session_key,
+			**contract,
 		}
 	)
 	run.owner = run_as

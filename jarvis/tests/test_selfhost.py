@@ -323,6 +323,94 @@ class TestConfigChecks(unittest.TestCase):
 		self.assertTrue(self._run("tok", stored="carol@example.com")["tool_user"])
 
 
+class TestUnsignedPluginAdvisory(unittest.TestCase):
+	"""JF-014 review UX P1-1: an operator who turned the unsigned-plugin
+	escape hatch on must see it (and how much it is being used) in the
+	product's own "Test connection" checks, not only in the bench log."""
+
+	CHECK = "plugin_signature_enforced"
+
+	def _row(self, status):
+		with mock.patch("jarvis._plugin_auth.unsigned_escape_hatch_status", return_value=status):
+			return selfhost._unsigned_plugin_check()
+
+	def _rows_via_config_checks(self, status):
+		fake = _FakeSettings(selfhost_tool_user="alice@example.com")
+		with (
+			mock.patch("jarvis._plugin_auth.unsigned_escape_hatch_status", return_value=status),
+			mock.patch("jarvis.selfhost.frappe") as fr,
+		):
+			fr.get_single.return_value = fake
+			fr.db.get_value.return_value = 1
+			return selfhost.config_checks("tok", "alice@example.com")
+
+	def test_no_row_while_enforcing(self):
+		"""The default bench must not grow a permanent scary row."""
+		self.assertIsNone(self._row(None))
+		checks = self._rows_via_config_checks(None)
+		self.assertNotIn(self.CHECK, [c["check"] for c in checks])
+
+	def test_row_reports_recent_count_and_sunset(self):
+		row = self._row(
+			{
+				"conf_key": "jarvis_plugin_allow_unsigned",
+				"sunset_date": "2026-10-01",
+				"window_days": 7,
+				"recent_allowed": 12,
+			}
+		)
+		self.assertEqual(row["check"], self.CHECK)
+		self.assertFalse(row["ok"])
+		self.assertIn("jarvis_plugin_allow_unsigned is ON", row["detail"])
+		self.assertIn("12 unsigned plugin call(s) allowed in the last 7 days", row["detail"])
+		self.assertIn("2026-10-01", row["detail"])
+
+	def test_zero_recent_calls_says_safe_to_turn_off(self):
+		row = self._row(
+			{
+				"conf_key": "jarvis_plugin_allow_unsigned",
+				"sunset_date": "2026-10-01",
+				"window_days": 7,
+				"recent_allowed": 0,
+			}
+		)
+		self.assertFalse(row["ok"])
+		self.assertIn("safe to turn off", row["detail"])
+
+	def test_unknown_count_is_not_reported_as_zero(self):
+		row = self._row(
+			{
+				"conf_key": "jarvis_plugin_allow_unsigned",
+				"sunset_date": "2026-10-01",
+				"window_days": 7,
+				"recent_allowed": None,
+			}
+		)
+		self.assertIn("call count unavailable", row["detail"])
+		self.assertNotIn("safe to turn off", row["detail"])
+
+	def test_row_is_advisory_in_test_connection(self):
+		"""It must never flip the connection verdict - it is a warning about
+		a deprecation, not a broken openclaw."""
+		checks = self._rows_via_config_checks(
+			{
+				"conf_key": "jarvis_plugin_allow_unsigned",
+				"sunset_date": "2026-10-01",
+				"window_days": 7,
+				"recent_allowed": 3,
+			}
+		)
+		names = [c["check"] for c in checks]
+		self.assertIn(self.CHECK, names)
+		# config_checks rows are tagged advisory by test_connection, which is
+		# what keeps result["ok"] about the openclaw connection alone.
+		self.assertEqual([c["check"] for c in checks if not c["ok"]], [self.CHECK])
+
+	def test_status_lookup_failure_never_breaks_test_connection(self):
+		with mock.patch("jarvis._plugin_auth.unsigned_escape_hatch_status", side_effect=RuntimeError("boom")):
+			self.assertIsNone(selfhost._unsigned_plugin_check())
+
+
 class TestProbeToolCallback(unittest.TestCase):
 	"""Opt-in end-to-end probe: induce a jarvis__* tool call over HTTP and
 	confirm the openclaw->Frappe callback landed (counter advanced)."""
