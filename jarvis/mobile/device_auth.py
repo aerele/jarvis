@@ -37,6 +37,28 @@ Frappe's socket.io middleware forwards the client's ``Authorization`` header to
 the hook below authenticates the realtime handshake with no extra work.
 ``frappe.set_user`` leaves ``session.data.user_type`` empty and core already
 falls back to a cached ``User.user_type`` read for exactly that case.
+
+auth_hooks ordering (constraint, not a bug)
+-------------------------------------------
+``frappe.get_hooks("auth_hooks")`` iterates ``installed_apps`` order, so any
+app whose own auth hook makes a decision from ``frappe.session.user`` must be
+installed AFTER jarvis or it will see a still-Guest session and act on it
+before the device token has been resolved. The live example is helpdesk's
+``helpdesk.auth.authenticate``, which raises ``PermissionError`` for non-Desk
+users on ``/api/`` paths outside its own namespace when ``block_endpoints`` is
+set in site config — on a site with both apps in the wrong order and that flag
+on, device-token requests would 403 before this hook ran. Ordinary api-key auth
+is immune because core resolves it inside ``validate_auth_via_api_keys``, ahead
+of every hook. No bench today runs that combination; the constraint is recorded
+here because it is invisible from either app on its own.
+
+Who may do what (adversarial P1-6 / P1-7)
+-----------------------------------------
+A request authenticated BY a device token is a *lower-trust* session than a
+password/cookie one: the credential lives on a handset that can be lost. So it
+may not mint a sibling token (``jarvis.mobile.auth.get_mobile_token`` refuses
+it) and it may not revoke another device selectively — only itself, or every
+device at once including itself (see ``revoke_all``).
 """
 
 from __future__ import annotations
@@ -64,6 +86,15 @@ LAST_USED_THROTTLE_SECONDS = 300
 #: (the old secret is unrecoverable), so without a cap a user who reinstalls
 #: repeatedly accumulates live credentials forever.
 MAX_DEVICES_PER_USER = 20
+
+#: Revoked rows are kept this long so "which phone was killed, when, by whom"
+#: is still answerable afterwards, then deleted: an inventory that only ever
+#: grows is its own defect (adversarial P2-12).
+REVOKED_RETENTION_DAYS = 90
+
+#: Ceiling on one scheduler pass, so a large backlog drains over several days
+#: instead of in one long transaction.
+PRUNE_BATCH_LIMIT = 500
 
 #: Frappe rolls the transaction back at the end of a read-only request, so a
 #: ``last_used`` stamp taken during auth on one of these needs its own commit.
@@ -293,22 +324,69 @@ def revoke(user: str, token_id: str, reason: str = "revoked by user") -> bool:
 	return True
 
 
-def revoke_all(user: str, except_token_id: str | None = None, reason: str = "revoked by user") -> int:
-	"""Revoke every live device of ``user`` (optionally sparing one)."""
+def revoke_all(user: str, reason: str = "revoked by user") -> int:
+	"""Revoke EVERY live device of ``user`` — the caller's own included.
+
+	There is deliberately no "spare this one" option. It existed (``keep_current``)
+	and it made "sign out everywhere" a one-request lockout primitive for whoever
+	held a stolen token: evict every legitimate device, keep your own. Nuking your
+	own access alongside everybody else's is acceptable; preserving it is not."""
 	rows = frappe.get_all(
 		DEVICE_DOCTYPE,
 		filters={"user": user, "enabled": 1},
 		fields=["name", "token_id"],
 		limit_page_length=0,
 	)
-	count = 0
 	for row in rows:
-		if except_token_id and row.token_id == except_token_id:
-			continue
 		_disable(row.name, reason)
 		_audit("revoke", user=user, token_id=row.token_id, reason=reason)
-		count += 1
-	return count
+	return len(rows)
+
+
+def prune_revoked_devices() -> int:
+	"""Daily scheduler job — delete revoked rows past the retention window.
+
+	Revocation only flips ``enabled``, so without this the table is append-only:
+	every reinstall, every logout and every ``revoke_all`` leaves a row behind
+	forever. Only DISABLED rows are ever touched, so a live credential can never
+	be deleted out from under a phone by this job. Rows disabled outside this
+	module (a System Manager unticking ``enabled`` in Desk) carry no
+	``revoked_at``, so they fall back to ``modified`` rather than being immortal.
+	"""
+	cutoff = frappe.utils.add_days(frappe.utils.now_datetime(), -REVOKED_RETENTION_DAYS)
+	names = frappe.get_all(
+		DEVICE_DOCTYPE,
+		filters={"enabled": 0, "revoked_at": ["<", cutoff]},
+		pluck="name",
+		order_by="revoked_at asc",
+		limit=PRUNE_BATCH_LIMIT,
+	)
+	if len(names) < PRUNE_BATCH_LIMIT:
+		names += frappe.get_all(
+			DEVICE_DOCTYPE,
+			filters={"enabled": 0, "revoked_at": ["is", "not set"], "modified": ["<", cutoff]},
+			pluck="name",
+			order_by="modified asc",
+			limit=PRUNE_BATCH_LIMIT - len(names),
+		)
+
+	deleted = 0
+	for name in names:
+		try:
+			frappe.delete_doc(
+				DEVICE_DOCTYPE,
+				name,
+				ignore_permissions=True,
+				force=True,
+				delete_permanently=True,
+			)
+			deleted += 1
+		except Exception:
+			frappe.logger("jarvis.mobile").warning(f"could not prune device row {name}", exc_info=True)
+	if deleted:
+		frappe.db.commit()
+		_audit("prune_revoked", deleted=deleted, retention_days=REVOKED_RETENTION_DAYS)
+	return deleted
 
 
 def _disable(name: str, reason: str) -> None:

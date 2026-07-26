@@ -6,7 +6,7 @@ device-scoped (two phones shared one credential), logout revoked nothing, and
 revoking it to kill a lost handset broke every other API integration the user
 owned.
 
-Four things have to hold at once, and each has a test here:
+Six things have to hold at once, and each has a test here:
 
 1. Pairing mints a NEW credential per device and NEVER discloses the global
    api_secret.
@@ -18,6 +18,11 @@ Four things have to hold at once, and each has a test here:
    devices AND the untouched global keypair working.
 4. Nothing recoverable is at rest: only an HMAC-SHA256 of the secret, keyed by
    the token id.
+5. A session authenticated BY a device token is lower-trust than a password
+   session: it cannot mint a sibling token, and it cannot revoke a sibling
+   device selectively — only itself, or everything including itself. Both
+   holes were live and both let a stolen phone outlive its own revocation.
+6. Revoked rows do not accumulate forever.
 """
 
 from __future__ import annotations
@@ -405,7 +410,7 @@ class TestRevocation(MobileDeviceBase):
 		with _as(USER_A), self.assertRaises(frappe.PermissionError):
 			mobile_auth.revoke_mobile_device(frappe.generate_hash(length=24))
 
-	def test_revoke_all(self):
+	def test_revoke_all_from_a_password_session_kills_every_device(self):
 		tokens = [device_auth.mint(USER_A, f"phone-{i}") for i in range(3)]
 		survivor = device_auth.mint(USER_B, "Other user")
 
@@ -416,13 +421,16 @@ class TestRevocation(MobileDeviceBase):
 			self.assertIsNone(device_auth.resolve(token["token"]))
 		self.assertEqual(device_auth.resolve(survivor["token"])["user"], USER_B)
 
-	def test_revoke_all_can_spare_the_calling_device(self):
-		keep = device_auth.mint(USER_A, "This phone")
+	def test_revoke_all_from_a_device_session_takes_the_caller_with_it(self):
+		"""Sign-out-everywhere from a phone must NOT spare the phone it was called
+		from. `keep_current` used to do exactly that, which made one POST with a
+		stolen token evict every legitimate device and preserve the thief's."""
+		caller = device_auth.mint(USER_A, "This phone")
 		other = device_auth.mint(USER_A, "Old phone")
-		with _request(f"token {keep['token']}"):
+		with _request(f"token {caller['token']}"):
 			device_auth.authenticate_device_token()
-			self.assertEqual(mobile_auth.revoke_all_mobile_devices(keep_current=1)["revoked"], 1)
-		self.assertEqual(device_auth.resolve(keep["token"])["user"], USER_A)
+			self.assertEqual(mobile_auth.revoke_all_mobile_devices()["revoked"], 2)
+		self.assertIsNone(device_auth.resolve(caller["token"]), "the calling device must be revoked too")
 		self.assertIsNone(device_auth.resolve(other["token"]))
 
 	def test_inventory_lists_only_own_devices_and_no_secret(self):
@@ -436,7 +444,128 @@ class TestRevocation(MobileDeviceBase):
 
 
 # --------------------------------------------------------------------------- #
-# 5. Storage + last_used
+# 5. A device-token session is lower-trust than a password session
+# --------------------------------------------------------------------------- #
+class TestDeviceSessionTrustBoundary(MobileDeviceBase):
+	"""A device token lives on a handset that can be lost, so it may not do the
+	two things that would let a stolen phone outlive its own revocation: mint a
+	sibling credential, or pick another device off while sparing itself."""
+
+	def test_a_device_token_cannot_mint_a_sibling(self):
+		"""Nothing legitimate hits this path: the mobile client's `login()`
+		clears the stored token before it signs in (src/api/client.ts, step 0 of
+		`login`), so every real pairing is authenticated by the password just
+		typed. Without the guard, a stolen token mints siblings that survive
+		revoking the phone they came from."""
+		stolen = device_auth.mint(USER_A, "Stolen phone")
+		with _request(f"token {stolen['token']}"):
+			device_auth.authenticate_device_token()
+			self.assertEqual(frappe.session.user, USER_A)
+			with self.assertRaises(frappe.PermissionError):
+				mobile_auth.get_mobile_token(device_label="Sibling")
+		self.assertEqual(
+			frappe.db.count(DEVICE_DOCTYPE, {"user": USER_A, "enabled": 1}),
+			1,
+			"no sibling row may be created",
+		)
+
+	def test_a_password_session_still_pairs(self):
+		"""The negative control for the guard above: pairing itself is untouched
+		when the session is not a device-token one."""
+		with _as(USER_A):
+			minted = mobile_auth.get_mobile_token(device_label="New phone")
+		self.assertEqual(device_auth.resolve(minted["device_token"])["user"], USER_A)
+
+	def test_a_device_token_cannot_revoke_a_sibling(self):
+		"""The retail version of the eviction attack: without this, a thief
+		loops revoke-one over the inventory and keeps their own access — exactly
+		what dropping `keep_current` from revoke-all was meant to prevent."""
+		stolen = device_auth.mint(USER_A, "Stolen phone")
+		victim = device_auth.mint(USER_A, "Real phone")
+		with _request(f"token {stolen['token']}"):
+			device_auth.authenticate_device_token()
+			with self.assertRaises(frappe.PermissionError):
+				mobile_auth.revoke_mobile_device(victim["token_id"])
+		self.assertEqual(device_auth.resolve(victim["token"])["user"], USER_A)
+		self.assertEqual(device_auth.resolve(stolen["token"])["user"], USER_A)
+
+	def test_a_device_token_may_revoke_itself(self):
+		"""The ordinary sign-out path — the app revokes its own credential."""
+		phone = device_auth.mint(USER_A, "This phone")
+		other = device_auth.mint(USER_A, "Other phone")
+		with _request(f"token {phone['token']}"):
+			device_auth.authenticate_device_token()
+			self.assertEqual(mobile_auth.revoke_mobile_device(phone["token_id"])["revoked"], 1)
+		self.assertIsNone(device_auth.resolve(phone["token"]))
+		self.assertEqual(device_auth.resolve(other["token"])["user"], USER_A)
+
+	def test_a_password_session_may_revoke_any_own_device(self):
+		"""Selective remote revocation stays possible — from the web app / Desk,
+		where the session is authenticated by the password a thief lacks."""
+		lost = device_auth.mint(USER_A, "Lost phone")
+		kept = device_auth.mint(USER_A, "Desk browser")
+		with _as(USER_A):
+			self.assertEqual(mobile_auth.revoke_mobile_device(lost["token_id"])["revoked"], 1)
+		self.assertIsNone(device_auth.resolve(lost["token"]))
+		self.assertEqual(device_auth.resolve(kept["token"])["user"], USER_A)
+
+	def test_inventory_is_readable_from_a_device_session_and_marks_the_caller(self):
+		"""The phone's Devices screen runs on this: it needs to know which row is
+		the handset in the user's hand."""
+		here = device_auth.mint(USER_A, "This phone")
+		device_auth.mint(USER_A, "Other phone")
+		with _request(f"token {here['token']}"):
+			device_auth.authenticate_device_token()
+			rows = mobile_auth.list_mobile_devices()
+		current = [r for r in rows if r["current"]]
+		self.assertEqual(len(rows), 2)
+		self.assertEqual([r["token_id"] for r in current], [here["token_id"]])
+
+
+# --------------------------------------------------------------------------- #
+# 6. Revoked-row hygiene
+# --------------------------------------------------------------------------- #
+class TestRevokedRowPruning(MobileDeviceBase):
+	def _age(self, token_id: str, field: str, days: int) -> str:
+		name = frappe.db.get_value(DEVICE_DOCTYPE, {"token_id": token_id}, "name")
+		frappe.db.set_value(
+			DEVICE_DOCTYPE, name, field, add_to_date(now_datetime(), days=-days), update_modified=False
+		)
+		return name
+
+	def test_old_revoked_rows_are_deleted_and_live_ones_are_not(self):
+		old = device_auth.mint(USER_A, "Ancient phone")
+		recent = device_auth.mint(USER_A, "Yesterday's phone")
+		live = device_auth.mint(USER_A, "Working phone")
+		with _as(USER_A):
+			mobile_auth.revoke_mobile_device(old["token_id"])
+			mobile_auth.revoke_mobile_device(recent["token_id"])
+		self._age(old["token_id"], "revoked_at", device_auth.REVOKED_RETENTION_DAYS + 5)
+		# A live credential is never deleted by the sweep, however old it is.
+		self._age(live["token_id"], "modified", device_auth.REVOKED_RETENTION_DAYS * 4)
+
+		# Not an equality check: the sweep is site-wide, so unrelated garbage
+		# left by another test on this site may be collected in the same pass.
+		self.assertGreaterEqual(device_auth.prune_revoked_devices(), 1)
+
+		self.assertFalse(frappe.db.exists(DEVICE_DOCTYPE, {"token_id": old["token_id"]}))
+		self.assertTrue(frappe.db.exists(DEVICE_DOCTYPE, {"token_id": recent["token_id"]}))
+		self.assertEqual(device_auth.resolve(live["token"])["user"], USER_A)
+
+	def test_rows_disabled_outside_the_module_are_not_immortal(self):
+		"""A System Manager unticking `enabled` in Desk leaves no revoked_at, so
+		the sweep falls back to `modified`."""
+		orphan = device_auth.mint(USER_A, "Disabled in Desk")
+		name = frappe.db.get_value(DEVICE_DOCTYPE, {"token_id": orphan["token_id"]}, "name")
+		frappe.db.set_value(DEVICE_DOCTYPE, name, "enabled", 0, update_modified=False)
+		self._age(orphan["token_id"], "modified", device_auth.REVOKED_RETENTION_DAYS + 5)
+
+		self.assertGreaterEqual(device_auth.prune_revoked_devices(), 1)
+		self.assertFalse(frappe.db.exists(DEVICE_DOCTYPE, name))
+
+
+# --------------------------------------------------------------------------- #
+# 7. Storage + last_used
 # --------------------------------------------------------------------------- #
 class TestStorageAndTelemetry(MobileDeviceBase):
 	def test_secret_is_hashed_at_rest(self):

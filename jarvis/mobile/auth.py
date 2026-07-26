@@ -12,8 +12,9 @@ JF-016: that credential is now a PER-DEVICE token (`jmd:<id>:<secret>`, see
 `jarvis/mobile/device_auth.py`), NOT the user's account-wide Frappe
 api_key/api_secret. Each pairing mints its own `Jarvis Mobile Device` row with
 only a HASH of the secret at rest, so a phone can be revoked on its own —
-logout actually revokes something, a lost handset can be killed from any other
-device, and none of it disturbs the user's other API integrations. This module
+logout actually revokes something, a lost handset can be killed (selectively
+from the web app, or wholesale from any other phone via "sign out everywhere"),
+and none of it disturbs the user's other API integrations. This module
 no longer reads or writes `User.api_key`/`User.api_secret` at all; installs that
 already hold a global keypair keep working through ordinary Frappe token auth
 (nothing here revokes it), and the app moves onto a device token at next login.
@@ -101,6 +102,14 @@ def get_mobile_token(device_label: str | None = None, platform: str | None = Non
 	realtime namespace correctly when the workspace is reached via a bare IP.
 	"""
 	user = _require_system_user()
+	# A device token may NOT mint a sibling. Otherwise a stolen phone breeds
+	# credentials that survive revoking the phone they came from, and "kill the
+	# lost handset" stops meaning anything. Nothing legitimate mints while
+	# holding one: the client's login() clears the stored token before it signs
+	# in (mobile src/api/client.ts, step 0 of `login`), so every real pairing is
+	# authenticated by the password the user just typed.
+	if device_auth.current_device_token_id():
+		frappe.throw("Sign in with your password to pair this device.", frappe.PermissionError)
 	_throttle_pairing(user)
 
 	minted = device_auth.mint(user, device_label=device_label, platform=platform)
@@ -116,7 +125,11 @@ def get_mobile_token(device_label: str | None = None, platform: str | None = Non
 
 @frappe.whitelist()
 def list_mobile_devices() -> list[dict]:
-	"""The session user's paired-device inventory (no secrets, own rows only)."""
+	"""The session user's paired-device inventory (no secrets, own rows only).
+
+	Readable from a device-token session too — the phone's Devices screen is
+	built on it. That grants nothing: a caller holding a device token already
+	has the user's whole API surface, and the inventory carries no secret."""
 	user = _require_system_user()
 	return device_auth.list_devices(user)
 
@@ -128,21 +141,38 @@ def revoke_mobile_device(device: str) -> dict:
 	`device` must belong to the session user; anything else raises
 	PermissionError, so this cannot revoke — or probe for — another account's
 	devices. Revoking the device that is making this very call is the normal
-	logout path: the next request with that token is a 401."""
+	logout path: the next request with that token is a 401.
+
+	A request authenticated BY a device token may revoke ONLY itself. Letting it
+	pick off siblings would restore, one row at a time, exactly the eviction
+	primitive that dropping `keep_current` from `revoke_all_mobile_devices`
+	removes: a stolen phone kills the user's real handset and keeps its own
+	access. Selective remote revocation is a password-session act (the Jarvis
+	web app / Desk); from a phone the answer is `revoke_all_mobile_devices`,
+	which always includes the caller."""
 	user = _require_system_user()
+	current = device_auth.current_device_token_id()
+	if current and device and device != current:
+		frappe.throw(
+			"Sign in with your password on the Jarvis web app to sign out another device. "
+			'From this device, use "Sign out everywhere".',
+			frappe.PermissionError,
+		)
 	revoked = device_auth.revoke(user, device)
 	return {"revoked": 1 if revoked else 0, "device": device}
 
 
 @frappe.whitelist(methods=["POST"])
-def revoke_all_mobile_devices(keep_current: int = 0) -> dict:
+def revoke_all_mobile_devices() -> dict:
 	"""Revoke every paired device of the session user ("sign out everywhere").
 
-	`keep_current=1` spares the device making the call — only meaningful when
-	the call itself is authenticated by a device token."""
+	Always includes the device making the call — there is no "spare this one"
+	option, because that turned this endpoint into a one-request lockout for
+	anyone holding a stolen token. Signing yourself out too is what makes it
+	safe to expose on the phone the user still holds, and it costs them one
+	re-login with a password the thief does not have."""
 	user = _require_system_user()
-	keep = device_auth.current_device_token_id() if cint(keep_current) else None
-	return {"revoked": device_auth.revoke_all(user, except_token_id=keep)}
+	return {"revoked": device_auth.revoke_all(user)}
 
 
 def _lan_ip() -> str | None:

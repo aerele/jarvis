@@ -1,14 +1,17 @@
 """Jarvis Mobile Device DocType controller (JF-016).
 
 One row per paired phone. It holds the PUBLIC half of a device credential
-(``token_id``) plus a SHA-256 of ``<token_id>:<secret>`` — the plaintext secret
-is handed to the phone exactly once, at pairing, and never stored, so a
-database dump yields no usable credential.
+(``token_id``) plus ``HMAC-SHA256(key=token_id, msg=secret)`` — keyed, not a
+plain ``sha256(token_id + ":" + secret)``, because concatenation is ambiguous
+across the separator. The plaintext secret is handed to the phone exactly once,
+at pairing, and never stored, so a database dump yields no usable credential.
 
 Rows are written only by ``jarvis.mobile.device_auth`` (mint / revoke); the
 doctype perms are read-if_owner for Jarvis User and full for System Manager,
 so a user can see their own device inventory in Desk but cannot re-enable a
-revoked device by writing the row.
+revoked device by writing the row. Revoked rows are deleted after
+``device_auth.REVOKED_RETENTION_DAYS`` by the daily
+``prune_revoked_devices`` job.
 """
 
 import frappe

@@ -374,6 +374,10 @@ scheduler_events = {
 		# bench's month-to-date per-user + per-model usage rollup to admin. Self-
 		# gating (skips self-hosted / unconfigured / not-onboarded); never raises.
 		"jarvis.chat.usage_push.push_usage_rollup",
+		# JF-016 hygiene: revocation only flips `enabled`, so the mobile-device
+		# table is append-only without this. Deletes DISABLED rows past the
+		# 90-day retention window; live credentials are never touched.
+		"jarvis.mobile.device_auth.prune_revoked_devices",
 	],
 	"weekly": [
 		# Wiki v2 health check: deterministic lint over Active pages
