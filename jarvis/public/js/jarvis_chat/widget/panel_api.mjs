@@ -7,6 +7,7 @@
 
 const CHAT = "jarvis.chat.api.";
 const ACTIONS = "jarvis.chat.actions_api.";
+const ACCOUNT = "jarvis.account.";
 
 function call(method, args) {
   return frappe.call({ method, args: args || {} }).then((r) => r.message);
@@ -92,3 +93,7 @@ export const stopRun = (conversation, runId) =>
 // Resolves a write-confirmation gate raised by an `action:pending` frame.
 export const confirmTool = (token, conversation) =>
   call(ACTIONS + "confirm_tool", { token, conversation: conversation || "" });
+
+// Chat-readiness verdict ({ready, reason, detail, billing_notice}) - see
+// panel_readiness.mjs for how the panel classifies it into gate/degraded/ready.
+export const isReadyForChat = () => call(ACCOUNT + "is_ready_for_chat");

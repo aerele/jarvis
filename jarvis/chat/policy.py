@@ -7,9 +7,9 @@ jarvis_admin app may layer real subscription gating on top by overriding
 this module's contract.
 
 Returns (True, None) on success or (False, reason: str) on rejection. The
-reason is a machine code the SPA maps to a human toast; the enforcement
-rejection uses reason ``"usage_limit"`` and the billing one
-``"subscription_suspended"``.
+reason is a machine code the SPA maps to a human toast: ``"usage_limit"`` for
+enforcement, ``"subscription_suspended"`` for billing, and
+``"release_update_required"`` while a release rollout is blocking this bench.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ def validate_can_send(user: str, model: str | None = None) -> tuple[bool, str | 
 		return False, "usage_limit"
 	if _subscription_suspended():
 		return False, "subscription_suspended"
+	if _release_update_required():
+		return False, "release_update_required"
 	# Per-model cap: only when a concrete model is known. ``model`` is resolved
 	# in chat.api (which knows the conversation) and passed in as a plain string,
 	# so policy never imports turn_handler (no import cycle). Pool "Auto" resolves
@@ -34,6 +36,25 @@ def validate_can_send(user: str, model: str | None = None) -> tuple[bool, str | 
 	if model and _over_model_limit(user, model):
 		return False, "usage_limit"
 	return True, None
+
+
+def _release_update_required() -> bool:
+	"""True while a published release notice applies to this bench.
+
+	The full-page gate only latches at boot, so without this an already-open tab
+	chats straight through a rollout. Reads the locally mirrored notice (no admin
+	round-trip) and reuses boot_payload's self-clear, so the send gate and the UI
+	gate can never disagree. Fails OPEN."""
+	try:
+		from jarvis import release_notice
+
+		return bool(release_notice.boot_payload().get("active"))
+	except Exception:
+		frappe.log_error(
+			title="jarvis policy: release-notice check failed (allowing send)",
+			message=frappe.get_traceback(),
+		)
+		return False
 
 
 def _subscription_suspended() -> bool:

@@ -40,6 +40,9 @@ _SNAPSHOTTED_FIELDS = (
 	"jarvis_admin_customer_password",
 	"agent_url",
 	"agent_token",
+	"release_notice_active",
+	"latest_jarvis_version",
+	"release_notice_message",
 )
 
 
@@ -93,6 +96,68 @@ class TestSyncConnection(FrappeTestCase):
 			out = onboarding.sync_connection()
 		self.assertTrue(out["synced"])
 		self.assertEqual(frappe.get_single("Jarvis Settings").agent_url, "ws://localhost:19000")
+
+	def test_sync_persists_release_notice(self):
+		"""An active operator notice on the connection payload is mirrored onto
+		Jarvis Settings so boot can read it with no admin round-trip."""
+		_set_token("tok")
+		with patch(
+			"jarvis.onboarding.admin_client.get_connection",
+			return_value={
+				"agent_url": "ws://localhost:19000",
+				"agent_token": "k",
+				"tenant_status": "running",
+				"release_notice": {
+					"active": True,
+					"version": "0.0.2",
+					"message": "Faster search.",
+				},
+			},
+		):
+			onboarding.sync_connection()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.release_notice_active, 1)
+		self.assertEqual(s.latest_jarvis_version, "0.0.2")
+		self.assertEqual(s.release_notice_message, "Faster search.")
+
+	def test_sync_clears_release_notice(self):
+		"""A payload without a notice clears a previously-mirrored one - the
+		operator switching it off must reach the tenant."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("release_notice_active", 1)
+		s.db_set("release_notice_message", "stale")
+		s.db_set("latest_jarvis_version", "0.0.2")
+		frappe.db.commit()
+		_set_token("tok")
+		with patch(
+			"jarvis.onboarding.admin_client.get_connection",
+			return_value={
+				"agent_url": "ws://localhost:19000",
+				"agent_token": "k",
+				"tenant_status": "running",
+			},
+		):
+			onboarding.sync_connection()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.release_notice_active, 0)
+		self.assertEqual(s.release_notice_message, "")
+
+	def test_sync_persists_release_notice_without_agent_url(self):
+		"""A payload with no agent_url still has to raise/clear the notice - for an
+		idle bench this daily sync is the only refresh it gets."""
+		_set_token("tok")
+		with patch(
+			"jarvis.onboarding.admin_client.get_connection",
+			return_value={
+				"agent_url": "",
+				"tenant_status": "pending",
+				"release_notice": {"active": True, "version": "0.0.2", "message": "Please update."},
+			},
+		):
+			onboarding.sync_connection()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.release_notice_active, 1)
+		self.assertEqual(s.latest_jarvis_version, "0.0.2")
 
 	def test_sync_noop_when_pending(self):
 		_set_token("tok")

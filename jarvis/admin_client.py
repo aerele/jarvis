@@ -397,8 +397,17 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	after an "applying"/timeout apply outcome to learn the admin reconcile
 	finished the apply (F2). Pass a short ``timeout_s`` for those hot status
 	probes so a slow admin can't stretch a convergence loop past its job budget.
+
+	Also reports this bench's jarvis version so the control plane can close out a
+	release rollout; an older admin ignores the key.
 	"""
-	return _post(path=_m("api.tenant.get_connection"), body={}, timeout_s=timeout_s)
+	from jarvis import __version__
+
+	return _post(
+		path=_m("api.tenant.get_connection"),
+		body={"jarvis_version": __version__},
+		timeout_s=timeout_s,
+	)
 
 
 # --------------------------------------------------------------------------- #

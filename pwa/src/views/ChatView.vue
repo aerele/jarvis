@@ -264,8 +264,15 @@ async function send() {
 		});
 		if (res?.ok === false) {
 			sendBusy.value = false;
-			errorBanner.value = res.reason || "Couldn't send that message.";
 			messages.value = messages.value.filter((m) => !m.optimistic);
+			// A rollout started under this tab; the gate only latches at boot, so
+			// reload onto it instead of leaving them retrying.
+			if (res.reason === "release_update_required") {
+				errorBanner.value = "Jarvis is being updated. Reloading…";
+				setTimeout(() => window.location.reload(), 1500);
+				return;
+			}
+			errorBanner.value = res.reason || "Couldn't send that message.";
 			return;
 		}
 		// First send of a brand-new chat: adopt the id the backend just created,

@@ -35,6 +35,7 @@
 						label="Conflicting"
 					/>
 					<Badge v-if="page.stale" variant="subtle" theme="orange" label="Stale" />
+					<PromotionStatusChip v-if="myPromo" :req="myPromo" noun="page" />
 				</div>
 
 				<!-- Conflicting gets the same treatment as Stale: a badge alone is
@@ -137,6 +138,13 @@
 						@click="startEdit"
 					/>
 					<Button
+						v-if="canPromote && !promoPending"
+						variant="subtle"
+						label="Request promotion…"
+						iconLeft="arrow-up-circle"
+						@click="promoDialog = true"
+					/>
+					<Button
 						v-if="page.can_archive && page.status !== 'Archived'"
 						variant="subtle"
 						theme="red"
@@ -165,6 +173,13 @@
 			</div>
 		</template>
 	</Dialog>
+
+	<PromotionRequestDialog
+		v-model="promoDialog"
+		noun="page"
+		:busy="promoBusy"
+		@submit="submitPromotion"
+	/>
 </template>
 
 <script setup>
@@ -195,7 +210,11 @@ import {
 	archiveWikiPage,
 	restoreWikiPage,
 	deleteWikiPage,
+	requestWikiPromotion,
+	myWikiPromotion,
 } from "@/api/wiki";
+import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
+import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -218,6 +237,49 @@ const page = ref(null);
 const loading = ref(false);
 const editing = ref(false);
 const previewing = ref(false);
+
+// ── promotion (requester side, Skills-area promotion surfacing) ───────────────
+// The wiki requester side was never wired: request_wiki_promotion existed but had
+// no caller, so the reviewer queue consumed requests nothing could create. Here
+// the owner of a private (User-scope) page can finally file one, into the SAME
+// reviewer queue. A User-scope page is editable only by its owner, so can_edit on
+// a User page ⟺ "mine".
+const myPromo = ref(null);
+const promoDialog = ref(false);
+const promoBusy = ref(false);
+const canPromote = computed(
+	() =>
+		!!page.value &&
+		page.value.scope === "User" &&
+		!!page.value.can_edit &&
+		page.value.status !== "Archived"
+);
+const promoPending = computed(() => !!(myPromo.value && myPromo.value.status === "Pending"));
+
+async function loadMyPromo() {
+	myPromo.value = null;
+	if (!page.value || page.value.scope !== "User" || !page.value.can_edit) return;
+	try {
+		const res = await myWikiPromotion(props.slug);
+		myPromo.value = res && res.status ? res : null;
+	} catch {
+		// best-effort chip
+	}
+}
+
+async function submitPromotion({ to_scope, target_role, note }) {
+	promoBusy.value = true;
+	try {
+		await requestWikiPromotion({ page: props.slug, to_scope, target_role, note });
+		promoDialog.value = false;
+		toast.success("Promotion requested — a reviewer will decide.");
+		await loadMyPromo();
+	} catch (e) {
+		toast.error(errMsg(e));
+	} finally {
+		promoBusy.value = false;
+	}
+}
 const editTitle = ref("");
 const editSummary = ref("");
 const editBody = ref("");
@@ -266,10 +328,12 @@ watch(
 
 async function load() {
 	page.value = null;
+	myPromo.value = null;
 	editing.value = false;
 	loading.value = true;
 	try {
 		page.value = await getWikiPage(props.slug);
+		loadMyPromo();
 	} catch (e) {
 		show.value = false;
 		toast.error(errMsg(e));
