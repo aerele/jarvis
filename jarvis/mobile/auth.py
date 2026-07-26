@@ -3,16 +3,20 @@
 Onboarding (issue #224): the phone scans a QR shown in the Jarvis web app to
 learn the *site connection details* (no typing a workspace URL), then signs in
 with email + password once. That login establishes a short-lived cookie session
-purely to call `get_mobile_token`, which returns a durable API key/secret; from
-then on the app authenticates every request (and the realtime socket) with
-`Authorization: token key:secret` — stateless, no idle-timeout. The password is
-never stored; on logout the phone re-signs-in (the site is remembered).
+purely to call `get_mobile_token`, which returns a durable credential; from then
+on the app authenticates every request (and the realtime socket) with
+`Authorization: token <credential>` — stateless, no idle-timeout. The password
+is never stored; on logout the phone re-signs-in (the site is remembered).
 
-`get_mobile_token` is idempotent: if the user already has an api_key/api_secret
-it returns the EXISTING pair (decrypted) and does NOT rotate it, so a user's
-existing API integrations keep working. Keys are only generated when missing.
-This differs from frappe.core.doctype.user.user.generate_keys, which is
-System-Manager gated AND rotates the secret on every call.
+JF-016: that credential is now a PER-DEVICE token (`jmd:<id>:<secret>`, see
+`jarvis/mobile/device_auth.py`), NOT the user's account-wide Frappe
+api_key/api_secret. Each pairing mints its own `Jarvis Mobile Device` row with
+only a HASH of the secret at rest, so a phone can be revoked on its own —
+logout actually revokes something, a lost handset can be killed from any other
+device, and none of it disturbs the user's other API integrations. This module
+no longer reads or writes `User.api_key`/`User.api_secret` at all; installs that
+already hold a global keypair keep working through ordinary Frappe token auth
+(nothing here revokes it), and the app moves onto a device token at next login.
 """
 
 import json
@@ -22,52 +26,123 @@ from io import BytesIO
 from urllib.parse import urlparse
 
 import frappe
+from frappe.utils import cint
+
+from jarvis.mobile import device_auth
 
 # Bumped if the QR payload shape changes so old app builds can reject it cleanly.
 PAIRING_PAYLOAD_VERSION = 1
 
+# Pairing mints a durable credential, so it is throttled per user (a stolen
+# cookie session should not be able to farm an unbounded fleet of tokens, and a
+# looping client should not fill the device inventory). The window is per user
+# rather than per IP so a whole office behind one NAT is not one budget.
+PAIRING_LIMIT = 10
+PAIRING_WINDOW_SECONDS = 15 * 60
 
-@frappe.whitelist(methods=["POST"])
-def get_mobile_token() -> dict:
-	"""Return the logged-in user's durable api_key/api_secret (creating them only
-	if absent — never rotating an existing secret).
 
-	Returns the plaintext secret so the phone can store it. Only ever acts on the
-	session user, never an arbitrary `user` argument. Also returns `site` (the
-	real Frappe site name) so the client targets the realtime namespace correctly
-	when the workspace is reached via a bare IP.
-	"""
+def _require_system_user() -> str:
+	"""Return the session user, or raise.
+
+	PART 4 REVISED, TASK 41: a Website/portal user has no legitimate use for the
+	Jarvis mobile endpoints (PART 1 TASK 6: portal users are a lower-trust
+	population, and Frappe's own generate_keys is System-Manager gated), so a
+	non-Desk user cannot self-mint or manage a durable credential here. Every
+	endpoint in this module acts on the SESSION user only — never on a `user`
+	argument."""
+	from jarvis.permissions import is_system_user
+
 	user = frappe.session.user
 	if not user or user == "Guest":
 		raise frappe.AuthenticationError
-
-	# PART 4 REVISED, TASK 41: a Website/portal user has no legitimate use for the
-	# Jarvis mobile app's token endpoint (PART 1 TASK 6: portal users are a
-	# lower-trust population, and Frappe's own generate_keys is SM-gated). This
-	# stays session-user-only + idempotent, but refuses a non-Desk user
-	# self-minting a durable credential here.
-	from jarvis.permissions import is_system_user
 
 	if not is_system_user(user):
 		frappe.throw(
 			"The Jarvis mobile token is available to Jarvis app (Desk) users only.",
 			frappe.PermissionError,
 		)
+	return user
 
-	doc = frappe.get_doc("User", user)
-	existing_secret = doc.get_password("api_secret", raise_exception=False) if doc.api_key else None
 
-	if doc.api_key and existing_secret:
-		# Reuse — rotating would break the user's existing API integrations.
-		secret = existing_secret
-	else:
-		secret = frappe.generate_hash(length=15)
-		if not doc.api_key:
-			doc.api_key = frappe.generate_hash(length=15)
-		doc.api_secret = secret
-		doc.save(ignore_permissions=True)
+def _pairing_cache_key(user: str):
+	return frappe.cache.make_key(f"jarvis_mobile_pairing:{user}")
 
-	return {"api_key": doc.api_key, "api_secret": secret, "site": frappe.local.site}
+
+def _throttle_pairing(user: str) -> None:
+	"""Reject a pairing storm. Mirrors frappe.rate_limiter's counter shape but
+	keyed by user instead of IP."""
+	key = _pairing_cache_key(user)
+	if not frappe.cache.get(key):
+		frappe.cache.setex(key, PAIRING_WINDOW_SECONDS, 0)
+	if cint(frappe.cache.incrby(key, 1)) > PAIRING_LIMIT:
+		frappe.throw(
+			"Too many pairing attempts. Please try again in a few minutes.",
+			frappe.RateLimitExceededError,
+		)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_mobile_token(device_label: str | None = None, platform: str | None = None) -> dict:
+	"""Mint a NEW per-device credential for the logged-in user.
+
+	Returns the plaintext secret exactly once — it is only ever stored hashed —
+	so re-pairing a phone always produces a fresh token and never resurrects an
+	old one.
+
+	Back-compat with shipped app builds: the response still carries
+	`api_key`/`api_secret`, because those builds join them into
+	`Authorization: token <api_key>:<api_secret>`. `api_key` is
+	`jmd:<token_id>` and `api_secret` is the device secret, so that join
+	reproduces exactly the `jmd:<token_id>:<secret>` device token — an
+	un-updated app upgrades onto a revocable credential with no client change.
+	Newer builds should read `device_token` + `device` instead.
+
+	Also returns `site` (the real Frappe site name) so the client targets the
+	realtime namespace correctly when the workspace is reached via a bare IP.
+	"""
+	user = _require_system_user()
+	_throttle_pairing(user)
+
+	minted = device_auth.mint(user, device_label=device_label, platform=platform)
+	return {
+		"api_key": f"{device_auth.DEVICE_TOKEN_PREFIX}:{minted['token_id']}",
+		"api_secret": minted["secret"],
+		"device_token": minted["token"],
+		"device": minted["token_id"],
+		"device_label": minted["device_label"],
+		"site": frappe.local.site,
+	}
+
+
+@frappe.whitelist()
+def list_mobile_devices() -> list[dict]:
+	"""The session user's paired-device inventory (no secrets, own rows only)."""
+	user = _require_system_user()
+	return device_auth.list_devices(user)
+
+
+@frappe.whitelist(methods=["POST"])
+def revoke_mobile_device(device: str) -> dict:
+	"""Revoke ONE paired device by its token id.
+
+	`device` must belong to the session user; anything else raises
+	PermissionError, so this cannot revoke — or probe for — another account's
+	devices. Revoking the device that is making this very call is the normal
+	logout path: the next request with that token is a 401."""
+	user = _require_system_user()
+	revoked = device_auth.revoke(user, device)
+	return {"revoked": 1 if revoked else 0, "device": device}
+
+
+@frappe.whitelist(methods=["POST"])
+def revoke_all_mobile_devices(keep_current: int = 0) -> dict:
+	"""Revoke every paired device of the session user ("sign out everywhere").
+
+	`keep_current=1` spares the device making the call — only meaningful when
+	the call itself is authenticated by a device token."""
+	user = _require_system_user()
+	keep = device_auth.current_device_token_id() if cint(keep_current) else None
+	return {"revoked": device_auth.revoke_all(user, except_token_id=keep)}
 
 
 def _lan_ip() -> str | None:

@@ -383,6 +383,17 @@ scheduler_events = {
 	],
 }
 
+# ---------------------------------------------------------------------------
+# Per-device mobile credentials (JF-016)
+# ---------------------------------------------------------------------------
+# The Jarvis mobile app authenticates with a REVOCABLE per-device token
+# (`Authorization: token jmd:<token_id>:<secret>`) instead of the user's
+# account-wide Frappe api_key/api_secret. Core's api-key parser declines a
+# three-segment token, so this hook — which Frappe runs right after it — is
+# what resolves the token to a user. Cheap for every other request: one header
+# read plus a prefix test. See jarvis/mobile/device_auth.py.
+auth_hooks = ["jarvis.mobile.device_auth.authenticate_device_token"]
+
 # Python type annotations on whitelisted endpoints
 # ------------------------------------------------
 # Auto-update controller files with type annotations + require all
