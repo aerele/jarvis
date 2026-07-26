@@ -32,7 +32,7 @@
    "length": 64,
    "reqd": 1,
    "in_list_view": 1,
-   "description": "One of auto_title/rich_outputs/macro_advance/telemetry_flush/terminal_publish/usage; part of the UNIQUE (turn, effect_name) enforced via the composite doc name (D2 §1a)."
+   "description": "One of the canonical turn-effect vocabulary jarvis.chat.turn_state.EFFECT_NAMES = [terminal_publish, rich_outputs, chat_asks, macro_advance, auto_title, wiki_nudge, usage, telemetry_flush] (that tuple is the single authority; any other name is rejected at insert by turn_state.insert_required_effects). Part of the UNIQUE (turn, effect_name) enforced via the composite doc name (D2 §1a)."
   },
   {
    "fieldname": "status",
