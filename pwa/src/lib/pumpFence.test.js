@@ -49,14 +49,14 @@ test("ChatView imports the SHARED fence, not a local re-implementation", () => {
 	assert.match(
 		src,
 		/import \{ admitEvent \} from "@jsshared\/pump_fence\.mjs";/,
-		"the fence must come from jarvis/public/js/shared so the widget and the PWA cannot drift",
+		"the fence must come from jarvis/public/js/shared so the widget and the PWA cannot drift"
 	);
 	assert.match(
 		src,
 		/import \{ eventFence \} from "\.\.\/lib\/pump_fence_state\.js";/,
 		"the fence instance must be the MODULE-scope singleton — a component-scope " +
 			"fence is destroyed on every route away from chat (no keep-alive) and " +
-			"readmits the stale frames it exists to drop",
+			"readmits the stale frames it exists to drop"
 	);
 });
 
@@ -78,7 +78,7 @@ test("onEvent gates on the fence BEFORE the switch, and returns on a drop", () =
 	const convFilter = body.indexOf("if (conv !== convId.value) return;");
 	assert.ok(
 		convFilter !== -1 && convFilter < gate,
-		"the conversation filter must precede the gate",
+		"the conversation filter must precede the gate"
 	);
 });
 
@@ -87,14 +87,14 @@ test("every pump-sequenced kind ChatView handles is covered by the fence", () =>
 	const kinds = [...body.matchAll(/case "([a-z:]+)":/g)].map((m) => m[1]);
 	assert.ok(
 		kinds.length >= 8,
-		`expected ChatView's switch to still have cases, found ${kinds.length}`,
+		`expected ChatView's switch to still have cases, found ${kinds.length}`
 	);
 	for (const kind of kinds) {
 		assert.ok(
 			FENCED_KINDS.has(kind) || UNFENCED_IN_CHATVIEW.has(kind),
 			`"${kind}" is handled by ChatView but is neither fenced nor a declared bypass — ` +
 				"decide which it is (add it to FENCED_KINDS in pump_fence.mjs, or to " +
-				"UNFENCED_IN_CHATVIEW here with the reason)",
+				"UNFENCED_IN_CHATVIEW here with the reason)"
 		);
 	}
 	// The two teardown kinds must be the fence's terminals, or a stale one re-closes
@@ -138,7 +138,7 @@ test("a stale terminal is dropped (it would clear live + fire a redundant load()
 	assert.equal(
 		admitEvent(fence, f("run:error", 2, 9)),
 		false,
-		"a losing pump's error is dropped",
+		"a losing pump's error is dropped"
 	);
 	// A genuine takeover at E+1 still gets to stream and settle.
 	assert.equal(admitEvent(fence, f("assistant:delta", 4, 1)), true);
@@ -159,6 +159,6 @@ test("approvals are never fenced away", () => {
 	assert.equal(
 		admitEvent(fence, { kind: "action:pending", run_id: "r1", token: "t1", pump_epoch: 1 }),
 		true,
-		"a parked write must reach the UI whatever the pump did",
+		"a parked write must reach the UI whatever the pump did"
 	);
 });

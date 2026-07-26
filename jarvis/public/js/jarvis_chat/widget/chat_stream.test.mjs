@@ -19,7 +19,7 @@ test("visibleMessages: drops tool rows", () => {
   ]);
   assert.deepEqual(
     out.map((m) => m.name),
-    ["1", "4"],
+    ["1", "4"]
   );
 });
 
@@ -32,7 +32,7 @@ test("visibleMessages: drops empty and whitespace-only content", () => {
   ]);
   assert.deepEqual(
     out.map((m) => m.name),
-    ["4"],
+    ["4"]
   );
 });
 
@@ -43,7 +43,7 @@ test("visibleMessages: preserves order and is safe on junk input", () => {
   ];
   assert.deepEqual(
     visibleMessages(rows).map((m) => m.name),
-    ["a", "b"],
+    ["a", "b"]
   );
   assert.deepEqual(visibleMessages(null), []);
   assert.deepEqual(visibleMessages(undefined), []);
@@ -62,7 +62,7 @@ test("emptyStream: starts idle", () => {
 test("run:start opens a live turn and clears busy", () => {
   const s = applyEvent(
     { ...emptyStream(), busy: true },
-    { kind: "run:start", run_id: "r1", message_id: "m1" },
+    { kind: "run:start", run_id: "r1", message_id: "m1" }
   );
   assert.equal(s.busy, false);
   assert.deepEqual(s.live, { runId: "r1", messageId: "m1", text: "" });
@@ -165,7 +165,7 @@ test("action:pending queues distinct tokens in arrival order", () => {
   s = applyEvent(s, { kind: "action:pending", token: "t2", summary: "second" });
   assert.deepEqual(
     s.pending.map((p) => p.token),
-    ["t1", "t2"],
+    ["t1", "t2"]
   );
 });
 
@@ -237,7 +237,7 @@ const pumped = (kind, epoch, seq, extra = {}) => ({
 test("fence: a superseded pump's delta cannot rewind the live text", () => {
   let s = applyEvent(
     emptyStream(),
-    pumped("run:start", 2, 1, { message_id: "m1" }),
+    pumped("run:start", 2, 1, { message_id: "m1" })
   );
   s = applyEvent(s, pumped("assistant:delta", 2, 2, { text: "Hello there" }));
   // Same run, older epoch, higher seq — the classic post-handoff straggler.
@@ -248,7 +248,7 @@ test("fence: a superseded pump's delta cannot rewind the live text", () => {
 test("fence: a replayed same-epoch delta is dropped", () => {
   let s = applyEvent(
     emptyStream(),
-    pumped("assistant:delta", 3, 5, { text: "full answer" }),
+    pumped("assistant:delta", 3, 5, { text: "full answer" })
   );
   s = applyEvent(s, pumped("assistant:delta", 3, 4, { text: "full" }));
   s = applyEvent(s, pumped("assistant:delta", 3, 5, { text: "full" }));
@@ -258,7 +258,7 @@ test("fence: a replayed same-epoch delta is dropped", () => {
 test("fence: the FIRST terminal settles the turn, the backstop repeat does not re-fire", () => {
   let s = applyEvent(
     emptyStream(),
-    pumped("assistant:delta", 4, 7, { text: "done" }),
+    pumped("assistant:delta", 4, 7, { text: "done" })
   );
   // finalize reproduces the delta watermark's seq — this must still settle.
   s = applyEvent(s, pumped("run:end", 4, 7));
@@ -274,7 +274,7 @@ test("fence: the FIRST terminal settles the turn, the backstop repeat does not r
 test("fence: a stale terminal cannot re-close a turn that has moved on", () => {
   let s = applyEvent(
     emptyStream(),
-    pumped("assistant:delta", 5, 1, { text: "a" }),
+    pumped("assistant:delta", 5, 1, { text: "a" })
   );
   s = applyEvent(s, pumped("run:end", 5, 1));
   s = { ...s, reload: false };
@@ -283,7 +283,7 @@ test("fence: a stale terminal cannot re-close a turn that has moved on", () => {
   s = applyEvent(s, pumped("run:start", 6, 1, { message_id: "m2" }));
   s = applyEvent(
     s,
-    pumped("assistant:delta", 6, 2, { text: "recovered answer" }),
+    pumped("assistant:delta", 6, 2, { text: "recovered answer" })
   );
   assert.equal(s.live.text, "recovered answer");
   // Now the losing pump's late terminal arrives. It must NOT wipe the live turn.
@@ -298,7 +298,7 @@ test("fence: a stale terminal cannot re-close a turn that has moved on", () => {
 test("fence: a stale run:start cannot re-open a settled turn", () => {
   let s = applyEvent(
     emptyStream(),
-    pumped("assistant:delta", 7, 3, { text: "final" }),
+    pumped("assistant:delta", 7, 3, { text: "final" })
   );
   s = applyEvent(s, pumped("run:end", 7, 3));
   s = { ...s, reload: false };
@@ -309,7 +309,7 @@ test("fence: a stale run:start cannot re-open a settled turn", () => {
 test("fence: approvals and renames bypass it (they are not pump-sequenced)", () => {
   let s = applyEvent(
     emptyStream(),
-    pumped("assistant:delta", 2, 9, { text: "x" }),
+    pumped("assistant:delta", 2, 9, { text: "x" })
   );
   s = applyEvent(s, {
     kind: "action:pending",
@@ -340,7 +340,7 @@ test("fence: legacy frames with no pump_epoch behave exactly as before", () => {
 test("fence: state is copied, never mutated in place", () => {
   const before = applyEvent(
     emptyStream(),
-    pumped("assistant:delta", 1, 1, { text: "a" }),
+    pumped("assistant:delta", 1, 1, { text: "a" })
   );
   const snapshot = JSON.parse(JSON.stringify(before.fence));
   applyEvent(before, pumped("assistant:delta", 1, 2, { text: "ab" }));
@@ -359,7 +359,7 @@ test("fence: a fresh stream (new conversation) starts unfenced", () => {
 test("applyEventEx: reports admitted=true for a live frame, false for a fenced straggler", () => {
   const r1 = applyEventEx(
     emptyStream(),
-    pumped("assistant:delta", 3, 5, { text: "new" }),
+    pumped("assistant:delta", 3, 5, { text: "new" })
   );
   assert.equal(r1.admitted, true);
   // Older epoch after a handoff: dropped AND reported as dropped, so Panel.vue
@@ -367,7 +367,7 @@ test("applyEventEx: reports admitted=true for a live frame, false for a fenced s
   // the safety net down (Wave-B UX P1-2).
   const r2 = applyEventEx(
     r1.state,
-    pumped("assistant:delta", 2, 9, { text: "old" }),
+    pumped("assistant:delta", 2, 9, { text: "old" })
   );
   assert.equal(r2.admitted, false);
   assert.equal(r2.state.live.text, "new");
@@ -376,13 +376,13 @@ test("applyEventEx: reports admitted=true for a live frame, false for a fenced s
 test("applyEventEx: the backstop terminal repeat is NOT admitted", () => {
   let r = applyEventEx(
     emptyStream(),
-    pumped("assistant:delta", 4, 7, { text: "done" }),
+    pumped("assistant:delta", 4, 7, { text: "done" })
   );
   r = applyEventEx(r.state, pumped("run:end", 4, 7));
   assert.equal(r.admitted, true);
   const again = applyEventEx(
     { ...r.state, reload: false },
-    pumped("run:end", 4, 7),
+    pumped("run:end", 4, 7)
   );
   assert.equal(again.admitted, false);
   assert.equal(again.state.reload, false);
@@ -394,13 +394,13 @@ test("fence survives startNewChat's state reset (dead-banner resurrection guard)
   // run:error instead of resurrecting a dead error banner.
   let s = applyEvent(
     emptyStream(),
-    pumped("assistant:delta", 6, 3, { text: "hi" }),
+    pumped("assistant:delta", 6, 3, { text: "hi" })
   );
   s = applyEvent(s, pumped("run:end", 6, 3));
   const reset = { ...emptyStream(), fence: s.fence };
   const r = applyEventEx(
     reset,
-    pumped("run:error", 5, 9, { error: "Relay lost the connection." }),
+    pumped("run:error", 5, 9, { error: "Relay lost the connection." })
   );
   assert.equal(r.admitted, false);
   assert.equal(r.state.error, "");
