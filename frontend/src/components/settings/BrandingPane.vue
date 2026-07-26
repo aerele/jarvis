@@ -1,50 +1,47 @@
 <template>
 	<!-- The dialog shell stopped rendering a shared header (design.md §4.1: each
-	     pane owns its own), so this pane supplies one like every other. Only the
-	     header is migrated; the body below still uses the legacy jv-* markup
-	     because the branding editor arrived on develop after this migration
-	     branched and is deferred with AiModelsPane.
+	     pane owns its own), so this pane uses the shared SettingsPane frame like
+	     every other migrated pane. -->
+	<SettingsPane
+		title="Branding"
+		description="Your assistant's name, logo and favicon."
+		:error="error"
+	>
+		<div v-if="loading" class="text-p-sm text-ink-gray-6">Loading…</div>
+		<template v-else>
+			<FormControl
+				type="text"
+				label="Assistant name"
+				v-model="name"
+				maxlength="40"
+				placeholder="Jarvis"
+				description="Shown in the chat header, the browser tab, notifications, and in the assistant's own replies. Leave blank to use “Jarvis”. Up to 40 characters."
+			/>
 
-	     The outer flex-col also matters: .jv-settings-body's `flex:1;
-	     overflow-y:auto` only becomes a scroll region inside a flex column. On a
-	     plain block wrapper the asset pickers would clip with no scrollbar. -->
-	<div class="flex h-full flex-col gap-6 px-10 py-8 text-ink-gray-8">
-		<div class="flex flex-col gap-1">
-			<h2 class="text-lg font-semibold text-ink-gray-8">Branding</h2>
-			<p class="max-w-md text-p-sm text-ink-gray-6">
-				Your assistant's name, logo and favicon.
-			</p>
-		</div>
-
-		<div class="jv-settings-body jv-pane-fill min-h-0 flex-1">
-			<div v-if="loading" class="jv-set-hint">Loading…</div>
-			<template v-else>
-				<!-- Assistant name -->
-				<div class="jv-set-sec">Assistant name</div>
-				<input
-					class="jv-brand-input"
-					type="text"
-					maxlength="40"
-					v-model="name"
-					placeholder="Jarvis"
-				/>
-				<div class="jv-set-hint">
-					Shown in the chat header, the browser tab, notifications, and in the
-					assistant's own replies. Leave blank to use “Jarvis”. Up to 40 characters.
-				</div>
-
-				<!-- Logo -->
-				<div class="jv-set-sec" style="margin-top: 20px">Logo</div>
-				<div class="jv-brand-asset">
+			<!-- Logo -->
+			<div class="mt-6 flex flex-col gap-1.5">
+				<span class="text-xs text-ink-gray-5">Logo</span>
+				<div class="flex items-center gap-3">
 					<img
 						v-if="logoUrl"
 						:src="logoUrl"
-						class="jv-brand-logo-prev"
+						class="size-11 shrink-0 rounded-lg object-cover"
 						alt="Logo preview"
 					/>
+					<!-- No logo yet: the same brand-mark glyph JarvisMark renders
+					     elsewhere (onboarding, chat avatars). Kept local rather than
+					     reusing <JarvisMark> because that component reads the
+					     committed brandLogoUrl, not this pane's unsaved draft - after
+					     "Remove" the preview must go blank immediately, before Save. -->
 					<span
 						v-else
-						class="jv-brand-logo-prev jv-brand-logo-default"
+						class="flex size-11 shrink-0 items-center justify-center rounded-lg"
+						style="
+							background: var(
+								--brand-grad,
+								linear-gradient(135deg, #6e8bff, #8b5cf6)
+							);
+						"
 						aria-hidden="true"
 					>
 						<svg width="26" height="26" viewBox="0 0 24 24" fill="#fff">
@@ -53,23 +50,21 @@
 							/>
 						</svg>
 					</span>
-					<div class="jv-brand-asset-actions">
-						<button
-							class="jv-btn jv-btn--sm jv-btn--ghost"
-							:disabled="uploadingLogo"
-							@click="logoInput.click()"
-						>
-							{{ uploadingLogo ? "Uploading…" : logoUrl ? "Replace" : "Upload" }}
-						</button>
-						<button
-							v-if="logoUrl"
-							class="jv-btn jv-btn--sm jv-btn--ghost"
-							:disabled="uploadingLogo"
-							@click="logoUrl = ''"
-						>
-							Remove
-						</button>
-					</div>
+					<Button
+						variant="subtle"
+						size="sm"
+						:label="uploadingLogo ? 'Uploading…' : logoUrl ? 'Replace' : 'Upload'"
+						:loading="uploadingLogo"
+						@click="logoInput.click()"
+					/>
+					<Button
+						v-if="logoUrl"
+						variant="subtle"
+						size="sm"
+						label="Remove"
+						:disabled="uploadingLogo"
+						@click="logoUrl = ''"
+					/>
 					<input
 						ref="logoInput"
 						type="file"
@@ -78,43 +73,43 @@
 						@change="onPick($event, 'logo')"
 					/>
 				</div>
-				<div class="jv-set-hint">
+				<span class="text-p-xs text-ink-gray-5">
 					Used as the assistant avatar and brand mark. A square image works best.
-				</div>
+				</span>
+			</div>
 
-				<!-- Favicon -->
-				<div class="jv-set-sec" style="margin-top: 20px">Favicon</div>
-				<div class="jv-brand-asset">
+			<!-- Favicon -->
+			<div class="mt-6 flex flex-col gap-1.5">
+				<span class="text-xs text-ink-gray-5">Favicon</span>
+				<div class="flex items-center gap-3">
 					<img
 						v-if="faviconUrl"
 						:src="faviconUrl"
-						class="jv-brand-fav-prev"
+						class="size-6 shrink-0 rounded-sm border object-cover"
 						alt="Favicon preview"
 					/>
 					<span
 						v-else
-						class="jv-brand-fav-prev jv-brand-fav-default"
+						class="size-6 shrink-0 rounded-sm border bg-surface-gray-2"
 						aria-hidden="true"
-					></span>
-					<div class="jv-brand-asset-actions">
-						<button
-							class="jv-btn jv-btn--sm jv-btn--ghost"
-							:disabled="uploadingFavicon"
-							@click="faviconInput.click()"
-						>
-							{{
-								uploadingFavicon ? "Uploading…" : faviconUrl ? "Replace" : "Upload"
-							}}
-						</button>
-						<button
-							v-if="faviconUrl"
-							class="jv-btn jv-btn--sm jv-btn--ghost"
-							:disabled="uploadingFavicon"
-							@click="faviconUrl = ''"
-						>
-							Remove
-						</button>
-					</div>
+					/>
+					<Button
+						variant="subtle"
+						size="sm"
+						:label="
+							uploadingFavicon ? 'Uploading…' : faviconUrl ? 'Replace' : 'Upload'
+						"
+						:loading="uploadingFavicon"
+						@click="faviconInput.click()"
+					/>
+					<Button
+						v-if="faviconUrl"
+						variant="subtle"
+						size="sm"
+						label="Remove"
+						:disabled="uploadingFavicon"
+						@click="faviconUrl = ''"
+					/>
 					<input
 						ref="faviconInput"
 						type="file"
@@ -123,29 +118,29 @@
 						@change="onPick($event, 'favicon')"
 					/>
 				</div>
-				<div class="jv-set-hint">
+				<span class="text-p-xs text-ink-gray-5">
 					The browser-tab icon. A square PNG (or .ico) works best.
-				</div>
+				</span>
+			</div>
 
-				<!-- Save -->
-				<div class="jv-brand-foot">
-					<button
-						class="jv-btn jv-btn--sm jv-btn--primary"
-						:disabled="!dirty || saving"
-						@click="save"
-					>
-						{{ saving ? "Saving…" : "Save branding" }}
-					</button>
-					<span v-if="error" class="jv-brand-err">{{ error }}</span>
-					<span v-else-if="savedMsg" class="jv-brand-ok">{{ savedMsg }}</span>
-				</div>
-			</template>
-		</div>
-	</div>
+			<!-- Save -->
+			<div class="mt-6">
+				<Button
+					variant="solid"
+					label="Save branding"
+					:loading="saving"
+					:disabled="!dirty"
+					@click="save"
+				/>
+			</div>
+		</template>
+	</SettingsPane>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from "vue";
+import { Button, FormControl, toast } from "frappe-ui";
+import SettingsPane from "@/components/settings/SettingsPane.vue";
 import * as api from "@/api";
 
 const loading = ref(true);
@@ -153,7 +148,6 @@ const saving = ref(false);
 const uploadingLogo = ref(false);
 const uploadingFavicon = ref(false);
 const error = ref("");
-const savedMsg = ref("");
 
 const name = ref("");
 const logoUrl = ref("");
@@ -205,7 +199,6 @@ async function onPick(ev, which) {
 
 async function save() {
 	error.value = "";
-	savedMsg.value = "";
 	saving.value = true;
 	try {
 		await api.updateBranding({
@@ -219,7 +212,9 @@ async function save() {
 			faviconUrl: faviconUrl.value,
 		};
 		name.value = original.name;
-		savedMsg.value = "Saved. Refresh to apply across the app.";
+		// Success flows through toast, not a bespoke inline green node
+		// (design.md §5 anti-pattern 16) - see SettingsPane's own doc comment.
+		toast.success("Saved. Refresh to apply across the app.");
 	} catch (e) {
 		error.value = (e && e.message) || "Save failed.";
 	} finally {
@@ -227,68 +222,3 @@ async function save() {
 	}
 }
 </script>
-
-<style scoped>
-.jv-brand-input {
-	width: 100%;
-	max-width: 340px;
-	padding: 8px 10px;
-	border: 1px solid var(--border, #e3e3ea);
-	border-radius: 8px;
-	background: var(--surface, #fff);
-	color: var(--text, #16161a);
-	font-size: 13px;
-	outline: none;
-}
-.jv-brand-input:focus {
-	border-color: var(--brand-1, #6e8bff);
-}
-.jv-brand-asset {
-	display: flex;
-	align-items: center;
-	gap: 12px;
-	margin: 4px 0;
-}
-.jv-brand-asset-actions {
-	display: flex;
-	gap: 8px;
-}
-.jv-brand-logo-prev {
-	width: 44px;
-	height: 44px;
-	border-radius: 11px;
-	object-fit: cover;
-	flex-shrink: 0;
-}
-.jv-brand-logo-default {
-	display: grid;
-	place-items: center;
-	background: var(--brand-grad, linear-gradient(135deg, #6e8bff, #8b5cf6));
-}
-.jv-brand-fav-prev {
-	width: 24px;
-	height: 24px;
-	border-radius: 5px;
-	object-fit: cover;
-	flex-shrink: 0;
-	border: 1px solid var(--border, #e3e3ea);
-}
-.jv-brand-fav-default {
-	display: block;
-	background: var(--surface-2, #f0f0f4);
-}
-.jv-brand-foot {
-	display: flex;
-	align-items: center;
-	gap: 12px;
-	margin-top: 24px;
-}
-.jv-brand-err {
-	color: var(--red, #e5484d);
-	font-size: 12px;
-}
-.jv-brand-ok {
-	color: var(--green, #30a46c);
-	font-size: 12px;
-}
-</style>

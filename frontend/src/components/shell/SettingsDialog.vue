@@ -24,8 +24,10 @@
 			     brand-token comment in main.css, and ConfirmDialog, which does the
 			     same thing for the same reason). Dialog portals this content into
 			     <body>, so it cannot inherit the palette from ChatView's root.
-			     Panes still on legacy markup (AiModelsPane and the LlmPoolEditor
-			     under it, BrandingPane) would otherwise render with every var(--)
+			     Every settings pane is now migrated to frappe-ui + semantic tokens;
+			     the one thing left on legacy markup is LlmPoolEditor (rendered
+			     inside AiModelsPane, deliberately deferred to its own PR -
+			     jarvis#406). It would otherwise render with every var(--)
 			     unresolved, and not one of the 161 in settings.css carries a
 			     fallback. Worst in dark mode: frappe-ui chrome themes correctly
 			     around a pane that has lost its backgrounds and borders. -->
@@ -65,11 +67,12 @@
 				</div>
 
 				<!-- ===== active pane =====
-				     flex-col matters: panes not yet migrated (AiModelsPane) still
-				     render `.jv-settings-body`, whose `flex:1; overflow-y:auto`
-				     only becomes a scroll region inside a flex-column parent. On a
-				     plain block wrapper their content would clip silently with no
-				     scrollbar. -->
+				     flex-col matters: every pane's SettingsPane frame is `h-full`,
+				     which only resolves against a flex-column ancestor with a
+				     definite height. AiModelsPane's jv-pane-fill wrapper around
+				     LlmPoolEditor needs the same thing for its save bar to sink to
+				     the bottom. On a plain block wrapper both would clip silently
+				     with no scrollbar. -->
 				<div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<component :is="pane" />
 				</div>
