@@ -45,6 +45,32 @@ class _FakeRequest:
 		return self._body
 
 
+SIGNATURE_HEADERS = ("X-Jarvis-Signature", "X-Jarvis-Nonce", "X-Jarvis-Timestamp")
+
+
+def sign_plugin_headers(token: str, session_key: str, body: bytes = b"") -> dict[str, str]:
+	"""Build the three signature headers the bench now requires (JF-014).
+
+	Mirrors ``signRequest`` in jarvis-openclaw-plugin's frappe-client.ts:
+	HMAC-SHA256 over "session | sha256(body) | nonce | timestamp", keyed by
+	the gateway token. A fresh nonce per call keeps the Redis dedup window
+	from rejecting back-to-back calls in the same test.
+	"""
+	import hashlib
+	import hmac as _hmac
+	import secrets
+	import time
+
+	nonce = secrets.token_hex(16)
+	ts = str(int(time.time()))
+	canonical = "|".join([session_key, hashlib.sha256(body).hexdigest(), nonce, ts]).encode("utf-8")
+	return {
+		"X-Jarvis-Signature": _hmac.new(token.encode("utf-8"), canonical, hashlib.sha256).hexdigest(),
+		"X-Jarvis-Nonce": nonce,
+		"X-Jarvis-Timestamp": ts,
+	}
+
+
 class TestCallToolPluginAuth(FrappeTestCase):
 	"""Plugin-auth path: X-Jarvis-Token + X-Jarvis-Session → Frappe resolves
 	the user from Jarvis Chat Session and dispatches as them.
@@ -86,13 +112,34 @@ class TestCallToolPluginAuth(FrappeTestCase):
 		frappe.db.commit()
 		super().tearDownClass()
 
-	def _with_headers(self, headers: dict[str, str], *, body: bytes = b"", request_ip: str = "127.0.0.1"):
+	def _with_headers(
+		self,
+		headers: dict[str, str],
+		*,
+		body: bytes = b"",
+		request_ip: str = "127.0.0.1",
+		sign: bool = True,
+	):
 		"""Context manager: fakes ``frappe.request`` AND
 		``frappe.local.request_ip``. Defaults to loopback so the
 		C2 IP-allowlist check passes; tests targeting the IP path
 		pass a different ``request_ip``.
+
+		Since JF-014 the bench requires signed plugin requests, so bearer +
+		session headers are auto-signed here (what every shipped plugin
+		build does). These tests are about session→user resolution, not the
+		signature; ``sign=False`` opts out.
 		"""
 		import contextlib
+
+		if (
+			sign
+			and headers.get("X-Jarvis-Token")
+			and headers.get("X-Jarvis-Session")
+			and not any(h in headers for h in SIGNATURE_HEADERS)
+		):
+			headers = dict(headers)
+			headers.update(sign_plugin_headers(headers["X-Jarvis-Token"], headers["X-Jarvis-Session"], body))
 
 		req_patch = patch.object(frappe, "request", _FakeRequest(headers, body=body), create=True)
 
@@ -359,13 +406,18 @@ class _PluginAuthTestBase(FrappeTestCase):
 
 		return _combined()
 
-	def _call(self, *, request_ip="127.0.0.1", extra_headers=None, body=b""):
+	def _call(self, *, request_ip="127.0.0.1", extra_headers=None, body=b"", sign=True):
 		headers = {
 			"X-Jarvis-Token": self.TOKEN,
 			"X-Jarvis-Session": self.SESSION_KEY,
 		}
 		if extra_headers:
 			headers.update(extra_headers)
+		# JF-014: signed is the production default. Tests that drive the
+		# signature themselves already supply the headers; the legacy
+		# bearer-only path is exercised explicitly with sign=False.
+		if sign and not any(h in headers for h in SIGNATURE_HEADERS):
+			headers.update(sign_plugin_headers(self.TOKEN, self.SESSION_KEY, body))
 		with self._with_headers(headers, body=body, request_ip=request_ip):
 			with patch("jarvis.api._persist_and_publish_tool_call"):
 				return call_tool(tool="get_schema", args={"doctype": "Customer"})
@@ -502,6 +554,119 @@ class TestC2HmacSignature(_PluginAuthTestBase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "AuthenticationError")
 		self.assertIn("nonce", result["error"]["message"].lower())
+
+
+class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
+	"""JF-014 (2026-07-26): the unsigned bearer-only path is retired.
+
+	A request carrying none of the three signature headers used to be
+	accepted on bearer + session alone, so a captured agent_token replayed
+	arbitrary unsigned tool bodies. Enforcement is now the default; the
+	site_config key ``jarvis_plugin_allow_unsigned`` is the documented,
+	WARN-logged escape hatch for un-upgraded self-hosted plugins.
+	"""
+
+	CONF_KEY = "jarvis_plugin_allow_unsigned"
+	_ABSENT = object()
+
+	def setUp(self):
+		super().setUp()
+		# The rate-limit counter is keyed on the session, which this class
+		# shares with TestC2RateLimit - and that class deliberately leaves
+		# the bucket exhausted for up to 60s.
+		try:
+			frappe.cache().delete(f"jarvis:plugin_rl:{self.SESSION_KEY}")
+		except Exception:
+			pass
+
+	def _conf(self, value):
+		"""Set the escape-hatch site_config key for the duration of the
+		block. ``value=self._ABSENT`` removes the key entirely (the state
+		of every bench that never opted in)."""
+		import contextlib
+
+		@contextlib.contextmanager
+		def _ctx():
+			conf = frappe.local.conf
+			missing = object()
+			prior = conf.get(self.CONF_KEY, missing)
+			if value is self._ABSENT:
+				conf.pop(self.CONF_KEY, None)
+			else:
+				conf[self.CONF_KEY] = value
+			try:
+				yield
+			finally:
+				if prior is missing:
+					conf.pop(self.CONF_KEY, None)
+				else:
+					conf[self.CONF_KEY] = prior
+
+		return _ctx()
+
+	def test_unsigned_request_rejected_by_default(self):
+		"""The enforcement guard: delete the reject branch in
+		_plugin_auth and this test fails."""
+		with self._conf(self._ABSENT):
+			result = self._call(sign=False)
+		self.assertFalse(result["ok"], msg=result)
+		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+		self.assertEqual(frappe.local.response.http_status_code, 400)
+		self.assertIn("signature headers required", result["error"]["message"])
+
+	def test_signed_request_still_accepted_with_flag_off(self):
+		"""No regression for the path every shipped plugin build uses."""
+		with self._conf(self._ABSENT):
+			result = self._call()
+		self.assertTrue(result["ok"], msg=result)
+
+	def test_off_or_junk_flag_values_keep_enforcement(self):
+		"""Fail closed: only an explicit on-literal re-opens the path."""
+		for value in (self._ABSENT, 0, "0", "", None, False, "false", "no", "maybe"):
+			with self.subTest(flag=value), self._conf(value):
+				result = self._call(sign=False)
+				self.assertFalse(result["ok"], msg=f"flag={value!r} allowed an unsigned request")
+				self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+
+	def test_partial_signature_headers_rejected_regardless_of_flag(self):
+		"""The escape hatch re-enables *unsigned* requests, never
+		half-signed ones - that shape is a downgrade attempt."""
+		for value in (self._ABSENT, 0, 1):
+			with self.subTest(flag=value), self._conf(value):
+				result = self._call(extra_headers={"X-Jarvis-Signature": "a" * 64})
+				self.assertFalse(result["ok"], msg=f"flag={value!r} allowed partial headers")
+				self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+				self.assertIn("partial signature", result["error"]["message"].lower())
+
+	def test_unsigned_allowed_when_flag_on_and_warns_with_sunset_date(self):
+		from unittest.mock import MagicMock
+
+		from jarvis import _plugin_auth
+
+		logger = MagicMock()
+		with self._conf(1), patch.object(_plugin_auth.frappe, "logger", return_value=logger):
+			result = self._call(sign=False)
+		self.assertTrue(result["ok"], msg=result)
+		warned = " ".join(str(arg) for call in logger.warning.call_args_list for arg in call.args)
+		self.assertIn("DEPRECATED unsigned request", warned)
+		self.assertIn(_plugin_auth._UNSIGNED_SUNSET_DATE, warned)
+		self.assertIn(self.CONF_KEY, warned)
+
+	def test_legacy_allowed_requests_are_counted(self):
+		"""Operators need a number to watch before flipping the flag off."""
+		from jarvis import _plugin_auth
+
+		cache = frappe.cache()
+		key = _plugin_auth._UNSIGNED_COUNTER_PREFIX + frappe.utils.today()
+		try:
+			cache.delete(key)
+		except Exception:
+			self.skipTest("cache unavailable")
+		with self._conf(1):
+			self.assertTrue(self._call(sign=False)["ok"])
+			self.assertTrue(self._call(sign=False)["ok"])
+		raw = cache.get(key)
+		self.assertEqual(int(raw.decode() if isinstance(raw, bytes) else raw), 2)
 
 
 class TestRotateAgentTokenEndpoint(FrappeTestCase):
