@@ -31,6 +31,11 @@ const _page = (p = {}) => ({
 //             last_run: {status, finished_at} | null}]}
 export const getAppLearningOverview = () => call(AL + "get_app_learning_overview").then(unwrap);
 
+// -> [{app, title, installed_version, path_ok, approx_files, approx_kb, last_run}]
+// The learnable-app roster on its own (no legacy run rollup), for the Custom App
+// Learning agent's per-run app selection + consent.
+export const listCustomApps = () => call(AL + "list_custom_apps").then(unwrap);
+
 // apps: array of app names (JSON-encoded, the batch_approve/deleteTriggersBulk
 // idiom); when: "" = run now | "YYYY-MM-DD HH:mm:ss" (SITE timezone) = schedule
 // once. consent is always 1 - this wrapper is only ever called from the

@@ -41,184 +41,244 @@
 			</template>
 		</div>
 
-		<!-- coverage-honesty banner: a truncated scan must NEVER read as all-clear -->
-		<div
-			v-if="coverageWarning"
-			class="mt-4 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
-		>
-			<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
-			<span> Partial scan - {{ coverageNote }}. Treat gaps as unreviewed, not clean. </span>
-		</div>
-
-		<!-- failed run: surface the error; no findings snapshot was recorded -->
-		<div
-			v-if="run.status === 'failed'"
-			class="mt-4 flex items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
-		>
-			<FeatherIcon name="x-circle" class="mt-0.5 size-4 shrink-0" />
-			<span>{{ run.error || "This run failed before recording findings." }}</span>
-		</div>
-
-		<!-- state-filter chips (all/open/acknowledged/resolved) -->
-		<div class="mt-5 flex items-center gap-2">
-			<Button
-				v-for="c in STATE_CHIPS"
-				:key="c.value"
-				:label="c.label"
-				:variant="stateFilter === c.value ? 'solid' : 'subtle'"
-				@click="stateFilter = c.value"
-			/>
-		</div>
-
-		<div v-if="loading && !rows.length" class="flex justify-center py-10">
-			<LoadingIndicator class="size-5 text-ink-gray-5" />
-		</div>
-		<!-- persistent fetch-error state: a failed load must never read as "No findings" -->
-		<div v-else-if="loadError && !rows.length" class="py-8 text-sm text-ink-red-4">
-			{{ loadError }}
-		</div>
-		<div v-else-if="!rows.length" class="py-8 text-sm text-ink-gray-5">
-			{{ emptyText }}
-		</div>
-
-		<!-- findings grouped by severity: blocker → warning → note -->
-		<div v-for="group in groups" :key="group.severity" class="mt-5">
-			<div class="flex items-center gap-2">
-				<span class="text-base font-semibold text-ink-gray-9">
-					{{ SEVERITY_LABEL[group.severity] }}
-				</span>
-				<!-- true server-side count (envelope severity_counts), not the loaded slice -->
-				<span class="text-sm text-ink-gray-5">({{ groupCount(group) }})</span>
+		<!-- Scribe run: a Custom App Learning agent writes wiki pages, not findings.
+		     Show the pages it wrote (with links) instead of a findings list, so a
+		     successful run reads as "N pages written", never a failure / "0 findings". -->
+		<template v-if="isScribe">
+			<div
+				v-if="run.status === 'failed'"
+				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
+			>
+				<FeatherIcon name="x-circle" class="mt-0.5 size-4 shrink-0" />
+				<span>{{ run.error || "This run failed before writing any pages." }}</span>
 			</div>
-			<div class="mt-2 divide-y overflow-hidden rounded-lg border">
-				<div v-for="f in group.rows" :key="f.name">
-					<!-- collapsed row (div, not button - it hosts the state select);
+			<div
+				v-else-if="run.coverage_note"
+				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
+			>
+				<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
+				<span>{{ coverageNote }}.</span>
+			</div>
+
+			<div class="mt-5 text-base font-medium text-ink-gray-9">
+				{{ scribePages.length || run.pages_written || 0 }} wiki page{{
+					(scribePages.length || run.pages_written || 0) === 1 ? "" : "s"
+				}}
+				written
+			</div>
+			<div v-if="scribePages.length" class="mt-2 divide-y overflow-hidden rounded-lg border">
+				<a
+					v-for="p in scribePages"
+					:key="p.slug"
+					:href="wikiUrl(p.slug)"
+					target="_blank"
+					rel="noopener"
+					class="flex items-center gap-2 px-3 py-2.5 hover:bg-surface-gray-1"
+				>
+					<FeatherIcon name="book-open" class="size-4 shrink-0 text-ink-gray-5" />
+					<span class="min-w-0 flex-1 truncate text-base text-ink-gray-8">
+						{{ p.title || p.slug }}
+					</span>
+					<FeatherIcon name="external-link" class="size-3.5 shrink-0 text-ink-gray-5" />
+				</a>
+			</div>
+			<div v-else-if="run.status === 'running'" class="mt-2 py-6 text-sm text-ink-gray-5">
+				Run in progress - pages appear here as they are written.
+			</div>
+			<div v-else class="mt-2 py-6 text-sm text-ink-gray-5">
+				No wiki pages were written this run.
+			</div>
+		</template>
+
+		<template v-else>
+			<!-- coverage-honesty banner: a truncated scan must NEVER read as all-clear -->
+			<div
+				v-if="coverageWarning"
+				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
+			>
+				<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
+				<span>
+					Partial scan - {{ coverageNote }}. Treat gaps as unreviewed, not clean.
+				</span>
+			</div>
+
+			<!-- failed run: surface the error; no findings snapshot was recorded -->
+			<div
+				v-if="run.status === 'failed'"
+				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
+			>
+				<FeatherIcon name="x-circle" class="mt-0.5 size-4 shrink-0" />
+				<span>{{ run.error || "This run failed before recording findings." }}</span>
+			</div>
+
+			<!-- state-filter chips (all/open/acknowledged/resolved) -->
+			<div class="mt-5 flex items-center gap-2">
+				<Button
+					v-for="c in STATE_CHIPS"
+					:key="c.value"
+					:label="c.label"
+					:variant="stateFilter === c.value ? 'solid' : 'subtle'"
+					@click="stateFilter = c.value"
+				/>
+			</div>
+
+			<div v-if="loading && !rows.length" class="flex justify-center py-10">
+				<LoadingIndicator class="size-5 text-ink-gray-5" />
+			</div>
+			<!-- persistent fetch-error state: a failed load must never read as "No findings" -->
+			<div v-else-if="loadError && !rows.length" class="py-8 text-sm text-ink-red-4">
+				{{ loadError }}
+			</div>
+			<div v-else-if="!rows.length" class="py-8 text-sm text-ink-gray-5">
+				{{ emptyText }}
+			</div>
+
+			<!-- findings grouped by severity: blocker → warning → note -->
+			<div v-for="group in groups" :key="group.severity" class="mt-5">
+				<div class="flex items-center gap-2">
+					<span class="text-base font-semibold text-ink-gray-9">
+						{{ SEVERITY_LABEL[group.severity] }}
+					</span>
+					<!-- true server-side count (envelope severity_counts), not the loaded slice -->
+					<span class="text-sm text-ink-gray-5">({{ groupCount(group) }})</span>
+				</div>
+				<div class="mt-2 divide-y overflow-hidden rounded-lg border">
+					<div v-for="f in group.rows" :key="f.name">
+						<!-- collapsed row (div, not button - it hosts the state select);
 					     role/tabindex + enter/space keep it keyboard-operable -->
-					<div
-						role="button"
-						tabindex="0"
-						:aria-expanded="isExpanded(f.name)"
-						class="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-gray-1"
-						@click="toggleExpand(f.name)"
-						@keydown.enter.prevent="toggleExpand(f.name)"
-						@keydown.space.prevent="toggleExpand(f.name)"
-					>
-						<FeatherIcon
-							name="chevron-right"
-							class="size-4 shrink-0 text-ink-gray-5 transition-all duration-300 ease-in-out"
-							:class="{ 'rotate-90': isExpanded(f.name) }"
-						/>
-						<Badge
-							class="shrink-0"
-							variant="subtle"
-							:theme="SEVERITY_THEME[f.severity] || 'gray'"
-							:label="severityBadgeLabel(f.severity)"
-						/>
-						<span class="w-20 shrink-0 truncate font-mono text-sm text-ink-gray-5">
-							{{ f.rule_id || "-" }}
-						</span>
-						<span class="min-w-0 flex-1 truncate text-base text-ink-gray-8">
-							{{ f.title }}
-						</span>
-						<span
-							v-if="f.amount != null && f.amount !== ''"
-							class="shrink-0 text-right text-base text-ink-gray-8"
+						<div
+							role="button"
+							tabindex="0"
+							:aria-expanded="isExpanded(f.name)"
+							class="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-gray-1"
+							@click="toggleExpand(f.name)"
+							@keydown.enter.prevent="toggleExpand(f.name)"
+							@keydown.space.prevent="toggleExpand(f.name)"
 						>
-							{{ fmtAmount(f.amount) }}
-						</span>
-						<Badge
-							class="shrink-0"
-							variant="subtle"
-							:theme="RECURRENCE_THEME[f.recurrence] || 'gray'"
-							:label="RECURRENCE_LABEL[f.recurrence] || 'New'"
-						/>
-						<!-- stop keydown too: enter/space on the select must not toggle the row -->
-						<div class="w-36 shrink-0" @click.stop @keydown.stop>
-							<FormControl
-								type="select"
-								:options="STATE_OPTIONS"
-								:modelValue="f.state"
-								:disabled="busy === f.name"
-								@update:modelValue="(v) => moveFinding(f, v)"
+							<FeatherIcon
+								name="chevron-right"
+								class="size-4 shrink-0 text-ink-gray-5 transition-all duration-300 ease-in-out"
+								:class="{ 'rotate-90': isExpanded(f.name) }"
 							/>
-						</div>
-					</div>
-
-					<!-- expanded: the recorded detail - detail_md, the referenced
-					     document, the statutory caveat, and the finding actions -->
-					<div v-if="isExpanded(f.name)" class="border-t bg-surface-gray-1 px-4 py-3">
-						<!-- O1: renderMarkdown from @/markdown (escapes HTML first - safe) -->
-						<div
-							v-if="f.detail_md"
-							class="prose prose-sm max-w-none"
-							v-html="renderMarkdown(f.detail_md)"
-						/>
-						<div v-else class="text-sm text-ink-gray-5">
-							No further detail recorded.
-						</div>
-
-						<div
-							v-if="f.ref_doctype && f.ref_name"
-							class="mt-3 flex items-center gap-2 text-sm"
-						>
-							<span class="shrink-0 text-ink-gray-5">Reference</span>
-							<a
-								:href="refUrl(f)"
-								target="_blank"
-								rel="noopener"
-								class="flex min-w-0 items-center gap-1 text-ink-gray-8 hover:underline"
+							<Badge
+								class="shrink-0"
+								variant="subtle"
+								:theme="SEVERITY_THEME[f.severity] || 'gray'"
+								:label="severityBadgeLabel(f.severity)"
+							/>
+							<span class="w-20 shrink-0 truncate font-mono text-sm text-ink-gray-5">
+								{{ f.rule_id || "-" }}
+							</span>
+							<span class="min-w-0 flex-1 truncate text-base text-ink-gray-8">
+								{{ f.title }}
+							</span>
+							<span
+								v-if="f.amount != null && f.amount !== ''"
+								class="shrink-0 text-right text-base text-ink-gray-8"
 							>
-								<span class="truncate">{{ f.ref_doctype }} {{ f.ref_name }}</span>
-								<FeatherIcon
-									name="external-link"
-									class="size-3.5 shrink-0 text-ink-gray-5"
+								{{ fmtAmount(f.amount) }}
+							</span>
+							<Badge
+								class="shrink-0"
+								variant="subtle"
+								:theme="RECURRENCE_THEME[f.recurrence] || 'gray'"
+								:label="RECURRENCE_LABEL[f.recurrence] || 'New'"
+							/>
+							<!-- stop keydown too: enter/space on the select must not toggle the row -->
+							<div class="w-36 shrink-0" @click.stop @keydown.stop>
+								<FormControl
+									type="select"
+									:options="STATE_OPTIONS"
+									:modelValue="f.state"
+									:disabled="busy === f.name"
+									@update:modelValue="(v) => moveFinding(f, v)"
 								/>
-							</a>
+							</div>
 						</div>
 
-						<!-- statutory caveat: the recorded basis, never a fabricated fix -->
+						<!-- expanded: the recorded detail - detail_md, the referenced
+					     document, the statutory caveat, and the finding actions -->
 						<div
-							v-if="f.section || f.effective_date || f.disclaimer"
-							class="mt-3 rounded bg-surface-gray-2 px-3 py-2 text-xs text-ink-gray-5"
+							v-if="isExpanded(f.name)"
+							class="border-t bg-surface-gray-1 px-4 py-3"
 						>
-							{{ caveatText(f) }}
-						</div>
+							<!-- O1: renderMarkdown from @/markdown (escapes HTML first - safe) -->
+							<div
+								v-if="f.detail_md"
+								class="prose prose-sm max-w-none"
+								v-html="renderMarkdown(f.detail_md)"
+							/>
+							<div v-else class="text-sm text-ink-gray-5">
+								No further detail recorded.
+							</div>
 
-						<div class="mt-3 flex items-center gap-2">
-							<Button
-								variant="subtle"
-								label="Discuss in chat"
-								iconLeft="message-circle"
-								:loading="chatBusy === f.name"
-								:disabled="!!chatBusy && chatBusy !== f.name"
-								@click="discussInChat(f)"
-							/>
-							<Button
+							<div
 								v-if="f.ref_doctype && f.ref_name"
-								variant="subtle"
-								label="Open document"
-								iconLeft="external-link"
-								@click="openDocument(f)"
-							/>
+								class="mt-3 flex items-center gap-2 text-sm"
+							>
+								<span class="shrink-0 text-ink-gray-5">Reference</span>
+								<a
+									:href="refUrl(f)"
+									target="_blank"
+									rel="noopener"
+									class="flex min-w-0 items-center gap-1 text-ink-gray-8 hover:underline"
+								>
+									<span class="truncate"
+										>{{ f.ref_doctype }} {{ f.ref_name }}</span
+									>
+									<FeatherIcon
+										name="external-link"
+										class="size-3.5 shrink-0 text-ink-gray-5"
+									/>
+								</a>
+							</div>
+
+							<!-- statutory caveat: the recorded basis, never a fabricated fix -->
+							<div
+								v-if="f.section || f.effective_date || f.disclaimer"
+								class="mt-3 rounded bg-surface-gray-2 px-3 py-2 text-xs text-ink-gray-5"
+							>
+								{{ caveatText(f) }}
+							</div>
+
+							<div class="mt-3 flex items-center gap-2">
+								<Button
+									variant="subtle"
+									label="Discuss in chat"
+									iconLeft="message-circle"
+									:loading="chatBusy === f.name"
+									:disabled="!!chatBusy && chatBusy !== f.name"
+									@click="discussInChat(f)"
+								/>
+								<Button
+									v-if="f.ref_doctype && f.ref_name"
+									variant="subtle"
+									label="Open document"
+									iconLeft="external-link"
+									@click="openDocument(f)"
+								/>
+							</div>
 						</div>
 					</div>
 				</div>
 			</div>
-		</div>
 
-		<!-- coverage honesty: the page cap must never be silent - always say how
+			<!-- coverage honesty: the page cap must never be silent - always say how
 		     much of the run is on screen, and offer the rest -->
-		<div v-if="rows.length" class="mt-4 flex items-center justify-between gap-2">
-			<Button
-				v-if="hasMore"
-				variant="subtle"
-				label="Load more"
-				:loading="loading"
-				@click="loadMore()"
-			/>
-			<div v-else />
-			<span class="text-sm text-ink-gray-5">Showing {{ rows.length }} of {{ total }}</span>
-		</div>
+			<div v-if="rows.length" class="mt-4 flex items-center justify-between gap-2">
+				<Button
+					v-if="hasMore"
+					variant="subtle"
+					label="Load more"
+					:loading="loading"
+					@click="loadMore()"
+				/>
+				<div v-else />
+				<span class="text-sm text-ink-gray-5"
+					>Showing {{ rows.length }} of {{ total }}</span
+				>
+			</div>
+		</template>
 	</div>
 </template>
 
@@ -250,7 +310,9 @@ import { takeFindingToChat } from "@/api/agents";
 const props = defineProps({
 	// full row from list_runs_page: {name, status, trigger, started_at,
 	// finished_at, conversation, dashboard, findings_count, blocker_count,
-	// error, coverage_note, ...}. `dashboard` is the saved Jarvis Dashboard
+	// error, coverage_note, nature, pages_written, pages_json, ...}. `nature`
+	// + `pages_written`/`pages_json` drive the scribe branch (wiki pages instead
+	// of findings); `dashboard` is the saved Jarvis Dashboard
 	// name (Run.dashboard); the run header links to /dashboards/:id when set.
 	// NB: list_runs_page must include `dashboard` in its fields for the link to
 	// appear (cross-file — see report notes).
@@ -310,6 +372,23 @@ const coverageNote = computed(() => {
 	// the sentence supplies its own terminal punctuation
 	return note.replace(/[.\s]+$/, "") || "some records were not reviewed";
 });
+
+// Scribe runs (Custom App Learning) write wiki pages, not findings: render the
+// pages tally + links instead of the findings machinery.
+const isScribe = computed(() => props.run && props.run.nature === "Scribe");
+const scribePages = computed(() => {
+	try {
+		const arr = JSON.parse(props.run.pages_json || "[]");
+		return Array.isArray(arr) ? arr.filter((p) => p && p.slug) : [];
+	} catch {
+		return [];
+	}
+});
+// The wiki page docname IS its slug (autoname field:slug), so the desk form
+// opens the exact page an admin can read/edit.
+function wikiUrl(slug) {
+	return `/app/jarvis-wiki-page/${encodeURIComponent(slug)}`;
+}
 const emptyText = computed(() => {
 	if (props.run.status === "running")
 		return "Run in progress - findings appear when it completes.";
@@ -349,6 +428,8 @@ function severityBadgeLabel(sev) {
 let reqId = 0;
 async function load({ append = false } = {}) {
 	if (!props.run || !props.run.name) return;
+	// a scribe run has no findings snapshot to fetch — its pages come inline
+	if (isScribe.value) return;
 	const id = ++reqId;
 	loading.value = true;
 	try {

@@ -19,6 +19,7 @@
   "installed_version",
   "installed_at",
   "config",
+  "source_apps_json",
   "sync_status",
   "synced_at",
   "schedule_section",
@@ -50,9 +51,9 @@
    "fieldtype": "Link",
    "label": "Run As User",
    "options": "User",
-   "reqd": 1,
+   "mandatory_depends_on": "eval:doc.enabled",
    "in_list_view": 1,
-   "description": "The Frappe user this agent's runs execute AS: every jarvis__* ERP read is permission-bounded to this user (company scope, role perms), decoupled from the row owner. A non-admin installer may only map the agent to run as themselves; any cross-user mapping needs Jarvis Admin, and binding to a System Manager needs a System Manager. Defaults to the installer."
+   "description": "The Frappe user this agent's runs execute AS: every jarvis__* ERP read is permission-bounded to this user (company scope, role perms), decoupled from the row owner. Required to ENABLE the install (enforced in validate(); a disabled install runs nothing, and legacy rows carrying no run-as user must stay disableable). A non-admin installer may only map the agent to run as themselves; any cross-user mapping needs Jarvis Admin, and binding to a System Manager needs a System Manager. Defaults to the installer."
   },
   {
    "default": "0",
@@ -79,6 +80,13 @@
    "fieldtype": "Long Text",
    "label": "Config (JSON)",
    "description": "Engagement inputs for this install (benchmark, percentage, engagement_risk_level, company, ...). The delegate reads it on its installation on the next run."
+  },
+  {
+   "fieldname": "source_apps_json",
+   "fieldtype": "Small Text",
+   "label": "Authorized Source Apps (JSON)",
+   "read_only": 1,
+   "description": "CX5-2 — Custom App Learning only: the JSON list of custom apps an admin explicitly authorized this installation to read source from, set by run_agent_now from the launching admin's selection. Scheduled runs REUSE this selection and are SKIPPED when it is empty (a scribe never reads unbounded)."
   },
   {
    "fieldname": "sync_status",
@@ -186,7 +194,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-07-04 20:30:00.000000",
+ "modified": "2026-07-25 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Installation",

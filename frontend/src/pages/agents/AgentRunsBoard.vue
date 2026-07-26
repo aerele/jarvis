@@ -51,7 +51,18 @@
 										· {{ row.trigger || "manual" }}
 									</span>
 								</div>
-								<div class="mt-1 truncate text-sm text-ink-gray-5">
+								<!-- a scribe writes wiki pages, not findings — show its pages
+								     tally so a successful run never reads as "0 findings" -->
+								<div
+									v-if="row.nature === 'Scribe'"
+									class="mt-1 truncate text-sm text-ink-gray-5"
+								>
+									{{ row.pages_written || 0 }} page{{
+										(row.pages_written || 0) === 1 ? "" : "s"
+									}}
+									written
+								</div>
+								<div v-else class="mt-1 truncate text-sm text-ink-gray-5">
 									{{ row.findings_count || 0 }} finding{{
 										(row.findings_count || 0) === 1 ? "" : "s"
 									}}

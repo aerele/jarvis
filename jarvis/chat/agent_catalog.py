@@ -126,6 +126,24 @@ def sync_agent_listings() -> dict:
 			updated += 1
 		else:
 			doc = frappe.get_doc({"doctype": LISTING, **values})
+			# Role restriction seed (INSERT branch ONLY): a manifest may declare
+			# ``default_allowed_roles`` to ship its install/run restriction ON BY
+			# DEFAULT (the Custom App Learning scribe seeds System Manager + Jarvis
+			# Admin, so it is admin-only out of the box). Seeded ONLY on first sync
+			# — the UPDATE branch above never touches ``allowed_roles``, so a
+			# re-sync can NEVER clobber an admin's later role edits (the
+			# bench-admin-state invariant, agent_catalog.py note above). Enforcement
+			# is unchanged (server-side at install AND run); this only sets the
+			# default. Unknown roles are skipped so a seed can never fail a migrate.
+			seed_roles = a.get("default_allowed_roles") or []
+			if isinstance(seed_roles, list):
+				rows = [
+					{"role": r}
+					for r in seed_roles
+					if isinstance(r, str) and r.strip() and frappe.db.exists("Role", r.strip())
+				]
+				if rows:
+					doc.set("allowed_roles", rows)
 			doc.flags.ignore_permissions = True
 			doc.insert()
 			created += 1
@@ -170,7 +188,14 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	RBAC (defense in depth): an enabled install whose OWNER's roles no longer
 	permit the agent is EXCLUDED from the push — the scheduler / run-now gates
 	already refuse to run it, but its enablement signal must not reach the
-	container either."""
+	container either. Identity (CX1-1, the same reasoning): an enabled install with
+	a BLANK run-as user is EXCLUDED too — R1-F3 refuses it at every dispatch path,
+	so pushing it would advertise an agent this bench can never run.
+
+	Installs are per-(owner, agent) but the payload is bench-global and keyed by
+	SLUG, so two users each enabling the SAME agent are ONE entry, not two —
+	emitted with UNION semantics (the slug ships if ANY enabled install clears the
+	gates)."""
 	# Lazy import — agents_api imports build_agent_push_payload from this module
 	# at module level, so a top-level back-import would be circular.
 	from jarvis.chat.agents_api import _user_allowed_for_agent
@@ -191,17 +216,72 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	installs = frappe.get_all(
 		"Jarvis Agent Installation",
 		filters=filters,
-		fields=["agent", "owner", "installable"],
-		order_by="agent asc",
+		fields=["agent", "owner", "installable", "run_as_user"],
+		# ``agent`` alone is not a total order once two owners install the same
+		# agent; the ``name`` tiebreak makes the iteration — and therefore which
+		# install wins the de-dupe below — stable across runs. The payload is a
+		# FULL RECONCILE that admin/fleet diffs against the container's current
+		# roster, so a wobbling order would read as a change.
+		order_by="agent asc, name asc",
 	)
 	payload = []
+	# De-dupe key: the LISTING DOCNAME (``row.agent``), not the emitted slug, so the
+	# short-circuit below can run BEFORE any query. The two are the same key —
+	# ``Jarvis Agent Listing`` is named ``field:agent_slug`` and ``agent_slug`` is
+	# ``unique: 1`` (a DB index), so docname <-> agent_slug is a bijection, and
+	# frappe re-pins the field to the name on every ORM save
+	# (``base_document._sync_autoname_field``, called from ``_validate``). Deduping
+	# on either therefore ships exactly the same set of slugs.
+	seen_agents: set[str] = set()
 	for row in installs:
+		# De-dupe by AGENT. An install is per-(owner, agent) but the container's
+		# agent_skills namespace is per-slug, so two users who each install AND
+		# enable the same agent produce two rows for ONE slug. Admin REJECTS a
+		# payload carrying a duplicate slug outright ("invalid: duplicate agent
+		# skill slug '<x>'"), which kills EVERY agent push from the bench — not just
+		# the duplicated agent.
+		#
+		# Checked FIRST, before the listing lookup and the RBAC gate: once an agent
+		# has been emitted the outcome cannot change — no later row can add or
+		# remove it — so the work those gates do for a second row of the same agent
+		# is spent purely to reach a `continue`. That work is a ``get_value`` on the
+		# listing PLUS ``_user_allowed_for_agent``, which is itself an N+1 on the
+		# allowed-role child table; and this function runs TWICE per Apply (the
+		# endpoint and again in the background job), so at 20 owners x 20 installs
+		# the short-circuit saves ~800 round-trips.
+		#
+		# UNION semantics are unaffected: ``seen_agents`` is only added to AFTER
+		# every gate has passed, so a row blocked by one of them leaves its agent
+		# unseen and the next candidate is still evaluated in full. The slug ships
+		# as soon as ANY enabled install clears the gates.
+		if row.agent in seen_agents:
+			continue
+
 		# R5-J8: a reconcile marks an install ``installable=0`` (never deletes) when
 		# a min_apps dependency vanished AFTER install while it was still enabled.
 		# Its enablement signal must not reach the container — the run gates already
 		# refuse it, and pushing it would install a bundle whose data is absent.
 		if not frappe.utils.cint(row.installable):
 			continue
+
+		# CX1-1: an enabled install with a BLANK run-as user has no executing
+		# identity, so R1-F3 makes every dispatch path refuse it (the scheduler, the
+		# manual run-now, and ``_launch_audit`` — the choke point both funnel
+		# through). Its enablement signal must not reach the container either: the
+		# push would provision the delegate, seat it in the container roster and the
+		# tenant's agent_roster, and so advertise an agent this bench will NEVER run.
+		# Same reasoning as the installability gate above and the RBAC gate below —
+		# schema relaxation (``run_as_user`` is no longer ``reqd``, so a legacy row
+		# stays disableable) must not leave a misconfigured row eligible for the
+		# fleet reconcile just because it is still flagged enabled.
+		#
+		# A PER-ROW gate, like every other one here: it disqualifies THIS row only
+		# and ``continue``s before ``seen_agents.add``, so UNION semantics hold in
+		# both directions — a blank row never suppresses a valid install of the same
+		# agent by another owner, and a blank row alone never ships the slug.
+		if not (row.run_as_user or "").strip():
+			continue
+
 		listing = frappe.db.get_value(
 			LISTING,
 			row.agent,
@@ -213,12 +293,20 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		if not _user_allowed_for_agent(row.agent, row.owner):
 			continue
 
+		# Every gate has passed, so this agent is emitted and no later row for it can
+		# change that: mark it seen. Collapsing the rows is safe because the entry
+		# below is derived purely from the listing row plus the bundled registry —
+		# it carries NO per-install data — so every row for an agent would yield a
+		# byte-identical entry.
+		seen_agents.add(row.agent)
+		slug = f"{AGENT_PREFIX}{listing.agent_slug}"
+
 		# A2 enablement signal — body-free. Admin resolves the SKILL from the
 		# private bundle store by slug (Phase 2C). The body NEVER leaves it.
 		meta = reg_by_slug.get(listing.agent_slug) or {}
 		payload.append(
 			{
-				"slug": f"{AGENT_PREFIX}{listing.agent_slug}",
+				"slug": slug,
 				"delivery": "delegate",
 				"tools_allow": meta.get("tools_allow") or [],
 				"model": meta.get("model") or None,
