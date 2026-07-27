@@ -198,6 +198,141 @@ test("parseSourcesBlock: unwraps double-nested spec ({spec:{spec:{...}}})", () =
 	assert.deepEqual(sources[0].spec, { from: "Sales Invoice" });
 });
 
+test("@layer: a standard theme wraps author <style> in @layer author and wins via @layer theme", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	const html =
+		"<html><head><style>.jd-card{background:#0f172a}</style></head><body><p>x</p></body></html>";
+	const out = buildSrcdoc(html, { theme: THEMES.jarvis });
+	// The theme block declares layer order author-before-theme; in CSS @layer the
+	// LAST-listed layer wins, so `author, theme` => theme beats author regardless
+	// of the author's source order or specificity.
+	assert.ok(out.includes("@layer author, theme;"), "layer order declaration present");
+	assert.ok(out.includes("@layer theme{"), "theme base emitted in @layer theme");
+	// the author's own <style> content is wrapped in @layer author (the loser)
+	assert.ok(
+		out.includes("@layer author{.jd-card{background:#0f172a}}"),
+		"author <style> wrapped in @layer author"
+	);
+	// the theme layer carries the tokens, so a jd-card in @layer theme wins color
+	assert.ok(out.indexOf("@layer theme{") < out.indexOf("--jd-bg:"));
+});
+
+test("@layer: multiple author <style> blocks are each wrapped; empty ones untouched", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	const html =
+		"<head><style>.a{color:var(--jd-ink)}</style></head>" +
+		"<body><style></style><style>.b{color:var(--jd-accent)}</style><p>x</p></body>";
+	const out = buildSrcdoc(html, { theme: THEMES.insight });
+	assert.ok(out.includes("@layer author{.a{color:var(--jd-ink)}}"));
+	assert.ok(out.includes("@layer author{.b{color:var(--jd-accent)}}"));
+	// an empty <style></style> is left as-is (no pointless @layer author{})
+	assert.ok(out.includes("<style></style>"));
+});
+
+test("@layer: an UNCLOSED author <style> is still wrapped in @layer author (F2)", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	// no </style>: the browser applies the CSS to EOF, so it must be layered too or
+	// it beats @layer theme unlayered. We wrap it AND synthesize a closing tag.
+	const out = buildSrcdoc("<body><style>.k{color:#0f172a}</body>", { theme: THEMES.jarvis });
+	assert.ok(
+		out.includes("@layer author{.k{color:#0f172a}}</style>"),
+		"unclosed author style wrapped in @layer author and closed"
+	);
+	// the theme still declares author-before-theme + emits its own theme layer,
+	// so the theme wins the cascade over the now-layered author CSS
+	assert.ok(out.includes("@layer author, theme;"), "layer order declaration present");
+	assert.ok(out.includes("@layer theme{"), "theme layer still emitted");
+});
+
+test("@layer: malformed author CSS with a stray } cannot break out to outrank @layer theme (F#4)", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	// A LEADING stray } would close @layer author{} immediately, leaving .jd-card
+	// UNLAYERED and beating @layer theme. The wrapper must NOT emit it unlayered.
+	const out = buildSrcdoc("<body><style>}.jd-card{color:var(--jd-negative)}</style></body>", {
+		theme: THEMES.jarvis,
+	});
+	// the theme layer machinery is intact (theme still wins for well-formed CSS)
+	assert.ok(out.includes("@layer author, theme;"), "layer order declaration present");
+	assert.ok(out.includes("@layer theme{"), "theme layer emitted");
+	// the malicious author rule is dropped — never emitted unlayered, so it cannot
+	// outrank the theme (and it never rode inside @layer author either)
+	assert.ok(
+		!out.includes(".jd-card{color:var(--jd-negative)}"),
+		"stray-} author rule dropped, not emitted unlayered"
+	);
+	assert.ok(!/@layer author\{\}/.test(out), "no empty-then-escaped @layer author remains");
+	// EXCESS trailing } (closes @layer author early, then .after would be unlayered)
+	const out2 = buildSrcdoc(
+		"<body><style>.evil{color:var(--jd-negative)}} .after{color:var(--jd-accent)}</style></body>",
+		{ theme: THEMES.jarvis }
+	);
+	assert.ok(!out2.includes("@layer author{.evil"), "excess-} block not wrapped");
+	assert.ok(!/\}\s*\.after\s*\{/.test(out2), "nothing left unlayered after the excess }");
+	// a WELL-FORMED author block under the same theme is still wrapped + layered
+	const ok = buildSrcdoc("<body><style>.jd-card{color:#0f172a}</style></body>", {
+		theme: THEMES.jarvis,
+	});
+	assert.ok(
+		ok.includes("@layer author{.jd-card{color:#0f172a}}"),
+		"well-formed CSS still wrapped"
+	);
+});
+
+test("@layer: Custom (bespoke) theme does NOT wrap author styles — author design wins", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	const html = "<style>.jd-card{background:#0f172a}</style><p>x</p>";
+	const out = buildSrcdoc(html, { theme: THEMES.custom });
+	// author CSS stays unlayered (unwrapped) so the bespoke look wins
+	assert.ok(out.includes(".jd-card{background:#0f172a}"));
+	assert.ok(!out.includes("@layer author{"), "no author layer for bespoke");
+	assert.ok(!out.includes("@layer theme{"), "no theme layer for bespoke");
+	// tokens are still injected (unlayered) so var(--jd-*) resolves, and the
+	// palette global is present
+	assert.ok(out.includes("--jd-bg:"));
+	assert.ok(out.includes('"name":"custom"'));
+});
+
+test("@layer: no-theme (legacy dark flag) path is unchanged — no layers, no theme block", () => {
+	const out = buildSrcdoc("<style>.a{color:red}</style><p>x</p>", { dark: true });
+	assert.ok(!out.includes("@layer"), "no @layer without a theme");
+	assert.ok(!out.includes("jarvis-theme"));
+	assert.ok(out.includes(".a{color:red}"), "author style passed through verbatim");
+	assert.ok(out.includes('data-theme="dark"'));
+});
+
+test("@layer: a quoted `>` in a <style> attribute cannot escape @layer author (DR2-2)", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	// The exploit: `<style data-x=">">.jd-card{…}</style>` is valid HTML — the `>`
+	// sits INSIDE a quoted attribute, so the start tag really ends at the LAST `>`.
+	// The prior `<style[^>]*>` regex stopped at the first (quoted) `>`, wrapping it
+	// as `<style data-x=">@layer author{">.jd-card{…}` and leaving `.jd-card`
+	// UNLAYERED, outranking `@layer theme`. The scan-based wrapper keeps it layered.
+	const html = '<style data-x=">">.jd-card{background:var(--jd-negative)}</style>';
+	const out = buildSrcdoc(html, { theme: THEMES.jarvis });
+	// the author CSS is wrapped in @layer author with the quoted attribute intact
+	assert.ok(
+		out.includes(
+			'<style data-x=">">@layer author{.jd-card{background:var(--jd-negative)}}</style>'
+		),
+		"quoted-> style content wrapped in @layer author"
+	);
+	// the old-regex escape (layer opener spliced into the attribute, `.jd-card`
+	// left unlayered) must NOT appear
+	assert.ok(
+		!out.includes('data-x=">@layer author{'),
+		"attribute value not mistaken for tag end"
+	);
+	assert.ok(out.includes("@layer author, theme;"), "layer order declaration present");
+});
+
+test("@layer: an UNQUOTED-attribute <style> is still wrapped (scan parity)", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	const out = buildSrcdoc("<style data-k=v>.a{color:var(--jd-ink)}</style>", {
+		theme: THEMES.insight,
+	});
+	assert.ok(out.includes("<style data-k=v>@layer author{.a{color:var(--jd-ink)}}</style>"));
+});
+
 test("SECURITY: stale openclaw ws-client script is stripped, other scripts kept", () => {
 	const html =
 		"<html><head></head><body><div id=chart></div>" +
@@ -207,4 +342,65 @@ test("SECURITY: stale openclaw ws-client script is stripped, other scripts kept"
 	const out = buildSrcdoc(html, {});
 	assert.ok(out.includes("renderChart()"), "legit script kept");
 	assert.ok(!out.includes("__openclaw__/ws"), "host ws-client stripped");
+});
+
+// DR3-1: a literal "<style" that is NOT a real start tag (inside an attribute
+// value, a <script>/<textarea> body, or a comment) must not desync the wrapper.
+// The prior hand-scanner searched for "<style" from the DATA position and could
+// treat a fake one as a start tag, swallowing the REAL "</style>" and leaving the
+// real rule UNLAYERED (outranking @layer theme). The tokenizer-state walk keeps
+// every real <style> layered regardless.
+const REAL = ".jd-card{background:var(--jd-negative)}";
+
+test("@layer DR3-1: a fake <style> in an ATTRIBUTE cannot desync — real rule stays layered", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	const html = `<div data-x="<style>"></div><style>${REAL}</style>`;
+	const out = buildSrcdoc(html, { theme: THEMES.jarvis });
+	assert.ok(out.includes(`@layer author{${REAL}}`), "real <style> wrapped in @layer author");
+	// the attribute-borne "<style" is part of the <div> tag, never its own token
+	assert.ok(out.includes('<div data-x="<style>">'), "attribute value preserved intact");
+	// the real rule is NEVER emitted bare (unlayered), which would outrank @layer theme
+	assert.ok(
+		!out.includes(`>${REAL}`) && !out.includes(`}${REAL}`),
+		"real rule not left unlayered"
+	);
+	assert.ok(out.includes("@layer author, theme;"), "layer order declaration present");
+});
+
+test("@layer DR3-1: a fake <style>/</style> inside a <script> body is skipped — real rule stays layered", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	const html = `<script>var s="</style><style>evil{}";</script><style>${REAL}</style>`;
+	const out = buildSrcdoc(html, { theme: THEMES.jarvis });
+	assert.ok(
+		out.includes(`@layer author{${REAL}}`),
+		"real <style> after the script stays wrapped"
+	);
+	// the script body's fake CSS is never wrapped as author CSS
+	assert.ok(!out.includes("@layer author{evil{}"), "fake in-script style not wrapped");
+	assert.ok(out.includes('var s="</style><style>evil{}";'), "script body preserved verbatim");
+});
+
+test("@layer DR3-1: attribute + script + comment fakes together, then a real style — still layered", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	const html =
+		`<div title="<style>x{}</style>"></div>` +
+		`<script>document.write("<style>y{}</style>")</script>` +
+		`<!-- <style>z{}</style> -->` +
+		`<style>${REAL}</style>`;
+	const out = buildSrcdoc(html, { theme: THEMES.jarvis });
+	assert.ok(out.includes(`@layer author{${REAL}}`), "real rule stays layered past every fake");
+	for (const fake of ["x{}", "y{}", "z{}"]) {
+		assert.ok(
+			!out.includes(`@layer author{${fake}}`),
+			`fake ${fake} not wrapped as author CSS`
+		);
+	}
+});
+
+test("@layer DR3-1: an abrupt-closing empty comment <!--> does not swallow the real style", async () => {
+	const { THEMES } = await import("./dashboardThemes.js");
+	// <!--> is a COMPLETE empty comment in HTML; the <style> after it is REAL, so it
+	// must be wrapped (a naive scan-to-`-->` would skip to EOF and miss it).
+	const out = buildSrcdoc(`<!--><style>${REAL}</style>`, { theme: THEMES.jarvis });
+	assert.ok(out.includes(`@layer author{${REAL}}`), "real style after <!--> stays layered");
 });

@@ -10,6 +10,19 @@ class PermissionDeniedError(JarvisError):
 	"""Raised when the calling user lacks permission for the requested operation."""
 
 
+class CapabilityDeniedError(JarvisError):
+	"""JF-017 — a marketplace-agent delegate called a tool outside the capability
+	contract snapshotted onto its ``Jarvis Agent Run`` at launch.
+
+	Deliberately NOT a ``PermissionDeniedError``: the run-as user's Frappe rights
+	are irrelevant here. The AGENT never declared the tool, and the snapshot is
+	immutable for the life of the run — so unlike a permission denial (which an
+	administrator can resolve mid-run) the answer is FIXED. Retrying, renaming the
+	tool or changing the arguments can never turn it into a yes; that is what the
+	``_ERROR_HINTS`` entry tells the delegate, so it stops burning turns on it.
+	"""
+
+
 class InvalidArgumentError(JarvisError):
 	"""Raised when tool arguments fail validation."""
 

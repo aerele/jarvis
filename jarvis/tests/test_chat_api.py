@@ -6,6 +6,8 @@ real chat history previously wiped that history; the fixture user keeps
 test cleanups scoped to disposable rows.
 """
 
+import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
@@ -1048,3 +1050,37 @@ class TestConversationOwnershipEnforcement(_ChatTestCase):
 			self.assertTrue(send_message(self.conv, "hello")["ok"])
 			self.assertTrue(retry_message(self.asst_msg)["ok"])
 		self.assertTrue(archive_conversation(self.conv)["ok"])
+
+
+class TestAllowedPinModels(unittest.TestCase):
+	"""_allowed_pin_models is the single source of truth both set_conversation_model
+	and send_message validate against, so the two cannot drift (the send_message path
+	used to check only the subscription allowlist and rejected every pool pin)."""
+
+	@staticmethod
+	def _settings(provider, pool):
+		return SimpleNamespace(
+			llm_provider=provider,
+			models=[SimpleNamespace(model=m, enabled=e) for m, e in pool],
+		)
+
+	def test_pool_rows_are_unioned_for_a_subscription_tenant(self):
+		from jarvis.chat import api
+
+		# A subscription/pool tenant stores llm_provider="", so the subscription
+		# allowlist is empty and the pin must be accepted from the enabled pool rows.
+		with patch.object(api, "_SUBSCRIPTION_MODELS", {"": [], "OpenAI": ["gpt-5.6"]}):
+			allowed = api._allowed_pin_models(
+				self._settings("", [("claude-sonnet-5", 1), ("glm-4.7", 1), ("retired", 0)])
+			)
+		self.assertIn("claude-sonnet-5", allowed)
+		self.assertIn("glm-4.7", allowed)
+		self.assertNotIn("retired", allowed)  # disabled pool rows are excluded
+		self.assertNotIn("gpt-5.6", allowed)  # not this tenant's subscription list
+
+	def test_subscription_models_are_included(self):
+		from jarvis.chat import api
+
+		with patch.object(api, "_SUBSCRIPTION_MODELS", {"OpenAI": ["gpt-5.6", "gpt-5.5"]}):
+			allowed = api._allowed_pin_models(self._settings("OpenAI", []))
+		self.assertEqual(allowed, {"gpt-5.6", "gpt-5.5"})

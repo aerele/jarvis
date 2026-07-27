@@ -294,15 +294,16 @@ def preview_upgrade(target_plan: str) -> dict:
 
 
 @frappe.whitelist()
-def start_upgrade(target_plan: str) -> dict:
-	"""Create the prorated Razorpay order; the page then opens Checkout.
+def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
+	"""Create the prorated order on the sub's gateway (or the ``provider``
+	override); the page then opens that gateway's Checkout.
 
 	Gated on System Manager (Sprint-1 Important from the 2026-06-16 code
 	review): initiates a billing transaction tied to the site's admin
 	account; non-admin staff shouldn't be able to upgrade the plan.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.start_upgrade, target_plan)
+	return _surface(admin_client.start_upgrade, target_plan, provider=provider)
 
 
 @frappe.whitelist()

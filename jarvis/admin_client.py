@@ -163,29 +163,51 @@ def _admin_url(settings) -> str:
 	return ((settings.jarvis_admin_url or "").rstrip("/")) or get_default_admin_url().rstrip("/")
 
 
-def signup(email: str, company_name: str, plan: str, coupon: str | None = None) -> dict:
-	"""Guest signup against admin. Returns admin's data dict
-	{api_key, api_secret, razorpay_key_id, razorpay_order_id, amount_inr}.
-	Annual stays a one-shot order (manual renew). Monthly plans with a
-	trial can instead come back as a Razorpay subscription (mandate)
-	depending on the plan; this docstring previously and incorrectly
-	claimed every plan was one-shot.
+# Payment gateways this bench build can launch in the wizard. Advertised to
+# admin so it never returns a provider the SPA/desk checkout can't render
+# (an older bench omits this, and admin falls back to razorpay).
+SUPPORTED_PROVIDERS = ("razorpay", "cashfree")
+
+
+def signup(
+	email: str,
+	company_name: str,
+	plan: str,
+	coupon: str | None = None,
+	provider: str | None = None,
+) -> dict:
+	"""Guest signup against admin. Returns admin's data dict, which carries a
+	``payment_provider`` discriminator plus that gateway's checkout handles:
+	Razorpay -> {api_key, api_secret, razorpay_key_id, amount_inr}; Cashfree ->
+	{..., cashfree_app_id, cashfree_env, amount_inr}.
+
+	The order handles depend on the plan, NOT on the gateway. Annual (and any
+	non-autopay) plan is a one-shot order and comes back with
+	``razorpay_order_id`` / ``cashfree_order_id`` + ``payment_session_id``. A
+	paid MONTHLY plan is an autopay mandate instead and comes back with
+	``razorpay_subscription_id`` / ``cashfree_subscription_id`` +
+	``subscription_session_id``. Do not assume one-shot: an earlier version of
+	this docstring did, and it was wrong for every monthly plan.
 
 	When the admin's ``Jarvis Admin Settings.require_email_verification``
-	flag is ON, the response shape is:
-	    {api_key, api_secret, razorpay_key_id, amount_inr, customer,
-	     pending_verification: True}
-	(no razorpay_order_id - the order is deferred until the customer clicks
-	the magic link and the bench polls ``get_signup_payment_state``).
+	flag is ON, the response is {..., pending_verification: True} with no order
+	handles - deferred until the customer clicks the magic link and the bench
+	polls ``get_signup_payment_state``.
+
+	``provider`` (optional) requests a specific gateway; admin defaults to
+	razorpay when omitted or unsupported.
 	"""
 	body = {
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
 		"frappe_site_url": frappe.utils.get_url(),
+		"supported_providers": list(SUPPORTED_PROVIDERS),
 	}
 	if coupon:
 		body["coupon"] = coupon
+	if provider:
+		body["provider"] = provider
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 
@@ -212,6 +234,20 @@ def get_signup_payment_state() -> dict:
 
 def get_plans() -> list:
 	return _post_guest(path=_m("billing.signup.get_plans"), body={})
+
+
+def get_payment_providers() -> dict:
+	"""Which gateways the control plane will actually charge on right now, and
+	which to preselect: ``{providers: [...], default: "..."}``.
+
+	Guest-safe like get_plans - the wizard needs it before the customer has any
+	credentials. Returns only enabled keys and the default, never gateway
+	configuration.
+
+	The caller intersects the result with SUPPORTED_PROVIDERS: admin may enable a
+	gateway this bench build cannot render, and offering it would strand the
+	customer at a checkout step that never opens."""
+	return _post_guest(path=_m("billing.signup.get_payment_providers"), body={})
 
 
 # Admin-owned preset catalog (spec 3.3). Guest-safe fetch (get_plans pattern),
@@ -566,10 +602,15 @@ def _authenticated_raw(path: str, body: dict, *, timeout_s: int):
 	return _raise_for_admin_raw(_send({**bearer, "Authorization": f"token {api_key}:{api_secret}"}))
 
 
-def renew() -> dict:
+def renew(provider: str | None = None) -> dict:
 	"""Existing customer pays again to extend (manual one-shot). Returns admin's
-	data dict {razorpay_order_id, razorpay_key_id, amount_inr} for Checkout."""
-	return _post(path=_m("api.tenant.renew"), body={})
+	data dict with the ``payment_provider`` discriminator + that gateway's
+	checkout handles. A sub renews on the gateway it was created with unless
+	``provider`` overrides."""
+	body: dict = {"supported_providers": list(SUPPORTED_PROVIDERS)}
+	if provider:
+		body["provider"] = provider
+	return _post(path=_m("api.tenant.renew"), body=body)
 
 
 def post_update_llm_creds(
@@ -1008,15 +1049,15 @@ def preview_upgrade(target_plan: str) -> dict:
 	)
 
 
-def start_upgrade(target_plan: str) -> dict:
-	"""Create a prorated Razorpay order for the upgrade and return the
-	Razorpay handles ({razorpay_order_id, razorpay_key_id, amount_inr,
-	target_plan}). The order's notes carry the upgrade intent for
-	confirm_payment to pick up after Razorpay Checkout completes."""
-	return _post(
-		path=_m("api.account.start_upgrade"),
-		body={"target_plan": target_plan},
-	)
+def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
+	"""Create a prorated order for the upgrade and return the provider
+	discriminator + that gateway's checkout handles (+ target_plan). The order
+	stashes the upgrade intent for confirm_payment to apply after Checkout. A
+	sub upgrades on the gateway it was created with unless ``provider`` overrides."""
+	body: dict = {"target_plan": target_plan, "supported_providers": list(SUPPORTED_PROVIDERS)}
+	if provider:
+		body["provider"] = provider
+	return _post(path=_m("api.account.start_upgrade"), body=body)
 
 
 def cancel_plan_at_period_end() -> dict:

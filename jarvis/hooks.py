@@ -183,6 +183,10 @@ website_route_rules = [
 	{"from_route": "/jarvis-mobile", "to_route": "jarvis_mobile"},
 	{"from_route": "/jarvis-mobile/<path:app_path>", "to_route": "jarvis_mobile"},
 	{"from_route": "/jarvis-no-access", "to_route": "jarvis_no_access"},
+	# Payment-gateway return landing. Hyphenated for the URL a gateway is
+	# configured with; the page itself is www/jarvis_pay_return.py. See that
+	# file for why the redirect cannot point at the wizard directly (SameSite).
+	{"from_route": "/jarvis-pay-return", "to_route": "jarvis_pay_return"},
 ]
 
 # Serves the PWA's service worker at the root-level /jarvis-mobile.sw.js, which
@@ -284,13 +288,22 @@ scheduler_events = {
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
 		],
-		"*/10 * * * *": [
-			# Learn-from-custom-apps tick: starts due Queued runs (one active
-			# run bench-wide), recovers stale ones and cleans up old snapshot
-			# zips. Self-gating + never raises; the real work runs on queue
-			# "long" (see jarvis/learning/app_analysis.py).
-			"jarvis.learning.app_analysis.tick",
-		],
+		# Learn-from-custom-apps has been REPLACED by the Custom App Learning
+		# *scribe* delegate agent (marketplace slug ``custom-app-learning``): it
+		# reads custom-app source and writes the wiki in the container, on demand,
+		# instead of the chat-batch pipeline. The engine
+		# (``jarvis.learning.app_analysis``), its API and the ``Jarvis App Learning
+		# Run`` doctype stay physically present (rollback safety + historical run
+		# rows). Full removal is a tracked fast-follow.
+		#
+		# CA3-5 (rollback-operable): ``app_analysis.tick`` is registered but SELF-GATES
+		# on ``_legacy_retired()`` — it returns immediately while the pipeline is retired
+		# (the default), so this cron is a cheap no-op in production, and its only job is
+		# to make the rollback path (conf ``jarvis_app_learning_reenable``) actually
+		# operable: when re-enabled, this tick is the scheduler entry that starts due
+		# Queued runs and drives stale-run recovery. ``schedule_app_learning`` is
+		# likewise conditional (refuses while retired, schedules when re-enabled).
+		"*/10 * * * *": ["jarvis.learning.app_analysis.tick"],
 		"*/15 * * * *": [
 			# Behavioural pattern learning tick. Hooks cron is app-static
 			# (per-site rows are reset on migrate), so the window is
@@ -365,6 +378,10 @@ scheduler_events = {
 		# bench's month-to-date per-user + per-model usage rollup to admin. Self-
 		# gating (skips self-hosted / unconfigured / not-onboarded); never raises.
 		"jarvis.chat.usage_push.push_usage_rollup",
+		# JF-016 hygiene: revocation only flips `enabled`, so the mobile-device
+		# table is append-only without this. Deletes DISABLED rows past the
+		# 90-day retention window; live credentials are never touched.
+		"jarvis.mobile.device_auth.prune_revoked_devices",
 	],
 	"weekly": [
 		# Wiki v2 health check: deterministic lint over Active pages
@@ -373,6 +390,17 @@ scheduler_events = {
 		"jarvis.learning.wiki_lint.scheduled_lint",
 	],
 }
+
+# ---------------------------------------------------------------------------
+# Per-device mobile credentials (JF-016)
+# ---------------------------------------------------------------------------
+# The Jarvis mobile app authenticates with a REVOCABLE per-device token
+# (`Authorization: token jmd:<token_id>:<secret>`) instead of the user's
+# account-wide Frappe api_key/api_secret. Core's api-key parser declines a
+# three-segment token, so this hook — which Frappe runs right after it — is
+# what resolves the token to a user. Cheap for every other request: one header
+# read plus a prefix test. See jarvis/mobile/device_auth.py.
+auth_hooks = ["jarvis.mobile.device_auth.authenticate_device_token"]
 
 # Python type annotations on whitelisted endpoints
 # ------------------------------------------------

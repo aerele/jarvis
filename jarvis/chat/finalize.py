@@ -37,21 +37,14 @@ TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
 
-# Canonical run order. Effects NOT in a turn's required set claim as "done"
+# Canonical run order = the ONE canonical vocabulary, in its declared order (never a
+# local literal — ``turn_state.EFFECT_NAMES`` is the single authority, and _RUNNERS
+# below must cover it exactly). Effects NOT in a turn's required set claim as "done"
 # (no ledger row) and are skipped — so a single ordered pass covers both the
 # relay:final full set and the errored/cancelled minimal set. terminal_publish
-# (CDX-12) runs FIRST so a lost/failed settlement terminal publish is re-delivered
-# before the slower enrichment effects.
-_EFFECT_ORDER = (
-	"terminal_publish",
-	"rich_outputs",
-	"chat_asks",
-	"macro_advance",
-	"auto_title",
-	"wiki_nudge",
-	"usage",
-	"telemetry_flush",
-)
+# (CDX-12) is FIRST in the canon so a lost/failed settlement terminal publish is
+# re-delivered before the slower enrichment effects.
+_EFFECT_ORDER = ts.EFFECT_NAMES
 
 
 class _UsageRetry(Exception):

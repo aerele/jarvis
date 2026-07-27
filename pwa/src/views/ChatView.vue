@@ -15,6 +15,8 @@ import { useRouter } from "vue-router";
 // The desktop SPA's renderer — dependency-free, and sharing it means an agent
 // reply reads identically on both surfaces.
 import { renderMarkdown } from "@shared/markdown.js";
+import { admitEvent } from "@jsshared/pump_fence.mjs";
+import { eventFence } from "../lib/pump_fence_state.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
@@ -65,6 +67,11 @@ const live = ref(null); // { runId, messageId, text, tools[] }
 // Stop is a UI-level cancel too — the backend may still finish the turn, so
 // ignore what comes back rather than letting a "stopped" reply reappear.
 const ignoredRuns = ref(new Set());
+// JF-018: the Relay-Pump epoch/seq watermark lives in a MODULE-scope singleton
+// (see ../lib/pump_fence_state.js for why): this component is route-mounted and
+// unmounts on /business, /files or /, so a component-scope fence would be wiped
+// on every route away and readmit the stale frames it exists to drop. The
+// singleton is what actually delivers "the terminal marker outlives the view".
 
 const decision = ref(null);
 const preview = ref(null);
@@ -391,6 +398,15 @@ function onEvent(p) {
 	const conv = p.conversation_id || p.conversation;
 	if (conv !== convId.value) return;
 	const ignored = p.run_id ? ignoredRuns.value.has(p.run_id) : false;
+
+	// JF-018: fence out a superseded pump's straggler before it touches anything.
+	// Because a delta carries the CUMULATIVE text, an out-of-order one REWINDS the
+	// reply mid-stream, and a stale run:end/run:error tears down a turn that has
+	// already been taken over. Dropping is invisible to the user: every terminal
+	// path below calls load(), and that durable re-fetch is what converges content.
+	// Same placement and the same kind set as the desktop SPA — see
+	// jarvis/public/js/shared/pump_fence.mjs for the mirrored comparison ladder.
+	if (!admitEvent(eventFence, p)) return;
 
 	switch (p.kind) {
 		case "run:start":

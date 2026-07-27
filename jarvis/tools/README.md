@@ -8,8 +8,9 @@ live Frappe ORM. **Tools never hardcode a DocType schema** - the agent calls
 
 This README documents the layer's contract plus the extensions added in
 `feat/tool-layer-extensions` (`run_method`, `get_schema` metadata + cache,
-`preview` dry-run, write auditing). The full agent-facing inventory of all 49
-tools, with confirmation discipline, is in `jarvis-persona/TOOLS.md`.
+`preview` dry-run, write auditing). The full agent-facing inventory, with
+confirmation discipline, is in `jarvis-persona/TOOLS.md`; the authoritative name
+set is `jarvis/tools/tool-names.json` (see the 3-way invariant below).
 
 ## Architecture
 
@@ -26,9 +27,19 @@ Two tiers, one call mechanism:
    chat user's own permissions** - so Frappe's permission model is the security
    boundary, not the tool code.
 
-A **3-way invariant** is enforced and must hold for every change:
-`tool-defs.ts pythonNames == openclaw.plugin.json contracts == registry _TOOL_NAMES`
-(currently **49**).
+A **3-way invariant** must hold for every change:
+`tool-defs.ts pythonNames == openclaw.plugin.json contracts == registry _TOOL_NAMES`.
+
+It is no longer maintained by discipline. `jarvis/tools/tool-names.json` is the
+single artifact both repos test themselves against - generated from the registry
+by `jarvis/tools/_tool_contract.py`, copied verbatim into the plugin repo at
+`contracts/tool-names.json`. `jarvis/tests/test_tool_contract.py` fails if the
+registry and the artifact disagree in either direction; the plugin's
+`tests/tool-contract.test.ts` fails if its descriptors or manifest contracts do.
+The registry is the source of truth, because a descriptor with no implementation
+is a tool the model can call and the bench can only answer with
+`ToolNotFoundError`. Registry tools that deliberately have no descriptor are
+listed, with reasons, in the artifact's `backend_only` map.
 
 ## Auth
 
@@ -181,7 +192,15 @@ Every **mutating** tool call is logged from the `_run_tool` choke-point
 2. Register the name in `jarvis/tools/registry.py` `_TOOL_NAMES`.
 3. If it mutates, add it to `_WRITE_TOOLS` in `jarvis/api.py` (and `_PREVIEWABLE`
    if a dry-run makes sense).
-4. Add the plugin descriptor (`src/tool-defs.ts`), the typed schema
-   (`src/schemas.ts`), and the contract (`openclaw.plugin.json`); rebuild `dist`.
-5. Keep the 3-way invariant green and add a row to `jarvis-persona/TOOLS.md`.
-6. Add tests under `jarvis/tests/` (happy path + validation + permission).
+4. Regenerate the contract artifact from the bench root:
+   `env/bin/python -m jarvis.tools._tool_contract --write`. Until you do,
+   `test_tool_contract` fails. (A tool that must stay bench-side goes in
+   `_tool_contract.BACKEND_ONLY` with its reason instead.)
+5. Copy `jarvis/tools/tool-names.json` **verbatim** into the plugin repo at
+   `contracts/tool-names.json` - same bytes, same `digest`. Its contract test
+   then fails until you add the descriptor (`src/tool-defs.ts`), the typed schema
+   (`src/schemas.ts`) and the manifest contract (`openclaw.plugin.json`), and
+   rebuild `dist`. Nothing in CI can see both repos, so this copy is the one
+   manual step - the plugin PR is where a stale copy surfaces.
+6. Add a row to `jarvis-persona/TOOLS.md`.
+7. Add tests under `jarvis/tests/` (happy path + validation + permission).

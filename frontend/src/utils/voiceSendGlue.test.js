@@ -1,25 +1,29 @@
-// ChatView-level INTEGRATION tests for the composer↔queue↔send glue (voiceSendGlue.js), the seam
-// Codex round 3 flagged: the round-2 tests were queue-unit-level and never exercised send-rejection
-// or conversation-id promotion, which is exactly where the three HIGH never-lose-audio bugs lived.
+// ChatView-level INTEGRATION tests for the composer↔store↔send glue (voiceSendGlue.js), the seam
+// Codex round 3 flagged: the earlier tests were unit-level and never exercised send-rejection or
+// conversation-id promotion, which is exactly where the three HIGH never-lose-audio bugs lived.
 //
 // The ChatView single-file component can't be mounted under `node --test` (no DOM, no Vue harness,
 // hundreds of deps), so — per the round-3 disposition's explicit fallback — the send/ack/promote/
-// resend logic was FACTORED into pure helpers (voiceSendGlue.js: promoteNewChatScope, planRejectedSend)
-// plus a payload-bound queue method (voiceChunkQueue.js: captureSentInPayload). ChatView imports and
-// calls exactly these, so the tests below drive the REAL code, not a reimplementation. Each test
-// stitches the helpers to the REAL queue (the source of truth for the audio lifecycle) + a mock send
-// outcome, reproducing the ChatView send flow end to end:
-//   * R3-1 — composer-edit-before-send: a clip edited/deleted out of the payload is NOT acknowledged.
-//   * R3-2 — id-less send success with a mid-flight (retry) commit: the late clip is migrated to the
-//            real id and released there, never stranded under the new-chat sentinel.
+// resend logic was FACTORED into pure helpers (voiceSendGlue.js: promoteNewChatScope,
+// planRejectedSend) plus a payload-bound store method (voiceDictationStore.js:
+// captureSentInPayload). ChatView imports and calls exactly these, so the tests below drive the REAL
+// code, not a reimplementation. Each test stitches the helpers to the REAL dictation store (the
+// source of truth for the audio lifecycle) + a mock send outcome, reproducing the ChatView send flow
+// end to end:
+//   * R3-1 — composer-edit-before-send: a recording edited/deleted out of the payload is NOT acknowledged.
+//   * R3-2 — id-less send success with a mid-flight (retry) commit: the late recording is migrated to
+//            the real id and released there, never stranded under the new-chat sentinel.
 //   * R3-3 — failed-bubble resend rejection across ok:false / usage_limit / subscription_suspended /
 //            single-flight: a bubble carrying the SAME voiceAck survives, audio retained, resendable.
+//
+// A dictation is now ONE recording transcribed in ONE call, so each take below is begin → one
+// timeslice fragment → finish, exactly as useDictationRecorder drives it.
 //
 // Run: `node --test voiceSendGlue.test.js`, or via the python suite
 // (jarvis/tests/test_voice_send_glue_client.py subprocess-runs it so the contract holds every CI run).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createVoiceChunkQueue } from "./voiceChunkQueue.js";
+import { createVoiceDictationStore } from "./voiceDictationStore.js";
 import {
 	promoteNewChatScope,
 	planRejectedSend,
@@ -30,46 +34,70 @@ import {
 const SENTINEL = "__jarvis_new_chat__";
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-// A controllable transcribe: parks each call until the test settles it by seq (same shape as the
-// queue-unit suite), so out-of-order / retry timing is fully deterministic.
+// A controllable transcribe: parks each call until the test settles it by recording id (same shape
+// as the store-unit suite), so retry timing is fully deterministic.
 function makeTranscriber() {
 	const calls = [];
-	const fn = (clip) =>
+	const fn = (rec) =>
 		new Promise((resolve, reject) => {
-			calls.push({ seq: clip.seq, settled: false, resolve, reject });
+			calls.push({ id: rec.id, settled: false, resolve, reject });
 		});
-	const _first = (seq) => calls.find((c) => c.seq === seq && !c.settled);
+	const _first = (id) => calls.find((c) => c.id === id && !c.settled);
 	return {
 		fn,
-		resolve(seq, text) {
-			const c = _first(seq);
-			assert.ok(c, `no in-flight transcribe for seq ${seq}`);
+		resolve(id, text) {
+			const c = _first(id);
+			assert.ok(c, `no in-flight transcribe for recording ${id}`);
 			c.settled = true;
 			c.resolve(text);
 		},
-		reject(seq, err) {
-			const c = _first(seq);
-			assert.ok(c, `no in-flight transcribe for seq ${seq}`);
+		reject(id, err) {
+			const c = _first(id);
+			assert.ok(c, `no in-flight transcribe for recording ${id}`);
 			c.settled = true;
 			c.reject(err || new Error("boom"));
 		},
 	};
 }
 
+// In-memory stand-in for the IndexedDB fragment mirror. `has(id)` asks the question every test
+// below really asks: is this recording's audio still saved?
 function makeMirror() {
-	const store = new Map();
+	const store = new Map(); // `${recordingId}:${index}` -> fragment
 	return {
 		store,
-		put(clip) {
-			store.set(clip.seq, clip);
+		recordingKey: (id) => `r${id}`,
+		putFragment(f) {
+			store.set(`${f.recordingId}:${f.index}`, f);
+			return Promise.resolve(true);
 		},
-		delete(seq) {
-			store.delete(seq);
+		adopt(r) {
+			for (const k of r._adoptKeys || []) store.delete(k);
+			store.set(`${r.recordingId}:0`, r);
+			return Promise.resolve(true);
 		},
-		all() {
-			return Array.from(store.values());
+		deleteRecording(rid) {
+			for (const k of Array.from(store.keys())) if (k.startsWith(rid + ":")) store.delete(k);
+			return Promise.resolve(true);
+		},
+		reassignConversation(rid, scope) {
+			for (const [k, v] of store)
+				if (String(v.recordingId) === rid) store.set(k, { ...v, conversationId: scope });
+			return Promise.resolve(true);
+		},
+		has(id) {
+			return Array.from(store.keys()).some((k) => k.startsWith(`r${id}:`));
 		},
 	};
+}
+
+// Drive one whole take exactly as useDictationRecorder does: begin, a timeslice fragment, finish
+// with the assembled bytes. Returns the recording id the store stamped.
+function dictate(store, { blob = "a", durationS = 15, conversationId = null } = {}) {
+	const id = store.begin({ conversationId });
+	store.addFragment(id, { index: 0, blob, durationS });
+	store.finish(id, { blob, durationS });
+	return id;
 }
 
 // A faithful mini-model of ChatView's voice send glue, assembled from the SAME extracted pieces the
@@ -92,25 +120,26 @@ function makeChat() {
 	};
 	let _bubbleSeq = 0; // stable bubble names (a switch clears messages, so length would collide)
 	const scopeOf = () => chat.currentId || SENTINEL;
-	const clipScope = (clip) =>
-		clip && clip.conversationId != null ? clip.conversationId : SENTINEL;
-	// Append a committed transcript to the composer target for the clip's scope (the live input when
-	// that scope is on screen, else its stashed draft) — the _appendTranscript / _mutateComposerFor path.
+	const recScope = (rec) => (rec && rec.conversationId != null ? rec.conversationId : SENTINEL);
+	// Append a committed transcript to the composer target for the recording's scope (the live input
+	// when that scope is on screen, else its stashed draft) — the _appendTranscript path.
 	const append = (prev, t) => (prev.trim() ? prev.replace(/\s+$/, "") + " " + t : t);
-	chat.queue = createVoiceChunkQueue({
+	chat.queue = createVoiceDictationStore({
 		transcribe: tx.fn,
 		mirror,
 		retainUntilSent: true,
 		concurrency: 3,
-		onCommit: (seq, text, clip) => {
+		onCommit: (id, text, rec) => {
 			const t = (text || "").trim();
 			if (!t) return;
-			const scope = clipScope(clip);
+			const scope = recScope(rec);
 			if (scope === scopeOf()) chat.input = append(chat.input, t);
 			else chat.drafts[scope] = append(chat.drafts[scope] || "", t);
 		},
 	});
 	chat.micConvId = scopeOf();
+	// Record a whole take into whatever store `chat.queue` currently is (one test swaps it).
+	chat.dictate = (opts) => dictate(chat.queue, opts);
 
 	// Switch the on-screen conversation — the loadConversation() path: stash the leaving scope's
 	// live input into its draft, restore the target's, and REPLACE the rendered messages (the array
@@ -139,8 +168,8 @@ function makeChat() {
 		const voiceAck =
 			resendAck || (fromMain ? chat.queue.captureSentInPayload(sentScope, text) : null);
 		if (fromMain) chat.input = "";
-		// VR4-1: a fromMain send clears the composer, so any committed clip in scope NOT in the
-		// payload token (edited out) becomes an ACTIONABLE retained clip instead of a silent count.
+		// A fromMain send clears the composer, so any transcribed recording in scope NOT in the
+		// payload token (edited out) becomes an ACTIONABLE retained chip instead of a silent count.
 		if (fromMain) chat.queue.markUnsentOrphans(sentScope, voiceAck);
 		const tmp = {
 			name: `tmp-${_bubbleSeq++}`,
@@ -181,14 +210,14 @@ function makeChat() {
 			}
 			return tmp;
 		}
-		// Accepted: release exactly the captured clips, then adopt a returned id (promoting the scope).
+		// Accepted: release exactly the captured recordings, then adopt a returned id (promoting the scope).
 		if (voiceAck) chat.queue.acknowledge(voiceAck);
 		if (outcome && outcome.conversation_id) {
 			// Whether the user is STILL on the chat we sent from — captured now, before any mutation.
 			const stillOnSentChat = scopeOf() === sentScope;
 			// VR4-3: the sentinel→real-id scope/record/mirror/draft/take migration is
 			// VISIBILITY-INDEPENDENT — run it whenever we sent from the sentinel and got a real id,
-			// REGARDLESS of the on-screen chat, else a mid-send switch strands the sentinel clips.
+			// REGARDLESS of the on-screen chat, else a mid-send switch strands the sentinel recordings.
 			if (sentScope === SENTINEL && outcome.conversation_id !== SENTINEL) {
 				chat.micConvId = promoteNewChatScope({
 					queue: chat.queue,
@@ -247,17 +276,17 @@ test("planRejectedSend keeps a voice resend's bubble across EVERY rejection reas
 	});
 });
 
-// ── promoteNewChatScope: migrates draft + take + queue records/mirror; idempotent + non-clobbering ─
-test("promoteNewChatScope migrates draft ownership, the take scope, and queue records/mirror off the sentinel", async () => {
+// ── promoteNewChatScope: migrates draft + take + store records/mirror; idempotent + non-clobbering ─
+test("promoteNewChatScope migrates draft ownership, the take scope, and store records/mirror off the sentinel", async () => {
 	const tx = makeTranscriber();
 	const mirror = makeMirror();
-	const q = createVoiceChunkQueue({
+	const q = createVoiceDictationStore({
 		transcribe: tx.fn,
 		mirror,
 		retainUntilSent: true,
 		concurrency: 2,
 	});
-	q.enqueue({ blob: "a", durationS: 15, conversationId: SENTINEL });
+	dictate(q, { blob: "a", conversationId: SENTINEL });
 	await flush();
 	tx.resolve(0, "recovered words");
 	await flush();
@@ -273,7 +302,7 @@ test("promoteNewChatScope migrates draft ownership, the take scope, and queue re
 	assert.equal(
 		nextTake,
 		"conv-real",
-		"the active take is re-pointed so later clips enqueue under the real id"
+		"the active take is re-pointed so a later recording is admitted under the real id"
 	);
 	assert.equal(
 		drafts["conv-real"],
@@ -281,13 +310,13 @@ test("promoteNewChatScope migrates draft ownership, the take scope, and queue re
 		"the sentinel draft becomes the real conversation's"
 	);
 	assert.ok(!(SENTINEL in drafts), "the stale sentinel draft key is dropped");
-	assert.deepEqual(q.captureSent(SENTINEL), [], "no queue records remain under the sentinel");
+	assert.deepEqual(q.captureSent(SENTINEL), [], "no store records remain under the sentinel");
 	assert.deepEqual(
 		q.captureSent("conv-real"),
 		[0],
 		"the record now belongs to the real conversation"
 	);
-	assert.ok(mirror.store.has(0), "migration never drops audio — the mirror record survives");
+	assert.ok(mirror.has(0), "migration never drops audio — the mirrored fragments survive");
 
 	// Non-clobbering + no-op guards.
 	const d2 = { [SENTINEL]: "from sentinel", "conv-real": "already here" };
@@ -310,49 +339,49 @@ test("promoteNewChatScope migrates draft ownership, the take scope, and queue re
 	assert.equal(keepTake, "keep", "a falsy toId is a no-op (take unchanged)");
 });
 
-// ── (R3-1) INTEGRATION: composer-edit-before-send — a clip edited out is never acknowledged ─────
-test("R3-1 integration: a clip whose transcript the user edits/deletes out of the composer before sending keeps its audio", async () => {
+// ── (R3-1) INTEGRATION: composer-edit-before-send — an edited-out recording is never acknowledged ─
+test("R3-1 integration: a recording whose transcript the user edits/deletes out of the composer before sending keeps its audio", async () => {
 	const chat = makeChat();
-	// Two clips dictated into the (id-less) new-chat composer; both commit into the live input.
-	chat.queue.enqueue({ blob: "a", durationS: 15, conversationId: SENTINEL });
-	chat.queue.enqueue({ blob: "b", durationS: 15, conversationId: SENTINEL });
+	// Two takes dictated into the (id-less) new-chat composer; both commit into the live input.
+	chat.dictate({ blob: "a", conversationId: SENTINEL });
+	chat.dictate({ blob: "b", conversationId: SENTINEL });
 	await flush();
 	chat.tx.resolve(0, "alpha words");
 	chat.tx.resolve(1, "bravo words");
 	await flush();
 	assert.equal(chat.input, "alpha words bravo words", "both transcripts landed in the composer");
 
-	// The user DELETES clip B's words before sending, leaving only clip A's text.
+	// The user DELETES recording B's words before sending, leaving only recording A's text.
 	chat.input = "alpha words";
 	const bubble = chat.send(undefined, undefined, { ok: true, conversation_id: "conv-1" });
 
 	assert.deepEqual(
 		bubble.voiceAck,
 		[0],
-		"only clip A (present in the payload) is in the release token"
+		"only recording A (present in the payload) is in the release token"
 	);
-	assert.ok(!chat.mirror.store.has(0), "clip A — its text was sent — is released");
-	assert.ok(chat.mirror.store.has(1), "clip B — edited out — is RETAINED (audio never lost)");
+	assert.ok(!chat.mirror.has(0), "recording A — its text was sent — is released");
+	assert.ok(chat.mirror.has(1), "recording B — edited out — is RETAINED (audio never lost)");
 	assert.equal(
 		chat.queue.hasUnfinished(),
 		true,
-		"the retained clip keeps the leave guard armed + actionable"
+		"the retained recording keeps the leave guard armed + actionable"
 	);
 });
 
 // ── (R3-2) INTEGRATION: an id-less send, then a retry commits AFTER id-adoption — not stranded ──
-test("R3-2 integration: a failed clip retried AFTER an id-less send's id-adoption commits under the REAL id and is releasable", async () => {
+test("R3-2 integration: a failed recording retried AFTER an id-less send's id-adoption commits under the REAL id and is releasable", async () => {
 	const chat = makeChat();
-	// A clip dictated in the new-chat composer FAILS (both attempts reject) → a retained failed clip.
-	const q = createVoiceChunkQueue({
+	// A take dictated in the new-chat composer FAILS → a retained failed recording.
+	const q = createVoiceDictationStore({
 		transcribe: chat.tx.fn,
 		mirror: chat.mirror,
 		retainUntilSent: true,
 		concurrency: 2,
 		maxAttempts: 1,
-		onCommit: (seq, text, clip) => {
-			// route like ChatView: live input when the clip's (possibly migrated) scope is on screen
-			const scope = clip && clip.conversationId != null ? clip.conversationId : SENTINEL;
+		onCommit: (id, text, rec) => {
+			// route like ChatView: live input when the recording's (possibly migrated) scope is on screen
+			const scope = rec && rec.conversationId != null ? rec.conversationId : SENTINEL;
 			const cur = chat.currentId || SENTINEL;
 			const t = (text || "").trim();
 			if (!t) return;
@@ -361,23 +390,27 @@ test("R3-2 integration: a failed clip retried AFTER an id-less send's id-adoptio
 		},
 	});
 	chat.queue = q;
-	q.enqueue({ blob: "later", durationS: 15, conversationId: SENTINEL });
+	chat.dictate({ blob: "later", conversationId: SENTINEL });
 	await flush();
 	chat.tx.reject(0, new Error("stt down")); // maxAttempts 1 → straight to failed
 	await flush();
-	assert.equal(q.snapshot().failed.length, 1, "the clip is a retained FAILED clip (its chip)");
+	assert.equal(
+		q.snapshot().failed.length,
+		1,
+		"the take is a retained FAILED recording (its chip)"
+	);
 
-	// The user also typed text and SENDS the id-less new chat (the failed clip does not block send).
+	// The user also typed text and SENDS the id-less new chat (a failed recording does not block send).
 	chat.input = "typed message";
 	chat.send(undefined, undefined, { ok: true, conversation_id: "conv-real" });
 	assert.equal(chat.currentId, "conv-real", "the new chat adopted its real id");
 	assert.deepEqual(
 		q.captureSent(SENTINEL),
 		[],
-		"the failed clip was migrated OFF the sentinel by id-adoption"
+		"the failed recording was migrated OFF the sentinel by id-adoption"
 	);
 
-	// Now the user hits Retry on the failed clip; it succeeds and commits AFTER the id switch.
+	// Now the user hits Retry on the failed recording; it succeeds and commits AFTER the id switch.
 	// (The send cleared the composer, so the late words land in the real conversation's now-empty
 	// live composer — the point is they route to the REAL id, never a stranded sentinel draft.)
 	q.retry(0);
@@ -394,17 +427,14 @@ test("R3-2 integration: a failed clip retried AFTER an id-less send's id-adoptio
 	assert.deepEqual(
 		q.captureSent("conv-real"),
 		[0],
-		"the migrated clip is releasable under the real id"
+		"the migrated recording is releasable under the real id"
 	);
 	chat.send(undefined, undefined, { ok: true });
-	assert.ok(
-		!chat.mirror.store.has(0),
-		"the real-scope send releases it — no forever-armed guard"
-	);
+	assert.ok(!chat.mirror.has(0), "the real-scope send releases it — no forever-armed guard");
 	assert.equal(
 		q.hasUnfinished(),
 		false,
-		"guard clears end to end — the clip was never stranded (R3-2)"
+		"guard clears end to end — the recording was never stranded (R3-2)"
 	);
 });
 
@@ -412,10 +442,10 @@ test("R3-2 integration: a failed clip retried AFTER an id-less send's id-adoptio
 test("R3-3 integration: a failed-bubble resend rejected (ok:false / usage_limit / subscription_suspended / single-flight) keeps a bubble with the SAME token; audio retained; resendable", async () => {
 	for (const reason of [undefined, "usage_limit", "subscription_suspended", "single_flight"]) {
 		const chat = makeChat();
-		// A clip is dictated + committed into a real conversation, then the FIRST send fails outright.
+		// A take is dictated + committed into a real conversation, then the FIRST send fails outright.
 		chat.currentId = "convR";
 		chat.micConvId = "convR";
-		chat.queue.enqueue({ blob: "a", durationS: 15, conversationId: "convR" });
+		chat.dictate({ blob: "a", conversationId: "convR" });
 		await flush();
 		chat.tx.resolve(0, "spoken words");
 		await flush();
@@ -432,7 +462,7 @@ test("R3-3 integration: a failed-bubble resend rejected (ok:false / usage_limit 
 			"the failed bubble carries the payload-bound token"
 		);
 		assert.ok(
-			chat.mirror.store.has(0),
+			chat.mirror.has(0),
 			"audio still retained after the failed send (nothing acknowledged)"
 		);
 		assert.equal(
@@ -453,7 +483,7 @@ test("R3-3 integration: a failed-bubble resend rejected (ok:false / usage_limit 
 			"the preserved bubble carries the SAME voiceAck so the user can resend again"
 		);
 		assert.ok(
-			chat.mirror.store.has(0),
+			chat.mirror.has(0),
 			"audio STILL retained across the rejected resend — never lost"
 		);
 		assert.equal(
@@ -462,11 +492,11 @@ test("R3-3 integration: a failed-bubble resend rejected (ok:false / usage_limit 
 			"guard still armed, but with an ACTION (resend the bubble)"
 		);
 
-		// Resend once more; this time it succeeds → the clip is finally released, guard clears.
+		// Resend once more; this time it succeeds → the recording is finally released, guard clears.
 		chat.resendFailed(resendBubble, { ok: true });
 		assert.ok(
-			!chat.mirror.store.has(0),
-			"a successful resend finally releases the delivered clip"
+			!chat.mirror.has(0),
+			"a successful resend finally releases the delivered recording"
 		);
 		assert.equal(
 			chat.queue.hasUnfinished(),
@@ -476,12 +506,12 @@ test("R3-3 integration: a failed-bubble resend rejected (ok:false / usage_limit 
 	}
 });
 
-// ── (VR4-1) INTEGRATION: a clip edited out of a MAIN send becomes an ACTIONABLE retained clip;
+// ── (VR4-1) INTEGRATION: a recording edited out of a MAIN send becomes an ACTIONABLE retained chip;
 //        Download exposes the audio and Discard clears the guard (no forever-armed done record). ─
-test("VR4-1 integration: an edited-out clip surfaces as a retained (actionable) clip after a send; Discard clears the guard", async () => {
+test("VR4-1 integration: an edited-out recording surfaces as a retained (actionable) chip after a send; Discard clears the guard", async () => {
 	const chat = makeChat();
-	chat.queue.enqueue({ blob: "a", durationS: 15, conversationId: SENTINEL });
-	chat.queue.enqueue({ blob: "b", durationS: 15, conversationId: SENTINEL });
+	chat.dictate({ blob: "a", conversationId: SENTINEL });
+	chat.dictate({ blob: "b", conversationId: SENTINEL });
 	await flush();
 	chat.tx.resolve(0, "alpha words");
 	chat.tx.resolve(1, "bravo words");
@@ -492,7 +522,7 @@ test("VR4-1 integration: an edited-out clip surfaces as a retained (actionable) 
 		"nothing retained while both are in the draft"
 	);
 
-	// The user DELETES clip B's words, then sends → B can no longer be released by a payload match.
+	// The user DELETES recording B's words, then sends → B can no longer be released by a payload match.
 	chat.input = "alpha words";
 	chat.send(undefined, undefined, { ok: true, conversation_id: "conv-1" });
 
@@ -500,30 +530,33 @@ test("VR4-1 integration: an edited-out clip surfaces as a retained (actionable) 
 	assert.equal(
 		snap.retained.length,
 		1,
-		"the edited-out clip B is surfaced as an ACTIONABLE retained clip"
+		"the edited-out recording B is surfaced as an ACTIONABLE retained chip"
 	);
-	assert.equal(snap.retained[0].seq, 1, "it is clip B");
+	assert.equal(snap.retained[0].id, 1, "it is recording B");
 	assert.equal(
 		snap.retained[0].text,
 		"bravo words",
 		"the retained entry carries B's transcript for Restore"
 	);
-	assert.ok(chat.mirror.store.has(1), "B's audio is still retained (never lost)");
-	assert.ok(chat.queue.getClip(1), "Download exposes the audio (getClip returns B's blob)");
+	assert.ok(chat.mirror.has(1), "B's audio is still retained (never lost)");
+	assert.ok(
+		chat.queue.get(1).blob,
+		"Download exposes the audio (get() returns B's assembled blob)"
+	);
 	assert.equal(
 		chat.queue.hasUnfinished(),
 		true,
 		"the guard is armed — but now with a visible resolution"
 	);
-	// clip A (sent) was released, and B rode the sentinel→real-id promotion still flagged retained.
-	assert.ok(!chat.mirror.store.has(0), "clip A (in the payload) was released");
+	// A (sent) was released, and B rode the sentinel→real-id promotion still flagged retained.
+	assert.ok(!chat.mirror.has(0), "recording A (in the payload) was released");
 	assert.equal(
 		chat.currentId,
 		"conv-1",
 		"the new chat adopted its real id (B migrated with it)"
 	);
 
-	// Discard the retained clip: guard clears, audio dropped — the VR4-1 forever-armed gap is closed.
+	// Discard the retained recording: guard clears, audio dropped — the forever-armed gap is closed.
 	chat.queue.discard(1);
 	assert.deepEqual(
 		chat.queue.snapshot().retained,
@@ -533,23 +566,23 @@ test("VR4-1 integration: an edited-out clip surfaces as a retained (actionable) 
 	assert.equal(
 		chat.queue.hasUnfinished(),
 		false,
-		"Discard clears the guard — no forever-armed clip"
+		"Discard clears the guard — no forever-armed recording"
 	);
-	assert.ok(!chat.mirror.store.has(1), "and drops the audio mirror");
+	assert.ok(!chat.mirror.has(1), "and drops the mirrored audio");
 });
 
 // ── (VR4-3) INTEGRATION: switching chats DURING an id-less send still promotes the sentinel scope,
 //        so a later retry routes to the REAL conversation and is releasable — never stranded. ─────
-test("VR4-3 integration: a mid-send chat switch still promotes the sentinel — a retried clip routes to the real id and releases", async () => {
+test("VR4-3 integration: a mid-send chat switch still promotes the sentinel — a retried recording routes to the real id and releases", async () => {
 	const chat = makeChat();
-	// A clip dictated in the new-chat composer FAILS (both attempts reject) → a retained failed clip.
-	chat.queue.enqueue({ blob: "later", durationS: 15, conversationId: SENTINEL });
+	// A take dictated in the new-chat composer FAILS (both attempts reject) → a retained failure.
+	chat.dictate({ blob: "later", conversationId: SENTINEL });
 	await flush();
 	chat.tx.reject(0, new Error("stt down 1"));
 	await flush();
 	chat.tx.reject(0, new Error("stt down 2"));
 	await flush();
-	assert.equal(chat.queue.snapshot().failed.length, 1, "the clip is a retained FAILED clip");
+	assert.equal(chat.queue.snapshot().failed.length, 1, "it is a retained FAILED recording");
 
 	// The user types + sends the id-less new chat, but SWITCHES conversations while the POST is
 	// in flight. The server still created a real conversation and returned its id.
@@ -561,11 +594,11 @@ test("VR4-3 integration: a mid-send chat switch still promotes the sentinel — 
 	assert.deepEqual(
 		chat.queue.captureSent(SENTINEL),
 		[],
-		"the failed clip was migrated OFF the sentinel despite the switch (VR4-3)"
+		"the failed recording was migrated OFF the sentinel despite the switch (VR4-3)"
 	);
 	assert.ok(!chat.drafts[SENTINEL], "no stale sentinel draft left behind");
 
-	// The user hits Retry on the failed clip; it now commits under the REAL id. Since conv-real is
+	// The user hits Retry on the failed recording; it now commits under the REAL id. Since conv-real is
 	// off-screen, the late words land in ITS draft — routed to the real conversation, not stranded.
 	chat.queue.retry(0);
 	await flush();
@@ -579,10 +612,10 @@ test("VR4-3 integration: a mid-send chat switch still promotes the sentinel — 
 	assert.deepEqual(
 		chat.queue.captureSent("conv-real"),
 		[0],
-		"the migrated clip is releasable under the real id"
+		"the migrated recording is releasable under the real id"
 	);
 
-	// Return to conv-real and send: the real-scope send releases the clip — the guard clears.
+	// Return to conv-real and send: the real-scope send releases it — the guard clears.
 	chat.navigateTo("conv-real");
 	assert.equal(
 		chat.input,
@@ -590,10 +623,7 @@ test("VR4-3 integration: a mid-send chat switch still promotes the sentinel — 
 		"returning restores conv-real's draft into the composer"
 	);
 	chat.send(undefined, undefined, { ok: true });
-	assert.ok(
-		!chat.mirror.store.has(0),
-		"the real-scope send releases it — never stranded (VR4-3)"
-	);
+	assert.ok(!chat.mirror.has(0), "the real-scope send releases it — never stranded (VR4-3)");
 	assert.equal(chat.queue.hasUnfinished(), false, "guard clears end to end");
 });
 
@@ -604,7 +634,7 @@ test("VR4-2 integration: a resend rejected mid-send-switch keeps the bubble + to
 		const chat = makeChat();
 		chat.currentId = "convR";
 		chat.micConvId = "convR";
-		chat.queue.enqueue({ blob: "a", durationS: 15, conversationId: "convR" });
+		chat.dictate({ blob: "a", conversationId: "convR" });
 		await flush();
 		chat.tx.resolve(0, "spoken words");
 		await flush();
@@ -612,7 +642,7 @@ test("VR4-2 integration: a resend rejected mid-send-switch keeps the bubble + to
 		// The first send THROWS → a failed bubble on convR carrying the payload-bound token.
 		const failed1 = chat.send(undefined, undefined, { throw: true });
 		assert.deepEqual(failed1.voiceAck, [0], "the failed bubble carries the token");
-		assert.ok(chat.mirror.store.has(0), "audio retained after the failed send");
+		assert.ok(chat.mirror.has(0), "audio retained after the failed send");
 
 		// The user hits Resend but SWITCHES to another conversation while the POST is in flight; the
 		// resend is then REJECTED with this reason.
@@ -627,7 +657,7 @@ test("VR4-2 integration: a resend rejected mid-send-switch keeps the bubble + to
 			`the rejected resend survives ORIGIN-scoped, not in the rendered messages (reason=${reason})`
 		);
 		assert.ok(
-			chat.mirror.store.has(0),
+			chat.mirror.has(0),
 			"audio STILL retained across the mid-send switch + rejection — never lost (VR4-2)"
 		);
 		assert.equal(
@@ -642,9 +672,9 @@ test("VR4-2 integration: a resend rejected mid-send-switch keeps the bubble + to
 		assert.ok(shown, `returning to the origin shows the resend affordance (reason=${reason})`);
 		assert.deepEqual(shown.voiceAck, [0], "the re-injected bubble carries the SAME token");
 
-		// Resend once more (now on screen) succeeds → the clip is finally released, guard clears.
+		// Resend once more (now on screen) succeeds → the recording is released, guard clears.
 		chat.resendFailed(shown, { ok: true });
-		assert.ok(!chat.mirror.store.has(0), "a successful resend releases the delivered clip");
+		assert.ok(!chat.mirror.has(0), "a successful resend releases the delivered recording");
 		assert.equal(chat.queue.hasUnfinished(), false, "guard clears — never stranded (VR4-2)");
 		assert.ok(
 			!chat.pending.has("convR"),

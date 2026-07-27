@@ -220,10 +220,13 @@ export const testLlmApiKey = (args) => call("jarvis.llm_key_probe.test_llm_api_k
 // jarvis/account.py, jarvis/selfhost.py) - verified against the desk wizard's
 // frappe.call usage in jarvis/jarvis/page/jarvis_onboarding/jarvis_onboarding.js.
 export const listPlans = () => call("jarvis.onboarding.list_plans");
+// {providers: [...], default: "..."} - already narrowed to gateways the
+// operator enabled AND this bench build can render.
+export const listPaymentProviders = () => call("jarvis.onboarding.list_payment_providers");
 export const getAccountDefaults = () => call("jarvis.onboarding.get_account_defaults");
 export const syncConnection = () => call("jarvis.onboarding.sync_connection");
-export const startSignup = (email, company, plan) =>
-	call("jarvis.onboarding.start_signup", { email, company, plan });
+export const startSignup = (email, company, plan, provider) =>
+	call("jarvis.onboarding.start_signup", { email, company, plan, provider });
 export const checkSignupPaymentState = () => call("jarvis.onboarding.check_signup_payment_state");
 export const finishPayment = (payload) => call("jarvis.onboarding.finish_payment", { payload });
 export const isOnboarded = () => call("jarvis.account.is_onboarded");
@@ -357,7 +360,14 @@ export const setAgentSchedule = (installation, p) =>
 // rounding_step) read by the agent on its installation.
 export const setAgentConfig = (installation, config) =>
 	call(AG + "set_config", { installation, config: JSON.stringify(config || {}) });
-export const runAgentNow = (installation) => call(AG + "run_agent_now", { installation });
+// options: per-launch payload. `source_apps` (array of app names) is REQUIRED for
+// the custom-app-learning agent - the server refuses the launch without an
+// explicit selection and stamps it as the run's source-read authorization.
+export const runAgentNow = (installation, options) =>
+	call(AG + "run_agent_now", {
+		installation,
+		...(options ? { options: JSON.stringify(options) } : {}),
+	});
 export const applyAgents = () => call(AG + "apply_agents");
 export const getAgentsSyncStatus = () => call(AG + "get_agents_sync_status");
 export const listAgentRuns = (agent, limit) =>

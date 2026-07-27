@@ -122,6 +122,17 @@ class TestGating(_ApiTestCase):
 
 
 class TestSchedule(_ApiTestCase):
+	def setUp(self):
+		super().setUp()
+		# CA3-5: ``schedule_app_learning`` refuses ONLY while the legacy pipeline is retired
+		# (the default). These tests exercise the RETAINED scheduling body, which is reachable
+		# only when the pipeline is re-enabled for rollback — so run them un-retired. (The
+		# refuse-while-retired config is covered by test_app_learning_agent's
+		# TestLegacyScheduleRetired.)
+		p = mock.patch.object(app_analysis, "_legacy_retired", return_value=False)
+		p.start()
+		self.addCleanup(p.stop)
+
 	def test_consent_is_mandatory(self):
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
@@ -275,3 +286,45 @@ class TestRunsList(_ApiTestCase):
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
 			app_learning_api.list_app_learning_runs_page(filters=frappe.as_json({"status": "Bogus"}))
+
+
+class TestRetireLegacyRunsMigration(_ApiTestCase):
+	"""CA-5: the upgrade migration must not strand a run that was Queued (or
+	mid-flight) before the chat-batch pipeline was retired — nothing advances it
+	and the frontend surfaces were removed. It is terminalized to Cancelled with a
+	retirement reason; historical terminal rows are untouched; re-run is a no-op."""
+
+	def _mk(self, status: str, error: str = "") -> str:
+		doc = frappe.get_doc(
+			{"doctype": RUN, "app": "fakeapp", "status": status, "requested_by": ADMIN_USER, "error": error}
+		)
+		doc.insert(ignore_permissions=True)
+		frappe.db.commit()
+		return doc.name
+
+	def test_non_terminal_rows_are_cancelled_with_reason(self):
+		from jarvis.patches.v2_06_retire_app_learning_runs import execute
+
+		non_terminal = {s: self._mk(s) for s in ("Queued", "Zipping", "Analyzing", "Ingesting")}
+		done = self._mk("Completed")
+		failed = self._mk("Failed", error="real failure")
+
+		execute()
+		frappe.db.commit()
+
+		for status, name in non_terminal.items():
+			row = frappe.db.get_value(RUN, name, ["status", "error", "finished_at"], as_dict=True)
+			self.assertEqual(row.status, "Cancelled", f"{status} row must be terminalized")
+			self.assertIn("retired", (row.error or "").lower())
+			self.assertTrue(row.finished_at)
+		# historical terminal rows are untouched (status + a real failure reason)
+		self.assertEqual(frappe.db.get_value(RUN, done, "status"), "Completed")
+		self.assertEqual(frappe.db.get_value(RUN, failed, "status"), "Failed")
+		self.assertEqual(frappe.db.get_value(RUN, failed, "error"), "real failure")
+
+		# idempotent: a second run leaves everything terminal, nothing to change
+		execute()
+		frappe.db.commit()
+		self.assertEqual(
+			frappe.db.count(RUN, {"status": ["in", ("Queued", "Zipping", "Analyzing", "Ingesting")]}), 0
+		)

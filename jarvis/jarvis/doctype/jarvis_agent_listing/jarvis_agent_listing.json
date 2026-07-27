@@ -59,7 +59,7 @@
    "fieldname": "nature",
    "fieldtype": "Select",
    "label": "Nature",
-   "options": "Auditor\nOperator",
+   "options": "Auditor\nOperator\nScribe",
    "in_standard_filter": 1
   },
   {

@@ -1,9 +1,9 @@
-// voiceSendGlue — the PURE composer↔queue↔send glue that ChatView.vue delegates to for the two
-// send-path decisions the queue-unit tests never exercised: promoting an unsaved new-chat scope to
+// voiceSendGlue — the PURE composer↔store↔send glue that ChatView.vue delegates to for the two
+// send-path decisions the store-unit tests never exercised: promoting an unsaved new-chat scope to
 // its real conversation id, and recovering a REJECTED send without losing voice audio. It is
-// extracted (like voiceChunkQueue.js / eventFence.js) so those decisions are unit-testable with
+// extracted (like voiceDictationStore.js / eventFence.js) so those decisions are unit-testable with
 // `node --test` WITHOUT mounting the (un-mountable) ChatView single-file component — the tests drive
-// these functions with a mock queue + a plain drafts object + a mock send outcome. ChatView imports
+// these functions with a mock store + a plain drafts object + a mock send outcome. ChatView imports
 // and calls them, so the tests exercise the REAL code, not a reimplementation.
 //
 // Codex round-3 findings closed here:

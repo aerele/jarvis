@@ -97,8 +97,9 @@
       "fieldname": "source",
       "fieldtype": "Select",
       "label": "Source",
-      "options": "Business Tab\nChat Nudge\nPersonalise",
-      "default": "Business Tab"
+      "options": "Business Tab\nChat Nudge\nPersonalise\nMobile",
+      "default": "Business Tab",
+      "description": "Capture surface. This is the union; each endpoint allowlist (voice_notes_api._SOURCES, personalise_api._NOTE_SOURCES) is a subset of it."
     },
     {
       "fieldname": "status",

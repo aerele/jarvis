@@ -87,14 +87,22 @@ LEASE_TTL_S = 30
 # System age-out for a queued turn (SUX-5).
 QUEUED_MAX_AGE_S = 15 * 60
 
-# The full possible enrichment set (D2 §1a + R-4). Settlement inserts the SUBSET
-# a given turn actually owes (its outcome decides the set, OAR-9).
+# THE canonical turn-effect vocabulary (D2 §1a + R-4) — the SINGLE authority every
+# other site derives from: settlement's owed sets (`settlement.FINAL_EFFECTS` /
+# `TERMINAL_EFFECTS`), finalize's run order + runner table, and the Jarvis Turn Effect
+# DocType `effect_name` description. Settlement inserts the SUBSET a given turn
+# actually owes (its outcome decides the set, OAR-9) and `insert_required_effects`
+# rejects any name not listed here, so a typo can never become an effect that is
+# owed but never run. The ORDER is finalize's canonical run order: terminal_publish
+# FIRST (CDX-12 — the terminal re-publish backstop beats the slower enrichment).
 EFFECT_NAMES = (
 	"terminal_publish",
-	"usage",
-	"auto_title",
 	"rich_outputs",
+	"chat_asks",
 	"macro_advance",
+	"auto_title",
+	"wiki_nudge",
+	"usage",
 	"telemetry_flush",
 )
 
@@ -992,14 +1000,33 @@ def _effect_name(run_id: str, effect_name: str) -> str:
 	return f"{run_id}::{effect_name}"
 
 
+def validate_effect_names(effect_names) -> tuple[str, ...]:
+	"""Fail CLOSED on the effect vocabulary: every name must be in ``EFFECT_NAMES``.
+	An unknown name is a caller bug (a typo, or an effect added to settlement without
+	adding it to the canon) whose only silent outcome would be a ledger row no
+	finalize runner ever claims — an effect that is owed forever and never runs, and
+	on the success path a turn that force-dones its way to ``done`` having skipped
+	real enrichment. Raise LOUDLY instead. Returns the validated names as a tuple."""
+	names = tuple(effect_names or ())
+	unknown = [n for n in names if n not in EFFECT_NAMES]
+	if unknown:
+		raise ValueError(
+			f"unknown turn effect(s) {unknown!r}: not in the canonical "
+			f"turn_state.EFFECT_NAMES {list(EFFECT_NAMES)!r}"
+		)
+	return names
+
+
 def insert_required_effects(run_id: str, effect_names) -> int:
 	"""Effect ledger — INSERT the required rows at settlement (OAR-9), idempotently:
 	the composite name PK (``turn::effect_name``) makes a duplicate a no-op. This
-	fixes the owed-enrichment set atomically the instant the slot is released.
-	Returns the count freshly inserted. No commit (runs inside the settlement
-	txn)."""
+	fixes the owed-enrichment set atomically the instant the slot is released. Every
+	name is validated against the canonical ``EFFECT_NAMES`` BEFORE the first insert,
+	so an unknown name raises with NOTHING written (no partially-populated ledger for
+	the finalize_done guard to wait on). Returns the count freshly inserted. No commit
+	(runs inside the settlement txn)."""
 	inserted = 0
-	for name in effect_names or ():
+	for name in validate_effect_names(effect_names):
 		try:
 			doc = frappe.get_doc(
 				{"doctype": EFFECT, "turn": run_id, "effect_name": name, "status": "pending", "attempts": 0}
