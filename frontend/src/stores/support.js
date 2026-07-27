@@ -59,6 +59,10 @@ const thread = reactive({
 	ticket: null,
 	messages: [],
 	attachments: [],
+	// Ticket-details metadata ({name, subject, status, priority, agent_group, SLA
+	// fields, creation}) for the thread's right-side panel — carried by get_thread
+	// (not the list row, which is null for deep-linked tickets outside the newest 50).
+	meta: null,
 	loading: false,
 	error: "",
 });
@@ -97,6 +101,7 @@ async function loadThread(name, { quiet = false } = {}) {
 		const d = (r && r.data) || {};
 		thread.messages = d.messages || [];
 		thread.attachments = d.ticket_attachments || [];
+		thread.meta = d.ticket_meta || null;
 		thread.error = "";
 	} catch (e) {
 		if (thread.ticket !== name) return; // superseded by a later loadThread()

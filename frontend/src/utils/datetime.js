@@ -19,6 +19,15 @@ export function formatDate(d, fmt) {
 	return d ? dayjsLocal(String(d)).format(fmt || "MMM D, YYYY") : "";
 }
 
+// Epoch ms for a naive site-tz datetime string (SLA deadlines, creation), tz-aware
+// via dayjsLocal — so the duration/ordering math in lib/supportSla is correct for
+// any viewer's timezone, not just the site's. null for empty/invalid input.
+export function toLocalMs(d) {
+	if (d == null || d === "") return null;
+	const dj = dayjsLocal(String(d));
+	return dj && typeof dj.isValid === "function" && dj.isValid() ? dj.valueOf() : null;
+}
+
 // The send-side mirror of dayjsLocal: a browser-local datetime (an
 // <input type="datetime-local"> value, "YYYY-MM-DDTHH:mm") → the naive
 // site-timezone "YYYY-MM-DD HH:mm:ss" string Frappe endpoints expect.

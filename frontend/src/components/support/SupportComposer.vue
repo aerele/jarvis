@@ -29,6 +29,7 @@
 		>
 			<TextEditor
 				:content="modelValue"
+				:autofocus="autofocus"
 				editor-class="prose-sm max-w-none min-h-[9rem] px-3 py-2.5"
 				:fixed-menu="TOOLBAR"
 				:upload-function="rejectInlineUpload"
@@ -112,6 +113,10 @@ const props = defineProps({
 	loading: { type: Boolean, default: false },
 	// Fine print under the card; "" hides the line entirely.
 	disclaimer: { type: String, default: "" },
+	// Focus the editor on mount — used when SupportReplyBox lazily mounts this on
+	// expand, so the caret lands in the box the user just opened. Off by default so
+	// the always-mounted new-ticket form doesn't steal focus from its Subject field.
+	autofocus: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["update:modelValue", "submit", "files-added", "remove-attachment"]);

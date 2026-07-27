@@ -10,7 +10,14 @@ vi.mock("frappe-ui/editor-style.css", () => ({}));
 vi.mock("frappe-ui", () => ({
 	TextEditor: {
 		name: "TextEditor",
-		props: ["content", "fixedMenu", "uploadFunction", "placeholder", "editorClass"],
+		props: [
+			"content",
+			"fixedMenu",
+			"uploadFunction",
+			"placeholder",
+			"editorClass",
+			"autofocus",
+		],
 		template: "<div class='editor' />",
 	},
 	Button: {
@@ -70,6 +77,13 @@ describe("SupportComposer — editor wiring", () => {
 		const w = mountComposer();
 		editor(w).vm.$emit("change", "<p>typed</p>");
 		expect(w.emitted("update:modelValue")[0]).toEqual(["<p>typed</p>"]);
+	});
+
+	it("forwards autofocus to the editor (off by default, on when asked)", () => {
+		// SupportReplyBox mounts this with autofocus on expand so the caret lands in
+		// the box; the always-mounted new-ticket form leaves it off.
+		expect(editor(mountComposer()).props("autofocus")).toBe(false);
+		expect(editor(mountComposer({ autofocus: true })).props("autofocus")).toBe(true);
 	});
 });
 

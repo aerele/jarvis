@@ -114,18 +114,34 @@ describe("support store", () => {
 				data: {
 					messages: [{ id: 1 }],
 					ticket_attachments: [{ file_url: "/files/a.png" }],
+					ticket_meta: { name: "T1", status: "Open", priority: "Medium" },
 				},
 			});
 			const s = useSupportStore();
 			await s.loadThread("T1");
 			expect(s.thread.messages).toEqual([{ id: 1 }]);
 			expect(s.thread.attachments).toEqual([{ file_url: "/files/a.png" }]);
+			// The right-panel metadata rides get_thread (not the list row) — see the
+			// store comment; without this the panel is blank for deep-linked tickets.
+			expect(s.thread.meta).toEqual({ name: "T1", status: "Open", priority: "Medium" });
 			// M6: thread.ticket is the "which ticket is loaded" marker the page
 			// compares against to detect a switch (C1) — it must always be the
 			// NAME, never the row (ticketRow()/fingerprintOf() already cover row
 			// data, and a row object here broke that comparison for the next
 			// open() call).
 			expect(s.thread.ticket).toBe("T1");
+		});
+
+		it("defaults thread.meta to null when get_thread omits ticket_meta", async () => {
+			// A pre-panel backend (or a transient response) may not carry ticket_meta;
+			// the panel must read null (-> renders "—"), never a stale previous ticket's.
+			api.supportGetThread.mockResolvedValue({
+				ok: true,
+				data: { messages: [], ticket_attachments: [] },
+			});
+			const s = useSupportStore();
+			await s.loadThread("T1");
+			expect(s.thread.meta).toBeNull();
 		});
 
 		it("toasts on failure and records the error", async () => {
