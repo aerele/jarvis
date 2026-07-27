@@ -2841,3 +2841,83 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 						],
 					}
 				)
+
+	# ---- child table used as the FROM/base doctype ----------------
+	# The customer-reported bug: a child (istable) DocType queried DIRECTLY as
+	# the FROM doctype has dt == base_doctype, so the pre-fix field ACL passed
+	# parenttype=None. get_permitted_fieldnames returns [] for an istable doctype
+	# with parenttype=None (frappe/model/meta.py), so EVERY field - even a
+	# permlevel-0 one - was rejected as "restricted by permission level". The fix
+	# resolves the child's owning parent(s), mirroring step 3's record-level gate.
+	# _child_table_parents is patched so the derivation does not issue a DB query
+	# through the mocked Engine (see the step-3 tests above).
+
+	def test_restricted_can_select_child_public_field_as_base(self):
+		"""RED before fix: a permlevel-0 field on a child table queried as the
+		base/FROM doctype must stay readable for a restricted (permlevel-0) user."""
+		frappe.set_user(self.USER_RESTRICTED)
+		with (
+			patch("frappe.has_permission", return_value=True),
+			patch(
+				"jarvis.tools.get_list._child_table_parents",
+				return_value=[self.PARENT_DT],
+			),
+			patch("frappe.database.query.Engine") as fake_engine,
+			patch("pypika.queries.QueryBuilder.run", return_value=[]),
+		):
+			fake_engine.return_value.get_permission_conditions.return_value = None
+			result = query(
+				{
+					"from": self.CHILD_DT,
+					"alias": "c",
+					"select": ["c.name", "c.child_public"],
+				}
+			)
+		self.assertIn("rows", result)
+
+	def test_restricted_cannot_select_child_permlevel_field_as_base(self):
+		"""Security guard: resolving the child-as-base ACL against the owning
+		parent must NOT open a permlevel>0 field. The restricted user has no
+		permlevel-1 grant on the parent, so child_restricted stays denied even
+		when the child is the FROM doctype. Raises in field validation, before
+		execution - no Engine/run patch needed."""
+		frappe.set_user(self.USER_RESTRICTED)
+		with (
+			patch("frappe.has_permission", return_value=True),
+			patch(
+				"jarvis.tools.get_list._child_table_parents",
+				return_value=[self.PARENT_DT],
+			),
+		):
+			with self.assertRaises(PermissionDeniedError) as cm:
+				query(
+					{
+						"from": self.CHILD_DT,
+						"alias": "c",
+						"select": ["c.child_restricted"],
+					}
+				)
+		self.assertIn("child_restricted", str(cm.exception))
+
+	def test_privileged_can_select_child_permlevel_field_as_base(self):
+		"""The privileged user (permlevel-1 read on the parent) CAN read the
+		child's permlevel>0 field when the child is queried as the base."""
+		frappe.set_user(self.USER_PRIVILEGED)
+		with (
+			patch("frappe.has_permission", return_value=True),
+			patch(
+				"jarvis.tools.get_list._child_table_parents",
+				return_value=[self.PARENT_DT],
+			),
+			patch("frappe.database.query.Engine") as fake_engine,
+			patch("pypika.queries.QueryBuilder.run", return_value=[]),
+		):
+			fake_engine.return_value.get_permission_conditions.return_value = None
+			result = query(
+				{
+					"from": self.CHILD_DT,
+					"alias": "c",
+					"select": ["c.name", "c.child_restricted"],
+				}
+			)
+		self.assertIn("rows", result)

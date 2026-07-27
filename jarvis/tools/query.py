@@ -555,6 +555,54 @@ def _from_doctype(alias_map: dict) -> str:
 	return next(iter(alias_map.values()))[0]
 
 
+def _permitted_read_fields(dt: str, base_doctype: str | None) -> set[str]:
+	"""Fields on ``dt`` the current user may READ (the field-level permlevel
+	ACL), mirroring ``get_list``'s ``apply_fieldlevel_read_permissions``.
+
+	A child (istable) DocType carries no permissions of its own, so
+	``get_permitted_fieldnames`` short-circuits to an EMPTY list for
+	``parenttype=None`` (``frappe/model/meta.py``: ``if self.istable and not
+	parenttype: return []``). That would reject EVERY field regardless of its
+	real permlevel — the customer-reported bug when a child table is the
+	FROM/base doctype (``dt == base_doctype``, so the plain resolution below
+	yields ``parenttype=None``). Resolve the child's owning parent(s) instead —
+	the same ``_child_table_parents`` derivation step 3 uses for the
+	record-level gate — and permit a field if it is readable under ANY owning
+	parent the caller can read the child through. A child JOINed under a
+	concrete parent already carries that parent as ``base_doctype``, so use it
+	directly (unchanged pre-fix behaviour). Non-child DocTypes keep the plain
+	``parenttype`` resolution.
+	"""
+	if not frappe.get_meta(dt).istable:
+		parenttype = None if (base_doctype is None or dt == base_doctype) else base_doctype
+		return set(
+			get_permitted_fields(
+				doctype=dt,
+				parenttype=parenttype,
+				permission_type="read",
+				ignore_virtual=True,
+			)
+		)
+	# Child table: evaluate its field ACL against the owning parent(s).
+	if base_doctype and base_doctype != dt and not frappe.get_meta(base_doctype).istable:
+		parents = [base_doctype]
+	else:
+		from jarvis.tools.get_list import _child_table_parents
+
+		parents = _child_table_parents(dt)
+	permitted: set[str] = set()
+	for parent in parents:
+		permitted |= set(
+			get_permitted_fields(
+				doctype=dt,
+				parenttype=parent,
+				permission_type="read",
+				ignore_virtual=True,
+			)
+		)
+	return permitted
+
+
 def _validate_column(dt: str, field: str, base_doctype: str | None = None) -> None:
 	"""Validate ``field`` is a real, READABLE column of DocType ``dt``.
 
@@ -609,15 +657,12 @@ def _validate_column(dt: str, field: str, base_doctype: str | None = None) -> No
 	# standard-field references without recursing through the patched Engine.
 	if field in _OPTIONAL_FIELDS or field in _DEFAULT_FIELDS or field in _CHILD_FIELDS:
 		return
-	parenttype = None if (base_doctype is None or dt == base_doctype) else base_doctype
-	permitted = set(
-		get_permitted_fields(
-			doctype=dt,
-			parenttype=parenttype,
-			permission_type="read",
-			ignore_virtual=True,
-		)
-	)
+	# Field-level ACL — permlevel-aware AND child-table-aware. A child (istable)
+	# DocType queried as the FROM/base doctype (dt == base_doctype) has no
+	# standalone permissions, so resolving it with parenttype=None blackholes
+	# every field; _permitted_read_fields resolves child fields against the
+	# owning parent(s) instead. See its docstring.
+	permitted = _permitted_read_fields(dt, base_doctype)
 	# OPTIONAL_FIELDS are always readable (mirrors
 	# apply_fieldlevel_read_permissions' explicit ``column in
 	# OPTIONAL_FIELDS`` allowance) even when absent from the permitted set.
