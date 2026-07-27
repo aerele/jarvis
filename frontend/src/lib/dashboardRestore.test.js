@@ -174,8 +174,14 @@ test("a remount restores WHAT WAS BEING EDITED, not just the pixels", () => {
 	assert.match(saveDialogSrc, /if \(e && e\.name\) payload\.name = e\.name;/);
 	assert.match(pageSrc, /:editing="editingDetail"/);
 	assert.match(pageSrc, /const editingSticky = useStorage\(`jarvis-dash-editing-\$\{/);
-	// seeded at setup, BEFORE the chat pane's transcript replay can reach the canvas
-	assert.match(pageSrc, /const editSeed = ref\(routeEdit \|\| editingSticky\.value\);/);
+	// seeded at setup, BEFORE the chat pane's transcript replay can reach the
+	// canvas. The one exception is a builder that went away mid-ADOPTION, where
+	// the canvas WAS the transcript's build and the stored row is behind it
+	// (dashboardOpen.test.js owns that path) — the identity still comes back.
+	assert.match(
+		pageSrc,
+		/const editSeed = ref\(routeEdit \|\| \(adoptionResume \? "" : editingSticky\.value\)\);/
+	);
 	assert.match(
 		pageSrc,
 		/if \(editSeed\.value\) loadEdit\(editSeed\.value, \{ deepLink: !!routeEdit \}\);/

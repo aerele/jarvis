@@ -20,9 +20,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	adoptionIdentity,
+	agentRevisionTarget,
 	canOpenInDashboards,
 	dashboardOpenRoute,
 	isNewerStamp,
+	resumesAdoption,
 	wouldDiscardOnPromotion,
 } from "./dashboardOpen.js";
 
@@ -385,6 +388,132 @@ test("an adoption does not licence discarding the OTHER legs of the guard", () =
 	assert.equal(wouldDiscardOnPromotion({ ...other, canvasMsg: "" }), false);
 });
 
+// ---- adoption: the SAVE identity is not the REVISION identity -------------
+
+const DETAIL = { name: "DASH-1", can_edit: true, theme: "Graphite", html: "<h1>old</h1>" };
+
+test("an adopted promotion tells the agent NOTHING about the row it adopted", () => {
+	// The canvas holds a build the adopted row is BEHIND. Naming that row in the
+	// send makes the turn handler instruct the agent to call jarvis__get_doc and
+	// "produce the full revised document" from the STORED html — so the next
+	// "make the totals bold" republishes the older document, reverting the build
+	// the user promoted, and the Save the adoption armed then writes that
+	// reversion over the row. The transcript is the current document here.
+	assert.equal(agentRevisionTarget({ editingName: "DASH-1", adoptionActive: true }), "");
+	// An ordinary edit session is untouched: there the row IS what is on the
+	// canvas, and reading it back is exactly right.
+	assert.equal(agentRevisionTarget({ editingName: "DASH-1", adoptionActive: false }), "DASH-1");
+	// ...so the name comes back the moment the two documents are one — the first
+	// successful Save, or an ?edit= that loads the row's own html (both clear the
+	// adoption, which is all this reads).
+	assert.equal(agentRevisionTarget({ editingName: "DASH-2", adoptionActive: false }), "DASH-2");
+	// nothing to name, either way
+	assert.equal(agentRevisionTarget({ editingName: "", adoptionActive: true }), "");
+	assert.equal(agentRevisionTarget({ editingName: "", adoptionActive: false }), "");
+	assert.equal(agentRevisionTarget({ editingName: undefined, adoptionActive: false }), "");
+});
+
+test("a remount mid-adoption resumes it instead of re-opening the saved row", () => {
+	// Every route change remounts the builder (no <KeepAlive> anywhere), so
+	// "promote → hop to the chat to re-read it → come back" is an ordinary move.
+	const adopted = {
+		routeEdit: "",
+		adoptedRow: "DASH-1",
+		editingSticky: "DASH-1",
+		canvasMsg: "M2",
+		chatConv: "C",
+	};
+	assert.equal(resumesAdoption(adopted), true);
+	// An ordinary edit session cannot wear this signature: loadEdit clears the
+	// canvas message precisely because the canvas becomes the row's document.
+	assert.equal(resumesAdoption({ ...adopted, adoptedRow: "", canvasMsg: "" }), false);
+	// ...nor can a sticky edit target with no adoption behind it
+	assert.equal(resumesAdoption({ ...adopted, adoptedRow: "" }), false);
+	// half-states are not the signature: all four, or the ?edit= path
+	assert.equal(resumesAdoption({ ...adopted, canvasMsg: "" }), false);
+	assert.equal(resumesAdoption({ ...adopted, chatConv: "" }), false);
+	// the sticky target moved on (another dashboard was opened for editing)
+	assert.equal(resumesAdoption({ ...adopted, editingSticky: "DASH-2" }), false);
+	assert.equal(resumesAdoption({ ...adopted, editingSticky: "" }), false);
+	// an explicit ?edit= is the user asking for a document, and always wins
+	assert.equal(resumesAdoption({ ...adopted, routeEdit: "DASH-3" }), false);
+	assert.equal(resumesAdoption({ ...adopted, routeEdit: "DASH-1" }), false);
+});
+
+test("only an EDITABLE row is adopted", () => {
+	assert.equal(adoptionIdentity({ dash: "DASH-1", detail: DETAIL }).name, "DASH-1");
+	assert.equal(adoptionIdentity({ dash: "DASH-1", detail: DETAIL }).adopted, DETAIL);
+	// get_dashboard is read-gated while save_dashboard demands owner/admin, and
+	// `dash` arrives on a URL — so an Org/Role row this user may merely READ would
+	// otherwise get the "Editing <their title>" badge and a "Save changes" that
+	// throws a PermissionError only after the dialog has been filled in.
+	for (const can_edit of [false, 0, undefined, null]) {
+		const r = adoptionIdentity({ dash: "DASH-1", detail: { ...DETAIL, can_edit } });
+		assert.equal(r.adopted, null);
+		assert.equal(r.name, "");
+	}
+	// nothing named, nothing answered
+	assert.equal(adoptionIdentity({ dash: "", detail: DETAIL }).name, "");
+	assert.equal(adoptionIdentity({ dash: "DASH-1", detail: null }).name, "");
+	assert.equal(adoptionIdentity({ dash: "DASH-1", detail: {} }).name, "");
+	assert.equal(adoptionIdentity({ dash: "DASH-1", detail: undefined }).adopted, null);
+});
+
+test("the adoption designs for, and saves against, the ROW's theme", () => {
+	// The picker sits on the product default on a fresh mount, and the save-time
+	// validator re-lints the html against whatever theme the save sends: a Slate
+	// row promoted and saved is otherwise rejected outright, or silently
+	// converted. The agent is told the same theme, so it designs for it too.
+	assert.equal(adoptionIdentity({ dash: "DASH-1", detail: DETAIL }).theme, "graphite");
+	// the capitalised label the DocType stores → the lowercase key the SPA uses
+	const themed = (theme) => adoptionIdentity({ dash: "DASH-1", detail: { ...DETAIL, theme } });
+	assert.equal(themed("Jarvis").theme, "jarvis");
+	assert.equal(themed("Custom").theme, "custom");
+	// an unknown/absent label falls back to the product default, never to nothing
+	assert.equal(themed("").theme, "jarvis");
+	assert.equal(themed(undefined).theme, "jarvis");
+	// no adoption, no theme: "" leaves the picker exactly where the user left it
+	assert.equal(adoptionIdentity({ dash: "DASH-1", detail: null }).theme, "");
+	assert.equal(
+		adoptionIdentity({ dash: "DASH-1", detail: { ...DETAIL, can_edit: false } }).theme,
+		""
+	);
+});
+
+test("a fetch blip keeps the identity the skipped confirm promised to keep", () => {
+	// wouldDiscardOnPromotion skips the dialog when the builder is already editing
+	// the row being adopted, on the promise that the identity is KEPT. A transient
+	// get_dashboard failure must not break that promise silently: the next Save
+	// would write the very duplicate the adoption exists to prevent, and no
+	// confirm was ever shown.
+	const blip = adoptionIdentity({ dash: "DASH-1", detail: null, priorName: "DASH-1" });
+	assert.equal(blip.keepPrior, true);
+	assert.equal(blip.name, "DASH-1");
+	assert.equal(blip.adopted, null); // no detail to show — the name is what survives
+	// a DIFFERENT prior identity was confirmed away, so it does not survive
+	const other = adoptionIdentity({ dash: "DASH-1", detail: null, priorName: "DASH-2" });
+	assert.equal(other.keepPrior, false);
+	assert.equal(other.name, "");
+	// no prior identity, nothing to keep
+	assert.equal(
+		adoptionIdentity({ dash: "DASH-1", detail: null, priorName: "" }).keepPrior,
+		false
+	);
+	// a successful adoption always answers with the fetched row
+	const ok = adoptionIdentity({ dash: "DASH-1", detail: DETAIL, priorName: "DASH-1" });
+	assert.equal(ok.keepPrior, false);
+	assert.equal(ok.adopted, DETAIL);
+	// ...and a fetch that ANSWERED "you may not edit this" is not a blip: it is
+	// the can_edit rule, and it wins over the promise
+	const denied = adoptionIdentity({
+		dash: "DASH-1",
+		detail: { ...DETAIL, can_edit: false },
+		priorName: "DASH-1",
+	});
+	assert.equal(denied.keepPrior, false);
+	assert.equal(denied.name, "");
+});
+
 // ---- main chat: the affordance is conversation state, not html-sniffing ----
 
 test("ChatView binds the origin to the conversation it was read for", () => {
@@ -660,10 +789,11 @@ test("accepting takes over the thread, the identity and the stale data-mode", ()
 	const promote = fnBody(pageSrc, "async function promoteFromChat(");
 	const accept = promote.slice(promote.indexOf("const accept = async () => {"));
 	for (const line of [
-		/editingSticky\.value = adopted \? adopted\.name : "";/,
-		/editingDetail\.value = adopted;/,
+		/editingSticky\.value = identity\.name;/,
+		/adoptedRow\.value = identity\.name;/,
+		/if \(!identity\.keepPrior\) \{\n\t\t\teditingDetail\.value = identity\.adopted;/,
+		/savedName\.value = identity\.name;/,
 		/editSeed\.value = "";/,
-		/savedName\.value = adopted \? adopted\.name : "";/,
 		/chatConv\.value = conversation;/,
 		/canvasMsg\.value = messageId;/,
 		/dashDataMode\.value = "auto";/,
@@ -713,24 +843,92 @@ test("the promotion ADOPTS the saved row main chat named", () => {
 	const accept = promote.slice(promote.indexOf("const accept = async () => {"));
 	assert.match(
 		accept,
-		/if \(dash\) \{\n\t\t\ttry \{\n\t\t\t\tconst d = await getDashboard\(dash\);/
+		/if \(dash\) \{\n\t\t\ttry \{\n\t\t\t\tdetail = await getDashboard\(dash\);/
 	);
-	assert.match(accept, /if \(d && d\.name\) adopted = d;/);
+	// the identity it comes away with is decided by the pure function above, on
+	// what the fetch answered and what the builder already had
+	assert.match(accept, /const priorName = editingName\(\);/);
+	assert.match(accept, /const identity = adoptionIdentity\(\{ dash, detail, priorName \}\);/);
 	// a name that fails the (permission-gated) fetch degrades to the identity-less
 	// promotion — a URL-supplied `dash` is never a dead click, and never a trusted
 	// one either
-	assert.match(accept, /\} catch \(e\) \{\n\t\t\t\tadopted = null;/);
+	assert.match(accept, /\} catch \(e\) \{\n\t\t\t\tdetail = null;/);
 	// the adopted row supplies the IDENTITY only: its html must never reach the
 	// canvas, or the promotion answers with the saved document instead of the
 	// build the user clicked
-	assert.doesNotMatch(accept, /builderHtml\.value = (adopted|d)\b/);
+	assert.doesNotMatch(accept, /builderHtml\.value = (identity|detail|adopted)\b/);
 	assert.doesNotMatch(accept, /\.html\b/);
 	// ...and the identity is what makes Save update in place — the dialog reads it
-	// off editingDetail
-	assert.match(pageSrc, /:editing-name="editingDetail \? editingDetail\.name : ''"/);
+	// off editingDetail, while the AGENT is told nothing (agentEditingName)
+	assert.match(pageSrc, /:editing-name="agentEditingName"/);
 	assert.match(pageSrc, /:editing="editingDetail"/);
+	// the row's theme rides along, so the first "Save changes" re-lints against
+	// the theme the row actually has instead of the picker's default
+	assert.match(accept, /if \(identity\.theme\) builderTheme\.value = identity\.theme;/);
 	// the query it arrived on is dropped with the rest of the promotion keys
 	assert.match(fnBody(pageSrc, "function stripPromotionQuery("), /delete q\.dash;/);
+});
+
+test("the two identities are bound separately, and the adoption ends where they meet", () => {
+	// Save reads the full detail; the agent reads agentEditingName, which is empty
+	// for as long as the canvas is ahead of the row.
+	assert.match(pageSrc, /:editing-name="agentEditingName"/);
+	assert.match(pageSrc, /:editing="editingDetail"/);
+	assert.match(pageSrc, /const agentEditingName = computed\(\(\) =>/);
+	assert.match(pageSrc, /editingName: \(editingDetail\.value \|\| \{\}\)\.name \|\| "",/);
+	assert.match(pageSrc, /adoptionActive: !!adoptedRow\.value,/);
+	// explicit state, not inferred from timestamps — and sticky, because the
+	// remount has to be able to tell the two states apart (resumesAdoption)
+	assert.match(
+		pageSrc,
+		/const adoptedRow = useStorage\(`jarvis-dash-adopted-\$\{session\.user \|\| "anon"\}`, ""\);/
+	);
+	// it ends exactly where the row and the canvas become one document again:
+	// the first successful Save, an ?edit= load, or a builder that was cleared
+	assert.match(fnBody(pageSrc, "function onSaved("), /adoptedRow\.value = "";/);
+	assert.match(fnBody(pageSrc, "async function loadEdit("), /adoptedRow\.value = "";/);
+	assert.match(fnBody(pageSrc, "function clearBuilder("), /adoptedRow\.value = "";/);
+	// the send itself takes the pane's prop, so the suppression reaches the agent
+	assert.match(paneSrc, /editingName: \{ type: String, default: "" \},/);
+	assert.match(paneSrc, /props\.editingName,/);
+	assert.match(apiSrc, /if \(editingName\) \{/);
+});
+
+test("the adoption resume restores the identity WITHOUT the row's html", () => {
+	// loadEdit is the wrong restore here: it puts the STORED document on the
+	// canvas and clears the canvas message, so the user comes back to an older
+	// build than the one they left and the promoted one is only in the transcript.
+	const resume = fnBody(pageSrc, "async function resumeAdoption(");
+	assert.match(resume, /d = await getDashboard\(name\);/);
+	assert.doesNotMatch(resume, /builderHtml\.value/);
+	assert.doesNotMatch(resume, /canvasMsg\.value/);
+	assert.match(resume, /if \(d && d\.name && d\.can_edit\) \{/);
+	assert.match(resume, /editingDetail\.value = d;/);
+	assert.match(resume, /builderTheme\.value = themeKey\(d\.theme\);/);
+	assert.match(resume, /adoptedRow\.value = d\.name;/);
+	// a deleted (or no-longer-ours) row is forgotten silently, as loadEdit's
+	// remount path does; a blip keeps the identity for the next mount to retry
+	assert.match(resume, /if \(isGoneError\(e\)\) \{/);
+	assert.match(fnBody(pageSrc, "function isGoneError("), /isPermissionError\(e\)/);
+	// the decision is taken at SETUP, like the edit seed — the pane mounts first
+	assert.match(pageSrc, /const adoptionResume = resumesAdoption\(\{/);
+	assert.match(pageSrc, /adoptedRow: adoptedRow\.value,/);
+	// ...and the seed is left EMPTY on that path, or onCanvas drops the pane's
+	// transcript restore and the canvas comes back blank
+	assert.match(
+		pageSrc,
+		/const editSeed = ref\(routeEdit \|\| \(adoptionResume \? "" : editingSticky\.value\)\);/
+	);
+	// the mount takes it ahead of the ?edit= path, and so does the fallback a
+	// declined/failed promotion runs
+	assert.match(pageSrc, /if \(adoptionResume\) \{\n\t\t\tresumeAdoption\(adoptedRow\.value\);/);
+	const mount = fnBody(pageSrc, "onMounted(async () => {");
+	assert.ok(
+		mount.indexOf("resumeAdoption(adoptedRow.value)") <
+			mount.indexOf("loadEdit(editSeed.value"),
+		"the adopted state is restored instead of the edit seed, not after it"
+	);
+	assert.match(mount, /promoteFromChat\(routeChat, routeCanvas, \{ fallback: normalMount/);
 });
 
 test("a promotion that would cost the user something confirms first", () => {
@@ -752,7 +950,10 @@ test("a promotion that would cost the user something confirms first", () => {
 		pageSrc,
 		/const editingName = \(\) =>\n\teditingSticky\.value \|\| \(editingDetail\.value \|\| \{\}\)\.name \|\| editSeed\.value \|\| "";/
 	);
-	assert.match(pageSrc, /import \{ wouldDiscardOnPromotion \} from "@\/lib\/dashboardOpen";/);
+	assert.match(
+		pageSrc,
+		/import \{\n\tadoptionIdentity,\n\tagentRevisionTarget,\n\tresumesAdoption,\n\twouldDiscardOnPromotion,\n\} from "@\/lib\/dashboardOpen";/
+	);
 	const promote = fnBody(pageSrc, "async function promoteFromChat(");
 	// `force` is required: confirmDiscard short-circuits on !unsavedCanvas, so an
 	// editing target alone would never reach the dialog

@@ -13,9 +13,11 @@
 // property of the conversation plus the item type, never of the html itself.
 //
 // Both ends of the hand-off keep their decisions here, as pure functions: what
-// main chat routes to, and what the builder would cost the user by accepting
-// the promotion. A .vue SFC cannot be imported into the plain node test runner,
-// so logic that lives in one is logic nothing can test behaviourally.
+// main chat routes to, what the builder would cost the user by accepting the
+// promotion, and what identity it comes away with. A .vue SFC cannot be
+// imported into the plain node test runner, so logic that lives in one is logic
+// nothing can test behaviourally.
+import { themeKey } from "./dashboardThemes.js";
 
 /**
  * Does this canvas item, in this conversation, get the affordance?
@@ -150,4 +152,95 @@ export function wouldDiscardOnPromotion({
 	if (unsavedCanvas) return true;
 	if (losesEditing) return true;
 	return !!(chatConv && chatConv !== conv && canvasMsg);
+}
+
+// ── adoption: the SAVE identity is not the REVISION identity ────────────────
+//
+// An adopted promotion holds two documents at once. The canvas shows the build
+// the user clicked — a later iteration than the row it belongs to — while the
+// row supplies the identity, so "Save changes" reconciles them instead of
+// writing a duplicate. Until that Save (or an `?edit=` that loads the row's own
+// html), the TRANSCRIPT is the current document and the stored row is history.
+// Everything below follows from that one asymmetry.
+
+/**
+ * What the builder chat tells the agent it is revising.
+ *
+ * NOT the Save target. `sendDashboardChat`'s editing name becomes a
+ * `{doctype, name}` context, and the turn handler turns that into "they are
+ * revising the saved dashboard <name> — call jarvis__get_doc … then produce the
+ * full revised document". Pointed at a row the canvas is already AHEAD of, that
+ * instruction makes the next small tweak ("make the totals bold") rebuild from
+ * the STORED html: the promoted build is silently reverted, and — because the
+ * adoption also armed Save — the next Save writes that reversion over the row.
+ *
+ * So while an adoption is active the agent is told nothing and revises from the
+ * transcript, exactly as an identity-less promotion does. The moment the two
+ * documents are one again, the name goes back on.
+ *
+ * @param {{editingName: string, adoptionActive: boolean}} arg
+ */
+export function agentRevisionTarget({ editingName, adoptionActive }) {
+	return adoptionActive ? "" : editingName || "";
+}
+
+/**
+ * Is this mount resuming an adopted promotion rather than an edit session?
+ *
+ * Every route change remounts the builder (there is no <KeepAlive>), so "promote
+ * → hop to the chat → come back" is an ordinary move. The sticky editing target
+ * alone cannot tell the two states apart, and read as an edit target it sends
+ * the mount through `loadEdit`, which puts the ROW's html on the canvas and
+ * clears the canvas message — answering with an older document than the one the
+ * user left, and forgetting the promoted build.
+ *
+ * The adopted state has its own signature: the row an adoption named, the same
+ * row still the sticky target, plus the canvas message and the thread it was
+ * promoted from. All four, or it is an ordinary edit session (`loadEdit` clears
+ * the canvas message precisely because the canvas is the row's document then).
+ * An explicit `?edit=` is the user asking for a document and always wins.
+ *
+ * @param {{routeEdit: string, adoptedRow: string, editingSticky: string, canvasMsg: string, chatConv: string}} arg
+ */
+export function resumesAdoption({ routeEdit, adoptedRow, editingSticky, canvasMsg, chatConv }) {
+	if (routeEdit) return false;
+	return !!adoptedRow && adoptedRow === editingSticky && !!canvasMsg && !!chatConv;
+}
+
+/**
+ * The identity a promotion comes away with.
+ *
+ * `dash` is the row main chat named, `detail` what `get_dashboard` answered for
+ * it (null when the fetch failed), `priorName` the identity the builder already
+ * had. Three rules, in order:
+ *
+ * - Adopt only an EDITABLE row. `dash` arrives on a URL and `get_dashboard` is
+ *   read-gated, while `save_dashboard` demands owner/admin — so an Org- or
+ *   Role-scoped row this user may merely read would otherwise get the badge and
+ *   a "Save changes" that throws a PermissionError after the dialog is filled.
+ * - A fetch that never ANSWERED, while `dash` is the identity the builder
+ *   already had, keeps that identity. The confirm was SKIPPED on the promise
+ *   that the row is kept (see wouldDiscardOnPromotion); clearing it on a blip
+ *   breaks that promise silently and the next Save writes the duplicate anyway.
+ *   A fetch that answered "you may not edit this" is not a blip — it is the
+ *   rule above, and it wins.
+ * - Anything else degrades to the identity-less promotion that shipped before.
+ *
+ * The row's `theme` rides along: the agent must design for the theme the row
+ * actually has, and the save-time validator re-lints the html against it — a
+ * Slate row saved with the picker left on the default is rejected outright.
+ *
+ * @param {{dash?: string, detail: {name?: string, can_edit?: boolean|number, theme?: string}|null, priorName?: string}} arg
+ * @returns {{adopted: object|null, keepPrior: boolean, name: string, theme: string}}
+ */
+export function adoptionIdentity({ dash, detail, priorName }) {
+	const answered = !!(detail && detail.name);
+	const adopted = dash && answered && detail.can_edit ? detail : null;
+	const keepPrior = !answered && !!dash && !!priorName && priorName === dash;
+	return {
+		adopted,
+		keepPrior,
+		name: adopted ? adopted.name : keepPrior ? priorName : "",
+		theme: adopted ? themeKey(adopted.theme) : "",
+	};
 }

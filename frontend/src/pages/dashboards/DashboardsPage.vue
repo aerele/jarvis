@@ -157,7 +157,7 @@
 					:style="{ height: chatPct + '%' }"
 					:caps="caps"
 					:theme="builderTheme"
-					:editing-name="editingDetail ? editingDetail.name : ''"
+					:editing-name="agentEditingName"
 					@canvas="onCanvas"
 					@reset="resetBuilder"
 				/>
@@ -219,7 +219,12 @@ import { getCanvas } from "@/api";
 import { agentName } from "@/branding";
 import { getDashboardsCaps, getDashboard, getDashboardConversation } from "@/api/dashboards";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
-import { wouldDiscardOnPromotion } from "@/lib/dashboardOpen";
+import {
+	adoptionIdentity,
+	agentRevisionTarget,
+	resumesAdoption,
+	wouldDiscardOnPromotion,
+} from "@/lib/dashboardOpen";
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardChatPane from "./DashboardChatPane.vue";
@@ -300,13 +305,42 @@ const dashDataMode = useStorage(`jarvis-dash-datamode-${session.user || "anon"}`
 // updating the one on screen.
 const editingSticky = useStorage(`jarvis-dash-editing-${session.user || "anon"}`, "");
 const canvasMsg = useStorage(`jarvis-dash-canvasmsg-${session.user || "anon"}`, "");
+// The row an ADOPTED promotion is bound to, while the canvas still holds the
+// promoted build. Sticky like the two above, and for the same reason: a remount
+// has to be able to tell "editing that row" from "holding a build that row is
+// behind". Empty again the moment the two are one document - after a Save, or
+// after ?edit= puts the row's own html on the canvas.
+const adoptedRow = useStorage(`jarvis-dash-adopted-${session.user || "anon"}`, "");
+
+// What the builder chat tells the AGENT it is revising - not the same as what
+// Save updates while an adoption is active. See agentRevisionTarget().
+const agentEditingName = computed(() =>
+	agentRevisionTarget({
+		editingName: (editingDetail.value || {}).name || "",
+		adoptionActive: !!adoptedRow.value,
+	})
+);
 
 // A pending ?edit=<name> deep-link, or - on a plain remount - the dashboard the
 // builder was editing when it went away. Read synchronously at setup, i.e.
 // BEFORE the chat pane mounts and replays its transcript's canvas: an explicit
 // edit target owns the canvas, so its restore must not flash a build first.
 const routeEdit = typeof route.query.edit === "string" ? route.query.edit : "";
-const editSeed = ref(routeEdit || editingSticky.value);
+// ...unless this mount is resuming an ADOPTED promotion, where the canvas the
+// user left was the transcript's build and not the row's html. Then the seed is
+// deliberately empty, so the pane's own transcript restore is the thing that
+// refills the canvas (onCanvas holds restores off while a seed is pending) and
+// resumeAdoption() brings back the identity WITHOUT the stored document.
+// Decided synchronously here, from the sticky slots, for the same reason the
+// seed is: the pane mounts first.
+const adoptionResume = resumesAdoption({
+	routeEdit,
+	adoptedRow: adoptedRow.value,
+	editingSticky: editingSticky.value,
+	canvasMsg: canvasMsg.value,
+	chatConv: chatConv.value,
+});
+const editSeed = ref(routeEdit || (adoptionResume ? "" : editingSticky.value));
 
 // ?chat=<conversation>&canvas=<message>: main chat handing a builder
 // conversation's artifact back here ("Open in Dashboards"). Read at setup for
@@ -404,6 +438,9 @@ function onSaved(detail) {
 	if (detail && detail.name) {
 		editingDetail.value = detail;
 		editingSticky.value = detail.name;
+		// The row now HOLDS the canvas: the two documents an adoption was keeping
+		// apart are one again, so the agent is told what it is revising from here on.
+		adoptedRow.value = "";
 	}
 	toast.success("Dashboard saved");
 }
@@ -494,6 +531,7 @@ function clearBuilder() {
 	chatConv.value = "";
 	dashDataMode.value = "auto";
 	editingSticky.value = "";
+	adoptedRow.value = "";
 	canvasMsg.value = "";
 	editSeed.value = "";
 	builderHtml.value = "";
@@ -553,6 +591,9 @@ async function loadEdit(name, { deepLink = true } = {}) {
 			builderTheme.value = themeKey(d.theme);
 			// the canvas is this document now, not an artifact from the transcript
 			canvasMsg.value = "";
+			// ...so whatever the builder was holding is no longer ahead of its row:
+			// the agent revises this document by name again.
+			adoptedRow.value = "";
 			// resume the build thread, or a fresh one — never the stale sticky
 			// conversation left over from editing a different dashboard.
 			if (deepLink || d.source_conversation) {
@@ -584,6 +625,48 @@ watch(
 		loadEdit(name);
 	}
 );
+
+// Permanent enough to forget a stored target over: the row was deleted, or this
+// user may no longer touch it. Anything else is a blip the next mount retries.
+function isGoneError(e) {
+	return (
+		!!(e && (e.status === 404 || e.exc_type === "DoesNotExistError")) || isPermissionError(e)
+	);
+}
+
+// The third mount path: coming back to an ADOPTED promotion (resumesAdoption
+// above). What was on the canvas is the transcript's build, NEWER than the row
+// it adopted, so loadEdit is the wrong restore - it would answer with the row's
+// stored html and drop the build the user was looking at. Restore the identity
+// alone (badge, theme, Save-in-place) and let the pane's transcript restore
+// replay the canvas, which it can because `editSeed` was left empty at setup.
+async function resumeAdoption(name) {
+	let d = null;
+	try {
+		d = await getDashboard(name);
+	} catch (e) {
+		// A blip keeps the identity: the next mount retries, and dropping it here
+		// would quietly arm the next Save to write a duplicate of that very row.
+		if (isGoneError(e)) {
+			editingSticky.value = "";
+			adoptedRow.value = "";
+		}
+		return;
+	}
+	if (d && d.name && d.can_edit) {
+		editingDetail.value = d;
+		editingSticky.value = d.name;
+		savedName.value = d.name;
+		builderTheme.value = themeKey(d.theme);
+		adoptedRow.value = d.name;
+		return;
+	}
+	// Gone, or readable but no longer editable: the canvas is still the user's
+	// build, so keep it and let Save write a row of its own rather than offer a
+	// "Save changes" that throws on submit.
+	editingSticky.value = "";
+	adoptedRow.value = "";
+}
 
 // ── ?chat=&canvas= — promoting a chat artifact onto the builder ──────────────
 // Main chat can open a builder conversation like any other, but its canvas only
@@ -684,22 +767,37 @@ async function promoteFromChat(conversation, messageId, { fallback = null, dash 
 		// the row only supplies the identity, so the badge names it and the next
 		// Save updates it in place instead of creating a duplicate. The fetch is
 		// permission-gated server-side, so a foreign or deleted name simply fails
-		// here and the promotion degrades to the identity-less one it was before.
-		let adopted = null;
+		// here; adoptionIdentity() decides what that failure costs.
+		const priorName = editingName();
+		let detail = null;
 		if (dash) {
 			try {
-				const d = await getDashboard(dash);
-				if (d && d.name) adopted = d;
+				detail = await getDashboard(dash);
 			} catch (e) {
-				adopted = null;
+				detail = null;
 			}
 		}
+		const identity = adoptionIdentity({ dash, detail, priorName });
 		// The builder is this conversation's now - anything else it was editing is
 		// over, or Save would write back onto the wrong dashboard.
-		editingSticky.value = adopted ? adopted.name : "";
-		editingDetail.value = adopted;
+		editingSticky.value = identity.name;
+		// SAVE identity armed, revision identity NOT: the canvas holds a build the
+		// row is behind, so the agent keeps working from the transcript until a
+		// Save reconciles the two (agentEditingName).
+		adoptedRow.value = identity.name;
+		// `keepPrior` is a fetch that blipped on the row the builder ALREADY had:
+		// the skipped confirm promised to keep that identity, so the sticky name
+		// above stands and the detail already in hand is left alone rather than
+		// nulled. Every other outcome takes what the fetch answered.
+		if (!identity.keepPrior) {
+			editingDetail.value = identity.adopted;
+			savedName.value = identity.name;
+		}
+		// Design for, and re-lint against, the theme the ROW actually has - a Save
+		// with the picker left on the default rewrites the row's look, and the
+		// validator rejects the html outright when the two disagree.
+		if (identity.theme) builderTheme.value = identity.theme;
 		editSeed.value = "";
-		savedName.value = adopted ? adopted.name : "";
 		detectedSources.value = [];
 		chatConv.value = conversation;
 		canvasMsg.value = messageId;
@@ -849,8 +947,14 @@ onMounted(async () => {
 	if (fresh) caps.value = { ...caps.value, ...fresh };
 
 	// An explicit ?edit= is the user asking; the sticky target is this page
-	// remembering what it was editing, so a failure there stays quiet.
+	// remembering what it was editing, so a failure there stays quiet. A builder
+	// that went away mid-ADOPTION remembers something else - a row its canvas is
+	// ahead of - and resumes that instead of re-opening the row's document.
 	const normalMount = () => {
+		if (adoptionResume) {
+			resumeAdoption(adoptedRow.value);
+			return;
+		}
 		if (editSeed.value) loadEdit(editSeed.value, { deepLink: !!routeEdit });
 	};
 	// ?edit= wins over ?chat=: it names a saved document, the promotion only a
