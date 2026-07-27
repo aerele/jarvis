@@ -222,7 +222,6 @@
 										Account
 									</div>
 									<FormControl
-										id="jv-ob-email"
 										type="email"
 										variant="outline"
 										label="Work email"
@@ -234,7 +233,6 @@
 										@keydown.enter="onDetailsSubmit"
 									/>
 									<FormControl
-										id="jv-ob-contact"
 										type="tel"
 										variant="outline"
 										label="Contact number (optional)"
@@ -269,7 +267,6 @@
 										invoicing.
 									</div>
 									<FormControl
-										id="jv-ob-addr"
 										class="col-span-2"
 										type="text"
 										variant="outline"
@@ -280,7 +277,6 @@
 										@keydown.enter="onDetailsSubmit"
 									/>
 									<FormControl
-										id="jv-ob-city"
 										type="text"
 										variant="outline"
 										label="City (optional)"
@@ -290,7 +286,6 @@
 										@keydown.enter="onDetailsSubmit"
 									/>
 									<FormControl
-										id="jv-ob-gstin"
 										type="text"
 										variant="outline"
 										label="GSTIN (optional)"
@@ -690,7 +685,6 @@
 								</div>
 								<div class="mx-auto flex max-w-[620px] flex-col gap-3.5">
 									<FormControl
-										id="jv-ob-sh-url"
 										type="text"
 										variant="outline"
 										label="openclaw URL"
@@ -698,7 +692,6 @@
 										placeholder="http://host.docker.internal:19060"
 									/>
 									<FormControl
-										id="jv-ob-sh-token"
 										type="password"
 										variant="outline"
 										label="Gateway token"
