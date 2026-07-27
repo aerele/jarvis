@@ -35,7 +35,7 @@ function devBootFlags() {
 	return {
 		name: "jarvis-dev-boot-flags",
 		apply: "serve", // vite never invokes this hook for `vite build`
-		transformIndexHtml(html) {
+		transformIndexHtml() {
 			const assignments = Object.entries(FLAGS)
 				.map(
 					([key, value]) =>
@@ -43,21 +43,23 @@ function devBootFlags() {
 							value
 						)};`
 				)
-				.join("\n\t\t\t");
-			return html.replace(
-				'<div id="app"></div>',
-				[
-					'<div id="app"></div>',
-					"\t\t<!-- DEV-ONLY SHIM (jarvis-dev-boot-flags, frontend/vite.config.js).",
-					"\t\t     NOT auth — grants zero server-side privilege, every admin API",
-					"\t\t     still re-checks permissions. Fills the boot flags Frappe would",
-					"\t\t     inject via www/jarvis.html so admin-gated settings panes are",
-					"\t\t     reachable on `vite serve`. Never present in a build. -->",
-					"\t\t<script>",
-					`\t\t\t${assignments}`,
-					"\t\t</script>",
-				].join("\n")
-			);
+				.join("\n");
+			// Returning tags (rather than a string.replace on the raw html) means
+			// this can't silently no-op if index.html's markup ever changes shape.
+			return [
+				{
+					tag: "script",
+					injectTo: "body", // same spot jinjaBootData uses in the real build
+					children: [
+						"// DEV-ONLY SHIM (jarvis-dev-boot-flags, frontend/vite.config.js).",
+						"// NOT auth: grants zero server-side privilege, every admin API",
+						"// still re-checks permissions. Fills the boot flags Frappe would",
+						"// inject via www/jarvis.html so admin-gated settings panes are",
+						"// reachable on `vite serve`. Never present in a build.",
+						assignments,
+					].join("\n"),
+				},
+			];
 		},
 	};
 }
