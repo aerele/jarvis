@@ -204,48 +204,49 @@
 						</section>
 
 						<!-- ===== Your Details ===== -->
-						<section v-else-if="state.step === 'details'" class="jv-ob-screen">
-							<div class="jv-ob-body">
-								<div class="jv-ob-head">
+						<section v-else-if="state.step === 'details'" class="ob-screen">
+							<div class="ob-body">
+								<div class="ob-head">
 									<h1>Your details</h1>
 									<p>
 										We'll set {{ agentName }} up for this workspace and send
 										receipts here.
 									</p>
 								</div>
-								<div class="jv-ob-form">
-									<div class="jv-ob-sec-label">Account</div>
-									<div class="jv-ob-field">
-										<label for="jv-ob-email">Work email</label>
-										<input
-											id="jv-ob-email"
-											class="jv-ob-inp"
-											type="email"
-											v-model="state.email"
-											placeholder="you@company.com"
-											autocomplete="email"
-											required
-											aria-required="true"
-											@keydown.enter="onDetailsSubmit"
-										/>
+								<div
+									class="ob-details-form mx-auto grid max-w-[620px] grid-cols-2 gap-3.5 max-[820px]:grid-cols-1"
+								>
+									<div
+										class="col-span-2 -mb-1 mt-2 text-base font-semibold text-ink-gray-9 first:mt-0"
+									>
+										Account
 									</div>
-									<div class="jv-ob-field">
-										<label for="jv-ob-contact"
-											>Contact number
-											<span class="jv-ob-opt">(optional)</span></label
+									<FormControl
+										id="jv-ob-email"
+										type="email"
+										variant="outline"
+										label="Work email"
+										v-model="state.email"
+										placeholder="you@company.com"
+										autocomplete="email"
+										required
+										aria-required="true"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<FormControl
+										id="jv-ob-contact"
+										type="tel"
+										variant="outline"
+										label="Contact number (optional)"
+										v-model="state.contact"
+										placeholder="+91 98765 43210"
+										autocomplete="tel"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<div class="col-span-2 flex flex-col gap-1.5">
+										<label for="jv-ob-company" class="text-xs text-ink-gray-5"
+											>Company</label
 										>
-										<input
-											id="jv-ob-contact"
-											class="jv-ob-inp"
-											type="tel"
-											v-model="state.contact"
-											placeholder="+91 98765 43210"
-											autocomplete="tel"
-											@keydown.enter="onDetailsSubmit"
-										/>
-									</div>
-									<div class="jv-ob-field jv-ob-field-full">
-										<label for="jv-ob-company">Company</label>
 										<JvCombo
 											id="jv-ob-company"
 											:model-value="state.company"
@@ -258,53 +259,45 @@
 											@enter="onDetailsSubmit"
 										/>
 									</div>
-									<div class="jv-ob-sec-label">Billing</div>
-									<div class="jv-ob-sec-hint">
+									<div
+										class="col-span-2 mt-2 text-base font-semibold text-ink-gray-9"
+									>
+										Billing
+									</div>
+									<div class="col-span-2 -mt-1 text-p-xs text-ink-gray-5">
 										Billing details are kept with your account for upcoming
 										invoicing.
 									</div>
-									<div class="jv-ob-field jv-ob-field-full">
-										<label for="jv-ob-addr"
-											>Billing address
-											<span class="jv-ob-opt">(optional)</span></label
-										>
-										<input
-											id="jv-ob-addr"
-											class="jv-ob-inp"
-											type="text"
-											v-model="state.billingAddress"
-											placeholder="Street, area"
-											autocomplete="street-address"
-											@keydown.enter="onDetailsSubmit"
-										/>
-									</div>
-									<div class="jv-ob-field">
-										<label for="jv-ob-city"
-											>City <span class="jv-ob-opt">(optional)</span></label
-										>
-										<input
-											id="jv-ob-city"
-											class="jv-ob-inp"
-											type="text"
-											v-model="state.city"
-											placeholder="Chennai"
-											autocomplete="address-level2"
-											@keydown.enter="onDetailsSubmit"
-										/>
-									</div>
-									<div class="jv-ob-field">
-										<label for="jv-ob-gstin"
-											>GSTIN <span class="jv-ob-opt">(optional)</span></label
-										>
-										<input
-											id="jv-ob-gstin"
-											class="jv-ob-inp"
-											type="text"
-											v-model="state.gstin"
-											placeholder="33ABCDE1234F1Z5"
-											@keydown.enter="onDetailsSubmit"
-										/>
-									</div>
+									<FormControl
+										id="jv-ob-addr"
+										class="col-span-2"
+										type="text"
+										variant="outline"
+										label="Billing address (optional)"
+										v-model="state.billingAddress"
+										placeholder="Street, area"
+										autocomplete="street-address"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<FormControl
+										id="jv-ob-city"
+										type="text"
+										variant="outline"
+										label="City (optional)"
+										v-model="state.city"
+										placeholder="Chennai"
+										autocomplete="address-level2"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<FormControl
+										id="jv-ob-gstin"
+										type="text"
+										variant="outline"
+										label="GSTIN (optional)"
+										v-model="state.gstin"
+										placeholder="33ABCDE1234F1Z5"
+										@keydown.enter="onDetailsSubmit"
+									/>
 								</div>
 								<Banner
 									v-if="state.detailsErr"
@@ -312,29 +305,21 @@
 									:message="state.detailsErr"
 									role="alert"
 									aria-live="polite"
+									class="mx-auto mt-5 max-w-[620px]"
 								/>
 							</div>
-							<div class="jv-ob-foot">
-								<button class="jv-ob-back" @click="goBack">
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="m15 18-6-6 6-6" /></svg
-									>Back
+							<div class="ob-foot">
+								<button class="ob-back" @click="goBack">
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back
 								</button>
-								<button
-									class="jv-ob-btn jv-ob-btn-primary"
+								<Button
+									variant="solid"
+									label="Continue"
 									@click="onDetailsSubmit"
-								>
-									Continue
-								</button>
+								/>
 							</div>
 						</section>
 
@@ -2019,6 +2004,31 @@ onMounted(async () => {
 	justify-content: center;
 }
 
+/* JvCombo (Company, Details step) matched to FormControl's variant="outline"
+   input recipe (frappe-ui TextInput.vue) so it looks like its FormControl
+   siblings — focus-within because the border belongs on the wrapper, the
+   caret sits in the inner input. */
+.ob-details-form :deep(.jvc-field) {
+	min-height: 28px;
+	padding: 0 8px;
+	gap: 8px;
+	border-color: var(--border-2);
+	border-radius: 6px;
+	font-size: 14px;
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.ob-details-form :deep(.jvc-field:hover) {
+	border-color: var(--text-3);
+}
+.ob-details-form :deep(.jvc-field:focus-within),
+.ob-details-form :deep(.jvc-field.jvc-open) {
+	border-color: var(--text);
+	box-shadow: 0 0 0 2px var(--surface-2);
+}
+.ob-details-form :deep(.jvc-input::placeholder) {
+	color: var(--text-3);
+}
+
 .jv-ob-screen {
 	animation: jvObFade 0.15s ease-out;
 }
@@ -2209,31 +2219,6 @@ onMounted(async () => {
 	flex: 1;
 	margin-top: 8px;
 }
-/* ---- Details form (design.md §3.4 mapped to the page context) ---- */
-.jv-ob-form {
-	display: grid;
-	grid-template-columns: 1fr 1fr;
-	gap: 14px 16px;
-	max-width: 620px;
-	margin: 0 auto;
-}
-.jv-ob-field {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-}
-.jv-ob-field-full {
-	grid-column: 1 / -1;
-}
-.jv-ob-field label {
-	font-size: 12px;
-	font-weight: 420;
-	color: var(--text-3);
-}
-.jv-ob-opt {
-	color: var(--text-3);
-	font-weight: 420;
-}
 .jv-ob-inp {
 	height: 32px;
 	border: 1px solid var(--border-2);
@@ -2257,42 +2242,6 @@ onMounted(async () => {
 	outline: none;
 	border-color: var(--text);
 	box-shadow: 0 0 0 3px var(--surface-2);
-}
-.jv-ob-sec-label {
-	grid-column: 1 / -1;
-	font-size: 14px;
-	font-weight: 600;
-	color: var(--text);
-	margin: 8px 0 -4px;
-}
-.jv-ob-sec-hint {
-	grid-column: 1 / -1;
-	font-size: 12px;
-	line-height: 1.5;
-	color: var(--text-3);
-	margin: 0 0 -6px;
-}
-/* JvCombo (Company) matched to the input recipe above (focus-within because
-   the border belongs on the wrapper, the caret sits in the inner input). */
-.jv-ob-form :deep(.jvc-field) {
-	min-height: 32px;
-	padding: 0 10px;
-	gap: 8px;
-	border-color: var(--border-2);
-	border-radius: 8px;
-	font-size: 13.5px;
-	transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.jv-ob-form :deep(.jvc-field:hover) {
-	border-color: var(--text-3);
-}
-.jv-ob-form :deep(.jvc-field:focus-within),
-.jv-ob-form :deep(.jvc-field.jvc-open) {
-	border-color: var(--text);
-	box-shadow: 0 0 0 3px var(--surface-2);
-}
-.jv-ob-form :deep(.jvc-input::placeholder) {
-	color: var(--text-3);
 }
 /* ---- Review & pay ---- */
 .jv-ob-rev {
