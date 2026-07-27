@@ -13,6 +13,7 @@ from werkzeug.wrappers import Response
 from jarvis import admin_client
 from jarvis.onboarding import _surface
 from jarvis.permissions import support_scope
+from jarvis.support.api import _requesting_user
 
 _MAX_BYTES = 25 * 1024 * 1024
 
@@ -31,7 +32,7 @@ def download(ticket: str, file_url: str):
 		admin_client.support_download,
 		ticket=ticket,
 		file_url=file_url,
-		requesting_user=frappe.session.user,
+		requesting_user=_requesting_user(),
 		scope=scope,
 	)
 	out = Response(content, content_type=content_type)
@@ -47,6 +48,8 @@ def upload(ticket: str) -> dict:
 	if not f:
 		frappe.throw("no file provided")
 	content = f.read()
+	if not content:
+		frappe.throw("This file is empty.")
 	if len(content) > _MAX_BYTES:
 		frappe.throw("file too large")
 	content_b64 = base64.b64encode(content).decode("ascii")
@@ -57,7 +60,7 @@ def upload(ticket: str) -> dict:
 			ticket=ticket,
 			filename=f.filename,
 			content_b64=content_b64,
-			requesting_user=frappe.session.user,
+			requesting_user=_requesting_user(),
 			scope=scope,
 		),
 	}

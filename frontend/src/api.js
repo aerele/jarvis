@@ -434,6 +434,23 @@ export const supportDownloadUrl = (ticket, fileUrl) =>
 		ticket
 	)}&file_url=${encodeURIComponent(fileUrl)}`;
 
+// Pull the human reason out of a Frappe error response the way frappe-ui's
+// `call()` does (it parses `_server_messages` the same way), so errMsg() in
+// the support store shows "file too large" / "no file provided" rather than
+// a generic status-code string.
+function _uploadErrorMessage(data, status) {
+	try {
+		if (data && data._server_messages) {
+			const msgs = JSON.parse(data._server_messages);
+			const first = typeof msgs[0] === "string" ? JSON.parse(msgs[0]) : msgs[0];
+			if (first && first.message) return String(first.message);
+		}
+	} catch (e) {
+		/* fall through to the status code */
+	}
+	return `upload failed (${status})`;
+}
+
 export async function supportUpload(ticket, file) {
 	const fd = new FormData();
 	fd.append("ticket", ticket);
@@ -444,6 +461,10 @@ export async function supportUpload(ticket, file) {
 		body: fd,
 		credentials: "include",
 	});
+	if (!r.ok) {
+		const data = await r.json().catch(() => null);
+		throw new Error(_uploadErrorMessage(data, r.status));
+	}
 	const data = await r.json();
 	const msg = data.message || data;
 	return msg.data || msg;

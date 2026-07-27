@@ -2,7 +2,7 @@
 	<Dropdown :options="menuOptions">
 		<template #trigger="{ open }">
 			<button
-				class="flex h-12 items-center rounded-md py-2 duration-300 ease-in-out"
+				class="relative flex h-12 items-center rounded-md py-2 duration-300 ease-in-out"
 				:class="
 					isCollapsed
 						? 'w-auto px-0'
@@ -10,19 +10,30 @@
 						? 'w-full px-2 bg-surface-white shadow-sm'
 						: 'w-full px-2 hover:bg-surface-gray-3'
 				"
-				:aria-label="`${agentName} menu`"
+				:aria-label="`${cardTitle} menu`"
 			>
 				<!-- the jarvis mark, 28×28 rounded — rendered from JarvisMark rather than
 				     a hand-pasted copy of its gradient + path data. That duplication is
 				     exactly what let the chat welcome mark drift to a different colour
 				     (design.md §2.2). -->
 				<JarvisMark :size="28" :radius="7" />
+				<!-- Resting badge: a waiting reply has to register while the user is
+				     heads-down in chat, without opening the menu. Mirrors the
+				     collapsed-sidebar dot in Sidebar.vue:57-62. -->
+				<div
+					v-if="supportOn && store.awaitingCount"
+					class="absolute left-7 top-1 size-2 rounded-full bg-surface-amber-2"
+					:aria-label="`${store.awaitingCount} ${
+						store.awaitingCount === 1 ? 'ticket' : 'tickets'
+					} awaiting your reply`"
+					role="status"
+				/>
 				<div
 					class="flex flex-1 flex-col overflow-hidden text-left duration-300 ease-in-out"
 					:class="isCollapsed ? 'ml-0 w-0 opacity-0' : 'ml-2 w-auto opacity-100'"
 				>
 					<div class="truncate text-base font-medium leading-none text-ink-gray-9">
-						{{ agentName }}
+						{{ cardTitle }}
 					</div>
 					<div class="mt-1 truncate text-sm text-ink-gray-7">{{ fullName }}</div>
 				</div>
@@ -39,35 +50,41 @@
 <script setup>
 // Sidebar header (DESIGN-V3 §3.2.1): brand + session user, HD's UserMenu
 // pattern. Dropdown: Settings (D9) · Switch to Desk · Change theme · Log out.
-import { computed, inject, ref, onMounted, onUnmounted } from "vue";
+import { computed, inject, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { Dropdown, FeatherIcon } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
 import { useShellStore } from "@/stores/shell";
+import { useSupportStore } from "@/stores/support";
 import { useJarvisTheme } from "@/theme";
-import { supportAwaitingCount } from "@/api";
 import { agentName } from "@/branding";
 
-defineProps({
+const props = defineProps({
 	isCollapsed: { type: Boolean, default: false },
+	// "chat" (default) = the Jarvis card + a "Support" link; "support" = a
+	// "Jarvis Support" title + a "Switch to Jarvis chat" link (we're already in support).
+	variant: { type: String, default: "chat" },
 });
 
-const store = useShellStore();
+// Card title: agentName ("Jarvis") in chat; "<agentName> Support" on the support rail.
+const cardTitle = computed(() =>
+	props.variant === "support" ? `${agentName} Support` : agentName
+);
+
+const shellStore = useShellStore();
 const session = inject("$session");
 const { effectiveDark, toggleTheme } = useJarvisTheme();
 
-// Support panel (Plan 3 C3/C4): dual kill-switch + an SPA-driven awaiting-count badge.
+// Support panel (Plan 3 C3/C4): dual kill-switch + a store-driven awaiting-count
+// badge. `store` is the shared support-store singleton (Task 1) — both this
+// resting dot and the list read the same value, so they can never disagree.
 const router = useRouter();
 const supportOn = window.support_available && window.has_support_access;
-const awaiting = ref(0);
+const store = useSupportStore();
 let pollTimer = null;
 async function pollAwaiting() {
-	try {
-		const r = await supportAwaitingCount();
-		awaiting.value = (r.data && r.data.count) || 0;
-	} catch (e) {
-		/* support is best-effort — never surface a boot error */
-	}
+	if (document.hidden) return;
+	await store.refreshAwaiting();
 }
 onMounted(() => {
 	if (!supportOn) return;
@@ -86,21 +103,42 @@ function cookie(name) {
 }
 const fullName = cookie("full_name") || session.user || "User";
 
+// Cross-surface link: from chat -> Support (with the awaiting count); from the
+// support rail -> back to chat (we're already in support, so a "Support" link is
+// pointless). `null` = omit (chat with support switched off).
+const crossItem = computed(() => {
+	if (props.variant === "support") {
+		return {
+			label: `Switch to ${agentName} chat`,
+			icon: "message-circle",
+			onClick: () => router.push({ name: "Chat" }),
+		};
+	}
+	if (!supportOn) return null;
+	return {
+		label: store.awaitingCount ? `Support (${store.awaitingCount})` : "Support",
+		icon: "life-buoy",
+		onClick: () => router.push({ name: "Support" }),
+	};
+});
+
 const menuOptions = computed(() => [
 	{
 		group: "Menu",
 		hideLabel: true,
 		items: [
-			{ label: "Settings", icon: "settings", onClick: () => store.openSettings() },
-			...(supportOn
-				? [
+			// The app/LLM Settings dialog is an admin/chat concern — omit it on the
+			// customer support rail (variant "support").
+			...(props.variant === "support"
+				? []
+				: [
 						{
-							label: awaiting.value ? `Support (${awaiting.value})` : "Support",
-							icon: "life-buoy",
-							onClick: () => router.push({ name: "Support" }),
+							label: "Settings",
+							icon: "settings",
+							onClick: () => shellStore.openSettings(),
 						},
-				  ]
-				: []),
+				  ]),
+			...(crossItem.value ? [crossItem.value] : []),
 			{
 				label: "Switch to Desk",
 				icon: "grid",

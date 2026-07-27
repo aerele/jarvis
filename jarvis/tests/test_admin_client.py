@@ -384,6 +384,42 @@ class TestAdminErrorResponses(FrappeTestCase):
 				post_update_llm_creds("p", "m", "b", "k")
 		self.assertEqual(str(cm.exception), "Customer C-001 already exists")
 
+	def test_unlisted_4xx_exc_type_routes_to_validation_error(self):
+		"""A ValidationError SUBCLASS whose exc_type isn't on the allowlist
+		(e.g. Helpdesk's InvalidEmailAddressError on 417) still means the admin
+		was REACHED and rejected the request. Surface its clean message as
+		AdminValidationError, not the misleading "admin is unreachable"."""
+		mock_post = MagicMock(
+			return_value=_mock_response(
+				417,
+				json_body={
+					"exception": "frappe.exceptions.InvalidEmailAddressError: Administrator is not a valid Email Address",
+					"exc_type": "InvalidEmailAddressError",
+					"_server_messages": '["{\\"message\\": \\"Administrator is not a valid Email Address\\", \\"indicator\\": \\"red\\"}"]',
+				},
+			)
+		)
+		with patch("requests.post", mock_post):
+			with self.assertRaises(AdminValidationError) as cm:
+				post_update_llm_creds("p", "m", "b", "k")
+		self.assertEqual(str(cm.exception), "Administrator is not a valid Email Address")
+
+	def test_unlisted_5xx_exc_type_stays_unreachable(self):
+		"""An unrecognised exc_type on a 5xx is a genuine admin-side fault - the
+		unreachable class is still correct there."""
+		mock_post = MagicMock(
+			return_value=_mock_response(
+				500,
+				json_body={
+					"exception": "some.module.WeirdInternalError: kaboom",
+					"exc_type": "WeirdInternalError",
+				},
+			)
+		)
+		with patch("requests.post", mock_post):
+			with self.assertRaises(AdminUnreachableError):
+				post_update_llm_creds("p", "m", "b", "k")
+
 	def test_frappe_permission_error_routes_to_auth_error(self):
 		mock_post = MagicMock(
 			return_value=_mock_response(
