@@ -39,6 +39,10 @@ vi.mock("vue-router", () => ({
 }));
 
 import { toast } from "frappe-ui";
+// UserMenu (reused in SupportSidebar) pulls theme.js/frappe-ui at import time — module-mock it (own suite).
+vi.mock("@/components/shell/UserMenu.vue", () => ({
+	default: { name: "UserMenu", template: "<div/>" },
+}));
 import SupportNewPage from "@/pages/support/SupportNewPage.vue";
 
 const opts = { global: { stubs: { SupportShell: { template: "<div><slot/></div>" } } } };

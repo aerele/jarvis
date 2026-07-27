@@ -88,6 +88,10 @@ const storeDouble = {
 };
 vi.mock("@/stores/support", () => ({ useSupportStore: () => storeDouble }));
 
+// UserMenu (reused in SupportSidebar) pulls theme.js/frappe-ui at import time — module-mock it (own suite).
+vi.mock("@/components/shell/UserMenu.vue", () => ({
+	default: { name: "UserMenu", template: "<div/>" },
+}));
 import SupportThreadPage from "@/pages/support/SupportThreadPage.vue";
 import SupportReplyBox from "@/components/support/SupportReplyBox.vue";
 import SupportTicketPanel from "@/components/support/SupportTicketPanel.vue";

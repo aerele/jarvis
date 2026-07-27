@@ -10,6 +10,10 @@ vi.mock("frappe-ui", () => ({
 	Breadcrumbs: { name: "Breadcrumbs", props: ["items"], template: "<nav class='crumbs' />" },
 }));
 
+// UserMenu (reused in SupportSidebar) pulls theme.js/frappe-ui at import time — module-mock it (own suite).
+vi.mock("@/components/shell/UserMenu.vue", () => ({
+	default: { name: "UserMenu", template: "<div/>" },
+}));
 import SupportShell from "@/components/support/SupportShell.vue";
 import SupportSidebar from "@/components/support/SupportSidebar.vue";
 import { useJarvisTheme, DARK_VARS } from "@/theme";

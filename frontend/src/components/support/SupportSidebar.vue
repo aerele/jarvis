@@ -5,15 +5,11 @@
 		     chat-surface jv-root, so it must not depend on the jv palette vars.
 		     (Comment kept inside the root to avoid a multi-root fragment.) -->
 		<div class="jv-supsb-top">
-			<button
-				class="jv-supsb-brand"
-				:title="collapsed ? 'Back to Jarvis' : null"
-				aria-label="Back to Jarvis"
-				@click="goChat"
-			>
-				<JarvisMark :size="26" :radius="7" />
-				<span v-if="!collapsed" class="jv-supsb-brandname">Support</span>
-			</button>
+			<!-- The same brand + user card as the chat sidebar (JarvisMark + Jarvis /
+			     full name + a Settings/Support/Desk/Theme/Log-out dropdown), reused
+			     verbatim so it stays identical. Chat navigation is the "Jarvis chat"
+			     nav link below. -->
+			<UserMenu :is-collapsed="collapsed" />
 
 			<div class="jv-supsb-nav">
 				<SidebarLink
@@ -58,12 +54,11 @@
 
 <script setup>
 import { computed, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
-import JarvisMark from "@/components/JarvisMark.vue";
+import { useRoute } from "vue-router";
+import UserMenu from "@/components/shell/UserMenu.vue";
 import SidebarLink from "@/components/shell/SidebarLink.vue";
 
 const route = useRoute();
-const router = useRouter();
 
 // Collapse state persists across reloads, self-contained (the shell doesn't need
 // to know — the rail sets its own width and SidebarLink hides labels when collapsed).
@@ -89,9 +84,6 @@ function toggle() {
 // chat" is the exit link, never active while we're on a support route.
 const isTickets = computed(() => route.path.startsWith("/support"));
 
-function goChat() {
-	router.push({ name: "Chat" });
-}
 function openDesk() {
 	window.open("/app", "_blank");
 }
@@ -117,26 +109,6 @@ function openDesk() {
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
-}
-.jv-supsb-brand {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	width: 100%;
-	padding: 6px;
-	border: 0;
-	border-radius: 7px;
-	background: transparent;
-	cursor: pointer;
-}
-.jv-supsb-brand:hover {
-	background: var(--surface-gray-2);
-}
-.jv-supsb-brandname {
-	font-size: 15px;
-	font-weight: 600;
-	color: var(--ink-gray-9);
-	white-space: nowrap;
 }
 .jv-supsb-nav,
 .jv-supsb-bottom {

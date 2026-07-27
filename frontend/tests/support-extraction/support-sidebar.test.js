@@ -27,12 +27,16 @@ vi.mock("@/components/shell/SidebarLink.vue", () => ({
 			"<button class='slink' :data-label='label' @click=\"onClick && onClick()\">{{ label }}</button>",
 	},
 }));
+// UserMenu (the reused chat user card) pulls frappe-ui's Dropdown at import time —
+// module-mock it too (it has its own suite).
+vi.mock("@/components/shell/UserMenu.vue", () => ({
+	default: { name: "UserMenu", props: ["isCollapsed"], template: "<div class='user-menu'/>" },
+}));
 
 import SupportSidebar from "@/components/support/SupportSidebar.vue";
 import SidebarLink from "@/components/shell/SidebarLink.vue"; // = the mock above
 
-const stubs = { JarvisMark: { template: "<span class='mark'/>" } };
-const mountSidebar = () => mount(SupportSidebar, { global: { stubs } });
+const mountSidebar = () => mount(SupportSidebar);
 const links = (w) => w.findAllComponents(SidebarLink);
 const linkBy = (w, label) => links(w).find((l) => l.props("label") === label);
 
@@ -61,10 +65,8 @@ describe("SupportSidebar", () => {
 		expect(linkBy(mountSidebar(), "Support tickets").props("isActive")).toBe(false);
 	});
 
-	it("navigates to chat when the brand is clicked", async () => {
-		const w = mountSidebar();
-		await w.find(".jv-supsb-brand").trigger("click");
-		expect(push).toHaveBeenCalledWith({ name: "Chat" });
+	it("renders the reused chat user card at the top", () => {
+		expect(mountSidebar().find(".user-menu").exists()).toBe(true);
 	});
 
 	it("collapses/expands on the toggle and persists the choice", async () => {
