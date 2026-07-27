@@ -57,6 +57,45 @@ test("filterOrphanFragments excludes the LIVE session — its fragments are not 
 	assert.deepEqual(filterOrphanFragments(null, {}), [], "tolerates missing input");
 });
 
+test("a recording ANOTHER TAB is still writing is not an orphan — the banner must not touch it", () => {
+	// Two Jarvis tabs is routine. Tab A is 90 s into a dictation, mirroring a fragment every
+	// ~15 s. Tab B mounts: it has never seen tab A's session id, so the live-session exclusion
+	// cannot help. Offering tab A's take here is not merely noisy — Transcribe ADOPTS it, which
+	// deletes its fragment keys (including index 0, the initialisation segment whose loss is the
+	// one case this design calls unrecoverable) while tab A keeps writing into the hole, and
+	// Discard deletes it outright.
+	const now = 1_000_000;
+	const live = [
+		frag({ recordingId: "sessA#0", index: 0, sessionId: "sessA", createdAt: now - 15000 }),
+		frag({ recordingId: "sessA#0", index: 1, sessionId: "sessA", createdAt: now }),
+	];
+	assert.deepEqual(
+		groupOrphanRecordings(
+			filterOrphanFragments(live, { userId: "alice@x.com", excludeSessionId: null, now })
+		),
+		[],
+		"tab B offers NOTHING for a take that is still being written"
+	);
+	// Age is judged per RECORDING: the old fragments of a live take go too, or the banner would
+	// offer a decapitated copy of it.
+	assert.deepEqual(
+		filterOrphanFragments(live, { userId: "alice@x.com", now }),
+		[],
+		"…including fragment 0, which is minutes old by then"
+	);
+	// Once the writer has genuinely stopped, the same rows ARE recoverable.
+	const [take] = groupOrphanRecordings(
+		filterOrphanFragments(live, { userId: "alice@x.com", now: now + 31000 })
+	);
+	assert.equal(take.recordingId, "sessA#0", "a crashed session's audio is still offered back");
+	assert.equal(take.complete, true);
+	// …and the gate is switchable off for callers that have their own liveness signal.
+	assert.equal(
+		filterOrphanFragments(live, { userId: "alice@x.com", now, liveGraceMs: 0 }).length,
+		2
+	);
+});
+
 // ── rebuilding recordings out of loose fragments ─────────────────────────────────────────────
 test("groupOrphanRecordings rebuilds a full take in INDEX order, with the audio that actually exists", () => {
 	// Deliberately shuffled, with realistic increasing timestamps: a createdAt sort would
@@ -163,6 +202,58 @@ test("groupOrphanRecordings still offers LEGACY per-clip records left by the pre
 	assert.deepEqual(take.keys, ["oldsess:2"]);
 	assert.equal(take.conversationId, "convZ", "…and still routes to the chat it was spoken in");
 	assert.equal(take.durationS, 15);
+});
+
+// ── the spoken-order guard the per-clip suite carried, restored ───────────────────────────────
+const legacy = (o) => ({
+	key: `${o.sessionId}:${o.seq}`,
+	sessionId: o.sessionId,
+	userId: "alice@x.com",
+	conversationId: o.conversationId === undefined ? "convZ" : o.conversationId,
+	seq: o.seq,
+	blob: `clip${o.seq}`,
+	durationS: 15,
+	mimeType: "audio/webm",
+	createdAt: o.createdAt,
+});
+
+test("LEGACY clips are re-offered in SPOKEN order, never reversed by their own timestamps", () => {
+	// Each legacy clip is a separate ~15 s slice of ONE dictation, and each got its own Date.now()
+	// at write time — so seq 3 carries the LATEST timestamp. A flat newest-first sort hands the
+	// user their sentence backwards, and clicking Transcribe down the banner types it that way.
+	// (They are never concatenated: each is a standalone webm with its own EBML header.)
+	const clips = [
+		legacy({ sessionId: "old", seq: 0, createdAt: 1000 }),
+		legacy({ sessionId: "old", seq: 1, createdAt: 1015 }),
+		legacy({ sessionId: "old", seq: 2, createdAt: 1030 }),
+		legacy({ sessionId: "old", seq: 3, createdAt: 1045 }),
+	];
+	const shuffled = [clips[2], clips[0], clips[3], clips[1]];
+	assert.deepEqual(
+		groupOrphanRecordings(shuffled).map((g) => g.fragments[0].blob),
+		["clip0", "clip1", "clip2", "clip3"],
+		"ascending seq = spoken order, despite increasing timestamps and shuffled input"
+	);
+	// …and a record that somehow carries no seq falls back to its write time, which ascends the
+	// same way within one session.
+	const noSeq = shuffled.map((c) => ({ ...c, seq: undefined }));
+	assert.deepEqual(
+		groupOrphanRecordings(noSeq).map((g) => g.fragments[0].blob),
+		["clip0", "clip1", "clip2", "clip3"]
+	);
+});
+
+test("LEGACY clips: newest SESSION first, then spoken order within a session", () => {
+	const rows = [
+		legacy({ sessionId: "old", seq: 1, createdAt: 200 }),
+		legacy({ sessionId: "old", seq: 0, createdAt: 100 }),
+		legacy({ sessionId: "new", seq: 0, createdAt: 500 }),
+	];
+	assert.deepEqual(
+		groupOrphanRecordings(rows).map((g) => g.recordingId),
+		["legacy:new:0", "legacy:old:0", "legacy:old:1"],
+		"the most recent session is offered first, and each session reads forwards"
+	);
 });
 
 // ── adoption is ATOMIC: the new copy lands and the old keys go, or neither ────────────────────

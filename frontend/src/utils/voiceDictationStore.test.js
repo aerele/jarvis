@@ -235,7 +235,15 @@ test("a recording that rejects twice enters `failed`, fires onFail, and RETAINS 
 		1,
 		"ONE chip for the whole recording — never one per fragment"
 	);
-	assert.deepEqual(snap.failed[0], { id, durationS: 30, sentWithout: false });
+	assert.deepEqual(snap.failed[0], {
+		id,
+		durationS: 30,
+		sentWithout: false,
+		// WHY it failed rides on the chip: a permanent config fault and a transient blip are
+		// otherwise indistinguishable, so users Retry-loop the same upload forever.
+		error: "timeout",
+		noSpeech: false,
+	});
 	assert.ok(mirror.has("s1#0"), "the audio is RETAINED — that is what Retry/Download act on");
 	assert.equal(q.hasUnfinishedReason(), "unresolved", "terminal + durable is not a loss risk");
 });
@@ -305,6 +313,125 @@ test("an empty transcription is a FAILURE, not a silent success", async () => {
 	);
 	assert.equal(q.snapshot().failed.length, 1, "it becomes an ACTIONABLE chip");
 	assert.ok(mirror.has("s1#0"), "…with its audio retained behind it");
+});
+
+test("finishSilent keeps a measured-silent take whole, off the network and out of the bin", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const fails = [];
+	const q = createVoiceDictationStore({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		onFail: (id) => fails.push(id),
+	});
+	const id = q.begin({ conversationId: "c1" });
+	q.addFragment(id, { index: 0, blob: "aa", durationS: 15 });
+	q.finishSilent(id, { blob: "aa", durationS: 15 });
+	await flush();
+	assert.deepEqual(
+		tx.calls,
+		[],
+		"silence is what makes the model fabricate — it is not uploaded"
+	);
+	assert.deepEqual(fails, [id], "…but it IS surfaced, as the same actionable chip");
+	const snap = q.snapshot();
+	assert.equal(snap.failed.length, 1);
+	assert.equal(snap.failed[0].noSpeech, true, "so the chip can say 'nothing was heard'");
+	assert.ok(mirror.has("s1#0"), "the audio is retained — a wrong measurement must not cost it");
+	assert.equal(q.hasUnfinishedReason(), "unresolved", "terminal + durable: nothing is at risk");
+	// It must not halt a later take's words either.
+	const next = dictate(q, { conversationId: "c1", fragments: ["b"] });
+	await flush();
+	tx.resolve(next, "the next thing I said");
+	await flush();
+	assert.equal(q.get(next).committed, true, "the cursor advanced past the silent take");
+});
+
+test("a take that never emitted a fragment is still mirrored when it is gated as silent", async () => {
+	const mirror = makeMirror();
+	const q = createVoiceDictationStore({ transcribe: async () => "x", mirror });
+	const id = q.begin({ conversationId: "c1" });
+	q.finishSilent(id, { blob: "whole", durationS: 4 });
+	await flush();
+	assert.ok(mirror.has("s1#0"), "Download and Retry both need bytes behind the chip");
+});
+
+// ── the pill's Cancel: a stuck transcription may not hold the whole composer ─────────────────
+test("cancelTranscription frees the slot, keeps the audio, and survives a LATE resolution", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceDictationStore({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 1,
+	});
+	const id = dictate(q, { conversationId: "c1", fragments: ["a"], durationS: 300 });
+	await flush();
+	assert.equal(q.snapshot().transcribing.length, 1, "the pill is up");
+	q.cancelTranscription(id);
+	const snap = q.snapshot();
+	assert.equal(
+		snap.transcribing.length,
+		0,
+		"the pill is gone — which is what un-blocks sending"
+	);
+	assert.equal(snap.failed.length, 1, "…and the recording is on its chip instead");
+	assert.equal(snap.failed[0].noSpeech, false);
+	assert.ok(mirror.has("s1#0"), "with the audio intact: Cancel is not Discard");
+
+	// The abandoned call lands anyway. It must NOT resurrect the record, and — the subtle one —
+	// must not decrement `running` a second time, which would let concurrency drift upward.
+	tx.resolve(id, "words that arrived too late");
+	await flush();
+	assert.equal(
+		q.snapshot().failed.length,
+		1,
+		"a stale resolution cannot revive a cancelled take"
+	);
+	assert.equal(q.get(id).committed, undefined, "…and commits nothing");
+
+	// A later take still gets the freed slot, exactly once.
+	const next = dictate(q, { conversationId: "c1", fragments: ["b"] });
+	await flush();
+	assert.equal(tx.callCount(next), 1, "the concurrency accounting stayed balanced");
+	tx.resolve(next, "later words");
+	await flush();
+
+	// And Retry on the cancelled one works, ignoring its own stale in-flight call.
+	q.retry(id);
+	await flush();
+	assert.equal(tx.callCount(id), 2, "'Retry' re-dispatches the same bytes");
+	tx.resolve(id, "the words after all");
+	await flush();
+	assert.equal(q.get(id).text, "the words after all", "…and the retry's answer is the one kept");
+});
+
+test("an auto-retry BACKS OFF instead of re-uploading the same megabytes instantly", async () => {
+	const tx = makeTranscriber();
+	const q = createVoiceDictationStore({
+		transcribe: tx.fn,
+		mirror: makeMirror(),
+		retainUntilSent: true,
+		retryBackoffMs: 60,
+	});
+	const id = dictate(q, { fragments: ["a"] });
+	await flush();
+	tx.reject(id, new Error("429"));
+	await flush();
+	assert.equal(
+		tx.callCount(id),
+		1,
+		"an instant retry is two back-to-back uploads into the same 429"
+	);
+	assert.equal(
+		q.snapshot().transcribing.length,
+		1,
+		"…the recording is still queued, not failed"
+	);
+	await new Promise((r) => setTimeout(r, 90));
+	assert.equal(tx.callCount(id), 2, "and it re-dispatches once the backoff elapses");
 });
 
 test("belt: a transcribe that resolves a non-string is treated as a failure, never String()-coerced", async () => {
@@ -504,6 +631,64 @@ test("the leave guard separates a LIVE loss risk from a merely unresolved one", 
 		true,
 		"…but it IS still outstanding for callers that need that"
 	);
+});
+
+test("an EDITED-OUT recording is unresolved, not 'live' — its chip and the banner already hold it", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceDictationStore({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+	});
+	const id = dictate(q, { conversationId: "c1", fragments: ["a"], durationS: 15 });
+	await flush();
+	tx.resolve(id, "hello there");
+	await flush();
+	// The user deletes the transcript out of the composer and sends something else.
+	const token = q.captureSentInPayload("c1", "totally different text");
+	q.markUnsentOrphans("c1", token);
+	await flush();
+	assert.equal(q.snapshot().retained.length, 1, "it is on the Restore/Download/✕ chip");
+	assert.equal(q.get(id).persist, "persisted", "…and its audio is CONFIRMED durable");
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"unresolved",
+		"a durably-mirrored, re-offerable recording must not arm loss-framed copy — that is the " +
+			"cry-wolf design.md §4.5 forbids, and it trains users through the warning that matters"
+	);
+});
+
+test("…but an edited-out recording whose write has NOT confirmed is still 'live'", async () => {
+	const tx = makeTranscriber();
+	let release;
+	const gate = new Promise((r) => (release = r));
+	const q = createVoiceDictationStore({
+		transcribe: tx.fn,
+		mirror: {
+			recordingKey: (id) => `s#${id}`,
+			putFragment: () => gate.then(() => true), // never settles until the test says so
+			adopt: async () => true,
+			deleteRecording: async () => {},
+			reassignConversation: async () => {},
+		},
+		retainUntilSent: true,
+	});
+	const id = dictate(q, { conversationId: "c1", fragments: ["a"], durationS: 15 });
+	await flush();
+	tx.resolve(id, "hello there");
+	await flush();
+	q.markUnsentOrphans("c1", q.captureSentInPayload("c1", "something else"));
+	assert.equal(q.get(id).persist, "persisting", "the write is still in flight");
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"live",
+		"'durably mirrored' is the ENTIRE justification for the softer copy — it has to be true"
+	);
+	release();
+	await flush();
+	await flush();
+	assert.equal(q.hasUnfinishedReason(), "unresolved", "…and it softens once the write lands");
 });
 
 // ── (6) durability is observed, never assumed ────────────────────────────────────────────────

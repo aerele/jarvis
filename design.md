@@ -560,7 +560,11 @@ learns one carries its expectations to the other. State which one a new surface 
   recording** — didn't transcribe (Retry/Download/✕), edited out before sending
   (Restore/Download/✕), audio that couldn't be saved (Download/Retry) — plus a previous-session
   recovery banner. Nothing is ever removed silently except the success path (chips clear on the
-  send that carried their words; no toast — that would be noise on the common case).
+  send that carried their words; no toast — that would be noise on the common case). **A
+  measurement never deletes a recording** — the client's silence gate decides what to UPLOAD, and
+  a take it measured as inaudible lands on the same retained chip ("nothing was heard" /
+  Transcribe anyway), because the measurement can be wrong and the user is the only one who gets
+  to throw audio away.
 - **Single-shot capture** (`useAudioRecorder`, `VoiceRecorder.vue` — wiki nudge, Business tab):
   record → transcribe → text, **no retention, no chips, no recovery**. A failure is a toast and a
   re-record, and the audio is gone.
@@ -573,9 +577,11 @@ from "your last message went without this" (identical copy for both is what make
 retained recording read as a stuck one). An action's tooltip must promise only what it can do
 *now* (Retry cannot edit a message that has already been sent — it adds to the current draft). A
 progress indicator may only state something it actually knows: the length of the recording being
-transcribed is honest, a percentage is theatre. And a leave/close warning may claim loss **only**
-when something is genuinely at risk — durably mirrored, re-offerable audio must not arm it (a
-warning that cries wolf gets trained away). If a new surface wants the chip model, reuse the store
+transcribed is honest, elapsed wait is honest, a percentage is theatre. Any wait the user cannot
+end is a bug — if a control blocks (Send behind a landing dictation), it must LOOK blocked and say
+why, and whatever it is waiting on must be cancellable. And a leave/close warning may claim loss
+**only** when something is genuinely at risk — durably mirrored, re-offerable audio must not arm
+it, edited-out and sent-without recordings included (a warning that cries wolf gets trained away). If a new surface wants the chip model, reuse the store
 rather than growing a third contract.
 
 ---

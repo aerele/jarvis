@@ -1,10 +1,9 @@
-// voiceSilenceGate — the CLIENT-SIDE near-silence gate for chunked voice dictation.
+// voiceSilenceGate — the CLIENT-SIDE near-silence gate for voice dictation.
 //
 // whisper-large-v3-turbo deterministically HALLUCINATES on near-silent audio: a 15 s
-// pure-silence webm transcribes as "Thank you." (3/3 on the probe). The chunked recorder
-// rotates a clip every ~15 s whether or not anybody spoke, and pauses mid-dictation are
-// routine — so without a gate the composer gets confident little phrases injected that the
-// user never said.
+// pure-silence webm transcribes as "Thank you." (3/3 on the probe). A dictation nobody
+// actually spoke into — a muted mic, a hot key pressed by accident — would otherwise come
+// back as a confident little phrase the user never said.
 //
 // It CANNOT be filtered server-side: OpenRouter's transcription endpoint does not pass
 // through verbose_json / no_speech_prob (probed — it 400s), and a phrase blocklist was
@@ -12,10 +11,14 @@
 // gate lives at the microphone instead: measured near-silence never leaves the browser.
 //
 // Two plain pieces, both dependency-injected so `node --test` can drive them without a
-// browser (the voiceChunkQueue.js precedent):
+// browser (the eventFence.js precedent):
 //   createRmsMeter(stream, deps) — an AnalyserNode riding the SAME MediaStream as the
-//                                  MediaRecorder, tracking peak RMS across a clip.
+//                                  MediaRecorder, tracking peak RMS across a take.
 //   isNearSilent(peakRms)        — the decision, biased hard toward TRANSCRIBING.
+//
+// A positive gate result means "do not UPLOAD this", never "delete this": the composer routes a
+// measured-silent take to the same retained, actionable failed chip as any other outcome
+// (voiceDictationStore.finishSilent), because a wrong measurement must not cost a recording.
 //
 // The invariant that outranks the feature: ABSENCE OF MEASUREMENT MUST NEVER DROP AUDIO.
 // Every failure mode — no AudioContext, a constructor or graph call that throws, a context
@@ -28,8 +31,8 @@
 // nominally [-1, 1], so this is ~0.5% of full scale (≈ -46 dBFS) — far under any speech that
 // could plausibly transcribe (even a close whisper sits well above it) and comfortably over
 // the noise floor getUserMedia leaves after Chrome's default noise suppression. It is the PEAK
-// across the whole ~15 s clip, so a single word anywhere in the clip clears it; skipping needs
-// the ENTIRE clip to be inaudible. Deliberately conservative: a too-low threshold merely
+// across the WHOLE take, so a single word anywhere in it clears the gate; skipping needs the
+// ENTIRE recording to be inaudible. Deliberately conservative: a too-low threshold merely
 // restores today's behaviour (transcribe, risk a hallucination), a too-high one deletes speech.
 export const SILENCE_PEAK_RMS = 0.005;
 
@@ -58,8 +61,9 @@ const DEAD_METER = Object.freeze({
 //   sampleMs       sampling period, default 100 ms
 //
 // Returns { available, peak(), reset(), stop() }. `peak()` is the highest RMS seen since the
-// last reset(), or `undefined` when the measurement can't be trusted. `reset()` is called at
-// each clip boundary so the peak is PER CLIP; `stop()` tears the graph down with the stream.
+// last reset(), or `undefined` when the measurement can't be trusted. The dictation recorder
+// NEVER calls reset() — the peak is per TAKE, which is why one audible word anywhere in a long,
+// pause-heavy recording clears the gate; `stop()` tears the graph down with the stream.
 export function createRmsMeter(stream, deps = {}) {
 	const Ctx =
 		deps.AudioContext ||

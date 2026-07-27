@@ -22,6 +22,16 @@ const DB_NAME = "jarvis_voice";
 const STORE = "clips";
 const DB_VERSION = 1;
 
+// A fragment written moments ago belongs to a recorder that is STILL RUNNING — most often ANOTHER
+// TAB of the same app, mid-dictation, whose session id this tab has never seen (IndexedDB is
+// shared per origin; the live-session exclusion below only knows about this tab). Offering that
+// take as "recovery" is destructive, not helpful: Transcribe adopts it and DELETES its fragment
+// keys — including index 0, the initialisation segment whose loss is the one case this design
+// calls unrecoverable — while the other tab keeps writing fragments into the hole; Discard deletes
+// it outright. So a recording only counts as an orphan once nothing has been written to it for
+// 2× the recorder's timeslice: by then a live recorder would have flushed again.
+export const LIVE_FRAGMENT_GRACE_MS = 30000;
+
 function _idb() {
 	try {
 		return typeof indexedDB !== "undefined" ? indexedDB : null;
@@ -44,10 +54,12 @@ function _openDb() {
 		req.onupgradeneeded = () => {
 			const db = req.result;
 			if (!db.objectStoreNames.contains(STORE)) {
-				// keyPath 'key' = `${recordingId}:${index}`; the `sessionId` index lets a
-				// session clear its own leftovers without scanning the whole store.
-				const os = db.createObjectStore(STORE, { keyPath: "key" });
-				os.createIndex("sessionId", "sessionId", { unique: false });
+				// keyPath 'key' = `${recordingId}:${index}`. That prefix IS the index: every
+				// per-recording op below runs a bound key range over it, so no secondary index
+				// is created. (A database from the previous release carries an unused
+				// `sessionId` index; leaving it costs nothing, and bumping DB_VERSION to drop
+				// it would run an upgrade over stores that still hold un-recovered audio.)
+				db.createObjectStore(STORE, { keyPath: "key" });
 			}
 		};
 		req.onsuccess = () => resolve(req.result);
@@ -63,22 +75,26 @@ function _tx(mode, fn) {
 	return _openDb().then((db) => {
 		if (!db) return false; // IndexedDB unavailable (private mode / unsupported) — NOT durable
 		return new Promise((resolve) => {
+			// EVERY terminal path closes the connection. Closing only on success leaked one open
+			// connection per failed transaction, and the failing path is exactly the one that
+			// repeats: a quota failure retries each fragment MIRROR_PUT_ATTEMPTS times.
+			const settle = (ok) => {
+				try {
+					db.close();
+				} catch (e) {
+					/* noop */
+				}
+				resolve(ok);
+			};
 			let store;
 			try {
 				const tx = db.transaction(STORE, mode);
 				store = tx.objectStore(STORE);
-				tx.oncomplete = () => {
-					try {
-						db.close();
-					} catch (e) {
-						/* noop */
-					}
-					resolve(true);
-				};
-				tx.onerror = () => resolve(false);
-				tx.onabort = () => resolve(false);
+				tx.oncomplete = () => settle(true);
+				tx.onerror = () => settle(false);
+				tx.onabort = () => settle(false);
 			} catch (e) {
-				resolve(false);
+				settle(false);
 				return;
 			}
 			try {
@@ -88,6 +104,19 @@ function _tx(mode, fn) {
 			}
 		});
 	});
+}
+
+// The half-open key range covering every fragment of one recording: keys are
+// `${recordingId}:${index}` and ";" is the character right after ":", so the bound range selects
+// exactly this recording's rows. Returns null where IDBKeyRange isn't available, and the caller
+// falls back to a full scan.
+function _recordingRange(recordingId) {
+	try {
+		if (typeof IDBKeyRange === "undefined") return null;
+		return IDBKeyRange.bound(`${recordingId}:`, `${recordingId};`, false, true);
+	} catch (e) {
+		return null;
+	}
 }
 
 // The persisted record for one fragment. Split out so putFragment() and the pure,
@@ -172,17 +201,20 @@ export function createVoiceAudioMirror(sessionId, userId) {
 			}).catch(() => false);
 		},
 		// Drop every fragment of one recording (its transcript is durable, or the user
-		// discarded it). Cursor-scanned rather than key-guessed: a take whose fragment count
-		// the caller no longer knows must still clear completely.
+		// discarded it). Cursor-scanned rather than key-guessed — a take whose fragment count
+		// the caller no longer knows must still clear completely — but over this recording's
+		// KEY RANGE only, and on keys rather than values, so a discard never materialises every
+		// audio blob in the store.
 		deleteRecording(recordingId) {
 			const want = String(recordingId);
+			const range = _recordingRange(want);
 			return _tx("readwrite", (store) => {
-				const cur = store.openCursor();
+				const cur = range ? store.openKeyCursor(range) : store.openCursor();
 				cur.onsuccess = () => {
 					const c = cur.result;
 					if (!c) return;
-					const v = c.value;
-					if (v && String(v.recordingId) === want) c.delete();
+					if (range) store.delete(c.key);
+					else if (c.value && String(c.value.recordingId) === want) c.delete();
 					c.continue();
 				};
 			}).catch(() => undefined);
@@ -193,8 +225,9 @@ export function createVoiceAudioMirror(sessionId, userId) {
 		reassignConversation(recordingId, conversationId) {
 			const want = String(recordingId);
 			const to = conversationId != null ? conversationId : null;
+			const range = _recordingRange(want);
 			return _tx("readwrite", (store) => {
-				const cur = store.openCursor();
+				const cur = range ? store.openCursor(range) : store.openCursor();
 				cur.onsuccess = () => {
 					const c = cur.result;
 					if (!c) return;
@@ -209,20 +242,43 @@ export function createVoiceAudioMirror(sessionId, userId) {
 	};
 }
 
+// The recording a fragment belongs to. A legacy per-clip record carries no recordingId, so it
+// stands alone under its own key — exactly as groupOrphanRecordings groups it.
+function _fragRecordingId(v) {
+	return v.recordingId == null ? `legacy:${v.key}` : String(v.recordingId);
+}
+
 // PURE, node-testable orphan filter. Keeps only fragments that (a) belong to a PRIOR session
-// (not the live one) and (b) belong to the SAME Frappe user — the cross-user safety gate. A
+// (not the live one), (b) belong to the SAME Frappe user — the cross-user safety gate — and
+// (c) belong to a recording nothing has written to for `liveGraceMs` (see
+// LIVE_FRAGMENT_GRACE_MS: a still-warm recording is another tab's LIVE take, not an orphan). A
 // record whose userId doesn't exactly match (including a legacy record with no userId when a
 // user IS logged in, or vice-versa) is HIDDEN, never offered to whoever happens to be logged in.
+//
+// `now` / `liveGraceMs` are injectable for tests; `liveGraceMs: 0` disables the age gate.
 export function filterOrphanFragments(rows, opts = {}) {
 	const norm = (u) => (u == null ? null : String(u));
 	const want = norm(opts.userId);
 	const excludeSessionId = opts.excludeSessionId;
-	return (rows || []).filter((v) => {
+	const now = typeof opts.now === "number" ? opts.now : Date.now();
+	const graceMs = opts.liveGraceMs == null ? LIVE_FRAGMENT_GRACE_MS : opts.liveGraceMs;
+	const mine = (rows || []).filter((v) => {
 		if (!v) return false;
 		if (excludeSessionId && v.sessionId === excludeSessionId) return false;
 		if (norm(v.userId) !== want) return false; // strict same-user; both-null is OK
 		return true;
 	});
+	if (!(graceMs > 0)) return mine;
+	// Age is judged per RECORDING, not per fragment: fragment 0 of a 90 s live take is minutes
+	// old, and dropping only the young rows would offer a take whose head is missing — the worst
+	// of both outcomes.
+	const newest = new Map();
+	for (const v of mine) {
+		const rid = _fragRecordingId(v);
+		const at = v.createdAt || 0;
+		if (at > (newest.get(rid) || 0)) newest.set(rid, at);
+	}
+	return mine.filter((v) => now - (newest.get(_fragRecordingId(v)) || 0) >= graceMs);
 }
 
 // PURE, node-testable: rebuild RECORDINGS out of loose persisted fragments.
@@ -238,18 +294,36 @@ export function filterOrphanFragments(rows, opts = {}) {
 //   * `durationS` is the largest cumulative duration any surviving fragment recorded, i.e. how
 //     much audio actually exists — an honest number for a crash-truncated take.
 //
-// Recordings are returned newest-first (by the newest write in the group).
+// ORDER. Sessions come newest-first (by the newest write anywhere in that session). WITHIN a
+// session, LEGACY clips are ordered by their `seq` ASCENDING — spoken order. That is not
+// cosmetic: each legacy clip was a separate ~15 s slice of one dictation, each clip's row got its
+// own Date.now() at write time, so a flat newest-first sort hands a user their sentence
+// BACKWARDS, and clicking Transcribe down the banner types it in that order. (They are never
+// concatenated: a legacy clip is a standalone webm with its own EBML header, so joining them
+// would not decode.) Modern recordings within a session stay newest-first — each is a whole
+// dictation, and the most recent one is the one being looked for.
 export function groupOrphanRecordings(fragments) {
 	const groups = new Map();
+	// sessionId -> the newest write seen anywhere in that session
+	const sessionRecency = new Map();
 	for (const v of fragments || []) {
 		if (!v) continue;
 		const legacy = v.recordingId == null;
 		const rid = legacy ? `legacy:${v.key}` : String(v.recordingId);
+		const sid = v.sessionId == null ? null : String(v.sessionId);
+		if ((v.createdAt || 0) > (sessionRecency.get(sid) || 0))
+			sessionRecency.set(sid, v.createdAt || 0);
 		let g = groups.get(rid);
 		if (!g) {
 			g = {
 				recordingId: rid,
-				sessionId: v.sessionId == null ? null : String(v.sessionId),
+				sessionId: sid,
+				legacy,
+				// Spoken position of a legacy clip within its session (0 for a modern recording,
+				// whose fragments carry `index` instead). The previous release always stamped
+				// `seq`; falling back to the write time keeps the ordering right for anything
+				// that somehow lacks it, since within ONE session both ascend together.
+				seq: legacy ? (v.seq != null ? Number(v.seq) || 0 : v.createdAt || 0) : 0,
 				conversationId: v.conversationId != null ? v.conversationId : null,
 				mimeType: v.mimeType || "audio/webm",
 				durationS: 0,
@@ -278,7 +352,13 @@ export function groupOrphanRecordings(fragments) {
 			g.complete = g.fragments.length > 0 && g.fragments[0].index === 0;
 			return g;
 		})
-		.sort((a, b) => b.createdAt - a.createdAt);
+		.sort((a, b) => {
+			const sa = sessionRecency.get(a.sessionId) || 0;
+			const sb = sessionRecency.get(b.sessionId) || 0;
+			if (sa !== sb) return sb - sa; // newest session first
+			if (a.legacy && b.legacy) return a.seq - b.seq; // …then SPOKEN order
+			return b.createdAt - a.createdAt;
+		});
 }
 
 // Read back every mirrored recording left by PRIOR sessions belonging to `userId` (anything
@@ -291,6 +371,15 @@ export function listOrphanRecordings(excludeSessionId, userId) {
 		if (!db) return [];
 		return new Promise((resolve) => {
 			const out = [];
+			// Close on EVERY terminal path, success or not — see _tx.
+			const settle = (v) => {
+				try {
+					db.close();
+				} catch (e) {
+					/* noop */
+				}
+				resolve(v);
+			};
 			try {
 				const tx = db.transaction(STORE, "readonly");
 				const store = tx.objectStore(STORE);
@@ -302,22 +391,16 @@ export function listOrphanRecordings(excludeSessionId, userId) {
 						c.continue();
 					}
 				};
-				tx.oncomplete = () => {
-					try {
-						db.close();
-					} catch (e) {
-						/* noop */
-					}
-					resolve(
+				tx.oncomplete = () =>
+					settle(
 						groupOrphanRecordings(
 							filterOrphanFragments(out, { userId, excludeSessionId })
 						)
 					);
-				};
-				tx.onerror = () => resolve([]);
-				tx.onabort = () => resolve([]);
+				tx.onerror = () => settle([]);
+				tx.onabort = () => settle([]);
 			} catch (e) {
-				resolve([]);
+				settle([]);
 			}
 		});
 	});

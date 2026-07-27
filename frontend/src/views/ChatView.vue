@@ -2224,6 +2224,7 @@
 						:attachments="composerAttachments"
 						:busy="busy"
 						:canSend="canSend"
+						:sendTitle="voiceSendBlockReason"
 						:placeholder="`Ask ${agentName}…   @ to mention a user, / for a doctype or tool`"
 						:disclaimer="`${agentName} can make mistakes. Verify important actions before submitting to ERPNext.`"
 						@submit="send()"
@@ -2477,7 +2478,10 @@
 						<template #below-input>
 							<!-- transcribing pill: ONE per recording, right where its words will
 						     land. M:SS is the RECORDING's length — there is no progress to
-						     report and inventing one would be theatre. -->
+						     report and inventing one would be theatre. Past 10 s it also states
+						     how long it has been waiting (a real number), and Cancel ends the
+						     wait: the recording drops to its failed chip with the audio intact,
+						     which is what un-blocks sending. -->
 							<div
 								v-if="ui.stt_enabled && voiceQ.transcribing.length"
 								style="
@@ -2515,7 +2519,17 @@
 									>
 										<path d="M12 3a9 9 0 1 0 9 9" />
 									</svg>
-									Transcribing {{ recLength(t.durationS) }}…
+									Transcribing {{ recLength(t.durationS) }}…{{
+										transcribingWait(t)
+									}}
+									<button
+										class="jv-voicechip-quiet"
+										title="Stop waiting for this transcription — the recording is kept, with Retry and Download"
+										aria-label="Cancel this transcription"
+										@click="cancelTranscribing(t.id)"
+									>
+										Cancel
+									</button>
 								</span>
 							</div>
 							<!-- recovery banner: a prior session left a recording un-transcribed. ONE
@@ -2553,6 +2567,13 @@
 									<button class="jv-voicechip-act" @click="downloadTake(t)">
 										Download
 									</button>
+									<!-- non-destructive escape: hide it for this tab session, keep
+								     the audio. Without it the only ways out are to act now or see
+								     the banner on every reload — pressure toward the one button
+								     that deletes. -->
+									<button class="jv-voicechip-act" @click="laterTake(t)">
+										Later
+									</button>
 									<!-- destructive: quieter weight + confirm before deleting audio -->
 									<button
 										class="jv-voicechip-quiet"
@@ -2565,9 +2586,14 @@
 							</template>
 							<!-- failed-recording chip: the take exhausted its transcription budget. The
 						     audio is retained, so Retry re-sends the SAME bytes and Download saves
-						     them. Once a message has gone out without it the label + Retry tooltip
-						     switch to the post-send wording — the two states are otherwise
-						     indistinguishable and the chip reads as stuck clutter. -->
+						     them, and the label carries the server's reason so a permanent fault
+						     is distinguishable from a blip. Once a message has gone out without it
+						     the label + Retry tooltip switch to the post-send wording — the two
+						     states are otherwise indistinguishable and the chip reads as stuck
+						     clutter. A take nothing was heard in (measured silent here, or an
+						     empty transcript from the server) lands here too, reading "nothing was
+						     heard" with "Transcribe anyway": a silence measurement is never
+						     allowed to delete a recording, only the user is. -->
 							<div
 								v-if="ui.stt_enabled && voiceQ.failed.length"
 								style="
@@ -2581,6 +2607,7 @@
 								<span
 									v-for="f in voiceQ.failed"
 									:key="'fail-' + f.id"
+									:title="failedChipTitle(f)"
 									style="
 										display: inline-flex;
 										align-items: center;
@@ -2599,7 +2626,7 @@
 										:title="failedChipRetryTitle(f)"
 										@click="retryRecording(f.id)"
 									>
-										Retry
+										{{ failedChipRetryLabel(f) }}
 									</button>
 									<button
 										class="jv-voicechip-act"
@@ -2674,7 +2701,9 @@
 						     device (storage full / private mode / IndexedDB blocked). Recording is
 						     stopped; a crash or reload would otherwise lose this audio silently, so
 						     it is surfaced as ACTIONABLE — Download keeps it, Retry re-attempts the
-						     save once space is freed. -->
+						     save once space is freed, ✕ drops it. Without that ✕ the chip had no
+						     exit at all: it also arms the leave guard on every navigation, and
+						     "send the message" / "free storage and Retry" are not affordances. -->
 							<div
 								v-if="
 									ui.stt_enabled &&
@@ -2718,6 +2747,14 @@
 										@click="downloadRecording(u.id)"
 									>
 										Download
+									</button>
+									<button
+										class="jv-voicechip-quiet"
+										title="Discard this recording"
+										aria-label="Discard this recording"
+										@click="discardUnpersistedRecording(u.id)"
+									>
+										✕
 									</button>
 								</span>
 							</div>
@@ -3589,6 +3626,7 @@ import {
 	createVoiceAudioMirror,
 	listOrphanRecordings,
 	deleteOrphanRecording,
+	LIVE_FRAGMENT_GRACE_MS,
 } from "@/utils/voiceAudioMirror";
 import { setMacroPrefill } from "@/composables/macroPrefill";
 import { takeChatPrefill } from "@/composables/chatPrefill";
@@ -4633,7 +4671,13 @@ const canSend = computed(
 		(input.value.trim().length > 0 || pendingFiles.value.length > 0) &&
 		!sending.value &&
 		// Suspended: the server rejects every send, so keep the button dead.
-		!suspendedNotice.value
+		!suspendedNotice.value &&
+		// A dictation that hasn't landed yet blocks the send inside send() anyway (its words
+		// would be dropped). Disable the button too, with the reason on its tooltip: leaving it
+		// lit and swallowing the click behind a fading toast is the button lying about what it
+		// does — and record→stop→read→record-more is the flow dictation actively encourages.
+		// (Enter still routes through send(), which keeps the toast for that path.)
+		!voiceSendBlockReason.value
 );
 const busy = computed(() => sending.value || waiting.value);
 // A parked write's Confirm dispatches a follow-up agent turn (continuation).
@@ -7654,6 +7698,40 @@ const recLength = (s) => _fmtClock(s || 0);
 const voiceBusyCount = computed(
 	() => voiceQ.value.transcribing.length + (voiceQ.value.capturing || 0)
 );
+// WHY the composer is holding a send, in the user's words — surfaced on the Send button itself
+// (see canSend) instead of only as a toast that fades in 3.2 s. A control whose enabled state
+// lies about what it will do reads as broken, which is the one thing this feature's copy is
+// careful about everywhere else.
+const voiceSendBlockReason = computed(() => {
+	if (micState.value === "recording")
+		return "Stop the dictation first — its words are still coming.";
+	if (voiceBusyCount.value > 0)
+		return "Waiting for the dictation to land in the box (or cancel it below).";
+	return "";
+});
+// A slow transcription and a stalled one look identical while the pill states only the
+// RECORDING's length, which never changes. Past this many seconds it also reports how long it
+// has actually been waiting — a number it genuinely knows, unlike a percentage.
+const VOICE_WAIT_VISIBLE_AFTER_S = 10;
+const _voiceNowMs = ref(0);
+let _voiceWaitTimer = null;
+watch(
+	() => voiceQ.value.transcribing.length,
+	(n) => {
+		if (n > 0 && !_voiceWaitTimer) {
+			_voiceNowMs.value = Date.now();
+			_voiceWaitTimer = setInterval(() => (_voiceNowMs.value = Date.now()), 1000);
+		} else if (!n && _voiceWaitTimer) {
+			clearInterval(_voiceWaitTimer);
+			_voiceWaitTimer = null;
+		}
+	}
+);
+const transcribingWait = (t) => {
+	if (!t.since || !_voiceNowMs.value) return "";
+	const s = Math.floor((_voiceNowMs.value - t.since) / 1000);
+	return s >= VOICE_WAIT_VISIBLE_AFTER_S ? ` · waiting ${s}s` : "";
+};
 
 function _voiceSnap() {
 	voiceQ.value = voiceStore ? voiceStore.snapshot() : { ..._emptyVoiceSnap };
@@ -7728,10 +7806,20 @@ function _ensureVoiceSession() {
 		// audio. Await it, validate the shape, and hand back ONLY res.text; any malformed or
 		// failed payload THROWS so the recording is retried, then RETAINED (never-lose-audio).
 		//
-		// The budget is deliberately generous and LONGER than the server's own worst case
-		// (10 s connect + 60 s read, retried once): one call now carries the WHOLE take, so a
-		// client abort that fires before the server has given up would turn a slow-but-fine
-		// transcription into a failed one. Measured, whisper-turbo does 300 s of audio in 1.2 s.
+		// BUDGET ARITHMETIC (re-derived; the previous version of this comment did not survive
+		// review). The client budget has to cover the UPLOAD as well as the server, because
+		// `requests`' timeout bounds connect+read only — sending the body is outside it:
+		//   * upload — the recorder now encodes at 32 kbps (useDictationRecorder's
+		//     AUDIO_BITS_PER_SECOND), so the 300 s worst-case take is ~1.2 MB, ~10 s on a
+		//     1 Mbps uplink (it was ~4.6 MB / ~37 s at Chrome's measured 129 kbps default).
+		//   * server — ONE transcription attempt now (voice.py `_TRANSCRIBE_ATTEMPTS`), so
+		//     10 s connect + 60 s read = 70 s, not 140. whisper-turbo does 300 s of audio in
+		//     1.2 s; the second attempt doubled the worst case to buy almost nothing.
+		//   * 10 + 70 = ~80 s worst case, against a 150 s client budget — real margin, where
+		//     before it was 177 s of worst case against 150 s and the client aborted calls the
+		//     server was about to finish, then re-uploaded them.
+		// Aborting early is the expensive mistake: it turns a slow-but-fine transcription into a
+		// failure and pays OpenRouter for work the user never sees.
 		transcribe: async (rec, signal) => {
 			const res = await voice.transcribeAudio(rec.blob, {
 				durationS: rec.durationS,
@@ -7743,6 +7831,10 @@ function _ensureVoiceSession() {
 		},
 		mirror: voiceMirror,
 		maxAttempts: 2, // the client abort lives in transcribeAudio; the store retries once
+		// …and pauses first. An instant re-upload into a 429 or a 5xx is two back-to-back
+		// multi-megabyte POSTs for the same answer, and the failing attempt has usually just
+		// burned its own timeout — 3 s costs the user nothing they can perceive.
+		retryBackoffMs: 3000,
 		// A transcript lives only in a volatile composer draft until the message is SENT —
 		// retain the audio (and the leave guard) until acknowledge()/discard so a reload can
 		// still recover it.
@@ -7798,12 +7890,16 @@ const micRec = useDictationRecorder({
 		if (!voiceStore || id == null) return;
 		// WHOLE-TAKE SILENCE GATE (voiceSilenceGate.js). whisper hallucinates confident phrases
 		// ("Thank you.") onto silent audio and the provider exposes no no_speech_prob to filter
-		// on, so a take the recorder MEASURED as inaudible from end to end is dropped right here:
-		// never uploaded, no text, no chip, not a failure. A take with NO measurement (no
-		// WebAudio / suspended context) is always transcribed: absence of measurement must never
-		// cost audio, and one audible word anywhere in the take clears the gate.
+		// on, so a take the recorder MEASURED as inaudible from end to end is never uploaded. It
+		// is NOT deleted: finishSilent() routes it to the same terminal `failed` state an empty
+		// transcript produces, so the audio survives behind the chip's Transcribe anyway /
+		// Download / Discard. A false positive here is plausible — a muted-then-forgotten mic, a
+		// Bluetooth gain quirk, an analyser the OS starves — and it would otherwise destroy up to
+		// five minutes of real speech behind a 3-second toast, against this feature's own first
+		// invariant. A take with NO measurement (no WebAudio / suspended context) is always
+		// transcribed, and one audible word anywhere in the take clears the gate.
 		if (isNearSilent(take.peakRms)) {
-			voiceStore.discard(id);
+			voiceStore.finishSilent(id, take);
 			notify("Nothing was heard — try closer to the microphone.", { type: "info" });
 			return;
 		}
@@ -7823,19 +7919,55 @@ const micRec = useDictationRecorder({
 			type: "info",
 		});
 	},
+	// One heads-up before the cap, so the cut is something the user steers into instead of a
+	// mid-sentence surprise explained only afterwards.
+	onNearCap: (secondsLeft) => {
+		notify(
+			`${secondsLeft} seconds left before the 5-minute limit — finish your sentence and stop when you're ready.`,
+			{ type: "info" }
+		);
+	},
+	// The recorder died mid-take (device removed, tab starved, MediaRecorder error). It has
+	// already salvaged the fragments through onDone; without this the mic UI would keep claiming
+	// to record — frozen clock, live dot, "Stop dictation" tooltip — with no microphone behind
+	// it, and the user would only find out on their next click. A start() failure is handled by
+	// startMic's own notify, and micState is still 'idle' there, so this stays out of its way.
+	onError: (msg) => {
+		if (micState.value !== "recording") return;
+		micState.value = "idle";
+		notify(msg || "Recording failed. Try again.", { type: "error" });
+	},
 });
 
 async function startMic() {
+	// RE-ENTRY GUARD — the composer's lockout bug lived here. stopMic() flips micState to 'idle'
+	// SYNCHRONOUSLY and then awaits the browser's async onstop, so during that window the button
+	// reads "Dictate" and a second click (a double-click, or the very natural click straight
+	// after the 5-minute auto-stop toast, or the persist-fail stop) lands right back in here
+	// while the previous take is still finishing. All four conditions matter: micState covers the
+	// UI, `starting` covers the permission-prompt window, the recorder's own state covers the
+	// stop→onstop window, and _activeRecordingId covers the take whose unit is still open.
+	if (
+		micState.value === "recording" ||
+		micRec.starting ||
+		micRec.state === "recording" ||
+		_activeRecordingId != null
+	)
+		return;
 	// Tag the take with the on-screen scope — a real conversation id, or the stable new-chat
 	// draft scope when nothing is saved yet (so recovery can't misroute it).
 	_micConvId = _currentScope();
 	_ensureVoiceSession();
-	await micRec.start();
+	// start() answers whether THIS call put a recorder live. Never infer it from micRec.state:
+	// during the stop→onstop window that still reads "recording" from the PREVIOUS take, which
+	// is what let a second unit be minted and the first one stranded in `recording` forever —
+	// voiceBusyCount then never returns to 0 and every send, voice or not, is refused.
+	const started = await micRec.start();
 	if (micRec.state === "error") {
 		notify(micRec.error || "Couldn't start the microphone.", { type: "error" });
 		return;
 	}
-	if (micRec.state !== "recording") return;
+	if (!started || micRec.state !== "recording") return;
 	// Open the recording's unit only once the mic is actually live: a denied prompt must not
 	// leave an empty take arming the leave guard. The first fragment is ~15 s away, so the id is
 	// always in place before anything needs it.
@@ -7857,27 +7989,61 @@ async function cancelMic() {
 }
 
 // ---- failed-recording chip actions ----
-// The chip means two different things and must not read the same for both. Before a send it is a
-// recording the user can still fix and include; after a send that went out without it, it is
-// audio a message has already left behind, and Retry can only ever add to the CURRENT draft (the
-// sent message is immutable).
+// The chip means three different things and must not read the same for any two of them. Before a
+// send it is a recording the user can still fix and include; after a send that went out without
+// it, it is audio a message has already left behind, and Retry can only ever add to the CURRENT
+// draft (the sent message is immutable); and `noSpeech` is the take nothing was heard in —
+// measured silent here, or transcribed to nothing by the server — where "didn't transcribe"
+// would be a riddle and the honest verb is "transcribe it anyway".
 const failedChipLabel = (f) => {
 	const len = _fmtClock(f.durationS);
+	if (f.noSpeech) return `Recording ${len} — nothing was heard`;
+	// WHY it failed, from the server's own (secret-scrubbed) message: a permanent fault
+	// ("Speech-to-text is not enabled on this site.") and a transient blip are otherwise
+	// indistinguishable, so users Retry-loop the same upload forever and report nothing useful.
+	const why = f.error ? ` · ${f.error}` : "";
 	return f.sentWithout
-		? `Recording ${len} didn't transcribe — your last message went without it`
-		: `Recording ${len} didn't transcribe`;
+		? `Recording ${len} didn't transcribe — your last message went without it${why}`
+		: `Recording ${len} didn't transcribe${why}`;
 };
+const failedChipTitle = (f) => (f.error ? `Reason: ${f.error}` : "");
+const failedChipRetryLabel = (f) => (f.noSpeech ? "Transcribe anyway" : "Retry");
 const failedChipRetryTitle = (f) =>
 	f.sentWithout
 		? "Transcribe again — the words go into your current draft, not the message that already went"
+		: f.noSpeech
+		? "Send it for transcription anyway — nothing audible was measured, but the measurement can be wrong"
 		: "Transcribe this recording again";
 function retryRecording(id) {
 	if (voiceStore) voiceStore.retry(id);
+}
+// Stop waiting on a transcription. The recording moves to the failed chip with its audio intact
+// (never a discard), which is also what releases the send block — a slow or misconfigured STT
+// used to hold every send, typed ones included, for the whole client budget with no way out but
+// a tab reload.
+function cancelTranscribing(id) {
+	if (voiceStore) voiceStore.cancelTranscription(id);
 }
 // Retry on an "audio not saved" chip — re-attempt the durable write. The chip clears once the
 // store accepts it (e.g. after the user frees space / leaves private mode).
 function retryPersistRecording(id) {
 	if (voiceStore) voiceStore.retryPersist(id);
+}
+// ✕ on an "audio not saved" chip. This audio exists ONLY in this tab's memory — there is no
+// durable copy to recover it from — so the confirm names that plainly instead of the usual
+// "download it first if you want to keep it" hint, which would understate it.
+async function discardUnpersistedRecording(id) {
+	if (!voiceStore) return;
+	const ok = await confirm({
+		title: "Discard this recording?",
+		message:
+			"This audio could not be saved to disk — discarding loses it. It exists only in this tab, so a reload would lose it too. Download it first if you want to keep it.",
+		danger: true,
+		confirmLabel: "Discard",
+		cancelLabel: "Keep",
+	});
+	if (!ok) return;
+	voiceStore.discard(id);
 }
 function _recordingBlob(rec) {
 	if (!rec) return null;
@@ -7963,12 +8129,28 @@ function _assembleTake(t) {
 	const parts = (t.fragments || []).map((f) => f.blob).filter(Boolean);
 	return parts.length ? new Blob(parts, { type: t.mimeType || "audio/webm" }) : null;
 }
-async function _loadRecovery() {
+// Recordings the user chose to deal with LATER: hidden for this tab session only, audio
+// untouched. Reset on reload, exactly like the per-clip release's laterOrphans.
+const _laterTakes = new Set();
+// A recording whose newest fragment is still warm is held back as another tab's LIVE take
+// (voiceAudioMirror's LIVE_FRAGMENT_GRACE_MS). That is also true of a tab that crashed seconds
+// ago and was reloaded straight away, so re-read ONCE after the window — otherwise genuinely
+// crashed audio would be silently absent from the banner until the next visit.
+let _recoveryRecheck = null;
+async function _loadRecovery(isRecheck) {
 	try {
 		const takes = await listOrphanRecordings(_voiceSessionId, session.user);
-		recoveryTakes.value = (takes || []).filter((t) => t.fragments && t.fragments.length);
+		recoveryTakes.value = (takes || []).filter(
+			(t) => t.fragments && t.fragments.length && !_laterTakes.has(t.recordingId)
+		);
 	} catch (e) {
 		recoveryTakes.value = [];
+	}
+	if (!isRecheck && !recoveryTakes.value.length && !_recoveryRecheck) {
+		_recoveryRecheck = setTimeout(() => {
+			_recoveryRecheck = null;
+			void _loadRecovery(true);
+		}, LIVE_FRAGMENT_GRACE_MS + 1000);
 	}
 }
 const recoveryLabel = (t) => {
@@ -8012,6 +8194,12 @@ function recoverTake(t) {
 			type: "info",
 		});
 	}
+}
+// "Later": stop offering this one for now, keep every byte. The audio stays in the mirror and the
+// banner comes back on the next reload.
+function laterTake(t) {
+	_laterTakes.add(t.recordingId);
+	recoveryTakes.value = recoveryTakes.value.filter((x) => x.recordingId !== t.recordingId);
 }
 function downloadTake(t) {
 	const blob = _assembleTake(t);
@@ -8476,7 +8664,14 @@ onMounted(async () => {
 	ui.value = (await uiP) || {};
 	// Offer recovery of any recording a prior session left un-transcribed (a tab
 	// crash / accidental reload) — only when dictation is actually enabled.
-	if (ui.value && ui.value.stt_enabled && micRec.supported) _loadRecovery();
+	// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes
+	// THIS tab's own fragments from the offer. Deferring it to the first startMic
+	// left the id null at load, so the exclusion never applied and the banner
+	// could offer — then adopt or discard — this tab's own live take.
+	if (ui.value && ui.value.stt_enabled && micRec.supported) {
+		_ensureVoiceSession();
+		_loadRecovery();
+	}
 	// Load custom skills so the "/" composer menu can offer them.
 	loadCustomSkills();
 	// "Discuss in chat" hand-off (Review tab → chatPrefill stash). Take the
@@ -8579,6 +8774,8 @@ onBeforeUnmount(() => {
 	// anything un-transcribed (the route guard already warned the user).
 	window.removeEventListener("beforeunload", _beforeUnloadVoice);
 	voiceStore?.dispose();
+	if (_voiceWaitTimer) clearInterval(_voiceWaitTimer);
+	if (_recoveryRecheck) clearTimeout(_recoveryRecheck);
 	if (nudge.value && (nudge.value.mode === "recording" || nudge.value.mode === "transcribing"))
 		nudgeRec?.cancel();
 	// ChatView is the sole writer of streamingConvId (§4 contract) and its

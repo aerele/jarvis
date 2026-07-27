@@ -18,6 +18,13 @@
 // The take is capped at `maxDurationS` (300 s, the server's limit): the cap AUTO-STOPS the
 // recorder and hands over what was captured — it never discards it.
 //
+// `start()` resolves a BOOLEAN — true only when this call actually put a recorder live. A
+// re-entrant call (already recording, or a previous start() still inside the permission prompt)
+// resolves FALSE, and so does every failure. The caller MUST gate on it: the early return is
+// otherwise indistinguishable from success, and a caller that reads the recorder's own `state`
+// instead sees the STALE "recording" of the take that is still finishing — which is exactly how a
+// double-click used to mint a second recording and strand the first one forever.
+//
 // Callbacks:
 //   onFragment({index, blob, durationS, mimeType})  a timeslice fragment arrived mid-take;
 //                                    `durationS` is the recording's length up to and including it
@@ -25,6 +32,11 @@
 //   onDone({blob, durationS, mimeType, peakRms, fragments})  the finished, assembled recording.
 //   onCancel()                       the user abandoned the take; drop everything for it.
 //   onAutoStop(durationS)            the cap fired — onDone follows with the captured audio.
+//   onNearCap(secondsLeft)           fired ONCE, `NEAR_CAP_WARN_S` before the cap, so the user can
+//                                    finish their sentence instead of being cut off mid-word.
+//   onError(message)                 the recorder died. A mid-take death still salvages the take
+//                                    (onDone runs first); without this the caller's UI would keep
+//                                    showing a live recording that no longer exists.
 //
 // `peakRms` is the loudest RMS an AnalyserNode saw on the SAME MediaStream across the WHOLE take
 // (per-session now, not per-chunk): the composer's silence gate reads it to skip uploading a take
@@ -38,6 +50,14 @@ const DEFAULT_FRAGMENT_MS = 15000;
 // The server rejects longer recordings (jarvis/chat/voice.py `_MAX_DURATION_S`), so the cap is
 // enforced HERE, at capture time, where the audio can still be saved rather than refused.
 const DEFAULT_MAX_SECONDS = 300;
+// How long before the cap the user is warned, so the cut is something they steer into rather than
+// a surprise mid-sentence.
+const NEAR_CAP_WARN_S = 30;
+// Speech, not music. Chrome's default for an opus mic track measures ~129 kbps, which makes a
+// 5-minute take ~4.6 MB — four times what the upload budget, the IndexedDB mirror and the
+// server's size cap need to carry, with no audible benefit for a transcription model. 32 kbps
+// opus is comfortably transparent for voice and puts the same take at ~1.2 MB.
+const AUDIO_BITS_PER_SECOND = 32000;
 
 export function useDictationRecorder(opts = {}) {
 	const fragmentMs = Math.max(2000, opts.fragmentMs || DEFAULT_FRAGMENT_MS);
@@ -46,6 +66,8 @@ export function useDictationRecorder(opts = {}) {
 	const onDone = typeof opts.onDone === "function" ? opts.onDone : () => {};
 	const onCancel = typeof opts.onCancel === "function" ? opts.onCancel : () => {};
 	const onAutoStop = typeof opts.onAutoStop === "function" ? opts.onAutoStop : () => {};
+	const onNearCap = typeof opts.onNearCap === "function" ? opts.onNearCap : () => {};
+	const onError = typeof opts.onError === "function" ? opts.onError : () => {};
 
 	const state = ref("idle"); // 'idle' | 'recording' | 'error'
 	const error = ref("");
@@ -79,6 +101,7 @@ export function useDictationRecorder(opts = {}) {
 	let startedAt = 0;
 	let action = null; // what the in-flight recorder.stop() means: 'final' | 'cancel'
 	let settle = null; // resolver for a stop()/cancel() awaiting onstop
+	let nearCapWarned = false; // the approaching-cap warning is once per take, never a countdown
 	// This take has already been handed over (onDone/onCancel) — exactly once. Starts TRUE so a
 	// cancel() before any take has begun hands nothing over.
 	let emitted = true;
@@ -117,6 +140,9 @@ export function useDictationRecorder(opts = {}) {
 		state.value = "error";
 		error.value = msg;
 		_resolveSettle();
+		// TELL the caller. Nothing watches these refs, so a recorder that died mid-take used to
+		// leave the composer's mic UI claiming to record — frozen clock, live dot, no microphone.
+		onError(msg);
 	}
 
 	function _pickMime() {
@@ -183,11 +209,13 @@ export function useDictationRecorder(opts = {}) {
 	async function start() {
 		if (!supported) {
 			_fail("Voice recording isn't supported in this browser.");
-			return;
+			return false;
 		}
 		// Reject a re-entry synchronously — while already recording OR while a previous start()
-		// is mid-getUserMedia (the permission-prompt window).
-		if (state.value === "recording" || starting.value) return;
+		// is mid-getUserMedia (the permission-prompt window). FALSE, never undefined: the caller
+		// opens the recording's unit off this answer, and a silent early return that looked like
+		// success is what let a second unit be minted for a take that was already running.
+		if (state.value === "recording" || starting.value) return false;
 		starting.value = true;
 		const gen = ++startGen;
 		error.value = "";
@@ -195,11 +223,12 @@ export function useDictationRecorder(opts = {}) {
 		fragments = [];
 		action = null;
 		emitted = false;
+		nearCapWarned = false;
 		let acquired;
 		try {
 			acquired = await navigator.mediaDevices.getUserMedia({ audio: true });
 		} catch (e) {
-			if (gen !== startGen) return; // cancelled/torn down during the prompt — nothing acquired
+			if (gen !== startGen) return false; // cancelled/torn down during the prompt
 			const name = (e && e.name) || "";
 			_fail(
 				name === "NotAllowedError" || name === "SecurityError"
@@ -208,7 +237,7 @@ export function useDictationRecorder(opts = {}) {
 					? "No microphone was found on this device."
 					: "Couldn't start the microphone."
 			);
-			return;
+			return false;
 		}
 		// Navigated away / cancelled while the prompt was open: this grant is STALE. STOP the
 		// tracks so the mic never stays hot on a dead component, and bail without a recorder.
@@ -218,7 +247,7 @@ export function useDictationRecorder(opts = {}) {
 			} catch (e) {
 				/* already stopped */
 			}
-			return;
+			return false;
 		}
 		stream = acquired;
 		mime = _pickMime();
@@ -229,8 +258,11 @@ export function useDictationRecorder(opts = {}) {
 		meter = createRmsMeter(stream);
 		try {
 			recorder = mime
-				? new MediaRecorder(stream, { mimeType: mime })
-				: new MediaRecorder(stream);
+				? new MediaRecorder(stream, {
+						mimeType: mime,
+						audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
+				  })
+				: new MediaRecorder(stream, { audioBitsPerSecond: AUDIO_BITS_PER_SECOND });
 			recorder.ondataavailable = (e) => {
 				if (!e.data || !e.data.size) return;
 				const index = fragments.length;
@@ -259,18 +291,30 @@ export function useDictationRecorder(opts = {}) {
 			recorder.start(fragmentMs);
 		} catch (e) {
 			_fail("Couldn't start the recorder in this browser.");
-			return;
+			return false;
 		}
 		state.value = "recording";
 		starting.value = false;
 		tick = setInterval(() => {
 			durationS.value = Math.min(maxDurationS, Math.floor((Date.now() - startedAt) / 1000));
+			if (
+				!nearCapWarned &&
+				durationS.value >= maxDurationS - NEAR_CAP_WARN_S &&
+				durationS.value < maxDurationS &&
+				state.value === "recording" &&
+				!action
+			) {
+				// ONE warning, not a countdown: enough to land the sentence, not a nag.
+				nearCapWarned = true;
+				onNearCap(maxDurationS - durationS.value);
+			}
 			if (durationS.value >= maxDurationS && state.value === "recording" && !action) {
 				// The cap is a stop, never a discard: onDone still receives everything captured.
 				onAutoStop(durationS.value);
 				void stop();
 			}
 		}, 250);
+		return true;
 	}
 
 	// Finalise: the recorder flushes its tail as one last fragment, then onstop assembles the
@@ -278,7 +322,12 @@ export function useDictationRecorder(opts = {}) {
 	function stop() {
 		if (state.value !== "recording" || !recorder) return Promise.resolve();
 		if (recorder.state !== "recording") {
+			// We believe we are recording but the browser's recorder is not, so no `onstop` is
+			// coming. Hand the take over anyway (fragments already captured are a valid, truncated
+			// webm) — silently returning here would strand the caller's recording unit open
+			// forever, with nothing to close it and the mic button gated on it.
 			_clearTimers();
+			_emitTake(true);
 			_releaseStream();
 			state.value = "idle";
 			return Promise.resolve();

@@ -101,6 +101,56 @@ test("the recorder runs ONE MediaRecorder in TIMESLICE mode and hands over the c
 	assert.match(onData, /index,/, "…with its ordinal, which is what recovery reassembles by");
 });
 
+test("start() answers whether IT started the recorder — a re-entry is FALSE, never undefined", () => {
+	// The lockout bug's root defect: the re-entry guard returned `undefined`, which is
+	// indistinguishable from success, so the caller sailed on and opened a SECOND recording unit
+	// for a take that was still finishing. The first unit then never left `recording`, and the
+	// composer refused every send — typed ones included — until the tab was reloaded.
+	assert.match(
+		recSrc,
+		/if \(state\.value === "recording" \|\| starting\.value\) return false;/,
+		"the re-entry guard must report FALSE to its caller"
+	);
+	const startBody = recSrc.slice(
+		recSrc.indexOf("async function start() {"),
+		recSrc.indexOf("\t// Finalise:")
+	);
+	assert.equal(
+		/\n\t\t\treturn;\n/.test(startBody) || /\n\t\treturn;\n/.test(startBody),
+		false,
+		"every exit from start() must answer true or false — a bare return is the old ambiguity"
+	);
+	assert.match(startBody, /\n\t\treturn true;\n/, "the success path must answer TRUE");
+});
+
+test("startMic refuses to open a second recording while one is still live or finishing", () => {
+	const body = src.slice(
+		src.indexOf("async function startMic() {"),
+		src.indexOf("async function stopMic()")
+	);
+	assert.match(
+		body,
+		/if \(\n\t\tmicState\.value === "recording" \|\|\n\t\tmicRec\.starting \|\|\n\t\tmicRec\.state === "recording" \|\|\n\t\t_activeRecordingId != null\n\t\)\n\t\treturn;/,
+		"all four windows must be closed: the UI state, the permission prompt, the recorder's own " +
+			"stop→onstop gap, and a recording unit that is still open"
+	);
+	assert.match(
+		body,
+		/const started = await micRec\.start\(\);/,
+		"the composer must gate on start()'s ANSWER…"
+	);
+	assert.match(
+		body,
+		/if \(!started \|\| micRec\.state !== "recording"\) return;/,
+		"…because micRec.state still reads 'recording' from the PREVIOUS take during its stop"
+	);
+	const begin = body.indexOf("voiceStore.begin({ conversationId: _micConvId })");
+	assert.ok(
+		begin > body.indexOf("if (!started"),
+		"the recording unit may only be opened after the gate"
+	);
+});
+
 test("the 5-minute cap AUTO-STOPS and keeps the audio — it never refuses the take", () => {
 	assert.match(
 		recSrc,
@@ -203,9 +253,16 @@ test("the done-recording captureSentInPayload → acknowledge release is untouch
 test("the failed chip and its Retry tooltip branch on sentWithout", () => {
 	assert.match(
 		src,
-		/return f\.sentWithout\n\t\t\? `Recording \$\{len\} didn't transcribe — your last message went without it`\n\t\t: `Recording \$\{len\} didn't transcribe`;/,
+		/\? `Recording \$\{len\} didn't transcribe — your last message went without it\$\{why\}`\n\t\t: `Recording \$\{len\} didn't transcribe\$\{why\}`;/,
 		"identical copy for both states is exactly what makes a correctly-retained chip read as stuck"
 	);
+	assert.match(
+		src,
+		/const why = f\.error \? ` · \$\{f\.error\}` : "";/,
+		"a permanent fault ('Speech-to-text is not enabled on this site.') and a transient blip " +
+			"read identically without the reason — users Retry-loop the upload and report nothing useful"
+	);
+	assert.match(src, /:title="failedChipTitle\(f\)"/, "…and the full reason is on the chip");
 	assert.match(
 		src,
 		/const failedChipRetryTitle = \(f\) =>\n\tf\.sentWithout/,
@@ -244,13 +301,61 @@ test("the transcribing pill states the RECORDING's length and invents no progres
 	for (const fake of ["%", "progress", "elapsed"]) {
 		assert.equal(pill.includes(fake), false, `the pill must not fake ${fake}`);
 	}
+	// What it MAY add is the wait it actually measured, once a wait is long enough to worry about.
+	assert.match(pill, /transcribingWait\(t\)/);
+	assert.match(
+		src,
+		/return s >= VOICE_WAIT_VISIBLE_AFTER_S \? ` · waiting \$\{s\}s` : "";/,
+		"elapsed seconds are a number the composer knows; a percentage is not"
+	);
 });
 
-test("the silent-take message says what happened and offers no phantom recovery", () => {
+test("the transcribing pill can be CANCELLED — a stuck STT may not hold the composer hostage", () => {
+	const pill = src.slice(
+		src.indexOf('v-for="t in voiceQ.transcribing"'),
+		src.indexOf("recovery banner")
+	);
+	assert.match(
+		pill,
+		/@click="cancelTranscribing\(t\.id\)"/,
+		"without this the only exit from a slow transcription is a tab reload — which the leave " +
+			"guard fights — while EVERY send, typed ones included, is refused"
+	);
+	assert.match(
+		src,
+		/function cancelTranscribing\(id\) \{\n\tif \(voiceStore\) voiceStore\.cancelTranscription\(id\);\n\}/,
+		"cancel moves the recording to its failed chip with the audio intact — never a discard"
+	);
+});
+
+test("a measured-silent take is RETAINED and actionable — it is never deleted on a measurement", () => {
+	const start = src.indexOf("const micRec = useDictationRecorder({");
+	const body = src.slice(start, src.indexOf("\nasync function startMic()", start));
+	assert.match(
+		body,
+		/if \(isNearSilent\(take\.peakRms\)\) \{\n\t\t\tvoiceStore\.finishSilent\(id, take\);/,
+		"discard() here destroyed up to five minutes of speech on one RMS reading, with no undo — " +
+			"against this feature's own first invariant. finishSilent keeps the audio."
+	);
+	assert.equal(
+		body.includes("voiceStore.discard(id);\n\t\t\tnotify("),
+		false,
+		"the silent path must not delete the take"
+	);
 	assert.match(
 		src,
 		/notify\("Nothing was heard — try closer to the microphone\.", \{ type: "info" \}\);/,
-		"a measured-silent take is not a failure and must not leave a chip behind"
+		"…and the user is still told, in the moment, what happened"
+	);
+	assert.match(
+		src,
+		/if \(f\.noSpeech\) return `Recording \$\{len\} — nothing was heard`;/,
+		"the chip must say what happened rather than the riddle 'didn't transcribe'"
+	);
+	assert.match(
+		src,
+		/const failedChipRetryLabel = \(f\) => \(f\.noSpeech \? "Transcribe anyway" : "Retry"\);/,
+		"…and offer the honest verb: the measurement can be wrong, so transcribing anyway is a real choice"
 	);
 });
 
@@ -281,6 +386,87 @@ test("the recovery banner names the recording's length and hides Transcribe when
 			`an un-rebuildable take must still offer ${act} — never silent loss`
 		);
 	}
+	assert.ok(
+		banner.includes("laterTake(t)"),
+		"a non-destructive dismiss must exist: otherwise the only ways out are to act now or see " +
+			"the banner on every reload, which is pressure toward the one button that deletes"
+	);
+});
+
+test("recovery is scoped by a session id that EXISTS by the time the banner is built", () => {
+	const mount = src.slice(
+		src.indexOf("if (ui.value && ui.value.stt_enabled && micRec.supported)")
+	);
+	assert.match(
+		mount.slice(0, 200),
+		/\{\n\t\t_ensureVoiceSession\(\);\n\t\t_loadRecovery\(\);\n\t\}/,
+		"_voiceSessionId is minted by _ensureVoiceSession; loading recovery first left it null, so " +
+			"excludeSessionId never applied and the banner could offer THIS tab's own live take"
+	);
+	assert.match(
+		src,
+		/const takes = await listOrphanRecordings\(_voiceSessionId, session\.user\);/,
+		"the exclusion + the cross-user gate both ride on that call"
+	);
+	assert.match(
+		src,
+		/_recoveryRecheck = setTimeout\(/,
+		"a take held back as 'still warm' must be re-read once the grace window passes, or a reload " +
+			"seconds after a crash would show nothing at all"
+	);
+});
+
+test("the un-saveable-audio chip has a way out, and its confirm names the real risk", () => {
+	const chip = src.slice(
+		src.indexOf("voiceQ.unpersisted &&"),
+		src.indexOf("#left-toolbar", src.indexOf("voiceQ.unpersisted &&"))
+	);
+	assert.ok(
+		chip.includes("discardUnpersistedRecording(u.id)"),
+		"Retry + Download only meant this chip could never be resolved — and it arms the leave guard"
+	);
+	assert.match(
+		src,
+		/"This audio could not be saved to disk — discarding loses it\./,
+		"the copy must not borrow the durable case's reassurance: there is no second copy here"
+	);
+});
+
+test("the approaching-cap warning fires once, before the cut, not after it", () => {
+	assert.match(
+		recSrc,
+		/const NEAR_CAP_WARN_S = 30;/,
+		"the cap is otherwise only ever explained after it has already cut a sentence in half"
+	);
+	assert.match(
+		recSrc,
+		/nearCapWarned = true;\n\t\t\t\tonNearCap\(maxDurationS - durationS\.value\);/
+	);
+	assert.match(
+		src,
+		/onNearCap: \(secondsLeft\) => \{/,
+		"…and the composer must actually say it"
+	);
+});
+
+test("Send visibly refuses while a dictation is still landing, with the reason on the button", () => {
+	assert.match(
+		src,
+		/!voiceSendBlockReason\.value\n\);/,
+		"canSend must fold in the voice block — a lit button that swallows the click behind a " +
+			"3-second toast is the control lying about what it does"
+	);
+	assert.match(
+		src,
+		/:sendTitle="voiceSendBlockReason"/,
+		"…and the reason has to reach the user, not just disable the button"
+	);
+	// The Enter path bypasses canSend (onKey calls send() directly), so send()'s own guard stays.
+	assert.match(
+		sendBody(),
+		/if \(micState\.value === "recording" \|\| voiceBusyCount\.value > 0\) \{/,
+		"the send-time guard is what actually prevents the words being dropped"
+	);
 });
 
 // ── leave guard: loss-framed copy only for a genuine loss ────────────────────────────────────
@@ -305,6 +491,100 @@ test("the leave guard blocks only for a LIVE loss risk", () => {
 		/is still being captured or transcribed, or its words are only in this unsent draft/,
 		"the copy must describe the risk that is actually present, or users learn to click through it"
 	);
+});
+
+// ── the composer lockout, driven against the REAL store ──────────────────────────────────────
+// ChatView cannot be imported here (single-file component, no harness) and useDictationRecorder
+// imports `vue`, so this drives the REAL store through a replica of startMic/stopMic and a
+// recorder stand-in that reproduces the ONE property the bug turned on: the browser fires
+// `onstop` on a LATER task, so micState is already 'idle' while the recorder is still recording.
+// The source assertions above fence the replica against the real handlers.
+function makeMic(store) {
+	let micState = "idle";
+	let activeId = null;
+	let recState = "idle";
+	let starting = false;
+	let pendingStop = null;
+	const mic = {
+		get micState() {
+			return micState;
+		},
+		async start() {
+			// startMic's guard, verbatim in shape.
+			if (
+				micState === "recording" ||
+				starting ||
+				recState === "recording" ||
+				activeId != null
+			)
+				return;
+			starting = true;
+			const started = recState === "recording" ? false : ((recState = "recording"), true);
+			starting = false;
+			if (!started || recState !== "recording") return;
+			activeId = store.begin({ conversationId: "c1" });
+			micState = "recording";
+		},
+		async stop() {
+			if (micState !== "recording") return;
+			micState = "idle"; // synchronous, exactly as in ChatView
+			// the recorder stays 'recording' until the browser's async onstop lands
+			pendingStop = true;
+		},
+		// the browser's onstop, one task later: flush the take and hand it over
+		settle() {
+			if (!pendingStop) return;
+			pendingStop = null;
+			recState = "idle";
+			const id = activeId;
+			activeId = null;
+			if (id != null) store.finish(id, { blob: "take", durationS: 20 });
+		},
+	};
+	return mic;
+}
+
+test("a double-click (and auto-stop → immediate click) cannot strand a take or lock out sending", async () => {
+	const settle = [];
+	const store = createVoiceDictationStore({
+		transcribe: (rec) => new Promise((res) => settle.push({ id: rec.id, res })),
+		retainUntilSent: true,
+	});
+	const mic = makeMic(store);
+	const busy = () => {
+		const s = store.snapshot();
+		return s.transcribing.length + (s.capturing || 0);
+	};
+
+	await mic.start();
+	assert.equal(store.snapshot().total, 1, "one take, one recording unit");
+	// DOUBLE-CLICK: stop, then a second click before the browser's onstop lands. The button reads
+	// "Dictate" in that window, which is exactly what the user sees after the 5-minute auto-stop
+	// toast too — "transcribing what you said" invites the next click immediately.
+	await mic.stop();
+	await mic.start();
+	assert.equal(
+		store.snapshot().total,
+		1,
+		"the second click must NOT mint a second recording — the first one's fragments are all in it"
+	);
+	mic.settle();
+	await flush();
+	settle.find((c) => c.id === 0).res("the words I said");
+	await flush();
+	assert.equal(
+		busy(),
+		0,
+		"…and the composer is free again: send() is blocked while this is > 0"
+	);
+	assert.equal(
+		store.hasUnfinishedReason(),
+		"live",
+		"only the un-sent draft remains outstanding"
+	);
+	const snap = store.snapshot();
+	assert.equal(snap.total, 1, "exactly ONE recording existed, start to finish");
+	assert.equal(snap.capturing, 0, "nothing is stranded in `recording` forever");
 });
 
 // ── parity walk against the REAL store ───────────────────────────────────────────────────────

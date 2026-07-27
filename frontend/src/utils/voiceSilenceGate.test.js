@@ -338,9 +338,10 @@ function makeHandoff() {
 		dictate(take) {
 			const id = store.begin({ conversationId: "chatA" });
 			store.addFragment(id, { index: 0, blob: take.blob, durationS: take.durationS });
-			// ChatView's onDone, verbatim in shape: gate FIRST, discard on silence, else finish.
+			// ChatView's onDone, verbatim in shape: gate FIRST, and a gated take is KEPT (routed
+			// to the retained failed chip), never deleted; else finish.
 			if (isNearSilent(take.peakRms)) {
-				store.discard(id);
+				store.finishSilent(id, take);
 				skipped.push(take);
 				return id;
 			}
@@ -350,20 +351,36 @@ function makeHandoff() {
 	};
 }
 
-test("END TO END: a take measured silent from end to end is dropped — no upload, no chip, no guard", async () => {
+test("END TO END: a take measured silent is never UPLOADED — and never DELETED either", async () => {
 	const h = makeHandoff();
-	h.dictate({ blob: "silence", durationS: 42, peakRms: 0 });
+	const id = h.dictate({ blob: "silence", durationS: 42, peakRms: 0 });
 	await flush();
 	assert.deepEqual(h.asked, [], "a silent take must never reach the transcription endpoint");
 	assert.deepEqual(h.commits, [], "it contributes no text");
-	assert.deepEqual(h.fails, [], "it is not a failure — nothing failed, nothing happened");
 	const snap = h.store.snapshot();
-	assert.equal(snap.total, 0, "the discarded take is invisible to the UI");
-	assert.equal(snap.failed.length, 0, "so there is no chip to show");
-	assert.equal(snap.transcribing.length, 0, "and no pill either");
-	assert.equal(snap.unpersisted.length, 0);
-	assert.equal(h.store.hasUnfinishedReason(), null, "the leave guard is not armed by silence");
+	assert.equal(snap.transcribing.length, 0, "no pill — nothing is in flight");
+	// The measurement can be WRONG (a muted-then-forgotten mic, a Bluetooth gain quirk, an
+	// analyser the OS starves). Deleting on it cost up to five minutes of real speech behind a
+	// 3-second toast, which is the exact opposite of this module's own stated invariant.
+	assert.equal(snap.failed.length, 1, "the take survives as ONE actionable chip");
+	assert.equal(snap.failed[0].noSpeech, true, "…which knows to say 'nothing was heard'");
+	assert.equal(snap.failed[0].durationS, 42, "…and how much audio is sitting behind it");
+	assert.deepEqual(h.fails, [id], "the composer is told, so the chip renders");
+	assert.ok(h.store.get(id).blob, "the audio itself is still there for Download / Retry");
 	assert.equal(h.skipped.length, 1);
+	// Transcribe-anyway is the SAME retry path a failed transcription uses.
+	h.store.retry(id);
+	await flush();
+	assert.deepEqual(h.asked, [id], "'Transcribe anyway' sends the very bytes that were kept");
+});
+
+test("a silent take is only ever removed by the USER", async () => {
+	const h = makeHandoff();
+	const id = h.dictate({ blob: "silence", durationS: 42, peakRms: 0 });
+	await flush();
+	h.store.discard(id); // the chip's ✕, behind its confirm
+	assert.equal(h.store.snapshot().total, 0, "…and then, and only then, it is gone");
+	assert.equal(h.store.hasUnfinishedReason(), null, "with nothing left arming the leave guard");
 });
 
 test("END TO END: a take with speech in it passes the gate and transcribes as ONE recording", async () => {
@@ -417,23 +434,25 @@ test("ChatView's onDone runs the gate BEFORE the recording is ever uploaded", ()
 	);
 	assert.match(
 		body,
-		/voiceStore\.discard\(id\);/,
-		"…and its mirrored fragments must be dropped, not left arming the recovery banner"
+		/voiceStore\.finishSilent\(id, take\);/,
+		"…and it must be KEPT: the gate decides what to UPLOAD, never what to delete"
+	);
+	assert.equal(
+		body.slice(gate, finish).includes("voiceStore.discard("),
+		false,
+		"deleting a whole take on one RMS reading is unrecoverable and has no undo"
 	);
 	assert.match(
 		chatSrc,
 		/import \{ isNearSilent \} from "@\/utils\/voiceSilenceGate";/,
 		"the gate must be the shared module, not a re-implemented threshold in the view"
 	);
-	// The gated path must not fabricate any of the artifacts a real recording produces.
-	const gatedBlock = body.slice(gate, finish);
-	for (const forbidden of ["voiceStore.finish", "onFail"]) {
-		assert.equal(
-			gatedBlock.includes(forbidden),
-			false,
-			`a skipped silent take must not ${forbidden} — it produces no chip and no failure`
-		);
-	}
+	// The gated path must not pretend the recording was transcribed.
+	assert.equal(
+		body.slice(gate, finish).includes("voiceStore.finish(id"),
+		false,
+		"a skipped silent take must not be sent for transcription after all"
+	);
 });
 
 test("the recorder measures on the SAME stream, for the WHOLE take, and stamps only a REAL measurement", () => {

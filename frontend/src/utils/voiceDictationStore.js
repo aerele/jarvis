@@ -31,14 +31,20 @@
 //     acknowledge), because a draft is volatile until it is sent.
 //   * A FAILED RECORDING IS RETAINED, always — that is what its Retry / Download chip acts on,
 //     and what reload recovery re-offers.
+//   * A MEASURED-SILENT TAKE IS NOT DELETED EITHER (finishSilent). It is not uploaded — silence
+//     is what makes the model fabricate — but the measurement can be wrong, and no measurement is
+//     allowed to cost a recording. It takes the same terminal `failed` route, audio retained.
+//   * NOTHING HERE EVER DELETES AUDIO EXCEPT discard() (the user chose to) and acknowledge() (its
+//     words are durable in a sent message).
 //
 // Recording state machine (per id):
 //
 //        begin()                    finish()                        transcribe resolves
 //     ───────────► recording ──────────────────────► transcribing ─────────────────────► done
-//                      │                                  │  ▲                            │
-//         cancel/abort │                        rejects   │  │ retry(id) / auto-retry     │ onCommit
-//                      ▼                                  ▼  │                            ▼
+//                      │  │                               │  ▲                            │
+//         cancel/abort │  │ finishSilent()      rejects / │  │ retry(id) / auto-retry     │ onCommit
+//                      │  │ (measured silent)   cancelTranscription()                     │
+//                      ▼  └──────────────────────────►    ▼  │                            ▼
 //                  discarded  ◄──── discard(id) ───────  failed  (audio RETAINED)     (text out)
 //
 // Text is emitted in RECORDING order through a `nextToFlush` cursor: a second take started while
@@ -52,6 +58,14 @@
 // design (Fable rejected that variant on prompt-injection grounds).
 
 const noop = () => {};
+
+// The one outcome that means "we reached the audio and there was nothing in it": either the
+// client's own meter measured the WHOLE take as inaudible (finishSilent), or the provider came
+// back with an empty transcript. Both are epistemically identical — genuine silence, OR a miss of
+// real speech — so both land in the SAME terminal `failed` state with the audio RETAINED behind an
+// actionable chip. Neither ever deletes: a positive-but-wrong measurement would otherwise destroy
+// up to five minutes of speech, and deletion is only ever the user's explicit choice.
+const NO_SPEECH = "no speech detected";
 
 // Invoke a caller callback WITHOUT letting a throw unwind the drain chain — a bug in onCommit
 // (reactive writes, nextTick) must not wedge the cursor and freeze every later commit.
@@ -125,6 +139,10 @@ function _rangesOverlap(a, b) {
 //     reassignConversation(id, scope) -> Promise?   best-effort routing update
 //   }                                     OPTIONAL crash-safety store (IndexedDB in prod).
 //   maxAttempts       total transcription tries per recording before `failed` (default 2)
+//   retryBackoffMs    pause before an AUTO-retry re-dispatches (default 0). An immediate retry
+//                     against a 429 / 5xx is two back-to-back multi-megabyte uploads, and the
+//                     server has already retried inside the first one. Default 0 keeps the
+//                     primitive synchronous for tests; the composer injects a real pause.
 //   concurrency       max transcriptions in flight at once (default 2)
 //   retainUntilSent   keep a transcribed recording's audio until acknowledge()/discard(), because
 //                     the composer's draft is volatile until the message is actually sent
@@ -141,6 +159,7 @@ export function createVoiceDictationStore(deps = {}) {
 	}
 	const mirror = deps.mirror || null;
 	const maxAttempts = Math.max(1, deps.maxAttempts || 2);
+	const retryBackoffMs = Math.max(0, deps.retryBackoffMs || 0);
 	const concurrency = Math.max(1, deps.concurrency || 2);
 	const retainUntilSent = !!deps.retainUntilSent;
 	const onCommit = deps.onCommit || noop;
@@ -177,6 +196,16 @@ export function createVoiceDictationStore(deps = {}) {
 			attempts: 0,
 			text: "",
 			recovered: !!init.recovered,
+			// Dispatch generation. Bumped on every transcription dispatch AND by every transition
+			// that frees the record's `running` slot early (cancelTranscription), so a late
+			// resolution of a call nobody is waiting for any more is recognised as STALE and
+			// cannot decrement `running` a second time or resurrect a terminal recording.
+			gen: 0,
+			// Earliest wall-clock time an auto-retry may re-dispatch (see `retryBackoffMs`).
+			retryAt: 0,
+			// When this recording last entered `transcribing` — the only honest elapsed number the
+			// pill can show while waiting.
+			transcribingSince: 0,
 			// Durable-write bookkeeping (only meaningful when a mirror is injected). A recording
 			// is crash-safe ONLY once every fragment write has been CONFIRMED.
 			persist: mirror ? "persisting" : undefined,
@@ -315,46 +344,99 @@ export function createVoiceDictationStore(deps = {}) {
 
 	// ---- transcription ----
 
+	// One AbortController per DISPATCH, chained to the store-wide one. Cancelling a single stuck
+	// transcription must abort THAT upload (a multi-megabyte POST the user has given up on)
+	// without touching any other recording's, while dispose() still aborts all of them.
+	function _dispatchSignal(rec) {
+		if (typeof AbortController === "undefined") return abort ? abort.signal : undefined;
+		const ac = new AbortController();
+		rec._abort = ac;
+		if (abort) {
+			if (abort.signal.aborted) ac.abort();
+			else abort.signal.addEventListener("abort", () => ac.abort(), { once: true });
+		}
+		return ac.signal;
+	}
+
+	let _retryTimer = null;
+	let _retryTimerAt = 0;
+	// Re-pump when the earliest backed-off retry comes due. One timer for the soonest deadline;
+	// a sooner one supersedes it.
+	function _schedulePump(at) {
+		if (disposed) return;
+		if (_retryTimer && _retryTimerAt <= at) return;
+		if (_retryTimer) clearTimeout(_retryTimer);
+		_retryTimerAt = at;
+		_retryTimer = setTimeout(() => {
+			_retryTimer = null;
+			_retryTimerAt = 0;
+			if (disposed) return;
+			_pump();
+			_safe(onChange);
+		}, Math.max(0, at - Date.now()));
+	}
+
 	function _pump() {
 		if (disposed) return;
+		let soonest = Infinity;
 		while (running < concurrency) {
 			let pick = null;
+			const now = Date.now();
 			for (const rec of records.values()) {
 				if (rec.state !== "transcribing" || rec.inflight) continue;
+				if (rec.retryAt > now) {
+					if (rec.retryAt < soonest) soonest = rec.retryAt;
+					continue; // still backing off — it is not dispatchable yet
+				}
 				if (pick === null || rec.id < pick.id) pick = rec;
 			}
 			if (!pick) break;
+			pick.retryAt = 0;
 			pick.inflight = true;
 			pick.attempts += 1;
+			pick.gen += 1;
 			running += 1;
 			const id = pick.id;
+			const gen = pick.gen;
+			const signal = _dispatchSignal(pick);
 			// Promise.resolve() tolerates a sync-throwing or non-promise transcribe.
 			Promise.resolve()
-				.then(() => transcribe(pick, abort ? abort.signal : undefined))
+				.then(() => transcribe(pick, signal))
 				.then(
-					(text) => _onResolve(id, text),
-					(err) => _onReject(id, err)
+					(text) => _onResolve(id, text, gen),
+					(err) => _onReject(id, err, gen)
 				);
 		}
+		if (soonest !== Infinity) _schedulePump(soonest);
 	}
 
-	function _onResolve(id, text) {
+	// A resolution/rejection nobody is waiting for any more: the recording was discarded, or its
+	// transcription was cancelled and the slot already freed. Ignoring it is what keeps `running`
+	// balanced — the transition that abandoned the call did the decrement.
+	function _isStale(rec, gen) {
+		if (!rec) return false;
+		if (rec.state === "discarded") return true;
+		return gen !== undefined && rec.gen !== gen;
+	}
+
+	function _onResolve(id, text, gen) {
 		if (disposed) return;
 		const rec = records.get(id);
 		// A recording the user discarded mid-flight is a terminal tombstone — a late resolution
 		// must not resurrect it (its slot was already freed by discard()).
-		if (rec && rec.state === "discarded") return;
+		if (_isStale(rec, gen)) return;
 		// CONTRACT BELT (defense in depth): the `transcribe` adapter MUST resolve a STRING. A
 		// non-string (e.g. the raw {ok,text,...} response object) must NEVER be String()-coerced
 		// and committed as "[object Object]" behind deleted audio — route it through the failure
 		// path so the recording is retried, then RETAINED (never-lose-audio).
 		if (typeof text !== "string") {
-			_onReject(id, new Error("transcribe resolved a non-string value"));
+			_onReject(id, new Error("transcribe resolved a non-string value"), gen);
 			return; // _onReject owns the running decrement + retry/fail transition
 		}
 		running -= 1;
 		if (!rec) return; // dropped (shouldn't happen); keep the count honest
 		rec.inflight = false;
+		rec._abort = null;
 		rec.text = text;
 		// A trimmed-empty successful transcription is UNCERTAIN — genuine silence OR a miss of
 		// real speech. Committing it would retain the audio behind an INVISIBLE done record (no
@@ -365,7 +447,7 @@ export function createVoiceDictationStore(deps = {}) {
 		// again). Discard is the user's explicit "it was silence".
 		if (rec.text.trim() === "") {
 			rec.state = "failed";
-			rec.error = "no speech detected";
+			rec.error = NO_SPEECH;
 			if (nextToFlush !== null && id >= nextToFlush) _drain();
 			_safe(onFail, id);
 			_pump();
@@ -385,15 +467,19 @@ export function createVoiceDictationStore(deps = {}) {
 		_safe(onChange);
 	}
 
-	function _onReject(id, err) {
+	function _onReject(id, err, gen) {
 		if (disposed) return;
 		const rec = records.get(id);
-		if (rec && rec.state === "discarded") return;
+		if (_isStale(rec, gen)) return;
 		running -= 1;
 		if (!rec) return;
 		rec.inflight = false;
+		rec._abort = null;
 		if (rec.attempts < maxAttempts) {
 			rec.state = "transcribing"; // ONE auto-retry (or more if maxAttempts raised)
+			// …after a pause. Re-uploading the same megabytes into a 429 the instant it lands
+			// just spends the user's budget twice as fast for the same answer.
+			if (retryBackoffMs > 0) rec.retryAt = Date.now() + retryBackoffMs;
 		} else {
 			rec.state = "failed";
 			rec.error = err ? String((err && err.message) || err) : "transcription failed";
@@ -466,12 +552,10 @@ export function createVoiceDictationStore(deps = {}) {
 		_persistFragment(rec, entry);
 	}
 
-	// The take is closed: the caller hands over the ASSEMBLED blob (the fragments concatenated —
-	// one valid webm, no re-encode) and the take moves to transcription, ONE call for the lot.
-	function finish(id, take = {}) {
-		if (disposed) return;
-		const rec = records.get(id);
-		if (!rec || rec.state !== "recording") return;
+	// Adopt the assembled bytes + measurements the recorder handed over, and make sure SOMETHING
+	// is mirrored for the take. Shared by finish() and finishSilent() so an inaudible recording is
+	// exactly as durable and as downloadable as a transcribed one.
+	function _closeTake(rec, take) {
 		rec.blob = take.blob || rec.blob;
 		if (take.durationS) rec.durationS = take.durationS;
 		if (take.mimeType) rec.mimeType = take.mimeType;
@@ -484,7 +568,68 @@ export function createVoiceDictationStore(deps = {}) {
 			rec.fragments.push(only);
 			_persistFragment(rec, only);
 		}
+	}
+
+	// The take is closed: the caller hands over the ASSEMBLED blob (the fragments concatenated —
+	// one valid webm, no re-encode) and the take moves to transcription, ONE call for the lot.
+	function finish(id, take = {}) {
+		if (disposed) return;
+		const rec = records.get(id);
+		if (!rec || rec.state !== "recording") return;
+		_closeTake(rec, take);
 		rec.state = "transcribing";
+		rec.transcribingSince = Date.now();
+		_pump();
+		_safe(onChange);
+	}
+
+	// The take is closed, but the CLIENT measured it as inaudible end to end, so it is never
+	// uploaded (whisper answers silence with a confident phrase nobody said, and the provider
+	// exposes no no_speech_prob to filter on). It is NOT deleted: the measurement can be wrong —
+	// a muted mic that still captures, a headset gain quirk, an analyser the OS starved — and
+	// deleting on it would cost up to five minutes of real speech with no undo, breaking the one
+	// invariant that outranks everything here. It lands in the SAME terminal `failed` state an
+	// empty server transcript produces, so the existing chip offers Transcribe-anyway (retry),
+	// Download and Discard, and the user decides.
+	function finishSilent(id, take = {}) {
+		if (disposed) return;
+		const rec = records.get(id);
+		if (!rec || rec.state !== "recording") return;
+		_closeTake(rec, take);
+		rec.state = "failed";
+		rec.error = NO_SPEECH;
+		if (nextToFlush !== null && id >= nextToFlush) _drain();
+		_safe(onFail, id);
+		_pump();
+		_safe(onChange);
+	}
+
+	// The user gave up waiting on a transcription (the pill's Cancel). The in-flight upload is
+	// ABORTED and the recording moves to the same terminal `failed` state a transcription error
+	// produces — audio RETAINED, chip visible, Retry available. Never a discard: the point is to
+	// unblock the composer, not to throw the recording away.
+	function cancelTranscription(id) {
+		if (disposed) return;
+		const rec = records.get(id);
+		if (!rec || rec.state !== "transcribing") return;
+		// Bump the generation FIRST: the in-flight call's settlement is stale from here on and
+		// must not decrement `running` again — this transition frees the slot itself.
+		rec.gen += 1;
+		if (rec.inflight) {
+			running = Math.max(0, running - 1);
+			rec.inflight = false;
+		}
+		rec.retryAt = 0;
+		try {
+			rec._abort && rec._abort.abort();
+		} catch (e) {
+			/* already aborted */
+		}
+		rec._abort = null;
+		rec.state = "failed";
+		rec.error = "you cancelled it";
+		if (nextToFlush !== null && id >= nextToFlush) _drain();
+		_safe(onFail, id);
 		_pump();
 		_safe(onChange);
 	}
@@ -497,7 +642,9 @@ export function createVoiceDictationStore(deps = {}) {
 		if (!rec || rec.state !== "failed") return;
 		rec.attempts = 0;
 		rec.error = undefined;
+		rec.retryAt = 0; // an explicit Retry is the user waiting — it never sits out a backoff
 		rec.state = "transcribing";
+		rec.transcribingSince = Date.now();
 		_pump();
 		_safe(onChange);
 	}
@@ -533,6 +680,7 @@ export function createVoiceDictationStore(deps = {}) {
 				state: "transcribing",
 				recovered: true,
 			});
+			rec.transcribingSince = Date.now();
 			_persistAdoption(rec, r._adoptKeys || r.keys || []);
 			ids.push(rec.id);
 		}
@@ -548,10 +696,18 @@ export function createVoiceDictationStore(deps = {}) {
 		if (disposed) return;
 		const rec = records.get(id);
 		if (!rec || rec.state === "discarded") return;
+		rec.gen += 1; // any in-flight settlement for this record is stale from here on
 		if (rec.inflight) {
 			running = Math.max(0, running - 1);
 			rec.inflight = false;
+			try {
+				rec._abort && rec._abort.abort(); // stop uploading audio nobody wants any more
+			} catch (e) {
+				/* already aborted */
+			}
 		}
+		rec._abort = null;
+		rec.retryAt = 0;
 		rec.state = "discarded";
 		rec.text = "";
 		rec.blob = null;
@@ -750,11 +906,18 @@ export function createVoiceDictationStore(deps = {}) {
 	function snapshot() {
 		let total = 0;
 		let capturing = 0;
-		// [{id, durationS}] — drives the inline "Transcribing M:SS…" pill.
+		// [{id, durationS, since}] — drives the inline "Transcribing M:SS…" pill. `since` is when
+		// the wait actually started, so the pill can report elapsed time rather than invent
+		// progress it has no way of knowing.
 		const transcribing = [];
-		// [{id, durationS, sentWithout}] — drives the failed chip (Retry/Download/Discard).
-		// `sentWithout` marks a recording a send already left behind: the chip's copy branches on
-		// it, because "not sent yet" and "sent without this" are otherwise indistinguishable.
+		// [{id, durationS, sentWithout, error, noSpeech}] — drives the failed chip
+		// (Retry/Download/Discard). `sentWithout` marks a recording a send already left behind:
+		// the chip's copy branches on it, because "not sent yet" and "sent without this" are
+		// otherwise indistinguishable. `error` is WHY it failed — a permanent config fault
+		// ("Speech-to-text is not enabled on this site.") and a transient blip otherwise read
+		// identically, so users Retry-loop megabytes forever and nobody files a useful ticket.
+		// `noSpeech` separates "we heard nothing" from "it didn't transcribe", which need
+		// different copy and a different verb on the retry button.
 		const failed = [];
 		// [{id, durationS, text}] — a transcribed recording whose words were edited OUT before the
 		// send: Restore/Download/Discard, so the audio is resolvable instead of arming the leave
@@ -768,12 +931,18 @@ export function createVoiceDictationStore(deps = {}) {
 			total += 1;
 			if (rec.state === "recording") capturing += 1;
 			else if (rec.state === "transcribing")
-				transcribing.push({ id: rec.id, durationS: rec.durationS });
+				transcribing.push({
+					id: rec.id,
+					durationS: rec.durationS,
+					since: rec.transcribingSince || 0,
+				});
 			else if (rec.state === "failed")
 				failed.push({
 					id: rec.id,
 					durationS: rec.durationS,
 					sentWithout: !!rec.sentWithout,
+					error: rec.error ? String(rec.error) : "",
+					noSpeech: rec.error === NO_SPEECH,
 				});
 			else if (rec.state === "done" && rec.orphaned)
 				retained.push({ id: rec.id, durationS: rec.durationS, text: rec.text });
@@ -826,10 +995,16 @@ export function createVoiceDictationStore(deps = {}) {
 				continue;
 			}
 			if (retainUntilSent && rec.committed) {
-				// A sent-without recording's words are back in the draft, but its audio is still
-				// mirrored and re-offered on reload — terminal-unresolved, not at-risk.
-				if (rec.sentWithout) unresolved = true;
-				else return "live";
+				// A sent-without recording's words are back in the draft, and an ORPHANED one's
+				// were edited out of the message before it went — in both cases the audio is
+				// still mirrored and re-offered by the recovery banner, and its chip is right
+				// there. Terminal-unresolved, not at-risk: loss-framed copy for either is the
+				// cry-wolf design.md §4.5 forbids. (Durability has to be CONFIRMED to say that,
+				// exactly as for a failed recording.)
+				if (rec.sentWithout || rec.orphaned) {
+					if (rec.persist === "persisting") return "live";
+					unresolved = true;
+				} else return "live";
 			}
 		}
 		return unresolved ? "unresolved" : null;
@@ -855,10 +1030,24 @@ export function createVoiceDictationStore(deps = {}) {
 	// recover anything un-transcribed.
 	function dispose() {
 		disposed = true;
+		if (_retryTimer) {
+			clearTimeout(_retryTimer);
+			_retryTimer = null;
+			_retryTimerAt = 0;
+		}
 		try {
 			abort && abort.abort();
 		} catch (e) {
 			/* ignore */
+		}
+		// No store-wide controller (an environment without AbortController) — abort each
+		// dispatch's own, so an unmount never leaves an upload running to its full budget.
+		for (const rec of records.values()) {
+			try {
+				rec._abort && rec._abort.abort();
+			} catch (e) {
+				/* ignore */
+			}
 		}
 	}
 
@@ -866,6 +1055,8 @@ export function createVoiceDictationStore(deps = {}) {
 		begin,
 		addFragment,
 		finish,
+		finishSilent,
+		cancelTranscription,
 		retry,
 		retryPersist,
 		recover,

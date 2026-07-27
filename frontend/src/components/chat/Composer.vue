@@ -257,6 +257,7 @@
 				:class="{ ready: sendable }"
 				@click="emit('submit')"
 				:disabled="!sendable"
+				:title="sendTitle || null"
 				:style="{
 					width: '32px',
 					height: '32px',
@@ -309,6 +310,9 @@ const props = defineProps({
 	// it from text/attachments; chat passes its own (it also blocks on
 	// `sending` and a suspended subscription).
 	canSend: { type: Boolean, default: null },
+	// Tooltip for the Send button. A host that disables Send for a reason the user can't see
+	// (chat: a dictation still landing) says why here, so the dead button isn't a mystery.
+	sendTitle: { type: String, default: "" },
 	placeholder: { type: String, default: "" },
 	// Fine print under the box. Empty string hides the line entirely.
 	disclaimer: { type: String, default: "" },
