@@ -207,11 +207,21 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 		# (parent_doctype-derived permission). Only reached on an actual denial, so
 		# the get_meta / get_all derivation stays off the hot path.
 		if frappe.get_meta(dt).istable:
-			from jarvis.tools.get_list import _child_table_parents
+			from jarvis.tools.get_list import _child_table_parents, _readable_child_parents
 
-			parents = _child_table_parents(dt)
-			if any(frappe.has_permission(dt, ptype="read", parent_doctype=p) for p in parents):
+			if _readable_child_parents(dt):
 				continue
+			# The child has owning parents but the caller can read NONE of them.
+			# Fail with a parent-oriented message (a child is reachable only
+			# through a parent DocType) rather than the generic denial below,
+			# which is kept for a child with no owning parents at all.
+			owning = _child_table_parents(dt)
+			if owning:
+				raise PermissionDeniedError(
+					f"no read permission on child DocType '{dt}': child tables are "
+					f"readable only through a parent DocType, and you cannot read "
+					f"any of its parents ({', '.join(owning)})"
+				)
 		raise PermissionDeniedError(f"no read permission on referenced DocType: {dt}")
 
 	# Step 4: per-site DocType allowlist (defense-in-depth).
@@ -294,50 +304,19 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 		if offset > 0:
 			q = q.offset(offset)
 
-	# Step 6: weave record-level permission predicates per DocType.
+	# Step 6: weave record-level permission predicates per ALIAS.
 	# This is the structural difference vs run_query - one call per
-	# doctype, all five permission layers covered. Engine returns
+	# referenced table, all five permission layers covered. Engine returns
 	# ``None`` when the user has no restrictions for the doctype; we
 	# skip appending in that case (no-op).
 	#
-	# Engine is normally bootstrapped via ``get_query()``; we don't go
-	# through that path because we already have our own qb query built.
-	# Instead we instantiate Engine directly and set the few attributes
-	# its permission helpers read: ``user``, ``ignore_user_permissions``,
-	# ``ignore_permissions``. Anything else
-	# ``get_permission_conditions()`` touches we'll discover via test
-	# failures and add here.
-	from frappe.database.query import Engine
-
-	engine = Engine()
-	engine.user = frappe.session.user
-	engine.ignore_user_permissions = False
-	engine.ignore_permissions = False
-	# Engine's permission-condition helpers introspect ``self.query`` to
-	# find which tables are in scope (for things like related-doctype
-	# joins driven by User Permissions). Sharing our being-built query
-	# lets the engine see the full join graph; the get_permission_conditions
-	# call is read-only on the query so mutations are safe.
-	engine.query = q
-	# Some permission_query_conditions hooks consult ``self.tables``;
-	# pre-populate it from our alias_map.
-	engine.tables = [table for (_, table) in alias_map.values()]
-	# ``permission_query_conditions`` hooks read ``self.doctype`` to
-	# format the main table name (e.g. ``f"tab{self.doctype}"``). Frappe's
-	# normal entry point ``Engine.get_query(dt)`` sets this internally;
-	# we don't go through that path, so set it explicitly to the primary
-	# doctype. Otherwise the first hook with a permission_query_conditions
-	# entry crashes with AttributeError.
-	engine.doctype = spec["from"]
-	for dt in doctypes:
-		# Find the table object we built for this doctype. If the spec
-		# has multiple references to the same doctype (rare; usually
-		# self-join scenarios) we apply the predicate to each instance.
-		for alias, (resolved_dt, table) in alias_map.items():
-			if resolved_dt == dt:
-				cond = engine.get_permission_conditions(dt, table)
-				if cond is not None:
-					q = q.where(cond)
+	# A single pass over ``alias_map`` is equivalent to the old
+	# ``for dt in doctypes: for alias ...`` double loop (every alias's
+	# doctype is in ``doctypes``), and lets the child branch resolve the
+	# scoping parent from THIS alias's join/where signals.
+	engine = _make_permission_engine(q, [table for (_, table) in alias_map.values()], spec["from"])
+	for alias, (resolved_dt, table) in alias_map.items():
+		q = _weave_record_gate(q, engine, alias, resolved_dt, table, spec, alias_map)
 
 	# Step 7: execute.
 	rows = q.run(as_dict=True)
@@ -587,7 +566,7 @@ def _permitted_read_fields(dt: str, base_doctype: str | None) -> set[str]:
 	if base_doctype and base_doctype != dt and not frappe.get_meta(base_doctype).istable:
 		parents = [base_doctype]
 	else:
-		from jarvis.tools.get_list import _child_table_parents
+		from jarvis.tools.get_list import _readable_child_parents
 
 		# Only parents the caller can actually read the child THROUGH — mirrors
 		# step 3's record-level gate. Without this filter, an owning parent with
@@ -595,9 +574,7 @@ def _permitted_read_fields(dt: str, base_doctype: str | None) -> set[str]:
 		# its "no permissions defined -> all fields" branch (frappe/model/meta.py)
 		# and leak a permlevel-restricted child field to a caller whose only real
 		# access path is a different, more restrictive parent.
-		parents = [
-			p for p in _child_table_parents(dt) if frappe.has_permission(dt, ptype="read", parent_doctype=p)
-		]
+		parents = _readable_child_parents(dt)
 	permitted: set[str] = set()
 	for parent in parents:
 		permitted |= set(
@@ -675,9 +652,249 @@ def _validate_column(dt: str, field: str, base_doctype: str | None = None) -> No
 	# apply_fieldlevel_read_permissions' explicit ``column in
 	# OPTIONAL_FIELDS`` allowance) even when absent from the permitted set.
 	if field not in permitted and field not in _OPTIONAL_FIELDS:
+		if frappe.get_meta(dt).istable:
+			# A child field's permission level is defined on its owning
+			# parent(s); point the caller there instead of at the child, which
+			# carries no permissions of its own.
+			from jarvis.tools.get_list import _readable_child_parents
+
+			parents = ", ".join(_readable_child_parents(dt))
+			raise PermissionDeniedError(
+				f"no read permission on field {field!r} of DocType {dt!r} "
+				f"(restricted by permission level; for child-table fields the "
+				f"permission level is granted on the parent DocType: {parents})"
+			)
 		raise PermissionDeniedError(
 			f"no read permission on field {field!r} of DocType {dt!r} (restricted by permission level)"
 		)
+
+
+# ---- Record-level permission weave (per-alias record gate) ----------
+
+
+def _make_permission_engine(query_builder, tables: list, doctype: str):
+	"""Instantiate a bare ``frappe.database.query.Engine`` wired with the few
+	attributes its permission-condition helpers read.
+
+	``Engine`` is normally bootstrapped through ``get_query()``; the query tool
+	builds its own qb query, so we set the attributes directly:
+
+	- ``user`` / ``ignore_user_permissions`` / ``ignore_permissions`` — the
+	  permission flags every helper branches on;
+	- ``query`` — shared (read-only) so hooks that introspect the join graph
+	  see the full query;
+	- ``tables`` — some ``permission_query_conditions`` hooks consult it;
+	- ``doctype`` — hooks format the main table name as ``f"tab{self.doctype}"``,
+	  so an unset value crashes the first such hook with AttributeError.
+
+	Factored from the three call sites: the outer step-6 weave, the EXISTS
+	sub-query weave, and the child-scope subquery build.
+	"""
+	from frappe.database.query import Engine
+
+	engine = Engine()
+	engine.user = frappe.session.user
+	engine.ignore_user_permissions = False
+	engine.ignore_permissions = False
+	engine.query = query_builder
+	engine.tables = list(tables)
+	engine.doctype = doctype
+	return engine
+
+
+def _weave_record_gate(q, engine, alias: str, resolved_dt: str, table, node_spec: dict, alias_map: dict):
+	"""AND this alias's record-level permission predicate into ``q``; return ``q``.
+
+	Non-child DocType: the framework ``Engine.get_permission_conditions`` as
+	before, but a raised ``frappe.PermissionError`` (raw HTML) is normalised to
+	a clean ``PermissionDeniedError``.
+
+	Child (istable) DocType: NEVER call ``get_permission_conditions`` on the
+	child — it carries no permissions of its own, so the framework raises the
+	raw ``Insufficient Permission`` error. Administrator is unrestricted
+	(framework ``allow_everything`` parity, preserving the admin FROM-child
+	path). A non-admin child is scoped to a single owning parent the caller can
+	read — resolved from THIS alias's join/where signals — mirroring
+	``get_list(child, parent_doctype=P)``.
+	"""
+	if frappe.get_meta(resolved_dt).istable:
+		if frappe.session.user == "Administrator":
+			return q
+		parent_dt = _child_scoping_parent(resolved_dt, alias, node_spec, alias_map)
+		cond = _child_record_scope(table, resolved_dt, parent_dt)
+		if cond is not None:
+			q = q.where(cond)
+		return q
+	try:
+		cond = engine.get_permission_conditions(resolved_dt, table)
+	except frappe.PermissionError:
+		raise PermissionDeniedError(f"no read permission on DocType {resolved_dt!r}")
+	if cond is not None:
+		q = q.where(cond)
+	return q
+
+
+def _child_scoping_parent(child_dt: str, child_alias: str, node_spec: dict, alias_map: dict) -> str:
+	"""Resolve the ONE parent DocType a child alias's rows are scoped to, or
+	raise a clean ``PermissionDeniedError``.
+
+	Structural resolution only (no SQL parsing — reads the same dicts the
+	builder consumes). ``node_spec`` is the outer ``spec`` at the outer weave
+	site, the ``sub_spec`` at the EXISTS site.
+
+	1. Explicit signals (join ``parent``/``name`` link or ``parenttype``
+	   literal) → exactly 1 distinct owning parent: use it IF the caller can
+	   read the child through it, else DENY; >1 (conflicting) → DENY ambiguous.
+	2. No signals → the parents the caller can read the child through: 0 → DENY
+	   (defensive; step 3 already gates this), 1 → use it, >1 → DENY ambiguous.
+	"""
+	from jarvis.tools.get_list import _child_table_parents, _readable_child_parents
+
+	owning_parents = _child_table_parents(child_dt)
+	owning = set(owning_parents)
+	signals = _collect_scoping_signals(child_dt, child_alias, node_spec, alias_map, owning)
+	if signals:
+		if len(signals) > 1:
+			raise PermissionDeniedError(_ambiguous_scope_message(child_dt, child_alias, sorted(signals)))
+		(pinned,) = tuple(signals)
+		if frappe.has_permission(child_dt, ptype="read", parent_doctype=pinned):
+			return pinned
+		raise PermissionDeniedError(
+			f"no read permission on child DocType '{child_dt}' through parent "
+			f"'{pinned}'; you can read it through: {', '.join(_readable_child_parents(child_dt))}"
+		)
+	readable = _readable_child_parents(child_dt)
+	if not readable:
+		# Defensive: step 3's DocType gate already denies a child with no
+		# readable parents. Kept parent-oriented in case a path reaches here.
+		raise PermissionDeniedError(
+			f"no read permission on child DocType '{child_dt}': child tables are "
+			f"readable only through a parent DocType, and you cannot read any of "
+			f"its parents ({', '.join(owning_parents)})"
+		)
+	if len(readable) > 1:
+		raise PermissionDeniedError(_ambiguous_scope_message(child_dt, child_alias, readable))
+	return readable[0]
+
+
+def _ambiguous_scope_message(child_dt: str, child_alias: str, parents: list) -> str:
+	"""Denial when a child alias could be scoped to more than one readable
+	parent (no disambiguating signal, or conflicting signals)."""
+	return (
+		f"cannot scope record-level permissions for child DocType '{child_dt}': "
+		f"you can read it through multiple parent DocTypes ({', '.join(parents)}); "
+		f"join {child_alias}.parent to <parent_alias>.name of ONE of these "
+		f"parents, or filter {child_alias}.parenttype = '<Parent>', so rows can "
+		f"be scoped to a single parent"
+	)
+
+
+def _literal_owning_parent(ref, alias_map: dict, owning: set) -> str | None:
+	"""``ref`` is a ``parenttype`` comparand. Mirror ``_build_on_criterion``'s
+	literal detection: a string is a field reference only when it is
+	``alias.field`` with a KNOWN alias — otherwise it is a literal. Return the
+	literal when it names an owning parent."""
+	if not isinstance(ref, str):
+		return None
+	is_field_ref = "." in ref and ref.split(".", 1)[0] in alias_map
+	if is_field_ref:
+		return None
+	return ref if ref in owning else None
+
+
+def _collect_scoping_signals(
+	child_dt: str, child_alias: str, node_spec: dict, alias_map: dict, owning: set
+) -> set:
+	"""Explicit scoping signals for THIS child alias, read structurally from
+	``node_spec``'s join ON dicts and TOP-LEVEL where equalities only:
+
+	- ``<child_alias>.parent == <other_alias>.name`` where ``<other_alias>``'s
+	  doctype is an owning parent (both orientations; in a sub-spec also the
+	  correlated ``{"$field": "<outer_alias>.name"}`` form);
+	- ``<child_alias>.parenttype == <string literal>`` naming an owning parent.
+
+	Returns the set of distinct owning-parent doctypes signalled.
+	"""
+	parent_ref = f"{child_alias}.parent"
+	parenttype_ref = f"{child_alias}.parenttype"
+	signals: set = set()
+
+	def _owning_of_name_ref(ref) -> str | None:
+		# "<alias>.name" whose alias resolves to an owning-parent doctype.
+		if isinstance(ref, str) and ref.count(".") == 1:
+			other_alias, col = ref.split(".", 1)
+			if col == "name" and other_alias in alias_map and alias_map[other_alias][0] in owning:
+				return alias_map[other_alias][0]
+		return None
+
+	# JOIN ON equalities (dict of lhs -> rhs).
+	for j in node_spec.get("joins") or []:
+		on = j.get("on")
+		if not isinstance(on, dict):
+			continue
+		for lhs, rhs in on.items():
+			# parent <-> name link (either orientation).
+			link = None
+			if lhs == parent_ref:
+				link = _owning_of_name_ref(rhs)
+			elif rhs == parent_ref:
+				link = _owning_of_name_ref(lhs)
+			if link:
+				signals.add(link)
+			# parenttype = literal (either orientation).
+			pt = None
+			if lhs == parenttype_ref:
+				pt = _literal_owning_parent(rhs, alias_map, owning)
+			elif rhs == parenttype_ref:
+				pt = _literal_owning_parent(lhs, alias_map, owning)
+			if pt:
+				signals.add(pt)
+
+	# TOP-LEVEL where equalities.
+	for w in node_spec.get("where") or []:
+		if not isinstance(w, dict) or w.get("op") != "=":
+			continue
+		field = w.get("field")
+		value = w.get("value")
+		if field == parenttype_ref and isinstance(value, str) and value in owning:
+			signals.add(value)
+		elif field == parent_ref and isinstance(value, dict) and "$field" in value:
+			# Correlated sub-spec form: c.parent = {"$field": "outer.name"}.
+			link = _owning_of_name_ref(value["$field"])
+			if link:
+				signals.add(link)
+	return signals
+
+
+def _child_record_scope(child_table, child_dt: str, parent_dt: str):
+	"""Record-level scope predicate for a child alias, pinned to ``parent_dt``.
+
+	``None`` when the parent is a Single DocType (Engine parity: a Single has no
+	per-record rows, so ``has_permission`` at step 3 fully covers it). Otherwise::
+
+	    child.name IS NULL
+	    OR ( child.parenttype = 'Parent'
+	         AND child.parent IN (SELECT name FROM `tabParent` WHERE <cond>) )
+
+	``<cond>`` is the PARENT's own record-level permission condition, evaluated
+	on an UNALIASED parent table inside the subquery so raw-SQL
+	``permission_query_conditions`` hooks that reference ``\\`tabParent\\``
+	resolve. The ``isin`` conjunct is emitted only when the parent is restricted
+	(``cond is not None``). The ``name IS NULL`` guard preserves a LEFT-joined
+	child's null-extended row (NULL name, carries no data, cannot leak) under a
+	single predicate shape for every join type.
+	"""
+	if frappe.get_meta(parent_dt).issingle:
+		return None
+	parent_table = frappe.qb.DocType(parent_dt)
+	sub_q = frappe.qb.from_(parent_table).select(parent_table.name)
+	engine = _make_permission_engine(sub_q, [parent_table], parent_dt)
+	cond = engine.get_permission_conditions(parent_dt, parent_table)
+	scoped = child_table.parenttype == parent_dt
+	if cond is not None:
+		sub_q = sub_q.where(cond)
+		scoped = scoped & child_table.parent.isin(sub_q)
+	return child_table.name.isnull() | scoped
 
 
 # ---- Translation: spec → qb expressions -----------------------------
@@ -1107,34 +1324,25 @@ def _build_exists_criterion(sub_spec: dict, outer_alias_map: dict, depth: int, *
 	# sub_alias_map for $field resolution are skipped — they were
 	# already perm-gated at the outer level (and weaving them again
 	# here would double-filter).
-	from frappe.database.query import Engine
-
-	sub_engine = Engine()
-	sub_engine.user = frappe.session.user
-	sub_engine.ignore_user_permissions = False
-	sub_engine.ignore_permissions = False
-	sub_engine.query = sub_q
 	# Only the sub-spec's own tables, not the outer-scoped aliases.
 	sub_local_aliases = {
 		a: (dt, table) for a, (dt, table) in sub_alias_map.items() if a not in outer_alias_map
 	}
-	sub_engine.tables = [table for (_, table) in sub_local_aliases.values()]
-	# Same reason as the outer engine: permission_query_conditions hooks
-	# read ``self.doctype`` to build the main table name. Set it to the
-	# sub-spec's primary doctype.
-	sub_engine.doctype = sub_spec["from"]
-	# Apply ``get_permission_conditions`` to every alias's table object.
-	# Earlier code de-duplicated by doctype on the assumption that the
-	# returned criterion was scoped to a canonical table; that's wrong —
-	# ``get_permission_conditions(dt, table)`` builds the predicate
-	# against the specific table object it's handed, so a self-join under
-	# two aliases needs the gate applied twice (once per alias) or the
-	# second alias bypasses User Permissions / DocShare entirely. Mirror
-	# the outer loop's per-alias iteration.
+	sub_engine = _make_permission_engine(
+		sub_q, [table for (_, table) in sub_local_aliases.values()], sub_spec["from"]
+	)
+	# Apply the record gate to every alias's table object. Earlier code
+	# de-duplicated by doctype on the assumption that the returned criterion
+	# was scoped to a canonical table; that's wrong — the predicate is built
+	# against the specific table object it's handed, so a self-join under two
+	# aliases needs the gate applied twice (once per alias) or the second
+	# alias bypasses User Permissions / DocShare entirely. The child branch is
+	# resolved from the SUB-spec's own signals (``sub_spec``), correlated
+	# ``$field`` markers resolving through ``sub_alias_map`` (which carries the
+	# folded-in outer aliases). THIS SITE MUST match the outer weave, or an
+	# EXISTS over a child table becomes the same raw-HTML / leak side-channel.
 	for alias, (resolved_dt, table) in sub_local_aliases.items():
-		cond = sub_engine.get_permission_conditions(resolved_dt, table)
-		if cond is not None:
-			sub_q = sub_q.where(cond)
+		sub_q = _weave_record_gate(sub_q, sub_engine, alias, resolved_dt, table, sub_spec, sub_alias_map)
 
 	# The SELECT projection of an EXISTS subquery is semantically
 	# irrelevant; we select the literal 1 (cheapest non-empty

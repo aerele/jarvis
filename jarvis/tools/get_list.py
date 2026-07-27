@@ -42,6 +42,24 @@ def _child_table_parents(doctype: str) -> list[str]:
 	return list(dict.fromkeys(parents))
 
 
+def _readable_child_parents(doctype: str) -> list[str]:
+	"""Owning parents of child ``doctype`` the current user can read it THROUGH.
+
+	A child (istable) DocType carries no permissions of its own; Frappe derives
+	its read access from a parent via ``has_permission(child, parent_doctype=P)``.
+	This factors the F1 readable-parent comprehension - ``_child_table_parents``
+	filtered to the parents the caller actually has that derived read on,
+	order-preserving. Shared by ``query.py``'s step-3 DocType gate, its field-ACL
+	resolver (``_permitted_read_fields``) and its record-level scoping-parent
+	resolver, so all three agree on which parents a child is reachable through.
+	"""
+	return [
+		p
+		for p in _child_table_parents(doctype)
+		if frappe.has_permission(doctype, ptype="read", parent_doctype=p)
+	]
+
+
 def get_list(
 	doctype: str,
 	fields: list[str] | None = None,

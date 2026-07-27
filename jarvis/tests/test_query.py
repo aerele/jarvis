@@ -902,7 +902,14 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 		outer_sentinel = Field("name") == "SENTINEL_OUTER"
 
 		def _perm_conds(dt, table):
-			if dt == "DocField":
+			# ``Custom Field`` (a NON-child doctype linked to DocType via ``dt``)
+			# stands in for the sub-spec doctype: F2 routes CHILD sub-spec
+			# doctypes through the record-scope gate instead of
+			# get_permission_conditions, so a non-child doctype is used here to
+			# keep exercising the get_permission_conditions weave. The child
+			# sub-spec case is covered by TestQueryPermlevelFieldACL's
+			# test_scope_exists_subspec_child_scoped.
+			if dt == "Custom Field":
 				return sub_sentinel
 			if dt == "DocType":
 				return outer_sentinel
@@ -923,11 +930,11 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 							{
 								"op": "exists",
 								"value": {
-									"from": "DocField",
-									"alias": "df",
+									"from": "Custom Field",
+									"alias": "cf",
 									"where": [
 										{
-											"field": "df.parent",
+											"field": "cf.dt",
 											"op": "=",
 											"value": {"$field": "dt.name"},
 										}
@@ -1048,10 +1055,13 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 			# self-join one).
 			if dt == "DocType":
 				return None
-			# Sub-spec DocField calls - one per alias. Return a
+			# Sub-spec Custom Field calls - one per alias. Return a
 			# different sentinel each time so we can prove both
-			# landed.
-			if dt == "DocField":
+			# landed. (A NON-child doctype: F2 routes CHILD sub-spec
+			# doctypes through the record-scope gate, so the
+			# get_permission_conditions per-alias weave is exercised with
+			# a non-child self-join here.)
+			if dt == "Custom Field":
 				return sentinels.pop(0) if sentinels else None
 			return None
 
@@ -1070,19 +1080,19 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 							{
 								"op": "exists",
 								"value": {
-									"from": "DocField",
-									"alias": "df",
+									"from": "Custom Field",
+									"alias": "cf",
 									"joins": [
 										{
 											"type": "inner",
-											"doctype": "DocField",
-											"alias": "df2",
-											"on": {"df2.parent": "df.parent"},
+											"doctype": "Custom Field",
+											"alias": "cf2",
+											"on": {"cf2.dt": "cf.dt"},
 										}
 									],
 									"where": [
 										{
-											"field": "df.parent",
+											"field": "cf.dt",
 											"op": "=",
 											"value": {"$field": "dt.name"},
 										}
@@ -1184,11 +1194,11 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 							{
 								"op": "exists",
 								"value": {
-									"from": "DocField",
-									"alias": "df",
+									"from": "Custom Field",
+									"alias": "cf",
 									"where": [
 										{
-											"field": "df.parent",
+											"field": "cf.dt",
 											"op": "=",
 											"value": {"$field": "dt.name"},
 										}
@@ -1198,9 +1208,11 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 						],
 					}
 				)
-		# Find the sub-spec calls (dt == "DocField") and check the
-		# engine's doctype was the sub-spec's "from" value.
-		subspec_calls = [c for c in captured if c["dt"] == "DocField"]
+		# Find the sub-spec calls (dt == "Custom Field") and check the
+		# engine's doctype was the sub-spec's "from" value. (A non-child
+		# doctype: F2 routes CHILD sub-spec doctypes through the record-scope
+		# gate, so a non-child exercises the get_permission_conditions path.)
+		subspec_calls = [c for c in captured if c["dt"] == "Custom Field"]
 		self.assertTrue(
 			subspec_calls,
 			"sub-spec get_permission_conditions never called",
@@ -1210,11 +1222,11 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 		# in this captured snapshot. The mock's doctype attribute at
 		# capture time reflects the most-recent setter. For the
 		# sub-spec calls, that setter was for the sub-spec's "from"
-		# value (DocField).
+		# value (Custom Field).
 		for c in subspec_calls:
 			self.assertEqual(
 				c["engine_doctype"],
-				"DocField",
+				"Custom Field",
 				f"sub_engine.doctype not set: {c['engine_doctype']!r}",
 			)
 
@@ -2453,6 +2465,32 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 	USER_RESTRICTED = "jqp-restricted@example.com"
 	USER_PRIVILEGED = "jqp-privileged@example.com"
 
+	# ---- F2 record-level child-scope fixture (separate family) ----------
+	# A dedicated child doctype (with rows) owned by TWO parents, so the
+	# per-alias record-level gate can be exercised for real without adding
+	# rows to the F1 CHILD_DT (whose admin FROM-child e2e asserts an EMPTY
+	# table). Parent A and Parent B both own SCOPE_CHILD_DT; a Parent A doc
+	# (A1) and a Parent B doc (B1) share the SAME name to prove the parenttype
+	# conjunct closes the cross-parent name-collision leak.
+	SCOPE_CHILD_DT = "JV Query Scope Child"
+	SCOPE_PARENT_A = "JV Query Scope Parent A"
+	SCOPE_PARENT_B = "JV Query Scope Parent B"
+	ROLE_SCOPE_A = "JQP Scope A Role"
+	ROLE_SCOPE_B = "JQP Scope B Role"
+	# reads Parent A only, User-Permission-restricted to {A1, A3, A4}
+	USER_SCOPE_A = "jqp-scope-a@example.com"
+	# reads BOTH Parent A and Parent B, no User Permission (all records)
+	USER_SCOPE_AB = "jqp-scope-ab@example.com"
+	# reads NEITHER scope parent (only the unrelated F1 parent via ROLE_BASE)
+	USER_SCOPE_NONE = "jqp-scope-none@example.com"
+	# A1 (Parent A) and B1 (Parent B) deliberately share this name.
+	COLLIDE_NAME = "JVQS-COLLIDE"
+	A2_NAME = "JVQS-A2"  # Parent A, NOT visible to USER_SCOPE_A
+	A3_NAME = "JVQS-A3"  # Parent A, visible, childless (LEFT-JOIN null-extension)
+	# A4 (Parent A, childless, visible) and B2 (Parent B, has a child) share
+	# this name — the EXISTS-site parenttype-collision leak probe.
+	SHARED_NAME = "JVQS-SHARED"
+
 	@staticmethod
 	def _ensure_role(name: str) -> None:
 		if not frappe.db.exists("Role", name):
@@ -2531,14 +2569,122 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		).insert()
 
 	@classmethod
+	def _ensure_scope_doctypes(cls) -> None:
+		"""F2 fixture: a child doctype owned by TWO parents (autoname prompt so
+		A1 and B1 can share a name), plus a permlevel-0-only role per parent."""
+		from frappe.core.doctype.doctype.test_doctype import new_doctype
+
+		for dt in (cls.SCOPE_PARENT_A, cls.SCOPE_PARENT_B, cls.SCOPE_CHILD_DT):
+			if frappe.db.exists("DocType", dt):
+				frappe.delete_doc("DocType", dt, force=True, ignore_permissions=True)
+		new_doctype(
+			name=cls.SCOPE_CHILD_DT,
+			custom=1,
+			istable=1,
+			fields=[
+				{"label": "Child Public", "fieldname": "child_public", "fieldtype": "Data", "permlevel": 0},
+				{
+					"label": "Child Restricted",
+					"fieldname": "child_restricted",
+					"fieldtype": "Data",
+					"permlevel": 1,
+				},
+				{"label": "Scope Val", "fieldname": "scope_val", "fieldtype": "Int", "permlevel": 0},
+			],
+			permissions=[],
+		).insert()
+		for parent_dt, role in (
+			(cls.SCOPE_PARENT_A, cls.ROLE_SCOPE_A),
+			(cls.SCOPE_PARENT_B, cls.ROLE_SCOPE_B),
+		):
+			new_doctype(
+				name=parent_dt,
+				custom=1,
+				autoname="prompt",
+				fields=[
+					{
+						"label": "Public Field",
+						"fieldname": "public_field",
+						"fieldtype": "Data",
+						"permlevel": 0,
+					},
+					{
+						"label": "Items",
+						"fieldname": "items",
+						"fieldtype": "Table",
+						"options": cls.SCOPE_CHILD_DT,
+					},
+				],
+				permissions=[{"role": role, "permlevel": 0, "read": 1}],
+			).insert()
+
+	@classmethod
+	def _seed_scope_data(cls) -> None:
+		"""Wipe and re-insert the F2 parent docs + child rows (idempotent)."""
+		for dt in (cls.SCOPE_PARENT_A, cls.SCOPE_PARENT_B):
+			for name in frappe.get_all(dt, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+
+		def _mk(parent_dt, name, public_field, children):
+			doc = frappe.get_doc({"doctype": parent_dt, "name": name, "public_field": public_field})
+			for pub, restricted, val in children:
+				doc.append(
+					"items",
+					{"child_public": pub, "child_restricted": restricted, "scope_val": val},
+				)
+			doc.insert(ignore_permissions=True)
+
+		# Parent A: A1 (3 children), A2 (1 child, not visible to USER_SCOPE_A),
+		# A3 (childless, visible), A4 (childless, visible, name collides w/ B2).
+		_mk(
+			cls.SCOPE_PARENT_A,
+			cls.COLLIDE_NAME,
+			"collide",
+			[
+				("a1", "sekret", 10),
+				("a1", "sekret", 20),
+				("collide", "sekret", 30),
+			],
+		)
+		_mk(cls.SCOPE_PARENT_A, cls.A2_NAME, "collide", [("collide", "sekret", 100)])
+		_mk(cls.SCOPE_PARENT_A, cls.A3_NAME, "none", [])
+		_mk(cls.SCOPE_PARENT_A, cls.SHARED_NAME, "none", [])
+		# Parent B: B1 (name == A1) with a child, B2 (name == A4) with a child.
+		_mk(cls.SCOPE_PARENT_B, cls.COLLIDE_NAME, "collide", [("collide", "sekret", 1000)])
+		_mk(cls.SCOPE_PARENT_B, cls.SHARED_NAME, "b2", [("b2", "sekret", 2000)])
+
+	@classmethod
+	def _set_scope_user_permissions(cls) -> None:
+		"""USER_SCOPE_A may see only Parent A docs A1, A3, A4 (User Permission)."""
+		for up in frappe.get_all("User Permission", filters={"user": cls.USER_SCOPE_A}, pluck="name"):
+			frappe.delete_doc("User Permission", up, force=True, ignore_permissions=True)
+		for value in (cls.COLLIDE_NAME, cls.A3_NAME, cls.SHARED_NAME):
+			frappe.get_doc(
+				{
+					"doctype": "User Permission",
+					"user": cls.USER_SCOPE_A,
+					"allow": cls.SCOPE_PARENT_A,
+					"for_value": value,
+				}
+			).insert(ignore_permissions=True)
+
+	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
 		frappe.set_user("Administrator")
 		cls._ensure_role(cls.ROLE_BASE)
 		cls._ensure_role(cls.ROLE_PRIV)
+		cls._ensure_role(cls.ROLE_SCOPE_A)
+		cls._ensure_role(cls.ROLE_SCOPE_B)
 		cls._ensure_doctypes()
+		cls._ensure_scope_doctypes()
 		cls._ensure_user(cls.USER_RESTRICTED, (cls.ROLE_BASE,))
 		cls._ensure_user(cls.USER_PRIVILEGED, (cls.ROLE_PRIV,))
+		cls._ensure_user(cls.USER_SCOPE_A, (cls.ROLE_SCOPE_A,))
+		cls._ensure_user(cls.USER_SCOPE_AB, (cls.ROLE_SCOPE_A, cls.ROLE_SCOPE_B))
+		cls._ensure_user(cls.USER_SCOPE_NONE, (cls.ROLE_BASE,))
+		cls._seed_scope_data()
+		cls._set_scope_user_permissions()
 		frappe.db.commit()
 		# Warm the meta cache for the fixture doctypes. The run-tests harness
 		# on this site can hit a pre-existing infinite get_meta recursion when
@@ -2547,6 +2693,9 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		# tests). Warming here keeps the child-table tests off that path.
 		frappe.get_meta(cls.PARENT_DT)
 		frappe.get_meta(cls.CHILD_DT)
+		frappe.get_meta(cls.SCOPE_CHILD_DT)
+		frappe.get_meta(cls.SCOPE_PARENT_A)
+		frappe.get_meta(cls.SCOPE_PARENT_B)
 
 	def setUp(self):
 		super().setUp()
@@ -2680,6 +2829,10 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		frappe.set_user(self.USER_RESTRICTED)
 		with (
 			patch("frappe.has_permission", return_value=True),
+			patch(
+				"jarvis.tools.get_list._child_table_parents",
+				return_value=[self.PARENT_DT],
+			),
 			patch("frappe.database.query.Engine") as fake_engine,
 			patch("pypika.queries.QueryBuilder.run", return_value=[]),
 		):
@@ -2705,6 +2858,10 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		frappe.set_user(self.USER_PRIVILEGED)
 		with (
 			patch("frappe.has_permission", return_value=True),
+			patch(
+				"jarvis.tools.get_list._child_table_parents",
+				return_value=[self.PARENT_DT],
+			),
 			patch("frappe.database.query.Engine") as fake_engine,
 			patch("pypika.queries.QueryBuilder.run", return_value=[]),
 		):
@@ -2938,3 +3095,272 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		)
 		self.assertIn("rows", result)
 		self.assertEqual(result["rows"], [])
+
+	# ================================================================
+	# F2: child-aware record-level gate (per-alias parent scoping).
+	# Real, unmocked — the child rows and User Permissions are seeded in
+	# setUpClass so the record-level scope executes against live SQL.
+	# ================================================================
+
+	def _scope_vals(self, spec):
+		spec.setdefault("limit", 100)
+		return sorted(r["scope_val"] for r in query(spec)["rows"] if r.get("scope_val") is not None)
+
+	# ---- 1 & 2: bare FROM child, single readable parent -------------
+
+	def test_scope_from_child_isin_excludes_other_parent_record(self):
+		"""[M: drop isin subquery] FROM child as a user User-Permission-restricted
+		to A1: A2's child (scope_val 100, a Parent A record they cannot see) is
+		excluded by the parent subquery membership test."""
+		frappe.set_user(self.USER_SCOPE_A)
+		vals = self._scope_vals({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.scope_val"]})
+		self.assertEqual(vals, [10, 20, 30])  # A1's three children only
+		self.assertNotIn(100, vals)  # A2 excluded by the isin subquery
+
+	def test_scope_from_child_parenttype_closes_name_collision(self):
+		"""[M: drop parenttype conjunct] B1's child (scope_val 1000) must be
+		excluded even though B1.name == A1.name and A1 is visible — only the
+		parenttype conjunct distinguishes the two same-named parent records."""
+		frappe.set_user(self.USER_SCOPE_A)
+		vals = self._scope_vals({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.scope_val"]})
+		self.assertNotIn(1000, vals)  # B1's child excluded despite the name collision
+
+	# ---- 3: aggregate correctness (restricted vs Administrator) ------
+
+	def test_scope_aggregate_restricted_totals(self):
+		frappe.set_user(self.USER_SCOPE_A)
+		rows = query(
+			{
+				"from": self.SCOPE_CHILD_DT,
+				"alias": "c",
+				"select": [
+					{"agg": "sum", "field": "c.scope_val", "as": "total"},
+					{"agg": "count", "field": "c.name", "as": "n"},
+				],
+			}
+		)["rows"]
+		self.assertEqual(rows[0]["total"], 60)  # 10 + 20 + 30 (A1 only)
+		self.assertEqual(rows[0]["n"], 3)
+
+	def test_scope_aggregate_admin_unscoped_totals(self):
+		"""[M: apply the child branch to Administrator] Administrator is unscoped:
+		SUM/COUNT span every child row across both parents."""
+		frappe.set_user("Administrator")
+		rows = query(
+			{
+				"from": self.SCOPE_CHILD_DT,
+				"alias": "c",
+				"select": [
+					{"agg": "sum", "field": "c.scope_val", "as": "total"},
+					{"agg": "count", "field": "c.name", "as": "n"},
+				],
+			}
+		)["rows"]
+		self.assertEqual(rows[0]["total"], 3160)  # 10+20+30+100+1000+2000
+		self.assertEqual(rows[0]["n"], 6)
+
+	# ---- 4: ambiguity (multiple readable parents, no signal) ---------
+
+	def test_scope_ambiguous_multi_readable_denied(self):
+		frappe.set_user(self.USER_SCOPE_AB)
+		with self.assertRaises(PermissionDeniedError) as cm:
+			query({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.name"]})
+		msg = str(cm.exception)
+		self.assertIn(self.SCOPE_PARENT_A, msg)
+		self.assertIn(self.SCOPE_PARENT_B, msg)
+		self.assertIn("parenttype", msg)  # points at the disambiguation fix
+		self.assertNotIn("<strong>", msg)  # no raw framework HTML
+
+	# ---- 5: disambiguation returns correctly-scoped rows -------------
+
+	def test_scope_disambiguate_join_parent_link(self):
+		"""[M: disable signal detection] FROM A JOIN child ON c.parent=a.name pins
+		the child to Parent A for the two-parent user."""
+		frappe.set_user(self.USER_SCOPE_AB)
+		vals = self._scope_vals(
+			{
+				"from": self.SCOPE_PARENT_A,
+				"alias": "a",
+				"joins": [
+					{
+						"type": "inner",
+						"doctype": self.SCOPE_CHILD_DT,
+						"alias": "c",
+						"on": {"c.parent": "a.name"},
+					}
+				],
+				"select": ["c.scope_val"],
+			}
+		)
+		self.assertEqual(vals, [10, 20, 30, 100])  # all Parent A children
+		self.assertNotIn(1000, vals)  # Parent B excluded by parenttype
+
+	def test_scope_disambiguate_parenttype_filter(self):
+		frappe.set_user(self.USER_SCOPE_AB)
+		vals = self._scope_vals(
+			{
+				"from": self.SCOPE_CHILD_DT,
+				"alias": "c",
+				"where": [{"field": "c.parenttype", "op": "=", "value": self.SCOPE_PARENT_A}],
+				"select": ["c.scope_val"],
+			}
+		)
+		self.assertEqual(vals, [10, 20, 30, 100])
+
+	def test_scope_disambiguate_reversed_on_orientation(self):
+		frappe.set_user(self.USER_SCOPE_AB)
+		vals = self._scope_vals(
+			{
+				"from": self.SCOPE_PARENT_A,
+				"alias": "a",
+				"joins": [
+					{
+						"type": "inner",
+						"doctype": self.SCOPE_CHILD_DT,
+						"alias": "c",
+						"on": {"a.name": "c.parent"},
+					}
+				],
+				"select": ["c.scope_val"],
+			}
+		)
+		self.assertEqual(vals, [10, 20, 30, 100])
+
+	# ---- 6: pinned to an unreadable parent -> denial (no fallback) ---
+
+	def test_scope_pinned_unreadable_parent_denied(self):
+		"""[M: fall back to a readable parent instead of denying] A signal pinning
+		Parent B (which USER_SCOPE_A cannot read) must DENY, not silently fall
+		back to the readable Parent A."""
+		frappe.set_user(self.USER_SCOPE_A)
+		with self.assertRaises(PermissionDeniedError) as cm:
+			query(
+				{
+					"from": self.SCOPE_CHILD_DT,
+					"alias": "c",
+					"where": [{"field": "c.parenttype", "op": "=", "value": self.SCOPE_PARENT_B}],
+					"select": ["c.name"],
+				}
+			)
+		msg = str(cm.exception)
+		self.assertIn(self.SCOPE_PARENT_B, msg)  # the pinned, unreadable parent
+		self.assertIn(self.SCOPE_PARENT_A, msg)  # what they CAN read it through
+		self.assertNotIn("<strong>", msg)
+
+	# ---- 7: LEFT JOIN null-extension preserved -----------------------
+
+	def test_scope_left_join_null_extension_preserved(self):
+		"""[M: drop the name IS NULL guard] A visible parent with zero child rows
+		(A3) still appears null-extended under a LEFT JOIN."""
+		frappe.set_user(self.USER_SCOPE_A)
+		rows = query(
+			{
+				"from": self.SCOPE_PARENT_A,
+				"alias": "a",
+				"joins": [
+					{
+						"type": "left",
+						"doctype": self.SCOPE_CHILD_DT,
+						"alias": "c",
+						"on": {"c.parent": "a.name"},
+					}
+				],
+				"select": ["a.name", "c.scope_val"],
+				"limit": 100,
+			}
+		)["rows"]
+		a3 = [r for r in rows if r["name"] == self.A3_NAME]
+		self.assertEqual(len(a3), 1)  # A3 present as a null-extended row
+		self.assertIsNone(a3[0]["scope_val"])
+		self.assertNotIn(1000, [r["scope_val"] for r in rows])  # B1 still excluded
+
+	# ---- 8: join-shape attack (ON links non-parent fields) -----------
+
+	def test_scope_join_shape_attack_still_scoped(self):
+		"""[M: skip the child branch] A JOIN whose ON links non-parent columns
+		(c.child_public = a.public_field) cannot smuggle A2's or B1's 'collide'
+		rows past the record gate — the child is scoped independently of the ON."""
+		frappe.set_user(self.USER_SCOPE_A)
+		vals = self._scope_vals(
+			{
+				"from": self.SCOPE_PARENT_A,
+				"alias": "a",
+				"joins": [
+					{
+						"type": "inner",
+						"doctype": self.SCOPE_CHILD_DT,
+						"alias": "c",
+						"on": {"c.child_public": "a.public_field"},
+					}
+				],
+				"select": ["c.scope_val"],
+			}
+		)
+		self.assertIn(30, vals)  # A1's own 'collide' child is legitimately visible
+		self.assertNotIn(100, vals)  # A2's 'collide' child (unreadable record)
+		self.assertNotIn(1000, vals)  # B1's 'collide' child (wrong parenttype)
+
+	# ---- 9: EXISTS sub-spec child scope ------------------------------
+
+	def test_scope_exists_subspec_child_scoped(self):
+		"""[M: skip the child branch at the EXISTS site] An EXISTS over the child
+		correlated to the outer parent must not let a childless Parent A doc (A4)
+		appear to exist via a same-named Parent B doc's child (B2)."""
+		frappe.set_user(self.USER_SCOPE_A)
+		names = sorted(
+			r["name"]
+			for r in query(
+				{
+					"from": self.SCOPE_PARENT_A,
+					"alias": "a",
+					"select": ["a.name"],
+					"where": [
+						{
+							"op": "exists",
+							"value": {
+								"from": self.SCOPE_CHILD_DT,
+								"alias": "c",
+								"where": [{"field": "c.parent", "op": "=", "value": {"$field": "a.name"}}],
+							},
+						}
+					],
+					"limit": 100,
+				}
+			)["rows"]
+		)
+		self.assertIn(self.COLLIDE_NAME, names)  # A1 genuinely has children
+		self.assertNotIn(self.SHARED_NAME, names)  # A4 must NOT exist via B2's child
+
+	# ---- 10: zero readable parents (step-3 parent-oriented message) --
+
+	def test_scope_zero_readable_parents_denied(self):
+		frappe.set_user(self.USER_SCOPE_NONE)
+		with self.assertRaises(PermissionDeniedError) as cm:
+			query({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.name"]})
+		msg = str(cm.exception)
+		self.assertIn(self.SCOPE_CHILD_DT, msg)
+		self.assertIn("parent", msg.lower())
+		self.assertIn(self.SCOPE_PARENT_A, msg)  # names the owning parents
+		self.assertNotIn("<strong>", msg)
+
+	# ---- 11: clean errors (no raw framework HTML for child queries) --
+
+	def test_scope_child_denials_are_clean_no_html(self):
+		frappe.set_user(self.USER_SCOPE_AB)
+		with self.assertRaises(PermissionDeniedError) as cm:
+			query({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.name"]})
+		msg = str(cm.exception)
+		self.assertNotIn("Insufficient Permission", msg)  # raw framework class gone
+		self.assertNotIn("<strong>", msg)
+		self.assertNotIn("</", msg)
+
+	# ---- 12: field-ACL denial names the governing parent -------------
+
+	def test_scope_child_permlevel_field_denial_names_parent(self):
+		frappe.set_user(self.USER_SCOPE_A)
+		with self.assertRaises(PermissionDeniedError) as cm:
+			query({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.child_restricted"]})
+		msg = str(cm.exception)
+		self.assertIn("child_restricted", msg)
+		self.assertIn("permission level", msg)
+		self.assertIn(self.SCOPE_PARENT_A, msg)  # the parent that governs the permlevel
