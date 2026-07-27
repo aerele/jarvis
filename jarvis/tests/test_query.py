@@ -2483,6 +2483,12 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 	USER_SCOPE_AB = "jqp-scope-ab@example.com"
 	# reads NEITHER scope parent (only the unrelated F1 parent via ROLE_BASE)
 	USER_SCOPE_NONE = "jqp-scope-none@example.com"
+	# H1: a SINGLE DocType also owns SCOPE_CHILD_DT; this user reads ONLY the
+	# Single (not Parent A/B). The Single scope must still fence by parenttype.
+	SCOPE_SINGLE = "JV Query Scope Single"
+	ROLE_SCOPE_SINGLE = "JQP Scope Single Role"
+	USER_SCOPE_SINGLE = "jqp-scope-single@example.com"
+	SINGLE_VAL = 7777  # the Single's own child row; the only value this user may read
 	# A1 (Parent A) and B1 (Parent B) deliberately share this name.
 	COLLIDE_NAME = "JVQS-COLLIDE"
 	A2_NAME = "JVQS-A2"  # Parent A, NOT visible to USER_SCOPE_A
@@ -2574,7 +2580,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		A1 and B1 can share a name), plus a permlevel-0-only role per parent."""
 		from frappe.core.doctype.doctype.test_doctype import new_doctype
 
-		for dt in (cls.SCOPE_PARENT_A, cls.SCOPE_PARENT_B, cls.SCOPE_CHILD_DT):
+		for dt in (cls.SCOPE_PARENT_A, cls.SCOPE_PARENT_B, cls.SCOPE_SINGLE, cls.SCOPE_CHILD_DT):
 			if frappe.db.exists("DocType", dt):
 				frappe.delete_doc("DocType", dt, force=True, ignore_permissions=True)
 		new_doctype(
@@ -2617,6 +2623,22 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 				],
 				permissions=[{"role": role, "permlevel": 0, "read": 1}],
 			).insert()
+		# H1 fixture: a SINGLE DocType that ALSO owns SCOPE_CHILD_DT. A user who
+		# can read only this Single must NOT see Parent A/B child rows.
+		new_doctype(
+			name=cls.SCOPE_SINGLE,
+			custom=1,
+			issingle=1,
+			fields=[
+				{
+					"label": "Entries",
+					"fieldname": "entries",
+					"fieldtype": "Table",
+					"options": cls.SCOPE_CHILD_DT,
+				},
+			],
+			permissions=[{"role": cls.ROLE_SCOPE_SINGLE, "permlevel": 0, "read": 1}],
+		).insert()
 
 	@classmethod
 	def _seed_scope_data(cls) -> None:
@@ -2652,6 +2674,14 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		# Parent B: B1 (name == A1) with a child, B2 (name == A4) with a child.
 		_mk(cls.SCOPE_PARENT_B, cls.COLLIDE_NAME, "collide", [("collide", "sekret", 1000)])
 		_mk(cls.SCOPE_PARENT_B, cls.SHARED_NAME, "b2", [("b2", "sekret", 2000)])
+		# The SINGLE parent's own child row (parenttype = the Single).
+		single_doc = frappe.get_doc(cls.SCOPE_SINGLE)
+		single_doc.set("entries", [])
+		single_doc.append(
+			"entries",
+			{"child_public": "single", "child_restricted": "sekret", "scope_val": cls.SINGLE_VAL},
+		)
+		single_doc.save(ignore_permissions=True)
 
 	@classmethod
 	def _set_scope_user_permissions(cls) -> None:
@@ -2676,6 +2706,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		cls._ensure_role(cls.ROLE_PRIV)
 		cls._ensure_role(cls.ROLE_SCOPE_A)
 		cls._ensure_role(cls.ROLE_SCOPE_B)
+		cls._ensure_role(cls.ROLE_SCOPE_SINGLE)
 		cls._ensure_doctypes()
 		cls._ensure_scope_doctypes()
 		cls._ensure_user(cls.USER_RESTRICTED, (cls.ROLE_BASE,))
@@ -2683,6 +2714,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		cls._ensure_user(cls.USER_SCOPE_A, (cls.ROLE_SCOPE_A,))
 		cls._ensure_user(cls.USER_SCOPE_AB, (cls.ROLE_SCOPE_A, cls.ROLE_SCOPE_B))
 		cls._ensure_user(cls.USER_SCOPE_NONE, (cls.ROLE_BASE,))
+		cls._ensure_user(cls.USER_SCOPE_SINGLE, (cls.ROLE_SCOPE_SINGLE,))
 		cls._seed_scope_data()
 		cls._set_scope_user_permissions()
 		frappe.db.commit()
@@ -2696,6 +2728,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		frappe.get_meta(cls.SCOPE_CHILD_DT)
 		frappe.get_meta(cls.SCOPE_PARENT_A)
 		frappe.get_meta(cls.SCOPE_PARENT_B)
+		frappe.get_meta(cls.SCOPE_SINGLE)
 
 	def setUp(self):
 		super().setUp()
@@ -3125,6 +3158,18 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		vals = self._scope_vals({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.scope_val"]})
 		self.assertNotIn(1000, vals)  # B1's child excluded despite the name collision
 
+	def test_scope_single_parent_does_not_leak_other_parents(self):
+		"""[M: restore `if issingle: return None`] H1 regression. When the sole
+		readable owning parent is a SINGLE, the parent subquery is skipped (a
+		Single has no per-record rows), but the parenttype conjunct must NOT be:
+		a user who can read only the Single sees just the Single's own child rows,
+		never Parent A/B's."""
+		frappe.set_user(self.USER_SCOPE_SINGLE)
+		vals = self._scope_vals({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.scope_val"]})
+		self.assertEqual(vals, [self.SINGLE_VAL])
+		for leaked in (10, 20, 30, 100, 1000, 2000):
+			self.assertNotIn(leaked, vals)  # no Parent A/B child rows leak via the Single
+
 	# ---- 3: aggregate correctness (restricted vs Administrator) ------
 
 	def test_scope_aggregate_restricted_totals(self):
@@ -3156,8 +3201,8 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 				],
 			}
 		)["rows"]
-		self.assertEqual(rows[0]["total"], 3160)  # 10+20+30+100+1000+2000
-		self.assertEqual(rows[0]["n"], 6)
+		self.assertEqual(rows[0]["total"], 10937)  # 10+20+30+100+1000+2000 + the Single's 7777
+		self.assertEqual(rows[0]["n"], 7)
 
 	# ---- 4: ambiguity (multiple readable parents, no signal) ---------
 

@@ -869,8 +869,11 @@ def _collect_scoping_signals(
 def _child_record_scope(child_table, child_dt: str, parent_dt: str):
 	"""Record-level scope predicate for a child alias, pinned to ``parent_dt``.
 
-	``None`` when the parent is a Single DocType (Engine parity: a Single has no
-	per-record rows, so ``has_permission`` at step 3 fully covers it). Otherwise::
+	For a Single parent the parent SUBQUERY is skipped (a Single has no
+	per-record rows and no real ``tab<Single>`` table), but the ``parenttype``
+	conjunct is STILL applied — dropping it (H1) would let a user who can read a
+	Single that shares this child table with a transactional parent read every
+	OTHER parent's child rows too. Shape::
 
 	    child.name IS NULL
 	    OR ( child.parenttype = 'Parent'
@@ -884,16 +887,15 @@ def _child_record_scope(child_table, child_dt: str, parent_dt: str):
 	child's null-extended row (NULL name, carries no data, cannot leak) under a
 	single predicate shape for every join type.
 	"""
-	if frappe.get_meta(parent_dt).issingle:
-		return None
-	parent_table = frappe.qb.DocType(parent_dt)
-	sub_q = frappe.qb.from_(parent_table).select(parent_table.name)
-	engine = _make_permission_engine(sub_q, [parent_table], parent_dt)
-	cond = engine.get_permission_conditions(parent_dt, parent_table)
 	scoped = child_table.parenttype == parent_dt
-	if cond is not None:
-		sub_q = sub_q.where(cond)
-		scoped = scoped & child_table.parent.isin(sub_q)
+	if not frappe.get_meta(parent_dt).issingle:
+		parent_table = frappe.qb.DocType(parent_dt)
+		sub_q = frappe.qb.from_(parent_table).select(parent_table.name)
+		engine = _make_permission_engine(sub_q, [parent_table], parent_dt)
+		cond = engine.get_permission_conditions(parent_dt, parent_table)
+		if cond is not None:
+			sub_q = sub_q.where(cond)
+			scoped = scoped & child_table.parent.isin(sub_q)
 	return child_table.name.isnull() | scoped
 
 
