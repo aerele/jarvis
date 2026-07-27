@@ -325,10 +325,10 @@
 
 						<!-- ===== Review & Pay (renderPay / renderVerifyEmail / startPay /
 							 openCheckout preserved verbatim in behavior) ===== -->
-						<section v-else-if="state.step === 'pay'" class="jv-ob-screen">
+						<section v-else-if="state.step === 'pay'" class="ob-screen">
 							<template v-if="state.provisioning || state.provisionErr">
-								<div class="jv-ob-body">
-									<div class="jv-ob-head">
+								<div class="ob-body">
+									<div class="ob-head">
 										<h1>Setting up your workspace</h1>
 										<p v-if="state.provisioning">
 											{{
@@ -342,9 +342,11 @@
 									</div>
 									<div
 										v-if="state.provisioning"
-										class="jv-ob-spinner"
+										class="mt-2.5 flex justify-center"
 										aria-hidden="true"
-									></div>
+									>
+										<LoadingIndicator class="h-8 w-8 text-ink-gray-6" />
+									</div>
 									<Banner
 										v-if="state.provisionErr"
 										type="error"
@@ -352,18 +354,17 @@
 										role="alert"
 									/>
 								</div>
-								<div v-if="state.provisionErr" class="jv-ob-foot jv-ob-foot-end">
-									<button
-										class="jv-ob-btn jv-ob-btn-primary"
+								<div v-if="state.provisionErr" class="ob-foot justify-end">
+									<Button
+										variant="solid"
+										label="Retry"
 										@click="proceedAfterPay"
-									>
-										Retry
-									</button>
+									/>
 								</div>
 							</template>
 							<template v-else-if="state.payPhase === 'verify'">
-								<div class="jv-ob-body">
-									<div class="jv-ob-head">
+								<div class="ob-body">
+									<div class="ob-head">
 										<h1>Check your email</h1>
 										<p>
 											We sent a confirmation link to
@@ -373,7 +374,7 @@
 											payment.
 										</p>
 									</div>
-									<p class="jv-ob-hint">
+									<p class="text-center text-p-sm text-ink-gray-5">
 										The link expires in 24 hours. Check your spam folder if it
 										doesn't arrive.
 									</p>
@@ -383,19 +384,19 @@
 										:message="state.payErr"
 									/>
 								</div>
-								<div class="jv-ob-foot jv-ob-foot-end">
-									<button
-										class="jv-ob-btn jv-ob-btn-primary"
-										:disabled="state.payBusy"
+								<div class="ob-foot justify-end">
+									<Button
+										variant="solid"
+										:loading="state.payBusy"
+										loading-text="Working…"
+										label="I've verified my email"
 										@click="onVerifyCheck"
-									>
-										{{ state.payBusy ? "Working…" : "I've verified my email" }}
-									</button>
+									/>
 								</div>
 							</template>
 							<template v-else-if="state.successData">
-								<div class="jv-ob-body">
-									<div class="jv-ob-head">
+								<div class="ob-body">
+									<div class="ob-head">
 										<h1>
 											{{
 												isTrialPlan
@@ -406,15 +407,13 @@
 										<p>You're all set. Continue to connect your AI.</p>
 									</div>
 								</div>
-								<div class="jv-ob-foot jv-ob-foot-end">
-									<button class="jv-ob-btn jv-ob-btn-primary" @click="goNext">
-										Continue
-									</button>
+								<div class="ob-foot justify-end">
+									<Button variant="solid" label="Continue" @click="goNext" />
 								</div>
 							</template>
 							<template v-else>
-								<div class="jv-ob-body">
-									<div class="jv-ob-head">
+								<div class="ob-body">
+									<div class="ob-head">
 										<h1>Review &amp; pay</h1>
 										<p>
 											{{
@@ -424,34 +423,46 @@
 											}}
 										</p>
 									</div>
-									<div class="jv-ob-rev">
-										<div class="jv-ob-rev-row">
-											<span>Plan</span><b>{{ planRowLabel }}</b>
+									<div
+										class="mx-auto max-w-[560px] overflow-hidden rounded-lg border border-outline-gray-1"
+									>
+										<div
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Plan</span
+											><b class="font-medium text-ink-gray-9">{{
+												planRowLabel
+											}}</b>
 										</div>
-										<div class="jv-ob-rev-row">
-											<span>Company</span><b>{{ state.company }}</b>
+										<div
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Company</span
+											><b class="font-medium text-ink-gray-9">{{
+												state.company
+											}}</b>
 										</div>
-										<div class="jv-ob-rev-row">
-											<span>Billed to</span><b>{{ state.email }}</b>
+										<div
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Billed to</span
+											><b class="font-medium text-ink-gray-9">{{
+												state.email
+											}}</b>
 										</div>
-										<div class="jv-ob-rev-row jv-ob-rev-total">
-											<span>Due today</span><b>{{ dueTodayLabel }}</b>
+										<div
+											class="flex items-center justify-between gap-3 bg-surface-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Due today</span
+											><b class="text-base font-semibold text-ink-gray-9">{{
+												dueTodayLabel
+											}}</b>
 										</div>
 									</div>
-									<div class="jv-ob-rev-note">
-										<svg
-											width="14"
-											height="14"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.8"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<rect x="3" y="11" width="18" height="11" rx="2" />
-											<path d="M7 11V7a5 5 0 0 1 10 0v4" />
-										</svg>
+									<div
+										class="mx-auto mt-3.5 flex max-w-[560px] items-center justify-center gap-1.5 text-center text-xs text-ink-gray-5"
+									>
+										<FeatherIcon name="lock" class="h-3.5 w-3.5" />
 										Secured by
 										{{
 											state.paymentProvider === "cashfree"
@@ -461,8 +472,10 @@
 									</div>
 									<div
 										v-if="showProviderChooser"
-										class="jv-ob-provseg"
-										:class="{ 'is-single': isSingleProvider }"
+										class="ob-provseg mx-auto mt-3.5 flex max-w-[360px] gap-1 rounded-xl border border-outline-gray-1 bg-surface-gray-2 p-1"
+										:class="{
+											'max-w-[220px] cursor-default': isSingleProvider,
+										}"
 										:role="isSingleProvider ? undefined : 'radiogroup'"
 										:aria-label="
 											isSingleProvider ? undefined : 'Payment method'
@@ -471,8 +484,13 @@
 										<button
 											v-if="providerAvailable('razorpay')"
 											type="button"
-											class="jv-ob-provseg-opt"
-											:class="{ sel: state.paymentProvider === 'razorpay' }"
+											class="ob-provseg-opt flex min-h-11 flex-1 items-center justify-center rounded-lg px-2.5 py-2 transition-[background,box-shadow,opacity] focus-visible:ring focus-visible:ring-outline-gray-3"
+											:class="
+												state.paymentProvider === 'razorpay' ||
+												isSingleProvider
+													? 'bg-surface-white opacity-100 shadow-sm'
+													: 'cursor-pointer opacity-60 hover:opacity-85'
+											"
 											:role="isSingleProvider ? undefined : 'radio'"
 											:aria-checked="
 												isSingleProvider
@@ -487,13 +505,11 @@
 											:disabled="isSingleProvider"
 											@click="chooseProvider('razorpay')"
 										>
-											<span class="jv-ob-rzp-logo" aria-hidden="true">
-												<svg
-													class="jv-ob-rzp-mark"
-													viewBox="0 0 20 24"
-													width="15"
-													height="18"
-												>
+											<span
+												class="inline-flex items-center gap-1.5"
+												aria-hidden="true"
+											>
+												<svg viewBox="0 0 20 24" width="15" height="18">
 													<path
 														fill="#3395ff"
 														d="M14.4 0 8 12.1l1.6 3.8L18 3.5z"
@@ -503,14 +519,23 @@
 														d="M9.2 8 2 24h4.7l3-7.5 2.1-4.6z"
 													/>
 												</svg>
-												<span class="jv-ob-rzp-word">Razorpay</span>
+												<span
+													class="text-base font-semibold tracking-tight"
+													style="color: #0b2a6b"
+													>Razorpay</span
+												>
 											</span>
 										</button>
 										<button
 											v-if="providerAvailable('cashfree')"
 											type="button"
-											class="jv-ob-provseg-opt"
-											:class="{ sel: state.paymentProvider === 'cashfree' }"
+											class="ob-provseg-opt flex min-h-11 flex-1 items-center justify-center rounded-lg px-2.5 py-2 transition-[background,box-shadow,opacity] focus-visible:ring focus-visible:ring-outline-gray-3"
+											:class="
+												state.paymentProvider === 'cashfree' ||
+												isSingleProvider
+													? 'bg-surface-white opacity-100 shadow-sm'
+													: 'cursor-pointer opacity-60 hover:opacity-85'
+											"
 											:role="isSingleProvider ? undefined : 'radio'"
 											:aria-checked="
 												isSingleProvider
@@ -528,7 +553,7 @@
 											<img
 												:src="cashfreeLogo"
 												alt="Cashfree"
-												class="jv-ob-cf-logo"
+												class="block h-5.5 w-auto"
 											/>
 										</button>
 									</div>
@@ -536,34 +561,28 @@
 										v-if="state.payErr"
 										type="error"
 										:message="state.payErr"
+										class="mx-auto mt-3.5 max-w-[560px]"
 									/>
 								</div>
-								<div class="jv-ob-foot">
+								<div class="ob-foot">
 									<button
-										class="jv-ob-back"
+										class="ob-back"
 										:disabled="state.payBusy"
 										@click="goBack"
 									>
-										<svg
-											width="14"
-											height="14"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.5"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="m15 18-6-6 6-6" /></svg
-										>Back
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
 									</button>
-									<button
-										class="jv-ob-btn jv-ob-btn-primary"
+									<Button
+										variant="solid"
 										:disabled="state.payBusy"
+										:loading="state.payBusy"
+										loading-text="Working…"
+										:label="payCta"
 										@click="onPayClick"
-									>
-										{{ state.payBusy ? "Working…" : payCta }}
-									</button>
+									/>
 								</div>
 							</template>
 						</section>
@@ -2178,47 +2197,6 @@ onMounted(async () => {
 	border-radius: 8px;
 	margin-left: 8px;
 }
-.jv-ob-err {
-	font-size: 12.5px;
-	color: var(--red);
-	min-height: 1em;
-	margin: 10px 0 0;
-}
-.jv-ob-err-center {
-	text-align: center;
-}
-.jv-ob-hint {
-	font-size: 13px;
-	line-height: 1.5;
-	color: var(--text-3);
-	text-align: center;
-	margin: 0;
-}
-/* "Setting up" transition spinner (pay provisioning only - the connect
-   finishing state uses the neural-net animation below). */
-.jv-ob-spinner {
-	width: 32px;
-	height: 32px;
-	margin: 10px auto 0;
-	border-radius: 50%;
-	border: 3px solid var(--surface-3);
-	border-top-color: var(--text);
-	animation: jvObSpin 0.8s linear infinite;
-}
-@keyframes jvObSpin {
-	to {
-		transform: rotate(360deg);
-	}
-}
-/* "Setting up Jarvis" finishing state: neural-net animation replacing the
-   spinner. Needs real height for the canvas to render into. */
-.jv-ob-setup-net {
-	position: relative;
-	width: 100%;
-	min-height: 380px;
-	flex: 1;
-	margin-top: 8px;
-}
 .jv-ob-inp {
 	height: 32px;
 	border: 1px solid var(--border-2);
@@ -2242,176 +2220,6 @@ onMounted(async () => {
 	outline: none;
 	border-color: var(--text);
 	box-shadow: 0 0 0 3px var(--surface-2);
-}
-/* ---- Review & pay ---- */
-.jv-ob-rev {
-	max-width: 560px;
-	margin: 0 auto;
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	overflow: hidden;
-}
-.jv-ob-rev-row {
-	display: flex;
-	justify-content: space-between;
-	gap: 12px;
-	padding: 12px 16px;
-	font-size: 13.5px;
-	border-bottom: 1px solid var(--border);
-}
-.jv-ob-rev-row:last-child {
-	border-bottom: 0;
-}
-.jv-ob-rev-row span {
-	color: var(--text-3);
-}
-.jv-ob-rev-row b {
-	font-weight: 500;
-}
-.jv-ob-rev-total {
-	background: var(--surface-1);
-}
-.jv-ob-rev-total b {
-	font-size: 15px;
-	font-weight: 600;
-}
-.jv-ob-rev-note {
-	max-width: 560px;
-	margin: 14px auto 0;
-	font-size: 12px;
-	color: var(--text-3);
-	text-align: center;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	gap: 7px;
-}
-.jv-ob-provseg {
-	max-width: 360px;
-	margin: 14px auto 0;
-	display: flex;
-	gap: 4px;
-	padding: 4px;
-	background: #eef0f3;
-	border: 1px solid #e3e6ea;
-	border-radius: 12px;
-}
-.jv-ob-provseg-opt {
-	flex: 1 1 0;
-	min-width: 0;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	min-height: 44px;
-	padding: 8px 10px;
-	border: 0;
-	border-radius: 9px;
-	background: transparent;
-	cursor: pointer;
-	opacity: 0.6;
-	transition: background 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
-}
-.jv-ob-provseg-opt:hover {
-	opacity: 0.85;
-}
-.jv-ob-provseg-opt.sel {
-	background: #ffffff;
-	opacity: 1;
-	box-shadow: 0 1px 3px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.04);
-}
-/* Single gateway: the row states which brand takes the payment, it does not
-   offer a choice. So it reads at full strength but drops every affordance that
-   implies one - no pointer, no hover lift, no pressed state. The browser's
-   default disabled dimming is overridden deliberately: this is not an
-   unavailable control, it is a label. */
-.jv-ob-provseg.is-single {
-	max-width: 220px;
-	cursor: default;
-}
-.jv-ob-provseg.is-single .jv-ob-provseg-opt,
-.jv-ob-provseg.is-single .jv-ob-provseg-opt:disabled {
-	cursor: default;
-	opacity: 1;
-}
-.jv-ob-provseg.is-single .jv-ob-provseg-opt:hover {
-	opacity: 1;
-}
-.jv-ob-provseg-opt:focus-visible {
-	outline: 2px solid #3395ff;
-	outline-offset: 2px;
-}
-.jv-ob-rzp-logo {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-}
-.jv-ob-rzp-word {
-	font-size: 15px;
-	font-weight: 700;
-	letter-spacing: -0.01em;
-	color: #0b2a6b;
-}
-.jv-ob-cf-logo {
-	height: 22px;
-	width: auto;
-	display: block;
-}
-@media (prefers-reduced-motion: reduce) {
-	.jv-ob-provseg-opt {
-		transition: none;
-	}
-}
-.jv-ob-devnote {
-	font-size: 12.5px;
-	color: var(--amber);
-	background: var(--amber-bg);
-	border: 1px solid var(--amber-bd);
-	border-radius: 8px;
-	padding: 8px 12px;
-	margin: 14px auto 0;
-	max-width: 560px;
-}
-.jv-ob-devblock {
-	font-size: 12.5px;
-	color: var(--text-2);
-	background: var(--amber-bg);
-	border: 1px solid var(--amber-bd);
-	border-radius: 8px;
-	padding: 12px 14px;
-	margin: 14px auto 0;
-	max-width: 560px;
-	text-align: left;
-}
-.jv-ob-devblock-title {
-	margin: 0 0 6px;
-	font-weight: 560;
-	color: var(--amber);
-}
-.jv-ob-devblock-body {
-	margin: 0 0 10px;
-}
-.jv-ob-devblock-steps {
-	margin: 0;
-	padding-left: 18px;
-	display: flex;
-	flex-direction: column;
-	gap: 10px;
-}
-.jv-ob-devblock-steps li {
-	line-height: 1.5;
-}
-.jv-ob-devblock-steps code {
-	display: block;
-	margin-top: 5px;
-	padding: 7px 9px;
-	background: var(--surface-2);
-	border: 1px solid var(--border);
-	border-radius: 6px;
-	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-	font-size: 11.5px;
-	color: var(--text);
-	white-space: pre-wrap;
-	word-break: break-all;
 }
 /* ---- Connect ---- */
 .jv-ob-connect {
