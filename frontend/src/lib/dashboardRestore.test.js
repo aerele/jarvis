@@ -138,7 +138,10 @@ test("an unreadable artifact is retried never, not on every transcript load", ()
 	assert.match(pageSrc, /const failedRestores = new Set\(\);/);
 	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
 	assert.match(onCanvas, /if \(restore && failedRestores\.has\(message_id\)\) return false;/);
-	assert.match(onCanvas, /if \(restore\) failedRestores\.add\(message_id\);/);
+	// the latch moved into restoreFailed(), which an ADOPTION also self-heals from
+	// (dashboardOpen.test.js owns that half) — it is still the first thing it does
+	assert.match(onCanvas, /if \(restore\) restoreFailed\(message_id\);/);
+	assert.match(fnBody(pageSrc, "function restoreFailed("), /failedRestores\.add\(message_id\);/);
 });
 
 // ---- D3: switching tabs must not tear the build pipeline down -----------

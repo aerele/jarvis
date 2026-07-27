@@ -211,8 +211,9 @@ export function resumesAdoption({ routeEdit, adoptedRow, editingSticky, canvasMs
  * The identity a promotion comes away with.
  *
  * `dash` is the row main chat named, `detail` what `get_dashboard` answered for
- * it (null when the fetch failed), `priorName` the identity the builder already
- * had. Three rules, in order:
+ * it (null when the fetch failed), `gone` whether that failure was a definitive
+ * "no such row for you", `priorName` the identity the builder already had.
+ * Three rules, in order:
  *
  * - Adopt only an EDITABLE row. `dash` arrives on a URL and `get_dashboard` is
  *   read-gated, while `save_dashboard` demands owner/admin — so an Org- or
@@ -223,20 +224,24 @@ export function resumesAdoption({ routeEdit, adoptedRow, editingSticky, canvasMs
  *   that the row is kept (see wouldDiscardOnPromotion); clearing it on a blip
  *   breaks that promise silently and the next Save writes the duplicate anyway.
  *   A fetch that answered "you may not edit this" is not a blip — it is the
- *   rule above, and it wins.
+ *   rule above, and it wins. Neither is a 404/403: `get_dashboard` is read-
+ *   gated, so a deleted row (or one this user may no longer touch) THROWS
+ *   rather than answering `can_edit: false`, and `gone` is how the caller says
+ *   the fetch DID answer. The identity naming that row is forgotten — the same
+ *   thing the remount path does with a sticky it can no longer resolve.
  * - Anything else degrades to the identity-less promotion that shipped before.
  *
  * The row's `theme` rides along: the agent must design for the theme the row
  * actually has, and the save-time validator re-lints the html against it — a
  * Slate row saved with the picker left on the default is rejected outright.
  *
- * @param {{dash?: string, detail: {name?: string, can_edit?: boolean|number, theme?: string}|null, priorName?: string}} arg
+ * @param {{dash?: string, detail: {name?: string, can_edit?: boolean|number, theme?: string}|null, priorName?: string, gone?: boolean}} arg
  * @returns {{adopted: object|null, keepPrior: boolean, name: string, theme: string}}
  */
-export function adoptionIdentity({ dash, detail, priorName }) {
+export function adoptionIdentity({ dash, detail, priorName, gone }) {
 	const answered = !!(detail && detail.name);
 	const adopted = dash && answered && detail.can_edit ? detail : null;
-	const keepPrior = !answered && !!dash && !!priorName && priorName === dash;
+	const keepPrior = !answered && !gone && !!dash && !!priorName && priorName === dash;
 	return {
 		adopted,
 		keepPrior,

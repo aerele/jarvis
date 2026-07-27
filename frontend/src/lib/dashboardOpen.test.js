@@ -514,6 +514,33 @@ test("a fetch blip keeps the identity the skipped confirm promised to keep", () 
 	assert.equal(denied.name, "");
 });
 
+test("a row that is GONE answered — it is not the blip that keeps the identity", () => {
+	// The carve-out above ("a fetch that answered 'you may not edit this'") does
+	// not cover the case that actually happens: get_dashboard is read-gated, so a
+	// deleted row, or one whose access was revoked mid-session, THROWS — it never
+	// comes back as can_edit:false. Read as a blip it would keep an identity whose
+	// row no longer exists, and "Save changes" then throws DoesNotExistError /
+	// PermissionError with the dialog already filled in.
+	const gone = { dash: "DASH-1", detail: null, priorName: "DASH-1", gone: true };
+	assert.equal(adoptionIdentity(gone).keepPrior, false);
+	assert.equal(adoptionIdentity(gone).name, "");
+	assert.equal(adoptionIdentity(gone).adopted, null);
+	// a fetch that never answered is still a blip, and still keeps the promise
+	assert.equal(adoptionIdentity({ ...gone, gone: false }).keepPrior, true);
+	assert.equal(adoptionIdentity({ ...gone, gone: false }).name, "DASH-1");
+	// absent reads as "not gone": nothing is kept that was not kept before
+	assert.equal(adoptionIdentity({ ...gone, gone: undefined }).keepPrior, true);
+	// and it never overrides a fetch that DID answer with a row
+	assert.equal(adoptionIdentity({ ...gone, detail: DETAIL }).adopted, DETAIL);
+	assert.equal(adoptionIdentity({ ...gone, detail: DETAIL }).name, "DASH-1");
+	// the funnel classifies with the same isGoneError the remount path uses —
+	// without it every error arrives as `detail = null` and is read as a blip
+	const promote = fnBody(pageSrc, "async function promoteFromChat(");
+	assert.match(promote, /gone = isGoneError\(e\);/);
+	assert.match(promote, /adoptionIdentity\(\{ dash, detail, priorName, gone \}\)/);
+	assert.match(fnBody(pageSrc, "function isGoneError("), /isPermissionError\(e\)/);
+});
+
 // ---- main chat: the affordance is conversation state, not html-sniffing ----
 
 test("ChatView binds the origin to the conversation it was read for", () => {
@@ -848,11 +875,14 @@ test("the promotion ADOPTS the saved row main chat named", () => {
 	// the identity it comes away with is decided by the pure function above, on
 	// what the fetch answered and what the builder already had
 	assert.match(accept, /const priorName = editingName\(\);/);
-	assert.match(accept, /const identity = adoptionIdentity\(\{ dash, detail, priorName \}\);/);
+	assert.match(
+		accept,
+		/const identity = adoptionIdentity\(\{ dash, detail, priorName, gone \}\);/
+	);
 	// a name that fails the (permission-gated) fetch degrades to the identity-less
 	// promotion — a URL-supplied `dash` is never a dead click, and never a trusted
 	// one either
-	assert.match(accept, /\} catch \(e\) \{\n\t\t\t\tdetail = null;/);
+	assert.match(accept, /gone = isGoneError\(e\);\n\t\t\t\tdetail = null;/);
 	// the adopted row supplies the IDENTITY only: its html must never reach the
 	// canvas, or the promotion answers with the saved document instead of the
 	// build the user clicked
@@ -929,6 +959,112 @@ test("the adoption resume restores the identity WITHOUT the row's html", () => {
 		"the adopted state is restored instead of the edit seed, not after it"
 	);
 	assert.match(mount, /promoteFromChat\(routeChat, routeCanvas, \{ fallback: normalMount/);
+});
+
+test("an identity discarded while the resume was in flight stays discarded", () => {
+	// The window is real and wide: the caps probe ahead of this can sleep a full
+	// second and retry before resumeAdoption even starts, and the pane's "New
+	// chat" sits on screen throughout. It runs clearBuilder — which short-circuits
+	// the confirm, because the canvas is still empty — so the user is looking at a
+	// builder they believe is fresh when the fetch lands. Writing the identity
+	// then attaches DASH-7 to whatever they build next, the dialog silently reads
+	// "Save changes", and the save overwrites DASH-7's html, sources and title.
+	const resume = fnBody(pageSrc, "async function resumeAdoption(");
+	const bail = "if (adoptedRow.value !== name) return;";
+	assert.equal(
+		(resume.match(/if \(adoptedRow\.value !== name\) return;/g) || []).length,
+		2,
+		"both branches re-check after the await, not just one"
+	);
+	// the catch branch: the re-check comes before it forgets a gone row
+	const failure = resume.slice(resume.indexOf("} catch (e) {"));
+	assert.ok(
+		failure.indexOf(bail) >= 0 &&
+			failure.indexOf(bail) < failure.indexOf("if (isGoneError(e))"),
+		"the catch branch bails before it writes"
+	);
+	// the success branch: before every write it makes
+	const success = resume.slice(resume.lastIndexOf(bail));
+	for (const write of [
+		"editingDetail.value = d;",
+		"editingSticky.value = d.name;",
+		"savedName.value = d.name;",
+		"builderTheme.value = themeKey(d.theme);",
+		"adoptedRow.value = d.name;",
+	]) {
+		assert.ok(success.includes(write), `the success writes follow the re-check: ${write}`);
+	}
+	// ...including the "gone, or no longer editable" tail
+	assert.ok(
+		success.lastIndexOf('adoptedRow.value = "";') >
+			success.indexOf("adoptedRow.value = d.name;"),
+		"the not-editable tail is inside the re-checked region too"
+	);
+});
+
+test("a kept identity repairs itself the moment the user asks to save", () => {
+	// The blip branch above keeps a NAME. Nothing reads it: the dialog's title,
+	// its "Save changes" label and the `name` on the payload all come off
+	// `editingDetail`, which a fresh mount has none of — so the promise "the row
+	// is kept" ends in the duplicate it was made to prevent. One repair fetch, at
+	// the only moment it matters.
+	const open = fnBody(pageSrc, "async function openSave(");
+	assert.match(open, /const name = adoptedRow\.value;/);
+	assert.match(open, /if \(name && !editingDetail\.value\) \{/);
+	assert.match(open, /const d = await getDashboard\(name\);/);
+	// success: the detail lands, so Save updates in place
+	assert.match(
+		open,
+		/if \(d && d\.name && d\.can_edit\) \{\n\t\t\t\t\teditingDetail\.value = d;/
+	);
+	// gone, or no longer editable: drop the identity rather than offer a "Save
+	// changes" that throws once the dialog has been filled in
+	assert.match(open, /if \(adoptedRow\.value === name && isGoneError\(e\)\) \{/);
+	assert.match(open, /adoptedRow\.value = "";/);
+	// this await is a window like every other: New chat / ?edit= can land in it
+	assert.match(open, /if \(adoptedRow\.value === name\) \{/);
+	assert.match(open, /if \(!builderHtml\.value\) return;/);
+	// one attempt, not one per click — and the button says it is working
+	assert.match(open, /if \(!builderHtml\.value \|\| repairing\.value\) return;/);
+	assert.match(open, /repairing\.value = true;/);
+	assert.match(open, /\} finally \{\n\t\t\trepairing\.value = false;/);
+	assert.match(pageSrc, /:loading="repairing"/);
+	// and the comment that claimed the blip branch kept the promise on its own
+	// now points at the mechanism that actually does
+	assert.match(fnBody(pageSrc, "async function resumeAdoption("), /openSave\(\)/);
+});
+
+test("an adoption whose artifact is gone falls back to the row it adopted", () => {
+	// accept() blanks the canvas when the promoted artifact cannot be fetched, but
+	// keeps the identity — so the next mount restores "Editing X", replays the
+	// same dead message, and latches: empty canvas, badge, Save disabled, every
+	// time. The build is unrecoverable; the ROW still holds a document.
+	const failed = fnBody(pageSrc, "function restoreFailed(");
+	assert.match(failed, /failedRestores\.add\(message_id\);/);
+	assert.match(failed, /if \(message_id !== canvasMsg\.value \|\| !adoptedRow\.value\) return;/);
+	assert.match(failed, /editSeed\.value = name;/);
+	assert.match(failed, /loadEdit\(name, \{ deepLink: false \}\);/);
+	// the latch is set FIRST, so the pane's next transcript load cannot re-enter
+	// this (onCanvas drops a latched message before it fetches anything)
+	assert.ok(
+		failed.indexOf("failedRestores.add(message_id);") < failed.indexOf("loadEdit(name,"),
+		"the loop guard goes up before the fallback runs"
+	);
+	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
+	assert.equal(
+		(onCanvas.match(/if \(restore\) restoreFailed\(message_id\);/g) || []).length,
+		2,
+		"both failure branches — no content, and a thrown fetch"
+	);
+	assert.match(onCanvas, /if \(restore && failedRestores\.has\(message_id\)\) return false;/);
+	// loadEdit is what ends the adoption: the canvas becomes the row's own html,
+	// so the two documents are one again
+	const edit = fnBody(pageSrc, "async function loadEdit(");
+	assert.match(edit, /adoptedRow\.value = "";/);
+	assert.match(edit, /canvasMsg\.value = "";/);
+	// a live frame's failure is untouched — it toasts, and there is no stale
+	// identity to fall back from
+	assert.match(onCanvas, /else toast\.error\(errMsg\(e\)\);/);
 });
 
 test("a promotion that would cost the user something confirms first", () => {

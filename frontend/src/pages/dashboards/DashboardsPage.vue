@@ -111,6 +111,7 @@
 								variant="solid"
 								label="Save dashboard"
 								:disabled="!builderHtml"
+								:loading="repairing"
 								@click="openSave"
 							/>
 						</div>
@@ -374,6 +375,28 @@ const promotionPending = ref(!!(routeChat && routeCanvas));
 // silent, failing get_canvas calls (a full File load + a disk read each time).
 const failedRestores = new Set();
 
+// A restore frame that could not be replayed. The latch is the loop guard above;
+// what follows it is the self-heal an ADOPTION needs.
+//
+// An adopted promotion keeps the identity of a row whose html it never loaded,
+// so an artifact that has since been purged leaves the builder with nothing to
+// show and nothing to fall back to: an empty canvas under an "Editing X" badge,
+// Save disabled, and the same outcome on every later mount. The promoted build
+// is genuinely unrecoverable — but the ROW still holds a document, and opening
+// it is what the mount would have done before the adoption existed. loadEdit
+// ends the adoption on its own (the canvas becomes the row's own html, so the
+// two are one document again and `canvasMsg`/`adoptedRow` are cleared), and the
+// latch means this can run at most once per message.
+function restoreFailed(message_id) {
+	failedRestores.add(message_id);
+	if (message_id !== canvasMsg.value || !adoptedRow.value) return;
+	const name = adoptedRow.value;
+	// the seed discipline the other loadEdit callers follow: it holds further
+	// restores off the canvas until this one settles, and loadEdit clears it
+	editSeed.value = name;
+	loadEdit(name, { deepLink: false });
+}
+
 // Chat drew/updated an artifact: pick the LAST html item and pull its
 // render-ready content onto the canvas.
 //
@@ -395,7 +418,7 @@ async function onCanvas({ message_id, items, restore }) {
 		const r = await getCanvas(message_id, htmlItem.name, 0);
 		const content = r && (r.content || r.data_url);
 		if (!content) {
-			if (restore) failedRestores.add(message_id);
+			if (restore) restoreFailed(message_id);
 			return false;
 		}
 		// The await above is a real round trip: re-check that a live frame (or a
@@ -412,14 +435,52 @@ async function onCanvas({ message_id, items, restore }) {
 	} catch (e) {
 		// A restore is best-effort background work the user did not ask for -
 		// a deleted/expired artifact must not raise a toast on page load.
-		if (restore) failedRestores.add(message_id);
+		if (restore) restoreFailed(message_id);
 		else toast.error(errMsg(e));
 		return false;
 	}
 }
 
-function openSave() {
-	if (!builderHtml.value) return;
+// A kept identity is a NAME without a detail (resumeAdoption's blip branch), and
+// the Save dialog updates in place off the DETAIL — so on its own that name
+// keeps nothing: the dialog would title itself "Save dashboard" and insert the
+// duplicate the adoption exists to prevent. The moment the user asks to save is
+// the one place a repair is worth a round trip, so take it, once: the row comes
+// back and Save updates it in place; the row is gone (or no longer this user's)
+// and the identity goes with it, because a new row beats a "Save changes" that
+// throws on submit; another blip changes nothing and the save proceeds as it
+// would have.
+const repairing = ref(false);
+async function openSave() {
+	if (!builderHtml.value || repairing.value) return;
+	const name = adoptedRow.value;
+	if (name && !editingDetail.value) {
+		repairing.value = true;
+		try {
+			const d = await getDashboard(name);
+			// a real round trip: the identity may have been discarded (New chat) or
+			// replaced (?edit=) while this was in flight
+			if (adoptedRow.value === name) {
+				if (d && d.name && d.can_edit) {
+					editingDetail.value = d;
+					savedName.value = d.name;
+				} else {
+					editingSticky.value = "";
+					adoptedRow.value = "";
+				}
+			}
+		} catch (e) {
+			if (adoptedRow.value === name && isGoneError(e)) {
+				editingSticky.value = "";
+				adoptedRow.value = "";
+			}
+		} finally {
+			repairing.value = false;
+		}
+		// ...and the canvas can be gone with it, in which case there is nothing to
+		// save any more
+		if (!builderHtml.value) return;
+	}
 	saveOpen.value = true;
 }
 
@@ -645,14 +706,24 @@ async function resumeAdoption(name) {
 	try {
 		d = await getDashboard(name);
 	} catch (e) {
-		// A blip keeps the identity: the next mount retries, and dropping it here
-		// would quietly arm the next Save to write a duplicate of that very row.
+		// This mount's own await is a real window - the caps probe alone can sleep a
+		// second before this even starts - and "New chat" is one click away in the
+		// pane throughout it. A builder cleared meanwhile DISCARDED this identity,
+		// and a discarded identity must stay discarded: re-attaching it here arms
+		// the next Save over a row that has nothing to do with what is now on the
+		// canvas.
+		if (adoptedRow.value !== name) return;
+		// A blip keeps the NAME for the next mount to retry. The name alone is not
+		// yet a Save target - the dialog updates in place off `editingDetail`, which
+		// this mount has none of - so what actually keeps the promise is the one
+		// repair attempt openSave() makes when it finds a name without a detail.
 		if (isGoneError(e)) {
 			editingSticky.value = "";
 			adoptedRow.value = "";
 		}
 		return;
 	}
+	if (adoptedRow.value !== name) return;
 	if (d && d.name && d.can_edit) {
 		editingDetail.value = d;
 		editingSticky.value = d.name;
@@ -770,14 +841,22 @@ async function promoteFromChat(conversation, messageId, { fallback = null, dash 
 		// here; adoptionIdentity() decides what that failure costs.
 		const priorName = editingName();
 		let detail = null;
+		let gone = false;
 		if (dash) {
 			try {
 				detail = await getDashboard(dash);
 			} catch (e) {
+				// Not every failure is a blip. get_dashboard is read-gated, so a
+				// deleted row - or one this user may no longer touch - THROWS rather
+				// than answering `can_edit: false`, and that is an answer: the
+				// identity naming it is forgotten, exactly as the remount path does
+				// with a sticky it can no longer resolve. Only a fetch that never
+				// answered at all can reach `keepPrior`.
+				gone = isGoneError(e);
 				detail = null;
 			}
 		}
-		const identity = adoptionIdentity({ dash, detail, priorName });
+		const identity = adoptionIdentity({ dash, detail, priorName, gone });
 		// The builder is this conversation's now - anything else it was editing is
 		// over, or Save would write back onto the wrong dashboard.
 		editingSticky.value = identity.name;
