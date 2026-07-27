@@ -98,6 +98,15 @@ function devBootFlags() {
 // before the slower one's transformIndexHtml ran; AsyncLocalStorage gives
 // each request its own store instead, so there is no cross-request race to
 // reason about.
+//
+// Residual trust assumption: fetchSessionCsrfToken() (below) picks its fetch
+// target from the request's own Host header. server.allowedHosts: true (#462)
+// means Vite itself will accept any Host, so without isKnownSiteHost()'s
+// check this would be an unauthenticated header choosing where the user's
+// session cookie gets sent. isKnownSiteHost() narrows that from "any host" to
+// "a host this bench actually has a site for" before the cookie is ever
+// forwarded anywhere. That does not make the Host header trusted, it only
+// bounds the blast radius to this bench's own configured sites.
 const csrfRequestContext = new AsyncLocalStorage();
 
 function devCsrfToken() {
@@ -177,10 +186,47 @@ function getWebserverPort() {
 	}
 }
 
+// Host header, stripped to bare hostname. Handles the IPv6-literal form
+// (`[::1]:8095`, brackets required by RFC 3986 so the literal's own colons
+// don't collide with the port separator) — split(":")[0] alone would yield
+// "[" for that form. Plain hostnames only ever have one colon (the port), so
+// splitting on the first one is enough for the common case.
+function hostnameFromHeader(hostHeader) {
+	if (!hostHeader) return "";
+	if (hostHeader.startsWith("[")) {
+		const end = hostHeader.indexOf("]");
+		return end === -1 ? "" : hostHeader.slice(1, end);
+	}
+	return hostHeader.split(":")[0];
+}
+
+// Is `host` one of THIS bench's actual sites? Read from sites/ directly
+// (a directory is a site iff it has its own site_config.json — the same
+// signal frappe's own bench CLI uses) rather than hardcoding names, so a
+// newly-created site doesn't have to be taught to this file. `localhost` /
+// `127.0.0.1` are deliberately never in this list: bench is Host-routed, so
+// the backend itself already 404s both today ("<host> does not exist") —
+// this isn't a new restriction, just not silently pretending they'd work.
+const SITE_NAME_PATTERN = /^[a-zA-Z0-9.-]+$/; // Frappe site names are domain-like; also rules out "../" before it ever reaches path.join
+function isKnownSiteHost(host) {
+	if (!host || !SITE_NAME_PATTERN.test(host)) return false;
+	const benchRoot = findBenchRoot(__dirname);
+	return !!benchRoot && fs.existsSync(path.join(benchRoot, "sites", host, "site_config.json"));
+}
+
 async function fetchSessionCsrfToken(req, logger) {
 	const cookie = req.headers.cookie;
-	const host = (req.headers.host || "").split(":")[0];
+	const host = hostnameFromHeader(req.headers.host);
 	if (!cookie || !host) return null; // no session cookie forwarded (not logged in yet) — nothing to look up
+
+	// Fail closed: server.allowedHosts: true (from #462) means Vite itself
+	// accepts any Host header, and this function forwards the request's
+	// session cookie to wherever `host` points. Left unchecked, that's an
+	// unauthenticated header choosing the destination for a credential — so
+	// only ever fetch for a host this bench actually hosts. An unrecognised
+	// host gets no token and no crash, same as a request with no cookie: the
+	// page loads exactly as it does for a logged-out session today.
+	if (!isKnownSiteHost(host)) return null;
 
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 5000);
