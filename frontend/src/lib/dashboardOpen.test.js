@@ -147,10 +147,14 @@ test("editing the saved row later must not re-hijack clicks on newer builds", ()
 	);
 });
 
-test("an unknown timestamp keeps the pre-existing ?edit= behaviour", () => {
-	// A server that predates the `creation` field (or a message row without one)
-	// must degrade to what shipped, not misroute on a guess.
-	for (const messageCreation of [undefined, "", null, "nonsense"]) {
+test("the build still being streamed promotes: no stamp yet means it IS the newest", () => {
+	// Main chat mints the assistant row from the first delta ({name, role,
+	// content, streaming}) and the realtime `canvas` frame hangs the artifact on
+	// that same row, so it carries no server `creation` until the next transcript
+	// load. That is the normal state at the exact moment the card appears — the
+	// likeliest moment to click it — and ?edit= there answers with the older
+	// saved row instead of the build the user just watched being drawn.
+	for (const messageCreation of [undefined, "", null]) {
 		assert.deepEqual(
 			dashboardOpenRoute({
 				dashboard: SAVED,
@@ -158,9 +162,24 @@ test("an unknown timestamp keeps the pre-existing ?edit= behaviour", () => {
 				messageId: "m2",
 				messageCreation,
 			}),
-			{ path: "/dashboards", query: { edit: "DASH-1" } }
+			{ path: "/dashboards", query: { chat: "c1", canvas: "m2" } }
 		);
 	}
+});
+
+test("an unreadable stamp keeps the pre-existing ?edit= behaviour", () => {
+	// A stamp that is present but unparseable is an old/odd server, not a live
+	// frame: degrade to what shipped rather than guessing.
+	assert.deepEqual(
+		dashboardOpenRoute({
+			dashboard: SAVED,
+			conversation: "c1",
+			messageId: "m2",
+			messageCreation: "nonsense",
+		}),
+		{ path: "/dashboards", query: { edit: "DASH-1" } }
+	);
+	// ...and so does a saved row that reports no `creation` of its own
 	assert.deepEqual(
 		dashboardOpenRoute({
 			dashboard: { name: "DASH-1" },
@@ -266,19 +285,24 @@ test("ChatView reads the conversation's origin_page and clears it on switch", ()
 	assert.match(chatSrc, /const originPage = ref\(""\);/);
 	const load = fnBody(chatSrc, "async function loadConversation(");
 	assert.match(load, /originPage\.value = d\?\.conversation\?\.origin_page \|\| "";/);
-	// the no-conversation arm must reset it, or the button survives onto a chat
-	// that has no dashboards at all
+	// the reset runs BEFORE the round trip, on every path. `messages` is only
+	// replaced when the response lands, so for one full RTT the PREVIOUS
+	// conversation's cards are on screen under the new currentId — and a fetch
+	// that rejects would otherwise leave the old origin standing for the session
 	assert.match(load, /originPage\.value = "";/);
 	assert.ok(
-		load.indexOf('originPage.value = "";') <
-			load.indexOf("originPage.value = d?.conversation?.origin_page"),
-		"the reset belongs to the `if (!id)` arm, above the load"
+		load.indexOf('originPage.value = "";') < load.indexOf("if (!id) {"),
+		"the reset belongs above the `if (!id)` arm, not inside it"
+	);
+	assert.ok(
+		load.indexOf('originPage.value = "";') < load.indexOf("await api.getConversation(id)"),
+		"the reset must precede the fetch"
 	);
 });
 
 test("every path that swaps the conversation out resets originPage too", () => {
 	// loadConversation is the only OTHER writer, and it does not run on these
-	// three: the route watcher no-ops when currentId is already the new id, and
+	// four: the route watcher no-ops when currentId is already the new id, and
 	// the boot arm is the failure of the load itself. A stale "dashboards" here
 	// puts the button on an ordinary chat's html — with Save armed over it once
 	// the builder promotes it.
@@ -291,9 +315,17 @@ test("every path that swaps the conversation out resets originPage too", () => {
 		chatSrc,
 		/currentId\.value = null;\s*messages\.value = \[\];\s*originPage\.value = "";/
 	);
-	// four writers of the empty value, no more: loadConversation's !id arm plus
-	// the three above (a fifth would mean a path nobody reviewed)
-	assert.equal((chatSrc.match(/originPage\.value = "";/g) || []).length, 4);
+	// ...and the watcher that drops it when it is deleted from the sidebar while
+	// open: the user's next send adopts the server id directly, so nothing
+	// re-reads the conversation and the origin would follow them onto it
+	const vanish = chatSrc.slice(chatSrc.indexOf("watch(\n\t() => store.conversations,"));
+	const vanishBody = vanish.slice(0, vanish.indexOf("\n);"));
+	assert.notEqual(vanishBody, "", "the vanished-conversation watcher must still exist");
+	assert.match(vanishBody, /currentId\.value = null;/);
+	assert.match(vanishBody, /originPage\.value = "";/);
+	// five writers of the empty value, no more: loadConversation's pre-fetch
+	// reset plus the four above (a sixth would mean a path nobody reviewed)
+	assert.equal((chatSrc.match(/originPage\.value = "";/g) || []).length, 5);
 });
 
 test("the open artifact carries the conversation it was opened from", () => {
@@ -418,15 +450,25 @@ test("a pending promotion holds the pane's restore off, exactly as ?edit= does",
 	);
 	const accept = promote.slice(promote.indexOf("const accept = async () => {"));
 	assert.match(accept, /promotionPending\.value = false;/);
-	// the live watcher arms it before handing over
+	// The hold is armed inside promoteFromChat, BELOW its dedupe check. The query
+	// watcher wakes on any route write and would re-arm with a pair already in
+	// flight — a call that then dedupes away, leaving an armed hold nothing is
+	// going to settle and the pane's restore blocked for the life of the page.
+	assert.ok(
+		promote.indexOf("if (key === promoting) return;") <
+			promote.indexOf("promotionPending.value = true;"),
+		"arm the hold below the dedupe check"
+	);
+	// ...and still above the first await, so no restore can slip in ahead of it
+	assert.ok(
+		promote.indexOf("promotionPending.value = true;") < promote.indexOf("await "),
+		"arm the hold synchronously, before anything yields"
+	);
 	const watcher = pageSrc.slice(
 		pageSrc.indexOf("watch(\n\t() => [route.query.chat, route.query.canvas],")
 	);
 	const body = watcher.slice(0, watcher.indexOf("\n);"));
-	assert.ok(
-		body.indexOf("promotionPending.value = true;") < body.indexOf("promoteFromChat("),
-		"arm the hold before the promotion, not after"
-	);
+	assert.doesNotMatch(body, /promotionPending\.value = true;/);
 	// ...and a mount that will NOT promote releases the setup-time hold, or the
 	// pane's restore stays blocked for the life of the page
 	assert.match(pageSrc, /promotionPending\.value = false;\n\t\tnormalMount\(\);/);
@@ -525,10 +567,8 @@ test("a promotion that would cost the user something confirms first", () => {
 	const promote = fnBody(pageSrc, "async function promoteFromChat(");
 	// `force` is required: confirmDiscard short-circuits on !unsavedCanvas, so an
 	// editing target alone would never reach the dialog
-	assert.match(
-		promote,
-		/confirmDiscard\(accept, \(\) => giveUp\(""\), \{ force: true, copy: PROMOTE_COPY \}\);/
-	);
+	assert.match(promote, /confirmDiscard\(accept, \(\) => giveUp\(""\), \{\n\t\tforce: true,/);
+	assert.match(promote, /copy: PROMOTE_COPY,/);
 	assert.match(
 		promote,
 		/if \(!promotionWouldDiscard\(conversation\)\) \{\n\t\tawait accept\(\);/
@@ -541,6 +581,23 @@ test("a promotion that would cost the user something confirms first", () => {
 	// and the default is restored when the dialog settles, or the next plain
 	// discard inherits the promotion's wording
 	assert.match(fnBody(pageSrc, "function settleDiscard("), /discardCopy\.value = DISCARD_COPY;/);
+});
+
+test("that confirm never offers to open the chat it was clicked from", () => {
+	// "Open its chat" is the escape hatch to the thread the builder is holding —
+	// an escape only while that is somewhere else. In the case these rules
+	// deliberately still confirm (the builder's OWN thread, with an editing
+	// identity at stake), it is the conversation the user clicked "Open in
+	// Dashboards" in, so the action lands them straight back there.
+	const promote = fnBody(pageSrc, "async function promoteFromChat(");
+	assert.match(promote, /offerChat: chatConv\.value !== conversation,/);
+	assert.match(pageSrc, /const discardOfferChat = ref\(true\);/);
+	assert.match(pageSrc, /if \(chatConv\.value && discardOfferChat\.value\) \{/);
+	const confirm = fnBody(pageSrc, "function confirmDiscard(");
+	assert.match(confirm, /offerChat = true/);
+	assert.match(confirm, /discardOfferChat\.value = offerChat;/);
+	// per-call, exactly like the copy: the next plain discard gets it back
+	assert.match(fnBody(pageSrc, "function settleDiscard("), /discardOfferChat\.value = true;/);
 });
 
 test("the query is stripped once the promotion settles, both ways", () => {
@@ -566,4 +623,7 @@ test("the query is stripped once the promotion settles, both ways", () => {
 	// ...but a declined or failed promotion can be asked for again
 	const giveUp = promote.slice(promote.indexOf("const giveUp = "));
 	assert.match(giveUp, /promoting = "";/);
+	// ...and so can an ACCEPTED one: a key left behind dedupes every later
+	// request for that same pair into silence for the life of the page
+	assert.match(accept, /promoting = "";/);
 });

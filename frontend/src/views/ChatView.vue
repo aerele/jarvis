@@ -6377,9 +6377,16 @@ async function loadConversation(id) {
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
 	// different conversation (matches how modelOverride/auto-apply reload here).
 	groundNextTurn.value = false;
+	// Dropped BEFORE the round trip, not after it. `messages` is only replaced
+	// when the response lands, so for one full RTT the screen still shows the
+	// PREVIOUS conversation's transcript while currentId already names the new
+	// one — a "dashboards" origin left standing over it offers "Open in
+	// Dashboards" on the old thread's card, and a click there pairs this
+	// conversation with that message. Clearing up front also means a fetch that
+	// rejects (deleted mid-click, a 500) strands no origin at all.
+	originPage.value = "";
 	if (!id) {
 		messages.value = [];
-		originPage.value = "";
 		modelOverride.value = "";
 		thinkingOverride.value = "";
 		promptHistory.value = [];
@@ -8493,6 +8500,11 @@ watch(
 		if (!list.some((c) => c.name === currentId.value)) {
 			currentId.value = null;
 			messages.value = [];
+			// loadConversation never runs on this path — the next send adopts the
+			// server id directly and the route watcher no-ops because currentId
+			// already equals it — so a builder origin left here would follow the
+			// user onto the next, ordinary chat.
+			originPage.value = "";
 			resetRunState();
 			if (route.params.id) router.replace({ name: "Chat" });
 		}

@@ -320,7 +320,9 @@ const routeCanvas = typeof route.query.canvas === "string" ? route.query.canvas 
 // BEFORE this page's, and the promotion waits on the caps probe, so without
 // this the restore reliably wins the race - and its canvas then reads as
 // "unsaved work" to the discard guard, popping a confirm over the very document
-// the user asked to open. Cleared when the promotion settles, either way.
+// the user asked to open. Taken here for the mount path (the promotion itself
+// only starts after the caps probe) and by promoteFromChat for a live
+// deep-link; cleared when the promotion settles, either way.
 const promotionPending = ref(!!(routeChat && routeCanvas));
 
 // Message ids whose artifact could not be replayed (the File was purged, the
@@ -423,15 +425,24 @@ const PROMOTE_COPY = {
 	message: "Opening this chat's dashboard replaces it. Its chat stays in your conversations.",
 };
 const discardCopy = ref(DISCARD_COPY);
+// "Open its chat" is an escape hatch to the thread the builder is holding — it
+// is only an escape when that is somewhere ELSE. A caller that is already
+// acting on that same conversation turns it into a loop, so it can drop it.
+const discardOfferChat = ref(true);
 
 // `force` is for callers whose own state (an editing target, another chat's
 // restored canvas) is worth confirming even when `unsavedCanvas` is false.
-function confirmDiscard(onYes, onNo, { force = false, copy = DISCARD_COPY } = {}) {
+function confirmDiscard(
+	onYes,
+	onNo,
+	{ force = false, copy = DISCARD_COPY, offerChat = true } = {}
+) {
 	if (!force && !unsavedCanvas.value) {
 		onYes();
 		return;
 	}
 	discardCopy.value = copy;
+	discardOfferChat.value = offerChat;
 	discardYes = onYes;
 	discardNo = onNo || null;
 	discardOpen.value = true;
@@ -446,6 +457,7 @@ function settleDiscard(yes) {
 	discardNo = null;
 	discardOpen.value = false;
 	discardCopy.value = DISCARD_COPY;
+	discardOfferChat.value = true;
 	if (yes) {
 		if (y) y();
 	} else if (n) n();
@@ -453,7 +465,7 @@ function settleDiscard(yes) {
 
 const discardActions = computed(() => {
 	const actions = [{ label: "Discard", variant: "solid", onClick: () => settleDiscard(true) }];
-	if (chatConv.value) {
+	if (chatConv.value && discardOfferChat.value) {
 		actions.push({
 			label: "Open its chat",
 			variant: "subtle",
@@ -600,11 +612,10 @@ function promotionWouldDiscard(conv) {
 	});
 }
 
-// The (conversation, message) being promoted, or the one already promoted:
-// the query watcher re-fires on unrelated route writes (a tab hash push carries
-// the query along), and a confirm dialog is open across several of them.
-// Cleared when a promotion is declined or fails, so the same link can be tried
-// again.
+// The (conversation, message) promotion IN FLIGHT: the query watcher re-fires
+// on unrelated route writes (a tab hash push carries the query along), and a
+// confirm dialog is open across several of them. Cleared on every settled path
+// - accepted, declined or failed - so the same link can be asked for again.
 let promoting = "";
 
 async function promoteFromChat(conversation, messageId, { fallback = null } = {}) {
@@ -612,6 +623,12 @@ async function promoteFromChat(conversation, messageId, { fallback = null } = {}
 	const key = conversation + "::" + messageId;
 	if (key === promoting) return;
 	promoting = key;
+	// The hold goes up here, BELOW the dedupe, not in the watcher: that watcher
+	// wakes on any route write and re-arms with the same pair, and an arm whose
+	// call then dedupes away has nothing left to clear it - the pane's transcript
+	// restore would stay blocked for the life of the page. Still synchronous,
+	// nothing awaits above it, so the pane's restore cannot slip in first.
+	promotionPending.value = true;
 	const giveUp = (msg) => {
 		if (msg) toast.error(msg);
 		promotionPending.value = false;
@@ -668,13 +685,25 @@ async function promoteFromChat(conversation, messageId, { fallback = null } = {}
 			toast.error("Couldn't load that dashboard's content — it may have expired.");
 		}
 		promotionPending.value = false;
+		// Settled: release the re-entrancy key, exactly as giveUp does. It guards
+		// a promotion IN FLIGHT, not one that finished - left set, asking for the
+		// same pair again (the same card, a second time in this page session)
+		// would dedupe into silence.
+		promoting = "";
 		stripPromotionQuery("");
 	};
 	if (!promotionWouldDiscard(conversation)) {
 		await accept();
 		return;
 	}
-	confirmDiscard(accept, () => giveUp(""), { force: true, copy: PROMOTE_COPY });
+	confirmDiscard(accept, () => giveUp(""), {
+		force: true,
+		copy: PROMOTE_COPY,
+		// The builder is already holding the very conversation being promoted
+		// (the same-thread-with-an-editing-identity case), so "Open its chat"
+		// would land the user back in the chat they clicked the button in.
+		offerChat: chatConv.value !== conversation,
+	});
 }
 
 // Live, for the same reason ?edit= is: the builder may already be open.
@@ -689,7 +718,8 @@ watch(
 			console.warn("dashboards: ?edit= wins over ?chat=&canvas=; the promotion is ignored");
 			return;
 		}
-		promotionPending.value = true;
+		// The hold is armed inside promoteFromChat, below its dedupe check - see
+		// there for why it cannot be armed from this watcher.
 		promoteFromChat(conv, msg);
 	}
 );

@@ -62,18 +62,29 @@ export function isNewerStamp(a, b) {
  * at unreachable. Compared on `creation`, not `modified`: editing the saved row
  * later must not re-hijack clicks on builds that came after it.
  *
+ * A message with a canvas and NO `creation` is the row being streamed into
+ * right now: main chat mints it client-side from the first delta and the
+ * realtime `canvas` frame attaches the artifact to it, so it carries no server
+ * stamp until the next transcript load. That row is by definition the newest
+ * thing in the thread — and the build the user just watched appear is exactly
+ * the one they are most likely to click — so it promotes. An unreadable stamp
+ * is a different story (an old server, not a live frame) and keeps the
+ * pre-existing `?edit=` behaviour, as does a saved row that reports no
+ * `creation` of its own.
+ *
  * @param {{dashboard: {name?: string, creation?: string}|null, conversation: string, messageId: string, messageCreation?: string}} arg
  * @returns {{path: string, query: object}} a vue-router location
  */
 export function dashboardOpenRoute({ dashboard, conversation, messageId, messageCreation }) {
 	const saved = (dashboard && dashboard.name) || "";
-	if (saved && !isNewerStamp(messageCreation, dashboard.creation)) {
-		return { path: "/dashboards", query: { edit: saved } };
-	}
-	return {
+	const promote = {
 		path: "/dashboards",
 		query: { chat: conversation || "", canvas: messageId || "" },
 	};
+	if (!saved) return promote;
+	if (!messageCreation) return promote;
+	if (isNewerStamp(messageCreation, dashboard.creation)) return promote;
+	return { path: "/dashboards", query: { edit: saved } };
 }
 
 /**

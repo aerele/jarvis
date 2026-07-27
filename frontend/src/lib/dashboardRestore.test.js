@@ -229,8 +229,10 @@ test("the discard confirm offers the surviving chat instead of just naming it", 
 	const actions = pageSrc.slice(pageSrc.indexOf("const discardActions = computed("));
 	assert.match(actions, /label: "Open its chat"/);
 	assert.match(actions, /router\.push\("\/c\/" \+ id\)/);
-	// ...only when there IS one
-	assert.match(actions, /if \(chatConv\.value\) \{/);
+	// ...only when there IS one, and only when going there is actually an escape
+	// (a caller already acting on that same conversation drops it — see
+	// dashboardOpen.test.js for the promotion that would otherwise loop)
+	assert.match(actions, /if \(chatConv\.value && discardOfferChat\.value\) \{/);
 });
 
 test("New chat asks the page instead of clearing itself behind a confirm", () => {
