@@ -2238,15 +2238,23 @@ class TestFT2ValidateMirrorTiming(_RT3SettingsTestCase):
 				self.fail(f"Fresh tenant save raised ValidationError unexpectedly: {exc}")
 
 	def test_proxy_active_pool_is_ready_for_chat(self):
-		"""proxy_active=1 + an APPLIED pool (status ok) → ready.
+		"""Pool mode + an APPLIED pool (status ok) → ready.
 
-		proxy_active alone no longer suffices: it is config intent, committed
+		Being a pool alone no longer suffices: it is config intent, committed
 		at save time BEFORE the async sync runs. Evidence of a successful
 		apply (llm_pool_synced_at, or an 'ok' status for tenants provisioned
 		before that marker existed) is what opens the gate.
 		"""
+		from unittest.mock import patch
+
+		# Pool mode is DERIVED from models[]: seed real rows rather than leaning on a
+		# forced flag (or on rows an earlier test in this class happened to leave).
 		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("proxy_active", 1, update_modified=False)
+		_add_model_row(settings, provider="openai", model="gpt-4o", order=0, api_key="sk-ft2-a")
+		_add_model_row(settings, provider="openai", model="gpt-4-turbo", order=1, api_key="sk-ft2-b")
+		with patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}):
+			settings.save()
+		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("llm_oauth_connected_at", None, update_modified=False)
 		settings.db_set("llm_pool_synced_at", frappe.utils.now(), update_modified=False)
 		frappe.db.commit()
@@ -2991,10 +2999,13 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		)
 		from jarvis.onboarding import get_llm_sync_status
 
+		# Pool mode is DERIVED from models[], so seed real rows: a forced flag on an
+		# empty pool is not a pool tenant, and the marker this asserts on
+		# (llm_pool_synced_at vs llm_direct_synced_at) is chosen by that derivation.
+		self._seed_pool()
 		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set(
 			{
-				"proxy_active": 1,
 				"llm_pool_synced_at": None,
 				"last_sync_status": _PENDING_APPLYING_STATUS,
 			},
