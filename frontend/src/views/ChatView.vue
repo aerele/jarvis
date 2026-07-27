@@ -1361,157 +1361,15 @@
 										Confirm
 									</button>
 								</div>
-								<!-- interactive clarifying questions (Claude-style cards; one Submit) -->
-								<div
+								<!-- interactive clarifying questions (Claude-style cards; one
+								     Submit). Keyed by message: AskCard holds the draft picks and
+								     must remount, not merely re-render, when a new ask arrives. -->
+								<AskCard
 									v-else-if="askFor === m.name && activeAsk"
-									class="jv-ask"
-									:class="{ 'jv-ask--form': askIsForm }"
-								>
-									<div
-										v-for="(q, qi) in activeAsk.questions"
-										:key="qi"
-										class="jv-ask-q"
-									>
-										<div class="jv-ask-qt">
-											<span class="jv-ask-num">{{ qi + 1 }}</span
-											>{{ q.q }}
-										</div>
-										<!-- yes/no, with optional custom labels (e.g. Approve / Reject) -->
-										<div v-if="q.type === 'yesno'" class="jv-ask-opts">
-											<button
-												v-for="(lbl, li) in q.options.length === 2
-													? q.options
-													: ['Yes', 'No']"
-												:key="li"
-												class="jv-ask-opt"
-												:class="{ on: isPicked(qi, lbl) }"
-												@click="toggleSingle(qi, lbl)"
-											>
-												<span v-if="isPicked(qi, lbl)" class="jv-ask-tick"
-													>✓</span
-												>{{ lbl }}
-											</button>
-										</div>
-										<!-- single / multi choice -->
-										<div
-											v-else-if="q.type === 'single' || q.type === 'multi'"
-											class="jv-ask-opts"
-										>
-											<button
-												v-for="(opt, oi) in q.options"
-												:key="oi"
-												class="jv-ask-opt"
-												:class="{ on: isPicked(qi, opt) }"
-												@click="
-													q.type === 'multi'
-														? toggleMulti(qi, opt)
-														: toggleSingle(qi, opt)
-												"
-											>
-												<span v-if="isPicked(qi, opt)" class="jv-ask-tick"
-													>✓</span
-												>{{ opt }}
-											</button>
-										</div>
-										<!-- date / datetime / free text fields -->
-										<input
-											v-else-if="q.type === 'date'"
-											type="date"
-											class="jv-ask-field"
-											:value="askSel[qi] || ''"
-											@input="pickSingle(qi, $event.target.value)"
-										/>
-										<input
-											v-else-if="q.type === 'datetime'"
-											type="datetime-local"
-											class="jv-ask-field"
-											:value="askSel[qi] || ''"
-											@input="pickSingle(qi, $event.target.value)"
-										/>
-										<input
-											v-else-if="q.type === 'text'"
-											type="text"
-											class="jv-ask-field"
-											:value="askSel[qi] || ''"
-											@input="pickSingle(qi, $event.target.value)"
-											placeholder="Type your answer…"
-											@keydown.enter.prevent
-										/>
-										<!-- link: search a record of the given DocType -->
-										<div v-else-if="q.type === 'link'" class="jv-ask-link">
-											<input
-												type="text"
-												class="jv-ask-field"
-												:value="
-													askLink[qi] && askLink[qi].q != null
-														? askLink[qi].q
-														: askSel[qi] || ''
-												"
-												@input="
-													onLinkSearch(
-														qi,
-														q.doctype,
-														$event.target.value
-													)
-												"
-												@focus="
-													onLinkSearch(
-														qi,
-														q.doctype,
-														(askLink[qi] && askLink[qi].q) || ''
-													)
-												"
-												:placeholder="
-													'Search ' + (q.doctype || 'records') + '…'
-												"
-												@blur="closeAskLink(qi)"
-												@keydown.enter.prevent
-											/>
-											<div
-												v-if="
-													askLink[qi] &&
-													askLink[qi].open &&
-													(askLink[qi].items || []).length
-												"
-												class="jv-ask-linkmenu"
-											>
-												<button
-													v-for="(it, ii) in askLink[qi].items"
-													:key="ii"
-													@mousedown.prevent="pickLink(qi, it)"
-												>
-													<b>{{ it.value }}</b
-													><span v-if="it.label"> · {{ it.label }}</span>
-												</button>
-											</div>
-										</div>
-										<!-- Other free-text only for choice questions -->
-										<input
-											v-if="
-												q.type === 'single' ||
-												q.type === 'multi' ||
-												q.type === 'yesno'
-											"
-											class="jv-ask-other"
-											v-model="askOther[qi]"
-											placeholder="Other…"
-											@input="onAskOther(qi, q.type)"
-											@keydown.enter.prevent
-										/>
-									</div>
-									<div class="jv-ask-foot">
-										<button
-											class="jv-ask-submit"
-											:disabled="!askReady"
-											@click="submitAsk"
-										>
-											Submit answers
-										</button>
-										<span v-if="!askReady" class="jv-ask-hint"
-											>Answer each question to continue</span
-										>
-									</div>
-								</div>
+									:key="m.name"
+									:spec="activeAsk"
+									@submit="send"
+								/>
 								<!-- record cards: scrollable card strip instead of a wide table -->
 								<div v-if="cardsOf(m)" class="jv-cards">
 									<div v-if="cardsOf(m).title" class="jv-cards-title">
@@ -3684,6 +3542,8 @@ import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
 import Composer from "@/components/chat/Composer.vue";
+import AskCard from "@/components/chat/AskCard.vue";
+import { parseAsk } from "@/lib/chatAsk";
 import { checkReady, readinessDetailOf } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner } from "@/account/format.js";
@@ -4785,8 +4645,8 @@ const _ACTION_RE = /```jarvis-action[ \t]*\n([\s\S]*?)```/;
 const _CONFIRM_RE = /```confirm[ \t]*\n([\s\S]*?)```/;
 // Interactive clarifying questions: the agent emits a ```jarvis-ask JSON block
 // (a list of questions, each single/multi/yesno with up to a few options); the
-// chat renders it as option cards with one Submit, and strips the raw block.
-const _ASK_RE = /```jarvis-ask[ \t]*\n([\s\S]*?)```/;
+// chat renders it as option cards with one Submit (<AskCard>), and strips the
+// raw block. Parsing lives in @/lib/chatAsk so every surface agrees.
 // A ```jarvis-cards block: a list of record cards the chat renders as a
 // horizontally-scrollable card strip instead of a wide Markdown table.
 const _CARDS_RE = /```jarvis-cards[ \t]*\n([\s\S]*?)```/;
@@ -5040,35 +4900,7 @@ function chartsOf(m) {
 }
 
 function askOf(m) {
-	const mt = ((m && m.content) || "").match(_ASK_RE);
-	if (!mt) return null;
-	try {
-		const a = JSON.parse(mt[1].trim());
-		const raw = Array.isArray(a) ? a : a && a.questions;
-		if (!Array.isArray(raw)) return null;
-		const FIELD = ["date", "datetime", "link", "text"];
-		const questions = raw
-			.slice(0, 6)
-			.map((q) => {
-				let type = q.type === "boolean" ? "yesno" : q.type;
-				if (!["single", "multi", "yesno", ...FIELD].includes(type)) type = "single";
-				return {
-					q: String(q.q || q.question || "").trim(),
-					type,
-					// yesno may carry exactly 2 custom labels (e.g. ["Approve","Reject"]).
-					options: Array.isArray(q.options) ? q.options.map(String).slice(0, 8) : [],
-					doctype: type === "link" ? String(q.doctype || q.link || "").trim() : "",
-				};
-			})
-			.filter((q) => {
-				if (!q.q) return false;
-				if (q.type === "yesno" || FIELD.includes(q.type)) return true;
-				return q.options.length > 0;
-			});
-		return questions.length ? { questions } : null;
-	} catch (e) {
-		return null;
-	}
+	return parseAsk((m && m.content) || "");
 }
 function actionOf(m) {
 	const mt = ((m && m.content) || "").match(_ACTION_RE);
@@ -6100,110 +5932,8 @@ const activeAsk = computed(() =>
 	_lastAssistant.value && !activeAction.value ? askOf(_lastAssistant.value) : null
 );
 const askFor = computed(() => (activeAsk.value ? _lastAssistant.value.name : null));
-const askSel = ref({}); // qIdx -> string (single/yesno/date/datetime/text/link) | string[] (multi)
-const askOther = ref({}); // qIdx -> free-text (option types only)
-const askLink = ref({}); // qIdx -> { q, items, open } for link-type record search
-const _FIELD_TYPES = ["date", "datetime", "link", "text"];
-// An ask whose questions are ALL field-type reads better as a compact mini-form
-// (no numbered badges, no dividers) than as a numbered question list.
-const askIsForm = computed(() => {
-	const spec = activeAsk.value;
-	return (
-		!!spec &&
-		spec.questions.length > 0 &&
-		spec.questions.every((q) => _FIELD_TYPES.includes(q.type))
-	);
-});
-// Reset the draft whenever a new question set appears (new message asks).
-watch(askFor, () => {
-	askSel.value = {};
-	askOther.value = {};
-	askLink.value = {};
-});
-async function onLinkSearch(i, doctype, val) {
-	askLink.value = { ...askLink.value, [i]: { ...(askLink.value[i] || {}), q: val, open: true } };
-	if (!doctype) return;
-	try {
-		const r = await api.searchLink(doctype, val);
-		const items = (r || [])
-			.map((x) => ({ value: x.value, label: x.description || "" }))
-			.slice(0, 8);
-		askLink.value = { ...askLink.value, [i]: { q: val, items, open: true } };
-	} catch (e) {
-		askLink.value = { ...askLink.value, [i]: { q: val, items: [], open: true } };
-	}
-}
-function pickLink(i, item) {
-	askSel.value = { ...askSel.value, [i]: item.value };
-	askLink.value = { ...askLink.value, [i]: { q: item.value, items: [], open: false } };
-}
-// Hide the record dropdown when the field loses focus (clicking elsewhere on
-// the screen / tabbing away). @mousedown.prevent on the result buttons lets a
-// pick land before the blur fires.
-function closeAskLink(i) {
-	const cur = askLink.value[i];
-	if (cur && cur.open) askLink.value = { ...askLink.value, [i]: { ...cur, open: false } };
-}
-function pickSingle(i, opt) {
-	askSel.value = { ...askSel.value, [i]: opt };
-}
-// Option BUTTONS (single/yesno) toggle: clicking the picked option again
-// unselects it, and picking one clears the "Other…" text (they're exclusive —
-// both being sent as the answer was a reported bug).
-function toggleSingle(i, opt) {
-	const cur = askSel.value[i];
-	askSel.value = { ...askSel.value, [i]: cur === opt ? "" : opt };
-	if (cur !== opt && (askOther.value[i] || "").trim()) {
-		askOther.value = { ...askOther.value, [i]: "" };
-	}
-}
-// Typing in "Other…" clears a picked option for single/yesno (mirror of the above).
-function onAskOther(i, qtype) {
-	if (qtype !== "multi" && (askOther.value[i] || "").trim() && askSel.value[i]) {
-		askSel.value = { ...askSel.value, [i]: "" };
-	}
-}
-function toggleMulti(i, opt) {
-	const cur = Array.isArray(askSel.value[i]) ? askSel.value[i].slice() : [];
-	const ix = cur.indexOf(opt);
-	if (ix >= 0) cur.splice(ix, 1);
-	else cur.push(opt);
-	askSel.value = { ...askSel.value, [i]: cur };
-}
-function isPicked(i, opt) {
-	const v = askSel.value[i];
-	return Array.isArray(v) ? v.includes(opt) : v === opt;
-}
-const askReady = computed(() => {
-	const spec = activeAsk.value;
-	if (!spec) return false;
-	return spec.questions.every((q, i) => {
-		const v = askSel.value[i];
-		if (_FIELD_TYPES.includes(q.type)) return v != null && String(v).trim() !== "";
-		const other = (askOther.value[i] || "").trim();
-		if (q.type === "multi") return (Array.isArray(v) && v.length > 0) || !!other;
-		return (v != null && v !== "") || !!other;
-	});
-});
-function submitAsk() {
-	const spec = activeAsk.value;
-	if (!spec || !askReady.value) return;
-	const lines = spec.questions.map((q, i) => {
-		const ans = [];
-		const v = askSel.value[i];
-		const other = (askOther.value[i] || "").trim();
-		if (Array.isArray(v)) ans.push(...v);
-		// Single-answer questions: a typed "Other…" IS the answer — never send
-		// both it and a leftover pick (the UI keeps them exclusive; this is the
-		// belt-and-braces for stale state).
-		else if (v != null && v !== "" && !other) ans.push(v);
-		if (other) ans.push(other);
-		return `${i + 1}. ${q.q} → ${ans.join(", ") || "(no answer)"}`;
-	});
-	askSel.value = {};
-	askOther.value = {};
-	send("Here are my answers:\n" + lines.join("\n"));
-}
+// The draft state, readiness and answer formatting live in <AskCard> +
+// @/lib/chatAsk, shared with the Dashboards builder pane.
 function copyText(t) {
 	const s = t || "";
 	// navigator.clipboard only exists in a secure context (https / localhost).
@@ -10959,200 +10689,6 @@ onUnmounted(() => {
 	border-color: var(--text);
 }
 
-/* interactive clarifying-question cards */
-.jv-ask {
-	margin-top: 12px;
-	padding: 14px;
-	border: 1px solid var(--border);
-	background: var(--surface-1);
-	border-radius: 12px;
-}
-.jv-ask-q {
-	padding-bottom: 13px;
-	margin-bottom: 13px;
-	border-bottom: 1px solid var(--border);
-}
-.jv-ask-q:last-of-type {
-	border-bottom: 0;
-	padding-bottom: 4px;
-	margin-bottom: 4px;
-}
-.jv-ask-qt {
-	display: flex;
-	align-items: flex-start;
-	gap: 8px;
-	font-size: 13.5px;
-	font-weight: 600;
-	color: var(--text);
-	margin-bottom: 9px;
-	line-height: 1.4;
-}
-.jv-ask-num {
-	flex: none;
-	width: 19px;
-	height: 19px;
-	border-radius: 99px;
-	background: var(--cta-bg);
-	color: var(--cta);
-	font-size: 11px;
-	font-weight: 700;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	margin-top: 1px;
-}
-.jv-ask--form .jv-ask-num {
-	display: none;
-}
-.jv-ask--form .jv-ask-q {
-	border-bottom: 0;
-	padding-bottom: 11px;
-	margin-bottom: 11px;
-}
-.jv-ask--form .jv-ask-q:last-of-type {
-	padding-bottom: 0;
-	margin-bottom: 0;
-}
-.jv-ask--form .jv-ask-qt {
-	font-size: 10.5px;
-	font-weight: 650;
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
-	color: var(--text-3);
-	margin-bottom: 6px;
-}
-.jv-ask-opts {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 7px;
-}
-.jv-ask-opt {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-	padding: 7px 12px;
-	background: var(--surface-2);
-	border: 1px solid var(--border);
-	border-radius: 9px;
-	font-family: inherit;
-	font-size: 12.5px;
-	font-weight: 500;
-	color: var(--text-2);
-	cursor: pointer;
-	transition: border-color 0.12s, background 0.12s, color 0.12s;
-}
-.jv-ask-opt:hover {
-	border-color: var(--border-2);
-	color: var(--text);
-}
-.jv-ask-opt.on {
-	border-color: var(--cta);
-	background: var(--cta-bg);
-	color: var(--text);
-	font-weight: 600;
-}
-.jv-ask-tick {
-	color: var(--cta);
-	font-weight: 700;
-	font-size: 11px;
-}
-.jv-ask-field {
-	width: 100%;
-	box-sizing: border-box;
-	padding: 8px 10px;
-	background: var(--surface-2);
-	border: 1px solid var(--border);
-	border-radius: 8px;
-	font-family: inherit;
-	font-size: 13px;
-	color: var(--text);
-	outline: none;
-}
-.jv-ask-field:focus {
-	border-color: var(--cta);
-}
-.jv-ask-link {
-	position: relative;
-}
-.jv-ask-linkmenu {
-	position: absolute;
-	left: 0;
-	right: 0;
-	top: calc(100% + 4px);
-	z-index: 20;
-	background: var(--surface);
-	border: 1px solid var(--border-2);
-	border-radius: 9px;
-	box-shadow: 0 8px 24px rgba(20, 20, 30, 0.14);
-	padding: 4px;
-	max-height: 220px;
-	overflow-y: auto;
-}
-.jv-ask-linkmenu button {
-	display: block;
-	width: 100%;
-	text-align: left;
-	padding: 7px 9px;
-	background: transparent;
-	border: none;
-	border-radius: 6px;
-	font-family: inherit;
-	font-size: 12.5px;
-	color: var(--text-2);
-	cursor: pointer;
-	white-space: normal;
-	overflow-wrap: anywhere;
-}
-.jv-ask-linkmenu button:hover {
-	background: var(--surface-2);
-	color: var(--text);
-}
-.jv-ask-other {
-	width: 100%;
-	box-sizing: border-box;
-	margin-top: 8px;
-	padding: 7px 10px;
-	background: var(--surface-2);
-	border: 1px solid var(--border);
-	border-radius: 8px;
-	font-family: inherit;
-	font-size: 12.5px;
-	color: var(--text);
-	outline: none;
-}
-.jv-ask-other:focus {
-	border-color: var(--cta);
-}
-.jv-ask-foot {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 10px;
-	margin-top: 14px;
-}
-.jv-ask-submit {
-	padding: 8px 16px;
-	background: var(--cta);
-	border: 1px solid var(--cta);
-	border-radius: 8px;
-	font-family: inherit;
-	font-size: 13px;
-	font-weight: 600;
-	color: var(--cta-fg);
-	cursor: pointer;
-	transition: opacity 0.12s;
-}
-.jv-ask-submit:hover {
-	opacity: 0.9;
-}
-.jv-ask-submit:disabled {
-	opacity: 0.45;
-	cursor: default;
-}
-.jv-ask-hint {
-	font-size: 11.5px;
-	color: var(--text-3);
-}
 /* scrollable record cards (alternative to a wide table) */
 .jv-cards {
 	margin-top: 12px;

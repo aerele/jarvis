@@ -58,10 +58,21 @@
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
 					     Approvals/Agents surfaces (renderMarkdown escapes HTML first) -->
-					<div v-else class="flex">
+					<div v-else class="flex flex-col">
 						<div
 							class="prose prose-sm min-w-0 max-w-none text-ink-gray-8"
 							v-html="renderBubble(m.content)"
+						/>
+						<!-- clarifying questions the agent asked before building: the
+						     SAME option cards the main chat renders. paletteVars is
+						     bound here because the jv-* tokens AskCard styles with are
+						     not global (SkillDetail precedent). -->
+						<AskCard
+							v-if="askFor === m.name && activeAsk"
+							:key="m.name"
+							:spec="activeAsk"
+							:style="paletteVars"
+							@submit="sendText"
 						/>
 					</div>
 				</template>
@@ -120,28 +131,36 @@
 			</div>
 		</div>
 
-		<!-- composer: autosizing textarea + voice + send -->
+		<!-- composer: autosizing textarea + voice + send.
+		     A RAW textarea with v-model, per Composer.vue's documented pattern:
+		     v-model (not :value + a manual emit) so Vue's own vModelText
+		     directive keeps handling IME composition. And the box is NEVER
+		     disabled: a focused, dirty textarea that is programmatically
+		     disabled gets blurred by the browser, which fires `change` — the
+		     frappe-ui Textarea this used to be listens on `change` too and
+		     re-emitted the PRE-CLEAR value, restoring the message we had just
+		     sent. Only the send button and send() are gated on `sending`. -->
 		<div class="shrink-0 border-t px-4 py-3">
-			<div ref="box" @keydown="onKeydown" @input="autoGrow">
-				<FormControl
-					type="textarea"
-					:rows="2"
-					placeholder="Describe the dashboard…"
-					:modelValue="draft"
-					:disabled="sending"
-					@update:modelValue="(v) => (draft = v)"
-				/>
-			</div>
+			<textarea
+				ref="box"
+				v-model="draft"
+				rows="2"
+				placeholder="Describe the dashboard…"
+				class="block w-full resize-none rounded border border-transparent bg-surface-gray-2 px-2 py-1.5 text-base text-ink-gray-8 transition-colors placeholder-ink-gray-4 hover:border-outline-gray-modals hover:bg-surface-gray-3 focus:border-outline-gray-4 focus:bg-surface-white focus:shadow-sm focus:outline-none focus:ring-0 focus-visible:ring-2 focus-visible:ring-outline-gray-3"
+				@keydown="onKeydown"
+				@input="autoGrow"
+			/>
 			<div class="mt-2 flex items-center justify-between gap-2">
 				<div class="flex items-center gap-1.5">
 					<VoiceRecorder v-if="caps.stt_enabled" compact @transcript="onTranscript" />
-					<!-- explicit data-mode: Auto lets the agent decide; Static bakes the
+					<!-- explicit data-mode: Auto leaves it to the opening interview
+					     (the agent asks before the first build); Static bakes the
 					     numbers in (one-time report); Live declares view-time sources.
 					     TabButtons = real radio-group semantics + the raised-chip look,
 					     so the active option isn't a second solid next to Send. -->
 					<span
 						class="ml-1 text-xs text-ink-gray-5"
-						title="How this dashboard gets its data"
+						title="How this dashboard gets its data. Auto: I'll ask you before the first build."
 					>
 						Data
 					</span>
@@ -154,7 +173,7 @@
 				<Button
 					variant="solid"
 					label="Send"
-					:disabled="!draft.trim()"
+					:disabled="!draft.trim() || sending"
 					:loading="sending"
 					@click="send"
 				/>
@@ -181,12 +200,16 @@
 //                      the html artifact onto the canvas pane.
 //   no socket        → (?nosocket / headless QA) a bounded refetch ladder after
 //                      each send stands in for the realtime frames.
-import { ref, computed, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
-import { Button, FeatherIcon, FormControl, LoadingIndicator, TabButtons, toast } from "frappe-ui";
+import { Button, FeatherIcon, LoadingIndicator, TabButtons, toast } from "frappe-ui";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
+import AskCard from "@/components/chat/AskCard.vue";
 import { renderMarkdown } from "@/markdown";
+import { parseAsk } from "@/lib/chatAsk";
+import { builderCanvasFrame } from "@/lib/dashboardRestore";
+import { useJarvisTheme } from "@/theme";
 import { session } from "@/data/session";
 import { sendDashboardChat, getDashboardConversation } from "@/api/dashboards";
 import { listPendingConfirmations, confirmTool, dismissTool } from "@/api";
@@ -204,12 +227,15 @@ const props = defineProps({
 	editingName: { type: String, default: "" },
 });
 
-// canvas: {message_id, items} for a canvas frame on our conversation;
+// canvas: {message_id, items[, restore]} for a canvas frame on our conversation
+// (restore = replayed from the loaded transcript, not a live socket frame);
 // activity: a run ended (the page may refresh lists); reset: New chat clicked.
 const emit = defineEmits(["canvas", "activity", "reset"]);
 
 const router = useRouter();
 const socket = inject("$socket", null);
+// AskCard styles with the jv-* tokens, which this frappe-ui page does not bind.
+const { paletteVars } = useJarvisTheme();
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
@@ -217,6 +243,11 @@ function errMsg(e) {
 
 // ── conversation persistence (per user, ChatComposer's namespacing idiom) ────
 const conversation = useStorage(`jarvis-dash-conv-${session.user || "anon"}`, "");
+// The message whose canvas the BUILDER last rendered - the page stamps it, this
+// pane replays exactly that one. Scanning the transcript for "the newest html"
+// instead would hand the builder an artifact main chat produced in the same
+// thread ("Open in chat" shares it) and arm Save over it.
+const canvasMsg = useStorage(`jarvis-dash-canvasmsg-${session.user || "anon"}`, "");
 
 // ── transcript ────────────────────────────────────────────────────────────────
 const messages = ref([]);
@@ -232,7 +263,10 @@ const bubbles = computed(() =>
 );
 
 // ChatView's stripBlocks, minimal subset: internal fenced blocks (actions,
-// confirms, cards…) never render as raw fences in the pane.
+// confirms, cards…) never render as raw fences in the pane. `jarvis-ask` is
+// stripped from the PROSE here too, but unlike the others it is not discarded:
+// <AskCard> renders it below the bubble (see activeAsk), so the clarifying
+// questions the agent asks before building are answerable in this pane.
 function stripBlocks(text) {
 	return (text || "")
 		.replace(/```jarvis-action[ \t]*\n[\s\S]*?```/g, "")
@@ -248,6 +282,20 @@ function stripBlocks(text) {
 function renderBubble(text) {
 	return renderMarkdown(stripBlocks(text));
 }
+
+// ── clarifying questions (ChatView's rule: the card lives on the LAST
+// assistant message only, so a stale ask from three turns ago isn't answerable)
+const lastAssistant = computed(() => {
+	const rows = bubbles.value;
+	for (let i = rows.length - 1; i >= 0; i--) {
+		if (rows[i].role === "assistant" && !rows[i].error) return rows[i];
+	}
+	return null;
+});
+const activeAsk = computed(() =>
+	lastAssistant.value ? parseAsk(lastAssistant.value.content) : null
+);
+const askFor = computed(() => (activeAsk.value ? lastAssistant.value.name : null));
 
 function scrollBottom() {
 	const el = scroller.value;
@@ -274,6 +322,13 @@ async function loadTranscript({ initial = false } = {}) {
 		const d = (await getDashboardConversation(conversation.value)) || {};
 		if (id !== loadReq) return;
 		messages.value = d.messages || [];
+		// Navigating away unmounts the builder and drops its canvas html, but the
+		// transcript we just reloaded still carries every artifact the agent drew
+		// (get_conversation returns each message's parsed `canvas` list). Replay
+		// the one the BUILDER last rendered so coming back is lossless — the
+		// page ignores it when a canvas is already on screen.
+		const frame = builderCanvasFrame(messages.value, canvasMsg.value);
+		if (frame) emit("canvas", { ...frame, restore: true });
 		nextTick(scrollBottom);
 	} catch (e) {
 		if (id !== loadReq) return;
@@ -414,7 +469,8 @@ const sending = ref(false);
 const draft = ref("");
 const box = ref(null);
 
-// Explicit data-mode toggle (goal requirement): "auto" = agent decides,
+// Explicit data-mode toggle (goal requirement): "auto" = one of the questions
+// the agent asks before the first build (it no longer guesses from wording),
 // "static" = baked one-time report, "live" = declared view-time sources.
 // Persisted per user so the choice survives page hops. ("auto" rather than ""
 // so reka-ui's RadioGroup has a real value to select.) The API wrapper only
@@ -427,13 +483,23 @@ const DATA_MODES = [
 const dataMode = useStorage(`jarvis-dash-datamode-${session.user || "anon"}`, "auto");
 
 function autoGrow() {
-	const ta = box.value && box.value.querySelector("textarea");
+	const ta = box.value;
 	if (!ta) return;
 	ta.style.height = "auto";
 	ta.style.height = Math.min(ta.scrollHeight, 180) + "px";
 }
+// Programmatic changes (the send that clears the box, dictation, the save
+// dialog's hand-off) only reach the DOM on the next flush — flush:"post" so the
+// textarea's value is already written when we measure scrollHeight. Typed input
+// grows synchronously in the @input handler so the box never lags the caret.
+watch(draft, autoGrow, { flush: "post" });
 
 function onKeydown(e) {
+	// An Enter that CONFIRMS an IME candidate (Japanese/Chinese/Korean) belongs
+	// to the composition, not to us - sending on it posts the half-converted
+	// reading. keyCode 229 is the pre-`isComposing` browsers' version of the
+	// same signal.
+	if (e.isComposing || e.keyCode === 229) return;
 	// Enter sends, Shift+Enter keeps the newline
 	if (e.key === "Enter" && !e.shiftKey) {
 		e.preventDefault();
@@ -445,15 +511,19 @@ function onTranscript(text) {
 	// dictation appends to any typed draft (ChatComposer precedent)
 	const cur = draft.value;
 	draft.value = cur.trim() ? cur.replace(/\s+$/, "") + " " + text : text;
-	nextTick(autoGrow);
 }
+
+// send() can be handed a DIFFERENT conversation than the one it posted to (the
+// stored one was deleted or reassigned server-side, so send_message opened a
+// fresh one). That repoint is OURS: the run it just started is the one on
+// screen, so the follow watcher below must not tear its Thinking indicator down.
+let ownRepoint = false;
 
 async function send() {
 	const text = draft.value.trim();
 	if (!text || sending.value) return;
 	sending.value = true;
 	draft.value = "";
-	nextTick(autoGrow);
 	// optimistic user bubble - reconciled by the next transcript refetch
 	const tmpName = `tmp-${Date.now()}`;
 	messages.value = [...messages.value, { name: tmpName, role: "user", content: text }];
@@ -475,6 +545,7 @@ async function send() {
 			return;
 		}
 		if (r.conversation_id && r.conversation_id !== conversation.value) {
+			ownRepoint = true;
 			conversation.value = r.conversation_id;
 		}
 		runActive.value = true;
@@ -489,17 +560,44 @@ async function send() {
 	}
 }
 
+// "New chat" ASKS the page rather than acting: the page owns the canvas and
+// puts up the discard confirm, then calls resetChat() back through the exposed
+// handle if the user goes ahead. Resetting here first would leave a cancelled
+// confirm with an emptied chat next to a canvas that survived.
 function newChat() {
-	loadReq++; // drop any in-flight transcript load
-	conversation.value = "";
-	messages.value = [];
-	pendingCards.value = [];
-	runActive.value = false;
-	draft.value = "";
-	nextTick(autoGrow);
-	// the page clears its builder seed (canvas html, editing state) with us
 	emit("reset");
 }
+
+// Drop everything that belongs to the thread on screen, leaving the pointer
+// alone (the conversation watcher below re-points it). `keepRun` is for the
+// one case where the thread moved but the run did not: our own send.
+function clearThread({ keepRun = false } = {}) {
+	loadReq++; // drop any in-flight transcript load
+	messages.value = [];
+	pendingCards.value = [];
+	if (!keepRun) runActive.value = false;
+	draft.value = "";
+}
+
+function resetChat() {
+	clearThread();
+	conversation.value = "";
+}
+
+// The page re-points the sticky conversation slot (opening a saved dashboard
+// for editing resumes the thread that built it). Follow it, or the transcript
+// on screen belongs to a different dashboard than the one the next send goes
+// to. Guarded on `prev`: "" -> id is our own first send, already reconciled.
+watch(conversation, (id, prev) => {
+	if (!prev || id === prev) return;
+	const own = ownRepoint;
+	ownRepoint = false;
+	clearThread({ keepRun: own });
+	if (id) {
+		loadTranscript({ initial: true });
+		refreshPending();
+	}
+});
 
 // Post a message into this pane programmatically (the save dialog's "Ask the
 // assistant to fix these" hand-off). Ignored while a send is already in flight.
@@ -507,10 +605,9 @@ function sendText(text) {
 	const t = String(text || "").trim();
 	if (!t || sending.value) return;
 	draft.value = t;
-	nextTick(autoGrow);
 	send();
 }
-defineExpose({ newChat, sendText });
+defineExpose({ resetChat, sendText });
 
 // ── realtime ──────────────────────────────────────────────────────────────────
 function onEvent(p) {

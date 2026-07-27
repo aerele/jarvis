@@ -385,6 +385,10 @@ function onKeydownInternal(e) {
 	// The host claimed this key (chat: mention nav, prompt history, its own
 	// Enter-to-send) — never double-handle it.
 	if (e.defaultPrevented) return;
+	// An Enter that CONFIRMS an IME candidate (Japanese/Chinese/Korean) belongs
+	// to the composition, not to us. keyCode 229 is the pre-`isComposing`
+	// browsers' version of the same signal.
+	if (e.isComposing || e.keyCode === 229) return;
 	if (e.key === "Enter" && !e.shiftKey) {
 		e.preventDefault();
 		emit("submit");

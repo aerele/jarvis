@@ -60,8 +60,12 @@
 					dashboard here. You can still open and view saved dashboards.
 				</span>
 			</div>
+			<!-- v-show, NOT v-if: switching to Saved must not unmount the chat
+			     pane. Its socket listener is torn down on unmount and the agent's
+			     kind:"canvas" frame is a ONE-SHOT publish, so a build that lands
+			     while the user is looking at Saved would never reach the canvas. -->
 			<div
-				v-if="activeTab === 'builder'"
+				v-show="activeTab === 'builder'"
 				ref="builderEl"
 				class="flex min-h-0 flex-1 flex-col"
 			>
@@ -112,6 +116,7 @@
 						</div>
 					</div>
 					<DashboardCanvas
+						ref="canvasRef"
 						class="min-h-0 flex-1"
 						mode="builder"
 						:html="builderHtml"
@@ -159,7 +164,7 @@
 			</div>
 
 			<!-- ============ Saved tab ============ -->
-			<SavedDashboardsTab v-else class="min-h-0 flex-1" />
+			<SavedDashboardsTab v-if="activeTab === 'saved'" class="min-h-0 flex-1" />
 
 			<SaveDashboardDialog
 				v-model="saveOpen"
@@ -171,6 +176,20 @@
 				:theme="builderTheme"
 				@saved="onSaved"
 				@fix-in-chat="fixInChat"
+			/>
+
+			<!-- Discard confirm. NOT frappe-ui's confirmDialog: that has room for
+			     exactly one action, and telling someone who is about to lose a
+			     canvas that "its chat stays in your conversations" is only useful
+			     with a way to go there. -->
+			<Dialog
+				v-model="discardOpen"
+				:options="{
+					title: 'Discard this unsaved dashboard?',
+					message: 'Its chat stays in your conversations.',
+					actions: discardActions,
+				}"
+				@close="settleDiscard(false)"
 			/>
 		</template>
 	</div>
@@ -190,7 +209,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
-import { Badge, Breadcrumbs, Button, Dropdown, FeatherIcon, toast } from "frappe-ui";
+import { Badge, Breadcrumbs, Button, Dialog, Dropdown, FeatherIcon, toast } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
 import { session } from "@/data/session";
@@ -256,6 +275,7 @@ const savedName = ref(""); // last save's name → the "View dashboard" link
 const detectedSources = ref([]); // parsed #jarvis-sources (DashboardCanvas emit)
 const saveOpen = ref(false);
 const chatPane = ref(null);
+const canvasRef = ref(null);
 // Named render theme; "Jarvis" (the app's design language) unless picked or
 // seeded from the edited dashboard.
 const builderTheme = ref(DEFAULT_THEME);
@@ -269,18 +289,62 @@ const themeOptions = THEME_OPTIONS.map((t) => ({
 // pane resumes the right thread and data mode instead of a stale sticky one.
 const chatConv = useStorage(`jarvis-dash-conv-${session.user || "anon"}`, "");
 const dashDataMode = useStorage(`jarvis-dash-datamode-${session.user || "anon"}`, "auto");
+// The dashboard this builder is EDITING, and the message whose canvas it last
+// rendered. Both are page state that a navigation would otherwise drop - and
+// dropping the first one is not cosmetic: without it a remount restores the
+// canvas but not the binding, so "Save dashboard" writes a SECOND row instead of
+// updating the one on screen.
+const editingSticky = useStorage(`jarvis-dash-editing-${session.user || "anon"}`, "");
+const canvasMsg = useStorage(`jarvis-dash-canvasmsg-${session.user || "anon"}`, "");
+
+// A pending ?edit=<name> deep-link, or - on a plain remount - the dashboard the
+// builder was editing when it went away. Read synchronously at setup, i.e.
+// BEFORE the chat pane mounts and replays its transcript's canvas: an explicit
+// edit target owns the canvas, so its restore must not flash a build first.
+const routeEdit = typeof route.query.edit === "string" ? route.query.edit : "";
+const editSeed = ref(routeEdit || editingSticky.value);
+
+// Message ids whose artifact could not be replayed (the File was purged, the
+// conversation was reassigned). The pane emits a restore frame on EVERY
+// transcript load - including the 300ms-debounced refetch behind each realtime
+// frame - so without this latch an unreadable artifact means an unbounded run of
+// silent, failing get_canvas calls (a full File load + a disk read each time).
+const failedRestores = new Set();
 
 // Chat drew/updated an artifact: pick the LAST html item and pull its
 // render-ready content onto the canvas.
-async function onCanvas({ message_id, items }) {
+//
+// `restore` marks a replay of the canvas this builder last rendered, found
+// again in the loaded transcript (the chat pane emits one on every transcript
+// load), rather than a live socket frame. It rehydrates the canvas after a
+// navigation dropped it, and must never
+// overwrite what is already on screen - a live frame for the turn in flight
+// always wins over a replay of an older turn.
+async function onCanvas({ message_id, items, restore }) {
+	if (restore && (builderHtml.value || editSeed.value)) return;
+	if (restore && failedRestores.has(message_id)) return;
 	const htmlItem = [...(items || [])].reverse().find((it) => it && it.type === "html");
 	if (!htmlItem || !message_id) return;
 	try {
 		const r = await getCanvas(message_id, htmlItem.name, 0);
 		const content = r && (r.content || r.data_url);
-		if (content) builderHtml.value = content;
+		if (!content) {
+			if (restore) failedRestores.add(message_id);
+			return;
+		}
+		// The await above is a real round trip: re-check that a live frame (or a
+		// resolved ?edit= seed) did not land while this replay was in flight.
+		if (restore && (builderHtml.value || editSeed.value)) return;
+		builderHtml.value = content;
+		// Remember WHICH message is on the canvas: a later rehydration replays
+		// exactly this artifact instead of the newest html in a conversation main
+		// chat may also have drawn in.
+		canvasMsg.value = message_id;
 	} catch (e) {
-		toast.error(errMsg(e));
+		// A restore is best-effort background work the user did not ask for -
+		// a deleted/expired artifact must not raise a toast on page load.
+		if (restore) failedRestores.add(message_id);
+		else toast.error(errMsg(e));
 	}
 }
 
@@ -299,59 +363,178 @@ function fixInChat({ text }) {
 
 function onSaved(detail) {
 	savedName.value = (detail && detail.name) || "";
-	// keep editing the row we just saved - the next Save is "Save changes"
-	if (detail && detail.name) editingDetail.value = detail;
+	// keep editing the row we just saved - the next Save is "Save changes", and
+	// it stays that way across a navigation (the sticky target below)
+	if (detail && detail.name) {
+		editingDetail.value = detail;
+		editingSticky.value = detail.name;
+	}
 	toast.success("Dashboard saved");
+}
+
+// A canvas the user would lose: html on the builder that isn't (still) the
+// document of the dashboard we last saved or opened for editing.
+const unsavedCanvas = computed(
+	() => !!builderHtml.value && builderHtml.value !== ((editingDetail.value || {}).html || "")
+);
+
+// The canvas is never thrown away silently. Every path that would drop an
+// unsaved dashboard (New dashboard, the chat pane's New chat, opening another
+// dashboard for editing) asks first. The chat itself is NOT lost either way -
+// it stays in the user's conversations - so say so, and offer to go there.
+const discardOpen = ref(false);
+let discardYes = null;
+let discardNo = null;
+
+function confirmDiscard(onYes, onNo) {
+	if (!unsavedCanvas.value) {
+		onYes();
+		return;
+	}
+	discardYes = onYes;
+	discardNo = onNo || null;
+	discardOpen.value = true;
+}
+
+// Both outcomes run exactly once: the callbacks are taken before the dialog
+// closes, so the component's own @close can never fire a second settle.
+function settleDiscard(yes) {
+	const y = discardYes;
+	const n = discardNo;
+	discardYes = null;
+	discardNo = null;
+	discardOpen.value = false;
+	if (yes) {
+		if (y) y();
+	} else if (n) n();
+}
+
+const discardActions = computed(() => {
+	const actions = [{ label: "Discard", variant: "solid", onClick: () => settleDiscard(true) }];
+	if (chatConv.value) {
+		actions.push({
+			label: "Open its chat",
+			variant: "subtle",
+			onClick: () => {
+				const id = chatConv.value;
+				settleDiscard(false);
+				router.push("/c/" + id);
+			},
+		});
+	}
+	return actions;
+});
+
+function clearBuilder() {
+	// The pane stays mounted across tabs now, so clear its thread through the
+	// exposed handle rather than relying on a remount to do it.
+	if (chatPane.value && chatPane.value.resetChat) chatPane.value.resetChat();
+	chatConv.value = "";
+	dashDataMode.value = "auto";
+	editingSticky.value = "";
+	canvasMsg.value = "";
+	editSeed.value = "";
+	builderHtml.value = "";
+	editingDetail.value = null;
+	savedName.value = "";
+	detectedSources.value = [];
+	builderTheme.value = DEFAULT_THEME;
 }
 
 // "New dashboard" (Saved tab header) - fresh chat + empty canvas on Builder.
 // One navigation clears the tab hash AND any ?edit seed together (resetBuilder
 // + setTab separately would race on route.query).
 function newDashboard() {
-	chatConv.value = ""; // pane isn't mounted on the Saved tab; clear before it is
-	dashDataMode.value = "auto";
-	builderHtml.value = "";
-	editingDetail.value = null;
-	savedName.value = "";
-	detectedSources.value = [];
-	builderTheme.value = DEFAULT_THEME;
-	activeTab.value = "builder";
-	router.push({ hash: "", query: {} });
+	confirmDiscard(() => {
+		clearBuilder();
+		activeTab.value = "builder";
+		router.push({ hash: "", query: {} });
+	});
 }
 
 // Also fired by the chat pane's own "New chat" (emit("reset")).
 function resetBuilder() {
-	chatConv.value = "";
-	dashDataMode.value = "auto";
-	builderHtml.value = "";
-	editingDetail.value = null;
-	savedName.value = "";
-	detectedSources.value = [];
-	builderTheme.value = DEFAULT_THEME;
-	if (route.query.edit) router.replace({ query: {}, hash: route.hash });
+	confirmDiscard(() => {
+		clearBuilder();
+		if (route.query.edit) router.replace({ query: {}, hash: route.hash });
+	});
 }
 
 // ?edit=<name> deep-link: seed the canvas + save dialog from a saved dashboard.
 // Also resume the conversation that built it (so the agent has memory of the
 // document) and seed the data-mode from its derived type, so an edit session
 // never silently drifts onto/converts the wrong dashboard.
-async function loadEdit(name) {
+//
+// It also repoints the single sticky conversation slot, so if an unsaved canvas
+// is on the builder it gets the same discard confirm as New dashboard.
+//
+// `deepLink: false` is the remount path (restoring the sticky editing target):
+// silent about a target that has since been deleted, and it never blanks the
+// thread in progress just because the stored document names no conversation.
+async function loadEdit(name, { deepLink = true } = {}) {
+	// The seed is settled only when the confirm is - clearing it up front would
+	// let a transcript restore land on the canvas while the dialog is still up.
+	const settle = () => {
+		if (editSeed.value === name) editSeed.value = "";
+	};
 	try {
 		const d = await getDashboard(name);
-		if (d && d.name) {
+		if (!d || !d.name) {
+			settle();
+			return;
+		}
+		confirmDiscard(() => {
 			builderHtml.value = d.html || "";
 			editingDetail.value = d;
+			editingSticky.value = d.name;
 			savedName.value = d.name;
 			builderTheme.value = themeKey(d.theme);
+			// the canvas is this document now, not an artifact from the transcript
+			canvasMsg.value = "";
 			// resume the build thread, or a fresh one — never the stale sticky
 			// conversation left over from editing a different dashboard.
-			chatConv.value = d.source_conversation || "";
-			dashDataMode.value = d.dashboard_type === "Connected" ? "live" : "static";
-		}
+			if (deepLink || d.source_conversation) {
+				chatConv.value = d.source_conversation || "";
+				dashDataMode.value = d.dashboard_type === "Connected" ? "live" : "static";
+			}
+			settle();
+		}, settle);
 	} catch (e) {
-		toast.error(errMsg(e));
+		// A restored target that has since been deleted is not the user's doing -
+		// forget it silently instead of toasting on every page load.
+		if (deepLink) toast.error(errMsg(e));
+		else editingSticky.value = "";
+		settle();
 	}
 }
+
+// ?edit= also changes WITHOUT a remount — "Edit in builder" on a second
+// dashboard while this page is already open. A one-shot read at setup made that
+// silently repoint the builder AND made loadEdit's discard confirm unreachable
+// (a fresh mount always has an empty canvas). Watch it, and the confirm is real.
+watch(
+	() => route.query.edit,
+	(v) => {
+		if (route.name !== "DashboardsPage") return;
+		const name = typeof v === "string" ? v : "";
+		if (!name || name === (editingDetail.value || {}).name) return;
+		editSeed.value = name;
+		loadEdit(name);
+	}
+);
+
+// v-show keeps the builder mounted while Saved is up, so its iframe loads and
+// runs at 0x0 behind `display:none` — charts initialised against a zero-size
+// container draw nothing and do not self-heal. Re-drive the document when the
+// canvas is visible again (flush:"post", i.e. after `display` is back).
+watch(
+	activeTab,
+	(v) => {
+		if (v !== "builder" || !builderHtml.value) return;
+		if (canvasRef.value && canvasRef.value.rebuild) canvasRef.value.rebuild();
+	},
+	{ flush: "post" }
+);
 
 // ── the drag-split (Sidebar's resize machinery, vertical) ────────────────────
 const builderEl = ref(null);
@@ -422,7 +605,8 @@ onMounted(async () => {
 	}
 	if (fresh) caps.value = { ...caps.value, ...fresh };
 
-	const edit = typeof route.query.edit === "string" ? route.query.edit : "";
-	if (edit) loadEdit(edit);
+	// An explicit ?edit= is the user asking; the sticky target is this page
+	// remembering what it was editing, so a failure there stays quiet.
+	if (editSeed.value) loadEdit(editSeed.value, { deepLink: !!routeEdit });
 });
 </script>

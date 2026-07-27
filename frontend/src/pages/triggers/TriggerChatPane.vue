@@ -71,10 +71,22 @@
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
 					     Approvals/Agents surfaces (renderMarkdown escapes HTML first) -->
-					<div v-else class="flex">
+					<div v-else class="flex flex-col">
 						<div
 							class="prose prose-sm min-w-0 max-w-none text-ink-gray-8"
 							v-html="renderBubble(m.content)"
+						/>
+						<!-- clarifying questions: the SAME option cards the main chat
+						     renders. `jarvis-ask` is a standing capability, so a model
+						     that asks here must not leave an empty bubble nobody can
+						     answer. paletteVars is bound because the jv-* tokens AskCard
+						     styles with are not global (SkillDetail precedent). -->
+						<AskCard
+							v-if="askFor === m.name && activeAsk"
+							:key="m.name"
+							:spec="activeAsk"
+							:style="paletteVars"
+							@submit="sendText"
 						/>
 					</div>
 				</template>
@@ -136,22 +148,26 @@
 		<!-- composer: autosizing textarea + voice + send. Fully disabled for
 		     non-admins (the note above explains why): the agent refuses the
 		     request server-side anyway, so submitting would only burn a slow
-		     LLM round trip. -->
+		     LLM round trip. That permission lock is the ONLY `disabled` here:
+		     a RAW textarea with v-model (Composer.vue's documented pattern -
+		     Vue's vModelText keeps handling IME composition), and `sending`
+		     gates the send button and send() alone. Disabling a focused, dirty
+		     textarea mid-send blurs it, fires `change`, and the frappe-ui
+		     Textarea this used to be re-emitted the PRE-CLEAR value, putting
+		     the just-sent message back in the box. -->
 		<div class="shrink-0 border-t px-4 py-3">
-			<div ref="box" @keydown="onKeydown" @input="autoGrow">
-				<FormControl
-					type="textarea"
-					:rows="2"
-					:placeholder="
-						caps.can_manage
-							? 'Describe the trigger…'
-							: 'Requires the Jarvis Admin role'
-					"
-					:modelValue="draft"
-					:disabled="sending || !caps.can_manage"
-					@update:modelValue="(v) => (draft = v)"
-				/>
-			</div>
+			<textarea
+				ref="box"
+				v-model="draft"
+				rows="2"
+				:placeholder="
+					caps.can_manage ? 'Describe the trigger…' : 'Requires the Jarvis Admin role'
+				"
+				:disabled="!caps.can_manage"
+				class="block w-full resize-none rounded border border-transparent bg-surface-gray-2 px-2 py-1.5 text-base text-ink-gray-8 transition-colors placeholder-ink-gray-4 hover:border-outline-gray-modals hover:bg-surface-gray-3 focus:border-outline-gray-4 focus:bg-surface-white focus:shadow-sm focus:outline-none focus:ring-0 focus-visible:ring-2 focus-visible:ring-outline-gray-3 disabled:bg-surface-gray-1 disabled:text-ink-gray-5 disabled:placeholder-ink-gray-3"
+				@keydown="onKeydown"
+				@input="autoGrow"
+			/>
 			<div class="mt-2 flex items-center justify-between gap-2">
 				<div class="flex items-center gap-1.5">
 					<VoiceRecorder
@@ -163,7 +179,7 @@
 				<Button
 					variant="solid"
 					label="Send"
-					:disabled="!draft.trim() || !caps.can_manage"
+					:disabled="!draft.trim() || sending || !caps.can_manage"
 					:loading="sending"
 					@click="send"
 				/>
@@ -190,12 +206,15 @@
 //                      created/edited by the agent).
 //   no socket        → (?nosocket / headless QA) a bounded refetch ladder after
 //                      each send stands in for the realtime frames.
-import { ref, computed, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
-import { Button, FeatherIcon, FormControl, LoadingIndicator, toast } from "frappe-ui";
+import { Button, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
+import AskCard from "@/components/chat/AskCard.vue";
 import { renderMarkdown } from "@/markdown";
+import { parseAsk } from "@/lib/chatAsk";
+import { useJarvisTheme } from "@/theme";
 import { session } from "@/data/session";
 import { sendTriggerChat, getTriggerConversation } from "@/api/triggers";
 import { listPendingConfirmations, confirmTool, dismissTool } from "@/api";
@@ -210,6 +229,8 @@ const emit = defineEmits(["activity"]); // parent refreshes the triggers list
 
 const router = useRouter();
 const socket = inject("$socket", null);
+// AskCard styles with the jv-* tokens, which this frappe-ui page does not bind.
+const { paletteVars } = useJarvisTheme();
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
@@ -232,7 +253,9 @@ const bubbles = computed(() =>
 );
 
 // ChatView's stripBlocks, minimal subset: internal fenced blocks (actions,
-// confirms, cards…) never render as raw fences in the pane.
+// confirms, cards…) never render as raw fences in the pane. `jarvis-ask` is
+// stripped from the PROSE here too, but unlike the others it is not discarded:
+// <AskCard> renders it below the bubble (see activeAsk).
 function stripBlocks(text) {
 	return (text || "")
 		.replace(/```jarvis-action[ \t]*\n[\s\S]*?```/g, "")
@@ -248,6 +271,20 @@ function stripBlocks(text) {
 function renderBubble(text) {
 	return renderMarkdown(stripBlocks(text));
 }
+
+// ── clarifying questions (ChatView's rule: the card lives on the LAST
+// assistant message only, so a stale ask from three turns ago isn't answerable)
+const lastAssistant = computed(() => {
+	const rows = bubbles.value;
+	for (let i = rows.length - 1; i >= 0; i--) {
+		if (rows[i].role === "assistant" && !rows[i].error) return rows[i];
+	}
+	return null;
+});
+const activeAsk = computed(() =>
+	lastAssistant.value ? parseAsk(lastAssistant.value.content) : null
+);
+const askFor = computed(() => (activeAsk.value ? lastAssistant.value.name : null));
 
 function scrollBottom() {
 	const el = scroller.value;
@@ -421,13 +458,23 @@ const draft = ref("");
 const box = ref(null);
 
 function autoGrow() {
-	const ta = box.value && box.value.querySelector("textarea");
+	const ta = box.value;
 	if (!ta) return;
 	ta.style.height = "auto";
 	ta.style.height = Math.min(ta.scrollHeight, 180) + "px";
 }
+// Programmatic changes (the send that clears the box, dictation) only reach the
+// DOM on the next flush - flush:"post" so the textarea's value is already
+// written when we measure scrollHeight. Typed input grows synchronously in the
+// @input handler so the box never lags the caret.
+watch(draft, autoGrow, { flush: "post" });
 
 function onKeydown(e) {
+	// An Enter that CONFIRMS an IME candidate (Japanese/Chinese/Korean) belongs
+	// to the composition, not to us - sending on it posts the half-converted
+	// reading. keyCode 229 is the pre-`isComposing` browsers' version of the
+	// same signal.
+	if (e.isComposing || e.keyCode === 229) return;
 	// Enter sends, Shift+Enter keeps the newline
 	if (e.key === "Enter" && !e.shiftKey) {
 		e.preventDefault();
@@ -439,7 +486,6 @@ function onTranscript(text) {
 	// dictation appends to any typed draft (ChatComposer precedent)
 	const cur = draft.value;
 	draft.value = cur.trim() ? cur.replace(/\s+$/, "") + " " + text : text;
-	nextTick(autoGrow);
 }
 
 async function send() {
@@ -450,7 +496,6 @@ async function send() {
 	if (!text || sending.value) return;
 	sending.value = true;
 	draft.value = "";
-	nextTick(autoGrow);
 	// optimistic user bubble - reconciled by the next transcript refetch
 	const tmpName = `tmp-${Date.now()}`;
 	messages.value = [...messages.value, { name: tmpName, role: "user", content: text }];
@@ -479,6 +524,16 @@ async function send() {
 	}
 }
 
+// Post a message into this pane programmatically (the AskCard's submitted
+// answers). Ignored while a send is already in flight - the card keeps its
+// picks, so the user can submit again once the pane is free.
+function sendText(text) {
+	const t = String(text || "").trim();
+	if (!t || sending.value) return;
+	draft.value = t;
+	send();
+}
+
 function newChat() {
 	loadReq++; // drop any in-flight transcript load
 	conversation.value = "";
@@ -486,7 +541,6 @@ function newChat() {
 	pendingCards.value = [];
 	runActive.value = false;
 	draft.value = "";
-	nextTick(autoGrow);
 }
 
 // ── realtime ──────────────────────────────────────────────────────────────────
