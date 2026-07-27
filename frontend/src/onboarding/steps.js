@@ -94,7 +94,7 @@ export function notReadyNote(detail, agent = DEFAULT_AGENT_NAME) {
 // and ends with "." (e.g. "Your OpenAI account has reached its usage limit.
 // It resets in about 27 hours."). Every other terminal status this field can
 // hold - "failed: auth: ...", "failed: rate-limited; retry shortly",
-// "failed: unexpected error; see Error Log", "skipped: no longer proxy-valid
+// "failed: unexpected error; see Error Log", "skipped: no longer pool-valid
 // after re-read (...)" - is developer/diagnostic text and stays wrapped in
 // the generic explanatory copy below. Mirror any change to the "Your ... ."
 // shape check on the admin/bench side in this same regex.

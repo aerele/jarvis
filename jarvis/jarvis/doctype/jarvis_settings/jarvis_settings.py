@@ -490,7 +490,7 @@ class JarvisSettings(Document):
 
 	def _on_update_unified_llm(self):
 		"""New LLM path: validate → derive proxy_active/proxy_recommended →
-		mirror models[0] into legacy fields → route to proxy or single-model path.
+		mirror models[0] into legacy fields → route to pool or single-model path.
 
 		Runs when the models table has rows OR a preset is set.
 		Validate fires BEFORE any mutation so that errors surface clean without
@@ -498,6 +498,7 @@ class JarvisSettings(Document):
 		"""
 		from jarvis.jarvis.pool_serialize import (
 			build_pool_payload,
+			compute_pool_mode,
 			compute_proxy_active,
 			validate_models,
 		)
@@ -508,6 +509,11 @@ class JarvisSettings(Document):
 			frappe.throw("<br>".join(errors), title="LLM Configuration")
 
 		# Step 2: Compute and persist derived flags (read-only, no modified bump).
+		# pool_mode picks the SYNC LEG (/llm-pool vs /llm-creds); proxy_active is
+		# the narrower "a Bifrost+cliproxy sidecar is deployed" and is persisted
+		# for the chat/monitor surfaces. A BYO api-key pool is pool_mode WITHOUT
+		# proxy_active — the fleet renders it openclaw-direct, no sidecar.
+		pool_mode = compute_pool_mode(self)
 		proxy_active = compute_proxy_active(self)
 		enabled_models = [m for m in (self.models or []) if m.enabled]
 		proxy_recommended = len(enabled_models) == 1 and not bool(getattr(self, "preset", None))
@@ -552,15 +558,18 @@ class JarvisSettings(Document):
 					# Mask in-memory so nothing downstream re-writes plaintext.
 					self.llm_api_key = "*" * 10
 
-		# Step 4: Route to proxy or single-model path.
-		if proxy_active:
-			# Proxy path: enqueue the admin call. The worker re-reads
+		# Step 4: Route to pool or single-model path. Keyed on pool_mode, NOT
+		# proxy_active: an openclaw-direct pool still has to be pushed as a whole
+		# spec through /llm-pool, and pushing its models[0] through /llm-creds
+		# instead would knock the container down to a single credential.
+		if pool_mode:
+			# Pool path: enqueue the admin call. The worker re-reads
 			# Jarvis Settings at run time so no snapshot is needed here.
 			# validate_models() already ran above (Step 1) so we know the
 			# current config is clean before enqueuing.
 			#
 			# Diff gate (pool analog of _classify_llm_change): every save of
-			# this Single lands here when proxy_active - including saves that
+			# this Single lands here when pool_mode - including saves that
 			# touch nothing pool-related (pattern-learning windows, chat-device
 			# writes through save()) - and each one
 			# re-POSTed the FULL pool spec + secrets to admin. Skip the
@@ -597,7 +606,7 @@ class JarvisSettings(Document):
 		"""Comparable snapshot of the pool-RELEVANT state of a settings doc.
 
 		Covers exactly the inputs that feed the admin pool push:
-		``preset`` + ``routing_mode`` (read by compute_proxy_active /
+		``preset`` + ``routing_mode`` (read by compute_pool_mode /
 		build_pool_payload) and, per models[] child row, every field
 		build_pool_payload serializes: provider, model, base_url, tier,
 		order, credential_type, enabled, rotation, plus the two row
@@ -1086,7 +1095,7 @@ def _cleared_subscription_status_fields() -> dict:
 	linger next to a `failed:` status the next poll reads. Never merged into
 	the "ok (...)" success write, nor into a skip path where the container's
 	last real apply is still the truth (the pre-enqueue redundant-sync skip,
-	or the run-time "no longer proxy-valid" skip - neither one touched the
+	or the run-time "no longer pool-valid" skip - neither one touched the
 	container, so whatever it's currently running is unchanged)."""
 	return {
 		"last_subscription_status": "",
@@ -1192,7 +1201,7 @@ def _enqueued_sync_via_admin_pool(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> 
 	``last_subscription_status`` / ``last_sync_warnings`` and are CLEARED on
 	every failed/skipped-on-retries-exhausted terminal write so a stale
 	warning from a prior successful apply never lingers next to a
-	"failed:" status. The run-time "no longer proxy-valid" skip below
+	"failed:" status. The run-time "no longer pool-valid" skip below
 	leaves them untouched, like the pre-enqueue redundant-sync skip: the
 	container itself was never touched, so its last real apply is still
 	the truth.
@@ -1254,15 +1263,16 @@ def _enqueued_sync_via_admin_pool(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> 
 		settings = _frappe.get_single("Jarvis Settings")
 
 		# Re-validate: the config may have changed between enqueue and run.
-		# If no longer proxy-valid, skip the push.
-		from jarvis.jarvis.pool_serialize import compute_proxy_active, validate_models
+		# If it is no longer a pool, skip the push. (Pool MODE, not proxy_active:
+		# a BYO api-key pool has no sidecar but is still pushed through /llm-pool.)
+		from jarvis.jarvis.pool_serialize import compute_pool_mode, validate_models
 
 		revalidation_errors = validate_models(settings)
-		if revalidation_errors or not compute_proxy_active(settings):
-			reason = "; ".join(revalidation_errors) if revalidation_errors else "not proxy_active"
+		if revalidation_errors or not compute_pool_mode(settings):
+			reason = "; ".join(revalidation_errors) if revalidation_errors else "no longer a pool"
 			settings.db_set(
 				"last_sync_status",
-				f"skipped: no longer proxy-valid after re-read ({reason})",
+				f"skipped: no longer pool-valid after re-read ({reason})",
 				update_modified=False,
 			)
 			return
@@ -1548,7 +1558,7 @@ def reconcile_pending_llm_sync() -> None:
 	- No-op unless the tenant is in a state the admin reconcile might have
 	  resolved since the bench last looked: either the explicit
 	  ``pending: admin applying config`` marker, OR a pool whose FIRST apply is
-	  still unproven (proxy_active + no llm_pool_synced_at) sitting at a
+	  still unproven (pool mode + no llm_pool_synced_at) sitting at a
 	  pending/failed status (the onboarding livelock class).
 	- Probes admin get_connection EXACTLY ONCE (chat_readiness); stamps the
 	  terminal success markers only on "Ready" (admin gates Ready on
@@ -1572,8 +1582,12 @@ def reconcile_pending_llm_sync() -> None:
 		if not admin_api_key and not customer_pw:
 			return
 
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
 		status = settings.get("last_sync_status") or ""
-		proxy_active = bool(settings.get("proxy_active"))
+		# The evidence marker follows the SYNC LEG, so this is pool mode, not the
+		# narrower proxy_active (an openclaw-direct pool stamps llm_pool_synced_at).
+		pool_mode = compute_pool_mode(settings)
 		pool_synced = bool(settings.get("llm_pool_synced_at"))
 		direct_synced = bool(settings.get("llm_direct_synced_at"))
 
@@ -1587,9 +1601,9 @@ def reconcile_pending_llm_sync() -> None:
 		# on llm_direct_synced_at, so an unproven direct tenant is the same
 		# stranding class as an unproven pool.
 		is_stuck = status.startswith("pending:") or status.startswith("failed:")
-		is_unproven_pool = proxy_active and not pool_synced and is_stuck
+		is_unproven_pool = pool_mode and not pool_synced and is_stuck
 		is_unproven_direct = (
-			not proxy_active
+			not pool_mode
 			and not direct_synced
 			and is_stuck
 			and (settings.get("llm_auth_mode") or "api_key") == "api_key"
@@ -1603,7 +1617,7 @@ def reconcile_pending_llm_sync() -> None:
 			# Stamps the evidence marker for whichever mode is active:
 			# llm_pool_synced_at for pool tenants, llm_direct_synced_at for
 			# single-model tenants (is_ready_for_chat's first-activation gates).
-			_stamp_converged_ok(settings, is_pool=proxy_active)
+			_stamp_converged_ok(settings, is_pool=pool_mode)
 	except Exception:
 		frappe.log_error(
 			title="Jarvis: reconcile_pending_llm_sync failed",

@@ -187,29 +187,126 @@ def compute_auto_enable(pool) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# compute_proxy_active — new helper (re-sourced from settings)
+# Derived mode flags — compute_pool_mode / compute_proxy_active
+#
+# These answer two DIFFERENT questions, and conflating them is what broke the
+# default chat turn for BYO api-key pools. See compute_proxy_active.
 # ---------------------------------------------------------------------------
 
 
-def compute_proxy_active(settings) -> bool:
-	"""Return True when the proxy should be engaged.
+def compute_pool_mode(settings) -> bool:
+	"""Return True when this tenant's LLM config is a POOL.
 
-	True when ≥2 models are enabled OR (a preset is selected AND ≥1 model enabled).
-	An empty enabled-model list with a preset does NOT count as proxy-valid.
+	A pool is pushed to the fleet as a whole ``models[]`` spec through
+	``/llm-pool``, not as one flat credential through ``/llm-creds``, and its
+	readiness gate and installed-apps resync follow the pool leg. This is the
+	predicate ``compute_proxy_active`` used to encode.
+
+	True when ≥2 models are enabled OR (a preset is selected AND ≥1 model
+	enabled) OR any enabled model is a chat subscription. An empty enabled-model
+	list with a preset does NOT count as pool-valid.
 	"""
-	enabled = [m for m in (settings.models or []) if m.enabled]
+	enabled = _enabled_models(settings)
 	if len(enabled) >= 2 or (bool(settings.preset) and len(enabled) >= 1):
 		return True
 	# A chat-subscription model REQUIRES the cliproxy sidecar, which is
-	# provisioned ONLY on the proxy path. The DIRECT (single-model) path just
+	# provisioned ONLY on the pool path. The DIRECT (single-model) path just
 	# pushes llm-creds and has no cliproxy, so a lone subscription model would
 	# never get its OAuth blob served and chat would fail despite a "connected"
-	# UI. Force such a pool onto the proxy path. (#200 review #1)
-	for m in enabled:
-		ct = m.credential_type if hasattr(m, "credential_type") else m.get("credential_type", "api_key")
-		if ct == "subscription":
-			return True
-	return False
+	# UI. Force such a config onto the pool path. (#200 review #1)
+	return has_subscription_model(settings)
+
+
+def has_subscription_model(settings) -> bool:
+	"""True when at least one ENABLED models[] row is a chat subscription."""
+	return any(_credential_type(m) == "subscription" for m in _enabled_models(settings))
+
+
+def compute_proxy_active(settings) -> bool:
+	"""Return True when the fleet actually DEPLOYS a proxy sidecar pair (Bifrost
+	+ CLIProxyAPI) in front of this tenant's openclaw container.
+
+	Mirrors jarvis-fleet-agent's ``pool_render.is_byo_direct``, inverted. A pool
+	whose every enabled model is a BYO **api key** now renders "openclaw-direct":
+	each credential becomes its own ``models.providers.<id>`` entry INSIDE
+	openclaw and openclaw drives failover natively through
+	``agents.defaults.model.{primary,fallbacks}``. No sidecar is deployed at all,
+	so there is no Bifrost to expand ``jarvis-pool`` and no cliproxy auth profile
+	to report. A pool holding ANY enabled subscription still takes the
+	Bifrost+cliproxy path, because cliproxy is what serves an OAuth blob.
+
+	This returned True for ANY 2+-model pool, which was right while every pool
+	had a Bifrost and became wrong the day openclaw-direct shipped: a pure
+	api-key pool carried ``proxy_active=1`` with no proxy, so every unpinned
+	"Auto" turn patched its openclaw session to the Bifrost-only ``jarvis-pool``
+	placeholder and the container rejected it with ``model_not_found``. Being an
+	explicit bad-id rejection rather than an upstream failure, openclaw's native
+	failover did not even engage.
+
+	``proxy_active`` now IMPLIES ``compute_pool_mode`` (a subscription forces
+	pool mode) but is strictly narrower. Ask ``compute_pool_mode`` for "which
+	sync / readiness leg does this tenant take".
+	"""
+	return has_subscription_model(settings)
+
+
+def pool_primary_model(settings) -> str:
+	"""The model id a pool tenant's container runs by DEFAULT, or "".
+
+	jarvis-fleet-agent orders a pool's enabled credentials with
+	``llm_proxy.render._common.ordered`` — ``(order, provider, model)`` — and
+	renders entry 0 as ``agents.defaults.model.primary``, the rest as
+	``fallbacks``. Returning entry 0's model keeps the bench's idea of the pool's
+	primary in step with the container's.
+
+	The id is BARE (``glm-4.6``), like every other model id this app hands
+	openclaw — ``llm_model``, ``model_override``, the Settings model picker —
+	and openclaw resolves a bare id against its registered providers. We
+	deliberately do NOT rebuild the fleet's ``<provider>-<idx>/<model>``
+	qualified ref: that id scheme belongs to the fleet's renderer, and a copy
+	here would silently rot the moment its indexing changed.
+
+	``order`` is the real key. Provider and model only break ties, and the
+	fleet's tie-break runs on the *Bifrost* provider name (synthesized per model
+	for custom-endpoint vendors), so the two can differ only in the ordering of
+	rows that already share an ``order``.
+	"""
+	if not compute_pool_mode(settings):
+		return ""
+	for m in sorted(_enabled_models(settings), key=_fleet_sort_key):
+		name = (_field(m, "model") or "").strip()
+		if name:
+			return name
+	return ""
+
+
+def _fleet_sort_key(m) -> tuple:
+	provider = _wire_provider(normalize_provider(_field(m, "provider")))
+	return (_int(_field(m, "order")), provider, _field(m, "model") or "")
+
+
+def _enabled_models(settings) -> list:
+	return [m for m in (settings.models or []) if m.enabled]
+
+
+def _credential_type(m) -> str:
+	"""Credential type of a models[] row; "api_key" when unset."""
+	return _field(m, "credential_type") or "api_key"
+
+
+def _field(m, fieldname: str, default: str = ""):
+	"""Read a plain (non-secret) field off a models[] row — BaseDocument or dict."""
+	if hasattr(m, fieldname):
+		return getattr(m, fieldname)
+	return m.get(fieldname, default) if hasattr(m, "get") else default
+
+
+def _int(value) -> int:
+	"""Best-effort int; a junk `order` must not blow up a sort (module contract)."""
+	try:
+		return int(value or 0)
+	except (TypeError, ValueError):
+		return 0
 
 
 # ---------------------------------------------------------------------------

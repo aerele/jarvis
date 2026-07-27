@@ -193,7 +193,7 @@ def get_preset_catalog() -> list:
 def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: str = "failover") -> dict:
 	"""Write the customer's multi-model LLM pool into Jarvis Settings.models[]
 	(+ preset, routing_mode) and let the existing on_update pipeline validate
-	(validate_models), derive proxy_active, mirror models[0] into legacy llm_*,
+	(validate_models), derive pool_mode/proxy_active, mirror models[0] into legacy llm_*,
 	and sync DIRECT (/llm-creds) vs PROXY (/llm-pool) via admin.
 
 	``models`` MUST stay annotated: with Frappe's
@@ -295,7 +295,7 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 	s.llm_oauth_account_email = ""
 	s.llm_oauth_connected_at = None
 	# save() -> on_update -> _on_update_unified_llm: validate_models (throws),
-	# compute_proxy_active, mirror models[0], enqueue pool/creds sync.
+	# compute_pool_mode/compute_proxy_active, mirror models[0], enqueue pool/creds sync.
 	s.save(ignore_permissions=True)
 	frappe.db.commit()
 
@@ -711,11 +711,14 @@ def _reconcile_pending_applying(settings) -> str | None:
 		_admin_chat_readiness,
 		_stamp_converged_ok,
 	)
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
 
 	state, _reason = _admin_chat_readiness()
 	if state != "Ready":
 		return None
-	_stamp_converged_ok(settings, is_pool=bool(settings.get("proxy_active")))
+	# The marker follows the SYNC LEG, so this is pool mode - a BYO api-key pool
+	# has no sidecar (proxy_active=0) but still stamps llm_pool_synced_at.
+	_stamp_converged_ok(settings, is_pool=compute_pool_mode(settings))
 	# _stamp_converged_ok's commit gate only fires in a worker/migrate context;
 	# this runs in a web request, where a GET would otherwise roll the terminal
 	# write back at request end.

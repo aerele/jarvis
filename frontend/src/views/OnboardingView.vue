@@ -1706,7 +1706,7 @@ async function afterSaveRecheckReady({ followSync = false } = {}) {
 			// "Setup hit a problem (...)" reads as developer text a customer
 			// should never have to parse. syncStatusNote keeps the wrapper for
 			// statuses that are genuinely opaque ("failed: unexpected error; see
-			// Error Log", "failed: auth: ...", "skipped: no longer proxy-valid...").
+			// Error Log", "failed: auth: ...", "skipped: no longer pool-valid...").
 			// The wrapper copy itself lives in steps.js and is whitelabelled there
 			// via `agentName`, so develop's branding is preserved.
 			state.finishNote = syncStatusNote(status, agentName);

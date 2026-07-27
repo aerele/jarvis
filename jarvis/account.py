@@ -15,6 +15,7 @@ their published names - no duplicates:
 import frappe
 
 from jarvis import admin_client, release_notice
+from jarvis.jarvis.pool_serialize import compute_pool_mode
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_admin
 
@@ -120,7 +121,7 @@ def is_ready_for_chat() -> dict:
 	  auth mode are missing. api_key mode needs llm_api_key + llm_provider +
 	  llm_model; subscription / oauth modes need llm_oauth_connected_at
 	  (the timestamp set when the oauth grant completes).
-	- ``"llm_pool_provisioning"`` - a pool is configured (proxy_active) but
+	- ``"llm_pool_provisioning"`` - a pool is configured (pool mode) but
 	  no sync has ever applied it to the container (first sync pending or
 	  failed).
 	- ``"container_provisioning"`` - all local checks passed, but admin reports
@@ -151,7 +152,7 @@ def is_ready_for_chat() -> dict:
 	if not admin_api_key:
 		return {"ready": False, "reason": "signup"}
 
-	# Pool mode: proxy_active is config INTENT, derived and committed at
+	# Pool mode: being a pool is config INTENT, derived and committed at
 	# save time BEFORE the async pool sync runs - it does not prove the
 	# container ever received the pool. Gate on evidence of a successful
 	# apply instead: llm_pool_synced_at, stamped by the pool-sync job on
@@ -167,7 +168,11 @@ def is_ready_for_chat() -> dict:
 	# the single-model sync, so a stale legacy "ok (reload via admin)" from
 	# a queued creds job could falsely open the gate for a never-applied
 	# pool.
-	if getattr(settings, "proxy_active", 0):
+	#
+	# Keyed on pool MODE, not the narrower proxy_active: a BYO api-key pool has
+	# no sidecar but still syncs through /llm-pool and stamps llm_pool_synced_at,
+	# so gating it on the direct marker would strand it forever.
+	if compute_pool_mode(settings):
 		if getattr(settings, "llm_pool_synced_at", None):
 			return _admin_chat_gate()
 		return {"ready": False, "reason": "llm_pool_provisioning"}
@@ -214,8 +219,9 @@ def is_ready_for_chat() -> dict:
 @frappe.whitelist()
 def get_llm_usage() -> dict:
 	"""Real, curated Bifrost usage for the Monitor tab (System-Manager only,
-	spec 7). DIRECT tenants (proxy_active=0, no Bifrost) short-circuit to the
-	empty shape — no pointless admin round-trip."""
+	spec 7). Tenants with no Bifrost (proxy_active=0) short-circuit to the empty
+	shape — no pointless admin round-trip. That now includes a BYO api-key POOL,
+	which the fleet renders openclaw-direct with no sidecar at all."""
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
 	if not getattr(settings, "proxy_active", 0):
@@ -239,9 +245,10 @@ def get_llm_connection_status() -> dict:
 	Wrapper over admin_client.post_llm_auth_status, remapped to the customer
 	contract field names. Never returns token material. System-Manager only.
 
-	DIRECT tenants (proxy_active=0, no Bifrost/cliproxy sidecar) short-circuit
-	before the admin round-trip, mirroring get_llm_usage above - there is no
-	proxy auth profile to report. Before this, the raw admin payload's
+	Tenants with no Bifrost/cliproxy sidecar (proxy_active=0, which now includes
+	a BYO api-key pool) short-circuit before the admin round-trip, mirroring
+	get_llm_usage above - there is no proxy auth profile to report. Before this,
+	single-model direct tenants already hit this path: the raw admin payload's
 	leftover fields (a stale/default default_model with auth_profile_present
 	false) made the SPA's ConnectionPane render a misleading orange "Not
 	connected" for a direct tenant whose chat verifiably works."""

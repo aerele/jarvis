@@ -566,32 +566,156 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 			self.fail(f"build_pool_payload raised on malformed oauth_blob: {exc}")
 
 	# ------------------------------------------------------------------ #
-	# (h) compute_proxy_active
+	# (h) compute_pool_mode — "is this config a POOL" (picks the sync leg)
 	# ------------------------------------------------------------------ #
 
-	def test_compute_proxy_active_true_when_two_enabled_models(self):
-		"""compute_proxy_active is True when ≥2 models are enabled."""
+	def test_compute_pool_mode_true_when_two_enabled_models(self):
+		"""compute_pool_mode is True when ≥2 models are enabled."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		m1 = _api_key_model(enabled=1)
+		m2 = _api_key_model(model="gpt-4-turbo", enabled=1, order=1)
+		settings = _make_settings_with_models([m1, m2])
+		self.assertTrue(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_true_when_preset_set(self):
+		"""compute_pool_mode is True when preset is set (even with only 1 model)."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		m = _api_key_model(enabled=1)
+		settings = _make_settings_with_models([m])
+		settings.preset = "Cost-saver"
+		self.assertTrue(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_false_when_one_model_no_preset(self):
+		"""compute_pool_mode is False for exactly 1 enabled model and no preset."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		m = _api_key_model(enabled=1)
+		settings = _make_settings_with_models([m])
+		settings.preset = None
+		self.assertFalse(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_true_for_a_lone_subscription(self):
+		"""A single subscription is still a pool: it needs the cliproxy sidecar."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account()])])
+		settings.preset = None
+		self.assertTrue(compute_pool_mode(settings))
+
+	# ------------------------------------------------------------------ #
+	# (h2) compute_proxy_active — "is a Bifrost/cliproxy sidecar DEPLOYED"
+	# ------------------------------------------------------------------ #
+
+	def test_compute_proxy_active_false_for_a_pure_api_key_pool(self):
+		"""A pool whose every enabled model is a BYO api key gets NO sidecar.
+
+		jarvis-fleet-agent renders it openclaw-direct (``pool_render.is_byo_direct``):
+		each credential becomes its own provider INSIDE openclaw and openclaw drives
+		failover natively. Reporting proxy_active here is what made every unpinned
+		"Auto" turn patch its session to the Bifrost-only "jarvis-pool" placeholder,
+		which the container rejected with model_not_found.
+		"""
 		_, _, compute_proxy_active = self._imports()
 		m1 = _api_key_model(enabled=1)
 		m2 = _api_key_model(model="gpt-4-turbo", enabled=1, order=1)
 		settings = _make_settings_with_models([m1, m2])
+		self.assertFalse(compute_proxy_active(settings))
+
+	def test_compute_proxy_active_false_for_an_api_key_pool_with_a_preset(self):
+		"""A preset does not conjure a sidecar — only a subscription does."""
+		_, _, compute_proxy_active = self._imports()
+		settings = _make_settings_with_models([_api_key_model(enabled=1)])
+		settings.preset = "Cost-saver"
+		self.assertFalse(compute_proxy_active(settings))
+
+	def test_compute_proxy_active_true_when_the_pool_holds_a_subscription(self):
+		"""Any enabled subscription keeps the pool on the Bifrost+cliproxy path."""
+		_, _, compute_proxy_active = self._imports()
+		settings = _make_settings_with_models(
+			[_api_key_model(enabled=1), _subscription_model(accounts=[_account()])]
+		)
 		self.assertTrue(compute_proxy_active(settings))
 
-	def test_compute_proxy_active_true_when_preset_set(self):
-		"""compute_proxy_active is True when preset is set (even with only 1 model)."""
+	def test_compute_proxy_active_ignores_a_disabled_subscription(self):
+		"""A DISABLED subscription row deploys nothing — the pool is still BYO-direct."""
 		_, _, compute_proxy_active = self._imports()
-		m = _api_key_model(enabled=1)
-		settings = _make_settings_with_models([m])
-		settings.preset = "Cost-saver"
-		self.assertTrue(compute_proxy_active(settings))
+		settings = _make_settings_with_models(
+			[
+				_api_key_model(enabled=1),
+				_api_key_model(model="gpt-4-turbo", enabled=1, order=1),
+				_subscription_model(enabled=0, accounts=[_account()]),
+			]
+		)
+		self.assertFalse(compute_proxy_active(settings))
 
 	def test_compute_proxy_active_false_when_one_model_no_preset(self):
-		"""compute_proxy_active is False for exactly 1 enabled model and no preset."""
+		"""compute_proxy_active is False for exactly 1 enabled api-key model."""
 		_, _, compute_proxy_active = self._imports()
 		m = _api_key_model(enabled=1)
 		settings = _make_settings_with_models([m])
 		settings.preset = None
 		self.assertFalse(compute_proxy_active(settings))
+
+	# ------------------------------------------------------------------ #
+	# (h3) pool_primary_model — what the container runs by DEFAULT
+	# ------------------------------------------------------------------ #
+
+	def test_pool_primary_model_is_the_lowest_order_row(self):
+		"""Mirrors the fleet's ``ordered()``: order first, then provider, then model."""
+		from jarvis.jarvis.pool_serialize import pool_primary_model
+
+		settings = _make_settings_with_models(
+			[
+				_api_key_model(model="qwen2.5:3b", provider="ollama", order=5),
+				_api_key_model(model="glm-4.6", provider="zai_coding", order=1),
+			]
+		)
+		self.assertEqual(pool_primary_model(settings), "glm-4.6")
+
+	def test_pool_primary_model_breaks_an_order_tie_on_provider_then_model(self):
+		from jarvis.jarvis.pool_serialize import pool_primary_model
+
+		settings = _make_settings_with_models(
+			[
+				_api_key_model(model="qwen2.5:3b", provider="ollama", order=0),
+				_api_key_model(model="grok-4", provider="anthropic", order=0),
+			]
+		)
+		self.assertEqual(pool_primary_model(settings), "grok-4")
+
+	def test_pool_primary_model_skips_disabled_rows(self):
+		from jarvis.jarvis.pool_serialize import pool_primary_model
+
+		settings = _make_settings_with_models(
+			[
+				_api_key_model(model="disabled-first", provider="openai", order=0, enabled=0),
+				_api_key_model(model="gpt-4o", provider="openai", order=1),
+				_api_key_model(model="gpt-4-turbo", provider="openai", order=2),
+			]
+		)
+		self.assertEqual(pool_primary_model(settings), "gpt-4o")
+
+	def test_pool_primary_model_is_blank_when_not_a_pool(self):
+		"""A single-model direct tenant has no pool primary — the flat llm_model owns it."""
+		from jarvis.jarvis.pool_serialize import pool_primary_model
+
+		settings = _make_settings_with_models([_api_key_model(enabled=1)])
+		settings.preset = None
+		self.assertEqual(pool_primary_model(settings), "")
+
+	def test_pool_primary_model_survives_a_junk_order(self):
+		"""pool_serialize's contract: no function raises on bad input."""
+		from jarvis.jarvis.pool_serialize import pool_primary_model
+
+		settings = _make_settings_with_models(
+			[
+				_api_key_model(model="gpt-4o", provider="openai", order="not-a-number"),
+				_api_key_model(model="gpt-4-turbo", provider="openai", order=3),
+			]
+		)
+		self.assertEqual(pool_primary_model(settings), "gpt-4o")
 
 	# ------------------------------------------------------------------ #
 	# No dangling key_ref: build_pool_payload only emits key_ref+api_keys together
@@ -954,7 +1078,10 @@ class TestRT3UnifiedOnUpdateRouting(_RT3SettingsTestCase):
 		mock_creds.assert_not_called()
 
 		settings = frappe.get_single("Jarvis Settings")
-		self.assertEqual(int(settings.proxy_active or 0), 1, "proxy_active must be 1 for ≥2 models")
+		# Two BYO api keys are a POOL (the /llm-pool push above proves the leg) but
+		# an openclaw-DIRECT one: the fleet deploys no Bifrost/cliproxy sidecar, so
+		# the derived proxy_active must stay 0.
+		self.assertEqual(int(settings.proxy_active or 0), 0, "an all-api-key pool gets no proxy sidecar")
 		# All legacy fields must mirror models[0].
 		self.assertEqual(settings.llm_model, "gpt-4o", "legacy llm_model must mirror models[0].model")
 		self.assertEqual(
@@ -1052,7 +1179,9 @@ class TestRT3UnifiedOnUpdateRouting(_RT3SettingsTestCase):
 		mock_creds.assert_not_called()
 
 		settings = frappe.get_single("Jarvis Settings")
-		self.assertEqual(int(settings.proxy_active or 0), 1, "proxy_active must be 1 when preset is set")
+		# A preset routes through /llm-pool (asserted above) but conjures no sidecar:
+		# the single credential is still a BYO api key, so this renders openclaw-direct.
+		self.assertEqual(int(settings.proxy_active or 0), 0, "an api-key preset pool gets no proxy sidecar")
 
 
 class TestRT3LegacyNoModelsBackcompat(_RT3SettingsTestCase):
@@ -2198,7 +2327,7 @@ class TestFT3EmptyPoolGuards(_RT3SettingsTestCase):
 		"""Worker re-validates at run time: if no models left → skips push, sets 'skipped' status."""
 		from unittest.mock import patch
 
-		# Set up proxy-valid state (2 models).
+		# Set up pool-valid state (2 models).
 		settings = frappe.get_single("Jarvis Settings")
 		_add_model_row(
 			settings,
@@ -2338,8 +2467,13 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		"""Make a minimal conversation-like object."""
 		return frappe._dict(model_override=model_override)
 
-	def _set_proxy_active(self, models_list):
-		"""Set proxy_active=1 and persist model rows to DB."""
+	def _save_pool(self, models_list):
+		"""Persist model rows to DB and let on_update derive the mode flags.
+
+		Deliberately does NOT force proxy_active: the flag is DERIVED, and forcing
+		it hid exactly the defect these tests now cover (an all-api-key pool has no
+		sidecar, so proxy_active must land on 0).
+		"""
 		from unittest.mock import patch
 
 		settings = frappe.get_single("Jarvis Settings")
@@ -2348,14 +2482,11 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		# Save with admin calls mocked so the model rows are persisted to DB.
 		with patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}):
 			settings.save()
-		# Force proxy_active=1 in DB (in case 2 models triggered it already;
-		# this handles the case where tests add only models via this helper
-		# and proxy_active should be 1 for the pool routing assertion).
-		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "proxy_active", 1, update_modified=False)
 		frappe.db.commit()
 
 	def _pool_of_two(self):
-		self._set_proxy_active(
+		"""Two BYO api keys: a pool, but an openclaw-DIRECT one (no sidecar)."""
+		self._save_pool(
 			[
 				{
 					"provider": "openai_compat",
@@ -2373,6 +2504,49 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 				},
 			]
 		)
+
+	def _pool_with_subscription(self):
+		"""An api key + a chat subscription: still the Bifrost+cliproxy path.
+
+		Goes through save_llm_pool (not _add_model_row) because only that path
+		persists the encrypted ``subscription_accounts`` JSON the row needs.
+		"""
+		from unittest.mock import patch
+
+		from jarvis import onboarding
+
+		payload = [
+			{
+				"provider": "openai_compat",
+				"model": "gpt-4o",
+				"tier": "strong",
+				"order": 0,
+				"api_key": "sk-p1",
+				"base_url": "https://api.openai.com",
+			},
+			{
+				"model": "gpt-5.5",
+				"tier": "cheap",
+				"order": 1,
+				"subscription": {
+					"rotation": "sticky",
+					"accounts": [
+						{
+							"upstream": "openai",
+							"account_ref": "ACC_SUB_1",
+							"label": "sub@example.com",
+							"oauth_blob": '{"refresh_token":"fake-rt-secret"}',
+						}
+					],
+				},
+			},
+		]
+		with (
+			patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}),
+			patch("jarvis.admin_client.post_update_llm_creds"),
+		):
+			onboarding.save_llm_pool(frappe.as_json(payload), preset=None, routing_mode="failover")
+		frappe.db.commit()
 
 	def test_pool_mode_resolver_still_returns_empty_for_the_one_shot_callers(self):
 		"""_resolve_model_and_provider's contract is UNCHANGED: "" means "no opinion".
@@ -2398,8 +2572,25 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 			)
 			self.assertIsNone(provider)
 
-	def test_session_model_for_pool_mode_with_no_pin_names_the_pool(self):
-		"""The SESSION patch must NAME the pool, not send nothing.
+	def test_api_key_pool_is_not_proxy_active(self):
+		"""A pool of two BYO api keys deploys NO sidecar, so proxy_active must be 0.
+
+		jarvis-fleet-agent renders it openclaw-direct: each key becomes its own
+		provider inside openclaw, which drives failover itself. Deriving
+		proxy_active=1 here is the root of the dead "Auto" turn below.
+		"""
+		self._pool_of_two()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(int(settings.proxy_active or 0), 0)
+
+	def test_subscription_pool_is_proxy_active(self):
+		"""Any enabled subscription keeps the Bifrost+cliproxy sidecars."""
+		self._pool_with_subscription()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(int(settings.proxy_active or 0), 1)
+
+	def test_session_model_for_byo_pool_with_no_pin_names_a_real_model(self):
+		"""The SESSION patch must NAME a model the container actually has.
 
 		handle_chat_send only issues sessions.patch when the model is truthy, and openclaw
 		remembers a session's model across turns -- so "" ("send nothing") meant a
@@ -2407,28 +2598,65 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		wrote model_override="" and flipped the pill, while openclaw went right on calling
 		the old model, forever. Clearing a pin has to be an explicit instruction, not the
 		absence of one. (jarvis#299)
+
+		For an openclaw-DIRECT pool the name must be the pool's primary real model.
+		"jarvis-pool" only exists inside Bifrost; against this container it matches
+		nothing and the turn dies with model_not_found -- and since that is an explicit
+		bad-id rejection, openclaw's native failover never engages.
 		"""
 		from jarvis.chat.worker import POOL_VIRTUAL_MODEL, _session_model_for
 
 		self._pool_of_two()
 		conv = self._make_conv(model_override="")
 		model, provider = _session_model_for(conv)
-		self.assertEqual(model, POOL_VIRTUAL_MODEL)
+		self.assertEqual(model, "gpt-4o", "must be the pool's primary (order 0), a real model id")
+		self.assertNotEqual(model, POOL_VIRTUAL_MODEL, "no Bifrost is deployed to expand the placeholder")
 		self.assertTrue(
 			bool(model), "must be truthy, or handle_chat_send skips sessions.patch and the stale pin sticks"
 		)
 		self.assertIsNone(provider)
 
+	def test_session_model_for_subscription_pool_with_no_pin_names_the_pool(self):
+		"""The Bifrost path is untouched: it still gets the virtual-model placeholder,
+		which its catch-all routing rule expands into the failover chain."""
+		from jarvis.chat.worker import POOL_VIRTUAL_MODEL, _session_model_for
+
+		self._pool_with_subscription()
+		conv = self._make_conv(model_override="")
+		model, provider = _session_model_for(conv)
+		self.assertEqual(model, POOL_VIRTUAL_MODEL)
+		self.assertIsNone(provider)
+
 	def test_session_model_for_stale_pin_resets_to_the_pool(self):
 		"""A pin naming a model the customer has since REMOVED from the pool resets to
-		the pool rather than leaking a dead model id through to openclaw."""
-		from jarvis.chat.worker import POOL_VIRTUAL_MODEL, _session_model_for
+		the pool's primary rather than leaking a dead model id through to openclaw."""
+		from jarvis.chat.worker import _session_model_for
 
 		self._pool_of_two()
 		conv = self._make_conv(model_override="a-model-the-customer-deleted")
 		model, provider = _session_model_for(conv)
-		self.assertEqual(model, POOL_VIRTUAL_MODEL)
+		self.assertEqual(model, "gpt-4o")
 		self.assertIsNone(provider)
+
+	def test_session_model_for_single_model_tenant_is_unchanged(self):
+		"""A one-model config is not a pool at all: the flat llm_model still wins."""
+		from jarvis.chat.worker import _session_model_for
+
+		self._save_pool(
+			[
+				{
+					"provider": "openai_compat",
+					"model": "gpt-4o",
+					"tier": "strong",
+					"order": 0,
+					"api_key": "sk-solo",
+				}
+			]
+		)
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(int(settings.proxy_active or 0), 0)
+		model, _ = _session_model_for(self._make_conv(model_override=""))
+		self.assertEqual(model, "gpt-4o")
 
 	def test_session_model_for_honours_a_valid_pin(self):
 		from jarvis.chat.worker import _session_model_for
@@ -2440,10 +2668,10 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertIsNone(provider)
 
 	def test_pool_mode_validates_override_against_enabled_models(self):
-		"""proxy_active=1, model_override in enabled models → override returned."""
+		"""Pool mode, model_override in enabled models → override returned."""
 		from jarvis.chat.worker import _resolve_model_and_provider
 
-		self._set_proxy_active(
+		self._save_pool(
 			[
 				{
 					"provider": "openai_compat",
@@ -2831,8 +3059,13 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 	# -- is_ready_for_chat gate ------------------------------------------
 
 	def _set_pool_gate_state(self, *, synced_at, status):
+		# Pool mode is DERIVED from models[], so the gate needs real rows: forcing
+		# proxy_active on an empty pool no longer reads as a pool tenant, and a BYO
+		# api-key pool's proxy_active is 0 by design (openclaw-direct, no sidecar).
 		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("proxy_active", 1, update_modified=False)
+		if len([m for m in (settings.models or []) if m.enabled]) < 2:
+			self._seed_pool()
+		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("llm_pool_synced_at", synced_at, update_modified=False)
 		settings.db_set("last_sync_status", status, update_modified=False)
 		frappe.db.commit()
@@ -2890,6 +3123,10 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		self._set_pool_gate_state(synced_at=None, status="ok (pool_update via admin)")
 		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("last_sync_at", frappe.utils.now(), update_modified=False)
+		# v1_10 grandfathers PRE-CHANGE tenants, so reproduce the flag the OLD
+		# "any 2+-model pool is proxied" rule persisted. The patch reads the
+		# stored field on purpose - at migrate time on_update has not re-derived it.
+		settings.db_set("proxy_active", 1, update_modified=False)
 		frappe.db.commit()
 
 		execute()
@@ -2908,6 +3145,10 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		self._set_pool_gate_state(synced_at=None, status="failed: admin unreachable: transient")
 		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("last_sync_at", frappe.utils.now(), update_modified=False)
+		# v1_10 grandfathers PRE-CHANGE tenants, so reproduce the flag the OLD
+		# "any 2+-model pool is proxied" rule persisted. The patch reads the
+		# stored field on purpose - at migrate time on_update has not re-derived it.
+		settings.db_set("proxy_active", 1, update_modified=False)
 		frappe.db.commit()
 		execute()
 		settings = frappe.get_single("Jarvis Settings")
@@ -3544,8 +3785,10 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 			reconcile_pending_llm_sync,
 		)
 
+		# Pool mode is DERIVED from models[] - a forced proxy_active flag with an
+		# empty pool is not a pool tenant (and an api-key pool's flag is 0 anyway).
+		self._seed_pool()
 		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("proxy_active", 1, update_modified=False)
 		settings.db_set("llm_pool_synced_at", None, update_modified=False)
 		settings.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
 		frappe.db.commit()
@@ -3563,8 +3806,10 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 			reconcile_pending_llm_sync,
 		)
 
+		# Pool mode is DERIVED from models[] - a forced proxy_active flag with an
+		# empty pool is not a pool tenant (and an api-key pool's flag is 0 anyway).
+		self._seed_pool()
 		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("proxy_active", 1, update_modified=False)
 		settings.db_set("llm_pool_synced_at", None, update_modified=False)
 		settings.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
 		frappe.db.commit()
@@ -3613,8 +3858,8 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 			reconcile_pending_llm_sync,
 		)
 
+		self._seed_pool()
 		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("proxy_active", 1, update_modified=False)
 		settings.db_set("llm_pool_synced_at", frappe.utils.now(), update_modified=False)
 		settings.db_set("last_sync_status", "ok (pool_update via admin)", update_modified=False)
 		frappe.db.commit()
