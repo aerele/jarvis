@@ -9,9 +9,11 @@ import { reactive } from "vue";
 // "No 'call' export is defined on the mock" for any imported name the factory
 // omits — so leaving it out would break the import of supportDownloadUrl, which
 // these tests deliberately exercise for real.
-// The thread reply is now SupportComposer (a frappe-ui TextEditor + footer), not
-// the chat Composer — so TextEditor must be stubbed (TipTap is too heavy for
-// jsdom) and toast needs `info` (the attach-flow + removed-images notices).
+// The thread reply is now SupportReplyBox (a collapse-to-expand wrapper around
+// SupportComposer, which is a frappe-ui TextEditor + footer) — so TextEditor must
+// be stubbed (TipTap is too heavy for jsdom) and toast needs `info` (the attach-flow
+// + removed-images notices). SupportReplyBox forwards the same props/events, so the
+// thread tests drive it directly (no need to expand into the nested composer).
 // dompurify is left REAL: renderSupportHtml's sanitize is exercised for real by
 // the "routes the body through the sanitizer" test below.
 vi.mock("frappe-ui/editor-style.css", () => ({}));
@@ -63,6 +65,9 @@ vi.mock("@/utils/datetime", () => ({
 	formatDate: (v) => (v ? String(v) : ""),
 	exactDate: (v) => (v ? String(v) : ""),
 	dayLabel: (v) => (v ? String(v).slice(0, 10) : ""),
+	// SupportTicketPanel (rendered via the #aside slot) imports toLocalMs; vitest
+	// throws on any imported name the mock omits, so provide a plain parser.
+	toLocalMs: (v) => (v == null || v === "" ? null : typeof v === "number" ? v : Date.parse(v)),
 }));
 
 const storeDouble = {
@@ -84,7 +89,7 @@ const storeDouble = {
 vi.mock("@/stores/support", () => ({ useSupportStore: () => storeDouble }));
 
 import SupportThreadPage from "@/pages/support/SupportThreadPage.vue";
-import SupportComposer from "@/components/support/SupportComposer.vue";
+import SupportReplyBox from "@/components/support/SupportReplyBox.vue";
 
 beforeEach(() => {
 	vi.stubGlobal("matchMedia", () => ({
@@ -320,25 +325,25 @@ describe("SupportThreadPage", () => {
 		// Resolve button here, so the disclaimer spells out both valid next steps
 		// instead of reading as if it contradicts the header.
 		const w = mountWith([], { name: "T1", subject: "x", status: "Resolved" });
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		expect(c.props("disclaimer")).toBe("Resolve to confirm and close, or reply to reopen.");
 	});
 
 	it("shows the plain reopens disclaimer for a ticket the store considers closed (not Resolved)", () => {
 		storeDouble.isClosed = (s) => s === "Closed";
 		const w = mountWith([], { name: "T1", subject: "x", status: "Closed" });
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		expect(c.props("disclaimer")).toBe("Replying reopens this ticket.");
 		storeDouble.isClosed = () => false; // restore the file's default double
 	});
 
 	it("arms Send for an attachment-only reply", () => {
 		const w = mountWith([]);
-		w.findComponent(SupportComposer).vm.$emit("files-added", [
+		w.findComponent(SupportReplyBox).vm.$emit("files-added", [
 			{ name: "a.png", type: "image/png" },
 		]);
 		return w.vm.$nextTick().then(() => {
-			expect(w.findComponent(SupportComposer).props("canSubmit")).toBe(true);
+			expect(w.findComponent(SupportReplyBox).props("canSubmit")).toBe(true);
 		});
 	});
 
@@ -358,7 +363,7 @@ describe("SupportThreadPage", () => {
 			return files;
 		});
 
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("update:modelValue", "here is the log");
 		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
 		await w.vm.$nextTick();
@@ -377,7 +382,7 @@ describe("SupportThreadPage", () => {
 		// nothing in this file resets mocks between tests.
 		storeDouble.uploadTo = vi.fn(async (name, files) => files);
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("update:modelValue", "please help");
 		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
 		await w.vm.$nextTick();
@@ -399,7 +404,7 @@ describe("SupportThreadPage", () => {
 		let resolveReply;
 		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("update:modelValue", "hello");
 		await w.vm.$nextTick();
 		c.vm.$emit("submit");
@@ -435,7 +440,7 @@ describe("SupportThreadPage", () => {
 			},
 		});
 		expect(w.findComponent({ name: "Badge" }).exists()).toBe(false);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		expect(c.props("disclaimer")).toBe("");
 	});
 
@@ -444,7 +449,7 @@ describe("SupportThreadPage", () => {
 		// disclaimer (e.g. dropping the ternary's else branch) would pass that
 		// test and still be wrong for the common case.
 		const w = mountWith([], { name: "T1", subject: "x", status: "Open" });
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		expect(c.props("disclaimer")).toBe("");
 	});
 
@@ -454,7 +459,7 @@ describe("SupportThreadPage", () => {
 		// still needs to retry after a transient upload failure.
 		storeDouble.uploadTo = vi.fn(async () => []); // nothing succeeded
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("files-added", [
 			{ name: "a.png", type: "image/png" },
 			{ name: "b.png", type: "image/png" },
@@ -509,7 +514,7 @@ describe("SupportThreadPage", () => {
 		storeDouble.fingerprintOf = vi.fn(() => "x");
 
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("update:modelValue", "please help");
 		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
 		await w.vm.$nextTick();
@@ -556,7 +561,7 @@ describe("SupportThreadPage", () => {
 		let resolveReply;
 		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("update:modelValue", "please help");
 		await w.vm.$nextTick();
 		c.vm.$emit("submit");
@@ -580,7 +585,7 @@ describe("SupportThreadPage", () => {
 		// clear ran. (The reference-safe compare is covered by the I2 test above.)
 		storeDouble.reply = vi.fn(async () => true);
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("update:modelValue", "<p>done</p>");
 		await w.vm.$nextTick();
 		c.vm.$emit("submit");
@@ -595,7 +600,7 @@ describe("SupportThreadPage", () => {
 		// canSend MUST gate on supportBodyIsEmpty, not `.trim()`. Reverting canSend to
 		// `!!draft.value.trim()` turns this red.
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("update:modelValue", "<p></p>");
 		await w.vm.$nextTick();
 
@@ -611,7 +616,7 @@ describe("SupportThreadPage", () => {
 		storeDouble.reply = vi.fn(async () => true);
 		storeDouble.uploadTo = vi.fn(async (name, files) => files);
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("update:modelValue", '<p><img src="data:image/png;base64,AAAA"></p>');
 		c.vm.$emit("files-added", [{ name: "shot.png", type: "image/png" }]);
 		await w.vm.$nextTick();
@@ -619,6 +624,95 @@ describe("SupportThreadPage", () => {
 		await flushPromises();
 
 		expect(c.props("modelValue")).toBe("");
+	});
+});
+
+describe("reply box collapse + panel wiring (redesign)", () => {
+	const replyBox = (w) => w.findComponent(SupportReplyBox);
+
+	it("collapses the reply box after a clean send", async () => {
+		storeDouble.reply = vi.fn(async () => true);
+		storeDouble.uploadTo = vi.fn(async (n, f) => f);
+		const w = mountWith([]);
+		const rb = replyBox(w);
+		rb.vm.$emit("update:expanded", true); // user opened it
+		rb.vm.$emit("update:modelValue", "<p>hi</p>");
+		await w.vm.$nextTick();
+		expect(rb.props("expanded")).toBe(true);
+		rb.vm.$emit("submit");
+		await flushPromises();
+		expect(rb.props("expanded")).toBe(false);
+	});
+
+	it("keeps the reply box expanded when a partial upload leaves files staged", async () => {
+		// files remain -> nothing collapses (the user still has chips to retry).
+		storeDouble.reply = vi.fn(async () => true);
+		storeDouble.uploadTo = vi.fn(async () => []); // nothing succeeded
+		const w = mountWith([]);
+		const rb = replyBox(w);
+		rb.vm.$emit("update:expanded", true);
+		rb.vm.$emit("files-added", [{ name: "a.png", type: "image/png" }]);
+		await w.vm.$nextTick();
+		rb.vm.$emit("submit");
+		await flushPromises();
+		expect(rb.props("expanded")).toBe(true);
+	});
+
+	it("keeps the reply box expanded when the user retypes during an in-flight send", async () => {
+		// draft changed -> cleared=false -> no collapse (mirrors the I2 keep-draft guard).
+		let resolveReply;
+		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
+		const w = mountWith([]);
+		const rb = replyBox(w);
+		rb.vm.$emit("update:expanded", true);
+		rb.vm.$emit("update:modelValue", "hello");
+		await w.vm.$nextTick();
+		rb.vm.$emit("submit");
+		await w.vm.$nextTick();
+		rb.vm.$emit("update:modelValue", "hello more"); // retype during flight
+		await w.vm.$nextTick();
+		resolveReply(true);
+		await flushPromises();
+		expect(rb.props("expanded")).toBe(true);
+	});
+
+	it("does NOT collapse the switched-to ticket's box when a reply finishes after a switch", async () => {
+		// The collapse sits inside the `store.thread.ticket === tName` guard, so a T1
+		// reply resolving after the user moved to T2 must not collapse T2's box.
+		let resolveReply;
+		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
+		storeDouble.loadThread = vi.fn(async () => {});
+		storeDouble.loadTickets = vi.fn(async () => {});
+		storeDouble.fingerprintOf = vi.fn(() => "x");
+		const w = mountWith([]);
+		const rb = replyBox(w);
+		rb.vm.$emit("update:modelValue", "hi");
+		await w.vm.$nextTick();
+		rb.vm.$emit("submit"); // send starts on T1
+		await w.vm.$nextTick();
+		lastRouteState.params.ticket = "T2";
+		storeDouble.thread.ticket = "T2"; // pin so open()'s C1 is skipped + the guard is deterministic
+		await w.vm.$nextTick();
+		rb.vm.$emit("update:expanded", true); // user opened T2's box
+		await w.vm.$nextTick();
+		resolveReply(true);
+		await flushPromises();
+		expect(rb.props("expanded")).toBe(true);
+	});
+
+	it("resets the reply box + panel meta on a real ticket switch", async () => {
+		storeDouble.thread.ticket = "T1";
+		storeDouble.thread.meta = { name: "T1", status: "Open" };
+		const w = mountWith([]);
+		const rb = replyBox(w);
+		rb.vm.$emit("update:expanded", true);
+		await w.vm.$nextTick();
+		expect(rb.props("expanded")).toBe(true);
+		// a genuine switch (thread.ticket still T1 -> open()'s C1 branch runs)
+		lastRouteState.params.ticket = "T2";
+		await w.vm.$nextTick();
+		expect(rb.props("expanded")).toBe(false);
+		expect(storeDouble.thread.meta).toBeNull();
 	});
 });
 
@@ -650,7 +744,7 @@ describe("attachment-only Send synthesizes a reply body (fix 1)", () => {
 		});
 
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("files-added", [{ name: "shot.png", type: "image/png" }]);
 		await w.vm.$nextTick();
 		c.vm.$emit("submit");
@@ -688,7 +782,7 @@ describe("uploadTo returns succeeded File references, not a count (fix 2)", () =
 		);
 
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("files-added", [
 			{ name: "a.png", type: "image/png" },
 			{ name: "b.png", type: "image/png" },
@@ -730,7 +824,7 @@ describe("settleUpload full-success branch", () => {
 		URL.revokeObjectURL = revoke;
 
 		const w = mountWith([]);
-		const c = w.findComponent(SupportComposer);
+		const c = w.findComponent(SupportReplyBox);
 		c.vm.$emit("files-added", [
 			{ name: "a.png", type: "image/png" },
 			{ name: "b.png", type: "image/png" },

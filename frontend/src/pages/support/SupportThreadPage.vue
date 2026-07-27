@@ -102,12 +102,13 @@
 			<!-- Same 820px column as jv-sup-thread-inner, so the reply box aligns
 			     under the conversation instead of stretching full-width. -->
 			<div class="jv-sup-composer-inner">
-				<!-- The SAME rich composer the new-ticket form uses, so the reply
-				     box feels unanimous with it: rich toolbar, Ctrl/Cmd+Enter to
-				     send (Enter = newline). No Stop control — a reply is a single
-				     POST, not a stream; `canSend` disarms Send while sending. -->
-				<SupportComposer
+				<!-- Collapse-to-expand reply: a one-line bar that opens the SAME rich
+				     composer the new-ticket form uses (rich toolbar, Ctrl/Cmd+Enter to
+				     send, Enter = newline). No Stop control — a reply is a single POST;
+				     `canSend` disarms Send while sending. Collapses after a clean send. -->
+				<SupportReplyBox
 					v-model="draft"
+					v-model:expanded="replyExpanded"
 					:pending="pending"
 					:can-submit="canSend"
 					:loading="sending"
@@ -120,6 +121,11 @@
 				/>
 			</div>
 		</div>
+
+		<!-- Right details panel (desktop). Its Reply button opens the composer. -->
+		<template #aside>
+			<SupportTicketPanel @open="replyExpanded = true" />
+		</template>
 	</SupportShell>
 </template>
 
@@ -129,7 +135,8 @@ import { useRoute } from "vue-router";
 import { Badge, Button, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
 import Message from "@/components/chat/Message.vue";
 import SupportShell from "@/components/support/SupportShell.vue";
-import SupportComposer from "@/components/support/SupportComposer.vue";
+import SupportReplyBox from "@/components/support/SupportReplyBox.vue";
+import SupportTicketPanel from "@/components/support/SupportTicketPanel.vue";
 import { renderSupportHtml } from "@/lib/supportHtml";
 import { supportBodyIsEmpty, prepareSupportBody } from "@/lib/supportBody";
 import { supportDownloadUrl } from "@/api";
@@ -149,6 +156,9 @@ const store = useSupportStore();
 const closing = ref(false);
 const draft = ref("");
 const sending = ref(false);
+// The reply box starts as a collapsed one-line bar; expands on click / the panel's
+// Reply button, collapses after a clean send and on a ticket switch.
+const replyExpanded = ref(false);
 
 // I4: staged-file / object-URL lifecycle shared with SupportNewPage.
 const { files, pending, onFiles, removeFile, snapshotStaged, settleUpload, reset } =
@@ -363,9 +373,14 @@ async function open(name) {
 		store.thread.messages = [];
 		store.thread.attachments = [];
 		store.thread.error = "";
+		// The details panel reads store.thread.meta — clear it too, so a stale panel
+		// doesn't linger under the new ticket during its fetch (get_thread repopulates it).
+		store.thread.meta = null;
 		// Composer state is per-TICKET: a draft or staged files left over from the
-		// PREVIOUS ticket must not silently ride along and post to this one.
+		// PREVIOUS ticket must not silently ride along and post to this one. Collapse
+		// the reply box so the new ticket starts at the one-line bar.
 		draft.value = "";
+		replyExpanded.value = false;
 		reset();
 	}
 	store.thread.ticket = name;
@@ -420,6 +435,9 @@ async function send() {
 	try {
 		// Body first, attachments second: media.upload attaches to an existing
 		// ticket, and posting the text is what actually reopens a resolved one.
+		// Whether the draft was cleanly cleared (the user didn't retype mid-send) —
+		// gates both the reference-safe clear and the reply-box collapse below.
+		let cleared = false;
 		if (body) {
 			const ok = await store.reply(tName, body);
 			if (!ok) return; // store already toasted; keep the draft so it isn't lost
@@ -432,7 +450,10 @@ async function send() {
 			// said was gone; if the user typed during the flight, it differs and we
 			// keep it. Setting draft = "" drives SupportComposer's :content watch,
 			// which setContent()s the editor empty.
-			if (draft.value === draftSnapshot) draft.value = "";
+			if (draft.value === draftSnapshot) {
+				draft.value = "";
+				cleared = true;
+			}
 		}
 
 		if (staged.length) {
@@ -460,6 +481,12 @@ async function send() {
 			// follow-up loadThread fails would swallow the change — the user's own
 			// reply stays invisible until the next focus-return refetch.
 			if (!store.thread.error) lastPrint = store.fingerprintOf(tName);
+			// Collapse the reply box back to the one-line bar — but ONLY here, inside
+			// the still-on-this-ticket guard, so a reply finishing after the user
+			// switched tickets can't collapse the new ticket's box. Also require the
+			// draft to have cleanly cleared (no retype during the send) and no
+			// attachments left staged (a partial-upload failure keeps chips to retry).
+			if (cleared && !files.value.length) replyExpanded.value = false;
 		}
 	} finally {
 		sending.value = false;
