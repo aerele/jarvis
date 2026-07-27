@@ -592,10 +592,10 @@
 							 save_llm_pool; this step is the post-save readiness handoff.
 							 v-show (not v-if) so the editor stays MOUNTED while its own save()
 							 is still awaiting. ===== -->
-						<section v-else-if="state.step === 'connect'" class="jv-ob-screen">
-							<div class="jv-ob-body">
+						<section v-else-if="state.step === 'connect'" class="ob-screen">
+							<div class="ob-body">
 								<div v-show="state.finishing">
-									<div class="jv-ob-head">
+									<div class="ob-head">
 										<h1>Setting up {{ agentName }}</h1>
 										<p>
 											{{
@@ -604,19 +604,23 @@
 											}}
 										</p>
 									</div>
-									<div class="jv-ob-setup-net">
+									<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
+										 canvas fills via absolute+inset-0, and percentage heights
+										 don't resolve against a min-height parent - see its own
+										 comment. Don't change this to a fixed h-*. -->
+									<div class="relative mt-2 min-h-[380px] flex-1">
 										<SetupNeuralNet :dark="dark" />
 									</div>
 								</div>
 								<div v-show="!state.finishing">
-									<div class="jv-ob-head">
+									<div class="ob-head">
 										<h1>Give {{ agentName }} a brain</h1>
 										<p>
 											Pick which AI powers {{ agentName }}. You can change
 											this anytime in Settings → AI models.
 										</p>
 									</div>
-									<div class="jv-ob-connect">
+									<div class="mx-auto max-w-[640px]">
 										<LlmPoolEditor
 											ref="poolRef"
 											:editable="true"
@@ -632,38 +636,29 @@
 										:message="state.finishNote"
 									>
 										<template #action>
-											<button
-												class="jv-ob-btn jv-ob-btn-primary"
+											<Button
+												variant="solid"
+												:label="`Continue to ${agentName}`"
 												@click="forceContinue"
-											>
-												Continue to {{ agentName }}
-											</button>
+											/>
 										</template>
 									</Banner>
 								</div>
 							</div>
-							<div v-if="!state.finishing" class="jv-ob-foot">
+							<div v-if="!state.finishing" class="ob-foot">
 								<!-- No Back on a reconciled resume: signup/payment already completed
 									 in a previous session, so there is no local pay/review context to
 									 go back to (re-running startSignup there would double-sign-up). -->
 								<button
 									v-if="!state.reconciledConnect"
-									class="jv-ob-back"
+									class="ob-back"
 									:disabled="savingConnect"
 									@click="goBack"
 								>
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="m15 18-6-6 6-6" /></svg
-									>Back
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back
 								</button>
 								<span v-else></span>
 								<!-- Always rendered; disabled until the editor reports a savable config,
@@ -681,9 +676,9 @@
 						<!-- ===== Self-host (reached via the quiet Plan-step link; logic
 							 unchanged, field names/args match test_connection /
 							 save_self_hosted verbatim) ===== -->
-						<section v-else-if="state.step === 'selfhost'" class="jv-ob-screen">
-							<div class="jv-ob-body">
-								<div class="jv-ob-head">
+						<section v-else-if="state.step === 'selfhost'" class="ob-screen">
+							<div class="ob-body">
+								<div class="ob-head">
 									<h1>Connect your openclaw</h1>
 									<p>
 										Point {{ agentName }} at <b>your own</b> openclaw server.
@@ -692,52 +687,54 @@
 										persona/skills. Validate first, then connect.
 									</p>
 								</div>
-								<div class="jv-ob-sh">
-									<label class="jv-ob-label" for="jv-ob-sh-url"
-										>openclaw URL</label
-									>
-									<input
+								<div class="mx-auto flex max-w-[620px] flex-col gap-3.5">
+									<FormControl
 										id="jv-ob-sh-url"
-										class="jv-ob-inp"
 										type="text"
+										variant="outline"
+										label="openclaw URL"
 										v-model="state.shUrl"
 										placeholder="http://host.docker.internal:19060"
 									/>
-									<label class="jv-ob-label" for="jv-ob-sh-token"
-										>Gateway token</label
-									>
-									<input
+									<FormControl
 										id="jv-ob-sh-token"
-										class="jv-ob-inp"
 										type="password"
+										variant="outline"
+										label="Gateway token"
 										v-model="state.shToken"
 										placeholder="paste your openclaw gateway token"
 										autocomplete="off"
 									/>
-									<label class="jv-ob-check"
-										><input type="checkbox" v-model="state.shStream" /> Stream
-										responses token-by-token (recommended)</label
-									>
-									<label class="jv-ob-check"
-										><input type="checkbox" v-model="state.shDeep" /> Run deep
-										chat test (slower, sends one message)</label
-									>
-									<div class="jv-ob-sh-actions">
-										<button
-											class="jv-ob-btn"
+									<FormControl
+										type="checkbox"
+										v-model="state.shStream"
+										label="Stream responses token-by-token (recommended)"
+									/>
+									<FormControl
+										type="checkbox"
+										v-model="state.shDeep"
+										label="Run deep chat test (slower, sends one message)"
+									/>
+									<div>
+										<Button
+											label="Test connection"
 											:disabled="state.shTestBusy"
+											:loading="state.shTestBusy"
+											loading-text="Testing…"
 											@click="runSelfHostTest"
-										>
-											{{ state.shTestBusy ? "Testing…" : "Test connection" }}
-										</button>
+										/>
 									</div>
-									<div v-if="state.shTestBusy" class="jv-ob-note">Testing…</div>
-									<div v-else-if="state.shTestResult" class="jv-ob-sh-results">
+									<div v-if="state.shTestBusy" class="ob-note">Testing…</div>
+									<div
+										v-else-if="state.shTestResult"
+										class="mb-1 mt-3.5 text-p-sm leading-relaxed"
+									>
 										<div
+											class="mb-1 font-medium"
 											:class="
 												state.shTestResult.ok
-													? 'jv-ob-sh-ok'
-													: 'jv-ob-sh-bad'
+													? 'text-ink-green-3'
+													: 'text-ink-red-3'
 											"
 										>
 											{{
@@ -749,59 +746,32 @@
 										<div
 											v-for="(c, i) in state.shTestResult.checks || []"
 											:key="i"
-											class="jv-ob-sh-check"
-											:class="{ 'jv-ob-sh-check-adv': c.advisory }"
+											class="flex items-start gap-1.5 py-0.5"
+											:class="
+												c.advisory ? 'text-ink-gray-5' : 'text-ink-gray-8'
+											"
 										>
-											<svg
+											<FeatherIcon
 												v-if="c.ok"
-												class="jv-ob-sh-ic jv-ob-sh-ic-ok"
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.5"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<circle cx="12" cy="12" r="9" />
-												<path d="m9 12 2 2 4-4" />
-											</svg>
-											<svg
+												name="check-circle"
+												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-green-3"
+											/>
+											<FeatherIcon
 												v-else-if="c.advisory"
-												class="jv-ob-sh-ic jv-ob-sh-ic-adv"
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.5"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path
-													d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"
-												/>
-												<path d="M12 9v4M12 17h.01" />
-											</svg>
-											<svg
+												name="alert-triangle"
+												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-amber-3"
+											/>
+											<FeatherIcon
 												v-else
-												class="jv-ob-sh-ic jv-ob-sh-ic-bad"
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.5"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<circle cx="12" cy="12" r="9" />
-												<path d="m15 9-6 6M9 9l6 6" />
-											</svg>
+												name="x-circle"
+												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-red-3"
+											/>
 											<span
 												><b>{{ c.check }}</b> · {{ c.detail || ""
-												}}<span v-if="c.advisory" class="jv-ob-sh-adv-tag">
+												}}<span
+													v-if="c.advisory"
+													class="italic text-ink-gray-5"
+												>
 													· advisory</span
 												></span
 											>
@@ -819,7 +789,7 @@
 										role="alert"
 										aria-live="polite"
 									/>
-									<div v-if="state.finishing" class="jv-ob-note">
+									<div v-if="state.finishing" class="ob-note">
 										Finishing setup…
 									</div>
 									<Banner
@@ -828,48 +798,36 @@
 										:message="state.finishNote"
 									>
 										<template #action>
-											<button
-												class="jv-ob-btn jv-ob-btn-primary"
+											<Button
+												variant="solid"
+												:label="`Continue to ${agentName}`"
 												@click="forceContinue"
-											>
-												Continue to {{ agentName }}
-											</button>
+											/>
 										</template>
 									</Banner>
 								</div>
 							</div>
-							<div class="jv-ob-foot">
+							<div class="ob-foot">
 								<!-- Stay disabled through the post-save readiness poll (finishing) too;
 									 both flags drop on the failure paths so retry stays possible. -->
 								<button
-									class="jv-ob-back"
+									class="ob-back"
 									:disabled="state.shSaveBusy || state.finishing"
 									@click="backFromSelfhost"
 								>
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="m15 18-6-6 6-6" /></svg
-									>Back
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back
 								</button>
-								<button
-									class="jv-ob-btn jv-ob-btn-primary"
+								<Button
+									variant="solid"
 									:disabled="state.shSaveBusy || state.finishing"
+									:loading="state.shSaveBusy || state.finishing"
+									loading-text="Connecting…"
+									label="Connect"
 									@click="onSelfHostSave"
-								>
-									{{
-										state.shSaveBusy || state.finishing
-											? "Connecting…"
-											: "Connect"
-									}}
-								</button>
+								/>
 							</div>
 						</section>
 					</div>
@@ -1911,8 +1869,9 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-/* Styling follows design.md (§4.3 onboarding & wizards): flat neutral surfaces,
-   near-black solid CTAs, colour-shift-only hover, no decorative motion. */
+/* Root page chrome (jv-ob-root/jv-dark/paletteVars): kept load-bearing, see the
+   template comment above the root <div> for why. Its own look (page tint,
+   default text color, full-height flex column) is otherwise unchanged. */
 .jv-ob-root {
 	min-height: 100vh;
 	background: var(--surface-1);
@@ -2023,6 +1982,38 @@ onMounted(async () => {
 	justify-content: center;
 }
 
+/* ---- buttons (design.md §3.1): solid near-black primary, colour-shift hover
+   only. .jv-ob-btn/.jv-ob-btn-grad are the LAST two hand-rolled buttons left
+   in this file - every other button call site is a real frappe-ui <Button>.
+   The "Start chatting" CTA (jv-ob-btn-grad) is deliberately migrated in its
+   own follow-up commit; this pair stays until then. ---- */
+.jv-ob-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	height: 36px;
+	padding: 0 16px;
+	border-radius: 8px;
+	border: 1px solid transparent;
+	font-family: inherit;
+	font-size: 13.5px;
+	font-weight: 500;
+	line-height: 1;
+	cursor: pointer;
+	white-space: nowrap;
+	background: var(--text);
+	color: var(--surface);
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.jv-ob-btn:hover:not(:disabled) {
+	background: var(--text-2);
+}
+.jv-ob-btn:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
 /* JvCombo (Company, Details step) matched to FormControl's variant="outline"
    input recipe (frappe-ui TextInput.vue) so it looks like its FormControl
    siblings — focus-within because the border belongs on the wrapper, the
@@ -2048,298 +2039,26 @@ onMounted(async () => {
 	color: var(--text-3);
 }
 
-.jv-ob-screen {
-	animation: jvObFade 0.15s ease-out;
-}
-@keyframes jvObFade {
-	from {
-		opacity: 0;
-	}
-	to {
-		opacity: 1;
-	}
-}
-/* min-height keeps every step's dialog the same size; shorter content
-   top-aligns inside it. The tour matches at 604px (TourIntro.vue). */
-.jv-ob-body {
-	padding: 32px 40px 28px;
-	min-height: 520px;
-	box-sizing: border-box;
-}
-.jv-ob-head {
-	text-align: center;
-	margin-bottom: 24px;
-}
-.jv-ob-head h1 {
-	font-size: 20px;
-	font-weight: 600;
-	margin: 0 0 7px;
-	text-wrap: balance;
-}
-.jv-ob-head p {
-	font-size: 14px;
-	line-height: 1.5;
-	color: var(--text-2);
-	margin: 0;
-}
-.jv-ob-foot {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
-	padding: 16px 40px 22px;
-	border-top: 1px solid var(--border);
-}
-.jv-ob-foot-end {
-	justify-content: flex-end;
-}
-.jv-ob-back {
-	font-size: 13px;
-	font-weight: 420;
-	color: var(--text-2);
-	background: none;
-	border: none;
-	cursor: pointer;
-	font-family: inherit;
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-	padding: 6px 8px;
-	border-radius: 8px;
-	transition: background-color 0.15s ease, color 0.15s ease;
-}
-.jv-ob-back svg {
-	flex: none;
-	color: var(--text-3);
-}
-.jv-ob-back:hover {
-	color: var(--text);
-	background: var(--surface-2);
-}
-.jv-ob-back:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
-/* quiet self-host link on the Plan footer — links look like links */
-.jv-ob-link {
-	font-size: 12.5px;
-	color: var(--text-3);
-	background: none;
-	border: none;
-	cursor: pointer;
-	font-family: inherit;
-	text-decoration: underline;
-	text-underline-offset: 3px;
-	padding: 4px 2px;
-}
-.jv-ob-link:hover {
-	color: var(--text-2);
-}
-/* keyboard focus (text inputs draw their own focus border) */
-.jv-ob-root button:focus-visible,
-.jv-ob-root input[type="checkbox"]:focus-visible,
-.jv-ob-root [tabindex]:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 2px;
-}
-/* ---- buttons (design.md §3.1): solid near-black primary, subtle secondary,
-   colour-shift hover only. The finishing CTA (.jv-ob-btn-grad class name kept
-   for the template) is the same solid primary as everywhere else. ---- */
-.jv-ob-btn {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	gap: 7px;
-	height: 36px;
-	padding: 0 16px;
-	border-radius: 8px;
-	border: 1px solid transparent;
-	font-family: inherit;
-	font-size: 13.5px;
-	font-weight: 500;
-	line-height: 1;
-	cursor: pointer;
-	white-space: nowrap;
-	background: var(--surface-2);
-	color: var(--text);
-	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-/* :not(:disabled) is REQUIRED here. Without it this rule (specificity 0,2,0)
-   outranks .jv-ob-btn-grad/.jv-ob-btn-primary (0,1,0) on hover, repainting a
-   DISABLED primary button's background to near-white --surface-3 while its
-   color stays var(--surface) (white) -> white-on-white, the button vanishes
-   under the cursor. Hit live on the Connect step's "Start chatting" while it
-   was still disabled. */
-.jv-ob-btn:hover:not(:disabled) {
-	background: var(--surface-3);
-}
-.jv-ob-btn:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
-.jv-ob-btn-primary,
-.jv-ob-btn-grad {
-	background: var(--text);
-	border-color: var(--text);
-	color: var(--surface);
-}
-.jv-ob-btn-primary:hover:not(:disabled),
-.jv-ob-btn-grad:hover:not(:disabled) {
-	background: var(--text-2);
-	border-color: var(--text-2);
-	color: var(--surface);
-}
-/* small variant (inline Retry next to an error message) */
-.jv-ob-btn-sm {
-	height: 28px;
-	padding: 0 12px;
-	font-size: 12.5px;
-	border-radius: 8px;
-	margin-left: 8px;
-}
-.jv-ob-inp {
-	height: 32px;
-	border: 1px solid var(--border-2);
-	border-radius: 8px;
-	background: var(--surface);
-	padding: 0 10px;
-	font-family: inherit;
-	font-size: 13.5px;
-	color: var(--text);
-	width: 100%;
-	box-sizing: border-box;
-	transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.jv-ob-inp::placeholder {
-	color: var(--text-3);
-}
-.jv-ob-inp:hover {
-	border-color: var(--text-3);
-}
-.jv-ob-inp:focus {
-	outline: none;
-	border-color: var(--text);
-	box-shadow: 0 0 0 3px var(--surface-2);
-}
-/* ---- Connect ---- */
-.jv-ob-connect {
-	max-width: 640px;
-	margin: 0 auto;
-}
-/* ---- Self-host (logic unchanged) ---- */
-.jv-ob-sh {
-	max-width: 620px;
-	margin: 0 auto;
-}
-.jv-ob-label {
-	display: block;
-	font-size: 12px;
-	font-weight: 420;
-	color: var(--text-3);
-	margin: 14px 0 6px;
-}
-.jv-ob-sh .jv-ob-label:first-of-type {
-	margin-top: 0;
-}
-.jv-ob-check {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	font-size: 13px;
-	color: var(--text);
-	margin-top: 10px;
-	cursor: pointer;
-}
-.jv-ob-sh-actions {
-	display: flex;
-	margin-top: 14px;
-}
-.jv-ob-sh-results {
-	margin: 14px 0 4px;
-	font-size: 12.5px;
-	line-height: 1.6;
-}
-.jv-ob-sh-check {
-	display: flex;
-	align-items: flex-start;
-	gap: 7px;
-	color: var(--text);
-	padding: 2px 0;
-}
-.jv-ob-sh-check-adv {
-	color: var(--text-3);
-}
-.jv-ob-sh-ic {
-	flex: none;
-	margin-top: 2px;
-}
-.jv-ob-sh-ic-ok {
-	color: var(--green);
-}
-.jv-ob-sh-ic-adv {
-	color: var(--amber);
-}
-.jv-ob-sh-ic-bad {
-	color: var(--red);
-}
-.jv-ob-sh-adv-tag {
-	color: var(--text-3);
-	font-style: italic;
-}
-.jv-ob-sh-ok {
-	color: var(--green);
-	font-weight: 500;
-	margin-bottom: 4px;
-}
-.jv-ob-sh-bad {
-	color: var(--red);
-	font-weight: 500;
-	margin-bottom: 4px;
-}
-/* ---- Connect / self-host post-save readiness note (afterSaveRecheckReady). ---- */
-.jv-ob-note {
-	font-size: 12.5px;
-	color: var(--text-3);
-	margin-top: 14px;
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	flex-wrap: wrap;
-	justify-content: center;
-}
 @media (max-width: 820px) {
-	.jv-ob-body {
+	.ob-body {
 		min-height: 0;
 		padding: 26px 22px 22px;
 	}
-	.jv-ob-foot {
+	.ob-foot {
 		padding: 14px 22px 20px;
-	}
-	.jv-ob-plans {
-		grid-template-columns: 1fr;
-	}
-	.jv-ob-form {
-		grid-template-columns: 1fr;
-	}
-	.jv-ob-head h1 {
-		font-size: 18px;
-	}
-	.jv-ob-foot {
 		flex-wrap: wrap;
+	}
+	.ob-head h1 {
+		font-size: 18px;
 	}
 }
 @media (prefers-reduced-motion: reduce) {
-	.jv-ob-screen {
+	.ob-screen {
 		animation: none;
 	}
-	.jv-ob-plan,
 	.jv-ob-btn,
-	.jv-ob-inp,
-	.jv-ob-form :deep(.jvc-field) {
+	.ob-details-form :deep(.jvc-field) {
 		transition: none;
-	}
-	.jv-ob-spinner {
-		animation: none;
 	}
 }
 </style>
