@@ -58,6 +58,25 @@ test("Submit emits the formatted answers once", async () => {
 	);
 });
 
+test("the picks survive Submit, so a host that refuses the text loses nothing", async () => {
+	// DashboardChatPane.sendText and ChatView.send both return early while a send
+	// is in flight (or a dictation is still transcribing). Clearing sel/other
+	// inside submit() emptied the card anyway - the answers were gone and the
+	// button was disabled again. The card unmounts on the next assistant message
+	// (it is keyed by message name), so there is nothing to reset here.
+	const w = mountWithPalette(AskCard, { spec: CHOICES });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	await submit(w).trigger("click");
+	expect(optionNamed(w, "Open").classes()).toContain("on");
+	expect(submit(w).attributes("disabled")).toBeUndefined();
+	// ...and a second click re-sends the same answers rather than an empty one
+	await submit(w).trigger("click");
+	const emitted = findCard(w).emitted("submit");
+	expect(emitted).toHaveLength(2);
+	expect(emitted[1][0]).toBe(emitted[0][0]);
+});
+
 test("clicking a picked option unpicks it (and disarms Submit)", async () => {
 	const w = mountWithPalette(AskCard, { spec: CHOICES });
 	await optionNamed(w, "Open").trigger("click");

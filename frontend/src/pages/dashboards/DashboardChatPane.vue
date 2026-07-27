@@ -153,13 +153,14 @@
 			<div class="mt-2 flex items-center justify-between gap-2">
 				<div class="flex items-center gap-1.5">
 					<VoiceRecorder v-if="caps.stt_enabled" compact @transcript="onTranscript" />
-					<!-- explicit data-mode: Auto lets the agent decide; Static bakes the
+					<!-- explicit data-mode: Auto leaves it to the opening interview
+					     (the agent asks before the first build); Static bakes the
 					     numbers in (one-time report); Live declares view-time sources.
 					     TabButtons = real radio-group semantics + the raised-chip look,
 					     so the active option isn't a second solid next to Send. -->
 					<span
 						class="ml-1 text-xs text-ink-gray-5"
-						title="How this dashboard gets its data"
+						title="How this dashboard gets its data. Auto: I'll ask you before the first build."
 					>
 						Data
 					</span>
@@ -207,7 +208,7 @@ import VoiceRecorder from "@/components/VoiceRecorder.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import { renderMarkdown } from "@/markdown";
 import { parseAsk } from "@/lib/chatAsk";
-import { lastCanvasFrame } from "@/lib/dashboardRestore";
+import { builderCanvasFrame } from "@/lib/dashboardRestore";
 import { useJarvisTheme } from "@/theme";
 import { session } from "@/data/session";
 import { sendDashboardChat, getDashboardConversation } from "@/api/dashboards";
@@ -242,6 +243,11 @@ function errMsg(e) {
 
 // ── conversation persistence (per user, ChatComposer's namespacing idiom) ────
 const conversation = useStorage(`jarvis-dash-conv-${session.user || "anon"}`, "");
+// The message whose canvas the BUILDER last rendered - the page stamps it, this
+// pane replays exactly that one. Scanning the transcript for "the newest html"
+// instead would hand the builder an artifact main chat produced in the same
+// thread ("Open in chat" shares it) and arm Save over it.
+const canvasMsg = useStorage(`jarvis-dash-canvasmsg-${session.user || "anon"}`, "");
 
 // ── transcript ────────────────────────────────────────────────────────────────
 const messages = ref([]);
@@ -319,9 +325,9 @@ async function loadTranscript({ initial = false } = {}) {
 		// Navigating away unmounts the builder and drops its canvas html, but the
 		// transcript we just reloaded still carries every artifact the agent drew
 		// (get_conversation returns each message's parsed `canvas` list). Replay
-		// the last one so coming back is lossless — the page ignores it when a
-		// canvas is already on screen.
-		const frame = lastCanvasFrame(messages.value);
+		// the one the BUILDER last rendered so coming back is lossless — the
+		// page ignores it when a canvas is already on screen.
+		const frame = builderCanvasFrame(messages.value, canvasMsg.value);
 		if (frame) emit("canvas", { ...frame, restore: true });
 		nextTick(scrollBottom);
 	} catch (e) {
@@ -463,7 +469,8 @@ const sending = ref(false);
 const draft = ref("");
 const box = ref(null);
 
-// Explicit data-mode toggle (goal requirement): "auto" = agent decides,
+// Explicit data-mode toggle (goal requirement): "auto" = one of the questions
+// the agent asks before the first build (it no longer guesses from wording),
 // "static" = baked one-time report, "live" = declared view-time sources.
 // Persisted per user so the choice survives page hops. ("auto" rather than ""
 // so reka-ui's RadioGroup has a real value to select.) The API wrapper only
@@ -488,6 +495,11 @@ function autoGrow() {
 watch(draft, autoGrow, { flush: "post" });
 
 function onKeydown(e) {
+	// An Enter that CONFIRMS an IME candidate (Japanese/Chinese/Korean) belongs
+	// to the composition, not to us - sending on it posts the half-converted
+	// reading. keyCode 229 is the pre-`isComposing` browsers' version of the
+	// same signal.
+	if (e.isComposing || e.keyCode === 229) return;
 	// Enter sends, Shift+Enter keeps the newline
 	if (e.key === "Enter" && !e.shiftKey) {
 		e.preventDefault();
@@ -500,6 +512,12 @@ function onTranscript(text) {
 	const cur = draft.value;
 	draft.value = cur.trim() ? cur.replace(/\s+$/, "") + " " + text : text;
 }
+
+// send() can be handed a DIFFERENT conversation than the one it posted to (the
+// stored one was deleted or reassigned server-side, so send_message opened a
+// fresh one). That repoint is OURS: the run it just started is the one on
+// screen, so the follow watcher below must not tear its Thinking indicator down.
+let ownRepoint = false;
 
 async function send() {
 	const text = draft.value.trim();
@@ -527,6 +545,7 @@ async function send() {
 			return;
 		}
 		if (r.conversation_id && r.conversation_id !== conversation.value) {
+			ownRepoint = true;
 			conversation.value = r.conversation_id;
 		}
 		runActive.value = true;
@@ -550,12 +569,13 @@ function newChat() {
 }
 
 // Drop everything that belongs to the thread on screen, leaving the pointer
-// alone (the conversation watcher below re-points it).
-function clearThread() {
+// alone (the conversation watcher below re-points it). `keepRun` is for the
+// one case where the thread moved but the run did not: our own send.
+function clearThread({ keepRun = false } = {}) {
 	loadReq++; // drop any in-flight transcript load
 	messages.value = [];
 	pendingCards.value = [];
-	runActive.value = false;
+	if (!keepRun) runActive.value = false;
 	draft.value = "";
 }
 
@@ -570,7 +590,9 @@ function resetChat() {
 // to. Guarded on `prev`: "" -> id is our own first send, already reconciled.
 watch(conversation, (id, prev) => {
 	if (!prev || id === prev) return;
-	clearThread();
+	const own = ownRepoint;
+	ownRepoint = false;
+	clearThread({ keepRun: own });
 	if (id) {
 		loadTranscript({ initial: true });
 		refreshPending();

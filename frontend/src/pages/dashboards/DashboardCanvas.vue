@@ -234,7 +234,11 @@ async function exportAs(format, title) {
 	if (format === "pdf") await downloadPdf(images, title);
 	else downloadPng(images, title);
 }
-defineExpose({ exportAs });
+// rebuild() is exposed for hosts that hide this component with `v-show`: the
+// iframe keeps loading while `display:none`, so charts initialise against a
+// 0x0 container and ECharts does not self-heal when it reappears. The builder
+// page re-drives it when the canvas becomes visible again.
+defineExpose({ exportAs, rebuild });
 
 // ── frame messages (validated: our iframe's window + the jarvis:1 stamp) ─────
 function onMessage(e) {

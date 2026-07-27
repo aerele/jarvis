@@ -1406,12 +1406,14 @@ def _dashboard_theme_cheatsheet(theme_key: str) -> str:
 
 
 def _dashboard_has_canvas(conversation_id: str) -> bool:
-	"""Has any turn in this conversation already drawn a canvas artifact?
+	"""Has any turn in this conversation already drawn an HTML canvas artifact?
 
 	``persist_canvases`` stamps the assistant message's ``canvas`` JSON field for
 	every turn that published one, and that same field is what ``get_conversation``
-	hands the builder. The Dashboards builder keeps no server-side draft, so this
-	IS the "is there a dashboard yet?" state for the interview-first rule below.
+	hands the builder. Only an ``html`` item can render on the builder canvas, and
+	``generated_media`` stamps the SAME field with ``type: "image"`` items - so the
+	rule here is the client's (``builderCanvasFrame``): an image drawn in this
+	conversation is not a dashboard.
 
 	Fails to True on any error: an unreadable state must degrade to today's
 	build-immediately behaviour, never to re-interrogating the user every turn.
@@ -1419,13 +1421,59 @@ def _dashboard_has_canvas(conversation_id: str) -> bool:
 	if not conversation_id:
 		return False
 	try:
+		rows = frappe.get_all(
+			MSG,
+			filters={"conversation": conversation_id, "canvas": ["is", "set"]},
+			pluck="canvas",
+			order_by="creation desc",
+			limit=50,
+		)
+		for raw in rows:
+			try:
+				items = frappe.parse_json(raw)
+			except Exception:
+				continue
+			if isinstance(items, list) and any(
+				isinstance(it, dict) and it.get("type") == "html" for it in items
+			):
+				return True
+		return False
+	except Exception:
+		frappe.log_error(
+			title="dashboards: canvas probe failed",
+			message=f"conversation={conversation_id!r}\n\n{frappe.get_traceback()}",
+		)
+		return True
+
+
+def _dashboard_has_asked(conversation_id: str) -> bool:
+	"""Has the assistant already put a ``jarvis-ask`` block in this conversation?
+
+	The interview is ONE-shot, and "did a canvas persist?" is the wrong state to
+	test for that: the turn carrying the user's answers has no canvas yet either,
+	and a publish that failed (or a bench with no canvas route at all) would keep
+	re-ordering the interview forever. What ends it is the ask having happened.
+
+	Fails to True on any error: never re-interrogate a user who already answered.
+	"""
+	if not conversation_id:
+		return False
+	try:
 		return bool(
 			frappe.db.exists(
 				MSG,
-				{"conversation": conversation_id, "canvas": ["is", "set"]},
+				{
+					"conversation": conversation_id,
+					"role": "assistant",
+					"content": ["like", "%```jarvis-ask%"],
+				},
 			)
 		)
 	except Exception:
+		frappe.log_error(
+			title="dashboards: prior-ask probe failed",
+			message=f"conversation={conversation_id!r}\n\n{frappe.get_traceback()}",
+		)
 		return True
 
 
@@ -1498,30 +1546,43 @@ def _prepend_doc_context(user_message: str, context, conversation_id: str = "") 
 		# guess the user then has to argue with, so the FIRST pass of a build asks
 		# the few decisions that shape it and waits. "First" is derived here, not
 		# sent by the client: no canvas has been drawn in this conversation yet and
-		# we are not revising an existing saved document. Once a canvas exists the
-		# wording below is unchanged from the iterate-only original.
+		# we are not revising an existing saved document. The interview is one-shot:
+		# once the ask has gone out, the next turn BUILDS whether or not the last
+		# publish landed, so a gateway blip (or a bench with no canvas route) can
+		# never trap the user in a question loop. Once a canvas exists the wording
+		# below is unchanged from the iterate-only original.
 		clarify_line = ""
 		if not edit_line and not _dashboard_has_canvas(conversation_id):
-			decisions = [
-				"the data scope (which records/doctypes, over what period)",
-				"the breakdown that matters (grouped by what, showing which numbers)",
-			]
-			if not mode:
-				decisions.append(
-					"whether they want a STATIC one-time report with the numbers baked in "
-					"or a LIVE data-connected dashboard"
+			if _dashboard_has_asked(conversation_id):
+				clarify_line = (
+					" You have ALREADY asked your clarifying questions in this conversation, "
+					"so never ask again: the user has answered them or moved on. Use their "
+					"answers, fill any remaining gap with a sensible default, and build the "
+					"dashboard now."
 				)
-			if not theme_key:
-				decisions.append("which theme it should use")
-			clarify_line = (
-				" NOTHING has been drawn on this canvas yet, so do NOT build on this pass. "
-				"Reply with one short lead-in line and exactly ONE ```jarvis-ask block (see "
-				"the jarvis-chat-blocks skill) asking about " + "; ".join(decisions) + " - "
-				"then stop and wait for the answers. Skip any decision their request already "
-				"answers unambiguously, and when it answers all of them, build instead of "
-				"asking. Never ask twice: once they have answered, or told you to go ahead, "
-				"build the dashboard."
-			)
+			else:
+				decisions = [
+					"the data scope (which records/doctypes, over what period)",
+					"the breakdown that matters (grouped by what, showing which numbers)",
+				]
+				if not mode:
+					decisions.append(
+						"whether they want a STATIC one-time report with the numbers baked in "
+						"or a LIVE data-connected dashboard"
+					)
+				clarify_line = (
+					" NOTHING has been drawn on this canvas yet. If this message is not a "
+					"request to build a dashboard (a greeting, a question about their data, a "
+					"remark about one you already discussed), just answer it normally - no "
+					"jarvis-ask block and no build. When it IS a build request, do NOT build "
+					"on this pass: reply with one short lead-in line and exactly ONE "
+					"```jarvis-ask block (see the jarvis-chat-blocks skill) asking about "
+					+ "; ".join(decisions)
+					+ " - then stop and wait for the answers. Skip any "
+					"decision their request already answers unambiguously, and when it answers "
+					"all of them, build instead of asking. Never ask twice: once they have "
+					"answered, or told you to go ahead, build the dashboard."
+				)
 		return (
 			"[Context: The user is on the Jarvis Dashboards builder page. They want to "
 			"create or iterate on a dashboard/report. Read and follow the "

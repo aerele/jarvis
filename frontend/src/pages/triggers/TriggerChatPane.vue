@@ -71,10 +71,22 @@
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
 					     Approvals/Agents surfaces (renderMarkdown escapes HTML first) -->
-					<div v-else class="flex">
+					<div v-else class="flex flex-col">
 						<div
 							class="prose prose-sm min-w-0 max-w-none text-ink-gray-8"
 							v-html="renderBubble(m.content)"
+						/>
+						<!-- clarifying questions: the SAME option cards the main chat
+						     renders. `jarvis-ask` is a standing capability, so a model
+						     that asks here must not leave an empty bubble nobody can
+						     answer. paletteVars is bound because the jv-* tokens AskCard
+						     styles with are not global (SkillDetail precedent). -->
+						<AskCard
+							v-if="askFor === m.name && activeAsk"
+							:key="m.name"
+							:spec="activeAsk"
+							:style="paletteVars"
+							@submit="sendText"
 						/>
 					</div>
 				</template>
@@ -199,7 +211,10 @@ import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
 import { Button, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
+import AskCard from "@/components/chat/AskCard.vue";
 import { renderMarkdown } from "@/markdown";
+import { parseAsk } from "@/lib/chatAsk";
+import { useJarvisTheme } from "@/theme";
 import { session } from "@/data/session";
 import { sendTriggerChat, getTriggerConversation } from "@/api/triggers";
 import { listPendingConfirmations, confirmTool, dismissTool } from "@/api";
@@ -214,6 +229,8 @@ const emit = defineEmits(["activity"]); // parent refreshes the triggers list
 
 const router = useRouter();
 const socket = inject("$socket", null);
+// AskCard styles with the jv-* tokens, which this frappe-ui page does not bind.
+const { paletteVars } = useJarvisTheme();
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
@@ -236,7 +253,9 @@ const bubbles = computed(() =>
 );
 
 // ChatView's stripBlocks, minimal subset: internal fenced blocks (actions,
-// confirms, cards…) never render as raw fences in the pane.
+// confirms, cards…) never render as raw fences in the pane. `jarvis-ask` is
+// stripped from the PROSE here too, but unlike the others it is not discarded:
+// <AskCard> renders it below the bubble (see activeAsk).
 function stripBlocks(text) {
 	return (text || "")
 		.replace(/```jarvis-action[ \t]*\n[\s\S]*?```/g, "")
@@ -252,6 +271,20 @@ function stripBlocks(text) {
 function renderBubble(text) {
 	return renderMarkdown(stripBlocks(text));
 }
+
+// ── clarifying questions (ChatView's rule: the card lives on the LAST
+// assistant message only, so a stale ask from three turns ago isn't answerable)
+const lastAssistant = computed(() => {
+	const rows = bubbles.value;
+	for (let i = rows.length - 1; i >= 0; i--) {
+		if (rows[i].role === "assistant" && !rows[i].error) return rows[i];
+	}
+	return null;
+});
+const activeAsk = computed(() =>
+	lastAssistant.value ? parseAsk(lastAssistant.value.content) : null
+);
+const askFor = computed(() => (activeAsk.value ? lastAssistant.value.name : null));
 
 function scrollBottom() {
 	const el = scroller.value;
@@ -437,6 +470,11 @@ function autoGrow() {
 watch(draft, autoGrow, { flush: "post" });
 
 function onKeydown(e) {
+	// An Enter that CONFIRMS an IME candidate (Japanese/Chinese/Korean) belongs
+	// to the composition, not to us - sending on it posts the half-converted
+	// reading. keyCode 229 is the pre-`isComposing` browsers' version of the
+	// same signal.
+	if (e.isComposing || e.keyCode === 229) return;
 	// Enter sends, Shift+Enter keeps the newline
 	if (e.key === "Enter" && !e.shiftKey) {
 		e.preventDefault();
@@ -484,6 +522,16 @@ async function send() {
 	} finally {
 		sending.value = false;
 	}
+}
+
+// Post a message into this pane programmatically (the AskCard's submitted
+// answers). Ignored while a send is already in flight - the card keeps its
+// picks, so the user can submit again once the pane is free.
+function sendText(text) {
+	const t = String(text || "").trim();
+	if (!t || sending.value) return;
+	draft.value = t;
+	send();
 }
 
 function newChat() {

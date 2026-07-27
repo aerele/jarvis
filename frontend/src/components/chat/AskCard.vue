@@ -197,10 +197,12 @@ function isPicked(i, opt) {
 }
 function submit() {
 	if (!ready.value) return;
-	const text = askAnswerText(props.spec, sel.value, other.value);
-	sel.value = {};
-	other.value = {};
-	emit("submit", text);
+	// Emit and keep the picks. The card is keyed by message, so it unmounts the
+	// moment the next assistant message arrives — there is nothing to reset. And
+	// a host is allowed to REFUSE the text (a send already in flight, a dictation
+	// still transcribing): clearing first would silently swallow the answers and
+	// leave the user staring at an empty, disabled card.
+	emit("submit", askAnswerText(props.spec, sel.value, other.value));
 }
 </script>
 
