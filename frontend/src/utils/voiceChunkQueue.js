@@ -29,6 +29,11 @@
 //     or (under `retainUntilSent`, which the composer sets because a draft is volatile
 //     until sent) on acknowledge()/discard. A `failed` clip is RETAINED either way (for the
 //     Retry/Download chip and reload recovery).
+//   * an HONEST retention story — a retained clip is not automatically a STUCK one. A failed clip
+//     whose placeholder rode out in an ACCEPTED send is flagged `sentWithout`
+//     (markSentWithoutClip) so the composer can tell "not sent yet" from "sent, minus this chunk",
+//     and hasUnfinishedReason() separates a genuine "live" loss risk from a merely "unresolved"
+//     (durably mirrored, re-offered on reload) one so the leave guard never warns about safe audio.
 //
 // Chunk record state machine (per seq):
 //
@@ -656,6 +661,21 @@ export function createVoiceChunkQueue(deps = {}) {
 		if (changed) _safe(onChange);
 	}
 
+	// UX-1: the payload that just left carried this failed clip's in-place ⟦clip N⟧ placeholder,
+	// which the composer STRIPPED on the way out — so the sent, immutable message is missing this
+	// clip's words and nothing else records that. Flag the record so its chip can say so instead of
+	// reading like leftover clutter next to an already-answered message, and so its Retry can
+	// promise a follow-up rather than an edit of a message that has already gone. Only a terminal
+	// `failed` clip can be sent-WITHOUT: a `done` clip's text WAS in the payload, and releasing it
+	// is acknowledge()'s job (untouched here). The audio stays retained either way.
+	function markSentWithoutClip(seq) {
+		if (disposed) return;
+		const rec = records.get(seq);
+		if (!rec || rec.state !== "failed" || rec.sentWithout) return;
+		rec.sentWithout = true;
+		_safe(onChange);
+	}
+
 	// VR4-1: the user chose Restore on a retained clip — its transcript is going back into the
 	// composer, so it is a normal un-sent draft clip again (the next send's payload match releases
 	// it). Clears the orphaned flag so its chip disappears; the audio is untouched.
@@ -672,6 +692,9 @@ export function createVoiceChunkQueue(deps = {}) {
 		let running = 0;
 		let done = 0;
 		let total = 0;
+		// [{seq, clip, sentWithout}] — `sentWithout` (UX-1) marks a failed clip whose placeholder rode
+		// out in an ACCEPTED send: the chip's copy branches on it ("was missing from your last
+		// message" vs "didn't transcribe"), because those two states are otherwise indistinguishable.
 		const failed = [];
 		// [{seq, clip, text}] — committed clips edited OUT of a sent message (VR4-1): actionable
 		// retained clips the composer renders Restore/Download/Discard for, so the audio is
@@ -688,7 +711,8 @@ export function createVoiceChunkQueue(deps = {}) {
 			else if (rec.state === "done") {
 				done += 1;
 				if (rec.orphaned) retained.push({ seq: rec.seq, clip: rec.clip, text: rec.text });
-			} else if (rec.state === "failed") failed.push({ seq: rec.seq, clip: rec.clip });
+			} else if (rec.state === "failed")
+				failed.push({ seq: rec.seq, clip: rec.clip, sentWithout: !!rec.sentWithout });
 			if (rec.persist === "failed") unpersisted.push({ seq: rec.seq, clip: rec.clip });
 		}
 		return {
@@ -703,21 +727,51 @@ export function createVoiceChunkQueue(deps = {}) {
 		};
 	}
 
-	// True while ANY clip is still un-safe — the composer uses this to arm the beforeunload
-	// + route-leave guard so audio is never silently lost on navigation. Un-safe means:
-	// still pending / in flight / failed (transcription incomplete); OR, under
-	// retainUntilSent, committed but still mirrored — its transcript lives only in an
-	// un-sent, volatile draft (finding 6). A discarded tombstone is safe.
-	function hasUnfinished() {
+	// WHY anything is still outstanding — the distinction the composer's leave guard needs so it
+	// stops crying wolf (UX-3). Returns:
+	//   "live"       — leaving now can genuinely LOSE something: a clip still pending/in flight
+	//                  (its transcription is mid-air), a clip whose audio could NOT be confirmed
+	//                  durably mirrored (persist === "failed" — nothing to recover it from), or,
+	//                  under retainUntilSent, a committed clip whose transcript exists ONLY in this
+	//                  volatile, un-sent draft.
+	//   "unresolved" — only terminal clips the user hasn't dealt with remain: a `failed` clip, or a
+	//                  committed clip that was already sent-without/edited out. Every one of them is
+	//                  durably mirrored and re-offered by the recovery banner next visit, so leaving
+	//                  loses NOTHING — loss-framed copy here is factually wrong and trains users to
+	//                  click through the warning that does matter.
+	//   null         — nothing outstanding at all.
+	// A discarded tombstone is always safe.
+	function hasUnfinishedReason() {
+		let unresolved = false;
 		for (const rec of records.values()) {
 			if (rec.state === "discarded") continue;
 			// VR5-2: a clip whose audio isn't confirmed durable is UN-safe regardless of its
 			// transcription state — the guard must stay armed until it persists or is discarded.
-			if (rec.persist === "failed") return true;
-			if (rec.state !== "done") return true;
-			if (retainUntilSent && rec.committed) return true;
+			if (rec.persist === "failed") return "live";
+			if (rec.state === "pending" || rec.state === "inflight") return "live";
+			if (rec.state === "failed") {
+				// "Durably mirrored" is the ENTIRE justification for not warning about a failed
+				// clip — so it has to be CONFIRMED, not merely in flight (a mirror write that has
+				// not settled yet may still fail, and then there is nothing to recover from).
+				if (rec.persist === "persisting") return "live";
+				unresolved = true; // terminal + confirmed durable: actionable, nothing at risk
+				continue;
+			}
+			if (retainUntilSent && rec.committed) {
+				// A resurrected sent-without clip's words are back in the draft, but its audio is
+				// still mirrored and re-offered on reload — terminal-unresolved, not at-risk.
+				if (rec.sentWithout) unresolved = true;
+				else return "live";
+			}
 		}
-		return false;
+		return unresolved ? "unresolved" : null;
+	}
+
+	// True while ANY clip is still un-safe OR merely unresolved — kept as the coarse predicate for
+	// callers that only need "is anything outstanding". The composer arms its guard off
+	// hasUnfinishedReason() instead, so a terminally-failed clip no longer raises a loss warning.
+	function hasUnfinished() {
+		return hasUnfinishedReason() !== null;
 	}
 
 	function getClip(seq) {
@@ -748,9 +802,11 @@ export function createVoiceChunkQueue(deps = {}) {
 		acknowledge,
 		reassignScope,
 		markUnsentOrphans,
+		markSentWithoutClip,
 		unorphan,
 		snapshot,
 		hasUnfinished,
+		hasUnfinishedReason,
 		getClip,
 		dispose,
 	};

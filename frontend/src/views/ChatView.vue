@@ -2526,7 +2526,10 @@
 							</div>
 							<!-- failed-clip chips: a chunk exhausted its retry budget. Retry drops the
 						     recovered words back into the in-place ⟦clip N⟧ placeholder where they
-						     belong (VUX-2), not at the composer end. ✕ discards the clip (confirmed). -->
+						     belong (VUX-2), not at the composer end. ✕ discards the clip (confirmed).
+						     UX-1: once the message carrying the placeholder has been SENT, the chip's
+						     label + Retry tooltip switch to the post-send wording (sentWithout) — the
+						     two states are otherwise indistinguishable and the chip reads as stuck. -->
 							<div
 								v-if="ui.stt_enabled && voiceQ.failed.length"
 								style="
@@ -2552,10 +2555,10 @@
 										border: 1px solid rgba(220, 150, 40, 0.32);
 									"
 								>
-									Clip {{ f.seq + 1 }} didn't transcribe
+									{{ failedChipLabel(f) }}
 									<button
 										class="jv-voicechip-act"
-										title="Transcribe again — the words drop back into the ⟦clip⟧ placeholder in the message, where they belong"
+										:title="failedChipRetryTitle(f)"
 										@click="retryClip(f.seq)"
 									>
 										Retry
@@ -6912,6 +6915,28 @@ async function send(textArg, resendAck) {
 	// retained audio mirror + leave guard can be released (finding 6).
 	const _sentScope = _currentScope();
 	const fromMain = typeof textArg !== "string";
+	// UX-2 (silent content loss): the ⟦clip N⟧ placeholders below are stripped from the payload, so
+	// the sent message — and its permanent history entry — reads as fluent, complete prose while
+	// actually missing what those clips recorded. Ask ONCE before that happens, and let the user
+	// back out to the composer where both the placeholder and the clip's chip are still sitting.
+	// Read from the RAW composer text (pre-strip) — that is where the tokens still exist. Only for a
+	// main-composer send: a resendFailed is re-sending a payload the user already chose to send with
+	// the gap in it, and a programmatic send carries no composer state to review.
+	let _gapSeqsInText = fromMain ? _gapSeqsIn(input.value) : [];
+	if (_gapSeqsInText.length && (_stripGapTokens(input.value) || pendingFiles.value.length)) {
+		const ok = await confirm({
+			title: "Send without part of what you said?",
+			message:
+				_gapSeqsInText.length === 1
+					? "One voice clip didn't transcribe, so part of your dictation is missing from this message. Send anyway, or fix it first?"
+					: `${_gapSeqsInText.length} voice clips didn't transcribe, so parts of your dictation are missing from this message. Send anyway, or fix them first?`,
+			confirmLabel: "Send anyway",
+			cancelLabel: "Review first",
+		});
+		if (!ok) return; // focus returns to the composer — placeholder + chip both still actionable
+		// The composer stays editable behind the modal, so re-read what is ACTUALLY going out.
+		_gapSeqsInText = _gapSeqsIn(input.value);
+	}
 	// Strip any pending-gap placeholder tokens (⟦clip N⟧) so a failed clip's marker never
 	// rides out in a sent message; its chip stays, so the audio is still recoverable. `text` is the
 	// EXACT voice-derived payload the POST will carry — so it's what the release token binds to.
@@ -7064,6 +7089,12 @@ async function send(textArg, resendAck) {
 		// and a failed-bubble resend (carrying the original token) releases its delivered records
 		// here too. A programmatic send with no token leaves input.value intact and releases none.
 		if (_voiceAck) voiceQueue?.acknowledge(_voiceAck);
+		// UX-1: this accepted payload carried (and stripped) these failed clips' placeholders, so the
+		// message that just left is missing their words. Flag them — their chips must now read "was
+		// missing from your last message" instead of looking like leftover clutter, and their Retry
+		// must promise a follow-up rather than an edit of a message that has already gone.
+		if (fromMain && voiceQueue)
+			for (const _gapSeq of _gapSeqsInText) voiceQueue.markSentWithoutClip(_gapSeq);
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
@@ -7634,6 +7665,18 @@ const _GAP_TOKEN_RE = /⟦clip \d+⟧/g;
 function _stripGapTokens(s) {
 	return (s || "").replace(_GAP_TOKEN_RE, "").replace(/ {2,}/g, " ").trim();
 }
+// The failed clips whose placeholders are sitting in `s`, as 0-based seqs (the token renders
+// seq+1, matching the chip label). Read from the RAW composer text BEFORE _stripGapTokens erases
+// them: it is the only record of WHICH clips' words an outgoing message will be missing.
+// matchAll clones the regex, so the shared /g literal's lastIndex is never left dangling.
+function _gapSeqsIn(s) {
+	const out = [];
+	for (const m of String(s || "").matchAll(_GAP_TOKEN_RE)) {
+		const n = Number(m[0].replace(/\D+/g, ""));
+		if (Number.isFinite(n) && n >= 1) out.push(n - 1);
+	}
+	return out;
+}
 function _joinAppend(prev, t) {
 	return prev.trim() ? prev.replace(/\s+$/, "") + " " + t : t;
 }
@@ -7697,14 +7740,22 @@ function _replaceGapPlaceholder(seq, text, clip) {
 	const t = (text || "").trim();
 	if (t) _takeCommitted += t.length;
 	const tok = _gapToken(seq);
+	let appendedInstead = false;
 	_mutateComposerFor(_clipConvId(clip), (prev) => {
 		if (prev.includes(tok)) {
 			return t
 				? prev.split(tok).join(t)
 				: prev.split(tok).join(" ").replace(/ {2,}/g, " ").trim();
 		}
+		appendedInstead = !!t;
 		return t ? _joinAppend(prev, t) : prev;
 	});
+	// UX-4: the token is gone — typically because the message carrying it was already SENT and the
+	// composer cleared — so the recovered words land at the END of the current draft instead of back
+	// in place. Say so, or unexplained text just appears in an otherwise-empty composer and sits
+	// there until the user notices it (or navigates away and abandons it).
+	if (appendedInstead)
+		notify(`Recovered text for Clip ${seq + 1} added to your draft.`, { type: "info" });
 }
 // The user discarded a failed clip: drop its placeholder from the composer.
 function _removeGapPlaceholder(seq, clip) {
@@ -7820,6 +7871,18 @@ async function cancelMic() {
 }
 
 // ---- failed-clip chip actions ----
+// UX-1: a failed clip's chip means two different things and must not read the same for both. Before
+// the send it is a gap the user can still fix in place; after an accepted send it is a hole in a
+// message that has already gone, and Retry can only ever build a follow-up (the sent message is
+// immutable and the composer that held its placeholder was cleared).
+const failedChipLabel = (f) =>
+	f.sentWithout
+		? `Clip ${f.seq + 1} was missing from your last message`
+		: `Clip ${f.seq + 1} didn't transcribe`;
+const failedChipRetryTitle = (f) =>
+	f.sentWithout
+		? "Transcribe and add as a follow-up message"
+		: "Transcribe again — the words drop back into the ⟦clip⟧ placeholder in the message, where they belong";
 function retryClip(seq) {
 	if (voiceQueue) voiceQueue.retry(seq);
 }
@@ -7980,30 +8043,36 @@ async function discardOrphans() {
 }
 
 // ---- never-lost navigation guard ----
-// Fire ONLY for genuinely-volatile work (VUX-11 strict ruling): a live recording, or a
-// clip still pending/in-flight/failed in the in-memory queue. A recovery banner is
-// deliberately NOT counted — those clips are durably persisted in the IndexedDB mirror,
-// scoped to this user + conversation, and the banner re-offers them on return, so
-// navigation loses nothing (the leave-confirm's "may lose audio" copy would be false
-// for them). Discard/Later resolve the banner explicitly instead.
-function _voiceHasUnfinished() {
-	return (
-		!!(voiceQueue && voiceQueue.hasUnfinished()) ||
+// Fire ONLY for genuinely-volatile work (VUX-11 strict ruling): a live recording, a take
+// starting, or a clip the queue calls "live" — still pending/in-flight, un-persistable, or
+// committed into this volatile un-sent draft. A recovery banner is deliberately NOT counted —
+// those clips are durably persisted in the IndexedDB mirror, scoped to this user + conversation,
+// and the banner re-offers them on return, so navigation loses nothing (the leave-confirm's "may
+// lose audio" copy would be false for them). Discard/Later resolve the banner explicitly instead.
+// UX-3: for exactly that reason the guard arms on the queue's REASON, not on "anything
+// outstanding". A terminally-failed or sent-without clip is mirrored just as durably, so the same
+// loss-framed copy is just as false for it — and a warning that cries wolf is one users learn to
+// click through, weakening it for the live case that matters. "unresolved" therefore does not
+// block navigation at all: its chips and the recovery banner already carry it.
+function _voiceGuardReason() {
+	if (
 		micState.value === "recording" ||
 		// The permission prompt is open (getUserMedia pending): a take is starting but
 		// micState hasn't flipped to 'recording' yet — cover navigation during it (finding 2).
-		!!micRec.starting
-	);
+		micRec.starting
+	)
+		return "live";
+	return (voiceQueue && voiceQueue.hasUnfinishedReason()) || null;
 }
 function _beforeUnloadVoice(e) {
-	if (_voiceHasUnfinished()) {
+	if (_voiceGuardReason() === "live") {
 		e.preventDefault();
 		e.returnValue = "";
 		return "";
 	}
 }
 onBeforeRouteLeave(async () => {
-	if (!_voiceHasUnfinished()) return true;
+	if (_voiceGuardReason() !== "live") return true;
 	return await confirm({
 		title: "Leave with un-transcribed audio?",
 		message:
@@ -8406,8 +8475,8 @@ onMounted(async () => {
 		.catch(() => {});
 	document.addEventListener("pointerdown", onDocClick);
 	window.addEventListener("keydown", onGlobalKey);
-	// Never-lost guard: warn on tab close/reload while any dictated clip is
-	// un-transcribed (armed/disarmed dynamically by _voiceHasUnfinished()).
+	// Never-lost guard: warn on tab close/reload while dictated audio is genuinely at risk
+	// (armed/disarmed dynamically by _voiceGuardReason() === "live").
 	window.addEventListener("beforeunload", _beforeUnloadVoice);
 	_thinkTimer = setInterval(() => {
 		thinkTick.value = busy.value ? thinkTick.value + 1 : 0;

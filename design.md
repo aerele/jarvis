@@ -547,6 +547,31 @@ three times. Recipe:
 - A `FormControl` paste field (never a bare `<textarea>`), inline `ErrorMessage` for
   expired/invalid-nonce errors, countdown hint in `text-p-sm text-ink-gray-5`.
 
+### 4.5 Voice capture — two surfaces, two retention models (say which one you are)
+
+Jarvis has **two** voice-recording surfaces with deliberately different contracts, and a user who
+learns one carries its expectations to the other. State which one a new surface implements.
+
+- **Chat composer dictation** (`useChunkedRecorder` + `utils/voiceChunkQueue.js`, ChatView): long
+  takes chunked into self-contained clips, transcribed independently, **audio retained** in an
+  IndexedDB mirror until its text is part of an accepted send. Anything unresolved is **visible and
+  actionable as a chip** — a failed clip (Retry/Download/✕), a clip edited out before sending
+  (Restore/Download/✕), a clip whose audio could not be saved (Download/Retry) — plus a
+  previous-session recovery banner. Nothing is ever removed silently except the success path
+  (chips clear on the send that carried their words; no toast — that would be noise on the common
+  case).
+- **Single-shot capture** (`useAudioRecorder`, `VoiceRecorder.vue` — wiki nudge, Business tab):
+  record → transcribe → text, **no retention, no chips, no recovery**. A failure is a toast and a
+  re-record, and the audio is gone.
+
+Rules for either: chip copy must distinguish "not sent yet" from "already sent without this"
+(identical copy for both is what makes a correctly-retained clip read as a stuck one); an action's
+tooltip must promise only what it can do *now* (Retry cannot edit a message that has already been
+sent — it builds a follow-up); and a leave/close warning may claim loss **only** when something is
+genuinely at risk — durably mirrored, re-offerable clips must not arm it (a warning that cries
+wolf gets trained away). If a new surface wants the chip model, reuse the queue rather than growing
+a third contract.
+
 ---
 
 ## 5. Do / Don't — current Jarvis anti-patterns

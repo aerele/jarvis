@@ -1406,3 +1406,270 @@ test("VR5-2: with no mirror injected, there is no persistence gating (opt-out co
 		"commits and clears exactly as before (no mirror to retain)"
 	);
 });
+
+// ── (32) UX-1: a failed clip whose ⟦clip N⟧ placeholder rode out in an ACCEPTED send is flagged
+//        `sentWithout`, so its chip can say "was missing from your last message" instead of being
+//        indistinguishable from a not-yet-sent gap. Only a terminal FAILED clip can be flagged;
+//        the done-clip captureSentInPayload/acknowledge release path is untouched. ───────────────
+test("UX-1: markSentWithoutClip flags only a failed clip, surfaces in snapshot().failed, and never touches the done-clip release", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 2,
+		maxAttempts: 1, // one shot: a rejection is terminal
+	});
+	const a = q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" }); // will fail
+	const b = q.enqueue({ blob: "b", durationS: 15, conversationId: "chatA" }); // will succeed
+	await flush();
+	tx.reject(a, new Error("timeout"));
+	tx.resolve(b, "the second half");
+	await flush();
+
+	let snap = q.snapshot();
+	assert.equal(snap.failed.length, 1, "clip A is the failed chip");
+	assert.equal(
+		snap.failed[0].sentWithout,
+		false,
+		"pre-send it is a plain gap — the chip keeps its 'didn't transcribe' copy"
+	);
+
+	// The composer stripped ⟦clip 1⟧ and sent "the second half". A: flagged; B: released.
+	q.markSentWithoutClip(a);
+	q.acknowledge(q.captureSentInPayload("chatA", "the second half"));
+	await flush();
+
+	snap = q.snapshot();
+	assert.equal(
+		snap.failed.length,
+		1,
+		"the failed clip is still RETAINED — a send never drops it"
+	);
+	assert.equal(snap.failed[0].seq, a);
+	assert.equal(
+		snap.failed[0].sentWithout,
+		true,
+		"…but now flagged: the message it belonged to has already gone"
+	);
+	assert.ok(mirror.store.has(a), "its audio is untouched — Download/Retry still work");
+	assert.ok(!mirror.store.has(b), "the DONE clip's release path is unchanged (mirror cleared)");
+	assert.equal(snap.done, 0, "clip B's record was released by acknowledge, exactly as before");
+
+	// A done or pending clip is NOT flaggable — only a terminal failed one was sent without.
+	const c = q.enqueue({ blob: "c", durationS: 15, conversationId: "chatA" });
+	await flush();
+	q.markSentWithoutClip(c); // still inflight
+	assert.equal(
+		q.snapshot().failed.length,
+		1,
+		"an in-flight clip is not a gap — flagging it is a no-op"
+	);
+	tx.resolve(c, "third");
+	await flush();
+	q.markSentWithoutClip(c); // now done
+	assert.equal(q.snapshot().done, 1, "a done clip stays done — never re-labelled as a gap");
+});
+
+// ── (33) UX-3: hasUnfinishedReason splits "leaving can LOSE something" from "there is something
+//        unresolved but durably mirrored", so the leave guard stops warning about safe audio.
+//        hasUnfinished() stays exactly as coarse as it was (reason !== null). ───────────────────
+test("UX-3: hasUnfinishedReason distinguishes a live loss risk from a merely-unresolved clip", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 1,
+		maxAttempts: 1,
+	});
+	assert.equal(q.hasUnfinishedReason(), null, "empty queue: nothing outstanding");
+
+	const a = q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	await flush();
+	assert.equal(q.hasUnfinishedReason(), "live", "a clip mid-transcription can still be lost");
+
+	tx.resolve(a, "hello there");
+	await flush();
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"live",
+		"committed but un-sent: the transcript exists only in a volatile draft"
+	);
+
+	q.acknowledge(q.captureSentInPayload("chatA", "hello there"));
+	await flush();
+	assert.equal(q.hasUnfinishedReason(), null, "sent → released → nothing outstanding");
+
+	// A terminally-failed clip: actionable, but its audio is durably mirrored and the recovery
+	// banner re-offers it — leaving loses NOTHING, so it must not raise a loss warning.
+	const b = q.enqueue({ blob: "b", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.reject(b, new Error("boom"));
+	await flush();
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"unresolved",
+		"a terminal failed clip is unresolved, NOT a live loss risk"
+	);
+	assert.equal(q.hasUnfinished(), true, "the coarse predicate still reports it as outstanding");
+	assert.ok(mirror.store.has(b), "because it is still durably mirrored");
+
+	// A live clip alongside an unresolved one wins: "live" is the stronger claim.
+	const c = q.enqueue({ blob: "c", durationS: 15, conversationId: "chatA" });
+	await flush();
+	assert.equal(q.hasUnfinishedReason(), "live", "any live clip outranks an unresolved one");
+	tx.reject(c, new Error("boom"));
+	await flush();
+	assert.equal(q.hasUnfinishedReason(), "unresolved", "…and drops back once it goes terminal");
+
+	q.discard(b);
+	q.discard(c);
+	await flush();
+	assert.equal(q.hasUnfinishedReason(), null, "Discard resolves them — no forever-armed guard");
+	assert.equal(q.hasUnfinished(), false, "and the coarse predicate agrees");
+});
+
+// ── (34) UX-3: an UNPERSISTABLE clip is "live" whatever its transcription state — there is no
+//        durable copy to re-offer, which is the whole reason the guard exists. ──────────────────
+test("UX-3: a clip whose audio could not be mirrored is always a LIVE risk, never merely unresolved", async () => {
+	const tx = makeTranscriber();
+	const mirror = {
+		store: new Map(),
+		put() {
+			return Promise.resolve(false); // never confirms durability
+		},
+		delete() {},
+		all() {
+			return [];
+		},
+	};
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 1,
+		maxAttempts: 1,
+		mirrorPutAttempts: 1,
+	});
+	const a = q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	for (let i = 0; i < 6; i++) await flush();
+	assert.equal(q.snapshot().unpersisted.length, 1, "the un-saved-audio chip is showing");
+	tx.reject(a, new Error("boom"));
+	await flush();
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"live",
+		"failed AND unpersistable — nothing durable exists, so leaving genuinely loses it"
+	);
+	q.markSentWithoutClip(a);
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"live",
+		"sent-without does not downgrade a clip whose audio was never saved"
+	);
+});
+
+// ── (35) UX-3: a sent-without clip the user RETRIES commits into the current draft. Its audio is
+//        still mirrored and re-offered on reload, so it stays "unresolved" — the guard does not
+//        re-arm with loss copy for a message that has already gone. ──────────────────────────────
+test("UX-3: a retried sent-without clip commits as a follow-up draft and stays unresolved, not live", async () => {
+	const tx = makeTranscriber();
+	const mirror = makeMirror();
+	const commits = [];
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 1,
+		maxAttempts: 1,
+		onCommit: (seq, text, clip, replace) => commits.push([seq, text, !!replace]),
+	});
+	const a = q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	const b = q.enqueue({ blob: "b", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.reject(a, new Error("boom")); // a fails → the cursor crosses it (gap placeholder)
+	await flush();
+	tx.resolve(b, "second half");
+	await flush();
+	q.markSentWithoutClip(a);
+	q.acknowledge(q.captureSentInPayload("chatA", "second half"));
+	await flush();
+	assert.equal(q.hasUnfinishedReason(), "unresolved", "only the sent-without gap remains");
+
+	// The user hits Retry on the post-send chip; this time it transcribes.
+	q.retry(a);
+	await flush();
+	tx.resolve(a, "first half");
+	await flush();
+	assert.deepEqual(
+		commits,
+		[
+			[b, "second half", false],
+			[a, "first half", true],
+		],
+		"the resurrected clip commits with replace=true (the composer appends it as a follow-up)"
+	);
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"unresolved",
+		"its audio is still mirrored and re-offerable — no loss-framed warning for an already-sent gap"
+	);
+	assert.ok(
+		mirror.store.has(a),
+		"and the audio is retained until the follow-up is actually sent"
+	);
+	q.acknowledge(q.captureSentInPayload("chatA", "first half"));
+	await flush();
+	assert.equal(q.hasUnfinishedReason(), null, "sending the follow-up releases it for good");
+});
+
+// ── (36) UX-3: "durably mirrored" is the whole reason a failed clip does not warn — so it must be
+//        CONFIRMED. While its mirror write is still in flight the clip is treated as LIVE. ───────
+test("UX-3: a failed clip whose mirror write has not confirmed yet is LIVE, not unresolved", async () => {
+	const tx = makeTranscriber();
+	let settlePut = null;
+	const mirror = {
+		store: new Map(),
+		put(clip) {
+			return new Promise((res) => {
+				settlePut = () => {
+					this.store.set(clip.seq, clip);
+					res();
+				};
+			});
+		},
+		delete(seq) {
+			this.store.delete(seq);
+		},
+		all() {
+			return [...this.store.values()];
+		},
+	};
+	const q = createVoiceChunkQueue({
+		transcribe: tx.fn,
+		mirror,
+		retainUntilSent: true,
+		concurrency: 1,
+		maxAttempts: 1,
+	});
+	const a = q.enqueue({ blob: "a", durationS: 15, conversationId: "chatA" });
+	await flush();
+	tx.reject(a, new Error("boom"));
+	await flush();
+	assert.equal(q.snapshot().failed.length, 1, "the clip is terminally failed");
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"live",
+		"its audio is NOT yet confirmed durable — leaving now could still lose it"
+	);
+	settlePut();
+	await flush();
+	assert.equal(
+		q.hasUnfinishedReason(),
+		"unresolved",
+		"once the write confirms, it is merely unresolved — the recovery banner re-offers it"
+	);
+});
