@@ -847,6 +847,20 @@ function onRealtime(payload) {
 	const conv = payload?.conversation_id || payload?.conversation;
 	if (!conv || conv !== convId.value) return;
 
+	// A failed turn on the Desk chat widget - report it (a socket event, so the
+	// global handler never sees it). window.jarvisReportError is installed by
+	// jarvis_error_reporter.bundle.js.
+	if (payload?.kind === "run:error") {
+		window.jarvisReportError?.({
+			surface: "desk_chat",
+			error_code: payload.code || "run_error",
+			error_class: "RunError",
+			message: payload.error || "The turn failed.",
+			conversation: conv,
+			run_id: payload.run_id || "",
+		});
+	}
+
 	const { state: next, admitted } = applyEventEx(stream.value, payload);
 
 	// Only an ADMITTED frame proves the winning pump's stream is reaching us.

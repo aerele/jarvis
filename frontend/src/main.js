@@ -6,6 +6,7 @@ import router from "./router";
 import { initSocket } from "./socket";
 import { session, requireLogin } from "./data/session";
 import { applyBrandChrome } from "./branding";
+import { install as installErrorReporter, vueErrorHandler } from "./lib/errorReporter";
 // Tailwind pipeline entry (frappe-ui/style.css + compensations + dark bridge)
 // MUST load before main.css so jv-* globals win cascade ties (DESIGN-V3 §2.3).
 import "./index.css";
@@ -19,7 +20,13 @@ requireLogin();
 
 setConfig("resourceFetcher", frappeRequest);
 
+// Capture uncaught errors (+ Vue render errors below) and forward them, scrubbed,
+// to the admin. Classified chokepoints (chat run:error, payment failures) call
+// report() directly - see errorReporter.js.
+installErrorReporter({ surface: "spa" });
+
 const app = createApp(App);
+app.config.errorHandler = vueErrorHandler;
 app.use(resourcesPlugin);
 app.use(router);
 

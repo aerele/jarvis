@@ -1,6 +1,7 @@
 import { reactive } from "vue";
 
 import { agentName } from "@/branding";
+import { report as reportError } from "@shared/lib/errorReporter";
 
 // The notification feed, assembled client-side from realtime events — the bench
 // has no persistent notification store (the desktop uses live toasts, the native
@@ -90,6 +91,16 @@ export function recordEvent(e) {
 			read: false,
 		});
 	} else if (e.kind === "run:error" && conv) {
+		// The turn failed - report it (classified) to the admin. A socket event,
+		// so the global handlers never see it.
+		reportError({
+			surface: "pwa_chat",
+			error_code: e.code || "run_error",
+			error_class: "RunError",
+			message: e.error || "Something went wrong during the run.",
+			conversation: conv,
+			run_id: e.run_id || "",
+		});
 		push({
 			id: `err:${e.run_id || e.message_id}`,
 			kind: "task-failed",
