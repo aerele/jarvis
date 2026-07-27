@@ -205,6 +205,27 @@ class TestUploadPartShape(FrappeTestCase):
 		self.assertEqual(voice._upload_mime(_FakeUpload(b"x", "")), "application/octet-stream")
 		self.assertEqual(voice._upload_mime(_FakeUpload(b"x", None)), "application/octet-stream")
 
+	def test_mime_that_is_not_a_plain_media_type_is_replaced(self):
+		"""Client-supplied, and written VERBATIM into the outbound multipart part
+		header. Stripping surrounding whitespace is not enough: an embedded CR/LF
+		that survived the inbound parse would let a desk user add part headers —
+		or another form field — to the provider request. Anything that is not
+		exactly ``type/subtype`` is replaced, not forwarded."""
+		for hostile in (
+			"audio/webm\r\nX-Injected: 1",
+			"audio/webm\nmodel=expensive/model",
+			"audio/webm\r\n\r\n--boundary",
+			"audio webm",
+			"audio/",
+			"/webm",
+			"audio/we bm",
+		):
+			self.assertEqual(
+				voice._upload_mime(_FakeUpload(b"x", hostile)),
+				"application/octet-stream",
+				f"{hostile!r} must never reach the part header",
+			)
+
 
 class TestTextModelDecoupledFromStt(FrappeTestCase):
 	"""openrouter_complete's TEXT callers (wiki ingest, voice facts, chat
@@ -309,6 +330,56 @@ class TestTranscribeAudio(FrappeTestCase):
 					with self.assertRaises(frappe.ValidationError):
 						voice.transcribe_audio()
 		mock_post.assert_not_called()
+
+	def test_more_bytes_than_the_claimed_duration_allows_is_rejected(self):
+		"""The two caps only bound spend TOGETHER. 15 MB is ~16 minutes of audio
+		at a browser's default bitrate, and ``duration_s`` is client-asserted, so
+		either one alone leaves room to buy several times the transcription the
+		300 s cap intends per call."""
+		too_big = b"x" * (10 * (voice._MAX_AUDIO_BITRATE_BPS // 8) + voice._AUDIO_SIZE_HEADROOM_BYTES + 1)
+		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
+			with _audio_request(data=too_big, duration_s="10"):
+				with patch("jarvis.chat.voice.requests.post") as mock_post:
+					with self.assertRaises(frappe.ValidationError):
+						voice.transcribe_audio()
+		mock_post.assert_not_called()
+
+	def test_the_ceiling_is_loose_enough_for_a_real_browser_recording(self):
+		"""Our recorders pin 32 kbps, but a browser still running a previously
+		cached bundle encodes at its own default (~129 kbps measured on Chrome).
+		That must go through untouched — a size cap that rejects real audio is a
+		worse bug than the one it closes."""
+		chrome_default = b"x" * int(60 * 129_000 / 8)  # a 60 s take at 129 kbps
+		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
+			with _audio_request(data=chrome_default, duration_s="60"):
+				with patch("jarvis.chat.voice.requests.post", return_value=_ok_response()):
+					self.assertTrue(voice.transcribe_audio()["ok"])
+
+	def test_an_unstated_duration_is_charged_at_the_full_cap(self):
+		"""Omitting duration_s must not be a way around the cross-check."""
+		over_cap = b"x" * (
+			voice._MAX_DURATION_S * (voice._MAX_AUDIO_BITRATE_BPS // 8) + voice._AUDIO_SIZE_HEADROOM_BYTES + 1
+		)
+		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
+			with _audio_request(data=over_cap, duration_s=""):
+				with patch("jarvis.chat.voice.requests.post") as mock_post:
+					with self.assertRaises(frappe.ValidationError):
+						voice.transcribe_audio()
+		mock_post.assert_not_called()
+
+	def test_a_failing_transcription_is_NOT_retried_server_side(self):
+		"""whisper-turbo does 300 s of audio in 1.2 s, so the retry bought almost
+		nothing while doubling the worst case the CLIENT has to wait out — and
+		the client's budget must also cover the upload, which requests' timeout
+		does not bound. The client owns the retry now."""
+		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
+			with _audio_request():
+				with patch(
+					"jarvis.chat.voice.requests.post", return_value=_response(503, text="upstream")
+				) as mock_post:
+					with self.assertRaises(frappe.ValidationError):
+						voice.transcribe_audio()
+		self.assertEqual(mock_post.call_count, 1, "one attempt, one upload")
 
 	def test_happy_path_posts_multipart_to_transcription_endpoint(self):
 		data = b"\x1aEfake-webm-bytes"
@@ -421,38 +492,23 @@ class TestTranscribeAudio(FrappeTestCase):
 						with self.assertRaises(frappe.ValidationError):
 							voice.transcribe_audio()
 
-	def test_retry_once_on_timeout(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
-			with _audio_request():
-				with patch(
-					"jarvis.chat.voice.requests.post",
-					side_effect=[requests.Timeout("boom"), _ok_response("after retry")],
-				) as mock_post:
-					out = voice.transcribe_audio()
-		self.assertEqual(out["text"], "after retry")
-		self.assertEqual(mock_post.call_count, 2)
-
-	def test_retry_once_on_5xx(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
-			with _audio_request():
-				with patch(
-					"jarvis.chat.voice.requests.post",
-					side_effect=[_response(502, text="bad gateway"), _ok_response("recovered")],
-				) as mock_post:
-					out = voice.transcribe_audio()
-		self.assertEqual(out["text"], "recovered")
-		self.assertEqual(mock_post.call_count, 2)
-
-	def test_double_timeout_raises(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
-			with _audio_request():
-				with patch(
-					"jarvis.chat.voice.requests.post",
-					side_effect=[requests.Timeout("a"), requests.Timeout("b")],
-				) as mock_post:
-					with self.assertRaises(frappe.ValidationError):
-						voice.transcribe_audio()
-		self.assertEqual(mock_post.call_count, 2)
+	def test_a_transient_failure_raises_immediately_instead_of_retrying(self):
+		"""The server used to retry a timeout / 5xx once. It no longer does — see
+		test_a_failing_transcription_is_NOT_retried_server_side. A retry HERE is
+		invisible to the client and doubles the wait its own budget has to cover,
+		so the client owns it (with a backoff, which the server cannot have)."""
+		for side_effect in (requests.Timeout("boom"), _response(502, text="bad gateway")):
+			with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
+				with _audio_request():
+					patched = (
+						{"side_effect": side_effect}
+						if isinstance(side_effect, Exception)
+						else {"return_value": side_effect}
+					)
+					with patch("jarvis.chat.voice.requests.post", **patched) as mock_post:
+						with self.assertRaises(frappe.ValidationError):
+							voice.transcribe_audio()
+			self.assertEqual(mock_post.call_count, 1, f"{side_effect!r} must not be retried")
 
 	def test_4xx_does_not_retry(self):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):

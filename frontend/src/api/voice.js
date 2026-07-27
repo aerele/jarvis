@@ -36,11 +36,13 @@ function _frappeErr(data, status) {
 
 // Recorded blob → verbatim transcript. Returns {ok, text, stt_ms, model}.
 //
-// timeoutMs is the PER-CHUNK budget (default 25 s): a hung STT call must not pin the
-// caller's mic UI for the server's full timeout. For chunked dictation the queue
-// (voiceChunkQueue) wraps this call and retries a rejected chunk exactly once, so a
-// single slow clip degrades to a Retry/Download chip rather than killing the session.
-// An optional `signal` lets the caller cancel an in-flight upload on teardown.
+// timeoutMs is the PER-CALL budget (default 25 s): a hung STT call must not pin the
+// caller's mic UI for the server's full timeout. Chat dictation sends ONE recording per
+// call and passes a much larger budget, sized in ChatView against the upload + the
+// server's own worst case; voiceDictationStore retries a rejected recording once (after
+// a backoff), so a slow transcription degrades to a Retry/Download chip rather than
+// killing the session. An optional `signal` lets the caller cancel an in-flight upload
+// on teardown, or when the user cancels a single transcription.
 export async function transcribeAudio(blob, { durationS = 0, timeoutMs = 25000, signal } = {}) {
 	const fd = new FormData();
 	fd.append("audio", blob, _audioFilename(blob));

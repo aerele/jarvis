@@ -57,10 +57,34 @@ _DEFAULT_TEXT_MODEL = "google/gemini-2.5-flash-lite"
 _MAX_AUDIO_BYTES = 15 * 1024 * 1024
 _MAX_DURATION_S = 300
 
+# V3 review: the byte cap alone permits far more AUDIO than the duration cap intends (15 MB at a
+# browser's default ~129 kbps is ~16 minutes), and ``duration_s`` is client-asserted, so neither
+# bounds spend on its own. Cross-check them: a recording may not carry more bytes than a bitrate
+# ceiling allows for the length it claims. The ceiling is deliberately loose — our recorders pin
+# 32 kbps, but a browser still running a previously-cached bundle encodes at its own default
+# (~129 kbps measured on Chrome) and must NOT be rejected. 160 kbps keeps every real encoder
+# comfortably inside while cutting a 300 s claim's allowance from 15 MB to ~6.5 MB; the fixed
+# headroom covers container overhead and a short recording's initialisation segment.
+_MAX_AUDIO_BITRATE_BPS = 160_000
+_AUDIO_SIZE_HEADROOM_BYTES = 256 * 1024
+
 # The clip filename is client-supplied and lands in a multipart
 # Content-Disposition header: keep it to characters that cannot reframe it.
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _FALLBACK_AUDIO_FILENAME = "audio.webm"
+
+# The clip's Content-Type is client-supplied too and is written VERBATIM into the outbound
+# multipart part header. Stripping surrounding whitespace is not enough — anything that is not a
+# plain ``type/subtype`` is replaced rather than forwarded, so no embedded control character can
+# reframe the part or inject a field into the provider request.
+_MEDIA_TYPE_RE = re.compile(r"[a-z0-9.+-]+/[a-z0-9.+-]+")
+_FALLBACK_AUDIO_MIME = "application/octet-stream"
+
+# ONE transcription attempt. whisper-turbo does 300 s of audio in 1.2 s, so the retry bought
+# almost nothing while doubling the server's worst case (2 x (10 s connect + 60 s read) = 140 s)
+# — and the client's own budget has to cover that PLUS the upload, which requests' timeout does
+# not bound. The client still retries once itself, after a backoff.
+_TRANSCRIBE_ATTEMPTS = 1
 
 
 def _voice_features_enabled() -> bool:
@@ -216,24 +240,34 @@ def _upload_filename(upload) -> str:
 def _upload_mime(upload) -> str:
 	"""The clip's own media type with parameters stripped: the recorder appends
 	``;codecs=opus``, which the decoder sniffs from the container anyway and
-	which some multipart parsers reject."""
+	which some multipart parsers reject.
+
+	The result goes straight into the outbound multipart part header, so it is
+	validated as a whole token, not merely trimmed — a value carrying CR/LF or
+	anything else outside ``type/subtype`` is replaced with the generic type
+	(the transcription endpoint reads the container from the bytes regardless).
+	"""
 	mime = (getattr(upload, "content_type", None) or "").split(";")[0].strip().lower()
-	return mime or "application/octet-stream"
+	if not mime or not _MEDIA_TYPE_RE.fullmatch(mime):
+		return _FALLBACK_AUDIO_MIME
+	return mime
 
 
 def _openrouter_transcribe(content: bytes, filename: str, mime: str, model: str, api_key: str) -> str:
 	"""One OpenRouter transcription call; returns the transcript text.
 
-	Same transport contract as ``openrouter_complete`` (one retry on timeout /
-	5xx, 4xx never retries, secret-scrubbed messages), but the request is
-	multipart ``file`` + ``model`` against the transcription endpoint. Anything
-	other than a 200 carrying a JSON ``text`` raises: a transcript this
-	function cannot read out of the provider is an error, never a plausible
-	string handed to the composer as if it were speech.
+	Same transport contract as ``openrouter_complete`` (4xx never retries,
+	secret-scrubbed messages), but the request is multipart ``file`` + ``model``
+	against the transcription endpoint and it does NOT retry
+	(``_TRANSCRIBE_ATTEMPTS``): the client owns the retry, and a second server
+	attempt only doubles the budget the caller has to wait out. Anything other
+	than a 200 carrying a JSON ``text`` raises: a transcript this function
+	cannot read out of the provider is an error, never a plausible string
+	handed to the composer as if it were speech.
 	"""
 	headers = {"Authorization": f"Bearer {api_key}"}
 	last_error = ""
-	for _attempt in range(2):
+	for _attempt in range(_TRANSCRIBE_ATTEMPTS):
 		try:
 			resp = requests.post(
 				_OPENROUTER_TRANSCRIBE_URL,
@@ -281,7 +315,7 @@ def _openrouter_transcribe(content: bytes, filename: str, mime: str, model: str,
 			)
 		return text
 	frappe.throw(
-		_("OpenRouter transcription failed after retry: {0}").format(_scrub_secrets(last_error)),
+		_("OpenRouter transcription failed: {0}").format(_scrub_secrets(last_error)),
 		frappe.ValidationError,
 	)
 
@@ -318,6 +352,14 @@ def transcribe_audio() -> dict:
 	duration_s = cint(frappe.form_dict.get("duration_s") or 0)
 	if duration_s > _MAX_DURATION_S:
 		frappe.throw(_("Recording is too long (max 5 minutes)."), frappe.ValidationError)
+	# Bytes cross-checked against the claimed length (see _MAX_AUDIO_BITRATE_BPS). An unstated
+	# duration is charged at the full cap, so omitting the field buys nothing.
+	claimed_s = duration_s if duration_s > 0 else _MAX_DURATION_S
+	if len(content) > claimed_s * (_MAX_AUDIO_BITRATE_BPS // 8) + _AUDIO_SIZE_HEADROOM_BYTES:
+		frappe.throw(
+			_("Audio is larger than a {0}-second recording can be.").format(claimed_s),
+			frappe.ValidationError,
+		)
 
 	t_stt = time.monotonic()
 	text = _openrouter_transcribe(

@@ -20,6 +20,10 @@ import { reactive, ref } from "vue";
 
 const MIME_PREFS = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
 const MAX_SECONDS = 300;
+// Speech, not music — the same reasoning as useDictationRecorder's constant. A browser's default
+// (~129 kbps measured on Chrome) makes a 300 s note ~4.6 MB to upload and to cap-check, with no
+// benefit at all for a transcription model.
+const AUDIO_BITS_PER_SECOND = 32000;
 
 export function useAudioRecorder(opts = {}) {
 	const state = ref("idle");
@@ -103,8 +107,11 @@ export function useAudioRecorder(opts = {}) {
 		});
 		try {
 			recorder = mime
-				? new MediaRecorder(stream, { mimeType: mime })
-				: new MediaRecorder(stream);
+				? new MediaRecorder(stream, {
+						mimeType: mime,
+						audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
+				  })
+				: new MediaRecorder(stream, { audioBitsPerSecond: AUDIO_BITS_PER_SECOND });
 		} catch (e) {
 			_fail("Couldn't start the recorder in this browser.");
 			return;

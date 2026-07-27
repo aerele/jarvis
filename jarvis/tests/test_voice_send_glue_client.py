@@ -1,16 +1,16 @@
 """The ChatView send-glue never-lose-audio contract, proven by a REAL executable node test that
-lives in the python suite forever (the eventFence / voiceChunkQueue precedent).
+lives in the python suite forever (the eventFence / voiceDictationStore precedent).
 
-Codex round 3 found three HIGH audio-loss bugs that lived NOT in the queue primitive (round 2's
-tests were queue-unit-level and green) but in ChatView's composer↔queue↔send glue: a scope-bound
-(not payload-bound) release token, an id-adoption that failed to migrate late clips off the
-new-chat sentinel, and a rejected failed-bubble resend that dropped its recovery token. Because the
-ChatView single-file component can't be mounted under ``node --test``, that glue was factored into
-pure helpers — ``frontend/src/utils/voiceSendGlue.js`` (promoteNewChatScope, planRejectedSend) plus
-``voiceChunkQueue.js``'s payload-bound ``captureSentInPayload`` — which ChatView imports and calls.
-``frontend/src/utils/voiceSendGlue.test.js`` drives those REAL helpers stitched to the real queue +
-a mock send outcome, reproducing the send flow end to end: composer-edit-before-send (R3-1), an
-id-less send with a mid-flight retry commit (R3-2), and a failed-bubble resend rejected across
+Codex round 3 found three HIGH audio-loss bugs that lived NOT in the store primitive (its own unit
+tests were green) but in ChatView's composer↔store↔send glue: a scope-bound (not payload-bound)
+release token, an id-adoption that failed to migrate late recordings off the new-chat sentinel, and
+a rejected failed-bubble resend that dropped its recovery token. Because the ChatView single-file
+component can't be mounted under ``node --test``, that glue was factored into pure helpers —
+``frontend/src/utils/voiceSendGlue.js`` (promoteNewChatScope, planRejectedSend) plus
+``voiceDictationStore.js``'s payload-bound ``captureSentInPayload`` — which ChatView imports and
+calls. ``frontend/src/utils/voiceSendGlue.test.js`` drives those REAL helpers stitched to the real
+store + a mock send outcome, reproducing the send flow end to end: composer-edit-before-send (R3-1),
+an id-less send with a mid-flight retry commit (R3-2), and a failed-bubble resend rejected across
 ok:false / usage_limit / subscription_suspended / single-flight (R3-3).
 
 This subprocess-runs it with ``node --test`` (which exits non-zero on any failed assertion) so the
