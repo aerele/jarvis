@@ -46,24 +46,59 @@ const fnBody = (src, decl) => {
 
 // ---- who gets the affordance ---------------------------------------------
 
+// A conversation whose origin has been read and belongs to the thread on screen.
+const gate = (o) =>
+	canOpenInDashboards({
+		originPage: "dashboards",
+		originOf: "c1",
+		conversation: "c1",
+		cv: { type: "html" },
+		...o,
+	});
+
 test("only an html artifact of a DASHBOARDS conversation gets the button", () => {
-	assert.equal(canOpenInDashboards("dashboards", { type: "html" }), true);
+	assert.equal(gate({}), true);
 	// same conversation, other artifact types: untouched
-	assert.equal(canOpenInDashboards("dashboards", { type: "image" }), false);
-	assert.equal(canOpenInDashboards("dashboards", { type: "pdf" }), false);
-	assert.equal(canOpenInDashboards("dashboards", { type: "svg" }), false);
-	assert.equal(canOpenInDashboards("dashboards", { type: "file" }), false);
+	assert.equal(gate({ cv: { type: "image" } }), false);
+	assert.equal(gate({ cv: { type: "pdf" } }), false);
+	assert.equal(gate({ cv: { type: "svg" } }), false);
+	assert.equal(gate({ cv: { type: "file" } }), false);
 	// same artifact, other conversations: untouched. Triggers conversations are
 	// stamped too, but this change ships the dashboards button only.
-	assert.equal(canOpenInDashboards("triggers", { type: "html" }), false);
-	assert.equal(canOpenInDashboards("", { type: "html" }), false);
-	assert.equal(canOpenInDashboards(undefined, { type: "html" }), false);
+	assert.equal(gate({ originPage: "triggers" }), false);
+	assert.equal(gate({ originPage: "" }), false);
+	assert.equal(gate({ originPage: undefined }), false);
 });
 
 test("a junk canvas item never throws", () => {
-	assert.equal(canOpenInDashboards("dashboards", null), false);
-	assert.equal(canOpenInDashboards("dashboards", undefined), false);
-	assert.equal(canOpenInDashboards("dashboards", {}), false);
+	assert.equal(gate({ cv: null }), false);
+	assert.equal(gate({ cv: undefined }), false);
+	assert.equal(gate({ cv: {} }), false);
+});
+
+test("the origin is BOUND to the conversation it was read for", () => {
+	// Refreshing the conversation already on screen (message:enriched fires one
+	// immediately after every canvas enrichment; onResync on every socket connect
+	// and every tab focus) writes nothing until its answer lands, and what it then
+	// writes is the same pair — so the button never blinks out from under a user
+	// at the moment they are most likely to click it.
+	assert.equal(gate({}), true);
+	// A SWITCH moves currentId a full round trip ahead of the new origin. Until
+	// that fetch lands the pair still describes the PREVIOUS conversation — whose
+	// transcript is still the one on screen — so the gate is closed.
+	assert.equal(gate({ conversation: "c2" }), false);
+	// ...and opens for c2 only once c2's own fetch has written its own pair
+	assert.equal(gate({ originOf: "c2", conversation: "c2" }), true);
+	assert.equal(gate({ originPage: "", originOf: "c2", conversation: "c2" }), false);
+	// A fetch that REJECTS (a blip, a 500, an abort on tab wake) writes neither
+	// half, so the binding stays on the conversation it was read for and the gate
+	// stays closed for the one switched to — instead of offering the way back over
+	// a thread nothing has vouched for.
+	assert.equal(gate({ originOf: "c1", conversation: "c2" }), false);
+	// the id-less states (welcome screen, a dropped conversation) satisfy nothing
+	assert.equal(gate({ originOf: "", conversation: "" }), false);
+	assert.equal(gate({ originOf: null, conversation: null }), false);
+	assert.equal(gate({ originOf: undefined, conversation: undefined }), false);
 });
 
 // ---- where it goes --------------------------------------------------------
@@ -128,7 +163,7 @@ test("a build made AFTER the save wins the click, saved row or not", () => {
 			messageId: "m2",
 			messageCreation: AFTER,
 		}),
-		{ path: "/dashboards", query: { chat: "c1", canvas: "m2" } }
+		{ path: "/dashboards", query: { chat: "c1", canvas: "m2", dash: "DASH-1" } }
 	);
 });
 
@@ -143,7 +178,41 @@ test("editing the saved row later must not re-hijack clicks on newer builds", ()
 			messageId: "m2",
 			messageCreation: AFTER,
 		}),
-		{ path: "/dashboards", query: { chat: "c1", canvas: "m2" } }
+		{ path: "/dashboards", query: { chat: "c1", canvas: "m2", dash: "DASH-1" } }
+	);
+});
+
+test("a promotion DESPITE a saved row carries that row's identity", () => {
+	// The build being promoted is a later iteration of the same dashboard, not a
+	// different one. Without the name the builder promotes with no identity, so
+	// the next "Save" writes a SECOND row for content the first already holds —
+	// which on the live-tweak path (no stamp yet) is every single click.
+	for (const messageCreation of [AFTER, undefined, "", null]) {
+		assert.equal(
+			dashboardOpenRoute({
+				dashboard: SAVED,
+				conversation: "c1",
+				messageId: "m2",
+				messageCreation,
+			}).query.dash,
+			"DASH-1"
+		);
+	}
+	// nothing to adopt with no saved row, and ?edit= opens the row itself
+	assert.equal(
+		"dash" in
+			dashboardOpenRoute({ dashboard: null, conversation: "c1", messageId: "m1" }).query,
+		false
+	);
+	assert.equal(
+		"dash" in
+			dashboardOpenRoute({
+				dashboard: SAVED,
+				conversation: "c1",
+				messageId: "m1",
+				messageCreation: BEFORE,
+			}).query,
+		false
 	);
 });
 
@@ -162,7 +231,7 @@ test("the build still being streamed promotes: no stamp yet means it IS the newe
 				messageId: "m2",
 				messageCreation,
 			}),
-			{ path: "/dashboards", query: { chat: "c1", canvas: "m2" } }
+			{ path: "/dashboards", query: { chat: "c1", canvas: "m2", dash: "DASH-1" } }
 		);
 	}
 });
@@ -275,45 +344,104 @@ test("a different conversation keeps the full guard", () => {
 	);
 });
 
+test("an ADOPTION does not discard the identity it names, so it does not ask", () => {
+	// The live-tweak path: the thread already has a saved dashboard, the user
+	// clicks the build they just watched appear, and the promotion carries that
+	// row's name. Nothing is lost — the session either continues (same row) or
+	// upgrades from no identity to update-in-place — so the "Discard" modal here
+	// would be asking the user to own something that is not happening.
+	const editing = { ...SAME, editing: true, editingName: "DASH-1" };
+	assert.equal(wouldDiscardOnPromotion({ ...editing, dash: "DASH-1" }), false);
+	// a builder with no identity at all, adopting one
+	assert.equal(
+		wouldDiscardOnPromotion({ ...SAME, editing: false, editingName: "", dash: "DASH-1" }),
+		false
+	);
+	// a DIFFERENT row IS a real editing session being replaced
+	assert.equal(wouldDiscardOnPromotion({ ...editing, dash: "DASH-2" }), true);
+	// ...and with no `dash` at all the shipped rules stand unchanged: the same
+	// thread with an identity confirms, because that identity is foreign by
+	// construction (a row belonging to this conversation would have been the one
+	// main chat looked up).
+	assert.equal(wouldDiscardOnPromotion({ ...editing }), true);
+	assert.equal(wouldDiscardOnPromotion({ ...SAME, editingName: "" }), false);
+});
+
+test("an adoption does not licence discarding the OTHER legs of the guard", () => {
+	// `dash` answers "is the editing identity lost?", nothing else. Another
+	// thread's unsaved canvas is still another thread's unsaved canvas.
+	const other = {
+		conv: "D",
+		chatConv: "C",
+		canvasMsg: "M1",
+		unsavedCanvas: false,
+		editing: false,
+		editingName: "",
+		dash: "DASH-1",
+	};
+	assert.equal(wouldDiscardOnPromotion(other), true);
+	assert.equal(wouldDiscardOnPromotion({ ...other, canvasMsg: "", unsavedCanvas: true }), true);
+	// ...but a builder holding nothing still does not need a dialog
+	assert.equal(wouldDiscardOnPromotion({ ...other, canvasMsg: "" }), false);
+});
+
 // ---- main chat: the affordance is conversation state, not html-sniffing ----
 
-test("ChatView reads the conversation's origin_page and clears it on switch", () => {
+test("ChatView binds the origin to the conversation it was read for", () => {
 	assert.match(
 		chatSrc,
 		/import \{ canOpenInDashboards, dashboardOpenRoute \} from "@\/lib\/dashboardOpen";/
 	);
 	assert.match(chatSrc, /const originPage = ref\(""\);/);
+	assert.match(chatSrc, /const originOf = ref\(""\);/);
 	const load = fnBody(chatSrc, "async function loadConversation(");
-	assert.match(load, /originPage\.value = d\?\.conversation\?\.origin_page \|\| "";/);
-	// the reset runs BEFORE the round trip, on every path. `messages` is only
-	// replaced when the response lands, so for one full RTT the PREVIOUS
-	// conversation's cards are on screen under the new currentId — and a fetch
-	// that rejects would otherwise leave the old origin standing for the session
-	assert.match(load, /originPage\.value = "";/);
-	assert.ok(
-		load.indexOf('originPage.value = "";') < load.indexOf("if (!id) {"),
-		"the reset belongs above the `if (!id)` arm, not inside it"
+	// the two halves are written together, and only once the fetch has answered
+	assert.match(
+		load,
+		/originPage\.value = d\?\.conversation\?\.origin_page \|\| "";\n\toriginOf\.value = id;/
 	);
 	assert.ok(
-		load.indexOf('originPage.value = "";') < load.indexOf("await api.getConversation(id)"),
-		"the reset must precede the fetch"
+		load.indexOf("await api.getConversation(id)") < load.indexOf("originOf.value = id;"),
+		"the pair is written from the response, not before it"
 	);
+	// NOTHING blanks the pair ahead of the round trip. Eight of loadConversation's
+	// call sites refresh the conversation already on screen (message:enriched
+	// after every canvas enrichment, onResync on every socket connect and tab
+	// focus) — a pre-fetch blanking removes "Open in Dashboards" from the DOM for
+	// a full RTT there, and for good when that refetch rejects.
+	const preFetch = load.slice(0, load.indexOf("const d = await api.getConversation(id)"));
+	assert.equal(
+		(preFetch.match(/originPage\.value = "";/g) || []).length,
+		1,
+		"the only pre-fetch reset is the id-less arm's own"
+	);
+	const idArm = preFetch.slice(preFetch.indexOf("if (!id) {"));
+	assert.match(idArm, /originPage\.value = "";\n\t\toriginOf\.value = "";/);
+	// the gate reads the binding, exactly as the preview header reads artifact.conv
+	const gate = fnBody(chatSrc, "function canOpenDash(");
+	assert.match(gate, /originPage: originPage\.value,/);
+	assert.match(gate, /originOf: originOf\.value,/);
+	assert.match(gate, /conversation: currentId\.value,/);
 });
 
-test("every path that swaps the conversation out resets originPage too", () => {
-	// loadConversation is the only OTHER writer, and it does not run on these
-	// four: the route watcher no-ops when currentId is already the new id, and
-	// the boot arm is the failure of the load itself. A stale "dashboards" here
-	// puts the button on an ordinary chat's html — with Save armed over it once
-	// the builder promotes it.
+test("every path that swaps the conversation out resets the pair too", () => {
+	// Defence in depth behind the binding: loadConversation is the only OTHER
+	// writer and it does not run on any of these (the route watcher no-ops when
+	// currentId already equals the new id; the boot arm is the failure of the load
+	// itself). A stale "dashboards" left here would need only a matching id to put
+	// the button on an ordinary chat's html — with Save armed over it once the
+	// builder promotes it.
 	const nc = fnBody(chatSrc, "async function newChat(");
-	assert.match(nc, /messages\.value = \[\];\n\t\/\/[^]*?originPage\.value = "";/);
+	assert.match(nc, /messages\.value = \[\];\n\t\/\/[^]*?originPage\.value = "";\n\toriginOf/);
 	const clear = fnBody(chatSrc, "async function clearAllHistory(");
-	assert.match(clear, /messages\.value = \[\];\s*originPage\.value = "";/);
+	assert.match(
+		clear,
+		/messages\.value = \[\];\s*originPage\.value = "";\s*originOf\.value = "";/
+	);
 	// the boot arm that drops a conversation which has since vanished
 	assert.match(
 		chatSrc,
-		/currentId\.value = null;\s*messages\.value = \[\];\s*originPage\.value = "";/
+		/currentId\.value = null;\s*messages\.value = \[\];\s*originPage\.value = "";\s*originOf\.value = "";/
 	);
 	// ...and the watcher that drops it when it is deleted from the sidebar while
 	// open: the user's next send adopts the server id directly, so nothing
@@ -323,9 +451,22 @@ test("every path that swaps the conversation out resets originPage too", () => {
 	assert.notEqual(vanishBody, "", "the vanished-conversation watcher must still exist");
 	assert.match(vanishBody, /currentId\.value = null;/);
 	assert.match(vanishBody, /originPage\.value = "";/);
-	// five writers of the empty value, no more: loadConversation's pre-fetch
-	// reset plus the four above (a sixth would mean a path nobody reviewed)
-	assert.equal((chatSrc.match(/originPage\.value = "";/g) || []).length, 5);
+	// ...and the send that ADOPTS a different id: a human send into a conversation
+	// the server can no longer find falls back to a fresh one and returns its id
+	// (jarvis/chat/api.py), and loadConversation runs on neither side of that
+	const send = fnBody(chatSrc, "async function send(");
+	const adopt = send.slice(send.indexOf("if (r.conversation_id !== currentId.value) {"));
+	assert.notEqual(adopt, "", "the send-adopt fallback must still exist");
+	assert.match(adopt, /currentId\.value = r\.conversation_id;[^]*?originPage\.value = "";/);
+	assert.match(adopt, /originOf\.value = "";/);
+	// six writers of the empty value, no more: the id-less arm plus the five swap
+	// sites above (a seventh would mean a path nobody reviewed)
+	assert.equal((chatSrc.match(/originPage\.value = "";/g) || []).length, 6);
+	// and the binding is dropped with it, every time — one write is never enough
+	assert.equal(
+		(chatSrc.match(/originOf\.value = "";/g) || []).length,
+		(chatSrc.match(/originPage\.value = "";/g) || []).length
+	);
 });
 
 test("the open artifact carries the conversation it was opened from", () => {
@@ -410,15 +551,23 @@ test("main chat never writes the builder's sticky slots", () => {
 test("the deep-link is read at setup AND watched, like ?edit=", () => {
 	assert.match(pageSrc, /const routeChat = typeof route\.query\.chat === "string"/);
 	assert.match(pageSrc, /const routeCanvas = typeof route\.query\.canvas === "string"/);
+	assert.match(pageSrc, /const routeDash = typeof route\.query\.dash === "string"/);
 	const watcher = pageSrc.slice(
 		pageSrc.indexOf("watch(\n\t() => [route.query.chat, route.query.canvas],")
 	);
 	assert.notEqual(watcher, "", "?chat=&canvas= must be watched, not read once at setup");
-	assert.match(watcher.slice(0, watcher.indexOf("\n);")), /promoteFromChat\(conv, msg\);/);
+	const body = watcher.slice(0, watcher.indexOf("\n);"));
+	assert.match(body, /promoteFromChat\(conv, msg, \{ dash \}\);/);
+	// `dash` rides along in the same route push, so it is read at fire time rather
+	// than watched — but it must be read, or the live deep-link adopts nothing
+	assert.match(
+		body,
+		/const dash = typeof route\.query\.dash === "string" \? route\.query\.dash : "";/
+	);
 	// and the mount path runs it too
 	assert.match(
 		pageSrc,
-		/promoteFromChat\(routeChat, routeCanvas, \{ fallback: normalMount \}\)/
+		/promoteFromChat\(routeChat, routeCanvas, \{ fallback: normalMount, dash: routeDash \}\)/
 	);
 });
 
@@ -504,17 +653,17 @@ test("the promotion is validated against the transcript, not the link", () => {
 	assert.match(giveUp, /if \(fallback\) fallback\(\);/);
 });
 
-test("accepting clears the editing identity and the stale data-mode", () => {
+test("accepting takes over the thread, the identity and the stale data-mode", () => {
 	// Without this, Save writes the promoted canvas back over whatever dashboard
 	// the builder happened to be editing — and the next send declares a
 	// static/live intent the user never expressed for THIS dashboard.
 	const promote = fnBody(pageSrc, "async function promoteFromChat(");
 	const accept = promote.slice(promote.indexOf("const accept = async () => {"));
 	for (const line of [
-		/editingSticky\.value = "";/,
-		/editingDetail\.value = null;/,
+		/editingSticky\.value = adopted \? adopted\.name : "";/,
+		/editingDetail\.value = adopted;/,
 		/editSeed\.value = "";/,
-		/savedName\.value = "";/,
+		/savedName\.value = adopted \? adopted\.name : "";/,
 		/chatConv\.value = conversation;/,
 		/canvasMsg\.value = messageId;/,
 		/dashDataMode\.value = "auto";/,
@@ -552,6 +701,38 @@ test("a promoted artifact whose content is gone says so, and shows nothing", () 
 	assert.doesNotMatch(onCanvas, /(?<!return false;\n\t)\breturn;/);
 });
 
+test("the promotion ADOPTS the saved row main chat named", () => {
+	// The live-tweak click on a thread that already has a dashboard: the build is
+	// newer than the row, so it promotes — but it is the SAME dashboard, and
+	// dropping the identity makes the next Save write a duplicate.
+	const promote = fnBody(pageSrc, "async function promoteFromChat(");
+	assert.match(
+		promote,
+		/async function promoteFromChat\(conversation, messageId, \{ fallback = null, dash = "" \} = \{\}\)/
+	);
+	const accept = promote.slice(promote.indexOf("const accept = async () => {"));
+	assert.match(
+		accept,
+		/if \(dash\) \{\n\t\t\ttry \{\n\t\t\t\tconst d = await getDashboard\(dash\);/
+	);
+	assert.match(accept, /if \(d && d\.name\) adopted = d;/);
+	// a name that fails the (permission-gated) fetch degrades to the identity-less
+	// promotion — a URL-supplied `dash` is never a dead click, and never a trusted
+	// one either
+	assert.match(accept, /\} catch \(e\) \{\n\t\t\t\tadopted = null;/);
+	// the adopted row supplies the IDENTITY only: its html must never reach the
+	// canvas, or the promotion answers with the saved document instead of the
+	// build the user clicked
+	assert.doesNotMatch(accept, /builderHtml\.value = (adopted|d)\b/);
+	assert.doesNotMatch(accept, /\.html\b/);
+	// ...and the identity is what makes Save update in place — the dialog reads it
+	// off editingDetail
+	assert.match(pageSrc, /:editing-name="editingDetail \? editingDetail\.name : ''"/);
+	assert.match(pageSrc, /:editing="editingDetail"/);
+	// the query it arrived on is dropped with the rest of the promotion keys
+	assert.match(fnBody(pageSrc, "function stripPromotionQuery("), /delete q\.dash;/);
+});
+
 test("a promotion that would cost the user something confirms first", () => {
 	// The rules themselves are unit-tested above; this fences the wiring.
 	const guard = fnBody(pageSrc, "function promotionWouldDiscard(");
@@ -563,6 +744,14 @@ test("a promotion that would cost the user something confirms first", () => {
 		guard,
 		/editing: !!\(editingSticky\.value \|\| editingDetail\.value \|\| editSeed\.value\),/
 	);
+	// the adoption matrix needs the identity by NAME, and the name it is being
+	// compared against
+	assert.match(guard, /editingName: editingName\(\),/);
+	assert.match(guard, /\bdash,/);
+	assert.match(
+		pageSrc,
+		/const editingName = \(\) =>\n\teditingSticky\.value \|\| \(editingDetail\.value \|\| \{\}\)\.name \|\| editSeed\.value \|\| "";/
+	);
 	assert.match(pageSrc, /import \{ wouldDiscardOnPromotion \} from "@\/lib\/dashboardOpen";/);
 	const promote = fnBody(pageSrc, "async function promoteFromChat(");
 	// `force` is required: confirmDiscard short-circuits on !unsavedCanvas, so an
@@ -571,7 +760,7 @@ test("a promotion that would cost the user something confirms first", () => {
 	assert.match(promote, /copy: PROMOTE_COPY,/);
 	assert.match(
 		promote,
-		/if \(!promotionWouldDiscard\(conversation\)\) \{\n\t\tawait accept\(\);/
+		/if \(!promotionWouldDiscard\(conversation, dash\)\) \{\n\t\tawait accept\(\);/
 	);
 	// the dialog's copy is per-call now, and the promotion's says the chat lives on
 	assert.match(pageSrc, /const discardCopy = ref\(DISCARD_COPY\);/);

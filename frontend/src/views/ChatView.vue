@@ -3703,6 +3703,15 @@ const autoApplyNote = ref("");
 // this list; this is the only thing that says its html artifacts are
 // dashboards, and it is what gates the "Open in Dashboards" affordance.
 const originPage = ref("");
+// ...and WHICH conversation that origin was read for. get_conversation answers a
+// full round trip after currentId already names the conversation being switched
+// to, so the flag alone would still be describing the previous thread while the
+// previous thread's cards are on screen. Written together with originPage, only
+// when the fetch lands, and compared against currentId at the gate: a switch (or
+// a fetch that never lands) fails closed, while a refresh of the conversation
+// already open — message:enriched, the resync on every tab focus — invalidates
+// nothing.
+const originOf = ref("");
 // The <Composer> instance. It owns the textarea and auto-grow; this view still
 // owns everything around them, so it reaches in for the two things a parent
 // legitimately needs: `composerRef.value.el` (the raw textarea, for the caret
@@ -4511,6 +4520,7 @@ async function clearAllHistory() {
 		await api.clearChatHistory();
 		messages.value = [];
 		originPage.value = "";
+		originOf.value = "";
 		currentId.value = "";
 		settingsOpen.value = false;
 		newChat(); // also reloads store.conversations
@@ -6200,7 +6210,12 @@ async function openArtifact(m, cv) {
 // over to it — as the saved dashboard it became, or as this exact canvas message
 // for the builder to replay.
 function canOpenDash(cv) {
-	return canOpenInDashboards(originPage.value, cv);
+	return canOpenInDashboards({
+		originPage: originPage.value,
+		originOf: originOf.value,
+		conversation: currentId.value,
+		cv,
+	});
 }
 async function openInDashboards(m, cv) {
 	const conv = currentId.value;
@@ -6218,6 +6233,8 @@ async function openInDashboards(m, cv) {
 	// m.creation decides the fork: a conversation keeps building after its first
 	// save, so a click on a LATER artifact must promote that artifact, not reopen
 	// the older saved row (which would silently answer with a different document).
+	// The saved row's name rides along on that fork (`dash`) so the builder can
+	// keep editing it rather than starting a second row for the same dashboard.
 	router.push(
 		dashboardOpenRoute({
 			dashboard,
@@ -6377,16 +6394,10 @@ async function loadConversation(id) {
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
 	// different conversation (matches how modelOverride/auto-apply reload here).
 	groundNextTurn.value = false;
-	// Dropped BEFORE the round trip, not after it. `messages` is only replaced
-	// when the response lands, so for one full RTT the screen still shows the
-	// PREVIOUS conversation's transcript while currentId already names the new
-	// one — a "dashboards" origin left standing over it offers "Open in
-	// Dashboards" on the old thread's card, and a click there pairs this
-	// conversation with that message. Clearing up front also means a fetch that
-	// rejects (deleted mid-click, a 500) strands no origin at all.
-	originPage.value = "";
 	if (!id) {
 		messages.value = [];
+		originPage.value = "";
+		originOf.value = "";
 		modelOverride.value = "";
 		thinkingOverride.value = "";
 		promptHistory.value = [];
@@ -6413,7 +6424,15 @@ async function loadConversation(id) {
 	// saved pin always rendered as "Auto" after a reload.
 	modelOverride.value = d?.conversation?.model_override || "";
 	thinkingOverride.value = d?.conversation?.thinking_override || "";
+	// The origin and the conversation it was read for, written as a pair — the
+	// gate compares the second against currentId, so neither is ever trusted
+	// alone. Nothing above blanks them: a refresh of the conversation already on
+	// screen (message:enriched fires one right after every canvas enrichment,
+	// onResync on every tab focus) would otherwise pull "Open in Dashboards" out
+	// of the DOM for a full RTT at exactly the moment it is most likely to be
+	// clicked — and leave it gone for good when that refetch rejects.
 	originPage.value = d?.conversation?.origin_page || "";
+	originOf.value = id;
 	// Per-conversation auto-apply + a fresh confirm-card slate for this chat
 	// (issue #186): a pending write from another conversation must not linger.
 	convAutoApply.value = !!(d?.conversation && d.conversation.auto_apply);
@@ -6755,6 +6774,7 @@ async function newChat() {
 	// origin survives onto a brand-new one — and the first html the agent draws
 	// there would offer "Open in Dashboards" over an ordinary chat's artifact.
 	originPage.value = "";
+	originOf.value = "";
 	// VR5-3: _promoteNewChatScope above moved any sentinel-scoped failed bubble (+ its voice-release
 	// token) onto the real id, but the route watcher no-ops here (currentId already equals this id),
 	// so loadConversation()'s pending-bubble peek never runs — re-inject them now, exactly as
@@ -7076,6 +7096,15 @@ async function send(textArg, resendAck) {
 				// yank a user who switched away — that is the ONLY part gated on visibility.
 				if (r.conversation_id !== currentId.value) {
 					currentId.value = r.conversation_id;
+					// A send into a conversation the server can no longer find falls back
+					// to a FRESH one (chat/api.py), and nothing re-reads the conversation
+					// here: loadConversation doesn't run, and the route watcher no-ops
+					// because currentId already equals the new id. The origin binding
+					// fails the gate closed on its own, but the pair is dropped together
+					// on every other swap and this is one — a builder origin left behind
+					// on an ordinary chat is the shape this fence exists for.
+					originPage.value = "";
+					originOf.value = "";
 					if (route.params.id !== r.conversation_id)
 						router.replace("/c/" + r.conversation_id);
 				}
@@ -8505,6 +8534,7 @@ watch(
 			// already equals it — so a builder origin left here would follow the
 			// user onto the next, ordinary chat.
 			originPage.value = "";
+			originOf.value = "";
 			resetRunState();
 			if (route.params.id) router.replace({ name: "Chat" });
 		}
@@ -8631,6 +8661,7 @@ onMounted(async () => {
 					currentId.value = null;
 					messages.value = [];
 					originPage.value = "";
+					originOf.value = "";
 					try {
 						localStorage.removeItem("jarvis-last-conv");
 					} catch (_e) {}

@@ -314,6 +314,14 @@ const editSeed = ref(routeEdit || editingSticky.value);
 // honours the deep-link too.
 const routeChat = typeof route.query.chat === "string" ? route.query.chat : "";
 const routeCanvas = typeof route.query.canvas === "string" ? route.query.canvas : "";
+// ...and `dash=<name>`: the saved dashboard this conversation already has, sent
+// only when main chat promotes a build made AFTER it. The promotion ADOPTS that
+// row - badge and "Save changes" keep pointing at it - instead of dropping the
+// identity and writing a second row for the same dashboard. User-influencable
+// (it is a URL), and deliberately not trusted: the only thing done with it is a
+// permission-gated get_dashboard, so an unknown or foreign name simply fails and
+// degrades to an identity-less promotion.
+const routeDash = typeof route.query.dash === "string" ? route.query.dash : "";
 // A promotion the page owes the user but has not finished, held exactly like
 // `editSeed`: an explicit deep-link owns the canvas, so the chat pane's own
 // transcript restore must not land on it first. The pane's onMounted fires
@@ -583,8 +591,11 @@ watch(
 // Dashboards" sends the pair here, and the ordinary restore path takes over:
 // the same artifact, rendered by DashboardCanvas, which does run it.
 //
-// A saved dashboard never comes this way (main chat routes those to ?edit=), so
-// the promotion always lands on a build the user has not saved yet.
+// The DOCUMENT that arrives is never a saved one (main chat routes those to
+// ?edit=): it is a build made after the last save, or before any. Its IDENTITY
+// can be, though - `&dash=` names the row the conversation already has, and the
+// promotion adopts it so a live tweak saves back onto that dashboard instead of
+// forking a second one.
 
 // Drop the promotion keys once it has settled, so a reload/back does not replay
 // it — the editSeed discipline, one route write.
@@ -594,21 +605,33 @@ function stripPromotionQuery(hash = route.hash) {
 	const q = { ...route.query };
 	delete q.chat;
 	delete q.canvas;
+	delete q.dash;
 	router.replace({ query: q, hash });
 }
+
+// The dashboard this builder is editing, by NAME - the three slots in the order
+// they settle (the sticky target, the loaded detail, a seed whose loadEdit is
+// still in flight). Only the adoption matrix needs the name; `editing` below
+// stays the wider "is there any editing state at all" flag.
+const editingName = () =>
+	editingSticky.value || (editingDetail.value || {}).name || editSeed.value || "";
 
 // What the promotion would overwrite. Wider than `unsavedCanvas` on purpose: it
 // also takes the thread and the editing identity, so a saved dashboard open for
 // editing, or another conversation's restored canvas, is worth asking about -
-// but re-opening the builder's OWN thread costs nothing and must not ask. The
-// rules live in lib/dashboardOpen.js so they are testable outside the SFC.
-function promotionWouldDiscard(conv) {
+// but re-opening the builder's OWN thread costs nothing and must not ask. An
+// adoption (`dash`) keeps the identity it names, so there is nothing to own
+// there either. The rules live in lib/dashboardOpen.js so they are testable
+// outside the SFC.
+function promotionWouldDiscard(conv, dash = "") {
 	return wouldDiscardOnPromotion({
 		conv,
 		chatConv: chatConv.value,
 		canvasMsg: canvasMsg.value,
 		unsavedCanvas: unsavedCanvas.value,
 		editing: !!(editingSticky.value || editingDetail.value || editSeed.value),
+		editingName: editingName(),
+		dash,
 	});
 }
 
@@ -618,7 +641,7 @@ function promotionWouldDiscard(conv) {
 // - accepted, declined or failed - so the same link can be asked for again.
 let promoting = "";
 
-async function promoteFromChat(conversation, messageId, { fallback = null } = {}) {
+async function promoteFromChat(conversation, messageId, { fallback = null, dash = "" } = {}) {
 	if (!conversation || !messageId) return;
 	const key = conversation + "::" + messageId;
 	if (key === promoting) return;
@@ -655,12 +678,28 @@ async function promoteFromChat(conversation, messageId, { fallback = null } = {}
 		return;
 	}
 	const accept = async () => {
-		// The builder is this conversation's now - anything it was editing is
+		// ADOPT the saved row this build belongs to, when main chat named one. Its
+		// detail is fetched exactly as loadEdit does - but its html never reaches
+		// the canvas: the promoted frame is the document the user asked for, and
+		// the row only supplies the identity, so the badge names it and the next
+		// Save updates it in place instead of creating a duplicate. The fetch is
+		// permission-gated server-side, so a foreign or deleted name simply fails
+		// here and the promotion degrades to the identity-less one it was before.
+		let adopted = null;
+		if (dash) {
+			try {
+				const d = await getDashboard(dash);
+				if (d && d.name) adopted = d;
+			} catch (e) {
+				adopted = null;
+			}
+		}
+		// The builder is this conversation's now - anything else it was editing is
 		// over, or Save would write back onto the wrong dashboard.
-		editingSticky.value = "";
-		editingDetail.value = null;
+		editingSticky.value = adopted ? adopted.name : "";
+		editingDetail.value = adopted;
 		editSeed.value = "";
-		savedName.value = "";
+		savedName.value = adopted ? adopted.name : "";
 		detectedSources.value = [];
 		chatConv.value = conversation;
 		canvasMsg.value = messageId;
@@ -692,7 +731,7 @@ async function promoteFromChat(conversation, messageId, { fallback = null } = {}
 		promoting = "";
 		stripPromotionQuery("");
 	};
-	if (!promotionWouldDiscard(conversation)) {
+	if (!promotionWouldDiscard(conversation, dash)) {
 		await accept();
 		return;
 	}
@@ -719,8 +758,11 @@ watch(
 			return;
 		}
 		// The hold is armed inside promoteFromChat, below its dedupe check - see
-		// there for why it cannot be armed from this watcher.
-		promoteFromChat(conv, msg);
+		// there for why it cannot be armed from this watcher. `dash` is read here
+		// rather than watched: it only ever arrives written together with the pair
+		// above, in the single route push main chat makes.
+		const dash = typeof route.query.dash === "string" ? route.query.dash : "";
+		promoteFromChat(conv, msg, { dash });
 	}
 );
 
@@ -818,7 +860,7 @@ onMounted(async () => {
 		console.warn("dashboards: ?edit= wins over ?chat=&canvas=; the promotion is ignored");
 	}
 	if (!routeEdit && routeChat && routeCanvas) {
-		promoteFromChat(routeChat, routeCanvas, { fallback: normalMount });
+		promoteFromChat(routeChat, routeCanvas, { fallback: normalMount, dash: routeDash });
 	} else {
 		// No promotion will run on this mount (?edit= won, or the pair is half
 		// present): release the hold taken at setup, or the pane's restore stays

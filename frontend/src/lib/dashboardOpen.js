@@ -17,9 +17,27 @@
 // the promotion. A .vue SFC cannot be imported into the plain node test runner,
 // so logic that lives in one is logic nothing can test behaviourally.
 
-/** Does this canvas item, in this conversation, get the affordance? */
-export function canOpenInDashboards(originPage, cv) {
-	return originPage === "dashboards" && !!cv && cv.type === "html";
+/**
+ * Does this canvas item, in this conversation, get the affordance?
+ *
+ * `originPage` is read from a conversation fetch that lands one full round trip
+ * after `currentId` already names the conversation being switched to, so the
+ * value on its own is not enough: it must be BOUND to the conversation it was
+ * read for (`originOf`). Until the new conversation's fetch lands — and forever,
+ * if that fetch rejects — the pair does not match and the gate stays closed,
+ * which is the fail-closed half. The other half is that a refresh of the
+ * conversation ALREADY on screen (a `message:enriched` reload, the resync on
+ * every tab focus) never invalidates anything, so the button does not blink out
+ * from under the user at the moment it is most likely to be clicked.
+ *
+ * Same shape as the preview header's own `artifact.conv === currentId` gate.
+ *
+ * @param {{originPage: string, originOf: string, conversation: string, cv: {type?: string}|null}} arg
+ */
+export function canOpenInDashboards({ originPage, originOf, conversation, cv }) {
+	if (originPage !== "dashboards") return false;
+	if (!conversation || originOf !== conversation) return false;
+	return !!cv && cv.type === "html";
 }
 
 // Frappe timestamps arrive as "YYYY-MM-DD HH:MM:SS[.ffffff]" — same server,
@@ -72,6 +90,13 @@ export function isNewerStamp(a, b) {
  * pre-existing `?edit=` behaviour, as does a saved row that reports no
  * `creation` of its own.
  *
+ * Promoting DESPITE a saved row carries that row's name along (`&dash=`). The
+ * conversation already has an identity — the build being promoted is a later
+ * iteration of the SAME dashboard, not a different one — so the builder adopts
+ * it and "Save changes" updates that row instead of writing a second one for
+ * content the first already holds. Only this fork can carry it: with no saved
+ * row there is nothing to adopt, and `?edit=` opens the row directly.
+ *
  * @param {{dashboard: {name?: string, creation?: string}|null, conversation: string, messageId: string, messageCreation?: string}} arg
  * @returns {{path: string, query: object}} a vue-router location
  */
@@ -82,8 +107,9 @@ export function dashboardOpenRoute({ dashboard, conversation, messageId, message
 		query: { chat: conversation || "", canvas: messageId || "" },
 	};
 	if (!saved) return promote;
-	if (!messageCreation) return promote;
-	if (isNewerStamp(messageCreation, dashboard.creation)) return promote;
+	const adopt = { path: "/dashboards", query: { ...promote.query, dash: saved } };
+	if (!messageCreation) return adopt;
+	if (isNewerStamp(messageCreation, dashboard.creation)) return adopt;
 	return { path: "/dashboards", query: { edit: saved } };
 }
 
@@ -101,11 +127,27 @@ export function dashboardOpenRoute({ dashboard, conversation, messageId, message
  * A different conversation keeps the full guard: an unsaved canvas, an editing
  * target, or another thread's restored canvas are all things to ask about.
  *
- * @param {{conv: string, chatConv: string, canvasMsg: string, unsavedCanvas: boolean, editing: boolean}} arg
+ * An ADOPTION (`dash` — the saved row this build belongs to) changes only the
+ * editing leg: the identity is not being thrown away, it is being kept, or a
+ * builder that had none is upgrading to update-in-place. Nothing to own, so
+ * nothing to ask. A DIFFERENT row is still a real editing session being
+ * replaced, and every other leg of the guard is untouched — an adoption does
+ * not licence discarding another thread's unsaved canvas.
+ *
+ * @param {{conv: string, chatConv: string, canvasMsg: string, unsavedCanvas: boolean, editing: boolean, editingName?: string, dash?: string}} arg
  */
-export function wouldDiscardOnPromotion({ conv, chatConv, canvasMsg, unsavedCanvas, editing }) {
-	if (chatConv && chatConv === conv) return !!editing;
+export function wouldDiscardOnPromotion({
+	conv,
+	chatConv,
+	canvasMsg,
+	unsavedCanvas,
+	editing,
+	editingName,
+	dash,
+}) {
+	const losesEditing = dash ? !!editingName && editingName !== dash : !!editing;
+	if (chatConv && chatConv === conv) return losesEditing;
 	if (unsavedCanvas) return true;
-	if (editing) return true;
+	if (losesEditing) return true;
 	return !!(chatConv && chatConv !== conv && canvasMsg);
 }
