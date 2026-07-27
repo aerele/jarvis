@@ -492,38 +492,23 @@ class TestTranscribeAudio(FrappeTestCase):
 						with self.assertRaises(frappe.ValidationError):
 							voice.transcribe_audio()
 
-	def test_retry_once_on_timeout(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
-			with _audio_request():
-				with patch(
-					"jarvis.chat.voice.requests.post",
-					side_effect=[requests.Timeout("boom"), _ok_response("after retry")],
-				) as mock_post:
-					out = voice.transcribe_audio()
-		self.assertEqual(out["text"], "after retry")
-		self.assertEqual(mock_post.call_count, 2)
-
-	def test_retry_once_on_5xx(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
-			with _audio_request():
-				with patch(
-					"jarvis.chat.voice.requests.post",
-					side_effect=[_response(502, text="bad gateway"), _ok_response("recovered")],
-				) as mock_post:
-					out = voice.transcribe_audio()
-		self.assertEqual(out["text"], "recovered")
-		self.assertEqual(mock_post.call_count, 2)
-
-	def test_double_timeout_raises(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
-			with _audio_request():
-				with patch(
-					"jarvis.chat.voice.requests.post",
-					side_effect=[requests.Timeout("a"), requests.Timeout("b")],
-				) as mock_post:
-					with self.assertRaises(frappe.ValidationError):
-						voice.transcribe_audio()
-		self.assertEqual(mock_post.call_count, 2)
+	def test_a_transient_failure_raises_immediately_instead_of_retrying(self):
+		"""The server used to retry a timeout / 5xx once. It no longer does — see
+		test_a_failing_transcription_is_NOT_retried_server_side. A retry HERE is
+		invisible to the client and doubles the wait its own budget has to cover,
+		so the client owns it (with a backoff, which the server cannot have)."""
+		for side_effect in (requests.Timeout("boom"), _response(502, text="bad gateway")):
+			with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
+				with _audio_request():
+					patched = (
+						{"side_effect": side_effect}
+						if isinstance(side_effect, Exception)
+						else {"return_value": side_effect}
+					)
+					with patch("jarvis.chat.voice.requests.post", **patched) as mock_post:
+						with self.assertRaises(frappe.ValidationError):
+							voice.transcribe_audio()
+			self.assertEqual(mock_post.call_count, 1, f"{side_effect!r} must not be retried")
 
 	def test_4xx_does_not_retry(self):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
