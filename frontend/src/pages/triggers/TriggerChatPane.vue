@@ -136,22 +136,26 @@
 		<!-- composer: autosizing textarea + voice + send. Fully disabled for
 		     non-admins (the note above explains why): the agent refuses the
 		     request server-side anyway, so submitting would only burn a slow
-		     LLM round trip. -->
+		     LLM round trip. That permission lock is the ONLY `disabled` here:
+		     a RAW textarea with v-model (Composer.vue's documented pattern -
+		     Vue's vModelText keeps handling IME composition), and `sending`
+		     gates the send button and send() alone. Disabling a focused, dirty
+		     textarea mid-send blurs it, fires `change`, and the frappe-ui
+		     Textarea this used to be re-emitted the PRE-CLEAR value, putting
+		     the just-sent message back in the box. -->
 		<div class="shrink-0 border-t px-4 py-3">
-			<div ref="box" @keydown="onKeydown" @input="autoGrow">
-				<FormControl
-					type="textarea"
-					:rows="2"
-					:placeholder="
-						caps.can_manage
-							? 'Describe the trigger…'
-							: 'Requires the Jarvis Admin role'
-					"
-					:modelValue="draft"
-					:disabled="sending || !caps.can_manage"
-					@update:modelValue="(v) => (draft = v)"
-				/>
-			</div>
+			<textarea
+				ref="box"
+				v-model="draft"
+				rows="2"
+				:placeholder="
+					caps.can_manage ? 'Describe the trigger…' : 'Requires the Jarvis Admin role'
+				"
+				:disabled="!caps.can_manage"
+				class="block w-full resize-none rounded border border-transparent bg-surface-gray-2 px-2 py-1.5 text-base text-ink-gray-8 transition-colors placeholder-ink-gray-4 hover:border-outline-gray-modals hover:bg-surface-gray-3 focus:border-outline-gray-4 focus:bg-surface-white focus:shadow-sm focus:outline-none focus:ring-0 focus-visible:ring-2 focus-visible:ring-outline-gray-3 disabled:bg-surface-gray-1 disabled:text-ink-gray-5 disabled:placeholder-ink-gray-3"
+				@keydown="onKeydown"
+				@input="autoGrow"
+			/>
 			<div class="mt-2 flex items-center justify-between gap-2">
 				<div class="flex items-center gap-1.5">
 					<VoiceRecorder
@@ -163,7 +167,7 @@
 				<Button
 					variant="solid"
 					label="Send"
-					:disabled="!draft.trim() || !caps.can_manage"
+					:disabled="!draft.trim() || sending || !caps.can_manage"
 					:loading="sending"
 					@click="send"
 				/>
@@ -190,10 +194,10 @@
 //                      created/edited by the agent).
 //   no socket        → (?nosocket / headless QA) a bounded refetch ladder after
 //                      each send stands in for the realtime frames.
-import { ref, computed, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
-import { Button, FeatherIcon, FormControl, LoadingIndicator, toast } from "frappe-ui";
+import { Button, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
 import { renderMarkdown } from "@/markdown";
 import { session } from "@/data/session";
@@ -421,11 +425,16 @@ const draft = ref("");
 const box = ref(null);
 
 function autoGrow() {
-	const ta = box.value && box.value.querySelector("textarea");
+	const ta = box.value;
 	if (!ta) return;
 	ta.style.height = "auto";
 	ta.style.height = Math.min(ta.scrollHeight, 180) + "px";
 }
+// Programmatic changes (the send that clears the box, dictation) only reach the
+// DOM on the next flush - flush:"post" so the textarea's value is already
+// written when we measure scrollHeight. Typed input grows synchronously in the
+// @input handler so the box never lags the caret.
+watch(draft, autoGrow, { flush: "post" });
 
 function onKeydown(e) {
 	// Enter sends, Shift+Enter keeps the newline
@@ -439,7 +448,6 @@ function onTranscript(text) {
 	// dictation appends to any typed draft (ChatComposer precedent)
 	const cur = draft.value;
 	draft.value = cur.trim() ? cur.replace(/\s+$/, "") + " " + text : text;
-	nextTick(autoGrow);
 }
 
 async function send() {
@@ -450,7 +458,6 @@ async function send() {
 	if (!text || sending.value) return;
 	sending.value = true;
 	draft.value = "";
-	nextTick(autoGrow);
 	// optimistic user bubble - reconciled by the next transcript refetch
 	const tmpName = `tmp-${Date.now()}`;
 	messages.value = [...messages.value, { name: tmpName, role: "user", content: text }];
@@ -486,7 +493,6 @@ function newChat() {
 	pendingCards.value = [];
 	runActive.value = false;
 	draft.value = "";
-	nextTick(autoGrow);
 }
 
 // ── realtime ──────────────────────────────────────────────────────────────────

@@ -632,7 +632,7 @@ def assemble_prompt(
 	# Floating-widget auto-context + file inputs layer onto the
 	# already date/user-augmented user_message built above. Prompt-only;
 	# the persisted/visible user message is unchanged.
-	user_message = _prepend_doc_context(user_message, context)
+	user_message = _prepend_doc_context(user_message, context, conversation_id)
 	# Vision is managed-pool only (self-host vision is a follow-up), gated by the
 	# operator toggle and the model's provider being multimodal. When off, image/
 	# PDF attachments degrade to a short note (no OCR fallback any more).
@@ -1405,7 +1405,31 @@ def _dashboard_theme_cheatsheet(theme_key: str) -> str:
 	)
 
 
-def _prepend_doc_context(user_message: str, context) -> str:
+def _dashboard_has_canvas(conversation_id: str) -> bool:
+	"""Has any turn in this conversation already drawn a canvas artifact?
+
+	``persist_canvases`` stamps the assistant message's ``canvas`` JSON field for
+	every turn that published one, and that same field is what ``get_conversation``
+	hands the builder. The Dashboards builder keeps no server-side draft, so this
+	IS the "is there a dashboard yet?" state for the interview-first rule below.
+
+	Fails to True on any error: an unreadable state must degrade to today's
+	build-immediately behaviour, never to re-interrogating the user every turn.
+	"""
+	if not conversation_id:
+		return False
+	try:
+		return bool(
+			frappe.db.exists(
+				MSG,
+				{"conversation": conversation_id, "canvas": ["is", "set"]},
+			)
+		)
+	except Exception:
+		return True
+
+
+def _prepend_doc_context(user_message: str, context, conversation_id: str = "") -> str:
 	"""Prepend the ERP doc / report the user was viewing (floating-widget
 	auto-context) as a leading ``[Viewing: ...]`` line, so questions like
 	"is this overdue?" or "why is this row missing?" resolve against the
@@ -1470,6 +1494,34 @@ def _prepend_doc_context(user_message: str, context) -> str:
 			)
 		else:
 			theme_line = ""
+		# Interview first, build on the final call. A dashboard nobody scoped is a
+		# guess the user then has to argue with, so the FIRST pass of a build asks
+		# the few decisions that shape it and waits. "First" is derived here, not
+		# sent by the client: no canvas has been drawn in this conversation yet and
+		# we are not revising an existing saved document. Once a canvas exists the
+		# wording below is unchanged from the iterate-only original.
+		clarify_line = ""
+		if not edit_line and not _dashboard_has_canvas(conversation_id):
+			decisions = [
+				"the data scope (which records/doctypes, over what period)",
+				"the breakdown that matters (grouped by what, showing which numbers)",
+			]
+			if not mode:
+				decisions.append(
+					"whether they want a STATIC one-time report with the numbers baked in "
+					"or a LIVE data-connected dashboard"
+				)
+			if not theme_key:
+				decisions.append("which theme it should use")
+			clarify_line = (
+				" NOTHING has been drawn on this canvas yet, so do NOT build on this pass. "
+				"Reply with one short lead-in line and exactly ONE ```jarvis-ask block (see "
+				"the jarvis-chat-blocks skill) asking about " + "; ".join(decisions) + " - "
+				"then stop and wait for the answers. Skip any decision their request already "
+				"answers unambiguously, and when it answers all of them, build instead of "
+				"asking. Never ask twice: once they have answered, or told you to go ahead, "
+				"build the dashboard."
+			)
 		return (
 			"[Context: The user is on the Jarvis Dashboards builder page. They want to "
 			"create or iterate on a dashboard/report. Read and follow the "
@@ -1490,7 +1542,8 @@ def _prepend_doc_context(user_message: str, context) -> str:
 			"of hardcoding design. For a bespoke look the user switches to the Custom "
 			"theme via the theme picker — on a curated theme never hardcode off-theme "
 			"colors/fonts (the save-time validator rejects them); tell the user to "
-			f"pick Custom for a one-off deviation.{theme_line}{mode_line}{edit_line}]"
+			f"pick Custom for a one-off deviation.{theme_line}{mode_line}{edit_line}"
+			f"{clarify_line}]"
 			f"\n\n{user_message}"
 		)
 	if context.get("page") == "triggers":
