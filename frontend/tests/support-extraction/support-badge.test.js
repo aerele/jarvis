@@ -109,6 +109,7 @@ describe("UserMenu variant (chat vs support)", () => {
 		expect(labels).toContain("Support");
 		expect(labels).not.toContain(`Switch to ${agentName} chat`);
 		expect(labels).toContain("Change theme");
+		expect(labels).toContain("Settings"); // chat/LLM settings belong here
 	});
 
 	it("support: title is '<agent> Support'; menu swaps Support for 'Switch to <agent> chat' and keeps the theme switcher", () => {
@@ -118,5 +119,7 @@ describe("UserMenu variant (chat vs support)", () => {
 		expect(labels).toContain(`Switch to ${agentName} chat`);
 		expect(labels).not.toContain("Support");
 		expect(labels).toContain("Change theme");
+		// The Jarvis chat/LLM Settings dialog is out of place in the customer portal.
+		expect(labels).not.toContain("Settings");
 	});
 });

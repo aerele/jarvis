@@ -127,7 +127,17 @@ const menuOptions = computed(() => [
 		group: "Menu",
 		hideLabel: true,
 		items: [
-			{ label: "Settings", icon: "settings", onClick: () => shellStore.openSettings() },
+			// The app/LLM Settings dialog is an admin/chat concern — omit it on the
+			// customer support rail (variant "support").
+			...(props.variant === "support"
+				? []
+				: [
+						{
+							label: "Settings",
+							icon: "settings",
+							onClick: () => shellStore.openSettings(),
+						},
+				  ]),
 			...(crossItem.value ? [crossItem.value] : []),
 			{
 				label: "Switch to Desk",
