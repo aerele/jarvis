@@ -3,9 +3,14 @@
 		 --surface-3) via getComputedStyle on THIS element, not document.documentElement.
 		 Those vars are inline-applied on an ancestor (.jv-ob-root's paletteVars in
 		 OnboardingView.vue), not on :root, so they only resolve correctly once
-		 inherited down to a node inside that scope - this component's root div. -->
-	<div ref="rootEl" class="jv-setup-net">
-		<canvas ref="canvasEl"></canvas>
+		 inherited down to a node inside that scope - this component's root div.
+
+		 Both this div and the canvas fill via absolute + inset-0 (NOT h-full on
+		 the div): the parent .jv-ob-setup-net uses min-height, and percentage
+		 heights don't resolve against min-height, so h-full collapsed the canvas
+		 to 0px and nothing drew. Do not change this to h-full. -->
+	<div ref="rootEl" class="absolute inset-0">
+		<canvas ref="canvasEl" class="absolute inset-0 block h-full w-full"></canvas>
 	</div>
 </template>
 
@@ -345,20 +350,3 @@ watch(
 	}
 );
 </script>
-
-<style scoped>
-/* Fill the wrapper via absolute inset (NOT height:100%): the parent
-   .jv-ob-setup-net uses min-height, and % heights don't resolve against
-   min-height, so height:100% collapsed the canvas to 0px and nothing drew. */
-.jv-setup-net {
-	position: absolute;
-	inset: 0;
-}
-.jv-setup-net canvas {
-	position: absolute;
-	inset: 0;
-	width: 100%;
-	height: 100%;
-	display: block;
-}
-</style>
