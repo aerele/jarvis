@@ -1,13 +1,36 @@
 <template>
+	<!-- Root: jv-ob-root + the jv-dark class + paletteVars stay bound here even
+		 though this view is otherwise migrated to frappe-ui/Tailwind. Two
+		 independent, load-bearing reasons, neither of them decoration:
+
+		 1. SetupNeuralNet's readColors() (onboarding/SetupNeuralNet.vue) reads
+			--text-3/--surface/--surface-3 via getComputedStyle on ITS OWN root,
+			which only resolve because they inherit down from paletteVars applied
+			somewhere above it in the DOM - there is no :root fallback (design.md
+			§2.2). Relocating/dropping this binding would silently render the
+			connect-step canvas with unresolved colors.
+		 2. JvCombo.vue (Details step) and LlmPoolEditor.vue (Connect step) - both
+			out of scope for this migration - read the SAME jv-* var(--...) custom
+			properties in their own scoped CSS (12 and 182 usages respectively) and
+			render raw <input> elements that frontend/src/index.css targets by the
+			literal ".jv-ob-root" selector to suppress the @tailwindcss/forms blue
+			focus ring (".jv-ob-root :where(input...):focus"). Renaming this class
+			would silently reintroduce that blue ring on every input inside
+			LlmPoolEditor/JvCombo, on this page only. -->
 	<div class="jv-ob-root" :class="{ 'jv-dark': dark }" :style="paletteVars">
-		<main class="jv-ob-main">
-			<div class="jv-ob-center">
-				<div class="jv-ob-wrap">
-					<!-- brand header: JarvisMark + name + per-step subtitle (preview .brand) -->
-					<div class="jv-ob-brand">
+		<main class="relative z-10 min-w-0 flex-1 overflow-y-auto">
+			<!-- Fills the viewport so the card centers vertically when short; a step
+				 taller than the viewport grows and the card top-aligns. -->
+			<div class="box-border flex min-h-full items-center justify-center px-5 pb-15 pt-6.5">
+				<div class="mx-auto flex w-full max-w-[1080px] flex-col items-center">
+					<!-- brand header: JarvisMark + name + per-step subtitle -->
+					<div class="mb-2 flex items-center justify-center gap-2.5">
 						<JarvisMark :size="30" :radius="8" />
-						<span class="jv-ob-brand-name">{{ agentName }}</span>
-						<span class="jv-ob-brand-sub">{{ frameSub }}</span>
+						<span class="text-base font-semibold">{{ agentName }}</span>
+						<span
+							class="border-l border-outline-gray-1 pl-2.5 text-p-sm text-ink-gray-6"
+							>{{ frameSub }}</span
+						>
 					</div>
 
 					<!-- step rail: flat progress segments with labels (design.md §4.3 —
@@ -15,7 +38,7 @@
 					 tour (chromeless) and on the single-step self-host track. -->
 					<div
 						v-if="railIndex >= 0"
-						class="jv-ob-steps"
+						class="my-4 flex w-full max-w-[720px] items-stretch gap-2"
 						role="list"
 						aria-label="Setup steps"
 					>
@@ -23,16 +46,30 @@
 							v-for="(s, i) in RAIL"
 							:key="s.id"
 							role="listitem"
-							class="jv-ob-step"
-							:class="{ done: i < railIndex, active: i === railIndex }"
+							class="flex flex-1 flex-col gap-1.5"
 							:aria-current="i === railIndex ? 'step' : undefined"
 						>
-							<span class="jv-ob-step-label">{{ s.label }}</span>
-							<span class="jv-ob-step-bar"></span>
+							<span
+								class="text-p-sm"
+								:class="
+									i === railIndex
+										? 'font-medium text-ink-gray-9'
+										: i < railIndex
+										? 'text-ink-gray-7'
+										: 'text-ink-gray-5'
+								"
+								>{{ s.label }}</span
+							>
+							<span
+								class="h-1 rounded-full"
+								:class="i <= railIndex ? 'bg-surface-gray-7' : 'bg-surface-gray-3'"
+							></span>
 						</div>
 					</div>
 
-					<div class="jv-ob-panel">
+					<div
+						class="w-full overflow-hidden rounded-2xl border border-outline-gray-1 bg-surface-white shadow-2xl"
+					>
 						<!-- ===== Intro tour (fresh starts only; reconcile routes mid-flight
 							 signups straight to the right step, past the tour) ===== -->
 						<TourIntro
@@ -830,6 +867,7 @@
 
 <script setup>
 import { reactive, ref, computed, onMounted, watch } from "vue";
+import { Button, FormControl, FeatherIcon, LoadingIndicator } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
@@ -1862,107 +1900,12 @@ onMounted(async () => {
 /* Styling follows design.md (§4.3 onboarding & wizards): flat neutral surfaces,
    near-black solid CTAs, colour-shift-only hover, no decorative motion. */
 .jv-ob-root {
-	--rad: 8px;
 	min-height: 100vh;
 	background: var(--surface-1);
 	color: var(--text);
 	display: flex;
 	flex-direction: column;
 	position: relative;
-}
-
-.jv-ob-main {
-	position: relative;
-	z-index: 1;
-	flex: 1;
-	min-width: 0;
-	overflow-y: auto;
-}
-/* Fills the viewport so the card centers vertically when short; when a step is
-   taller than the viewport it grows and the card top-aligns (scrolls from top,
-   no cutoff). */
-.jv-ob-center {
-	min-height: 100%;
-	box-sizing: border-box;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 26px 20px 60px;
-}
-.jv-ob-wrap {
-	max-width: 1080px;
-	width: 100%;
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-}
-
-/* ---- brand header: the mark is the one sanctioned brand asset (design.md
-   §2.2); no glow shadow around it. ---- */
-.jv-ob-brand {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	gap: 10px;
-	align-self: center;
-	margin-bottom: 8px;
-}
-.jv-ob-brand-name {
-	font-size: 15px;
-	font-weight: 600;
-}
-.jv-ob-brand-sub {
-	font-size: 13px;
-	color: var(--text-3);
-	border-left: 1px solid var(--border);
-	padding-left: 11px;
-}
-
-/* ---- step rail: labelled flat segments (design.md §4.3) ---- */
-.jv-ob-steps {
-	display: flex;
-	align-items: stretch;
-	gap: 8px;
-	margin: 16px 0 22px;
-	width: 100%;
-	max-width: 720px;
-}
-.jv-ob-step {
-	flex: 1;
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-}
-.jv-ob-step-label {
-	font-size: 12.5px;
-	font-weight: 420;
-	color: var(--text-3);
-}
-.jv-ob-step.active .jv-ob-step-label {
-	color: var(--text);
-	font-weight: 500;
-}
-.jv-ob-step.done .jv-ob-step-label {
-	color: var(--text-2);
-}
-.jv-ob-step-bar {
-	height: 4px;
-	border-radius: 999px;
-	background: var(--surface-3);
-}
-.jv-ob-step.done .jv-ob-step-bar,
-.jv-ob-step.active .jv-ob-step-bar {
-	background: var(--text);
-}
-
-/* ---- panel + shared step body/foot ---- */
-.jv-ob-panel {
-	width: 100%;
-	background: var(--surface);
-	border: 1px solid var(--border);
-	border-radius: 16px;
-	box-shadow: 0 0 1px rgba(0, 0, 0, 0.2), 0 24px 30px -8px rgba(0, 0, 0, 0.1);
-	overflow: hidden;
 }
 .jv-ob-screen {
 	animation: jvObFade 0.15s ease-out;
@@ -2051,7 +1994,6 @@ onMounted(async () => {
 .jv-ob-link:hover {
 	color: var(--text-2);
 }
-
 /* keyboard focus (text inputs draw their own focus border) */
 .jv-ob-root button:focus-visible,
 .jv-ob-root input[type="checkbox"]:focus-visible,
@@ -2059,7 +2001,6 @@ onMounted(async () => {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
-
 /* ---- buttons (design.md §3.1): solid near-black primary, subtle secondary,
    colour-shift hover only. The finishing CTA (.jv-ob-btn-grad class name kept
    for the template) is the same solid primary as everywhere else. ---- */
@@ -2115,7 +2056,6 @@ onMounted(async () => {
 	border-radius: 8px;
 	margin-left: 8px;
 }
-
 .jv-ob-placeholder {
 	font-size: 13.5px;
 	color: var(--text-3);
@@ -2138,7 +2078,6 @@ onMounted(async () => {
 	text-align: center;
 	margin: 0;
 }
-
 /* "Setting up" transition spinner (pay provisioning only - the connect
    finishing state uses the neural-net animation below). */
 .jv-ob-spinner {
@@ -2155,7 +2094,6 @@ onMounted(async () => {
 		transform: rotate(360deg);
 	}
 }
-
 /* "Setting up Jarvis" finishing state: neural-net animation replacing the
    spinner. Needs real height for the canvas to render into. */
 .jv-ob-setup-net {
@@ -2165,7 +2103,6 @@ onMounted(async () => {
 	flex: 1;
 	margin-top: 8px;
 }
-
 /* ---- Plan cards: selectable radio cards; selection is a dark ring, hover is
    a background tint — never motion (design.md §4.2). ---- */
 .jv-ob-plans {
@@ -2254,7 +2191,6 @@ onMounted(async () => {
 .jv-ob-muted {
 	color: var(--text-3);
 }
-
 /* ---- Details form (design.md §3.4 mapped to the page context) ---- */
 .jv-ob-form {
 	display: grid;
@@ -2340,7 +2276,6 @@ onMounted(async () => {
 .jv-ob-form :deep(.jvc-input::placeholder) {
 	color: var(--text-3);
 }
-
 /* ---- Review & pay ---- */
 .jv-ob-rev {
 	max-width: 560px;
@@ -2511,13 +2446,11 @@ onMounted(async () => {
 	white-space: pre-wrap;
 	word-break: break-all;
 }
-
 /* ---- Connect ---- */
 .jv-ob-connect {
 	max-width: 640px;
 	margin: 0 auto;
 }
-
 /* ---- Self-host (logic unchanged) ---- */
 .jv-ob-sh {
 	max-width: 620px;
@@ -2588,7 +2521,6 @@ onMounted(async () => {
 	font-weight: 500;
 	margin-bottom: 4px;
 }
-
 /* ---- Connect / self-host post-save readiness note (afterSaveRecheckReady). ---- */
 .jv-ob-note {
 	font-size: 12.5px;
@@ -2600,7 +2532,6 @@ onMounted(async () => {
 	flex-wrap: wrap;
 	justify-content: center;
 }
-
 @media (max-width: 820px) {
 	.jv-ob-body {
 		min-height: 0;
