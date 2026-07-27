@@ -420,7 +420,85 @@
 											<rect x="3" y="11" width="18" height="11" rx="2" />
 											<path d="M7 11V7a5 5 0 0 1 10 0v4" />
 										</svg>
-										Secured by Razorpay · cards, UPI &amp; netbanking
+										Secured by
+										{{
+											state.paymentProvider === "cashfree"
+												? "Cashfree"
+												: "Razorpay"
+										}}
+									</div>
+									<div
+										v-if="showProviderChooser"
+										class="jv-ob-provseg"
+										:class="{ 'is-single': isSingleProvider }"
+										:role="isSingleProvider ? undefined : 'radiogroup'"
+										:aria-label="
+											isSingleProvider ? undefined : 'Payment method'
+										"
+									>
+										<button
+											v-if="providerAvailable('razorpay')"
+											type="button"
+											class="jv-ob-provseg-opt"
+											:class="{ sel: state.paymentProvider === 'razorpay' }"
+											:role="isSingleProvider ? undefined : 'radio'"
+											:aria-checked="
+												isSingleProvider
+													? undefined
+													: state.paymentProvider === 'razorpay'
+											"
+											:aria-label="
+												isSingleProvider
+													? 'Payment method: Razorpay'
+													: 'Razorpay'
+											"
+											:disabled="isSingleProvider"
+											@click="chooseProvider('razorpay')"
+										>
+											<span class="jv-ob-rzp-logo" aria-hidden="true">
+												<svg
+													class="jv-ob-rzp-mark"
+													viewBox="0 0 20 24"
+													width="15"
+													height="18"
+												>
+													<path
+														fill="#3395ff"
+														d="M14.4 0 8 12.1l1.6 3.8L18 3.5z"
+													/>
+													<path
+														fill="#0b2a6b"
+														d="M9.2 8 2 24h4.7l3-7.5 2.1-4.6z"
+													/>
+												</svg>
+												<span class="jv-ob-rzp-word">Razorpay</span>
+											</span>
+										</button>
+										<button
+											v-if="providerAvailable('cashfree')"
+											type="button"
+											class="jv-ob-provseg-opt"
+											:class="{ sel: state.paymentProvider === 'cashfree' }"
+											:role="isSingleProvider ? undefined : 'radio'"
+											:aria-checked="
+												isSingleProvider
+													? undefined
+													: state.paymentProvider === 'cashfree'
+											"
+											:aria-label="
+												isSingleProvider
+													? 'Payment method: Cashfree'
+													: 'Cashfree'
+											"
+											:disabled="isSingleProvider"
+											@click="chooseProvider('cashfree')"
+										>
+											<img
+												:src="cashfreeLogo"
+												alt="Cashfree"
+												class="jv-ob-cf-logo"
+											/>
+										</button>
 									</div>
 									<Banner
 										v-if="state.payErr"
@@ -759,6 +837,7 @@ import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
+import cashfreeLogo from "@/assets/cashfree.png";
 import {
 	STEPS_MANAGED,
 	STEPS_SELFHOST,
@@ -774,6 +853,7 @@ import {
 	isReadyForChat,
 	getLlmSyncStatus,
 	listPlans,
+	listPaymentProviders,
 	startSignup,
 	finishPayment,
 	saveSelfHosted,
@@ -842,6 +922,11 @@ const state = reactive({
 	plansErr: "",
 	// pay (renderPay / renderVerifyEmail / startPay / openCheckout)
 	payPhase: "review", // "review" | "verify" - mirrors desk's step-3 vs "check your email" sub-screen
+	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
+	// Gateways the operator has actually enabled, narrowed to what this build
+	// can render. Starts as razorpay-only so the step is never briefly empty
+	// while the lookup is in flight, and stays that way if the lookup fails.
+	availableProviders: ["razorpay"],
 	payErr: "",
 	payBusy: false,
 	// True when reconcile landed us directly on "connect" (signup + payment
@@ -888,6 +973,66 @@ const frameSub = computed(() => FRAME_SUBS[state.step] || "Set up your workspace
 // autopay mandate now; the first charge fires when the trial ends.
 const trialDays = computed(() => Number(selectedPlan.value.trial_days) || 0);
 const isTrialPlan = computed(() => trialDays.value > 0);
+
+// The chooser is only a choice when there is more than one gateway. With a
+// single enabled gateway a radiogroup of one is noise: it asks the customer to
+// decide something already decided, and the "Secured by X" line below already
+// names it. Free/trial plans collect no payment at all.
+const providerChoices = computed(() => state.availableProviders || []);
+// Two terms the old template carried are gone, both leftovers of features that
+// were removed (the free plan; dev-signup/sandbox mode) whose identifiers no
+// longer exist anywhere:
+//
+//   isFreePlan       never defined. Harmless in a template - Vue resolves an
+//                    unknown identifier to undefined and only warns, so
+//                    `!isFreePlan` was permanently true - but a hard
+//                    ReferenceError once moved into a computed, which is how
+//                    the dead condition finally surfaced.
+//   state.devActive  never assigned. Reads as undefined rather than throwing,
+//                    so it silently never fired.
+//
+// Dropped rather than carried forward: a condition that cannot fire reads as a
+// rule someone still has to reason about.
+//
+// Shown for ONE gateway too, not only for a choice. An earlier version hid the
+// row entirely below two options, reasoning that a radiogroup of one is a fake
+// decision. That reasoning was right but discarded the wrong half: the customer
+// still needs to see who is about to take their money, and a line of small text
+// is weaker assurance than the brand they are about to be handed to. A single
+// gateway therefore renders as a NON-INTERACTIVE chip - present and legible,
+// with nothing to decide.
+const showProviderChooser = computed(
+	() => !isTrialPlan.value && providerChoices.value.length >= 1
+);
+const isSingleProvider = computed(() => providerChoices.value.length === 1);
+const providerAvailable = (p) => providerChoices.value.includes(p);
+// Clicking is only meaningful when there is something to switch to. Guarding
+// here as well as via :disabled keeps the selection honest even if the chip is
+// reached some other way (keyboard, a stray programmatic click).
+function chooseProvider(p) {
+	if (isSingleProvider.value || !providerAvailable(p)) return;
+	state.paymentProvider = p;
+}
+
+// Ask the control plane which gateways are live and preselect its default.
+// Fail-open and non-blocking: the wizard must render even if this never
+// answers, and the razorpay-only seed above is the floor.
+async function loadPaymentProviders() {
+	try {
+		const r = (await listPaymentProviders()) || {};
+		const providers = Array.isArray(r.providers) ? r.providers.filter(Boolean) : [];
+		if (!providers.length) return;
+		state.availableProviders = providers;
+		// Preselect admin's default; never leave the selection pointing at a
+		// gateway that is no longer offered, or Pay would post a provider the
+		// server refuses.
+		const preferred = providers.includes(r.default) ? r.default : providers[0];
+		if (!providers.includes(state.paymentProvider)) state.paymentProvider = preferred;
+		else if (providers.length === 1) state.paymentProvider = providers[0];
+	} catch (e) {
+		// Keep the seed: a control-plane blip must not block payment entirely.
+	}
+}
 
 // Pay CTA copy: "Start free trial" for an autopay trial (nothing due
 // today); "Pay ₹X" for a plain paid plan.
@@ -985,8 +1130,17 @@ async function reconcileMidFlightSignup() {
 		}
 		// reason === "signup" (or call failed) - no completed signup yet, but
 		// one may still be mid-flight (started, awaiting verification/payment).
+		//
+		// The in-flight test goes through verifyPollAction rather than naming
+		// order ids here. This gate used to check razorpay_order_id only, which
+		// made it blind to BOTH Cashfree shapes - and a Cashfree mandate is
+		// exactly the case that needs it, because authorising one is a full-page
+		// redirect that lands back here with the wizard's in-memory state gone.
+		// Falling through dropped the customer at "intro", as if they had never
+		// signed up, moments after they authorised. verifyPollAction is the one
+		// place that knows every gateway/shape, so the two cannot drift again.
 		const pay = await checkSignupPaymentState();
-		if (pay && (pay.razorpay_order_id || pay.pending_verification)) {
+		if (pay && (pay.pending_verification || verifyPollAction(pay).kind === "checkout")) {
 			state.mode = "managed";
 			state.step = "pay";
 			state.payPhase = "verify";
@@ -1178,13 +1332,18 @@ async function proceedAfterPay() {
 
 async function runStartPay() {
 	try {
-		const d = await startSignup(state.email, state.company, state.planName);
+		const d = await startSignup(
+			state.email,
+			state.company,
+			state.planName,
+			state.paymentProvider
+		);
 		if (d && d.pending_verification) {
 			state.payPhase = "verify";
 			state.payBusy = false;
 			return;
 		}
-		await openCheckout(d);
+		await launchCheckout(d);
 	} catch (e) {
 		state.payBusy = false;
 		state.payErr = errMsg(e);
@@ -1204,7 +1363,7 @@ async function onVerifyCheck() {
 		const d = await checkSignupPaymentState();
 		const action = verifyPollAction(d);
 		if (action.kind === "checkout") {
-			await openCheckout(d);
+			await launchCheckout(d, action.provider);
 			return;
 		}
 		if (action.kind === "complete") {
@@ -1230,10 +1389,126 @@ async function onVerifyCheck() {
 	}
 }
 
+// Cashfree Checkout v3 SDK, DOM-injected at runtime (mirrors ensureRazorpayLoaded)
+// so it stays out of the self-contained SPA bundle.
+let cashfreeLoadPromise = null;
+function ensureCashfreeLoaded() {
+	if (window.Cashfree) return Promise.resolve();
+	if (cashfreeLoadPromise) return cashfreeLoadPromise;
+	cashfreeLoadPromise = new Promise((resolve, reject) => {
+		const s = document.createElement("script");
+		s.src = "https://sdk.cashfree.com/js/v3/cashfree.js";
+		s.onload = () => resolve();
+		s.onerror = () => {
+			cashfreeLoadPromise = null;
+			reject(new Error("Couldn't load the Cashfree checkout script."));
+		};
+		document.head.appendChild(s);
+	});
+	return cashfreeLoadPromise;
+}
+
+// Provider dispatcher: the admin response (or the verify-poll action) carries a
+// payment_provider discriminator; launch the matching gateway. Defaults to
+// razorpay so nothing changes when admin returns no discriminator.
+function launchCheckout(d, provider) {
+	const p = (provider || (d && d.payment_provider) || "razorpay").toLowerCase();
+	if (p === "cashfree") return openCashfreeCheckout(d);
+	return openRazorpayCheckout(d);
+}
+
+// Cashfree checkout. Unlike Razorpay there is NO client-side signature: after
+// the modal we confirm SERVER-SIDE by polling finish_payment, which makes admin
+// fetch the real order status from Cashfree. A forged "success" can't activate.
+async function openCashfreeCheckout(d) {
+	try {
+		await ensureCashfreeLoaded();
+	} catch (e) {
+		state.payBusy = false;
+		state.payErr = "Couldn't load the payment form. Check your connection and try again.";
+		return;
+	}
+	state.payBusy = false;
+	let cf;
+	try {
+		cf = window.Cashfree({ mode: d.cashfree_env === "production" ? "production" : "sandbox" });
+	} catch (e) {
+		state.payErr = "Couldn't start Cashfree checkout.";
+		return;
+	}
+	// Paid MONTHLY plans authorize a recurring mandate instead of paying an
+	// order, and the two are NOT interchangeable: the mandate carries a
+	// subscription_session_id and needs subscriptionsCheckout({subsSessionId}).
+	// Passing it to checkout({paymentSessionId}) fails.
+	if (d.subscription_session_id) {
+		return openCashfreeMandate(cf, d);
+	}
+
+	try {
+		// _modal keeps the SPA mounted (a full redirect would tear down wizard state).
+		await cf.checkout({ paymentSessionId: d.payment_session_id, redirectTarget: "_modal" });
+	} catch (e) {
+		// modal error / user close: fall through to the confirm poll - the payment
+		// may still have succeeded, and the server-side poll is what decides.
+	}
+	state.payBusy = true;
+	await confirmCashfree(d.cashfree_order_id);
+}
+
+// Mandate authorization (autopay monthly). This is a REDIRECT journey, not the
+// order flow's modal, and that is imposed by the SDK rather than chosen:
+// subscriptionsCheckout POSTs a form whose target is the raw redirectTarget, so
+// "_modal" would open a window literally named _modal instead of an overlay.
+// It also resolves the moment the form is submitted - {redirect:true} - so
+// there is nothing to await and no result to inspect.
+//
+// The customer therefore leaves the wizard. Admin sets Cashfree's return_url to
+// this page, and on the way back the wizard's normal resume path
+// (verifyPollAction -> finish_payment) confirms the mandate server-side, exactly
+// as it already does after email verification. Nothing trusts the redirect
+// itself: confirm refuses any mandate Cashfree does not report ACTIVE.
+async function openCashfreeMandate(cf, d) {
+	try {
+		const r = await cf.subscriptionsCheckout({
+			subsSessionId: d.subscription_session_id,
+			redirectTarget: "_self",
+		});
+		// The SDK resolves with {error} rather than throwing for bad input.
+		if (r && r.error) {
+			state.payBusy = false;
+			state.payErr = "Couldn't start the auto-pay authorisation. Try again.";
+		}
+	} catch (e) {
+		state.payBusy = false;
+		state.payErr = "Couldn't start the auto-pay authorisation. Try again.";
+	}
+}
+
+// Poll finish_payment (→ admin confirm_payment → Cashfree Get Order/Payments).
+// Succeeds once Cashfree reports the order PAID (sync confirm or the webhook,
+// whichever lands first); both converge idempotently on activation.
+async function confirmCashfree(cashfree_order_id) {
+	for (let i = 0; i < 12; i++) {
+		try {
+			const rr = await finishPayment({ provider: "cashfree", cashfree_order_id });
+			state.successData = rr;
+			state.payBusy = false;
+			await proceedAfterPay();
+			return;
+		} catch (e) {
+			// Not confirmed yet (order not PAID, or a transient) - wait and retry.
+			await _sleep(3000);
+		}
+	}
+	state.payBusy = false;
+	state.payErr =
+		"We couldn't confirm your payment yet. If you completed it, it'll finalize shortly — refresh in a moment.";
+}
+
 // Razorpay Checkout - options object + success handler ported verbatim from
 // desk openCheckout (jarvis_onboarding.js ~1646-1676). See task-4-report.md
 // for the field-by-field comparison against the desk source.
-async function openCheckout(d) {
+async function openRazorpayCheckout(d) {
 	try {
 		await ensureRazorpayLoaded();
 	} catch (e) {
@@ -1574,6 +1849,7 @@ async function prefillAccount() {
 onMounted(async () => {
 	prefillAccount();
 	restoreBillingDetails();
+	loadPaymentProviders();
 	await reconcileMidFlightSignup();
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"
@@ -2108,6 +2384,134 @@ onMounted(async () => {
 	justify-content: center;
 	gap: 7px;
 }
+.jv-ob-provseg {
+	max-width: 360px;
+	margin: 14px auto 0;
+	display: flex;
+	gap: 4px;
+	padding: 4px;
+	background: #eef0f3;
+	border: 1px solid #e3e6ea;
+	border-radius: 12px;
+}
+.jv-ob-provseg-opt {
+	flex: 1 1 0;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 44px;
+	padding: 8px 10px;
+	border: 0;
+	border-radius: 9px;
+	background: transparent;
+	cursor: pointer;
+	opacity: 0.6;
+	transition: background 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
+}
+.jv-ob-provseg-opt:hover {
+	opacity: 0.85;
+}
+.jv-ob-provseg-opt.sel {
+	background: #ffffff;
+	opacity: 1;
+	box-shadow: 0 1px 3px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.04);
+}
+/* Single gateway: the row states which brand takes the payment, it does not
+   offer a choice. So it reads at full strength but drops every affordance that
+   implies one - no pointer, no hover lift, no pressed state. The browser's
+   default disabled dimming is overridden deliberately: this is not an
+   unavailable control, it is a label. */
+.jv-ob-provseg.is-single {
+	max-width: 220px;
+	cursor: default;
+}
+.jv-ob-provseg.is-single .jv-ob-provseg-opt,
+.jv-ob-provseg.is-single .jv-ob-provseg-opt:disabled {
+	cursor: default;
+	opacity: 1;
+}
+.jv-ob-provseg.is-single .jv-ob-provseg-opt:hover {
+	opacity: 1;
+}
+.jv-ob-provseg-opt:focus-visible {
+	outline: 2px solid #3395ff;
+	outline-offset: 2px;
+}
+.jv-ob-rzp-logo {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+.jv-ob-rzp-word {
+	font-size: 15px;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+	color: #0b2a6b;
+}
+.jv-ob-cf-logo {
+	height: 22px;
+	width: auto;
+	display: block;
+}
+@media (prefers-reduced-motion: reduce) {
+	.jv-ob-provseg-opt {
+		transition: none;
+	}
+}
+.jv-ob-devnote {
+	font-size: 12.5px;
+	color: var(--amber);
+	background: var(--amber-bg);
+	border: 1px solid var(--amber-bd);
+	border-radius: 8px;
+	padding: 8px 12px;
+	margin: 14px auto 0;
+	max-width: 560px;
+}
+.jv-ob-devblock {
+	font-size: 12.5px;
+	color: var(--text-2);
+	background: var(--amber-bg);
+	border: 1px solid var(--amber-bd);
+	border-radius: 8px;
+	padding: 12px 14px;
+	margin: 14px auto 0;
+	max-width: 560px;
+	text-align: left;
+}
+.jv-ob-devblock-title {
+	margin: 0 0 6px;
+	font-weight: 560;
+	color: var(--amber);
+}
+.jv-ob-devblock-body {
+	margin: 0 0 10px;
+}
+.jv-ob-devblock-steps {
+	margin: 0;
+	padding-left: 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.jv-ob-devblock-steps li {
+	line-height: 1.5;
+}
+.jv-ob-devblock-steps code {
+	display: block;
+	margin-top: 5px;
+	padding: 7px 9px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 11.5px;
+	color: var(--text);
+	white-space: pre-wrap;
+	word-break: break-all;
+}
+
 /* ---- Connect ---- */
 .jv-ob-connect {
 	max-width: 640px;

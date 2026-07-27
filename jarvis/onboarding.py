@@ -157,6 +157,32 @@ def list_plans() -> list:
 
 
 @frappe.whitelist()
+def list_payment_providers() -> dict:
+	"""Gateways the wizard may offer, already narrowed to what THIS bench can
+	render: ``{providers: [...], default: "..."}``.
+
+	Two filters, and both matter. Admin drops gateways the operator disabled;
+	this intersects with ``SUPPORTED_PROVIDERS`` so a gateway enabled on a newer
+	control plane than this bench build is not offered here and then dead-ended
+	at a checkout that cannot open.
+
+	Fails OPEN to razorpay: the chooser is a convenience, and a control-plane
+	blip must not leave a customer unable to pay at all. Razorpay is the gateway
+	that supports every flow, so it is the safe floor.
+	"""
+	try:
+		data = admin_client.get_payment_providers() or {}
+	except Exception:
+		return {"providers": ["razorpay"], "default": "razorpay"}
+
+	providers = [p for p in (data.get("providers") or []) if p in admin_client.SUPPORTED_PROVIDERS]
+	if not providers:
+		return {"providers": ["razorpay"], "default": "razorpay"}
+	default = (data.get("default") or "").strip().lower()
+	return {"providers": providers, "default": default if default in providers else providers[0]}
+
+
+@frappe.whitelist()
 def get_preset_catalog() -> list:
 	"""Preset catalog for the desk onboarding step + the /ai SPA route.
 	Thin wrapper over admin_client (fetch/cache/bundled fallback)."""
@@ -287,7 +313,7 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 
 
 @frappe.whitelist()
-def start_signup(email: str, company: str, plan: str) -> dict:
+def start_signup(email: str, company: str, plan: str, provider: str | None = None) -> dict:
 	"""Guest signup → store the api_token → return the Razorpay handles for Checkout.
 
 	Gated on System Manager (Sprint-1 Important from the 2026-06-16 code
@@ -313,7 +339,7 @@ def start_signup(email: str, company: str, plan: str) -> dict:
 	"""
 	require_jarvis_admin()
 	_require_admin_url()
-	data = _surface(admin_client.signup, email, company, plan)
+	data = _surface(admin_client.signup, email, company, plan, provider=provider)
 	# Persist whatever credentials the response carries. The guard also fires
 	# on ``customer`` so the OAuth grant username is stored even if a future
 	# admin response shape omits api_key/api_secret. write_connection skips
@@ -413,15 +439,15 @@ def finish_payment(payload: dict | str) -> dict:
 
 
 @frappe.whitelist()
-def renew() -> dict:
-	"""Existing customer initiates a renewal payment; returns the Razorpay handles
-	for Checkout. The page then completes Checkout and calls finish_payment.
+def renew(provider: str | None = None) -> dict:
+	"""Existing customer initiates a renewal payment; returns the provider's
+	checkout handles. The page then completes Checkout and calls finish_payment.
 
 	Gated on System Manager: initiates a billing transaction tied to the
 	site's admin account.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.renew)
+	return _surface(admin_client.renew, provider=provider)
 
 
 @frappe.whitelist()

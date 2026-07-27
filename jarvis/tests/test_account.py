@@ -90,7 +90,7 @@ class TestAccountWrappers(FrappeTestCase):
 		}
 		with patch.object(admin_client, "start_upgrade", return_value=fake) as m:
 			out = account.start_upgrade("plan-pro")
-		m.assert_called_once_with("plan-pro")
+		m.assert_called_once_with("plan-pro", provider=None)
 		self.assertEqual(out, fake)
 
 	def test_get_account_surfaces_admin_validation_error_as_frappe_throw(self):

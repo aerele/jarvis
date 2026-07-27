@@ -70,6 +70,12 @@
 		if (!window.frappe || !frappe.boot) return false;
 		if (frappe.boot.jarvis_onboarded !== false) return false;
 		if (!erpnextSetupComplete()) return false;
+		// A second, sturdier setup signal alongside the sysdefaults flag above:
+		// the Company count (jarvis_site_setup_complete, set in jarvis.boot)
+		// stays correct even when setup_complete was flipped by a fixture or a
+		// restore. Strict === false so an older boot payload without the key
+		// behaves exactly as before.
+		if (frappe.boot.jarvis_site_setup_complete === false) return false;
 		if (!isSystemManager()) return false;
 		if (dismissed()) return false;
 		var route = (frappe.get_route && frappe.get_route()) || [];

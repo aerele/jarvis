@@ -15,6 +15,10 @@ Keys we set:
   all (``jarvis.permissions.has_jarvis_access``). Lets the desk's
   floating Jarvis button send an unauthorized user to
   ``/jarvis-no-access`` instead of opening the chat panel.
+- ``jarvis_site_setup_complete`` - whether the site has a Company yet.
+  The same banner also gates on this, so a fresh install running
+  ERPNext's own setup wizard is not simultaneously nagged to set up
+  Jarvis, which has nothing to operate until a company exists.
 """
 
 import frappe
@@ -46,6 +50,28 @@ def set_jarvis_boot(bootinfo):
 		bootinfo.jarvis_has_access = bool(has_jarvis_access())
 	except Exception:
 		bootinfo.jarvis_has_access = False  # fail-closed; the no-access page self-heals
+
+	# Gates the same not-onboarded nudge on the SITE being set up first.
+	#
+	# Jarvis operates the customer's ERP; on a site that has not completed setup
+	# there is no ERP for it to operate yet. Nagging a fresh install to "set up
+	# Jarvis" lands in the middle of ERPNext's own setup wizard, competing with
+	# it for the same person's attention and pointing at a wizard whose whole
+	# premise (a company to run) does not exist.
+	#
+	# Company count is the signal rather than System Settings.setup_complete:
+	# it is what actually has to exist for Jarvis to be useful, and it stays
+	# correct on a site whose setup flag was flipped by a fixture or a restore.
+	# Guarded on the doctype because erpnext is not a hard dependency of jarvis.
+	try:
+		bootinfo.jarvis_site_setup_complete = bool(
+			frappe.db.exists("DocType", "Company") and frappe.db.count("Company")
+		)
+	except Exception:
+		# Match the jarvis_onboarded fail-safe above: when in doubt, stay quiet.
+		# A nudge that cannot be dismissed by finishing setup is worse than a
+		# missing one.
+		bootinfo.jarvis_site_setup_complete = False
 
 	# Whitelabel branding for the desk floating chat widget (Panel.vue / Widget.vue
 	# read window.frappe.boot.* synchronously, so no flash). Blank => the widget

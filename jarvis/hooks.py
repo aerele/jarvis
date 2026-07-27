@@ -183,6 +183,10 @@ website_route_rules = [
 	{"from_route": "/jarvis-mobile", "to_route": "jarvis_mobile"},
 	{"from_route": "/jarvis-mobile/<path:app_path>", "to_route": "jarvis_mobile"},
 	{"from_route": "/jarvis-no-access", "to_route": "jarvis_no_access"},
+	# Payment-gateway return landing. Hyphenated for the URL a gateway is
+	# configured with; the page itself is www/jarvis_pay_return.py. See that
+	# file for why the redirect cannot point at the wizard directly (SameSite).
+	{"from_route": "/jarvis-pay-return", "to_route": "jarvis_pay_return"},
 ]
 
 # Serves the PWA's service worker at the root-level /jarvis-mobile.sw.js, which

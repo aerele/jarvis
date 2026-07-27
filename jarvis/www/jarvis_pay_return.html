@@ -1,0 +1,7 @@
+{% extends "templates/web.html" %}
+{# Never rendered: get_context always redirects. Present because a Frappe www
+   page needs a template, and so that a redirect failure degrades to a sentence
+   rather than a traceback. #}
+{% block page_content %}
+<p>Returning you to setup…</p>
+{% endblock %}
