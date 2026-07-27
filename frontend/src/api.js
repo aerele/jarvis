@@ -431,7 +431,7 @@ export const supportAwaitingCount = () => call("jarvis.support.api.awaiting_coun
 // Same-origin GET so <img>/<a> resolve against the bench; session cookie authenticates.
 export const supportDownloadUrl = (ticket, fileUrl) =>
 	`/api/method/jarvis.support.media.download?ticket=${encodeURIComponent(
-		ticket,
+		ticket
 	)}&file_url=${encodeURIComponent(fileUrl)}`;
 
 export async function supportUpload(ticket, file) {

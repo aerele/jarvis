@@ -132,7 +132,7 @@ test("verifyPollAction: terminal statuses surface as halted", () => {
 	for (const status of ["Cancelled", "Expired", "Past Due"]) {
 		assert.deepEqual(
 			verifyPollAction({ pending_verification: false, subscription_status: status }),
-			{ kind: "halted", status },
+			{ kind: "halted", status }
 		);
 	}
 });
@@ -183,16 +183,16 @@ test("suspensionNotice: prefers admin's sentence, falls back when absent", () =>
 			reason: "subscription_suspended",
 			detail: "Your subscription has expired. Renew to restore access to Jarvis.",
 		}),
-		"Your subscription has expired. Renew to restore access to Jarvis.",
+		"Your subscription has expired. Renew to restore access to Jarvis."
 	);
 	// Older admin sends the state with no reason string.
 	assert.equal(
 		suspensionNotice({ ready: false, reason: "subscription_suspended" }),
-		SUSPENDED_FALLBACK,
+		SUSPENDED_FALLBACK
 	);
 	assert.equal(
 		suspensionNotice({ ready: false, reason: "subscription_suspended", detail: "" }),
-		SUSPENDED_FALLBACK,
+		SUSPENDED_FALLBACK
 	);
 });
 

@@ -1002,7 +1002,7 @@ const providerChoices = computed(() => state.availableProviders || []);
 // gateway therefore renders as a NON-INTERACTIVE chip - present and legible,
 // with nothing to decide.
 const showProviderChooser = computed(
-	() => !isTrialPlan.value && providerChoices.value.length >= 1,
+	() => !isTrialPlan.value && providerChoices.value.length >= 1
 );
 const isSingleProvider = computed(() => providerChoices.value.length === 1);
 const providerAvailable = (p) => providerChoices.value.includes(p);
@@ -1208,7 +1208,7 @@ function persistBillingDetails() {
 				billingAddress: state.billingAddress,
 				city: state.city,
 				gstin: state.gstin,
-			}),
+			})
 		);
 	} catch (e) {
 		/* storage full/blocked - purely best-effort */
@@ -1336,7 +1336,7 @@ async function runStartPay() {
 			state.email,
 			state.company,
 			state.planName,
-			state.paymentProvider,
+			state.paymentProvider
 		);
 		if (d && d.pending_verification) {
 			state.payPhase = "verify";
@@ -1828,7 +1828,7 @@ watch(
 			loadPlansSafe();
 		}
 		if (s === "pay") enterPayStep();
-	},
+	}
 );
 
 // Prefill the Details step from what the site already knows (caller's email +
@@ -1961,9 +1961,7 @@ onMounted(async () => {
 	background: var(--surface);
 	border: 1px solid var(--border);
 	border-radius: 16px;
-	box-shadow:
-		0 0 1px rgba(0, 0, 0, 0.2),
-		0 24px 30px -8px rgba(0, 0, 0, 0.1);
+	box-shadow: 0 0 1px rgba(0, 0, 0, 0.2), 0 24px 30px -8px rgba(0, 0, 0, 0.1);
 	overflow: hidden;
 }
 .jv-ob-screen {
@@ -2024,9 +2022,7 @@ onMounted(async () => {
 	gap: 4px;
 	padding: 6px 8px;
 	border-radius: 8px;
-	transition:
-		background-color 0.15s ease,
-		color 0.15s ease;
+	transition: background-color 0.15s ease, color 0.15s ease;
 }
 .jv-ob-back svg {
 	flex: none;
@@ -2084,10 +2080,7 @@ onMounted(async () => {
 	white-space: nowrap;
 	background: var(--surface-2);
 	color: var(--text);
-	transition:
-		background-color 0.15s ease,
-		color 0.15s ease,
-		border-color 0.15s ease;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 /* :not(:disabled) is REQUIRED here. Without it this rule (specificity 0,2,0)
    outranks .jv-ob-btn-grad/.jv-ob-btn-primary (0,1,0) on hover, repainting a
@@ -2187,10 +2180,7 @@ onMounted(async () => {
 	background: var(--surface);
 	cursor: pointer;
 	position: relative;
-	transition:
-		border-color 0.15s ease,
-		background-color 0.15s ease,
-		box-shadow 0.15s ease;
+	transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
 }
 .jv-ob-plan:hover {
 	background: var(--surface-1);
@@ -2248,9 +2238,7 @@ onMounted(async () => {
 	border: 1px solid var(--border-2);
 	display: grid;
 	place-items: center;
-	transition:
-		border-color 0.15s ease,
-		background-color 0.15s ease;
+	transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 .jv-ob-plan.sel .jv-ob-plan-rd {
 	border-color: var(--text);
@@ -2303,9 +2291,7 @@ onMounted(async () => {
 	color: var(--text);
 	width: 100%;
 	box-sizing: border-box;
-	transition:
-		border-color 0.15s ease,
-		box-shadow 0.15s ease;
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .jv-ob-inp::placeholder {
 	color: var(--text-3);
@@ -2341,9 +2327,7 @@ onMounted(async () => {
 	border-color: var(--border-2);
 	border-radius: 8px;
 	font-size: 13.5px;
-	transition:
-		border-color 0.15s ease,
-		box-shadow 0.15s ease;
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .jv-ob-form :deep(.jvc-field:hover) {
 	border-color: var(--text-3);
@@ -2423,10 +2407,7 @@ onMounted(async () => {
 	background: transparent;
 	cursor: pointer;
 	opacity: 0.6;
-	transition:
-		background 0.16s ease,
-		box-shadow 0.16s ease,
-		opacity 0.16s ease;
+	transition: background 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
 }
 .jv-ob-provseg-opt:hover {
 	opacity: 0.85;
@@ -2434,9 +2415,7 @@ onMounted(async () => {
 .jv-ob-provseg-opt.sel {
 	background: #ffffff;
 	opacity: 1;
-	box-shadow:
-		0 1px 3px rgba(16, 24, 40, 0.16),
-		0 0 0 1px rgba(16, 24, 40, 0.04);
+	box-shadow: 0 1px 3px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.04);
 }
 /* Single gateway: the row states which brand takes the payment, it does not
    offer a choice. So it reads at full strength but drops every affordance that

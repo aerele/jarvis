@@ -525,14 +525,15 @@ _GUARD_SUBSTRS = (
 )
 
 # Intentionally-open endpoints (justified): boolean readiness probes, the public
-# plan/preset catalog + the onboarding sync poller (carry no secret; the SPA
-# needs them before roles settle), and the site-URL pairing QR (Guest-rejected,
-# no secret).
+# plan/preset/gateway catalog + the onboarding sync poller (carry no secret; the
+# SPA needs them before roles settle), and the site-URL pairing QR
+# (Guest-rejected, no secret).
 _OPEN_ALLOWLIST = {
 	"account.is_onboarded": "boolean readiness probe, no secret",
 	"account.is_ready_for_chat": "boolean readiness probe, no secret",
 	"onboarding.list_plans": "public plan catalog (spec: leave ungated)",
 	"onboarding.get_preset_catalog": "public preset catalog (spec: leave ungated)",
+	"onboarding.list_payment_providers": "public gateway list for the onboarding chooser; keys only, no secret",
 	"onboarding.get_llm_sync_status": "sanitized sync poller, needed pre-role-settle",
 	"mobile.auth.get_pairing_qr": "Guest-rejected; encodes only the site URL, no secret",
 }
