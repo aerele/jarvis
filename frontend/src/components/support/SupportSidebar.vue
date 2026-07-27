@@ -9,7 +9,7 @@
 			     full name + a Settings/Support/Desk/Theme/Log-out dropdown), reused
 			     verbatim so it stays identical. Chat navigation is the "Jarvis chat"
 			     nav link below. -->
-			<UserMenu :is-collapsed="collapsed" />
+			<UserMenu :is-collapsed="collapsed" variant="support" />
 
 			<div class="jv-supsb-nav">
 				<SidebarLink

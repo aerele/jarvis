@@ -10,7 +10,7 @@
 						? 'w-full px-2 bg-surface-white shadow-sm'
 						: 'w-full px-2 hover:bg-surface-gray-3'
 				"
-				:aria-label="`${agentName} menu`"
+				:aria-label="`${cardTitle} menu`"
 			>
 				<!-- the jarvis mark, 28×28 rounded — rendered from JarvisMark rather than
 				     a hand-pasted copy of its gradient + path data. That duplication is
@@ -33,7 +33,7 @@
 					:class="isCollapsed ? 'ml-0 w-0 opacity-0' : 'ml-2 w-auto opacity-100'"
 				>
 					<div class="truncate text-base font-medium leading-none text-ink-gray-9">
-						{{ agentName }}
+						{{ cardTitle }}
 					</div>
 					<div class="mt-1 truncate text-sm text-ink-gray-7">{{ fullName }}</div>
 				</div>
@@ -59,9 +59,17 @@ import { useSupportStore } from "@/stores/support";
 import { useJarvisTheme } from "@/theme";
 import { agentName } from "@/branding";
 
-defineProps({
+const props = defineProps({
 	isCollapsed: { type: Boolean, default: false },
+	// "chat" (default) = the Jarvis card + a "Support" link; "support" = a
+	// "Jarvis Support" title + a "Switch to Jarvis chat" link (we're already in support).
+	variant: { type: String, default: "chat" },
 });
+
+// Card title: agentName ("Jarvis") in chat; "<agentName> Support" on the support rail.
+const cardTitle = computed(() =>
+	props.variant === "support" ? `${agentName} Support` : agentName
+);
 
 const shellStore = useShellStore();
 const session = inject("$session");
@@ -95,23 +103,32 @@ function cookie(name) {
 }
 const fullName = cookie("full_name") || session.user || "User";
 
+// Cross-surface link: from chat -> Support (with the awaiting count); from the
+// support rail -> back to chat (we're already in support, so a "Support" link is
+// pointless). `null` = omit (chat with support switched off).
+const crossItem = computed(() => {
+	if (props.variant === "support") {
+		return {
+			label: `Switch to ${agentName} chat`,
+			icon: "message-circle",
+			onClick: () => router.push({ name: "Chat" }),
+		};
+	}
+	if (!supportOn) return null;
+	return {
+		label: store.awaitingCount ? `Support (${store.awaitingCount})` : "Support",
+		icon: "life-buoy",
+		onClick: () => router.push({ name: "Support" }),
+	};
+});
+
 const menuOptions = computed(() => [
 	{
 		group: "Menu",
 		hideLabel: true,
 		items: [
 			{ label: "Settings", icon: "settings", onClick: () => shellStore.openSettings() },
-			...(supportOn
-				? [
-						{
-							label: store.awaitingCount
-								? `Support (${store.awaitingCount})`
-								: "Support",
-							icon: "life-buoy",
-							onClick: () => router.push({ name: "Support" }),
-						},
-				  ]
-				: []),
+			...(crossItem.value ? [crossItem.value] : []),
 			{
 				label: "Switch to Desk",
 				icon: "grid",
