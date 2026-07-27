@@ -40,6 +40,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { Badge, Button, Tooltip, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import * as api from "@/api";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
@@ -50,10 +51,12 @@ const pending = ref(false);
 const applying = ref(false);
 const isSM = !!window.is_system_manager;
 
-const failed = computed(() => (status.value || "").startsWith("failed"));
-const failureReason = computed(() =>
-	failed.value ? (status.value || "").replace(/^failed:?/, "").trim() : ""
-);
+// Prefix parsing is shared (@/lib/syncStatus) so this pill, the agents list and
+// the AI models pane all read the same raw string the same way, and a reason long
+// enough to be a traceback gets flattened before it reaches a tooltip.
+const human = computed(() => humaniseSyncStatus(status.value));
+const failed = computed(() => human.value.kind === "failed");
+const failureReason = computed(() => human.value.detail);
 
 let timer = null;
 function startPoll() {

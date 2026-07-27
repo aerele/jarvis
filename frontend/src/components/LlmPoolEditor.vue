@@ -6,7 +6,19 @@
        CSS vars (--surface, --text, …); uses only tokens, no hard-coded colors.
        Consumers: AiView (manage tab) now, AccountView + onboarding later. -->
 	<div class="jv-llm-editor" style="font-family: inherit; color: var(--text)">
-		<div v-if="err" style="color: var(--red); font-size: 13px; margin-bottom: 12px">
+		<!-- Blocking progress while a Connect is in flight. The scrim stops the mouse;
+	         `inert` on each block below is what stops the KEYBOARD, so Tab cannot walk
+	         into the controls underneath. Both are needed - a scrim alone leaves the
+	         whole form reachable, and `inert` alone leaves it looking clickable. -->
+		<div v-if="busy.active" class="jv-llm-busy">
+			<JvSpinner :size="56" :label="busy.label" />
+		</div>
+
+		<div
+			v-if="err"
+			:inert="busy.active"
+			style="color: var(--red); font-size: 13px; margin-bottom: 12px"
+		>
 			{{ err }}
 			<button type="button" class="jv-mon-retry" @click="load">Retry</button>
 		</div>
@@ -16,7 +28,7 @@
          Account/Settings editor). Onboarding never reaches this branch
          (singleMode forces llmMode==='quick' below). Phase 1: read list
          only; config section arrives in phase 2. ============================================================ -->
-		<section v-if="!singleMode" style="margin-bottom: 18px">
+		<section v-if="!singleMode" :inert="busy.active" style="margin-bottom: 18px">
 			<!-- No section heading and no explainer here: the dialog already titles this
            pane ("AI models" / "The AI connection that powers Jarvis."), so an
            uppercase "AI MODELS" repeated below it was pure duplication. The failover
@@ -62,14 +74,16 @@
 				<span class="jv-pool-dot jv-pool-dot--ok" aria-hidden="true"></span>
 				<span class="jv-flist-acts">
 					<button
-						v-if="editable"
+						v-if="canEdit"
+						:disabled="!editable"
 						@click="directPanelOpen = !directPanelOpen"
 						class="jv-btn jv-btn--sm jv-btn--ghost"
 					>
 						{{ directPanelOpen ? "Close" : "Reconnect" }}
 					</button>
 					<button
-						v-if="editable"
+						v-if="canEdit"
+						:disabled="!editable"
 						@click="removeDirect"
 						class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
 					>
@@ -167,28 +181,32 @@
 						</svg>
 					</button>
 					<button
-						v-if="editable"
+						v-if="canEdit"
+						:disabled="!editable"
 						@click="openEdit(i)"
 						class="jv-btn jv-btn--sm jv-btn--ghost"
 					>
 						Edit
 					</button>
 					<button
-						v-if="editable && row.credentialType === 'subscription'"
+						v-if="canEdit && row.credentialType === 'subscription'"
+						:disabled="!editable"
 						@click="quickReconnect(i)"
 						class="jv-btn jv-btn--sm jv-btn--ghost"
 					>
 						Reconnect
 					</button>
 					<button
-						v-else-if="editable"
+						v-else-if="canEdit"
+						:disabled="!editable"
 						@click="openEdit(i)"
 						class="jv-btn jv-btn--sm jv-btn--ghost"
 					>
 						Replace key
 					</button>
 					<button
-						v-if="editable"
+						v-if="canEdit"
+						:disabled="!editable"
 						@click="remove(i)"
 						class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
 					>
@@ -204,7 +222,8 @@
            is, inside the panel, where the account itself then appears. Ghost, not
            primary: Save configuration stays the pane's single primary action. -->
 			<button
-				v-if="editable && !panel.open"
+				v-if="canEdit && !panel.open"
+				:disabled="!editable"
 				@click="openAdd"
 				class="jv-btn jv-btn--primary jv-flist-addbtn jv-flist-addbtn--end"
 			>
@@ -226,7 +245,7 @@
 			<!-- A single model has nothing to fall back to. Name the consequence instead
            of leaving the customer to infer it from "tried in order". -->
 			<div
-				v-if="editable && !panel.open && rows.length === 1 && !showDirectRow"
+				v-if="canEdit && !panel.open && rows.length === 1 && !showDirectRow"
 				class="jv-flist-hint"
 			>
 				<svg
@@ -550,11 +569,12 @@
                closed), giving a neutral re-entry point rather than auto-popping OAuth. -->
 					<button
 						v-if="
-							editable &&
+							canEdit &&
 							panel.mode !== 'add' &&
 							!(panelRow._connect && panelRow._connect.open) &&
 							!(panelRow.accounts && panelRow.accounts.length)
 						"
+						:disabled="!editable"
 						@click="openConnectPanel(panelRow)"
 						class="jv-btn jv-btn--primary jv-flist-addbtn"
 					>
@@ -608,16 +628,18 @@
 								>
 								<span class="jv-pool-acctacts">
 									<button
-										v-if="editable"
+										v-if="canEdit"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
+										:disabled="!editable"
 										@click="openConnectPanel(panelRow, ai)"
 										title="Re-authorize to mint fresh tokens"
 									>
 										Reconnect
 									</button>
 									<button
-										v-if="editable"
+										v-if="canEdit"
 										class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
+										:disabled="!editable"
 										@click="removeAccount(panelRow, ai)"
 									>
 										Disconnect
@@ -629,7 +651,8 @@
                    (Primary is reserved for the required next step -- Connect account when
                    there is none, and Save configuration.) -->
 							<button
-								v-if="editable && !(panelRow._connect && panelRow._connect.open)"
+								v-if="canEdit && !(panelRow._connect && panelRow._connect.open)"
+								:disabled="!editable"
 								@click="openConnectPanel(panelRow)"
 								class="jv-btn jv-btn--sm jv-btn--ghost"
 							>
@@ -649,16 +672,10 @@
                back to the neutral button above rather than auto-popping OAuth. Step 1's
                button starts OAuth inside its own click (preserving the user gesture /
                popup-blocker fix); step 2 stays pending until step 1 mints the authorize
-               URL, since a URL pasted before sign-in has no nonce and finishConnect no-ops. -->
-					<div
-						v-if="
-							panelRow._connect &&
-							(panelRow._connect.open ||
-								(panel.mode === 'add' &&
-									!(panelRow.accounts && panelRow.accounts.length)))
-						"
-						class="jv-csteps"
-					>
+               URL, since a URL pasted before sign-in has no nonce and finishConnect no-ops.
+               The condition lives in panelConnectOpen because the panel's own primary
+               action has to know when this spine owns the Connect button. -->
+					<div v-if="panelConnectOpen" class="jv-csteps">
 						<!-- DEVICE-CODE (Kimi): show the code + verification link, poll for approval. -->
 						<template v-if="panelRow._connect.deviceFlow">
 							<div class="jv-cstep">
@@ -710,6 +727,7 @@
 							</div>
 							<div class="jv-cn-acts">
 								<button
+									:disabled="!editable"
 									@click="closeConnect(panelRow)"
 									class="jv-btn jv-btn--ghost"
 								>
@@ -840,20 +858,26 @@
 							<div class="jv-cn-acts">
 								<button
 									v-if="panel.mode !== 'add'"
+									:disabled="!editable"
 									@click="closeConnect(panelRow)"
 									class="jv-btn jv-btn--ghost"
 								>
 									Cancel
 								</button>
+								<!-- This IS the save for a chat subscription: the grant it captures
+	                     is written to the pool in the same flow, and the button stays
+	                     on "Connecting…" until the agent has picked it up. -->
 								<button
 									@click="finishConnect(panelRow)"
 									:disabled="
+										!editable ||
 										panelRow._connect.loading ||
 										!panelRow._connect.authorizeUrl ||
 										!(panelRow._connect.pastedUrl || '').trim()
 									"
 									class="jv-btn jv-btn--primary"
 								>
+									<JvSpinner v-if="panelRow._connect.loading" />
 									{{ panelRow._connect.loading ? "Connecting…" : "Connect" }}
 								</button>
 							</div>
@@ -1022,9 +1046,17 @@
 					</div>
 				</div>
 
+				<!-- A failed apply is reported HERE, next to the row it belongs to, and the
+	               panel is deliberately left open with everything still typed into it so
+	               the customer can fix the cause without re-entering a key. -->
+				<div v-if="applyResult && applyResult.kind === 'failed'" class="jv-cn-err">
+					{{ applyMessage }}
+				</div>
+
 				<div class="jv-cfgpanel-acts">
 					<button
 						type="button"
+						:disabled="!editable"
 						class="jv-btn jv-btn--sm jv-btn--ghost"
 						@click="closePanel"
 					>
@@ -1036,12 +1068,26 @@
 								: "Close"
 						}}
 					</button>
+					<!-- The panel's ONE primary action. It connects AND applies: there is no
+		                 second "Save configuration" step behind it. Absent while the OAuth
+		                 spine above is showing, because that spine's own Connect button is
+		                 this action for a chat subscription. -->
+					<button
+						v-if="panelAction"
+						type="button"
+						:disabled="!editable"
+						class="jv-btn jv-btn--primary"
+						@click="panelAction.run()"
+					>
+						<JvSpinner v-if="busy.active" />
+						{{ busy.active ? "Connecting…" : panelAction.label }}
+					</button>
 				</div>
 			</div>
 		</section>
 
 		<!-- ================ QUICK / CUSTOM (shared rows) ================ -->
-		<section v-if="singleMode" style="margin-bottom: 18px">
+		<section v-if="singleMode" :inert="busy.active" style="margin-bottom: 18px">
 			<div
 				v-if="!editorRows.length"
 				style="font-size: 13px; color: var(--text-3); padding: 8px 0"
@@ -1253,16 +1299,18 @@
 								>
 								<span class="jv-pool-acctacts">
 									<button
-										v-if="editable && !singleMode"
+										v-if="canEdit && !singleMode"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
+										:disabled="!editable"
 										@click="startConnect(m, ai)"
 										title="Re-authorize to mint fresh tokens"
 									>
 										Reconnect
 									</button>
 									<button
-										v-if="editable"
+										v-if="canEdit"
 										class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
+										:disabled="!editable"
 										@click="removeAccount(m, ai)"
 									>
 										Disconnect
@@ -1270,7 +1318,7 @@
 								</span>
 							</div>
 							<button
-								v-if="editable && !singleMode && !(m._connect && m._connect.open)"
+								v-if="canEdit && !singleMode && !(m._connect && m._connect.open)"
 								@click="startConnect(m)"
 								:disabled="
 									m._connect && m._connect.loading && !m._connect.authorizeUrl
@@ -1344,6 +1392,7 @@
 											<button
 												type="button"
 												class="jv-cbtn jv-cbtn-ghost"
+												:disabled="!editable"
 												@click="closeConnect(m)"
 											>
 												Cancel
@@ -1481,6 +1530,7 @@
 											<button
 												type="button"
 												class="jv-cbtn jv-cbtn-ghost"
+												:disabled="!editable"
 												@click="closeConnect(m)"
 											>
 												Cancel
@@ -1508,7 +1558,8 @@
 			</div>
 
 			<button
-				v-if="isMulti && editable"
+				v-if="isMulti && canEdit"
+				:disabled="!editable"
 				@click="addModel"
 				class="jv-btn jv-btn--sm jv-btn--ghost"
 			>
@@ -1516,42 +1567,20 @@
 			</button>
 		</section>
 
-		<!-- Save bar + sync status - hidden when a host renders its own footer. -->
-		<div
-			v-if="!footerless"
-			class="jv-pool-savebar"
-			style="
-				display: flex;
-				align-items: center;
-				gap: 12px;
-				flex-wrap: wrap;
-				justify-content: flex-end;
-			"
-		>
+		<!-- Status strip. There is no Save button and no "unsaved changes" warning any
+	         more: Connect connects AND saves, and so do Remove and reordering, so the
+	         editor is never holding a change the customer still has to commit. What is
+	         left is reporting - the outcome of the apply this editor just ran, and
+	         otherwise whatever the server last recorded (which covers an apply that is
+	         still landing from a previous visit, or one started from another tab). -->
+		<div v-if="!footerless && statusLine" :inert="busy.active" class="jv-pool-savebar">
 			<span
-				v-if="saveBlocked && missingVendors.length"
-				style="font-size: 13px; color: var(--amber)"
-			>
-				Provide keys for: {{ missingVendors.map(providerLabel).join(", ") }}
-			</span>
-			<span v-else-if="dirty" style="font-size: 13px; color: var(--amber); font-weight: 600"
-				>● Unsaved changes - Save configuration to apply</span
-			>
-			<span
-				v-else-if="applyStatus.kind !== 'idle'"
 				class="jv-pool-syncpill"
-				:class="'jv-pool-syncpill--' + applyStatus.kind"
+				:class="'jv-pool-syncpill--' + statusLine.kind"
+				role="status"
 			>
-				<span class="jv-pool-syncpill-ic" aria-hidden="true"></span>{{ applyStatus.text }}
+				<span class="jv-pool-syncpill-ic" aria-hidden="true"></span>{{ statusLine.text }}
 			</span>
-			<button
-				v-if="editable"
-				@click="save"
-				:disabled="saving || saveBlocked"
-				class="jv-btn jv-btn--primary"
-			>
-				{{ saving ? "Saving…" : "Save configuration" }}
-			</button>
 		</div>
 	</div>
 </template>
@@ -1579,8 +1608,10 @@ import {
 	LOCAL_PROVIDER_IDS,
 } from "@/llm/pool";
 import { errMessage as _err } from "@/lib/errors";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { useConfirm } from "@/composables/useConfirm";
 import JvCombo from "@/components/JvCombo.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import DirectSubscriptionCard from "@/components/DirectSubscriptionCard.vue";
 import ProviderLogo from "@/components/ProviderLogo.vue";
 import { agentName } from "@/branding";
@@ -1641,8 +1672,48 @@ const sync = ref({
 	warnings: [],
 	model_statuses: [],
 });
-const savedSnapshot = ref("__init__"); // savable pool as of last load/save; drives the unsaved-changes notice
+const savedSnapshot = ref("__init__"); // savable pool as of last load/save; drives the dot's staleness
 let pollTimer = null;
+let pollSettle = null; // resolver for the promise startPolling hands back
+
+// How long a Connect blocks the editor before it hands the wait back to the
+// customer. The enqueued job is NOT cancelled at this point and a server-side
+// reconciler picks up anything it drops, so timing out here is a UI decision
+// ("you should not have to keep staring at this"), never a failure.
+const APPLY_TIMEOUT_MS = 90000;
+const POLL_MS = 3000;
+
+// The single in-flight apply. Only one can exist: while it runs the whole editor
+// is inert, so a second one cannot be started, and no edit can race the payload
+// that is already on its way to the fleet.
+const busy = ref({ active: false, label: "" });
+// Outcome of the last apply THIS editor started: {kind, text, detail}. Distinct
+// from `applyStatus` (which reflects whatever the server last recorded, including
+// applies started elsewhere) because only this one is worth interrupting for.
+const applyResult = ref(null);
+
+// Two flavours of "may the customer touch this", and the split is load-bearing.
+//
+// canEdit answers "does this customer get edit affordances at all" (props.editable)
+// and is what every v-if in the template asks. `editable` shadows the prop with the
+// narrower "is the editor accepting input RIGHT NOW", and is what every :disabled
+// asks - so one line here disables every control in a 1,500-line template for the
+// duration of an apply, including rows the customer was not working on.
+//
+// They must not be the same binding: gating the v-ifs on busy would UNMOUNT the row
+// actions mid-apply, collapsing the list under the spinner overlay that is sitting
+// on top of it.
+const canEdit = computed(() => props.editable);
+const editable = computed(() => props.editable && !busy.value.active);
+
+// The blocking overlay belongs to whichever surface owns the persistence. Onboarding
+// (footerless) drives save from its own wizard footer and already covers the same
+// wait with its full-screen "Setting up" animation, so a second scrim there would
+// only fight it. Pass "" to release.
+function setBusy(label) {
+	if (props.footerless) return;
+	busy.value = label ? { active: true, label } : { active: false, label: "" };
+}
 
 const ALL_MODE_TABS = [
 	{ value: "quick", label: "Quick" },
@@ -1866,11 +1937,18 @@ const badgeLabel = computed(() => {
 // Save-bar status pill (Option A - "honest model health"). Reflects the outcome
 // of the most recent apply, including any per-account subscription warnings the
 // backend surfaced (e.g. a chat subscription that rejected a test request).
+// The wording comes from @/lib/syncStatus so this pill, the billing pane's Sync
+// row and the skills/agents pills all say the same thing about the same raw value.
+// Two kinds are added on top of it and stay local to this editor: "warn" (applied,
+// but the fleet flagged individual models) and "idle" (nothing recorded yet, so the
+// pill is hidden rather than captioned).
 const applyStatus = computed(() => {
 	if (sync.value.pending) return { kind: "pending", text: "Applying to your agent…" };
-	const s = sync.value.last_sync_status || "";
-	if (s.startsWith("failed")) return { kind: "failed", text: "Sync failed — try again" };
-	if (s.startsWith("ok")) {
+	const st = humaniseSyncStatus(sync.value.last_sync_status);
+	if (st.kind === "failed") {
+		return { kind: "failed", text: st.detail ? `${st.text}. ${st.detail}` : st.text };
+	}
+	if (st.kind === "ok") {
 		let n = Array.isArray(sync.value.warnings) ? sync.value.warnings.length : 0;
 		if (n === 0 && sync.value.subscription_status === "unverified") n = 1;
 		if (n > 0)
@@ -1880,6 +1958,7 @@ const applyStatus = computed(() => {
 			};
 		return { kind: "ok", text: "Applied" };
 	}
+	if (st.kind === "pending") return { kind: "pending", text: "Applying to your agent…" };
 	return { kind: "idle", text: "" };
 });
 // Unsaved-changes detector: current savable pool vs the last saved snapshot.
@@ -2250,6 +2329,93 @@ function closePanel() {
 	panel.value = closedPanel();
 }
 
+// ---- the panel's ONE primary action --------------------------------------
+// Connect is the save. Whatever the credential type, the customer presses one
+// button and the model is live on their agent when it releases; there is no second
+// step to go and find.
+
+// True while the OAuth sign-in spine is on screen. That spine ends in its own
+// Connect button (finishConnect), so the panel must not offer a competing one.
+const panelConnectOpen = computed(() => {
+	const r = panelRow.value;
+	if (!r || r.credentialType !== "subscription") return false;
+	const c = r._connect;
+	if (!c) return false;
+	return !!c.open || (panel.value.mode === "add" && !(r.accounts || []).length);
+});
+
+const panelAction = computed(() => {
+	const r = panelRow.value;
+	if (!panel.value.open || !r || !canEdit.value) return null;
+	// On the preset tab, picking a card IS the action - there is no single row to
+	// connect. (The tab ships disabled/"Soon"; this keeps the branch honest.)
+	if (panel.value.source === "preset") return null;
+	if (panel.value.source === "api_key") {
+		// "Connect" while the model is not live yet. Once it is, the same button
+		// says "Save and apply": calling it Connect there would imply the model is
+		// currently disconnected when the customer is only rotating a key or
+		// changing the model id.
+		const connected = r.hasKey && panel.value.mode !== "add";
+		return {
+			label: connected ? "Save and apply" : "Connect",
+			run: () => connectApiKeyRow(r),
+		};
+	}
+	if (panelConnectOpen.value) return null;
+	// A subscription row with a live account: the only thing left to persist is an
+	// edit made inside this panel, e.g. a second account disconnected.
+	if (!(r.accounts || []).length) return null;
+	return { label: "Save and apply", run: () => runApply() };
+});
+
+// API-key Connect: probe the key live BEFORE anything is written, then persist.
+// A key the provider rejects must never reach the tenant's container - it would put
+// the whole pool through a restart just to arrive broken, and the customer would
+// learn about it from a failed chat turn rather than from the button they pressed.
+async function connectApiKeyRow(row) {
+	if (!row || busy.value.active) return;
+	err.value = "";
+	setApplyResult(null);
+	const blocked = missingApiKeyField(row);
+	if (blocked) {
+		setApplyResult({ kind: "failed", text: blocked, detail: "" });
+		return;
+	}
+	// Probe only what can actually be sent. A stored key is encrypted server-side and
+	// never comes back to the browser, so an untouched row has nothing to probe; and a
+	// local endpoint (ollama, vllm) is reachable from the CONTAINER rather than from
+	// this bench, so a failure here would say nothing about the key while blocking a
+	// perfectly good save.
+	if ((row.apiKey || "").trim() && !isLocalProviderRow(row)) {
+		// The probe is part of the Connect, so the editor is inert for it too. Released
+		// before runApply, which puts the overlay straight back up with its own label -
+		// and because nothing awaits in between, the swap costs no repaint.
+		setBusy("Checking your key…");
+		try {
+			await testApiKeyRow(row);
+		} finally {
+			setBusy("");
+		}
+		const probe = panel.value.testResult;
+		// Nothing else to say: the red Test result block above the button is already
+		// showing the provider's own words for why it refused.
+		if (!probe || !probe.ok) return;
+	}
+	// The "add backup models automatically" switch used to be honoured on Close,
+	// which only worked because a Save came afterwards. Expand before the payload is
+	// built or the switch would silently do nothing.
+	if (panel.value.mode === "add" && panel.value.addBackups) expandApiKeyBackups(row);
+	await runApply();
+}
+// The one field standing between this row and a save, or "" when it is ready.
+function missingApiKeyField(row) {
+	if (!(row.provider || "").trim()) return "Choose a provider first.";
+	if (!(row.model || "").trim()) return "Enter a model id first.";
+	if (!(row.apiKey || "").trim() && !row.hasKey && !isLocalProviderRow(row))
+		return "Enter an API key first.";
+	return "";
+}
+
 // ---- direct subscription (legacy flat-field path) as a list row ---------
 // !singleMode only - onboarding never passes directStatus. Rendered OUTSIDE
 // rows.value/save() entirely (verdict §3: never round-trip a direct row
@@ -2390,19 +2556,52 @@ function onUpstreamChange(m) {
 	m.accounts = [];
 	m._connect = blankConnect();
 }
+// Reordering the failover list is a persisted change like any other now that there
+// is no Save button to follow it with. It is debounced because each apply re-renders
+// and RESTARTS the tenant's container: moving a model from fourth to first is three
+// clicks, and three restarts for one intent would be indefensible. The burst
+// coalesces into a single apply, and `reorderBaseline` holds the order from before
+// the burst so a failed write can be put back.
+let reorderTimer = null;
+let reorderBaseline = null;
+const REORDER_DEBOUNCE_MS = 900;
 function move(i, d) {
+	if (busy.value.active) return;
+	if (!reorderTimer) reorderBaseline = rows.value;
 	rows.value = reorder(rows.value, i, i + d);
+	if (props.footerless) return; // host owns persistence
+	clearTimeout(reorderTimer);
+	reorderTimer = setTimeout(() => {
+		const revertRows = reorderBaseline;
+		reorderTimer = null;
+		reorderBaseline = null;
+		runApply({ revertRows });
+	}, REORDER_DEBOUNCE_MS);
 }
 async function remove(i) {
 	const r = rows.value[i];
-	if (!r) return;
+	if (!r || busy.value.active) return;
+	// save_llm_pool rejects an empty pool server-side, and taking the agent's last
+	// model away is a disconnect, not an edit (a separate flow, not this one). Say so
+	// instead of letting the customer walk into a validation error they cannot clear.
+	// Counted over FILLED rows, because an open "+ Add a model" panel has already put
+	// an empty placeholder in the list and it must not read as a second model.
+	const filled = rows.value.filter((x) => !isRowEmpty(x));
+	if (!props.footerless && !isRowEmpty(r) && filled.length <= 1) {
+		setApplyResult({
+			kind: "failed",
+			text: "This is your only model, so removing it would leave nothing to answer with. Add another model first.",
+			detail: "",
+		});
+		return;
+	}
 	const label = rowModelLabel(r);
 	if (
 		!(await confirm({
 			title: "Remove this model?",
 			message: label
-				? `"${label}" will be removed from the failover list. Save configuration to apply.`
-				: "This model will be removed from the failover list. Save configuration to apply.",
+				? `"${label}" will be removed from the failover list and your agent updated right away.`
+				: "This model will be removed from the failover list and your agent updated right away.",
 			confirmLabel: "Remove",
 			danger: true,
 		}))
@@ -2410,7 +2609,10 @@ async function remove(i) {
 		return;
 	// Filter by the row's stable handle, not the captured index: confirm() awaits, so
 	// an index could go stale if rows.value is re-seeded meanwhile.
+	const before = rows.value;
 	rows.value = rows.value.filter((x) => x._uid !== r._uid);
+	if (props.footerless) return;
+	await runApply({ revertRows: before });
 }
 function removeAccount(m, idx) {
 	m.accounts = (m.accounts || []).filter((_, j) => j !== idx);
@@ -2677,8 +2879,22 @@ async function _placeConnectedAccount(m, d) {
 		if (byEmail >= 0 && byEmail !== ri) m.accounts.splice(byEmail, 1);
 	} else if (byEmail >= 0) m.accounts.splice(byEmail, 1, acct);
 	else m.accounts.push(acct);
+	// Connect IS the save. The grant only lives in this component until the pool is
+	// written, so there is no honest state in which the customer has "connected" but
+	// not saved - which is why the pane-level Save button is gone. Onboarding
+	// (footerless) is the exception: its wizard footer owns the save, and its own
+	// completion screen owns the wait.
+	if (props.footerless) {
+		m._connect = blankConnect();
+		return;
+	}
+	// Leave the sign-in spine standing, with its Connect button still spinning, until
+	// the apply resolves. Blanking _connect here would tear the spine down the instant
+	// the grant landed, so the button the customer pressed would vanish mid-wait and
+	// the panel would reflow underneath the overlay.
+	m._connect.loading = true;
+	await runApply();
 	m._connect = blankConnect();
-	if (!props.footerless) await save();
 }
 async function finishConnect(m) {
 	if (!m._connect || !m._connect.nonce) return;
@@ -2690,32 +2906,37 @@ async function finishConnect(m) {
 	}
 	m._connect.loading = true;
 	m._connect.error = "";
+	// The token exchange is part of the Connect, so the editor is inert for it. It is
+	// released before _placeConnectedAccount, which owns the apply and raises the
+	// overlay again with its own label.
+	setBusy("Connecting your account…");
+	let res = null;
 	try {
-		const res = await api.completePoolAccountSignin(
-			m._connect.nonce,
-			m._connect.pastedUrl.trim()
-		);
-		// Same {ok, data} envelope as begin - unwrap + surface errors.
-		if (!res || res.ok === false) {
-			m._connect.loading = false;
-			m._connect.error =
-				(res && res.error && res.error.message) ||
-				(isCodeOnlyPaste(m.upstream)
-					? "Couldn't connect the account. Check the pasted code and try again."
-					: "Couldn't connect the account. Check the pasted URL and try again.");
-			return;
-		}
-		// Place the (re)connected account. The backend mints a fresh account_ref on
-		// every sign-in, so it can't be a dedupe key: a per-account Reconnect refreshes
-		// that exact slot (reconnectIdx); otherwise fold onto an existing account with
-		// the same email; otherwise append a new one. The just-minted OAuth blob lives
-		// only in memory until the pool is saved, so _placeConnectedAccount persists
-		// immediately (unless footerless onboarding, where the host CTA drives save).
-		await _placeConnectedAccount(m, res.data || {});
+		res = await api.completePoolAccountSignin(m._connect.nonce, m._connect.pastedUrl.trim());
 	} catch (e) {
 		m._connect.loading = false;
 		m._connect.error = _err(e);
+		return;
+	} finally {
+		setBusy("");
 	}
+	// Same {ok, data} envelope as begin - unwrap + surface errors.
+	if (!res || res.ok === false) {
+		m._connect.loading = false;
+		m._connect.error =
+			(res && res.error && res.error.message) ||
+			(isCodeOnlyPaste(m.upstream)
+				? "Couldn't connect the account. Check the pasted code and try again."
+				: "Couldn't connect the account. Check the pasted URL and try again.");
+		return;
+	}
+	// Place the (re)connected account. The backend mints a fresh account_ref on
+	// every sign-in, so it can't be a dedupe key: a per-account Reconnect refreshes
+	// that exact slot (reconnectIdx); otherwise fold onto an existing account with
+	// the same email; otherwise append a new one. The just-minted OAuth blob lives
+	// only in memory until the pool is saved, so _placeConnectedAccount persists
+	// immediately (unless footerless onboarding, where the host CTA drives save).
+	await _placeConnectedAccount(m, res.data || {});
 }
 function closeConnect(m) {
 	m._connect = blankConnect();
@@ -2935,25 +3156,39 @@ function buildSaveModels(sourceRows) {
 // names nothing the customer recognises and points at no row. Dropping it loses
 // nothing the customer chose.
 //
-// Deliberately narrow: an in-progress SUBSCRIPTION row (connect started, no account
-// yet) is NOT pruned. That row represents intent, so validation should say "connect
-// your account" rather than let it silently vanish. And if pruning would empty the
-// pool we keep every row, so validation still speaks up instead of saving nothing.
+// An accountless SUBSCRIPTION row used to be exempt from this, deliberately, so that
+// validation would say "connect your account" rather than let an in-progress row
+// silently vanish. That guard belonged to the pane-level Save button, which could be
+// pressed at any moment with a half-filled row on screen. A save can now only start
+// FROM a row (Connect) or from an unrelated one (Remove, reorder) - and "+ Add a
+// model" seeds an empty subscription row the moment the panel opens, so the exemption
+// meant that opening the panel and then removing some OTHER model failed validation
+// on a row the customer had not finished starting. Onboarding keeps its own, clearer
+// "Connect your account to continue." pre-check in buildSavePayload, so nothing is
+// lost by pruning here.
+//
+// If pruning would empty the pool we keep every row, so validation still speaks up
+// instead of quietly saving nothing.
 function prunedForSave(src) {
 	const all = src || [];
-	const kept = all.filter((r) => !(r.credentialType !== "subscription" && isRowEmpty(r)));
+	const kept = all.filter((r) => !isRowEmpty(r));
 	return kept.length ? kept : all;
 }
 
-async function save() {
-	err.value = "";
+// Everything save_llm_pool needs, or {error} with the one sentence to show. Split
+// out of save() so the settings editor's Connect can validate + build the SAME
+// payload without inheriting save()'s "return the moment the row is written".
+function buildSavePayload() {
 	let saveModels, savePreset;
 	if (llmMode.value === "preset") {
 		const e = selectedEntry.value;
-		if (!e) {
-			err.value = "Pick a preset.";
-			return;
-		}
+		if (!e) return { error: "Pick a preset." };
+		// This used to be enforced by disabling the Save button. With no Save button
+		// it has to be a real check, or a preset would apply with blank keys.
+		if (saveBlocked.value)
+			return {
+				error: `Provide keys for: ${missingVendors.value.map(providerLabel).join(", ")}`,
+			};
 		saveModels = presetToModels(e, keysByVendor.value);
 		savePreset = selectedPreset.value || null;
 	} else {
@@ -2976,18 +3211,31 @@ async function save() {
 			r0.credentialType === "subscription" &&
 			!(r0.accounts || []).some((a) => a && (a.oauth_blob || a.account_ref))
 		) {
-			err.value = "Connect your account to continue.";
-			return;
+			return { error: "Connect your account to continue." };
 		}
 	}
 	const v = validatePool(saveModels, savePreset);
-	if (!v.ok) {
-		err.value = v.error;
-		return;
+	if (!v.ok) return { error: v.error };
+	return { models: saveModels, preset: savePreset };
+}
+
+// Persist and return. The apply itself finishes in a background job, so this says
+// nothing about whether the agent picked the config up.
+//
+// This is the ONBOARDING entry point (footerless: the wizard's own footer button
+// calls it through defineExpose, then runs its own readiness handoff). The settings
+// editor uses runApply below instead, because there a button that says "Connect"
+// must not go quiet while the container is still being rebuilt.
+async function save() {
+	err.value = "";
+	const payload = buildSavePayload();
+	if (payload.error) {
+		err.value = payload.error;
+		return false;
 	}
 	saving.value = true;
 	try {
-		await api.saveLlmPool(saveModels, savePreset, "failover");
+		await api.saveLlmPool(payload.models, payload.preset, "failover");
 		try {
 			sync.value = await api.getLlmSyncStatus();
 		} catch (e) {
@@ -2996,29 +3244,168 @@ async function save() {
 		startPolling();
 		emit("saved", sync.value);
 		await load();
+		return true;
 	} catch (e) {
 		err.value = _err(e);
+		return false;
 	} finally {
 		saving.value = false;
 	}
 }
 
-function startPolling() {
+// Persist AND stay on it until the tenant has actually picked the config up.
+//
+// The customer just pressed a button that claims a model is connected, so
+// returning at save_llm_pool - which only writes the child table and enqueues the
+// push to the fleet - would be claiming an outcome we have not seen. The editor
+// goes inert for the duration (see `busy`), then reports what really happened.
+//
+// Returns {persisted, outcome}. persisted:false means NOTHING was written, so an
+// optimistic list mutation (reorder, remove) can be put back.
+async function runApply({ revertRows = null } = {}) {
+	if (busy.value.active) return { persisted: false, outcome: null };
+	err.value = "";
+	setApplyResult(null);
+	const payload = buildSavePayload();
+	if (payload.error) {
+		if (revertRows) rows.value = revertRows;
+		setApplyResult({ kind: "failed", text: payload.error, detail: "" });
+		return { persisted: false, outcome: null };
+	}
+	setBusy("Applying to your agent…");
+	try {
+		await api.saveLlmPool(payload.models, payload.preset, "failover");
+	} catch (e) {
+		if (revertRows) rows.value = revertRows;
+		setApplyResult({ kind: "failed", text: "Could not save your models.", detail: _err(e) });
+		setBusy("");
+		return { persisted: false, outcome: null };
+	}
+	let outcome;
+	try {
+		outcome = await startPolling({ timeoutMs: APPLY_TIMEOUT_MS });
+	} finally {
+		setBusy("");
+	}
+	emit("saved", sync.value);
+	setApplyResult(describeOutcome(outcome));
+	// A failed apply keeps the panel and everything typed into it exactly where it
+	// was, so the customer can fix the cause without re-entering a key. Success (and
+	// a timeout, where the config IS saved and still landing) re-seeds from the
+	// server, which also closes the panel - the row is done.
+	if (outcome.kind !== "failed") await load();
+	return { persisted: true, outcome };
+}
+
+// What an apply outcome says to the customer.
+function describeOutcome(outcome) {
+	if (outcome.kind === "failed") {
+		return {
+			kind: "failed",
+			text: "Could not apply this to your agent.",
+			detail: outcome.detail,
+		};
+	}
+	if (outcome.kind === "ok") {
+		return { kind: "ok", text: "Applied. Your agent is using it now.", detail: "" };
+	}
+	// Timed out, or the status endpoint stopped answering. Not an error: the job is
+	// still running and a server-side reconciler catches anything it drops, so say
+	// so plainly instead of showing a red state for something that is going fine.
+	return {
+		kind: "pending",
+		text: "Still applying. This can take a minute, and it will finish on its own.",
+		detail: "",
+	};
+}
+// A success message is worth a glance, not a permanent fixture, so it retires
+// itself. Anything the customer may still need to act on stays until the next
+// apply replaces it.
+let applyResultTimer = null;
+function setApplyResult(result) {
+	clearTimeout(applyResultTimer);
+	applyResult.value = result;
+	if (result && result.kind === "ok") {
+		applyResultTimer = setTimeout(() => {
+			if (applyResult.value === result) applyResult.value = null;
+		}, 6000);
+	}
+}
+const applyMessage = computed(() => {
+	const r = applyResult.value;
+	if (!r) return "";
+	return r.detail ? `${r.text} ${r.detail}` : r.text;
+});
+// The one line at the foot of the editor. Prefers the outcome of the apply THIS
+// editor just ran; falls back to whatever the server last recorded, which is what
+// covers an apply still landing from a previous visit or started in another tab.
+// Null hides the strip rather than leaving a bordered, empty band.
+const statusLine = computed(() => {
+	const r = applyResult.value;
+	// A failure is already reported inside the open panel, right next to the row it
+	// belongs to. Do not say it twice.
+	if (r && !(r.kind === "failed" && panel.value.open)) {
+		return { kind: r.kind, text: applyMessage.value };
+	}
+	if (applyStatus.value.kind !== "idle") return applyStatus.value;
+	return null;
+});
+
+// The ONE sync poller. Fire-and-forget callers (load, save) ignore the return
+// value and get the old behaviour: refresh sync.value every few seconds until the
+// apply settles. A caller that is BLOCKING on the apply awaits the promise, which
+// resolves with the humanised outcome, and passes a deadline so it can hand the
+// wait back instead of holding the customer hostage to a slow fleet.
+//
+// setTimeout, not setInterval: getLlmSyncStatus takes real time, and an interval
+// would stack overlapping requests on a slow connection.
+function startPolling(opts = {}) {
 	stopPolling();
-	pollTimer = setInterval(async () => {
-		try {
-			sync.value = await api.getLlmSyncStatus();
-			if (!sync.value.pending) stopPolling();
-		} catch (e) {
-			stopPolling();
-		}
-	}, 3000);
+	const deadline = opts.timeoutMs ? Date.now() + opts.timeoutMs : 0;
+	return new Promise((resolve) => {
+		pollSettle = resolve;
+		const tick = async () => {
+			pollTimer = null;
+			try {
+				sync.value = (await api.getLlmSyncStatus()) || sync.value;
+			} catch (e) {
+				// A status call that fails says nothing about the apply itself, so
+				// report "still going" rather than inventing a failure.
+				settlePolling({ kind: "pending", text: "", detail: "" });
+				return;
+			}
+			const st = humaniseSyncStatus(sync.value.last_sync_status);
+			if (!sync.value.pending && st.kind !== "pending") {
+				settlePolling(st);
+				return;
+			}
+			if (deadline && Date.now() >= deadline) {
+				settlePolling({ kind: "pending", text: "", detail: "" });
+				return;
+			}
+			pollTimer = setTimeout(tick, POLL_MS);
+		};
+		// First read immediately: on_update writes "pending: …" inside the save
+		// request, so the status is already meaningful the moment save returns.
+		pollTimer = setTimeout(tick, 0);
+	});
 }
 function stopPolling() {
 	if (pollTimer) {
-		clearInterval(pollTimer);
+		clearTimeout(pollTimer);
 		pollTimer = null;
 	}
+	// Anyone awaiting an abandoned poll is told the apply is still running, which is
+	// true: stopping the poller does not stop the background job. Without this an
+	// unmount (or a second startPolling) would strand the awaiting Connect forever
+	// with the overlay up.
+	settlePolling(null);
+}
+function settlePolling(outcome) {
+	const resolve = pollSettle;
+	if (!resolve) return;
+	pollSettle = null;
+	resolve(outcome || { kind: "pending", text: "", detail: "" });
 }
 
 // Refresh the preset preview whenever vendor keys change while a preset is active.
@@ -3038,13 +3425,76 @@ watch(
 watch(ready, (v) => emit("ready", v), { immediate: true });
 
 onMounted(load);
-onBeforeUnmount(stopPolling);
+onBeforeUnmount(() => {
+	stopPolling();
+	clearTimeout(reorderTimer);
+	clearTimeout(applyResultTimer);
+});
 
 // Let a host (onboarding, footerless) drive Save from its own footer.
 defineExpose({ save });
 </script>
 
 <style scoped>
+/* ===== Blocking apply overlay =============================================
+   The editor is the positioning context so the scrim covers exactly it, not the
+   whole settings dialog: the customer should still be able to close the dialog
+   or move to another pane while their agent restarts in the background. Inside
+   the editor, though, nothing is clickable and (thanks to `inert` on the blocks
+   underneath) nothing is tabbable either. ========================================= */
+.jv-llm-editor {
+	position: relative;
+}
+.jv-llm-busy {
+	position: absolute;
+	inset: 0;
+	z-index: 5;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	border-radius: 10px;
+	/* Translucent, not opaque: the row being connected and its own spinning
+	   button stay legible through it, so the wait is attached to the thing the
+	   customer pressed rather than floating over a blanked-out panel. */
+	background: color-mix(in srgb, var(--surface) 78%, transparent);
+	backdrop-filter: blur(1.5px);
+}
+/* color-mix is recent enough that a fallback is worth the two lines: without an
+   opaque-ish backdrop the scrim would read as "nothing is happening". */
+@supports not (background: color-mix(in srgb, red 50%, transparent)) {
+	.jv-llm-busy {
+		background: var(--surface);
+		opacity: 0.88;
+	}
+}
+
+/* Status strip (formerly the save bar). settings.css supplies the sink-to-bottom
+   margin, the top border and the padding via .jv-pane-fill; this is only the
+   internal layout the inline styles used to carry. */
+.jv-pool-savebar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+/* "Applied" is a word and belongs in a lozenge. A failure reason and the
+   still-applying note are SENTENCES, so those two relax into a rounded rectangle
+   that wraps, rather than stretching a pill the width of the pane. */
+.jv-pool-savebar .jv-pool-syncpill--failed,
+.jv-pool-savebar .jv-pool-syncpill--pending {
+	align-items: flex-start;
+	max-width: 100%;
+	padding: 7px 11px;
+	border-radius: 10px;
+	line-height: 1.5;
+	text-align: left;
+}
+.jv-pool-savebar .jv-pool-syncpill--failed .jv-pool-syncpill-ic,
+.jv-pool-savebar .jv-pool-syncpill--pending .jv-pool-syncpill-ic {
+	margin-top: 3px;
+}
+
 /* ===== Account editor (!singleMode) row redesign - "Option A: refine in
    place". Onboarding's singleMode cards below are untouched; these jv-pool-*
    classes are new and only ever rendered from the !singleMode branches. ===== */

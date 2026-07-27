@@ -9,7 +9,11 @@
 				<h3 class="text-base font-semibold text-ink-gray-9">Status</h3>
 				<div class="mt-2">
 					<KvRow label="Mode" :value="config.proxy_active ? 'Proxy' : 'Direct'" />
-					<KvRow label="Sync" :value="sync.last_sync_status || '—'" />
+					<!-- last_sync_status is an internal audit string ("ok (restart via
+					     admin)") and this row used to print it verbatim, so a customer read
+					     an already-completed restart as a chore waiting for them in Desk.
+					     @/lib/syncStatus is the one place that translates it. -->
+					<KvRow label="Sync" :value="syncLabel" />
 					<KvRow v-if="sync.last_sync_at" label="Last sync" :value="sync.last_sync_at" />
 				</div>
 			</div>
@@ -98,6 +102,7 @@ import JvChart from "@/charts/JvChart.vue";
 import EChart from "@/charts/EChart.vue";
 import { budgetGaugeOption, perModelBarSpec } from "@/charts/usageCharts.js";
 import { getLlmConfig, getLlmUsage, getLlmSyncStatus } from "@/api";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { useJarvisTheme } from "@/theme";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
@@ -113,6 +118,10 @@ const loading = ref(false);
 // SettingsPane renders the one error surface for the pane (design.md §4.1); the
 // usage card keeps only the Retry button, this supplies the message it retries.
 const errorMessage = computed(() => (usageError.value ? "Usage is unavailable right now." : ""));
+
+// A failure reason belongs on a surface that can act on it (the AI models pane);
+// here the row only needs to say which of the three states the pool is in.
+const syncLabel = computed(() => humaniseSyncStatus(sync.value.last_sync_status).text);
 
 const perModelSpec = computed(() =>
 	(usage.value.per_model || []).length ? perModelBarSpec(usage.value.per_model, "tokens") : null
