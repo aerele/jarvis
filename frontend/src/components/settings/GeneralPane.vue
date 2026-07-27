@@ -8,6 +8,11 @@
 			<KvRow label="Status">
 				<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
 			</KvRow>
+			<KvRow
+				v-if="isProxy && connStatus && connStatus.oauth_expires_at"
+				label="Expires"
+				:value="expiresLabel"
+			/>
 		</div>
 
 		<hr class="my-8" />
@@ -144,9 +149,16 @@ const isSM = !!(window.is_system_manager || window.is_jarvis_admin);
 const connStatus = ref(null);
 // get_llm_connection_status short-circuits server-side for a DIRECT (single-
 // model) tenant and reports that via proxy_active rather than the raw proxy-auth
-// payload — the same fix as ConnectionPane.vue. Without this, a direct tenant's
-// own auth_present:false read as "Not connected" here too.
+// payload, so proxy_active tells the two states apart explicitly instead of
+// guessing from which fields happen to be populated. Without this, a direct
+// tenant's own auth_present:false read as "Not connected" here too.
 const isProxy = computed(() => !!(connStatus.value && connStatus.value.proxy_active));
+// Ported from the removed ConnectionPane.vue, the one row this pane lacked:
+// oauth_expires_at is an epoch-ms value, rendered in the viewer's locale.
+const expiresLabel = computed(() => {
+	const ms = connStatus.value && connStatus.value.oauth_expires_at;
+	return ms ? new Date(Number(ms)).toLocaleString() : "—";
+});
 const connected = computed(() =>
 	isSM ? !!(connStatus.value && isProxy.value && connStatus.value.auth_present) : true
 );
