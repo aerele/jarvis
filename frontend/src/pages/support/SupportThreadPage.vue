@@ -110,6 +110,7 @@
 					v-model="draft"
 					:pending="pending"
 					:can-submit="canSend"
+					:loading="sending"
 					submit-label="Send"
 					placeholder="Reply to Aerele Support…"
 					:disclaimer="disclaimer"

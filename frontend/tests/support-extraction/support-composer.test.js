@@ -106,6 +106,28 @@ describe("SupportComposer — submit gesture", () => {
 		expect(w.emitted("submit")).toBeUndefined();
 	});
 
+	it("catches Ctrl+Enter at capture so it never reaches the editor keymap (no stray <br>)", () => {
+		// TipTap's HardBreak binds Mod-Enter -> insert <br>. The card must catch the
+		// chord at CAPTURE and stopPropagation so ProseMirror never sees it — otherwise
+		// every keyboard send posts a trailing <br>. A listener on the editor element
+		// stands in for PM's keymap: it must NOT fire, yet submit must still emit.
+		// (Reverting to bubble phase, OR dropping stopPropagation, lets the stand-in fire.)
+		const w = mountComposer({ canSubmit: true });
+		const editorEl = w.find(".editor").element;
+		const pmSpy = vi.fn();
+		editorEl.addEventListener("keydown", pmSpy);
+		editorEl.dispatchEvent(
+			new KeyboardEvent("keydown", {
+				key: "Enter",
+				ctrlKey: true,
+				bubbles: true,
+				cancelable: true,
+			})
+		);
+		expect(pmSpy).not.toHaveBeenCalled();
+		expect(w.emitted("submit")).toHaveLength(1);
+	});
+
 	it("submits when the (armed) Submit button is clicked, and disables it when disarmed", async () => {
 		const armed = mountComposer({ canSubmit: true, submitLabel: "Send" });
 		expect(submitBtn(armed).props("disabled")).toBe(false);

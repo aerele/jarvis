@@ -65,6 +65,14 @@ describe("cleanSupportBody", () => {
 		expect(html).not.toContain("data:");
 	});
 
+	it("strips a data: image whose src has an INTERNAL newline/tab (browsers ignore it)", () => {
+		// Whitespace ANYWHERE in a URL is ignored by browsers + DOMPurify's
+		// ATTR_WHITESPACE, so a crafted `src="da\nta:…"` renders as data: yet a plain
+		// trim+prefix (ends only) would miss it. Stripping all \t\r\n closes that.
+		const { stripped } = cleanSupportBody('<img src="da\nta:image/png;base64,AAAA">');
+		expect(stripped).toBe(1);
+	});
+
 	it("keeps a normal (non-inline) image untouched", () => {
 		const { html, stripped } = cleanSupportBody('<p><img src="/files/a.png"></p>');
 		expect(stripped).toBe(0);

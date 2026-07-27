@@ -36,7 +36,14 @@ export function cleanSupportBody(html) {
 	// yet an `[src^="data:"]` selector would miss it — leaking megabytes of base64
 	// downstream with no "removed" toast. Trim + lowercase + startsWith closes that.
 	for (const img of doc.querySelectorAll("img")) {
-		const src = (img.getAttribute("src") || "").trim().toLowerCase();
+		// Strip ALL tab/CR/LF (not just the ends) before testing the scheme: browsers
+		// and DOMPurify's ATTR_WHITESPACE ignore whitespace ANYWHERE in a URL, so a
+		// crafted `src="da&#10;ta:…"` renders as a data: image yet a plain trim+prefix
+		// would miss it. Then trim + lowercase for the leading/trailing + case cases.
+		const src = (img.getAttribute("src") || "")
+			.replace(/[\t\r\n]/g, "")
+			.trim()
+			.toLowerCase();
 		if (src.startsWith("data:") || src.startsWith("blob:")) {
 			img.remove();
 			stripped += 1;

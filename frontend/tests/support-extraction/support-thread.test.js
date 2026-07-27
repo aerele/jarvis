@@ -389,13 +389,13 @@ describe("SupportThreadPage", () => {
 		expect(storeDouble.uploadTo).not.toHaveBeenCalled();
 	});
 
-	it("drops canSend while a reply is in flight and restores it once settled", async () => {
-		// This is the double-submit guard: Composer's `busy` prop is deliberately
-		// unused (see the template comment), so `canSend` going false while
-		// `sending` is true is the ONLY thing standing between the user and a
-		// second concurrent submit. Resolving to `false` here (reply failed, so
-		// the draft is kept per the fix above) gives an unambiguous "back to true"
-		// afterward without needing to re-type anything.
+	it("drops canSend and shows the Send spinner while a reply is in flight, restoring both once settled", async () => {
+		// Double-submit guard: `canSend` going false while `sending` is true is what
+		// stands between the user and a second concurrent submit (the composer has no
+		// Stop control). `loading` (F5) also tracks `sending`, so the Send button
+		// spins during the reply — matching the new-ticket Submit for a unanimous feel.
+		// Resolving to `false` (reply failed, draft kept) gives an unambiguous
+		// "back to true / spinner off" afterward without re-typing.
 		let resolveReply;
 		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
 		const w = mountWith([]);
@@ -406,11 +406,13 @@ describe("SupportThreadPage", () => {
 		await w.vm.$nextTick();
 
 		expect(c.props("canSubmit")).toBe(false);
+		expect(c.props("loading")).toBe(true);
 
 		resolveReply(false);
 		await flushPromises();
 
 		expect(c.props("canSubmit")).toBe(true);
+		expect(c.props("loading")).toBe(false);
 	});
 
 	it("hides the status badge and shows no reopen disclaimer for an out-of-list ticket (fix 3, row=null)", () => {

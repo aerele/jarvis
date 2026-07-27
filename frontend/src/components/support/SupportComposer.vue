@@ -22,7 +22,7 @@
 	<div class="jv-supc">
 		<div
 			class="rounded-lg border border-outline-gray-2"
-			@keydown="onEditorKeydown"
+			@keydown.capture="onEditorKeydown"
 			@paste.capture="onEditorPaste"
 			@drop.capture="onEditorDrop"
 			@dragover.capture.prevent
@@ -174,15 +174,20 @@ function onSubmit() {
 	if (props.canSubmit) emit("submit");
 }
 
+// Registered in the CAPTURE phase (see the template) so the card sees Ctrl/Cmd+Enter
+// BEFORE the ProseMirror editable does: TipTap's HardBreak binds Mod-Enter to insert
+// a <br>, so a bubble-phase handler would submit AFTER the editor had already added a
+// stray trailing break to every keyboard-sent reply. stopPropagation keeps the chord
+// from ever reaching that keymap.
 function onEditorKeydown(e) {
-	// Ignore Ctrl/Cmd+Enter raised from a real <input> inside the editor — the
-	// Link-URL popover's own field applies the link on Enter (Vue's .enter fires
-	// on Ctrl+Enter too), and without this guard the same chord would ALSO bubble
-	// here and send the reply / create the ticket mid-link-edit. The ProseMirror
-	// editable is a contenteditable <div>, not an <input>, so real typing is unaffected.
+	// Ignore a chord raised from a real <input> inside the editor's own subtree (e.g.
+	// a task-list checkbox) — real typing is in a contenteditable <div>, not an
+	// <input>, so it is unaffected. (The Link-URL popover is teleported to <body>, so
+	// its Enter never travels through this handler at all.)
 	if (e.target.closest && e.target.closest("input")) return;
 	if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
 		e.preventDefault();
+		e.stopPropagation();
 		onSubmit();
 	}
 }
@@ -248,11 +253,13 @@ function rejectInlineUpload(file) {
 <style scoped>
 /* Mounted both outside jv-root (new-ticket) and inside a chat-surface jv-root
    (thread). index.css's jv-root reset reverts bare input/textarea to UA defaults;
-   the ProseMirror editable is a <div> (untouched), but the editor's transient
-   Link-URL popover uses a real <input> — give any input inside this card a stock
-   bordered look so the editor is usable and consistent in both mounts. :deep()
-   because those inputs live inside the child TextEditor. The file input is hidden,
-   so it is excluded. */
+   the ProseMirror editable is a <div> (untouched). Defensive only: give any real
+   <input> the editor might render INSIDE its own subtree a stock bordered look so
+   it stays usable+consistent in both mounts. In practice the editor's Link-URL
+   popover is teleported to <body> (outside this subtree), so it keeps stock
+   frappe-ui styling on its own and this rule currently matches nothing; the file
+   input is hidden and excluded. Kept as cheap insurance against a future in-subtree
+   field. :deep() because such inputs live inside the child TextEditor. */
 .jv-supc :deep(input:not([type="checkbox"]):not([type="radio"]):not([type="file"])) {
 	font-size: 0.875rem;
 	line-height: 1.5;
