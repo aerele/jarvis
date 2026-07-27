@@ -1512,50 +1512,76 @@
 										>
 									</button>
 									<!-- everything else → the file card -->
-									<button
-										v-else
-										class="jv-artifact"
-										@click="openArtifact(m, cv)"
-										:title="'Open ' + cv.title"
-									>
-										<span class="jv-artifact-ic" :class="'t-' + cv.type">
+									<div v-else class="jv-artifact-group">
+										<button
+											class="jv-artifact"
+											@click="openArtifact(m, cv)"
+											:title="'Open ' + cv.title"
+										>
+											<span class="jv-artifact-ic" :class="'t-' + cv.type">
+												<svg
+													width="17"
+													height="17"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="1.7"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												>
+													<path
+														d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+													/>
+													<path d="M14 2v6h6" />
+												</svg>
+											</span>
+											<span class="jv-artifact-txt">
+												<span class="jv-artifact-title">{{
+													cv.title
+												}}</span>
+												<span class="jv-artifact-sub"
+													>{{ (cv.type || "file").toUpperCase() }} · open
+													preview</span
+												>
+											</span>
 											<svg
-												width="17"
-												height="17"
+												class="jv-artifact-go"
+												width="15"
+												height="15"
 												viewBox="0 0 24 24"
 												fill="none"
 												stroke="currentColor"
-												stroke-width="1.7"
+												stroke-width="1.8"
 												stroke-linecap="round"
 												stroke-linejoin="round"
 											>
-												<path
-													d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-												/>
-												<path d="M14 2v6h6" />
+												<path d="M9 18l6-6-6-6" />
 											</svg>
-										</span>
-										<span class="jv-artifact-txt">
-											<span class="jv-artifact-title">{{ cv.title }}</span>
-											<span class="jv-artifact-sub"
-												>{{ (cv.type || "file").toUpperCase() }} · open
-												preview</span
-											>
-										</span>
-										<svg
-											class="jv-artifact-go"
-											width="15"
-											height="15"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.8"
-											stroke-linecap="round"
-											stroke-linejoin="round"
+										</button>
+										<!-- a Dashboards build opened in main chat: the card
+										     above previews the document but never runs its
+										     queries — the builder does -->
+										<button
+											v-if="canOpenDash(cv)"
+											class="jv-artifact-open"
+											@click="openInDashboards(m, cv)"
+											title="Open this dashboard in Dashboards, with its data"
 										>
-											<path d="M9 18l6-6-6-6" />
-										</svg>
-									</button>
+											<svg
+												width="13"
+												height="13"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.9"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M18 20V10M12 20V4M6 20v-6" />
+											</svg>
+											Open in Dashboards
+										</button>
+									</div>
 								</template>
 								<div v-if="skillsUsedOf(m).length" class="jv-skillused">
 									<span
@@ -2984,6 +3010,28 @@
 								/>
 							</svg>
 						</a>
+						<!-- the same hand-off as the inline card, for the artifact that is
+						     already open: this preview does not run the dashboard -->
+						<button
+							v-if="canOpenDash(artifact.cv)"
+							class="jv-art-act"
+							@click="openInDashboards(artifact.m, artifact.cv)"
+							title="Open in Dashboards"
+							aria-label="Open in Dashboards"
+						>
+							<svg
+								width="16"
+								height="16"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M18 20V10M12 20V4M6 20v-6" />
+							</svg>
+						</button>
 						<span class="jv-art-divider" aria-hidden="true"></span>
 						<button
 							class="jv-art-close"
@@ -3544,6 +3592,8 @@ import Message from "@/components/chat/Message.vue";
 import Composer from "@/components/chat/Composer.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
+import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
+import { dashboardForConversation } from "@/api/dashboards";
 import { checkReady, readinessDetailOf } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner } from "@/account/format.js";
@@ -3645,6 +3695,11 @@ function dismissBillingAlert() {
 // THIS chat. autoApplyNote surfaces the admin-only-enable message.
 const convAutoApply = ref(false);
 const autoApplyNote = ref("");
+// Which builder page started this thread ("dashboards" / "triggers" / ""),
+// from get_conversation. A Dashboards build is an ordinary conversation in
+// this list; this is the only thing that says its html artifacts are
+// dashboards, and it is what gates the "Open in Dashboards" affordance.
+const originPage = ref("");
 // The <Composer> instance. It owns the textarea and auto-grow; this view still
 // owns everything around them, so it reaches in for the two things a parent
 // legitimately needs: `composerRef.value.el` (the raw textarea, for the caret
@@ -6128,6 +6183,29 @@ async function openArtifact(m, cv) {
 	}
 	artifact.value = { m, cv, url, kind: "nopreview" };
 }
+// ---- "Open in Dashboards" (a Dashboards-builder conversation opened here) ----
+// The preview in this thread renders the document but never runs it: main chat's
+// canvas has no query-tool bridge. The Dashboards page does, so hand the artifact
+// over to it — as the saved dashboard it became, or as this exact canvas message
+// for the builder to replay.
+function canOpenDash(cv) {
+	return canOpenInDashboards(originPage.value, cv);
+}
+async function openInDashboards(m, cv) {
+	const conv = currentId.value;
+	if (!conv || !canOpenDash(cv)) return;
+	let dashboard = null;
+	try {
+		dashboard = await dashboardForConversation(conv);
+	} catch (e) {
+		// A lookup that fails (offline, a dashboard since moved out of scope)
+		// must never leave a dead button: fall through to the builder promotion,
+		// which needs nothing but the transcript.
+		dashboard = null;
+	}
+	closeArtifact();
+	router.push(dashboardOpenRoute({ dashboard, conversation: conv, messageId: m.name }));
+}
 // Lazily fetch each artifact's render payload (srcdoc content for html/svg, a
 // data-url for pdf/image/file) and cache it.
 async function ensureCanvas(m) {
@@ -6280,6 +6358,7 @@ async function loadConversation(id) {
 	groundNextTurn.value = false;
 	if (!id) {
 		messages.value = [];
+		originPage.value = "";
 		modelOverride.value = "";
 		thinkingOverride.value = "";
 		promptHistory.value = [];
@@ -6306,6 +6385,7 @@ async function loadConversation(id) {
 	// saved pin always rendered as "Auto" after a reload.
 	modelOverride.value = d?.conversation?.model_override || "";
 	thinkingOverride.value = d?.conversation?.thinking_override || "";
+	originPage.value = d?.conversation?.origin_page || "";
 	// Per-conversation auto-apply + a fresh confirm-card slate for this chat
 	// (issue #186): a pending write from another conversation must not linger.
 	convAutoApply.value = !!(d?.conversation && d.conversation.auto_apply);
@@ -10635,6 +10715,36 @@ onUnmounted(() => {
 .jv-artifact-go {
 	color: var(--text-3);
 	flex: none;
+}
+/* the card plus its follow-on action ("Open in Dashboards"), so the button is a
+   SIBLING of the card, never nested inside that <button> */
+.jv-artifact-group {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+}
+/* secondary by design.md's rule (one solid action per surface): the card is the
+   primary affordance, this is the quieter way out to the builder */
+.jv-artifact-open {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 6px;
+	padding: 5px 10px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--surface-1);
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 550;
+	color: var(--text-2);
+	cursor: pointer;
+	transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+.jv-artifact-open:hover {
+	border-color: var(--border-2);
+	background: var(--surface-2);
+	color: var(--text);
 }
 
 /* confirm / cancel card for a pending ERP-mutating action */

@@ -185,8 +185,8 @@
 			<Dialog
 				v-model="discardOpen"
 				:options="{
-					title: 'Discard this unsaved dashboard?',
-					message: 'Its chat stays in your conversations.',
+					title: discardCopy.title,
+					message: discardCopy.message,
 					actions: discardActions,
 				}"
 				@close="settleDiscard(false)"
@@ -202,7 +202,9 @@
 // tab is the core UX: the sandboxed canvas on top, the assistant chat below,
 // split by a draggable divider (persisted %). The chat's canvas frames pull
 // the agent's html artifact onto the canvas; Save opens the scope/title
-// dialog; ?edit=<name> seeds the canvas from a saved dashboard for editing.
+// dialog; ?edit=<name> seeds the canvas from a saved dashboard for editing, and
+// ?chat=<conversation>&canvas=<message> promotes a build the user found in main
+// chat back onto this builder, where it renders WITH its data.
 // Probe failures follow the TriggersPage rule: a genuine 403 shows the
 // no-access state; a transient 500/network blip retries once and otherwise
 // proceeds with default caps rather than blocking an authorized user.
@@ -215,7 +217,8 @@ import TabBar from "@/components/list/TabBar.vue";
 import { session } from "@/data/session";
 import { getCanvas } from "@/api";
 import { agentName } from "@/branding";
-import { getDashboardsCaps, getDashboard } from "@/api/dashboards";
+import { getDashboardsCaps, getDashboard, getDashboardConversation } from "@/api/dashboards";
+import { builderCanvasFrame } from "@/lib/dashboardRestore";
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardChatPane from "./DashboardChatPane.vue";
@@ -304,6 +307,13 @@ const canvasMsg = useStorage(`jarvis-dash-canvasmsg-${session.user || "anon"}`, 
 const routeEdit = typeof route.query.edit === "string" ? route.query.edit : "";
 const editSeed = ref(routeEdit || editingSticky.value);
 
+// ?chat=<conversation>&canvas=<message>: main chat handing a builder
+// conversation's artifact back here ("Open in Dashboards"). Read at setup for
+// the same reason as ?edit=, and watched below so an already-mounted builder
+// honours the deep-link too.
+const routeChat = typeof route.query.chat === "string" ? route.query.chat : "";
+const routeCanvas = typeof route.query.canvas === "string" ? route.query.canvas : "";
+
 // Message ids whose artifact could not be replayed (the File was purged, the
 // conversation was reassigned). The pane emits a restore frame on EVERY
 // transcript load - including the 300ms-debounced refetch behind each realtime
@@ -320,31 +330,36 @@ const failedRestores = new Set();
 // navigation dropped it, and must never
 // overwrite what is already on screen - a live frame for the turn in flight
 // always wins over a replay of an older turn.
+// Answers whether the artifact actually reached the canvas, so a caller that
+// repointed the builder at it (the ?chat= promotion) can tell a render from a
+// no-op instead of leaving the previous document on screen under a new thread.
 async function onCanvas({ message_id, items, restore }) {
-	if (restore && (builderHtml.value || editSeed.value)) return;
-	if (restore && failedRestores.has(message_id)) return;
+	if (restore && (builderHtml.value || editSeed.value)) return false;
+	if (restore && failedRestores.has(message_id)) return false;
 	const htmlItem = [...(items || [])].reverse().find((it) => it && it.type === "html");
-	if (!htmlItem || !message_id) return;
+	if (!htmlItem || !message_id) return false;
 	try {
 		const r = await getCanvas(message_id, htmlItem.name, 0);
 		const content = r && (r.content || r.data_url);
 		if (!content) {
 			if (restore) failedRestores.add(message_id);
-			return;
+			return false;
 		}
 		// The await above is a real round trip: re-check that a live frame (or a
 		// resolved ?edit= seed) did not land while this replay was in flight.
-		if (restore && (builderHtml.value || editSeed.value)) return;
+		if (restore && (builderHtml.value || editSeed.value)) return false;
 		builderHtml.value = content;
 		// Remember WHICH message is on the canvas: a later rehydration replays
 		// exactly this artifact instead of the newest html in a conversation main
 		// chat may also have drawn in.
 		canvasMsg.value = message_id;
+		return true;
 	} catch (e) {
 		// A restore is best-effort background work the user did not ask for -
 		// a deleted/expired artifact must not raise a toast on page load.
 		if (restore) failedRestores.add(message_id);
 		else toast.error(errMsg(e));
+		return false;
 	}
 }
 
@@ -386,11 +401,26 @@ const discardOpen = ref(false);
 let discardYes = null;
 let discardNo = null;
 
-function confirmDiscard(onYes, onNo) {
-	if (!unsavedCanvas.value) {
+const DISCARD_COPY = {
+	title: "Discard this unsaved dashboard?",
+	message: "Its chat stays in your conversations.",
+};
+// The ?chat= promotion replaces the whole builder (canvas AND thread), which is
+// worth confirming even when the canvas on screen is a saved document.
+const PROMOTE_COPY = {
+	title: "Discard what's in the builder?",
+	message: "Opening this chat's dashboard replaces it. Its chat stays in your conversations.",
+};
+const discardCopy = ref(DISCARD_COPY);
+
+// `force` is for callers whose own state (an editing target, another chat's
+// restored canvas) is worth confirming even when `unsavedCanvas` is false.
+function confirmDiscard(onYes, onNo, { force = false, copy = DISCARD_COPY } = {}) {
+	if (!force && !unsavedCanvas.value) {
 		onYes();
 		return;
 	}
+	discardCopy.value = copy;
 	discardYes = onYes;
 	discardNo = onNo || null;
 	discardOpen.value = true;
@@ -404,6 +434,7 @@ function settleDiscard(yes) {
 	discardYes = null;
 	discardNo = null;
 	discardOpen.value = false;
+	discardCopy.value = DISCARD_COPY;
 	if (yes) {
 		if (y) y();
 	} else if (n) n();
@@ -523,6 +554,112 @@ watch(
 	}
 );
 
+// ── ?chat=&canvas= — promoting a chat artifact onto the builder ──────────────
+// Main chat can open a builder conversation like any other, but its canvas only
+// PREVIEWS the document; nothing there runs the query tools. "Open in
+// Dashboards" sends the pair here, and the ordinary restore path takes over:
+// the same artifact, rendered by DashboardCanvas, which does run it.
+//
+// A saved dashboard never comes this way (main chat routes those to ?edit=), so
+// the promotion always lands on a build the user has not saved yet.
+
+// Drop the promotion keys once it has settled, so a reload/back does not replay
+// it — the editSeed discipline, one route write.
+function stripPromotionQuery(hash = route.hash) {
+	if (route.name !== "DashboardsPage") return;
+	if (route.query.chat === undefined && route.query.canvas === undefined) return;
+	const q = { ...route.query };
+	delete q.chat;
+	delete q.canvas;
+	router.replace({ query: q, hash });
+}
+
+// What the promotion would overwrite. Wider than `unsavedCanvas` on purpose: it
+// also takes the thread and the editing identity, so a saved dashboard open for
+// editing, or another conversation's restored canvas, is worth asking about.
+function promotionWouldDiscard(conv) {
+	if (unsavedCanvas.value) return true;
+	if (editingSticky.value || editingDetail.value || editSeed.value) return true;
+	return !!(chatConv.value && chatConv.value !== conv && canvasMsg.value);
+}
+
+// The (conversation, message) being promoted, or the one already promoted:
+// the query watcher re-fires on unrelated route writes (a tab hash push carries
+// the query along), and a confirm dialog is open across several of them.
+// Cleared when a promotion is declined or fails, so the same link can be tried
+// again.
+let promoting = "";
+
+async function promoteFromChat(conversation, messageId, { fallback = null } = {}) {
+	if (!conversation || !messageId) return;
+	const key = conversation + "::" + messageId;
+	if (key === promoting) return;
+	promoting = key;
+	const giveUp = (msg) => {
+		if (msg) toast.error(msg);
+		stripPromotionQuery();
+		promoting = "";
+		if (fallback) fallback();
+	};
+	// Validate against the transcript, not the link: the message must still
+	// exist and must still carry an html artifact.
+	let frame = null;
+	try {
+		const d = (await getDashboardConversation(conversation)) || {};
+		frame = builderCanvasFrame(d.messages || [], messageId);
+	} catch (e) {
+		giveUp(errMsg(e));
+		return;
+	}
+	if (!frame) {
+		giveUp("That dashboard is no longer in this chat.");
+		return;
+	}
+	const accept = async () => {
+		// The builder is this conversation's now - anything it was editing is
+		// over, or Save would write back onto the wrong dashboard.
+		editingSticky.value = "";
+		editingDetail.value = null;
+		editSeed.value = "";
+		savedName.value = "";
+		detectedSources.value = [];
+		chatConv.value = conversation;
+		canvasMsg.value = messageId;
+		activeTab.value = "builder";
+		// builderHtml is deliberately NOT cleared first: while it holds the old
+		// document, the pane's own transcript restore stays blocked, so only this
+		// frame can reach the canvas. onCanvas fetches the artifact and renders it
+		// through DashboardCanvas - which is what runs the queries as the viewer.
+		const rendered = await onCanvas({ message_id: frame.message_id, items: frame.items });
+		// The artifact was in the transcript a moment ago, so a failure here means
+		// its File is gone. Leaving the previous document on the canvas would arm
+		// Save over html that has nothing to do with the thread now underneath it.
+		if (!rendered) builderHtml.value = "";
+		stripPromotionQuery("");
+	};
+	if (!promotionWouldDiscard(conversation)) {
+		await accept();
+		return;
+	}
+	confirmDiscard(accept, () => giveUp(""), { force: true, copy: PROMOTE_COPY });
+}
+
+// Live, for the same reason ?edit= is: the builder may already be open.
+watch(
+	() => [route.query.chat, route.query.canvas],
+	([c, m]) => {
+		if (route.name !== "DashboardsPage") return;
+		const conv = typeof c === "string" ? c : "";
+		const msg = typeof m === "string" ? m : "";
+		if (!conv || !msg) return;
+		if (route.query.edit) {
+			console.warn("dashboards: ?edit= wins over ?chat=&canvas=; the promotion is ignored");
+			return;
+		}
+		promoteFromChat(conv, msg);
+	}
+);
+
 // v-show keeps the builder mounted while Saved is up, so its iframe loads and
 // runs at 0x0 behind `display:none` — charts initialised against a zero-size
 // container draw nothing and do not self-heal. Re-drive the document when the
@@ -607,6 +744,19 @@ onMounted(async () => {
 
 	// An explicit ?edit= is the user asking; the sticky target is this page
 	// remembering what it was editing, so a failure there stays quiet.
-	if (editSeed.value) loadEdit(editSeed.value, { deepLink: !!routeEdit });
+	const normalMount = () => {
+		if (editSeed.value) loadEdit(editSeed.value, { deepLink: !!routeEdit });
+	};
+	// ?edit= wins over ?chat=: it names a saved document, the promotion only a
+	// draft. Declining or failing the promotion falls back to what this mount
+	// would otherwise have done.
+	if (routeEdit && routeChat) {
+		console.warn("dashboards: ?edit= wins over ?chat=&canvas=; the promotion is ignored");
+	}
+	if (!routeEdit && routeChat && routeCanvas) {
+		promoteFromChat(routeChat, routeCanvas, { fallback: normalMount });
+	} else {
+		normalMount();
+	}
 });
 </script>

@@ -49,6 +49,12 @@ export const saveDashboard = (payload = {}) =>
 
 export const deleteDashboard = (name) => call(DB + "delete_dashboard", { name }).then(unwrap);
 
+// The saved dashboard a conversation built, for main chat's "Open in Dashboards"
+// affordance. -> {name, dashboard_title} | {} (an unsaved build is the normal
+// empty answer, not an error). Throws if the caller does not own the chat.
+export const dashboardForConversation = (conversation) =>
+	call(DB + "dashboard_for_conversation", { conversation }).then(unwrap);
+
 // View-mode data: executes the SERVER-stored spec for one named source.
 // -> {ok:true, data:{source_name, tool, rows, columns? (run_report only),
 //     truncated, took_ms}}

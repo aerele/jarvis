@@ -124,13 +124,13 @@ test("a restore never overwrites a live canvas or an explicit ?edit target", () 
 	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
 	assert.match(
 		onCanvas,
-		/if \(restore && \(builderHtml\.value \|\| editSeed\.value\)\) return;/
+		/if \(restore && \(builderHtml\.value \|\| editSeed\.value\)\) return false;/
 	);
 	// re-checked AFTER the get_canvas round trip, not just before it
 	assert.equal(
 		(
 			onCanvas.match(
-				/if \(restore && \(builderHtml\.value \|\| editSeed\.value\)\) return;/g
+				/if \(restore && \(builderHtml\.value \|\| editSeed\.value\)\) return false;/g
 			) || []
 		).length,
 		2
@@ -145,7 +145,7 @@ test("an unreadable artifact is retried never, not on every transcript load", ()
 	// run of silent get_canvas calls.
 	assert.match(pageSrc, /const failedRestores = new Set\(\);/);
 	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
-	assert.match(onCanvas, /if \(restore && failedRestores\.has\(message_id\)\) return;/);
+	assert.match(onCanvas, /if \(restore && failedRestores\.has\(message_id\)\) return false;/);
 	assert.match(onCanvas, /if \(restore\) failedRestores\.add\(message_id\);/);
 });
 

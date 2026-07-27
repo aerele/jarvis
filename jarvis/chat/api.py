@@ -605,6 +605,10 @@ def get_conversation(conversation: str) -> dict:
 			# "" means inherit Jarvis Settings; the picker renders that as "Auto".
 			"thinking_override": doc.thinking_override or "",
 			"auto_apply": int(doc.auto_apply or 0),
+			# "dashboards" / "triggers" when this thread was started from a
+			# builder page; "" for an ordinary chat. The SPA reads it to offer
+			# "Open in Dashboards" on a builder conversation's html artifacts.
+			"origin_page": doc.get("origin_page") or "",
 			"last_active_at": doc.last_active_at,
 		},
 		"messages": messages,
@@ -1132,6 +1136,15 @@ def send_message(
 					# that theme's token+recipe cheatsheet). Literal allow-list.
 					if ctx["page"] == "dashboards" and ctx.get("theme") in _DASHBOARD_THEME_KEYS:
 						enqueue_kwargs["context"]["theme"] = ctx["theme"]
+					# Remember which builder page this thread came from. A builder
+					# conversation is an ordinary Jarvis Conversation that also shows
+					# up in the main chat list, where nothing else tells a dashboard
+					# artifact apart from any other html canvas — so the origin has
+					# to be data, not client state. Stamped on EVERY qualifying send
+					# rather than at creation, so a thread that predates the field
+					# self-heals the next time the user chats from the builder.
+					if not (conv_doc.get("origin_page") or ""):
+						conv_doc.db_set("origin_page", ctx["page"], update_modified=False)
 				# Persist the viewing-context doc ref on the user message row
 				# so post-turn entity extraction (jarvis.chat.entities) sees
 				# what the user was looking at, not just what tools touched.

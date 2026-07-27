@@ -13,6 +13,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.api import search_workspace, send_message
 from jarvis.chat.dashboards_api import (
+	dashboard_for_conversation,
 	delete_dashboard,
 	get_dashboard,
 	get_dashboards_caps,
@@ -811,3 +812,142 @@ class TestWorkspaceSearchAndContext(_DashboardsApiTestCase):
 				}
 			),
 		)
+
+
+class TestOriginPageStamp(_DashboardsApiTestCase):
+	"""``Jarvis Conversation.origin_page`` — the durable marker that says a chat
+	came from a builder page. The builder's thread is an ordinary conversation
+	that also shows up in the main chat list, where nothing else tells a
+	dashboard artifact apart from any other html canvas."""
+
+	def _conv(self, user: str, title: str = "origin stamp test") -> str:
+		frappe.set_user(user)
+		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": title}).insert(
+			ignore_permissions=True
+		)
+		self._convs.append(conv.name)
+		return conv.name
+
+	def _send(self, conv: str, message: str, context: dict | None = None):
+		with (
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, "")),
+			patch("jarvis.chat.api._dispatch_turn"),
+			# Same pinning as test_send_message_context_dashboards_allowlist: the
+			# pump branch never reaches _dispatch_turn, and the context allow-list
+			# (where the stamp lives) runs either way.
+			patch("jarvis.chat.admission.turn_machine_enabled", return_value=False),
+		):
+			return send_message(
+				conv,
+				message,
+				context=frappe.as_json(context) if context is not None else None,
+			)
+
+	def _origin(self, conv: str) -> str:
+		return frappe.db.get_value("Jarvis Conversation", conv, "origin_page") or ""
+
+	def test_dashboards_send_stamps_the_conversation(self):
+		conv = self._conv(PLAIN_A)
+		self.assertTrue(self._send(conv, "build me a dashboard", {"page": "dashboards"})["ok"])
+		self.assertEqual(self._origin(conv), "dashboards")
+
+	def test_triggers_send_stamps_the_conversation(self):
+		# Triggers conversations are stamped too (the marker is data, not a UI
+		# decision); only the dashboards button ships in this change.
+		conv = self._conv(PLAIN_A)
+		self.assertTrue(self._send(conv, "when an invoice is submitted…", {"page": "triggers"})["ok"])
+		self.assertEqual(self._origin(conv), "triggers")
+
+	def test_an_ordinary_send_stamps_nothing(self):
+		conv = self._conv(PLAIN_A)
+		self.assertTrue(self._send(conv, "hello")["ok"])
+		self.assertEqual(self._origin(conv), "")
+		# a doc-viewing context is not a builder page either
+		self.assertTrue(self._send(conv, "what is this?", {"doctype": "ToDo", "name": "x"})["ok"])
+		self.assertEqual(self._origin(conv), "")
+		# and a page outside the allow-list is dropped whole
+		self.assertTrue(self._send(conv, "hi", {"page": "evil"})["ok"])
+		self.assertEqual(self._origin(conv), "")
+
+	def test_an_older_conversation_self_heals_on_the_next_builder_send(self):
+		# No backfill patch exists (the origin was never persisted before this
+		# field), so the stamp has to happen on EVERY qualifying send, not only
+		# at creation.
+		conv = self._conv(PLAIN_A)
+		self.assertTrue(self._send(conv, "first, before the field existed")["ok"])
+		self.assertEqual(self._origin(conv), "")
+		self.assertTrue(self._send(conv, "now from the builder", {"page": "dashboards"})["ok"])
+		self.assertEqual(self._origin(conv), "dashboards")
+
+	def test_the_stamp_is_written_once_and_never_flips(self):
+		conv = self._conv(PLAIN_A)
+		self._send(conv, "build me a dashboard", {"page": "dashboards"})
+		self._send(conv, "and again", {"page": "triggers"})
+		self.assertEqual(self._origin(conv), "dashboards")
+
+	def test_get_conversation_returns_origin_page(self):
+		from jarvis.chat.api import get_conversation
+
+		conv = self._conv(PLAIN_A)
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(get_conversation(conv)["conversation"]["origin_page"], "")
+		self._send(conv, "build me a dashboard", {"page": "dashboards"})
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(get_conversation(conv)["conversation"]["origin_page"], "dashboards")
+
+
+class TestDashboardForConversation(_DashboardsApiTestCase):
+	"""The lookup behind main chat's "Open in Dashboards": saved dashboard ->
+	open it in place; nothing saved -> the builder promotes the transcript's
+	canvas instead. ``{}`` is an ordinary answer, not an error."""
+
+	def _conv(self, user: str) -> str:
+		frappe.set_user(user)
+		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "dash build"}).insert(
+			ignore_permissions=True
+		)
+		self._convs.append(conv.name)
+		return conv.name
+
+	def test_owner_gets_the_dashboard_built_from_the_conversation(self):
+		conv = self._conv(PLAIN_A)
+		d = self._mk_static(PLAIN_A, title="from chat", source_conversation=conv)
+		frappe.set_user(PLAIN_A)
+		out = dashboard_for_conversation(conv)
+		self.assertTrue(out["ok"])
+		self.assertEqual(out["data"], {"name": d["name"], "dashboard_title": "from chat"})
+
+	def test_no_saved_dashboard_is_an_empty_answer(self):
+		conv = self._conv(PLAIN_A)
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(dashboard_for_conversation(conv)["data"], {})
+
+	def test_several_saves_answer_with_the_newest(self):
+		conv = self._conv(PLAIN_A)
+		self._mk_static(PLAIN_A, title="older", source_conversation=conv)
+		newer = self._mk_static(PLAIN_A, title="newer", source_conversation=conv)
+		# `modified` has second resolution on some backends - order the pair
+		# explicitly so the assertion is about the ORDER BY, not the clock.
+		frappe.db.set_value(
+			DASHBOARD, newer["name"], "modified", "2099-01-01 00:00:00", update_modified=False
+		)
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(dashboard_for_conversation(conv)["data"]["name"], newer["name"])
+
+	def test_another_users_conversation_is_a_permission_error(self):
+		conv = self._conv(PLAIN_A)
+		self._mk_static(PLAIN_A, title="theirs", source_conversation=conv)
+		frappe.set_user(PLAIN_B)
+		self.assertRaises(frappe.PermissionError, dashboard_for_conversation, conv)
+
+	def test_a_dashboard_out_of_the_callers_scope_reads_as_none(self):
+		# The conversation is A's, but the dashboard bound to it is B's private
+		# one: A must get "nothing saved", not B's title.
+		conv = self._conv(PLAIN_A)
+		self._mk_static(PLAIN_B, title="not for A", source_conversation=conv)
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(dashboard_for_conversation(conv)["data"], {})
+
+	def test_a_missing_conversation_does_not_exist(self):
+		frappe.set_user(PLAIN_A)
+		self.assertRaises(frappe.DoesNotExistError, dashboard_for_conversation, "no-such-conversation")
