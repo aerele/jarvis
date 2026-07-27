@@ -79,16 +79,19 @@
 						/>
 
 						<!-- ===== Choose Your Plan ===== -->
-						<section v-else-if="state.step === 'plan'" class="jv-ob-screen">
-							<div class="jv-ob-body">
-								<div class="jv-ob-head">
+						<section v-else-if="state.step === 'plan'" class="ob-screen">
+							<div class="ob-body">
+								<div class="ob-head">
 									<h1>Choose your plan</h1>
 									<p>
 										Start free. Upgrade or extend anytime, with no
 										auto-renewal.
 									</p>
 								</div>
-								<div v-if="state.plansLoading" class="jv-ob-placeholder">
+								<div
+									v-if="state.plansLoading"
+									class="mb-5 text-center text-p-sm text-ink-gray-5"
+								>
 									Loading plans…
 								</div>
 								<Banner
@@ -97,28 +100,30 @@
 									:message="state.plansErr"
 								>
 									<template #action>
-										<button
-											class="jv-ob-btn jv-ob-btn-sm"
-											@click="loadPlansSafe"
-										>
-											Retry
-										</button>
+										<Button label="Retry" @click="loadPlansSafe" />
 									</template>
 								</Banner>
-								<div v-else-if="!state.plans.length" class="jv-ob-placeholder">
+								<div
+									v-else-if="!state.plans.length"
+									class="mb-5 text-center text-p-sm text-ink-gray-5"
+								>
 									No plans are available right now. Please contact support.
 								</div>
 								<div
 									v-else
-									class="jv-ob-plans"
+									class="grid grid-cols-1 gap-3 sm:grid-cols-3"
 									role="radiogroup"
 									aria-label="Plan"
 								>
 									<div
 										v-for="p in state.plans"
 										:key="p.name"
-										class="jv-ob-plan"
-										:class="{ sel: state.planName === p.name }"
+										class="relative cursor-pointer rounded-lg border p-4.5 transition-colors focus-visible:outline-none focus-visible:ring focus-visible:ring-outline-gray-3"
+										:class="
+											state.planName === p.name
+												? 'border-outline-gray-5 ring-1 ring-outline-gray-5'
+												: 'border-outline-gray-1 hover:border-outline-gray-2 hover:bg-surface-gray-1'
+										"
 										role="radio"
 										:aria-checked="state.planName === p.name"
 										tabindex="0"
@@ -126,70 +131,75 @@
 										@keydown.enter.prevent="state.planName = p.name"
 										@keydown.space.prevent="state.planName = p.name"
 									>
-										<div class="jv-ob-plan-rd"></div>
-										<div class="jv-ob-plan-nm">{{ p.plan_name }}</div>
-										<div class="jv-ob-plan-pr">
+										<div
+											class="absolute right-4 top-4 grid h-4 w-4 place-items-center rounded-full border transition-colors"
+											:class="
+												state.planName === p.name
+													? 'border-outline-gray-5 bg-surface-gray-7'
+													: 'border-outline-gray-3'
+											"
+										>
+											<span
+												v-if="state.planName === p.name"
+												class="h-1.5 w-1.5 rounded-full bg-surface-white"
+											></span>
+										</div>
+										<div class="text-base font-medium text-ink-gray-9">
+											{{ p.plan_name }}
+										</div>
+										<div
+											class="mb-0.5 mt-2.5 text-[22px] font-medium text-ink-gray-9"
+										>
 											{{ planAmount(p.price_inr)
 											}}<span
 												v-if="planSuffix(p.price_inr, p.billing_cycle)"
+												class="text-p-sm font-normal text-ink-gray-5"
 											>
 												{{
 													planSuffix(p.price_inr, p.billing_cycle)
 												}}</span
 											>
 										</div>
-										<div class="jv-ob-plan-cyc">{{ planCycleLabel(p) }}</div>
-										<ul>
-											<li v-for="(f, k) in planFeatures(p)" :key="k">
-												<svg
-													width="14"
-													height="14"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													stroke-width="2.4"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-												>
-													<path d="M20 6 9 17l-5-5" /></svg
-												>{{ f }}
+										<div class="text-xs text-ink-gray-5">
+											{{ planCycleLabel(p) }}
+										</div>
+										<ul class="mt-3.5 grid gap-2">
+											<li
+												v-for="(f, k) in planFeatures(p)"
+												:key="k"
+												class="flex items-start gap-2 text-p-sm text-ink-gray-7"
+											>
+												<FeatherIcon
+													name="check"
+													class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-green-3"
+												/>{{ f }}
 											</li>
-											<li v-if="!planFeatures(p).length" class="jv-ob-muted">
+											<li
+												v-if="!planFeatures(p).length"
+												class="text-p-sm text-ink-gray-5"
+											>
 												{{ p.billing_cycle }} plan
 											</li>
 										</ul>
 									</div>
 								</div>
 							</div>
-							<div class="jv-ob-foot">
-								<button class="jv-ob-back" @click="goBack">
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="m15 18-6-6 6-6" /></svg
-									>Back to tour
+							<div class="ob-foot">
+								<button class="ob-back" @click="goBack">
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back to tour
 								</button>
-								<button
-									v-if="canSelfHost"
-									class="jv-ob-link"
-									@click="enterSelfhost"
-								>
+								<button v-if="canSelfHost" class="ob-link" @click="enterSelfhost">
 									Self-hosted? Connect your own openclaw
 								</button>
-								<button
-									class="jv-ob-btn jv-ob-btn-primary"
+								<Button
+									variant="solid"
+									label="Continue"
 									:disabled="!state.planName"
 									@click="onPlanContinue"
-								>
-									Continue
-								</button>
+								/>
 							</div>
 						</section>
 
@@ -1907,6 +1917,108 @@ onMounted(async () => {
 	flex-direction: column;
 	position: relative;
 }
+
+/* ---- shared step chrome: fade-in, body/head/foot, back/link nav (design.md
+   §4.3). Real frappe-ui components (Button/FormControl/Checkbox/FeatherIcon)
+   own their own look; this is only the layout these steps repeat. ---- */
+.ob-screen {
+	animation: jvObFade 0.15s ease-out;
+}
+@keyframes jvObFade {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+/* min-height keeps every step's card the same size; shorter content
+   top-aligns inside it. The tour matches at 604px (TourIntro.vue). */
+.ob-body {
+	padding: 32px 40px 28px;
+	min-height: 520px;
+	box-sizing: border-box;
+}
+.ob-head {
+	text-align: center;
+	margin-bottom: 24px;
+}
+.ob-head h1 {
+	font-size: 20px; /* text-2xl, 0.1.278 */
+	font-weight: 600;
+	margin: 0 0 7px;
+	text-wrap: balance;
+}
+.ob-head p {
+	font-size: 14px; /* text-p-base */
+	line-height: 1.5;
+	color: var(--text-2);
+	margin: 0;
+}
+.ob-foot {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 16px 40px 22px;
+	border-top: 1px solid var(--border);
+}
+/* Back/quiet-link nav (design.md §4.3 "back/skip are plain text links" —
+   these stay plain buttons, not frappe-ui <Button>, matching OnboardingGate's
+   "Switch to Desk" precedent). */
+.ob-back {
+	font-size: 13px;
+	color: var(--text-2);
+	background: none;
+	border: none;
+	cursor: pointer;
+	font-family: inherit;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 6px 8px;
+	border-radius: 8px;
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+.ob-back:hover {
+	color: var(--text);
+	background: var(--surface-2);
+}
+.ob-back:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+.ob-back:focus-visible,
+.ob-link:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
+}
+/* quiet self-host link on the Plan footer — links look like links */
+.ob-link {
+	font-size: 12.5px;
+	color: var(--text-3);
+	background: none;
+	border: none;
+	cursor: pointer;
+	font-family: inherit;
+	text-decoration: underline;
+	text-underline-offset: 3px;
+	padding: 4px 2px;
+}
+.ob-link:hover {
+	color: var(--text-2);
+}
+.ob-note {
+	font-size: 12.5px;
+	color: var(--text-3);
+	margin-top: 14px;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	justify-content: center;
+}
+
 .jv-ob-screen {
 	animation: jvObFade 0.15s ease-out;
 }
@@ -2056,12 +2168,6 @@ onMounted(async () => {
 	border-radius: 8px;
 	margin-left: 8px;
 }
-.jv-ob-placeholder {
-	font-size: 13.5px;
-	color: var(--text-3);
-	margin: 0 0 20px;
-	text-align: center;
-}
 .jv-ob-err {
 	font-size: 12.5px;
 	color: var(--red);
@@ -2102,94 +2208,6 @@ onMounted(async () => {
 	min-height: 380px;
 	flex: 1;
 	margin-top: 8px;
-}
-/* ---- Plan cards: selectable radio cards; selection is a dark ring, hover is
-   a background tint — never motion (design.md §4.2). ---- */
-.jv-ob-plans {
-	display: grid;
-	grid-template-columns: repeat(3, 1fr);
-	gap: 12px;
-}
-.jv-ob-plan {
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	padding: 18px;
-	background: var(--surface);
-	cursor: pointer;
-	position: relative;
-	transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
-}
-.jv-ob-plan:hover {
-	background: var(--surface-1);
-	border-color: var(--border-2);
-}
-.jv-ob-plan.sel {
-	border-color: var(--text);
-	box-shadow: 0 0 0 1px var(--text);
-}
-.jv-ob-plan-nm {
-	font-size: 14px;
-	font-weight: 500;
-}
-.jv-ob-plan-pr {
-	font-size: 22px;
-	font-weight: 500;
-	margin: 10px 0 2px;
-}
-.jv-ob-plan-pr span {
-	font-size: 13px;
-	font-weight: 420;
-	color: var(--text-3);
-}
-.jv-ob-plan-cyc {
-	font-size: 12.5px;
-	color: var(--text-3);
-}
-.jv-ob-plan ul {
-	list-style: none;
-	margin: 14px 0 0;
-	padding: 0;
-	display: grid;
-	gap: 8px;
-}
-.jv-ob-plan li {
-	display: flex;
-	gap: 8px;
-	align-items: flex-start;
-	font-size: 13px;
-	line-height: 1.4;
-	color: var(--text-2);
-}
-.jv-ob-plan li svg {
-	color: var(--green);
-	flex: none;
-	margin-top: 1px;
-}
-.jv-ob-plan-rd {
-	position: absolute;
-	top: 16px;
-	right: 16px;
-	width: 16px;
-	height: 16px;
-	border-radius: 50%;
-	border: 1px solid var(--border-2);
-	display: grid;
-	place-items: center;
-	transition: border-color 0.15s ease, background-color 0.15s ease;
-}
-.jv-ob-plan.sel .jv-ob-plan-rd {
-	border-color: var(--text);
-	background: var(--text);
-}
-.jv-ob-plan.sel .jv-ob-plan-rd::after {
-	content: "";
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: var(--surface);
-}
-.jv-ob-muted {
-	color: var(--text-3);
 }
 /* ---- Details form (design.md §3.4 mapped to the page context) ---- */
 .jv-ob-form {
