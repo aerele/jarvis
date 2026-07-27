@@ -3011,9 +3011,12 @@
 							</svg>
 						</a>
 						<!-- the same hand-off as the inline card, for the artifact that is
-						     already open: this preview does not run the dashboard -->
+						     already open: this preview does not run the dashboard. The
+						     conversation check is not belt-and-braces: this panel survives
+						     a switch in the sidebar behind it, and the hand-off pairs the
+						     CURRENT conversation with the OPEN artifact's message -->
 						<button
-							v-if="canOpenDash(artifact.cv)"
+							v-if="canOpenDash(artifact.cv) && artifact.conv === currentId"
 							class="jv-art-act"
 							@click="openInDashboards(artifact.m, artifact.cv)"
 							title="Open in Dashboards"
@@ -4507,6 +4510,7 @@ async function clearAllHistory() {
 	try {
 		await api.clearChatHistory();
 		messages.value = [];
+		originPage.value = "";
 		currentId.value = "";
 		settingsOpen.value = false;
 		newChat(); // also reloads store.conversations
@@ -6128,7 +6132,13 @@ function cvFile(cv) {
 }
 // ---- artifact preview side panel (ChatGPT/Claude-style: click a card → slide-
 // in panel on the right; PDF/image render directly, xlsx/csv as a table) ----
-const artifact = ref(null); // { m, cv, url, kind, content?, sheets?, sheetIdx?, text? }
+// { m, cv, url, kind, conv, content?, sheets?, sheetIdx?, text? }
+// `conv` is the conversation the artifact was opened FROM. The overlay is
+// absolutely positioned inside the ChatView container, so the AppShell's
+// conversation sidebar stays clickable behind it: the panel routinely outlives
+// the conversation it belongs to, and any action that mixes it with the current
+// conversation (the Dashboards hand-off) would act on a mismatched pair.
+const artifact = ref(null);
 const artifactPanelEl = ref(null);
 // Move focus into the panel when it opens so keyboard users land inside it
 // and Escape closes it right away (handled in onGlobalKey).
@@ -6152,36 +6162,37 @@ function setSheet(si) {
 async function openArtifact(m, cv) {
 	const url = cv.file_url || cvOf(m, cv);
 	const t = cv.type;
+	const conv = currentId.value;
 	if (t === "pdf" || t === "image") {
-		artifact.value = { m, cv, url, kind: t };
+		artifact.value = { m, cv, url, conv, kind: t };
 		return;
 	}
 	if (t === "html" || t === "svg") {
 		let content = cvOf(m, cv);
 		if (!content) {
-			artifact.value = { m, cv, url, kind: "loading" };
+			artifact.value = { m, cv, url, conv, kind: "loading" };
 			await ensureCanvas(m);
 			content = cvOf(m, cv);
 		}
-		artifact.value = { m, cv, url, kind: content ? t : "nopreview", content };
+		artifact.value = { m, cv, url, conv, kind: content ? t : "nopreview", content };
 		return;
 	}
 	// "file" (xlsx / csv / txt / …) → ask the backend for a tabular/text preview.
-	artifact.value = { m, cv, url, kind: "loading" };
+	artifact.value = { m, cv, url, conv, kind: "loading" };
 	try {
 		const r = await api.previewFile(cv.file_url);
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
-			artifact.value = { m, cv, url, kind: "table", sheets: r.sheets, sheetIdx: 0 };
+			artifact.value = { m, cv, url, conv, kind: "table", sheets: r.sheets, sheetIdx: 0 };
 			return;
 		}
 		if (r && r.kind === "text") {
-			artifact.value = { m, cv, url, kind: "text", text: r.text || "" };
+			artifact.value = { m, cv, url, conv, kind: "text", text: r.text || "" };
 			return;
 		}
 	} catch (e) {
 		/* fall through to download-only */
 	}
-	artifact.value = { m, cv, url, kind: "nopreview" };
+	artifact.value = { m, cv, url, conv, kind: "nopreview" };
 }
 // ---- "Open in Dashboards" (a Dashboards-builder conversation opened here) ----
 // The preview in this thread renders the document but never runs it: main chat's
@@ -6204,7 +6215,17 @@ async function openInDashboards(m, cv) {
 		dashboard = null;
 	}
 	closeArtifact();
-	router.push(dashboardOpenRoute({ dashboard, conversation: conv, messageId: m.name }));
+	// m.creation decides the fork: a conversation keeps building after its first
+	// save, so a click on a LATER artifact must promote that artifact, not reopen
+	// the older saved row (which would silently answer with a different document).
+	router.push(
+		dashboardOpenRoute({
+			dashboard,
+			conversation: conv,
+			messageId: m.name,
+			messageCreation: m.creation,
+		})
+	);
 }
 // Lazily fetch each artifact's render payload (srcdoc content for html/svg, a
 // data-url for pdf/image/file) and cache it.
@@ -6722,6 +6743,11 @@ async function newChat() {
 	// and a later send can release the records by the real scope instead of stranding them (R2-2/R3-2).
 	if (currentId.value) _promoteNewChatScope(currentId.value);
 	messages.value = [];
+	// loadConversation is the only other writer and the route watcher no-ops here
+	// (currentId already equals this id), so without this the previous chat's
+	// origin survives onto a brand-new one — and the first html the agent draws
+	// there would offer "Open in Dashboards" over an ordinary chat's artifact.
+	originPage.value = "";
 	// VR5-3: _promoteNewChatScope above moved any sentinel-scoped failed bubble (+ its voice-release
 	// token) onto the real id, but the route watcher no-ops here (currentId already equals this id),
 	// so loadConversation()'s pending-bubble peek never runs — re-inject them now, exactly as
@@ -8592,6 +8618,7 @@ onMounted(async () => {
 					// hard-deleted after EMPTY_GRACE_DAYS, so a stale bookmark is routine.
 					currentId.value = null;
 					messages.value = [];
+					originPage.value = "";
 					try {
 						localStorage.removeItem("jarvis-last-conv");
 					} catch (_e) {}

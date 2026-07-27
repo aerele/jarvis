@@ -1065,6 +1065,27 @@ def send_message(
 	# worker creates it on its pooled connection and inserts the Jarvis Chat
 	# Session row BEFORE streaming starts (2026-07 latency plan, Phase 1.1).
 	first_turn = 1 if not conv_doc.session_key else 0
+
+	# Remember which builder page this thread came from. A builder conversation is
+	# an ordinary Jarvis Conversation that also shows up in the main chat list,
+	# where nothing else tells a dashboard artifact apart from any other html
+	# canvas - so the origin has to be data, not client state. Stamped on EVERY
+	# qualifying send rather than at creation, so a thread that predates the field
+	# self-heals the next time the user chats from the builder.
+	#
+	# It rides the save+commit below deliberately: admission.accept_or_queue rolls
+	# back on its overload-reject and duplicate-replay paths, so a stamp written
+	# after that commit would be silently discarded on a busy site. The parse is
+	# side-effect-free and reads the same two-value literal allow-list the enqueue
+	# payload applies further down.
+	if context and not (conv_doc.get("origin_page") or ""):
+		try:
+			_octx = frappe.parse_json(context)
+			if isinstance(_octx, dict) and _octx.get("page") in ("triggers", "dashboards"):
+				conv_doc.origin_page = _octx["page"]
+		except Exception:
+			pass
+
 	if _delegated:
 		conv_doc.flags.ignore_permissions = True
 	conv_doc.save()
@@ -1136,15 +1157,6 @@ def send_message(
 					# that theme's token+recipe cheatsheet). Literal allow-list.
 					if ctx["page"] == "dashboards" and ctx.get("theme") in _DASHBOARD_THEME_KEYS:
 						enqueue_kwargs["context"]["theme"] = ctx["theme"]
-					# Remember which builder page this thread came from. A builder
-					# conversation is an ordinary Jarvis Conversation that also shows
-					# up in the main chat list, where nothing else tells a dashboard
-					# artifact apart from any other html canvas — so the origin has
-					# to be data, not client state. Stamped on EVERY qualifying send
-					# rather than at creation, so a thread that predates the field
-					# self-heals the next time the user chats from the builder.
-					if not (conv_doc.get("origin_page") or ""):
-						conv_doc.db_set("origin_page", ctx["page"], update_modified=False)
 				# Persist the viewing-context doc ref on the user message row
 				# so post-turn entity extraction (jarvis.chat.entities) sees
 				# what the user was looking at, not just what tools touched.

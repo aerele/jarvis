@@ -120,21 +120,13 @@ test("the page records WHICH message is on the canvas, under the same key", () =
 	assert.match(fnBody(pageSrc, "async function loadEdit("), /canvasMsg\.value = "";/);
 });
 
-test("a restore never overwrites a live canvas or an explicit ?edit target", () => {
+test("a restore never overwrites a live canvas, an ?edit target or a promotion", () => {
 	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
-	assert.match(
-		onCanvas,
-		/if \(restore && \(builderHtml\.value \|\| editSeed\.value\)\) return false;/
-	);
+	const guard =
+		/if \(restore && \(builderHtml\.value \|\| editSeed\.value \|\| promotionPending\.value\)\)\s*\n?\s*return false;/;
+	assert.match(onCanvas, guard);
 	// re-checked AFTER the get_canvas round trip, not just before it
-	assert.equal(
-		(
-			onCanvas.match(
-				/if \(restore && \(builderHtml\.value \|\| editSeed\.value\)\) return false;/g
-			) || []
-		).length,
-		2
-	);
+	assert.equal((onCanvas.match(new RegExp(guard.source, "g")) || []).length, 2);
 	// a failed replay is silent; only a live frame's failure is surfaced
 	assert.match(onCanvas, /else toast\.error\(errMsg\(e\)\);/);
 });
@@ -245,7 +237,7 @@ test("New chat asks the page instead of clearing itself behind a confirm", () =>
 	// The pane owns no canvas, so it must not act before the page has asked.
 	assert.match(fnBody(paneSrc, "function newChat("), /emit\("reset"\)/);
 	assert.doesNotMatch(fnBody(paneSrc, "function newChat("), /conversation\.value = ""/);
-	assert.match(paneSrc, /defineExpose\(\{ resetChat, sendText \}\)/);
+	assert.match(paneSrc, /defineExpose\(\{ resetChat, sendText, restoreCanvas \}\)/);
 	assert.match(fnBody(pageSrc, "function clearBuilder("), /chatPane\.value\.resetChat\(\)/);
 });
 

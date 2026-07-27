@@ -8,20 +8,29 @@
 // The builder's conversation shows up in the main chat list. Opening it there
 // shows the prompt and the dashboard, but that canvas never runs its queries —
 // accepted — so what was missing was a way back to the page where it does.
-// canOpenInDashboards()/dashboardOpenRoute() are the real logic; the rest is
-// component wiring, fenced here by source assertions (the dashboardRestore
-// precedent) because a .vue SFC cannot be imported into a plain node runner.
+// Every DECISION the feature makes is a pure function in dashboardOpen.js and
+// is tested by behaviour below: who gets the affordance, where a click goes
+// (including which of two documents wins on time), and what a promotion would
+// cost the user. Only component WIRING is fenced by source assertions (the
+// dashboardRestore precedent), because a .vue SFC cannot be imported into a
+// plain node runner.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canOpenInDashboards, dashboardOpenRoute } from "./dashboardOpen.js";
+import {
+	canOpenInDashboards,
+	dashboardOpenRoute,
+	isNewerStamp,
+	wouldDiscardOnPromotion,
+} from "./dashboardOpen.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const read = (...p) => fs.readFileSync(path.join(HERE, ...p), "utf8");
 const chatSrc = read("..", "views", "ChatView.vue");
 const pageSrc = read("..", "pages", "dashboards", "DashboardsPage.vue");
+const paneSrc = read("..", "pages", "dashboards", "DashboardChatPane.vue");
 const apiSrc = read("..", "api", "dashboards.js");
 
 // The body of a named declaration: everything up to its closing brace, which in
@@ -59,12 +68,27 @@ test("a junk canvas item never throws", () => {
 
 // ---- where it goes --------------------------------------------------------
 
+const SAVED = { name: "DASH-1", dashboard_title: "Sales", creation: "2026-07-27 10:00:00.000000" };
+const BEFORE = "2026-07-27 09:59:59.999999";
+const AFTER = "2026-07-27 10:00:00.000001";
+
 test("a saved dashboard opens IN PLACE, so Save keeps updating that row", () => {
 	assert.deepEqual(
 		dashboardOpenRoute({
-			dashboard: { name: "DASH-1", dashboard_title: "Sales" },
+			dashboard: SAVED,
 			conversation: "c1",
 			messageId: "m1",
+			messageCreation: BEFORE,
+		}),
+		{ path: "/dashboards", query: { edit: "DASH-1" } }
+	);
+	// the artifact that IS the saved document (same instant) is not "newer"
+	assert.deepEqual(
+		dashboardOpenRoute({
+			dashboard: SAVED,
+			conversation: "c1",
+			messageId: "m1",
+			messageCreation: SAVED.creation,
 		}),
 		{ path: "/dashboards", query: { edit: "DASH-1" } }
 	);
@@ -92,6 +116,146 @@ test("an unsaved build is promoted from the transcript instead", () => {
 	);
 });
 
+test("a build made AFTER the save wins the click, saved row or not", () => {
+	// The thread keeps iterating after its first save: "this conversation has a
+	// dashboard" is not "this artifact IS that dashboard". Routing a newer
+	// artifact to ?edit= answers with a different document and leaves the one
+	// the user pointed at unreachable (every later click routes the same way).
+	assert.deepEqual(
+		dashboardOpenRoute({
+			dashboard: SAVED,
+			conversation: "c1",
+			messageId: "m2",
+			messageCreation: AFTER,
+		}),
+		{ path: "/dashboards", query: { chat: "c1", canvas: "m2" } }
+	);
+});
+
+test("editing the saved row later must not re-hijack clicks on newer builds", () => {
+	// The comparison is on `creation`, never `modified` — otherwise touching the
+	// old dashboard once puts it back in front of every artifact built since.
+	const editedJustNow = { ...SAVED, modified: "2099-01-01 00:00:00.000000" };
+	assert.deepEqual(
+		dashboardOpenRoute({
+			dashboard: editedJustNow,
+			conversation: "c1",
+			messageId: "m2",
+			messageCreation: AFTER,
+		}),
+		{ path: "/dashboards", query: { chat: "c1", canvas: "m2" } }
+	);
+});
+
+test("an unknown timestamp keeps the pre-existing ?edit= behaviour", () => {
+	// A server that predates the `creation` field (or a message row without one)
+	// must degrade to what shipped, not misroute on a guess.
+	for (const messageCreation of [undefined, "", null, "nonsense"]) {
+		assert.deepEqual(
+			dashboardOpenRoute({
+				dashboard: SAVED,
+				conversation: "c1",
+				messageId: "m2",
+				messageCreation,
+			}),
+			{ path: "/dashboards", query: { edit: "DASH-1" } }
+		);
+	}
+	assert.deepEqual(
+		dashboardOpenRoute({
+			dashboard: { name: "DASH-1" },
+			conversation: "c1",
+			messageId: "m2",
+			messageCreation: AFTER,
+		}),
+		{ path: "/dashboards", query: { edit: "DASH-1" } }
+	);
+});
+
+test("frappe timestamps compare exactly, microseconds and all", () => {
+	assert.equal(isNewerStamp("2026-07-27 10:00:00.000002", "2026-07-27 10:00:00.000001"), true);
+	assert.equal(isNewerStamp("2026-07-27 10:00:00.000001", "2026-07-27 10:00:00.000002"), false);
+	// equal is not newer, however the two sides spell it
+	assert.equal(isNewerStamp("2026-07-27 10:00:00", "2026-07-27 10:00:00.000000"), false);
+	assert.equal(isNewerStamp("2026-07-27 10:00:01", "2026-07-27 10:00:00.999999"), true);
+	// dates and months carry, not just the time
+	assert.equal(isNewerStamp("2026-08-01 00:00:00", "2026-07-31 23:59:59.999999"), true);
+	assert.equal(isNewerStamp("2026-07-31 23:59:59.999999", "2026-08-01 00:00:00"), false);
+	// the ISO separator the wire sometimes uses
+	assert.equal(isNewerStamp("2026-07-27T10:00:01", "2026-07-27 10:00:00"), true);
+	// anything unreadable answers "not newer" on either side
+	for (const bad of ["", null, undefined, "not a date", 12345, {}]) {
+		assert.equal(isNewerStamp(bad, "2026-07-27 10:00:00"), false);
+		assert.equal(isNewerStamp("2026-07-27 10:00:00", bad), false);
+	}
+});
+
+// ---- what a promotion would cost -----------------------------------------
+
+const SAME = { conv: "C", chatConv: "C", canvasMsg: "M1", unsavedCanvas: false, editing: false };
+
+test("re-opening the builder's OWN thread never confirms", () => {
+	// The feature's primary path: the user built here, went to main chat, and
+	// clicked the way back. Both messages live in one transcript, so repointing
+	// the canvas loses nothing — and a confirm here is worse than noise, since
+	// its "Open its chat" action lands back in the chat they clicked from.
+	assert.equal(wouldDiscardOnPromotion(SAME), false);
+	// the restored canvas of that same thread reads as "unsaved" on a fresh
+	// mount (editingDetail is null) — still nothing to lose
+	assert.equal(wouldDiscardOnPromotion({ ...SAME, unsavedCanvas: true }), false);
+	// a DIFFERENT message of the same thread, and a builder with no canvas yet
+	assert.equal(
+		wouldDiscardOnPromotion({ ...SAME, canvasMsg: "M2", unsavedCanvas: true }),
+		false
+	);
+	assert.equal(wouldDiscardOnPromotion({ ...SAME, canvasMsg: "" }), false);
+});
+
+test("the same thread WITH an editing identity still confirms", () => {
+	// Accepting flips Save from update-in-place to create-new. That is a real
+	// identity change and the user has to own it.
+	assert.equal(wouldDiscardOnPromotion({ ...SAME, editing: true }), true);
+	assert.equal(wouldDiscardOnPromotion({ ...SAME, editing: true, unsavedCanvas: true }), true);
+});
+
+test("a different conversation keeps the full guard", () => {
+	const other = {
+		conv: "D",
+		chatConv: "C",
+		canvasMsg: "M1",
+		unsavedCanvas: false,
+		editing: false,
+	};
+	// another thread's restored canvas
+	assert.equal(wouldDiscardOnPromotion(other), true);
+	// an unsaved canvas, or an editing target, on their own
+	assert.equal(wouldDiscardOnPromotion({ ...other, canvasMsg: "", unsavedCanvas: true }), true);
+	assert.equal(wouldDiscardOnPromotion({ ...other, canvasMsg: "", editing: true }), true);
+	// ...but a builder holding nothing is not worth a dialog
+	assert.equal(wouldDiscardOnPromotion({ ...other, canvasMsg: "" }), false);
+	assert.equal(
+		wouldDiscardOnPromotion({
+			conv: "D",
+			chatConv: "",
+			canvasMsg: "",
+			unsavedCanvas: false,
+			editing: false,
+		}),
+		false
+	);
+	// a fresh builder that has an unsaved canvas but no thread still asks
+	assert.equal(
+		wouldDiscardOnPromotion({
+			conv: "D",
+			chatConv: "",
+			canvasMsg: "",
+			unsavedCanvas: true,
+			editing: false,
+		}),
+		true
+	);
+});
+
 // ---- main chat: the affordance is conversation state, not html-sniffing ----
 
 test("ChatView reads the conversation's origin_page and clears it on switch", () => {
@@ -110,6 +274,39 @@ test("ChatView reads the conversation's origin_page and clears it on switch", ()
 			load.indexOf("originPage.value = d?.conversation?.origin_page"),
 		"the reset belongs to the `if (!id)` arm, above the load"
 	);
+});
+
+test("every path that swaps the conversation out resets originPage too", () => {
+	// loadConversation is the only OTHER writer, and it does not run on these
+	// three: the route watcher no-ops when currentId is already the new id, and
+	// the boot arm is the failure of the load itself. A stale "dashboards" here
+	// puts the button on an ordinary chat's html — with Save armed over it once
+	// the builder promotes it.
+	const nc = fnBody(chatSrc, "async function newChat(");
+	assert.match(nc, /messages\.value = \[\];\n\t\/\/[^]*?originPage\.value = "";/);
+	const clear = fnBody(chatSrc, "async function clearAllHistory(");
+	assert.match(clear, /messages\.value = \[\];\s*originPage\.value = "";/);
+	// the boot arm that drops a conversation which has since vanished
+	assert.match(
+		chatSrc,
+		/currentId\.value = null;\s*messages\.value = \[\];\s*originPage\.value = "";/
+	);
+	// four writers of the empty value, no more: loadConversation's !id arm plus
+	// the three above (a fifth would mean a path nobody reviewed)
+	assert.equal((chatSrc.match(/originPage\.value = "";/g) || []).length, 4);
+});
+
+test("the open artifact carries the conversation it was opened from", () => {
+	// The preview overlay is absolute inside ChatView, so the AppShell sidebar
+	// stays clickable behind it: without the stamp the header's hand-off pairs
+	// the CURRENT conversation with the PREVIOUS one's message id.
+	const open = fnBody(chatSrc, "async function openArtifact(");
+	assert.match(open, /const conv = currentId\.value;/);
+	const assigns = open.match(/artifact\.value = \{[^}]*\}/g) || [];
+	assert.equal(assigns.length, 7, "every artifact.value assignment must be accounted for");
+	for (const a of assigns) assert.match(a, /\bconv,/);
+	// the sheet switcher re-assigns a spread copy, so it keeps the stamp
+	assert.match(chatSrc, /artifact\.value = \{ \.\.\.artifact\.value, sheetIdx: si \};/);
 });
 
 test("the inline card offers it as a SIBLING button, never nested in the card", () => {
@@ -131,13 +328,13 @@ test("the inline card offers it as a SIBLING button, never nested in the card", 
 	);
 });
 
-test("the open preview panel offers the same hand-off for the open artifact", () => {
+test("the open preview panel offers the same hand-off, for its OWN conversation", () => {
 	const head = chatSrc.slice(
 		chatSrc.indexOf('<div class="jv-artifact-head">'),
 		chatSrc.indexOf('<div class="jv-artifact-body">')
 	);
 	assert.notEqual(head, "", "the artifact preview header must still exist");
-	assert.match(head, /v-if="canOpenDash\(artifact\.cv\)"/);
+	assert.match(head, /v-if="canOpenDash\(artifact\.cv\) && artifact\.conv === currentId"/);
 	assert.match(head, /@click="openInDashboards\(artifact\.m, artifact\.cv\)"/);
 	assert.match(head, /aria-label="Open in Dashboards"/);
 	// alongside the existing open/download actions, not instead of them
@@ -153,10 +350,10 @@ test("a failed lookup degrades to the promotion route — never a dead button", 
 	const afterCatch = open.slice(open.indexOf("catch (e) {"));
 	assert.doesNotMatch(afterCatch, /\breturn;/);
 	assert.match(open, /dashboard = null;/);
-	assert.match(
-		open,
-		/router\.push\(dashboardOpenRoute\(\{ dashboard, conversation: conv, messageId: m\.name \}\)\);/
-	);
+	// the clicked message's own creation decides the fork
+	assert.match(open, /messageId: m\.name,/);
+	assert.match(open, /messageCreation: m\.creation,/);
+	assert.match(open, /router\.push\(\s*dashboardOpenRoute\(\{/);
 	// the panel is closed on the way out; leaving it up over the new page is a
 	// modal stranded on a route that never opened it
 	assert.ok(
@@ -193,6 +390,48 @@ test("the deep-link is read at setup AND watched, like ?edit=", () => {
 	);
 });
 
+test("a pending promotion holds the pane's restore off, exactly as ?edit= does", () => {
+	// The pane's onMounted fires BEFORE this page's, and the promotion waits on
+	// the caps probe — so the transcript restore reliably lands first, and its
+	// canvas then reads as unsaved work to the discard guard. routeChat/
+	// routeCanvas were already read at setup for this; the hold is what uses it.
+	assert.match(pageSrc, /const promotionPending = ref\(!!\(routeChat && routeCanvas\)\);/);
+	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
+	assert.equal(
+		(onCanvas.match(/promotionPending\.value/g) || []).length,
+		2,
+		"both restore guards — before AND after the get_canvas round trip"
+	);
+	const promote = fnBody(pageSrc, "async function promoteFromChat(");
+	const giveUp = promote.slice(
+		promote.indexOf("const giveUp = "),
+		promote.indexOf("// Validate against the transcript")
+	);
+	assert.match(giveUp, /promotionPending\.value = false;/);
+	// a decline must leave the builder AS IT WAS: the frame the pane emitted
+	// while the hold was up was dropped, so ask for it again
+	assert.match(giveUp, /chatPane\.value\.restoreCanvas\(\)/);
+	assert.match(paneSrc, /defineExpose\(\{ resetChat, sendText, restoreCanvas \}\);/);
+	assert.match(
+		fnBody(paneSrc, "function restoreCanvas("),
+		/emit\("canvas", \{ \.\.\.frame, restore: true \}\)/
+	);
+	const accept = promote.slice(promote.indexOf("const accept = async () => {"));
+	assert.match(accept, /promotionPending\.value = false;/);
+	// the live watcher arms it before handing over
+	const watcher = pageSrc.slice(
+		pageSrc.indexOf("watch(\n\t() => [route.query.chat, route.query.canvas],")
+	);
+	const body = watcher.slice(0, watcher.indexOf("\n);"));
+	assert.ok(
+		body.indexOf("promotionPending.value = true;") < body.indexOf("promoteFromChat("),
+		"arm the hold before the promotion, not after"
+	);
+	// ...and a mount that will NOT promote releases the setup-time hold, or the
+	// pane's restore stays blocked for the life of the page
+	assert.match(pageSrc, /promotionPending\.value = false;\n\t\tnormalMount\(\);/);
+});
+
 test("?edit= wins over ?chat=, and says so", () => {
 	const watcher = pageSrc.slice(
 		pageSrc.indexOf("watch(\n\t() => [route.query.chat, route.query.canvas],")
@@ -223,9 +462,10 @@ test("the promotion is validated against the transcript, not the link", () => {
 	assert.match(giveUp, /if \(fallback\) fallback\(\);/);
 });
 
-test("accepting clears the editing identity before repointing the builder", () => {
+test("accepting clears the editing identity and the stale data-mode", () => {
 	// Without this, Save writes the promoted canvas back over whatever dashboard
-	// the builder happened to be editing.
+	// the builder happened to be editing — and the next send declares a
+	// static/live intent the user never expressed for THIS dashboard.
 	const promote = fnBody(pageSrc, "async function promoteFromChat(");
 	const accept = promote.slice(promote.indexOf("const accept = async () => {"));
 	for (const line of [
@@ -235,6 +475,7 @@ test("accepting clears the editing identity before repointing the builder", () =
 		/savedName\.value = "";/,
 		/chatConv\.value = conversation;/,
 		/canvasMsg\.value = messageId;/,
+		/dashDataMode\.value = "auto";/,
 	]) {
 		assert.match(accept, line);
 	}
@@ -244,34 +485,43 @@ test("accepting clears the editing identity before repointing the builder", () =
 		accept,
 		/const rendered = await onCanvas\(\{ message_id: frame\.message_id, items: frame\.items \}\);/
 	);
-	// ...and an artifact whose File has since gone must not leave the PREVIOUS
-	// document on the canvas with Save armed over the new thread
-	assert.match(accept, /if \(!rendered\) builderHtml\.value = "";/);
+});
+
+test("a promoted artifact whose content is gone says so, and shows nothing", () => {
+	// An empty canvas alone is indistinguishable from "nothing built yet", and
+	// the query is already stripped by then — there would be no way to tell the
+	// click did anything. Leaving the PREVIOUS document up instead would arm
+	// Save over html that has nothing to do with the thread now underneath it.
+	const promote = fnBody(pageSrc, "async function promoteFromChat(");
+	const accept = promote.slice(promote.indexOf("const accept = async () => {"));
+	assert.match(accept, /if \(!rendered\) \{\n\t\t\tbuilderHtml\.value = "";/);
+	assert.match(accept, /toast\.error\("Couldn't load that dashboard's content/);
+	// builderHtml is NOT cleared before the fetch: promotionPending already holds
+	// the pane's restore off, so the only reason to keep the old document up is
+	// to avoid flashing an empty canvas on the way to the new one
+	assert.ok(
+		accept.indexOf("await onCanvas(") < accept.indexOf('builderHtml.value = "";'),
+		"the canvas is cleared only after the artifact failed to arrive"
+	);
+	assert.equal((accept.match(/builderHtml\.value = "";/g) || []).length, 1);
 	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
 	assert.match(onCanvas, /canvasMsg\.value = message_id;\n\t\treturn true;/);
 	// every other exit says "nothing was rendered"
 	assert.doesNotMatch(onCanvas, /(?<!return false;\n\t)\breturn;/);
-	// clearing builderHtml BEFORE the fetch would unblock the pane's own
-	// transcript restore and let an older frame race this one onto the canvas —
-	// the only clear allowed is the post-fetch one above
-	assert.ok(
-		accept.indexOf("await onCanvas(") < accept.indexOf('builderHtml.value = "";'),
-		"builderHtml is only cleared after the artifact failed to arrive"
-	);
-	assert.equal((accept.match(/builderHtml\.value = "";/g) || []).length, 1);
 });
 
 test("a promotion that would cost the user something confirms first", () => {
+	// The rules themselves are unit-tested above; this fences the wiring.
 	const guard = fnBody(pageSrc, "function promotionWouldDiscard(");
-	assert.match(guard, /if \(unsavedCanvas\.value\) return true;/);
+	assert.match(guard, /return wouldDiscardOnPromotion\(\{/);
+	assert.match(guard, /chatConv: chatConv\.value,/);
+	assert.match(guard, /canvasMsg: canvasMsg\.value,/);
+	assert.match(guard, /unsavedCanvas: unsavedCanvas\.value,/);
 	assert.match(
 		guard,
-		/if \(editingSticky\.value \|\| editingDetail\.value \|\| editSeed\.value\) return true;/
+		/editing: !!\(editingSticky\.value \|\| editingDetail\.value \|\| editSeed\.value\),/
 	);
-	assert.match(
-		guard,
-		/return !!\(chatConv\.value && chatConv\.value !== conv && canvasMsg\.value\);/
-	);
+	assert.match(pageSrc, /import \{ wouldDiscardOnPromotion \} from "@\/lib\/dashboardOpen";/);
 	const promote = fnBody(pageSrc, "async function promoteFromChat(");
 	// `force` is required: confirmDiscard short-circuits on !unsavedCanvas, so an
 	// editing target alone would never reach the dialog

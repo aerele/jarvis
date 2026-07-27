@@ -895,6 +895,44 @@ class TestOriginPageStamp(_DashboardsApiTestCase):
 		frappe.set_user(PLAIN_A)
 		self.assertEqual(get_conversation(conv)["conversation"]["origin_page"], "dashboards")
 
+	def test_the_stamp_survives_an_admission_rollback(self):
+		"""``admission.accept_or_queue`` rolls back on its overload-reject and
+		duplicate-replay paths. The stamp rides the conversation's own
+		save+commit, which happens BEFORE that call, so a busy site cannot
+		silently drop it (it would otherwise only self-heal on a later send).
+
+		accept_or_queue is stubbed rather than driven: reaching the real
+		overload branch needs the shard/conversation locks plus a site whose
+		predispatch state says machine-active. What matters here is only that
+		the rollback lands AFTER the stamp is committed, which the stub
+		reproduces exactly (admission.py rolls back and returns this shape).
+		"""
+		conv = self._conv(PLAIN_A)
+
+		def _reject(**kwargs):
+			frappe.db.rollback()
+			return {"ok": False, "overloaded": True, "reason": "busy"}
+
+		def _duplicate(**kwargs):
+			frappe.db.rollback()
+			return {"ok": True, "dispatched": False, "duplicate": True, "queued_position": None}
+
+		for stub, expect_ok in ((_reject, False), (_duplicate, True)):
+			frappe.db.set_value("Jarvis Conversation", conv, "origin_page", "", update_modified=False)
+			frappe.db.commit()
+			frappe.set_user(PLAIN_A)
+			with (
+				patch("jarvis.chat.api.validate_can_send", return_value=(True, "")),
+				patch("jarvis.chat.admission.turn_machine_enabled", return_value=True),
+				patch("jarvis.chat.admission.shard_overloaded", return_value=False),
+				patch("jarvis.chat.admission.accept_or_queue", side_effect=stub),
+			):
+				out = send_message(
+					conv, "build me a dashboard", context=frappe.as_json({"page": "dashboards"})
+				)
+			self.assertEqual(out["ok"], expect_ok)
+			self.assertEqual(self._origin(conv), "dashboards")
+
 
 class TestDashboardForConversation(_DashboardsApiTestCase):
 	"""The lookup behind main chat's "Open in Dashboards": saved dashboard ->
@@ -915,7 +953,14 @@ class TestDashboardForConversation(_DashboardsApiTestCase):
 		frappe.set_user(PLAIN_A)
 		out = dashboard_for_conversation(conv)
 		self.assertTrue(out["ok"])
-		self.assertEqual(out["data"], {"name": d["name"], "dashboard_title": "from chat"})
+		self.assertEqual(out["data"]["name"], d["name"])
+		self.assertEqual(out["data"]["dashboard_title"], "from chat")
+		# `creation` travels so the caller can compare it against the clicked
+		# message's own creation (a later build must not open the older row).
+		self.assertEqual(
+			out["data"]["creation"],
+			str(frappe.db.get_value(DASHBOARD, d["name"], "creation")),
+		)
 
 	def test_no_saved_dashboard_is_an_empty_answer(self):
 		conv = self._conv(PLAIN_A)
@@ -924,15 +969,53 @@ class TestDashboardForConversation(_DashboardsApiTestCase):
 
 	def test_several_saves_answer_with_the_newest(self):
 		conv = self._conv(PLAIN_A)
-		self._mk_static(PLAIN_A, title="older", source_conversation=conv)
+		older = self._mk_static(PLAIN_A, title="older", source_conversation=conv)
 		newer = self._mk_static(PLAIN_A, title="newer", source_conversation=conv)
-		# `modified` has second resolution on some backends - order the pair
-		# explicitly so the assertion is about the ORDER BY, not the clock.
+		# Order the pair explicitly so the assertion is about the ORDER BY, not
+		# about how fast two inserts run.
 		frappe.db.set_value(
-			DASHBOARD, newer["name"], "modified", "2099-01-01 00:00:00", update_modified=False
+			DASHBOARD, older["name"], "creation", "2020-01-01 00:00:00", update_modified=False
+		)
+		frappe.db.set_value(
+			DASHBOARD, newer["name"], "creation", "2020-01-02 00:00:00", update_modified=False
 		)
 		frappe.set_user(PLAIN_A)
 		self.assertEqual(dashboard_for_conversation(conv)["data"]["name"], newer["name"])
+
+	def test_editing_an_older_dashboard_does_not_promote_it_over_a_newer_one(self):
+		# `creation desc`, not `modified desc`: merely touching the old row must
+		# not put it back in front of one built after it.
+		conv = self._conv(PLAIN_A)
+		older = self._mk_static(PLAIN_A, title="older", source_conversation=conv)
+		newer = self._mk_static(PLAIN_A, title="newer", source_conversation=conv)
+		frappe.db.set_value(
+			DASHBOARD, older["name"], "creation", "2020-01-01 00:00:00", update_modified=False
+		)
+		frappe.db.set_value(
+			DASHBOARD, newer["name"], "creation", "2020-01-02 00:00:00", update_modified=False
+		)
+		frappe.db.set_value(
+			DASHBOARD, older["name"], "modified", "2099-01-01 00:00:00", update_modified=False
+		)
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(dashboard_for_conversation(conv)["data"]["name"], newer["name"])
+
+	def test_another_users_org_dashboard_bound_to_this_conversation_is_ignored(self):
+		# `source_conversation` is a client-settable payload field with no
+		# ownership validation, and an Org-scope row is visible to everyone -
+		# so without the owner filter, a row bound to A's conversation id by
+		# somebody else would answer A's "Open in Dashboards".
+		conv = self._conv(PLAIN_A)
+		planted = self._mk_static(ADMIN_USER, title="planted", scope="Org", source_conversation=conv)
+		frappe.set_user(PLAIN_A)
+		# visible to A (Org scope), and still not the answer
+		self.assertTrue(frappe.get_list(DASHBOARD, filters={"name": planted["name"]}))
+		self.assertEqual(dashboard_for_conversation(conv)["data"], {})
+		# A's own save wins outright, even though the plant is newer
+		mine = self._mk_static(PLAIN_A, title="mine", source_conversation=conv)
+		frappe.db.set_value(DASHBOARD, mine["name"], "creation", "2020-01-01 00:00:00", update_modified=False)
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(dashboard_for_conversation(conv)["data"]["name"], mine["name"])
 
 	def test_another_users_conversation_is_a_permission_error(self):
 		conv = self._conv(PLAIN_A)

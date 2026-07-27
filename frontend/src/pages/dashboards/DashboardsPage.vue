@@ -219,6 +219,7 @@ import { getCanvas } from "@/api";
 import { agentName } from "@/branding";
 import { getDashboardsCaps, getDashboard, getDashboardConversation } from "@/api/dashboards";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
+import { wouldDiscardOnPromotion } from "@/lib/dashboardOpen";
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardChatPane from "./DashboardChatPane.vue";
@@ -313,6 +314,14 @@ const editSeed = ref(routeEdit || editingSticky.value);
 // honours the deep-link too.
 const routeChat = typeof route.query.chat === "string" ? route.query.chat : "";
 const routeCanvas = typeof route.query.canvas === "string" ? route.query.canvas : "";
+// A promotion the page owes the user but has not finished, held exactly like
+// `editSeed`: an explicit deep-link owns the canvas, so the chat pane's own
+// transcript restore must not land on it first. The pane's onMounted fires
+// BEFORE this page's, and the promotion waits on the caps probe, so without
+// this the restore reliably wins the race - and its canvas then reads as
+// "unsaved work" to the discard guard, popping a confirm over the very document
+// the user asked to open. Cleared when the promotion settles, either way.
+const promotionPending = ref(!!(routeChat && routeCanvas));
 
 // Message ids whose artifact could not be replayed (the File was purged, the
 // conversation was reassigned). The pane emits a restore frame on EVERY
@@ -334,7 +343,7 @@ const failedRestores = new Set();
 // repointed the builder at it (the ?chat= promotion) can tell a render from a
 // no-op instead of leaving the previous document on screen under a new thread.
 async function onCanvas({ message_id, items, restore }) {
-	if (restore && (builderHtml.value || editSeed.value)) return false;
+	if (restore && (builderHtml.value || editSeed.value || promotionPending.value)) return false;
 	if (restore && failedRestores.has(message_id)) return false;
 	const htmlItem = [...(items || [])].reverse().find((it) => it && it.type === "html");
 	if (!htmlItem || !message_id) return false;
@@ -346,8 +355,10 @@ async function onCanvas({ message_id, items, restore }) {
 			return false;
 		}
 		// The await above is a real round trip: re-check that a live frame (or a
-		// resolved ?edit= seed) did not land while this replay was in flight.
-		if (restore && (builderHtml.value || editSeed.value)) return false;
+		// resolved ?edit= seed, or a promotion that started meanwhile) did not
+		// land while this replay was in flight.
+		if (restore && (builderHtml.value || editSeed.value || promotionPending.value))
+			return false;
 		builderHtml.value = content;
 		// Remember WHICH message is on the canvas: a later rehydration replays
 		// exactly this artifact instead of the newest html in a conversation main
@@ -576,11 +587,17 @@ function stripPromotionQuery(hash = route.hash) {
 
 // What the promotion would overwrite. Wider than `unsavedCanvas` on purpose: it
 // also takes the thread and the editing identity, so a saved dashboard open for
-// editing, or another conversation's restored canvas, is worth asking about.
+// editing, or another conversation's restored canvas, is worth asking about -
+// but re-opening the builder's OWN thread costs nothing and must not ask. The
+// rules live in lib/dashboardOpen.js so they are testable outside the SFC.
 function promotionWouldDiscard(conv) {
-	if (unsavedCanvas.value) return true;
-	if (editingSticky.value || editingDetail.value || editSeed.value) return true;
-	return !!(chatConv.value && chatConv.value !== conv && canvasMsg.value);
+	return wouldDiscardOnPromotion({
+		conv,
+		chatConv: chatConv.value,
+		canvasMsg: canvasMsg.value,
+		unsavedCanvas: unsavedCanvas.value,
+		editing: !!(editingSticky.value || editingDetail.value || editSeed.value),
+	});
 }
 
 // The (conversation, message) being promoted, or the one already promoted:
@@ -597,6 +614,11 @@ async function promoteFromChat(conversation, messageId, { fallback = null } = {}
 	promoting = key;
 	const giveUp = (msg) => {
 		if (msg) toast.error(msg);
+		promotionPending.value = false;
+		// The hold above dropped the restore frame the pane emitted while this
+		// promotion was in flight. Declining (or failing) must leave the builder
+		// as it was, not empty, so ask the pane for that frame again.
+		if (chatPane.value && chatPane.value.restoreCanvas) chatPane.value.restoreCanvas();
 		stripPromotionQuery();
 		promoting = "";
 		if (fallback) fallback();
@@ -625,16 +647,27 @@ async function promoteFromChat(conversation, messageId, { fallback = null } = {}
 		detectedSources.value = [];
 		chatConv.value = conversation;
 		canvasMsg.value = messageId;
+		// The sticky data-mode belongs to the build the builder was on. Carried
+		// into a promoted one it declares an intent the user never expressed - a
+		// "static" left over from a baked report tells the agent to freeze the
+		// numbers of the live dashboard just promoted. Neutral, as clearBuilder.
+		dashDataMode.value = "auto";
 		activeTab.value = "builder";
-		// builderHtml is deliberately NOT cleared first: while it holds the old
-		// document, the pane's own transcript restore stays blocked, so only this
-		// frame can reach the canvas. onCanvas fetches the artifact and renders it
-		// through DashboardCanvas - which is what runs the queries as the viewer.
+		// The pane's own transcript restore is held off by promotionPending, so
+		// only this frame can reach the canvas. onCanvas fetches the artifact and
+		// renders it through DashboardCanvas - which is what runs the queries as
+		// the viewer.
 		const rendered = await onCanvas({ message_id: frame.message_id, items: frame.items });
 		// The artifact was in the transcript a moment ago, so a failure here means
 		// its File is gone. Leaving the previous document on the canvas would arm
-		// Save over html that has nothing to do with the thread now underneath it.
-		if (!rendered) builderHtml.value = "";
+		// Save over html that has nothing to do with the thread now underneath it -
+		// and an empty canvas alone reads as "nothing built yet", so say what
+		// happened instead of failing silently.
+		if (!rendered) {
+			builderHtml.value = "";
+			toast.error("Couldn't load that dashboard's content — it may have expired.");
+		}
+		promotionPending.value = false;
 		stripPromotionQuery("");
 	};
 	if (!promotionWouldDiscard(conversation)) {
@@ -656,6 +689,7 @@ watch(
 			console.warn("dashboards: ?edit= wins over ?chat=&canvas=; the promotion is ignored");
 			return;
 		}
+		promotionPending.value = true;
 		promoteFromChat(conv, msg);
 	}
 );
@@ -756,6 +790,10 @@ onMounted(async () => {
 	if (!routeEdit && routeChat && routeCanvas) {
 		promoteFromChat(routeChat, routeCanvas, { fallback: normalMount });
 	} else {
+		// No promotion will run on this mount (?edit= won, or the pair is half
+		// present): release the hold taken at setup, or the pane's restore stays
+		// blocked for the life of the page.
+		promotionPending.value = false;
 		normalMount();
 	}
 });
