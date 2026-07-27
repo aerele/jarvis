@@ -320,6 +320,9 @@ async function closeThisTicket() {
 		// badge/Resolve reflect Closed immediately instead of lagging 30s to the
 		// next poll (they read store.thread.meta, which only get_thread repopulates).
 		await store.loadThread(ticketName.value, { quiet: true });
+		// Advance the watermark so the next 30s tick doesn't do a redundant refetch
+		// (the close moved `modified`, which the fingerprint would read as a change).
+		if (!store.thread.error) lastPrint = store.fingerprintOf(ticketName.value);
 	}
 	closing.value = false;
 }

@@ -33,8 +33,10 @@ export function firstResponseBadge(meta, nowMs = Date.now()) {
 		agreementStatus = null,
 	} = meta || {};
 	if (firstRespondedOn != null) {
-		// Responded: met if before the target (or there was no target).
-		if (responseBy == null || firstRespondedOn < responseBy) {
+		// Responded: met if AT or before the target (or there was no target). `<=`
+		// matches Helpdesk, which fails only on a strict deadline < actual, so a
+		// response landing exactly on the deadline counts as fulfilled.
+		if (responseBy == null || firstRespondedOn <= responseBy) {
 			const dur =
 				creation != null
 					? ` in ${formatDuration((firstRespondedOn - creation) / 1000)}`
@@ -60,8 +62,9 @@ export function resolutionBadge(meta, nowMs = Date.now()) {
 		agreementStatus = null,
 	} = meta || {};
 	if (resolutionDate != null) {
-		// Resolved: met if before the target (or there was no target).
-		if (resolutionBy == null || resolutionDate < resolutionBy) {
+		// Resolved: met if AT or before the target (or there was no target) — `<=`
+		// to match Helpdesk's on-the-dot-is-fulfilled boundary (see firstResponseBadge).
+		if (resolutionBy == null || resolutionDate <= resolutionBy) {
 			const dur = resolutionTime != null ? ` in ${formatDuration(resolutionTime)}` : "";
 			return { label: `Fulfilled${dur}`, theme: "green" };
 		}

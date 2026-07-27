@@ -105,3 +105,17 @@ describe("resolutionBadge", () => {
 		expect(resolutionBadge(null, NOW)).toBeNull();
 	});
 });
+
+describe("SLA boundary (Helpdesk: on-the-dot is Fulfilled)", () => {
+	it("treats a response/resolution landing EXACTLY on the deadline as Fulfilled, not Failed", () => {
+		expect(
+			firstResponseBadge(
+				{ firstRespondedOn: NOW, responseBy: NOW, creation: NOW - 60_000 },
+				NOW
+			)
+		).toMatchObject({ theme: "green" });
+		expect(
+			resolutionBadge({ resolutionDate: NOW, resolutionBy: NOW, resolutionTime: 60 }, NOW)
+		).toMatchObject({ theme: "green" });
+	});
+});
