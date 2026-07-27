@@ -1023,7 +1023,16 @@ test("a kept identity repairs itself the moment the user asks to save", () => {
 	assert.match(open, /adoptedRow\.value = "";/);
 	// this await is a window like every other: New chat / ?edit= can land in it
 	assert.match(open, /if \(adoptedRow\.value === name\) \{/);
-	assert.match(open, /if \(!builderHtml\.value\) return;/);
+	// ...and a discard confirm raised inside it owns the screen — the Save dialog
+	// must not stack on top of it
+	assert.match(open, /if \(!builderHtml\.value \|\| discardOpen\.value\) return;/);
+	// the repaired row brings its THEME with it (a repair only runs on a fresh
+	// mount, DEFAULT_THEME picker) — but never over a theme the user picked this
+	// session, or "re-theme my dashboard" would be silently undone
+	assert.match(
+		open,
+		/if \(builderTheme\.value === DEFAULT_THEME\)\n\t\t\t\t\t\tbuilderTheme\.value = themeKey\(d\.theme\);/
+	);
 	// one attempt, not one per click — and the button says it is working
 	assert.match(open, /if \(!builderHtml\.value \|\| repairing\.value\) return;/);
 	assert.match(open, /repairing\.value = true;/);

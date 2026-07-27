@@ -464,6 +464,11 @@ async function openSave() {
 				if (d && d.name && d.can_edit) {
 					editingDetail.value = d;
 					savedName.value = d.name;
+					// The repair only ever runs on a fresh mount, where the picker still
+					// holds the default — but a user who re-themed this session owns the
+					// picker, so seed the row's theme only over the untouched default.
+					if (builderTheme.value === DEFAULT_THEME)
+						builderTheme.value = themeKey(d.theme);
 				} else {
 					editingSticky.value = "";
 					adoptedRow.value = "";
@@ -478,8 +483,9 @@ async function openSave() {
 			repairing.value = false;
 		}
 		// ...and the canvas can be gone with it, in which case there is nothing to
-		// save any more
-		if (!builderHtml.value) return;
+		// save any more — and a discard confirm raised mid-repair owns the screen,
+		// so the dialog must not stack on top of it
+		if (!builderHtml.value || discardOpen.value) return;
 	}
 	saveOpen.value = true;
 }
