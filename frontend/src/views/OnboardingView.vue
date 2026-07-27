@@ -663,13 +663,14 @@
 								<span v-else></span>
 								<!-- Always rendered; disabled until the editor reports a savable config,
 									 so the step never shows without a primary action. -->
-								<button
-									class="jv-ob-btn jv-ob-btn-grad"
+								<Button
+									variant="solid"
 									:disabled="!connectReady || savingConnect"
+									:loading="savingConnect"
+									loading-text="Connecting…"
+									label="Start chatting"
 									@click="saveConnect"
-								>
-									{{ savingConnect ? "Connecting…" : "Start chatting" }}
-								</button>
+								/>
 							</div>
 						</section>
 
@@ -1982,38 +1983,6 @@ onMounted(async () => {
 	justify-content: center;
 }
 
-/* ---- buttons (design.md §3.1): solid near-black primary, colour-shift hover
-   only. .jv-ob-btn/.jv-ob-btn-grad are the LAST two hand-rolled buttons left
-   in this file - every other button call site is a real frappe-ui <Button>.
-   The "Start chatting" CTA (jv-ob-btn-grad) is deliberately migrated in its
-   own follow-up commit; this pair stays until then. ---- */
-.jv-ob-btn {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	gap: 7px;
-	height: 36px;
-	padding: 0 16px;
-	border-radius: 8px;
-	border: 1px solid transparent;
-	font-family: inherit;
-	font-size: 13.5px;
-	font-weight: 500;
-	line-height: 1;
-	cursor: pointer;
-	white-space: nowrap;
-	background: var(--text);
-	color: var(--surface);
-	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-.jv-ob-btn:hover:not(:disabled) {
-	background: var(--text-2);
-}
-.jv-ob-btn:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
-
 /* JvCombo (Company, Details step) matched to FormControl's variant="outline"
    input recipe (frappe-ui TextInput.vue) so it looks like its FormControl
    siblings — focus-within because the border belongs on the wrapper, the
@@ -2056,7 +2025,6 @@ onMounted(async () => {
 	.ob-screen {
 		animation: none;
 	}
-	.jv-ob-btn,
 	.ob-details-form :deep(.jvc-field) {
 		transition: none;
 	}
