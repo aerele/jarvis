@@ -547,6 +547,37 @@ three times. Recipe:
 - A `FormControl` paste field (never a bare `<textarea>`), inline `ErrorMessage` for
   expired/invalid-nonce errors, countdown hint in `text-p-sm text-ink-gray-5`.
 
+### 4.5 Voice capture — two surfaces, two retention models (say which one you are)
+
+Jarvis has **two** voice-recording surfaces with deliberately different contracts, and a user who
+learns one carries its expectations to the other. State which one a new surface implements.
+
+- **Chat composer dictation** (`useDictationRecorder` + `utils/voiceDictationStore.js`, ChatView):
+  a take is **one recording**, transcribed in **one call** with its full context, and its audio is
+  **retained** in an IndexedDB mirror until the transcript is part of an accepted send. While
+  recording, ~15 s timeslice fragments are mirrored as they arrive purely for crash-safety — they
+  are never a transcription unit. Anything unresolved is **visible and actionable as one chip per
+  recording** — didn't transcribe (Retry/Download/✕), edited out before sending
+  (Restore/Download/✕), audio that couldn't be saved (Download/Retry) — plus a previous-session
+  recovery banner. Nothing is ever removed silently except the success path (chips clear on the
+  send that carried their words; no toast — that would be noise on the common case).
+- **Single-shot capture** (`useAudioRecorder`, `VoiceRecorder.vue` — wiki nudge, Business tab):
+  record → transcribe → text, **no retention, no chips, no recovery**. A failure is a toast and a
+  re-record, and the audio is gone.
+
+Rules for either. **Never split one utterance into independently-transcribed pieces** — a speech
+model handed a fragment with no beginning and no end invents words to bridge the gap, and its
+failure mode is fluent, confident text nobody said; if a take is too long for one call, that is a
+budget problem to solve, not a reason to chop it up. Chip copy must distinguish "not sent yet"
+from "your last message went without this" (identical copy for both is what makes a correctly
+retained recording read as a stuck one). An action's tooltip must promise only what it can do
+*now* (Retry cannot edit a message that has already been sent — it adds to the current draft). A
+progress indicator may only state something it actually knows: the length of the recording being
+transcribed is honest, a percentage is theatre. And a leave/close warning may claim loss **only**
+when something is genuinely at risk — durably mirrored, re-offerable audio must not arm it (a
+warning that cries wolf gets trained away). If a new surface wants the chip model, reuse the store
+rather than growing a third contract.
+
 ---
 
 ## 5. Do / Don't — current Jarvis anti-patterns
