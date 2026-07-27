@@ -7,13 +7,17 @@
 		]"
 	>
 		<template #actions>
-			<!-- row is null for a deep-linked ticket outside the newest 50 (P2/out-of-list):
-			     get_thread carries no status at all, so the row is the ONLY source —
-			     rendering "Open" here would be an outright lie for a possibly-Closed
-			     ticket. Hide the badge entirely rather than guess. -->
-			<Badge v-if="row" variant="subtle" :theme="badge.theme" :label="badge.label" />
+			<!-- ticketStatus falls back to store.thread.meta.status, so a deep-linked
+			     ticket outside the newest-50 list (row=null) still shows the correct
+			     badge + Resolve instead of a blank header contradicting the panel. -->
+			<Badge
+				v-if="ticketStatus"
+				variant="subtle"
+				:theme="badge.theme"
+				:label="badge.label"
+			/>
 			<Button
-				v-if="row && !store.isClosed(row.status)"
+				v-if="ticketStatus && !store.isClosed(ticketStatus)"
 				label="Resolve"
 				:loading="closing"
 				@click="closeThisTicket"
@@ -166,7 +170,15 @@ const { files, pending, onFiles, removeFile, snapshotStaged, settleUpload, reset
 
 const ticketName = computed(() => String(route.params.ticket || ""));
 const row = computed(() => store.ticketRow(ticketName.value));
-const badge = computed(() => store.badgeFor(row.value && row.value.status));
+// A deep-linked ticket outside the newest-50 list has row=null, but get_thread now
+// carries the status via store.thread.meta — so the badge/Resolve/disclaimer read
+// the row first, then fall back to the panel meta (fixes: no badge, an unreachable
+// Resolve, and no reopen disclaimer on open deep-linked tickets).
+const ticketStatus = computed(
+	() =>
+		(row.value && row.value.status) || (store.thread.meta && store.thread.meta.status) || null
+);
+const badge = computed(() => store.badgeFor(ticketStatus.value));
 
 // draft is now the editor's HTML (not plain text): a blank TipTap doc is
 // "<p></p>", so `.trim()` would be truthy and arm Send on an empty editor —
@@ -182,10 +194,10 @@ const canSend = computed(
 // this ticket" alone reads as contradicting the "Awaiting you" header — this
 // spells out both paths instead.
 const disclaimer = computed(() => {
-	if (!row.value) return "";
-	if (row.value.status === "Resolved")
-		return "Resolve to confirm and close, or reply to reopen.";
-	if (store.isClosed(row.value.status)) return "Replying reopens this ticket.";
+	const st = ticketStatus.value;
+	if (!st) return "";
+	if (st === "Resolved") return "Resolve to confirm and close, or reply to reopen.";
+	if (store.isClosed(st)) return "Replying reopens this ticket.";
 	return "";
 });
 
@@ -304,6 +316,10 @@ async function closeThisTicket() {
 	if (ok) {
 		toast.success("Ticket closed. Reply anytime to reopen it.");
 		await store.loadTickets({ quiet: true });
+		// Refresh the thread too, so the details panel's status/SLA and the header
+		// badge/Resolve reflect Closed immediately instead of lagging 30s to the
+		// next poll (they read store.thread.meta, which only get_thread repopulates).
+		await store.loadThread(ticketName.value, { quiet: true });
 	}
 	closing.value = false;
 }
@@ -476,17 +492,25 @@ async function send() {
 		// out-of-order guard covers anything past this synchronous check.
 		if (store.thread.ticket === tName) {
 			await store.loadThread(tName);
+			// Re-check AFTER the await: the user can switch tickets DURING loadThread,
+			// so bail before touching this component's watermark/reply state if we've
+			// moved on (the store's own out-of-order guard already protected the fetch).
+			if (store.thread.ticket !== tName) return;
 			// Same guard as pollSignal/onFocus/open: advance the watermark only after
 			// a successful refetch. Without it, a reply that posts fine but whose
 			// follow-up loadThread fails would swallow the change — the user's own
 			// reply stays invisible until the next focus-return refetch.
-			if (!store.thread.error) lastPrint = store.fingerprintOf(tName);
-			// Collapse the reply box back to the one-line bar — but ONLY here, inside
-			// the still-on-this-ticket guard, so a reply finishing after the user
-			// switched tickets can't collapse the new ticket's box. Also require the
-			// draft to have cleanly cleared (no retype during the send) and no
-			// attachments left staged (a partial-upload failure keeps chips to retry).
-			if (cleared && !files.value.length) replyExpanded.value = false;
+			if (!store.thread.error) {
+				lastPrint = store.fingerprintOf(tName);
+				// Collapse the reply box back to the one-line bar only on a fully clean
+				// send: still on this ticket (checked above), the refetch didn't error,
+				// the draft cleanly cleared AND is still empty NOW (a follow-up typed
+				// during the upload/refetch window keeps it open), and no attachments
+				// remain to retry.
+				if (cleared && !files.value.length && supportBodyIsEmpty(draft.value)) {
+					replyExpanded.value = false;
+				}
+			}
 		}
 	} finally {
 		sending.value = false;

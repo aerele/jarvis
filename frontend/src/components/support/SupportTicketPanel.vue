@@ -109,6 +109,7 @@ const slaRows = computed(() => {
 					firstRespondedOn: toLocalMs(m.first_responded_on),
 					responseBy: toLocalMs(m.response_by),
 					creation: toLocalMs(m.creation),
+					agreementStatus: m.agreement_status,
 				},
 				nowMs.value
 			),

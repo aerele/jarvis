@@ -18,7 +18,7 @@ import { reactive } from "vue";
 // the "routes the body through the sanitizer" test below.
 vi.mock("frappe-ui/editor-style.css", () => ({}));
 vi.mock("frappe-ui", () => ({
-	Badge: { template: "<span/>" },
+	Badge: { name: "Badge", template: "<span/>" },
 	Button: {
 		props: ["label", "disabled", "loading"],
 		template: "<button :disabled='disabled'><slot/></button>",
@@ -90,6 +90,7 @@ vi.mock("@/stores/support", () => ({ useSupportStore: () => storeDouble }));
 
 import SupportThreadPage from "@/pages/support/SupportThreadPage.vue";
 import SupportReplyBox from "@/components/support/SupportReplyBox.vue";
+import SupportTicketPanel from "@/components/support/SupportTicketPanel.vue";
 
 beforeEach(() => {
 	vi.stubGlobal("matchMedia", () => ({
@@ -444,6 +445,31 @@ describe("SupportThreadPage", () => {
 		expect(c.props("disclaimer")).toBe("");
 	});
 
+	it("shows the badge + reopen disclaimer for an out-of-list ticket via thread.meta.status (deep-link fix)", () => {
+		// The complement of the test above: get_thread's meta now DOES carry the
+		// status, so a deep-linked ticket (row=null) shows the correct badge + Resolve
+		// gating + disclaimer instead of a blank header contradicting the panel.
+		storeDouble.tickets = [];
+		storeDouble.thread.messages = [];
+		storeDouble.thread.error = "";
+		storeDouble.thread.meta = { name: "T1", status: "Closed" };
+		storeDouble.isClosed = (s) => s === "Closed";
+		storeDouble.loadThread = vi.fn(async () => {});
+		storeDouble.loadTickets = vi.fn(async () => {});
+		routeTicket = "T1";
+		const w = mount(SupportThreadPage, {
+			global: {
+				stubs: { SupportShell: { template: "<div><slot name='actions'/><slot/></div>" } },
+			},
+		});
+		expect(w.findComponent({ name: "Badge" }).exists()).toBe(true);
+		expect(w.findComponent(SupportReplyBox).props("disclaimer")).toBe(
+			"Replying reopens this ticket."
+		);
+		storeDouble.thread.meta = null; // restore shared state
+		storeDouble.isClosed = () => false;
+	});
+
 	it("shows no disclaimer for an open (non-resolved, non-closed) ticket", () => {
 		// Only the Resolved positive case was covered before; an unconditional
 		// disclaimer (e.g. dropping the ternary's else branch) would pass that
@@ -676,6 +702,29 @@ describe("reply box collapse + panel wiring (redesign)", () => {
 		expect(rb.props("expanded")).toBe(true);
 	});
 
+	it("keeps the box expanded if the user retypes during the post-send refetch window", async () => {
+		// Medium-6 hardening: `cleared` latches right after reply(), but the collapse
+		// fires after uploadTo+loadTickets+loadThread — a follow-up typed in that
+		// window must keep the box open (collapse re-checks supportBodyIsEmpty(draft)).
+		storeDouble.reply = vi.fn(async () => true);
+		storeDouble.loadTickets = vi.fn(async () => {});
+		storeDouble.fingerprintOf = vi.fn(() => "x");
+		let resolveLoad;
+		storeDouble.loadThread = vi.fn(() => new Promise((r) => (resolveLoad = r)));
+		const w = mountWith([]);
+		const rb = replyBox(w);
+		rb.vm.$emit("update:expanded", true);
+		rb.vm.$emit("update:modelValue", "hi");
+		await w.vm.$nextTick();
+		rb.vm.$emit("submit"); // reply resolves + draft clears; send() now awaits loadThread
+		await flushPromises(); // park at the loadThread await (still pending)
+		rb.vm.$emit("update:modelValue", "second thought"); // retype during the refetch
+		await w.vm.$nextTick();
+		resolveLoad();
+		await flushPromises();
+		expect(rb.props("expanded")).toBe(true);
+	});
+
 	it("does NOT collapse the switched-to ticket's box when a reply finishes after a switch", async () => {
 		// The collapse sits inside the `store.thread.ticket === tName` guard, so a T1
 		// reply resolving after the user moved to T2 must not collapse T2's box.
@@ -698,6 +747,27 @@ describe("reply box collapse + panel wiring (redesign)", () => {
 		resolveReply(true);
 		await flushPromises();
 		expect(rb.props("expanded")).toBe(true);
+	});
+
+	it("expands the reply box when the details panel's Reply is triggered", async () => {
+		// The panel is rendered via SupportShell's #aside slot; its `open` event must
+		// expand the composer. The default mountWith stub omits #aside, so use one that
+		// renders it here — otherwise this wiring is entirely untested.
+		storeDouble.thread.meta = { name: "T1", status: "Open" };
+		const w = mount(SupportThreadPage, {
+			global: {
+				stubs: {
+					SupportShell: {
+						template: "<div><slot name='actions'/><slot/><slot name='aside'/></div>",
+					},
+				},
+			},
+		});
+		const panel = w.findComponent(SupportTicketPanel);
+		expect(panel.exists()).toBe(true);
+		panel.vm.$emit("open");
+		await w.vm.$nextTick();
+		expect(w.findComponent(SupportReplyBox).props("expanded")).toBe(true);
 	});
 
 	it("resets the reply box + panel meta on a real ticket switch", async () => {

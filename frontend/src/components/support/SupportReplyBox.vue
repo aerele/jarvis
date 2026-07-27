@@ -29,6 +29,8 @@
 			data-test="reply-bar"
 			class="jv-suprb-bar"
 			@click="emit('update:expanded', true)"
+			@dragover.prevent
+			@drop.prevent
 		>
 			<span class="jv-suprb-avatar" aria-hidden="true">
 				<FeatherIcon name="edit-2" class="size-4" />

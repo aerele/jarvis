@@ -102,6 +102,29 @@ describe("SupportTicketPanel — populated", () => {
 		const w = mountPanel();
 		expect(w.findAll("button").some((b) => b.text() === "Reply")).toBe(false);
 	});
+
+	it("wires agreement_status through: a Paused ticket reads On hold, never Failed", () => {
+		// Pins that the panel forwards agreement_status to BOTH SLA badges (first
+		// response gained it in the High-2 fix), so an awaiting-customer ticket is
+		// never blamed with a red Failed.
+		storeDouble.thread.meta = {
+			...FULL_META,
+			agreement_status: "Paused",
+			first_responded_on: null,
+			resolution_date: null,
+		};
+		const w = mountPanel();
+		const labels = badges(w).map((b) => b.text());
+		expect(labels).toContain("On hold");
+		expect(labels).not.toContain("Failed");
+	});
+
+	it("clears the 60s SLA refresh interval on unmount", () => {
+		const spy = vi.spyOn(global, "clearInterval");
+		mountPanel().unmount();
+		expect(spy).toHaveBeenCalled();
+		spy.mockRestore();
+	});
 });
 
 describe("SupportTicketPanel — no meta yet", () => {

@@ -24,8 +24,15 @@ export function formatDate(d, fmt) {
 // any viewer's timezone, not just the site's. null for empty/invalid input.
 export function toLocalMs(d) {
 	if (d == null || d === "") return null;
-	const dj = dayjsLocal(String(d));
-	return dj && typeof dj.isValid === "function" && dj.isValid() ? dj.valueOf() : null;
+	// dayjsLocal -> dayjs.tz() THROWS RangeError on an unparseable string (before
+	// isValid() can catch it), so a single bad datetime would crash the caller's
+	// render (the SLA panel). Guard it and treat any failure as "no value".
+	try {
+		const dj = dayjsLocal(String(d));
+		return dj && typeof dj.isValid === "function" && dj.isValid() ? dj.valueOf() : null;
+	} catch {
+		return null;
+	}
 }
 
 // The send-side mirror of dayjsLocal: a browser-local datetime (an

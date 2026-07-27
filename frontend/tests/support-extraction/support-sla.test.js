@@ -3,7 +3,9 @@ import { formatDuration, firstResponseBadge, resolutionBadge } from "@/lib/suppo
 
 // Pure logic — inputs are epoch-ms numbers with an injected `nowMs`, so these are
 // deterministic and need no frappe-ui / timezone setup (the panel does the site-tz
-// -> ms conversion via @/utils/datetime before calling in).
+// -> ms conversion via @/utils/datetime before calling in). Each badge is computed
+// PER STAGE from its own deadline fields; `agreementStatus` only supplies the
+// "Paused" (awaiting-customer / on-hold) override.
 
 const NOW = 1_700_000_000_000; // fixed "now"
 const HOUR = 3_600_000;
@@ -25,8 +27,10 @@ describe("formatDuration", () => {
 
 describe("firstResponseBadge", () => {
 	it("Due (orange) when unanswered and the target is still ahead", () => {
-		const b = firstResponseBadge({ firstRespondedOn: null, responseBy: NOW + 2 * HOUR }, NOW);
-		expect(b).toEqual({ label: "Due in 2h 0m", theme: "orange" });
+		expect(firstResponseBadge({ responseBy: NOW + 2 * HOUR }, NOW)).toEqual({
+			label: "Due in 2h 0m",
+			theme: "orange",
+		});
 	});
 	it("Fulfilled (green) with time-to-first-response when answered before target", () => {
 		const creation = NOW;
@@ -44,34 +48,57 @@ describe("firstResponseBadge", () => {
 		expect(b).toEqual({ label: "Failed", theme: "red" });
 	});
 	it("Failed (red) when unanswered and the target has passed", () => {
-		const b = firstResponseBadge({ firstRespondedOn: null, responseBy: NOW - HOUR }, NOW);
-		expect(b).toEqual({ label: "Failed", theme: "red" });
+		expect(firstResponseBadge({ responseBy: NOW - HOUR }, NOW)).toEqual({
+			label: "Failed",
+			theme: "red",
+		});
 	});
-	it("null when there is no first-response SLA at all (no false Failed)", () => {
-		expect(firstResponseBadge({ firstRespondedOn: null, responseBy: null }, NOW)).toBeNull();
+	it("On hold (gray) when unanswered and the SLA is Paused (awaiting the customer)", () => {
+		// Would otherwise read Failed on the stale past deadline — the bug this fixes.
+		expect(
+			firstResponseBadge({ responseBy: NOW - HOUR, agreementStatus: "Paused" }, NOW)
+		).toEqual({ label: "On hold", theme: "gray" });
+	});
+	it("null when there is no first-response SLA at all", () => {
+		expect(firstResponseBadge({}, NOW)).toBeNull();
 		expect(firstResponseBadge(null, NOW)).toBeNull();
 	});
 });
 
 describe("resolutionBadge", () => {
 	it("Due (orange) when unresolved and the target is still ahead", () => {
-		const b = resolutionBadge({ resolutionDate: null, resolutionBy: NOW + DAY }, NOW);
-		expect(b).toEqual({ label: "Due in 1d 0h", theme: "orange" });
+		expect(resolutionBadge({ resolutionBy: NOW + DAY }, NOW)).toEqual({
+			label: "Due in 1d 0h",
+			theme: "orange",
+		});
 	});
-	it("Fulfilled (green) with resolution_time (seconds) when agreement is Fulfilled", () => {
-		const b = resolutionBadge({ agreementStatus: "Fulfilled", resolutionTime: 7200 }, NOW);
-		expect(b).toEqual({ label: "Fulfilled in 2h 0m", theme: "green" });
-	});
-	it("Failed (red) when the agreement failed", () => {
+	it("Fulfilled (green) with resolution_time when resolved before the target", () => {
 		const b = resolutionBadge(
-			{
-				resolutionDate: NOW - HOUR,
-				resolutionBy: NOW - 2 * HOUR,
-				agreementStatus: "Failed",
-			},
+			{ resolutionDate: NOW - HOUR, resolutionBy: NOW, resolutionTime: 7200 },
 			NOW
 		);
+		expect(b).toEqual({ label: "Fulfilled in 2h 0m", theme: "green" });
+	});
+	it("Failed (red) when resolved AFTER the target", () => {
+		const b = resolutionBadge({ resolutionDate: NOW, resolutionBy: NOW - HOUR }, NOW);
 		expect(b).toEqual({ label: "Failed", theme: "red" });
+	});
+	it("Failed (red) when unresolved and the target has passed", () => {
+		expect(resolutionBadge({ resolutionBy: NOW - HOUR }, NOW)).toEqual({
+			label: "Failed",
+			theme: "red",
+		});
+	});
+	it("On hold (gray), NOT Failed, for an awaiting-customer (Paused) ticket — the High-2 fix", () => {
+		// "Replied / Awaiting you" freezes resolution_by in the past with no
+		// resolution_date; the old code rendered a false red "Failed" (blaming us for
+		// the customer's delay). Paused must read as On hold.
+		expect(
+			resolutionBadge(
+				{ resolutionBy: NOW - DAY, resolutionDate: null, agreementStatus: "Paused" },
+				NOW
+			)
+		).toEqual({ label: "On hold", theme: "gray" });
 	});
 	it("null when there is no resolution SLA at all", () => {
 		expect(resolutionBadge({}, NOW)).toBeNull();
