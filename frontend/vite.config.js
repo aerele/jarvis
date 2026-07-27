@@ -25,5 +25,9 @@ export default defineConfig({
 	},
 	optimizeDeps: {
 		include: ["frappe-ui > feather-icons", "showdown", "engine.io-client"],
+		exclude: ["frappe-ui"],
+	},
+	server: {
+		allowedHosts: true,
 	},
 });
