@@ -1,12 +1,12 @@
 <template>
-	<!-- Collapse-to-expand reply wrapper, modelled on Helpdesk's TicketTextEditor:
-	     a one-line "simple input" bar that swaps to the full SupportComposer on
-	     click. The editor is v-if-mounted (NOT hidden) so TipTap/ProseMirror isn't
-	     constructed while collapsed — that's both the perf win and the literal
-	     "simple input that expands". `expanded` is parent-driven (v-model:expanded)
-	     so the host collapses it after a successful send and the details-panel
-	     Reply button can open it, without this component knowing either flow. -->
 	<div class="jv-suprb">
+		<!-- Collapse-to-expand reply wrapper, modelled on Helpdesk's TicketTextEditor:
+		     a one-line "simple input" bar that swaps to the full SupportComposer on
+		     click. The editor is v-if-mounted (NOT hidden) so TipTap/ProseMirror isn't
+		     constructed while collapsed — that's both the perf win and the literal
+		     "simple input that expands". `expanded` is parent-driven (v-model:expanded)
+		     so the host collapses it after a successful send and the details-panel
+		     Reply button can open it. (Comment inside the root to avoid a fragment.) -->
 		<SupportComposer
 			v-if="expanded"
 			:model-value="modelValue"

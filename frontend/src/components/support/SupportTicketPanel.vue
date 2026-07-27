@@ -1,8 +1,9 @@
 <template>
-	<!-- Read-only "Ticket details" panel (Helpdesk TicketCustomerSidebar). Reads
-	     store.thread.meta (carried by get_thread), so it works for deep-linked
-	     tickets too. Every field falls back to "—" when meta is absent/loading. -->
 	<aside class="jv-suptp">
+		<!-- Read-only "Ticket details" panel (Helpdesk TicketCustomerSidebar). Reads
+		     store.thread.meta (carried by get_thread), so it works for deep-linked
+		     tickets too. Every field falls back to "—" when meta is absent/loading.
+		     (Comment kept inside the root to avoid a multi-root fragment.) -->
 		<div class="jv-suptp-head">Ticket details</div>
 
 		<div class="jv-suptp-sec jv-suptp-sec-b">
