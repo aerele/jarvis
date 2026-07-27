@@ -31,9 +31,16 @@ export function supportBodyIsEmpty(html) {
 export function cleanSupportBody(html) {
 	const doc = new DOMParser().parseFromString(html || "", "text/html");
 	let stripped = 0;
-	for (const img of doc.querySelectorAll('img[src^="data:" i], img[src^="blob:" i]')) {
-		img.remove();
-		stripped += 1;
+	// Iterate every <img> and TRIM the src before testing the scheme: a browser
+	// trims leading/trailing whitespace in a URL, so `src=" data:…"` still renders
+	// yet an `[src^="data:"]` selector would miss it — leaking megabytes of base64
+	// downstream with no "removed" toast. Trim + lowercase + startsWith closes that.
+	for (const img of doc.querySelectorAll("img")) {
+		const src = (img.getAttribute("src") || "").trim().toLowerCase();
+		if (src.startsWith("data:") || src.startsWith("blob:")) {
+			img.remove();
+			stripped += 1;
+		}
 	}
 	return { html: DOMPurify.sanitize(doc.body.innerHTML), stripped };
 }

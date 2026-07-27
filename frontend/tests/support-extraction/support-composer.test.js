@@ -96,6 +96,16 @@ describe("SupportComposer — submit gesture", () => {
 		expect(w.emitted("submit")).toBeUndefined();
 	});
 
+	it("does NOT submit on Ctrl+Enter raised from an <input> inside the editor", async () => {
+		// The Link-URL popover's field applies the link on Enter (Vue's .enter fires
+		// on Ctrl+Enter too); without the input-guard the same chord bubbles to the
+		// card handler and sends. The composer's own hidden file input is an in-card
+		// <input> stand-in for that popover field (real TipTap isn't in jsdom).
+		const w = mountComposer({ canSubmit: true });
+		await w.find('input[type="file"]').trigger("keydown", { key: "Enter", ctrlKey: true });
+		expect(w.emitted("submit")).toBeUndefined();
+	});
+
 	it("submits when the (armed) Submit button is clicked, and disables it when disarmed", async () => {
 		const armed = mountComposer({ canSubmit: true, submitLabel: "Send" });
 		expect(submitBtn(armed).props("disabled")).toBe(false);

@@ -54,6 +54,17 @@ describe("cleanSupportBody", () => {
 		expect(stripped).toBe(1);
 	});
 
+	it("strips a data: image whose src has leading/trailing whitespace (browsers trim it)", () => {
+		// A browser trims URL whitespace, so `src=" data:… "` still renders — an
+		// exact `[src^="data:"]` selector would MISS it and leak the base64. The
+		// trim-before-test closes that bypass.
+		const { stripped, html } = cleanSupportBody(
+			'<p><img src=" data:image/png;base64,AAAA "></p>'
+		);
+		expect(stripped).toBe(1);
+		expect(html).not.toContain("data:");
+	});
+
 	it("keeps a normal (non-inline) image untouched", () => {
 		const { html, stripped } = cleanSupportBody('<p><img src="/files/a.png"></p>');
 		expect(stripped).toBe(0);

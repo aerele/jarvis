@@ -175,6 +175,12 @@ function onSubmit() {
 }
 
 function onEditorKeydown(e) {
+	// Ignore Ctrl/Cmd+Enter raised from a real <input> inside the editor — the
+	// Link-URL popover's own field applies the link on Enter (Vue's .enter fires
+	// on Ctrl+Enter too), and without this guard the same chord would ALSO bubble
+	// here and send the reply / create the ticket mid-link-edit. The ProseMirror
+	// editable is a contenteditable <div>, not an <input>, so real typing is unaffected.
+	if (e.target.closest && e.target.closest("input")) return;
 	if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
 		e.preventDefault();
 		onSubmit();

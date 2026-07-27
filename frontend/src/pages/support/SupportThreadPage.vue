@@ -422,14 +422,16 @@ async function send() {
 		if (body) {
 			const ok = await store.reply(tName, body);
 			if (!ok) return; // store already toasted; keep the draft so it isn't lost
-			// I2: only clear if the editor still holds exactly what was sent —
-			// a blanket clear would wipe text the user kept typing during the
-			// in-flight reply. Compare against the RAW snapshot taken at send-start
-			// (not the sanitized body). A SYNTHESIZED body was never in the draft
-			// (the user typed nothing), so it must never clear the editor.
-			// Setting draft = "" drives SupportComposer's :content watch, which
-			// setContent()s the editor empty.
-			if (!synthesized && draft.value === draftSnapshot) draft.value = "";
+			// I2: only clear if the editor STILL holds exactly what was at send-start
+			// — a blanket clear would wipe text the user kept typing during the
+			// in-flight reply. The raw-snapshot compare makes this safe for the
+			// synthesized (files-only) case too: if the draft held only stripped
+			// inline images (body came back empty), the snapshot still matches and we
+			// clear it, so the editor doesn't strand a "removed" image the toast just
+			// said was gone; if the user typed during the flight, it differs and we
+			// keep it. Setting draft = "" drives SupportComposer's :content watch,
+			// which setContent()s the editor empty.
+			if (draft.value === draftSnapshot) draft.value = "";
 		}
 
 		if (staged.length) {

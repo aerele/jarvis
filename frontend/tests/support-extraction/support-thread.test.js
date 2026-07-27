@@ -569,6 +569,55 @@ describe("SupportThreadPage", () => {
 
 		expect(c.props("modelValue")).toBe("please help more");
 	});
+
+	it("clears the reply box after a clean send (draft unchanged during flight)", async () => {
+		// Pins the clear line (SupportThreadPage send()'s `draft.value = ""`):
+		// without it the sent text lingers in the composer, still armed — a trivial
+		// double-send. The stubbed TextEditor can't run TipTap, but the page's draft
+		// ref IS the composer's modelValue, so modelValue resetting to "" proves the
+		// clear ran. (The reference-safe compare is covered by the I2 test above.)
+		storeDouble.reply = vi.fn(async () => true);
+		const w = mountWith([]);
+		const c = w.findComponent(SupportComposer);
+		c.vm.$emit("update:modelValue", "<p>done</p>");
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(c.props("modelValue")).toBe("");
+	});
+
+	it("does NOT arm Send for a blank TipTap doc (<p></p>) with no files", async () => {
+		// The reply draft is HTML now: `.trim()` on "<p></p>" is truthy and would arm
+		// Send, posting an empty reply — the exact bug this whole change fixes, so
+		// canSend MUST gate on supportBodyIsEmpty, not `.trim()`. Reverting canSend to
+		// `!!draft.value.trim()` turns this red.
+		const w = mountWith([]);
+		const c = w.findComponent(SupportComposer);
+		c.vm.$emit("update:modelValue", "<p></p>");
+		await w.vm.$nextTick();
+
+		expect(c.props("canSubmit")).toBe(false);
+	});
+
+	it("clears an image-only draft after a files-only (synthesized) send", async () => {
+		// Fix 5: draft holds only an inline data: image plus a staged file.
+		// prepareSupportBody strips the image -> empty body -> a synthesized files-only
+		// reply; the clear must STILL run (the raw-snapshot matches) so the editor
+		// doesn't strand the very image the "removed images" toast just said was gone.
+		// Re-adding the old `!synthesized` guard on the clear turns this red.
+		storeDouble.reply = vi.fn(async () => true);
+		storeDouble.uploadTo = vi.fn(async (name, files) => files);
+		const w = mountWith([]);
+		const c = w.findComponent(SupportComposer);
+		c.vm.$emit("update:modelValue", '<p><img src="data:image/png;base64,AAAA"></p>');
+		c.vm.$emit("files-added", [{ name: "shot.png", type: "image/png" }]);
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(c.props("modelValue")).toBe("");
+	});
 });
 
 describe("attachment-only Send synthesizes a reply body (fix 1)", () => {
