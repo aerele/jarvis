@@ -204,7 +204,7 @@
 
 						<!-- cards -->
 						<div v-if="board.loading && !board.rows.length" class="py-10 text-center">
-							<LoadingIndicator class="size-5 text-ink-gray-5" />
+							<JvSpinner />
 						</div>
 						<div
 							v-else-if="!board.rows.length"
@@ -461,7 +461,7 @@
 											v-if="expanded[row.name] === 'loading'"
 											class="py-4 text-center"
 										>
-											<LoadingIndicator class="size-4 text-ink-gray-5" />
+											<JvSpinner />
 										</div>
 										<template v-else>
 											<div
@@ -872,7 +872,7 @@
 						</div>
 
 						<div v-if="promo.loading && !promo.rows.length" class="py-10 text-center">
-							<LoadingIndicator class="size-5 text-ink-gray-5" />
+							<JvSpinner />
 						</div>
 						<div
 							v-else-if="!promo.rows.length"
@@ -1043,7 +1043,7 @@
 							v-if="skillPromo.loading && !skillPromo.rows.length"
 							class="py-10 text-center"
 						>
-							<LoadingIndicator class="size-5 text-ink-gray-5" />
+							<JvSpinner />
 						</div>
 						<div
 							v-else-if="!skillPromo.rows.length"
@@ -1263,7 +1263,7 @@
 					</div>
 
 					<div v-if="decided.loading && !decided.rows.length" class="py-8 text-center">
-						<LoadingIndicator class="size-5 text-ink-gray-5" />
+						<JvSpinner />
 					</div>
 					<div
 						v-else-if="!decided.rows.length"
@@ -1343,7 +1343,7 @@
 									v-if="dExpanded[row.name] === 'loading'"
 									class="py-4 text-center"
 								>
-									<LoadingIndicator class="size-4 text-ink-gray-5" />
+									<JvSpinner />
 								</div>
 								<template v-else>
 									<div
@@ -1784,7 +1784,6 @@ import {
 	Dropdown,
 	FeatherIcon,
 	FormControl,
-	LoadingIndicator,
 	Tooltip,
 	confirmDialog,
 	toast,
@@ -1793,6 +1792,7 @@ import { useRouter } from "vue-router";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import SyncPill from "./SyncPill.vue";
 import InsightApplyDialog from "@/components/learning/InsightApplyDialog.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { setChatPrefill } from "@/composables/chatPrefill";
 import { getSkillsAreaCaps } from "@/api/personalise";

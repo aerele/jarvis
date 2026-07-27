@@ -118,7 +118,7 @@
 					</div>
 				</template>
 				<div v-else-if="loading" class="flex h-full items-center justify-center">
-					<LoadingIndicator class="size-5 text-ink-gray-5" />
+					<JvSpinner />
 				</div>
 				<!-- persistent fetch-error state: a failed load must never read as "No runs" -->
 				<div
@@ -187,8 +187,9 @@
 // reload({selectNewest: true}) through the exposed handle so the freshly
 // queued run is surfaced and selected even if a facet would hide it.
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
-import { Badge, Button, FeatherIcon, FormControl, LoadingIndicator, Tooltip } from "frappe-ui";
+import { Badge, Button, FeatherIcon, FormControl, Tooltip } from "frappe-ui";
 import FindingsPanel from "@/pages/agents/FindingsPanel.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiAgents from "@/api/agents";

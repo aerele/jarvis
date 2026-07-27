@@ -308,11 +308,9 @@
 											usually takes under a minute…
 										</p>
 									</div>
-									<div
-										v-if="state.provisioning"
-										class="jv-ob-spinner"
-										aria-hidden="true"
-									></div>
+									<div v-if="state.provisioning" class="jv-ob-provision-spin">
+										<JvSpinner :size="72" />
+									</div>
 									<Banner
 										v-if="state.provisionErr"
 										type="error"
@@ -833,6 +831,7 @@ import { reactive, ref, computed, onMounted, watch } from "vue";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
@@ -2139,21 +2138,15 @@ onMounted(async () => {
 	margin: 0;
 }
 
-/* "Setting up" transition spinner (pay provisioning only - the connect
-   finishing state uses the neural-net animation below). */
-.jv-ob-spinner {
-	width: 32px;
-	height: 32px;
-	margin: 10px auto 0;
-	border-radius: 50%;
-	border: 3px solid var(--surface-3);
-	border-top-color: var(--text);
-	animation: jvObSpin 0.8s linear infinite;
-}
-@keyframes jvObSpin {
-	to {
-		transform: rotate(360deg);
-	}
+/* Centres the provisioning spinner. .jv-ob-body is a plain block, so the
+   spinner it contains has no centring of its own: the previous hand-rolled
+   spinner relied on `margin: 10px auto 0` to centre itself, and JvSpinner is an
+   inline-block with no margin, so without this wrapper it renders hard against
+   the left edge. */
+.jv-ob-provision-spin {
+	display: flex;
+	justify-content: center;
+	margin-top: 24px;
 }
 
 /* "Setting up Jarvis" finishing state: neural-net animation replacing the
@@ -2631,9 +2624,6 @@ onMounted(async () => {
 	.jv-ob-inp,
 	.jv-ob-form :deep(.jvc-field) {
 		transition: none;
-	}
-	.jv-ob-spinner {
-		animation: none;
 	}
 }
 </style>

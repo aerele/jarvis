@@ -57,7 +57,7 @@
 		</div>
 		<!-- loading (AgentsList/AgentActivityTab pattern - never a blank page) -->
 		<div v-else-if="!agent" class="flex flex-1 flex-col items-center justify-center gap-2">
-			<LoadingIndicator class="size-5 text-ink-gray-5" />
+			<JvSpinner />
 			<span class="text-sm text-ink-gray-5">Loading agent…</span>
 		</div>
 
@@ -463,7 +463,6 @@ import {
 	ListHeaderItem,
 	ListRows,
 	ListRowItem,
-	LoadingIndicator,
 	Switch,
 	TimePicker,
 	confirmDialog,
@@ -475,6 +474,7 @@ import CommentsSection from "@/components/doc/CommentsSection.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";

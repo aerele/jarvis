@@ -2,7 +2,7 @@
 	<Dialog v-model="show" :options="{ title: (page && page.title) || 'Wiki page', size: 'xl' }">
 		<template #body-content>
 			<div v-if="loading" class="py-8 text-center">
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 			</div>
 			<template v-else-if="page">
 				<!-- metadata row: type · scope (+target) · slug · updated · flags -->
@@ -197,7 +197,6 @@ import {
 	Button,
 	Dialog,
 	FormControl,
-	LoadingIndicator,
 	Tooltip,
 	toast,
 	confirmDialog,
@@ -213,6 +212,7 @@ import {
 	requestWikiPromotion,
 	myWikiPromotion,
 } from "@/api/wiki";
+import JvSpinner from "@/components/JvSpinner.vue";
 import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 

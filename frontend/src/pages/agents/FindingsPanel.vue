@@ -123,7 +123,7 @@
 			</div>
 
 			<div v-if="loading && !rows.length" class="flex justify-center py-10">
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 			</div>
 			<!-- persistent fetch-error state: a failed load must never read as "No findings" -->
 			<div v-else-if="loadError && !rows.length" class="py-8 text-sm text-ink-red-4">
@@ -298,10 +298,10 @@ import {
 	Button,
 	FeatherIcon,
 	FormControl,
-	LoadingIndicator,
 	Tooltip,
 	toast,
 } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { timeAgo, exactDate, formatDate } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";

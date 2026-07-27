@@ -23,7 +23,7 @@
 		<!-- transcript -->
 		<div ref="scroller" class="min-h-0 flex-1 overflow-y-auto px-4 py-4">
 			<div v-if="loadingTranscript && !bubbles.length" class="flex justify-center py-8">
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 			</div>
 
 			<!-- empty state: nudge toward the natural-language flow -->
@@ -203,7 +203,8 @@
 import { ref, computed, watch, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
-import { Button, FeatherIcon, LoadingIndicator, TabButtons, toast } from "frappe-ui";
+import { Button, FeatherIcon, TabButtons, toast } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import { renderMarkdown } from "@/markdown";

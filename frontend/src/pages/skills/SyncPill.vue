@@ -1,9 +1,9 @@
 <template>
 	<div v-if="pending || failed" class="inline-flex items-center gap-2">
 		<Tooltip v-if="pending" text="Updating your assistant… (restarts briefly, ~30s)">
-			<Badge theme="orange" variant="subtle">
+			<Badge theme="orange" variant="subtle" size="lg">
 				<template #prefix>
-					<LoadingIndicator class="size-3" />
+					<JvSpinner />
 				</template>
 				Applying skills…
 			</Badge>
@@ -37,7 +37,8 @@
 //   checkNow() - read the status and poll if pending (bulk delete - the
 //                server already enqueued the apply, §8.3)
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
-import { Badge, Button, Tooltip, LoadingIndicator, toast } from "frappe-ui";
+import { Badge, Button, Tooltip, toast } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import * as api from "@/api";
 
 function errMsg(e) {
