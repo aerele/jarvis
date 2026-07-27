@@ -102,19 +102,20 @@
 			<!-- Same 820px column as jv-sup-thread-inner, so the reply box aligns
 			     under the conversation instead of stretching full-width. -->
 			<div class="jv-sup-composer-inner">
-				<!-- `busy` is deliberately NOT passed: it swaps Send for a Stop button
-				     that emits `stop`, and support has nothing to stop — a reply is a
-				     single POST, not a stream. A dead Stop control is worse than none.
-				     `canSend` already goes false while sending, which disarms Send. -->
-				<Composer
+				<!-- The SAME rich composer the new-ticket form uses, so the reply
+				     box feels unanimous with it: rich toolbar, Ctrl/Cmd+Enter to
+				     send (Enter = newline). No Stop control — a reply is a single
+				     POST, not a stream; `canSend` disarms Send while sending. -->
+				<SupportComposer
 					v-model="draft"
-					:attachments="pending"
-					:can-send="canSend"
+					:pending="pending"
+					:can-submit="canSend"
+					submit-label="Send"
 					placeholder="Reply to Aerele Support…"
 					:disclaimer="disclaimer"
-					@files-added="(fs) => onFiles(withinSize(fs))"
-					@remove-attachment="removeFile"
 					@submit="send"
+					@files-added="(fs) => onFiles(fs)"
+					@remove-attachment="removeFile"
 				/>
 			</div>
 		</div>
@@ -125,13 +126,14 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { Badge, Button, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
-import Composer from "@/components/chat/Composer.vue";
 import Message from "@/components/chat/Message.vue";
 import SupportShell from "@/components/support/SupportShell.vue";
+import SupportComposer from "@/components/support/SupportComposer.vue";
 import { renderSupportHtml } from "@/lib/supportHtml";
+import { supportBodyIsEmpty, prepareSupportBody } from "@/lib/supportBody";
 import { supportDownloadUrl } from "@/api";
 import { useSupportStore } from "@/stores/support";
-import { useStagedFiles, withinSize } from "@/composables/useStagedFiles";
+import { useStagedFiles } from "@/composables/useStagedFiles";
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 
 // The #avatar slot renders a round human avatar, deliberately unlike Jarvis's
@@ -155,7 +157,12 @@ const ticketName = computed(() => String(route.params.ticket || ""));
 const row = computed(() => store.ticketRow(ticketName.value));
 const badge = computed(() => store.badgeFor(row.value && row.value.status));
 
-const canSend = computed(() => !sending.value && (!!draft.value.trim() || files.value.length > 0));
+// draft is now the editor's HTML (not plain text): a blank TipTap doc is
+// "<p></p>", so `.trim()` would be truthy and arm Send on an empty editor —
+// gate on supportBodyIsEmpty (strips tags + nbsp) instead. Files alone still arm.
+const canSend = computed(
+	() => !sending.value && (!supportBodyIsEmpty(draft.value) || files.value.length > 0)
+);
 
 // Reopen is reply-driven: there is no reopen endpoint, so the composer stays
 // ENABLED on a resolved/closed ticket and says what replying will do. Resolved
@@ -382,7 +389,17 @@ function synthesizedBodyFor(staged) {
 async function send() {
 	if (!canSend.value) return;
 	sending.value = true;
-	const userBody = draft.value.trim();
+	// Clean the editor HTML here (the host owns the send): strip inline data:/blob:
+	// images + DOMPurify. prepareSupportBody returns "" for an empty result, which
+	// is how a files-only reply is detected — NOT `.trim()` (truthy for "<p></p>").
+	const { body: userBody, stripped } = prepareSupportBody(draft.value);
+	if (stripped) {
+		toast.info("Embedded images were removed - add them with the Attach button instead.");
+	}
+	// Snapshot the RAW draft for the reference-safe clear below: the compare must be
+	// against what the editor held at send-start (the raw HTML), so text the user
+	// keeps typing during the in-flight reply is never wiped.
+	const draftSnapshot = draft.value;
 	// Snapshot BEFORE the awaited reply/uploadTo below — see useStagedFiles.
 	const staged = snapshotStaged();
 	// Snapshot the ticket too: `send()` awaits store.reply/uploadTo, and the
@@ -405,12 +422,14 @@ async function send() {
 		if (body) {
 			const ok = await store.reply(tName, body);
 			if (!ok) return; // store already toasted; keep the draft so it isn't lost
-			// I2: only clear if the draft still holds exactly what was posted —
+			// I2: only clear if the editor still holds exactly what was sent —
 			// a blanket clear would wipe text the user kept typing during the
-			// in-flight reply. Same reference-safety idea as the staged files.
-			// A SYNTHESIZED body was never in the draft (the user typed nothing),
-			// so it must never be compared against or clear draft.value.
-			if (!synthesized && draft.value.trim() === body) draft.value = "";
+			// in-flight reply. Compare against the RAW snapshot taken at send-start
+			// (not the sanitized body). A SYNTHESIZED body was never in the draft
+			// (the user typed nothing), so it must never clear the editor.
+			// Setting draft = "" drives SupportComposer's :content watch, which
+			// setContent()s the editor empty.
+			if (!synthesized && draft.value === draftSnapshot) draft.value = "";
 		}
 
 		if (staged.length) {

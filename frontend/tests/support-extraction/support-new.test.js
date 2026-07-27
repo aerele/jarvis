@@ -196,7 +196,7 @@ describe("SupportNewPage", () => {
 		await submitBtn(w).trigger("click");
 		await flushPromises();
 
-		expect(w.findAll(".jv-supn-chip")).toHaveLength(2);
+		expect(w.findAll(".jv-supc-chip")).toHaveLength(2);
 	});
 
 	it("stages every selected file by name, and removes exactly the chip whose X is clicked", async () => {
@@ -210,7 +210,7 @@ describe("SupportNewPage", () => {
 		]);
 		// bug (a): all three stage, each with its real filename — a FileList that
 		// concat()'d as one element would have produced a single nameless chip.
-		expect(w.findAll(".jv-supn-chip").map((c) => c.text())).toEqual([
+		expect(w.findAll(".jv-supc-chip").map((c) => c.text())).toEqual([
 			"first.png",
 			"second.png",
 			"third.png",
@@ -218,8 +218,8 @@ describe("SupportNewPage", () => {
 
 		// bug (b): removing the MIDDLE chip must drop exactly that file, not a
 		// wrong index — removeFile was being handed the key string (a no-op).
-		await w.findAll(".jv-supn-chip")[1].find("button").trigger("click");
-		expect(w.findAll(".jv-supn-chip").map((c) => c.text())).toEqual([
+		await w.findAll(".jv-supc-chip")[1].find("button").trigger("click");
+		expect(w.findAll(".jv-supc-chip").map((c) => c.text())).toEqual([
 			"first.png",
 			"third.png",
 		]);
@@ -243,20 +243,20 @@ describe("SupportNewPage", () => {
 		await card.trigger("paste", {
 			clipboardData: { files: fileList([{ name: "shot.png", type: "image/png" }]) },
 		});
-		expect(w.findAll(".jv-supn-chip").map((c) => c.text())).toEqual(["shot.png"]);
+		expect(w.findAll(".jv-supc-chip").map((c) => c.text())).toEqual(["shot.png"]);
 		expect(toast.info).toHaveBeenCalledTimes(1);
 
 		// a files-less paste (plain text) must pass through untouched
 		toast.info.mockClear();
 		await card.trigger("paste", { clipboardData: { files: fileList([]) } });
-		expect(w.findAll(".jv-supn-chip")).toHaveLength(1);
+		expect(w.findAll(".jv-supc-chip")).toHaveLength(1);
 		expect(toast.info).not.toHaveBeenCalled();
 
 		// drop takes the same route
 		await card.trigger("drop", {
 			dataTransfer: { files: fileList([{ name: "log.txt", type: "text/plain" }]) },
 		});
-		expect(w.findAll(".jv-supn-chip").map((c) => c.text())).toEqual(["shot.png", "log.txt"]);
+		expect(w.findAll(".jv-supc-chip").map((c) => c.text())).toEqual(["shot.png", "log.txt"]);
 	});
 
 	it("strips inline data:/blob: images from the body before sending (they can't render server-side)", async () => {
@@ -278,7 +278,7 @@ describe("SupportNewPage", () => {
 			{ name: "huge.zip", size: 26 * 1024 * 1024 },
 			{ name: "ok.png", type: "image/png", size: 1000 },
 		]);
-		expect(w.findAll(".jv-supn-chip").map((c) => c.text())).toEqual(["ok.png"]);
+		expect(w.findAll(".jv-supc-chip").map((c) => c.text())).toEqual(["ok.png"]);
 		expect(toast.error).toHaveBeenCalled();
 	});
 
@@ -312,7 +312,7 @@ describe("SupportNewPage", () => {
 		]);
 		submitBtn(w).trigger("click"); // create() now awaits createTicket
 		await flushPromises();
-		await w.findAll(".jv-supn-chip")[1].find("button").trigger("click"); // remove drop.png
+		await w.findAll(".jv-supc-chip")[1].find("button").trigger("click"); // remove drop.png
 		resolveCreate("TKT-9");
 		await flushPromises();
 		expect(storeDouble.uploadTo.mock.calls[0][1].map((f) => f.name)).toEqual(["keep.png"]);

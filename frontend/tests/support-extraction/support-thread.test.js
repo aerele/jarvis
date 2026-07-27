@@ -9,13 +9,23 @@ import { reactive } from "vue";
 // "No 'call' export is defined on the mock" for any imported name the factory
 // omits — so leaving it out would break the import of supportDownloadUrl, which
 // these tests deliberately exercise for real.
+// The thread reply is now SupportComposer (a frappe-ui TextEditor + footer), not
+// the chat Composer — so TextEditor must be stubbed (TipTap is too heavy for
+// jsdom) and toast needs `info` (the attach-flow + removed-images notices).
+// dompurify is left REAL: renderSupportHtml's sanitize is exercised for real by
+// the "routes the body through the sanitizer" test below.
+vi.mock("frappe-ui/editor-style.css", () => ({}));
 vi.mock("frappe-ui", () => ({
 	Badge: { template: "<span/>" },
-	Button: { template: "<button><slot/></button>" },
+	Button: {
+		props: ["label", "disabled", "loading"],
+		template: "<button :disabled='disabled'><slot/></button>",
+	},
 	FeatherIcon: { template: "<i/>" },
 	LoadingIndicator: { template: "<i/>" },
+	TextEditor: { name: "TextEditor", props: ["content"], template: "<div class='editor'/>" },
 	call: vi.fn(),
-	toast: { success: vi.fn(), error: vi.fn() },
+	toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
 // useRoute/useRouter are injection-based — global.mocks.$route does NOT feed
@@ -74,6 +84,7 @@ const storeDouble = {
 vi.mock("@/stores/support", () => ({ useSupportStore: () => storeDouble }));
 
 import SupportThreadPage from "@/pages/support/SupportThreadPage.vue";
+import SupportComposer from "@/components/support/SupportComposer.vue";
 
 beforeEach(() => {
 	vi.stubGlobal("matchMedia", () => ({
@@ -309,25 +320,25 @@ describe("SupportThreadPage", () => {
 		// Resolve button here, so the disclaimer spells out both valid next steps
 		// instead of reading as if it contradicts the header.
 		const w = mountWith([], { name: "T1", subject: "x", status: "Resolved" });
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		expect(c.props("disclaimer")).toBe("Resolve to confirm and close, or reply to reopen.");
 	});
 
 	it("shows the plain reopens disclaimer for a ticket the store considers closed (not Resolved)", () => {
 		storeDouble.isClosed = (s) => s === "Closed";
 		const w = mountWith([], { name: "T1", subject: "x", status: "Closed" });
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		expect(c.props("disclaimer")).toBe("Replying reopens this ticket.");
 		storeDouble.isClosed = () => false; // restore the file's default double
 	});
 
 	it("arms Send for an attachment-only reply", () => {
 		const w = mountWith([]);
-		w.findComponent({ name: "Composer" }).vm.$emit("files-added", [
+		w.findComponent(SupportComposer).vm.$emit("files-added", [
 			{ name: "a.png", type: "image/png" },
 		]);
 		return w.vm.$nextTick().then(() => {
-			expect(w.findComponent({ name: "Composer" }).props("canSend")).toBe(true);
+			expect(w.findComponent(SupportComposer).props("canSubmit")).toBe(true);
 		});
 	});
 
@@ -347,7 +358,7 @@ describe("SupportThreadPage", () => {
 			return files;
 		});
 
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("update:modelValue", "here is the log");
 		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
 		await w.vm.$nextTick();
@@ -366,7 +377,7 @@ describe("SupportThreadPage", () => {
 		// nothing in this file resets mocks between tests.
 		storeDouble.uploadTo = vi.fn(async (name, files) => files);
 		const w = mountWith([]);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("update:modelValue", "please help");
 		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
 		await w.vm.$nextTick();
@@ -374,7 +385,7 @@ describe("SupportThreadPage", () => {
 		await flushPromises();
 
 		expect(c.props("modelValue")).toBe("please help");
-		expect(c.props("attachments")).toHaveLength(1);
+		expect(c.props("pending")).toHaveLength(1);
 		expect(storeDouble.uploadTo).not.toHaveBeenCalled();
 	});
 
@@ -388,18 +399,18 @@ describe("SupportThreadPage", () => {
 		let resolveReply;
 		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
 		const w = mountWith([]);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("update:modelValue", "hello");
 		await w.vm.$nextTick();
 		c.vm.$emit("submit");
 		await w.vm.$nextTick();
 
-		expect(c.props("canSend")).toBe(false);
+		expect(c.props("canSubmit")).toBe(false);
 
 		resolveReply(false);
 		await flushPromises();
 
-		expect(c.props("canSend")).toBe(true);
+		expect(c.props("canSubmit")).toBe(true);
 	});
 
 	it("hides the status badge and shows no reopen disclaimer for an out-of-list ticket (fix 3, row=null)", () => {
@@ -422,7 +433,7 @@ describe("SupportThreadPage", () => {
 			},
 		});
 		expect(w.findComponent({ name: "Badge" }).exists()).toBe(false);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		expect(c.props("disclaimer")).toBe("");
 	});
 
@@ -431,7 +442,7 @@ describe("SupportThreadPage", () => {
 		// disclaimer (e.g. dropping the ternary's else branch) would pass that
 		// test and still be wrong for the common case.
 		const w = mountWith([], { name: "T1", subject: "x", status: "Open" });
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		expect(c.props("disclaimer")).toBe("");
 	});
 
@@ -441,7 +452,7 @@ describe("SupportThreadPage", () => {
 		// still needs to retry after a transient upload failure.
 		storeDouble.uploadTo = vi.fn(async () => []); // nothing succeeded
 		const w = mountWith([]);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("files-added", [
 			{ name: "a.png", type: "image/png" },
 			{ name: "b.png", type: "image/png" },
@@ -450,7 +461,7 @@ describe("SupportThreadPage", () => {
 		c.vm.$emit("submit");
 		await flushPromises();
 
-		expect(c.props("attachments")).toHaveLength(2);
+		expect(c.props("pending")).toHaveLength(2);
 	});
 
 	it("clears the previous ticket's messages before a different ticket's fetch resolves (C1)", () => {
@@ -496,7 +507,7 @@ describe("SupportThreadPage", () => {
 		storeDouble.fingerprintOf = vi.fn(() => "x");
 
 		const w = mountWith([]);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("update:modelValue", "please help");
 		c.vm.$emit("files-added", [{ name: "log.txt", type: "text/plain" }]);
 		await w.vm.$nextTick();
@@ -543,7 +554,7 @@ describe("SupportThreadPage", () => {
 		let resolveReply;
 		storeDouble.reply = vi.fn(() => new Promise((r) => (resolveReply = r)));
 		const w = mountWith([]);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("update:modelValue", "please help");
 		await w.vm.$nextTick();
 		c.vm.$emit("submit");
@@ -588,7 +599,7 @@ describe("attachment-only Send synthesizes a reply body (fix 1)", () => {
 		});
 
 		const w = mountWith([]);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("files-added", [{ name: "shot.png", type: "image/png" }]);
 		await w.vm.$nextTick();
 		c.vm.$emit("submit");
@@ -626,7 +637,7 @@ describe("uploadTo returns succeeded File references, not a count (fix 2)", () =
 		);
 
 		const w = mountWith([]);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("files-added", [
 			{ name: "a.png", type: "image/png" },
 			{ name: "b.png", type: "image/png" },
@@ -635,8 +646,8 @@ describe("uploadTo returns succeeded File references, not a count (fix 2)", () =
 		c.vm.$emit("submit");
 		await flushPromises();
 
-		expect(c.props("attachments")).toHaveLength(1);
-		expect(c.props("attachments")[0].file_name).toBe("b.png");
+		expect(c.props("pending")).toHaveLength(1);
+		expect(c.props("pending")[0].file_name).toBe("b.png");
 
 		storeDouble.uploadTo.mockClear();
 		c.vm.$emit("submit");
@@ -668,7 +679,7 @@ describe("settleUpload full-success branch", () => {
 		URL.revokeObjectURL = revoke;
 
 		const w = mountWith([]);
-		const c = w.findComponent({ name: "Composer" });
+		const c = w.findComponent(SupportComposer);
 		c.vm.$emit("files-added", [
 			{ name: "a.png", type: "image/png" },
 			{ name: "b.png", type: "image/png" },
@@ -677,7 +688,7 @@ describe("settleUpload full-success branch", () => {
 		c.vm.$emit("submit");
 		await flushPromises();
 
-		expect(c.props("attachments")).toHaveLength(0);
+		expect(c.props("pending")).toHaveLength(0);
 		expect(revoke).toHaveBeenCalledTimes(2);
 	});
 });
