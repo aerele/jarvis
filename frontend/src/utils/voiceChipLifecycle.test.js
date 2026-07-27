@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createVoiceChunkQueue } from "./voiceChunkQueue.js";
+import { isNearSilent } from "./voiceSilenceGate.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CHAT_VIEW = path.join(HERE, "..", "views", "ChatView.vue");
@@ -291,4 +292,46 @@ test("parity: a stripped gap + a released done clip leave exactly one flagged ch
 		"unresolved",
 		"nothing is at risk: the remaining audio is durably mirrored, so navigation is not blocked"
 	);
+});
+
+// ── the near-silence gate produces NO chip lifecycle at all ─────────────────────
+// The gate itself (threshold, meter, degrade-safety) is proven in voiceSilenceGate.test.js.
+// What belongs HERE is the chip consequence: a dictation pause is not a failed clip, not a
+// retained clip and not an unsaved clip — it must leave the composer's chip row exactly as it
+// found it. A gate that dropped clips into any of those states would swap one hallucinated
+// phrase for a permanent row of "Clip N didn't transcribe" chips after every pause.
+test("a gated pause creates no chip, no placeholder and no guard — unlike a failed clip", async () => {
+	const flush = () => new Promise((r) => setTimeout(r, 0));
+	const asked = [];
+	const gaps = [];
+	const q = createVoiceChunkQueue({
+		transcribe: (clip) => {
+			asked.push(clip.seq);
+			return Promise.resolve("spoken words");
+		},
+		retainUntilSent: true,
+		onGap: (seq) => gaps.push(seq),
+	});
+	// ChatView's micRec.onClip, replicated (voiceSilenceGate.test.js fences the replication).
+	const handoff = (clip) => {
+		if (isNearSilent(clip.peakRms)) return;
+		q.enqueue({ ...clip, conversationId: "c1" });
+	};
+	handoff({ blob: "pause", durationS: 15, peakRms: 0 });
+	await flush();
+	let snap = q.snapshot();
+	assert.deepEqual(asked, [], "a pause is never uploaded, so it can never hallucinate a phrase");
+	assert.equal(snap.failed.length, 0, "…and never becomes a 'didn't transcribe' chip");
+	assert.equal(snap.retained.length, 0, "…nor a retained-clip chip");
+	assert.equal(snap.unpersisted.length, 0, "…nor an unsaved-audio chip");
+	assert.deepEqual(gaps, [], "…and drops no ⟦clip⟧ placeholder into the message");
+	assert.equal(q.hasUnfinishedReason(), null, "…so the leave guard stays disarmed");
+
+	// A clip that was merely QUIET-ish (above the threshold) still gets the full lifecycle: the
+	// gate is not allowed to grow into a general "probably nothing" filter.
+	handoff({ blob: "speech", durationS: 15, peakRms: 0.05 });
+	await flush();
+	snap = q.snapshot();
+	assert.deepEqual(asked, [0], "the audible clip is transcribed as it always was");
+	assert.equal(snap.done, 1);
 });

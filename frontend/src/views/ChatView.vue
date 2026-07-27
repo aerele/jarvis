@@ -3554,6 +3554,7 @@ import { agentName } from "@/branding";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { useChunkedRecorder } from "@/composables/useChunkedRecorder";
 import { createVoiceChunkQueue } from "@/utils/voiceChunkQueue";
+import { isNearSilent } from "@/utils/voiceSilenceGate";
 import {
 	promoteNewChatScope,
 	planRejectedSend,
@@ -7830,7 +7831,21 @@ const micRec = useChunkedRecorder({
 	// The queue stamps `seq` (single authority); we tag each clip with the conversation
 	// it was spoken in so recovery/late commits route to the right chat.
 	onClip: (clip) => {
-		if (voiceQueue) voiceQueue.enqueue({ ...clip, conversationId: _micConvId });
+		if (!voiceQueue) return;
+		// NEAR-SILENCE GATE (voiceSilenceGate.js). whisper hallucinates confident phrases
+		// ("Thank you.") onto silent audio and the provider exposes no no_speech_prob to filter
+		// on, so a clip the recorder MEASURED as a pure pause is dropped right here: never
+		// uploaded, no text, no ⟦clip⟧ placeholder, no chip, not a failure — it simply never
+		// happened. A clip with no measurement (no WebAudio / suspended context) is always
+		// enqueued: absence of measurement must never cost audio.
+		if (isNearSilent(clip.peakRms)) {
+			console.debug("[voice] near-silent clip skipped", {
+				durationS: clip.durationS,
+				peakRms: clip.peakRms,
+			});
+			return;
+		}
+		voiceQueue.enqueue({ ...clip, conversationId: _micConvId });
 	},
 });
 

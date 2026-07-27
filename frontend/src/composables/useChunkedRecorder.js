@@ -11,16 +11,23 @@
 // Cost: a tens-of-ms inter-cycle gap where a boundary word can clip — accepted per
 // the owner spec (chunking is what makes long sessions safe).
 //
-// Each finished clip is handed to opts.onClip({ blob, durationS, mimeType }); the
+// Each finished clip is handed to opts.onClip({ blob, durationS, mimeType, peakRms }); the
 // composer feeds it straight into voiceChunkQueue, which STAMPS the monotonic `seq`
 // (single seq authority — the recorder deliberately does NOT number clips, so it can
 // never collide with recovery on a seq). This composable owns ONLY the browser
-// recorder plumbing (unit-tested logic lives in voiceChunkQueue.js; the recorder
-// itself is validated by the real-mic QA script).
+// recorder plumbing (unit-tested logic lives in voiceChunkQueue.js / voiceSilenceGate.js;
+// the recorder itself is validated by the real-mic QA script).
+//
+// `peakRms` is the loudest RMS an AnalyserNode saw on the SAME MediaStream during THIS
+// clip's cycle — the composer's near-silence gate (voiceSilenceGate.js) reads it to drop a
+// pause-only clip before it can be transcribed into a whisper hallucination. It is OMITTED
+// whenever the meter couldn't measure (no WebAudio, a suspended context), and the gate
+// treats a missing measurement as "transcribe" — the meter never costs audio.
 //
 // There is deliberately NO 300 s hard cap here (unlike useAudioRecorder) — chunking
 // makes long sessions safe, so the mic stays live until the user stops.
 import { reactive, ref } from "vue";
+import { createRmsMeter } from "@/utils/voiceSilenceGate";
 
 const MIME_PREFS = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
 const DEFAULT_CHUNK_MS = 15000;
@@ -46,6 +53,7 @@ export function useChunkedRecorder(opts = {}) {
 
 	let stream = null;
 	let recorder = null;
+	let meter = null; // peak-RMS meter on the same stream; null until start(), never required
 	let chunks = [];
 	let mime = "";
 	// Cancellation generation covering the pending getUserMedia (finding 2). start() captures
@@ -64,6 +72,12 @@ export function useChunkedRecorder(opts = {}) {
 	let settle = null; // resolver for a stop()/cancel() awaiting the final onstop
 
 	function _releaseStream() {
+		try {
+			meter?.stop();
+		} catch (e) {
+			/* already torn down */
+		}
+		meter = null;
 		try {
 			stream?.getTracks().forEach((t) => t.stop());
 		} catch (e) {
@@ -136,6 +150,13 @@ export function useChunkedRecorder(opts = {}) {
 		};
 		recorder.onerror = () => _fail("Recording failed. Try again.");
 		recorder.onstop = _onStop;
+		// Peak RMS is PER CLIP: zero it as the new cycle's recorder starts, so a loud
+		// sentence in clip N never keeps clip N+1's silence from being gated.
+		try {
+			meter?.reset();
+		} catch (e) {
+			/* a meter that misbehaves just stops measuring; it must not break recording */
+		}
 		cycleStartedAt = Date.now();
 		recorder.start(); // NO timeslice — the whole cycle is one self-contained file
 	}
@@ -147,6 +168,14 @@ export function useChunkedRecorder(opts = {}) {
 		const dur = Math.max(0, Math.round((Date.now() - cycleStartedAt) / 1000));
 		const built = chunks.length ? new Blob(chunks, { type: mimeType }) : null;
 		chunks = [];
+		// Read the cycle's peak BEFORE the next _newRecorder() resets it. `undefined` means the
+		// meter couldn't measure this clip — the gate then transcribes it (never-drop-audio).
+		let peakRms;
+		try {
+			peakRms = meter ? meter.peak() : undefined;
+		} catch (e) {
+			peakRms = undefined;
+		}
 
 		if (localAction === "cancel") {
 			// Discard ONLY this in-progress snippet; clips already emitted this session
@@ -160,7 +189,10 @@ export function useChunkedRecorder(opts = {}) {
 		}
 
 		if (built && built.size) {
-			onClip({ blob: built, durationS: dur, mimeType });
+			const clip = { blob: built, durationS: dur, mimeType };
+			// Only carry a REAL measurement — an absent key is what tells the gate "unmeasured".
+			if (typeof peakRms === "number") clip.peakRms = peakRms;
+			onClip(clip);
 		}
 
 		if (localAction === "rotate" && state.value === "recording") {
@@ -223,6 +255,10 @@ export function useChunkedRecorder(opts = {}) {
 		}
 		stream = acquired;
 		mime = _pickMime();
+		// The near-silence meter rides the SAME stream. createRmsMeter NEVER throws — an
+		// unavailable/failing WebAudio returns a meter that measures nothing, and an unmeasured
+		// clip is always transcribed — so recording is never gated on it.
+		meter = createRmsMeter(stream);
 		try {
 			_newRecorder();
 		} catch (e) {
