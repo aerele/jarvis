@@ -162,6 +162,21 @@ export function vueErrorHandler(err) {
 	});
 }
 
+/** Test-only: reset module state so unit tests isolate. Not used at runtime. */
+export function _resetForTests() {
+	_surface = "spa";
+	_offline = false;
+	_installed = false;
+	_reporting = false;
+	_sent = 0;
+	_queue = [];
+	_seen = new Set();
+	if (_timer) {
+		clearTimeout(_timer);
+		_timer = null;
+	}
+}
+
 /** Install the global uncaught-error handlers. Idempotent. */
 export function install(opts = {}) {
 	configure(opts);
