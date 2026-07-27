@@ -10,6 +10,7 @@ import { initSocket } from "./socket";
 // the race on a warm refresh and the install offer silently disappears.
 import "./install";
 import { applyTheme } from "./lib/theme";
+import { applyBrandChrome } from "./branding";
 import "./index.css";
 
 setConfig("resourceFetcher", frappeRequest);
@@ -17,6 +18,8 @@ setConfig("resourceFetcher", frappeRequest);
 // Before mount: applying the saved theme after the first paint would flash the
 // wrong palette, which on an OLED phone is very visible.
 applyTheme();
+// Whitelabel: patch tab title/favicon + repoint the manifest before mount.
+applyBrandChrome();
 
 const app = createApp(App);
 app.use(resourcesPlugin);

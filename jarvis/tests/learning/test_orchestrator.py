@@ -397,6 +397,23 @@ class TestTickBails(FrappeTestCase):
 
 
 class TestTickCreatesRunInWindow(FrappeTestCase):
+	def setUp(self):
+		super().setUp()
+		# Isolation: a committed OPEN (Queued/Running/Paused) Jarvis Pattern Run
+		# leaked by a sibling test (e.g. a manual run left Paused) makes
+		# _schedule_in_window take the resume/skip path instead of creating tonight's
+		# fresh run — so tick() enqueues the leaked run (with a ::hop job_id) and the
+		# count never increases (before != before+1). Clear any open runs so tick
+		# sees the clean slate this test assumes. Production behavior (resume an
+		# unfinished night before opening a new run) is correct and unchanged.
+		for n in frappe.get_all(
+			orchestrator.RUN,
+			filters={"status": ["in", list(orchestrator._OPEN_STATUSES)]},
+			pluck="name",
+		):
+			frappe.delete_doc(orchestrator.RUN, n, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
 	def test_in_window_and_due_creates_run_and_enqueues(self):
 		now = now_datetime()
 		start = (add_to_date(now, hours=-2)).strftime("%H:%M:%S")

@@ -244,7 +244,7 @@
 				</svg>
 				<span
 					><b>No backup yet.</b> If this model fails or hits its limit, chat stops. Add a
-					second one and Jarvis switches over automatically.</span
+					second one and {{ agentName }} switches over automatically.</span
 				>
 			</div>
 
@@ -1570,7 +1570,10 @@ import {
 	providerId,
 	seedRowsFromConfig,
 	defaultSubscriptionModel,
+	subModelSuggestions,
 	apiKeyModelHealth,
+	subscriptionAccountHealth,
+	dirtyAccountHealth,
 	isCodeOnlyPaste,
 	effectiveApiKey,
 	LOCAL_PROVIDER_IDS,
@@ -1580,6 +1583,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import JvCombo from "@/components/JvCombo.vue";
 import DirectSubscriptionCard from "@/components/DirectSubscriptionCard.vue";
 import ProviderLogo from "@/components/ProviderLogo.vue";
+import { agentName } from "@/branding";
 
 const { confirm } = useConfirm();
 
@@ -1607,6 +1611,23 @@ const emit = defineEmits(["saved", "ready", "direct-changed"]);
 // ---- state ---------------------------------------------------------------
 const cfg = ref({ models: [], preset: "", routing_mode: "failover", proxy_active: false });
 const catalog = ref([]);
+// Admin-managed model catalog (jarvis.chat.api.get_model_catalog_ui): api-key
+// suggestions, subscription suggestions, and per-provider defaults. Fetched on
+// mount (see load()) independent of get_chat_ui_settings so this also works in
+// the onboarding wizard, which never calls that. Falls back to the built-in
+// literals below when the fetch fails or hasn't landed yet - never blank.
+const modelCatalog = ref({
+	api_key_models: {},
+	subscription_models: {},
+	default_models: {},
+});
+// Chat-subscription suggestion table derived from the fetched catalog (falls
+// back to pool.js's built-in FALLBACK_SUB_MODELS via subModelSuggestions when
+// empty/unfetched). Passed to every defaultSubscriptionModel(...) call site so
+// an admin-changed subscription default is honoured everywhere, not just here.
+const subscriptionSuggestions = computed(() =>
+	subModelSuggestions(modelCatalog.value.subscription_models)
+);
 const rows = ref([]); // canonical camelCase rows (single source of truth)
 const llmMode = ref("quick"); // "quick" | "preset" | "custom"
 const selectedPreset = ref("");
@@ -1705,31 +1726,19 @@ const pastePlaceholder = (u, ready) => {
 // display LABEL as `provider` (matches seedRowsFromConfig + the desk page).
 const providerOptions = PROVIDER_LABELS.map((p) => p.label);
 
-// ---- model-id suggestions (ported verbatim from jarvis_account.js) -------
-const STATIC_MODEL_SUGGESTIONS = {
-	Anthropic: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-	OpenAI: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o"],
-	"Google Gemini": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-flash"],
-	Mistral: ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest"],
-	Groq: [
-		"llama-3.3-70b-versatile",
-		"openai/gpt-oss-120b",
-		"openai/gpt-oss-20b",
-		"llama-3.1-8b-instant",
-	],
-	"Together AI": ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
-	DeepSeek: ["deepseek-chat"],
-	"Moonshot (Kimi)": ["kimi-k2.6"],
-	"xAI Grok": ["grok-4.5", "grok-4.3", "grok-build-0.1"],
-	"GLM / Z.ai": ["glm-4.6", "glm-4.7"],
-	"GLM / Z.ai (Coding Plan)": ["glm-4.6", "glm-4.7"],
-	OpenRouter: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.5"],
-	"Ollama (local)": ["qwen2.5:3b", "qwen2.5:0.5b", "llama3"],
-	"OpenAI-Compatible": ["claude-sonnet-4-6", "gpt-4o", "qwen2.5:3b", "llama3"],
-};
+// ---- model-id suggestions --------------------------------------------------
+// STATIC_MODEL_SUGGESTIONS (the hardcoded per-provider datalist) is gone: the
+// admin-managed catalog (modelCatalog.value.api_key_models, fetched in load())
+// is now the source, so a model added in the admin desk shows up here with no
+// deploy. See modelSuggestionsForProvider below.
 const PROVIDER_DEFAULTS = {
 	Anthropic: { model: "claude-sonnet-4-6", baseUrl: "https://api.anthropic.com" },
-	OpenAI: { model: "gpt-4o", baseUrl: "https://api.openai.com/v1" },
+	// "gpt-5.5" is this literal's FALLBACK value only, used before the catalog
+	// fetch lands or if it fails - providerDefaultModel() below prefers the
+	// catalog's is_default flag. Previously a stale "gpt-4o" here (fixed
+	// alongside the catalog wiring: PROVIDER_DEFAULTS.OpenAI predates the
+	// gpt-5.x rollout and was never updated).
+	OpenAI: { model: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
 	"Google Gemini": {
 		model: "gemini-2.5-pro",
 		baseUrl: "https://generativelanguage.googleapis.com",
@@ -1760,6 +1769,15 @@ const PROVIDER_DEFAULTS = {
 function catalogVendorLabel(vid) {
 	return vid === "gemini" ? "Google Gemini" : providerLabel(vid);
 }
+// The api-key-tier model preselected for a provider. Prefers the admin-managed
+// catalog's is_default flag; falls back to the PROVIDER_DEFAULTS literal when
+// the catalog has no default for this label (fetch still pending, failed, or
+// the label has no api-key rows at all).
+function providerDefaultModel(label) {
+	const rows = (modelCatalog.value.api_key_models || {})[label] || [];
+	const flagged = rows.find((m) => m.is_default);
+	return (flagged && flagged.model_id) || (PROVIDER_DEFAULTS[label] || {}).model || "";
+}
 function modelSuggestionsForProvider(provider) {
 	const label = providerLabel(provider || "");
 	const out = [];
@@ -1771,8 +1789,8 @@ function modelSuggestionsForProvider(provider) {
 			if (catalogVendorLabel(m.provider) === label) push(m.model);
 		})
 	);
-	(STATIC_MODEL_SUGGESTIONS[label] || []).forEach(push);
-	push((PROVIDER_DEFAULTS[label] || {}).model);
+	((modelCatalog.value.api_key_models || {})[label] || []).forEach((m) => push(m.model_id));
+	push(providerDefaultModel(label));
 	return out;
 }
 
@@ -2255,7 +2273,7 @@ async function removeDirect() {
 	if (
 		!(await confirm({
 			title: "Disconnect chat subscription?",
-			message: "Jarvis chat will stop working until you reconnect.",
+			message: `${agentName} chat will stop working until you reconnect.`,
 			confirmLabel: "Disconnect",
 			danger: true,
 		}))
@@ -2324,7 +2342,7 @@ function setCredType(m, type) {
 		// invalid one). validatePool + save still REQUIRE a model id, so derive it from
 		// the chosen provider. Dropping this would make every subscription save fail
 		// validation with "model is required".
-		m.model = defaultSubscriptionModel(m.upstream);
+		m.model = defaultSubscriptionModel(m.upstream, subscriptionSuggestions.value);
 	} else {
 		// Toggling back to API key: drop the subscription's model id so it doesn't
 		// linger under an API-key provider it does not belong to (a "gpt-5.5" left on
@@ -2332,7 +2350,7 @@ function setCredType(m, type) {
 		// the upstream). This used to be gated on singleMode -- but the SETTINGS editor
 		// hides the subscription model field too, so it needs the same reset; without it
 		// the stale id is invisible AND unsavable-by-hand.
-		m.model = (PROVIDER_DEFAULTS[m.provider] || {}).model || "";
+		m.model = providerDefaultModel(m.provider);
 	}
 }
 function onProviderChange(m, newProvider) {
@@ -2345,7 +2363,7 @@ function onProviderChange(m, newProvider) {
 	// not whatever model was there before. Providers with no default model
 	// (OpenAI-Compatible / vLLM) clear the field so the user types their own.
 	const d = PROVIDER_DEFAULTS[m.provider] || {};
-	m.model = d.model || "";
+	m.model = providerDefaultModel(m.provider);
 	m.baseUrl = d.baseUrl || "";
 	// A stored key (hasKey) belongs to the OLD provider's key_ref, not this one -
 	// carrying it forward would either merge the wrong provider's secret on save
@@ -2368,7 +2386,7 @@ function onUpstreamChange(m) {
 	// it needs the same derivation. Changing provider must also clear the accounts:
 	// an OAuth account is authorized against ONE provider, so keeping OpenAI accounts
 	// on a row switched to Anthropic would ship a pool whose credentials can't serve it.
-	m.model = defaultSubscriptionModel(m.upstream);
+	m.model = defaultSubscriptionModel(m.upstream, subscriptionSuggestions.value);
 	m.accounts = [];
 	m._connect = blankConnect();
 }
@@ -2435,20 +2453,54 @@ function firstWarningMessage() {
 	return (sync.value.warnings && sync.value.warnings[0] && sync.value.warnings[0].message) || "";
 }
 // Honest model health: the connected-account dot + label for a model row.
-// Subscriptions reflect the fleet's last (pool-wide) subscription-probe result;
-// api-key rows reflect their own per-model verdict from the last apply
-// (contract 1.11 model_statuses). Onboarding (singleMode) never shows this - always neutral.
+// Subscriptions reflect the fleet's last (pool-wide) subscription-probe result via
+// subscriptionAccountHealth (@/llm/pool.js, shared with onboarding below); api-key
+// rows reflect their own per-model verdict from the last apply (contract 1.11
+// model_statuses).
+//
+// Onboarding (singleMode) USED to hardcode {level:"neutral"} unconditionally here,
+// before looking at any real signal - and the CSS painted "neutral" the exact same
+// green as a positively-verified "ok", so an unverified, out-of-quota account
+// rendered identically to a healthy one (2026-07-23 trace: the customer saw a green
+// dot + "Account connected" for a ChatGPT account that had no quota left). Fixed by
+// actually reading sync.value.subscription_status in both modes now.
 function accountHealth(m) {
-	if (singleMode.value) return { level: "neutral" };
 	if (!m) return { level: "ok" };
-	// Config changed but not yet (re)applied - the last probe result no longer
-	// describes what's about to be saved, so don't assert a stale health.
-	if (dirty.value || sync.value.pending) return { level: "neutral" };
-	// api-key rows carry a PER-MODEL verdict (contract 1.11 model_statuses), probed in
-	// isolation, so each shows its own health instead of the presence-only "key set" that
-	// once made a dead model look identical to a healthy one.
+	// Config changed but not yet (re)applied, or the last save is still being applied -
+	// the last probe result no longer describes what's about to be saved, so it can't
+	// be asserted verbatim. dirtyAccountHealth (@/llm/pool.js) is what decides how that
+	// downgrades a settled health into what the dot actually shows - see its doc for
+	// why a settled "ok" gets its own "pending" treatment instead of collapsing into
+	// the same grey a never-verified row shows (PR #410 review finding 2).
+	return dirtyAccountHealth(settledAccountHealth(m), dirty.value || sync.value.pending);
+}
+// The health accountHealth() would show if the pool were clean and no apply were in
+// flight - i.e. purely from the last real signal, with no regard for whether that
+// signal still describes what's about to be saved. Split out so dirtyAccountHealth
+// (@/llm/pool.js) has a settled value to compare "what did we last actually measure"
+// against "is that measurement stale".
+function settledAccountHealth(m) {
 	if (m.credentialType !== "subscription") {
+		// api-key rows carry a PER-MODEL verdict (contract 1.11 model_statuses), probed
+		// in isolation, so each shows its own health instead of the presence-only "key
+		// set" that once made a dead model look identical to a healthy one. Onboarding
+		// only ever renders the accounts/subscription branch below (its single api-key
+		// row has no "Connected accounts" chip list to hang a dot on), but this stays
+		// mode-agnostic for whenever that changes.
 		return apiKeyModelHealth(m, sync.value.model_statuses);
+	}
+	if (singleMode.value) {
+		// Onboarding's one connected account skips the failover-list's multi-row
+		// disambiguation below (there is only ever one row here) but must NOT inherit
+		// its "no verdict yet -> quiet green" default: right after OAuth paste-back,
+		// BEFORE "Start chatting" even runs save_llm_pool, sync.value is whatever the
+		// LAST applied config's status was - typically nothing at all for a brand-new
+		// tenant - so degrading that to green here is exactly the bug above. knownGood
+		// stays false so green is earned only by an explicit "verified".
+		return subscriptionAccountHealth(sync.value.subscription_status, {
+			knownGood: false,
+			warningDetail: firstWarningMessage(),
+		});
 	}
 	// sync.subscription_status is POOL-WIDE, not per-row: the fleet probes the pool's
 	// subscription credential and returns ONE verdict. Painting it on every subscription
@@ -2458,26 +2510,12 @@ function accountHealth(m) {
 	// neutral rather than assert something we did not measure.
 	const subRows = rows.value.filter((r) => r.credentialType === "subscription");
 	if (subRows.length > 1) return { level: "neutral" };
-	const status = sync.value.subscription_status;
-	if (status === "unverified") {
-		return {
-			level: "warn",
-			label: "Not accepting requests",
-			title:
-				firstWarningMessage() ||
-				"This subscription rejected a test request — reconnect to restore chat.",
-		};
-	}
-	if (status === "unchecked") {
-		return {
-			level: "unchecked",
-			label: "Not verified yet",
-			title: "We couldn't confirm this subscription is active — it will be re-checked on the next apply.",
-		};
-	}
-	// "verified", "not_applicable", "", or undefined (backend without the field) -
-	// all degrade to today's quiet green.
-	return { level: "ok" };
+	// knownGood defaults true here: an absent verdict on the settings editor can mean
+	// an EXISTING, previously-working pool that a pre-1.11 fleet just didn't report on -
+	// unlike onboarding, that has actually been proven to work before.
+	return subscriptionAccountHealth(sync.value.subscription_status, {
+		warningDetail: firstWarningMessage(),
+	});
 }
 // Open the connect panel WITHOUT starting OAuth.
 //
@@ -2501,7 +2539,7 @@ async function startConnect(m, reconnectIdx = null, opts = {}) {
 	// Simplified editor hides the model field - make sure a subscription row always
 	// carries a model id so the connect flow never dead-ends on an unfillable field.
 	if (singleMode.value && m.credentialType === "subscription" && !(m.model || "").trim()) {
-		m.model = defaultSubscriptionModel(m.upstream);
+		m.model = defaultSubscriptionModel(m.upstream, subscriptionSuggestions.value);
 	}
 	if (!(m.model || "").trim()) {
 		m._connect = {
@@ -2752,7 +2790,7 @@ function seedRows(config) {
 		// the editors use, so such a row is repairable instead of permanently stuck.
 		const model =
 			r.credentialType === "subscription" && !(r.model || "").trim()
-				? defaultSubscriptionModel(upstream)
+				? defaultSubscriptionModel(upstream, subscriptionSuggestions.value)
 				: r.model;
 		return {
 			...r,
@@ -2830,10 +2868,22 @@ async function load() {
 	} catch (e) {
 		/* non-fatal */
 	}
+	// Onboarding (singleMode) never renders the preset picker (modes=['quick']
+	// hides the "From a preset" tab, which is disabled/"Soon" anyway) and
+	// nothing in the singleMode branch reads `catalog`, so skip the fetch
+	// there. The Account/Settings editor (!singleMode) still loads it for
+	// resilient-by-default backups (expandApiKeyBackups) and the preset tab.
+	if (!singleMode.value) {
+		try {
+			catalog.value = (await api.getPresetCatalog()) || [];
+		} catch (e) {
+			/* backend bundled fallback */
+		}
+	}
 	try {
-		catalog.value = (await api.getPresetCatalog()) || [];
+		modelCatalog.value = (await api.getModelCatalogUi()) || modelCatalog.value;
 	} catch (e) {
-		/* backend bundled fallback */
+		/* built-in literal fallbacks below cover this */
 	}
 }
 
@@ -3153,17 +3203,29 @@ defineExpose({ save });
 	background: var(--green);
 }
 /* Option A "honest model health" - dot color reflects the fleet's last
-   subscription probe. --ok/--neutral both render the pre-existing green so a
-   backend without the field (or a config mid-edit) looks exactly as before. */
-.jv-pool-dot--ok,
-.jv-pool-dot--neutral {
+   subscription probe. --neutral now shares --unchecked's grey, NOT --ok's green:
+   "nothing known yet" and "not verified yet" are the same customer-facing state, and
+   painting neutral green is exactly how an unverified, out-of-quota account got shown
+   as healthy before anyone had checked it (2026-07-23 trace). Green is reserved for an
+   explicit --ok verdict only. */
+.jv-pool-dot--ok {
 	background: var(--green);
 }
 .jv-pool-dot--warn {
 	background: var(--amber);
 }
+.jv-pool-dot--neutral,
 .jv-pool-dot--unchecked {
 	background: var(--text-3);
+}
+/* A settled "ok" row caught mid-edit or mid-apply (accountHealth's dirty/pending
+   branch) - deliberately NOT --text-3 grey. Sharing that colour with --neutral would
+   make "previously verified, about to be re-checked" indistinguishable from "never
+   verified at all", which is the exact regression this rule exists to avoid (PR #410
+   review finding 2). --link is the one sanctioned "in progress" blue elsewhere in this
+   app (see theme.js) - calm, not alarming, and visibly not the unproven grey. */
+.jv-pool-dot--pending {
+	background: var(--link);
 }
 /* flex: none + a cap, not 0 1 auto: the label can now carry a provider's own error detail
    (apiKeyModelHealth's `detail`, e.g. a GLM/Z.ai balance message) instead of always being one
@@ -3183,6 +3245,9 @@ defineExpose({ save });
 }
 .jv-pool-acct-health--unchecked {
 	color: var(--text-3);
+}
+.jv-pool-acct-health--pending {
+	color: var(--link);
 }
 .jv-pool-acctacts {
 	margin-left: auto;

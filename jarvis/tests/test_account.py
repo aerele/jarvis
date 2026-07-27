@@ -145,11 +145,56 @@ class TestAdminChatGate(FrappeTestCase):
 	is_ready_for_chat. Fail-open, v1-tolerant, positive verdict cached ~2 min.
 	admin_client.get_connection is mocked."""
 
+	# The gate now mirrors the release notice onto Jarvis Settings as a side
+	# effect (persist({}) when the mock carries none), so snapshot/restore those
+	# fields to avoid clobbering a real site's operator state.
+	_RELEASE_FIELDS = (
+		"release_notice_active",
+		"latest_jarvis_version",
+		"release_notice_message",
+	)
+
 	def setUp(self):
 		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+		s = frappe.get_single("Jarvis Settings")
+		self._rn_snap = {f: s.get(f) for f in self._RELEASE_FIELDS}
 
 	def tearDown(self):
 		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+		s = frappe.get_single("Jarvis Settings")
+		for f, v in self._rn_snap.items():
+			s.db_set(f, v)
+		frappe.db.commit()
+
+	def test_release_notice_persisted_on_gate(self):
+		# The gate mirrors an active notice so boot can read it; the returned
+		# verdict shape is unchanged (release_notice never rides the gate reply).
+		notice = {"active": True, "version": "9.9.9", "message": "Please update"}
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={"chat_readiness": "Ready", "release_notice": notice},
+		):
+			out = account._admin_chat_gate()
+		self.assertEqual(out, {"ready": True, "reason": None, "billing_notice": {}})
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.release_notice_active, 1)
+		self.assertEqual(s.latest_jarvis_version, "9.9.9")
+		self.assertEqual(s.release_notice_message, "Please update")
+
+	def test_release_notice_cleared_on_gate(self):
+		"""The transition that unblocks an updated tenant: admin stops sending a
+		notice, so the mirror must zero rather than keep the stale block up."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("release_notice_active", 1)
+		s.db_set("latest_jarvis_version", "9.9.9")
+		s.db_set("release_notice_message", "stale")
+		frappe.db.commit()
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
+			account._admin_chat_gate()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.release_notice_active, 0)
+		self.assertEqual(s.release_notice_message, "")
 
 	def test_blocks_when_admin_not_ready(self):
 		with patch.object(

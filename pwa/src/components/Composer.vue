@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref } from "vue";
+import { agentName } from "@/branding";
 
 // Attachments + dictation + send/stop. Split out of ChatView so the thread
 // screen stays about the thread.
@@ -8,7 +9,7 @@ const props = defineProps({
 	sending: { type: Boolean, default: false },
 	attachments: { type: Array, default: () => [] },
 	micEnabled: { type: Boolean, default: false },
-	placeholder: { type: String, default: "Message Jarvis…" },
+	placeholder: { type: String, default: () => `Message ${agentName}…` },
 });
 const emit = defineEmits(["update:modelValue", "send", "stop", "attach", "remove", "mic"]);
 

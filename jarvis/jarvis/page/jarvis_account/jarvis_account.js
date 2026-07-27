@@ -17,9 +17,16 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 
 	// LLM provider defaults - mirror the onboarding wizard's PROVIDER_DEFAULTS
 	// so the section behaves identically there and here.
+	//
+	// The admin-managed catalog (api_key_models, fetched via get_chat_ui_settings
+	// below) carries no base-URL data, so `.baseUrl` here stays the source of
+	// truth. `.model` is this literal's FALLBACK only - providerDefaultModel()
+	// below prefers the catalog's is_default flag, which also fixes this file's
+	// own copy of the stale "gpt-4o" OpenAI default (see LlmPoolEditor.vue's
+	// identical fix).
 	const PROVIDER_DEFAULTS = {
 		Anthropic: { model: "claude-sonnet-4-6", baseUrl: "https://api.anthropic.com" },
-		OpenAI: { model: "gpt-4o", baseUrl: "https://api.openai.com/v1" },
+		OpenAI: { model: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
 		"Google Gemini": {
 			model: "gemini-2.5-pro",
 			baseUrl: "https://generativelanguage.googleapis.com",
@@ -79,42 +86,31 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 	// pickable while arbitrary IDs stay typeable (openai_compat / Ollama / shim
 	// need custom model ids). Suggestions are sourced per provider:
 	//   1) the already-loaded preset catalog (models grouped by vendor id), then
-	//   2) a small static fallback for providers the catalog omits, then
+	//   2) the admin-managed catalog (apiKeyModels, from get_chat_ui_settings), then
 	//   3) the provider's default model. Deduped, catalog-first.
-	// Static fallback keyed by the provider dropdown LABEL.
-	const STATIC_MODEL_SUGGESTIONS = {
-		Anthropic: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-		OpenAI: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o"],
-		"Google Gemini": ["gemini-2.5-pro", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
-		Mistral: ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest"],
-		Groq: [
-			"llama-3.3-70b-versatile",
-			"openai/gpt-oss-120b",
-			"openai/gpt-oss-20b",
-			"llama-3.1-8b-instant",
-		],
-		"Together AI": ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
-		DeepSeek: ["deepseek-chat"],
-		"Moonshot (Kimi)": ["kimi-k2.6"],
-		"xAI Grok": ["grok-4.5", "grok-4.3", "grok-build-0.1"],
-		"GLM / Z.ai": ["glm-4.6", "glm-4.7"],
-		"GLM / Z.ai (Coding Plan)": ["glm-4.6", "glm-4.7"],
-		OpenRouter: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.5"],
-		"Ollama (local)": ["qwen2.5:3b", "qwen2.5:0.5b", "llama3"],
-		"OpenAI-Compatible": ["claude-sonnet-4-6", "gpt-4o", "qwen2.5:3b", "llama3"],
-		// vLLM (local): no useful default → plain free-text input.
-	};
-	// Subscription rows suggest the upstream's chat models (keyed by upstream id).
-	const SUB_MODEL_SUGGESTIONS = {
-		openai: ["gpt-5.5", "gpt-5.4"],
-		google: ["gemini-2.5-pro", "gemini-3.5-flash"],
-	};
+	//
+	// STATIC_MODEL_SUGGESTIONS and SUB_MODEL_SUGGESTIONS (the old hardcoded
+	// per-provider datalists) are gone: a model added in the admin desk now
+	// shows up here with no deploy. SUB_MODEL_SUGGESTIONS previously carried
+	// only openai/google, so a tenant on a Grok or Kimi subscription saw no
+	// suggestions at all on this page; subscriptionModels (already fetched
+	// dynamically, see loadInitial) carries all four.
+	//
 	// Preset-catalog vendor ids -> provider dropdown label. The catalog uses
 	// "gemini"; the dropdown label is "Google Gemini" (stored id "google"), so
 	// alias both to the same label. Others fall through to providerLabel.
 	function catalogVendorLabel(vid) {
 		if (vid === "gemini") return "Google Gemini";
 		return providerLabel(vid);
+	}
+	// The api-key-tier model preselected for a provider. Prefers the admin-managed
+	// catalog's is_default flag; falls back to the PROVIDER_DEFAULTS literal when
+	// the catalog has no default for this label (fetch failed, or no api-key rows
+	// at all for it).
+	function providerDefaultModel(label) {
+		const rows = apiKeyModels[label] || [];
+		const flagged = rows.find((m) => m.is_default);
+		return (flagged && flagged.model_id) || (PROVIDER_DEFAULTS[label] || {}).model || "";
 	}
 	// Suggested model ids for an API-key row's provider (label or id).
 	function modelSuggestionsForProvider(provider) {
@@ -128,13 +124,23 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 				if (catalogVendorLabel(m.provider) === label) push(m.model);
 			})
 		);
-		(STATIC_MODEL_SUGGESTIONS[label] || []).forEach(push);
-		push((PROVIDER_DEFAULTS[label] || {}).model);
+		(apiKeyModels[label] || []).forEach((m) => push(m.model_id));
+		push(providerDefaultModel(label));
 		return out;
 	}
+	// Upstream id (openai/google/xai/kimi) -> the subscription-surface provider
+	// LABEL subscriptionModels is keyed by (get_chat_ui_settings /
+	// jarvis/_subscription_models.py). Mirrors LlmPoolEditor.vue's
+	// UPSTREAM_OAUTH_PROVIDER so the two never drift.
+	const UPSTREAM_TO_SUB_LABEL = {
+		openai: "OpenAI",
+		google: "Google Gemini",
+		xai: "xAI Grok",
+		kimi: "Kimi (Moonshot)",
+	};
 	// Suggested model ids for a subscription row's chosen upstream.
 	function subModelSuggestions(upstream) {
-		return SUB_MODEL_SUGGESTIONS[upstream] || [];
+		return subscriptionModels[UPSTREAM_TO_SUB_LABEL[upstream] || ""] || [];
 	}
 	// A <datalist> of model-id suggestions. Empty list → the bound input just
 	// behaves as a plain free-text field.
@@ -189,6 +195,10 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 	const CODE_ONLY_PASTE_PROVIDERS = ["xAI Grok"];
 	const isCodeOnlyPaste = (p) => CODE_ONLY_PASTE_PROVIDERS.indexOf(p) !== -1;
 	let defaultModels = {};
+	// Api-key-tier suggestions (provider label -> [{model_id, label, is_default}]),
+	// same get_chat_ui_settings response as subscriptionModels/defaultModels above.
+	// Replaces the old hardcoded STATIC_MODEL_SUGGESTIONS; see modelSuggestionsForProvider.
+	let apiKeyModels = {};
 	// Preset failover ladders (jarvis.onboarding.get_preset_catalog). Fetched in
 	// loadInitial alongside the pool config so the Preset tab is populated before
 	// the user opens it. Empty on fetch failure → Preset tab shows a fallback line.
@@ -304,6 +314,7 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 					const cui = (chatUi && chatUi.message) || {};
 					subscriptionModels = cui.subscription_models || {};
 					defaultModels = cui.default_models || {};
+					apiKeyModels = cui.api_key_models || {};
 					presetCatalog = (catalog && catalog.message) || [];
 					// First-paint seed: pick the canonical default for the
 					// initial subProvider so render() doesn't show an empty
@@ -613,7 +624,7 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 
 	function renderApiKeyPanel(editable, isActiveMode) {
 		const provider = settingsLocal.llm_provider || "Anthropic";
-		const model = settingsLocal.llm_model || (PROVIDER_DEFAULTS[provider] || {}).model || "";
+		const model = settingsLocal.llm_model || providerDefaultModel(provider);
 		const base =
 			settingsLocal.llm_base_url || (PROVIDER_DEFAULTS[provider] || {}).baseUrl || "";
 		const sync = settingsLocal.last_sync_status || "";
@@ -1490,13 +1501,14 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 			const i = +$(this).data("i");
 			const p = $(this).val();
 			const d = PROVIDER_DEFAULTS[p] || {};
+			const defaultModel = providerDefaultModel(p);
 			const row = ui.customRows[i] || {};
 			// A stored key (has_key) belongs to the OLD provider's key_ref - carry it
 			// forward and a switch to Ollama/vLLM with no retyped key would still send
 			// a blank api_key while has_key=true, hitting the exact "blank api_key"
 			// rejection this whole editor exists to avoid for local providers.
 			const patch = { provider: p, has_key: false, apiKey: "" };
-			if (!(row.model || "").trim() && d.model) patch.model = d.model;
+			if (!(row.model || "").trim() && defaultModel) patch.model = defaultModel;
 			if (!(row.baseUrl || "").trim() && d.baseUrl) patch.baseUrl = d.baseUrl;
 			ui.customRows[i] = Object.assign({}, row, patch);
 			rerenderAiCard(editable);
@@ -1888,7 +1900,7 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 		$prov.on("change", () => {
 			const p = $prov.val();
 			const d = PROVIDER_DEFAULTS[p] || {};
-			$body.find("#ja-model").val(d.model || "");
+			$body.find("#ja-model").val(providerDefaultModel(p));
 			$body.find("#ja-base").val(d.baseUrl || "");
 		});
 		$body.find("#ja-llm-save").on("click", () => {
@@ -2069,9 +2081,34 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 						? `<button class="ja-btn ja-btn-ghost" id="ja-cta-reauth" data-action="reauth">Set up auto-renewal</button>`
 						: ""
 				}
+				${
+					// A cheaper plan is available and none is scheduled yet. Applies
+					// at the next cycle, so it's a quiet ghost action, not a headline.
+					(account.downgrade_plans || []).length && !account.scheduled_plan
+						? `<button class="ja-btn ja-btn-ghost" id="ja-cta-downgrade" data-action="downgrade">Switch to a smaller plan</button>`
+						: ""
+				}
 			</div>
+			${renderScheduledSwitch()}
 			<div class="ja-err" id="ja-billing-err"></div>
 		</div>`;
+	}
+
+	// Both shapes are undoable, but they cost differently: an Annual switch is a
+	// plain flag we clear, while a Monthly one already moved the mandate to the
+	// cheaper plan (the old mandate is released and terminal at Razorpay), so
+	// keeping the current plan means authorising a replacement at its price.
+	// Say which one they're in rather than springing the Checkout on them.
+	function renderScheduledSwitch() {
+		if (!account.scheduled_plan) return "";
+		const name = esc(account.scheduled_plan_name || account.scheduled_plan);
+		const on = account.scheduled_plan_on
+			? " on " + esc(String(account.scheduled_plan_on).split(" ")[0])
+			: "";
+		const cost = account.scheduled_downgrade_revocable
+			? ""
+			: " Keeping it means setting up auto-renewal again at your current price.";
+		return `<p class="ja-sub" style="margin-top:8px">Switching to ${name}${on}. You keep your current plan until then.${cost}</p><button class="ja-btn ja-btn-ghost" id="ja-cta-keep" data-action="keep-plan">Keep current plan</button>`;
 	}
 
 	// Only suppress renewal when the server explicitly refuses it. An older
@@ -2081,34 +2118,44 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 		return account.can_renew !== false;
 	}
 
+	// The autopay wording names the actual renewal date, which the customer
+	// otherwise has to hunt for in the plan card above.
+	function autoRenewNote() {
+		const end = account.current_period_end
+			? String(frappe.datetime.str_to_user(account.current_period_end)).split(" ")[0]
+			: "";
+		return end
+			? `Your plan renews automatically on ${end} using your saved payment method. There's nothing to pay now.`
+			: "Your plan renews automatically using your saved payment method. There's nothing to pay now.";
+	}
+
 	function primaryCta(sub) {
 		const upgrade = (account.upgrade_plans || []).length > 0;
 		switch (sub) {
 			case "Active":
-				return upgrade
-					? {
-							action: "upgrade",
-							label: "Upgrade plan",
-							heading: "Want more capacity?",
-							subtitle:
-								"Move to a higher plan - you only pay the prorated difference for the remaining period.",
-					  }
-					: canRenew()
-					? {
-							action: "renew",
-							label: "Renew now",
-							heading: "Renew early",
-							subtitle: "Add another billing cycle to your current plan.",
-					  }
-					: {
-							// renew() refuses a manual order alongside a live mandate
-							// (double charge). Nothing to sell here.
-							action: "",
-							label: "",
-							heading: "Auto-renewal is on",
-							subtitle:
-								"Your plan renews automatically - there is nothing to pay right now.",
-					  };
+				if (upgrade)
+					return {
+						action: "upgrade",
+						label: "Upgrade plan",
+						heading: "Want more capacity?",
+						subtitle:
+							"Move to a higher plan - you only pay the prorated difference for the remaining period.",
+					};
+				if (canRenew())
+					return {
+						action: "renew",
+						label: "Renew now",
+						heading: "Renew early",
+						subtitle: "Add another billing cycle to your current plan.",
+					};
+				// renew() refuses a manual order alongside a live mandate (double
+				// charge). Nothing to sell here - say when it renews instead.
+				return {
+					action: "",
+					label: "",
+					heading: "Auto-renewal is on",
+					subtitle: autoRenewNote(),
+				};
 			case "Cancelled":
 				return {
 					action: "renew",
@@ -2117,6 +2164,16 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 					subtitle: "Pay now to keep service running past the current period end.",
 				};
 			case "Past Due":
+				if (!canRenew())
+					// The mandate is live and Razorpay retries on its own schedule;
+					// a manual payment here would stack on top of that retry.
+					return {
+						action: "",
+						heading: "Payment retrying",
+						subtitle:
+							"We'll charge your saved payment method again automatically. No manual payment is needed.",
+					};
+			// falls through - a dead mandate means this is a normal reactivation
 			case "Expired":
 				return {
 					action: "renew",
@@ -2137,6 +2194,7 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 	}
 
 	function secondaryCta(sub, hasUpgrade) {
+		// Same rule as the primary: never offer a renewal the server refuses.
 		if (sub === "Active" && hasUpgrade && canRenew())
 			return { action: "renew", label: "Renew now" };
 		if (sub === "Cancelled" && hasUpgrade) return { action: "upgrade", label: "Upgrade plan" };
@@ -2144,12 +2202,139 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 	}
 
 	function bindBilling() {
-		$body.find("#ja-cta-primary, #ja-cta-secondary, #ja-cta-reauth").on("click", function () {
-			const action = $(this).data("action");
-			if (action === "upgrade") return openUpgradeModal();
-			if (action === "renew") return startRenew();
-			if (action === "reauth") return startReauthorize();
+		$body
+			.find(
+				"#ja-cta-primary, #ja-cta-secondary, #ja-cta-reauth, #ja-cta-downgrade, #ja-cta-keep"
+			)
+			.on("click", function () {
+				const action = $(this).data("action");
+				if (action === "upgrade") return openUpgradeModal();
+				if (action === "renew") return startRenew();
+				if (action === "reauth") return startReauthorize();
+				if (action === "downgrade") return openDowngradeModal();
+				if (action === "keep-plan") return cancelScheduledSwitch();
+			});
+	}
+
+	function cancelScheduledSwitch() {
+		setBusy("#ja-cta-keep", true);
+		frappe
+			.call({ method: "jarvis.account.cancel_scheduled_downgrade" })
+			.then((r) => {
+				setBusy("#ja-cta-keep", false);
+				const data = (r.message && r.message.data) || r.message || {};
+				if (data.razorpay_subscription_id) {
+					// Monthly: the cheaper mandate is already dropped, so re-arm the
+					// current plan in the same step (mandate-only, nothing charged).
+					return openCheckout(data, /*upgrade=*/ false);
+				}
+				// loadInitial() re-renders the card, which drops the busy button.
+				frappe.show_alert({
+					message: __("Plan switch cancelled - you're staying on your current plan."),
+					indicator: "green",
+				});
+				loadInitial();
+			})
+			.catch((e) => {
+				setBusy("#ja-cta-keep", false);
+				$body
+					.find("#ja-billing-err")
+					.text(e.message || "Couldn't cancel the plan switch.");
+			});
+	}
+
+	// What the plan actually provisions - the real trade-off in a downgrade.
+	// A plan stores 0/NULL when a limit was never configured (the fleet agent
+	// rejects cpu_limit <= 0, so 0 is "unset", never "unlimited"), so say
+	// nothing rather than advertise "0 vCPU".
+	function planCapacity(p) {
+		const parts = [];
+		const cpu = parseFloat(p.cpu_limit);
+		if (cpu > 0) parts.push(`${+cpu.toFixed(2)} vCPU`);
+		const mb = Number(p.memory_limit_mb);
+		if (mb > 0) parts.push(mb >= 1024 ? `${+(mb / 1024).toFixed(1)} GB RAM` : `${mb} MB RAM`);
+		return parts.join(" · ");
+	}
+
+	// ---- downgrade (applies next cycle) -----------------------------------
+	function openDowngradeModal() {
+		const plans = account.downgrade_plans || [];
+		const cards = plans
+			.map((p) => {
+				const cap = planCapacity(p);
+				const capLine = cap ? `<div class="ja-dn-cap">${esc(cap)}</div>` : "";
+				return `
+			<div class="ja-dn-row" data-plan="${esc(p.name)}">
+				<div class="ja-dn-info">
+					<div class="ja-dn-name">${esc(p.plan_name || p.name)}</div>
+					${capLine}
+				</div>
+				<div class="ja-dn-price">${inr(p.price_inr)}<span class="jo-plan-cycle">${cycleLabel(
+					p.billing_cycle
+				)}</span></div>
+				<button class="ja-btn ja-btn-ghost ja-dn-pick" data-plan="${esc(p.name)}">Switch</button>
+			</div>`;
+			})
+			.join("");
+		// The cutover date is shared by every option, so state it once here
+		// rather than repeating it on each row.
+		const endNice = account.current_period_end
+			? String(frappe.datetime.str_to_user(account.current_period_end)).split(" ")[0]
+			: "";
+		const until = endNice ? `<b>${esc(endNice)}</b>` : "your next billing cycle";
+		// Monthly switches open a Checkout to authorise auto-renewal at the new
+		// price, so say that up front rather than springing a payment sheet.
+		const monthly =
+			String((account.plan || {}).billing_cycle || "").toLowerCase() === "monthly";
+		const intro = monthly
+			? `You keep your current plan until ${until}. Switching sets up auto-renewal at the new price - nothing is charged today.`
+			: `You keep your current plan until ${until}, then move to the one you pick. Nothing is charged now.`;
+		const html = `<div class="ja-modal-bg">
+			<div class="ja-modal">
+				<div class="ja-modal-head">
+					<h2 class="ja-h">Switch to a smaller plan</h2>
+					<button class="ja-modal-close" id="ja-modal-close">✕</button>
+				</div>
+				<p class="ja-sub">${intro}</p>
+				<div class="ja-up-list">${cards || `<div class="ja-empty">No smaller plans available.</div>`}</div>
+				<div class="ja-err" id="ja-dn-err"></div>
+			</div>
+		</div>`;
+		const $m = $(html).appendTo(document.body);
+		$m.find("#ja-modal-close, .ja-modal-bg").on("click", function (e) {
+			if (e.target === this) $m.remove();
 		});
+		$m.find(".ja-dn-pick").on("click", function () {
+			startDowngrade($(this).data("plan"), $m);
+		});
+	}
+
+	function startDowngrade(target_plan, $modal) {
+		const $btn = $modal.find(`.ja-dn-pick[data-plan="${target_plan}"]`);
+		setBusy($btn, true);
+		frappe
+			.call({ method: "jarvis.account.start_downgrade", args: { target_plan } })
+			.then((r) => {
+				setBusy($btn, false);
+				const data = (r.message && r.message.data) || r.message || {};
+				$modal.remove();
+				if (data.razorpay_subscription_id) {
+					// Monthly autopay: a ₹0 mandate-auth Checkout for the cheaper
+					// plan (openCheckout takes the subscription_id branch, no amount).
+					openCheckout(data, /*upgrade=*/ false);
+				} else {
+					// Annual / no mandate: scheduled server-side, nothing to pay.
+					frappe.show_alert({
+						message: __("Downgrade scheduled for your next billing cycle."),
+						indicator: "green",
+					});
+					loadInitial();
+				}
+			})
+			.catch((e) => {
+				setBusy($btn, false);
+				$modal.find("#ja-dn-err").text(e.message || "Couldn't schedule the downgrade.");
+			});
 	}
 
 	// ---- re-authorize autopay ---------------------------------------------
@@ -2491,6 +2676,18 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 		.ja-up-card-name{font-size:14px;font-weight:600;color:var(--text-color)}
 		.ja-up-card-price{font-size:16px;font-weight:700;color:var(--text-color)}
 		.ja-up-card-prorate{font-size:13px;color:var(--text-muted);margin-bottom:10px}
+		/* Downgrade rows: compact, one line per plan. Name + the capacity it
+		   provisions on the left, price and a quiet Switch button on the right —
+		   no dead vertical space, and the primary colour stays for upgrade/renew. */
+		.ja-dn-row{display:flex;align-items:center;gap:14px;border:1px solid var(--border-color);border-radius:10px;padding:12px 14px;transition:border-color .15s}
+		.ja-dn-row:hover{border-color:var(--jarvis-primary-faint)}
+		.ja-dn-info{flex:1 1 auto;min-width:0}
+		.ja-dn-name{font-size:14.5px;font-weight:600;color:var(--text-color)}
+		.ja-dn-cap{font-size:12.5px;color:var(--text-muted);margin-top:2px;font-variant-numeric:tabular-nums}
+		.ja-dn-price{font-size:15px;font-weight:700;color:var(--text-color);white-space:nowrap;font-variant-numeric:tabular-nums}
+		.ja-dn-price .jo-plan-cycle{font-size:12px;font-weight:500;color:var(--text-muted);margin-left:1px}
+		.ja-dn-pick{flex:0 0 auto;padding:7px 16px}
+		.ja-btn-ghost .ja-spin{border-color:var(--jarvis-primary-faint);border-top-color:var(--jarvis-primary)}
 		.ja-overlay{position:fixed;inset:0;z-index:2000;background:rgba(20,20,40,.45);display:flex;align-items:center;justify-content:center}
 		.ja-overlay-card{background:var(--card-bg);padding:18px 22px;border-radius:10px;font-size:14px;color:var(--text-color);box-shadow:0 12px 40px -12px rgba(0,0,0,.4)}
 		.ja-overlay .ja-spin{border-color:var(--jarvis-primary-faint);border-top-color:var(--jarvis-primary)}

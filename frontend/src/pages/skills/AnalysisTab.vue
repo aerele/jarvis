@@ -254,9 +254,9 @@
 				<!-- ══════════════ Learn from custom apps (M2) ══════════════ -->
 				<!-- Below the Behavioural-learning settings card, same gate: this
 				     whole tab only mounts for admin/SM viewers (SkillsPage's
-				     caps.analysis probe - the gate the settings card above rides),
-				     and every app-learning endpoint re-checks manage rights
-				     server-side. Full-width row: it hosts the runs list. -->
+				     caps.analysis probe - the gate the settings card above rides).
+				     Full-width row: the card now points admins to the Custom App
+				     Learning agent (the chat-batch runs list was retired). -->
 				<AppLearningCard ref="appLearningCard" class="lg:col-span-2" />
 
 				<!-- ══════════════ Personalisation questions pointer ══════════════ -->
@@ -273,8 +273,8 @@
 								Personalisation questions
 							</div>
 							<div class="mt-0.5 text-sm text-ink-gray-6">
-								Configure what Jarvis asks your team — org-wide, per role, or one
-								person at a time — on the Personalise tab.
+								Configure what {{ agentName }} asks your team — org-wide, per role,
+								or one person at a time — on the Personalise tab.
 							</div>
 						</div>
 						<Button
@@ -321,6 +321,7 @@ import {
 	setLearningSettings,
 	getLearningStatus,
 } from "@/api/learning";
+import { agentName } from "@/branding";
 
 const emit = defineEmits(["changed"]);
 const router = useRouter();

@@ -225,7 +225,7 @@ const catLabels = computed(() =>
 		<!-- A heatmap or a gauge is not worth hand-drawing for the phone; say so
 		     rather than silently dropping the agent's output. -->
 		<div v-else class="jv-chart-na">
-			Chart ({{ type }}) — open the full workspace to view it.
+			Chart ({{ type }}). Open the full workspace to view it.
 		</div>
 	</div>
 </template>

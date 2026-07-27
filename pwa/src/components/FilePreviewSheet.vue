@@ -144,7 +144,7 @@ watch(
 				}}</pre>
 
 				<div v-else class="jv-preview-state">
-					<div>{{ fileExt(props.item) }} file — no inline preview.</div>
+					<div>{{ fileExt(props.item) }} file. No inline preview.</div>
 					<a
 						class="jv-preview-open"
 						:href="props.item.file_url"

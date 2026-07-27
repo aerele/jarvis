@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import { installPrompt, isStandalone } from "../install";
+import { agentName } from "@/branding";
 import BrandMark from "./BrandMark.vue";
 
 // "Add Jarvis to your home screen." Two different worlds:
@@ -10,8 +11,12 @@ import BrandMark from "./BrandMark.vue";
 //    appears on a warm refresh. This component only reads the stashed event.
 //  - iOS Safari has no such event and never will; Add to Home Screen is a manual
 //    menu action, so there we can only tell the user where it is.
-const DISMISS_KEY = "jarvis.install.dismissed";
 
+// Dismissal is deliberately NOT persisted, matching Frappe HR: closing the
+// banner hides it for this page only, and it returns on the next load until the
+// app is actually installed. A durable flag lost the install path for good on
+// one stray tap of a small close button, with no way back short of clearing
+// site data. isStandalone() is what ends it permanently.
 const dismissed = ref(false);
 const isIos = ref(false);
 
@@ -45,20 +50,9 @@ async function install() {
 
 function dismiss() {
 	dismissed.value = true;
-	// Durable: a banner the user closed must not come back on every reload.
-	try {
-		localStorage.setItem(DISMISS_KEY, "1");
-	} catch {
-		/* private mode — a session-only dismissal is still better than none */
-	}
 }
 
 onMounted(() => {
-	try {
-		dismissed.value = localStorage.getItem(DISMISS_KEY) === "1";
-	} catch {
-		/* ignore */
-	}
 	const ua = window.navigator.userAgent;
 	if (/iPhone|iPad|iPod/.test(ua) && /Safari/.test(ua) && !/CriOS|FxiOS/.test(ua)) {
 		isIos.value = true;
@@ -72,12 +66,34 @@ onMounted(() => {
 		<div v-if="show" class="jv-install">
 			<BrandMark :size="34" />
 			<div class="jv-install-text">
-				<strong>Install Jarvis</strong>
+				<strong>Install {{ agentName }}</strong>
 				<span v-if="insecure"
-					>Open this site over https to install it — browsers won't install an insecure
+					>Open this site over https to install it. Browsers won't install an insecure
 					page.</span
 				>
-				<span v-else-if="isIos">Tap Share, then “Add to Home Screen”.</span>
+				<!-- Draw the share glyph rather than naming it: Safari's control is an
+				     unlabelled icon, so "tap Share" sends people hunting for a word that
+				     is not on screen. -->
+				<span v-else-if="isIos" class="jv-install-ios">
+					Tap
+					<svg
+						class="jv-share-icon"
+						viewBox="0 0 24 24"
+						width="15"
+						height="15"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.8"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						role="img"
+						aria-label="Share"
+					>
+						<path d="M12 3v12M8.5 6.5 12 3l3.5 3.5" />
+						<path d="M6 13v6a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-6" />
+					</svg>
+					then “Add to Home Screen”.
+				</span>
 				<span v-else>Keep it one tap away, like an app.</span>
 			</div>
 			<button v-if="!isIos && !insecure" class="jv-install-cta" @click="install">
@@ -131,6 +147,16 @@ onMounted(() => {
 	font-size: 14px;
 	font-weight: 600;
 	color: var(--ink9);
+}
+/* The glyph is part of a sentence, so it rides the text baseline instead of
+   stretching the line box. */
+.jv-install-ios {
+	display: inline;
+}
+.jv-share-icon {
+	display: inline-block;
+	vertical-align: -3px;
+	margin: 0 1px;
 }
 .jv-install-cta {
 	flex: none;

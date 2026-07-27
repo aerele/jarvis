@@ -24,6 +24,24 @@ _PASSWORD_FIELDS = {
 }
 
 
+# reset_onboarding() clears these OUTSIDE the _RESET_CLEAR_FIELDS loop (see
+# jarvis/dev.py), so snapshotting that tuple alone left them wiped for every
+# test that ran after this module in the same shard. llm_auth_mode is `reqd`
+# on Jarvis Settings, so a blank one makes the NEXT full .save() of the Single
+# anywhere in the shard die with MandatoryError - which is exactly how this
+# leak surfaced, in an unrelated module, only once shard balancing happened to
+# put the two together. Snapshotted raw rather than through _read so a NULL
+# datetime restores as NULL instead of "".
+_RESET_EXTRA_FIELDS = (
+	"llm_auth_mode",
+	"llm_oauth_account_email",
+	"llm_oauth_connected_at",
+	"preset",
+	"proxy_active",
+	"proxy_recommended",
+)
+
+
 def _read(s, field):
 	"""Read a Jarvis Settings field, password-safe."""
 	if field in _PASSWORD_FIELDS:
@@ -36,6 +54,7 @@ def _snapshot():
 	(not test_site) don't trash the operator's actual onboarded state."""
 	s = frappe.get_single(SETTINGS)
 	snap = {f: _read(s, f) for f in (*_RESET_CLEAR_FIELDS, "llm_provider")}
+	snap.update({f: s.get(f) for f in _RESET_EXTRA_FIELDS})
 	return snap
 
 

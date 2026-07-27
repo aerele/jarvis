@@ -135,6 +135,7 @@ import {
 } from "frappe-ui";
 import { exactDate } from "@/utils/datetime";
 import { getNote, deleteNote } from "@/api/personalise";
+import { agentName } from "@/branding";
 
 const router = useRouter();
 
@@ -214,8 +215,8 @@ function confirmDelete() {
 		title: "Delete this note?",
 		message:
 			note.value && note.value.status === "Processed"
-				? "This removes the note from your list. Knowledge Jarvis already extracted from it is kept."
-				: "This note hasn't been processed yet - Jarvis won't learn from it if you delete it now.",
+				? `This removes the note from your list. Knowledge ${agentName} already extracted from it is kept.`
+				: `This note hasn't been processed yet - ${agentName} won't learn from it if you delete it now.`,
 		onConfirm: async ({ hideDialog }) => {
 			deleting.value = true;
 			try {

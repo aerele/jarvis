@@ -8,8 +8,8 @@ Layered defenses against the C2 attack surface (2026-06-16 review):
      row so an operator can grep for brute-force attempts. The caller IP
      is recorded for triage context even though the IP itself is not
      used as an enforcement gate.
-  3. Optional HMAC signature (Phase 2) - if the plugin presents
-     X-Jarvis-Signature + X-Jarvis-Nonce + X-Jarvis-Timestamp, the
+  3. Required HMAC signature (Phase 2) - the plugin must present
+     X-Jarvis-Signature + X-Jarvis-Nonce + X-Jarvis-Timestamp, and the
      bench validates a signed canonical request and dedupes the nonce
      in Redis. Replay-proof. A leaked agent_token alone is no longer
      enough to forge a request - the attacker also needs the HMAC key
@@ -29,10 +29,33 @@ window, with replay killed by Redis-backed nonce dedup. The operational
 cost (every multi-host deployment maintaining CIDRs through cloud IP
 churn) outweighed the marginal protection.
 
-Plugin clients that don't send signatures keep working with a
-warn-log. The plugin repo (jarvis-openclaw-plugin) gets a separate PR
-to emit signatures; once all containers in the field are upgraded the
-legacy path is removed.
+Signature rollout / sunset (JF-014, 2026-07-26)
+-----------------------------------------------
+The signature started life as opt-in: a request carrying none of the
+three headers was accepted on bearer + session alone, which meant a
+captured agent_token replayed arbitrary unsigned tool bodies forever -
+exactly the blast radius the signature exists to close. Every managed
+container in the field now runs a plugin build that signs every call,
+so the default is now ENFORCE: no signature headers is a reject with
+the same 400 InvalidArgumentError shape as partial headers.
+
+The single escape hatch is the site_config key
+``jarvis_plugin_allow_unsigned`` (absent or 0 = enforce; 1 = accept
+unsigned bearer-only requests). It exists only for self-hosted benches
+whose openclaw plugin has not been upgraded yet, it WARN-logs the
+sunset date on every request it lets through, and it bumps a per-day
+Redis counter (``jarvis:plugin_unsigned_allowed:<YYYY-MM-DD>``) so an
+operator can confirm the field is quiet before turning it off. While the
+hatch is on, ``unsigned_escape_hatch_status`` surfaces that count as an
+advisory row in the self-host "Test connection" checks (jarvis.selfhost)
+so the operator sees it in the product, not only in the logs. The flag
+itself is scheduled for removal on 2026-10-01 (``_UNSIGNED_SUNSET_DATE``).
+
+Requests rejected while the flag is off land in the Error Log under
+"plugin_auth: unsigned request rejected", throttled to one row per
+session per minute: an un-upgraded plugin retries every tool call, so an
+unthrottled audit would fill the Error Log with thousands of copies of
+one fact. The reject itself is never throttled.
 """
 
 from __future__ import annotations
@@ -46,6 +69,15 @@ import frappe
 _MAX_CLOCK_SKEW_S = 60
 _NONCE_TTL_S = 120
 _NONCE_REDIS_PREFIX = "jarvis:plugin_nonce:"
+
+# JF-014 unsigned-request sunset. See the module docstring.
+_ALLOW_UNSIGNED_CONF_KEY = "jarvis_plugin_allow_unsigned"
+_UNSIGNED_SUNSET_DATE = "2026-10-01"
+_UNSIGNED_COUNTER_PREFIX = "jarvis:plugin_unsigned_allowed:"
+_UNSIGNED_COUNTER_DAYS = 7
+_UNSIGNED_COUNTER_TTL_S = _UNSIGNED_COUNTER_DAYS * 24 * 60 * 60
+_UNSIGNED_AUDIT_GATE_PREFIX = "jarvis:plugin_unsigned_audit:"
+_UNSIGNED_AUDIT_GATE_TTL_S = 60
 
 
 class PluginAuthError(Exception):
@@ -140,16 +172,18 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			message="X-Jarvis-Session header required when using X-Jarvis-Token",
 		)
 
-	# 4. HMAC signature (Phase 2) - validated if all three headers are
-	# present. Plugin clients without signature support keep working but
-	# get a warn-log so operators can track the rollout.
+	# 4. HMAC signature (Phase 2) - REQUIRED unless the deprecated
+	# site_config escape hatch is on. See the module docstring for the
+	# rollout story.
 	sig = (headers.get("X-Jarvis-Signature") or "").strip()
 	nonce = (headers.get("X-Jarvis-Nonce") or "").strip()
 	ts_str = (headers.get("X-Jarvis-Timestamp") or "").strip()
 	if sig or nonce or ts_str:
 		# Partial signature headers are ALWAYS a reject - either you sign
 		# the request properly or you don't sign at all. Partial = client
-		# bug at best, downgrade-attack attempt at worst.
+		# bug at best, downgrade-attack attempt at worst. Not even the
+		# escape hatch relaxes this: it re-enables *unsigned* requests,
+		# never half-signed ones.
 		if not (sig and nonce and ts_str):
 			raise PluginAuthError(
 				http_status=400,
@@ -165,14 +199,36 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			nonce=nonce,
 			timestamp_str=ts_str,
 		)
-	else:
-		# Legacy bearer-only path. Log once so operators can see how many
-		# unsigned requests are still in flight before deprecation.
-		frappe.logger().info(
-			"plugin_auth: legacy bearer-only request from %s (session=%s); "
-			"plugin should be upgraded to send signed requests",
+	elif _allow_unsigned():
+		# Deprecated bearer-only path, explicitly re-enabled by the
+		# operator. WARN + a per-day counter so the stragglers are
+		# visible before the flag is turned off for good.
+		allowed_today = _record_unsigned_allowed()
+		frappe.logger().warning(
+			"plugin_auth: DEPRECATED unsigned request allowed by site_config "
+			"%s (removal %s); caller=%s session=%s unsigned_today=%s; upgrade "
+			"the openclaw plugin so it signs every call",
+			_ALLOW_UNSIGNED_CONF_KEY,
+			_UNSIGNED_SUNSET_DATE,
 			caller_ip,
 			session_key,
+			"unknown" if allowed_today is None else allowed_today,
+		)
+	else:
+		if _should_audit_unsigned_reject(session_key):
+			_audit_log(
+				"plugin_auth: unsigned request rejected",
+				f"remote_ip={caller_ip!r} session={session_key!r}; no signature headers "
+				f"and {_ALLOW_UNSIGNED_CONF_KEY} is off",
+			)
+		raise PluginAuthError(
+			http_status=400,
+			code="InvalidArgumentError",
+			message="signature headers required; provide all of "
+			"X-Jarvis-Signature/X-Jarvis-Nonce/X-Jarvis-Timestamp. Upgrade the "
+			"openclaw plugin to a signing build, or run `bench --site <site> "
+			f"set-config {_ALLOW_UNSIGNED_CONF_KEY} 1` as a stopgap until that "
+			f"flag is removed on {_UNSIGNED_SUNSET_DATE}.",
 		)
 
 	# 5. Rate limit per session_key (after signature validation so the
@@ -220,6 +276,98 @@ def _caller_ip() -> str:
 		if val:
 			return str(val).strip()
 	return ""
+
+
+def _allow_unsigned() -> bool:
+	"""True iff site_config re-enables the deprecated unsigned path.
+
+	Read with an explicit ``0`` default and truthiness decided on an
+	allowlist of literals: the flag is a security downgrade, so anything
+	we don't positively recognise as "on" (absent key, 0, "", "no", a
+	NULL-ish read, a raising conf) means ENFORCE.
+	"""
+	try:
+		raw = frappe.conf.get(_ALLOW_UNSIGNED_CONF_KEY, 0)
+	except Exception:
+		return False
+	return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _should_audit_unsigned_reject(session_key: str) -> bool:
+	"""One "unsigned request rejected" Error Log row per session per minute.
+
+	A bench whose plugin predates signing rejects EVERY tool call, so an
+	unthrottled audit turns one operator fact into thousands of rows. The
+	reject itself is unconditional; only the row is gated. Fails OPEN (log
+	it) when the cache is unreachable, so a Redis outage can never make the
+	audit trail quieter than it should be.
+	"""
+	try:
+		cache = frappe.cache()
+		key = _UNSIGNED_AUDIT_GATE_PREFIX + (session_key or "-")
+		return bool(cache.set(key, b"1", nx=True, ex=_UNSIGNED_AUDIT_GATE_TTL_S))
+	except Exception:
+		return True
+
+
+def unsigned_escape_hatch_status() -> dict | None:
+	"""Operator-facing state of the deprecated unsigned-plugin escape hatch.
+
+	Returns None when the hatch is off - the enforcing default, nothing to
+	advise about. When it is on, returns the conf key, the removal date, the
+	counter window and how many unsigned calls it let through over that
+	window (``recent_allowed`` is None when the cache is unreachable).
+	Consumed by jarvis.selfhost.config_checks so the sunset is visible in
+	the product, not only in the bench logs.
+	"""
+	if not _allow_unsigned():
+		return None
+	return {
+		"conf_key": _ALLOW_UNSIGNED_CONF_KEY,
+		"sunset_date": _UNSIGNED_SUNSET_DATE,
+		"window_days": _UNSIGNED_COUNTER_DAYS,
+		"recent_allowed": _unsigned_allowed_recent(),
+	}
+
+
+def _unsigned_allowed_recent() -> int | None:
+	"""Unsigned requests allowed across the counter's retention window.
+
+	Reads the same raw (un-pickled) keys ``_record_unsigned_allowed`` writes
+	with ``incr``, so it must use ``cache.get``, not ``get_value``. Returns
+	None when the cache is unreachable - the caller says "unknown" rather
+	than an untrue zero.
+	"""
+	try:
+		cache = frappe.cache()
+		total = 0
+		for offset in range(_UNSIGNED_COUNTER_DAYS):
+			day = frappe.utils.add_days(frappe.utils.today(), -offset)
+			raw = cache.get(_UNSIGNED_COUNTER_PREFIX + str(day))
+			if raw is None:
+				continue
+			total += int(raw.decode() if isinstance(raw, bytes) else raw)
+		return total
+	except Exception:
+		return None
+
+
+def _record_unsigned_allowed() -> int | None:
+	"""Bump the per-day counter of legacy-allowed unsigned requests.
+
+	Returns the running count for today, or None when the cache is
+	unreachable. Best-effort observability only - it must never fail a
+	request that auth has already decided to allow.
+	"""
+	try:
+		cache = frappe.cache()
+		key = _UNSIGNED_COUNTER_PREFIX + frappe.utils.today()
+		count = int(cache.incr(key))
+		if count == 1:
+			cache.expire(key, _UNSIGNED_COUNTER_TTL_S)
+		return count
+	except Exception:
+		return None
 
 
 def _agent_token() -> str:

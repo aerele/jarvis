@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from "vue";
 import BrandMark from "../components/BrandMark.vue";
+import { agentName } from "@/branding";
 import { call } from "frappe-ui";
 
 // The app's own sign-in, inside the PWA's scope.
@@ -9,18 +10,22 @@ import { call } from "frappe-ui";
 // manifest scope, which an installed PWA hands off to the browser. The user
 // taps the Jarvis icon and lands in a Chrome tab. Signing in here keeps them in
 // the app, which is the whole point of installing it.
-const email = ref("");
+
+// Any Frappe user id, not just an email: Administrator has no email address,
+// and a username-based account never will. The field is plain text so the
+// browser's email format check can't reject a valid id before submit runs.
+const userId = ref("");
 const password = ref("");
 const showPassword = ref(false);
 const busy = ref(false);
 const error = ref("");
 
 async function submit() {
-	if (busy.value || !email.value.trim() || !password.value) return;
+	if (busy.value || !userId.value.trim() || !password.value) return;
 	busy.value = true;
 	error.value = "";
 	try {
-		const r = await call("login", { usr: email.value.trim(), pwd: password.value });
+		const r = await call("login", { usr: userId.value.trim(), pwd: password.value });
 
 		// Two-factor is a multi-step flow (tmp_id + OTP) this screen doesn't
 		// implement. Say so plainly instead of leaving the user on a form that
@@ -43,7 +48,7 @@ async function submit() {
 		// else is worth showing verbatim rather than flattening to "login failed".
 		const msg = String(e?.message || e || "");
 		error.value = /auth|password|incorrect|invalid login/i.test(msg)
-			? "That email or password isn't right."
+			? "Those sign-in details aren't right."
 			: msg || "Couldn't sign in. Try again.";
 		busy.value = false;
 	}
@@ -54,7 +59,7 @@ async function submit() {
 	<div class="jv-login jv-safe-bottom">
 		<div class="jv-login-head">
 			<BrandMark :size="56" />
-			<h1>Jarvis</h1>
+			<h1>{{ agentName }}</h1>
 			<p>Your AI teammate. Sign in to pick up where you left off.</p>
 		</div>
 
@@ -62,14 +67,13 @@ async function submit() {
 			<label>
 				<span>Email</span>
 				<input
-					v-model="email"
-					type="email"
-					name="email"
+					v-model="userId"
+					type="text"
+					name="username"
 					autocomplete="username"
-					inputmode="email"
 					autocapitalize="none"
 					autocorrect="off"
-					placeholder="you@company.com"
+					placeholder="jarvis@mail.com"
 					required
 				/>
 			</label>
@@ -131,7 +135,7 @@ async function submit() {
 			<button
 				class="jv-login-btn"
 				type="submit"
-				:disabled="busy || !email.trim() || !password"
+				:disabled="busy || !userId.trim() || !password"
 			>
 				<span v-if="busy" class="jv-spinner" />
 				<span v-else>Sign in</span>

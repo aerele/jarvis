@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, onMounted, ref } from "vue";
 import AppBar from "../components/AppBar.vue";
 import * as api from "../api";
 import { relativeTime } from "../lib/time";
+import { agentName } from "@/branding";
 
 // Business: what the agent knows about how YOUR company works. Notes captured
 // here are processed daily into learned defaults and the org wiki, so the agent
@@ -72,7 +73,7 @@ onMounted(load);
 
 	<div class="jv-scroll">
 		<div class="jv-capture">
-			<div class="jv-capture-head">Tell Jarvis how your business works</div>
+			<div class="jv-capture-head">Tell {{ agentName }} how your business works</div>
 			<div class="jv-capture-sub">
 				“We never ship to a customer with an overdue invoice.” Notes become defaults the
 				agent applies on its own.
@@ -121,7 +122,7 @@ onMounted(load);
 
 		<div v-if="!loaded" class="jv-empty">Loading…</div>
 		<div v-else-if="!notes.length" class="jv-empty" style="height: auto; padding: 24px">
-			No notes yet. The first one teaches Jarvis something new.
+			No notes yet. The first one teaches {{ agentName }} something new.
 		</div>
 
 		<ul v-else class="jv-notes">

@@ -1,0 +1,107 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`assistant markdown row renders identically (dark) 1`] = `
+"<div class="jv-root jv-dark" style="--surface: #16161a; --surface-1: #1d1d22; --surface-2: #26262d; --surface-3: #30303a; --border: #2c2c34; --border-2: #3a3a45; --text: #ededf2; --text-2: #b6b6c0; --text-3: #7e7e8a; --cta: #ececf0; --cta-fg: #1c1c22; --cta-bg: #26262d; --cta-bd: #3a3a45; --link: #6e8bff; --green: #34d399; --green-bg: #15271f; --green-bd: #214b38; --red: #f87171; --red-bg: #2a1818; --red-bd: #4a2a2a; --amber: #fbbf24; --amber-bg: #2a2315; --amber-bd: #4a3d1f;">
+  <div data-v-25f0d04f="" class="jv-amsg" style="display: flex; gap: 12px;">
+    <div data-v-25f0d04f="" style="flex: 1 1 0%; min-width: 0;">
+      <!-- support-agent identity line: name + role + time. Chat's
+				     assistant passes no \`sender\`, so this never renders there. -->
+      <!--v-if-->
+      <!-- v-html body: markdown (chat, bodyClass="jv-md") or bare
+				     Helpdesk HTML (support, bodyClass="jv-html"). Both style
+				     blocks live in this component's scoped <style> and use
+				     :deep() because v-html children carry no scope id. The base
+				     font/line/color match chat's assistant body exactly. -->
+      <div data-v-25f0d04f="" class="jv-md-body jv-md" style="font-size: 14px; line-height: 1.6; color: var(--text);">
+        <h4 class="jv-md-h">Summary</h4>
+        <p class="jv-md-p">Here is what I found:</p>
+        <ul class="jv-md-list">
+          <li>First item</li>
+          <li>Second item with <code class="jv-md-code">inline code</code></li>
+        </ul>
+        <pre class="jv-md-pre"><code>console.log('hello');</code></pre>
+        <div class="jv-md-tablewrap">
+          <table class="jv-md-table">
+            <thead>
+              <tr>
+                <th style="text-align:left">Field</th>
+                <th style="text-align:left">Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="text-align:left">Status</td>
+                <td style="text-align:left">Open</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="jv-md-p">See the <a href="https://example.com/ticket/1" target="_blank" rel="noopener" class="jv-md-link">ticket</a> for details.</p>
+        <p class="jv-md-p">![diagram](/files/diagram.png)</p>
+      </div>
+      <!-- Built-in trailer (attachments + Copy bar) for consumers that
+				     do NOT take over the post-body region via #below-body — i.e.
+				     the standalone Support page (PR2). Chat provides #below-body
+				     (its canvas loop + metabar live there, byte-identical), so
+				     this stays hidden for chat and never double-renders. -->
+      <div data-v-25f0d04f="" class="jv-msgbar"><span data-v-25f0d04f="" class="jv-msgtime" title="">9:12</span><button data-v-25f0d04f="" class="jv-msgbtn" title="Copy"><svg data-v-25f0d04f="" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect data-v-25f0d04f="" x="9" y="9" width="13" height="13" rx="2"></rect>
+            <path data-v-25f0d04f="" d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg></button></div>
+    </div>
+  </div>
+</div>"
+`;
+
+exports[`assistant markdown row renders identically (light) 1`] = `
+"<div class="jv-root" style="--surface: #ffffff; --surface-1: #f7f7f8; --surface-2: #f1f1f3; --surface-3: #ececef; --border: #e8e8ec; --border-2: #dfdfe4; --text: #171717; --text-2: #4a4a4f; --text-3: #6d6d76; --cta: #1c1c22; --cta-fg: #ffffff; --cta-bg: #f1f1f4; --cta-bd: #e2e2e8; --link: #1579d0; --green: #16a34a; --green-bg: #edf8f0; --green-bd: #cdeed8; --red: #dc2626; --red-bg: #fdf0ef; --red-bd: #f5d4d1; --amber: #d97706; --amber-bg: #fdf6ec; --amber-bd: #f3e2c2;">
+  <div data-v-25f0d04f="" class="jv-amsg" style="display: flex; gap: 12px;">
+    <div data-v-25f0d04f="" style="flex: 1 1 0%; min-width: 0;">
+      <!-- support-agent identity line: name + role + time. Chat's
+				     assistant passes no \`sender\`, so this never renders there. -->
+      <!--v-if-->
+      <!-- v-html body: markdown (chat, bodyClass="jv-md") or bare
+				     Helpdesk HTML (support, bodyClass="jv-html"). Both style
+				     blocks live in this component's scoped <style> and use
+				     :deep() because v-html children carry no scope id. The base
+				     font/line/color match chat's assistant body exactly. -->
+      <div data-v-25f0d04f="" class="jv-md-body jv-md" style="font-size: 14px; line-height: 1.6; color: var(--text);">
+        <h4 class="jv-md-h">Summary</h4>
+        <p class="jv-md-p">Here is what I found:</p>
+        <ul class="jv-md-list">
+          <li>First item</li>
+          <li>Second item with <code class="jv-md-code">inline code</code></li>
+        </ul>
+        <pre class="jv-md-pre"><code>console.log('hello');</code></pre>
+        <div class="jv-md-tablewrap">
+          <table class="jv-md-table">
+            <thead>
+              <tr>
+                <th style="text-align:left">Field</th>
+                <th style="text-align:left">Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="text-align:left">Status</td>
+                <td style="text-align:left">Open</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="jv-md-p">See the <a href="https://example.com/ticket/1" target="_blank" rel="noopener" class="jv-md-link">ticket</a> for details.</p>
+        <p class="jv-md-p">![diagram](/files/diagram.png)</p>
+      </div>
+      <!-- Built-in trailer (attachments + Copy bar) for consumers that
+				     do NOT take over the post-body region via #below-body — i.e.
+				     the standalone Support page (PR2). Chat provides #below-body
+				     (its canvas loop + metabar live there, byte-identical), so
+				     this stays hidden for chat and never double-renders. -->
+      <div data-v-25f0d04f="" class="jv-msgbar"><span data-v-25f0d04f="" class="jv-msgtime" title="">9:12</span><button data-v-25f0d04f="" class="jv-msgbtn" title="Copy"><svg data-v-25f0d04f="" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect data-v-25f0d04f="" x="9" y="9" width="13" height="13" rx="2"></rect>
+            <path data-v-25f0d04f="" d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg></button></div>
+    </div>
+  </div>
+</div>"
+`;

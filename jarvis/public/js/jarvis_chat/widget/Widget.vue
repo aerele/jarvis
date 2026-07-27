@@ -15,7 +15,7 @@
 				'jvw-fab--dock-left': side === 'left',
 			}"
 			:style="fabStyle"
-			:aria-label="panelOpen ? 'Close Jarvis' : 'Ask Jarvis'"
+			:aria-label="panelOpen ? `Close ${brandName}` : `Ask ${brandName}`"
 			:aria-expanded="panelOpen ? 'true' : 'false'"
 			@click="onFabClick"
 			@pointerdown="onPointerDown"
@@ -28,7 +28,8 @@
 			<!-- Grip dots: the drag affordance. design.md 1.3 forbids hover
 			     motion, so this fades in on OPACITY alone — nothing moves. -->
 			<span class="jvw-grip" aria-hidden="true"><i></i><i></i><i></i></span>
-			<svg viewBox="0 0 24 24" width="24" height="24" fill="#fff">
+			<img v-if="brandLogoUrl" :src="brandLogoUrl" class="jvw-fab-img" alt="" />
+			<svg v-else viewBox="0 0 24 24" width="24" height="24" fill="#fff">
 				<path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z" />
 			</svg>
 		</button>
@@ -72,6 +73,9 @@ let snapTimeoutHandle = null;
 
 // Access gate: desk boot sets this once for the session (see Task B).
 const hasAccess = Boolean(window.frappe?.boot?.jarvis_has_access);
+// Whitelabel FAB label + mark (set_jarvis_boot); blank => Jarvis defaults.
+const brandName = (window.frappe?.boot?.jarvis_agent_name || "").trim() || "Jarvis";
+const brandLogoUrl = (window.frappe?.boot?.jarvis_brand_logo_url || "").trim();
 
 // ---- Side chat panel: open state and the Desk record it is looking at. ----
 const panelRef = ref(null);
@@ -373,6 +377,12 @@ onBeforeUnmount(() => {
 	touch-action: none;
 	will-change: transform;
 	transition: opacity 0.25s ease;
+}
+.jvw-fab-img {
+	width: 24px;
+	height: 24px;
+	object-fit: cover;
+	border-radius: 7px;
 }
 .jvw-fab:hover {
 	filter: brightness(1.06);

@@ -6,7 +6,7 @@
 					<!-- brand header: JarvisMark + name + per-step subtitle (preview .brand) -->
 					<div class="jv-ob-brand">
 						<JarvisMark :size="30" :radius="8" />
-						<span class="jv-ob-brand-name">Jarvis</span>
+						<span class="jv-ob-brand-name">{{ agentName }}</span>
 						<span class="jv-ob-brand-sub">{{ frameSub }}</span>
 					</div>
 
@@ -162,8 +162,8 @@
 								<div class="jv-ob-head">
 									<h1>Your details</h1>
 									<p>
-										We'll set Jarvis up for this workspace and send receipts
-										here.
+										We'll set {{ agentName }} up for this workspace and send
+										receipts here.
 									</p>
 								</div>
 								<div class="jv-ob-form">
@@ -304,8 +304,8 @@
 													? "Auto-pay authorized — nothing charged until your trial ends."
 													: "Payment received."
 											}}
-											We're provisioning your Jarvis workspace. This usually
-											takes under a minute…
+											We're provisioning your {{ agentName }} workspace. This
+											usually takes under a minute…
 										</p>
 									</div>
 									<div
@@ -545,7 +545,7 @@
 							<div class="jv-ob-body">
 								<div v-show="state.finishing">
 									<div class="jv-ob-head">
-										<h1>Setting up Jarvis</h1>
+										<h1>Setting up {{ agentName }}</h1>
 										<p>
 											{{
 												state.finishSubtitle ||
@@ -559,10 +559,10 @@
 								</div>
 								<div v-show="!state.finishing">
 									<div class="jv-ob-head">
-										<h1>Give Jarvis a brain</h1>
+										<h1>Give {{ agentName }} a brain</h1>
 										<p>
-											Pick which AI powers Jarvis. You can change this
-											anytime in Settings → AI models.
+											Pick which AI powers {{ agentName }}. You can change
+											this anytime in Settings → AI models.
 										</p>
 									</div>
 									<div class="jv-ob-connect">
@@ -585,7 +585,7 @@
 												class="jv-ob-btn jv-ob-btn-primary"
 												@click="forceContinue"
 											>
-												Continue to Jarvis
+												Continue to {{ agentName }}
 											</button>
 										</template>
 									</Banner>
@@ -635,7 +635,8 @@
 								<div class="jv-ob-head">
 									<h1>Connect your openclaw</h1>
 									<p>
-										Point Jarvis at <b>your own</b> openclaw server. Jarvis
+										Point {{ agentName }} at <b>your own</b> openclaw server.
+										{{ agentName }}
 										connects over HTTP with a bearer token. No Aerele
 										persona/skills. Validate first, then connect.
 									</p>
@@ -780,7 +781,7 @@
 												class="jv-ob-btn jv-ob-btn-primary"
 												@click="forceContinue"
 											>
-												Continue to Jarvis
+												Continue to {{ agentName }}
 											</button>
 										</template>
 									</Banner>
@@ -843,6 +844,8 @@ import {
 	nextStep,
 	prevStep,
 	verifyPollAction,
+	notReadyNote,
+	syncStatusNote,
 } from "@/onboarding/steps";
 import { inr, planAmount, planSuffix } from "@/account/format";
 import {
@@ -859,6 +862,7 @@ import {
 	syncConnection,
 } from "@/api";
 import { errMessage as errMsg } from "@/lib/errors";
+import { agentName } from "@/branding";
 
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
@@ -884,7 +888,7 @@ const FRAME_SUBS = {
 	plan: "Choose your plan",
 	details: "Your details",
 	pay: "Review & pay",
-	connect: "Give Jarvis a brain",
+	connect: `Give ${agentName} a brain`,
 	selfhost: "Self-hosted setup",
 };
 
@@ -1521,10 +1525,10 @@ async function openRazorpayCheckout(d) {
 	// razorpay_subscription_id; finishPayment forwards whichever is present.
 	const rzOpts = {
 		key: d.razorpay_key_id,
-		name: "Jarvis",
+		name: agentName,
 		description: d.razorpay_subscription_id
-			? "Jarvis subscription (auto-pay after trial)"
-			: "Jarvis subscription",
+			? `${agentName} subscription (auto-pay after trial)`
+			: `${agentName} subscription`,
 		handler: (res) => {
 			state.payBusy = true;
 			finishPayment({
@@ -1573,22 +1577,49 @@ async function openRazorpayCheckout(d) {
 // router module from scratch and re-runs the readiness check fresh.
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Defect-2 fix (2026-07-23 out-of-quota trace): this used to be 5 attempts * 800ms -
+// about 4 SECONDS - while waitForSyncTerminal below budgets up to 15 MINUTES for the
+// same save's provisioning job. That asymmetry was never intentional; it is a leftover
+// from when the sync job's terminal flip and admin's chat-readiness verdict
+// (_admin_chat_gate in jarvis/account.py, the FINAL check inside is_ready_for_chat)
+// were assumed to settle in lockstep. In practice the chat-readiness verdict is a
+// SEPARATE admin round-trip that can lag the sync job's own terminal state by tens of
+// seconds, so a 4s budget almost always timed out before the real verdict - ready, or
+// a specific not-ready reason + detail - ever came back, and the customer got a
+// made-up generic sentence instead of the truth admin already knew. ~75s gives that
+// final check room to actually catch up, without making a genuinely-stuck customer
+// wait dramatically longer than before.
+const READINESS_POLL_ATTEMPTS = 30;
+const READINESS_POLL_INTERVAL_MS = 2500;
+
 // Poll is_ready_for_chat a few times (short backoff) rather than trusting a
 // single check - the save itself (pool save or self-host connect) can
 // return before whatever it kicked off (e.g. proxy provisioning) is fully
-// reflected. Fails closed (returns false) on a persistent error; callers
-// treat "not ready yet" as advisory, not fatal - see finishNote below.
-async function waitUntilReady(attempts = 5, delayMs = 800) {
+// reflected. Fails closed (ready:false) on a persistent error; callers treat
+// "not ready yet" as advisory, not fatal - see finishNote below.
+//
+// Defect-1 fix: records the LAST OBSERVED {reason, detail} even on a losing poll,
+// instead of collapsing the whole result to a bare boolean - the caller needs the
+// real reason to tell the customer the truth (e.g. "Your OpenAI account has reached
+// its usage limit...") rather than a generic "still finishing" shrug. Only a THROWN
+// error (network hiccup) is swallowed and ignored; a RETURNED {ready:false, ...} is a
+// real verdict and overwrites whatever came before it.
+async function waitUntilReady(
+	attempts = READINESS_POLL_ATTEMPTS,
+	delayMs = READINESS_POLL_INTERVAL_MS
+) {
+	let last = { reason: null, detail: "" };
 	for (let i = 0; i < attempts; i++) {
 		try {
 			const r = await isReadyForChat();
-			if (r && r.ready) return true;
+			if (r && r.ready) return { ready: true, reason: null, detail: "" };
+			if (r) last = { reason: r.reason || null, detail: r.detail || "" };
 		} catch (e) {
 			// keep retrying - transient network hiccups shouldn't strand the user
 		}
 		if (i < attempts - 1) await sleep(delayMs);
 	}
-	return false;
+	return { ready: false, ...last };
 }
 
 // Manual fallback for the "still not ready" case: never hard-block. The
@@ -1667,12 +1698,23 @@ async function afterSaveRecheckReady({ followSync = false } = {}) {
 		const status = ((terminal && terminal.last_sync_status) || "").trim();
 		if (status.startsWith("failed") || status.startsWith("skipped")) {
 			state.finishing = false;
-			state.finishNote = `Setup hit a problem (${status}). Check the AI connection and save again - or continue to Jarvis and retry from Settings.`;
+			// Defect fix (2026-07-23 out-of-quota trace): when the status carries a
+			// real customer sentence (jarvis_settings.py now writes
+			// "failed: Your OpenAI account has reached its usage limit..." for
+			// this exact case), render it directly - burying "Your OpenAI account
+			// has reached its usage limit. It resets in about 27 hours." inside
+			// "Setup hit a problem (...)" reads as developer text a customer
+			// should never have to parse. syncStatusNote keeps the wrapper for
+			// statuses that are genuinely opaque ("failed: unexpected error; see
+			// Error Log", "failed: auth: ...", "skipped: no longer proxy-valid...").
+			// The wrapper copy itself lives in steps.js and is whitelabelled there
+			// via `agentName`, so develop's branding is preserved.
+			state.finishNote = syncStatusNote(status, agentName);
 			return;
 		}
 	}
-	const ready = await waitUntilReady();
-	if (ready) {
+	const result = await waitUntilReady();
+	if (result.ready) {
 		// Keep the "Setting up Jarvis" spinner up THROUGH the full-page reload.
 		// Flipping finishing off first re-shows the editor for a frame before
 		// the browser navigates. Leave it on; location.assign tears the page down.
@@ -1680,8 +1722,16 @@ async function afterSaveRecheckReady({ followSync = false } = {}) {
 		return;
 	}
 	state.finishing = false;
-	state.finishNote =
-		"Still finishing setup. This can take a few seconds. You can continue to Jarvis now, or wait and try again.";
+	// Defect-1 fix: render the backend's OWN sentence (is_ready_for_chat's `detail`,
+	// admin-owned wording - e.g. "Your OpenAI account has reached its usage limit. It
+	// resets in about 27 hours.") instead of a made-up generic one. notReadyNote falls
+	// back to the old generic copy only when the backend truly has no wording for this
+	// reason yet (an older admin, or a reason account.py hasn't wired a sentence for) -
+	// see steps.js, where that fallback is whitelabelled via `agentName` so develop's
+	// branding survives. The "Continue to <agent>" action below now sits right next to
+	// whichever of the two is showing, so it always reads as an honest choice rather
+	// than an unexplained escape hatch.
+	state.finishNote = notReadyNote(result.detail, agentName);
 }
 
 // ---- Connect (renders <LlmPoolEditor>) - the component itself owns

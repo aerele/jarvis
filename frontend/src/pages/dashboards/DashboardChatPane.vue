@@ -4,7 +4,9 @@
 		<div class="flex shrink-0 items-start justify-between gap-2 border-b px-4 py-3">
 			<div class="flex min-w-0 flex-col gap-0.5">
 				<span class="text-base font-semibold text-ink-gray-9">Describe a dashboard</span>
-				<span class="text-p-sm text-ink-gray-6">Jarvis draws it on the canvas above</span>
+				<span class="text-p-sm text-ink-gray-6"
+					>{{ agentName }} draws it on the canvas above</span
+				>
 			</div>
 			<div class="flex shrink-0 items-center gap-1">
 				<Button
@@ -188,11 +190,15 @@ import { renderMarkdown } from "@/markdown";
 import { session } from "@/data/session";
 import { sendDashboardChat, getDashboardConversation } from "@/api/dashboards";
 import { listPendingConfirmations, confirmTool, dismissTool } from "@/api";
+import { agentName } from "@/branding";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
 // dialog; stt_enabled - when the backend sends it - gates the mic)
 const props = defineProps({
 	caps: { type: Object, default: () => ({}) },
+	// the selected theme key (lowercase) — forwarded in the send context so the
+	// agent designs FOR that theme (the skill injects its token+recipe cheatsheet).
+	theme: { type: String, default: "jarvis" },
 	// when revising a saved dashboard, its name — forwarded in the send context
 	// so the agent knows which dashboard it is iterating on ("" = a new one).
 	editingName: { type: String, default: "" },
@@ -458,7 +464,8 @@ async function send() {
 				conversation.value,
 				text,
 				dataMode.value,
-				props.editingName
+				props.editingName,
+				props.theme
 			)) || {};
 		if (r.ok === false) {
 			// rejected (single-flight guard / usage cap) - nothing persisted
@@ -493,7 +500,17 @@ function newChat() {
 	// the page clears its builder seed (canvas html, editing state) with us
 	emit("reset");
 }
-defineExpose({ newChat });
+
+// Post a message into this pane programmatically (the save dialog's "Ask the
+// assistant to fix these" hand-off). Ignored while a send is already in flight.
+function sendText(text) {
+	const t = String(text || "").trim();
+	if (!t || sending.value) return;
+	draft.value = t;
+	nextTick(autoGrow);
+	send();
+}
+defineExpose({ newChat, sendText });
 
 // ── realtime ──────────────────────────────────────────────────────────────────
 function onEvent(p) {

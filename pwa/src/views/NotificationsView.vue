@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useRouter } from "vue-router";
 import { store } from "../store";
 import { feed, markAllRead, markRead } from "../lib/notifications";
+import { agentName } from "@/branding";
 
 // What Jarvis did while you were somewhere else. Split New / Earlier, exactly as
 // the native app does — an unread task is a thing to act on, a read one is
@@ -84,7 +85,7 @@ function open(item) {
 			</span>
 			<div style="font-size: 15px; font-weight: 600; color: var(--ink9)">Nothing yet</div>
 			<div style="font-size: 14px; line-height: 1.5">
-				Finished tasks, decisions Jarvis needs and new conversations land here.
+				Finished tasks, decisions {{ agentName }} needs and new conversations land here.
 			</div>
 		</div>
 

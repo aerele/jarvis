@@ -1,0 +1,139 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-07-26 09:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "user",
+  "device_label",
+  "platform",
+  "enabled",
+  "last_used",
+  "token_id",
+  "secret_hash",
+  "revoked_at",
+  "revoked_by",
+  "revoked_reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "label": "User",
+   "options": "User",
+   "reqd": 1,
+   "read_only": 1,
+   "set_only_once": 1,
+   "search_index": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Owner of the paired device. The token authenticates AS this user."
+  },
+  {
+   "fieldname": "device_label",
+   "fieldtype": "Data",
+   "label": "Device",
+   "length": 140,
+   "in_list_view": 1,
+   "description": "Human-readable name the phone reported at pairing (e.g. \"Pixel 8\"). Client-supplied, so display-only - never trusted for any decision."
+  },
+  {
+   "fieldname": "platform",
+   "fieldtype": "Data",
+   "label": "Platform",
+   "length": 40,
+   "in_list_view": 1,
+   "description": "Client-reported platform (ios / android / web / unknown). Display-only."
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "1",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "0 = revoked. The auth hook refuses a disabled row, so flipping this kills exactly this one device."
+  },
+  {
+   "fieldname": "last_used",
+   "fieldtype": "Datetime",
+   "label": "Last Used",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "Stamped by the auth hook at most once per throttle window (see jarvis/mobile/device_auth.py), so it is approximate by design - one write per request would be unacceptable on the hot path."
+  },
+  {
+   "fieldname": "token_id",
+   "fieldtype": "Data",
+   "label": "Token ID",
+   "length": 64,
+   "reqd": 1,
+   "unique": 1,
+   "read_only": 1,
+   "set_only_once": 1,
+   "no_copy": 1,
+   "description": "Public half of the device token (`jmd:<token_id>:<secret>`). Not a secret: it only identifies the row to look up."
+  },
+  {
+   "fieldname": "secret_hash",
+   "fieldtype": "Data",
+   "label": "Secret Hash",
+   "length": 64,
+   "reqd": 1,
+   "read_only": 1,
+   "set_only_once": 1,
+   "no_copy": 1,
+   "hidden": 1,
+   "description": "HMAC-SHA256 of the secret, keyed by token_id. The plaintext secret is returned exactly once, at pairing, and NEVER stored - a database dump yields no usable credential."
+  },
+  {
+   "fieldname": "revoked_at",
+   "fieldtype": "Datetime",
+   "label": "Revoked At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "revoked_by",
+   "fieldtype": "Data",
+   "label": "Revoked By",
+   "length": 140,
+   "read_only": 1,
+   "description": "Session user at revocation time - a Data SNAPSHOT, not a Link, so the audit trail outlives the account."
+  },
+  {
+   "fieldname": "revoked_reason",
+   "fieldtype": "Data",
+   "label": "Revoked Reason",
+   "length": 140,
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-07-26 09:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Mobile Device",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "Jarvis User",
+   "if_owner": 1
+  },
+  {
+   "read": 1,
+   "write": 1,
+   "delete": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

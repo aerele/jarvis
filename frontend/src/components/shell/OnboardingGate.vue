@@ -15,15 +15,15 @@
 		<div class="jv-gate-card">
 			<JarvisMark :size="56" :radius="14" class="jv-gate-logo" />
 
-			<h1 class="jv-gate-title">Finish setting up Jarvis</h1>
+			<h1 class="jv-gate-title">Finish setting up {{ agentName }}</h1>
 
 			<p v-if="isSystemManager" class="jv-gate-sub">
 				This workspace isn't connected to an AI agent yet. Complete a short setup to start
-				chatting with Jarvis about your ERPNext data.
+				chatting with {{ agentName }} about your ERPNext data.
 			</p>
 			<p v-else class="jv-gate-sub">
-				Jarvis isn't set up for this workspace yet. Please ask your administrator (a System
-				Manager) to complete onboarding.
+				{{ agentName }} isn't set up for this workspace yet. Please ask your administrator
+				(a System Manager) to complete onboarding.
 			</p>
 
 			<button v-if="isSystemManager" class="jv-gate-btn" @click="goOnboard">
@@ -39,6 +39,7 @@
 <script setup>
 import { useRouter } from "vue-router";
 import JarvisMark from "@/components/JarvisMark.vue";
+import { agentName } from "@/branding";
 
 const router = useRouter();
 

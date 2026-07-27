@@ -10,7 +10,7 @@
 						>No access to Dashboards</span
 					>
 					<span class="text-p-base text-ink-gray-6">
-						Ask your Jarvis admin for access to dashboards.
+						Ask your {{ agentName }} admin for access to dashboards.
 					</span>
 				</div>
 			</div>
@@ -151,6 +151,7 @@
 					class="shrink-0 border-t"
 					:style="{ height: chatPct + '%' }"
 					:caps="caps"
+					:theme="builderTheme"
 					:editing-name="editingDetail ? editingDetail.name : ''"
 					@canvas="onCanvas"
 					@reset="resetBuilder"
@@ -169,6 +170,7 @@
 				:conversation="chatConv"
 				:theme="builderTheme"
 				@saved="onSaved"
+				@fix-in-chat="fixInChat"
 			/>
 		</template>
 	</div>
@@ -193,6 +195,7 @@ import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
 import { session } from "@/data/session";
 import { getCanvas } from "@/api";
+import { agentName } from "@/branding";
 import { getDashboardsCaps, getDashboard } from "@/api/dashboards";
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
@@ -284,6 +287,14 @@ async function onCanvas({ message_id, items }) {
 function openSave() {
 	if (!builderHtml.value) return;
 	saveOpen.value = true;
+}
+
+// A theme-rejected save hands its violations back to the model: close the dialog
+// and post the message into the builder chat, so the agent regenerates on-theme
+// without the user relaying CSS jargon (P0-2).
+function fixInChat({ text }) {
+	saveOpen.value = false;
+	if (chatPane.value && chatPane.value.sendText) chatPane.value.sendText(text);
 }
 
 function onSaved(detail) {

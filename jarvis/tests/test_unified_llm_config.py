@@ -3452,6 +3452,91 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		)
 		self.assertFalse(settings.llm_pool_synced_at)
 
+	# -- This fix (2026-07-23 out-of-quota trace): a DEFINITIVE rejection ----
+	# wrapped in the same AdminUnreachableError class as a genuine timeout
+	# must be recognised and recorded TERMINAL, not converged/pending.
+
+	def test_admin_customer_facing_reason_extracts_the_wrapped_sentence(self):
+		"""Unit-level: admin_client wraps a 5xx envelope message as "admin
+		returned a {status} error: {msg}" - the extractor must strip that
+		wrapper and return admin's own "Your ..." sentence underneath."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			_admin_customer_facing_reason,
+		)
+
+		self.assertEqual(
+			_admin_customer_facing_reason(
+				"admin returned a 502 error: Your OpenAI account has reached "
+				"its usage limit. It resets in about 27 hours."
+			),
+			"Your OpenAI account has reached its usage limit. It resets in about 27 hours.",
+		)
+
+	def test_admin_customer_facing_reason_accepts_an_unwrapped_sentence(self):
+		"""Not every caller goes through the "admin returned a NNN error: "
+		wrapper (e.g. a direct AdminUnreachableError("Your ...") in a test, or
+		a future call site) - the sentence alone must still be recognised."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			_admin_customer_facing_reason,
+		)
+
+		self.assertEqual(
+			_admin_customer_facing_reason("Your OpenAI subscription was rejected. Reconnect the account."),
+			"Your OpenAI subscription was rejected. Reconnect the account.",
+		)
+
+	def test_admin_customer_facing_reason_rejects_generic_technical_text(self):
+		"""A real network failure / raw diagnostic must NOT be mistaken for a
+		customer-facing sentence - only admin's own "Your ..." convention
+		qualifies. Never take the converge-skip path for these."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			_admin_customer_facing_reason,
+		)
+
+		self.assertEqual(_admin_customer_facing_reason("read timeout"), "")
+		self.assertEqual(
+			_admin_customer_facing_reason("admin is unreachable; check network / service status"), ""
+		)
+		self.assertEqual(
+			_admin_customer_facing_reason(
+				"admin returned a 502 error: provision_failed: subscription-only "
+				"pool has no usable route: cliproxy_listening=True"
+			),
+			"",
+		)
+		self.assertEqual(_admin_customer_facing_reason(""), "")
+		self.assertEqual(_admin_customer_facing_reason(None), "")
+
+	def test_unreachable_with_customer_facing_reason_records_failed_not_pending(self):
+		"""The remaining gap this fix closes. admin's fleet layer raises
+		errors.ProvisionError on a subscription-only pool's first activation
+		when the probe comes back exhausted (fleet's hard gate) - that never
+		converges (there is no reconcile that can make a quota-exhausted
+		account "Ready" before its own reset time), so it must be recorded as
+		a terminal "failed: <admin's own sentence>" instead of livelocking in
+		"pending:" via the F2 converge path. get_connection must never even
+		be consulted for this case."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		self._seed_pool()
+		msg = (
+			"admin returned a 502 error: Your OpenAI account has reached its "
+			"usage limit. It resets in about 27 hours."
+		)
+		with (
+			patch("jarvis.admin_client.post_update_llm_pool", side_effect=AdminUnreachableError(msg)),
+			patch("jarvis.admin_client.get_connection") as get_conn,
+		):
+			_enqueued_sync_via_admin_pool()
+			get_conn.assert_not_called()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(
+			settings.last_sync_status,
+			"failed: Your OpenAI account has reached its usage limit. It resets in about 27 hours.",
+		)
+		self.assertFalse(settings.llm_pool_synced_at)
+		self.assertEqual(settings.last_subscription_status, "", "must clear stale subscription_status")
+
 	# -- Scheduled safety net (reconcile_pending_llm_sync) -------------------
 
 	def test_reconcile_stamps_marker_when_admin_reports_ready(self):

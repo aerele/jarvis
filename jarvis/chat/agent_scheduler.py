@@ -33,10 +33,13 @@ trigger takes the EXACT same code path as the scheduler.
 from datetime import timedelta
 
 import frappe
+from frappe import _
 from frappe.utils import now_datetime
 
+from jarvis._session import authenticated_user
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
+from jarvis.tools import _delegate_capability
 
 INSTALLATION = "Jarvis Agent Installation"
 LISTING = "Jarvis Agent Listing"
@@ -76,6 +79,8 @@ def run_due_agent_audits() -> None:
 			"schedule_frequency",
 			"schedule_time",
 			"installable",
+			"source_apps_json",
+			"activation_state",
 		],
 	)
 	if not due:
@@ -103,17 +108,63 @@ def run_due_agent_audits() -> None:
 			_advance(row, now)
 			continue
 
-		# Only auditor agents run scheduled scans; an operator install with a
-		# schedule set just consumes its slot (it drafts through the board, not
-		# on a cron).
-		if frappe.db.get_value(LISTING, row.agent, "nature") != "Auditor":
+		# Only auditor + scribe agents run scheduled scans; an operator install
+		# with a schedule set just consumes its slot (it drafts through the board,
+		# not on a cron). A scribe's schedule is optional (manual run-now is the
+		# primary path) but honoured here when set, so periodic re-learning works.
+		nature = frappe.db.get_value(LISTING, row.agent, "nature")
+		if nature not in ("Auditor", "Scribe"):
 			_advance(row, now)
 			continue
 
+		# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so there is
+		# no such thing as a shadow scribe run — refuse it here exactly as the manual path
+		# does, and consume the slot so the cadence does not busy-retry.
+		if nature == "Scribe" and (row.get("activation_state") or "shadow") == "shadow":
+			_record_failed(
+				row,
+				"scheduled run skipped: this agent writes the wiki directly; promote the "
+				"installation to live to run it",
+			)
+			_advance(row, now)
+			continue
+
+		# CX5-2: a Custom App Learning run may only read the apps an ADMIN authorized.
+		# The cron has no human to ask, so it REUSES the durable selection the last
+		# manual launch persisted on the installation (``source_apps_json``) — and when
+		# there is none (or the selected apps have since been uninstalled) it SKIPS with
+		# a recorded reason rather than launching a run that could read the whole bench.
+		source_apps = None
+		if _is_app_learning(row.agent):
+			from jarvis.learning import app_source
+
+			try:
+				source_apps = app_source.validate_source_apps(row.get("source_apps_json") or [])
+			except ValueError as e:
+				_record_failed(
+					row,
+					f"scheduled app-learning skipped: no valid authorized app selection ({e})",
+				)
+				_advance(row, now)
+				continue
+
 		# Phase 1 identity: the audit executes AS the install's run_as_user (its
-		# jarvis__* reads are permission-bounded to that user). Falls back to
-		# owner for installs from before run_as_user / the A13 backfill.
-		run_as = row.run_as_user or row.owner
+		# jarvis__* reads are permission-bounded to that user).
+		#
+		# R1-F3: there is deliberately NO ``or row.owner`` fallback. A blank
+		# run_as_user means the install is MISCONFIGURED, not that it should run as
+		# the row owner: the owner is an identity ``_validate_run_as_escalation``
+		# never litigated, so binding an unattended run to it would execute ERP
+		# reads under rights nobody vetted. Refuse, record WHY, and CONSUME the slot
+		# — retrying hourly would just relog the same failure 24x/day and can never
+		# fix itself; a human has to set a run-as user or disable the install.
+		run_as = (row.run_as_user or "").strip()
+		if not run_as:
+			_record_failed(
+				row, "scheduled audit skipped: no run-as user on this install (set one, or disable it)"
+			)
+			_advance(row, now)
+			continue
 
 		# S1 fail-closed identity guard — never bind a scheduled audit turn to
 		# Administrator / Guest / a disabled RUN-AS user.
@@ -147,7 +198,9 @@ def run_due_agent_audits() -> None:
 		try:
 			frappe.set_user(run_as)
 			inst = frappe.get_doc(INSTALLATION, row.name)
-			_launch_audit(inst, trigger="scheduled")
+			# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
+			# it has no initiating human — the scheduler user (Administrator) is not one.
+			_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
 			frappe.set_user(original_user)
 			_advance(row, now)  # O4: advance ONLY after a successful enqueue
 		except Exception:
@@ -169,42 +222,101 @@ def run_due_agent_audits() -> None:
 # A8 stale-run reaper (backstop) — hooks cron
 # --------------------------------------------------------------------------- #
 def reap_stale_agent_runs() -> int:
-	"""Fail agent runs stuck ``running`` past ``STALE_RUN_AFTER_SECONDS`` and tear
-	down their orphaned per-run session rows (A8). Backstop only: a healthy run
+	"""Terminalize agent runs stuck ``running`` past ``STALE_RUN_AFTER_SECONDS`` and
+	tear down their orphaned per-run session rows (A8). Backstop only: a healthy run
 	finalizes via ``record_agent_run`` and a dead delegate fails itself via the
 	fleet worker (A15); this catches the crash that killed both. Returns the count
-	reaped. Runs as Administrator (scheduler); best-effort, never raises out."""
+	terminalized. Runs as Administrator (scheduler); best-effort, never raises out.
+
+	CA-4 (server-owned scribe completion): a Custom App Learning *scribe* delegate
+	writes wiki pages via ``record_app_wiki`` (which stamps ``pages_written`` on the
+	run) and is MEANT to call ``finish_app_learning_run`` to reach ``completed`` —
+	but the model may simply forget. Completion must not depend on model behavior:
+	a stuck scribe run whose durable page tally proves it SUCCEEDED is reconciled to
+	``completed`` here (not mislabeled ``failed``). Everything else is a genuinely
+	dead run and is failed as before.
+
+	CA2-4 (finish-vs-sweep race): the cached status/tally from the bulk scan may be
+	STALE — a concurrent ``record_app_wiki``/``finish`` can complete a run between the
+	scan and its transition here. Each candidate is therefore re-read under a ROW LOCK
+	and transitioned with a COMPARE-AND-SET on ``status='running'``: a row a concurrent
+	finish already moved off running is LEFT ALONE, and the per-run session is torn down
+	only AFTER the transition is won + committed."""
 	from jarvis.chat import agent_runs
+	from jarvis.tools.record_app_wiki import reconcile_run_pages
 
 	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
-	stuck = frappe.get_all(
-		RUN,
-		filters={"status": "running", "started_at": ["<", cutoff]},
-		fields=["name", "session_key", "owner", "agent", "installation"],
-	)
 	reaped = 0
-	for r in stuck:
+	for r in _stale_candidates(cutoff):
 		try:
-			frappe.db.set_value(
+			# Re-read under a ROW LOCK immediately before deciding. The row lock serializes
+			# against a concurrent record_app_wiki/finish (both write this row), so the
+			# status + tally we act on are current, not the possibly-stale scan snapshot.
+			cur = frappe.db.get_value(
 				RUN,
 				r.name,
-				{
-					"status": "failed",
-					"finished_at": frappe.utils.now(),
-					"error": "run exceeded max duration; reaped by the stale-run sweep (A8 backstop)",
-				},
-				update_modified=False,
+				["status", "pages_written", "agent", "session_key", "owner", "installation"],
+				as_dict=True,
+				for_update=True,
 			)
-			# A8: the session bearer must not outlive the (now-failed) run.
-			agent_runs.teardown_run_session(r.session_key)
-			log_activity(
-				agent=r.agent,
-				agent_title=frappe.db.get_value(LISTING, r.agent, "title"),
-				installation=r.installation,
-				action="run_failed",
-				run=r.name,
+			if not cur or cur.status != "running":
+				# A concurrent finish already moved it off running — leave it alone (never
+				# overwrite a completed run with failed). Release the lock and move on.
+				frappe.db.commit()
+				continue
+			nature = (frappe.db.get_value(LISTING, cur.agent, "nature") or "").strip().title()
+			pages = int(cur.pages_written or 0)
+			pages_meta = None
+			if nature == "Scribe" and pages == 0:
+				# CA2-3 fallback: rebuild the tally from page provenance before failing a
+				# scribe run whose stored tally reads zero, so real work is never lost.
+				pages_meta = reconcile_run_pages(r.name)
+				if pages_meta is None:
+					# CA3-4: the provenance QUERY failed — the true page count is UNKNOWN.
+					# Neither terminalization is safe (completing with 0 would drop real
+					# pages; failing would mislabel a success), so leave the run running and
+					# retry on the next sweep. Release the row lock and move on.
+					frappe.db.commit()
+					continue
+				pages = pages_meta["count"]
+			if nature == "Scribe" and pages > 0:
+				# Server-owned terminalization: the pages are already durably written,
+				# so this is an honest SUCCESS the model merely never finalized. Complete
+				# it with its tally rather than failing real work.
+				values = {"status": "completed", "finished_at": frappe.utils.now()}
+				if pages_meta is not None:
+					# CA3-4: the tally was rebuilt from provenance (the stored one read 0) —
+					# PERSIST the reconciled ``pages_written`` + ``pages_json`` in the SAME
+					# locked terminalization write, so a run completed off provenance shows
+					# its real page count + list in the durable tally + the Runs UI, never 0.
+					values["pages_written"] = pages
+					values["pages_json"] = frappe.as_json(pages_meta["pages"])[:60000]
+				frappe.db.set_value(RUN, r.name, values, update_modified=False)
+				frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+				agent_runs.teardown_run_session(cur.session_key)
+				log_activity(
+					agent=cur.agent,
+					agent_title=frappe.db.get_value(LISTING, cur.agent, "title"),
+					installation=cur.installation,
+					action="run_completed",
+					run=r.name,
+					detail=f"reconciled to completed: scribe wrote {pages} page(s); finish not called",
+					owner=cur.owner,
+				)
+				frappe.db.commit()
+				reaped += 1
+				continue
+			# The row lock is already held and the compare-and-set above has already
+			# established that the row is still ``running``, so this goes straight to
+			# the shared terminalization tail.
+			_terminalize_failed(
+				r.name,
+				agent=cur.agent,
+				installation=cur.installation,
+				session_key=cur.session_key,
+				owner=cur.owner,
+				error="run exceeded max duration; reaped by the stale-run sweep (A8 backstop)",
 				detail="reaped: run exceeded max duration",
-				owner=r.owner,
 			)
 			reaped += 1
 		except Exception:
@@ -212,27 +324,234 @@ def reap_stale_agent_runs() -> int:
 				title=f"jarvis agent: stale-run reap failed: {r.name}",
 				message=frappe.get_traceback(),
 			)
-	if reaped:
-		frappe.db.commit()
 	return reaped
+
+
+def _stale_candidates(cutoff) -> list:
+	"""Runs stuck ``running`` past ``cutoff`` — the reaper's candidate set. Factored so
+	the CA2-4 compare-and-set (re-read under a row lock before transitioning) can be
+	exercised against a deliberately-stale candidate snapshot in tests."""
+	return frappe.get_all(
+		RUN,
+		filters={"status": "running", "started_at": ["<", cutoff]},
+		fields=["name", "session_key", "owner", "agent", "installation", "pages_written"],
+	)
+
+
+def _terminalize_failed(
+	run_name: str,
+	*,
+	agent: str | None,
+	installation: str | None,
+	session_key: str | None,
+	owner: str | None,
+	error: str,
+	detail: str | None = None,
+) -> None:
+	"""Stamp a run ``failed`` + tear down its bearer + log the activity — the tail
+	shared by every path that kills a RUNNING run.
+
+	The caller must already have established that the row is still ``running``:
+	the reaper holds the row lock from its compare-and-set, ``fail_run`` takes one.
+	Ordering is load-bearing — the status write is committed (releasing the row
+	lock) BEFORE the session teardown, so a teardown never runs under the lock."""
+	from jarvis.chat import agent_runs
+
+	frappe.db.set_value(
+		RUN,
+		run_name,
+		{
+			"status": "failed",
+			"finished_at": frappe.utils.now(),
+			"error": (error or "")[:140],
+		},
+		update_modified=False,
+	)
+	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+	# A8: the session bearer must not outlive the (now-failed) run.
+	agent_runs.teardown_run_session(session_key)
+	log_activity(
+		agent=agent,
+		agent_title=frappe.db.get_value(LISTING, agent, "title") if agent else "",
+		installation=installation,
+		action="run_failed",
+		run=run_name,
+		detail=(detail or error or "")[:140],
+		owner=owner,
+	)
+	frappe.db.commit()
+
+
+def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
+	"""Terminalize a RUNNING agent run as ``failed`` with ``error``. Returns True
+	iff this call is the one that transitioned it.
+
+	The honest-failure entry point for a run that is provably dead before it can
+	finalize itself — today, a delegate whose capability contract authorises no
+	tool at all (JF-017), which is refused on every call INCLUDING the
+	``record_agent_run`` writeback. Without this the row would sit ``running``
+	until the 3h stale-run sweep relabelled it "exceeded max duration", sending
+	the customer after a timeout that never happened.
+
+	Same discipline as the sweep: commit first so the ``FOR UPDATE`` opens the
+	read view, compare-and-set on ``status='running'`` under the row lock so a
+	concurrent finish is never overwritten with ``failed``. Best-effort — a
+	failure to record the failure must never take down the caller's response."""
+	if not run_name:
+		return False
+	try:
+		frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
+		cur = frappe.db.get_value(
+			RUN,
+			run_name,
+			["status", "agent", "installation", "session_key", "owner"],
+			as_dict=True,
+			for_update=True,
+		)
+		if not cur or cur.status != "running":
+			frappe.db.commit()  # release the lock; a concurrent finish already won
+			return False
+		_terminalize_failed(
+			run_name,
+			agent=cur.agent,
+			installation=cur.installation,
+			session_key=cur.session_key,
+			owner=cur.owner,
+			error=error,
+			detail=detail,
+		)
+		return True
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis agent: run failure stamp failed: {run_name}",
+			message=frappe.get_traceback(),
+		)
+		return False
 
 
 # --------------------------------------------------------------------------- #
 # shared launch (scheduler + manual run_agent_now take the SAME path)
 # --------------------------------------------------------------------------- #
-def _launch_audit(inst, trigger: str) -> dict:
+def _resolve_initiating_human(trigger: str, initiating_human: str | None) -> str | None:
+	"""JF-021 — the validated human to stamp as a run's immutable ``initiating_human``.
+
+	Provenance is PASSED IN, never read from ambient session state. By the time
+	``_launch_audit`` runs, BOTH launch paths have already switched the session to the
+	installation's ``run_as_user``, so ``frappe.session.user`` is the EXECUTING identity;
+	stamping it misattributed every manual run whose triggerer != run-as user, forever
+	(the field is immutable once inserted).
+
+	Fail-closed rules:
+
+	* **scheduled** — no human initiates a cron run, so the field stays empty. A caller
+	  that supplies one is REFUSED rather than believed (attributing an unattended run
+	  to a person is exactly the lie this field exists to prevent).
+	* **manual** — the identity must equal the AUTHENTICATED session user of this
+	  request (``jarvis._session.authenticated_user`` — the user as of BEFORE any
+	  ``impersonate`` switch). A supplied value can therefore only ever CONFIRM what the
+	  server already knows; it can never introduce a third identity, so nothing
+	  client-reachable can forge attribution. Omitting it resolves to that same
+	  authenticated user (the in-process callers that never impersonate).
+	* the resolved identity must be a real ENABLED User and never Guest — an
+	  unattributable "human" is refused, not stamped.
+	"""
+	if trigger != "manual":
+		if initiating_human:
+			frappe.throw(_("A scheduled agent run has no initiating human."))
+		return None
+
+	# The pre-impersonation session user: the server's own answer to "who triggered
+	# this", derived independently of whatever the caller passed.
+	actual = (authenticated_user() or "").strip()
+	human = (initiating_human or actual).strip()
+	if human != actual:
+		frappe.throw(
+			_("An agent run can only be attributed to the user who triggered it."),
+			frappe.PermissionError,
+		)
+	if human in ("", "Guest") or not frappe.db.get_value("User", human, "enabled"):
+		frappe.throw(_("A manual agent run must be attributable to an enabled user."))
+	return human
+
+
+def _launch_audit(
+	inst,
+	trigger: str,
+	source_apps: list[str] | None = None,
+	initiating_human: str | None = None,
+) -> dict:
 	"""Create the audit conversation + a ``running`` Jarvis Agent Run + enqueue
 	the triggering turn. MUST run as the installation owner (the scheduler
 	set_user's it; run_agent_now is already the owner). Returns
 	``{run, conversation, session_key}``. Identity/budget guards + next_run_at
-	advancement are the caller's job."""
+	advancement are the caller's job.
+
+	``initiating_human`` (JF-021) is the human who triggered a MANUAL run, captured by
+	the caller BEFORE it impersonated the run-as user and validated here by
+	``_resolve_initiating_human``. The scheduler passes ``None`` — a cron run has no
+	initiating human.
+
+	``source_apps`` (CX5-2) is the Custom App Learning run's ADMIN-AUTHORIZED app
+	selection, already validated by the caller (``app_source.validate_source_apps``).
+	It is stamped SERVER-SIDE into the run's ``scope_json`` and is the ONLY thing
+	that authorises the source-read/wiki tools to touch an app — the model can
+	neither author nor widen it. Both launch paths (manual + cron) must supply it
+	for that agent; ``None`` leaves the run with no authorized apps, i.e. the tools
+	refuse everything."""
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
 	# run_agent_now) has already switched the session to this user, so
 	# frappe.session.user == run_as_user here — scope + watermark below are
 	# resolved AS the run-as user (permission-bounded).
-	run_as_user = inst.run_as_user or owner
+	#
+	# R1-F3: the LAST line of defence, and the reason no ``or owner`` fallback
+	# survives anywhere on the run path. ``run_as_user`` is no longer ``reqd`` (a
+	# legacy row carrying none must stay DISABLEABLE) and the controller check that
+	# replaced it lives in ``validate()``, which frappe skips WHOLESALE under
+	# ``flags.ignore_validate`` (``run_before_save_methods`` returns early;
+	# ``_validate`` — the ``reqd`` enforcer — is what always runs). So a future
+	# seeder/importer adopting that flag could persist an ENABLED install with no
+	# executing identity. Refuse to dispatch it rather than falling back to the row
+	# OWNER: that identity was never litigated by the escalation guard, so the
+	# fallback amounts to a privilege grant nobody reviewed. Thrown BEFORE any row
+	# is inserted, so a refused launch leaves no orphan conversation/run.
+	run_as_user = (inst.run_as_user or "").strip()
+	if not run_as_user:
+		frappe.throw(
+			_(
+				"This agent installation has no run-as user, so there is no identity to run "
+				"it as. Set a run-as user on the installation, or disable it."
+			)
+		)
+
+	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
+	# for the same reason as the run-as guard above — a refused launch must leave no
+	# orphan conversation/run behind. Deliberately ORDERED BEFORE the capability
+	# check below: an unauthorized triggerer must be answered with the authorization
+	# refusal, never with a bundle-configuration diagnosis (merge ruling, 2026-07-26
+	# composition review).
+	initiating_human = _resolve_initiating_human(trigger, initiating_human)
+
+	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
+	# because an empty declared surface is not a runnable state: the bench would
+	# refuse every call the delegate makes — record_agent_run included — so the run
+	# could never finalize itself and would sit "running" until the 3h stale-run
+	# sweep relabelled it a timeout it never hit. Refuse the LAUNCH instead, with
+	# the real reason, and leave no orphan conversation/run behind (same discipline
+	# as the run_as_user guard above). Imported inside the function so the bundled
+	# registry stays the one seam tests inject a declared surface at.
+	from jarvis.chat.agent_catalog import registry_tools_allow
+
+	declared_tools = registry_tools_allow(listing.agent_slug)
+	if not declared_tools:
+		frappe.throw(
+			_(
+				"This agent's bundle declares no tools, so the run would be refused at "
+				"every step and could never finish. Reinstall or update the agent, or "
+				"contact support — nothing was started."
+			)
+		)
 
 	# Fresh conversation. ROW ownership is the human owner (reassigned below) so
 	# if_owner visibility works; the ERP-read identity is the run-as user.
@@ -250,13 +569,20 @@ def _launch_audit(inst, trigger: str) -> dict:
 	#     (shadow|live) at launch, so a run made in shadow is forever attributable as
 	#     such even after the install is later promoted.
 	#   * initiating_human — the human who triggered a MANUAL run; None for a
-	#     scheduled cron run (no human initiated it). On the manual path the caller has
-	#     switched the session to the run-as user, so frappe.session.user is the
-	#     triggering human ONLY on a self-mapped install (run_as == triggerer); see the
-	#     cross-file note for the run_as != triggerer case.
+	#     scheduled cron run (no human initiated it). Resolved above from the caller's
+	#     EXPLICIT argument, never from frappe.session.user: the session here is the
+	#     run-as user, which is a different person whenever the triggerer did not run
+	#     their own self-mapped install (JF-021).
 	bundle_version = inst.installed_version or listing.version or None
 	preparation_mode = inst.activation_state or "shadow"
-	initiating_human = frappe.session.user if trigger == "manual" else None
+
+	# Stamped in the same insert and under the same immutability guard — the
+	# declared ``tools_allow`` resolved above plus the listing's ``nature``/
+	# ``writes`` as they stand RIGHT NOW. From here on the bench authorises this
+	# run's tool calls against the snapshot, never against the mutable listing, so
+	# neither a listing edit mid-run nor a compromised container can widen what an
+	# in-flight run may do.
+	capability = _delegate_capability.contract_for_launch(listing, declared_tools)
 
 	run = frappe.get_doc(
 		{
@@ -270,6 +596,7 @@ def _launch_audit(inst, trigger: str) -> dict:
 			"bundle_version": bundle_version,
 			"preparation_mode": preparation_mode,
 			"initiating_human": initiating_human,
+			**capability,
 		}
 	)
 	run.flags.ignore_permissions = True
@@ -302,7 +629,7 @@ def _launch_audit(inst, trigger: str) -> dict:
 
 	# A6 explicit scope + A17 consistency watermark + A12 permission profile —
 	# all best-effort (never abort the launch) and computed AS the run-as user.
-	scope = _stamp_scope_and_watermark(run.name, inst, run_as_user)
+	scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
 
 	frappe.db.commit()
 
@@ -382,26 +709,37 @@ def _mint_run_session(session_key: str, user: str) -> None:
 	).insert(ignore_permissions=True)
 
 
-def _stamp_scope_and_watermark(run_name: str, inst, run_as_user: str) -> dict | None:
+def _stamp_scope_and_watermark(
+	run_name: str, inst, run_as_user: str, source_apps: list[str] | None = None
+) -> dict | None:
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
 
 	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
 	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
 	watermark + scope are resolved AS the run-as user (this runs under that
-	session). Returns the resolved scope dict (or None)."""
+	session). Returns the resolved scope dict (or None).
+
+	``source_apps`` (CX5-2) is folded into the SAME ``scope_json`` stamp OUTSIDE
+	the best-effort try, so an ERP scope-resolution failure can never drop the
+	authorization the source-read tools read back — a scribe run either carries its
+	admin-authorized app list or reads nothing."""
 	from jarvis.chat import agent_scope
 
 	values: dict = {}
 	scope = None
 	try:
 		scope = agent_scope.resolve_scope(inst)
-		values["scope_json"] = frappe.as_json(scope)
 	except Exception:
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
 		)
+	if source_apps is not None:
+		scope = dict(scope or {})
+		scope["source_apps"] = list(source_apps)
+	if scope is not None:
+		values["scope_json"] = frappe.as_json(scope)
 
 	if scope and scope.get("company") and scope.get("to_date"):
 		# A17: row-count + max(modified) over the scope's GL as-of window. The old
@@ -471,8 +809,14 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	Kept short: the delegate resolves the run/installation linkage for its Phase-3
 	writeback from the session_key the bench minted, not from this text."""
 	scope_block = ""
-	if scope:
-		scope_block = (
+	# CX5-2: name the admin-authorized apps explicitly. The bench ENFORCES the same
+	# list on every source-read/wiki call, so this is a courtesy so the delegate does
+	# not waste the run discovering that everything else is refused.
+	if scope and scope.get("source_apps"):
+		apps = ", ".join(str(a) for a in scope["source_apps"])
+		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
+	if scope and scope.get("company"):
+		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period): "
 			f'company="{scope.get("company")}", '
 			f'fiscal_year="{scope.get("fiscal_year")}", '
@@ -493,6 +837,14 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+def _is_app_learning(agent: str) -> bool:
+	"""True iff this listing is the Custom App Learning capability — the one agent
+	whose launch REQUIRES an explicit admin app selection (CX5-2)."""
+	from jarvis.tools import _app_learning_ctx
+
+	return _app_learning_ctx.is_app_learning_agent(agent)
+
+
 def _valid_owner(owner: str) -> bool:
 	if not owner or owner in ("Administrator", "Guest"):
 		return False

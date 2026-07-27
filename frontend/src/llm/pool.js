@@ -62,22 +62,45 @@ export function reorder(list, from, to) {
 	a.splice(to, 0, x);
 	return a;
 }
-// Suggested chat-subscription model ids per upstream (index 0 = the default the
-// onboarding editor uses when it hides the model field). Single source of truth,
-// shared with LlmPoolEditor's datalist so the default + suggestions can't drift.
-export const SUB_MODEL_SUGGESTIONS = {
+// Built-in fallback for chat-subscription model ids per upstream. The catalog is
+// owned by admin now (Jarvis LLM Provider doctype) and arrives via
+// get_chat_ui_settings.subscription_models; this literal is the degraded-mode
+// floor used before the first response lands and when admin is unreachable.
+// Do NOT add models here to make them selectable: add them in the admin desk.
+const FALLBACK_SUB_MODELS = {
 	openai: ["gpt-5.5", "gpt-5.4"],
 	google: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-flash"],
-	// Model ids must exist in cli-proxy-api's v7.2.35 catalogue (grok-4.5 is NOT).
 	xai: ["grok-4.3", "grok-build-0.1"],
 	kimi: ["kimi-k2.7-code", "kimi-k2.6"],
 };
-// Default chat-subscription model for an upstream (SUB_MODEL_SUGGESTIONS[0], with
-// an openai fallback for unmapped upstreams). Onboarding hides the model field
-// (provider is enough), so the row still needs a model id for validatePool + save.
-// Pure + exported for unit tests.
-export function defaultSubscriptionModel(upstream) {
-	return (SUB_MODEL_SUGGESTIONS[upstream] || SUB_MODEL_SUGGESTIONS.openai)[0];
+
+// Provider label (as admin stores it) -> the upstream key the pool editor uses.
+const LABEL_TO_UPSTREAM = {
+	OpenAI: "openai",
+	"Google Gemini": "google",
+	"xAI Grok": "xai",
+	"Kimi (Moonshot)": "kimi",
+};
+
+// Map a get_chat_ui_settings.subscription_models payload (keyed by provider
+// LABEL) to the upstream keys this module uses. Falls back when empty.
+export function subModelSuggestions(apiSubscriptionModels) {
+	const src = apiSubscriptionModels || {};
+	const out = {};
+	for (const [label, models] of Object.entries(src)) {
+		const upstream = LABEL_TO_UPSTREAM[label];
+		if (upstream && Array.isArray(models) && models.length) out[upstream] = models;
+	}
+	return Object.keys(out).length ? out : FALLBACK_SUB_MODELS;
+}
+
+// Default chat-subscription model for an upstream. Synchronous by contract: the
+// onboarding editor calls it before any API response exists, so `catalog` is
+// optional and omitting it yields the built-in fallback.
+export function defaultSubscriptionModel(upstream, catalog) {
+	const table = catalog && Object.keys(catalog).length ? catalog : FALLBACK_SUB_MODELS;
+	const models = table[upstream] || FALLBACK_SUB_MODELS[upstream] || FALLBACK_SUB_MODELS.openai;
+	return models[0];
 }
 export function validatePool(models, preset) {
 	if (!Array.isArray(models) || models.length === 0)
@@ -356,4 +379,80 @@ export function apiKeyModelHealth(row, modelStatuses) {
 		};
 	}
 	return { level: "ok" };
+}
+
+// Map the fleet's pool-wide subscription-probe verdict (sync.subscription_status) to a
+// dot health + label + title. Shared by the failover-list account row (LlmPoolEditor's
+// !singleMode accountHealth) and onboarding's single-account picker - both read the
+// exact same field; disambiguation of WHICH row it describes happens in the caller
+// (the failover list only attributes it when there is exactly one subscription row;
+// onboarding always has exactly one, so it skips that check).
+//
+// `knownGood` decides what "no verdict at all" (status is "not_applicable", "", or
+// undefined) degrades to:
+//   - true  (the failover-list editor): a previously-saved, working pool that a
+//     pre-1.11 fleet just didn't report on - quiet green, same as before this fix.
+//   - false (onboarding): "no verdict yet" almost always means the account was JUST
+//     connected and nothing has actually probed it - painting THAT green is exactly
+//     how an out-of-quota account got shown "Account connected" before anyone had
+//     checked it (2026-07-23 trace). Green there is earned only by an explicit
+//     "verified".
+export function subscriptionAccountHealth(status, { knownGood = true, warningDetail = "" } = {}) {
+	if (status === "unverified") {
+		return {
+			level: "warn",
+			label: "Not accepting requests",
+			title:
+				warningDetail ||
+				"This account rejected a test request. Reconnect to restore chat.",
+		};
+	}
+	if (status === "verified") return { level: "ok" };
+	// No verdict AT ALL - status is falsy, or the fleet's own "nothing to probe here"
+	// value - is the one case allowed to degrade to knownGood's default, because it is
+	// the ONLY case that can legitimately mean "an existing, previously-working pool
+	// that a pre-1.11 fleet simply never reported on" (see knownGood's doc above).
+	if (!status || status === "not_applicable")
+		return knownGood ? { level: "ok" } : { level: "neutral" };
+	// Anything else - "unchecked", or a status string this frontend enum does not
+	// recognise at all (a future "rate_limited"/"expired", or a typo upstream) - must
+	// fail towards "not proven" rather than "fine". Falling an UNRECOGNISED value
+	// through to knownGood's default (as a bare `else` would) reintroduces the exact
+	// false-positive-green bug this function was written to kill, just via a status
+	// string instead of a hardcoded short-circuit: a fleet reporting a verdict this
+	// frontend has never heard of would otherwise paint solid green in the
+	// failover-list editor (knownGood defaults true there), for an account the backend
+	// is actively flagging. Treat it identically to the known "unchecked" case instead.
+	return {
+		level: "unchecked",
+		label: "Not verified yet",
+		title: "We couldn't confirm this account is active yet. It will be re-checked on the next apply.",
+	};
+}
+
+// Given the SETTLED health a row would show if the pool were clean and no apply were
+// in flight (from apiKeyModelHealth/subscriptionAccountHealth above), decides what
+// LlmPoolEditor's dot actually renders while the pool is dirty (unsaved edits) or a
+// previous save is still being applied (sync.pending). In both cases the last probe
+// result no longer describes what's about to be saved, so it can't be asserted
+// verbatim - but that must NOT mean every row collapses to the same grey dot a
+// never-verified row shows: a row that was settled "ok" (positively verified, or a
+// previously-working pool nothing has yet contradicted) has earned better than
+// looking freshly-suspect. Collapsing it into --neutral grey (the same colour the CSS
+// now correctly uses for "never proven", see subscriptionAccountHealth's knownGood
+// doc above) made an already-healthy account's dot flip from green to grey the
+// instant the customer edited an unrelated field - reading as "this just broke" when
+// nothing about THAT account changed (PR #410 review finding 2). A settled row that
+// was already unproven or already flagged (anything that isn't "ok") has nothing to
+// lose by staying at that same dot; only "ok" gets the softer, visibly-not-a-failure
+// "pending" treatment, and it stays visibly distinct from "neutral" so the two can
+// never be confused for one another.
+export function dirtyAccountHealth(settled, isDirtyOrPending) {
+	if (!isDirtyOrPending) return settled;
+	if (settled.level !== "ok") return { level: "neutral" };
+	return {
+		level: "pending",
+		label: "Pending re-check",
+		title: "This account was verified before your latest changes. It will be re-checked once they're applied.",
+	};
 }

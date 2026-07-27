@@ -36,7 +36,7 @@ export default defineConfig({
 				name: "Jarvis",
 				short_name: "Jarvis",
 				description:
-					"Your AI teammate. Ask for anything across your ERP — in plain language.",
+					"Your AI teammate. Ask for anything across your ERP, in plain language.",
 				start_url: "/jarvis-mobile",
 				scope: "/jarvis-mobile",
 				display: "standalone",
@@ -96,11 +96,16 @@ export default defineConfig({
 			// means agent replies look the same on both surfaces. It is a
 			// dependency-free module, so importing across apps costs nothing.
 			"@shared": path.resolve(__dirname, "../frontend/src"),
+			// Surface-agnostic chat modules (the Relay-Pump event fence). They live
+			// under jarvis/public/js rather than frontend/src because the Desk widget
+			// is an esbuild bundle that can only reach that tree — see
+			// jarvis/public/js/shared/pump_fence.mjs.
+			"@jsshared": path.resolve(__dirname, "../jarvis/public/js/shared"),
 		},
 		dedupe: ["vue"],
 	},
 	server: {
-		// @shared reaches outside this app's root.
+		// @shared and @jsshared reach outside this app's root.
 		fs: { allow: [".."] },
 	},
 	optimizeDeps: {

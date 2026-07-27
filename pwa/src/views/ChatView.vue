@@ -10,10 +10,13 @@ import {
 	watch,
 } from "vue";
 import BrandMark from "../components/BrandMark.vue";
+import { agentName } from "@/branding";
 import { useRouter } from "vue-router";
 // The desktop SPA's renderer — dependency-free, and sharing it means an agent
 // reply reads identically on both surfaces.
 import { renderMarkdown } from "@shared/markdown.js";
+import { admitEvent } from "@jsshared/pump_fence.mjs";
+import { eventFence } from "../lib/pump_fence_state.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
@@ -64,6 +67,11 @@ const live = ref(null); // { runId, messageId, text, tools[] }
 // Stop is a UI-level cancel too — the backend may still finish the turn, so
 // ignore what comes back rather than letting a "stopped" reply reappear.
 const ignoredRuns = ref(new Set());
+// JF-018: the Relay-Pump epoch/seq watermark lives in a MODULE-scope singleton
+// (see ../lib/pump_fence_state.js for why): this component is route-mounted and
+// unmounts on /business, /files or /, so a component-scope fence would be wiped
+// on every route away and readmit the stale frames it exists to drop. The
+// singleton is what actually delivers "the terminal marker outlives the view".
 
 const decision = ref(null);
 const preview = ref(null);
@@ -263,8 +271,15 @@ async function send() {
 		});
 		if (res?.ok === false) {
 			sendBusy.value = false;
-			errorBanner.value = res.reason || "Couldn't send that message.";
 			messages.value = messages.value.filter((m) => !m.optimistic);
+			// A rollout started under this tab; the gate only latches at boot, so
+			// reload onto it instead of leaving them retrying.
+			if (res.reason === "release_update_required") {
+				errorBanner.value = "Jarvis is being updated. Reloading…";
+				setTimeout(() => window.location.reload(), 1500);
+				return;
+			}
+			errorBanner.value = res.reason || "Couldn't send that message.";
 			return;
 		}
 		// First send of a brand-new chat: adopt the id the backend just created,
@@ -277,7 +292,7 @@ async function send() {
 		}
 	} catch (e) {
 		sendBusy.value = false;
-		errorBanner.value = "That didn't reach Jarvis. Check your connection and try again.";
+		errorBanner.value = `That didn't reach ${agentName}. Check your connection and try again.`;
 		messages.value = messages.value.filter((m) => !m.optimistic);
 	}
 }
@@ -384,6 +399,15 @@ function onEvent(p) {
 	if (conv !== convId.value) return;
 	const ignored = p.run_id ? ignoredRuns.value.has(p.run_id) : false;
 
+	// JF-018: fence out a superseded pump's straggler before it touches anything.
+	// Because a delta carries the CUMULATIVE text, an out-of-order one REWINDS the
+	// reply mid-stream, and a stale run:end/run:error tears down a turn that has
+	// already been taken over. Dropping is invisible to the user: every terminal
+	// path below calls load(), and that durable re-fetch is what converges content.
+	// Same placement and the same kind set as the desktop SPA — see
+	// jarvis/public/js/shared/pump_fence.mjs for the mirrored comparison ladder.
+	if (!admitEvent(eventFence, p)) return;
+
 	switch (p.kind) {
 		case "run:start":
 			if (ignored) return;
@@ -476,6 +500,7 @@ watch(
 	() => props.id,
 	(id) => {
 		convId.value = id === "new" ? "" : id;
+		store.clearUnread(convId.value);
 		messages.value = [];
 		conversation.value = null;
 		pending.value = [];
@@ -490,6 +515,8 @@ watch(
 onMounted(async () => {
 	socket?.on("jarvis:event", onEvent);
 	window.addEventListener("jv:resync", onResync);
+	// Opening the chat IS reading it — drop the list's dot straight away.
+	store.clearUnread(convId.value);
 	if (!store.loaded) store.loadConversations();
 	load(true);
 	loadPending();
@@ -525,7 +552,7 @@ onUnmounted(() => {
 		</button>
 		<div class="jv-head">
 			<div class="jv-head-title">{{ title }}</div>
-			<div class="jv-head-sub">{{ model ? `Jarvis · ${model}` : "Jarvis" }}</div>
+			<div class="jv-head-sub">{{ model ? `${agentName} · ${model}` : agentName }}</div>
 		</div>
 		<button
 			v-if="convId"
@@ -569,7 +596,7 @@ onUnmounted(() => {
 				<template v-if="it.msg">
 					<div v-if="it.view.html" class="jv-md" v-html="it.view.html" />
 					<div v-else-if="it.view.empty" class="jv-msg-error">
-						Jarvis didn't return a reply for this turn. Try asking again.
+						{{ agentName }} didn't return a reply for this turn. Try asking again.
 					</div>
 					<!-- SIBLING of the chain above, not a v-else-if in it: a partial stop
 					     has non-empty html, so chaining this would let the first branch
@@ -629,7 +656,7 @@ onUnmounted(() => {
 		<DecisionCard
 			v-for="p in pending"
 			:key="p.token"
-			:summary="p.summary || p.tool || 'Jarvis needs your approval'"
+			:summary="p.summary || p.tool || `${agentName} needs your approval`"
 			@open="decision = p"
 		/>
 	</div>
@@ -757,7 +784,8 @@ onUnmounted(() => {
 					<div class="jv-danger-main">
 						<div class="jv-danger-title">Auto-apply changes</div>
 						<div class="jv-danger-sub">
-							Jarvis commits ERP writes without asking. Turns off approval prompts.
+							{{ agentName }} commits ERP writes without asking. Turns off approval
+							prompts.
 						</div>
 						<div v-if="menuError" class="jv-menu-error">{{ menuError }}</div>
 					</div>

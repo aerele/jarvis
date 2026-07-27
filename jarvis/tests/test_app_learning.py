@@ -25,7 +25,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, add_to_date, now_datetime
 
-from jarvis.learning import app_analysis
+from jarvis.learning import app_analysis, app_source
 
 RUN = "Jarvis App Learning Run"
 CONV = "Jarvis Conversation"
@@ -75,6 +75,14 @@ class _AppLearningTestCase(FrappeTestCase):
 		self._patches = [
 			mock.patch.object(app_analysis, "_app_source_dir", side_effect=lambda app: self.app_dir),
 			mock.patch.object(app_analysis, "_installed_custom_apps", return_value=["fakeapp"]),
+			# _snapshot_zip now resolves the source ROOT through app_source._resolve_app_root
+			# (CA2-1), which reads app_source's OWN _app_source_dir binding — patch it there
+			# too so the shared resolver sees the temp app tree.
+			mock.patch.object(app_source, "_app_source_dir", side_effect=lambda app: self.app_dir),
+			mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp"]),
+			# The chat-batch pipeline is retired + fail-closed by default (CA2-1); un-retire
+			# it here so the engine-mechanics tests still exercise the rollback-present engine.
+			mock.patch.object(app_analysis, "_legacy_retired", return_value=False),
 		]
 		for p in self._patches:
 			p.start()
@@ -229,7 +237,10 @@ class TestSnapshotZip(_AppLearningTestCase):
 				"README.md": "# r\n",
 			}
 		)
-		with mock.patch.object(app_analysis, "FILE_CAP", 3):
+		# FILE_CAP now lives in the shared jarvis.learning.app_source module (imported
+		# + re-exported by app_analysis); _collect_files reads it there, so the cap must
+		# be patched at its source module for the snapshot's file-cap subset to shrink.
+		with mock.patch.object(app_source, "FILE_CAP", 3):
 			snap = app_analysis._snapshot_zip("test-cap-run", "fakeapp")
 		self._zips.append(snap["zip_path"])
 		import zipfile
@@ -524,7 +535,9 @@ class TestIngest(_AppLearningTestCase):
 
 		captured: list[list[dict]] = []
 
-		def _apply(updates, source, user, ref=None, default_scope=None, target_user=None):
+		def _apply(
+			updates, source, user, ref=None, default_scope=None, target_user=None, provenance_prefix=None
+		):
 			captured.append(updates)
 			self.assertEqual(source, "app-learning:fakeapp")
 			self.assertEqual(user, ADMIN_USER)
@@ -785,3 +798,289 @@ class TestScheduling(_AppLearningTestCase):
 			mock.patch.object(app_analysis, "_due_queued_runs", side_effect=RuntimeError("boom")),
 		):
 			app_analysis.tick()  # must swallow everything
+
+
+# --------------------------------------------------------------------------- #
+# CDX-19 (residual) — capacity deferral of an analysis turn
+# --------------------------------------------------------------------------- #
+class TestAppLearningCapacityDefer(_AppLearningTestCase):
+	"""When a batch/final turn cannot be admitted (`_enqueue_turn` overloaded), the run must NOT
+	fail and must NOT wait forever for a terminal that never comes — it defers, and the tick's
+	stale-recovery pass re-attempts the SAME pending turn promptly, bounded then Failed."""
+
+	def test_batch_overload_defers_not_fails_then_resume_heals(self):
+		run = self._analyzing_run()  # Analyzing, batches_total=2, batches_done=0
+		# A parseable batch-1 reply; its turn-end chains batch 2, whose enqueue OVERLOADS.
+		self._reply(run.conversation, _fenced({"notes": ["n1"]}))
+		overload = {"ok": False, "overloaded": True, "reason": "busy"}
+		with mock.patch("jarvis.chat.api._enqueue_turn", return_value=overload):
+			app_analysis.on_turn_end(run.conversation, errored=False)
+		run.reload()
+		self.assertEqual(run.status, "Analyzing", "overload DEFERS — the run is not failed")
+		self.assertEqual(int(run.batches_done), 1, "batch 1 landed; batch 2 is the deferred target")
+		cw = json.loads(run.notes or "{}").get("capacity_wait") or {}
+		self.assertEqual(cw.get("key"), "2")
+		self.assertGreaterEqual(int(cw.get("count") or 0), 1)
+		# The stale-recovery pass re-attempts PROMPTLY (no 45-min wait). Capacity freed → dispatch.
+		with (
+			mock.patch("jarvis.chat.api._enqueue_turn") as enq,
+			mock.patch.object(app_analysis, "_enqueue_tick"),
+		):
+			app_analysis._recover_stale_runs()
+		enq.assert_called_once()
+		run.reload()
+		self.assertEqual(run.status, "Analyzing")
+		self.assertNotIn("capacity_wait", json.loads(run.notes or "{}"), "marker cleared once dispatched")
+
+	def test_capacity_bounded_then_failed_honestly(self):
+		run = self._analyzing_run()
+		# Park at the ceiling; the next resume exceeds the bound and fails the run honestly.
+		notes = {"capacity_wait": {"key": "1", "count": app_analysis._MAX_CAPACITY_WAITS + 1}}
+		frappe.db.set_value(RUN, run.name, "notes", json.dumps(notes))
+		frappe.db.commit()
+		app_analysis._bust_active_conversations()
+		with (
+			mock.patch("jarvis.chat.api._enqueue_turn"),
+			mock.patch.object(app_analysis, "_enqueue_tick"),
+		):
+			app_analysis._recover_stale_runs()
+		run.reload()
+		self.assertEqual(run.status, "Failed")
+		self.assertIn("busy", (run.error or "").lower())
+
+	def test_cancel_before_resume_prevents_new_turn(self):
+		"""CDX-22: a cancel that has landed prevents the capacity-resume pass from enqueuing a new
+		batch turn. ``mark_cancelled`` now writes ``Cancelled`` under the SAME per-run lock the
+		resume/turn-end critical sections hold, so it can no longer slip between a recheck of
+		``Analyzing`` and the enqueue."""
+		run = self._analyzing_run()
+		frappe.db.set_value(RUN, run.name, "notes", json.dumps({"capacity_wait": {"key": "1", "count": 1}}))
+		frappe.db.commit()
+		app_analysis._bust_active_conversations()
+		app_analysis.mark_cancelled(run.name)
+		self.assertEqual(frappe.db.get_value(RUN, run.name, "status"), "Cancelled")
+		with (
+			mock.patch("jarvis.chat.api._enqueue_turn") as enq,
+			mock.patch.object(app_analysis, "_enqueue_tick"),
+		):
+			app_analysis._recover_stale_runs()
+		enq.assert_not_called()
+		self.assertEqual(frappe.db.get_value(RUN, run.name, "status"), "Cancelled")
+
+	def test_resume_yields_while_the_run_lock_is_held(self):
+		"""CDX-22: while a cancel/turn-end HOLDS the per-run lock (its recheck->enqueue critical
+		section), the capacity-resume pass (non-blocking on the same lock) YIELDS — so a cancel in
+		progress can never be raced into a new-turn enqueue. Once the lock frees, the resume runs."""
+		run = self._analyzing_run()
+		frappe.db.set_value(RUN, run.name, "notes", json.dumps({"capacity_wait": {"key": "1", "count": 1}}))
+		frappe.db.commit()
+		app_analysis._bust_active_conversations()
+		from jarvis._redis_lock import redis_lock
+
+		lock_name = f"jarvis_app_learning_run:{run.name}"
+		with redis_lock(lock_name, timeout_s=60, blocking_timeout_s=0.0) as held:
+			self.assertTrue(held)
+			with (
+				mock.patch("jarvis.chat.api._enqueue_turn") as enq,
+				mock.patch.object(app_analysis, "_enqueue_tick"),
+			):
+				app_analysis._recover_stale_runs()
+			enq.assert_not_called()
+		# Lock released → the capacity-resume proceeds and enqueues the pending batch.
+		with (
+			mock.patch("jarvis.chat.api._enqueue_turn") as enq2,
+			mock.patch.object(app_analysis, "_enqueue_tick"),
+		):
+			app_analysis._recover_stale_runs()
+		enq2.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# CA2-1 — the retired pipeline is FAIL-CLOSED + the legacy walk is resolver-guarded
+# --------------------------------------------------------------------------- #
+class TestLegacyPipelineRetired(_AppLearningTestCase):
+	"""CA2-1: once the chat-batch pipeline is retired it is FAIL-CLOSED. Even a worker
+	that was mid-flight when the retirement landed refuses its NEXT transition, so it can
+	never resurrect Analyzing on a row the retirement migration Cancelled; and the legacy
+	snapshot walk is routed through the canonical containment resolver."""
+
+	def test_on_turn_end_refuses_after_retirement(self):
+		# The load-bearing interposition: a mid-flight worker's turn completes, but the
+		# NEW-code turn-end hook REFUSES to advance the run once the pipeline is retired.
+		run = self._analyzing_run()  # created while un-retired (base setUp)
+		conv = run.conversation
+		self._reply(conv, _fenced({"batch": 1, "notes": ["n1"]}))
+		with (
+			mock.patch.object(app_analysis, "_legacy_retired", return_value=True),
+			mock.patch("jarvis.chat.api._enqueue_turn") as enq,
+			mock.patch.object(app_analysis, "_enqueue_ingest") as ing,
+		):
+			app_analysis.on_turn_end(conv, errored=False)
+		run.reload()
+		self.assertEqual(run.status, "Analyzing")  # NOT advanced
+		self.assertEqual(int(run.batches_done), 0)  # the batch reply was NOT consumed
+		enq.assert_not_called()
+		ing.assert_not_called()
+
+	def test_snapshot_zip_refuses_after_retirement(self):
+		self._write({"hooks.py": "h\n"})
+		with mock.patch.object(app_analysis, "_legacy_retired", return_value=True):
+			with self.assertRaises(app_analysis._LegacyRetired):
+				app_analysis._snapshot_zip("retired-run", "fakeapp")
+
+	def test_snapshot_zip_walk_is_resolver_guarded(self):
+		# CA2-1 belt: the legacy walk goes through _resolve_app_root, so a symlinked app
+		# root (apps/<app> -> elsewhere) is refused before any file is zipped/shipped.
+		reallib = os.path.join(self.tmp, "reallib")
+		os.makedirs(reallib)
+		with open(os.path.join(reallib, "hooks.py"), "w") as fh:
+			fh.write("x = 1\n")
+		linkroot = os.path.join(self.tmp, "linkapp")
+		os.symlink(reallib, linkroot)
+		with mock.patch.object(app_source, "_app_source_dir", side_effect=lambda a: linkroot):
+			with self.assertRaises((FileNotFoundError, ValueError)):
+				app_analysis._snapshot_zip("symroot-run", "fakeapp")
+
+	def test_start_run_cas_does_not_resurrect_a_cancelled_row(self):
+		# A start_run whose row is Cancelled (by a concurrent cancel / the retirement
+		# migration) WHILE it snapshots must NOT restore Analyzing on it (compare-and-set).
+		self._write({"hooks.py": "h\n", "mod/api.py": "import frappe\n"})
+		run = self._mk_run()  # Queued
+		real_snap = app_analysis._snapshot_zip
+
+		def _snap_then_cancel(run_name, app):
+			out = real_snap(run_name, app)
+			self._zips.append(out["zip_path"])
+			frappe.db.set_value(RUN, run_name, {"status": "Cancelled", "finished_at": now_datetime()})
+			frappe.db.commit()
+			app_analysis._bust_active_conversations()
+			return out
+
+		with (
+			mock.patch.object(app_analysis, "_snapshot_zip", side_effect=_snap_then_cancel),
+			mock.patch("jarvis.chat.api._enqueue_turn") as enq,
+			mock.patch.object(app_analysis, "_enqueue_tick"),
+		):
+			app_analysis.start_run(run.name)
+		run.reload()
+		self.assertEqual(run.status, "Cancelled")  # NOT resurrected to Analyzing
+		enq.assert_not_called()
+
+	def test_cas_status_leaves_a_moved_row_alone(self):
+		run = self._mk_run(status="Analyzing", conversation="conv-cas-x")
+		frappe.db.set_value(RUN, run.name, "status", "Cancelled")
+		frappe.db.commit()
+		# expected=Zipping but the row is Cancelled -> the CAS loses, the row is untouched
+		self.assertFalse(app_analysis._cas_status(run.name, "Zipping", {"status": "Analyzing"}))
+		self.assertEqual(frappe.db.get_value(RUN, run.name, "status"), "Cancelled")
+
+	def test_process_due_and_ingest_refuse_after_retirement(self):
+		self._mk_run(status="Queued")
+		with (
+			mock.patch.object(app_analysis, "_legacy_retired", return_value=True),
+			mock.patch.object(app_analysis, "start_run") as sr,
+		):
+			app_analysis.process_due()
+			sr.assert_not_called()
+		# the legacy ingest fails CLOSED once retired — an enqueued job never runs
+		ing_run = self._mk_run(status="Ingesting", conversation=self._mk_conv())
+		with mock.patch.object(app_analysis, "_legacy_retired", return_value=True):
+			app_analysis.ingest(ing_run.name)
+		ing_run.reload()
+		self.assertEqual(ing_run.status, "Ingesting")  # untouched — the writeback never ran
+
+
+# --------------------------------------------------------------------------- #
+# CA3-2 — full compare-and-set coverage on the legacy transitions + ingest rollback
+# --------------------------------------------------------------------------- #
+class TestLegacyTransitionCAS(_AppLearningTestCase):
+	"""CA3-2: EVERY forward + failure transition is a compare-and-set, so a cancel / the
+	retirement migration that terminalizes a run is never overwritten by a later transition,
+	and a lost completion CAS rolls back the ingest side effects (pages + skills)."""
+
+	def test_fail_run_does_not_overwrite_a_terminal_run(self):
+		# The failure transition is a CAS too — it never flips a terminal row to Failed, so
+		# a Cancelled run a concurrent cancel produced stays Cancelled.
+		run = self._mk_run(status="Cancelled", conversation="conv-fr-x", finished_at=now_datetime())
+		app_analysis._fail_run(run.name, "boom")
+		self.assertEqual(frappe.db.get_value(RUN, run.name, "status"), "Cancelled")
+
+	def test_mark_cancelled_does_not_overwrite_a_completed_run(self):
+		# mark_cancelled re-reads eligibility under a row lock — a run that already WON a
+		# forward transition (Completed) is never overwritten to Cancelled.
+		run = self._mk_run(status="Completed", conversation="conv-mc-x", finished_at=now_datetime())
+		app_analysis.mark_cancelled(run.name)
+		self.assertEqual(frappe.db.get_value(RUN, run.name, "status"), "Completed")
+
+	def test_final_transition_uses_cas_and_respects_a_lost_race(self):
+		# Analyzing -> Ingesting is a compare-and-set; if it LOSES (a cancel/retirement moved
+		# the row off Analyzing under us), the run is NOT pushed to Ingesting and no ingest
+		# is enqueued.
+		run = self._analyzing_run()
+		frappe.db.set_value(RUN, run.name, "batches_done", run.batches_total)
+		frappe.db.commit()
+		run.reload()
+		self._reply(run.conversation, _fenced({"wiki_pages": [], "skills": [], "summary": "done"}))
+		with (
+			mock.patch.object(app_analysis, "_cas_status", return_value=False) as cas,
+			mock.patch.object(app_analysis, "_enqueue_ingest") as ing,
+		):
+			app_analysis._advance_run(run, errored=False)
+		cas.assert_called_once()
+		self.assertEqual(cas.call_args[0][1], "Analyzing")  # expected=Analyzing
+		self.assertEqual(cas.call_args[0][2]["status"], "Ingesting")  # target=Ingesting
+		ing.assert_not_called()
+
+	def test_cancel_vs_ingest_cas_rolls_back_side_effects(self):
+		# When the completion CAS observes the run moved off Ingesting (a cancel / the
+		# retirement migration won the row before the CAS), the wiki pages written THIS
+		# ingest are ROLLED BACK to the savepoint and NO skills are created — a cancelled run
+		# never keeps this run's pages or skills. The concurrent cancel is simulated by
+		# making the CAS's for_update status read observe "Cancelled" (a single-connection
+		# test cannot stage a second connection's committed write); the real row stays
+		# Ingesting, so the assertion is that it is NEVER Completed and nothing durably lands.
+		self.addCleanup(
+			lambda: (
+				frappe.db.delete("Jarvis Wiki Page", {"slug": ["like", "fakeapp-%"]}),
+				frappe.db.commit(),
+			)
+		)
+		payload = {
+			"wiki_pages": [{"title": "Overview", "page_type": "Process", "body_md": "b", "mode": "create"}],
+			"skills": [
+				{
+					"skill_name": "fakeapp-cas-skill",
+					"description": "d",
+					"instructions": "i",
+					"user_invocable": False,
+				}
+			],
+			"summary": "s",
+		}
+		self._skills.append("fakeapp-cas-skill")
+		conv = self._mk_conv()
+		self._reply(conv, _fenced(payload))
+		run = self._mk_run(status="Ingesting", conversation=conv)
+		real_gv = frappe.db.get_value
+
+		def _gv(*args, **kwargs):
+			# intercept ONLY the completion CAS read; everything else passes through
+			if (
+				len(args) >= 3
+				and args[0] == RUN
+				and args[1] == run.name
+				and args[2] == "status"
+				and kwargs.get("for_update")
+			):
+				return "Cancelled"
+			return real_gv(*args, **kwargs)
+
+		with (
+			mock.patch.object(frappe.db, "get_value", side_effect=_gv),
+			mock.patch.object(app_analysis, "_enqueue_tick"),
+		):
+			app_analysis.ingest(run.name)
+		# NEVER completed the cancelled run; the page rolled back; no skill created
+		self.assertNotEqual(frappe.db.get_value(RUN, run.name, "status"), "Completed")
+		self.assertEqual(frappe.db.count("Jarvis Wiki Page", {"slug": "fakeapp-overview"}), 0)
+		self.assertEqual(frappe.db.count(SKILL, {"skill_name": "fakeapp-cas-skill"}), 0)

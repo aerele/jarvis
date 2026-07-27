@@ -6,7 +6,7 @@ import json
 
 import frappe
 
-from jarvis import admin_client
+from jarvis import admin_client, release_notice
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -117,6 +117,11 @@ def write_connection(data: dict) -> None:
 		s.db_set("agent_url", data["agent_url"])
 	if data.get("agent_token"):
 		set_settings_password(s, "agent_token", data["agent_token"])
+	# NB: the release notice is deliberately NOT mirrored here. Several callers
+	# pass a partial payload (a password, a customer email), and an absent notice
+	# key means "cleared" - which would drop a live notice. It is persisted only
+	# where a full get_connection payload is in hand: sync_connection and the
+	# chat gate.
 
 
 @frappe.whitelist()
@@ -136,6 +141,10 @@ def sync_connection() -> dict:
 	if not (api_key and api_secret):
 		return {"synced": False, "reason": "not onboarded"}
 	data = admin_client.get_connection()
+	# Outside the agent_url branch: a payload without one must still be able to
+	# raise or clear the release notice, and this is the only refresh an idle
+	# bench gets.
+	release_notice.persist(data.get("release_notice") or {})
 	if data.get("agent_url"):
 		write_connection(data)
 		return {"synced": True, "tenant_status": data.get("tenant_status")}

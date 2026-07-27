@@ -179,8 +179,33 @@ select {
 	font-family: inherit;
 }
 
+/* The caret and the selection are the last two things the UA still tints its
+   own way: iOS draws both in system blue (#007AFF), which appears nowhere in
+   this palette, so tapping a field flashed a stray blue line against the
+   violet accent. Tie both to the accent instead. */
+input,
+textarea {
+	caret-color: var(--accent-solid);
+}
+
+::selection {
+	background: var(--accent-bg);
+	color: var(--ink9);
+}
+
 :focus {
 	outline: none;
+}
+
+/* frappe-ui's preflight paints a focus RING on form controls with box-shadow
+   (--tw-ring-color: #007BE0) and re-asserts border-color, so every reset that
+   only cleared `outline` left a stray blue rectangle around a tapped field.
+   Kill the ring itself; :focus-visible below still gives keyboards a real one. */
+input:focus,
+textarea:focus,
+select:focus {
+	box-shadow: none;
+	border-color: inherit;
 }
 
 :focus-visible {

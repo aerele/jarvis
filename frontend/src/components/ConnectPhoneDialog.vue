@@ -6,8 +6,8 @@
 	>
 		<template #body-content>
 			<p class="text-p-sm text-ink-gray-6">
-				Open the <b>Jarvis</b> app on your phone and scan this code to connect to this
-				workspace — then sign in with your email and password.
+				Open the <b>{{ agentName }}</b> app on your phone and scan this code to connect to
+				this workspace — then sign in with your email and password.
 			</p>
 
 			<div class="mt-4 flex flex-col items-center">
@@ -37,8 +37,8 @@
 			</div>
 
 			<p class="mt-4 text-p-sm text-ink-gray-5">
-				Don’t have the app yet? Install <b>Jarvis</b> from your app store, then tap
-				<b>Scan to connect</b> on the welcome screen.
+				Don’t have the app yet? Install <b>{{ agentName }}</b> from your app store, then
+				tap <b>Scan to connect</b> on the welcome screen.
 			</p>
 		</template>
 
@@ -61,6 +61,7 @@
 import { ref, computed, watch } from "vue";
 import { Dialog, Button, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
+import { agentName } from "@/branding";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },

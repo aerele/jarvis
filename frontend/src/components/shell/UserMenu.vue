@@ -10,7 +10,7 @@
 						? 'w-full px-2 bg-surface-white shadow-sm'
 						: 'w-full px-2 hover:bg-surface-gray-3'
 				"
-				aria-label="Jarvis menu"
+				:aria-label="`${agentName} menu`"
 			>
 				<!-- the jarvis mark, 28×28 rounded — rendered from JarvisMark rather than
 				     a hand-pasted copy of its gradient + path data. That duplication is
@@ -22,7 +22,7 @@
 					:class="isCollapsed ? 'ml-0 w-0 opacity-0' : 'ml-2 w-auto opacity-100'"
 				>
 					<div class="truncate text-base font-medium leading-none text-ink-gray-9">
-						Jarvis
+						{{ agentName }}
 					</div>
 					<div class="mt-1 truncate text-sm text-ink-gray-7">{{ fullName }}</div>
 				</div>
@@ -46,6 +46,7 @@ import JarvisMark from "@/components/JarvisMark.vue";
 import { useShellStore } from "@/stores/shell";
 import { useJarvisTheme } from "@/theme";
 import { supportAwaitingCount } from "@/api";
+import { agentName } from "@/branding";
 
 defineProps({
 	isCollapsed: { type: Boolean, default: false },

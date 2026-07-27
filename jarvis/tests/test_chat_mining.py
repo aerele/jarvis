@@ -17,7 +17,7 @@ from unittest import mock
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import add_days, now_datetime
+from frappe.utils import add_days, add_to_date, now_datetime
 
 from jarvis.learning import chat_mining
 from jarvis.permissions import JARVIS_USER_ROLE, ensure_jarvis_user_role
@@ -408,7 +408,19 @@ class TestChatMiningSafety(ChatMiningTestCase):
 		self.assertTrue(qs[0]["question"].startswith("Jarvis noticed:"))
 
 	def test_llm_failure_holds_the_watermark(self):
-		self._simple_conv(USER_A)
+		conv = self._simple_conv(USER_A)
+		# Scope the mining window to THIS conversation only. A committed sibling
+		# conversation in the window (e.g. a leaked Administrator "actions-api test"
+		# conv from another suite) is an EXCLUDED-owner "done" candidate that
+		# LEGITIMATELY advances the watermark past ITSELF — moving `after` ahead of
+		# `before` and masking the contract asserted here: a FAILED batch does not
+		# advance the watermark past its OWN conversation (so it is retried next run).
+		# Anchor the watermark just before this conv's first activity so it is the
+		# sole candidate and the hold is observable as exact equality.
+		first_activity = frappe.db.sql(
+			"SELECT MIN(creation) FROM `tabJarvis Chat Message` WHERE conversation = %s", conv
+		)[0][0]
+		self._set_watermark(add_to_date(first_activity, seconds=-1))
 		before = frappe.db.get_single_value(SETTINGS, "chat_mining_watermark")
 		with _mock_llm(frappe.ValidationError("model down")):
 			self._run()

@@ -203,8 +203,12 @@ const shareOpen = ref(false);
 
 // Render theme: seeded from the saved dashboard; picking restyles immediately
 // and (for editors) persists quietly — viewers just restyle their own view.
+// Custom is EXCLUDED from the VIEW picker: opting a dashboard out of the enforced
+// standard is a deliberate author/build-time choice, not a one-click view action
+// (it would silently downgrade governance on a shared dashboard). It stays in the
+// builder picker where the author owns the document.
 const viewTheme = ref(DEFAULT_THEME);
-const themeOptions = THEME_OPTIONS.map((t) => ({
+const themeOptions = THEME_OPTIONS.filter((t) => t.key !== "custom").map((t) => ({
 	label: t.label,
 	onClick: () => pickTheme(t.key),
 }));

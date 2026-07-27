@@ -74,3 +74,17 @@ export const syncWikiMirrorNow = () => call(WK + "sync_wiki_mirror_now");
 // Runs the wiki health check synchronously. → {ok, summary} (summary also
 // persisted on Jarvis Settings; get_wiki_caps surfaces the last run).
 export const runWikiLintNow = () => call(WK + "run_wiki_lint_now");
+
+// ── page promotion (requester side, Skills-area promotion surfacing) ──────────
+// Ask a reviewer to widen one of MY OWN User-scope pages to Role/Org visibility.
+// Snapshots the body into a Pending request routed to the SAME reviewer queue the
+// wiki reviewer side already consumes (its requester side was never wired until
+// now). The page is untouched until a reviewer decides. -> { ok, request, page }
+export const requestWikiPromotion = ({ page, to_scope, target_role = "", note = "" }) =>
+	call(WK + "request_wiki_promotion", { page, to_scope, target_role, note });
+
+// My most-recent promotion request for one page, for the status chip. Owner-
+// scoped server-side; `page` is a slug or docname. -> {} | {name, status,
+// from_scope, to_scope, target_role, note, reviewer, reviewer_name, decided_at,
+// decision_note, created}
+export const myWikiPromotion = (page) => call(WK + "my_wiki_promotion", { page });

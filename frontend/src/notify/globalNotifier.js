@@ -18,6 +18,7 @@
 import { ref } from "vue";
 import { useShellStore } from "@/stores/shell";
 import { session } from "@/data/session";
+import { agentName } from "@/branding";
 
 // ---- toast state (rendered by NotifyToaster.vue) -----------------------------
 const MAX_TOASTS = 3;
@@ -32,7 +33,7 @@ export function useToasts() {
 
 export function pushToast({ title, body, onClick }) {
 	const id = ++_seq;
-	const next = [...toasts.value, { id, title: title || "Jarvis", body: body || "", onClick }];
+	const next = [...toasts.value, { id, title: title || agentName, body: body || "", onClick }];
 	// max 3 stacked — drop the oldest (and its timer) instead of growing a pile
 	while (next.length > MAX_TOASTS) {
 		const drop = next.shift();
@@ -157,13 +158,13 @@ export function attachGlobalNotifier({ socket, router }) {
 					// keep the row's title/order honest (debounced reload)
 					store.applyRemoteNew();
 				}
-				const title = convTitle(conv) || "Jarvis";
+				const title = convTitle(conv) || agentName;
 				// A stop is the user's own click, seconds ago - the dot is useful, a
 				// notification saying "Reply ready" for the reply they just killed is not.
 				if (p.stopped) return;
 				const body =
 					p.kind === "run:error"
-						? `Jarvis hit an error in ${convTitle(conv) || "your chat"}`
+						? `${agentName} hit an error in ${convTitle(conv) || "your chat"}`
 						: _excerpt(p.preview) || "Reply ready";
 				signal({ conv, title, body, tag: "jarvis-" + conv, open: () => go("/c/" + conv) });
 				return;
@@ -175,8 +176,8 @@ export function attachGlobalNotifier({ socket, router }) {
 				const tool = p.tool ? String(p.tool).replace(/^jarvis__/, "") : "";
 				signal({
 					conv,
-					title: convTitle(conv) || "Jarvis",
-					body: "Jarvis needs your confirmation" + (tool ? " — " + tool : ""),
+					title: convTitle(conv) || agentName,
+					body: `${agentName} needs your confirmation` + (tool ? " — " + tool : ""),
 					tag: "jarvis-" + (conv || "confirm"),
 					open: () => go(conv ? "/c/" + conv : "/"),
 				});
@@ -188,7 +189,7 @@ export function attachGlobalNotifier({ socket, router }) {
 				signal({
 					conv: null,
 					toastAnywhere: true, // waiting-on-you is worth a toast even on-conversation
-					title: "Jarvis is waiting on you",
+					title: `${agentName} is waiting on you`,
 					body:
 						_excerpt(p.question) ||
 						"A question needs your answer on the Approval Board.",
@@ -247,8 +248,9 @@ export function attachGlobalNotifier({ socket, router }) {
 				// off the chat routes ChatView isn't mounted to refresh the sidebar
 				// list — do it here (debounced; harmless double when both run)
 				if (!router.currentRoute.value.meta.chat) store.applyRemoteNew();
-				const title = p.title || "Message from Jarvis";
-				const body = _excerpt(p.preview) || "Jarvis started a new conversation with you.";
+				const title = p.title || `Message from ${agentName}`;
+				const body =
+					_excerpt(p.preview) || `${agentName} started a new conversation with you.`;
 				const open = () => go("/c/" + conv);
 				if (document.hidden) {
 					browserNotify({ title, body, tag: "jarvis-" + conv, onclick: open });

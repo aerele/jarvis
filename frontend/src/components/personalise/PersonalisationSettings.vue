@@ -50,10 +50,10 @@
 										Question sources
 									</h2>
 									<p class="mt-1 text-p-base text-ink-gray-6">
-										Admin-authored questions Jarvis asks everyone, a role, or
-										one person &mdash; separate from the questions it generates
-										on its own from behaviour and chat patterns (uncapped,
-										materialized as soon as you save one).
+										Admin-authored questions {{ agentName }} asks everyone, a
+										role, or one person &mdash; separate from the questions it
+										generates on its own from behaviour and chat patterns
+										(uncapped, materialized as soon as you save one).
 									</p>
 								</div>
 								<Button
@@ -80,9 +80,9 @@
 									/>
 									<FormControl
 										type="textarea"
-										label="Context for Jarvis (optional)"
+										:label="`Context for ${agentName} (optional)`"
 										:rows="3"
-										placeholder="What should Jarvis share when asking this?"
+										:placeholder="`What should ${agentName} share when asking this?`"
 										:modelValue="editor.context_md"
 										@update:modelValue="(v) => (editor.context_md = v)"
 									/>
@@ -156,8 +156,8 @@
 									No configured questions yet
 								</div>
 								<div class="max-w-sm text-p-base text-ink-gray-6">
-									Add what Jarvis should ask every employee, a role, or one
-									person.
+									Add what {{ agentName }} should ask every employee, a role, or
+									one person.
 								</div>
 							</div>
 							<div v-else class="flex flex-col gap-2">
@@ -208,8 +208,8 @@
 								</h2>
 								<p class="mt-1 text-p-base text-ink-gray-6">
 									Control how many behavioural-learning / chat-pattern questions
-									Jarvis adds to a person's bank each day. Organisation, role,
-									and reviewer follow-up questions are never capped.
+									{{ agentName }} adds to a person's bank each day. Organisation,
+									role, and reviewer follow-up questions are never capped.
 								</p>
 							</div>
 
@@ -221,8 +221,8 @@
 										Personalisation questions
 									</div>
 									<div class="mt-0.5 text-sm text-ink-gray-6">
-										Turn off to stop Jarvis asking anyone new questions.
-										Existing questions stay listed and answerable.
+										Turn off to stop {{ agentName }} asking anyone new
+										questions. Existing questions stay listed and answerable.
 									</div>
 								</div>
 								<Switch v-model="settings.personalise_enabled" size="md" />
@@ -236,7 +236,7 @@
 										Learn from chats
 									</div>
 									<div class="mt-0.5 text-sm text-ink-gray-6">
-										Once a day, Jarvis reviews recent chats and drafts
+										Once a day, {{ agentName }} reviews recent chats and drafts
 										questions so people can confirm what it should remember.
 										Answers become wiki notes and skills.
 									</div>
@@ -347,6 +347,7 @@ import {
 	generateChatQuestionsNow,
 } from "@/api/personalise";
 import { timeAgo } from "@/utils/datetime";
+import { agentName } from "@/branding";
 
 const props = defineProps({
 	open: { type: Boolean, default: false },
@@ -519,8 +520,7 @@ async function saveEditor() {
 function confirmDeleteRule(rule) {
 	confirmDialog({
 		title: "Delete this question?",
-		message:
-			"Removes this configured question. Questions Jarvis already asked people from this rule stay in their own banks — this only stops new ones.",
+		message: `Removes this configured question. Questions ${agentName} already asked people from this rule stay in their own banks — this only stops new ones.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await deleteQuestionRule(rule.name);

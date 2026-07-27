@@ -1,5 +1,7 @@
 import { reactive } from "vue";
 
+import { agentName } from "@/branding";
+
 // The notification feed, assembled client-side from realtime events — the bench
 // has no persistent notification store (the desktop uses live toasts, the native
 // app builds the same feed in memory from the same events).
@@ -82,7 +84,7 @@ export function recordEvent(e) {
 			id: `end:${e.run_id || e.message_id}`,
 			kind: "task-finished",
 			title: "Task finished",
-			body: "Jarvis finished working on your request.",
+			body: `${agentName} finished working on your request.`,
 			conversation: conv,
 			at,
 			read: false,
@@ -102,7 +104,7 @@ export function recordEvent(e) {
 			id: `dec:${e.token || e.run_id}`,
 			kind: "needs-decision",
 			title: "Needs your decision",
-			body: e.summary || "Jarvis is waiting for your approval.",
+			body: e.summary || `${agentName} is waiting for your approval.`,
 			conversation: conv,
 			at,
 			read: false,
@@ -112,7 +114,7 @@ export function recordEvent(e) {
 			id: `new:${conv}`,
 			kind: "new-conversation",
 			title: e.title || "New conversation",
-			body: e.preview || "Jarvis started a conversation for you.",
+			body: e.preview || `${agentName} started a conversation for you.`,
 			conversation: conv,
 			at,
 			read: false,

@@ -1,0 +1,127 @@
+{
+  "name": "overflow-compaction",
+  "description": "Mid-stream context-overflow lifecycle error, a compaction pause, then the answer streams and terminal final. NOTE: on the MANAGED relay path relay_turn_events drops lifecycle frames, so the bench sees a longer turn that resolves to final (openclaw auto-compacts internally); the run:recovering UX is a self-host-path (stream_agent_turn) behavior. The lifecycle_error frame is retained so the self-host consumer + Stage-B differential still exercise it.",
+  "ack": {
+    "status": "started"
+  },
+  "ack_behavior": "normal",
+  "frames": [
+    {
+      "op": "assistant",
+      "text": "Reading the",
+      "delta": "Reading the"
+    },
+    {
+      "op": "assistant",
+      "text": "Reading the full thread",
+      "delta": " full thread"
+    },
+    {
+      "op": "assistant",
+      "text": "Reading the full thread history to",
+      "delta": " history to"
+    },
+    {
+      "op": "assistant",
+      "text": "Reading the full thread history to answer accurately.",
+      "delta": " answer accurately."
+    },
+    {
+      "op": "lifecycle_error",
+      "error": "Context overflow: prompt too large for the model; auto-compacting"
+    },
+    {
+      "op": "pause",
+      "ms": 600
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for",
+      "delta": "Thanks for"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014",
+      "delta": " waiting \u2014"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted",
+      "delta": " I compacted"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older",
+      "delta": " the older"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and",
+      "delta": " context and"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is",
+      "delta": " here is"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer:",
+      "delta": " the answer:"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation",
+      "delta": " the reconciliation"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for",
+      "delta": " matches for"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but",
+      "delta": " all but"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but one line,",
+      "delta": " one line,"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but one line, which is",
+      "delta": " which is"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but one line, which is off by",
+      "delta": " off by"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but one line, which is off by ninety rupees",
+      "delta": " ninety rupees"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but one line, which is off by ninety rupees due to",
+      "delta": " due to"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but one line, which is off by ninety rupees due to a rounding",
+      "delta": " a rounding"
+    },
+    {
+      "op": "assistant",
+      "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but one line, which is off by ninety rupees due to a rounding difference.",
+      "delta": " difference."
+    }
+  ],
+  "terminal": {
+    "kind": "final",
+    "text": "Thanks for waiting \u2014 I compacted the older context and here is the answer: the reconciliation matches for all but one line, which is off by ninety rupees due to a rounding difference."
+  }
+}

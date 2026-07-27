@@ -15,6 +15,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import pending_confirm
 from jarvis.chat.actions_api import confirm_tool
+from jarvis.tests._transport_helpers import provision_legacy_site
 
 
 def _spy_mint():
@@ -645,6 +646,16 @@ class TestRealConversationGuard(FrappeTestCase):
 	it into consume as a REAL check. A mismatched conversation is rejected; the
 	matching one succeeds; when omitted, owner + single-use still guard."""
 
+	def tearDown(self):
+		# These tests execute create_doc(ToDo) writes on the matching-confirm path but never
+		# cleaned up the rows — so on a re-run/dirty site the "nothing executed" assertion saw a
+		# stale ToDo and failed (non-idempotent). Clean the fixture ToDos so re-runs are stable.
+		for name in frappe.get_all(
+			"ToDo", filters={"description": ["like", "jarvis-test-confirm-convguard-%"]}, pluck="name"
+		):
+			frappe.delete_doc("ToDo", name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
 	def test_mismatched_conversation_rejected_and_token_not_burned(self):
 		owner = frappe.session.user
 		desc = "jarvis-test-confirm-convguard-050"
@@ -1138,6 +1149,11 @@ class TestConfirmGracefulFailure(FrappeTestCase):
 	the endpoint returns {ok:false} instead of a 500 with the token burned and the
 	agent stuck at 'awaiting confirmation', and it still fires the failed
 	continuation so the agent learns the outcome."""
+
+	def setUp(self):
+		super().setUp()
+		# CDX-10: asserts the LEGACY _dispatch_turn failed-continuation dispatch — provision legacy.
+		provision_legacy_site(self)
 
 	def tearDown(self):
 		for name in frappe.get_all(CONV, filters={"title": "confirm-gate test"}, pluck="name"):

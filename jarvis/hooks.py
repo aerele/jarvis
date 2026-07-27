@@ -192,7 +192,12 @@ website_route_rules = [
 # Serves the PWA's service worker at the root-level /jarvis-mobile.sw.js, which
 # is the only way it can claim a scope covering the app. See jarvis/pwa.py — the
 # route is deliberately outside the /jarvis-mobile/ catch-all above.
-page_renderer = ["jarvis.pwa.ServiceWorkerRenderer"]
+# ManifestRenderer serves the per-tenant whitelabel manifest at the root-level
+# /jarvis-mobile.webmanifest (same catch-all reasoning).
+page_renderer = [
+	"jarvis.pwa.ServiceWorkerRenderer",
+	"jarvis.pwa.ManifestRenderer",
+]
 
 # The agents marketplace lives at the SPA route /jarvis/agents; keep the
 # friendlier top-level /jarvis-agents spelling working as a redirect.
@@ -245,6 +250,20 @@ scheduler_events = {
 	"cron": {
 		"*/5 * * * *": [
 			"jarvis.chat.stale_scan.scan_and_mark_errored",
+			# Phase-0 admission backstop (chat concurrency, WP-0): reclaim lost
+			# reservations, reconcile dispatching Turn rows against Message truth,
+			# age-out stale queued turns, then re-promote. Cheap no-op when no
+			# non-terminal Turn rows exist (so it costs one COUNT when the feature
+			# is off or idle).
+			"jarvis.chat.admission.sweep",
+			# Relay Pump backstop (chat concurrency, WP-1c): the LAST-RESORT
+			# recovery path for the one gap the sender-driven ensure_pump cannot
+			# cover — a turn committed, the pump then died, and no new send arrives
+			# to revive it. Scans ALL nonterminal Turn states per-shard (age-out,
+			# prepare-deadline reclaim, deadline park, finalize re-enqueue) then
+			# ensure_pump for any shard with live work. Cheap no-op (one DISTINCT)
+			# when no non-terminal Turn rows exist.
+			"jarvis.chat.pump.watchdog",
 			# Onboarding convergence safety net (review P0-2): when an LLM
 			# apply parked at "pending: admin applying config" (admin accepted
 			# it and its reconcile is converging server-side), probe
@@ -258,17 +277,33 @@ scheduler_events = {
 			# keeps the prefix warm continuously while there is recent chat
 			# activity (the function itself gates on activity).
 			"jarvis.chat.prewarm.keep_warm_if_active",
+			# Chat-concurrency CDX-19 backstop: re-attempt macro runs parked in
+			# `waiting_capacity` (a step could not be admitted because the site's turn
+			# queue was momentarily full). A deferred step dispatches no turn, so the
+			# turn-end chaining hook never fires for it — this cron is its ONLY resume
+			# path. Bounded per run (capacity_attempts), then the run fails honestly.
+			# Cheap no-op (one indexed status query) when nothing is parked.
+			"jarvis.chat.macros.resume_waiting_capacity_runs",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
 		],
-		"*/10 * * * *": [
-			# Learn-from-custom-apps tick: starts due Queued runs (one active
-			# run bench-wide), recovers stale ones and cleans up old snapshot
-			# zips. Self-gating + never raises; the real work runs on queue
-			# "long" (see jarvis/learning/app_analysis.py).
-			"jarvis.learning.app_analysis.tick",
-		],
+		# Learn-from-custom-apps has been REPLACED by the Custom App Learning
+		# *scribe* delegate agent (marketplace slug ``custom-app-learning``): it
+		# reads custom-app source and writes the wiki in the container, on demand,
+		# instead of the chat-batch pipeline. The engine
+		# (``jarvis.learning.app_analysis``), its API and the ``Jarvis App Learning
+		# Run`` doctype stay physically present (rollback safety + historical run
+		# rows). Full removal is a tracked fast-follow.
+		#
+		# CA3-5 (rollback-operable): ``app_analysis.tick`` is registered but SELF-GATES
+		# on ``_legacy_retired()`` — it returns immediately while the pipeline is retired
+		# (the default), so this cron is a cheap no-op in production, and its only job is
+		# to make the rollback path (conf ``jarvis_app_learning_reenable``) actually
+		# operable: when re-enabled, this tick is the scheduler entry that starts due
+		# Queued runs and drives stale-run recovery. ``schedule_app_learning`` is
+		# likewise conditional (refuses while retired, schedules when re-enabled).
+		"*/10 * * * *": ["jarvis.learning.app_analysis.tick"],
 		"*/15 * * * *": [
 			# Behavioural pattern learning tick. Hooks cron is app-static
 			# (per-site rows are reset on migrate), so the window is
@@ -343,6 +378,10 @@ scheduler_events = {
 		# bench's month-to-date per-user + per-model usage rollup to admin. Self-
 		# gating (skips self-hosted / unconfigured / not-onboarded); never raises.
 		"jarvis.chat.usage_push.push_usage_rollup",
+		# JF-016 hygiene: revocation only flips `enabled`, so the mobile-device
+		# table is append-only without this. Deletes DISABLED rows past the
+		# 90-day retention window; live credentials are never touched.
+		"jarvis.mobile.device_auth.prune_revoked_devices",
 	],
 	"weekly": [
 		# Wiki v2 health check: deterministic lint over Active pages
@@ -351,6 +390,17 @@ scheduler_events = {
 		"jarvis.learning.wiki_lint.scheduled_lint",
 	],
 }
+
+# ---------------------------------------------------------------------------
+# Per-device mobile credentials (JF-016)
+# ---------------------------------------------------------------------------
+# The Jarvis mobile app authenticates with a REVOCABLE per-device token
+# (`Authorization: token jmd:<token_id>:<secret>`) instead of the user's
+# account-wide Frappe api_key/api_secret. Core's api-key parser declines a
+# three-segment token, so this hook — which Frappe runs right after it — is
+# what resolves the token to a user. Cheap for every other request: one header
+# read plus a prefix test. See jarvis/mobile/device_auth.py.
+auth_hooks = ["jarvis.mobile.device_auth.authenticate_device_token"]
 
 # Python type annotations on whitelisted endpoints
 # ------------------------------------------------
@@ -399,6 +449,13 @@ doc_events["Jarvis Wiki Page"] = {
 # save, inactive rules no-op).
 doc_events["Jarvis Personalise Question Rule"] = {
 	"on_update": "jarvis.learning.questions.on_rule_update",
+}
+
+# Phase-0 admission (chat concurrency, WP-0): a deleted conversation must not
+# leave orphaned Jarvis Chat Turn rows behind (they would linger as ghost queued/
+# dispatching rows in the admission shard). Cascade-delete them on trash.
+doc_events["Jarvis Conversation"] = {
+	"on_trash": "jarvis.chat.admission.on_conversation_trash",
 }
 
 # ---------------------------------------------------------------------------

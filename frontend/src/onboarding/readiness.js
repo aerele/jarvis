@@ -67,3 +67,21 @@ export async function billingNoticeOf() {
 	const r = await checkReady();
 	return (r && r.billing_notice) || {};
 }
+
+// The backend's OWN explanation for a "container_provisioning" not-ready verdict
+// (jarvis.account.is_ready_for_chat's `detail`, set by _admin_chat_gate - e.g. "Your
+// OpenAI account has reached its usage limit. It resets in about 27 hours."). A
+// dedicated accessor, same shape as billingNoticeOf above, so a caller that only
+// wants "what do I tell the customer" never has to know the raw {ready, reason,
+// detail} shape checkReady() resolves to.
+//
+// Deliberately scoped to ONLY container_provisioning: "subscription_suspended" has
+// its own dedicated copy (suspensionNotice/SUSPENDED_FALLBACK in steps.js) with a
+// Renew call to action, which is wrong for this reason (nothing to renew via US when
+// the customer's OWN LLM account merely ran out of quota) - a caller must not paint
+// this detail into that banner's "Chat is paused" framing.
+export async function readinessDetailOf() {
+	const r = await checkReady();
+	if (!r || r.ready || r.reason !== "container_provisioning") return "";
+	return r.detail || "";
+}

@@ -97,8 +97,9 @@
 			     the empty state, which real first-visits on a grown wiki never see -->
 			<template #banner>
 				<p class="mb-2 text-p-sm text-ink-gray-5">
-					The wiki is the knowledge Jarvis keeps about your business - customers,
-					suppliers, processes, conventions. It grows from chat and voice notes; Jarvis
+					The wiki is the knowledge {{ agentName }} keeps about your business -
+					customers, suppliers, processes, conventions. It grows from chat and voice
+					notes; {{ agentName }}
 					cites it when answering.
 				</p>
 			</template>
@@ -236,7 +237,7 @@
 						type="textarea"
 						label="Summary (optional)"
 						:rows="2"
-						placeholder="One or two lines Jarvis can cite in chat context"
+						:placeholder="`One or two lines ${agentName} can cite in chat context`"
 						:modelValue="createDialog.summary"
 						@update:modelValue="(v) => (createDialog.summary = v)"
 					/>
@@ -313,6 +314,7 @@ import {
 	syncWikiMirrorNow,
 	runWikiLintNow,
 } from "@/api/wiki";
+import { agentName } from "@/branding";
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
@@ -443,7 +445,7 @@ const emptyState = computed(() => {
 			icon: "book-open",
 			title: "No personal pages yet",
 			description:
-				"Personal pages are knowledge only you and Jarvis share - shortcuts, " +
+				`Personal pages are knowledge only you and ${agentName} share - shortcuts, ` +
 				'preferences, your own working notes. Use "New page" and pick the ' +
 				"Personal scope to create your first one.",
 		};
@@ -457,10 +459,10 @@ const emptyState = computed(() => {
 		icon: "book-open",
 		title: "No wiki pages yet",
 		description:
-			"The wiki is the knowledge base Jarvis keeps about your business - customers, " +
+			`The wiki is the knowledge base ${agentName} keeps about your business - customers, ` +
 			"suppliers, items and processes. It grows on its own as people answer chat " +
 			"nudges and record voice notes on the Business tab; pages appear here as " +
-			"Jarvis learns.",
+			`${agentName} learns.`,
 	};
 });
 

@@ -1,0 +1,48 @@
+{
+  "name": "abort",
+  "description": "Partial stream then a user stop; terminal aborted (also emitted on chat.abort). Drives the stop-click->visible-stop probe.",
+  "ack": {
+    "status": "started"
+  },
+  "ack_behavior": "normal",
+  "frames": [
+    {
+      "op": "assistant",
+      "text": "Starting the",
+      "delta": "Starting the"
+    },
+    {
+      "op": "assistant",
+      "text": "Starting the export now,",
+      "delta": " export now,"
+    },
+    {
+      "op": "assistant",
+      "text": "Starting the export now, this will",
+      "delta": " this will"
+    },
+    {
+      "op": "assistant",
+      "text": "Starting the export now, this will take a",
+      "delta": " take a"
+    },
+    {
+      "op": "assistant",
+      "text": "Starting the export now, this will take a few moments",
+      "delta": " few moments"
+    },
+    {
+      "op": "assistant",
+      "text": "Starting the export now, this will take a few moments as I",
+      "delta": " as I"
+    },
+    {
+      "op": "assistant",
+      "text": "Starting the export now, this will take a few moments as I gather",
+      "delta": " gather"
+    }
+  ],
+  "terminal": {
+    "kind": "aborted"
+  }
+}

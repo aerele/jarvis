@@ -24,35 +24,24 @@ agent's DECLARED contract, enforced BEFORE any Frappe permission check:
 
 The ``writes[]`` contract is DECLARATIVE, non-IP (a list of ``{doctype, mode}``;
 ``mode`` ∈ {draft, approval-request}) mirrored from the bundle-store manifest —
-never a rule body/threshold. Storage: ``Jarvis Agent Listing.writes`` (JSON),
+never a rule body/threshold. Origin: ``Jarvis Agent Listing.writes`` (JSON),
 populated by ``agent_catalog.sync_agent_listings``.
-"""
 
-import json
+JF-017: ``nature``/``writes`` are now read from the run's LAUNCH SNAPSHOT
+(``Jarvis Agent Run.capability_nature`` / ``.capability_writes_json``), not from
+the live listing. Reading the mutable listing at call time meant anything that
+could edit a listing re-authorised an IN-FLIGHT run mid-flight — widening an
+auditor into an operator, or adding a doctype to an operator's contract, with no
+relaunch. The snapshot is stamped once by ``agent_scheduler._launch_audit`` and is
+immutable thereafter, so a run's write authority is fixed at the instant it was
+launched. Runs that predate the snapshot (``capability_contract == 'legacy'``)
+still resolve against the listing — exactly the behaviour they launched under.
+"""
 
 import frappe
 
 from jarvis.exceptions import PermissionDeniedError
-from jarvis.tools._agent_run_ctx import get_session_key
-
-RUN = "Jarvis Agent Run"
-LISTING = "Jarvis Agent Listing"
-
-
-def _parse_writes(raw) -> list:
-	"""The listing's ``writes`` JSON -> a list of ``{doctype, mode, ...}`` dicts.
-	A malformed / non-list value is treated as an EMPTY contract (fail-closed:
-	an operator with an unreadable contract writes nothing)."""
-	if not raw:
-		return []
-	if isinstance(raw, list):
-		parsed = raw
-	else:
-		try:
-			parsed = json.loads(raw)
-		except (TypeError, ValueError):
-			return []
-	return [w for w in parsed if isinstance(w, dict) and w.get("doctype")] if isinstance(parsed, list) else []
+from jarvis.tools import _delegate_capability
 
 
 def resolve_delegate() -> dict | None:
@@ -69,23 +58,14 @@ def resolve_delegate() -> dict | None:
 
 	Returns ``{agent, nature, writes, run_as}`` or None.
 	"""
-	session_key = get_session_key()
-	if not session_key:
+	cap = _delegate_capability.resolve()
+	if cap is None:
 		return None
-	run = frappe.db.get_value(
-		RUN,
-		{"session_key": session_key},
-		["name", "agent"],
-		as_dict=True,
-	)
-	if not run or not run.agent:
-		return None  # no delegate run bound -> not a delegate; leave the caller untouched
-	listing = frappe.db.get_value(LISTING, run.agent, ["nature", "writes"], as_dict=True) or {}
 	return {
-		"agent": run.agent,
-		"nature": (listing.get("nature") or "").strip().lower(),
-		"writes": _parse_writes(listing.get("writes")),
-		"run_as": frappe.session.user,
+		"agent": cap["agent"],
+		"nature": cap["nature"],
+		"writes": cap["writes"],
+		"run_as": cap["run_as"],
 	}
 
 

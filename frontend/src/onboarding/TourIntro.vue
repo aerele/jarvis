@@ -12,8 +12,8 @@
 					<span class="eyebrow">Welcome</span>
 					<h2>Harness AI agents inside your ERPNext.</h2>
 					<p>
-						Jarvis is an AI teammate that lives in your ERP. Ask a question, hand off a
-						task, or let it watch the books, all in plain language.
+						{{ agentName }} is an AI teammate that lives in your ERP. Ask a question,
+						hand off a task, or let it watch the books, all in plain language.
 					</p>
 					<ul class="pts">
 						<li>
@@ -76,7 +76,9 @@
 					</ul>
 				</div>
 				<div class="mock">
-					<div class="mock-bar"><i></i><i></i><i></i><span>Jarvis · New chat</span></div>
+					<div class="mock-bar">
+						<i></i><i></i><i></i><span>{{ agentName }} · New chat</span>
+					</div>
 					<div class="mock-body">
 						<div class="m-side" v-html="sideHtml('Chat')"></div>
 						<div class="m-main">
@@ -170,7 +172,7 @@
 								</div>
 							</div>
 							<div class="composer">
-								Ask Jarvis… @ to mention a user, / for a doctype or tool
+								Ask {{ agentName }}… @ to mention a user, / for a doctype or tool
 							</div>
 						</div>
 					</div>
@@ -183,7 +185,8 @@
 					<span class="eyebrow">Chat</span>
 					<h2>Ask anything about your business.</h2>
 					<p>
-						“Which sales orders are overdue?” “Draft a follow-up to this lead.” Jarvis
+						“Which sales orders are overdue?” “Draft a follow-up to this lead.”
+						{{ agentName }}
 						pulls the answer straight from ERPNext and shows its work.
 					</p>
 				</div>
@@ -214,9 +217,9 @@
 					<span class="eyebrow">Skills</span>
 					<h2>It already knows Frappe &amp; ERPNext.</h2>
 					<p>
-						Jarvis ships with deep skills for every core doctype, and you can create
-						custom skills for your domain-specific workflows, so it works the way your
-						team already does.
+						{{ agentName }} ships with deep skills for every core doctype, and you can
+						create custom skills for your domain-specific workflows, so it works the
+						way your team already does.
 					</p>
 				</div>
 				<div class="mock">
@@ -312,9 +315,9 @@
 					<span class="eyebrow">File Box</span>
 					<h2>Drop files in, get clean entries out.</h2>
 					<p>
-						Upload invoices, bank statements or price lists. Jarvis reads them,
-						extracts the details, and drafts the entries in ERPNext. You just review
-						and approve.
+						Upload invoices, bank statements or price lists. {{ agentName }} reads
+						them, extracts the details, and drafts the entries in ERPNext. You just
+						review and approve.
 					</p>
 				</div>
 				<div class="mock">
@@ -374,8 +377,8 @@
 					</p>
 					<p class="final-call">
 						<mark
-							>Ready to see it on your data? Onboard Jarvis and explore everything
-							hands-on. It takes about two minutes.</mark
+							>Ready to see it on your data? Onboard {{ agentName }} and explore
+							everything hands-on. It takes about two minutes.</mark
 						>
 					</p>
 				</div>
@@ -501,7 +504,7 @@
 					Next
 				</button>
 				<button v-else class="btn btn--primary btn--sm" @click="$emit('finish')">
-					Onboard Jarvis
+					Onboard {{ agentName }}
 				</button>
 			</div>
 		</div>
@@ -510,6 +513,7 @@
 
 <script setup>
 import { ref, computed } from "vue";
+import { agentName } from "@/branding";
 
 // 'finish' = the final-slide CTA (or advancing past the last slide);
 // 'skip' = the footer "Skip tour" link. Both land the wizard on the Plan step.
@@ -548,7 +552,7 @@ const NAV_ORDER = ["Chat", "Skills", "Macros", "File Box", "Agents"];
 
 function sideHtml(active) {
 	return (
-		'<div class="m-brand"><span class="d"><svg width="10" height="10" viewBox="0 0 24 24" fill="#fff"><path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"/></svg></span><span class="col"><b>Jarvis</b><small>Administrator</small></span></div>' +
+		`<div class="m-brand"><span class="d"><svg width="10" height="10" viewBox="0 0 24 24" fill="#fff"><path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"/></svg></span><span class="col"><b>${agentName}</b><small>Administrator</small></span></div>` +
 		`<div class="m-act">${FI('<path d="M12 5v14M5 12h14"/>')}New Chat</div>` +
 		`<div class="m-act">${FI(
 			'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>'

@@ -1,35 +1,43 @@
 <template>
-	<div class="jv-settings-body">
-		<!-- The dialog header already titles this pane — no duplicate heading here
-         (design.md §4.1). -->
-		<section class="jv-mon-card">
-			<div v-if="!isSystemManager" class="jv-mon-note">
+	<SettingsPane
+		title="Connection"
+		description="Connection status for this workspace."
+		:error="errorMessage"
+	>
+		<div class="rounded-md border p-4">
+			<div v-if="!isSystemManager" class="text-p-sm text-ink-gray-6">
 				Connection details are available to System Managers only.
 			</div>
-			<div v-else-if="loading" class="jv-mon-note">Checking…</div>
-			<div v-else-if="err" class="jv-mon-note">
-				Connection status is unavailable right now.
-				<button type="button" class="jv-mon-retry" @click="load">Retry</button>
-			</div>
+			<div v-else-if="loading" class="text-p-sm text-ink-gray-6">Checking.</div>
+			<Button
+				v-else-if="err"
+				variant="subtle"
+				label="Retry"
+				iconLeft="refresh-cw"
+				:loading="loading"
+				@click="load"
+			/>
 			<template v-else>
-				<div class="jv-mon-kv">
-					<span>Status</span>
-					<b :class="statusClass">{{ statusLabel }}</b>
-				</div>
-				<div v-if="conn.default_model" class="jv-mon-kv">
-					<span>Model</span><b>{{ conn.default_model }}</b>
-				</div>
-				<div v-if="isProxy && conn.oauth_expires_at" class="jv-mon-kv">
-					<span>Expires</span><b>{{ expiresLabel }}</b>
-				</div>
+				<KvRow label="Status">
+					<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
+				</KvRow>
+				<KvRow v-if="conn.default_model" label="Model" :value="conn.default_model" />
+				<KvRow
+					v-if="isProxy && conn.oauth_expires_at"
+					label="Expires"
+					:value="expiresLabel"
+				/>
 			</template>
-		</section>
-	</div>
+		</div>
+	</SettingsPane>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from "vue";
+import { Badge, Button } from "frappe-ui";
 import { getLlmConnectionStatus } from "@/api";
+import SettingsPane from "@/components/settings/SettingsPane.vue";
+import KvRow from "@/components/settings/KvRow.vue";
 
 // Admin-tier endpoint (server enforces `require_jarvis_admin`); the rail already
 // gates this pane, but guard the fetch so a non-admin never fires a doomed
@@ -59,12 +67,19 @@ const statusLabel = computed(() => {
 	if (!isProxy.value) return "Direct";
 	return conn.value.auth_present ? "Connected" : "Not connected";
 });
-// Direct is a mode, not a warning - neutral text, no jv-ok/jv-warn tint
-// (matches BillingMeteringPane's uncoloured "Mode" row for the same value).
-const statusClass = computed(() => {
-	if (!isProxy.value) return "";
-	return conn.value.auth_present ? "jv-ok" : "jv-warn";
+// Direct is a mode, not a warning, so it stays neutral gray; a real failure to
+// connect is red (design.md §3.8 status map — matches GeneralPane's mapping
+// for the same underlying fields).
+const statusTheme = computed(() => {
+	if (!isProxy.value) return "gray";
+	return conn.value.auth_present ? "green" : "red";
 });
+
+// SettingsPane renders the one error surface for the pane (§4.1); this is the
+// message it shows, derived from the `err` flag below.
+const errorMessage = computed(() =>
+	err.value ? "Connection status is unavailable right now." : ""
+);
 
 async function load() {
 	if (!isSystemManager) {

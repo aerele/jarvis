@@ -14,7 +14,7 @@ their published names - no duplicates:
 
 import frappe
 
-from jarvis import admin_client
+from jarvis import admin_client, release_notice
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_admin
 
@@ -59,6 +59,9 @@ def _admin_chat_gate() -> dict:
 	except Exception:
 		# Fail open on ANY admin error; deliberately no negative cache.
 		return {"ready": True, "reason": None, "billing_notice": {}}
+	# Refresh the locally-mirrored release notice on this gate's ~120s cadence so
+	# an active user sees an activate/clear without waiting for the daily sync.
+	release_notice.persist(conn.get("release_notice") or {})
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
 		suspended = conn["chat_readiness"] == "Suspended"
@@ -339,6 +342,31 @@ def reauthorize_autopay() -> dict:
 	"""
 	require_jarvis_admin()
 	return _surface(admin_client.reauthorize_autopay)
+
+
+@frappe.whitelist()
+def preview_downgrade(target_plan: str) -> dict:
+	"""Describe a downgrade for the picker. SM-only, same gate as upgrade."""
+	require_jarvis_admin()
+	return _surface(admin_client.preview_downgrade, target_plan)
+
+
+@frappe.whitelist()
+def start_downgrade(target_plan: str) -> dict:
+	"""Schedule a downgrade (next cycle). Monthly autopay returns a
+	subscription id for a ₹0 mandate Checkout; Annual just schedules.
+
+	Chat-gate bust: a downgrade never changes entitlement until the boundary,
+	so no bust is needed - the container keeps serving the current plan."""
+	require_jarvis_admin()
+	return _surface(admin_client.start_downgrade, target_plan)
+
+
+@frappe.whitelist()
+def cancel_scheduled_downgrade() -> dict:
+	"""Revoke a scheduled downgrade (SM-only)."""
+	require_jarvis_admin()
+	return _surface(admin_client.cancel_scheduled_downgrade)
 
 
 def _bust_chat_gate() -> None:

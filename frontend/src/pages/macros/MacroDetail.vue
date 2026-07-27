@@ -73,7 +73,7 @@
 					<Switch
 						v-model="form.schedule_enabled"
 						label="Run on a schedule"
-						description="Jarvis runs this macro automatically."
+						:description="`${agentName} runs this macro automatically.`"
 						:disabled="saving"
 					/>
 					<div v-if="form.schedule_enabled" class="flex items-start gap-4">
@@ -197,6 +197,7 @@ import StepsBuilder from "./StepsBuilder.vue";
 import { takeMacroPrefill } from "@/composables/macroPrefill";
 import { exactDate } from "@/utils/datetime";
 import * as api from "@/api";
+import { agentName } from "@/branding";
 
 const props = defineProps({
 	id: { type: String, default: "" },

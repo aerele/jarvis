@@ -5,6 +5,7 @@ import Sheet from "../components/Sheet.vue";
 import * as api from "../api";
 import { EFFORT, prefs, setPrefs } from "../lib/prefs";
 import { applyTheme, theme } from "../lib/theme";
+import { agentName } from "@/branding";
 
 // Settings, as the native app has them: Chat (default model + effort),
 // Appearance, Notifications. No "open full workspace" — this is the workspace.
@@ -157,7 +158,7 @@ onMounted(async () => {
 			</div>
 			<div v-if="notifyError" class="jv-err">{{ notifyError }}</div>
 			<p class="jv-hint">
-				Jarvis only buzzes when this tab isn't the one you're looking at.
+				{{ agentName }} only buzzes when this tab isn't the one you're looking at.
 			</p>
 		</template>
 	</div>

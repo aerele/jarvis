@@ -1,0 +1,75 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`composer renders identically (light) 1`] = `
+"<div class="jv-root" style="--surface: #ffffff; --surface-1: #f7f7f8; --surface-2: #f1f1f3; --surface-3: #ececef; --border: #e8e8ec; --border-2: #dfdfe4; --text: #171717; --text-2: #4a4a4f; --text-3: #6d6d76; --cta: #1c1c22; --cta-fg: #ffffff; --cta-bg: #f1f1f4; --cta-bd: #e2e2e8; --link: #1579d0; --green: #16a34a; --green-bg: #edf8f0; --green-bd: #cdeed8; --red: #dc2626; --red-bg: #fdf0ef; --red-bd: #f5d4d1; --amber: #d97706; --amber-bg: #fdf6ec; --amber-bd: #f3e2c2;">
+  <!-- Host content directly above the box, in flow (chat's wiki nudge card). -->
+  <div data-v-680708eb="" class="jv-composer" style="position: relative; border: 1.5px solid var(--text); border-radius: 13px; background: var(--surface); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07); padding: 5px 6px 6px 6px; transition: border-color 0.12s, box-shadow 0.12s;">
+    <!--v-if-->
+    <!-- pending attachments: image thumbnails (Claude-style) + file chips.
+		     Purely a projection of the \`attachments\` prop — an entry with a
+		     \`preview_url\` is a thumbnail, one with \`uploading\` is the in-flight
+		     placeholder pill, anything else is a 📎 chip. -->
+    <!--v-if-->
+    <!-- Host popovers anchored to the box (chat's @/ mention dropdown, which
+		     is absolutely positioned) plus any in-flow notice that belongs
+		     directly above the textarea (chat's paste hint). Placed after the
+		     chips so an in-flow notice lands exactly where chat renders it. -->
+    <!-- v-model (not :value + a manual emit) so Vue's own vModelText directive
+		     keeps handling IME composition: it suppresses the update mid-compose,
+		     which a hand-rolled binding would not. Its listener is registered
+		     before @input, so the host sees the raw event with the new value
+		     already committed — exactly the order chat had inline. --><textarea data-v-680708eb="" rows="1" placeholder="Ask Jarvis…" style="width: 100%; outline: none; resize: none; font-family: inherit; font-size: 14px; line-height: 1.5; color: var(--text); background: transparent; padding: 8px 8px 4px; max-height: 140px;"></textarea><input data-v-680708eb="" type="file" multiple="" style="display: none;">
+    <!-- Host content directly below the input and above the toolbar row (chat's
+		     voice-clip chips: recovery / failed / retained / unpersisted). Full-width
+		     rows live here, not in #left-toolbar, so they don't disrupt the button row. -->
+    <div data-v-680708eb="" style="display: flex; align-items: center; gap: 6px; padding: 2px 4px;">
+      <!-- Host toolbar buttons on the left (chat: mic + 📎 + wiki-ground).
+			     \`pickFiles\` is handed down so a host that takes the slot over can
+			     still open this component's own hidden file input. The fallback is
+			     the plain attach button the generic composer ships with. --><button data-v-680708eb="" class="jv-iconbtn" title="Attach file" style="width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: transparent; border-radius: 7px; cursor: pointer; color: var(--text-3);"><svg data-v-680708eb="" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path data-v-680708eb="" d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"></path>
+        </svg></button><span data-v-680708eb="" style="margin-left: auto; font-size: 11px; color: var(--text-3); margin-right: 4px;">Enter ↵</span><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <path data-v-680708eb="" d="M12 19V5M5 12l7-7 7 7"></path>
+        </svg></button>
+    </div>
+  </div>
+  <div data-v-680708eb="" style="text-align: center; font-size: 10.5px; color: var(--text-3); margin-top: 8px;">Jarvis can make mistakes.</div>
+</div>"
+`;
+
+exports[`dark render 1`] = `
+"<div class="jv-root jv-dark" style="--surface: #16161a; --surface-1: #1d1d22; --surface-2: #26262d; --surface-3: #30303a; --border: #2c2c34; --border-2: #3a3a45; --text: #ededf2; --text-2: #b6b6c0; --text-3: #7e7e8a; --cta: #ececf0; --cta-fg: #1c1c22; --cta-bg: #26262d; --cta-bd: #3a3a45; --link: #6e8bff; --green: #34d399; --green-bg: #15271f; --green-bd: #214b38; --red: #f87171; --red-bg: #2a1818; --red-bd: #4a2a2a; --amber: #fbbf24; --amber-bg: #2a2315; --amber-bd: #4a3d1f;">
+  <!-- Host content directly above the box, in flow (chat's wiki nudge card). -->
+  <div data-v-680708eb="" class="jv-composer" style="position: relative; border: 1.5px solid var(--text); border-radius: 13px; background: var(--surface); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07); padding: 5px 6px 6px 6px; transition: border-color 0.12s, box-shadow 0.12s;">
+    <!--v-if-->
+    <!-- pending attachments: image thumbnails (Claude-style) + file chips.
+		     Purely a projection of the \`attachments\` prop — an entry with a
+		     \`preview_url\` is a thumbnail, one with \`uploading\` is the in-flight
+		     placeholder pill, anything else is a 📎 chip. -->
+    <!--v-if-->
+    <!-- Host popovers anchored to the box (chat's @/ mention dropdown, which
+		     is absolutely positioned) plus any in-flow notice that belongs
+		     directly above the textarea (chat's paste hint). Placed after the
+		     chips so an in-flow notice lands exactly where chat renders it. -->
+    <!-- v-model (not :value + a manual emit) so Vue's own vModelText directive
+		     keeps handling IME composition: it suppresses the update mid-compose,
+		     which a hand-rolled binding would not. Its listener is registered
+		     before @input, so the host sees the raw event with the new value
+		     already committed — exactly the order chat had inline. --><textarea data-v-680708eb="" rows="1" placeholder="" style="width: 100%; outline: none; resize: none; font-family: inherit; font-size: 14px; line-height: 1.5; color: var(--text); background: transparent; padding: 8px 8px 4px; max-height: 140px;"></textarea><input data-v-680708eb="" type="file" multiple="" style="display: none;">
+    <!-- Host content directly below the input and above the toolbar row (chat's
+		     voice-clip chips: recovery / failed / retained / unpersisted). Full-width
+		     rows live here, not in #left-toolbar, so they don't disrupt the button row. -->
+    <div data-v-680708eb="" style="display: flex; align-items: center; gap: 6px; padding: 2px 4px;">
+      <!-- Host toolbar buttons on the left (chat: mic + 📎 + wiki-ground).
+			     \`pickFiles\` is handed down so a host that takes the slot over can
+			     still open this component's own hidden file input. The fallback is
+			     the plain attach button the generic composer ships with. --><button data-v-680708eb="" class="jv-iconbtn" title="Attach file" style="width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: transparent; border-radius: 7px; cursor: pointer; color: var(--text-3);"><svg data-v-680708eb="" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path data-v-680708eb="" d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"></path>
+        </svg></button><span data-v-680708eb="" style="margin-left: auto; font-size: 11px; color: var(--text-3); margin-right: 4px;">Enter ↵</span><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <path data-v-680708eb="" d="M12 19V5M5 12l7-7 7 7"></path>
+        </svg></button>
+    </div>
+  </div>
+  <!--v-if-->
+</div>"
+`;

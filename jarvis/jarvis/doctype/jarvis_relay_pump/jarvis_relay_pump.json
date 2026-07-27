@@ -1,0 +1,122 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:relay_target_id",
+ "creation": "2026-07-22 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "relay_target_id",
+  "transport_mode",
+  "mode_epoch",
+  "mirror_mismatch",
+  "pump_epoch",
+  "lease_holder",
+  "lease_expires_at",
+  "loop_heartbeat_ts",
+  "hop_counter"
+ ],
+ "fields": [
+  {
+   "fieldname": "relay_target_id",
+   "fieldtype": "Data",
+   "label": "Relay Target ID",
+   "reqd": 1,
+   "unique": 1,
+   "in_list_view": 1,
+   "length": 140,
+   "description": "The shard key; the container/gateway this pump serves. The admission serializer takes SELECT ... FOR UPDATE on it (OAR-1)."
+  },
+  {
+   "fieldname": "transport_mode",
+   "fieldtype": "Select",
+   "label": "Transport Mode",
+   "options": "\npump\ndraining\nlegacy",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "CDX-10 — the DB-AUTHORITATIVE transport decision for this shard: which machine owns a NEW turn's dispatch. 'pump' = the Relay Pump owns dispatch; 'draining' = no new pump admissions (new turns fall through to legacy) while existing pump Turn rows drain; 'legacy' = the kill switch (byte-identical worker-per-turn). This ROW — read under the shard control-row FOR UPDATE — is the fenced decision value at every dispatch-deciding point (accept_or_queue's pump branch, _dispatch_turn's enqueue-boundary re-check); jarvis_pump_enabled in site_config is the operator-facing MIRROR only, never the decider (an already-initialized request's frappe.local.conf can be stale across a cutover). Empty = not yet reconciled; readers fall back to the config-derived mode until pump_cutover_execute / a reconcile writes it."
+  },
+  {
+   "fieldname": "mode_epoch",
+   "fieldtype": "Int",
+   "label": "Mode Epoch",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "CDX-10 — the transport_mode fencing generation. Advanced (+1) under the shard control-row FOR UPDATE on every DELIBERATE transport_mode change (pump_cutover_execute and any operator-driven mode flip), so a mode transition is observable/orderable and a stale actor's cached mode can be fenced. Distinct from pump_epoch (which fences pump LEASE ownership)."
+  },
+  {
+   "fieldname": "mirror_mismatch",
+   "fieldtype": "Check",
+   "label": "Mirror Mismatch",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "CDX-21 — the operator-facing signal that the site_config jarvis_pump_enabled MIRROR currently disagrees with this row's authoritative transport_mode (a mirror write failed after the row committed, or a crash cut between the commit and the mirror write). The ROW still decides all admission + lifecycle behaviour regardless; the watchdog rewrites the config from the row each cycle and clears this flag once they agree. Purely informational — never read for a decision."
+  },
+  {
+   "fieldname": "pump_epoch",
+   "fieldtype": "Int",
+   "label": "Pump Epoch",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The MONOTONIC fencing generation. Advanced transactionally on EVERY lease acquisition (cold start, takeover, self-hop). A pump caches E; every pump-owned write CASes WHERE pump_epoch=E; a stale pump's E no longer matches so it affects 0 rows and exits (D2 §3, D4)."
+  },
+  {
+   "fieldname": "lease_holder",
+   "fieldtype": "Data",
+   "label": "Lease Holder",
+   "length": 140,
+   "read_only": 1,
+   "description": "Current hop's RQ job id (jarvis-pump::<site>::hop<n>); diagnostic + takeover logging (D2 §3)."
+  },
+  {
+   "fieldname": "lease_expires_at",
+   "fieldtype": "Datetime",
+   "label": "Lease Expires At",
+   "search_index": 1,
+   "read_only": 1,
+   "description": "Lease TTL wall-clock (~30s, heartbeat ~10s). A takeover is legal only when now > lease_expires_at OR the lease is vacant. MariaDB is authoritative; Redis mirrors for the fast wake path (D2 §3). Kept NULLABLE (D2 §3 states NOT NULL) so WP-0's bare _ensure_control_row insert stays valid; NULL = never-leased/vacant, treated as acquirable by lease_acquire's predicate."
+  },
+  {
+   "fieldname": "loop_heartbeat_ts",
+   "fieldtype": "Datetime",
+   "label": "Loop Heartbeat Ts",
+   "search_index": 1,
+   "read_only": 1,
+   "description": "Loop-WRITTEN liveness, DISTINCT from lease renewal (Amendment E). Catches the live-but-wedged pump the lease alone cannot (D2 §3)."
+  },
+  {
+   "fieldname": "hop_counter",
+   "fieldtype": "Int",
+   "label": "Hop Counter",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The <n> in the hop job id; increments on every self-requeue so the new hop gets a FRESH job id (Frappe job-id dedupe trap). Separate from pump_epoch: hop_counter mints ids, pump_epoch fences writes (D2 §3)."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-07-23 00:00:00.000000",
+ "module": "Jarvis",
+ "name": "Jarvis Relay Pump",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "Jarvis Admin"
+  }
+ ],
+ "quick_entry": 0,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

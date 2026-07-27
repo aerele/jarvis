@@ -213,6 +213,7 @@ def _conv_visible(alias: str) -> str:
 _INBOUND_INNER = f"""
 	SELECT c.name, c.title, c.creation,
 	       COALESCE(pa.n, 0) AS pending_approvals,
+	       COALESCE(bt.behind, 0) AS behind_chat,
 	       CASE
 	         WHEN COALESCE(pa.n, 0) > 0                 THEN 'needs_approval'
 	         WHEN lm.conversation IS NULL               THEN 'processing'
@@ -236,6 +237,10 @@ _INBOUND_INNER = f"""
 	                 WHERE mm.role = 'assistant' GROUP BY mm.conversation) x
 	             ON x.conversation = m.conversation AND x.mseq = m.seq
 	           WHERE m.role = 'assistant') lm ON lm.conversation = c.name
+	LEFT JOIN (SELECT bT.conversation, 1 AS behind
+	           FROM `tabJarvis Chat Turn` bT
+	           WHERE bT.turn_class = 'background' AND bT.state = 'queued'
+	           GROUP BY bT.conversation) bt ON bt.conversation = c.name
 	WHERE {_conv_visible("c")} AND c.title LIKE 'File: %%' AND c.status != 'Archived'
 	{{extra}}
 """
@@ -345,7 +350,7 @@ def list_inbound_page(
 
 	total = frappe.db.sql(f"SELECT COUNT(*) FROM ({inner}) t {outer}", params)[0][0]
 	rows = frappe.db.sql(
-		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals
+		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals, t.behind_chat
 		FROM ({inner}) t {outer}
 		ORDER BY {order}
 		LIMIT %(page_length)s OFFSET %(start)s""",

@@ -17,8 +17,8 @@
 			>
 				<LoadingIndicator class="size-5 text-ink-gray-5" />
 				<span class="max-w-sm text-sm text-ink-gray-6">
-					Drafting - Jarvis is matching this insight against your custom skills and
-					writing the update. This takes a few seconds.
+					Drafting - {{ agentName }} is matching this insight against your custom skills
+					and writing the update. This takes a few seconds.
 				</span>
 			</div>
 
@@ -153,6 +153,7 @@ import {
 	applyInsightSkillUpdate,
 	acknowledgeLearnedPattern,
 } from "@/api/learning";
+import { agentName } from "@/branding";
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";

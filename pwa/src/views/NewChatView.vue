@@ -1,6 +1,7 @@
 <script setup>
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from "vue";
 import BrandMark from "../components/BrandMark.vue";
+import { agentName } from "@/branding";
 import { useRouter } from "vue-router";
 import * as api from "../api";
 import { store } from "../store";
@@ -66,10 +67,10 @@ const uploading = computed(() => attachments.value.some((a) => a.uploading));
 function modelDesc(name) {
 	const n = String(name).toLowerCase();
 	if (n.includes("opus") || n.includes("5.5"))
-		return "Most capable — for complex, multi-step work";
+		return "Most capable, for complex multi-step work";
 	if (n.includes("sonnet")) return "Balanced speed and intelligence";
 	if (n.includes("haiku") || n.includes("mini") || n.includes("flash"))
-		return "Fastest — for quick everyday tasks";
+		return "Fastest, for quick everyday tasks";
 	return "Available on your plan";
 }
 
@@ -272,7 +273,7 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 				ref="inputEl"
 				v-model="input"
 				rows="1"
-				placeholder="Message Jarvis…"
+				:placeholder="`Message ${agentName}…`"
 				@input="autoGrow"
 				@keydown="onKeydown"
 			/>
@@ -412,7 +413,7 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 				<div class="jv-sep" />
 
 				<div class="jv-msheet-sub">Effort</div>
-				<div class="jv-msheet-hint">How much Jarvis thinks before it acts.</div>
+				<div class="jv-msheet-hint">How much {{ agentName }} thinks before it acts.</div>
 				<div class="jv-seg">
 					<button
 						v-for="e in EFFORT"
@@ -464,13 +465,21 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	gap: 14px;
 	padding: 18px;
 }
+/* The name is arbitrary-length, so this line has to survive "Administrator"
+   as well as "Jo". At 24px/600 the longest common case measured 326px against
+   324px of usable width, so it overflowed its own padding and sat edge to edge.
+   Smaller and lighter, capped short of the padding, and balanced so a wrap
+   splits evenly instead of dropping one orphaned word. */
 .jv-greeting {
 	margin: 0;
-	font-size: 24px;
-	font-weight: 600;
-	letter-spacing: -0.4px;
+	max-width: 20ch;
+	font-size: 21px;
+	font-weight: 550;
+	letter-spacing: -0.3px;
+	line-height: 1.25;
 	color: var(--ink9);
 	text-align: center;
+	text-wrap: balance;
 }
 
 .jv-heroc {
@@ -505,7 +514,10 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	background: transparent;
 	color: var(--ink9);
 	font: inherit;
-	font-size: 14.5px;
+	/* 15.5px, not 14.5: this is the one field the user actually composes in,
+	   and the reference apps sit around 16px. Below that it reads as a caption
+	   rather than the primary input. */
+	font-size: 15.5px;
 	line-height: 1.45;
 	padding: 2px 0 12px;
 	max-height: 120px;

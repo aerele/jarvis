@@ -5,6 +5,7 @@ import { pendingCardOf, pendingExpiry } from "@shared/lib/actionSummary.js";
 import Sheet from "./Sheet.vue";
 import PendingCard from "./PendingCard.vue";
 import * as api from "../api";
+import { agentName } from "@/branding";
 
 // Approve / deny a parked write.
 //
@@ -79,8 +80,8 @@ async function approve() {
 				// InvalidConfirmation is deliberately opaque; use the card's own
 				// wall-clock expiry to say the right thing (F15).
 				error.value = pendingExpiry(props.action?.expires_at, Date.now()).expired
-					? "This confirmation expired — tell Jarvis the action again to retry it."
-					: "Couldn't confirm — it may have been handled elsewhere. Refresh, or ask Jarvis to try again.";
+					? `This confirmation expired. Tell ${agentName} the action again to retry it.`
+					: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`;
 				state.value = "review";
 				emit("resolved", props.action.token, "expired");
 				return;
@@ -135,8 +136,8 @@ async function approve() {
 				<div class="jv-dresult-sub">
 					{{
 						state === "approved"
-							? "Jarvis is running the action now. You'll see the result in the thread."
-							: "The change was rejected. Jarvis won't run this action."
+							? `${agentName} is running the action now. You'll see the result in the thread.`
+							: `The change was rejected. ${agentName} won't run this action.`
 					}}
 				</div>
 				<button class="jv-btn is-primary" @click="emit('close')">Done</button>
@@ -152,7 +153,8 @@ async function approve() {
 					<PendingCard v-if="card" :card="card" :details="rawDetails" class="jv-dcard" />
 					<div v-else-if="previewHtml" class="jv-dpreview" v-html="previewHtml" />
 					<div v-if="expired" class="jv-dexpired">
-						This confirmation expired — tell Jarvis the action again to retry it.
+						This confirmation expired. Tell {{ agentName }} the action again to retry
+						it.
 					</div>
 					<div v-if="error" class="jv-derror">{{ error }}</div>
 				</div>

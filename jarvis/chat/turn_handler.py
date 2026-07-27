@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass, field
 
 import frappe
 
@@ -413,6 +414,20 @@ def _org_locale_clause() -> str:
 	return ("; " + "; ".join(parts)) if parts else ""
 
 
+def _assistant_name_clause(settings) -> str:
+	"""Whitelabel assistant name folded into the turn's trusted [Context:] line
+	so the agent refers to itself by the customer's chosen name. "" when unset
+	(blank tenants pay zero per-turn tokens, like _org_locale_clause). Sanitized
+	like the model-text notes clause - customer free-text inside a trusted
+	bracket, so disarm brackets/backticks/newlines and cap length (validate()
+	already caps at 40; belt and braces)."""
+	name = (getattr(settings, "agent_name", None) or "").strip()
+	if not name:
+		return ""
+	safe = _safe_label_name(name).replace("[", "(").replace("]", ")")[:40]
+	return f"; assistant name: {safe}"
+
+
 def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 	"""Chaining hook for the macro engine: if this conversation is a running
 	macro, advance it (enqueue the next step, or finish). Best-effort — a macro
@@ -429,6 +444,220 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 		app_analysis.on_turn_end(conversation_id, errored=errored)
 	except Exception:
 		frappe.log_error(title="jarvis app-learning turn hook failed", message=frappe.get_traceback())
+
+
+def _admission_settle(run_id: str, state: str, error: str | None = None) -> None:
+	"""Phase-0 admission terminal hook: mark this turn's durable Turn row
+	terminal (CAS) and promote the next queued turn. Flag-gated + best-effort
+	inside admission.settle_turn, so flag-OFF is byte-identical and a Phase-0
+	failure never affects the legacy turn. Called ONLY at the legacy terminal
+	commit points and ALWAYS outside the brittle slice region (:996-:1022)."""
+	try:
+		from jarvis.chat import admission
+
+		admission.settle_turn(run_id, state, error=error)
+	except Exception:
+		frappe.log_error(title="admission settle hook", message=frappe.get_traceback())
+
+
+@dataclass
+class _PreparedPrompt:
+	"""The assembled, ready-to-send turn prompt + its bootstrap metadata. Produced
+	by :func:`assemble_prompt` and consumed by BOTH the legacy ``handle_chat_send``
+	body AND the Relay-Pump ``prepare`` job (jarvis.chat.prepare) — the ONE source
+	of truth for the clause ORDER (a documented safety invariant) + attachment
+	fencing, so the pump-mode prompt is byte-for-byte what the legacy path sends."""
+
+	settings: object
+	chat_user: str
+	user_message: str
+	vision_parts: list = field(default_factory=list)
+	inlined_prompt_chars: int = 0
+	drained_notes: list = field(default_factory=list)
+	drained_ids: list = field(default_factory=list)
+
+
+def assemble_prompt(
+	conv,
+	*,
+	message_id: str,
+	conversation_id: str,
+	context,
+	attachments,
+	user: str,
+) -> _PreparedPrompt:
+	"""Assemble the full turn prompt (the ``[Context: …]`` bracket + every clause,
+	the doc/report viewing context, and inlined/vision attachments) for one turn.
+
+	Extracted VERBATIM from ``handle_chat_send`` so the Relay-Pump prepare job
+	reuses the exact same assembly (no logic duplication — WP-1d). It performs
+	only READS (Singles/Company/wiki/agent-notes snapshot + permission-gated File
+	reads) + string building; it has NO side effects, so calling it from either
+	owner is byte-identical. ``agent_notes`` are READ here (folded into the
+	bracket) but NOT cleared — the clear fires only after PROVEN delivery
+	(post-ack), which is the pump's job in managed-pump mode (R-2) and
+	``handle_chat_send``'s job on the legacy path."""
+	settings = frappe.get_single("Jarvis Settings")
+	# Fetch content + sender of THIS user message in one round-trip.
+	# msg_row.owner is the Frappe user who sent this turn, set by Frappe
+	# at insert time in send_message (jarvis/chat/api.py). We use it
+	# rather than conv.owner for the context bracket because the bench-
+	# side dispatcher (_dispatch_from_session in jarvis/api.py:118) also
+	# acts on the per-request identity, not the conversation creator -
+	# the bracket and the tool-call's frappe.session.user stay in lock-
+	# step. Today these are equal for single-owner conversations; the
+	# distinction matters the moment we ship shared conversations.
+	msg_row = frappe.db.get_value(MSG, message_id, ["content", "owner"], as_dict=True) or {}
+	user_message = msg_row.get("content")
+	chat_user = msg_row.get("owner") or user
+	# Prepend today's date AND the chat user's Frappe id as a context line so
+	# the agent (AGENTS.md tells it to treat the leading ``[Context: ...]``
+	# as system, not user) can (a) resolve relative time expressions
+	# ("last quarter", "this week") and (b) answer "who am I" / "what
+	# perms do I have" without a clarifying round-trip or a doomed
+	# get_list on User. The persisted user_message in the DB is
+	# unchanged; only the value sent over to openclaw is augmented.
+	now = frappe.utils.now_datetime()
+	today = now.strftime("%Y-%m-%d (%A)")
+	# Fold the auto-apply preference into the system context line so the agent
+	# knows whether to confirm mutating ops. Default (off) = confirm; the persona
+	# confirms by default, so we only signal the non-default "auto" mode.
+	auto_apply = "; auto-apply changes: ON" if conv.auto_apply else ""
+	# Custom-skill invocation: if the user typed /slug for an enabled custom
+	# skill, name the installed custom-<slug> skill(s) in the system context so
+	# the agent activates them deterministically (openclaw has no documented
+	# user-invocable trigger; the SKILL.md is already in workspace/skills/).
+	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
+
+	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
+	# Learned skills (plan section 6.6, the reliable activation path): deterministically
+	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
+	# agent applies them without depending on openclaw's undocumented auto-retrieval.
+	# Additive to skill_clause; role match uses the cached role lookup (hot path).
+	learned_clause = learned_skill_clause(chat_user)
+	# Org locale (default Company country/currency + site date/number/tz) so the
+	# agent formats for the org's region instead of defaulting to US conventions.
+	locale_clause = _org_locale_clause()
+	# Whitelabel assistant name (Phase 3): folded into the trusted [Context:] line
+	# so the agent refers to itself by the customer's chosen name. "" when unset.
+	assistant_name_clause = _assistant_name_clause(settings)
+	# Personal custom skills + org wiki notes (voice & wiki feature). Both
+	# clauses are best-effort ("" on any failure — a clause bug must never
+	# break a turn) and size-capped (~700 chars combined). Lazy imports so a
+	# not-yet-reloaded RQ worker keeps serving turns before these land.
+	try:
+		from jarvis.chat.custom_skills import personal_skill_clause
+
+		personal_clause = personal_skill_clause(chat_user) or ""
+	except Exception:
+		personal_clause = ""
+	try:
+		from jarvis.chat.wiki import wiki_clause
+
+		wiki_notes_clause = wiki_clause(conversation_id, context) or ""
+	except Exception:
+		wiki_notes_clause = ""
+	# Site-customizations hint: counts-only, cached per site. Same
+	# best-effort + lazy-import contract as the clauses above.
+	try:
+		from jarvis.chat.customizations_clause import customizations_clause
+
+		custom_site_clause = customizations_clause() or ""
+	except Exception:
+		custom_site_clause = ""
+	# Deferred agent-correction notes (e.g. a discarded action the agent's
+	# in-container memory still believes is pending): fold them into the TRUSTED
+	# [Context: ...] line so the correction reaches the agent on THIS turn without
+	# firing an extra turn. Each carries model-proposed structural text (a record
+	# name), so neutralize it - single line, no backticks, brackets disarmed - so
+	# it can't break out of the bracket or forge a system line. Read now; the queue
+	# is cleared only after a successful send (below), so a failed dispatch
+	# re-delivers instead of silently dropping the veto.
+	from jarvis.chat import agent_notes
+
+	drained_notes = agent_notes.read(conv)
+	drained_ids = [e["id"] for e in drained_notes]
+	notes_clause = ""
+	if drained_notes:
+		safe_notes = "; ".join(
+			_safe_label_name(e["text"]).replace("[", "(").replace("]", ")") for e in drained_notes
+		)
+		notes_clause = f"; notes: {safe_notes}"
+	# On-demand "ground on wiki" (the composer's one-shot control): when the user
+	# armed it, inject the clipped bodies of the most relevant wiki pages as a
+	# labelled block AFTER the [Context:] bracket (not inside it — bodies are
+	# multi-line), so the agent answers grounded in the org's own knowledge this
+	# turn. Best-effort → "" so a grounding failure never breaks the turn.
+	ground_block = ""
+	if isinstance(context, dict) and context.get("ground_wiki"):
+		try:
+			from jarvis.chat.wiki import forced_wiki_block
+
+			ground_block = forced_wiki_block(conversation_id, context, user_message) or ""
+		except Exception:
+			ground_block = ""
+		if not ground_block:
+			# The user explicitly asked to ground this turn on the wiki but nothing
+			# matched (or the wiki is empty) — tell the agent so it answers honestly
+			# instead of silently falling back to its own knowledge as if it had
+			# consulted the wiki.
+			ground_block = (
+				"\n\n(You were asked to ground this answer on the org wiki, but no "
+				"matching wiki page was found. Say that no relevant wiki page exists "
+				"rather than implying the answer came from the wiki.)"
+			)
+	user_message = (
+		# conv:<id> lets the agent link rows it creates (e.g. Jarvis Approval)
+		# back to this conversation so deciding can resume the chat.
+		#
+		# Clause ORDER is a safety invariant (Skills-area rework, DESIGN.md
+		# section 6 / research/ux-permissions.md §4.4): the org/role/learned and
+		# wiki clauses are emitted BEFORE the personal clause, and the personal
+		# clause itself carries "(applies to you; org guidance takes priority on
+		# conflict)" — so a user's personal skills never silently outrank org/role
+		# guidance inside their own turn. Do NOT move personal_clause ahead of
+		# learned_clause/wiki_notes_clause. Explicit /slug invocation
+		# (skill_clause) stays intentional and is not demoted. The
+		# customizations clause is org-level too, so it sits with the org
+		# clauses - before personal, which stays last.
+		f"[Context: today is {today}{locale_clause}{assistant_name_clause}; chat user: {chat_user}"
+		f"; conv: {conversation_id}{auto_apply}{skill_clause}{learned_clause}"
+		f"{wiki_notes_clause}{custom_site_clause}{personal_clause}{notes_clause}]"
+		f"{ground_block}"
+		f"\n\n{user_message or ''}"
+	)
+
+	from jarvis import selfhost
+
+	# Floating-widget auto-context + file inputs layer onto the
+	# already date/user-augmented user_message built above. Prompt-only;
+	# the persisted/visible user message is unchanged.
+	user_message = _prepend_doc_context(user_message, context)
+	# Vision is managed-pool only (self-host vision is a follow-up), gated by the
+	# operator toggle and the model's provider being multimodal. When off, image/
+	# PDF attachments degrade to a short note (no OCR fallback any more).
+	vision_ok = (
+		not selfhost.is_self_hosted()
+		and _vision_enabled(settings)
+		and vision.supports_vision(settings.llm_provider)
+	)
+	# Measure how much the attachments grew the PROMPT, not just how many
+	# vision parts they produced. Text files (CSV/TXT/JSON/MD/logs) and the
+	# vision-off PDF text fallback are inlined into user_message and leave
+	# vision_parts empty, so growth is the only signal that the send is big.
+	# Feeds _ack_timeout_s() below.
+	_prompt_chars_before_attachments = len(user_message)
+	user_message, vision_parts = _prepare_attachments(user_message, attachments, vision_ok)
+	inlined_prompt_chars = max(0, len(user_message) - _prompt_chars_before_attachments)
+	return _PreparedPrompt(
+		settings=settings,
+		chat_user=chat_user,
+		user_message=user_message,
+		vision_parts=vision_parts,
+		inlined_prompt_chars=inlined_prompt_chars,
+		drained_notes=drained_notes,
+		drained_ids=drained_ids,
+	)
 
 
 def handle_chat_send(payload: dict) -> None:
@@ -529,155 +758,28 @@ def handle_chat_send(payload: dict) -> None:
 		},
 	)
 
-	settings = frappe.get_single("Jarvis Settings")
-	# Fetch content + sender of THIS user message in one round-trip.
-	# msg_row.owner is the Frappe user who sent this turn, set by Frappe
-	# at insert time in send_message (jarvis/chat/api.py). We use it
-	# rather than conv.owner for the context bracket because the bench-
-	# side dispatcher (_dispatch_from_session in jarvis/api.py:118) also
-	# acts on the per-request identity, not the conversation creator -
-	# the bracket and the tool-call's frappe.session.user stay in lock-
-	# step. Today these are equal for single-owner conversations; the
-	# distinction matters the moment we ship shared conversations.
-	msg_row = frappe.db.get_value(MSG, message_id, ["content", "owner"], as_dict=True) or {}
-	user_message = msg_row.get("content")
-	chat_user = msg_row.get("owner") or user
-	# Prepend today's date AND the chat user's Frappe id as a context line so
-	# the agent (AGENTS.md tells it to treat the leading ``[Context: ...]``
-	# as system, not user) can (a) resolve relative time expressions
-	# ("last quarter", "this week") and (b) answer "who am I" / "what
-	# perms do I have" without a clarifying round-trip or a doomed
-	# get_list on User. The persisted user_message in the DB is
-	# unchanged; only the value sent over to openclaw is augmented.
-	now = frappe.utils.now_datetime()
-	today = now.strftime("%Y-%m-%d (%A)")
-	# Fold the auto-apply preference into the system context line so the agent
-	# knows whether to confirm mutating ops. Default (off) = confirm; the persona
-	# confirms by default, so we only signal the non-default "auto" mode.
-	auto_apply = "; auto-apply changes: ON" if conv.auto_apply else ""
-	# Custom-skill invocation: if the user typed /slug for an enabled custom
-	# skill, name the installed custom-<slug> skill(s) in the system context so
-	# the agent activates them deterministically (openclaw has no documented
-	# user-invocable trigger; the SKILL.md is already in workspace/skills/).
-	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
-
-	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
-	# Learned skills (plan section 6.6, the reliable activation path): deterministically
-	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
-	# agent applies them without depending on openclaw's undocumented auto-retrieval.
-	# Additive to skill_clause; role match uses the cached role lookup (hot path).
-	learned_clause = learned_skill_clause(chat_user)
-	# Org locale (default Company country/currency + site date/number/tz) so the
-	# agent formats for the org's region instead of defaulting to US conventions.
-	locale_clause = _org_locale_clause()
-	# Personal custom skills + org wiki notes (voice & wiki feature). Both
-	# clauses are best-effort ("" on any failure — a clause bug must never
-	# break a turn) and size-capped (~700 chars combined). Lazy imports so a
-	# not-yet-reloaded RQ worker keeps serving turns before these land.
-	try:
-		from jarvis.chat.custom_skills import personal_skill_clause
-
-		personal_clause = personal_skill_clause(chat_user) or ""
-	except Exception:
-		personal_clause = ""
-	try:
-		from jarvis.chat.wiki import wiki_clause
-
-		wiki_notes_clause = wiki_clause(conversation_id, context) or ""
-	except Exception:
-		wiki_notes_clause = ""
-	# Site-customizations hint: counts-only, cached per site. Same
-	# best-effort + lazy-import contract as the clauses above.
-	try:
-		from jarvis.chat.customizations_clause import customizations_clause
-
-		custom_site_clause = customizations_clause() or ""
-	except Exception:
-		custom_site_clause = ""
-	# Deferred agent-correction notes (e.g. a discarded action the agent's
-	# in-container memory still believes is pending): fold them into the TRUSTED
-	# [Context: ...] line so the correction reaches the agent on THIS turn without
-	# firing an extra turn. Each carries model-proposed structural text (a record
-	# name), so neutralize it - single line, no backticks, brackets disarmed - so
-	# it can't break out of the bracket or forge a system line. Read now; the queue
-	# is cleared only after a successful send (below), so a failed dispatch
-	# re-delivers instead of silently dropping the veto.
-	from jarvis.chat import agent_notes
-
-	drained_notes = agent_notes.read(conv)
-	drained_ids = [e["id"] for e in drained_notes]
-	notes_clause = ""
-	if drained_notes:
-		safe_notes = "; ".join(
-			_safe_label_name(e["text"]).replace("[", "(").replace("]", ")") for e in drained_notes
-		)
-		notes_clause = f"; notes: {safe_notes}"
-	# On-demand "ground on wiki" (the composer's one-shot control): when the user
-	# armed it, inject the clipped bodies of the most relevant wiki pages as a
-	# labelled block AFTER the [Context:] bracket (not inside it — bodies are
-	# multi-line), so the agent answers grounded in the org's own knowledge this
-	# turn. Best-effort → "" so a grounding failure never breaks the turn.
-	ground_block = ""
-	if isinstance(context, dict) and context.get("ground_wiki"):
-		try:
-			from jarvis.chat.wiki import forced_wiki_block
-
-			ground_block = forced_wiki_block(conversation_id, context, user_message) or ""
-		except Exception:
-			ground_block = ""
-		if not ground_block:
-			# The user explicitly asked to ground this turn on the wiki but nothing
-			# matched (or the wiki is empty) — tell the agent so it answers honestly
-			# instead of silently falling back to its own knowledge as if it had
-			# consulted the wiki.
-			ground_block = (
-				"\n\n(You were asked to ground this answer on the org wiki, but no "
-				"matching wiki page was found. Say that no relevant wiki page exists "
-				"rather than implying the answer came from the wiki.)"
-			)
-	user_message = (
-		# conv:<id> lets the agent link rows it creates (e.g. Jarvis Approval)
-		# back to this conversation so deciding can resume the chat.
-		#
-		# Clause ORDER is a safety invariant (Skills-area rework, DESIGN.md
-		# section 6 / research/ux-permissions.md §4.4): the org/role/learned and
-		# wiki clauses are emitted BEFORE the personal clause, and the personal
-		# clause itself carries "(applies to you; org guidance takes priority on
-		# conflict)" — so a user's personal skills never silently outrank org/role
-		# guidance inside their own turn. Do NOT move personal_clause ahead of
-		# learned_clause/wiki_notes_clause. Explicit /slug invocation
-		# (skill_clause) stays intentional and is not demoted. The
-		# customizations clause is org-level too, so it sits with the org
-		# clauses - before personal, which stays last.
-		f"[Context: today is {today}{locale_clause}; chat user: {chat_user}"
-		f"; conv: {conversation_id}{auto_apply}{skill_clause}{learned_clause}"
-		f"{wiki_notes_clause}{custom_site_clause}{personal_clause}{notes_clause}]"
-		f"{ground_block}"
-		f"\n\n{user_message or ''}"
+	# Prompt assembly (shared with the Relay-Pump prepare job so the two paths
+	# emit a byte-identical prompt — clause order + attachment fencing live in
+	# ONE place, jarvis.chat.turn_handler.assemble_prompt). Pure reads + string
+	# building; agent_notes are READ (folded in) but cleared only after a proven
+	# delivery below.
+	_ap = assemble_prompt(
+		conv,
+		message_id=message_id,
+		conversation_id=conversation_id,
+		context=context,
+		attachments=attachments,
+		user=user,
 	)
-
+	settings = _ap.settings
+	chat_user = _ap.chat_user
+	user_message = _ap.user_message
+	vision_parts = _ap.vision_parts
+	inlined_prompt_chars = _ap.inlined_prompt_chars
+	drained_notes = _ap.drained_notes
+	drained_ids = _ap.drained_ids
 	from jarvis import selfhost
-
-	# Floating-widget auto-context + file inputs layer onto the
-	# already date/user-augmented user_message built above. Prompt-only;
-	# the persisted/visible user message is unchanged.
-	user_message = _prepend_doc_context(user_message, context)
-	# Vision is managed-pool only (self-host vision is a follow-up), gated by the
-	# operator toggle and the model's provider being multimodal. When off, image/
-	# PDF attachments degrade to a short note (no OCR fallback any more).
-	vision_ok = (
-		not selfhost.is_self_hosted()
-		and _vision_enabled(settings)
-		and vision.supports_vision(settings.llm_provider)
-	)
-	# Measure how much the attachments grew the PROMPT, not just how many
-	# vision parts they produced. Text files (CSV/TXT/JSON/MD/logs) and the
-	# vision-off PDF text fallback are inlined into user_message and leave
-	# vision_parts empty, so growth is the only signal that the send is big.
-	# Feeds _ack_timeout_s() below.
-	_prompt_chars_before_attachments = len(user_message)
-	user_message, vision_parts = _prepare_attachments(user_message, attachments, vision_ok)
-	inlined_prompt_chars = max(0, len(user_message) - _prompt_chars_before_attachments)
+	from jarvis.chat import agent_notes
 	# The /think directive: self-hosted still inlines it as the FIRST bytes
 	# of the message body (openclaw's leading-directive parser strips it
 	# from there); managed sends it as the chat_send ``thinking`` param
@@ -806,6 +908,7 @@ def handle_chat_send(payload: dict) -> None:
 			except OpenclawUnreachableError as e:
 				_publish_run_error(str(e), changed_data=False, exc=e)
 				_advance_macro(conversation_id, errored=True)
+				_admission_settle(run_id, "errored", str(e))
 				return
 			finally:
 				selfhost.clear_active_turn(tool_user, run_id)
@@ -991,6 +1094,7 @@ def handle_chat_send(payload: dict) -> None:
 				# confined to the ghost-run-already-finished case.
 				_publish_run_error(str(e), changed_data=False, exc=e)
 				_advance_macro(conversation_id, errored=True)
+				_admission_settle(run_id, "errored", str(e))
 				return
 
 			if terminal["kind"] == "relay:error":
@@ -1049,9 +1153,11 @@ def handle_chat_send(payload: dict) -> None:
 						},
 					)
 					_advance_macro(conversation_id, errored=True)
+					_admission_settle(run_id, "cancelled")
 					return
 				_publish_run_error(err_text)
 				_advance_macro(conversation_id, errored=True)
+				_admission_settle(run_id, "errored", err_text)
 				return
 			if terminal["kind"] == "relay:interrupted":
 				# Deadline, transport drop, or exhausted stream after a
@@ -1136,14 +1242,19 @@ def handle_chat_send(payload: dict) -> None:
 			# original exception that RQ should see.
 			pass
 		_advance_macro(conversation_id, errored=True)
+		# Backstop terminal: settle the Turn row errored + promote before the
+		# re-raise so a queued turn never waits on a crashed worker. Best-effort
+		# inside _admission_settle - it never masks the re-raised exception.
+		_admission_settle(run_id, "errored", f"unexpected worker error: {type(e).__name__}")
 		raise
 	# A turn can end "cleanly" (no exception) yet be an LLM-level failure — an
 	# openclaw lifecycle:error frame (quota/cooldown/provider error) ends the
 	# stream normally after _mark_errored stamped the message. So the macro's
 	# errored signal is the assistant message's error field, not the code path.
+	_turn_errored = bool(frappe.db.get_value(MSG, assistant_msg.name, "error"))
 	_advance_macro(
 		conversation_id,
-		errored=bool(frappe.db.get_value(MSG, assistant_msg.name, "error")),
+		errored=_turn_errored,
 	)
 	_publish_to_user(
 		user,
@@ -1154,6 +1265,10 @@ def handle_chat_send(payload: dict) -> None:
 			"run_id": run_id,
 		},
 	)
+	# Phase-0 admission terminal hook for the clean-exit path: done on a real
+	# reply, errored when an lifecycle:error stamped the message (the same
+	# signal _advance_macro used above). Promotes the next queued turn.
+	_admission_settle(run_id, "errored" if _turn_errored else "done")
 
 	# Latency telemetry summary (plan Phase 0). first_delta_ms is the number
 	# users feel: worker start → first visible token. pre_reply_tool_calls
@@ -1246,6 +1361,50 @@ def _format_report_filters(filters: dict) -> str:
 	return f" with filters {{{body}}}"
 
 
+_THEME_TOKEN_ORDER = (
+	"bg",
+	"surface",
+	"surface-2",
+	"ink",
+	"heading",
+	"muted",
+	"line",
+	"accent",
+	"positive",
+	"negative",
+	"warning",
+	"info",
+)
+
+
+def _dashboard_theme_cheatsheet(theme_key: str) -> str:
+	"""Render the SELECTED curated theme's compact token+palette cheatsheet from
+	its canonical theme.json (jarvis/dashboards/themes/<key>/theme.json), inlined
+	per-turn into the dashboards [Context:] line. Only the chosen theme is
+	rendered — the skill carries the theme-agnostic mechanism, never all four
+	cheatsheets. Empty for an unknown/custom key (custom has no spec)."""
+	try:
+		from jarvis.dashboards import theme_spec
+
+		spec = theme_spec.load_theme(theme_key)
+	except Exception:
+		spec = None
+	if not spec:
+		return ""
+	rt = spec.get("render_tokens", {})
+	toks = " ".join(f"--jd-{k} {rt[k]}" for k in _THEME_TOKEN_ORDER if k in rt)
+	palette = " ".join(spec.get("palette", []))
+	mode = "dark" if spec.get("dark") else "light"
+	fdisp = (rt.get("font-display") or "").lower()
+	headings = "serif" if "serif" in fdisp and "sans-serif" not in fdisp else "system-sans"
+	return (
+		f" {spec.get('label', theme_key)} cheatsheet ({mode}; headings {headings}): "
+		f"tokens {toks}; chart series = window.JARVIS_THEME.palette in order "
+		f"[{palette}]. Compose var(--jd-*) (never hardcode these hexes); "
+		"--jd-muted for secondary/labels, --jd-positive/-negative for status text."
+	)
+
+
 def _prepend_doc_context(user_message: str, context) -> str:
 	"""Prepend the ERP doc / report the user was viewing (floating-widget
 	auto-context) as a leading ``[Viewing: ...]`` line, so questions like
@@ -1288,6 +1447,29 @@ def _prepend_doc_context(user_message: str, context) -> str:
 				f"jarvis__get_doc on Jarvis Dashboard {context['name']} to read its "
 				"current html and sources, then produce the full revised document."
 			)
+		# The selected canvas theme: name it so the agent designs FOR it, and
+		# inline THAT theme's compact token+palette cheatsheet (rendered per-turn
+		# from theme.json — the skill carries only the theme-agnostic mechanism).
+		# The save-time validator rejects off-theme output, so composing the jd-*
+		# classes + --jd-* tokens is the standard, not a suggestion.
+		theme_key = (context.get("theme") or "").strip().lower()
+		if theme_key == "custom":
+			theme_line = (
+				" The user chose the CUSTOM theme: build the bespoke look they "
+				"describe — their own design wins and no standard theme is enforced "
+				"(but never load external resources or @font-face webfonts)."
+			)
+		elif theme_key:
+			theme_line = (
+				f" The selected theme is '{theme_key}' — design FOR it: compose the "
+				"jd-* component classes and take every color/font from the injected "
+				"--jd-* variables and window.JARVIS_THEME.palette. The save-time "
+				"validator rejects off-theme colors/fonts, @font-face, external URLs "
+				"and prefers-color-scheme, so do not hardcode any of them."
+				+ _dashboard_theme_cheatsheet(theme_key)
+			)
+		else:
+			theme_line = ""
 		return (
 			"[Context: The user is on the Jarvis Dashboards builder page. They want to "
 			"create or iterate on a dashboard/report. Read and follow the "
@@ -1305,8 +1487,10 @@ def _prepend_doc_context(user_message: str, context) -> str:
 			'fetch with window.jarvis.data("<source_name>"). Style with the injected '
 			"--jd-* CSS variables (--jd-bg/-surface/-ink/-heading/-muted/-line/"
 			"-accent/-font) and the window.JARVIS_THEME.palette chart colors instead "
-			"of hardcoding design; only deviate when the user explicitly asks about "
-			f"the look.{mode_line}{edit_line}]"
+			"of hardcoding design. For a bespoke look the user switches to the Custom "
+			"theme via the theme picker — on a curated theme never hardcode off-theme "
+			"colors/fonts (the save-time validator rejects them); tell the user to "
+			f"pick Custom for a one-off deviation.{theme_line}{mode_line}{edit_line}]"
 			f"\n\n{user_message}"
 		)
 	if context.get("page") == "triggers":

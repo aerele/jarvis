@@ -16,7 +16,8 @@
     "instructions",
     "shared_with",
     "allowed_roles",
-    "managed_by_learning"
+    "managed_by_learning",
+    "source_skill"
   ],
   "fields": [
     {
@@ -95,6 +96,15 @@
       "default": "0",
       "hidden": 1,
       "description": "Marker only: this row is a consolidated learned-<domain> skill compiled from approved learned patterns; the learning board is its management surface."
+    },
+    {
+      "fieldname": "source_skill",
+      "fieldtype": "Data",
+      "label": "Source Skill",
+      "read_only": 1,
+      "hidden": 1,
+      "search_index": 1,
+      "description": "Lineage marker (R2-SP-3): for a system-owned shared copy materialized by a reviewer-approved promotion, the docname of the requester's private source skill it was promoted FROM. A later higher-scope approval of the SAME source supersedes this copy in place (User->Role then User->Org yields one shared copy at Org, no orphan). Plain Data (not a Link) so deleting the private source never blocks on it."
     }
   ],
   "permissions": [

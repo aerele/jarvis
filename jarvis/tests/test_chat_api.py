@@ -6,11 +6,14 @@ real chat history previously wiped that history; the fixture user keeps
 test cleanups scoped to disposable rows.
 """
 
+import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import admission, pump
 from jarvis.chat.api import (
 	_AGENT_TURN_WORKER_TIMEOUT,
 	archive_conversation,
@@ -28,7 +31,12 @@ from jarvis.chat.api import (
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
+PUMP = "Jarvis Relay Pump"
 TEST_USER = "jarvis-test@example.com"
+
+# CDX-10: these classes assert the LEGACY dispatch path — provision an honestly-legacy site
+# (transport_mode ROW = 'legacy' + explicit conf jarvis_pump_enabled=0), restored after.
+from jarvis.tests._transport_helpers import provision_legacy_site as _provision_legacy_site
 
 
 def _ensure_test_user(user: str = TEST_USER) -> None:
@@ -284,6 +292,8 @@ class TestSendMessage(_ChatTestCase):
 	def setUp(self):
 		super().setUp()
 		self.conv = create_conversation()
+		# CDX-10: these tests assert the LEGACY worker enqueue — provision a legacy site.
+		_provision_legacy_site(self)
 
 	def test_rejects_when_policy_says_no(self):
 		with patch(
@@ -439,6 +449,8 @@ class TestRetryMessage(_ChatTestCase):
 		gate = patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None})
 		gate.start()
 		self.addCleanup(gate.stop)
+		# CDX-10: these tests assert the LEGACY worker enqueue / shared dispatcher — provision legacy.
+		_provision_legacy_site(self)
 
 	def test_routes_through_shared_dispatcher(self):
 		"""Retry must use the SAME dispatcher as send_message (after-commit
@@ -623,7 +635,11 @@ class TestSetConversationModel(_ChatTestCase):
 class TestSendMessageWithModelOverride(_ChatTestCase):
 	"""send_message accepts an optional model_override that gets applied
 	to the conversation BEFORE the worker is enqueued - so the first
-	turn lands on the picked model without a race against the worker."""
+	turn lands on the picked model without a race against the worker.
+
+	CDX-10: the persist-before-enqueue capture asserts the LEGACY worker enqueue fires, so
+	these run on a legacy-provisioned site (see setUp). The override-persistence invariant the
+	pump path ALSO satisfies is covered by TestSendModelOverridePumpTwin below."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -650,6 +666,8 @@ class TestSendMessageWithModelOverride(_ChatTestCase):
 	def setUp(self):
 		super().setUp()
 		self.conv = create_conversation()
+		# CDX-10: the persist-before-enqueue capture asserts the LEGACY worker enqueue.
+		_provision_legacy_site(self)
 
 	def test_valid_override_persists_before_enqueue(self):
 		"""When model_override is passed, conv.model_override is set
@@ -697,6 +715,65 @@ class TestSendMessageWithModelOverride(_ChatTestCase):
 		)
 
 
+class TestSendModelOverridePumpTwin(_ChatTestCase):
+	"""CDX-10 pump-mode twin: the override-persistence invariant the legacy test asserts ALSO
+	holds on the PUMP path — send_message writes conv.model_override BEFORE the transport
+	decision, so a pump-owned turn still lands on the picked model. Provisions the default pump
+	site (transport_mode ROW = pump, conf absent = default-ON) and stubs the pump wake so no
+	real hop enqueues."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		settings = frappe.get_single("Jarvis Settings")
+		cls._settings_snap = {
+			"llm_auth_mode": settings.llm_auth_mode,
+			"llm_provider": settings.llm_provider,
+			"llm_model": settings.llm_model,
+		}
+		settings.db_set("llm_auth_mode", "oauth", update_modified=False)
+		settings.db_set("llm_provider", "OpenAI", update_modified=False)
+		settings.db_set("llm_model", "gpt-5.5", update_modified=False)
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		settings = frappe.get_single("Jarvis Settings")
+		for k, v in cls._settings_snap.items():
+			settings.db_set(k, v, update_modified=False)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		super().setUp()
+		self.conv = create_conversation()
+		target = admission.DEFAULT_RELAY_TARGET
+		self._prior_mode = frappe.db.get_value(PUMP, target, "transport_mode")
+		pump.set_transport_mode(target, pump._MODE_PUMP)  # the default-ON site the fenced read decides on
+		frappe.db.commit()
+		self.addCleanup(self._restore_mode)
+
+	def _restore_mode(self):
+		frappe.db.set_value(
+			PUMP, admission.DEFAULT_RELAY_TARGET, "transport_mode", self._prior_mode, update_modified=False
+		)
+		frappe.db.commit()
+
+	def test_override_persists_on_pump_path(self):
+		from jarvis.chat.api import send_message
+
+		with (
+			patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"),
+			patch.object(pump, "ensure_pump", lambda *a, **k: None),
+			patch.object(pump, "lpush_wake", lambda *a, **k: None),
+		):
+			result = send_message(self.conv, "hi", model_override="gpt-5.4-mini")
+		self.assertTrue(result["ok"])
+		# Pump path: the override was persisted to the conversation BEFORE dispatch — the same
+		# invariant the legacy test asserts, holding cross-transport.
+		self.assertEqual(frappe.db.get_value(CONV, self.conv, "model_override"), "gpt-5.4-mini")
+
+
 class TestSendMessageThinkingOverride(_ChatTestCase):
 	"""send_message accepts an optional thinking_override that persists to
 	conv.thinking_override BEFORE the worker is enqueued - mirroring the
@@ -705,6 +782,8 @@ class TestSendMessageThinkingOverride(_ChatTestCase):
 	def setUp(self):
 		super().setUp()
 		self.conv = create_conversation()
+		# CDX-10: the persist-before-enqueue capture asserts the LEGACY worker enqueue.
+		_provision_legacy_site(self)
 
 	def test_valid_thinking_override_persists_before_enqueue(self):
 		"""thinking_override='low' is written to conv before frappe.enqueue fires."""
@@ -971,3 +1050,37 @@ class TestConversationOwnershipEnforcement(_ChatTestCase):
 			self.assertTrue(send_message(self.conv, "hello")["ok"])
 			self.assertTrue(retry_message(self.asst_msg)["ok"])
 		self.assertTrue(archive_conversation(self.conv)["ok"])
+
+
+class TestAllowedPinModels(unittest.TestCase):
+	"""_allowed_pin_models is the single source of truth both set_conversation_model
+	and send_message validate against, so the two cannot drift (the send_message path
+	used to check only the subscription allowlist and rejected every pool pin)."""
+
+	@staticmethod
+	def _settings(provider, pool):
+		return SimpleNamespace(
+			llm_provider=provider,
+			models=[SimpleNamespace(model=m, enabled=e) for m, e in pool],
+		)
+
+	def test_pool_rows_are_unioned_for_a_subscription_tenant(self):
+		from jarvis.chat import api
+
+		# A subscription/pool tenant stores llm_provider="", so the subscription
+		# allowlist is empty and the pin must be accepted from the enabled pool rows.
+		with patch.object(api, "_SUBSCRIPTION_MODELS", {"": [], "OpenAI": ["gpt-5.6"]}):
+			allowed = api._allowed_pin_models(
+				self._settings("", [("claude-sonnet-5", 1), ("glm-4.7", 1), ("retired", 0)])
+			)
+		self.assertIn("claude-sonnet-5", allowed)
+		self.assertIn("glm-4.7", allowed)
+		self.assertNotIn("retired", allowed)  # disabled pool rows are excluded
+		self.assertNotIn("gpt-5.6", allowed)  # not this tenant's subscription list
+
+	def test_subscription_models_are_included(self):
+		from jarvis.chat import api
+
+		with patch.object(api, "_SUBSCRIPTION_MODELS", {"OpenAI": ["gpt-5.6", "gpt-5.5"]}):
+			allowed = api._allowed_pin_models(self._settings("OpenAI", []))
+		self.assertEqual(allowed, {"gpt-5.6", "gpt-5.5"})

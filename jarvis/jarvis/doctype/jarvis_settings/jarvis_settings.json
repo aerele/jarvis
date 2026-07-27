@@ -11,6 +11,10 @@
   "account_section",
   "token_budget_monthly",
   "enabled",
+  "branding_section",
+  "agent_name",
+  "brand_logo",
+  "brand_favicon",
   "llm_section",
   "models",
   "preset",
@@ -102,6 +106,10 @@
   "activation_module_ceiling",
   "learned_skills_synced_at",
   "learned_skills_sync_status",
+  "release_notice_section",
+  "release_notice_active",
+  "latest_jarvis_version",
+  "release_notice_message",
   "agent_tools_section",
   "run_query_doctype_allowlist",
   "auto_apply_changes",
@@ -131,6 +139,30 @@
    "fieldtype": "Check",
    "label": "Enabled",
    "default": "1"
+  },
+  {
+   "fieldname": "branding_section",
+   "fieldtype": "Section Break",
+   "label": "Branding",
+   "description": "Whitelabel identity shown to your users: the assistant's name (browser tab, chat header, notifications, and its own replies), logo, and browser-tab favicon. Blank name falls back to Jarvis. Edited by customers in Settings → Branding."
+  },
+  {
+   "fieldname": "agent_name",
+   "fieldtype": "Data",
+   "label": "Assistant Name",
+   "description": "Display name for the assistant. Blank = Jarvis. Max 40 characters."
+  },
+  {
+   "fieldname": "brand_logo",
+   "fieldtype": "Attach Image",
+   "label": "Logo",
+   "description": "Brand mark shown as the assistant avatar and in the chat header. Square image works best."
+  },
+  {
+   "fieldname": "brand_favicon",
+   "fieldtype": "Attach Image",
+   "label": "Favicon",
+   "description": "Browser-tab icon. Square PNG (or .ico) works best."
   },
   {
    "fieldname": "llm_section",
@@ -749,6 +781,30 @@
    "fieldname": "learned_skills_sync_status",
    "fieldtype": "Long Text",
    "label": "Learned Skills Sync Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_section",
+   "fieldtype": "Section Break",
+   "label": "Release Notice (synced)",
+   "description": "Mirror of the operator's release notice, pulled from the control plane. Read-only here."
+  },
+  {
+   "fieldname": "release_notice_active",
+   "fieldtype": "Check",
+   "label": "Release Notice Active",
+   "read_only": 1
+  },
+  {
+   "fieldname": "latest_jarvis_version",
+   "fieldtype": "Data",
+   "label": "Latest Jarvis Version",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_message",
+   "fieldtype": "Small Text",
+   "label": "Release Notice Message",
    "read_only": 1
   },
   {

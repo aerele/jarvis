@@ -9,6 +9,7 @@
 	>
 		<template #actions>
 			<SyncPill ref="syncPill" />
+			<PromotionStatusChip v-if="canEdit && myPromo" :req="myPromo" noun="skill" />
 			<Badge
 				v-if="skill && !canEdit"
 				variant="subtle"
@@ -184,6 +185,13 @@
 		@saved="loadShares"
 	/>
 
+	<PromotionRequestDialog
+		v-model="promoDialog"
+		noun="skill"
+		:busy="promoBusy"
+		@submit="submitPromotion"
+	/>
+
 	<!-- Discard-changes confirm — styled with the chat SPA's jv-* design system
 	     (palette vars + overlay + jv-btn) to match the Settings dialog. -->
 	<div
@@ -266,7 +274,10 @@ import CommentsSection from "@/components/doc/CommentsSection.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import SyncPill from "./SyncPill.vue";
 import ShareDialog from "./ShareDialog.vue";
+import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
+import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 import { getSkillsAreaCaps } from "@/api/personalise";
+import { requestSkillPromotion, mySkillPromotion } from "@/api/skills";
 import { renderMarkdown } from "@/markdown";
 import { timeAgo } from "@/utils/datetime";
 import { useJarvisTheme } from "@/theme";
@@ -327,6 +338,49 @@ const canEdit = computed(() => props.isNew || !!(skill.value && skill.value.can_
 const readonly = computed(() => !canEdit.value || saving.value);
 const sharedBy = computed(() => (skill.value && skill.value.shared_by) || "");
 
+// ── promotion (requester side, Skills-area promotion surfacing) ───────────────
+// The owner of a private (User-scope) skill can ask a reviewer to widen it to a
+// role or the whole org. Learned rows are managed by the board, not promotion.
+const myPromo = ref(null); // {} | most-recent request for THIS skill (status chip)
+const promoDialog = ref(false);
+const promoBusy = ref(false);
+const canPromote = computed(
+	() =>
+		!props.isNew &&
+		canEdit.value &&
+		!!skill.value &&
+		(skill.value.scope || "User") === "User" &&
+		!skill.value.managed_by_learning
+);
+// Offer the action only when there is no request in flight; a Pending request
+// shows the status chip instead (a rejected one may be re-requested).
+const promoPending = computed(() => !!(myPromo.value && myPromo.value.status === "Pending"));
+
+async function loadMyPromo() {
+	myPromo.value = null;
+	if (props.isNew || !props.id || !canEdit.value) return;
+	try {
+		const res = await mySkillPromotion(props.id);
+		myPromo.value = res && res.status ? res : null;
+	} catch {
+		// best-effort chip; a failure must not disturb the page
+	}
+}
+
+async function submitPromotion({ to_scope, target_role, note }) {
+	promoBusy.value = true;
+	try {
+		await requestSkillPromotion({ name: props.id, to_scope, target_role, note });
+		promoDialog.value = false;
+		toast.success("Promotion requested — a reviewer will decide.");
+		await loadMyPromo();
+	} catch (e) {
+		toast.error(errMsg(e));
+	} finally {
+		promoBusy.value = false;
+	}
+}
+
 // Instructions markdown preview (goal item 1) - mirrors WikiPageDialog's
 // `previewing`/`previewHtml` pair exactly, scoped to this one field.
 const previewingInstructions = ref(false);
@@ -355,7 +409,13 @@ const breadcrumbs = computed(() => [
 		: { label: pageTitle.value, route: { name: "SkillDetail", params: { id: props.id } } },
 ]);
 
-const overflowOptions = [{ label: "Delete", onClick: () => confirmDelete() }];
+const overflowOptions = computed(() => {
+	const opts = [];
+	if (canPromote.value && !promoPending.value)
+		opts.push({ label: "Request promotion…", onClick: () => (promoDialog.value = true) });
+	opts.push({ label: "Delete", onClick: () => confirmDelete() });
+	return opts;
+});
 
 // ── load / init (re-runs when /skills/new saves and replaces to /skills/:id) ─
 function seed(data) {
@@ -393,6 +453,7 @@ async function init() {
 			if (docmeta.value && typeof docmeta.value.reload === "function")
 				docmeta.value.reload();
 			loadShares();
+			loadMyPromo();
 		}
 	} catch (e) {
 		loadError.value = errMsg(e);

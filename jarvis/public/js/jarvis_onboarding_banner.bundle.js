@@ -3,10 +3,21 @@
 // user to finish setup and start easing their ERP workflows. Replaces the old
 // top banner with a friendlier, on-brand "Jarvis is chatting" bubble thread.
 //
-// Reads `frappe.boot.jarvis_onboarded` (set in jarvis.boot.set_jarvis_boot).
-// Shows only for a not-onboarded System Manager; dismissal is per-tab-session
-// (sessionStorage) so it returns next fresh session until setup is finished.
-// Loaded on every Desk page via hooks.app_include_js.
+// Reads `frappe.boot.jarvis_onboarded` (set in jarvis.boot.set_jarvis_boot)
+// and `frappe.boot.sysdefaults.setup_complete` (frappe.is_setup_complete()).
+// Shows only for a not-onboarded System Manager AFTER ERPNext's own setup
+// wizard is finished, so it never pops over the wizard. Dismissal is
+// per-tab-session (sessionStorage) so it returns next fresh session until
+// setup is finished. Loaded on every Desk page via hooks.app_include_js.
+//
+// The jarvis_onboarded flag is written ONCE per page load, so a Desk that
+// stays open across a setup finishing elsewhere keeps nagging until a hard
+// reload. The reported case: open the Desk, go to /jarvis, complete
+// onboarding, press Back. The browser restores the Desk from bfcache, no boot
+// runs, and the nudge is still sitting there on a workspace that is now set
+// up. So the nudge re-asks the server whenever the page is shown again, and
+// only while the flag still says not-onboarded, which leaves a set-up Desk at
+// zero extra round trips.
 
 (function () {
 	if (window.__jarvisOnboardingBanner) return;
@@ -17,26 +28,103 @@
 	var STYLE_ID = "jarvis-onboarding-nudge-style";
 	// No point nagging a user already mid-setup on the legacy desk page.
 	var HIDE_ON_ROUTES = ["jarvis-onboarding"];
+	// Same check the SPA gate and the widget popup use, so all three surfaces
+	// agree on what "set up" means.
+	var READY_METHOD = "jarvis.account.is_ready_for_chat";
+	// Floor between server re-checks for the chatty triggers (route change,
+	// tab focus). A bfcache restore bypasses it: that is the exact moment the
+	// flag is most likely stale and the user is looking straight at it.
+	var RECHECK_MIN_MS = 30 * 1000;
+	var lastCheckAt = 0;
+	var checking = false;
+
+	// ERPNext's own setup wizard must be finished first: completing it creates
+	// the first Company. Until then the desk IS the setup wizard, so nudging the
+	// user to set up Jarvis on top of it is just noise.
+	// frappe.boot.sysdefaults.setup_complete is frappe.is_setup_complete().
+	function erpnextSetupComplete() {
+		if (!window.frappe || !frappe.boot) return false;
+		return (frappe.boot.sysdefaults || {}).setup_complete == 1;
+	}
+
+	function isSystemManager() {
+		return !!(
+			window.frappe &&
+			frappe.user &&
+			frappe.user.has_role &&
+			frappe.user.has_role("System Manager")
+		);
+	}
+
+	function dismissed() {
+		try {
+			return !!sessionStorage.getItem(DISMISS_KEY);
+		} catch (e) {
+			// sessionStorage unavailable (privacy mode etc.), so treat it as
+			// not dismissed and show the nudge.
+			return false;
+		}
+	}
 
 	function shouldShow() {
 		if (!window.frappe || !frappe.boot) return false;
 		if (frappe.boot.jarvis_onboarded !== false) return false;
-		// Site setup comes first. Jarvis operates the customer's ERP, so on a
-		// site with no Company there is nothing for it to operate — nagging here
-		// lands on top of ERPNext's own setup wizard and points at a Jarvis
-		// wizard whose premise does not exist yet. Strict === false so an older
-		// boot payload without the key behaves exactly as before.
+		if (!erpnextSetupComplete()) return false;
+		// A second, sturdier setup signal alongside the sysdefaults flag above:
+		// the Company count (jarvis_site_setup_complete, set in jarvis.boot)
+		// stays correct even when setup_complete was flipped by a fixture or a
+		// restore. Strict === false so an older boot payload without the key
+		// behaves exactly as before.
 		if (frappe.boot.jarvis_site_setup_complete === false) return false;
-		if (!frappe.user || !frappe.user.has_role || !frappe.user.has_role("System Manager"))
-			return false;
-		try {
-			if (sessionStorage.getItem(DISMISS_KEY)) return false;
-		} catch (e) {
-			// sessionStorage unavailable (privacy mode etc.) — show it anyway.
-		}
+		if (!isSystemManager()) return false;
+		if (dismissed()) return false;
 		var route = (frappe.get_route && frappe.get_route()) || [];
 		if (HIDE_ON_ROUTES.indexOf(route[0] || "") !== -1) return false;
 		return true;
+	}
+
+	// Ask the server whether setup finished since this page booted. Only ever
+	// corrects false to true: nothing can make a set-up workspace un-set-up
+	// mid-session, and an expiring credential is the degraded path's problem,
+	// not this nudge's.
+	function reverify(force) {
+		// The nudge's own visibility predicate, reused rather than re-listed.
+		// If the nudge would not be on screen (already onboarded, mid-ERPNext
+		// wizard, not a System Manager, dismissed, or on a hidden route) then
+		// correcting the flag changes nothing anyone can see, so it is not
+		// worth a round trip. Deriving it keeps the two from drifting apart
+		// the next time a guard is added to shouldShow().
+		if (!shouldShow()) return;
+		if (checking) return;
+		var now = new Date().getTime();
+		if (!force && now - lastCheckAt < RECHECK_MIN_MS) return;
+		lastCheckAt = now;
+		checking = true;
+		// Release the in-flight guard on EVERY outcome, including a synchronous
+		// throw out of frappe.call before it ever returns a promise. A guard
+		// left stuck on would silently kill every later re-check in this tab.
+		try {
+			var req = frappe.call({
+				method: READY_METHOD,
+				callback: function (r) {
+					// Anything other than an explicit ready leaves the flag
+					// alone. A failed or malformed check must never clear a
+					// nudge the workspace still needs.
+					if (r && r.message && r.message.ready) {
+						frappe.boot.jarvis_onboarded = true;
+						sync();
+					}
+				},
+			});
+			if (req && req.always) req.always(releaseCheck);
+			else releaseCheck();
+		} catch (e) {
+			releaseCheck();
+		}
+	}
+
+	function releaseCheck() {
+		checking = false;
 	}
 
 	function dismiss() {
@@ -159,10 +247,33 @@
 		else remove();
 	}
 
+	// Render from what this page already knows, then confirm it against the
+	// server. Wrapped at every call site rather than passed as a handler
+	// directly, because a listener's own argument (the route, the event) would
+	// land in `force` and defeat the throttle.
+	function syncAndVerify(force) {
+		sync();
+		reverify(force);
+	}
+
 	function start() {
 		if (!window.frappe) return;
-		sync();
-		if (frappe.router && frappe.router.on) frappe.router.on("change", sync);
+		syncAndVerify(false);
+		if (frappe.router && frappe.router.on)
+			frappe.router.on("change", function () {
+				syncAndVerify(false);
+			});
+		// bfcache restore, which is the Back-from-onboarding case: `persisted`
+		// means no boot ran, so the flag is whatever it was before the user
+		// left. Force past the throttle, the answer is the whole point of the
+		// navigation.
+		window.addEventListener("pageshow", function (e) {
+			if (e && e.persisted) syncAndVerify(true);
+		});
+		// Setup finished in another tab and the user came back to this one.
+		document.addEventListener("visibilitychange", function () {
+			if (document.visibilityState === "visible") syncAndVerify(false);
+		});
 	}
 
 	if (window.frappe && window.frappe.router) {

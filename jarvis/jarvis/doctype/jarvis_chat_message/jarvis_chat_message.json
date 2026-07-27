@@ -22,10 +22,12 @@
     "tool_args",
     "tool_result",
     "tool_status",
+    "tool_call_id",
     "action_outcome",
     "ref_doctype",
     "ref_name",
     "canvas",
+    "reply_duration_ms",
     "hidden"
   ],
   "fields": [
@@ -136,6 +138,16 @@
       "depends_on": "eval:doc.role=='tool'"
     },
     {
+      "fieldname": "tool_call_id",
+      "fieldtype": "Data",
+      "label": "Tool Call ID",
+      "length": 128,
+      "search_index": 1,
+      "no_copy": 1,
+      "depends_on": "eval:doc.role=='tool'",
+      "description": "The openclaw tool-call id for this receipt. (session_key->conversation, tool_call_id) is the R-6 out-of-band idempotency key: a duplicate callback for the same tool call dedupes instead of writing a second receipt. Null for legacy/self-host callbacks that carry no call id."
+    },
+    {
       "fieldname": "action_outcome",
       "fieldtype": "Select",
       "label": "Action Outcome",
@@ -165,6 +177,14 @@
       "fieldtype": "JSON",
       "label": "Canvas",
       "description": "Rich artifacts (chart/canvas) the agent rendered this turn: [{name,title,type,file_url}]."
+    },
+    {
+      "fieldname": "reply_duration_ms",
+      "fieldtype": "Int",
+      "label": "Reply Duration Ms",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "CDX-20 — the assistant reply's honest generation span in milliseconds, on ONE durable baseline shared with the live timer: run:start (the pump's dispatching_at, stamped at the ready->dispatching transition immediately before run:start is published) -> settlement (the terminal instant). Stamped in the winning settlement txn. The SPA reads THIS on reload (ChatView.elapsedOf) so a reloaded reply shows the same duration the live run:start->run:end timer showed, within network tolerance. Replaces the old creation/modified rewrite (creation is Frappe's record-creation AUDIT field and is no longer repurposed as a metric). NULL on legacy (non-pump) rows, which fall back to modified-creation."
     },
     {
       "fieldname": "hidden",

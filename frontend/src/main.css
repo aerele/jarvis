@@ -19,6 +19,18 @@
 	--brand-grad: linear-gradient(135deg, var(--brand-1), var(--brand-2));
 }
 
+/* Native form controls (select dropdowns, date/time pickers, scrollbars)
+   follow the app theme instead of the OS default — without this, a dark app
+   pops white select menus and calendar popups. Global (not scoped to
+   ChatView) because `.jv-root` is also the palette-vars root for the
+   settings dialog, onboarding, and (PR2) the standalone Support page. */
+.jv-root {
+	color-scheme: light;
+}
+.jv-root.jv-dark {
+	color-scheme: dark;
+}
+
 * {
 	box-sizing: border-box;
 }
@@ -79,4 +91,21 @@ body {
 @keyframes jv-grow {
 	from { transform: scaleY(0); }
 	to { transform: scaleY(1); }
+}
+
+/* frappe-ui Dialog renders through DialogPortal into <body> with no z-index of
+   its own. #app is only `height: 100vh` so it creates no stacking context,
+   which means Sidebar.vue's z-10 / z-20 layers would paint straight over a
+   portaled dialog. 60 clears those (it is the value the old hand-rolled
+   .jv-settings-overlay used) and stays below the shell ConfirmDialog's 200,
+   which is what lets a confirm still open on top of the settings dialog.
+
+   Deliberately app-wide rather than scoped to the settings dialog: every
+   frappe-ui Dialog here (command palette, MoreMenu, ConnectPhoneDialog,
+   WikiPageDialog, FilePreview) portals the same way and is equally
+   paintable-over by the sidebar today, so one floor for portaled modals is the
+   right fix. Anything that must sit ABOVE a modal already carries a higher
+   z-index (ConfirmDialog 200, toasts above that). */
+.dialog-overlay {
+	z-index: 60;
 }

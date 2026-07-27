@@ -1,0 +1,79 @@
+{
+  "name": "confirmation-card",
+  "description": "Assistant proposes a change and opens a confirmation card (jarvis__update_doc, confirm-gated); terminal final leaves the card awaiting the user.",
+  "ack": {
+    "status": "started"
+  },
+  "ack_behavior": "normal",
+  "frames": [
+    {
+      "op": "assistant",
+      "text": "I have",
+      "delta": "I have"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a",
+      "delta": " prepared a"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder",
+      "delta": " payment reminder"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder for the",
+      "delta": " for the"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder for the Acme overdue",
+      "delta": " Acme overdue"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder for the Acme overdue invoice. Please",
+      "delta": " invoice. Please"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder for the Acme overdue invoice. Please review the",
+      "delta": " review the"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder for the Acme overdue invoice. Please review the draft below",
+      "delta": " draft below"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder for the Acme overdue invoice. Please review the draft below and confirm",
+      "delta": " and confirm"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder for the Acme overdue invoice. Please review the draft below and confirm before I",
+      "delta": " before I"
+    },
+    {
+      "op": "assistant",
+      "text": "I have prepared a payment reminder for the Acme overdue invoice. Please review the draft below and confirm before I send it.",
+      "delta": " send it."
+    },
+    {
+      "op": "tool_start",
+      "name": "jarvis__update_doc",
+      "call_id": "c1",
+      "title": "update_doc Payment Reminder (needs confirm)"
+    },
+    {
+      "op": "pause",
+      "ms": 120
+    }
+  ],
+  "terminal": {
+    "kind": "final",
+    "text": "I have prepared a payment reminder for the Acme overdue invoice. Please review the draft below and confirm before I send it."
+  }
+}

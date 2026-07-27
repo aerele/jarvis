@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref } from "vue";
 import * as api from "../api";
+import { agentName } from "@/branding";
 
 // The agent proposes a document; a human applies it.
 //
@@ -36,7 +37,7 @@ const heading = computed(
 const invalid = computed(() => {
 	if (!isWrite.value) return "";
 	if (Array.isArray(props.action.docs))
-		return "This draft carries a `docs` batch, which is a create_doc payload rather than a card. Ask Jarvis to apply them as a batch.";
+		return `This draft carries a \`docs\` batch, which is a create_doc payload rather than a card. Ask ${agentName} to apply them as a batch.`;
 	if (verb.value === "create" && !(props.action.fields || []).length)
 		return "This draft has no fields to show.";
 	return "";
@@ -80,7 +81,7 @@ async function apply() {
 		if (unmapped.length) {
 			error.value = `Not applying: ${unmapped.join(", ")} ${
 				unmapped.length === 1 ? "is not a field" : "are not fields"
-			} on ${props.action.doctype}. Ask Jarvis to correct it.`;
+			} on ${props.action.doctype}. Ask ${agentName} to correct it.`;
 			state.value = "review";
 			return;
 		}

@@ -10,15 +10,42 @@ import {
 	validatePool,
 } from "./pool.js";
 import { PROVIDER_LABELS, providerLabel, providerId, seedRowsFromConfig } from "./pool.js";
-import { defaultSubscriptionModel } from "./pool.js";
-import { apiKeyModelHealth } from "./pool.js";
+import { defaultSubscriptionModel, subModelSuggestions } from "./pool.js";
+import { apiKeyModelHealth, subscriptionAccountHealth, dirtyAccountHealth } from "./pool.js";
 import { LOCAL_PROVIDER_IDS, effectiveApiKey } from "./pool.js";
 
-test("defaultSubscriptionModel: per-upstream default, openai fallback", () => {
+test("defaultSubscriptionModel: falls back to built-in defaults with no catalog", () => {
 	assert.equal(defaultSubscriptionModel("openai"), "gpt-5.5");
 	assert.equal(defaultSubscriptionModel("google"), "gemini-2.5-pro");
 	assert.equal(defaultSubscriptionModel("unknown"), "gpt-5.5");
 	assert.equal(defaultSubscriptionModel(undefined), "gpt-5.5");
+});
+
+test("defaultSubscriptionModel: a catalog overrides the built-in default", () => {
+	const catalog = { openai: ["gpt-9.9", "gpt-5.5"] };
+	assert.equal(defaultSubscriptionModel("openai", catalog), "gpt-9.9");
+	// an upstream absent from the catalog still falls back
+	assert.equal(defaultSubscriptionModel("google", catalog), "gemini-2.5-pro");
+});
+
+test("subModelSuggestions: maps an API subscription_models payload to upstream keys", () => {
+	const apiPayload = {
+		OpenAI: ["gpt-9.9"],
+		"Google Gemini": ["gemini-9.9"],
+		"xAI Grok": ["grok-9.9"],
+		"Kimi (Moonshot)": ["kimi-9.9"],
+	};
+	assert.deepEqual(subModelSuggestions(apiPayload), {
+		openai: ["gpt-9.9"],
+		google: ["gemini-9.9"],
+		xai: ["grok-9.9"],
+		kimi: ["kimi-9.9"],
+	});
+});
+
+test("subModelSuggestions: empty or missing payload yields the built-in fallback", () => {
+	assert.equal(subModelSuggestions({}).openai[0], "gpt-5.5");
+	assert.equal(subModelSuggestions(undefined).openai[0], "gpt-5.5");
 });
 
 const LADDER = {
@@ -699,4 +726,124 @@ test("apiKeyModelHealth: the same 1113 detail on an UNRELATED provider does NOT 
 	assert.doesNotMatch(h.label, /endpoint/i);
 	assert.doesNotMatch(h.title, /coding plan/i);
 	assert.match(h.label, /Insufficient balance/);
+});
+
+// ---- subscriptionAccountHealth: honest dot health for a connected chat-subscription
+// account (contract: sync.subscription_status). Before this, LlmPoolEditor's onboarding
+// (singleMode) picker hardcoded EVERY connected account to {level:"neutral"} unconditionally,
+// and the CSS painted "neutral" the same green as a positively-verified "ok" - so a
+// FREE-tier account that was out of quota rendered exactly like a healthy one
+// (2026-07-23 trace). These pin the real-signal mapping both call sites now share. ----
+
+test("subscriptionAccountHealth: unverified is a warn state with an actionable title", () => {
+	const h = subscriptionAccountHealth("unverified");
+	assert.equal(h.level, "warn");
+	assert.equal(h.label, "Not accepting requests");
+	assert.match(h.title, /reconnect/i);
+});
+
+test("subscriptionAccountHealth: unverified prefers the fleet's own warning message", () => {
+	const h = subscriptionAccountHealth("unverified", { warningDetail: "429: rate limited" });
+	assert.equal(h.title, "429: rate limited");
+});
+
+test("subscriptionAccountHealth: unchecked reads as a neutral 'not verified yet'", () => {
+	const h = subscriptionAccountHealth("unchecked");
+	assert.equal(h.level, "unchecked");
+	assert.equal(h.label, "Not verified yet");
+});
+
+test("subscriptionAccountHealth: verified is a MEANINGFUL green (ok, no label) regardless of knownGood", () => {
+	assert.deepEqual(subscriptionAccountHealth("verified"), { level: "ok" });
+	assert.deepEqual(subscriptionAccountHealth("verified", { knownGood: false }), { level: "ok" });
+});
+
+test("subscriptionAccountHealth: no verdict at all -> quiet green ONLY when knownGood (failover-list default)", () => {
+	assert.deepEqual(subscriptionAccountHealth(""), { level: "ok" });
+	assert.deepEqual(subscriptionAccountHealth(undefined), { level: "ok" });
+	assert.deepEqual(subscriptionAccountHealth("not_applicable"), { level: "ok" });
+});
+
+test("subscriptionAccountHealth: no verdict at all -> neutral (grey), never green, when knownGood is false", () => {
+	// This is the onboarding case: right after OAuth paste-back, before Start chatting
+	// even runs save_llm_pool, nothing has actually probed the account yet. Green here
+	// is exactly the defect this test pins against a regression.
+	const opts = { knownGood: false };
+	assert.deepEqual(subscriptionAccountHealth("", opts), { level: "neutral" });
+	assert.deepEqual(subscriptionAccountHealth(undefined, opts), { level: "neutral" });
+	assert.deepEqual(subscriptionAccountHealth("not_applicable", opts), { level: "neutral" });
+});
+
+// ---- subscriptionAccountHealth: an UNRECOGNISED status must never read as healthy
+// (review finding #1 on PR #410). "unverified"/"unchecked"/"verified"/falsy/
+// "not_applicable" are the only strings this function knows about - anything else (a
+// future fleet verdict this frontend enum hasn't caught up to yet, or a typo upstream)
+// used to fall through to knownGood's default, painting solid green in the
+// failover-list editor (knownGood defaults true there) for an account the backend is
+// actively reporting a problem on. That is the exact false-positive-green defect this
+// whole PR exists to kill, reintroduced through an unrecognised string instead of the
+// old hardcoded singleMode short-circuit. An unknown verdict must fail towards "not
+// proven", the same as "unchecked". ----
+
+test("subscriptionAccountHealth: an unrecognised status is treated as unchecked, NEVER green, regardless of knownGood", () => {
+	const known = subscriptionAccountHealth("unchecked");
+	assert.deepEqual(subscriptionAccountHealth("rate_limited"), known);
+	assert.deepEqual(subscriptionAccountHealth("rate_limited", { knownGood: true }), known);
+	assert.deepEqual(subscriptionAccountHealth("rate_limited", { knownGood: false }), known);
+	// A typo'd/legacy verdict string behaves identically - the enum is closed, not the
+	// set of strings a real or misbehaving fleet might ever send.
+	assert.deepEqual(subscriptionAccountHealth("Unverified"), known);
+});
+
+test("subscriptionAccountHealth: an unrecognised status is never 'ok' even in the failover-list editor (knownGood defaults true)", () => {
+	// This is the exact scenario the finding describes: the failover-list editor calls
+	// subscriptionAccountHealth with its default options (knownGood defaults true), so
+	// the regression would show here first.
+	assert.notEqual(subscriptionAccountHealth("expired").level, "ok");
+});
+
+// ---- dirtyAccountHealth: what LlmPoolEditor's dot shows once the pool is dirty
+// (unsaved edits) or a save is still being applied (sync.pending) - review finding #2
+// on PR #410. Repointing --neutral's CSS from green to grey (the fix above, for the
+// real never-verified case) had a side effect: LlmPoolEditor's accountHealth()
+// unconditionally forced EVERY row to {level:"neutral"} while dirty/pending, so an
+// already-healthy, previously-verified account's dot flipped from green to grey the
+// moment the customer edited an unrelated field - reading as "this just broke" when
+// nothing about that account's health changed. These pin that a settled "ok" gets its
+// own "pending" treatment instead, distinct from both "ok" (still asserting current
+// health) and "neutral" (never proven at all), while anything that was already
+// unproven or already flagged keeps landing on the same neutral dot as before. ----
+
+test("dirtyAccountHealth: not dirty/pending -> passes the settled health through unchanged", () => {
+	assert.deepEqual(dirtyAccountHealth({ level: "ok" }, false), { level: "ok" });
+	assert.deepEqual(dirtyAccountHealth({ level: "warn", label: "Not working" }, false), {
+		level: "warn",
+		label: "Not working",
+	});
+});
+
+test("dirtyAccountHealth: a settled 'ok' row goes to 'pending' (not 'neutral') while dirty - it was never broken", () => {
+	const h = dirtyAccountHealth({ level: "ok" }, true);
+	assert.equal(h.level, "pending");
+	assert.notEqual(h.level, "neutral");
+	assert.ok(h.label, "pending must carry a label explaining why the dot isn't plain green");
+	assert.match(h.title, /verified/i);
+});
+
+test("dirtyAccountHealth: a settled 'warn'/'unchecked'/'neutral' row stays 'neutral' while dirty - nothing to lose, unlike a settled 'ok'", () => {
+	assert.deepEqual(dirtyAccountHealth({ level: "warn", label: "Not working" }, true), {
+		level: "neutral",
+	});
+	assert.deepEqual(dirtyAccountHealth({ level: "unchecked", label: "Not verified yet" }, true), {
+		level: "neutral",
+	});
+	assert.deepEqual(dirtyAccountHealth({ level: "neutral" }, true), { level: "neutral" });
+});
+
+test("dirtyAccountHealth: 'pending' and 'neutral' are visibly distinct levels (regression lock)", () => {
+	// The whole point of this fix is that these two must NOT collapse into one
+	// customer-visible state again - assert the levels differ, not just that both exist.
+	const wasHealthy = dirtyAccountHealth({ level: "ok" }, true);
+	const neverProven = dirtyAccountHealth({ level: "neutral" }, true);
+	assert.notEqual(wasHealthy.level, neverProven.level);
 });

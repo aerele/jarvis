@@ -27,7 +27,7 @@
 			:empty-state="{
 				icon: 'inbox',
 				title: 'No files yet',
-				description: 'Add or drop a document and Jarvis will process it.',
+				description: `Add or drop a document and ${agentName} will process it.`,
 			}"
 			@update:filters="onFiltersUpdate"
 			@update:sort="(s) => setSort(s.field, s.dir)"
@@ -71,9 +71,9 @@
 							}}<span v-if="uploadingCount"> - {{ uploadingCount }} uploading…</span>
 						</div>
 						<div class="max-w-2xl text-p-sm text-ink-gray-6">
-							Drop your files - single or in bulk - and leave them. Jarvis identifies
-							each file's nature and processes it in the background. If it needs your
-							input, it asks in the
+							Drop your files - single or in bulk - and leave them.
+							{{ agentName }} identifies each file's nature and processes it in the
+							background. If it needs your input, it asks in the
 							<!-- .stop keeps the link from also triggering the card's pickFiles
 							     (click) and from having Enter swallowed by the card's
 							     keydown.enter.prevent -->
@@ -120,6 +120,13 @@
 
 			<template #cell-status="{ row }">
 				<Badge
+					v-if="row.behind_chat && row.status === 'processing'"
+					variant="subtle"
+					theme="gray"
+					label="Waiting — behind chat"
+				/>
+				<Badge
+					v-else
 					variant="subtle"
 					:theme="(STATUS_BADGE[row.status] || {}).theme || 'gray'"
 					:label="(STATUS_BADGE[row.status] || {}).label || row.status"
@@ -186,6 +193,7 @@ import { useListPage } from "@/composables/useListPage";
 import { useShellStore } from "@/stores/shell";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
+import { agentName } from "@/branding";
 
 const route = useRoute();
 const router = useRouter();

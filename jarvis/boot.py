@@ -72,3 +72,13 @@ def set_jarvis_boot(bootinfo):
 		# A nudge that cannot be dismissed by finishing setup is worse than a
 		# missing one.
 		bootinfo.jarvis_site_setup_complete = False
+
+	# Whitelabel branding for the desk floating chat widget (Panel.vue / Widget.vue
+	# read window.frappe.boot.* synchronously, so no flash). Blank => the widget
+	# keeps the Jarvis defaults.
+	try:
+		bootinfo.jarvis_agent_name = frappe.db.get_single_value("Jarvis Settings", "agent_name") or ""
+		bootinfo.jarvis_brand_logo_url = frappe.db.get_single_value("Jarvis Settings", "brand_logo") or ""
+	except Exception:
+		bootinfo.jarvis_agent_name = ""
+		bootinfo.jarvis_brand_logo_url = ""

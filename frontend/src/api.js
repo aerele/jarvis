@@ -61,6 +61,11 @@ export const adminSetUserModelLimit = (user, model, monthlyTokenLimit) =>
 	});
 export const adminSyncUsage = () => call(US + "admin_sync_usage");
 
+// --- Whitelabel branding (tenant-admin only; server re-checks) ---
+const BR = "jarvis.branding.";
+export const getBranding = () => call(BR + "get_branding");
+export const updateBranding = (p) => call(BR + "update_branding", p || {});
+
 // --- Mobile app onboarding: QR the phone scans to learn the site connection
 // details (no secret — just where to reach this site). ---
 export const getPairingQr = () => call("jarvis.mobile.auth.get_pairing_qr");
@@ -165,6 +170,21 @@ export async function stopRun(conversation, runId) {
 	return call("jarvis.chat.api.stop_run", { conversation, run_id: runId || "" });
 }
 
+// Phase-0 admission (chat concurrency): cancel a turn that is still QUEUED
+// (behind other turns, not yet dispatched). Owner-checked server-side.
+export const cancelQueuedTurn = (runId) =>
+	call("jarvis.chat.admission.cancel_queued_turn", { run_id: runId });
+
+// Poll-on-focus fallback for the queued chip: returns {state, position}.
+export const getQueuePosition = (runId) =>
+	call("jarvis.chat.admission.queue_position", { run_id: runId });
+
+// Server-truth resync for the queued chip (SUXI-1): the conversation's own
+// non-terminal turn, if any. Rebuilds the chip after a reload / conversation
+// switch / second tab / WS reconnect (the queued chip is otherwise client-only).
+export const getActiveTurn = (conversation) =>
+	call("jarvis.chat.admission.active_turn_for_conversation", { conversation });
+
 // Mentions: reuse Frappe's built-in Link-field search (no custom backend).
 export const searchLink = (doctype, txt) =>
 	call("frappe.desk.search.search_link", { doctype, txt: txt || "", page_length: 8 });
@@ -177,6 +197,11 @@ export const getDoctypeFields = (doctype) =>
 // --- LLM pool / models config (System-Manager only, gated server-side) ---
 export const getLlmConfig = () => call("jarvis.onboarding.get_llm_config");
 export const getPresetCatalog = () => call("jarvis.onboarding.get_preset_catalog");
+// Admin-managed model catalog slice (api_key_models, subscription_models,
+// default_models) for the pool editor + subscription card. Independent of
+// get_chat_ui_settings so it also works in the onboarding wizard, which never
+// calls that. See jarvis.chat.api.get_model_catalog_ui.
+export const getModelCatalogUi = () => call("jarvis.chat.api.get_model_catalog_ui");
 export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_status");
 export const saveLlmPool = (models, preset = null, routingMode = "failover") =>
 	call("jarvis.onboarding.save_llm_pool", {
@@ -260,12 +285,35 @@ export const getAccount = () => call("jarvis.account.get_account");
 export const cancelPlanAtPeriodEnd = () => call("jarvis.account.cancel_plan_at_period_end");
 export const resumePlan = () => call("jarvis.account.resume_plan");
 export const reauthorizeAutopay = () => call("jarvis.account.reauthorize_autopay");
+export const previewDowngrade = (targetPlan) =>
+	call("jarvis.account.preview_downgrade", { target_plan: targetPlan });
+export const startDowngrade = (targetPlan) =>
+	call("jarvis.account.start_downgrade", { target_plan: targetPlan });
+export const cancelScheduledDowngrade = () => call("jarvis.account.cancel_scheduled_downgrade");
 
 // File input: upload to Frappe's File doctype, return {file_url, file_name}.
 export async function uploadFile(file) {
 	const fd = new FormData();
 	fd.append("file", file, file.name);
 	fd.append("is_private", "1");
+	const r = await fetch("/api/method/upload_file", {
+		method: "POST",
+		headers: { "X-Frappe-CSRF-Token": window.csrf_token || "" },
+		body: fd,
+		credentials: "include",
+	});
+	if (!r.ok) throw new Error(`upload failed (${r.status})`);
+	const data = await r.json();
+	const f = data.message || data;
+	return { file_url: f.file_url, file_name: f.file_name || file.name };
+}
+
+// Branding logo/favicon: PUBLIC file (the favicon <link> and the PWA manifest
+// must fetch it without a session cookie), unlike the private uploadFile above.
+export async function uploadBrandAsset(file) {
+	const fd = new FormData();
+	fd.append("file", file, file.name);
+	fd.append("is_private", "0");
 	const r = await fetch("/api/method/upload_file", {
 		method: "POST",
 		headers: { "X-Frappe-CSRF-Token": window.csrf_token || "" },
@@ -312,7 +360,14 @@ export const setAgentSchedule = (installation, p) =>
 // rounding_step) read by the agent on its installation.
 export const setAgentConfig = (installation, config) =>
 	call(AG + "set_config", { installation, config: JSON.stringify(config || {}) });
-export const runAgentNow = (installation) => call(AG + "run_agent_now", { installation });
+// options: per-launch payload. `source_apps` (array of app names) is REQUIRED for
+// the custom-app-learning agent - the server refuses the launch without an
+// explicit selection and stamps it as the run's source-read authorization.
+export const runAgentNow = (installation, options) =>
+	call(AG + "run_agent_now", {
+		installation,
+		...(options ? { options: JSON.stringify(options) } : {}),
+	});
 export const applyAgents = () => call(AG + "apply_agents");
 export const getAgentsSyncStatus = () => call(AG + "get_agents_sync_status");
 export const listAgentRuns = (agent, limit) =>
