@@ -589,7 +589,15 @@ def _permitted_read_fields(dt: str, base_doctype: str | None) -> set[str]:
 	else:
 		from jarvis.tools.get_list import _child_table_parents
 
-		parents = _child_table_parents(dt)
+		# Only parents the caller can actually read the child THROUGH — mirrors
+		# step 3's record-level gate. Without this filter, an owning parent with
+		# zero DocPerm rows would make get_permitted_fieldnames fall through to
+		# its "no permissions defined -> all fields" branch (frappe/model/meta.py)
+		# and leak a permlevel-restricted child field to a caller whose only real
+		# access path is a different, more restrictive parent.
+		parents = [
+			p for p in _child_table_parents(dt) if frappe.has_permission(dt, ptype="read", parent_doctype=p)
+		]
 	permitted: set[str] = set()
 	for parent in parents:
 		permitted |= set(

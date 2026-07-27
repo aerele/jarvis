@@ -2921,3 +2921,20 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 				}
 			)
 		self.assertIn("rows", result)
+
+	def test_admin_can_select_child_field_as_base_end_to_end(self):
+		"""End-to-end regression for the customer report, NO mocks: even
+		Administrator was blackholed pre-fix, because the istable + parenttype=None
+		short-circuit in get_permitted_fieldnames (frappe/model/meta.py) runs before
+		any user check. Runs the REAL pipeline (step-3 gate + field ACL + Engine perm
+		conditions + SQL) against the empty fixture child table."""
+		frappe.set_user("Administrator")
+		result = query(
+			{
+				"from": self.CHILD_DT,
+				"alias": "c",
+				"select": ["c.name", "c.child_public"],
+			}
+		)
+		self.assertIn("rows", result)
+		self.assertEqual(result["rows"], [])
