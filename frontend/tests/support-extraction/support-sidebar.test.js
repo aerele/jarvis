@@ -30,7 +30,20 @@ vi.mock("@/components/shell/SidebarLink.vue", () => ({
 // UserMenu (the reused chat user card) pulls frappe-ui's Dropdown at import time —
 // module-mock it too (it has its own suite).
 vi.mock("@/components/shell/UserMenu.vue", () => ({
-	default: { name: "UserMenu", props: ["isCollapsed"], template: "<div class='user-menu'/>" },
+	default: {
+		name: "UserMenu",
+		props: ["isCollapsed", "variant"],
+		template: "<div class='user-menu'/>",
+	},
+}));
+// The New-ticket CTA is now a frappe-ui Button (matching the top bar); stub it.
+vi.mock("frappe-ui", () => ({
+	Button: {
+		name: "Button",
+		props: ["label", "icon", "iconLeft", "variant"],
+		emits: ["click"],
+		template: "<button class='fbtn' @click=\"$emit('click')\">{{ label }}</button>",
+	},
 }));
 
 import SupportSidebar from "@/components/support/SupportSidebar.vue";
@@ -51,11 +64,20 @@ beforeEach(() => {
 });
 
 describe("SupportSidebar", () => {
-	it("offers New ticket + Support tickets + Jarvis chat, each to the right route", () => {
+	it("offers Support tickets + Jarvis chat nav links, each to the right route", () => {
 		const w = mountSidebar();
-		expect(linkBy(w, "New ticket").props("to")).toEqual({ name: "SupportNew" });
 		expect(linkBy(w, "Support tickets").props("to")).toEqual({ name: "Support" });
 		expect(linkBy(w, "Jarvis chat").props("to")).toEqual({ name: "Chat" });
+	});
+
+	it("has a prominent New-ticket Button (like the top bar) that navigates to the new-ticket page", async () => {
+		const w = mountSidebar();
+		const btn = w.findComponent({ name: "Button" });
+		expect(btn.exists()).toBe(true);
+		expect(btn.props("label")).toBe("New ticket");
+		expect(btn.props("variant")).toBe("solid");
+		btn.vm.$emit("click");
+		expect(push).toHaveBeenCalledWith({ name: "SupportNew" });
 	});
 
 	it("marks 'Support tickets' active across support routes, not otherwise", () => {

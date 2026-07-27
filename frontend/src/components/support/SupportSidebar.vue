@@ -12,11 +12,17 @@
 			<UserMenu :is-collapsed="collapsed" variant="support" />
 
 			<div class="jv-supsb-nav">
-				<SidebarLink
-					icon="plus"
-					label="New ticket"
-					:to="{ name: 'SupportNew' }"
-					:is-collapsed="collapsed"
+				<!-- Prominent primary CTA — the SAME solid Button the list top bar uses,
+				     so the two "New ticket" actions match. Icon-only when collapsed. -->
+				<Button
+					class="jv-supsb-new"
+					variant="solid"
+					:label="collapsed ? null : 'New ticket'"
+					:icon="collapsed ? 'plus' : null"
+					:icon-left="collapsed ? null : 'plus'"
+					:aria-label="collapsed ? 'New ticket' : undefined"
+					:title="collapsed ? 'New ticket' : undefined"
+					@click="newTicket"
 				/>
 				<SidebarLink
 					icon="inbox"
@@ -54,11 +60,17 @@
 
 <script setup>
 import { computed, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
+import { Button } from "frappe-ui";
 import UserMenu from "@/components/shell/UserMenu.vue";
 import SidebarLink from "@/components/shell/SidebarLink.vue";
 
 const route = useRoute();
+const router = useRouter();
+
+function newTicket() {
+	router.push({ name: "SupportNew" });
+}
 
 // Collapse state persists across reloads, self-contained (the shell doesn't need
 // to know — the rail sets its own width and SidebarLink hides labels when collapsed).
@@ -118,5 +130,17 @@ function openDesk() {
 }
 .jv-supsb-nav {
 	margin-top: 14px;
+}
+/* The New-ticket CTA: full-width solid button when expanded, a compact centred
+   icon button when collapsed. (`.jv-supsb-new` is on the frappe-ui Button's root,
+   which carries this component's scope id, so scoped styles reach it.) */
+.jv-supsb-new {
+	width: 100%;
+	justify-content: center;
+	margin-bottom: 6px;
+}
+.jv-supsb-collapsed .jv-supsb-new {
+	width: auto;
+	align-self: center;
 }
 </style>
