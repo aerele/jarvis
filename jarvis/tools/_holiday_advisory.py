@@ -14,7 +14,7 @@ import frappe
 from frappe.utils import getdate
 
 try:
-	# The official resolver: Employee.holiday_list, else Department/Company default.
+	# The official resolver: Employee.holiday_list, else the Company default.
 	from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
 except ImportError:  # erpnext not installed on this bench -> feature is a no-op
 	get_holiday_list_for_employee = None

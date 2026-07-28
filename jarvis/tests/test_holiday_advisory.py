@@ -128,6 +128,7 @@ class TestHolidayAdvisory(FrappeTestCase):
 	def test_swallow_preserves_pre_existing_message(self):
 		"""F3: the never-raise swallow must drop only messages THIS call pushed,
 		never a msgprint the successful write itself emitted."""
+		self.addCleanup(setattr, frappe.local, "message_log", [])
 		frappe.local.message_log = [{"message": "the write's own message"}]
 		before = len(frappe.local.message_log)
 		with patch.object(ha, "get_holiday_list_for_employee", side_effect=RuntimeError("boom")):
