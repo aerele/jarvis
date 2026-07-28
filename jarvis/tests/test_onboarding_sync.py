@@ -944,6 +944,27 @@ class TestAccountReconnect(FrappeTestCase):
 		self.assertEqual(s.get_password("jarvis_admin_api_key", raise_exception=False), "new-key")
 		self.assertEqual(s.jarvis_admin_customer_email, "someone@example.com")
 
+	def test_check_awaiting_code_writes_nothing(self):
+		"""Confirmed but not yet unlocked: the code binds delivery to whoever
+		clicked, so nothing is persisted until it matches."""
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={"status": "awaiting_code"},
+		):
+			out = onboarding.check_account_reconnect("rid-1")
+		self.assertEqual(out["status"], "awaiting_code")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+	def test_check_passes_code_through(self):
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={"status": "awaiting_code"},
+		) as poll:
+			onboarding.check_account_reconnect("rid-1", "ABCD2345")
+		poll.assert_called_once_with("rid-1", "ABCD2345")
+
 	def test_check_expired_passthrough(self):
 		with patch(
 			"jarvis.onboarding.admin_client.get_reconnect_state",

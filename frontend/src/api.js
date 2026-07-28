@@ -41,8 +41,8 @@ export const getUsage = (conversation) =>
 // ---- account reconnect (fresh bench -> existing paid subscription) ---------
 export const startAccountReconnect = (email) =>
 	call("jarvis.onboarding.start_account_reconnect", { email });
-export const checkAccountReconnect = (requestId) =>
-	call("jarvis.onboarding.check_account_reconnect", { request_id: requestId });
+export const checkAccountReconnect = (requestId, code) =>
+	call("jarvis.onboarding.check_account_reconnect", { request_id: requestId, code: code || "" });
 
 export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
 

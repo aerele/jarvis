@@ -403,14 +403,31 @@
 											approval…
 										</p>
 									</div>
-									<div class="mt-2.5 flex justify-center">
-										<JvSpinner :size="56" />
-									</div>
-									<p class="text-center text-p-sm text-ink-gray-5">
-										The link expires in 1 hour and signs your old site out. If
-										your inbox is unreachable, contact support — an operator
-										can approve the reconnect instead.
-									</p>
+									<template v-if="state.reconnectAwaitingCode">
+										<p class="text-center text-p-sm text-ink-gray-6">
+											Approved. Enter the code shown on the confirmation page
+											(or given to you by support) to finish.
+										</p>
+										<FormControl
+											class="mx-auto mt-2 max-w-[260px]"
+											type="text"
+											variant="outline"
+											label="Confirmation code"
+											v-model="state.reconnectCode"
+											placeholder="ABCD2345"
+											@keydown.enter="submitReconnectCode"
+										/>
+									</template>
+									<template v-else>
+										<div class="mt-2.5 flex justify-center">
+											<JvSpinner :size="56" />
+										</div>
+										<p class="text-center text-p-sm text-ink-gray-5">
+											The link expires in 1 hour and signs your old site out.
+											If your inbox is unreachable, contact support — an
+											operator can approve the reconnect instead.
+										</p>
+									</template>
 									<Banner
 										v-if="state.payErr"
 										type="error"
@@ -424,6 +441,15 @@
 											class="h-3.5 w-3.5 text-ink-gray-5"
 										/>Back
 									</button>
+									<Button
+										v-if="state.reconnectAwaitingCode"
+										variant="solid"
+										:loading="state.payBusy"
+										loading-text="Working…"
+										:disabled="!state.reconnectCode.trim()"
+										label="Finish reconnect"
+										@click="submitReconnectCode"
+									/>
 								</div>
 							</template>
 							<template v-else-if="state.successData">
@@ -983,6 +1009,8 @@ const state = reactive({
 	payPhase: "review", // "review" | "verify" | "reconnect" - step-3 sub-screens
 	reconnectOffered: false,
 	reconnectRequestId: "",
+	reconnectCode: "",
+	reconnectAwaitingCode: false,
 	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
 	// Gateways the operator has actually enabled, narrowed to what this build
 	// can render. Starts as razorpay-only so the step is never briefly empty
@@ -1458,6 +1486,37 @@ function cancelReconnect() {
 	state.payPhase = "review";
 	state.payErr = "";
 	state.reconnectRequestId = "";
+	state.reconnectCode = "";
+	state.reconnectAwaitingCode = false;
+}
+
+// The code the customer read off the confirmation page (or got from support).
+// Wrong code => admin keeps answering awaiting_code, so just say so and let
+// them retype rather than restarting the whole reconnect.
+async function submitReconnectCode() {
+	if (!state.reconnectCode.trim()) return;
+	state.payErr = "";
+	state.payBusy = true;
+	try {
+		const d = await checkAccountReconnect(
+			state.reconnectRequestId,
+			state.reconnectCode.trim()
+		);
+		if (d && d.status === "connected") {
+			state.successData = {};
+			state.payBusy = false;
+			await proceedAfterPay();
+			return;
+		}
+		state.payErr =
+			d && d.status === "expired"
+				? "The reconnect request expired. Start it again."
+				: "That code didn't match. Check the confirmation page and try again.";
+	} catch (e) {
+		state.payErr = errMsg(e);
+	} finally {
+		state.payBusy = false;
+	}
 }
 
 // "Already subscribed? Reconnect this site": start the admin-side magic-link
@@ -1466,6 +1525,8 @@ function cancelReconnect() {
 async function startReconnect() {
 	state.payErr = "";
 	state.reconnectOffered = false;
+	state.reconnectCode = "";
+	state.reconnectAwaitingCode = false;
 	state.payBusy = true;
 	try {
 		const d = await startAccountReconnect(state.email);
@@ -1484,7 +1545,16 @@ async function pollReconnect() {
 	const deadline = Date.now() + 10 * 60 * 1000;
 	while (state.payPhase === "reconnect" && Date.now() < deadline) {
 		try {
-			const d = await checkAccountReconnect(state.reconnectRequestId);
+			const d = await checkAccountReconnect(state.reconnectRequestId, state.reconnectCode);
+			// Re-check AFTER the await: "Back" may have fired while it was in
+			// flight, and acting then would override the user's cancel.
+			if (state.payPhase !== "reconnect") return;
+			if (d && d.status === "awaiting_code") {
+				// Confirmed on the customer's side; stop spinning and ask for the
+				// code that binds delivery to whoever clicked (anti-phishing).
+				state.reconnectAwaitingCode = true;
+				return;
+			}
 			if (d && d.status === "connected") {
 				// Same handoff as a completed payment: poll sync_connection to the
 				// customer's EXISTING container, then continue to the LLM step

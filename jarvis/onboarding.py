@@ -519,14 +519,15 @@ def start_account_reconnect(email: str) -> dict:
 
 
 @frappe.whitelist()
-def check_account_reconnect(request_id: str) -> dict:
+def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	"""Poll the reconnect. Once the customer clicks the emailed link (or an
-	operator approves), admin delivers rotated credentials — persist them and
+	operator approves) AND the customer relays the confirmation code shown to
+	them, admin delivers rotated credentials — persist them and
 	grant the onboarding admin role, exactly like a fresh signup would. The
 	wizard then rides the normal sync_connection path to the customer's
 	EXISTING container; only the LLM step needs re-doing on this fresh site."""
 	require_jarvis_admin()
-	data = _surface(admin_client.get_reconnect_state, request_id) or {}
+	data = _surface(admin_client.get_reconnect_state, request_id, code) or {}
 	if data.get("status") != "ready":
 		return {"status": data.get("status") or "expired"}
 	write_connection(
