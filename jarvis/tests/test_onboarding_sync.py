@@ -564,3 +564,234 @@ class TestGetLlmSyncStatus(FrappeTestCase):
 			s.db_set("last_model_statuses", bad, update_modified=False)
 			frappe.db.commit()
 			self.assertEqual(onboarding.get_llm_sync_status()["model_statuses"], [])
+
+
+class TestWorkspaceReset(FrappeTestCase):
+	"""Self-serve reset: transport cleared, admin creds + synced markers kept."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + (
+		"last_sync_status",
+		"llm_pool_synced_at",
+		"chat_device_id",
+		"chat_device_public_key",
+		"chat_device_private_key",
+		"chat_device_token",
+	)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			v = (
+				s.get_password(f, raise_exception=False)
+				if f.endswith(("_key", "_secret", "_token", "_password"))
+				else s.get(f)
+			)
+			self._snap[f] = v or ""
+		_set_token("tok")
+		s.db_set("agent_url", "ws://localhost:19000")
+		s.db_set("chat_device_id", "dev-1")
+		s.db_set("llm_pool_synced_at", "2026-01-01 00:00:00")
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+
+	def test_reset_disconnects_transport_and_keeps_creds(self):
+		with (
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect") as disc,
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace",
+				return_value={"status": "Applied", "tenant": "t-new"},
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.request_workspace_reset(reason="stuck")
+		disc.assert_called_once()
+		self.assertEqual(out["status"], "Applied")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.agent_url)
+		self.assertFalse(s.chat_device_id)
+		self.assertEqual(s.last_sync_status, onboarding._RESETTING_STATUS)
+		# The control plane carries these; clearing them would eject to the wizard.
+		self.assertTrue(s.get_password("jarvis_admin_api_key", raise_exception=False))
+		self.assertTrue(s.llm_pool_synced_at)
+
+	def test_reset_admin_failure_leaves_transport(self):
+		from jarvis.admin_client import AdminUnreachableError
+
+		with (
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace",
+				side_effect=AdminUnreachableError("down"),
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.request_workspace_reset()
+		self.assertEqual(frappe.get_single("Jarvis Settings").agent_url, "ws://localhost:19000")
+
+	def test_poll_converges_when_ready(self):
+		frappe.get_single("Jarvis Settings").db_set("last_sync_status", onboarding._RESETTING_STATUS)
+		frappe.db.commit()
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"status": "Applied"},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={
+					"chat_readiness": "Ready",
+					"agent_url": "ws://localhost:19100",
+					"agent_token": "t2",
+					"tenant_status": "running",
+				},
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.workspace_reset_state()
+		self.assertTrue(out["ready"])
+		self.assertFalse(out["resetting"])
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.agent_url, "ws://localhost:19100")
+		self.assertEqual(s.last_sync_status, "ok (workspace reset)")
+
+	def test_poll_reports_resetting_while_not_ready(self):
+		frappe.get_single("Jarvis Settings").db_set("last_sync_status", onboarding._RESETTING_STATUS)
+		frappe.db.commit()
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"status": "Pending Capacity", "message": "provisioning shortly"},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={"chat_readiness": "Configuring"},
+			),
+		):
+			out = onboarding.workspace_reset_state()
+		self.assertFalse(out["ready"])
+		self.assertTrue(out["resetting"])
+		self.assertEqual(out["status"], "Pending Capacity")
+
+	def test_poll_reconnects_and_repushes_pool_when_container_up(self):
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._RESETTING_STATUS)
+		s.db_set("agent_url", "")
+		s.db_set("proxy_active", 1)
+		frappe.db.commit()
+		try:
+			with (
+				patch(
+					"jarvis.onboarding.admin_client.reset_workspace_state",
+					return_value={"status": "Applied"},
+				),
+				patch(
+					"jarvis.onboarding.admin_client.get_connection",
+					return_value={
+						"chat_readiness": "Configuring",
+						"agent_url": "ws://localhost:19100",
+						"agent_token": "t2",
+					},
+				),
+				patch(
+					"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.JarvisSettings._enqueue_pool_sync"
+				) as push,
+			):
+				out = onboarding.workspace_reset_state()
+			push.assert_called_once()
+			self.assertFalse(out["ready"])
+			self.assertEqual(frappe.get_single("Jarvis Settings").agent_url, "ws://localhost:19100")
+		finally:
+			frappe.get_single("Jarvis Settings").db_set("proxy_active", 0)
+			frappe.db.commit()
+
+	def test_reset_wipe_data_deletes_content(self):
+		frappe.db.delete("Jarvis Macro", {"macro_name": "wipe-me"})
+		frappe.db.commit()
+		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "wipe-me"})
+		conv.flags.ignore_mandatory = True
+		conv.flags.ignore_links = True
+		conv.insert(ignore_permissions=True)
+		macro = frappe.get_doc(
+			{"doctype": "Jarvis Macro", "macro_name": "wipe-me", "steps": [{"prompt": "hello"}]}
+		)
+		macro.flags.ignore_mandatory = True
+		macro.flags.ignore_links = True
+		macro.insert(ignore_permissions=True)
+		frappe.db.commit()
+		with (
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace",
+				return_value={"status": "Applied", "tenant": "t-new"},
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding.request_workspace_reset(wipe_data=True)
+		self.assertEqual(frappe.db.count("Jarvis Conversation"), 0)
+		self.assertEqual(frappe.db.count("Jarvis Macro"), 0)
+
+	def test_reset_revoke_llm_clears_connections(self):
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("llm_model", "claude-sonnet-5")
+		s.db_set("proxy_active", 1)
+		s.db_set("llm_pool_synced_at", "2026-01-01 00:00:00")
+		pm = frappe.get_doc(
+			{
+				"doctype": "Jarvis LLM Pool Model",
+				"parent": "Jarvis Settings",
+				"parenttype": "Jarvis Settings",
+				"parentfield": "models",
+				"model": "gpt-5.5",
+			}
+		)
+		pm.flags.ignore_mandatory = True
+		pm.flags.ignore_links = True
+		pm.insert(ignore_permissions=True)
+		frappe.db.commit()
+		with (
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace",
+				return_value={"status": "Applied", "tenant": "t-new"},
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding.request_workspace_reset(revoke_llm=True)
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.llm_model)
+		self.assertFalse(s.proxy_active)
+		self.assertFalse(s.llm_pool_synced_at)
+		self.assertEqual(s.llm_provider, "Anthropic")
+		self.assertEqual(frappe.db.count("Jarvis LLM Pool Model", {"parent": "Jarvis Settings"}), 0)
+		self.assertEqual(s.last_sync_status, onboarding._RESETTING_RECONNECT_LLM_STATUS)
+		# Admin creds must survive — only the LLM connections are revoked.
+		self.assertTrue(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+	def test_poll_completes_on_container_up_when_llm_revoked(self):
+		frappe.get_single("Jarvis Settings").db_set(
+			"last_sync_status", onboarding._RESETTING_RECONNECT_LLM_STATUS
+		)
+		frappe.db.commit()
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"status": "Applied"},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={
+					"chat_readiness": "Configuring",
+					"agent_url": "ws://localhost:19100",
+					"agent_token": "t2",
+				},
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.workspace_reset_state()
+		self.assertTrue(out["ready"])
+		self.assertEqual(frappe.get_single("Jarvis Settings").last_sync_status, "ok (workspace reset)")

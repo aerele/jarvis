@@ -40,6 +40,15 @@ export const getUsage = (conversation) =>
 	call("jarvis.chat.api.get_usage", { conversation: conversation || "" });
 export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
 
+// ---- workspace reset (customer self-serve, admin-gated) --------------------
+export const requestWorkspaceReset = (reason, opts = {}) =>
+	call("jarvis.onboarding.request_workspace_reset", {
+		reason: reason || "",
+		wipe_data: opts.wipeData ? 1 : 0,
+		revoke_llm: opts.revokeLlm ? 1 : 0,
+	});
+export const workspaceResetState = () => call("jarvis.onboarding.workspace_reset_state");
+
 // --- Per-user chat settings + real (measured) usage tracking, incl. the
 // tenant-admin usage table (design doc §4/§6). All return the house
 // {ok, data} / {ok:false, reason} envelope — unlike getUsage above, which is

@@ -271,6 +271,10 @@ scheduler_events = {
 			# moment chat_readiness reads Ready. Without this, a pending apply
 			# that outlives the in-job 120s poll is a permanent dead-end.
 			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.reconcile_pending_llm_sync",
+			# Workspace-reset convergence backstop: if the customer closed the tab
+			# mid-reset, pull the new container's connection once admin reports
+			# Ready (same shape as reconcile_pending_llm_sync above).
+			"jarvis.onboarding.reconcile_pending_workspace_reset",
 			# 2026-07 latency plan, Phase 1.4: was */30, which left the
 			# provider prompt cache (5-10 min retention) cold for most of
 			# each half-hour. Every 5 min + a 4-min cooldown in prewarm.py

@@ -7045,6 +7045,18 @@ async function send(textArg, resendAck) {
 				setTimeout(() => window.location.reload(), 1500);
 				return;
 			}
+			if (r.reason === "workspace_resetting") {
+				notify(`${agentName} is being reset. Chat will be back in a few minutes.`, {
+					type: "warning",
+				});
+				return;
+			}
+			if (r.reason === "llm_not_configured") {
+				notify("No AI model is connected. Connect one in Settings → AI models.", {
+					type: "warning",
+				});
+				return;
+			}
 			notify(
 				r.reason === "usage_limit"
 					? `Monthly usage limit reached. Ask your ${agentName} admin to raise your limit.`
