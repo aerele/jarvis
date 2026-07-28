@@ -81,6 +81,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey, true));
 	position: fixed;
 	inset: 0;
 	z-index: 200;
+	/* The settings dialog is a MODAL frappe-ui/reka Dialog, and while it is open
+	   reka sets `pointer-events: none` inline on <body> so nothing outside the
+	   modal can be clicked. This overlay is teleported to <body>, so it inherits
+	   that lock: it paints correctly above the settings dialog but every click
+	   falls through, leaving Cancel/confirm dead. Opting back in is what makes
+	   the buttons reachable. Teleport alone was not enough (jarvis#435). */
+	pointer-events: auto;
 	background: rgba(15, 15, 22, 0.34);
 	display: flex;
 	align-items: center;
