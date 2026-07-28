@@ -56,7 +56,7 @@
 				     Presentation, NOT a security boundary: /api/method is reachable
 				     directly, so every endpoint gates itself server-side. -->
 				<div
-					class="flex shrink-0 gap-1 overflow-x-auto border-b bg-surface-menu-bar p-1 sm:w-56 sm:flex-col sm:gap-0.5 sm:overflow-y-auto sm:overflow-x-visible sm:rounded-l-lg sm:border-b-0"
+					class="flex shrink-0 gap-1 overflow-x-auto border-b bg-surface-menu-bar p-1 sm:w-56 sm:flex-col sm:gap-0.5 sm:overflow-y-auto sm:overflow-x-visible sm:rounded-l-lg sm:border-b-0 sm:px-3 sm:py-5"
 				>
 					<template v-for="group in visibleGroups" :key="group.name">
 						<div
@@ -67,7 +67,7 @@
 						<button
 							v-for="item in group.items"
 							:key="item.key"
-							class="flex h-7 shrink-0 items-center gap-2 rounded px-2 text-sm text-ink-gray-8"
+							class="mx-0.5 flex h-7 shrink-0 items-center gap-2 rounded px-2 text-sm text-ink-gray-8"
 							:class="
 								section === item.key
 									? 'bg-surface-white shadow-sm'
@@ -141,9 +141,6 @@ const PlanBillingPane = defineAsyncComponent(() =>
 	import("@/components/settings/PlanBillingPane.vue")
 );
 const AiModelsPane = defineAsyncComponent(() => import("@/components/settings/AiModelsPane.vue"));
-const ConnectionPane = defineAsyncComponent(() =>
-	import("@/components/settings/ConnectionPane.vue")
-);
 const BillingMeteringPane = defineAsyncComponent(() =>
 	import("@/components/settings/BillingMeteringPane.vue")
 );
@@ -165,7 +162,6 @@ const PANES = {
 	shortcuts: ShortcutsPane,
 	plan: PlanBillingPane,
 	aimodels: AiModelsPane,
-	connection: ConnectionPane,
 	billing: BillingMeteringPane,
 	branding: BrandingPane,
 	usageadmin: UsageAdminPane,
@@ -191,7 +187,6 @@ const NAV = [
 		items: [
 			{ key: "plan", label: "Plan and billing", icon: "credit-card" },
 			{ key: "aimodels", label: "AI models", icon: "cpu" },
-			{ key: "connection", label: "Connection", icon: "wifi" },
 			{ key: "billing", label: "Billing and metering", icon: "dollar-sign" },
 			{ key: "branding", label: "Branding", icon: "image" },
 		],

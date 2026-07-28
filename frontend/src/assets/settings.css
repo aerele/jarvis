@@ -14,7 +14,16 @@
    ========================================================================== */
 
 /* ===== settings panel (centered modal with a left section rail) ===== */
-.jv-settings-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.27); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.jv-settings-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 60;
+	background: rgba(0, 0, 0, 0.27);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+}
 /* z-index 60: the shell ConfirmDialog uses 200 to sit above this. */
 /* Height is ADAPTIVE (was a hard 560px): the compact AI-models pane left roughly
    half the dialog empty. `auto` sizes to the tallest column, clamped by
@@ -34,27 +43,179 @@
    min() guards a short viewport: a bare height/min-height BEATS max-height in the
    cascade, so on a landscape phone the dialog would grow past the screen.
    Below 720px the fixed rail can't fit — see the stacking media query at the end. */
-.jv-settings { width: 1080px; max-width: 100%; height: min(680px, 88vh); max-height: 88vh; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; display: flex; overflow: hidden; box-shadow: 0 0 1px rgba(0, 0, 0, .2), 0 24px 30px -8px rgba(0, 0, 0, .1); animation: jv-popin 0.1s ease-out; }
-@keyframes jv-popin { from { transform: scale(0.98); opacity: 0.5; } to { transform: scale(1); opacity: 1; } }
-.jv-settings-nav { width: 230px; flex: none; background: var(--surface-1); border-right: 1px solid var(--border); padding: 8px; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
-.jv-settings-nav-title { font-size: 15px; font-weight: 600; color: var(--text); padding: 6px 8px 10px; }
-.jv-settings-navitem { display: flex; align-items: center; gap: 8px; width: 100%; height: 28px; padding: 0 8px; border: none; background: transparent; border-radius: 8px; font-family: inherit; font-size: 13px; font-weight: 420; color: var(--text-2); cursor: pointer; text-align: left; transition: background-color .15s ease, color .15s ease; }
-.jv-settings-navitem svg { color: var(--text-3); flex: none; }
-.jv-settings-navitem:hover { background: var(--surface-2); color: var(--text); }
-.jv-settings-navitem.on { background: var(--surface); color: var(--text); box-shadow: 0 0 1px rgba(0, 0, 0, .33), 0 1px 3px rgba(0, 0, 0, .14); }
-.jv-dark .jv-settings-navitem.on { background: var(--surface-3); box-shadow: 0 0 0 1px var(--border-2); }
-.jv-settings-navitem.on svg { color: var(--text); }
+.jv-settings {
+	width: 1080px;
+	max-width: 100%;
+	height: min(680px, 88vh);
+	max-height: 88vh;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 16px;
+	display: flex;
+	overflow: hidden;
+	box-shadow: 0 0 1px rgba(0, 0, 0, 0.2), 0 24px 30px -8px rgba(0, 0, 0, 0.1);
+	animation: jv-popin 0.1s ease-out;
+}
+@keyframes jv-popin {
+	from {
+		transform: scale(0.98);
+		opacity: 0.5;
+	}
+	to {
+		transform: scale(1);
+		opacity: 1;
+	}
+}
+.jv-settings-nav {
+	width: 230px;
+	flex: none;
+	background: var(--surface-1);
+	border-right: 1px solid var(--border);
+	padding: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	overflow-y: auto;
+}
+.jv-settings-nav-title {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--text);
+	padding: 6px 8px 10px;
+}
+.jv-settings-navitem {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	height: 28px;
+	padding: 0 8px;
+	border: none;
+	background: transparent;
+	border-radius: 8px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 420;
+	color: var(--text-2);
+	cursor: pointer;
+	text-align: left;
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+.jv-settings-navitem svg {
+	color: var(--text-3);
+	flex: none;
+}
+.jv-settings-navitem:hover {
+	background: var(--surface-2);
+	color: var(--text);
+}
+.jv-settings-navitem.on {
+	background: var(--surface);
+	color: var(--text);
+	box-shadow: 0 0 1px rgba(0, 0, 0, 0.33), 0 1px 3px rgba(0, 0, 0, 0.14);
+}
+.jv-dark .jv-settings-navitem.on {
+	background: var(--surface-3);
+	box-shadow: 0 0 0 1px var(--border-2);
+}
+.jv-settings-navitem.on svg {
+	color: var(--text);
+}
 /* min-height:0 — REQUIRED now that .jv-settings is height:auto/max-height. A flex
    item defaults to min-height:auto, which refuses to shrink below its content, so
    a tall pane would blow past max-height and get clipped by the shell's
    overflow:hidden instead of scrolling in .jv-settings-body. */
-.jv-settings-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.jv-settings-main {
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
 /* Pane-owned header (design.md §4.1): title + optional description left, ghost
    close right. The dialog renders it once; panes carry no duplicate heading. */
-.jv-settings-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 20px 24px 14px; flex: none; }
-.jv-settings-head-title { font-size: 16px; font-weight: 600; color: var(--text); line-height: 1.2; }
-.jv-settings-head-desc { font-size: 13px; line-height: 1.5; color: var(--text-3); margin-top: 4px; }
-.jv-settings-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 24px 28px; }
+.jv-settings-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 20px 24px 14px;
+	flex: none;
+}
+.jv-settings-head-title {
+	font-size: 16px;
+	font-weight: 600;
+	color: var(--text);
+	line-height: 1.2;
+}
+.jv-settings-head-desc {
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--text-3);
+	margin-top: 4px;
+}
+.jv-settings-body {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 4px 24px 28px;
+}
+
+/* Overlay-style scrollbar for the settings dialog's scroll regions (this
+   legacy .jv-settings-body plus SettingsPane.vue's own overflow-y-auto div,
+   which is what most panes actually scroll inside), modelled on Claude's
+   settings dialog: invisible at rest, revealed only while the user is
+   scrolling or hovering the region, and parked in scrollbar-gutter so the
+   thumb never sits on top of pane content. Scoped to .jv-scroll-overlay /
+   .jv-settings-body rather than widening the ::-webkit-scrollbar rule in
+   main.css -- that rule is global and would restyle every scrollable surface
+   in the product, not just this dialog. */
+.jv-scroll-overlay {
+	scrollbar-gutter: stable;
+	scrollbar-width: thin;
+	scrollbar-color: transparent transparent;
+}
+.jv-scroll-overlay::-webkit-scrollbar {
+	width: 7px;
+	height: 7px;
+}
+.jv-scroll-overlay::-webkit-scrollbar-track {
+	background: transparent;
+}
+.jv-scroll-overlay::-webkit-scrollbar-thumb {
+	background-color: transparent;
+	border-radius: 8px;
+	border: 2px solid transparent;
+	background-clip: padding-box;
+	transition: background-color 0.15s ease;
+}
+.jv-scroll-overlay:hover,
+.jv-scroll-overlay:focus-within {
+	scrollbar-color: #d6d6dc transparent;
+}
+.jv-scroll-overlay:hover::-webkit-scrollbar-thumb,
+.jv-scroll-overlay:focus-within::-webkit-scrollbar-thumb {
+	background-color: #d6d6dc;
+	background-clip: padding-box;
+}
+.jv-scroll-overlay::-webkit-scrollbar-thumb:hover {
+	background-color: #c2c2ca;
+	background-clip: padding-box;
+}
+/* dark thumb colours, mirroring the dark override for the global scrollbar
+   rule in main.css */
+:root[data-theme="dark"] .jv-scroll-overlay:hover,
+:root[data-theme="dark"] .jv-scroll-overlay:focus-within {
+	scrollbar-color: #3a3a45 transparent;
+}
+:root[data-theme="dark"] .jv-scroll-overlay:hover::-webkit-scrollbar-thumb,
+:root[data-theme="dark"] .jv-scroll-overlay:focus-within::-webkit-scrollbar-thumb {
+	background-color: #3a3a45;
+}
+:root[data-theme="dark"] .jv-scroll-overlay::-webkit-scrollbar-thumb:hover {
+	background-color: #4a4a55;
+}
+
 /* Panes whose content is much shorter than the dialog. The dialog height cannot
    shrink to fit them: the left rail (~516px of nav items) is the floor, while the
    AI-models pane is only ~164px -- leaving ~276px of dead white space. So fill the
@@ -63,89 +224,446 @@
    margin-top:auto is inert outside a flex column, so the same editor rendered in
    AccountView (normal flow) is unaffected, and onboarding never renders the bar at
    all (:footerless). */
-.jv-pane-fill { display: flex; flex-direction: column; }
-.jv-pane-fill > .jv-llm-editor { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.jv-pane-fill .jv-pool-savebar { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border); }
-.jv-set-sec { font-size: 14px; font-weight: 600; color: var(--text); margin: 0 0 6px; }
-.jv-set-sub { font-size: 12px; line-height: 1.5; color: var(--text-3); font-weight: 420; }
+.jv-pane-fill {
+	display: flex;
+	flex-direction: column;
+}
+.jv-pane-fill > .jv-llm-editor {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+.jv-pane-fill .jv-pool-savebar {
+	margin-top: auto;
+	padding-top: 16px;
+	border-top: 1px solid var(--border);
+}
+.jv-set-sec {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text);
+	margin: 0 0 6px;
+}
+.jv-set-sub {
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--text-3);
+	font-weight: 420;
+}
 /* usage stat cards */
-.jv-statgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.jv-stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
-.jv-stat-label { font-size: 12px; font-weight: 420; color: var(--text-3); }
-.jv-stat-val { font-size: 20px; font-weight: 500; color: var(--text); margin-top: 6px; line-height: 1.1; }
-.jv-stat-sub { font-size: 12px; color: var(--text-3); margin-top: 3px; }
-.jv-set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text-2); }
-.jv-set-row:last-child { border-bottom: 0; }
-.jv-set-row b { font-weight: 500; color: var(--text); text-align: right; }
-.jv-set-empty { font-size: 13px; color: var(--text-3); padding: 14px 0; }
-.jv-set-hint { font-size: 12px; color: var(--text-3); margin-top: 8px; }
-.jv-kbd-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text-2); }
-.jv-kbd-row:last-of-type { border-bottom: 0; }
-.jv-kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 6px; background: var(--surface-1); border: 1px solid var(--border-2); border-radius: 6px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; font-weight: 500; color: var(--text); }
-.jv-kbd-plus { color: var(--text-3); margin: 0 3px; font-size: 11px; }
-.jv-est { font-size: 10px; font-weight: 500; color: var(--text-3); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
-.jv-usage-bar { margin-top: 12px; height: 6px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
-.jv-usage-fill { height: 100%; border-radius: 99px; background: var(--text); transition: width .25s ease; }
+.jv-statgrid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 10px;
+}
+.jv-stat {
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	padding: 12px 14px;
+}
+.jv-stat-label {
+	font-size: 12px;
+	font-weight: 420;
+	color: var(--text-3);
+}
+.jv-stat-val {
+	font-size: 20px;
+	font-weight: 500;
+	color: var(--text);
+	margin-top: 6px;
+	line-height: 1.1;
+}
+.jv-stat-sub {
+	font-size: 12px;
+	color: var(--text-3);
+	margin-top: 3px;
+}
+.jv-set-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 10px 0;
+	border-bottom: 1px solid var(--border);
+	font-size: 13px;
+	color: var(--text-2);
+}
+.jv-set-row:last-child {
+	border-bottom: 0;
+}
+.jv-set-row b {
+	font-weight: 500;
+	color: var(--text);
+	text-align: right;
+}
+.jv-set-empty {
+	font-size: 13px;
+	color: var(--text-3);
+	padding: 14px 0;
+}
+.jv-set-hint {
+	font-size: 12px;
+	color: var(--text-3);
+	margin-top: 8px;
+}
+.jv-kbd-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 9px 0;
+	border-bottom: 1px solid var(--border);
+	font-size: 13px;
+	color: var(--text-2);
+}
+.jv-kbd-row:last-of-type {
+	border-bottom: 0;
+}
+.jv-kbd {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 22px;
+	height: 22px;
+	padding: 0 6px;
+	background: var(--surface-1);
+	border: 1px solid var(--border-2);
+	border-radius: 6px;
+	font-family: ui-monospace, "SF Mono", Menlo, monospace;
+	font-size: 11.5px;
+	font-weight: 500;
+	color: var(--text);
+}
+.jv-kbd-plus {
+	color: var(--text-3);
+	margin: 0 3px;
+	font-size: 11px;
+}
+.jv-est {
+	font-size: 10px;
+	font-weight: 500;
+	color: var(--text-3);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	padding: 1px 7px;
+}
+.jv-usage-bar {
+	margin-top: 12px;
+	height: 6px;
+	border-radius: 99px;
+	background: var(--surface-2);
+	overflow: hidden;
+}
+.jv-usage-fill {
+	height: 100%;
+	border-radius: 99px;
+	background: var(--text);
+	transition: width 0.25s ease;
+}
 
 /* toggle switch — on-state is near-black (frappe Switch), not green */
-.jv-switch { width: 38px; height: 22px; flex: none; border: none; border-radius: 11px; background: var(--surface-3); position: relative; cursor: pointer; padding: 0; transition: background .15s; }
-.jv-switch.on { background: var(--text); }
-.jv-switch-knob { position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: left .15s; }
-.jv-switch.on .jv-switch-knob { left: 18px; }
+.jv-switch {
+	width: 38px;
+	height: 22px;
+	flex: none;
+	border: none;
+	border-radius: 11px;
+	background: var(--surface-3);
+	position: relative;
+	cursor: pointer;
+	padding: 0;
+	transition: background 0.15s;
+}
+.jv-switch.on {
+	background: var(--text);
+}
+.jv-switch-knob {
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: #fff;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+	transition: left 0.15s;
+}
+.jv-switch.on .jv-switch-knob {
+	left: 18px;
+}
 /* dark: the ON track is near-white (var(--text)), so the knob flips dark */
-.jv-dark .jv-switch.on .jv-switch-knob { background: var(--surface); }
+.jv-dark .jv-switch.on .jv-switch-knob {
+	background: var(--surface);
+}
 
 /* segmented control — one recipe for Appearance (.jv-seg), macro-run filters
    (.jv-runchips) and the AI-models tabs (.jv-acct-aitabs): gray track, active
    = raised chip (design.md §3.5) */
-.jv-seg, .jv-runchips, .jv-acct-aitabs { display: inline-flex; align-items: center; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 2px; gap: 2px; }
-.jv-seg button, .jv-runchips button, .jv-acct-aitabs button { display: flex; align-items: center; gap: 6px; padding: 5px 12px; background: transparent; border: none; border-radius: 8px; font-family: inherit; font-size: 13px; font-weight: 420; color: var(--text-3); cursor: pointer; transition: background-color .15s ease, color .15s ease, box-shadow .15s ease; }
-.jv-seg button:hover, .jv-runchips button:hover, .jv-acct-aitabs button:hover { color: var(--text-2); background: var(--surface-3); }
-.jv-seg button.on, .jv-runchips button.on, .jv-acct-aitabs button.on { background: var(--surface); color: var(--text); box-shadow: 0 0 1px rgba(0, 0, 0, .33), 0 1px 3px rgba(0, 0, 0, .14); }
-.jv-dark .jv-seg button.on, .jv-dark .jv-runchips button.on, .jv-dark .jv-acct-aitabs button.on { background: var(--surface-3); box-shadow: none; }
-.jv-seg button svg { color: var(--text-3); }
-.jv-seg button.on svg { color: var(--text); }
+.jv-seg,
+.jv-runchips,
+.jv-acct-aitabs {
+	display: inline-flex;
+	align-items: center;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	padding: 2px;
+	gap: 2px;
+}
+.jv-seg button,
+.jv-runchips button,
+.jv-acct-aitabs button {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 12px;
+	background: transparent;
+	border: none;
+	border-radius: 8px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 420;
+	color: var(--text-3);
+	cursor: pointer;
+	transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.jv-seg button:hover,
+.jv-runchips button:hover,
+.jv-acct-aitabs button:hover {
+	color: var(--text-2);
+	background: var(--surface-3);
+}
+.jv-seg button.on,
+.jv-runchips button.on,
+.jv-acct-aitabs button.on {
+	background: var(--surface);
+	color: var(--text);
+	box-shadow: 0 0 1px rgba(0, 0, 0, 0.33), 0 1px 3px rgba(0, 0, 0, 0.14);
+}
+.jv-dark .jv-seg button.on,
+.jv-dark .jv-runchips button.on,
+.jv-dark .jv-acct-aitabs button.on {
+	background: var(--surface-3);
+	box-shadow: none;
+}
+.jv-seg button svg {
+	color: var(--text-3);
+}
+.jv-seg button.on svg {
+	color: var(--text);
+}
 
 /* activity rows */
-.jv-act { padding: 10px 0; border-bottom: 1px solid var(--border); }
-.jv-act:last-child { border-bottom: 0; }
-.jv-act-top { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 420; color: var(--text-2); }
-.jv-act-ms { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-3); font-weight: 420; }
-.jv-act-names { font-size: 11.5px; color: var(--text-3); margin-top: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-word; }
+.jv-act {
+	padding: 10px 0;
+	border-bottom: 1px solid var(--border);
+}
+.jv-act:last-child {
+	border-bottom: 0;
+}
+.jv-act-top {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-size: 13px;
+	font-weight: 420;
+	color: var(--text-2);
+}
+.jv-act-ms {
+	margin-left: auto;
+	font-variant-numeric: tabular-nums;
+	color: var(--text-3);
+	font-weight: 420;
+}
+.jv-act-names {
+	font-size: 11.5px;
+	color: var(--text-3);
+	margin-top: 3px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	word-break: break-word;
+}
 
 /* macro run history dashboard (Macro runs) */
-.jv-runfilters { display: flex; align-items: center; gap: 10px; margin: 12px 0 6px; flex-wrap: wrap; }
-.jv-runmacrosel { margin-left: auto; font-family: inherit; font-size: 13px; color: var(--text-2); background: var(--surface-1); border: 1px solid var(--border-2); border-radius: 8px; padding: 5px 10px; cursor: pointer; outline: none; transition: border-color .15s ease, background-color .15s ease; }
-.jv-runmacrosel:focus { background: var(--surface); border-color: var(--text-3); }
-.jv-run { display: flex; align-items: flex-start; gap: 11px; padding: 12px 2px; border-bottom: 1px solid var(--surface-2); }
-.jv-run:last-of-type { border-bottom: none; }
-.jv-run-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
-.jv-run-dot.d-ok { background: var(--green); }
-.jv-run-dot.d-err { background: var(--red); }
-.jv-run-dot.d-run { background: var(--cta); }
-.jv-run-dot.d-stop { background: var(--text-3); }
-.jv-run-main { flex: 1; min-width: 0; }
-.jv-run-top { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.jv-run-name { font-size: 13px; font-weight: 500; color: var(--text); }
-.jv-run-badge { font-size: 11px; font-weight: 420; padding: 2px 8px; border-radius: 999px; text-transform: capitalize; }
-.jv-run-badge.b-ok { background: var(--green-bg); color: var(--green); }
-.jv-run-badge.b-err { background: var(--red-bg); color: var(--red); }
-.jv-run-badge.b-run { background: var(--cta-bg); color: var(--link); }
-.jv-run-badge.b-stop { background: var(--surface-2); color: var(--text-3); }
-.jv-run-trig { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); }
-.jv-run-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-3); margin-top: 4px; flex-wrap: wrap; }
-.jv-run-prog { font-family: ui-monospace, Menlo, monospace; }
-.jv-run-sep { opacity: .5; }
-.jv-run-err { display: flex; align-items: center; gap: 5px; margin-top: 5px; font-size: 12px; color: var(--red); word-break: break-word; }
-.jv-run-err svg { flex: none; }
-.jv-run-act { display: flex; align-items: center; gap: 6px; flex: none; }
-.jv-run-btn { display: inline-flex; align-items: center; gap: 5px; font-family: inherit; font-size: 12.5px; font-weight: 420; height: 28px; padding: 0 11px; border-radius: 8px; cursor: pointer; background: var(--surface-2); color: var(--text); border: 1px solid transparent; transition: background-color .15s ease, color .15s ease; }
-.jv-run-btn:hover { background: var(--surface-3); }
-.jv-run-btn.stop { background: var(--red-bg); color: var(--red); }
-.jv-run-btn.stop:hover { background: var(--red-bd); }
-.jv-run-loadmore { display: block; margin: 14px auto 2px; font-family: inherit; font-size: 13px; font-weight: 420; color: var(--text); background: var(--surface-2); border: 1px solid transparent; border-radius: 8px; padding: 7px 16px; cursor: pointer; transition: background-color .15s ease; }
-.jv-run-loadmore:hover { background: var(--surface-3); }
-.jv-run-loadmore:disabled { opacity: .6; cursor: default; }
+.jv-runfilters {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 12px 0 6px;
+	flex-wrap: wrap;
+}
+.jv-runmacrosel {
+	margin-left: auto;
+	font-family: inherit;
+	font-size: 13px;
+	color: var(--text-2);
+	background: var(--surface-1);
+	border: 1px solid var(--border-2);
+	border-radius: 8px;
+	padding: 5px 10px;
+	cursor: pointer;
+	outline: none;
+	transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.jv-runmacrosel:focus {
+	background: var(--surface);
+	border-color: var(--text-3);
+}
+.jv-run {
+	display: flex;
+	align-items: flex-start;
+	gap: 11px;
+	padding: 12px 2px;
+	border-bottom: 1px solid var(--surface-2);
+}
+.jv-run:last-of-type {
+	border-bottom: none;
+}
+.jv-run-dot {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	margin-top: 5px;
+}
+.jv-run-dot.d-ok {
+	background: var(--green);
+}
+.jv-run-dot.d-err {
+	background: var(--red);
+}
+.jv-run-dot.d-run {
+	background: var(--cta);
+}
+.jv-run-dot.d-stop {
+	background: var(--text-3);
+}
+.jv-run-main {
+	flex: 1;
+	min-width: 0;
+}
+.jv-run-top {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	flex-wrap: wrap;
+}
+.jv-run-name {
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--text);
+}
+.jv-run-badge {
+	font-size: 11px;
+	font-weight: 420;
+	padding: 2px 8px;
+	border-radius: 999px;
+	text-transform: capitalize;
+}
+.jv-run-badge.b-ok {
+	background: var(--green-bg);
+	color: var(--green);
+}
+.jv-run-badge.b-err {
+	background: var(--red-bg);
+	color: var(--red);
+}
+.jv-run-badge.b-run {
+	background: var(--cta-bg);
+	color: var(--link);
+}
+.jv-run-badge.b-stop {
+	background: var(--surface-2);
+	color: var(--text-3);
+}
+.jv-run-trig {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 11px;
+	color: var(--text-3);
+}
+.jv-run-meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12px;
+	color: var(--text-3);
+	margin-top: 4px;
+	flex-wrap: wrap;
+}
+.jv-run-prog {
+	font-family: ui-monospace, Menlo, monospace;
+}
+.jv-run-sep {
+	opacity: 0.5;
+}
+.jv-run-err {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	margin-top: 5px;
+	font-size: 12px;
+	color: var(--red);
+	word-break: break-word;
+}
+.jv-run-err svg {
+	flex: none;
+}
+.jv-run-act {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: none;
+}
+.jv-run-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-family: inherit;
+	font-size: 12.5px;
+	font-weight: 420;
+	height: 28px;
+	padding: 0 11px;
+	border-radius: 8px;
+	cursor: pointer;
+	background: var(--surface-2);
+	color: var(--text);
+	border: 1px solid transparent;
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+.jv-run-btn:hover {
+	background: var(--surface-3);
+}
+.jv-run-btn.stop {
+	background: var(--red-bg);
+	color: var(--red);
+}
+.jv-run-btn.stop:hover {
+	background: var(--red-bd);
+}
+.jv-run-loadmore {
+	display: block;
+	margin: 14px auto 2px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 420;
+	color: var(--text);
+	background: var(--surface-2);
+	border: 1px solid transparent;
+	border-radius: 8px;
+	padding: 7px 16px;
+	cursor: pointer;
+	transition: background-color 0.15s ease;
+}
+.jv-run-loadmore:hover {
+	background: var(--surface-3);
+}
+.jv-run-loadmore:disabled {
+	opacity: 0.6;
+	cursor: default;
+}
 
 /* ============ BUTTONS (design.md §3.1 mapped to jv tokens) ============
    Compose a variant with the base:
@@ -153,110 +671,447 @@
      <button class="jv-btn jv-btn--ghost">Cancel</button>   ← subtle gray fill
      <button class="jv-btn jv-btn--danger">Delete</button>  ← red subtle (confirm handles solid red)
    Add --sm for the compact 28px size. Hover shifts colour only — never motion. */
-.jv-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid transparent; background: transparent; font-family: inherit; font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer; user-select: none; transition: background-color .15s ease, color .15s ease, border-color .15s ease; }
-.jv-btn:disabled { opacity: .5; cursor: default; pointer-events: none; }
-.jv-btn svg { flex: none; }
-.jv-btn--primary { background: var(--text); border-color: var(--text); color: var(--surface); }
-.jv-btn--primary:hover { background: var(--text-2); border-color: var(--text-2); }
-.jv-btn--primary svg { stroke: var(--surface); }
-.jv-btn--ghost { background: var(--surface-2); border-color: transparent; color: var(--text); }
-.jv-btn--ghost:hover { background: var(--surface-3); }
-.jv-btn--danger { background: var(--red); border-color: var(--red); color: #fff; }
-.jv-btn--danger:hover { background: color-mix(in srgb, var(--red) 88%, #000); border-color: color-mix(in srgb, var(--red) 88%, #000); }
-.jv-btn--danger svg { stroke: #fff; }
-.jv-btn--sm { height: 28px; padding: 0 10px; font-size: 12.5px; border-radius: 8px; }
-.jv-btn--icon { width: 28px; height: 28px; padding: 0; border-radius: 8px; color: var(--text-3); background: transparent; }
-.jv-btn--icon:hover { background: var(--surface-2); color: var(--text); }
+.jv-btn {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	height: 32px;
+	padding: 0 12px;
+	border-radius: 8px;
+	border: 1px solid transparent;
+	background: transparent;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	cursor: pointer;
+	user-select: none;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.jv-btn:disabled {
+	opacity: 0.5;
+	cursor: default;
+	pointer-events: none;
+}
+.jv-btn svg {
+	flex: none;
+}
+.jv-btn--primary {
+	background: var(--text);
+	border-color: var(--text);
+	color: var(--surface);
+}
+.jv-btn--primary:hover {
+	background: var(--text-2);
+	border-color: var(--text-2);
+}
+.jv-btn--primary svg {
+	stroke: var(--surface);
+}
+.jv-btn--ghost {
+	background: var(--surface-2);
+	border-color: transparent;
+	color: var(--text);
+}
+.jv-btn--ghost:hover {
+	background: var(--surface-3);
+}
+.jv-btn--danger {
+	background: var(--red);
+	border-color: var(--red);
+	color: #fff;
+}
+.jv-btn--danger:hover {
+	background: color-mix(in srgb, var(--red) 88%, #000);
+	border-color: color-mix(in srgb, var(--red) 88%, #000);
+}
+.jv-btn--danger svg {
+	stroke: #fff;
+}
+.jv-btn--sm {
+	height: 28px;
+	padding: 0 10px;
+	font-size: 12.5px;
+	border-radius: 8px;
+}
+.jv-btn--icon {
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border-radius: 8px;
+	color: var(--text-3);
+	background: transparent;
+}
+.jv-btn--icon:hover {
+	background: var(--surface-2);
+	color: var(--text);
+}
 /* legacy single-dash danger modifier (used with jv-btn jv-btn--sm jv-btn-danger) */
-.jv-btn-danger { color: var(--red); background: var(--red-bg); border-color: transparent; }
-.jv-btn-danger:hover { background: var(--red-bd); }
-.jv-btn-danger:disabled { opacity: .6; }
+.jv-btn-danger {
+	color: var(--red);
+	background: var(--red-bg);
+	border-color: transparent;
+}
+.jv-btn-danger:hover {
+	background: var(--red-bd);
+}
+.jv-btn-danger:disabled {
+	opacity: 0.6;
+}
 
 /* fade for the overlay (transition name="jv-fade") */
-.jv-fade-enter-active { transition: opacity .1s ease-out; }
-.jv-fade-leave-active { transition: opacity .15s ease-in; }
-.jv-fade-enter-from, .jv-fade-leave-to { opacity: 0; }
+.jv-fade-enter-active {
+	transition: opacity 0.1s ease-out;
+}
+.jv-fade-leave-active {
+	transition: opacity 0.15s ease-in;
+}
+.jv-fade-enter-from,
+.jv-fade-leave-to {
+	opacity: 0;
+}
 
 /* ===== Account / billing (design.md §4.2) ===== */
-.jv-acct-card { padding: 2px 0; }
-.jv-acct-card h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; color: var(--text); }
-.jv-acct-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
-.jv-acct-card-head h2 { margin-bottom: 0; }
-.jv-acct-sub { color: var(--text-3); font-weight: 420; font-size: 12px; }
-.jv-acct-muted, .jv-acct-err { font-size: 13px; color: var(--text-3); }
-.jv-acct-err { color: var(--red); }
-.jv-acct-pill { font-size: 12px; font-weight: 420; height: 20px; display: inline-flex; align-items: center; padding: 0 8px; border-radius: 999px; flex: none; }
-.jv-pill-ok { color: var(--green); background: var(--green-bg); }
-.jv-pill-warn { color: var(--amber); background: var(--amber-bg); }
-.jv-pill-bad { color: var(--red); background: var(--red-bg); }
-.jv-pill-muted { color: var(--text-3); background: var(--surface-2); }
-.jv-acct-plan-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.jv-acct-plan-name { font-size: 16px; font-weight: 500; color: var(--text); }
-.jv-acct-plan-price { font-size: 13px; color: var(--text-2); }
-.jv-acct-renewal { font-size: 13px; color: var(--text-3); margin-top: 6px; }
-.jv-acct-features { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 7px; font-size: 13px; color: var(--text-2); }
-.jv-acct-features li { display: flex; align-items: flex-start; gap: 8px; }
-.jv-acct-features li svg { color: var(--green); flex: none; margin-top: 1px; }
-.jv-acct-upgrades { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
-.jv-acct-upgrades-label { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
-.jv-acct-upgrade-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
-.jv-acct-upgrade-card { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
-.jv-acct-upgrade-head { padding: 10px 12px; border-bottom: 1px solid var(--border); }
-.jv-acct-upgrade-name { font-size: 13px; font-weight: 500; color: var(--text); }
-.jv-acct-upgrade-price { font-size: 12.5px; color: var(--text-3); margin-top: 2px; }
-.jv-acct-upgrade-act { padding: 10px 12px; margin-top: auto; }
+.jv-acct-card {
+	padding: 2px 0;
+}
+.jv-acct-card h2 {
+	font-size: 14px;
+	font-weight: 600;
+	margin: 0 0 10px;
+	color: var(--text);
+}
+.jv-acct-card-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+	margin-bottom: 4px;
+}
+.jv-acct-card-head h2 {
+	margin-bottom: 0;
+}
+.jv-acct-sub {
+	color: var(--text-3);
+	font-weight: 420;
+	font-size: 12px;
+}
+.jv-acct-muted,
+.jv-acct-err {
+	font-size: 13px;
+	color: var(--text-3);
+}
+.jv-acct-err {
+	color: var(--red);
+}
+.jv-acct-pill {
+	font-size: 12px;
+	font-weight: 420;
+	height: 20px;
+	display: inline-flex;
+	align-items: center;
+	padding: 0 8px;
+	border-radius: 999px;
+	flex: none;
+}
+.jv-pill-ok {
+	color: var(--green);
+	background: var(--green-bg);
+}
+.jv-pill-warn {
+	color: var(--amber);
+	background: var(--amber-bg);
+}
+.jv-pill-bad {
+	color: var(--red);
+	background: var(--red-bg);
+}
+.jv-pill-muted {
+	color: var(--text-3);
+	background: var(--surface-2);
+}
+.jv-acct-plan-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+.jv-acct-plan-name {
+	font-size: 16px;
+	font-weight: 500;
+	color: var(--text);
+}
+.jv-acct-plan-price {
+	font-size: 13px;
+	color: var(--text-2);
+}
+.jv-acct-renewal {
+	font-size: 13px;
+	color: var(--text-3);
+	margin-top: 6px;
+}
+.jv-acct-features {
+	list-style: none;
+	margin: 12px 0 0;
+	padding: 0;
+	display: grid;
+	gap: 7px;
+	font-size: 13px;
+	color: var(--text-2);
+}
+.jv-acct-features li {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+}
+.jv-acct-features li svg {
+	color: var(--green);
+	flex: none;
+	margin-top: 1px;
+}
+.jv-acct-upgrades {
+	margin-top: 20px;
+	padding-top: 16px;
+	border-top: 1px solid var(--border);
+}
+.jv-acct-upgrades-label {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text);
+	margin-bottom: 10px;
+}
+.jv-acct-upgrade-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+	gap: 10px;
+}
+.jv-acct-upgrade-card {
+	display: flex;
+	flex-direction: column;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--surface);
+	overflow: hidden;
+}
+.jv-acct-upgrade-head {
+	padding: 10px 12px;
+	border-bottom: 1px solid var(--border);
+}
+.jv-acct-upgrade-name {
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--text);
+}
+.jv-acct-upgrade-price {
+	font-size: 12.5px;
+	color: var(--text-3);
+	margin-top: 2px;
+}
+.jv-acct-upgrade-act {
+	padding: 10px 12px;
+	margin-top: auto;
+}
 /* the upgrade CTA is an <a> (same Desk href) rendered as a quiet subtle button */
-.jv-acct-btn-sm { display: flex; align-items: center; justify-content: center; width: 100%; height: 28px; font-size: 12.5px; font-weight: 500; color: var(--text); text-decoration: none; border-radius: 8px; background: var(--surface-2); transition: background-color .15s ease; }
-.jv-acct-btn-sm:hover { background: var(--surface-3); }
+.jv-acct-btn-sm {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 100%;
+	height: 28px;
+	font-size: 12.5px;
+	font-weight: 500;
+	color: var(--text);
+	text-decoration: none;
+	border-radius: 8px;
+	background: var(--surface-2);
+	transition: background-color 0.15s ease;
+}
+.jv-acct-btn-sm:hover {
+	background: var(--surface-3);
+}
 /* scheduled-cancellation banner: warn-toned, above the plan actions */
-.jv-acct-notice { margin-top: 12px; padding: 9px 11px; border-radius: 8px; background: var(--surface-2); font-size: 12.5px; color: var(--text-2); }
+.jv-acct-notice {
+	margin-top: 12px;
+	padding: 9px 11px;
+	border-radius: 8px;
+	background: var(--surface-2);
+	font-size: 12.5px;
+	color: var(--text-2);
+}
 /* notice with an inline action (the cancellation notice carries Resume) */
-.jv-acct-notice--row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.jv-acct-notice--row > span { min-width: 0; }
+.jv-acct-notice--row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+.jv-acct-notice--row > span {
+	min-width: 0;
+}
 /* plan lifecycle actions (cancel / resume) sit below the feature list */
-.jv-acct-actions { display: flex; gap: 8px; margin-top: 16px; }
-.jv-acct-actions .jv-acct-btn-sm { width: auto; padding: 0 12px; }
+.jv-acct-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 16px;
+}
+.jv-acct-actions .jv-acct-btn-sm {
+	width: auto;
+	padding: 0 12px;
+}
 /* manage-billing: a plain text link (design.md §4.2) */
-.jv-acct-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 18px; font-size: 13px; color: var(--link); text-decoration: none; }
-.jv-acct-link:hover { text-decoration: underline; }
-.jv-acct-link svg { flex: none; }
+.jv-acct-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	margin-top: 18px;
+	font-size: 13px;
+	color: var(--link);
+	text-decoration: none;
+}
+.jv-acct-link:hover {
+	text-decoration: underline;
+}
+.jv-acct-link svg {
+	flex: none;
+}
 /* manage footer: billing link left, quiet cancel action right (same baseline) */
-.jv-acct-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; }
-.jv-acct-footer .jv-acct-link { margin-top: 0; }
+.jv-acct-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 18px;
+}
+.jv-acct-footer .jv-acct-link {
+	margin-top: 0;
+}
 /* cancel: a quiet text link, red only on hover — confirm dialog owns the red */
-.jv-acct-cancel { flex: none; padding: 0; border: 0; background: none; font: inherit; font-size: 13px; color: var(--text-3); cursor: pointer; transition: color .15s ease; }
-.jv-acct-cancel:hover:not(:disabled) { color: var(--red); text-decoration: underline; }
-.jv-acct-cancel:disabled { opacity: .5; cursor: default; }
-.jv-acct-savednote { font-size: 12px; color: var(--text-3); font-weight: 420; }
-.jv-acct-usage-line { font-size: 13px; color: var(--text-2); }
+.jv-acct-cancel {
+	flex: none;
+	padding: 0;
+	border: 0;
+	background: none;
+	font: inherit;
+	font-size: 13px;
+	color: var(--text-3);
+	cursor: pointer;
+	transition: color 0.15s ease;
+}
+.jv-acct-cancel:hover:not(:disabled) {
+	color: var(--red);
+	text-decoration: underline;
+}
+.jv-acct-cancel:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+.jv-acct-savednote {
+	font-size: 12px;
+	color: var(--text-3);
+	font-weight: 420;
+}
+.jv-acct-usage-line {
+	font-size: 13px;
+	color: var(--text-2);
+}
 
-/* ===== Monitor cards (Billing & metering / Connection) ===== */
-.jv-mon { display: grid; gap: 12px; }
-.jv-mon-card { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--surface); }
-.jv-mon-card h3 { font-size: 14px; font-weight: 600; margin: 0 0 10px; color: var(--text); }
-.jv-mon-sub, .jv-mon-tag { color: var(--text-3); font-weight: 420; font-size: 12px; }
-.jv-mon-kv { display: flex; justify-content: space-between; font-size: 13px; padding: 6px 0; }
-.jv-mon-kv span { color: var(--text-3); }
-.jv-mon-kv b { font-weight: 500; color: var(--text); }
-.jv-mon-models { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
-.jv-mon-stats { display: flex; gap: 20px; margin-bottom: 10px; font-size: 13px; }
-.jv-mon-note, .jv-mon-empty { font-size: 13px; color: var(--text-3); line-height: 1.5; }
-.jv-mon-empty { padding: 40px; text-align: center; }
+/* ===== Monitor cards (Billing & metering) ===== */
+.jv-mon {
+	display: grid;
+	gap: 12px;
+}
+.jv-mon-card {
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	padding: 14px 16px;
+	background: var(--surface);
+}
+.jv-mon-card h3 {
+	font-size: 14px;
+	font-weight: 600;
+	margin: 0 0 10px;
+	color: var(--text);
+}
+.jv-mon-sub,
+.jv-mon-tag {
+	color: var(--text-3);
+	font-weight: 420;
+	font-size: 12px;
+}
+.jv-mon-kv {
+	display: flex;
+	justify-content: space-between;
+	font-size: 13px;
+	padding: 6px 0;
+}
+.jv-mon-kv span {
+	color: var(--text-3);
+}
+.jv-mon-kv b {
+	font-weight: 500;
+	color: var(--text);
+}
+.jv-mon-models {
+	margin: 6px 0 0;
+	padding-left: 18px;
+	font-size: 13px;
+}
+.jv-mon-stats {
+	display: flex;
+	gap: 20px;
+	margin-bottom: 10px;
+	font-size: 13px;
+}
+.jv-mon-note,
+.jv-mon-empty {
+	font-size: 13px;
+	color: var(--text-3);
+	line-height: 1.5;
+}
+.jv-mon-empty {
+	padding: 40px;
+	text-align: center;
+}
 /* retry — same recipe as jv-btn--ghost --sm (one retry pattern, design.md §3.8) */
-.jv-mon-retry { display: inline-flex; align-items: center; margin-left: 6px; height: 24px; border: none; background: var(--surface-2); color: var(--text); border-radius: 8px; padding: 0 10px; font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background-color .15s ease; }
-.jv-mon-retry:hover { background: var(--surface-3); }
+.jv-mon-retry {
+	display: inline-flex;
+	align-items: center;
+	margin-left: 6px;
+	height: 24px;
+	border: none;
+	background: var(--surface-2);
+	color: var(--text);
+	border-radius: 8px;
+	padding: 0 10px;
+	font-size: 12px;
+	font-weight: 500;
+	font-family: inherit;
+	cursor: pointer;
+	transition: background-color 0.15s ease;
+}
+.jv-mon-retry:hover {
+	background: var(--surface-3);
+}
 
 /* AI-models tabs share the segmented recipe above; only the margin is local. */
-.jv-acct-aitabs { margin-bottom: 14px; }
+.jv-acct-aitabs {
+	margin-bottom: 14px;
+}
 
 /* Rail group headers — 12px medium, sentence case (design.md §2.3; no uppercase). */
-.jv-settings-group { font-size: 12px; font-weight: 500; color: var(--text-3); padding: 14px 8px 5px; display: flex; align-items: center; gap: 6px; }
-
-
-/* Connection status colouring — ConnectionPane uses jv-ok/jv-warn inside a
-   jv-mon-kv row. */
-.jv-mon-kv .jv-ok { color: var(--green); }
-.jv-mon-kv .jv-warn { color: var(--amber); }
+.jv-settings-group {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--text-3);
+	padding: 14px 8px 5px;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
 
 /* Header close icon-button — quiet ghost hover (no colour inversion).
    This is the ONLY global `.jv-iconbtn`, and its hover is deliberately NOT the
@@ -264,19 +1119,40 @@
    and components/chat/Composer.vue, which carry !important and would beat this
    rule if they were ever unscoped). Three copies is intentional: sync the two
    chat ones with each other, leave this one alone. */
-.jv-iconbtn { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; background: transparent; border: none; border-radius: 8px; cursor: pointer; color: var(--text-3); transition: background-color .15s ease, color .15s ease; }
-.jv-iconbtn:hover { background: var(--surface-2); color: var(--text); }
+.jv-iconbtn {
+	width: 28px;
+	height: 28px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	border: none;
+	border-radius: 8px;
+	cursor: pointer;
+	color: var(--text-3);
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+.jv-iconbtn:hover {
+	background: var(--surface-2);
+	color: var(--text);
+}
 
 /* ===== geometry/scrim overrides — kept textually identical to the
    pre-restyle file so in-flight settings PRs (#278 dialog resize) merge
    cleanly in either order; being last, these win the cascade. ===== */
-.jv-settings-overlay.jv-dark { background: rgba(0, 0, 0, 0.55); }
+.jv-settings-overlay.jv-dark {
+	background: rgba(0, 0, 0, 0.55);
+}
 /* Widened dialog + roomier grouped rail. */
 /* NOTE: this block is LAST, so it wins the cascade over the .jv-settings rule at
    the top of the file. Any width change must be made in BOTH places or it will
    appear to do nothing. */
-.jv-settings { width: 1080px; }
-.jv-settings-nav { width: 230px; }
+.jv-settings {
+	width: 1080px;
+}
+.jv-settings-nav {
+	width: 230px;
+}
 
 /* ===== narrow screens =======================================================
    The rail is `flex: none; width: 230px`, so it never shrinks: at a 390px
@@ -286,27 +1162,67 @@
    row; the items stay in the same order, so the grouping is still implied.
    Placed at the very end so it outranks BOTH .jv-settings blocks above. */
 @media (max-width: 720px) {
-	.jv-settings-overlay { padding: 12px; }
-	.jv-settings { width: 100%; flex-direction: column; height: 92vh; max-height: 92vh; border-radius: 14px; }
-	.jv-settings-nav {
-		width: 100%; flex: none; flex-direction: row; align-items: center; gap: 6px;
-		padding: 8px 10px; overflow-x: auto; overflow-y: hidden;
-		border-right: 0; border-bottom: 1px solid var(--border);
+	.jv-settings-overlay {
+		padding: 12px;
 	}
-	.jv-settings-nav-title, .jv-settings-group { display: none; }
-	.jv-settings-navitem { width: auto; flex: none; white-space: nowrap; }
-	.jv-settings-body { padding: 4px 16px 20px; }
+	.jv-settings {
+		width: 100%;
+		flex-direction: column;
+		height: 92vh;
+		max-height: 92vh;
+		border-radius: 14px;
+	}
+	.jv-settings-nav {
+		width: 100%;
+		flex: none;
+		flex-direction: row;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 10px;
+		overflow-x: auto;
+		overflow-y: hidden;
+		border-right: 0;
+		border-bottom: 1px solid var(--border);
+	}
+	.jv-settings-nav-title,
+	.jv-settings-group {
+		display: none;
+	}
+	.jv-settings-navitem {
+		width: auto;
+		flex: none;
+		white-space: nowrap;
+	}
+	.jv-settings-body {
+		padding: 4px 16px 20px;
+	}
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .jv-fade-enter-active, .jv-fade-leave-active { transition: none; }
-  .jv-settings { animation: none; }
+	.jv-fade-enter-active,
+	.jv-fade-leave-active {
+		transition: none;
+	}
+	.jv-settings {
+		animation: none;
+	}
 }
 
 /* Admin tag — small pill next to the "Administration" rail group heading
    (SettingsDialog.vue), marking that group as gated to Jarvis Admin/System
    Manager, matching the .jv-mon-tag colour recipe (blue, not the green/amber
    status tones used elsewhere). */
-.sm-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 20px;
-  font-size: 9px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
-  background: var(--blue-bg); border: 1px solid var(--blue-bd); color: var(--text-2); vertical-align: middle; }
+.sm-tag {
+	display: inline-block;
+	margin-left: 6px;
+	padding: 1px 6px;
+	border-radius: 20px;
+	font-size: 9px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	background: var(--blue-bg);
+	border: 1px solid var(--blue-bd);
+	color: var(--text-2);
+	vertical-align: middle;
+}
