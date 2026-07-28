@@ -32,7 +32,7 @@ boot_session = "jarvis.boot.set_jarvis_boot"
 # change this string + ship a new release.
 # (``DEFAULT_ADMIN_URL`` is re-exported by ``jarvis.admin_client`` so existing
 # imports keep working - resolved lazily via module __getattr__ below.)
-_DEFAULT_ADMIN_URL_FALLBACK = "https://admin.klerk.in"
+_DEFAULT_ADMIN_URL_FALLBACK = "https://fleet.klerk.in"
 
 
 def get_default_admin_url() -> str:
