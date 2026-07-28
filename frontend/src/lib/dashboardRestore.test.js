@@ -120,21 +120,13 @@ test("the page records WHICH message is on the canvas, under the same key", () =
 	assert.match(fnBody(pageSrc, "async function loadEdit("), /canvasMsg\.value = "";/);
 });
 
-test("a restore never overwrites a live canvas or an explicit ?edit target", () => {
+test("a restore never overwrites a live canvas, an ?edit target or a promotion", () => {
 	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
-	assert.match(
-		onCanvas,
-		/if \(restore && \(builderHtml\.value \|\| editSeed\.value\)\) return;/
-	);
+	const guard =
+		/if \(restore && \(builderHtml\.value \|\| editSeed\.value \|\| promotionPending\.value\)\)\s*\n?\s*return false;/;
+	assert.match(onCanvas, guard);
 	// re-checked AFTER the get_canvas round trip, not just before it
-	assert.equal(
-		(
-			onCanvas.match(
-				/if \(restore && \(builderHtml\.value \|\| editSeed\.value\)\) return;/g
-			) || []
-		).length,
-		2
-	);
+	assert.equal((onCanvas.match(new RegExp(guard.source, "g")) || []).length, 2);
 	// a failed replay is silent; only a live frame's failure is surfaced
 	assert.match(onCanvas, /else toast\.error\(errMsg\(e\)\);/);
 });
@@ -145,8 +137,11 @@ test("an unreadable artifact is retried never, not on every transcript load", ()
 	// run of silent get_canvas calls.
 	assert.match(pageSrc, /const failedRestores = new Set\(\);/);
 	const onCanvas = fnBody(pageSrc, "async function onCanvas(");
-	assert.match(onCanvas, /if \(restore && failedRestores\.has\(message_id\)\) return;/);
-	assert.match(onCanvas, /if \(restore\) failedRestores\.add\(message_id\);/);
+	assert.match(onCanvas, /if \(restore && failedRestores\.has\(message_id\)\) return false;/);
+	// the latch moved into restoreFailed(), which an ADOPTION also self-heals from
+	// (dashboardOpen.test.js owns that half) — it is still the first thing it does
+	assert.match(onCanvas, /if \(restore\) restoreFailed\(message_id\);/);
+	assert.match(fnBody(pageSrc, "function restoreFailed("), /failedRestores\.add\(message_id\);/);
 });
 
 // ---- D3: switching tabs must not tear the build pipeline down -----------
@@ -182,8 +177,14 @@ test("a remount restores WHAT WAS BEING EDITED, not just the pixels", () => {
 	assert.match(saveDialogSrc, /if \(e && e\.name\) payload\.name = e\.name;/);
 	assert.match(pageSrc, /:editing="editingDetail"/);
 	assert.match(pageSrc, /const editingSticky = useStorage\(`jarvis-dash-editing-\$\{/);
-	// seeded at setup, BEFORE the chat pane's transcript replay can reach the canvas
-	assert.match(pageSrc, /const editSeed = ref\(routeEdit \|\| editingSticky\.value\);/);
+	// seeded at setup, BEFORE the chat pane's transcript replay can reach the
+	// canvas. The one exception is a builder that went away mid-ADOPTION, where
+	// the canvas WAS the transcript's build and the stored row is behind it
+	// (dashboardOpen.test.js owns that path) — the identity still comes back.
+	assert.match(
+		pageSrc,
+		/const editSeed = ref\(routeEdit \|\| \(adoptionResume \? "" : editingSticky\.value\)\);/
+	);
 	assert.match(
 		pageSrc,
 		/if \(editSeed\.value\) loadEdit\(editSeed\.value, \{ deepLink: !!routeEdit \}\);/
@@ -237,15 +238,17 @@ test("the discard confirm offers the surviving chat instead of just naming it", 
 	const actions = pageSrc.slice(pageSrc.indexOf("const discardActions = computed("));
 	assert.match(actions, /label: "Open its chat"/);
 	assert.match(actions, /router\.push\("\/c\/" \+ id\)/);
-	// ...only when there IS one
-	assert.match(actions, /if \(chatConv\.value\) \{/);
+	// ...only when there IS one, and only when going there is actually an escape
+	// (a caller already acting on that same conversation drops it — see
+	// dashboardOpen.test.js for the promotion that would otherwise loop)
+	assert.match(actions, /if \(chatConv\.value && discardOfferChat\.value\) \{/);
 });
 
 test("New chat asks the page instead of clearing itself behind a confirm", () => {
 	// The pane owns no canvas, so it must not act before the page has asked.
 	assert.match(fnBody(paneSrc, "function newChat("), /emit\("reset"\)/);
 	assert.doesNotMatch(fnBody(paneSrc, "function newChat("), /conversation\.value = ""/);
-	assert.match(paneSrc, /defineExpose\(\{ resetChat, sendText \}\)/);
+	assert.match(paneSrc, /defineExpose\(\{ resetChat, sendText, restoreCanvas \}\)/);
 	assert.match(fnBody(pageSrc, "function clearBuilder("), /chatPane\.value\.resetChat\(\)/);
 });
 

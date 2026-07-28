@@ -607,7 +607,16 @@ function sendText(text) {
 	draft.value = t;
 	send();
 }
-defineExpose({ resetChat, sendText });
+// Re-issue the transcript's restore frame. The page holds restores off while a
+// ?chat=&canvas= promotion is in flight (an explicit deep-link owns the canvas);
+// if that promotion is then declined or fails, the frame this pane already
+// emitted has been dropped, and the builder would sit empty until some later
+// transcript load. Declining must leave the builder as it was, so ask again.
+function restoreCanvas() {
+	const frame = builderCanvasFrame(messages.value, canvasMsg.value);
+	if (frame) emit("canvas", { ...frame, restore: true });
+}
+defineExpose({ resetChat, sendText, restoreCanvas });
 
 // ── realtime ──────────────────────────────────────────────────────────────────
 function onEvent(p) {
