@@ -172,6 +172,26 @@ function findBenchRoot(dir) {
 	}
 }
 
+// src/socket.js imports the bench's common_site_config.json by a FIXED relative
+// depth ("../../../../sites/..."), which only resolves when frontend/ sits at
+// apps/<app>/frontend. From a git worktree it is nested deeper
+// (.claude/worktrees/<name>/frontend), the specifier lands somewhere that does
+// not exist, and the whole build dies on "Could not resolve". findBenchRoot
+// already walks up rather than counting levels, which is exactly the property
+// the depth-based specifier lacks, so point the alias at the file it found.
+//
+// Aliased here rather than edited in socket.js so the source keeps a plain
+// relative import that still resolves for anyone reading it, and so this stays
+// one build-config concern in one place.
+function commonSiteConfigPath() {
+	const benchRoot = findBenchRoot(__dirname);
+	return benchRoot
+		? path.join(benchRoot, "sites", "common_site_config.json")
+		: // No bench above us (a bare checkout, CI without a bench). Fall back to
+		  // the original literal so the failure mode is unchanged rather than new.
+		  path.resolve(__dirname, "../../../../sites/common_site_config.json");
+}
+
 function getWebserverPort() {
 	if (process.env.FRAPPE_WEB_SERVER_PORT) {
 		return Number(process.env.FRAPPE_WEB_SERVER_PORT);
@@ -278,6 +298,7 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			"@": path.resolve(__dirname, "src"),
+			"../../../../sites/common_site_config.json": commonSiteConfigPath(),
 		},
 		// wiki-graph-core is a self-contained file: package (own vue in its
 		// node_modules); dedupe keeps a single Vue instance shared with the app.
