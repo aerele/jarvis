@@ -391,6 +391,41 @@
 									/>
 								</div>
 							</template>
+							<template v-else-if="state.payPhase === 'reconnect'">
+								<div class="ob-body">
+									<div class="ob-head">
+										<h1>Check your email</h1>
+										<p>
+											We sent a reconnect link to
+											<b>{{ state.email || "your email" }}</b
+											>. Approving it connects this site to your existing
+											subscription — nothing to pay again. Waiting for your
+											approval…
+										</p>
+									</div>
+									<div class="mt-2.5 flex justify-center">
+										<JvSpinner :size="56" />
+									</div>
+									<p class="text-center text-p-sm text-ink-gray-5">
+										The link expires in 1 hour and signs your old site out. If
+										your inbox is unreachable, contact support — an operator
+										can approve the reconnect instead.
+									</p>
+									<Banner
+										v-if="state.payErr"
+										type="error"
+										:message="state.payErr"
+									/>
+								</div>
+								<div class="ob-foot">
+									<button class="ob-back" @click="cancelReconnect">
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
+									</button>
+								</div>
+							</template>
 							<template v-else-if="state.successData">
 								<div class="ob-body">
 									<div class="ob-head">
@@ -560,6 +595,21 @@
 										:message="state.payErr"
 										class="mx-auto mt-3.5 max-w-[560px]"
 									/>
+									<div
+										v-if="state.reconnectOffered && !state.payBusy"
+										class="mx-auto mt-2 max-w-[560px] text-center"
+									>
+										<Button
+											variant="subtle"
+											label="Already subscribed? Reconnect this site"
+											@click="startReconnect"
+										/>
+										<p class="mt-1.5 text-p-sm text-ink-gray-5">
+											We'll email a link to {{ state.email }} — approving it
+											connects this site to your existing subscription.
+											Nothing to pay again.
+										</p>
+									</div>
 								</div>
 								<div class="ob-foot">
 									<button
@@ -861,6 +911,8 @@ import {
 	getLlmSyncStatus,
 	listPlans,
 	listPaymentProviders,
+	startAccountReconnect,
+	checkAccountReconnect,
 	startSignup,
 	finishPayment,
 	saveSelfHosted,
@@ -928,7 +980,9 @@ const state = reactive({
 	plansLoading: false,
 	plansErr: "",
 	// pay (renderPay / renderVerifyEmail / startPay / openCheckout)
-	payPhase: "review", // "review" | "verify" - mirrors desk's step-3 vs "check your email" sub-screen
+	payPhase: "review", // "review" | "verify" | "reconnect" - step-3 sub-screens
+	reconnectOffered: false,
+	reconnectRequestId: "",
 	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
 	// Gateways the operator has actually enabled, narrowed to what this build
 	// can render. Starts as razorpay-only so the step is never briefly empty
@@ -1354,6 +1408,10 @@ async function runStartPay() {
 	} catch (e) {
 		state.payBusy = false;
 		state.payErr = errMsg(e);
+		// The duplicate-email rejection on a FRESH bench (no stored creds to
+		// auto-resume with) usually means "my old site died" - offer the
+		// reconnect path instead of the dead end.
+		state.reconnectOffered = /already registered or pending/i.test(state.payErr);
 	}
 }
 
@@ -1393,6 +1451,62 @@ async function onVerifyCheck() {
 	} catch (e) {
 		state.payBusy = false;
 		state.payErr = errMsg(e);
+	}
+}
+
+function cancelReconnect() {
+	state.payPhase = "review";
+	state.payErr = "";
+	state.reconnectRequestId = "";
+}
+
+// "Already subscribed? Reconnect this site": start the admin-side magic-link
+// flow and switch the pay step into the waiting screen. The poll below rides
+// until the customer clicks the emailed link (or an operator approves).
+async function startReconnect() {
+	state.payErr = "";
+	state.reconnectOffered = false;
+	state.payBusy = true;
+	try {
+		const d = await startAccountReconnect(state.email);
+		state.reconnectRequestId = (d && d.request) || "";
+		state.payPhase = "reconnect";
+		pollReconnect();
+	} catch (e) {
+		state.payErr = errMsg(e);
+		state.reconnectOffered = true;
+	} finally {
+		state.payBusy = false;
+	}
+}
+
+async function pollReconnect() {
+	const deadline = Date.now() + 10 * 60 * 1000;
+	while (state.payPhase === "reconnect" && Date.now() < deadline) {
+		try {
+			const d = await checkAccountReconnect(state.reconnectRequestId);
+			if (d && d.status === "connected") {
+				// Same handoff as a completed payment: poll sync_connection to the
+				// customer's EXISTING container, then continue to the LLM step
+				// (this fresh site has no local LLM config to reuse).
+				state.successData = {};
+				await proceedAfterPay();
+				return;
+			}
+			if (d && d.status === "expired") {
+				state.payErr = "The reconnect request expired. Start it again.";
+				state.payPhase = "review";
+				state.reconnectOffered = true;
+				return;
+			}
+		} catch (e) {
+			/* transient admin hiccup - keep polling */
+		}
+		await _sleep(3000);
+	}
+	if (state.payPhase === "reconnect") {
+		state.payErr =
+			"Still waiting for the email approval. Click the link in your inbox, then this page will continue automatically.";
 	}
 }
 

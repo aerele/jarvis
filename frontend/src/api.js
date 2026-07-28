@@ -38,6 +38,12 @@ export const setAutoApply = (conversation, value) =>
 // null/zeros until then (design doc §6, UsagePane's "Measured usage" block).
 export const getUsage = (conversation) =>
 	call("jarvis.chat.api.get_usage", { conversation: conversation || "" });
+// ---- account reconnect (fresh bench -> existing paid subscription) ---------
+export const startAccountReconnect = (email) =>
+	call("jarvis.onboarding.start_account_reconnect", { email });
+export const checkAccountReconnect = (requestId) =>
+	call("jarvis.onboarding.check_account_reconnect", { request_id: requestId });
+
 export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
 
 // ---- workspace reset (customer self-serve, admin-gated) --------------------
