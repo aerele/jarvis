@@ -61,9 +61,9 @@
 					<Button variant="solid" label="Resume" :loading="busy" @click="doResume" />
 				</div>
 
-				<ul v-if="planFeatures.length" class="mt-4 flex flex-col gap-2">
+				<ul v-if="features.length" class="mt-4 flex flex-col gap-2">
 					<li
-						v-for="(f, i) in planFeatures"
+						v-for="(f, i) in features"
 						:key="i"
 						class="flex items-center gap-2 text-p-sm text-ink-gray-7"
 					>
@@ -76,9 +76,9 @@
 			<!-- A downgrade already scheduled: state it plainly, and put the one
 			     affordance that undoes it right here, mirroring the cancellation
 			     notice above. Undoing an Annual switch is a plain flag the server
-			     clears, so it happens inline; a Monthly one already migrated the
-			     mandate, so undoing needs a Razorpay checkout this pane does not
-			     host and it deep-links to Desk instead (anti-pattern 15).
+			     clears, so it happens inline. A Monthly one already migrated the
+			     mandate, so undoing it needs a Razorpay checkout, which this
+			     summary pane does not host - the billing page does.
 			     Subtle, never solid: Resume above is the pane's single solid
 			     button. -->
 			<div
@@ -87,110 +87,26 @@
 			>
 				<span class="text-p-sm text-ink-gray-7">{{ scheduledDowngradeNotice }}</span>
 				<Button
-					v-if="account.scheduled_downgrade_revocable"
 					variant="subtle"
 					label="Keep current plan"
 					:loading="busy"
-					@click="doCancelDowngrade"
+					@click="
+						account.scheduled_downgrade_revocable ? doCancelDowngrade() : goBilling()
+					"
 				/>
-				<a v-else :href="billingUrl" class="text-base text-ink-blue-link hover:underline">
-					Keep current plan in Desk
-				</a>
 			</div>
-
-			<!-- Upgrade / Renew deep-link to the existing Desk billing flow
-			     (Razorpay checkout). Rendered as plain text links, not as buttons:
-			     they leave the SPA, and design.md §5 anti-pattern 15 keeps the Desk
-			     billing link a plain text link until the flow moves in-SPA.
-			     Hidden while cancelling: the server refuses upgrades with
-			     ResumeBeforeUpgrade, and a CTA that 400s is worse than none. -->
-			<template v-if="upgradePlans.length && !cancelling">
-				<hr class="my-8" />
-				<h3 class="text-base font-semibold text-ink-gray-9">Upgrade options</h3>
-				<div class="mt-3 grid grid-cols-2 gap-4">
-					<div
-						v-for="p in upgradePlans"
-						:key="p.name"
-						class="flex flex-col gap-1 rounded-md border p-4"
-					>
-						<span class="text-base font-medium text-ink-gray-8">
-							{{ p.plan_name || p.name }}
-						</span>
-						<span class="text-p-sm text-ink-gray-6">
-							{{ planPriceLabel(p.price_inr, p.billing_cycle) }}
-						</span>
-						<a
-							:href="billingUrl"
-							class="mt-2 text-base text-ink-blue-link hover:underline"
-						>
-							Upgrade in Desk
-						</a>
-					</div>
-				</div>
-			</template>
-
-			<!-- Switch to a smaller plan. Same card grid as Upgrade rather than a
-			     second invented layout; it reads quieter purely by sitting below.
-			     Applies at the NEXT cycle, so the heading says "switch", not
-			     "downgrade now". Hidden while cancelling, and once one is already
-			     scheduled the notice above replaces it. -->
-			<template v-if="downgradePlans.length && !cancelling && !scheduledDowngrade">
-				<hr class="my-8" />
-				<h3 class="text-base font-semibold text-ink-gray-9">Switch to a smaller plan</h3>
-				<p class="mt-1 text-p-sm text-ink-gray-6">
-					You keep your current plan until the end of this billing period.
-				</p>
-				<div class="mt-3 grid grid-cols-2 gap-4">
-					<div
-						v-for="p in downgradePlans"
-						:key="p.name"
-						class="flex flex-col gap-1 rounded-md border p-4"
-					>
-						<span class="text-base font-medium text-ink-gray-8">
-							{{ p.plan_name || p.name }}
-						</span>
-						<span class="text-p-sm text-ink-gray-6">
-							{{ planPriceLabel(p.price_inr, p.billing_cycle) }}
-						</span>
-						<a
-							:href="billingUrl"
-							class="mt-2 text-base text-ink-blue-link hover:underline"
-						>
-							Switch in Desk
-						</a>
-					</div>
-				</div>
-			</template>
-
-			<!-- Lapsed: renewing is the point (it is where the chat suspension
-			     banner sends them), so it gets its own section rather than being
-			     buried in the footer. -->
-			<template v-if="ended">
-				<hr class="my-8" />
-				<h3 class="text-base font-semibold text-ink-gray-9">Renew</h3>
-				<p class="mt-1 text-p-sm text-ink-gray-6">
-					Your subscription has ended. Renewing restores access straight away.
-				</p>
-				<a
-					:href="billingUrl"
-					class="mt-2 inline-block text-base text-ink-blue-link hover:underline"
-				>
-					Renew subscription in Desk
-				</a>
-			</template>
 
 			<!-- Autopay off but re-armable. This MUST carry an action: a released
 			     mandate is terminal at Razorpay, so neither resume nor a one-shot
 			     renew brings auto-renewal back, and the notice alone left the
-			     customer told to "set up payment again" with nothing to click. -->
+			     customer told to "set up payment again" with nothing to click.
+			     Re-arming means a mandate checkout, so it hands off to the page. -->
 			<div
 				v-if="account.can_reauthorize"
 				class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border p-4"
 			>
 				<span class="text-p-sm text-ink-gray-7">{{ reauthBanner }}</span>
-				<a :href="billingUrl" class="text-base text-ink-blue-link hover:underline">
-					Set up auto-renewal in Desk
-				</a>
+				<Button variant="subtle" label="Set up auto-renewal" @click="goBilling" />
 			</div>
 			<p
 				v-else-if="reauthNotice"
@@ -201,15 +117,24 @@
 
 			<hr class="my-8" />
 
-			<!-- Manage footer. Cancel is a red SUBTLE button, never red solid: the
-			     confirm dialog owns the deliberate red step, and a solid red
-			     resting on the pane just makes it hostile (design.md §4.1 danger
-			     zone). Hidden while cancelling (Resume is above) or ended (there is
-			     nothing left to cancel). -->
+			<!-- Manage footer. This pane is a SUMMARY: it keeps the state and the
+			     three in-place actions that need no payment (cancel, resume, undo
+			     a revocable switch), and every action that takes money lives on
+			     the billing page. The plan-comparison grids that used to sit here
+			     went with them - showing plan cards in both places is how the two
+			     surfaces drift apart.
+
+			     Cancel is a red SUBTLE button, never red solid: the confirm dialog
+			     owns the deliberate red step, and a solid red resting on the pane
+			     just makes it hostile (design.md §4.1 danger zone). Hidden while
+			     cancelling (Resume is above) or ended (nothing left to cancel). -->
 			<div class="flex items-center justify-between gap-4">
-				<a :href="billingUrl" class="text-base text-ink-blue-link hover:underline">
-					Manage plan and billing in Desk
-				</a>
+				<Button
+					variant="solid"
+					:label="ended ? 'Renew subscription' : 'Manage plan and billing'"
+					iconRight="arrow-right"
+					@click="goBilling"
+				/>
 				<Button
 					v-if="!cancelling && !ended"
 					variant="subtle"
@@ -225,45 +150,43 @@
 
 <script setup>
 import { ref, computed, onMounted } from "vue";
+import { useRouter } from "vue-router";
 import { Badge, Button, FeatherIcon } from "frappe-ui";
 import { getAccount, cancelPlanAtPeriodEnd, resumePlan, cancelScheduledDowngrade } from "@/api";
 import {
 	statusLabel,
 	pillTone,
 	planPriceLabel,
+	planFeatures,
 	renewalLabel,
 	cancelActionLabel,
 	cancelPillLabel,
 	cancellationNotice,
 } from "@/account/format.js";
 import { useConfirm } from "@/composables/useConfirm";
+import { useShellStore } from "@/stores/shell";
 import { errMessage as errMsg } from "@/lib/errors";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 
 const { confirm } = useConfirm();
+const router = useRouter();
+const store = useShellStore();
 
-// The desk page (still Razorpay-backed) is the existing billing entry point.
-const billingUrl = "/app/jarvis-account?billing=1";
+// Billing is a full page now, not a Desk trip. Closing the dialog first matters:
+// routing underneath an open modal leaves the customer looking at settings on
+// top of the page they asked for.
+function goBilling() {
+	store.settingsOpen = false;
+	router.push({ name: "Billing" });
+}
 
 const account = ref({});
 const accountLoading = ref(true);
 const accountErr = ref("");
 
-const planFeatures = computed(() => {
-	const f = account.value.plan && account.value.plan.features;
-	if (Array.isArray(f)) return f;
-	if (typeof f === "string" && f.trim()) {
-		try {
-			const parsed = JSON.parse(f);
-			return Array.isArray(parsed) ? parsed : [];
-		} catch (e) {
-			return [];
-		}
-	}
-	return [];
-});
-const upgradePlans = computed(() => account.value.upgrade_plans || []);
-const downgradePlans = computed(() => account.value.downgrade_plans || []);
+// Shared with the billing page's cards via account/format.js, so the two
+// surfaces cannot disagree about what a plan includes.
+const features = computed(() => planFeatures(account.value.plan));
 const scheduledDowngrade = computed(() => !!account.value.scheduled_plan);
 const scheduledDowngradeNotice = computed(() => {
 	const name =

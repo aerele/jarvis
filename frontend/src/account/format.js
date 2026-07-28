@@ -87,6 +87,41 @@ export function planPriceLabel(priceInr, billingCycle) {
 	const suffix = planSuffix(priceInr, billingCycle);
 	return `${planAmount(priceInr)} / ${suffix.slice(1)}`;
 }
+// Cycle line under the price ("Billed monthly" / "Billed annually"), keyed off
+// the shared suffix helper so the cycle rule cannot drift from the price.
+export function planCycleLabel(p) {
+	const suffix = planSuffix(p && p.price_inr, p && p.billing_cycle);
+	const trial = Number(p && p.trial_days) || 0;
+	const billed = suffix === "/yr" ? "Billed annually" : "Billed monthly";
+	// Auto-pay trial: nothing is charged until the trial ends, then autopay begins.
+	return trial > 0 ? `${trial}-day free trial, then ${billed.toLowerCase()}` : billed;
+}
+// A plan's feature bullets, whatever shape the field arrived in.
+//
+// The billing page renders plans from TWO sources in one grid and they do not
+// agree: get_account's own plan carries features as a JSON array (or its
+// stringified form), while the rows in upgrade_plans / downgrade_plans carry
+// the raw newline-separated Data field, which is what the onboarding plan step
+// parses. Driving one grid from two parsers is how a card silently loses its
+// bullets, so both shapes resolve here.
+export function planFeatures(p) {
+	const f = p && p.features;
+	if (Array.isArray(f)) return f.filter(Boolean);
+	const s = typeof f === "string" ? f.trim() : "";
+	if (!s) return [];
+	if (s.startsWith("[")) {
+		try {
+			const parsed = JSON.parse(s);
+			if (Array.isArray(parsed)) return parsed.filter(Boolean);
+		} catch (e) {
+			// Not valid JSON after all - fall through and treat it as text.
+		}
+	}
+	return s
+		.split(/\r?\n/)
+		.map((x) => x.trim())
+		.filter(Boolean);
+}
 export function renewalLabel(currentPeriodEnd, daysRemaining) {
 	const end = (currentPeriodEnd || "").trim();
 	if (!end) return "No active period";

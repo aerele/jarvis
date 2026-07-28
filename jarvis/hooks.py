@@ -203,6 +203,23 @@ page_renderer = [
 # friendlier top-level /jarvis-agents spelling working as a redirect.
 website_redirects = [
 	{"source": "/jarvis-agents", "target": "/jarvis/agents"},
+	# The retired /app/jarvis-account desk billing page. This is NOT only for
+	# stale bookmarks: admin-v2 still mails renewal links built as
+	# "{site}/app/jarvis-account?billing=1"
+	# (jarvis_admin_v2/billing/notifications.py), so this URL is live traffic
+	# from a repo that has not been changed.
+	#
+	# BOTH spellings are listed on purpose. Frappe core itself redirects
+	# "/app/(.*)" to "/desk/\1" (frappe/hooks.py), and get_hooks returns frappe's
+	# rules FIRST, so core wins the /app form and the request arrives here a
+	# second time as /desk/jarvis-account - which is the entry that actually
+	# fires today. The /app entry is the belt to that braces: if core ever stops
+	# rewriting, this keeps working without another migration.
+	#
+	# No forward_query_parameters: the old "?billing=1" flag only told the desk
+	# page to open on its billing tab, and the new route is billing already.
+	{"source": "/app/jarvis-account", "target": "/jarvis/billing"},
+	{"source": "/desk/jarvis-account", "target": "/jarvis/billing"},
 ]
 
 # Session hooks

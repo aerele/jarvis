@@ -290,6 +290,19 @@ export const previewDowngrade = (targetPlan) =>
 export const startDowngrade = (targetPlan) =>
 	call("jarvis.account.start_downgrade", { target_plan: targetPlan });
 export const cancelScheduledDowngrade = () => call("jarvis.account.cancel_scheduled_downgrade");
+// The paying half of the billing page. preview_* prices the change so the
+// customer sees the number BEFORE a payment sheet opens; start_* returns the
+// gateway handles that sheet needs. Both were already whitelisted for the desk
+// page and only lacked an SPA wrapper.
+export const previewUpgrade = (targetPlan) =>
+	call("jarvis.account.preview_upgrade", { target_plan: targetPlan });
+export const startUpgrade = (targetPlan) =>
+	call("jarvis.account.start_upgrade", { target_plan: targetPlan });
+// Renewal mints its order through the onboarding endpoint, the same one the
+// desk page called. Its Checkout result is confirmed by `finishPayment` above
+// (declared with the onboarding wrappers), which is the single signature-verify
+// endpoint for EVERY billing flow here, not just renewal and first signup.
+export const renewPlan = () => call("jarvis.onboarding.renew");
 
 // File input: upload to Frappe's File doctype, return {file_url, file_name}.
 export async function uploadFile(file) {

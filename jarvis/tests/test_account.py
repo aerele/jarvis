@@ -1,5 +1,5 @@
 """Tests for jarvis.account wrappers and admin_client shims for the
-/jarvis-account page. admin_client is mocked - these are unit tests of
+/jarvis/billing SPA page. admin_client is mocked - these are unit tests of
 the customer-side glue, not of the admin endpoints themselves."""
 
 from unittest.mock import patch

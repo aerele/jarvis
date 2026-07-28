@@ -17,23 +17,19 @@
  * ============================================================= */
 body[data-route^="jarvis-chat"] .navbar,
 body[data-route^="jarvis-onboarding"] .navbar,
-body[data-route^="jarvis-account"] .navbar,
 body[data-route^="jarvis-chat"] .page-head,
-body[data-route^="jarvis-onboarding"] .page-head,
-body[data-route^="jarvis-account"] .page-head {
+body[data-route^="jarvis-onboarding"] .page-head {
 	display: none !important;
 }
 
 /* With the navbar gone, reclaim its vertical space so the Jarvis surface
  * starts at the very top of the viewport. */
 body[data-route^="jarvis-chat"] .main-section,
-body[data-route^="jarvis-onboarding"] .main-section,
-body[data-route^="jarvis-account"] .main-section {
+body[data-route^="jarvis-onboarding"] .main-section {
 	padding-top: 0 !important;
 }
 
 body[data-route^="jarvis-chat"] .page-body,
-body[data-route^="jarvis-onboarding"] .page-body,
-body[data-route^="jarvis-account"] .page-body {
+body[data-route^="jarvis-onboarding"] .page-body {
 	margin-top: 0 !important;
 }

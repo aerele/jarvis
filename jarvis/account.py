@@ -1,4 +1,9 @@
-"""Customer-side wrappers for the /jarvis-account page.
+"""Customer-side wrappers for the SPA billing page (/jarvis/billing).
+
+Written originally for the /app/jarvis-account Desk page, which has been
+retired. The endpoints were never Desk-specific and moved to the SPA unchanged;
+only Razorpay Checkout had to be reimplemented there (frontend/src/lib/
+useRazorpay.js).
 
 Thin shims over admin_client (so the browser never holds admin api_key /
 api_secret). Errors are normalized via the shared ``_surface`` helper from
@@ -272,9 +277,11 @@ def get_account() -> dict:
 
 	System-Manager only, like its siblings above. Until now the only gate was
 	the UI: SettingsDialog hides the ACCOUNT & BILLING rail group from non-SM
-	users, and the /jarvis-account desk page carries roles=["System Manager"].
-	Neither stops a direct /api/method call, so any authenticated user could
-	read the account's plan, subscription status and validity.
+	users, and the (now retired) jarvis-account desk page carried
+	roles=["System Manager"]. Neither stops a direct /api/method call, so any
+	authenticated user could read the account's plan, status and validity. The
+	SPA /jarvis/billing route deliberately adds no client-side guard of its own
+	and leans on this one.
 	"""
 	require_jarvis_admin()
 	return _surface(admin_client.get_account_summary)
