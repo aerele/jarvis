@@ -1,8 +1,8 @@
 """Dev-only helpers for the customer bench.
 
-Gated by the System Manager role. Used by the Jarvis Settings form to wipe
-local state so the operator can run the onboarding wizard fresh without
-manual DB surgery.
+Gated by the System Manager role. Exposed as the ``bench reset-onboarding``
+command (``jarvis.commands``) to wipe local state so the operator can run the
+onboarding wizard fresh without manual DB surgery.
 
 Companion to ``jarvis_admin_v2.api.dev.purge_customer`` on the admin side -
 the admin button wipes admin-side records; this clears the customer bench.
@@ -57,10 +57,15 @@ _RESET_CLEAR_FIELDS = (
 )
 
 
-@frappe.whitelist()
-def reset_onboarding() -> dict:
+def reset_onboarding(wipe_data: bool = False) -> dict:
 	"""Wipe local Jarvis Settings connection + LLM credentials so the
 	customer bench can run the onboarding wizard from step 1 again.
+
+	``wipe_data`` additionally deletes all workspace content (chats, skills,
+	macros, triggers, learning artifacts, wiki, dashboards — the same
+	``onboarding._WIPE_DOCTYPES`` set the self-serve reset offers) for a true
+	factory reset. The ``bench reset-onboarding`` CLI passes it by default;
+	programmatic callers must opt in.
 
 	Preserved (these are settings, not onboarded session state):
 	  - jarvis_admin_url        (so the bench remembers which admin to point at)
@@ -70,7 +75,7 @@ def reset_onboarding() -> dict:
 	    stays valid - it's a Select field, can't be blank)
 
 	Does NOT call the admin-side purge - use
-	``jarvis_admin_v2.api.dev.purge_customer`` on admin for that. Both buttons
+	``jarvis_admin_v2.api.dev.purge_customer`` on admin for that. The two
 	together give a clean two-step reset; this one alone is enough when the
 	admin record was already removed or never created.
 	"""
@@ -135,9 +140,18 @@ def reset_onboarding() -> dict:
 		"proxy_recommended",
 		"models",
 	]
+	wiped: list = []
+	if wipe_data:
+		from jarvis.onboarding import _WIPE_DOCTYPES, _wipe_workspace_content
+
+		_wipe_workspace_content()
+		frappe.db.commit()
+		wiped = list(_WIPE_DOCTYPES)
+
 	return {
 		"ok": True,
 		"data": {
 			"cleared_fields": list(_RESET_CLEAR_FIELDS) + _extra_cleared + ["llm_provider"],
+			"wiped_doctypes": wiped,
 		},
 	}

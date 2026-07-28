@@ -133,13 +133,87 @@
 				@click="onClearAllHistory"
 			/>
 		</div>
+
+		<!-- Reset workspace (jarvis.onboarding.*): self-serve container rebuild.
+		     Admin-tier only; the red solid lives in the useConfirm dialog, per the
+		     danger-zone rule above. While a reset runs the pane polls back to
+		     Ready and hard-reloads /jarvis (drops the memoized readiness verdict). -->
+		<template v-if="isSM">
+			<div class="mt-6 flex items-start justify-between gap-4">
+				<div class="flex flex-col gap-0.5">
+					<span class="text-base font-medium text-ink-gray-8">Reset workspace</span>
+					<span class="max-w-lg text-p-sm text-ink-gray-6">
+						Destroys this workspace's container and attaches a fresh one, then
+						reconnects automatically — use it when the workspace is stuck or won't
+						connect. Chat is unavailable while it runs (usually a few minutes). Your
+						subscription, chat history and AI connections are kept unless you tick the
+						options.
+					</span>
+				</div>
+				<Button
+					v-if="!resetting"
+					variant="subtle"
+					theme="red"
+					:label="resetOpen ? 'Close' : 'Reset workspace'"
+					@click="resetOpen = !resetOpen"
+				/>
+			</div>
+
+			<div v-if="resetting" class="mt-3">
+				<Badge :label="resetStatusLabel" theme="blue" variant="subtle" />
+				<p class="mt-2 text-p-sm text-ink-gray-6">{{ resetNote }}</p>
+			</div>
+
+			<div v-else-if="resetOpen" class="mt-3 max-w-lg">
+				<textarea
+					v-model="resetReason"
+					rows="2"
+					class="w-full rounded-md border bg-surface-white p-2 text-p-sm text-ink-gray-8"
+					placeholder="What's wrong? (optional)"
+				/>
+				<label class="mt-3 flex cursor-pointer items-start gap-2.5">
+					<input v-model="wipeData" type="checkbox" class="mt-0.5" />
+					<span>
+						<span class="block text-p-sm font-medium text-ink-gray-8">
+							Also delete workspace content
+						</span>
+						<span class="block text-p-sm text-ink-gray-6">
+							Permanently deletes chats, skills, macros, triggers, learned patterns,
+							wiki pages and dashboards. Cannot be undone.
+						</span>
+					</span>
+				</label>
+				<label class="mt-2 flex cursor-pointer items-start gap-2.5">
+					<input v-model="revokeLlm" type="checkbox" class="mt-0.5" />
+					<span>
+						<span class="block text-p-sm font-medium text-ink-gray-8">
+							Also disconnect AI model connections
+						</span>
+						<span class="block text-p-sm text-ink-gray-6">
+							Removes every connected model and key; you'll set them up again after
+							the reset.
+						</span>
+					</span>
+				</label>
+				<Button
+					class="mt-3"
+					variant="subtle"
+					theme="red"
+					label="Reset workspace"
+					iconLeft="refresh-cw"
+					:loading="resetBusy"
+					@click="doReset"
+				/>
+			</div>
+		</template>
 	</SettingsPane>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from "vue";
-import { Badge, Button } from "frappe-ui";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { Badge, Button, toast } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
+import { useConfirm } from "@/composables/useConfirm";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
 import ToggleRow from "@/components/settings/ToggleRow.vue";
@@ -306,4 +380,125 @@ async function onClearAllHistory() {
 		clearing.value = false;
 	}
 }
+
+// -- Reset workspace (danger zone) -----------------------------------------
+const { confirm } = useConfirm();
+const resetOpen = ref(false);
+const resetReason = ref("");
+const resetBusy = ref(false);
+const resetting = ref(false);
+const resetState = ref({});
+const wipeData = ref(false);
+const revokeLlm = ref(false);
+
+// Poll every 3s while resetting, up to 15 min; the tenant-side */5 cron backstop
+// converges a closed tab, so timing out here just stops the spinner.
+const POLL_MS = 3000;
+const POLL_BUDGET_MS = 15 * 60 * 1000;
+let pollTimer = null;
+let pollStarted = 0;
+
+const resetStatusLabel = computed(() =>
+	resetState.value.status === "Pending Capacity"
+		? "Waiting for capacity…"
+		: "Rebuilding your workspace…"
+);
+const resetNote = computed(() => {
+	if (resetState.value.message) return resetState.value.message;
+	return "This usually takes a few minutes. You can leave this page open — chat reloads when the workspace is back.";
+});
+
+async function doReset() {
+	const parts = [
+		"Chat will stop working until the workspace reconnects (usually a few minutes).",
+	];
+	if (wipeData.value) {
+		parts.push(
+			"All chats, skills, macros, triggers, learned patterns, wiki pages and dashboards will be permanently deleted. This cannot be undone."
+		);
+	} else {
+		parts.push("Your subscription and chat history are kept.");
+	}
+	if (revokeLlm.value) {
+		parts.push(
+			"Your AI model connections will be disconnected — you'll set them up again after the reset."
+		);
+	}
+	const ok = await confirm({
+		title: "Reset workspace?",
+		message: parts.join(" "),
+		confirmLabel: "Reset workspace",
+		danger: true,
+	});
+	if (!ok) return;
+	resetBusy.value = true;
+	try {
+		const out =
+			(await api.requestWorkspaceReset(resetReason.value, {
+				wipeData: wipeData.value,
+				revokeLlm: revokeLlm.value,
+			})) || {};
+		resetReason.value = "";
+		resetOpen.value = false;
+		resetState.value = out;
+		resetting.value = true;
+		toast.success("Resetting your workspace.");
+		startPoll();
+	} catch (e) {
+		toast.error((e && e.messages && e.messages[0]) || "Could not reset the workspace.");
+	} finally {
+		resetBusy.value = false;
+	}
+}
+
+function startPoll() {
+	stopPoll();
+	pollStarted = Date.now();
+	pollTimer = setInterval(pollReset, POLL_MS);
+}
+
+function stopPoll() {
+	if (pollTimer) clearInterval(pollTimer);
+	pollTimer = null;
+}
+
+async function pollReset() {
+	if (Date.now() - pollStarted > POLL_BUDGET_MS) {
+		stopPoll();
+		resetting.value = false;
+		toast.error("The reset is taking longer than expected. Check back in a few minutes.");
+		return;
+	}
+	let s;
+	try {
+		s = (await api.workspaceResetState()) || {};
+	} catch (e) {
+		return; // transient — the container is mid-rebuild; keep polling
+	}
+	resetState.value = s;
+	if (s.ready) {
+		stopPoll();
+		toast.success("Workspace is back — reloading.");
+		// Full reload drops the memoized readiness verdict (same ending as the
+		// onboarding wizard).
+		setTimeout(() => window.location.assign("/jarvis/"), 800);
+	}
+}
+
+async function resumeResetIfInFlight() {
+	if (!isSM) return;
+	try {
+		const s = (await api.workspaceResetState()) || {};
+		if (s.resetting && !s.ready) {
+			resetState.value = s;
+			resetting.value = true;
+			startPoll();
+		}
+	} catch (e) {
+		/* no in-flight reset to resume */
+	}
+}
+
+onMounted(resumeResetIfInFlight);
+onBeforeUnmount(stopPoll);
 </script>

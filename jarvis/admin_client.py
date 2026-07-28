@@ -947,6 +947,23 @@ def post_disconnect_llm() -> dict:
 	)
 
 
+# --------------------------------------------------------------------------- #
+# Workspace reset proxies. The customer bench forwards to the control plane,
+# which re-derives the customer from the api_key. ``_post`` already unwraps the
+# admin's {ok, data} envelope to the inner data dict (see _do_post), so these
+# return it directly — do NOT ``.get("data")`` again (that double-unwraps to {}).
+# --------------------------------------------------------------------------- #
+def reset_workspace(reason: str = "") -> dict:
+	"""Self-serve container rebuild (keeps customer + subscription + site data).
+	Container-recreate class op — destroy + warm-pool claim happen inline."""
+	return _post(path=_m("api.tenant_request.reset_workspace"), body={"reason": reason}, timeout_s=180)
+
+
+def reset_workspace_state() -> dict:
+	"""Latest workspace-reset request state (for the SPA poll)."""
+	return _post(path=_m("api.tenant_request.get_request_state"), body={}, timeout_s=8)
+
+
 def post_update_llm_pool(*, spec: dict, api_keys: dict, oauth_blobs: dict) -> dict:
 	"""POST a PoolSpec + separated secrets to admin → fleet-agent → openclaw.
 

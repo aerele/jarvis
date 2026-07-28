@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 
 import frappe
-from frappe.utils import cint
 
 SETTINGS = "Jarvis Settings"
 FIELD = "installed_apps_synced"
@@ -39,7 +38,7 @@ def after_migrate() -> None:
 		if pool is None:
 			# Neither leg is safe to guess; stale snapshot retries next migrate.
 			frappe.logger("jarvis.installed_apps").warning(
-				"proxy_active unreadable; deferring installed-apps resync"
+				"pool mode unreadable; deferring installed-apps resync"
 			)
 			return
 		_enqueue_resync(synced, current, pool=pool)
@@ -88,11 +87,16 @@ def _admin_configured() -> bool:
 
 
 def _pool_active() -> bool | None:
-	"""Pool (proxy) tenant? The resync MUST take the pool leg then - the
-	single-model render knocks the container off Bifrost routing. None when
-	unreadable; the caller defers rather than guesses."""
+	"""Pool tenant? The resync MUST take the pool leg then - the single-model
+	render knocks the container down to one credential. Derived from models[],
+	not from the persisted proxy_active flag, which now means the narrower "a
+	Bifrost/cliproxy sidecar is deployed" and is 0 for a BYO api-key pool that
+	still has to resync through /llm-pool. None when unreadable; the caller
+	defers rather than guesses."""
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
+
 	try:
-		return bool(cint(frappe.db.get_single_value(SETTINGS, "proxy_active")))
+		return compute_pool_mode(frappe.get_single(SETTINGS))
 	except Exception:
 		return None
 

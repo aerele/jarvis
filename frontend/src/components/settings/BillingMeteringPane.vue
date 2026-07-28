@@ -8,7 +8,7 @@
 			<div class="rounded-md border p-4">
 				<h3 class="text-base font-semibold text-ink-gray-9">Status</h3>
 				<div class="mt-2">
-					<KvRow label="Mode" :value="config.proxy_active ? 'Proxy' : 'Direct'" />
+					<KvRow label="Mode" :value="modeLabel" />
 					<!-- last_sync_status is an internal audit string ("ok (restart via
 					     admin)") and this row used to print it verbatim, so a customer read
 					     an already-completed restart as a chore waiting for them in Desk.
@@ -57,8 +57,8 @@
 					@click="loadAll"
 				/>
 				<p v-else-if="!usage.applicable" class="mt-2 text-p-sm text-ink-gray-5">
-					Usage is available on multi-model (proxy) setups. This tenant runs a single
-					model (direct), so there is no proxy to meter.
+					Metering comes from the managed proxy. This tenant's models are called straight
+					from its container, so there is no proxy to meter.
 				</p>
 				<template v-else>
 					<div class="mt-2 grid grid-cols-3 gap-4">
@@ -118,6 +118,16 @@ const loading = ref(false);
 // SettingsPane renders the one error surface for the pane (design.md §4.1); the
 // usage card keeps only the Retry button, this supplies the message it retries.
 const errorMessage = computed(() => (usageError.value ? "Usage is unavailable right now." : ""));
+
+// `proxy_active` means "a Bifrost/cliproxy sidecar is deployed", NOT "this is a
+// pool" - a pool of BYO api keys is rendered openclaw-direct and runs its own
+// failover with no sidecar. Reading the flag alone printed "Direct" right above
+// the Active-pool card listing both of that tenant's models.
+const modeLabel = computed(() => {
+	if (config.value.proxy_active) return "Pool (proxied)";
+	const enabled = (config.value.models || []).filter((m) => m.enabled !== false);
+	return enabled.length > 1 ? "Pool (direct failover)" : "Direct";
+});
 
 // A failure reason belongs on a surface that can act on it (the AI models pane);
 // here the row only needs to say which of the three states the pool is in.

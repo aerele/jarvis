@@ -283,8 +283,8 @@ test("syncStatusNote: keeps the generic wrapper for genuinely opaque statuses", 
 			"again - or continue to Jarvis and retry from Settings."
 	);
 	assert.equal(
-		syncStatusNote("skipped: no longer proxy-valid after re-read (some reason)"),
-		"Setup hit a problem (skipped: no longer proxy-valid after re-read (some reason)). Check the " +
+		syncStatusNote("skipped: no longer pool-valid after re-read (some reason)"),
+		"Setup hit a problem (skipped: no longer pool-valid after re-read (some reason)). Check the " +
 			"AI connection and save again - or continue to Jarvis and retry from Settings."
 	);
 });

@@ -5,6 +5,7 @@ never holds admin creds). admin_client returns already-unwrapped admin data."""
 import json
 
 import frappe
+from frappe.utils import cint
 
 from jarvis import admin_client, release_notice
 from jarvis.exceptions import (
@@ -193,7 +194,7 @@ def get_preset_catalog() -> list:
 def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: str = "failover") -> dict:
 	"""Write the customer's multi-model LLM pool into Jarvis Settings.models[]
 	(+ preset, routing_mode) and let the existing on_update pipeline validate
-	(validate_models), derive proxy_active, mirror models[0] into legacy llm_*,
+	(validate_models), derive pool_mode/proxy_active, mirror models[0] into legacy llm_*,
 	and sync DIRECT (/llm-creds) vs PROXY (/llm-pool) via admin.
 
 	``models`` MUST stay annotated: with Frappe's
@@ -295,7 +296,7 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 	s.llm_oauth_account_email = ""
 	s.llm_oauth_connected_at = None
 	# save() -> on_update -> _on_update_unified_llm: validate_models (throws),
-	# compute_proxy_active, mirror models[0], enqueue pool/creds sync.
+	# compute_pool_mode/compute_proxy_active, mirror models[0], enqueue pool/creds sync.
 	s.save(ignore_permissions=True)
 	frappe.db.commit()
 
@@ -559,6 +560,202 @@ def renew(provider: str | None = None) -> dict:
 	return _surface(admin_client.renew, provider=provider)
 
 
+_RESETTING_STATUS = "pending: resetting workspace"
+# Variant marker when the customer also revoked their LLM connections: the poll
+# then completes on "container reachable" (readiness can never reach Ready with
+# no LLM configured) and the wizard gate owns the rest.
+_RESETTING_RECONNECT_LLM_STATUS = _RESETTING_STATUS + " (reconnect llm)"
+
+# Customer content wiped by the "also delete my data" reset option. Raw table
+# deletes (single-tenant DB, no hooks) — the dev.reset_onboarding precedent.
+# Deliberately NOT wiped: Jarvis Settings, user settings/usage, agent listings/
+# installations, relay pump, File rows.
+_WIPE_DOCTYPES = (
+	# chats
+	"Jarvis Chat Message",
+	"Jarvis Chat Turn",
+	"Jarvis Turn Effect",
+	"Jarvis Chat Session",
+	"Jarvis Conversation",
+	"Jarvis Voice Note",
+	# skills
+	"Jarvis Custom Skill Allowed Role",
+	"Jarvis Custom Skill Share",
+	"Jarvis Custom Skill",
+	"Jarvis Skill Promotion Request",
+	"Jarvis Shared Skill Slug",
+	# macros + triggers + approvals
+	"Jarvis Macro Step",
+	"Jarvis Macro Run",
+	"Jarvis Macro",
+	"Jarvis Trigger Activity",
+	"Jarvis Trigger",
+	"Jarvis Approval Request",
+	# learning artifacts
+	"Jarvis Learned Pattern Role",
+	"Jarvis Learned Pattern",
+	"Jarvis Pattern Run",
+	"Jarvis Pattern Snapshot",
+	"Jarvis Pattern Detector State",
+	"Jarvis Personalise Question Rule",
+	"Jarvis Personalise Question",
+	"Jarvis App Learning Run",
+	# wiki + dashboards
+	"Jarvis Wiki Page",
+	"Jarvis Wiki Graph History",
+	"Jarvis Wiki Promotion Request",
+	"Jarvis Dashboard Source",
+	"Jarvis Dashboard",
+)
+
+
+@frappe.whitelist()
+def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_llm: bool = False) -> dict:
+	"""Self-serve workspace reset: the control plane rebuilds the container NOW
+	(subscription kept), then this site disconnects its agent transport and polls
+	``workspace_reset_state`` back to Ready.
+
+	``wipe_data`` also deletes workspace content (chats, skills, macros,
+	triggers, learning artifacts, wiki, dashboards). ``revoke_llm`` also clears
+	every LLM connection (pool models, subscription accounts, keys, synced
+	markers) so the customer sets up their AI model fresh after the reset.
+	Both run only AFTER the control plane accepted the reset.
+
+	Gated on System Manager, like the rest of onboarding."""
+	require_jarvis_admin()
+	settings = frappe.get_single("Jarvis Settings")
+	# Tear down the container-side OAuth auth-profile while the old container is
+	# still reachable (same ordering as dev.reset_onboarding). Best-effort — a
+	# dead container is often the very reason for the reset.
+	if settings.get("agent_url"):
+		try:
+			admin_client.post_subscription_disconnect()
+		except Exception:
+			pass
+	out = _surface(admin_client.reset_workspace, reason)
+	if cint(wipe_data):
+		_wipe_workspace_content()
+	if cint(revoke_llm):
+		_revoke_llm_connections(settings)
+	_disconnect_agent_transport(settings, reconnect_llm=bool(cint(revoke_llm)))
+	return out
+
+
+def _wipe_workspace_content() -> None:
+	for dt in _WIPE_DOCTYPES:
+		frappe.db.delete(dt)
+
+
+def _revoke_llm_connections(settings) -> None:
+	"""The LLM subset of dev.reset_onboarding: clear direct creds, OAuth state,
+	the models[] pool (subscription blobs live encrypted ON those rows) and the
+	synced markers — is_ready_for_chat then routes to the LLM setup step. db_set
+	only, so on_update never fires mid-reset. Admin creds untouched."""
+	from jarvis._password_utils import clear_settings_password
+
+	for f in ("llm_model", "llm_base_url", "llm_auth_mode", "llm_oauth_account_email", "preset"):
+		settings.db_set(f, "")
+	clear_settings_password(settings, "llm_api_key")
+	for f in ("llm_oauth_connected_at", "llm_pool_synced_at", "llm_direct_synced_at"):
+		settings.db_set(f, None)
+	settings.db_set("proxy_active", 0)
+	settings.db_set("proxy_recommended", 0)
+	settings.db_set("llm_provider", "Anthropic")  # Select field — can't be blank
+	frappe.db.delete(
+		"Jarvis LLM Pool Model",
+		{"parent": "Jarvis Settings", "parenttype": "Jarvis Settings", "parentfield": "models"},
+	)
+
+
+def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
+	"""Clear the agent transport so chat gates on admin's chat_readiness while
+	the container is rebuilt. Keeps admin creds and (unless the customer revoked
+	them) the LLM config + ``*_synced_at`` markers — the control plane carries
+	those onto the new container; clearing them would eject the customer into
+	the setup wizard."""
+	from jarvis._password_utils import clear_settings_password
+	from jarvis.account import _bust_chat_gate
+	from jarvis.chat.device import clear_credentials
+
+	settings.db_set("agent_url", "")
+	clear_settings_password(settings, "agent_token")
+	clear_credentials()
+	settings.db_set(
+		"last_sync_status", _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS
+	)
+	_bust_chat_gate()
+	frappe.db.commit()
+
+
+@frappe.whitelist()
+def workspace_reset_state() -> dict:
+	"""Poll endpoint for the reset card: admin request state + serving readiness.
+	When admin reports the new container Ready, persists the fresh connection and
+	clears the resetting marker — chat works again with no manual steps."""
+	require_jarvis_admin()
+	return _workspace_reset_poll()
+
+
+def _workspace_reset_poll() -> dict:
+	settings = frappe.get_single("Jarvis Settings")
+	req: dict = {}
+	try:
+		req = admin_client.reset_workspace_state() or {}
+	except Exception:
+		pass  # audit-row state is advisory; readiness below is the real signal
+
+	def _resetting() -> bool:
+		return (settings.get("last_sync_status") or "").startswith(_RESETTING_STATUS)
+
+	def _reconnect_llm() -> bool:
+		return (settings.get("last_sync_status") or "").startswith(_RESETTING_RECONNECT_LLM_STATUS)
+
+	try:
+		data = admin_client.get_connection(timeout_s=8) or {}
+	except Exception:
+		return {
+			"ready": False,
+			"resetting": _resetting(),
+			"status": req.get("status") or "",
+			"message": req.get("message") or "",
+		}
+	# With the LLM revoked, readiness can never reach Ready (nothing configured);
+	# "container reachable" completes the reset and the wizard gate owns the rest.
+	ready = bool(data.get("agent_url")) and (data.get("chat_readiness") == "Ready" or _reconnect_llm())
+	if ready and _resetting():
+		from jarvis.account import _bust_chat_gate
+
+		write_connection(data)
+		settings.db_set("last_sync_status", "ok (workspace reset)")
+		_bust_chat_gate()
+		frappe.db.commit()
+	elif _resetting() and data.get("agent_url") and not (settings.get("agent_url") or ""):
+		# New container reachable but not Ready yet: reconnect the transport and,
+		# for a pool tenant, re-push the stored spec + subscription blobs — OAuth
+		# creds never ride a rebuild, so without this a subscription pool stays
+		# "blocked" forever. Hands convergence to the standard pending-applying
+		# machinery (marker replaced; runs once — agent_url is set after this).
+		write_connection(data)
+		if settings.get("proxy_active"):
+			settings._enqueue_pool_sync()
+		frappe.db.commit()
+	return {
+		"ready": ready,
+		"resetting": _resetting(),
+		"status": req.get("status") or "",
+		"message": req.get("message") or "",
+		"tenant_status": data.get("tenant_status") or "",
+	}
+
+
+def reconcile_pending_workspace_reset() -> None:
+	"""*/5 backstop: converge a reset whose tab was closed mid-poll."""
+	s = frappe.get_single("Jarvis Settings")
+	if not (s.get("last_sync_status") or "").startswith(_RESETTING_STATUS):
+		return
+	_workspace_reset_poll()
+
+
 @frappe.whitelist()
 def save_llm_creds(
 	provider: str,
@@ -820,11 +1017,14 @@ def _reconcile_pending_applying(settings) -> str | None:
 		_admin_chat_readiness,
 		_stamp_converged_ok,
 	)
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
 
 	state, _reason = _admin_chat_readiness()
 	if state != "Ready":
 		return None
-	_stamp_converged_ok(settings, is_pool=bool(settings.get("proxy_active")))
+	# The marker follows the SYNC LEG, so this is pool mode - a BYO api-key pool
+	# has no sidecar (proxy_active=0) but still stamps llm_pool_synced_at.
+	_stamp_converged_ok(settings, is_pool=compute_pool_mode(settings))
 	# _stamp_converged_ok's commit gate only fires in a worker/migrate context;
 	# this runs in a web request, where a GET would otherwise roll the terminal
 	# write back at request end.
