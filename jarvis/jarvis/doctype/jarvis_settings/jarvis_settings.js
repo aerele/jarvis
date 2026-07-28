@@ -313,4 +313,3 @@ function openSelfHostDialog(frm) {
 	});
 	d.show();
 }
-

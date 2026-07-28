@@ -1,7 +1,6 @@
 """Bench CLI commands for the jarvis app (auto-discovered via ``commands``)."""
 
 import click
-
 import frappe
 from frappe.commands import get_site, pass_context
 
@@ -32,8 +31,7 @@ def reset_onboarding(context, force, keep_data):
 				"(chats, skills, macros, triggers, learning, wiki, dashboards)"
 			)
 			click.confirm(
-				f"Reset Jarvis onboarding on {site}? This clears {what}. "
-				"Admin-side records are not touched.",
+				f"Reset Jarvis onboarding on {site}? This clears {what}. Admin-side records are not touched.",
 				abort=True,
 			)
 		from jarvis.dev import reset_onboarding as _reset

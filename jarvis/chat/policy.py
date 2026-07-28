@@ -83,8 +83,14 @@ def _llm_not_configured() -> bool:
 	via the workspace-reset "disconnect AI model connections" option). Mirrors
 	account.is_ready_for_chat's local llm_credentials branch — without this gate a
 	send queues against the container's stub key and hangs instead of telling the
-	customer to connect a model. Fails OPEN."""
+	customer to connect a model. Fails OPEN.
+
+	Skipped under test unless a test opts in via
+	``frappe.flags.test_llm_configured_gate``: the CI site has no LLM configured,
+	so this gate would otherwise reject every chat test's send."""
 	try:
+		if frappe.flags.in_test and not frappe.flags.test_llm_configured_gate:
+			return False
 		s = frappe.get_single("Jarvis Settings")
 		if s.get("proxy_active"):
 			return False  # a pool is configured; pool health is admin's concern

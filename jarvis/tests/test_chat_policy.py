@@ -183,6 +183,10 @@ class TestLlmConfiguredGate(FrappeTestCase):
 		self.addCleanup(self._rn.stop)
 		import frappe
 
+		# The gate is a no-op under test unless a test opts in (the CI site has
+		# no LLM configured); these tests ARE its coverage, so opt in.
+		frappe.flags.test_llm_configured_gate = True
+		self.addCleanup(lambda: setattr(frappe.flags, "test_llm_configured_gate", False))
 		s = frappe.get_single("Jarvis Settings")
 		self._prev = {f: s.get(f) or ("" if f != "proxy_active" else 0) for f in self._FIELDS}
 		self.addCleanup(self._restore)
@@ -215,7 +219,9 @@ class TestLlmConfiguredGate(FrappeTestCase):
 	def test_configured_direct_llm_sends(self):
 		import frappe.model.document
 
-		self._set(llm_provider="Anthropic", llm_model="claude-sonnet-5", llm_auth_mode="api_key", proxy_active=0)
+		self._set(
+			llm_provider="Anthropic", llm_model="claude-sonnet-5", llm_auth_mode="api_key", proxy_active=0
+		)
 		with patch.object(frappe.model.document.Document, "get_password", return_value="k"):
 			ok, reason = validate_can_send("Administrator")
 		self.assertTrue(ok)

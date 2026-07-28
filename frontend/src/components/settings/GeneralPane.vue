@@ -144,10 +144,10 @@
 					<span class="text-base font-medium text-ink-gray-8">Reset workspace</span>
 					<span class="max-w-lg text-p-sm text-ink-gray-6">
 						Destroys this workspace's container and attaches a fresh one, then
-						reconnects automatically — use it when the workspace is stuck or
-						won't connect. Chat is unavailable while it runs (usually a few
-						minutes). Your subscription, chat history and AI connections are
-						kept unless you tick the options.
+						reconnects automatically — use it when the workspace is stuck or won't
+						connect. Chat is unavailable while it runs (usually a few minutes). Your
+						subscription, chat history and AI connections are kept unless you tick the
+						options.
 					</span>
 				</div>
 				<Button
@@ -178,8 +178,8 @@
 							Also delete workspace content
 						</span>
 						<span class="block text-p-sm text-ink-gray-6">
-							Permanently deletes chats, skills, macros, triggers, learned
-							patterns, wiki pages and dashboards. Cannot be undone.
+							Permanently deletes chats, skills, macros, triggers, learned patterns,
+							wiki pages and dashboards. Cannot be undone.
 						</span>
 					</span>
 				</label>
@@ -190,8 +190,8 @@
 							Also disconnect AI model connections
 						</span>
 						<span class="block text-p-sm text-ink-gray-6">
-							Removes every connected model and key; you'll set them up again
-							after the reset.
+							Removes every connected model and key; you'll set them up again after
+							the reset.
 						</span>
 					</span>
 				</label>
@@ -397,7 +397,9 @@ const resetNote = computed(() => {
 });
 
 async function doReset() {
-	const parts = ["Chat will stop working until the workspace reconnects (usually a few minutes)."];
+	const parts = [
+		"Chat will stop working until the workspace reconnects (usually a few minutes).",
+	];
 	if (wipeData.value) {
 		parts.push(
 			"All chats, skills, macros, triggers, learned patterns, wiki pages and dashboards will be permanently deleted. This cannot be undone."

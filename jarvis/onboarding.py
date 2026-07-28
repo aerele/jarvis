@@ -594,6 +594,7 @@ def _workspace_reset_poll() -> dict:
 		req = admin_client.reset_workspace_state() or {}
 	except Exception:
 		pass  # audit-row state is advisory; readiness below is the real signal
+
 	def _resetting() -> bool:
 		return (settings.get("last_sync_status") or "").startswith(_RESETTING_STATUS)
 
