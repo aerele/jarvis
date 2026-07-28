@@ -27,8 +27,11 @@ frappe.pages["jarvis-account"].on_page_load = function (wrapper) {
 	const PROVIDER_DEFAULTS = {
 		Anthropic: { model: "claude-sonnet-4-6", baseUrl: "https://api.anthropic.com" },
 		OpenAI: { model: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
+		// Flash, not pro: Google grants pro-tier models zero free quota, so a
+		// gemini-2.5-pro fallback 429s on the free key most customers start with.
+		// Kept identical to LlmPoolEditor.vue's copy, per the mirror note above.
 		"Google Gemini": {
-			model: "gemini-2.5-pro",
+			model: "gemini-3.6-flash",
 			baseUrl: "https://generativelanguage.googleapis.com",
 		},
 		Mistral: { model: "mistral-large-latest", baseUrl: "https://api.mistral.ai/v1" },
