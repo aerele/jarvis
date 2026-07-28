@@ -26,6 +26,7 @@ const api = vi.hoisted(() => ({
 	getPresetCatalog: vi.fn(),
 	getModelCatalogUi: vi.fn(),
 	saveLlmPool: vi.fn(),
+	disconnectLlm: vi.fn(),
 	testLlmApiKey: vi.fn(),
 	disconnectSubscription: vi.fn(),
 	getDirectSubscriptionStatus: vi.fn(),
@@ -103,6 +104,15 @@ beforeEach(() => {
 		serverPool.models = clone(models);
 		serverPool.preset = preset || "";
 		return {};
+	});
+	// disconnect_llm empties the pool server-side; the reseed that follows has to
+	// see that, or the editor would keep showing the models it just deleted.
+	api.disconnectLlm.mockImplementation(async () => {
+		serverPool.models = [];
+		serverPool.preset = "";
+		serverPool.proxy_active = false;
+		syncStatus = { ...syncStatus, last_sync_status: "disconnected", pending: false };
+		return { disconnected: true };
 	});
 });
 
@@ -278,8 +288,10 @@ describe("an in-progress add survives an unrelated apply (defect 2)", () => {
 		await w.vm.remove(0);
 		await idle();
 
+		// Still the LAST model, so this is a disconnect - a half-typed row nobody
+		// pressed Connect on is not the spare that would have made it a plain Remove.
 		expect(api.saveLlmPool).not.toHaveBeenCalled();
-		expect(w.vm.applyResult.text).toMatch(/only model/i);
+		expect(api.disconnectLlm).toHaveBeenCalledTimes(1);
 	});
 
 	it("still sends a row whose write already landed", async () => {
@@ -316,6 +328,81 @@ describe("an in-progress add survives an unrelated apply (defect 2)", () => {
 		await idle();
 
 		expect(savedModels().map((m) => m.model)).toContain("gpt-4o-mini");
+	});
+});
+
+describe("removing the last model disconnects the workspace", () => {
+	it("calls disconnect instead of saving a pool the server would refuse", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor();
+
+		await w.vm.remove(0);
+		await idle();
+
+		expect(api.disconnectLlm).toHaveBeenCalledTimes(1);
+		// save_llm_pool rejects an empty list, so reaching it at all would be the bug.
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+		expect(w.vm.applyResult.kind).toBe("ok");
+		expect(w.vm.applyResult.text).toMatch(/^Disconnected/);
+	});
+
+	it("keeps Remove as an ordinary edit while another model is left", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0), keyModel("anthropic", "claude-sonnet-4", 1)]);
+		const w = await mountEditor();
+
+		await w.vm.remove(0);
+		await idle();
+
+		expect(api.disconnectLlm).not.toHaveBeenCalled();
+		expect(savedModels().map((m) => m.model)).toEqual(["claude-sonnet-4"]);
+	});
+
+	it("labels the action for what it will do before it is pressed", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0), keyModel("anthropic", "claude-sonnet-4", 1)]);
+		const w = await mountEditor();
+		expect(w.vm.isLastConnectedRow(w.vm.rows[0])).toBe(false);
+
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const only = await mountEditor();
+		expect(only.vm.isLastConnectedRow(only.vm.rows[0])).toBe(true);
+	});
+
+	it("does nothing without a confirmation", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		answer.confirm = false;
+		const w = await mountEditor();
+
+		await w.vm.remove(0);
+		await idle();
+
+		expect(api.disconnectLlm).not.toHaveBeenCalled();
+		expect(w.vm.rows).toHaveLength(1);
+	});
+
+	it("reports a failed disconnect instead of claiming the keys are gone", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		api.disconnectLlm.mockRejectedValue(new Error("admin unreachable"));
+		const w = await mountEditor();
+
+		await w.vm.remove(0);
+		await idle();
+
+		expect(w.vm.applyResult.kind).toBe("failed");
+		expect(w.vm.busy.active).toBe(false);
+		// The pool is untouched on screen because it is untouched on the server.
+		expect(w.vm.rows[0].model).toBe("gpt-4o");
+	});
+
+	it("is never offered in onboarding, which has nothing to disconnect from", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor({ modes: ["quick"], footerless: true });
+		expect(w.vm.isLastConnectedRow(w.vm.rows[0])).toBe(false);
+
+		await w.vm.remove(0);
+		await idle();
+
+		expect(api.disconnectLlm).not.toHaveBeenCalled();
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
 	});
 });
 

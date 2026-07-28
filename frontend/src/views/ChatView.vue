@@ -2069,6 +2069,27 @@
 					:message="notReadyNotice"
 					style="margin-bottom: 10px"
 				/>
+				<!-- No model configured: the workspace was disconnected, or its credential
+					 expired. The composer is disabled alongside this (see canSend) - every
+					 send would fail at the agent, and letting it be tried just turns a clear
+					 explanation into an error the customer has to interpret. -->
+				<Banner
+					v-else-if="noAiConnected"
+					type="warning"
+					title="No AI connected"
+					message="Connect a model to start chatting again"
+					style="margin-bottom: 10px"
+				>
+					<template #action>
+						<button
+							v-if="canConnectModel"
+							class="jv-btn jv-btn--sm"
+							@click="goConnectModel"
+						>
+							Connect a model
+						</button>
+					</template>
+				</Banner>
 
 				<!-- floats just above the composer; jumps the thread to the newest message -->
 				<transition name="jv-sd">
@@ -3597,7 +3618,12 @@ import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { dashboardForConversation } from "@/api/dashboards";
-import { checkReady, readinessDetailOf } from "@/onboarding/readiness.js";
+import {
+	checkReady,
+	readinessDetailOf,
+	needsLlmConnection,
+	forgetReady,
+} from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner } from "@/account/format.js";
 import { billingNoticeOf } from "@/onboarding/readiness.js";
@@ -3677,6 +3703,21 @@ const suspendedNotice = ref(null);
 // onboarding's "Continue to Jarvis" while genuinely not ready used to land here to
 // dead silence - the real reason existed the whole time, nobody rendered it).
 const notReadyNotice = ref("");
+// No AI connected at all (is_ready_for_chat reason "llm_credentials"): the customer
+// disconnected their model, or the credential expired. Until now this reason was
+// handled by NEITHER the onboarding gate (correctly - see readiness.js) nor any
+// banner, so the workspace looked fine and every send failed on arrival. Its own
+// flag rather than reusing notReadyNotice: that one carries admin's sentence about a
+// container, and this one has its own copy and its own call to action.
+const noAiConnected = ref(false);
+// Connecting a model is gated on require_jarvis_admin() server-side. A member who
+// cannot reach the AI models pane still gets the banner (their chat IS broken and
+// they should know why), just without a button that would only bounce them back to
+// General.
+const canConnectModel = !!(window.is_jarvis_admin || window.is_system_manager);
+function goConnectModel() {
+	store.openSettings("aimodels");
+}
 // Billing lifecycle banner. Dismissal is session-only (a ref, not storage): the
 // pre-expiry nudge should return on the next visit, since the deadline has not.
 const billingNotice = ref({});
@@ -3827,7 +3868,20 @@ const settingsTab = ref("overview");
 watch(
 	() => store.settingsOpen,
 	async (open) => {
-		if (!open) return;
+		if (!open) {
+			// The AI models pane lives in this dialog, so connecting or disconnecting a
+			// model happens while chat is still mounted behind it. The readiness verdict
+			// is memoized for the page load, so without dropping it here the composer
+			// would stay dead after a reconnect, or stay live after a disconnect until
+			// the customer reloaded. Best-effort, exactly like the boot read.
+			forgetReady();
+			try {
+				noAiConnected.value = await needsLlmConnection();
+			} catch (e) {
+				/* leave the last known state */
+			}
+			return;
+		}
 		try {
 			usage.value = await api.getUsage(currentId.value);
 		} catch (e) {
@@ -4658,6 +4712,9 @@ const canSend = computed(
 		!sending.value &&
 		// Suspended: the server rejects every send, so keep the button dead.
 		!suspendedNotice.value &&
+		// No model configured: nothing on the other end can answer, so prevent the
+		// send rather than reporting the failure after the fact.
+		!noAiConnected.value &&
 		// A dictation that hasn't landed yet blocks the send inside send() anyway (its words
 		// would be dropped). Disable the button too, with the reason on its tooltip: leaving it
 		// lit and swallowing the click behind a fading toast is the button lying about what it
@@ -6925,6 +6982,14 @@ async function send(textArg, resendAck) {
 	const _failedAtSend = fromMain && voiceStore ? voiceStore.failedIdsForScope(_sentScope) : [];
 	const attachments = fromMain ? pendingFiles.value.slice() : [];
 	if ((!text && !attachments.length) || sending.value) return;
+	// canSend already darkens the Send button, but Enter routes here directly (onKey
+	// preventDefaults and calls send()), and a programmatic send never sees the button
+	// at all. With no model connected the turn can only fail at the agent, so refuse it
+	// here and keep the banner's own wording rather than surfacing a backend error.
+	if (noAiConnected.value) {
+		notify("No AI connected. Connect a model to start chatting again.", { type: "info" });
+		return;
+	}
 	if (text && promptHistory.value[promptHistory.value.length - 1] !== text) {
 		promptHistory.value.push(text); // for Up/Down recall
 	}
@@ -8585,6 +8650,14 @@ onMounted(async () => {
 	readinessDetailOf()
 		.then((detail) => {
 			notReadyNotice.value = detail;
+		})
+		.catch(() => {});
+	// ...and the llm_credentials half of the same boot promise. Same fail-open
+	// posture: an unreachable backend leaves this false and chat behaves as before,
+	// because wrongly disabling a working composer is worse than a failed send.
+	needsLlmConnection()
+		.then((v) => {
+			noAiConnected.value = v;
 		})
 		.catch(() => {});
 	document.addEventListener("pointerdown", onDocClick);

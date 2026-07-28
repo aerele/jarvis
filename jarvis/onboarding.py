@@ -312,6 +312,115 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 	}
 
 
+# Every Jarvis Settings field that names or dates the LLM connection, and the
+# value that means "there is no connection". The api_key Password fields are NOT
+# here - clearing a Password needs its __Auth row dropped too, so they go through
+# _clear_llm_secrets below.
+#
+# llm_pool_synced_at / llm_direct_synced_at look like history rather than
+# credentials, but they are cleared deliberately: is_ready_for_chat treats a
+# stamped marker as "this tenant has applied at least once, so keep chat open
+# through a transient pending". Leaving them set would let the NEXT connection
+# open chat before its first apply is confirmed - exactly the split-brain the
+# markers exist to prevent. A disconnect ends that history.
+_DISCONNECTED_LLM_FIELDS = {
+	"llm_provider": "",
+	"llm_model": "",
+	"llm_base_url": "",
+	"llm_auth_mode": "api_key",
+	"llm_oauth_account_email": "",
+	"llm_oauth_connected_at": None,
+	"preset": "",
+	"proxy_active": 0,
+	"proxy_recommended": 0,
+	"llm_pool_synced_at": None,
+	"llm_direct_synced_at": None,
+	# Same marker jarvis.oauth.api.disconnect writes. humaniseSyncStatus does not
+	# recognise it, which is correct here: the editor's status strip hides itself
+	# rather than reporting on an apply that no longer has a subject.
+	"last_sync_status": "disconnected",
+	"last_subscription_status": "",
+	"last_sync_warnings": "[]",
+	"last_model_statuses": "[]",
+}
+
+_POOL_MODEL_DOCTYPE = "Jarvis LLM Pool Model"
+
+
+@frappe.whitelist()
+def disconnect_llm() -> dict:
+	"""Tear the customer's whole LLM connection down: delete every credential this
+	bench stores AND ask admin to delete them from the container.
+
+	Deliberately NOT expressed as "save an empty pool". save_llm_pool rejects an
+	empty list, and so does the fleet agent, because an empty pool reaching the
+	apply path is almost always a bug rather than an intention. A separate method
+	keeps that guard intact, cannot be reached by accident from an edit, and gives
+	the destructive action its own auditable name in the logs.
+
+	Admin goes FIRST and its failure aborts the whole thing. The other order would
+	leave a bench that reads "disconnected" in front of a container still holding
+	live keys and still answering turns - the customer would believe their
+	credentials were deleted when they were not, which is the one outcome this
+	feature cannot have.
+
+	Idempotent: a tenant with nothing configured clears nothing and still succeeds
+	(admin's endpoint is idempotent for the same reason).
+	"""
+	require_jarvis_admin()
+	from jarvis import selfhost
+
+	settings = frappe.get_single("Jarvis Settings")
+	# Only call admin when there is an admin tenancy to call. A self-hosted bench
+	# has no control plane at all, and an un-onboarded one has no credentials for
+	# it, so admin_client would raise AdminAuthError("not onboarded") on what is
+	# otherwise a perfectly valid local wipe.
+	if not selfhost.is_self_hosted() and _has_admin_credentials(settings):
+		_surface(admin_client.post_disconnect_llm)
+
+	_clear_llm_secrets(settings)
+	for field, value in _DISCONNECTED_LLM_FIELDS.items():
+		settings.db_set(field, value, update_modified=False)
+	frappe.db.commit()
+	return {"disconnected": True, "last_sync_status": "disconnected"}
+
+
+def _has_admin_credentials(settings) -> bool:
+	"""True when this bench holds credentials for the control plane. Mirrors the
+	un-onboarded short-circuit in reconcile_pending_llm_sync: either the api-key
+	pair or the OAuth password is enough to authenticate a call."""
+	api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()
+	customer_pw = (
+		settings.get_password("jarvis_admin_customer_password", raise_exception=False) or ""
+	).strip()
+	return bool(api_key or customer_pw)
+
+
+def _clear_llm_secrets(settings) -> None:
+	"""Delete every stored LLM credential: the models[] child rows (whose api_key
+	and subscription_accounts are Password fields) and the legacy flat llm_api_key.
+
+	Password fields keep the real value in __Auth, keyed by (doctype, row name) -
+	the doctype column only ever holds a mask. Frappe cleans __Auth in
+	frappe.delete_doc, which does not apply here: child rows of a Single are
+	removed by Document.update_child_table with a bare SQL DELETE that never looks
+	at __Auth. So clearing models[] the ordinary way leaves the encrypted keys
+	behind, readable by anything that knows a deleted row's name. Drop them by hand,
+	before the rows themselves.
+
+	The sweep is by DOCTYPE, not by row name: Jarvis LLM Pool Model is a child of
+	the Jarvis Settings Single and of nothing else, so every one of its __Auth rows
+	belongs to the connection being torn down - including any orphaned by an
+	earlier ordinary pool save. "Removed from everywhere" has to mean those too.
+	"""
+	from jarvis._password_utils import clear_settings_password
+
+	frappe.db.delete("__Auth", {"doctype": _POOL_MODEL_DOCTYPE})
+	frappe.db.delete(_POOL_MODEL_DOCTYPE, {"parenttype": "Jarvis Settings", "parent": "Jarvis Settings"})
+	settings.set("models", [])
+	clear_settings_password(settings, "llm_api_key")
+
+
 @frappe.whitelist()
 def start_signup(email: str, company: str, plan: str, provider: str | None = None) -> dict:
 	"""Guest signup → store the api_token → return the Razorpay handles for Checkout.

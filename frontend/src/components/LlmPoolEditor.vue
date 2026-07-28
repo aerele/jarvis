@@ -204,13 +204,22 @@
 					>
 						Replace key
 					</button>
+					<!-- One button, two meanings, and the label says which BEFORE it is
+			         pressed: with other models left this drops one entry from the
+			         failover list; on the last one there is no list left to edit and it
+			         tears the whole connection down instead. -->
 					<button
 						v-if="canEdit"
 						:disabled="!editable"
 						@click="remove(i)"
 						class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
+						:title="
+							isLastConnectedRow(row)
+								? 'Delete your keys and connected accounts everywhere'
+								: 'Remove this model from the failover list'
+						"
 					>
-						Remove
+						{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
 					</button>
 				</span>
 			</div>
@@ -2623,24 +2632,32 @@ async function applyOrder() {
 	// already put the old order back, and the baseline must stay valid for the retry.
 	if (persisted) orderBaseline.value = null;
 }
+// The models that actually count as a connection. An open "+ Add a model" panel has
+// already put a placeholder in the list and it must not read as a second model - not
+// even once the customer has typed a provider and key into it, since nothing about it
+// is connected until they press Connect.
+function filledRows() {
+	const pending = pendingAddRow();
+	return rows.value.filter((x) => !isRowEmpty(x) && x !== pending);
+}
+// True when removing this row would empty the pool, which is a disconnect rather than
+// an edit. Drives BOTH the row action's label and where remove() routes, so the button
+// says what it is about to do before it is pressed. Never in onboarding (footerless):
+// there is no connection to tear down there yet, and its wizard footer owns the save.
+function isLastConnectedRow(row) {
+	if (props.footerless || !row || isRowEmpty(row)) return false;
+	const filled = filledRows();
+	return filled.length <= 1 && filled[0] === row;
+}
 async function remove(i) {
 	const r = rows.value[i];
 	if (!r || busy.value.active) return;
-	// save_llm_pool rejects an empty pool server-side, and taking the agent's last
-	// model away is a disconnect, not an edit (a separate flow, not this one). Say so
-	// instead of letting the customer walk into a validation error they cannot clear.
-	// Counted over FILLED rows, because an open "+ Add a model" panel has already put
-	// a placeholder in the list and it must not read as a second model - not even once
-	// the customer has typed a provider and key into it, since nothing about it is
-	// connected until they press Connect.
-	const pending = pendingAddRow();
-	const filled = rows.value.filter((x) => !isRowEmpty(x) && x !== pending);
-	if (!props.footerless && !isRowEmpty(r) && filled.length <= 1) {
-		setApplyResult({
-			kind: "failed",
-			text: "This is your only model, so removing it would leave nothing to answer with. Add another model first.",
-			detail: "",
-		});
+	// save_llm_pool rejects an empty pool server-side, and so does the fleet agent.
+	// Taking the agent's last model away is therefore a different operation, not a
+	// smaller edit: it goes through disconnect_llm, which deletes the credentials
+	// everywhere instead of writing a pool nobody will accept.
+	if (isLastConnectedRow(r)) {
+		await disconnect();
 		return;
 	}
 	const label = rowModelLabel(r);
@@ -2662,6 +2679,54 @@ async function remove(i) {
 	if (props.footerless) return;
 	await runApply({ revertRows: before, keepPendingAdd: true });
 }
+// Tear the whole connection down: every stored key and connected account, on this
+// bench AND in the workspace container.
+//
+// Worded for the outcome, not the mechanism. "Remove your last model" describes an
+// edit to a list; what actually happens is that the workspace stops having AI, and
+// that is what the customer has to agree to. Remove keeps its own narrower meaning
+// (drop one entry from the failover list) and is still what the button says whenever
+// another model would be left behind.
+//
+// Runs through the same busy/inert overlay as an apply: it re-renders the tenant
+// config and restarts the container exactly like one, so the editor must not accept
+// edits while it is in flight.
+async function disconnect() {
+	if (busy.value.active) return;
+	if (
+		!(await confirm({
+			title: `Disconnect ${agentName} from AI?`,
+			message: `Your API keys and connected accounts will be permanently deleted from ${agentName} and from your workspace container. Chat will stop working until you connect a model. Your chat history, skills and macros are kept.`,
+			confirmLabel: "Disconnect",
+			danger: true,
+		}))
+	)
+		return;
+	err.value = "";
+	setApplyResult(null);
+	setBusy("Disconnecting…");
+	try {
+		await api.disconnectLlm();
+	} catch (e) {
+		setApplyResult({ kind: "failed", text: "Could not disconnect.", detail: _err(e) });
+		return;
+	} finally {
+		setBusy("");
+	}
+	// No startPolling: there is no apply to converge on. disconnect_llm calls admin
+	// synchronously and only clears the bench once admin has confirmed, so by the time
+	// it returns the outcome is already final.
+	setApplyResult({
+		kind: "ok",
+		text: "Disconnected. Your keys and connected accounts have been deleted.",
+		detail: "",
+	});
+	await load();
+	// Same signal an apply emits, so the host pane re-reads its own state (the DIRECT
+	// subscription probe in particular, which a disconnect also clears).
+	emit("saved", sync.value);
+}
+
 // Disconnecting an account persists itself, like every other mutating action here.
 //
 // It used to only filter the local array: the chip vanished, nothing was written, and
@@ -2681,21 +2746,18 @@ async function removeAccount(m, idx) {
 	}
 	const last = prev.length === 1;
 	// An accountless subscription row cannot answer a turn, so prunedForSave drops it
-	// and the model leaves the failover list along with its last account. Refuse when
-	// that would empty the pool - same wall remove() puts up, for the same reason, and
-	// far clearer than validatePool's "Model <id> needs at least one connected account"
-	// on a model id this editor never showed the customer.
-	if (last) {
-		const pending = pendingAddRow();
-		const filled = rows.value.filter((x) => !isRowEmpty(x) && x !== pending);
-		if (filled.length <= 1) {
-			setApplyResult({
-				kind: "failed",
-				text: "This is the only account on your only model, so disconnecting it would leave nothing to answer with. Add another model first.",
-				detail: "",
-			});
-			return;
-		}
+	// and the model leaves the failover list along with its last account. That would
+	// empty the pool, which this path cannot express - save_llm_pool refuses an empty
+	// list. Point at the two things that CAN be done instead, one of which is now the
+	// row's own Disconnect. Still far clearer than validatePool's "Model <id> needs at
+	// least one connected account" on a model id this editor never showed the customer.
+	if (last && filledRows().length <= 1) {
+		setApplyResult({
+			kind: "failed",
+			text: "This is the only account on your only model. Use Disconnect on the model to delete it everywhere, or add another model first.",
+			detail: "",
+		});
+		return;
 	}
 	const who = accountLabel(prev[idx]);
 	if (
