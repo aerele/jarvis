@@ -2597,30 +2597,37 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(settings.proxy_active or 0), 1)
 
-	def test_session_model_for_byo_pool_with_no_pin_names_a_real_model(self):
-		"""The SESSION patch must NAME a model the container actually has.
+	def test_session_model_for_byo_pool_with_no_pin_resets_to_the_agent_default(self):
+		"""An unpinned openclaw-direct pool RESETS the session; it does not name a model.
 
-		handle_chat_send only issues sessions.patch when the model is truthy, and openclaw
-		remembers a session's model across turns -- so "" ("send nothing") meant a
-		conversation that had ONCE been pinned was never walked back. Selecting "Auto"
-		wrote model_override="" and flipped the pill, while openclaw went right on calling
-		the old model, forever. Clearing a pin has to be an explicit instruction, not the
-		absence of one. (jarvis#299)
+		openclaw remembers a session's model across turns, so "" ("send nothing") left a
+		conversation that had ONCE been pinned pinned forever: selecting "Auto" wrote
+		model_override="" and flipped the pill while openclaw went right on calling the old
+		model. Clearing a pin has to be an explicit instruction. (jarvis#299)
 
-		For an openclaw-DIRECT pool the name must be the pool's primary real model.
-		"jarvis-pool" only exists inside Bifrost; against this container it matches
-		nothing and the turn dies with model_not_found -- and since that is an explicit
-		bad-id rejection, openclaw's native failover never engages.
+		The instruction is None -> sessions.patch {"model": null}, which openclaw's
+		isDefault branch answers by deleting the session's modelOverride and
+		modelOverrideSource.
+
+		It must NOT be the pool's primary model id, which is what this used to return. Any
+		named model leaves the session model-OVERRIDDEN unless it resolves EXACTLY to the
+		rendered agent default; on a mismatch openclaw stores modelOverrideSource:"user"
+		and resolveEffectiveModelFallbacks then returns [], so the conversation runs with
+		zero failover candidates. Render races, stale specs and legacy "jarvis-pool" pins
+		make that mismatch real. (Marking the override modelOverrideSource:"auto" would
+		satisfy that branch, but the field is not in the sessions.patch schema and the
+		gateway rejects it with INVALID_REQUEST, so not overriding is the only route.)
 		"""
-		from jarvis.chat.worker import POOL_VIRTUAL_MODEL, _session_model_for
+		from jarvis.chat.worker import _session_model_for
 
 		self._pool_of_two()
 		conv = self._make_conv(model_override="")
 		model, provider = _session_model_for(conv)
-		self.assertEqual(model, "gpt-4o", "must be the pool's primary (order 0), a real model id")
-		self.assertNotEqual(model, POOL_VIRTUAL_MODEL, "no Bifrost is deployed to expand the placeholder")
-		self.assertTrue(
-			bool(model), "must be truthy, or handle_chat_send skips sessions.patch and the stale pin sticks"
+		self.assertIsNone(
+			model,
+			"must be None (reset the session). A model id -- the pool primary or the "
+			"jarvis-pool placeholder -- overrides the session and zeroes failover; "
+			'"" would skip the patch entirely and leave a stale pin live.',
 		)
 		self.assertIsNone(provider)
 
@@ -2635,15 +2642,20 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertEqual(model, POOL_VIRTUAL_MODEL)
 		self.assertIsNone(provider)
 
-	def test_session_model_for_stale_pin_resets_to_the_pool(self):
-		"""A pin naming a model the customer has since REMOVED from the pool resets to
-		the pool's primary rather than leaking a dead model id through to openclaw."""
+	def test_session_model_for_stale_pin_resets_to_the_agent_default(self):
+		"""A pin naming a model the customer has since REMOVED from the pool resets the
+		session rather than leaking a dead model id through to openclaw.
+
+		The reset is None (walk back to the agent default), not the primary's id: a
+		customer who deleted their pinned model has expressed no preference, so pinning
+		them to something else on their behalf would disable failover for a choice they
+		never made."""
 		from jarvis.chat.worker import _session_model_for
 
 		self._pool_of_two()
 		conv = self._make_conv(model_override="a-model-the-customer-deleted")
 		model, provider = _session_model_for(conv)
-		self.assertEqual(model, "gpt-4o")
+		self.assertIsNone(model)
 		self.assertIsNone(provider)
 
 	def test_session_model_for_single_model_tenant_is_unchanged(self):
@@ -2667,6 +2679,8 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertEqual(model, "gpt-4o")
 
 	def test_session_model_for_honours_a_valid_pin(self):
+		"""A GENUINE pin still pins, and must: openclaw deliberately disables failover
+		for an explicit user pick, and the reset above must not quietly widen that."""
 		from jarvis.chat.worker import _session_model_for
 
 		self._pool_of_two()
@@ -2674,6 +2688,19 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		model, provider = _session_model_for(conv)
 		self.assertEqual(model, "gpt-3.5-turbo")
 		self.assertIsNone(provider)
+
+	def test_session_model_patch_puts_the_byo_pool_reset_on_the_wire(self):
+		"""End of the chain: an unpinned openclaw-direct pool must reach the transport as
+		"patch, with a null model", not as "skip". _session_model_patch is where the
+		three-way answer is folded, so a regression that turned the reset back into a skip
+		would show up here even if _session_model_for still returned None."""
+		from jarvis.chat.turn_handler import _session_model_patch
+
+		self._pool_of_two()
+		self.assertEqual(_session_model_patch(self._make_conv(model_override="")), (True, None))
+		self.assertEqual(
+			_session_model_patch(self._make_conv(model_override="gpt-3.5-turbo")), (True, "gpt-3.5-turbo")
+		)
 
 	def test_pool_mode_validates_override_against_enabled_models(self):
 		"""Pool mode, model_override in enabled models → override returned."""
@@ -2749,6 +2776,39 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertIn("routing_mode", fields, "Jarvis Settings must have 'routing_mode' field")
 		f = fields["routing_mode"]
 		self.assertEqual(f.fieldtype, "Select", "routing_mode must be of type Select")
+
+
+class TestSessionModelPatchFold(FrappeTestCase):
+	"""_session_model_patch folds _session_model_for's three-way answer into
+	(should_patch, model_ref). The fold lives in ONE place precisely because a call site
+	that only tested truthiness would swallow the None (RESET) case and leave a stale pin
+	live - that is jarvis#299 - so it is asserted here rather than at each call site.
+
+	Driven off a stubbed _session_model_for so all four shapes are covered without four
+	settings fixtures; the pool-awareness class above pins the real-settings end.
+	"""
+
+	def _fold(self, model, provider):
+		from unittest.mock import patch
+
+		from jarvis.chat import turn_handler
+
+		with patch.object(turn_handler, "_session_model_for", return_value=(model, provider)):
+			return turn_handler._session_model_patch(object())
+
+	def test_empty_string_skips_the_patch(self):
+		"""Direct mode with no model configured at all: nothing useful to say."""
+		self.assertEqual(self._fold("", None), (False, None))
+
+	def test_none_is_patched_as_an_explicit_reset(self):
+		"""None must PATCH, carrying a null ref. Skipping here would leave a stale pin."""
+		self.assertEqual(self._fold(None, None), (True, None))
+
+	def test_bare_model_goes_through_verbatim(self):
+		self.assertEqual(self._fold("gpt-4o", None), (True, "gpt-4o"))
+
+	def test_oauth_provider_qualifies_the_ref(self):
+		self.assertEqual(self._fold("gpt-5.5", "openai"), (True, "openai/gpt-5.5"))
 
 
 # ---------------------------------------------------------------------------

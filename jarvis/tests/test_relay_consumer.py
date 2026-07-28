@@ -286,7 +286,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 
 
 class TestSetSessionModel(FrappeTestCase):
-	def test_sends_exact_sessions_patch_params(self):
+	def _capture(self, *args, **kwargs):
 		sess = OpenclawSession.__new__(OpenclawSession)
 		captured = {}
 
@@ -296,6 +296,27 @@ class TestSetSessionModel(FrappeTestCase):
 			return {"ok": True, "payload": {}}
 
 		sess._request = fake_request
-		sess.set_session_model("sk", "openai/gpt-4o")
+		sess.set_session_model(*args, **kwargs)
+		return captured
+
+	def test_sends_exact_sessions_patch_params(self):
+		captured = self._capture("sk", "openai/gpt-4o")
 		self.assertEqual(captured["method"], "sessions.patch")
 		self.assertEqual(captured["params"], {"key": "sk", "model": "openai/gpt-4o"})
+
+	def test_none_sends_an_explicit_null_to_reset_the_session(self):
+		"""None must reach the gateway as ``"model": null`` -- PRESENT, not omitted.
+
+		openclaw only clears a session's modelOverride when it actually sees
+		``model: null`` (its isDefault branch). Dropping the key instead would leave a
+		stale pin live -- the jarvis#299 bug -- and would leave the session overridden,
+		which is what disables the fallback chain.
+
+		This asserts only what we put ON THE WIRE. It stubs _request, so it cannot see
+		gateway schema validation: an earlier attempt to add a ``modelOverrideSource``
+		field passed a test shaped exactly like this one and was rejected live with
+		INVALID_REQUEST. Payload-shape changes need a real container to verify.
+		"""
+		captured = self._capture("sk", None)
+		self.assertIn("model", captured["params"], "the key must be PRESENT, not dropped")
+		self.assertEqual(captured["params"], {"key": "sk", "model": None})

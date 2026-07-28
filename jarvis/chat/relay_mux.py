@@ -632,10 +632,14 @@ class RelayMux:
 		return self.issue_rpc("chat.send", params, timeout_s=timeout_s)
 
 	def set_session_model(
-		self, session_key: str, model_ref: str, *, timeout_s: float = DEFAULT_RPC_TIMEOUT_S
+		self, session_key: str, model_ref: str | None, *, timeout_s: float = DEFAULT_RPC_TIMEOUT_S
 	) -> PendingRpc:
 		"""``sessions.patch`` — per-conversation model override, issued mid-stream
-		without stealing any lane's frames."""
+		without stealing any lane's frames.
+
+		``model_ref=None`` resets the session to the agent default (clearing the
+		override, which is what keeps the fallback chain live). Same contract as
+		``OpenclawSession.set_session_model`` — see its docstring."""
 		return self.issue_rpc("sessions.patch", {"key": session_key, "model": model_ref}, timeout_s=timeout_s)
 
 	def abort(

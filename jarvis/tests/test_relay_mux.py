@@ -31,6 +31,7 @@ import queue
 import threading
 import time
 from unittest.mock import MagicMock
+from unittest.mock import patch as mock_patch
 
 from frappe.tests.utils import FrappeTestCase
 
@@ -706,3 +707,32 @@ class TestRelayMuxReaderLoop(FrappeTestCase):
 		# the abort transcript ends aborted → relay:error terminal.
 		self.assertEqual(rec.terminal[0], "relay:error")
 		self.assertEqual(rec.terminal[1].get("state"), "aborted")
+
+
+class TestRelayMuxSessionModelParams(FrappeTestCase):
+	"""The pump's transport must put the SAME sessions.patch payload on the wire as the
+	legacy ``OpenclawSession`` one (test_relay_consumer.TestSetSessionModel). If the two
+	drift on the null-model RESET, the pump silently keeps a stale pin -- and an
+	overridden session is the shape that zeroes openclaw's fallback chain. See
+	``turn_handler._session_model_for``.
+
+	Stubs ``issue_rpc``, so like its sibling it asserts INTENT only and cannot catch a
+	gateway schema rejection.
+	"""
+
+	def _params(self, model_ref):
+		mux = RelayMux.__new__(RelayMux)
+		with mock_patch.object(RelayMux, "issue_rpc", return_value=None) as rpc:
+			mux.set_session_model("sk", model_ref, timeout_s=5.0)
+		return rpc.call_args.args
+
+	def test_named_model_is_sent_verbatim(self):
+		self.assertEqual(
+			self._params("acme/model-x"), ("sessions.patch", {"key": "sk", "model": "acme/model-x"})
+		)
+
+	def test_none_is_sent_as_an_explicit_null(self):
+		method, params = self._params(None)
+		self.assertEqual(method, "sessions.patch")
+		self.assertIn("model", params, "the key must be PRESENT, not dropped")
+		self.assertEqual(params, {"key": "sk", "model": None})

@@ -186,12 +186,13 @@ class TestPerModelAttribution(_Base):
 
 
 class TestPoolAutoAttribution(_Base):
-	"""Auto-mode (pool, unpinned) turns get their openclaw SESSION patched to
-	turn_handler.POOL_VIRTUAL_MODEL ("jarvis-pool") - see
+	"""Auto-mode (BIFROST pool, unpinned) turns get their openclaw SESSION
+	patched to turn_handler.POOL_VIRTUAL_MODEL ("jarvis-pool") - see
 	turn_handler._session_model_for - so the gateway's sessions.list row
 	reports that sentinel as `model` for the turn, not the real per-request
 	model Bifrost picked server-side (that data isn't available bench-side;
-	pool tenants get true per-model data from Bifrost logs admin-side).
+	those tenants get true per-model data from Bifrost logs admin-side). An
+	openclaw-DIRECT pool RESETS its session instead, so it never lands here.
 	record_turn_usage records the turn under that same sentinel - the
 	honest bucket for "pool auto-routed" - and usage.py must reference the
 	shared constant rather than an implicit magic string, so the two

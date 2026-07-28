@@ -135,7 +135,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		return {"ok": False, "reason": "self_host"}
 
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-	effective_model, oauth_provider_id = turn_handler._session_model_for(conv)
+	patch_session_model, session_model_ref = turn_handler._session_model_patch(conv)
 	managed_attachments = turn_handler._to_managed_attachments(ap.vision_parts) if ap.vision_parts else None
 
 	if not conv.session_key:
@@ -166,11 +166,12 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 				session_key = _ensure_session_key(chat_user, sess=sess)
 				frappe.db.set_value(CONV, conversation, "session_key", session_key)
 				frappe.db.commit()
-			# (#23) model patch (stateful — openclaw remembers across turns).
-			if effective_model:
-				model_ref = f"{oauth_provider_id}/{effective_model}" if oauth_provider_id else effective_model
+			# (#23) model patch (stateful — openclaw remembers across turns). A None ref
+			# means "reset to the agent default" and MUST still be sent: it is the
+			# instruction that walks back a stale pin. See _session_model_patch.
+			if patch_session_model:
 				try:
-					sess.set_session_model(session_key, model_ref)
+					sess.set_session_model(session_key, session_model_ref)
 				except OpenclawUnreachableError:
 					raise
 				except Exception:

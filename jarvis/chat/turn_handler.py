@@ -39,7 +39,7 @@ import frappe
 
 from jarvis.chat import openclaw_session_pool, vision
 from jarvis.exceptions import OpenclawUnreachableError
-from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
+from jarvis.jarvis.pool_serialize import compute_pool_mode
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -326,7 +326,7 @@ def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 	return effective_model, provider
 
 
-def _session_model_for(conv) -> tuple[str, str | None]:
+def _session_model_for(conv) -> tuple[str | None, str | None]:
 	"""The model to PATCH THE SESSION to -- a different question from
 	_resolve_model_and_provider's, and the distinction is the whole fix.
 
@@ -341,20 +341,49 @@ def _session_model_for(conv) -> tuple[str, str | None]:
 
 	The SESSION patch is stateful in a way those one-shots are not. openclaw remembers a
 	session's model across turns (it holds the history server-side), so here "no opinion"
-	CANNOT mean "send nothing" -- that is precisely the bug: handle_chat_send only issues
-	sessions.patch when the model is truthy, so a conversation that had ONCE been pinned
+	CANNOT mean "send nothing" -- that is precisely the bug: handle_chat_send only issued
+	sessions.patch when the model was truthy, so a conversation that had ONCE been pinned
 	was never walked back. Selecting "Auto" wrote model_override="" and flipped the pill,
-	while openclaw went on calling the old model forever.
+	while openclaw went on calling the old model forever. (jarvis#299)
 
-	So here, and ONLY here, an unpinned pool conversation must NAME the pool. (jarvis#299)
+	So here, and ONLY here, clearing a pin is an explicit INSTRUCTION -- and the
+	instruction is ``None``, not a model name. Three return values, three meanings:
 
-	WHICH name depends on what is actually in front of the container. Only a Bifrost pool
-	understands "jarvis-pool" -- its catch-all rule expands the placeholder into the
-	failover chain. A BYO api-key pool is rendered openclaw-direct with NO sidecar, so the
-	placeholder matches no registered model there and openclaw rejects the turn outright
-	with `model_not_found` -- and because that is an explicit bad-id rejection rather than
-	an upstream failure, openclaw's native failover never engages. Name the pool's PRIMARY
-	real model instead; the container's own model.fallbacks chain covers the rest.
+	    ""    nothing to patch (direct mode with no model configured) -- caller skips
+	    None  RESET this session to the agent's configured default
+	    "id"  pin this model
+
+	``None`` goes on the wire as ``sessions.patch {"model": null}``, which openclaw's
+	isDefault branch answers by DELETING the session's modelOverride, providerOverride and
+	modelOverrideSource. That is what makes it a walk-back rather than a no-op.
+
+	Naming the pool's primary here instead -- which is what this function used to do --
+	looks equivalent and is not, because ANY named model leaves the session
+	model-OVERRIDDEN:
+
+	    resolveEffectiveModelFallbacks:
+	      if (!hasSessionModelOverride) return agentFallbacksOverride;   // chain applies
+	      if (!(modelOverrideSource === "auto" || ...)) return [];       // NO chain
+
+	openclaw deletes the override only when the patched model resolves EXACTLY to the
+	rendered agent default; on any mismatch it stores ``modelOverrideSource: "user"`` and
+	the conversation runs with zero failover candidates. Mismatches happen for real --
+	render races, stale specs, legacy "jarvis-pool" pins -- so naming the primary was a
+	silent coin flip on whether failover survived. Marking the override
+	``modelOverrideSource: "auto"`` would satisfy that branch too, but the field is not in
+	the sessions.patch schema (the gateway rejects it with INVALID_REQUEST), so not
+	overriding at all is the only supported route.
+
+	A GENUINE user pin still pins. openclaw deliberately drops failover for an explicit
+	pick, and quietly widening that is not this layer's call.
+
+	Resetting also stops the customer plane duplicating a choice it does not own: the fleet
+	already renders the pool primary as ``agents.defaults.model.primary``, so the
+	container's own default IS the model we were copying.
+
+	A Bifrost pool still gets "jarvis-pool" by name: its catch-all rule expands the
+	placeholder into the failover chain server-side, so that is a real routing id rather
+	than a reset.
 	"""
 	model, provider = _resolve_model_and_provider(conv)
 	if model:
@@ -362,12 +391,30 @@ def _session_model_for(conv) -> tuple[str, str | None]:
 	settings = frappe.get_single("Jarvis Settings")
 	if getattr(settings, "proxy_active", 0):
 		return POOL_VIRTUAL_MODEL, None  # Bifrost expands it into the chain
-	primary = pool_primary_model(settings)
-	if primary:
-		return primary, None  # openclaw-direct pool: name a model it really has
+	if compute_pool_mode(settings):
+		# openclaw-direct pool (no sidecar), no pin: RESET rather than name a model, so the
+		# session keeps no override and the container's model.fallbacks chain stays live.
+		return None, None
 	# Direct mode already resolves to settings.llm_model, so "" here means the site has
 	# no model configured at all -- nothing useful to patch. Unchanged behaviour.
 	return model, provider
+
+
+def _session_model_patch(conv) -> tuple[bool, str | None]:
+	"""``(should_patch, model_ref)`` for this turn's ``sessions.patch``.
+
+	Folds _session_model_for's three-way answer into a flag plus a payload, in ONE place,
+	so no call site can mistake ``None`` (RESET) for ``""`` (nothing to say) by testing
+	truthiness -- which is exactly how the stale pin of jarvis#299 survived:
+
+	    ""    -> (False, None)   leave the session alone
+	    None  -> (True, None)    send {"model": null}: reset to the agent default
+	    "id"  -> (True, "id")    or "<provider>/id" when direct-mode OAuth names one
+	"""
+	model, provider = _session_model_for(conv)
+	if model == "":
+		return False, None
+	return True, f"{provider}/{model}" if provider and model else model
 
 
 def _thinking_prefix(thinking_override: str | None) -> str:
@@ -939,7 +986,7 @@ def handle_chat_send(payload: dict) -> None:
 			# retry inside this turn because tokens may have already
 			# streamed to the UI by the time the failure surfaces.
 			gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-			effective_model, oauth_provider_id = _session_model_for(conv)
+			patch_session_model, session_model_ref = _session_model_patch(conv)
 			if not conv.session_key:
 				# First turn of this conversation pays session-create and is the
 				# most cold-start-prone (a dormant container takes ~10-25s to
@@ -977,12 +1024,12 @@ def handle_chat_send(payload: dict) -> None:
 						frappe.db.set_value(CONV, conversation_id, "session_key", conv.session_key)
 						frappe.db.commit()
 						session_create_ms = int((time.monotonic() - t_sess) * 1000)
-					if effective_model:
-						model_ref = (
-							f"{oauth_provider_id}/{effective_model}" if oauth_provider_id else effective_model
-						)
+					# A None ref means "reset this session to the agent default" and MUST
+					# still be sent: it is the instruction that walks back a stale pin.
+					# See _session_model_patch.
+					if patch_session_model:
 						try:
-							sess.set_session_model(conv.session_key, model_ref)
+							sess.set_session_model(conv.session_key, session_model_ref)
 						except OpenclawUnreachableError:
 							raise
 						except Exception:
