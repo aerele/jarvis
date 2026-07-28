@@ -75,8 +75,28 @@ class TestInstalledAppsSync(FrappeTestCase):
 		# premature stamp would silence the gap forever on a failed send.
 		self.assertEqual(ias._synced_apps(), stale)
 
+	def test_pool_active_is_derived_from_models_not_the_proxy_flag(self):
+		"""A BYO api-key pool has proxy_active=0 (no sidecar - openclaw drives its
+		own failover) yet MUST still resync through the pool leg. Reading the flag
+		would send it down the single-model render and cut it to one credential."""
+		for p in self._patches:
+			p.stop()  # this test exercises the REAL _pool_active
+		try:
+			settings = frappe._dict(
+				preset="",
+				models=[
+					frappe._dict(enabled=1, credential_type="api_key", model="gpt-4o", order=0),
+					frappe._dict(enabled=1, credential_type="api_key", model="gpt-4-turbo", order=1),
+				],
+			)
+			with patch("frappe.get_single", return_value=settings):
+				self.assertTrue(ias._pool_active())
+		finally:
+			for p in self._patches:
+				p.start()
+
 	def test_unreadable_pool_flag_defers(self):
-		"""Neither leg is safe to guess when proxy_active can't be read -
+		"""Neither leg is safe to guess when pool mode can't be read -
 		defer (stale snapshot retries next migrate) instead of risking the
 		single-model render on a pool tenant."""
 		stale = sorted(frappe.get_installed_apps())[:-1]
@@ -87,7 +107,7 @@ class TestInstalledAppsSync(FrappeTestCase):
 		self.assertEqual(ias._synced_apps(), stale)
 
 	def test_pool_tenant_takes_pool_leg(self):
-		"""proxy_active tenants MUST resync through the pool path - the
+		"""Pool tenants MUST resync through the pool path - the
 		single-model restart would re-render openclaw.json in direct mode
 		and knock the container off Bifrost pool routing."""
 		stale = sorted(frappe.get_installed_apps())[:-1]

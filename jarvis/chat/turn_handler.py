@@ -39,6 +39,7 @@ import frappe
 
 from jarvis.chat import openclaw_session_pool, vision
 from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -293,13 +294,19 @@ POOL_VIRTUAL_MODEL = "jarvis-pool"
 def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 	"""Return (effective_model, openclaw_provider_id_or_None) for this conv.
 
-	Pool mode (proxy_active=1): the pinned model, or the pool's virtual model when no
-	pin is set. Direct mode: use conv.model_override or settings.llm_model.
+	Pool mode: the pinned model, or "" (no opinion) when no pin is set. Direct mode:
+	use conv.model_override or settings.llm_model.
+
+	The pool branch keys on ``compute_pool_mode``, NOT on ``proxy_active``. Both kinds
+	of pool -- Bifrost-fronted and openclaw-direct -- need the pin validated against the
+	enabled models; ``proxy_active`` now says only whether a sidecar is deployed, and a
+	BYO api-key pool has none.
 	"""
 	settings = frappe.get_single("Jarvis Settings")
 
-	if getattr(settings, "proxy_active", 0):
-		# Pool mode: Bifrost routes. Use override if it matches an enabled model name.
+	if compute_pool_mode(settings):
+		# Pool mode: the container (or Bifrost) routes. Use override if it matches an
+		# enabled model name.
 		enabled_names = {
 			(m.model if hasattr(m, "model") else m.get("model", ""))
 			for m in (settings.models or [])
@@ -308,7 +315,7 @@ def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 		override = (conv.model_override or "").strip()
 		if override and override in enabled_names:
 			return override, None  # Validated override accepted
-		return "", None  # Let Bifrost/pool route
+		return "", None  # Let the pool route
 
 	effective_model = conv.model_override or settings.llm_model or ""
 	provider = (
@@ -340,13 +347,24 @@ def _session_model_for(conv) -> tuple[str, str | None]:
 	while openclaw went on calling the old model forever.
 
 	So here, and ONLY here, an unpinned pool conversation must NAME the pool. (jarvis#299)
+
+	WHICH name depends on what is actually in front of the container. Only a Bifrost pool
+	understands "jarvis-pool" -- its catch-all rule expands the placeholder into the
+	failover chain. A BYO api-key pool is rendered openclaw-direct with NO sidecar, so the
+	placeholder matches no registered model there and openclaw rejects the turn outright
+	with `model_not_found` -- and because that is an explicit bad-id rejection rather than
+	an upstream failure, openclaw's native failover never engages. Name the pool's PRIMARY
+	real model instead; the container's own model.fallbacks chain covers the rest.
 	"""
 	model, provider = _resolve_model_and_provider(conv)
 	if model:
 		return model, provider
 	settings = frappe.get_single("Jarvis Settings")
 	if getattr(settings, "proxy_active", 0):
-		return POOL_VIRTUAL_MODEL, None
+		return POOL_VIRTUAL_MODEL, None  # Bifrost expands it into the chain
+	primary = pool_primary_model(settings)
+	if primary:
+		return primary, None  # openclaw-direct pool: name a model it really has
 	# Direct mode already resolves to settings.llm_model, so "" here means the site has
 	# no model configured at all -- nothing useful to patch. Unchanged behaviour.
 	return model, provider
