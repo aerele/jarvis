@@ -393,6 +393,13 @@ def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None)
 	try:
 		return admin_client.resume_pending_signup(plan, provider=provider)
 	except Exception:
+		# Deliberate fallthrough to the original duplicate error (a rejected
+		# resume usually means a REAL duplicate), but leave a trace so a broken
+		# resume path is debuggable rather than invisible.
+		frappe.log_error(
+			title="signup resume fallback failed (showing original duplicate error)",
+			message=frappe.get_traceback(),
+		)
 		return None
 
 
