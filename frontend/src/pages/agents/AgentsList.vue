@@ -278,6 +278,7 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { useListPage } from "@/composables/useListPage";
 import * as api from "@/api";
 import * as agentsApi from "@/api/agents";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 
 const route = useRoute();
 const router = useRouter();
@@ -463,10 +464,12 @@ async function probeCaps() {
 // dirty = the enabled set changed since the last successful Apply - drives the
 // prominent solid button, the "Changes pending" badge and the leave-guard.
 const sync = reactive({ pending: false, dirty: false, status: "" });
-const syncFailed = computed(() => (sync.status || "").startsWith("failed"));
-const syncFailureReason = computed(() =>
-	syncFailed.value ? (sync.status || "").replace(/^failed:?/, "").trim() : ""
-);
+// Prefix parsing lives in @/lib/syncStatus, not here: this file, SyncPill.vue and
+// ReviewTab.vue each carried their own copy of the same regex over the same raw
+// last_sync_status strings, which is how the wording drifted apart between them.
+const syncHuman = computed(() => humaniseSyncStatus(sync.status));
+const syncFailed = computed(() => syncHuman.value.kind === "failed");
+const syncFailureReason = computed(() => syncHuman.value.detail);
 
 let syncTimer = null;
 async function loadSyncStatus() {
