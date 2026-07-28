@@ -31,6 +31,7 @@ Safety bounds (same shape as update_doc, adapted for create):
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools import _holiday_advisory
 from jarvis.tools._bulk import _MAX_BATCH, run_atomic_batch
 from jarvis.tools._delegate_write_caps import enforce_create
 
@@ -110,7 +111,7 @@ def create_doc(
 	_validate_create_args(doctype, values)
 	doc = _insert_one(doctype, values)
 	doc.apply_fieldlevel_read_permissions()
-	return doc.as_dict()
+	return _holiday_advisory.attach(doc.as_dict(), doc)
 
 
 def _create_batch(docs: list, notes: list | None = None) -> dict:

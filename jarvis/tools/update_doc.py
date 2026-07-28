@@ -29,7 +29,7 @@ Safety bounds enforced here (on top of Frappe's standard validation):
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
-from jarvis.tools import require_doctype_and_name
+from jarvis.tools import _holiday_advisory, require_doctype_and_name
 from jarvis.tools._bulk import run_atomic_batch
 from jarvis.tools._delegate_write_caps import enforce_update
 
@@ -103,7 +103,7 @@ def update_doc(
 	require_doctype_and_name(doctype, name)
 	doc = _update_one(doctype, name, changes)
 	doc.apply_fieldlevel_read_permissions()
-	return doc.as_dict()
+	return _holiday_advisory.attach(doc.as_dict(), doc)
 
 
 def _update_batch(doctype: str, updates: list) -> dict:
