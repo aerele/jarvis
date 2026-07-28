@@ -29,6 +29,10 @@ def validate_can_send(user: str, model: str | None = None) -> tuple[bool, str | 
 		return False, "subscription_suspended"
 	if _release_update_required():
 		return False, "release_update_required"
+	if _workspace_resetting():
+		return False, "workspace_resetting"
+	if _llm_not_configured():
+		return False, "llm_not_configured"
 	# Per-model cap: only when a concrete model is known. ``model`` is resolved
 	# in chat.api (which knows the conversation) and passed in as a plain string,
 	# so policy never imports turn_handler (no import cycle). Pool "Auto" resolves
@@ -54,6 +58,62 @@ def _release_update_required() -> bool:
 			title="jarvis policy: release-notice check failed (allowing send)",
 			message=frappe.get_traceback(),
 		)
+		return False
+
+
+def _workspace_resetting() -> bool:
+	"""True while a self-serve workspace reset is rebuilding the container
+	(transport cleared + resetting marker set). Without this a send throws a raw
+	"openclaw is not configured" instead of a gated state. Fails OPEN."""
+	try:
+		from jarvis.onboarding import _RESETTING_STATUS
+
+		s = frappe.get_single("Jarvis Settings")
+		return not s.get("agent_url") and (s.get("last_sync_status") or "").startswith(_RESETTING_STATUS)
+	except Exception:
+		# See _over_model_limit: don't let a logging failure defeat fail-open.
+		try:
+			frappe.log_error(
+				title="jarvis policy: workspace-reset check failed (allowing send)",
+				message=frappe.get_traceback(),
+			)
+		except Exception:
+			pass
+		return False
+
+
+def _llm_not_configured() -> bool:
+	"""True when NO LLM connection is configured at all (never set up, or revoked
+	via the workspace-reset "disconnect AI model connections" option). Mirrors
+	account.is_ready_for_chat's local llm_credentials branch — without this gate a
+	send queues against the container's stub key and hangs instead of telling the
+	customer to connect a model. Fails OPEN.
+
+	Skipped under test unless a test opts in via
+	``frappe.flags.test_llm_configured_gate``: the CI site has no LLM configured,
+	so this gate would otherwise reject every chat test's send."""
+	try:
+		if frappe.flags.in_test and not frappe.flags.test_llm_configured_gate:
+			return False
+		s = frappe.get_single("Jarvis Settings")
+		if s.get("proxy_active"):
+			return False  # a pool is configured; pool health is admin's concern
+		mode = (s.get("llm_auth_mode") or "api_key").strip() or "api_key"
+		if mode in ("subscription", "oauth"):
+			return not s.get("llm_oauth_connected_at")
+		key = s.get_password("llm_api_key", raise_exception=False) or ""
+		provider = (s.get("llm_provider") or "").strip()
+		model = (s.get("llm_model") or "").strip()
+		return not (key and provider and model)
+	except Exception:
+		# See _over_model_limit: don't let a logging failure defeat fail-open.
+		try:
+			frappe.log_error(
+				title="jarvis policy: llm-configured check failed (allowing send)",
+				message=frappe.get_traceback(),
+			)
+		except Exception:
+			pass
 		return False
 
 
