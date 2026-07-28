@@ -11,9 +11,12 @@ GEMINI = "Google Gemini"
 # was listed until 2026-07-23 and never was: the image carries only the -image,
 # -image-preview, -lite and -lite-preview variants, so a subscriber choosing it
 # silently misrouted to the pool primary via Bifrost's catch-all instead of
-# erroring. Replaced with the -lite variant, which is real. The api-key tier still
-# offers "gemini-3.1-flash" (Google's own API serves it); only this tier is
-# image-bound.
+# erroring. Replaced with the -lite variant, which is real.
+# CORRECTED 2026-07-28: this note used to add that the api-key tier still offered
+# "gemini-3.1-flash" because Google's own API served it. Measured against a live
+# key, Google 404s it there too ("not found for API version v1beta") and it is
+# absent from the 41 generateContent models the API lists, so the bare id is gone
+# from BOTH tiers. This tier is image-bound on top of that.
 EXPECTED_GEMINI = [
 	"gemini-2.5-pro",
 	"gemini-2.5-flash",

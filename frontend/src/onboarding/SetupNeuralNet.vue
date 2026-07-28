@@ -16,6 +16,7 @@
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
+import { BRAND_STAR_PATH } from "@/lib/brand";
 
 const props = defineProps({
 	dark: { type: Boolean, default: false },
@@ -43,7 +44,7 @@ const MODS = [
 	"Compliance",
 	"Quality",
 ];
-const STAR = new Path2D("M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z");
+const STAR = new Path2D(BRAND_STAR_PATH);
 
 let ctx = null;
 let W = 0,

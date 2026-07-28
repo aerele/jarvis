@@ -55,12 +55,15 @@
 									:loading="syncing"
 									@click="confirmSync"
 								/>
+								<!-- wiki_mirror_last_sync_status is the same internal audit
+								     string every apply pipeline writes ("ok (restart via
+								     admin)", "failed: fleet returned 502") and this line
+								     used to print it verbatim. @/lib/syncStatus is the one
+								     place that turns it into words a customer can read. -->
 								<p class="text-p-sm text-ink-gray-5">
 									<template v-if="caps.wiki_mirror_last_synced_at">
 										Last synced {{ timeAgo(caps.wiki_mirror_last_synced_at)
-										}}<span v-if="caps.wiki_mirror_last_sync_status">
-											- {{ caps.wiki_mirror_last_sync_status }}</span
-										>
+										}}<span v-if="wikiSyncLabel"> - {{ wikiSyncLabel }}</span>
 									</template>
 									<template v-else>Not synced yet.</template>
 								</p>
@@ -303,6 +306,7 @@ import ListPage from "@/components/list/ListPage.vue";
 import WikiPageDialog from "@/components/wiki/WikiPageDialog.vue";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 import {
 	listWikiPagesPage,
 	getWikiCaps,
@@ -483,6 +487,19 @@ const caps = reactive({
 	wiki_lint_summary: "",
 	wiki_mirror_last_synced_at: null,
 	wiki_mirror_last_sync_status: "",
+});
+
+// What the "Last synced …" line says about the last mirror push. Empty only when the
+// backend recorded nothing at all, so the line stays a bare timestamp instead of
+// gaining a redundant clause; an unrecognised status still gets syncStatus's degraded
+// label rather than being dropped, because silence there would read as success. The
+// failure reason IS shown: this line has room for it, and it is the only clue a
+// customer gets about why the wiki is stale.
+const wikiSyncLabel = computed(() => {
+	const raw = (caps.wiki_mirror_last_sync_status || "").trim();
+	if (!raw) return "";
+	const st = humaniseSyncStatus(raw);
+	return st.detail ? `${st.text}: ${st.detail}` : st.text;
 });
 
 async function loadCaps() {

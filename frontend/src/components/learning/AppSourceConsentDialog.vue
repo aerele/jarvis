@@ -31,7 +31,7 @@
 
 			<!-- roster -->
 			<div v-if="loading" class="flex items-center gap-2 py-8 text-sm text-ink-gray-5">
-				<LoadingIndicator class="size-4" />
+				<JvSpinner />
 				Loading your custom apps…
 			</div>
 			<div
@@ -105,7 +105,8 @@
 // never consent, so this dialog is the only way a run gets any apps at all - both
 // the Analysis-tab card and the agent page open it before calling run_agent_now.
 import { ref, watch } from "vue";
-import { Button, Checkbox, Dialog, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
+import { Button, Checkbox, Dialog, FeatherIcon, toast } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { listCustomApps } from "@/api/appLearning";
 import { errMessage as errMsg } from "@/lib/errors";
 

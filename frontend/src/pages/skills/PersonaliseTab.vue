@@ -77,7 +77,7 @@
 							v-if="board.loading && !board.rows.length"
 							class="grid place-items-center py-12"
 						>
-							<LoadingIndicator class="size-5 text-ink-gray-5" />
+							<JvSpinner />
 						</div>
 
 						<div
@@ -307,7 +307,6 @@ import {
 	Button,
 	FeatherIcon,
 	FormControl,
-	LoadingIndicator,
 	Tooltip,
 	toast,
 	confirmDialog,
@@ -318,6 +317,7 @@ import OriginBadge from "@/components/personalise/OriginBadge.vue";
 import ChatComposer from "@/components/personalise/ChatComposer.vue";
 import NotesView from "@/components/personalise/NotesView.vue";
 import PersonalisationSettings from "@/components/personalise/PersonalisationSettings.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import {
 	getSkillsAreaCaps,
 	listQuestionsPage,

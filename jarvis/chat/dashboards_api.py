@@ -271,6 +271,56 @@ def get_dashboard(name: str) -> dict:
 	return {"ok": True, "data": _dashboard_detail(doc)}
 
 
+@frappe.whitelist()
+@require_jarvis_user
+def dashboard_for_conversation(conversation: str) -> dict:
+	"""The saved dashboard this conversation built, if there is one.
+
+	Main chat offers "Open in Dashboards" on a builder conversation's html
+	artifact: a saved dashboard opens in place (``?edit=``), an unsaved canvas
+	is promoted onto the builder from the transcript instead. This is the
+	lookup behind that fork, so ``{}`` is an ordinary answer, not an error.
+
+	Permission: the CALLER must own the conversation (conversations are
+	strictly private - the same gate ``chat.api.get_conversation`` applies),
+	and the dashboard row goes through ``frappe.get_list`` - NOT get_all,
+	which sets ignore_permissions and would skip the
+	permission_query_conditions hook that applies the scope-visibility matrix.
+	A dashboard that has since moved out of the caller's reach therefore reads
+	as "none" rather than leaking its title.
+
+	``owner`` is in the filters as well: ``source_conversation`` is a
+	client-settable payload field, so an Org-scope dashboard carrying someone
+	else's conversation id would otherwise be visible on THEIR "Open in
+	Dashboards". The caller provably owns the conversation, so nobody else can
+	legitimately have built from it.
+
+	``creation`` is returned (and ordered on, not ``modified``): the caller
+	compares it against the clicked message's own creation, so merely EDITING
+	an old dashboard cannot re-hijack a click on a newer unsaved build.
+	"""
+	from jarvis.chat.api import _get_owned_conversation
+
+	_get_owned_conversation(conversation)  # non-owner: PermissionError
+	rows = frappe.get_list(
+		DASHBOARD,
+		filters={"source_conversation": conversation, "owner": frappe.session.user},
+		fields=["name", "dashboard_title", "creation"],
+		order_by="creation desc",
+		limit=1,
+	)
+	if not rows:
+		return {"ok": True, "data": {}}
+	return {
+		"ok": True,
+		"data": {
+			"name": rows[0].name,
+			"dashboard_title": rows[0].dashboard_title or "",
+			"creation": str(rows[0].creation or ""),
+		},
+	}
+
+
 # --------------------------------------------------------------------------- #
 # save / delete
 # --------------------------------------------------------------------------- #

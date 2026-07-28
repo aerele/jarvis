@@ -23,7 +23,7 @@
 			</div>
 		</div>
 
-		<div class="min-h-0 flex-1 overflow-y-auto">
+		<div class="jv-scroll-overlay min-h-0 flex-1 overflow-y-auto">
 			<slot />
 		</div>
 

@@ -204,7 +204,7 @@
 
 						<!-- cards -->
 						<div v-if="board.loading && !board.rows.length" class="py-10 text-center">
-							<LoadingIndicator class="size-5 text-ink-gray-5" />
+							<JvSpinner />
 						</div>
 						<div
 							v-else-if="!board.rows.length"
@@ -461,7 +461,7 @@
 											v-if="expanded[row.name] === 'loading'"
 											class="py-4 text-center"
 										>
-											<LoadingIndicator class="size-4 text-ink-gray-5" />
+											<JvSpinner />
 										</div>
 										<template v-else>
 											<div
@@ -872,7 +872,7 @@
 						</div>
 
 						<div v-if="promo.loading && !promo.rows.length" class="py-10 text-center">
-							<LoadingIndicator class="size-5 text-ink-gray-5" />
+							<JvSpinner />
 						</div>
 						<div
 							v-else-if="!promo.rows.length"
@@ -1043,7 +1043,7 @@
 							v-if="skillPromo.loading && !skillPromo.rows.length"
 							class="py-10 text-center"
 						>
-							<LoadingIndicator class="size-5 text-ink-gray-5" />
+							<JvSpinner />
 						</div>
 						<div
 							v-else-if="!skillPromo.rows.length"
@@ -1263,7 +1263,7 @@
 					</div>
 
 					<div v-if="decided.loading && !decided.rows.length" class="py-8 text-center">
-						<LoadingIndicator class="size-5 text-ink-gray-5" />
+						<JvSpinner />
 					</div>
 					<div
 						v-else-if="!decided.rows.length"
@@ -1343,7 +1343,7 @@
 									v-if="dExpanded[row.name] === 'loading'"
 									class="py-4 text-center"
 								>
-									<LoadingIndicator class="size-4 text-ink-gray-5" />
+									<JvSpinner />
 								</div>
 								<template v-else>
 									<div
@@ -1784,7 +1784,6 @@ import {
 	Dropdown,
 	FeatherIcon,
 	FormControl,
-	LoadingIndicator,
 	Tooltip,
 	confirmDialog,
 	toast,
@@ -1793,6 +1792,7 @@ import { useRouter } from "vue-router";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import SyncPill from "./SyncPill.vue";
 import InsightApplyDialog from "@/components/learning/InsightApplyDialog.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { setChatPrefill } from "@/composables/chatPrefill";
 import { getSkillsAreaCaps } from "@/api/personalise";
@@ -1833,6 +1833,7 @@ import { formatPushProjection, projectionChanged } from "./promotionBudget";
 // HTML-escape for every untrusted value interpolated into a confirm message
 // (ConfirmDialog renders `message` via v-html) — SAR-1 client belt.
 import { esc } from "./escapeHtml";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 // Session user: a reviewer who is ALSO the requester can't decide their own
 // request (four-eyes); we disable + explain up front (SAR-4 / SPX-4).
 import { session } from "@/data/session";
@@ -2832,9 +2833,11 @@ function startApplyPoll() {
 		if (st && st.pending) return;
 		stopApplyPoll();
 		applyActive.value = false;
-		const s = (st && st.last_sync_status) || "";
-		if (s.startsWith("failed")) {
-			toast.error(s.replace(/^failed:?/, "").trim() || "Applying learned skills failed.");
+		// Shared prefix parsing (@/lib/syncStatus): the raw "failed: …" string is never
+		// what goes in the toast, and a multi-line reason is flattened first.
+		const outcome = humaniseSyncStatus(st && st.last_sync_status);
+		if (outcome.kind === "failed") {
+			toast.error(outcome.detail || "Applying learned skills failed.");
 		} else {
 			toast.success("Learned skills applied to your assistant.");
 		}

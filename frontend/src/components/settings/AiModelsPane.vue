@@ -85,8 +85,8 @@ const directSub = ref({ is_direct_subscription: false });
 const directSubLoading = ref(true);
 const directSubErr = ref("");
 // SettingsPane's single error surface (design.md anti-pattern 16) takes a
-// short user-facing string; the retry Button sits in the body, mirroring
-// ConnectionPane's errorMessage/Retry split.
+// short user-facing string; the retry Button sits in the body, the same
+// errorMessage/Retry split every migrated pane in this dialog uses.
 const errorMessage = ref("");
 
 async function loadDirectSub() {

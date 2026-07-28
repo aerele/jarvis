@@ -22,13 +22,14 @@
 			viewBox="0 0 24 24"
 			fill="#fff"
 		>
-			<path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z" />
+			<path :d="BRAND_STAR_PATH" />
 		</svg>
 	</span>
 </template>
 
 <script setup>
 import { brandLogoUrl } from "@/branding";
+import { BRAND_STAR_PATH } from "@/lib/brand";
 
 defineProps({
 	size: { type: Number, default: 56 },

@@ -32,7 +32,7 @@
 
 		<!-- list -->
 		<div v-if="notes.loading && !notes.rows.length" class="py-8 text-center">
-			<LoadingIndicator class="size-5 text-ink-gray-5" />
+			<JvSpinner />
 		</div>
 		<div
 			v-else-if="!notes.rows.length && filtered"
@@ -136,17 +136,10 @@
 // the emitted payload (see NoteDetailModal.vue's own comment for the full
 // emit contract - this component only passes it through unchanged).
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
-import {
-	Badge,
-	Button,
-	FeatherIcon,
-	FormControl,
-	LoadingIndicator,
-	Tooltip,
-	toast,
-} from "frappe-ui";
+import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { listNotesPage } from "@/api/personalise";
+import JvSpinner from "@/components/JvSpinner.vue";
 import NoteDetailModal from "./NoteDetailModal.vue";
 import { agentName } from "@/branding";
 

@@ -50,7 +50,7 @@
 				v-if="loading"
 				class="absolute inset-0 flex items-center justify-center bg-surface-white/60"
 			>
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 			</div>
 		</template>
 	</div>
@@ -67,7 +67,8 @@
 // html actually references echarts. The named dashboard theme (--jd-* vars)
 // owns the canvas look; switching it rebuilds the document.
 import { ref, watch, onMounted, onBeforeUnmount } from "vue";
-import { Button, ErrorMessage, FeatherIcon, LoadingIndicator } from "frappe-ui";
+import { Button, ErrorMessage, FeatherIcon } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { buildSrcdoc, parseSourcesBlock } from "@/lib/dashboardSrcdoc";
 import { THEMES, DEFAULT_THEME, themeKey } from "@/lib/dashboardThemes";
 import { loadCaptureLib, downloadPng, downloadPdf } from "@/lib/dashboardExport";

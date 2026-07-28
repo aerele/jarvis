@@ -145,7 +145,7 @@
 
 							<!-- rule list -->
 							<div v-if="rulesLoading" class="grid place-items-center py-10">
-								<LoadingIndicator class="size-5 text-ink-gray-5" />
+								<JvSpinner />
 							</div>
 							<div
 								v-else-if="!rules.length"
@@ -331,11 +331,11 @@ import {
 	Dialog,
 	FeatherIcon,
 	FormControl,
-	LoadingIndicator,
 	Switch,
 	toast,
 	confirmDialog,
 } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { listShareableUsers } from "@/api";
 import {
 	listRoleOptions,

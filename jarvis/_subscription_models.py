@@ -33,9 +33,11 @@ _SEED_SUBSCRIPTION_MODELS: dict[str, list[str]] = {
 	# NOT "gemini-3.1-flash": that id is absent from the pinned cliproxy image
 	# (only the -image, -image-preview, -lite and -lite-preview variants are
 	# compiled into its binary), so the subscription tier cannot serve it and a
-	# customer choosing it silently misrouted to the pool primary. The api-key
-	# tier still offers "gemini-3.1-flash" because those ids go to Google's real
-	# API, which does serve it. jarvis_admin_v2 enforces this at save time.
+	# customer choosing it silently misrouted to the pool primary.
+	# CORRECTED 2026-07-28: the second half of this note used to say the api-key
+	# tier still offers it "because those ids go to Google's real API, which does
+	# serve it". Measured against a live key, Google 404s it there too, so the id
+	# is gone from both tiers. jarvis_admin_v2 enforces this at save time.
 	"Google Gemini": [
 		"gemini-2.5-pro",
 		"gemini-2.5-flash",

@@ -8,6 +8,27 @@
 			<KvRow label="Status">
 				<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
 			</KvRow>
+			<KvRow
+				v-if="isProxy && connStatus && connStatus.oauth_expires_at"
+				label="Expires"
+				:value="expiresLabel"
+			/>
+			<!-- A failed status fetch must not look like a healthy workspace. Without
+			     this the catch below leaves Status on its placeholder, which reads as
+			     an answer rather than as "we could not ask". Admin-only, because only
+			     an admin can query the endpoint or act on the result. -->
+			<div v-if="connErr" class="mt-2 flex items-center gap-2">
+				<span class="text-p-sm text-ink-gray-6">
+					Connection status is unavailable right now.
+				</span>
+				<Button
+					variant="subtle"
+					label="Retry"
+					iconLeft="refresh-cw"
+					:loading="connLoading"
+					@click="loadConnStatus"
+				/>
+			</div>
 		</div>
 
 		<hr class="my-8" />
@@ -130,7 +151,21 @@ const store = useShellStore();
 // Chat-scoped context (null on non-chat routes — guard everything).
 const ctx = computed(() => store.chatContext);
 const hasConversation = computed(() => !!(ctx.value && ctx.value.conversationId));
-const modelLabel = computed(() => (ctx.value && ctx.value.modelLabel) || "Auto");
+// Prefer the SERVER-VERIFIED default model over the conversation's label.
+//
+// ctx.modelLabel is scoped to the open conversation and falls back to the string
+// "Auto" when there is no conversation, which is a placeholder, not a fact about
+// the workspace. The deleted ConnectionPane showed conn.default_model here, and
+// an admin opening Settings to diagnose a wrong-model or failover problem needs
+// the configured model, not "Auto". Everything else in this block (Provider,
+// Auth mode, Status) is workspace-level, so this row now matches them.
+// Non-admins have no connStatus and keep the conversation label as before.
+const modelLabel = computed(
+	() =>
+		(connStatus.value && connStatus.value.default_model) ||
+		(ctx.value && ctx.value.modelLabel) ||
+		"Auto"
+);
 const ui = computed(() => (ctx.value && ctx.value.ui) || {});
 const convAutoApply = computed(() => !!(ctx.value && ctx.value.convAutoApply));
 const autoApplyNote = computed(() => (ctx.value && ctx.value.autoApplyNote) || "");
@@ -142,11 +177,37 @@ const autoApplyNote = computed(() => (ctx.value && ctx.value.autoApplyNote) || "
 // 403 rendered as an error.
 const isSM = !!(window.is_system_manager || window.is_jarvis_admin);
 const connStatus = ref(null);
+const connErr = ref(false);
+const connLoading = ref(false);
+
+// Also ported from the removed ConnectionPane.vue: a fetch failure has to be
+// visible and recoverable. Swallowing it left Status showing its placeholder,
+// which an admin reads as "fine" rather than "we could not ask", and there was
+// no way to retry without reloading the whole app.
+async function loadConnStatus() {
+	if (!isSM) return;
+	connLoading.value = true;
+	try {
+		connStatus.value = await api.getLlmConnectionStatus();
+		connErr.value = false;
+	} catch (e) {
+		connErr.value = true;
+	} finally {
+		connLoading.value = false;
+	}
+}
 // get_llm_connection_status short-circuits server-side for a DIRECT (single-
 // model) tenant and reports that via proxy_active rather than the raw proxy-auth
-// payload — the same fix as ConnectionPane.vue. Without this, a direct tenant's
-// own auth_present:false read as "Not connected" here too.
+// payload, so proxy_active tells the two states apart explicitly instead of
+// guessing from which fields happen to be populated. Without this, a direct
+// tenant's own auth_present:false read as "Not connected" here too.
 const isProxy = computed(() => !!(connStatus.value && connStatus.value.proxy_active));
+// Ported from the removed ConnectionPane.vue, the one row this pane lacked:
+// oauth_expires_at is an epoch-ms value, rendered in the viewer's locale.
+const expiresLabel = computed(() => {
+	const ms = connStatus.value && connStatus.value.oauth_expires_at;
+	return ms ? new Date(Number(ms)).toLocaleString() : "—";
+});
 const connected = computed(() =>
 	isSM ? !!(connStatus.value && isProxy.value && connStatus.value.auth_present) : true
 );
@@ -185,13 +246,7 @@ onMounted(async () => {
 	} catch (e) {
 		/* usage is best-effort — leave the placeholder */
 	}
-	if (isSM) {
-		try {
-			connStatus.value = await api.getLlmConnectionStatus();
-		} catch (e) {
-			/* status stays on the placeholder */
-		}
-	}
+	await loadConnStatus();
 	// Roam notify/activity-detail prefs from the server row, falling back to the
 	// localStorage cache the store already booted from on any failure (endpoint
 	// not deployed yet, network error) — never blocks or errors the pane.
