@@ -104,3 +104,33 @@ class TestHolidayAdvisory(FrappeTestCase):
 			self.assertEqual(
 				ha.advisories_for_doc(_doc("Attendance", employee="EMP-1", attendance_date=NAMED_DATE)), []
 			)
+
+	def test_resolver_resolved_as_of_activity_date(self):
+		"""F1: the holiday list is resolved AS OF the activity date (as_on), not
+		today - so a backdated attendance uses the list in effect then, not now."""
+		from frappe.utils import getdate
+
+		with patch.object(ha, "get_holiday_list_for_employee", return_value=HL) as m:
+			ha.advisories_for_doc(_doc("Attendance", employee="EMP-1", attendance_date=NAMED_DATE))
+		m.assert_called_once_with("EMP-1", raise_exception=False, as_on=getdate(NAMED_DATE))
+
+	def test_attach_survives_non_list_warnings_field(self):
+		"""F2: a curated doctype with a Custom Field named `warnings` puts a
+		non-list value in as_dict(); attach must NOT raise (never break the write)."""
+		doc = _doc("Attendance", employee="EMP-1", attendance_date=NAMED_DATE)
+		r = ha.attach({"name": "X", "warnings": None}, doc)
+		self.assertIsInstance(r["warnings"], list)
+		self.assertEqual(len(r["warnings"]), 1)
+		r2 = ha.attach({"name": "Y", "warnings": "a stringy custom field"}, doc)
+		self.assertIsInstance(r2["warnings"], list)
+		self.assertEqual(len(r2["warnings"]), 1)
+
+	def test_swallow_preserves_pre_existing_message(self):
+		"""F3: the never-raise swallow must drop only messages THIS call pushed,
+		never a msgprint the successful write itself emitted."""
+		frappe.local.message_log = [{"message": "the write's own message"}]
+		before = len(frappe.local.message_log)
+		with patch.object(ha, "get_holiday_list_for_employee", side_effect=RuntimeError("boom")):
+			ha.advisories_for_doc(_doc("Attendance", employee="EMP-1", attendance_date=NAMED_DATE))
+		self.assertEqual(len(frappe.local.message_log), before)
+		self.assertTrue(any("the write's own message" in str(m) for m in frappe.local.message_log))

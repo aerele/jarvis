@@ -45,15 +45,13 @@ def _advisory_line(who: str, holiday: dict) -> str:
 
 def advisories_for_doc(doc) -> list[str]:
 	"""Advisory strings for a just-written doc, or [] (never raises)."""
+	mark = len(frappe.local.message_log) if getattr(frappe.local, "message_log", None) else 0
 	try:
 		spec = CURATED_MAP.get(getattr(doc, "doctype", None))
 		if not spec or get_holiday_list_for_employee is None:
 			return []
 		employee = doc.get(spec["employee"])
 		if not employee:
-			return []
-		holiday_list = get_holiday_list_for_employee(employee, raise_exception=False)
-		if not holiday_list:
 			return []
 		who = _who(doc, employee)
 		out: list[str] = []
@@ -65,6 +63,13 @@ def advisories_for_doc(doc) -> list[str]:
 			end = getdate(doc.get(end_field)) if end_field and doc.get(end_field) else start
 			if end < start:
 				start, end = end, start
+			# Resolve the holiday list AS OF the activity date, not today. Lists are
+			# yearly and (under HRMS) assigned per period via Holiday List Assignment,
+			# so a backdated attendance or a mid-year reassignment must use the list
+			# in effect THEN. ERPNext's vanilla resolver accepts and ignores as_on.
+			holiday_list = get_holiday_list_for_employee(employee, raise_exception=False, as_on=start)
+			if not holiday_list:
+				continue
 			holidays = frappe.get_all(
 				"Holiday",
 				filters={"parent": holiday_list, "holiday_date": ("between", [start, end])},
@@ -74,8 +79,12 @@ def advisories_for_doc(doc) -> list[str]:
 			out.extend(_advisory_line(who, h) for h in holidays)
 		return out
 	except Exception:
-		# Advisory must never break a write; swallow and stay silent.
-		frappe.clear_last_message()
+		# Advisory must never break a write. Drop only the messages THIS call pushed
+		# (e.g. a frappe.throw in the swallowed path) back to the pre-call mark, never
+		# the successful write's own msgprints.
+		log = getattr(frappe.local, "message_log", None)
+		if log is not None and len(log) > mark:
+			del log[mark:]
 		return []
 
 
@@ -87,5 +96,13 @@ def attach(result: dict, doc) -> dict:
 	"""
 	advisories = advisories_for_doc(doc)
 	if advisories:
-		result.setdefault("warnings", []).extend(advisories)
+		# Never assume ``warnings`` is absent or a list: a curated doctype could
+		# carry a Custom Field literally named ``warnings`` (its value lands in
+		# ``as_dict()``). setdefault().extend() would then AttributeError and break
+		# the write — the one invariant we must not pierce. Extend a list, else set.
+		existing = result.get("warnings")
+		if isinstance(existing, list):
+			existing.extend(advisories)
+		else:
+			result["warnings"] = advisories
 	return result
