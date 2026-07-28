@@ -134,7 +134,8 @@ def _create_batch(docs: list, notes: list | None = None) -> dict:
 
 	def _do(item: dict) -> dict:
 		doc = _insert_one(item["doctype"], item["values"])
-		return {"doctype": doc.doctype, "name": doc.name}
+		row = {"doctype": doc.doctype, "name": doc.name}
+		return _holiday_advisory.attach(row, doc)
 
 	created = run_atomic_batch(docs, _do, label=lambda d: d.get("doctype"))
 	return {"created": created, "notes": list(notes) if isinstance(notes, list) else []}

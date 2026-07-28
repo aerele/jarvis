@@ -118,9 +118,15 @@ def _update_batch(doctype: str, updates: list) -> dict:
 		if not isinstance(item, dict) or not item.get("name"):
 			raise InvalidArgumentError(f"updates[{i}] must be a dict with a name + changes")
 
+	warnings: list[str] = []
+
 	def _do(item: dict) -> str:
-		_update_one(doctype, item["name"], item.get("changes"))
+		doc = _update_one(doctype, item["name"], item.get("changes"))
+		warnings.extend(_holiday_advisory.advisories_for_doc(doc))
 		return item["name"]
 
 	updated = run_atomic_batch(updates, _do, label=lambda u: u.get("name"))
-	return {"doctype": doctype, "updated": updated, "count": len(updated)}
+	result = {"doctype": doctype, "updated": updated, "count": len(updated)}
+	if warnings:
+		result["warnings"] = warnings
+	return result

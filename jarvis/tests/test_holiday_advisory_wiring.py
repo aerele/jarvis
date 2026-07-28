@@ -49,3 +49,46 @@ class TestAdvisoryWiringSingle(FrappeTestCase):
 		):
 			out = update_doc(doctype="Attendance", name="ATT-1", changes={"status": "Present"})
 		self.assertEqual(out.get("warnings"), ["W2"])
+
+	def test_batch_create_attaches_per_record_warnings(self):
+		from jarvis.tools.create_doc import create_doc
+
+		created_docs = [
+			frappe._dict(doctype="Attendance", name="ATT-1"),
+			frappe._dict(doctype="Attendance", name="ATT-2"),
+		]
+		it = iter(created_docs)
+		with (
+			patch("jarvis.tools.create_doc._insert_one", side_effect=lambda dt, v: next(it)),
+			patch("jarvis.tools.create_doc._validate_create_args"),
+			patch.object(ha, "advisories_for_doc", side_effect=[["W-A"], []]),
+		):
+			out = create_doc(
+				docs=[
+					{"doctype": "Attendance", "values": {"employee": "E1"}},
+					{"doctype": "Attendance", "values": {"employee": "E2"}},
+				]
+			)
+		self.assertEqual(out["created"][0].get("warnings"), ["W-A"])
+		self.assertNotIn("warnings", out["created"][1])
+
+	def test_batch_update_aggregates_warnings(self):
+		from jarvis.tools.update_doc import update_doc
+
+		docs = [
+			frappe._dict(doctype="Attendance", name="ATT-1"),
+			frappe._dict(doctype="Attendance", name="ATT-2"),
+		]
+		it = iter(docs)
+		with (
+			patch("jarvis.tools.update_doc._update_one", side_effect=lambda dt, n, c: next(it)),
+			patch.object(ha, "advisories_for_doc", side_effect=[["W-1"], ["W-2"]]),
+		):
+			out = update_doc(
+				doctype="Attendance",
+				updates=[
+					{"name": "ATT-1", "changes": {"status": "Present"}},
+					{"name": "ATT-2", "changes": {"status": "Present"}},
+				],
+			)
+		self.assertEqual(sorted(out.get("warnings", [])), ["W-1", "W-2"])
