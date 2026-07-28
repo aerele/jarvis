@@ -16,7 +16,14 @@
 
 	<!-- Without a label: just the spinner, so it drops into a button or a table
 	     cell without an extra wrapper affecting layout. -->
-	<span v-else class="jv-spin" :class="tier" :style="sizeStyle" role="status" aria-label="Loading">
+	<span
+		v-else
+		class="jv-spin"
+		:class="tier"
+		:style="sizeStyle"
+		role="status"
+		aria-label="Loading"
+	>
 		<span class="jv-spin-halo"></span>
 		<span class="jv-spin-dots"><i></i><i></i><i></i></span>
 		<span class="jv-spin-core">
@@ -170,7 +177,12 @@ const sizeStyle = computed(() => ({ "--jv-spin-size": `${resolvedSize.value}px` 
 	width: calc(var(--jv-spin-size) * 0.16);
 	height: calc(var(--jv-spin-size) * 0.16);
 	margin: calc(var(--jv-spin-size) * -0.08);
-	background: radial-gradient(circle, #fff 0%, var(--brand-1, #6e8bff) 55%, rgba(110, 139, 255, 0) 88%);
+	background: radial-gradient(
+		circle,
+		#fff 0%,
+		var(--brand-1, #6e8bff) 55%,
+		rgba(110, 139, 255, 0) 88%
+	);
 }
 .jv-spin--md .jv-spin-dots i:nth-child(1) {
 	transform: rotate(0deg) translateY(calc(var(--jv-spin-size) * -0.45));
@@ -190,7 +202,12 @@ const sizeStyle = computed(() => ({ "--jv-spin-size": `${resolvedSize.value}px` 
 	width: calc(var(--jv-spin-size) * 0.15);
 	height: calc(var(--jv-spin-size) * 0.15);
 	margin: calc(var(--jv-spin-size) * -0.075);
-	background: radial-gradient(circle, #fff 0%, var(--brand-1, #6e8bff) 42%, rgba(110, 139, 255, 0) 74%);
+	background: radial-gradient(
+		circle,
+		#fff 0%,
+		var(--brand-1, #6e8bff) 42%,
+		rgba(110, 139, 255, 0) 74%
+	);
 }
 .jv-spin--lg .jv-spin-dots i:nth-child(1) {
 	transform: rotate(0deg) translateY(calc(var(--jv-spin-size) * -0.47));

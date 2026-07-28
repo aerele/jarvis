@@ -192,15 +192,7 @@
 // the page itself whenever it opens (v-model true + slug); emits `refresh`
 // after a save/archive/delete so the owning list refetches.
 import { ref, computed, watch } from "vue";
-import {
-	Badge,
-	Button,
-	Dialog,
-	FormControl,
-	Tooltip,
-	toast,
-	confirmDialog,
-} from "frappe-ui";
+import { Badge, Button, Dialog, FormControl, Tooltip, toast, confirmDialog } from "frappe-ui";
 import { renderMarkdown } from "@/markdown";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import {

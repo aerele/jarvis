@@ -136,14 +136,7 @@
 // the emitted payload (see NoteDetailModal.vue's own comment for the full
 // emit contract - this component only passes it through unchanged).
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
-import {
-	Badge,
-	Button,
-	FeatherIcon,
-	FormControl,
-	Tooltip,
-	toast,
-} from "frappe-ui";
+import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { listNotesPage } from "@/api/personalise";
 import JvSpinner from "@/components/JvSpinner.vue";
