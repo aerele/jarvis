@@ -211,6 +211,18 @@ def signup(
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 
+def resume_pending_signup(plan: str, provider: str | None = None) -> dict:
+	"""Authenticated failed-payment resume: re-issues checkout handles for the
+	caller's own Pending Payment signup, optionally on a different plan/provider.
+	Returns the same checkout-fields shape as signup's sync path (no credentials
+	— the bench already holds them; that's how this call authenticates).
+	Raises AdminValidationError when there is nothing to resume (409)."""
+	body: dict = {"plan": plan}
+	if provider:
+		body["provider"] = provider
+	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)
+
+
 def get_signup_payment_state() -> dict:
 	"""Authenticated poll. Returns one of:
 	    {pending_verification: True}

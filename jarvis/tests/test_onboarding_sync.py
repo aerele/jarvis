@@ -820,3 +820,70 @@ class TestWorkspaceReset(FrappeTestCase):
 			out = onboarding.workspace_reset_state()
 		self.assertTrue(out["ready"])
 		self.assertEqual(frappe.get_single("Jarvis Settings").last_sync_status, "ok (workspace reset)")
+
+
+class TestSignupResumeFallback(FrappeTestCase):
+	"""Failed-payment retry: the dedup rejection falls back to the authenticated
+	resume only when this bench holds creds for that same email."""
+
+	_DUP = "An account with this email is already registered or pending."
+
+	def setUp(self):
+		self._snap = _snapshot_settings()
+		s = frappe.get_single("Jarvis Settings")
+		_set_token("tok")
+		s.db_set("jarvis_admin_url", "https://fleet.example.test")
+		s.db_set("jarvis_admin_customer_email", "resume-me@example.com")
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+
+	def _signup_raises(self, msg):
+		from jarvis.exceptions import AdminValidationError
+
+		return patch("jarvis.onboarding.admin_client.signup", side_effect=AdminValidationError(msg))
+
+	def test_dedup_with_matching_creds_resumes(self):
+		with (
+			self._signup_raises(self._DUP),
+			patch(
+				"jarvis.onboarding.admin_client.resume_pending_signup",
+				return_value={"payment_provider": "razorpay", "razorpay_order_id": "order_R2"},
+			) as resume,
+		):
+			out = onboarding.start_signup("Resume-Me@example.com ", "Co", "some-plan")
+		resume.assert_called_once_with("some-plan", provider=None)
+		self.assertEqual(out["razorpay_order_id"], "order_R2")
+
+	def test_dedup_with_different_email_reraises(self):
+		with (
+			self._signup_raises(self._DUP),
+			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.start_signup("someone-else@example.com", "Co", "some-plan")
+		resume.assert_not_called()
+
+	def test_non_dedup_error_reraises(self):
+		with (
+			self._signup_raises("Unsupported payment provider."),
+			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_not_called()
+
+	def test_failed_resume_reraises_original_duplicate(self):
+		from jarvis.exceptions import AdminValidationError
+
+		with (
+			self._signup_raises(self._DUP),
+			patch(
+				"jarvis.onboarding.admin_client.resume_pending_signup",
+				side_effect=AdminValidationError("signup is not awaiting payment; nothing to resume"),
+			),
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		self.assertIn("already registered", str(ctx.exception))

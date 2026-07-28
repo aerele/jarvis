@@ -340,7 +340,13 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	"""
 	require_jarvis_admin()
 	_require_admin_url()
-	data = _surface(admin_client.signup, email, company, plan, provider=provider)
+	try:
+		data = _surface(admin_client.signup, email, company, plan, provider=provider)
+	except frappe.ValidationError as e:
+		resumed = _try_resume_pending_signup(e, email, plan, provider)
+		if resumed is None:
+			raise
+		data = resumed
 	# Persist whatever credentials the response carries. The guard also fires
 	# on ``customer`` so the OAuth grant username is stored even if a future
 	# admin response shape omits api_key/api_secret. write_connection skips
@@ -363,6 +369,31 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	# be the SM site owner — a plain Jarvis User is rejected before reaching here.
 	grant_onboarding_admin()
 	return data
+
+
+def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None) -> dict | None:
+	"""Failed-payment retry: when guest signup is rejected as a duplicate and
+	this bench already holds credentials for THAT email (persisted by the first
+	attempt), resume the pending signup through admin's authenticated
+	``resume_pending_signup`` — same plan or a newly chosen one — instead of
+	dead-ending the wizard on "already registered or pending".
+
+	Returns admin's checkout payload, or None when the fallback doesn't apply
+	(different email, no stored creds, or a non-duplicate error) so the caller
+	re-raises the original error. A resume that itself fails (e.g. the customer
+	is Active — a real duplicate) also returns None: the original duplicate
+	error is the honest message for that case."""
+	if "already registered or pending" not in str(err):
+		return None
+	settings = frappe.get_single("Jarvis Settings")
+	stored_email = (settings.get("jarvis_admin_customer_email") or "").strip().lower()
+	has_creds = bool(settings.get_password("jarvis_admin_api_key", raise_exception=False))
+	if not has_creds or stored_email != (email or "").strip().lower():
+		return None
+	try:
+		return admin_client.resume_pending_signup(plan, provider=provider)
+	except Exception:
+		return None
 
 
 @frappe.whitelist()
