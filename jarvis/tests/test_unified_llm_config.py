@@ -2616,7 +2616,7 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 
 		self._pool_of_two()
 		conv = self._make_conv(model_override="")
-		model, provider = _session_model_for(conv)
+		model, provider, source = _session_model_for(conv)
 		self.assertEqual(model, "gpt-4o", "must be the pool's primary (order 0), a real model id")
 		self.assertNotEqual(model, POOL_VIRTUAL_MODEL, "no Bifrost is deployed to expand the placeholder")
 		self.assertTrue(
@@ -2631,7 +2631,7 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 
 		self._pool_with_subscription()
 		conv = self._make_conv(model_override="")
-		model, provider = _session_model_for(conv)
+		model, provider, source = _session_model_for(conv)
 		self.assertEqual(model, POOL_VIRTUAL_MODEL)
 		self.assertIsNone(provider)
 
@@ -2642,7 +2642,7 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 
 		self._pool_of_two()
 		conv = self._make_conv(model_override="a-model-the-customer-deleted")
-		model, provider = _session_model_for(conv)
+		model, provider, source = _session_model_for(conv)
 		self.assertEqual(model, "gpt-4o")
 		self.assertIsNone(provider)
 
@@ -2663,7 +2663,7 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		)
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(settings.proxy_active or 0), 0)
-		model, _ = _session_model_for(self._make_conv(model_override=""))
+		model, _, source = _session_model_for(self._make_conv(model_override=""))
 		self.assertEqual(model, "gpt-4o")
 
 	def test_session_model_for_honours_a_valid_pin(self):
@@ -2671,9 +2671,41 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 
 		self._pool_of_two()
 		conv = self._make_conv(model_override="gpt-3.5-turbo")
-		model, provider = _session_model_for(conv)
+		model, provider, source = _session_model_for(conv)
 		self.assertEqual(model, "gpt-3.5-turbo")
 		self.assertIsNone(provider)
+		self.assertEqual(source, "user", "an explicit pin is the customer's own choice")
+
+	def test_a_model_we_chose_is_sourced_auto_so_failover_survives(self):
+		"""``source`` is load-bearing, not documentation.
+
+		Naming a model makes the openclaw session model-OVERRIDDEN, and its
+		``resolveEffectiveModelFallbacks`` returns ``[]`` for any override whose
+		``modelOverrideSource`` is not "auto". That zeroes the fallback candidates,
+		makes ``fallbackConfigured`` false, and turns a recoverable upstream failure
+		into a surfaced error. Measured live 2026-07-28: a real 429 on the pool
+		primary logged ``decision=candidate_failed reason=rate_limit next=none``
+		with a healthy second model configured, because this patch said "user".
+
+		So every model WE pick on the customer's behalf must report "auto".
+		"""
+		from jarvis.chat.worker import POOL_VIRTUAL_MODEL, _session_model_for
+
+		# openclaw-direct pool, no pin: we name the primary, so we chose it.
+		self._pool_of_two()
+		_, _, source = _session_model_for(self._make_conv(model_override=""))
+		self.assertEqual(source, "auto")
+
+		# A pin naming a model the customer has since deleted also resets to the
+		# primary -- that reset is our decision, not theirs.
+		_, _, source = _session_model_for(self._make_conv(model_override="deleted-model"))
+		self.assertEqual(source, "auto")
+
+		# The Bifrost path names the placeholder; still our choice, not the customer's.
+		self._pool_with_subscription()
+		model, _, source = _session_model_for(self._make_conv(model_override=""))
+		self.assertEqual(model, POOL_VIRTUAL_MODEL)
+		self.assertEqual(source, "auto")
 
 	def test_pool_mode_validates_override_against_enabled_models(self):
 		"""Pool mode, model_override in enabled models → override returned."""

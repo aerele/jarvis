@@ -135,7 +135,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		return {"ok": False, "reason": "self_host"}
 
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-	effective_model, oauth_provider_id = turn_handler._session_model_for(conv)
+	effective_model, oauth_provider_id, model_source = turn_handler._session_model_for(conv)
 	managed_attachments = turn_handler._to_managed_attachments(ap.vision_parts) if ap.vision_parts else None
 
 	if not conv.session_key:
@@ -170,7 +170,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 			if effective_model:
 				model_ref = f"{oauth_provider_id}/{effective_model}" if oauth_provider_id else effective_model
 				try:
-					sess.set_session_model(session_key, model_ref)
+					sess.set_session_model(session_key, model_ref, source=model_source)
 				except OpenclawUnreachableError:
 					raise
 				except Exception:

@@ -689,15 +689,32 @@ class OpenclawSession:
 		session_key: str,
 		model_ref: str,
 		*,
+		source: str = "user",
 		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
 	) -> None:
 		"""Point the session at ``model_ref`` (``"<provider>/<model>"`` or
 		bare ``"<model>"``) via ``sessions.patch``. chat.send has no per-turn
 		model param, so per-conversation overrides are applied to the session
-		before the send."""
+		before the send.
+
+		``source`` MUST be ``"auto"`` when WE picked the model rather than the
+		customer. openclaw drops the agent's entire model.fallbacks chain for an
+		overridden session unless the override declares itself automatic. From the
+		2026.6.8 bundle -- the sessions.patch handler:
+
+		    entry.modelOverrideSource = patch.modelOverrideSource === "auto" ? "auto" : "user"
+
+		and ``resolveEffectiveModelFallbacks`` returns ``[]`` for any non-"auto"
+		override. Omitting the field is therefore NOT neutral: it reads as "user" and
+		silently disables failover (see ``turn_handler._session_model_for``).
+		"""
 		self._request(
 			"sessions.patch",
-			{"key": session_key, "model": model_ref},
+			{
+				"key": session_key,
+				"model": model_ref,
+				"modelOverrideSource": "auto" if source == "auto" else "user",
+			},
 			timeout_s=timeout_s,
 		)
 

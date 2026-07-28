@@ -326,9 +326,14 @@ def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 	return effective_model, provider
 
 
-def _session_model_for(conv) -> tuple[str, str | None]:
+def _session_model_for(conv) -> tuple[str, str | None, str]:
 	"""The model to PATCH THE SESSION to -- a different question from
 	_resolve_model_and_provider's, and the distinction is the whole fix.
+
+	Returns ``(model, provider, source)``. ``source`` is ``"user"`` when the
+	conversation actually asked for this model and ``"auto"`` when WE picked it on
+	the customer's behalf, and it is load-bearing rather than informational: see
+	the note on the pool branch below.
 
 	_resolve_model_and_provider answers "what model does this conversation want", where
 	"" means "no opinion, let the agent's configured default stand". Two other callers
@@ -355,19 +360,41 @@ def _session_model_for(conv) -> tuple[str, str | None]:
 	with `model_not_found` -- and because that is an explicit bad-id rejection rather than
 	an upstream failure, openclaw's native failover never engages. Name the pool's PRIMARY
 	real model instead; the container's own model.fallbacks chain covers the rest.
+
+	...but ONLY if we also tell openclaw we picked it. Naming a model makes the session
+	model-OVERRIDDEN, and openclaw drops the whole fallback chain for an overridden
+	session unless the override is flagged as automatic. From its 2026.6.8 bundle:
+
+	    resolveEffectiveModelFallbacks:
+	      if (!hasSessionModelOverride) return agentFallbacksOverride;   // no pin: chain applies
+	      if (!(modelOverrideSource === "auto" || ...)) return [];       // pinned: NO chain
+
+	so an unflagged pin yields zero candidates, `fallbackConfigured` false, and the run
+	surfaces the upstream error instead of failing over. Measured live 2026-07-28: a real
+	429 on the primary logged `decision=candidate_failed reason=rate_limit next=none` with
+	a perfectly good second model configured. That is this function naming a model and the
+	patch not saying who chose it -- hence ``source``, which the caller forwards as
+	``sessions.patch``'s ``modelOverrideSource``.
+
+	"user" stays the default for a real pin ON PURPOSE: someone who explicitly selects
+	Gemini should get an error, not a silent switch to another vendor mid-conversation.
 	"""
 	model, provider = _resolve_model_and_provider(conv)
 	if model:
-		return model, provider
+		return model, provider, "user"  # the conversation asked for this one
 	settings = frappe.get_single("Jarvis Settings")
 	if getattr(settings, "proxy_active", 0):
-		return POOL_VIRTUAL_MODEL, None  # Bifrost expands it into the chain
+		# Bifrost expands the placeholder into the chain itself, so the chain does not
+		# depend on openclaw's fallbacks here -- but this IS still our choice, not the
+		# customer's, and mislabelling it "user" would be wrong if the pool ever moves
+		# off Bifrost.
+		return POOL_VIRTUAL_MODEL, None, "auto"
 	primary = pool_primary_model(settings)
 	if primary:
-		return primary, None  # openclaw-direct pool: name a model it really has
+		return primary, None, "auto"  # openclaw-direct pool: we chose it, keep the chain
 	# Direct mode already resolves to settings.llm_model, so "" here means the site has
 	# no model configured at all -- nothing useful to patch. Unchanged behaviour.
-	return model, provider
+	return model, provider, "user"
 
 
 def _thinking_prefix(thinking_override: str | None) -> str:
@@ -939,7 +966,7 @@ def handle_chat_send(payload: dict) -> None:
 			# retry inside this turn because tokens may have already
 			# streamed to the UI by the time the failure surfaces.
 			gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-			effective_model, oauth_provider_id = _session_model_for(conv)
+			effective_model, oauth_provider_id, model_source = _session_model_for(conv)
 			if not conv.session_key:
 				# First turn of this conversation pays session-create and is the
 				# most cold-start-prone (a dormant container takes ~10-25s to
@@ -982,7 +1009,7 @@ def handle_chat_send(payload: dict) -> None:
 							f"{oauth_provider_id}/{effective_model}" if oauth_provider_id else effective_model
 						)
 						try:
-							sess.set_session_model(conv.session_key, model_ref)
+							sess.set_session_model(conv.session_key, model_ref, source=model_source)
 						except OpenclawUnreachableError:
 							raise
 						except Exception:

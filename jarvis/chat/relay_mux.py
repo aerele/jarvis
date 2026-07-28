@@ -632,11 +632,29 @@ class RelayMux:
 		return self.issue_rpc("chat.send", params, timeout_s=timeout_s)
 
 	def set_session_model(
-		self, session_key: str, model_ref: str, *, timeout_s: float = DEFAULT_RPC_TIMEOUT_S
+		self,
+		session_key: str,
+		model_ref: str,
+		*,
+		source: str = "user",
+		timeout_s: float = DEFAULT_RPC_TIMEOUT_S,
 	) -> PendingRpc:
 		"""``sessions.patch`` — per-conversation model override, issued mid-stream
-		without stealing any lane's frames."""
-		return self.issue_rpc("sessions.patch", {"key": session_key, "model": model_ref}, timeout_s=timeout_s)
+		without stealing any lane's frames.
+
+		``source="auto"`` when WE picked the model; omitting it reads as "user" and
+		makes openclaw drop the agent's model.fallbacks chain. Same contract as
+		``OpenclawSession.set_session_model`` — see its docstring for the bundle
+		reference."""
+		return self.issue_rpc(
+			"sessions.patch",
+			{
+				"key": session_key,
+				"model": model_ref,
+				"modelOverrideSource": "auto" if source == "auto" else "user",
+			},
+			timeout_s=timeout_s,
+		)
 
 	def abort(
 		self, session_key: str, run_id: str | None = None, *, timeout_s: float = DEFAULT_RPC_TIMEOUT_S

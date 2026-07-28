@@ -286,7 +286,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 
 
 class TestSetSessionModel(FrappeTestCase):
-	def test_sends_exact_sessions_patch_params(self):
+	def _capture(self, *args, **kwargs):
 		sess = OpenclawSession.__new__(OpenclawSession)
 		captured = {}
 
@@ -296,6 +296,33 @@ class TestSetSessionModel(FrappeTestCase):
 			return {"ok": True, "payload": {}}
 
 		sess._request = fake_request
-		sess.set_session_model("sk", "openai/gpt-4o")
+		sess.set_session_model(*args, **kwargs)
+		return captured
+
+	def test_sends_exact_sessions_patch_params(self):
+		captured = self._capture("sk", "openai/gpt-4o")
 		self.assertEqual(captured["method"], "sessions.patch")
-		self.assertEqual(captured["params"], {"key": "sk", "model": "openai/gpt-4o"})
+		self.assertEqual(
+			captured["params"],
+			{"key": "sk", "model": "openai/gpt-4o", "modelOverrideSource": "user"},
+		)
+
+	def test_an_auto_chosen_model_is_flagged_on_the_wire(self):
+		"""``modelOverrideSource`` is what keeps openclaw's failover alive.
+
+		Its sessions.patch handler reads
+		``modelOverrideSource = patch.modelOverrideSource === "auto" ? "auto" : "user"``
+		and ``resolveEffectiveModelFallbacks`` returns ``[]`` for a non-"auto"
+		override. Omitting the field is therefore NOT neutral: it reads as "user"
+		and silently disables the agent's entire model.fallbacks chain, which is
+		exactly how a live 429 produced ``next=none`` on 2026-07-28.
+		"""
+		captured = self._capture("sk", "gemini/gemini-3.6-flash", source="auto")
+		self.assertEqual(captured["params"]["modelOverrideSource"], "auto")
+
+	def test_an_unrecognised_source_degrades_to_user_not_auto(self):
+		"""Fail closed: only a literal "auto" unlocks the fallback chain, so a typo
+		or some future source name can never silently re-route a model the customer
+		pinned on purpose to a different vendor."""
+		captured = self._capture("sk", "openai/gpt-4o", source="sometimes")
+		self.assertEqual(captured["params"]["modelOverrideSource"], "user")
