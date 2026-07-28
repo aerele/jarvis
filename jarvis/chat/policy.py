@@ -71,10 +71,14 @@ def _workspace_resetting() -> bool:
 		s = frappe.get_single("Jarvis Settings")
 		return not s.get("agent_url") and (s.get("last_sync_status") or "").startswith(_RESETTING_STATUS)
 	except Exception:
-		frappe.log_error(
-			title="jarvis policy: workspace-reset check failed (allowing send)",
-			message=frappe.get_traceback(),
-		)
+		# See _over_model_limit: don't let a logging failure defeat fail-open.
+		try:
+			frappe.log_error(
+				title="jarvis policy: workspace-reset check failed (allowing send)",
+				message=frappe.get_traceback(),
+			)
+		except Exception:
+			pass
 		return False
 
 
@@ -102,10 +106,14 @@ def _llm_not_configured() -> bool:
 		model = (s.get("llm_model") or "").strip()
 		return not (key and provider and model)
 	except Exception:
-		frappe.log_error(
-			title="jarvis policy: llm-configured check failed (allowing send)",
-			message=frappe.get_traceback(),
-		)
+		# See _over_model_limit: don't let a logging failure defeat fail-open.
+		try:
+			frappe.log_error(
+				title="jarvis policy: llm-configured check failed (allowing send)",
+				message=frappe.get_traceback(),
+			)
+		except Exception:
+			pass
 		return False
 
 

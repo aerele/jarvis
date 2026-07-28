@@ -569,13 +569,27 @@ class TestGetLlmSyncStatus(FrappeTestCase):
 class TestWorkspaceReset(FrappeTestCase):
 	"""Self-serve reset: transport cleared, admin creds + synced markers kept."""
 
+	# Everything the reset/revoke paths mutate. llm_auth_mode is MANDATORY on the
+	# doctype: leaving it blank (db_set bypasses validation) breaks the next full
+	# Jarvis Settings save in an unrelated suite (test_part4_security's fence).
 	_FIELDS = _SNAPSHOTTED_FIELDS + (
 		"last_sync_status",
 		"llm_pool_synced_at",
+		"llm_direct_synced_at",
 		"chat_device_id",
 		"chat_device_public_key",
 		"chat_device_private_key",
 		"chat_device_token",
+		"llm_provider",
+		"llm_model",
+		"llm_base_url",
+		"llm_auth_mode",
+		"llm_api_key",
+		"llm_oauth_account_email",
+		"llm_oauth_connected_at",
+		"preset",
+		"proxy_active",
+		"proxy_recommended",
 	)
 
 	def setUp(self):
@@ -590,6 +604,10 @@ class TestWorkspaceReset(FrappeTestCase):
 				else s.get(f)
 			)
 			self._snap[f] = v or ""
+		# The revoke path deletes the models[] child rows — snapshot to re-insert.
+		self._pool_rows = frappe.get_all(
+			"Jarvis LLM Pool Model", filters={"parent": "Jarvis Settings"}, fields=["*"]
+		)
 		_set_token("tok")
 		s.db_set("agent_url", "ws://localhost:19000")
 		s.db_set("chat_device_id", "dev-1")
@@ -598,6 +616,13 @@ class TestWorkspaceReset(FrappeTestCase):
 
 	def tearDown(self):
 		_restore_settings(self._snap)
+		frappe.db.delete("Jarvis LLM Pool Model", {"parent": "Jarvis Settings"})
+		for row in self._pool_rows:
+			doc = frappe.get_doc(dict(row, doctype="Jarvis LLM Pool Model", name=None))
+			doc.flags.ignore_mandatory = True
+			doc.flags.ignore_links = True
+			doc.insert(ignore_permissions=True)
+		frappe.db.commit()
 
 	def test_reset_disconnects_transport_and_keeps_creds(self):
 		with (
