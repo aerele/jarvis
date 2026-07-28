@@ -51,7 +51,7 @@
 
 		<!-- loading -->
 		<div v-if="loading" class="flex flex-1 items-center justify-center">
-			<LoadingIndicator class="size-5 text-ink-gray-5" />
+			<JvSpinner />
 		</div>
 
 		<!-- §3.8 permission-blocked state -->
@@ -172,10 +172,10 @@ import {
 	Dropdown,
 	ErrorMessage,
 	FeatherIcon,
-	LoadingIndicator,
 	toast,
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { setChatPrefill } from "@/composables/chatPrefill";
 import { getDashboard, getDashboardsCaps, deleteDashboard, saveDashboard } from "@/api/dashboards";
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";

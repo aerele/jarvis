@@ -29,7 +29,7 @@
 				v-if="store.thread.loading && !store.thread.messages.length"
 				class="jv-sup-center"
 			>
-				<LoadingIndicator class="size-5" />
+				<JvSpinner />
 			</div>
 
 			<div
@@ -136,7 +136,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { Badge, Button, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
+import { Badge, Button, FeatherIcon, toast } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import Message from "@/components/chat/Message.vue";
 import SupportShell from "@/components/support/SupportShell.vue";
 import SupportReplyBox from "@/components/support/SupportReplyBox.vue";

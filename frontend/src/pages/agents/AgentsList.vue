@@ -12,9 +12,9 @@
 				<div v-if="canApply" class="flex items-center gap-2">
 					<!-- duration lives IN the badge text - tooltips are invisible to
 					     keyboard/SR users -->
-					<Badge v-if="sync.pending" theme="orange" variant="subtle">
+					<Badge v-if="sync.pending" theme="orange" variant="subtle" size="lg">
 						<template #prefix>
-							<LoadingIndicator class="size-3" />
+							<JvSpinner />
 						</template>
 						Applying agents - ~30s, one restart
 					</Badge>
@@ -269,12 +269,12 @@ import {
 	FeatherIcon,
 	FormControl,
 	ListFooter,
-	LoadingIndicator,
 	toast,
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
 import AgentActivityTab from "./AgentActivityTab.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { useListPage } from "@/composables/useListPage";
 import * as api from "@/api";
 import * as agentsApi from "@/api/agents";

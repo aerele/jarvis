@@ -169,7 +169,7 @@
 					class="flex items-center justify-center"
 					:class="awaitingReply.length ? 'py-16' : 'h-full'"
 				>
-					<LoadingIndicator class="size-5 text-ink-gray-5" />
+					<JvSpinner />
 				</div>
 			</div>
 
@@ -196,7 +196,7 @@
 					<div class="text-p-base text-ink-gray-6">{{ paneError }}</div>
 				</div>
 				<div v-else-if="!selected" class="flex h-full items-center justify-center">
-					<LoadingIndicator class="size-5 text-ink-gray-5" />
+					<JvSpinner />
 				</div>
 				<div v-else class="mx-auto w-full max-w-3xl px-8 py-6">
 					<!-- 1. title row -->
@@ -494,7 +494,6 @@ import {
 	Button,
 	FeatherIcon,
 	FormControl,
-	LoadingIndicator,
 	Popover,
 	Tooltip,
 	toast,
@@ -503,6 +502,7 @@ import LayoutHeader from "@/components/LayoutHeader.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { useListPage } from "@/composables/useListPage";
 import { useShellStore } from "@/stores/shell";

@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:node": "node --test \"src/**/*.test.js\"",
     "test:snap": "vitest run tests/support-extraction",
     "test:snap:watch": "vitest tests/support-extraction"
   },

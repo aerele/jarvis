@@ -2,7 +2,7 @@
 	<Dialog v-model="show" :options="{ title: (page && page.title) || 'Wiki page', size: 'xl' }">
 		<template #body-content>
 			<div v-if="loading" class="py-8 text-center">
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 			</div>
 			<template v-else-if="page">
 				<!-- metadata row: type · scope (+target) · slug · updated · flags -->
@@ -192,16 +192,7 @@
 // the page itself whenever it opens (v-model true + slug); emits `refresh`
 // after a save/archive/delete so the owning list refetches.
 import { ref, computed, watch } from "vue";
-import {
-	Badge,
-	Button,
-	Dialog,
-	FormControl,
-	LoadingIndicator,
-	Tooltip,
-	toast,
-	confirmDialog,
-} from "frappe-ui";
+import { Badge, Button, Dialog, FormControl, Tooltip, toast, confirmDialog } from "frappe-ui";
 import { renderMarkdown } from "@/markdown";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import {
@@ -213,6 +204,7 @@ import {
 	requestWikiPromotion,
 	myWikiPromotion,
 } from "@/api/wiki";
+import JvSpinner from "@/components/JvSpinner.vue";
 import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 

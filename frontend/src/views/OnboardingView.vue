@@ -335,12 +335,14 @@
 											usually takes under a minute…
 										</p>
 									</div>
+									<!-- Deliberately NOT aria-hidden. JvSpinner is its own status
+										 region, and while provisioning runs this is the only thing on
+										 screen saying the workspace is still being built. -->
 									<div
 										v-if="state.provisioning"
 										class="mt-2.5 flex justify-center"
-										aria-hidden="true"
 									>
-										<LoadingIndicator class="h-8 w-8 text-ink-gray-6" />
+										<JvSpinner :size="72" />
 									</div>
 									<Banner
 										v-if="state.provisionErr"
@@ -833,10 +835,11 @@
 
 <script setup>
 import { reactive, ref, computed, onMounted, watch } from "vue";
-import { Button, FormControl, FeatherIcon, LoadingIndicator } from "frappe-ui";
+import { Button, FormControl, FeatherIcon } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";

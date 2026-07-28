@@ -15,7 +15,7 @@
 				v-if="phase === 'loading'"
 				class="flex flex-col items-center gap-2 py-10 text-center"
 			>
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 				<span class="max-w-sm text-sm text-ink-gray-6">
 					Drafting - {{ agentName }} is matching this insight against your custom skills
 					and writing the update. This takes a few seconds.
@@ -147,7 +147,8 @@
 // normal Skills-tab apply (no auto-push). Self-contained like ShareDialog:
 // owns its busy refs; the parent refreshes on @applied.
 import { reactive, ref, computed, watch } from "vue";
-import { Badge, Button, Dialog, FeatherIcon, LoadingIndicator, toast } from "frappe-ui";
+import { Badge, Button, Dialog, FeatherIcon, toast } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import {
 	draftInsightSkillUpdate,
 	applyInsightSkillUpdate,
