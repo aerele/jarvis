@@ -332,6 +332,12 @@ class TestLlmMissingVerdict(FrappeTestCase):
 		out, _ = self._verdict(self._S(), conn={"subscription_status": "Active"})
 		self.assertEqual(out["reason"], "llm_credentials")
 
+	def test_suspended_sub_stays_soft(self):
+		# Suspended is an ESTABLISHED account — the renew banner owns it; the
+		# wizard would dead-end it at signup's duplicate guard.
+		out, _ = self._verdict(self._S(), conn={"subscription_status": "Suspended"})
+		self.assertEqual(out["reason"], "llm_credentials")
+
 	def test_admin_unreachable_fails_open_to_soft(self):
 		out, _ = self._verdict(self._S(), raises=RuntimeError("admin down"))
 		self.assertEqual(out["reason"], "llm_credentials")

@@ -251,9 +251,12 @@ def _llm_missing_verdict(settings) -> dict:
 		sub_status = (admin_client.get_connection(timeout_s=8) or {}).get("subscription_status") or ""
 	except Exception:
 		sub_status = ""
-	if not sub_status or sub_status == "Active":
-		return {"ready": False, "reason": "llm_credentials"}
-	return {"ready": False, "reason": "llm_setup"}
+	# Hard-gate ONLY the never-paid shapes. Active is established (the revoke
+	# case); Suspended/Cancelled stay SOFT too — the renew/suspension banner
+	# path owns them, and the wizard would dead-end them at the dedup guard.
+	if sub_status in ("none", "Pending Payment", "Pending Verification"):
+		return {"ready": False, "reason": "llm_setup"}
+	return {"ready": False, "reason": "llm_credentials"}
 
 
 @frappe.whitelist()
