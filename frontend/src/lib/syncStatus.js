@@ -61,7 +61,10 @@ export function isSyncFailed(raw) {
  * and length-capped.
  */
 function failureDetail(s) {
-	const body = s.replace(/^failed:?/i, "").replace(/\s+/g, " ").trim();
+	const body = s
+		.replace(/^failed:?/i, "")
+		.replace(/\s+/g, " ")
+		.trim();
 	if (!body) return "";
 	return body.length > MAX_DETAIL ? body.slice(0, MAX_DETAIL - 1).trimEnd() + "…" : body;
 }

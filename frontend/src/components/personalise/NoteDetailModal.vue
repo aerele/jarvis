@@ -124,14 +124,7 @@
 //   any other host) knows to refetch its list. No payload.
 import { ref, computed, watch } from "vue";
 import { useRouter } from "vue-router";
-import {
-	Badge,
-	Button,
-	Dialog,
-	FeatherIcon,
-	toast,
-	confirmDialog,
-} from "frappe-ui";
+import { Badge, Button, Dialog, FeatherIcon, toast, confirmDialog } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { exactDate } from "@/utils/datetime";
 import { getNote, deleteNote } from "@/api/personalise";

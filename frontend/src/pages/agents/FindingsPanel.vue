@@ -293,14 +293,7 @@
 // No remediation text is ever fabricated - only what the run persisted.
 import { ref, computed, watch } from "vue";
 import { useRouter } from "vue-router";
-import {
-	Badge,
-	Button,
-	FeatherIcon,
-	FormControl,
-	Tooltip,
-	toast,
-} from "frappe-ui";
+import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { timeAgo, exactDate, formatDate } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
