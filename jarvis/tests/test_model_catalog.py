@@ -132,18 +132,40 @@ class TestBundledCatalogMirrorsAdminSeed(FrappeTestCase):
 		self.assertEqual(subs, ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-flash-lite"])
 
 	def test_the_two_gemini_tiers_differ_on_purpose(self):
-		# Not a typo and not drift. "gemini-3.1-flash" is absent from the pinned
-		# cliproxy image, so it cannot be served on the subscription tier, but
-		# Google's own API does serve it so the api-key tier keeps it. If a future
-		# regeneration ever collapses these to the same list, one tier is wrong.
+		# The tiers still differ on purpose, but NOT the way this test used to
+		# assert. It required "gemini-3.1-flash" on the api_key tier, on the
+		# reasoning that the pinned cliproxy image lacks it while "Google's own
+		# API does serve it". Measured 2026-07-28 against a live Google AI Studio
+		# key, Google does not: the id 404s ("not found for API version v1beta")
+		# and is absent from the 41 generateContent models the API lists. It was
+		# unservable on BOTH tiers, so it belongs on neither.
 		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
 
 		g = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
 		api = [m["model_id"] for m in g["models"] if m["tier"] == "api_key"]
 		subs = [m["model_id"] for m in g["models"] if m["tier"] == "subscription"]
-		self.assertIn("gemini-3.1-flash", api)
+		self.assertNotIn("gemini-3.1-flash", api)
 		self.assertNotIn("gemini-3.1-flash", subs)
 		self.assertIn("gemini-3.1-flash-lite", subs)
+		# The tiers are still not interchangeable: the api_key tier carries the
+		# current flash id, which the pinned image cannot serve.
+		self.assertIn("gemini-3.6-flash", api)
+		self.assertNotIn("gemini-3.6-flash", subs)
+
+	def test_the_gemini_api_key_default_is_servable_on_a_free_key(self):
+		# A new customer's first Gemini key is usually a free-tier one, and Google
+		# grants pro-tier models ZERO free quota (gemini-2.5-pro returns 429 on
+		# one). The default therefore has to be a flash id, or the very first turn
+		# after a clean pool apply fails. Verified 2026-07-28 by calling
+		# :generateContent, not by reading models.list, which advertises ids that
+		# 404 on use.
+		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+
+		g = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
+		defaults = [
+			m["model_id"] for m in g["models"] if m["tier"] == "api_key" and m["is_default"]
+		]
+		self.assertEqual(defaults, ["gemini-3.6-flash"])
 
 
 class TestGetModelCatalogNeverRaises(FrappeTestCase):

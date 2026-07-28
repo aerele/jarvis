@@ -1739,8 +1739,11 @@ const PROVIDER_DEFAULTS = {
 	// alongside the catalog wiring: PROVIDER_DEFAULTS.OpenAI predates the
 	// gpt-5.x rollout and was never updated).
 	OpenAI: { model: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
+	// Flash, not pro: Google grants pro-tier models zero free quota, so a
+	// gemini-2.5-pro fallback 429s on the free key most customers start with.
+	// Matches the catalog's api_key is_default, which this only stands in for.
 	"Google Gemini": {
-		model: "gemini-2.5-pro",
+		model: "gemini-3.6-flash",
 		baseUrl: "https://generativelanguage.googleapis.com",
 	},
 	Mistral: { model: "mistral-large-latest", baseUrl: "https://api.mistral.ai/v1" },
