@@ -162,9 +162,7 @@ class TestBundledCatalogMirrorsAdminSeed(FrappeTestCase):
 		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
 
 		g = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
-		defaults = [
-			m["model_id"] for m in g["models"] if m["tier"] == "api_key" and m["is_default"]
-		]
+		defaults = [m["model_id"] for m in g["models"] if m["tier"] == "api_key" and m["is_default"]]
 		self.assertEqual(defaults, ["gemini-3.6-flash"])
 
 
