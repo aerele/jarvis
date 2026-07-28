@@ -117,3 +117,41 @@ class TestResetOnboardingGuards(FrappeTestCase):
 		frappe.set_user("Guest")
 		with self.assertRaises(frappe.PermissionError):
 			reset_onboarding()
+
+
+class TestResetOnboardingWipe(FrappeTestCase):
+	"""wipe_data=True (the CLI default) also factory-resets workspace content."""
+
+	def setUp(self):
+		self._snap = _snapshot()
+		_seed_onboarded_state()
+		frappe.db.delete("Jarvis Macro", {"macro_name": "dev-reset-wipe"})
+		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "dev-reset-wipe"})
+		conv.flags.ignore_mandatory = True
+		conv.flags.ignore_links = True
+		conv.insert(ignore_permissions=True)
+		macro = frappe.get_doc(
+			{"doctype": "Jarvis Macro", "macro_name": "dev-reset-wipe", "steps": [{"prompt": "hi"}]}
+		)
+		macro.flags.ignore_mandatory = True
+		macro.flags.ignore_links = True
+		macro.insert(ignore_permissions=True)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.db.delete("Jarvis Conversation", {"title": "dev-reset-wipe"})
+		frappe.db.delete("Jarvis Macro", {"macro_name": "dev-reset-wipe"})
+		frappe.db.commit()
+		_restore(self._snap)
+
+	def test_wipe_data_deletes_content(self):
+		out = reset_onboarding(wipe_data=True)
+		self.assertTrue(out["data"]["wiped_doctypes"])
+		self.assertEqual(frappe.db.count("Jarvis Conversation"), 0)
+		self.assertEqual(frappe.db.count("Jarvis Macro"), 0)
+
+	def test_default_keeps_content(self):
+		out = reset_onboarding()
+		self.assertEqual(out["data"]["wiped_doctypes"], [])
+		self.assertEqual(frappe.db.count("Jarvis Conversation", {"title": "dev-reset-wipe"}), 1)
+		self.assertEqual(frappe.db.count("Jarvis Macro", {"macro_name": "dev-reset-wipe"}), 1)
