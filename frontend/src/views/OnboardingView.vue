@@ -1,13 +1,36 @@
 <template>
+	<!-- Root: jv-ob-root + the jv-dark class + paletteVars stay bound here even
+		 though this view is otherwise migrated to frappe-ui/Tailwind. Two
+		 independent, load-bearing reasons, neither of them decoration:
+
+		 1. SetupNeuralNet's readColors() (onboarding/SetupNeuralNet.vue) reads
+			--text-3/--surface/--surface-3 via getComputedStyle on ITS OWN root,
+			which only resolve because they inherit down from paletteVars applied
+			somewhere above it in the DOM - there is no :root fallback (design.md
+			§2.2). Relocating/dropping this binding would silently render the
+			connect-step canvas with unresolved colors.
+		 2. JvCombo.vue (Details step) and LlmPoolEditor.vue (Connect step) - both
+			out of scope for this migration - read the SAME jv-* var(--...) custom
+			properties in their own scoped CSS (12 and 182 usages respectively) and
+			render raw <input> elements that frontend/src/index.css targets by the
+			literal ".jv-ob-root" selector to suppress the @tailwindcss/forms blue
+			focus ring (".jv-ob-root :where(input...):focus"). Renaming this class
+			would silently reintroduce that blue ring on every input inside
+			LlmPoolEditor/JvCombo, on this page only. -->
 	<div class="jv-ob-root" :class="{ 'jv-dark': dark }" :style="paletteVars">
-		<main class="jv-ob-main">
-			<div class="jv-ob-center">
-				<div class="jv-ob-wrap">
-					<!-- brand header: JarvisMark + name + per-step subtitle (preview .brand) -->
-					<div class="jv-ob-brand">
+		<main class="relative z-10 min-w-0 flex-1 overflow-y-auto">
+			<!-- Fills the viewport so the card centers vertically when short; a step
+				 taller than the viewport grows and the card top-aligns. -->
+			<div class="box-border flex min-h-full items-center justify-center px-5 pb-15 pt-6.5">
+				<div class="mx-auto flex w-full max-w-[1080px] flex-col items-center">
+					<!-- brand header: JarvisMark + name + per-step subtitle -->
+					<div class="mb-2 flex items-center justify-center gap-2.5">
 						<JarvisMark :size="30" :radius="8" />
-						<span class="jv-ob-brand-name">{{ agentName }}</span>
-						<span class="jv-ob-brand-sub">{{ frameSub }}</span>
+						<span class="text-base font-semibold">{{ agentName }}</span>
+						<span
+							class="border-l border-outline-gray-1 pl-2.5 text-p-sm text-ink-gray-6"
+							>{{ frameSub }}</span
+						>
 					</div>
 
 					<!-- step rail: flat progress segments with labels (design.md §4.3 —
@@ -15,7 +38,7 @@
 					 tour (chromeless) and on the single-step self-host track. -->
 					<div
 						v-if="railIndex >= 0"
-						class="jv-ob-steps"
+						class="my-4 flex w-full max-w-[720px] items-stretch gap-2"
 						role="list"
 						aria-label="Setup steps"
 					>
@@ -23,16 +46,30 @@
 							v-for="(s, i) in RAIL"
 							:key="s.id"
 							role="listitem"
-							class="jv-ob-step"
-							:class="{ done: i < railIndex, active: i === railIndex }"
+							class="flex flex-1 flex-col gap-1.5"
 							:aria-current="i === railIndex ? 'step' : undefined"
 						>
-							<span class="jv-ob-step-label">{{ s.label }}</span>
-							<span class="jv-ob-step-bar"></span>
+							<span
+								class="text-p-sm"
+								:class="
+									i === railIndex
+										? 'font-medium text-ink-gray-9'
+										: i < railIndex
+										? 'text-ink-gray-7'
+										: 'text-ink-gray-5'
+								"
+								>{{ s.label }}</span
+							>
+							<span
+								class="h-1 rounded-full"
+								:class="i <= railIndex ? 'bg-surface-gray-7' : 'bg-surface-gray-3'"
+							></span>
 						</div>
 					</div>
 
-					<div class="jv-ob-panel">
+					<div
+						class="w-full overflow-hidden rounded-2xl border border-outline-gray-1 bg-surface-white shadow-2xl"
+					>
 						<!-- ===== Intro tour (fresh starts only; reconcile routes mid-flight
 							 signups straight to the right step, past the tour) ===== -->
 						<TourIntro
@@ -42,16 +79,19 @@
 						/>
 
 						<!-- ===== Choose Your Plan ===== -->
-						<section v-else-if="state.step === 'plan'" class="jv-ob-screen">
-							<div class="jv-ob-body">
-								<div class="jv-ob-head">
+						<section v-else-if="state.step === 'plan'" class="ob-screen">
+							<div class="ob-body">
+								<div class="ob-head">
 									<h1>Choose your plan</h1>
 									<p>
 										Start free. Upgrade or extend anytime, with no
 										auto-renewal.
 									</p>
 								</div>
-								<div v-if="state.plansLoading" class="jv-ob-placeholder">
+								<div
+									v-if="state.plansLoading"
+									class="mb-5 text-center text-p-sm text-ink-gray-5"
+								>
 									Loading plans…
 								</div>
 								<Banner
@@ -60,28 +100,30 @@
 									:message="state.plansErr"
 								>
 									<template #action>
-										<button
-											class="jv-ob-btn jv-ob-btn-sm"
-											@click="loadPlansSafe"
-										>
-											Retry
-										</button>
+										<Button label="Retry" @click="loadPlansSafe" />
 									</template>
 								</Banner>
-								<div v-else-if="!state.plans.length" class="jv-ob-placeholder">
+								<div
+									v-else-if="!state.plans.length"
+									class="mb-5 text-center text-p-sm text-ink-gray-5"
+								>
 									No plans are available right now. Please contact support.
 								</div>
 								<div
 									v-else
-									class="jv-ob-plans"
+									class="grid grid-cols-1 gap-3 sm:grid-cols-3"
 									role="radiogroup"
 									aria-label="Plan"
 								>
 									<div
 										v-for="p in state.plans"
 										:key="p.name"
-										class="jv-ob-plan"
-										:class="{ sel: state.planName === p.name }"
+										class="relative cursor-pointer rounded-lg border p-4.5 transition-colors focus-visible:outline-none focus-visible:ring focus-visible:ring-outline-gray-3"
+										:class="
+											state.planName === p.name
+												? 'border-outline-gray-5 ring-1 ring-outline-gray-5'
+												: 'border-outline-gray-1 hover:border-outline-gray-2 hover:bg-surface-gray-1'
+										"
 										role="radio"
 										:aria-checked="state.planName === p.name"
 										tabindex="0"
@@ -89,116 +131,120 @@
 										@keydown.enter.prevent="state.planName = p.name"
 										@keydown.space.prevent="state.planName = p.name"
 									>
-										<div class="jv-ob-plan-rd"></div>
-										<div class="jv-ob-plan-nm">{{ p.plan_name }}</div>
-										<div class="jv-ob-plan-pr">
+										<div
+											class="absolute right-4 top-4 grid h-4 w-4 place-items-center rounded-full border transition-colors"
+											:class="
+												state.planName === p.name
+													? 'border-outline-gray-5 bg-surface-gray-7'
+													: 'border-outline-gray-3'
+											"
+										>
+											<span
+												v-if="state.planName === p.name"
+												class="h-1.5 w-1.5 rounded-full bg-surface-white"
+											></span>
+										</div>
+										<div class="text-base font-medium text-ink-gray-9">
+											{{ p.plan_name }}
+										</div>
+										<div
+											class="mb-0.5 mt-2.5 text-[22px] font-medium text-ink-gray-9"
+										>
 											{{ planAmount(p.price_inr)
 											}}<span
 												v-if="planSuffix(p.price_inr, p.billing_cycle)"
+												class="text-p-sm font-normal text-ink-gray-5"
 											>
 												{{
 													planSuffix(p.price_inr, p.billing_cycle)
 												}}</span
 											>
 										</div>
-										<div class="jv-ob-plan-cyc">{{ planCycleLabel(p) }}</div>
-										<ul>
-											<li v-for="(f, k) in planFeatures(p)" :key="k">
-												<svg
-													width="14"
-													height="14"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													stroke-width="2.4"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-												>
-													<path d="M20 6 9 17l-5-5" /></svg
-												>{{ f }}
+										<div class="text-xs text-ink-gray-5">
+											{{ planCycleLabel(p) }}
+										</div>
+										<ul class="mt-3.5 grid gap-2">
+											<li
+												v-for="(f, k) in planFeatures(p)"
+												:key="k"
+												class="flex items-start gap-2 text-p-sm text-ink-gray-7"
+											>
+												<FeatherIcon
+													name="check"
+													class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-green-3"
+												/>{{ f }}
 											</li>
-											<li v-if="!planFeatures(p).length" class="jv-ob-muted">
+											<li
+												v-if="!planFeatures(p).length"
+												class="text-p-sm text-ink-gray-5"
+											>
 												{{ p.billing_cycle }} plan
 											</li>
 										</ul>
 									</div>
 								</div>
 							</div>
-							<div class="jv-ob-foot">
-								<button class="jv-ob-back" @click="goBack">
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="m15 18-6-6 6-6" /></svg
-									>Back to tour
+							<div class="ob-foot">
+								<button class="ob-back" @click="goBack">
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back to tour
 								</button>
-								<button
-									v-if="canSelfHost"
-									class="jv-ob-link"
-									@click="enterSelfhost"
-								>
+								<button v-if="canSelfHost" class="ob-link" @click="enterSelfhost">
 									Self-hosted? Connect your own openclaw
 								</button>
-								<button
-									class="jv-ob-btn jv-ob-btn-primary"
+								<Button
+									variant="solid"
+									label="Continue"
 									:disabled="!state.planName"
 									@click="onPlanContinue"
-								>
-									Continue
-								</button>
+								/>
 							</div>
 						</section>
 
 						<!-- ===== Your Details ===== -->
-						<section v-else-if="state.step === 'details'" class="jv-ob-screen">
-							<div class="jv-ob-body">
-								<div class="jv-ob-head">
+						<section v-else-if="state.step === 'details'" class="ob-screen">
+							<div class="ob-body">
+								<div class="ob-head">
 									<h1>Your details</h1>
 									<p>
 										We'll set {{ agentName }} up for this workspace and send
 										receipts here.
 									</p>
 								</div>
-								<div class="jv-ob-form">
-									<div class="jv-ob-sec-label">Account</div>
-									<div class="jv-ob-field">
-										<label for="jv-ob-email">Work email</label>
-										<input
-											id="jv-ob-email"
-											class="jv-ob-inp"
-											type="email"
-											v-model="state.email"
-											placeholder="you@company.com"
-											autocomplete="email"
-											required
-											aria-required="true"
-											@keydown.enter="onDetailsSubmit"
-										/>
+								<div
+									class="ob-details-form mx-auto grid max-w-[620px] grid-cols-2 gap-3.5 max-[820px]:grid-cols-1"
+								>
+									<div
+										class="col-span-2 -mb-1 mt-2 text-base font-semibold text-ink-gray-9 first:mt-0"
+									>
+										Account
 									</div>
-									<div class="jv-ob-field">
-										<label for="jv-ob-contact"
-											>Contact number
-											<span class="jv-ob-opt">(optional)</span></label
+									<FormControl
+										type="email"
+										variant="outline"
+										label="Work email"
+										v-model="state.email"
+										placeholder="you@company.com"
+										autocomplete="email"
+										required
+										aria-required="true"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<FormControl
+										type="tel"
+										variant="outline"
+										label="Contact number (optional)"
+										v-model="state.contact"
+										placeholder="+91 98765 43210"
+										autocomplete="tel"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<div class="col-span-2 flex flex-col gap-1.5">
+										<label for="jv-ob-company" class="text-xs text-ink-gray-5"
+											>Company</label
 										>
-										<input
-											id="jv-ob-contact"
-											class="jv-ob-inp"
-											type="tel"
-											v-model="state.contact"
-											placeholder="+91 98765 43210"
-											autocomplete="tel"
-											@keydown.enter="onDetailsSubmit"
-										/>
-									</div>
-									<div class="jv-ob-field jv-ob-field-full">
-										<label for="jv-ob-company">Company</label>
 										<JvCombo
 											id="jv-ob-company"
 											:model-value="state.company"
@@ -211,53 +257,42 @@
 											@enter="onDetailsSubmit"
 										/>
 									</div>
-									<div class="jv-ob-sec-label">Billing</div>
-									<div class="jv-ob-sec-hint">
+									<div
+										class="col-span-2 mt-2 text-base font-semibold text-ink-gray-9"
+									>
+										Billing
+									</div>
+									<div class="col-span-2 -mt-1 text-p-xs text-ink-gray-5">
 										Billing details are kept with your account for upcoming
 										invoicing.
 									</div>
-									<div class="jv-ob-field jv-ob-field-full">
-										<label for="jv-ob-addr"
-											>Billing address
-											<span class="jv-ob-opt">(optional)</span></label
-										>
-										<input
-											id="jv-ob-addr"
-											class="jv-ob-inp"
-											type="text"
-											v-model="state.billingAddress"
-											placeholder="Street, area"
-											autocomplete="street-address"
-											@keydown.enter="onDetailsSubmit"
-										/>
-									</div>
-									<div class="jv-ob-field">
-										<label for="jv-ob-city"
-											>City <span class="jv-ob-opt">(optional)</span></label
-										>
-										<input
-											id="jv-ob-city"
-											class="jv-ob-inp"
-											type="text"
-											v-model="state.city"
-											placeholder="Chennai"
-											autocomplete="address-level2"
-											@keydown.enter="onDetailsSubmit"
-										/>
-									</div>
-									<div class="jv-ob-field">
-										<label for="jv-ob-gstin"
-											>GSTIN <span class="jv-ob-opt">(optional)</span></label
-										>
-										<input
-											id="jv-ob-gstin"
-											class="jv-ob-inp"
-											type="text"
-											v-model="state.gstin"
-											placeholder="33ABCDE1234F1Z5"
-											@keydown.enter="onDetailsSubmit"
-										/>
-									</div>
+									<FormControl
+										class="col-span-2"
+										type="text"
+										variant="outline"
+										label="Billing address (optional)"
+										v-model="state.billingAddress"
+										placeholder="Street, area"
+										autocomplete="street-address"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<FormControl
+										type="text"
+										variant="outline"
+										label="City (optional)"
+										v-model="state.city"
+										placeholder="Chennai"
+										autocomplete="address-level2"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<FormControl
+										type="text"
+										variant="outline"
+										label="GSTIN (optional)"
+										v-model="state.gstin"
+										placeholder="33ABCDE1234F1Z5"
+										@keydown.enter="onDetailsSubmit"
+									/>
 								</div>
 								<Banner
 									v-if="state.detailsErr"
@@ -265,38 +300,30 @@
 									:message="state.detailsErr"
 									role="alert"
 									aria-live="polite"
+									class="mx-auto mt-5 max-w-[620px]"
 								/>
 							</div>
-							<div class="jv-ob-foot">
-								<button class="jv-ob-back" @click="goBack">
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="m15 18-6-6 6-6" /></svg
-									>Back
+							<div class="ob-foot">
+								<button class="ob-back" @click="goBack">
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back
 								</button>
-								<button
-									class="jv-ob-btn jv-ob-btn-primary"
+								<Button
+									variant="solid"
+									label="Continue"
 									@click="onDetailsSubmit"
-								>
-									Continue
-								</button>
+								/>
 							</div>
 						</section>
 
 						<!-- ===== Review & Pay (renderPay / renderVerifyEmail / startPay /
 							 openCheckout preserved verbatim in behavior) ===== -->
-						<section v-else-if="state.step === 'pay'" class="jv-ob-screen">
+						<section v-else-if="state.step === 'pay'" class="ob-screen">
 							<template v-if="state.provisioning || state.provisionErr">
-								<div class="jv-ob-body">
-									<div class="jv-ob-head">
+								<div class="ob-body">
+									<div class="ob-head">
 										<h1>Setting up your workspace</h1>
 										<p v-if="state.provisioning">
 											{{
@@ -310,9 +337,11 @@
 									</div>
 									<div
 										v-if="state.provisioning"
-										class="jv-ob-spinner"
+										class="mt-2.5 flex justify-center"
 										aria-hidden="true"
-									></div>
+									>
+										<LoadingIndicator class="h-8 w-8 text-ink-gray-6" />
+									</div>
 									<Banner
 										v-if="state.provisionErr"
 										type="error"
@@ -320,18 +349,17 @@
 										role="alert"
 									/>
 								</div>
-								<div v-if="state.provisionErr" class="jv-ob-foot jv-ob-foot-end">
-									<button
-										class="jv-ob-btn jv-ob-btn-primary"
+								<div v-if="state.provisionErr" class="ob-foot justify-end">
+									<Button
+										variant="solid"
+										label="Retry"
 										@click="proceedAfterPay"
-									>
-										Retry
-									</button>
+									/>
 								</div>
 							</template>
 							<template v-else-if="state.payPhase === 'verify'">
-								<div class="jv-ob-body">
-									<div class="jv-ob-head">
+								<div class="ob-body">
+									<div class="ob-head">
 										<h1>Check your email</h1>
 										<p>
 											We sent a confirmation link to
@@ -341,7 +369,7 @@
 											payment.
 										</p>
 									</div>
-									<p class="jv-ob-hint">
+									<p class="text-center text-p-sm text-ink-gray-5">
 										The link expires in 24 hours. Check your spam folder if it
 										doesn't arrive.
 									</p>
@@ -351,19 +379,19 @@
 										:message="state.payErr"
 									/>
 								</div>
-								<div class="jv-ob-foot jv-ob-foot-end">
-									<button
-										class="jv-ob-btn jv-ob-btn-primary"
-										:disabled="state.payBusy"
+								<div class="ob-foot justify-end">
+									<Button
+										variant="solid"
+										:loading="state.payBusy"
+										loading-text="Working…"
+										label="I've verified my email"
 										@click="onVerifyCheck"
-									>
-										{{ state.payBusy ? "Working…" : "I've verified my email" }}
-									</button>
+									/>
 								</div>
 							</template>
 							<template v-else-if="state.successData">
-								<div class="jv-ob-body">
-									<div class="jv-ob-head">
+								<div class="ob-body">
+									<div class="ob-head">
 										<h1>
 											{{
 												isTrialPlan
@@ -374,15 +402,13 @@
 										<p>You're all set. Continue to connect your AI.</p>
 									</div>
 								</div>
-								<div class="jv-ob-foot jv-ob-foot-end">
-									<button class="jv-ob-btn jv-ob-btn-primary" @click="goNext">
-										Continue
-									</button>
+								<div class="ob-foot justify-end">
+									<Button variant="solid" label="Continue" @click="goNext" />
 								</div>
 							</template>
 							<template v-else>
-								<div class="jv-ob-body">
-									<div class="jv-ob-head">
+								<div class="ob-body">
+									<div class="ob-head">
 										<h1>Review &amp; pay</h1>
 										<p>
 											{{
@@ -392,34 +418,46 @@
 											}}
 										</p>
 									</div>
-									<div class="jv-ob-rev">
-										<div class="jv-ob-rev-row">
-											<span>Plan</span><b>{{ planRowLabel }}</b>
+									<div
+										class="mx-auto max-w-[560px] overflow-hidden rounded-lg border border-outline-gray-1"
+									>
+										<div
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Plan</span
+											><b class="font-medium text-ink-gray-9">{{
+												planRowLabel
+											}}</b>
 										</div>
-										<div class="jv-ob-rev-row">
-											<span>Company</span><b>{{ state.company }}</b>
+										<div
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Company</span
+											><b class="font-medium text-ink-gray-9">{{
+												state.company
+											}}</b>
 										</div>
-										<div class="jv-ob-rev-row">
-											<span>Billed to</span><b>{{ state.email }}</b>
+										<div
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Billed to</span
+											><b class="font-medium text-ink-gray-9">{{
+												state.email
+											}}</b>
 										</div>
-										<div class="jv-ob-rev-row jv-ob-rev-total">
-											<span>Due today</span><b>{{ dueTodayLabel }}</b>
+										<div
+											class="flex items-center justify-between gap-3 bg-surface-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Due today</span
+											><b class="text-base font-semibold text-ink-gray-9">{{
+												dueTodayLabel
+											}}</b>
 										</div>
 									</div>
-									<div class="jv-ob-rev-note">
-										<svg
-											width="14"
-											height="14"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.8"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<rect x="3" y="11" width="18" height="11" rx="2" />
-											<path d="M7 11V7a5 5 0 0 1 10 0v4" />
-										</svg>
+									<div
+										class="mx-auto mt-3.5 flex max-w-[560px] items-center justify-center gap-1.5 text-center text-xs text-ink-gray-5"
+									>
+										<FeatherIcon name="lock" class="h-3.5 w-3.5" />
 										Secured by
 										{{
 											state.paymentProvider === "cashfree"
@@ -429,8 +467,10 @@
 									</div>
 									<div
 										v-if="showProviderChooser"
-										class="jv-ob-provseg"
-										:class="{ 'is-single': isSingleProvider }"
+										class="ob-provseg mx-auto mt-3.5 flex max-w-[360px] gap-1 rounded-xl border border-outline-gray-1 bg-surface-gray-2 p-1"
+										:class="{
+											'max-w-[220px] cursor-default': isSingleProvider,
+										}"
 										:role="isSingleProvider ? undefined : 'radiogroup'"
 										:aria-label="
 											isSingleProvider ? undefined : 'Payment method'
@@ -439,8 +479,13 @@
 										<button
 											v-if="providerAvailable('razorpay')"
 											type="button"
-											class="jv-ob-provseg-opt"
-											:class="{ sel: state.paymentProvider === 'razorpay' }"
+											class="ob-provseg-opt flex min-h-11 flex-1 items-center justify-center rounded-lg px-2.5 py-2 transition-[background,box-shadow,opacity] focus-visible:ring focus-visible:ring-outline-gray-3"
+											:class="
+												state.paymentProvider === 'razorpay' ||
+												isSingleProvider
+													? 'bg-surface-white opacity-100 shadow-sm'
+													: 'cursor-pointer opacity-60 hover:opacity-85'
+											"
 											:role="isSingleProvider ? undefined : 'radio'"
 											:aria-checked="
 												isSingleProvider
@@ -455,13 +500,11 @@
 											:disabled="isSingleProvider"
 											@click="chooseProvider('razorpay')"
 										>
-											<span class="jv-ob-rzp-logo" aria-hidden="true">
-												<svg
-													class="jv-ob-rzp-mark"
-													viewBox="0 0 20 24"
-													width="15"
-													height="18"
-												>
+											<span
+												class="inline-flex items-center gap-1.5"
+												aria-hidden="true"
+											>
+												<svg viewBox="0 0 20 24" width="15" height="18">
 													<path
 														fill="#3395ff"
 														d="M14.4 0 8 12.1l1.6 3.8L18 3.5z"
@@ -471,14 +514,23 @@
 														d="M9.2 8 2 24h4.7l3-7.5 2.1-4.6z"
 													/>
 												</svg>
-												<span class="jv-ob-rzp-word">Razorpay</span>
+												<span
+													class="text-base font-semibold tracking-tight"
+													style="color: #0b2a6b"
+													>Razorpay</span
+												>
 											</span>
 										</button>
 										<button
 											v-if="providerAvailable('cashfree')"
 											type="button"
-											class="jv-ob-provseg-opt"
-											:class="{ sel: state.paymentProvider === 'cashfree' }"
+											class="ob-provseg-opt flex min-h-11 flex-1 items-center justify-center rounded-lg px-2.5 py-2 transition-[background,box-shadow,opacity] focus-visible:ring focus-visible:ring-outline-gray-3"
+											:class="
+												state.paymentProvider === 'cashfree' ||
+												isSingleProvider
+													? 'bg-surface-white opacity-100 shadow-sm'
+													: 'cursor-pointer opacity-60 hover:opacity-85'
+											"
 											:role="isSingleProvider ? undefined : 'radio'"
 											:aria-checked="
 												isSingleProvider
@@ -496,7 +548,7 @@
 											<img
 												:src="cashfreeLogo"
 												alt="Cashfree"
-												class="jv-ob-cf-logo"
+												class="block h-5.5 w-auto"
 											/>
 										</button>
 									</div>
@@ -504,34 +556,28 @@
 										v-if="state.payErr"
 										type="error"
 										:message="state.payErr"
+										class="mx-auto mt-3.5 max-w-[560px]"
 									/>
 								</div>
-								<div class="jv-ob-foot">
+								<div class="ob-foot">
 									<button
-										class="jv-ob-back"
+										class="ob-back"
 										:disabled="state.payBusy"
 										@click="goBack"
 									>
-										<svg
-											width="14"
-											height="14"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.5"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="m15 18-6-6 6-6" /></svg
-										>Back
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
 									</button>
-									<button
-										class="jv-ob-btn jv-ob-btn-primary"
+									<Button
+										variant="solid"
 										:disabled="state.payBusy"
+										:loading="state.payBusy"
+										loading-text="Working…"
+										:label="payCta"
 										@click="onPayClick"
-									>
-										{{ state.payBusy ? "Working…" : payCta }}
-									</button>
+									/>
 								</div>
 							</template>
 						</section>
@@ -541,10 +587,10 @@
 							 save_llm_pool; this step is the post-save readiness handoff.
 							 v-show (not v-if) so the editor stays MOUNTED while its own save()
 							 is still awaiting. ===== -->
-						<section v-else-if="state.step === 'connect'" class="jv-ob-screen">
-							<div class="jv-ob-body">
+						<section v-else-if="state.step === 'connect'" class="ob-screen">
+							<div class="ob-body">
 								<div v-show="state.finishing">
-									<div class="jv-ob-head">
+									<div class="ob-head">
 										<h1>Setting up {{ agentName }}</h1>
 										<p>
 											{{
@@ -553,19 +599,23 @@
 											}}
 										</p>
 									</div>
-									<div class="jv-ob-setup-net">
+									<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
+										 canvas fills via absolute+inset-0, and percentage heights
+										 don't resolve against a min-height parent - see its own
+										 comment. Don't change this to a fixed h-*. -->
+									<div class="relative mt-2 min-h-[380px] flex-1">
 										<SetupNeuralNet :dark="dark" />
 									</div>
 								</div>
 								<div v-show="!state.finishing">
-									<div class="jv-ob-head">
+									<div class="ob-head">
 										<h1>Give {{ agentName }} a brain</h1>
 										<p>
 											Pick which AI powers {{ agentName }}. You can change
 											this anytime in Settings → AI models.
 										</p>
 									</div>
-									<div class="jv-ob-connect">
+									<div class="mx-auto max-w-[640px]">
 										<LlmPoolEditor
 											ref="poolRef"
 											:editable="true"
@@ -581,58 +631,50 @@
 										:message="state.finishNote"
 									>
 										<template #action>
-											<button
-												class="jv-ob-btn jv-ob-btn-primary"
+											<Button
+												variant="solid"
+												:label="`Continue to ${agentName}`"
 												@click="forceContinue"
-											>
-												Continue to {{ agentName }}
-											</button>
+											/>
 										</template>
 									</Banner>
 								</div>
 							</div>
-							<div v-if="!state.finishing" class="jv-ob-foot">
+							<div v-if="!state.finishing" class="ob-foot">
 								<!-- No Back on a reconciled resume: signup/payment already completed
 									 in a previous session, so there is no local pay/review context to
 									 go back to (re-running startSignup there would double-sign-up). -->
 								<button
 									v-if="!state.reconciledConnect"
-									class="jv-ob-back"
+									class="ob-back"
 									:disabled="savingConnect"
 									@click="goBack"
 								>
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="m15 18-6-6 6-6" /></svg
-									>Back
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back
 								</button>
 								<span v-else></span>
 								<!-- Always rendered; disabled until the editor reports a savable config,
 									 so the step never shows without a primary action. -->
-								<button
-									class="jv-ob-btn jv-ob-btn-grad"
+								<Button
+									variant="solid"
 									:disabled="!connectReady || savingConnect"
+									:loading="savingConnect"
+									loading-text="Connecting…"
+									label="Start chatting"
 									@click="saveConnect"
-								>
-									{{ savingConnect ? "Connecting…" : "Start chatting" }}
-								</button>
+								/>
 							</div>
 						</section>
 
 						<!-- ===== Self-host (reached via the quiet Plan-step link; logic
 							 unchanged, field names/args match test_connection /
 							 save_self_hosted verbatim) ===== -->
-						<section v-else-if="state.step === 'selfhost'" class="jv-ob-screen">
-							<div class="jv-ob-body">
-								<div class="jv-ob-head">
+						<section v-else-if="state.step === 'selfhost'" class="ob-screen">
+							<div class="ob-body">
+								<div class="ob-head">
 									<h1>Connect your openclaw</h1>
 									<p>
 										Point {{ agentName }} at <b>your own</b> openclaw server.
@@ -641,52 +683,52 @@
 										persona/skills. Validate first, then connect.
 									</p>
 								</div>
-								<div class="jv-ob-sh">
-									<label class="jv-ob-label" for="jv-ob-sh-url"
-										>openclaw URL</label
-									>
-									<input
-										id="jv-ob-sh-url"
-										class="jv-ob-inp"
+								<div class="mx-auto flex max-w-[620px] flex-col gap-3.5">
+									<FormControl
 										type="text"
+										variant="outline"
+										label="openclaw URL"
 										v-model="state.shUrl"
 										placeholder="http://host.docker.internal:19060"
 									/>
-									<label class="jv-ob-label" for="jv-ob-sh-token"
-										>Gateway token</label
-									>
-									<input
-										id="jv-ob-sh-token"
-										class="jv-ob-inp"
+									<FormControl
 										type="password"
+										variant="outline"
+										label="Gateway token"
 										v-model="state.shToken"
 										placeholder="paste your openclaw gateway token"
 										autocomplete="off"
 									/>
-									<label class="jv-ob-check"
-										><input type="checkbox" v-model="state.shStream" /> Stream
-										responses token-by-token (recommended)</label
-									>
-									<label class="jv-ob-check"
-										><input type="checkbox" v-model="state.shDeep" /> Run deep
-										chat test (slower, sends one message)</label
-									>
-									<div class="jv-ob-sh-actions">
-										<button
-											class="jv-ob-btn"
+									<FormControl
+										type="checkbox"
+										v-model="state.shStream"
+										label="Stream responses token-by-token (recommended)"
+									/>
+									<FormControl
+										type="checkbox"
+										v-model="state.shDeep"
+										label="Run deep chat test (slower, sends one message)"
+									/>
+									<div>
+										<Button
+											label="Test connection"
 											:disabled="state.shTestBusy"
+											:loading="state.shTestBusy"
+											loading-text="Testing…"
 											@click="runSelfHostTest"
-										>
-											{{ state.shTestBusy ? "Testing…" : "Test connection" }}
-										</button>
+										/>
 									</div>
-									<div v-if="state.shTestBusy" class="jv-ob-note">Testing…</div>
-									<div v-else-if="state.shTestResult" class="jv-ob-sh-results">
+									<div v-if="state.shTestBusy" class="ob-note">Testing…</div>
+									<div
+										v-else-if="state.shTestResult"
+										class="mb-1 mt-3.5 text-p-sm leading-relaxed"
+									>
 										<div
+											class="mb-1 font-medium"
 											:class="
 												state.shTestResult.ok
-													? 'jv-ob-sh-ok'
-													: 'jv-ob-sh-bad'
+													? 'text-ink-green-3'
+													: 'text-ink-red-3'
 											"
 										>
 											{{
@@ -698,59 +740,32 @@
 										<div
 											v-for="(c, i) in state.shTestResult.checks || []"
 											:key="i"
-											class="jv-ob-sh-check"
-											:class="{ 'jv-ob-sh-check-adv': c.advisory }"
+											class="flex items-start gap-1.5 py-0.5"
+											:class="
+												c.advisory ? 'text-ink-gray-5' : 'text-ink-gray-8'
+											"
 										>
-											<svg
+											<FeatherIcon
 												v-if="c.ok"
-												class="jv-ob-sh-ic jv-ob-sh-ic-ok"
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.5"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<circle cx="12" cy="12" r="9" />
-												<path d="m9 12 2 2 4-4" />
-											</svg>
-											<svg
+												name="check-circle"
+												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-green-3"
+											/>
+											<FeatherIcon
 												v-else-if="c.advisory"
-												class="jv-ob-sh-ic jv-ob-sh-ic-adv"
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.5"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path
-													d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"
-												/>
-												<path d="M12 9v4M12 17h.01" />
-											</svg>
-											<svg
+												name="alert-triangle"
+												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-amber-3"
+											/>
+											<FeatherIcon
 												v-else
-												class="jv-ob-sh-ic jv-ob-sh-ic-bad"
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.5"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<circle cx="12" cy="12" r="9" />
-												<path d="m15 9-6 6M9 9l6 6" />
-											</svg>
+												name="x-circle"
+												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-red-3"
+											/>
 											<span
 												><b>{{ c.check }}</b> · {{ c.detail || ""
-												}}<span v-if="c.advisory" class="jv-ob-sh-adv-tag">
+												}}<span
+													v-if="c.advisory"
+													class="italic text-ink-gray-5"
+												>
 													· advisory</span
 												></span
 											>
@@ -768,7 +783,7 @@
 										role="alert"
 										aria-live="polite"
 									/>
-									<div v-if="state.finishing" class="jv-ob-note">
+									<div v-if="state.finishing" class="ob-note">
 										Finishing setup…
 									</div>
 									<Banner
@@ -777,48 +792,36 @@
 										:message="state.finishNote"
 									>
 										<template #action>
-											<button
-												class="jv-ob-btn jv-ob-btn-primary"
+											<Button
+												variant="solid"
+												:label="`Continue to ${agentName}`"
 												@click="forceContinue"
-											>
-												Continue to {{ agentName }}
-											</button>
+											/>
 										</template>
 									</Banner>
 								</div>
 							</div>
-							<div class="jv-ob-foot">
+							<div class="ob-foot">
 								<!-- Stay disabled through the post-save readiness poll (finishing) too;
 									 both flags drop on the failure paths so retry stays possible. -->
 								<button
-									class="jv-ob-back"
+									class="ob-back"
 									:disabled="state.shSaveBusy || state.finishing"
 									@click="backFromSelfhost"
 								>
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="m15 18-6-6 6-6" /></svg
-									>Back
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back
 								</button>
-								<button
-									class="jv-ob-btn jv-ob-btn-primary"
+								<Button
+									variant="solid"
 									:disabled="state.shSaveBusy || state.finishing"
+									:loading="state.shSaveBusy || state.finishing"
+									loading-text="Connecting…"
+									label="Connect"
 									@click="onSelfHostSave"
-								>
-									{{
-										state.shSaveBusy || state.finishing
-											? "Connecting…"
-											: "Connect"
-									}}
-								</button>
+								/>
 							</div>
 						</section>
 					</div>
@@ -830,6 +833,7 @@
 
 <script setup>
 import { reactive, ref, computed, onMounted, watch } from "vue";
+import { Button, FormControl, FeatherIcon, LoadingIndicator } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
@@ -1859,10 +1863,10 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-/* Styling follows design.md (§4.3 onboarding & wizards): flat neutral surfaces,
-   near-black solid CTAs, colour-shift-only hover, no decorative motion. */
+/* Root page chrome (jv-ob-root/jv-dark/paletteVars): kept load-bearing, see the
+   template comment above the root <div> for why. Its own look (page tint,
+   default text color, full-height flex column) is otherwise unchanged. */
 .jv-ob-root {
-	--rad: 8px;
 	min-height: 100vh;
 	background: var(--surface-1);
 	color: var(--text);
@@ -1871,100 +1875,10 @@ onMounted(async () => {
 	position: relative;
 }
 
-.jv-ob-main {
-	position: relative;
-	z-index: 1;
-	flex: 1;
-	min-width: 0;
-	overflow-y: auto;
-}
-/* Fills the viewport so the card centers vertically when short; when a step is
-   taller than the viewport it grows and the card top-aligns (scrolls from top,
-   no cutoff). */
-.jv-ob-center {
-	min-height: 100%;
-	box-sizing: border-box;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 26px 20px 60px;
-}
-.jv-ob-wrap {
-	max-width: 1080px;
-	width: 100%;
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-}
-
-/* ---- brand header: the mark is the one sanctioned brand asset (design.md
-   §2.2); no glow shadow around it. ---- */
-.jv-ob-brand {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	gap: 10px;
-	align-self: center;
-	margin-bottom: 8px;
-}
-.jv-ob-brand-name {
-	font-size: 15px;
-	font-weight: 600;
-}
-.jv-ob-brand-sub {
-	font-size: 13px;
-	color: var(--text-3);
-	border-left: 1px solid var(--border);
-	padding-left: 11px;
-}
-
-/* ---- step rail: labelled flat segments (design.md §4.3) ---- */
-.jv-ob-steps {
-	display: flex;
-	align-items: stretch;
-	gap: 8px;
-	margin: 16px 0 22px;
-	width: 100%;
-	max-width: 720px;
-}
-.jv-ob-step {
-	flex: 1;
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-}
-.jv-ob-step-label {
-	font-size: 12.5px;
-	font-weight: 420;
-	color: var(--text-3);
-}
-.jv-ob-step.active .jv-ob-step-label {
-	color: var(--text);
-	font-weight: 500;
-}
-.jv-ob-step.done .jv-ob-step-label {
-	color: var(--text-2);
-}
-.jv-ob-step-bar {
-	height: 4px;
-	border-radius: 999px;
-	background: var(--surface-3);
-}
-.jv-ob-step.done .jv-ob-step-bar,
-.jv-ob-step.active .jv-ob-step-bar {
-	background: var(--text);
-}
-
-/* ---- panel + shared step body/foot ---- */
-.jv-ob-panel {
-	width: 100%;
-	background: var(--surface);
-	border: 1px solid var(--border);
-	border-radius: 16px;
-	box-shadow: 0 0 1px rgba(0, 0, 0, 0.2), 0 24px 30px -8px rgba(0, 0, 0, 0.1);
-	overflow: hidden;
-}
-.jv-ob-screen {
+/* ---- shared step chrome: fade-in, body/head/foot, back/link nav (design.md
+   §4.3). Real frappe-ui components (Button/FormControl/Checkbox/FeatherIcon)
+   own their own look; this is only the layout these steps repeat. ---- */
+.ob-screen {
 	animation: jvObFade 0.15s ease-out;
 }
 @keyframes jvObFade {
@@ -1975,30 +1889,30 @@ onMounted(async () => {
 		opacity: 1;
 	}
 }
-/* min-height keeps every step's dialog the same size; shorter content
+/* min-height keeps every step's card the same size; shorter content
    top-aligns inside it. The tour matches at 604px (TourIntro.vue). */
-.jv-ob-body {
+.ob-body {
 	padding: 32px 40px 28px;
 	min-height: 520px;
 	box-sizing: border-box;
 }
-.jv-ob-head {
+.ob-head {
 	text-align: center;
 	margin-bottom: 24px;
 }
-.jv-ob-head h1 {
-	font-size: 20px;
+.ob-head h1 {
+	font-size: 20px; /* text-2xl, 0.1.278 */
 	font-weight: 600;
 	margin: 0 0 7px;
 	text-wrap: balance;
 }
-.jv-ob-head p {
-	font-size: 14px;
+.ob-head p {
+	font-size: 14px; /* text-p-base */
 	line-height: 1.5;
 	color: var(--text-2);
 	margin: 0;
 }
-.jv-ob-foot {
+.ob-foot {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -2006,12 +1920,11 @@ onMounted(async () => {
 	padding: 16px 40px 22px;
 	border-top: 1px solid var(--border);
 }
-.jv-ob-foot-end {
-	justify-content: flex-end;
-}
-.jv-ob-back {
+/* Back/quiet-link nav (design.md §4.3 "back/skip are plain text links" —
+   these stay plain buttons, not frappe-ui <Button>, matching OnboardingGate's
+   "Switch to Desk" precedent). */
+.ob-back {
 	font-size: 13px;
-	font-weight: 420;
 	color: var(--text-2);
 	background: none;
 	border: none;
@@ -2024,20 +1937,21 @@ onMounted(async () => {
 	border-radius: 8px;
 	transition: background-color 0.15s ease, color 0.15s ease;
 }
-.jv-ob-back svg {
-	flex: none;
-	color: var(--text-3);
-}
-.jv-ob-back:hover {
+.ob-back:hover {
 	color: var(--text);
 	background: var(--surface-2);
 }
-.jv-ob-back:disabled {
+.ob-back:disabled {
 	opacity: 0.5;
 	cursor: default;
 }
+.ob-back:focus-visible,
+.ob-link:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
+}
 /* quiet self-host link on the Plan footer — links look like links */
-.jv-ob-link {
+.ob-link {
 	font-size: 12.5px;
 	color: var(--text-3);
 	background: none;
@@ -2048,549 +1962,10 @@ onMounted(async () => {
 	text-underline-offset: 3px;
 	padding: 4px 2px;
 }
-.jv-ob-link:hover {
+.ob-link:hover {
 	color: var(--text-2);
 }
-
-/* keyboard focus (text inputs draw their own focus border) */
-.jv-ob-root button:focus-visible,
-.jv-ob-root input[type="checkbox"]:focus-visible,
-.jv-ob-root [tabindex]:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 2px;
-}
-
-/* ---- buttons (design.md §3.1): solid near-black primary, subtle secondary,
-   colour-shift hover only. The finishing CTA (.jv-ob-btn-grad class name kept
-   for the template) is the same solid primary as everywhere else. ---- */
-.jv-ob-btn {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	gap: 7px;
-	height: 36px;
-	padding: 0 16px;
-	border-radius: 8px;
-	border: 1px solid transparent;
-	font-family: inherit;
-	font-size: 13.5px;
-	font-weight: 500;
-	line-height: 1;
-	cursor: pointer;
-	white-space: nowrap;
-	background: var(--surface-2);
-	color: var(--text);
-	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-/* :not(:disabled) is REQUIRED here. Without it this rule (specificity 0,2,0)
-   outranks .jv-ob-btn-grad/.jv-ob-btn-primary (0,1,0) on hover, repainting a
-   DISABLED primary button's background to near-white --surface-3 while its
-   color stays var(--surface) (white) -> white-on-white, the button vanishes
-   under the cursor. Hit live on the Connect step's "Start chatting" while it
-   was still disabled. */
-.jv-ob-btn:hover:not(:disabled) {
-	background: var(--surface-3);
-}
-.jv-ob-btn:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
-.jv-ob-btn-primary,
-.jv-ob-btn-grad {
-	background: var(--text);
-	border-color: var(--text);
-	color: var(--surface);
-}
-.jv-ob-btn-primary:hover:not(:disabled),
-.jv-ob-btn-grad:hover:not(:disabled) {
-	background: var(--text-2);
-	border-color: var(--text-2);
-	color: var(--surface);
-}
-/* small variant (inline Retry next to an error message) */
-.jv-ob-btn-sm {
-	height: 28px;
-	padding: 0 12px;
-	font-size: 12.5px;
-	border-radius: 8px;
-	margin-left: 8px;
-}
-
-.jv-ob-placeholder {
-	font-size: 13.5px;
-	color: var(--text-3);
-	margin: 0 0 20px;
-	text-align: center;
-}
-.jv-ob-err {
-	font-size: 12.5px;
-	color: var(--red);
-	min-height: 1em;
-	margin: 10px 0 0;
-}
-.jv-ob-err-center {
-	text-align: center;
-}
-.jv-ob-hint {
-	font-size: 13px;
-	line-height: 1.5;
-	color: var(--text-3);
-	text-align: center;
-	margin: 0;
-}
-
-/* "Setting up" transition spinner (pay provisioning only - the connect
-   finishing state uses the neural-net animation below). */
-.jv-ob-spinner {
-	width: 32px;
-	height: 32px;
-	margin: 10px auto 0;
-	border-radius: 50%;
-	border: 3px solid var(--surface-3);
-	border-top-color: var(--text);
-	animation: jvObSpin 0.8s linear infinite;
-}
-@keyframes jvObSpin {
-	to {
-		transform: rotate(360deg);
-	}
-}
-
-/* "Setting up Jarvis" finishing state: neural-net animation replacing the
-   spinner. Needs real height for the canvas to render into. */
-.jv-ob-setup-net {
-	position: relative;
-	width: 100%;
-	min-height: 380px;
-	flex: 1;
-	margin-top: 8px;
-}
-
-/* ---- Plan cards: selectable radio cards; selection is a dark ring, hover is
-   a background tint — never motion (design.md §4.2). ---- */
-.jv-ob-plans {
-	display: grid;
-	grid-template-columns: repeat(3, 1fr);
-	gap: 12px;
-}
-.jv-ob-plan {
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	padding: 18px;
-	background: var(--surface);
-	cursor: pointer;
-	position: relative;
-	transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
-}
-.jv-ob-plan:hover {
-	background: var(--surface-1);
-	border-color: var(--border-2);
-}
-.jv-ob-plan.sel {
-	border-color: var(--text);
-	box-shadow: 0 0 0 1px var(--text);
-}
-.jv-ob-plan-nm {
-	font-size: 14px;
-	font-weight: 500;
-}
-.jv-ob-plan-pr {
-	font-size: 22px;
-	font-weight: 500;
-	margin: 10px 0 2px;
-}
-.jv-ob-plan-pr span {
-	font-size: 13px;
-	font-weight: 420;
-	color: var(--text-3);
-}
-.jv-ob-plan-cyc {
-	font-size: 12.5px;
-	color: var(--text-3);
-}
-.jv-ob-plan ul {
-	list-style: none;
-	margin: 14px 0 0;
-	padding: 0;
-	display: grid;
-	gap: 8px;
-}
-.jv-ob-plan li {
-	display: flex;
-	gap: 8px;
-	align-items: flex-start;
-	font-size: 13px;
-	line-height: 1.4;
-	color: var(--text-2);
-}
-.jv-ob-plan li svg {
-	color: var(--green);
-	flex: none;
-	margin-top: 1px;
-}
-.jv-ob-plan-rd {
-	position: absolute;
-	top: 16px;
-	right: 16px;
-	width: 16px;
-	height: 16px;
-	border-radius: 50%;
-	border: 1px solid var(--border-2);
-	display: grid;
-	place-items: center;
-	transition: border-color 0.15s ease, background-color 0.15s ease;
-}
-.jv-ob-plan.sel .jv-ob-plan-rd {
-	border-color: var(--text);
-	background: var(--text);
-}
-.jv-ob-plan.sel .jv-ob-plan-rd::after {
-	content: "";
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: var(--surface);
-}
-.jv-ob-muted {
-	color: var(--text-3);
-}
-
-/* ---- Details form (design.md §3.4 mapped to the page context) ---- */
-.jv-ob-form {
-	display: grid;
-	grid-template-columns: 1fr 1fr;
-	gap: 14px 16px;
-	max-width: 620px;
-	margin: 0 auto;
-}
-.jv-ob-field {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-}
-.jv-ob-field-full {
-	grid-column: 1 / -1;
-}
-.jv-ob-field label {
-	font-size: 12px;
-	font-weight: 420;
-	color: var(--text-3);
-}
-.jv-ob-opt {
-	color: var(--text-3);
-	font-weight: 420;
-}
-.jv-ob-inp {
-	height: 32px;
-	border: 1px solid var(--border-2);
-	border-radius: 8px;
-	background: var(--surface);
-	padding: 0 10px;
-	font-family: inherit;
-	font-size: 13.5px;
-	color: var(--text);
-	width: 100%;
-	box-sizing: border-box;
-	transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.jv-ob-inp::placeholder {
-	color: var(--text-3);
-}
-.jv-ob-inp:hover {
-	border-color: var(--text-3);
-}
-.jv-ob-inp:focus {
-	outline: none;
-	border-color: var(--text);
-	box-shadow: 0 0 0 3px var(--surface-2);
-}
-.jv-ob-sec-label {
-	grid-column: 1 / -1;
-	font-size: 14px;
-	font-weight: 600;
-	color: var(--text);
-	margin: 8px 0 -4px;
-}
-.jv-ob-sec-hint {
-	grid-column: 1 / -1;
-	font-size: 12px;
-	line-height: 1.5;
-	color: var(--text-3);
-	margin: 0 0 -6px;
-}
-/* JvCombo (Company) matched to the input recipe above (focus-within because
-   the border belongs on the wrapper, the caret sits in the inner input). */
-.jv-ob-form :deep(.jvc-field) {
-	min-height: 32px;
-	padding: 0 10px;
-	gap: 8px;
-	border-color: var(--border-2);
-	border-radius: 8px;
-	font-size: 13.5px;
-	transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.jv-ob-form :deep(.jvc-field:hover) {
-	border-color: var(--text-3);
-}
-.jv-ob-form :deep(.jvc-field:focus-within),
-.jv-ob-form :deep(.jvc-field.jvc-open) {
-	border-color: var(--text);
-	box-shadow: 0 0 0 3px var(--surface-2);
-}
-.jv-ob-form :deep(.jvc-input::placeholder) {
-	color: var(--text-3);
-}
-
-/* ---- Review & pay ---- */
-.jv-ob-rev {
-	max-width: 560px;
-	margin: 0 auto;
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	overflow: hidden;
-}
-.jv-ob-rev-row {
-	display: flex;
-	justify-content: space-between;
-	gap: 12px;
-	padding: 12px 16px;
-	font-size: 13.5px;
-	border-bottom: 1px solid var(--border);
-}
-.jv-ob-rev-row:last-child {
-	border-bottom: 0;
-}
-.jv-ob-rev-row span {
-	color: var(--text-3);
-}
-.jv-ob-rev-row b {
-	font-weight: 500;
-}
-.jv-ob-rev-total {
-	background: var(--surface-1);
-}
-.jv-ob-rev-total b {
-	font-size: 15px;
-	font-weight: 600;
-}
-.jv-ob-rev-note {
-	max-width: 560px;
-	margin: 14px auto 0;
-	font-size: 12px;
-	color: var(--text-3);
-	text-align: center;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	gap: 7px;
-}
-.jv-ob-provseg {
-	max-width: 360px;
-	margin: 14px auto 0;
-	display: flex;
-	gap: 4px;
-	padding: 4px;
-	background: #eef0f3;
-	border: 1px solid #e3e6ea;
-	border-radius: 12px;
-}
-.jv-ob-provseg-opt {
-	flex: 1 1 0;
-	min-width: 0;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	min-height: 44px;
-	padding: 8px 10px;
-	border: 0;
-	border-radius: 9px;
-	background: transparent;
-	cursor: pointer;
-	opacity: 0.6;
-	transition: background 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
-}
-.jv-ob-provseg-opt:hover {
-	opacity: 0.85;
-}
-.jv-ob-provseg-opt.sel {
-	background: #ffffff;
-	opacity: 1;
-	box-shadow: 0 1px 3px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.04);
-}
-/* Single gateway: the row states which brand takes the payment, it does not
-   offer a choice. So it reads at full strength but drops every affordance that
-   implies one - no pointer, no hover lift, no pressed state. The browser's
-   default disabled dimming is overridden deliberately: this is not an
-   unavailable control, it is a label. */
-.jv-ob-provseg.is-single {
-	max-width: 220px;
-	cursor: default;
-}
-.jv-ob-provseg.is-single .jv-ob-provseg-opt,
-.jv-ob-provseg.is-single .jv-ob-provseg-opt:disabled {
-	cursor: default;
-	opacity: 1;
-}
-.jv-ob-provseg.is-single .jv-ob-provseg-opt:hover {
-	opacity: 1;
-}
-.jv-ob-provseg-opt:focus-visible {
-	outline: 2px solid #3395ff;
-	outline-offset: 2px;
-}
-.jv-ob-rzp-logo {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-}
-.jv-ob-rzp-word {
-	font-size: 15px;
-	font-weight: 700;
-	letter-spacing: -0.01em;
-	color: #0b2a6b;
-}
-.jv-ob-cf-logo {
-	height: 22px;
-	width: auto;
-	display: block;
-}
-@media (prefers-reduced-motion: reduce) {
-	.jv-ob-provseg-opt {
-		transition: none;
-	}
-}
-.jv-ob-devnote {
-	font-size: 12.5px;
-	color: var(--amber);
-	background: var(--amber-bg);
-	border: 1px solid var(--amber-bd);
-	border-radius: 8px;
-	padding: 8px 12px;
-	margin: 14px auto 0;
-	max-width: 560px;
-}
-.jv-ob-devblock {
-	font-size: 12.5px;
-	color: var(--text-2);
-	background: var(--amber-bg);
-	border: 1px solid var(--amber-bd);
-	border-radius: 8px;
-	padding: 12px 14px;
-	margin: 14px auto 0;
-	max-width: 560px;
-	text-align: left;
-}
-.jv-ob-devblock-title {
-	margin: 0 0 6px;
-	font-weight: 560;
-	color: var(--amber);
-}
-.jv-ob-devblock-body {
-	margin: 0 0 10px;
-}
-.jv-ob-devblock-steps {
-	margin: 0;
-	padding-left: 18px;
-	display: flex;
-	flex-direction: column;
-	gap: 10px;
-}
-.jv-ob-devblock-steps li {
-	line-height: 1.5;
-}
-.jv-ob-devblock-steps code {
-	display: block;
-	margin-top: 5px;
-	padding: 7px 9px;
-	background: var(--surface-2);
-	border: 1px solid var(--border);
-	border-radius: 6px;
-	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-	font-size: 11.5px;
-	color: var(--text);
-	white-space: pre-wrap;
-	word-break: break-all;
-}
-
-/* ---- Connect ---- */
-.jv-ob-connect {
-	max-width: 640px;
-	margin: 0 auto;
-}
-
-/* ---- Self-host (logic unchanged) ---- */
-.jv-ob-sh {
-	max-width: 620px;
-	margin: 0 auto;
-}
-.jv-ob-label {
-	display: block;
-	font-size: 12px;
-	font-weight: 420;
-	color: var(--text-3);
-	margin: 14px 0 6px;
-}
-.jv-ob-sh .jv-ob-label:first-of-type {
-	margin-top: 0;
-}
-.jv-ob-check {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	font-size: 13px;
-	color: var(--text);
-	margin-top: 10px;
-	cursor: pointer;
-}
-.jv-ob-sh-actions {
-	display: flex;
-	margin-top: 14px;
-}
-.jv-ob-sh-results {
-	margin: 14px 0 4px;
-	font-size: 12.5px;
-	line-height: 1.6;
-}
-.jv-ob-sh-check {
-	display: flex;
-	align-items: flex-start;
-	gap: 7px;
-	color: var(--text);
-	padding: 2px 0;
-}
-.jv-ob-sh-check-adv {
-	color: var(--text-3);
-}
-.jv-ob-sh-ic {
-	flex: none;
-	margin-top: 2px;
-}
-.jv-ob-sh-ic-ok {
-	color: var(--green);
-}
-.jv-ob-sh-ic-adv {
-	color: var(--amber);
-}
-.jv-ob-sh-ic-bad {
-	color: var(--red);
-}
-.jv-ob-sh-adv-tag {
-	color: var(--text-3);
-	font-style: italic;
-}
-.jv-ob-sh-ok {
-	color: var(--green);
-	font-weight: 500;
-	margin-bottom: 4px;
-}
-.jv-ob-sh-bad {
-	color: var(--red);
-	font-weight: 500;
-	margin-bottom: 4px;
-}
-
-/* ---- Connect / self-host post-save readiness note (afterSaveRecheckReady). ---- */
-.jv-ob-note {
+.ob-note {
 	font-size: 12.5px;
 	color: var(--text-3);
 	margin-top: 14px;
@@ -2601,39 +1976,50 @@ onMounted(async () => {
 	justify-content: center;
 }
 
+/* JvCombo (Company, Details step) matched to FormControl's variant="outline"
+   input recipe (frappe-ui TextInput.vue) so it looks like its FormControl
+   siblings — focus-within because the border belongs on the wrapper, the
+   caret sits in the inner input. */
+.ob-details-form :deep(.jvc-field) {
+	min-height: 28px;
+	padding: 0 8px;
+	gap: 8px;
+	border-color: var(--border-2);
+	border-radius: 6px;
+	font-size: 14px;
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.ob-details-form :deep(.jvc-field:hover) {
+	border-color: var(--text-3);
+}
+.ob-details-form :deep(.jvc-field:focus-within),
+.ob-details-form :deep(.jvc-field.jvc-open) {
+	border-color: var(--text);
+	box-shadow: 0 0 0 2px var(--surface-2);
+}
+.ob-details-form :deep(.jvc-input::placeholder) {
+	color: var(--text-3);
+}
+
 @media (max-width: 820px) {
-	.jv-ob-body {
+	.ob-body {
 		min-height: 0;
 		padding: 26px 22px 22px;
 	}
-	.jv-ob-foot {
+	.ob-foot {
 		padding: 14px 22px 20px;
-	}
-	.jv-ob-plans {
-		grid-template-columns: 1fr;
-	}
-	.jv-ob-form {
-		grid-template-columns: 1fr;
-	}
-	.jv-ob-head h1 {
-		font-size: 18px;
-	}
-	.jv-ob-foot {
 		flex-wrap: wrap;
+	}
+	.ob-head h1 {
+		font-size: 18px;
 	}
 }
 @media (prefers-reduced-motion: reduce) {
-	.jv-ob-screen {
+	.ob-screen {
 		animation: none;
 	}
-	.jv-ob-plan,
-	.jv-ob-btn,
-	.jv-ob-inp,
-	.jv-ob-form :deep(.jvc-field) {
+	.ob-details-form :deep(.jvc-field) {
 		transition: none;
-	}
-	.jv-ob-spinner {
-		animation: none;
 	}
 }
 </style>
