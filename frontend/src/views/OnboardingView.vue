@@ -1839,7 +1839,8 @@ watch(
 	() => [state.payErr, state.provisionErr],
 	([pay, prov]) => {
 		if (pay) reportError({ surface: "onboarding", error_code: "payment", message: pay });
-		if (prov) reportError({ surface: "onboarding", error_code: "provisioning", message: prov });
+		if (prov)
+			reportError({ surface: "onboarding", error_code: "provisioning", message: prov });
 	}
 );
 
