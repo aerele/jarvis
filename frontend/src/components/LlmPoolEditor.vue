@@ -215,12 +215,27 @@
 				</span>
 			</div>
 
+			<!-- Ordering is the one change in this editor that does not apply itself
+           (see move() for why), so it has to say so and offer a way to commit.
+           Shown only while there are unapplied moves. -->
+			<div v-if="orderDirty" class="jv-flist-orderbar">
+				<span class="jv-flist-orderbar__msg">
+					New order not applied. Your agent still uses the previous order.
+				</span>
+				<button
+					:disabled="!editable"
+					@click="applyOrder"
+					class="jv-btn jv-btn--sm jv-btn--primary"
+				>
+					Apply order
+				</button>
+			</div>
+
 			<!-- A real .jv-btn, not a dashed row: this is a LIST ACTION that opens the
            config panel, so it belongs to the same button system as the row actions
-           (Edit / Reconnect / Remove) and Save. The dashed treatment is reserved for
-           an EMPTY SLOT the content will fill -- which is what "+ Connect account"
-           is, inside the panel, where the account itself then appears. Ghost, not
-           primary: Save configuration stays the pane's single primary action. -->
+           (Edit / Reconnect / Remove). The dashed treatment is reserved for an EMPTY
+           SLOT the content will fill -- which is what "+ Connect account" is, inside
+           the panel, where the account itself then appears. -->
 			<button
 				v-if="canEdit && !panel.open"
 				:disabled="!editable"
@@ -1567,10 +1582,11 @@
 			</button>
 		</section>
 
-		<!-- Status strip. There is no Save button and no "unsaved changes" warning any
-	         more: Connect connects AND saves, and so do Remove and reordering, so the
-	         editor is never holding a change the customer still has to commit. What is
-	         left is reporting - the outcome of the apply this editor just ran, and
+		<!-- Status strip. There is no Save button and no blanket "unsaved changes"
+	         warning any more: Connect connects AND saves, and so does Remove. Ordering
+	         is the one change that waits for the customer, and it says so itself in its
+	         own bar next to the list rather than from down here. What is left for this
+	         strip is reporting - the outcome of the apply this editor just ran, and
 	         otherwise whatever the server last recorded (which covers an apply that is
 	         still landing from a previous visit, or one started from another tab). -->
 		<div v-if="!footerless && statusLine" :inert="busy.active" class="jv-pool-savebar">
@@ -2556,27 +2572,35 @@ function onUpstreamChange(m) {
 	m.accounts = [];
 	m._connect = blankConnect();
 }
-// Reordering the failover list is a persisted change like any other now that there
-// is no Save button to follow it with. It is debounced because each apply re-renders
-// and RESTARTS the tenant's container: moving a model from fourth to first is three
-// clicks, and three restarts for one intent would be indefensible. The burst
-// coalesces into a single apply, and `reorderBaseline` holds the order from before
-// the burst so a failed write can be put back.
-let reorderTimer = null;
-let reorderBaseline = null;
-const REORDER_DEBOUNCE_MS = 900;
+// Reordering stays in memory until the customer explicitly applies it.
+//
+// Everywhere else in this editor an action applies itself, because "Connect" that
+// does not connect is the thing we set out to fix. Reordering is the one deliberate
+// exception: applying re-renders the tenant's config and RESTARTS its container, so
+// self-applying would mean a casual drag costs a ~30s restart, and walking a model
+// from fourth to first would cost three. Debouncing hides that but does not remove
+// it, and it leaves the customer unable to say "not yet". So ordering gets one small
+// Apply button that appears only once the order is actually dirty.
+//
+// `orderBaseline` is the order from before the first unapplied move. It doubles as
+// the dirty flag (non-null means unapplied moves exist) and as the revert target if
+// the write fails.
+const orderBaseline = ref(null);
+// Onboarding (footerless) never shows this: its wizard footer owns persistence, so
+// an order change there is applied by the host along with everything else.
+const orderDirty = computed(() => !props.footerless && orderBaseline.value !== null);
 function move(i, d) {
 	if (busy.value.active) return;
-	if (!reorderTimer) reorderBaseline = rows.value;
+	if (!orderBaseline.value) orderBaseline.value = rows.value;
 	rows.value = reorder(rows.value, i, i + d);
-	if (props.footerless) return; // host owns persistence
-	clearTimeout(reorderTimer);
-	reorderTimer = setTimeout(() => {
-		const revertRows = reorderBaseline;
-		reorderTimer = null;
-		reorderBaseline = null;
-		runApply({ revertRows });
-	}, REORDER_DEBOUNCE_MS);
+}
+async function applyOrder() {
+	if (busy.value.active || !orderBaseline.value) return;
+	const revertRows = orderBaseline.value;
+	const { persisted } = await runApply({ revertRows });
+	// Only clear the baseline on a write that landed. If it failed, runApply has
+	// already put the old order back, and the baseline must stay valid for the retry.
+	if (persisted) orderBaseline.value = null;
 }
 async function remove(i) {
 	const r = rows.value[i];
@@ -3427,7 +3451,6 @@ watch(ready, (v) => emit("ready", v), { immediate: true });
 onMounted(load);
 onBeforeUnmount(() => {
 	stopPolling();
-	clearTimeout(reorderTimer);
 	clearTimeout(applyResultTimer);
 });
 
@@ -3968,6 +3991,27 @@ defineExpose({ save });
 	color: var(--text);
 }
 /* Consequence-first nudge shown while the pool has no fallback. */
+/* Sits directly under the list it refers to, and matches .jv-flist-hint's frame so
+   the two never look like different kinds of message. Unlike the hint it carries an
+   action, so it is a row with the button pushed to the end. */
+.jv-flist-orderbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-top: 14px;
+	padding: 9px 11px 9px 13px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--surface-1);
+}
+.jv-flist-orderbar__msg {
+	font-size: 12.5px;
+	line-height: 1.55;
+	color: var(--text-2);
+}
+
 .jv-flist-hint {
 	display: flex;
 	align-items: flex-start;
