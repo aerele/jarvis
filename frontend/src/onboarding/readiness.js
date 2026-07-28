@@ -46,11 +46,17 @@ export async function isWorkspaceReady() {
 // (llm_direct_synced_at never stamped). Same permanence guarantee — once a
 // direct config confirms once, the marker is permanent — so it belongs here
 // too, never on the degraded-banner path.
+// "llm_setup" is the server-decided hard variant of llm_credentials: creds
+// missing AND nothing ever synced AND the subscription never went Active — a
+// half-finished signup (e.g. failed payment), not an established workspace.
+// The soft/hard split lives server-side (_llm_missing_verdict) because only
+// admin knows the subscription state.
 const NOT_ONBOARDED_REASONS = new Set([
 	"signup",
 	"selfhost_connection",
 	"llm_pool_provisioning",
 	"llm_provisioning",
+	"llm_setup",
 ]);
 
 // True only when the workspace has NOT completed onboarding at all — the single
