@@ -2123,6 +2123,24 @@ function isRowEmpty(r) {
 	if (r.credentialType === "subscription") return !(r.accounts || []).length;
 	return !(r.model || "").trim() && !(r.apiKey || "").trim() && !r.hasKey;
 }
+// The row the customer is in the MIDDLE of adding, or null.
+//
+// openAdd appends the row up front (so a Connect started inside the panel already
+// includes it), but appending is not committing: until the customer presses Connect
+// the row is a half-filled form, not a model. An apply started from some OTHER row
+// (Remove, Apply order) must therefore leave it completely alone - neither saving it
+// half-finished nor letting the load() that follows delete it.
+//
+// `_committed` is what keeps this honest in the one case where an add-panel row IS
+// already on the server: a Connect whose write landed but whose fleet apply then
+// failed leaves the panel open on a row save_llm_pool has already stored. Holding
+// that row out of the next payload would silently delete a model the customer really
+// did connect, so it stops counting as in-progress the moment its write succeeds.
+function pendingAddRow() {
+	if (!panel.value.open || panel.value.mode !== "add") return null;
+	const r = rows.value.find((x) => x._uid === panel.value.uid);
+	return r && !r._committed ? r : null;
+}
 // Append a blank row up-front (not on a later "commit") so finishConnect's
 // !footerless auto-save - which can fire while this panel is still open -
 // already includes it instead of silently dropping an in-progress connect.
@@ -2597,7 +2615,7 @@ function move(i, d) {
 async function applyOrder() {
 	if (busy.value.active || !orderBaseline.value) return;
 	const revertRows = orderBaseline.value;
-	const { persisted } = await runApply({ revertRows });
+	const { persisted } = await runApply({ revertRows, keepPendingAdd: true });
 	// Only clear the baseline on a write that landed. If it failed, runApply has
 	// already put the old order back, and the baseline must stay valid for the retry.
 	if (persisted) orderBaseline.value = null;
@@ -2609,8 +2627,11 @@ async function remove(i) {
 	// model away is a disconnect, not an edit (a separate flow, not this one). Say so
 	// instead of letting the customer walk into a validation error they cannot clear.
 	// Counted over FILLED rows, because an open "+ Add a model" panel has already put
-	// an empty placeholder in the list and it must not read as a second model.
-	const filled = rows.value.filter((x) => !isRowEmpty(x));
+	// a placeholder in the list and it must not read as a second model - not even once
+	// the customer has typed a provider and key into it, since nothing about it is
+	// connected until they press Connect.
+	const pending = pendingAddRow();
+	const filled = rows.value.filter((x) => !isRowEmpty(x) && x !== pending);
 	if (!props.footerless && !isRowEmpty(r) && filled.length <= 1) {
 		setApplyResult({
 			kind: "failed",
@@ -2636,10 +2657,69 @@ async function remove(i) {
 	const before = rows.value;
 	rows.value = rows.value.filter((x) => x._uid !== r._uid);
 	if (props.footerless) return;
-	await runApply({ revertRows: before });
+	await runApply({ revertRows: before, keepPendingAdd: true });
 }
-function removeAccount(m, idx) {
-	m.accounts = (m.accounts || []).filter((_, j) => j !== idx);
+// Disconnecting an account persists itself, like every other mutating action here.
+//
+// It used to only filter the local array: the chip vanished, nothing was written, and
+// the next load() (any apply, any reopen of the pane) brought the account back still
+// connected. The customer had been told they disconnected something that was in fact
+// still live on their agent, which is the one kind of wrong this editor must not be.
+//
+// Onboarding (footerless) stays local on purpose: its wizard footer owns the single
+// save, there is no agent to disconnect from yet, and applying here would fight it.
+async function removeAccount(m, idx) {
+	if (!m || busy.value.active) return;
+	const prev = m.accounts || [];
+	if (idx < 0 || idx >= prev.length) return;
+	if (props.footerless) {
+		m.accounts = prev.filter((_, j) => j !== idx);
+		return;
+	}
+	const last = prev.length === 1;
+	// An accountless subscription row cannot answer a turn, so prunedForSave drops it
+	// and the model leaves the failover list along with its last account. Refuse when
+	// that would empty the pool - same wall remove() puts up, for the same reason, and
+	// far clearer than validatePool's "Model <id> needs at least one connected account"
+	// on a model id this editor never showed the customer.
+	if (last) {
+		const pending = pendingAddRow();
+		const filled = rows.value.filter((x) => !isRowEmpty(x) && x !== pending);
+		if (filled.length <= 1) {
+			setApplyResult({
+				kind: "failed",
+				text: "This is the only account on your only model, so disconnecting it would leave nothing to answer with. Add another model first.",
+				detail: "",
+			});
+			return;
+		}
+	}
+	const who = accountLabel(prev[idx]);
+	if (
+		!(await confirm({
+			title: "Disconnect this account?",
+			message: last
+				? `${who} will be disconnected. "${rowModelLabel(
+						m
+				  )}" has no other account, so it leaves your failover list too, and your agent is updated right away.`
+				: `${who} will be disconnected and your agent updated right away.`,
+			confirmLabel: "Disconnect",
+			danger: true,
+		}))
+	)
+		return;
+	// Re-resolve the row after the await: confirm() yields, and an apply finishing in
+	// that window reseeds rows.value, leaving `m` detached from the list. Mutating a
+	// detached object would drop the disconnect silently.
+	const live = rows.value.find((x) => x._uid === m._uid);
+	if (!live) return;
+	const now = live.accounts || [];
+	if (idx >= now.length) return;
+	live.accounts = now.filter((_, j) => j !== idx);
+	const { persisted } = await runApply();
+	// runApply's revertRows only restores the rows ARRAY, which is untouched here, so
+	// the chip is put back by hand when nothing was written.
+	if (!persisted) live.accounts = now;
 }
 function addModel() {
 	rows.value = [...rows.value, { ...newRow(), order: rows.value.length }];
@@ -3048,11 +3128,21 @@ function seedRows(config) {
 	});
 }
 
-async function load() {
+// opts.carry: a row to keep across the reseed (the in-progress add row - see
+// pendingAddRow). It is not on the server, so seeding from get_llm_config would
+// simply delete it, the panelRow watcher would close the panel on top of it, and
+// the customer's half-started "+ Add a model" would be gone with no message at all.
+// Re-appending it here, inside the SAME assignment that reseeds, keeps the panel
+// pointing at the same row object with everything typed into it intact.
+//
+// (Called from the template's Retry button too, which passes a click Event - hence
+// the defensive read rather than destructuring.)
+async function load(opts = {}) {
+	const carry = (opts && opts.carry) || null;
 	err.value = "";
 	try {
 		cfg.value = (await api.getLlmConfig()) || cfg.value;
-		rows.value = seedRows(cfg.value);
+		rows.value = carry ? [...seedRows(cfg.value), carry] : seedRows(cfg.value);
 		selectedPreset.value = cfg.value.preset || "";
 		keysByVendor.value = {};
 		// Open on the tab that matches what's stored (mirrors seedLlmSetupFromConfig).
@@ -3098,7 +3188,12 @@ async function load() {
 			if (!rows.value.length) rows.value = [newRow()];
 		}
 		// Baseline for the unsaved-changes notice - the pool as just loaded is clean.
-		savedSnapshot.value = poolSnapshot();
+		// The carried row is deliberately NOT in the baseline: it is unsaved work, and
+		// it should read as unsaved here exactly as it does the moment "+ Add a model"
+		// appends it.
+		savedSnapshot.value = poolSnapshot(
+			carry ? rows.value.filter((r) => r !== carry) : rows.value
+		);
 	} catch (e) {
 		err.value = _err(e);
 	}
@@ -3134,9 +3229,9 @@ async function load() {
 
 // Stable string of the savable pool + preset - the cheap key the dirty-notice
 // and snapshot reset compare against.
-function poolSnapshot() {
+function poolSnapshot(src = rows.value) {
 	try {
-		return JSON.stringify({ m: buildSaveModels(rows.value), p: selectedPreset.value });
+		return JSON.stringify({ m: buildSaveModels(src), p: selectedPreset.value });
 	} catch (e) {
 		return "";
 	}
@@ -3191,10 +3286,15 @@ function buildSaveModels(sourceRows) {
 // "Connect your account to continue." pre-check in buildSavePayload, so nothing is
 // lost by pruning here.
 //
+// `exclude` is the in-progress add row (see pendingAddRow), held out entirely rather
+// than pruned-if-empty: a half-typed API-KEY row is not empty, so pruning alone would
+// either save it unfinished or fail an unrelated Remove on validation the customer
+// cannot connect to anything they did.
+//
 // If pruning would empty the pool we keep every row, so validation still speaks up
 // instead of quietly saving nothing.
-function prunedForSave(src) {
-	const all = src || [];
+function prunedForSave(src, exclude = null) {
+	const all = (src || []).filter((r) => r !== exclude);
 	const kept = all.filter((r) => !isRowEmpty(r));
 	return kept.length ? kept : all;
 }
@@ -3202,7 +3302,7 @@ function prunedForSave(src) {
 // Everything save_llm_pool needs, or {error} with the one sentence to show. Split
 // out of save() so the settings editor's Connect can validate + build the SAME
 // payload without inheriting save()'s "return the moment the row is written".
-function buildSavePayload() {
+function buildSavePayload({ exclude = null } = {}) {
 	let saveModels, savePreset;
 	if (llmMode.value === "preset") {
 		const e = selectedEntry.value;
@@ -3219,7 +3319,7 @@ function buildSavePayload() {
 		// Quick saves a single-model pool (rows[0]); Custom saves the full pool.
 		// Exception: onboarding's singleMode keeps seeded tail rows (editorRows only
 		// renders the first) so a returning customer's existing pool isn't dropped.
-		const src = prunedForSave(rows.value);
+		const src = prunedForSave(rows.value, exclude);
 		saveModels = buildSaveModels(
 			llmMode.value === "quick" && !singleMode.value ? src.slice(0, 1) : src
 		);
@@ -3286,11 +3386,16 @@ async function save() {
 //
 // Returns {persisted, outcome}. persisted:false means NOTHING was written, so an
 // optimistic list mutation (reorder, remove) can be put back.
-async function runApply({ revertRows = null } = {}) {
+//
+// keepPendingAdd marks an apply the customer started from a DIFFERENT row. Such an
+// apply must not touch the row an add-panel is still open on (see pendingAddRow):
+// it is held out of the payload here and carried across the reseed below.
+async function runApply({ revertRows = null, keepPendingAdd = false } = {}) {
 	if (busy.value.active) return { persisted: false, outcome: null };
 	err.value = "";
 	setApplyResult(null);
-	const payload = buildSavePayload();
+	const pending = keepPendingAdd ? pendingAddRow() : null;
+	const payload = buildSavePayload({ exclude: pending });
 	if (payload.error) {
 		if (revertRows) rows.value = revertRows;
 		setApplyResult({ kind: "failed", text: payload.error, detail: "" });
@@ -3305,6 +3410,13 @@ async function runApply({ revertRows = null } = {}) {
 		setBusy("");
 		return { persisted: false, outcome: null };
 	}
+	// The write landed WITH the add-panel's row in it, so that row is no longer
+	// in-progress: the server has it, and a later unrelated apply must keep sending it.
+	// Only when it really went into the payload - prunedForSave still drops an empty one.
+	if (!pending) {
+		const justSaved = pendingAddRow();
+		if (justSaved && !isRowEmpty(justSaved)) justSaved._committed = true;
+	}
 	let outcome;
 	try {
 		outcome = await startPolling({ timeoutMs: APPLY_TIMEOUT_MS });
@@ -3317,7 +3429,13 @@ async function runApply({ revertRows = null } = {}) {
 	// was, so the customer can fix the cause without re-entering a key. Success (and
 	// a timeout, where the config IS saved and still landing) re-seeds from the
 	// server, which also closes the panel - the row is done.
-	if (outcome.kind !== "failed") await load();
+	if (outcome.kind !== "failed") await load({ carry: pending });
+	// The blocking wait gave up but the job did not: keep watching, slowly, so the
+	// "it will finish on its own" message above becomes true on THIS screen rather
+	// than only after the pane is closed and reopened. Started after load() because
+	// load() starts the fast poller for a still-pending sync, and only one observer
+	// may run at a time.
+	if (outcome.kind === "pending") startBackgroundWatch();
 	return { persisted: true, outcome };
 }
 
@@ -3385,6 +3503,10 @@ const statusLine = computed(() => {
 // would stack overlapping requests on a slow connection.
 function startPolling(opts = {}) {
 	stopPolling();
+	// Exactly one observer of the sync status runs at a time. A new apply supersedes
+	// the slow post-deadline watch below, and nothing has to reason about two pollers
+	// writing sync.value (or two results racing onto the status strip).
+	stopBackgroundWatch();
 	const deadline = opts.timeoutMs ? Date.now() + opts.timeoutMs : 0;
 	return new Promise((resolve) => {
 		pollSettle = resolve;
@@ -3432,6 +3554,62 @@ function settlePolling(outcome) {
 	resolve(outcome || { kind: "pending", text: "", detail: "" });
 }
 
+// ---- post-deadline watch --------------------------------------------------
+// APPLY_TIMEOUT_MS releases the customer, not the job: the enqueued apply is still
+// running, and the status strip is left saying "Still applying. This can take a
+// minute, and it will finish on its own." Nothing used to update it after that, so
+// the promise was false for the very screen the sentence was on - the strip froze
+// until the pane was closed and reopened. This keeps observing, slowly, and replaces
+// the sentence with what actually happened.
+//
+// Nothing is blocked on this, so it polls far less often than POLL_MS.
+const BG_POLL_MS = 15000;
+// ...and it is bounded. An apply that has not settled in ten minutes will not be
+// resolved by one more status read, and an observer with no end is a leak dressed as
+// a feature. When the bound is reached the strip keeps the honest "it will finish on
+// its own" line, and reopening the pane picks up whatever the server ended on.
+const BG_POLL_MAX_MS = 600000;
+let bgTimer = null;
+
+function startBackgroundWatch() {
+	// One observer at a time (load() may have started the fast poller for this same
+	// still-pending apply) and never two of these.
+	stopPolling();
+	stopBackgroundWatch();
+	const until = Date.now() + BG_POLL_MAX_MS;
+	const tick = async () => {
+		bgTimer = null;
+		let failed = false;
+		try {
+			sync.value = (await api.getLlmSyncStatus()) || sync.value;
+		} catch (e) {
+			// A status read that fails says nothing about the apply, so keep watching
+			// rather than inventing an outcome.
+			failed = true;
+		}
+		if (!failed) {
+			const st = humaniseSyncStatus(sync.value.last_sync_status);
+			if (!sync.value.pending && st.kind !== "pending") {
+				// The whole point: the strip stops claiming the apply is still running.
+				// Deliberately no load() here - the pool was already written and reseeded
+				// before this watch started, and a surprise reseed would close a panel the
+				// customer has since opened.
+				setApplyResult(describeOutcome(st));
+				return;
+			}
+		}
+		if (Date.now() >= until) return;
+		bgTimer = setTimeout(tick, BG_POLL_MS);
+	};
+	bgTimer = setTimeout(tick, BG_POLL_MS);
+}
+function stopBackgroundWatch() {
+	if (bgTimer) {
+		clearTimeout(bgTimer);
+		bgTimer = null;
+	}
+}
+
 // Refresh the preset preview whenever vendor keys change while a preset is active.
 watch(
 	keysByVendor,
@@ -3451,6 +3629,7 @@ watch(ready, (v) => emit("ready", v), { immediate: true });
 onMounted(load);
 onBeforeUnmount(() => {
 	stopPolling();
+	stopBackgroundWatch();
 	clearTimeout(applyResultTimer);
 });
 
