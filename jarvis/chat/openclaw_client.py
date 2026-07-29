@@ -687,14 +687,24 @@ class OpenclawSession:
 	def set_session_model(
 		self,
 		session_key: str,
-		model_ref: str,
+		model_ref: str | None,
 		*,
 		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
 	) -> None:
 		"""Point the session at ``model_ref`` (``"<provider>/<model>"`` or
 		bare ``"<model>"``) via ``sessions.patch``. chat.send has no per-turn
 		model param, so per-conversation overrides are applied to the session
-		before the send."""
+		before the send.
+
+		``model_ref=None`` sends ``{"model": null}``, which openclaw's ``isDefault``
+		branch answers by DELETING the session's modelOverride, providerOverride and
+		modelOverrideSource. Use it to RESET a session to the agent's configured
+		default: an unoverridden session is the only shape that keeps
+		``agents.defaults.model.fallbacks`` live, because
+		``resolveEffectiveModelFallbacks`` returns ``[]`` for any override not marked
+		``modelOverrideSource: "auto"`` -- and that marker is not in the sessions.patch
+		schema (the gateway rejects it with INVALID_REQUEST), so not overriding is the
+		supported way to preserve failover. See ``turn_handler._session_model_for``."""
 		self._request(
 			"sessions.patch",
 			{"key": session_key, "model": model_ref},

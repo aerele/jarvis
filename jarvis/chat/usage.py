@@ -26,9 +26,9 @@ from datetime import datetime
 import frappe
 
 # The pool-mode "Auto" sentinel model id. turn_handler._session_model_for
-# patches an unpinned pool conversation's openclaw SESSION to this value
-# (jarvis#299), so the gateway's sessions.list row reports it as `model` for
-# that turn - see record_turn_usage's docstring below for what that means for
+# patches an unpinned BIFROST-fronted pool conversation's openclaw SESSION to
+# this value (jarvis#299), so the gateway's sessions.list row reports it as
+# `model` for that turn - see record_turn_usage below for what that means for
 # attribution. Imported (not hardcoded) so this module and turn_handler can't
 # drift on what the sentinel is; re-exported here as a module-level constant
 # so callers that only care about "is this the pool auto-routed bucket" don't
@@ -222,15 +222,22 @@ def record_turn_usage(session_key: str, row: dict | None) -> str:
 			params,
 		)
 		# Per-model attribution (fleet spec §7): the gateway sessions row
-		# carries whatever model the SESSION was patched to for this turn
+		# carries whatever model the SESSION resolved to for this turn
 		# (turn_handler._session_model_for). For a pinned model that's the
-		# real model. For an unpinned pool "Auto" conversation it is instead
-		# POOL_VIRTUAL_MODEL - Bifrost picks the actual per-request model
-		# server-side, and that choice never comes back to the bench, so
-		# every Auto turn is attributed to the sentinel, not the real model.
-		# That's an intentionally honest bucket ("pool auto-routed"), not a
-		# bug: pool tenants get true per-model data from Bifrost logs on the
-		# admin side. Missing/blank model → aggregate only, no per-model row.
+		# real model. For an unpinned BIFROST pool the session is patched to
+		# POOL_VIRTUAL_MODEL, so the turn lands in the sentinel bucket -
+		# Bifrost picks the actual per-request model server-side and that
+		# choice never comes back to the bench. That's an intentionally
+		# honest bucket ("pool auto-routed"), not a bug: those tenants get
+		# true per-model data from Bifrost logs on the admin side. An
+		# unpinned openclaw-DIRECT pool no longer names a model at all (it
+		# RESETS the session, which is what keeps the container's failover
+		# chain live), so its row reports whatever the gateway attributes to
+		# an unoverridden session - the resolved agent default, or the
+		# fallback that actually ran. That is strictly more accurate than the
+		# primary's id the bench used to guess, and if the gateway reports no
+		# model for such a row the guard below simply records the aggregate.
+		# Missing/blank model → aggregate only, no per-model row.
 		#
 		# Isolated in its OWN try/except: this call sits between the
 		# aggregate UPDATEs above and the commit below. If it raises and is
