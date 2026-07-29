@@ -849,7 +849,6 @@ class TestAccountReconnect(FrappeTestCase):
 		s.db_set("jarvis_admin_url", "https://fleet.example.test")
 		s.db_set("jarvis_admin_customer_email", "resume-me@example.com")
 
-
 		s.db_set("jarvis_admin_url", "https://fleet.example.test")
 		frappe.db.commit()
 
@@ -904,7 +903,6 @@ class TestAccountReconnect(FrappeTestCase):
 		):
 			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
 		self.assertIn("already registered", str(ctx.exception))
-
 
 	def test_start_proxies_request(self):
 		with patch(
