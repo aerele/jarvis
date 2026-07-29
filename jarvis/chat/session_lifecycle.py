@@ -454,8 +454,15 @@ def _delete_gateway_session(sess, session_key: str, summary: dict) -> bool:
 # failover failure, which is the expensive part of the bug.
 #
 # So ask the gateway before deleting. sessions.list -> hasActiveRun is the same
-# signal _reap_orphans already trusts, and settling first costs a background job
-# a few hundred ms it is not on any critical path for.
+# signal _reap_orphans already trusts.
+#
+# PROBE FIRST, sleep only between retries. One of these callers
+# (learning.polish, via learned_api's "Polish with AI" and follow-up-rephrase
+# endpoints) runs INSIDE a synchronous whitelisted request, and title/polish
+# hold one of only POOL_MAX_PER_GATEWAY=3 pooled connections while they do
+# this. An unconditional settle would tax both on every call; a probe costs one
+# sessions.list and only turns into a wait when the gateway actually says the
+# run is live, which is precisely when waiting is the correct answer.
 RECLAIM_PROBE_ATTEMPTS = 6
 RECLAIM_PROBE_DELAY_S = 0.5
 
@@ -463,9 +470,9 @@ RECLAIM_PROBE_DELAY_S = 0.5
 def reclaim_throwaway_session(sess, session_key: str, *, logger_name: str) -> bool:
 	"""Delete a throwaway session once the gateway stops reporting a run on it.
 
-	Waits ``RECLAIM_PROBE_DELAY_S`` and re-checks up to ``RECLAIM_PROBE_ATTEMPTS``
-	times. Returns True when the session was deleted, False when it was left
-	behind - still busy, or the gateway would not answer.
+	Probes immediately, then re-checks after ``RECLAIM_PROBE_DELAY_S`` up to
+	``RECLAIM_PROBE_ATTEMPTS`` times. Returns True when the session was deleted,
+	False when it was left behind - still busy, or the gateway would not answer.
 
 	Leaving it behind is safe and deliberate: every throwaway label carries a
 	``THROWAWAY_GRACE_HOURS`` grace and its own ``ORPHAN_BATCH_MAX`` budget in
@@ -473,25 +480,29 @@ def reclaim_throwaway_session(sess, session_key: str, *, logger_name: str) -> bo
 	a leak. Killing a live run to hit the budget would be the worse trade - that
 	is the whole defect this function exists to remove.
 
-	Never raises: every caller is a best-effort background path whose real work
-	is already done by the time it reclaims."""
+	RESIDUAL: ``hasActiveRun`` is the strongest finished-signal the gateway
+	exposes, so a session openclaw has stopped counting as active but is still
+	writing to would still be deleted underneath. Every case actually observed
+	on jarvis-pool-bf4097 had the run's lane demonstrably still working when the
+	delete landed (it re-created the session file afterwards), so the probe
+	covers them; the sweep covers whatever it does not.
+
+	Never raises: every caller is a best-effort path whose real work is already
+	done by the time it reclaims."""
 	if not session_key or not isinstance(session_key, str):
 		return False
 	log = frappe.logger(logger_name)
-	for _ in range(RECLAIM_PROBE_ATTEMPTS):
-		# Sleep FIRST: the caller usually arrives here microseconds after its
-		# own turn ended, which is exactly the window openclaw is still writing
-		# the session file in. One probe round-trip alone would not clear it.
-		time.sleep(RECLAIM_PROBE_DELAY_S)
+	for attempt in range(RECLAIM_PROBE_ATTEMPTS):
 		try:
-			if sess.is_run_active(session_key):
-				continue
-			sess.delete_session(session_key)
-			return True
+			if not sess.is_run_active(session_key):
+				sess.delete_session(session_key)
+				return True
 		except Exception:
 			# A gateway blip during probe or delete: hand it to the sweep
 			# rather than retrying a delete whose outcome we cannot read.
 			log.debug("throwaway session reclaim failed key=%s", session_key, exc_info=True)
 			return False
+		if attempt < RECLAIM_PROBE_ATTEMPTS - 1:
+			time.sleep(RECLAIM_PROBE_DELAY_S)
 	log.debug("throwaway session still running, left for the sweep key=%s", session_key)
 	return False

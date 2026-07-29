@@ -135,6 +135,11 @@ def warm_prefix() -> bool:
 				model=model or None,
 				provider=provider,
 			)
+			# Stop the clock HERE, not after the reclaim below. The reclaim can
+			# now spend up to a couple of seconds waiting out the previous warm's
+			# run, and folding that into fire_ms would silently corrupt the one
+			# number this telemetry exists to watch.
+			fire_ms = int((time.monotonic() - t0) * 1000)
 			# Remember the new throwaway BEFORE reclaiming the old one: a failure
 			# between the two then leaks only the PREVIOUS session (the orphan
 			# sweep still collects it) instead of losing the pointer to the one we
@@ -145,16 +150,13 @@ def warm_prefix() -> bool:
 			_reclaim_previous(sess, prev, throwaway)
 		finally:
 			sess.close()
-		# Latency telemetry (plan Phase 0): connect+create+fire duration.
-		# (fire_agent is fire-and-forget, so this does NOT include the
-		# prefill itself — cold-vs-warm shows up in real turns'
-		# first_delta_ms, logged by turn_handler.)
+		# Latency telemetry (plan Phase 0): connect+create+fire duration, as
+		# measured above before the reclaim. (fire_agent is fire-and-forget, so
+		# this does NOT include the prefill itself — cold-vs-warm shows up in
+		# real turns' first_delta_ms, logged by turn_handler.)
 		from jarvis.chat.latency import get_logger as _get_latency_logger
 
-		_get_latency_logger().info(
-			"warm_prefix fire_ms=%d",
-			int((time.monotonic() - t0) * 1000),
-		)
+		_get_latency_logger().info("warm_prefix fire_ms=%d", fire_ms)
 		# Warm succeeded: arm the full cooldown so the next cron tick skips.
 		cache.set_value(key, "1", expires_in_sec=_WARM_COOLDOWN_S)
 		return True

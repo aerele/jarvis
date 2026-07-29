@@ -13,7 +13,11 @@ which is NOT the same instant the run ends:
 Deleting there renamed the session file out from under a live run. These tests
 pin the fix: every reclaim first asks the gateway whether a run is still active
 (``sessions.list`` -> ``hasActiveRun``, the same signal the orphan sweep uses)
-and withholds the delete while it is, leaving the session to that sweep.
+and withholds the delete while it is, leaving the session to that sweep. They
+also pin the cost shape - one probe and no sleep when the run is already done,
+a backoff only when the gateway says it is live - because polish's reclaim runs
+inside a synchronous whitelisted request and title's holds one of only three
+pooled connections.
 
 SCOPE NOTE: the transport is stubbed here, as everywhere else in this suite, so
 these tests assert INTENT - which RPCs the bench issues and in what order. They
@@ -62,7 +66,7 @@ def _checkout_yielding(sess):
 
 
 def _no_sleep():
-	"""Drop the settle delay so the probe loop runs at test speed."""
+	"""Drop the retry backoff so a busy-session probe loop runs at test speed."""
 	return patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0)
 
 
@@ -85,7 +89,11 @@ class TestReclaimThrowawaySession(FrappeTestCase):
 
 	def test_deletes_once_the_run_clears(self):
 		"""Giving up on a busy session must not become a leak: as soon as the
-		gateway reports the run finished, the session goes."""
+		gateway reports the run finished, the session goes.
+
+		The call_count assertion is load-bearing. Without it this passes against
+		an unconditional delete AND against an inverted probe (which would fire
+		on the first True), so it would pin nothing."""
 		sess = _stub_pool_session(active_probes=[True, True, False])
 
 		with _no_sleep():
@@ -93,6 +101,34 @@ class TestReclaimThrowawaySession(FrappeTestCase):
 
 		self.assertTrue(reclaimed)
 		sess.delete_session.assert_called_once_with(SKEY)
+		self.assertEqual(sess.is_run_active.call_count, 3, "the delete must wait for the third, idle probe")
+		self.assertEqual(
+			[c[0] for c in sess.method_calls],
+			["is_run_active", "is_run_active", "is_run_active", "delete_session"],
+			"every probe must precede the delete",
+		)
+
+	def test_idle_session_is_deleted_without_waiting(self):
+		"""polish's reclaim runs inside a synchronous whitelisted request and
+		title's holds one of three pooled connections, so the common case must
+		cost one probe and no sleep at all."""
+		sess = _stub_pool_session(active_probes=False)
+
+		with patch.object(session_lifecycle.time, "sleep") as sleep:
+			reclaimed = session_lifecycle.reclaim_throwaway_session(sess, SKEY, logger_name="jarvis.tests")
+
+		self.assertTrue(reclaimed)
+		self.assertEqual(sess.is_run_active.call_count, 1)
+		sleep.assert_not_called()
+
+	def test_busy_session_backs_off_between_probes(self):
+		"""The wait only appears when the gateway says the run is live."""
+		sess = _stub_pool_session(active_probes=[True, False])
+
+		with patch.object(session_lifecycle.time, "sleep") as sleep:
+			session_lifecycle.reclaim_throwaway_session(sess, SKEY, logger_name="jarvis.tests")
+
+		sleep.assert_called_once_with(session_lifecycle.RECLAIM_PROBE_DELAY_S)
 
 	def test_probe_failure_defers_to_the_sweep(self):
 		"""An unreadable gateway must not be answered with a blind delete."""
@@ -157,6 +193,7 @@ class TestAutoTitleReclaim(FrappeTestCase):
 		title_text = self._generate(sess)
 
 		sess.delete_session.assert_called_once_with(SKEY)
+		self.assertEqual(sess.is_run_active.call_count, 2, "the delete must wait for the idle probe")
 		self.assertEqual(title_text, "A Nice Title")
 
 	def test_failed_title_turn_does_not_delete_a_live_session(self):
@@ -210,6 +247,23 @@ class TestPatternPolishReclaim(FrappeTestCase):
 		self._run(sess)
 
 		sess.delete_session.assert_called_once_with(SKEY)
+		self.assertEqual(sess.is_run_active.call_count, 2, "the delete must wait for the idle probe")
+
+	def test_failed_polish_turn_does_not_delete_a_live_session(self):
+		"""polish's finally has title's exact shape and its exact bug history,
+		so it gets title's raise-path test too."""
+		from jarvis.exceptions import OpenclawUnreachableError
+
+		sess = _stub_pool_session(
+			active_probes=True,
+			raises=OpenclawUnreachableError("agent turn timed out before lifecycle end"),
+		)
+
+		with patch("jarvis.learning.polish.frappe.log_error"):
+			text = self._run(sess)
+
+		sess.delete_session.assert_not_called()
+		self.assertEqual(text, "", "a failed polish turn still falls back to the template text")
 
 
 class TestPrewarmReclaim(FrappeTestCase):
@@ -243,6 +297,7 @@ class TestPrewarmReclaim(FrappeTestCase):
 			prewarm._reclaim_previous(sess, "sk_previous", "sk_current")
 
 		sess.delete_session.assert_called_once_with("sk_previous")
+		sess.is_run_active.assert_called_once_with("sk_previous")
 
 	def test_own_session_is_never_reclaimed(self):
 		from jarvis.chat import prewarm
