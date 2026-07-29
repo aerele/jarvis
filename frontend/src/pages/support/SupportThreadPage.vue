@@ -458,9 +458,17 @@ async function send() {
 		// Whether the draft was cleanly cleared (the user didn't retype mid-send) —
 		// gates both the reference-safe clear and the reply-box collapse below.
 		let cleared = false;
+		// The reply's Communication name — attaching the files to it (below) is what makes
+		// Helpdesk render them inline; a ticket-level File only shows in the sidebar. Hoisted
+		// out of the `if (body)` block so the upload can thread it through.
+		let replyComm = "";
 		if (body) {
 			const ok = await store.reply(tName, body);
 			if (!ok) return; // store already toasted; keep the draft so it isn't lost
+			// store.reply returns the new Communication's name on success, or `true` when the CP
+			// didn't echo one (older CP). Keep only a real string id to thread to the upload —
+			// `true` would post a bogus comm the CP would reject.
+			if (typeof ok === "string") replyComm = ok;
 			// I2: only clear if the editor STILL holds exactly what was at send-start
 			// — a blanket clear would wipe text the user kept typing during the
 			// in-flight reply. The raw-snapshot compare makes this safe for the
@@ -481,7 +489,11 @@ async function send() {
 			// send must not be uploaded (Helpdesk has no un-attach).
 			const live = staged.filter((f) => files.value.includes(f));
 			if (live.length) {
-				const uploaded = await store.uploadTo(tName, live);
+				// Thread the reply's Communication so each File attaches to it and renders inline.
+				// replyComm is "" when there was no reply (never reached here — a files-only send
+				// posts a synthesized reply) or when the CP didn't echo one; supportUpload then
+				// omits the field and the File attaches to the ticket, as before.
+				const uploaded = await store.uploadTo(tName, live, replyComm);
 				settleUpload(uploaded);
 			}
 		}

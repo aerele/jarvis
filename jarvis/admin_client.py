@@ -549,8 +549,18 @@ def support_awaiting_count(*, requesting_user: str, scope: str) -> dict:
 	)
 
 
-def support_upload(*, ticket: str, filename: str, content_b64: str, requesting_user: str, scope: str) -> dict:
+def support_upload(
+	*,
+	ticket: str,
+	filename: str,
+	content_b64: str,
+	requesting_user: str,
+	scope: str,
+	comm: str | None = None,
+) -> dict:
 	# Bytes ride b64-in-JSON (the CP media.upload decodes) -> plain _post, no binary helper.
+	# comm (optional): the reply Communication to attach the File to so it renders inline; the CP
+	# re-checks it belongs to the ticket before honoring it.
 	return _post(
 		path=_m("support.media.upload"),
 		body={
@@ -559,6 +569,7 @@ def support_upload(*, ticket: str, filename: str, content_b64: str, requesting_u
 			"content_b64": content_b64,
 			"requesting_user": requesting_user,
 			"scope": scope,
+			"comm": comm,
 		},
 		timeout_s=DEFAULT_TIMEOUT_S,
 	)
