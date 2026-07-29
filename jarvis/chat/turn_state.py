@@ -1259,10 +1259,13 @@ def lease_acquire(target: str, holder: str, hop_counter: int | None = None) -> t
 	params = {"t": target, "h": holder, "exp": exp, "now": now}
 	if hop_counter is not None:
 		params["hop"] = hop_counter
+	# GAP 3: stamp loop_heartbeat_ts=now on the winning acquire so a freshly revived
+	# hop starts with a FRESH progress stamp and is never force-expired as "wedged"
+	# before its first drain slice (the takeover kill-loop guard; see _progress_stale).
 	won = (
 		_run_cas(
 			f"""UPDATE `tab{PUMP}`
-			SET pump_epoch=pump_epoch+1, lease_holder=%(h)s, lease_expires_at=%(exp)s{hop_set}
+			SET pump_epoch=pump_epoch+1, lease_holder=%(h)s, lease_expires_at=%(exp)s, loop_heartbeat_ts=%(now)s{hop_set}
 			WHERE relay_target_id=%(t)s
 			  AND (lease_expires_at IS NULL OR lease_expires_at < %(now)s)""",
 			params,
@@ -1365,6 +1368,19 @@ def lease_heartbeat(target: str, epoch: int) -> bool:
 	)
 	frappe.db.commit()
 	return won
+
+
+def _progress_stale(loop_heartbeat_ts, threshold_s: int, now=None) -> bool:
+	"""True iff a live-lease pump has made no PROGRESS for > ``threshold_s`` (GAP 3).
+	A NULL / empty stamp is FRESH (never stale): a control row that never heartbeated,
+	or a lease just acquired before its first progress write, must never be
+	force-expired — that is the takeover kill-loop guard. ``now`` is injectable for
+	tests (defaults to the current time)."""
+	if not loop_heartbeat_ts:
+		return False
+	now_dt = frappe.utils.get_datetime(now or _now())
+	age = (now_dt - frappe.utils.get_datetime(loop_heartbeat_ts)).total_seconds()
+	return age > threshold_s
 
 
 def lease_release_if_idle(target: str, epoch: int) -> bool:

@@ -537,6 +537,30 @@ class TestFencingTimelines(_TurnStateTestCase):
 		frappe.db.commit()
 		self.assertEqual(self._state("ts_d4a"), "finalizing")
 
+	def test_a1_acquire_stamps_progress_heartbeat(self):
+		"""A1 (GAP 3): lease_acquire stamps ``loop_heartbeat_ts`` on the winning
+		acquire, so a freshly-revived hop is never seen as progress-stale — the
+		force-takeover kill-loop guard. A fresh control row has no stamp yet."""
+		ts._ensure_control_row(self._target)
+		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", None, update_modified=False)
+		frappe.db.commit()
+		self.assertIsNone(frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts"))
+		won, _ = ts.lease_acquire(self._target, "hop-a1")
+		self.assertTrue(won)
+		self.assertIsNotNone(
+			frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts"),
+			"acquire must stamp the progress heartbeat",
+		)
+
+	def test_a1_progress_stale_null_is_fresh(self):
+		"""A1 (GAP 3): a NULL progress stamp is FRESH (never stale) — a lease just
+		acquired before its first progress write must never be force-expired."""
+		self.assertFalse(ts._progress_stale(None, 60), "NULL stamp is fresh")
+		old = frappe.utils.add_to_date(None, seconds=-120)
+		self.assertTrue(ts._progress_stale(old, 60), "120s-old stamp is stale past a 60s threshold")
+		recent = frappe.utils.add_to_date(None, seconds=-10)
+		self.assertFalse(ts._progress_stale(recent, 60), "10s-old stamp is fresh under a 60s threshold")
+
 	def test_d4c_delayed_old_writer_stale_after_takeover(self):
 		"""D4 (c): P_old streaming at epoch E stalls; P_new takes over
 		(lease_acquire bumps epoch to E+1 and RE-STAMPS the turn); P_old's cached-E
