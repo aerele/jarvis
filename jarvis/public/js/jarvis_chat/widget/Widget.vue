@@ -28,7 +28,13 @@
 			<!-- Grip dots: the drag affordance. design.md 1.3 forbids hover
 			     motion, so this fades in on OPACITY alone — nothing moves. -->
 			<span class="jvw-grip" aria-hidden="true"><i></i><i></i><i></i></span>
-			<img v-if="brandLogoUrl" :src="brandLogoUrl" class="jvw-fab-img" alt="" />
+			<img
+				v-if="brandLogoUrl"
+				:src="brandLogoUrl"
+				class="jvw-fab-img"
+				alt=""
+				draggable="false"
+			/>
 			<svg v-else viewBox="0 0 24 24" width="24" height="24" fill="#fff">
 				<path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z" />
 			</svg>
@@ -388,13 +394,19 @@ onBeforeUnmount(() => {
 	object-fit: cover;
 	border-radius: inherit;
 	display: block;
+	/* The launcher is dragged with pointer events; without this the browser
+	   also starts its own image drag and trails a ghost of the logo. */
+	-webkit-user-drag: none;
+	user-select: none;
 }
 .jvw-fab:hover {
 	filter: brightness(1.06);
 }
 .jvw-fab:focus-visible {
-	outline: 2px solid var(--accent);
-	outline-offset: 3px;
+	/* A ring that HUGS the rounded tile. outline + outline-offset drew a
+	   detached square that looked misaligned against a full-bleed logo. */
+	outline: none;
+	box-shadow: 0 10px 26px -6px rgba(106, 86, 232, 0.55), 0 0 0 2px #fff, 0 0 0 4px var(--accent);
 }
 .jvw-fab--snapping {
 	transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease;
