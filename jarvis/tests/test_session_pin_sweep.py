@@ -56,7 +56,7 @@ def _page(rows, *, defaults=None, has_more=False, next_offset=None):
 def _fake_sess(*pages):
 	sess = MagicMock()
 	sess.list_sessions_page.side_effect = list(pages)
-	sess.clear_session_model.return_value = None
+	sess.clear_session_model.return_value = {}
 	return sess
 
 
@@ -130,10 +130,15 @@ class TestSessionPinSweep(FrappeTestCase):
 		self.assertEqual(summary.plan, [])
 		self.assertEqual(summary.scanned, 1)
 
-	def test_bench_throwaway_orphan_is_cleared(self):
+	def test_bench_throwaway_is_skipped(self):
+		# Single-use and reaped by session_lifecycle within the hour; patching one
+		# would only bump the updatedAt that reaper grades on.
 		key = "agent:main:dashboard:pin-title"
 		row = _row(key, provider="openai_compat-0", model="jarvis-pool", label="jarvis-title-abc123")
-		self.assertEqual(self._verbs(self._sweep(_fake_sess(_page([row])))), {key: CLEAR})
+		sess = _fake_sess(_page([row]))
+		summary = self._sweep(sess, apply=True)
+		self.assertEqual(self._verbs(summary), {key: SKIP})
+		sess.clear_session_model.assert_not_called()
 
 	def test_agent_main_and_heartbeat_are_cleared(self):
 		rows = [
@@ -209,6 +214,18 @@ class TestSessionPinSweep(FrappeTestCase):
 		self.assertEqual(summary.capped, 1)
 		self.assertEqual(sess.clear_session_model.call_count, 2)
 
+	def test_a_surviving_override_counts_as_an_error(self):
+		key = "agent:main:dashboard:pin-stuck"
+		self._conv(key, model_override="")
+		sess = _fake_sess(_page([_row(key, provider="openai_compat-0", model="jarvis-pool")]))
+		sess.clear_session_model.return_value = {
+			"modelOverride": "jarvis-pool",
+			"modelOverrideSource": "user",
+		}
+		summary = self._sweep(sess, apply=True)
+		self.assertEqual(summary.cleared, 0)
+		self.assertEqual(summary.errors, 1)
+
 	def test_one_failed_clear_does_not_stop_the_sweep(self):
 		keys = []
 		for i in range(2):
@@ -217,7 +234,7 @@ class TestSessionPinSweep(FrappeTestCase):
 			keys.append(key)
 		rows = [_row(k, provider="openai_compat-0", model="jarvis-pool") for k in keys]
 		sess = _fake_sess(_page(rows))
-		sess.clear_session_model.side_effect = [RuntimeError("nope"), None]
+		sess.clear_session_model.side_effect = [RuntimeError("nope"), {}]
 		summary = self._sweep(sess, apply=True)
 		self.assertEqual(summary.cleared, 1)
 		self.assertEqual(summary.errors, 1)

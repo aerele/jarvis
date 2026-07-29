@@ -39,17 +39,40 @@ REMEDY, PER CLASS.
     DIFFERENT model            -> REPORT. Bench and container disagree; the next
                                  turn re-patches the session from the row, so
                                  clearing here would only fight it.
-  * no conversation, bench
-    label (title/prewarm/
-    polish) or the agent's own
-    main/heartbeat session     -> CLEAR. Never a customer pick.
-  * no conversation, unknown
-    label                      -> REPORT, never touch. Unattributable.
+  * openclaw's own
+    agent:<id>:main[:heartbeat] -> CLEAR. The built-in poller resumes it on every
+                                 tick, so a pin there fails forever, and it is
+                                 never a customer pick.
+  * a bench throwaway
+    (title / prewarm / polish) -> SKIP. Single-use and reaped within the hour by
+                                 session_lifecycle; touching it would only bump
+                                 the updatedAt that reaper grades on.
+  * anything else with no
+    conversation               -> REPORT, never touch. Unattributable.
+
+WHAT "PINNED" MEANS HERE, HONESTLY. A sessions.list row carries the RESOLVED
+model, never the raw override, and the gateway puts no override field on the wire
+at all - so "resolves to something other than the agent default" is the only
+signal available, and it is exactly the one openclaw's own control UI uses. It
+cannot separate a live override from a STALE RUNTIME RECORD: a session that once
+ran under an earlier render keeps that render's provider in entry.model long
+after the override is gone. Measured on jarvis-pool-bf4097 (2026-07-29): 6
+conversation sessions resolved away from the default, of which 3 held a real
+override and 3 only the stale record.
+
+That is acceptable because the clear is an ASSERTION, not a repair, and it is
+idempotent. On a session with a real override it deletes the override; on one
+with only a stale record it deletes that record (which names a provider the
+container no longer has) and nothing else changes. The cost of a false positive
+is a telemetry reset - entry.model / contextTokens recomputed on the next turn -
+never a behaviour change. Excluding the throwaways keeps that cost off the only
+population where a bumped updatedAt would matter.
 
 Clearing goes through ``sessions.patch {"model": null}`` rather than an edit of
 ``sessions.json`` on disk: the gateway keeps the store in memory and rewrites it
 on every session update, so a host-side edit either loses the race or needs the
-container stopped. See ``OpenclawSession.clear_session_model``.
+container stopped. The patch response echoes the resulting store entry, so every
+clear is verified rather than trusted. See ``OpenclawSession.clear_session_model``.
 
 DRY RUN IS THE DEFAULT. ``run()`` only reports; ``run(apply=True)`` clears, up to
 ``MAX_CLEAR`` pins per invocation::
@@ -91,7 +114,6 @@ _BENCH_LABEL_PREFIXES = ("jarvis-prewarm-", "jarvis-title-", "jarvis-polish-")
 # openclaw's own per-agent session: "agent:<id>:main" and its ":heartbeat"
 # sibling. The heartbeat resumes on every tick, so a pin there fails forever.
 _AGENT_MAIN_PREFIX = "agent:"
-_AGENT_MAIN_SEGMENT = ":main"
 
 
 @dataclass(frozen=True)
@@ -254,8 +276,12 @@ class SessionPinSweep:
 
 		conv = owners.get(key)
 		if conv is None:
-			if label.startswith(_BENCH_LABEL_PREFIXES) or _is_agent_main_key(key):
-				return PinPlan(key, CLEAR, "bench-owned session, never a customer pick", pinned, label)
+			if _is_agent_main_key(key):
+				return PinPlan(
+					key, CLEAR, "openclaw's own main session, never a customer pick", pinned, label
+				)
+			if label.startswith(_BENCH_LABEL_PREFIXES):
+				return PinPlan(key, SKIP, "bench throwaway; session_lifecycle reaps it", pinned, label)
 			return PinPlan(key, REPORT, "no conversation owns this session", pinned, label)
 
 		chosen = (conv.get("model_override") or "").strip()
@@ -282,11 +308,21 @@ class SessionPinSweep:
 				summary.capped += 1
 				continue
 			try:
-				self._sess.clear_session_model(item.key)
+				entry = self._sess.clear_session_model(item.key) or {}
 			except Exception:
 				frappe.log_error(
 					title="session_pin_sweep: clear failed",
 					message=f"session_key={item.key}\n{frappe.get_traceback()}",
+				)
+				summary.errors += 1
+				continue
+			# The patch echoes the resulting store entry: verify rather than
+			# trust the ack. A surviving override means openclaw took a branch
+			# we did not expect, and the operator needs to know before re-running.
+			if entry.get("modelOverride") or entry.get("modelOverrideSource"):
+				frappe.log_error(
+					title="session_pin_sweep: override survived the patch",
+					message=f"session_key={item.key}\nentry={entry}",
 				)
 				summary.errors += 1
 				continue

@@ -696,7 +696,7 @@ class OpenclawSession:
 		session_key: str,
 		*,
 		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
-	) -> None:
+	) -> dict:
 		"""Drop the session's model override so the agent's configured default -
 		and, crucially, its ``model.fallbacks`` chain - applies again.
 
@@ -708,14 +708,18 @@ class OpenclawSession:
 		``sessions.json`` on disk instead would race that writer: the gateway
 		holds the store in memory and rewrites it on every session update.
 
+		Returns the gateway's post-patch store entry (``payload.entry``) so the
+		caller can VERIFY the override is gone instead of trusting the ack.
+
 		NEVER call this for a key the gateway did not just report. Patching an
 		ABSENT key does not fail - openclaw creates the entry, mints a fresh
 		sessionId and drops the label."""
-		self._request(
+		res = self._request(
 			"sessions.patch",
 			{"key": session_key, "model": None},
 			timeout_s=timeout_s,
 		)
+		return (res.get("payload") or {}).get("entry") or {}
 
 	def delete_session(
 		self,
