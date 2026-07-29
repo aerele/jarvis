@@ -11,8 +11,13 @@ export function deriveMode(models, preset) {
 				m.credentialType === "subscription" ||
 				m.credential_type === "subscription")
 	);
-	if (hasSubscription) return "proxy";
-	return list.length <= 1 && !preset ? "direct" : "proxy";
+	// A preset is picked from a curated ladder that always resolves through the
+	// proxy path, so it stays "proxy" independent of model count. Otherwise mode
+	// mirrors the backend's compute_proxy_active: a proxy sidecar is only
+	// deployed for a subscription model, so a pool of any size that is purely
+	// BYO api keys is "direct" - it renders openclaw-direct with no sidecar.
+	// (was: any 2+-model pool counted as "proxy" regardless of credential type)
+	return hasSubscription || preset ? "proxy" : "direct";
 }
 export function uniqueVendors(entry) {
 	if (entry && Array.isArray(entry.vendors) && entry.vendors.length)
