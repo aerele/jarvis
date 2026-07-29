@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import api_errors, error_push
+from jarvis import admin_client, api_errors, error_push, selfhost
 
 DT = api_errors.DT
 USER = "apierr-user@example.com"
@@ -304,24 +304,24 @@ class TestErrorLogReader(ApiErrorsBase):
 class TestPushSelfGates(ApiErrorsBase):
 	def test_skips_when_self_hosted(self):
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=True),
-			patch("jarvis.admin_client.push_error_rollup") as push,
+			patch.object(selfhost, "is_self_hosted", return_value=True),
+			patch.object(admin_client, "push_error_rollup") as push,
 		):
 			error_push.push_error_rollup()
 		push.assert_not_called()
 
 	def test_skips_when_admin_unconfigured(self):
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
-			patch("jarvis.error_push._admin_configured", return_value=False),
-			patch("jarvis.admin_client.push_error_rollup") as push,
+			patch.object(selfhost, "is_self_hosted", return_value=False),
+			patch.object(error_push, "_admin_configured", return_value=False),
+			patch.object(admin_client, "push_error_rollup") as push,
 		):
 			error_push.push_error_rollup()
 		push.assert_not_called()
 
 	def test_never_raises(self):
 		with (
-			patch("jarvis.selfhost.is_self_hosted", side_effect=RuntimeError("boom")),
+			patch.object(selfhost, "is_self_hosted", side_effect=RuntimeError("boom")),
 		):
 			# Must swallow and log, not propagate.
 			error_push.push_error_rollup()
@@ -339,9 +339,9 @@ class TestPushClaimConfirm(ApiErrorsBase):
 		"""Run push_error_rollup with the admin push replaced by ``push_impl``
 		(a Mock or a plain callable)."""
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
-			patch("jarvis.error_push._admin_configured", return_value=True),
-			patch("jarvis.admin_client.push_error_rollup", push_impl),
+			patch.object(selfhost, "is_self_hosted", return_value=False),
+			patch.object(error_push, "_admin_configured", return_value=True),
+			patch.object(admin_client, "push_error_rollup", push_impl),
 		):
 			error_push.push_error_rollup()
 
