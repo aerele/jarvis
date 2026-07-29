@@ -125,7 +125,12 @@ def is_ready_for_chat() -> dict:
 	- ``"llm_credentials"`` - signup done, but LLM creds for the active
 	  auth mode are missing. api_key mode needs llm_api_key + llm_provider +
 	  llm_model; subscription / oauth modes need llm_oauth_connected_at
-	  (the timestamp set when the oauth grant completes).
+	  (the timestamp set when the oauth grant completes). Soft: banner, not
+	  the wizard gate — the workspace was established and stays reachable.
+	- ``"llm_setup"`` - creds missing AND this workspace never completed
+	  onboarding: no LLM config ever confirmed and the subscription never
+	  went Active (e.g. a failed-payment signup). Hard: routes back to the
+	  wizard — chat cannot work and there is no history to protect.
 	- ``"llm_pool_provisioning"`` - a pool is configured (pool mode) but
 	  no sync has ever applied it to the container (first sync pending or
 	  failed).
@@ -195,7 +200,7 @@ def is_ready_for_chat() -> dict:
 		provider = (getattr(settings, "llm_provider", "") or "").strip()
 		model = (getattr(settings, "llm_model", "") or "").strip()
 		if not (llm_key and provider and model):
-			return {"ready": False, "reason": "llm_credentials"}
+			return _llm_missing_verdict(settings)
 		# Local key/provider/model presence is config INTENT (committed at save,
 		# before the async admin apply runs) — it does NOT prove the container ever
 		# received the creds. Gate on evidence of a CONFIRMED apply instead
@@ -213,12 +218,50 @@ def is_ready_for_chat() -> dict:
 		# set (read-only) when the oauth grant completes and the admin
 		# pushes the auth-profile blob to the container.
 		if not getattr(settings, "llm_oauth_connected_at", None):
-			return {"ready": False, "reason": "llm_credentials"}
+			return _llm_missing_verdict(settings)
 	else:
 		# Unknown auth_mode - treat as misconfigured; the wizard owns it.
 		return {"ready": False, "reason": "llm_credentials"}
 
 	return _admin_chat_gate()
+
+
+def _llm_missing_verdict(settings) -> dict:
+	"""LLM creds absent for the active mode: wizard or banner?
+
+	An ESTABLISHED workspace gets the soft ``llm_credentials`` banner — any LLM
+	config ever confirmed (a synced/connected marker survives creds expiry), or
+	an Active subscription (the workspace-reset "disconnect AI model
+	connections" option clears every marker; its owner reconnects via
+	Settings -> AI models, and the wizard would dead-end them at signup's
+	duplicate guard). Never lock such a workspace away from chat + history over
+	a recoverable credential problem.
+
+	A workspace that has NEVER had a working LLM and whose subscription never
+	went Active is still MID-ONBOARDING (e.g. a failed-payment signup, refresh):
+	``llm_setup`` hard-gates back to the wizard — chat cannot work there, and
+	the half-created signup resumes via start_signup's authenticated fallback.
+	Subscription state comes from admin; fail OPEN to the soft banner when it
+	is unknown/unreachable."""
+	never_synced = not (
+		getattr(settings, "llm_direct_synced_at", None)
+		or getattr(settings, "llm_pool_synced_at", None)
+		or getattr(settings, "llm_oauth_connected_at", None)
+	)
+	if not never_synced:
+		return {"ready": False, "reason": "llm_credentials"}
+	try:
+		from jarvis import admin_client
+
+		sub_status = (admin_client.get_connection(timeout_s=8) or {}).get("subscription_status") or ""
+	except Exception:
+		sub_status = ""
+	# Hard-gate ONLY the never-paid shapes. Active is established (the revoke
+	# case); Suspended/Cancelled stay SOFT too — the renew/suspension banner
+	# path owns them, and the wizard would dead-end them at the dedup guard.
+	if sub_status in ("none", "Pending Payment", "Pending Verification"):
+		return {"ready": False, "reason": "llm_setup"}
+	return {"ready": False, "reason": "llm_credentials"}
 
 
 @frappe.whitelist()

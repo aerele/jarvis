@@ -296,3 +296,52 @@ class TestAdminChatGate(FrappeTestCase):
 		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Provisioning"}):
 			account._admin_chat_gate()
 		self.assertIsNone(frappe.cache().get_value(account._CHAT_GATE_CACHE_KEY))
+
+
+class TestLlmMissingVerdict(FrappeTestCase):
+	"""_llm_missing_verdict — the wizard-vs-banner split when LLM creds are
+	absent. Only a never-synced workspace whose subscription never went Active
+	hard-gates back to the wizard; everything else (and every failure mode)
+	stays on the soft banner."""
+
+	class _S:
+		llm_direct_synced_at = None
+		llm_pool_synced_at = None
+		llm_oauth_connected_at = None
+
+	def _verdict(self, settings, conn=None, raises=None):
+		kw = {"side_effect": raises} if raises else {"return_value": conn or {}}
+		with patch.object(admin_client, "get_connection", **kw) as gc:
+			out = account._llm_missing_verdict(settings)
+		return out, gc
+
+	def test_ever_synced_stays_soft_without_admin_call(self):
+		s = self._S()
+		s.llm_pool_synced_at = "2026-01-01 00:00:00"
+		out, gc = self._verdict(s)
+		self.assertEqual(out["reason"], "llm_credentials")
+		gc.assert_not_called()
+
+	def test_never_synced_pending_payment_hard_gates(self):
+		out, _ = self._verdict(self._S(), conn={"subscription_status": "Pending Payment"})
+		self.assertEqual(out["reason"], "llm_setup")
+
+	def test_never_synced_active_sub_stays_soft(self):
+		# The workspace-reset revoke option clears every marker on an Active
+		# customer — they reconnect via Settings, never the wizard.
+		out, _ = self._verdict(self._S(), conn={"subscription_status": "Active"})
+		self.assertEqual(out["reason"], "llm_credentials")
+
+	def test_suspended_sub_stays_soft(self):
+		# Suspended is an ESTABLISHED account — the renew banner owns it; the
+		# wizard would dead-end it at signup's duplicate guard.
+		out, _ = self._verdict(self._S(), conn={"subscription_status": "Suspended"})
+		self.assertEqual(out["reason"], "llm_credentials")
+
+	def test_admin_unreachable_fails_open_to_soft(self):
+		out, _ = self._verdict(self._S(), raises=RuntimeError("admin down"))
+		self.assertEqual(out["reason"], "llm_credentials")
+
+	def test_unknown_subscription_status_fails_open_to_soft(self):
+		out, _ = self._verdict(self._S(), conn={})
+		self.assertEqual(out["reason"], "llm_credentials")

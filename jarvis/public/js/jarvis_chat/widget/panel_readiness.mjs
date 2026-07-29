@@ -28,9 +28,13 @@
 // Whichever way it is fixed, fix frontend/src/onboarding/readiness.js in the
 // same change: divergence between these two files is exactly the bug this
 // module exists to close.
+// "llm_setup" is the server-decided HARD variant of llm_credentials (creds
+// missing + nothing ever synced + subscription never Active): a half-finished
+// signup, where chat cannot work at all.
 const NOT_ONBOARDED_REASONS = new Set([
   "signup",
   "selfhost_connection",
+  "llm_setup",
   "llm_pool_provisioning",
   "llm_provisioning",
 ]);
