@@ -96,6 +96,11 @@ SOFT_HOP_BUDGET_S = 90
 HARD_HOP_DEADLINE_S = 120
 HOP_TIMEOUT_S = 180
 
+# GAP 3: a pump that keeps its lease alive but makes no PROGRESS (loop_heartbeat_ts;
+# turn_state._progress_stale) for this long is WEDGED — the watchdog force-takes it
+# over. 2x the soft hop budget: a healthy pump advances progress well within one hop.
+PROGRESS_STALE_S = 2 * SOFT_HOP_BUDGET_S
+
 # Loop heartbeat + lease renew cadence (distinct signals, Amendment E). Both are
 # written at most this often (a slice is ~sub-second, so we gate them).
 HEARTBEAT_INTERVAL_S = 10
@@ -2969,7 +2974,16 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 	the pump configured (watchdog still drains in-flight rows to terminal) and only
 	then ``-> disabled``."""
 	deps = deps or _default_deps()
-	summary = {"aged_out": 0, "reclaimed": 0, "parked": 0, "finalize_requeued": 0, "errored": 0, "revived": 0}
+	summary = {
+		"aged_out": 0,
+		"reclaimed": 0,
+		"parked": 0,
+		"finalize_requeued": 0,
+		"errored": 0,
+		"revived": 0,
+		"wedged_detected": 0,
+		"forced_expired": 0,
+	}
 	# CDX-21 (Residual A): the config key is site-wide, so reconcile the operator mirror FROM the
 	# authoritative default control row EVERY cycle, OUTSIDE the open-work target loop — an IDLE
 	# site whose mirror diverged (a failed command mirror write) otherwise stays divergent
@@ -3007,6 +3021,49 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 			frappe.db.rollback()
 			frappe.log_error(title="pump.watchdog", message=frappe.get_traceback())
 	return summary
+
+
+_WEDGED_LOG_TTL_S = 3600
+
+
+def _force_takeover_enabled() -> bool:
+	"""GAP 3 A5 rollback rung: force-takeover of a wedged pump is OFF by default
+	(detect + log only, A4a) until the false-positive rate is measured in prod; set
+	site_config ``jarvis_pump_force_takeover`` truthy to enable (A4b)."""
+	return bool(frappe.conf.get("jarvis_pump_force_takeover"))
+
+
+def _pump_wedged(target: str, now: str) -> int | None:
+	"""GAP 3 A4: is this shard's pump WEDGED — lease LIVE but no PROGRESS for
+	``PROGRESS_STALE_S``? Returns the wedged pump's epoch (for ``force_expire_wedged``)
+	or None. A live lease is precisely what makes ``ensure_pump`` refuse to revive (it
+	looks alive), so a wedge is invisible without this check; ``_progress_stale`` treats
+	a NULL / recent stamp as fresh, so a just-acquired (A1 stamps on acquire) or healthy
+	pump is never flagged."""
+	row = frappe.db.get_value(
+		PUMP, target, ["pump_epoch", "lease_expires_at", "loop_heartbeat_ts"], as_dict=True
+	)
+	if not row or not row.get("lease_expires_at"):
+		return None
+	if frappe.utils.get_datetime(row["lease_expires_at"]) <= frappe.utils.get_datetime(now):
+		return None  # an expired lease is the normal revive path, not a wedge
+	if not ts._progress_stale(row.get("loop_heartbeat_ts"), PROGRESS_STALE_S, now):
+		return None
+	return int(row["pump_epoch"] or 0)
+
+
+def _log_wedged_throttled(target: str, epoch: int) -> None:
+	"""Log a wedged-but-live-lease detection at most once per hour per shard (so a
+	persistently-wedged shard cannot flood the Error Log every watchdog tick)."""
+	key = f"jarvis_pump_wedged_logged::{target}"
+	if frappe.cache().get_value(key):
+		return
+	frappe.cache().set_value(key, "1", expires_in_sec=_WEDGED_LOG_TTL_S)
+	frappe.log_error(
+		title="pump.wedged: lease-live but no progress",
+		message=f"target={target} epoch={epoch} stale>{PROGRESS_STALE_S}s "
+		f"force_takeover={'on' if _force_takeover_enabled() else 'off'}",
+	)
 
 
 def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
@@ -3126,6 +3183,18 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 		summary["finalize_requeued"] += 1
 
 	if live_work:
+		# GAP 3 A4: a wedged-but-lease-live pump (progress stale) is NOT revived by
+		# ensure_pump below — its lease looks live. Detect it; with the takeover flag
+		# ON (A4b) force-expire so ensure_pump can hand off to a fresh hop; otherwise
+		# just log for measurement (A4a). Fires at most once per shard per watchdog
+		# tick — the 5-min cadence is the natural rate limit (no separate cooldown).
+		wedged_epoch = _pump_wedged(target, now)
+		if wedged_epoch is not None:
+			summary["wedged_detected"] += 1
+			_log_wedged_throttled(target, wedged_epoch)
+			if _force_takeover_enabled() and ts.force_expire_wedged(target, wedged_epoch):
+				_clear_lease_mirror(target)
+				summary["forced_expired"] += 1
 		res = ensure_pump(target, deps=deps)
 		if res.get("enqueued"):
 			summary["revived"] += 1
