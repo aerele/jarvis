@@ -234,11 +234,15 @@ const hasConversation = computed(() => !!(ctx.value && ctx.value.conversationId)
 // the configured model, not "Auto". Everything else in this block (Provider,
 // Auth mode, Status) is workspace-level, so this row now matches them.
 // Non-admins have no connStatus and keep the conversation label as before.
-const modelLabel = computed(
-	() =>
-		(connStatus.value && connStatus.value.default_model) ||
-		(ctx.value && ctx.value.modelLabel) ||
-		"Auto"
+// A disconnected workspace has no model, and the "Auto" fallback below would
+// claim one - it is a placeholder for "the conversation did not name a model",
+// which is a different thing from "there is no model".
+const modelLabel = computed(() =>
+	disconnected.value
+		? "—"
+		: (connStatus.value && connStatus.value.default_model) ||
+		  (ctx.value && ctx.value.modelLabel) ||
+		  "Auto"
 );
 const ui = computed(() => (ctx.value && ctx.value.ui) || {});
 const convAutoApply = computed(() => !!(ctx.value && ctx.value.convAutoApply));
@@ -285,17 +289,25 @@ const expiresLabel = computed(() => {
 const connected = computed(() =>
 	isSM ? !!(connStatus.value && isProxy.value && connStatus.value.auth_present) : true
 );
+// No model configured at all: the workspace was disconnected (or never
+// connected). Checked BEFORE isProxy below for the same reason the server
+// computes it before its own DIRECT short-circuit: a disconnected tenant is
+// proxy_active:false, so without this it would read as a healthy "Direct".
+const disconnected = computed(() => !!(connStatus.value && connStatus.value.disconnected));
 const statusLabel = computed(() => {
 	if (!isSM) return "Connected";
 	if (!connStatus.value) return "—";
+	if (disconnected.value) return "Disconnected";
 	if (!isProxy.value) return "Direct";
 	return connected.value ? "Connected" : "Not connected";
 });
 // design.md §3.8 status map: connected is green, a plain direct tenant is
-// neutral, an actual failure is red.
+// neutral, an actual failure is red. Disconnected is orange (warning), not red:
+// nothing is broken, the customer chose this and can undo it in AI models.
 const statusTheme = computed(() => {
 	if (!isSM) return "green";
 	if (!connStatus.value) return "gray";
+	if (disconnected.value) return "orange";
 	if (!isProxy.value) return "gray";
 	return connected.value ? "green" : "red";
 });

@@ -923,6 +923,30 @@ def post_subscription_disconnect() -> dict:
 	)
 
 
+def post_disconnect_llm() -> dict:
+	"""POST to admin to delete EVERY LLM credential from the customer's container:
+	the pool spec and its sidecar keys, /secrets/llm.key, and any auth profile.
+
+	Wider than post_subscription_disconnect above, which only drops the DIRECT
+	chat-subscription auth profile and leaves an api-key pool serving. This is the
+	whole connection coming down, so nothing is left that could answer a turn.
+
+	Idempotent - a tenant with nothing configured is a no-op success, so a repeat
+	call (or a retry after a read timeout) is safe.
+
+	Rides the shared DEFAULT_TIMEOUT_S like post_update_llm_pool: admin re-renders
+	the tenant config and restarts the container on this path too, which sits above
+	the admin's own admin->agent budget.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError
+	"""
+	return _post(
+		path=_m("api.tenant.disconnect_llm"),
+		body={},
+	)
+
+
 # --------------------------------------------------------------------------- #
 # Workspace reset proxies. The customer bench forwards to the control plane,
 # which re-derives the customer from the api_key. ``_post`` already unwraps the

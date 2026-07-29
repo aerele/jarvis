@@ -7,8 +7,10 @@ import { isOnboardComplete } from "@/onboarding/steps.js";
 // poster when the workspace was NEVER set up). Sharing one in-flight promise
 // keeps it to a SINGLE backend round-trip.
 //
-// No cache-reset helper is needed: OnboardingView hard-reloads to /jarvis/ on
-// completion, which re-mounts the SPA and drops this module-level cache.
+// OnboardingView hard-reloads to /jarvis/ on completion, which re-mounts the SPA
+// and drops this cache; that covers the wizard. It does NOT cover changes made
+// in-app, which is why forgetReady() below exists: connecting or disconnecting a
+// model from the settings dialog changes this verdict without leaving the page.
 let readyPromise = null;
 
 // Fail-open: if the backend check THROWS, treat the workspace as ready so a
@@ -19,6 +21,13 @@ export function checkReady() {
 		readyPromise = isReadyForChat().catch(() => ({ ready: true }));
 	}
 	return readyPromise;
+}
+
+// Drop the memoized verdict so the NEXT checkReady() asks the backend again.
+// Deliberately not a re-fetch: the callers that care re-read straight afterwards,
+// and a caller that does not must not pay for a round-trip it never reads.
+export function forgetReady() {
+	readyPromise = null;
 }
 
 // Resolves true once the workspace is chat-ready. Used by the router guard.
@@ -75,21 +84,41 @@ export async function billingNoticeOf() {
 // wants "what do I tell the customer" never has to know the raw {ready, reason,
 // detail} shape checkReady() resolves to.
 //
-// Scoped to container_provisioning + llm_credentials: "subscription_suspended" has
-// its own dedicated copy (suspensionNotice/SUSPENDED_FALLBACK in steps.js) with a
-// Renew call to action, which is wrong for these reasons (nothing to renew via US
-// when the customer's OWN LLM account merely ran out of quota) - a caller must not
+// Scoped to container_provisioning ALONE: "subscription_suspended" has its own
+// dedicated copy (suspensionNotice/SUSPENDED_FALLBACK in steps.js) with a Renew
+// call to action, which is wrong for this reason (nothing to renew via US when
+// the customer's OWN LLM account merely ran out of quota) - a caller must not
 // paint this detail into that banner's "Chat is paused" framing.
 //
-// "llm_credentials" (no key/model configured, or creds revoked — e.g. after a
-// workspace reset with "disconnect AI model connections") has no backend detail,
-// so it gets a fixed actionable sentence; without it the chat renders NO hint at
-// all and a send just queues against the stub LLM.
+// "llm_credentials" is deliberately NOT handled here, and re-adding it is a
+// REGRESSION (pinned by readiness.spec.js). It used to return a fixed sentence
+// as a stopgap, from before needsLlmConnection() and the "No AI connected"
+// banner existed. Two accessors firing for one reason meant the caller rendered
+// two banners for the same state, and the generic CTA-less one won the v-else-if
+// race in ChatView - so the customer whose AI is disconnected got "Chat may not
+// work yet" with no way back to the AI models pane, which is the exact case the
+// dedicated banner was built for. One reason, one accessor: this one answers
+// "what did the backend say", needsLlmConnection() below answers "is there an
+// AI attached at all".
 export async function readinessDetailOf() {
 	const r = await checkReady();
 	if (!r || r.ready) return "";
 	if (r.reason === "container_provisioning") return r.detail || "";
-	if (r.reason === "llm_credentials")
-		return "No AI model is connected. Connect one in Settings → AI models to start chatting.";
 	return "";
+}
+
+// True when the workspace is not chat-ready specifically because it has no usable
+// LLM credential - the customer disconnected their AI, or the credential the
+// workspace was using expired or was revoked. A sibling accessor rather than a
+// widening of readinessDetailOf above, because that one answers "what did the
+// backend say about this" and is_ready_for_chat sends no `detail` for this reason:
+// there is nothing to quote, only a state to name.
+//
+// This deliberately does NOT belong in NOT_ONBOARDED_REASONS (see the comment
+// there). The full-screen gate poster is for a workspace that was never set up;
+// this one HAS been set up and merely has no AI attached right now, so it keeps its
+// chat history, its settings and every other route, and gets a banner instead.
+export async function needsLlmConnection() {
+	const r = await checkReady();
+	return !!(r && !r.ready && r.reason === "llm_credentials");
 }

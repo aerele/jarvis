@@ -251,12 +251,30 @@ def get_llm_connection_status() -> dict:
 	single-model direct tenants already hit this path: the raw admin payload's
 	leftover fields (a stale/default default_model with auth_profile_present
 	false) made the SPA's ConnectionPane render a misleading orange "Not
-	connected" for a direct tenant whose chat verifiably works."""
+	connected" for a direct tenant whose chat verifiably works.
+
+	``disconnected`` is the third state, and it has to be computed FIRST. The
+	DIRECT short-circuit above returns before any admin round-trip, so a tenant
+	whose connection was torn down (jarvis.onboarding.disconnect_llm) would
+	otherwise fall into it and report a healthy-looking "Direct" while chat is
+	dead. It is derived here rather than added to ``chat_readiness``: that field
+	is a shared admin/bench contract with exactly four values, and the bench
+	already knows its own config is empty without asking anybody."""
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
+	if not _has_llm_config(settings):
+		return {
+			"proxy_active": False,
+			"disconnected": True,
+			"auth_present": False,
+			"oauth_expires_at": None,
+			"profile_ids": [],
+			"default_model": "",
+		}
 	if not getattr(settings, "proxy_active", 0):
 		return {
 			"proxy_active": False,
+			"disconnected": False,
 			"auth_present": False,
 			"oauth_expires_at": None,
 			"profile_ids": [],
@@ -266,11 +284,28 @@ def get_llm_connection_status() -> dict:
 	data = raw.get("data", raw) or {}
 	return {
 		"proxy_active": True,
+		"disconnected": False,
 		"auth_present": bool(data.get("auth_profile_present")),
 		"oauth_expires_at": data.get("openai_profile_expires_ms"),
 		"profile_ids": data.get("profile_ids", []),
 		"default_model": data.get("default_model", ""),
 	}
+
+
+def _has_llm_config(settings) -> bool:
+	"""True when this workspace still has an AI connection configured.
+
+	The flat llm_provider / llm_model pair is the mirror on_update keeps of
+	models[0], so it covers pool and direct tenants alike. models[] is checked
+	too because a table whose rows are all DISABLED leaves the mirror blank while
+	the credentials are still stored - that is a paused pool, not a disconnected
+	workspace, and it must not read as one. proxy_active is checked for the same
+	reason from the other direction: it is DERIVED from the config at save time
+	(compute_proxy_active) and reset to 0 whenever the config goes away, so a set
+	flag is by itself proof that a pool exists, whatever the mirrors say."""
+	provider = (settings.get("llm_provider") or "").strip()
+	model = (settings.get("llm_model") or "").strip()
+	return bool(provider or model or settings.get("models") or getattr(settings, "proxy_active", 0))
 
 
 @frappe.whitelist()

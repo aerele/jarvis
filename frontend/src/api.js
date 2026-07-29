@@ -218,6 +218,11 @@ export const saveLlmPool = (models, preset = null, routingMode = "failover") =>
 		preset: preset || "",
 		routing_mode: routingMode,
 	});
+// Tear the whole AI connection down: deletes every stored credential on the
+// bench (models[] rows + the legacy flat fields) and asks admin to delete them
+// from the workspace container. NOT "save an empty pool" - saveLlmPool refuses
+// an empty list on purpose. Idempotent. Returns { disconnected: true }.
+export const disconnectLlm = () => call("jarvis.onboarding.disconnect_llm");
 // Pre-save "Test" probe for ONE api-key model row (never persists, never
 // touches the fleet/container - see jarvis/llm_key_probe.py). args:
 // {provider, model, api_key, base_url}. Returns
