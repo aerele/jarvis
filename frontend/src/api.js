@@ -480,9 +480,13 @@ function _uploadErrorMessage(data, status) {
 	return `upload failed (${status})`;
 }
 
-export async function supportUpload(ticket, file) {
+export async function supportUpload(ticket, file, comm) {
 	const fd = new FormData();
 	fd.append("ticket", ticket);
+	// Attach to the reply Communication (when given) so Helpdesk renders the file inline; a
+	// ticket-level File only shows in the sidebar. Appended before the file, so the multipart
+	// scalar fields precede the binary part.
+	if (comm) fd.append("comm", comm);
 	fd.append("file", file, file.name);
 	const r = await fetch("/api/method/jarvis.support.media.upload", {
 		method: "POST",

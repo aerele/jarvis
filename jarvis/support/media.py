@@ -42,7 +42,10 @@ def download(ticket: str, file_url: str):
 
 
 @frappe.whitelist()
-def upload(ticket: str) -> dict:
+def upload(ticket: str, comm: str | None = None) -> dict:
+	# comm (optional): the reply Communication this upload belongs to. Frappe maps the multipart form
+	# field onto it, same as `ticket`. Forwarded to the CP, which attaches the File to that Communication
+	# (so it renders inline) after re-checking the comm belongs to the ticket.
 	scope = _scope()
 	f = frappe.request.files.get("file") if frappe.request else None
 	if not f:
@@ -62,5 +65,6 @@ def upload(ticket: str) -> dict:
 			content_b64=content_b64,
 			requesting_user=_requesting_user(),
 			scope=scope,
+			comm=comm,
 		),
 	}

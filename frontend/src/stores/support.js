@@ -159,8 +159,12 @@ async function createTicket(subject, body) {
 
 async function reply(name, body) {
 	try {
-		await supportReply(name, body);
-		return true;
+		const r = await supportReply(name, body);
+		// Return the new Communication's name so the caller can thread a files-only/attachment
+		// upload to it — attaching a File to the Communication is what makes it render inline.
+		// Fall back to `true` when the CP didn't echo one, so existing truthiness-checking
+		// callers (the `if (!ok) return` guard in send()) still read this as success.
+		return (r && r.data && r.data.comm) || true;
 	} catch (e) {
 		toast.error(errMsg(e));
 		return false;
@@ -183,11 +187,11 @@ async function closeTicket(name) {
 // the File REFERENCES that actually succeeded (not a count) — the caller
 // (useStagedFiles's settleUpload) needs to know exactly which ones landed so a
 // retry re-sends only the failures, never the ones already attached.
-async function uploadTo(name, files) {
+async function uploadTo(name, files, comm) {
 	const succeeded = [];
 	for (const f of files || []) {
 		try {
-			await supportUpload(name, f);
+			await supportUpload(name, f, comm);
 			succeeded.push(f);
 		} catch (e) {
 			toast.error(`Couldn't attach ${f.name}: ${errMsg(e)}`);
