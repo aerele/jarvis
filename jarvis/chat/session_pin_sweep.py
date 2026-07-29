@@ -194,13 +194,6 @@ def run(apply: bool = False, max_clear: int = MAX_CLEAR) -> dict:
 	Reports only unless ``apply`` is true. Uses a dedicated connection, never the
 	turn pool - a maintenance sweep must not contend with live chat. Returns the
 	summary dict (also logged) so a ``bench execute`` run shows its work."""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		# A self-hosted tenant is reached over HTTP bearer auth with no device
-		# pairing, so the WS client this sweep uses does not apply there.
-		return SweepSummary(apply=bool(apply), aborted="self-hosted").as_dict()
-
 	settings = frappe.get_single("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	if not gateway_url:

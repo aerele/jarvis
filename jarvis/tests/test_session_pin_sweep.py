@@ -331,10 +331,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		frappe.db.set_single_value(SETTINGS, "agent_url", "http://gw.test:18789")
 		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		try:
-			with (
-				patch("jarvis.selfhost.is_self_hosted", return_value=False),
-				patch("jarvis.chat.openclaw_client.OpenclawSession.connect", return_value=sess),
-			):
+			with patch("jarvis.chat.openclaw_client.OpenclawSession.connect", return_value=sess):
 				out = session_pin_sweep.run()
 		finally:
 			frappe.db.set_single_value(SETTINGS, "agent_url", orig or "")
@@ -351,18 +348,12 @@ class TestSessionPinSweep(FrappeTestCase):
 		frappe.db.set_single_value(SETTINGS, "agent_url", "")
 		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		try:
-			with patch("jarvis.selfhost.is_self_hosted", return_value=False):
-				out = session_pin_sweep.run()
+			out = session_pin_sweep.run()
 		finally:
 			frappe.db.set_single_value(SETTINGS, "agent_url", orig or "")
 			frappe.clear_document_cache(SETTINGS, SETTINGS)
 			frappe.db.commit()
 		self.assertEqual(out["aborted"], "no agent_url")
-
-	def test_run_on_a_self_hosted_bench_does_nothing(self):
-		with patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			out = session_pin_sweep.run(apply=True)
-		self.assertEqual(out["aborted"], "self-hosted")
 
 	# -- races between the listing and the patch --------------------------- #
 
