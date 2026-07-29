@@ -146,6 +146,9 @@
 						/>
 					</div>
 
+					<p v-if="changesBlockedReason" class="mt-3 text-p-sm text-ink-gray-6">
+						{{ changesBlockedReason }}
+					</p>
 					<p
 						v-if="!upgradePlans.length && !downgradePlans.length"
 						class="mt-4 text-p-sm text-ink-gray-6"
@@ -227,6 +230,7 @@ import BillingNotice from "./BillingNotice.vue";
 import { useJarvisTheme } from "@/theme";
 import { errMessage as errMsg } from "@/lib/errors";
 import { openCheckout } from "@/lib/useRazorpay";
+import { openCashfreeCheckout } from "@/lib/useCashfree";
 import {
 	payAndApply,
 	accountSnapshot,
@@ -234,11 +238,14 @@ import {
 	PAY_APPLIED,
 	PAY_DISMISSED,
 	PAY_PENDING,
+	PAY_UNCONFIRMED,
+	CHECKOUT_CASHFREE_ORDER,
+	UnsupportedCheckoutError,
 } from "@/lib/billingCheckout";
 import {
 	inr,
 	statusLabel,
-	pillTone,
+	statusBadgeTheme,
 	planPriceLabel,
 	renewalLabel,
 	cancelPillLabel,
@@ -279,15 +286,26 @@ const ended = computed(() => ENDED_STATUSES.has(account.value.subscription_statu
 // already pending, so the cards disable rather than offer a button that 400s.
 const changesBlocked = computed(() => cancelling.value || scheduledDowngrade.value);
 
-const PILL_THEME = {
-	"jv-pill-ok": "green",
-	"jv-pill-warn": "orange",
-	"jv-pill-bad": "red",
-	"jv-pill-muted": "gray",
-};
-const statusTheme = computed(
-	() => PILL_THEME[pillTone(account.value.subscription_status, cancelling.value)] || "gray"
+// Shared with PlanBillingPane via format.js rather than copied. The status
+// colour rule living in two places is how the settings pane and this page end
+// up showing different badges for the same subscription.
+const statusTheme = computed(() =>
+	statusBadgeTheme(account.value.subscription_status, cancelling.value)
 );
+
+// Why the plan actions are inert. The retired pane HID them in these states,
+// reasoning that a button which 400s is worse than no button; rendering them
+// disabled with no explanation is worse than either, because the customer is
+// left to guess whether it is their account or the page that is broken.
+const changesBlockedReason = computed(() => {
+	if (cancelling.value) {
+		return "Your subscription is set to end, so plan changes are paused. Resume it above to change plans.";
+	}
+	if (scheduledDowngrade.value) {
+		return "A plan switch is already scheduled, so further changes are paused. Keep your current plan above to change that.";
+	}
+	return "";
+});
 
 const currentAction = computed(() => {
 	if (ended.value) return { label: "Renew", note: "Renewing restores access straight away." };
@@ -460,7 +478,19 @@ async function doKeepCurrentPlan() {
 		// Monthly: revoking the switch also dropped the cheaper mandate, so the
 		// current plan's mandate has to be re-armed in the same step. Annual
 		// returns nothing to pay and falls through to a plain reload.
-		await settleWithCheckout(handles, "Keep current plan");
+		//
+		// This call ALREADY COMMITTED server-side before any sheet opens: the
+		// scheduled switch is cleared and, on Monthly, the mandate is gone. So a
+		// dismissal here cannot be treated as "nothing happened". Without this the
+		// page kept showing "Switching to X on <date>" and offering this same
+		// button, while the account had actually lost both the schedule and its
+		// autopay, and a second click failed on a schedule that no longer existed.
+		await settleWithCheckout(handles, "Keep current plan", {
+			alreadyCommitted:
+				"Your plan switch is cancelled, so you stay on your current plan. Automatic renewal is " +
+				"not set up yet, because the payment step was not completed. Set up auto-renewal below " +
+				"to keep your plan renewing.",
+		});
 	} catch (e) {
 		actionErr.value = errMsg(e);
 	} finally {
@@ -531,7 +561,7 @@ async function runPayment({ key, start, description }) {
  * Every exit clears `phase`, which is what keeps the overlay from stranding
  * the page when the sheet closes by any route.
  */
-async function settleWithCheckout(handles, description) {
+async function settleWithCheckout(handles, description, { alreadyCommitted = "" } = {}) {
 	const before = accountSnapshot(account.value);
 	let out;
 	try {
@@ -539,20 +569,45 @@ async function settleWithCheckout(handles, description) {
 			handles,
 			description,
 			before,
-			openCheckout,
+			// Which sheet to open is decided by payAndApply from the handles, not
+			// guessed here. The bench never learns a tenant's gateway up front, so
+			// the discriminator only arrives in this response.
+			openCheckout: (h, desc, kind) =>
+				kind === CHECKOUT_CASHFREE_ORDER ? openCashfreeCheckout(h) : openCheckout(h, desc),
 			finishPayment: api.finishPayment,
 			getAccount: api.getAccount,
 			onPhase: (p) => {
 				phase.value = p;
 			},
 		});
+	} catch (e) {
+		// A gateway object we cannot render. Its message is customer-facing copy
+		// and names a way forward, which is the point: the old behaviour reported
+		// success and quietly took no money.
+		if (e instanceof UnsupportedCheckoutError) {
+			actionErr.value = e.message;
+			await loadAccount();
+			return;
+		}
+		throw e;
 	} finally {
 		phase.value = "";
 	}
 
 	if (out.status === PAY_DISMISSED) {
-		// Explicitly nothing: no toast, no error, no reload. The customer closed
-		// the sheet and the page must look exactly as they left it.
+		if (alreadyCommitted) {
+			// The server-side part of this flow ALREADY landed before the sheet
+			// opened, so "look exactly as you left it" would be a lie: the page
+			// would still offer an action that is now done, and a second click
+			// would fail on state that no longer exists. Re-read and say what
+			// actually happened.
+			notice.value = alreadyCommitted;
+			await loadAccount();
+			return;
+		}
+		// Nothing was committed, so explicitly nothing: no toast, no error, no
+		// reload. The customer closed the sheet and the page must look exactly as
+		// they left it.
 		return;
 	}
 	if (out.status === PAY_APPLIED) {
@@ -570,6 +625,18 @@ async function settleWithCheckout(handles, description) {
 		// true and do not pretend it failed.
 		notice.value =
 			"Your payment was received. Your plan should update within a minute - refresh to check, or contact support if it does not.";
+		await loadAccount();
+		return;
+	}
+	if (out.status === PAY_UNCONFIRMED) {
+		// Cashfree only. Its sheet settles the same way whether the customer paid,
+		// closed it, or hit a card error, and our server-side confirm did not come
+		// back either, so we genuinely do not know whether money moved. Saying
+		// "payment received" here would be a claim about the customer's money that
+		// we cannot evidence, and saying "cancelled" could be flatly false.
+		notice.value =
+			"We could not confirm whether your payment went through. Nothing has changed on your plan yet. " +
+			"Check your bank or card statement before trying again, and contact support if you were charged.";
 		await loadAccount();
 		return;
 	}

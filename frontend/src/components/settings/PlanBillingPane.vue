@@ -155,7 +155,7 @@ import { Badge, Button, FeatherIcon } from "frappe-ui";
 import { getAccount, cancelPlanAtPeriodEnd, resumePlan, cancelScheduledDowngrade } from "@/api";
 import {
 	statusLabel,
-	pillTone,
+	statusBadgeTheme,
 	planPriceLabel,
 	planFeatures,
 	renewalLabel,
@@ -203,17 +203,8 @@ const cancelling = computed(() => !!account.value.cancel_at_period_end);
 // fresh payment restores service. Distinct from `cancelling` (still entitled).
 const ENDED_STATUSES = new Set(["Expired", "Cancelled"]);
 const ended = computed(() => ENDED_STATUSES.has(account.value.subscription_status));
-// pillTone still returns the legacy jv-pill-* class names and is shared with
-// other surfaces, so map its verdict onto a Badge theme here rather than
-// changing the shared helper (design.md §3.8 status map).
-const PILL_THEME = {
-	"jv-pill-ok": "green",
-	"jv-pill-warn": "orange",
-	"jv-pill-bad": "red",
-	"jv-pill-muted": "gray",
-};
-const statusTheme = computed(
-	() => PILL_THEME[pillTone(account.value.subscription_status, cancelling.value)] || "gray"
+const statusTheme = computed(() =>
+	statusBadgeTheme(account.value.subscription_status, cancelling.value)
 );
 const busy = ref(false);
 const reauthNotice = ref("");

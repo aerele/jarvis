@@ -28,6 +28,22 @@ export function pillTone(status, cancelAtPeriodEnd) {
 	if (status === "Expired") return "jv-pill-bad";
 	return "jv-pill-muted";
 }
+// pillTone speaks the legacy jv-pill-* class names, which surfaces that still
+// render those classes depend on, so the frappe-ui Badge theme is derived here
+// rather than by changing pillTone (design.md §3.8 status map).
+//
+// Both billing surfaces - the page and the settings pane - read this one map.
+// They used to carry a verbatim copy each, which is how the same subscription
+// could show green on one and grey on the other after a single-sided edit.
+const BADGE_THEME = {
+	"jv-pill-ok": "green",
+	"jv-pill-warn": "orange",
+	"jv-pill-bad": "red",
+	"jv-pill-muted": "gray",
+};
+export function statusBadgeTheme(status, cancelAtPeriodEnd) {
+	return BADGE_THEME[pillTone(status, cancelAtPeriodEnd)] || "gray";
+}
 // The cancel button's label adapts to what the customer actually has: an
 // autopay mandate is an auto-renewal to switch off; a one-shot plan is a
 // subscription to end. Promising to "cancel auto-renewal" on a plan that

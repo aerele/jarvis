@@ -9,6 +9,13 @@ import {
 	PAY_DISMISSED,
 	PAY_PENDING,
 	PAY_NOTHING_TO_PAY,
+	PAY_UNCONFIRMED,
+	classifyHandles,
+	CHECKOUT_RAZORPAY,
+	CHECKOUT_CASHFREE_ORDER,
+	CHECKOUT_NONE,
+	CHECKOUT_UNSUPPORTED,
+	UnsupportedCheckoutError,
 } from "@/lib/billingCheckout";
 import { CHECKOUT_SUCCESS, CHECKOUT_DISMISSED } from "@/lib/useRazorpay";
 
@@ -206,5 +213,125 @@ describe("pollUntilChanged", () => {
 		expect(out).toBeNull();
 		// One read up front, then one per interval until the window closes.
 		expect(getAccount).toHaveBeenCalledTimes(4);
+	});
+});
+
+// --- the Cashfree silent-success regression ---------------------------------
+// A Cashfree customer clicking Renew used to fall through to "nothing to pay",
+// and the page then reloaded reporting SUCCESS for a renewal that took no money
+// and changed nothing. These pin that it cannot happen again.
+
+const CASHFREE_ORDER = {
+	payment_provider: "cashfree",
+	cashfree_order_id: "cf_order_1",
+	payment_session_id: "sess_1",
+	amount_inr: 100,
+};
+const CASHFREE_MANDATE = {
+	payment_provider: "cashfree",
+	cashfree_subscription_id: "cf_sub_1",
+	subscription_session_id: "sub_sess_1",
+};
+
+describe("classifyHandles", () => {
+	it("recognises a razorpay order", () => {
+		expect(classifyHandles(HANDLES)).toBe(CHECKOUT_RAZORPAY);
+	});
+
+	it("recognises a cashfree order", () => {
+		expect(classifyHandles(CASHFREE_ORDER)).toBe(CHECKOUT_CASHFREE_ORDER);
+	});
+
+	it("refuses a cashfree mandate rather than rendering the wrong sheet", () => {
+		expect(classifyHandles(CASHFREE_MANDATE)).toBe(CHECKOUT_UNSUPPORTED);
+	});
+
+	it("refuses an unknown gateway that still minted something", () => {
+		expect(classifyHandles({ payment_provider: "stripe", stripe_pi: "pi_1" })).toBe(
+			CHECKOUT_UNSUPPORTED
+		);
+	});
+
+	it("only calls it nothing-to-pay when there are no handles at all", () => {
+		expect(classifyHandles({})).toBe(CHECKOUT_NONE);
+		expect(classifyHandles(null)).toBe(CHECKOUT_NONE);
+	});
+});
+
+describe("needsCheckout", () => {
+	it("is true for a cashfree order (the bug: it used to be false)", () => {
+		expect(needsCheckout(CASHFREE_ORDER)).toBe(true);
+	});
+
+	it("is true for an unsupported gateway object, so it can be refused not skipped", () => {
+		expect(needsCheckout(CASHFREE_MANDATE)).toBe(true);
+	});
+});
+
+describe("payAndApply across gateways", () => {
+	it("opens a sheet for a cashfree order instead of reporting nothing to pay", async () => {
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_SUCCESS, payload: {} }));
+		const out = await payAndApply({
+			handles: CASHFREE_ORDER,
+			description: "Renew",
+			before: accountSnapshot(PRO),
+			openCheckout,
+			finishPayment: vi.fn(async () => ({})),
+			getAccount: vi.fn(async () => STARTER),
+			sleep: async () => {},
+		});
+		expect(openCheckout).toHaveBeenCalled();
+		expect(out.status).not.toBe(PAY_NOTHING_TO_PAY);
+		// and it is told WHICH sheet, rather than the opener having to guess
+		expect(openCheckout.mock.calls[0][2]).toBe(CHECKOUT_CASHFREE_ORDER);
+	});
+
+	it("refuses an unsupported gateway loudly, and never opens a sheet", async () => {
+		const openCheckout = vi.fn();
+		await expect(
+			payAndApply({
+				handles: CASHFREE_MANDATE,
+				description: "Renew",
+				before: accountSnapshot(PRO),
+				openCheckout,
+				finishPayment: vi.fn(),
+				getAccount: vi.fn(),
+			})
+		).rejects.toBeInstanceOf(UnsupportedCheckoutError);
+		expect(openCheckout).not.toHaveBeenCalled();
+	});
+
+	it("reports UNCONFIRMED, not PENDING, when cashfree could not be confirmed", async () => {
+		// Cashfree gives no trustworthy dismissal signal, so an unconfirmed
+		// settle must not claim the customer paid.
+		const out = await payAndApply({
+			handles: CASHFREE_ORDER,
+			description: "Renew",
+			before: accountSnapshot(PRO),
+			openCheckout: async () => ({ status: CHECKOUT_SUCCESS, payload: {} }),
+			finishPayment: vi.fn(async () => {
+				throw new Error("confirm failed");
+			}),
+			getAccount: vi.fn(async () => PRO),
+			sleep: async () => {},
+			timeoutMs: 0,
+		});
+		expect(out.status).toBe(PAY_UNCONFIRMED);
+	});
+
+	it("still reports PENDING for razorpay, which did reach its success handler", async () => {
+		const out = await payAndApply({
+			handles: HANDLES,
+			description: "Renew",
+			before: accountSnapshot(PRO),
+			openCheckout: async () => ({ status: CHECKOUT_SUCCESS, payload: {} }),
+			finishPayment: vi.fn(async () => {
+				throw new Error("confirm failed");
+			}),
+			getAccount: vi.fn(async () => PRO),
+			sleep: async () => {},
+			timeoutMs: 0,
+		});
+		expect(out.status).toBe(PAY_PENDING);
 	});
 });
