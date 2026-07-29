@@ -151,11 +151,11 @@
 					</span>
 				</div>
 				<Button
-					v-if="!resetting"
+					v-if="!resetting && !resetOpen"
 					variant="subtle"
 					theme="red"
-					:label="resetOpen ? 'Close' : 'Reset workspace'"
-					@click="resetOpen = !resetOpen"
+					label="Reset workspace"
+					@click="openReset"
 				/>
 			</div>
 
@@ -195,22 +195,29 @@
 						</span>
 					</span>
 				</label>
-				<Button
-					class="mt-3"
-					variant="subtle"
-					theme="red"
-					label="Reset workspace"
-					iconLeft="refresh-cw"
-					:loading="resetBusy"
-					@click="doReset"
-				/>
+				<div ref="resetFormEl" class="mt-4 flex items-center gap-2">
+					<Button
+						variant="subtle"
+						theme="red"
+						label="Reset workspace"
+						iconLeft="refresh-cw"
+						:loading="resetBusy"
+						@click="doReset"
+					/>
+					<Button
+						variant="ghost"
+						label="Cancel"
+						:disabled="resetBusy"
+						@click="closeReset"
+					/>
+				</div>
 			</div>
 		</template>
 	</SettingsPane>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Badge, Button, toast } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { useConfirm } from "@/composables/useConfirm";
@@ -408,6 +415,20 @@ const resetNote = computed(() => {
 	return "This usually takes a few minutes. You can leave this page open — chat reloads when the workspace is back.";
 });
 
+const resetFormEl = ref(null);
+
+function openReset() {
+	resetOpen.value = true;
+	nextTick(() => resetFormEl.value?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+}
+
+function closeReset() {
+	resetOpen.value = false;
+	resetReason.value = "";
+	wipeData.value = false;
+	revokeLlm.value = false;
+}
+
 async function doReset() {
 	const parts = [
 		"Chat will stop working until the workspace reconnects (usually a few minutes).",
@@ -438,8 +459,7 @@ async function doReset() {
 				wipeData: wipeData.value,
 				revokeLlm: revokeLlm.value,
 			})) || {};
-		resetReason.value = "";
-		resetOpen.value = false;
+		closeReset();
 		resetState.value = out;
 		resetting.value = true;
 		toast.success("Resetting your workspace.");
