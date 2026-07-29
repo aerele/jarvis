@@ -897,3 +897,83 @@ class TestSignupResumeFallback(FrappeTestCase):
 		):
 			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
 		self.assertIn("already registered", str(ctx.exception))
+
+
+class TestAccountReconnect(FrappeTestCase):
+	"""Fresh-bench reconnect wrappers (admin_client mocked)."""
+
+	def setUp(self):
+		self._snap = _snapshot_settings()
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("jarvis_admin_url", "https://fleet.example.test")
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+
+	def test_start_proxies_request(self):
+		with patch(
+			"jarvis.onboarding.admin_client.request_account_reconnect",
+			return_value={"request": "rid-1", "message": "check your email"},
+		) as req:
+			out = onboarding.start_account_reconnect("someone@example.com")
+		req.assert_called_once_with("someone@example.com")
+		self.assertEqual(out["request"], "rid-1")
+
+	def test_check_pending_writes_nothing(self):
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={"status": "pending"},
+		):
+			out = onboarding.check_account_reconnect("rid-1")
+		self.assertEqual(out["status"], "pending")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+	def test_check_ready_persists_rotated_credentials(self):
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={
+				"status": "ready",
+				"api_key": "new-key",
+				"api_secret": "new-secret",
+				"customer": "someone@example.com",
+				"customer_password": "new-pass",
+			},
+		):
+			out = onboarding.check_account_reconnect("rid-1")
+		self.assertEqual(out["status"], "connected")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("jarvis_admin_api_key", raise_exception=False), "new-key")
+		self.assertEqual(s.jarvis_admin_customer_email, "someone@example.com")
+
+	def test_check_awaiting_code_writes_nothing(self):
+		"""Confirmed but not yet unlocked: the code binds delivery to whoever
+		clicked, so nothing is persisted until it matches."""
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={"status": "awaiting_code"},
+		):
+			out = onboarding.check_account_reconnect("rid-1")
+		self.assertEqual(out["status"], "awaiting_code")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+	def test_check_passes_code_through(self):
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={"status": "awaiting_code"},
+		) as poll:
+			onboarding.check_account_reconnect("rid-1", "ABCD2345")
+		poll.assert_called_once_with("rid-1", "ABCD2345")
+
+	def test_check_expired_passthrough(self):
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={"status": "expired"},
+		):
+			out = onboarding.check_account_reconnect("rid-x")
+		self.assertEqual(out["status"], "expired")

@@ -223,6 +223,28 @@ def resume_pending_signup(plan: str, provider: str | None = None) -> dict:
 	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)
 
 
+def request_account_reconnect(email: str) -> dict:
+	"""Guest: start a fresh-bench reconnect to an EXISTING paid account (wiped
+	site recovery). Admin emails a CODE to the registered address and returns an
+	opaque request_id to poll — the response is identical whether or not the
+	email matches an account. Nothing is re-paid."""
+	return _post_guest(
+		path=_m("billing.reconnect.request_account_reconnect"),
+		body={"email": email, "frappe_site_url": frappe.utils.get_url()},
+	)
+
+
+def get_reconnect_state(request_id: str, code: str = "") -> dict:
+	"""Guest poll for the reconnect. Statuses: ``pending``, ``awaiting_code``
+	(the customer must type the code mailed to them, or one support issued),
+	``ready`` (+ api_key, api_secret, customer, customer_password), ``expired``.
+	The code is what releases the credentials - request_id alone never does."""
+	return _post_guest(
+		path=_m("billing.reconnect.get_reconnect_state"),
+		body={"request_id": request_id, "code": code},
+	)
+
+
 def get_signup_payment_state() -> dict:
 	"""Authenticated poll. Returns one of:
 	    {pending_verification: True}

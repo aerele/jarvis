@@ -507,6 +507,43 @@ def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None)
 
 
 @frappe.whitelist()
+def start_account_reconnect(email: str) -> dict:
+	"""Fresh-bench recovery: ask admin to email a reconnect CODE to the
+	REGISTERED address of an existing paid account (wiped-site scenario — the
+	duplicate-email guard blocks re-signup, and nothing should be re-paid).
+	Returns {request, message}; the customer then types the code, which
+	``check_account_reconnect`` redeems. Same System-Manager gating as the rest
+	of onboarding."""
+	require_jarvis_admin()
+	_require_admin_url()
+	return _surface(admin_client.request_account_reconnect, email)
+
+
+@frappe.whitelist()
+def check_account_reconnect(request_id: str, code: str = "") -> dict:
+	"""Redeem the reconnect code the customer received by email (or from
+	support). Only a correct code releases anything: admin then rotates and
+	delivers the credentials — persist them and
+	grant the onboarding admin role, exactly like a fresh signup would. The
+	wizard then rides the normal sync_connection path to the customer's
+	EXISTING container; only the LLM step needs re-doing on this fresh site."""
+	require_jarvis_admin()
+	data = _surface(admin_client.get_reconnect_state, request_id, code) or {}
+	if data.get("status") != "ready":
+		return {"status": data.get("status") or "expired"}
+	write_connection(
+		{
+			"api_key": data.get("api_key", ""),
+			"api_secret": data.get("api_secret", ""),
+			"customer": data.get("customer", ""),
+			"customer_password": data.get("customer_password", ""),
+		}
+	)
+	grant_onboarding_admin()
+	return {"status": "connected"}
+
+
+@frappe.whitelist()
 def get_account_defaults() -> dict:
 	"""Prefill for the onboarding Account step so the customer doesn't retype what
 	the site already knows: the caller's email + a default company. Company is the

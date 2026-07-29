@@ -391,6 +391,54 @@
 									/>
 								</div>
 							</template>
+							<template v-else-if="state.payPhase === 'reconnect'">
+								<div class="ob-body">
+									<div class="ob-head">
+										<h1>Enter your reconnect code</h1>
+										<p>
+											We emailed a code to
+											<b>{{ state.email || "your email" }}</b
+											>. Enter it here to connect this site to your existing
+											subscription — nothing to pay again.
+										</p>
+									</div>
+									<FormControl
+										class="mx-auto mt-2 max-w-[260px]"
+										type="text"
+										variant="outline"
+										label="Reconnect code"
+										v-model="state.reconnectCode"
+										placeholder="ABCD2345"
+										@keydown.enter="submitReconnectCode"
+									/>
+									<p class="text-center text-p-sm text-ink-gray-5">
+										The code expires in 1 hour. Using it signs your old site
+										out. If you can't reach that inbox, contact support — they
+										can issue the code another way.
+									</p>
+									<Banner
+										v-if="state.payErr"
+										type="error"
+										:message="state.payErr"
+									/>
+								</div>
+								<div class="ob-foot">
+									<button class="ob-back" @click="cancelReconnect">
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
+									</button>
+									<Button
+										variant="solid"
+										:loading="state.payBusy"
+										loading-text="Working…"
+										:disabled="!state.reconnectCode.trim()"
+										label="Finish reconnect"
+										@click="submitReconnectCode"
+									/>
+								</div>
+							</template>
 							<template v-else-if="state.successData">
 								<div class="ob-body">
 									<div class="ob-head">
@@ -560,6 +608,21 @@
 										:message="state.payErr"
 										class="mx-auto mt-3.5 max-w-[560px]"
 									/>
+									<div
+										v-if="state.reconnectOffered && !state.payBusy"
+										class="mx-auto mt-2 max-w-[560px] text-center"
+									>
+										<Button
+											variant="subtle"
+											label="Already subscribed? Reconnect this site"
+											@click="startReconnect"
+										/>
+										<p class="mt-1.5 text-p-sm text-ink-gray-5">
+											We'll email a link to {{ state.email }} — approving it
+											connects this site to your existing subscription.
+											Nothing to pay again.
+										</p>
+									</div>
 								</div>
 								<div class="ob-foot">
 									<button
@@ -861,6 +924,8 @@ import {
 	getLlmSyncStatus,
 	listPlans,
 	listPaymentProviders,
+	startAccountReconnect,
+	checkAccountReconnect,
 	startSignup,
 	finishPayment,
 	saveSelfHosted,
@@ -928,7 +993,10 @@ const state = reactive({
 	plansLoading: false,
 	plansErr: "",
 	// pay (renderPay / renderVerifyEmail / startPay / openCheckout)
-	payPhase: "review", // "review" | "verify" - mirrors desk's step-3 vs "check your email" sub-screen
+	payPhase: "review", // "review" | "verify" | "reconnect" - step-3 sub-screens
+	reconnectOffered: false,
+	reconnectRequestId: "",
+	reconnectCode: "",
 	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
 	// Gateways the operator has actually enabled, narrowed to what this build
 	// can render. Starts as razorpay-only so the step is never briefly empty
@@ -1354,6 +1422,10 @@ async function runStartPay() {
 	} catch (e) {
 		state.payBusy = false;
 		state.payErr = errMsg(e);
+		// The duplicate-email rejection on a FRESH bench (no stored creds to
+		// auto-resume with) usually means "my old site died" - offer the
+		// reconnect path instead of the dead end.
+		state.reconnectOffered = /already registered or pending/i.test(state.payErr);
 	}
 }
 
@@ -1393,6 +1465,62 @@ async function onVerifyCheck() {
 	} catch (e) {
 		state.payBusy = false;
 		state.payErr = errMsg(e);
+	}
+}
+
+function cancelReconnect() {
+	state.payPhase = "review";
+	state.payErr = "";
+	state.reconnectRequestId = "";
+	state.reconnectCode = "";
+}
+
+// The code the customer read off the confirmation page (or got from support).
+// Wrong code => admin keeps answering awaiting_code, so just say so and let
+// them retype rather than restarting the whole reconnect.
+async function submitReconnectCode() {
+	if (!state.reconnectCode.trim()) return;
+	state.payErr = "";
+	state.payBusy = true;
+	try {
+		const d = await checkAccountReconnect(
+			state.reconnectRequestId,
+			state.reconnectCode.trim()
+		);
+		if (d && d.status === "connected") {
+			state.successData = {};
+			state.payBusy = false;
+			await proceedAfterPay();
+			return;
+		}
+		state.payErr =
+			d && d.status === "expired"
+				? "The reconnect request expired. Start it again."
+				: "That code didn't match. Check the confirmation page and try again.";
+	} catch (e) {
+		state.payErr = errMsg(e);
+	} finally {
+		state.payBusy = false;
+	}
+}
+
+// "Already subscribed? Reconnect this site": start the admin-side magic-link
+// flow and switch the pay step into the waiting screen. The poll below rides
+// until the customer clicks the emailed link (or an operator approves).
+async function startReconnect() {
+	state.payErr = "";
+	state.reconnectOffered = false;
+	state.reconnectCode = "";
+	state.payBusy = true;
+	try {
+		const d = await startAccountReconnect(state.email);
+		state.reconnectRequestId = (d && d.request) || "";
+		state.payPhase = "reconnect";
+	} catch (e) {
+		state.payErr = errMsg(e);
+		state.reconnectOffered = true;
+	} finally {
+		state.payBusy = false;
 	}
 }
 
