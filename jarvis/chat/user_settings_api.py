@@ -234,15 +234,8 @@ def admin_sync_usage() -> dict:
 	"""Sweep ``sessions.list`` over the pooled gateway connection and refresh
 	per-session snapshot fields + ``last_synced_at`` (no counter accumulation).
 	Returns a per-user summary. Degrades to ``gateway_unreachable`` when the
-	gateway can't be reached (or on self-hosted, which has no session
-	telemetry). Admins only."""
+	gateway can't be reached. Admins only."""
 	require_jarvis_admin()
-
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		# The self-hosted OpenAI-compat path has no per-session telemetry.
-		return {"ok": False, "reason": "gateway_unreachable"}
 
 	settings = frappe.get_single("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")

@@ -120,7 +120,7 @@ def process_daily() -> None:
 	feature toggle (NULL=ON) and an empty New backlog; otherwise enqueues the
 	deduped worker. Never raises out of the scheduler.
 
-	Deliberately NOT gated on self-host: the sweep's wiki ingest and
+	Deliberately ungated on deployment: the sweep's wiki ingest and
 	JLP-proposal work is all bench-side; only the learned-skill container
 	push is (separately) managed-only."""
 	try:

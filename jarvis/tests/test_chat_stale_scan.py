@@ -102,7 +102,6 @@ class TestScanAndMarkErrored(FrappeTestCase):
 		frappe.db.commit()
 		name = self._insert_stale_streaming_message(age_seconds=800)
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.stale_scan.publish_to_user") as pub,
 		):
 			scan_and_mark_errored()

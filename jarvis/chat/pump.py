@@ -173,7 +173,7 @@ _sleep: Callable[[float], None] = time.sleep
 
 
 # --------------------------------------------------------------------------- #
-# Pump-mode routing flags (§10.9 — managed relay ONLY; self-host keeps legacy)
+# Pump-mode routing flags (§10.9 — the managed relay transport)
 # --------------------------------------------------------------------------- #
 #
 # The Relay Pump is Jarvis's DEFAULT managed transport, so the per-site flag
@@ -186,10 +186,8 @@ _sleep: Callable[[float], None] = time.sleep
 #     a total no-op (OARF-1). ABSENCE is NEVER this opt-out.
 #   * the sentinel 'draining'  = no NEW pump admissions (new turns fall through to
 #     legacy) while the pump keeps draining its existing Turn rows to terminal.
-# All three predicates are ANDed with `not selfhost.is_self_hosted()` (§10.9 — the
-# default applies ONLY where the managed relay is the transport; self-host stays
-# legacy even with the flag unset). Independent of `jarvis_phase0_admission_enabled`
-# (pump ON implies admission semantics INSIDE the machine).
+# Independent of `jarvis_phase0_admission_enabled` (pump ON implies admission
+# semantics INSIDE the machine).
 #
 # `_pump_flag_explicit_off` is the ONE place the absent-vs-explicit-0 distinction is
 # decided, so every predicate below shares it verbatim — the kill switch means the
@@ -242,8 +240,7 @@ _MODE_LEGACY = "legacy"
 def _config_transport_mode() -> str:
 	"""Derive the transport_mode a shard SHOULD have from the site_config flag (the
 	initial/reconcile source). Shares ``_pump_flag_explicit_off`` verbatim so absent-vs-
-	explicit-0 never diverges from the conf predicates. Self-host is orthogonal (handled
-	at the decision points by ANDing ``not is_self_hosted()``), so this maps only the flag."""
+	explicit-0 never diverges from the conf predicates."""
 	flag = frappe.conf.get("jarvis_pump_enabled")
 	if _pump_flag_explicit_off(flag):
 		return _MODE_LEGACY
@@ -305,44 +302,33 @@ def set_transport_mode(target: str, mode: str) -> int:
 def pump_mode_active(from_db: bool = False, target: str | None = None) -> bool:
 	"""True when the Relay Pump owns NEW turn dispatch on this bench: the per-site
 	``jarvis_pump_enabled`` flag is NOT an explicit-off kill switch AND not
-	``'draining'``, AND the transport is managed relay. The pump is the DEFAULT
-	transport, so an UNSET flag is ACTIVE — only an explicit ``0``/``false`` disables
-	it (§10.9 — self-host turns keep the legacy worker-per-turn path regardless).
-	Cheap conf read + one selfhost check.
+	``'draining'``. The pump is the DEFAULT transport, so an UNSET flag is ACTIVE —
+	only an explicit ``0``/``false`` disables it. Cheap conf read.
 
 	``from_db=True`` (CDX-10, the FENCED path): read ``transport_mode`` from the shard
 	control ROW instead of the request-local conf snapshot — the caller MUST already hold
 	that row FOR UPDATE. Used only at the two dispatch-deciding points; every other reader
 	keeps the cheap conf read."""
-	from jarvis import selfhost
-
 	if from_db:
-		return _row_transport_mode(target or "default") == _MODE_PUMP and not selfhost.is_self_hosted()
+		return _row_transport_mode(target or "default") == _MODE_PUMP
 	flag = frappe.conf.get("jarvis_pump_enabled")
-	if _pump_flag_explicit_off(flag) or _pump_flag_draining(flag):
-		return False
-	return not selfhost.is_self_hosted()
+	return not (_pump_flag_explicit_off(flag) or _pump_flag_draining(flag))
 
 
 def pump_draining(from_db: bool = False, target: str | None = None) -> bool:
-	"""True when the shard is DRAINING on a managed bench: NO new pump admissions (new
-	turns fall through to the legacy path), while the pump keeps draining its existing
-	Turn-row turns to terminal (OAR-11 coexistence). Draining is ALWAYS an explicit
-	sentinel, so the default-ON inversion does not touch it. ``from_db=True`` reads the
-	fenced ROW (caller holds the shard lock)."""
-	from jarvis import selfhost
-
+	"""True when the shard is DRAINING: NO new pump admissions (new turns fall through
+	to the legacy path), while the pump keeps draining its existing Turn-row turns to
+	terminal (OAR-11 coexistence). Draining is ALWAYS an explicit sentinel, so the
+	default-ON inversion does not touch it. ``from_db=True`` reads the fenced ROW
+	(caller holds the shard lock)."""
 	if from_db:
-		return _row_transport_mode(target or "default") == _MODE_DRAINING and not selfhost.is_self_hosted()
-	flag = frappe.conf.get("jarvis_pump_enabled")
-	if not _pump_flag_draining(flag):
-		return False
-	return not selfhost.is_self_hosted()
+		return _row_transport_mode(target or "default") == _MODE_DRAINING
+	return _pump_flag_draining(frappe.conf.get("jarvis_pump_enabled"))
 
 
 def pump_configured(from_db: bool = False, target: str | None = None) -> bool:
-	"""True when the pump is on in ANY form (active OR draining) on a managed bench —
-	i.e. NOT the explicit-off kill switch. The pump is the DEFAULT transport, so an
+	"""True when the pump is on in ANY form (active OR draining) — i.e. NOT the
+	explicit-off kill switch. The pump is the DEFAULT transport, so an
 	UNSET flag IS configured; only an explicit falsy value (``0``/``"0"``/``false``)
 	makes it INERT (OARF-1: ``ensure_pump`` + ``watchdog`` no-op). Once configured, the
 	pump OWNS every ``Jarvis Chat Turn`` row, so Phase-0 admission's promote/sweep step
@@ -350,30 +336,23 @@ def pump_configured(from_db: bool = False, target: str | None = None) -> bool:
 	coexistence discriminator that keeps the two machines from fighting over the same
 	rows. ``from_db=True`` (CDX-10) reads the fenced ROW (caller holds the shard lock);
 	configured == transport_mode is NOT ``legacy``."""
-	from jarvis import selfhost
-
 	if from_db:
-		return _row_transport_mode(target or "default") != _MODE_LEGACY and not selfhost.is_self_hosted()
-	if _pump_flag_explicit_off(frappe.conf.get("jarvis_pump_enabled")):
-		return False
-	return not selfhost.is_self_hosted()
+		return _row_transport_mode(target or "default") != _MODE_LEGACY
+	return not _pump_flag_explicit_off(frappe.conf.get("jarvis_pump_enabled"))
 
 
 def transport_predicates_from_row(target: str) -> dict:
 	"""Sweep note (contention): read the shard control ROW's ``transport_mode`` EXACTLY ONCE
 	(the caller holds it FOR UPDATE) and derive the fenced predicates from that single value —
 	instead of ``turn_machine_enabled(from_db)`` + ``pump_mode_active(from_db)`` each re-reading
-	the row while the site-wide admission lock is held. ``is_self_hosted()`` is a static
-	per-bench property. Returns ``pump_active`` / ``configured`` (== not the legacy kill switch)
-	so ``accept_or_queue`` can compute BOTH ``pump_mode`` and ``machine_active`` from one read."""
-	from jarvis import selfhost
-
+	the row while the site-wide admission lock is held. Returns ``pump_active`` / ``configured``
+	(== not the legacy kill switch) so ``accept_or_queue`` can compute BOTH ``pump_mode`` and
+	``machine_active`` from one read."""
 	mode = _row_transport_mode(target)
-	self_host = selfhost.is_self_hosted()
 	return {
 		"mode": mode,
-		"pump_active": mode == _MODE_PUMP and not self_host,
-		"configured": mode != _MODE_LEGACY and not self_host,
+		"pump_active": mode == _MODE_PUMP,
+		"configured": mode != _MODE_LEGACY,
 	}
 
 
@@ -403,13 +382,11 @@ def _lifecycle_row_mode(target: str) -> str:
 
 def pump_lifecycle_configured(target: str) -> bool:
 	"""CDX-21 gate for ensure_pump/watchdog: configured == the ROW is not the ``legacy`` kill
-	switch (and not self-hosted). Row-authoritative (5s TTL read-through), REPLACING the old
-	config-based ``pump_configured()`` so the lifecycle machinery can never disagree with the
-	fenced accept. When the row is momentarily out of sync with the config mirror, the accept
+	switch. Row-authoritative (5s TTL read-through), REPLACING the old config-based
+	``pump_configured()`` so the lifecycle machinery can never disagree with the fenced
+	accept. When the row is momentarily out of sync with the config mirror, the accept
 	gate (row) and this gate (row) still agree — no strand."""
-	from jarvis import selfhost
-
-	return _lifecycle_row_mode(target) != _MODE_LEGACY and not selfhost.is_self_hosted()
+	return _lifecycle_row_mode(target) != _MODE_LEGACY
 
 
 def _kill_switch_engaged(target: str) -> bool:

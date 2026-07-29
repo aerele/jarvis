@@ -1507,10 +1507,8 @@ def _est_tokens(text: str | None) -> int:
 def _measured_usage(user: str) -> dict | None:
 	"""Real per-turn token usage for ``user`` from the ``Jarvis User Settings``
 	row (design section 3). Rollover-aware: a stale ``usage_month`` reads as 0
-	tokens for the current month. No row yet: all zeros on managed (recording
-	simply hasn't started), but ``None`` on self-hosted — that mode records
-	nothing in v1, and the SPA hides the "Measured usage" block on None rather
-	than showing a forever-zero meter."""
+	tokens for the current month. No row yet: all zeros (recording simply
+	hasn't started)."""
 	measured = {
 		"month_tokens": 0,
 		"month_input_tokens": 0,
@@ -1536,9 +1534,7 @@ def _measured_usage(user: str) -> dict | None:
 		as_dict=True,
 	)
 	if not row:
-		from jarvis import selfhost
-
-		return None if selfhost.is_self_hosted() else measured
+		return measured
 	stale = row.usage_month != _usage_month_key()
 	measured.update(
 		{
@@ -1666,7 +1662,7 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 def warm_session() -> dict:
 	"""Fire-and-forget: warm this tenant's openclaw prefix cache so the next
 	new-chat first turn skips the cold prefill. Best-effort; always ok. The
-	chat UI calls this on open. Self-hosted and unconfigured benches no-op.
+	chat UI calls this on open. Unconfigured benches no-op.
 	Runs in a background RQ job so the gunicorn web worker is not blocked."""
 	require_jarvis_access()
 	frappe.enqueue(
@@ -1816,8 +1812,7 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	the UI. The gateway authorizes the abort from this web process (shared device
 	id + operator scope) even though the RQ worker started the run. Best-effort:
 	on any failure the Stop button's honest "still finishing in the background"
-	behaviour still applies. No-op on self-hosted (the HTTP surface has no
-	abort RPC) - the UI stop stands alone there."""
+	behaviour still applies."""
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
 	# Phase-0 admission (flag ON): record cancel intent on this conversation's
@@ -1850,10 +1845,6 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		pending_confirm.clear_for_conversation(frappe.session.user, conversation, run_id)
 	except Exception:
 		frappe.log_error(title="stop_run token sweep", message=frappe.get_traceback())
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return {"ok": False, "reason": _("stop isn't available on this connection yet")}
 	if not conv.session_key:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")
@@ -2166,14 +2157,12 @@ def _enqueue_turn(
 	if thinking_override is not None:
 		conv_doc.thinking_override = (thinking_override or "").strip().lower()
 
-	# First turn of a fresh (managed) macro conversation needs a session_key.
+	# First turn of a fresh macro conversation needs a session_key.
 	# Continuation turns skip this: they always follow an existing turn, and a
 	# missing key is created by the worker on its pooled connection anyway
 	# (turn_handler.handle_chat_send), so the human's Apply/Confirm POST never
 	# pays - or fails on - a WS handshake here.
-	from jarvis import selfhost
-
-	if not hidden and not selfhost.is_self_hosted() and not conv_doc.session_key:
+	if not hidden and not conv_doc.session_key:
 		conv_doc.session_key = _ensure_session_key(conv_doc.owner)
 
 	seq = _next_seq(conversation)

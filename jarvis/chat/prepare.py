@@ -122,18 +122,8 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		return {"ok": False, "reason": "assemble_failed"}
 
 	# (#22/#23/#24) session bootstrap + model patch + watermark on a SHORT-LIVED
-	# pooled connection (R-9). Managed only (the pump is managed; §10.9).
+	# pooled connection (R-9).
 	settings = ap.settings
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		# Defensive: pump mode is managed-only; a self-host turn must never reach the
-		# pump. Error rather than mis-dispatch.
-		_prepare_error(
-			run_id, version, assistant_msg, conversation, owner, "Self-host turns do not use the pump."
-		)
-		return {"ok": False, "reason": "self_host"}
-
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	effective_model, oauth_provider_id = turn_handler._session_model_for(conv)
 	managed_attachments = turn_handler._to_managed_attachments(ap.vision_parts) if ap.vision_parts else None

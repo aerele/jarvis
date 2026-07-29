@@ -74,7 +74,6 @@ class TestTurnRecovery(FrappeTestCase):
 		settings = MagicMock()
 		settings.agent_url = "https://gw.example"
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.turn_recovery.frappe.get_single", return_value=settings),
 			patch("jarvis.chat.turn_recovery._recovery_connection", fake_conn),
 			patch("jarvis.chat.turn_recovery.publish_to_user") as pub,
@@ -90,7 +89,6 @@ class TestTurnRecovery(FrappeTestCase):
 		settings = MagicMock()
 		settings.agent_url = "https://gw.example"
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.turn_recovery.frappe.get_single", return_value=settings),
 			patch("jarvis.chat.turn_recovery._recovery_connection", fake_conn),
 			patch("jarvis.chat.turn_recovery.publish_to_user") as pub,
@@ -162,7 +160,6 @@ class TestTurnRecovery(FrappeTestCase):
 		settings = MagicMock()
 		settings.agent_url = "https://gw.example"
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.turn_recovery.frappe.get_single", return_value=settings),
 			patch("jarvis.chat.turn_recovery._recovery_connection", boom),
 			patch("jarvis.chat.turn_recovery.publish_to_user"),
@@ -288,18 +285,6 @@ class TestTurnRecovery(FrappeTestCase):
 			frappe.db.delete(turn_recovery.CONV, {"name": other.name})
 			frappe.db.commit()
 
-	def test_recover_now_skipped_when_self_hosted(self):
-		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=True),
-			patch("jarvis.chat.turn_recovery.publish_to_user") as pub,
-		):
-			out = turn_recovery.recover_now(self.conv.name)
-		self.assertEqual(out, "skipped")
-		pub.assert_not_called()
-		row = self._row()
-		self.assertEqual(row.streaming, 1)
-		self.assertEqual(row.recovering, 1)
-
 	def test_recover_now_skipped_on_connect_failure(self):
 		def boom(_url):
 			raise RuntimeError("gateway down")
@@ -307,7 +292,6 @@ class TestTurnRecovery(FrappeTestCase):
 		settings = MagicMock()
 		settings.agent_url = "https://gw.example"
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.turn_recovery.frappe.get_single", return_value=settings),
 			patch("jarvis.chat.turn_recovery._recovery_connection", boom),
 			patch("jarvis.chat.turn_recovery.publish_to_user") as pub,
@@ -342,7 +326,6 @@ class TestTurnRecovery(FrappeTestCase):
 		settings = MagicMock()
 		settings.agent_url = "https://gw.example"
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.turn_recovery.frappe.get_single", return_value=settings),
 			patch("jarvis.chat.turn_recovery._recovery_connection", boom),
 			patch("jarvis.chat.turn_recovery.publish_to_user"),
@@ -637,7 +620,6 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		settings = MagicMock()
 		settings.agent_url = "https://gw.example"
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.turn_recovery.frappe.get_single", return_value=settings),
 			patch("jarvis.chat.turn_recovery._recovery_connection", fake_conn),
 			patch("jarvis.chat.turn_recovery.publish_to_user") as pub,
@@ -716,7 +698,6 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		settings = MagicMock()
 		settings.agent_url = "https://gw.example"
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.turn_recovery.frappe.get_single", return_value=settings),
 			patch("jarvis.chat.turn_recovery._recovery_connection", boom),
 			patch("jarvis.chat.turn_recovery.publish_to_user"),
@@ -789,8 +770,7 @@ class TestRecoveryRateWatch(FrappeTestCase):
 		self._add_assistant(recovered=True)
 		self._add_assistant(recovered=False)
 		frappe.db.commit()
-		with patch("jarvis.selfhost.is_self_hosted", return_value=False):
-			turn_recovery.recovery_rate_watch()
+		turn_recovery.recovery_rate_watch()
 		self.assertEqual(frappe.db.count("Error Log", {"method": self.TITLE}), 0)
 
 	def test_above_threshold_logs_exactly_one(self):
@@ -799,8 +779,7 @@ class TestRecoveryRateWatch(FrappeTestCase):
 		for _ in range(2):
 			self._add_assistant(recovered=False)
 		frappe.db.commit()
-		with patch("jarvis.selfhost.is_self_hosted", return_value=False):
-			turn_recovery.recovery_rate_watch()
+		turn_recovery.recovery_rate_watch()
 		self.assertEqual(frappe.db.count("Error Log", {"method": self.TITLE}), 1)
 
 	def test_second_run_within_20h_still_exactly_one(self):
@@ -809,15 +788,6 @@ class TestRecoveryRateWatch(FrappeTestCase):
 		for _ in range(2):
 			self._add_assistant(recovered=False)
 		frappe.db.commit()
-		with patch("jarvis.selfhost.is_self_hosted", return_value=False):
-			turn_recovery.recovery_rate_watch()
-			turn_recovery.recovery_rate_watch()
+		turn_recovery.recovery_rate_watch()
+		turn_recovery.recovery_rate_watch()
 		self.assertEqual(frappe.db.count("Error Log", {"method": self.TITLE}), 1)
-
-	def test_self_hosted_returns_early_no_query(self):
-		for _ in range(6):
-			self._add_assistant(recovered=True)
-		frappe.db.commit()
-		with patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			turn_recovery.recovery_rate_watch()
-		self.assertEqual(frappe.db.count("Error Log", {"method": self.TITLE}), 0)

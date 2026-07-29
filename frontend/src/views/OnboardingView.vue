@@ -35,7 +35,7 @@
 
 					<!-- step rail: flat progress segments with labels (design.md §4.3 —
 					 no numbered circles, no connector lines). Hidden on the intro
-					 tour (chromeless) and on the single-step self-host track. -->
+					 tour (chromeless). -->
 					<div
 						v-if="railIndex >= 0"
 						class="my-4 flex w-full max-w-[720px] items-stretch gap-2"
@@ -190,9 +190,6 @@
 										name="chevron-left"
 										class="h-3.5 w-3.5 text-ink-gray-5"
 									/>Back to tour
-								</button>
-								<button v-if="canSelfHost" class="ob-link" @click="enterSelfhost">
-									Self-hosted? Connect your own openclaw
 								</button>
 								<Button
 									variant="solid"
@@ -741,162 +738,6 @@
 								/>
 							</div>
 						</section>
-
-						<!-- ===== Self-host (reached via the quiet Plan-step link; logic
-							 unchanged, field names/args match test_connection /
-							 save_self_hosted verbatim) ===== -->
-						<section v-else-if="state.step === 'selfhost'" class="ob-screen">
-							<div class="ob-body">
-								<div class="ob-head">
-									<h1>Connect your openclaw</h1>
-									<p>
-										Point {{ agentName }} at <b>your own</b> openclaw server.
-										{{ agentName }}
-										connects over HTTP with a bearer token. No Aerele
-										persona/skills. Validate first, then connect.
-									</p>
-								</div>
-								<div class="mx-auto flex max-w-[620px] flex-col gap-3.5">
-									<FormControl
-										type="text"
-										variant="outline"
-										label="openclaw URL"
-										v-model="state.shUrl"
-										placeholder="http://host.docker.internal:19060"
-									/>
-									<FormControl
-										type="password"
-										variant="outline"
-										label="Gateway token"
-										v-model="state.shToken"
-										placeholder="paste your openclaw gateway token"
-										autocomplete="off"
-									/>
-									<FormControl
-										type="checkbox"
-										v-model="state.shStream"
-										label="Stream responses token-by-token (recommended)"
-									/>
-									<FormControl
-										type="checkbox"
-										v-model="state.shDeep"
-										label="Run deep chat test (slower, sends one message)"
-									/>
-									<div>
-										<Button
-											label="Test connection"
-											:disabled="state.shTestBusy"
-											:loading="state.shTestBusy"
-											loading-text="Testing…"
-											@click="runSelfHostTest"
-										/>
-									</div>
-									<div v-if="state.shTestBusy" class="ob-note">Testing…</div>
-									<div
-										v-else-if="state.shTestResult"
-										class="mb-1 mt-3.5 text-p-sm leading-relaxed"
-									>
-										<div
-											class="mb-1 font-medium"
-											:class="
-												state.shTestResult.ok
-													? 'text-ink-green-3'
-													: 'text-ink-red-3'
-											"
-										>
-											{{
-												state.shTestResult.ok
-													? "All required checks passed."
-													: "Some checks failed. Fix them and retry."
-											}}
-										</div>
-										<div
-											v-for="(c, i) in state.shTestResult.checks || []"
-											:key="i"
-											class="flex items-start gap-1.5 py-0.5"
-											:class="
-												c.advisory ? 'text-ink-gray-5' : 'text-ink-gray-8'
-											"
-										>
-											<FeatherIcon
-												v-if="c.ok"
-												name="check-circle"
-												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-green-3"
-											/>
-											<FeatherIcon
-												v-else-if="c.advisory"
-												name="alert-triangle"
-												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-amber-3"
-											/>
-											<FeatherIcon
-												v-else
-												name="x-circle"
-												class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-red-3"
-											/>
-											<span
-												><b>{{ c.check }}</b> · {{ c.detail || ""
-												}}<span
-													v-if="c.advisory"
-													class="italic text-ink-gray-5"
-												>
-													· advisory</span
-												></span
-											>
-										</div>
-									</div>
-									<Banner
-										v-if="state.shWarning"
-										type="warning"
-										:message="state.shWarning"
-									/>
-									<Banner
-										v-if="state.shErr"
-										type="error"
-										:message="state.shErr"
-										role="alert"
-										aria-live="polite"
-									/>
-									<div v-if="state.finishing" class="ob-note">
-										Finishing setup…
-									</div>
-									<Banner
-										v-else-if="state.finishNote"
-										type="info"
-										:message="state.finishNote"
-									>
-										<template #action>
-											<Button
-												variant="solid"
-												:label="`Continue to ${agentName}`"
-												@click="forceContinue"
-											/>
-										</template>
-									</Banner>
-								</div>
-							</div>
-							<div class="ob-foot">
-								<!-- Stay disabled through the post-save readiness poll (finishing) too;
-									 both flags drop on the failure paths so retry stays possible. -->
-								<button
-									class="ob-back"
-									:disabled="state.shSaveBusy || state.finishing"
-									@click="backFromSelfhost"
-								>
-									<FeatherIcon
-										name="chevron-left"
-										class="h-3.5 w-3.5 text-ink-gray-5"
-									/>Back
-								</button>
-								<Button
-									variant="solid"
-									:disabled="state.shSaveBusy || state.finishing"
-									:loading="state.shSaveBusy || state.finishing"
-									loading-text="Connecting…"
-									label="Connect"
-									@click="onSelfHostSave"
-								/>
-							</div>
-						</section>
 					</div>
 				</div>
 			</div>
@@ -918,7 +759,6 @@ import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
 import cashfreeLogo from "@/assets/cashfree.png";
 import {
 	STEPS_MANAGED,
-	STEPS_SELFHOST,
 	nextStep,
 	prevStep,
 	verifyPollAction,
@@ -936,8 +776,6 @@ import {
 	checkAccountReconnect,
 	startSignup,
 	finishPayment,
-	saveSelfHosted,
-	testSelfHostConnection,
 	getAccountDefaults,
 	syncConnection,
 } from "@/api";
@@ -946,15 +784,8 @@ import { agentName } from "@/branding";
 
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
-// Self-host connect (save_self_hosted / test_connection) stays System-Manager-
-// ONLY (owner trust-boundary decision). Managed onboarding is widened to the
-// Jarvis Admin tier, but the self-host side-branch entry point + its auto-
-// reconcile must be hidden/short-circuited for a Jarvis-Admin-not-SM so they
-// never land on a step whose save 403s. NOT `|| window.is_jarvis_admin`.
-const canSelfHost = !!window.is_system_manager;
-
-// The 4 named wizard steps shown on the rail. The intro tour and the
-// self-host track are chromeless (no rail entry).
+// The 4 named wizard steps shown on the rail. The intro tour is chromeless
+// (no rail entry).
 const RAIL = [
 	{ id: "plan", label: "Plan" },
 	{ id: "details", label: "Details" },
@@ -969,15 +800,11 @@ const FRAME_SUBS = {
 	details: "Your details",
 	pay: "Review & pay",
 	connect: `Give ${agentName} a brain`,
-	selfhost: "Self-hosted setup",
 };
 
 // ---- step machine -----------------------------------------------------------
-// `state.step` walks STEPS_MANAGED (intro → plan → details → pay → connect);
-// the self-host track is a side branch entered from the Plan step's quiet link
-// (enterSelfhost/backFromSelfhost below) and via reconcile.
+// `state.step` walks STEPS_MANAGED (intro → plan → details → pay → connect).
 const state = reactive({
-	mode: "managed",
 	step: "intro",
 	// details (Your Details step)
 	email: "",
@@ -1024,26 +851,16 @@ const state = reactive({
 	// has no container to configure).
 	provisioning: false,
 	provisionErr: "",
-	// post-save readiness recheck (Connect + self-host both funnel through
+	// post-save readiness recheck (Connect funnels through
 	// afterSaveRecheckReady/forceContinue below). finishSubtitle swaps the
 	// spinner's default line for a calm "this can take a few minutes" message
 	// once the sync is confirmed still-converging server-side (F2 pending).
 	finishing: false,
 	finishNote: "",
 	finishSubtitle: "",
-	// self-host (renderSelfHost / renderShResults, jarvis_onboarding.js ~296-376)
-	shUrl: "",
-	shToken: "",
-	shStream: true,
-	shDeep: false,
-	shTestBusy: false,
-	shTestResult: null,
-	shSaveBusy: false,
-	shErr: "",
-	shWarning: "",
 });
 
-const steps = computed(() => (state.mode === "selfhost" ? STEPS_SELFHOST : STEPS_MANAGED));
+const steps = computed(() => STEPS_MANAGED);
 const selectedPlan = computed(() => state.plans.find((p) => p.name === state.planName) || {});
 const railIndex = computed(() => RAIL.findIndex((r) => r.id === state.step));
 const frameSub = computed(() => FRAME_SUBS[state.step] || "Set up your workspace");
@@ -1151,18 +968,6 @@ function goBack() {
 function startWizard() {
 	state.step = "plan";
 }
-// Self-host is a side branch off the Plan step, not a rail step. Entering and
-// leaving it flips `state.mode` so `steps` (and goNext from a reconciled
-// selfhost resume) stay coherent.
-function enterSelfhost() {
-	state.mode = "selfhost";
-	state.step = "selfhost";
-}
-function backFromSelfhost() {
-	state.mode = "managed";
-	state.step = "plan";
-}
-
 // ---- on-mount reconcile: resume a mid-flight signup ------------------------
 // A mid-flight signup must land on the right step, NOT the intro tour - the
 // tour shows only for a fresh, not-started onboarding (the default "intro"
@@ -1189,14 +994,6 @@ function backFromSelfhost() {
 async function reconcileMidFlightSignup() {
 	try {
 		const ready = await isReadyForChat();
-		if (ready && ready.reason === "selfhost_connection" && canSelfHost) {
-			// Self-host connect is SM-only; a Jarvis-Admin-not-SM must not be
-			// routed into the selfhost step (its save 403s). Fall through to the
-			// default step for them.
-			state.mode = "selfhost";
-			state.step = "selfhost";
-			return;
-		}
 		if (
 			ready &&
 			(ready.reason === "llm_credentials" || ready.reason === "llm_pool_provisioning")
@@ -1207,7 +1004,6 @@ async function reconcileMidFlightSignup() {
 			// whose sync-status poller shows the pending/failed state. Mark the
 			// resume so the Connect step hides Back (no local signup context to
 			// return to - see state.reconciledConnect).
-			state.mode = "managed";
 			state.step = "connect";
 			state.reconciledConnect = true;
 			return;
@@ -1225,7 +1021,6 @@ async function reconcileMidFlightSignup() {
 		// place that knows every gateway/shape, so the two cannot drift again.
 		const pay = await checkSignupPaymentState();
 		if (pay && (pay.pending_verification || verifyPollAction(pay).kind === "checkout")) {
-			state.mode = "managed";
 			state.step = "pay";
 			state.payPhase = "verify";
 		}
@@ -1730,16 +1525,16 @@ async function openRazorpayCheckout(d) {
 	rz.open();
 }
 
-// ---- post-save readiness recheck (Connect + self-host) ----------------------
+// ---- post-save readiness recheck (Connect) ----------------------------------
 // CRITICAL: the router's first-run guard (router/index.js) caches its
 // is_ready_for_chat probe in a module-level `readyPromise` for the lifetime
 // of the page - it never invalidates mid-session. So a plain
 // `router.push({ name: "Chat" })` right after completing onboarding would
 // read that STALE "not ready" cache and bounce straight back to
-// /onboarding. Both completion paths (onConnected below and
-// onSelfHostSave) instead do a FULL PAGE RELOAD via
-// window.location.assign("/jarvis/") once ready, which re-imports the
-// router module from scratch and re-runs the readiness check fresh.
+// /onboarding. The completion path (onConnected below) instead does a FULL
+// PAGE RELOAD via window.location.assign("/jarvis/") once ready, which
+// re-imports the router module from scratch and re-runs the readiness check
+// fresh.
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Defect-2 fix (2026-07-23 out-of-quota trace): this used to be 5 attempts * 800ms -
@@ -1758,8 +1553,8 @@ const READINESS_POLL_ATTEMPTS = 30;
 const READINESS_POLL_INTERVAL_MS = 2500;
 
 // Poll is_ready_for_chat a few times (short backoff) rather than trusting a
-// single check - the save itself (pool save or self-host connect) can
-// return before whatever it kicked off (e.g. proxy provisioning) is fully
+// single check - the save itself (a pool save) can return before whatever
+// it kicked off (e.g. proxy provisioning) is fully
 // reflected. Fails closed (ready:false) on a persistent error; callers treat
 // "not ready yet" as advisory, not fatal - see finishNote below.
 //
@@ -1832,15 +1627,12 @@ async function waitForSyncTerminal(maxMs = 15 * 60 * 1000, intervalMs = 3000) {
 // either auto-reload (the common case) or leave a "still finishing" note
 // with a manual continue button so the user is never stuck on a spinner.
 //
-// followSync is ONLY for the managed pool path (save_llm_pool writes a
-// "pending:" status synchronously before returning, so a sync from THIS
-// save is observable as pending right now). The self-host save never
-// touches last_sync_status, and a no-op / container-owned managed save
-// enqueues nothing - in both cases the field may hold a STALE terminal
-// "failed:" (or a stale "pending:" from an abandoned earlier attempt),
-// which must not block an actually-ready tenant. Hence: only follow a
-// sync we can see in flight, and never gate the self-host path on this
-// field at all.
+// followSync is ONLY for the pool path (save_llm_pool writes a "pending:"
+// status synchronously before returning, so a sync from THIS save is
+// observable as pending right now). A no-op / container-owned save enqueues
+// nothing, and the field may then hold a STALE terminal "failed:" (or a stale
+// "pending:" from an abandoned earlier attempt), which must not block an
+// actually-ready tenant. Hence: only follow a sync we can see in flight.
 async function afterSaveRecheckReady({ followSync = false } = {}) {
 	state.finishNote = "";
 	state.finishSubtitle = "";
@@ -1924,68 +1716,9 @@ async function saveConnect() {
 	}
 }
 
-// ---- Self-host (renderSelfHost / renderShResults / runSelfHostTest /
-// saveSelfHost, jarvis_onboarding.js ~296-376) --------------------------------
-async function runSelfHostTest() {
-	state.shErr = "";
-	const url = (state.shUrl || "").trim();
-	if (!url) {
-		state.shErr = "Enter the openclaw URL first.";
-		return;
-	}
-	state.shTestBusy = true;
-	state.shTestResult = null;
-	try {
-		const r = await testSelfHostConnection({
-			base_url: url,
-			token: (state.shToken || "").trim(),
-			deep: state.shDeep ? 1 : 0,
-		});
-		state.shTestResult = r || {};
-	} catch (e) {
-		state.shErr = errMsg(e);
-	} finally {
-		state.shTestBusy = false;
-	}
-}
-
-async function onSelfHostSave() {
-	state.shErr = "";
-	state.shWarning = "";
-	const url = (state.shUrl || "").trim();
-	const tok = (state.shToken || "").trim();
-	if (!url || !tok) {
-		state.shErr = "openclaw URL and gateway token are both required.";
-		return;
-	}
-	state.shSaveBusy = true;
-	try {
-		const r = await saveSelfHosted({
-			base_url: url,
-			token: tok,
-			deep: state.shDeep ? 1 : 0,
-			stream: state.shStream ? 1 : 0,
-		});
-		const m = r || {};
-		state.shSaveBusy = false;
-		if (m.ok) {
-			// Advisory only (e.g. no Self-Host Tool User set yet) - the connection
-			// itself is already saved, so this doesn't block the readiness recheck.
-			if (m.warning) state.shWarning = m.warning;
-			await afterSaveRecheckReady();
-		} else {
-			state.shTestResult = m.result || {};
-			state.shErr = "Validation failed. Fix the checks above, then retry.";
-		}
-	} catch (e) {
-		state.shSaveBusy = false;
-		state.shErr = errMsg(e);
-	}
-}
-
 // Enter-step triggers: load the plan list on reaching "plan" (first entry
-// from the tour, or a "Back" from selfhost/details), and probe dev-mode +
-// preload Razorpay on reaching "pay".
+// from the tour, or a "Back" from details), and probe dev-mode + preload
+// Razorpay on reaching "pay".
 watch(
 	() => state.step,
 	(s) => {
@@ -2165,7 +1898,7 @@ onMounted(async () => {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
-/* quiet self-host link on the Plan footer — links look like links */
+/* quiet inline links on a step footer — links look like links */
 .ob-link {
 	font-size: 12.5px;
 	color: var(--text-3);

@@ -189,7 +189,7 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 		# A bare lifecycle:error frame (as opposed to a relay:error terminal)
 		# no longer occurs on the real managed path (relay_turn_events strips
 		# lifecycle frames), but _handle_event_inner's lifecycle-error branch
-		# is still live for self-hosted, so this pins that shared dispatch
+		# is still live, so this pins that shared dispatch
 		# still marks the row errored regardless of which branch drove it.
 		fake_sess.relay_turn_events.return_value = _fake_event_stream(
 			[
@@ -995,12 +995,9 @@ class TestRunAgentTurnRelayStreamTelemetry(FrappeTestCase):
 
 
 class TestRunAgentTurnThinkingDirective(FrappeTestCase):
-	"""The /think directive is cache-unsafe as a message-body prefix on the
-	managed path (it would bust the OpenAI prefix cache the warm-up
-	populates), so managed sends it as the chat_send ``thinking`` param and
-	leaves user_message unprefixed. Self-hosted has no such param (it goes
-	over the HTTP OpenAI-compatible surface) so it keeps inlining the
-	directive as the first bytes of the message body."""
+	"""The /think directive is cache-unsafe as a message-body prefix (it would
+	bust the OpenAI prefix cache the warm-up populates), so the turn sends it as
+	the chat_send ``thinking`` param and leaves user_message unprefixed."""
 
 	def setUp(self):
 		openclaw_session_pool._POOL.clear()
@@ -1032,21 +1029,6 @@ class TestRunAgentTurnThinkingDirective(FrappeTestCase):
 		message_sent = args[1]
 		self.assertNotIn("/think", message_sent)
 		self.assertEqual(kwargs.get("thinking"), "high")
-
-	def test_self_hosted_message_still_prefixed(self):
-		with patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			with patch("jarvis.chat.openclaw_http_client.stream_agent_turn") as stream_mock:
-				stream_mock.return_value = _fake_event_stream(
-					[
-						{"kind": "lifecycle", "phase": "end"},
-					]
-				)
-				with patch("jarvis.chat.worker.publish_to_user"):
-					run_agent_turn(self.conv, self.user_msg, run_id="r1")
-
-		args, kwargs = stream_mock.call_args
-		message_sent = args[2]
-		self.assertTrue(message_sent.startswith("/think high\n"))
 
 
 class TestRichOutputsRouting(FrappeTestCase):

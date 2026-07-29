@@ -78,7 +78,6 @@ describe("readiness verdict ownership", () => {
 	it("never lets both accessors claim one reason", async () => {
 		const reasons = [
 			"signup",
-			"selfhost_connection",
 			"llm_credentials",
 			"llm_pool_provisioning",
 			"llm_provisioning",

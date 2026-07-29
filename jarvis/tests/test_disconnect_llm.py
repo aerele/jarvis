@@ -219,15 +219,6 @@ class TestDisconnectLlm(_RT3SettingsTestCase):
 		m.assert_not_called()
 		self.assertTrue(out["disconnected"])
 
-	def test_skips_the_admin_call_on_a_self_hosted_bench(self):
-		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=True),
-			patch("jarvis.admin_client.post_disconnect_llm") as m,
-		):
-			out = onboarding.disconnect_llm()
-		m.assert_not_called()
-		self.assertTrue(out["disconnected"])
-
 	def test_admin_credentials_predicate_accepts_either_auth_shape(self):
 		class _Stub:
 			def __init__(self, **values):

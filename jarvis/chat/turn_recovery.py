@@ -183,8 +183,8 @@ def _finalize(row: dict, text: str) -> None:
 	conv, owner, name = row["conversation"], row["owner"], row["name"]
 	# Phase-0 admission: a recovered turn is a terminal settlement of the
 	# conversation's dispatching Turn row - close it (done) + promote the next
-	# queued turn. Flag-gated + best-effort inside admission (self-host / flag-off
-	# are unaffected). Keyed by conversation because recovery works off Message
+	# queued turn. Flag-gated + best-effort inside admission (a flag-off bench is
+	# unaffected). Keyed by conversation because recovery works off Message
 	# rows and per-conversation single-flight makes the dispatching turn unique.
 	_admission_settle_conv(conv, "done")
 	publish_to_user(
@@ -232,14 +232,13 @@ def _finalize(row: dict, text: str) -> None:
 	# A recovered turn completed like any other, so it earns the same post-
 	# turn wiki nudge as the worker's clean exit. Fire-and-forget: all gates
 	# re-check inside the short-queue job; a failure never affects recovery.
-	# Cheap pre-gate mirrors the clean-exit path so wiki-off / self-host
-	# deployments never spawn the per-turn job (owner is the only sender
-	# identity a recovered turn carries).
+	# Cheap pre-gate mirrors the clean-exit path so wiki-off deployments never
+	# spawn the per-turn job (owner is the only sender identity a recovered turn
+	# carries).
 	try:
-		from jarvis import selfhost
 		from jarvis.chat import wiki
 
-		if not selfhost.is_self_hosted() and wiki.wiki_enabled():
+		if wiki.wiki_enabled():
 			frappe.enqueue(
 				"jarvis.chat.wiki.maybe_nudge",
 				queue="short",
@@ -302,11 +301,6 @@ def _active_map(sess: OpenclawSession) -> dict:
 
 def recover_pending_turns(limit: int = 20) -> dict:
 	"""Scheduler entry: finalize managed turns stuck in the recovering state."""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return {"skipped": "self-hosted"}
-
 	# Query rows FIRST (so we never load Settings on an empty bench, #14).
 	# Ordered conversation, seq DESC so the first row per conversation is the
 	# latest (used for the no-bleed dedup, #2).
@@ -424,10 +418,6 @@ def recover_now(conversation_id: str) -> str:
 	does not wait for the cron. Dedicated connection - the pooled WS may be
 	the very thing that just died. Idempotent vs the cron via
 	_conditional_clear inside _finalize/_error."""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return "skipped"
 	rows = frappe.db.sql(
 		"""
 		SELECT m.name, m.conversation, c.session_key, c.owner,
@@ -473,11 +463,6 @@ def recovery_rate_watch() -> None:
 	it - deduped against an existing Error Log with the same title in the
 	last _RATE_WATCH_DEDUPE_HOURS hours, so a sustained problem alarms
 	roughly once a day rather than every hour this cron fires."""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return
-
 	since_24h = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-24)
 	row = frappe.db.sql(
 		"""

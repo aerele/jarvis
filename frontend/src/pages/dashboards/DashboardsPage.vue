@@ -44,22 +44,6 @@
 			/>
 
 			<!-- ============ Builder tab: canvas over chat, drag-split ============ -->
-			<!-- self-hosted benches have no gateway canvas route, so chat can't
-			     produce a rendered dashboard - say so instead of an eternal empty
-			     canvas (caps.canvas_available from get_dashboards_caps). -->
-			<div
-				v-if="activeTab === 'builder' && caps.canvas_available === false"
-				class="flex items-start gap-2 border-b bg-surface-amber-1 px-4 py-2"
-			>
-				<FeatherIcon
-					name="alert-triangle"
-					class="mt-0.5 size-4 shrink-0 text-ink-amber-3"
-				/>
-				<span class="text-sm text-ink-gray-7">
-					Live canvas rendering isn't available on this deployment, so chat can't draw a
-					dashboard here. You can still open and view saved dashboards.
-				</span>
-			</div>
 			<!-- v-show, NOT v-if: switching to Saved must not unmount the chat
 			     pane. Its socket listener is torn down on unmount and the agent's
 			     kind:"canvas" frame is a ONE-SHOT publish, so a build that lands
@@ -252,7 +236,6 @@ const caps = ref({
 	max_sources: 0,
 	max_html_chars: 0,
 	max_rows: 0,
-	canvas_available: false,
 });
 const accessDenied = ref(false);
 

@@ -11,7 +11,6 @@
 			</template>
 			<template #right-header>
 				<Button
-					v-if="!selfHosted"
 					icon="refresh-cw"
 					variant="ghost"
 					:tooltip="'Refresh'"
@@ -21,24 +20,9 @@
 			</template>
 		</LayoutHeader>
 
-		<!-- self-host: feature fully disabled (plan §13.3 / §7 T5) -->
-		<div
-			v-if="selfHosted"
-			class="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
-		>
-			<FeatherIcon name="cloud-off" class="size-8 text-ink-gray-5" />
-			<span class="text-lg font-medium text-ink-gray-8">
-				Behavioural learning is available on managed plans
-			</span>
-			<span class="max-w-md text-p-base text-ink-gray-6">
-				Pattern learning mines this site's history into reviewable defaults. It runs only
-				on Jarvis-managed benches and is disabled on self-hosted installs.
-			</span>
-		</div>
-
 		<!-- two panes at xl+ (left ~60% decision queue · right ~40% decided log);
 		     stacked below xl so nothing overlaps at laptop widths -->
-		<div v-else class="min-h-0 flex-1 overflow-y-auto">
+		<div class="min-h-0 flex-1 overflow-y-auto">
 			<div class="mx-auto grid w-full max-w-7xl grid-cols-1 gap-6 px-5 py-5 xl:grid-cols-5">
 				<!-- ══════════════ LEFT · To review ══════════════ -->
 				<section class="flex min-w-0 flex-col gap-4 xl:col-span-3">
@@ -1771,8 +1755,7 @@
 // chatPrefill with autoSend, so ChatView opens a FRESH conversation and sends
 // it as the first message. Both fetchers use the useListPage monotonic-reqId
 // guard so reset/load-more/search races never interleave. Settings + run
-// telemetry live in AnalysisTab. Managed-only: get_learning_status reports
-// self_hosted → this renders the managed-only empty state.
+// telemetry live in AnalysisTab.
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import {
 	Avatar,
@@ -1889,7 +1872,6 @@ const SNOOZE_DAYS = [7, 30, 90];
 const ACK_NOTE = "Acknowledged - insight only";
 
 // ── state ────────────────────────────────────────────────────────────────────
-const selfHosted = ref(false);
 const acting = ref(""); // pattern name (or "__batch__") currently acting
 
 // slim status slice (the full telemetry lives on the Analysis tab): enabled
@@ -2127,19 +2109,17 @@ const emptyDescription = computed(() => {
 
 // ── loaders ──────────────────────────────────────────────────────────────────
 // Review visibility is DECOUPLED from Analysis now (DESIGN.md §6): the tab's own
-// probe is get_review_access (reviewer set, self-host aware), NOT
+// probe is get_review_access (reviewer set), NOT
 // get_learning_status (which is admin-gated and 403s a plain reviewer). It also
 // seeds the Promotions chip count so the queue reads before its list loads.
 async function loadStatus() {
 	try {
 		const st = await getReviewAccess();
-		selfHosted.value = !!st.self_hosted;
 		promo.total = st.pending_promotions || 0;
 		skillPromo.total = st.pending_skill_promotions || 0;
 		pendingCandidates.value = st.pending_patterns || 0;
 	} catch (e) {
 		// parent mounts this only for the reviewer set; a failure here = no access
-		selfHosted.value = false;
 		toast.error(errMsg(e));
 	}
 	// Best-effort Analysis niceties for reviewers who ALSO hold the admin role:
@@ -2849,7 +2829,6 @@ function startApplyPoll() {
 // ── init ─────────────────────────────────────────────────────────────────────
 onMounted(async () => {
 	await loadStatus();
-	if (selfHosted.value) return;
 	fetchBoard("reset");
 	fetchDecided("reset");
 	// resume progress if an Apply is already in flight (page reloaded mid-push)

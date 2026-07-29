@@ -11,7 +11,6 @@ import uuid
 
 import frappe
 
-from jarvis import selfhost
 from jarvis.chat.openclaw_client import OpenclawSession
 
 # Cooldown between warm-ups for one bench. 2026-07 latency plan, Phase
@@ -98,10 +97,8 @@ def _resolve_default_model_and_provider(settings) -> tuple[str, str | None]:
 def warm_prefix() -> bool:
 	"""Fire one throwaway warm-up turn for this bench's container. Returns
 	True if a warm-up was fired, False if skipped (debounced, not
-	configured, self-hosted) or on any error. Never raises."""
+	configured) or on any error. Never raises."""
 	try:
-		if selfhost.is_self_hosted():
-			return False
 		cache = frappe.cache()
 		key = _warm_cooldown_key()
 		if cache.get_value(key):
@@ -165,11 +162,9 @@ def warm_prefix() -> bool:
 def keep_warm_if_active() -> None:
 	"""Scheduler entry: keep the prefix cache warm for benches with recent
 	chat activity, so a returning user's first turn is warm after an idle
-	gap. No-op on idle or self-hosted benches. Runs on the existing
-	scheduler; the per-bench debounce in warm_prefix bounds frequency."""
+	gap. No-op on idle benches. Runs on the existing scheduler; the per-bench
+	debounce in warm_prefix bounds frequency."""
 	try:
-		if selfhost.is_self_hosted():
-			return
 		cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-30)
 		recent = frappe.db.exists("Jarvis Chat Message", {"creation": [">", cutoff]})
 		if not recent:
@@ -200,8 +195,6 @@ def enqueue_warm_if_due() -> None:
 	path - the connect + warm runs off the web worker. Best-effort, never
 	raises, and debounced so repeated calls do not fan out into jobs."""
 	try:
-		if selfhost.is_self_hosted():
-			return
 		if frappe.cache().get_value(_warm_cooldown_key()):
 			return
 		frappe.enqueue("jarvis.chat.prewarm.warm_prefix", queue="short")

@@ -3,9 +3,9 @@
 Frappe only encrypts a Password field (into __Auth) when the value passes
 through Document._save_passwords() - i.e. a real doc.save(). Several flows
 here deliberately write via db_set to avoid re-triggering on_update's admin
-sync (onboarding.write_connection, chat/device.py, api.rotate_agent_token,
-selfhost.save_self_hosted); before the fix each of those wrote the raw
-secret straight into the Single's row in tabSingles.
+sync (onboarding.write_connection, chat/device.py, api.rotate_agent_token);
+before the fix each of those wrote the raw secret straight into the Single's
+row in tabSingles.
 
 These tests pin the fixed behavior of jarvis._password_utils and every
 call site:
@@ -45,11 +45,6 @@ _PLAIN_FIELDS = (
 	"agent_token_issued_at",
 	"chat_device_id",
 	"chat_device_public_key",
-	"deployment_mode",
-	"selfhost_stream",
-	"selfhost_last_validated_at",
-	"selfhost_last_validation",
-	"selfhost_tool_user",
 )
 
 
@@ -269,22 +264,6 @@ class TestRotateAgentToken(_SecretsSnapshotTestCase):
 		self.assert_encrypted_at_rest("agent_token", new_token)
 
 
-class TestSaveSelfHostedToken(_SecretsSnapshotTestCase):
-	def test_save_self_hosted_encrypts_agent_token(self):
-		"""The audit-missed site: a self-hosted bench persisted the
-		customer-supplied openclaw bearer token via bare db_set."""
-		from jarvis import selfhost
-
-		ok_result = {"ok": True, "checks": [], "openclaw_version": None, "models": ["m1"]}
-		with patch("jarvis.selfhost.validate_connection", return_value=ok_result):
-			out = selfhost.save_self_hosted(base_url="http://127.0.0.1:18789", token="selfhost-bearer-tok-42")
-
-		self.assertTrue(out["ok"], f"save must succeed, got: {out}")
-		self.assert_encrypted_at_rest("agent_token", "selfhost-bearer-tok-42")
-		s = frappe.get_single(SETTINGS)
-		self.assertEqual(s.deployment_mode, "Self-Hosted")
-
-
 class TestV111EncryptPlaintextPatch(_SecretsSnapshotTestCase):
 	"""The v1_11 migration: plaintext column values move to __Auth + mask."""
 
@@ -349,7 +328,7 @@ class TestV111EncryptPlaintextPatch(_SecretsSnapshotTestCase):
 		self.assert_encrypted_at_rest("jarvis_admin_api_key", "plain-key-run-twice")
 
 	def test_patch_purges_stale_auth_row_behind_empty_column(self):
-		"""The pre-fix clear paths (clear_credentials, selfhost blank-token)
+		"""The pre-fix clear path (clear_credentials)
 		db_set("") the column WITHOUT remove_encrypted_password, so the
 		REVOKED secret survived in __Auth - and get_password falls through to
 		__Auth whenever the column is falsy, resurrecting it. The patch must

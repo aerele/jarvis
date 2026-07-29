@@ -450,15 +450,14 @@ class TestRunMethodParkDoesNotSandboxExecute(FrappeTestCase):
 		self.assertEqual(disp.call_args.args[0], "run_method")
 
 
-class TestConfirmSelfHostOwnerBinding(FrappeTestCase):
-	"""#1/#5/#6: in self-host the gate binds the token to the CONVERSATION
-	OWNER (the operator whose browser is subscribed), NOT the restricted tool
-	user the model path runs as. The operator confirms from their own browser
-	session (== the owner), and the confirmed write EXECUTES as the stored
-	``exec_user`` (the tool user) so a confirm never exceeds the model path's
-	scope. Managed mode is unchanged (owner == exec_user)."""
+class TestConfirmExecUserBinding(FrappeTestCase):
+	"""#1/#5/#6: the gate binds the token to the CONVERSATION OWNER (the human
+	whose browser is subscribed), and the confirmed write EXECUTES as the stored
+	``exec_user`` (the scoped model-execution identity) so a confirm never
+	exceeds the model path's scope. When the two are the same user the
+	impersonation no-ops."""
 
-	_TOOL_USER = "jarvis-selfhost-tool@example.com"
+	_EXEC_USER = "jarvis-exec-identity@example.com"
 
 	def _ensure_user(self, email):
 		if not frappe.db.exists("User", email):
@@ -466,17 +465,17 @@ class TestConfirmSelfHostOwnerBinding(FrappeTestCase):
 				{
 					"doctype": "User",
 					"email": email,
-					"first_name": "SelfHost",
+					"first_name": "ExecIdentity",
 					"send_welcome_email": 0,
 				}
 			).insert(ignore_permissions=True)
 		return email
 
-	def test_selfhost_confirm_by_owner_executes_as_exec_user(self):
+	def test_confirm_by_owner_executes_as_exec_user(self):
 		# The gate binds owner=operator (the browser session, Administrator here)
 		# and exec_user=tool_user. The operator confirms from their own session;
 		# the write dispatches under the tool user, not the browser session (#6).
-		tool_user = self._ensure_user(self._TOOL_USER)
+		tool_user = self._ensure_user(self._EXEC_USER)
 		operator = frappe.session.user  # browser session == conversation owner
 		token = pending_confirm.mint(
 			conversation="",
@@ -501,11 +500,7 @@ class TestConfirmSelfHostOwnerBinding(FrappeTestCase):
 		before_data = frappe.session.data
 		frappe.session.data.csrf_token = "SENTINEL-SH-020"
 
-		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=True),
-			patch("jarvis.api._selfhost_tool_user", return_value=tool_user),
-			patch("jarvis.api.dispatch", side_effect=_spy_dispatch),
-		):
+		with patch("jarvis.api.dispatch", side_effect=_spy_dispatch):
 			res = confirm_tool(token)
 		self.assertTrue(res["ok"])
 		# #6: executed under the scoped tool user, not the browser-session owner.
@@ -522,8 +517,8 @@ class TestConfirmSelfHostOwnerBinding(FrappeTestCase):
 		again = confirm_tool(token)
 		self.assertFalse(again["ok"])
 
-	def test_selfhost_confirm_still_rejects_guest(self):
-		tool_user = self._ensure_user(self._TOOL_USER)
+	def test_confirm_still_rejects_guest(self):
+		tool_user = self._ensure_user(self._EXEC_USER)
 		operator = frappe.session.user
 		token = pending_confirm.mint(
 			conversation="",
@@ -536,11 +531,7 @@ class TestConfirmSelfHostOwnerBinding(FrappeTestCase):
 		original = frappe.session.user
 		frappe.set_user("Guest")
 		try:
-			with (
-				patch("jarvis.selfhost.is_self_hosted", return_value=True),
-				patch("jarvis.api._selfhost_tool_user", return_value=tool_user),
-				self.assertRaises(frappe.PermissionError),
-			):
+			with self.assertRaises(frappe.PermissionError):
 				confirm_tool(token)
 		finally:
 			frappe.set_user(original)
@@ -552,41 +543,40 @@ class TestConfirmSelfHostOwnerBinding(FrappeTestCase):
 		desc_ok = "jarvis-test-managed-owner-ok-022"
 		desc_bad = "jarvis-test-managed-owner-bad-022"
 		session_user = frappe.session.user  # Administrator in tests
-		with patch("jarvis.selfhost.is_self_hosted", return_value=False):
-			# Token minted under the session user -> confirms + executes.
-			ok_token = pending_confirm.mint(
-				conversation="",
-				owner=session_user,
-				tool="create_doc",
-				args={"doctype": "ToDo", "values": {"description": desc_ok}},
-				run_id="",
-			)
-			# Managed mode: owner == exec == session user, so confirm_tool's
-			# impersonate no-ops - but the cookie session must STILL survive
-			# intact (a bare unconditional frappe.set_user would gut it even for
-			# the same user and log the operator out).
-			before_sid = frappe.session.sid
-			before_data = frappe.session.data
-			frappe.session.data.csrf_token = "SENTINEL-MANAGED-022"
-			res = confirm_tool(ok_token)
-			self.assertTrue(res["ok"])
-			self.assertTrue(frappe.db.exists("ToDo", {"description": desc_ok}))
-			self.assertEqual(frappe.session.sid, before_sid)
-			self.assertIs(frappe.session.data, before_data)
-			self.assertEqual(frappe.session.data.csrf_token, "SENTINEL-MANAGED-022")
+		# Token minted under the session user -> confirms + executes.
+		ok_token = pending_confirm.mint(
+			conversation="",
+			owner=session_user,
+			tool="create_doc",
+			args={"doctype": "ToDo", "values": {"description": desc_ok}},
+			run_id="",
+		)
+		# Managed mode: owner == exec == session user, so confirm_tool's
+		# impersonate no-ops - but the cookie session must STILL survive
+		# intact (a bare unconditional frappe.set_user would gut it even for
+		# the same user and log the operator out).
+		before_sid = frappe.session.sid
+		before_data = frappe.session.data
+		frappe.session.data.csrf_token = "SENTINEL-MANAGED-022"
+		res = confirm_tool(ok_token)
+		self.assertTrue(res["ok"])
+		self.assertTrue(frappe.db.exists("ToDo", {"description": desc_ok}))
+		self.assertEqual(frappe.session.sid, before_sid)
+		self.assertIs(frappe.session.data, before_data)
+		self.assertEqual(frappe.session.data.csrf_token, "SENTINEL-MANAGED-022")
 
-			# Token minted under a DIFFERENT owner -> rejected, not executed.
-			bad_token = pending_confirm.mint(
-				conversation="",
-				owner="someone-else@example.com",
-				tool="create_doc",
-				args={"doctype": "ToDo", "values": {"description": desc_bad}},
-				run_id="",
-			)
-			res = confirm_tool(bad_token)
-			self.assertFalse(res["ok"])
-			self.assertEqual(res["error"]["type"], "InvalidConfirmation")
-			self.assertFalse(frappe.db.exists("ToDo", {"description": desc_bad}))
+		# Token minted under a DIFFERENT owner -> rejected, not executed.
+		bad_token = pending_confirm.mint(
+			conversation="",
+			owner="someone-else@example.com",
+			tool="create_doc",
+			args={"doctype": "ToDo", "values": {"description": desc_bad}},
+			run_id="",
+		)
+		res = confirm_tool(bad_token)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["type"], "InvalidConfirmation")
+		self.assertFalse(frappe.db.exists("ToDo", {"description": desc_bad}))
 
 
 CONV = "Jarvis Conversation"

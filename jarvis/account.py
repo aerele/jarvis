@@ -140,16 +140,6 @@ def is_ready_for_chat() -> dict:
 	  v1-tolerant (see ``_admin_chat_gate``).
 	- ``None`` when ``ready`` is True.
 	"""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		# Self-hosted: ready iff a validated openclaw connection is stored.
-		# No admin signup / managed LLM creds involved.
-		sh = frappe.get_single("Jarvis Settings")
-		if (sh.agent_url or "").strip() and sh.selfhost_last_validated_at:
-			return {"ready": True, "reason": None}
-		return {"ready": False, "reason": "selfhost_connection"}
-
 	settings = frappe.get_single("Jarvis Settings")
 
 	admin_api_key = (

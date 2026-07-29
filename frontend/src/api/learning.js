@@ -1,10 +1,8 @@
 // Learning-board API (plan §6.4) - thin wrappers around
-// `jarvis.chat.learned_api.*`, the SM-gated + managed-only endpoints behind the
-// Skills-page "Learning" tab. Mirrors src/api/skills.js: one `call` per
-// endpoint; list/settings/batch args are JSON-encoded where the server
-// `_parse_json`s them. `get_learning_status` is the only endpoint reachable on
-// self-host (it reports `self_hosted` so the tab can show the managed-only
-// empty state); every other call throws on a self-hosted bench.
+// `jarvis.chat.learned_api.*`, the SM-gated endpoints behind the Skills-page
+// "Learning" tab. Mirrors src/api/skills.js: one `call` per endpoint;
+// list/settings/batch args are JSON-encoded where the server `_parse_json`s
+// them.
 import { call } from "frappe-ui";
 
 const LR = "jarvis.chat.learned_api.";
@@ -103,18 +101,16 @@ export const getLearningSettings = (includePreflight = 0) =>
 	call(LR + "get_learning_settings", { include_preflight: includePreflight ? 1 : 0 });
 export const setLearningSettings = (payload) =>
 	call(LR + "set_learning_settings", { payload: JSON.stringify(payload || {}) });
-// SM-only but NOT self-host-gated - the probe the tab uses to render the
-// managed-only empty state (reports {self_hosted, enabled, last/next run, ...}).
+// SM-only - the status probe the Analysis tab renders from
+// (reports {enabled, last/next run, ...}).
 export const getLearningStatus = () => call(LR + "get_learning_status");
 
 // ── Review-tab access probe (Skills-area rework, DESIGN.md §6/§6b) ──────────
 // Reviewer-set role check ONLY (Jarvis Skill Reviewer | Jarvis Admin | System
-// Manager | Administrator), NOT self-host-gated - mirrors `getLearningStatus`
-// so ReviewTab can still render its managed-only empty state on a
-// self-hosted bench. Review visibility is a SEPARATE gate from Analysis now
-// (SkillsPage's tab strip uses the collapsed `get_skills_area_caps` probe for
-// that; this one is for ReviewTab's own reviewer-only affordances - e.g.
+// Manager | Administrator). Review visibility is a SEPARATE gate from Analysis
+// now (SkillsPage's tab strip uses the collapsed `get_skills_area_caps` probe
+// for that; this one is for ReviewTab's own reviewer-only affordances - e.g.
 // "Ask the user" follow-ups, promotion decisions). Reports
-// {self_hosted, pending_promotions, pending_patterns} so the tab's two queue-
-// type chips render their counts without a second round-trip.
+// {pending_promotions, pending_patterns} so the tab's two queue-type chips
+// render their counts without a second round-trip.
 export const getReviewAccess = () => call(LR + "get_review_access");

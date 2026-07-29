@@ -370,19 +370,6 @@ class JarvisSettings(Document):
 		"""
 		if not frappe.utils.cint(getattr(self, "pattern_learning_enabled", 0)):
 			return
-		# Model-layer defense: behavioural learning is managed-only. The API and
-		# the scheduler tick already bail on self-host; refusing enablement here
-		# closes the Desk-form path (the feature never runs on self-host anyway).
-		try:
-			from jarvis import selfhost
-
-			if selfhost.is_self_hosted():
-				frappe.throw(
-					"Behavioural learning is available on managed plans only.",
-					frappe.ValidationError,
-				)
-		except ImportError:
-			pass
 		start = getattr(self, "pattern_window_start", None)
 		end = getattr(self, "pattern_window_end", None)
 		if not start or not end:
@@ -1565,14 +1552,9 @@ def reconcile_pending_llm_sync() -> None:
 	  applied_version >= desired_version, so it never reports Ready from intent).
 	- Never flips a status to a new "failed:" and never touches a healthy /
 	  already-"ok" tenant. Swallows every error - a scheduled task must not
-	  raise. Self-host and un-onboarded sites short-circuit.
+	  raise. Un-onboarded sites short-circuit.
 	"""
 	try:
-		from jarvis import selfhost
-
-		if selfhost.is_self_hosted():
-			return
-
 		settings = frappe.get_single("Jarvis Settings")
 		# Un-onboarded: no admin credentials -> get_connection would just raise.
 		admin_api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()

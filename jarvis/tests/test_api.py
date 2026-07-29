@@ -563,12 +563,11 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 	accepted on bearer + session alone, so a captured agent_token replayed
 	arbitrary unsigned tool bodies. Enforcement is now the default; the
 	site_config key ``jarvis_plugin_allow_unsigned`` is the documented,
-	WARN-logged escape hatch for un-upgraded self-hosted plugins.
+	WARN-logged escape hatch for un-upgraded plugins.
 
 	The trailing block covers the review remediation: the reject is the
 	operator's only signal, so it carries the remedy; the audit row behind
-	it is throttled; and the hatch's usage count is readable for the
-	self-host advisory.
+	it is throttled; and the hatch's usage count is readable by an operator.
 	"""
 
 	CONF_KEY = "jarvis_plugin_allow_unsigned"
@@ -739,8 +738,8 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 			self.assertIsNone(_plugin_auth.unsigned_escape_hatch_status())
 
 	def test_escape_hatch_status_reports_recent_allowed_count(self):
-		"""Feeds the self-host advisory row (UX P1-1) - the count must be
-		read back from the same raw keys the allow path increments."""
+		"""The operator-facing count must be read back from the same raw keys
+		the allow path increments."""
 		from jarvis import _plugin_auth
 
 		cache = frappe.cache()

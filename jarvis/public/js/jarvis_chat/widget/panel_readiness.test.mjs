@@ -14,7 +14,6 @@ test("classifyReadiness: ready is ready regardless of a leftover reason", () => 
 test("classifyReadiness: never-onboarded reasons gate the whole panel", () => {
   for (const reason of [
     "signup",
-    "selfhost_connection",
     "llm_pool_provisioning",
     "llm_provisioning",
   ]) {
