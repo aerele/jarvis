@@ -10,6 +10,14 @@ from unittest.mock import Mock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+# Import selfhost + admin_client BEFORE api_errors / error_push. Those two pull in
+# a large chat-module chain, and in some CI shard collection orders (py3.14)
+# importing selfhost partway through that chain leaves it half-initialised
+# ("cannot import name 'selfhost' from 'jarvis'"). Importing them first - like
+# test_selfhost.py, which has no heavy chain ahead of it - puts a complete module
+# in sys.modules for the patch.object() targets below.
+import jarvis.admin_client
+import jarvis.selfhost
 from jarvis import api_errors, error_push
 
 DT = api_errors.DT
@@ -302,38 +310,29 @@ class TestErrorLogReader(ApiErrorsBase):
 # Push job — self-gating + never-raise
 # --------------------------------------------------------------------------- #
 class TestPushSelfGates(ApiErrorsBase):
-	# NB: import selfhost / admin_client at execution time (inside each method),
-	# not at module top. A top-level `from jarvis import selfhost` runs during
-	# test collection, where it hit a circular-import ordering only in CI; by the
-	# time a test method runs the app is fully booted and the import is safe. We
-	# then patch.object the imported module (not a dotted string), which also
-	# sidesteps py3.14's mock.patch no longer auto-importing string targets.
+	# patch.object on the modules imported at the top (not dotted-string targets):
+	# string patch() no longer auto-imports on py3.14, and the modules are already
+	# imported cleanly and early. See the import note at the top of the file.
 	def test_skips_when_self_hosted(self):
-		from jarvis import admin_client, selfhost
-
 		with (
-			patch.object(selfhost, "is_self_hosted", return_value=True),
-			patch.object(admin_client, "push_error_rollup") as push,
+			patch.object(jarvis.selfhost, "is_self_hosted", return_value=True),
+			patch.object(jarvis.admin_client, "push_error_rollup") as push,
 		):
 			error_push.push_error_rollup()
 		push.assert_not_called()
 
 	def test_skips_when_admin_unconfigured(self):
-		from jarvis import admin_client, selfhost
-
 		with (
-			patch.object(selfhost, "is_self_hosted", return_value=False),
+			patch.object(jarvis.selfhost, "is_self_hosted", return_value=False),
 			patch.object(error_push, "_admin_configured", return_value=False),
-			patch.object(admin_client, "push_error_rollup") as push,
+			patch.object(jarvis.admin_client, "push_error_rollup") as push,
 		):
 			error_push.push_error_rollup()
 		push.assert_not_called()
 
 	def test_never_raises(self):
-		from jarvis import selfhost
-
 		with (
-			patch.object(selfhost, "is_self_hosted", side_effect=RuntimeError("boom")),
+			patch.object(jarvis.selfhost, "is_self_hosted", side_effect=RuntimeError("boom")),
 		):
 			# Must swallow and log, not propagate.
 			error_push.push_error_rollup()
@@ -349,14 +348,11 @@ class TestPushClaimConfirm(ApiErrorsBase):
 
 	def _run_push(self, push_impl):
 		"""Run push_error_rollup with the admin push replaced by ``push_impl``
-		(a Mock or a plain callable). selfhost / admin_client are imported here (at
-		execution time) - see the note on TestPushSelfGates."""
-		from jarvis import admin_client, selfhost
-
+		(a Mock or a plain callable)."""
 		with (
-			patch.object(selfhost, "is_self_hosted", return_value=False),
+			patch.object(jarvis.selfhost, "is_self_hosted", return_value=False),
 			patch.object(error_push, "_admin_configured", return_value=True),
-			patch.object(admin_client, "push_error_rollup", push_impl),
+			patch.object(jarvis.admin_client, "push_error_rollup", push_impl),
 		):
 			error_push.push_error_rollup()
 
