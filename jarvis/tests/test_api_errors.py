@@ -10,15 +10,16 @@ from unittest.mock import Mock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-# Import selfhost + admin_client BEFORE api_errors / error_push. Those two pull in
-# a large chat-module chain, and in some CI shard collection orders (py3.14)
-# importing selfhost partway through that chain leaves it half-initialised
-# ("cannot import name 'selfhost' from 'jarvis'"). Importing them first - like
-# test_selfhost.py, which has no heavy chain ahead of it - puts a complete module
-# in sys.modules for the patch.object() targets below.
-import jarvis.admin_client
-import jarvis.selfhost
 from jarvis import api_errors, error_push
+
+# NB: this module deliberately never imports or patches ``jarvis.selfhost``.
+# ``test_whitelist_annotations`` walks and imports every jarvis module via
+# pkgutil, and in some CI shard orders (py3.14) that leaves
+# ``sys.modules['jarvis.selfhost']`` as ``None`` - so any later
+# ``import jarvis.selfhost`` (here, or inside push_error_rollup) raises
+# ModuleNotFoundError. The self-host gate is therefore driven through its real
+# input (the ``deployment_mode`` setting) and the claim/confirm/revert core is
+# tested via ``_do_push`` directly, both of which avoid the selfhost import.
 
 DT = api_errors.DT
 USER = "apierr-user@example.com"
@@ -310,31 +311,31 @@ class TestErrorLogReader(ApiErrorsBase):
 # Push job — self-gating + never-raise
 # --------------------------------------------------------------------------- #
 class TestPushSelfGates(ApiErrorsBase):
-	# patch.object on the modules imported at the top (not dotted-string targets):
-	# string patch() no longer auto-imports on py3.14, and the modules are already
-	# imported cleanly and early. See the import note at the top of the file.
+	# Drive is_self_hosted() through its real input (deployment_mode) and patch
+	# only the importable admin_client / error_push seams - never jarvis.selfhost.
 	def test_skips_when_self_hosted(self):
-		with (
-			patch.object(jarvis.selfhost, "is_self_hosted", return_value=True),
-			patch.object(jarvis.admin_client, "push_error_rollup") as push,
-		):
+		frappe.db.set_single_value("Jarvis Settings", "deployment_mode", "Self-Hosted")
+		from jarvis import admin_client
+
+		with patch.object(admin_client, "push_error_rollup") as push:
 			error_push.push_error_rollup()
 		push.assert_not_called()
 
 	def test_skips_when_admin_unconfigured(self):
+		frappe.db.set_single_value("Jarvis Settings", "deployment_mode", "Managed")
+		from jarvis import admin_client
+
 		with (
-			patch.object(jarvis.selfhost, "is_self_hosted", return_value=False),
 			patch.object(error_push, "_admin_configured", return_value=False),
-			patch.object(jarvis.admin_client, "push_error_rollup") as push,
+			patch.object(admin_client, "push_error_rollup") as push,
 		):
 			error_push.push_error_rollup()
 		push.assert_not_called()
 
 	def test_never_raises(self):
-		with (
-			patch.object(jarvis.selfhost, "is_self_hosted", side_effect=RuntimeError("boom")),
-		):
-			# Must swallow and log, not propagate.
+		# Any exception in the push path must be swallowed, not propagated. Force
+		# one via the importable _admin_configured seam.
+		with patch.object(error_push, "_admin_configured", side_effect=RuntimeError("boom")):
 			error_push.push_error_rollup()
 
 
@@ -346,20 +347,20 @@ class TestPushClaimConfirm(ApiErrorsBase):
 		with _as(USER):
 			api_errors.report_client_errors([{"surface": "spa", "error_code": "e", "message": message}])
 
-	def _run_push(self, push_impl):
-		"""Run push_error_rollup with the admin push replaced by ``push_impl``
-		(a Mock or a plain callable)."""
-		with (
-			patch.object(jarvis.selfhost, "is_self_hosted", return_value=False),
-			patch.object(error_push, "_admin_configured", return_value=True),
-			patch.object(jarvis.admin_client, "push_error_rollup", push_impl),
-		):
-			error_push.push_error_rollup()
+	def _run_do_push(self, push_impl):
+		"""Drive the claim/confirm/revert core directly with the admin push replaced
+		by ``push_impl``. Goes through ``_do_push`` (not ``push_error_rollup``) so the
+		test never depends on the self-host gate or the jarvis.selfhost import - the
+		gates are covered by TestPushSelfGates. ``admin_client`` imports cleanly."""
+		from jarvis import admin_client
+
+		with patch.object(admin_client, "push_error_rollup", push_impl):
+			error_push._do_push()
 
 	def test_success_marks_pushed(self):
 		self._seed()
 		push = Mock()
-		self._run_push(push)
+		self._run_do_push(push)
 		push.assert_called_once()
 		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 0}), 0, "claimed + sent")
 		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 1}), 1)
@@ -368,8 +369,10 @@ class TestPushClaimConfirm(ApiErrorsBase):
 		from jarvis.exceptions import AdminUnreachableError
 
 		self._seed()
-		# Must not raise; the claimed row is reverted for the next cycle.
-		self._run_push(Mock(side_effect=AdminUnreachableError("down")))
+		# _do_push reverts the claim, then re-raises for push_error_rollup to
+		# classify (silent for transient admin errors). We assert both here.
+		with self.assertRaises(AdminUnreachableError):
+			self._run_do_push(Mock(side_effect=AdminUnreachableError("down")))
 		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 0}), 1)
 		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 1}), 0)
 
@@ -384,6 +387,6 @@ class TestPushClaimConfirm(ApiErrorsBase):
 					[{"surface": "spa", "error_code": "e", "message": "window boom"}]
 				)
 
-		self._run_push(_during_push)
+		self._run_do_push(_during_push)
 		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 1}), 1, "original sent once")
 		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 0}), 1, "mid-flight occurrence kept")
