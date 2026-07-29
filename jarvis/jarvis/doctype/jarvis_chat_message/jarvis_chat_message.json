@@ -145,7 +145,7 @@
       "search_index": 1,
       "no_copy": 1,
       "depends_on": "eval:doc.role=='tool'",
-      "description": "The openclaw tool-call id for this receipt. (session_key->conversation, tool_call_id) is the R-6 out-of-band idempotency key: a duplicate callback for the same tool call dedupes instead of writing a second receipt. Null for legacy/self-host callbacks that carry no call id."
+      "description": "The openclaw tool-call id for this receipt. (session_key->conversation, tool_call_id) is the R-6 out-of-band idempotency key: a duplicate callback for the same tool call dedupes instead of writing a second receipt. Null for legacy callbacks that carry no call id."
     },
     {
       "fieldname": "action_outcome",

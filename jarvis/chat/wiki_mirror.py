@@ -274,12 +274,6 @@ def _stamp_sync_status(result: dict) -> None:
 
 
 def _sync(full: bool) -> dict:
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		# No managed container to mirror into; the DB copy stays canonical.
-		return {"ok": True, "skipped": "self-hosted"}
-
 	rows = frappe.get_all(WIKI, fields=_PAGE_FIELDS, limit_page_length=0)
 	org = [r for r in rows if _is_org_scope(r.scope)]
 	active = [r for r in org if (r.status or "Active") == "Active"]

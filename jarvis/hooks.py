@@ -329,7 +329,7 @@ scheduler_events = {
 			# Behavioural pattern learning tick. Hooks cron is app-static
 			# (per-site rows are reset on migrate), so the window is
 			# self-enforced: the tick bails on the site_config kill switch,
-			# the enabled flag, self-host and outside-window times.
+			# the enabled flag and outside-window times.
 			"jarvis.learning.orchestrator.tick",
 		],
 	},
@@ -397,7 +397,7 @@ scheduler_events = {
 		"jarvis.chat.wiki_graph.record_history_snapshot",
 		# Architecture A (fleet usage spec §3/§5): best-effort daily push of the
 		# bench's month-to-date per-user + per-model usage rollup to admin. Self-
-		# gating (skips self-hosted / unconfigured / not-onboarded); never raises.
+		# gating (skips unconfigured / not-onboarded); never raises.
 		"jarvis.chat.usage_push.push_usage_rollup",
 		# JF-016 hygiene: revocation only flips `enabled`, so the mobile-device
 		# table is append-only without this. Deletes DISABLED rows past the

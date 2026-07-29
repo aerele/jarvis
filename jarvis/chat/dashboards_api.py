@@ -164,11 +164,7 @@ def _dashboard_detail(doc) -> dict:
 @require_jarvis_user
 def get_dashboards_caps() -> dict:
 	"""Single gating probe for the Dashboards page: which scopes the caller
-	may create in, which roles they may target, the size caps, and whether the
-	chat side can even produce canvas artifacts on this bench (self-hosted
-	chats have no gateway canvas route)."""
-	from jarvis import selfhost
-
+	may create in, which roles they may target, and the size caps."""
 	stt_enabled = False
 	try:
 		from jarvis.chat import voice
@@ -184,7 +180,6 @@ def get_dashboards_caps() -> dict:
 			"max_sources": _MAX_SOURCES,
 			"max_html_chars": _MAX_HTML_CHARS,
 			"max_rows": DASHBOARD_MAX_ROWS,
-			"canvas_available": not selfhost.is_self_hosted(),
 			"stt_enabled": stt_enabled,
 		},
 	}

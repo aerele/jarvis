@@ -933,8 +933,8 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# a disabled RUN-AS user ON SOMEONE ELSE'S behalf (the escalation a System
 	# Manager could otherwise cause, and the unattended risk the scheduler faces).
 	# A user running their OWN self-mapped install manually is attended +
-	# same-identity, so it is allowed — this is how a single-admin dev / self-host
-	# box runs audits at all.
+	# same-identity, so it is allowed — this is how a single-admin dev box runs
+	# audits at all.
 	if not _valid_owner(run_as) and run_as != frappe.session.user:
 		frappe.throw(_("Cannot run this audit as its run-as user (identity guard)."))
 

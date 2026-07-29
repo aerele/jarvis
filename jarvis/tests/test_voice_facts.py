@@ -395,12 +395,11 @@ class TestVoiceFactsSweep(VoiceFactsTestCase):
 # process_daily gates
 # --------------------------------------------------------------------------- #
 class TestProcessDailyGates(VoiceFactsTestCase):
-	def _run_daily(self, kill_switch=False, self_hosted=False, flag_on=True):
+	def _run_daily(self, kill_switch=False, flag_on=True):
 		conf = dict(frappe.conf)
 		conf["jarvis_voice_learning_disabled"] = 1 if kill_switch else 0
 		with (
 			mock.patch.object(frappe.local, "conf", frappe._dict(conf)),
-			mock.patch("jarvis.selfhost.is_self_hosted", return_value=self_hosted),
 			mock.patch.object(voice_facts, "_flag_on", return_value=flag_on),
 			mock.patch.object(voice_facts, "_enqueue") as enq,
 		):
@@ -416,13 +415,6 @@ class TestProcessDailyGates(VoiceFactsTestCase):
 		self._note(USER_A, "Fresh note.")
 		enq = self._run_daily(kill_switch=True)
 		enq.assert_not_called()
-
-	def test_self_hosted_does_not_block(self):
-		"""The sweep's wiki + JLP-proposal work is bench-side and functions
-		on self-host; only the learned-skill container push is managed-only."""
-		self._note(USER_A, "Fresh note.")
-		enq = self._run_daily(self_hosted=True)
-		enq.assert_called_once()
 
 	def test_disabled_flag_blocks(self):
 		self._note(USER_A, "Fresh note.")

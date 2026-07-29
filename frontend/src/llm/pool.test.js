@@ -68,11 +68,27 @@ const TRIO = {
 	],
 };
 
-test("deriveMode: 1 model & no preset => direct; else proxy", () => {
+test("deriveMode: 1 api-key model & no preset => direct; a preset always => proxy", () => {
 	assert.equal(deriveMode([{ provider: "openai", model: "gpt-5.5" }], null), "direct");
 	assert.equal(deriveMode([{ provider: "openai", model: "gpt-5.5" }], "cost-saver"), "proxy");
-	assert.equal(deriveMode([{}, {}], null), "proxy");
 	assert.equal(deriveMode([], null), "direct");
+});
+test("deriveMode: a pure BYO api-key pool is direct regardless of size (no sidecar deployed)", () => {
+	// Mirrors the backend's compute_proxy_active: a proxy sidecar is only
+	// deployed for a subscription model. A 2+-model pool of api keys alone
+	// renders openclaw-direct, so it must NOT read "proxy" just from the count.
+	assert.equal(deriveMode([{}, {}], null), "direct");
+	assert.equal(
+		deriveMode(
+			[
+				{ provider: "openai", model: "gpt-5.5" },
+				{ provider: "anthropic", model: "claude-opus-4-8" },
+				{ provider: "google", model: "gemini-2.5-pro" },
+			],
+			null
+		),
+		"direct"
+	);
 });
 test("deriveMode: a single subscription model is proxy (needs cliproxy)", () => {
 	assert.equal(
@@ -81,6 +97,18 @@ test("deriveMode: a single subscription model is proxy (needs cliproxy)", () => 
 	);
 	assert.equal(
 		deriveMode([{ model: "gpt-5.5", subscription: { accounts: [] } }], null),
+		"proxy"
+	);
+});
+test("deriveMode: a pool with ANY subscription model is proxy, even mixed with api keys", () => {
+	assert.equal(
+		deriveMode(
+			[
+				{ provider: "openai", model: "gpt-5.5" },
+				{ model: "claude-opus-4-8", credentialType: "subscription" },
+			],
+			null
+		),
 		"proxy"
 	);
 });

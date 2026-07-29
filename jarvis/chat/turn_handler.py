@@ -95,19 +95,13 @@ def persist_rich_outputs(
 	"""Best-effort canvas + generated-image persistence and publish for one
 	finished turn. Shared by the worker's clean exit and snapshot recovery
 	(a recovered long turn is exactly the kind that produced charts).
-	Managed mode only; never raises."""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return
-
+	Never raises."""
 	settings = frappe.get_single("Jarvis Settings")
 
 	# Rich outputs: detect any canvas/chart artifact the agent produced this
 	# turn (HTML or SVG), fetch it from the gateway, persist it as a private
-	# File, and publish a 'canvas' event so the UI renders it inline. Managed
-	# mode only; self-hosted chats over the HTTP surface have no gateway
-	# canvas route. Failure here never fails the turn.
+	# File, and publish a 'canvas' event so the UI renders it inline. Failure
+	# here never fails the turn.
 	try:
 		from jarvis.chat import canvas as canvas_mod
 
@@ -417,16 +411,6 @@ def _session_model_patch(conv) -> tuple[bool, str | None]:
 	return True, f"{provider}/{model}" if provider and model else model
 
 
-def _thinking_prefix(thinking_override: str | None) -> str:
-	"""Inline openclaw /think directive for this turn, or '' when unset.
-
-	openclaw reads a leading /think directive from the MESSAGE BODY and
-	strips it. We keep it in the user message (after the static system
-	prefix), so it never busts the prefix cache the warm-up populates."""
-	level = (thinking_override or "").strip().lower()
-	return f"/think {level}\n" if level in ("low", "medium", "high") else ""
-
-
 def _org_locale_clause() -> str:
 	"""Region/locale of the site's default Company, folded into the turn's
 	``[Context: ...]`` line so the agent formats dates, currency, and numbers
@@ -692,20 +676,14 @@ def assemble_prompt(
 		f"\n\n{user_message or ''}"
 	)
 
-	from jarvis import selfhost
-
 	# Floating-widget auto-context + file inputs layer onto the
 	# already date/user-augmented user_message built above. Prompt-only;
 	# the persisted/visible user message is unchanged.
 	user_message = _prepend_doc_context(user_message, context, conversation_id)
-	# Vision is managed-pool only (self-host vision is a follow-up), gated by the
-	# operator toggle and the model's provider being multimodal. When off, image/
-	# PDF attachments degrade to a short note (no OCR fallback any more).
-	vision_ok = (
-		not selfhost.is_self_hosted()
-		and _vision_enabled(settings)
-		and vision.supports_vision(settings.llm_provider)
-	)
+	# Vision is gated by the operator toggle and the model's provider being
+	# multimodal. When off, image/PDF attachments degrade to a short note (no
+	# OCR fallback any more).
+	vision_ok = _vision_enabled(settings) and vision.supports_vision(settings.llm_provider)
 	# Measure how much the attachments grew the PROMPT, not just how many
 	# vision parts they produced. Text files (CSV/TXT/JSON/MD/logs) and the
 	# vision-off PDF text fallback are inlined into user_message and leave
@@ -777,7 +755,7 @@ def handle_chat_send(payload: dict) -> None:
 	t_handle0 = time.monotonic()
 	enqueued_at_ms = payload.get("enqueued_at_ms")
 	queue_wait_ms = max(0, int(time.time() * 1000) - int(enqueued_at_ms)) if enqueued_at_ms else -1
-	# Stream-phase stats filled in by _consume: ms to the first event of any
+	# Stream-phase stats filled in by _consume_relay: ms to the first event of any
 	# kind, ms to the first assistant delta (= first visible token), and how
 	# many tool events fired before that first delta (measures the persona's
 	# read-SOUL/TOOLS/STYLE-before-answering tax; see the latency plan).
@@ -843,13 +821,10 @@ def handle_chat_send(payload: dict) -> None:
 	inlined_prompt_chars = _ap.inlined_prompt_chars
 	drained_notes = _ap.drained_notes
 	drained_ids = _ap.drained_ids
-	from jarvis import selfhost
 	from jarvis.chat import agent_notes
-	# The /think directive: self-hosted still inlines it as the FIRST bytes
-	# of the message body (openclaw's leading-directive parser strips it
-	# from there); managed sends it as the chat_send ``thinking`` param
-	# instead, so user_message stays unprefixed and the OpenAI prefix
-	# cache the warm-up populates is never busted by a varying prefix.
+	# The /think directive rides the chat_send ``thinking`` param, so
+	# user_message stays unprefixed and the OpenAI prefix cache the warm-up
+	# populates is never busted by a varying prefix.
 
 	def _publish_run_error(err: str, *, changed_data=None, code=None, exc=None) -> None:
 		# changed_data: pass False only when we KNOW nothing was written (a
@@ -872,42 +847,14 @@ def handle_chat_send(payload: dict) -> None:
 		tool_msg_by_call_id: dict[str, str] = {}
 		batcher = _AssistantContentBatcher(assistant_msg.name)
 
-		def _consume(events) -> None:
-			if stream_stats["t0"] is None:
-				stream_stats["t0"] = time.monotonic()
-			for event in events:
-				# Segment telemetry (plan Phase 0): first event / first
-				# assistant delta / tool calls that ran before the first
-				# visible token. Cheap dict writes, no extra I/O.
-				ev_ms = int((time.monotonic() - stream_stats["t0"]) * 1000)
-				if stream_stats["first_event_ms"] < 0:
-					stream_stats["first_event_ms"] = ev_ms
-				kind = event.get("kind")
-				if kind == "assistant" and stream_stats["first_delta_ms"] < 0:
-					stream_stats["first_delta_ms"] = ev_ms
-				elif kind == "tool" and stream_stats["first_delta_ms"] < 0:
-					if (event.get("phase") or "") != "end":
-						stream_stats["pre_reply_tool_calls"] += 1
-				_handle_event(
-					event,
-					conversation_id=conversation_id,
-					assistant_msg_name=assistant_msg.name,
-					tool_msg_by_call_id=tool_msg_by_call_id,
-					user=user,
-					run_id=run_id,
-					batcher=batcher,
-				)
-			# Drain buffered assistant deltas before the streaming=0 cleanup.
-			batcher.flush()
-
 		def _consume_relay(events) -> dict:
 			if stream_stats["t0"] is None:
 				stream_stats["t0"] = time.monotonic()
 			terminal = {"kind": "relay:interrupted", "reason": "stream-exhausted"}
 			for event in events:
-				# Same segment telemetry as _consume (plan Phase 0), so managed
-				# (relay) turns keep feeding the latency summary below instead
-				# of logging -1s for every field.
+				# Segment telemetry (plan Phase 0): first event / first
+				# assistant delta / tool calls that ran before the first
+				# visible token. Cheap dict writes, no extra I/O.
 				ev_ms = int((time.monotonic() - stream_stats["t0"]) * 1000)
 				if stream_stats["first_event_ms"] < 0:
 					stream_stats["first_event_ms"] = ev_ms
@@ -932,306 +879,204 @@ def handle_chat_send(payload: dict) -> None:
 			batcher.flush()
 			return terminal
 
-		if selfhost.is_self_hosted():
-			# Self-hosted: openclaw's HTTP OpenAI-compatible surface with a
-			# bearer token (full operator scope, no device pairing). agent_url
-			# holds the http(s) base; the user's openclaw uses its own LLM.
-			from jarvis.chat import openclaw_http_client
+		# Device-paired WebSocket to the tenant's gateway.
+		# Uses a per-process connection pool so we don't pay the
+		# DNS + TCP + TLS + WS upgrade + handshake (~50-200ms) on
+		# every turn. The pool eviction on OpenclawUnreachableError
+		# means the next attempt will reconnect; we don't auto-
+		# retry inside this turn because tokens may have already
+		# streamed to the UI by the time the failure surfaces.
+		gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
+		patch_session_model, session_model_ref = _session_model_patch(conv)
+		if not conv.session_key:
+			# First turn of this conversation pays session-create and is the
+			# most cold-start-prone (a dormant container takes ~10-25s to
+			# wake). Tell the user we're waking the assistant so the connect
+			# window reads as progress rather than a dead spinner.
+			_publish_to_user(
+				user,
+				{
+					"kind": "run:status",
+					"conversation_id": conversation_id,
+					"message_id": assistant_msg.name,
+					"run_id": run_id,
+					"status": "waking",
+				},
+			)
+		try:
+			t_checkout = time.monotonic()
+			with openclaw_session_pool.checkout(gateway_url) as sess:
+				checkout_ms = int((time.monotonic() - t_checkout) * 1000)
+				# First turn of this conversation: create the openclaw
+				# session on THIS pooled connection (no extra handshake)
+				# and persist the Jarvis Chat Session row BEFORE the
+				# stream starts — the plugin's call_tool sessionKey→user
+				# lookup (the permission moat) needs the row in place
+				# before the agent's first tool callback. Moved here from
+				# send_message so the browser-awaited POST never pays a
+				# WS connect (2026-07 latency plan, Phase 1.1). chat_user
+				# (the sender) owns the session row, keeping tool-call
+				# identity in lockstep with the [Context:] bracket above.
+				if not conv.session_key:
+					from jarvis.chat.api import _ensure_session_key
 
-			base_url = (settings.agent_url or "").strip()
-			token = settings.get_password("agent_token", raise_exception=False) or ""
-			# Register this turn so the plugin's call_tool callback (which only
-			# carries the openclaw HTTP session key, not our conversation) can
-			# attribute tool calls back here and surface tool cards.
-			tool_user = (settings.selfhost_tool_user or "").strip()
-			selfhost.set_active_turn(tool_user, conversation=conversation_id, owner=user, run_id=run_id)
-			# Stream token-by-token unless the operator explicitly turned it
-			# off (a NULL field on a pre-existing config defaults to streaming).
-			stream_pref = (settings.selfhost_stream is None) or bool(settings.selfhost_stream)
-			# Self-hosted has no chat_send ``thinking`` param (it goes over the
-			# HTTP OpenAI-compatible surface, not chat.send), so the /think
-			# directive is inlined as the FIRST bytes of the message body here,
-			# same as before this refactor.
-			sh_message = _thinking_prefix(conv.thinking_override) + user_message
-			try:
-				_consume(
-					openclaw_http_client.stream_agent_turn(
-						base_url,
-						token,
-						sh_message,
-						model="openclaw",
-						stream=stream_pref,
-					)
-				)
-				# Delivered (the stream ran to completion) - drop exactly the notes
-				# we folded in (by id), so the correction is delivered once, not
-				# re-nagged, without clobbering a discard appended mid-turn or one a
-				# concurrent continuation delivered. An Unreachable failure raises
-				# before this, keeping them for retry.
-				if drained_notes:
-					agent_notes.clear(conversation_id, drained_ids)
-			except OpenclawUnreachableError as e:
-				_publish_run_error(str(e), changed_data=False, exc=e)
-				_advance_macro(conversation_id, errored=True)
-				_admission_settle(run_id, "errored", str(e))
-				return
-			finally:
-				selfhost.clear_active_turn(tool_user, run_id)
-		else:
-			# Managed: device-paired WebSocket to the tenant's gateway.
-			# Uses a per-process connection pool so we don't pay the
-			# DNS + TCP + TLS + WS upgrade + handshake (~50-200ms) on
-			# every turn. The pool eviction on OpenclawUnreachableError
-			# means the next attempt will reconnect; we don't auto-
-			# retry inside this turn because tokens may have already
-			# streamed to the UI by the time the failure surfaces.
-			gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-			patch_session_model, session_model_ref = _session_model_patch(conv)
-			if not conv.session_key:
-				# First turn of this conversation pays session-create and is the
-				# most cold-start-prone (a dormant container takes ~10-25s to
-				# wake). Tell the user we're waking the assistant so the connect
-				# window reads as progress rather than a dead spinner.
-				_publish_to_user(
-					user,
-					{
-						"kind": "run:status",
-						"conversation_id": conversation_id,
-						"message_id": assistant_msg.name,
-						"run_id": run_id,
-						"status": "waking",
-					},
-				)
-			try:
-				t_checkout = time.monotonic()
-				with openclaw_session_pool.checkout(gateway_url) as sess:
-					checkout_ms = int((time.monotonic() - t_checkout) * 1000)
-					# First turn of this conversation: create the openclaw
-					# session on THIS pooled connection (no extra handshake)
-					# and persist the Jarvis Chat Session row BEFORE the
-					# stream starts — the plugin's call_tool sessionKey→user
-					# lookup (the permission moat) needs the row in place
-					# before the agent's first tool callback. Moved here from
-					# send_message so the browser-awaited POST never pays a
-					# WS connect (2026-07 latency plan, Phase 1.1). chat_user
-					# (the sender) owns the session row, keeping tool-call
-					# identity in lockstep with the [Context:] bracket above.
-					if not conv.session_key:
-						from jarvis.chat.api import _ensure_session_key
-
-						t_sess = time.monotonic()
-						conv.session_key = _ensure_session_key(chat_user, sess=sess)
-						frappe.db.set_value(CONV, conversation_id, "session_key", conv.session_key)
-						frappe.db.commit()
-						session_create_ms = int((time.monotonic() - t_sess) * 1000)
-					# A None ref means "reset this session to the agent default" and MUST
-					# still be sent: it is the instruction that walks back a stale pin.
-					# See _session_model_patch.
-					if patch_session_model:
-						try:
-							sess.set_session_model(conv.session_key, session_model_ref)
-						except OpenclawUnreachableError:
-							raise
-						except Exception:
-							frappe.log_error(
-								title="chat: model override patch failed",
-								message=frappe.get_traceback(),
-							)
-					# Watermark BEFORE the send: recovery must never stamp a
-					# previous turn's answer onto this row (a run that dies
-					# with zero output leaves the prior reply as the newest
-					# transcript message). Best-effort: on failure the
-					# watermark stays 0 and recovery behaves as before.
+					t_sess = time.monotonic()
+					conv.session_key = _ensure_session_key(chat_user, sess=sess)
+					frappe.db.set_value(CONV, conversation_id, "session_key", conv.session_key)
+					frappe.db.commit()
+					session_create_ms = int((time.monotonic() - t_sess) * 1000)
+				# A None ref means "reset this session to the agent default" and MUST
+				# still be sent: it is the instruction that walks back a stale pin.
+				# See _session_model_patch.
+				if patch_session_model:
 					try:
-						_wm_msgs = sess.get_session_messages(conv.session_key, limit=5)
-						watermark = max(
-							(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in _wm_msgs),
-							default=0,
-						)
-						if watermark:
-							frappe.db.set_value(
-								MSG,
-								assistant_msg.name,
-								"openclaw_seq_watermark",
-								watermark,
-								update_modified=False,
-							)
-							frappe.db.commit()
+						sess.set_session_model(conv.session_key, session_model_ref)
+					except OpenclawUnreachableError:
+						raise
 					except Exception:
 						frappe.log_error(
-							title="chat: seq watermark capture failed",
+							title="chat: model override patch failed",
 							message=frappe.get_traceback(),
 						)
-					managed_attachments = _to_managed_attachments(vision_parts) if vision_parts else None
-					ack_timeout = _ack_timeout_s(len(managed_attachments or []), inlined_prompt_chars)
-					ack_timed_out = False
+				# Watermark BEFORE the send: recovery must never stamp a
+				# previous turn's answer onto this row (a run that dies
+				# with zero output leaves the prior reply as the newest
+				# transcript message). Best-effort: on failure the
+				# watermark stays 0 and recovery behaves as before.
+				try:
+					_wm_msgs = sess.get_session_messages(conv.session_key, limit=5)
+					watermark = max(
+						(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in _wm_msgs),
+						default=0,
+					)
+					if watermark:
+						frappe.db.set_value(
+							MSG,
+							assistant_msg.name,
+							"openclaw_seq_watermark",
+							watermark,
+							update_modified=False,
+						)
+						frappe.db.commit()
+				except Exception:
+					frappe.log_error(
+						title="chat: seq watermark capture failed",
+						message=frappe.get_traceback(),
+					)
+				managed_attachments = _to_managed_attachments(vision_parts) if vision_parts else None
+				ack_timeout = _ack_timeout_s(len(managed_attachments or []), inlined_prompt_chars)
+				ack_timed_out = False
+				try:
+					ack = (
+						sess.chat_send(
+							conv.session_key,
+							user_message,
+							run_id,
+							thinking=(conv.thinking_override or "").strip() or None,
+							attachments=managed_attachments,
+							timeout_s=ack_timeout,
+						)
+						or {}
+					)
+				except OpenclawUnreachableError as e:
+					# The ack window closed with the request frame already on
+					# the wire. openclaw routinely ACCEPTS the message and runs
+					# the whole turn while the bench is still waiting, so
+					# erroring here is a false negative: the user sees
+					# "chat.send timed out" while the transcript shows a
+					# finished answer, and a retry re-runs under a FRESH run_id
+					# (dedupe keys off run_id) and can duplicate writes. Park
+					# for snapshot recovery instead - the seq watermark was
+					# captured BEFORE the send, so recovery can tell this turn's
+					# messages from the previous turn's. Only the TIMEOUT is
+					# ambiguous; a rejection or a dead socket never reached the
+					# agent, so those still raise onto the real-error path.
+					if getattr(e, "code", None) != "ack-timeout":
+						raise
+					ack = {}
+					ack_timed_out = True
+				# chat.send delivered our message (incl. any drained notes) -
+				# drop exactly the notes we folded in (by id), so the correction
+				# is delivered once, not re-nagged, without clobbering a discard
+				# appended mid-turn or one a concurrent continuation delivered. A
+				# pre-ack failure raises OpenclawUnreachableError below instead of
+				# reaching here, leaving the notes for retry. An ack TIMEOUT is
+				# excluded for the same reason: delivery is unproven there, and
+				# re-nagging a correction is a much cheaper mistake than silently
+				# dropping one.
+				if drained_notes and not ack_timed_out:
+					agent_notes.clear(conversation_id, drained_ids)
+				if ack_timed_out:
+					# Same park-and-recover path as a dropped stream, handled
+					# below AFTER this pool checkout releases the per-gateway
+					# lock so the recovery round-trip never blocks other turns.
+					terminal = {"kind": "relay:interrupted", "reason": "ack-timeout"}
+				elif ack.get("status") == "ok":
+					# Cached replay of a completed run (same run_id
+					# re-enqueued after the worker died post-completion).
+					# No events will follow; finalize from the durable
+					# transcript instead. Routed through the same
+					# relay:interrupted handling as a dropped stream
+					# (below, AFTER this pool checkout releases the
+					# per-gateway lock) so the park+recover round-trip
+					# never holds the lock other turns are waiting on.
+					terminal = {"kind": "relay:interrupted", "reason": "completed-replay"}
+				else:
+					terminal = _consume_relay(
+						sess.relay_turn_events(
+							conv.session_key,
+							ack.get("runId") or run_id,
+						)
+					)
+				# Real usage accounting (design section 3): a genuinely
+				# completed run leaves fresh last-run token counts on the
+				# gateway's sessions.list row. Read them NOW, while `sess` is
+				# still checked out, and record this turn's delta. Only on
+				# relay:final (a cached completed-replay or a parked
+				# interrupt/error must NOT re-count). Delegated to
+				# jarvis.chat.usage; wrapped so usage accounting can never
+				# break the turn.
+				if terminal.get("kind") == "relay:final":
 					try:
-						ack = (
-							sess.chat_send(
-								conv.session_key,
-								user_message,
-								run_id,
-								thinking=(conv.thinking_override or "").strip() or None,
-								attachments=managed_attachments,
-								timeout_s=ack_timeout,
-							)
-							or {}
-						)
-					except OpenclawUnreachableError as e:
-						# The ack window closed with the request frame already on
-						# the wire. openclaw routinely ACCEPTS the message and runs
-						# the whole turn while the bench is still waiting, so
-						# erroring here is a false negative: the user sees
-						# "chat.send timed out" while the transcript shows a
-						# finished answer, and a retry re-runs under a FRESH run_id
-						# (dedupe keys off run_id) and can duplicate writes. Park
-						# for snapshot recovery instead - the seq watermark was
-						# captured BEFORE the send, so recovery can tell this turn's
-						# messages from the previous turn's. Only the TIMEOUT is
-						# ambiguous; a rejection or a dead socket never reached the
-						# agent, so those still raise onto the real-error path.
-						if getattr(e, "code", None) != "ack-timeout":
-							raise
-						ack = {}
-						ack_timed_out = True
-					# chat.send delivered our message (incl. any drained notes) -
-					# drop exactly the notes we folded in (by id), so the correction
-					# is delivered once, not re-nagged, without clobbering a discard
-					# appended mid-turn or one a concurrent continuation delivered. A
-					# pre-ack failure raises OpenclawUnreachableError below instead of
-					# reaching here, leaving the notes for retry. An ack TIMEOUT is
-					# excluded for the same reason: delivery is unproven there, and
-					# re-nagging a correction is a much cheaper mistake than silently
-					# dropping one.
-					if drained_notes and not ack_timed_out:
-						agent_notes.clear(conversation_id, drained_ids)
-					if ack_timed_out:
-						# Same park-and-recover path as a dropped stream, handled
-						# below AFTER this pool checkout releases the per-gateway
-						# lock so the recovery round-trip never blocks other turns.
-						terminal = {"kind": "relay:interrupted", "reason": "ack-timeout"}
-					elif ack.get("status") == "ok":
-						# Cached replay of a completed run (same run_id
-						# re-enqueued after the worker died post-completion).
-						# No events will follow; finalize from the durable
-						# transcript instead. Routed through the same
-						# relay:interrupted handling as a dropped stream
-						# (below, AFTER this pool checkout releases the
-						# per-gateway lock) so the park+recover round-trip
-						# never holds the lock other turns are waiting on.
-						terminal = {"kind": "relay:interrupted", "reason": "completed-replay"}
-					else:
-						terminal = _consume_relay(
-							sess.relay_turn_events(
-								conv.session_key,
-								ack.get("runId") or run_id,
-							)
-						)
-					# Real usage accounting (design section 3): a genuinely
-					# completed run leaves fresh last-run token counts on the
-					# gateway's sessions.list row. Read them NOW, while `sess` is
-					# still checked out, and record this turn's delta. Only on
-					# relay:final (a cached completed-replay or a parked
-					# interrupt/error must NOT re-count). Delegated to
-					# jarvis.chat.usage; wrapped so usage accounting can never
-					# break the turn.
-					if terminal.get("kind") == "relay:final":
-						try:
-							from jarvis.chat import usage as _usage
+						from jarvis.chat import usage as _usage
 
-							_row = _usage.fetch_fresh_session_row(sess, conv.session_key)
-							if _row:
-								_usage.record_turn_usage(conv.session_key, _row)
-						except Exception:
-							frappe.log_error(
-								title="chat: usage record hook failed",
-								message=frappe.get_traceback(),
-							)
-			except OpenclawUnreachableError as e:
-				# Pre-ack only (relay_turn_events never raises): the run never
-				# started, so this is a real, retriable error. Gray zone: a
-				# DELIVERED send whose ack was lost lands here too and a user
-				# retry then re-runs under a fresh run_id - deliberate. Reusing
-				# the old run_id would make openclaw REPLAY the cached outcome
-				# (dedupe semantics), never re-run; and while a ghost run is
-				# still active, openclaw's content-based dedupe already returns
-				# in_flight for the identical resend, so true double-runs are
-				# confined to the ghost-run-already-finished case.
-				_publish_run_error(str(e), changed_data=False, exc=e)
-				_advance_macro(conversation_id, errored=True)
-				_admission_settle(run_id, "errored", str(e))
-				return
+						_row = _usage.fetch_fresh_session_row(sess, conv.session_key)
+						if _row:
+							_usage.record_turn_usage(conv.session_key, _row)
+					except Exception:
+						frappe.log_error(
+							title="chat: usage record hook failed",
+							message=frappe.get_traceback(),
+						)
+		except OpenclawUnreachableError as e:
+			# Pre-ack only (relay_turn_events never raises): the run never
+			# started, so this is a real, retriable error. Gray zone: a
+			# DELIVERED send whose ack was lost lands here too and a user
+			# retry then re-runs under a fresh run_id - deliberate. Reusing
+			# the old run_id would make openclaw REPLAY the cached outcome
+			# (dedupe semantics), never re-run; and while a ghost run is
+			# still active, openclaw's content-based dedupe already returns
+			# in_flight for the identical resend, so true double-runs are
+			# confined to the ghost-run-already-finished case.
+			_publish_run_error(str(e), changed_data=False, exc=e)
+			_advance_macro(conversation_id, errored=True)
+			_admission_settle(run_id, "errored", str(e))
+			return
 
-			if terminal["kind"] == "relay:error":
-				err_text = terminal.get("error") or "agent error"
-				# Context overflow is NOT terminal on openclaw: it emits the
-				# error, then auto-compacts and RETRIES the prompt (observed
-				# live: 'auto-compaction succeeded; retrying prompt' ~45s
-				# after the error; the retried run completes in the session).
-				# Park for snapshot recovery instead of erroring - the
-				# recovery cron finalizes the retried answer; if the retry
-				# ALSO dies, the recovery ceiling errors it honestly. This
-				# holds for ANY plan/context-window size: openclaw derives
-				# the window from the model catalog, so smaller-plan windows
-				# just compact sooner - the customer never sees the raw
-				# overflow either way.
-				if "context overflow" in err_text.lower():
-					_mark_recovering(assistant_msg.name)
-					_publish_to_user(
-						user,
-						{
-							"kind": "run:recovering",
-							"conversation_id": conversation_id,
-							"message_id": assistant_msg.name,
-							"run_id": run_id,
-							"reason": "compacting",
-						},
-					)
-					return
-				if terminal.get("state") == "aborted":
-					# User hit Stop -> stop_run -> openclaw chat.abort. Finalize as a
-					# clean stop: keep whatever streamed, no error. Publish run:end so
-					# OTHER tabs (which never muted this run) also unlock - the
-					# stopping tab mutes it via stoppedRunId. (Ordered after the
-					# overflow check - the two terminal states are mutually exclusive,
-					# and the overflow branch stays first FOR ITS TEST: reordering
-					# these breaks TestRelayOverflowParks, which reads this file as
-					# text and asserts on a window after the relay:error line.)
-					#
-					# The stop is recorded as a FLAG, not as prose in `content`:
-					# `content` is what the agent said, and a partial answer with no
-					# marker reads as a complete one. The SPA renders the marker from
-					# `stopped`, so a mid-sentence stop is finally distinguishable
-					# from a short reply. `stopped` means the abort LANDED - the
-					# several paths where stop_run never reaches here leave it 0.
-					frappe.db.set_value(MSG, assistant_msg.name, "stopped", 1)
-					frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
-					frappe.db.commit()
-					_publish_to_user(
-						user,
-						{
-							"kind": "run:end",
-							"conversation_id": conversation_id,
-							"message_id": assistant_msg.name,
-							"run_id": run_id,
-							"stopped": True,
-						},
-					)
-					_advance_macro(conversation_id, errored=True)
-					_admission_settle(run_id, "cancelled")
-					return
-				_publish_run_error(err_text)
-				_advance_macro(conversation_id, errored=True)
-				_admission_settle(run_id, "errored", err_text)
-				return
-			if terminal["kind"] == "relay:interrupted":
-				# Deadline, transport drop, or exhausted stream after a
-				# successful ack: openclaw still owns the turn and persists
-				# the result. Park for snapshot recovery. NEVER a false error.
-				# Publish a recovering event so the UI shows a clear
-				# "reconnecting, your answer will appear here" state and
-				# unlocks the composer, instead of a silent, locked spinner
-				# that can sit for up to the recovery ceiling.
+		if terminal["kind"] == "relay:error":
+			err_text = terminal.get("error") or "agent error"
+			# Context overflow is NOT terminal on openclaw: it emits the
+			# error, then auto-compacts and RETRIES the prompt (observed
+			# live: 'auto-compaction succeeded; retrying prompt' ~45s
+			# after the error; the retried run completes in the session).
+			# Park for snapshot recovery instead of erroring - the
+			# recovery cron finalizes the retried answer; if the retry
+			# ALSO dies, the recovery ceiling errors it honestly. This
+			# holds for ANY plan/context-window size: openclaw derives
+			# the window from the model catalog, so smaller-plan windows
+			# just compact sooner - the customer never sees the raw
+			# overflow either way.
+			if "context overflow" in err_text.lower():
 				_mark_recovering(assistant_msg.name)
 				_publish_to_user(
 					user,
@@ -1240,14 +1085,70 @@ def handle_chat_send(payload: dict) -> None:
 						"conversation_id": conversation_id,
 						"message_id": assistant_msg.name,
 						"run_id": run_id,
-						"reason": terminal.get("reason") or "interrupted",
+						"reason": "compacting",
 					},
 				)
-				_try_recover_now(conversation_id)
 				return
-			# relay:final - authoritative text beats the batcher tail.
-			if terminal.get("text"):
-				frappe.db.set_value(MSG, assistant_msg.name, "content", terminal["text"])
+			if terminal.get("state") == "aborted":
+				# User hit Stop -> stop_run -> openclaw chat.abort. Finalize as a
+				# clean stop: keep whatever streamed, no error. Publish run:end so
+				# OTHER tabs (which never muted this run) also unlock - the
+				# stopping tab mutes it via stoppedRunId. (Ordered after the
+				# overflow check - the two terminal states are mutually exclusive,
+				# and the overflow branch stays first FOR ITS TEST: reordering
+				# these breaks TestRelayOverflowParks, which reads this file as
+				# text and asserts on a window after the relay:error line.)
+				#
+				# The stop is recorded as a FLAG, not as prose in `content`:
+				# `content` is what the agent said, and a partial answer with no
+				# marker reads as a complete one. The SPA renders the marker from
+				# `stopped`, so a mid-sentence stop is finally distinguishable
+				# from a short reply. `stopped` means the abort LANDED - the
+				# several paths where stop_run never reaches here leave it 0.
+				frappe.db.set_value(MSG, assistant_msg.name, "stopped", 1)
+				frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
+				frappe.db.commit()
+				_publish_to_user(
+					user,
+					{
+						"kind": "run:end",
+						"conversation_id": conversation_id,
+						"message_id": assistant_msg.name,
+						"run_id": run_id,
+						"stopped": True,
+					},
+				)
+				_advance_macro(conversation_id, errored=True)
+				_admission_settle(run_id, "cancelled")
+				return
+			_publish_run_error(err_text)
+			_advance_macro(conversation_id, errored=True)
+			_admission_settle(run_id, "errored", err_text)
+			return
+		if terminal["kind"] == "relay:interrupted":
+			# Deadline, transport drop, or exhausted stream after a
+			# successful ack: openclaw still owns the turn and persists
+			# the result. Park for snapshot recovery. NEVER a false error.
+			# Publish a recovering event so the UI shows a clear
+			# "reconnecting, your answer will appear here" state and
+			# unlocks the composer, instead of a silent, locked spinner
+			# that can sit for up to the recovery ceiling.
+			_mark_recovering(assistant_msg.name)
+			_publish_to_user(
+				user,
+				{
+					"kind": "run:recovering",
+					"conversation_id": conversation_id,
+					"message_id": assistant_msg.name,
+					"run_id": run_id,
+					"reason": terminal.get("reason") or "interrupted",
+				},
+			)
+			_try_recover_now(conversation_id)
+			return
+		# relay:final - authoritative text beats the batcher tail.
+		if terminal.get("text"):
+			frappe.db.set_value(MSG, assistant_msg.name, "content", terminal["text"])
 
 		# Streaming exited cleanly via lifecycle.end
 		frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
@@ -1360,7 +1261,7 @@ def handle_chat_send(payload: dict) -> None:
 	except Exception:
 		pass
 
-	# Auto-title (managed mode): the first substantive turn of a still-unnamed
+	# Auto-title: the first substantive turn of a still-unnamed
 	# conversation gets a concise, LLM-summarised title, not the raw first
 	# message. Deferred to the SHORT queue (2026-07 latency plan, Phase 1.2):
 	# it used to run inline here — a full extra LLM turn holding this long-
@@ -1368,41 +1269,38 @@ def handle_chat_send(payload: dict) -> None:
 	# title generation. The job re-resolves settings/model itself; the title
 	# still lands via the same "conversation:renamed" event.
 	# Best-effort: a title failure must never affect the completed turn.
-	from jarvis import selfhost
+	try:
+		from jarvis.chat import title as title_mod
 
-	if not selfhost.is_self_hosted():
-		try:
-			from jarvis.chat import title as title_mod
+		title_mod.enqueue_autotitle(conversation_id, user)
+	except Exception:
+		frappe.log_error(
+			title="chat worker: auto-title enqueue failed",
+			message=frappe.get_traceback(),
+		)
+	# Wiki nudge (voice & wiki feature): fire-and-forget short-queue job.
+	# Every gate (wiki_enabled, File Box, cooldown, dismissal, wiki-worthy
+	# entities this turn) re-checks inside the job; the cheap wiki_enabled
+	# read here just skips a pointless enqueue when the wiki is off. The
+	# nudge goes to chat_user — the turn's actual sender — not conv.owner
+	# (they diverge in shared conversations). Lazy import + best-effort:
+	# a nudge failure can never affect the completed turn.
+	try:
+		from jarvis.chat import wiki as wiki_mod
 
-			title_mod.enqueue_autotitle(conversation_id, user)
-		except Exception:
-			frappe.log_error(
-				title="chat worker: auto-title enqueue failed",
-				message=frappe.get_traceback(),
+		if wiki_mod.wiki_enabled():
+			frappe.enqueue(
+				"jarvis.chat.wiki.maybe_nudge",
+				queue="short",
+				conversation_id=conversation_id,
+				user=chat_user,
+				run_id=run_id,
 			)
-		# Wiki nudge (voice & wiki feature): fire-and-forget short-queue job.
-		# Every gate (wiki_enabled, File Box, cooldown, dismissal, wiki-worthy
-		# entities this turn) re-checks inside the job; the cheap wiki_enabled
-		# read here just skips a pointless enqueue when the wiki is off. The
-		# nudge goes to chat_user — the turn's actual sender — not conv.owner
-		# (they diverge in shared conversations). Lazy import + best-effort:
-		# a nudge failure can never affect the completed turn.
-		try:
-			from jarvis.chat import wiki as wiki_mod
-
-			if wiki_mod.wiki_enabled():
-				frappe.enqueue(
-					"jarvis.chat.wiki.maybe_nudge",
-					queue="short",
-					conversation_id=conversation_id,
-					user=chat_user,
-					run_id=run_id,
-				)
-		except Exception:
-			frappe.log_error(
-				title="chat worker: wiki nudge enqueue failed",
-				message=frappe.get_traceback(),
-			)
+	except Exception:
+		frappe.log_error(
+			title="chat worker: wiki nudge enqueue failed",
+			message=frappe.get_traceback(),
+		)
 
 
 _REPORT_FILTER_LINE_CAP = 400
@@ -1803,7 +1701,7 @@ def _fence_untrusted(text: str, source: str) -> str:
 
 def _vision_enabled(settings) -> bool:
 	"""Operator toggle; NULL-safe (a pre-existing config without the field
-	defaults to ON), mirroring selfhost_stream."""
+	defaults to ON)."""
 	v = settings.vision_attachments_enabled
 	return v is None or bool(v)
 

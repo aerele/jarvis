@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
 	STEPS_MANAGED,
-	STEPS_SELFHOST,
 	nextStep,
 	prevStep,
 	stepIndex,
@@ -21,12 +20,6 @@ test("managed step order", () => {
 	assert.equal(prevStep(STEPS_MANAGED, "details"), "plan");
 	assert.equal(nextStep(STEPS_MANAGED, "connect"), "connect"); // clamp at end
 	assert.equal(prevStep(STEPS_MANAGED, "intro"), "intro"); // clamp at start
-});
-
-test("selfhost step order", () => {
-	assert.deepEqual(STEPS_SELFHOST, ["plan", "selfhost"]);
-	assert.equal(nextStep(STEPS_SELFHOST, "plan"), "selfhost");
-	assert.equal(prevStep(STEPS_SELFHOST, "selfhost"), "plan");
 });
 
 test("stepIndex", () => {

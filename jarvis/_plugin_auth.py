@@ -41,15 +41,12 @@ the same 400 InvalidArgumentError shape as partial headers.
 
 The single escape hatch is the site_config key
 ``jarvis_plugin_allow_unsigned`` (absent or 0 = enforce; 1 = accept
-unsigned bearer-only requests). It exists only for self-hosted benches
-whose openclaw plugin has not been upgraded yet, it WARN-logs the
-sunset date on every request it lets through, and it bumps a per-day
-Redis counter (``jarvis:plugin_unsigned_allowed:<YYYY-MM-DD>``) so an
-operator can confirm the field is quiet before turning it off. While the
-hatch is on, ``unsigned_escape_hatch_status`` surfaces that count as an
-advisory row in the self-host "Test connection" checks (jarvis.selfhost)
-so the operator sees it in the product, not only in the logs. The flag
-itself is scheduled for removal on 2026-10-01 (``_UNSIGNED_SUNSET_DATE``).
+unsigned bearer-only requests). It exists only for benches whose openclaw
+plugin has not been upgraded yet, it WARN-logs the sunset date on every
+request it lets through, and it bumps a per-day Redis counter
+(``jarvis:plugin_unsigned_allowed:<YYYY-MM-DD>``) so an operator can confirm
+the field is quiet before turning it off. The flag itself is scheduled for
+removal on 2026-10-01 (``_UNSIGNED_SUNSET_DATE``).
 
 Requests rejected while the flag is off land in the Error Log under
 "plugin_auth: unsigned request rejected", throttled to one row per
@@ -317,8 +314,6 @@ def unsigned_escape_hatch_status() -> dict | None:
 	advise about. When it is on, returns the conf key, the removal date, the
 	counter window and how many unsigned calls it let through over that
 	window (``recent_allowed`` is None when the cache is unreachable).
-	Consumed by jarvis.selfhost.config_checks so the sunset is visible in
-	the product, not only in the bench logs.
 	"""
 	if not _allow_unsigned():
 		return None

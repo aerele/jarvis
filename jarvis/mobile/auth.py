@@ -191,7 +191,7 @@ def _lan_ip() -> str | None:
 def _pairing_payload() -> dict:
 	"""Non-secret site connection details the phone needs to reach this site."""
 	dev = bool(frappe.conf.get("developer_mode"))
-	# In dev/self-host the realtime server listens on its own port; in production
+	# In dev the realtime server listens on its own port; in production
 	# it rides the site origin, so no port is advertised.
 	port = frappe.conf.get("socketio_port") if dev else None
 

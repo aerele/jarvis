@@ -146,11 +146,6 @@ def rotate_dormant_sessions() -> dict:
 	empty chats, and reap orphaned throwaway sessions. Returns a summary dict
 	(also logged) so a manual ``bench execute`` run shows what happened. (Name
 	kept for the scheduler entry in hooks.py.)"""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return {"skipped": "self-hosted"}
-
 	settings = frappe.get_single("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	if not gateway_url:

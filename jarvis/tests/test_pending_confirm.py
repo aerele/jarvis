@@ -215,7 +215,7 @@ class TestListForOwner(FrappeTestCase):
 		self.assertIsNotNone(pending_confirm.peek(t_cl))  # conv-less kept
 
 	def test_clear_for_conversation_run_id_scoping(self):
-		"""F6: with a run_id, a self-host token (which carries a run_id) is swept
+		"""F6: with a run_id, a token that carries a run_id is swept
 		only when it matches; a managed token (run_id "") is always swept."""
 		t_r1 = pending_confirm.mint(
 			conversation="conv-z",
@@ -321,7 +321,7 @@ class TestConsume(FrappeTestCase):
 		"""F1: a token minted with an unresolvable conversation ("") carries no
 		conversation binding, so an owner-matched consume must still succeed even
 		when the caller passes its current (non-empty) conversation id. Regression
-		for the managed session_key-miss / self-host ambiguous-concurrency case
+		for the session_key-miss case
 		where the card was delivered but every Confirm click failed the
 		conversation check and showed a misleading 'expired' toast."""
 		token = pending_confirm.mint(conversation="", owner=OWNER, tool=TOOL, args=ARGS, run_id=RUN_ID)

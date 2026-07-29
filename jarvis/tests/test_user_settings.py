@@ -367,10 +367,8 @@ class _FakeSess:
 
 class TestAdminSync(_UsageTestBase):
 	def _patch_gateway(self, sess_or_exc):
-		"""Patch selfhost off + a non-empty agent_url + the pooled checkout so no
-		real WS ever opens. ``admin_sync_usage`` imports selfhost lazily via
-		``from jarvis import selfhost``, so the patch target is the source module."""
-		from jarvis import selfhost as _sh
+		"""Patch a non-empty agent_url + the pooled checkout so no real WS ever
+		opens."""
 
 		@contextmanager
 		def _fake_checkout(url):
@@ -383,12 +381,9 @@ class TestAdminSync(_UsageTestBase):
 		self.addCleanup(
 			lambda: frappe.db.set_single_value("Jarvis Settings", "agent_url", orig_agent_url or "")
 		)
-		for p in (
-			patch.object(_sh, "is_self_hosted", return_value=False),
-			patch.object(user_settings_api.openclaw_session_pool, "checkout", _fake_checkout),
-		):
-			p.start()
-			self.addCleanup(p.stop)
+		p = patch.object(user_settings_api.openclaw_session_pool, "checkout", _fake_checkout)
+		p.start()
+		self.addCleanup(p.stop)
 
 	def test_refreshes_snapshots_without_accumulating(self):
 		_make_session("agent:sa", USER_A)
@@ -436,14 +431,6 @@ class TestAdminSync(_UsageTestBase):
 	def test_gateway_unreachable(self):
 		self._patch_gateway(OpenclawUnreachableError("down"))
 		out = user_settings_api.admin_sync_usage()
-		self.assertFalse(out["ok"])
-		self.assertEqual(out["reason"], "gateway_unreachable")
-
-	def test_self_hosted_degrades(self):
-		from jarvis import selfhost as _sh
-
-		with patch.object(_sh, "is_self_hosted", return_value=True):
-			out = user_settings_api.admin_sync_usage()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["reason"], "gateway_unreachable")
 
@@ -529,30 +516,18 @@ class TestEnforcement(_UsageTestBase):
 
 
 # --------------------------------------------------------------------------- #
-# 7. get_usage()'s "measured" block — managed zeros vs self-hosted None
+# 7. get_usage()'s "measured" block
 # --------------------------------------------------------------------------- #
 class TestMeasuredUsage(_UsageTestBase):
-	def test_no_row_managed_returns_zeros(self):
-		from jarvis import selfhost as _sh
+	def test_no_row_returns_zeros(self):
 		from jarvis.chat.api import _measured_usage
 
-		with patch.object(_sh, "is_self_hosted", return_value=False):
-			m = _measured_usage(USER_A)
+		m = _measured_usage(USER_A)
 		self.assertIsNotNone(m)
 		self.assertEqual(m["month_tokens"], 0)
 		self.assertEqual(m["monthly_token_limit"], 0)
 
-	def test_no_row_self_hosted_returns_none(self):
-		"""Self-hosted records nothing in v1 — the SPA hides the measured block
-		on None instead of showing a forever-zero meter."""
-		from jarvis import selfhost as _sh
-		from jarvis.chat.api import _measured_usage
-
-		with patch.object(_sh, "is_self_hosted", return_value=True):
-			self.assertIsNone(_measured_usage(USER_A))
-
-	def test_existing_row_wins_even_self_hosted(self):
-		from jarvis import selfhost as _sh
+	def test_existing_row_wins(self):
 		from jarvis.chat.api import _measured_usage
 
 		usage.get_or_create_user_settings(USER_A)
@@ -563,8 +538,7 @@ class TestMeasuredUsage(_UsageTestBase):
 			update_modified=False,
 		)
 		frappe.db.commit()
-		with patch.object(_sh, "is_self_hosted", return_value=True):
-			m = _measured_usage(USER_A)
+		m = _measured_usage(USER_A)
 		self.assertEqual(m["month_tokens"], 42)
 		self.assertEqual(m["total_tokens"], 42)
 

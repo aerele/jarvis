@@ -3,7 +3,7 @@ DESIGN.md sections 4 / 5b / 6b).
 
 Before this module, there was NO general-purpose URL-fetch capability
 anywhere in this app (research/processing.md section (c): every existing
-``requests.*`` call is internal/infra - self-host probes, the tenant's own
+``requests.*`` call is internal/infra - LLM key probes, the tenant's own
 container gateway, OpenRouter, OAuth token exchange - never an arbitrary
 customer-supplied URL). A Link-kind Personalise note is the first feature
 that fetches content the CALLER chose, from wherever it points, so the SSRF

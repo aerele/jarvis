@@ -36,7 +36,7 @@ const routes = [
 		component: () => import("@/pages/skills/SkillDetail.vue"),
 		props: true,
 	},
-	// First-run wizard (managed signup or self-hosted connect) — System-Manager
+	// First-run wizard (managed signup) — System-Manager
 	// only; guard redirects others to Chat. Reached via the chat welcome card
 	// or the desk banner, not a forced redirect (see beforeEach below).
 	{

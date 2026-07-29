@@ -21,10 +21,6 @@ FIELD = "installed_apps_synced"
 def after_migrate() -> None:
 	"""Best-effort; never blocks a migrate."""
 	try:
-		from jarvis import selfhost
-
-		if selfhost.is_self_hosted():
-			return
 		if not _admin_configured():
 			return
 		current = _current_apps()

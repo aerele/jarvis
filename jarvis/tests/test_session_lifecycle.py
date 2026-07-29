@@ -144,7 +144,6 @@ class TestSessionLifecycle(FrappeTestCase):
 				"jarvis.chat.openclaw_client.OpenclawSession.connect",
 				return_value=sess,
 			),
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 		):
 			return session_lifecycle.rotate_dormant_sessions()
 
@@ -625,17 +624,6 @@ class TestSessionLifecycle(FrappeTestCase):
 
 	# ---- gating ------------------------------------------------------
 
-	def test_self_hosted_early_return(self):
-		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=True),
-			patch(
-				"jarvis.chat.openclaw_client.OpenclawSession.connect",
-			) as connect,
-		):
-			summary = session_lifecycle.rotate_dormant_sessions()
-		self.assertEqual(summary, {"skipped": "self-hosted"})
-		connect.assert_not_called()
-
 	def test_connect_failure_is_a_clean_skip(self):
 		self._conv(session_key="test-lc-x", idle_days=40, has_message=True)
 		with (
@@ -643,7 +631,6 @@ class TestSessionLifecycle(FrappeTestCase):
 				"jarvis.chat.openclaw_client.OpenclawSession.connect",
 				side_effect=RuntimeError("refused"),
 			),
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("frappe.log_error"),
 		):
 			summary = session_lifecycle.rotate_dormant_sessions()

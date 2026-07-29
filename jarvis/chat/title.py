@@ -218,9 +218,8 @@ def enqueue_autotitle(conversation_id: str, user: str) -> None:
 def autotitle_job(conversation_id: str, user: str) -> None:
 	"""Short-queue job body for the deferred auto-title. Re-resolves
 	settings / gateway / model itself (nothing heavyweight is serialized
-	through the queue). Managed mode only — the enqueue site is already
-	gated on ``not selfhost.is_self_hosted()``. Best-effort like the old
-	inline path: any failure is logged, never affects the finished turn.
+	through the queue). Best-effort like the old inline path: any failure is
+	logged, never affects the finished turn.
 	"""
 	try:
 		from jarvis.chat.turn_handler import _resolve_model_and_provider

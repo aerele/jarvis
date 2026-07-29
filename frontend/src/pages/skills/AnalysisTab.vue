@@ -11,14 +11,12 @@
 			</template>
 			<template #right-header>
 				<Button
-					v-if="!selfHosted"
 					icon="refresh-cw"
 					variant="ghost"
 					:tooltip="'Refresh'"
 					@click="reloadAll"
 				/>
 				<Button
-					v-if="!selfHosted"
 					variant="subtle"
 					:label="status.latestRun ? 'Run analysis now' : 'Run first analysis now'"
 					iconLeft="play"
@@ -28,22 +26,7 @@
 			</template>
 		</LayoutHeader>
 
-		<!-- self-host: feature fully disabled (plan §13.3 / §7 T5) -->
-		<div
-			v-if="selfHosted"
-			class="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
-		>
-			<FeatherIcon name="cloud-off" class="size-8 text-ink-gray-5" />
-			<span class="text-lg font-medium text-ink-gray-8">
-				Behavioural learning is available on managed plans
-			</span>
-			<span class="max-w-md text-p-base text-ink-gray-6">
-				Pattern learning mines this site's history into reviewable defaults. It runs only
-				on Jarvis-managed benches and is disabled on self-hosted installs.
-			</span>
-		</div>
-
-		<div v-else class="min-h-0 flex-1 overflow-y-auto">
+		<div class="min-h-0 flex-1 overflow-y-auto">
 			<div
 				class="mx-auto grid w-full max-w-5xl grid-cols-1 items-start gap-5 px-5 py-5 lg:grid-cols-2"
 			>
@@ -297,8 +280,6 @@
 // the Run-now control (top-right, confirm popup, dynamic first-run label) and
 // a "Runs & findings" pane that renders the latest-run telemetry + detector
 // coverage from get_learning_status. The decision queue lives in ReviewTab.
-// Managed-only: get_learning_status reports self_hosted → this renders the
-// managed-only empty state and stops.
 import { ref, reactive, computed, onMounted } from "vue";
 import {
 	Badge,
@@ -331,7 +312,6 @@ function errMsg(e) {
 }
 
 // ── state ────────────────────────────────────────────────────────────────────
-const selfHosted = ref(false);
 const savingSettings = ref(false);
 const runningNow = ref(false);
 
@@ -397,7 +377,6 @@ const coverageNote = computed(() => {
 async function loadStatus() {
 	try {
 		const st = await getLearningStatus();
-		selfHosted.value = !!st.self_hosted;
 		status.enabled = !!st.enabled;
 		status.lastRunAt = st.last_run_at || "";
 		status.lastRunStatus = st.last_run_status || "";
@@ -406,7 +385,6 @@ async function loadStatus() {
 		status.latestRun = st.latest_run || null;
 	} catch (e) {
 		// parent mounts this only for SMs; a failure here means no access
-		selfHosted.value = false;
 		toast.error(errMsg(e));
 	}
 }
@@ -505,7 +483,6 @@ function runNow() {
 // ── init ─────────────────────────────────────────────────────────────────────
 onMounted(async () => {
 	await loadStatus();
-	if (selfHosted.value) return;
 	loadSettings();
 });
 </script>

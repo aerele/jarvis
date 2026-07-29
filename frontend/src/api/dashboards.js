@@ -27,7 +27,7 @@ const _page = (p = {}) => ({
 
 // ── caps probe ────────────────────────────────────────────────────────────────
 // -> {creatable_scopes: ["User", ...], manageable_roles: [...], max_sources,
-//     max_html_chars, max_rows, canvas_available}
+//     max_html_chars, max_rows}
 export const getDashboardsCaps = () => call(DB + "get_dashboards_caps").then(unwrap);
 
 // ── dashboards ────────────────────────────────────────────────────────────────

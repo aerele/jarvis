@@ -8,7 +8,7 @@ DB-authoritative ``Jarvis Relay Pump.transport_mode`` ROW, and patterntest's row
 ``pump`` by the migration default — so a send/continuation there routes to the pump (no
 legacy worker enqueue, ``_dispatch_turn`` not called via the accept callback). Tests that
 assert the LEGACY worker enqueue / the shared ``_dispatch_turn`` continuation dispatch
-cover a REAL shipped path (explicit-0 kill-switch sites, self-host), so they must run on an
+cover a REAL shipped path (explicit-0 kill-switch sites), so they must run on an
 honestly-legacy site: this flips the ROW to ``legacy`` (via the sanctioned
 ``pump.set_transport_mode`` row writer) AND sets the explicit conf mirror
 ``jarvis_pump_enabled=0`` for the request context, so both the entry ``turn_machine_enabled()``

@@ -285,8 +285,7 @@
    "fieldtype": "Section Break",
    "label": "Behavioural Learning",
    "collapsible": 1,
-   "depends_on": "eval:doc.deployment_mode != 'Self-Hosted'",
-   "description": "Nightly, window-bound, READ-ONLY mining of this site's history into reviewable pattern proposals. Nothing activates without System Manager approval. Managed deployments only in v1 (hidden for self-host)."
+   "description": "Nightly, window-bound, READ-ONLY mining of this site's history into reviewable pattern proposals. Nothing activates without System Manager approval."
   },
   {
    "fieldname": "pattern_learning_enabled",
@@ -491,30 +490,33 @@
   {
    "fieldname": "deployment_section",
    "fieldtype": "Section Break",
-   "label": "Deployment Mode"
+   "label": "Deployment Mode",
+   "hidden": 1
   },
   {
    "fieldname": "deployment_mode",
-   "fieldtype": "Select",
+   "fieldtype": "Data",
    "label": "Deployment Mode",
-   "options": "Managed\nSelf-Hosted",
    "default": "Managed",
-   "description": "Managed = Aerele-hosted openclaw container (persona + skills, billed). Self-Hosted = connect to your own openclaw server (you bring openclaw + LLM; no Aerele persona/skills). Switchable; chat history is preserved."
+   "read_only": 1,
+   "hidden": 1,
+   "description": "Retired. Jarvis is managed-only; nothing reads this field. Kept so existing sites keep their column until a migration drops it."
   },
   {
    "fieldname": "selfhost_last_validated_at",
    "fieldtype": "Datetime",
    "label": "Self-Host Last Validated At",
    "read_only": 1,
-   "depends_on": "eval:doc.deployment_mode == 'Self-Hosted'"
+   "hidden": 1,
+   "description": "Retired with self-hosted deployments; nothing reads this field."
   },
   {
    "fieldname": "selfhost_last_validation",
    "fieldtype": "Long Text",
    "label": "Self-Host Last Validation",
    "read_only": 1,
-   "depends_on": "eval:doc.deployment_mode == 'Self-Hosted'",
-   "description": "JSON result of the last connection validation (per-check pass/fail)."
+   "hidden": 1,
+   "description": "Retired with self-hosted deployments; nothing reads this field."
   },
   {
    "fieldname": "selfhost_tool_user",
@@ -522,16 +524,18 @@
    "permlevel": 1,
    "options": "User",
    "label": "Self-Host Tool User",
-   "depends_on": "eval:doc.deployment_mode == 'Self-Hosted'",
-   "description": "Frappe user whose permissions the jarvis__* (ERP) tools run under when chatting via a self-hosted openclaw. A self-hosted bench is single-tenant; defaults to whoever configured self-host."
+   "read_only": 1,
+   "hidden": 1,
+   "description": "Retired with self-hosted deployments; nothing reads this field."
   },
   {
    "fieldname": "selfhost_stream",
    "fieldtype": "Check",
    "label": "Stream Self-Host Responses",
    "default": "1",
-   "depends_on": "eval:doc.deployment_mode == 'Self-Hosted'",
-   "description": "Stream the agent's reply token-by-token over HTTP (SSE) for a responsive chat. Turn off if your openclaw (or a proxy in front of it) buffers streaming responses, in which case the full reply appears at once."
+   "read_only": 1,
+   "hidden": 1,
+   "description": "Retired with self-hosted deployments; nothing reads this field."
   },
   {
    "fieldname": "vision_attachments_enabled",

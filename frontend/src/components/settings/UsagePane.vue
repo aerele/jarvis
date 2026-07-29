@@ -162,7 +162,7 @@ const s = computed(() => shell.chatContext?.sessionStats || null);
 const usage = ref(null);
 
 // Real (gateway-recorded) usage, added to get_usage()'s response. null until the
-// backend ships it or the user has no recorded usage yet (self-hosted stays null).
+// backend ships it or the user has no recorded usage yet.
 const measured = computed(() => (usage.value && usage.value.measured) || null);
 const measuredPct = computed(() => {
 	const m = measured.value;

@@ -1959,7 +1959,14 @@ const badgeLabel = computed(() => {
 	// api-key OR a lone chat subscription - shows NO badge: it was just noise, and
 	// "Proxy" on a single subscription read as confusing/broken.
 	if (llmMode.value === "preset") return selectedPreset.value ? "Proxy (failover)" : "";
-	if (llmMode.value === "custom") return validModels.value.length >= 2 ? "Proxy (failover)" : "";
+	// A 2+-model custom pool only reads "Proxy (failover)" when badgeMode agrees a
+	// sidecar is actually deployed (some enabled model is a subscription). A pure
+	// BYO api-key pool of any size is openclaw-direct - no proxy, so no badge.
+	// (was: any 2+ rows counted as "Proxy (failover)" regardless of credential type)
+	if (llmMode.value === "custom")
+		return validModels.value.length >= 2 && badgeMode.value === "proxy"
+			? "Proxy (failover)"
+			: "";
 	return ""; // quick = single model
 });
 // Save-bar status pill (Option A - "honest model health"). Reflects the outcome

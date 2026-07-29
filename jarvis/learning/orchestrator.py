@@ -3,9 +3,8 @@
 ``tick()`` is the app-static cron entry (per-site cron rows are impossible;
 they are reset on migrate). It is intentionally cheap and self-enforcing:
 
-1. Bail on the site_config kill switch, self-host, the disabled flag, an
-   un-onboarded account, or a time outside the analysis window (wrap-aware,
-   site-tz).
+1. Bail on the site_config kill switch, the disabled flag, an un-onboarded
+   account, or a time outside the analysis window (wrap-aware, site-tz).
 2. Stale-run watch: a Running run whose heartbeat predates the current
    window (or is >20 min old), and a Queued run that never got a worker
    (queued >20 min), are marked Failed with a coverage note. This is the
@@ -63,15 +62,6 @@ def tick() -> None:
 	for this site. Runs as Administrator (the scheduler user), default queue."""
 	if frappe.conf.get("jarvis_pattern_learning_disabled"):
 		return
-	try:
-		from jarvis.selfhost import is_self_hosted
-
-		if is_self_hosted():
-			return
-	except Exception:
-		# selfhost probe failure must never let the feature run on self-host;
-		# but a genuinely-missing module on managed benches should not block.
-		pass
 	if not _feature_enabled():
 		return
 	if not _is_onboarded():
@@ -135,22 +125,11 @@ def _schedule_in_window(now, window_start, window_end) -> None:
 def run_now(requested_by: str) -> dict:
 	"""Create a manual ``Jarvis Pattern Run`` and enqueue the engine. Manual
 	runs BYPASS the window (plan section 5.2, trigger-aware) but keep the row
-	budget + statement timeouts. Refuses on self-host or when disabled.
+	budget + statement timeouts. Refuses when disabled.
 
 	Returns ``{"ok": bool, "run": <name>|None, "reason": <str>|None}``."""
 	if frappe.conf.get("jarvis_pattern_learning_disabled"):
 		return {"ok": False, "run": None, "reason": "pattern learning is disabled for this site"}
-	try:
-		from jarvis.selfhost import is_self_hosted
-
-		if is_self_hosted():
-			return {
-				"ok": False,
-				"run": None,
-				"reason": "pattern learning is not available on self-hosted benches",
-			}
-	except Exception:
-		pass
 	if not _feature_enabled():
 		return {"ok": False, "run": None, "reason": "pattern learning is not enabled"}
 

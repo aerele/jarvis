@@ -363,14 +363,12 @@ def disconnect_llm() -> dict:
 	(admin's endpoint is idempotent for the same reason).
 	"""
 	require_jarvis_admin()
-	from jarvis import selfhost
-
 	settings = frappe.get_single("Jarvis Settings")
-	# Only call admin when there is an admin tenancy to call. A self-hosted bench
-	# has no control plane at all, and an un-onboarded one has no credentials for
-	# it, so admin_client would raise AdminAuthError("not onboarded") on what is
-	# otherwise a perfectly valid local wipe.
-	if not selfhost.is_self_hosted() and _has_admin_credentials(settings):
+	# Only call admin when there is an admin tenancy to call. An un-onboarded
+	# bench has no credentials for it, so admin_client would raise
+	# AdminAuthError("not onboarded") on what is otherwise a perfectly valid
+	# local wipe.
+	if _has_admin_credentials(settings):
 		_surface(admin_client.post_disconnect_llm)
 
 	_clear_llm_secrets(settings)

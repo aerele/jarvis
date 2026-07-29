@@ -473,7 +473,7 @@ class TestContinuation(FrappeTestCase):
 
 class TestConfirmEmptyConversationToken(FrappeTestCase):
 	"""F1: a gated write parked with an unresolvable conversation ("" - managed
-	session_key->conversation lookup miss / self-host ambiguous concurrency) is
+	session_key->conversation lookup miss) is
 	delivered to and rendered by the owner, so it must still be confirmable /
 	discardable, and its receipt + continuation must attach to the conversation
 	the click came from (the SPA's current id, passed in)."""
