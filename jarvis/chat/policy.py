@@ -120,7 +120,7 @@ def _llm_not_configured() -> bool:
 def _subscription_suspended() -> bool:
 	"""True iff admin reports the subscription no longer entitles chat. Reuses
 	_admin_chat_gate's cache; fails OPEN (a control-plane hiccup must never block
-	a paying customer, and self-host has no admin)."""
+	a paying customer)."""
 	try:
 		from jarvis.account import _admin_chat_gate
 

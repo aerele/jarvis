@@ -6,7 +6,7 @@ PermissionError), the monthly budget cap (149th turn ok, 151st refused, via
 direct cache-counter manipulation), output validation (missing '- ' bullet,
 injection-shaped reply, over-length reply, altered Evidence sentence all
 rejected; a valid reply accepted), and the endpoint wiring (flag-disabled
-refused, self-host refused, status guard, ok path writes skill_draft with
+refused, status guard, ok path writes skill_draft with
 draft_edited=0, gateway failure falls back without writing).
 
 The gateway boundary is ALWAYS mocked (``polish._run_gateway_turn``): no test
@@ -372,13 +372,6 @@ class TestPolishEndpoint(_PolishTestCase):
 		with _as(self.sm), _flag(0):
 			with self.assertRaises(frappe.ValidationError):
 				learned_api.polish_learned_draft(name)
-
-	def test_self_host_refused(self):
-		name = _mk("ep-selfhost")
-		with _as(self.sm), _flag(1):
-			with mock.patch("jarvis.selfhost.is_self_hosted", return_value=True):
-				with self.assertRaises(frappe.ValidationError):
-					learned_api.polish_learned_draft(name)
 
 	def test_non_sm_refused(self):
 		name = _mk("ep-nonsm")

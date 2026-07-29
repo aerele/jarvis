@@ -1,6 +1,6 @@
 """Daily month-to-date usage rollup push (Architecture A, fleet spec §3/§5).
-admin_client is mocked; a push failure is swallowed; self-hosted / unconfigured
-skip; payload cap logged."""
+admin_client is mocked; a push failure is swallowed; an unconfigured bench
+skips; payload cap logged."""
 
 from __future__ import annotations
 
@@ -225,7 +225,6 @@ class TestPushJob(_Base):
 	def test_pushes_when_configured(self):
 		self._seed()
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch.object(usage_push, "_admin_configured", return_value=True),
 			patch("jarvis.admin_client.push_usage_rollup", return_value={"ok": True}) as push,
 		):
@@ -235,19 +234,9 @@ class TestPushJob(_Base):
 		self.assertEqual(sent["month_key"], usage.current_month_key())
 		self.assertTrue(any(x["email"] == USER_A for x in sent["users"]))
 
-	def test_self_hosted_skips(self):
-		self._seed()
-		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=True),
-			patch("jarvis.admin_client.push_usage_rollup") as push,
-		):
-			usage_push.push_usage_rollup()
-		push.assert_not_called()
-
 	def test_unconfigured_skips(self):
 		self._seed()
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch.object(usage_push, "_admin_configured", return_value=False),
 			patch("jarvis.admin_client.push_usage_rollup") as push,
 		):
@@ -259,7 +248,6 @@ class TestPushJob(_Base):
 		from jarvis.exceptions import AdminUnreachableError
 
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch.object(usage_push, "_admin_configured", return_value=True),
 			patch("jarvis.admin_client.push_usage_rollup", side_effect=AdminUnreachableError("down")),
 			patch("frappe.log_error") as logged,
@@ -272,7 +260,6 @@ class TestPushJob(_Base):
 		from jarvis.exceptions import AdminAuthError
 
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch.object(usage_push, "_admin_configured", return_value=True),
 			patch("jarvis.admin_client.push_usage_rollup", side_effect=AdminAuthError("not onboarded")),
 			patch("frappe.log_error") as logged,

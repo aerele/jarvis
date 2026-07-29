@@ -58,32 +58,6 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			"user",
 		)
 		if not plugin_user:
-			# Self-hosted benches chat over openclaw's HTTP transport, which
-			# creates no Jarvis Chat Session row. The gateway token was already
-			# validated above (proving the call came from the configured
-			# openclaw), so run the tool as the configured self-host tool user
-			# - a self-hosted bench is single-tenant.
-			from jarvis import selfhost
-
-			if selfhost.is_self_hosted():
-				# The gateway token was validated above, so a callback reaching
-				# here proves openclaw->Frappe reachability. Bump the marker the
-				# connection probe reads (best-effort; self-host branch only, so
-				# the managed/session path never touches it).
-				selfhost.note_callback_seen()
-				plugin_user = _selfhost_tool_user()
-				if not plugin_user:
-					# Self-hosted, but the tool user is unset (or names a user
-					# that no longer exists). Fail with a clear, fixable
-					# message instead of the opaque "unknown session" below.
-					frappe.local.response.http_status_code = 400
-					return _error(
-						"ConfigurationError",
-						"self-hosted tool user is not configured. Set "
-						"'Self-Host Tool User' in Jarvis Settings to a "
-						"non-admin Frappe user so ERP tools can run.",
-					)
-		if not plugin_user:
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
@@ -98,11 +72,9 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 
 		# NOTE: no Jarvis-access role gate on the plugin path. It is
 		# machine-authenticated (token/HMAC proves the call came from openclaw),
-		# and `plugin_user` is either the real chat user — already gated when they
-		# started the conversation — or, in self-hosted mode, the non-privileged
-		# self-host tool BOT (which legitimately never holds the role). Gating
-		# here rejected every self-hosted tool call. Per-DocType perms still apply
-		# under _dispatch_from_session.
+		# and `plugin_user` is the real chat user — already gated when they
+		# started the conversation. Per-DocType perms still apply under
+		# _dispatch_from_session.
 
 		# C2 stretch (2026-06-16 review): bind session_key -> bench's
 		# device_id at session-create time, verify on every call. If the
@@ -156,31 +128,6 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 		return _error("PermissionError", "you do not have access to Jarvis")
 
 	return _dispatch_current_user(tool, args)
-
-
-def _selfhost_tool_user() -> str | None:
-	"""User that plugin tool calls run under in self-hosted mode.
-
-	Self-hosted openclaw uses the HTTP transport, which has no Jarvis Chat
-	Session → user mapping. The gateway token (X-Jarvis-Token) was already
-	validated, so we run tools as the configured self-host tool user (the
-	bench is single-tenant). Returns None when not self-hosted, unset, or the
-	configured user is not a usable tool user.
-	"""
-	from jarvis import selfhost
-
-	if not selfhost.is_self_hosted():
-		return None
-	s = frappe.get_single("Jarvis Settings")
-	user = (getattr(s, "selfhost_tool_user", "") or "").strip()
-	# Authoritative guard: the selfhost_tool_user Link field can be edited
-	# directly on Jarvis Settings (bypassing save_self_hosted's validation), so
-	# enforce the invariant HERE - never run jarvis__* tools as Administrator
-	# (bypasses all DocType perms), Guest, or a missing/disabled user, however
-	# the field was set. get_value("enabled") is None for missing, 0 for disabled.
-	if user and user not in ("Guest", "Administrator") and frappe.db.get_value("User", user, "enabled"):
-		return user
-	return None
 
 
 def _dispatch_current_user(tool: str, args: dict | str | None) -> dict:
@@ -280,8 +227,7 @@ def _dispatch_from_session(
 			# _parse_args call is idempotent on dicts (no JSON parse path,
 			# legacy-marker strip is also idempotent), so no double-work.
 			# Resolve the conversation for this session up front so the
-			# confirmation gate can bind a parked write to it (managed mode); the
-			# gate also falls back to the active-turn marker for run_id.
+			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
 			result = _run_tool(tool, parsed_args, conversation=conv)
 			_persist_and_publish_tool_call(
@@ -310,19 +256,7 @@ def _persist_and_publish_tool_call(
 	"""
 	conv_name = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
 	if not conv_name:
-		# Self-hosted: the openclaw HTTP session key isn't linked to a
-		# conversation. Attribute the tool call to the in-flight self-host
-		# turn (keyed by the tool user = current dispatch user) so the UI
-		# renders the tool card like managed mode. get_active_turn returns
-		# None when 2+ turns are concurrently active for the tool user, so an
-		# ambiguous tool call is dropped rather than mis-filed into - and
-		# realtime-leaked to - the wrong conversation.
-		from jarvis import selfhost
-
-		turn = selfhost.get_active_turn(frappe.session.user) if selfhost.is_self_hosted() else None
-		conv_name = (turn or {}).get("conversation")
-		if not conv_name:
-			return
+		return
 	persist_tool_receipt(conv_name, tool, args, result, tool_call_id=tool_call_id)
 
 
@@ -356,7 +290,7 @@ def persist_tool_receipt(
 	    ``MAX(seq)+1``;
 	  * ``(conversation, tool_call_id)`` is the durable idempotency key — a duplicate
 	    callback for the SAME tool call dedupes instead of double-writing. ``tool_call_id``
-	    is null for legacy/self-host callbacks that carry no id (no dedupe then, but
+	    is null for legacy callbacks that carry no id (no dedupe then, but
 	    the seq race is still fixed)."""
 	result = result or {}
 	discarded = action_outcome == "discarded"
@@ -775,27 +709,6 @@ def _preview_error(e: Exception) -> dict:
 	return _error("InvalidArgumentError", str(e) or type(e).__name__)
 
 
-def _gate_context(conversation: str | None) -> tuple[str, str]:
-	"""Resolve (conversation, run_id) for the in-flight turn so a parked call
-	can be bound to it.
-
-	Primary source is ``selfhost.get_active_turn(current_user)`` - the only
-	place run_id is tracked - which returns ``{conversation, owner, run_id}``
-	for the single unambiguous in-flight turn. An explicit ``conversation``
-	(managed mode resolves it from the session_key upstream) wins for the
-	conversation binding; run_id only ever comes from the active turn. When
-	neither is available (direct-Python calls, ambiguous concurrency) both
-	fall back to "" - the token is then bound by OWNER alone, which is the
-	real security boundary; conversation binding is a secondary replay guard.
-	"""
-	from jarvis import selfhost
-
-	turn = selfhost.get_active_turn(frappe.session.user) or {}
-	conv = conversation or turn.get("conversation") or ""
-	run_id = turn.get("run_id") or ""
-	return conv, run_id
-
-
 def _describe_call(tool: str, args: dict) -> str:
 	"""Short human string of a tool call + its key args, for a pending card
 	whose write cannot be dry-run (send_email) or whose preview was
@@ -1170,13 +1083,19 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					"each one before starting the next.",
 				)
 
-		conv, run_id = _gate_context(conversation)
+		# The parked call binds to the conversation resolved server-side upstream
+		# (from the session_key). When it is unresolved the token falls back to ""
+		# and is bound by OWNER alone, which is the real security boundary;
+		# conversation binding is a secondary replay guard. ``run_id`` is not
+		# tracked on this path, so the token carries "" and the sibling-run filter
+		# in pending_confirm.clear_for_conversation no-ops.
+		conv = conversation or ""
+		run_id = ""
 		# Two identities (issue #186, #1/#5/#6):
 		#   owner_user = the CONVERSATION OWNER - the human who sees the card,
 		#     clicks Confirm, and whose browser is subscribed. Deliver + bind +
-		#     confirm all key off THIS user. In managed mode it equals the acting
-		#     user; in self-host it is the operator, NOT the restricted tool user
-		#     the gate runs as (frappe.session.user).
+		#     confirm all key off THIS user. In a shared conversation it is the
+		#     owner, not necessarily the acting user (frappe.session.user).
 		#   exec_user = frappe.session.user - the scoped model-execution identity
 		#     the confirmed write must run AS, so a confirm can never exceed the
 		#     model path's permission scope.
@@ -1194,9 +1113,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# run_method, and every destructive tool (delete/cancel/amend/send_email)
 		# - ALWAYS parks, even with auto_apply on.
 		#
-		# conv is never a client claim - it is resolved server-side by
-		# _gate_context above (managed mode from the session_key, self-host from
-		# selfhost.get_active_turn) - so there is no owner to re-check here: an
+		# conv is never a client claim - it is resolved server-side from the
+		# session_key upstream - so there is no owner to re-check here: an
 		# owner comparison against owner_user (itself read from this same conv
 		# a few lines up) would just be comparing one DB read to another read of
 		# the identical field, not a real access-control boundary.

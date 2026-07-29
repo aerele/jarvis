@@ -16,16 +16,9 @@ Two role tiers gate this module (Skills-area rework, DESIGN.md sections 1 / 6b):
   the unrelated jarvis_admin SaaS role, which lives on a DIFFERENT Frappe site -
   no technical collision, only a documented naming one).
 
-Because behavioural pattern learning is a MANAGED-ONLY feature (plan sections
-13 / 7 T5 / 6.4), both guards additionally refuse on self-hosted benches. The
-two tab PROBES are deliberately reachable on self-host so their tabs can render
-the managed-only empty state and simply report ``self_hosted=True``:
-``get_learning_status`` (Analysis, admin-role-only, no self-host block) and
-``get_review_access`` (Review, reviewer-role-only, no self-host block).
 ``flag_learned_default`` (the plan-6.5 correction loop) stays open to ANY
 authenticated System User (the chat user who just watched a learned default
-misfire), still self-host-gated and refused for Guest / portal (Website User)
-sessions.
+misfire), and is refused for Guest / portal (Website User) sessions.
 
 Board lifecycle (plan section 6.5) runs through the ``Jarvis Learned Pattern``
 state machine (``validate_transition`` in the controller). These are HUMAN
@@ -233,17 +226,6 @@ _FLAG_STALE_PREFIX = "flagged by"
 # --------------------------------------------------------------------------- #
 # gating
 # --------------------------------------------------------------------------- #
-def _is_self_hosted() -> bool:
-	try:
-		from jarvis.selfhost import is_self_hosted
-
-		return bool(is_self_hosted())
-	except Exception:
-		# A missing/broken selfhost probe on a managed bench must not block the
-		# feature; the tick/orchestrator make the same fail-open choice.
-		return False
-
-
 # The REVIEWER set gates the board/decide/apply/follow-up actions; the ADMIN
 # tier gates the Analysis config surface. Both now live in jarvis.permissions
 # (PART 4 REVISED, TASK 50 — one definition, no drift). The reviewer set stays
@@ -251,41 +233,17 @@ def _is_self_hosted() -> bool:
 _REVIEWER_ROLES = JARVIS_REVIEWER_ROLES
 
 
-def _reviewer_roles() -> None:
-	"""Reviewer-set role check ONLY (no self-host block). The Review probe
-	(``get_review_access``) uses this so it stays reachable on a self-host bench
-	to render the managed-only empty state."""
+def _guard() -> None:
+	"""Reviewer-set role check. Every board / decide / drill-down / apply /
+	follow-up endpoint calls this first."""
 	frappe.only_for(_REVIEWER_ROLES)
 
 
-def _guard() -> None:
-	"""Reviewer-set AND managed-only. Every board / decide / drill-down / apply /
-	follow-up endpoint calls this first, except ``get_review_access`` (which
-	reports self-host instead)."""
-	_reviewer_roles()
-	if _is_self_hosted():
-		frappe.throw(
-			_("Pattern learning is not available on self-hosted benches."),
-			frappe.ValidationError,
-		)
-
-
-def _admin_roles() -> None:
-	"""Admin-tier role check ONLY (no self-host block). The Analysis probe
-	(``get_learning_status``) uses this so it stays reachable on a self-host
-	bench. PART 4 REVISED, TASK 50 — delegates to jarvis.permissions."""
-	require_jarvis_admin()
-
-
 def _admin_guard() -> None:
-	"""Admin-set AND managed-only. The Analysis-tab config surface
-	(``get/set_learning_settings``, ``run_pattern_analysis_now``) calls this."""
-	_admin_roles()
-	if _is_self_hosted():
-		frappe.throw(
-			_("Pattern learning is not available on self-hosted benches."),
-			frappe.ValidationError,
-		)
+	"""Admin-tier role check. The Analysis-tab config surface
+	(``get/set_learning_settings``, ``run_pattern_analysis_now``) calls this.
+	PART 4 REVISED, TASK 50 — delegates to jarvis.permissions."""
+	require_jarvis_admin()
 
 
 # --------------------------------------------------------------------------- #
@@ -1435,11 +1393,6 @@ def flag_learned_default(name: str, note: str = "") -> dict:
 	affordance on the skill badge is a follow-up; this endpoint is the
 	contract."""
 	_system_user_guard()
-	if _is_self_hosted():
-		frappe.throw(
-			_("Pattern learning is not available on self-hosted benches."),
-			frappe.ValidationError,
-		)
 
 	note = frappe.utils.strip_html_tags(note or "").strip()[:_FLAG_NOTE_MAX]
 
@@ -1738,13 +1691,8 @@ def set_learning_settings(payload: str | dict | None = None) -> dict:
 
 @frappe.whitelist()
 def get_learning_status() -> dict:
-	"""Last-run summary + next-run pointer + self-host flag. Deliberately NOT
-	self-host-gated (admin set still): it is the Analysis-tab probe used to render
-	the managed-only empty state, so it must stay reachable on self-host. Uses the
-	role-only admin check (not ``_admin_guard``) precisely to keep that self-host
-	exemption - matching its prior bare ``frappe.only_for`` behaviour."""
-	_admin_roles()
-	self_hosted = _is_self_hosted()
+	"""Last-run summary + next-run pointer. The Analysis-tab probe."""
+	_admin_guard()
 	s = frappe.get_single(SETTINGS)
 
 	latest = frappe.get_all(
@@ -1771,7 +1719,6 @@ def get_learning_status() -> dict:
 			latest_run[k] = str(latest_run.get(k) or "")
 
 	return {
-		"self_hosted": int(self_hosted),
 		"enabled": int(s.get("pattern_learning_enabled") or 0),
 		"last_run_at": str(s.get("pattern_last_run_at") or ""),
 		"last_run_status": s.get("pattern_last_run_status") or "",
@@ -1787,14 +1734,10 @@ def get_learning_status() -> dict:
 @frappe.whitelist()
 def get_review_access() -> dict:
 	"""Cheap reviewer-access probe - the Review-tab analogue of
-	``get_learning_status``. Role-only (reviewer set), NOT self-host-gated, so a
-	self-host bench can still render the managed-only empty state; reports
-	``self_hosted`` with the same shape conventions. Carries the two Review badge
+	``get_learning_status``. Role-only (reviewer set). Carries the two Review badge
 	counts so the tab renders without a second round-trip."""
-	_reviewer_roles()
-	self_hosted = _is_self_hosted()
+	_guard()
 	return {
-		"self_hosted": int(self_hosted),
 		"pending_promotions": frappe.db.count(PROMO, {"status": "Pending"}),
 		# Skill-promotion queue badge — mirrors the wiki ``pending_promotions``
 		# count plumbing exactly (Skills-area rework: skills get the reviewer queue

@@ -358,10 +358,8 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 
 	Identity model (issue #186, #1/#5/#6): the gate binds the token to the
 	CONVERSATION OWNER - the human whose browser is subscribed and who clicks
-	Confirm. That is ``frappe.session.user`` here in BOTH deployment modes (in
-	self-host the operator's browser session is the conversation owner, not the
-	restricted tool user), so we consume under the session user directly - no
-	per-mode owner resolution. ``consume`` re-validates owner + conversation
+	Confirm. That is ``frappe.session.user`` here, so we consume under the
+	session user directly. ``consume`` re-validates owner + conversation
 	atomically and single-uses the token; a wrong-owner caller learns nothing
 	and does NOT burn the token.
 
@@ -373,8 +371,8 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	actually run.
 
 	Execution scope (#6): the confirmed write executes AS the stored
-	``exec_user`` (the scoped model-execution identity - the tool user in
-	self-host), so a confirm can never exceed the model path's permission scope.
+	``exec_user`` (the scoped model-execution identity), so a confirm can never
+	exceed the model path's permission scope.
 	The switch goes through ``impersonate`` (session-safe), so the confirming
 	browser session's sid + data are always restored - a bare ``frappe.set_user``
 	would gut the cookie session and log the user out.
@@ -426,8 +424,8 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	# reload, matching the inline model-write path's tool card. Best-effort: the
 	# write already committed, so a receipt hiccup must not report failure.
 	# Attach to the conversation the click came from (``passed_conv``) when the
-	# token itself was minted conversation-less (F1: a managed session_key lookup
-	# miss / self-host ambiguous concurrency), but only when the caller OWNS that
+	# token itself was minted conversation-less (F1: a session_key lookup miss),
+	# but only when the caller OWNS that
 	# conversation (passed_conv is client-supplied - never inject into another
 	# user's chat). A true headless caller with no owned conversation just skips.
 	conv = record.get("conversation")

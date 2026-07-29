@@ -4,8 +4,8 @@ spec §3/§5).
 The bench holds month-to-date running counters (per user + per model), not a
 per-day ledger, so the push is an idempotent month-to-date SNAPSHOT: admin
 upserts on (tenant, user, month) and owns history. Best-effort - a push failure
-never affects chat. Self-hosted benches (no managed container) and un-onboarded
-benches (no admin credentials) simply don't push; admin then shows "no usage".
+never affects chat. Un-onboarded benches (no admin credentials) simply don't
+push; admin then shows "no usage".
 """
 
 from __future__ import annotations
@@ -112,10 +112,6 @@ def _per_model_totals(users: list[str], month: str) -> dict[str, dict[str, dict]
 def push_usage_rollup() -> None:
 	"""Daily scheduler entry. Self-gating + best-effort; NEVER raises."""
 	try:
-		from jarvis import selfhost
-
-		if selfhost.is_self_hosted():
-			return
 		if not _admin_configured():
 			return
 		rollup, truncated = _build_rollup()
@@ -127,8 +123,8 @@ def push_usage_rollup() -> None:
 
 		admin_client.push_usage_rollup(rollup)
 	except AdminAuthError:
-		# Not onboarded / no admin credentials (self-hosted-ish). Nothing to push;
-		# not an error condition, so don't log_error.
+		# Not onboarded / no admin credentials. Nothing to push; not an error
+		# condition, so don't log_error.
 		return
 	except Exception:
 		frappe.log_error(

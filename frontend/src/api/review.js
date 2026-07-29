@@ -15,9 +15,9 @@ const LR = "jarvis.chat.learned_api.";
 // NOT learned_api — the skill queue is a sibling of the wiki queue, not a fork.
 const CS = "jarvis.chat.custom_skills_api.";
 
-// Reviewer-set + self-host-aware access probe: {self_hosted, pending_promotions,
-// pending_patterns}. Defined in F1's learning.js; surfaced here so the Review tab
-// has one import site for every reviewer-only binding.
+// Reviewer-set access probe: {pending_promotions, pending_patterns}. Defined in
+// F1's learning.js; surfaced here so the Review tab has one import site for
+// every reviewer-only binding.
 export { getReviewAccess } from "./learning";
 
 // ── wiki-promotion queue (DESIGN.md 2.4 / 6b) ────────────────────────────────

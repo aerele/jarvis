@@ -1,8 +1,7 @@
 """Tests for the SM-gated learning-board API (jarvis/chat/learned_api.py).
 
 Covers, per plan sections 6.4/6.5/5.1: System-Manager gating (non-SM ->
-PermissionError), the managed-only self-host block (and the deliberate
-get_learning_status exemption), the frozen list envelope + domain facets +
+PermissionError), the frozen list envelope + domain facets +
 board counters, the approve/reject/un-approve/restore/snooze lifecycle
 transitions with their TOCTOU source guards, the A-class-only batch_approve
 guard, run-now enqueue, apply delegation to the compiler, the settings
@@ -191,23 +190,6 @@ class TestLearnedApi(unittest.TestCase):
 			):
 				with self.assertRaises(frappe.PermissionError):
 					call()
-
-	# ------------------------------------------------------------------ #
-	# self-host block (+ get_learning_status exemption)
-	# ------------------------------------------------------------------ #
-	def test_self_host_blocks_feature_endpoints(self):
-		name = _mk("sh1")
-		with mock.patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.list_learned_patterns_page()
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.get_learned_pattern(name)
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.approve_learned_pattern(name)
-			# get_learning_status is exempt: it reports self_hosted so the tab can
-			# render the managed-only empty state.
-			status = learned_api.get_learning_status()
-			self.assertEqual(status["self_hosted"], 1)
 
 	# ------------------------------------------------------------------ #
 	# list envelope + facets + counters
@@ -795,12 +777,6 @@ class TestLearnedApi(unittest.TestCase):
 		self.assertEqual(out["flags_count"], 1)
 		self.assertEqual(out["distinct_users"], 1)
 		self.assertFalse(out["demoted"])
-
-	def test_flag_self_host_blocked(self):
-		name = _mk("fl3", status="Active")
-		with mock.patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.flag_learned_default(name)
 
 	def test_flag_only_on_active_or_approved(self):
 		proposed = _mk("fl4")  # Proposed

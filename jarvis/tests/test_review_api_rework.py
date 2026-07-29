@@ -306,9 +306,8 @@ class TestReviewGuards(unittest.TestCase):
 	def test_get_review_access_shape(self):
 		with _as(REVIEWER):
 			out = learned_api.get_review_access()
-		for key in ("self_hosted", "pending_promotions", "pending_patterns"):
+		for key in ("pending_promotions", "pending_patterns"):
 			self.assertIn(key, out)
-		self.assertIn(out["self_hosted"], (0, 1))
 
 
 # --------------------------------------------------------------------------- #

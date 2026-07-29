@@ -29,7 +29,7 @@ _TTL_S = 900  # 15 min; a confirmation token the user must click within
 _PREFIX = "jarvis:pending_confirm:"
 # Per-owner index: a Redis set of the owner's currently-live token ids, so the
 # resync endpoint can enumerate a user's own parked confirmations after a reload
-# or reconnect. TTL discipline mirrors selfhost.get_active_turn: dead members
+# or reconnect. TTL discipline: dead members
 # (token record expired/consumed) are pruned on read; the set key itself is
 # given a refreshed TTL on every mint so an emptied set self-expires.
 _OWNER_PREFIX = "jarvis:pending_confirm:owner:"
@@ -136,9 +136,7 @@ def mint(
 	Confirm, and whose browser is subscribed. Delivery + binding + confirm all
 	key off this identity. ``exec_user`` is the scoped model-execution identity
 	the confirmed write must run AS (so a confirm can never exceed the model
-	path's permission scope). In managed mode owner == exec_user; in self-host
-	owner is the operator and exec_user is the restricted tool user. It defaults
-	to ``owner`` when omitted (managed-mode back-compat).
+	path's permission scope). It defaults to ``owner`` when omitted.
 	"""
 	token = secrets.token_urlsafe(24)
 	record = {
@@ -211,8 +209,8 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	if record.get("owner") != owner:
 		return None
 	# Conversation is a SECONDARY replay guard, not the boundary. A token minted
-	# without a resolvable conversation ("" - a managed session_key->conversation
-	# lookup miss, or self-host ambiguous concurrency) carries no conversation
+	# without a resolvable conversation ("" - a session_key->conversation
+	# lookup miss) carries no conversation
 	# binding, so an owner-matched consume must still succeed even when the caller
 	# passes its current conversation id. Without this skip such a card is
 	# delivered to the owner but EVERY Confirm click fails here and shows a
@@ -311,11 +309,11 @@ def clear_for_conversation(owner: str, conversation: str, run_id: str | None = N
 	run is stopped so its parked confirmation cards cannot linger or resurface on
 	resync (F6). Best-effort: a token consumed concurrently just isn't counted.
 
-	``run_id``: when given AND the token itself carries a run_id (self-host), only
-	that run's cards are swept - so stopping one run does not consume a sibling
-	run's still-valid card. In managed mode the token's run_id is always "" (it is
-	never tracked there), so the filter no-ops and the whole conversation is swept,
-	which is the intended behaviour for the single-run-per-conversation case."""
+	``run_id``: when given AND the token itself carries a run_id, only that run's
+	cards are swept - so stopping one run does not consume a sibling run's
+	still-valid card. Nothing populates the token's run_id today (it is always
+	""), so the filter no-ops and the whole conversation is swept, which is the
+	intended behaviour for the single-run-per-conversation case."""
 	if not owner or not conversation:
 		return 0
 	n = 0
@@ -323,7 +321,7 @@ def clear_for_conversation(owner: str, conversation: str, run_id: str | None = N
 		if rec.get("conversation") != conversation:
 			continue  # list_for_owner surfaces conv-less tokens under any filter
 		if run_id and rec.get("run_id") and rec.get("run_id") != run_id:
-			continue  # a sibling run's card (self-host only; managed run_id is "")
+			continue  # a sibling run's card (run_id is "" today, so this no-ops)
 		if consume(rec["token"], owner=owner, conversation=conversation) is not None:
 			n += 1
 	return n

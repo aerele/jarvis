@@ -69,7 +69,6 @@ class WikiMirrorTestCase(FrappeTestCase):
 		"""Patch the managed-tenant gate + the admin push seam. ``result``
 		is push_wiki_files' return for every call (None = offline)."""
 		with (
-			mock.patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			mock.patch("jarvis.admin_client.push_wiki_files", return_value=result) as push,
 		):
 			yield push
@@ -271,17 +270,6 @@ class TestSync(WikiMirrorTestCase):
 		# nothing stamped -> the next sync retries the page
 		self.assertFalse(frappe.db.get_value(WIKI, doc.name, "mirror_hash"))
 
-	def test_sync_self_hosted_skips_without_calling_admin(self):
-		self._page("acme")
-		with (
-			mock.patch("jarvis.selfhost.is_self_hosted", return_value=True),
-			mock.patch("jarvis.admin_client.push_wiki_files") as push,
-		):
-			out = wiki_mirror.sync()
-		self.assertTrue(out["ok"])
-		self.assertEqual(out["skipped"], "self-hosted")
-		push.assert_not_called()
-
 	def test_archived_page_gets_deleted_and_hash_cleared(self):
 		doc = self._page("acme")
 		wire_path = f"customers/{doc.name}.md"
@@ -327,7 +315,6 @@ class TestSync(WikiMirrorTestCase):
 		for i in range(12):
 			self._page(f"big-{i}", body="a" * 19000)
 		with (
-			mock.patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			mock.patch(
 				"jarvis.admin_client.push_wiki_files",
 				side_effect=[_PUSH_OK, None, None],

@@ -2,7 +2,7 @@
 
 Several call sites (jarvis/onboarding.py::write_connection,
 jarvis/chat/device.py::_save_credentials/update_device_token,
-jarvis/api.py::rotate_agent_token, jarvis/selfhost.py::save_self_hosted)
+jarvis/api.py::rotate_agent_token)
 wrote Password field values via doc.db_set(...), which stores exactly what
 it's given straight into the Single's row in tabSingles - no encryption.
 Only Document.save()'s _save_passwords path (or a direct
@@ -22,7 +22,7 @@ get_single_value is used here as the more direct/documented API). Then
 three branches:
 
 - EMPTY column -> purge any __Auth row. The pre-fix clear paths
-  (chat/device.clear_credentials, selfhost's blank-token db_set("")) blanked
+  (chat/device.clear_credentials) blanked
   the column WITHOUT remove_encrypted_password, and fields also saved via a
   full .save() at some point in history have __Auth rows - so a REVOKED
   secret can survive behind the empty column, and BaseDocument.get_password

@@ -1,7 +1,7 @@
 """Orchestrator + engine scheduling tests (plan section 5.2).
 
 Covers the pure window math (wrap-aware, boundaries), next_run advance,
-stale-run threshold, the dormant-company skip, and the self-host / disabled /
+stale-run threshold, the dormant-company skip, and the disabled /
 in-window tick paths. No migrate is run; the doctypes are already migrated.
 """
 
@@ -374,25 +374,17 @@ class TestTickBails(FrappeTestCase):
 				orchestrator.tick()
 		enq.assert_not_called()
 
-	def test_bails_on_self_host(self):
-		with mock.patch("jarvis.selfhost.is_self_hosted", return_value=True):
+	def test_bails_when_disabled(self):
+		with mock.patch.object(orchestrator, "_feature_enabled", return_value=False):
 			with mock.patch("frappe.enqueue") as enq:
 				orchestrator.tick()
 		enq.assert_not_called()
 
-	def test_bails_when_disabled(self):
-		with mock.patch("jarvis.selfhost.is_self_hosted", return_value=False):
-			with mock.patch.object(orchestrator, "_feature_enabled", return_value=False):
+	def test_bails_when_not_onboarded(self):
+		with mock.patch.object(orchestrator, "_feature_enabled", return_value=True):
+			with mock.patch.object(orchestrator, "_is_onboarded", return_value=False):
 				with mock.patch("frappe.enqueue") as enq:
 					orchestrator.tick()
-		enq.assert_not_called()
-
-	def test_bails_when_not_onboarded(self):
-		with mock.patch("jarvis.selfhost.is_self_hosted", return_value=False):
-			with mock.patch.object(orchestrator, "_feature_enabled", return_value=True):
-				with mock.patch.object(orchestrator, "_is_onboarded", return_value=False):
-					with mock.patch("frappe.enqueue") as enq:
-						orchestrator.tick()
 		enq.assert_not_called()
 
 
@@ -428,7 +420,6 @@ class TestTickCreatesRunInWindow(FrappeTestCase):
 
 		before = frappe.db.count("Jarvis Pattern Run")
 		with (
-			mock.patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			mock.patch.object(orchestrator, "_feature_enabled", return_value=True),
 			mock.patch.object(orchestrator, "_is_onboarded", return_value=True),
 			mock.patch.object(orchestrator, "_settings_value", side_effect=sv),
@@ -458,7 +449,6 @@ class TestTickCreatesRunInWindow(FrappeTestCase):
 			}.get(field)
 
 		with (
-			mock.patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			mock.patch.object(orchestrator, "_feature_enabled", return_value=True),
 			mock.patch.object(orchestrator, "_is_onboarded", return_value=True),
 			mock.patch.object(orchestrator, "_settings_value", side_effect=sv),
@@ -470,14 +460,8 @@ class TestTickCreatesRunInWindow(FrappeTestCase):
 
 
 class TestRunNowGuards(FrappeTestCase):
-	def test_refuses_on_self_host(self):
-		with mock.patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			res = orchestrator.run_now("Administrator")
-		self.assertFalse(res["ok"])
-
 	def test_refuses_when_disabled(self):
 		with (
-			mock.patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			mock.patch.object(orchestrator, "_feature_enabled", return_value=False),
 		):
 			res = orchestrator.run_now("Administrator")

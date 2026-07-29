@@ -381,15 +381,8 @@ class TestWikiGraphCompute(FrappeTestCase):
 
 
 class TestWikiGraphSync(FrappeTestCase):
-	def test_self_hosted_skips(self):
-		with patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			out = wiki_graph.sync()
-		self.assertTrue(out["ok"])
-		self.assertEqual(out.get("skipped"), "self-hosted")
-
 	def test_push_unreachable_reports_not_ok(self):
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.admin_client.push_wiki_graph", return_value=None),
 		):
 			out = wiki_graph.sync()
@@ -397,7 +390,6 @@ class TestWikiGraphSync(FrappeTestCase):
 
 	def test_push_ok_returns_counts(self):
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.admin_client.push_wiki_graph", return_value={"ok": True}),
 		):
 			out = wiki_graph.sync()

@@ -33,7 +33,6 @@
 // signup, where chat cannot work at all.
 const NOT_ONBOARDED_REASONS = new Set([
   "signup",
-  "selfhost_connection",
   "llm_setup",
   "llm_pool_provisioning",
   "llm_provisioning",

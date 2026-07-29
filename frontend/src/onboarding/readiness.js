@@ -36,9 +36,8 @@ export async function isWorkspaceReady() {
 }
 
 // Reasons (from account.py:is_ready_for_chat) that mean "this workspace has
-// never completed onboarding" — the FIRST setup step for each mode:
-//   - "signup"             managed: no admin api_key yet (wizard not started)
-//   - "selfhost_connection" self-host: no validated openclaw connection yet
+// never completed onboarding" — the FIRST setup step:
+//   - "signup"  no admin api_key yet (wizard not started)
 // Deliberately NOT "llm_credentials": that reason ALSO fires when an
 // already-onboarded workspace's LLM creds later expire/rotate. Hard-blocking a
 // working workspace out of its chat + data over a recoverable credential
@@ -62,7 +61,6 @@ export async function isWorkspaceReady() {
 // admin knows the subscription state.
 const NOT_ONBOARDED_REASONS = new Set([
 	"signup",
-	"selfhost_connection",
 	"llm_pool_provisioning",
 	"llm_provisioning",
 	"llm_setup",

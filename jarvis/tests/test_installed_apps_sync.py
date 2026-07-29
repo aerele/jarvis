@@ -32,7 +32,6 @@ class TestInstalledAppsSync(FrappeTestCase):
 		# Deterministic environment: managed bench, admin configured,
 		# single-model mode (pool tests override _pool_active locally).
 		self._patches = [
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch.object(ias, "_admin_configured", return_value=True),
 			patch.object(ias, "_pool_active", return_value=False),
 		]
@@ -143,12 +142,6 @@ class TestInstalledAppsSync(FrappeTestCase):
 		):
 			js._post_pool_with_retry({}, {}, {})
 		stamp.assert_not_called()
-
-	def test_self_hosted_skips(self):
-		_set_snapshot(["frappe"])  # would otherwise trigger
-		with patch("jarvis.selfhost.is_self_hosted", return_value=True), patch("frappe.enqueue") as enq:
-			ias.after_migrate()
-		enq.assert_not_called()
 
 	def test_unconfigured_admin_skips(self):
 		_set_snapshot(["frappe"])

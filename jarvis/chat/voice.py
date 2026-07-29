@@ -1,7 +1,7 @@
 """Speech-to-text for the chat composer (voice notes / business tab).
 
 Config resolution (``stt_config``) is two-tier: explicit site_config keys win
-(dev / self-host: ``jarvis_stt_openrouter_api_key`` + optional
+(dev benches: ``jarvis_stt_openrouter_api_key`` + optional
 ``jarvis_stt_model`` / ``jarvis_stt_enabled``), else the managed path asks the
 admin app via ``jarvis.admin_client.get_stt_config`` (Redis-cached, never
 raises). Transcription itself is one OpenRouter TRANSCRIPTION call: the clip is
@@ -132,7 +132,7 @@ def stt_config() -> dict | None:
 	None when voice features / STT are off or no key is available.
 
 	Site config WINS when ``jarvis_stt_openrouter_api_key`` is present
-	(dev / self-host); the managed path defers to admin's tenant config
+	(dev benches); the managed path defers to admin's tenant config
 	(Redis-cached in admin_client, errors degrade to None).
 	"""
 	if not _voice_features_enabled():

@@ -11,8 +11,7 @@ from an unpaid account. z.ai's own error is precise::
 
 This probe surfaces exactly that message instead of swallowing it.
 
-Mirrors ``jarvis.selfhost.validate_connection`` / ``test_connection``'s
-shape: synchronous, no persistence, gated, does live HTTP, and NEVER raises
+Shape: synchronous, no persistence, gated, does live HTTP, and NEVER raises
 for a failed check - it always returns a structured
 ``{"ok": bool, "checks": [{"check", "ok", "detail"}, ...]}``.
 

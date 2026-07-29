@@ -557,9 +557,8 @@ class TestNudge(_ConversationFixture):
 
 	@contextlib.contextmanager
 	def _nudge_env(self):
-		with patch("jarvis.selfhost.is_self_hosted", return_value=False):
-			with patch("jarvis.chat.wiki.publish_to_user") as publish:
-				yield publish
+		with patch("jarvis.chat.wiki.publish_to_user") as publish:
+			yield publish
 
 	def test_nudge_publishes_payload_shape(self):
 		with self._nudge_env() as publish:

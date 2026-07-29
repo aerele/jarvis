@@ -222,21 +222,13 @@ def _effect_macro_advance(ctx: _Ctx) -> None:
 
 
 def _effect_auto_title(ctx: _Ctx) -> None:
-	# Managed-only (pump is managed). Job re-gates on title=="New chat".
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return
+	# Job re-gates on title=="New chat".
 	from jarvis.chat import title as title_mod
 
 	title_mod.enqueue_autotitle(ctx.conversation, ctx.owner)
 
 
 def _effect_wiki_nudge(ctx: _Ctx) -> None:
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return
 	from jarvis.chat import wiki as wiki_mod
 
 	if not wiki_mod.wiki_enabled():

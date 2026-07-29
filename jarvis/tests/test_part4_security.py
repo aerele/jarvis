@@ -117,11 +117,6 @@ class Part4Base(FrappeTestCase):
 			).insert(ignore_permissions=True)
 		# Deterministic baseline for the permlevel-fence read/write assertions.
 		frappe.db.set_value(SETTINGS, SETTINGS, "agent_url", "ws://p4-baseline", update_modified=False)
-		# Behavioural learning is managed-only; the Settings validate() throws
-		# "available on managed plans only" when pattern_learning_enabled is on AND
-		# the site is self-hosted. The permlevel-fence tests save Jarvis Settings, so
-		# disable it here to keep that unrelated plan-gate from firing on a
-		# self-hosted test site (it is off in CI's baked dump, on locally).
 		frappe.db.set_value(SETTINGS, SETTINGS, "pattern_learning_enabled", 0, update_modified=False)
 		frappe.db.commit()
 
@@ -227,7 +222,6 @@ class TestSettingsPermlevelFence(Part4Base):
 		"jarvis_admin_url",
 		"agent_url",
 		"agent_token",
-		"selfhost_tool_user",
 		"run_query_doctype_allowlist",
 	)
 
@@ -384,49 +378,6 @@ class TestOwnerSmOnlyCapabilities(Part4Base):
 			with self.assertRaises(frappe.PermissionError):
 				jarvis_api.rotate_agent_token()
 
-	def test_selfhost_write_capabilities_reject_non_sm_admin(self):
-		from jarvis import selfhost
-
-		with _as(ADMIN):
-			with self.assertRaises(frappe.PermissionError):
-				selfhost.save_self_hosted("http://x", "tok")
-			with self.assertRaises(frappe.PermissionError):
-				selfhost.test_connection("http://x")
-
-	def test_admin_can_use_widened_selfhost_status(self):
-		from jarvis import selfhost
-
-		# get_status was widened to the admin tier — a Jarvis Admin may call it.
-		with _as(ADMIN):
-			out = selfhost.get_status()
-		self.assertIn("deployment_mode", out)
-
-	def test_get_status_redacts_agent_url_from_non_sm_admin(self):
-		from jarvis import selfhost
-
-		# Finding A: agent_url is a permlevel-1 operator field (TASK 46) redacted
-		# from ping_openclaw (TASK 34-R). get_status was widened to the admin tier,
-		# so it must ALSO withhold agent_url from a Jarvis-Admin-not-SM while still
-		# showing it to a System Manager. Parallels test_ping_openclaw_drops_agent_url.
-		mock_settings = MagicMock()
-		mock_settings.deployment_mode = "Self-Hosted"
-		mock_settings.agent_url = "ws://secret-selfhost"
-		mock_settings.selfhost_last_validated_at = ""
-		mock_settings.selfhost_stream = 1
-		with _as(ADMIN), patch("frappe.get_single", return_value=mock_settings):
-			admin_out = selfhost.get_status()
-		self.assertFalse(
-			admin_out.get("agent_url"), "get_status leaked the self-host agent_url to a Jarvis-Admin-not-SM"
-		)
-		self.assertNotIn("secret-selfhost", json.dumps(admin_out))
-		with _as(SM), patch("frappe.get_single", return_value=mock_settings):
-			sm_out = selfhost.get_status()
-		self.assertEqual(
-			sm_out.get("agent_url"),
-			"ws://secret-selfhost",
-			"System Manager lost agent_url in get_status after the redaction",
-		)
-
 
 # --------------------------------------------------------------------------- #
 # TASK 35 — date_add SQLi (unconstrained literal n)
@@ -542,7 +493,6 @@ _COVERED_MODULES = {
 	"diagnostics.py": "diagnostics",
 	"onboarding.py": "onboarding",
 	"account.py": "account",
-	"selfhost.py": "selfhost",
 	"dev.py": "dev",
 }
 _COVERED_SUBPATHS = {

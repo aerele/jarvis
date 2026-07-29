@@ -6,10 +6,10 @@ Reaching Jarvis at all requires the dedicated ``Jarvis User`` role, with
 
 Enforcement is at the HUMAN ENTRY POINTS — the SPA route (``www/jarvis.py``),
 the desk page (``jarvis_chat``) and the user-initiated chat APIs. It is
-deliberately NOT applied to machine-authenticated or delegated paths (the
-self-hosted plugin tool user, or ``send_message`` invoked under
-``set_user(owner)`` by the scheduler / approvals resume), which act as an
-identity that legitimately may not hold the role.
+deliberately NOT applied to machine-authenticated or delegated paths
+(``send_message`` invoked under ``set_user(owner)`` by the scheduler /
+approvals resume), which act as an identity that legitimately may not hold
+the role.
 """
 
 from __future__ import annotations

@@ -53,7 +53,6 @@ class TestWarmPrefix(FrappeTestCase):
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = fake_sess
@@ -81,7 +80,6 @@ class TestWarmPrefix(FrappeTestCase):
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = fake_sess
@@ -109,7 +107,6 @@ class TestWarmPrefix(FrappeTestCase):
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = fake_sess
@@ -126,7 +123,6 @@ class TestWarmPrefix(FrappeTestCase):
 		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = MagicMock(create_session=MagicMock(return_value="sk"))
@@ -138,7 +134,6 @@ class TestWarmPrefix(FrappeTestCase):
 
 		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		with (
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.get_single", side_effect=RuntimeError("boom")),
 		):
 			self.assertFalse(prewarm.warm_prefix())  # no raise
@@ -158,7 +153,6 @@ class TestWarmPrefix(FrappeTestCase):
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=stub),
 		):
 			OC.connect.return_value = fake_sess
@@ -177,7 +171,6 @@ class TestWarmPrefix(FrappeTestCase):
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 			patch("jarvis.chat.prewarm.frappe.cache", return_value=cache_mock),
 			patch("jarvis.chat.prewarm.frappe.logger"),
@@ -212,7 +205,6 @@ class TestWarmPrefix(FrappeTestCase):
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = fake_sess
@@ -240,7 +232,6 @@ class TestKeepWarm(FrappeTestCase):
 		from jarvis.chat import prewarm
 
 		with (
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.db.exists", return_value="MSG-1"),
 			patch("jarvis.chat.prewarm.warm_prefix") as wp,
 		):
@@ -251,7 +242,6 @@ class TestKeepWarm(FrappeTestCase):
 		from jarvis.chat import prewarm
 
 		with (
-			patch("jarvis.chat.prewarm.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.db.exists", return_value=None),
 			patch("jarvis.chat.prewarm.warm_prefix") as wp,
 		):
@@ -273,7 +263,6 @@ class TestEnqueueWarmIfDue(FrappeTestCase):
 
 		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
 			patch("jarvis.chat.prewarm.frappe.enqueue") as enq,
 		):
 			prewarm.enqueue_warm_if_due()
@@ -285,18 +274,6 @@ class TestEnqueueWarmIfDue(FrappeTestCase):
 
 		frappe.cache().set_value(prewarm._warm_cooldown_key(), "1", expires_in_sec=60)
 		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=False),
-			patch("jarvis.chat.prewarm.frappe.enqueue") as enq,
-		):
-			prewarm.enqueue_warm_if_due()
-		enq.assert_not_called()
-
-	def test_skips_enqueue_self_hosted(self):
-		from jarvis.chat import prewarm
-
-		frappe.cache().delete_value(prewarm._warm_cooldown_key())
-		with (
-			patch("jarvis.selfhost.is_self_hosted", return_value=True),
 			patch("jarvis.chat.prewarm.frappe.enqueue") as enq,
 		):
 			prewarm.enqueue_warm_if_due()

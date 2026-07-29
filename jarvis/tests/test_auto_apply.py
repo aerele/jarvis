@@ -347,11 +347,10 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
 
 	def test_auto_apply_fires_when_actor_differs_from_owner(self):
-		# #5: the bypass now compares auto_apply against owner_user (the
-		# CONVERSATION OWNER) rather than the acting session user, so it fires in
-		# self-host where the acting user (the restricted tool user) differs from
-		# the operator who owns the conversation and enabled auto-apply. Modelled
-		# here by acting as a DIFFERENT user than the conversation owner: the
+		# #5: the bypass compares auto_apply against owner_user (the CONVERSATION
+		# OWNER) rather than the acting session user, so it fires when the acting
+		# user differs from the owner who enabled auto-apply. Modelled here by
+		# acting as a DIFFERENT user than the conversation owner: the
 		# reversible write fast-paths (reaches dispatch, does not park) and runs
 		# under the acting/exec user's scope. dispatch is spied so the test is
 		# not coupled to the exec user's DocType permissions.
@@ -385,18 +384,17 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		self.assertEqual(acting["user"], NON_ADMIN_USER)
 
 	def test_bypass_off_when_conversation_empty(self):
-		# No conversation binding (and no active turn) -> conv resolves to ""
-		# -> auto_apply cannot be trusted -> parks.
+		# No conversation binding -> conv resolves to "" -> auto_apply cannot be
+		# trusted -> parks.
 		desc = "jarvis-autoapply-empty-005"
-		with patch("jarvis.selfhost.get_active_turn", return_value=None):
-			r = api._run_tool(
-				"create_doc",
-				{
-					"doctype": "ToDo",
-					"values": {"description": desc},
-				},
-				conversation=None,
-			)
+		r = api._run_tool(
+			"create_doc",
+			{
+				"doctype": "ToDo",
+				"values": {"description": desc},
+			},
+			conversation=None,
+		)
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
 		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
 

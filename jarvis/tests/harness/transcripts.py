@@ -182,8 +182,8 @@ def _build() -> dict[str, dict]:
 			"Mid-stream context-overflow lifecycle error, a compaction pause, then the answer "
 			"streams and terminal final. NOTE: on the MANAGED relay path relay_turn_events drops "
 			"lifecycle frames, so the bench sees a longer turn that resolves to final (openclaw "
-			"auto-compacts internally); the run:recovering UX is a self-host-path (stream_agent_turn) "
-			"behavior. The lifecycle_error frame is retained so the self-host consumer + Stage-B "
+			"auto-compacts internally); the run:recovering UX is a legacy-path (stream_agent_turn) "
+			"behavior. The lifecycle_error frame is retained so the Stage-B "
 			"differential still exercise it."
 		),
 		"ack": {"status": "started"},

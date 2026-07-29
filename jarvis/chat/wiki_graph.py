@@ -315,10 +315,8 @@ def sync() -> dict:
 
 
 def _sync() -> dict:
-	from jarvis import admin_client, selfhost
+	from jarvis import admin_client
 
-	if selfhost.is_self_hosted():
-		return {"ok": True, "skipped": "self-hosted"}
 	payload = compute_graph()
 	resp = admin_client.push_wiki_graph(payload)
 	if resp is None:

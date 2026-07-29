@@ -176,7 +176,6 @@ class TestCaps(_DashboardsApiTestCase):
 		self.assertEqual(data["max_sources"], 12)
 		self.assertEqual(data["max_html_chars"], 1_000_000)
 		self.assertEqual(data["max_rows"], 2000)
-		self.assertIn(data["canvas_available"], (True, False))
 		frappe.set_user(ADMIN_USER)
 		data = get_dashboards_caps()["data"]
 		self.assertEqual(data["creatable_scopes"], ["Org", "Role", "User"])

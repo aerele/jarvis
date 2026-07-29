@@ -559,10 +559,6 @@ def maybe_nudge(conversation_id: str, user: str, run_id: str | None = None) -> N
 
 
 def _maybe_nudge(conversation_id: str, user: str) -> None:
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return
 	if not wiki_enabled():
 		return
 	conv = frappe.db.get_value(CONV, conversation_id, ["name", "file_box"], as_dict=True)

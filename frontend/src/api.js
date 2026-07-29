@@ -229,10 +229,10 @@ export const disconnectLlm = () => call("jarvis.onboarding.disconnect_llm");
 // {ok, checks:[{check,ok,detail}], provider, local_endpoint, caveat}.
 export const testLlmApiKey = (args) => call("jarvis.llm_key_probe.test_llm_api_key", args);
 
-// --- Onboarding wizard (managed signup + self-hosted connect) ---
+// --- Onboarding wizard (managed signup) ---
 // Arg names mirror the real backend signatures (jarvis/onboarding.py,
-// jarvis/account.py, jarvis/selfhost.py) - verified against the desk wizard's
-// frappe.call usage in jarvis/jarvis/page/jarvis_onboarding/jarvis_onboarding.js.
+// jarvis/account.py) - verified against the desk wizard's frappe.call usage in
+// jarvis/jarvis/page/jarvis_onboarding/jarvis_onboarding.js.
 export const listPlans = () => call("jarvis.onboarding.list_plans");
 // {providers: [...], default: "..."} - already narrowed to gateways the
 // operator enabled AND this bench build can render.
@@ -246,10 +246,6 @@ export const finishPayment = (payload) => call("jarvis.onboarding.finish_payment
 export const isOnboarded = () => call("jarvis.account.is_onboarded");
 // args: {provider, model, api_key, base_url, auth_mode, force}
 export const saveLlmCreds = (args) => call("jarvis.onboarding.save_llm_creds", args);
-// args: {base_url, token, deep, stream, tool_user}
-export const saveSelfHosted = (args) => call("jarvis.selfhost.save_self_hosted", args);
-// args: {base_url, token, deep}
-export const testSelfHostConnection = (args) => call("jarvis.selfhost.test_connection", args);
 
 // --- Per-account chat-subscription capture (paste-back OAuth) ---
 // begin → { nonce, authorize_url, expires_in }; open authorize_url, sign in,

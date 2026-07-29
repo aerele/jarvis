@@ -1258,8 +1258,7 @@ class TestCutoverDbAuthoritativeMode(FrappeTestCase):
 	update_site_config never refreshes for an already-initialized request). These tests
 	initialize requests with GENUINELY DIFFERENT frappe.local.conf snapshots + a REAL committed
 	row — no patched turn_machine_enabled / pump_mode_active shared flag — so they exercise the
-	exact Frappe request-local-config behavior codex flagged. Only selfhost.is_self_hosted (a
-	static per-bench property, not the raced value) is pinned to the managed value."""
+	exact Frappe request-local-config behavior codex flagged."""
 
 	def setUp(self):
 		_ensure_test_user()
@@ -1267,11 +1266,8 @@ class TestCutoverDbAuthoritativeMode(FrappeTestCase):
 		frappe.set_user(TEST_USER)
 		_cleanup()
 		admission._ensure_control_row(admission.DEFAULT_RELAY_TARGET)
-		self._selfhost = patch("jarvis.selfhost.is_self_hosted", return_value=False)
-		self._selfhost.start()
 
 	def tearDown(self):
-		self._selfhost.stop()
 		# Reset the fenced ROW so other suites fall back to config (patterntest: pump ABSENT).
 		try:
 			frappe.db.set_value(
@@ -1339,7 +1335,6 @@ class TestCutoverDbAuthoritativeMode(FrappeTestCase):
 				with (
 					patch.object(admission, "pump_cutover_preflight", side_effect=fake_scan),
 					patch("frappe.installer.update_site_config", side_effect=lambda *a, **k: None),
-					patch("jarvis.selfhost.is_self_hosted", return_value=False),
 				):
 					res = admission.pump_cutover_execute()
 					if not res.get("done"):
@@ -1365,7 +1360,6 @@ class TestCutoverDbAuthoritativeMode(FrappeTestCase):
 				kwargs = {"conversation_id": conv, "message_id": seed, "run_id": run_id, "enqueued_at_ms": 1}
 				with (
 					patch("frappe.enqueue", side_effect=lambda *a, **k: enqueued.append(k.get("job_id"))),
-					patch("jarvis.selfhost.is_self_hosted", return_value=False),
 					patch.object(
 						admission,
 						"accept_or_queue",
