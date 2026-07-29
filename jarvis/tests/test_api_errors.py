@@ -99,12 +99,16 @@ class TestScrub(ApiErrorsBase):
 		self.assertIn("ValidationError", api_errors._scrub_error_text("ValidationError: rejected"))
 
 	def test_redacts_id_shaped_tokens(self):
-		# Fixed-width alphanumeric IDs (GSTIN/PAN/serials) mixing letters and digits
-		# are ERP identifiers, not taxonomy - they must not ride along.
+		# Fixed-width UPPERCASE alphanumeric IDs (GSTIN/PAN/serials) are ERP
+		# identifiers, not taxonomy - they must not ride along.
 		out = api_errors._scrub_error_text("filing for GSTIN 27AAPFU0939F1ZV was rejected")
 		self.assertNotIn("27AAPFU0939F1ZV", out)
 		# a pure-letter token (an exception class) has no digit and survives
 		self.assertIn("PermissionDeniedError", api_errors._scrub_error_text("PermissionDeniedError: no"))
+		# a CamelCase class name that HAPPENS to carry a digit has a lowercase run,
+		# so it is not ID-shaped and survives (R2 - taxonomy must not be eaten).
+		for cls in ("OAuth2Error", "Base64DecodeError", "Http404Error", "S3UploadError"):
+			self.assertIn(cls, api_errors._scrub_error_text(f"raised {cls} in handler"), cls)
 
 	def test_keeps_the_reporting_users_own_email(self):
 		out = api_errors._scrub_error_text(f"failed for {USER}", keep_email=USER)
@@ -154,11 +158,11 @@ class TestReportEndpoint(ApiErrorsBase):
 		self.assertEqual(rows[0].route, "/c/abc", "query string stripped")
 		self.assertIn("8 tries", rows[0].message, "the newest sample overwrites")
 
-	def test_fingerprint_uses_raw_message_not_scrubbed(self):
-		# Two different entity names scrub to the SAME text ("Missing [NAME]") but
-		# are different errors. Fingerprinting the RAW message keeps them distinct
-		# AND decouples grouping from redaction policy, so a future scrubber tweak
-		# never re-keys the admin feed (N6).
+	def test_fingerprint_groups_by_scrubbed_message(self):
+		# Different entity names in the SAME error shape scrub to the same text
+		# ("Missing [NAME]") and MUST fold into one group - otherwise one bug across
+		# N customers becomes N rows at count=1 (R1). Grouping keys on the scrubbed
+		# message; _SCRUB_VERSION makes a future scrubber change a deliberate re-key.
 		with _as(USER):
 			api_errors.report_client_errors(
 				[{"surface": "spa", "error_code": "e", "message": "Missing Tata Steel Ltd"}]
@@ -166,11 +170,12 @@ class TestReportEndpoint(ApiErrorsBase):
 			api_errors.report_client_errors(
 				[{"surface": "spa", "error_code": "e", "message": "Missing Reliance Industries"}]
 			)
-		self.assertEqual(frappe.db.count(DT, {"user": USER}), 2, "distinct raw messages stay distinct groups")
-		# ...and both stored copies are scrubbed (the names never land on disk).
-		for msg in frappe.get_all(DT, filters={"user": USER}, pluck="message"):
-			self.assertNotIn("Tata Steel", msg)
-			self.assertNotIn("Reliance Industries", msg)
+		rows = frappe.get_all(DT, filters={"user": USER}, fields=["count", "message"])
+		self.assertEqual(len(rows), 1, "same error shape, different names -> one group")
+		self.assertEqual(rows[0].count, 2, "occurrences accumulate")
+		# ...and the stored copy is scrubbed (the names never land on disk).
+		self.assertNotIn("Tata Steel", rows[0].message)
+		self.assertNotIn("Reliance Industries", rows[0].message)
 
 	def test_different_word_is_a_different_group(self):
 		with _as(USER):
@@ -313,8 +318,21 @@ class TestErrorLogReader(ApiErrorsBase):
 class TestPushSelfGates(ApiErrorsBase):
 	# Drive is_self_hosted() through its real input (deployment_mode) and patch
 	# only the importable admin_client / error_push seams - never jarvis.selfhost.
+	def _pin_deployment_mode(self, mode):
+		# ApiErrorsBase.tearDown commits, which defeats FrappeTestCase's rollback -
+		# so a change to this shared Single would leak Self-Hosted into every later
+		# file in the shard (is_self_hosted() gates real behaviour). Restore it.
+		prev = frappe.db.get_single_value("Jarvis Settings", "deployment_mode") or "Managed"
+
+		def restore():
+			frappe.db.set_single_value("Jarvis Settings", "deployment_mode", prev)
+			frappe.db.commit()
+
+		self.addCleanup(restore)
+		frappe.db.set_single_value("Jarvis Settings", "deployment_mode", mode)
+
 	def test_skips_when_self_hosted(self):
-		frappe.db.set_single_value("Jarvis Settings", "deployment_mode", "Self-Hosted")
+		self._pin_deployment_mode("Self-Hosted")
 		from jarvis import admin_client
 
 		with patch.object(admin_client, "push_error_rollup") as push:
@@ -322,7 +340,7 @@ class TestPushSelfGates(ApiErrorsBase):
 		push.assert_not_called()
 
 	def test_skips_when_admin_unconfigured(self):
-		frappe.db.set_single_value("Jarvis Settings", "deployment_mode", "Managed")
+		self._pin_deployment_mode("Managed")
 		from jarvis import admin_client
 
 		with (

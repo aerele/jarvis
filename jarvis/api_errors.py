@@ -69,11 +69,14 @@ _KV_SECRET_RE = re.compile(
 )
 # long hex / base64-ish blobs (hashes, ids, tokens)
 _LONG_BLOB_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{24,}\b")
-# fixed-width alphanumeric IDs under the blob threshold that mix letters AND
-# digits: GSTIN (27AAPFU0939F1ZV), PAN, batch/serial codes. These are ERP
-# identifiers, not taxonomy. A pure-letter token (an exception class) has no
-# digit and is left alone; a pure-digit run is handled by _NUMBER_RE.
-_ID_RE = re.compile(r"\b(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{10,23}\b")
+# fixed-width UPPERCASE alphanumeric IDs under the blob threshold that mix
+# letters AND digits: GSTIN (27AAPFU0939F1ZV), PAN, batch/serial codes. These
+# are ERP identifiers, not taxonomy. Restricted to [A-Z0-9] on purpose: a
+# CamelCase class name that carries a digit ("OAuth2Error", "Http404Error",
+# "S3UploadError") always has a lowercase letter, so it stays intact; a pure
+# uppercase ID does not. A pure-letter token (an exception class) has no digit;
+# a pure-digit run is handled by _NUMBER_RE.
+_ID_RE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{10,23}\b")
 # decimals, thousand-grouped, or 4+ digit runs = amounts / quantities / ids
 _NUMBER_RE = re.compile(r"(?<![\w.])(?:\d[\d,]*\.\d+|\d{1,3}(?:,\d{3})+|\d{4,})(?![\w])")
 # any quoted literal - redacted unconditionally. ERP messages quote entity names
@@ -129,12 +132,24 @@ def _scrub_error_text(text: str | None, *, keep_email: str | None = None) -> str
 # --------------------------------------------------------------------------- #
 _NORM_DIGITS = re.compile(r"\d+")
 
+#: Grouping-key version. The UI fingerprint is computed from the SCRUBBED message
+#: (see _ingest_one), which doubles as the normalizer that collapses different
+#: entity names into one group - so one bug across N customers stays one row at
+#: count=N, not N rows at count=1. That couples grouping to redaction policy: any
+#: change to _scrub_error_text would silently re-key the whole admin feed. Bump
+#: this constant in the SAME commit as any scrubber change, so the re-key becomes
+#: an intentional, dated event and the old rows age out via the 90-day prune.
+_SCRUB_VERSION = "1"
+
 
 def _fingerprint(error_code: str, error_class: str, message: str, surface: str) -> str:
 	"""Stable dedupe key for a UI error - digits normalized out of the message so
-	'... 42 units' and '... 7 units' collapse to one group."""
+	'... 42 units' and '... 7 units' collapse to one group. Fed the SCRUBBED
+	message by _ingest_one, so entity-name variants ('Tata Steel' vs 'Acme') that
+	both scrub to '[VAL]'/'[NAME]' collapse to one group too. Versioned by
+	_SCRUB_VERSION so a scrubber change re-keys deliberately, not silently."""
 	norm = _NORM_DIGITS.sub("#", (message or "").lower())[:200]
-	raw = f"{error_code}|{error_class}|{surface}|{norm}"
+	raw = f"{_SCRUB_VERSION}|{error_code}|{error_class}|{surface}|{norm}"
 	return hashlib.sha1(raw.encode()).hexdigest()
 
 
@@ -236,16 +251,15 @@ def _ingest_one(raw: dict, user: str) -> bool:
 	if _looks_non_jarvis(surface, str(raw.get("route") or ""), str(raw.get("stack") or "")):
 		return False
 
-	raw_message = str(raw.get("message") or "")
-	message = _scrub_error_text(raw_message, keep_email=user)[:MAX_MESSAGE]
+	message = _scrub_error_text(raw.get("message"), keep_email=user)[:MAX_MESSAGE]
 	stack = _scrub_error_text(raw.get("stack"), keep_email=user)[:MAX_STACK]
-	# Fingerprint the RAW (unscrubbed) message, not the scrubbed one. The
-	# fingerprint is admin's per-row grouping key (JTE-{tenant}-{fingerprint}), and
-	# a hash never leaves the bench in reversible form. Keying on raw text
-	# decouples grouping identity from redaction policy: a future scrubber tweak
-	# then does NOT re-key the whole feed (every row reappearing as new with
-	# count=1 and orphaned `resolved` flags). Lane 2 already fingerprints raw frames.
-	fp = _fingerprint(error_code, error_class, raw_message, surface)
+	# Fingerprint the SCRUBBED message: it doubles as the grouping normalizer, so
+	# "Customer 'Tata Steel'" and "Customer 'Acme'" both scrub to "Customer '[VAL]'"
+	# and collapse to one group - one bug across N customers is one row at count=N,
+	# not N rows at count=1. The scrubber-coupling that creates (a scrubber change
+	# would re-key the feed) is made explicit and deliberate via _SCRUB_VERSION,
+	# baked into _fingerprint. Lane 2 keys on raw frames, so it is scrub-stable.
+	fp = _fingerprint(error_code, error_class, message, surface)
 
 	# Serialize concurrent reports of the SAME error (same user+fingerprint) so the
 	# check-then-act below can't double-insert, and two occurrences can't both read
