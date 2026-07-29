@@ -363,6 +363,7 @@ onBeforeUnmount(() => {
 	width: 54px;
 	height: 54px;
 	border-radius: 16px;
+	overflow: hidden;
 	background: var(--accent-grad);
 	border: none;
 	cursor: grab;
@@ -378,11 +379,15 @@ onBeforeUnmount(() => {
 	will-change: transform;
 	transition: opacity 0.25s ease;
 }
+/* A tenant logo IS the tile, exactly as the SPA's JarvisMark treats it: it
+   fills the launcher edge-to-edge instead of floating as a small cropped
+   square inside the purple gradient, which read as misaligned. */
 .jvw-fab-img {
-	width: 24px;
-	height: 24px;
+	width: 100%;
+	height: 100%;
 	object-fit: cover;
-	border-radius: 7px;
+	border-radius: inherit;
+	display: block;
 }
 .jvw-fab:hover {
 	filter: brightness(1.06);
