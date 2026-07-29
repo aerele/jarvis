@@ -438,6 +438,36 @@ class TestHopHandoff(_PumpTestCase):
 
 
 class TestTakeoverFencing(_PumpTestCase):
+	def test_a2_progress_stamp_advances_only_on_progress(self):
+		"""A2 (GAP 3): loop_heartbeat_ts (the PROGRESS stamp) advances ONLY when the
+		slice made progress; the lease is renewed either way (liveness independent of
+		progress), so a lease-alive-but-not-draining pump goes progress-stale while a
+		healthy-but-quiet pump keeps its lease."""
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		old = frappe.utils.add_to_date(None, seconds=-300)
+		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", old, update_modified=False)
+		frappe.db.commit()
+
+		# No progress: lease renewed, progress stamp NOT advanced.
+		ctx.last_heartbeat = 0.0
+		pump._heartbeat_and_renew(ctx, progressed=False)
+		frappe.db.commit()
+		self.assertEqual(
+			str(frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts")),
+			str(old),
+			"no-progress slice must NOT advance the progress stamp",
+		)
+
+		# Progress: the stamp advances.
+		ctx.last_heartbeat = 0.0
+		pump._heartbeat_and_renew(ctx, progressed=True)
+		frappe.db.commit()
+		self.assertNotEqual(
+			str(frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts")),
+			str(old),
+			"progress slice must advance the progress stamp",
+		)
+
 	def test_old_epoch_write_affects_zero_rows(self):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv)

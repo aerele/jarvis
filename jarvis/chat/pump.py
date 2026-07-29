@@ -1559,12 +1559,11 @@ def drain_slice(ctx: PumpContext) -> str:
 	# regardless — the snapshot poll never blocks and mux.dispatch runs below.
 	_maybe_refresh_capacity(ctx)
 	_poll_snapshot(ctx)  # CDX-11: fold a resolved refresh (or fail-close a timed-out one) pre-promote
-	_promote_queued(ctx)
-	_dispatch_ready(ctx)  # OARF-5: issues chat.send acks, parks them (never blocks)
+	promoted = _promote_queued(ctx)
+	dispatched = _dispatch_ready(ctx)  # OARF-5: issues chat.send acks, parks them (never blocks)
 	_poll_pending(ctx)  # OARF-5: resolve done acks/recovery tails; ack-timeout deadlines
 
-	if ctx.mux is not None:
-		ctx.mux.dispatch(block_s=SLICE_BLOCK_S)
+	applied = ctx.mux.dispatch(block_s=SLICE_BLOCK_S) if ctx.mux is not None else 0
 	if ctx.lease_lost:
 		ts.lease_lost_exit(ctx.lease_lost)
 	# D5 §5-d: a dead socket ends the hop (the reader's Closing already failed the
@@ -1575,7 +1574,12 @@ def drain_slice(ctx: PumpContext) -> str:
 
 	_cancel_sweep(ctx)
 
-	_heartbeat_and_renew(ctx)
+	# GAP 3 A2: progress = the slice did real drain work (promoted / dispatched a turn
+	# or applied a mux frame) OR the pump is correctly capacity-blocked (fail-closed:
+	# gateway visibility UNKNOWN, where a takeover cannot help — not a wedge). Only a
+	# genuine "should be draining but isn't" leaves the progress stamp un-advanced.
+	progressed = promoted > 0 or dispatched > 0 or applied > 0 or not ctx.gateway_active_known
+	_heartbeat_and_renew(ctx, progressed)
 
 	if _idle_exit(ctx):
 		return "idle_exit"
@@ -2269,15 +2273,19 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _heartbeat_and_renew(ctx: PumpContext) -> None:
-	"""Write ``loop_heartbeat_ts`` (loop-liveness, DISTINCT from lease renewal) and
-	renew the lease, at most once per HEARTBEAT_INTERVAL_S. A 0-rows renew/
-	heartbeat means the epoch was lost to a takeover ⇒ shared lease-loss exit."""
+def _heartbeat_and_renew(ctx: PumpContext, progressed: bool) -> None:
+	"""Renew the lease (liveness) and — ONLY when the slice made progress — advance
+	the ``loop_heartbeat_ts`` PROGRESS stamp, at most once per HEARTBEAT_INTERVAL_S.
+	GAP 3 A2: the progress stamp is now DECOUPLED from lease renewal, so a
+	lease-alive-but-not-draining pump goes progress-stale (the watchdog then
+	force-takes it over) while a healthy-but-quiet pump keeps renewing and is never
+	falsely expired. A 0-rows renew/heartbeat means the epoch was lost to a takeover
+	⇒ shared lease-loss exit."""
 	now = _monotonic()
 	if now - ctx.last_heartbeat < HEARTBEAT_INTERVAL_S:
 		return
 	ctx.last_heartbeat = now
-	if not ts.lease_heartbeat(ctx.relay_target_id, ctx.epoch):
+	if progressed and not ts.lease_heartbeat(ctx.relay_target_id, ctx.epoch):
 		ts.lease_lost_exit()
 	if not ts.lease_renew(ctx.relay_target_id, ctx.epoch, holder=ctx.holder):
 		ts.lease_lost_exit()
