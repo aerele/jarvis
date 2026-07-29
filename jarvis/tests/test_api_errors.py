@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import admin_client, api_errors, error_push, selfhost
+from jarvis import api_errors, error_push
 
 DT = api_errors.DT
 USER = "apierr-user@example.com"
@@ -302,7 +302,15 @@ class TestErrorLogReader(ApiErrorsBase):
 # Push job — self-gating + never-raise
 # --------------------------------------------------------------------------- #
 class TestPushSelfGates(ApiErrorsBase):
+	# NB: import selfhost / admin_client at execution time (inside each method),
+	# not at module top. A top-level `from jarvis import selfhost` runs during
+	# test collection, where it hit a circular-import ordering only in CI; by the
+	# time a test method runs the app is fully booted and the import is safe. We
+	# then patch.object the imported module (not a dotted string), which also
+	# sidesteps py3.14's mock.patch no longer auto-importing string targets.
 	def test_skips_when_self_hosted(self):
+		from jarvis import admin_client, selfhost
+
 		with (
 			patch.object(selfhost, "is_self_hosted", return_value=True),
 			patch.object(admin_client, "push_error_rollup") as push,
@@ -311,6 +319,8 @@ class TestPushSelfGates(ApiErrorsBase):
 		push.assert_not_called()
 
 	def test_skips_when_admin_unconfigured(self):
+		from jarvis import admin_client, selfhost
+
 		with (
 			patch.object(selfhost, "is_self_hosted", return_value=False),
 			patch.object(error_push, "_admin_configured", return_value=False),
@@ -320,6 +330,8 @@ class TestPushSelfGates(ApiErrorsBase):
 		push.assert_not_called()
 
 	def test_never_raises(self):
+		from jarvis import selfhost
+
 		with (
 			patch.object(selfhost, "is_self_hosted", side_effect=RuntimeError("boom")),
 		):
@@ -337,7 +349,10 @@ class TestPushClaimConfirm(ApiErrorsBase):
 
 	def _run_push(self, push_impl):
 		"""Run push_error_rollup with the admin push replaced by ``push_impl``
-		(a Mock or a plain callable)."""
+		(a Mock or a plain callable). selfhost / admin_client are imported here (at
+		execution time) - see the note on TestPushSelfGates."""
+		from jarvis import admin_client, selfhost
+
 		with (
 			patch.object(selfhost, "is_self_hosted", return_value=False),
 			patch.object(error_push, "_admin_configured", return_value=True),
