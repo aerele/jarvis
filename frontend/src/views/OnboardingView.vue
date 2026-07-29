@@ -394,40 +394,28 @@
 							<template v-else-if="state.payPhase === 'reconnect'">
 								<div class="ob-body">
 									<div class="ob-head">
-										<h1>Check your email</h1>
+										<h1>Enter your reconnect code</h1>
 										<p>
-											We sent a reconnect link to
+											We emailed a code to
 											<b>{{ state.email || "your email" }}</b
-											>. Approving it connects this site to your existing
-											subscription — nothing to pay again. Waiting for your
-											approval…
+											>. Enter it here to connect this site to your existing
+											subscription — nothing to pay again.
 										</p>
 									</div>
-									<template v-if="state.reconnectAwaitingCode">
-										<p class="text-center text-p-sm text-ink-gray-6">
-											Approved. Enter the code shown on the confirmation page
-											(or given to you by support) to finish.
-										</p>
-										<FormControl
-											class="mx-auto mt-2 max-w-[260px]"
-											type="text"
-											variant="outline"
-											label="Confirmation code"
-											v-model="state.reconnectCode"
-											placeholder="ABCD2345"
-											@keydown.enter="submitReconnectCode"
-										/>
-									</template>
-									<template v-else>
-										<div class="mt-2.5 flex justify-center">
-											<JvSpinner :size="56" />
-										</div>
-										<p class="text-center text-p-sm text-ink-gray-5">
-											The link expires in 1 hour and signs your old site out.
-											If your inbox is unreachable, contact support — an
-											operator can approve the reconnect instead.
-										</p>
-									</template>
+									<FormControl
+										class="mx-auto mt-2 max-w-[260px]"
+										type="text"
+										variant="outline"
+										label="Reconnect code"
+										v-model="state.reconnectCode"
+										placeholder="ABCD2345"
+										@keydown.enter="submitReconnectCode"
+									/>
+									<p class="text-center text-p-sm text-ink-gray-5">
+										The code expires in 1 hour. Using it signs your old site
+										out. If you can't reach that inbox, contact support — they
+										can issue the code another way.
+									</p>
 									<Banner
 										v-if="state.payErr"
 										type="error"
@@ -442,7 +430,6 @@
 										/>Back
 									</button>
 									<Button
-										v-if="state.reconnectAwaitingCode"
 										variant="solid"
 										:loading="state.payBusy"
 										loading-text="Working…"
@@ -1010,7 +997,6 @@ const state = reactive({
 	reconnectOffered: false,
 	reconnectRequestId: "",
 	reconnectCode: "",
-	reconnectAwaitingCode: false,
 	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
 	// Gateways the operator has actually enabled, narrowed to what this build
 	// can render. Starts as razorpay-only so the step is never briefly empty
@@ -1487,7 +1473,6 @@ function cancelReconnect() {
 	state.payErr = "";
 	state.reconnectRequestId = "";
 	state.reconnectCode = "";
-	state.reconnectAwaitingCode = false;
 }
 
 // The code the customer read off the confirmation page (or got from support).
@@ -1526,57 +1511,16 @@ async function startReconnect() {
 	state.payErr = "";
 	state.reconnectOffered = false;
 	state.reconnectCode = "";
-	state.reconnectAwaitingCode = false;
 	state.payBusy = true;
 	try {
 		const d = await startAccountReconnect(state.email);
 		state.reconnectRequestId = (d && d.request) || "";
 		state.payPhase = "reconnect";
-		pollReconnect();
 	} catch (e) {
 		state.payErr = errMsg(e);
 		state.reconnectOffered = true;
 	} finally {
 		state.payBusy = false;
-	}
-}
-
-async function pollReconnect() {
-	const deadline = Date.now() + 10 * 60 * 1000;
-	while (state.payPhase === "reconnect" && Date.now() < deadline) {
-		try {
-			const d = await checkAccountReconnect(state.reconnectRequestId, state.reconnectCode);
-			// Re-check AFTER the await: "Back" may have fired while it was in
-			// flight, and acting then would override the user's cancel.
-			if (state.payPhase !== "reconnect") return;
-			if (d && d.status === "awaiting_code") {
-				// Confirmed on the customer's side; stop spinning and ask for the
-				// code that binds delivery to whoever clicked (anti-phishing).
-				state.reconnectAwaitingCode = true;
-				return;
-			}
-			if (d && d.status === "connected") {
-				// Same handoff as a completed payment: poll sync_connection to the
-				// customer's EXISTING container, then continue to the LLM step
-				// (this fresh site has no local LLM config to reuse).
-				state.successData = {};
-				await proceedAfterPay();
-				return;
-			}
-			if (d && d.status === "expired") {
-				state.payErr = "The reconnect request expired. Start it again.";
-				state.payPhase = "review";
-				state.reconnectOffered = true;
-				return;
-			}
-		} catch (e) {
-			/* transient admin hiccup - keep polling */
-		}
-		await _sleep(3000);
-	}
-	if (state.payPhase === "reconnect") {
-		state.payErr =
-			"Still waiting for the email approval. Click the link in your inbox, then this page will continue automatically.";
 	}
 }
 

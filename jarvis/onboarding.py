@@ -508,11 +508,12 @@ def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None)
 
 @frappe.whitelist()
 def start_account_reconnect(email: str) -> dict:
-	"""Fresh-bench recovery: ask admin to email a reconnect link to the
+	"""Fresh-bench recovery: ask admin to email a reconnect CODE to the
 	REGISTERED address of an existing paid account (wiped-site scenario — the
 	duplicate-email guard blocks re-signup, and nothing should be re-paid).
-	Returns {request, message}; the wizard polls ``check_account_reconnect``.
-	Same System-Manager gating as the rest of onboarding."""
+	Returns {request, message}; the customer then types the code, which
+	``check_account_reconnect`` redeems. Same System-Manager gating as the rest
+	of onboarding."""
 	require_jarvis_admin()
 	_require_admin_url()
 	return _surface(admin_client.request_account_reconnect, email)
@@ -520,9 +521,9 @@ def start_account_reconnect(email: str) -> dict:
 
 @frappe.whitelist()
 def check_account_reconnect(request_id: str, code: str = "") -> dict:
-	"""Poll the reconnect. Once the customer clicks the emailed link (or an
-	operator approves) AND the customer relays the confirmation code shown to
-	them, admin delivers rotated credentials — persist them and
+	"""Redeem the reconnect code the customer received by email (or from
+	support). Only a correct code releases anything: admin then rotates and
+	delivers the credentials — persist them and
 	grant the onboarding admin role, exactly like a fresh signup would. The
 	wizard then rides the normal sync_connection path to the customer's
 	EXISTING container; only the LLM step needs re-doing on this fresh site."""
