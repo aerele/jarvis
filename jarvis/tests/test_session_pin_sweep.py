@@ -32,6 +32,10 @@ from jarvis.chat.session_pin_sweep import (
 CONV = "Jarvis Conversation"
 SETTINGS = "Jarvis Settings"
 
+# Every conversation fixture in this file keys off this prefix, so setUp can
+# clear residue left by an interrupted run without touching real rows.
+KEY_PREFIX = "agent:main:dashboard:pin-"
+
 DEFAULT_PROVIDER = "anthropic-0"
 DEFAULT_MODEL = "claude-sonnet-5"
 DEFAULTS = {"modelProvider": DEFAULT_PROVIDER, "model": DEFAULT_MODEL}
@@ -71,6 +75,11 @@ def _fake_sess(*pages):
 class TestSessionPinSweep(FrappeTestCase):
 	def setUp(self):
 		self._made = []
+		# session_key is unique on the DocType and _conv commits, so a run killed
+		# mid-test would leave a row that 1062s the next run's insert. Sweep any
+		# residue from this file's own key namespace first.
+		frappe.db.delete(CONV, {"session_key": ["like", f"{KEY_PREFIX}%"]})
+		frappe.db.commit()
 
 	def tearDown(self):
 		for name in self._made:
@@ -126,6 +135,17 @@ class TestSessionPinSweep(FrappeTestCase):
 		key = "agent:main:dashboard:pin-drift"
 		self._conv(key, model_override="gemini-3.6-flash")
 		sess = _fake_sess(_page([_row(key, provider="zai_coding-0", model="claude-sonnet-4-6")]))
+		summary = self._sweep(sess, apply=True)
+		self.assertEqual(self._verbs(summary), {key: REPORT})
+		sess.clear_session_model.assert_not_called()
+
+	def test_a_pick_the_tenant_no_longer_offers_still_holds(self):
+		# The customer's model pill still reads this row, so the sweep does not
+		# unpin the container behind it; repairing a dead pick is the
+		# conversation's business.
+		key = "agent:main:dashboard:pin-dead"
+		self._conv(key, model_override="a-model-nobody-serves-now")
+		sess = _fake_sess(_page([_row(key, provider="vllm", model="claude-sonnet-4-6")]))
 		summary = self._sweep(sess, apply=True)
 		self.assertEqual(self._verbs(summary), {key: REPORT})
 		sess.clear_session_model.assert_not_called()
@@ -230,7 +250,8 @@ class TestSessionPinSweep(FrappeTestCase):
 			"modelOverride": "jarvis-pool",
 			"modelOverrideSource": "user",
 		}
-		summary = self._sweep(sess, apply=True)
+		with patch("frappe.log_error"):
+			summary = self._sweep(sess, apply=True)
 		self.assertEqual(summary.cleared, 0)
 		self.assertEqual(summary.errors, 1)
 
@@ -243,7 +264,8 @@ class TestSessionPinSweep(FrappeTestCase):
 		rows = [_row(k, provider="openai_compat-0", model="jarvis-pool") for k in keys]
 		sess = _fake_sess(_page(rows))
 		sess.clear_session_model.side_effect = [RuntimeError("nope"), {}]
-		summary = self._sweep(sess, apply=True)
+		with patch("frappe.log_error"):
+			summary = self._sweep(sess, apply=True)
 		self.assertEqual(summary.cleared, 1)
 		self.assertEqual(summary.errors, 1)
 		self.assertEqual(sess.clear_session_model.call_count, 2)
@@ -295,7 +317,8 @@ class TestSessionPinSweep(FrappeTestCase):
 			),
 			RuntimeError("gateway went away"),
 		]
-		summary = self._sweep(sess)
+		with patch("frappe.log_error"):
+			summary = self._sweep(sess)
 		self.assertEqual(self._verbs(summary), {key: CLEAR})
 
 	# -- entry point ------------------------------------------------------- #
@@ -344,27 +367,31 @@ class TestSessionPinSweep(FrappeTestCase):
 	# -- races between the listing and the patch --------------------------- #
 
 	def test_a_pick_made_after_planning_is_not_reverted(self):
+		# The plan is built while the conversation is on Auto; the customer picks
+		# a model before the patch goes out. The recheck re-reads the row, so the
+		# fresh pick must survive.
 		key = "agent:main:dashboard:pin-race"
 		name = self._conv(key, model_override="")
 		sess = _fake_sess(_page([_row(key, provider="openai_compat-0", model="jarvis-pool")]))
+		sess.clear_session_model.side_effect = AssertionError("must not revert a fresh pick")
+		real_get_value = frappe.db.get_value
+		landed = []
 
-		def pick(session_key):
-			raise AssertionError("must not patch a conversation that just got a pick")
+		def pick_lands_first(*args, **kwargs):
+			# Fires once, on the recheck's own read, and only then: set_value may
+			# itself read through the patched get_value, so guard against reentry.
+			if not landed and args[:2] == (CONV, name):
+				landed.append(True)
+				frappe.db.set_value(CONV, name, "model_override", "gemini-3.6-flash")
+				frappe.db.commit()
+			return real_get_value(*args, **kwargs)
 
-		sess.clear_session_model.side_effect = pick
-		# The customer chooses a model between the listing and the patch.
-		original = session_pin_sweep.SessionPinSweep._clear
-
-		def clear_after_pick(inner, summary):
-			frappe.db.set_value(CONV, name, "model_override", "gemini-3.6-flash")
-			frappe.db.commit()
-			return original(inner, summary)
-
-		with patch.object(session_pin_sweep.SessionPinSweep, "_clear", clear_after_pick):
+		with patch("frappe.db.get_value", side_effect=pick_lands_first):
 			summary = self._sweep(sess, apply=True)
 		self.assertEqual(summary.cleared, 0)
 		self.assertEqual(summary.raced, 1)
 		self.assertEqual(summary.errors, 0)
+		self.assertEqual(frappe.db.get_value(CONV, name, "model_override"), "gemini-3.6-flash")
 
 	def test_a_replaced_session_is_an_error_not_a_fix(self):
 		# The lifecycle sweep freed the session mid-run, so openclaw minted a
@@ -373,7 +400,8 @@ class TestSessionPinSweep(FrappeTestCase):
 		self._conv(key, model_override="")
 		sess = _fake_sess(_page([_row(key, provider="openai_compat-0", model="jarvis-pool")]))
 		sess.clear_session_model.return_value = {"sessionId": "some-other-session"}
-		summary = self._sweep(sess, apply=True)
+		with patch("frappe.log_error"):
+			summary = self._sweep(sess, apply=True)
 		self.assertEqual(summary.cleared, 0)
 		self.assertEqual(summary.errors, 1)
 
@@ -417,7 +445,12 @@ class TestSessionPinSweep(FrappeTestCase):
 		self.assertEqual(_model_ref({}), "")
 
 	def test_agent_main_key_shapes(self):
-		for key in ("agent:main:main", "agent:main:main:heartbeat", "agent:other:main"):
+		for key in (
+			"agent:main:main",
+			"agent:main:main:heartbeat",
+			"agent:main:main:anything-openclaw-adds",
+			"agent:other:main",
+		):
 			self.assertTrue(_is_agent_main_key(key), key)
 		for key in (
 			"agent:",

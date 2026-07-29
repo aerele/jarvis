@@ -36,13 +36,18 @@ REMEDY, PER CLASS.
                                  should see that vendor's error, not a silent
                                  switch to another one mid-conversation.
   * conversation pins a
-    DIFFERENT model            -> REPORT. Bench and container disagree; the next
-                                 turn re-patches the session from the row, so
-                                 clearing here would only fight it.
+    DIFFERENT model            -> REPORT. Bench and container disagree, and the
+                                 row is what the customer's model pill reads, so
+                                 unpinning the container behind it would only
+                                 widen the gap. Holds even when the pick names a
+                                 model the tenant no longer offers: that is a
+                                 conversation to repair, not a pin to drop.
   * openclaw's own
-    agent:<id>:main[:heartbeat] -> CLEAR. The built-in poller resumes it on every
-                                 tick, so a pin there fails forever, and it is
-                                 never a customer pick.
+    agent:<id>:main and anything
+    under agent:<id>:main:*     -> CLEAR. The built-in poller resumes the
+                                 heartbeat on every tick, so a pin there fails
+                                 forever, and openclaw owns that whole
+                                 namespace: none of it is a customer pick.
   * a bench throwaway
     (title / prewarm / polish) -> SKIP. Single-use and reaped within the hour by
                                  session_lifecycle; touching it would only bump
@@ -215,7 +220,21 @@ def run(apply: bool = False, max_clear: int = MAX_CLEAR) -> dict:
 			sess.close()
 		except Exception:
 			logger.debug("session_pin_sweep: close failed", exc_info=True)
-	logger.info("session_pin_sweep: %s", summary.as_dict())
+	# Counters only. The plan carries session labels, which embed the customer's
+	# Frappe user, and the conversation names they map to; the DocType treats
+	# session_key as impersonation-sensitive (permlevel 1), so that detail goes
+	# to the operator who ran the command, not into the app log.
+	logger.info(
+		"session_pin_sweep: apply=%s default=%s scanned=%s %s cleared=%s raced=%s errors=%s%s",
+		summary.apply,
+		summary.default_model,
+		summary.scanned,
+		summary.counts(),
+		summary.cleared,
+		summary.raced,
+		summary.errors,
+		f" aborted={summary.aborted}" if summary.aborted else "",
+	)
 	return summary.as_dict()
 
 
@@ -316,7 +335,14 @@ class SessionPinSweep:
 			return plan(CLEAR, "conversation is on Auto", conv["name"])
 		if chosen.casefold() == (row.get("model") or "").strip().casefold():
 			return plan(KEEP, "the customer picked this model", conv["name"])
-		return plan(REPORT, f"conversation pins {chosen!r}; the next turn re-patches it", conv["name"])
+		# REPORT holds even when the pick names a model the tenant no longer
+		# offers. That row is what the customer's model pill reads, so unpinning
+		# the container behind it would only widen the disagreement, and a turn
+		# taken on the conversation re-patches the session from the row anyway.
+		# The repair for a dead pick belongs on the conversation, not here.
+		return plan(
+			REPORT, f"conversation pins {chosen!r}; the bench row decides, not this sweep", conv["name"]
+		)
 
 	def _clear(self, summary: SweepSummary) -> None:
 		"""Issue sessions.patch {"model": null} for every CLEAR plan, up to the
@@ -342,7 +368,7 @@ class SessionPinSweep:
 			if not self._verify(item, entry, summary):
 				continue
 			summary.cleared += 1
-			logger.info("session_pin_sweep: cleared %s (was %s)", item.key, item.pinned)
+			logger.info("session_pin_sweep: cleared a session pinned to %s", item.pinned)
 
 	def _pick_arrived_since_planning(self, item: PinPlan) -> bool:
 		"""True when the conversation gained an explicit model since the plan was
@@ -386,7 +412,13 @@ class SessionPinSweep:
 	def _conversations_by_session_key(self) -> dict[str, dict]:
 		"""session_key -> {name, model_override} for every conversation that
 		holds one. The join key is exact: prepare.py persists the session_key it
-		created onto the row before the first turn can run."""
+		created onto the row before the first turn can run.
+
+		Deliberately uncapped, unlike every budgeted read in session_lifecycle:
+		this is the attribution table, not a work queue. A truncated map would
+		make a real conversation's session look like an unowned orphan, which is
+		the one misclassification that must never happen. It stays small because
+		one site is one tenant and the lifecycle sweep reaps idle rows."""
 		rows = frappe.get_all(
 			CONV,
 			fields=["name", "session_key", "model_override"],
@@ -408,8 +440,12 @@ def _model_ref(row: dict) -> str:
 
 
 def _is_agent_main_key(key: str) -> bool:
-	"""True for openclaw's own ``agent:<id>:main`` session and its
-	``:heartbeat`` sibling - the built-in poller, never a customer chat."""
+	"""True for openclaw's own ``agent:<id>:main`` session and anything scoped
+	under it, ``agent:<id>:main:*`` - today that is the ``:heartbeat`` poller.
+	Never a customer chat, which always lands under ``:dashboard:``.
+
+	The trailing wildcard is deliberate: openclaw owns that namespace and may add
+	siblings, and every one of them is its own bookkeeping."""
 	if not key.startswith(_AGENT_MAIN_PREFIX):
 		return False
 	rest = key[len(_AGENT_MAIN_PREFIX) :]
