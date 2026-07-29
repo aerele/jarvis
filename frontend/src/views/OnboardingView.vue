@@ -780,6 +780,7 @@ import {
 	syncConnection,
 } from "@/api";
 import { errMessage as errMsg } from "@/lib/errors";
+import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
 
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
@@ -1726,6 +1727,18 @@ watch(
 			loadPlansSafe();
 		}
 		if (s === "pay") enterPayStep();
+	}
+);
+
+// Report onboarding/payment failures to the admin as they surface. These are
+// caught-and-shown (not thrown), so the global handler never sees them; one
+// watcher covers every payErr/provisionErr assignment above.
+watch(
+	() => [state.payErr, state.provisionErr],
+	([pay, prov]) => {
+		if (pay) reportError({ surface: "onboarding", error_code: "payment", message: pay });
+		if (prov)
+			reportError({ surface: "onboarding", error_code: "provisioning", message: prov });
 	}
 );
 

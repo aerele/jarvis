@@ -11,9 +11,15 @@ import { initSocket } from "./socket";
 import "./install";
 import { applyTheme } from "./lib/theme";
 import { applyBrandChrome } from "./branding";
+import { install as installErrorReporter, vueErrorHandler } from "@shared/lib/errorReporter";
 import "./index.css";
 
 setConfig("resourceFetcher", frappeRequest);
+
+// Same shared reporter as the SPA (via @shared). offline:true buffers failed
+// posts to localStorage and flushes on reconnect (App.vue onResync), since a
+// mobile user is often offline when an error fires.
+installErrorReporter({ surface: "pwa", offline: true });
 
 // Before mount: applying the saved theme after the first paint would flash the
 // wrong palette, which on an OLED phone is very visible.
@@ -22,6 +28,7 @@ applyTheme();
 applyBrandChrome();
 
 const app = createApp(App);
+app.config.errorHandler = vueErrorHandler;
 app.use(resourcesPlugin);
 app.use(router);
 // A guest has no user room to join: the socket would only sit there retrying

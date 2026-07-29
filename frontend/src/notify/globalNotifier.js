@@ -18,6 +18,7 @@
 import { ref } from "vue";
 import { useShellStore } from "@/stores/shell";
 import { session } from "@/data/session";
+import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
 
 // ---- toast state (rendered by NotifyToaster.vue) -----------------------------
@@ -146,6 +147,19 @@ export function attachGlobalNotifier({ socket, router }) {
 			case "run:end":
 			case "run:error": {
 				const conv = p.conversation_id;
+				// A failed turn is the most common error a user faces. Report it
+				// (classified, with the run id) regardless of on-screen state - this
+				// is a socket event, so the global handlers never see it.
+				if (p.kind === "run:error") {
+					reportError({
+						surface: "spa_chat",
+						error_code: p.code || "run_error",
+						error_class: "RunError",
+						message: p.error || "The run failed.",
+						conversation: conv || "",
+						run_id: p.run_id || "",
+					});
+				}
 				if (!conv) return;
 				// The Triggers pane renders this conversation's turns inline — treat
 				// it like the on-screen chat: no unread dot, no "Reply ready" toast.

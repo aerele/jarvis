@@ -1,0 +1,160 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-07-27 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "surface",
+  "route",
+  "error_code",
+  "error_class",
+  "message",
+  "stack",
+  "user",
+  "conversation",
+  "run_id",
+  "fingerprint",
+  "count",
+  "first_seen",
+  "last_seen",
+  "pushed",
+  "pushed_at"
+ ],
+ "fields": [
+  {
+   "fieldname": "surface",
+   "fieldtype": "Data",
+   "label": "Surface",
+   "length": 40,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Where the error was raised: spa_chat / desk_chat / onboarding / account / pwa / unknown. Display-only."
+  },
+  {
+   "fieldname": "route",
+   "fieldtype": "Data",
+   "label": "Route",
+   "length": 200,
+   "description": "The UI route/path (query string stripped) the user was on. Never trusted for a decision."
+  },
+  {
+   "fieldname": "error_code",
+   "fieldtype": "Data",
+   "label": "Error Code",
+   "length": 64,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Classified code from the existing taxonomy (unreachable / timeout / provider / PermissionDeniedError / ...)."
+  },
+  {
+   "fieldname": "error_class",
+   "fieldtype": "Data",
+   "label": "Error Class",
+   "length": 140,
+   "description": "The JS error name / constructor (TypeError, ApiError, ...)."
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Small Text",
+   "label": "Message",
+   "description": "Scrubbed, bounded to 500 chars. PII / ERP values are redacted before this is stored."
+  },
+  {
+   "fieldname": "stack",
+   "fieldtype": "Long Text",
+   "label": "Stack",
+   "description": "Scrubbed, bounded to 2000 chars."
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "label": "User",
+   "options": "User",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "The reporting session user (set server-side, never from the client)."
+  },
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Data",
+   "label": "Conversation",
+   "length": 140,
+   "description": "Jarvis Conversation id when the error happened inside a chat, else empty."
+  },
+  {
+   "fieldname": "run_id",
+   "fieldtype": "Data",
+   "label": "Run ID",
+   "length": 140,
+   "description": "The chat run id for a turn failure, used to dedupe against the backend view of the same failure."
+  },
+  {
+   "fieldname": "fingerprint",
+   "fieldtype": "Data",
+   "label": "Fingerprint",
+   "length": 64,
+   "reqd": 1,
+   "search_index": 1,
+   "in_standard_filter": 1,
+   "description": "Stable dedupe key (code + class + normalized message + surface). Unpushed rows with the same fingerprint are folded into one with a count."
+  },
+  {
+   "fieldname": "count",
+   "fieldtype": "Int",
+   "label": "Count",
+   "default": "1",
+   "in_list_view": 1,
+   "description": "How many times this fingerprint has occurred in the current (not-yet-pushed) window."
+  },
+  {
+   "fieldname": "first_seen",
+   "fieldtype": "Datetime",
+   "label": "First Seen",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_seen",
+   "fieldtype": "Datetime",
+   "label": "Last Seen",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "pushed",
+   "fieldtype": "Check",
+   "label": "Pushed",
+   "default": "0",
+   "in_standard_filter": 1,
+   "description": "1 once forwarded to the admin control plane. Pushed rows are pruned by the daily job."
+  },
+  {
+   "fieldname": "pushed_at",
+   "fieldtype": "Datetime",
+   "label": "Pushed At",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-07-27 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Client Error",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "write": 1,
+   "delete": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

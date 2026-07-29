@@ -164,6 +164,9 @@ app_include_js = [
 	"jarvis_widget.bundle.js",
 	"jarvis_onboarding_llm.bundle.js",
 	"jarvis_onboarding_banner.bundle.js",
+	# Captures uncaught JS on the Desk Jarvis surfaces and exposes
+	# window.jarvisReportError() for caught-and-shown errors (widget / onboarding).
+	"jarvis_error_reporter.bundle.js",
 ]
 
 # Separate frappe-ui Vue SPA (apps/jarvis/frontend) served at /jarvis. The
@@ -305,6 +308,11 @@ scheduler_events = {
 			# path. Bounded per run (capacity_attempts), then the run fails honestly.
 			# Cheap no-op (one indexed status query) when nothing is parked.
 			"jarvis.chat.macros.resume_waiting_capacity_runs",
+			# Forward tenant errors (UI + jarvis-only code-level exceptions) to the
+			# admin control plane for the per-tenant Errors feed. Off the hot path,
+			# self-gating (skips self-hosted / un-onboarded), never raises. Cheap
+			# no-op when there is nothing new to push.
+			"jarvis.error_push.push_error_rollup",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -403,6 +411,10 @@ scheduler_events = {
 		# table is append-only without this. Deletes DISABLED rows past the
 		# 90-day retention window; live credentials are never touched.
 		"jarvis.mobile.device_auth.prune_revoked_devices",
+		# Errors hygiene: delete Jarvis Client Error rows already forwarded to
+		# admin past the retention window (the durable record lives in the admin's
+		# Jarvis Tenant Error). Keeps the local buffer small.
+		"jarvis.error_push.prune_pushed_client_errors",
 	],
 	"weekly": [
 		# Wiki v2 health check: deterministic lint over Active pages

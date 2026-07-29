@@ -9,6 +9,7 @@ import { sessionUser } from "./router";
 import { showNotice } from "./noticeGate";
 import { prefs } from "./lib/prefs";
 import { agentName } from "@/branding";
+import { flushBuffered } from "@shared/lib/errorReporter";
 import { recordEvent } from "./lib/notifications";
 
 const socket = inject("$socket");
@@ -83,6 +84,8 @@ function onResync() {
 	// Behind the login screen there is nothing to resync, and asking would just
 	// log a 403 on every tab-wake.
 	if (!sessionUser()) return;
+	// Flush any errors buffered while offline (no-op when the buffer is empty).
+	void flushBuffered();
 	store.loadConversations();
 	if (router.currentRoute.value.name === "Chat") window.dispatchEvent(new Event("jv:resync"));
 }
