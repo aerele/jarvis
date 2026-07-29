@@ -882,9 +882,10 @@ class TestPostSubscriptionDisconnect(FrappeTestCase):
 	def test_happy_path(self):
 		captured = {}
 
-		def _fake_post(url, json=None, **_kw):
+		def _fake_post(url, json=None, timeout=None, **_kw):
 			captured["url"] = url
 			captured["body"] = json
+			captured["timeout"] = timeout
 			return _mock_response(200, json_body={"message": {"ok": True, "data": {"ok": True}}})
 
 		with patch("requests.post", side_effect=_fake_post):
@@ -892,6 +893,15 @@ class TestPostSubscriptionDisconnect(FrappeTestCase):
 		self.assertEqual(result, {"ok": True})
 		self.assertIn("subscription_disconnect", captured["url"])
 		self.assertEqual(captured["body"], {})
+		# This lands on admin's DELETE /auth-profile, whose own agent bound is
+		# 150s and which runs doctor + restart inside it. The shared 150s left no
+		# headroom for the HTTPS round trip on top, so the bench could give up on
+		# a call admin was still serving.
+		self.assertGreater(
+			captured["timeout"],
+			150,
+			"must leave headroom over admin's own 150s delete_auth_profile bound",
+		)
 
 
 class TestPostDisconnectLlm(FrappeTestCase):
@@ -904,17 +914,11 @@ class TestPostDisconnectLlm(FrappeTestCase):
 	def test_timeout_outlasts_admins_own_budget(self):
 		"""Same rule as post_push_oauth_blob above, which the disconnect missed.
 
-		admin floors the agent's healthz budget at provision_healthz_timeout_s
-		and then waits +30s on top of it itself, so at the shipped 180s setting
-		admin may legitimately spend 210s answering. Riding the shared 150s meant
-		this call gave up SIXTY SECONDS early on exactly the slow container the
-		budget exists for, and reported AdminUnreachableError for a disconnect
-		that was still succeeding.
-
-		That false failure is not cosmetic: onboarding.disconnect_llm aborts
-		before clearing the bench's own credentials when this raises, so the
-		customer kept advertising a live model after admin and the host had
-		already destroyed it.
+		The rationale (and the invariant this bound encodes) lives once, on
+		``admin_client._DISCONNECT_TIMEOUT_S``. This asserts two separate things:
+		that the constant is actually PLUMBED to requests, and that it still
+		clears admin's worst-case budget -- so bumping the constant alone cannot
+		silently drop back under it.
 		"""
 		captured = {}
 
@@ -927,6 +931,11 @@ class TestPostDisconnectLlm(FrappeTestCase):
 			admin_client.post_disconnect_llm()
 
 		self.assertIn("disconnect_llm", captured["url"])
+		self.assertEqual(
+			captured["timeout"],
+			admin_client._DISCONNECT_TIMEOUT_S,
+			"the dedicated budget must actually reach requests, not just be declared",
+		)
 		self.assertGreater(
 			captured["timeout"],
 			210,

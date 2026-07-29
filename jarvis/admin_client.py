@@ -961,10 +961,18 @@ def post_subscription_disconnect() -> dict:
 	"""POST to admin to clear the customer's OAuth profile on the container.
 
 	Idempotent - a tenant in api_key mode is a no-op success.
+
+	Carries the same 180s as post_push_oauth_blob, and for the same reason: this
+	lands on admin's DELETE /auth-profile, whose own agent bound is 150s
+	(``agent_client.delete_auth_profile``) and which runs doctor + restart inside
+	it. Riding the shared DEFAULT_TIMEOUT_S of 150 left ZERO headroom for the
+	HTTPS round trip on top of that, so the bench could give up on a call admin
+	was still serving -- the same shape as the disconnect defect below.
 	"""
 	return _post(
 		path=_m("api.tenant.subscription_disconnect"),
 		body={},
+		timeout_s=180,
 	)
 
 
@@ -986,6 +994,17 @@ def post_subscription_disconnect() -> dict:
 #: exists to provide. Observed end-to-end on a live pool tenant.
 #:
 #: INVARIANT: keep this ABOVE admin's ``provision_healthz_timeout_s`` + 30.
+#:
+#: AND BELOW the web worker's own ceiling, which this file cannot enforce. The
+#: call is synchronous inside a whitelisted request, so gunicorn's ``-t``
+#: (bench's ``http_timeout``, unset here and so defaulting to 120 in a
+#: supervisor deployment) bounds the whole thing. If that ceiling is lower than
+#: the budget admin needs, the worker is killed mid-call and the caller never
+#: reaches ``_clear_llm_secrets`` -- the same split state this constant exists
+#: to prevent, just triggered a layer up. Raising this without also raising
+#: ``http_timeout`` therefore fixes dev and leaves that deployment exposed;
+#: the durable fix is to stop depending on the response (converge from admin's
+#: own state on a later pass) rather than to keep widening timeouts.
 _DISCONNECT_TIMEOUT_S = 240
 
 
