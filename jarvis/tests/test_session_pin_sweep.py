@@ -19,7 +19,15 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import session_pin_sweep
-from jarvis.chat.session_pin_sweep import CLEAR, KEEP, REPORT, SKIP, SessionPinSweep
+from jarvis.chat.session_pin_sweep import (
+	CLEAR,
+	KEEP,
+	REPORT,
+	SKIP,
+	SessionPinSweep,
+	_is_agent_main_key,
+	_model_ref,
+)
 
 CONV = "Jarvis Conversation"
 SETTINGS = "Jarvis Settings"
@@ -300,7 +308,10 @@ class TestSessionPinSweep(FrappeTestCase):
 		frappe.db.set_single_value(SETTINGS, "agent_url", "http://gw.test:18789")
 		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		try:
-			with patch("jarvis.chat.openclaw_client.OpenclawSession.connect", return_value=sess):
+			with (
+				patch("jarvis.selfhost.is_self_hosted", return_value=False),
+				patch("jarvis.chat.openclaw_client.OpenclawSession.connect", return_value=sess),
+			):
 				out = session_pin_sweep.run()
 		finally:
 			frappe.db.set_single_value(SETTINGS, "agent_url", orig or "")
@@ -317,9 +328,103 @@ class TestSessionPinSweep(FrappeTestCase):
 		frappe.db.set_single_value(SETTINGS, "agent_url", "")
 		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		try:
-			out = session_pin_sweep.run()
+			with patch("jarvis.selfhost.is_self_hosted", return_value=False):
+				out = session_pin_sweep.run()
 		finally:
 			frappe.db.set_single_value(SETTINGS, "agent_url", orig or "")
 			frappe.clear_document_cache(SETTINGS, SETTINGS)
 			frappe.db.commit()
 		self.assertEqual(out["aborted"], "no agent_url")
+
+	def test_run_on_a_self_hosted_bench_does_nothing(self):
+		with patch("jarvis.selfhost.is_self_hosted", return_value=True):
+			out = session_pin_sweep.run(apply=True)
+		self.assertEqual(out["aborted"], "self-hosted")
+
+	# -- races between the listing and the patch --------------------------- #
+
+	def test_a_pick_made_after_planning_is_not_reverted(self):
+		key = "agent:main:dashboard:pin-race"
+		name = self._conv(key, model_override="")
+		sess = _fake_sess(_page([_row(key, provider="openai_compat-0", model="jarvis-pool")]))
+
+		def pick(session_key):
+			raise AssertionError("must not patch a conversation that just got a pick")
+
+		sess.clear_session_model.side_effect = pick
+		# The customer chooses a model between the listing and the patch.
+		original = session_pin_sweep.SessionPinSweep._clear
+
+		def clear_after_pick(inner, summary):
+			frappe.db.set_value(CONV, name, "model_override", "gemini-3.6-flash")
+			frappe.db.commit()
+			return original(inner, summary)
+
+		with patch.object(session_pin_sweep.SessionPinSweep, "_clear", clear_after_pick):
+			summary = self._sweep(sess, apply=True)
+		self.assertEqual(summary.cleared, 0)
+		self.assertEqual(summary.raced, 1)
+		self.assertEqual(summary.errors, 0)
+
+	def test_a_replaced_session_is_an_error_not_a_fix(self):
+		# The lifecycle sweep freed the session mid-run, so openclaw minted a
+		# ghost entry under the key instead of patching the planned one.
+		key = "agent:main:dashboard:pin-ghost"
+		self._conv(key, model_override="")
+		sess = _fake_sess(_page([_row(key, provider="openai_compat-0", model="jarvis-pool")]))
+		sess.clear_session_model.return_value = {"sessionId": "some-other-session"}
+		summary = self._sweep(sess, apply=True)
+		self.assertEqual(summary.cleared, 0)
+		self.assertEqual(summary.errors, 1)
+
+	def test_a_matching_session_id_verifies(self):
+		key = "agent:main:dashboard:pin-samesid"
+		self._conv(key, model_override="")
+		row = _row(key, provider="openai_compat-0", model="jarvis-pool")
+		sess = _fake_sess(_page([row]))
+		sess.clear_session_model.return_value = {"sessionId": row["sessionId"]}
+		summary = self._sweep(sess, apply=True)
+		self.assertEqual(summary.cleared, 1)
+		self.assertEqual(summary.errors, 0)
+
+	def test_a_row_repeated_across_pages_is_cleared_once(self):
+		key = "agent:main:dashboard:pin-dup"
+		self._conv(key, model_override="")
+		row = _row(key, provider="openai_compat-0", model="jarvis-pool")
+		sess = _fake_sess(_page([row], has_more=True, next_offset=1), _page([row]))
+		summary = self._sweep(sess, apply=True)
+		self.assertEqual(summary.scanned, 1)
+		self.assertEqual(sess.clear_session_model.call_count, 1)
+
+	def test_an_endless_cursor_stops_at_max_pages(self):
+		pages = [
+			_page([_row(f"agent:main:dashboard:pin-endless{i}")], has_more=True, next_offset=i + 1)
+			for i in range(session_pin_sweep.MAX_PAGES + 5)
+		]
+		sess = _fake_sess(*pages)
+		self._sweep(sess)
+		self.assertEqual(sess.list_sessions_page.call_count, session_pin_sweep.MAX_PAGES)
+
+	# -- helpers ----------------------------------------------------------- #
+
+	def test_model_ref_shapes(self):
+		self.assertEqual(
+			_model_ref({"modelProvider": "Anthropic-0", "model": "Claude-Sonnet-5"}),
+			"anthropic-0/claude-sonnet-5",
+		)
+		self.assertEqual(_model_ref({"model": "claude-sonnet-5"}), "claude-sonnet-5")
+		self.assertEqual(_model_ref({"modelProvider": "anthropic-0"}), "")
+		self.assertEqual(_model_ref({}), "")
+
+	def test_agent_main_key_shapes(self):
+		for key in ("agent:main:main", "agent:main:main:heartbeat", "agent:other:main"):
+			self.assertTrue(_is_agent_main_key(key), key)
+		for key in (
+			"agent:",
+			"agent:main",
+			"agent:main:maintenance",
+			"agent:main:dashboard:abc",
+			"mainly:main",
+			"",
+		):
+			self.assertFalse(_is_agent_main_key(key), key)

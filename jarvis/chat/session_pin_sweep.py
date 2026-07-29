@@ -74,6 +74,13 @@ on every session update, so a host-side edit either loses the race or needs the
 container stopped. The patch response echoes the resulting store entry, so every
 clear is verified rather than trusted. See ``OpenclawSession.clear_session_model``.
 
+The listing and the patch are seconds apart, and both facts behind a CLEAR can
+move in that window, so each one is rechecked at patch time: the conversation's
+model_override is re-read (a customer who picked a model in between keeps it),
+and the returned entry's sessionId must be the one that was planned against (the
+lifecycle sweep can free a session mid-run, and patching a freed key makes
+openclaw mint a ghost entry instead of failing).
+
 DRY RUN IS THE DEFAULT. ``run()`` only reports; ``run(apply=True)`` clears, up to
 ``MAX_CLEAR`` pins per invocation::
 
@@ -126,6 +133,7 @@ class PinPlan:
 	pinned: str
 	label: str = ""
 	conversation: str = ""
+	session_id: str = ""
 
 	def as_dict(self) -> dict:
 		return {
@@ -135,6 +143,7 @@ class PinPlan:
 			"pinned": self.pinned,
 			"label": self.label,
 			"conversation": self.conversation,
+			"session_id": self.session_id,
 		}
 
 
@@ -147,6 +156,7 @@ class SweepSummary:
 	scanned: int = 0
 	cleared: int = 0
 	capped: int = 0
+	raced: int = 0
 	errors: int = 0
 	aborted: str = ""
 	plan: list[PinPlan] = field(default_factory=list)
@@ -165,6 +175,7 @@ class SweepSummary:
 			"pinned": len(self.plan),
 			"cleared": self.cleared,
 			"capped": self.capped,
+			"raced": self.raced,
 			"errors": self.errors,
 			"aborted": self.aborted,
 			"counts": self.counts(),
@@ -178,6 +189,13 @@ def run(apply: bool = False, max_clear: int = MAX_CLEAR) -> dict:
 	Reports only unless ``apply`` is true. Uses a dedicated connection, never the
 	turn pool - a maintenance sweep must not contend with live chat. Returns the
 	summary dict (also logged) so a ``bench execute`` run shows its work."""
+	from jarvis import selfhost
+
+	if selfhost.is_self_hosted():
+		# A self-hosted tenant is reached over HTTP bearer auth with no device
+		# pairing, so the WS client this sweep uses does not apply there.
+		return SweepSummary(apply=bool(apply), aborted="self-hosted").as_dict()
+
 	settings = frappe.get_single("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	if not gateway_url:
@@ -233,8 +251,13 @@ class SessionPinSweep:
 		"""Every sessions.list row plus the agent's default "provider/model".
 
 		A page that fails mid-way returns what it has: the sweep then reports on
-		fewer sessions rather than none, and re-running picks up the rest."""
-		rows: list[dict] = []
+		fewer sessions rather than none, and re-running picks up the rest.
+
+		Paging is plain offset against a LIVE store, so a session created between
+		two fetches can shift a row onto a page it was already on. Rows are keyed
+		by session key (last one wins) so a duplicate cannot burn two slots of the
+		clear budget for one session."""
+		by_key: dict[str, dict] = {}
 		default_ref = ""
 		offset = 0
 		for _ in range(MAX_PAGES):
@@ -247,13 +270,14 @@ class SessionPinSweep:
 				)
 				break
 			default_ref = default_ref or _model_ref(page.get("defaults") or {})
-			batch = page.get("sessions") or []
-			rows.extend(r for r in batch if isinstance(r, dict))
+			for row in page.get("sessions") or []:
+				if isinstance(row, dict) and row.get("key"):
+					by_key[row["key"]] = row
 			next_offset = page.get("nextOffset")
 			if not page.get("hasMore") or not isinstance(next_offset, int) or next_offset <= offset:
 				break
 			offset = next_offset
-		return rows, default_ref
+		return list(by_key.values()), default_ref
 
 	def _classify(self, row: dict, default_ref: str, owners: dict) -> PinPlan | None:
 		"""The plan for one session row, or None when it carries no pin.
@@ -267,36 +291,32 @@ class SessionPinSweep:
 		if not key or not pinned or pinned == default_ref:
 			return None
 		label = row.get("label") or ""
+		sid = row.get("sessionId") or ""
+
+		def plan(verb: str, reason: str, conversation: str = "") -> PinPlan:
+			return PinPlan(key, verb, reason, pinned, label, conversation, sid)
+
 		if row.get("hasActiveRun"):
-			return PinPlan(key, SKIP, "a run is in flight", pinned, label)
-		if not row.get("sessionId"):
+			return plan(SKIP, "a run is in flight")
+		if not sid:
 			# Patching an entry with no sessionId makes openclaw mint one and drop
 			# the label. Nothing here is worth that.
-			return PinPlan(key, SKIP, "store entry has no sessionId", pinned, label)
+			return plan(SKIP, "store entry has no sessionId")
 
 		conv = owners.get(key)
 		if conv is None:
 			if _is_agent_main_key(key):
-				return PinPlan(
-					key, CLEAR, "openclaw's own main session, never a customer pick", pinned, label
-				)
+				return plan(CLEAR, "openclaw's own main session, never a customer pick")
 			if label.startswith(_BENCH_LABEL_PREFIXES):
-				return PinPlan(key, SKIP, "bench throwaway; session_lifecycle reaps it", pinned, label)
-			return PinPlan(key, REPORT, "no conversation owns this session", pinned, label)
+				return plan(SKIP, "bench throwaway; session_lifecycle reaps it")
+			return plan(REPORT, "no conversation owns this session")
 
 		chosen = (conv.get("model_override") or "").strip()
 		if not chosen:
-			return PinPlan(key, CLEAR, "conversation is on Auto", pinned, label, conv["name"])
+			return plan(CLEAR, "conversation is on Auto", conv["name"])
 		if chosen.casefold() == (row.get("model") or "").strip().casefold():
-			return PinPlan(key, KEEP, "the customer picked this model", pinned, label, conv["name"])
-		return PinPlan(
-			key,
-			REPORT,
-			f"conversation pins {chosen!r}; the next turn re-patches it",
-			pinned,
-			label,
-			conv["name"],
-		)
+			return plan(KEEP, "the customer picked this model", conv["name"])
+		return plan(REPORT, f"conversation pins {chosen!r}; the next turn re-patches it", conv["name"])
 
 	def _clear(self, summary: SweepSummary) -> None:
 		"""Issue sessions.patch {"model": null} for every CLEAR plan, up to the
@@ -307,6 +327,9 @@ class SessionPinSweep:
 			if summary.cleared >= self._max_clear:
 				summary.capped += 1
 				continue
+			if self._pick_arrived_since_planning(item):
+				summary.raced += 1
+				continue
 			try:
 				entry = self._sess.clear_session_model(item.key) or {}
 			except Exception:
@@ -316,18 +339,49 @@ class SessionPinSweep:
 				)
 				summary.errors += 1
 				continue
-			# The patch echoes the resulting store entry: verify rather than
-			# trust the ack. A surviving override means openclaw took a branch
-			# we did not expect, and the operator needs to know before re-running.
-			if entry.get("modelOverride") or entry.get("modelOverrideSource"):
-				frappe.log_error(
-					title="session_pin_sweep: override survived the patch",
-					message=f"session_key={item.key}\nentry={entry}",
-				)
-				summary.errors += 1
+			if not self._verify(item, entry, summary):
 				continue
 			summary.cleared += 1
 			logger.info("session_pin_sweep: cleared %s (was %s)", item.key, item.pinned)
+
+	def _pick_arrived_since_planning(self, item: PinPlan) -> bool:
+		"""True when the conversation gained an explicit model since the plan was
+		built. The listing and the patch are seconds apart and a customer can
+		choose a model in between; reverting a fresh pick would be worse than
+		leaving one poisoned session for the next run."""
+		if not item.conversation:
+			return False
+		chosen = frappe.db.get_value(CONV, item.conversation, "model_override")
+		return bool((chosen or "").strip())
+
+	def _verify(self, item: PinPlan, entry: dict, summary: SweepSummary) -> bool:
+		"""The patch echoes the resulting store entry, so check it instead of
+		trusting the ack. Two things can be wrong:
+
+		- the override survived, meaning openclaw took a branch we did not expect;
+		- the entry carries a DIFFERENT sessionId, meaning the session was freed
+		  between the listing and the patch and openclaw minted a fresh entry
+		  under that key rather than patching the one we planned against. That
+		  ghost has no override, so only the id comparison catches it. It is an
+		  unreferenced session, which the session_lifecycle orphan sweep reaps.
+
+		Either way: count an error, do not count a fix."""
+		if entry.get("modelOverride") or entry.get("modelOverrideSource"):
+			frappe.log_error(
+				title="session_pin_sweep: override survived the patch",
+				message=f"session_key={item.key}\nentry={entry}",
+			)
+			summary.errors += 1
+			return False
+		got = entry.get("sessionId")
+		if item.session_id and got and got != item.session_id:
+			frappe.log_error(
+				title="session_pin_sweep: patched a session that had been replaced",
+				message=f"session_key={item.key}\nplanned={item.session_id}\ngot={got}",
+			)
+			summary.errors += 1
+			return False
+		return True
 
 	def _conversations_by_session_key(self) -> dict[str, dict]:
 		"""session_key -> {name, model_override} for every conversation that
