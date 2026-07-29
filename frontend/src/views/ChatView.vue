@@ -4294,12 +4294,12 @@ const liveStatus = computed(() => {
 });
 // Recovery banner copy: compaction (context overflow, retrying) vs a connection
 // hiccup. Both mean "still working, in the background" — not an error.
-// Renew CTA → Settings ▸ Plan & billing, the only surface that takes payment.
+// Renew CTA → the billing page, the only surface that takes payment.
 function goRenew() {
-	// Straight to our renewal flow (the Desk billing page's Razorpay checkout),
-	// not the settings pane the customer would then have to click through. The
+	// A route push, not a full page load: renewal now happens in-SPA, so throwing
+	// the customer out to Desk to pay is exactly the trip this page removed. The
 	// Renew button only shows for someone who can actually renew.
-	window.location.assign("/app/jarvis-account?billing=1");
+	router.push({ name: "Billing" });
 }
 const recoveringLabel = computed(() =>
 	recovering.value && recovering.value.reason === "compacting"

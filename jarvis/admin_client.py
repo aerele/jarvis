@@ -1073,7 +1073,8 @@ def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int 
 
 def get_account_summary() -> dict:
 	"""Fetch the customer's plan + validity + upgrade-eligible plans. Used by
-	the /jarvis-account page to render plan summary and the upgrade picker."""
+	the /jarvis/billing SPA page to render the plan cards and the settings
+	dialog's Plan and billing summary."""
 	return _post(
 		path=_m("api.account.get_account_summary"),
 		body={},

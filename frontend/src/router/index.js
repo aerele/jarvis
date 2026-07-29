@@ -159,6 +159,20 @@ const routes = [
 		name: "AgentsList",
 		component: () => import("@/pages/agents/AgentsList.vue"),
 	},
+	// Plan and billing — the in-SPA replacement for the retired
+	// /app/jarvis-account desk page. Reached from the settings dialog, from the
+	// chat suspension banner's Renew, and from the /desk/jarvis-account redirect
+	// that catches bookmarks and the renewal emails admin-v2 still sends.
+	//
+	// No beforeEnter role guard: every endpoint the page calls is
+	// require_jarvis_admin() gated server-side, and a client-side guard here
+	// would have to duplicate that rule to no benefit. A non-admin who deep-links
+	// in sees the load error, not a silent redirect that hides why.
+	{
+		path: "/billing",
+		name: "Billing",
+		component: () => import("@/pages/billing/BillingPage.vue"),
+	},
 	// Legacy round-2 tab routes — static, registered BEFORE :slug (§9). Point at
 	// the current hash-tabs (mine→Installed, activity→Activity); admin is now a
 	// per-agent detail tab, so it falls back to the catalog.

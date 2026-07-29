@@ -485,13 +485,14 @@ Every pane in the Settings dialog owns its own header (there is no global dialog
   blue, not a lift** — press writes raw `ring-1 ring-gray-900`; Jarvis writes
   `border-outline-gray-5 ring-1 ring-outline-gray-5` (the darkest semantic outline) to stay
   inside the token contract.
-- **Change-plan target state is an in-SPA dialog** (press pattern): `size="3xl"`, plan grid
-  inside, full-width solid footer button whose label flips per state ("Select plan" →
-  "Upgrade plan"). If billing details/payment method are missing, the same dialog becomes a
-  stepped wizard with a `Progress` bar on top. **Until the in-SPA Razorpay flow exists**
-  (Phase-2), keep the Desk deep-link (`/app/jarvis-account?billing=1`) but render it as a
-  plain `text-ink-blue-link` text link ("Manage plan & billing"), never an `Upgrade →`
-  button-styled `<a>`.
+- **Change-plan is an in-SPA PAGE**, not a dialog. The in-SPA Razorpay flow now exists
+  (`@/lib/useRazorpay`), so the Desk deep-link is retired. Plan cards need width to be
+  compared side by side, so this is a full route at `/billing`
+  (`pages/billing/BillingPage.vue`) in the onboarding plan-card aesthetic: current plan
+  marked, one action per card. `PlanBillingPane` keeps the current-plan summary and the
+  actions that take no payment (cancel, resume, undo a revocable switch); its footer is a
+  solid "Manage plan and billing" button that closes the dialog and routes to the page.
+  Do not re-add a Desk link, and do not render plan cards in both surfaces.
 - **Billing overview**: definition-list rows separated by `h-px bg-surface-gray-2` — row title
   `font-medium` + value `text-ink-gray-7` left, **one subtle button per row right-aligned**
   ("Add card", "Edit", "Add credit"). Solid is reserved for the single action you want taken
@@ -607,7 +608,7 @@ Each "Don't" is live in the Jarvis codebase today (settings dialog, onboarding, 
 | 12 | 10px uppercase group headers, 8.5px `sm-tag` micro-pill | 12px `font-medium text-ink-gray-5` group labels; `Badge size="sm"` minimum 11px |
 | 13 | Hand-pasted SVG path data per nav item | `FeatherIcon`/Lucide components at `size-4` |
 | 14 | `window.confirm()` for disconnect | frappe-ui `confirmDialog` / red-solid Dialog action |
-| 15 | Billing exits the SPA to Desk (`/app/jarvis-account?billing=1`) with link-buttons | Target: in-SPA plan/billing dialogs (press pattern); until Phase-2, the Desk link stays but styled as a plain text link (§4.2) |
+| 15 | Billing exits the SPA to Desk (`/app/jarvis-account?billing=1`) with link-buttons | RESOLVED: billing is the in-SPA `/billing` page (§4.2). The Desk page is deleted and that URL now redirects. Never re-introduce an "in Desk" billing link |
 | 16 | Toast errors in one pane, inline red text in others, green flash notes | Errors: inline `ErrorMessage` + `toast.error`; success: `toast.success`; dirty: orange "Unsaved" badge; sync: "Syncing…" badge (§4.1) |
 | 17 | Inverted toggle ("Confirm before changes" bound to `!autoApply`) | Switch state matches its label; rename the label if needed |
 | 18 | "Coming soon." placeholder card | Ship the section when it exists; empty states only for real data absence |
