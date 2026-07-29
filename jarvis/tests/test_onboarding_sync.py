@@ -838,18 +838,12 @@ class TestSignupResumeFallback(FrappeTestCase):
 
 	_DUP = "An account with this email is already registered or pending."
 
-
-class TestAccountReconnect(FrappeTestCase):
-	"""Fresh-bench reconnect wrappers (admin_client mocked)."""
-
 	def setUp(self):
 		self._snap = _snapshot_settings()
 		s = frappe.get_single("Jarvis Settings")
 		_set_token("tok")
 		s.db_set("jarvis_admin_url", "https://fleet.example.test")
 		s.db_set("jarvis_admin_customer_email", "resume-me@example.com")
-
-		s.db_set("jarvis_admin_url", "https://fleet.example.test")
 		frappe.db.commit()
 
 	def tearDown(self):
@@ -903,6 +897,19 @@ class TestAccountReconnect(FrappeTestCase):
 		):
 			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
 		self.assertIn("already registered", str(ctx.exception))
+
+
+class TestAccountReconnect(FrappeTestCase):
+	"""Fresh-bench reconnect wrappers (admin_client mocked)."""
+
+	def setUp(self):
+		self._snap = _snapshot_settings()
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("jarvis_admin_url", "https://fleet.example.test")
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
 
 	def test_start_proxies_request(self):
 		with patch(
