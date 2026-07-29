@@ -12,6 +12,7 @@ import uuid
 import frappe
 
 from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
 # Cooldown between warm-ups for one bench. 2026-07 latency plan, Phase
 # 1.4: was 25 min, which is LONGER than the providers' prompt-cache
@@ -53,22 +54,25 @@ def _reclaim_previous(sess, prev, current: str) -> None:
 	A warm cannot delete its own: fire_agent is fire-and-forget, so the turn that
 	warms the prefix is still running when it returns, and waiting for it would
 	block a short-queue worker for no benefit. Instead each warm reclaims its
-	predecessor, which the cooldown guarantees has had at least _WARM_COOLDOWN_S
-	to finish. Steady state is one live prewarm session rather than one per warm -
-	at a 4-minute cooldown the old create-and-forget leaked up to ~350 sessions a
-	day against an orphan sweep capped at 25.
+	predecessor, which the cooldown USUALLY guarantees has had at least
+	_WARM_COOLDOWN_S to finish. Steady state is one live prewarm session rather
+	than one per warm - at a 4-minute cooldown the old create-and-forget leaked
+	up to ~350 sessions a day against an orphan sweep capped at 25.
+
+	"Usually" is why this goes through reclaim_throwaway_session (issue #525).
+	The cooldown check is a get-then-set on the cache, so two warms can pass it
+	in the same instant (observed 6ms apart on jarvis-pool-bf4097); the second
+	then reads a "previous" pointer the first wrote milliseconds ago and deletes
+	a session whose warm turn is still running. That rename killed the run and
+	openclaw re-created the session file 568ms later. Probing hasActiveRun first
+	turns that into a skipped reclaim - the orphan sweep collects it - instead of
+	a killed run and a fresh orphan.
 
 	Best-effort: on failure (or a lost cache pointer) the session is left for the
 	orphan sweep, which reaps jarvis-prewarm-* on a short grace."""
 	if not prev or not isinstance(prev, str) or prev == current:
 		return
-	try:
-		sess.delete_session(prev)
-	except Exception:
-		frappe.logger("jarvis.chat.prewarm").debug(
-			"previous warm session delete failed",
-			exc_info=True,
-		)
+	reclaim_throwaway_session(sess, prev, logger_name="jarvis.chat.prewarm")
 
 
 def _gateway_ws_url(settings) -> str:
@@ -131,6 +135,11 @@ def warm_prefix() -> bool:
 				model=model or None,
 				provider=provider,
 			)
+			# Stop the clock HERE, not after the reclaim below. The reclaim can
+			# now spend up to a couple of seconds waiting out the previous warm's
+			# run, and folding that into fire_ms would silently corrupt the one
+			# number this telemetry exists to watch.
+			fire_ms = int((time.monotonic() - t0) * 1000)
 			# Remember the new throwaway BEFORE reclaiming the old one: a failure
 			# between the two then leaks only the PREVIOUS session (the orphan
 			# sweep still collects it) instead of losing the pointer to the one we
@@ -141,16 +150,13 @@ def warm_prefix() -> bool:
 			_reclaim_previous(sess, prev, throwaway)
 		finally:
 			sess.close()
-		# Latency telemetry (plan Phase 0): connect+create+fire duration.
-		# (fire_agent is fire-and-forget, so this does NOT include the
-		# prefill itself — cold-vs-warm shows up in real turns'
-		# first_delta_ms, logged by turn_handler.)
+		# Latency telemetry (plan Phase 0): connect+create+fire duration, as
+		# measured above before the reclaim. (fire_agent is fire-and-forget, so
+		# this does NOT include the prefill itself — cold-vs-warm shows up in
+		# real turns' first_delta_ms, logged by turn_handler.)
 		from jarvis.chat.latency import get_logger as _get_latency_logger
 
-		_get_latency_logger().info(
-			"warm_prefix fire_ms=%d",
-			int((time.monotonic() - t0) * 1000),
-		)
+		_get_latency_logger().info("warm_prefix fire_ms=%d", fire_ms)
 		# Warm succeeded: arm the full cooldown so the next cron tick skips.
 		cache.set_value(key, "1", expires_in_sec=_WARM_COOLDOWN_S)
 		return True
