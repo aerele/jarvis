@@ -245,6 +245,7 @@ def _run_gateway_turn(prompt: str) -> str:
 	touches a visible conversation. Returns the assistant text, or '' on any
 	failure (unreachable gateway, timeout, agent error, no gateway_url)."""
 	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 	from jarvis.chat.turn_handler import _resolve_model_and_provider
 
 	settings = frappe.get_single(SETTINGS)
@@ -272,20 +273,20 @@ def _run_gateway_turn(prompt: str) -> str:
 					if ev.get("kind") == "assistant" and ev.get("text"):
 						text = ev["text"]
 			finally:
-				# Delete the throwaway on the SAME pooled connection, turn
+				# Reclaim the throwaway on the SAME pooled connection, turn
 				# succeeded or not: otherwise every polish turn leaks a session
-				# that only the budget-capped orphan sweep could reclaim. The turn
-				# is fully consumed by here, so nothing is in flight.
+				# that only the budget-capped orphan sweep could reclaim.
 				#
-				# Swallow a delete failure - `text` is already captured, and the
-				# orphan sweep collects jarvis-polish-* as a backstop.
-				try:
-					sess.delete_session(skey)
-				except Exception:
-					frappe.logger("jarvis.learning.polish").debug(
-						"throwaway polish session delete failed",
-						exc_info=True,
-					)
+				# NOT a bare sessions.delete (issue #525): the turn is NOT
+				# necessarily finished here. stream_agent_turn returns on the
+				# lifecycle-end frame while openclaw is still finalising the
+				# session file, and raises on every error path with the run still
+				# alive server side, so deleting here raced the run that owns the
+				# session. reclaim_throwaway_session waits for the gateway to
+				# report no active run and otherwise defers to the orphan sweep,
+				# which collects jarvis-polish-* as a backstop. Failure is
+				# swallowed in there - `text` is already captured.
+				reclaim_throwaway_session(sess, skey, logger_name="jarvis.learning.polish")
 	except Exception:
 		frappe.log_error(
 			title="pattern polish: gateway turn failed",

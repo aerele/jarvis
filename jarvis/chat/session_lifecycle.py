@@ -9,11 +9,12 @@ first turn. Without a sweep, state accumulates forever:
   0-message row cluttering history.
 - Orphaned throwaway sessions: deleted conversations leave their sessions behind,
   and so do the three throwaway kinds (auto-title, pattern polish, prefix
-  prewarm) whenever their own cleanup is missed. All three DO now delete their
-  own - title and polish in a finally, prewarm by reclaiming its predecessor on
-  the next warm - so this sweep is their backstop, not their only collector. It
-  used to be the only one, and could not keep up: a 4-minute warm cooldown alone
-  minted up to ~350 sessions/day against a sweep capped at 25/day.
+  prewarm) whenever their own cleanup is missed. All three DO now reclaim their
+  own through ``reclaim_throwaway_session`` below - title and polish in a
+  finally, prewarm by reclaiming its predecessor on the next warm - so this
+  sweep is their backstop, not their only collector. It used to be the only one,
+  and could not keep up: a 4-minute warm cooldown alone minted up to ~350
+  sessions/day against a sweep capped at 25/day.
 
 The bench is the durable owner of chat history (Jarvis Chat Message rows); the
 openclaw session is a cache of working context, not the record. Deleting one is
@@ -53,6 +54,12 @@ gateway hygiene, always runs, and has its own budget so parts 1 + 2 cannot
 starve it. Everything is best-effort on a dedicated connection (never the pool -
 a sweep must not contend with live turns), batch-capped so a backlog drains over
 a few runs instead of stampeding a gateway, and managed-mode only.
+
+``reclaim_throwaway_session`` is the other half: the same "is this session
+really finished" gate the sweep applies, exposed to the throwaway minters so
+they can collect their own session immediately without racing the run that owns
+it. Cron and minters therefore agree on one rule - never delete a session the
+gateway still reports an active run for.
 """
 
 from __future__ import annotations
@@ -420,3 +427,71 @@ def _delete_gateway_session(sess, session_key: str, summary: dict) -> bool:
 		)
 		summary["errors"] += 1
 		return False
+
+
+# --------------------------------------------------------------------------- #
+# throwaway reclaim (called by the minters, not by the cron)
+# --------------------------------------------------------------------------- #
+
+# A throwaway one-shot used to call sessions.delete the instant its own turn
+# returned. That is too early, and the gateway paid for it (issue #525):
+#
+# - stream_agent_turn returns on the run's lifecycle-end frame, but openclaw's
+#   embedded run is still finalising the session file for a beat after that;
+# - on EVERY error path stream_agent_turn RAISES while the run keeps going
+#   server side (openclaw's run lane deliberately survives a client drop), and
+#   the delete then ran from a finally with the run mid-flight;
+# - prewarm's fire_agent never waits at all, so its session is by definition
+#   still running when the next warm reclaims it.
+#
+# Deleting underneath a live run renames the session file out from under it.
+# Observed on jarvis-pool-bf4097: an auto-title session deleted 194ms after its
+# reply landed was RE-CREATED by the same run 113ms later (a fresh orphan the
+# sweep then has to collect), and another died outright with
+# "EmbeddedAttemptSessionTakeoverError: session file changed while embedded
+# prompt lock was released". The failed run surfaces as a decision=surface_error
+# ... next=none line that is indistinguishable in the log from a genuine
+# failover failure, which is the expensive part of the bug.
+#
+# So ask the gateway before deleting. sessions.list -> hasActiveRun is the same
+# signal _reap_orphans already trusts, and settling first costs a background job
+# a few hundred ms it is not on any critical path for.
+RECLAIM_PROBE_ATTEMPTS = 6
+RECLAIM_PROBE_DELAY_S = 0.5
+
+
+def reclaim_throwaway_session(sess, session_key: str, *, logger_name: str) -> bool:
+	"""Delete a throwaway session once the gateway stops reporting a run on it.
+
+	Waits ``RECLAIM_PROBE_DELAY_S`` and re-checks up to ``RECLAIM_PROBE_ATTEMPTS``
+	times. Returns True when the session was deleted, False when it was left
+	behind - still busy, or the gateway would not answer.
+
+	Leaving it behind is safe and deliberate: every throwaway label carries a
+	``THROWAWAY_GRACE_HOURS`` grace and its own ``ORPHAN_BATCH_MAX`` budget in
+	the hourly sweep above, so a skipped reclaim costs a delayed collection, not
+	a leak. Killing a live run to hit the budget would be the worse trade - that
+	is the whole defect this function exists to remove.
+
+	Never raises: every caller is a best-effort background path whose real work
+	is already done by the time it reclaims."""
+	if not session_key or not isinstance(session_key, str):
+		return False
+	log = frappe.logger(logger_name)
+	for _ in range(RECLAIM_PROBE_ATTEMPTS):
+		# Sleep FIRST: the caller usually arrives here microseconds after its
+		# own turn ended, which is exactly the window openclaw is still writing
+		# the session file in. One probe round-trip alone would not clear it.
+		time.sleep(RECLAIM_PROBE_DELAY_S)
+		try:
+			if sess.is_run_active(session_key):
+				continue
+			sess.delete_session(session_key)
+			return True
+		except Exception:
+			# A gateway blip during probe or delete: hand it to the sweep
+			# rather than retrying a delete whose outcome we cannot read.
+			log.debug("throwaway session reclaim failed key=%s", session_key, exc_info=True)
+			return False
+	log.debug("throwaway session still running, left for the sweep key=%s", session_key)
+	return False

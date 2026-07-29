@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import session_lifecycle
 from jarvis.chat.openclaw_client import OpenclawSession
 
 
@@ -68,19 +69,23 @@ class TestWarmPrefix(FrappeTestCase):
 	def test_warm_prefix_reclaims_previous_throwaway(self):
 		"""Each warm deletes its PREDECESSOR's session. fire_agent is
 		fire-and-forget, so a warm cannot delete its own without blocking a
-		worker until the turn lands; the cooldown guarantees the predecessor has
-		long since finished. Steady state: one live prewarm session, not one per
-		warm (which at a 4-minute cooldown leaked up to ~350/day)."""
+		worker until the turn lands; the cooldown usually guarantees the
+		predecessor has long since finished. Steady state: one live prewarm
+		session, not one per warm (which at a 4-minute cooldown leaked up to
+		~350/day). "Usually" is why the reclaim now probes hasActiveRun first -
+		see test_throwaway_session_reclaim.py."""
 		from jarvis.chat import prewarm
 
 		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		frappe.cache().delete_value(prewarm._warm_last_key())
 		fake_sess = MagicMock()
 		fake_sess.create_session.side_effect = ["sk_first", "sk_second"]
+		fake_sess.is_run_active.return_value = False  # predecessor's warm turn is done
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
+			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
 		):
 			OC.connect.return_value = fake_sess
 			self.assertTrue(prewarm.warm_prefix())
@@ -103,11 +108,13 @@ class TestWarmPrefix(FrappeTestCase):
 		frappe.cache().delete_value(prewarm._warm_last_key())
 		fake_sess = MagicMock()
 		fake_sess.create_session.side_effect = ["sk_first", "sk_second"]
+		fake_sess.is_run_active.return_value = False
 		fake_sess.delete_session.side_effect = RuntimeError("gateway blip")
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
+			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
 		):
 			OC.connect.return_value = fake_sess
 			self.assertTrue(prewarm.warm_prefix())

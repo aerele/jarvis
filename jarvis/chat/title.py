@@ -150,6 +150,7 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 	"""Run a silent throwaway agent turn to summarise the opening message into a
 	title. Returns "" on any failure (caller falls back to derive_title)."""
 	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
 	prompt = _TITLE_PROMPT.format(msg=source_text[:_SOURCE_MAX_CHARS])
 	text = ""
@@ -172,23 +173,26 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 					if ev.get("kind") == "assistant" and ev.get("text"):
 						text = ev["text"]
 			finally:
-				# Delete the throwaway on the SAME pooled connection, turn
+				# Reclaim the throwaway on the SAME pooled connection, turn
 				# succeeded or not. Without this every auto-titled chat leaks a
 				# session that only the budget-capped orphan sweep could reclaim,
-				# and that sweep could never keep up. The turn is fully consumed
-				# by here (stream_agent_turn ran to exhaustion or raised), so
-				# nothing is in flight.
+				# and that sweep could never keep up.
 				#
-				# Swallow a delete failure: `text` is already captured, and losing
-				# the title over failed cleanup would be the worse bug - the
-				# orphan sweep still collects jarvis-title-* as a backstop.
-				try:
-					sess.delete_session(skey)
-				except Exception:
-					frappe.logger("jarvis.chat.title").debug(
-						"throwaway title session delete failed",
-						exc_info=True,
-					)
+				# NOT a bare sessions.delete (issue #525): reaching this line does
+				# NOT mean the run is over. stream_agent_turn returns on the
+				# lifecycle-end frame while openclaw is still finalising the
+				# session file, and RAISES on every error path with the run still
+				# going server side - so deleting here renamed the session file
+				# out from under a live run, which openclaw answers by either
+				# re-creating the file (a fresh orphan) or killing the run with
+				# EmbeddedAttemptSessionTakeoverError. reclaim_throwaway_session
+				# waits for the gateway to stop reporting an active run, and
+				# leaves anything still busy to the orphan sweep.
+				#
+				# Failure is swallowed in there: `text` is already captured, and
+				# losing the title over failed cleanup would be the worse bug -
+				# the sweep still collects jarvis-title-* as a backstop.
+				reclaim_throwaway_session(sess, skey, logger_name="jarvis.chat.title")
 	except Exception:
 		frappe.log_error(
 			title="auto-title: gateway generation failed",

@@ -12,6 +12,7 @@ import uuid
 import frappe
 
 from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
 # Cooldown between warm-ups for one bench. 2026-07 latency plan, Phase
 # 1.4: was 25 min, which is LONGER than the providers' prompt-cache
@@ -53,22 +54,25 @@ def _reclaim_previous(sess, prev, current: str) -> None:
 	A warm cannot delete its own: fire_agent is fire-and-forget, so the turn that
 	warms the prefix is still running when it returns, and waiting for it would
 	block a short-queue worker for no benefit. Instead each warm reclaims its
-	predecessor, which the cooldown guarantees has had at least _WARM_COOLDOWN_S
-	to finish. Steady state is one live prewarm session rather than one per warm -
-	at a 4-minute cooldown the old create-and-forget leaked up to ~350 sessions a
-	day against an orphan sweep capped at 25.
+	predecessor, which the cooldown USUALLY guarantees has had at least
+	_WARM_COOLDOWN_S to finish. Steady state is one live prewarm session rather
+	than one per warm - at a 4-minute cooldown the old create-and-forget leaked
+	up to ~350 sessions a day against an orphan sweep capped at 25.
+
+	"Usually" is why this goes through reclaim_throwaway_session (issue #525).
+	The cooldown check is a get-then-set on the cache, so two warms can pass it
+	in the same instant (observed 6ms apart on jarvis-pool-bf4097); the second
+	then reads a "previous" pointer the first wrote milliseconds ago and deletes
+	a session whose warm turn is still running. That rename killed the run and
+	openclaw re-created the session file 568ms later. Probing hasActiveRun first
+	turns that into a skipped reclaim - the orphan sweep collects it - instead of
+	a killed run and a fresh orphan.
 
 	Best-effort: on failure (or a lost cache pointer) the session is left for the
 	orphan sweep, which reaps jarvis-prewarm-* on a short grace."""
 	if not prev or not isinstance(prev, str) or prev == current:
 		return
-	try:
-		sess.delete_session(prev)
-	except Exception:
-		frappe.logger("jarvis.chat.prewarm").debug(
-			"previous warm session delete failed",
-			exc_info=True,
-		)
+	reclaim_throwaway_session(sess, prev, logger_name="jarvis.chat.prewarm")
 
 
 def _gateway_ws_url(settings) -> str:
