@@ -894,6 +894,47 @@ class TestPostSubscriptionDisconnect(FrappeTestCase):
 		self.assertEqual(captured["body"], {})
 
 
+class TestPostDisconnectLlm(FrappeTestCase):
+	def setUp(self):
+		_settings_for_admin()
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def test_timeout_outlasts_admins_own_budget(self):
+		"""Same rule as post_push_oauth_blob above, which the disconnect missed.
+
+		admin floors the agent's healthz budget at provision_healthz_timeout_s
+		and then waits +30s on top of it itself, so at the shipped 180s setting
+		admin may legitimately spend 210s answering. Riding the shared 150s meant
+		this call gave up SIXTY SECONDS early on exactly the slow container the
+		budget exists for, and reported AdminUnreachableError for a disconnect
+		that was still succeeding.
+
+		That false failure is not cosmetic: onboarding.disconnect_llm aborts
+		before clearing the bench's own credentials when this raises, so the
+		customer kept advertising a live model after admin and the host had
+		already destroyed it.
+		"""
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["url"] = url
+			captured["timeout"] = timeout
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {"ok": True}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.post_disconnect_llm()
+
+		self.assertIn("disconnect_llm", captured["url"])
+		self.assertGreater(
+			captured["timeout"],
+			210,
+			"must outlast admin's provision_healthz_timeout_s (180) + its own 30s headroom, "
+			"or a slow-but-successful disconnect is reported to the customer as unreachable",
+		)
+
+
 class TestPairChatDevice(FrappeTestCase):
 	"""Sprint-2 plumb-through (2026-06-16 review): bench's pair_chat_device
 	now accepts request_timeout_s and forwards it as a body field so admin

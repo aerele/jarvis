@@ -968,6 +968,27 @@ def post_subscription_disconnect() -> dict:
 	)
 
 
+#: The disconnect's own HTTP budget. Deliberately NOT the shared 150s.
+#:
+#: admin's interactive-apply ladder hands the agent ``provision_healthz_timeout_s``
+#: to come back healthy and then waits ``+30s`` on top of that itself
+#: (``agent_client._interactive_apply_timeouts``). At the shipped 180s healthz
+#: budget admin is therefore entitled to spend 210s answering, while this call
+#: gave up at DEFAULT_TIMEOUT_S = 150 -- SIXTY SECONDS before admin could reply.
+#: So any disconnect that actually needed its healthz budget (i.e. exactly the
+#: slow container the budget exists for) raised AdminUnreachableError on a call
+#: that was still succeeding server-side.
+#:
+#: That false failure is not cosmetic. ``onboarding.disconnect_llm`` aborts
+#: BEFORE ``_clear_llm_secrets`` when this raises, by design, so the customer was
+#: left advertising a live model while admin and the host had already destroyed
+#: the credentials -- the exact inversion of the ordering guarantee that abort
+#: exists to provide. Observed end-to-end on a live pool tenant.
+#:
+#: INVARIANT: keep this ABOVE admin's ``provision_healthz_timeout_s`` + 30.
+_DISCONNECT_TIMEOUT_S = 240
+
+
 def post_disconnect_llm() -> dict:
 	"""POST to admin to delete EVERY LLM credential from the customer's container:
 	the pool spec and its sidecar keys, /secrets/llm.key, and any auth profile.
@@ -979,9 +1000,9 @@ def post_disconnect_llm() -> dict:
 	Idempotent - a tenant with nothing configured is a no-op success, so a repeat
 	call (or a retry after a read timeout) is safe.
 
-	Rides the shared DEFAULT_TIMEOUT_S like post_update_llm_pool: admin re-renders
-	the tenant config and restarts the container on this path too, which sits above
-	the admin's own admin->agent budget.
+	Runs on _DISCONNECT_TIMEOUT_S, NOT the shared DEFAULT_TIMEOUT_S: see that
+	constant for why 150s was strictly below what admin is allowed to spend, and
+	what the resulting false "admin is unreachable" did to the customer's row.
 
 	Raises:
 		AdminAuthError, AdminUnreachableError, AdminValidationError
@@ -989,6 +1010,7 @@ def post_disconnect_llm() -> dict:
 	return _post(
 		path=_m("api.tenant.disconnect_llm"),
 		body={},
+		timeout_s=_DISCONNECT_TIMEOUT_S,
 	)
 
 
