@@ -12,14 +12,11 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api_errors, error_push
 
-# NB: this module deliberately never imports or patches ``jarvis.selfhost``.
-# ``test_whitelist_annotations`` walks and imports every jarvis module via
-# pkgutil, and in some CI shard orders (py3.14) that leaves
-# ``sys.modules['jarvis.selfhost']`` as ``None`` - so any later
-# ``import jarvis.selfhost`` (here, or inside push_error_rollup) raises
-# ModuleNotFoundError. The self-host gate is therefore driven through its real
-# input (the ``deployment_mode`` setting) and the claim/confirm/revert core is
-# tested via ``_do_push`` directly, both of which avoid the selfhost import.
+# NB: self-hosted mode was removed (commit 9f8d984a deleted ``jarvis/selfhost.py``),
+# so error_push no longer imports it and push_error_rollup gates only on
+# ``_admin_configured()``. ``test_pushes_when_admin_configured`` drives the real
+# entry point - the earlier push tests only exercise ``_do_push``, which is how a
+# stale ``import jarvis.selfhost`` shipped a silently-dead push job with green tests.
 
 DT = api_errors.DT
 USER = "apierr-user@example.com"
@@ -316,31 +313,25 @@ class TestErrorLogReader(ApiErrorsBase):
 # Push job — self-gating + never-raise
 # --------------------------------------------------------------------------- #
 class TestPushSelfGates(ApiErrorsBase):
-	# Drive is_self_hosted() through its real input (deployment_mode) and patch
-	# only the importable admin_client / error_push seams - never jarvis.selfhost.
-	def _pin_deployment_mode(self, mode):
-		# ApiErrorsBase.tearDown commits, which defeats FrappeTestCase's rollback -
-		# so a change to this shared Single would leak Self-Hosted into every later
-		# file in the shard (is_self_hosted() gates real behaviour). Restore it.
-		prev = frappe.db.get_single_value("Jarvis Settings", "deployment_mode") or "Managed"
-
-		def restore():
-			frappe.db.set_single_value("Jarvis Settings", "deployment_mode", prev)
-			frappe.db.commit()
-
-		self.addCleanup(restore)
-		frappe.db.set_single_value("Jarvis Settings", "deployment_mode", mode)
-
-	def test_skips_when_self_hosted(self):
-		self._pin_deployment_mode("Self-Hosted")
-		from jarvis import admin_client
-
-		with patch.object(admin_client, "push_error_rollup") as push:
+	# push_error_rollup gates only on _admin_configured() now (self-hosted mode
+	# removed). Patch only the importable error_push / admin_client seams.
+	def test_pushes_when_admin_configured(self):
+		# Regression: the real */5 entry point must REACH the push when admin is
+		# configured. A stale `from jarvis import selfhost` (module deleted in
+		# 9f8d984a) made every tick raise ModuleNotFoundError, swallowed by the
+		# never-raise guard, so tenant errors were silently never forwarded - and
+		# the suite stayed green because the other push tests drive _do_push
+		# directly and never push_error_rollup itself.
+		with (
+			patch.object(error_push, "_admin_configured", return_value=True),
+			patch.object(error_push, "_do_push") as do_push,
+			patch.object(error_push, "_log_push_failure_throttled") as logged,
+		):
 			error_push.push_error_rollup()
-		push.assert_not_called()
+		do_push.assert_called_once()
+		logged.assert_not_called()  # no swallowed import/other error
 
 	def test_skips_when_admin_unconfigured(self):
-		self._pin_deployment_mode("Managed")
 		from jarvis import admin_client
 
 		with (
@@ -367,9 +358,9 @@ class TestPushClaimConfirm(ApiErrorsBase):
 
 	def _run_do_push(self, push_impl):
 		"""Drive the claim/confirm/revert core directly with the admin push replaced
-		by ``push_impl``. Goes through ``_do_push`` (not ``push_error_rollup``) so the
-		test never depends on the self-host gate or the jarvis.selfhost import - the
-		gates are covered by TestPushSelfGates. ``admin_client`` imports cleanly."""
+		by ``push_impl``. Goes through ``_do_push`` (not ``push_error_rollup``) to
+		isolate the claim/confirm/revert logic; the entry-point gate is covered by
+		TestPushSelfGates. ``admin_client`` imports cleanly."""
 		from jarvis import admin_client
 
 		with patch.object(admin_client, "push_error_rollup", push_impl):
