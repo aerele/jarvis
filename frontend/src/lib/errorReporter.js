@@ -64,7 +64,13 @@ function _isBenign(text) {
 /** Explicit, classified report. Safe to call from anywhere; cheap and silent. */
 export function report(ctx = {}) {
 	try {
-		if (_reporting || _sent >= MAX_PER_SESSION) return;
+		// NB: do NOT gate on `_reporting` here. report() only enqueues (flush is
+		// async and catches its own errors, so there is no synchronous re-entrant
+		// loop to guard against), and gating on an in-flight POST would silently
+		// drop every unrelated error raised during a slow flush. Concurrency is
+		// handled where it matters - flush()/flushBuffered() guard against
+		// overlapping POSTs, and MAX_PER_SESSION / MAX_QUEUE bound the volume.
+		if (_sent >= MAX_PER_SESSION) return;
 		const message = String(ctx.message || "").slice(0, 2000);
 		if (_isBenign(message) || _isBenign(ctx.stack)) return;
 		const e = {
@@ -144,9 +150,15 @@ export async function flushBuffered() {
 	localStorage.removeItem(BUFFER_KEY);
 	_reporting = true;
 	try {
-		await _post(buf.slice(0, MAX_QUEUE));
+		// The buffer holds up to 100 entries; drain it in MAX_QUEUE-sized chunks
+		// rather than posting only the first chunk and dropping the rest. On the
+		// first failed chunk, re-buffer everything still unsent so nothing is lost.
+		while (buf.length) {
+			await _post(buf.slice(0, MAX_QUEUE));
+			buf = buf.slice(MAX_QUEUE);
+		}
 	} catch {
-		_buffer(buf); // put it back for next time
+		_buffer(buf); // re-buffer the unsent remainder for the next reconnect
 	} finally {
 		_reporting = false;
 	}

@@ -4,7 +4,8 @@ jarvis-only Error Log reader, and the self-gating push."""
 from __future__ import annotations
 
 import contextlib
-from unittest.mock import patch
+import time
+from unittest.mock import Mock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -68,6 +69,25 @@ class TestScrub(ApiErrorsBase):
 		self.assertNotIn("42.50", out)
 		self.assertNotIn("sk-abcdef1234567890abcdef", out)
 		self.assertNotIn("0123456789abcdef0123456789abcdef", out)
+		# a short, alphabetic *quoted* entity name is gone too (the old length/
+		# digit heuristic left these behind)
+		self.assertNotIn("ACME", out)
+
+	def test_removes_bare_unquoted_entity_names(self):
+		# The blocking finding: ERP messages interpolate entity names bare
+		# (frappe.throw(_("...{0}...").format(name))), so they are neither quoted
+		# nor numeric and no value regex catches them. A capitalised multi-word run
+		# must be redacted.
+		for text, leaked in (
+			("Could not find Customer: 'Tata Steel Ltd'", "Tata Steel"),
+			("Employee Priya Sharma has base salary 85000", "Priya Sharma"),
+			("Item Titanium Rod not available for Supplier Reliance Industries", "Reliance Industries"),
+			('customer_name "Bharat Petroleum"', "Bharat Petroleum"),
+		):
+			out = api_errors._scrub_error_text(text)
+			self.assertNotIn(leaked, out, f"entity name leaked: {out!r}")
+		# a single-token CamelCase exception class is NOT a run, so it survives
+		self.assertIn("ValidationError", api_errors._scrub_error_text("ValidationError: rejected"))
 
 	def test_keeps_the_reporting_users_own_email(self):
 		out = api_errors._scrub_error_text(f"failed for {USER}", keep_email=USER)
@@ -148,6 +168,57 @@ class TestReportEndpoint(ApiErrorsBase):
 			r = api_errors.report_client_errors([None, "nope", {"surface": "spa", "message": "ok"}])
 		self.assertEqual(r["accepted"], 1)
 
+	def test_drops_non_jarvis_origin_desk_error(self):
+		# A stray ERPNext Desk error (positive non-jarvis asset marker in the raw
+		# stack, no jarvis marker) is filtered server-side, not stored/forwarded.
+		with _as(USER):
+			r = api_errors.report_client_errors(
+				[
+					{
+						"surface": "desk",
+						"error_code": "uncaught",
+						"message": "boom",
+						"stack": "at handler (/assets/erpnext/js/erpnext.bundle.js:1:2)",
+					}
+				]
+			)
+		self.assertEqual(r["accepted"], 0)
+		self.assertEqual(frappe.db.count(DT, {"user": USER}), 0)
+
+	def test_keeps_jarvis_origin_desk_error(self):
+		# Same shape, but the stack points at a jarvis asset -> kept.
+		with _as(USER):
+			r = api_errors.report_client_errors(
+				[
+					{
+						"surface": "desk",
+						"error_code": "uncaught",
+						"message": "boom",
+						"stack": "at handler (/assets/jarvis/js/jarvis_widget.bundle.js:1:2)",
+					}
+				]
+			)
+		self.assertEqual(r["accepted"], 1)
+		self.assertEqual(frappe.db.count(DT, {"user": USER}), 1)
+
+	def test_rate_limit_throttles_past_the_cap(self):
+		# The endpoint short-circuits the limiter under frappe.flags.in_test, so
+		# exercise the bucket directly with the flag flipped off.
+		probe = "ratelimit-probe@example.com"
+		bucket = int(time.time()) // 60
+		# incrby uses the raw redis key, so clear with delete() (not delete_value).
+		key = f"jarvis.client_error_report.{probe}.{bucket}"
+		frappe.cache.delete(key)
+		orig = frappe.flags.in_test
+		frappe.flags.in_test = False
+		try:
+			for _ in range(api_errors.REPORT_RATE_PER_MIN):
+				self.assertFalse(api_errors._over_report_rate_limit(probe))
+			self.assertTrue(api_errors._over_report_rate_limit(probe), "the (N+1)th call is throttled")
+		finally:
+			frappe.flags.in_test = orig
+			frappe.cache.delete(key)
+
 
 # --------------------------------------------------------------------------- #
 # Error Log reader — jarvis-only
@@ -158,6 +229,14 @@ class TestErrorLogReader(ApiErrorsBase):
 		self.assertTrue(api_errors.is_jarvis_error("", 'File "/x/apps/jarvis/jarvis/api.py", line 3, in f'))
 		self.assertFalse(api_errors.is_jarvis_error("erpnext.stock.get_stock", ""))
 		self.assertFalse(api_errors.is_jarvis_error("frappe.model.document.save", "no app path"))
+
+	def test_reporter_own_failures_are_not_forwarded(self):
+		# The push job / endpoint failing must NOT feed back to admin about its own
+		# outage - otherwise a */5 admin outage floods the feed once admin returns.
+		push_tb = 'File "/x/apps/jarvis/jarvis/error_push.py", line 60, in push_error_rollup'
+		self.assertFalse(api_errors.is_jarvis_error("jarvis errors: rollup push failed", push_tb))
+		endpoint_tb = 'File "/x/apps/jarvis/jarvis/api_errors.py", line 40, in report_client_errors'
+		self.assertFalse(api_errors.is_jarvis_error("", endpoint_tb))
 
 	def test_collect_filters_to_jarvis_and_advances_watermark(self):
 		jtb = (
@@ -216,3 +295,54 @@ class TestPushSelfGates(ApiErrorsBase):
 		):
 			# Must swallow and log, not propagate.
 			error_push.push_error_rollup()
+
+
+# --------------------------------------------------------------------------- #
+# Push job — claim / confirm / revert (occurrences never lost, outage safe)
+# --------------------------------------------------------------------------- #
+class TestPushClaimConfirm(ApiErrorsBase):
+	def _seed(self, message="boom"):
+		with _as(USER):
+			api_errors.report_client_errors([{"surface": "spa", "error_code": "e", "message": message}])
+
+	def _run_push(self, push_impl):
+		"""Run push_error_rollup with the admin push replaced by ``push_impl``
+		(a Mock or a plain callable)."""
+		with (
+			patch("jarvis.selfhost.is_self_hosted", return_value=False),
+			patch("jarvis.error_push._admin_configured", return_value=True),
+			patch("jarvis.admin_client.push_error_rollup", push_impl),
+		):
+			error_push.push_error_rollup()
+
+	def test_success_marks_pushed(self):
+		self._seed()
+		push = Mock()
+		self._run_push(push)
+		push.assert_called_once()
+		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 0}), 0, "claimed + sent")
+		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 1}), 1)
+
+	def test_failed_push_reverts_claim(self):
+		from jarvis.exceptions import AdminUnreachableError
+
+		self._seed()
+		# Must not raise; the claimed row is reverted for the next cycle.
+		self._run_push(Mock(side_effect=AdminUnreachableError("down")))
+		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 0}), 1)
+		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 1}), 0)
+
+	def test_occurrence_arriving_after_claim_is_not_lost(self):
+		self._seed("window boom")
+
+		def _during_push(errors):
+			# Same error reported again mid-flight: it must land in a FRESH pushed=0
+			# row (it can't fold into the already-claimed one), so its count lives.
+			with _as(USER):
+				api_errors.report_client_errors(
+					[{"surface": "spa", "error_code": "e", "message": "window boom"}]
+				)
+
+		self._run_push(_during_push)
+		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 1}), 1, "original sent once")
+		self.assertEqual(frappe.db.count(DT, {"user": USER, "pushed": 0}), 1, "mid-flight occurrence kept")

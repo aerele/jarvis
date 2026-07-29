@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 
 import frappe
 
@@ -35,8 +36,26 @@ MAX_ERRORS_PER_CALL = 50
 MAX_MESSAGE = 500
 MAX_STACK = 2000
 
+#: Server-side ceiling on the endpoint: the client caps are advisory (curl
+#: ignores them), so cap accepted batches per user per minute. Past this the call
+#: returns early WITHOUT touching the DB - each accepted batch is up to
+#: MAX_ERRORS_PER_CALL get_value+save cycles, so this is the real DoS guard.
+REPORT_RATE_PER_MIN = 60
+
 #: How many Error Log rows one push cycle scans at most.
 ERROR_LOG_SCAN_LIMIT = 300
+
+#: Positive "this browser error came from another app, not Jarvis" evidence -
+#: an asset path only a non-Jarvis Desk bundle loads. Used as a server-side
+#: backstop to the client-side scoping (a stray ERPNext/HRMS Desk error must not
+#: cross to the control plane). See _looks_non_jarvis.
+_NONJARVIS_ASSET_MARKERS = (
+	"/assets/frappe/",
+	"/assets/erpnext/",
+	"/assets/hrms/",
+	"/assets/payments/",
+	"/assets/lms/",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -51,24 +70,37 @@ _KV_SECRET_RE = re.compile(
 _LONG_BLOB_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{24,}\b")
 # decimals, thousand-grouped, or 4+ digit runs = amounts / quantities / ids
 _NUMBER_RE = re.compile(r"(?<![\w.])(?:\d[\d,]*\.\d+|\d{1,3}(?:,\d{3})+|\d{4,})(?![\w])")
-# quoted literals that look like DATA (contain a digit, or are long)
+# any quoted literal - redacted unconditionally. ERP messages quote entity names
+# ('Tata Steel Ltd') that carry no digit and sit under 24 chars, so the old
+# length/digit heuristic leaked them. A traceback's `File "..."` path is dropped
+# too; the frame's function name + line survive unquoted, which is what triage needs.
 _QUOTED_RE = re.compile(r"(['\"])((?:\\.|(?!\1).)*?)\1")
+# a run of 2+ Capitalised words - the shape of an *unquoted* ERP entity name
+# ("Employee Priya Sharma", "Supplier Reliance Industries"). Most
+# frappe.throw(_("...{0}...").format(name)) messages interpolate the name bare,
+# so it is never quoted and no value regex above would catch it. CamelCase
+# exception classes ("ValueError", "TypeError") are single tokens and are not a
+# run, so the taxonomy survives.
+_NAME_RUN_RE = re.compile(r"\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z0-9]*){1,}\b")
 
 
 def _redact_quoted(m: re.Match) -> str:
-	inner = m.group(2)
-	if len(inner) > 24 or any(c.isdigit() for c in inner):
-		return m.group(1) + "[VAL]" + m.group(1)
-	return m.group(0)
+	# Every quoted literal is a candidate data value; redact unconditionally.
+	# Keeping "path-shaped" quotes was tempting but unsafe - a base64 secret
+	# contains '/' too, and _LONG_BLOB_RE already drops long paths regardless.
+	return m.group(1) + "[VAL]" + m.group(1)
 
 
 def _scrub_error_text(text: str | None, *, keep_email: str | None = None) -> str:
 	"""Redact PII / ERP values from a free-text error message or traceback.
 
-	Best-effort and deliberately conservative on structure (keeps error codes,
-	class names, field names) while removing values: emails (except the
-	reporting user's own), secret-shaped tokens, long hashes, amounts /
-	quantities / long ids, and data-shaped quoted literals."""
+	Deliberately conservative on structure (keeps error codes, class names, field
+	names, frame functions) while removing values: emails (except the reporting user's
+	own), secret-shaped tokens, long hashes, amounts / quantities / long ids, and
+	both *quoted* and *bare capitalised* entity names. The name redaction is
+	blunt on purpose - the failure mode of a blocklist here (a leaked customer /
+	supplier / employee name crossing benches to the control plane) is worse than
+	over-redacting a doctype label."""
 	if not text:
 		return ""
 	out = str(text)
@@ -80,6 +112,7 @@ def _scrub_error_text(text: str | None, *, keep_email: str | None = None) -> str
 
 	out = _EMAIL_RE.sub(_email_sub, out)
 	out = _QUOTED_RE.sub(_redact_quoted, out)
+	out = _NAME_RUN_RE.sub("[NAME]", out)
 	out = _NUMBER_RE.sub("[NUM]", out)
 	return out
 
@@ -118,6 +151,11 @@ def report_client_errors(errors: str | list) -> dict:
 	if not user or user == "Guest":
 		raise frappe.AuthenticationError
 
+	if _over_report_rate_limit(user):
+		# Soft-throttle: bail before any DB work. The client treats a non-ok
+		# result as "drop" (best-effort telemetry), so no retry storm.
+		return {"ok": False, "accepted": 0, "throttled": True}
+
 	if isinstance(errors, str):
 		try:
 			errors = json.loads(errors)
@@ -131,8 +169,8 @@ def report_client_errors(errors: str | list) -> dict:
 		if not isinstance(raw, dict):
 			continue
 		try:
-			_ingest_one(raw, user)
-			accepted += 1
+			if _ingest_one(raw, user):
+				accepted += 1
 		except Exception:
 			# One malformed row must not sink the batch.
 			frappe.logger("jarvis.client_errors").debug("client error row dropped", exc_info=True)
@@ -141,47 +179,100 @@ def report_client_errors(errors: str | list) -> dict:
 	return {"ok": True, "accepted": accepted}
 
 
-def _ingest_one(raw: dict, user: str) -> None:
+def _over_report_rate_limit(user: str) -> bool:
+	"""Per-user calendar-minute bucket. Atomic ``incrby`` (not get-then-set): it
+	is race-free under concurrent requests, and - unlike get_value/set_value with
+	a TTL - it is not fooled by frappe's request-local cache when the same request
+	checks more than once. The key self-expires, so old buckets never accumulate."""
+	if frappe.flags.in_test:
+		return False
+	bucket = int(time.time()) // 60
+	key = f"jarvis.client_error_report.{user}.{bucket}"
+	count = frappe.cache.incrby(key, 1)
+	if count == 1:
+		frappe.cache.expire(key, 120)
+	return count > REPORT_RATE_PER_MIN
+
+
+def _looks_non_jarvis(surface: str, route: str, stack: str) -> bool:
+	"""Server-side backstop mirroring lane 2's jarvis-only filter for lane 1.
+
+	The SPA/PWA reporters only load on Jarvis surfaces, so they are Jarvis-scoped
+	by construction; the Desk bundle loads on every Desk page, so a stray
+	ERPNext/HRMS error could reach here. Drop a row only on POSITIVE non-Jarvis
+	evidence (another app's asset in the stack) and no Jarvis marker anywhere -
+	so an empty-stack or genuinely-Jarvis error is always kept."""
+	if "jarvis" in f"{surface}\n{route}\n{stack}".lower():
+		return False
+	return any(m in stack for m in _NONJARVIS_ASSET_MARKERS)
+
+
+def _row_lock(user: str, fp: str) -> str:
+	return "jce:" + hashlib.sha1(f"{user}|{fp}".encode()).hexdigest()[:40]
+
+
+def _ingest_one(raw: dict, user: str) -> bool:
+	"""Fold one reported error into the local buffer. Returns True if stored,
+	False if filtered out (non-Jarvis origin)."""
 	surface = (str(raw.get("surface") or "unknown"))[:40]
 	error_code = (str(raw.get("error_code") or ""))[:64]
 	error_class = (str(raw.get("error_class") or ""))[:140]
 	route = _clean_route(raw.get("route"))
 	conversation = (str(raw.get("conversation") or ""))[:140]
 	run_id = (str(raw.get("run_id") or ""))[:140]
+
+	# Origin check runs on the RAW stack/route - scrubbing would blob the asset
+	# path (`/assets/erpnext/...` -> `[BLOB]`) and hide the very marker we filter on.
+	if _looks_non_jarvis(surface, str(raw.get("route") or ""), str(raw.get("stack") or "")):
+		return False
+
 	message = _scrub_error_text(raw.get("message"), keep_email=user)[:MAX_MESSAGE]
 	stack = _scrub_error_text(raw.get("stack"), keep_email=user)[:MAX_STACK]
 	fp = _fingerprint(error_code, error_class, message, surface)
 
-	now = frappe.utils.now_datetime()
-	existing = frappe.db.get_value(DT, {"fingerprint": fp, "user": user, "pushed": 0}, "name")
-	if existing:
-		doc = frappe.get_doc(DT, existing)
-		doc.count = (doc.count or 1) + 1
-		doc.last_seen = now
-		doc.message = message or doc.message
-		doc.stack = stack or doc.stack
-		doc.route = route or doc.route
-		doc.save(ignore_permissions=True)
-		return
+	# Serialize concurrent reports of the SAME error (same user+fingerprint) so
+	# the check-then-act below can't double-insert, and two occurrences can't both
+	# read the same count and lose an increment. Different errors hash to
+	# different lock names and never contend. Best-effort: on lock timeout we fall
+	# through unlocked - a rare duplicate row is harmless (admin folds by
+	# (tenant, fingerprint)).
+	lock = _row_lock(user, fp)
+	got = frappe.db.sql("SELECT GET_LOCK(%s, 3)", lock)[0][0]
+	try:
+		now = frappe.utils.now_datetime()
+		existing = frappe.db.get_value(DT, {"fingerprint": fp, "user": user, "pushed": 0}, "name")
+		if existing:
+			doc = frappe.get_doc(DT, existing)
+			doc.count = (doc.count or 1) + 1
+			doc.last_seen = now
+			doc.message = message or doc.message
+			doc.stack = stack or doc.stack
+			doc.route = route or doc.route
+			doc.save(ignore_permissions=True)
+			return True
 
-	frappe.get_doc(
-		{
-			"doctype": DT,
-			"surface": surface,
-			"route": route,
-			"error_code": error_code,
-			"error_class": error_class,
-			"message": message,
-			"stack": stack,
-			"user": user,
-			"conversation": conversation,
-			"run_id": run_id,
-			"fingerprint": fp,
-			"count": 1,
-			"first_seen": now,
-			"last_seen": now,
-		}
-	).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": DT,
+				"surface": surface,
+				"route": route,
+				"error_code": error_code,
+				"error_class": error_class,
+				"message": message,
+				"stack": stack,
+				"user": user,
+				"conversation": conversation,
+				"run_id": run_id,
+				"fingerprint": fp,
+				"count": 1,
+				"first_seen": now,
+				"last_seen": now,
+			}
+		).insert(ignore_permissions=True)
+		return True
+	finally:
+		if got:
+			frappe.db.sql("SELECT RELEASE_LOCK(%s)", lock)
 
 
 def _clean_route(route) -> str:
@@ -202,14 +293,26 @@ _JARVIS_APP_MARKER = "/apps/jarvis/"
 _FRAME_RE = re.compile(r'File "([^"]+)", line \d+, in (\w+)')
 _EXC_LINE_RE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrupt)):?\s*(.*)$")
 
+#: The error-reporting pipeline's OWN modules. A failure here (e.g. admin
+#: unreachable) must never be forwarded - it would report on its own outage and,
+#: once admin returns, flood the feed with a report per failed cycle. These logs
+#: stay local (Error Log / journalctl) where the operator can still see them.
+_REPORTER_SELF_MARKERS = (
+	"/apps/jarvis/jarvis/error_push.py",
+	"/apps/jarvis/jarvis/api_errors.py",
+)
+
 
 def is_jarvis_error(method: str | None, traceback: str | None) -> bool:
 	"""True only for exceptions that originate in the jarvis app - so a
 	customer's ERPNext / framework / other-app errors never leave their bench.
 
 	Matches the jarvis app path in the traceback, or a ``jarvis.*`` dotted
-	``method`` title (excluding the un-installed ``jarvis_admin`` checkout)."""
+	``method`` title (excluding the un-installed ``jarvis_admin`` checkout).
+	Excludes the reporter's own modules so error reporting can't report itself."""
 	tb = traceback or ""
+	if any(marker in tb for marker in _REPORTER_SELF_MARKERS):
+		return False
 	if _JARVIS_APP_MARKER in tb:
 		return True
 	m = (method or "").strip()

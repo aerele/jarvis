@@ -37,6 +37,21 @@
 		return (e.error_code || "") + "|" + (e.error_class || "") + "|desk|" + msg;
 	}
 
+	// This bundle loads on EVERY Desk page (app_include_js), but must only forward
+	// JARVIS errors - an ERPNext / HRMS / client-script error on a plain Desk form
+	// must never cross to the control plane. An error is Jarvis-origin if it came
+	// from a Jarvis asset (the chat widget, injected everywhere, always shows one
+	// in its stack) or fired on a full-page Jarvis Desk surface. Explicit
+	// window.jarvisReportError() calls skip this gate - they are Jarvis by
+	// construction (only Jarvis code calls it).
+	function isJarvisOrigin(ev, err) {
+		var file = (ev && ev.filename) || "";
+		var stack = (err && err.stack) || "";
+		if (/\/assets\/jarvis\//.test(file) || /\/assets\/jarvis\//.test(stack)) return true;
+		var path = (location && location.pathname) || "";
+		return /jarvis/i.test(path);
+	}
+
 	function csrf() {
 		try {
 			return (window.frappe && frappe.csrf_token) || window.csrf_token || "";
@@ -101,6 +116,7 @@
 
 	window.addEventListener("error", function (ev) {
 		var err = ev && ev.error;
+		if (!isJarvisOrigin(ev, err)) return; // scope: Jarvis Desk surfaces only
 		report({
 			error_class: (err && err.name) || "Error",
 			error_code: "uncaught",
@@ -110,6 +126,7 @@
 	});
 	window.addEventListener("unhandledrejection", function (ev) {
 		var r = ev && ev.reason;
+		if (!isJarvisOrigin(null, r)) return; // scope: Jarvis Desk surfaces only
 		report({
 			error_class: (r && r.name) || "UnhandledRejection",
 			error_code: "unhandledrejection",

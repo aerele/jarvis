@@ -142,24 +142,58 @@ test("offline flushBuffered puts the batch back if the resend also fails", async
 	assert.equal(buf.length, 1, "kept for the next reconnect");
 });
 
-test("a report raised WHILE a flush is in flight is dropped, not re-entrant", async () => {
-	let resolveFetch;
+test("a report raised WHILE a flush is in flight is queued and sent next, not dropped", async () => {
+	let resolveFirst;
+	let callN = 0;
 	const bodies = [];
 	globalThis.fetch = (url, opts) => {
 		bodies.push(JSON.parse(opts.body));
-		return new Promise((res) => {
-			resolveFetch = () => res({ ok: true, status: 200 });
-		});
+		callN += 1;
+		// Only the first POST is held open (to create the in-flight window); the
+		// follow-up flush that drains the queued error resolves immediately.
+		if (callN === 1) {
+			return new Promise((res) => {
+				resolveFirst = () => res({ ok: true, status: 200 });
+			});
+		}
+		return Promise.resolve({ ok: true, status: 200 });
 	};
 	report({ surface: "s", error_code: "e", message: "first" });
-	const inflight = flush(); // _reporting = true, awaiting fetch
-	await flush(); // guarded: no second fetch
-	report({ surface: "s", error_code: "e", message: "second" }); // dropped by the guard
-	assert.equal(bodies.length, 1, "only one fetch while in flight");
-	resolveFetch();
+	const inflight = flush(); // _reporting = true, awaiting the held-open fetch
+	await flush(); // no *second concurrent* fetch (flush guards overlap)
+	report({ surface: "s", error_code: "e", message: "second" }); // queued, NOT dropped
+	assert.equal(bodies.length, 1, "only one concurrent fetch while in flight");
+	resolveFirst();
 	await inflight;
-	await flush(); // queue empty (second was dropped)
-	assert.equal(bodies.length, 1);
+	await flush(); // drains the queued "second"
+	assert.equal(bodies.length, 2, "the error raised mid-flight was captured, not lost");
+	assert.equal(bodies[1].errors[0].message, "second");
+});
+
+test("flushBuffered drains the whole buffer in chunks, not just the first 50", async () => {
+	configure({ offline: true });
+	const buf = Array.from({ length: 80 }, (_, i) => ({ surface: "s", message: "m" + i }));
+	lsStore["jarvis.errorBuffer"] = JSON.stringify(buf);
+	const calls = installFetch("ok");
+	await flushBuffered();
+	const totalSent = calls.reduce((n, c) => n + c.body.errors.length, 0);
+	assert.equal(totalSent, 80, "all 80 buffered entries resent across chunks");
+	assert.equal(lsStore["jarvis.errorBuffer"], undefined, "buffer cleared once fully drained");
+});
+
+test("flushBuffered re-buffers only the unsent remainder when a chunk fails", async () => {
+	configure({ offline: true });
+	const buf = Array.from({ length: 80 }, (_, i) => ({ surface: "s", message: "m" + i }));
+	lsStore["jarvis.errorBuffer"] = JSON.stringify(buf);
+	let n = 0;
+	globalThis.fetch = () => {
+		n += 1; // first chunk (50) ok, second chunk (30) fails
+		return Promise.resolve({ ok: n === 1, status: n === 1 ? 200 : 500 });
+	};
+	await flushBuffered();
+	const left = JSON.parse(lsStore["jarvis.errorBuffer"] || "[]");
+	assert.equal(left.length, 30, "the 50 sent are gone, the 30 unsent are kept");
+	assert.equal(left[0].message, "m50", "remainder starts right after the sent chunk");
 });
 
 test("install() wires window handlers that capture uncaught errors + rejections", async () => {
