@@ -561,6 +561,56 @@ class TestFencingTimelines(_TurnStateTestCase):
 		recent = frappe.utils.add_to_date(None, seconds=-10)
 		self.assertFalse(ts._progress_stale(recent, 60), "10s-old stamp is fresh under a 60s threshold")
 
+	def test_a3_force_expire_wedged_fences_and_vacates(self):
+		"""A3 (GAP 3): force_expire_wedged bumps the epoch (fencing the wedged pump's
+		cached-E renews / heartbeats / turn-writes) and vacates the lease (1s past) so
+		a successor can acquire; in-flight turns are re-stamped; it is idempotent under
+		the epoch CAS."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		amsg = self._mk_msg(conv, 2, role="assistant", content="", streaming=1)
+		E = 6
+		self._mk_turn(
+			conv,
+			"ts_fe",
+			seed,
+			"streaming",
+			version=20,
+			pump_epoch=E,
+			reserved=1,
+			dispatching_at=frappe.utils.now(),
+			assistant_message=amsg,
+		)
+		# A LIVE lease at epoch E — the wedged pump still holds it.
+		frappe.db.set_value(PUMP, self._target, "pump_epoch", E, update_modified=False)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"lease_expires_at",
+			frappe.utils.add_to_date(None, seconds=25),
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+		self.assertTrue(ts.force_expire_wedged(self._target, E))
+		row = frappe.db.get_value(PUMP, self._target, ["pump_epoch", "lease_expires_at"], as_dict=True)
+		self.assertEqual(row["pump_epoch"], E + 1, "epoch bumped to fence the wedged pump")
+		self.assertLess(
+			frappe.utils.get_datetime(row["lease_expires_at"]),
+			frappe.utils.get_datetime(frappe.utils.now()),
+			"lease vacated (1s in the past)",
+		)
+		turn = frappe.db.get_value(TURN, "ts_fe", ["pump_epoch", "version"], as_dict=True)
+		self.assertEqual(turn["pump_epoch"], E + 1, "in-flight turn re-stamped to the new epoch")
+		self.assertEqual(turn["version"], 21, "re-stamp bumped the turn version")
+
+		# The wedged pump's cached-E renew now affects 0 rows -> it will lease_lost_exit.
+		self.assertFalse(ts.lease_renew(self._target, E), "stale-epoch renew is fenced")
+		frappe.db.rollback()
+		# Idempotent: a second force-expire at the same (now-gone) epoch is a no-op.
+		self.assertFalse(ts.force_expire_wedged(self._target, E))
+		frappe.db.rollback()
+
 	def test_d4c_delayed_old_writer_stale_after_takeover(self):
 		"""D4 (c): P_old streaming at epoch E stalls; P_new takes over
 		(lease_acquire bumps epoch to E+1 and RE-STAMPS the turn); P_old's cached-E

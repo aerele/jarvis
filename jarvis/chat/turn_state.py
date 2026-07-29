@@ -1331,6 +1331,48 @@ def lease_handoff(target: str, epoch: int, next_hop: int, successor_holder: str)
 	return won
 
 
+def force_expire_wedged(target: str, epoch: int) -> bool:
+	"""Force-expire a WEDGED but lease-LIVE pump (GAP 3 A4). A pump that keeps renewing
+	its lease but has made no PROGRESS (``loop_heartbeat_ts`` stale, see
+	``_progress_stale``) is not draining and will not self-recover. Under CAS on the
+	wedged pump's ``pump_epoch=E`` this atomically:
+	  * BUMPS the epoch (``pump_epoch+1``) — so the wedged pump's next lease_renew /
+	    heartbeat / turn-write (all cached at E) affects 0 rows and it exits via
+	    ``lease_lost_exit``. This is the fence: a bare lease-expiry would just be
+	    re-extended within HEARTBEAT_INTERVAL_S by the wedged pump's own renew.
+	  * sets ``lease_expires_at`` 1s in the PAST — vacant, so the watchdog's
+	    ``ensure_pump`` successor immediately wins its own acquire.
+	  * RE-STAMPS in-flight turns to the new epoch (the wedged pump's cached-E turn
+	    writes then affect 0 rows), mirroring ``lease_acquire``.
+	The CALLER (the watchdog) clears the Redis lease mirror + ``ensure_pump`` on a won
+	result. Returns won/lost; idempotent under the epoch CAS (a second call at the same
+	E affects 0 rows). Commits (a standalone lifecycle op)."""
+	frappe.db.commit()
+	past = frappe.utils.add_to_date(None, seconds=-1)
+	won = (
+		_run_cas(
+			f"""UPDATE `tab{PUMP}`
+			SET pump_epoch=pump_epoch+1, lease_expires_at=%(past)s
+			WHERE relay_target_id=%(t)s AND pump_epoch=%(e)s""",
+			{"past": past, "t": target, "e": epoch},
+		)
+		== 1
+	)
+	if not won:
+		frappe.db.rollback()
+		return False
+	new_epoch = int(frappe.db.get_value(PUMP, target, "pump_epoch") or 0)
+	inflight = "','".join(EPOCH_INFLIGHT_STATES)
+	_run_cas(
+		f"""UPDATE `tab{TURN}`
+		SET pump_epoch=%(e)s, version=version+1
+		WHERE relay_target_id=%(t)s AND state IN ('{inflight}')""",
+		{"e": new_epoch, "t": target},
+	)
+	frappe.db.commit()
+	return True
+
+
 def lease_renew(target: str, epoch: int, holder: str | None = None) -> bool:
 	"""Extend the lease TTL while THIS pump still holds the epoch (D2 §3). CAS on
 	``pump_epoch=E`` — a pump that lost the epoch to a takeover renews 0 rows and
