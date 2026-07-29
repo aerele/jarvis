@@ -668,6 +668,55 @@ class OpenclawSession:
 		res = self._request("sessions.list", {}, timeout_s=timeout_s)
 		return (res.get("payload") or {}).get("sessions") or []
 
+	def list_sessions_page(
+		self,
+		*,
+		limit: int = 100,
+		offset: int = 0,
+		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
+	) -> dict:
+		"""One page of ``sessions.list`` with the WHOLE payload, not just the
+		rows: ``sessions`` plus ``defaults`` (the agent's configured model, i.e.
+		what an unpinned session resolves to) and ``hasMore`` / ``nextOffset``.
+
+		``list_sessions`` above drops the envelope and accepts the gateway's own
+		100-row cap. The model-pin sweep needs both halves: ``defaults`` is the
+		only way to tell a pinned session from an unpinned one over the wire
+		(the row carries the RESOLVED model, never the raw override), and a
+		tenant with a long history needs the paging cursor."""
+		res = self._request(
+			"sessions.list",
+			{"limit": limit, "offset": offset},
+			timeout_s=timeout_s,
+		)
+		return res.get("payload") or {}
+
+	def clear_session_model(
+		self,
+		session_key: str,
+		*,
+		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
+	) -> None:
+		"""Drop the session's model override so the agent's configured default -
+		and, crucially, its ``model.fallbacks`` chain - applies again.
+
+		``sessions.patch`` with a NULL model takes openclaw's own isDefault
+		branch (2026.6.8 ``src/sessions/model-overrides.ts``), which deletes
+		``modelOverride``, ``providerOverride`` and ``modelOverrideSource``
+		together with the now-stale runtime model/contextTokens fields, then
+		persists through the gateway's own store writer. Rewriting
+		``sessions.json`` on disk instead would race that writer: the gateway
+		holds the store in memory and rewrites it on every session update.
+
+		NEVER call this for a key the gateway did not just report. Patching an
+		ABSENT key does not fail - openclaw creates the entry, mints a fresh
+		sessionId and drops the label."""
+		self._request(
+			"sessions.patch",
+			{"key": session_key, "model": None},
+			timeout_s=timeout_s,
+		)
+
 	def delete_session(
 		self,
 		session_key: str,
