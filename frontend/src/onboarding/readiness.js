@@ -84,22 +84,26 @@ export async function billingNoticeOf() {
 // wants "what do I tell the customer" never has to know the raw {ready, reason,
 // detail} shape checkReady() resolves to.
 //
-// Scoped to container_provisioning + llm_credentials: "subscription_suspended" has
-// its own dedicated copy (suspensionNotice/SUSPENDED_FALLBACK in steps.js) with a
-// Renew call to action, which is wrong for these reasons (nothing to renew via US
-// when the customer's OWN LLM account merely ran out of quota) - a caller must not
+// Scoped to container_provisioning ALONE: "subscription_suspended" has its own
+// dedicated copy (suspensionNotice/SUSPENDED_FALLBACK in steps.js) with a Renew
+// call to action, which is wrong for this reason (nothing to renew via US when
+// the customer's OWN LLM account merely ran out of quota) - a caller must not
 // paint this detail into that banner's "Chat is paused" framing.
 //
-// "llm_credentials" (no key/model configured, or creds revoked — e.g. after a
-// workspace reset with "disconnect AI model connections") has no backend detail,
-// so it gets a fixed actionable sentence; without it the chat renders NO hint at
-// all and a send just queues against the stub LLM.
+// "llm_credentials" is deliberately NOT handled here, and re-adding it is a
+// REGRESSION (pinned by readiness.spec.js). It used to return a fixed sentence
+// as a stopgap, from before needsLlmConnection() and the "No AI connected"
+// banner existed. Two accessors firing for one reason meant the caller rendered
+// two banners for the same state, and the generic CTA-less one won the v-else-if
+// race in ChatView - so the customer whose AI is disconnected got "Chat may not
+// work yet" with no way back to the AI models pane, which is the exact case the
+// dedicated banner was built for. One reason, one accessor: this one answers
+// "what did the backend say", needsLlmConnection() below answers "is there an
+// AI attached at all".
 export async function readinessDetailOf() {
 	const r = await checkReady();
 	if (!r || r.ready) return "";
 	if (r.reason === "container_provisioning") return r.detail || "";
-	if (r.reason === "llm_credentials")
-		return "No AI model is connected. Connect one in Settings → AI models to start chatting.";
 	return "";
 }
 

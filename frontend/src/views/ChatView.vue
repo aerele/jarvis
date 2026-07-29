@@ -2057,22 +2057,18 @@
 						<button class="jv-btn jv-btn--sm" @click="goRenew">Renew</button>
 					</template>
 				</Banner>
-				<!-- Not chat-ready for a NON-billing reason (e.g. the connected LLM account
-					 itself is out of quota, or a container is still coming up). No CTA: unlike
-					 a lapsed subscription there's nothing to renew via us here - the detail
-					 IS the admin's own diagnosis (jarvis.account.is_ready_for_chat), not a
-					 guess this UI is making up. -->
-				<Banner
-					v-else-if="notReadyNotice"
-					type="warning"
-					title="Chat may not work yet"
-					:message="notReadyNotice"
-					style="margin-bottom: 10px"
-				/>
 				<!-- No model configured: the workspace was disconnected, or its credential
 					 expired. The composer is disabled alongside this (see canSend) - every
 					 send would fail at the agent, and letting it be tried just turns a clear
-					 explanation into an error the customer has to interpret. -->
+					 explanation into an error the customer has to interpret.
+
+					 ORDER MATTERS, and it is pinned by readiness.spec.js. This banner is the
+					 SPECIFIC one and carries the only route back to the AI models pane, so it
+					 must be tested before the generic notReadyNotice below or a generic,
+					 CTA-less banner shadows it. readiness.js keeps the two verdicts mutually
+					 exclusive as well (llm_credentials belongs to needsLlmConnection alone),
+					 so this cannot swallow an unrelated not-ready state such as
+					 container_provisioning either. -->
 				<Banner
 					v-else-if="noAiConnected"
 					type="warning"
@@ -2090,6 +2086,18 @@
 						</button>
 					</template>
 				</Banner>
+				<!-- Not chat-ready for a NON-billing reason (e.g. the connected LLM account
+					 itself is out of quota, or a container is still coming up). No CTA: unlike
+					 a lapsed subscription there's nothing to renew via us here - the detail
+					 IS the admin's own diagnosis (jarvis.account.is_ready_for_chat), not a
+					 guess this UI is making up. -->
+				<Banner
+					v-else-if="notReadyNotice"
+					type="warning"
+					title="Chat may not work yet"
+					:message="notReadyNotice"
+					style="margin-bottom: 10px"
+				/>
 
 				<!-- floats just above the composer; jumps the thread to the newest message -->
 				<transition name="jv-sd">
@@ -3864,6 +3872,24 @@ const settingsOpen = computed({
 	},
 });
 const settingsTab = ref("overview");
+// AI models is the ONLY pane that can change the chat-readiness verdict: every
+// connect, rotate and disconnect goes through LlmPoolEditor, which only that pane
+// renders (SettingsDialog.vue PANES). Closing the dialog is one of the most common
+// actions in the app, so remember whether that pane was actually opened during
+// this visit rather than paying for a readiness round-trip every time someone
+// glances at the theme and closes. Tracked across the whole visit, not read at
+// close time, because the customer can disconnect and then navigate to another
+// pane before closing.
+let aiModelsPaneVisited = false;
+const SETTINGS_READINESS_SECTION = "aimodels";
+watch(
+	() => store.settingsSection,
+	(section) => {
+		if (store.settingsOpen && section === SETTINGS_READINESS_SECTION) {
+			aiModelsPaneVisited = true;
+		}
+	}
+);
 // Load usage stats whenever the dialog opens (was openSettings()).
 watch(
 	() => store.settingsOpen,
@@ -3874,6 +3900,8 @@ watch(
 			// is memoized for the page load, so without dropping it here the composer
 			// would stay dead after a reconnect, or stay live after a disconnect until
 			// the customer reloaded. Best-effort, exactly like the boot read.
+			if (!aiModelsPaneVisited) return;
+			aiModelsPaneVisited = false;
 			forgetReady();
 			try {
 				noAiConnected.value = await needsLlmConnection();
@@ -3882,6 +3910,13 @@ watch(
 			}
 			return;
 		}
+		// openSettings(section) writes both refs in the same tick, so the section
+		// watcher above may not fire for a dialog opened DIRECTLY on AI models (the
+		// "Connect a model" banner button does exactly that, and the section is
+		// sticky, so it can already hold "aimodels" from a previous visit). Seed the
+		// flag from the section the dialog is opening on instead of relying on a
+		// change event that may never come.
+		aiModelsPaneVisited = store.settingsSection === SETTINGS_READINESS_SECTION;
 		try {
 			usage.value = await api.getUsage(currentId.value);
 		} catch (e) {
