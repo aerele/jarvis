@@ -57,10 +57,6 @@ MAX_BUFFER_ROWS = 5000
 def push_error_rollup() -> None:
 	"""``*/5`` scheduler entry. Self-gating + best-effort; NEVER raises."""
 	try:
-		from jarvis import selfhost
-
-		if selfhost.is_self_hosted():
-			return
 		if not _admin_configured():
 			return
 		_do_push()
