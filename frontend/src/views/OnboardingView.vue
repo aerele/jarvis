@@ -392,29 +392,37 @@
 								</div>
 							</template>
 							<template v-else-if="state.payPhase === 'reconnect'">
-								<div class="ob-body">
+								<div class="ob-body ob-body--center">
 									<div class="ob-head">
 										<h1>Enter your reconnect code</h1>
 										<p>
-											We emailed a code to
-											<b>{{ state.email || "your email" }}</b
-											>. Enter it here to connect this site to your existing
-											subscription — nothing to pay again.
+											Sent to <b>{{ state.email || "your email" }}</b> —
+											connects this site to your existing subscription,
+											nothing to pay again.
 										</p>
 									</div>
-									<FormControl
-										class="mx-auto mt-2 max-w-[260px]"
-										type="text"
-										variant="outline"
-										label="Reconnect code"
+									<input
 										v-model="state.reconnectCode"
+										class="ob-code"
+										type="text"
+										autocapitalize="characters"
+										autocomplete="one-time-code"
+										spellcheck="false"
+										maxlength="9"
+										aria-label="Reconnect code"
 										placeholder="ABCD2345"
 										@keydown.enter="submitReconnectCode"
 									/>
-									<p class="text-center text-p-sm text-ink-gray-5">
-										The code expires in 1 hour. Using it signs your old site
-										out. If you can't reach that inbox, contact support — they
-										can issue the code another way.
+									<p class="ob-code-note">
+										<template v-if="state.reconnectResentIn > 0">
+											Sent. You can resend in {{ state.reconnectResentIn }}s.
+										</template>
+										<template v-else>
+											Didn't get it?
+											<button class="ob-link" @click="resendReconnectCode">
+												Resend code
+											</button>
+										</template>
 									</p>
 									<Banner
 										v-if="state.payErr"
@@ -997,6 +1005,7 @@ const state = reactive({
 	reconnectOffered: false,
 	reconnectRequestId: "",
 	reconnectCode: "",
+	reconnectResentIn: 0,
 	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
 	// Gateways the operator has actually enabled, narrowed to what this build
 	// can render. Starts as razorpay-only so the step is never briefly empty
@@ -1473,11 +1482,32 @@ function cancelReconnect() {
 	state.payErr = "";
 	state.reconnectRequestId = "";
 	state.reconnectCode = "";
+	state.reconnectResentIn = 0;
 }
 
 // The code the customer read off the confirmation page (or got from support).
 // Wrong code => admin keeps answering awaiting_code, so just say so and let
 // them retype rather than restarting the whole reconnect.
+// A new request supersedes the old one, so any earlier code stops working.
+// Cooled down: admin allows 5 reconnect requests an hour and a frustrated
+// customer would otherwise burn that budget in seconds.
+async function resendReconnectCode() {
+	if (state.reconnectResentIn > 0) return;
+	state.payErr = "";
+	try {
+		const d = await startAccountReconnect(state.email);
+		state.reconnectRequestId = (d && d.request) || state.reconnectRequestId;
+		state.reconnectCode = "";
+		state.reconnectResentIn = 30;
+		const tick = setInterval(() => {
+			state.reconnectResentIn -= 1;
+			if (state.reconnectResentIn <= 0) clearInterval(tick);
+		}, 1000);
+	} catch (e) {
+		state.payErr = errMsg(e);
+	}
+}
+
 async function submitReconnectCode() {
 	if (!state.reconnectCode.trim()) return;
 	state.payErr = "";
@@ -2030,6 +2060,60 @@ onMounted(async () => {
 .ob-head {
 	text-align: center;
 	margin-bottom: 24px;
+}
+/* A one-field step would otherwise pin its content to the top of the 520px
+   body and leave a dead white expanse below it. */
+.ob-body--center {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+}
+.ob-body--center .ob-head {
+	margin-bottom: 20px;
+}
+/* The code IS the screen - one unmistakable target, not a small labelled
+   field adrift in the middle of it. */
+.ob-code {
+	width: 260px;
+	padding: 14px 16px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--surface);
+	color: var(--text);
+	font: 600 22px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+	letter-spacing: 6px;
+	text-align: center;
+	text-transform: uppercase;
+	outline: none;
+	transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.ob-code::placeholder {
+	color: var(--text-3, #9ca3af);
+	letter-spacing: 6px;
+	font-weight: 500;
+}
+.ob-code:focus {
+	border-color: var(--accent, #2563eb);
+	box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+.ob-code-note {
+	margin: 14px 0 0;
+	max-width: 420px;
+	text-align: center;
+	font-size: 13px;
+	line-height: 1.55;
+	color: var(--text-2);
+}
+.ob-link {
+	color: var(--accent, #2563eb);
+	font: inherit;
+	background: none;
+	border: 0;
+	padding: 0;
+	cursor: pointer;
+	text-decoration: underline;
+	text-underline-offset: 2px;
 }
 .ob-head h1 {
 	font-size: 20px; /* text-2xl, 0.1.278 */
