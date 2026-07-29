@@ -27,6 +27,7 @@ import time
 
 import frappe
 
+from jarvis._redis_lock import redis_lock
 from jarvis.audit import _SECRET_KEYS
 
 DT = "Jarvis Client Error"
@@ -68,6 +69,11 @@ _KV_SECRET_RE = re.compile(
 )
 # long hex / base64-ish blobs (hashes, ids, tokens)
 _LONG_BLOB_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{24,}\b")
+# fixed-width alphanumeric IDs under the blob threshold that mix letters AND
+# digits: GSTIN (27AAPFU0939F1ZV), PAN, batch/serial codes. These are ERP
+# identifiers, not taxonomy. A pure-letter token (an exception class) has no
+# digit and is left alone; a pure-digit run is handled by _NUMBER_RE.
+_ID_RE = re.compile(r"\b(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{10,23}\b")
 # decimals, thousand-grouped, or 4+ digit runs = amounts / quantities / ids
 _NUMBER_RE = re.compile(r"(?<![\w.])(?:\d[\d,]*\.\d+|\d{1,3}(?:,\d{3})+|\d{4,})(?![\w])")
 # any quoted literal - redacted unconditionally. ERP messages quote entity names
@@ -111,6 +117,7 @@ def _scrub_error_text(text: str | None, *, keep_email: str | None = None) -> str
 		return m.group(0) if keep_email and m.group(0).lower() == keep_email.lower() else "[EMAIL]"
 
 	out = _EMAIL_RE.sub(_email_sub, out)
+	out = _ID_RE.sub("[ID]", out)
 	out = _QUOTED_RE.sub(_redact_quoted, out)
 	out = _NAME_RUN_RE.sub("[NAME]", out)
 	out = _NUMBER_RE.sub("[NUM]", out)
@@ -187,7 +194,10 @@ def _over_report_rate_limit(user: str) -> bool:
 	if frappe.flags.in_test:
 		return False
 	bucket = int(time.time()) // 60
-	key = f"jarvis.client_error_report.{user}.{bucket}"
+	# incrby is a raw redis-py call that bypasses RedisWrapper.make_key's site
+	# prefix, so prefix the site ourselves - otherwise a multi-site bench sharing
+	# one Redis would let two sites' same-named users share a bucket.
+	key = f"{frappe.local.site}:jarvis.client_error_report.{user}.{bucket}"
 	count = frappe.cache.incrby(key, 1)
 	if count == 1:
 		frappe.cache.expire(key, 120)
@@ -226,19 +236,26 @@ def _ingest_one(raw: dict, user: str) -> bool:
 	if _looks_non_jarvis(surface, str(raw.get("route") or ""), str(raw.get("stack") or "")):
 		return False
 
-	message = _scrub_error_text(raw.get("message"), keep_email=user)[:MAX_MESSAGE]
+	raw_message = str(raw.get("message") or "")
+	message = _scrub_error_text(raw_message, keep_email=user)[:MAX_MESSAGE]
 	stack = _scrub_error_text(raw.get("stack"), keep_email=user)[:MAX_STACK]
-	fp = _fingerprint(error_code, error_class, message, surface)
+	# Fingerprint the RAW (unscrubbed) message, not the scrubbed one. The
+	# fingerprint is admin's per-row grouping key (JTE-{tenant}-{fingerprint}), and
+	# a hash never leaves the bench in reversible form. Keying on raw text
+	# decouples grouping identity from redaction policy: a future scrubber tweak
+	# then does NOT re-key the whole feed (every row reappearing as new with
+	# count=1 and orphaned `resolved` flags). Lane 2 already fingerprints raw frames.
+	fp = _fingerprint(error_code, error_class, raw_message, surface)
 
-	# Serialize concurrent reports of the SAME error (same user+fingerprint) so
-	# the check-then-act below can't double-insert, and two occurrences can't both
-	# read the same count and lose an increment. Different errors hash to
-	# different lock names and never contend. Best-effort: on lock timeout we fall
-	# through unlocked - a rare duplicate row is harmless (admin folds by
+	# Serialize concurrent reports of the SAME error (same user+fingerprint) so the
+	# check-then-act below can't double-insert, and two occurrences can't both read
+	# the same count and lose an increment. Uses the repo's portable Redis mutex
+	# (jarvis._redis_lock) rather than a MySQL GET_LOCK: it is DB-agnostic and does
+	# not pin the worker's DB connection. Best-effort with a short bounded wait -
+	# different errors take different locks and never contend; on contention/timeout
+	# we proceed unlocked (a rare duplicate row is harmless: admin folds by
 	# (tenant, fingerprint)).
-	lock = _row_lock(user, fp)
-	got = frappe.db.sql("SELECT GET_LOCK(%s, 3)", lock)[0][0]
-	try:
+	with redis_lock(_row_lock(user, fp), timeout_s=10, blocking_timeout_s=2):
 		now = frappe.utils.now_datetime()
 		existing = frappe.db.get_value(DT, {"fingerprint": fp, "user": user, "pushed": 0}, "name")
 		if existing:
@@ -270,9 +287,6 @@ def _ingest_one(raw: dict, user: str) -> bool:
 			}
 		).insert(ignore_permissions=True)
 		return True
-	finally:
-		if got:
-			frappe.db.sql("SELECT RELEASE_LOCK(%s)", lock)
 
 
 def _clean_route(route) -> str:

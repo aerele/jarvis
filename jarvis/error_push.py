@@ -76,6 +76,13 @@ def push_error_rollup() -> None:
 
 
 def _do_push() -> None:
+	# Delivery is at-least-once, by design. The claim is NOT committed before the
+	# HTTP push, so if the worker crashes mid-push the transaction rolls back, the
+	# rows revert to pushed=0, and the next cycle re-sends. Admin accumulates with
+	# `count = count + VALUES(count)`, so a crash after admin received the batch
+	# double-counts that batch. This is the deliberate trade: re-sending (a small
+	# count inflation) beats committing the claim first, where the same crash would
+	# instead LOSE the batch. Telemetry-grade either way.
 	ui_names, ui_rows = _collect_ui_errors()  # CLAIMS the rows (pushed 0 -> 1)
 	watermark = frappe.db.get_default(_WATERMARK_KEY) or None
 	log_result = api_errors.collect_error_log(watermark)

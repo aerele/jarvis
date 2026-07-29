@@ -89,6 +89,14 @@ class TestScrub(ApiErrorsBase):
 		# a single-token CamelCase exception class is NOT a run, so it survives
 		self.assertIn("ValidationError", api_errors._scrub_error_text("ValidationError: rejected"))
 
+	def test_redacts_id_shaped_tokens(self):
+		# Fixed-width alphanumeric IDs (GSTIN/PAN/serials) mixing letters and digits
+		# are ERP identifiers, not taxonomy - they must not ride along.
+		out = api_errors._scrub_error_text("filing for GSTIN 27AAPFU0939F1ZV was rejected")
+		self.assertNotIn("27AAPFU0939F1ZV", out)
+		# a pure-letter token (an exception class) has no digit and survives
+		self.assertIn("PermissionDeniedError", api_errors._scrub_error_text("PermissionDeniedError: no"))
+
 	def test_keeps_the_reporting_users_own_email(self):
 		out = api_errors._scrub_error_text(f"failed for {USER}", keep_email=USER)
 		self.assertIn(USER, out)
@@ -136,6 +144,24 @@ class TestReportEndpoint(ApiErrorsBase):
 		self.assertEqual(rows[0].count, 2)
 		self.assertEqual(rows[0].route, "/c/abc", "query string stripped")
 		self.assertIn("8 tries", rows[0].message, "the newest sample overwrites")
+
+	def test_fingerprint_uses_raw_message_not_scrubbed(self):
+		# Two different entity names scrub to the SAME text ("Missing [NAME]") but
+		# are different errors. Fingerprinting the RAW message keeps them distinct
+		# AND decouples grouping from redaction policy, so a future scrubber tweak
+		# never re-keys the admin feed (N6).
+		with _as(USER):
+			api_errors.report_client_errors(
+				[{"surface": "spa", "error_code": "e", "message": "Missing Tata Steel Ltd"}]
+			)
+			api_errors.report_client_errors(
+				[{"surface": "spa", "error_code": "e", "message": "Missing Reliance Industries"}]
+			)
+		self.assertEqual(frappe.db.count(DT, {"user": USER}), 2, "distinct raw messages stay distinct groups")
+		# ...and both stored copies are scrubbed (the names never land on disk).
+		for msg in frappe.get_all(DT, filters={"user": USER}, pluck="message"):
+			self.assertNotIn("Tata Steel", msg)
+			self.assertNotIn("Reliance Industries", msg)
 
 	def test_different_word_is_a_different_group(self):
 		with _as(USER):
@@ -203,18 +229,22 @@ class TestReportEndpoint(ApiErrorsBase):
 
 	def test_rate_limit_throttles_past_the_cap(self):
 		# The endpoint short-circuits the limiter under frappe.flags.in_test, so
-		# exercise the bucket directly with the flag flipped off.
+		# exercise the bucket directly with the flag flipped off. The clock is
+		# FROZEN so the calendar-minute bucket cannot roll mid-loop (otherwise the
+		# (N+1)th call would land in a fresh bucket and spuriously pass).
 		probe = "ratelimit-probe@example.com"
-		bucket = int(time.time()) // 60
-		# incrby uses the raw redis key, so clear with delete() (not delete_value).
-		key = f"jarvis.client_error_report.{probe}.{bucket}"
+		frozen = 1_800_000_000  # fixed epoch
+		bucket = frozen // 60
+		# incrby uses the raw redis key, site-prefixed; clear with delete().
+		key = f"{frappe.local.site}:jarvis.client_error_report.{probe}.{bucket}"
 		frappe.cache.delete(key)
 		orig = frappe.flags.in_test
 		frappe.flags.in_test = False
 		try:
-			for _ in range(api_errors.REPORT_RATE_PER_MIN):
-				self.assertFalse(api_errors._over_report_rate_limit(probe))
-			self.assertTrue(api_errors._over_report_rate_limit(probe), "the (N+1)th call is throttled")
+			with patch("jarvis.api_errors.time.time", return_value=frozen):
+				for _ in range(api_errors.REPORT_RATE_PER_MIN):
+					self.assertFalse(api_errors._over_report_rate_limit(probe))
+				self.assertTrue(api_errors._over_report_rate_limit(probe), "the (N+1)th call is throttled")
 		finally:
 			frappe.flags.in_test = orig
 			frappe.cache.delete(key)
