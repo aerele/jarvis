@@ -1291,7 +1291,7 @@ async function resendReconnectCode() {
 	if (state.reconnectResentIn > 0) return;
 	state.payErr = "";
 	try {
-		const d = await startAccountReconnect(state.email);
+		const d = await startAccountReconnect(state.email, state.company);
 		state.reconnectRequestId = (d && d.request) || state.reconnectRequestId;
 		state.reconnectCode = "";
 		state.reconnectResentIn = 30;
@@ -1339,7 +1339,7 @@ async function startReconnect() {
 	state.reconnectCode = "";
 	state.payBusy = true;
 	try {
-		const d = await startAccountReconnect(state.email);
+		const d = await startAccountReconnect(state.email, state.company);
 		state.reconnectRequestId = (d && d.request) || "";
 		state.payPhase = "reconnect";
 	} catch (e) {

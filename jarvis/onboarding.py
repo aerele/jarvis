@@ -505,16 +505,17 @@ def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None)
 
 
 @frappe.whitelist()
-def start_account_reconnect(email: str) -> dict:
+def start_account_reconnect(email: str, company: str = "") -> dict:
 	"""Fresh-bench recovery: ask admin to email a reconnect CODE to the
 	REGISTERED address of an existing paid account (wiped-site scenario — the
 	duplicate-email guard blocks re-signup, and nothing should be re-paid).
+	``company`` disambiguates when the email owns several company accounts.
 	Returns {request, message}; the customer then types the code, which
 	``check_account_reconnect`` redeems. Same System-Manager gating as the rest
 	of onboarding."""
 	require_jarvis_admin()
 	_require_admin_url()
-	return _surface(admin_client.request_account_reconnect, email)
+	return _surface(admin_client.request_account_reconnect, email, company)
 
 
 @frappe.whitelist()
