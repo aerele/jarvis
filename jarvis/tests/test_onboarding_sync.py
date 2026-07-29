@@ -182,19 +182,28 @@ class TestSyncConnection(FrappeTestCase):
 		self.assertFalse(out["synced"])
 		self.assertEqual(out["reason"], "not onboarded")
 
-	def test_start_signup_throws_when_admin_url_blank(self):
-		"""start_signup requires the admin URL to be set deliberately before
-		any signup attempt."""
+	def test_start_signup_throws_only_when_no_admin_url_resolves(self):
+		"""start_signup blocks only when even the bench-wide default resolves
+		empty; a normal blank-config deployment rides the default (below)."""
 		_set_token("")
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "jarvis_admin_url", "")
 		frappe.db.commit()
 		with (
 			patch.dict(frappe.local.conf, {"jarvis_admin_url": ""}),
+			patch("jarvis.onboarding.get_default_admin_url", return_value=""),
 			patch("jarvis.onboarding.admin_client.signup") as mock_signup,
 		):
 			with self.assertRaises(frappe.ValidationError):
 				onboarding.start_signup("e4@x.com", "Co", "Annual Plan")
 			mock_signup.assert_not_called()
+
+	def test_require_admin_url_allows_default_fallback(self):
+		"""With no explicit jarvis_admin_url, onboarding rides the bench-wide
+		default instead of blocking (deliberate change)."""
+		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "jarvis_admin_url", "")
+		frappe.db.commit()
+		with patch.dict(frappe.local.conf, {"jarvis_admin_url": ""}):
+			onboarding._require_admin_url()  # non-empty default → must not raise
 
 	def test_write_connection_ignores_legacy_api_token(self):
 		"""If admin returns the old api_token key, write_connection should NOT
@@ -417,8 +426,8 @@ class TestSignupEmailVerification(FrappeTestCase):
 		)
 
 	def test_check_signup_payment_state_requires_admin_url(self):
-		# Same pre-flight guard as start_signup - misconfigured bench
-		# shouldn't silently route to DEFAULT_ADMIN_URL.
+		# Same pre-flight guard as start_signup: blocks only when even the
+		# bench-wide default admin URL resolves empty.
 		frappe.db.set_value(
 			"Jarvis Settings",
 			"Jarvis Settings",
@@ -428,6 +437,7 @@ class TestSignupEmailVerification(FrappeTestCase):
 		frappe.db.commit()
 		with (
 			patch.dict(frappe.local.conf, {"jarvis_admin_url": ""}),
+			patch("jarvis.onboarding.get_default_admin_url", return_value=""),
 			patch(
 				"jarvis.onboarding.admin_client.get_signup_payment_state",
 			) as mock_call,
