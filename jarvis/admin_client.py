@@ -1299,6 +1299,14 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 	return token
 
 
+def clear_cached_token() -> None:
+	"""Drop the cached bearer. Anything that rotates this bench's admin credentials
+	MUST call it: the cached token was minted from the old ones, stays valid for its
+	full TTL, and keeps authenticating as the PREVIOUS account - so a reconnected
+	bench asks about a customer it no longer is and sits on "still being set up"."""
+	frappe.cache().delete_value(_OAUTH_CACHE_KEY)
+
+
 def _cache_oauth_token(token: dict) -> None:
 	ttl = int(token.get("expires_in") or 0)
 	if ttl <= 0:

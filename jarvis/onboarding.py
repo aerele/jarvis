@@ -112,6 +112,10 @@ def write_connection(data: dict) -> None:
 		s.db_set("agent_url", data["agent_url"])
 	if data.get("agent_token"):
 		set_settings_password(s, "agent_token", data["agent_token"])
+	# Credentials just changed (fresh signup, or a reconnect rotating onto another
+	# account): a bearer minted from the old ones would outlive them.
+	if any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password")):
+		admin_client.clear_cached_token()
 	# NB: the release notice is deliberately NOT mirrored here. Several callers
 	# pass a partial payload (a password, a customer email), and an absent notice
 	# key means "cleared" - which would drop a live notice. It is persisted only

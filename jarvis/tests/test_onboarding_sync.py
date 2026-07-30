@@ -977,3 +977,50 @@ class TestAccountReconnect(FrappeTestCase):
 		):
 			out = onboarding.check_account_reconnect("rid-x")
 		self.assertEqual(out["status"], "expired")
+
+
+class TestCredentialChangeBustsTheTokenCache(FrappeTestCase):
+	"""A cached bearer outlives the credentials it was minted from. Reconnecting a
+	bench onto another account left it calling admin as the PREVIOUS customer -
+	which reports no subscription and no tenant, so the wizard sat on "still being
+	set up" while everything server-side looked healthy."""
+
+	def setUp(self):
+		from jarvis import admin_client
+
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "stale-from-the-old-account", "access_expires_at": 9999999999},
+		)
+
+	def tearDown(self):
+		from jarvis import admin_client
+
+		frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
+
+	def _cached(self):
+		from jarvis import admin_client
+
+		return frappe.cache().get_value(admin_client._OAUTH_CACHE_KEY)
+
+	def test_writing_a_new_login_drops_the_cached_token(self):
+		onboarding.write_connection({"customer": "cust-newaccount@jarvis.invalid"})
+		self.assertIsNone(self._cached())
+
+	def test_writing_a_new_password_drops_the_cached_token(self):
+		onboarding.write_connection({"customer_password": "s3cret"})
+		self.assertIsNone(self._cached())
+
+	def test_writing_api_keys_drops_the_cached_token(self):
+		onboarding.write_connection({"api_key": "k", "api_secret": "s"})
+		self.assertIsNone(self._cached())
+
+	def test_a_payload_with_no_credentials_leaves_it_alone(self):
+		onboarding.write_connection({"agent_url": "ws://127.0.0.1:19999"})
+		self.assertIsNotNone(self._cached(), "an agent_url refresh is not a credential change")
+
+	def test_reset_onboarding_drops_it_too(self):
+		from jarvis.dev import reset_onboarding
+
+		reset_onboarding()
+		self.assertIsNone(self._cached())
