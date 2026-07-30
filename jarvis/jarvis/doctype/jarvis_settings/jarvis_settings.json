@@ -68,10 +68,6 @@
   "system_tab",
   "deployment_section",
   "deployment_mode",
-  "selfhost_last_validated_at",
-  "selfhost_last_validation",
-  "selfhost_tool_user",
-  "selfhost_stream",
   "admin_connection_section",
   "jarvis_admin_url",
   "jarvis_admin_api_key",
@@ -501,41 +497,6 @@
    "read_only": 1,
    "hidden": 1,
    "description": "Retired. Jarvis is managed-only; nothing reads this field. Kept so existing sites keep their column until a migration drops it."
-  },
-  {
-   "fieldname": "selfhost_last_validated_at",
-   "fieldtype": "Datetime",
-   "label": "Self-Host Last Validated At",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired with self-hosted deployments; nothing reads this field."
-  },
-  {
-   "fieldname": "selfhost_last_validation",
-   "fieldtype": "Long Text",
-   "label": "Self-Host Last Validation",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired with self-hosted deployments; nothing reads this field."
-  },
-  {
-   "fieldname": "selfhost_tool_user",
-   "fieldtype": "Link",
-   "permlevel": 1,
-   "options": "User",
-   "label": "Self-Host Tool User",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired with self-hosted deployments; nothing reads this field."
-  },
-  {
-   "fieldname": "selfhost_stream",
-   "fieldtype": "Check",
-   "label": "Stream Self-Host Responses",
-   "default": "1",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired with self-hosted deployments; nothing reads this field."
   },
   {
    "fieldname": "vision_attachments_enabled",

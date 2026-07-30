@@ -315,7 +315,7 @@ scheduler_events = {
 			"jarvis.chat.macros.resume_waiting_capacity_runs",
 			# Forward tenant errors (UI + jarvis-only code-level exceptions) to the
 			# admin control plane for the per-tenant Errors feed. Off the hot path,
-			# self-gating (skips self-hosted / un-onboarded), never raises. Cheap
+			# self-gating (skips un-onboarded), never raises. Cheap
 			# no-op when there is nothing new to push.
 			"jarvis.error_push.push_error_rollup",
 		],
