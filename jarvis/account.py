@@ -63,7 +63,13 @@ def _admin_chat_gate() -> dict:
 	try:
 		conn = admin_client.get_connection(timeout_s=8) or {}
 	except Exception:
-		# Fail open on ANY admin error; deliberately no negative cache.
+		# A site whose account was reconnected elsewhere fails auth here forever, so
+		# failing open sends it into a chat that cannot work. Ask the one question it
+		# can still ask before shrugging.
+		moved = _site_replacement()
+		if moved.get("replaced"):
+			return {"ready": False, "reason": "site_replaced", "replaced_notice": moved, "billing_notice": {}}
+		# Fail open on ANY other admin error; deliberately no negative cache.
 		return {"ready": True, "reason": None, "billing_notice": {}}
 	# Refresh the locally-mirrored release notice on this gate's ~120s cadence so
 	# an active user sees an activate/clear without waiting for the daily sync.
@@ -105,6 +111,30 @@ def is_onboarded() -> dict:
 		or ""
 	).strip()
 	return {"onboarded": bool(api_key)}
+
+
+_REPLACED_CACHE_KEY = "jarvis:site_replacement"
+_REPLACED_CACHE_TTL_S = 300
+
+
+def _site_replacement() -> dict:
+	"""Cached {replaced, at, moved_to}. Cached both ways: a replaced site would
+	otherwise ask on every gate miss, and an unreplaced one on every admin blip."""
+	cache = frappe.cache()
+	hit = cache.get_value(_REPLACED_CACHE_KEY)
+	if isinstance(hit, dict):
+		return hit
+	try:
+		out = admin_client.site_replacement() or {}
+	except Exception:
+		out = {}
+	verdict = {
+		"replaced": bool(out.get("replaced")),
+		"at": out.get("at") or "",
+		"moved_to": out.get("moved_to") or "",
+	}
+	cache.set_value(_REPLACED_CACHE_KEY, verdict, expires_in_sec=_REPLACED_CACHE_TTL_S)
+	return verdict
 
 
 @frappe.whitelist()

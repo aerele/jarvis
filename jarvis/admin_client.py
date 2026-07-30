@@ -235,6 +235,19 @@ def reconnect_eligibility(email: str, company_name: str = "") -> dict:
 	)
 
 
+def site_replacement() -> dict:
+	"""Guest: was THIS site's account reconnected somewhere else?
+
+	The only question a site whose credentials were rotated away can still ask -
+	it can no longer authenticate, so it cannot be told over any other call.
+	Returns ``{replaced, at, moved_to}``; treat any failure as "not replaced"."""
+	return _post_guest(
+		path=_m("billing.reconnect.check_site_replaced"),
+		body={"frappe_site_url": frappe.utils.get_url()},
+		timeout_s=8,
+	)
+
+
 def request_account_reconnect(email: str, company_name: str = "") -> dict:
 	"""Guest: start a fresh-bench reconnect to an EXISTING paid account (wiped
 	site recovery). Admin emails a CODE to the registered address and returns an

@@ -9,7 +9,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const isReadyForChat = vi.fn();
 vi.mock("@/api.js", () => ({ isReadyForChat: (...a) => isReadyForChat(...a) }));
 
-const { readinessDetailOf, needsLlmConnection, forgetReady } = await import("./readiness.js");
+const { readinessDetailOf, needsLlmConnection, forgetReady, replacedBanner } = await import(
+	"./readiness.js"
+);
 
 // The verdict is memoized for the page load, so every case has to start clean.
 beforeEach(() => {
@@ -113,5 +115,24 @@ describe("ChatView banner chain order", () => {
 		// call to action, so a generic banner ahead of it in the chain leaves a
 		// disconnected customer with no discoverable way back to the AI models pane.
 		expect(specific).toBeLessThan(generic);
+	});
+});
+
+describe("replaced-site banner", () => {
+	it("names the site the account moved to", () => {
+		const b = replacedBanner({ replaced: true, moved_to: "https://jarvis-2.example.com/" });
+		expect(b.message).toContain("jarvis-2.example.com");
+		expect(b.message).not.toContain("https://");
+		expect(b.action).toBeTruthy();
+	});
+
+	it("still explains itself without a destination", () => {
+		expect(replacedBanner({ replaced: true }).message).toContain("another site");
+	});
+
+	it("stays silent when nothing moved", () => {
+		expect(replacedBanner({})).toBeNull();
+		expect(replacedBanner(null)).toBeNull();
+		expect(replacedBanner({ replaced: false })).toBeNull();
 	});
 });
