@@ -1438,6 +1438,14 @@ def get_chat_ui_settings() -> dict:
 		# Composer "ground on wiki" pill gating: shown only when the wiki feature
 		# is on AND the org has at least one Active page (best-effort).
 		"wiki_enabled": _wiki_enabled_flag(),
+		# Persona pill gating: a real kill switch (Jarvis Settings.persona_enabled,
+		# default on), read here AND in _persona_clause so flipping it off both hides
+		# the pill and stops the clause - never a client-only half-switch (N7).
+		"persona_enabled": _persona_feature_enabled(),
+		# The server's current persona for this user, so the SPA can reconcile a
+		# localStorage-booted pill to the row at mount. Best-effort like the sibling
+		# gates (N8): a migrate-lag missing column must not 500 the whole bootstrap.
+		"preferred_persona": _current_user_persona(),
 		# auto-apply is per-conversation now (issue #186); the frontend reads
 		# ``auto_apply`` from the conversation payload, not this global endpoint.
 	}
@@ -1454,6 +1462,34 @@ def _wiki_enabled_flag() -> bool:
 		return bool(wiki_enabled() and _has_active_pages())
 	except Exception:
 		return False
+
+
+def _current_user_persona() -> str:
+	"""The caller's stored persona for the boot payload. Best-effort like the
+	sibling bootstrap keys (N8): a migrate-lag missing column, or any read error,
+	must not 500 the whole endpoint - fall back to the default so ChatView still
+	gets its model picker, timezone, and the rest of `ui`."""
+	try:
+		return (
+			frappe.db.get_value("Jarvis User Settings", {"user": frappe.session.user}, "preferred_persona")
+			or "Jarvis"
+		)
+	except Exception:
+		return "Jarvis"
+
+
+def _persona_feature_enabled() -> bool:
+	"""The persona kill switch for the boot payload. Best-effort like the sibling
+	gates (N8): default ON, an explicit 0 is the only OFF, and a migrate-lag
+	missing field/value must not 500 the bootstrap or invert the pill vs the
+	clause. Uses get_single_value (returns None when unset) so it matches
+	_persona_clause's None-is-ON semantics exactly rather than a bare attribute
+	read that would AttributeError before the column syncs."""
+	try:
+		val = frappe.db.get_single_value("Jarvis Settings", "persona_enabled")
+	except Exception:
+		return True
+	return val is None or bool(frappe.utils.cint(val))
 
 
 @frappe.whitelist()

@@ -68,7 +68,14 @@ function clearSettingsActions() {
 // trust signal, so hide it only when the user has explicitly turned it off
 // ("0"). The server-side default matches (Jarvis User Settings.activity_detail
 // defaults to 1) so the first get_my_settings sync can't flip a fresh device.
-const _storedActivityDetail = localStorage.getItem("jarvis-activity-detail");
+function _lsGet(key) {
+	try {
+		return localStorage.getItem(key);
+	} catch (e) {
+		return null;
+	}
+}
+const _storedActivityDetail = _lsGet("jarvis-activity-detail");
 const activityDetail = ref(_storedActivityDetail === null ? true : _storedActivityDetail === "1");
 // `persist:false` is used only by syncSettingsFromServer, to apply a value
 // that already came FROM the server without immediately POSTing it back.
@@ -89,9 +96,58 @@ function setActivityDetail(v, { persist = true } = {}) {
 		);
 	}
 }
+// Per-user persona voice (Jarvis default / Jara). Same localStorage-cache +
+// roaming-server pattern as activityDetail; a string, default "Jarvis". Voice
+// only — the agent's tools, permissions, and behaviour are identical either way.
+const _storedPersona = _lsGet("jarvis-preferred-persona");
+const preferredPersona = ref(_storedPersona === "Jara" ? "Jara" : "Jarvis");
+// In-flight counter for persona server writes (N3): incremented right before
+// each api.updateMySettings persona POST, decremented when it settles. While
+// non-zero, the persist:false adopt-from-server path (mount reconcile /
+// GeneralPane's syncSettingsFromServer) must not overwrite the ref +
+// localStorage, or it can clobber a write the user just made that hasn't
+// round-tripped yet.
+let _personaWritesInflight = 0;
+// Request-sequence guard (N4): only the most recently issued POST may roll
+// back on failure, so a stale rejected request can't stomp a newer accepted
+// value.
+let _personaSeq = 0;
+function setPreferredPersona(v, { persist = true } = {}) {
+	const persona = v === "Jara" ? "Jara" : "Jarvis";
+	if (!persist && _personaWritesInflight > 0) return;
+	const prev = preferredPersona.value;
+	preferredPersona.value = persona;
+	try {
+		localStorage.setItem("jarvis-preferred-persona", persona);
+	} catch (e) {
+		// localStorage throws in private mode and when the quota is full.
+		// The preference is a nicety; losing it must never break the picker.
+	}
+	if (persist) {
+		const seq = ++_personaSeq;
+		// Fire-and-forget, same as renameConversation/toggleStar: roll back both
+		// the ref and the cache on failure so a device that never actually wrote
+		// the server value doesn't keep showing it as current.
+		_personaWritesInflight++;
+		api.updateMySettings({ preferred_persona: persona })
+			.catch(() => {
+				if (seq !== _personaSeq) return;
+				preferredPersona.value = prev;
+				try {
+					localStorage.setItem("jarvis-preferred-persona", prev);
+				} catch (_e) {
+					// see above: localStorage write failures are non-fatal
+				}
+				toast.error("Couldn't switch to " + persona + " - still using " + prev + ".");
+			})
+			.finally(() => {
+				_personaWritesInflight--;
+			});
+	}
+}
 const notifyEnabled = ref(
 	typeof Notification !== "undefined" &&
-		localStorage.getItem("jarvis-notify") === "1" &&
+		_lsGet("jarvis-notify") === "1" &&
 		Notification.permission === "granted"
 );
 async function toggleNotify() {
@@ -146,6 +202,8 @@ function syncSettingsFromServer(data) {
 			// The preference is a nicety; losing it must never break the toggle.
 		}
 	}
+	if (data.preferred_persona !== undefined)
+		setPreferredPersona(data.preferred_persona, { persist: false });
 }
 
 // Sidebar collapse: persisted preference (same localStorage key/values as
@@ -330,6 +388,7 @@ const store = reactive({
 	settingsActions,
 	activityDetail,
 	notifyEnabled,
+	preferredPersona,
 	pendingNewChat,
 	paletteOpen,
 	moreMenuOpen,
@@ -350,6 +409,7 @@ const store = reactive({
 	registerSettingsActions,
 	clearSettingsActions,
 	setActivityDetail,
+	setPreferredPersona,
 	toggleNotify,
 	syncSettingsFromServer,
 	applyRemoteRename,
