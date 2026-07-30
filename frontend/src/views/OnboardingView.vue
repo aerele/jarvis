@@ -1391,6 +1391,13 @@ async function submitReconnectCode() {
 		if (d && d.status === "connected") {
 			state.successData = {};
 			state.payBusy = false;
+			// Re-anchor to the funnel BEFORE handing over. proceedAfterPay() advances
+			// relative to state.step and renders its progress inside the pay step, but
+			// `reconnect` deliberately sits outside STEPS_MANAGED (that is what hides the
+			// rail) and stepIndex() clamps an unknown step to 0 - so advancing from here
+			// dropped the customer back on Details, which promptly re-offered the
+			// reconnect they had just completed instead of taking them to chat.
+			state.step = "pay";
 			await proceedAfterPay();
 			return;
 		}
