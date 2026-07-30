@@ -916,8 +916,8 @@ class TestAccountReconnect(FrappeTestCase):
 			"jarvis.onboarding.admin_client.request_account_reconnect",
 			return_value={"request": "rid-1", "message": "check your email"},
 		) as req:
-			out = onboarding.start_account_reconnect("someone@example.com")
-		req.assert_called_once_with("someone@example.com")
+			out = onboarding.start_account_reconnect("someone@example.com", "Acme")
+		req.assert_called_once_with("someone@example.com", "Acme")
 		self.assertEqual(out["request"], "rid-1")
 
 	def test_check_pending_writes_nothing(self):

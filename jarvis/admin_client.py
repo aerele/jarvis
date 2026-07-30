@@ -223,14 +223,15 @@ def resume_pending_signup(plan: str, provider: str | None = None) -> dict:
 	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)
 
 
-def request_account_reconnect(email: str) -> dict:
+def request_account_reconnect(email: str, company_name: str = "") -> dict:
 	"""Guest: start a fresh-bench reconnect to an EXISTING paid account (wiped
 	site recovery). Admin emails a CODE to the registered address and returns an
 	opaque request_id to poll — the response is identical whether or not the
-	email matches an account. Nothing is re-paid."""
+	email matches an account. Nothing is re-paid. ``company_name`` disambiguates
+	when one email owns several company accounts (multi-company identity)."""
 	return _post_guest(
 		path=_m("billing.reconnect.request_account_reconnect"),
-		body={"email": email, "frappe_site_url": frappe.utils.get_url()},
+		body={"email": email, "company_name": company_name, "frappe_site_url": frappe.utils.get_url()},
 	)
 
 

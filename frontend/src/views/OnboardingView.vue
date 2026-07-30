@@ -1229,8 +1229,12 @@ async function runStartPay() {
 		state.payErr = errMsg(e);
 		// The duplicate-email rejection on a FRESH bench (no stored creds to
 		// auto-resume with) usually means "my old site died" - offer the
-		// reconnect path instead of the dead end.
-		state.reconnectOffered = /already registered or pending/i.test(state.payErr);
+		// reconnect path instead of the dead end. Match both the pre- and
+		// post-multi-company wording ("already registered or pending" and
+		// "...email and company already exists").
+		state.reconnectOffered = /already registered or pending|already exists/i.test(
+			state.payErr
+		);
 	}
 }
 
@@ -1291,7 +1295,7 @@ async function resendReconnectCode() {
 	if (state.reconnectResentIn > 0) return;
 	state.payErr = "";
 	try {
-		const d = await startAccountReconnect(state.email);
+		const d = await startAccountReconnect(state.email, state.company);
 		state.reconnectRequestId = (d && d.request) || state.reconnectRequestId;
 		state.reconnectCode = "";
 		state.reconnectResentIn = 30;
@@ -1339,7 +1343,7 @@ async function startReconnect() {
 	state.reconnectCode = "";
 	state.payBusy = true;
 	try {
-		const d = await startAccountReconnect(state.email);
+		const d = await startAccountReconnect(state.email, state.company);
 		state.reconnectRequestId = (d && d.request) || "";
 		state.payPhase = "reconnect";
 	} catch (e) {
