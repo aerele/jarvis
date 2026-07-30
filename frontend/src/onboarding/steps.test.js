@@ -15,9 +15,9 @@ import {
 } from "./steps.js";
 
 test("managed step order", () => {
-	assert.deepEqual(STEPS_MANAGED, ["intro", "plan", "details", "pay", "connect"]);
-	assert.equal(nextStep(STEPS_MANAGED, "plan"), "details");
-	assert.equal(prevStep(STEPS_MANAGED, "details"), "plan");
+	assert.deepEqual(STEPS_MANAGED, ["intro", "details", "plan", "pay", "connect"]);
+	assert.equal(nextStep(STEPS_MANAGED, "plan"), "pay");
+	assert.equal(prevStep(STEPS_MANAGED, "details"), "intro");
 	assert.equal(nextStep(STEPS_MANAGED, "connect"), "connect"); // clamp at end
 	assert.equal(prevStep(STEPS_MANAGED, "intro"), "intro"); // clamp at start
 });

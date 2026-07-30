@@ -189,7 +189,7 @@
 									<FeatherIcon
 										name="chevron-left"
 										class="h-3.5 w-3.5 text-ink-gray-5"
-									/>Back to tour
+									/>Back
 								</button>
 								<Button
 									variant="solid"
@@ -318,7 +318,7 @@
 									<FeatherIcon
 										name="chevron-left"
 										class="h-3.5 w-3.5 text-ink-gray-5"
-									/>Back
+									/>Back to tour
 								</button>
 								<Button
 									variant="solid"
@@ -802,8 +802,8 @@ const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 // The 4 named wizard steps shown on the rail. The intro tour is chromeless
 // (no rail entry).
 const RAIL = [
-	{ id: "plan", label: "Plan" },
 	{ id: "details", label: "Details" },
+	{ id: "plan", label: "Plan" },
 	{ id: "pay", label: "Pay" },
 	{ id: "connect", label: "Connect" },
 ];
@@ -985,10 +985,11 @@ function goNext() {
 function goBack() {
 	state.step = prevStep(steps.value, state.step);
 }
-// Intro tour exits (CTA / advancing past the last slide / Skip tour) all land
-// on the Plan step.
+// Intro tour exits (CTA / advancing past the last slide / Skip tour) all land on
+// whatever follows the intro - derived, not hardcoded, so it tracks STEPS_MANAGED
+// instead of silently bypassing the first real step when the order changes.
 function startWizard() {
-	state.step = "plan";
+	state.step = nextStep(steps.value, "intro");
 }
 // ---- on-mount reconcile: resume a mid-flight signup ------------------------
 // A mid-flight signup must land on the right step, NOT the intro tour - the
