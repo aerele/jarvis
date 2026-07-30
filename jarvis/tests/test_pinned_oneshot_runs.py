@@ -33,7 +33,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat.agent_client import (
 	ONESHOT_RUN_PREFIX,
 	PINNED_ONESHOT_RUN_PREFIX,
-	OpenclawSession,
+	AgentSession,
 	oneshot_run_id,
 )
 
@@ -41,12 +41,12 @@ LOG = "jarvis.chat.agent_client"
 SKEY = "agent:main:dashboard:throwaway-1"
 
 
-def _bare_session() -> OpenclawSession:
-	"""An OpenclawSession with no WS behind it - callers stub the transport."""
-	return OpenclawSession.__new__(OpenclawSession)
+def _bare_session() -> AgentSession:
+	"""An AgentSession with no WS behind it - callers stub the transport."""
+	return AgentSession.__new__(AgentSession)
 
 
-def _streaming_session() -> OpenclawSession:
+def _streaming_session() -> AgentSession:
 	"""A session whose ``agent`` request acks and then ends the run at once."""
 	sess = _bare_session()
 	frames = iter(
@@ -209,7 +209,7 @@ class TestOneShotsMintPinnedRunIds(FrappeTestCase):
 		sess = MagicMock()
 		sess.create_session.return_value = "sk_throwaway"
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=settings),
 			# warm_prefix skips outright when a real turn ran in the last couple
 			# of minutes (#548) and a suite run leaves Jarvis Chat Message rows

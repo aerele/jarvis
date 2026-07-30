@@ -1,7 +1,7 @@
 """WP-1b — the one-reader WebSocket multiplexer (Relay Pump transport core).
 
 This module is the I/O adapter the pump reactor (D6) drives. It owns exactly
-ONE ``OpenclawSession`` (one WS per ``relay_target_id``) and is the SOLE caller
+ONE ``AgentSession`` (one WS per ``relay_target_id``) and is the SOLE caller
 of that socket's ``_recv`` — the single-reader constraint the pool warns about
 (``agent_session_pool.py:21-38``: two readers "would steal frames between
 turns") is not relaxed, it is INVERTED: one reader serves every turn on the
@@ -65,13 +65,13 @@ from dataclasses import dataclass
 
 from jarvis.chat.agent_client import (
 	FAILED_FINAL_ERROR,
-	OpenclawSession,
+	AgentSession,
 	_build_request_frame,
 	_chat_final_failed,
 	_chat_final_text,
 )
 from jarvis.chat.events import parse_event
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 _logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ class PendingRpc:
 			# Remove ourselves so a late resolve doesn't linger in the map.
 			if self._on_settle is not None:
 				self._on_settle(self.req_id)
-			raise OpenclawUnreachableError(f"{self.method} timed out", code="ack-timeout")
+			raise AgentUnreachableError(f"{self.method} timed out", code="ack-timeout")
 		if self._exc is not None:
 			raise self._exc
 		return self._result  # type: ignore[return-value]
@@ -307,7 +307,7 @@ class _Lane:
 class RelayMux:
 	"""One-reader WS multiplexer for one ``relay_target_id``.
 
-	Construct it with an already-connected ``OpenclawSession`` (the pump owns
+	Construct it with an already-connected ``AgentSession`` (the pump owns
 	connect/reconnect — the mux is the I/O adapter on a given socket). Call
 	``start()`` to spawn the reader; the pump then registers runs, issues RPCs,
 	and calls ``dispatch()`` to apply buffered frames.
@@ -315,7 +315,7 @@ class RelayMux:
 
 	def __init__(
 		self,
-		session: OpenclawSession,
+		session: AgentSession,
 		relay_target_id: str,
 		*,
 		on_breaker: Callable[[str, int], None] | None = None,
@@ -406,13 +406,13 @@ class RelayMux:
 		while not self._stopping.is_set():
 			try:
 				frame = self._session._recv(READER_SOFT_TIMEOUT_S)
-			except OpenclawUnreachableError as exc:
+			except AgentUnreachableError as exc:
 				# Socket failure — the ONLY hop-ending cause this module observes
 				# directly (§2/§5). Everything else routes back to reading.
 				self._begin_closing(exc)
 				return
 			except Exception as exc:  # pragma: no cover - defensive
-				self._begin_closing(OpenclawUnreachableError(f"reader loop error: {exc}"))
+				self._begin_closing(AgentUnreachableError(f"reader loop error: {exc}"))
 				return
 			if frame is None:
 				# soft timeout / non-JSON noise (swallowed by _recv) — never crash
@@ -451,7 +451,7 @@ class RelayMux:
 			err = frame.get("error") or {}
 			details = err.get("details")
 			fut.set_exception(
-				OpenclawUnreachableError(
+				AgentUnreachableError(
 					f"{fut.method} rejected: {err.get('code', '?')}: {err.get('message', '')}",
 					code=err.get("code"),
 					details=details if isinstance(details, dict) else None,
@@ -581,7 +581,7 @@ class RelayMux:
 		the serialized send lock. The reader resolves the future when the response
 		arrives; the caller awaits ``future.result(timeout)``."""
 		if self._closed.is_set() or self._stopping.is_set():
-			raise OpenclawUnreachableError(f"{method} on a closed mux", code="ack-timeout")
+			raise AgentUnreachableError(f"{method} on a closed mux", code="ack-timeout")
 		payload, req_id = _build_request_frame(method, params)
 		fut = PendingRpc(method, req_id, timeout_s)
 		fut._on_settle = self._drop_pending
@@ -594,7 +594,7 @@ class RelayMux:
 				self._session._ws.send(payload)
 		except Exception as exc:
 			self._drop_pending(req_id)
-			raise OpenclawUnreachableError(f"{method} send failed: {exc}") from exc
+			raise AgentUnreachableError(f"{method} send failed: {exc}") from exc
 		return fut
 
 	def send_chat(
@@ -639,7 +639,7 @@ class RelayMux:
 
 		``model_ref=None`` resets the session to the agent default (clearing the
 		override, which is what keeps the fallback chain live). Same contract as
-		``OpenclawSession.set_session_model`` — see its docstring."""
+		``AgentSession.set_session_model`` — see its docstring."""
 		return self.issue_rpc("sessions.patch", {"key": session_key, "model": model_ref}, timeout_s=timeout_s)
 
 	def abort(
@@ -859,7 +859,7 @@ class RelayMux:
 		if self._closed.is_set():
 			return
 		detail = str(exc)
-		sentinel = OpenclawUnreachableError(f"relay transport lost: {detail}", code="ack-timeout")
+		sentinel = AgentUnreachableError(f"relay transport lost: {detail}", code="ack-timeout")
 		# 1. fail ALL pending RPC futures (immediately, no dead-wait).
 		with self._pending_lock:
 			futs = list(self._pending.values())

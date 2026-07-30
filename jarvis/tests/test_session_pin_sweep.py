@@ -6,7 +6,7 @@ differs from the agent default the same sessions.list response reports - against
 actually chose. Empty means Auto, so a pin on such a conversation is one the
 bench wrote itself and gets cleared; a matching explicit pick is left alone.
 
-The gateway is reached only through OpenclawSession, so these patch it with a
+The gateway is reached only through AgentSession, so these patch it with a
 fake exposing ``list_sessions_page`` / ``clear_session_model``. Conversations are
 real rows on the test site.
 """
@@ -331,7 +331,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		frappe.db.set_single_value(SETTINGS, "agent_url", "http://gw.test:18789")
 		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		try:
-			with patch("jarvis.chat.agent_client.OpenclawSession.connect", return_value=sess):
+			with patch("jarvis.chat.agent_client.AgentSession.connect", return_value=sess):
 				out = session_pin_sweep.run()
 		finally:
 			frappe.db.set_single_value(SETTINGS, "agent_url", orig or "")

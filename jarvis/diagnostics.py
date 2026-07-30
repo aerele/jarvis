@@ -61,7 +61,7 @@ def ping_openclaw() -> dict:
 	operator-scope probe surface). Returns only the connectivity verdict."""
 	require_jarvis_admin()
 	from jarvis import agent_ws
-	from jarvis.exceptions import OpenclawUnreachableError
+	from jarvis.exceptions import AgentUnreachableError
 
 	settings = frappe.get_single("Jarvis Settings")
 	url = (settings.agent_url or "").strip()
@@ -73,7 +73,7 @@ def ping_openclaw() -> dict:
 	try:
 		agent_ws.ping(url, token)
 		return {"ok": True, "kind": "ok", "connected": True}
-	except OpenclawUnreachableError as e:
+	except AgentUnreachableError as e:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
 	except Exception as e:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}
@@ -171,9 +171,9 @@ def reset_agent_pairing() -> dict:
 	"""
 	require_jarvis_admin()
 	from jarvis.chat import agent_session_pool
-	from jarvis.chat.agent_client import OpenclawSession
+	from jarvis.chat.agent_client import AgentSession
 	from jarvis.chat.device import clear_credentials
-	from jarvis.exceptions import OpenclawUnreachableError
+	from jarvis.exceptions import AgentUnreachableError
 
 	settings = frappe.get_single("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").strip().replace("http://", "ws://").replace("https://", "wss://")
@@ -186,10 +186,10 @@ def reset_agent_pairing() -> dict:
 	except Exception:
 		pass
 	try:
-		sess = OpenclawSession.connect(gateway_url)
+		sess = AgentSession.connect(gateway_url)
 		sess.close()
 		return {"ok": True, "message": "Cleared the old pairing and reconnected to the agent."}
-	except OpenclawUnreachableError as e:
+	except AgentUnreachableError as e:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
 	except Exception as e:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}

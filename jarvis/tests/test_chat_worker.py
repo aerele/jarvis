@@ -13,7 +13,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat import agent_session_pool, turn_handler
 from jarvis.chat.api import create_conversation, get_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -73,7 +73,7 @@ class TestRunAgentTurnHappyPath(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -134,7 +134,7 @@ class TestRunAgentTurnToolCall(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -162,11 +162,11 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 		frappe.set_user(self._orig_user)
 
 	def test_connect_failure_publishes_run_error_and_marks_message_errored(self):
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		with patch(
-			"jarvis.chat.agent_session_pool.OpenclawSession.connect",
-			side_effect=OpenclawUnreachableError("connect refused"),
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
+			side_effect=AgentUnreachableError("connect refused"),
 		):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -198,7 +198,7 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -210,7 +210,7 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 		self.assertIn("model overloaded", assistants[0]["error"])
 
 	def test_unexpected_exception_marks_errored_then_reraises(self):
-		"""Sprint-3 (2026-06-16 review): the inline OpenclawUnreachableError
+		"""Sprint-3 (2026-06-16 review): the inline AgentUnreachableError
 		catches USED to leave every other exception (cryptography.InvalidKey
 		from device signing, ssl.SSLError, programmer bugs in _handle_event)
 		propagating to RQ without _mark_errored or run:error - the
@@ -231,7 +231,7 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 			published_kinds.append(payload.get("kind"))
 
 		with (
-			patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess),
+			patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess),
 			patch("jarvis.chat.worker.publish_to_user", side_effect=_capture),
 		):
 			with self.assertRaises(ssl.SSLError):
@@ -280,7 +280,7 @@ class TestRunAgentTurnAugmentsMessage(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -349,7 +349,7 @@ class TestRunAgentTurnModelResolution(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		# Model overrides are applied to the SESSION (sessions.patch) before
@@ -427,7 +427,7 @@ class TestRunAgentTurnApiKeyModeOmitsProvider(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		# api_key mode has no oauth_provider_id, so the session model patch
@@ -480,7 +480,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		# Five assistant:delta publishes (one per token), even though
@@ -531,7 +531,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 				write_calls.append(args)
 			return real_set_value(*args, **kwargs)
 
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				with patch("frappe.db.set_value", side_effect=tracking_set_value):
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -577,7 +577,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		# Final cumulative content is the last assistant text. The
@@ -623,7 +623,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 				raise RuntimeError("simulated tool-row insert failure")
 			return _orig_get_doc(*args, **kwargs)
 
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				with patch("frappe.get_doc", side_effect=boom_on_tool_msg):
 					with patch("frappe.log_error") as log_err:
@@ -764,7 +764,7 @@ class TestWorkerCreatesSessionOnFirstTurn(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -832,7 +832,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 				{"kind": "relay:interrupted", "reason": "deadline"},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.turn_recovery.recover_now") as recover_now:
 				with patch("jarvis.chat.worker.publish_to_user") as pub:
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -857,7 +857,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 				{"kind": "relay:error", "state": "error", "error": "provider quota exceeded"},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -873,7 +873,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 		# job re-enqueued). No events will follow - finalize from the
 		# durable transcript instead of calling relay_turn_events at all.
 		fake_sess = self._fake_sess([], ack={"runId": "r1", "status": "ok"})
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.turn_recovery.recover_now") as recover_now:
 				with patch("jarvis.chat.worker.publish_to_user"):
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -891,7 +891,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 			[{"kind": "relay:final", "text": None}],
 			ack={"runId": "server-assigned-run-id", "status": "in_flight"},
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -910,7 +910,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 				{"kind": "relay:final", "text": "authoritative final text"},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -928,7 +928,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 			{"role": "assistant", "content": "old", "__openclaw": {"seq": 3}},
 			{"role": "user", "content": "q", "__openclaw": {"seq": 4}},
 		]
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -978,7 +978,7 @@ class TestRunAgentTurnRelayStreamTelemetry(FrappeTestCase):
 			]
 		)
 		fake_logger = MagicMock()
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				with patch("jarvis.chat.latency.get_logger", return_value=fake_logger):
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -1021,7 +1021,7 @@ class TestRunAgentTurnThinkingDirective(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -1062,7 +1062,7 @@ class TestRichOutputsRouting(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				with patch("jarvis.chat.turn_handler.persist_rich_outputs") as rich:
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -1093,7 +1093,7 @@ class TestRichOutputsRouting(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -1219,7 +1219,7 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 	def _run_with_send_raising(self, exc):
 		fake_sess = MagicMock()
 		fake_sess.chat_send.side_effect = exc
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.turn_recovery.recover_now") as recover_now:
 				with patch("jarvis.chat.worker.publish_to_user") as pub:
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -1233,7 +1233,7 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 
 	def test_ack_timeout_parks_instead_of_erroring(self):
 		row, kinds, recover_now = self._run_with_send_raising(
-			OpenclawUnreachableError("chat.send timed out", code="ack-timeout")
+			AgentUnreachableError("chat.send timed out", code="ack-timeout")
 		)
 		self.assertEqual(row["recovering"], 1)
 		# Spinner stays up; turn_recovery finalizes from the gateway snapshot.
@@ -1246,7 +1246,7 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 	def test_rejection_still_errors(self):
 		"""Guards the blast radius: only the ambiguous timeout parks."""
 		row, kinds, _ = self._run_with_send_raising(
-			OpenclawUnreachableError("chat.send rejected: bad-request: nope", code="bad-request")
+			AgentUnreachableError("chat.send rejected: bad-request: nope", code="bad-request")
 		)
 		self.assertEqual(row["recovering"], 0)
 		self.assertTrue(row["error"])
@@ -1254,7 +1254,7 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 		self.assertNotIn("run:recovering", kinds)
 
 	def test_untagged_transport_failure_still_errors(self):
-		row, kinds, _ = self._run_with_send_raising(OpenclawUnreachableError("openclaw WS closed: gone"))
+		row, kinds, _ = self._run_with_send_raising(AgentUnreachableError("openclaw WS closed: gone"))
 		self.assertEqual(row["recovering"], 0)
 		self.assertTrue(row["error"])
 		self.assertIn("run:error", kinds)
@@ -1314,7 +1314,7 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 			"status": "started",
 		}
 		fake_sess.relay_turn_events.return_value = _fake_event_stream(relay_events)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		return pub
@@ -1433,7 +1433,7 @@ class TestRunAgentTurnFailedFinal(FrappeTestCase):
 			"status": "started",
 		}
 		fake_sess.relay_turn_events.return_value = _fake_event_stream(relay_events)
-		with patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		return pub

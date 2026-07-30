@@ -49,7 +49,7 @@ SKEY = "agent:main:dashboard:throwaway-1"
 
 
 def _stub_pool_session(*, active_probes, reply="A Nice Title", raises=None):
-	"""A pooled OpenclawSession whose ``is_run_active`` answers ``active_probes``
+	"""A pooled AgentSession whose ``is_run_active`` answers ``active_probes``
 	in order (a bare bool repeats forever)."""
 	sess = MagicMock()
 	sess.create_session.return_value = SKEY
@@ -290,11 +290,11 @@ class TestAutoTitleReclaim(FrappeTestCase):
 		"""The worst of the old paths: stream_agent_turn raises precisely
 		BECAUSE the run is still going (a WS drop leaves openclaw running), and
 		the finally deleted the session anyway."""
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		sess = _stub_pool_session(
 			active_probes=True,
-			raises=OpenclawUnreachableError("agent turn timed out before lifecycle end"),
+			raises=AgentUnreachableError("agent turn timed out before lifecycle end"),
 		)
 
 		with patch("jarvis.chat.title.frappe.log_error"):
@@ -311,11 +311,11 @@ class TestAutoTitleReclaim(FrappeTestCase):
 		This is the shape the probe-only fix (#530) still gets wrong: a WS drop
 		or a connect error raises within a few hundred ms of the fire, well
 		inside the measured 670ms median start delay."""
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		sess = _stub_pool_session(
 			active_probes=False,
-			raises=OpenclawUnreachableError("connection closed before the first frame"),
+			raises=AgentUnreachableError("connection closed before the first frame"),
 		)
 
 		with patch("jarvis.chat.title.frappe.log_error"):
@@ -363,11 +363,11 @@ class TestPatternPolishReclaim(FrappeTestCase):
 	def test_failed_polish_turn_does_not_delete_a_live_session(self):
 		"""polish's finally has title's exact shape and its exact bug history,
 		so it gets title's raise-path test too."""
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		sess = _stub_pool_session(
 			active_probes=True,
-			raises=OpenclawUnreachableError("agent turn timed out before lifecycle end"),
+			raises=AgentUnreachableError("agent turn timed out before lifecycle end"),
 		)
 
 		with patch("jarvis.learning.polish.frappe.log_error"):
@@ -380,11 +380,11 @@ class TestPatternPolishReclaim(FrappeTestCase):
 		"""Issue #535, polish's copy of title's raise-path gap: the gateway
 		reports the session idle because the run has not started, not because it
 		finished."""
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		sess = _stub_pool_session(
 			active_probes=False,
-			raises=OpenclawUnreachableError("connection closed before the first frame"),
+			raises=AgentUnreachableError("connection closed before the first frame"),
 		)
 
 		with patch("jarvis.learning.polish.frappe.log_error"):

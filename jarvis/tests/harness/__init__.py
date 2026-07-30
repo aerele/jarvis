@@ -9,7 +9,7 @@ baseline the Relay Pump must later beat.
 Layers of fidelity (stated up front, and again in every report):
 
   * Transport / relay / batching — REAL bench code. The harness drives the
-    real ``jarvis.chat.agent_client.OpenclawSession`` (real handshake,
+    real ``jarvis.chat.agent_client.AgentSession`` (real handshake,
     ``chat_send``, ``relay_turn_events``) over a real socket into
     ``fake_gateway.FakeGateway``, and feeds the frames through the real
     ``jarvis.chat.turn_handler._AssistantContentBatcher`` +

@@ -13,7 +13,7 @@ the requested scopes, and the rest of the protocol (sessions.create, agent,
 event streaming) is identical to what the Node script used to do - only the
 transport changed from subprocess-pipes to direct WS frames.
 
-Public surface: OpenclawSession.connect / create_session / chat_send /
+Public surface: AgentSession.connect / create_session / chat_send /
 relay_turn_events / set_session_model / subscribe_session / get_history /
 get_session_messages / is_run_active / fire_agent / stream_agent_turn /
 close. The managed chat path now uses the relay pair (chat_send +
@@ -83,7 +83,7 @@ def _is_response_frame(frame: dict, req_id: str) -> bool:
 	return frame.get("type") == "res" and frame.get("id") == req_id
 
 
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 CONNECT_TIMEOUT_SECONDS = 10
 
@@ -257,7 +257,7 @@ _STALE_PAIRING_AUTH_REASONS = frozenset(
 
 
 def _is_stale_pairing(err: Exception) -> bool:
-	"""Return True iff ``err`` is an OpenclawUnreachableError that openclaw
+	"""Return True iff ``err`` is an AgentUnreachableError that openclaw
 	classified as a stale device pairing - either via error.code (internal
 	reason set) or via error.details.authReason (the real wire shape for
 	connect auth failures, see _STALE_PAIRING_AUTH_REASONS above).
@@ -377,11 +377,11 @@ def _persisted_device_token() -> str:
 		return ""
 
 
-class OpenclawSession:
+class AgentSession:
 	"""Direct WebSocket session to one tenant's openclaw gateway.
 
 	Public surface:
-	  OpenclawSession.connect(gateway_url) -> session
+	  AgentSession.connect(gateway_url) -> session
 	  session.create_session(label=...) -> session_key
 	  session.stream_agent_turn(session_key, message, idem) -> iter of parsed events
 	  session.close()
@@ -399,9 +399,9 @@ class OpenclawSession:
 	# -- lifecycle --------------------------------------------------------
 
 	@classmethod
-	def connect(cls, gateway_url: str) -> OpenclawSession:
+	def connect(cls, gateway_url: str) -> AgentSession:
 		if not gateway_url:
-			raise OpenclawUnreachableError("agent_url not set on Jarvis Settings")
+			raise AgentUnreachableError("agent_url not set on Jarvis Settings")
 
 		# Two-shot self-heal for tenant re-provisioning: on the first attempt
 		# we use whatever paired creds the customer has; if openclaw rejects
@@ -412,7 +412,7 @@ class OpenclawSession:
 		return cls._attempt_connect(gateway_url, allow_repair=True)
 
 	@classmethod
-	def _attempt_connect(cls, gateway_url: str, *, allow_repair: bool) -> OpenclawSession:
+	def _attempt_connect(cls, gateway_url: str, *, allow_repair: bool) -> AgentSession:
 		# Timing breakdown logged so the connection pool's win is
 		# measurable in production. Three phases:
 		#   - ensure_paired (cache hit on a paired bench, real I/O on
@@ -429,7 +429,7 @@ class OpenclawSession:
 
 		try:
 			reissued_token = cls._handshake(ws, creds)
-		except OpenclawUnreachableError as e:
+		except AgentUnreachableError as e:
 			try:
 				ws.close()
 			except Exception:
@@ -452,7 +452,7 @@ class OpenclawSession:
 			creds = cls._adopt_reissued_token(creds, reissued_token)
 		t_handshake_done = time.monotonic()
 		_logger.info(
-			"OpenclawSession.connect: pair_ms=%d ws_open_ms=%d handshake_ms=%d total_ms=%d gateway=%s",
+			"AgentSession.connect: pair_ms=%d ws_open_ms=%d handshake_ms=%d total_ms=%d gateway=%s",
 			int((t_pair_done - t_pair_start) * 1000),
 			int((t_ws_done - t_pair_done) * 1000),
 			int((t_handshake_done - t_ws_done) * 1000),
@@ -487,7 +487,7 @@ class OpenclawSession:
 				)
 			except (websocket.WebSocketException, OSError) as e:
 				if time.monotonic() >= deadline:
-					raise OpenclawUnreachableError(
+					raise AgentUnreachableError(
 						f"WS open failed after {attempt} attempt(s) in "
 						f"{CONNECT_OPEN_DEADLINE_SECONDS}s - the assistant may be "
 						f"starting up; please try again in a moment ({e})"
@@ -605,7 +605,7 @@ class OpenclawSession:
 		res = self._request("sessions.create", {"label": label}, timeout_s=CONNECT_TIMEOUT_SECONDS)
 		key = (res.get("payload") or {}).get("key")
 		if not key:
-			raise OpenclawUnreachableError(f"sessions.create returned no key: {res}")
+			raise AgentUnreachableError(f"sessions.create returned no key: {res}")
 		return key
 
 	# -- openclaw-native turn model (chat.send + chat.history + sessions.*) --
@@ -876,7 +876,7 @@ class OpenclawSession:
 				return
 			try:
 				frame = self._recv(remaining)
-			except OpenclawUnreachableError as e:
+			except AgentUnreachableError as e:
 				# Close the dead WS before yielding: this generator swallows
 				# the exception by design, so the pool's discard-on-exception
 				# contract never fires. Closing flips the connected flag the
@@ -978,7 +978,7 @@ class OpenclawSession:
 		fallbacks.
 
 		Yields the same parsed-event shape the worker used to consume from
-		the subprocess. Raises OpenclawUnreachableError on WS drop, agent
+		the subprocess. Raises AgentUnreachableError on WS drop, agent
 		errors, or timeout - all the failure modes worker.py already maps to
 		assistant-message error rows."""
 		params = {
@@ -1014,7 +1014,7 @@ class OpenclawSession:
 				if not frame.get("ok"):
 					err = frame.get("error") or {}
 					details = err.get("details")
-					raise OpenclawUnreachableError(
+					raise AgentUnreachableError(
 						f"agent rejected: {err.get('code', '?')}: {err.get('message', '')}",
 						code=err.get("code"),
 						details=details if isinstance(details, dict) else None,
@@ -1025,7 +1025,7 @@ class OpenclawSession:
 			# Pre-ack events can arrive; pass them through if they belong to us
 			# by lifecycle (no runId yet at this point, drop unrelated noise).
 		if not got_ack:
-			raise OpenclawUnreachableError("agent RPC never acknowledged")
+			raise AgentUnreachableError("agent RPC never acknowledged")
 
 		# 2. Stream events for this run until lifecycle.end / .error.
 		# The run has started (we have the ack); a WS drop from here is
@@ -1034,10 +1034,10 @@ class OpenclawSession:
 		while time.monotonic() < deadline:
 			try:
 				frame = self._recv(deadline - time.monotonic())
-			except OpenclawUnreachableError as e:
+			except AgentUnreachableError as e:
 				if getattr(e, "code", None):
 					raise
-				raise OpenclawUnreachableError(str(e), code="turn-timeout") from e
+				raise AgentUnreachableError(str(e), code="turn-timeout") from e
 			if frame is None:
 				continue
 			ftype = frame.get("type")
@@ -1054,7 +1054,7 @@ class OpenclawSession:
 				phase = (payload.get("data") or {}).get("phase")
 				if phase in ("end", "error"):
 					return
-		raise OpenclawUnreachableError(
+		raise AgentUnreachableError(
 			"agent turn timed out before lifecycle end",
 			code="turn-timeout",
 		)
@@ -1084,7 +1084,7 @@ class OpenclawSession:
 				nonce = (frame.get("payload") or {}).get("nonce")
 				break
 		if not nonce:
-			raise OpenclawUnreachableError("did not receive connect.challenge before timeout")
+			raise AgentUnreachableError("did not receive connect.challenge before timeout")
 
 		# 2. Sign + send the connect frame.
 		signed_at_ms = int(time.time() * 1000)
@@ -1134,7 +1134,7 @@ class OpenclawSession:
 				if not frame.get("ok"):
 					err = frame.get("error") or {}
 					details = err.get("details")
-					raise OpenclawUnreachableError(
+					raise AgentUnreachableError(
 						f"connect rejected: {err.get('code', '?')}: {err.get('message', '')}",
 						code=err.get("code"),
 						details=details if isinstance(details, dict) else None,
@@ -1148,7 +1148,7 @@ class OpenclawSession:
 				if isinstance(reissued, str) and reissued and reissued != creds.device_token:
 					return reissued
 				return None
-		raise OpenclawUnreachableError("no connect response before timeout")
+		raise AgentUnreachableError("no connect response before timeout")
 
 	def _send(self, method: str, params: dict) -> str:
 		"""Send a request frame; return the generated request id."""
@@ -1172,7 +1172,7 @@ class OpenclawSession:
 				if not frame.get("ok"):
 					err = frame.get("error") or {}
 					details = err.get("details")
-					raise OpenclawUnreachableError(
+					raise AgentUnreachableError(
 						f"{method} rejected: {err.get('code', '?')}: {err.get('message', '')}",
 						code=err.get("code"),
 						details=details if isinstance(details, dict) else None,
@@ -1184,11 +1184,11 @@ class OpenclawSession:
 		# uses this to park for snapshot recovery instead of reporting a false
 		# error (see turn_handler). A rejection or a dead socket is definite
 		# and raises without this code.
-		raise OpenclawUnreachableError(f"{method} timed out", code="ack-timeout")
+		raise AgentUnreachableError(f"{method} timed out", code="ack-timeout")
 
 	def _recv(self, timeout_s: float) -> dict | None:
 		"""Read one frame from the WS, parse JSON, or return None on a soft
-		timeout / non-JSON noise. Raises OpenclawUnreachableError on hard
+		timeout / non-JSON noise. Raises AgentUnreachableError on hard
 		close so the caller can wrap into an assistant-message error row."""
 		return _recv_with_timeout(self._ws, timeout_s)
 
@@ -1202,9 +1202,9 @@ def _recv_with_timeout(ws: websocket.WebSocket, timeout_s: float) -> dict | None
 	except websocket.WebSocketTimeoutException:
 		return None
 	except websocket.WebSocketConnectionClosedException as e:
-		raise OpenclawUnreachableError(f"openclaw WS closed: {e}") from e
+		raise AgentUnreachableError(f"openclaw WS closed: {e}") from e
 	except websocket.WebSocketException as e:
-		raise OpenclawUnreachableError(f"openclaw WS error: {e}") from e
+		raise AgentUnreachableError(f"openclaw WS error: {e}") from e
 	if not raw:
 		return None
 	try:

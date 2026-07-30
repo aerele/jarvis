@@ -158,12 +158,12 @@ def rotate_dormant_sessions() -> dict:
 	if not gateway_url:
 		return {"skipped": "no agent_url"}
 
-	from jarvis.chat.agent_client import OpenclawSession
+	from jarvis.chat.agent_client import AgentSession
 
 	summary = {"sessions_freed": 0, "empty_reaped": 0, "orphans_reaped": 0, "skipped": 0, "errors": 0}
 	budget = BATCH_MAX
 	try:
-		sess = OpenclawSession.connect(gateway_url)
+		sess = AgentSession.connect(gateway_url)
 	except Exception:
 		frappe.log_error(
 			title="session_lifecycle: connect failed",

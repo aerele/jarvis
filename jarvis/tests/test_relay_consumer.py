@@ -1,7 +1,7 @@
-"""Unit tests for OpenclawSession.relay_turn_events + set_session_model.
+"""Unit tests for AgentSession.relay_turn_events + set_session_model.
 
 Mirror of test_openclaw_native_rpcs.py's harness: bypass __init__ via
-OpenclawSession.__new__ and stub _recv (fed a scripted frame list; an
+AgentSession.__new__ and stub _recv (fed a scripted frame list; an
 Exception instance in the list is raised) / _request.
 
 relay_turn_events is the consumer half of the openclaw-native turn model:
@@ -13,8 +13,8 @@ frames are dropped.
 
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.agent_client import OpenclawSession
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.chat.agent_client import AgentSession
+from jarvis.exceptions import AgentUnreachableError
 
 
 def _agent_frame(run_id, stream, data):
@@ -37,7 +37,7 @@ def _chat_frame(run_id, session_key, state, **extra):
 
 class TestRelayTurnEvents(FrappeTestCase):
 	def _sess(self, frames):
-		sess = OpenclawSession.__new__(OpenclawSession)  # bypass __init__/WS
+		sess = AgentSession.__new__(AgentSession)  # bypass __init__/WS
 		queue = list(frames)
 
 		def fake_recv(_timeout):
@@ -257,7 +257,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(out, [{"kind": "relay:final", "text": "here is the partial answer"}])
 
 	def test_transport_drop_yields_interrupted_transport_and_does_not_raise(self):
-		sess = self._sess([OpenclawUnreachableError("ws closed mid-stream")])
+		sess = self._sess([AgentUnreachableError("ws closed mid-stream")])
 		# The generator swallows the exception, so the pool's
 		# discard-on-exception contract never fires; the consumer must close
 		# the dead WS itself so the pool healthcheck evicts it instead of
@@ -272,7 +272,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(closed, [True])
 
 	def test_deadline_yields_interrupted_deadline_on_stalling_recv(self):
-		sess = OpenclawSession.__new__(OpenclawSession)
+		sess = AgentSession.__new__(AgentSession)
 
 		def stalling_recv(_timeout):
 			import time
@@ -287,7 +287,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 
 class TestSetSessionModel(FrappeTestCase):
 	def _capture(self, *args, **kwargs):
-		sess = OpenclawSession.__new__(OpenclawSession)
+		sess = AgentSession.__new__(AgentSession)
 		captured = {}
 
 		def fake_request(method, params, *, timeout_s):

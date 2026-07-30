@@ -70,7 +70,7 @@ class E2E:
 
 	def setup(self):
 		self.frappe = bootstrap(self.site)
-		# Stub device pairing (ensure_paired): OpenclawSession.connect otherwise pairs
+		# Stub device pairing (ensure_paired): AgentSession.connect otherwise pairs
 		# via the admin, which patterntest is not onboarded for. Same stub run_baseline
 		# uses; it never touches a real tenant. (It also rebinds worker.publish_to_user,
 		# which is independent of turn_state.publish_to_user that we capture below.)
@@ -171,13 +171,13 @@ class E2E:
 
 	@contextmanager
 	def _pool_to_gateway(self):
-		"""Redirect the openclaw pool checkout to a REAL OpenclawSession on the fake
+		"""Redirect the openclaw pool checkout to a REAL AgentSession on the fake
 		gateway (a real socket) — prepare's session bootstrap + finalize's usage poll
 		then create/reference the session ON the gateway, so sessions.list reflects it."""
-		from jarvis.chat.agent_client import OpenclawSession
+		from jarvis.chat.agent_client import AgentSession
 
 		if self._pool_sess is None:
-			self._pool_sess = OpenclawSession.connect(self.gateway.ws_url)
+			self._pool_sess = AgentSession.connect(self.gateway.ws_url)
 
 		@contextmanager
 		def _co(url):
@@ -203,13 +203,13 @@ class E2E:
 	def _make_deps(self):
 		from jarvis.chat import finalize, pump
 		from jarvis.chat import prepare as prepare_mod
-		from jarvis.chat.agent_client import OpenclawSession
+		from jarvis.chat.agent_client import AgentSession
 		from jarvis.chat.relay_mux import RelayMux
 
 		gw = self.gateway
 
 		def make_mux(target, epoch):
-			mux = RelayMux(OpenclawSession.connect(gw.ws_url), target, on_breaker=pump._on_poison_breaker)
+			mux = RelayMux(AgentSession.connect(gw.ws_url), target, on_breaker=pump._on_poison_breaker)
 			return mux.start()
 
 		def dispatch_prepare(run_id, target):
@@ -429,7 +429,7 @@ def main():
 		"site": args.site,
 		"when": time.strftime("%Y-%m-%d %H:%M:%S"),
 		"gateway": "harness FakeGateway on a real 127.0.0.1 socket",
-		"transport": "REAL OpenclawSession + RelayMux over real sockets (pump mux + prepare/finalize pool)",
+		"transport": "REAL AgentSession + RelayMux over real sockets (pump mux + prepare/finalize pool)",
 	}
 	summary_path = os.path.join(args.out, "pump_e2e_results.json")
 	with open(summary_path, "w") as fh:

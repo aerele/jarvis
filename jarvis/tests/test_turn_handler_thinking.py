@@ -79,7 +79,7 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 			]
 		)
 		with patch(
-			"jarvis.chat.agent_session_pool.OpenclawSession.connect",
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
 			return_value=fake_sess,
 		):
 			with patch("jarvis.chat.worker.publish_to_user"):

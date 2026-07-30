@@ -3,7 +3,7 @@
 Two surface areas to cover:
 1. ensure_paired: generates a keypair if missing, calls admin to register the
    public side, persists everything atomically; reuses existing creds when
-   present; surfaces admin failures as OpenclawUnreachableError without
+   present; surfaces admin failures as AgentUnreachableError without
    half-persisting a broken state.
 2. build_payload_v3 / sign_payload: the byte-exact mirror of openclaw's
    device-auth.ts:36 - if openclaw rev-bumps the format, this is the test
@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import device as chat_device
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 
 def _b64u(raw: bytes) -> str:
@@ -130,7 +130,7 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 
 	def test_admin_failure_raises_and_does_not_persist(self):
 		with patch("jarvis.chat.device.admin_client.pair_chat_device", side_effect=RuntimeError("boom")):
-			with self.assertRaises(OpenclawUnreachableError):
+			with self.assertRaises(AgentUnreachableError):
 				chat_device.ensure_paired()
 		# Nothing persisted on failure.
 		s = frappe.get_single("Jarvis Settings")
@@ -139,7 +139,7 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 
 	def test_empty_device_token_raises_unreachable(self):
 		with patch("jarvis.chat.device.admin_client.pair_chat_device", return_value={"device_token": ""}):
-			with self.assertRaises(OpenclawUnreachableError):
+			with self.assertRaises(AgentUnreachableError):
 				chat_device.ensure_paired()
 
 	def test_concurrent_callers_share_one_admin_pair_call(self):
@@ -279,7 +279,7 @@ class TestRotateChatDevice(_SettingsSnapshotMixin, FrappeTestCase):
 		with patch(
 			"jarvis.chat.device.admin_client.pair_chat_device", side_effect=RuntimeError("admin down")
 		):
-			with self.assertRaises(OpenclawUnreachableError):
+			with self.assertRaises(AgentUnreachableError):
 				chat_device.rotate_chat_device()
 
 		# Old creds intact.

@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis.chat import agent_session_pool, vision
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode
 
 CONV = "Jarvis Conversation"
@@ -729,7 +729,7 @@ def handle_chat_send(payload: dict) -> None:
 	viewing when they asked (floating-widget auto-context). Prepended to the
 	agent prompt only; the persisted/visible user message is unchanged.
 
-	Sprint-3 (2026-06-16 review): the inline ``except OpenclawUnreachableError``
+	Sprint-3 (2026-06-16 review): the inline ``except AgentUnreachableError``
 	blocks only marked the placeholder errored for openclaw-specific
 	failures. Any OTHER exception (cryptography.InvalidKey, ssl.SSLError,
 	programmer bug in _handle_event, etc.) propagated to RQ without
@@ -882,7 +882,7 @@ def handle_chat_send(payload: dict) -> None:
 		# Device-paired WebSocket to the tenant's gateway.
 		# Uses a per-process connection pool so we don't pay the
 		# DNS + TCP + TLS + WS upgrade + handshake (~50-200ms) on
-		# every turn. The pool eviction on OpenclawUnreachableError
+		# every turn. The pool eviction on AgentUnreachableError
 		# means the next attempt will reconnect; we don't auto-
 		# retry inside this turn because tokens may have already
 		# streamed to the UI by the time the failure surfaces.
@@ -931,7 +931,7 @@ def handle_chat_send(payload: dict) -> None:
 				if patch_session_model:
 					try:
 						sess.set_session_model(conv.session_key, session_model_ref)
-					except OpenclawUnreachableError:
+					except AgentUnreachableError:
 						raise
 					except Exception:
 						frappe.log_error(
@@ -978,7 +978,7 @@ def handle_chat_send(payload: dict) -> None:
 						)
 						or {}
 					)
-				except OpenclawUnreachableError as e:
+				except AgentUnreachableError as e:
 					# The ack window closed with the request frame already on
 					# the wire. openclaw routinely ACCEPTS the message and runs
 					# the whole turn while the bench is still waiting, so
@@ -999,7 +999,7 @@ def handle_chat_send(payload: dict) -> None:
 				# drop exactly the notes we folded in (by id), so the correction
 				# is delivered once, not re-nagged, without clobbering a discard
 				# appended mid-turn or one a concurrent continuation delivered. A
-				# pre-ack failure raises OpenclawUnreachableError below instead of
+				# pre-ack failure raises AgentUnreachableError below instead of
 				# reaching here, leaving the notes for retry. An ack TIMEOUT is
 				# excluded for the same reason: delivery is unproven there, and
 				# re-nagging a correction is a much cheaper mistake than silently
@@ -1048,7 +1048,7 @@ def handle_chat_send(payload: dict) -> None:
 							title="chat: usage record hook failed",
 							message=frappe.get_traceback(),
 						)
-		except OpenclawUnreachableError as e:
+		except AgentUnreachableError as e:
 			# Pre-ack only (relay_turn_events never raises): the run never
 			# started, so this is a real, retriable error. Gray zone: a
 			# DELIVERED send whose ack was lost lands here too and a user
@@ -1178,7 +1178,7 @@ def handle_chat_send(payload: dict) -> None:
 
 	except Exception as e:
 		# Last-resort backstop. Any exception that wasn't an
-		# OpenclawUnreachableError (e.g. cryptography.InvalidKey from
+		# AgentUnreachableError (e.g. cryptography.InvalidKey from
 		# device-pairing signing, ssl.SSLError, a tool-handler bug,
 		# DoesNotExistError on a stale conversation row) would otherwise
 		# leave the assistant row at ``streaming=1`` indefinitely. Mark
@@ -1868,7 +1868,7 @@ def _classify_error(err_text: str, exc=None) -> str:
 	if code == "turn-timeout":
 		return "timeout"
 	low = (err_text or "").lower()
-	if isinstance(exc, OpenclawUnreachableError) or "ws open failed" in low or "unreachable" in low:
+	if isinstance(exc, AgentUnreachableError) or "ws open failed" in low or "unreachable" in low:
 		return "unreachable"
 	if "recovery window" in low:
 		return "recovery-expired"

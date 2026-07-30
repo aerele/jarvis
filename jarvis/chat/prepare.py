@@ -24,7 +24,7 @@ Ruled owners folded in here (WP-D / D1, RULINGS-PA):
     observed ack (R-2); prepare only stashes the drained ids for the pump.
 
 On success: ``preparing -> ready`` then ``ensure_pump`` + wake so the pump picks it
-up. On an ``OpenclawUnreachableError`` bootstrap failure: ``preparing -> errored``
+up. On an ``AgentUnreachableError`` bootstrap failure: ``preparing -> errored``
 (release credit) + a fenced ``run:error`` (no retry — matches legacy). Never
 blocks the pump (it is its own RQ job).
 """
@@ -38,7 +38,7 @@ import frappe
 
 from jarvis._session import impersonate
 from jarvis.chat import turn_state as ts
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
@@ -162,7 +162,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 			if patch_session_model:
 				try:
 					sess.set_session_model(session_key, session_model_ref)
-				except OpenclawUnreachableError:
+				except AgentUnreachableError:
 					raise
 				except Exception:
 					frappe.log_error(title="prepare.model_patch", message=frappe.get_traceback())
@@ -181,7 +181,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 					frappe.db.commit()
 			except Exception:
 				frappe.log_error(title="prepare.watermark", message=frappe.get_traceback())
-	except OpenclawUnreachableError as exc:
+	except AgentUnreachableError as exc:
 		# Pre-dispatch unreachable = a real, retriable error (the run never started).
 		_prepare_error(run_id, version, assistant_msg, conversation, owner, str(exc), exc=exc)
 		return {"ok": False, "reason": "unreachable"}

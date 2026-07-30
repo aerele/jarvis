@@ -169,7 +169,7 @@ class TestClauseAssemblyOrdering(FrappeTestCase):
 			]
 		)
 		with (
-			patch("jarvis.chat.agent_session_pool.OpenclawSession.connect", return_value=fake_sess),
+			patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess),
 			patch("jarvis.chat.worker.publish_to_user"),
 			patch("jarvis.chat.wiki.wiki_clause", return_value="; WIKI-SENT"),
 			patch("jarvis.chat.customizations_clause.customizations_clause", return_value="; CUSTOM-SENT"),

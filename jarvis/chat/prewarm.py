@@ -68,7 +68,7 @@ import uuid
 
 import frappe
 
-from jarvis.chat.agent_client import OpenclawSession, oneshot_run_id
+from jarvis.chat.agent_client import AgentSession, oneshot_run_id
 from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
 # Ceiling on how often the one remaining trigger can bill a warm for one bench.
@@ -307,7 +307,7 @@ def warm_prefix() -> bool:
 			_log_skip("recent_turn")
 			return False
 		settings = frappe.get_single("Jarvis Settings")
-		# OpenclawSession.connect authenticates via device pairing
+		# AgentSession.connect authenticates via device pairing
 		# (ensure_paired / chat_device_* creds), NOT agent_token.
 		# agent_token is empty on managed/device-paired benches.
 		gateway_url = _gateway_ws_url(settings)
@@ -316,7 +316,7 @@ def warm_prefix() -> bool:
 			return False
 		model, provider = _resolve_default_model_and_provider(settings)
 		t0 = time.monotonic()
-		sess = OpenclawSession.connect(gateway_url)
+		sess = AgentSession.connect(gateway_url)
 		try:
 			throwaway = sess.create_session(label=f"jarvis-prewarm-{uuid.uuid4().hex[:8]}")
 			# The pin is the whole point: this warms ONE model's prefix cache,

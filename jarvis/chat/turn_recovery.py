@@ -26,7 +26,7 @@ from collections.abc import Iterator
 
 import frappe
 
-from jarvis.chat.agent_client import OpenclawSession
+from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
 
 MSG = "Jarvis Chat Message"
@@ -55,10 +55,10 @@ _RATE_WATCH_DEDUPE_HOURS = 20
 
 
 @contextlib.contextmanager
-def _recovery_connection(gateway_url: str) -> Iterator[OpenclawSession]:
+def _recovery_connection(gateway_url: str) -> Iterator[AgentSession]:
 	"""A dedicated short-lived connection for recovery. NEVER the shared pool
 	(agent_session_pool is single-turn-exclusive and not concurrency-safe)."""
-	sess = OpenclawSession.connect(gateway_url)
+	sess = AgentSession.connect(gateway_url)
 	try:
 		yield sess
 	finally:
@@ -288,7 +288,7 @@ def _error(row: dict, message: str) -> None:
 	_advance_macro(row["conversation"], errored=True)
 
 
-def _active_map(sess: OpenclawSession) -> dict:
+def _active_map(sess: AgentSession) -> dict:
 	"""One sessions.list per cycle -> {session_key: hasActiveRun}. Replaces the
 	per-row is_run_active call (#13)."""
 	res = sess._request("sessions.list", {}, timeout_s=10)
@@ -370,7 +370,7 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	return {"checked": len(rows), **counts}
 
 
-def _recover_one(sess: OpenclawSession, row: dict, active: dict) -> str:
+def _recover_one(sess: AgentSession, row: dict, active: dict) -> str:
 	"""Drive one eligible (latest-per-conversation) recovering row. Returns
 	'finalized' | 'active' | 'waiting'. Ceiling/error is handled by the caller
 	and the unconditional backstop, not here."""

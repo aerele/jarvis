@@ -1,4 +1,4 @@
-"""Unit tests for the openclaw-native RPC methods on OpenclawSession.
+"""Unit tests for the openclaw-native RPC methods on AgentSession.
 
 These mirror openclaw's own UI gateway model (chat.send + chat.history +
 sessions.list/get), so the bench can drive turns and reconcile from the
@@ -9,12 +9,12 @@ Each method is request/response, so we bypass __init__ and stub _request.
 
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.agent_client import OpenclawSession
+from jarvis.chat.agent_client import AgentSession
 
 
 class TestOpenclawNativeRpcs(FrappeTestCase):
 	def _sess(self, response):
-		sess = OpenclawSession.__new__(OpenclawSession)  # bypass __init__/WS
+		sess = AgentSession.__new__(AgentSession)  # bypass __init__/WS
 		captured = {"response": response}
 
 		def fake_request(method, params, *, timeout_s):
@@ -93,35 +93,35 @@ class TestOpenclawNativeRpcs(FrappeTestCase):
 	def test_stream_agent_turn_tags_midstream_drop_as_turn_timeout(self):
 		# A WS drop AFTER the run is acked must surface code="turn-timeout" so
 		# turn_handler parks it for recovery instead of false-erroring (#4).
-		from jarvis.chat.agent_client import OpenclawUnreachableError
+		from jarvis.chat.agent_client import AgentUnreachableError
 
-		sess = OpenclawSession.__new__(OpenclawSession)
+		sess = AgentSession.__new__(AgentSession)
 		frames = [{"type": "res", "id": "a1", "ok": True, "payload": {"runId": "r1"}}]
 		sess._send = lambda method, params: "a1"
 
 		def fake_recv(_timeout):
 			if frames:
 				return frames.pop(0)
-			raise OpenclawUnreachableError("ws closed mid-stream")
+			raise AgentUnreachableError("ws closed mid-stream")
 
 		sess._recv = fake_recv
-		with self.assertRaises(OpenclawUnreachableError) as ctx:
+		with self.assertRaises(AgentUnreachableError) as ctx:
 			list(sess.stream_agent_turn("sk", "hi", "idem"))
 		self.assertEqual(getattr(ctx.exception, "code", None), "turn-timeout")
 
 	def test_stream_agent_turn_propagates_preack_failure_uncoded(self):
 		# A failure BEFORE the ack (run never started) must NOT be turn-timeout,
 		# so turn_handler errors it rather than parking a non-existent run.
-		from jarvis.chat.agent_client import OpenclawUnreachableError
+		from jarvis.chat.agent_client import AgentUnreachableError
 
-		sess = OpenclawSession.__new__(OpenclawSession)
+		sess = AgentSession.__new__(AgentSession)
 		sess._send = lambda method, params: "a1"
 
 		def fake_recv(_timeout):
-			raise OpenclawUnreachableError("ws closed before ack")
+			raise AgentUnreachableError("ws closed before ack")
 
 		sess._recv = fake_recv
-		with self.assertRaises(OpenclawUnreachableError) as ctx:
+		with self.assertRaises(AgentUnreachableError) as ctx:
 			list(sess.stream_agent_turn("sk", "hi", "idem"))
 		self.assertNotEqual(getattr(ctx.exception, "code", None), "turn-timeout")
 

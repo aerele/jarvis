@@ -809,7 +809,7 @@ import uuid
 
 from frappe import _
 
-from jarvis.chat.agent_client import OpenclawSession
+from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.policy import validate_can_send
 
 _INFLIGHT_FRESH_SECONDS = 180
@@ -2324,7 +2324,7 @@ def enqueue_continuation(conversation: str, receipt: str, *, failed: bool = Fals
 	return _enqueue_turn(conversation, scaffold.format(receipt=safe), hidden=True, exempt_overload=True)
 
 
-def _ensure_session_key(user: str, sess: OpenclawSession | None = None) -> str:
+def _ensure_session_key(user: str, sess: AgentSession | None = None) -> str:
 	"""Create an openclaw session for `user`, persist the Chat Session row,
 	and return the session_key. Caller is responsible for storing it on the
 	parent Conversation row.
@@ -2349,7 +2349,7 @@ def _ensure_session_key(user: str, sess: OpenclawSession | None = None) -> str:
 		if not gateway_url or not gateway_token:
 			frappe.throw(_("openclaw is not configured"))
 
-		one_shot = OpenclawSession.connect(gateway_url)
+		one_shot = AgentSession.connect(gateway_url)
 		try:
 			session_key = one_shot.create_session(label=f"jarvis-chat-{user}-{int(time.time() * 1000)}")
 		finally:

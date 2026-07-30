@@ -46,7 +46,7 @@ SESSION = "Jarvis Chat Session"
 
 
 class _FakeSess:
-	"""In-process stand-in for a pooled OpenclawSession — the bootstrap RPCs
+	"""In-process stand-in for a pooled AgentSession — the bootstrap RPCs
 	(prepare) + the usage poll (finalize) with NO real socket."""
 
 	def __init__(self):

@@ -6,7 +6,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import session_lifecycle
-from jarvis.chat.agent_client import OpenclawSession
+from jarvis.chat.agent_client import AgentSession
 
 
 def _lapse_cooldown(prewarm):
@@ -30,7 +30,7 @@ def _lapse_cooldown(prewarm):
 
 class TestFireAgent(FrappeTestCase):
 	def test_fire_agent_sends_deliver_false_and_returns_runid(self):
-		sess = OpenclawSession.__new__(OpenclawSession)  # bypass __init__/WS
+		sess = AgentSession.__new__(AgentSession)  # bypass __init__/WS
 		captured = {}
 
 		def fake_request(method, params, *, timeout_s):
@@ -87,7 +87,7 @@ class TestWarmPrefix(FrappeTestCase):
 		before = frappe.db.count("Jarvis Chat Message")
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = fake_sess
@@ -117,7 +117,7 @@ class TestWarmPrefix(FrappeTestCase):
 		fake_sess.is_run_active.return_value = False  # predecessor's warm turn is done
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
 		):
@@ -147,7 +147,7 @@ class TestWarmPrefix(FrappeTestCase):
 		fake_sess.delete_session.side_effect = RuntimeError("gateway blip")
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
 		):
@@ -173,7 +173,7 @@ class TestWarmPrefix(FrappeTestCase):
 
 		before = time.time()
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = fake_sess
@@ -212,7 +212,7 @@ class TestWarmPrefix(FrappeTestCase):
 		fake_sess.is_run_active.return_value = False
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
 			patch.object(session_lifecycle, "RUN_START_GRACE_S", 3600),
@@ -241,7 +241,7 @@ class TestWarmPrefix(FrappeTestCase):
 		fake_sess.is_run_active.return_value = False
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
 		):
@@ -255,7 +255,7 @@ class TestWarmPrefix(FrappeTestCase):
 
 		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = MagicMock(create_session=MagicMock(return_value="sk"))
@@ -285,7 +285,7 @@ class TestWarmPrefix(FrappeTestCase):
 		fake_sess.create_session.return_value = "sk_throwaway"
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=stub),
 		):
 			OC.connect.return_value = fake_sess
@@ -303,7 +303,7 @@ class TestWarmPrefix(FrappeTestCase):
 		cache_mock.set.return_value = True  # the atomic claim is won
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 			patch("jarvis.chat.prewarm.frappe.cache", return_value=cache_mock),
 			patch("jarvis.chat.prewarm.frappe.logger"),
@@ -330,7 +330,7 @@ class TestWarmPrefix(FrappeTestCase):
 		fake_sess.create_session.return_value = "sk_throwaway"
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 		):
 			OC.connect.return_value = fake_sess
@@ -377,7 +377,7 @@ class TestWarmPrefix(FrappeTestCase):
 			return settings
 
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", side_effect=load_settings_then_race),
 			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
 		):
@@ -411,7 +411,7 @@ class TestPrefixAlreadyWarm(FrappeTestCase):
 
 		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		with (
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 			patch.object(prewarm, "_prefix_recently_used", return_value=True),
 		):
 			self.assertFalse(prewarm.warm_prefix())
@@ -479,7 +479,7 @@ class TestPrewarmKillSwitch(FrappeTestCase):
 		with (
 			patch.dict(frappe.local.conf, {prewarm._PREWARM_CONF_KEY: 0}),
 			patch("jarvis.chat.prewarm.frappe.enqueue") as enq,
-			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.AgentSession") as OC,
 		):
 			prewarm.enqueue_warm_if_due()
 			self.assertFalse(prewarm.warm_prefix())

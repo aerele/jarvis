@@ -2,7 +2,7 @@
 bench uses, with deterministic transcript playback and configurable faults.
 
 It is a REAL ``websockets`` server on ``127.0.0.1:<port>`` (reachable by the
-real ``jarvis.chat.agent_client.OpenclawSession`` over a real socket), so
+real ``jarvis.chat.agent_client.AgentSession`` over a real socket), so
 the whole bench transport + relay path is exercised — no frame mocking.
 
 Protocol subset (grounded in spike S2 + the transport client):

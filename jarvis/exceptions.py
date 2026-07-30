@@ -77,7 +77,7 @@ class ResultTooLargeError(InvalidArgumentError):
 		super().__init__(message)
 
 
-class OpenclawUnreachableError(JarvisError):
+class AgentUnreachableError(JarvisError):
 	"""Raised when the openclaw gateway can't be reached (WS handshake
 	failed, container down).
 
@@ -102,7 +102,7 @@ class OpenclawUnreachableError(JarvisError):
 		self.details = details
 
 
-class OpenclawReloadFailedError(JarvisError):
+class AgentReloadFailedError(JarvisError):
 	"""Raised when secrets.reload returned ok=false or timed out."""
 
 

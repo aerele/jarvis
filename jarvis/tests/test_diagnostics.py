@@ -110,12 +110,12 @@ class TestPingOpenclaw(FrappeTestCase):
 		self.assertNotIn("agent_url", out)
 
 	def test_unreachable(self):
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "ws://h:1")
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
-		with patch("jarvis.agent_ws.ping", side_effect=OpenclawUnreachableError("refused")):
+		with patch("jarvis.agent_ws.ping", side_effect=AgentUnreachableError("refused")):
 			out = diagnostics.ping_openclaw()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["kind"], "unreachable")

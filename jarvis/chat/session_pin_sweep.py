@@ -77,7 +77,7 @@ Clearing goes through ``sessions.patch {"model": null}`` rather than an edit of
 ``sessions.json`` on disk: the gateway keeps the store in memory and rewrites it
 on every session update, so a host-side edit either loses the race or needs the
 container stopped. The patch response echoes the resulting store entry, so every
-clear is verified rather than trusted. See ``OpenclawSession.clear_session_model``.
+clear is verified rather than trusted. See ``AgentSession.clear_session_model``.
 
 The listing and the patch are seconds apart, and both facts behind a CLEAR can
 move in that window, so each one is rechecked at patch time: the conversation's
@@ -199,10 +199,10 @@ def run(apply: bool = False, max_clear: int = MAX_CLEAR) -> dict:
 	if not gateway_url:
 		return SweepSummary(apply=bool(apply), aborted="no agent_url").as_dict()
 
-	from jarvis.chat.agent_client import OpenclawSession
+	from jarvis.chat.agent_client import AgentSession
 
 	try:
-		sess = OpenclawSession.connect(gateway_url)
+		sess = AgentSession.connect(gateway_url)
 	except Exception:
 		frappe.log_error(title="session_pin_sweep: connect failed", message=frappe.get_traceback())
 		return SweepSummary(apply=bool(apply), aborted="connect failed").as_dict()

@@ -76,7 +76,7 @@ import frappe
 
 from jarvis.chat import turn_state as ts
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 TURN = "Jarvis Chat Turn"
 PUMP = "Jarvis Relay Pump"
@@ -161,7 +161,7 @@ LEASE_MIRROR_TTL_S = 30
 # IMMEDIATE successor, up to this many consecutive transport retries. frappe.enqueue
 # exposes no delayed/scheduled enqueue (no enqueue_in/at; the RQ job scheduler is not
 # run by the bench workers), so the ruled '5s/15s/45s' time-delay is realized as a
-# bounded fast-retry COUNT paced by the OpenclawSession connect timeout, then a
+# bounded fast-retry COUNT paced by the AgentSession connect timeout, then a
 # fall-through to the watchdog-cron / sender ``ensure_pump`` revival for a sustained
 # outage. This preserves the hard invariant (never exit successor-less with live
 # work, within the budget) without a hot reconnect loop. See PUMP-RUNBOOK.md §CDX-1.
@@ -1204,13 +1204,13 @@ def _default_make_mux(relay_target_id: str, epoch: int) -> RelayMux:
 	(reconnect-per-hop; the pump owns connect, the mux is the I/O adapter). The
 	gateway URL is resolved from Jarvis Settings ``agent_url``. Production
 	(WP-1e) exercises this; tests inject a transport double."""
-	from jarvis.chat.agent_client import OpenclawSession
+	from jarvis.chat.agent_client import AgentSession
 
 	settings = frappe.get_cached_doc("Jarvis Settings")
 	gateway_url = (
 		(getattr(settings, "agent_url", "") or "").replace("http://", "ws://").replace("https://", "wss://")
 	)
-	session = OpenclawSession.connect(gateway_url)
+	session = AgentSession.connect(gateway_url)
 	mux = RelayMux(session, relay_target_id, on_breaker=_on_poison_breaker)
 	return mux.start()
 
@@ -1919,7 +1919,7 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 			thinking=dispatch.get("thinking"),
 			attachments=dispatch.get("attachments"),
 		)
-	except OpenclawUnreachableError as exc:
+	except AgentUnreachableError as exc:
 		# Immediate send failure (socket write failed) — resolve inline (rare).
 		_handle_ack_failure(ctx, rs, exc)
 		return False
@@ -1957,7 +1957,7 @@ def _poll_acks(ctx: PumpContext) -> None:
 			# deadline -> result(0) cleans up the mux map and raises the ack-timeout
 			# sentinel (the timeout, not a blocking wait).
 			ack = pa.fut.result(0)
-		except OpenclawUnreachableError as exc:
+		except AgentUnreachableError as exc:
 			_handle_ack_failure(ctx, pa.rs, exc)
 			continue
 		_on_ack_success(ctx, pa, ack)
@@ -1988,7 +1988,7 @@ def _on_ack_success(ctx: PumpContext, pa: _PendingAck, ack: dict) -> None:
 	rs.version = _resync_version(rs.run_id)
 
 
-def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: OpenclawUnreachableError) -> bool:
+def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableError) -> bool:
 	"""Ack did not resolve OK. The ``ack-timeout`` sentinel (also the Closing/WS
 	drop sentinel, OAR-10) is AMBIGUOUS — the request was written, the peer may
 	have accepted it — so park recovering. A DEFINITE pre-ack rejection (ok:false
