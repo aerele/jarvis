@@ -4,7 +4,7 @@ Three whitelisted endpoints exposed as buttons:
 
 - ping_admin: hits an authenticated admin endpoint to verify the
   customer's jarvis_admin_api_key works against jarvis_admin_url.
-- ping_openclaw: opens a WS to agent_url with agent_token and completes
+- ping_agent: opens a WS to agent_url with agent_token and completes
   the connect handshake only. No restart, no reload.
 - force_resync: re-runs the same sync path as Jarvis Settings.on_update
   without depending on its change-detection. Useful when an LLM key
@@ -53,7 +53,7 @@ def ping_admin() -> dict:
 
 
 @frappe.whitelist()
-def ping_openclaw() -> dict:
+def ping_agent() -> dict:
 	"""Open WS to agent_url with agent_token; connect handshake only.
 
 	SECURITY (PART 4 REVISED, TASK 34-R / 45): gated on ``require_jarvis_admin``

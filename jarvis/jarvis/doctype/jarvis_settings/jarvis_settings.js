@@ -37,7 +37,7 @@ frappe.ui.form.on("Jarvis Settings", {
 			() => {
 				frappe
 					.call({
-						method: "jarvis.diagnostics.ping_openclaw",
+						method: "jarvis.diagnostics.ping_agent",
 					})
 					.then((r) => {
 						const m = r.message || {};

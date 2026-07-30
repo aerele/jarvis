@@ -2,7 +2,7 @@
 exploit reproductions + fix proofs.
 
 Covers the central admin gate (TASK 44), the Settings operator-field permlevel
-fence (TASK 46), the ping_admin/ping_openclaw token+URL redaction (TASK 34-R),
+fence (TASK 46), the ping_admin/ping_agent token+URL redaction (TASK 34-R),
 the onboarding grant (TASK 48), the date_add SQLi (TASK 35), the widened
 agent-admin endpoints (TASK 45/47), the Jarvis User Settings ORM scoping (TASK
 52), the FOUR owner-decision capabilities kept System-Manager-only, and the
@@ -307,7 +307,7 @@ class TestSettingsPermlevelFence(Part4Base):
 
 
 # --------------------------------------------------------------------------- #
-# TASK 34-R — ping_admin / ping_openclaw never leak the token or operator URL
+# TASK 34-R — ping_admin / ping_agent never leak the token or operator URL
 # --------------------------------------------------------------------------- #
 class TestDiagnosticsRedaction(Part4Base):
 	def test_ping_admin_redacts_token_and_urls_on_success(self):
@@ -333,7 +333,7 @@ class TestDiagnosticsRedaction(Part4Base):
 		self.assertNotIn("connection", res)
 		self.assertNotIn("admin_url", res)
 
-	def test_ping_openclaw_drops_agent_url(self):
+	def test_ping_agent_drops_agent_url(self):
 		mock_settings = MagicMock()
 		mock_settings.agent_url = "ws://secret-openclaw"
 		mock_settings.get_password.return_value = "tok-secret"
@@ -342,7 +342,7 @@ class TestDiagnosticsRedaction(Part4Base):
 			patch("frappe.get_single", return_value=mock_settings),
 			patch("jarvis.agent_ws.ping", return_value=None),
 		):
-			res = diagnostics.ping_openclaw()
+			res = diagnostics.ping_agent()
 		self.assertTrue(res.get("ok"))
 		self.assertNotIn("agent_url", res)
 		self.assertNotIn("secret-openclaw", json.dumps(res))
@@ -352,7 +352,7 @@ class TestDiagnosticsRedaction(Part4Base):
 			with self.assertRaises(frappe.PermissionError):
 				diagnostics.ping_admin()
 			with self.assertRaises(frappe.PermissionError):
-				diagnostics.ping_openclaw()
+				diagnostics.ping_agent()
 
 	def test_ping_admin_admits_jarvis_admin(self):
 		# The gate lets a Jarvis-Admin-not-SM through (returns a config verdict

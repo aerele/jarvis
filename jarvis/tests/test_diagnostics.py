@@ -66,7 +66,7 @@ class TestPingAdmin(FrappeTestCase):
 		self.assertEqual(out["kind"], "unreachable")
 
 
-class TestPingOpenclaw(FrappeTestCase):
+class TestPingAgent(FrappeTestCase):
 	def setUp(self):
 		s = frappe.get_single("Jarvis Settings")
 		self._orig_url = s.get("agent_url") or ""
@@ -81,7 +81,7 @@ class TestPingOpenclaw(FrappeTestCase):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "")
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
-		out = diagnostics.ping_openclaw()
+		out = diagnostics.ping_agent()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["kind"], "config")
 		self.assertIn("agent_url", out["error"])
@@ -92,7 +92,7 @@ class TestPingOpenclaw(FrappeTestCase):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "ws://h:1")
 		frappe.db.commit()
 		with patch.object(frappe.get_single("Jarvis Settings").__class__, "get_password", return_value=""):
-			out = diagnostics.ping_openclaw()
+			out = diagnostics.ping_agent()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["kind"], "config")
 		self.assertIn("agent_token", out["error"])
@@ -102,7 +102,7 @@ class TestPingOpenclaw(FrappeTestCase):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
 		with patch("jarvis.agent_ws.ping") as p:
-			out = diagnostics.ping_openclaw()
+			out = diagnostics.ping_agent()
 		p.assert_called_once_with("ws://h:1", "t")
 		self.assertTrue(out["ok"])
 		# PART 4 TASK 34-R: the endpoint agent_url is an operator-disclosure surface
@@ -116,7 +116,7 @@ class TestPingOpenclaw(FrappeTestCase):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
 		with patch("jarvis.agent_ws.ping", side_effect=AgentUnreachableError("refused")):
-			out = diagnostics.ping_openclaw()
+			out = diagnostics.ping_agent()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["kind"], "unreachable")
 

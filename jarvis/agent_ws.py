@@ -1,7 +1,7 @@
 """Bench → openclaw container WebSocket ping helper.
 
 Single use: the `Test Agent Connection` diagnostic button on Jarvis
-Settings (via `jarvis.diagnostics.ping_openclaw`) opens a WS to the
+Settings (via `jarvis.diagnostics.ping_agent`) opens a WS to the
 customer's container, completes the operator-role connect handshake,
 and closes. No secrets.reload, no restart.
 
