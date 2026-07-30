@@ -1,4 +1,5 @@
 # app/jarvis/tests/test_prewarm.py
+import time
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -6,6 +7,25 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import session_lifecycle
 from jarvis.chat.openclaw_client import OpenclawSession
+
+
+def _lapse_cooldown(prewarm):
+	"""Put the bench where the NEXT warm really finds it: cooldown expired, and
+	the remembered predecessor fired a cooldown ago.
+
+	Both halves matter. Clearing the cooldown key alone would leave a pointer
+	stamped microseconds ago, and reclaim_throwaway_session deliberately refuses
+	to delete a session whose run may not have started yet (issue #535) - so such
+	a test would be asserting the guard, not the reclaim. Backdating the stamp is
+	what the four-minute cooldown does in production."""
+	frappe.cache().delete_value(prewarm._warm_cooldown_key())
+	pointer = frappe.cache().get_value(prewarm._warm_last_key())
+	if isinstance(pointer, dict):
+		frappe.cache().set_value(
+			prewarm._warm_last_key(),
+			dict(pointer, fired_at=time.time() - 600),
+			expires_in_sec=3600,
+		)
 
 
 class TestFireAgent(FrappeTestCase):
@@ -91,12 +111,13 @@ class TestWarmPrefix(FrappeTestCase):
 			self.assertTrue(prewarm.warm_prefix())
 			# Nothing to reclaim on the very first warm of a bench.
 			fake_sess.delete_session.assert_not_called()
-			frappe.cache().delete_value(prewarm._warm_cooldown_key())  # lapse the cooldown
+			_lapse_cooldown(prewarm)
 			self.assertTrue(prewarm.warm_prefix())
 
 		# The second warm reclaimed the first's session — and only that one.
 		fake_sess.delete_session.assert_called_once_with("sk_first")
-		self.assertEqual(frappe.cache().get_value(prewarm._warm_last_key()), "sk_second")
+		pointer = frappe.cache().get_value(prewarm._warm_last_key())
+		self.assertEqual(pointer["key"], "sk_second")
 
 	def test_warm_prefix_survives_previous_delete_failure(self):
 		"""A failed reclaim must never fail the warm — the orphan sweep is the
@@ -118,11 +139,102 @@ class TestWarmPrefix(FrappeTestCase):
 		):
 			OC.connect.return_value = fake_sess
 			self.assertTrue(prewarm.warm_prefix())
-			frappe.cache().delete_value(prewarm._warm_cooldown_key())
+			_lapse_cooldown(prewarm)
 			self.assertTrue(prewarm.warm_prefix())
 
 		self.assertEqual(fake_sess.fire_agent.call_count, 2)
-		self.assertEqual(frappe.cache().get_value(prewarm._warm_last_key()), "sk_second")
+		pointer = frappe.cache().get_value(prewarm._warm_last_key())
+		self.assertEqual(pointer["key"], "sk_second")
+
+	def test_warm_prefix_remembers_when_it_fired(self):
+		"""The pointer carries a fire time, not just a key. Without it the next
+		warm cannot tell a predecessor whose run finished from one whose run has
+		not started yet, and #535's guard has nothing to work with."""
+		from jarvis.chat import prewarm
+
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
+		frappe.cache().delete_value(prewarm._warm_last_key())
+		fake_sess = MagicMock()
+		fake_sess.create_session.return_value = "sk_only"
+
+		before = time.time()
+		with (
+			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
+		):
+			OC.connect.return_value = fake_sess
+			self.assertTrue(prewarm.warm_prefix())
+
+		pointer = frappe.cache().get_value(prewarm._warm_last_key())
+		self.assertEqual(pointer["key"], "sk_only")
+		self.assertGreaterEqual(pointer["fired_at"], before)
+		self.assertLessEqual(pointer["fired_at"], time.time())
+
+	def test_a_predecessor_fired_moments_ago_is_left_for_the_sweep(self):
+		"""THE #535 REGRESSION, at the level that produces it.
+
+		Two warms can pass the get-then-set cooldown check in the same instant
+		(observed 6ms apart on jarvis-pool-bf4097), which makes "the predecessor"
+		a session whose fire-and-forget turn openclaw has ACCEPTED but not yet
+		STARTED. sessions.list answers hasActiveRun=false for that state exactly
+		as it does for a finished run - measured median 670ms wide - so the probe
+		alone waves the delete through and it lands on a live run.
+
+		Here the cooldown is cleared WITHOUT backdating the pointer, which is
+		what that race looks like from prewarm's side.
+
+		The grace is widened for the duration so the assertion cannot depend on
+		how long a loaded CI box takes to get from the first warm to the second.
+		The real 5s value is plenty in production and asserted directly in
+		test_throwaway_session_reclaim.py; what this test is for is the wiring,
+		which must not turn into a timing flake."""
+		from jarvis.chat import prewarm
+
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
+		frappe.cache().delete_value(prewarm._warm_last_key())
+		fake_sess = MagicMock()
+		fake_sess.create_session.side_effect = ["sk_first", "sk_second"]
+		# The gateway cannot see the run yet, so it reports the session as idle.
+		fake_sess.is_run_active.return_value = False
+
+		with (
+			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
+			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
+			patch.object(session_lifecycle, "RUN_START_GRACE_S", 3600),
+		):
+			OC.connect.return_value = fake_sess
+			self.assertTrue(prewarm.warm_prefix())
+			frappe.cache().delete_value(prewarm._warm_cooldown_key())
+			self.assertTrue(prewarm.warm_prefix())
+
+		fake_sess.delete_session.assert_not_called()
+		self.assertEqual(fake_sess.fire_agent.call_count, 2, "both warms must still fire")
+		# No leak: the pointer moved on and the sweep collects jarvis-prewarm-*
+		# on THROWAWAY_GRACE_HOURS, which is exactly what a skipped reclaim buys.
+		self.assertEqual(frappe.cache().get_value(prewarm._warm_last_key())["key"], "sk_second")
+
+	def test_a_pre_535_pointer_still_reclaims(self):
+		"""A bare-string pointer written before this deploy can still be in the
+		cache under its 24h TTL. It must reclaim as it always did, not crash and
+		not silently stop collecting."""
+		from jarvis.chat import prewarm
+
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
+		frappe.cache().set_value(prewarm._warm_last_key(), "sk_legacy", expires_in_sec=3600)
+		fake_sess = MagicMock()
+		fake_sess.create_session.return_value = "sk_new"
+		fake_sess.is_run_active.return_value = False
+
+		with (
+			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
+			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
+		):
+			OC.connect.return_value = fake_sess
+			self.assertTrue(prewarm.warm_prefix())
+
+		fake_sess.delete_session.assert_called_once_with("sk_legacy")
 
 	def test_warm_prefix_debounced_second_call_is_noop(self):
 		from jarvis.chat import prewarm

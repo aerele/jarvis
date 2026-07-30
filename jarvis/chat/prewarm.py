@@ -7,6 +7,7 @@ for every subsequent new chat in the same container. We never touch the
 user's real session or write chat rows. Always best-effort; never raises.
 """
 
+import time
 import uuid
 
 import frappe
@@ -33,10 +34,11 @@ _WARM_COOLDOWN_S = 4 * 60
 _WARM_INPROGRESS_S = 90
 
 
-# The previous warm's session key, remembered so the NEXT warm can reclaim it
-# (see _reclaim_previous). TTL is far longer than the cooldown: losing this
-# pointer leaks one session, so err on the side of remembering. The orphan sweep
-# (session_lifecycle) is the backstop for whatever this misses.
+# The previous warm's session key AND the moment its turn was fired, remembered
+# so the NEXT warm can reclaim it (see _reclaim_previous). TTL is far longer than
+# the cooldown: losing this pointer leaks one session, so err on the side of
+# remembering. The orphan sweep (session_lifecycle) is the backstop for whatever
+# this misses.
 _WARM_LAST_TTL_S = 24 * 60 * 60
 
 
@@ -46,6 +48,24 @@ def _warm_cooldown_key() -> str:
 
 def _warm_last_key() -> str:
 	return f"jarvis:chat:prefix_warm:last:{frappe.local.site}"
+
+
+def _previous_pointer(prev) -> tuple[str, float | None]:
+	"""Unpack the remembered ``{"key", "fired_at"}`` pointer -> (key, fired_at).
+
+	Tolerates the pre-#535 shape, a bare session-key string with no fire time:
+	one of those can still be sitting in the cache under the 24h TTL when this
+	deploys. It reclaims exactly as it did before, which is correct for it - the
+	cooldown makes such a pointer minutes old in every case but the
+	concurrent-warm race, and that race cannot span a deploy."""
+	if isinstance(prev, dict):
+		key = prev.get("key")
+		fired_at = prev.get("fired_at")
+		return (
+			key if isinstance(key, str) else "",
+			fired_at if isinstance(fired_at, (int, float)) else None,
+		)
+	return (prev if isinstance(prev, str) else ""), None
 
 
 def _reclaim_previous(sess, prev, current: str) -> None:
@@ -68,11 +88,19 @@ def _reclaim_previous(sess, prev, current: str) -> None:
 	turns that into a skipped reclaim - the orphan sweep collects it - instead of
 	a killed run and a fresh orphan.
 
+	The remembered fire time is what makes that probe trustworthy (issue #535).
+	openclaw accepts a run a median 670ms before it starts one, and reports
+	"accepted, not started" and "finished" identically, so probing a predecessor
+	fired milliseconds ago answers "idle" for a run that is about to begin -
+	the very race above, unfixed. Handing reclaim_throwaway_session the fire time
+	makes it decline that delete instead.
+
 	Best-effort: on failure (or a lost cache pointer) the session is left for the
 	orphan sweep, which reaps jarvis-prewarm-* on a short grace."""
-	if not prev or not isinstance(prev, str) or prev == current:
+	key, fired_at = _previous_pointer(prev)
+	if not key or key == current:
 		return
-	reclaim_throwaway_session(sess, prev, logger_name="jarvis.chat.prewarm")
+	reclaim_throwaway_session(sess, key, logger_name="jarvis.chat.prewarm", fired_at=fired_at)
 
 
 def _gateway_ws_url(settings) -> str:
@@ -122,8 +150,6 @@ def warm_prefix() -> bool:
 		# disable warming for 25 min.
 		cache.set_value(key, "1", expires_in_sec=_WARM_INPROGRESS_S)
 		model, provider = _resolve_default_model_and_provider(settings)
-		import time
-
 		t0 = time.monotonic()
 		sess = OpenclawSession.connect(gateway_url)
 		try:
@@ -151,7 +177,16 @@ def warm_prefix() -> bool:
 			# just created, which would leak one every warm, forever.
 			last_key = _warm_last_key()
 			prev = cache.get_value(last_key)
-			cache.set_value(last_key, throwaway, expires_in_sec=_WARM_LAST_TTL_S)
+			# Remember WHEN as well as WHICH: the next warm needs the fire time to
+			# tell "this predecessor's run finished" from "this predecessor's run
+			# has not started yet", which sessions.list reports identically (issue
+			# #535). Stamped here rather than at the fire a few ms above; that only
+			# makes the guard marginally longer, never shorter.
+			cache.set_value(
+				last_key,
+				{"key": throwaway, "fired_at": time.time()},
+				expires_in_sec=_WARM_LAST_TTL_S,
+			)
 			_reclaim_previous(sess, prev, throwaway)
 		finally:
 			sess.close()

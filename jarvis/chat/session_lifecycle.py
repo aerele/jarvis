@@ -466,13 +466,56 @@ def _delete_gateway_session(sess, session_key: str, summary: dict) -> bool:
 RECLAIM_PROBE_ATTEMPTS = 6
 RECLAIM_PROBE_DELAY_S = 0.5
 
+# ...but a probe alone cannot close the window, because openclaw ACCEPTS a run
+# well before it STARTS one, and sessions.list reports "accepted, not started"
+# exactly like "finished": hasActiveRun is false in both.
+#
+# Measured on jarvis-pool-bf4097, 269 sessions, as the gap between the session
+# file's creation stamp (the sessions.create the bench issues immediately before
+# it fires) and the run's own session.started trajectory event:
+#
+#     p50 0.67s   p90 2.90s   p95 4.84s   (86 over 1s, 25 over 3s)
+#
+# So for a median 670ms after a fire-and-forget the gateway will happily tell a
+# reclaim "no run here", and the reclaim deletes the session out from under a
+# run that is about to start. That is a check-then-act race, and no amount of
+# probing fixes it: the probe is reading a signal that has not been written yet.
+#
+# What closes it is a caller that knows it never saw the run END. For those, a
+# "no active run" answer is only believed once RUN_START_GRACE_S has passed
+# since the fire, OR once a probe has actually caught the run active (positive
+# evidence beats the clock - see `seen_active`). Callers that DID watch the run
+# reach its terminal frame pass no fire time and keep the immediate reclaim.
+#
+# Sized just past the p95 above. We do not WAIT this out - waiting would tax
+# polish's synchronous request for nothing - we simply decline to guess and let
+# the orphan sweep collect it, which is the same trade the rest of this function
+# already makes.
+RUN_START_GRACE_S = 5.0
 
-def reclaim_throwaway_session(sess, session_key: str, *, logger_name: str) -> bool:
+
+def reclaim_throwaway_session(
+	sess,
+	session_key: str,
+	*,
+	logger_name: str,
+	fired_at: float | None = None,
+) -> bool:
 	"""Delete a throwaway session once the gateway stops reporting a run on it.
 
 	Probes immediately, then re-checks after ``RECLAIM_PROBE_DELAY_S`` up to
 	``RECLAIM_PROBE_ATTEMPTS`` times. Returns True when the session was deleted,
-	False when it was left behind - still busy, or the gateway would not answer.
+	False when it was left behind - still busy, not started yet, or the gateway
+	would not answer.
+
+	``fired_at`` is the wall-clock ``time.time()`` at which the run was fired,
+	and MUST be passed by any caller that did not watch that run reach its
+	terminal frame: prewarm (fire-and-forget by construction) and title/polish
+	on the path where ``stream_agent_turn`` raised. It marks the answer
+	"no active run" as untrustworthy until ``RUN_START_GRACE_S`` has elapsed,
+	which is what keeps a not-yet-started run from being deleted. Callers that
+	consumed the stream to its end pass nothing and reclaim immediately, as
+	before - there is no unstarted run to protect.
 
 	Leaving it behind is safe and deliberate: every throwaway label carries a
 	``THROWAWAY_GRACE_HOURS`` grace and its own ``ORPHAN_BATCH_MAX`` budget in
@@ -485,16 +528,33 @@ def reclaim_throwaway_session(sess, session_key: str, *, logger_name: str) -> bo
 	writing to would still be deleted underneath. Every case actually observed
 	on jarvis-pool-bf4097 had the run's lane demonstrably still working when the
 	delete landed (it re-created the session file afterwards), so the probe
-	covers them; the sweep covers whatever it does not.
+	covers them; the sweep covers whatever it does not. On the start side, a run
+	that takes longer than ``RUN_START_GRACE_S`` to appear is still exposed - 5%
+	of the measured sample - and the sweep is the backstop there too.
 
 	Never raises: every caller is a best-effort path whose real work is already
 	done by the time it reclaims."""
 	if not session_key or not isinstance(session_key, str):
 		return False
 	log = frappe.logger(logger_name)
+	# Before this instant an idle answer only means "the run has not started
+	# yet". 0.0 (no fire time given) => the caller saw the run end, trust at once.
+	#
+	# The isinstance check is not decoration: the arithmetic below sits OUTSIDE
+	# the per-probe try, so a caller that ever handed over a non-numeric fire
+	# time (a str from a cache round-trip, say) would raise straight through the
+	# "never raises" contract every caller here relies on.
+	trust_idle_after = (
+		fired_at + RUN_START_GRACE_S if isinstance(fired_at, (int, float)) and fired_at else 0.0
+	)
+	seen_active = False
 	for attempt in range(RECLAIM_PROBE_ATTEMPTS):
 		try:
-			if not sess.is_run_active(session_key):
+			if sess.is_run_active(session_key):
+				# Positive evidence the run exists. Every later idle answer is now
+				# a real finished-signal, so the grace above stops applying.
+				seen_active = True
+			elif seen_active or time.time() >= trust_idle_after:
 				sess.delete_session(session_key)
 				return True
 		except Exception:
@@ -504,5 +564,5 @@ def reclaim_throwaway_session(sess, session_key: str, *, logger_name: str) -> bo
 			return False
 		if attempt < RECLAIM_PROBE_ATTEMPTS - 1:
 			time.sleep(RECLAIM_PROBE_DELAY_S)
-	log.debug("throwaway session still running, left for the sweep key=%s", session_key)
+	log.debug("throwaway session not confirmed finished, left for the sweep key=%s", session_key)
 	return False
