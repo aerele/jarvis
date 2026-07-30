@@ -287,10 +287,16 @@ def warm_prefix() -> bool:
 		# Claim the slot BEFORE any slow work: the claim is the only thing
 		# standing between a burst of chat-surface loads and a burst of billed
 		# upstream runs, so nothing that can take milliseconds may precede it.
-		# On any exception below, the short marker expires in
-		# _WARM_INPROGRESS_S and warming retries soon; the full cooldown is
-		# armed only when there was nothing to do or the warm landed, so a
-		# transient blip never disables warming for the whole cooldown.
+		#
+		# The claim's own TTL is the SHORT one, and only two exits below extend
+		# it to the full cooldown: a warm that landed, and a prefix already hot.
+		# Everything else - an exception, or a bench with no gateway configured -
+		# keeps the 90s, so a transient blip retries in 90s instead of disabling
+		# warming for the whole cooldown, and a bench that becomes configured
+		# mid-onboarding starts warming within 90s rather than four minutes.
+		# Those exits spend nothing, so a retry costs one job and one Settings
+		# read; the thing worth throttling hard is a FIRED warm, not a skipped
+		# one.
 		if not _claim_warm_slot(cache, key, _WARM_INPROGRESS_S):
 			return False
 		if _prefix_recently_used():
