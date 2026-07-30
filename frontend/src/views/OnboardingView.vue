@@ -301,12 +301,13 @@
 								/>
 							</div>
 							<p
+								v-if="canReconnect"
 								class="mx-auto mt-5 max-w-[620px] text-center text-p-sm text-ink-gray-5"
 							>
 								Already subscribed and setting this site up again?
 								<button
 									class="ob-link"
-									:disabled="!canReconnect || state.payBusy"
+									:disabled="state.payBusy"
 									@click="startReconnect"
 								>
 									Reconnect instead
@@ -786,6 +787,7 @@ import {
 	getLlmSyncStatus,
 	listPlans,
 	listPaymentProviders,
+	reconnectAvailable,
 	startAccountReconnect,
 	checkAccountReconnect,
 	startSignup,
@@ -848,6 +850,8 @@ const state = reactive({
 	reconnectOffered: false,
 	reconnectRequestId: "",
 	reconnectFrom: "",
+	reconnectEligible: false,
+	reconnectNeedsCompany: false,
 	reconnectCode: "",
 	reconnectResentIn: 0,
 	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
@@ -880,10 +884,54 @@ const state = reactive({
 const steps = computed(() => STEPS_MANAGED);
 const selectedPlan = computed(() => state.plans.find((p) => p.name === state.planName) || {});
 const railIndex = computed(() => RAIL.findIndex((r) => r.id === state.step));
-// Admin resolves a reconnect by (email, company) - several company accounts can
-// share one address - so both halves must be filled before the offer is live.
-const canReconnect = computed(
+// Both halves of the identity must be present before the plane can resolve an
+// account: several company accounts can share one address.
+const reconnectInputsReady = computed(
 	() => /.+@.+\..+/.test((state.email || "").trim()) && !!(state.company || "").trim()
+);
+// The offer is shown ONLY when the control plane confirms this (email, company)
+// has an account a reconnect would actually find. Never guessed client-side: a
+// wrong guess either hides recovery from someone who needs it, or sends someone
+// who has no account into a code screen no code will ever arrive for.
+const canReconnect = computed(() => reconnectInputsReady.value && state.reconnectEligible);
+
+// Debounced so typing an address doesn't call the plane per keystroke, and
+// cached per (email, company) so going back and forth doesn't re-ask. Fails
+// closed: any error leaves the offer hidden and the customer on the normal path.
+let eligibilityTimer = null;
+const eligibilityCache = new Map();
+async function refreshReconnectEligibility() {
+	if (!reconnectInputsReady.value) {
+		state.reconnectEligible = false;
+		state.reconnectNeedsCompany = false;
+		return;
+	}
+	const key = `${state.email.trim().toLowerCase()}\u0000${state.company.trim().toLowerCase()}`;
+	if (eligibilityCache.has(key)) {
+		const hit = eligibilityCache.get(key);
+		state.reconnectEligible = hit.eligible;
+		state.reconnectNeedsCompany = hit.needsCompany;
+		return;
+	}
+	try {
+		const d = (await reconnectAvailable(state.email.trim(), state.company.trim())) || {};
+		const hit = { eligible: !!d.eligible, needsCompany: !!d.needs_company };
+		eligibilityCache.set(key, hit);
+		state.reconnectEligible = hit.eligible;
+		state.reconnectNeedsCompany = hit.needsCompany;
+	} catch (e) {
+		state.reconnectEligible = false;
+		state.reconnectNeedsCompany = false;
+	}
+}
+watch(
+	() => [state.step, state.email, state.company],
+	() => {
+		if (state.step !== "details") return;
+		clearTimeout(eligibilityTimer);
+		eligibilityTimer = setTimeout(refreshReconnectEligibility, 500);
+	},
+	{ immediate: true }
 );
 const frameSub = computed(() => FRAME_SUBS[state.step] || "Set up your workspace");
 
