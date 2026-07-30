@@ -126,9 +126,13 @@ def list_conversations() -> list[dict]:
 	reuses the hidden empty row.
 	"""
 	require_jarvis_access()
-	# Chat page loaded: warm the openclaw prefix cache in the background
+	# Chat surface loaded: warm the openclaw prefix cache in the background
 	# (best-effort, debounced) so the first turn of a new chat skips the cold
-	# provider prefill. Never blocks or fails this read.
+	# provider prefill. Never blocks or fails this read. Since #548 this is the
+	# ONLY prewarm trigger, and it is deliberately a load-correlated one: a warm
+	# is a billed upstream request against the tenant's own quota. The several
+	# call sites that reload this list AFTER a send are absorbed by prewarm's own
+	# "the prefix is already hot" guard, not by anything here.
 	from jarvis.chat import prewarm
 
 	prewarm.enqueue_warm_if_due()
@@ -1661,14 +1665,19 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 @frappe.whitelist()
 def warm_session() -> dict:
 	"""Fire-and-forget: warm this tenant's openclaw prefix cache so the next
-	new-chat first turn skips the cold prefill. Best-effort; always ok. The
-	chat UI calls this on open. Unconfigured benches no-op.
-	Runs in a background RQ job so the gunicorn web worker is not blocked."""
+	new-chat first turn skips the cold prefill. Best-effort; always ok.
+	Unconfigured benches no-op. Runs in a background RQ job so the gunicorn web
+	worker is not blocked.
+
+	Goes through ``enqueue_warm_if_due`` rather than enqueuing ``warm_prefix``
+	directly (#548). A warm is a billed upstream request against the tenant's own
+	quota, and enqueuing unconditionally let any authenticated Jarvis user turn N
+	calls to this endpoint into N short-queue jobs. The cooldown claim inside
+	``warm_prefix`` bounds the SPEND either way; this bounds the jobs too."""
 	require_jarvis_access()
-	frappe.enqueue(
-		"jarvis.chat.prewarm.warm_prefix",
-		queue="short",
-	)
+	from jarvis.chat import prewarm
+
+	prewarm.enqueue_warm_if_due()
 	return {"ok": True, "enqueued": True}
 
 

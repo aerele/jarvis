@@ -228,9 +228,13 @@ website_redirects = [
 # Session hooks
 # --------------
 
-# 2026-07 latency plan, Phase 1.4: kick off a (debounced) prefix warm-up on
-# login so the provider prompt cache is warm before the chat page even loads.
-on_session_creation = ["jarvis.chat.prewarm.warm_on_login"]
+# No prefix warm-up on login (removed in #548). It billed an upstream LLM
+# request against the tenant's own quota for EVERY login to the site, including
+# desk and API logins by users who never open chat, to buy a sub-second head
+# start on a prefill the chat-surface load already begins. The chat-surface load
+# (jarvis.chat.prewarm.enqueue_warm_if_due, from list_conversations) is now the
+# only prewarm trigger. Do not add a login hook or a timer back without a
+# measured warm-vs-cold first_delta_ms split - see jarvis/chat/prewarm.py.
 
 # A fresh install runs THIS and never after_migrate, so anything a day-1 site
 # needs that DocType sync does not produce has to be seeded here: the roles no
@@ -295,12 +299,13 @@ scheduler_events = {
 			# mid-reset, pull the new container's connection once admin reports
 			# Ready (same shape as reconcile_pending_llm_sync above).
 			"jarvis.onboarding.reconcile_pending_workspace_reset",
-			# 2026-07 latency plan, Phase 1.4: was */30, which left the
-			# provider prompt cache (5-10 min retention) cold for most of
-			# each half-hour. Every 5 min + a 4-min cooldown in prewarm.py
-			# keeps the prefix warm continuously while there is recent chat
-			# activity (the function itself gates on activity).
-			"jarvis.chat.prewarm.keep_warm_if_active",
+			# NO periodic prefix keep-warm here (removed in #548). Every tick
+			# billed an upstream LLM request against the tenant's own quota,
+			# and its activity gate was inverted: it fired only when chat
+			# traffic had ALREADY warmed the provider cache for free, and
+			# no-opped on the idle benches where a cold prefix is possible.
+			# A timer cannot know a turn is coming, which is the premise of
+			# warming, so it has no correct interval - not a shorter one.
 			# Chat-concurrency CDX-19 backstop: re-attempt macro runs parked in
 			# `waiting_capacity` (a step could not be admitted because the site's turn
 			# queue was momentarily full). A deferred step dispatches no turn, so the

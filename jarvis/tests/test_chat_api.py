@@ -897,11 +897,17 @@ class TestChatUiSettings(FrappeTestCase):
 
 
 class TestWarmSessionEndpoint(FrappeTestCase):
+	def tearDown(self):
+		from jarvis.chat import prewarm
+
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
+
 	def test_warm_session_enqueues_not_inline(self):
 		"""warm_session must enqueue warm_prefix as a background job and
 		return immediately - proves FIX D (non-blocking web worker)."""
-		from jarvis.chat import api
+		from jarvis.chat import api, prewarm
 
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		with patch("frappe.enqueue") as enqueue, patch("jarvis.chat.prewarm.warm_prefix") as wp:
 			out = api.warm_session()
 
@@ -912,6 +918,20 @@ class TestWarmSessionEndpoint(FrappeTestCase):
 		)
 		# warm_prefix must NOT have been called inline in the web worker.
 		wp.assert_not_called()
+		self.assertEqual(out, {"ok": True, "enqueued": True})
+
+	def test_warm_session_respects_the_cooldown(self):
+		"""#548: a warm is a billed upstream request against the tenant's own
+		quota, so this endpoint must go through the same cooldown as the
+		chat-surface trigger. It used to enqueue unconditionally, which let any
+		authenticated Jarvis user turn N calls into N short-queue jobs."""
+		from jarvis.chat import api, prewarm
+
+		frappe.cache().set_value(prewarm._warm_cooldown_key(), "1", expires_in_sec=60)
+		with patch("frappe.enqueue") as enqueue:
+			out = api.warm_session()
+
+		enqueue.assert_not_called()
 		self.assertEqual(out, {"ok": True, "enqueued": True})
 
 

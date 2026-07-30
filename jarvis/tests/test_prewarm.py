@@ -56,6 +56,20 @@ class TestWarmPrefix(FrappeTestCase):
 		s.llm_provider = "OpenAI"
 		return s
 
+	def setUp(self):
+		"""Pin "the prefix is cold" for the tests in this class.
+
+		warm_prefix now skips outright when a real turn ran within
+		_RECENT_TURN_S (#548), and a suite run creates Jarvis Chat Message rows
+		seconds before these tests - which would make every one of them assert
+		the new guard instead of the behaviour it was written for. The guard is
+		asserted for real in TestPrefixAlreadyWarm, which does not patch it."""
+		from jarvis.chat import prewarm
+
+		cold = patch.object(prewarm, "_prefix_recently_used", return_value=False)
+		cold.start()
+		self.addCleanup(cold.stop)
+
 	def tearDown(self):
 		from jarvis.chat import prewarm
 
@@ -280,13 +294,13 @@ class TestWarmPrefix(FrappeTestCase):
 		self.assertTrue(fired, "warm_prefix must fire even with empty agent_token")
 
 	def test_warm_prefix_failure_does_not_arm_full_cooldown(self):
-		"""A failed connect must set only the short in-progress marker,
-		not the full cooldown. Proves FIX B: transient failures retry soon
-		instead of being disabled for 25 min."""
+		"""A failed connect must leave only the short in-progress claim, not the
+		full cooldown. Proves FIX B: transient failures retry soon instead of
+		being disabled for the whole cooldown."""
 		from jarvis.chat import prewarm
 
 		cache_mock = MagicMock()
-		cache_mock.get_value.return_value = None  # not debounced
+		cache_mock.set.return_value = True  # the atomic claim is won
 
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
@@ -298,20 +312,13 @@ class TestWarmPrefix(FrappeTestCase):
 			fired = prewarm.warm_prefix()
 
 		self.assertFalse(fired)
-		set_calls = cache_mock.set_value.call_args_list
-		# Exactly one set_value call: the short in-progress guard.
-		# A second call (full cooldown) must not appear on failure.
-		self.assertEqual(
-			len(set_calls),
-			1,
-			"Only the short in-progress TTL should be set on failure, not the full cooldown",
-		)
-		_, call_kwargs = set_calls[0]
-		self.assertEqual(
-			call_kwargs.get("expires_in_sec"),
-			prewarm._WARM_INPROGRESS_S,
-			"The single cache set on failure must use the short in-progress TTL",
-		)
+		# The claim is a single SET NX EX on the short in-progress TTL...
+		cache_mock.set.assert_called_once()
+		_, claim_kwargs = cache_mock.set.call_args
+		self.assertEqual(claim_kwargs.get("ex"), prewarm._WARM_INPROGRESS_S)
+		self.assertTrue(claim_kwargs.get("nx"), "the claim must be conditional (SET NX)")
+		# ...and nothing extends it to the full cooldown on a failure.
+		cache_mock.set_value.assert_not_called()
 
 	def test_warm_prefix_passes_default_model_to_fire_agent(self):
 		"""warm_prefix resolves the Settings default model and passes it to
@@ -337,35 +344,181 @@ class TestWarmPrefix(FrappeTestCase):
 		# api_key mode: no oauth provider
 		self.assertIsNone(call_kwargs.get("provider"), "provider must be None in api_key mode")
 
+	def test_two_concurrent_warms_fire_exactly_one(self):
+		"""THE COOLDOWN RACE (#548).
 
-class TestKeepWarm(FrappeTestCase):
+		Two warms were observed passing the old get-then-set cooldown check 6ms
+		apart on jarvis-pool-bf4097, so a burst of chat-surface loads billed a
+		burst of upstream runs against the tenant's own quota.
+
+		The window they raced through was [get_value ... set_value], which spans
+		the `Jarvis Settings` load - so a second caller arriving DURING that load
+		IS the observed race, and re-entering warm_prefix from get_single
+		reproduces it deterministically without threads (frappe.local is
+		thread-local, so a real thread has no site to warm). Under the old
+		get-then-set both callers reach fire_agent; under SET NX EX the second
+		loses the claim and spends nothing."""
+		from jarvis.chat import prewarm
+
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
+		frappe.cache().delete_value(prewarm._warm_last_key())
+		fake_sess = MagicMock()
+		fake_sess.create_session.side_effect = ["sk_a", "sk_b"]
+		fake_sess.is_run_active.return_value = False
+		settings = self._settings_stub()
+		# Set BEFORE recursing, or the inner call re-enters through this same
+		# side effect forever.
+		race = {"started": False, "inner": None}
+
+		def load_settings_then_race(*_args, **_kwargs):
+			if not race["started"]:
+				race["started"] = True
+				race["inner"] = prewarm.warm_prefix()
+			return settings
+
+		with (
+			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch("jarvis.chat.prewarm.frappe.get_single", side_effect=load_settings_then_race),
+			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
+		):
+			OC.connect.return_value = fake_sess
+			outer = prewarm.warm_prefix()
+
+		self.assertTrue(outer, "the caller that won the claim must warm")
+		self.assertIs(race["inner"], False, "the concurrent second warm must be refused")
+		self.assertEqual(
+			fake_sess.fire_agent.call_count,
+			1,
+			"two warms racing the cooldown must bill exactly one upstream run",
+		)
+
+
+class TestPrefixAlreadyWarm(FrappeTestCase):
+	"""#548: a real chat turn warms the same container-wide prefix, so warming
+	again inside the retention window is pure spend on the tenant's own key.
+
+	This is the exact INVERSE of the gate the deleted keep-warm cron used, which
+	fired only when recent chat traffic had already made warming worthless."""
+
 	def tearDown(self):
 		from jarvis.chat import prewarm
 
 		frappe.cache().delete_value(prewarm._warm_cooldown_key())
-		# Leaving this set would make the NEXT test's first warm reclaim a
-		# session this one invented.
 		frappe.cache().delete_value(prewarm._warm_last_key())
 
-	def test_keep_warm_warms_when_recent_activity(self):
+	def test_recent_turn_skips_the_warm_and_arms_the_full_cooldown(self):
 		from jarvis.chat import prewarm
 
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		with (
-			patch("jarvis.chat.prewarm.frappe.db.exists", return_value="MSG-1"),
-			patch("jarvis.chat.prewarm.warm_prefix") as wp,
+			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
+			patch.object(prewarm, "_prefix_recently_used", return_value=True),
 		):
-			prewarm.keep_warm_if_active()
-		wp.assert_called_once()
+			self.assertFalse(prewarm.warm_prefix())
 
-	def test_keep_warm_noop_when_idle(self):
+		OC.connect.assert_not_called()
+		# Nothing failed, so this is the full cooldown rather than the short
+		# in-progress marker: there is simply nothing worth paying for until the
+		# provider cache could have cooled.
+		ttl = frappe.cache().ttl(frappe.cache().make_key(prewarm._warm_cooldown_key()))
+		self.assertGreater(ttl, prewarm._WARM_INPROGRESS_S)
+
+	def test_the_recent_turn_window_is_the_documented_one(self):
+		"""Pins what _RECENT_TURN_S means: a Jarvis Chat Message newer than
+		now - _RECENT_TURN_S. An arbitrary window here is the same class of bug
+		as the cron's 30-minute one."""
 		from jarvis.chat import prewarm
 
+		with patch("jarvis.chat.prewarm.frappe.db.exists", return_value="MSG-1") as ex:
+			self.assertTrue(prewarm._prefix_recently_used())
+
+		doctype, filters = ex.call_args.args
+		self.assertEqual(doctype, "Jarvis Chat Message")
+		op, cutoff = filters["creation"]
+		self.assertEqual(op, ">")
+		expected = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-prewarm._RECENT_TURN_S)
+		self.assertLess(abs((cutoff - expected).total_seconds()), 5)
+
+	def test_no_recent_turn_means_the_prefix_may_be_cold(self):
+		from jarvis.chat import prewarm
+
+		with patch("jarvis.chat.prewarm.frappe.db.exists", return_value=None):
+			self.assertFalse(prewarm._prefix_recently_used())
+
+
+class TestPrewarmKillSwitch(FrappeTestCase):
+	"""#548: prewarming spends the customer's own quota in EVERY auth mode
+	(api_key / subscription / oauth are all their credential), so an operator
+	whose tenant is on a tight or free-tier key needs a way to switch it off.
+	Absence must keep it ON - only an explicit falsy value disables it."""
+
+	def tearDown(self):
+		from jarvis.chat import prewarm
+
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
+		frappe.cache().delete_value(prewarm._warm_last_key())
+
+	def test_absent_flag_leaves_prewarm_on(self):
+		from jarvis.chat import prewarm
+
+		with patch.dict(frappe.local.conf, {}, clear=False):
+			frappe.local.conf.pop(prewarm._PREWARM_CONF_KEY, None)
+			self.assertTrue(prewarm._prewarm_enabled())
+
+	def test_explicit_falsy_values_switch_prewarm_off(self):
+		from jarvis.chat import prewarm
+
+		for flag in (0, "0", False, "false", "off", "no", ""):
+			with self.subTest(flag=flag), patch.dict(frappe.local.conf, {prewarm._PREWARM_CONF_KEY: flag}):
+				self.assertFalse(prewarm._prewarm_enabled())
+
+	def test_disabled_site_neither_enqueues_nor_warms(self):
+		from jarvis.chat import prewarm
+
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
 		with (
-			patch("jarvis.chat.prewarm.frappe.db.exists", return_value=None),
-			patch("jarvis.chat.prewarm.warm_prefix") as wp,
+			patch.dict(frappe.local.conf, {prewarm._PREWARM_CONF_KEY: 0}),
+			patch("jarvis.chat.prewarm.frappe.enqueue") as enq,
+			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
 		):
-			prewarm.keep_warm_if_active()
-		wp.assert_not_called()
+			prewarm.enqueue_warm_if_due()
+			self.assertFalse(prewarm.warm_prefix())
+
+		enq.assert_not_called()
+		OC.connect.assert_not_called()
+
+
+class TestPrewarmTriggerSurface(FrappeTestCase):
+	"""#548 regression guard: the chat-surface load is the ONLY prewarm trigger.
+
+	The login hook and the */5 keep-warm cron each billed an upstream LLM request
+	against the tenant's own quota on a schedule uncorrelated with anyone being
+	about to send a message. Re-adding either needs a measured warm-vs-cold
+	first_delta_ms split first, which is why this asserts on hooks.py."""
+
+	def test_no_prewarm_on_login(self):
+		from jarvis import hooks
+
+		self.assertNotIn(
+			"prewarm",
+			str(getattr(hooks, "on_session_creation", "")),
+			"a login must not bill a prefix warm-up",
+		)
+
+	def test_no_periodic_keep_warm_cron(self):
+		from jarvis import hooks
+
+		scheduled = str(hooks.scheduler_events)
+		self.assertNotIn("keep_warm", scheduled)
+		self.assertNotIn("prewarm", scheduled, "nothing may warm the prefix on a timer")
+
+	def test_the_removed_entry_points_are_gone(self):
+		"""Deleted, not merely unhooked: a leftover callable is what gets wired
+		back up by the next person reading hooks.py."""
+		from jarvis.chat import prewarm
+
+		self.assertFalse(hasattr(prewarm, "keep_warm_if_active"))
+		self.assertFalse(hasattr(prewarm, "warm_on_login"))
 
 
 class TestEnqueueWarmIfDue(FrappeTestCase):
