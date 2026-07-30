@@ -11,6 +11,12 @@ function esc(s) {
 
 function inline(s) {
 	let t = esc(s);
+	// esc() above escaped ALL html (XSS-safe for LLM output). Re-permit ONLY a
+	// bare, attribute-less <br> (also <br/> and <br />): it's the standard way to
+	// line-break inside a GFM table cell, which agents rely on, and it's inert —
+	// no attributes means no script/handler/URL surface. The attribute form
+	// (&lt;br onload=...&gt;) deliberately stays escaped, so the safe posture holds.
+	t = t.replace(/&lt;br\s*\/?&gt;/gi, "<br>");
 	t = t.replace(/`([^`]+)`/g, '<code class="jv-md-code">$1</code>');
 	t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
 	t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
