@@ -1,12 +1,68 @@
-"""Best-effort pre-warming of the openclaw container's OpenAI prefix cache.
+"""Best-effort pre-warming of the openclaw container's provider prefix cache.
 
-The first turn of a fresh session pays a cold provider prefill over the
-large static system prefix (persona + skills + tool schema). That cache is
-prefix-keyed and container-wide, so one cheap throwaway agent turn warms it
-for every subsequent new chat in the same container. We never touch the
-user's real session or write chat rows. Always best-effort; never raises.
+The first turn of a fresh session pays a cold provider prefill over the large
+static system prefix (persona + skills + tool schema). That cache is
+prefix-keyed and container-wide, so one cheap throwaway agent turn warms it for
+every subsequent new chat in the same container. We never touch the user's real
+session or write chat rows. Always best-effort; never raises.
+
+WHAT A WARM COSTS (issue #548)
+------------------------------
+A warm is a real upstream ``agent`` run billed to the TENANT'S OWN credential.
+There is no mode in which the operator pays: ``llm_auth_mode`` is api_key /
+subscription / oauth and all three are the customer's. So a warm can never be
+cost-neutral, only cost-traded-for-latency:
+
+  without prewarm  the first turn pays a full prefix, later turns pay the
+                   provider's discounted cached rate
+  with prewarm     the warm pays a full prefix, and then EVERY turn pays the
+                   cached rate
+
+which is strictly more spend per cycle when a turn does follow, and one wholly
+wasted prefix when none does. This app fired 528 warms against 86 real turns on
+jarvis.proxy (six paid warm-ups per turn) and exhausted a free-tier Gemini key
+that real chat turns then 429'd on.
+
+So the only defensible trigger is one correlated with a user about to send a
+first message into a plausibly-cold container, firing at most once per arrival.
+Hence, as of #548:
+
+- ONE trigger: the chat-surface load (``enqueue_warm_if_due``, called from
+  ``list_conversations``). Two were removed.
+  * The ``*/5`` ``keep_warm_if_active`` cron. Its gate ("any chat message in
+    the last 30 minutes") was INVERTED with respect to its own purpose: recent
+    chat traffic is exactly what keeps the provider cache warm for free, so the
+    cron spent up to seven paid warms per burst of activity precisely when
+    warming was worthless, and no-opped on the idle benches where a cold prefix
+    is actually possible. A timer also cannot know a turn is coming, which is
+    the whole premise of warming.
+  * The ``on_session_creation`` login warm. It billed a request for every login
+    to the site, including desk and API logins by users who never open chat, to
+    buy a sub-second head start on a multi-second prefill that the chat-surface
+    load already starts.
+- A warm is SKIPPED while the prefix is already hot (``_prefix_recently_used``).
+  That is what stops the SPA's post-send list refreshes from billing warms into
+  a session whose own turns keep the prefix warm: sixteen call sites reach
+  ``list_conversations``, several of them after every single send.
+- The cooldown is claimed ATOMICALLY (``_claim_warm_slot``). The get-then-set it
+  replaces spanned a ``Jarvis Settings`` load, and two warms were observed
+  passing it 6ms apart on jarvis-pool-bf4097.
+
+NOT MEASURED
+------------
+No benefit number exists for any of this, and #548 is the right place to say so
+rather than to keep implying one. The turn telemetry line records no warm/cold
+state and no cached-token count, so ``first_delta_ms`` cannot be split by prefix
+state even in principle; the Stage-A/B harnesses run against a FakeGateway, so
+their ``warm_session`` measures nothing about provider caching; and "watch
+warm-turn token spend after this change" (commit 1017f3ab, which tripled the
+frequency) was never done - ``fire_ms`` below times the WS round trip, not the
+LLM work. Until a warm-vs-cold ``first_delta_ms`` split exists, treat the one
+remaining trigger as unproven and keep its volume proportional to real use.
+``jarvis_prefix_prewarm: 0`` in site_config turns it off entirely.
 """
 
+import pickle
 import time
 import uuid
 
@@ -15,23 +71,41 @@ import frappe
 from jarvis.chat.openclaw_client import OpenclawSession, oneshot_run_id
 from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
-# Cooldown between warm-ups for one bench. 2026-07 latency plan, Phase
-# 1.4: was 25 min, which is LONGER than the providers' prompt-cache
-# retention (OpenAI evicts after ~5-10 min of inactivity; Gemini implicit
-# caching is similar or shorter) — so for most of each half-hour the
-# cooldown key said "warm" while the provider cache had already cooled,
-# and the first turn ate a cold prefill anyway. 4 min keeps every warm
-# inside the retention window; paired with the */5 keep_warm cron so each
-# tick re-warms. Watch warm-turn token spend after this change.
+# Ceiling on how often the one remaining trigger can bill a warm for one bench.
+# 4 min sits inside the shortest documented provider retention (OpenAI evicts a
+# prompt cache after ~5-10 min idle; Anthropic's default ephemeral TTL is 5
+# min), so a chat-surface load that finds the cooldown lapsed is always looking
+# at a plausibly-cold cache. It is a CEILING, not a schedule: nothing re-warms
+# on a timer any more (#548). Note the retention figure is unverifiable for the
+# provider that actually blew the quota - Gemini's IMPLICIT cache has no
+# documented TTL - so do not read "4 min is inside the window" as measured.
 _WARM_COOLDOWN_S = 4 * 60
 
-# Short in-progress TTL set BEFORE the slow connect so concurrent opens
-# cannot fan out into concurrent warm-ups. Expires quickly on failure
-# so a failed warm retries soon rather than blocking for the full cooldown.
-# Accepted best-effort SET race: two concurrent callers may both pass
-# get_value before either sets this key; the second warm is harmless
-# (#6 accepted best-effort).
+# Short in-progress TTL claimed BEFORE any slow work so a burst of chat-surface
+# loads cannot fan out into concurrent billed warm-ups. Expires quickly on
+# failure so a failed warm retries soon rather than blocking for the full
+# cooldown. Claimed atomically - see _claim_warm_slot.
 _WARM_INPROGRESS_S = 90
+
+# A real chat turn warms this container-wide prefix far better than a throwaway
+# does, so a warm within _RECENT_TURN_S of one is pure spend. Two minutes is
+# comfortably inside every documented retention floor, and it is the window the
+# SPA's post-send list refreshes land in - the amplifier behind the six-warms-
+# per-turn ratio in #548. This is the INVERSE of the gate the deleted keep-warm
+# cron used, which is precisely what was wrong with it.
+_RECENT_TURN_S = 120
+
+# Explicit falsy site_config values that turn prewarming OFF. Absence is NEVER
+# one of them: prewarming has always been on, so only an operator writing the
+# key can disable it. Same absent-vs-explicit-0 shape as `jarvis_pump_enabled`
+# ("0" is a truthy Python string, which is why this set exists).
+_PREWARM_CONF_KEY = "jarvis_prefix_prewarm"
+_EXPLICIT_OFF_VALUES = frozenset({"0", "false", "no", "off", ""})
+
+# The cooldown marker, pickled so frappe's get_value/set_value still read and
+# write it. The atomic claim below bypasses set_value for atomicity, not to
+# change the stored format.
+_CLAIM_VALUE = pickle.dumps("1")
 
 
 # The previous warm's session key AND the moment its turn was fired, remembered
@@ -48,6 +122,76 @@ def _warm_cooldown_key() -> str:
 
 def _warm_last_key() -> str:
 	return f"jarvis:chat:prefix_warm:last:{frappe.local.site}"
+
+
+def _prewarm_enabled() -> bool:
+	"""Is prefix prewarming switched on for this site?
+
+	Deliberately an OPERATOR site_config flag and NOT a per-tenant opt-in field.
+	Every tenant is BYO - api_key, subscription and oauth all charge the customer
+	- so a per-tenant toggle would be asking each customer to answer a question
+	nobody has data for (see NOT MEASURED above). Measure the warm-vs-cold
+	first_delta_ms split first; until then the honest position is a volume
+	proportional to real use, plus an off switch for a tenant whose quota is
+	tight enough to matter.
+	"""
+	flag = frappe.conf.get(_PREWARM_CONF_KEY)
+	if flag is None:
+		return True
+	return str(flag).strip().lower() not in _EXPLICIT_OFF_VALUES
+
+
+def _claim_warm_slot(cache, key: str, ttl_s: int) -> bool:
+	"""Atomically take the right to warm. True for exactly ONE of N callers.
+
+	``get_value`` then ``set_value`` cannot express this. The window between the
+	two spanned a ``Jarvis Settings`` load (a DB round trip), and two warms were
+	observed passing it 6ms apart on jarvis-pool-bf4097 - each one a billed
+	upstream request against the tenant's own key, and the second one also the
+	trigger for the #535 reclaim race. ``SET NX EX`` collapses the read and the
+	write into one Redis round trip, so a burst produces exactly one warm.
+
+	Raises on a Redis outage, which callers turn into "no warm". Failing CLOSED
+	is the right side to fail on for work that spends the customer's money.
+
+	``set`` is plain redis-py, so the site prefix has to be applied by hand -
+	unlike ``exists`` below, which frappe overrides to do it for you.
+	"""
+	return bool(cache.set(cache.make_key(key), _CLAIM_VALUE, ex=ttl_s, nx=True))
+
+
+def _warm_slot_held(cache, key: str) -> bool:
+	"""Is a cooldown or an in-flight warm already holding the slot?
+
+	``exists`` rather than ``get_value`` so the answer can never come from
+	``frappe.local.cache``, which the atomic claim above does not populate.
+	Frappe's override applies ``make_key`` itself, so the key is passed raw.
+	"""
+	return bool(cache.exists(key))
+
+
+def _prefix_recently_used() -> bool:
+	"""Did a real chat turn touch this container's prefix within
+	``_RECENT_TURN_S``? Then the provider cache is warm and a throwaway warm buys
+	a bill and nothing else.
+
+	One indexed EXISTS - frappe gives every non-child table an index on
+	``creation`` - and it runs in the background job, never on the web request.
+	"""
+	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-_RECENT_TURN_S)
+	return bool(frappe.db.exists("Jarvis Chat Message", {"creation": [">", cutoff]}))
+
+
+def _log_skip(reason: str) -> None:
+	"""Record a skipped warm on the same logger as a fired one.
+
+	The six-warms-per-turn ratio in #548 was only measurable because the fire
+	logged; the skips did not, so nobody could see what share of the volume was
+	avoidable. With both on one file the paid-warm rate is readable directly.
+	"""
+	from jarvis.chat.latency import get_logger as _get_latency_logger
+
+	_get_latency_logger().info("warm_prefix skipped reason=%s", reason)
 
 
 def _previous_pointer(prev) -> tuple[str, float | None]:
@@ -127,13 +271,34 @@ def _resolve_default_model_and_provider(settings) -> tuple[str, str | None]:
 
 
 def warm_prefix() -> bool:
-	"""Fire one throwaway warm-up turn for this bench's container. Returns
-	True if a warm-up was fired, False if skipped (debounced, not
-	configured) or on any error. Never raises."""
+	"""Fire one throwaway warm-up turn for this bench's container.
+
+	Returns True only when an upstream run was actually fired. False when it was
+	skipped - switched off, the slot already claimed, the prefix already hot from
+	a real turn, or the bench unconfigured - and on any error. Never raises.
+
+	Every False is a billed request NOT sent against the tenant's own quota,
+	which is why the skips are logged (``_log_skip``) rather than silent."""
 	try:
+		if not _prewarm_enabled():
+			return False
 		cache = frappe.cache()
 		key = _warm_cooldown_key()
-		if cache.get_value(key):
+		# Claim the slot BEFORE any slow work: the claim is the only thing
+		# standing between a burst of chat-surface loads and a burst of billed
+		# upstream runs, so nothing that can take milliseconds may precede it.
+		# On any exception below, the short marker expires in
+		# _WARM_INPROGRESS_S and warming retries soon; the full cooldown is
+		# armed only when there was nothing to do or the warm landed, so a
+		# transient blip never disables warming for the whole cooldown.
+		if not _claim_warm_slot(cache, key, _WARM_INPROGRESS_S):
+			return False
+		if _prefix_recently_used():
+			# Already hot from a real turn. Nothing failed, there is simply
+			# nothing worth paying for until the cache could have cooled, so
+			# arm the full cooldown rather than the short in-flight marker.
+			cache.set_value(key, "1", expires_in_sec=_WARM_COOLDOWN_S)
+			_log_skip("recent_turn")
 			return False
 		settings = frappe.get_single("Jarvis Settings")
 		# OpenclawSession.connect authenticates via device pairing
@@ -141,14 +306,8 @@ def warm_prefix() -> bool:
 		# agent_token is empty on managed/device-paired benches.
 		gateway_url = _gateway_ws_url(settings)
 		if not gateway_url:
+			_log_skip("not_configured")
 			return False
-		# Set a short in-progress marker BEFORE the slow connect so a burst
-		# of opens (or a broken gateway) cannot fan out into concurrent
-		# warm-ups. On any exception this short marker expires in
-		# _WARM_INPROGRESS_S, allowing a retry soon. The full cooldown is
-		# only set after a successful warm so a transient blip does not
-		# disable warming for 25 min.
-		cache.set_value(key, "1", expires_in_sec=_WARM_INPROGRESS_S)
 		model, provider = _resolve_default_model_and_provider(settings)
 		t0 = time.monotonic()
 		sess = OpenclawSession.connect(gateway_url)
@@ -191,13 +350,17 @@ def warm_prefix() -> bool:
 		finally:
 			sess.close()
 		# Latency telemetry (plan Phase 0): connect+create+fire duration, as
-		# measured above before the reclaim. (fire_agent is fire-and-forget, so
-		# this does NOT include the prefill itself — cold-vs-warm shows up in
-		# real turns' first_delta_ms, logged by turn_handler.)
+		# measured above before the reclaim. fire_agent is fire-and-forget, so
+		# this is the WS round trip and NOT the prefill - it says nothing about
+		# what the warm bought. Turns log first_delta_ms but carry no warm/cold
+		# marker, so the two cannot be joined; that missing marker is why #548
+		# could price this feature's cost and not its benefit.
 		from jarvis.chat.latency import get_logger as _get_latency_logger
 
 		_get_latency_logger().info("warm_prefix fire_ms=%d", fire_ms)
-		# Warm succeeded: arm the full cooldown so the next cron tick skips.
+		# Warm landed: extend the short claim to the full cooldown, which is now
+		# a spend ceiling for the chat-surface trigger rather than a handshake
+		# with a cron tick.
 		cache.set_value(key, "1", expires_in_sec=_WARM_COOLDOWN_S)
 		return True
 	except Exception:
@@ -205,43 +368,24 @@ def warm_prefix() -> bool:
 		return False
 
 
-def keep_warm_if_active() -> None:
-	"""Scheduler entry: keep the prefix cache warm for benches with recent
-	chat activity, so a returning user's first turn is warm after an idle
-	gap. No-op on idle benches. Runs on the existing scheduler; the per-bench
-	debounce in warm_prefix bounds frequency."""
-	try:
-		cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-30)
-		recent = frappe.db.exists("Jarvis Chat Message", {"creation": [">", cutoff]})
-		if not recent:
-			return
-		warm_prefix()
-	except Exception:
-		frappe.logger("jarvis.chat.prewarm").debug("keep_warm skipped", exc_info=True)
+def enqueue_warm_if_due() -> None:
+	"""Warm on chat-surface load: the ONE prewarm trigger (#548).
 
+	Called from ``list_conversations``, which every chat surface hits on load, so
+	the first turn of a new chat gets a warm prefix without a frontend change.
+	Just a cheap Redis existence check on the request path - the connect + warm
+	runs off the web worker, and ``warm_prefix`` re-checks everything atomically,
+	so this read only avoids pointless jobs and is never the guard. Best-effort,
+	never raises.
 
-def warm_on_login(login_manager=None) -> None:
-	"""``on_session_creation`` hook (2026-07 latency plan, Phase 1.4): start
-	warming as soon as anyone logs in, before the chat page even loads —
-	the warm-up has the whole page-load window to land. Same debounced
-	enqueue as the chat-load trigger, so non-chat logins cost one cache
-	read. Best-effort, never raises (a hook failure must never block login).
+	There is deliberately no timer and no login hook behind this any more: a
+	trigger uncorrelated with an imminent first message spends the customer's
+	quota for nothing (see the module docstring).
 	"""
 	try:
-		enqueue_warm_if_due()
-	except Exception:
-		pass
-
-
-def enqueue_warm_if_due() -> None:
-	"""Warm-on-chat-load: enqueue a prefix warm-up in a background job if the
-	per-bench cooldown has lapsed. Called from list_conversations (which every
-	chat surface hits on load), so the first turn of a new chat gets a warm
-	prefix without a frontend change. Just a cheap cache read on the request
-	path - the connect + warm runs off the web worker. Best-effort, never
-	raises, and debounced so repeated calls do not fan out into jobs."""
-	try:
-		if frappe.cache().get_value(_warm_cooldown_key()):
+		if not _prewarm_enabled():
+			return
+		if _warm_slot_held(frappe.cache(), _warm_cooldown_key()):
 			return
 		frappe.enqueue("jarvis.chat.prewarm.warm_prefix", queue="short")
 	except Exception:

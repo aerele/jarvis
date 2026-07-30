@@ -211,6 +211,10 @@ class TestOneShotsMintPinnedRunIds(FrappeTestCase):
 		with (
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=settings),
+			# warm_prefix skips outright when a real turn ran in the last couple
+			# of minutes (#548) and a suite run leaves Jarvis Chat Message rows
+			# behind. This test is about the run id, not that guard.
+			patch.object(prewarm, "_prefix_recently_used", return_value=False),
 		):
 			OC.connect.return_value = sess
 			self.assertTrue(prewarm.warm_prefix())
