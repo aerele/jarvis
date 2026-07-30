@@ -245,6 +245,7 @@ def _run_gateway_turn(prompt: str) -> str:
 	touches a visible conversation. Returns the assistant text, or '' on any
 	failure (unreachable gateway, timeout, agent error, no gateway_url)."""
 	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat.openclaw_client import oneshot_run_id
 	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 	from jarvis.chat.turn_handler import _resolve_model_and_provider
 
@@ -263,10 +264,13 @@ def _run_gateway_turn(prompt: str) -> str:
 		with openclaw_session_pool.checkout(gateway_url) as sess:
 			skey = sess.create_session(label=label)
 			try:
+				# Pinning the resolved model costs this run its failover chain
+				# (#531); the prefixed run id keeps the resulting openclaw
+				# ``next=none`` distinguishable from an exhausted chain.
 				for ev in sess.stream_agent_turn(
 					skey,
 					prompt,
-					f"polish:{skey}",
+					oneshot_run_id("polish", skey, model=model, provider=provider),
 					model=model,
 					provider=provider,
 				):

@@ -123,6 +123,83 @@ _GATEWAY_ORIGIN = "http://127.0.0.1:18789"
 # for this turn + pair + WS connect overhead.
 TURN_TIMEOUT_SECONDS = 600
 
+# --- pinned one-shots (issue #531) ------------------------------------------
+#
+# ``fire_agent`` / ``stream_agent_turn`` are the only two RPCs here that carry
+# an explicit model/provider, and passing either one COSTS the run its whole
+# failover chain. Verified against the shipped bundle of
+# ghcr.io/openclaw/openclaw:2026.6.8:
+#
+#   agent-command: hasExplicitRunOverride = Boolean(opts.provider || opts.model)
+#                  resolveEffectiveModelFallbacks({
+#                      hasSessionModelOverride: hasExplicitRunOverride || ...,
+#                      modelOverrideSource: hasExplicitRunOverride ? "user" : ...,
+#                  })
+#   agent-scope:   if (!(modelOverrideSource === "auto" || ...)) return [];
+#
+# So an explicit per-request model hardcodes source "user" and the effective
+# fallback list collapses to []. There is no way to opt back in: AgentParamsSchema
+# is ``additionalProperties: false`` over {message, agentId, provider, model, ...}
+# with no modelOverrideSource / allowFallbacks knob, and sessions.patch rejects
+# the marker outright (closed PR #517).
+#
+# The pin is deliberate and must NOT be "fixed" by dropping it: prewarm exists
+# to warm ONE model's prefix cache (a failover would warm the wrong one), and
+# auto-title deliberately bills against a cheap model rather than the pool
+# primary. What was wrong was that the resulting openclaw log
+# (``decision=surface_error ... next=none``) read exactly like a dead chain.
+#
+# Both halves of the fix live here, at the boundary that actually puts model on
+# the wire, so they cannot drift from the RPC params:
+#
+#  1. a pinned run id is prefixed differently from an unpinned one, which makes
+#     openclaw's own ``embedded run failover decision: runId=... next=none``
+#     line self-describing without cross-referencing anything;
+#  2. the bench logs one line per pinned turn naming the run id and the pinned
+#     model, so the jarvis-side log answers the question on its own too.
+#
+# openclaw uses the idempotency key verbatim as the run id
+# (``const idem = request.idempotencyKey; const runId = idem;``), so the prefix
+# survives to every failover log line. Both must stay clear of openclaw's own
+# ``exec-approval-followup:`` key namespace, and stay well under the 200-char
+# console truncation.
+#
+# The two prefixes have to track the RPC params exactly. A one-shot whose model
+# resolved empty is NOT pinned - it keeps its fallbacks - so a ``next=none``
+# under ONESHOT_RUN_PREFIX really does mean the chain is dead, and claiming
+# otherwise would recreate the very ambiguity this exists to remove.
+PINNED_ONESHOT_RUN_PREFIX = "jarvis-pinned-"
+ONESHOT_RUN_PREFIX = "jarvis-oneshot-"
+
+
+def oneshot_run_id(kind: str, unique: str, *, model: str | None, provider: str | None) -> str:
+	"""Idempotency key (== openclaw run id) for a throwaway one-shot turn.
+
+	``kind`` names the feature (title / polish / prewarm); ``unique`` is
+	whatever already made the caller's key unique, kept so the run id still
+	points back at its session. openclaw dedupes on this key, so ``unique``
+	must stay per-call. Pass the same model/provider the turn will send: they
+	decide which prefix the run id gets."""
+	prefix = PINNED_ONESHOT_RUN_PREFIX if (model or provider) else ONESHOT_RUN_PREFIX
+	return f"{prefix}{kind}:{unique}"
+
+
+def _log_pinned_oneshot(run_id: str, model: str | None, provider: str | None) -> None:
+	"""Record that this turn traded failover away for a pinned model.
+
+	Keyed on the run id so it joins straight onto openclaw's
+	``embedded run failover decision: runId=...`` line. Without this a
+	``next=none`` from a pinned one-shot is indistinguishable from an
+	exhausted chain (issue #531)."""
+	_logger.info(
+		"pinned one-shot turn: runId=%s model=%s provider=%s fallbacks=none-by-design "
+		"reason=explicit-model-on-agent-rpc",
+		run_id,
+		model or "-",
+		provider or "-",
+	)
+
+
 # Scopes the chat path needs: operator.write for sessions.create + agent;
 # operator.admin so the same connection can also read state (status snapshots,
 # etc.) without re-pairing.
@@ -861,7 +938,10 @@ class OpenclawSession:
 		side after we close (the run lane survives client disconnect), so this
 		is enough to warm the provider prompt cache. ``deliver`` is False so
 		the result stays session-only. ``_request`` drops the interleaved
-		event frames and returns the agent ack response."""
+		event frames and returns the agent ack response.
+
+		Setting ``model`` / ``provider`` disables openclaw's failover for this
+		run - see PINNED_ONESHOT_RUN_PREFIX."""
 		params = {
 			"message": message,
 			"sessionKey": session_key,
@@ -872,6 +952,8 @@ class OpenclawSession:
 			params["model"] = model
 		if provider:
 			params["provider"] = provider
+		if model or provider:
+			_log_pinned_oneshot(idempotency_key, model, provider)
 		res = self._request("agent", params, timeout_s=CONNECT_TIMEOUT_SECONDS)
 		return (res.get("payload") or {}).get("runId") or ""
 
@@ -890,8 +972,10 @@ class OpenclawSession:
 		`model` / `provider` are optional per-turn overrides. When set, they
 		flow into openclaw's agent RPC params; the gateway honours them via
 		the operator.admin-scope-gated modelOverride path (our connect already
-		declares that scope). When omitted, openclaw falls back to
-		agents.defaults.model.primary from openclaw.json.
+		declares that scope), and the run loses its failover chain for the
+		duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, openclaw falls
+		back to agents.defaults.model.primary from openclaw.json AND keeps its
+		fallbacks.
 
 		Yields the same parsed-event shape the worker used to consume from
 		the subprocess. Raises OpenclawUnreachableError on WS drop, agent
@@ -913,6 +997,8 @@ class OpenclawSession:
 			# {type:"image", mimeType, fileName, content:<base64>} shape is what
 			# its gateway normalizer accepts.
 			params["attachments"] = attachments
+		if model or provider:
+			_log_pinned_oneshot(idempotency_key, model, provider)
 		agent_id = self._send("agent", params)
 		deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
 

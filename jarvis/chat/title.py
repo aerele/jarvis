@@ -150,6 +150,7 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 	"""Run a silent throwaway agent turn to summarise the opening message into a
 	title. Returns "" on any failure (caller falls back to derive_title)."""
 	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat.openclaw_client import oneshot_run_id
 	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
 	prompt = _TITLE_PROMPT.format(msg=source_text[:_SOURCE_MAX_CHARS])
@@ -163,10 +164,14 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 		with openclaw_session_pool.checkout(gateway_url) as sess:
 			skey = sess.create_session(label=label)
 			try:
+				# Titling deliberately pins a cheap model instead of the pool
+				# primary, which costs this run its failover chain (#531). The
+				# prefixed run id is what keeps openclaw's resulting
+				# ``next=none`` from reading like a dead chain.
 				for ev in sess.stream_agent_turn(
 					skey,
 					prompt,
-					f"title:{skey}",
+					oneshot_run_id("title", skey, model=model, provider=provider),
 					model=model,
 					provider=provider,
 				):
