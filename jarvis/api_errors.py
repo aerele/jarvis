@@ -328,6 +328,9 @@ _EXC_LINE_RE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrup
 _REPORTER_SELF_MARKERS = (
 	"/apps/jarvis/jarvis/error_push.py",
 	"/apps/jarvis/jarvis/api_errors.py",
+	# GAP 1 heartbeat: its own push-path errors are infra, not customer-relevant — do not
+	# forward them into the tenant Errors feed (would be a fleet-wide false positive).
+	"/apps/jarvis/jarvis/chat/heartbeat.py",
 )
 
 

@@ -562,6 +562,18 @@ class TestWatchdog(_PumpTestCase):
 			"watchdog must stamp a fresh completion time",
 		)
 
+	def test_b1_watchdog_early_return_does_not_stamp(self):
+		"""B1 (GAP 1): an early exit (target enumeration fails) must NOT stamp completion,
+		so the bench heartbeat's watchdog age keeps growing and the CP still sees a stalled
+		cron rather than a falsely-fresh one."""
+		key = "jarvis_pump_watchdog_last_completed"
+		old = "2020-01-01 00:00:00"
+		frappe.db.set_default(key, old)
+		frappe.db.commit()
+		with patch.object(ts, "shards_with_open_effects", side_effect=Exception("boom")):
+			pump.watchdog(self._deps())
+		self.assertEqual(frappe.db.get_default(key), old, "early-return must not stamp completion")
+
 	def test_per_state_actions(self):
 		conv = self._mk_conv()
 		# queued age-out (older than QUEUED_MAX_AGE_S).

@@ -8,7 +8,7 @@ import frappe
 
 from jarvis.chat import heartbeat, pump
 from jarvis.chat import turn_state as ts
-from jarvis.exceptions import AdminUnreachableError
+from jarvis.exceptions import AdminUnreachableError, AdminValidationError
 from jarvis.tests.test_pump import _PumpTestCase
 
 
@@ -73,6 +73,19 @@ class TestBenchHeartbeatPush(_PumpTestCase):
 			patch("jarvis.admin_client.push_bench_heartbeat", side_effect=AdminUnreachableError("down")),
 		):
 			heartbeat.push_bench_heartbeat()  # must not raise
+
+	def test_b3_silent_on_admin_validation_error(self):
+		"""A 4xx from the CP — INCLUDING the ingest endpoint not existing yet (before Track
+		C ships) — is silently swallowed, never logged fleet-wide."""
+		with (
+			patch.object(heartbeat, "_admin_configured", return_value=True),
+			patch(
+				"jarvis.admin_client.push_bench_heartbeat", side_effect=AdminValidationError("no endpoint")
+			),
+			patch.object(heartbeat, "_log_failure_throttled") as logged,
+		):
+			heartbeat.push_bench_heartbeat()  # must not raise
+		logged.assert_not_called()
 
 	def test_b3_never_raises_on_a_bug(self):
 		with (
