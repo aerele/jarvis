@@ -16,8 +16,8 @@ set is `jarvis/tools/tool-names.json` (see the 3-way invariant below).
 
 Two tiers, one call mechanism:
 
-1. **Transport (TypeScript):** `jarvis-agent-plugin` exposes each tool to the
-   agent agent runtime - descriptors in `src/tool-defs.ts`, typed params in
+1. **Transport (TypeScript):** `jarvis-openclaw-plugin` exposes each tool to the
+   agent runtime - descriptors in `src/tool-defs.ts`, typed params in
    `src/schemas.ts`, the contract list in `openclaw.plugin.json`. It calls back
    to the bench over HTTP.
 2. **Execution (Python, in-process):** `jarvis.api.call_tool` is the whitelisted

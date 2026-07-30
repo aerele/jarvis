@@ -58,7 +58,7 @@ _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 		"userinfo": "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
 		# Scopes MUST match what the bundled gemini-cli OAuth client has
 		# registered in its Google Cloud Console consent screen. Verified
-		# against agent/extensions/google/oauth.shared.ts:19-23.
+		# against openclaw/extensions/google/oauth.shared.ts:19-23.
 		# `https://www.googleapis.com/auth/generative-language` is NOT a real
 		# Google OAuth scope - Google returns Error 403 restricted_client
 		# "Unregistered scope(s) in the request" if anything else is sent.
@@ -164,7 +164,7 @@ def extract_account_id(provider: str, access_token: str) -> str:
 
 	agent's codex auth resolver gates on this field: profiles without
 	an accountId are treated as unusable and chat fails with "No API key
-	found for provider openai". See agent/docs/concepts/oauth.md step
+	found for provider openai". See openclaw/docs/concepts/oauth.md step
 	6 of the codex OAuth exchange.
 
 	OpenAI codex: ``payload["https://api.openai.com/auth"]["chatgpt_account_id"]``.

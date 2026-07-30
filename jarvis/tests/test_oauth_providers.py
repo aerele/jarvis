@@ -60,7 +60,7 @@ class TestExtractAccountId(unittest.TestCase):
 	"""agent's codex auth resolver requires `accountId` on the OAuth
 	profile; without it the credential is treated as unusable and the
 	chat surfaces 'No API key found for provider openai'. See
-	agent/docs/concepts/oauth.md step 6 of the codex OAuth exchange."""
+	openclaw/docs/concepts/oauth.md step 6 of the codex OAuth exchange."""
 
 	def test_openai_pulls_chatgpt_account_id_from_jwt(self):
 		jwt = _jwt(

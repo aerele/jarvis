@@ -29,12 +29,24 @@ _ALLOWED_FILES = {
 }
 # Historical applied migrations are never rewritten.
 _ALLOWED_PREFIXES = ("jarvis/patches/",)
-# Wire-contract literals allowed in ANY file (the runtime's filesystem / image / marker /
-# the old openclaw_seq_watermark column the rename migration still copies from until a later
-# contract patch drops it). Stripped before the check so a line carrying only these is not
-# flagged.
+# Literals allowed in ANY file, each a genuine reference to the openclaw runtime that must
+# stay verbatim (NOT the app's own naming). Stripped before the check so a line carrying only
+# these is not flagged:
+#   - runtime filesystem / image / markers: openclaw.json[.plugin], `.openclaw/` container
+#     paths, __openclaw (the transcript-metadata key the gateway stamps on every message) +
+#     __openclaw__ (the frontend live-reload marker), the ghcr openclaw/openclaw image,
+#     openclaw_state
+#   - cross-repo identifiers (the vendored openclaw repo + sibling repos, unrenameable here):
+#     an `openclaw/<path>` citation, jarvis-openclaw-plugin, render_openclaw_config,
+#     DEFAULT_OPENCLAW_IMAGE, verify-openclaw-assumptions
+#   - openclaw_seq_watermark: the old column the rename migration copies from until a later
+#     contract patch drops it
+# `.openclaw` is anchored to the `/`-terminated container-path form so it does NOT mask a
+# dotted attribute/module leak like `x.openclaw_y` (which must be caught).
 _ALLOWED_LITERALS = re.compile(
-	r"openclaw\.plugin\.json|openclaw\.json|__openclaw__|openclaw/openclaw|\.openclaw|openclaw_state|openclaw_seq_watermark"
+	r"openclaw\.plugin\.json|openclaw\.json|__openclaw__|__openclaw|openclaw/openclaw|openclaw/"
+	r"|\.openclaw/|openclaw_state|openclaw_seq_watermark|jarvis-openclaw-plugin"
+	r"|render_openclaw_config|DEFAULT_OPENCLAW_IMAGE|verify-openclaw-assumptions"
 )
 _OPENCLAW = re.compile(r"openclaw", re.IGNORECASE)
 _SCAN_SUFFIXES = (".py", ".js", ".ts", ".vue", ".json", ".md", ".txt", ".j2")

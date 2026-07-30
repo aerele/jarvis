@@ -1212,9 +1212,9 @@ def _recv_with_timeout(ws: websocket.WebSocket, timeout_s: float) -> dict | None
 	except websocket.WebSocketTimeoutException:
 		return None
 	except websocket.WebSocketConnectionClosedException as e:
-		raise AgentUnreachableError(f"openclaw WS closed: {e}") from e
+		raise AgentUnreachableError(f"agent WS closed: {e}") from e
 	except websocket.WebSocketException as e:
-		raise AgentUnreachableError(f"openclaw WS error: {e}") from e
+		raise AgentUnreachableError(f"agent WS error: {e}") from e
 	if not raw:
 		return None
 	try:

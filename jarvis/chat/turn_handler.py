@@ -240,7 +240,7 @@ class _AssistantContentBatcher:
 # Provider label → agent provider id sent in the chat WS frame.
 #
 # Agent has two dispatch paths chosen at request time
-# (agent/src/agents/model-selection-cli.ts:6-20):
+# (openclaw/src/agents/model-selection-cli.ts:6-20):
 #
 #   - CLI backend: taken when isCliProvider(provider) returns true.
 #     Routes dispatch to a registered CliBackend that spawns an external
@@ -254,12 +254,12 @@ class _AssistantContentBatcher:
 # The two providers we currently support resolve to two different paths:
 #
 #   - OpenAI codex: codex IS a registered plugin harness
-#     (agent/extensions/codex/index.ts:34) whose allowlist accepts
+#     (openclaw/extensions/codex/index.ts:34) whose allowlist accepts
 #     "openai" as the model-provider key. Use "openai" for the chat WS
 #     frame and the embedded codex-harness path handles the dispatch.
 #
 #   - Google Gemini: gemini-cli is registered ONLY as a CliBackend
-#     (agent/extensions/google/cli-backend.ts:16 with id
+#     (openclaw/extensions/google/cli-backend.ts:16 with id
 #     "google-gemini-cli"). Use "google-gemini-cli" verbatim so
 #     isCliProvider returns true and dispatch routes via the CLI backend
 #     to the gemini binary inside the container. Mapping it to "google"
@@ -275,7 +275,7 @@ _PROVIDER_LABEL_TO_AGENT_ID = {
 
 
 # The virtual model the fleet configures agent with whenever the proxy is active
-# (jarvis-fleet-agent compose.render_agent_config(model="jarvis-pool")). Bifrost
+# (jarvis-fleet-agent compose.render_openclaw_config(model="jarvis-pool")). Bifrost
 # expands it into the pool's failover chain via its catch-all routing rule.
 #
 # The customer plane has to know this name because CLEARING a pin has to be an explicit
@@ -944,7 +944,7 @@ def handle_chat_send(payload: dict) -> None:
 				try:
 					_wm_msgs = sess.get_session_messages(conv.session_key, limit=5)
 					watermark = max(
-						(((m or {}).get("__agent") or {}).get("seq", 0) for m in _wm_msgs),
+						(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in _wm_msgs),
 						default=0,
 					)
 					if watermark:

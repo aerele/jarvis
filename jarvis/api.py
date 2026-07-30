@@ -24,7 +24,7 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 	   whoever Frappe's session resolves to; their permissions are what the
 	   tool sees. Guest is rejected.
 
-	2. **Plugin auth** (``jarvis-agent-plugin`` Path A): two custom headers
+	2. **Plugin auth** (``jarvis-openclaw-plugin`` Path A): two custom headers
 	   are presented together:
 
 	   - ``X-Jarvis-Token`` - the shared ``agent_token`` secret

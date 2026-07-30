@@ -51,7 +51,7 @@ SIGNATURE_HEADERS = ("X-Jarvis-Signature", "X-Jarvis-Nonce", "X-Jarvis-Timestamp
 def sign_plugin_headers(token: str, session_key: str, body: bytes = b"") -> dict[str, str]:
 	"""Build the three signature headers the bench now requires (JF-014).
 
-	Mirrors ``signRequest`` in jarvis-agent-plugin's frappe-client.ts:
+	Mirrors ``signRequest`` in jarvis-openclaw-plugin's frappe-client.ts:
 	HMAC-SHA256 over "session | sha256(body) | nonce | timestamp", keyed by
 	the gateway token. A fresh nonce per call keeps the Redis dedup window
 	from rejecting back-to-back calls in the same test.

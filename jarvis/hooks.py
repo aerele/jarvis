@@ -68,7 +68,7 @@ def __getattr__(name: str):
 # refreshes against the same client_id we used to mint.
 #
 # Source:
-#   OpenAI: agent/extensions/openai/openai-codex-device-code.ts:5
+#   OpenAI: openclaw/extensions/openai/openai-codex-device-code.ts:5
 #   Google Gemini: bundled with @google/gemini-cli; override via env if it drifts.
 #
 # Anthropic Claude is deliberately absent - agent has no compatible

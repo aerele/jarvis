@@ -555,7 +555,7 @@
    "fieldname": "operator_section",
    "fieldtype": "Section Break",
    "label": "Agent Operator",
-   "description": "Operator config - populated by jarvis.openclaw_bootstrap.start (dev) or the Jarvis admin signup response (prod)."
+   "description": "Operator config - populated during agent container bootstrap (dev) or the Jarvis admin signup response (prod)."
   },
   {
    "fieldname": "agent_url",
@@ -563,7 +563,7 @@
    "permlevel": 1,
    "label": "Agent URL",
    "read_only": 1,
-   "description": "WebSocket URL for the customer's agent agent (e.g. ws://127.0.0.1:18789 in dev; wss://<subdomain>.<admin-host>:443 in prod)"
+   "description": "WebSocket URL for the customer's agent (e.g. ws://127.0.0.1:18789 in dev; wss://<subdomain>.<admin-host>:443 in prod)"
   },
   {
    "fieldname": "agent_token",

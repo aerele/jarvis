@@ -597,8 +597,8 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "assistant", "content": "PRIOR ANSWER", "__agent": {"seq": 5}},
-				{"role": "user", "content": "second question", "__agent": {"seq": 6}},
+				{"role": "assistant", "content": "PRIOR ANSWER", "__openclaw": {"seq": 5}},
+				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
 			],
 		)
 		ctx = self._ctx_for(double, epoch)
@@ -629,9 +629,9 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "assistant", "content": "PRIOR ANSWER", "__agent": {"seq": 5}},
-				{"role": "user", "content": "second question", "__agent": {"seq": 6}},
-				{"role": "assistant", "content": "RECOVERED ANSWER", "__agent": {"seq": 7}},
+				{"role": "assistant", "content": "PRIOR ANSWER", "__openclaw": {"seq": 5}},
+				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
+				{"role": "assistant", "content": "RECOVERED ANSWER", "__openclaw": {"seq": 7}},
 			],
 		)
 		ctx = self._ctx_for(double, epoch)

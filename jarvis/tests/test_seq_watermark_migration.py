@@ -15,6 +15,11 @@ MSG = "Jarvis Chat Message"
 
 class TestSeqWatermarkMigration(FrappeTestCase):
 	def setUp(self):
+		# The old column survives model-sync as an orphan on migrated sites, but a fresh CI
+		# install only ships the new column - synthesize the orphan so this test exercises the
+		# real transition state (old populated, new to-fill) portably, not ambient dev-site state.
+		if "openclaw_seq_watermark" not in frappe.db.get_table_columns(MSG):
+			frappe.db.sql(f"ALTER TABLE `tab{MSG}` ADD COLUMN openclaw_seq_watermark INT NOT NULL DEFAULT 0")
 		self.conv = frappe.get_doc(
 			{"doctype": "Jarvis Conversation", "title": "wm", "session_key": "wm-migration-test"}
 		).insert(ignore_permissions=True)

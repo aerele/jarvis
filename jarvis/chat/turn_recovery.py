@@ -92,7 +92,7 @@ def _latest_assistant_text(messages: list, *, min_seq: int = 0, max_seq: int | N
 	question's reply). Messages with seq > max_seq belong to a later turn."""
 
 	def seq(m):
-		return ((m or {}).get("__agent") or {}).get("seq", 0)
+		return ((m or {}).get("__openclaw") or {}).get("seq", 0)
 
 	for m in sorted(messages or [], key=seq, reverse=True):
 		if min_seq > 0 and seq(m) <= min_seq:
