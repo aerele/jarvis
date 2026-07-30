@@ -11,7 +11,7 @@ import uuid
 
 import frappe
 
-from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.openclaw_client import OpenclawSession, oneshot_run_id
 from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
 # Cooldown between warm-ups for one bench. 2026-07 latency plan, Phase
@@ -128,10 +128,15 @@ def warm_prefix() -> bool:
 		sess = OpenclawSession.connect(gateway_url)
 		try:
 			throwaway = sess.create_session(label=f"jarvis-prewarm-{uuid.uuid4().hex[:8]}")
+			# The pin is the whole point: this warms ONE model's prefix cache,
+			# so a failover would warm the wrong one. openclaw answers an
+			# explicit model by dropping the run's fallback chain (#531), and
+			# the prefixed run id is what tells a later log reader that the
+			# resulting ``next=none`` is by design rather than a dead chain.
 			sess.fire_agent(
 				throwaway,
 				"/think off warmup",
-				uuid.uuid4().hex,
+				oneshot_run_id("prewarm", uuid.uuid4().hex, model=model, provider=provider),
 				model=model or None,
 				provider=provider,
 			)
