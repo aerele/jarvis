@@ -935,7 +935,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 		call_names = [c[0] for c in fake_sess.mock_calls if c[0] in ("get_session_messages", "chat_send")]
 		self.assertEqual(call_names, ["get_session_messages", "chat_send"])
 
-		row = self._assistant_row("openclaw_seq_watermark")
+		row = self._assistant_row("agent_seq_watermark")
 		self.assertEqual(row, 4)
 
 

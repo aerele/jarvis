@@ -535,7 +535,7 @@ class TestPanel10Draining(_PipelineCase):
 
 class TestSnapshotRecoveryWindow(_PipelineCase):
 	"""OARF-2: missed-terminal snapshot recovery must window the durable tail by
-	the turn's ``openclaw_seq_watermark`` (captured by prepare BEFORE this turn's
+	the turn's ``agent_seq_watermark`` (captured by prepare BEFORE this turn's
 	send). A run that ended with NO output beyond the watermark must NEVER adopt a
 	PRIOR turn's answer — it settles ``errored`` honestly (Amendment D: never
 	fabricate)."""
@@ -543,7 +543,7 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 	def _seed_streaming_gone(self, conv, rid, *, watermark, last_event_seq=3):
 		seed = self._mk_msg(conv, content="second question")
 		amsg = self._mk_msg(
-			conv, role="assistant", content="partial", streaming=1, openclaw_seq_watermark=watermark
+			conv, role="assistant", content="partial", streaming=1, agent_seq_watermark=watermark
 		)
 		epoch = self._acquire_fresh("snaprec")
 		self._mk_turn(

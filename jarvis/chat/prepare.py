@@ -176,7 +176,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 				)
 				if watermark:
 					frappe.db.set_value(
-						MSG, assistant_msg, "openclaw_seq_watermark", watermark, update_modified=False
+						MSG, assistant_msg, "agent_seq_watermark", watermark, update_modified=False
 					)
 					frappe.db.commit()
 			except Exception:

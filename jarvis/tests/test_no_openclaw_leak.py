@@ -30,8 +30,9 @@ _ALLOWED_FILES = {
 # Historical applied migrations are never rewritten.
 _ALLOWED_PREFIXES = ("jarvis/patches/",)
 # Wire-contract literals allowed in ANY file (the runtime's filesystem / image / marker /
-# the openclaw_seq_watermark column until it is renamed). Stripped before the check so a
-# line carrying only these is not flagged.
+# the old openclaw_seq_watermark column the rename migration still copies from until a later
+# contract patch drops it). Stripped before the check so a line carrying only these is not
+# flagged.
 _ALLOWED_LITERALS = re.compile(
 	r"openclaw\.plugin\.json|openclaw\.json|__openclaw__|openclaw/openclaw|\.openclaw|openclaw_state|openclaw_seq_watermark"
 )

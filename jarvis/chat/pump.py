@@ -2452,7 +2452,7 @@ def _poll_recoveries(ctx: PumpContext) -> None:
 
 def _recovery_window(r: dict) -> tuple[int, int | None]:
 	"""OARF-2 recovery window for a turn: ``min_seq`` = the turn's
-	``openclaw_seq_watermark`` (captured by prepare BEFORE this turn's chat.send —
+	``agent_seq_watermark`` (captured by prepare BEFORE this turn's chat.send —
 	a transcript message at/below it predates this turn), ``max_seq`` = the next
 	turn's watermark (a message above it belongs to a later turn). Identical bound
 	to the legacy ``turn_recovery`` fix for the same 'recovered with the next
@@ -2460,8 +2460,8 @@ def _recovery_window(r: dict) -> tuple[int, int | None]:
 	am = r.get("assistant_message")
 	if not am:
 		return 0, None
-	row = frappe.db.get_value(MSG, am, ["openclaw_seq_watermark", "seq"], as_dict=True) or {}
-	min_seq = int(row.get("openclaw_seq_watermark") or 0)
+	row = frappe.db.get_value(MSG, am, ["agent_seq_watermark", "seq"], as_dict=True) or {}
+	min_seq = int(row.get("agent_seq_watermark") or 0)
 	max_seq = None
 	if row.get("seq"):
 		from jarvis.chat.turn_recovery import _next_turn_watermark

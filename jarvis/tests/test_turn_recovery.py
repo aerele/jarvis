@@ -379,7 +379,7 @@ class TestTurnRecovery(FrappeTestCase):
 		# watermark (7) captured before this turn's send - a run that died
 		# server-side with zero output must not have the previous reply
 		# wrongly stamped onto this row.
-		frappe.db.set_value(MSG_DT, self.msg.name, "openclaw_seq_watermark", 7)
+		frappe.db.set_value(MSG_DT, self.msg.name, "agent_seq_watermark", 7)
 		frappe.db.commit()
 		sess = self._fake_sess(
 			messages_by_key={
@@ -396,7 +396,7 @@ class TestTurnRecovery(FrappeTestCase):
 		self.assertNotIn("run:end", [c.args[1]["kind"] for c in pub.call_args_list])
 
 	def test_watermark_finalizes_from_strictly_newer_message(self):
-		frappe.db.set_value(MSG_DT, self.msg.name, "openclaw_seq_watermark", 7)
+		frappe.db.set_value(MSG_DT, self.msg.name, "agent_seq_watermark", 7)
 		frappe.db.commit()
 		sess = self._fake_sess(
 			messages_by_key={
@@ -473,7 +473,7 @@ class TestTurnRecovery(FrappeTestCase):
 			}
 		)
 		doc.insert(ignore_permissions=True)
-		frappe.db.set_value(MSG_DT, doc.name, "openclaw_seq_watermark", watermark)
+		frappe.db.set_value(MSG_DT, doc.name, "agent_seq_watermark", watermark)
 		frappe.db.commit()
 		return doc
 

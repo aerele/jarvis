@@ -307,7 +307,7 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	rows = frappe.db.sql(
 		"""
 		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, m.openclaw_seq_watermark, m.creation
+			   m.recovery_started_at, m.seq, m.agent_seq_watermark, m.creation
 		FROM `tabJarvis Chat Message` m
 		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
 		WHERE m.streaming = 1 AND m.recovering = 1
@@ -384,7 +384,7 @@ def _recover_one(sess: AgentSession, row: dict, active: dict) -> str:
 	messages = sess.get_session_messages(session_key, limit=50)
 	text = _latest_assistant_text(
 		messages,
-		min_seq=row.get("openclaw_seq_watermark") or 0,
+		min_seq=row.get("agent_seq_watermark") or 0,
 		max_seq=_next_turn_watermark(row["conversation"], row["seq"]),
 	)
 	if text:
@@ -402,10 +402,10 @@ def _next_turn_watermark(conversation: str, seq: int) -> int | None:
 	which matches the common single-in-flight-turn case."""
 	val = frappe.db.sql(
 		"""
-		SELECT MIN(openclaw_seq_watermark)
+		SELECT MIN(agent_seq_watermark)
 		FROM `tabJarvis Chat Message`
 		WHERE conversation = %(conv)s AND role = 'assistant'
-		  AND seq > %(seq)s AND openclaw_seq_watermark > 0
+		  AND seq > %(seq)s AND agent_seq_watermark > 0
 		""",
 		{"conv": conversation, "seq": seq},
 	)[0][0]
@@ -421,7 +421,7 @@ def recover_now(conversation_id: str) -> str:
 	rows = frappe.db.sql(
 		"""
 		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, m.openclaw_seq_watermark, m.creation
+			   m.recovery_started_at, m.seq, m.agent_seq_watermark, m.creation
 		FROM `tabJarvis Chat Message` m
 		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
 		WHERE m.streaming = 1 AND m.recovering = 1

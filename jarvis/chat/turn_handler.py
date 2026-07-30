@@ -951,7 +951,7 @@ def handle_chat_send(payload: dict) -> None:
 						frappe.db.set_value(
 							MSG,
 							assistant_msg.name,
-							"openclaw_seq_watermark",
+							"agent_seq_watermark",
 							watermark,
 							update_modified=False,
 						)

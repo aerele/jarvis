@@ -15,7 +15,7 @@
     "error",
     "recovering",
     "recovery_started_at",
-    "openclaw_seq_watermark",
+    "agent_seq_watermark",
     "was_recovered",
     "stopped",
     "tool_name",
@@ -87,7 +87,7 @@
       "description": "When this row entered the recovering state. Bounds the recovery window against an absolute ceiling."
     },
     {
-      "fieldname": "openclaw_seq_watermark",
+      "fieldname": "agent_seq_watermark",
       "fieldtype": "Int",
       "label": "Agent Seq Watermark",
       "read_only": 1,
