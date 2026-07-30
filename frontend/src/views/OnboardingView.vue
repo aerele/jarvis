@@ -814,6 +814,7 @@ const FRAME_SUBS = {
 	plan: "Choose your plan",
 	details: "Your details",
 	pay: "Review & pay",
+	reconnect: "Reconnect your subscription",
 	connect: `Give ${agentName} a brain`,
 };
 
