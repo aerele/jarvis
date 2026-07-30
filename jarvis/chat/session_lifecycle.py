@@ -539,7 +539,14 @@ def reclaim_throwaway_session(
 	log = frappe.logger(logger_name)
 	# Before this instant an idle answer only means "the run has not started
 	# yet". 0.0 (no fire time given) => the caller saw the run end, trust at once.
-	trust_idle_after = fired_at + RUN_START_GRACE_S if fired_at else 0.0
+	#
+	# The isinstance check is not decoration: the arithmetic below sits OUTSIDE
+	# the per-probe try, so a caller that ever handed over a non-numeric fire
+	# time (a str from a cache round-trip, say) would raise straight through the
+	# "never raises" contract every caller here relies on.
+	trust_idle_after = (
+		fired_at + RUN_START_GRACE_S if isinstance(fired_at, (int, float)) and fired_at else 0.0
+	)
 	seen_active = False
 	for attempt in range(RECLAIM_PROBE_ATTEMPTS):
 		try:

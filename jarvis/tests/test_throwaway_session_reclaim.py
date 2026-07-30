@@ -232,17 +232,24 @@ class TestUnstartedRunIsNotDeleted(FrappeTestCase):
 
 	def test_the_guard_declines_rather_than_waiting_the_grace_out(self):
 		"""It refuses to guess, it does not block. polish's reclaim runs inside a
-		synchronous whitelisted request; spending RUN_START_GRACE_S there to
-		reach a delete the orphan sweep does for free would be the worse trade."""
+		synchronous whitelisted request, so spending RUN_START_GRACE_S there to
+		reach a delete the orphan sweep does for free would be the worse trade.
+
+		Asserted on the REAL backoff (no patched-to-zero delay) and on the sum of
+		what the helper asks to sleep, because that is the number a wrong fix
+		would move: sleeping until the deadline instead of declining would push
+		this to RUN_START_GRACE_S or beyond, while wall-clock in a test with a
+		stubbed gateway stays near zero either way."""
 		sess = _stub_pool_session(active_probes=False)
 
-		started = time.time()
-		with patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0):
+		with patch.object(session_lifecycle.time, "sleep") as sleep:
 			session_lifecycle.reclaim_throwaway_session(
 				sess, SKEY, logger_name="jarvis.tests", fired_at=time.time()
 			)
 
-		self.assertLess(time.time() - started, session_lifecycle.RUN_START_GRACE_S)
+		slept = sum(call.args[0] for call in sleep.call_args_list)
+		self.assertLess(slept, session_lifecycle.RUN_START_GRACE_S)
+		sess.delete_session.assert_not_called()
 
 
 class TestAutoTitleReclaim(FrappeTestCase):
@@ -435,7 +442,15 @@ class TestPrewarmReclaim(FrappeTestCase):
 		"""Issue #535: the same instant-apart race, but with the gateway
 		answering hasActiveRun=FALSE because it has not started the predecessor's
 		run yet. The probe waves this one through; the remembered fire time is
-		what stops it."""
+		what stops it.
+
+		The probe-count assertion is load-bearing, for a non-obvious reason. The
+		pre-#535 _reclaim_previous guard was ``not isinstance(prev, str)``, so it
+		rejects this dict pointer outright and returns without reclaiming at all
+		- meaning a bare ``delete_session.assert_not_called()`` would pass against
+		the unfixed code too, for entirely the wrong reason. Requiring that the
+		helper was reached AND spent its whole budget declining is what makes this
+		discriminate."""
 		from jarvis.chat import prewarm
 
 		sess = _stub_pool_session(active_probes=False)
@@ -444,6 +459,11 @@ class TestPrewarmReclaim(FrappeTestCase):
 			prewarm._reclaim_previous(sess, {"key": "sk_previous", "fired_at": time.time()}, "sk_current")
 
 		sess.delete_session.assert_not_called()
+		self.assertEqual(
+			sess.is_run_active.call_count,
+			session_lifecycle.RECLAIM_PROBE_ATTEMPTS,
+			"the reclaim must have been reached, and must have declined all the way through",
+		)
 
 	def test_a_predecessor_from_a_cooldown_ago_is_reclaimed(self):
 		"""The normal case, which must stay immediate: the cooldown has elapsed,

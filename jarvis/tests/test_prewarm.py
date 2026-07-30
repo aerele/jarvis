@@ -181,7 +181,13 @@ class TestWarmPrefix(FrappeTestCase):
 		alone waves the delete through and it lands on a live run.
 
 		Here the cooldown is cleared WITHOUT backdating the pointer, which is
-		what that race looks like from prewarm's side."""
+		what that race looks like from prewarm's side.
+
+		The grace is widened for the duration so the assertion cannot depend on
+		how long a loaded CI box takes to get from the first warm to the second.
+		The real 5s value is plenty in production and asserted directly in
+		test_throwaway_session_reclaim.py; what this test is for is the wiring,
+		which must not turn into a timing flake."""
 		from jarvis.chat import prewarm
 
 		frappe.cache().delete_value(prewarm._warm_cooldown_key())
@@ -195,6 +201,7 @@ class TestWarmPrefix(FrappeTestCase):
 			patch("jarvis.chat.prewarm.OpenclawSession") as OC,
 			patch("jarvis.chat.prewarm.frappe.get_single", return_value=self._settings_stub()),
 			patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0),
+			patch.object(session_lifecycle, "RUN_START_GRACE_S", 3600),
 		):
 			OC.connect.return_value = fake_sess
 			self.assertTrue(prewarm.warm_prefix())
