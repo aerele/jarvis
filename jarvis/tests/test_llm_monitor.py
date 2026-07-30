@@ -96,15 +96,44 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		# A DIRECT (single-model) tenant has no proxy auth profile to report -
 		# the SPA's ConnectionPane used to render this as a misleading orange
 		# "Not connected" instead of an accurate "Direct" state.
+		#
+		# _has_llm_config is stubbed rather than satisfied with a real stored
+		# key. The subject here is the SHORT-CIRCUIT and the field remap, not the
+		# predicate, which TestHasLlmConfig below covers exhaustively over a stub.
+		# Satisfying it for real would mean writing a Password field, and blanking
+		# one afterwards leaves the secret in __Auth and leaks a test key into
+		# every later test on the site. It would also make the outcome depend on
+		# whatever models[] the shared test site happens to hold.
 		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
 		frappe.db.set_single_value("Jarvis Settings", "llm_model", "gpt-4o")
 		frappe.db.commit()
-		with patch.object(admin_client, "post_llm_auth_status") as m:
-			out = account.get_llm_connection_status()
+		with patch.object(account, "_has_llm_config", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status") as m:
+				out = account.get_llm_connection_status()
 		m.assert_not_called()
 		self.assertEqual(out["proxy_active"], False)
+		self.assertEqual(out["disconnected"], False)
 		self.assertEqual(out["auth_present"], False)
 		self.assertEqual(out["default_model"], "gpt-4o")
+
+	def test_a_leftover_model_label_alone_reports_disconnected(self):
+		"""The behaviour change, asserted at the endpoint and not just on the
+		predicate: a workspace holding only a MIRROR (llm_model) with no
+		credential behind it is disconnected, and must not leak the label out as
+		a default_model the SPA would render as a healthy "Direct" state.
+
+		This is the shape jarvis.oauth.api.disconnect leaves behind - it clears
+		the OAuth side and deliberately keeps llm_provider / llm_model.
+		"""
+		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
+		frappe.db.set_single_value("Jarvis Settings", "llm_model", "gpt-4o")
+		frappe.db.commit()
+		with patch.object(account, "_has_llm_config", return_value=False):
+			with patch.object(admin_client, "post_llm_auth_status") as m:
+				out = account.get_llm_connection_status()
+		m.assert_not_called()
+		self.assertEqual(out["disconnected"], True)
+		self.assertEqual(out["default_model"], "")
 
 
 class TestHasLlmConfig(FrappeTestCase):
