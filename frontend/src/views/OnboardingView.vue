@@ -300,6 +300,19 @@
 									class="mx-auto mt-5 max-w-[620px]"
 								/>
 							</div>
+							<p
+								class="mx-auto mt-5 max-w-[620px] text-center text-p-sm text-ink-gray-5"
+							>
+								Already subscribed and setting this site up again?
+								<button
+									class="ob-link"
+									:disabled="!canReconnect || state.payBusy"
+									@click="startReconnect"
+								>
+									Reconnect instead
+								</button>
+								— we'll email a code to confirm it's you. Nothing to pay again.
+							</p>
 							<div class="ob-foot">
 								<button class="ob-back" @click="goBack">
 									<FeatherIcon
@@ -385,62 +398,6 @@
 										loading-text="Working…"
 										label="I've verified my email"
 										@click="onVerifyCheck"
-									/>
-								</div>
-							</template>
-							<template v-else-if="state.payPhase === 'reconnect'">
-								<div class="ob-body ob-body--center">
-									<div class="ob-head">
-										<h1>Enter your reconnect code</h1>
-										<p>
-											Sent to <b>{{ state.email || "your email" }}</b> —
-											connects this site to your existing subscription,
-											nothing to pay again.
-										</p>
-									</div>
-									<input
-										v-model="state.reconnectCode"
-										class="ob-code"
-										type="text"
-										autocapitalize="characters"
-										autocomplete="one-time-code"
-										spellcheck="false"
-										maxlength="9"
-										aria-label="Reconnect code"
-										placeholder="ABCD2345"
-										@keydown.enter="submitReconnectCode"
-									/>
-									<p class="ob-code-note">
-										<template v-if="state.reconnectResentIn > 0">
-											Sent. You can resend in {{ state.reconnectResentIn }}s.
-										</template>
-										<template v-else>
-											Didn't get it?
-											<button class="ob-link" @click="resendReconnectCode">
-												Resend code
-											</button>
-										</template>
-									</p>
-									<Banner
-										v-if="state.payErr"
-										type="error"
-										:message="state.payErr"
-									/>
-								</div>
-								<div class="ob-foot">
-									<button class="ob-back" @click="cancelReconnect">
-										<FeatherIcon
-											name="chevron-left"
-											class="h-3.5 w-3.5 text-ink-gray-5"
-										/>Back
-									</button>
-									<Button
-										variant="solid"
-										:loading="state.payBusy"
-										loading-text="Working…"
-										:disabled="!state.reconnectCode.trim()"
-										label="Finish reconnect"
-										@click="submitReconnectCode"
 									/>
 								</div>
 							</template>
@@ -623,8 +580,8 @@
 											@click="startReconnect"
 										/>
 										<p class="mt-1.5 text-p-sm text-ink-gray-5">
-											We'll email a link to {{ state.email }} — approving it
-											connects this site to your existing subscription.
+											We'll email a code to {{ state.email }} — enter it to
+											connect this site to your existing subscription.
 											Nothing to pay again.
 										</p>
 									</div>
@@ -657,6 +614,63 @@
 							 save_llm_pool; this step is the post-save readiness handoff.
 							 v-show (not v-if) so the editor stays MOUNTED while its own save()
 							 is still awaiting. ===== -->
+						<!-- ===== Reconnect an existing subscription. NOT a rail step: it is a
+						     divergence out of the purchase funnel, and RAIL hides itself for any
+						     step it doesn't know - so the customer stops being told they are at
+						     "Pay" while reconnecting something they already paid for. ===== -->
+						<section v-else-if="state.step === 'reconnect'" class="ob-screen">
+							<div class="ob-body ob-body--center">
+								<div class="ob-head">
+									<h1>Enter your reconnect code</h1>
+									<p>
+										Sent to <b>{{ state.email || "your email" }}</b> — connects
+										this site to your existing subscription, nothing to pay
+										again.
+									</p>
+								</div>
+								<input
+									v-model="state.reconnectCode"
+									class="ob-code"
+									type="text"
+									autocapitalize="characters"
+									autocomplete="one-time-code"
+									spellcheck="false"
+									maxlength="9"
+									aria-label="Reconnect code"
+									placeholder="ABCD2345"
+									@keydown.enter="submitReconnectCode"
+								/>
+								<p class="ob-code-note">
+									<template v-if="state.reconnectResentIn > 0">
+										Sent. You can resend in {{ state.reconnectResentIn }}s.
+									</template>
+									<template v-else>
+										Didn't get it?
+										<button class="ob-link" @click="resendReconnectCode">
+											Resend code
+										</button>
+									</template>
+								</p>
+								<Banner v-if="state.payErr" type="error" :message="state.payErr" />
+							</div>
+							<div class="ob-foot">
+								<button class="ob-back" @click="cancelReconnect">
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back
+								</button>
+								<Button
+									variant="solid"
+									:loading="state.payBusy"
+									loading-text="Working…"
+									:disabled="!state.reconnectCode.trim()"
+									label="Finish reconnect"
+									@click="submitReconnectCode"
+								/>
+							</div>
+						</section>
+
 						<section v-else-if="state.step === 'connect'" class="ob-screen">
 							<div class="ob-body">
 								<div v-show="state.finishing">
@@ -829,9 +843,10 @@ const state = reactive({
 	plansLoading: false,
 	plansErr: "",
 	// pay (renderPay / renderVerifyEmail / startPay / openCheckout)
-	payPhase: "review", // "review" | "verify" | "reconnect" - step-3 sub-screens
+	payPhase: "review", // "review" | "verify" - step-3 sub-screens
 	reconnectOffered: false,
 	reconnectRequestId: "",
+	reconnectFrom: "",
 	reconnectCode: "",
 	reconnectResentIn: 0,
 	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
@@ -864,6 +879,11 @@ const state = reactive({
 const steps = computed(() => STEPS_MANAGED);
 const selectedPlan = computed(() => state.plans.find((p) => p.name === state.planName) || {});
 const railIndex = computed(() => RAIL.findIndex((r) => r.id === state.step));
+// Admin resolves a reconnect by (email, company) - several company accounts can
+// share one address - so both halves must be filled before the offer is live.
+const canReconnect = computed(
+	() => /.+@.+\..+/.test((state.email || "").trim()) && !!(state.company || "").trim()
+);
 const frameSub = computed(() => FRAME_SUBS[state.step] || "Set up your workspace");
 
 // No "Popular" tag: the admin plan catalog carries no recommended/popular
@@ -1278,6 +1298,7 @@ async function onVerifyCheck() {
 }
 
 function cancelReconnect() {
+	state.step = state.reconnectFrom || "pay";
 	state.payPhase = "review";
 	state.payErr = "";
 	state.reconnectRequestId = "";
@@ -1334,18 +1355,21 @@ async function submitReconnectCode() {
 	}
 }
 
-// "Already subscribed? Reconnect this site": start the admin-side magic-link
-// flow and switch the pay step into the waiting screen. The poll below rides
-// until the customer clicks the emailed link (or an operator approves).
+// "Already subscribed?": ask admin to mail a reconnect code, then show the
+// code screen. Reachable from Details (a returning customer never has to pick a
+// plan or reach a payment wall) and from a rejected pay attempt.
 async function startReconnect() {
 	state.payErr = "";
 	state.reconnectOffered = false;
 	state.reconnectCode = "";
 	state.payBusy = true;
+	// Where to return on Back/cancel: reconnect can now be entered from Details
+	// (before any plan is chosen) as well as from a rejected pay attempt.
+	state.reconnectFrom = state.step === "reconnect" ? state.reconnectFrom : state.step;
 	try {
 		const d = await startAccountReconnect(state.email, state.company);
 		state.reconnectRequestId = (d && d.request) || "";
-		state.payPhase = "reconnect";
+		state.step = "reconnect";
 	} catch (e) {
 		state.payErr = errMsg(e);
 		state.reconnectOffered = true;
