@@ -505,6 +505,27 @@ def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None)
 
 
 @frappe.whitelist()
+def reconnect_available(email: str, company: str = "") -> dict:
+	"""Would a reconnect for this (email, company) find an account to reconnect?
+
+	Gates the wizard's reconnect offer so it appears only when it would work. Fails
+	CLOSED: any admin-side error answers "not available" rather than raising, because
+	this only decides whether to show a hint - a wizard that breaks because the
+	control plane blipped would be a worse trade than a hint that stays hidden.
+	Same System-Manager gating as the rest of onboarding."""
+	require_jarvis_admin()
+	try:
+		_require_admin_url()
+		d = admin_client.reconnect_eligibility(email, company) or {}
+	except Exception:
+		return {"eligible": False, "needs_company": False}
+	return {
+		"eligible": bool(d.get("eligible")),
+		"needs_company": bool(d.get("needs_company")),
+	}
+
+
+@frappe.whitelist()
 def start_account_reconnect(email: str, company: str = "") -> dict:
 	"""Fresh-bench recovery: ask admin to email a reconnect CODE to the
 	REGISTERED address of an existing paid account (wiped-site scenario — the

@@ -223,6 +223,18 @@ def resume_pending_signup(plan: str, provider: str | None = None) -> dict:
 	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)
 
 
+def reconnect_eligibility(email: str, company_name: str = "") -> dict:
+	"""Guest: would a reconnect for this (email, company) find anything? Read-only
+	precursor to request_account_reconnect, so the wizard can offer the reconnect
+	path only when it works. Short timeout - it gates a hint, never a decision:
+	the caller treats any failure as "don't offer"."""
+	return _post_guest(
+		path=_m("billing.reconnect.can_reconnect"),
+		body={"email": email, "company_name": company_name},
+		timeout_s=8,
+	)
+
+
 def request_account_reconnect(email: str, company_name: str = "") -> dict:
 	"""Guest: start a fresh-bench reconnect to an EXISTING paid account (wiped
 	site recovery). Admin emails a CODE to the registered address and returns an

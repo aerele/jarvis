@@ -39,6 +39,8 @@ export const setAutoApply = (conversation, value) =>
 export const getUsage = (conversation) =>
 	call("jarvis.chat.api.get_usage", { conversation: conversation || "" });
 // ---- account reconnect (fresh bench -> existing paid subscription) ---------
+export const reconnectAvailable = (email, company = "") =>
+	call("jarvis.onboarding.reconnect_available", { email, company });
 export const startAccountReconnect = (email, company = "") =>
 	call("jarvis.onboarding.start_account_reconnect", { email, company });
 export const checkAccountReconnect = (requestId, code) =>

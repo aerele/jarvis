@@ -5,7 +5,11 @@
 
 // Managed flow (2026-07 redesign): intro tour → Plan → Details → Pay → Connect.
 // The old "mode" chooser + "account" step are gone.
-export const STEPS_MANAGED = ["intro", "plan", "details", "pay", "connect"];
+// Details BEFORE plan: the email + company are what identify an account, so asking
+// for them first is what lets a returning customer take the reconnect exit before
+// weighing plans they already pay for. Nothing on the Details step reads the chosen
+// plan, so the two are free to swap.
+export const STEPS_MANAGED = ["intro", "details", "plan", "pay", "connect"];
 
 export function stepIndex(steps, cur) {
 	const i = steps.indexOf(cur);

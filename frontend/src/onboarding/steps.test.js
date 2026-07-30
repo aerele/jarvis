@@ -15,10 +15,20 @@ import {
 } from "./steps.js";
 
 test("managed step order", () => {
-	assert.deepEqual(STEPS_MANAGED, ["intro", "plan", "details", "pay", "connect"]);
-	assert.equal(nextStep(STEPS_MANAGED, "plan"), "details");
-	assert.equal(prevStep(STEPS_MANAGED, "details"), "plan");
+	assert.deepEqual(STEPS_MANAGED, ["intro", "details", "plan", "pay", "connect"]);
+	assert.equal(nextStep(STEPS_MANAGED, "plan"), "pay");
+	assert.equal(prevStep(STEPS_MANAGED, "details"), "intro");
 	assert.equal(nextStep(STEPS_MANAGED, "connect"), "connect"); // clamp at end
+	// Off-funnel steps (e.g. "reconnect", which is deliberately absent so the rail
+	// hides) clamp to index 0, so relative navigation from one silently walks the
+	// customer back to the FIRST step. Anything off-funnel must set state.step
+	// explicitly instead of calling goNext()/goBack().
+	assert.equal(stepIndex(STEPS_MANAGED, "reconnect"), 0);
+	assert.equal(nextStep(STEPS_MANAGED, "reconnect"), "details");
+	// ...which is why finishing a reconnect re-anchors to "pay" first: that is where
+	// the provisioning screen renders, and it is the step that advances to the end of
+	// onboarding rather than back into the funnel.
+	assert.equal(nextStep(STEPS_MANAGED, "pay"), "connect");
 	assert.equal(prevStep(STEPS_MANAGED, "intro"), "intro"); // clamp at start
 });
 
