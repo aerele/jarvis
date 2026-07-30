@@ -537,10 +537,10 @@ class TestFencingTimelines(_TurnStateTestCase):
 		frappe.db.commit()
 		self.assertEqual(self._state("ts_d4a"), "finalizing")
 
-	def test_a1_acquire_stamps_progress_heartbeat(self):
-		"""A1 (GAP 3): lease_acquire stamps ``loop_heartbeat_ts`` on the winning
-		acquire, so a freshly-revived hop is never seen as progress-stale — the
-		force-takeover kill-loop guard. A fresh control row has no stamp yet."""
+	def test_a1_acquire_seeds_progress_stamp_on_cold_start(self):
+		"""A1 (GAP 3): a COLD-START acquire (loop_heartbeat_ts is NULL) SEEDS the stamp
+		to now, so a pump wedged from birth still ages toward detection instead of
+		sitting at NULL (which _progress_stale treats as fresh forever)."""
 		ts._ensure_control_row(self._target)
 		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", None, update_modified=False)
 		frappe.db.commit()
@@ -549,7 +549,34 @@ class TestFencingTimelines(_TurnStateTestCase):
 		self.assertTrue(won)
 		self.assertIsNotNone(
 			frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts"),
-			"acquire must stamp the progress heartbeat",
+			"cold-start acquire must seed the progress stamp",
+		)
+
+	def test_a1_acquire_carries_progress_stamp_forward(self):
+		"""A1 (GAP 3 — the CRITICAL guard): a clean-hop re-acquire CARRIES the progress
+		stamp FORWARD (COALESCE), it does NOT refresh it. run_pump_hop calls lease_acquire
+		on EVERY hop (~90s), so refreshing here would keep the stamp younger than the
+		180s threshold forever and the wedge detector could never fire. A non-draining
+		lineage must age past the threshold across hops."""
+		ts._ensure_control_row(self._target)
+		old = frappe.utils.add_to_date(None, seconds=-300)
+		# A prior hop left an OLD progress stamp; expire the lease so the next acquire wins.
+		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", old, update_modified=False)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"lease_expires_at",
+			frappe.utils.add_to_date(None, seconds=-5),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		won, _ = ts.lease_acquire(self._target, "hop-carry")
+		self.assertTrue(won)
+		self.assertEqual(
+			str(frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts")),
+			str(old),
+			"acquire must CARRY the progress stamp forward, not refresh it "
+			"(else the wedge detector never fires)",
 		)
 
 	def test_a1_progress_stale_null_is_fresh(self):
@@ -590,11 +617,20 @@ class TestFencingTimelines(_TurnStateTestCase):
 			frappe.utils.add_to_date(None, seconds=25),
 			update_modified=False,
 		)
+		stale_stamp = frappe.utils.add_to_date(None, seconds=-300)
+		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", stale_stamp, update_modified=False)
 		frappe.db.commit()
 
 		self.assertTrue(ts.force_expire_wedged(self._target, E))
-		row = frappe.db.get_value(PUMP, self._target, ["pump_epoch", "lease_expires_at"], as_dict=True)
+		row = frappe.db.get_value(
+			PUMP, self._target, ["pump_epoch", "lease_expires_at", "loop_heartbeat_ts"], as_dict=True
+		)
 		self.assertEqual(row["pump_epoch"], E + 1, "epoch bumped to fence the wedged pump")
+		self.assertGreater(
+			frappe.utils.get_datetime(row["loop_heartbeat_ts"]),
+			frappe.utils.get_datetime(stale_stamp),
+			"force-expire RESETS the progress stamp so the successor gets a fresh window",
+		)
 		self.assertLess(
 			frappe.utils.get_datetime(row["lease_expires_at"]),
 			frappe.utils.get_datetime(frappe.utils.now()),

@@ -1566,7 +1566,11 @@ def drain_slice(ctx: PumpContext) -> str:
 	_poll_snapshot(ctx)  # CDX-11: fold a resolved refresh (or fail-close a timed-out one) pre-promote
 	promoted = _promote_queued(ctx)
 	dispatched = _dispatch_ready(ctx)  # OARF-5: issues chat.send acks, parks them (never blocks)
+	pending_before = len(ctx.pending_acks) + len(ctx.pending_recoveries)
 	_poll_pending(ctx)  # OARF-5: resolve done acks/recovery tails; ack-timeout deadlines
+	# A turn advanced (ack -> streaming/errored, recovery tail settled) when the in-flight
+	# RPC set shrank — that is drain progress even in a slice with no mux frame applied.
+	polled_progress = (len(ctx.pending_acks) + len(ctx.pending_recoveries)) < pending_before
 
 	applied = ctx.mux.dispatch(block_s=SLICE_BLOCK_S) if ctx.mux is not None else 0
 	if ctx.lease_lost:
@@ -1583,7 +1587,9 @@ def drain_slice(ctx: PumpContext) -> str:
 	# or applied a mux frame) OR the pump is correctly capacity-blocked (fail-closed:
 	# gateway visibility UNKNOWN, where a takeover cannot help — not a wedge). Only a
 	# genuine "should be draining but isn't" leaves the progress stamp un-advanced.
-	progressed = promoted > 0 or dispatched > 0 or applied > 0 or not ctx.gateway_active_known
+	progressed = (
+		promoted > 0 or dispatched > 0 or applied > 0 or polled_progress or not ctx.gateway_active_known
+	)
 	_heartbeat_and_renew(ctx, progressed)
 
 	if _idle_exit(ctx):
@@ -3191,10 +3197,14 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 		wedged_epoch = _pump_wedged(target, now)
 		if wedged_epoch is not None:
 			summary["wedged_detected"] += 1
+			# _telemetry is per-event (unthrottled) so A4a can measure the true trip rate;
+			# the log below is throttled 1/h/shard only to bound Error Log volume.
+			_telemetry("pump_wedged", target=target, epoch=wedged_epoch, threshold_s=PROGRESS_STALE_S)
 			_log_wedged_throttled(target, wedged_epoch)
 			if _force_takeover_enabled() and ts.force_expire_wedged(target, wedged_epoch):
 				_clear_lease_mirror(target)
 				summary["forced_expired"] += 1
+				_telemetry("pump_force_expired", target=target, epoch=wedged_epoch)
 		res = ensure_pump(target, deps=deps)
 		if res.get("enqueued"):
 			summary["revived"] += 1

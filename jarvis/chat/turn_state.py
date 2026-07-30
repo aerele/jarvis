@@ -1259,13 +1259,19 @@ def lease_acquire(target: str, holder: str, hop_counter: int | None = None) -> t
 	params = {"t": target, "h": holder, "exp": exp, "now": now}
 	if hop_counter is not None:
 		params["hop"] = hop_counter
-	# GAP 3: stamp loop_heartbeat_ts=now on the winning acquire so a freshly revived
-	# hop starts with a FRESH progress stamp and is never force-expired as "wedged"
-	# before its first drain slice (the takeover kill-loop guard; see _progress_stale).
+	# GAP 3: SEED loop_heartbeat_ts on a cold-start acquire (it is NULL) but CARRY IT
+	# FORWARD on a clean-hop re-acquire (COALESCE keeps the existing value). Because
+	# run_pump_hop calls lease_acquire on EVERY hop (~every 90s), overwriting it here
+	# would refresh the progress stamp every hop and the wedge detector (progress stale
+	# for PROGRESS_STALE_S while the lease is live) could NEVER fire. Carrying it forward
+	# lets a non-draining lineage age past the threshold, while a healthy lineage keeps
+	# it fresh via lease_heartbeat (progress). A cold-start seed avoids a NULL-forever
+	# stamp on a pump wedged from birth. force_expire_wedged resets it for the successor.
 	won = (
 		_run_cas(
 			f"""UPDATE `tab{PUMP}`
-			SET pump_epoch=pump_epoch+1, lease_holder=%(h)s, lease_expires_at=%(exp)s, loop_heartbeat_ts=%(now)s{hop_set}
+			SET pump_epoch=pump_epoch+1, lease_holder=%(h)s, lease_expires_at=%(exp)s,
+			    loop_heartbeat_ts=COALESCE(loop_heartbeat_ts, %(now)s){hop_set}
 			WHERE relay_target_id=%(t)s
 			  AND (lease_expires_at IS NULL OR lease_expires_at < %(now)s)""",
 			params,
@@ -1344,17 +1350,22 @@ def force_expire_wedged(target: str, epoch: int) -> bool:
 	    ``ensure_pump`` successor immediately wins its own acquire.
 	  * RE-STAMPS in-flight turns to the new epoch (the wedged pump's cached-E turn
 	    writes then affect 0 rows), mirroring ``lease_acquire``.
+	Also RESETS ``loop_heartbeat_ts`` to now: the successor (which carries the stamp
+	forward on acquire) then gets a fresh ``PROGRESS_STALE_S`` window to prove itself,
+	so a persistently-wedged shard is retried at the watchdog cadence rather than
+	re-detected immediately every tick.
 	The CALLER (the watchdog) clears the Redis lease mirror + ``ensure_pump`` on a won
 	result. Returns won/lost; idempotent under the epoch CAS (a second call at the same
 	E affects 0 rows). Commits (a standalone lifecycle op)."""
 	frappe.db.commit()
+	now = _now()
 	past = frappe.utils.add_to_date(None, seconds=-1)
 	won = (
 		_run_cas(
 			f"""UPDATE `tab{PUMP}`
-			SET pump_epoch=pump_epoch+1, lease_expires_at=%(past)s
+			SET pump_epoch=pump_epoch+1, lease_expires_at=%(past)s, loop_heartbeat_ts=%(now)s
 			WHERE relay_target_id=%(t)s AND pump_epoch=%(e)s""",
-			{"past": past, "t": target, "e": epoch},
+			{"past": past, "now": now, "t": target, "e": epoch},
 		)
 		== 1
 	)
