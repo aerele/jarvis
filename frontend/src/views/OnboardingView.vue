@@ -1232,7 +1232,9 @@ async function runStartPay() {
 		// reconnect path instead of the dead end. Match both the pre- and
 		// post-multi-company wording ("already registered or pending" and
 		// "...email and company already exists").
-		state.reconnectOffered = /already registered or pending|already exists/i.test(state.payErr);
+		state.reconnectOffered = /already registered or pending|already exists/i.test(
+			state.payErr
+		);
 	}
 }
 
