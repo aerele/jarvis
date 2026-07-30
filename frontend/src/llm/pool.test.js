@@ -76,7 +76,7 @@ test("deriveMode: 1 api-key model & no preset => direct; a preset always => prox
 test("deriveMode: a pure BYO api-key pool is direct regardless of size (no sidecar deployed)", () => {
 	// Mirrors the backend's compute_proxy_active: a proxy sidecar is only
 	// deployed for a subscription model. A 2+-model pool of api keys alone
-	// renders openclaw-direct, so it must NOT read "proxy" just from the count.
+	// renders agent-direct, so it must NOT read "proxy" just from the count.
 	assert.equal(deriveMode([{}, {}], null), "direct");
 	assert.equal(
 		deriveMode(

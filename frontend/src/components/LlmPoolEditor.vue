@@ -1961,7 +1961,7 @@ const badgeLabel = computed(() => {
 	if (llmMode.value === "preset") return selectedPreset.value ? "Proxy (failover)" : "";
 	// A 2+-model custom pool only reads "Proxy (failover)" when badgeMode agrees a
 	// sidecar is actually deployed (some enabled model is a subscription). A pure
-	// BYO api-key pool of any size is openclaw-direct - no proxy, so no badge.
+	// BYO api-key pool of any size is agent-direct - no proxy, so no badge.
 	// (was: any 2+ rows counted as "Proxy (failover)" regardless of credential type)
 	if (llmMode.value === "custom")
 		return validModels.value.length >= 2 && badgeMode.value === "proxy"

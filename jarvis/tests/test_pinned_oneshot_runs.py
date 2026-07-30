@@ -1,8 +1,8 @@
 """A pinned one-shot must be recognisable as pinned from the log alone.
 
 Issue #531. The three throwaway one-shots (auto-title, pattern polish, prefix
-prewarm) each pass an explicit model/provider on openclaw's ``agent`` RPC, and
-openclaw answers that by dropping the run's model-fallback chain entirely:
+prewarm) each pass an explicit model/provider on agent's ``agent`` RPC, and
+agent answers that by dropping the run's model-fallback chain entirely:
 ``hasExplicitRunOverride`` forces ``modelOverrideSource: "user"``, and
 ``resolveEffectiveModelFallbacks`` returns ``[]`` for any source but ``"auto"``.
 There is no per-request way to opt back in - ``AgentParamsSchema`` is
@@ -12,13 +12,13 @@ rejects the marker outright (closed PR #517).
 The pin stays (prewarm must warm ONE model's cache; titles must stay cheap), so
 the fix is to make the inability to fail over unambiguous. Two things carry it,
 both asserted here: a pinned run id is prefixed differently from an unpinned
-one, which makes openclaw's own ``embedded run failover decision: runId=...
+one, which makes agent's own ``embedded run failover decision: runId=...
 next=none`` line self-describing, and the bench logs one line per pinned turn
 naming the run id and the pinned model.
 
 SCOPE NOTE: the transport is stubbed here, as everywhere else in this suite, so
 these tests assert INTENT - what the bench puts on the wire and what it records
-about it. They cannot observe openclaw's failover resolver or the log lines it
+about it. They cannot observe agent's failover resolver or the log lines it
 emits; that behaviour was read off the shipped 2026.6.8 bundle, not from a test.
 """
 
@@ -82,7 +82,7 @@ def _pool_session(reply: str) -> MagicMock:
 
 
 class TestPinnedRunId(FrappeTestCase):
-	"""openclaw uses the idempotency key verbatim as the run id, so the run id
+	"""agent uses the idempotency key verbatim as the run id, so the run id
 	is the one field guaranteed to reach every failover log line."""
 
 	def test_run_id_announces_the_pin_and_keeps_the_caller_key(self):
@@ -101,18 +101,18 @@ class TestPinnedRunId(FrappeTestCase):
 		self.assertFalse(run_id.startswith(PINNED_ONESHOT_RUN_PREFIX))
 
 	def test_a_bare_provider_still_counts_as_pinned(self):
-		"""openclaw drops the chain on either field, not just model."""
+		"""agent drops the chain on either field, not just model."""
 		run_id = oneshot_run_id("polish", "abc", model=None, provider="openai")
 
 		self.assertTrue(run_id.startswith(PINNED_ONESHOT_RUN_PREFIX))
 
-	def test_run_id_stays_clear_of_openclaws_own_key_namespace(self):
-		"""openclaw parses ``exec-approval-followup:`` keys as an approval id."""
+	def test_run_id_stays_clear_of_agents_own_key_namespace(self):
+		"""agent parses ``exec-approval-followup:`` keys as an approval id."""
 		for prefix in (PINNED_ONESHOT_RUN_PREFIX, ONESHOT_RUN_PREFIX):
 			self.assertFalse(prefix.startswith("exec-approval-followup:"))
 
 	def test_run_id_fits_the_console_truncation(self):
-		"""openclaw truncates console fields at 200 chars; a clipped run id
+		"""agent truncates console fields at 200 chars; a clipped run id
 		would not join back onto anything."""
 		self.assertLess(len(oneshot_run_id("polish", SKEY, model="gpt-5.5", provider=None)), 200)
 
@@ -128,7 +128,7 @@ class TestPinnedTurnIsLogged(FrappeTestCase):
 			sess.fire_agent(SKEY, "warmup", "idem-1", model="gpt-5.5", provider="openai")
 
 		line = "\n".join(logs.output)
-		self.assertIn("idem-1", line, "the log must name the run id openclaw will report")
+		self.assertIn("idem-1", line, "the log must name the run id agent will report")
 		self.assertIn("gpt-5.5", line)
 		self.assertIn("fallbacks=none-by-design", line)
 

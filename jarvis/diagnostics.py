@@ -90,7 +90,7 @@ def force_resync(action: str = "reload") -> dict:
 	if action not in ("reload", "restart"):
 		raise frappe.ValidationError(f"invalid action {action!r}; expected reload or restart")
 	settings = frappe.get_single("Jarvis Settings")
-	# Always the admin path: the legacy local-openclaw sync was retired with
+	# Always the admin path: the legacy local-agent sync was retired with
 	# the managed fleet (its method no longer exists), and _sync_via_admin
 	# surfaces its own clear error on an unconfigured bench.
 	settings._sync_via_admin(action)
@@ -160,8 +160,8 @@ def chat_recovery_stats() -> dict:
 def reset_agent_pairing() -> dict:
 	"""Clear the cached chat-device pairing and re-pair from scratch.
 
-	Use when openclaw rejects the existing pairing (e.g. 'device token
-	mismatch') and the automatic repair did not fire because openclaw
+	Use when agent rejects the existing pairing (e.g. 'device token
+	mismatch') and the automatic repair did not fire because agent
 	returned a generic error code. Clears the chat-device creds, drops any
 	pooled connection, then opens a fresh device-paired connection (which
 	re-pairs via the ops bench + fleet-agent) to verify.

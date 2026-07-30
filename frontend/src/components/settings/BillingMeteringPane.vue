@@ -120,7 +120,7 @@ const loading = ref(false);
 const errorMessage = computed(() => (usageError.value ? "Usage is unavailable right now." : ""));
 
 // `proxy_active` means "a Bifrost/cliproxy sidecar is deployed", NOT "this is a
-// pool" - a pool of BYO api keys is rendered openclaw-direct and runs its own
+// pool" - a pool of BYO api keys is rendered agent-direct and runs its own
 // failover with no sidecar. Reading the flag alone printed "Direct" right above
 // the Active-pool card listing both of that tenant's models.
 const modeLabel = computed(() => {

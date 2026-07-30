@@ -259,7 +259,7 @@ def get_llm_usage() -> dict:
 	"""Real, curated Bifrost usage for the Monitor tab (System-Manager only,
 	spec 7). Tenants with no Bifrost (proxy_active=0) short-circuit to the empty
 	shape — no pointless admin round-trip. That now includes a BYO api-key POOL,
-	which the fleet renders openclaw-direct with no sidecar at all."""
+	which the fleet renders agent-direct with no sidecar at all."""
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
 	if not getattr(settings, "proxy_active", 0):

@@ -5,8 +5,8 @@ Two surface areas to cover:
    public side, persists everything atomically; reuses existing creds when
    present; surfaces admin failures as AgentUnreachableError without
    half-persisting a broken state.
-2. build_payload_v3 / sign_payload: the byte-exact mirror of openclaw's
-   device-auth.ts:36 - if openclaw rev-bumps the format, this is the test
+2. build_payload_v3 / sign_payload: the byte-exact mirror of agent's
+   device-auth.ts:36 - if agent rev-bumps the format, this is the test
    that catches it before chat goes live.
 """
 
@@ -98,7 +98,7 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 		self.assertEqual(creds.device_token, "tok-from-admin")
 		self.assertEqual(creds.public_key, captured["public_key"])
 		self.assertEqual(creds.device_id, captured["device_id"])
-		# deviceId must match sha256(rawPublicKey) - same invariant openclaw enforces.
+		# deviceId must match sha256(rawPublicKey) - same invariant agent enforces.
 		raw = base64.urlsafe_b64decode(captured["public_key"] + "=" * (-len(captured["public_key"]) % 4))
 		self.assertEqual(creds.device_id, hashlib.sha256(raw).hexdigest())
 		# Persisted in Settings.
@@ -389,7 +389,7 @@ class TestSigning(FrappeTestCase):
 			platform="Linux",
 			device_family="",
 		)
-		# Mirror of openclaw's buildDeviceAuthPayloadV3 (device-auth.ts:36).
+		# Mirror of agent's buildDeviceAuthPayloadV3 (device-auth.ts:36).
 		# Platform is normalized to ASCII lowercase ("linux"); device_family
 		# stays empty.
 		expected = (
@@ -399,7 +399,7 @@ class TestSigning(FrappeTestCase):
 
 	def test_sign_payload_verifies_with_public_key(self):
 		"""Round-trip: sign with private, verify with the matching public key
-		using the same Ed25519 raw scheme openclaw uses."""
+		using the same Ed25519 raw scheme agent uses."""
 		priv = Ed25519PrivateKey.generate()
 		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 		payload = "v3|x|y|z|operator||0||n||"

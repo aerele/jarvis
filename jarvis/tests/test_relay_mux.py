@@ -246,7 +246,7 @@ class _DoubleGateway:
 	def arm_sessions_get(self, session_key: str, messages: list):
 		"""Arm the raw transcript ``sessions.get`` returns for a session key (used by
 		the pump's missed-terminal snapshot-recovery tail). Each message may carry an
-		``__openclaw.seq`` so the pump's watermark windowing (OARF-2) is exercised."""
+		``__agent.seq`` so the pump's watermark windowing (OARF-2) is exercised."""
 		self._sessions_get[session_key] = messages
 
 	def arm_sessions_list(self, rows: list):
@@ -713,7 +713,7 @@ class TestRelayMuxSessionModelParams(FrappeTestCase):
 	"""The pump's transport must put the SAME sessions.patch payload on the wire as the
 	legacy ``AgentSession`` one (test_relay_consumer.TestSetSessionModel). If the two
 	drift on the null-model RESET, the pump silently keeps a stale pin -- and an
-	overridden session is the shape that zeroes openclaw's fallback chain. See
+	overridden session is the shape that zeroes agent's fallback chain. See
 	``turn_handler._session_model_for``.
 
 	Stubs ``issue_rpc``, so like its sibling it asserts INTENT only and cannot catch a

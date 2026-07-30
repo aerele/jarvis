@@ -21,11 +21,11 @@ from jarvis.tests.test_chat_api import (
 
 
 class TestThinkingDirectiveLeading(FrappeTestCase):
-	"""The /think directive must be the FIRST bytes sent to openclaw
+	"""The /think directive must be the FIRST bytes sent to agent
 	even when _prepend_doc_context prepends a [Viewing: ...] line for
 	floating-widget auto-context (spec 7.3, verification 10.3).
 
-	These tests call run_agent_turn with a mocked openclaw session and
+	These tests call run_agent_turn with a mocked agent session and
 	capture the message argument actually passed to stream_agent_turn.
 
 	test_directive_leads_with_doc_context is the RED-before / GREEN-after
@@ -47,7 +47,7 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 				"what is the status?",
 				thinking_override="high",
 			)
-		# send_message no longer creates the openclaw session on the web
+		# send_message no longer creates the agent session on the web
 		# request (2026-07 latency plan, Phase 1.1 — the worker creates it on
 		# its pooled connection). These tests assert message COMPOSITION on an
 		# existing session, so seed the key directly, same as

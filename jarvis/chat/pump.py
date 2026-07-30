@@ -130,7 +130,7 @@ PREPARE_DISPATCH_DEADLINE_S = 120
 # Bench-side delta batcher cadence (OARF-6 / D1 #28): the legacy
 # `_AssistantContentBatcher` relocated INTO the lane handler — per-frame
 # commit+publish becomes one commit+publish per N frames OR every INTERVAL ms
-# (whichever trips first), coalescing openclaw's ~150ms cumulative mirrors. The
+# (whichever trips first), coalescing agent's ~150ms cumulative mirrors. The
 # first delta always flushes immediately (first-token latency, C1). C3
 # (flush_gap_ms) measures the resulting cadence.
 _DELTA_BATCH_SIZE = 10
@@ -955,7 +955,7 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 	"""CDX-5 + CDX-15 — the REAL, EPOCH+STATE+VERSION-FENCED tool-event applier (D1 rows
 	#30-32). Two ownership classes:
 
-	  * **built-in openclaw tools** (browser/canvas/image-gen — NOT ``jarvis__*``):
+	  * **built-in agent tools** (browser/canvas/image-gen — NOT ``jarvis__*``):
 	    the pump OWNS the durable ``role=tool`` receipt. On ``start`` it inserts the
 	    row (seq allocated UNDER the conversation lock, R-9) keyed idempotently by the
 	    durable ``(conversation, tool_call_id)`` so a hop re-attach / replay never
@@ -1104,7 +1104,7 @@ def _update_tool_end_row(conversation: str, tool_call_id: str, status: str | Non
 	"""CDX-5/CDX-15: close the built-in tool receipt at ``end`` (tool_status +
 	streaming=0) INSIDE the caller's fenced txn — NO commit here (the caller commits the
 	fence + this update atomically). Idempotent by (conversation, tool_call_id). An
-	``end`` with no matching ``start`` row is logged (an openclaw event-ordering
+	``end`` with no matching ``start`` row is logged (an agent event-ordering
 	regression) and returns None — matches legacy ``turn_handler`` orphan handling."""
 	name = frappe.db.get_value(
 		MSG, {"conversation": conversation, "tool_call_id": tool_call_id, "role": "tool"}, "name"
@@ -2121,7 +2121,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		# Record the latest cumulative text + accumulate the incremental delta, then
 		# flush (one apply_delta CAS + commit + publish for the whole batch) only
 		# when the size (N=10) or time (250ms) threshold trips — the first delta
-		# always flushes immediately (first-token latency, C1). openclaw already
+		# always flushes immediately (first-token latency, C1). agent already
 		# coalesces at ~150ms, so this is bench-side de-duplication of commits+
 		# publishes, not a change to what the user eventually sees (cumulative).
 		if ctx.lease_lost:

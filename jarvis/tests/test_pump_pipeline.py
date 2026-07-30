@@ -3,7 +3,7 @@ settle -> finalize) + the PANEL matrix rows WP-1d owns.
 
 These drive the REAL prepare / settlement / finalize jobs in-process against the
 real ``turn_state`` CAS library + WP-1b's transport double (only the gateway
-socket + the openclaw pool checkout are faked). The two enrichment side effects
+socket + the agent pool checkout are faked). The two enrichment side effects
 that do real HTTP/gateway work (rich outputs, usage poll) are mocked at their
 boundary so the LEDGER machinery (claim/complete/force-done/finalize_done) runs
 for real.
@@ -597,8 +597,8 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "assistant", "content": "PRIOR ANSWER", "__openclaw": {"seq": 5}},
-				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
+				{"role": "assistant", "content": "PRIOR ANSWER", "__agent": {"seq": 5}},
+				{"role": "user", "content": "second question", "__agent": {"seq": 6}},
 			],
 		)
 		ctx = self._ctx_for(double, epoch)
@@ -629,9 +629,9 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "assistant", "content": "PRIOR ANSWER", "__openclaw": {"seq": 5}},
-				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
-				{"role": "assistant", "content": "RECOVERED ANSWER", "__openclaw": {"seq": 7}},
+				{"role": "assistant", "content": "PRIOR ANSWER", "__agent": {"seq": 5}},
+				{"role": "user", "content": "second question", "__agent": {"seq": 6}},
+				{"role": "assistant", "content": "RECOVERED ANSWER", "__agent": {"seq": 7}},
 			],
 		)
 		ctx = self._ctx_for(double, epoch)
@@ -1234,7 +1234,7 @@ class TestDeltaBatcher(_PipelineCase):
 class TestToolApplierEquivalence(_PipelineCase):
 	"""CDX-5 equivalence RE-RUN: the tool-heavy transcript through the pump with the
 	DEFAULT (production) ``apply_tool`` — NOT the recorder the Stage-B evidence used.
-	Built-in openclaw tools (browser) must produce their durable role=tool receipt +
+	Built-in agent tools (browser) must produce their durable role=tool receipt +
 	tool-end update + start/end publishes; ``jarvis__*`` callback-owned tools must
 	publish lifecycle ONLY (no pump-owned receipt row)."""
 

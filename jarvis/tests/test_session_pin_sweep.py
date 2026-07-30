@@ -195,7 +195,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		sess.clear_session_model.assert_not_called()
 
 	def test_entry_without_session_id_is_skipped(self):
-		# Patching one makes openclaw mint a fresh sessionId and drop the label.
+		# Patching one makes agent mint a fresh sessionId and drop the label.
 		key = "agent:main:dashboard:pin-nosid"
 		self._conv(key, model_override="")
 		row = _row(key, provider="openai_compat-0", model="jarvis-pool", sessionId=None)
@@ -385,7 +385,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		self.assertEqual(frappe.db.get_value(CONV, name, "model_override"), "gemini-3.6-flash")
 
 	def test_a_replaced_session_is_an_error_not_a_fix(self):
-		# The lifecycle sweep freed the session mid-run, so openclaw minted a
+		# The lifecycle sweep freed the session mid-run, so agent minted a
 		# ghost entry under the key instead of patching the planned one.
 		key = "agent:main:dashboard:pin-ghost"
 		self._conv(key, model_override="")
@@ -439,7 +439,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		for key in (
 			"agent:main:main",
 			"agent:main:main:heartbeat",
-			"agent:main:main:anything-openclaw-adds",
+			"agent:main:main:anything-agent-adds",
 			"agent:other:main",
 		):
 			self.assertTrue(_is_agent_main_key(key), key)

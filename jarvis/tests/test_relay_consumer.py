@@ -1,10 +1,10 @@
 """Unit tests for AgentSession.relay_turn_events + set_session_model.
 
-Mirror of test_openclaw_native_rpcs.py's harness: bypass __init__ via
+Mirror of test_agent_native_rpcs.py's harness: bypass __init__ via
 AgentSession.__new__ and stub _recv (fed a scripted frame list; an
 Exception instance in the list is raised) / _request.
 
-relay_turn_events is the consumer half of the openclaw-native turn model:
+relay_turn_events is the consumer half of the agent-native turn model:
 token/tool streaming comes from broadcast "agent" event frames retagged
 with the chat.send clientRunId == run_id; completion comes ONLY from the
 run-scoped "chat" event (state final|aborted|error). agent lifecycle
@@ -189,7 +189,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		)
 
 	def test_final_stream_error_sentinel_content_yields_relay_error(self):
-		# Some openclaw builds leave the sentinel text block in the projected
+		# Some agent builds leave the sentinel text block in the projected
 		# final message instead of stripping it. That is still a failed turn,
 		# not a real answer, so it maps to the same failed_final error rather
 		# than rendering the raw sentinel as the assistant's reply.
@@ -307,7 +307,7 @@ class TestSetSessionModel(FrappeTestCase):
 	def test_none_sends_an_explicit_null_to_reset_the_session(self):
 		"""None must reach the gateway as ``"model": null`` -- PRESENT, not omitted.
 
-		openclaw only clears a session's modelOverride when it actually sees
+		agent only clears a session's modelOverride when it actually sees
 		``model: null`` (its isDefault branch). Dropping the key instead would leave a
 		stale pin live -- the jarvis#299 bug -- and would leave the session overridden,
 		which is what disables the fallback chain.

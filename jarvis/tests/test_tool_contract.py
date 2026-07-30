@@ -31,7 +31,7 @@ class TestToolContract(FrappeTestCase):
 			on_disk,
 			tc.render(tc.build_contract()),
 			f"tool-names.json does not match the registry — {_REGENERATE}, then copy the file "
-			"into jarvis-openclaw-plugin at contracts/tool-names.json",
+			"into jarvis-agent-plugin at contracts/tool-names.json",
 		)
 
 	def test_registry_equals_the_artifact_in_both_directions(self):

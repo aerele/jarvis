@@ -2,7 +2,7 @@
 
 NEW FILES ONLY — this package edits no product code. It measures the CURRENT
 (legacy, worker-per-turn) chat transport against a deterministic local WS
-gateway that reproduces the openclaw protocol subset the bench uses (S2), so
+gateway that reproduces the agent protocol subset the bench uses (S2), so
 the owner's six production criteria (C1–C6, BUILD-DIRECTIVE §1) get a clean
 baseline the Relay Pump must later beat.
 

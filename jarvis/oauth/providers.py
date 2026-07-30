@@ -26,21 +26,21 @@ _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 		# POOL sign-ins (CLIProxyAPI subscription accounts) MUST use the
 		# codex-CLI scope set - no connectors scopes. The connectors scope
 		# yields an access_token with aud=https://api.openai.com/v1 (fine for
-		# openclaw's codex app-server, which is why the DIRECT flow keeps it),
+		# agent's codex app-server, which is why the DIRECT flow keeps it),
 		# but cli-proxy-api's codex backend needs aud=chatgpt.com/backend-api
 		# and rejects the connectors-audience token: the account loads, then
 		# /v1/models returns [] and every call 502s "unknown provider".
 		# Live-verified 2026-07-03; this scope set is exactly what
 		# cli-proxy-api's own --codex-login requests.
 		"pool_scope": "openid email profile offline_access",
-		# openclaw_provider keys the auth-profiles.json entry that openclaw
+		# agent_provider keys the auth-profiles.json entry that agent
 		# looks up at request time. After fix/oauth-model-provider-key on
 		# fleet-agent + fix/chat-worker-mapped-model-provider on this app,
-		# openclaw queries by the MODEL-provider key ("openai"), not the
+		# agent queries by the MODEL-provider key ("openai"), not the
 		# OAuth flow id ("openai-codex"). The OAuth login flow itself uses
 		# the metadata above (authorize URL, scopes, codex-cli params); only
 		# the storage/lookup identity is the mapped name.
-		"openclaw_provider": "openai",
+		"agent_provider": "openai",
 		# codex-cli-specific authorize params - auth.openai.com returns a
 		# generic "unknown_error" page mid-flow without these.
 		"extra_authorize_params": {
@@ -58,18 +58,18 @@ _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 		"userinfo": "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
 		# Scopes MUST match what the bundled gemini-cli OAuth client has
 		# registered in its Google Cloud Console consent screen. Verified
-		# against openclaw/extensions/google/oauth.shared.ts:19-23.
+		# against agent/extensions/google/oauth.shared.ts:19-23.
 		# `https://www.googleapis.com/auth/generative-language` is NOT a real
 		# Google OAuth scope - Google returns Error 403 restricted_client
 		# "Unregistered scope(s) in the request" if anything else is sent.
 		"scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
 		# Gemini OAuth tokens are read by the `gemini` binary which
-		# openclaw spawns via the CliBackend registered at
+		# agent spawns via the CliBackend registered at
 		# extensions/google/cli-backend.ts:16 (id "google-gemini-cli").
 		# auth-profiles.json must key the credential by this exact id -
-		# mapping to "google" makes openclaw's CLI dispatch path miss the
+		# mapping to "google" makes agent's CLI dispatch path miss the
 		# stored credential (different lookup key).
-		"openclaw_provider": "google-gemini-cli",
+		"agent_provider": "google-gemini-cli",
 		"extra_authorize_params": {
 			"access_type": "offline",
 			"prompt": "consent",
@@ -86,7 +86,7 @@ _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 		"token": "https://auth.x.ai/oauth2/token",
 		"userinfo": "https://auth.x.ai/oauth2/userinfo",
 		"scope": "openid profile email offline_access grok-cli:access api:access",
-		"openclaw_provider": "xai",
+		"agent_provider": "xai",
 		"redirect_uri": "http://127.0.0.1:56121/callback",
 		"requires_nonce": True,
 		# xAI's approval screen hands the customer a BARE authorization code to
@@ -112,7 +112,7 @@ _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 		"grant_type": "device_code",
 		"device_authorization": "https://auth.kimi.com/api/oauth/device_authorization",
 		"token": "https://auth.kimi.com/api/oauth/token",
-		"openclaw_provider": "kimi",
+		"agent_provider": "kimi",
 		"device_headers": {"X-Msh-Platform": "cli-proxy-api", "X-Msh-Version": "1.0.0"},
 		"poll_interval_s": 5,
 	},
@@ -160,11 +160,11 @@ def get_provider(label: str) -> dict:
 
 
 def extract_account_id(provider: str, access_token: str) -> str:
-	"""Pull openclaw's `accountId` claim out of the access JWT.
+	"""Pull agent's `accountId` claim out of the access JWT.
 
-	openclaw's codex auth resolver gates on this field: profiles without
+	agent's codex auth resolver gates on this field: profiles without
 	an accountId are treated as unusable and chat fails with "No API key
-	found for provider openai". See openclaw/docs/concepts/oauth.md step
+	found for provider openai". See agent/docs/concepts/oauth.md step
 	6 of the codex OAuth exchange.
 
 	OpenAI codex: ``payload["https://api.openai.com/auth"]["chatgpt_account_id"]``.
@@ -207,7 +207,7 @@ def build_authorize_url(
 
 	``pool=True`` selects the provider's ``pool_scope`` when it defines one
 	(subscription-pool accounts consumed by cli-proxy-api need a different
-	token audience than the direct openclaw flow - see the OpenAI entry).
+	token audience than the direct agent flow - see the OpenAI entry).
 
 	``oidc_nonce`` is added to the authorize params only for providers that set
 	``requires_nonce`` (xAI's authorize endpoint 400s without a fresh nonce, the

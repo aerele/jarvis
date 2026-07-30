@@ -1,6 +1,6 @@
 """The 8 scripted transcripts (fixture data) for the differential harness.
 
-These are the deterministic openclaw run playbacks the fake gateway streams.
+These are the deterministic agent run playbacks the fake gateway streams.
 Each transcript models one row of the WP-2 matrix:
 
     success, tool-heavy, confirmation-card, overflow/compaction,
@@ -50,7 +50,7 @@ FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "transcripts")
 
 def _stream_text(full: str, chunk_words: int = 2) -> list[dict]:
 	"""Expand a full answer into cumulative assistant deltas (word-chunked),
-	exactly the shape openclaw emits (stream=assistant, cumulative text +
+	exactly the shape agent emits (stream=assistant, cumulative text +
 	incremental delta)."""
 	words = full.split(" ")
 	frames: list[dict] = []
@@ -181,7 +181,7 @@ def _build() -> dict[str, dict]:
 		"description": (
 			"Mid-stream context-overflow lifecycle error, a compaction pause, then the answer "
 			"streams and terminal final. NOTE: on the MANAGED relay path relay_turn_events drops "
-			"lifecycle frames, so the bench sees a longer turn that resolves to final (openclaw "
+			"lifecycle frames, so the bench sees a longer turn that resolves to final (agent "
 			"auto-compacts internally); the run:recovering UX is a legacy-path (stream_agent_turn) "
 			"behavior. The lifecycle_error frame is retained so the Stage-B "
 			"differential still exercise it."
@@ -206,11 +206,11 @@ def _build() -> dict[str, dict]:
 
 	# 6. ack-timeout — the gateway delays the chat.send response past the
 	#    client's ack window; the bench parks for snapshot recovery
-	#    (relay:interrupted reason=ack-timeout). openclaw still ran the turn,
+	#    (relay:interrupted reason=ack-timeout). agent still ran the turn,
 	#    so the durable transcript holds the answer.
 	t["ack-timeout"] = {
 		"name": "ack-timeout",
-		"description": "chat.send ack delayed past the client window -> OpenclawUnreachable(ack-timeout) -> bench parks; the transcript still completes server-side.",
+		"description": "chat.send ack delayed past the client window -> AgentUnreachable(ack-timeout) -> bench parks; the transcript still completes server-side.",
 		"ack": {"status": "started"},
 		"ack_behavior": "timeout",
 		"frames": _stream_text(_SUCCESS_TEXT),

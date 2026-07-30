@@ -27,7 +27,7 @@
       "unique": 1,
       "in_list_view": 1,
       "in_standard_filter": 1,
-      "description": "Openclaw session key returned by sessions.create"
+      "description": "Agent session key returned by sessions.create"
     },
     {
       "fieldname": "user",
@@ -36,7 +36,7 @@
       "options": "User",
       "reqd": 1,
       "in_list_view": 1,
-      "description": "Frappe user who owns this openclaw session"
+      "description": "Frappe user who owns this agent session"
     },
     {
       "fieldname": "chat_device_id",

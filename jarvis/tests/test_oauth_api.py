@@ -138,7 +138,7 @@ class TestBeginPasteSignin(_OAuthApiBase):
 	def test_standard_api_model_coerced_to_codex_default(self):
 		"""Customer-supplied models that aren't in the codex subscription list
 		(e.g. "gpt-4o" carried over from api_key mode) get rewritten to the
-		default codex model. Otherwise the openclaw codex extension fails
+		default codex model. Otherwise the agent codex extension fails
 		every chat turn with ProviderAuthError "No API key found for provider
 		openai" - treats model-mismatch as auth failure. Confirmed live on
 		jarvis-pool-05b704 (2026-06-11)."""
@@ -430,7 +430,7 @@ class TestCompletePasteSigninFlow(_OAuthApiBase):
 		mock_push,
 		mock_save,
 	):
-		# Realistic JWT shape: openclaw's codex auth resolver pulls accountId
+		# Realistic JWT shape: agent's codex auth resolver pulls accountId
 		# from the access token's `https://api.openai.com/auth.chatgpt_account_id`
 		# claim; without that field the OAuth profile is treated as unusable
 		# and chat surfaces "No API key found for provider openai".
@@ -468,7 +468,7 @@ class TestCompletePasteSigninFlow(_OAuthApiBase):
 
 		mock_push.assert_called_once()
 		args = mock_push.call_args.args
-		# Blob is keyed by the mapped model-provider name so openclaw's
+		# Blob is keyed by the mapped model-provider name so agent's
 		# request-time auth lookup hits. The OAuth flow itself (authorize
 		# URL, client_id, codex-cli params) still uses the OpenAI metadata.
 		self.assertEqual(args[0], "openai")
@@ -489,7 +489,7 @@ class TestCompletePasteSigninFlow(_OAuthApiBase):
 		self.assertEqual(sk["auth_mode"], "oauth")
 		# force=True is mandatory in the re-authorize path: without it
 		# Jarvis Settings.on_update's diff classifier sees no change
-		# and skips the re-render + restart, so openclaw keeps serving
+		# and skips the re-render + restart, so agent keeps serving
 		# the previous (broken) auth state. Verified live 2026-06-11.
 		self.assertTrue(
 			sk.get("force"),
@@ -689,7 +689,7 @@ class TestCompletePasteSigninStripsIdToken(_OAuthApiBase):
 	extra_forbidden) and REJECTS an ``id_token`` field, so the DIRECT push
 	from complete_paste_signin must strip it — otherwise every direct
 	(re)authorize 502s with ``extra_forbidden ... blob.id_token`` (the
-	2026-07 direct-reauthorize outage). The earlier assumption that openclaw
+	2026-07 direct-reauthorize outage). The earlier assumption that agent
 	"ignores unknown blob keys" was wrong against the live agent. The blob
 	builder still retains id_token for the POOL path's CLIProxyAPI-codex
 	reformat; only this direct auth-profiles.json push drops it."""
@@ -925,7 +925,7 @@ class TestPoolSigninScope(_OAuthApiBase):
 	"""Pool sign-ins must request the codex-CLI scope set (no connectors).
 
 	The connectors scope yields an access_token with
-	aud=https://api.openai.com/v1 - openclaw's codex app-server accepts it
+	aud=https://api.openai.com/v1 - agent's codex app-server accepts it
 	(so the DIRECT flow keeps it), but cli-proxy-api's codex backend needs
 	aud=chatgpt.com/backend-api and rejects the connectors-audience token:
 	the account loads, /v1/models returns [], every call 502s "unknown
@@ -1114,7 +1114,7 @@ class TestKimiDeviceFlow(_OAuthApiBase):
 		self.assertEqual(d["status"], "ok")
 		self.assertTrue(d["account_ref"].startswith("SUB_"))
 		blob = json.loads(d["oauth_blob"])
-		# openclaw blob shape the fleet oauth_blob_to_cliproxy_kimi transform consumes
+		# agent blob shape the fleet oauth_blob_to_cliproxy_kimi transform consumes
 		self.assertEqual(blob["provider"], "kimi")
 		self.assertEqual(blob["access"], "KAT")
 		self.assertEqual(blob["refresh"], "KRT")
@@ -1147,7 +1147,7 @@ class TestKimiDeviceFlow(_OAuthApiBase):
 
 
 class TestXaiPoolCapture(_OAuthApiBase):
-	"""Phase 2: xAI pool capture reuses the paste-back flow, producing an openclaw
+	"""Phase 2: xAI pool capture reuses the paste-back flow, producing an agent
 	blob the fleet oauth_blob_to_cliproxy_xai transform consumes (provider='xai',
 	id_token retained)."""
 
@@ -1189,7 +1189,7 @@ class TestXaiPoolCapture(_OAuthApiBase):
 		d = res["data"]
 		self.assertTrue(d["account_ref"].startswith("SUB_"))
 		blob = json.loads(d["oauth_blob"])
-		self.assertEqual(blob["provider"], "xai")  # openclaw_provider
+		self.assertEqual(blob["provider"], "xai")  # agent_provider
 		self.assertEqual(blob["access"], "XAT")
 		self.assertTrue(blob["id_token"])  # xai transform REQUIRES it
 		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, nonce))  # single-use

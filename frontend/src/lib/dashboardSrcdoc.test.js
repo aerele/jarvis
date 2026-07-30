@@ -333,7 +333,7 @@ test("@layer: an UNQUOTED-attribute <style> is still wrapped (scan parity)", asy
 	assert.ok(out.includes("<style data-k=v>@layer author{.a{color:var(--jd-ink)}}</style>"));
 });
 
-test("SECURITY: stale openclaw ws-client script is stripped, other scripts kept", () => {
+test("SECURITY: stale agent ws-client script is stripped, other scripts kept", () => {
 	const html =
 		"<html><head></head><body><div id=chart></div>" +
 		"<script>renderChart()</script>" +

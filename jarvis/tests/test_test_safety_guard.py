@@ -45,7 +45,7 @@ class TestRealNetworkIsBlocked(FrappeTestCase):
 			)
 
 	def test_a_real_websocket_is_blocked(self):
-		"""openclaw's gateway. A test that reached it would mutate live session state via
+		"""agent's gateway. A test that reached it would mutate live session state via
 		sessions.patch and burn real tokens from the customer's LLM quota."""
 		import websocket
 

@@ -1,4 +1,4 @@
-"""Best-effort pre-warming of the openclaw container's provider prefix cache.
+"""Best-effort pre-warming of the agent container's provider prefix cache.
 
 The first turn of a fresh session pays a cold provider prefill over the large
 static system prefix (persona + skills + tool schema). That cache is
@@ -228,12 +228,12 @@ def _reclaim_previous(sess, prev, current: str) -> None:
 	in the same instant (observed 6ms apart on jarvis-pool-bf4097); the second
 	then reads a "previous" pointer the first wrote milliseconds ago and deletes
 	a session whose warm turn is still running. That rename killed the run and
-	openclaw re-created the session file 568ms later. Probing hasActiveRun first
+	agent re-created the session file 568ms later. Probing hasActiveRun first
 	turns that into a skipped reclaim - the orphan sweep collects it - instead of
 	a killed run and a fresh orphan.
 
 	The remembered fire time is what makes that probe trustworthy (issue #535).
-	openclaw accepts a run a median 670ms before it starts one, and reports
+	agent accepts a run a median 670ms before it starts one, and reports
 	"accepted, not started" and "finished" identically, so probing a predecessor
 	fired milliseconds ago answers "idle" for a run that is about to begin -
 	the very race above, unfixed. Handing reclaim_throwaway_session the fire time
@@ -259,13 +259,11 @@ def _resolve_default_model_and_provider(settings) -> tuple[str, str | None]:
 	case: default model = Jarvis Settings.llm_model; provider id only in
 	oauth mode. Reuses turn_handler's provider map as the single source of
 	truth so the warm-up cannot drift to a different provider's cache."""
-	from jarvis.chat.turn_handler import _PROVIDER_LABEL_TO_OPENCLAW_ID
+	from jarvis.chat.turn_handler import _PROVIDER_LABEL_TO_AGENT_ID
 
 	model = settings.llm_model or ""
 	provider = (
-		_PROVIDER_LABEL_TO_OPENCLAW_ID.get(settings.llm_provider)
-		if settings.llm_auth_mode == "oauth"
-		else None
+		_PROVIDER_LABEL_TO_AGENT_ID.get(settings.llm_provider) if settings.llm_auth_mode == "oauth" else None
 	)
 	return model, provider
 
@@ -320,7 +318,7 @@ def warm_prefix() -> bool:
 		try:
 			throwaway = sess.create_session(label=f"jarvis-prewarm-{uuid.uuid4().hex[:8]}")
 			# The pin is the whole point: this warms ONE model's prefix cache,
-			# so a failover would warm the wrong one. openclaw answers an
+			# so a failover would warm the wrong one. agent answers an
 			# explicit model by dropping the run's fallback chain (#531), and
 			# the prefixed run id is what tells a later log reader that the
 			# resulting ``next=none`` is by design rather than a dead chain.

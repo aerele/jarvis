@@ -3,7 +3,7 @@ name = "jarvis"
 authors = [
     { name = "Aerele", email = "navin@aerele.in"}
 ]
-description = "AI superpowers for Frappe/ERPNext, powered by openclaw"
+description = "AI superpowers for Frappe/ERPNext, powered by agent"
 requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]

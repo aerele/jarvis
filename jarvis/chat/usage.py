@@ -1,6 +1,6 @@
 """Real per-turn token-usage accounting for managed (gateway) chat.
 
-The openclaw gateway's ``sessions.list`` rows carry per-session
+The agent gateway's ``sessions.list`` rows carry per-session
 ``inputTokens`` / ``outputTokens`` that are **last-completed-run** numbers
 (not cumulative), ``totalTokens`` (context size), and ``totalTokensFresh``
 (validity marker). Accurate accounting therefore records a *delta at each
@@ -26,7 +26,7 @@ from datetime import datetime
 import frappe
 
 # The pool-mode "Auto" sentinel model id. turn_handler._session_model_for
-# patches an unpinned BIFROST-fronted pool conversation's openclaw SESSION to
+# patches an unpinned BIFROST-fronted pool conversation's agent SESSION to
 # this value (jarvis#299), so the gateway's sessions.list row reports it as
 # `model` for that turn - see record_turn_usage below for what that means for
 # attribution. Imported (not hardcoded) so this module and turn_handler can't
@@ -230,7 +230,7 @@ def record_turn_usage(session_key: str, row: dict | None) -> str:
 		# choice never comes back to the bench. That's an intentionally
 		# honest bucket ("pool auto-routed"), not a bug: those tenants get
 		# true per-model data from Bifrost logs on the admin side. An
-		# unpinned openclaw-DIRECT pool no longer names a model at all (it
+		# unpinned agent-DIRECT pool no longer names a model at all (it
 		# RESETS the session, which is what keeps the container's failover
 		# chain live), so its row reports whatever the gateway attributes to
 		# an unoverridden session - the resolved agent default, or the

@@ -1,15 +1,15 @@
 """Shared chat-turn body. The single source of truth for "what happens
-during one chat turn": DB writes, openclaw pool checkout, event
+during one chat turn": DB writes, agent pool checkout, event
 streaming, canvas persist, auto-title.
 
-Managed transport is the openclaw-native relay (never-error discipline):
+Managed transport is the agent-native relay (never-error discipline):
 chat.send with idempotencyKey = the bench run_id hands the turn to
-openclaw, relay_turn_events streams the broadcast frames, and the ONLY
-path to run:error after a successful ack is a genuine openclaw-reported
+agent, relay_turn_events streams the broadcast frames, and the ONLY
+path to run:error after a successful ack is a genuine agent-reported
 terminal. Deadline expiry, transport drops, and exhausted streams park
 the row (_mark_recovering) and try recover_now immediately; the
 turn_recovery cron and its 60-minute ceiling are the backstop. See
-docs/superpowers/specs/2026-07-04-openclaw-native-chat-relay-design.md
+docs/superpowers/specs/2026-07-04-agent-native-chat-relay-design.md
 (jarvis repo root).
 
 Today this is called only by ``jarvis.chat.worker.run_agent_turn``,
@@ -67,7 +67,7 @@ MSG = "Jarvis Chat Message"
 _ASSISTANT_BATCH_SIZE = 10
 _ASSISTANT_BATCH_INTERVAL_MS = 250
 
-# chat.send ack budget. openclaw ingests and PREPROCESSES the whole message
+# chat.send ack budget. agent ingests and PREPROCESSES the whole message
 # before it acks the RPC, so this window has to cover the payload, not just
 # the WS round-trip. Two contributions, because a message grows two ways:
 #   - vision parts: each PDF page is rasterized + resized inside the RPC
@@ -76,7 +76,7 @@ _ASSISTANT_BATCH_INTERVAL_MS = 250
 #     body (up to _MAX_INLINE_CHARS) and never becomes a vision part, so it
 #     used to add nothing to the budget while adding ~20k chars to the send.
 #     That is the "timed out in the UI, answered in the transcript" split
-#     brain: the bench gave up at 10s, openclaw completed the turn anyway.
+#     brain: the bench gave up at 10s, agent completed the turn anyway.
 # The base also absorbs cold-session bootstrap (persona + skills catalog) on
 # a first turn, which is when the old flat 10s was tightest.
 _ACK_TIMEOUT_BASE_S = 30.0
@@ -131,7 +131,7 @@ def persist_rich_outputs(
 		)
 
 	# Generated images: codex imagegen writes them on the container disk (not
-	# the canvas dir, and openclaw neither streams nor serves them), so pull
+	# the canvas dir, and agent neither streams nor serves them), so pull
 	# any produced this turn via the fleet agent + persist as ERP Files so
 	# they show inline. Gated on the imagegen skill badge to avoid a fleet
 	# round-trip on every turn. Failure never fails a turn.
@@ -237,10 +237,10 @@ class _AssistantContentBatcher:
 		return True
 
 
-# Provider label → openclaw provider id sent in the chat WS frame.
+# Provider label → agent provider id sent in the chat WS frame.
 #
-# Openclaw has two dispatch paths chosen at request time
-# (openclaw/src/agents/model-selection-cli.ts:6-20):
+# Agent has two dispatch paths chosen at request time
+# (agent/src/agents/model-selection-cli.ts:6-20):
 #
 #   - CLI backend: taken when isCliProvider(provider) returns true.
 #     Routes dispatch to a registered CliBackend that spawns an external
@@ -254,28 +254,28 @@ class _AssistantContentBatcher:
 # The two providers we currently support resolve to two different paths:
 #
 #   - OpenAI codex: codex IS a registered plugin harness
-#     (openclaw/extensions/codex/index.ts:34) whose allowlist accepts
+#     (agent/extensions/codex/index.ts:34) whose allowlist accepts
 #     "openai" as the model-provider key. Use "openai" for the chat WS
 #     frame and the embedded codex-harness path handles the dispatch.
 #
 #   - Google Gemini: gemini-cli is registered ONLY as a CliBackend
-#     (openclaw/extensions/google/cli-backend.ts:16 with id
+#     (agent/extensions/google/cli-backend.ts:16 with id
 #     "google-gemini-cli"). Use "google-gemini-cli" verbatim so
 #     isCliProvider returns true and dispatch routes via the CLI backend
 #     to the gemini binary inside the container. Mapping it to "google"
 #     makes isCliProvider return false, dispatch falls into the embedded
-#     path, and openclaw errors "No API key found for provider 'google'".
+#     path, and agent errors "No API key found for provider 'google'".
 #
 # Only used in oauth mode - api_key mode skips this map and lets
-# openclaw resolve the single registered models.providers entry.
-_PROVIDER_LABEL_TO_OPENCLAW_ID = {
+# agent resolve the single registered models.providers entry.
+_PROVIDER_LABEL_TO_AGENT_ID = {
 	"OpenAI": "openai",
 	"Google Gemini": "google-gemini-cli",
 }
 
 
-# The virtual model the fleet configures openclaw with whenever the proxy is active
-# (jarvis-fleet-agent compose.render_openclaw_config(model="jarvis-pool")). Bifrost
+# The virtual model the fleet configures agent with whenever the proxy is active
+# (jarvis-fleet-agent compose.render_agent_config(model="jarvis-pool")). Bifrost
 # expands it into the pool's failover chain via its catch-all routing rule.
 #
 # The customer plane has to know this name because CLEARING a pin has to be an explicit
@@ -286,13 +286,13 @@ POOL_VIRTUAL_MODEL = "jarvis-pool"
 
 
 def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
-	"""Return (effective_model, openclaw_provider_id_or_None) for this conv.
+	"""Return (effective_model, agent_provider_id_or_None) for this conv.
 
 	Pool mode: the pinned model, or "" (no opinion) when no pin is set. Direct mode:
 	use conv.model_override or settings.llm_model.
 
 	The pool branch keys on ``compute_pool_mode``, NOT on ``proxy_active``. Both kinds
-	of pool -- Bifrost-fronted and openclaw-direct -- need the pin validated against the
+	of pool -- Bifrost-fronted and agent-direct -- need the pin validated against the
 	enabled models; ``proxy_active`` now says only whether a sidecar is deployed, and a
 	BYO api-key pool has none.
 	"""
@@ -313,9 +313,7 @@ def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 
 	effective_model = conv.model_override or settings.llm_model or ""
 	provider = (
-		_PROVIDER_LABEL_TO_OPENCLAW_ID.get(settings.llm_provider)
-		if settings.llm_auth_mode == "oauth"
-		else None
+		_PROVIDER_LABEL_TO_AGENT_ID.get(settings.llm_provider) if settings.llm_auth_mode == "oauth" else None
 	)
 	return effective_model, provider
 
@@ -333,12 +331,12 @@ def _session_model_for(conv) -> tuple[str | None, str | None]:
 	have never exercised, and a rejection there degrades silently -- crude titles, raw
 	unpolished patterns -- because both callers swallow their exceptions.
 
-	The SESSION patch is stateful in a way those one-shots are not. openclaw remembers a
+	The SESSION patch is stateful in a way those one-shots are not. agent remembers a
 	session's model across turns (it holds the history server-side), so here "no opinion"
 	CANNOT mean "send nothing" -- that is precisely the bug: handle_chat_send only issued
 	sessions.patch when the model was truthy, so a conversation that had ONCE been pinned
 	was never walked back. Selecting "Auto" wrote model_override="" and flipped the pill,
-	while openclaw went on calling the old model forever. (jarvis#299)
+	while agent went on calling the old model forever. (jarvis#299)
 
 	So here, and ONLY here, clearing a pin is an explicit INSTRUCTION -- and the
 	instruction is ``None``, not a model name. Three return values, three meanings:
@@ -347,7 +345,7 @@ def _session_model_for(conv) -> tuple[str | None, str | None]:
 	    None  RESET this session to the agent's configured default
 	    "id"  pin this model
 
-	``None`` goes on the wire as ``sessions.patch {"model": null}``, which openclaw's
+	``None`` goes on the wire as ``sessions.patch {"model": null}``, which agent's
 	isDefault branch answers by DELETING the session's modelOverride, providerOverride and
 	modelOverrideSource. That is what makes it a walk-back rather than a no-op.
 
@@ -359,7 +357,7 @@ def _session_model_for(conv) -> tuple[str | None, str | None]:
 	      if (!hasSessionModelOverride) return agentFallbacksOverride;   // chain applies
 	      if (!(modelOverrideSource === "auto" || ...)) return [];       // NO chain
 
-	openclaw deletes the override only when the patched model resolves EXACTLY to the
+	agent deletes the override only when the patched model resolves EXACTLY to the
 	rendered agent default; on any mismatch it stores ``modelOverrideSource: "user"`` and
 	the conversation runs with zero failover candidates. Mismatches happen for real --
 	render races, stale specs, legacy "jarvis-pool" pins -- so naming the primary was a
@@ -368,7 +366,7 @@ def _session_model_for(conv) -> tuple[str | None, str | None]:
 	the sessions.patch schema (the gateway rejects it with INVALID_REQUEST), so not
 	overriding at all is the only supported route.
 
-	A GENUINE user pin still pins. openclaw deliberately drops failover for an explicit
+	A GENUINE user pin still pins. agent deliberately drops failover for an explicit
 	pick, and quietly widening that is not this layer's call.
 
 	Resetting also stops the customer plane duplicating a choice it does not own: the fleet
@@ -386,7 +384,7 @@ def _session_model_for(conv) -> tuple[str | None, str | None]:
 	if getattr(settings, "proxy_active", 0):
 		return POOL_VIRTUAL_MODEL, None  # Bifrost expands it into the chain
 	if compute_pool_mode(settings):
-		# openclaw-direct pool (no sidecar), no pin: RESET rather than name a model, so the
+		# agent-direct pool (no sidecar), no pin: RESET rather than name a model, so the
 		# session keeps no override and the container's model.fallbacks chain stays live.
 		return None, None
 	# Direct mode already resolves to settings.llm_model, so "" here means the site has
@@ -565,7 +563,7 @@ def assemble_prompt(
 	# ("last quarter", "this week") and (b) answer "who am I" / "what
 	# perms do I have" without a clarifying round-trip or a doomed
 	# get_list on User. The persisted user_message in the DB is
-	# unchanged; only the value sent over to openclaw is augmented.
+	# unchanged; only the value sent over to agent is augmented.
 	now = frappe.utils.now_datetime()
 	today = now.strftime("%Y-%m-%d (%A)")
 	# Fold the auto-apply preference into the system context line so the agent
@@ -574,14 +572,14 @@ def assemble_prompt(
 	auto_apply = "; auto-apply changes: ON" if conv.auto_apply else ""
 	# Custom-skill invocation: if the user typed /slug for an enabled custom
 	# skill, name the installed custom-<slug> skill(s) in the system context so
-	# the agent activates them deterministically (openclaw has no documented
+	# the agent activates them deterministically (agent has no documented
 	# user-invocable trigger; the SKILL.md is already in workspace/skills/).
 	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
 
 	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
-	# agent applies them without depending on openclaw's undocumented auto-retrieval.
+	# agent applies them without depending on agent's undocumented auto-retrieval.
 	# Additive to skill_clause; role match uses the cached role lookup (hot path).
 	learned_clause = learned_skill_clause(chat_user)
 	# Org locale (default Company country/currency + site date/number/tz) so the
@@ -730,7 +728,7 @@ def handle_chat_send(payload: dict) -> None:
 	agent prompt only; the persisted/visible user message is unchanged.
 
 	Sprint-3 (2026-06-16 review): the inline ``except AgentUnreachableError``
-	blocks only marked the placeholder errored for openclaw-specific
+	blocks only marked the placeholder errored for agent-specific
 	failures. Any OTHER exception (cryptography.InvalidKey, ssl.SSLError,
 	programmer bug in _handle_event, etc.) propagated to RQ without
 	calling _mark_errored, leaving the assistant row stuck at
@@ -907,7 +905,7 @@ def handle_chat_send(payload: dict) -> None:
 			t_checkout = time.monotonic()
 			with agent_session_pool.checkout(gateway_url) as sess:
 				checkout_ms = int((time.monotonic() - t_checkout) * 1000)
-				# First turn of this conversation: create the openclaw
+				# First turn of this conversation: create the agent
 				# session on THIS pooled connection (no extra handshake)
 				# and persist the Jarvis Chat Session row BEFORE the
 				# stream starts — the plugin's call_tool sessionKey→user
@@ -946,7 +944,7 @@ def handle_chat_send(payload: dict) -> None:
 				try:
 					_wm_msgs = sess.get_session_messages(conv.session_key, limit=5)
 					watermark = max(
-						(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in _wm_msgs),
+						(((m or {}).get("__agent") or {}).get("seq", 0) for m in _wm_msgs),
 						default=0,
 					)
 					if watermark:
@@ -980,7 +978,7 @@ def handle_chat_send(payload: dict) -> None:
 					)
 				except AgentUnreachableError as e:
 					# The ack window closed with the request frame already on
-					# the wire. openclaw routinely ACCEPTS the message and runs
+					# the wire. agent routinely ACCEPTS the message and runs
 					# the whole turn while the bench is still waiting, so
 					# erroring here is a false negative: the user sees
 					# "chat.send timed out" while the transcript shows a
@@ -1053,9 +1051,9 @@ def handle_chat_send(payload: dict) -> None:
 			# started, so this is a real, retriable error. Gray zone: a
 			# DELIVERED send whose ack was lost lands here too and a user
 			# retry then re-runs under a fresh run_id - deliberate. Reusing
-			# the old run_id would make openclaw REPLAY the cached outcome
+			# the old run_id would make agent REPLAY the cached outcome
 			# (dedupe semantics), never re-run; and while a ghost run is
-			# still active, openclaw's content-based dedupe already returns
+			# still active, agent's content-based dedupe already returns
 			# in_flight for the identical resend, so true double-runs are
 			# confined to the ghost-run-already-finished case.
 			_publish_run_error(str(e), changed_data=False, exc=e)
@@ -1065,14 +1063,14 @@ def handle_chat_send(payload: dict) -> None:
 
 		if terminal["kind"] == "relay:error":
 			err_text = terminal.get("error") or "agent error"
-			# Context overflow is NOT terminal on openclaw: it emits the
+			# Context overflow is NOT terminal on agent: it emits the
 			# error, then auto-compacts and RETRIES the prompt (observed
 			# live: 'auto-compaction succeeded; retrying prompt' ~45s
 			# after the error; the retried run completes in the session).
 			# Park for snapshot recovery instead of erroring - the
 			# recovery cron finalizes the retried answer; if the retry
 			# ALSO dies, the recovery ceiling errors it honestly. This
-			# holds for ANY plan/context-window size: openclaw derives
+			# holds for ANY plan/context-window size: agent derives
 			# the window from the model catalog, so smaller-plan windows
 			# just compact sooner - the customer never sees the raw
 			# overflow either way.
@@ -1090,7 +1088,7 @@ def handle_chat_send(payload: dict) -> None:
 				)
 				return
 			if terminal.get("state") == "aborted":
-				# User hit Stop -> stop_run -> openclaw chat.abort. Finalize as a
+				# User hit Stop -> stop_run -> agent chat.abort. Finalize as a
 				# clean stop: keep whatever streamed, no error. Publish run:end so
 				# OTHER tabs (which never muted this run) also unlock - the
 				# stopping tab mutes it via stoppedRunId. (Ordered after the
@@ -1127,7 +1125,7 @@ def handle_chat_send(payload: dict) -> None:
 			return
 		if terminal["kind"] == "relay:interrupted":
 			# Deadline, transport drop, or exhausted stream after a
-			# successful ack: openclaw still owns the turn and persists
+			# successful ack: agent still owns the turn and persists
 			# the result. Park for snapshot recovery. NEVER a false error.
 			# Publish a recovering event so the UI shows a clear
 			# "reconnecting, your answer will appear here" state and
@@ -1214,7 +1212,7 @@ def handle_chat_send(payload: dict) -> None:
 		_admission_settle(run_id, "errored", f"unexpected worker error: {type(e).__name__}")
 		raise
 	# A turn can end "cleanly" (no exception) yet be an LLM-level failure — an
-	# openclaw lifecycle:error frame (quota/cooldown/provider error) ends the
+	# agent lifecycle:error frame (quota/cooldown/provider error) ends the
 	# stream normally after _mark_errored stamped the message. So the macro's
 	# errored signal is the assistant message's error field, not the code path.
 	_turn_errored = bool(frappe.db.get_value(MSG, assistant_msg.name, "error"))
@@ -1669,7 +1667,7 @@ def _fence_untrusted(text: str, source: str) -> str:
 	Only extracted FILE TEXT is fenced here: never the user's own typed
 	message (the trusted instruction channel) and never bench-authored
 	structural lines like ``[Context: ...]``/``[Viewing: ...]``. Tool-RESULT
-	fencing (record field values returned via the openclaw plugin's
+	fencing (record field values returned via the agent plugin's
 	toolSuccess, inside the agent loop) is explicitly out of scope for this
 	bench-side seam - those responses never pass through turn_handler, so
 	fencing here cannot reach them.
@@ -1709,7 +1707,7 @@ def _vision_enabled(settings) -> bool:
 def _ack_timeout_s(vision_part_count: int, inlined_prompt_chars: int) -> float:
 	"""Wall-clock window to wait for the ``chat.send`` ack, sized from the payload.
 
-	openclaw ingests and preprocesses the whole message before it acks, so a
+	agent ingests and preprocesses the whole message before it acks, so a
 	big send needs a bigger window. Giving up early is a FALSE negative - the
 	gateway goes on to run the turn while the bench reports a timeout - so the
 	window errs generous and is bounded by ``_ACK_TIMEOUT_CEILING_S`` to keep a
@@ -1724,7 +1722,7 @@ def _ack_timeout_s(vision_part_count: int, inlined_prompt_chars: int) -> float:
 
 
 def _to_managed_attachments(vision_parts: list[dict]) -> list[dict]:
-	"""Map internal parts to the flat shape openclaw's gateway normalizer accepts
+	"""Map internal parts to the flat shape agent's gateway normalizer accepts
 	({type:"image", mimeType, fileName, content:<base64>})."""
 	return [
 		{"type": "image", "mimeType": p["mime"], "fileName": p["file_name"], "content": p["data_b64"]}
@@ -1904,7 +1902,7 @@ def _mark_errored(assistant_msg_name: str, error: str) -> None:
 
 
 def _mark_recovering(assistant_msg_name: str) -> None:
-	"""Park a managed turn for snapshot recovery instead of erroring: openclaw
+	"""Park a managed turn for snapshot recovery instead of erroring: agent
 	is still running/finished and turn_recovery will finalize it from the
 	gateway snapshot. streaming stays 1 (spinner up); no error, no run:error."""
 	frappe.db.set_value(
@@ -1943,7 +1941,7 @@ def _handle_event(
 	batcher: _AssistantContentBatcher,
 ) -> None:
 	"""Per-event dispatch. Wrapped in a top-level try/except so a
-	programmer bug on one event (KeyError on a malformed openclaw frame,
+	programmer bug on one event (KeyError on a malformed agent frame,
 	a DB DoesNotExist on a stale row, etc.) doesn't kill the whole turn
 	and leave the assistant row stranded at streaming=1. Sprint-5
 	punch-list "Wrap _handle_event in try/except logging event kind +
@@ -2001,7 +1999,7 @@ def _handle_event_inner(
 		phase = event.get("phase")
 		if phase == "error":
 			err_text = event.get("error") or "lifecycle error"
-			# Context overflow is NOT terminal on openclaw: the runtime
+			# Context overflow is NOT terminal on agent: the runtime
 			# auto-compacts and retries the prompt right after emitting
 			# this error (observed live: error at t+0, "auto-compaction
 			# succeeded; retrying prompt" at t+45s, full answer ~2min
@@ -2072,7 +2070,7 @@ def _handle_event_inner(
 		# (jarvis.api._persist_and_publish_tool_call). Persisting again here
 		# would double up every ERP tool call with an arg-less duplicate, so we
 		# only drive the live activity indicator for those and let the backend
-		# own the durable row. Built-in openclaw tools (browser/canvas/…) never
+		# own the durable row. Built-in agent tools (browser/canvas/…) never
 		# hit call_tool, so we still persist those here.
 		is_jarvis = (tool_name or "").startswith("jarvis__")
 		if phase == "start":
@@ -2102,7 +2100,7 @@ def _handle_event_inner(
 					"conversation_id": conversation_id,
 					"message_id": tool_msg_by_call_id.get(tool_call_id),
 					"tool_name": tool_name,
-					# openclaw's own human summary ("get_list Sales Invoice") -
+					# agent's own human summary ("get_list Sales Invoice") -
 					# drives the live status line; absent for runtimes that don't
 					# emit item titles.
 					"tool_title": event.get("tool_title"),
@@ -2128,11 +2126,11 @@ def _handle_event_inner(
 				return
 			name = tool_msg_by_call_id.get(tool_call_id)
 			if not name:
-				# Orphan: openclaw emitted a tool 'end' event for a
+				# Orphan: agent emitted a tool 'end' event for a
 				# tool_call_id we never logged a 'start' for. Shouldn't
 				# happen, but the previous shape silently returned and
 				# left no operator trace - so a real recurring orphan
-				# (would point at an openclaw event-ordering regression)
+				# (would point at an agent event-ordering regression)
 				# would be invisible. Log it as a warning so it shows
 				# up in Error Log triage.
 				frappe.log_error(

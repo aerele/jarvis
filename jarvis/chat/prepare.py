@@ -2,7 +2,7 @@
 
 The RQ prepare job (D1 Stage 1, owners #16–#26) that runs BEFORE the pump
 dispatches a turn: it drives ``queued -> preparing -> ready`` and hands the pump a
-fully-assembled prompt + a live openclaw session via the Turn's
+fully-assembled prompt + a live agent session via the Turn's
 ``dispatch_payload``. Enqueued by the pump at promote (``dispatch_prepare`` seam),
 deduped on ``jarvis-prepare::<run_id>`` — a still-``queued`` reserved turn may be
 re-offered each slice, and the idempotent ``claim_preparing`` CAS + the dedupe
@@ -156,7 +156,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 				session_key = _ensure_session_key(chat_user, sess=sess)
 				frappe.db.set_value(CONV, conversation, "session_key", session_key)
 				frappe.db.commit()
-			# (#23) model patch (stateful — openclaw remembers across turns). A None ref
+			# (#23) model patch (stateful — agent remembers across turns). A None ref
 			# means "reset to the agent default" and MUST still be sent: it is the
 			# instruction that walks back a stale pin. See _session_model_patch.
 			if patch_session_model:
@@ -171,7 +171,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 			try:
 				wm_msgs = sess.get_session_messages(session_key, limit=5)
 				watermark = max(
-					(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in wm_msgs),
+					(((m or {}).get("__agent") or {}).get("seq", 0) for m in wm_msgs),
 					default=0,
 				)
 				if watermark:

@@ -1,6 +1,6 @@
 """Tests for the direct-WS chat client (jarvis.chat.agent_client).
 
-The transport is a real websocket-client connection to openclaw's gateway.
+The transport is a real websocket-client connection to agent's gateway.
 Tests fake it out at the create_connection level: a scripted WS whose recv()
 returns a sequence of JSON frames and whose send() captures the client's
 outbound frames for assertion.
@@ -156,11 +156,11 @@ class TestConnect(FrappeTestCase):
 		self.assertGreater(params["device"]["signedAt"], int(time.time() * 1000) - 60_000)
 		sess.close()
 
-	def test_connect_uses_an_origin_openclaw_allows_on_lan_bind(self):
-		"""openclaw >= v2026.2.26 enforces gateway.controlUi.allowedOrigins on LAN
+	def test_connect_uses_an_origin_agent_allows_on_lan_bind(self):
+		"""agent >= v2026.2.26 enforces gateway.controlUi.allowedOrigins on LAN
 		binds and seeds ["http://localhost:18789", "http://127.0.0.1:18789"]; the WS
 		Origin we send MUST be one of those or the gateway rejects every connect
-		('origin not allowed'). Regression for the openclaw 2026.6.8 bump, which
+		('origin not allowed'). Regression for the agent 2026.6.8 bump, which
 		stopped honoring the old "*" wildcard that a bare http://localhost relied on."""
 		from jarvis.chat.agent_client import _GATEWAY_ORIGIN
 
@@ -180,7 +180,7 @@ class TestConnect(FrappeTestCase):
 
 		self.assertEqual(cc.call_args.kwargs["origin"], _GATEWAY_ORIGIN)
 		# Loopback host + the gateway's own internal port (18789) — matches what
-		# openclaw seeds for a LAN bind, NOT a bare http://localhost.
+		# agent seeds for a LAN bind, NOT a bare http://localhost.
 		self.assertIn(_GATEWAY_ORIGIN, ("http://127.0.0.1:18789", "http://localhost:18789"))
 
 	def test_connect_rejection_raises_unreachable(self):
@@ -447,7 +447,7 @@ class TestClose(FrappeTestCase):
 class TestSelfHealOnStalePairing(FrappeTestCase):
 	"""When admin re-provisions a tenant, the new container has no record of
 	the customer's existing chat_device_*. The first WS connect fails with
-	one of openclaw's pairing-stale errors. agent_client should detect
+	one of agent's pairing-stale errors. agent_client should detect
 	that, clear local creds, re-pair via ensure_paired, and retry the WS
 	once. A second stale signal is a real failure (no infinite loop)."""
 
@@ -456,7 +456,7 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 		`first_reject_marker` in the error message (or the full `first_error`
 		dict when given); second one accepts."""
 
-		# Sprint-3 (2026-06-16 review): openclaw's rejection payload puts
+		# Sprint-3 (2026-06-16 review): agent's rejection payload puts
 		# the marker in error.code, not error.message. The classifier on
 		# the client side now reads the structured code rather than
 		# substring-matching the message text, so the scripted fixture
@@ -531,7 +531,7 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 		self.assertEqual(len(clears), 1)
 		sess.close()
 
-	# openclaw's REAL wire shape for a device-token auth rejection, captured
+	# agent's REAL wire shape for a device-token auth rejection, captured
 	# verbatim from a live gateway (2026-07-09, reproduction against
 	# ghcr.io/openclaw/openclaw): the generic INVALID_REQUEST code with the
 	# machine-readable reason only in error.details.authReason. This is what
@@ -550,7 +550,7 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 	}
 
 	def test_wire_shape_invalid_request_auth_reason_triggers_repair(self):
-		"""The 2026-07-08 post-deploy regression: openclaw rejects with
+		"""The 2026-07-08 post-deploy regression: agent rejects with
 		code=INVALID_REQUEST + details.authReason=device_token_mismatch.
 		The code-only classifier missed it and chat stayed permanently
 		broken after a tenant container was replaced. The classifier must
@@ -716,7 +716,7 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 
 
 class TestReissuedTokenAdoption(FrappeTestCase):
-	"""openclaw's hello-ok can carry a REISSUED auth.deviceToken: the
+	"""agent's hello-ok can carry a REISSUED auth.deviceToken: the
 	gateway rotates the stored device token at connect whenever the
 	existing entry no longer lines up with the requested scopes/issuer,
 	and the rotation is already durable gateway-side when hello-ok
@@ -841,7 +841,7 @@ class TestRepairConvoyCollapse(FrappeTestCase):
 				"type": "res",
 				"id": first.sent[-1]["id"],
 				"ok": False,
-				# Sprint-3: marker in code, not message - matches openclaw's wire shape.
+				# Sprint-3: marker in code, not message - matches agent's wire shape.
 				"error": {"code": "device-not-paired", "message": "stale"},
 			}
 		)

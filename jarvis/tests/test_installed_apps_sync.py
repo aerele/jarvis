@@ -75,7 +75,7 @@ class TestInstalledAppsSync(FrappeTestCase):
 		self.assertEqual(ias._synced_apps(), stale)
 
 	def test_pool_active_is_derived_from_models_not_the_proxy_flag(self):
-		"""A BYO api-key pool has proxy_active=0 (no sidecar - openclaw drives its
+		"""A BYO api-key pool has proxy_active=0 (no sidecar - agent drives its
 		own failover) yet MUST still resync through the pool leg. Reading the flag
 		would send it down the single-model render and cut it to one credential."""
 		for p in self._patches:

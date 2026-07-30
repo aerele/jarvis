@@ -51,7 +51,7 @@ SIGNATURE_HEADERS = ("X-Jarvis-Signature", "X-Jarvis-Nonce", "X-Jarvis-Timestamp
 def sign_plugin_headers(token: str, session_key: str, body: bytes = b"") -> dict[str, str]:
 	"""Build the three signature headers the bench now requires (JF-014).
 
-	Mirrors ``signRequest`` in jarvis-openclaw-plugin's frappe-client.ts:
+	Mirrors ``signRequest`` in jarvis-agent-plugin's frappe-client.ts:
 	HMAC-SHA256 over "session | sha256(body) | nonce | timestamp", keyed by
 	the gateway token. A fresh nonce per call keeps the Redis dedup window
 	from rejecting back-to-back calls in the same test.
@@ -88,7 +88,7 @@ class TestCallToolPluginAuth(FrappeTestCase):
 		super().setUpClass()
 		settings = frappe.get_single("Jarvis Settings")
 		# Use a dedicated token for plugin-auth tests so we don't depend on
-		# real openclaw config. db_set bypasses on_update - the value persists
+		# real agent config. db_set bypasses on_update - the value persists
 		# only for this test class.
 		cls._original_token = settings.get_password("agent_token", raise_exception=False) or ""
 		settings.db_set("agent_token", "plugin-auth-test-token")
@@ -700,7 +700,7 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 		msg = result["error"]["message"]
 		self.assertFalse(result["ok"], msg=result)
 		self.assertIn("signature headers required", msg)
-		self.assertIn("Upgrade the openclaw plugin", msg)
+		self.assertIn("Upgrade the agent plugin", msg)
 		self.assertIn(f"bench --site <site> set-config {self.CONF_KEY} 1", msg)
 		self.assertIn(_plugin_auth._UNSIGNED_SUNSET_DATE, msg)
 

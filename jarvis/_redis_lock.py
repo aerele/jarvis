@@ -4,7 +4,7 @@ Two call sites today:
 
   jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin
       Two close saves enqueue two workers; without the lock both call
-      admin -> fleet -> openclaw in parallel and either clobber each
+      admin -> fleet -> agent in parallel and either clobber each
       other's last_sync_status writes or fire two redundant container
       restarts. The lock serializes one-at-a-time per bench.
 

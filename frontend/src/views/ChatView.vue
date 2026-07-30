@@ -271,7 +271,7 @@
 							</button>
 							<template v-if="pickableModels.length">
 								<!-- Auto: let Jarvis pick, divided from the explicit models. Clearing the pin
-								     is openclaw's "/model default": the session stops overriding the configured
+								     is agent's "/model default": the session stops overriding the configured
 								     primary and inherits it again. -->
 								<button
 									class="jv-menuitem"
@@ -778,7 +778,7 @@
 							</template>
 							<template #above-body>
 								<!-- Activity: the tool calls (with input + output) that produced
-								     this answer — openclaw-style, collapsible. -->
+								     this answer — agent-style, collapsible. -->
 								<div
 									v-if="
 										showActivityDetail &&
@@ -3862,7 +3862,7 @@ async function greetingNeverAsk() {
 	}
 }
 
-// ---- settings panel (openclaw-style console) ----
+// ---- settings panel (agent-style console) ----
 // The overlay is bound to the SHELL's settingsOpen (D9): the user menu opens
 // it from any route via store.openSettings(router); Esc/close write through.
 const settingsOpen = computed({
@@ -4216,7 +4216,7 @@ const failedCount = computed(() => activeTools.value.filter((t) => t.status === 
 // Real progress instead of a blanket "Thinking…": phase transitions come from
 // the run's realtime events (run:start → tool:start/end → assistant:delta).
 // Faithful by construction: tool phrases derive from the tool NAME plus
-// openclaw's own arg summary (tool_title, e.g. "get_list Sales Invoice") —
+// agent's own arg summary (tool_title, e.g. "get_list Sales Invoice") —
 // nothing is invented client-side.
 const statusPhase = ref(null); // 'model' | 'analyzing' | null
 const TOOL_PHRASES = {
@@ -4260,7 +4260,7 @@ function toolPhrase(tool) {
 	if (!tool) return "";
 	const raw = String(tool.name || "");
 	const base = raw.replace(/^jarvis__/, "");
-	// openclaw's title is "<toolName> <arg summary>"; the remainder after the
+	// agent's title is "<toolName> <arg summary>"; the remainder after the
 	// tool name is its own faithful description of the target.
 	let detail = "";
 	if (tool.title) {
@@ -4434,7 +4434,7 @@ const availableModels = computed(
 
 // Effort levels the SERVER accepts. Never hard-code these: Jarvis Conversation
 // .thinking_override is a Select limited to low/medium/high, and offering a
-// level it rejects (openclaw itself also knows xhigh/max) would fail the save.
+// level it rejects (agent itself also knows xhigh/max) would fail the save.
 const thinkingLevels = computed(() => ui.value.thinking_levels || ["low", "medium", "high"]);
 const thinkingLabel = computed(() => thinkingOverride.value || "auto");
 
@@ -4557,7 +4557,7 @@ const visibleMessages = computed(() =>
 );
 // Group role=tool messages under the assistant turn they belong to, so each
 // answer can show an expandable "Activity" list of the tool calls (with input
-// + output) that produced it — openclaw-style. Tool rows follow their
+// + output) that produced it — agent-style. Tool rows follow their
 // assistant placeholder in seq order, so we attach to the most recent
 // assistant message and reset on each user message.
 const activityByAssistant = computed(() => {
@@ -7343,7 +7343,7 @@ function onEvent(p) {
 	switch (p.kind) {
 		case "run:recovering":
 			// A managed turn was parked for background recovery (a connection
-			// hiccup, or openclaw auto-compacting on context overflow). Don't trap
+			// hiccup, or agent auto-compacting on context overflow). Don't trap
 			// the user behind a locked spinner: unlock the composer and show a
 			// distinct "still working" banner. The answer lands later via the
 			// recovery path (assistant:delta + run:end, run_id "recovered").
@@ -7595,7 +7595,7 @@ function onEvent(p) {
 }
 
 function stopRun() {
-	// Actually abort the run (openclaw chat.abort via stop_run) - best-effort:
+	// Actually abort the run (agent chat.abort via stop_run) - best-effort:
 	// if the abort can't be delivered, the turn finishes server-side and the UI
 	// stop still stands. We also mute this run's events + pin the reply so a
 	// later recovery can't overwrite the stopped state.
@@ -9062,7 +9062,7 @@ onUnmounted(() => {
 .jv-metabar:empty {
 	display: none;
 }
-/* Tool activity (openclaw-style): collapsible list of tool calls with I/O */
+/* Tool activity (agent-style): collapsible list of tool calls with I/O */
 .jv-activity {
 	margin: 0 0 10px;
 	border: 1px solid var(--border);
@@ -9774,7 +9774,7 @@ onUnmounted(() => {
 	letter-spacing: 0.04em;
 	margin: 0 0 8px;
 }
-/* openclaw-style usage stat cards */
+/* agent-style usage stat cards */
 .jv-statgrid {
 	display: grid;
 	grid-template-columns: 1fr 1fr;

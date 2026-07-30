@@ -128,7 +128,7 @@ class TestAgentSessionPool(FrappeTestCase):
 			sess1.close.assert_called()
 
 	def test_other_exception_does_not_evict(self):
-		"""A non-Openclaw exception inside the block should NOT evict
+		"""A non-Agent exception inside the block should NOT evict
 		the pool — those are caller bugs, the connection is fine."""
 		sess = _fake_session()
 		with patch.object(agent_session_pool.AgentSession, "connect", return_value=sess) as mock_connect:

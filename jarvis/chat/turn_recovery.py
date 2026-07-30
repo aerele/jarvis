@@ -1,7 +1,7 @@
 """Scheduler-driven recovery for managed chat turns that the bench abandoned.
 
 A long turn can outrun the bench's WS cap, or its RQ worker can be hard-killed
-(SIGTERM at the 720s job cap, OOM, crash, deploy). openclaw keeps running the
+(SIGTERM at the 720s job cap, OOM, crash, deploy). agent keeps running the
 turn and persists the result regardless. So instead of falsely erroring, the
 turn is left `streaming=1, recovering=1` and this job finalizes it from the
 gateway's durable transcript.
@@ -92,7 +92,7 @@ def _latest_assistant_text(messages: list, *, min_seq: int = 0, max_seq: int | N
 	question's reply). Messages with seq > max_seq belong to a later turn."""
 
 	def seq(m):
-		return ((m or {}).get("__openclaw") or {}).get("seq", 0)
+		return ((m or {}).get("__agent") or {}).get("seq", 0)
 
 	for m in sorted(messages or [], key=seq, reverse=True):
 		if min_seq > 0 and seq(m) <= min_seq:

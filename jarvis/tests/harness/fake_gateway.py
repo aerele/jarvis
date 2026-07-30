@@ -1,4 +1,4 @@
-"""FakeGateway — a local WS server speaking the openclaw protocol subset the
+"""FakeGateway — a local WS server speaking the agent protocol subset the
 bench uses, with deterministic transcript playback and configurable faults.
 
 It is a REAL ``websockets`` server on ``127.0.0.1:<port>`` (reachable by the
@@ -27,7 +27,7 @@ Config knobs (per gateway, overridable per-run via ``arm``):
   cadence_ms          spacing between streamed frames (token cadence)
   ack_delay_ms        normal ack latency
   ack_timeout_hold_ms hold before responding when ack_behavior == "timeout"
-  max_concurrent      global main-lane cap (openclaw default 4)
+  max_concurrent      global main-lane cap (agent default 4)
   lane_sim            enable the FIFO->lane admission gating (dwell)
   lane_dwell_ms       extra artificial dwell added while holding a lane slot
                       (simulate a busy container even below the cap)
@@ -411,7 +411,7 @@ class FakeGateway:
 		# on this session was armed with inject.recover_via == "history", the
 		# durable transcript still holds the complete answer, so surface it as a
 		# role=assistant tail message the way sessions.get / chat.history would
-		# (openclaw stamps __openclaw:{seq,id}). Stage-B recovery probes read it.
+		# (agent stamps __agent:{seq,id}). Stage-B recovery probes read it.
 		if not session_key:
 			return []
 		with self._state_lock:
@@ -432,7 +432,7 @@ class FakeGateway:
 					{
 						"role": "assistant",
 						"content": inject["final_text"],
-						"__openclaw": {"seq": seq, "id": f"rec-{tl.run_id}"},
+						"__agent": {"seq": seq, "id": f"rec-{tl.run_id}"},
 					}
 				)
 				seq += 1

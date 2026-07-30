@@ -83,10 +83,10 @@ _REDIRECT_URI = "http://localhost:1455/auth/callback"
 # the same set of accepted models (previously this module declared sets
 # and chat/api.py declared lists - 2026-06-16 punch-list drift item).
 #
-# Catalog sync constraints: these values must match openclaw 2026.6.4's
+# Catalog sync constraints: these values must match agent 2026.6.4's
 # bundled codex catalog (the version pinned by jarvis_admin.host_setup.
-# DEFAULT_OPENCLAW_IMAGE). The script at
-# jarvis-fleet-agent/scripts/verify-openclaw-assumptions.sh asserts at
+# DEFAULT_AGENT_IMAGE). The script at
+# jarvis-fleet-agent/scripts/verify-agent-assumptions.sh asserts at
 # image-bump time that the catalog still contains "gpt-5.5"; if it ever
 # fails because the catalog drifted, update jarvis/_subscription_models.py
 # + the JS mirrors atomically and re-run the script before bumping the
@@ -206,7 +206,7 @@ def _begin_signin(provider: str, model: str, *, pool: bool) -> dict:
 		state=state,
 		# Pool accounts feed cli-proxy-api, which needs the codex-scope
 		# token audience; the direct flow keeps the connectors scope for
-		# openclaw's own codex path. See providers.py pool_scope.
+		# agent's own codex path. See providers.py pool_scope.
 		pool=pool,
 		oidc_nonce=oidc_nonce,
 	)
@@ -450,7 +450,7 @@ def _validate_signin_nonce(nonce: str):
 
 def _exchange_and_build_blob(entry: dict, redirected_url: str):
 	"""Parse the pasted redirect, verify state (constant-time), exchange the
-	code, and build the openclaw auth-profile blob.
+	code, and build the agent auth-profile blob.
 
 	Shared by the DIRECT (``complete_paste_signin``) and POOL
 	(``complete_pool_account_signin``) flows so both build an identically
@@ -521,7 +521,7 @@ def _exchange_and_build_blob(entry: dict, redirected_url: str):
 	expires_ms = now_ms + int(tokens.get("expires_in", 3600)) * 1000
 	blob = {
 		"type": "oauth",
-		"provider": p["openclaw_provider"],
+		"provider": p["agent_provider"],
 		"access": access_token,
 		"refresh": tokens.get("refresh_token") or "",
 		"expires": expires_ms,
@@ -577,7 +577,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	# actionable message and bail BEFORE save_llm_creds, so the tenant's current
 	# config is left untouched rather than half-migrated.
 	try:
-		admin_client.post_push_oauth_blob(p["openclaw_provider"], direct_blob)
+		admin_client.post_push_oauth_blob(p["agent_provider"], direct_blob)
 	except admin_client.AdminAuthError as e:
 		return _err(
 			"admin_auth",
@@ -598,7 +598,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	# auth-profiles.json (out-of-band from Jarvis Settings), so on_update's
 	# diff classifier sees no change and skips the re-render+restart when
 	# a customer re-authorizes with the same provider+model. Without the
-	# restart the container's openclaw keeps serving stale auth, surfacing
+	# restart the container's agent keeps serving stale auth, surfacing
 	# as the same ProviderAuthError the re-auth was meant to fix. Verified
 	# live 2026-06-11.
 	sync_result = onboarding.save_llm_creds(
@@ -631,7 +631,7 @@ def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 
 	Same validation as ``complete_paste_signin`` (nonce+user binding,
 	constant-time state compare, code exchange) and builds the same
-	openclaw blob shape (WITH ``id_token``) — but this endpoint is
+	agent blob shape (WITH ``id_token``) — but this endpoint is
 	capture-only: it does NOT call ``save_llm_creds``, does NOT push the
 	blob to the container, and does NOT write to Jarvis Settings. The
 	frontend collects N of these into a pool subscription and persists them
@@ -754,14 +754,14 @@ def poll_pool_account_signin(nonce: str) -> dict:
 		# 200 with no token yet — treat as still pending.
 		return _ok({"status": "pending"})
 
-	# Success. Build the device-flow openclaw blob; the fleet-agent's
+	# Success. Build the device-flow agent blob; the fleet-agent's
 	# oauth_blob_to_cliproxy_kimi transform consumes access/refresh/expires/
 	# token_type/scope/device_id (Kimi is device-code: NO id_token, NO email).
 	now_ms = int(time.time() * 1000)
 	expires_ms = now_ms + int(body.get("expires_in", 3600)) * 1000
 	blob = {
 		"type": "oauth",
-		"provider": p["openclaw_provider"],
+		"provider": p["agent_provider"],
 		"access": access_token,
 		"refresh": body.get("refresh_token") or "",
 		"expires": expires_ms,

@@ -6,7 +6,7 @@ They used to call ``sessions.delete`` the instant their own call returned,
 which is NOT the same instant the run ends:
 
 - ``stream_agent_turn`` returns on the run's lifecycle-end frame, while
-  openclaw is still finalising the session file;
+  agent is still finalising the session file;
 - it RAISES on every error path with the run still going server side;
 - ``fire_agent`` (prewarm) never waits at all.
 
@@ -19,7 +19,7 @@ a backoff only when the gateway says it is live - because polish's reclaim runs
 inside a synchronous whitelisted request and title's holds one of only three
 pooled connections.
 
-Issue #535 then found the half that probe could not reach: openclaw ACCEPTS a
+Issue #535 then found the half that probe could not reach: agent ACCEPTS a
 run a median 670ms before it STARTS one, and ``hasActiveRun`` is false for the
 whole of that window, so a reclaim firing inside it deletes a session whose run
 is about to begin. ``TestUnstartedRunIsNotDeleted`` below pins the second half
@@ -29,7 +29,7 @@ and an idle answer is only believed once that has aged past
 
 SCOPE NOTE: the transport is stubbed here, as everywhere else in this suite, so
 these tests assert INTENT - which RPCs the bench issues and in what order. They
-cannot observe what openclaw does with a delete that lands mid-run; that was
+cannot observe what agent does with a delete that lands mid-run; that was
 established from the tenant container's own session files and gateway log, not
 from a test.
 """
@@ -174,7 +174,7 @@ class TestReclaimThrowawaySession(FrappeTestCase):
 class TestUnstartedRunIsNotDeleted(FrappeTestCase):
 	"""Issue #535: the window the probe alone cannot close.
 
-	openclaw ACCEPTS a run before it STARTS one, and sessions.list reports
+	agent ACCEPTS a run before it STARTS one, and sessions.list reports
 	"accepted, not started" and "finished" identically - hasActiveRun is false in
 	both. Measured on jarvis-pool-bf4097 over 269 sessions, as the gap between
 	the session file's creation stamp and the run's own session.started
@@ -268,7 +268,7 @@ class TestAutoTitleReclaim(FrappeTestCase):
 
 	def test_title_session_is_not_deleted_while_its_run_is_live(self):
 		"""The regression. stream_agent_turn returning is not the run ending -
-		openclaw is still writing the session file - so a title turn whose run
+		agent is still writing the session file - so a title turn whose run
 		the gateway still reports as active must be left alone."""
 		sess = _stub_pool_session(active_probes=True)
 
@@ -288,7 +288,7 @@ class TestAutoTitleReclaim(FrappeTestCase):
 
 	def test_failed_title_turn_does_not_delete_a_live_session(self):
 		"""The worst of the old paths: stream_agent_turn raises precisely
-		BECAUSE the run is still going (a WS drop leaves openclaw running), and
+		BECAUSE the run is still going (a WS drop leaves agent running), and
 		the finally deleted the session anyway."""
 		from jarvis.exceptions import AgentUnreachableError
 

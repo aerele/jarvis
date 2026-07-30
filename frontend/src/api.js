@@ -126,7 +126,7 @@ export const summarizeMacro = (name) => call(MC + "summarize_macro", { name });
 export const setConversationModel = (conversation, model) =>
 	call("jarvis.chat.api.set_conversation_model", { conversation, model: model || "" });
 // Reasoning effort. "" clears the override, so the turn inherits Jarvis Settings.
-// The server maps this onto openclaw's "/think <level>" directive.
+// The server maps this onto agent's "/think <level>" directive.
 export const setConversationThinking = (conversation, thinking) =>
 	call("jarvis.chat.api.set_conversation_thinking", { conversation, thinking: thinking || "" });
 
@@ -181,7 +181,7 @@ export async function sendMessage(conversation, message, modelOverride, attachme
 	return call("jarvis.chat.api.send_message", args);
 }
 
-// Actually abort a running turn (openclaw chat.abort) — best-effort; on failure
+// Actually abort a running turn (agent chat.abort) — best-effort; on failure
 // the UI stop stands and the turn finishes server-side.
 export async function stopRun(conversation, runId) {
 	return call("jarvis.chat.api.stop_run", { conversation, run_id: runId || "" });

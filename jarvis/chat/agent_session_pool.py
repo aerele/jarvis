@@ -1,7 +1,7 @@
 """WebSocket connection pool for AgentSession.
 
 Each chat worker turn previously opened a fresh WS to the tenant's
-openclaw gateway: DNS + TCP + TLS + WS upgrade + 3-phase signed
+agent gateway: DNS + TCP + TLS + WS upgrade + 3-phase signed
 handshake before sending the agent RPC. The spike (workflow
 ``w0s0vqhqu``) measured this as 50-200ms per turn (recurring) and
 confirmed:
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 
 # Max idle seconds before a pooled session is discarded on next
-# checkout. Below the typical 5-min openclaw gateway idle disconnect
+# checkout. Below the typical 5-min agent gateway idle disconnect
 # so the WS is fresh when handed out. Aggressive eviction is cheap;
 # the next checkout reconnects.
 IDLE_MAX_S = 240

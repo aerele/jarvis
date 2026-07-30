@@ -4,7 +4,7 @@ Operating instructions. Read this every session.
 
 ## Available tools
 
-All tools come from the `jarvis-openclaw-plugin`:
+All tools come from the `jarvis-agent-plugin`:
 
 | Tool | What it does |
 |---|---|

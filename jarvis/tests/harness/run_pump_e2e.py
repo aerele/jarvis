@@ -171,7 +171,7 @@ class E2E:
 
 	@contextmanager
 	def _pool_to_gateway(self):
-		"""Redirect the openclaw pool checkout to a REAL AgentSession on the fake
+		"""Redirect the agent pool checkout to a REAL AgentSession on the fake
 		gateway (a real socket) — prepare's session bootstrap + finalize's usage poll
 		then create/reference the session ON the gateway, so sessions.list reflects it."""
 		from jarvis.chat.agent_client import AgentSession

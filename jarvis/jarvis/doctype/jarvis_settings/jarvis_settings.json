@@ -480,7 +480,7 @@
    "fieldtype": "Int",
    "label": "Reclaim idle chat memory after (days)",
    "default": "30",
-   "description": "A chat you have not opened for this many days keeps its full history but has its agent working-memory (its openclaw session) reclaimed to free container resources. The chat stays in your list and resumes automatically on your next message, starting without the old working context. Chats with history are never deleted. Minimum 7; set to 0 to keep sessions forever (also disables cleanup of abandoned empty chats). Default 30. Readers treat an unset value as 30 (Single defaults are not backfilled on migrate)."
+   "description": "A chat you have not opened for this many days keeps its full history but has its agent working-memory (its agent session) reclaimed to free container resources. The chat stays in your list and resumes automatically on your next message, starting without the old working context. Chats with history are never deleted. Minimum 7; set to 0 to keep sessions forever (also disables cleanup of abandoned empty chats). Default 30. Readers treat an unset value as 30 (Single defaults are not backfilled on migrate)."
   },
   {
    "fieldname": "system_tab",
@@ -602,7 +602,7 @@
    "permlevel": 1,
    "label": "Agent URL",
    "read_only": 1,
-   "description": "WebSocket URL for the customer's openclaw agent (e.g. ws://127.0.0.1:18789 in dev; wss://<subdomain>.<admin-host>:443 in prod)"
+   "description": "WebSocket URL for the customer's agent agent (e.g. ws://127.0.0.1:18789 in dev; wss://<subdomain>.<admin-host>:443 in prod)"
   },
   {
    "fieldname": "agent_token",
@@ -631,14 +631,14 @@
    "fieldtype": "Data",
    "label": "Chat Device ID",
    "read_only": 1,
-   "description": "sha256(rawPublicKey).hex - openclaw deviceId this bench was paired as. Set lazily on first chat; cleared on re-pair."
+   "description": "sha256(rawPublicKey).hex - agent deviceId this bench was paired as. Set lazily on first chat; cleared on re-pair."
   },
   {
    "fieldname": "chat_device_public_key",
    "fieldtype": "Long Text",
    "label": "Chat Device Public Key",
    "read_only": 1,
-   "description": "Base64url-encoded Ed25519 public key registered with openclaw at pair time."
+   "description": "Base64url-encoded Ed25519 public key registered with agent at pair time."
   },
   {
    "fieldname": "chat_device_private_key",
@@ -654,7 +654,7 @@
    "fieldtype": "Password",
    "label": "Chat Device Token",
    "read_only": 1,
-   "description": "Bearer token openclaw issued at pair time. Sent in auth.deviceToken at every chat WS connect."
+   "description": "Bearer token agent issued at pair time. Sent in auth.deviceToken at every chat WS connect."
   },
   {
    "fieldname": "last_sync_section",

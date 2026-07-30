@@ -189,7 +189,7 @@ class TestWarmPrefix(FrappeTestCase):
 
 		Two warms can pass the get-then-set cooldown check in the same instant
 		(observed 6ms apart on jarvis-pool-bf4097), which makes "the predecessor"
-		a session whose fire-and-forget turn openclaw has ACCEPTED but not yet
+		a session whose fire-and-forget turn agent has ACCEPTED but not yet
 		STARTED. sessions.list answers hasActiveRun=false for that state exactly
 		as it does for a finished run - measured median 670ms wide - so the probe
 		alone waves the delete through and it lands on a live run.

@@ -1,7 +1,7 @@
 """Tests for jarvis.chat.session_lifecycle (idle-session reclaim + empty-chat
 + orphan sweeps).
 
-The hourly cron (1) frees the openclaw session of conversations idle past the
+The hourly cron (1) frees the agent session of conversations idle past the
 configurable retention window (Jarvis Settings.conversation_retention_days) -
 leaving the conversation Active and visible, only reclaiming its working memory;
 (2) hard-deletes Active, non-starred, zero-message chats idle past

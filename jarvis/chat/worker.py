@@ -1,4 +1,4 @@
-"""RQ job: stream one agent turn from openclaw to DB + realtime.
+"""RQ job: stream one agent turn from agent to DB + realtime.
 
 Today this is the default chat path: ``jarvis.chat.api.send_message``
 enqueues, RQ workers pick up, this function runs. The actual turn
@@ -36,7 +36,7 @@ from jarvis.chat.turn_handler import (
 	_ASSISTANT_BATCH_SIZE,
 	_IMAGE_EXT,
 	_MAX_INLINE_CHARS,
-	_PROVIDER_LABEL_TO_OPENCLAW_ID,
+	_PROVIDER_LABEL_TO_AGENT_ID,
 	POOL_VIRTUAL_MODEL,
 	_AssistantContentBatcher,
 	_create_assistant_placeholder,
@@ -63,7 +63,7 @@ __all__ = [
 	"_ASSISTANT_BATCH_SIZE",
 	"_IMAGE_EXT",
 	"_MAX_INLINE_CHARS",
-	"_PROVIDER_LABEL_TO_OPENCLAW_ID",
+	"_PROVIDER_LABEL_TO_AGENT_ID",
 	"_AssistantContentBatcher",
 	"_create_assistant_placeholder",
 	"_handle_event",

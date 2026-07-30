@@ -3,13 +3,13 @@
 No Frappe imports - pure media handling so it unit-tests without a site. The
 worker (jarvis/chat/worker.py) loads the File + checks the user's read
 permission, then calls these helpers to build the provider-neutral image parts
-the openclaw gateway accepts (flat ``{type:"image", mimeType, fileName,
-content}`` shape; openclaw normalizes per provider). PDFs cannot be sent as a
+the agent gateway accepts (flat ``{type:"image", mimeType, fileName,
+content}`` shape; agent normalizes per provider). PDFs cannot be sent as a
 native document block on the chat entrypoint, so we rasterize their pages to
 images here.
 
 Caps (all enforced before anything leaves the bench):
-- per-image bytes: kept under openclaw's 2MB inline threshold (hard cap 6MB) so
+- per-image bytes: kept under agent's 2MB inline threshold (hard cap 6MB) so
   images stay inline rather than disk-offloaded;
 - pixels: <= ~3.75MP (Anthropic's limit) - also the decompression-bomb guard,
   set once process-wide at import;

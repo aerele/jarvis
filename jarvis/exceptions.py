@@ -41,7 +41,7 @@ class ResultTooLargeError(InvalidArgumentError):
 
 	Background: the 2026-06-22 customer outage on openai/gpt-5.5 traced to
 	a single chat turn that accumulated 800+ row Timesheet Detail dumps
-	and 776-row joined query results into the agent transcript. Openclaw
+	and 776-row joined query results into the agent transcript. Agent
 	tried to auto-compact and the upstream summarization call hit a
 	transport error - the whole turn died. The slim-`get_schema` walk-back
 	(PR #133) cut the schema side of the bloat; the row guard handles the
@@ -78,18 +78,18 @@ class ResultTooLargeError(InvalidArgumentError):
 
 
 class AgentUnreachableError(JarvisError):
-	"""Raised when the openclaw gateway can't be reached (WS handshake
+	"""Raised when the agent gateway can't be reached (WS handshake
 	failed, container down).
 
 	Sprint-3 (2026-06-16 review): may carry a structured ``code`` taken
-	from openclaw's rejection payload (``device-not-paired``,
+	from agent's rejection payload (``device-not-paired``,
 	``token-mismatch``, ``signature-invalid``, etc.). Downstream
 	classifiers (e.g. _is_stale_pairing) should branch on this
 	attribute, not on a substring match of the message. ``code`` is
-	None when the error didn't originate from an openclaw response
+	None when the error didn't originate from an agent response
 	(e.g. network-level WS open failure).
 
-	2026-07-09: also carries ``details`` - openclaw's ``error.details``
+	2026-07-09: also carries ``details`` - agent's ``error.details``
 	object. Connect AUTH failures arrive with the GENERIC error.code
 	"INVALID_REQUEST" and the machine-readable reason only in
 	``details.authReason`` (e.g. "device_token_mismatch"), so ``code``

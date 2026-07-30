@@ -1,6 +1,6 @@
-"""Unit tests for the openclaw-native RPC methods on AgentSession.
+"""Unit tests for the agent-native RPC methods on AgentSession.
 
-These mirror openclaw's own UI gateway model (chat.send + chat.history +
+These mirror agent's own UI gateway model (chat.send + chat.history +
 sessions.list/get), so the bench can drive turns and reconcile from the
 durable transcript instead of holding the agent RPC's request stream.
 
@@ -12,7 +12,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat.agent_client import AgentSession
 
 
-class TestOpenclawNativeRpcs(FrappeTestCase):
+class TestAgentNativeRpcs(FrappeTestCase):
 	def _sess(self, response):
 		sess = AgentSession.__new__(AgentSession)  # bypass __init__/WS
 		captured = {"response": response}

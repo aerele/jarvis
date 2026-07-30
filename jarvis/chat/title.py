@@ -2,7 +2,7 @@
 
 Instead of using the raw first message as the conversation title, we generate
 a concise, summarised title after the first *substantive* turn — the way
-ChatGPT and openclaw do it. This mirrors openclaw's own ``generateThreadTitle``
+ChatGPT and agent do it. This mirrors agent's own ``generateThreadTitle``
 (extensions/discord/src/monitor/thread-title.ts):
 
   - feed the opening user message (capped at ~600 chars) to the model with a
@@ -11,11 +11,11 @@ ChatGPT and openclaw do it. This mirrors openclaw's own ``generateThreadTitle``
   - strip wrapping quotes / ``**bold**`` / ``__underline__`` / code fences;
   - cap the length.
 
-openclaw runs this through a cheap "simple completion" model. We don't have a
+agent runs this through a cheap "simple completion" model. We don't have a
 separate completion surface in managed mode (device-paired WS only), so we run
 a throwaway agent turn on its own session_key — it never touches the visible
 conversation. Best-effort throughout: any failure falls back to a cleaned-up
-first message (openclaw's ``deriveSessionTitle`` fallback) and never breaks the
+first message (agent's ``deriveSessionTitle`` fallback) and never breaks the
 chat turn that triggered it.
 """
 
@@ -31,9 +31,9 @@ from jarvis.chat.events import publish_to_user
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
 
-# openclaw uses DERIVED_TITLE_MAX_LEN = 60; match it.
+# agent uses DERIVED_TITLE_MAX_LEN = 60; match it.
 _TITLE_MAX_LEN = 60
-# openclaw caps the title *source* at 600 chars before sending to the model.
+# agent caps the title *source* at 600 chars before sending to the model.
 _SOURCE_MAX_CHARS = 600
 
 # A turn whose opening message is just a greeting shouldn't define the title —
@@ -69,7 +69,7 @@ _GREETINGS = {
 	"test",
 }
 
-# Mirrors openclaw's SYSTEM_PROMPT for thread titles, adapted to a single
+# Mirrors agent's SYSTEM_PROMPT for thread titles, adapted to a single
 # user-message agent turn (our managed gateway runs the persona agent, so we
 # spell out "no tools / only the title" explicitly).
 _TITLE_PROMPT = (
@@ -98,7 +98,7 @@ def _is_greeting(text: str) -> bool:
 
 
 def normalize_title(raw: str | None) -> str:
-	"""openclaw-style normalisation: first meaningful line, unwrapped, capped."""
+	"""agent-style normalisation: first meaningful line, unwrapped, capped."""
 	if not raw:
 		return ""
 	first_line = ""
@@ -122,7 +122,7 @@ def normalize_title(raw: str | None) -> str:
 
 
 def derive_title(text: str) -> str:
-	"""Deterministic fallback (openclaw ``deriveSessionTitle``): the first line
+	"""Deterministic fallback (agent ``deriveSessionTitle``): the first line
 	of the opening message, unwrapped + capped. Used only when LLM generation
 	fails, so the chat never gets stuck on "New chat"."""
 	return normalize_title(_clean(text)) or _clean(text)[:_TITLE_MAX_LEN]
@@ -156,7 +156,7 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 
 	prompt = _TITLE_PROMPT.format(msg=source_text[:_SOURCE_MAX_CHARS])
 	text = ""
-	# openclaw rejects sessions.create with a label that's already in use, so
+	# agent rejects sessions.create with a label that's already in use, so
 	# the label MUST be unique per call — a fixed "jarvis-title" works the first
 	# time then fails ("label already in use") and silently falls back to the
 	# raw message. A random suffix keeps each throwaway title session distinct.
@@ -169,7 +169,7 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 			try:
 				# Titling deliberately pins a cheap model instead of the pool
 				# primary, which costs this run its failover chain (#531). The
-				# prefixed run id is what keeps openclaw's resulting
+				# prefixed run id is what keeps agent's resulting
 				# ``next=none`` from reading like a dead chain.
 				for ev in sess.stream_agent_turn(
 					skey,
@@ -189,17 +189,17 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 				#
 				# NOT a bare sessions.delete (issue #525): reaching this line does
 				# NOT mean the run is over. stream_agent_turn returns on the
-				# lifecycle-end frame while openclaw is still finalising the
+				# lifecycle-end frame while agent is still finalising the
 				# session file, and RAISES on every error path with the run still
 				# going server side - so deleting here renamed the session file
-				# out from under a live run, which openclaw answers by either
+				# out from under a live run, which agent answers by either
 				# re-creating the file (a fresh orphan) or killing the run with
 				# EmbeddedAttemptSessionTakeoverError. reclaim_throwaway_session
 				# waits for the gateway to stop reporting an active run, and
 				# leaves anything still busy to the orphan sweep.
 				#
 				# On the RAISE path that probe is not enough on its own (issue
-				# #535): the raise can land inside the ~670ms median openclaw
+				# #535): the raise can land inside the ~670ms median agent
 				# takes to start an accepted run, and sessions.list cannot tell
 				# "not started" from "finished". So hand over the fire time there
 				# and let the helper refuse the delete. On the normal path we

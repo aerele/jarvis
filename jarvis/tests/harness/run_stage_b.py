@@ -61,7 +61,7 @@ DESK_URL = "http://127.0.0.1:8000/api/method/ping"
 DESK_HOST = "patterntest.localhost"
 
 # Baseline-matched gateway cadence (Stage-A run_baseline used 25ms), so the
-# legacy-vs-pump C3 delta is apples-to-apples. The real openclaw ~150ms mirror
+# legacy-vs-pump C3 delta is apples-to-apples. The real agent ~150ms mirror
 # cadence caveat is stated in the report.
 CADENCE_MS = 25.0
 

@@ -867,7 +867,7 @@ const state = reactive({
 	// with empty args).
 	reconciledConnect: false,
 	successData: null,
-	// provisioning gate: after pay, the openclaw container is still spinning up.
+	// provisioning gate: after pay, the agent container is still spinning up.
 	// We block entry to the Connect step until it's running (else save_llm_pool
 	// has no container to configure).
 	provisioning: false,
@@ -1249,7 +1249,7 @@ function _sleep(ms) {
 	return new Promise((r) => setTimeout(r, ms));
 }
 
-// Provisioning gate: after pay, the openclaw container is still spinning up.
+// Provisioning gate: after pay, the agent container is still spinning up.
 // Don't enter Connect until it's running - otherwise save_llm_pool there has
 // no container to configure. If pay already returned a running tenant, advance
 // immediately; otherwise poll sync_connection until the container is ready.

@@ -23,7 +23,7 @@ class TestGetProvider(unittest.TestCase):
 		self.assertEqual(p["client_id"], "app_EMoamEEZ73f0CkXaXp7hrann")
 		# Storage/lookup identity is the mapped model-provider key, not the
 		# OAuth flow id. See providers.py for rationale.
-		self.assertEqual(p["openclaw_provider"], "openai")
+		self.assertEqual(p["agent_provider"], "openai")
 		self.assertIn("openid", p["scope"])
 		self.assertIn("api.connectors.read", p["scope"])
 		self.assertIn("api.connectors.invoke", p["scope"])
@@ -31,17 +31,17 @@ class TestGetProvider(unittest.TestCase):
 	def test_gemini_returns_gemini_cli_metadata(self):
 		p = providers.get_provider("Google Gemini")
 		self.assertEqual(p["authorize"], "https://accounts.google.com/o/oauth2/v2/auth")
-		# Auth storage key matches openclaw's registered CliBackend id so the
-		# gemini binary finds the OAuth token when openclaw routes dispatch
-		# via the CLI backend. Mapping to "google" makes openclaw's
+		# Auth storage key matches agent's registered CliBackend id so the
+		# gemini binary finds the OAuth token when agent routes dispatch
+		# via the CLI backend. Mapping to "google" makes agent's
 		# isCliProvider return false and the CLI dispatch path is missed.
-		self.assertEqual(p["openclaw_provider"], "google-gemini-cli")
+		self.assertEqual(p["agent_provider"], "google-gemini-cli")
 		# Userinfo flipped from None to the Google v1 endpoint after the
 		# scope drift bug fix - the bundled gemini-cli OAuth client doesn't
 		# have `openid` registered, so no id_token comes back and email is
 		# fetched via Bearer-authenticated userinfo instead.
 		self.assertEqual(p["userinfo"], "https://www.googleapis.com/oauth2/v1/userinfo?alt=json")
-		# Lock in the scope contract - matches openclaw's gemini-cli SCOPES.
+		# Lock in the scope contract - matches agent's gemini-cli SCOPES.
 		# Reject the previously-broken `generative-language` and the
 		# `openid`/`email`/`profile` short forms that aren't registered on
 		# the gemini-cli OAuth client.
@@ -57,10 +57,10 @@ class TestGetProvider(unittest.TestCase):
 
 
 class TestExtractAccountId(unittest.TestCase):
-	"""openclaw's codex auth resolver requires `accountId` on the OAuth
+	"""agent's codex auth resolver requires `accountId` on the OAuth
 	profile; without it the credential is treated as unusable and the
 	chat surfaces 'No API key found for provider openai'. See
-	openclaw/docs/concepts/oauth.md step 6 of the codex OAuth exchange."""
+	agent/docs/concepts/oauth.md step 6 of the codex OAuth exchange."""
 
 	def test_openai_pulls_chatgpt_account_id_from_jwt(self):
 		jwt = _jwt(
@@ -192,7 +192,7 @@ class TestPhase2Providers(unittest.TestCase):
 	def test_kimi_is_device_code(self):
 		p = providers.get_provider("Kimi (Moonshot)")
 		self.assertEqual(p["grant_type"], "device_code")
-		self.assertEqual(p["openclaw_provider"], "kimi")
+		self.assertEqual(p["agent_provider"], "kimi")
 		self.assertEqual(p["client_id"], "17e5f671-d194-4dfb-9706-5516cb48c098")
 		self.assertIn("device_authorization", p)
 

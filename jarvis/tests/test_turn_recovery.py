@@ -106,8 +106,8 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "user", "content": "q", "__openclaw": {"seq": 1}},
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "user", "content": "q", "__agent": {"seq": 1}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -124,7 +124,7 @@ class TestTurnRecovery(FrappeTestCase):
 	def test_uses_raw_session_messages_not_truncating_history(self):
 		# Content must come from get_session_messages (raw), never get_history (#1).
 		sess = self._fake_sess(
-			messages_by_key={SK: [{"role": "assistant", "content": "x", "__openclaw": {"seq": 1}}]}
+			messages_by_key={SK: [{"role": "assistant", "content": "x", "__agent": {"seq": 1}}]}
 		)
 		self._run(sess)
 		sess.get_history.assert_not_called()
@@ -132,7 +132,7 @@ class TestTurnRecovery(FrappeTestCase):
 	def test_leaves_active_run_untouched(self):
 		sess = self._fake_sess(
 			active={SK},
-			messages_by_key={SK: [{"role": "assistant", "content": "x", "__openclaw": {"seq": 1}}]},
+			messages_by_key={SK: [{"role": "assistant", "content": "x", "__agent": {"seq": 1}}]},
 		)
 		self._run(sess)
 		row = self._row()
@@ -176,9 +176,7 @@ class TestTurnRecovery(FrappeTestCase):
 		newer = self._add_msg(seq=2, started_min=-10, content="partial2")
 		frappe.db.commit()
 		sess = self._fake_sess(
-			messages_by_key={
-				SK: [{"role": "assistant", "content": "latest answer", "__openclaw": {"seq": 9}}]
-			}
+			messages_by_key={SK: [{"role": "assistant", "content": "latest answer", "__agent": {"seq": 9}}]}
 		)
 		self._run(sess)
 		self.assertEqual(self._row(newer.name).content, "latest answer")
@@ -204,7 +202,7 @@ class TestTurnRecovery(FrappeTestCase):
 			[
 				{
 					"role": "assistant",
-					"__openclaw": {"seq": 5},
+					"__agent": {"seq": 5},
 					"content": [{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}],
 				}
 			]
@@ -216,7 +214,7 @@ class TestTurnRecovery(FrappeTestCase):
 			[
 				{
 					"role": "assistant",
-					"__openclaw": {"seq": 5},
+					"__agent": {"seq": 5},
 					"content": [{"type": "text", "text": {"unexpected": "dict"}}],
 					"text": 123,
 				}
@@ -229,7 +227,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -249,7 +247,7 @@ class TestTurnRecovery(FrappeTestCase):
 	def test_recover_now_leaves_active_run_untouched(self):
 		sess = self._fake_sess(
 			active={SK},
-			messages_by_key={SK: [{"role": "assistant", "content": "x", "__openclaw": {"seq": 1}}]},
+			messages_by_key={SK: [{"role": "assistant", "content": "x", "__agent": {"seq": 1}}]},
 		)
 		out, pub = self._run_now(sess)
 		self.assertEqual(out, "active")
@@ -308,7 +306,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -352,7 +350,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -386,7 +384,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the OLD reply", "__openclaw": {"seq": 5}},
+					{"role": "assistant", "content": "the OLD reply", "__agent": {"seq": 5}},
 				]
 			}
 		)
@@ -403,7 +401,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the NEW reply", "__openclaw": {"seq": 9}},
+					{"role": "assistant", "content": "the NEW reply", "__agent": {"seq": 9}},
 				]
 			}
 		)
@@ -420,7 +418,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -433,7 +431,7 @@ class TestTurnRecovery(FrappeTestCase):
 	def test_latest_assistant_text_min_seq_filters_out_older_message(self):
 		text = turn_recovery._latest_assistant_text(
 			[
-				{"role": "assistant", "__openclaw": {"seq": 5}, "content": "old"},
+				{"role": "assistant", "__agent": {"seq": 5}, "content": "old"},
 			],
 			min_seq=7,
 		)
@@ -442,8 +440,8 @@ class TestTurnRecovery(FrappeTestCase):
 	def test_latest_assistant_text_min_seq_keeps_strictly_newer_message(self):
 		text = turn_recovery._latest_assistant_text(
 			[
-				{"role": "assistant", "__openclaw": {"seq": 5}, "content": "old"},
-				{"role": "assistant", "__openclaw": {"seq": 9}, "content": "new"},
+				{"role": "assistant", "__agent": {"seq": 5}, "content": "old"},
+				{"role": "assistant", "__agent": {"seq": 9}, "content": "new"},
 			],
 			min_seq=7,
 		)
@@ -454,8 +452,8 @@ class TestTurnRecovery(FrappeTestCase):
 
 	def test_latest_assistant_text_max_seq_excludes_later_turns_message(self):
 		msgs = [
-			{"role": "assistant", "__openclaw": {"seq": 2}, "content": "GOLF"},
-			{"role": "assistant", "__openclaw": {"seq": 4}, "content": "HOTEL"},
+			{"role": "assistant", "__agent": {"seq": 2}, "content": "GOLF"},
+			{"role": "assistant", "__agent": {"seq": 4}, "content": "HOTEL"},
 		]
 		self.assertEqual(turn_recovery._latest_assistant_text(msgs, min_seq=0, max_seq=2), "GOLF")
 		self.assertEqual(turn_recovery._latest_assistant_text(msgs, min_seq=0), "HOTEL")
@@ -486,8 +484,8 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "GOLF", "__openclaw": {"seq": 2}},
-					{"role": "assistant", "content": "HOTEL", "__openclaw": {"seq": 4}},
+					{"role": "assistant", "content": "GOLF", "__agent": {"seq": 2}},
+					{"role": "assistant", "content": "HOTEL", "__agent": {"seq": 4}},
 				]
 			}
 		)
@@ -505,7 +503,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "HOTEL", "__openclaw": {"seq": 4}},
+					{"role": "assistant", "content": "HOTEL", "__agent": {"seq": 4}},
 				]
 			}
 		)
@@ -535,7 +533,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -546,7 +544,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess2 = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -636,7 +634,7 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -652,7 +650,7 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)
@@ -677,7 +675,7 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					{"role": "assistant", "content": "the full answer", "__agent": {"seq": 2}},
 				]
 			}
 		)

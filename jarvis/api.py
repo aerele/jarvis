@@ -24,12 +24,12 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 	   whoever Frappe's session resolves to; their permissions are what the
 	   tool sees. Guest is rejected.
 
-	2. **Plugin auth** (``jarvis-openclaw-plugin`` Path A): two custom headers
+	2. **Plugin auth** (``jarvis-agent-plugin`` Path A): two custom headers
 	   are presented together:
 
 	   - ``X-Jarvis-Token`` - the shared ``agent_token`` secret
-	     (proves the request originated inside the openclaw container)
-	   - ``X-Jarvis-Session`` - the openclaw sessionKey for this conversation
+	     (proves the request originated inside the agent container)
+	   - ``X-Jarvis-Session`` - the agent sessionKey for this conversation
 
 	   The token is validated, then the user is resolved from
 	   ``Jarvis Chat Session`` (the row inserted at session-create time maps
@@ -71,7 +71,7 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			)
 
 		# NOTE: no Jarvis-access role gate on the plugin path. It is
-		# machine-authenticated (token/HMAC proves the call came from openclaw),
+		# machine-authenticated (token/HMAC proves the call came from agent),
 		# and `plugin_user` is the real chat user — already gated when they
 		# started the conversation. Per-DocType perms still apply under
 		# _dispatch_from_session.
@@ -150,7 +150,7 @@ def _dispatch_from_session(
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
 	# never authors it — it is the delegate's opaque bearer, delivered over the
 	# HTTPS header). record_agent_run resolves its Jarvis Agent Run from it.
-	# R-6: the openclaw tool-call id, when the plugin sends it (forward-compatible
+	# R-6: the agent tool-call id, when the plugin sends it (forward-compatible
 	# header), keys the out-of-band receipt idempotency. Absent today => no dedupe,
 	# but the seq race is still fixed under the conversation lock.
 	tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None

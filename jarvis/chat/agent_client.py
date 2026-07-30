@@ -1,5 +1,15 @@
 """Openclaw gateway client - direct WebSocket with device-paired auth.
 
+WIRE-CONTRACT BOUNDARY - "openclaw" is retained on purpose here (and in
+chat/device.py, chat/events.py, agent_ws.py, chat/relay_mux.py, the
+tools/*contract* files, and agent_templates/openclaw.json.j2). These are the
+runtime's own protocol/config identity - the WS method names, the device-auth
+envelope, the ghcr.io/openclaw/openclaw image, the openclaw.json config and the
+__openclaw__/ws marker - and renaming them would silently break the plugin /
+fleet-agent / container. Everywhere else in the app the runtime is called
+"agent"; jarvis/tests/test_no_openclaw_leak.py enforces that split. Do NOT
+rename "openclaw" in this file.
+
 Previously this module shelled out to `docker compose exec ... node -e <script>`
 so the WS connection would appear as loopback inside the container - openclaw
 strips self-declared `operator.write` scopes from non-loopback token-only

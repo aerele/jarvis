@@ -335,7 +335,7 @@ class TestDiagnosticsRedaction(Part4Base):
 
 	def test_ping_agent_drops_agent_url(self):
 		mock_settings = MagicMock()
-		mock_settings.agent_url = "ws://secret-openclaw"
+		mock_settings.agent_url = "ws://secret-agent"
 		mock_settings.get_password.return_value = "tok-secret"
 		with (
 			_as(ADMIN),
@@ -345,7 +345,7 @@ class TestDiagnosticsRedaction(Part4Base):
 			res = diagnostics.ping_agent()
 		self.assertTrue(res.get("ok"))
 		self.assertNotIn("agent_url", res)
-		self.assertNotIn("secret-openclaw", json.dumps(res))
+		self.assertNotIn("secret-agent", json.dumps(res))
 
 	def test_ping_endpoints_reject_plain_jarvis_user(self):
 		with _as(USER_A):

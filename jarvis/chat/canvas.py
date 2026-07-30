@@ -1,6 +1,6 @@
-"""Artifact handling for the chat surface — render openclaw's file outputs inline.
+"""Artifact handling for the chat surface — render agent's file outputs inline.
 
-openclaw's agent emits rich outputs (charts, reports, PDFs, images, exports) by
+agent's agent emits rich outputs (charts, reports, PDFs, images, exports) by
 writing a file under the container's ``~/.openclaw/canvas/`` (including
 subdirectories) and referencing its path in the reply; the gateway serves it at
 ``/__openclaw__/canvas/<path>``. The live WS stream does NOT carry file content
@@ -61,7 +61,7 @@ _CANVAS_REF = re.compile(rf"canvas/({_PATH}\.(?:{_EXTS}))(?![\w])", re.IGNORECAS
 _CANVAS_LINK = re.compile(rf"\[[^\]]*\]\(\s*\S*?canvas/{_PATH}\.(?:{_EXTS})\S*?\s*\)", re.IGNORECASE)
 _CANVAS_BARE = re.compile(rf"\S*?canvas/{_PATH}\.(?:{_EXTS})(?![\w])", re.IGNORECASE)
 
-# openclaw 2026.6+ "hosted embed" markers. The runtime's own system prompt
+# agent 2026.6+ "hosted embed" markers. The runtime's own system prompt
 # teaches the model to publish rich HTML as a hosted canvas document and
 # reference it with ``[embed ref="<id>" title="..." /]`` (or an explicit
 # ``[embed url="/__openclaw__/canvas/..." /]``). The gateway serves ref

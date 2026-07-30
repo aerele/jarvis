@@ -1,5 +1,5 @@
 """R-21 guard — re-assert the protocol facts the fake gateway reproduces
-against the REAL pinned openclaw 2026.6.8 runtime, read-only, in a THROWAWAY
+against the REAL pinned agent 2026.6.8 runtime, read-only, in a THROWAWAY
 container (never the running pool).
 
 Methodology matches spikes S1/S2 (which established the ordering + payload facts
