@@ -174,7 +174,7 @@ class E2E:
 		"""Redirect the openclaw pool checkout to a REAL OpenclawSession on the fake
 		gateway (a real socket) — prepare's session bootstrap + finalize's usage poll
 		then create/reference the session ON the gateway, so sessions.list reflects it."""
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import OpenclawSession
 
 		if self._pool_sess is None:
 			self._pool_sess = OpenclawSession.connect(self.gateway.ws_url)
@@ -183,7 +183,7 @@ class E2E:
 		def _co(url):
 			yield self._pool_sess
 
-		with patch("jarvis.chat.openclaw_session_pool.checkout", _co):
+		with patch("jarvis.chat.agent_session_pool.checkout", _co):
 			yield
 
 	@contextmanager
@@ -203,7 +203,7 @@ class E2E:
 	def _make_deps(self):
 		from jarvis.chat import finalize, pump
 		from jarvis.chat import prepare as prepare_mod
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import OpenclawSession
 		from jarvis.chat.relay_mux import RelayMux
 
 		gw = self.gateway

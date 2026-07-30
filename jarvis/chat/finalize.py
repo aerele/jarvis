@@ -272,12 +272,12 @@ def _effect_usage(ctx: _Ctx) -> None:
 		# force-done budget logs the undercount loudly rather than silently marking it
 		# recorded with nothing accrued (the original unmapped-data loss).
 		raise _UsageRetry(f"no session key for {ctx.run_id} (conversation {ctx.conversation})")
-	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat import agent_session_pool
 	from jarvis.chat import usage as _usage
 
 	settings = frappe.get_cached_doc("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-	with openclaw_session_pool.checkout(gateway_url) as sess:
+	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner

@@ -17,7 +17,7 @@ from __future__ import annotations
 import frappe
 from frappe.utils import cint, sbool
 
-from jarvis.chat import openclaw_session_pool, usage
+from jarvis.chat import agent_session_pool, usage
 from jarvis.exceptions import OpenclawUnreachableError
 from jarvis.permissions import require_jarvis_access, require_jarvis_admin
 
@@ -243,7 +243,7 @@ def admin_sync_usage() -> dict:
 		return {"ok": False, "reason": "gateway_unreachable"}
 
 	try:
-		with openclaw_session_pool.checkout(gateway_url) as sess:
+		with agent_session_pool.checkout(gateway_url) as sess:
 			rows = sess.list_sessions()
 	except OpenclawUnreachableError:
 		return {"ok": False, "reason": "gateway_unreachable"}

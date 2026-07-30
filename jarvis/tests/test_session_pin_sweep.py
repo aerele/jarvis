@@ -331,7 +331,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		frappe.db.set_single_value(SETTINGS, "agent_url", "http://gw.test:18789")
 		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		try:
-			with patch("jarvis.chat.openclaw_client.OpenclawSession.connect", return_value=sess):
+			with patch("jarvis.chat.agent_client.OpenclawSession.connect", return_value=sess):
 				out = session_pin_sweep.run()
 		finally:
 			frappe.db.set_single_value(SETTINGS, "agent_url", orig or "")

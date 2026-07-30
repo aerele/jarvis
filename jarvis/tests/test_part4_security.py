@@ -340,7 +340,7 @@ class TestDiagnosticsRedaction(Part4Base):
 		with (
 			_as(ADMIN),
 			patch("frappe.get_single", return_value=mock_settings),
-			patch("jarvis.openclaw_ws.ping", return_value=None),
+			patch("jarvis.agent_ws.ping", return_value=None),
 		):
 			res = diagnostics.ping_openclaw()
 		self.assertTrue(res.get("ok"))

@@ -141,7 +141,7 @@ class TestSessionLifecycle(FrappeTestCase):
 	def _run(self, sess):
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.OpenclawSession.connect",
+				"jarvis.chat.agent_client.OpenclawSession.connect",
 				return_value=sess,
 			),
 		):
@@ -628,7 +628,7 @@ class TestSessionLifecycle(FrappeTestCase):
 		self._conv(session_key="test-lc-x", idle_days=40, has_message=True)
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.OpenclawSession.connect",
+				"jarvis.chat.agent_client.OpenclawSession.connect",
 				side_effect=RuntimeError("refused"),
 			),
 			patch("frappe.log_error"),

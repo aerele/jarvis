@@ -30,14 +30,14 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.openclaw_client import (
+from jarvis.chat.agent_client import (
 	ONESHOT_RUN_PREFIX,
 	PINNED_ONESHOT_RUN_PREFIX,
 	OpenclawSession,
 	oneshot_run_id,
 )
 
-LOG = "jarvis.chat.openclaw_client"
+LOG = "jarvis.chat.agent_client"
 SKEY = "agent:main:dashboard:throwaway-1"
 
 
@@ -69,7 +69,7 @@ def _checkout_yielding(sess):
 	def _cm(_gateway_url):
 		yield sess
 
-	with patch("jarvis.chat.openclaw_session_pool.checkout", _cm):
+	with patch("jarvis.chat.agent_session_pool.checkout", _cm):
 		yield
 
 

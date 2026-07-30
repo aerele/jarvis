@@ -158,7 +158,7 @@ def rotate_dormant_sessions() -> dict:
 	if not gateway_url:
 		return {"skipped": "no agent_url"}
 
-	from jarvis.chat.openclaw_client import OpenclawSession
+	from jarvis.chat.agent_client import OpenclawSession
 
 	summary = {"sessions_freed": 0, "empty_reaped": 0, "orphans_reaped": 0, "skipped": 0, "errors": 0}
 	budget = BATCH_MAX
@@ -287,7 +287,7 @@ def _reap_empty(sess, budget: int, summary: dict) -> int:
 		  -- reapable. A conversation that holds ANY message - a user message, or
 		  -- even an assistant row from a turn that FAILED (a terminal agent error
 		  -- leaves an errored/empty assistant row; see turn_handler + the
-		  -- openclaw_client failed_final mapping) - is real chat history and is
+		  -- agent_client failed_final mapping) - is real chat history and is
 		  -- never auto-deleted. Do NOT loosen this to reap "conversations whose
 		  -- turns all failed / produced no visible content": that would delete the
 		  -- user's message. Empty ones may go; anything with a message stays.

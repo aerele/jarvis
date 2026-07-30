@@ -1204,7 +1204,7 @@ def _default_make_mux(relay_target_id: str, epoch: int) -> RelayMux:
 	(reconnect-per-hop; the pump owns connect, the mux is the I/O adapter). The
 	gateway URL is resolved from Jarvis Settings ``agent_url``. Production
 	(WP-1e) exercises this; tests inject a transport double."""
-	from jarvis.chat.openclaw_client import OpenclawSession
+	from jarvis.chat.agent_client import OpenclawSession
 
 	settings = frappe.get_cached_doc("Jarvis Settings")
 	gateway_url = (

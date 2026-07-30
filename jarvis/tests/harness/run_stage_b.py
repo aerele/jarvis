@@ -177,7 +177,7 @@ class StageB:
 	def warm_session(self, conv: str):
 		"""Pre-create the gateway session so the measured turn is WARM (prepare
 		skips create_session)."""
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import OpenclawSession
 
 		sess = OpenclawSession.connect(self.gateway.ws_url)
 		try:
@@ -201,7 +201,7 @@ class StageB:
 
 	@contextmanager
 	def _pool_to_gateway(self):
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import OpenclawSession
 
 		if self._pool_sess is None:
 			self._pool_sess = OpenclawSession.connect(self.gateway.ws_url)
@@ -210,7 +210,7 @@ class StageB:
 		def _co(url):
 			yield self._pool_sess
 
-		with patch("jarvis.chat.openclaw_session_pool.checkout", _co):
+		with patch("jarvis.chat.agent_session_pool.checkout", _co):
 			yield
 
 	@contextmanager
@@ -228,7 +228,7 @@ class StageB:
 	def _make_deps(self):
 		from jarvis.chat import finalize, pump
 		from jarvis.chat import prepare as prepare_mod
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import OpenclawSession
 		from jarvis.chat.relay_mux import RelayMux
 
 		gw = self.gateway

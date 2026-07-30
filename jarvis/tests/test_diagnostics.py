@@ -101,7 +101,7 @@ class TestPingOpenclaw(FrappeTestCase):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "ws://h:1")
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
-		with patch("jarvis.openclaw_ws.ping") as p:
+		with patch("jarvis.agent_ws.ping") as p:
 			out = diagnostics.ping_openclaw()
 		p.assert_called_once_with("ws://h:1", "t")
 		self.assertTrue(out["ok"])
@@ -115,7 +115,7 @@ class TestPingOpenclaw(FrappeTestCase):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "ws://h:1")
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
-		with patch("jarvis.openclaw_ws.ping", side_effect=OpenclawUnreachableError("refused")):
+		with patch("jarvis.agent_ws.ping", side_effect=OpenclawUnreachableError("refused")):
 			out = diagnostics.ping_openclaw()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["kind"], "unreachable")

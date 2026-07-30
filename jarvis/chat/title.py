@@ -150,8 +150,8 @@ def _first_substantive_user_message(conversation_id: str) -> str | None:
 def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 	"""Run a silent throwaway agent turn to summarise the opening message into a
 	title. Returns "" on any failure (caller falls back to derive_title)."""
-	from jarvis.chat import openclaw_session_pool
-	from jarvis.chat.openclaw_client import oneshot_run_id
+	from jarvis.chat import agent_session_pool
+	from jarvis.chat.agent_client import oneshot_run_id
 	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
 	prompt = _TITLE_PROMPT.format(msg=source_text[:_SOURCE_MAX_CHARS])
@@ -162,7 +162,7 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 	# raw message. A random suffix keeps each throwaway title session distinct.
 	label = f"jarvis-title-{frappe.generate_hash(length=10)}"
 	try:
-		with openclaw_session_pool.checkout(gateway_url) as sess:
+		with agent_session_pool.checkout(gateway_url) as sess:
 			skey = sess.create_session(label=label)
 			fired_at = time.time()
 			run_ended = False

@@ -68,7 +68,7 @@ import uuid
 
 import frappe
 
-from jarvis.chat.openclaw_client import OpenclawSession, oneshot_run_id
+from jarvis.chat.agent_client import OpenclawSession, oneshot_run_id
 from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 
 # Ceiling on how often the one remaining trigger can bill a warm for one bench.

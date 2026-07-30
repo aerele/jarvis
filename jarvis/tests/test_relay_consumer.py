@@ -13,7 +13,7 @@ frames are dropped.
 
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.agent_client import OpenclawSession
 from jarvis.exceptions import OpenclawUnreachableError
 
 
@@ -170,7 +170,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		# sentinel-stripped message that keeps stopReason="error". It must NOT
 		# read as a silent successful empty final; it must surface as an error
 		# so the turn handler stamps the assistant row's `error` field.
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		sess = self._sess(
 			[
@@ -193,7 +193,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		# final message instead of stripping it. That is still a failed turn,
 		# not a real answer, so it maps to the same failed_final error rather
 		# than rendering the raw sentinel as the assistant's reply.
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		sess = self._sess(
 			[

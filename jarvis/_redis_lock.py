@@ -8,7 +8,7 @@ Two call sites today:
       other's last_sync_status writes or fire two redundant container
       restarts. The lock serializes one-at-a-time per bench.
 
-  jarvis.chat.openclaw_client.OpenclawSession._attempt_connect
+  jarvis.chat.agent_client.OpenclawSession._attempt_connect
       After a tenant re-provision, N RQ workers concurrently observe
       "stale pairing" rejections and all race to clear_credentials() +
       re-pair. Each ensure_paired() generates a different Ed25519 keypair;

@@ -1,4 +1,4 @@
-"""Tests for the direct-WS chat client (jarvis.chat.openclaw_client).
+"""Tests for the direct-WS chat client (jarvis.chat.agent_client).
 
 The transport is a real websocket-client connection to openclaw's gateway.
 Tests fake it out at the create_connection level: a scripted WS whose recv()
@@ -27,8 +27,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat.agent_client import OpenclawSession
 from jarvis.chat.device import ChatDeviceCredentials
-from jarvis.chat.openclaw_client import OpenclawSession
 from jarvis.exceptions import OpenclawUnreachableError
 
 # --- helpers --------------------------------------------------------------
@@ -112,8 +112,8 @@ def _build_session(creds=None) -> tuple[OpenclawSession, _ScriptedWS]:
 
 	scripted = _ScriptedWS([_challenge(), _ok])
 	with (
-		patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=scripted),
-		patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
+		patch("jarvis.chat.agent_client.websocket.create_connection", return_value=scripted),
+		patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
 	):
 		sess = OpenclawSession.connect("ws://test")
 	scripted.sent.clear()
@@ -133,8 +133,8 @@ class TestConnect(FrappeTestCase):
 
 		scripted = _ScriptedWS([_challenge("nonce-xyz"), _ok])
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=scripted),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client.websocket.create_connection", return_value=scripted),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
 		):
 			sess = OpenclawSession.connect("ws://t")
 
@@ -162,7 +162,7 @@ class TestConnect(FrappeTestCase):
 		Origin we send MUST be one of those or the gateway rejects every connect
 		('origin not allowed'). Regression for the openclaw 2026.6.8 bump, which
 		stopped honoring the old "*" wildcard that a bare http://localhost relied on."""
-		from jarvis.chat.openclaw_client import _GATEWAY_ORIGIN
+		from jarvis.chat.agent_client import _GATEWAY_ORIGIN
 
 		creds = _make_creds()
 
@@ -173,8 +173,8 @@ class TestConnect(FrappeTestCase):
 		scripted = _ScriptedWS([_challenge(), _ok])
 		cc = MagicMock(return_value=scripted)
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", cc),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client.websocket.create_connection", cc),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
 		):
 			OpenclawSession.connect("ws://t")
 
@@ -199,8 +199,8 @@ class TestConnect(FrappeTestCase):
 
 		scripted = _ScriptedWS([_challenge(), _nack])
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=scripted),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client.websocket.create_connection", return_value=scripted),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
 		):
 			with self.assertRaises(OpenclawUnreachableError) as cm:
 				OpenclawSession.connect("ws://t")
@@ -210,15 +210,15 @@ class TestConnect(FrappeTestCase):
 	def test_missing_challenge_times_out(self):
 		creds = _make_creds()
 		with (
-			patch("jarvis.chat.openclaw_client.CONNECT_TIMEOUT_SECONDS", 0.05),
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=_ScriptedWS([])),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client.CONNECT_TIMEOUT_SECONDS", 0.05),
+			patch("jarvis.chat.agent_client.websocket.create_connection", return_value=_ScriptedWS([])),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
 		):
 			with self.assertRaises(OpenclawUnreachableError):
 				OpenclawSession.connect("ws://t")
 
 	def test_empty_gateway_url_raises(self):
-		with patch("jarvis.chat.openclaw_client.ensure_paired", return_value=_make_creds()):
+		with patch("jarvis.chat.agent_client.ensure_paired", return_value=_make_creds()):
 			with self.assertRaises(OpenclawUnreachableError):
 				OpenclawSession.connect("")
 
@@ -228,8 +228,8 @@ class TestConnect(FrappeTestCase):
 		sentinel = object()
 		cc = MagicMock(side_effect=[OSError("timed out"), OSError("connection refused"), sentinel])
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", cc),
-			patch("jarvis.chat.openclaw_client.time.sleep") as sleep,
+			patch("jarvis.chat.agent_client.websocket.create_connection", cc),
+			patch("jarvis.chat.agent_client.time.sleep") as sleep,
 		):
 			ws = OpenclawSession._open_ws_with_retry("ws://t")
 		self.assertIs(ws, sentinel)
@@ -241,9 +241,9 @@ class TestConnect(FrappeTestCase):
 		# carries the "starting up" hint instead of the raw timeout.
 		cc = MagicMock(side_effect=OSError("timed out"))
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", cc),
-			patch("jarvis.chat.openclaw_client.time.sleep"),
-			patch("jarvis.chat.openclaw_client.CONNECT_OPEN_DEADLINE_SECONDS", 0),
+			patch("jarvis.chat.agent_client.websocket.create_connection", cc),
+			patch("jarvis.chat.agent_client.time.sleep"),
+			patch("jarvis.chat.agent_client.CONNECT_OPEN_DEADLINE_SECONDS", 0),
 		):
 			with self.assertRaises(OpenclawUnreachableError) as cm:
 				OpenclawSession._open_ws_with_retry("ws://t")
@@ -447,7 +447,7 @@ class TestClose(FrappeTestCase):
 class TestSelfHealOnStalePairing(FrappeTestCase):
 	"""When admin re-provisions a tenant, the new container has no record of
 	the customer's existing chat_device_*. The first WS connect fails with
-	one of openclaw's pairing-stale errors. openclaw_client should detect
+	one of openclaw's pairing-stale errors. agent_client should detect
 	that, clear local creds, re-pair via ensure_paired, and retry the WS
 	once. A second stale signal is a real failure (no infinite loop)."""
 
@@ -503,13 +503,13 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 		# on whatever the local site happens to hold.
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.websocket.create_connection",
+				"jarvis.chat.agent_client.websocket.create_connection",
 				side_effect=lambda *a, **kw: next(ws_iter),
 			),
-			patch("jarvis.chat.openclaw_client.ensure_paired", side_effect=_fake_ensure_paired),
-			patch("jarvis.chat.openclaw_client._persisted_device_id", return_value=""),
-			patch("jarvis.chat.openclaw_client._persisted_device_token", return_value=""),
-			patch("jarvis.chat.openclaw_client.clear_credentials", side_effect=_fake_clear),
+			patch("jarvis.chat.agent_client.ensure_paired", side_effect=_fake_ensure_paired),
+			patch("jarvis.chat.agent_client._persisted_device_id", return_value=""),
+			patch("jarvis.chat.agent_client._persisted_device_token", return_value=""),
+			patch("jarvis.chat.agent_client.clear_credentials", side_effect=_fake_clear),
 		):
 			result = OpenclawSession.connect("ws://t")
 		return result, clear_called, ensure_paired_calls
@@ -580,14 +580,14 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 		clear_called: list = []
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.websocket.create_connection",
+				"jarvis.chat.agent_client.websocket.create_connection",
 				side_effect=lambda *a, **kw: next(ws_iter),
 			),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
-			patch("jarvis.chat.openclaw_client._persisted_device_id", return_value=creds.device_id),
-			patch("jarvis.chat.openclaw_client._persisted_device_token", return_value="tok-rotated-by-peer"),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client._persisted_device_id", return_value=creds.device_id),
+			patch("jarvis.chat.agent_client._persisted_device_token", return_value="tok-rotated-by-peer"),
 			patch(
-				"jarvis.chat.openclaw_client.clear_credentials", side_effect=lambda: clear_called.append(True)
+				"jarvis.chat.agent_client.clear_credentials", side_effect=lambda: clear_called.append(True)
 			),
 		):
 			sess = OpenclawSession.connect("ws://t")
@@ -621,10 +621,10 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 		first_ws = _ScriptedWS([_challenge(), _nack])
 		clear_called: list = []
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=first_ws),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client.websocket.create_connection", return_value=first_ws),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
 			patch(
-				"jarvis.chat.openclaw_client.clear_credentials", side_effect=lambda: clear_called.append(True)
+				"jarvis.chat.agent_client.clear_credentials", side_effect=lambda: clear_called.append(True)
 			),
 		):
 			with self.assertRaises(OpenclawUnreachableError):
@@ -666,10 +666,10 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 		first_ws = _ScriptedWS([_challenge(), _nack])
 		clear_called: list = []
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=first_ws),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client.websocket.create_connection", return_value=first_ws),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
 			patch(
-				"jarvis.chat.openclaw_client.clear_credentials", side_effect=lambda: clear_called.append(True)
+				"jarvis.chat.agent_client.clear_credentials", side_effect=lambda: clear_called.append(True)
 			),
 		):
 			with self.assertRaises(OpenclawUnreachableError) as cm:
@@ -700,10 +700,10 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 		first_ws = _ScriptedWS([_challenge(), _nack])
 		clear_called: list = []
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=first_ws),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client.websocket.create_connection", return_value=first_ws),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
 			patch(
-				"jarvis.chat.openclaw_client.clear_credentials", side_effect=lambda: clear_called.append(True)
+				"jarvis.chat.agent_client.clear_credentials", side_effect=lambda: clear_called.append(True)
 			),
 		):
 			with self.assertRaises(OpenclawUnreachableError):
@@ -734,9 +734,9 @@ class TestReissuedTokenAdoption(FrappeTestCase):
 
 		ws = _ScriptedWS([_challenge(), _ok])
 		with (
-			patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=ws),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
-			patch("jarvis.chat.openclaw_client.update_device_token", update_mock),
+			patch("jarvis.chat.agent_client.websocket.create_connection", return_value=ws),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
+			patch("jarvis.chat.agent_client.update_device_token", update_mock),
 		):
 			sess = OpenclawSession.connect("ws://t")
 		return sess, creds, update_mock
@@ -811,9 +811,9 @@ class TestReissuedTokenAdoption(FrappeTestCase):
 			ws = _ScriptedWS([_challenge(), _ok])
 			update_mock = MagicMock(return_value=True)
 			with (
-				patch("jarvis.chat.openclaw_client.websocket.create_connection", return_value=ws),
-				patch("jarvis.chat.openclaw_client.ensure_paired", return_value=creds),
-				patch("jarvis.chat.openclaw_client.update_device_token", update_mock),
+				patch("jarvis.chat.agent_client.websocket.create_connection", return_value=ws),
+				patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
+				patch("jarvis.chat.agent_client.update_device_token", update_mock),
 			):
 				sess = OpenclawSession.connect("ws://t")
 			update_mock.assert_not_called()
@@ -867,14 +867,14 @@ class TestRepairConvoyCollapse(FrappeTestCase):
 		ws_iter = iter([first_ws, second_ws])
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.websocket.create_connection",
+				"jarvis.chat.agent_client.websocket.create_connection",
 				side_effect=lambda *a, **kw: next(ws_iter),
 			),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=stale_creds),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=stale_creds),
 			patch(
-				"jarvis.chat.openclaw_client.clear_credentials", side_effect=lambda: clear_called.append(True)
+				"jarvis.chat.agent_client.clear_credentials", side_effect=lambda: clear_called.append(True)
 			),
-			patch("jarvis.chat.openclaw_client._persisted_device_id", return_value=winner_device_id),
+			patch("jarvis.chat.agent_client._persisted_device_id", return_value=winner_device_id),
 		):
 			sess = OpenclawSession.connect("ws://t")
 		self.assertEqual(clear_called, [], "convoy follower must NOT clear the winner's freshly-paired creds")
@@ -890,17 +890,15 @@ class TestRepairConvoyCollapse(FrappeTestCase):
 		ws_iter = iter([first_ws, second_ws])
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.websocket.create_connection",
+				"jarvis.chat.agent_client.websocket.create_connection",
 				side_effect=lambda *a, **kw: next(ws_iter),
 			),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=stale_creds),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=stale_creds),
 			patch(
-				"jarvis.chat.openclaw_client.clear_credentials", side_effect=lambda: clear_called.append(True)
+				"jarvis.chat.agent_client.clear_credentials", side_effect=lambda: clear_called.append(True)
 			),
-			patch("jarvis.chat.openclaw_client._persisted_device_id", return_value=stale_creds.device_id),
-			patch(
-				"jarvis.chat.openclaw_client._persisted_device_token", return_value=stale_creds.device_token
-			),
+			patch("jarvis.chat.agent_client._persisted_device_id", return_value=stale_creds.device_id),
+			patch("jarvis.chat.agent_client._persisted_device_token", return_value=stale_creds.device_token),
 		):
 			sess = OpenclawSession.connect("ws://t")
 		self.assertEqual(
@@ -925,12 +923,12 @@ class TestRepairConvoyCollapse(FrappeTestCase):
 		ws_iter = iter([first_ws, second_ws])
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.websocket.create_connection",
+				"jarvis.chat.agent_client.websocket.create_connection",
 				side_effect=lambda *a, **kw: next(ws_iter),
 			),
-			patch("jarvis.chat.openclaw_client.ensure_paired", return_value=stale_creds),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=stale_creds),
 			patch(
-				"jarvis.chat.openclaw_client.clear_credentials", side_effect=lambda: clear_called.append(True)
+				"jarvis.chat.agent_client.clear_credentials", side_effect=lambda: clear_called.append(True)
 			),
 			patch("jarvis._redis_lock.redis_lock", side_effect=_never_acquired),
 		):

@@ -26,8 +26,8 @@ from collections.abc import Iterator
 
 import frappe
 
+from jarvis.chat.agent_client import OpenclawSession
 from jarvis.chat.events import publish_to_user
-from jarvis.chat.openclaw_client import OpenclawSession
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
@@ -57,7 +57,7 @@ _RATE_WATCH_DEDUPE_HOURS = 20
 @contextlib.contextmanager
 def _recovery_connection(gateway_url: str) -> Iterator[OpenclawSession]:
 	"""A dedicated short-lived connection for recovery. NEVER the shared pool
-	(openclaw_session_pool is single-turn-exclusive and not concurrency-safe)."""
+	(agent_session_pool is single-turn-exclusive and not concurrency-safe)."""
 	sess = OpenclawSession.connect(gateway_url)
 	try:
 		yield sess

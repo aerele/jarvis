@@ -142,10 +142,10 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		except Exception:
 			pass
 
-	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat import agent_session_pool
 
 	try:
-		with openclaw_session_pool.checkout(gateway_url) as sess:
+		with agent_session_pool.checkout(gateway_url) as sess:
 			session_key = conv.session_key
 			if not session_key:
 				# (#22) create the session on THIS pooled connection and persist the

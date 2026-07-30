@@ -381,7 +381,7 @@ class TestAdminSync(_UsageTestBase):
 		self.addCleanup(
 			lambda: frappe.db.set_single_value("Jarvis Settings", "agent_url", orig_agent_url or "")
 		)
-		p = patch.object(user_settings_api.openclaw_session_pool, "checkout", _fake_checkout)
+		p = patch.object(user_settings_api.agent_session_pool, "checkout", _fake_checkout)
 		p.start()
 		self.addCleanup(p.stop)
 

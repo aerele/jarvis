@@ -199,7 +199,7 @@ def run(apply: bool = False, max_clear: int = MAX_CLEAR) -> dict:
 	if not gateway_url:
 		return SweepSummary(apply=bool(apply), aborted="no agent_url").as_dict()
 
-	from jarvis.chat.openclaw_client import OpenclawSession
+	from jarvis.chat.agent_client import OpenclawSession
 
 	try:
 		sess = OpenclawSession.connect(gateway_url)

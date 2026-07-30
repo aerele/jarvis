@@ -137,7 +137,7 @@ class _PipelineCase(_PumpTestCase):
 		def _co(url):
 			yield fake
 
-		with patch("jarvis.chat.openclaw_session_pool.checkout", _co):
+		with patch("jarvis.chat.agent_session_pool.checkout", _co):
 			yield
 
 	@contextmanager

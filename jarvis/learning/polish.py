@@ -246,8 +246,8 @@ def _run_gateway_turn(prompt: str) -> str:
 	"""One silent throwaway agent turn on its own session_key - it never
 	touches a visible conversation. Returns the assistant text, or '' on any
 	failure (unreachable gateway, timeout, agent error, no gateway_url)."""
-	from jarvis.chat import openclaw_session_pool
-	from jarvis.chat.openclaw_client import oneshot_run_id
+	from jarvis.chat import agent_session_pool
+	from jarvis.chat.agent_client import oneshot_run_id
 	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 	from jarvis.chat.turn_handler import _resolve_model_and_provider
 
@@ -263,7 +263,7 @@ def _run_gateway_turn(prompt: str) -> str:
 	label = f"jarvis-polish-{frappe.generate_hash(length=10)}"
 	text = ""
 	try:
-		with openclaw_session_pool.checkout(gateway_url) as sess:
+		with agent_session_pool.checkout(gateway_url) as sess:
 			skey = sess.create_session(label=label)
 			fired_at = time.time()
 			run_ended = False

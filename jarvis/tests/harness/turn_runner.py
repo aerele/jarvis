@@ -71,7 +71,7 @@ def install_stubs():
 	"""Swap ensure_paired (avoid real device pairing) + publish_to_user (record
 	the realtime fan-out instead of hitting socketio). Returns a restore fn.
 	Point the recorder with set_active_recorder() per scenario."""
-	import jarvis.chat.openclaw_client as oc
+	import jarvis.chat.agent_client as oc
 	import jarvis.chat.worker as worker
 
 	orig_ensure = oc.ensure_paired
@@ -183,8 +183,8 @@ class TurnResult:
 def run_turn(spec: TurnSpec, gateway, recorder) -> TurnResult:
 	import frappe
 
-	from jarvis.chat import openclaw_session_pool, turn_handler
-	from jarvis.chat.openclaw_client import OpenclawSession
+	from jarvis.chat import agent_session_pool, turn_handler
+	from jarvis.chat.agent_client import OpenclawSession
 	from jarvis.exceptions import OpenclawUnreachableError
 
 	res = TurnResult(run_id=spec.run_id, transcript=spec.transcript, conversation=spec.conversation_id)
@@ -259,7 +259,7 @@ def run_turn(spec: TurnSpec, gateway, recorder) -> TurnResult:
 
 	try:
 		if spec.connect_mode == "pool":
-			with openclaw_session_pool.checkout(gateway.ws_url) as sess:
+			with agent_session_pool.checkout(gateway.ws_url) as sess:
 				_do(sess)
 		else:
 			sess = OpenclawSession.connect(gateway.ws_url)

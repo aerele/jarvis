@@ -6,7 +6,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import session_lifecycle
-from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.agent_client import OpenclawSession
 
 
 def _lapse_cooldown(prewarm):

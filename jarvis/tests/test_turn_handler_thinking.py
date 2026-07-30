@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import openclaw_session_pool
+from jarvis.chat import agent_session_pool
 from jarvis.chat.api import create_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
 from jarvis.tests.test_chat_api import (
@@ -35,7 +35,7 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -79,7 +79,7 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 			]
 		)
 		with patch(
-			"jarvis.chat.openclaw_session_pool.OpenclawSession.connect",
+			"jarvis.chat.agent_session_pool.OpenclawSession.connect",
 			return_value=fake_sess,
 		):
 			with patch("jarvis.chat.worker.publish_to_user"):

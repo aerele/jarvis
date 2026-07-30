@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 import frappe
 
-from jarvis.chat import openclaw_session_pool, vision
+from jarvis.chat import agent_session_pool, vision
 from jarvis.exceptions import OpenclawUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode
 
@@ -905,7 +905,7 @@ def handle_chat_send(payload: dict) -> None:
 			)
 		try:
 			t_checkout = time.monotonic()
-			with openclaw_session_pool.checkout(gateway_url) as sess:
+			with agent_session_pool.checkout(gateway_url) as sess:
 				checkout_ms = int((time.monotonic() - t_checkout) * 1000)
 				# First turn of this conversation: create the openclaw
 				# session on THIS pooled connection (no extra handshake)

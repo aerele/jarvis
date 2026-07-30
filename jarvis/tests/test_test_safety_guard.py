@@ -77,7 +77,7 @@ class TestMockedTestsAreUntouched(FrappeTestCase):
 		post.assert_called_once()
 
 	def test_a_patched_websocket_still_works(self):
-		"""test_chat_openclaw_client calls OpenclawSession.connect DIRECTLY -- connect is
+		"""test_chat_agent_client calls OpenclawSession.connect DIRECTLY -- connect is
 		the unit under test, so it cannot mock itself. It mocks create_connection instead.
 		A guard inside connect() would have broken that whole file."""
 		import websocket

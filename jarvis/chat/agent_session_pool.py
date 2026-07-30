@@ -53,7 +53,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.agent_client import OpenclawSession
 from jarvis.exceptions import OpenclawUnreachableError
 
 logger = logging.getLogger(__name__)
@@ -190,13 +190,13 @@ def _acquire_entry(group: _GatewayGroup) -> _PooledEntry:
 			# fork-per-job RQ this line should ~never appear - that absence
 			# is itself the signal that the persistent executor is needed.
 			logger.info(
-				"openclaw_session_pool: pool-hit gateway=%s idle_s=%.1f",
+				"agent_session_pool: pool-hit gateway=%s idle_s=%.1f",
 				group.gateway_url,
 				time.monotonic() - entry.last_used,
 			)
 			return entry
 		logger.info(
-			"openclaw_session_pool: stale entry, reconnecting gateway=%s idle_s=%.1f connected=%s",
+			"agent_session_pool: stale entry, reconnecting gateway=%s idle_s=%.1f connected=%s",
 			group.gateway_url,
 			time.monotonic() - entry.last_used,
 			_safe_connected(entry.session),
@@ -248,7 +248,7 @@ def _do_connect(gateway_url: str) -> OpenclawSession:
 	sess = OpenclawSession.connect(gateway_url)
 	elapsed_ms = int((time.monotonic() - t0) * 1000)
 	logger.info(
-		"openclaw_session_pool: pool-miss connect gateway=%s total_ms=%d",
+		"agent_session_pool: pool-miss connect gateway=%s total_ms=%d",
 		gateway_url,
 		elapsed_ms,
 	)

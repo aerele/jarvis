@@ -70,7 +70,7 @@ def _checkout_yielding(sess):
 	def _cm(_gateway_url):
 		yield sess
 
-	with patch("jarvis.chat.openclaw_session_pool.checkout", _cm):
+	with patch("jarvis.chat.agent_session_pool.checkout", _cm):
 		yield
 
 

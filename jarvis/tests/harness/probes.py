@@ -298,7 +298,7 @@ def measure_stop_visible(gateway, *, cadence_ms: float = 25.0, abort_after_frame
 	"""Start an abort-transcript turn, let a few frames stream, send chat.abort
 	from a SECOND connection (web process aborting the worker's run), and
 	measure the time to the visible aborted terminal."""
-	from jarvis.chat.openclaw_client import OpenclawSession, OpenclawUnreachableError
+	from jarvis.chat.agent_client import OpenclawSession, OpenclawUnreachableError
 
 	run_id = f"stopvis-{uuid.uuid4().hex[:8]}"
 	gateway.arm(run_id, "abort", cadence_ms=cadence_ms)

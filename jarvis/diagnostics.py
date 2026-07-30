@@ -60,7 +60,7 @@ def ping_openclaw() -> dict:
 	and the ``agent_url`` is dropped from the response (endpoint disclosure +
 	operator-scope probe surface). Returns only the connectivity verdict."""
 	require_jarvis_admin()
-	from jarvis import openclaw_ws
+	from jarvis import agent_ws
 	from jarvis.exceptions import OpenclawUnreachableError
 
 	settings = frappe.get_single("Jarvis Settings")
@@ -71,7 +71,7 @@ def ping_openclaw() -> dict:
 	if not token:
 		return {"ok": False, "kind": "config", "error": "agent_token is not set."}
 	try:
-		openclaw_ws.ping(url, token)
+		agent_ws.ping(url, token)
 		return {"ok": True, "kind": "ok", "connected": True}
 	except OpenclawUnreachableError as e:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
@@ -170,9 +170,9 @@ def reset_agent_pairing() -> dict:
 	diagnostic, widened from SM-only.
 	"""
 	require_jarvis_admin()
-	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat import agent_session_pool
+	from jarvis.chat.agent_client import OpenclawSession
 	from jarvis.chat.device import clear_credentials
-	from jarvis.chat.openclaw_client import OpenclawSession
 	from jarvis.exceptions import OpenclawUnreachableError
 
 	settings = frappe.get_single("Jarvis Settings")
@@ -182,7 +182,7 @@ def reset_agent_pairing() -> dict:
 
 	clear_credentials()
 	try:
-		openclaw_session_pool.drain_all()
+		agent_session_pool.drain_all()
 	except Exception:
 		pass
 	try:

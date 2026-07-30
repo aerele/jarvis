@@ -54,7 +54,7 @@ def _att_is_image(att: dict) -> bool:
 # Covers worst case end-to-end: pair (<=90s admin round-trip) +
 # WS connect (10s) + TURN_TIMEOUT_SECONDS (600s) = 700s. 720s gives
 # 20s headroom. Bumped from 300s in lockstep with the
-# TURN_TIMEOUT_SECONDS bump to 600s (see openclaw_client.py for the
+# TURN_TIMEOUT_SECONDS bump to 600s (see agent_client.py for the
 # Frappe-Cloud + Hetzner WAN rationale - the bench RQ envelope has
 # to be larger than the WS turn cap or the worker dies first and
 # the WS cap never gets a chance to enforce). Previously this was
@@ -809,7 +809,7 @@ import uuid
 
 from frappe import _
 
-from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.agent_client import OpenclawSession
 from jarvis.chat.policy import validate_can_send
 
 _INFLIGHT_FRESH_SECONDS = 180
@@ -1858,10 +1858,10 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat import agent_session_pool
 
 	try:
-		with openclaw_session_pool.checkout(gateway_url) as sess:
+		with agent_session_pool.checkout(gateway_url) as sess:
 			sess.chat_abort(conv.session_key, run_id or None)
 	except Exception as e:
 		frappe.log_error(title="jarvis stop_run", message=str(e))

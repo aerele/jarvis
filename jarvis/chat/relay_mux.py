@@ -3,7 +3,7 @@
 This module is the I/O adapter the pump reactor (D6) drives. It owns exactly
 ONE ``OpenclawSession`` (one WS per ``relay_target_id``) and is the SOLE caller
 of that socket's ``_recv`` — the single-reader constraint the pool warns about
-(``openclaw_session_pool.py:21-38``: two readers "would steal frames between
+(``agent_session_pool.py:21-38``: two readers "would steal frames between
 turns") is not relaxed, it is INVERTED: one reader serves every turn on the
 container by DEMUXing frames instead of discarding non-matching ones.
 
@@ -16,7 +16,7 @@ Binding contract (read in order):
     per-shard poison-rate circuit breaker, stray-frame counter (Amendment I).
   * implementation/spikes/S2-gateway-semantics.md — ack at accept
     {runId,status}; broadcast agent/chat frames keyed by runId.
-  * jarvis/chat/openclaw_client.py — the frame classifiers this module adapts
+  * jarvis/chat/agent_client.py — the frame classifiers this module adapts
     around (``_is_response_frame``, ``_build_request_frame``, ``parse_event``,
     ``_chat_final_text``/``_chat_final_failed``, the ``ack-timeout`` sentinel,
     the serialized-send ``_lock`` idiom).
@@ -43,7 +43,7 @@ HARD INVARIANTS (this component is TRANSPORT-PURE):
 
 Threading model (works under both the gevent realtime executor and RQ threads —
 the waits use ``threading`` primitives the realtime process monkey-patches into
-cooperative waits, exactly as ``openclaw_session_pool`` does):
+cooperative waits, exactly as ``agent_session_pool`` does):
   * READER thread (mux-owned, no DB): the sole ``_recv`` caller. Classifies each
     frame and either resolves a pending-RPC future, routes an event to its lane
     queue, or increments the stray counter. Never blocks, never calls a lane
@@ -63,14 +63,14 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from jarvis.chat.events import parse_event
-from jarvis.chat.openclaw_client import (
+from jarvis.chat.agent_client import (
 	FAILED_FINAL_ERROR,
 	OpenclawSession,
 	_build_request_frame,
 	_chat_final_failed,
 	_chat_final_text,
 )
+from jarvis.chat.events import parse_event
 from jarvis.exceptions import OpenclawUnreachableError
 
 _logger = logging.getLogger(__name__)
@@ -447,7 +447,7 @@ class RelayMux:
 		if not frame.get("ok"):
 			# Preserve today's structured error classification (code + details)
 			# so the issuing pump path classifies stale-pairing etc. as it does
-			# now (openclaw_client._request:1023-1030).
+			# now (agent_client._request:1023-1030).
 			err = frame.get("error") or {}
 			details = err.get("details")
 			fut.set_exception(

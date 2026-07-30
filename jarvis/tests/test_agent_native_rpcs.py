@@ -9,7 +9,7 @@ Each method is request/response, so we bypass __init__ and stub _request.
 
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.agent_client import OpenclawSession
 
 
 class TestOpenclawNativeRpcs(FrappeTestCase):
@@ -93,7 +93,7 @@ class TestOpenclawNativeRpcs(FrappeTestCase):
 	def test_stream_agent_turn_tags_midstream_drop_as_turn_timeout(self):
 		# A WS drop AFTER the run is acked must surface code="turn-timeout" so
 		# turn_handler parks it for recovery instead of false-erroring (#4).
-		from jarvis.chat.openclaw_client import OpenclawUnreachableError
+		from jarvis.chat.agent_client import OpenclawUnreachableError
 
 		sess = OpenclawSession.__new__(OpenclawSession)
 		frames = [{"type": "res", "id": "a1", "ok": True, "payload": {"runId": "r1"}}]
@@ -112,7 +112,7 @@ class TestOpenclawNativeRpcs(FrappeTestCase):
 	def test_stream_agent_turn_propagates_preack_failure_uncoded(self):
 		# A failure BEFORE the ack (run never started) must NOT be turn-timeout,
 		# so turn_handler errors it rather than parking a non-existent run.
-		from jarvis.chat.openclaw_client import OpenclawUnreachableError
+		from jarvis.chat.agent_client import OpenclawUnreachableError
 
 		sess = OpenclawSession.__new__(OpenclawSession)
 		sess._send = lambda method, params: "a1"

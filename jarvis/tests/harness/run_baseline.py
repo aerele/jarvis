@@ -180,7 +180,7 @@ class Harness:
 	def warm_session(self, conv: str, gateway: FakeGateway):
 		"""Pre-create the gateway session so the measured turn is WARM (skips
 		session-create)."""
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import OpenclawSession
 
 		sess = OpenclawSession.connect(gateway.ws_url)
 		try:
