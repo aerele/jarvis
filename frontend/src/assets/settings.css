@@ -174,6 +174,12 @@
 	scrollbar-gutter: stable;
 	scrollbar-width: thin;
 	scrollbar-color: transparent transparent;
+	/* scrollbar-gutter reserves nothing for macOS OVERLAY scrollbars, so the
+	   thumb is painted ON TOP of whatever sits at the right edge - right-aligned
+	   danger-zone buttons ended up half-covered by it. Keep content clear of the
+	   thumb's track by hand, with enough room that the bar reads as chrome
+	   sitting beside the pane rather than crowding its buttons. */
+	padding-right: 20px;
 }
 .jv-scroll-overlay::-webkit-scrollbar {
 	width: 7px;
