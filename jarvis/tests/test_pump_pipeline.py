@@ -1038,6 +1038,115 @@ class TestSuxf1RecoveringMirror(_PipelineCase):
 		self.assertIn("run:error", self._pub_kinds())
 		self.assertEqual(int(self._val(rid, "reserved")), 0, "credit released")
 
+	def test_repark_after_adopt_still_reaches_terminal_error(self):
+		"""SUXF-2: the streaming/recovering oscillation must still hit the budget.
+
+		The customer-visible hang. The tenant's gateway container is bounced under a
+		live turn, so every hop re-adopts the turn to ``streaming`` and cannot reach the
+		run; the watchdog re-parks it each cycle on the (never re-stamped) expired
+		``deadline_at``. Because the watchdog cron period is SHORTER than
+		RECOVERY_BUDGET_S, a park that re-stamped ``recovery_started_at`` reset the
+		budget every cycle, so ``_recovery_budget_exhausted`` could never fire: the turn
+		never reached ``errored``, no ``run:error`` was ever published, and the SPA held
+		the reconnecting banner forever with no error and no timeout.
+		"""
+		conv = self._mk_conv()
+		rid = "pmp_suxf2_osc"
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		epoch = self._acquire_fresh("suxf2a")
+		episode_start = frappe.utils.add_to_date(None, seconds=-30)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"streaming",
+			version=4,
+			pump_epoch=epoch,
+			reserved=1,
+			assistant_message=amsg,
+			dispatching_at=frappe.utils.now(),
+			deadline_at=frappe.utils.add_to_date(None, seconds=-5),  # soft deadline passed
+			recovery_started_at=episode_start,  # an episode is already under way
+		)
+		wd_deps = pump.PumpDeps()
+		wd_deps.enqueue_pump_job = _Recorder()
+
+		# Cycle 1: 60s budget is not spent yet (episode is 30s old), so the watchdog
+		# re-parks on the expired deadline rather than erroring.
+		with (
+			patch.object(pump, "RECOVERY_BUDGET_S", 60),
+			patch.object(pump, "pump_configured", return_value=True),
+		):
+			pump.watchdog(deps=wd_deps)
+		self.assertEqual(self._state(rid), "recovering")
+		self.assertEqual(
+			frappe.utils.get_datetime(self._val(rid, "recovery_started_at")),
+			frappe.utils.get_datetime(episode_start),
+			"the re-park must not restart the budget clock",
+		)
+
+		# The next hop adopts the turn back to streaming (recover_adopt keeps the
+		# episode clock, because this is the SAME in-flight run continuing).
+		self.assertTrue(ts.recover_adopt(rid, int(self._val(rid, "version")), epoch, "streaming"))
+		frappe.db.commit()
+		self.assertEqual(self._state(rid), "streaming")
+
+		# Cycle 2: the episode has now outlived the budget, so the turn must reach the
+		# terminal error UX instead of oscillating forever.
+		self._pubs.clear()
+		with (
+			patch.object(pump, "RECOVERY_BUDGET_S", 10),
+			patch.object(pump, "pump_configured", return_value=True),
+		):
+			pump.watchdog(deps=wd_deps)
+		self.assertEqual(self._state(rid), "errored")
+		row = frappe.db.get_value(MSG, amsg, ["streaming", "error"], as_dict=True)
+		self.assertEqual(int(row["streaming"]), 0, "the spinner must be taken down")
+		self.assertTrue(row["error"], "the user must get a visible error")
+		self.assertIn("run:error", self._pub_kinds())
+
+	def test_transport_budget_exhausted_parks_and_publishes_recovering(self):
+		"""SUXF-3: when the fast-retry budget proves the gateway is unreachable, park
+		the shard's in-flight turns AT ONCE instead of leaving a locked spinner with no
+		feedback until the per-turn deadline plus a watchdog tick."""
+		conv = self._mk_conv()
+		rid = "pmp_suxf3_park"
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		epoch = self._acquire_fresh("suxf3a")
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"streaming",
+			version=4,
+			pump_epoch=epoch,
+			reserved=1,
+			assistant_message=amsg,
+			dispatching_at=frappe.utils.now(),
+			# Deliberately NOT expired: today only the deadline park would fire, so a
+			# fresh turn stays a silent spinner for the whole soft-deadline window.
+			deadline_at=frappe.utils.add_to_date(None, seconds=600),
+		)
+		ctx = pump.PumpContext(
+			relay_target_id=self._target,
+			epoch=epoch,
+			holder="suxf3-holder",
+			hop_counter=1,
+			site=frappe.local.site,
+			deps=pump.PumpDeps(),
+		)
+		self._pubs.clear()
+		pump._schedule_successor_on_exit(ctx, transport_retry=pump.TRANSPORT_RETRY_MAX)
+		self.assertEqual(self._state(rid), "recovering")
+		self.assertIn("run:recovering", self._pub_kinds())
+		self.assertEqual(
+			int(frappe.db.get_value(MSG, amsg, "recovering")),
+			1,
+			"the Message mirror lets a reload rebuild the banner instead of a locked composer",
+		)
+
 	def test_db_disconnect_park_writes_mirror_and_publishes(self):
 		conv = self._mk_conv()
 		rid = "pmp_suxf1_db"

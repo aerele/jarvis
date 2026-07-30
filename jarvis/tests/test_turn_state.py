@@ -965,6 +965,78 @@ class TestRecoveringSplit(_TurnStateTestCase):
 		frappe.db.commit()
 		self.assertEqual(self._state("ts_mrd"), "recovering")
 
+	def test_mark_recovering_stamps_recovery_start_once_per_episode(self):
+		"""SUXF-2: a RE-park must not push ``recovery_started_at`` forward.
+
+		This is the field ``pump._recovery_budget_exhausted`` measures
+		``RECOVERY_BUDGET_S`` against. A turn whose gateway went away oscillates
+		streaming -> (watchdog deadline park) recovering -> (next hop recover_adopt)
+		streaming, and the watchdog cron period is SHORTER than the budget, so
+		re-stamping the clock on every park made the budget unreachable: the turn could
+		never reach ``errored`` and the customer kept the reconnecting banner forever.
+		"""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		first_park = frappe.utils.add_to_date(None, seconds=-450)
+		self._mk_turn(
+			conv,
+			"ts_mr_ep",
+			seed,
+			"streaming",
+			version=3,
+			pump_epoch=2,
+			dispatching_at=frappe.utils.now(),
+			recovery_started_at=first_park,
+		)
+		self.assertTrue(ts.mark_recovering("ts_mr_ep", 3))
+		frappe.db.commit()
+		self.assertEqual(self._state("ts_mr_ep"), "recovering")
+		self.assertEqual(
+			frappe.utils.get_datetime(frappe.db.get_value(TURN, "ts_mr_ep", "recovery_started_at")),
+			frappe.utils.get_datetime(first_park),
+			"a re-park must keep the FIRST park's clock or the recovery budget never expires",
+		)
+
+	def test_mark_recovering_stamps_recovery_start_when_absent(self):
+		"""The first park of an episode still starts the clock (the COALESCE fallback)."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		self._mk_turn(
+			conv,
+			"ts_mr_new",
+			seed,
+			"streaming",
+			version=2,
+			pump_epoch=2,
+			dispatching_at=frappe.utils.now(),
+		)
+		self.assertIsNone(frappe.db.get_value(TURN, "ts_mr_new", "recovery_started_at"))
+		self.assertTrue(ts.mark_recovering("ts_mr_new", 2))
+		frappe.db.commit()
+		self.assertIsNotNone(frappe.db.get_value(TURN, "ts_mr_new", "recovery_started_at"))
+
+	def test_recover_to_queued_clears_recovery_start(self):
+		"""SUXF-2 pairing: a full re-queue drops the prepare refs, so that recovery
+		episode is genuinely over and the next park must start a fresh budget."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		self._mk_turn(
+			conv,
+			"ts_rq_clr",
+			seed,
+			"recovering",
+			version=6,
+			recovering=1,
+			recovery_started_at=frappe.utils.add_to_date(None, seconds=-120),
+		)
+		self.assertTrue(ts.recover_to_queued("ts_rq_clr", 6))
+		frappe.db.commit()
+		self.assertEqual(self._state("ts_rq_clr"), "queued")
+		self.assertIsNone(
+			frappe.db.get_value(TURN, "ts_rq_clr", "recovery_started_at"),
+			"a fresh prepare must not inherit the previous episode's budget clock",
+		)
+
 
 # --------------------------------------------------------------------------- #
 # Effect ledger: idempotency + force-done at 3 + all-done guard.

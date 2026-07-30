@@ -875,7 +875,20 @@ def mark_recovering(
 	form. A pre-dispatch turn (pump_epoch=0, no gateway run) therefore is NOT parked
 	by an epoch-fenced pump park; reconcile-on-start / the watchdog reclaim it.
 	Caller publishes ``run:recovering`` fenced AFTER commit (SUX-1). Returns
-	won/lost. No commit."""
+	won/lost. No commit.
+
+	SUXF-2 — ``recovery_started_at`` is stamped ONCE PER EPISODE (``COALESCE``), never
+	pushed forward by a re-park. It is the clock ``pump._recovery_budget_exhausted``
+	measures ``RECOVERY_BUDGET_S`` against, and re-stamping it made that budget
+	UNREACHABLE: a turn whose gateway went away oscillates ``streaming ->`` (watchdog
+	deadline park) ``recovering ->`` (next hop ``recover_adopt``) ``streaming``, and
+	because the watchdog cron period is SHORTER than the budget, every cycle reset the
+	clock to now. The turn could then never reach ``errored`` — the customer kept the
+	reconnecting banner forever, with no error and no timeout, which is the whole bug.
+	``recover_adopt`` deliberately does NOT clear the field (adoption CONTINUES the
+	same in-flight run, so its recovery time must keep accruing); ``recover_to_queued``
+	DOES clear it, because a full re-queue drops the prepare refs and genuinely begins
+	a fresh episode."""
 	now = _now()
 	clauses = [
 		"name=%(r)s",
@@ -895,7 +908,8 @@ def mark_recovering(
 	return (
 		_run_cas(
 			f"""UPDATE `tab{TURN}`
-			SET state='recovering', recovering=1, recovery_started_at=%(now)s,
+			SET state='recovering', recovering=1,
+			    recovery_started_at=COALESCE(recovery_started_at, %(now)s),
 			    was_recovered=1, version=version+1
 			WHERE {where}""",
 			params,
@@ -911,11 +925,17 @@ def recover_to_queued(run_id: str, version: int) -> bool:
 	(``reserved=0``), NULL ``reservation_expires_at``, clear ``recovering``, DROP
 	stale prepare refs (``assistant_message``/``preparing_at``/``ready_at``) so it
 	re-prepares from scratch (session at-most-once absorbs the leak, OAR-4),
-	``version+1``. Returns won/lost. No commit."""
+	``version+1``. Returns won/lost. No commit.
+
+	SUXF-2: also CLEAR ``recovery_started_at``. The turn is going back to a fresh
+	prepare with no gateway run attached, so the recovery episode this budget was
+	measuring is genuinely over — pairing with ``mark_recovering``'s once-per-episode
+	``COALESCE`` stamp, which is what bounds the streaming/recovering oscillation."""
 	return (
 		_run_cas(
 			f"""UPDATE `tab{TURN}`
 			SET state='queued', recovering=0, reserved=0, reservation_expires_at=NULL,
+			    recovery_started_at=NULL,
 			    assistant_message=NULL, preparing_at=NULL, ready_at=NULL, version=version+1
 			WHERE name=%(r)s AND state='recovering' AND version=%(v)s AND dispatching_at IS NULL""",
 			{"r": run_id, "v": version},
