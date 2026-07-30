@@ -66,7 +66,6 @@ _RESET_CLEAR_FIELDS = (
 	"llm_model",
 	"llm_api_key",
 	"llm_base_url",
-	"llm_auth_mode",
 	"llm_oauth_account_email",
 	"preset",
 	# Release notice belonging to the previous tenancy
@@ -89,6 +88,14 @@ _RESET_NULL_FIELDS = (
 	"learned_skills_synced_at",
 	"wiki_mirror_last_synced_at",
 )
+
+# Fields that must hold a value, so they go back to a default rather than blank.
+# llm_auth_mode is `reqd`: db_set skips validation, so a blanked one persists and
+# the NEXT full .save() of the Single - anywhere, in unrelated code - dies with
+# MandatoryError. Its default comes from the doctype so the two cannot drift;
+# llm_provider has no doctype default, so the choice lives here.
+_RESET_DEFAULT_FIELDS = ("llm_auth_mode",)
+_RESET_LITERAL_DEFAULTS = {"llm_provider": "Anthropic"}
 
 # Check / Int -> 0
 _RESET_ZERO_FIELDS = (
@@ -114,8 +121,8 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 	  - jarvis_admin_url        (so the bench remembers which admin to point at)
 	  - enabled, token_budget_monthly
 	  - sampling: llm_temperature, llm_max_output_tokens
-	  - llm_provider (reset to the doctype default "Anthropic" so the form
-	    stays valid - it's a Select field, can't be blank)
+	  - llm_provider, llm_auth_mode (reset to a default, not blanked: auth mode is
+	    `reqd`, so a blank one makes the next full .save() of the Single fail)
 
 	Does NOT call the admin-side purge - use
 	``jarvis_admin_v2.api.dev.purge_customer`` on admin for that. The two
@@ -165,8 +172,11 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 		},
 	)
 
-	# Select field - must hold a valid option; reset to default.
-	s.db_set("llm_provider", "Anthropic")
+	meta = frappe.get_meta(SETTINGS)
+	for field in _RESET_DEFAULT_FIELDS:
+		s.db_set(field, meta.get_field(field).default)
+	for field, value in _RESET_LITERAL_DEFAULTS.items():
+		s.db_set(field, value)
 	frappe.db.commit()
 	wiped: list = []
 	if wipe_data:
@@ -183,8 +193,9 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 				*_RESET_CLEAR_FIELDS,
 				*_RESET_NULL_FIELDS,
 				*_RESET_ZERO_FIELDS,
+				*_RESET_DEFAULT_FIELDS,
+				*_RESET_LITERAL_DEFAULTS,
 				"models",
-				"llm_provider",
 			],
 			"wiped_doctypes": wiped,
 		},

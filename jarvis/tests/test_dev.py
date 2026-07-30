@@ -12,6 +12,8 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.dev import (
 	_PASSWORD_FIELDS,
 	_RESET_CLEAR_FIELDS,
+	_RESET_DEFAULT_FIELDS,
+	_RESET_LITERAL_DEFAULTS,
 	_RESET_NULL_FIELDS,
 	_RESET_ZERO_FIELDS,
 	reset_onboarding,
@@ -31,7 +33,8 @@ def _snapshot():
 	"""Snapshot every reset-affected field so tests run against a real site
 	(not test_site) don't trash the operator's actual onboarded state."""
 	s = frappe.get_single(SETTINGS)
-	snap = {f: _read(s, f) for f in (*_RESET_CLEAR_FIELDS, "llm_provider")}
+	defaults = (*_RESET_DEFAULT_FIELDS, *_RESET_LITERAL_DEFAULTS)
+	snap = {f: _read(s, f) for f in (*_RESET_CLEAR_FIELDS, *defaults)}
 	# Raw, not via _read: a NULL datetime must restore as NULL, not "". llm_auth_mode
 	# is reqd on the Single, so a blank one left behind makes the next full .save()
 	# anywhere in the shard die with MandatoryError.
@@ -55,7 +58,8 @@ def _seed_onboarded_state():
 		s.db_set(f, "2026-01-01 00:00:00")
 	for f in _RESET_ZERO_FIELDS:
 		s.db_set(f, 1)
-	s.db_set("llm_provider", "OpenAI")
+	for f in (*_RESET_DEFAULT_FIELDS, *_RESET_LITERAL_DEFAULTS):
+		s.db_set(f, "oauth" if f == "llm_auth_mode" else "OpenAI")
 	frappe.db.commit()
 
 
@@ -77,8 +81,15 @@ class TestResetOnboarding(FrappeTestCase):
 			self.assertIsNone(s.get(f), f"{f} should be NULL after reset, not an empty string")
 		for f in _RESET_ZERO_FIELDS:
 			self.assertIn(int(s.get(f) or 0), (0,), f"{f} should be 0 after reset")
-		# llm_provider resets to default rather than going blank (Select).
+		# These go back to a default rather than blank.
 		self.assertEqual(s.llm_provider, "Anthropic")
+		self.assertEqual(s.llm_auth_mode, frappe.get_meta(SETTINGS).get_field("llm_auth_mode").default)
+
+	def test_settings_can_still_be_saved_after_a_reset(self):
+		"""llm_auth_mode is reqd and db_set skips validation, so blanking it used to
+		leave the Single unsaveable - surfacing as MandatoryError in unrelated code."""
+		reset_onboarding()
+		frappe.get_single(SETTINGS).save()  # must not raise MandatoryError
 
 	def test_clears_the_credential_the_bench_actually_authenticates_with(self):
 		"""admin_client prefers the OAuth password grant over the api-key pair, so a
