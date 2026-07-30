@@ -22,6 +22,7 @@ chat turn that triggered it.
 from __future__ import annotations
 
 import re
+import time
 
 import frappe
 
@@ -162,6 +163,8 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 	try:
 		with openclaw_session_pool.checkout(gateway_url) as sess:
 			skey = sess.create_session(label=label)
+			fired_at = time.time()
+			run_ended = False
 			try:
 				for ev in sess.stream_agent_turn(
 					skey,
@@ -172,6 +175,7 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 				):
 					if ev.get("kind") == "assistant" and ev.get("text"):
 						text = ev["text"]
+				run_ended = True
 			finally:
 				# Reclaim the throwaway on the SAME pooled connection, turn
 				# succeeded or not. Without this every auto-titled chat leaks a
@@ -189,10 +193,23 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 				# waits for the gateway to stop reporting an active run, and
 				# leaves anything still busy to the orphan sweep.
 				#
+				# On the RAISE path that probe is not enough on its own (issue
+				# #535): the raise can land inside the ~670ms median openclaw
+				# takes to start an accepted run, and sessions.list cannot tell
+				# "not started" from "finished". So hand over the fire time there
+				# and let the helper refuse the delete. On the normal path we
+				# watched the run reach its terminal frame, so there is no
+				# unstarted run to protect and the reclaim stays immediate.
+				#
 				# Failure is swallowed in there: `text` is already captured, and
 				# losing the title over failed cleanup would be the worse bug -
 				# the sweep still collects jarvis-title-* as a backstop.
-				reclaim_throwaway_session(sess, skey, logger_name="jarvis.chat.title")
+				reclaim_throwaway_session(
+					sess,
+					skey,
+					logger_name="jarvis.chat.title",
+					fired_at=None if run_ended else fired_at,
+				)
 	except Exception:
 		frappe.log_error(
 			title="auto-title: gateway generation failed",

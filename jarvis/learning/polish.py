@@ -34,6 +34,8 @@ Contract (plan 5.5 Phase-2 paragraph):
 
 from __future__ import annotations
 
+import time
+
 import frappe
 from frappe import _
 from frappe.utils import today
@@ -262,6 +264,8 @@ def _run_gateway_turn(prompt: str) -> str:
 	try:
 		with openclaw_session_pool.checkout(gateway_url) as sess:
 			skey = sess.create_session(label=label)
+			fired_at = time.time()
+			run_ended = False
 			try:
 				for ev in sess.stream_agent_turn(
 					skey,
@@ -272,6 +276,7 @@ def _run_gateway_turn(prompt: str) -> str:
 				):
 					if ev.get("kind") == "assistant" and ev.get("text"):
 						text = ev["text"]
+				run_ended = True
 			finally:
 				# Reclaim the throwaway on the SAME pooled connection, turn
 				# succeeded or not: otherwise every polish turn leaks a session
@@ -286,7 +291,20 @@ def _run_gateway_turn(prompt: str) -> str:
 				# report no active run and otherwise defers to the orphan sweep,
 				# which collects jarvis-polish-* as a backstop. Failure is
 				# swallowed in there - `text` is already captured.
-				reclaim_throwaway_session(sess, skey, logger_name="jarvis.learning.polish")
+				#
+				# The raise path needs more than the probe (issue #535): it can
+				# land inside the ~670ms median openclaw takes to START an
+				# accepted run, and sessions.list reports "not started" and
+				# "finished" identically. Passing the fire time there makes the
+				# helper decline the delete. The normal path watched the run reach
+				# its terminal frame, so it keeps the immediate reclaim - which
+				# matters here, where this runs in a synchronous request.
+				reclaim_throwaway_session(
+					sess,
+					skey,
+					logger_name="jarvis.learning.polish",
+					fired_at=None if run_ended else fired_at,
+				)
 	except Exception:
 		frappe.log_error(
 			title="pattern polish: gateway turn failed",

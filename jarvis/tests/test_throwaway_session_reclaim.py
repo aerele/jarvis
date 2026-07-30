@@ -19,6 +19,14 @@ a backoff only when the gateway says it is live - because polish's reclaim runs
 inside a synchronous whitelisted request and title's holds one of only three
 pooled connections.
 
+Issue #535 then found the half that probe could not reach: openclaw ACCEPTS a
+run a median 670ms before it STARTS one, and ``hasActiveRun`` is false for the
+whole of that window, so a reclaim firing inside it deletes a session whose run
+is about to begin. ``TestUnstartedRunIsNotDeleted`` below pins the second half
+of the rule - a caller that never saw the run END hands over the time it fired,
+and an idle answer is only believed once that has aged past
+``RUN_START_GRACE_S`` or a probe has actually caught the run.
+
 SCOPE NOTE: the transport is stubbed here, as everywhere else in this suite, so
 these tests assert INTENT - which RPCs the bench issues and in what order. They
 cannot observe what openclaw does with a delete that lands mid-run; that was
@@ -29,6 +37,7 @@ from a test.
 from __future__ import annotations
 
 import contextlib
+import time
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -162,6 +171,80 @@ class TestReclaimThrowawaySession(FrappeTestCase):
 		sess.is_run_active.assert_not_called()
 
 
+class TestUnstartedRunIsNotDeleted(FrappeTestCase):
+	"""Issue #535: the window the probe alone cannot close.
+
+	openclaw ACCEPTS a run before it STARTS one, and sessions.list reports
+	"accepted, not started" and "finished" identically - hasActiveRun is false in
+	both. Measured on jarvis-pool-bf4097 over 269 sessions, as the gap between
+	the session file's creation stamp and the run's own session.started
+	trajectory event: p50 0.67s, p90 2.90s, p95 4.84s. A reclaim that fires
+	inside that window therefore reads "idle" and deletes the session out from
+	under a run that is about to begin.
+
+	The fix is not more probing - the signal has not been written yet - but a
+	caller admitting it never saw the run END, by handing over the time it fired.
+	"""
+
+	def test_an_accepted_but_unstarted_run_is_not_deleted(self):
+		sess = _stub_pool_session(active_probes=False)
+
+		with _no_sleep():
+			reclaimed = session_lifecycle.reclaim_throwaway_session(
+				sess, SKEY, logger_name="jarvis.tests", fired_at=time.time()
+			)
+
+		self.assertFalse(reclaimed)
+		sess.delete_session.assert_not_called()
+
+	def test_an_old_run_reported_idle_is_still_reclaimed_at_once(self):
+		"""The guard must not become a leak. Past the grace, an idle answer is
+		what it has always been - a finished run - and costs one probe."""
+		sess = _stub_pool_session(active_probes=False)
+
+		with patch.object(session_lifecycle.time, "sleep") as sleep:
+			reclaimed = session_lifecycle.reclaim_throwaway_session(
+				sess,
+				SKEY,
+				logger_name="jarvis.tests",
+				fired_at=time.time() - (session_lifecycle.RUN_START_GRACE_S + 60),
+			)
+
+		self.assertTrue(reclaimed)
+		sess.delete_session.assert_called_once_with(SKEY)
+		self.assertEqual(sess.is_run_active.call_count, 1)
+		sleep.assert_not_called()
+
+	def test_a_run_caught_active_is_reclaimed_inside_the_grace(self):
+		"""Positive evidence beats the clock. Once a probe has actually SEEN the
+		run, a later idle answer is a real finished-signal, so the grace stops
+		applying and the session goes immediately."""
+		sess = _stub_pool_session(active_probes=[True, False])
+
+		with _no_sleep():
+			reclaimed = session_lifecycle.reclaim_throwaway_session(
+				sess, SKEY, logger_name="jarvis.tests", fired_at=time.time()
+			)
+
+		self.assertTrue(reclaimed)
+		sess.delete_session.assert_called_once_with(SKEY)
+		self.assertEqual(sess.is_run_active.call_count, 2)
+
+	def test_the_guard_declines_rather_than_waiting_the_grace_out(self):
+		"""It refuses to guess, it does not block. polish's reclaim runs inside a
+		synchronous whitelisted request; spending RUN_START_GRACE_S there to
+		reach a delete the orphan sweep does for free would be the worse trade."""
+		sess = _stub_pool_session(active_probes=False)
+
+		started = time.time()
+		with patch.object(session_lifecycle, "RECLAIM_PROBE_DELAY_S", 0):
+			session_lifecycle.reclaim_throwaway_session(
+				sess, SKEY, logger_name="jarvis.tests", fired_at=time.time()
+			)
+
+		self.assertLess(time.time() - started, session_lifecycle.RUN_START_GRACE_S)
+
+
 class TestAutoTitleReclaim(FrappeTestCase):
 	"""jarvis/chat/title.py::_generate_via_gateway"""
 
@@ -212,6 +295,27 @@ class TestAutoTitleReclaim(FrappeTestCase):
 
 		sess.delete_session.assert_not_called()
 		self.assertEqual(title_text, "", "a failed title turn still falls back to derive_title")
+
+	def test_a_title_run_that_has_not_started_yet_is_not_deleted(self):
+		"""Issue #535. Same raise path as above, but the gateway has not started
+		the run yet, so hasActiveRun is FALSE and the probe cannot tell it from a
+		finished run. Only the fire time can, and the finally must hand it over.
+
+		This is the shape the probe-only fix (#530) still gets wrong: a WS drop
+		or a connect error raises within a few hundred ms of the fire, well
+		inside the measured 670ms median start delay."""
+		from jarvis.exceptions import OpenclawUnreachableError
+
+		sess = _stub_pool_session(
+			active_probes=False,
+			raises=OpenclawUnreachableError("connection closed before the first frame"),
+		)
+
+		with patch("jarvis.chat.title.frappe.log_error"):
+			title_text = self._generate(sess)
+
+		sess.delete_session.assert_not_called()
+		self.assertEqual(title_text, "")
 
 
 class TestPatternPolishReclaim(FrappeTestCase):
@@ -265,6 +369,23 @@ class TestPatternPolishReclaim(FrappeTestCase):
 		sess.delete_session.assert_not_called()
 		self.assertEqual(text, "", "a failed polish turn still falls back to the template text")
 
+	def test_a_polish_run_that_has_not_started_yet_is_not_deleted(self):
+		"""Issue #535, polish's copy of title's raise-path gap: the gateway
+		reports the session idle because the run has not started, not because it
+		finished."""
+		from jarvis.exceptions import OpenclawUnreachableError
+
+		sess = _stub_pool_session(
+			active_probes=False,
+			raises=OpenclawUnreachableError("connection closed before the first frame"),
+		)
+
+		with patch("jarvis.learning.polish.frappe.log_error"):
+			text = self._run(sess)
+
+		sess.delete_session.assert_not_called()
+		self.assertEqual(text, "")
+
 
 class TestPrewarmReclaim(FrappeTestCase):
 	"""jarvis/chat/prewarm.py::_reclaim_previous"""
@@ -306,6 +427,46 @@ class TestPrewarmReclaim(FrappeTestCase):
 
 		with _no_sleep():
 			prewarm._reclaim_previous(sess, "sk_same", "sk_same")
+
+		sess.delete_session.assert_not_called()
+		sess.is_run_active.assert_not_called()
+
+	def test_a_predecessor_whose_run_has_not_started_is_left_alone(self):
+		"""Issue #535: the same instant-apart race, but with the gateway
+		answering hasActiveRun=FALSE because it has not started the predecessor's
+		run yet. The probe waves this one through; the remembered fire time is
+		what stops it."""
+		from jarvis.chat import prewarm
+
+		sess = _stub_pool_session(active_probes=False)
+
+		with _no_sleep():
+			prewarm._reclaim_previous(sess, {"key": "sk_previous", "fired_at": time.time()}, "sk_current")
+
+		sess.delete_session.assert_not_called()
+
+	def test_a_predecessor_from_a_cooldown_ago_is_reclaimed(self):
+		"""The normal case, which must stay immediate: the cooldown has elapsed,
+		so the pointer is minutes old and an idle answer means finished."""
+		from jarvis.chat import prewarm
+
+		sess = _stub_pool_session(active_probes=False)
+
+		with _no_sleep():
+			prewarm._reclaim_previous(
+				sess, {"key": "sk_previous", "fired_at": time.time() - 600}, "sk_current"
+			)
+
+		sess.delete_session.assert_called_once_with("sk_previous")
+
+	def test_a_malformed_pointer_is_a_noop(self):
+		from jarvis.chat import prewarm
+
+		sess = _stub_pool_session(active_probes=False)
+
+		with _no_sleep():
+			prewarm._reclaim_previous(sess, {"fired_at": time.time()}, "sk_current")
+			prewarm._reclaim_previous(sess, None, "sk_current")
 
 		sess.delete_session.assert_not_called()
 		sess.is_run_active.assert_not_called()
