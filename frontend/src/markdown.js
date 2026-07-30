@@ -10,20 +10,38 @@ function esc(s) {
 }
 
 function inline(s) {
-	let t = esc(s);
-	// esc() above escaped ALL html (XSS-safe for LLM output). Re-permit ONLY a
-	// bare, attribute-less <br> (also <br/> and <br />): it's the standard way to
-	// line-break inside a GFM table cell, which agents rely on, and it's inert —
-	// no attributes means no script/handler/URL surface. The attribute form
-	// (&lt;br onload=...&gt;) deliberately stays escaped, so the safe posture holds.
+	// Stash inline code spans behind a NUL sentinel FIRST, so none of the transforms
+	// below touch content meant to render verbatim: the <br> re-permit, and also
+	// **bold**/*em*/~~del~~/links (which previously leaked into code-span text, e.g.
+	// `a*b*c` rendered a stray <em>). Restored last, HTML-escaped. NUL never occurs in
+	// agent/user text, so it can't collide with real content.
+	const codes = [];
+	let t = String(s)
+		// Strip NUL first so attacker-supplied input can't collide with the sentinel below.
+		.replace(/\u0000/g, "")
+		.replace(/`([^`]+)`/g, (_m, c) => {
+			codes.push(c);
+			return `\u0000C${codes.length - 1}\u0000`;
+		});
+	t = esc(t);
+	// esc() escaped ALL html (XSS-safe for LLM output). Re-permit ONLY a bare,
+	// attribute-less <br> (also <br/> and <br />): it's the standard way to line-break
+	// inside a GFM table cell, which agents rely on, and it's inert — no attributes
+	// means no script/handler/URL surface. The attribute form (&lt;br onload=...&gt;)
+	// deliberately stays escaped, so the safe posture holds.
 	t = t.replace(/&lt;br\s*\/?&gt;/gi, "<br>");
-	t = t.replace(/`([^`]+)`/g, '<code class="jv-md-code">$1</code>');
 	t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
 	t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 	t = t.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
 	t = t.replace(
 		/\[([^\]]+)\]\((https?:[^)]+)\)/g,
 		'<a href="$2" target="_blank" rel="noopener" class="jv-md-link">$1</a>'
+	);
+	// Restore code spans, escaping their raw content so it renders verbatim (a <br>,
+	// **bold**, etc. inside backticks shows as literal text, not markup).
+	t = t.replace(
+		/\u0000C(\d+)\u0000/g,
+		(_m, i) => `<code class="jv-md-code">${esc(codes[Number(i)])}</code>`
 	);
 	return t;
 }
