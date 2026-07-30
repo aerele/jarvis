@@ -736,24 +736,12 @@ def _wipe_workspace_content() -> None:
 
 
 def _revoke_llm_connections(settings) -> None:
-	"""The LLM subset of dev.reset_onboarding: clear direct creds, OAuth state,
-	the models[] pool (subscription blobs live encrypted ON those rows) and the
-	synced markers — is_ready_for_chat then routes to the LLM setup step. db_set
-	only, so on_update never fires mid-reset. Admin creds untouched."""
-	from jarvis._password_utils import clear_settings_password
+	"""Clear the LLM subset — direct creds, OAuth state, the models[] pool and the
+	synced markers — so is_ready_for_chat routes to the LLM setup step. Admin creds
+	untouched. Shares its field list with the reset-onboarding CLI."""
+	from jarvis import settings_reset
 
-	for f in ("llm_model", "llm_base_url", "llm_auth_mode", "llm_oauth_account_email", "preset"):
-		settings.db_set(f, "")
-	clear_settings_password(settings, "llm_api_key")
-	for f in ("llm_oauth_connected_at", "llm_pool_synced_at", "llm_direct_synced_at"):
-		settings.db_set(f, None)
-	settings.db_set("proxy_active", 0)
-	settings.db_set("proxy_recommended", 0)
-	settings.db_set("llm_provider", "Anthropic")  # Select field — can't be blank
-	frappe.db.delete(
-		"Jarvis LLM Pool Model",
-		{"parent": "Jarvis Settings", "parenttype": "Jarvis Settings", "parentfield": "models"},
-	)
+	settings_reset.apply(settings, settings_reset.LLM)
 
 
 def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:

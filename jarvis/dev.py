@@ -15,46 +15,21 @@ System Manager alone via ``frappe.only_for``.
 """
 
 import frappe
-from frappe.utils.password import remove_encrypted_password
+
+from jarvis import settings_reset
+from jarvis.settings_reset import FULL as _FULL
 
 SETTINGS = "Jarvis Settings"
 
-# Password fieldtype stores the real value in __Auth, not the doctype row.
-# db_set("") only blanks the row's masked placeholder; __Auth retains the
-# prior secret, so get_password() keeps returning it. We explicitly drop
-# the __Auth row for these fields.
-_PASSWORD_FIELDS = {
-	"jarvis_admin_api_key",
-	"jarvis_admin_api_secret",
-	"agent_token",
-	"chat_device_private_key",
-	"chat_device_token",
-	"llm_api_key",
-}
-
-
-# Fields cleared by reset_onboarding(). Grouped here so tests can iterate
-# without re-listing field names.
-_RESET_CLEAR_FIELDS = (
-	# Admin connection
-	"jarvis_admin_api_key",
-	"jarvis_admin_api_secret",
-	# Agent / container
-	"agent_url",
-	"agent_token",
-	# Chat device pairing
-	"chat_device_id",
-	"chat_device_public_key",
-	"chat_device_private_key",
-	"chat_device_token",
-	# Last sync trace
-	"last_sync_at",
-	"last_sync_status",
-	# LLM credentials (caller asked for a clean slate)
-	"llm_model",
-	"llm_api_key",
-	"llm_base_url",
-)
+# The field groups live in jarvis.settings_reset so the CLI and the self-serve
+# workspace reset cannot drift apart. Re-exported here under the old names
+# because tests iterate them rather than re-listing field names.
+_RESET_CLEAR_FIELDS = _FULL.blank + _FULL.passwords
+_PASSWORD_FIELDS = set(_FULL.passwords)
+_RESET_NULL_FIELDS = _FULL.null
+_RESET_ZERO_FIELDS = _FULL.zero
+_RESET_DEFAULT_FIELDS = _FULL.defaults
+_RESET_LITERAL_DEFAULTS = dict(_FULL.literals)
 
 
 def reset_onboarding(wipe_data: bool = False) -> dict:
@@ -71,8 +46,8 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 	  - jarvis_admin_url        (so the bench remembers which admin to point at)
 	  - enabled, token_budget_monthly
 	  - sampling: llm_temperature, llm_max_output_tokens
-	  - llm_provider (reset to the doctype default "Anthropic" so the form
-	    stays valid - it's a Select field, can't be blank)
+	  - llm_provider, llm_auth_mode (reset to a default, not blanked: auth mode is
+	    `reqd`, so a blank one makes the next full .save() of the Single fail)
 
 	Does NOT call the admin-side purge - use
 	``jarvis_admin_v2.api.dev.purge_customer`` on admin for that. The two
@@ -100,46 +75,9 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 				"reset_onboarding: container subscription_disconnect skipped/failed (non-fatal)"
 			)
 
-	for field in _RESET_CLEAR_FIELDS:
-		s.db_set(field, "")
-		if field in _PASSWORD_FIELDS:
-			remove_encrypted_password(SETTINGS, SETTINGS, field)
-
-	# Clear the OAuth / pool CONNECTION state the field loop misses. Previously
-	# reset left llm_auth_mode="oauth" + llm_oauth_connected_at set + the models[]
-	# pool + proxy flags intact, so the bench still reported the old subscription
-	# as connected and a subsequent onboard reused it. Wipe it all for a true
-	# clean slate. db_set (not save) so on_update never fires mid-reset.
-	s.db_set("llm_auth_mode", "")
-	s.db_set("llm_oauth_account_email", "")
-	s.db_set("llm_oauth_connected_at", None)
-	s.db_set("preset", "")
-	s.db_set("proxy_active", 0)
-	s.db_set("proxy_recommended", 0)
-	# Clear the models[] pool via a direct child-row delete rather than
-	# s.set("models", []) + save(), so Jarvis Settings.on_update
-	# (validate_models / admin pool-sync) does NOT fire during the reset.
-	frappe.db.delete(
-		"Jarvis LLM Pool Model",
-		{
-			"parent": SETTINGS,
-			"parenttype": SETTINGS,
-			"parentfield": "models",
-		},
-	)
-
-	# Select field - must hold a valid option; reset to default.
-	s.db_set("llm_provider", "Anthropic")
+	settings_reset.apply(s, _FULL)
 	frappe.db.commit()
-	_extra_cleared = [
-		"llm_auth_mode",
-		"llm_oauth_account_email",
-		"llm_oauth_connected_at",
-		"preset",
-		"proxy_active",
-		"proxy_recommended",
-		"models",
-	]
+
 	wiped: list = []
 	if wipe_data:
 		from jarvis.onboarding import _WIPE_DOCTYPES, _wipe_workspace_content
@@ -151,7 +89,7 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 	return {
 		"ok": True,
 		"data": {
-			"cleared_fields": list(_RESET_CLEAR_FIELDS) + _extra_cleared + ["llm_provider"],
+			"cleared_fields": settings_reset.cleared_fields(_FULL),
 			"wiped_doctypes": wiped,
 		},
 	}
