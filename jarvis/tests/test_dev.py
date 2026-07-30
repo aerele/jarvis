@@ -9,37 +9,15 @@ hardening)."""
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.dev import _RESET_CLEAR_FIELDS, reset_onboarding
+from jarvis.dev import (
+	_PASSWORD_FIELDS,
+	_RESET_CLEAR_FIELDS,
+	_RESET_NULL_FIELDS,
+	_RESET_ZERO_FIELDS,
+	reset_onboarding,
+)
 
 SETTINGS = "Jarvis Settings"
-
-
-_PASSWORD_FIELDS = {
-	"jarvis_admin_api_key",
-	"jarvis_admin_api_secret",
-	"agent_token",
-	"chat_device_private_key",
-	"chat_device_token",
-	"llm_api_key",
-}
-
-
-# reset_onboarding() clears these OUTSIDE the _RESET_CLEAR_FIELDS loop (see
-# jarvis/dev.py), so snapshotting that tuple alone left them wiped for every
-# test that ran after this module in the same shard. llm_auth_mode is `reqd`
-# on Jarvis Settings, so a blank one makes the NEXT full .save() of the Single
-# anywhere in the shard die with MandatoryError - which is exactly how this
-# leak surfaced, in an unrelated module, only once shard balancing happened to
-# put the two together. Snapshotted raw rather than through _read so a NULL
-# datetime restores as NULL instead of "".
-_RESET_EXTRA_FIELDS = (
-	"llm_auth_mode",
-	"llm_oauth_account_email",
-	"llm_oauth_connected_at",
-	"preset",
-	"proxy_active",
-	"proxy_recommended",
-)
 
 
 def _read(s, field):
@@ -54,7 +32,10 @@ def _snapshot():
 	(not test_site) don't trash the operator's actual onboarded state."""
 	s = frappe.get_single(SETTINGS)
 	snap = {f: _read(s, f) for f in (*_RESET_CLEAR_FIELDS, "llm_provider")}
-	snap.update({f: s.get(f) for f in _RESET_EXTRA_FIELDS})
+	# Raw, not via _read: a NULL datetime must restore as NULL, not "". llm_auth_mode
+	# is reqd on the Single, so a blank one left behind makes the next full .save()
+	# anywhere in the shard die with MandatoryError.
+	snap.update({f: s.get(f) for f in (*_RESET_NULL_FIELDS, *_RESET_ZERO_FIELDS)})
 	return snap
 
 
@@ -70,6 +51,10 @@ def _seed_onboarded_state():
 	s = frappe.get_single(SETTINGS)
 	for f in _RESET_CLEAR_FIELDS:
 		s.db_set(f, f"seed-{f}")
+	for f in _RESET_NULL_FIELDS:
+		s.db_set(f, "2026-01-01 00:00:00")
+	for f in _RESET_ZERO_FIELDS:
+		s.db_set(f, 1)
 	s.db_set("llm_provider", "OpenAI")
 	frappe.db.commit()
 
@@ -88,8 +73,21 @@ class TestResetOnboarding(FrappeTestCase):
 		s = frappe.get_single(SETTINGS)
 		for f in _RESET_CLEAR_FIELDS:
 			self.assertEqual(_read(s, f), "", f"{f} should be blank after reset")
+		for f in _RESET_NULL_FIELDS:
+			self.assertIsNone(s.get(f), f"{f} should be NULL after reset, not an empty string")
+		for f in _RESET_ZERO_FIELDS:
+			self.assertIn(int(s.get(f) or 0), (0,), f"{f} should be 0 after reset")
 		# llm_provider resets to default rather than going blank (Select).
 		self.assertEqual(s.llm_provider, "Anthropic")
+
+	def test_clears_the_credential_the_bench_actually_authenticates_with(self):
+		"""admin_client prefers the OAuth password grant over the api-key pair, so a
+		reset that leaves it still reaches the control plane as the old customer."""
+		reset_onboarding()
+		s = frappe.get_single(SETTINGS)
+		self.assertEqual(s.jarvis_admin_customer_email or "", "")
+		self.assertEqual(s.get_password("jarvis_admin_customer_password", raise_exception=False) or "", "")
+		self.assertIn("jarvis_admin_customer_password", _PASSWORD_FIELDS, "__Auth row must be dropped too")
 
 	def test_preserves_unrelated_settings(self):
 		s = frappe.get_single(SETTINGS)

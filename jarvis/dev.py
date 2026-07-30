@@ -26,6 +26,7 @@ SETTINGS = "Jarvis Settings"
 _PASSWORD_FIELDS = {
 	"jarvis_admin_api_key",
 	"jarvis_admin_api_secret",
+	"jarvis_admin_customer_password",
 	"agent_token",
 	"chat_device_private_key",
 	"chat_device_token",
@@ -33,12 +34,18 @@ _PASSWORD_FIELDS = {
 }
 
 
-# Fields cleared by reset_onboarding(). Grouped here so tests can iterate
-# without re-listing field names.
+# Fields cleared by reset_onboarding(), split by the empty value each type takes.
+# Grouped here so tests can iterate without re-listing field names.
+
+# Data / Text / Password / Attach Image -> ""
 _RESET_CLEAR_FIELDS = (
-	# Admin connection
+	# Admin connection. The customer email + password are the OAuth password-grant
+	# pair admin_client prefers over the api-key fallback, so leaving them behind
+	# lets a "reset" bench still authenticate as the previous customer.
 	"jarvis_admin_api_key",
 	"jarvis_admin_api_secret",
+	"jarvis_admin_customer_email",
+	"jarvis_admin_customer_password",
 	# Agent / container
 	"agent_url",
 	"agent_token",
@@ -47,13 +54,49 @@ _RESET_CLEAR_FIELDS = (
 	"chat_device_public_key",
 	"chat_device_private_key",
 	"chat_device_token",
-	# Last sync trace
-	"last_sync_at",
+	# Sync trace + the per-push statuses that otherwise read as "already sent"
 	"last_sync_status",
-	# LLM credentials (caller asked for a clean slate)
+	"last_sync_warnings",
+	"installed_apps_synced",
+	"custom_skills_sync_status",
+	"agent_skills_sync_status",
+	"learned_skills_sync_status",
+	"wiki_mirror_last_sync_status",
+	# LLM credentials + connection state
 	"llm_model",
 	"llm_api_key",
 	"llm_base_url",
+	"llm_auth_mode",
+	"llm_oauth_account_email",
+	"preset",
+	# Release notice belonging to the previous tenancy
+	"release_notice_message",
+	# Whitelabel branding - the SPA falls back to "Jarvis" when blank
+	"agent_name",
+	"brand_logo",
+	"brand_favicon",
+)
+
+# Datetime -> None. "" is not a date: MariaDB stores 0000-00-00 or rejects it.
+_RESET_NULL_FIELDS = (
+	"last_sync_at",
+	"agent_token_issued_at",
+	"llm_oauth_connected_at",
+	"llm_pool_synced_at",
+	"llm_direct_synced_at",
+	"custom_skills_synced_at",
+	"agent_skills_synced_at",
+	"learned_skills_synced_at",
+	"wiki_mirror_last_synced_at",
+)
+
+# Check / Int -> 0
+_RESET_ZERO_FIELDS = (
+	"proxy_active",
+	"proxy_recommended",
+	"agent_catalog_dirty",
+	"agent_catalog_version",
+	"release_notice_active",
 )
 
 
@@ -100,22 +143,16 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 				"reset_onboarding: container subscription_disconnect skipped/failed (non-fatal)"
 			)
 
+	# db_set (not save) throughout so on_update never fires mid-reset.
 	for field in _RESET_CLEAR_FIELDS:
 		s.db_set(field, "")
 		if field in _PASSWORD_FIELDS:
 			remove_encrypted_password(SETTINGS, SETTINGS, field)
+	for field in _RESET_NULL_FIELDS:
+		s.db_set(field, None)
+	for field in _RESET_ZERO_FIELDS:
+		s.db_set(field, 0)
 
-	# Clear the OAuth / pool CONNECTION state the field loop misses. Previously
-	# reset left llm_auth_mode="oauth" + llm_oauth_connected_at set + the models[]
-	# pool + proxy flags intact, so the bench still reported the old subscription
-	# as connected and a subsequent onboard reused it. Wipe it all for a true
-	# clean slate. db_set (not save) so on_update never fires mid-reset.
-	s.db_set("llm_auth_mode", "")
-	s.db_set("llm_oauth_account_email", "")
-	s.db_set("llm_oauth_connected_at", None)
-	s.db_set("preset", "")
-	s.db_set("proxy_active", 0)
-	s.db_set("proxy_recommended", 0)
 	# Clear the models[] pool via a direct child-row delete rather than
 	# s.set("models", []) + save(), so Jarvis Settings.on_update
 	# (validate_models / admin pool-sync) does NOT fire during the reset.
@@ -131,15 +168,6 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 	# Select field - must hold a valid option; reset to default.
 	s.db_set("llm_provider", "Anthropic")
 	frappe.db.commit()
-	_extra_cleared = [
-		"llm_auth_mode",
-		"llm_oauth_account_email",
-		"llm_oauth_connected_at",
-		"preset",
-		"proxy_active",
-		"proxy_recommended",
-		"models",
-	]
 	wiped: list = []
 	if wipe_data:
 		from jarvis.onboarding import _WIPE_DOCTYPES, _wipe_workspace_content
@@ -151,7 +179,13 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 	return {
 		"ok": True,
 		"data": {
-			"cleared_fields": list(_RESET_CLEAR_FIELDS) + _extra_cleared + ["llm_provider"],
+			"cleared_fields": [
+				*_RESET_CLEAR_FIELDS,
+				*_RESET_NULL_FIELDS,
+				*_RESET_ZERO_FIELDS,
+				"models",
+				"llm_provider",
+			],
 			"wiped_doctypes": wiped,
 		},
 	}
