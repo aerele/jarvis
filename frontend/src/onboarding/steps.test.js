@@ -12,6 +12,7 @@ import {
 	notReadyNote,
 	GENERIC_NOT_READY_NOTE,
 	syncStatusNote,
+	planSubtitleFor,
 } from "./steps.js";
 
 test("managed step order", () => {
@@ -34,6 +35,42 @@ test("managed step order", () => {
 
 test("stepIndex", () => {
 	assert.equal(stepIndex(STEPS_MANAGED, "pay"), 3);
+});
+
+// jarvis#536: the plan step's subtitle used to hardcode "Start free" even
+// when nothing on offer was free or trial-gated. planSubtitleFor derives it
+// from the plans actually fetched instead.
+test("planSubtitleFor: no free or trial plan drops the free-tier promise", () => {
+	assert.equal(
+		planSubtitleFor([
+			{ name: "ob-plan", price_inr: 1000, trial_days: 0 },
+			{ name: "Pro (Annual)", price_inr: 3000, trial_days: 0 },
+		]),
+		"Pick a plan to get started. No auto-renewal."
+	);
+});
+
+test("planSubtitleFor: a zero-price plan keeps the free-tier wording", () => {
+	assert.equal(
+		planSubtitleFor([
+			{ name: "Free", price_inr: 0, trial_days: 0 },
+			{ name: "Pro (Annual)", price_inr: 3000, trial_days: 0 },
+		]),
+		"Start free. Upgrade or extend anytime, with no auto-renewal."
+	);
+});
+
+test("planSubtitleFor: a trial-gated plan also keeps the free-tier wording", () => {
+	assert.equal(
+		planSubtitleFor([{ name: "Pro", price_inr: 3000, trial_days: 7 }]),
+		"Start free. Upgrade or extend anytime, with no auto-renewal."
+	);
+});
+
+test("planSubtitleFor: an empty or missing plan list is not a false promise", () => {
+	assert.equal(planSubtitleFor([]), "Pick a plan to get started. No auto-renewal.");
+	assert.equal(planSubtitleFor(null), "Pick a plan to get started. No auto-renewal.");
+	assert.equal(planSubtitleFor(undefined), "Pick a plan to get started. No auto-renewal.");
 });
 
 // jarvis.account.is_ready_for_chat returns {ready: bool, reason: str|None}
