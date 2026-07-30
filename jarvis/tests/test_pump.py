@@ -547,6 +547,21 @@ class TestTakeoverFencing(_PumpTestCase):
 
 
 class TestWatchdog(_PumpTestCase):
+	def test_b1_watchdog_stamps_last_completed(self):
+		"""B1 (GAP 1): watchdog() stamps jarvis_pump_watchdog_last_completed so the bench
+		heartbeat can report how long ago the recovery machinery last ran."""
+		key = "jarvis_pump_watchdog_last_completed"
+		frappe.db.set_default(key, "2020-01-01 00:00:00")
+		frappe.db.commit()
+		pump.watchdog(self._deps())
+		stamped = frappe.db.get_default(key)
+		self.assertIsNotNone(stamped)
+		self.assertGreater(
+			frappe.utils.get_datetime(stamped),
+			frappe.utils.get_datetime("2020-01-01 00:00:00"),
+			"watchdog must stamp a fresh completion time",
+		)
+
 	def test_per_state_actions(self):
 		conv = self._mk_conv()
 		# queued age-out (older than QUEUED_MAX_AGE_S).

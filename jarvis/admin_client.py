@@ -1140,6 +1140,13 @@ def push_error_rollup(errors: list) -> dict:
 	return _post(path=_m("api.tenant.ingest_error_rollup"), body={"errors": errors})
 
 
+def push_bench_heartbeat(heartbeat: dict) -> dict:
+	"""Push the bench liveness vector (watchdog + oldest-turn ages) to admin's GAP 1
+	dead-man's-switch. Called best-effort from the heartbeat */5 cron.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
+
+
 def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
 	"""POST customer's chat device pubkey to admin; admin asks the fleet-agent
 	to write a PairedDevice record into the customer's openclaw container and
