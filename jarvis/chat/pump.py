@@ -167,6 +167,12 @@ LEASE_MIRROR_TTL_S = 30
 # work, within the budget) without a hot reconnect loop. See PUMP-RUNBOOK.md §CDX-1.
 TRANSPORT_RETRY_MAX = 4
 
+# SUXF-3: the ``run:recovering`` reason slug for a park caused by the transport
+# fast-retry budget running out (the gateway is provably unreachable, e.g. its
+# container was bounced under a live turn). A slug, not user-facing prose — ChatView
+# renders its own "interrupted" banner copy off the event.
+_TRANSPORT_LOST_REASON = "transport-lost"
+
 # Injection seams for timing (tests monkeypatch to remove real waits).
 _monotonic: Callable[[], float] = time.monotonic
 _sleep: Callable[[float], None] = time.sleep
@@ -2711,14 +2717,17 @@ def _park_recovering(ctx: PumpContext, run_id: str, *, reason: str) -> None:
 	_telemetry("park_recovering", run_id=run_id, reason=reason)
 
 
-def _park_affected_recovering(ctx: PumpContext) -> None:
-	"""DB-disconnect park (D6 §6): mark the shard's in-flight turns ``recovering``
-	so the next hop re-attaches from durable state, then let the hop exit. Never
-	spins. Best-effort — if the DB is truly down the marks fail and we simply
-	exit; the watchdog/ensure_pump revives later. SUXF-1: each park writes the
-	Message-row mirror + publishes ``run:recovering`` (via ``_mark_recovering_mirror``)
-	so a reload during the disconnect reconstructs the banner rather than a plain
-	locked composer."""
+def _park_affected_recovering(ctx: PumpContext, *, reason: str = "db-disconnect") -> None:
+	"""Shard-wide park (D6 §6): mark the shard's in-flight turns ``recovering`` so the
+	next hop re-attaches from durable state, then let the hop exit. Never spins.
+	Best-effort — if the DB is truly down the marks fail and we simply exit; the
+	watchdog/ensure_pump revives later. SUXF-1: each park writes the Message-row mirror
+	+ publishes ``run:recovering`` (via ``_mark_recovering_mirror``) so a reload during
+	the outage reconstructs the banner rather than a plain locked composer.
+
+	``reason`` rides the published event for operator/telemetry attribution: the
+	DB-disconnect backoff (default), the kill-switch halt, and the SUXF-3
+	transport-budget park all share this one path."""
 	target = ctx.relay_target_id
 	try:
 		rows = frappe.db.sql(
@@ -2737,7 +2746,7 @@ def _park_affected_recovering(ctx: PumpContext) -> None:
 				int(r["version"]),
 				r["conversation"],
 				r.get("assistant_message"),
-				reason="db-disconnect",
+				reason=reason,
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
 			)
@@ -2906,7 +2915,19 @@ def _schedule_successor_on_exit(ctx: PumpContext, *, transport_retry: int) -> No
 	budget (``TRANSPORT_RETRY_MAX``) we leave the now-acquirable lease for the
 	watchdog-cron / sender ``ensure_pump`` to revive — the documented backoff tail for
 	a sustained gateway outage (see the ``TRANSPORT_RETRY_MAX`` note). Best-effort:
-	never raises out of an exit path."""
+	never raises out of an exit path.
+
+	SUXF-3: crossing the budget also PARKS the shard's in-flight turns ``recovering``.
+	Those turns were always going to be recovered, but ONLY the watchdog noticed, and
+	only once the per-turn ``deadline_at`` had passed — up to the dispatch deadline
+	plus a cron tick of a LOCKED composer showing a spinner with no feedback, while
+	the gateway is already provably unreachable (the fast-retry budget just proved
+	it). Parking here publishes ``run:recovering`` at once, so the customer gets the
+	interrupted banner and an UNLOCKED composer within the fast-retry window instead
+	of a silent multi-minute hang, and the existing ladder (budget-exhausted
+	``recovering -> _settle_recover_errored``) still drives the turn to a terminal
+	error if the gateway never returns. Covers ANY sustained mid-run transport loss,
+	not just a config-apply container bounce."""
 	target = ctx.relay_target_id
 	# CDX-21 (Residual B): the kill switch overrides transport-error succession. A transport exit
 	# under a legacy row must NOT enqueue a successor — release WITHOUT succession and park live
@@ -2917,14 +2938,22 @@ def _schedule_successor_on_exit(ctx: PumpContext, *, transport_retry: int) -> No
 	next_hop = ctx.hop_counter + 1
 	successor = f"jarvis-pump::{ctx.site}::{target}::hop{next_hop}"
 	try:
+		# SUXF-3: park BEFORE the lease release, so the recovering marks are written while
+		# this hop still provably holds epoch E — the same ordering _halt_for_kill_switch
+		# uses. _mark_recovering_mirror is epoch-fenced (CDX-24), so a hop that a takeover
+		# already superseded parks 0 rows and cannot disturb the new owner's turns.
+		budget_spent = transport_retry >= TRANSPORT_RETRY_MAX
+		if budget_spent and _shard_has_live_work(target):
+			_park_affected_recovering(ctx, reason=_TRANSPORT_LOST_REASON)
 		if not ts.lease_handoff(target, ctx.epoch, next_hop, successor):
 			return  # stale — a takeover owns the shard; it drives succession
 		_clear_lease_mirror(target)
 		if not _shard_has_live_work(target):
 			return  # idle — nothing to revive; the released lease simply stays vacant
-		if transport_retry >= TRANSPORT_RETRY_MAX:
-			# Bounded fast-retry budget spent: fall through to the watchdog / sender
-			# ensure_pump (the lease is already acquirable). Documented backoff tail.
+		if budget_spent:
+			# Bounded fast-retry budget spent: the shard's turns are parked above, so the
+			# watchdog / sender ensure_pump revival now recovers turns the customer can
+			# already SEE are interrupted. Documented backoff tail.
 			_telemetry("transport_retry_capped", target=target, retry=transport_retry)
 			return
 		ctx.deps.enqueue_pump_job(
@@ -3071,6 +3100,19 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 			# run:recovering so a reload reconstructs the banner (not a plain locked
 			# composer).
 			if _recovery_budget_exhausted(r, now):
+				# SUXF-2: the budget clock survives recover_adopt, so an IN-FLIGHT turn
+				# genuinely arrives here already over budget (park -> adopt -> park is the
+				# gateway-is-gone loop). recover_errored is D2 row 24 (recovering ->
+				# errored), so calling it on an in-flight state matches 0 rows — and
+				# because this is the leading `if`, the branch never falls through to the
+				# deadline park below either. The turn would sit in-flight forever with the
+				# spinner up and no error. Park to `recovering` first (row 20, no deadline
+				# predicate — the budget already expired), THEN settle to errored. No
+				# intermediate run:recovering publish: the very next step is the terminal
+				# run:error, and a banner that flashes for one statement helps nobody.
+				if ts.mark_recovering(run_id, v):
+					frappe.db.commit()
+					v += 1
 				if _settle_recover_errored(run_id, v, conv, am, error=_STALLED_ERROR):
 					summary["errored"] += 1
 			elif r.get("deadline_at") and _expired(r.get("deadline_at"), now):
