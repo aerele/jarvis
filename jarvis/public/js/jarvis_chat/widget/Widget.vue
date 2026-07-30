@@ -28,8 +28,7 @@
 			<!-- Grip dots: the drag affordance. design.md 1.3 forbids hover
 			     motion, so this fades in on OPACITY alone — nothing moves. -->
 			<span class="jvw-grip" aria-hidden="true"><i></i><i></i><i></i></span>
-			<img v-if="brandLogoUrl" :src="brandLogoUrl" class="jvw-fab-img" alt="" />
-			<svg v-else viewBox="0 0 24 24" width="24" height="24" fill="#fff">
+			<svg v-if="!brandLogoUrl" viewBox="0 0 24 24" width="24" height="24" fill="#fff">
 				<path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z" />
 			</svg>
 		</button>
@@ -123,9 +122,21 @@ function openFull() {
 	window.location.assign(conversationUrl(panelRef.value?.convId));
 }
 
-const fabStyle = computed(() => ({
-	transform: `translate3d(${fabXY.value.x}px, ${fabXY.value.y}px, 0)`,
-}));
+const fabStyle = computed(() => {
+	const style = {
+		transform: `translate3d(${fabXY.value.x}px, ${fabXY.value.y}px, 0)`,
+	};
+	if (brandLogoUrl) {
+		// Painted on the button itself rather than as an <img> child: a
+		// background is clipped by the border-radius by definition, so a logo
+		// of any aspect ratio can never bleed past the rounded corners.
+		style.backgroundImage = `url("${encodeURI(brandLogoUrl)}")`;
+		style.backgroundSize = "cover";
+		style.backgroundPosition = "center";
+		style.backgroundRepeat = "no-repeat";
+	}
+	return style;
+});
 
 function readCssPx(el, prop, fallback) {
 	if (!el) return fallback;
@@ -363,6 +374,7 @@ onBeforeUnmount(() => {
 	width: 54px;
 	height: 54px;
 	border-radius: 16px;
+	overflow: hidden;
 	background: var(--accent-grad);
 	border: none;
 	cursor: grab;
@@ -378,18 +390,15 @@ onBeforeUnmount(() => {
 	will-change: transform;
 	transition: opacity 0.25s ease;
 }
-.jvw-fab-img {
-	width: 24px;
-	height: 24px;
-	object-fit: cover;
-	border-radius: 7px;
-}
+
 .jvw-fab:hover {
 	filter: brightness(1.06);
 }
 .jvw-fab:focus-visible {
-	outline: 2px solid var(--accent);
-	outline-offset: 3px;
+	/* A ring that HUGS the rounded tile. outline + outline-offset drew a
+	   detached square that looked misaligned against a full-bleed logo. */
+	outline: none;
+	box-shadow: 0 10px 26px -6px rgba(106, 86, 232, 0.55), 0 0 0 2px #fff, 0 0 0 4px var(--accent);
 }
 .jvw-fab--snapping {
 	transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease;
