@@ -331,19 +331,43 @@ def get_llm_connection_status() -> dict:
 
 
 def _has_llm_config(settings) -> bool:
-	"""True when this workspace still has an AI connection configured.
+	"""True when this workspace still has a usable AI CREDENTIAL.
 
-	The flat llm_provider / llm_model pair is the mirror on_update keeps of
-	models[0], so it covers pool and direct tenants alike. models[] is checked
-	too because a table whose rows are all DISABLED leaves the mirror blank while
-	the credentials are still stored - that is a paused pool, not a disconnected
-	workspace, and it must not read as one. proxy_active is checked for the same
-	reason from the other direction: it is DERIVED from the config at save time
-	(compute_proxy_active) and reset to 0 whenever the config goes away, so a set
-	flag is by itself proof that a pool exists, whatever the mirrors say."""
-	provider = (settings.get("llm_provider") or "").strip()
-	model = (settings.get("llm_model") or "").strip()
-	return bool(provider or model or settings.get("models") or getattr(settings, "proxy_active", 0))
+	It asks whether a credential exists, not whether a provider NAME is written
+	down, and that distinction is the whole point. llm_provider / llm_model are
+	labels that on_update mirrors from models[0]; they are not proof of anything
+	on their own, and a partial disconnect can leave them behind.
+
+	The concrete case: jarvis.oauth.api.disconnect (Disconnect chat subscription)
+	deliberately clears only the OAuth side, writes last_sync_status
+	"disconnected", and LEAVES llm_provider / llm_model in place. Testing the
+	labels therefore reported such a workspace as connected while its own sync
+	status said "disconnected" - two sources of truth disagreeing, and the
+	customer's Connection badge showing a healthy state over a workspace that
+	cannot answer a turn. Observed on a real tenant: models[] empty,
+	last_sync_status "disconnected", llm_provider still "OpenAI".
+
+	What counts as a credential:
+	  * models[] - the pool holds its own keys/accounts. Checked even when every
+	    row is DISABLED, because a paused pool still HAS credentials and must not
+	    read as disconnected.
+	  * proxy_active - DERIVED from the config at save time
+	    (compute_proxy_active) and reset to 0 when the config goes away, so a set
+	    flag is itself proof a pool exists whatever the mirrors say.
+	  * a direct tenant's stored api key, or its live OAuth connection.
+	"""
+	if settings.get("models") or getattr(settings, "proxy_active", 0):
+		return True
+	# Direct (non-pool) tenant. The credential lives in the flat fields, so read
+	# the credential itself rather than the label beside it.
+	if (settings.get("llm_auth_mode") or "") == "oauth":
+		return bool(settings.get("llm_oauth_connected_at") or settings.get("llm_oauth_account_email"))
+	try:
+		return bool(settings.get_password("llm_api_key", raise_exception=False))
+	except Exception:
+		# Never let a password-store read break the status endpoint: an
+		# unreadable secret is not evidence of a connection.
+		return False
 
 
 @frappe.whitelist()

@@ -11,6 +11,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import account, admin_client
+from jarvis.account import _has_llm_config
 from jarvis.exceptions import AdminValidationError
 
 
@@ -95,12 +96,113 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		# A DIRECT (single-model) tenant has no proxy auth profile to report -
 		# the SPA's ConnectionPane used to render this as a misleading orange
 		# "Not connected" instead of an accurate "Direct" state.
+		#
+		# _has_llm_config is stubbed rather than satisfied with a real stored
+		# key. The subject here is the SHORT-CIRCUIT and the field remap, not the
+		# predicate, which TestHasLlmConfig below covers exhaustively over a stub.
+		# Satisfying it for real would mean writing a Password field, and blanking
+		# one afterwards leaves the secret in __Auth and leaks a test key into
+		# every later test on the site. It would also make the outcome depend on
+		# whatever models[] the shared test site happens to hold.
 		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
 		frappe.db.set_single_value("Jarvis Settings", "llm_model", "gpt-4o")
 		frappe.db.commit()
-		with patch.object(admin_client, "post_llm_auth_status") as m:
-			out = account.get_llm_connection_status()
+		with patch.object(account, "_has_llm_config", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status") as m:
+				out = account.get_llm_connection_status()
 		m.assert_not_called()
 		self.assertEqual(out["proxy_active"], False)
+		self.assertEqual(out["disconnected"], False)
 		self.assertEqual(out["auth_present"], False)
 		self.assertEqual(out["default_model"], "gpt-4o")
+
+	def test_a_leftover_model_label_alone_reports_disconnected(self):
+		"""The behaviour change, asserted at the endpoint and not just on the
+		predicate: a workspace holding only a MIRROR (llm_model) with no
+		credential behind it is disconnected, and must not leak the label out as
+		a default_model the SPA would render as a healthy "Direct" state.
+
+		This is the shape jarvis.oauth.api.disconnect leaves behind - it clears
+		the OAuth side and deliberately keeps llm_provider / llm_model.
+		"""
+		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
+		frappe.db.set_single_value("Jarvis Settings", "llm_model", "gpt-4o")
+		frappe.db.commit()
+		with patch.object(account, "_has_llm_config", return_value=False):
+			with patch.object(admin_client, "post_llm_auth_status") as m:
+				out = account.get_llm_connection_status()
+		m.assert_not_called()
+		self.assertEqual(out["disconnected"], True)
+		self.assertEqual(out["default_model"], "")
+
+
+class TestHasLlmConfig(FrappeTestCase):
+	"""_has_llm_config must report a CREDENTIAL, not a leftover label.
+
+	Driven with a stub rather than the live Single on purpose. The predicate is
+	pure logic over a settings-like object, and the earlier site-state version of
+	these tests was both order-dependent and wrong: it fought whatever another
+	session happened to have configured on the shared test site, and it had to
+	delete a real __Auth row to set up (a Password field survives a column
+	blank), which leaked a secret into every later test.
+
+	The behaviour under test: llm_provider / llm_model are labels that on_update
+	mirrors from models[0]. They are not proof of a connection on their own, and
+	jarvis.oauth.api.disconnect deliberately leaves them behind while removing the
+	only usable credential. Testing the labels reported such a workspace as
+	connected.
+	"""
+
+	class _Stub:
+		def __init__(self, **kw):
+			self._d = {
+				"llm_provider": "",
+				"llm_model": "",
+				"llm_auth_mode": "api_key",
+				"llm_oauth_account_email": "",
+				"llm_oauth_connected_at": None,
+				"models": [],
+				"proxy_active": 0,
+			}
+			self._d.update(kw)
+			self._key = kw.get("_key", "")
+
+		def get(self, k, default=None):
+			return self._d.get(k, default)
+
+		def get_password(self, fieldname, raise_exception=True):
+			return self._key
+
+		def __getattr__(self, k):
+			return self._d.get(k)
+
+	def test_a_leftover_provider_label_with_no_credential_is_not_connected(self):
+		"""The exact half-cleared shape jarvis.oauth.api.disconnect leaves."""
+		s = self._Stub(llm_provider="OpenAI", llm_model="gpt-4o")
+		self.assertFalse(_has_llm_config(s))
+
+	def test_a_direct_tenant_with_a_stored_key_is_connected(self):
+		s = self._Stub(llm_provider="OpenAI", llm_model="gpt-4o", _key="sk-real")
+		self.assertTrue(_has_llm_config(s))
+
+	def test_a_live_oauth_tenant_is_connected_without_an_api_key(self):
+		s = self._Stub(llm_provider="Anthropic", llm_auth_mode="oauth", llm_oauth_account_email="a@b.c")
+		self.assertTrue(_has_llm_config(s))
+
+	def test_an_oauth_tenant_whose_connection_was_cleared_is_not_connected(self):
+		s = self._Stub(llm_provider="Anthropic", llm_auth_mode="oauth")
+		self.assertFalse(_has_llm_config(s))
+
+	def test_a_pool_counts_even_with_the_mirrors_blank(self):
+		"""A pool whose rows are all disabled leaves the mirror blank, but it
+		still HOLDS credentials: paused, not disconnected."""
+		self.assertTrue(_has_llm_config(self._Stub(models=[object()])))
+
+	def test_proxy_active_alone_counts(self):
+		"""proxy_active is derived from config and reset when it goes away, so a
+		set flag is itself proof a pool exists. An existing monitor test relies
+		on exactly this shape."""
+		self.assertTrue(_has_llm_config(self._Stub(proxy_active=1)))
+
+	def test_a_bare_workspace_is_not_connected(self):
+		self.assertFalse(_has_llm_config(self._Stub()))
