@@ -88,15 +88,18 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(len(out), 3)
 
 	def test_discards_frames_for_other_run_or_session_and_non_event_frames(self):
+		# The terminals here all carry text: this test is about FILTERING, and a
+		# textless final is a failed turn (#543), not a routing outcome.
+		answered = {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}
 		sess = self._sess(
 			[
 				_agent_frame("other-run", "assistant", {"text": "nope", "delta": "nope"}),
 				{"type": "res", "id": "x", "ok": True},  # non-event frame
 				None,  # soft-timeout / non-JSON noise
-				_chat_frame("r1", "other-session", "final"),  # wrong sessionKey
-				_chat_frame("other-run", "sk", "final"),  # wrong runId
+				_chat_frame("r1", "other-session", "final", message=answered),  # wrong sessionKey
+				_chat_frame("other-run", "sk", "final", message=answered),  # wrong runId
 				_agent_frame("r1", "assistant", {"text": "ok", "delta": "ok"}),
-				_chat_frame("r1", "sk", "final"),
+				_chat_frame("r1", "sk", "final", message=answered),
 			]
 		)
 		out = list(sess.relay_turn_events("sk", "r1"))
@@ -104,7 +107,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 			out,
 			[
 				{"kind": "assistant", "text": "ok", "delta": "ok"},
-				{"kind": "relay:final", "text": None},
+				{"kind": "relay:final", "text": "ok"},
 			],
 		)
 
@@ -113,11 +116,16 @@ class TestRelayTurnEvents(FrappeTestCase):
 			[
 				_agent_frame("r1", "lifecycle", {"phase": "start"}),
 				_agent_frame("r1", "lifecycle", {"phase": "end"}),
-				_chat_frame("r1", "sk", "final"),
+				_chat_frame(
+					"r1",
+					"sk",
+					"final",
+					message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+				),
 			]
 		)
 		out = list(sess.relay_turn_events("sk", "r1"))
-		self.assertEqual(out, [{"kind": "relay:final", "text": None}])
+		self.assertEqual(out, [{"kind": "relay:final", "text": "done"}])
 
 	def test_chat_delta_state_ignored(self):
 		sess = self._sess(
@@ -130,10 +138,9 @@ class TestRelayTurnEvents(FrappeTestCase):
 		out = list(sess.relay_turn_events("sk", "r1"))
 		self.assertEqual(out, [{"kind": "relay:final", "text": "done"}])
 
-	def test_final_with_no_message_yields_text_none(self):
-		sess = self._sess([_chat_frame("r1", "sk", "final")])
-		out = list(sess.relay_turn_events("sk", "r1"))
-		self.assertEqual(out, [{"kind": "relay:final", "text": None}])
+	# NB: a `final` with no message used to be asserted here as a successful
+	# relay:final with text=None. That is the #543 defect, and it now lives as
+	# test_final_with_no_message_at_all_yields_relay_error below.
 
 	def test_final_with_string_content_yields_text(self):
 		sess = self._sess([_chat_frame("r1", "sk", "final", message={"content": "plain text"})])
