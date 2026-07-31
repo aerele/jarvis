@@ -768,7 +768,7 @@ def post_push_oauth_blob(provider: str, blob: dict) -> dict:
 
 	Timeout is bumped above the default 90s because the admin handler
 	chains to fleet-agent's PUT /auth-profile, which now runs
-	``agent doctor --fix --non-interactive`` (up to 60s, migrates the
+	``openclaw doctor --fix --non-interactive`` (up to 60s, migrates the
 	legacy JSON store to SQLite on agent 2026.6.5+) plus
 	``docker compose restart`` + healthz poll. Admin's own bound is 150s;
 	we give bench 180s to allow for the HTTPS round-trip and admin's

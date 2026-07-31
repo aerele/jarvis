@@ -19,16 +19,20 @@ _ALLOWED_FILES = {
 	"jarvis/chat/agent_client.py",
 	"jarvis/chat/device.py",
 	"jarvis/chat/events.py",
-	"jarvis/agent_ws.py",
-	"jarvis/chat/relay_mux.py",
 	"jarvis/tools/tool-names.json",
 	"jarvis/tools/_tool_contract.py",
 	"jarvis/agent_templates/openclaw.json.j2",
 	"jarvis/patches.txt",
 	"jarvis/tests/test_no_openclaw_leak.py",  # this guard itself names the allowlist
+	# Historical APPLIED migrations are never rewritten — enumerated, NOT a blanket
+	# patches/ prefix, so a newly authored patch is scanned like any other file.
+	"jarvis/patches/v1_0_rename_openclaw_to_agent.py",
+	"jarvis/patches/v1_4_drop_llm_oauth_fields.py",
+	"jarvis/patches/v1_5_drop_dev_only_operator_fields.py",
+	"jarvis/patches/v1_15_unarchive_auto_expired_conversations.py",
+	"jarvis/patches/v2_01_backfill_glm_zai_provider_id.py",
 }
-# Historical applied migrations are never rewritten.
-_ALLOWED_PREFIXES = ("jarvis/patches/",)
+_ALLOWED_PREFIXES = ()
 # Literals allowed in ANY file, each a genuine reference to the openclaw runtime that must
 # stay verbatim (NOT the app's own naming). Stripped before the check so a line carrying only
 # these is not flagged:
@@ -49,6 +53,7 @@ _ALLOWED_LITERALS = re.compile(
 	r"openclaw\.plugin\.json|openclaw\.json|__openclaw__|__openclaw|openclaw/(?:src|extensions|docs|openclaw)"
 	r"|\.openclaw/|openclaw_state|openclaw_seq_watermark|jarvis-openclaw-plugin"
 	r"|render_openclaw_config|DEFAULT_OPENCLAW_IMAGE|verify-openclaw-assumptions"
+	r"|openclaw doctor"  # the runtime's own CLI invocation, cited verbatim in ops docs
 )
 _OPENCLAW = re.compile(r"openclaw", re.IGNORECASE)
 _SCAN_SUFFIXES = (".py", ".js", ".ts", ".vue", ".json", ".md", ".txt", ".j2", ".html", ".css")
@@ -83,6 +88,18 @@ class TestNoOpenclawLeak(FrappeTestCase):
 									offenders.append(f"{rel}:{i}: {line.strip()}")
 					except (UnicodeDecodeError, OSError):
 						continue
+		# Repo-root docs (README.md, design.md, ...) ship with the app and are the
+		# first thing a customer engineer reads — scan them too (non-recursive).
+		for fn in os.listdir(app_root):
+			if not fn.endswith(".md"):
+				continue
+			try:
+				with open(os.path.join(app_root, fn), encoding="utf-8") as fh:
+					for i, line in enumerate(fh, 1):
+						if _OPENCLAW.search(_ALLOWED_LITERALS.sub("", line)):
+							offenders.append(f"{fn}:{i}: {line.strip()}")
+			except (UnicodeDecodeError, OSError):
+				continue
 		self.assertEqual(
 			offenders,
 			[],

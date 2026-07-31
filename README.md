@@ -1,6 +1,6 @@
 # Jarvis
 
-AI superpowers for Frappe/ERPNext, powered by [agent](https://github.com/openclaw/openclaw).
+AI superpowers for Frappe/ERPNext, powered by a per-tenant hosted [agent runtime](https://github.com/openclaw/openclaw).
 
 Jarvis lets ERPNext users — especially business owners and execs — ask plain-English questions over their ERP data and get correct, permission-aware answers grounded in the actual records. It pairs an in-bench Frappe app (settings, permission-aware tool layer, HTTP API, on-save credentials propagation) with an agent runtime hosted per-tenant on Aerele's infrastructure. Data stays on the customer's bench; the agent brain lives off the customer's bench; permissions inherit from Frappe's own per-user checks.
 

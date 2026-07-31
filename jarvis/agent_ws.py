@@ -1,4 +1,4 @@
-"""Bench → openclaw container WebSocket ping helper.
+"""Bench → agent container WebSocket ping helper.
 
 Single use: the `Test Agent Connection` diagnostic button on Jarvis
 Settings (via `jarvis.diagnostics.ping_agent`) opens a WS to the
@@ -25,7 +25,7 @@ PING_TIMEOUT_SECONDS = 10
 
 
 def ping(gateway_url: str, gateway_token: str) -> None:
-	"""Open WS to openclaw and complete the connect handshake only.
+	"""Open WS to the agent runtime and complete the connect handshake only.
 
 	Raises ``AgentUnreachableError`` if the socket can't open or the
 	handshake is rejected.
