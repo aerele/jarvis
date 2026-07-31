@@ -306,6 +306,21 @@ class TestListForOwner(FrappeTestCase):
 		items = pending_confirm.list_items_for_owner(self._A, conversation="conv-a2")
 		self.assertEqual([it["token"] for it in items], [t2])
 
+	def test_list_items_summary_failure_still_surfaces_card(self):
+		"""A confirmable card must NEVER be dropped because the COSMETIC summary
+		(_describe_call) throws on one odd record - that is the exact invisible-card
+		bug this whole fix exists to close. The item still surfaces; only the summary
+		degrades to ""."""
+		t = self._mint(self._A, "conv-a1", "sum-throws")
+		with patch("jarvis.api._describe_call", side_effect=RuntimeError("boom")):
+			with patch.object(frappe, "log_error"):
+				items = pending_confirm.list_items_for_owner(self._A)
+		self.assertEqual([it["token"] for it in items], [t])
+		self.assertEqual(items[0]["summary"], "")
+		# The rest of the client-facing shape is intact.
+		self.assertEqual(items[0]["tool"], "create_doc")
+		self.assertIn("preview", items[0])
+
 	def test_clear_for_conversation_removes_only_that_conversation(self):
 		"""F6: clearing a conversation's tokens (on stop_run) deletes its own live
 		tokens and leaves other conversations - and conversation-less tokens - alone."""

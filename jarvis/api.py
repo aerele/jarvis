@@ -1226,15 +1226,19 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		try:
 			events.publish_to_user(
 				owner_user,
+				# Same shared item shape the resync endpoint + run:end terminal use, so
+				# the live push can't drift from them (and gets the summary guard too).
 				{
 					"kind": "action:pending",
-					"token": token,
-					"tool": tool,
-					"preview": preview,
-					"conversation": conv,
-					"run_id": run_id,
-					"summary": _describe_call(tool, args),
-					"expires_at": expires_at,
+					**pending_confirm._pending_item(
+						token=token,
+						tool=tool,
+						args=args,
+						preview=preview,
+						conversation=conv,
+						run_id=run_id,
+						expires_at=expires_at,
+					),
 				},
 			)
 		except Exception:

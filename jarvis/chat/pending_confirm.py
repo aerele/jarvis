@@ -332,39 +332,65 @@ def list_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
 	return out
 
 
-def list_items_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
-	"""Client-facing pending-confirmation items for ``owner`` (optionally filtered
-	to ``conversation``): the SAME shape the ``action:pending`` event and the resync
-	endpoint deliver - ``token``/``tool``/``preview``/``summary``/``conversation``/
-	``run_id``/``expires_at``, and NEVER the internal ``args``/``exec_user``/
-	``args_hash``. Single home for that shape so the resync endpoint and the
-	``run:end`` terminal cannot drift: a card missed on the best-effort live push
-	re-surfaces on the turn's (fenced, backstopped) terminal without a manual reload.
-	Per-record guard: one malformed record must not sink the whole list."""
+def _pending_item(
+	*,
+	token: str,
+	tool: str,
+	args: dict,
+	preview: dict | None,
+	conversation: str,
+	run_id: str,
+	expires_at: int | None,
+) -> dict:
+	"""The ONE client-facing pending-confirmation item shape, shared by the live
+	``action:pending`` push (jarvis.api), the resync endpoint, and the ``run:end``
+	terminal - so the three cannot drift. Carries
+	``token``/``tool``/``preview``/``summary``/``conversation``/``run_id``/
+	``expires_at`` and NEVER the internal ``args``/``exec_user``/``args_hash``.
+
+	``summary`` is COSMETIC: if ``_describe_call`` throws it degrades to "" (and is
+	logged) - a confirmable card must NEVER be dropped because its human label failed
+	to build. That is the invisible-card bug this whole change closes."""
 	from jarvis.api import _describe_call
 
-	items: list[dict] = []
-	for r in list_for_owner(owner, conversation=conversation):
-		try:
-			tool = r.get("tool")
-			args = r.get("args") or {}
-			items.append(
-				{
-					"token": r.get("token"),
-					"tool": tool,
-					"preview": r.get("preview"),
-					"summary": _describe_call(tool, args),
-					"conversation": r.get("conversation"),
-					"run_id": r.get("run_id"),
-					"expires_at": r.get("expires_at"),
-				}
-			)
-		except Exception:
-			frappe.log_error(
-				title="pending_confirm.list_items_for_owner: record skipped",
-				message=frappe.get_traceback(),
-			)
-	return items
+	try:
+		summary = _describe_call(tool, args or {})
+	except Exception:
+		summary = ""
+		frappe.log_error(
+			title="pending_confirm: confirmation summary build failed",
+			message=frappe.get_traceback(),
+		)
+	return {
+		"token": token,
+		"tool": tool,
+		"preview": preview,
+		"summary": summary,
+		"conversation": conversation,
+		"run_id": run_id,
+		"expires_at": expires_at,
+	}
+
+
+def list_items_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
+	"""Client-facing pending-confirmation items for ``owner`` (optionally filtered to
+	``conversation``), each built through the shared ``_pending_item`` shape so the
+	resync endpoint and the ``run:end`` terminal cannot drift: a card missed on the
+	best-effort live push re-surfaces on the turn's (fenced, backstopped) terminal
+	without a manual reload. Item building never drops a record - only its cosmetic
+	summary can degrade (see ``_pending_item``)."""
+	return [
+		_pending_item(
+			token=r.get("token"),
+			tool=r.get("tool"),
+			args=r.get("args") or {},
+			preview=r.get("preview"),
+			conversation=r.get("conversation"),
+			run_id=r.get("run_id"),
+			expires_at=r.get("expires_at"),
+		)
+		for r in list_for_owner(owner, conversation=conversation)
+	]
 
 
 def clear_for_conversation(owner: str, conversation: str, run_id: str | None = None) -> int:
