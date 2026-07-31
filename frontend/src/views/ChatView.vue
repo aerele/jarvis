@@ -4712,9 +4712,6 @@ const showWelcome = computed(
 const convCount = computed(() => store.conversations.length);
 const msgCount = computed(() => visibleMessages.value.length);
 const toolCount = computed(() => jarvisTools.value.length);
-const sessionToolCalls = computed(() =>
-	Object.values(runMeta.value).reduce((s, r) => s + (r.tools || 0), 0)
-);
 const userMsgCount = computed(() => visibleMessages.value.filter((m) => m.role === "user").length);
 const assistantMsgCount = computed(
 	() => visibleMessages.value.filter((m) => m.role === "assistant").length
@@ -4725,18 +4722,12 @@ const avgTokensPerMsg = computed(() => {
 	return fmtTokens(Math.round((usage.value.chat_tokens || 0) / n));
 });
 const starredCount = computed(() => store.conversations.filter((c) => c.starred).length);
-// Recent tool runs in this chat (most recent first), from the per-message run
-// metrics we already stamp on run:end.
-const recentActivity = computed(() => {
-	const out = [];
-	for (const m of visibleMessages.value) {
-		const meta = runMeta.value[m.name];
-		if (m.role === "assistant" && meta && meta.tools) {
-			out.push({ tools: meta.tools, ms: meta.ms || 0, names: meta.names || [] });
-		}
-	}
-	return out.reverse();
-});
+// Recent tool runs and the per-chat tool-call total are NOT published here any
+// more. Both used to be read off runMeta, which is stamped on the live run:end
+// event and therefore empty for every turn this mount did not itself watch, so
+// the settings panes reported zero tool calls over a transcript still rendering
+// ten tool cards (#551). They now come from the persisted rows via
+// jarvis.chat.api.get_tool_activity / get_usage.chat_tool_calls.
 const headerSub = computed(() => {
 	const n = visibleMessages.value.length;
 	return n ? `${Math.ceil(n / 2)} message${n > 2 ? "s" : ""}` : "ERPNext Assistant";
@@ -8874,12 +8865,10 @@ watchEffect(() => {
 			msgCount: msgCount.value,
 			userMsgCount: userMsgCount.value,
 			assistantMsgCount: assistantMsgCount.value,
-			sessionToolCalls: sessionToolCalls.value,
 			avgTokensPerMsg: avgTokensPerMsg.value,
 			convCount: convCount.value,
 			starredCount: starredCount.value,
 			toolCount: toolCount.value,
-			recentActivity: recentActivity.value,
 		},
 		convAutoApply: convAutoApply.value,
 		autoApplyNote: autoApplyNote.value,

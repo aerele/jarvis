@@ -38,6 +38,13 @@ export const setAutoApply = (conversation, value) =>
 // null/zeros until then (design doc §6, UsagePane's "Measured usage" block).
 export const getUsage = (conversation) =>
 	call("jarvis.chat.api.get_usage", { conversation: conversation || "" });
+// Tool runs recorded in one chat, newest turn first, from the PERSISTED tool
+// rows: the same rows the thread's Activity accordion renders. The Settings
+// Activity pane used to derive this from the browser's live run stream, which
+// read zero on every reload (#551). Response: {runs:[{tools,ms,names}],
+// tool_calls}.
+export const getToolActivity = (conversation) =>
+	call("jarvis.chat.api.get_tool_activity", { conversation });
 // ---- account reconnect (fresh bench -> existing paid subscription) ---------
 export const reconnectAvailable = (email, company = "") =>
 	call("jarvis.onboarding.reconnect_available", { email, company });

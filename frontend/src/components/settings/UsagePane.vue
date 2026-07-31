@@ -1,6 +1,6 @@
 <template>
 	<SettingsPane title="Usage" description="Message and token counts for this device.">
-		<template v-if="measured">
+		<template v-if="hasMeasured">
 			<h3 class="text-base font-semibold text-ink-gray-9">Measured usage</h3>
 			<div class="mt-2">
 				<KvRow
@@ -63,8 +63,17 @@
 			<hr class="my-8" />
 		</template>
 
+		<!-- The wording changes with the block above: naming the measured totals
+		     only makes sense when they are on screen. -->
 		<p class="flex flex-wrap items-center gap-2 text-p-sm text-ink-gray-6">
-			Estimated tokens, messages and tool activity for your workspace.
+			<template v-if="hasMeasured">
+				Workspace activity. Token figures here are estimated from the stored transcript, so
+				they read lower than the measured totals above, which also count the instructions
+				and history sent with every turn.
+			</template>
+			<template v-else>
+				Estimated tokens, messages and tool activity for your workspace.
+			</template>
 			<Badge label="est." theme="gray" variant="subtle" size="sm" />
 		</p>
 		<div class="mt-4 grid grid-cols-3 gap-4">
@@ -77,10 +86,10 @@
 			</div>
 			<div class="rounded-md border p-4">
 				<div class="text-2xl font-medium text-ink-gray-8">
-					{{ s ? s.sessionToolCalls : "—" }}
+					{{ usage ? usage.chat_tool_calls : "—" }}
 				</div>
 				<div class="mt-1 text-sm text-ink-gray-6">Tool calls</div>
-				<div class="mt-1 text-xs text-ink-gray-5">this session</div>
+				<div class="mt-1 text-xs text-ink-gray-5">this chat</div>
 			</div>
 			<div class="rounded-md border p-4">
 				<div class="text-2xl font-medium text-ink-gray-8">
@@ -103,26 +112,39 @@
 				<div class="mt-1 text-sm text-ink-gray-6">This chat</div>
 				<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
 			</div>
-			<div class="rounded-md border p-4">
-				<div class="text-2xl font-medium text-ink-gray-8">
-					{{ usage ? fmtTokens(usage.month_tokens) : "—" }}
+			<!-- The month / all-time estimates are dropped once measured usage
+			     exists: the block above already carries both labels from the
+			     gateway's own counters, and showing an estimate of the stored
+			     transcript beside a measurement of what was actually sent put two
+			     very different numbers under one heading (#551). "This chat" stays
+			     because the measured counters have no per-chat breakdown. -->
+			<template v-if="!hasMeasured">
+				<div class="rounded-md border p-4">
+					<div class="text-2xl font-medium text-ink-gray-8">
+						{{ usage ? fmtTokens(usage.month_tokens) : "—" }}
+					</div>
+					<div class="mt-1 text-sm text-ink-gray-6">
+						{{ usage ? usage.month_label : "This month" }}
+					</div>
+					<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
 				</div>
-				<div class="mt-1 text-sm text-ink-gray-6">
-					{{ usage ? usage.month_label : "This month" }}
+				<div class="rounded-md border p-4">
+					<div class="text-2xl font-medium text-ink-gray-8">
+						{{ usage ? fmtTokens(usage.total_tokens) : "—" }}
+					</div>
+					<div class="mt-1 text-sm text-ink-gray-6">All time</div>
+					<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
 				</div>
-				<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
-			</div>
-			<div class="rounded-md border p-4">
-				<div class="text-2xl font-medium text-ink-gray-8">
-					{{ usage ? fmtTokens(usage.total_tokens) : "—" }}
-				</div>
-				<div class="mt-1 text-sm text-ink-gray-6">All time</div>
-				<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
-			</div>
+			</template>
+			<!-- Not comparable with the container's own tool numbers: this is the
+			     bench-side ERP tool registry (jarvis.chat.api.list_tools), which the
+			     agent runtime re-exports as jarvis__<name> alongside its own built-in
+			     tools and its search catalogue. Labelled so the three are not read as
+			     one drifting number (#551). -->
 			<div class="rounded-md border p-4">
 				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.toolCount : "—" }}</div>
-				<div class="mt-1 text-sm text-ink-gray-6">Tools</div>
-				<div class="mt-1 text-xs text-ink-gray-5">available</div>
+				<div class="mt-1 text-sm text-ink-gray-6">ERP tools</div>
+				<div class="mt-1 text-xs text-ink-gray-5">Jarvis can run here</div>
 			</div>
 		</div>
 
@@ -164,6 +186,12 @@ const usage = ref(null);
 // Real (gateway-recorded) usage, added to get_usage()'s response. null until the
 // backend ships it or the user has no recorded usage yet.
 const measured = computed(() => (usage.value && usage.value.measured) || null);
+// The backend always returns the measured block, all-zero until the gateway has
+// recorded a turn. Rendering it while it is still empty put a "0 tokens" heading
+// above a non-zero estimate, which is the same two-numbers-disagree problem as
+// showing both once real counters exist. So the block appears only once there is
+// something measured to show.
+const hasMeasured = computed(() => !!(measured.value && Number(measured.value.total_tokens || 0)));
 const measuredPct = computed(() => {
 	const m = measured.value;
 	if (!m || !m.monthly_token_limit) return 0;
