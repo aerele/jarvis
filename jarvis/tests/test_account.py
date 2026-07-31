@@ -345,3 +345,57 @@ class TestLlmMissingVerdict(FrappeTestCase):
 	def test_unknown_subscription_status_fails_open_to_soft(self):
 		out, _ = self._verdict(self._S(), conn={})
 		self.assertEqual(out["reason"], "llm_credentials")
+
+
+class TestReplacedSiteIsExplained(FrappeTestCase):
+	"""A site whose account was reconnected elsewhere can no longer authenticate.
+	Failing open sends it into a chat that cannot work; it asks the one question it
+	can still ask instead."""
+
+	def setUp(self):
+		frappe.cache().delete_value(account._REPLACED_CACHE_KEY)
+		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+
+	def tearDown(self):
+		frappe.cache().delete_value(account._REPLACED_CACHE_KEY)
+		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+
+	def test_an_auth_failure_on_a_replaced_site_explains_itself(self):
+		with (
+			patch.object(account.admin_client, "get_connection", side_effect=Exception("401")),
+			patch.object(
+				account.admin_client,
+				"site_replacement",
+				return_value={"replaced": True, "at": "2026-07-30", "moved_to": "https://other.example.com"},
+			),
+		):
+			out = account._admin_chat_gate()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "site_replaced")
+		self.assertEqual(out["replaced_notice"]["moved_to"], "https://other.example.com")
+
+	def test_an_ordinary_admin_blip_still_fails_open(self):
+		with (
+			patch.object(account.admin_client, "get_connection", side_effect=Exception("timeout")),
+			patch.object(account.admin_client, "site_replacement", return_value={"replaced": False}),
+		):
+			out = account._admin_chat_gate()
+		self.assertTrue(out["ready"], "an outage must not lock a working site out of chat")
+
+	def test_the_verdict_is_cached_so_the_guest_endpoint_is_not_hammered(self):
+		with (
+			patch.object(account.admin_client, "get_connection", side_effect=Exception("401")),
+			patch.object(account.admin_client, "site_replacement", return_value={"replaced": True}) as probe,
+		):
+			account._admin_chat_gate()
+			frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+			account._admin_chat_gate()
+		self.assertEqual(probe.call_count, 1)
+
+	def test_a_failing_probe_is_treated_as_not_replaced(self):
+		with (
+			patch.object(account.admin_client, "get_connection", side_effect=Exception("401")),
+			patch.object(account.admin_client, "site_replacement", side_effect=Exception("unreachable")),
+		):
+			out = account._admin_chat_gate()
+		self.assertTrue(out["ready"], "cannot prove a replacement, so do not invent one")
