@@ -1556,6 +1556,109 @@ def _est_tokens(text: str | None) -> int:
 	return (len(text) + 3) // 4
 
 
+def _tool_label(name: str | None) -> str:
+	"""Strip the ``jarvis__`` prefix the openclaw plugin registers tools under,
+	so the panes show the same bare name the thread does (ChatView.toolLabel)."""
+	return (name or "tool").replace("jarvis__", "", 1)
+
+
+def _reply_ms(row) -> int:
+	"""Generation span of one assistant reply, in milliseconds.
+
+	``reply_duration_ms`` (stamped at settlement) when present, else the
+	modified-creation span for legacy rows that predate it. The column is an Int,
+	so an unstamped row reads 0 rather than NULL; 0 therefore means "no stamp"
+	and falls through to the span. Both are clamped to the same 30-minute sanity
+	ceiling the thread uses, so a row whose ``modified`` was bumped by a later
+	edit cannot report an absurd duration. Mirrors ChatView.elapsedOf minus its
+	live-timer branch, which has no server side.
+	"""
+	from frappe.utils import get_datetime
+
+	ceiling = 1800 * 1000
+	ms = int(row.get("reply_duration_ms") or 0)
+	if 0 < ms < ceiling:
+		return ms
+	if row.get("creation") and row.get("modified"):
+		span = get_datetime(row.modified) - get_datetime(row.creation)
+		ms = int(span.total_seconds() * 1000)
+		if 0 <= ms < ceiling:
+			return ms
+	return 0
+
+
+def _tool_runs(conversation: str) -> list[dict]:
+	"""Tool calls recorded in ``conversation``, grouped under the assistant turn
+	that made them, newest turn first.
+
+	Reads the PERSISTED ``role="tool"`` rows: the same rows the thread's
+	Activity accordion renders (ChatView.activityByAssistant). The Settings
+	panes used to derive this from the browser's live run stream instead, so a
+	reload (or simply opening an older chat) reported zero tool calls for a chat
+	whose transcript was still showing ten of them (#551).
+
+	Grouping matches the accordion exactly, so no two counts on one screen can
+	disagree: walk in ``seq`` order, reset on a user row, attach tool rows to the
+	most recent assistant row. ``hidden`` rows are excluded because the SPA never
+	receives them (get_conversation filters them), and a hidden user row would
+	otherwise reset the grouping server-side but not client-side. Rows carrying an
+	``action_outcome`` (a confirmed / discarded / failed gated write) are skipped
+	for the same reason: the thread renders those inline as receipt chips rather
+	than as accordion entries.
+
+	Each run is ``{"tools": <n>, "ms": <int>, "names": [...]}``. Assistant turns
+	that called no tool are dropped.
+	"""
+	rows = frappe.get_all(
+		MSG,
+		filters={"conversation": conversation, "hidden": 0},
+		fields=[
+			"seq",
+			"role",
+			"tool_name",
+			"action_outcome",
+			"reply_duration_ms",
+			"creation",
+			"modified",
+		],
+		order_by="seq asc",
+	)
+	runs = []
+	cur = None
+	for m in rows:
+		if m.role == "user":
+			cur = None
+		elif m.role == "assistant":
+			cur = {"tools": 0, "ms": _reply_ms(m), "names": []}
+			runs.append(cur)
+		elif m.role == "tool" and cur and not m.action_outcome:
+			cur["tools"] += 1
+			cur["names"].append(_tool_label(m.tool_name))
+	runs = [r for r in runs if r["tools"]]
+	runs.reverse()
+	return runs
+
+
+@frappe.whitelist()
+def get_tool_activity(conversation: str, limit: int = 20) -> dict:
+	"""Recent tool runs in ``conversation`` for the Settings Activity pane.
+
+	Returns ``{"runs": [{"tools", "ms", "names"}, ...], "tool_calls": <total>}``
+	with the newest turn first. ``tool_calls`` is the total across the whole
+	conversation, not just the returned page. Owner-only, like every other
+	conversation read.
+	"""
+	require_jarvis_access()
+	_get_owned_conversation(conversation)
+	from frappe.utils import cint
+
+	runs = _tool_runs(conversation)
+	return {
+		"runs": runs[: cint(limit) or 20],
+		"tool_calls": sum(r["tools"] for r in runs),
+	}
+
+
 def _measured_usage(user: str) -> dict | None:
 	"""Real per-turn token usage for ``user`` from the ``Jarvis User Settings``
 	row (design section 3). Rollover-aware: a stale ``usage_month`` reads as 0
@@ -1625,6 +1728,7 @@ def get_usage(conversation: str | None = None) -> dict:
 	out = {
 		"estimated": True,
 		"chat_tokens": 0,
+		"chat_tool_calls": 0,
 		"month_tokens": 0,
 		"total_tokens": 0,
 		"budget_monthly": budget,
@@ -1637,6 +1741,13 @@ def get_usage(conversation: str | None = None) -> dict:
 	out["measured"] = _measured_usage(user)
 	if not convs:
 		return out
+
+	# Tool calls actually recorded in the open chat. NOT an estimate and NOT
+	# derived from the browser's live run stream. The same persisted rows the
+	# Activity pane reads, so the two panes agree (#551). Membership in `convs`
+	# is the ownership check: this endpoint never loads the conversation doc.
+	if conversation and conversation in convs:
+		out["chat_tool_calls"] = sum(r["tools"] for r in _tool_runs(conversation))
 
 	rows = frappe.get_all(
 		MSG,
