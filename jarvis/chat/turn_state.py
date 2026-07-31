@@ -1279,10 +1279,19 @@ def lease_acquire(target: str, holder: str, hop_counter: int | None = None) -> t
 	params = {"t": target, "h": holder, "exp": exp, "now": now}
 	if hop_counter is not None:
 		params["hop"] = hop_counter
+	# GAP 3: SEED loop_heartbeat_ts on a cold-start acquire (it is NULL) but CARRY IT
+	# FORWARD on a clean-hop re-acquire (COALESCE keeps the existing value). Because
+	# run_pump_hop calls lease_acquire on EVERY hop (~every 90s), overwriting it here
+	# would refresh the progress stamp every hop and the wedge detector (progress stale
+	# for PROGRESS_STALE_S while the lease is live) could NEVER fire. Carrying it forward
+	# lets a non-draining lineage age past the threshold, while a healthy lineage keeps
+	# it fresh via lease_heartbeat (progress). A cold-start seed avoids a NULL-forever
+	# stamp on a pump wedged from birth. force_expire_wedged resets it for the successor.
 	won = (
 		_run_cas(
 			f"""UPDATE `tab{PUMP}`
-			SET pump_epoch=pump_epoch+1, lease_holder=%(h)s, lease_expires_at=%(exp)s{hop_set}
+			SET pump_epoch=pump_epoch+1, lease_holder=%(h)s, lease_expires_at=%(exp)s,
+			    loop_heartbeat_ts=COALESCE(loop_heartbeat_ts, %(now)s){hop_set}
 			WHERE relay_target_id=%(t)s
 			  AND (lease_expires_at IS NULL OR lease_expires_at < %(now)s)""",
 			params,
@@ -1348,6 +1357,62 @@ def lease_handoff(target: str, epoch: int, next_hop: int, successor_holder: str)
 	return won
 
 
+def force_expire_wedged(target: str, epoch: int, stale_after_s: int) -> bool:
+	"""Force-expire a WEDGED but lease-LIVE pump (GAP 3 A4). A pump that keeps renewing
+	its lease but has made no PROGRESS (``loop_heartbeat_ts`` stale, see
+	``_progress_stale``) is not draining and will not self-recover. The CAS re-asserts
+	the FULL wedge predicate — epoch AND live lease AND ``loop_heartbeat_ts`` older
+	than ``stale_after_s`` — inside the UPDATE itself, because the watchdog's
+	detection READ races this takeover: the pump can resume progress (heartbeat) after
+	that read while still at epoch E, and an epoch-only CAS would force-expire the
+	now-healthy pump. A pump that progressed since the read, a lease that has expired
+	meanwhile (the normal ``ensure_pump`` revive path owns that), and a NULL stamp
+	(SQL ``NULL < x`` never matches — mirrors ``_progress_stale``'s NULL-is-fresh
+	kill-loop guard) all affect 0 rows. Under that CAS this atomically:
+	  * BUMPS the epoch (``pump_epoch+1``) — so the wedged pump's next lease_renew /
+	    heartbeat / turn-write (all cached at E) affects 0 rows and it exits via
+	    ``lease_lost_exit``. This is the fence: a bare lease-expiry would just be
+	    re-extended within HEARTBEAT_INTERVAL_S by the wedged pump's own renew.
+	  * sets ``lease_expires_at`` 1s in the PAST — vacant, so the watchdog's
+	    ``ensure_pump`` successor immediately wins its own acquire.
+	  * RE-STAMPS in-flight turns to the new epoch (the wedged pump's cached-E turn
+	    writes then affect 0 rows), mirroring ``lease_acquire``.
+	Also RESETS ``loop_heartbeat_ts`` to now: the successor (which carries the stamp
+	forward on acquire) then gets a fresh ``PROGRESS_STALE_S`` window to prove itself,
+	so a persistently-wedged shard is retried at the watchdog cadence rather than
+	re-detected immediately every tick.
+	The CALLER (the watchdog) clears the Redis lease mirror + ``ensure_pump`` on a won
+	result. Returns won/lost; idempotent under the epoch CAS (a second call at the same
+	E affects 0 rows). Commits (a standalone lifecycle op)."""
+	frappe.db.commit()
+	now = _now()
+	past = frappe.utils.add_to_date(None, seconds=-1)
+	cutoff = frappe.utils.add_to_date(now, seconds=-int(stale_after_s))
+	won = (
+		_run_cas(
+			f"""UPDATE `tab{PUMP}`
+			SET pump_epoch=pump_epoch+1, lease_expires_at=%(past)s, loop_heartbeat_ts=%(now)s
+			WHERE relay_target_id=%(t)s AND pump_epoch=%(e)s
+			  AND lease_expires_at > %(now)s AND loop_heartbeat_ts < %(cutoff)s""",
+			{"past": past, "now": now, "cutoff": cutoff, "t": target, "e": epoch},
+		)
+		== 1
+	)
+	if not won:
+		frappe.db.rollback()
+		return False
+	new_epoch = int(frappe.db.get_value(PUMP, target, "pump_epoch") or 0)
+	inflight = "','".join(EPOCH_INFLIGHT_STATES)
+	_run_cas(
+		f"""UPDATE `tab{TURN}`
+		SET pump_epoch=%(e)s, version=version+1
+		WHERE relay_target_id=%(t)s AND state IN ('{inflight}')""",
+		{"e": new_epoch, "t": target},
+	)
+	frappe.db.commit()
+	return True
+
+
 def lease_renew(target: str, epoch: int, holder: str | None = None) -> bool:
 	"""Extend the lease TTL while THIS pump still holds the epoch (D2 §3). CAS on
 	``pump_epoch=E`` — a pump that lost the epoch to a takeover renews 0 rows and
@@ -1385,6 +1450,19 @@ def lease_heartbeat(target: str, epoch: int) -> bool:
 	)
 	frappe.db.commit()
 	return won
+
+
+def _progress_stale(loop_heartbeat_ts, threshold_s: int, now=None) -> bool:
+	"""True iff a live-lease pump has made no PROGRESS for > ``threshold_s`` (GAP 3).
+	A NULL / empty stamp is FRESH (never stale): a control row that never heartbeated,
+	or a lease just acquired before its first progress write, must never be
+	force-expired — that is the takeover kill-loop guard. ``now`` is injectable for
+	tests (defaults to the current time)."""
+	if not loop_heartbeat_ts:
+		return False
+	now_dt = frappe.utils.get_datetime(now or _now())
+	age = (now_dt - frappe.utils.get_datetime(loop_heartbeat_ts)).total_seconds()
+	return age > threshold_s
 
 
 def lease_release_if_idle(target: str, epoch: int) -> bool:

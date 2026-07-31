@@ -438,6 +438,142 @@ class TestHopHandoff(_PumpTestCase):
 
 
 class TestTakeoverFencing(_PumpTestCase):
+	def test_a2_progress_stamp_advances_only_on_progress(self):
+		"""A2 (GAP 3): loop_heartbeat_ts (the PROGRESS stamp) advances ONLY when the
+		slice made progress; the lease is renewed either way (liveness independent of
+		progress), so a lease-alive-but-not-draining pump goes progress-stale while a
+		healthy-but-quiet pump keeps its lease."""
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		old = frappe.utils.add_to_date(None, seconds=-300)
+		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", old, update_modified=False)
+		frappe.db.commit()
+
+		# No progress: lease renewed, progress stamp NOT advanced.
+		ctx.last_heartbeat = 0.0
+		pump._heartbeat_and_renew(ctx, progressed=False)
+		frappe.db.commit()
+		self.assertEqual(
+			str(frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts")),
+			str(old),
+			"no-progress slice must NOT advance the progress stamp",
+		)
+
+		# Progress: the stamp advances.
+		ctx.last_heartbeat = 0.0
+		pump._heartbeat_and_renew(ctx, progressed=True)
+		frappe.db.commit()
+		self.assertNotEqual(
+			str(frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts")),
+			str(old),
+			"progress slice must advance the progress stamp",
+		)
+
+	def _fresh_summary(self):
+		return {
+			"aged_out": 0,
+			"reclaimed": 0,
+			"parked": 0,
+			"finalize_requeued": 0,
+			"errored": 0,
+			"revived": 0,
+			"wedged_detected": 0,
+			"forced_expired": 0,
+		}
+
+	def _wedge_shard(self, *, epoch=2, lease_s=20, hb_s):
+		"""Shard = lease-live (`lease_s` future) at `epoch`, progress stamp `hb_s`s old,
+		plus one live-work streaming turn (so the watchdog sees live_work)."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		self._mk_turn(
+			conv,
+			f"pmp_w_{frappe.generate_hash(length=6)}",
+			seed,
+			"streaming",
+			version=3,
+			pump_epoch=epoch,
+			reserved=1,
+			dispatching_at=frappe.utils.now(),
+			assistant_message=amsg,
+		)
+		frappe.db.set_value(PUMP, self._target, "pump_epoch", epoch, update_modified=False)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"lease_expires_at",
+			frappe.utils.add_to_date(None, seconds=lease_s),
+			update_modified=False,
+		)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"loop_heartbeat_ts",
+			frappe.utils.add_to_date(None, seconds=-hb_s),
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	def test_a4a_wedge_detected_but_not_taken_over_when_flag_off(self):
+		"""A4a (GAP 3): a lease-live pump with a STALE progress stamp is DETECTED as
+		wedged, but with the takeover flag OFF it is only logged — not force-expired."""
+		self._wedge_shard(epoch=2, hb_s=pump.PROGRESS_STALE_S + 60)
+		summary = self._fresh_summary()
+		with (
+			patch.object(pump, "_force_takeover_enabled", return_value=False),
+			patch.object(pump, "_log_wedged_throttled"),
+		):
+			pump._watchdog_shard(self._target, self._deps(), summary)
+		self.assertEqual(summary["wedged_detected"], 1, "wedge detected")
+		self.assertEqual(summary["forced_expired"], 0, "flag off -> no takeover")
+		self.assertEqual(
+			int(frappe.db.get_value(PUMP, self._target, "pump_epoch")),
+			2,
+			"epoch unchanged (not force-expired)",
+		)
+
+	def test_a4b_wedge_force_taken_over_when_flag_on(self):
+		"""A4b (GAP 3): with the flag ON, a wedged pump is force-expired (epoch bumped,
+		mirror cleared) and ensure_pump revives a fresh hop on the vacated lease."""
+		self._wedge_shard(epoch=2, hb_s=pump.PROGRESS_STALE_S + 60)
+		summary = self._fresh_summary()
+		with (
+			patch.object(pump, "_force_takeover_enabled", return_value=True),
+			patch.object(pump, "_log_wedged_throttled"),
+			patch.object(pump, "_clear_lease_mirror") as clear_mirror,
+		):
+			pump._watchdog_shard(self._target, self._deps(), summary)
+		self.assertEqual(summary["wedged_detected"], 1)
+		self.assertEqual(summary["forced_expired"], 1, "flag on -> force-expired")
+		self.assertEqual(
+			int(frappe.db.get_value(PUMP, self._target, "pump_epoch")),
+			3,
+			"epoch bumped by force_expire_wedged",
+		)
+		clear_mirror.assert_called_with(self._target)
+		self.assertGreaterEqual(summary["revived"], 1, "ensure_pump revived on the vacated lease")
+
+	def test_a4_healthy_pump_not_flagged_wedged(self):
+		"""A4 (GAP 3): a lease-live pump with a FRESH progress stamp is never flagged
+		wedged — the false-positive / kill-loop guard."""
+		self._wedge_shard(epoch=2, hb_s=0)  # fresh progress stamp
+		summary = self._fresh_summary()
+		with (
+			patch.object(pump, "_force_takeover_enabled", return_value=True),
+			patch.object(pump, "_log_wedged_throttled"),
+		):
+			pump._watchdog_shard(self._target, self._deps(), summary)
+		self.assertEqual(summary["wedged_detected"], 0, "fresh-progress pump is healthy")
+		self.assertEqual(summary["forced_expired"], 0)
+
+	def test_a5_force_takeover_flag_reads_conf(self):
+		"""A5 (GAP 3): the rollback rung reads site_config jarvis_pump_force_takeover —
+		falsy / absent = OFF (detect-log only), truthy = ON."""
+		with patch.dict(frappe.conf, {"jarvis_pump_force_takeover": 0}):
+			self.assertFalse(pump._force_takeover_enabled(), "falsy -> off")
+		with patch.dict(frappe.conf, {"jarvis_pump_force_takeover": 1}):
+			self.assertTrue(pump._force_takeover_enabled(), "truthy -> on")
+
 	def test_old_epoch_write_affects_zero_rows(self):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv)
