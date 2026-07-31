@@ -19,6 +19,24 @@ export function deriveMode(models, preset) {
 	// (was: any 2+-model pool counted as "proxy" regardless of credential type)
 	return hasSubscription || preset ? "proxy" : "direct";
 }
+// The one place that NAMES a tenant's LLM topology. Settings > General and
+// Settings > Billing and metering each used to name it themselves and disagreed:
+// a 2-model api-key pool read "Direct" on General while Billing called the
+// identical state "Pool (direct failover)" (jarvis#561).
+//
+// The two inputs answer DIFFERENT questions and blurring them is what this
+// wording has to keep apart (backend: compute_pool_mode vs compute_proxy_active):
+//   proxyActive  - a Bifrost + CLIProxyAPI sidecar pair is deployed in front of
+//                  the container. Only a chat subscription needs one, because
+//                  cliproxy is what serves an OAuth blob.
+//   enabledCount - how many models the container fails over between. A pool of
+//                  BYO api keys renders openclaw-direct and fails over natively
+//                  with NO sidecar at all, so it is a pool AND it is direct - the
+//                  parenthetical is what says so without claiming a proxy.
+export function connectionModeLabel(proxyActive, enabledCount) {
+	if (proxyActive) return "Pool (proxied)";
+	return Number(enabledCount || 0) > 1 ? "Pool (direct failover)" : "Direct";
+}
 export function uniqueVendors(entry) {
 	if (entry && Array.isArray(entry.vendors) && entry.vendors.length)
 		return entry.vendors.slice();
