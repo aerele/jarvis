@@ -250,6 +250,28 @@ class TestListForOwner(FrappeTestCase):
 	def test_empty_for_unknown_owner(self):
 		self.assertEqual(pending_confirm.list_for_owner("nobody@example.invalid"), [])
 
+	def test_list_items_for_owner_clean_client_shape(self):
+		"""C2: the shared item builder returns the client-facing shape and NEVER
+		leaks internal fields (args/exec_user/args_hash) - the SAME shape the resync
+		endpoint and the run:end terminal both use, so they cannot drift."""
+		t = self._mint(self._A, "conv-a1", "items-clean")
+		items = pending_confirm.list_items_for_owner(self._A)
+		self.assertEqual([it["token"] for it in items], [t])
+		it = items[0]
+		self.assertEqual(
+			set(it.keys()),
+			{"token", "tool", "preview", "summary", "conversation", "run_id", "expires_at"},
+		)
+		self.assertEqual(it["tool"], "create_doc")
+		for internal in ("args", "exec_user", "args_hash"):
+			self.assertNotIn(internal, it)
+
+	def test_list_items_for_owner_filtered_by_conversation(self):
+		self._mint(self._A, "conv-a1", "i-1")
+		t2 = self._mint(self._A, "conv-a2", "i-2")
+		items = pending_confirm.list_items_for_owner(self._A, conversation="conv-a2")
+		self.assertEqual([it["token"] for it in items], [t2])
+
 	def test_clear_for_conversation_removes_only_that_conversation(self):
 		"""F6: clearing a conversation's tokens (on stop_run) deletes its own live
 		tokens and leaves other conversations - and conversation-less tokens - alone."""

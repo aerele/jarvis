@@ -315,6 +315,41 @@ def list_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
 	return out
 
 
+def list_items_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
+	"""Client-facing pending-confirmation items for ``owner`` (optionally filtered
+	to ``conversation``): the SAME shape the ``action:pending`` event and the resync
+	endpoint deliver - ``token``/``tool``/``preview``/``summary``/``conversation``/
+	``run_id``/``expires_at``, and NEVER the internal ``args``/``exec_user``/
+	``args_hash``. Single home for that shape so the resync endpoint and the
+	``run:end`` terminal cannot drift: a card missed on the best-effort live push
+	re-surfaces on the turn's (fenced, backstopped) terminal without a manual reload.
+	Per-record guard: one malformed record must not sink the whole list."""
+	from jarvis.api import _describe_call
+
+	items: list[dict] = []
+	for r in list_for_owner(owner, conversation=conversation):
+		try:
+			tool = r.get("tool")
+			args = r.get("args") or {}
+			items.append(
+				{
+					"token": r.get("token"),
+					"tool": tool,
+					"preview": r.get("preview"),
+					"summary": _describe_call(tool, args),
+					"conversation": r.get("conversation"),
+					"run_id": r.get("run_id"),
+					"expires_at": r.get("expires_at"),
+				}
+			)
+		except Exception:
+			frappe.log_error(
+				title="pending_confirm.list_items_for_owner: record skipped",
+				message=frappe.get_traceback(),
+			)
+	return items
+
+
 def clear_for_conversation(owner: str, conversation: str, run_id: str | None = None) -> int:
 	"""Delete all of ``owner``'s live tokens STRICTLY bound to ``conversation``
 	and return the count cleared. Conversation-less tokens ("") are left alone -
