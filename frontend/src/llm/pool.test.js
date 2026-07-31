@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
 	deriveMode,
+	connectionModeLabel,
 	uniqueVendors,
 	missingVendorKeys,
 	presetToModels,
@@ -89,6 +90,21 @@ test("deriveMode: a pure BYO api-key pool is direct regardless of size (no sidec
 		),
 		"direct"
 	);
+});
+test("connectionModeLabel: a multi-model api-key pool is a pool, and it is direct", () => {
+	// The wording Settings > General and Billing and metering disagreed on
+	// (jarvis#561): General called this state "Direct" while Billing called the
+	// identical state "Pool (direct failover)". One helper now answers for both,
+	// and the parenthetical keeps "no sidecar" from reading as "not a pool".
+	assert.equal(connectionModeLabel(false, 2), "Pool (direct failover)");
+	assert.equal(connectionModeLabel(false, 4), "Pool (direct failover)");
+});
+test("connectionModeLabel: a sidecar pair is proxied; one credential is direct", () => {
+	assert.equal(connectionModeLabel(true, 4), "Pool (proxied)");
+	assert.equal(connectionModeLabel(true, 1), "Pool (proxied)");
+	assert.equal(connectionModeLabel(false, 1), "Direct");
+	assert.equal(connectionModeLabel(false, 0), "Direct");
+	assert.equal(connectionModeLabel(undefined, undefined), "Direct");
 });
 test("deriveMode: a single subscription model is proxy (needs cliproxy)", () => {
 	assert.equal(

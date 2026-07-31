@@ -63,18 +63,37 @@ class TestGetLlmUsage(FrappeTestCase):
 
 
 class TestGetLlmConnectionStatus(FrappeTestCase):
+	_FIELDS = (
+		"proxy_active",
+		"llm_model",
+		"routing_mode",
+		"last_sync_status",
+		"last_subscription_status",
+		"llm_pool_synced_at",
+	)
+
 	def setUp(self):
-		self._proxy = frappe.db.get_single_value("Jarvis Settings", "proxy_active")
-		self._llm_model = frappe.db.get_single_value("Jarvis Settings", "llm_model")
+		# frappe.get_single serves a CACHED doc, so a db.set_single_value written
+		# here is invisible to the endpoint unless the cache is dropped first
+		# (the stale-Single flake this suite has hit before).
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		self._saved = {f: frappe.db.get_single_value("Jarvis Settings", f) for f in self._FIELDS}
 
 	def tearDown(self):
-		frappe.db.set_single_value("Jarvis Settings", "proxy_active", self._proxy or 0)
-		frappe.db.set_single_value("Jarvis Settings", "llm_model", self._llm_model or "")
+		for field, value in self._saved.items():
+			frappe.db.set_single_value("Jarvis Settings", field, value)
 		frappe.db.commit()
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+
+	def _seed(self, **values):
+		"""Write Single fields and make them visible to frappe.get_single."""
+		for field, value in values.items():
+			frappe.db.set_single_value("Jarvis Settings", field, value)
+		frappe.db.commit()
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
 
 	def test_remaps_admin_auth_status_fields(self):
-		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 1)
-		frappe.db.commit()
+		self._seed(proxy_active=1)
 		raw = {
 			"ok": True,
 			"data": {
@@ -84,13 +103,151 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 				"openai_profile_expires_ms": 1893456000000,
 			},
 		}
-		with patch.object(admin_client, "post_llm_auth_status", return_value=raw) as m:
-			out = account.get_llm_connection_status()
+		# pool_primary_model is stubbed so default_model does not depend on
+		# whatever models[] the shared test site happens to hold - the local
+		# primary is preferred over admin's value, and its own preference is
+		# asserted in test_default_model_prefers_the_local_pool_primary below.
+		with patch.object(account, "pool_primary_model", return_value=""):
+			with patch.object(admin_client, "post_llm_auth_status", return_value=raw) as m:
+				out = account.get_llm_connection_status()
 		m.assert_called_once_with()
 		self.assertEqual(out["proxy_active"], True)
 		self.assertEqual(out["auth_present"], True)
 		self.assertEqual(out["oauth_expires_at"], 1893456000000)
 		self.assertEqual(out["default_model"], "gpt-5.5")
+
+	def test_default_model_prefers_the_local_pool_primary(self):
+		"""Admin answers default_model with the Bifrost virtual endpoint
+		("openai_compat/jarvis-pool"), which is not a model the customer picked.
+		The bench knows which member the container runs first, so that wins."""
+		self._seed(proxy_active=1)
+		raw = {"data": {"default_model": "openai_compat/jarvis-pool"}}
+		with patch.object(account, "pool_primary_model", return_value="glm-4.7"):
+			with patch.object(admin_client, "post_llm_auth_status", return_value=raw):
+				out = account.get_llm_connection_status()
+		self.assertEqual(out["default_model"], "glm-4.7")
+
+	# ---- health: admin's auth_profile_present is not a verdict (#561) ------- #
+	#
+	# compute_pool_mode is stubbed throughout rather than satisfied with real
+	# models[] rows, for the same reasons the DIRECT test below stubs
+	# _has_llm_config: seeding a real pool means writing encrypted Password
+	# fields into a shared Single (which survive a column blank and leak into
+	# every later test on the site), and reading the live models[] would make the
+	# outcome depend on whatever another test left behind. The subject here is
+	# which SIGNAL decides health, not how a pool is detected.
+
+	def test_a_serving_pool_is_not_disconnected_when_admin_reports_no_profiles(self):
+		"""The bug. cliproxy had both subscription auth files loaded and was
+		answering turns with them, while admin's post_llm_auth_status returned
+		auth_profile_present:false with an empty profile_ids - and the badge
+		rendered red "Not connected" over demonstrably working chat.
+
+		The admin claim is still passed through verbatim for support; it just
+		stops deciding anything.
+		"""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="ok (pool_update via admin)",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+		)
+		raw = {"data": {"auth_profile_present": False, "profile_ids": []}}
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value=raw):
+				out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "ok")
+		self.assertFalse(out["disconnected"])
+		self.assertFalse(out["auth_present"])
+		self.assertTrue(out["pool_mode"])
+
+	def test_a_pool_the_container_never_received_is_still_reported_down(self):
+		"""The counterweight: health must not be a hardcoded green. With no
+		confirmed apply the container is not serving this config at all, which is
+		the same evidence is_ready_for_chat refuses to open chat on."""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="failed: admin unreachable",
+			llm_pool_synced_at="",
+		)
+		raw = {"data": {"auth_profile_present": True, "profile_ids": ["openai"]}}
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value=raw):
+				out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "down")
+
+	def test_a_failed_apply_on_a_serving_pool_needs_attention(self):
+		"""Applied before, so the container keeps serving its previous config -
+		broken enough to flag, not broken enough to call disconnected."""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="failed: subscription needs re-authentication (blocked)",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+		)
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+				out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "attention")
+
+	def test_a_rejected_subscription_needs_attention(self):
+		"""The fleet's own pool-wide probe said the account rejected a test
+		request. That is a real verdict about the workspace, unlike the auth
+		profile count."""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="ok (pool_update via admin)",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+			last_subscription_status="unverified",
+		)
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+				out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "attention")
+
+	def test_an_unchecked_subscription_is_not_treated_as_a_failure(self):
+		"""An "unchecked" verdict means nobody looked (a no-op apply runs no probe
+		at all), which must not read as evidence of a problem."""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="ok (pool_update via admin)",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+			last_subscription_status="unchecked",
+		)
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+				out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "ok")
+
+	def test_a_save_in_flight_reports_applying(self):
+		self._seed(
+			proxy_active=1,
+			last_sync_status="pending: admin applying config",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+		)
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+				out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "applying")
+
+	def test_shape_fields_describe_the_pool_rather_than_models_zero(self):
+		"""The Model/Provider/Auth-mode triple came from the legacy models[0]
+		mirror, so a 4-model pool was described by one member. These are the
+		fields the SPA replaces it with."""
+		self._seed(proxy_active=1, routing_mode="failover")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+				out = account.get_llm_connection_status()
+		self.assertTrue(out["pool_mode"])
+		self.assertEqual(out["routing_mode"], "failover")
+		self.assertIn("model_count", out)
+		self.assertIn("sync_status", out)
+
+	def test_a_disconnected_workspace_is_down_and_says_so(self):
+		with patch.object(account, "_has_llm_config", return_value=False):
+			with patch.object(admin_client, "post_llm_auth_status") as m:
+				out = account.get_llm_connection_status()
+		m.assert_not_called()
+		self.assertTrue(out["disconnected"])
+		self.assertEqual(out["health"], "down")
 
 	def test_direct_tenant_short_circuits_without_admin_call(self):
 		# A DIRECT (single-model) tenant has no proxy auth profile to report -
@@ -104,9 +261,7 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		# one afterwards leaves the secret in __Auth and leaks a test key into
 		# every later test on the site. It would also make the outcome depend on
 		# whatever models[] the shared test site happens to hold.
-		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
-		frappe.db.set_single_value("Jarvis Settings", "llm_model", "gpt-4o")
-		frappe.db.commit()
+		self._seed(proxy_active=0, llm_model="gpt-4o")
 		with patch.object(account, "_has_llm_config", return_value=True):
 			with patch.object(admin_client, "post_llm_auth_status") as m:
 				out = account.get_llm_connection_status()
@@ -125,9 +280,7 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		This is the shape jarvis.oauth.api.disconnect leaves behind - it clears
 		the OAuth side and deliberately keeps llm_provider / llm_model.
 		"""
-		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
-		frappe.db.set_single_value("Jarvis Settings", "llm_model", "gpt-4o")
-		frappe.db.commit()
+		self._seed(proxy_active=0, llm_model="gpt-4o")
 		with patch.object(account, "_has_llm_config", return_value=False):
 			with patch.object(admin_client, "post_llm_auth_status") as m:
 				out = account.get_llm_connection_status()

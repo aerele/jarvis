@@ -20,7 +20,7 @@ their published names - no duplicates:
 import frappe
 
 from jarvis import admin_client, release_notice
-from jarvis.jarvis.pool_serialize import compute_pool_mode
+from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_admin
 
@@ -279,31 +279,66 @@ def get_llm_usage() -> dict:
 
 @frappe.whitelist()
 def get_llm_connection_status() -> dict:
-	"""Connection card for the Monitor tab: auth profile present + OAuth expiry.
-	Wrapper over admin_client.post_llm_auth_status, remapped to the customer
-	contract field names. Never returns token material. System-Manager only.
+	"""Connection card for Settings, General: how this workspace's LLM config is
+	SHAPED (``pool_mode`` / ``proxy_active`` / ``model_count`` / ``routing_mode``)
+	and whether it is actually SERVING (``health``). Never returns token material.
+	System-Manager only.
 
-	Tenants with no Bifrost/cliproxy sidecar (proxy_active=0, which now includes
-	a BYO api-key pool) short-circuit before the admin round-trip, mirroring
-	get_llm_usage above - there is no proxy auth profile to report. Before this,
-	single-model direct tenants already hit this path: the raw admin payload's
-	leftover fields (a stale/default default_model with auth_profile_present
-	false) made the SPA's ConnectionPane render a misleading orange "Not
-	connected" for a direct tenant whose chat verifiably works.
+	``health`` is decided here, from what the bench already knows, and it is the
+	only field the status badge may render. Admin's ``auth_profile_present`` is
+	still passed through as ``auth_present`` because support wants the raw claim,
+	but it is NOT a verdict about the workspace. A live 4-model pool whose two
+	chat subscriptions cliproxy had loaded and was answering turns with still came
+	back ``auth_profile_present: false, profile_ids: []``, and trusting that
+	boolean painted a red "Not connected" over a workspace whose chat
+	demonstrably worked (#561). Why admin sees no profiles is a control-plane bug
+	of its own; the point here is that the answer never described a pool in the
+	first place, so no value of it should decide this badge.
 
-	``disconnected`` is the third state, and it has to be computed FIRST. The
-	DIRECT short-circuit above returns before any admin round-trip, so a tenant
+	That is the same misleading state that was already fixed once for DIRECT
+	tenants, by short-circuiting them before the admin round-trip: the raw admin
+	payload's leftover fields (a stale/default default_model with
+	auth_profile_present false) made the SPA render "Not connected" for a direct
+	tenant whose chat verifiably worked. The proxy branch kept trusting the
+	boolean, so the identical state came back for pools.
+
+	The honest local signal is the one ``is_ready_for_chat`` already gates chat
+	on: the durable marker the fleet stamps when it CONFIRMS an apply. Tying the
+	badge to it means the badge and the chat gate cannot disagree - a workspace
+	chat let the customer into is green because the same evidence opened both, and
+	a workspace whose config never reached its container is red for the same
+	reason chat refuses it. See ``_llm_health``.
+
+	Tenants with no Bifrost/cliproxy sidecar (proxy_active=0, which includes a BYO
+	api-key pool) still short-circuit before the admin round-trip, mirroring
+	get_llm_usage above - there is no proxy auth profile to report.
+
+	``disconnected`` is a state of its own, and it has to be computed FIRST. The
+	DIRECT short-circuit below returns before any admin round-trip, so a tenant
 	whose connection was torn down (jarvis.onboarding.disconnect_llm) would
-	otherwise fall into it and report a healthy-looking "Direct" while chat is
+	otherwise fall into it and report a healthy-looking config while chat is
 	dead. It is derived here rather than added to ``chat_readiness``: that field
 	is a shared admin/bench contract with exactly four values, and the bench
 	already knows its own config is empty without asking anybody."""
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
+	pool_mode = compute_pool_mode(settings)
+	# Shape, not health. The SPA needs these to name the topology honestly: a
+	# single Model/Provider/Auth-mode triple describes one credential, and a
+	# failover pool is not one credential. pool_mode and proxy_active answer
+	# DIFFERENT questions and must not be blurred - see compute_proxy_active.
+	shape = {
+		"pool_mode": pool_mode,
+		"model_count": len([m for m in (settings.get("models") or []) if m.enabled]),
+		"routing_mode": settings.get("routing_mode") or "",
+		"sync_status": settings.get("last_sync_status") or "",
+	}
 	if not _has_llm_config(settings):
 		return {
+			**shape,
 			"proxy_active": False,
 			"disconnected": True,
+			"health": "down",
 			"auth_present": False,
 			"oauth_expires_at": None,
 			"profile_ids": [],
@@ -311,8 +346,10 @@ def get_llm_connection_status() -> dict:
 		}
 	if not getattr(settings, "proxy_active", 0):
 		return {
+			**shape,
 			"proxy_active": False,
 			"disconnected": False,
+			"health": _llm_health(settings, pool_mode),
 			"auth_present": False,
 			"oauth_expires_at": None,
 			"profile_ids": [],
@@ -321,13 +358,79 @@ def get_llm_connection_status() -> dict:
 	raw = _surface(admin_client.post_llm_auth_status) or {}
 	data = raw.get("data", raw) or {}
 	return {
+		**shape,
 		"proxy_active": True,
 		"disconnected": False,
+		"health": _llm_health(settings, pool_mode),
 		"auth_present": bool(data.get("auth_profile_present")),
 		"oauth_expires_at": data.get("openai_profile_expires_ms"),
 		"profile_ids": data.get("profile_ids", []),
-		"default_model": data.get("default_model", ""),
+		# Admin answers this with the Bifrost virtual endpoint
+		# ("openai_compat/jarvis-pool"), which is not a model the customer picked
+		# and not one they would recognise. The bench knows which member the
+		# container actually runs first, so prefer that and keep admin's value as
+		# the fallback for a shape pool_primary_model cannot read.
+		"default_model": pool_primary_model(settings) or data.get("default_model", ""),
 	}
+
+
+def _llm_health(settings, pool_mode: bool) -> str:
+	"""``ok`` / ``applying`` / ``attention`` / ``down`` for a workspace that HAS a
+	credential (``_has_llm_config`` has already said so).
+
+	Every input is local. Nothing here asks admin, because the one thing admin was
+	asked - "does a cliproxy auth profile exist" - turned out not to describe a
+	pool at all (see get_llm_connection_status).
+
+	  applying  - a save is in flight. The container is still on its previous
+	              config, so neither "fine" nor "broken" is true yet.
+	  down      - the container has NEVER confirmed this workspace's config, so it
+	              is not serving it. This is the same evidence is_ready_for_chat
+	              gates chat on, which is what keeps the badge and the gate from
+	              contradicting each other.
+	  attention - the container IS serving, but the last apply failed or the
+	              fleet's own probe reports the chat subscription rejecting
+	              requests. Both are workspace-level verdicts. Per-MODEL verdicts
+	              deliberately stay out: AI models shows them per row, and one dead
+	              member of a healthy failover chain is what failover is for.
+	  ok        - serving, and the last apply came back clean.
+
+	The status prefixes match @/lib/syncStatus's, which is the SPA's one
+	translator for the same field, so the badge and the sync line cannot disagree
+	about which of the three an audit string means.
+	"""
+	status = (settings.get("last_sync_status") or "").strip().lower()
+	if status.startswith("pending"):
+		return "applying"
+	if not _llm_apply_confirmed(settings, pool_mode):
+		return "down"
+	if status.startswith("failed"):
+		return "attention"
+	# The fleet's own pool-wide subscription probe. Only an explicit rejection
+	# counts: "unchecked" (and a no-op apply, which runs no probe at all) means
+	# nobody looked, which is not evidence of a problem.
+	return "attention" if (settings.get("last_subscription_status") or "") == "unverified" else "ok"
+
+
+def _llm_apply_confirmed(settings, pool_mode: bool) -> bool:
+	"""Has the fleet CONFIRMED an apply of the leg this workspace syncs through?
+
+	Mirrors ``is_ready_for_chat``'s three legs exactly, and must keep mirroring
+	them - the whole value of this signal is that chat and the connection badge
+	read the same evidence. Pool marker for a pool (including a BYO api-key pool,
+	which has no sidecar but is still pushed through /llm-pool and still stamps
+	llm_pool_synced_at), the OAuth connect stamp for a direct subscription/oauth
+	tenant, the direct apply marker otherwise.
+
+	Legacy workspaces on both legs are backfilled by patch (v1_10 for the pool,
+	v2_00_backfill_llm_direct_synced_at for direct), so an established tenant does
+	not read as never-applied.
+	"""
+	if pool_mode:
+		return bool(settings.get("llm_pool_synced_at"))
+	if (settings.get("llm_auth_mode") or "api_key").strip() in ("subscription", "oauth"):
+		return bool(settings.get("llm_oauth_connected_at"))
+	return bool(settings.get("llm_direct_synced_at"))
 
 
 def _has_llm_config(settings) -> bool:
