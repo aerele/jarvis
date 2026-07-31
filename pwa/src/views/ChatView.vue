@@ -480,6 +480,23 @@ function onEvent(p) {
 			sendBusy.value = false;
 			live.value = null;
 			if (!ignored) errorBanner.value = p.error || "That turn failed.";
+			// C2 self-heal (mirror run:end): a card parked in a turn that then errors
+			// must still auto-recover — drain p.pending here too, not only on run:end.
+			// Deduped by token; a conv-less token ("") binds to this conversation.
+			if (Array.isArray(p.pending)) {
+				for (const card of p.pending) {
+					if (!card.token || pending.value.some((x) => x.token === card.token)) continue;
+					pending.value.push({
+						token: card.token,
+						tool: card.tool || "",
+						summary: card.summary || "",
+						preview: card.preview ?? null,
+						conversation: card.conversation || conv,
+						run_id: card.run_id,
+						expires_at: card.expires_at ?? null,
+					});
+				}
+			}
 			load();
 			break;
 
