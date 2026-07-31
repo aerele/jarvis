@@ -10,7 +10,7 @@
 	         `inert` on each block below is what stops the KEYBOARD, so Tab cannot walk
 	         into the controls underneath. Both are needed - a scrim alone leaves the
 	         whole form reachable, and `inert` alone leaves it looking clickable. -->
-		<div v-if="busy.active" class="jv-llm-busy">
+		<div v-if="busy.active && !hostScrim" class="jv-llm-busy">
 			<JvSpinner :size="56" :label="busy.label" />
 		</div>
 
@@ -877,8 +877,11 @@
                  The inner Cancel is EDIT-mode only: there it calls closeConnect to
                  collapse the steps back to the account list. In add mode the steps ARE
                  the panel (they render directly from panel.mode==='add'), so closeConnect
-                 can't hide them - it would leave an inert "Cancel". Abandoning a fresh add
-                 is the panel's own Cancel/Close below; "Connect" stays to submit. -->
+                 can't hide them - Connect stays to submit. The footer below owns Cancel
+                 for every other flow, but its container can never share a row with this
+                 one, so add mode gets its own paired Cancel here instead (Connect on the
+                 left, Cancel on the right, as requested) and the footer's copy is
+                 suppressed via spineCancelPaired so it does not render a second time. -->
 							<div class="jv-cn-acts">
 								<button
 									v-if="panel.mode !== 'add'"
@@ -903,6 +906,15 @@
 								>
 									<JvSpinner v-if="panelRow._connect.loading" />
 									{{ panelRow._connect.loading ? "Connecting…" : "Connect" }}
+								</button>
+								<button
+									v-if="panel.mode === 'add'"
+									type="button"
+									:disabled="!editable"
+									class="jv-btn jv-btn--ghost"
+									@click="closePanel"
+								>
+									Cancel
 								</button>
 							</div>
 						</template>
@@ -1078,7 +1090,12 @@
 				</div>
 
 				<div class="jv-cfgpanel-acts">
+					<!-- Suppressed while spineCancelPaired: the OAuth spine's own Cancel
+		                 (jv-cn-acts, add mode) already covers this, paired with its Connect
+		                 in the order the product asked for - rendering this one too would
+		                 put a second Cancel on screen. -->
 					<button
+						v-if="!spineCancelPaired"
 						type="button"
 						:disabled="!editable"
 						class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -1103,7 +1120,6 @@
 						class="jv-btn jv-btn--primary"
 						@click="panelAction.run()"
 					>
-						<JvSpinner v-if="busy.active" />
 						{{ busy.active ? "Connecting…" : panelAction.label }}
 					</button>
 				</div>
@@ -1597,8 +1613,12 @@
 	         own bar next to the list rather than from down here. What is left for this
 	         strip is reporting - the outcome of the apply this editor just ran, and
 	         otherwise whatever the server last recorded (which covers an apply that is
-	         still landing from a previous visit, or one started from another tab). -->
-		<div v-if="!footerless && statusLine" :inert="busy.active" class="jv-pool-savebar">
+	         still landing from a previous visit, or one started from another tab).
+	         Hidden while busy.active: the scrim's own label already says "Applying to
+	         your agent…" next to its spinner, and this strip says the exact same
+	         sentence, so showing both is a duplicate, not a second, more useful
+	         status (jarvis#559). -->
+		<div v-if="!footerless && statusLine && !busy.active" class="jv-pool-savebar">
 			<span
 				class="jv-pool-syncpill"
 				:class="'jv-pool-syncpill--' + statusLine.kind"
@@ -1661,6 +1681,12 @@ const props = defineProps({
 	// subscription (is_single_subscription_pool) already renders as a normal
 	// row via rows.value and needs no special-casing.
 	directStatus: { type: Object, default: null },
+	// Let a host (AiModelsPane) render its OWN busy scrim over the whole settings
+	// pane, not just this editor's own box, and suppress the one below so a
+	// connect in flight is never blurred twice. `busy` is exposed for the host
+	// to read; other consumers (onboarding, ChatView) never pass this, so their
+	// scrim is unaffected.
+	hostScrim: { type: Boolean, default: false },
 });
 const emit = defineEmits(["saved", "ready", "direct-changed"]);
 
@@ -2395,6 +2421,28 @@ const panelConnectOpen = computed(() => {
 	const c = r._connect;
 	if (!c) return false;
 	return !!c.open || (panel.value.mode === "add" && !(r.accounts || []).length);
+});
+
+// True exactly when the spine's own Cancel is standing in for the footer's -
+// the paste-back add flow above (jv-cn-acts), not the device-code flow (that one
+// has no Connect to pair against, so it keeps the footer's Cancel as-is). Read by
+// the footer below to skip its own Cancel/Close and avoid showing two.
+//
+// The explicit panel.source check matters: setPanelSource("preset") leaves
+// panelRow.credentialType at whatever it was on the tab the customer came
+// from, so switching from Chat subscription to Preset without this guard
+// would still read as panelConnectOpen and wrongly hide the preset tab's
+// own "Done" - the same trap panelAction below already guards against.
+const spineCancelPaired = computed(() => {
+	const r = panelRow.value;
+	return !!(
+		panel.value.source === "subscription" &&
+		panelConnectOpen.value &&
+		panel.value.mode === "add" &&
+		r &&
+		r._connect &&
+		!r._connect.deviceFlow
+	);
 });
 
 const panelAction = computed(() => {
@@ -3705,8 +3753,9 @@ onBeforeUnmount(() => {
 	clearTimeout(applyResultTimer);
 });
 
-// Let a host (onboarding, footerless) drive Save from its own footer.
-defineExpose({ save });
+// Let a host (onboarding, footerless) drive Save from its own footer, and a
+// hostScrim host (AiModelsPane) read the apply-in-flight state for its own scrim.
+defineExpose({ save, busy });
 </script>
 
 <style scoped>
@@ -3715,7 +3764,13 @@ defineExpose({ save });
    whole settings dialog: the customer should still be able to close the dialog
    or move to another pane while their agent restarts in the background. Inside
    the editor, though, nothing is clickable and (thanks to `inert` on the blocks
-   underneath) nothing is tabbable either. ========================================= */
+   underneath) nothing is tabbable either.
+
+   hostScrim consumers (AiModelsPane) skip this box entirely and render their
+   own wider one instead - the editor alone was too narrow a box: the pane's
+   own save-bar status line sits below it and stayed sharp underneath a scrim
+   scoped only to .jv-llm-editor (jarvis#559). Onboarding and ChatView never
+   pass hostScrim, so they keep exactly this behaviour. ========================================= */
 .jv-llm-editor {
 	position: relative;
 }

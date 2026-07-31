@@ -42,12 +42,29 @@
 		     round-tripping it through save_llm_pool. -->
 		<div v-else class="jv-pane-fill h-full">
 			<LlmPoolEditor
+				ref="poolEditor"
 				:editable="isSM"
 				:directStatus="directSub"
+				:hostScrim="true"
 				@saved="onSaved"
 				@direct-changed="onDirectChanged"
 			/>
 		</div>
+
+		<!-- Pane-wide busy scrim (jarvis#559): LlmPoolEditor's own scrim only ever
+		     covered its own box, so the pane's status line below it (same editor,
+		     sunk to the bottom via jv-pane-fill) stayed sharp and unblurred while a
+		     connect applied. hostScrim tells the editor to skip its scrim and expose
+		     `busy` instead, so this one - anchored to the whole SettingsPane via its
+		     `scrim` slot - can cover it. -->
+		<template #scrim>
+			<div
+				v-if="poolEditor?.busy?.active"
+				class="absolute inset-0 z-10 grid place-items-center bg-surface-white/85 backdrop-blur-sm"
+			>
+				<JvSpinner :size="56" :label="poolEditor.busy.label" />
+			</div>
+		</template>
 	</SettingsPane>
 </template>
 
@@ -57,7 +74,12 @@ import { Button } from "frappe-ui";
 import { getDirectSubscriptionStatus } from "@/api";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { agentName } from "@/branding";
+
+// Template ref onto LlmPoolEditor's exposed { save, busy } - read busy.active/
+// busy.label above for the pane-wide scrim in the #scrim slot.
+const poolEditor = ref(null);
 
 // The rail already gates this section to the tenant-admin tier; this flag
 // additionally gates the editor's edit affordances + which probes fire. PART 4
