@@ -1212,9 +1212,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		if not token:
 			return _error(
 				"ConfirmationUnavailableError",
-				"could not stage the confirmation for this action (a transient "
-				"storage error). Nothing was changed. Retry the exact same call and "
-				"the confirmation card will appear.",
+				"could not stage the confirmation for this action (a storage error). "
+				"Nothing was changed. You may retry the exact same call once; if it "
+				"still fails, tell the user the confirmation could not be shown right "
+				"now and stop - do not loop.",
 			)
 		# Deliver the token to the human's UI out-of-band, over the realtime
 		# channel, NEVER via the function return below - the model must never
