@@ -1337,11 +1337,18 @@ def lease_handoff(target: str, epoch: int, next_hop: int, successor_holder: str)
 	return won
 
 
-def force_expire_wedged(target: str, epoch: int) -> bool:
+def force_expire_wedged(target: str, epoch: int, stale_after_s: int) -> bool:
 	"""Force-expire a WEDGED but lease-LIVE pump (GAP 3 A4). A pump that keeps renewing
 	its lease but has made no PROGRESS (``loop_heartbeat_ts`` stale, see
-	``_progress_stale``) is not draining and will not self-recover. Under CAS on the
-	wedged pump's ``pump_epoch=E`` this atomically:
+	``_progress_stale``) is not draining and will not self-recover. The CAS re-asserts
+	the FULL wedge predicate — epoch AND live lease AND ``loop_heartbeat_ts`` older
+	than ``stale_after_s`` — inside the UPDATE itself, because the watchdog's
+	detection READ races this takeover: the pump can resume progress (heartbeat) after
+	that read while still at epoch E, and an epoch-only CAS would force-expire the
+	now-healthy pump. A pump that progressed since the read, a lease that has expired
+	meanwhile (the normal ``ensure_pump`` revive path owns that), and a NULL stamp
+	(SQL ``NULL < x`` never matches — mirrors ``_progress_stale``'s NULL-is-fresh
+	kill-loop guard) all affect 0 rows. Under that CAS this atomically:
 	  * BUMPS the epoch (``pump_epoch+1``) — so the wedged pump's next lease_renew /
 	    heartbeat / turn-write (all cached at E) affects 0 rows and it exits via
 	    ``lease_lost_exit``. This is the fence: a bare lease-expiry would just be
@@ -1360,12 +1367,14 @@ def force_expire_wedged(target: str, epoch: int) -> bool:
 	frappe.db.commit()
 	now = _now()
 	past = frappe.utils.add_to_date(None, seconds=-1)
+	cutoff = frappe.utils.add_to_date(now, seconds=-int(stale_after_s))
 	won = (
 		_run_cas(
 			f"""UPDATE `tab{PUMP}`
 			SET pump_epoch=pump_epoch+1, lease_expires_at=%(past)s, loop_heartbeat_ts=%(now)s
-			WHERE relay_target_id=%(t)s AND pump_epoch=%(e)s""",
-			{"past": past, "now": now, "t": target, "e": epoch},
+			WHERE relay_target_id=%(t)s AND pump_epoch=%(e)s
+			  AND lease_expires_at > %(now)s AND loop_heartbeat_ts < %(cutoff)s""",
+			{"past": past, "now": now, "cutoff": cutoff, "t": target, "e": epoch},
 		)
 		== 1
 	)

@@ -621,7 +621,7 @@ class TestFencingTimelines(_TurnStateTestCase):
 		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", stale_stamp, update_modified=False)
 		frappe.db.commit()
 
-		self.assertTrue(ts.force_expire_wedged(self._target, E))
+		self.assertTrue(ts.force_expire_wedged(self._target, E, 180))
 		row = frappe.db.get_value(
 			PUMP, self._target, ["pump_epoch", "lease_expires_at", "loop_heartbeat_ts"], as_dict=True
 		)
@@ -644,7 +644,85 @@ class TestFencingTimelines(_TurnStateTestCase):
 		self.assertFalse(ts.lease_renew(self._target, E), "stale-epoch renew is fenced")
 		frappe.db.rollback()
 		# Idempotent: a second force-expire at the same (now-gone) epoch is a no-op.
-		self.assertFalse(ts.force_expire_wedged(self._target, E))
+		self.assertFalse(ts.force_expire_wedged(self._target, E, 180))
+		frappe.db.rollback()
+
+	def _wedged_row(self, E, *, lease_s=25, hb_age_s=300):
+		"""Control row in the WEDGED shape at epoch E: lease `lease_s`s in the future,
+		progress stamp `hb_age_s`s old, plus one in-flight streaming turn."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		amsg = self._mk_msg(conv, 2, role="assistant", content="", streaming=1)
+		run_id = f"ts_few_{frappe.generate_hash(length=6)}"
+		self._mk_turn(
+			conv,
+			run_id,
+			seed,
+			"streaming",
+			version=20,
+			pump_epoch=E,
+			reserved=1,
+			dispatching_at=frappe.utils.now(),
+			assistant_message=amsg,
+		)
+		frappe.db.set_value(PUMP, self._target, "pump_epoch", E, update_modified=False)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"lease_expires_at",
+			frappe.utils.add_to_date(None, seconds=lease_s),
+			update_modified=False,
+		)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"loop_heartbeat_ts",
+			frappe.utils.add_to_date(None, seconds=-hb_age_s),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return run_id
+
+	def test_a4_force_expire_reasserts_progress_under_cas(self):
+		"""GAP 3 review fix: the takeover CAS re-asserts the FULL wedge predicate, not
+		just the epoch. A pump that resumed progress AFTER the watchdog's stale read —
+		still at the same epoch E — must NOT be force-expired: the recovery heartbeat
+		between detection and takeover makes the CAS affect 0 rows."""
+		E = 6
+		run_id = self._wedged_row(E)  # detection would flag this shape as wedged
+		# Between the watchdog's read and its takeover, the pump recovers and writes
+		# a fresh progress stamp through its normal path.
+		self.assertTrue(ts.lease_heartbeat(self._target, E))
+		lease_before = frappe.db.get_value(PUMP, self._target, "lease_expires_at")
+
+		self.assertFalse(
+			ts.force_expire_wedged(self._target, E, 180),
+			"a pump that progressed since the stale read is NOT taken over",
+		)
+		row = frappe.db.get_value(PUMP, self._target, ["pump_epoch", "lease_expires_at"], as_dict=True)
+		self.assertEqual(row["pump_epoch"], E, "epoch NOT bumped — the healthy pump keeps writing")
+		self.assertEqual(str(row["lease_expires_at"]), str(lease_before), "lease NOT vacated")
+		turn = frappe.db.get_value(TURN, run_id, ["pump_epoch", "version"], as_dict=True)
+		self.assertEqual(turn["pump_epoch"], E, "in-flight turn NOT re-stamped")
+		self.assertEqual(turn["version"], 20, "turn version untouched")
+		frappe.db.rollback()
+
+	def test_a4_force_expire_requires_live_lease(self):
+		"""The wedge takeover fires ONLY on the wedge shape (live lease + stale
+		progress). A lease that has EXPIRED by CAS time is the ordinary dead-pump
+		revive path (``ensure_pump`` acquires it normally) — force-expire declines
+		rather than bumping the epoch under a successor's feet."""
+		E = 7
+		self._wedged_row(E, lease_s=-5)  # stale progress, but the lease already lapsed
+		self.assertFalse(
+			ts.force_expire_wedged(self._target, E, 180),
+			"an expired lease is not the wedge shape — the normal revive path owns it",
+		)
+		self.assertEqual(
+			int(frappe.db.get_value(PUMP, self._target, "pump_epoch")),
+			E,
+			"epoch unchanged",
+		)
 		frappe.db.rollback()
 
 	def test_d4c_delayed_old_writer_stale_after_takeover(self):

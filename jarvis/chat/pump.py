@@ -3201,7 +3201,7 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 			# the log below is throttled 1/h/shard only to bound Error Log volume.
 			_telemetry("pump_wedged", target=target, epoch=wedged_epoch, threshold_s=PROGRESS_STALE_S)
 			_log_wedged_throttled(target, wedged_epoch)
-			if _force_takeover_enabled() and ts.force_expire_wedged(target, wedged_epoch):
+			if _force_takeover_enabled() and ts.force_expire_wedged(target, wedged_epoch, PROGRESS_STALE_S):
 				_clear_lease_mirror(target)
 				summary["forced_expired"] += 1
 				_telemetry("pump_force_expired", target=target, epoch=wedged_epoch)
