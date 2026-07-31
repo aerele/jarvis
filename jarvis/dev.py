@@ -66,14 +66,22 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 	# still succeed when admin/fleet is down, the tenant was already purged, or
 	# nothing was connected. Only attempted when a container is actually wired up.
 	if (s.get("agent_url") or "").strip():
-		try:
-			from jarvis import admin_client
+		from jarvis import admin_client
 
+		try:
 			admin_client.post_subscription_disconnect()
 		except Exception:
 			frappe.logger().info(
 				"reset_onboarding: container subscription_disconnect skipped/failed (non-fatal)"
 			)
+		# The field loop below clears this bench's device credentials, but the
+		# PAIRING lives in the container - so any surviving copy of the token
+		# would keep chat access to a "reset" workspace. Same ordering reason as
+		# the disconnect above: after the wipe the bench cannot reach admin.
+		try:
+			admin_client.unpair_chat_devices()
+		except Exception:
+			frappe.logger().info("reset_onboarding: container unpair skipped/failed (non-fatal)")
 
 	settings_reset.apply(s, _FULL)
 	frappe.db.commit()

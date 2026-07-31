@@ -6,6 +6,8 @@ now gates on System Manager alone via frappe.only_for, which was always the
 real security boundary (sandbox mode was documented as self-attested UX, not
 hardening)."""
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
@@ -164,3 +166,44 @@ class TestResetOnboardingWipe(FrappeTestCase):
 		self.assertEqual(out["data"]["wiped_doctypes"], [])
 		self.assertEqual(frappe.db.count("Jarvis Conversation", {"title": "dev-reset-wipe"}), 1)
 		self.assertEqual(frappe.db.count("Jarvis Macro", {"macro_name": "dev-reset-wipe"}), 1)
+
+
+class TestResetUnpairsTheContainer(FrappeTestCase):
+	"""The field wipe below clears this bench's device credentials, but the
+	PAIRING lives in the container: any surviving copy of that token would keep
+	chat access to a workspace the operator just reset."""
+
+	def setUp(self):
+		self._snap = _snapshot()
+		_seed_onboarded_state()
+		for target in ("post_subscription_disconnect", "unpair_chat_devices"):
+			pt = patch(f"jarvis.admin_client.{target}")
+			self.addCleanup(pt.stop)
+			setattr(self, target, pt.start())
+
+	def tearDown(self):
+		_restore(self._snap)
+
+	def test_unpairs_while_the_bench_can_still_reach_admin(self):
+		"""Ordering: after the wipe the api credentials are gone, so the call must
+		happen before it."""
+		seen = {}
+		self.unpair_chat_devices.side_effect = lambda: seen.update(
+			agent_url=frappe.db.get_single_value(SETTINGS, "agent_url")
+		)
+		reset_onboarding()
+		self.assertTrue(self.unpair_chat_devices.called, "reset left the container paired")
+		self.assertTrue(seen.get("agent_url"), "unpaired after the credentials were wiped")
+
+	def test_a_failed_unpair_never_blocks_the_reset(self):
+		"""A dead container is often the very reason for the reset."""
+		self.unpair_chat_devices.side_effect = Exception("fleet agent down")
+		out = reset_onboarding()
+		self.assertTrue(out["ok"])
+		self.assertEqual(frappe.get_single(SETTINGS).agent_url or "", "")
+
+	def test_skipped_when_no_container_is_wired(self):
+		frappe.get_single(SETTINGS).db_set("agent_url", "")
+		frappe.db.commit()
+		reset_onboarding()
+		self.assertFalse(self.unpair_chat_devices.called)
