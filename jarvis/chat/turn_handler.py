@@ -477,6 +477,29 @@ def _assistant_name_clause(settings) -> str:
 	return f"; assistant name: {safe}"
 
 
+def persona_feature_enabled() -> bool:
+	"""The persona kill switch (``Jarvis Settings.persona_enabled``), NULL=ON.
+
+	Probes the ``tabSingles`` row directly instead of
+	``frappe.db.get_single_value``: for a Check field the latter coerces an unset
+	value to 0 via ``cint()`` (``personalise_api._single_bool`` and ``wiki.py``
+	document this exact trap), which is indistinguishable from an admin explicitly
+	disabling it - so an un-backfilled bench and a fresh install (which never runs
+	patches) would both read the feature as OFF. Here "no row" is the default
+	(ON); only a stored 0 is OFF. The probe never touches the meta, so it also
+	cannot throw in the migrate window before the field syncs - unlike
+	get_single_value, which raises on a missing meta field and would invert the
+	pill against the clause. Read here AND by the boot payload (N7) so the same
+	switch value drives both."""
+	row = frappe.db.sql(
+		"select value from tabSingles where doctype=%s and field=%s",
+		("Jarvis Settings", "persona_enabled"),
+	)
+	if not row:
+		return True
+	return bool(frappe.utils.cint(row[0][0]))
+
+
 def _persona_clause(chat_user: str) -> str:
 	"""Per-user persona voice folded into the trusted [Context:] line so the agent
 	adopts the chosen voice (AGENTS.md "Personas"). ONLY the non-default persona is
@@ -485,21 +508,22 @@ def _persona_clause(chat_user: str) -> str:
 	emit only the known alternate value, never the raw stored string - the bracket
 	is trusted/system, so a stray DB value must not flow into it verbatim.
 
-	Gated by the Jarvis Settings.persona_enabled kill switch: an explicit 0 turns
-	the feature off (pill hidden by get_chat_ui_settings, clause silent here), so a
-	flipped-off bench stops injecting the token for already-opted-in users (N7)."""
+	Gated by the Jarvis Settings.persona_enabled kill switch (NULL=ON, see
+	persona_feature_enabled): an explicit 0 turns the feature off (pill hidden by
+	get_chat_ui_settings, clause silent here), so a flipped-off bench stops
+	injecting the token for already-opted-in users (N7)."""
 	try:
-		enabled = frappe.db.get_single_value("Jarvis Settings", "persona_enabled")
-		if enabled is not None and not frappe.utils.cint(enabled):
+		if not persona_feature_enabled():
 			return ""
 		persona = frappe.db.get_value("Jarvis User Settings", {"user": chat_user}, "preferred_persona")
 	except Exception as e:
 		# A site-wide lookup failure would degrade every Jara user invisibly. Log at
-		# WARNING (this repo's loggers default above DEBUG, so .debug never emits -
-		# see latency.py), wrapped so a logging failure can never defeat the fail-open
+		# ERROR: production loggers run under supervisor with _dev_server False, so
+		# the default level is ERROR (40) and .warning/.debug never emit - see
+		# latency.py. Wrapped so a logging failure can never defeat the fail-open
 		# return (mirrors policy.py's G2 guard). Lazy %s, zero happy-path cost.
 		try:
-			frappe.logger("jarvis").warning("_persona_clause lookup failed for %s: %s", chat_user, e)
+			frappe.logger("jarvis").error("_persona_clause lookup failed for %s: %s", chat_user, e)
 		except Exception:
 			pass
 		return ""

@@ -1406,7 +1406,7 @@ def get_chat_ui_settings() -> dict:
 	# providers==[] and the UI hides the provider group.
 	providers = sorted({r["provider"] for r in pool if r["provider"]})
 
-	return {
+	ui = {
 		"llm_auth_mode": settings.llm_auth_mode or "api_key",
 		"llm_provider": settings.llm_provider or "",
 		"llm_model": settings.llm_model or "",
@@ -1442,13 +1442,18 @@ def get_chat_ui_settings() -> dict:
 		# default on), read here AND in _persona_clause so flipping it off both hides
 		# the pill and stops the clause - never a client-only half-switch (N7).
 		"persona_enabled": _persona_feature_enabled(),
-		# The server's current persona for this user, so the SPA can reconcile a
-		# localStorage-booted pill to the row at mount. Best-effort like the sibling
-		# gates (N8): a migrate-lag missing column must not 500 the whole bootstrap.
-		"preferred_persona": _current_user_persona(),
 		# auto-apply is per-conversation now (issue #186); the frontend reads
 		# ``auto_apply`` from the conversation payload, not this global endpoint.
 	}
+	# The server's current persona, so the SPA can reconcile a localStorage-booted
+	# pill to the row at mount. Only sent when we could actually read it: on a read
+	# failure _current_user_persona returns None and we OMIT the key, because the
+	# client reconciles (and caches) only when the key is present - so a transient
+	# failure keeps the current pill instead of pinning it to a wrong default.
+	persona = _current_user_persona()
+	if persona is not None:
+		ui["preferred_persona"] = persona
+	return ui
 
 
 def _wiki_enabled_flag() -> bool:
@@ -1464,32 +1469,39 @@ def _wiki_enabled_flag() -> bool:
 		return False
 
 
-def _current_user_persona() -> str:
-	"""The caller's stored persona for the boot payload. Best-effort like the
-	sibling bootstrap keys (N8): a migrate-lag missing column, or any read error,
-	must not 500 the whole endpoint - fall back to the default so ChatView still
-	gets its model picker, timezone, and the rest of `ui`."""
+def _current_user_persona() -> str | None:
+	"""The caller's stored persona for the boot payload, or None if it can't be
+	read. A real read (including a user with no row) yields the actual value,
+	defaulting to "Jarvis"; a FAILURE returns None so get_chat_ui_settings OMITS
+	the preferred_persona key and the SPA keeps its current pill rather than
+	adopting-and-caching a wrong default. The old code returned "Jarvis" on error,
+	which the persist:false reconcile wrote to localStorage - so a transient read
+	failure could pin the pill to Jarvis while turns still came back as Jara.
+	Contrast _wiki_enabled_flag, whose fallback only hides a pill, never mutates
+	client state."""
 	try:
 		return (
 			frappe.db.get_value("Jarvis User Settings", {"user": frappe.session.user}, "preferred_persona")
 			or "Jarvis"
 		)
 	except Exception:
-		return "Jarvis"
+		return None
 
 
 def _persona_feature_enabled() -> bool:
-	"""The persona kill switch for the boot payload. Best-effort like the sibling
-	gates (N8): default ON, an explicit 0 is the only OFF, and a migrate-lag
-	missing field/value must not 500 the bootstrap or invert the pill vs the
-	clause. Uses get_single_value (returns None when unset) so it matches
-	_persona_clause's None-is-ON semantics exactly rather than a bare attribute
-	read that would AttributeError before the column syncs."""
+	"""The persona kill switch for the boot payload: default ON, only an explicit
+	stored 0 is OFF. Delegates to the canonical NULL=ON probe in turn_handler so
+	the pill and the clause read the switch identically (N7). Wrapped best-effort
+	(N8): a read failure shows the pill rather than 500-ing the whole bootstrap.
+	The probe uses a tabSingles row check, not get_single_value - the latter
+	coerces an unset Check to 0, which had shipped the feature OFF for every
+	un-backfilled bench and fresh install."""
 	try:
-		val = frappe.db.get_single_value("Jarvis Settings", "persona_enabled")
+		from jarvis.chat.turn_handler import persona_feature_enabled
+
+		return persona_feature_enabled()
 	except Exception:
 		return True
-	return val is None or bool(frappe.utils.cint(val))
 
 
 @frappe.whitelist()

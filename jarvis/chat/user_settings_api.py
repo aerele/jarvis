@@ -108,7 +108,10 @@ def _settings_payload(doc) -> dict:
 		"user": doc.user,
 		"notify_enabled": cint(doc.notify_enabled),
 		"activity_detail": cint(doc.activity_detail),
-		"preferred_persona": doc.preferred_persona or "Jarvis",
+		# getattr, not a bare read: in the migrate window before preferred_persona
+		# syncs onto the doc's meta, doc.preferred_persona would AttributeError and
+		# 500 get_my_settings / update_my_settings. Default to Jarvis like the rest.
+		"preferred_persona": getattr(doc, "preferred_persona", None) or "Jarvis",
 		"monthly_token_limit": cint(doc.monthly_token_limit),
 		"usage_month": doc.usage_month,
 		"month_tokens": _month_tokens_effective(doc.usage_month, doc.month_tokens),
@@ -251,7 +254,8 @@ def admin_set_user_model_limit(user: str, model: str, monthly_token_limit: int =
 	Admins only (server re-checks; the SPA gate is UX)."""
 	require_jarvis_admin()
 	# Coerce before the db calls: a dict `user` would otherwise turn the identity
-	# check into a filter match, and a list `model` would 500 on .strip() (N10).
+	# check into a filter match, and a non-string `model` would crash the per-model
+	# lookup - a list reaches frappe.db.get_value as filters and unpacks wrong (N10).
 	user = _s(user)
 	if not user or not frappe.db.exists("User", user):
 		return {"ok": False, "reason": "unknown_user"}
