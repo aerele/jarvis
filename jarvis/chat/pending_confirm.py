@@ -154,19 +154,32 @@ def mint(
 		# carries it (the resync payload reads it straight off the record).
 		"expires_at": expires_at if expires_at is not None else int(time.time()) + _TTL_S,
 	}
-	frappe.cache().set_value(_key(token), record, expires_in_sec=_TTL_S)
-	# cards_open gauge +1 (self-healing on expiry via the ZSET score).
-	_gauge_add(token, record["expires_at"])
-	_emit_cards_open("mint")
-	# Index the token under its owner so list_for_owner can re-surface it. Best
-	# effort: the token record is the source of truth (owner binding + execution
-	# both read it), so an index hiccup must never block the park.
+	cache = frappe.cache()
+	cache.set_value(_key(token), record, expires_in_sec=_TTL_S)
+	# Index the token under its owner so list_for_owner (the resync endpoint) can
+	# re-surface it after a reload/reconnect. This is REQUIRED, not best-effort: an
+	# unindexed record is INVISIBLE to resync -> a silent, unrecoverable
+	# confirmation card (the bulk-create card that parked but never rendered). So if
+	# the index write fails, roll the record back rather than leave an orphan the
+	# user can never see, and log the failure LOUDLY (it was a silent
+	# try/except: pass). The gate re-parks on its next attempt.
 	try:
-		cache = frappe.cache()
 		cache.sadd(_owner_key(owner), token)
 		cache.expire_key(_owner_key(owner), _TTL_S)
 	except Exception:
-		pass
+		frappe.log_error(
+			title="pending_confirm: owner-index write failed; token not parked",
+			message=frappe.get_traceback(),
+		)
+		try:
+			cache.delete_value(_key(token))
+		except Exception:
+			pass
+		return token
+	# cards_open gauge +1 (self-healing on expiry via the ZSET score). Bumped only
+	# after a successful persist+index so the gauge never over-counts a rolled-back park.
+	_gauge_add(token, record["expires_at"])
+	_emit_cards_open("mint")
 	return token
 
 

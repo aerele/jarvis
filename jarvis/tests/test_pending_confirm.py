@@ -10,6 +10,7 @@ import threading
 from unittest.mock import patch
 
 import frappe
+import redis.exceptions
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import pending_confirm
@@ -65,6 +66,61 @@ class TestMint(FrappeTestCase):
 		# Both are independently live.
 		self.assertIsNotNone(pending_confirm.peek(t1))
 		self.assertIsNotNone(pending_confirm.peek(t2))
+
+
+class TestMintReliableIndex(FrappeTestCase):
+	"""C1: a token can NEVER be persisted without being findable by
+	list_for_owner. An unindexed record is invisible to the resync endpoint -> a
+	silent, unrecoverable confirmation card (the bulk-create card that never
+	rendered). So the owner-index write is required, not best-effort: if it fails
+	the record is rolled back (no orphan) and the failure is logged LOUDLY (it was
+	a silent try/except: pass)."""
+
+	_A = "owner-c1@example.invalid"
+
+	def setUp(self):
+		# The per-owner index lives in Redis (not rolled back with the DB); clear
+		# it so a prior run's tokens don't mask these assertions.
+		frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self._A)
+
+	def _mint(self):
+		return pending_confirm.mint(
+			conversation="conv-c1",
+			owner=self._A,
+			tool="create_doc",
+			args={"docs": [{"doctype": "ToDo", "values": {"description": "c1"}}]},
+			run_id="",
+			preview={"preview": True, "would": {"created": [{"doctype": "ToDo", "name": "x"}]}},
+		)
+
+	def test_mint_persists_and_indexes(self):
+		"""A normal mint is BOTH peekable AND retrievable by resync (regression
+		guard for the persisted<->indexed invariant)."""
+		token = self._mint()
+		self.assertIsNotNone(pending_confirm.peek(token))
+		self.assertIn(token, {r["token"] for r in pending_confirm.list_for_owner(self._A)})
+
+	def test_index_write_failure_is_logged_not_silent(self):
+		"""An owner-index write failure must be LOUD (was swallowed by
+		try/except: pass), so the mode is observable instead of invisible."""
+		with patch.object(
+			frappe.cache(), "sadd", side_effect=redis.exceptions.ConnectionError("simulated redis blip")
+		):
+			with patch.object(frappe, "log_error") as mock_log:
+				self._mint()
+		self.assertTrue(mock_log.called, "index-write failure must be logged, not swallowed")
+
+	def test_index_write_failure_leaves_no_orphan(self):
+		"""If the token can't be indexed it must NOT be left persisted (invisible
+		to resync) - the record is rolled back so no unrecoverable orphan survives
+		for the full TTL."""
+		with patch.object(
+			frappe.cache(), "sadd", side_effect=redis.exceptions.ConnectionError("simulated redis blip")
+		):
+			with patch.object(frappe, "log_error"):
+				token = self._mint()
+		self.assertIsNone(pending_confirm.peek(token))
+		self.assertNotIn(token, {r["token"] for r in pending_confirm.list_for_owner(self._A)})
 
 
 class TestExecUser(FrappeTestCase):
