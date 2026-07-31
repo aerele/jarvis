@@ -537,6 +537,194 @@ class TestFencingTimelines(_TurnStateTestCase):
 		frappe.db.commit()
 		self.assertEqual(self._state("ts_d4a"), "finalizing")
 
+	def test_a1_acquire_seeds_progress_stamp_on_cold_start(self):
+		"""A1 (GAP 3): a COLD-START acquire (loop_heartbeat_ts is NULL) SEEDS the stamp
+		to now, so a pump wedged from birth still ages toward detection instead of
+		sitting at NULL (which _progress_stale treats as fresh forever)."""
+		ts._ensure_control_row(self._target)
+		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", None, update_modified=False)
+		frappe.db.commit()
+		self.assertIsNone(frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts"))
+		won, _ = ts.lease_acquire(self._target, "hop-a1")
+		self.assertTrue(won)
+		self.assertIsNotNone(
+			frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts"),
+			"cold-start acquire must seed the progress stamp",
+		)
+
+	def test_a1_acquire_carries_progress_stamp_forward(self):
+		"""A1 (GAP 3 — the CRITICAL guard): a clean-hop re-acquire CARRIES the progress
+		stamp FORWARD (COALESCE), it does NOT refresh it. run_pump_hop calls lease_acquire
+		on EVERY hop (~90s), so refreshing here would keep the stamp younger than the
+		180s threshold forever and the wedge detector could never fire. A non-draining
+		lineage must age past the threshold across hops."""
+		ts._ensure_control_row(self._target)
+		old = frappe.utils.add_to_date(None, seconds=-300)
+		# A prior hop left an OLD progress stamp; expire the lease so the next acquire wins.
+		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", old, update_modified=False)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"lease_expires_at",
+			frappe.utils.add_to_date(None, seconds=-5),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		won, _ = ts.lease_acquire(self._target, "hop-carry")
+		self.assertTrue(won)
+		self.assertEqual(
+			str(frappe.db.get_value(PUMP, self._target, "loop_heartbeat_ts")),
+			str(old),
+			"acquire must CARRY the progress stamp forward, not refresh it "
+			"(else the wedge detector never fires)",
+		)
+
+	def test_a1_progress_stale_null_is_fresh(self):
+		"""A1 (GAP 3): a NULL progress stamp is FRESH (never stale) — a lease just
+		acquired before its first progress write must never be force-expired."""
+		self.assertFalse(ts._progress_stale(None, 60), "NULL stamp is fresh")
+		old = frappe.utils.add_to_date(None, seconds=-120)
+		self.assertTrue(ts._progress_stale(old, 60), "120s-old stamp is stale past a 60s threshold")
+		recent = frappe.utils.add_to_date(None, seconds=-10)
+		self.assertFalse(ts._progress_stale(recent, 60), "10s-old stamp is fresh under a 60s threshold")
+
+	def test_a3_force_expire_wedged_fences_and_vacates(self):
+		"""A3 (GAP 3): force_expire_wedged bumps the epoch (fencing the wedged pump's
+		cached-E renews / heartbeats / turn-writes) and vacates the lease (1s past) so
+		a successor can acquire; in-flight turns are re-stamped; it is idempotent under
+		the epoch CAS."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		amsg = self._mk_msg(conv, 2, role="assistant", content="", streaming=1)
+		E = 6
+		self._mk_turn(
+			conv,
+			"ts_fe",
+			seed,
+			"streaming",
+			version=20,
+			pump_epoch=E,
+			reserved=1,
+			dispatching_at=frappe.utils.now(),
+			assistant_message=amsg,
+		)
+		# A LIVE lease at epoch E — the wedged pump still holds it.
+		frappe.db.set_value(PUMP, self._target, "pump_epoch", E, update_modified=False)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"lease_expires_at",
+			frappe.utils.add_to_date(None, seconds=25),
+			update_modified=False,
+		)
+		stale_stamp = frappe.utils.add_to_date(None, seconds=-300)
+		frappe.db.set_value(PUMP, self._target, "loop_heartbeat_ts", stale_stamp, update_modified=False)
+		frappe.db.commit()
+
+		self.assertTrue(ts.force_expire_wedged(self._target, E, 180))
+		row = frappe.db.get_value(
+			PUMP, self._target, ["pump_epoch", "lease_expires_at", "loop_heartbeat_ts"], as_dict=True
+		)
+		self.assertEqual(row["pump_epoch"], E + 1, "epoch bumped to fence the wedged pump")
+		self.assertGreater(
+			frappe.utils.get_datetime(row["loop_heartbeat_ts"]),
+			frappe.utils.get_datetime(stale_stamp),
+			"force-expire RESETS the progress stamp so the successor gets a fresh window",
+		)
+		self.assertLess(
+			frappe.utils.get_datetime(row["lease_expires_at"]),
+			frappe.utils.get_datetime(frappe.utils.now()),
+			"lease vacated (1s in the past)",
+		)
+		turn = frappe.db.get_value(TURN, "ts_fe", ["pump_epoch", "version"], as_dict=True)
+		self.assertEqual(turn["pump_epoch"], E + 1, "in-flight turn re-stamped to the new epoch")
+		self.assertEqual(turn["version"], 21, "re-stamp bumped the turn version")
+
+		# The wedged pump's cached-E renew now affects 0 rows -> it will lease_lost_exit.
+		self.assertFalse(ts.lease_renew(self._target, E), "stale-epoch renew is fenced")
+		frappe.db.rollback()
+		# Idempotent: a second force-expire at the same (now-gone) epoch is a no-op.
+		self.assertFalse(ts.force_expire_wedged(self._target, E, 180))
+		frappe.db.rollback()
+
+	def _wedged_row(self, E, *, lease_s=25, hb_age_s=300):
+		"""Control row in the WEDGED shape at epoch E: lease `lease_s`s in the future,
+		progress stamp `hb_age_s`s old, plus one in-flight streaming turn."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		amsg = self._mk_msg(conv, 2, role="assistant", content="", streaming=1)
+		run_id = f"ts_few_{frappe.generate_hash(length=6)}"
+		self._mk_turn(
+			conv,
+			run_id,
+			seed,
+			"streaming",
+			version=20,
+			pump_epoch=E,
+			reserved=1,
+			dispatching_at=frappe.utils.now(),
+			assistant_message=amsg,
+		)
+		frappe.db.set_value(PUMP, self._target, "pump_epoch", E, update_modified=False)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"lease_expires_at",
+			frappe.utils.add_to_date(None, seconds=lease_s),
+			update_modified=False,
+		)
+		frappe.db.set_value(
+			PUMP,
+			self._target,
+			"loop_heartbeat_ts",
+			frappe.utils.add_to_date(None, seconds=-hb_age_s),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return run_id
+
+	def test_a4_force_expire_reasserts_progress_under_cas(self):
+		"""GAP 3 review fix: the takeover CAS re-asserts the FULL wedge predicate, not
+		just the epoch. A pump that resumed progress AFTER the watchdog's stale read —
+		still at the same epoch E — must NOT be force-expired: the recovery heartbeat
+		between detection and takeover makes the CAS affect 0 rows."""
+		E = 6
+		run_id = self._wedged_row(E)  # detection would flag this shape as wedged
+		# Between the watchdog's read and its takeover, the pump recovers and writes
+		# a fresh progress stamp through its normal path.
+		self.assertTrue(ts.lease_heartbeat(self._target, E))
+		lease_before = frappe.db.get_value(PUMP, self._target, "lease_expires_at")
+
+		self.assertFalse(
+			ts.force_expire_wedged(self._target, E, 180),
+			"a pump that progressed since the stale read is NOT taken over",
+		)
+		row = frappe.db.get_value(PUMP, self._target, ["pump_epoch", "lease_expires_at"], as_dict=True)
+		self.assertEqual(row["pump_epoch"], E, "epoch NOT bumped — the healthy pump keeps writing")
+		self.assertEqual(str(row["lease_expires_at"]), str(lease_before), "lease NOT vacated")
+		turn = frappe.db.get_value(TURN, run_id, ["pump_epoch", "version"], as_dict=True)
+		self.assertEqual(turn["pump_epoch"], E, "in-flight turn NOT re-stamped")
+		self.assertEqual(turn["version"], 20, "turn version untouched")
+		frappe.db.rollback()
+
+	def test_a4_force_expire_requires_live_lease(self):
+		"""The wedge takeover fires ONLY on the wedge shape (live lease + stale
+		progress). A lease that has EXPIRED by CAS time is the ordinary dead-pump
+		revive path (``ensure_pump`` acquires it normally) — force-expire declines
+		rather than bumping the epoch under a successor's feet."""
+		E = 7
+		self._wedged_row(E, lease_s=-5)  # stale progress, but the lease already lapsed
+		self.assertFalse(
+			ts.force_expire_wedged(self._target, E, 180),
+			"an expired lease is not the wedge shape — the normal revive path owns it",
+		)
+		self.assertEqual(
+			int(frappe.db.get_value(PUMP, self._target, "pump_epoch")),
+			E,
+			"epoch unchanged",
+		)
+		frappe.db.rollback()
+
 	def test_d4c_delayed_old_writer_stale_after_takeover(self):
 		"""D4 (c): P_old streaming at epoch E stalls; P_new takes over
 		(lease_acquire bumps epoch to E+1 and RE-STAMPS the turn); P_old's cached-E

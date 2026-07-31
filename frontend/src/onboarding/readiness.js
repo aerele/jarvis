@@ -76,6 +76,31 @@ export async function needsOnboarding() {
 }
 
 // Billing banner payload from the same memoized verdict - no extra round-trip.
+// The account was reconnected on ANOTHER site, so this one lost the workspace.
+// `site_replaced` is deliberately absent from NOT_ONBOARDED_REASONS: this site IS
+// onboarded, it just no longer holds the account, and the full-screen setup poster
+// would say the wrong thing. Returns {} unless it applies.
+export async function replacedNoticeOf() {
+	const r = await checkReady();
+	if (!r || r.reason !== "site_replaced") return {};
+	return r.replaced_notice || { replaced: true };
+}
+
+// Copy for that banner. `moved_to` is the site now holding the account - both
+// belong to the same account holder, so naming it is what makes this actionable.
+export function replacedBanner(notice) {
+	if (!notice || !notice.replaced) return null;
+	const where = (notice.moved_to || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+	return {
+		tone: "warning",
+		title: "This site no longer has access to your workspace",
+		message: where
+			? `Your Jarvis account is now connected to ${where}. Chat here stopped working when it moved.`
+			: "Your Jarvis account was reconnected on another site. Chat here stopped working when it moved.",
+		action: "Reconnect this site instead",
+	};
+}
+
 export async function billingNoticeOf() {
 	const r = await checkReady();
 	return (r && r.billing_notice) || {};

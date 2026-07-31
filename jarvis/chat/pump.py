@@ -96,9 +96,22 @@ SOFT_HOP_BUDGET_S = 90
 HARD_HOP_DEADLINE_S = 120
 HOP_TIMEOUT_S = 180
 
+# GAP 3: a pump that keeps its lease alive but makes no PROGRESS (loop_heartbeat_ts;
+# turn_state._progress_stale) for this long is WEDGED — the watchdog force-takes it
+# over. 2x the soft hop budget: a healthy pump advances progress well within one hop.
+PROGRESS_STALE_S = 2 * SOFT_HOP_BUDGET_S
+
 # Loop heartbeat + lease renew cadence (distinct signals, Amendment E). Both are
 # written at most this often (a slice is ~sub-second, so we gate them).
 HEARTBEAT_INTERVAL_S = 10
+
+# GAP 1 (Track B): the Default key stamped when watchdog() reaches completion. The bench
+# heartbeat reports (now - this); the control plane can tell a watchdog cron that stopped
+# running/completing (age grows while the scheduler otherwise ticks) from a dead scheduler
+# (the heartbeat cron stops too). Per-shard recovery failures are swallowed + continue, so
+# the completion stamp stays fresh through them — that symptom is caught by the turn-age
+# signal, not this one.
+WATCHDOG_LAST_COMPLETED_KEY = "jarvis_pump_watchdog_last_completed"
 
 # How long a slice blocks on the mux for buffered frames before re-checking the
 # lease / budget. Small so budgets + SIGTERM are honored promptly.
@@ -1565,12 +1578,15 @@ def drain_slice(ctx: PumpContext) -> str:
 	# regardless — the snapshot poll never blocks and mux.dispatch runs below.
 	_maybe_refresh_capacity(ctx)
 	_poll_snapshot(ctx)  # CDX-11: fold a resolved refresh (or fail-close a timed-out one) pre-promote
-	_promote_queued(ctx)
-	_dispatch_ready(ctx)  # OARF-5: issues chat.send acks, parks them (never blocks)
+	promoted = _promote_queued(ctx)
+	dispatched = _dispatch_ready(ctx)  # OARF-5: issues chat.send acks, parks them (never blocks)
+	pending_before = len(ctx.pending_acks) + len(ctx.pending_recoveries)
 	_poll_pending(ctx)  # OARF-5: resolve done acks/recovery tails; ack-timeout deadlines
+	# A turn advanced (ack -> streaming/errored, recovery tail settled) when the in-flight
+	# RPC set shrank — that is drain progress even in a slice with no mux frame applied.
+	polled_progress = (len(ctx.pending_acks) + len(ctx.pending_recoveries)) < pending_before
 
-	if ctx.mux is not None:
-		ctx.mux.dispatch(block_s=SLICE_BLOCK_S)
+	applied = ctx.mux.dispatch(block_s=SLICE_BLOCK_S) if ctx.mux is not None else 0
 	if ctx.lease_lost:
 		ts.lease_lost_exit(ctx.lease_lost)
 	# D5 §5-d: a dead socket ends the hop (the reader's Closing already failed the
@@ -1581,7 +1597,14 @@ def drain_slice(ctx: PumpContext) -> str:
 
 	_cancel_sweep(ctx)
 
-	_heartbeat_and_renew(ctx)
+	# GAP 3 A2: progress = the slice did real drain work (promoted / dispatched a turn
+	# or applied a mux frame) OR the pump is correctly capacity-blocked (fail-closed:
+	# gateway visibility UNKNOWN, where a takeover cannot help — not a wedge). Only a
+	# genuine "should be draining but isn't" leaves the progress stamp un-advanced.
+	progressed = (
+		promoted > 0 or dispatched > 0 or applied > 0 or polled_progress or not ctx.gateway_active_known
+	)
+	_heartbeat_and_renew(ctx, progressed)
 
 	if _idle_exit(ctx):
 		return "idle_exit"
@@ -2275,15 +2298,19 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _heartbeat_and_renew(ctx: PumpContext) -> None:
-	"""Write ``loop_heartbeat_ts`` (loop-liveness, DISTINCT from lease renewal) and
-	renew the lease, at most once per HEARTBEAT_INTERVAL_S. A 0-rows renew/
-	heartbeat means the epoch was lost to a takeover ⇒ shared lease-loss exit."""
+def _heartbeat_and_renew(ctx: PumpContext, progressed: bool) -> None:
+	"""Renew the lease (liveness) and — ONLY when the slice made progress — advance
+	the ``loop_heartbeat_ts`` PROGRESS stamp, at most once per HEARTBEAT_INTERVAL_S.
+	GAP 3 A2: the progress stamp is now DECOUPLED from lease renewal, so a
+	lease-alive-but-not-draining pump goes progress-stale (the watchdog then
+	force-takes it over) while a healthy-but-quiet pump keeps renewing and is never
+	falsely expired. A 0-rows renew/heartbeat means the epoch was lost to a takeover
+	⇒ shared lease-loss exit."""
 	now = _monotonic()
 	if now - ctx.last_heartbeat < HEARTBEAT_INTERVAL_S:
 		return
 	ctx.last_heartbeat = now
-	if not ts.lease_heartbeat(ctx.relay_target_id, ctx.epoch):
+	if progressed and not ts.lease_heartbeat(ctx.relay_target_id, ctx.epoch):
 		ts.lease_lost_exit()
 	if not ts.lease_renew(ctx.relay_target_id, ctx.epoch, holder=ctx.holder):
 		ts.lease_lost_exit()
@@ -2990,7 +3017,16 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 	the pump configured (watchdog still drains in-flight rows to terminal) and only
 	then ``-> disabled``."""
 	deps = deps or _default_deps()
-	summary = {"aged_out": 0, "reclaimed": 0, "parked": 0, "finalize_requeued": 0, "errored": 0, "revived": 0}
+	summary = {
+		"aged_out": 0,
+		"reclaimed": 0,
+		"parked": 0,
+		"finalize_requeued": 0,
+		"errored": 0,
+		"revived": 0,
+		"wedged_detected": 0,
+		"forced_expired": 0,
+	}
 	# CDX-21 (Residual A): the config key is site-wide, so reconcile the operator mirror FROM the
 	# authoritative default control row EVERY cycle, OUTSIDE the open-work target loop — an IDLE
 	# site whose mirror diverged (a failed command mirror write) otherwise stays divergent
@@ -3027,7 +3063,53 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(title="pump.watchdog", message=frappe.get_traceback())
+	# GAP 1 (Track B): record that the recovery machinery ran to completion, for the
+	# bench heartbeat's watchdog_last_completed_age signal.
+	frappe.db.set_default(WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
 	return summary
+
+
+_WEDGED_LOG_TTL_S = 3600
+
+
+def _force_takeover_enabled() -> bool:
+	"""GAP 3 A5 rollback rung: force-takeover of a wedged pump is OFF by default
+	(detect + log only, A4a) until the false-positive rate is measured in prod; set
+	site_config ``jarvis_pump_force_takeover`` truthy to enable (A4b)."""
+	return bool(frappe.conf.get("jarvis_pump_force_takeover"))
+
+
+def _pump_wedged(target: str, now: str) -> int | None:
+	"""GAP 3 A4: is this shard's pump WEDGED — lease LIVE but no PROGRESS for
+	``PROGRESS_STALE_S``? Returns the wedged pump's epoch (for ``force_expire_wedged``)
+	or None. A live lease is precisely what makes ``ensure_pump`` refuse to revive (it
+	looks alive), so a wedge is invisible without this check; ``_progress_stale`` treats
+	a NULL / recent stamp as fresh, so a just-acquired (A1 stamps on acquire) or healthy
+	pump is never flagged."""
+	row = frappe.db.get_value(
+		PUMP, target, ["pump_epoch", "lease_expires_at", "loop_heartbeat_ts"], as_dict=True
+	)
+	if not row or not row.get("lease_expires_at"):
+		return None
+	if frappe.utils.get_datetime(row["lease_expires_at"]) <= frappe.utils.get_datetime(now):
+		return None  # an expired lease is the normal revive path, not a wedge
+	if not ts._progress_stale(row.get("loop_heartbeat_ts"), PROGRESS_STALE_S, now):
+		return None
+	return int(row["pump_epoch"] or 0)
+
+
+def _log_wedged_throttled(target: str, epoch: int) -> None:
+	"""Log a wedged-but-live-lease detection at most once per hour per shard (so a
+	persistently-wedged shard cannot flood the Error Log every watchdog tick)."""
+	key = f"jarvis_pump_wedged_logged::{target}"
+	if frappe.cache().get_value(key):
+		return
+	frappe.cache().set_value(key, "1", expires_in_sec=_WEDGED_LOG_TTL_S)
+	frappe.log_error(
+		title="pump.wedged: lease-live but no progress",
+		message=f"target={target} epoch={epoch} stale>{PROGRESS_STALE_S}s "
+		f"force_takeover={'on' if _force_takeover_enabled() else 'off'}",
+	)
 
 
 def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
@@ -3160,6 +3242,22 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 		summary["finalize_requeued"] += 1
 
 	if live_work:
+		# GAP 3 A4: a wedged-but-lease-live pump (progress stale) is NOT revived by
+		# ensure_pump below — its lease looks live. Detect it; with the takeover flag
+		# ON (A4b) force-expire so ensure_pump can hand off to a fresh hop; otherwise
+		# just log for measurement (A4a). Fires at most once per shard per watchdog
+		# tick — the 5-min cadence is the natural rate limit (no separate cooldown).
+		wedged_epoch = _pump_wedged(target, now)
+		if wedged_epoch is not None:
+			summary["wedged_detected"] += 1
+			# _telemetry is per-event (unthrottled) so A4a can measure the true trip rate;
+			# the log below is throttled 1/h/shard only to bound Error Log volume.
+			_telemetry("pump_wedged", target=target, epoch=wedged_epoch, threshold_s=PROGRESS_STALE_S)
+			_log_wedged_throttled(target, wedged_epoch)
+			if _force_takeover_enabled() and ts.force_expire_wedged(target, wedged_epoch, PROGRESS_STALE_S):
+				_clear_lease_mirror(target)
+				summary["forced_expired"] += 1
+				_telemetry("pump_force_expired", target=target, epoch=wedged_epoch)
 		res = ensure_pump(target, deps=deps)
 		if res.get("enqueued"):
 			summary["revived"] += 1

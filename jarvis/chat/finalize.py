@@ -340,6 +340,10 @@ def _effect_terminal_publish(ctx: _Ctx) -> None:
 			"run:end",
 			{"enrichment_pending": True, "was_recovered": bool(row.get("was_recovered"))},
 		)
+	# C2: re-attach any live parked confirmation card on the terminal backstop too
+	# (mirrors settlement), so a card missed on the live push still re-surfaces even
+	# if it was the settlement publish itself that was lost.
+	extra = settlement._extra_with_pending(extra, ctx.owner, ctx.conversation)
 	# CDX-12: carry pump_epoch + the SAME stable terminal seq (the durable watermark)
 	# settlement emitted, so the CLIENT one-shot fence recognises this as the identical
 	# terminal at this run's epoch and dedupes it (no repeated announcement / reload),

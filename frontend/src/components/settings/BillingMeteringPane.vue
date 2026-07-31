@@ -103,6 +103,7 @@ import EChart from "@/charts/EChart.vue";
 import { budgetGaugeOption, perModelBarSpec } from "@/charts/usageCharts.js";
 import { getLlmConfig, getLlmUsage, getLlmSyncStatus } from "@/api";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { connectionModeLabel } from "@/llm/pool";
 import { useJarvisTheme } from "@/theme";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
@@ -123,11 +124,16 @@ const errorMessage = computed(() => (usageError.value ? "Usage is unavailable ri
 // pool" - a pool of BYO api keys is rendered agent-direct and runs its own
 // failover with no sidecar. Reading the flag alone printed "Direct" right above
 // the Active-pool card listing both of that tenant's models.
-const modeLabel = computed(() => {
-	if (config.value.proxy_active) return "Pool (proxied)";
-	const enabled = (config.value.models || []).filter((m) => m.enabled !== false);
-	return enabled.length > 1 ? "Pool (direct failover)" : "Direct";
-});
+//
+// The wording itself now lives in @/llm/pool, shared with Settings > General,
+// which was naming the same three states on its own and disagreeing with this
+// pane about a 2-model api-key pool (jarvis#561).
+const modeLabel = computed(() =>
+	connectionModeLabel(
+		config.value.proxy_active,
+		(config.value.models || []).filter((m) => m.enabled !== false).length
+	)
+);
 
 // A failure reason belongs on a surface that can act on it (the AI models pane);
 // here the row only needs to say which of the three states the pool is in.

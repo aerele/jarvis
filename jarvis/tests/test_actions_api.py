@@ -668,7 +668,14 @@ class TestListPendingConfirmations(FrappeTestCase):
 		self.assertEqual(len(items), 1)
 		self.assertEqual(items[0]["preview"], stored)
 
-	def test_one_bad_record_does_not_blind_the_endpoint(self):
+	def test_bad_summary_degrades_card_but_does_not_drop_it(self):
+		"""F3 + card-visibility: a record whose COSMETIC summary (_describe_call)
+		throws must NOT be dropped from the list - dropping a confirmable card is the
+		exact invisible-card bug this fix closes. The endpoint still returns ok, BOTH
+		cards surface, and the one whose summary failed degrades to "" (not vanishes).
+
+		(Supersedes the earlier assertion that a bad record was silently skipped -
+		that baked in the drop-the-card defect.)"""
 		from jarvis.chat import pending_confirm
 		from jarvis.chat.actions_api import list_pending_confirmations
 
@@ -698,8 +705,11 @@ class TestListPendingConfirmations(FrappeTestCase):
 				raise RuntimeError("boom building this record's summary")
 			return "ok-summary"
 
-		with patch("jarvis.api._describe_call", side_effect=_boom):
+		with patch("jarvis.api._describe_call", side_effect=_boom), patch.object(frappe, "log_error"):
 			r = list_pending_confirmations(conversation=conv)
-		# One record raised; the endpoint still returns ok with the other card.
+		# One summary raised; the endpoint still returns ok AND keeps BOTH cards -
+		# the bad-summary one degrades to "" rather than disappearing.
 		self.assertTrue(r["ok"])
-		self.assertEqual(len(r["data"]["pending"]), 1)
+		items = r["data"]["pending"]
+		self.assertEqual(len(items), 2)
+		self.assertEqual(sorted(it["summary"] for it in items), ["", "ok-summary"])

@@ -112,6 +112,12 @@ def apply(settings, spec: ResetSpec) -> None:
 		settings.db_set(field, meta.get_field(field).default)
 	for field, value in spec.literals:
 		settings.db_set(field, value)
+	if spec.passwords:
+		# A reset that leaves a cached bearer behind is not a reset: the token
+		# outlives the credentials it was minted from.
+		from jarvis.admin_client import clear_cached_token
+
+		clear_cached_token()
 	if spec.clear_pool:
 		frappe.db.delete(
 			"Jarvis LLM Pool Model",

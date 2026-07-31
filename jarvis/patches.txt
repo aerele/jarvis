@@ -37,5 +37,6 @@ jarvis.patches.v2_06_retire_app_learning_runs
 jarvis.patches.v2_06_skill_promotion_marker_and_shared_slug
 jarvis.patches.v2_07_agent_run_capability_snapshot
 jarvis.patches.v2_08_drop_jarvis_account_page
+jarvis.patches.v2_09_backfill_persona_enabled
 jarvis.patches.v2_09_drop_selfhost_settings_fields
 jarvis.patches.v2_10_rename_openclaw_seq_watermark

@@ -166,6 +166,10 @@ def invoke_settlement(
 	# durable watermark at the terminal) so the client dedupes a repeat equal-epoch
 	# terminal (the finalize backstop re-publish) one-shot — no repeated announcement/reload.
 	if owner:
+		# C2: ride any live parked confirmation card for this conversation on the
+		# fenced, backstopped terminal, so a card whose best-effort action:pending
+		# push was missed re-surfaces at turn-end without a manual reload.
+		pub_extra = _extra_with_pending(pub_extra, owner, conversation)
 		ts.publish_fenced(
 			owner,
 			pub_kind,
@@ -180,6 +184,24 @@ def invoke_settlement(
 
 	# S6 — enqueue enrichment (idempotent per (turn, effect_name); force-done at 3).
 	deps.enqueue_finalize(run_id, relay_target_id)
+
+
+def _extra_with_pending(extra: dict, owner: str | None, conversation: str) -> dict:
+	"""C2 self-heal: fold any live parked confirmation card(s) for ``conversation``
+	into a terminal event's ``extra`` payload under ``pending``, so a card whose
+	best-effort ``action:pending`` push was missed re-surfaces on the (fenced,
+	backstopped) ``run:end`` without a manual reload. Returns a NEW dict when a card
+	is present (never mutates the caller's) and the input unchanged - no ``pending``
+	key - in the common no-card case (one owner-index read). Shared by settlement's
+	authoritative publish and finalize's re-publish backstop so they can't diverge."""
+	if not owner:
+		return extra
+	from jarvis.chat import pending_confirm
+
+	pending = pending_confirm.list_items_for_owner(owner, conversation)
+	if not pending:
+		return extra
+	return {**extra, "pending": pending}
 
 
 # --------------------------------------------------------------------------- #

@@ -854,6 +854,29 @@ class JarvisSettings(Document):
 				title="Jarvis: admin auth failed",
 				message=frappe.get_traceback(),
 			)
+		except admin_client.AdminRejectedError as e:
+			# jarvis #542: admin was REACHED and permanently refused this config
+			# (an unknown provider slug, an unusable spec). The F2 handling below
+			# is right for a timeout - admin persists desired-first and reconciles
+			# a late apply - but its premise is false here: admin threw during
+			# validation and stored NOTHING, so there is no desired state for the
+			# */5 reconcile to converge to and "pending:" would never resolve.
+			# The customer sat on "Applying your changes" forever while admin
+			# already knew the exact reason. Terminal, carrying that reason, like
+			# the neighbouring auth/rate-limit branches.
+			reason = _admin_rejection_reason(e)
+			self.db_set(
+				{
+					"last_sync_at": frappe.utils.now(),
+					"last_sync_status": f"failed: {reason}",
+				}
+			)
+			_commit_terminal_sync_status()
+			terminal_written = True
+			frappe.log_error(
+				title="Jarvis: admin rejected the LLM config",
+				message=frappe.get_traceback(),
+			)
 		except admin_client.AdminUnreachableError as e:
 			# F2: for a "restart" (creds re-render), an unreachable/timeout is an
 			# apply the admin persisted desired-first and will reconcile - not a
@@ -1129,10 +1152,42 @@ def _admin_customer_facing_reason(message: str) -> str:
 	return ""
 
 
+def _admin_rejection_reason(e) -> str:
+	"""The customer-facing reason to record for an AdminRejectedError.
+
+	Admin sometimes writes the sentence itself (fleet's "Your ..." convention -
+	see _admin_customer_facing_reason above); that is already prose aimed at a
+	customer, so it passes straight through and reads identically to the
+	quota-exhausted case the pool path has recorded since 2026-07-23.
+
+	Everything else is a raw diagnostic written for an engineer ("unknown
+	llm_provider: 'gemini'"). It is still the single most useful thing the
+	customer can be told, so it IS surfaced verbatim - but behind a short
+	lead-in of our own, never standing alone as though Jarvis had phrased it.
+	Same shape the AI-models list uses for a probe's contract-1.12 ``detail``
+	("Not working: <detail>"), so the two upstream-reason surfaces read alike.
+	"""
+	detail = (getattr(e, "detail", "") or "").strip()
+	if not detail:
+		# No structured detail (a hand-built error, or a raise site added later
+		# that forgot it): fall back to the message with admin_client's "admin
+		# returned a NNN error: " wrapper stripped, so the plumbing never shows.
+		wrapped = _ADMIN_WRAPPED_ERROR_RE.match(str(e).strip())
+		detail = (wrapped.group(1) if wrapped else str(e)).strip()
+	sentence = _admin_customer_facing_reason(detail)
+	if sentence:
+		return sentence
+	if not detail:
+		return "Your AI configuration was rejected"
+	return f"Your AI configuration was rejected: {detail}"
+
+
 def _post_pool_with_retry(spec, api_keys, oauth_blobs):
 	"""post_update_llm_pool, retrying only the transient AdminUnreachableError.
 	Re-raises the last unreachable error after exhausting retries; other Admin*
-	errors propagate immediately (not retried)."""
+	errors propagate immediately (not retried) - including AdminRejectedError,
+	which IS an AdminUnreachableError subclass but names a spec admin already
+	refused, so re-POSTing the identical payload can only be refused again."""
 	import time as _time
 
 	import frappe as _frappe
@@ -1154,6 +1209,10 @@ def _post_pool_with_retry(spec, api_keys, oauth_blobs):
 
 				record_synced_snapshot()
 			return result
+		except admin_client.AdminRejectedError:
+			# Permanent: admin validated the spec and refused it. Burning the
+			# second attempt (and its 5s sleep) buys a second identical refusal.
+			raise
 		except admin_client.AdminUnreachableError as e:
 			last = e
 			_frappe.logger().warning(
@@ -1371,6 +1430,27 @@ def _enqueued_sync_via_admin_pool(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> 
 				title="Jarvis: admin auth failed (pool sync)",
 				message=_frappe.get_traceback(),
 			)
+		except admin_client.AdminRejectedError as e:
+			# jarvis #542, the structured half of the branch below: admin named
+			# the refusal itself (an ``error.code`` on _PERMANENT_REJECTION_CODES,
+			# e.g. FleetConfigError on an unknown provider slug) instead of only
+			# implying it through a "Your ..." sentence. Nothing was persisted, so
+			# no reconcile can ever finish it - terminal, with admin's reason.
+			reason = _admin_rejection_reason(e)
+			settings.db_set(
+				{
+					"last_sync_at": _frappe.utils.now(),
+					"last_sync_status": f"failed: {reason}",
+					**_cleared_subscription_status_fields(),
+				}
+			)
+			_commit_terminal_sync_status()
+			terminal_written = True
+			_frappe.log_error(
+				title="Jarvis: admin rejected the LLM pool config",
+				message=_frappe.get_traceback(),
+			)
+			return
 		except admin_client.AdminUnreachableError as e:
 			# This fix (2026-07-23 out-of-quota trace): admin's fleet layer can
 			# raise a DEFINITIVE, already-decided rejection - e.g. a

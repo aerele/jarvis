@@ -10,6 +10,7 @@ import threading
 from unittest.mock import patch
 
 import frappe
+import redis.exceptions
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import pending_confirm
@@ -65,6 +66,95 @@ class TestMint(FrappeTestCase):
 		# Both are independently live.
 		self.assertIsNotNone(pending_confirm.peek(t1))
 		self.assertIsNotNone(pending_confirm.peek(t2))
+
+
+class TestMintReliableIndex(FrappeTestCase):
+	"""C1: a token can NEVER be persisted without being findable by
+	list_for_owner. An unindexed record is invisible to the resync endpoint -> a
+	silent, unrecoverable confirmation card (the bulk-create card that never
+	rendered). So the owner-index write is required, not best-effort: if it fails
+	the record is rolled back (no orphan) and the failure is logged LOUDLY (it was
+	a silent try/except: pass)."""
+
+	_A = "owner-c1@example.invalid"
+
+	def setUp(self):
+		# The per-owner index lives in Redis (not rolled back with the DB); clear
+		# it so a prior run's tokens don't mask these assertions.
+		frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self._A)
+
+	def _mint(self):
+		return pending_confirm.mint(
+			conversation="conv-c1",
+			owner=self._A,
+			tool="create_doc",
+			args={"docs": [{"doctype": "ToDo", "values": {"description": "c1"}}]},
+			run_id="",
+			preview={"preview": True, "would": {"created": [{"doctype": "ToDo", "name": "x"}]}},
+		)
+
+	def test_mint_persists_and_indexes(self):
+		"""A normal mint is BOTH peekable AND retrievable by resync (regression
+		guard for the persisted<->indexed invariant)."""
+		token = self._mint()
+		self.assertIsNotNone(pending_confirm.peek(token))
+		self.assertIn(token, {r["token"] for r in pending_confirm.list_for_owner(self._A)})
+
+	def test_index_write_failure_is_logged_not_silent(self):
+		"""An owner-index write failure must be LOUD (was swallowed by
+		try/except: pass), so the mode is observable instead of invisible."""
+		with patch.object(
+			frappe.cache(), "sadd", side_effect=redis.exceptions.ConnectionError("simulated redis blip")
+		):
+			with patch.object(frappe, "log_error") as mock_log:
+				self._mint()
+		self.assertTrue(mock_log.called, "index-write failure must be logged, not swallowed")
+
+	def test_index_write_failure_leaves_no_orphan(self):
+		"""If the token can't be indexed it must NOT be left persisted (invisible
+		to resync) - the record is rolled back so no unrecoverable orphan survives
+		for the full TTL."""
+		with patch.object(
+			frappe.cache(), "sadd", side_effect=redis.exceptions.ConnectionError("simulated redis blip")
+		):
+			with patch.object(frappe, "log_error"):
+				token = self._mint()
+		self.assertIsNone(pending_confirm.peek(token))
+		self.assertNotIn(token, {r["token"] for r in pending_confirm.list_for_owner(self._A)})
+
+	def test_index_write_failure_returns_none(self):
+		"""A park that can't be indexed must SIGNAL failure by returning None - NOT
+		a token. Returning a token whose record was rolled back made the gate
+		publish an un-confirmable card that wedged the turn on an 'expired' toast
+		(the whole point of this fix). None lets the gate surface a retryable tool
+		error instead."""
+		with patch.object(
+			frappe.cache(), "sadd", side_effect=redis.exceptions.ConnectionError("simulated redis blip")
+		):
+			with patch.object(frappe, "log_error"):
+				self.assertIsNone(self._mint())
+
+	def test_persist_verify_failure_returns_none(self):
+		"""set_value SUPPRESSES a transient redis ConnectionError, so a record can
+		silently fail to persist while the index write succeeds. mint reads the
+		record back and, finding it absent, must treat the park as failed (return
+		None + log) rather than let a card be published against a token whose record
+		never landed."""
+		with patch.object(pending_confirm, "peek", return_value=None):
+			with patch.object(frappe, "log_error") as mock_log:
+				self.assertIsNone(self._mint())
+		self.assertTrue(mock_log.called, "a persist-verify miss must be logged, not swallowed")
+
+	def test_failed_park_does_not_bump_cards_open_gauge(self):
+		"""The cards_open gauge is observability, not authority: a rolled-back park
+		must never leave the gauge over-counting a card the user can't see."""
+		before = pending_confirm.cards_open_gauge()
+		with patch.object(
+			frappe.cache(), "sadd", side_effect=redis.exceptions.ConnectionError("simulated redis blip")
+		):
+			with patch.object(frappe, "log_error"):
+				self._mint()
+		self.assertEqual(pending_confirm.cards_open_gauge(), before)
 
 
 class TestExecUser(FrappeTestCase):
@@ -193,6 +283,43 @@ class TestListForOwner(FrappeTestCase):
 
 	def test_empty_for_unknown_owner(self):
 		self.assertEqual(pending_confirm.list_for_owner("nobody@example.invalid"), [])
+
+	def test_list_items_for_owner_clean_client_shape(self):
+		"""C2: the shared item builder returns the client-facing shape and NEVER
+		leaks internal fields (args/exec_user/args_hash) - the SAME shape the resync
+		endpoint and the run:end terminal both use, so they cannot drift."""
+		t = self._mint(self._A, "conv-a1", "items-clean")
+		items = pending_confirm.list_items_for_owner(self._A)
+		self.assertEqual([it["token"] for it in items], [t])
+		it = items[0]
+		self.assertEqual(
+			set(it.keys()),
+			{"token", "tool", "preview", "summary", "conversation", "run_id", "expires_at"},
+		)
+		self.assertEqual(it["tool"], "create_doc")
+		for internal in ("args", "exec_user", "args_hash"):
+			self.assertNotIn(internal, it)
+
+	def test_list_items_for_owner_filtered_by_conversation(self):
+		self._mint(self._A, "conv-a1", "i-1")
+		t2 = self._mint(self._A, "conv-a2", "i-2")
+		items = pending_confirm.list_items_for_owner(self._A, conversation="conv-a2")
+		self.assertEqual([it["token"] for it in items], [t2])
+
+	def test_list_items_summary_failure_still_surfaces_card(self):
+		"""A confirmable card must NEVER be dropped because the COSMETIC summary
+		(_describe_call) throws on one odd record - that is the exact invisible-card
+		bug this whole fix exists to close. The item still surfaces; only the summary
+		degrades to ""."""
+		t = self._mint(self._A, "conv-a1", "sum-throws")
+		with patch("jarvis.api._describe_call", side_effect=RuntimeError("boom")):
+			with patch.object(frappe, "log_error"):
+				items = pending_confirm.list_items_for_owner(self._A)
+		self.assertEqual([it["token"] for it in items], [t])
+		self.assertEqual(items[0]["summary"], "")
+		# The rest of the client-facing shape is intact.
+		self.assertEqual(items[0]["tool"], "create_doc")
+		self.assertIn("preview", items[0])
 
 	def test_clear_for_conversation_removes_only_that_conversation(self):
 		"""F6: clearing a conversation's tokens (on stop_run) deletes its own live

@@ -24,6 +24,29 @@ export function prevStep(steps, cur) {
 	return steps[Math.max(stepIndex(steps, cur) - 1, 0)];
 }
 
+// Plan step subtitle (OnboardingView's "Choose your plan" header): "Start
+// free" is only honest when the catalog actually has something free or
+// trial-gated on offer. The admin plan catalog can deactivate the Free plan
+// on its own (jarvis#536), at which point every selectable plan charges
+// immediately, so the copy has to track the plans that were actually
+// fetched rather than being hardcoded. Pure so the no-free-plan branch
+// stays unit-tested without mounting the wizard.
+export function planSubtitleFor(plans) {
+	const list = Array.isArray(plans) ? plans : [];
+	// A missing price must NOT read as free: Number(null) is 0, so a plan row
+	// that simply never carried price_inr would otherwise resurrect the exact
+	// false promise this function exists to remove. Absent, null and blank all
+	// coerce to NaN here, which fails both comparisons, so the honest paid-only
+	// wording wins whenever the catalog is not explicit about being free.
+	const amount = (v) => (v === null || v === undefined || v === "" ? NaN : Number(v));
+	const hasFreeOrTrial = list.some(
+		(p) => !!p && (amount(p.price_inr) === 0 || amount(p.trial_days) > 0)
+	);
+	return hasFreeOrTrial
+		? "Start free. Upgrade or extend anytime, with no auto-renewal."
+		: "Pick a plan to get started. No auto-renewal.";
+}
+
 // jarvis.account.is_ready_for_chat (jarvis/account.py) returns
 // {ready: bool, reason: str|None} - reason is one of "signup" /
 // "llm_credentials" and friends when not ready, null when ready.

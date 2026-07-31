@@ -22,6 +22,7 @@ import requests
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
+	AdminRejectedError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
@@ -231,6 +232,19 @@ def reconnect_eligibility(email: str, company_name: str = "") -> dict:
 	return _post_guest(
 		path=_m("billing.reconnect.can_reconnect"),
 		body={"email": email, "company_name": company_name},
+		timeout_s=8,
+	)
+
+
+def site_replacement() -> dict:
+	"""Guest: was THIS site's account reconnected somewhere else?
+
+	The only question a site whose credentials were rotated away can still ask -
+	it can no longer authenticate, so it cannot be told over any other call.
+	Returns ``{replaced, at, moved_to}``; treat any failure as "not replaced"."""
+	return _post_guest(
+		path=_m("billing.reconnect.check_site_replaced"),
+		body={"frappe_site_url": frappe.utils.get_url()},
 		timeout_s=8,
 	)
 
@@ -607,7 +621,12 @@ def _raise_for_admin_raw(resp):
 	"""Status routing for a RAW Response, mirroring _do_post's envelope routing (R1-3): 2xx returns
 	the Response; 401/403 -> AdminAuthError (drives the ladder); 429 -> AdminRateLimitedError; other
 	4xx -> AdminValidationError; 5xx -> AdminUnreachableError. DRIFT-GUARD: keep in sync with
-	_do_post's status branches — mirror any change there in both places."""
+	_do_post's status branches - mirror any change there in both places.
+
+	One branch deliberately has NO mirror: _do_post's AdminRejectedError needs admin's
+	structured ``error.code``, and this path streams raw bytes (media download) with no
+	envelope to read it from. A rejection here stays an AdminUnreachableError, which is
+	right - no media caller waits on a reconcile."""
 	if resp.status_code < 400:
 		return resp
 	if resp.status_code in (401, 403):
@@ -1153,6 +1172,13 @@ def push_error_rollup(errors: list) -> dict:
 	return _post(path=_m("api.tenant.ingest_error_rollup"), body={"errors": errors})
 
 
+def push_bench_heartbeat(heartbeat: dict) -> dict:
+	"""Push the bench liveness vector (watchdog + oldest-turn ages) to admin's GAP 1
+	dead-man's-switch. Called best-effort from the heartbeat */5 cron.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
+
+
 def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
 	"""POST customer's chat device pubkey to admin; admin asks the fleet-agent
 	to write a PairedDevice record into the customer's agent container and
@@ -1297,6 +1323,14 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 		)
 		return None
 	return token
+
+
+def clear_cached_token() -> None:
+	"""Drop the cached bearer. Anything that rotates this bench's admin credentials
+	MUST call it: the cached token was minted from the old ones, stays valid for its
+	full TTL, and keeps authenticating as the PREVIOUS account - so a reconnected
+	bench asks about a customer it no longer is and sits on "still being set up"."""
+	frappe.cache().delete_value(_OAUTH_CACHE_KEY)
 
 
 def _cache_oauth_token(token: dict) -> None:
@@ -1481,6 +1515,45 @@ def _envelope_error_message(envelope) -> str:
 	return _scrub_secrets(err.get("message") or "")
 
 
+# Admin ``error.code`` values that name a PERMANENT rejection: the admin was
+# reached, validated the request and refused it, so re-sending the SAME payload
+# can never converge. jarvis_admin_v2's @fleet_endpoint answers a FleetError
+# with HTTP 502 and ``error.code`` = the raising class's name, so a config
+# refusal arrives on the wire wearing the same status as a gateway fault - which
+# is how a rejected creds push came to be recorded as "pending: admin applying
+# config" forever (jarvis #542).
+#
+# An ALLOWLIST, not a denylist: an unrecognised code keeps today's optimistic
+# "admin may still be reconciling" handling, so a fleet error class we have not
+# classified yet can only ever be too patient, never wrongly terminal.
+_PERMANENT_REJECTION_CODES = frozenset(
+	{
+		# Bad provider slug, a provider with no resolvable base_url, an
+		# unusable agent-config render - deterministic in the request itself.
+		"FleetConfigError",
+		# A pool apply the fleet-agent permanently rejected (its invalid_spec
+		# envelope class). admin's own docstring: retrying the same desired
+		# spec against a healthy fleet-agent can never converge.
+		"PoolSpecRejected",
+	}
+)
+
+
+def _permanent_rejection_code(envelope) -> str:
+	"""admin's ``error.code`` when it names a permanent rejection, else "".
+
+	Only ever consulted on a response the admin actually shaped (an ``ok:
+	false`` envelope) - a proxy's HTML 502 has no envelope and never reaches
+	here, so a genuine gateway fault cannot be mistaken for a refusal."""
+	if not isinstance(envelope, dict):
+		return ""
+	err = envelope.get("error")
+	if not isinstance(err, dict):
+		return ""
+	code = err.get("code") or ""
+	return code if code in _PERMANENT_REJECTION_CODES else ""
+
+
 def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str) -> dict:
 	try:
 		resp = requests.post(url, json=body, headers=headers, timeout=timeout_s)
@@ -1586,6 +1659,13 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	#   4xx + envelope -> AdminValidationError (clean text to UI)
 	#   5xx + envelope -> AdminUnreachableError (network / admin-down)
 	#   200 with ok:false (rare; some endpoints inline failure) -> AdminUnreachableError
+	#
+	# jarvis #542 refines the last two: a 5xx (or an inlined ok:false) whose
+	# ``error.code`` is on _PERMANENT_REJECTION_CODES is admin REFUSING the
+	# request, not admin being unwell, so it raises the AdminRejectedError
+	# subclass carrying that code + admin's own message. Callers that retry or
+	# wait for a reconcile branch on it; everything else keeps catching the
+	# base class exactly as before.
 	if resp.status_code >= 400:
 		msg = _envelope_error_message(envelope)
 		if not msg:
@@ -1598,6 +1678,13 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			msg = f"admin returned {resp.status_code}"
 		if 400 <= resp.status_code < 500:
 			raise AdminValidationError(msg)
+		rejected = _permanent_rejection_code(envelope)
+		if rejected:
+			raise AdminRejectedError(
+				f"admin returned a {resp.status_code} error: {msg}",
+				code=rejected,
+				detail=msg,
+			)
 		raise AdminUnreachableError(f"admin returned a {resp.status_code} error: {msg}")
 	if isinstance(envelope, dict) and not envelope.get("ok", True):
 		err = envelope.get("error", {}) or {}
@@ -1612,5 +1699,7 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# Keep code in the message (stable identifier admin_client
 		# callers + ops can grep for). admin_url is intentionally
 		# omitted - the bench knows where it's pointing.
+		if _permanent_rejection_code(envelope):
+			raise AdminRejectedError(f"{code}: {msg}", code=code, detail=msg)
 		raise AdminUnreachableError(f"{code}: {msg}")
 	return envelope.get("data", envelope) if isinstance(envelope, dict) else envelope

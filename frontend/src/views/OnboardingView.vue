@@ -83,10 +83,7 @@
 							<div class="ob-body">
 								<div class="ob-head">
 									<h1>Choose your plan</h1>
-									<p>
-										Start free. Upgrade or extend anytime, with no
-										auto-renewal.
-									</p>
+									<p>{{ planSubtitle }}</p>
 								</div>
 								<div
 									v-if="state.plansLoading"
@@ -313,6 +310,13 @@
 									Reconnect instead
 								</button>
 								— we'll email a code to confirm it's you. Nothing to pay again.
+							</p>
+							<p
+								v-else-if="state.reconnectNeedsCompany"
+								class="mx-auto mt-5 max-w-[620px] text-center text-p-sm text-ink-gray-5"
+							>
+								This email already has a subscription under a different company —
+								enter that company above to reconnect it instead of paying again.
 							</p>
 							<div class="ob-foot">
 								<button class="ob-back" @click="goBack">
@@ -779,6 +783,7 @@ import {
 	verifyPollAction,
 	notReadyNote,
 	syncStatusNote,
+	planSubtitleFor,
 } from "@/onboarding/steps";
 import { inr, planAmount, planSuffix } from "@/account/format";
 import {
@@ -883,6 +888,8 @@ const state = reactive({
 
 const steps = computed(() => STEPS_MANAGED);
 const selectedPlan = computed(() => state.plans.find((p) => p.name === state.planName) || {});
+// See planSubtitleFor (onboarding/steps.js) for why this can't be hardcoded.
+const planSubtitle = computed(() => planSubtitleFor(state.plans));
 const railIndex = computed(() => RAIL.findIndex((r) => r.id === state.step));
 // Both halves of the identity must be present before the plane can resolve an
 // account: several company accounts can share one address.
@@ -1189,9 +1196,14 @@ function onDetailsSubmit() {
 		return;
 	}
 	persistBillingDetails();
-	// Entering Review & Pay fresh from Details: reset the pay sub-state.
+	// Entering Review & Pay fresh from Details: reset the pay sub-state. This
+	// includes reconnectOffered, not just payErr - otherwise a reconnect offer
+	// raised by a duplicate email on an earlier attempt survives a Back, an
+	// edit to a genuinely new email, and a Continue, and is shown pointing at
+	// an address that was never rejected.
 	state.payPhase = "review";
 	state.payErr = "";
+	state.reconnectOffered = false;
 	goNext();
 }
 
@@ -1233,6 +1245,10 @@ async function enterPayStep() {
 // Click handler for the Pay button.
 async function onPayClick() {
 	state.payErr = "";
+	// A fresh attempt starts clean: a reconnect offer raised by a previous
+	// failure must not survive into this one. runStartPay's catch below sets
+	// it again if this attempt also hits a duplicate-email rejection.
+	state.reconnectOffered = false;
 	// Guard against a signup with empty args: on a reconciled resume (or any
 	// state loss) there is no local plan/email/company, and startSignup(email,
 	// company, null) would create a broken signup upstream.

@@ -588,38 +588,12 @@ def list_pending_confirmations(conversation: str | None = None) -> dict:
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
 
-	from jarvis.api import _describe_call
 	from jarvis.chat import pending_confirm
 
 	conv = (conversation or "").strip() or None
-	records = pending_confirm.list_for_owner(frappe.session.user, conversation=conv)
-	items = []
-	for r in records:
-		# Per-record guard (F3): a single malformed record must NOT 500 the whole
-		# endpoint - that would blind resync of EVERY card until TTL. Skip + log
-		# the bad one; surface the rest.
-		try:
-			tool = r.get("tool")
-			args = r.get("args") or {}
-			items.append(
-				{
-					"token": r.get("token"),
-					"tool": tool,
-					# Return the PARK-TIME preview verbatim (F2). Recomputing it here
-					# via _pending_preview re-runs the sandboxed dry-run, whose inline
-					# on_submit/on_cancel side effects are NOT sandboxed and would
-					# re-fire on every reload/reconnect/tab-wake/post-confirm. Tokens
-					# minted before preview was stored carry None (summary still
-					# describes the action); no dry-run is ever run on this path.
-					"preview": r.get("preview"),
-					"summary": _describe_call(tool, args),
-					"conversation": r.get("conversation"),
-					"run_id": r.get("run_id"),
-					"expires_at": r.get("expires_at"),
-				}
-			)
-		except Exception:
-			frappe.log_error(
-				title="list_pending_confirmations record skipped", message=frappe.get_traceback()
-			)
+	# Same client-facing item shape the action:pending event and the run:end
+	# terminal use (pending_confirm.list_items_for_owner) so the three cannot drift
+	# and no internal field leaks. The park-time preview is returned verbatim (F2 -
+	# never a re-run dry-run) and the per-record F3 guard both live in the helper.
+	items = pending_confirm.list_items_for_owner(frappe.session.user, conversation=conv)
 	return {"ok": True, "data": {"pending": items}}

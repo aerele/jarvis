@@ -2,9 +2,25 @@
 	<SettingsPane title="General" description="Chat behavior, notifications and token usage.">
 		<h3 class="text-base font-semibold text-ink-gray-9">Connection</h3>
 		<div class="mt-2">
-			<KvRow label="Model" :value="modelLabel" />
-			<KvRow label="Provider" :value="ui.llm_provider || '—'" />
-			<KvRow label="Auth mode" :value="ui.llm_auth_mode || '—'" />
+			<!-- Mode names the TOPOLOGY, Status reports its HEALTH. They used to be
+			     the same row, which is how a 2-model pool came to be labelled
+			     "Direct" here while Billing and metering called the identical state
+			     "Pool (direct failover)". Both panes now read the one
+			     connectionModeLabel(). -->
+			<KvRow v-if="modeLabel" label="Mode" :value="modeLabel" />
+			<!-- A failover pool has no single Model/Provider/Auth mode. Those three
+			     rows were filled from the legacy models[0] mirror, so a 4-model pool
+			     described member one and presented it as the whole connection, under
+			     a Model row naming the synthetic Bifrost endpoint nobody chose. AI
+			     models owns the per-model story (every model in failover order, with
+			     its own status); this is a summary that points at it. The triple
+			     stays for a single-credential tenant, where it is accurate. -->
+			<KvRow v-if="isPool" label="Models" :value="poolSummary" />
+			<template v-else>
+				<KvRow label="Model" :value="modelLabel" />
+				<KvRow label="Provider" :value="ui.llm_provider || '—'" />
+				<KvRow label="Auth mode" :value="ui.llm_auth_mode || '—'" />
+			</template>
 			<KvRow label="Status">
 				<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
 			</KvRow>
@@ -13,6 +29,14 @@
 				label="Expires"
 				:value="expiresLabel"
 			/>
+			<div v-if="isPool" class="mt-2">
+				<Button
+					variant="subtle"
+					label="Manage models"
+					iconLeft="cpu"
+					@click="store.openSettings('aimodels')"
+				/>
+			</div>
 			<!-- A failed status fetch must not look like a healthy workspace. Without
 			     this the catch below leaves Status on its placeholder, which reads as
 			     an answer rather than as "we could not ask". Admin-only, because only
@@ -224,6 +248,8 @@ import { useConfirm } from "@/composables/useConfirm";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
 import ToggleRow from "@/components/settings/ToggleRow.vue";
+import { connectionModeLabel } from "@/llm/pool";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { agentName } from "@/branding";
 import * as api from "@/api";
 
@@ -281,42 +307,77 @@ async function loadConnStatus() {
 		connLoading.value = false;
 	}
 }
-// get_llm_connection_status short-circuits server-side for a DIRECT (single-
-// model) tenant and reports that via proxy_active rather than the raw proxy-auth
-// payload, so proxy_active tells the two states apart explicitly instead of
-// guessing from which fields happen to be populated. Without this, a direct
-// tenant's own auth_present:false read as "Not connected" here too.
+// proxy_active means "a Bifrost + CLIProxyAPI sidecar pair is deployed", which
+// only a chat subscription needs. It is NOT "this is a pool": a pool of BYO api
+// keys renders agent-direct and fails over with no sidecar at all. Kept
+// separate from isPool below for exactly that reason: only a proxied tenant has
+// an OAuth profile expiry to show.
 const isProxy = computed(() => !!(connStatus.value && connStatus.value.proxy_active));
+// pool_mode is the server's compute_pool_mode: this workspace syncs as a whole
+// models[] spec, so there is no one credential for the Model/Provider/Auth-mode
+// triple to describe.
+const isPool = computed(() => !!(connStatus.value && connStatus.value.pool_mode));
 // Ported from the removed ConnectionPane.vue, the one row this pane lacked:
 // oauth_expires_at is an epoch-ms value, rendered in the viewer's locale.
 const expiresLabel = computed(() => {
 	const ms = connStatus.value && connStatus.value.oauth_expires_at;
 	return ms ? new Date(Number(ms)).toLocaleString() : "—";
 });
-const connected = computed(() =>
-	isSM ? !!(connStatus.value && isProxy.value && connStatus.value.auth_present) : true
+// Shared with Billing and metering so the two panes cannot name the same state
+// differently again: that pane called a 2-model api-key pool "Pool (direct
+// failover)" while this one called it "Direct". Blank without a verdict (a
+// non-admin never fetches one), which hides the row rather than guessing.
+const modeLabel = computed(() =>
+	connStatus.value
+		? connectionModeLabel(connStatus.value.proxy_active, connStatus.value.model_count)
+		: ""
 );
-// No model configured at all: the workspace was disconnected (or never
-// connected). Checked BEFORE isProxy below for the same reason the server
-// computes it before its own DIRECT short-circuit: a disconnected tenant is
-// proxy_active:false, so without this it would read as a healthy "Direct".
+// The one line that replaces the triple for a pool: how many models, how they
+// are routed, and whether the container has the current set. humaniseSyncStatus
+// is the same translator Billing and metering's Sync row uses, so the two cannot
+// describe one last_sync_status differently. Its text is a standalone label
+// there and a clause here, hence the case fold.
+const poolSummary = computed(() => {
+	const c = connStatus.value || {};
+	const n = Number(c.model_count || 0);
+	const parts = [`${n} ${n === 1 ? "model" : "models"}`];
+	if (c.routing_mode) parts.push(c.routing_mode);
+	const sync = humaniseSyncStatus(c.sync_status);
+	if (sync.kind !== "unknown") parts.push(sync.text.toLowerCase());
+	return parts.join(", ");
+});
+// No credential configured at all: the workspace was disconnected (or never
+// connected). Checked FIRST, for the same reason the server computes it before
+// its own DIRECT short-circuit: a disconnected tenant is proxy_active:false, so
+// without this it would read as a healthy single-model tenant.
 const disconnected = computed(() => !!(connStatus.value && connStatus.value.disconnected));
+// The server's verdict, and the ONLY input to the badge. It used to be computed
+// here from admin's auth_profile_present, which is a claim about a cliproxy auth
+// profile and never described a pool: a 4-model pool that was serving turns off
+// two connected subscriptions reported auth_profile_present:false and rendered
+// red "Not connected" over working chat (jarvis#561). get_llm_connection_status
+// now derives health from the same evidence is_ready_for_chat gates chat on, so
+// a workspace chat let you into cannot show a failure here.
+const health = computed(() => (connStatus.value && connStatus.value.health) || "");
 const statusLabel = computed(() => {
 	if (!isSM) return "Connected";
 	if (!connStatus.value) return "—";
 	if (disconnected.value) return "Disconnected";
-	if (!isProxy.value) return "Direct";
-	return connected.value ? "Connected" : "Not connected";
+	if (health.value === "down") return "Not connected";
+	if (health.value === "applying") return "Applying changes";
+	if (health.value === "attention") return "Needs attention";
+	return "Connected";
 });
-// design.md §3.8 status map: connected is green, a plain direct tenant is
-// neutral, an actual failure is red. Disconnected is orange (warning), not red:
-// nothing is broken, the customer chose this and can undo it in AI models.
+// design.md §3.6 status map: Success is green, Attention required and Broken are
+// red, Processing is blue. Disconnected is orange (warning), not red: nothing is
+// broken, the customer chose this and can undo it in AI models.
 const statusTheme = computed(() => {
 	if (!isSM) return "green";
 	if (!connStatus.value) return "gray";
 	if (disconnected.value) return "orange";
-	if (!isProxy.value) return "gray";
-	return connected.value ? "green" : "red";
+	if (health.value === "down" || health.value === "attention") return "red";
+	if (health.value === "applying") return "blue";
+	return "green";
 });
 
 // Estimated token usage — the dialog fetches its own data on open.

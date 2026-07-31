@@ -119,12 +119,15 @@ def mint(
 	exec_user: str | None = None,
 	preview: dict | None = None,
 	expires_at: int | None = None,
-) -> str:
+) -> str | None:
 	"""Store a pending call and return a fresh single-use token
 	(secrets.token_urlsafe(24)). The stored record carries conversation,
 	owner, tool, args (the full dict - this is the authoritative payload
 	that will execute), args_hash, run_id, exec_user, preview. TTL _TTL_S.
-	Returns the token.
+	Returns the token, or ``None`` when the park could not be stored (a transient
+	cache failure): the record+index must BOTH land or the caller must treat it as
+	a retryable failure and publish NO card - a token whose record does not exist is
+	an un-confirmable card that wedges the turn.
 
 	``preview`` is the park-time confirmation preview (dry-run "would" doc or
 	described-intent dict). It is stored so the resync endpoint can return it
@@ -154,19 +157,46 @@ def mint(
 		# carries it (the resync payload reads it straight off the record).
 		"expires_at": expires_at if expires_at is not None else int(time.time()) + _TTL_S,
 	}
-	frappe.cache().set_value(_key(token), record, expires_in_sec=_TTL_S)
-	# cards_open gauge +1 (self-healing on expiry via the ZSET score).
-	_gauge_add(token, record["expires_at"])
-	_emit_cards_open("mint")
-	# Index the token under its owner so list_for_owner can re-surface it. Best
-	# effort: the token record is the source of truth (owner binding + execution
-	# both read it), so an index hiccup must never block the park.
+	cache = frappe.cache()
+	# Persist the record, index it under its owner, and VERIFY it landed - all three
+	# must hold or the park is a failure. Two ways a park silently breaks:
+	#   1. The owner-index write fails: an unindexed record is INVISIBLE to the resync
+	#      endpoint -> a confirmation card that never re-surfaces (the bulk-create card
+	#      that parked but never rendered).
+	#   2. set_value SUPPRESSES a transient redis ConnectionError, so the record itself
+	#      can fail to persist with no exception raised at all.
+	# In EITHER case, returning a token would make the gate publish a card whose token
+	# has no record -> an un-confirmable "expired" card that wedges the turn. So on ANY
+	# failure roll the writes back (no orphan), log LOUDLY (it was once a silent
+	# try/except: pass), and return None so the gate surfaces a RETRYABLE tool error and
+	# the model can simply call again.
 	try:
-		cache = frappe.cache()
+		cache.set_value(_key(token), record, expires_in_sec=_TTL_S)
 		cache.sadd(_owner_key(owner), token)
 		cache.expire_key(_owner_key(owner), _TTL_S)
+		# set_value swallows a redis blip, so confirm the record is really readable
+		# before we let a card be published against this token.
+		if peek(token) is None:
+			raise RuntimeError("pending-confirm record did not persist")
 	except Exception:
-		pass
+		frappe.log_error(
+			title="pending_confirm: park failed; token not stored",
+			message=frappe.get_traceback(),
+		)
+		for _rollback in (
+			lambda: cache.delete_value(_key(token)),
+			lambda: cache.srem(_owner_key(owner), token),
+		):
+			try:
+				_rollback()
+			except Exception:
+				pass
+		return None
+	# cards_open gauge +1 (self-healing on expiry via the ZSET score). Bumped only
+	# after a successful persist+index+verify so the gauge never over-counts a
+	# rolled-back park.
+	_gauge_add(token, record["expires_at"])
+	_emit_cards_open("mint")
 	return token
 
 
@@ -300,6 +330,67 @@ def list_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
 		except Exception:
 			pass
 	return out
+
+
+def _pending_item(
+	*,
+	token: str,
+	tool: str,
+	args: dict,
+	preview: dict | None,
+	conversation: str,
+	run_id: str,
+	expires_at: int | None,
+) -> dict:
+	"""The ONE client-facing pending-confirmation item shape, shared by the live
+	``action:pending`` push (jarvis.api), the resync endpoint, and the ``run:end``
+	terminal - so the three cannot drift. Carries
+	``token``/``tool``/``preview``/``summary``/``conversation``/``run_id``/
+	``expires_at`` and NEVER the internal ``args``/``exec_user``/``args_hash``.
+
+	``summary`` is COSMETIC: if ``_describe_call`` throws it degrades to "" (and is
+	logged) - a confirmable card must NEVER be dropped because its human label failed
+	to build. That is the invisible-card bug this whole change closes."""
+	from jarvis.api import _describe_call
+
+	try:
+		summary = _describe_call(tool, args or {})
+	except Exception:
+		summary = ""
+		frappe.log_error(
+			title="pending_confirm: confirmation summary build failed",
+			message=frappe.get_traceback(),
+		)
+	return {
+		"token": token,
+		"tool": tool,
+		"preview": preview,
+		"summary": summary,
+		"conversation": conversation,
+		"run_id": run_id,
+		"expires_at": expires_at,
+	}
+
+
+def list_items_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
+	"""Client-facing pending-confirmation items for ``owner`` (optionally filtered to
+	``conversation``), each built through the shared ``_pending_item`` shape so the
+	resync endpoint and the ``run:end`` terminal cannot drift: a card missed on the
+	best-effort live push re-surfaces on the turn's (fenced, backstopped) terminal
+	without a manual reload. Item building never drops a record - only its cosmetic
+	summary can degrade (see ``_pending_item``)."""
+	return [
+		_pending_item(
+			token=r.get("token"),
+			tool=r.get("tool"),
+			args=r.get("args") or {},
+			preview=r.get("preview"),
+			conversation=r.get("conversation"),
+			run_id=r.get("run_id"),
+			expires_at=r.get("expires_at"),
+		)
+		for r in list_for_owner(owner, conversation=conversation)
+	]
 
 
 def clear_for_conversation(owner: str, conversation: str, run_id: str | None = None) -> int:

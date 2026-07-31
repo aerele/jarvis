@@ -436,6 +436,122 @@ class TestAdminErrorResponses(FrappeTestCase):
 		self.assertEqual(str(cm.exception), "customer status: Suspended")
 
 
+class TestPermanentRejectionClassification(FrappeTestCase):
+	"""jarvis #542: 502 is admin's answer BOTH to a gateway fault AND to its
+	fleet layer permanently refusing the config (@fleet_endpoint answers every
+	FleetError with 502 + error.code = the raising class's name). Only the
+	second is terminal, and that code is the only thing telling them apart.
+
+	Deliberately drives a FAKE settings doc (the same seam
+	test_api_key_decrypted_via_get_password_not_attribute uses) instead of the
+	_settings_for_admin / _settings_clear_admin fixture: these tests need no
+	real state, and that fixture COMMITS - its teardown removes the site's
+	stored admin passwords from __Auth, outside FrappeTestCase's rollback. A
+	classification test must not be able to take a bench's admin credentials
+	with it."""
+
+	def _fake_settings(self):
+		fake = MagicMock()
+		fake.jarvis_admin_url = "https://admin.example.com"
+		# No OAuth password stored -> _admin_access_token short-circuits and the
+		# call goes out on the legacy api_key:api_secret header.
+		fake.jarvis_admin_customer_email = ""
+
+		def _get_password(field, raise_exception=False):
+			return {
+				"jarvis_admin_api_key": "fake-key",
+				"jarvis_admin_api_secret": "fake-secret",
+			}.get(field, "")
+
+		fake.get_password.side_effect = _get_password
+		return fake
+
+	def _post_creds(self, response):
+		"""Run one creds push against a canned admin response, touching no DB."""
+		with (
+			patch("frappe.get_single", return_value=self._fake_settings()),
+			patch("requests.post", MagicMock(return_value=response)),
+		):
+			post_update_llm_creds("p", "m", "b", "k")
+
+	def test_502_with_permanent_rejection_code_raises_rejected(self):
+		with self.assertRaises(admin_client.AdminRejectedError) as cm:
+			self._post_creds(
+				_mock_response(
+					502,
+					json_body={
+						"message": {
+							"ok": False,
+							"error": {
+								"code": "FleetConfigError",
+								"message": "unknown llm_provider: 'gemini'",
+							},
+						}
+					},
+				)
+			)
+		self.assertEqual(cm.exception.code, "FleetConfigError")
+		# detail is admin's message ALONE - without the "admin returned a 502
+		# error: " wrapper the message carries - so a caller can put it in front
+		# of a customer without parsing it back out.
+		self.assertEqual(cm.exception.detail, "unknown llm_provider: 'gemini'")
+		self.assertIn("unknown llm_provider", str(cm.exception))
+
+	def test_rejected_error_is_an_unreachable_subclass(self):
+		"""Every pre-existing catch site keys off AdminUnreachableError and
+		already records a terminal failure, so inheriting leaves all of them
+		correct without touching one. Only the two sites that WAIT on a
+		reconcile branch on the subclass."""
+		self.assertTrue(issubclass(admin_client.AdminRejectedError, AdminUnreachableError))
+
+	def test_502_with_unrecognised_code_stays_unreachable(self):
+		"""Allowlist, not denylist: a fleet error class we have not classified
+		(a health-check timeout here) keeps the optimistic converge/pending
+		handling, so an unclassified code can only ever be too patient."""
+		with self.assertRaises(AdminUnreachableError) as cm:
+			self._post_creds(
+				_mock_response(
+					502,
+					json_body={
+						"message": {
+							"ok": False,
+							"error": {"code": "HealthCheckError", "message": "healthz timed out"},
+						}
+					},
+				)
+			)
+		self.assertNotIsInstance(cm.exception, admin_client.AdminRejectedError)
+
+	def test_non_json_502_stays_unreachable(self):
+		"""A real gateway fault (an nginx HTML 502) carries no envelope at all,
+		so it can never be read as a refusal."""
+		with self.assertRaises(AdminUnreachableError) as cm:
+			self._post_creds(_mock_response(502, json_body=None, text="<html>502 Bad Gateway</html>"))
+		self.assertNotIsInstance(cm.exception, admin_client.AdminRejectedError)
+
+	def test_200_ok_false_with_permanent_code_raises_rejected(self):
+		"""The rare inlined-failure envelope gets the same classification, so an
+		endpoint that reports its refusal at 200 is not the one shape that can
+		still strand a tenant in "pending"."""
+		with self.assertRaises(admin_client.AdminRejectedError) as cm:
+			self._post_creds(
+				_mock_response(
+					200,
+					json_body={
+						"message": {
+							"ok": False,
+							"error": {
+								"code": "PoolSpecRejected",
+								"message": "Your subscription cannot serve this.",
+							},
+						}
+					},
+				)
+			)
+		self.assertEqual(cm.exception.code, "PoolSpecRejected")
+		self.assertEqual(cm.exception.detail, "Your subscription cannot serve this.")
+
+
 class TestSecretScrubbingAtBoundary(FrappeTestCase):
 	"""Cross-repo punch-list "secret values can leak to last_sync_status /
 	Error Log via upstream passthrough" from the 2026-06-16 review.
