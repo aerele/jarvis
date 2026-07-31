@@ -453,6 +453,25 @@ function onEvent(p) {
 		case "run:end":
 			sendBusy.value = false;
 			live.value = null;
+			// C2 self-heal: a parked confirmation card whose best-effort action:pending
+			// push was missed rides the terminal here (settlement/finalize) - surface it at
+			// turn-end WITHOUT a manual reload. Deduped by token; a conv-less token ("")
+			// binds to this conversation, mirroring the action:pending case below. Skip a
+			// run the user STOPPED - its cards were swept server-side; don't resurrect them.
+			if (!ignored && Array.isArray(p.pending)) {
+				for (const card of p.pending) {
+					if (!card.token || pending.value.some((x) => x.token === card.token)) continue;
+					pending.value.push({
+						token: card.token,
+						tool: card.tool || "",
+						summary: card.summary || "",
+						preview: card.preview ?? null,
+						conversation: card.conversation || conv,
+						run_id: card.run_id,
+						expires_at: card.expires_at ?? null,
+					});
+				}
+			}
 			// The reply is durable now; reconcile against it (canvas items, final
 			// formatting) instead of trusting the streamed copy.
 			load();
@@ -462,6 +481,24 @@ function onEvent(p) {
 			sendBusy.value = false;
 			live.value = null;
 			if (!ignored) errorBanner.value = p.error || "That turn failed.";
+			// C2 self-heal (mirror run:end): a card parked in a turn that then errors
+			// must still auto-recover — drain p.pending here too, not only on run:end.
+			// Deduped by token; a conv-less token ("") binds to this conversation; a
+			// user-STOPPED run is skipped (its cards were swept server-side).
+			if (!ignored && Array.isArray(p.pending)) {
+				for (const card of p.pending) {
+					if (!card.token || pending.value.some((x) => x.token === card.token)) continue;
+					pending.value.push({
+						token: card.token,
+						tool: card.tool || "",
+						summary: card.summary || "",
+						preview: card.preview ?? null,
+						conversation: card.conversation || conv,
+						run_id: card.run_id,
+						expires_at: card.expires_at ?? null,
+					});
+				}
+			}
 			load();
 			break;
 

@@ -97,6 +97,30 @@ class TestGateParks(FrappeTestCase):
 		self.assertIsNotNone(captured.get("token"))
 
 
+class TestGateParkFailure(FrappeTestCase):
+	"""When mint cannot stage the confirmation (a transient redis failure rolled
+	the record back), it returns None. The gate must NOT publish a card against a
+	token whose record does not exist - that card is un-confirmable and wedges the
+	turn on an 'expired' toast. Instead it returns a RETRYABLE tool error so the
+	model can simply call again."""
+
+	def test_park_failure_returns_error_and_publishes_no_card(self):
+		desc = "jarvis-test-gate-park-fail-001"
+		with patch("jarvis.chat.pending_confirm.mint", return_value=None):
+			with patch("jarvis.chat.events.publish_to_user") as pub:
+				r = api._run_tool(
+					"create_doc",
+					{"doctype": "ToDo", "values": {"description": desc}},
+				)
+		# A legible error, NOT a pending_confirmation the model waits on.
+		self.assertFalse(r["ok"])
+		self.assertNotEqual(r.get("data", {}).get("status"), "pending_confirmation")
+		# No action:pending card was published (nothing for the user to confirm).
+		self.assertFalse(pub.called, "a failed park must not publish a dead card")
+		# And nothing was written.
+		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
+
+
 class TestShareAssignGatedWrites(FrappeTestCase):
 	"""F17/F20 (share_doc) + F23 (assign_to): their own docstrings/descriptors
 	say "ALWAYS confirm" (share_doc: re-share/everyone=true is a permission

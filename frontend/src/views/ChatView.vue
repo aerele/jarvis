@@ -7265,6 +7265,18 @@ function onEvent(p) {
 			// at pump_epoch E so ANY later lower-epoch straggler is blocked PERMANENTLY.
 			if (pumpFenceReject(p, true)) break;
 			pumpFenceAccept(p, true);
+			// C2 self-heal: a parked confirmation card whose best-effort action:pending
+			// push was missed rides the terminal here (settlement/finalize), so it appears
+			// at turn-end WITHOUT a manual reload. Deduped by token (enqueuePending), so the
+			// finalize backstop re-publish can't double-render; a conv-less token ("") binds
+			// to this conversation, mirroring the action:pending handler's rescue.
+			if (Array.isArray(p.pending)) {
+				for (const card of p.pending)
+					enqueuePending({
+						...card,
+						conversation: card.conversation || p.conversation_id,
+					});
+			}
 			// Defensive: if a promoted turn's run:start was missed, retire the chip.
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
 			const m = messages.value.find((x) => x.name === p.message_id);
@@ -7366,6 +7378,18 @@ function onEvent(p) {
 			// pump_epoch E (blocks later lower-epoch stragglers).
 			if (pumpFenceReject(p, true)) break;
 			pumpFenceAccept(p, true);
+			// C2 self-heal (mirror run:end): a parked confirmation card rides an ERRORED
+			// terminal too (settlement/finalize enrich both), so drain it here as well —
+			// otherwise a card parked in a turn that then errors never auto-recovers
+			// (run:error reloads the conversation, not the pending list). Deduped by token;
+			// a conv-less token ("") binds to this conversation.
+			if (Array.isArray(p.pending)) {
+				for (const card of p.pending)
+					enqueuePending({
+						...card,
+						conversation: card.conversation || p.conversation_id,
+					});
+			}
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
 			if (p.message_id) {
 				errorMeta.value = {
