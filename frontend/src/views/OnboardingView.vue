@@ -311,6 +311,13 @@
 								</button>
 								— we'll email a code to confirm it's you. Nothing to pay again.
 							</p>
+							<p
+								v-else-if="state.reconnectNeedsCompany"
+								class="mx-auto mt-5 max-w-[620px] text-center text-p-sm text-ink-gray-5"
+							>
+								This email already has a subscription under a different company —
+								enter that company above to reconnect it instead of paying again.
+							</p>
 							<div class="ob-foot">
 								<button class="ob-back" @click="goBack">
 									<FeatherIcon
