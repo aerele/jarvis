@@ -167,6 +167,15 @@ useDismissable(rootRef, open, undefined, triggerRef);
 		linear-gradient(140deg, #9d7cea, #6846e3);
 	box-shadow: 0 0 10px rgba(124, 92, 234, 0.4);
 }
+/* The Jarvis orb renders <JarvisMark>, whose default .jv-mark paints its own
+   opaque brand gradient at the full orb size - which covered .pep-orb.jarvis's
+   radial highlight, so the Jarvis orb read flat while Jara's white star (a bare
+   SVG over the same orb) glowed. Drop the nested mark's own background so the
+   orb's highlight shows through behind the star, matching Jara. A tenant
+   whitelabel logo (.jv-mark-img) is exempt - an image must stay opaque. */
+.pep-orb.jarvis :deep(.jv-mark:not(.jv-mark-img)) {
+	background: transparent;
+}
 
 /* ---- dropdown ---- */
 .pep-menu {

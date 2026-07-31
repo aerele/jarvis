@@ -86,12 +86,19 @@
 			<!-- effort → side flyout (wrapper keeps the flyout a SIBLING of the row
 			     button, never nested inside it — interactive-in-button is invalid) -->
 			<div class="mep-sub" @mouseenter="cancelEffortClose" @mouseleave="scheduleEffortClose">
+				<!-- click OPENS, it does not toggle. For a mouse user the pointer order
+				     is mouseenter (opens) then click, so a toggling click would close
+				     what the hover just opened and the flyout could never open by
+				     click. Both intents here are "open"; closing is mouseleave (the
+				     .mep-sub delay), outside-click / Escape (useDismissable), or
+				     picking a level. Keyboard users open with Enter and close with
+				     Escape. -->
 				<button
 					class="mep-item"
 					:class="{ open: effortOpen }"
 					aria-haspopup="menu"
 					:aria-expanded="effortOpen"
-					@click="effortOpen = !effortOpen"
+					@click="effortOpen = true"
 					@mouseenter="effortOpen = true"
 				>
 					<span class="mep-item-body"><span class="mep-name">Effort</span></span>

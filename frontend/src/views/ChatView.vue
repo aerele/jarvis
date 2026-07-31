@@ -2457,6 +2457,11 @@
 									/>
 								</svg>
 							</button>
+							<!-- persona_enabled is read once at mount (boot payload). If an admin
+							     flips the fleet-wide kill switch mid-session the pill can linger
+							     until reload, but the server clause (_persona_clause) re-reads the
+							     switch every turn, so behaviour is always correct - this is
+							     voice-only cosmetic lag that self-heals on the next boot. -->
 							<PersonaPill v-if="ui.persona_enabled" />
 							<button
 								v-if="ui.wiki_enabled"

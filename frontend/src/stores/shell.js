@@ -112,10 +112,21 @@ let _personaWritesInflight = 0;
 // back on failure, so a stale rejected request can't stomp a newer accepted
 // value.
 let _personaSeq = 0;
+// The last value the SERVER confirmed - a successful write, or a value the
+// server pushed via syncSettingsFromServer. Rollback restores THIS, not the ref
+// value at call time: during rapid toggles that ref may itself be an unconfirmed
+// optimistic value, so rolling back to it could strand the pill on a value the
+// server never accepted. Initialised to the booted local value as the baseline.
+let _personaConfirmed = preferredPersona.value;
+// Upper bound on how long a persona POST may hold the reconcile guard. Without
+// it, one hung (never-settling) request would pin _personaWritesInflight above 0
+// for the rest of the session, silently and permanently disabling every
+// persist:false reconcile (cross-tab / cross-device sync). The seq guard still
+// prevents a late real settlement from rolling back a newer value.
+const PERSONA_WRITE_TIMEOUT_MS = 15000;
 function setPreferredPersona(v, { persist = true } = {}) {
 	const persona = v === "Jara" ? "Jara" : "Jarvis";
 	if (!persist && _personaWritesInflight > 0) return;
-	const prev = preferredPersona.value;
 	preferredPersona.value = persona;
 	try {
 		localStorage.setItem("jarvis-preferred-persona", persona);
@@ -123,27 +134,63 @@ function setPreferredPersona(v, { persist = true } = {}) {
 		// localStorage throws in private mode and when the quota is full.
 		// The preference is a nicety; losing it must never break the picker.
 	}
-	if (persist) {
-		const seq = ++_personaSeq;
-		// Fire-and-forget, same as renameConversation/toggleStar: roll back both
-		// the ref and the cache on failure so a device that never actually wrote
-		// the server value doesn't keep showing it as current.
-		_personaWritesInflight++;
-		api.updateMySettings({ preferred_persona: persona })
-			.catch(() => {
-				if (seq !== _personaSeq) return;
-				preferredPersona.value = prev;
-				try {
-					localStorage.setItem("jarvis-preferred-persona", prev);
-				} catch (_e) {
-					// see above: localStorage write failures are non-fatal
-				}
-				toast.error("Couldn't switch to " + persona + " - still using " + prev + ".");
-			})
-			.finally(() => {
-				_personaWritesInflight--;
-			});
+	if (!persist) {
+		// This IS the server's value (mount reconcile / GeneralPane sync), so it
+		// becomes the confirmed baseline a later failed write rolls back to.
+		_personaConfirmed = persona;
+		return;
 	}
+	const seq = ++_personaSeq;
+	// Fire-and-forget, same as renameConversation/toggleStar: on failure roll the
+	// ref + cache back to the last server-confirmed value so a device that never
+	// actually wrote the server value doesn't keep showing it as current.
+	_personaWritesInflight++;
+	let settled = false;
+	let timer = null;
+	const release = () => {
+		if (settled) return;
+		settled = true;
+		if (timer) clearTimeout(timer);
+		_personaWritesInflight = Math.max(0, _personaWritesInflight - 1);
+	};
+	api.updateMySettings({ preferred_persona: persona })
+		.then(() => {
+			if (seq !== _personaSeq) return;
+			// Server accepted this value: make it authoritative for BOTH the ref and
+			// the confirmed baseline. Re-asserting the ref matters because the
+			// timeout below can force-release the in-flight guard before a slow POST
+			// settles, letting a persist:false reconcile set the ref back to the
+			// pre-write value; without this the pill would stay stale after the POST
+			// finally succeeds. On the normal path the ref is already `persona`, so
+			// this is a no-op. (Ordering vs a reconcile is best-effort: _personaSeq
+			// tracks only local writes, so in the rare window of a >timeout hang plus
+			// a genuine cross-device change landing via reconcile, a still-current
+			// local write re-asserts its own value; it self-heals on the next
+			// reconcile - far rarer and milder than the stale pill this closes.)
+			_personaConfirmed = persona;
+			preferredPersona.value = persona;
+			try {
+				localStorage.setItem("jarvis-preferred-persona", persona);
+			} catch (_e) {
+				// see above: localStorage write failures are non-fatal
+			}
+		})
+		.catch(() => {
+			if (seq !== _personaSeq) return;
+			preferredPersona.value = _personaConfirmed;
+			try {
+				localStorage.setItem("jarvis-preferred-persona", _personaConfirmed);
+			} catch (_e) {
+				// see above: localStorage write failures are non-fatal
+			}
+			toast.error(
+				"Couldn't switch to " + persona + " - still using " + _personaConfirmed + "."
+			);
+		})
+		.finally(release);
+	// Safety net: force-release the guard after the bound even if the POST never
+	// settles, so the reconcile path can always recover. Cleared on settle.
+	timer = setTimeout(release, PERSONA_WRITE_TIMEOUT_MS);
 }
 const notifyEnabled = ref(
 	typeof Notification !== "undefined" &&
