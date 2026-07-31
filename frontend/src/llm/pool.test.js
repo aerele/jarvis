@@ -875,3 +875,76 @@ test("dirtyAccountHealth: 'pending' and 'neutral' are visibly distinct levels (r
 	const neverProven = dirtyAccountHealth({ level: "neutral" }, true);
 	assert.notEqual(wasHealthy.level, neverProven.level);
 });
+
+// jarvis#556: the pre-flight probe used to skip only ollama/vllm BY PROVIDER ID,
+// so any other provider pointed at a private or loopback endpoint was probed from
+// the bench, could not be reached, and silently refused to connect. Locality now
+// follows the address.
+import { isContainerOnlyBaseUrl, isContainerOnlyRow } from "./pool.js";
+
+test("isContainerOnlyBaseUrl: private and loopback addresses are container-only", () => {
+	for (const url of [
+		"http://localhost:11434",
+		"http://127.0.0.1:8000",
+		"http://0.0.0.0:8000",
+		"http://10.1.2.3/v1",
+		"http://192.168.1.9:8080",
+		"http://172.16.0.5",
+		"http://172.31.255.254",
+		"http://169.254.1.1",
+		"http://100.64.0.1",
+		"http://[::1]:8000",
+		"http://ollama:11434",
+		"http://box.local/v1",
+		"http://gateway.internal/v1",
+		"10.0.0.4:8080",
+	]) {
+		assert.equal(isContainerOnlyBaseUrl(url), true, url);
+	}
+});
+
+test("isContainerOnlyBaseUrl: public endpoints still get probed", () => {
+	for (const url of [
+		"https://api.openai.com/v1",
+		"https://api.z.ai/api/paas/v4",
+		"https://generativelanguage.googleapis.com",
+		"https://8.8.8.8/v1",
+		"http://172.32.0.5",
+		"http://11.0.0.1",
+		"",
+		null,
+	]) {
+		assert.equal(isContainerOnlyBaseUrl(url), false, String(url));
+	}
+});
+
+test("isContainerOnlyBaseUrl: a malformed host is not waved through as local", () => {
+	// Treating garbage as local would skip the probe and hide a typo.
+	assert.equal(isContainerOnlyBaseUrl("http://not a host/v1"), false);
+	assert.equal(isContainerOnlyBaseUrl("http://-bad-/v1"), false);
+});
+
+test("isContainerOnlyRow: a private base url counts whatever the provider is", () => {
+	// The reported case: openai_compat pointed at a LAN address.
+	assert.equal(
+		isContainerOnlyRow({
+			provider: "OpenAI-compatible",
+			baseUrl: "http://192.168.1.50:8000/v1",
+		}),
+		true
+	);
+	// The same provider on a public URL must still be probed.
+	assert.equal(
+		isContainerOnlyRow({
+			provider: "OpenAI-compatible",
+			baseUrl: "https://api.example.com/v1",
+		}),
+		false
+	);
+});
+
+test("isContainerOnlyRow: ollama and vllm keep their carve-out with no base url", () => {
+	assert.equal(isContainerOnlyRow({ provider: "Ollama (local)", baseUrl: "" }), true);
+	assert.equal(isContainerOnlyRow({ provider: "vLLM (local)", baseUrl: "" }), true);
+	assert.equal(isContainerOnlyRow(null), false);
+});

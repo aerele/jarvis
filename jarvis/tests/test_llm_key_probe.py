@@ -277,3 +277,74 @@ class TestTestLlmApiKeyGating(FrappeTestCase):
 				"Ollama (local)", "llama3", "unused", "http://host.docker.internal:11434/v1"
 			)
 		self.assertIn("container", result["caveat"])
+
+
+class TestContainerOnlyBaseUrl(FrappeTestCase):
+	"""jarvis#556: locality follows the ADDRESS, not the provider id.
+
+	The pre-flight probe used to skip only ollama and vllm, so any other provider
+	pointed at a private or loopback endpoint was probed from the bench, could not
+	be reached, and the connect silently refused. These are pure string checks and
+	touch nothing.
+	"""
+
+	def test_private_and_loopback_hosts_are_container_only(self):
+		from jarvis.llm_key_probe import is_container_only_base_url
+
+		for url in (
+			"http://localhost:11434",
+			"http://127.0.0.1:8000",
+			"http://0.0.0.0:8000",
+			"http://10.1.2.3/v1",
+			"http://192.168.1.9:8080",
+			"http://172.16.0.5",
+			"http://172.31.255.254",
+			"http://169.254.1.1",
+			"http://100.64.0.1",
+			"http://[::1]:8000",
+			"http://ollama:11434",
+			"http://box.local/v1",
+			"http://gateway.internal/v1",
+			"10.0.0.4:8080",
+		):
+			self.assertTrue(is_container_only_base_url(url), url)
+
+	def test_public_endpoints_are_still_probed(self):
+		from jarvis.llm_key_probe import is_container_only_base_url
+
+		for url in (
+			"https://api.openai.com/v1",
+			"https://api.z.ai/api/paas/v4",
+			"https://generativelanguage.googleapis.com",
+			"https://8.8.8.8/v1",
+			"http://172.32.0.5",
+			"http://11.0.0.1",
+			"",
+		):
+			self.assertFalse(is_container_only_base_url(url), url)
+
+	def test_malformed_host_is_not_waved_through_as_local(self):
+		"""Treating garbage as local would skip the probe and hide a typo."""
+		from jarvis.llm_key_probe import is_container_only_base_url
+
+		self.assertFalse(is_container_only_base_url("http://not a host/v1"))
+		self.assertFalse(is_container_only_base_url("http://-bad-/v1"))
+
+	def test_probe_reports_local_endpoint_for_a_private_url_on_any_provider(self):
+		"""The reported case: openai_compat pointed at a LAN address.
+
+		The probe reports it as a local endpoint so the caller stops treating an
+		unreachable-from-here address as a real key failure. No request is made:
+		the missing-model guard returns first.
+		"""
+		from jarvis.llm_key_probe import probe_api_key
+
+		out = probe_api_key("OpenAI-compatible", "", "sk-test", "http://192.168.1.50:8000/v1")
+		self.assertTrue(out["local_endpoint"])
+		self.assertFalse(out["ok"])
+
+	def test_probe_still_reports_a_public_url_as_remote(self):
+		from jarvis.llm_key_probe import probe_api_key
+
+		out = probe_api_key("OpenAI-compatible", "", "sk-test", "https://api.example.com/v1")
+		self.assertFalse(out["local_endpoint"])

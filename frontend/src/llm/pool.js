@@ -223,6 +223,61 @@ export function providerLabel(id) {
 export function providerId(label) {
 	return _ID_BY_LABEL[label] || label || "";
 }
+
+// True when a base URL names an endpoint only the tenant's CONTAINER can reach:
+// loopback, an RFC1918 / CGNAT / link-local address, a .local-style suffix, or a
+// bare single-label name (a docker service alias). Probing one of those from the
+// bench says nothing about the key, and before jarvis#556 it blocked the save of
+// a perfectly good private endpoint.
+//
+// Keyed on the ADDRESS, not the provider id. A private endpoint reached through
+// openai_compat is exactly as unreachable from this bench as one reached through
+// ollama, and the provider id was never evidence either way.
+//
+// SSRF direction: this only ever REMOVES a bench-originated request to a private
+// address, it never adds one. The server keeps its own link_fetch SSRF guard, so
+// any probe that does reach it is still refused there.
+export function isContainerOnlyBaseUrl(rawUrl) {
+	const raw = (rawUrl || "").trim();
+	if (!raw) return false;
+	let host = "";
+	try {
+		host = new URL(raw.includes("://") ? raw : `http://${raw}`).hostname.toLowerCase();
+	} catch {
+		return false; // unparseable, so treat as public and let the probe run
+	}
+	// URL.hostname KEEPS the brackets on an IPv6 literal (unlike Python's
+	// urlsplit), so strip them before matching.
+	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+	if (!host) return false;
+	if (host === "::1") return true;
+	if (/^f[cd][0-9a-f]{2}:/.test(host)) return true; // unique-local
+	if (/^fe[89ab][0-9a-f]:/.test(host)) return true; // link-local
+	// A single label resolves only inside a container network. Require it to look
+	// like a real hostname so a malformed URL is not quietly waved through as
+	// "local" and left unprobed.
+	if (!host.includes(".")) return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(host);
+	if (/\.(local|internal|lan|home|localdomain)$/.test(host)) return true;
+	const quad = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+	if (!quad) return false;
+	const a = Number(quad[1]);
+	const b = Number(quad[2]);
+	if (a === 0 || a === 127 || a === 10) return true;
+	if (a === 192 && b === 168) return true;
+	if (a === 169 && b === 254) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
+	if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+	return false;
+}
+
+// Row-level form of the above. ollama and vllm keep their carve-out even with no
+// base URL typed yet: they are local by definition and the field is optional for
+// ollama.
+export function isContainerOnlyRow(row) {
+	if (!row) return false;
+	if (LOCAL_PROVIDER_IDS.has(providerId(row.provider))) return true;
+	return isContainerOnlyBaseUrl(row.baseUrl || row.base_url || "");
+}
 // The api_key value to persist for one API-key row. A real typed key always
 // wins; an unchanged has_key row sends "" (the merge-on-save convention - see
 // buildCustomModels/buildSaveModels callers, "let backend merge keep a stored

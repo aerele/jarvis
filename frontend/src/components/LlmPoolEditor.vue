@@ -1651,6 +1651,7 @@ import {
 	isCodeOnlyPaste,
 	effectiveApiKey,
 	LOCAL_PROVIDER_IDS,
+	isContainerOnlyRow,
 } from "@/llm/pool";
 import { errMessage as _err } from "@/lib/errors";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
@@ -2484,10 +2485,14 @@ async function connectApiKeyRow(row) {
 	}
 	// Probe only what can actually be sent. A stored key is encrypted server-side and
 	// never comes back to the browser, so an untouched row has nothing to probe; and a
-	// local endpoint (ollama, vllm) is reachable from the CONTAINER rather than from
-	// this bench, so a failure here would say nothing about the key while blocking a
+	// container-only endpoint is reachable from the CONTAINER rather than from this
+	// bench, so a failure here would say nothing about the key while blocking a
 	// perfectly good save.
-	if ((row.apiKey || "").trim() && !isLocalProviderRow(row)) {
+	//
+	// Locality is decided by the ADDRESS, not the provider id (jarvis#556). Keying it
+	// on ollama/vllm meant any other provider pointed at a private or loopback URL got
+	// probed from the bench, could not be reached, and silently refused to connect.
+	if ((row.apiKey || "").trim() && !isContainerOnlyRow(row)) {
 		// The probe is part of the Connect, so the editor is inert for it too. Released
 		// before runApply, which puts the overlay straight back up with its own label -
 		// and because nothing awaits in between, the swap costs no repaint.
@@ -2498,9 +2503,22 @@ async function connectApiKeyRow(row) {
 			setBusy("");
 		}
 		const probe = panel.value.testResult;
-		// Nothing else to say: the red Test result block above the button is already
-		// showing the provider's own words for why it refused.
-		if (!probe || !probe.ok) return;
+		// A probe that produced a RESULT needs nothing more from us: the red Test
+		// result block above the button is already showing the provider's own words
+		// for why it refused. A probe that produced NO result at all is different -
+		// the request itself failed, the block stays empty, and returning here left
+		// the customer pressing Connect against total silence (jarvis#556).
+		if (!probe) {
+			setApplyResult({
+				kind: "failed",
+				text: "Could not check this key.",
+				detail:
+					"The check could not be completed, so the model was not connected. " +
+					"Check the base URL and try again.",
+			});
+			return;
+		}
+		if (!probe.ok) return;
 	}
 	// The "add backup models automatically" switch used to be honoured on Close,
 	// which only worked because a Save came afterwards. Expand before the payload is
