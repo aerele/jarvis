@@ -122,6 +122,40 @@ class TestMintReliableIndex(FrappeTestCase):
 		self.assertIsNone(pending_confirm.peek(token))
 		self.assertNotIn(token, {r["token"] for r in pending_confirm.list_for_owner(self._A)})
 
+	def test_index_write_failure_returns_none(self):
+		"""A park that can't be indexed must SIGNAL failure by returning None - NOT
+		a token. Returning a token whose record was rolled back made the gate
+		publish an un-confirmable card that wedged the turn on an 'expired' toast
+		(the whole point of this fix). None lets the gate surface a retryable tool
+		error instead."""
+		with patch.object(
+			frappe.cache(), "sadd", side_effect=redis.exceptions.ConnectionError("simulated redis blip")
+		):
+			with patch.object(frappe, "log_error"):
+				self.assertIsNone(self._mint())
+
+	def test_persist_verify_failure_returns_none(self):
+		"""set_value SUPPRESSES a transient redis ConnectionError, so a record can
+		silently fail to persist while the index write succeeds. mint reads the
+		record back and, finding it absent, must treat the park as failed (return
+		None + log) rather than let a card be published against a token whose record
+		never landed."""
+		with patch.object(pending_confirm, "peek", return_value=None):
+			with patch.object(frappe, "log_error") as mock_log:
+				self.assertIsNone(self._mint())
+		self.assertTrue(mock_log.called, "a persist-verify miss must be logged, not swallowed")
+
+	def test_failed_park_does_not_bump_cards_open_gauge(self):
+		"""The cards_open gauge is observability, not authority: a rolled-back park
+		must never leave the gauge over-counting a card the user can't see."""
+		before = pending_confirm.cards_open_gauge()
+		with patch.object(
+			frappe.cache(), "sadd", side_effect=redis.exceptions.ConnectionError("simulated redis blip")
+		):
+			with patch.object(frappe, "log_error"):
+				self._mint()
+		self.assertEqual(pending_confirm.cards_open_gauge(), before)
+
 
 class TestExecUser(FrappeTestCase):
 	def test_exec_user_stored_and_returned(self):

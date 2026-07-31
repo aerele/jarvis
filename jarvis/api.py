@@ -1203,6 +1203,19 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			preview=preview,
 			expires_at=expires_at,
 		)
+		# mint returns None when it could not stage the park (a transient cache
+		# failure that it already rolled back, so nothing is persisted). Do NOT
+		# publish a card against a token whose record does not exist - that card is
+		# un-confirmable and wedges the turn on an "expired" toast. Surface a
+		# RETRYABLE tool error instead: nothing changed, so the model can simply call
+		# the exact same tool again and the confirmation card will appear.
+		if not token:
+			return _error(
+				"ConfirmationUnavailableError",
+				"could not stage the confirmation for this action (a transient "
+				"storage error). Nothing was changed. Retry the exact same call and "
+				"the confirmation card will appear.",
+			)
 		# Deliver the token to the human's UI out-of-band, over the realtime
 		# channel, NEVER via the function return below - the model must never
 		# see it. Published to the OWNER (the subscribed browser), not the acting

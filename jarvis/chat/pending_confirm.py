@@ -119,12 +119,15 @@ def mint(
 	exec_user: str | None = None,
 	preview: dict | None = None,
 	expires_at: int | None = None,
-) -> str:
+) -> str | None:
 	"""Store a pending call and return a fresh single-use token
 	(secrets.token_urlsafe(24)). The stored record carries conversation,
 	owner, tool, args (the full dict - this is the authoritative payload
 	that will execute), args_hash, run_id, exec_user, preview. TTL _TTL_S.
-	Returns the token.
+	Returns the token, or ``None`` when the park could not be stored (a transient
+	cache failure): the record+index must BOTH land or the caller must treat it as
+	a retryable failure and publish NO card - a token whose record does not exist is
+	an un-confirmable card that wedges the turn.
 
 	``preview`` is the park-time confirmation preview (dry-run "would" doc or
 	described-intent dict). It is stored so the resync endpoint can return it
@@ -155,29 +158,43 @@ def mint(
 		"expires_at": expires_at if expires_at is not None else int(time.time()) + _TTL_S,
 	}
 	cache = frappe.cache()
-	cache.set_value(_key(token), record, expires_in_sec=_TTL_S)
-	# Index the token under its owner so list_for_owner (the resync endpoint) can
-	# re-surface it after a reload/reconnect. This is REQUIRED, not best-effort: an
-	# unindexed record is INVISIBLE to resync -> a silent, unrecoverable
-	# confirmation card (the bulk-create card that parked but never rendered). So if
-	# the index write fails, roll the record back rather than leave an orphan the
-	# user can never see, and log the failure LOUDLY (it was a silent
-	# try/except: pass). The gate re-parks on its next attempt.
+	# Persist the record, index it under its owner, and VERIFY it landed - all three
+	# must hold or the park is a failure. Two ways a park silently breaks:
+	#   1. The owner-index write fails: an unindexed record is INVISIBLE to the resync
+	#      endpoint -> a confirmation card that never re-surfaces (the bulk-create card
+	#      that parked but never rendered).
+	#   2. set_value SUPPRESSES a transient redis ConnectionError, so the record itself
+	#      can fail to persist with no exception raised at all.
+	# In EITHER case, returning a token would make the gate publish a card whose token
+	# has no record -> an un-confirmable "expired" card that wedges the turn. So on ANY
+	# failure roll the writes back (no orphan), log LOUDLY (it was once a silent
+	# try/except: pass), and return None so the gate surfaces a RETRYABLE tool error and
+	# the model can simply call again.
 	try:
+		cache.set_value(_key(token), record, expires_in_sec=_TTL_S)
 		cache.sadd(_owner_key(owner), token)
 		cache.expire_key(_owner_key(owner), _TTL_S)
+		# set_value swallows a redis blip, so confirm the record is really readable
+		# before we let a card be published against this token.
+		if peek(token) is None:
+			raise RuntimeError("pending-confirm record did not persist")
 	except Exception:
 		frappe.log_error(
-			title="pending_confirm: owner-index write failed; token not parked",
+			title="pending_confirm: park failed; token not stored",
 			message=frappe.get_traceback(),
 		)
-		try:
-			cache.delete_value(_key(token))
-		except Exception:
-			pass
-		return token
+		for _rollback in (
+			lambda: cache.delete_value(_key(token)),
+			lambda: cache.srem(_owner_key(owner), token),
+		):
+			try:
+				_rollback()
+			except Exception:
+				pass
+		return None
 	# cards_open gauge +1 (self-healing on expiry via the ZSET score). Bumped only
-	# after a successful persist+index so the gauge never over-counts a rolled-back park.
+	# after a successful persist+index+verify so the gauge never over-counts a
+	# rolled-back park.
 	_gauge_add(token, record["expires_at"])
 	_emit_cards_open("mint")
 	return token
