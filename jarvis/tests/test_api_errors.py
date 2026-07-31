@@ -278,6 +278,10 @@ class TestErrorLogReader(ApiErrorsBase):
 		self.assertFalse(api_errors.is_jarvis_error("jarvis errors: rollup push failed", push_tb))
 		endpoint_tb = 'File "/x/apps/jarvis/jarvis/api_errors.py", line 40, in report_client_errors'
 		self.assertFalse(api_errors.is_jarvis_error("", endpoint_tb))
+		# GAP 1 heartbeat: its own push-path errors must not self-forward either (guards
+		# the _REPORTER_SELF_MARKERS entry against a future drop/typo).
+		heartbeat_tb = 'File "/x/apps/jarvis/jarvis/chat/heartbeat.py", line 60, in push_bench_heartbeat'
+		self.assertFalse(api_errors.is_jarvis_error("jarvis.chat.heartbeat push failed", heartbeat_tb))
 
 	def test_collect_filters_to_jarvis_and_advances_watermark(self):
 		jtb = (

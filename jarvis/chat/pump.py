@@ -105,6 +105,14 @@ PROGRESS_STALE_S = 2 * SOFT_HOP_BUDGET_S
 # written at most this often (a slice is ~sub-second, so we gate them).
 HEARTBEAT_INTERVAL_S = 10
 
+# GAP 1 (Track B): the Default key stamped when watchdog() reaches completion. The bench
+# heartbeat reports (now - this); the control plane can tell a watchdog cron that stopped
+# running/completing (age grows while the scheduler otherwise ticks) from a dead scheduler
+# (the heartbeat cron stops too). Per-shard recovery failures are swallowed + continue, so
+# the completion stamp stays fresh through them — that symptom is caught by the turn-age
+# signal, not this one.
+WATCHDOG_LAST_COMPLETED_KEY = "jarvis_pump_watchdog_last_completed"
+
 # How long a slice blocks on the mux for buffered frames before re-checking the
 # lease / budget. Small so budgets + SIGTERM are honored promptly.
 SLICE_BLOCK_S = 0.2
@@ -3055,6 +3063,9 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(title="pump.watchdog", message=frappe.get_traceback())
+	# GAP 1 (Track B): record that the recovery machinery ran to completion, for the
+	# bench heartbeat's watchdog_last_completed_age signal.
+	frappe.db.set_default(WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
 	return summary
 
 
