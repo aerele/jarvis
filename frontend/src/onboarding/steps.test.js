@@ -58,7 +58,10 @@ test("planSubtitleFor: an absent, null or blank price is not treated as free", (
 	assert.equal(planSubtitleFor([{ name: "ob-plan", price_inr: null }]), paidOnly);
 	assert.equal(planSubtitleFor([{ name: "ob-plan" }]), paidOnly);
 	assert.equal(planSubtitleFor([{ name: "ob-plan", price_inr: "" }]), paidOnly);
-	assert.equal(planSubtitleFor([{ name: "ob-plan", price_inr: 1000, trial_days: null }]), paidOnly);
+	assert.equal(
+		planSubtitleFor([{ name: "ob-plan", price_inr: 1000, trial_days: null }]),
+		paidOnly
+	);
 	// A stray null element from a partially loaded response must not count either.
 	assert.equal(planSubtitleFor([null, { name: "Pro", price_inr: 3000 }]), paidOnly);
 	// A genuine zero still reads as free, including the string form.
