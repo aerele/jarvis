@@ -110,6 +110,37 @@ class AdminUnreachableError(JarvisError):
 	"""HTTPS call to jarvis_admin failed (network, timeout, 5xx, non-JSON)."""
 
 
+class AdminRejectedError(AdminUnreachableError):
+	"""jarvis_admin was REACHED and PERMANENTLY refused the request.
+
+	The admin's fleet layer answers a config it can never accept (an unknown
+	provider slug, a spec the fleet-agent rejects) with HTTP 502 carrying its
+	own structured ``error.code`` - the same status a genuine gateway fault
+	uses. Collapsing both into ``AdminUnreachableError`` is what let a
+	deterministic rejection be recorded as "pending: admin applying config"
+	forever: the caller assumed admin had persisted the desired state and
+	would reconcile it, when in fact admin threw during validation and stored
+	nothing (jarvis #542).
+
+	``code`` is admin's own ``error.code`` (the raising exception's class
+	name, e.g. ``FleetConfigError``); ``detail`` is admin's ``error.message``
+	on its own, WITHOUT the "admin returned a 502 error: " wrapper the
+	exception message carries, so a caller can put the reason in front of a
+	customer without re-parsing it back out.
+
+	Deliberately a SUBCLASS of AdminUnreachableError: every other catch site
+	already treats an admin failure as terminal, so inheriting leaves them
+	correct with no change at all. Only the two sites that treat an
+	unreachable admin as "the apply is still landing" need to branch, and
+	they do it with an explicit handler ahead of their unreachable one.
+	"""
+
+	def __init__(self, message: str, *, code: str = "", detail: str = ""):
+		super().__init__(message)
+		self.code = code
+		self.detail = detail
+
+
 class AdminAuthError(JarvisError):
 	"""jarvis_admin rejected the token / site (401 / 403).
 
