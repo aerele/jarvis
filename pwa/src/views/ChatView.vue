@@ -453,6 +453,24 @@ function onEvent(p) {
 		case "run:end":
 			sendBusy.value = false;
 			live.value = null;
+			// C2 self-heal: a parked confirmation card whose best-effort action:pending
+			// push was missed rides the terminal here (settlement/finalize) - surface it at
+			// turn-end WITHOUT a manual reload. Deduped by token; a conv-less token ("")
+			// binds to this conversation, mirroring the action:pending case below.
+			if (Array.isArray(p.pending)) {
+				for (const card of p.pending) {
+					if (!card.token || pending.value.some((x) => x.token === card.token)) continue;
+					pending.value.push({
+						token: card.token,
+						tool: card.tool || "",
+						summary: card.summary || "",
+						preview: card.preview ?? null,
+						conversation: card.conversation || conv,
+						run_id: card.run_id,
+						expires_at: card.expires_at ?? null,
+					});
+				}
+			}
 			// The reply is durable now; reconcile against it (canvas items, final
 			// formatting) instead of trusting the streamed copy.
 			load();
