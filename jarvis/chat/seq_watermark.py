@@ -27,11 +27,14 @@ _LEGACY_COL = "openclaw_seq_watermark"
 
 def has_legacy_column() -> bool:
 	"""True while the pre-rename column is still present (upgraded site, transition
-	release). Fresh installs never grow it. Cached per request — schema does not
-	change mid-request."""
+	release). Fresh installs never grow it. Asks the SERVER directly (SHOW COLUMNS)
+	rather than ``get_table_columns`` — that helper is redis/client cached and a
+	stale entry here would silently disable the compat layer (bit CI when the test
+	suite ALTERs the column in). Memoized per request — schema does not change
+	mid-request."""
 	cached = getattr(frappe.local, "_jarvis_wm_legacy_col", None)
 	if cached is None:
-		cached = _LEGACY_COL in frappe.db.get_table_columns(MSG)
+		cached = bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` LIKE %(c)s", {"c": _LEGACY_COL}))
 		frappe.local._jarvis_wm_legacy_col = cached
 	return cached
 

@@ -22,19 +22,39 @@ MSG = "Jarvis Chat Message"
 class TestSeqWatermarkMigration(FrappeTestCase):
 	_added_legacy_col = False
 
+	@staticmethod
+	def _legacy_col_exists() -> bool:
+		# Ask the SERVER, not get_table_columns — that helper is redis/client cached
+		# and the DDL below makes the cache lie (this exact staleness broke CI once:
+		# the patch's own has-column guard read the stale cache and no-op'd).
+		return bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` LIKE 'openclaw_seq_watermark'"))
+
+	@staticmethod
+	def _bust_columns_cache():
+		key = f"table_columns::tab{MSG}"
+		frappe.cache.delete_value(key)
+		try:
+			frappe.client_cache.delete_value(key)
+		except Exception:
+			pass
+		frappe.local._jarvis_wm_legacy_col = None
+
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		if "openclaw_seq_watermark" not in frappe.db.get_table_columns(MSG):
+		if not cls._legacy_col_exists():
 			frappe.db.sql_ddl(
 				f"ALTER TABLE `tab{MSG}` ADD COLUMN openclaw_seq_watermark INT(11) NOT NULL DEFAULT 0"
 			)
 			cls._added_legacy_col = True
+		cls._bust_columns_cache()
+		assert cls._legacy_col_exists(), "simulated-upgrade column did not stick"
 
 	@classmethod
 	def tearDownClass(cls):
-		if cls._added_legacy_col:
+		if cls._added_legacy_col and cls._legacy_col_exists():
 			frappe.db.sql_ddl(f"ALTER TABLE `tab{MSG}` DROP COLUMN openclaw_seq_watermark")
+		cls._bust_columns_cache()
 		super().tearDownClass()
 
 	def setUp(self):
