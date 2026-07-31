@@ -230,6 +230,62 @@ class TestOnUpdateStatus(_SettingsSingletonTestCase):
 		self.assertIn("failed", settings.last_sync_status or "")
 		self.assertIn("admin unreachable", settings.last_sync_status or "")
 
+	# jarvis #542: on a "restart" the two failures below arrive as the SAME
+	# exception class off the wire (admin answers a gateway fault and a config
+	# refusal with the same 502), and they must end in opposite states - one
+	# waits for the admin reconcile, the other can only ever be refused again.
+
+	def test_transient_unreachable_on_restart_records_pending(self):
+		"""F2, unchanged: admin persists a creds re-render desired-first and
+		reconciles a late apply, so a timeout is pending, never a lost change."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		settings = frappe.get_single("Jarvis Settings")
+		settings.llm_provider = "Anthropic"
+		settings.llm_model = "claude-sonnet-4-6"
+		with (
+			patch(
+				"jarvis.admin_client.post_update_llm_creds",
+				side_effect=AdminUnreachableError("read timeout"),
+			),
+			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Configuring"}),
+		):
+			settings.save()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(settings.last_sync_status, "pending: admin applying config")
+
+	def test_permanent_rejection_on_restart_records_failed_with_the_reason(self):
+		"""admin threw during validation and persisted NOTHING, so there is no
+		desired state for the */5 reconcile to converge to - "pending" would
+		read as "Applying your changes" forever. Terminal, carrying admin's own
+		reason, and get_connection is never even consulted."""
+		from jarvis.exceptions import AdminRejectedError
+
+		settings = frappe.get_single("Jarvis Settings")
+		settings.llm_provider = "Anthropic"
+		settings.llm_model = "claude-sonnet-4-6"
+		with (
+			patch(
+				"jarvis.admin_client.post_update_llm_creds",
+				side_effect=AdminRejectedError(
+					"admin returned a 502 error: unknown llm_provider: 'gemini'",
+					code="FleetConfigError",
+					detail="unknown llm_provider: 'gemini'",
+				),
+			),
+			patch("jarvis.admin_client.get_connection") as get_conn,
+		):
+			settings.save()
+			get_conn.assert_not_called()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(
+			settings.last_sync_status,
+			"failed: Your AI configuration was rejected: unknown llm_provider: 'gemini'",
+		)
+		# last_sync_at stayed NULL on the pending path, which left support with
+		# no signal either - a terminal verdict always stamps it.
+		self.assertIsNotNone(settings.last_sync_at)
+
 	def test_save_succeeds_even_when_admin_call_fails(self):
 		from jarvis.exceptions import AdminUnreachableError
 

@@ -3849,6 +3849,62 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		self.assertFalse(settings.llm_pool_synced_at)
 		self.assertEqual(settings.last_subscription_status, "", "must clear stale subscription_status")
 
+	# -- jarvis #542: a rejection admin NAMED with a structured error.code ---
+	# (not merely implied through its "Your ..." sentence) is terminal too.
+
+	def test_rejected_pool_apply_records_failed_and_is_not_retried(self):
+		"""A raw diagnostic ("unknown llm_provider: 'gemini'") is the single most
+		useful thing the customer can be told, so it is surfaced verbatim behind
+		a lead-in of our own. Nothing was persisted admin-side, so the transient
+		retry and the converge poll are both pure waste here."""
+		from jarvis.exceptions import AdminRejectedError
+
+		self._seed_pool()
+		rejection = AdminRejectedError(
+			"admin returned a 502 error: unknown llm_provider: 'gemini'",
+			code="FleetConfigError",
+			detail="unknown llm_provider: 'gemini'",
+		)
+		with (
+			patch("jarvis.admin_client.post_update_llm_pool", side_effect=rejection) as push,
+			patch("jarvis.admin_client.get_connection") as get_conn,
+		):
+			_enqueued_sync_via_admin_pool()
+			get_conn.assert_not_called()
+			self.assertEqual(push.call_count, 1, "a permanent rejection must not burn the transient retry")
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(
+			settings.last_sync_status,
+			"failed: Your AI configuration was rejected: unknown llm_provider: 'gemini'",
+		)
+		self.assertFalse(settings.llm_pool_synced_at)
+		self.assertEqual(settings.last_subscription_status, "", "must clear stale subscription_status")
+
+	def test_rejected_pool_apply_keeps_admins_own_customer_sentence(self):
+		"""When admin phrased the refusal itself (its "Your ..." convention) that
+		sentence is already customer prose - it must pass through unchanged
+		rather than picking up the raw-diagnostic lead-in, so a structurally
+		classified rejection reads identically to the 2026-07-23 quota case."""
+		from jarvis.exceptions import AdminRejectedError
+
+		self._seed_pool()
+		sentence = "Your OpenAI account has reached its usage limit. It resets in about 27 hours."
+		with (
+			patch(
+				"jarvis.admin_client.post_update_llm_pool",
+				side_effect=AdminRejectedError(
+					f"admin returned a 502 error: {sentence}",
+					code="PoolSpecRejected",
+					detail=sentence,
+				),
+			),
+			patch("jarvis.admin_client.get_connection") as get_conn,
+		):
+			_enqueued_sync_via_admin_pool()
+			get_conn.assert_not_called()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(settings.last_sync_status, f"failed: {sentence}")
+
 	# -- Scheduled safety net (reconcile_pending_llm_sync) -------------------
 
 	def test_reconcile_stamps_marker_when_admin_reports_ready(self):
