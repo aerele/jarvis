@@ -279,6 +279,10 @@ def _effect_usage(ctx: _Ctx) -> None:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	with openclaw_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
+	# jarvis#560: attribute the reply BEFORE the freshness gate below. The row names
+	# the model whether or not its token counters have gone fresh yet, and an audit
+	# ("which model proposed this journal entry") must not be lost to a slow counter.
+	_stamp_reply_model(ctx, row)
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner
 	# rolls back the guard CAS above and RELEASES the effect to pending for the next
@@ -288,6 +292,52 @@ def _effect_usage(ctx: _Ctx) -> None:
 	outcome = _usage.record_turn_usage(session_key, row)
 	if outcome == _usage.USAGE_RETRY:
 		raise _UsageRetry(f"usage not fresh for {ctx.run_id} (session {session_key})")
+
+
+def _stamp_reply_model(ctx: _Ctx, row: dict | None) -> None:
+	"""jarvis#560: record WHICH model produced this reply, on the reply itself.
+
+	Jarvis writes to the customer's ERP, so "which model proposed this journal
+	entry" is a question an auditor or an incident review will ask about ONE
+	message. A session-level field cannot answer it: a thread can switch models
+	mid-conversation, and an unpinned thread can fail over without the user ever
+	choosing the substitute. So the stamp lands on the assistant ROW.
+
+	The value is whatever ``sessions.list`` attributes to this turn's session -
+	see ``usage.resolved_model_identity`` for the wire shape and for why no live
+	relay frame can supply it. Reading it here, off the row the usage poll just
+	fetched, costs no extra RPC and keeps the transcript's credit identical to the
+	per-model usage bucket this same row is billed against.
+
+	``role='assistant'`` is in the WHERE clause, not just implied by
+	``turn.assistant_message``: the field is meaningless on a user or tool row and
+	a mislinked turn must not be able to write one. A blank model (no row, or a
+	session the gateway does not name a model for - an openclaw-direct pool that
+	never resolved one) leaves the row untouched rather than writing "" over a
+	value an earlier finalize cycle already got right.
+
+	``modified`` is deliberately NOT bumped: ``ChatView.elapsedOf`` still falls
+	back to the ``modified - creation`` span on rows with no ``reply_duration_ms``,
+	and finalize runs well after settlement, so touching it would inflate the
+	duration a legacy row reports.
+
+	Bounded by the same claim/retry envelope as the usage effect it rides in: an
+	exception rolls this back with the guard CAS and the next finalize cycle
+	re-reads the row. A turn that force-dones the usage effect after three stale
+	reads keeps a blank model - honest, and already logged loudly by
+	``fetch_fresh_session_row`` as a lost turn."""
+	am = ctx.turn.get("assistant_message")
+	if not am:
+		return
+	from jarvis.chat import usage as _usage
+
+	model, provider = _usage.resolved_model_identity(row)
+	if not model:
+		return
+	ts._run_cas(
+		f"UPDATE `tab{MSG}` SET model=%(model)s, provider=%(provider)s WHERE name=%(m)s AND role='assistant'",
+		{"model": model[:140], "provider": provider[:140], "m": am},
+	)
 
 
 def _effect_terminal_publish(ctx: _Ctx) -> None:

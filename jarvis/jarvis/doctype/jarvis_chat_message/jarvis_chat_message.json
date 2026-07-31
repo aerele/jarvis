@@ -28,6 +28,8 @@
     "ref_name",
     "canvas",
     "reply_duration_ms",
+    "model",
+    "provider",
     "hidden"
   ],
   "fields": [
@@ -185,6 +187,24 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "CDX-20 — the assistant reply's honest generation span in milliseconds, on ONE durable baseline shared with the live timer: run:start (the pump's dispatching_at, stamped at the ready->dispatching transition immediately before run:start is published) -> settlement (the terminal instant). Stamped in the winning settlement txn. The SPA reads THIS on reload (ChatView.elapsedOf) so a reloaded reply shows the same duration the live run:start->run:end timer showed, within network tolerance. Replaces the old creation/modified rewrite (creation is Frappe's record-creation AUDIT field and is no longer repurposed as a metric). NULL on legacy (non-pump) rows, which fall back to modified-creation."
+    },
+    {
+      "fieldname": "model",
+      "fieldtype": "Data",
+      "label": "Model",
+      "length": 140,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "jarvis#560 - the model that actually PRODUCED this reply, stamped on assistant rows only. Read at finalize from the gateway's sessions.list row for this turn's session (the same row the per-model usage bucket is billed against, so the transcript and the usage pane can never disagree). It names the model that answered, which is not always the one requested: an unpinned conversation keeps openclaw's failover chain live, so a substitution lands here with no other trace. Blank on legacy rows and on turns whose session row never named a model."
+    },
+    {
+      "fieldname": "provider",
+      "fieldtype": "Data",
+      "label": "Provider",
+      "length": 140,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "jarvis#560 - the openclaw provider id that served this reply (sessions.list `modelProvider`, e.g. `gemini`, `openai_compat`), paired with `model`. Two providers can expose the same model id, so the pair is what identifies the run for an audit or an incident review."
     },
     {
       "fieldname": "hidden",
