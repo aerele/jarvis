@@ -227,62 +227,66 @@
 					</svg>
 				</button>
 			</slot>
-			<span
-				style="margin-left: auto; font-size: 11px; color: var(--text-3); margin-right: 4px"
-				>{{ busy ? "Stop" : "Enter ↵" }}</span
-			>
-			<button
-				v-if="busy"
-				@click="emit('stop')"
-				title="Stop generating"
-				style="
-					width: 32px;
-					height: 32px;
-					display: flex;
-					align-items: center;
-					justify-content: center;
-					background: var(--cta);
-					border: none;
-					border-radius: 8px;
-					cursor: pointer;
-				"
-			>
-				<svg width="13" height="13" viewBox="0 0 24 24" fill="var(--cta-fg)">
-					<rect x="6" y="6" width="12" height="12" rx="2.5" />
-				</svg>
-			</button>
-			<button
-				v-else
-				class="jv-sendbtn"
-				:class="{ ready: sendable }"
-				@click="emit('submit')"
-				:disabled="!sendable"
-				:title="sendTitle || null"
-				:style="{
-					width: '32px',
-					height: '32px',
-					display: 'flex',
-					alignItems: 'center',
-					justifyContent: 'center',
-					background: sendable ? 'var(--cta)' : 'var(--surface-3)',
-					border: 'none',
-					borderRadius: '8px',
-					cursor: sendable ? 'pointer' : 'default',
-				}"
-			>
-				<svg
-					width="16"
-					height="16"
-					viewBox="0 0 24 24"
-					fill="none"
-					:stroke="sendable ? 'var(--cta-fg)' : 'var(--text-3)'"
-					stroke-width="2.1"
-					stroke-linecap="round"
-					stroke-linejoin="round"
+			<div style="margin-left: auto; display: flex; align-items: center; gap: 6px">
+				<!-- Host buttons on the RIGHT (chat: dictation mic + model picker),
+				     between the left cluster and the Enter hint + send button. -->
+				<slot name="right-toolbar" />
+				<span style="font-size: 11px; color: var(--text-3); margin-right: 2px">{{
+					busy ? "Stop" : "Enter ↵"
+				}}</span>
+				<button
+					v-if="busy"
+					@click="emit('stop')"
+					title="Stop generating"
+					style="
+						width: 32px;
+						height: 32px;
+						display: flex;
+						align-items: center;
+						justify-content: center;
+						background: var(--cta);
+						border: none;
+						border-radius: 8px;
+						cursor: pointer;
+					"
 				>
-					<path d="M12 19V5M5 12l7-7 7 7" />
-				</svg>
-			</button>
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="var(--cta-fg)">
+						<rect x="6" y="6" width="12" height="12" rx="2.5" />
+					</svg>
+				</button>
+				<button
+					v-else
+					class="jv-sendbtn"
+					:class="{ ready: sendable }"
+					@click="emit('submit')"
+					:disabled="!sendable"
+					:title="sendTitle || null"
+					:style="{
+						width: '32px',
+						height: '32px',
+						display: 'flex',
+						alignItems: 'center',
+						justifyContent: 'center',
+						background: sendable ? 'var(--cta)' : 'var(--surface-3)',
+						border: 'none',
+						borderRadius: '8px',
+						cursor: sendable ? 'pointer' : 'default',
+					}"
+				>
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						:stroke="sendable ? 'var(--cta-fg)' : 'var(--text-3)'"
+						stroke-width="2.1"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path d="M12 19V5M5 12l7-7 7 7" />
+					</svg>
+				</button>
+			</div>
 		</div>
 	</div>
 	<div

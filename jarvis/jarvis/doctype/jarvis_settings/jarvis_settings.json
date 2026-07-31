@@ -48,6 +48,7 @@
   "voice_wiki_section",
   "voice_features_enabled",
   "wiki_enabled",
+  "persona_enabled",
   "wiki_nudge_cooldown_hours",
   "voice_notes_last_processed_at",
   "voice_notes_last_process_status",
@@ -369,6 +370,13 @@
    "label": "Enable Business Wiki",
    "default": "1",
    "description": "Business wiki pages + post-turn wiki nudges. Readers treat an unset value as ON."
+  },
+  {
+   "fieldname": "persona_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Persona Picker",
+   "default": "1",
+   "description": "Jarvis/Jara voice picker in the composer. An explicit 0 hides the pill and stops the persona clause fleet-wide. Readers treat an unset value as ON."
   },
   {
    "fieldname": "wiki_nudge_cooldown_hours",

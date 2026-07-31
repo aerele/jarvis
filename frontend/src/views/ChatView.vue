@@ -125,254 +125,6 @@
 							>Save as macro</span
 						>
 					</button>
-					<!-- Model picker: switch the LLM model for this conversation -->
-					<div class="jv-modelmenu-wrap" style="position: relative">
-						<button
-							class="jv-modelpill"
-							@click="modelMenuOpen = !modelMenuOpen"
-							title="Model and effort"
-							style="
-								display: flex;
-								align-items: center;
-								gap: 7px;
-								padding: 5px 10px;
-								background: var(--surface-1);
-								border: 1px solid var(--border);
-								border-radius: 20px;
-								cursor: pointer;
-								font-family: inherit;
-							"
-						>
-							<svg
-								width="13"
-								height="13"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="var(--text-2)"
-								stroke-width="1.7"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<ellipse cx="12" cy="5" rx="9" ry="3" />
-								<path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5" />
-								<path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3" />
-							</svg>
-							<span
-								style="font-size: 12px; color: var(--text-2); font-weight: 500"
-								>{{ modelLabel }}</span
-							>
-							<span
-								v-if="thinkingOverride"
-								style="font-size: 11px; color: var(--text-3); font-weight: 450"
-								>· {{ thinkingOverride }}</span
-							>
-							<svg
-								width="12"
-								height="12"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="var(--text-3)"
-								stroke-width="1.9"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<path d="m6 9 6 6 6-6" />
-							</svg>
-						</button>
-						<div
-							v-if="modelMenuOpen"
-							style="
-								position: absolute;
-								top: calc(100% + 6px);
-								right: 0;
-								min-width: 224px;
-								background: var(--surface);
-								border: 1px solid var(--border-2);
-								border-radius: 10px;
-								box-shadow: 0 8px 24px rgba(20, 20, 30, 0.14);
-								padding: 5px;
-								z-index: 30;
-							"
-						>
-							<!-- Effort first: it is the control that always applies, even when the
-								     customer has exactly one configured model. Levels come from the server
-								     (thinking_levels) because Jarvis Conversation.thinking_override is a
-								     Select - offering a level it rejects would fail the save. -->
-							<div
-								style="
-									padding: 3px 9px 6px;
-									font-size: 10px;
-									color: var(--text-3);
-									font-weight: 600;
-									text-transform: uppercase;
-									letter-spacing: 0.03em;
-								"
-							>
-								Effort
-							</div>
-							<button
-								class="jv-menuitem"
-								:class="{ on: !thinkingOverride }"
-								@click="selectThinking('')"
-							>
-								<svg
-									width="14"
-									height="14"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									style="flex: none"
-								>
-									<path
-										d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"
-									/>
-								</svg>
-								<span style="flex: 1">Auto</span>
-								<svg
-									v-if="!thinkingOverride"
-									width="14"
-									height="14"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--text)"
-									stroke-width="2.2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									style="flex: none"
-								>
-									<path d="M20 6 9 17l-5-5" />
-								</svg>
-							</button>
-							<button
-								v-for="lvl in thinkingLevels"
-								:key="lvl"
-								class="jv-menuitem"
-								:class="{ on: lvl === thinkingOverride }"
-								@click="selectThinking(lvl)"
-							>
-								<span style="flex: 1; text-transform: capitalize">{{ lvl }}</span>
-								<svg
-									v-if="lvl === thinkingOverride"
-									width="14"
-									height="14"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--text)"
-									stroke-width="2.2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									style="flex: none"
-								>
-									<path d="M20 6 9 17l-5-5" />
-								</svg>
-							</button>
-							<template v-if="pickableModels.length">
-								<!-- Auto: let Jarvis pick, divided from the explicit models. Clearing the pin
-								     is openclaw's "/model default": the session stops overriding the configured
-								     primary and inherits it again. -->
-								<button
-									class="jv-menuitem"
-									:class="{ on: !modelOverride }"
-									@click="selectModel('')"
-								>
-									<svg
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										style="flex: none"
-									>
-										<path
-											d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"
-										/>
-									</svg>
-									<span style="flex: 1"
-										>Auto
-										<span style="color: var(--text-3); font-weight: 450"
-											>· {{ ui.llm_model || "default" }}</span
-										></span
-									>
-									<svg
-										v-if="!modelOverride"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="var(--text)"
-										stroke-width="2.2"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										style="flex: none"
-									>
-										<path d="M20 6 9 17l-5-5" />
-									</svg>
-								</button>
-								<!-- One group per provider, but only labelled by provider when the customer
-								     actually has more than one. A subscription pool stores provider="" on every
-								     row, so a single flat "Model" header is the honest rendering there. -->
-								<template v-for="g in modelsByProvider" :key="g.provider">
-									<div
-										style="
-											height: 1px;
-											background: var(--border);
-											margin: 5px 2px;
-										"
-									></div>
-									<div
-										style="
-											padding: 3px 9px 6px;
-											font-size: 10px;
-											color: var(--text-3);
-											font-weight: 600;
-											text-transform: uppercase;
-											letter-spacing: 0.03em;
-										"
-									>
-										{{ showProviders ? g.provider : "Model" }}
-									</div>
-									<button
-										v-for="r in g.models"
-										:key="g.provider + '/' + r.model"
-										class="jv-menuitem"
-										:class="{ on: r.model === modelOverride }"
-										@click="selectModel(r.model)"
-									>
-										<span style="flex: 1">{{ r.model }}</span>
-										<span
-											v-if="r.tier"
-											style="
-												font-size: 10px;
-												color: var(--text-3);
-												margin-right: 6px;
-											"
-											>{{ r.tier }}</span
-										>
-										<svg
-											v-if="r.model === modelOverride"
-											width="14"
-											height="14"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="var(--text)"
-											stroke-width="2.2"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-											style="flex: none"
-										>
-											<path d="M20 6 9 17l-5-5" />
-										</svg>
-									</button>
-								</template>
-							</template>
-						</div>
-					</div>
 					<!-- Connect phone: shows a QR the mobile app scans to onboard -->
 					<button
 						class="jv-iconbtn"
@@ -2689,74 +2441,6 @@
 							</div>
 						</template>
 						<template #left-toolbar="{ pickFiles }">
-							<!-- dictation mic (hidden unless the backend reports STT configured) -->
-							<template v-if="ui.stt_enabled && micRec.supported">
-								<button
-									class="jv-iconbtn jv-micbtn"
-									:class="{ rec: micState === 'recording' }"
-									:title="
-										micState === 'recording'
-											? 'Stop dictation'
-											: 'Dictate (voice to text)'
-									"
-									@click="micState === 'recording' ? stopMic() : startMic()"
-									style="
-										width: 30px;
-										height: 30px;
-										display: flex;
-										align-items: center;
-										justify-content: center;
-										background: transparent;
-										border: none;
-										border-radius: 7px;
-										cursor: pointer;
-										color: var(--text-3);
-									"
-								>
-									<svg
-										width="17"
-										height="17"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.7"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path
-											d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
-										/>
-										<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-										<path d="M12 19v3" />
-									</svg>
-								</button>
-								<template v-if="micState === 'recording'">
-									<span class="jv-mic-live"
-										><span class="jv-mic-dot"></span>{{ micClock }}</span
-									>
-									<button
-										class="jv-mic-cancel"
-										title="Cancel recording (Esc) — throws this whole recording away; text already in the box is kept"
-										aria-label="Cancel recording"
-										@click="cancelMic"
-									>
-										<svg
-											width="12"
-											height="12"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="2.2"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M18 6 6 18M6 6l12 12" />
-										</svg>
-									</button>
-								</template>
-								<!-- the transcribing indicator lives in #below-input, where the words
-							     will actually land — one pill per recording, not a count here. -->
-							</template>
 							<button
 								class="jv-iconbtn"
 								title="Attach file"
@@ -2789,6 +2473,12 @@
 									/>
 								</svg>
 							</button>
+							<!-- persona_enabled is read once at mount (boot payload). If an admin
+							     flips the fleet-wide kill switch mid-session the pill can linger
+							     until reload, but the server clause (_persona_clause) re-reads the
+							     switch every turn, so behaviour is always correct - this is
+							     voice-only cosmetic lag that self-heals on the next boot. -->
+							<PersonaPill v-if="ui.persona_enabled" />
 							<button
 								v-if="ui.wiki_enabled"
 								class="jv-iconbtn"
@@ -2872,6 +2562,86 @@
 									<line x1="4.93" y1="19.07" x2="9.17" y2="14.83" />
 								</svg>
 							</button>
+						</template>
+						<template #right-toolbar>
+							<!-- dictation mic (hidden unless the backend reports STT configured) -->
+							<template v-if="ui.stt_enabled && micRec.supported">
+								<button
+									class="jv-iconbtn jv-micbtn"
+									:class="{ rec: micState === 'recording' }"
+									:title="
+										micState === 'recording'
+											? 'Stop dictation'
+											: 'Dictate (voice to text)'
+									"
+									@click="micState === 'recording' ? stopMic() : startMic()"
+									style="
+										width: 30px;
+										height: 30px;
+										display: flex;
+										align-items: center;
+										justify-content: center;
+										background: transparent;
+										border: none;
+										border-radius: 7px;
+										cursor: pointer;
+										color: var(--text-3);
+									"
+								>
+									<svg
+										width="17"
+										height="17"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.7"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<path
+											d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
+										/>
+										<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+										<path d="M12 19v3" />
+									</svg>
+								</button>
+								<template v-if="micState === 'recording'">
+									<span class="jv-mic-live"
+										><span class="jv-mic-dot"></span>{{ micClock }}</span
+									>
+									<button
+										class="jv-mic-cancel"
+										title="Cancel recording (Esc) — throws this whole recording away; text already in the box is kept"
+										aria-label="Cancel recording"
+										@click="cancelMic"
+									>
+										<svg
+											width="12"
+											height="12"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2.2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M18 6 6 18M6 6l12 12" />
+										</svg>
+									</button>
+								</template>
+								<!-- the transcribing indicator lives in #below-input, where the words
+							     will actually land — one pill per recording, not a count here. -->
+							</template>
+							<ModelEffortPicker
+								:model-override="modelOverride"
+								:default-model="ui.llm_model || ''"
+								:thinking-override="thinkingOverride"
+								:thinking-levels="thinkingLevels"
+								:models-by-provider="modelsByProvider"
+								:show-providers="showProviders"
+								@select-model="selectModel"
+								@select-thinking="selectThinking"
+							/>
 						</template>
 					</Composer>
 				</div>
@@ -3638,6 +3408,8 @@ import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
 import Composer from "@/components/chat/Composer.vue";
+import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
+import PersonaPill from "@/components/chat/PersonaPill.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
@@ -3833,7 +3605,6 @@ function announceSR(msg) {
 // <ConfirmDialog> in AppShell) — this view just calls confirm(). Escape/backdrop
 // dismissal and rendering are owned by that component.
 const { confirm } = useConfirm();
-const modelMenuOpen = ref(false);
 const showConnect = ref(false);
 // One-shot "ground on wiki": when armed, the NEXT message carries a
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
@@ -6922,7 +6693,6 @@ function openErpDesk() {
 	window.open("/app", "_blank");
 }
 async function selectModel(m) {
-	modelMenuOpen.value = false;
 	const prev = modelOverride.value;
 	modelOverride.value = m;
 	if (currentId.value) {
@@ -6938,7 +6708,6 @@ async function selectModel(m) {
 }
 
 async function selectThinking(level) {
-	modelMenuOpen.value = false;
 	const prev = thinkingOverride.value;
 	thinkingOverride.value = level;
 	if (currentId.value) {
@@ -6951,7 +6720,6 @@ async function selectThinking(level) {
 	}
 }
 function onDocClick(e) {
-	if (!e.target.closest(".jv-modelmenu-wrap")) modelMenuOpen.value = false;
 	if (!e.target.closest(".jv-composer")) mention.value = { ...mention.value, open: false };
 }
 async function retry(messageId) {
@@ -8744,6 +8512,12 @@ onMounted(async () => {
 		if (busy.value) nowMs.value = Date.now();
 	}, 1000);
 	ui.value = (await uiP) || {};
+	// Reconcile the persona pill with the server's current value, so a persona
+	// switched on another device shows up here too. Adopt only, never a write
+	// (persist:false), since this is us catching up to the server, not a change.
+	if (ui.value.preferred_persona !== undefined) {
+		store.setPreferredPersona(ui.value.preferred_persona, { persist: false });
+	}
 	// Offer recovery of any recording a prior session left un-transcribed (a tab
 	// crash / accidental reload) — only when dictation is actually enabled.
 	// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes

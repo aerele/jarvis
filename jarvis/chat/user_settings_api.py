@@ -21,7 +21,19 @@ from jarvis.chat import openclaw_session_pool, usage
 from jarvis.exceptions import OpenclawUnreachableError
 from jarvis.permissions import require_jarvis_access, require_jarvis_admin
 
+# NOTE: `from __future__ import annotations` above turns every annotation in this
+# module into a STRING, and frappe's transform_parameter_types skips string
+# annotations - so the whitelist arg-type gate does NOT coerce or validate inputs
+# here. Each endpoint must defensively coerce its own string args through _s()
+# below; never rely on the declared parameter types for runtime safety.
 USER_SETTINGS = "Jarvis User Settings"
+
+
+def _s(x) -> str:
+	"""Coerce a whitelisted string arg to trimmed text. The runtime type gate is
+	off in this module (see the NOTE above), so a hostile list/dict must be forced
+	to text before it reaches .strip() or a filter-shaped db call."""
+	return str(x or "").strip()
 
 
 def _month_tokens_effective(usage_month: str | None, month_tokens) -> int:
@@ -96,6 +108,10 @@ def _settings_payload(doc) -> dict:
 		"user": doc.user,
 		"notify_enabled": cint(doc.notify_enabled),
 		"activity_detail": cint(doc.activity_detail),
+		# getattr, not a bare read: in the migrate window before preferred_persona
+		# syncs onto the doc's meta, doc.preferred_persona would AttributeError and
+		# 500 get_my_settings / update_my_settings. Default to Jarvis like the rest.
+		"preferred_persona": getattr(doc, "preferred_persona", None) or "Jarvis",
 		"monthly_token_limit": cint(doc.monthly_token_limit),
 		"usage_month": doc.usage_month,
 		"month_tokens": _month_tokens_effective(doc.usage_month, doc.month_tokens),
@@ -118,7 +134,11 @@ def get_my_settings() -> dict:
 
 
 @frappe.whitelist()
-def update_my_settings(notify_enabled: int | None = None, activity_detail: int | None = None) -> dict:
+def update_my_settings(
+	notify_enabled: int | None = None,
+	activity_detail: int | None = None,
+	preferred_persona: str | None = None,
+) -> dict:
 	"""Update the caller's own chat preferences only. The usage limit and
 	counters (permlevel 1 / read-only) are never writable here."""
 	require_jarvis_access()
@@ -127,6 +147,18 @@ def update_my_settings(notify_enabled: int | None = None, activity_detail: int |
 		doc.notify_enabled = 1 if sbool(notify_enabled) else 0
 	if activity_detail is not None:
 		doc.activity_detail = 1 if sbool(activity_detail) else 0
+	if preferred_persona is not None:
+		# Blank clears back to the default; otherwise it must be a known persona
+		# (this value rides the trusted [Context:] line in turn_handler).
+		# _s() coerces a hostile non-string before .strip() (see the module NOTE);
+		# without it a list/dict would 500 the endpoint on AttributeError.
+		persona = _s(preferred_persona) or "Jarvis"
+		if persona not in ("Jarvis", "Jara"):
+			# Fixed-enum message that reflects NOTHING back (house style for small
+			# enums): naming the valid set is clearer than echoing the bad value,
+			# and reflecting nothing removes the self-XSS vector entirely.
+			frappe.throw(frappe._("Persona must be Jarvis or Jara."))
+		doc.preferred_persona = persona
 	# ignore_permissions: the row is owner-scoped by construction (we loaded the
 	# caller's own row), and only permlevel-0 pref fields are touched here.
 	doc.save(ignore_permissions=True)
@@ -196,6 +228,9 @@ def admin_set_user_limit(user: str, monthly_token_limit: int = 0) -> dict:
 	"""Set a user's monthly token cap (0 = unlimited), creating the settings
 	row if absent. Admins only."""
 	require_jarvis_admin()
+	# Coerce before the db calls: a dict `user` would turn the identity check into
+	# a filter match (see the module NOTE / N10).
+	user = _s(user)
 	if not user or not frappe.db.exists("User", user):
 		return {"ok": False, "reason": "unknown_user"}
 	limit = max(0, cint(monthly_token_limit))
@@ -218,9 +253,13 @@ def admin_set_user_model_limit(user: str, model: str, monthly_token_limit: int =
 	settings row + current-month child row if absent. Mirrors admin_set_user_limit.
 	Admins only (server re-checks; the SPA gate is UX)."""
 	require_jarvis_admin()
+	# Coerce before the db calls: a dict `user` would otherwise turn the identity
+	# check into a filter match, and a non-string `model` would crash the per-model
+	# lookup - a list reaches frappe.db.get_value as filters and unpacks wrong (N10).
+	user = _s(user)
 	if not user or not frappe.db.exists("User", user):
 		return {"ok": False, "reason": "unknown_user"}
-	model = (model or "").strip()
+	model = _s(model)
 	if not model:
 		return {"ok": False, "reason": "invalid_model"}
 	limit = max(0, cint(monthly_token_limit))

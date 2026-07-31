@@ -1410,7 +1410,7 @@ def get_chat_ui_settings() -> dict:
 	# providers==[] and the UI hides the provider group.
 	providers = sorted({r["provider"] for r in pool if r["provider"]})
 
-	return {
+	ui = {
 		"llm_auth_mode": settings.llm_auth_mode or "api_key",
 		"llm_provider": settings.llm_provider or "",
 		"llm_model": settings.llm_model or "",
@@ -1442,9 +1442,22 @@ def get_chat_ui_settings() -> dict:
 		# Composer "ground on wiki" pill gating: shown only when the wiki feature
 		# is on AND the org has at least one Active page (best-effort).
 		"wiki_enabled": _wiki_enabled_flag(),
+		# Persona pill gating: a real kill switch (Jarvis Settings.persona_enabled,
+		# default on), read here AND in _persona_clause so flipping it off both hides
+		# the pill and stops the clause - never a client-only half-switch (N7).
+		"persona_enabled": _persona_feature_enabled(),
 		# auto-apply is per-conversation now (issue #186); the frontend reads
 		# ``auto_apply`` from the conversation payload, not this global endpoint.
 	}
+	# The server's current persona, so the SPA can reconcile a localStorage-booted
+	# pill to the row at mount. Only sent when we could actually read it: on a read
+	# failure _current_user_persona returns None and we OMIT the key, because the
+	# client reconciles (and caches) only when the key is present - so a transient
+	# failure keeps the current pill instead of pinning it to a wrong default.
+	persona = _current_user_persona()
+	if persona is not None:
+		ui["preferred_persona"] = persona
+	return ui
 
 
 def _wiki_enabled_flag() -> bool:
@@ -1458,6 +1471,41 @@ def _wiki_enabled_flag() -> bool:
 		return bool(wiki_enabled() and _has_active_pages())
 	except Exception:
 		return False
+
+
+def _current_user_persona() -> str | None:
+	"""The caller's stored persona for the boot payload, or None if it can't be
+	read. A real read (including a user with no row) yields the actual value,
+	defaulting to "Jarvis"; a FAILURE returns None so get_chat_ui_settings OMITS
+	the preferred_persona key and the SPA keeps its current pill rather than
+	adopting-and-caching a wrong default. The old code returned "Jarvis" on error,
+	which the persist:false reconcile wrote to localStorage - so a transient read
+	failure could pin the pill to Jarvis while turns still came back as Jara.
+	Contrast _wiki_enabled_flag, whose fallback only hides a pill, never mutates
+	client state."""
+	try:
+		return (
+			frappe.db.get_value("Jarvis User Settings", {"user": frappe.session.user}, "preferred_persona")
+			or "Jarvis"
+		)
+	except Exception:
+		return None
+
+
+def _persona_feature_enabled() -> bool:
+	"""The persona kill switch for the boot payload: default ON, only an explicit
+	stored 0 is OFF. Delegates to the canonical NULL=ON probe in turn_handler so
+	the pill and the clause read the switch identically (N7). Wrapped best-effort
+	(N8): a read failure shows the pill rather than 500-ing the whole bootstrap.
+	The probe uses a tabSingles row check, not get_single_value - the latter
+	coerces an unset Check to 0, which had shipped the feature OFF for every
+	un-backfilled bench and fresh install."""
+	try:
+		from jarvis.chat.turn_handler import persona_feature_enabled
+
+		return persona_feature_enabled()
+	except Exception:
+		return True
 
 
 @frappe.whitelist()

@@ -477,6 +477,61 @@ def _assistant_name_clause(settings) -> str:
 	return f"; assistant name: {safe}"
 
 
+def persona_feature_enabled() -> bool:
+	"""The persona kill switch (``Jarvis Settings.persona_enabled``), NULL=ON.
+
+	Probes the ``tabSingles`` row directly instead of
+	``frappe.db.get_single_value``: for a Check field the latter coerces an unset
+	value to 0 via ``cint()`` (``personalise_api._single_bool`` and ``wiki.py``
+	document this exact trap), which is indistinguishable from an admin explicitly
+	disabling it - so an un-backfilled bench and a fresh install (which never runs
+	patches) would both read the feature as OFF. Here "no row" is the default
+	(ON); only a stored 0 is OFF. The probe never touches the meta, so it also
+	cannot throw in the migrate window before the field syncs - unlike
+	get_single_value, which raises on a missing meta field and would invert the
+	pill against the clause. Read here AND by the boot payload (N7) so the same
+	switch value drives both."""
+	row = frappe.db.sql(
+		"select value from tabSingles where doctype=%s and field=%s",
+		("Jarvis Settings", "persona_enabled"),
+	)
+	if not row:
+		return True
+	return bool(frappe.utils.cint(row[0][0]))
+
+
+def _persona_clause(chat_user: str) -> str:
+	"""Per-user persona voice folded into the trusted [Context:] line so the agent
+	adopts the chosen voice (AGENTS.md "Personas"). ONLY the non-default persona is
+	signalled: Jarvis/unset -> "" so the default turn is byte-identical to before
+	this feature and pays zero per-turn tokens (like _assistant_name_clause). We
+	emit only the known alternate value, never the raw stored string - the bracket
+	is trusted/system, so a stray DB value must not flow into it verbatim.
+
+	Gated by the Jarvis Settings.persona_enabled kill switch (NULL=ON, see
+	persona_feature_enabled): an explicit 0 turns the feature off (pill hidden by
+	get_chat_ui_settings, clause silent here), so a flipped-off bench stops
+	injecting the token for already-opted-in users (N7)."""
+	try:
+		if not persona_feature_enabled():
+			return ""
+		persona = frappe.db.get_value("Jarvis User Settings", {"user": chat_user}, "preferred_persona")
+	except Exception as e:
+		# A site-wide lookup failure would degrade every Jara user invisibly. Log at
+		# ERROR: production loggers run under supervisor with _dev_server False, so
+		# the default level is ERROR (40) and .warning/.debug never emit - see
+		# latency.py. Wrapped so a logging failure can never defeat the fail-open
+		# return (mirrors policy.py's G2 guard). Lazy %s, zero happy-path cost.
+		try:
+			frappe.logger("jarvis").error("_persona_clause lookup failed for %s: %s", chat_user, e)
+		except Exception:
+			pass
+		return ""
+	if (persona or "").strip() == "Jara":
+		return "; persona: Jara"
+	return ""
+
+
 def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 	"""Chaining hook for the macro engine: if this conversation is a running
 	macro, advance it (enqueue the next step, or finish). Best-effort — a macro
@@ -590,6 +645,10 @@ def assemble_prompt(
 	# Whitelabel assistant name (Phase 3): folded into the trusted [Context:] line
 	# so the agent refers to itself by the customer's chosen name. "" when unset.
 	assistant_name_clause = _assistant_name_clause(settings)
+	# Per-user persona voice (Jarvis default / Jara), folded into the trusted
+	# [Context:] line like the assistant name. "" for the default, so the turn is
+	# unchanged for everyone who has not picked Jara.
+	persona_clause = _persona_clause(chat_user)
 	# Personal custom skills + org wiki notes (voice & wiki feature). Both
 	# clauses are best-effort ("" on any failure — a clause bug must never
 	# break a turn) and size-capped (~700 chars combined). Lazy imports so a
@@ -669,7 +728,7 @@ def assemble_prompt(
 		# (skill_clause) stays intentional and is not demoted. The
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
-		f"[Context: today is {today}{locale_clause}{assistant_name_clause}; chat user: {chat_user}"
+		f"[Context: today is {today}{locale_clause}{assistant_name_clause}{persona_clause}; chat user: {chat_user}"
 		f"; conv: {conversation_id}{auto_apply}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"

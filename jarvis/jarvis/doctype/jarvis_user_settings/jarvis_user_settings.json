@@ -12,6 +12,7 @@
     "prefs_section",
     "notify_enabled",
     "activity_detail",
+    "preferred_persona",
     "app_state_section",
     "business_greeting_state",
     "business_greeting_chat_count",
@@ -58,6 +59,14 @@
       "fieldtype": "Check",
       "label": "Show Activity Detail",
       "default": "1"
+    },
+    {
+      "fieldname": "preferred_persona",
+      "fieldtype": "Select",
+      "label": "Assistant Persona",
+      "options": "Jarvis\nJara",
+      "default": "Jarvis",
+      "description": "Which persona voice this user chats with: Jarvis (default) or Jara (calmer, more jovial). Voice only - same tools, permissions, and behaviour."
     },
     { "fieldname": "app_state_section", "fieldtype": "Section Break", "label": "App State" },
     {

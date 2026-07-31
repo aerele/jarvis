@@ -28,9 +28,13 @@ exports[`composer renders identically (light) 1`] = `
 			     still open this component's own hidden file input. The fallback is
 			     the plain attach button the generic composer ships with. --><button data-v-680708eb="" class="jv-iconbtn" title="Attach file" style="width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: transparent; border-radius: 7px; cursor: pointer; color: var(--text-3);"><svg data-v-680708eb="" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
           <path data-v-680708eb="" d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"></path>
-        </svg></button><span data-v-680708eb="" style="margin-left: auto; font-size: 11px; color: var(--text-3); margin-right: 4px;">Enter ↵</span><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-          <path data-v-680708eb="" d="M12 19V5M5 12l7-7 7 7"></path>
         </svg></button>
+      <div data-v-680708eb="" style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
+        <!-- Host buttons on the RIGHT (chat: dictation mic + model picker),
+				     between the left cluster and the Enter hint + send button. --><span data-v-680708eb="" style="font-size: 11px; color: var(--text-3); margin-right: 2px;">Enter ↵</span><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <path data-v-680708eb="" d="M12 19V5M5 12l7-7 7 7"></path>
+          </svg></button>
+      </div>
     </div>
   </div>
   <div data-v-680708eb="" style="text-align: center; font-size: 10.5px; color: var(--text-3); margin-top: 8px;">Jarvis can make mistakes.</div>
@@ -65,9 +69,13 @@ exports[`dark render 1`] = `
 			     still open this component's own hidden file input. The fallback is
 			     the plain attach button the generic composer ships with. --><button data-v-680708eb="" class="jv-iconbtn" title="Attach file" style="width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: transparent; border-radius: 7px; cursor: pointer; color: var(--text-3);"><svg data-v-680708eb="" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
           <path data-v-680708eb="" d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"></path>
-        </svg></button><span data-v-680708eb="" style="margin-left: auto; font-size: 11px; color: var(--text-3); margin-right: 4px;">Enter ↵</span><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-          <path data-v-680708eb="" d="M12 19V5M5 12l7-7 7 7"></path>
         </svg></button>
+      <div data-v-680708eb="" style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
+        <!-- Host buttons on the RIGHT (chat: dictation mic + model picker),
+				     between the left cluster and the Enter hint + send button. --><span data-v-680708eb="" style="font-size: 11px; color: var(--text-3); margin-right: 2px;">Enter ↵</span><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <path data-v-680708eb="" d="M12 19V5M5 12l7-7 7 7"></path>
+          </svg></button>
+      </div>
     </div>
   </div>
   <!--v-if-->

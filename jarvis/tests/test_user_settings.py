@@ -227,6 +227,31 @@ class TestAdminGate(_UsageTestBase):
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["reason"], "unknown_user")
 
+	def test_admin_limit_coerces_non_string_user_and_model(self):
+		# N10/I10: `user`/`model` must be string-coerced (_s) BEFORE the identity
+		# check. A raw dict `user` would be read by frappe.db.exists as FILTERS, so
+		# a crafted {"name": <real user>} could match and mutate a row the caller
+		# never named. With _s() the dict stringifies and never matches; a list
+		# `model` would 500 on .strip() without it. A revert at either site fails
+		# here.
+		out = user_settings_api.admin_set_user_limit(user={"name": USER_A}, monthly_token_limit=999)
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["reason"], "unknown_user")
+		# The filter-match path must not have created / mutated USER_A's row.
+		self.assertFalse(frappe.db.exists(USETT, {"user": USER_A}))
+		out2 = user_settings_api.admin_set_user_model_limit(
+			user={"name": USER_A}, model="gpt-x", monthly_token_limit=999
+		)
+		self.assertFalse(out2["ok"])
+		self.assertEqual(out2["reason"], "unknown_user")
+		# A list `model` must be coerced (not .strip()ed raw, which 500s). The point
+		# of _s() at this site is crash-safety, so the call must simply not raise -
+		# it accepts the string coercion. A revert makes this line raise instead.
+		out3 = user_settings_api.admin_set_user_model_limit(
+			user=USER_A, model=["gpt-x"], monthly_token_limit=999
+		)
+		self.assertTrue(out3["ok"])
+
 	def test_admin_list_includes_row(self):
 		user_settings_api.admin_set_user_limit(user=USER_A, monthly_token_limit=99)
 		out = user_settings_api.admin_list_user_usage()
@@ -564,3 +589,289 @@ class TestMeasuredUsage(_UsageTestBase):
 			m = _measured_usage(USER_A)
 		mock_rows.assert_called_once_with(USER_A)
 		self.assertEqual(m["per_model"], sentinel)
+
+
+# --------------------------------------------------------------------------- #
+# 8. Persona preference (per-user voice) + the trusted [Context:] clause
+# --------------------------------------------------------------------------- #
+class TestPersonaPreference(_UsageTestBase):
+	"""preferred_persona picks Jarvis (default) or Jara. Only the non-default
+	value rides the trusted [Context:] line (turn_handler._persona_clause), and
+	the default path stays byte-identical to before the feature."""
+
+	def test_default_is_jarvis_and_clause_empty(self):
+		from jarvis.chat.turn_handler import _persona_clause
+
+		# No row at all: clause is empty (default) and never raises.
+		self.assertEqual(_persona_clause(USER_A), "")
+		# Lazy-created row defaults to Jarvis; the payload reflects it.
+		frappe.set_user(USER_A)
+		out = user_settings_api.get_my_settings()
+		self.assertEqual(out["data"]["preferred_persona"], "Jarvis")
+		frappe.set_user("Administrator")
+		self.assertEqual(_persona_clause(USER_A), "")
+
+	def test_update_to_jara_persists_and_emits_clause(self):
+		from jarvis.chat.turn_handler import _persona_clause
+
+		frappe.set_user(USER_A)
+		out = user_settings_api.update_my_settings(preferred_persona="Jara")
+		self.assertEqual(out["data"]["preferred_persona"], "Jara")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "preferred_persona"), "Jara")
+		self.assertEqual(_persona_clause(USER_A), "; persona: Jara")
+
+	def test_switch_back_to_jarvis_clears_clause(self):
+		from jarvis.chat.turn_handler import _persona_clause
+
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(preferred_persona="Jara")
+		user_settings_api.update_my_settings(preferred_persona="Jarvis")
+		frappe.set_user("Administrator")
+		self.assertEqual(_persona_clause(USER_A), "")
+
+	def test_unknown_persona_rejected(self):
+		frappe.set_user(USER_A)
+		with self.assertRaises(frappe.ValidationError):
+			user_settings_api.update_my_settings(preferred_persona="Loki")
+		frappe.set_user("Administrator")
+		# Nothing persisted from the rejected write.
+		self.assertIn(
+			frappe.db.get_value(USETT, {"user": USER_A}, "preferred_persona") or "Jarvis",
+			("Jarvis", None),
+		)
+
+	def test_unknown_persona_message_does_not_reflect_input(self):
+		# The rejection is a fixed-enum sentence that echoes NOTHING back, so a
+		# hostile value can never be reflected - the self-XSS F11 guards against.
+		# A refactor to an f-string that interpolates the value would fail here.
+		frappe.set_user(USER_A)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			user_settings_api.update_my_settings(preferred_persona="<img src=x onerror=alert(1)>")
+		frappe.set_user("Administrator")
+		msg = str(cm.exception)
+		self.assertNotIn("<img", msg)
+		self.assertNotIn("onerror", msg)
+		self.assertIn("Jarvis or Jara", msg)
+
+	def test_non_string_persona_does_not_500(self):
+		# This module's arg-type gate is not enforced at runtime (from __future__
+		# import annotations), so a hostile non-string reaches the handler raw. It
+		# must be coerced, not .strip()ed directly (which 500s on AttributeError).
+		frappe.set_user(USER_A)
+		# Structured values reject cleanly as a ValidationError, never a 500.
+		for bad in (["Jara"], {"persona": "Jara"}):
+			with self.assertRaises(frappe.ValidationError):
+				user_settings_api.update_my_settings(preferred_persona=bad)
+		# Falsy non-strings take the blank-clears-to-default path (store Jarvis).
+		for falsy in (0, False, []):
+			user_settings_api.update_my_settings(preferred_persona=falsy)
+			self.assertEqual(user_settings_api.get_my_settings()["data"]["preferred_persona"], "Jarvis")
+		frappe.set_user("Administrator")
+
+	def test_persona_update_touches_only_own_row(self):
+		usage.get_or_create_user_settings(USER_B)
+		frappe.db.commit()
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(preferred_persona="Jara")
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			frappe.db.get_value(USETT, {"user": USER_B}, "preferred_persona") or "Jarvis", "Jarvis"
+		)
+
+	def test_persona_pref_leaves_other_prefs_untouched(self):
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(notify_enabled=0)
+		user_settings_api.update_my_settings(preferred_persona="Jara")
+		out = user_settings_api.get_my_settings()
+		# The persona-only update must not disturb the earlier notify choice.
+		self.assertEqual(out["data"]["notify_enabled"], 0)
+		self.assertEqual(out["data"]["preferred_persona"], "Jara")
+		frappe.set_user("Administrator")
+
+	def _assembled_prompt_for(self, persona_user):
+		"""Insert a real conversation + message owned by ``persona_user`` and run the
+		shared, read-only ``assemble_prompt`` (the ONE place the [Context:] bracket
+		is built). Returns the assembled prompt string. conv/msg are cleaned up."""
+		from jarvis.chat.turn_handler import CONV, MSG, assemble_prompt
+
+		conv = frappe.get_doc({"doctype": CONV, "title": "persona-test", "auto_apply": 0}).insert(
+			ignore_permissions=True
+		)
+		self.addCleanup(lambda: frappe.delete_doc(CONV, conv.name, force=True, ignore_permissions=True))
+		msg = frappe.get_doc(
+			{"doctype": MSG, "conversation": conv.name, "seq": 1, "role": "user", "content": "hello"}
+		).insert(ignore_permissions=True)
+		self.addCleanup(lambda: frappe.delete_doc(MSG, msg.name, force=True, ignore_permissions=True))
+		# chat_user - and thus the persona lookup - derives from the message owner.
+		frappe.db.set_value(MSG, msg.name, "owner", persona_user, update_modified=False)
+		ap = assemble_prompt(
+			conv,
+			message_id=msg.name,
+			conversation_id=conv.name,
+			context={},
+			attachments=[],
+			user=persona_user,
+		)
+		return ap.user_message
+
+	def test_context_line_positions_persona_and_pins_byte_identical_default(self):
+		# Jara: the clause lands in the trusted [Context:] bracket immediately
+		# before "; chat user:", i.e. AFTER the date / locale / assistant-name
+		# clauses (the fixed f-string order in assemble_prompt). This pins both the
+		# presence AND the position.
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(preferred_persona="Jara")
+		frappe.set_user("Administrator")
+		jara_prompt = self._assembled_prompt_for(USER_A)
+		self.assertIn("; persona: Jara; chat user:", jara_prompt)
+		# EXACTLY one persona segment: a duplicated {persona_clause}{persona_clause}
+		# merge slip still satisfies the assertIn above, so pin the count too.
+		self.assertEqual(jara_prompt.count("persona:"), 1)
+
+		# Default user (USER_B, untouched): the assembled turn is byte-identical to
+		# before the feature - the bracket carries NO persona segment at all.
+		default_prompt = self._assembled_prompt_for(USER_B)
+		self.assertNotIn("persona:", default_prompt)
+		self.assertIn("; chat user:", default_prompt)  # assembly sanity
+
+	def test_chat_ui_settings_exposes_persona(self):
+		# get_chat_ui_settings feeds the SPA pill: it must reflect the server's
+		# current persona (for the cross-device reconcile) and the enabled flag (N11).
+		from jarvis.chat.api import get_chat_ui_settings
+
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(preferred_persona="Jara")
+		ui = get_chat_ui_settings()
+		self.assertEqual(ui["preferred_persona"], "Jara")
+		self.assertTrue(ui["persona_enabled"])  # default on
+		frappe.set_user("Administrator")
+
+	def test_persona_kill_switch_stops_pill_and_clause(self):
+		# Flipping Jarvis Settings.persona_enabled off must BOTH hide the pill and
+		# silence the clause, so an already-opted-in user stops getting the token
+		# (N7). Driven via set_single_value, NOT mock.patch (py3.14 import trap).
+		from jarvis.chat.api import get_chat_ui_settings
+		from jarvis.chat.turn_handler import _persona_clause
+
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(preferred_persona="Jara")
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value("Jarvis Settings", "persona_enabled", 0)
+		try:
+			self.assertEqual(_persona_clause(USER_A), "")
+			frappe.set_user(USER_A)
+			self.assertFalse(get_chat_ui_settings()["persona_enabled"])
+			frappe.set_user("Administrator")
+		finally:
+			frappe.db.set_single_value("Jarvis Settings", "persona_enabled", 1)
+		# Re-enabled: the clause returns for the opted-in user.
+		self.assertEqual(_persona_clause(USER_A), "; persona: Jara")
+
+	def test_persona_enabled_defaults_on_without_singles_row(self):
+		# The C1 regression: frappe.db.get_single_value coerces an unset Check to 0,
+		# so an un-backfilled bench and a fresh install (which never runs patches)
+		# both read the switch as OFF. With NO tabSingles row, NULL=ON must hold at
+		# every reader: pill shown, clause active. Deleting the row is what the old
+		# test never did - a migrate-written row made ON look real.
+		from jarvis.chat.api import _persona_feature_enabled as boot_enabled
+		from jarvis.chat.api import get_chat_ui_settings
+		from jarvis.chat.turn_handler import _persona_clause, persona_feature_enabled
+
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(preferred_persona="Jara")
+		frappe.set_user("Administrator")
+		frappe.db.sql(
+			"delete from tabSingles where doctype=%s and field=%s",
+			("Jarvis Settings", "persona_enabled"),
+		)
+		self.assertTrue(persona_feature_enabled())  # NULL=ON at the source probe
+		self.assertTrue(boot_enabled())  # boot pill fails to ON, not OFF
+		frappe.set_user(USER_A)
+		self.assertTrue(get_chat_ui_settings()["persona_enabled"])
+		frappe.set_user("Administrator")
+		self.assertEqual(_persona_clause(USER_A), "; persona: Jara")  # clause active
+
+	def test_persona_readers_fail_open_on_db_error(self):
+		# A transient read failure must neither 500 the boot nor silently flip the
+		# feature: the pill defaults ON, the clause stays silent. Swap frappe.db.sql
+		# directly rather than mock.patch, which these persona tests avoid for the
+		# py3.14 walk_packages import trap.
+		from jarvis.chat.api import _persona_feature_enabled as boot_enabled
+		from jarvis.chat.turn_handler import _persona_clause
+
+		orig_sql = frappe.db.sql
+
+		def boom(*a, **k):
+			raise RuntimeError("db down")
+
+		frappe.db.sql = boom
+		try:
+			self.assertTrue(boot_enabled())  # boot pill fails open ON
+			self.assertEqual(_persona_clause(USER_A), "")  # clause fails silent
+		finally:
+			frappe.db.sql = orig_sql
+
+	def test_current_user_persona_none_on_error_omits_boot_key(self):
+		# I7: a failed persona read must return None so get_chat_ui_settings OMITS
+		# preferred_persona - the SPA reconciles (and caches) only when the key is
+		# present, so omitting it keeps the current pill instead of pinning it to a
+		# wrong default. The old code returned the "Jarvis" sentinel, which the
+		# persist:false reconcile wrote to localStorage.
+		from jarvis.chat import api as chat_api
+
+		orig_gv = frappe.db.get_value
+
+		def boom(*a, **k):
+			raise RuntimeError("boom")
+
+		frappe.db.get_value = boom
+		try:
+			self.assertIsNone(chat_api._current_user_persona())
+		finally:
+			frappe.db.get_value = orig_gv
+
+		# And the payload drops the key entirely (not a None value) when unreadable.
+		frappe.set_user(USER_A)
+		orig_helper = chat_api._current_user_persona
+		chat_api._current_user_persona = lambda: None
+		try:
+			ui = chat_api.get_chat_ui_settings()
+			self.assertNotIn("preferred_persona", ui)
+			self.assertTrue(ui["persona_enabled"])  # switch still reported
+		finally:
+			chat_api._current_user_persona = orig_helper
+			frappe.set_user("Administrator")
+
+	def test_backfill_seeds_when_absent_and_never_clobbers_admin_zero(self):
+		# The backfill protects the WRITE path: a full Jarvis Settings.save()
+		# coerces an unset Check to 0 (get_valid_dict), which would flip the switch
+		# OFF. Seeding a real 1 row prevents that - but ONLY when the row is absent,
+		# so an admin's explicit 0 is never clobbered on a re-run (idempotent).
+		from jarvis.patches.v2_09_backfill_persona_enabled import execute as backfill
+
+		q = ("Jarvis Settings", "persona_enabled")
+		sel = "select value from tabSingles where doctype=%s and field=%s"
+		frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", q)
+		backfill()
+		self.assertEqual(int(frappe.db.sql(sel, q)[0][0]), 1)  # absent -> seeded 1
+		frappe.db.set_single_value("Jarvis Settings", "persona_enabled", 0)
+		backfill()
+		self.assertEqual(int(frappe.db.sql(sel, q)[0][0]), 0)  # explicit 0 preserved
+		frappe.db.set_single_value("Jarvis Settings", "persona_enabled", 1)
+
+	def test_full_settings_save_keeps_persona_on_after_backfill(self):
+		# End-to-end write-path regression: on an un-backfilled bench a full
+		# Jarvis Settings save would coerce persona_enabled to 0; once the backfill
+		# has seeded a real 1 row, the same save preserves ON.
+		from jarvis.chat.turn_handler import persona_feature_enabled
+		from jarvis.patches.v2_09_backfill_persona_enabled import execute as backfill
+
+		frappe.db.sql(
+			"delete from tabSingles where doctype=%s and field=%s",
+			("Jarvis Settings", "persona_enabled"),
+		)
+		backfill()
+		frappe.get_single("Jarvis Settings").save(ignore_permissions=True)
+		self.assertTrue(persona_feature_enabled())
+		frappe.db.set_single_value("Jarvis Settings", "persona_enabled", 1)
