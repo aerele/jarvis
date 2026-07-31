@@ -33,8 +33,14 @@ export function prevStep(steps, cur) {
 // stays unit-tested without mounting the wizard.
 export function planSubtitleFor(plans) {
 	const list = Array.isArray(plans) ? plans : [];
+	// A missing price must NOT read as free: Number(null) is 0, so a plan row
+	// that simply never carried price_inr would otherwise resurrect the exact
+	// false promise this function exists to remove. Absent, null and blank all
+	// coerce to NaN here, which fails both comparisons, so the honest paid-only
+	// wording wins whenever the catalog is not explicit about being free.
+	const amount = (v) => (v === null || v === undefined || v === "" ? NaN : Number(v));
 	const hasFreeOrTrial = list.some(
-		(p) => Number(p && p.price_inr) === 0 || Number(p && p.trial_days) > 0
+		(p) => !!p && (amount(p.price_inr) === 0 || amount(p.trial_days) > 0)
 	);
 	return hasFreeOrTrial
 		? "Start free. Upgrade or extend anytime, with no auto-renewal."

@@ -50,6 +50,24 @@ test("planSubtitleFor: no free or trial plan drops the free-tier promise", () =>
 	);
 });
 
+// A plan row whose price is absent, null or blank is NOT free. Number(null)
+// is 0, so the naive coercion reported the free-tier wording for a catalog
+// that charges for everything, which is the bug jarvis#536 was filed about.
+test("planSubtitleFor: an absent, null or blank price is not treated as free", () => {
+	const paidOnly = "Pick a plan to get started. No auto-renewal.";
+	assert.equal(planSubtitleFor([{ name: "ob-plan", price_inr: null }]), paidOnly);
+	assert.equal(planSubtitleFor([{ name: "ob-plan" }]), paidOnly);
+	assert.equal(planSubtitleFor([{ name: "ob-plan", price_inr: "" }]), paidOnly);
+	assert.equal(planSubtitleFor([{ name: "ob-plan", price_inr: 1000, trial_days: null }]), paidOnly);
+	// A stray null element from a partially loaded response must not count either.
+	assert.equal(planSubtitleFor([null, { name: "Pro", price_inr: 3000 }]), paidOnly);
+	// A genuine zero still reads as free, including the string form.
+	assert.equal(
+		planSubtitleFor([{ name: "Free", price_inr: "0" }]),
+		"Start free. Upgrade or extend anytime, with no auto-renewal."
+	);
+});
+
 test("planSubtitleFor: a zero-price plan keeps the free-tier wording", () => {
 	assert.equal(
 		planSubtitleFor([
