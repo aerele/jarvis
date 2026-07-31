@@ -2021,8 +2021,24 @@
 					 Replaces (not stacks with) the suspended banner - its copy is
 					 the admin wording, which is wrong for a member who cannot
 					 renew. -->
+				<!-- The account was reconnected on another site, so this one lost the
+					 workspace. Leads the chain: billing/suspension wording is
+					 meaningless once the account is somewhere else. -->
 				<Banner
-					v-if="billingAlert"
+					v-if="replacedAlert"
+					type="warning"
+					:title="replacedAlert.title"
+					:message="replacedAlert.message"
+					style="margin-bottom: 10px"
+				>
+					<template #action>
+						<button class="jv-btn jv-btn--sm" @click="goReconnect">
+							{{ replacedAlert.action }}
+						</button>
+					</template>
+				</Banner>
+				<Banner
+					v-else-if="billingAlert"
 					:type="billingAlert.type"
 					:title="billingAlert.title"
 					:message="billingAlert.message"
@@ -3634,7 +3650,7 @@ import {
 } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner } from "@/account/format.js";
-import { billingNoticeOf } from "@/onboarding/readiness.js";
+import { billingNoticeOf, replacedNoticeOf, replacedBanner } from "@/onboarding/readiness.js";
 import { useShellStore } from "@/stores/shell";
 import { useJarvisTheme } from "@/theme";
 import { displayName } from "@/lib/user";
@@ -3729,6 +3745,14 @@ function goConnectModel() {
 // Billing lifecycle banner. Dismissal is session-only (a ref, not storage): the
 // pre-expiry nudge should return on the next visit, since the deadline has not.
 const billingNotice = ref({});
+// Set by the readiness poll when this site's account moved elsewhere.
+const replacedNotice = ref({});
+const replacedAlert = computed(() => replacedBanner(replacedNotice.value));
+function goReconnect() {
+	// The wizard owns the reconnect flow; land on it rather than duplicating the
+	// code-entry screen here.
+	window.location.assign("/jarvis/onboarding");
+}
 const billingDismissedPhase = ref("");
 // Renewing is gated on require_jarvis_admin(), which accepts Jarvis Admin OR
 // System Manager - match it, or a System Manager who CAN renew is told to ask
@@ -8661,6 +8685,9 @@ onMounted(async () => {
 	const convsP = store.loadConversations().catch(() => {});
 	// Billing banner rides the memoized readiness verdict already fetched for
 	// this page load - no extra round-trip. Never blocks the mount.
+	replacedNoticeOf()
+		.then((n) => (replacedNotice.value = n || {}))
+		.catch(() => {});
 	billingNoticeOf()
 		.then((n) => {
 			billingNotice.value = n || {};
