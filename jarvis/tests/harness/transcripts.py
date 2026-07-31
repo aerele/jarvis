@@ -25,7 +25,9 @@ A transcript is a plain dict (JSON-serialisable) with:
                 | {"kind":"error","state":"error","errorMessage":<str>}
                 | {"kind":"aborted"}                      (also emitted on
                     chat.abort regardless of scripted point)
-                | {"kind":"failed_final","stopReason":"error"}
+                | {"kind":"failed_final","stopReason":<str|None>}  (a final with
+                    NO assistant message at all, stopReason TOP-LEVEL: the live
+                    shape of a turn that produced nothing, #543)
   inject        optional fault: {"drop_after_frame": <idx>}  (WS-drop) |
                 {"recover_via":"history","final_text":<str>} (recovered:
                     stream is cut, the durable transcript still holds the
@@ -33,7 +35,10 @@ A transcript is a plain dict (JSON-serialisable) with:
 
 ``text`` on the terminal final is the authoritative answer
 (``_chat_final_text`` joins message.content). The gateway derives the chat
-final ``message.content`` block from it.
+final ``message.content`` block from it, and OMITS ``message`` entirely when
+there is no text: that is what openclaw does on the wire, and modelling it as
+an empty-content message instead is what once let a dead classifier branch pass
+its tests (#543).
 
 The transcripts are built in Python (the maintainable source of truth) and can
 be exported to ``fixtures/transcripts/*.json`` via ``dump_fixtures()`` for
@@ -247,6 +252,54 @@ def _build() -> dict[str, dict]:
 			"recover_via": "history",
 			"final_text": _RECOVERED_TEXT,
 		},
+	}
+
+	# --- regression fixtures, OUTSIDE the 8-row WP-2 matrix (kept out of NAMES so
+	#     the baseline / Stage-B runners still play exactly the matrix) ---------
+
+	# #543-a: a hard provider failure (429, failover chain exhausted). openclaw
+	# names the reason on a lifecycle error frame, then ends the run with a chat
+	# final that carries NO assistant message at all. Zero streamed frames, which
+	# is what the live reproduction recorded (last_event_seq=0).
+	t["failed-final"] = {
+		"name": "failed-final",
+		"description": (
+			"Provider failure with the failover chain exhausted: a lifecycle error naming the "
+			"reason, then a terminal final with no assistant message. Must settle as a terminal "
+			"ERROR, never as a successful empty final (#543)."
+		),
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": [
+			{
+				"op": "lifecycle_error",
+				"error": (
+					"Google Generative AI API error (429): You exceeded your current quota, "
+					"please check your plan and billing details."
+				),
+			}
+		],
+		"terminal": {"kind": "failed_final", "stopReason": "error"},
+	}
+
+	# #543-b: the SAME terminal reached the other way: the tools ran, the model
+	# returned nothing, openclaw exhausted its empty-response retries and
+	# surfaced an incomplete-turn error. The user saw tool cards and no answer.
+	t["empty-final-after-tools"] = {
+		"name": "empty-final-after-tools",
+		"description": (
+			"Tools run, the model returns nothing, openclaw surfaces an incomplete-turn error and "
+			"the terminal final still carries no assistant message (#543, second reproduction)."
+		),
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": [
+			{"op": "tool_start", "name": "jarvis__get_list", "call_id": "e1", "title": "get_list User"},
+			{"op": "tool_end", "call_id": "e1", "status": "completed"},
+			{"op": "tool_start", "name": "jarvis__get_list", "call_id": "e2", "title": "get_list User"},
+			{"op": "tool_end", "call_id": "e2", "status": "completed"},
+		],
+		"terminal": {"kind": "failed_final", "stopReason": "stop"},
 	}
 
 	return t

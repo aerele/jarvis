@@ -88,15 +88,18 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(len(out), 3)
 
 	def test_discards_frames_for_other_run_or_session_and_non_event_frames(self):
+		# The terminals here all carry text: this test is about FILTERING, and a
+		# textless final is a failed turn (#543), not a routing outcome.
+		answered = {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}
 		sess = self._sess(
 			[
 				_agent_frame("other-run", "assistant", {"text": "nope", "delta": "nope"}),
 				{"type": "res", "id": "x", "ok": True},  # non-event frame
 				None,  # soft-timeout / non-JSON noise
-				_chat_frame("r1", "other-session", "final"),  # wrong sessionKey
-				_chat_frame("other-run", "sk", "final"),  # wrong runId
+				_chat_frame("r1", "other-session", "final", message=answered),  # wrong sessionKey
+				_chat_frame("other-run", "sk", "final", message=answered),  # wrong runId
 				_agent_frame("r1", "assistant", {"text": "ok", "delta": "ok"}),
-				_chat_frame("r1", "sk", "final"),
+				_chat_frame("r1", "sk", "final", message=answered),
 			]
 		)
 		out = list(sess.relay_turn_events("sk", "r1"))
@@ -104,7 +107,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 			out,
 			[
 				{"kind": "assistant", "text": "ok", "delta": "ok"},
-				{"kind": "relay:final", "text": None},
+				{"kind": "relay:final", "text": "ok"},
 			],
 		)
 
@@ -113,11 +116,16 @@ class TestRelayTurnEvents(FrappeTestCase):
 			[
 				_agent_frame("r1", "lifecycle", {"phase": "start"}),
 				_agent_frame("r1", "lifecycle", {"phase": "end"}),
-				_chat_frame("r1", "sk", "final"),
+				_chat_frame(
+					"r1",
+					"sk",
+					"final",
+					message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+				),
 			]
 		)
 		out = list(sess.relay_turn_events("sk", "r1"))
-		self.assertEqual(out, [{"kind": "relay:final", "text": None}])
+		self.assertEqual(out, [{"kind": "relay:final", "text": "done"}])
 
 	def test_chat_delta_state_ignored(self):
 		sess = self._sess(
@@ -130,10 +138,9 @@ class TestRelayTurnEvents(FrappeTestCase):
 		out = list(sess.relay_turn_events("sk", "r1"))
 		self.assertEqual(out, [{"kind": "relay:final", "text": "done"}])
 
-	def test_final_with_no_message_yields_text_none(self):
-		sess = self._sess([_chat_frame("r1", "sk", "final")])
-		out = list(sess.relay_turn_events("sk", "r1"))
-		self.assertEqual(out, [{"kind": "relay:final", "text": None}])
+	# NB: a `final` with no message used to be asserted here as a successful
+	# relay:final with text=None. That is the #543 defect, and it now lives as
+	# test_final_with_no_message_at_all_yields_relay_error below.
 
 	def test_final_with_string_content_yields_text(self):
 		sess = self._sess([_chat_frame("r1", "sk", "final", message={"content": "plain text"})])
@@ -235,6 +242,90 @@ class TestRelayTurnEvents(FrappeTestCase):
 		)
 		out = list(sess.relay_turn_events("sk", "r1"))
 		self.assertEqual(out, [{"kind": "relay:final", "text": None}])
+
+	def test_final_with_no_message_at_all_yields_relay_error(self):
+		# #543, the LIVE failure shape. openclaw's relay emitters omit ``message``
+		# entirely when the turn produced no assistant text, so a failed turn
+		# arrives as a bare {"state": "final"}. Both live reproductions settled
+		# this way and wrote an assistant row with no content AND no error.
+		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+
+		sess = self._sess([_chat_frame("r1", "sk", "final")])
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(
+			out,
+			[{"kind": "relay:error", "state": "failed_final", "error": FAILED_FINAL_ERROR}],
+		)
+
+	def test_final_top_level_stop_reason_error_yields_relay_error(self):
+		# The same emitters put ``stopReason`` at the TOP LEVEL of the chat
+		# payload, NOT inside ``message`` - reading it only from the message is
+		# what made the original guard dead code on the live wire.
+		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+
+		sess = self._sess([_chat_frame("r1", "sk", "final", stopReason="error")])
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(
+			out,
+			[{"kind": "relay:error", "state": "failed_final", "error": FAILED_FINAL_ERROR}],
+		)
+
+	def test_failed_final_names_the_provider_reason_from_the_lifecycle_frame(self):
+		# The lifecycle error frame is the ONLY place openclaw names the failure.
+		# It is dropped from the terminal path (the chat event stays the single
+		# terminal) but kept, so the customer is told what to fix.
+		detail = (
+			"Google Generative AI API error (429): You exceeded your current quota, "
+			"please check your plan and billing details."
+		)
+		sess = self._sess(
+			[
+				_agent_frame("r1", "lifecycle", {"phase": "error", "error": detail}),
+				_chat_frame("r1", "sk", "final"),
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(len(out), 1)
+		self.assertEqual(out[0]["state"], "failed_final")
+		self.assertIn("429", out[0]["error"])
+		self.assertIn("quota", out[0]["error"])
+
+	def test_failed_final_detail_that_would_reroute_falls_back_to_generic_copy(self):
+		# turn_handler parks a relay:error mentioning "context overflow" for
+		# snapshot recovery. That never lands for a TERMINAL failed final, so a
+		# provider detail carrying the marker must not steer control flow - the
+		# generic copy is used instead and the turn stays terminal.
+		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+
+		sess = self._sess(
+			[
+				_agent_frame(
+					"r1",
+					"lifecycle",
+					{"phase": "error", "error": "Context overflow: prompt too large for the model"},
+				),
+				_chat_frame("r1", "sk", "final"),
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out[0]["error"], FAILED_FINAL_ERROR)
+
+	def test_lifecycle_error_then_a_real_answer_stays_a_relay_final(self):
+		# openclaw emits a lifecycle error per FAILED candidate and then fails
+		# over. A turn the fallback model rescued must keep its answer.
+		sess = self._sess(
+			[
+				_agent_frame("r1", "lifecycle", {"phase": "error", "error": "rate limited"}),
+				_chat_frame(
+					"r1",
+					"sk",
+					"final",
+					message={"role": "assistant", "content": [{"type": "text", "text": "PONG"}]},
+				),
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out, [{"kind": "relay:final", "text": "PONG"}])
 
 	def test_final_real_text_with_error_stop_reason_keeps_the_answer(self):
 		# A partial answer that also flagged an error must NOT be hidden behind

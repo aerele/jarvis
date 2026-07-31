@@ -35,6 +35,7 @@ from unittest.mock import patch as mock_patch
 
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import OpenclawUnreachableError
 from jarvis.tests.harness import transcripts as _transcripts
@@ -119,6 +120,16 @@ def _chat_final_frame(run_id, session_key, text="hi"):
 	}
 
 
+def _chat_failed_final_frame(run_id, session_key, stop_reason=None):
+	"""The LIVE shape of a chat final for a turn that produced nothing (#543):
+	no ``message`` key at all, and ``stopReason`` (when openclaw resolved one) at
+	the TOP LEVEL rather than inside the message."""
+	payload = {"runId": run_id, "sessionKey": session_key, "state": "final"}
+	if stop_reason:
+		payload["stopReason"] = stop_reason
+	return {"type": "event", "event": "chat", "payload": payload}
+
+
 def _term_text(name: str) -> str:
 	return _transcripts.get(name)["terminal"]["text"]
 
@@ -176,12 +187,18 @@ def _terminal_frame(run_id, session_key, terminal):
 	kind = terminal.get("kind", "final")
 	payload = {"runId": run_id, "sessionKey": session_key}
 	if kind == "final":
+		# Live wire shape (#543): openclaw OMITS ``message`` entirely when the turn
+		# produced no assistant text, rather than sending an empty one.
 		text = terminal.get("text")
-		payload.update(
-			{"state": "final", "message": {"content": [{"type": "text", "text": text}] if text else []}}
-		)
+		payload.update({"state": "final"})
+		if text:
+			payload["message"] = {"content": [{"type": "text", "text": text}]}
 	elif kind == "failed_final":
-		payload.update({"state": "final", "message": {"content": [], "stopReason": "error"}})
+		# Live wire shape (#543): ``stopReason`` is TOP-LEVEL, not inside
+		# ``message``, and a turn with no output carries no ``message`` at all.
+		payload.update({"state": "final"})
+		if terminal.get("stopReason"):
+			payload["stopReason"] = terminal["stopReason"]
 	elif kind == "aborted":
 		payload.update({"state": "aborted", "errorMessage": "aborted by user"})
 	else:
@@ -497,6 +514,115 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 			mux._classify(_agent_frame("r", "s", "assistant", {"text": f"t{i}", "delta": f"t{i}"}))
 		self.assertEqual(mux.dispatch(), total, "all events drained in one call (round-robin passes)")
 		self.assertFalse(mux._has_work())
+
+
+# --------------------------------------------------------------------------- #
+# Failed-final classification (#543): the LIVE openclaw terminal shapes
+# --------------------------------------------------------------------------- #
+
+
+class TestRelayMuxFailedFinal(FrappeTestCase):
+	"""#543: a turn that fails at the provider must reach the pump as a terminal
+	ERROR, never as a successful empty final.
+
+	Both live reproductions settled with ``terminal_kind='relay:final'`` and
+	``terminal_payload={"text": null}``, leaving an assistant row with no content
+	AND no error, i.e. a failure rendered as an in-progress success. The frames
+	are the shapes the 2026.6.8 gateway actually puts on the wire: a failed final
+	carries NO ``message`` (and ``stopReason``, when resolved, at the TOP LEVEL),
+	and the provider reason is named only on the agent ``lifecycle`` error frame.
+	Everything from ``_classify`` down is the real mux.
+	"""
+
+	def _terminal_for(self, frames):
+		mux = RelayMux(MagicMock(), "ff-target")
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		for frame in frames:
+			mux._classify(frame)
+		mux.dispatch()
+		return rec.terminal
+
+	def test_final_without_a_message_is_a_terminal_error(self):
+		# Repro 1: a hard provider failure (429, failover chain exhausted) ends the
+		# run with a chat final that carries no assistant message at all.
+		term = self._terminal_for([_chat_failed_final_frame("r1", "s1")])
+		self.assertEqual(term[0], "relay:error")
+		self.assertEqual(term[1]["state"], "failed_final")
+		self.assertEqual(term[1]["error"], FAILED_FINAL_ERROR)
+
+	def test_empty_final_after_tools_is_a_terminal_error(self):
+		# Repro 2: the tools ran, the model returned nothing, openclaw surfaced an
+		# incomplete-turn error, and the final still arrives with no message. Same
+		# terminal as the hard failure above: the two repros are ONE root cause.
+		term = self._terminal_for(
+			[
+				_agent_frame(
+					"r1",
+					"s1",
+					"item",
+					{"kind": "tool", "phase": "start", "name": "get_list", "toolCallId": "c1"},
+				),
+				_agent_frame(
+					"r1",
+					"s1",
+					"item",
+					{"kind": "tool", "phase": "end", "name": "get_list", "toolCallId": "c1"},
+				),
+				_chat_failed_final_frame("r1", "s1", stop_reason="stop"),
+			]
+		)
+		self.assertEqual(term[0], "relay:error")
+		self.assertEqual(term[1]["state"], "failed_final")
+
+	def test_top_level_stop_reason_error_is_a_terminal_error(self):
+		term = self._terminal_for([_chat_failed_final_frame("r1", "s1", stop_reason="error")])
+		self.assertEqual(term[0], "relay:error")
+
+	def test_failed_final_names_the_provider_reason_from_the_lifecycle_frame(self):
+		detail = (
+			"Google Generative AI API error (429): You exceeded your current quota, "
+			"please check your plan and billing details."
+		)
+		term = self._terminal_for(
+			[
+				_agent_frame("r1", "s1", "lifecycle", {"phase": "error", "error": detail}),
+				_chat_failed_final_frame("r1", "s1"),
+			]
+		)
+		self.assertEqual(term[0], "relay:error")
+		self.assertIn("429", term[1]["error"])
+		self.assertIn("quota", term[1]["error"])
+
+	def test_lifecycle_error_never_errors_a_turn_that_still_answered(self):
+		# openclaw emits a lifecycle error per FAILED candidate, then fails over. A
+		# recovered turn must keep its answer: the remembered detail is only ever
+		# consulted for a final that produced nothing.
+		term = self._terminal_for(
+			[
+				_agent_frame("r1", "s1", "lifecycle", {"phase": "error", "error": "rate limited"}),
+				_chat_final_frame("r1", "s1", "recovered on the fallback model"),
+			]
+		)
+		self.assertEqual(term[0], "relay:final")
+		self.assertEqual(term[1]["text"], "recovered on the fallback model")
+
+	def test_final_with_an_empty_message_and_benign_stop_reason_stays_final(self):
+		# A final that DOES carry an assistant message with no text and a non-error
+		# stopReason is the one empty shape that is not evidence of failure.
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"message": {"content": [], "stopReason": "end_turn"},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term[0], "relay:final")
+		self.assertIsNone(term[1]["text"])
 
 
 # --------------------------------------------------------------------------- #

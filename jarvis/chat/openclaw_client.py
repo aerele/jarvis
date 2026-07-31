@@ -310,12 +310,14 @@ def _chat_final_text(payload: dict) -> str | None:
 _STREAM_ERROR_SENTINEL = "[assistant turn failed before producing content]"
 
 # User-facing text stamped on the assistant row's ``error`` field (and shown in
-# the chat) for such a failed final. Generic on purpose: a ``state == "final"``
-# event carries no ``errorMessage`` (only ``stopReason``), so the exact cause
-# cannot be named here; a context window too small for the conversation is the
-# common one. Must NOT contain "context overflow" (that substring reroutes the
-# turn handler into the auto-compact park-for-recovery branch, which never
-# lands for a terminal precheck failure) or "aborted".
+# the chat) for such a failed final when openclaw gave us nothing better.
+# Generic on purpose: a ``state == "final"`` event carries no ``errorMessage``
+# (only ``stopReason``), so the exact cause cannot be named from that frame
+# alone; a context window too small for the conversation is the common one.
+# ``failed_final_error`` below names the cause instead whenever the run's
+# lifecycle error frame supplied one. Must NOT contain "context overflow" (that
+# substring reroutes the turn handler into the auto-compact park-for-recovery
+# branch, which never lands for a terminal precheck failure) or "aborted".
 FAILED_FINAL_ERROR = (
 	"The assistant could not complete this response and the turn ended "
 	"without any output. This can happen when the conversation is too long "
@@ -323,26 +325,79 @@ FAILED_FINAL_ERROR = (
 	"start a new chat."
 )
 
+# Substrings a provider detail must not carry into a failed final's error text:
+# ``turn_handler`` routes a relay:error containing "context overflow" into the
+# auto-compact park-for-recovery branch (turn_handler.py) and reads "aborted" as
+# a clean user stop. Neither is true of a TERMINAL failed final, and letting
+# provider prose steer that control flow would put the turn straight back to
+# spinning. A detail carrying either marker is dropped for the generic copy.
+_ERROR_DETAIL_REROUTE_MARKERS = ("context overflow", "aborted")
+
+# Cap on the appended provider detail. openclaw's own failure text is already
+# user-facing and self-truncating (~200 chars); this only stops a pathological
+# runtime from filling the Message.error column (settlement stores error[:1000]).
+_ERROR_DETAIL_MAX_CHARS = 400
+
+
+def failed_final_error(detail: str | None = None) -> str:
+	"""User-facing error text for a failed final, naming the provider reason
+	when openclaw gave one.
+
+	The run's lifecycle ``phase == "error"`` frame is the ONLY place the runtime
+	names the failure ("Google Generative AI API error (429): You exceeded your
+	current quota..."), and that is the actionable half of the message - the
+	customer can top up a quota, they cannot act on "something went wrong". The
+	relay drops lifecycle frames from the terminal path (the chat event stays
+	the single terminal) but remembers this text; pass it here. Without a
+	detail, FAILED_FINAL_ERROR is all we can honestly say."""
+	d = (detail or "").strip()
+	if not d or any(marker in d.lower() for marker in _ERROR_DETAIL_REROUTE_MARKERS):
+		return FAILED_FINAL_ERROR
+	return f"The assistant could not complete this response: {d[:_ERROR_DETAIL_MAX_CHARS]}"
+
 
 def _chat_final_failed(payload: dict, text: str | None) -> bool:
 	"""True when a ``state == "final"`` chat event actually represents a FAILED
-	turn that produced NO real answer: its only content is the stream-error
-	sentinel, or (with no visible text) the assistant message carries
-	``stopReason == "error"``. Such a "final" must surface as an error, not a
-	silent empty bubble.
+	turn that produced NO real answer. Such a "final" must surface as an error,
+	not a silent empty bubble.
+
+	The wire shapes this has to cover, verified against the shipped bundle of
+	ghcr.io/openclaw/openclaw:2026.6.8:
+
+	  * the LIVE relay emitters (``dist/server-chat-*.js`` and
+	    ``dist/embedded-backend-*.js``, both ``emitChatFinal``) build the payload
+	    as ``{state, stopReason?, message?}``: ``stopReason`` sits at the TOP
+	    LEVEL, NOT inside ``message``, and ``message`` is OMITTED ENTIRELY when
+	    the turn produced no assistant text. A failed turn therefore reaches us
+	    as a final with NO message at all - which is exactly what both live
+	    reproductions in #543 left behind (``terminal_payload`` was
+	    ``{"text": null}`` and the assistant row's ``error`` was NULL);
+	  * the transcript-projected emitter (``broadcastChatFinal``) passes the
+	    stored assistant message straight through, so THERE ``stopReason`` rides
+	    inside ``message`` - the shape the original guard was written for.
 
 	Guards two non-failures:
 	  * a real (possibly partial) answer is kept even when the turn also flagged
 	    an error, so a streamed reply is never hidden behind an error;
-	  * a genuinely successful turn that emitted only rich outputs (canvas /
-	    image, no prose) has no text and ``stopReason`` != "error", so it stays a
-	    normal empty-text relay:final."""
+	  * a final that DOES carry an assistant message with no text and a non-error
+	    ``stopReason`` stays a normal empty-text relay:final.
+
+	A turn that produced no assistant text at all is NOT distinguishable here
+	from a hypothetical rich-output-only success - openclaw omits ``message``
+	for both. Surfacing the failure is the safer of the two: today's silence
+	renders a failed turn as an in-progress one that never resolves, whereas the
+	worst case in the other direction is an honest error on a turn that said
+	nothing anyway."""
 	if isinstance(text, str) and text.strip() == _STREAM_ERROR_SENTINEL:
 		return True
 	if text:
 		return False
+	if payload.get("stopReason") == "error":
+		return True
 	msg = payload.get("message")
-	return isinstance(msg, dict) and msg.get("stopReason") == "error"
+	if not isinstance(msg, dict):
+		return True
+	return msg.get("stopReason") == "error"
 
 
 def _persisted_device_id() -> str:
@@ -863,12 +918,17 @@ class OpenclawSession:
 		  {"kind": "relay:interrupted", "reason": "transport"|"deadline", ...}
 
 		A ``state == "final"`` event whose assistant turn actually failed
-		(stopReason error / stream-error sentinel, e.g. a precheck context
-		overflow that deletes the session) is remapped to a ``failed_final``
-		relay:error so it stamps an honest error instead of a silent empty
-		final. See _chat_final_failed.
+		(no assistant message at all, stopReason error, stream-error sentinel)
+		is remapped to a ``failed_final`` relay:error so it stamps an honest
+		error instead of a silent empty final, naming the provider reason from
+		the run's lifecycle error frame when there was one. See
+		_chat_final_failed / failed_final_error.
 		"""
 		deadline = time.monotonic() + soft_deadline_s
+		# Last lifecycle error text seen for this run. NOT terminal on its own
+		# (the chat event is the single terminal path); it is the only frame
+		# that names the provider failure, so it is kept for a failed final.
+		failure_detail: str | None = None
 		while True:
 			remaining = deadline - time.monotonic()
 			if remaining <= 0:
@@ -904,7 +964,7 @@ class OpenclawSession:
 						yield {
 							"kind": "relay:error",
 							"state": "failed_final",
-							"error": FAILED_FINAL_ERROR,
+							"error": failed_final_error(failure_detail),
 						}
 						return
 					yield {"kind": "relay:final", "text": text}
@@ -921,6 +981,12 @@ class OpenclawSession:
 				continue
 			parsed = parse_event(payload)
 			if parsed is None or parsed.get("kind") == "lifecycle":
+				# lifecycle frames stay off the terminal path, but the ``error``
+				# phase carries the runtime's own user-facing failure text - the
+				# only place the provider reason is ever named. Keep it for a
+				# failed final; a real answer still wins over it (#543).
+				if parsed is not None and parsed.get("phase") == "error" and parsed.get("error"):
+					failure_detail = str(parsed["error"])
 				continue
 			yield parsed
 
