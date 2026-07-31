@@ -28,6 +28,7 @@ import frappe
 
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
+from jarvis.chat.seq_watermark import wm_expr
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
@@ -305,9 +306,9 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	# Ordered conversation, seq DESC so the first row per conversation is the
 	# latest (used for the no-bleed dedup, #2).
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, m.agent_seq_watermark, m.creation
+			   m.recovery_started_at, m.seq, {wm_expr("m.")} AS agent_seq_watermark, m.creation
 		FROM `tabJarvis Chat Message` m
 		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
 		WHERE m.streaming = 1 AND m.recovering = 1
@@ -401,11 +402,11 @@ def _next_turn_watermark(conversation: str, seq: int) -> int | None:
 	(or none with a usable watermark) - then the window stays open-ended,
 	which matches the common single-in-flight-turn case."""
 	val = frappe.db.sql(
-		"""
-		SELECT MIN(agent_seq_watermark)
+		f"""
+		SELECT MIN({wm_expr()})
 		FROM `tabJarvis Chat Message`
 		WHERE conversation = %(conv)s AND role = 'assistant'
-		  AND seq > %(seq)s AND agent_seq_watermark > 0
+		  AND seq > %(seq)s AND {wm_expr()} > 0
 		""",
 		{"conv": conversation, "seq": seq},
 	)[0][0]
@@ -419,9 +420,9 @@ def recover_now(conversation_id: str) -> str:
 	the very thing that just died. Idempotent vs the cron via
 	_conditional_clear inside _finalize/_error."""
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, m.agent_seq_watermark, m.creation
+			   m.recovery_started_at, m.seq, {wm_expr("m.")} AS agent_seq_watermark, m.creation
 		FROM `tabJarvis Chat Message` m
 		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
 		WHERE m.streaming = 1 AND m.recovering = 1

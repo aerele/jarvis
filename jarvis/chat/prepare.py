@@ -37,6 +37,7 @@ import time
 import frappe
 
 from jarvis._session import impersonate
+from jarvis.chat import seq_watermark
 from jarvis.chat import turn_state as ts
 from jarvis.exceptions import AgentUnreachableError
 
@@ -175,9 +176,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 					default=0,
 				)
 				if watermark:
-					frappe.db.set_value(
-						MSG, assistant_msg, "agent_seq_watermark", watermark, update_modified=False
-					)
+					seq_watermark.stamp_watermark(assistant_msg, watermark)
 					frappe.db.commit()
 			except Exception:
 				frappe.log_error(title="prepare.watermark", message=frappe.get_traceback())

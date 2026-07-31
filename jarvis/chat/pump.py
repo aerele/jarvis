@@ -2487,7 +2487,15 @@ def _recovery_window(r: dict) -> tuple[int, int | None]:
 	am = r.get("assistant_message")
 	if not am:
 		return 0, None
-	row = frappe.db.get_value(MSG, am, ["agent_seq_watermark", "seq"], as_dict=True) or {}
+	from jarvis.chat.seq_watermark import wm_expr
+
+	rows = frappe.db.sql(
+		f"""SELECT {wm_expr()} AS agent_seq_watermark, seq
+		FROM `tab{MSG}` WHERE name=%(n)s""",
+		{"n": am},
+		as_dict=True,
+	)
+	row = rows[0] if rows else {}
 	min_seq = int(row.get("agent_seq_watermark") or 0)
 	max_seq = None
 	if row.get("seq"):

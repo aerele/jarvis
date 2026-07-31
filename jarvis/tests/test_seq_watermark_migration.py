@@ -1,26 +1,45 @@
-"""Migration test for v2_10: openclaw_seq_watermark -> agent_seq_watermark copy.
+"""Transition tests for the watermark rename: the v2_10 copy patch AND the
+dual-write/GREATEST-read compatibility layer (jarvis.chat.seq_watermark).
 
-Exercises the real patch against populated rows on both columns (the old column
-survives model-sync as an orphan, so both exist during the transition). Verifies
-the copy fills the new column and is clobber-safe on re-run.
+On an upgraded site the old column survives model-sync as an orphan; on a fresh
+install it never exists. The upgrade shape is the one the migration exists for —
+so instead of skipping when the column is absent (which made this suite vacuous
+on every fresh CI site), setUpClass CREATES the legacy column to simulate the
+upgrade, and tearDownClass drops it again if we added it (leaving a fresh site
+pristine).
 """
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import seq_watermark
+from jarvis.chat.turn_recovery import _next_turn_watermark
 from jarvis.patches.v2_10_rename_openclaw_seq_watermark import execute
 
 MSG = "Jarvis Chat Message"
 
 
 class TestSeqWatermarkMigration(FrappeTestCase):
-	def setUp(self):
-		# The old column only exists on sites migrated from the pre-rename schema (model-sync
-		# keeps it as an orphan). On a fresh install the JSON ships only agent_seq_watermark, so
-		# v2_10 is a documented no-op (its own has_column guard) and there is no transition to
-		# exercise - skip rather than error (or mutate the shared schema) on the missing column.
+	_added_legacy_col = False
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
 		if "openclaw_seq_watermark" not in frappe.db.get_table_columns(MSG):
-			self.skipTest("no orphan openclaw_seq_watermark column (fresh install); v2_10 is a no-op")
+			frappe.db.sql_ddl(
+				f"ALTER TABLE `tab{MSG}` ADD COLUMN openclaw_seq_watermark INT(11) NOT NULL DEFAULT 0"
+			)
+			cls._added_legacy_col = True
+
+	@classmethod
+	def tearDownClass(cls):
+		if cls._added_legacy_col:
+			frappe.db.sql_ddl(f"ALTER TABLE `tab{MSG}` DROP COLUMN openclaw_seq_watermark")
+		super().tearDownClass()
+
+	def setUp(self):
+		# the per-request column cache must not leak between tests / the DDL above
+		frappe.local._jarvis_wm_legacy_col = None
 		self.conv = frappe.get_doc(
 			{"doctype": "Jarvis Conversation", "title": "wm", "session_key": "wm-migration-test"}
 		).insert(ignore_permissions=True)
@@ -39,15 +58,24 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 		frappe.db.delete(MSG, {"conversation": self.conv.name})
 		frappe.db.delete("Jarvis Conversation", {"name": self.conv.name})
 		frappe.db.commit()
+		frappe.local._jarvis_wm_legacy_col = None
 
-	def _set_cols(self, old, new):
+	def _set_cols(self, old, new, name=None):
 		frappe.db.sql(
 			"UPDATE `tabJarvis Chat Message` SET openclaw_seq_watermark=%s, agent_seq_watermark=%s WHERE name=%s",
-			(old, new, self.msg.name),
+			(old, new, name or self.msg.name),
 		)
+
+	def _cols(self, name=None):
+		return frappe.db.sql(
+			"SELECT agent_seq_watermark, openclaw_seq_watermark FROM `tabJarvis Chat Message` WHERE name=%s",
+			(name or self.msg.name,),
+		)[0]
 
 	def _new(self):
 		return frappe.db.get_value(MSG, self.msg.name, "agent_seq_watermark")
+
+	# ---- the v2_10 one-shot copy ----
 
 	def test_copies_old_watermark_when_new_is_zero(self):
 		self._set_cols(old=42, new=0)
@@ -65,3 +93,38 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 		self._set_cols(old=3, new=9)
 		execute()
 		self.assertEqual(self._new(), 9)
+
+	# ---- the transition compatibility layer (dual-write + GREATEST read) ----
+
+	def test_stamp_watermark_dual_writes_while_legacy_column_exists(self):
+		"""A rollback's old-code readers look only at the legacy column: while it
+		exists, every new-code write must land on BOTH columns."""
+		self.assertTrue(seq_watermark.has_legacy_column())
+		seq_watermark.stamp_watermark(self.msg.name, 17)
+		self.assertEqual(self._cols(), (17, 17))
+
+	def test_read_expr_sees_a_legacy_only_write(self):
+		"""The forward deploy window: an old-code worker stamped ONLY the legacy
+		column after the one-shot copy ran. The read expression must surface that
+		value — a plain new-column read would return 0 and disable the fence."""
+		self._set_cols(old=23, new=0)
+		val = frappe.db.sql(
+			f"SELECT {seq_watermark.wm_expr()} FROM `tab{MSG}` WHERE name=%s", (self.msg.name,)
+		)[0][0]
+		self.assertEqual(int(val), 23)
+
+	def test_next_turn_watermark_honors_legacy_only_later_turn(self):
+		"""The real recovery read path: a LATER turn whose watermark exists only on
+		the legacy column must still bound this turn's transcript window."""
+		later = frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Message",
+				"conversation": self.conv.name,
+				"seq": 2,
+				"role": "assistant",
+				"content": "y",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		self._set_cols(old=31, new=0, name=later.name)
+		self.assertEqual(_next_turn_watermark(self.conv.name, 1), 31)

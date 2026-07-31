@@ -51,15 +51,21 @@ _ALLOWED_LITERALS = re.compile(
 	r"|render_openclaw_config|DEFAULT_OPENCLAW_IMAGE|verify-openclaw-assumptions"
 )
 _OPENCLAW = re.compile(r"openclaw", re.IGNORECASE)
-_SCAN_SUFFIXES = (".py", ".js", ".ts", ".vue", ".json", ".md", ".txt", ".j2")
-_SKIP = ("__pycache__", "/public/", "docs/superpowers", "node_modules")
+_SCAN_SUFFIXES = (".py", ".js", ".ts", ".vue", ".json", ".md", ".txt", ".j2", ".html", ".css")
+# /public/frontend is the built SPA bundle (generated); the rest of /public (desk
+# widget js/css, manifest) is SOURCE that ships to the customer bench and IS scanned.
+_SKIP = ("__pycache__", "/public/frontend", "docs/superpowers", "node_modules")
+# Every scanned root must yield at least this many files, else the scan has gone
+# vacuous (a moved/renamed root would otherwise pass silently by scanning nothing).
+_MIN_FILES_PER_ROOT = {"jarvis": 300, os.path.join("frontend", "src"): 100, "pwa": 10}
 
 
 class TestNoOpenclawLeak(FrappeTestCase):
 	def test_openclaw_only_in_sanctioned_wire_contract(self):
 		app_root = os.path.dirname(frappe.get_app_path("jarvis"))  # .../app
 		offenders = []
-		for base in ("jarvis", os.path.join("frontend", "src")):
+		scanned = dict.fromkeys(_MIN_FILES_PER_ROOT, 0)
+		for base in _MIN_FILES_PER_ROOT:
 			for root, _dirs, files in os.walk(os.path.join(app_root, base)):
 				if any(skip in root for skip in _SKIP):
 					continue
@@ -71,6 +77,7 @@ class TestNoOpenclawLeak(FrappeTestCase):
 						continue
 					try:
 						with open(os.path.join(root, fn), encoding="utf-8") as fh:
+							scanned[base] += 1
 							for i, line in enumerate(fh, 1):
 								if _OPENCLAW.search(_ALLOWED_LITERALS.sub("", line)):
 									offenders.append(f"{rel}:{i}: {line.strip()}")
@@ -81,3 +88,10 @@ class TestNoOpenclawLeak(FrappeTestCase):
 			[],
 			'un-sanctioned "openclaw" found (white-label: use "agent"):\n' + "\n".join(offenders),
 		)
+		for base, floor in _MIN_FILES_PER_ROOT.items():
+			self.assertGreaterEqual(
+				scanned[base],
+				floor,
+				f"guard scanned only {scanned[base]} files under {base!r} (floor {floor}) - "
+				"the scan root moved or the walk went vacuous; fix the root, don't lower the floor blindly",
+			)

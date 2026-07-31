@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 import frappe
 
-from jarvis.chat import agent_session_pool, vision
+from jarvis.chat import agent_session_pool, seq_watermark, vision
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode
 
@@ -1007,13 +1007,7 @@ def handle_chat_send(payload: dict) -> None:
 						default=0,
 					)
 					if watermark:
-						frappe.db.set_value(
-							MSG,
-							assistant_msg.name,
-							"agent_seq_watermark",
-							watermark,
-							update_modified=False,
-						)
+						seq_watermark.stamp_watermark(assistant_msg.name, watermark)
 						frappe.db.commit()
 				except Exception:
 					frappe.log_error(
