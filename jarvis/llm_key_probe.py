@@ -49,10 +49,7 @@ response.
 
 from __future__ import annotations
 
-import ipaddress
 import json
-import re
-from urllib.parse import urlsplit
 
 import frappe
 
@@ -72,50 +69,6 @@ _MAX_DETAIL_LEN = 400
 # carries local_endpoint=True so the caller renders a disclaimer, and a guard
 # rejection gets a locality-aware message instead of a bare "blocked".
 LOCAL_PROVIDER_IDS = {"ollama", "vllm"}
-
-# Private / container-only network space. An endpoint here is reachable from the
-# tenant's container and not from this bench, whatever provider id it wears
-# (jarvis#556). Mirrors isContainerOnlyBaseUrl in frontend/src/llm/pool.js; the
-# two are kept in step for the SAME reason LOCAL_PROVIDER_IDS is, so that the
-# button's disclaimer and the server's verdict agree.
-_PRIVATE_SUFFIXES = (".local", ".internal", ".lan", ".home", ".localdomain")
-_HOSTNAME_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-_CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
-
-
-def is_container_only_base_url(base_url: str) -> bool:
-	"""True when ``base_url``'s host is loopback, private, link-local, CGNAT, a
-	private-style suffix, or a bare single-label name (a container alias).
-
-	Unparseable or public hosts return False, so the probe still runs for them.
-	This never widens what the bench will fetch: it only marks endpoints the
-	caller should not treat as a real key failure. ``link_fetch``'s SSRF guard
-	is unchanged and remains the thing that actually refuses a request.
-	"""
-	raw = (base_url or "").strip()
-	if not raw:
-		return False
-	try:
-		host = (urlsplit(raw if "://" in raw else f"http://{raw}").hostname or "").lower()
-	except ValueError:
-		return False
-	if not host:
-		return False
-	# A single label resolves only inside a container network. Require it to look
-	# like a real hostname so a malformed URL is not quietly waved through as
-	# "local" and left unprobed.
-	if "." not in host and ":" not in host:
-		return bool(_HOSTNAME_LABEL_RE.match(host))
-	if host.endswith(_PRIVATE_SUFFIXES):
-		return True
-	try:
-		ip = ipaddress.ip_address(host)
-	except ValueError:
-		return False
-	if ip.version == 4 and ip in _CGNAT_V4:
-		return True  # 100.64/10 is carrier-grade NAT, which ipaddress does not call private
-	return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_reserved)
-
 
 # Wire-protocol grouping for building the probe request. Everything not
 # explicitly Anthropic/Gemini speaks the OpenAI chat/completions shape - this
@@ -235,17 +188,11 @@ def probe_api_key(provider: str, model: str, api_key: str, base_url: str = "") -
 	notes (SSRF guard via link_fetch, key scrubbing)."""
 	checks: list[dict] = []
 	provider_id = normalize_provider(provider)
+	is_local = provider_id in LOCAL_PROVIDER_IDS
 
 	model = (model or "").strip()
 	api_key = (api_key or "").strip()
 	base = (base_url or "").strip()
-
-	# jarvis#556: locality follows the ADDRESS, not just the provider id. A private
-	# or loopback endpoint is only reachable from the tenant's CONTAINER whatever
-	# provider it is reached through, so reporting it as remote made the caller
-	# treat an unreachable-from-here endpoint as a real key failure. ollama and
-	# vllm keep their id-based carve-out for the case where no base URL is typed.
-	is_local = provider_id in LOCAL_PROVIDER_IDS or is_container_only_base_url(base)
 
 	def _done(ok: bool) -> dict:
 		return {"ok": ok, "checks": checks, "provider": provider_id, "local_endpoint": is_local}
