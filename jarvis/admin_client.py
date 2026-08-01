@@ -1065,6 +1065,12 @@ def post_disconnect_llm() -> dict:
 	)
 
 
+def unpair_chat_devices() -> dict:
+	"""Drop the container's paired devices. Idempotent; a file op on the agent,
+	so it needs none of the disconnect budget above."""
+	return _post(path=_m("api.tenant.unpair_chat_devices"), body={}, timeout_s=60)
+
+
 # --------------------------------------------------------------------------- #
 # Workspace reset proxies. The customer bench forwards to the control plane,
 # which re-derives the customer from the api_key. ``_post`` already unwraps the

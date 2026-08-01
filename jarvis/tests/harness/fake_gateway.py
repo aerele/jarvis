@@ -381,11 +381,21 @@ class FakeGateway:
 		session_key = tl.session_key
 		payload = {"runId": run_id, "sessionKey": session_key}
 		if kind == "final":
+			# Live wire shape (#543): the runtime OMITS ``message`` entirely when the
+			# turn produced no assistant text, rather than sending an empty one.
 			text = terminal.get("text")
-			content = [{"type": "text", "text": text}] if text else []
-			payload.update({"state": "final", "message": {"content": content}})
+			payload.update({"state": "final"})
+			if text:
+				payload["message"] = {"content": [{"type": "text", "text": text}]}
 		elif kind == "failed_final":
-			payload.update({"state": "final", "message": {"content": [], "stopReason": "error"}})
+			# Live wire shape (#543): ``stopReason`` is TOP-LEVEL, not inside
+			# ``message``, and a turn with no output carries no ``message`` at all.
+			# The old {"message": {"content": [], "stopReason": "error"}} shape is
+			# one the runtime never sends, and modelling it here is what let the
+			# failed-final classifier pass its tests while being dead on the wire.
+			payload.update({"state": "final"})
+			if terminal.get("stopReason"):
+				payload["stopReason"] = terminal["stopReason"]
 		elif kind == "aborted":
 			tl.aborted = True
 			payload.update({"state": "aborted", "errorMessage": "aborted by user"})

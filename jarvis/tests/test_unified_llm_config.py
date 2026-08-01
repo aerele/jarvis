@@ -4176,3 +4176,78 @@ class TestPoolSyncChangeDetection(_RT3SettingsTestCase):
 			settings.save()
 
 		mock_enqueue.assert_called_once()
+
+
+class TestLeavingPoolModeConvergence(FrappeTestCase):
+	"""jarvis#550: a shrink out of pool mode must still converge the container.
+
+	Removing a NON-PRIMARY model flips compute_pool_mode off, which routed the
+	save to the single-model leg. There _classify_llm_change compares only the
+	legacy mirror fields, and those are mirrored from models[0], so nothing it
+	looks at changed and it returned "reload" (rotate the secret file only).
+	Admin kept the old llm_pool_config, openclaw.json kept declaring the removed
+	provider, and its llm_key_N.key stayed on disk.
+
+	These build settings-like objects in memory. Nothing here may touch the DB:
+	the pre-existing fixture in test_admin_client.py that commits and calls
+	remove_encrypted_password has already destroyed a real site's credentials
+	(jarvis#566).
+	"""
+
+	def _leaving(self, before_rows, after_rows):
+		from unittest.mock import Mock
+
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		doc = _make_settings_with_models(after_rows)
+		doc.get_doc_before_save = Mock(
+			return_value=(_make_settings_with_models(before_rows) if before_rows is not None else None)
+		)
+		return JarvisSettings._is_leaving_pool_mode(doc)
+
+	def test_dropping_two_models_to_one_is_leaving_pool_mode(self):
+		"""The reported repro: remove the non-primary of a 2-model pool."""
+		before = [_api_key_model(order=0), _api_key_model(model="gemini-3.6-flash", order=1)]
+		self.assertTrue(self._leaving(before, [_api_key_model(order=0)]))
+
+	def test_first_ever_save_is_not_leaving_pool_mode(self):
+		"""No before-doc means nothing was left, so the ordinary leg applies."""
+		self.assertFalse(self._leaving(None, [_api_key_model(order=0)]))
+
+	def test_single_model_edit_is_not_leaving_pool_mode(self):
+		"""A tenant that was never a pool must keep the single-model leg."""
+		self.assertFalse(self._leaving([_api_key_model(order=0)], [_api_key_model(order=0)]))
+
+	def test_removing_the_last_subscription_is_leaving_pool_mode(self):
+		"""A lone subscription is pool mode, so dropping it also has to converge.
+
+		This is the transition that tears the Bifrost and CLIProxyAPI sidecars
+		down, which only the /llm-pool leg does.
+		"""
+		before = [_subscription_model(order=0, accounts=[_account()])]
+		self.assertTrue(self._leaving(before, [_api_key_model(order=0)]))
+
+	def test_teardown_push_is_allowed_past_the_pool_mode_gate(self):
+		"""The worker must not skip the job whose whole purpose is the teardown."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import _pool_spec_pushable
+
+		one_model = _make_settings_with_models([_api_key_model(order=0)])
+		# Without the flag this is exactly the "no longer a pool" skip that let
+		# the stale container config survive.
+		self.assertFalse(_pool_spec_pushable(one_model, False))
+		self.assertTrue(_pool_spec_pushable(one_model, True))
+
+	def test_teardown_push_still_refuses_an_empty_spec(self):
+		"""llm_proxy.validate rejects an empty pool, so never send one."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import _pool_spec_pushable
+
+		none_enabled = _make_settings_with_models([_api_key_model(order=0, enabled=0)])
+		self.assertFalse(_pool_spec_pushable(none_enabled, True))
+		self.assertFalse(_pool_spec_pushable(_make_settings_with_models([]), True))
+
+	def test_a_real_pool_is_pushable_without_the_flag(self):
+		"""The ordinary path is unchanged."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import _pool_spec_pushable
+
+		pool = _make_settings_with_models([_api_key_model(order=0), _api_key_model(model="glm-4.7", order=1)])
+		self.assertTrue(_pool_spec_pushable(pool, False))

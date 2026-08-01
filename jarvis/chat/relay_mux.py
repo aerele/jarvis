@@ -64,11 +64,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from jarvis.chat.agent_client import (
-	FAILED_FINAL_ERROR,
 	AgentSession,
 	_build_request_frame,
 	_chat_final_failed,
 	_chat_final_text,
+	failed_final_error,
 )
 from jarvis.chat.events import parse_event
 from jarvis.exceptions import AgentUnreachableError
@@ -252,6 +252,11 @@ class _Lane:
 		self.watermark = int(start_seq)
 		self.state = "active"  # active | quarantined | terminal | closed
 		self.poison_count = 0
+		# Last lifecycle error text seen for this run (#543). Written and read on
+		# the READER thread only (both _route_agent and _route_terminal run
+		# there), so it needs no lock. Not terminal on its own: it just names the
+		# provider failure for a terminal that otherwise cannot.
+		self.failure_detail: str | None = None
 
 	def next_seq(self) -> int:
 		self.watermark += 1
@@ -502,6 +507,10 @@ class RelayMux:
 		if parsed is None or parsed.get("kind") == "lifecycle":
 			# lifecycle frames are dropped on the managed relay path (mirror of
 			# relay_turn_events); not a stray — it's an expected known-run drop.
+			# The ``error`` phase is the only frame that names the provider
+			# failure, so keep its text on the lane for a failed final (#543).
+			if parsed is not None and parsed.get("phase") == "error" and parsed.get("error"):
+				lane.failure_detail = str(parsed["error"])
 			return
 		kind = parsed.get("kind")
 		if kind == "assistant":
@@ -537,7 +546,7 @@ class RelayMux:
 			if _chat_final_failed(payload, text):
 				term_kind, term_payload = (
 					"relay:error",
-					{"state": "failed_final", "error": FAILED_FINAL_ERROR},
+					{"state": "failed_final", "error": failed_final_error(lane.failure_detail)},
 				)
 			else:
 				term_kind, term_payload = "relay:final", {"text": text}

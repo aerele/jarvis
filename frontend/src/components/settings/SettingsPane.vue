@@ -6,8 +6,14 @@
 
 	     `actions` is for the pane's own header button (a Save, a Refresh). Long
 	     panes that want a pinned Save should render it in the body inside a
-	     `sticky bottom-0` bar instead. -->
-	<div class="flex h-full flex-col gap-6 px-10 py-8 text-ink-gray-8">
+	     `sticky bottom-0` bar instead.
+
+	     `relative` plus the optional `scrim` slot let a pane cover its own header,
+	     body and footer with one blocking overlay while a long-running action is in
+	     flight (AiModelsPane, jarvis#559) - a scrim scoped only to the pane's body
+	     would still leave the header and any status line outside the body sharp
+	     and clickable. Empty for every other pane. -->
+	<div class="relative flex h-full flex-col gap-6 px-10 py-8 text-ink-gray-8">
 		<div class="flex items-start justify-between gap-4">
 			<div class="flex flex-col gap-1">
 				<h2 class="flex items-center gap-2 text-lg font-semibold text-ink-gray-8">
@@ -31,6 +37,8 @@
 		     or a green success banner: failures land here, successes go through
 		     toast.success (§5 anti-pattern 16). -->
 		<ErrorMessage v-if="error" :message="error" />
+
+		<slot name="scrim" />
 	</div>
 </template>
 

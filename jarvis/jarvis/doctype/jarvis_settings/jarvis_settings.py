@@ -583,10 +583,46 @@ class JarvisSettings(Document):
 				1 if (len(enabled_models) == 1) else 0,
 				update_modified=False,
 			)
-			# Single-model path: reuse the existing classify/enqueue path.
-			# The legacy fields are now mirrored, so _classify_llm_change
-			# will correctly see any structural change.
-			self._on_update_single_model_legacy()
+			# A tenant LEAVING pool mode still has to be pushed through /llm-pool
+			# one final time (#550). Dropping from 2 models to 1 flips pool_mode
+			# off, so the save routes here, and _classify_llm_change compares only
+			# the legacy mirror fields - which are mirrored from models[0] and are
+			# UNCHANGED when the model that was removed was not the primary. It
+			# returns "reload", which merely rotates the secret file: admin keeps
+			# the old llm_pool_config, openclaw.json keeps declaring the removed
+			# provider, and that model's llm_key_N.key stays on disk. The agent can
+			# still fail over to a model the customer deleted, and the credential
+			# they may have been trying to revoke is never revoked.
+			#
+			# Forcing "restart" would not be enough: /llm-creds re-renders
+			# openclaw.json but never prunes llm_key_*.key, never rewrites
+			# docker-compose.yml, and never tears the Bifrost/cliproxy sidecars
+			# down. /llm-pool does all three, and llm_proxy.validate() accepts a
+			# single-model spec (it rejects only an EMPTY pool), so the honest
+			# convergence for a shrink is one final pool push carrying the reduced
+			# spec.
+			if self._is_leaving_pool_mode():
+				self._enqueue_pool_sync(converge_teardown=True)
+			else:
+				# Single-model path: reuse the existing classify/enqueue path.
+				# The legacy fields are now mirrored, so _classify_llm_change
+				# will correctly see any structural change.
+				self._on_update_single_model_legacy()
+
+	def _is_leaving_pool_mode(self) -> bool:
+		"""True when this save drops the tenant OUT of pool mode.
+
+		Only meaningful on the single-model leg, where the caller has already
+		established that ``compute_pool_mode(self)`` is False. A first-ever save
+		has no before-doc and so cannot be leaving anything: it reads False and
+		takes the ordinary single-model path.
+		"""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		before = self.get_doc_before_save()
+		if before is None:
+			return False
+		return bool(compute_pool_mode(before))
 
 	@staticmethod
 	def _pool_state_snapshot(doc) -> tuple:
@@ -673,7 +709,7 @@ class JarvisSettings(Document):
 			return False
 		return (self.get("last_sync_status") or "").startswith("ok")
 
-	def _enqueue_pool_sync(self) -> None:
+	def _enqueue_pool_sync(self, *, converge_teardown: bool = False) -> None:
 		"""Enqueue the pool-sync admin call for the proxy path.
 
 		Mirrors the existing ``on_update`` enqueue pattern:
@@ -698,8 +734,15 @@ class JarvisSettings(Document):
 			timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
 			enqueue_after_commit=not run_inline,
 			now=run_inline,
-			job_id="jarvis_settings_sync:pool",
+			# A teardown push carries its own job id. Sharing the ordinary one
+			# would let dedup drop it behind an already-queued normal sync, and
+			# the surviving job would run WITHOUT converge_teardown, hit the
+			# pool-mode gate, and skip - silently restoring the #550 bug. The two
+			# still serialize on the redis lock, so an occasional extra run is
+			# harmless.
+			job_id="jarvis_settings_sync:pool:teardown" if converge_teardown else "jarvis_settings_sync:pool",
 			deduplicate=True,
+			converge_teardown=converge_teardown,
 		)
 
 	def _on_update_single_model_legacy(self):
@@ -1182,6 +1225,26 @@ def _admin_rejection_reason(e) -> str:
 	return f"Your AI configuration was rejected: {detail}"
 
 
+def _pool_spec_pushable(settings, converge_teardown: bool = False) -> bool:
+	"""True when this settings doc may be pushed through the /llm-pool leg.
+
+	Normally that means it IS a pool (``compute_pool_mode``). A
+	``converge_teardown`` job is the deliberate exception: it was enqueued
+	PRECISELY BECAUSE the tenant left pool mode (#550), so compute_pool_mode is
+	expected to be False and gating on it would skip the teardown that is the
+	whole point of the job. Such a push still needs a non-empty spec, since
+	``llm_proxy.validate`` rejects an empty pool, so at least one enabled model
+	is required either way.
+	"""
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+	if compute_pool_mode(settings):
+		return True
+	if not converge_teardown:
+		return False
+	return any(m.enabled for m in (settings.models or []))
+
+
 def _post_pool_with_retry(spec, api_keys, oauth_blobs):
 	"""post_update_llm_pool, retrying only the transient AdminUnreachableError.
 	Re-raises the last unreachable error after exhausting retries; other Admin*
@@ -1223,7 +1286,9 @@ def _post_pool_with_retry(spec, api_keys, oauth_blobs):
 	raise last
 
 
-def _enqueued_sync_via_admin_pool(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> None:
+def _enqueued_sync_via_admin_pool(
+	retry_left: int = ADMIN_SYNC_LOCK_RETRIES, converge_teardown: bool = False
+) -> None:
 	"""Background-queue wrapper for the proxy (pool) sync path.
 
 	Re-reads Jarvis Settings at run time and rebuilds the pool payload via
@@ -1286,6 +1351,9 @@ def _enqueued_sync_via_admin_pool(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> 
 					"._enqueued_sync_via_admin_pool",
 					job_base="jarvis_settings_sync:pool",
 					retry_left=retry_left,
+					# Carry the teardown intent down the retry chain: a level that
+					# dropped it would re-arm the pool-mode gate and skip (#550).
+					converge_teardown=converge_teardown,
 				)
 				return
 			_frappe.logger().warning(
@@ -1311,10 +1379,10 @@ def _enqueued_sync_via_admin_pool(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> 
 		# Re-validate: the config may have changed between enqueue and run.
 		# If it is no longer a pool, skip the push. (Pool MODE, not proxy_active:
 		# a BYO api-key pool has no sidecar but is still pushed through /llm-pool.)
-		from jarvis.jarvis.pool_serialize import compute_pool_mode, validate_models
+		from jarvis.jarvis.pool_serialize import validate_models
 
 		revalidation_errors = validate_models(settings)
-		if revalidation_errors or not compute_pool_mode(settings):
+		if revalidation_errors or not _pool_spec_pushable(settings, converge_teardown):
 			reason = "; ".join(revalidation_errors) if revalidation_errors else "no longer a pool"
 			settings.db_set(
 				"last_sync_status",

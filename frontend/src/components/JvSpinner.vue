@@ -6,7 +6,7 @@
 			<span class="jv-spin-halo"></span>
 			<span class="jv-spin-dots"><i></i><i></i><i></i></span>
 			<span class="jv-spin-core">
-				<svg viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
+				<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 					<path :d="BRAND_STAR_PATH" />
 				</svg>
 			</span>
@@ -27,7 +27,7 @@
 		<span class="jv-spin-halo"></span>
 		<span class="jv-spin-dots"><i></i><i></i><i></i></span>
 		<span class="jv-spin-core">
-			<svg viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
+			<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 				<path :d="BRAND_STAR_PATH" />
 			</svg>
 		</span>
@@ -39,11 +39,18 @@
  * JvSpinner - the ONE loading indicator in Jarvis.
  *
  * Distilled from the onboarding completion animation (SetupNeuralNet.vue): the
- * same gradient core, the same four-point spark, the same breathing halo and
- * inward-orbiting pulse dots, minus the twelve ERP module labels. Using the one
- * mark for every wait in the product means a customer waiting on a Connect and a
- * customer waiting on their workspace being built are looking at the same
- * product, not two.
+ * same four-point spark, the same breathing halo and inward-orbiting pulse
+ * dots, minus the twelve ERP module labels. Using the one mark for every wait
+ * in the product means a customer waiting on a Connect and a customer waiting
+ * on their workspace being built are looking at the same product, not two.
+ *
+ * Every layer follows currentColor rather than the brand gradient (jarvis#559):
+ * a caller sets `color` (or inherits one), and the spark, its dots and its halo
+ * all tint to that. The spark itself is always drawn at full strength; the halo
+ * and core backdrop behind it are a soft, partial-opacity wash of the same
+ * colour, so the spark reads clearly against them on ANY surface - dark text on
+ * a light card, white on a black button, an accent tone inside a coloured
+ * badge - without ever needing to know what colour it is.
  *
  * Do not add a second spinner. If a surface cannot fit this one, resize the
  * surface.
@@ -119,12 +126,18 @@ const sizeStyle = computed(() => ({ "--jv-spin-size": `${resolvedSize.value}px` 
 }
 
 /* The halo is the "breathing" of the onboarding core. It sits slightly outside
-   the footprint, so the element is allowed to overflow its own box. */
+   the footprint, so the element is allowed to overflow its own box. A partial-
+   opacity wash of currentColor, not a solid fill, so it never has to fight the
+   spark on top of it for contrast (jarvis#559). */
 .jv-spin-halo {
 	position: absolute;
 	inset: -6%;
 	border-radius: 50%;
-	background: radial-gradient(circle, rgba(139, 92, 246, 0.3) 0%, transparent 68%);
+	background: radial-gradient(
+		circle,
+		color-mix(in srgb, currentColor 30%, transparent) 0%,
+		transparent 68%
+	);
 	animation: jv-spin-breathe 2.2s ease-in-out infinite;
 }
 
@@ -133,11 +146,12 @@ const sizeStyle = computed(() => ({ "--jv-spin-size": `${resolvedSize.value}px` 
 	border-radius: 50%;
 	display: grid;
 	place-items: center;
-	/* Matches JarvisMark: --brand-grad is theme-invariant and defined on :root,
-	   with a literal fallback so the spinner is still correct if it is ever
-	   rendered outside the app stylesheet (an isolated test harness). */
-	background: var(--brand-grad, linear-gradient(135deg, #6e8bff, #8b5cf6));
-	box-shadow: 0 2px 7px rgba(139, 92, 246, 0.4);
+	/* Same partial-opacity currentColor wash as the halo: a backdrop for the
+	   spark, not a competing colour. The spark (fill="currentColor" on the svg
+	   above) is drawn at full strength on top, so it always reads clearly
+	   against this regardless of what colour the caller is using. */
+	background: color-mix(in srgb, currentColor 16%, transparent);
+	box-shadow: 0 2px 7px color-mix(in srgb, currentColor 35%, transparent);
 }
 .jv-spin-core svg {
 	width: 62%;
@@ -177,12 +191,7 @@ const sizeStyle = computed(() => ({ "--jv-spin-size": `${resolvedSize.value}px` 
 	width: calc(var(--jv-spin-size) * 0.16);
 	height: calc(var(--jv-spin-size) * 0.16);
 	margin: calc(var(--jv-spin-size) * -0.08);
-	background: radial-gradient(
-		circle,
-		#fff 0%,
-		var(--brand-1, #6e8bff) 55%,
-		rgba(110, 139, 255, 0) 88%
-	);
+	background: radial-gradient(circle, currentColor 0%, currentColor 55%, transparent 88%);
 }
 .jv-spin--md .jv-spin-dots i:nth-child(1) {
 	transform: rotate(0deg) translateY(calc(var(--jv-spin-size) * -0.45));
@@ -202,12 +211,7 @@ const sizeStyle = computed(() => ({ "--jv-spin-size": `${resolvedSize.value}px` 
 	width: calc(var(--jv-spin-size) * 0.15);
 	height: calc(var(--jv-spin-size) * 0.15);
 	margin: calc(var(--jv-spin-size) * -0.075);
-	background: radial-gradient(
-		circle,
-		#fff 0%,
-		var(--brand-1, #6e8bff) 42%,
-		rgba(110, 139, 255, 0) 74%
-	);
+	background: radial-gradient(circle, currentColor 0%, currentColor 42%, transparent 74%);
 }
 .jv-spin--lg .jv-spin-dots i:nth-child(1) {
 	transform: rotate(0deg) translateY(calc(var(--jv-spin-size) * -0.47));

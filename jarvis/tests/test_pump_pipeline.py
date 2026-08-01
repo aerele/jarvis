@@ -869,6 +869,87 @@ class TestSux11ErrorContract(_PipelineCase):
 
 
 # --------------------------------------------------------------------------- #
+# 7b. #543: a failed final must settle as an ERROR, not a silent empty success
+# --------------------------------------------------------------------------- #
+
+
+class TestFailedFinalSettlesAsError(_PipelineCase):
+	"""#543: both live reproductions (a hard 429 with the failover chain
+	exhausted, and a turn whose tools ran but whose model returned nothing)
+	settled with ``terminal_kind='relay:final'`` and ``terminal_payload={"text":
+	null}``, leaving an assistant row with no content AND no error. The SPA then
+	held a "Finishing..." spinner on an enrichment that a stalled finalize never
+	delivered, so a failure rendered as an in-progress success.
+
+	These play the real gateway frames through the real mux + settlement, so the
+	assertion is on the durable outcome the customer's browser reads back.
+	"""
+
+	def _drive(self, rid: str, transcript: str):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="Reply with exactly one word: PONG")
+		self._mk_turn(conv, rid, seed, "queued", version=0, reserved=0)
+		double = self._double()
+		deps = self._deps(double=double, prepare=self._prepare_stub(conv, double, transcript))
+		ctx = self._make_ctx(deps)
+		self._pubs.clear()
+		self._pump_until(ctx, lambda: self._state(rid) in ("errored", "finalizing", "done"))
+		return conv, deps
+
+	def _assert_terminal_failure(self, rid: str):
+		self.assertEqual(self._state(rid), "errored", "a failed final settles errored, not finalizing")
+		self.assertEqual(self._val(rid, "terminal_kind"), "relay:error")
+		self.assertEqual(int(self._val(rid, "reserved")), 0, "slot released")
+		amsg = self._val(rid, "assistant_message")
+		row = frappe.db.get_value(MSG, amsg, ["error", "streaming", "recovering"], as_dict=True)
+		# The core of the bug: `error` must be set, not NULL, on a terminal failure.
+		self.assertTrue((row["error"] or "").strip(), "assistant row carries a user-facing error")
+		self.assertEqual(int(row["streaming"]), 0, "the spinner stops")
+		self.assertFalse(int(row["recovering"] or 0), "terminal, NOT parked for recovery")
+		# run:error (which clears the SPA's spinner and renders the retry affordance),
+		# never a run:end carrying enrichment_pending (which is what left "Finishing...").
+		kinds = self._pub_kinds()
+		self.assertIn("run:error", kinds)
+		self.assertNotIn("run:end", kinds)
+		return row["error"]
+
+	def test_hard_provider_failure_settles_errored_and_names_the_reason(self):
+		rid = "pmp_ff_hard"
+		self._drive(rid, "failed-final")
+		err = self._assert_terminal_failure(rid)
+		# The lifecycle error frame named the cause; it must survive to the row so
+		# the customer sees something they can act on (top up the quota).
+		self.assertIn("429", err)
+		self.assertIn("quota", err)
+		err_pub = next(p for p in self._pubs if p.get("kind") == "run:error")
+		self.assertEqual(err_pub["code"], "provider", "quota -> 'provider' headline (ERROR_HEADLINES)")
+
+	def test_empty_final_after_tools_settles_errored(self):
+		# Second reproduction: same terminal reached with tools already run and a
+		# non-error stopReason. One root cause, one fix.
+		rid = "pmp_ff_empty"
+		self._drive(rid, "empty-final-after-tools")
+		err = self._assert_terminal_failure(rid)
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
+
+		self.assertEqual(err, FAILED_FINAL_ERROR, "no lifecycle detail -> the generic honest copy")
+
+	def test_errored_turn_promises_no_enrichment_the_client_would_wait_for(self):
+		# The stuck "Finishing..." was an enrichment the client was told to wait for.
+		# An errored turn owes only the terminal effect set, so nothing is pending
+		# and no message:enriched is ever promised.
+		rid = "pmp_ff_effects"
+		self._drive(rid, "failed-final")
+		self.assertEqual(set(self._effects(rid)), set(settlement.TERMINAL_EFFECTS))
+		with self._mock_enrichment():
+			out = finalize.run_finalize(rid, self._target)
+		self.assertTrue(out["ok"])
+		self.assertFalse(out["done"], "an errored turn is already terminal; finalize never un-settles it")
+		self.assertEqual(self._state(rid), "errored")
+		self.assertNotIn("message:enriched", self._pub_kinds())
+
+
+# --------------------------------------------------------------------------- #
 # 8. Usage (turn_id) idempotency under finalize replay
 # --------------------------------------------------------------------------- #
 

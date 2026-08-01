@@ -37,9 +37,10 @@ const moreMenuOpen = ref(false); // the sidebar "More" destinations palette (Mor
 // the shell-level settings panes can read the current conversation's live stats
 // and degrade gracefully (—/empty) on non-chat routes. Shape when set:
 //   { conversationId, sessionStats:{ msgCount,userMsgCount,assistantMsgCount,
-//       sessionToolCalls,avgTokensPerMsg,convCount,starredCount,toolCount,
-//       recentActivity },
+//       avgTokensPerMsg,convCount,starredCount,toolCount },
 //     convAutoApply, autoApplyNote, modelLabel, ui }
+// Tool-call counts are deliberately NOT here: they are read from the persisted
+// rows (jarvis.chat.api.get_tool_activity), not from this live snapshot (#551).
 const chatContext = ref(null);
 function setChatContext(v) {
 	chatContext.value = v;
