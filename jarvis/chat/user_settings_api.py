@@ -28,6 +28,15 @@ from jarvis.permissions import require_jarvis_access, require_jarvis_admin
 # below; never rely on the declared parameter types for runtime safety.
 USER_SETTINGS = "Jarvis User Settings"
 
+# Version of the chat-home introduction the SPA currently renders (the static,
+# assistant-styled welcome bubble - presentation only, never a Jarvis Chat
+# Message row). The server owns this number, not the client: the boot payload
+# publishes it (get_chat_ui_settings) and mark_home_intro_seen clamps to it, so
+# a client can neither invent a version nor mute a future one. Bump it ONLY
+# when the introduction's content materially changes and every user should see
+# it once more.
+HOME_INTRO_VERSION = 1
+
 
 def _s(x) -> str:
 	"""Coerce a whitelisted string arg to trimmed text. The runtime type gate is
@@ -163,6 +172,43 @@ def update_my_settings(
 	# caller's own row), and only permlevel-0 pref fields are touched here.
 	doc.save(ignore_permissions=True)
 	return {"ok": True, "data": _settings_payload(doc)}
+
+
+@frappe.whitelist()
+def mark_home_intro_seen(version: int = 0) -> dict:
+	"""Record that the caller has been shown the chat-home introduction.
+
+	Fired best-effort by the SPA when the welcome bubble actually renders. It
+	must never block chat, so the client ignores failures - the only cost of a
+	lost ack is the introduction appearing again on the next empty chat home.
+
+	Idempotent and monotonic: replays are no-ops, and a stale client can never
+	LOWER a version already acknowledged (which would re-show an introduction
+	the user has seen). ``version`` is clamped to ``HOME_INTRO_VERSION`` so a
+	client cannot mute a future introduction by acking a version that does not
+	exist yet.
+
+	Uses the same per-user row pattern as ``update_my_settings``:
+	``get_or_create_user_settings`` (Jarvis User's permlevel-0 grant is
+	``if_owner`` with NO create, so a user with no row yet must not 403) plus an
+	``ignore_permissions`` save of permlevel-0 app-state fields on the caller's
+	own row.
+	"""
+	require_jarvis_access()
+	wanted = min(max(0, cint(version)), HOME_INTRO_VERSION)
+	doc = usage.get_or_create_user_settings(frappe.session.user)
+	# getattr, not a bare read: in the migrate window before home_intro_seen_version
+	# syncs onto the doc's meta this would AttributeError and 500 the ack (the same
+	# trap _settings_payload documents for preferred_persona).
+	seen = cint(getattr(doc, "home_intro_seen_version", 0))
+	if wanted > seen:
+		doc.home_intro_seen_version = wanted
+		doc.home_intro_seen_at = frappe.utils.now_datetime()
+		# ignore_permissions: owner-scoped row by construction (we loaded the
+		# caller's own), and only permlevel-0 app-state fields are touched.
+		doc.save(ignore_permissions=True)
+		seen = wanted
+	return {"ok": True, "data": {"home_intro_seen_version": seen}}
 
 
 @frappe.whitelist()

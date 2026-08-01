@@ -72,6 +72,11 @@ const US = "jarvis.chat.user_settings_api.";
 export const getMySettings = () => call(US + "get_my_settings");
 export const updateMySettings = (p) => call(US + "update_my_settings", p || {});
 export const setUserTheme = (theme) => call(US + "set_user_theme", { theme });
+// Best-effort ack that the chat-home introduction (the static welcome bubble)
+// was shown. Idempotent + monotonic server-side; the caller swallows failures,
+// whose only cost is the introduction appearing once more.
+export const markHomeIntroSeen = (version) =>
+	call(US + "mark_home_intro_seen", { version: version || 0 });
 // Jarvis Admin (or System Manager) only — server re-checks independently of
 // the client's window.is_jarvis_admin gate.
 export const adminListUserUsage = () => call(US + "admin_list_user_usage");

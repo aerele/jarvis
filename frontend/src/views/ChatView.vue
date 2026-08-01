@@ -211,8 +211,14 @@
 			     crowds the composer or the send button. "Maybe later" just hides the card
 			     client-side for this chat - the cadence itself is the snooze, so it comes
 			     back on the next multiple-of-three chat with no follow-up question. "Don't
-			     ask again" is the durable, permanent, server-side dismiss. -->
-			<div v-if="bizGreeting.show" class="jv-greeting-banner">
+			     ask again" is the durable, permanent, server-side dismiss.
+			     Suppressed while the first-chat introduction is on screen: both draw
+			     above the welcome column, and stacking a nudge on top of "hello, here
+			     is what I do" is the one place they must never meet. Nothing is
+			     consumed by skipping it — the cadence counter is bumped server-side by
+			     create_or_focus_empty and maybe_greet is a pure reader, so the card
+			     simply returns on the next multiple-of-three chat. -->
+			<div v-if="bizGreeting.show && !showHomeIntro" class="jv-greeting-banner">
 				<div class="jv-nudge" style="margin: 0">
 					<div class="jv-nudge-head">
 						<div class="jv-nudge-q">
@@ -300,39 +306,51 @@
 				"
 			>
 				<div style="width: 100%; max-width: 680px; text-align: center">
-					<!-- The brand mark, from its single source of truth. This was a
-					     hand-pasted copy whose gradient read `var(--cta)` as its first
-					     stop; when #294 repointed --cta from indigo to near-black, this
-					     mark silently became near-black->purple while the sidebar mark
-					     (UserMenu) stayed blue->purple — two different logos on one
-					     screen. The purple glow shadow is dropped (design.md §5 #4). -->
-					<JarvisMark :size="54" :radius="14" style="margin: 0 auto 18px" />
-					<h1
-						class="jv-welcome-h1"
-						style="
-							font-size: 30px;
-							font-weight: 640;
-							letter-spacing: -0.03em;
-							margin: 0 0 8px;
-							overflow-wrap: anywhere;
-						"
-					>
-						{{ greeting }}, {{ firstName }}
-					</h1>
-					<p
-						style="
-							font-size: 14.5px;
-							color: var(--text-2);
-							margin: 0 0 26px;
-							line-height: 1.5;
-						"
-					>
-						Ask about your ERP data, run a workflow, or draft something.
-						{{ agentName }}
-						is connected to your
-						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
-						instance.
-					</p>
+					<!-- First empty chat home (per user, versioned): the assistant-styled
+					     introduction REPLACES the compact hero, then never lectures
+					     again. Static presentation only — see WelcomeAssistantMessage. -->
+					<WelcomeAssistantMessage
+						v-if="showHomeIntro"
+						:speaker="homeIntroSpeakerName"
+						:persona="homeIntroPersona"
+						:firstName="firstName"
+						@seen="ackHomeIntro"
+					/>
+					<template v-else>
+						<!-- The brand mark, from its single source of truth. This was a
+						     hand-pasted copy whose gradient read `var(--cta)` as its first
+						     stop; when #294 repointed --cta from indigo to near-black, this
+						     mark silently became near-black->purple while the sidebar mark
+						     (UserMenu) stayed blue->purple — two different logos on one
+						     screen. The purple glow shadow is dropped (design.md §5 #4). -->
+						<JarvisMark :size="54" :radius="14" style="margin: 0 auto 18px" />
+						<h1
+							class="jv-welcome-h1"
+							style="
+								font-size: 30px;
+								font-weight: 640;
+								letter-spacing: -0.03em;
+								margin: 0 0 8px;
+								overflow-wrap: anywhere;
+							"
+						>
+							{{ greeting }}, {{ firstName }}
+						</h1>
+						<p
+							style="
+								font-size: 14.5px;
+								color: var(--text-2);
+								margin: 0 0 26px;
+								line-height: 1.5;
+							"
+						>
+							Ask about your ERP data, run a workflow, or draft something.
+							{{ agentName }}
+							is connected to your
+							<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
+							instance.
+						</p>
+					</template>
 					<div
 						class="jv-welcome-grid"
 						style="
@@ -3396,7 +3414,7 @@ import {
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import * as api from "@/api";
 import * as voice from "@/api/voice";
-import { agentName } from "@/branding";
+import { agentName, isWhitelabeled } from "@/branding";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { useDictationRecorder } from "@/composables/useDictationRecorder";
 import { createVoiceDictationStore } from "@/utils/voiceDictationStore";
@@ -3434,6 +3452,8 @@ import Composer from "@/components/chat/Composer.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import PersonaPill from "@/components/chat/PersonaPill.vue";
 import AskCard from "@/components/chat/AskCard.vue";
+import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
+import { homeIntroDue, homeIntroSpeaker } from "@/lib/homeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { dashboardForConversation } from "@/api/dashboards";
@@ -4538,6 +4558,45 @@ const booting = ref(true);
 const showWelcome = computed(
 	() => !booting.value && (!currentId.value || visibleMessages.value.length === 0)
 );
+
+// ---- first-chat introduction (the static assistant-styled welcome bubble) ----
+// Resolved ONCE from the boot payload (both numbers land in `ui` before
+// booting flips false, so the bubble can never flash in or out), then latched
+// for the session: the introduction stays for as long as the user is on an
+// empty chat home, and retires the moment any real message is on screen —
+// their first send, or opening a chat that already has content. It never draws
+// over a conversation that has messages (a proactive one included), because
+// showWelcome is false there by definition.
+const homeIntroPending = ref(false);
+const homeIntroVersion = ref(0);
+let _homeIntroAcked = false;
+const showHomeIntro = computed(() => showWelcome.value && homeIntroPending.value);
+// Persona drives the avatar and (on an unbranded workspace) the name. Gated by
+// the same kill switch the boot payload reports: with persona_enabled off the
+// turns answer in the default voice, so the bubble must not sign as Jara.
+const homeIntroPersona = computed(() =>
+	ui.value.persona_enabled !== false && store.preferredPersona === "Jara" ? "Jara" : "Jarvis"
+);
+const homeIntroSpeakerName = computed(() =>
+	homeIntroSpeaker({ agentName, isWhitelabeled, persona: homeIntroPersona.value })
+);
+watch(
+	() => visibleMessages.value.length,
+	(n) => {
+		// `!booting`: the boot restore of the last conversation must NOT count as
+		// "the user has moved on" — otherwise an existing user (seen version 0, or
+		// a later version bump) would retire the introduction before ever getting
+		// the empty home it renders on, and would never see it at all.
+		if (!booting.value && n > 0) homeIntroPending.value = false;
+	}
+);
+// Fire-and-forget: a failed ack only means the introduction may appear again,
+// and it must never stand between the user and the composer.
+function ackHomeIntro() {
+	if (_homeIntroAcked) return;
+	_homeIntroAcked = true;
+	api.markHomeIntroSeen(homeIntroVersion.value).catch(() => {});
+}
 
 // settings/overview derived metrics (all from data we already hold)
 const convCount = computed(() => store.conversations.length);
@@ -8569,6 +8628,10 @@ onMounted(async () => {
 	if (ui.value.preferred_persona !== undefined) {
 		store.setPreferredPersona(ui.value.preferred_persona, { persist: false });
 	}
+	// First-chat introduction, decided here (before booting flips false) so the
+	// welcome column paints its final shape in one go.
+	homeIntroVersion.value = Number(ui.value.home_intro_version) || 0;
+	homeIntroPending.value = homeIntroDue(ui.value);
 	// Offer recovery of any recording a prior session left un-transcribed (a tab
 	// crash / accidental reload) — only when dictation is actually enabled.
 	// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes
