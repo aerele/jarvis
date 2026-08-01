@@ -892,6 +892,22 @@ class TestSignupResumeFallback(FrappeTestCase):
 		resume.assert_called_once_with("some-plan", provider=None)
 		self.assertEqual(out["razorpay_order_id"], "order_R4")
 
+	def test_unrelated_error_mentioning_already_exists_does_not_resume(self):
+		"""The prose fallback must not swallow unrelated validation errors.
+
+		A bare "already exists" substring would divert any admin error containing
+		that phrase into the resume path, resuming a stale pending signup and
+		hiding the real problem. The pattern anchors on "account ... already
+		<verb>" so only a genuine duplicate-signup rejection matches."""
+		with (
+			self._signup_raises("A plan with this name already exists."),
+			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_not_called()
+		self.assertIn("A plan with this name", str(ctx.exception))
+
 	def test_dedup_with_matching_creds_resumes(self):
 		with (
 			self._signup_raises(self._DUP),

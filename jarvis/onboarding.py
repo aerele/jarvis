@@ -19,11 +19,19 @@ from jarvis.hooks import get_default_admin_url
 from jarvis.permissions import grant_onboarding_admin, require_jarvis_admin
 
 # Duplicate-signup prose, for an admin too old to tag the response with
-# exc_type="DuplicateEntryError". Deliberately matches BOTH the current wording
-# and the pre-2026-07 one, and is the SAME pair the onboarding view keys its
-# reconnect offer off (frontend/src/views/OnboardingView.vue). Structured
-# exc_type is the primary signal; see _is_duplicate_signup_error.
-_DUPLICATE_SIGNUP_RE = re.compile(r"already registered or pending|already exists", re.I)
+# exc_type="DuplicateEntryError". Covers BOTH admin wordings:
+#   "An account for this email and company already exists."      (current)
+#   "An account with this email is already registered or pending." (pre-2026-07)
+#
+# Anchored on "account ... already <verb>" rather than a bare "already exists",
+# which would also match unrelated admin validation errors (a plan or config
+# conflict, say) and silently divert them into the resume path, hiding the real
+# error from the customer. The onboarding view keys its reconnect OFFER off the
+# looser pair, which is fine for a display hint but too loose for control flow.
+# exc_type is the primary signal; this only runs when admin sent none.
+_DUPLICATE_SIGNUP_RE = re.compile(
+	r"account\b.{0,60}?already\s+(?:exists|registered or pending)", re.I | re.S
+)
 
 
 def _require_admin_url() -> None:
