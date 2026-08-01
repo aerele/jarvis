@@ -1,6 +1,9 @@
 // Global floating Jarvis widget — a draggable, edge-snapping FAB that opens
 // the side chat panel in place, present on every Desk page EXCEPT the full
-// chat page (and the onboarding flow, where the agent isn't ready yet).
+// chat page, the onboarding flow (where the agent isn't ready yet), and
+// Frappe's setup wizard (a fresh install whose site setup isn't finished, where
+// Frappe blocks the desk on the wizard). The visibility rule lives in
+// widget_visibility.mjs.
 //
 // The panel is a child of the FAB component, so hiding this host hides both.
 // On a narrow viewport the FAB navigates to the chat SPA instead of opening a
@@ -12,12 +15,10 @@
 
 import { createApp } from "vue";
 import Widget from "./jarvis_chat/widget/Widget.vue";
+import { shouldHideWidget } from "./jarvis_chat/widget/widget_visibility.mjs";
 
 (function () {
 	if (window.__jarvisWidgetBooted) return;
-
-	// Routes where the floating widget should NOT appear.
-	const HIDE_ON = ["jarvis-chat", "jarvis-onboarding"];
 
 	let host = null;
 
@@ -32,8 +33,7 @@ import Widget from "./jarvis_chat/widget/Widget.vue";
 	function sync() {
 		ensureMounted();
 		const route = (window.frappe && frappe.get_route && frappe.get_route()) || [];
-		const hide = HIDE_ON.indexOf(route[0] || "") !== -1;
-		host.style.display = hide ? "none" : "";
+		host.style.display = shouldHideWidget(route) ? "none" : "";
 	}
 
 	function start() {
