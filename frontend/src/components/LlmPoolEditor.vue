@@ -2006,6 +2006,23 @@ const badgeLabel = computed(() => {
 const applyStatus = computed(() => {
 	if (sync.value.pending) return { kind: "pending", text: "Applying to your agent…" };
 	const st = humaniseSyncStatus(sync.value.last_sync_status);
+	// A teardown is the one outcome the server records that is NOT an apply, and it
+	// used to fall through to "idle" and hide the strip. That left the whole
+	// user-visible result of Disconnect riding on applyResult, a client-only value
+	// that retires itself after six seconds and does not survive the pane
+	// remounting the editor - so a disconnect that deleted every credential could
+	// leave nothing at all on screen (jarvis#574). Reading it off the server makes
+	// the outcome durable: it is still true after the toast expires, after a
+	// reload, and in a tab that was not the one that pressed the button.
+	//
+	// Amber, not red, and for the same reason the Connection badge is: nothing is
+	// broken, the customer asked for this, and the sentence says how to undo it.
+	if (st.kind === "disconnected") {
+		return {
+			kind: "warn",
+			text: "Disconnected. Your keys and connected accounts were deleted. Add a model to use chat again.",
+		};
+	}
 	if (st.kind === "failed") {
 		return { kind: "failed", text: st.detail ? `${st.text}. ${st.detail}` : st.text };
 	}
@@ -2763,7 +2780,24 @@ async function disconnect() {
 	try {
 		await api.disconnectLlm();
 	} catch (e) {
-		setApplyResult({ kind: "failed", text: "Could not disconnect.", detail: _err(e) });
+		// NOT "nothing happened". A disconnect is the one operation in this stack
+		// with NO rollback, deliberately: the fleet's llm_disconnect.deprovision
+		// destroys the key files BEFORE it restarts the container, and admin commits
+		// the blanked credential row BEFORE it calls the host, precisely so that a
+		// credential which could not be confirmed destroyed is never reported as
+		// kept. disconnect_llm then aborts before clearing THIS bench, so a failure
+		// here can genuinely mean the keys are gone from the workspace while the
+		// bench still holds its copy and still lists the model.
+		//
+		// So the honest sentence names both halves and points at the retry. Saying
+		// "Could not disconnect." invited the customer to carry on using a workspace
+		// whose AI was already torn down. Repeating Disconnect is safe: every leg of
+		// it is idempotent.
+		setApplyResult({
+			kind: "failed",
+			text: "Could not confirm the disconnect. Your keys are still stored here, but they may already have been removed from your workspace, so chat may stop working. Try Disconnect again.",
+			detail: _err(e),
+		});
 		return;
 	} finally {
 		setBusy("");
@@ -2771,6 +2805,10 @@ async function disconnect() {
 	// No startPolling: there is no apply to converge on. disconnect_llm calls admin
 	// synchronously and only clears the bench once admin has confirmed, so by the time
 	// it returns the outcome is already final.
+	//
+	// This message is the immediate acknowledgement and it retires itself; the DURABLE
+	// statement of the same fact is applyStatus reading last_sync_status
+	// "disconnected" off the server, so the outcome outlives this toast.
 	setApplyResult({
 		kind: "ok",
 		text: "Disconnected. Your keys and connected accounts have been deleted.",
