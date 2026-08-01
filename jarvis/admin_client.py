@@ -1628,7 +1628,10 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	# class isn't recognised.
 	if exc_type:
 		if exc_type in ("ValidationError", "DuplicateEntryError", "DoesNotExistError"):
-			raise AdminValidationError(clean)
+			# Carry admin's exception class forward. Callers branch on it
+			# (see onboarding._is_duplicate_signup_error) rather than on the
+			# message prose, which admin is free to reword at any time.
+			raise AdminValidationError(clean, exc_type=exc_type)
 		# AuthenticationError ~ a token/credential failure (retry-eligible, 401);
 		# PermissionError ~ an authorization denial (terminal, 403). Tag the
 		# status so _post re-mints on the former but surfaces the latter as-is.

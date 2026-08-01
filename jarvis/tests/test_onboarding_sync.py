@@ -836,7 +836,14 @@ class TestSignupResumeFallback(FrappeTestCase):
 	"""Failed-payment retry: the dedup rejection falls back to the authenticated
 	resume only when this bench holds creds for that same email."""
 
-	_DUP = "An account with this email is already registered or pending."
+	# The message jarvis_admin_v2 ACTUALLY throws today, copied verbatim from
+	# jarvis_admin_v2/billing/signup.py::_reject_duplicate_email. This class used
+	# to pin ONLY the pre-2026-07 wording (_DUP_LEGACY); when admin reworded the
+	# message the resume path went dead for every real customer while all four
+	# tests here stayed green. Both wordings are covered now, and
+	# test_dedup_by_exc_type_resumes covers the signal that does not rot.
+	_DUP = "An account for this email and company already exists."
+	_DUP_LEGACY = "An account with this email is already registered or pending."
 
 	def setUp(self):
 		self._snap = _snapshot_settings()
@@ -849,10 +856,41 @@ class TestSignupResumeFallback(FrappeTestCase):
 	def tearDown(self):
 		_restore_settings(self._snap)
 
-	def _signup_raises(self, msg):
+	def _signup_raises(self, msg, exc_type=None):
 		from jarvis.exceptions import AdminValidationError
 
-		return patch("jarvis.onboarding.admin_client.signup", side_effect=AdminValidationError(msg))
+		return patch(
+			"jarvis.onboarding.admin_client.signup",
+			side_effect=AdminValidationError(msg, exc_type=exc_type),
+		)
+
+	def test_dedup_by_exc_type_resumes_regardless_of_wording(self):
+		"""The signal that cannot rot: admin's exception CLASS. Even with prose
+		this bench has never seen, a DuplicateEntryError must reach the resume."""
+		with (
+			self._signup_raises("some wording nobody has written yet", exc_type="DuplicateEntryError"),
+			patch(
+				"jarvis.onboarding.admin_client.resume_pending_signup",
+				return_value={"payment_provider": "razorpay", "razorpay_order_id": "order_R3"},
+			) as resume,
+		):
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_called_once_with("some-plan", provider=None)
+		self.assertEqual(out["razorpay_order_id"], "order_R3")
+
+	def test_dedup_legacy_wording_still_resumes(self):
+		"""An admin old enough to send the pre-2026-07 message, with no exc_type,
+		must still reach the resume via the prose fallback."""
+		with (
+			self._signup_raises(self._DUP_LEGACY),
+			patch(
+				"jarvis.onboarding.admin_client.resume_pending_signup",
+				return_value={"payment_provider": "razorpay", "razorpay_order_id": "order_R4"},
+			) as resume,
+		):
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_called_once_with("some-plan", provider=None)
+		self.assertEqual(out["razorpay_order_id"], "order_R4")
 
 	def test_dedup_with_matching_creds_resumes(self):
 		with (
@@ -896,7 +934,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			self.assertRaises(frappe.ValidationError) as ctx,
 		):
 			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
-		self.assertIn("already registered", str(ctx.exception))
+		self.assertIn("already exists", str(ctx.exception))
 
 
 class TestAccountReconnect(FrappeTestCase):

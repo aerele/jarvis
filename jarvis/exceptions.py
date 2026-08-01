@@ -160,7 +160,18 @@ class AdminAuthError(JarvisError):
 class AdminValidationError(JarvisError):
 	"""jarvis_admin raised a Frappe ValidationError (or similar user-input
 	error) inside a whitelisted endpoint. Carries the clean operator-facing
-	message - never the traceback dump."""
+	message - never the traceback dump.
+
+	``exc_type`` carries admin's own exception class name (e.g.
+	"DuplicateEntryError") when the response declared one. Callers that need to
+	branch on WHICH validation failed must key off this, never off the message
+	prose: the failed-payment resume used to match the substring "already
+	registered or pending", admin later reworded that message, and the resume
+	became silently unreachable. None when admin sent no exc_type."""
+
+	def __init__(self, message: str, *, exc_type: str | None = None):
+		super().__init__(message)
+		self.exc_type = exc_type
 
 
 class AdminRateLimitedError(JarvisError):

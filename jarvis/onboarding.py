@@ -3,6 +3,7 @@ Settings, and thin server wrappers the onboarding page calls (so the browser
 never holds admin creds). admin_client returns already-unwrapped admin data."""
 
 import json
+import re
 
 import frappe
 from frappe.utils import cint
@@ -16,6 +17,13 @@ from jarvis.exceptions import (
 )
 from jarvis.hooks import get_default_admin_url
 from jarvis.permissions import grant_onboarding_admin, require_jarvis_admin
+
+# Duplicate-signup prose, for an admin too old to tag the response with
+# exc_type="DuplicateEntryError". Deliberately matches BOTH the current wording
+# and the pre-2026-07 one, and is the SAME pair the onboarding view keys its
+# reconnect offer off (frontend/src/views/OnboardingView.vue). Structured
+# exc_type is the primary signal; see _is_duplicate_signup_error.
+_DUPLICATE_SIGNUP_RE = re.compile(r"already registered or pending|already exists", re.I)
 
 
 def _require_admin_url() -> None:
@@ -446,11 +454,16 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	require_jarvis_admin()
 	_require_admin_url()
 	try:
-		data = _surface(admin_client.signup, email, company, plan, provider=provider)
-	except frappe.ValidationError as e:
+		# NOT _surface: that maps the admin error straight to a bare
+		# frappe.throw, discarding the AdminValidationError (and the exc_type
+		# on it) that the duplicate check needs. Inspect the raised error
+		# first, then hand anything non-resumable to the identical mapping
+		# _surface would have applied.
+		data = admin_client.signup(email, company, plan, provider=provider)
+	except (AdminValidationError, AdminAuthError, AdminUnreachableError, AdminRateLimitedError) as e:
 		resumed = _try_resume_pending_signup(e, email, plan, provider)
 		if resumed is None:
-			raise
+			_throw_admin_error(e)  # always raises
 		data = resumed
 	# Persist whatever credentials the response carries. The guard also fires
 	# on ``customer`` so the OAuth grant username is stored even if a future
@@ -476,6 +489,25 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	return data
 
 
+def _is_duplicate_signup_error(err) -> bool:
+	"""Is this admin rejection "that (email, company) already has an account"?
+
+	Keyed on admin's exception CLASS, not on its message. The previous check
+	matched the substring "already registered or pending"; admin later reworded
+	that to "An account for this email and company already exists.", and because
+	nothing asserted against the real message the failed-payment resume below
+	became silently unreachable — every customer whose card was declined got a
+	dead end instead of a fresh checkout. Only the customer-side test fixture
+	still carried the old wording, so the suite stayed green throughout.
+
+	The prose fallback covers an admin old enough to send DuplicateEntryError as
+	a plain ValidationError. It matches BOTH wordings, matching the regex the
+	onboarding view already uses to decide whether to offer reconnect."""
+	if getattr(err, "exc_type", None) == "DuplicateEntryError":
+		return True
+	return bool(_DUPLICATE_SIGNUP_RE.search(str(err)))
+
+
 def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None) -> dict | None:
 	"""Failed-payment retry: when guest signup is rejected as a duplicate and
 	this bench already holds credentials for THAT email (persisted by the first
@@ -488,7 +520,7 @@ def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None)
 	re-raises the original error. A resume that itself fails (e.g. the customer
 	is Active — a real duplicate) also returns None: the original duplicate
 	error is the honest message for that case."""
-	if "already registered or pending" not in str(err):
+	if not _is_duplicate_signup_error(err):
 		return None
 	settings = frappe.get_single("Jarvis Settings")
 	stored_email = (settings.get("jarvis_admin_customer_email") or "").strip().lower()
