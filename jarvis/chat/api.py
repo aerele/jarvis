@@ -587,6 +587,12 @@ def get_conversation(conversation: str) -> dict:
 			"action_outcome",
 			"canvas",
 			"reply_duration_ms",
+			# jarvis#560: which model actually produced each reply. The SPA renders it
+			# on the bubble only when it differs from what the header pill implies, so
+			# a mid-thread switch or a silent failover is visible without adding noise
+			# to a steady thread.
+			"model",
+			"provider",
 			"creation",
 			"modified",
 		],
