@@ -16,6 +16,11 @@ message, and it is what the ``TestLifecycleInvariants`` class below defends:
 - the first real send must still be ``seq=1``, and the pump/turn state must not
   see text the model never produced.
 
+``TestAckAtomicity`` covers the other half of the server side: the settings row
+has concurrent single-field writers, so the ack must not be a full-doc save.
+``TestVeteranBackfill`` covers patch v2_10, which is what keeps the
+introduction pointed at genuinely new users.
+
 Hermetic: disposable enabled System Users with the Jarvis User role (NOT admin
 - the ack must work for the ordinary owner-scoped grant, which is ``if_owner``
 with **no create** permission). ``mark_home_intro_seen`` writes a real row, and
@@ -25,10 +30,13 @@ explicitly rather than trusting the transaction rollback.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
+from frappe.utils import cint
 
-from jarvis.chat import user_settings_api
+from jarvis.chat import usage, user_settings_api
 from jarvis.chat.api import create_or_focus_empty, get_chat_ui_settings, list_conversations
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
@@ -39,6 +47,7 @@ from jarvis.permissions import (
 USETT = "Jarvis User Settings"
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
+SESSION = "Jarvis Chat Session"
 
 USER_A = "jarvis-intro-a@example.test"
 USER_B = "jarvis-intro-b@example.test"
@@ -77,6 +86,8 @@ def _cleanup() -> None:
 			frappe.delete_doc(CONV, name, ignore_permissions=True, force=True)
 		for name in frappe.get_all(USETT, filters={"user": email}, pluck="name"):
 			frappe.delete_doc(USETT, name, ignore_permissions=True, force=True)
+		for name in frappe.get_all(SESSION, filters={"user": email}, pluck="name"):
+			frappe.delete_doc(SESSION, name, ignore_permissions=True, force=True)
 
 
 class _IntroTestBase(FrappeTestCase):
@@ -233,7 +244,74 @@ class TestCadence(_IntroTestBase):
 
 
 # --------------------------------------------------------------------------- #
-# 2. Lifecycle invariants - the reason the bubble is not a persisted message
+# 2. Ack atomicity - the row has other, concurrent writers
+# --------------------------------------------------------------------------- #
+class TestAckAtomicity(_IntroTestBase):
+	"""``Jarvis User Settings`` is written by several server paths that touch a
+	single field with raw ``update_modified=False`` SQL (admin_set_user_limit's
+	spend cap, the usage counters, the greeting cadence counter). Because those
+	writes leave ``modified`` alone, Frappe's timestamp check cannot catch a
+	full-doc save built from a snapshot taken before them - it just silently
+	writes the stale values back. The ack therefore touches ONLY its own two
+	columns, via one conditional UPDATE."""
+
+	def test_ack_does_not_clobber_a_concurrent_field_write(self):
+		frappe.set_user("Administrator")
+		usage.get_or_create_user_settings(USER_A)
+		frappe.db.commit()
+
+		# Deterministic interleaving: an admin sets this user's monthly spend cap
+		# (exactly what admin_set_user_limit does - raw, update_modified=False)
+		# in the window between the ack obtaining the row and the ack writing.
+		real = usage.get_or_create_user_settings
+
+		def racing_admin_write(user):
+			doc = real(user)
+			frappe.db.set_value(
+				USETT, {"user": user}, "monthly_token_limit", 50000, update_modified=False
+			)
+			return doc
+
+		frappe.set_user(USER_A)
+		with patch.object(usage, "get_or_create_user_settings", side_effect=racing_admin_write):
+			user_settings_api.mark_home_intro_seen(version=1)
+		frappe.set_user("Administrator")
+
+		# The cap the admin just set must survive...
+		self.assertEqual(
+			cint(frappe.db.get_value(USETT, {"user": USER_A}, "monthly_token_limit")),
+			50000,
+			"the ack wrote a stale snapshot back over a concurrent field write",
+		)
+		# ...and the ack must still have landed.
+		self.assertEqual(self._seen(USER_A), 1)
+
+	def test_ack_leaves_modified_untouched(self):
+		"""Not bumping ``modified`` is deliberate, not an oversight: this row is
+		app state, and a touched timestamp would make every ack look like a user
+		preference change to anything watching the row."""
+		frappe.set_user("Administrator")
+		usage.get_or_create_user_settings(USER_A)
+		frappe.db.commit()
+		before = frappe.db.get_value(USETT, {"user": USER_A}, "modified")
+		frappe.set_user(USER_A)
+		user_settings_api.mark_home_intro_seen(version=1)
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "modified"), before)
+		self.assertEqual(self._seen(USER_A), 1)
+
+	def test_ack_does_not_disturb_sibling_preferences(self):
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(notify_enabled=0, preferred_persona="Jara")
+		user_settings_api.mark_home_intro_seen(version=1)
+		out = user_settings_api.get_my_settings()["data"]
+		self.assertEqual(out["notify_enabled"], 0)
+		self.assertEqual(out["preferred_persona"], "Jara")
+		frappe.set_user("Administrator")
+
+
+# --------------------------------------------------------------------------- #
+# 3. Lifecycle invariants - the reason the bubble is not a persisted message
 # --------------------------------------------------------------------------- #
 class TestLifecycleInvariants(_IntroTestBase):
 	"""Every assertion here fails against an implementation that persists the
@@ -241,12 +319,24 @@ class TestLifecycleInvariants(_IntroTestBase):
 	matters). They are the regression net for the design decision itself, not
 	for the copy."""
 
-	def _counts(self, user: str) -> tuple[int, int]:
+	def _counts(self, user: str) -> tuple[int, int, int, int, int]:
+		"""Everything showing the introduction must leave alone: conversations,
+		messages, gateway sessions, and token spend. The last three exist so a
+		variant that spins an openclaw session or calls a model to "generate" the
+		greeting fails here too, not just one that persists a row."""
 		convs = frappe.get_all(CONV, filters={"owner": user}, pluck="name")
-		msgs = (
-			frappe.db.count(MSG, {"conversation": ["in", convs]}) if convs else 0
+		msgs = frappe.db.count(MSG, {"conversation": ["in", convs]}) if convs else 0
+		sessions = frappe.db.count(SESSION, {"user": user})
+		row = frappe.db.get_value(
+			USETT, {"user": user}, ["month_tokens", "total_tokens"], as_dict=True
 		)
-		return len(convs), msgs
+		return (
+			len(convs),
+			msgs,
+			sessions,
+			cint(row.month_tokens) if row else 0,
+			cint(row.total_tokens) if row else 0,
+		)
 
 	def test_showing_the_introduction_creates_no_rows(self):
 		"""Boot + ack is the entire server side of showing the bubble. It must
@@ -257,7 +347,7 @@ class TestLifecycleInvariants(_IntroTestBase):
 		user_settings_api.mark_home_intro_seen(version=1)
 		self.assertEqual(self._counts(USER_A), before)
 		frappe.set_user("Administrator")
-		self.assertEqual(self._counts(USER_A), (0, 0))
+		self.assertEqual(self._counts(USER_A), (0, 0, 0, 0, 0))
 
 	def test_the_empty_chat_stays_empty(self):
 		"""The bubble renders over a genuinely empty conversation, and it must
@@ -345,3 +435,98 @@ class TestLifecycleInvariants(_IntroTestBase):
 		self.assertEqual(count_after, count_before)
 		self.assertEqual(count_before, 1)
 		frappe.set_user("Administrator")
+
+
+# --------------------------------------------------------------------------- #
+# 4. Existing-user backfill (patch v2_10)
+# --------------------------------------------------------------------------- #
+class TestVeteranBackfill(_IntroTestBase):
+	"""The seen column arrives at 0 on every row, so without the backfill the
+	release would introduce Jarvis to people who have used it for months. The
+	signal is behavioural - a conversation that actually has messages - not a
+	registration date."""
+
+	def _run_patch(self) -> None:
+		from jarvis.patches.v2_10_backfill_home_intro_seen import execute
+
+		execute()
+
+	def _seed_history(self, user: str) -> str:
+		"""A conversation owned by ``user`` carrying one real message."""
+		conv = frappe.get_doc({"doctype": CONV, "title": "history"}).insert(ignore_permissions=True)
+		frappe.db.set_value(CONV, conv.name, "owner", user, update_modified=False)
+		frappe.get_doc(
+			{"doctype": MSG, "conversation": conv.name, "seq": 1, "role": "user", "content": "hi"}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		return conv.name
+
+	def test_veteran_with_history_is_marked_seen(self):
+		usage.get_or_create_user_settings(USER_A)
+		self._seed_history(USER_A)
+		self.assertEqual(self._seen(USER_A), 0)
+		self._run_patch()
+		self.assertEqual(self._seen(USER_A), 1)
+		self.assertIsNotNone(frappe.db.get_value(USETT, {"user": USER_A}, "home_intro_seen_at"))
+		# ...and the boot payload agrees: no introduction for them.
+		frappe.set_user(USER_A)
+		ui = get_chat_ui_settings()
+		self.assertEqual(ui["home_intro_seen_version"], ui["home_intro_version"])
+		frappe.set_user("Administrator")
+
+	def test_veteran_without_a_settings_row_gets_one(self):
+		"""Rows are created lazily, so a veteran can legitimately have none - and
+		a missing row reads as seen=0, exactly the case this patch prevents."""
+		self._seed_history(USER_A)
+		self.assertFalse(frappe.db.exists(USETT, {"user": USER_A}))
+		self._run_patch()
+		row = frappe.db.get_value(
+			USETT,
+			{"user": USER_A},
+			["owner", "home_intro_seen_version", "notify_enabled", "preferred_persona"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(row)
+		self.assertEqual(cint(row.home_intro_seen_version), 1)
+		# owner must be the settings user or the if_owner permlevel-0 grant breaks.
+		self.assertEqual(row.owner, USER_A)
+		# Schema defaults, the same values get_or_create_user_settings produces.
+		self.assertEqual(cint(row.notify_enabled), 1)
+		self.assertEqual(row.preferred_persona, "Jarvis")
+
+	def test_genuinely_new_user_is_left_alone(self):
+		usage.get_or_create_user_settings(USER_B)
+		frappe.db.commit()
+		self._run_patch()
+		self.assertEqual(self._seen(USER_B), 0)
+		frappe.set_user(USER_B)
+		ui = get_chat_ui_settings()
+		self.assertGreater(ui["home_intro_version"], ui["home_intro_seen_version"])
+		frappe.set_user("Administrator")
+
+	def test_an_empty_conversation_is_not_history(self):
+		"""An abandoned New Chat (or a File Box drop that never sent) proves the
+		user has seen nothing, so it must not grandfather them."""
+		usage.get_or_create_user_settings(USER_B)
+		conv = frappe.get_doc({"doctype": CONV, "title": "abandoned"}).insert(ignore_permissions=True)
+		frappe.db.set_value(CONV, conv.name, "owner", USER_B, update_modified=False)
+		frappe.db.commit()
+		self._run_patch()
+		self.assertEqual(self._seen(USER_B), 0)
+
+	def test_patch_is_idempotent_and_never_lowers(self):
+		self._seed_history(USER_A)
+		self._run_patch()
+		stamp = frappe.db.get_value(USETT, {"user": USER_A}, "home_intro_seen_at")
+		self._run_patch()
+		self.assertEqual(self._seen(USER_A), 1)
+		# Re-running neither re-stamps nor duplicates the row.
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "home_intro_seen_at"), stamp)
+		self.assertEqual(len(frappe.get_all(USETT, filters={"user": USER_A})), 1)
+
+		# And a user already ahead of the patch keeps their higher version: a
+		# replay after a future HOME_INTRO_VERSION bump must not walk them back.
+		frappe.db.set_value(USETT, {"user": USER_A}, "home_intro_seen_version", 5)
+		frappe.db.commit()
+		self._run_patch()
+		self.assertEqual(self._seen(USER_A), 5)

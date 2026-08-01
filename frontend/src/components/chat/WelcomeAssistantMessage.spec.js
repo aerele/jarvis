@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 
 import WelcomeAssistantMessage from "./WelcomeAssistantMessage.vue";
+import { homeIntroPersona, homeIntroSpeaker } from "@/lib/homeIntro";
 
 /**
  * The static first-chat introduction. Two things are pinned here: the copy
@@ -18,12 +19,10 @@ describe("WelcomeAssistantMessage copy", () => {
 	it("greets by first name and signs with the speaker", () => {
 		const w = mount(WelcomeAssistantMessage, { props: props() });
 		expect(w.text()).toContain("Hi Vignesh — I'm Jarvis, your AI teammate inside your ERP.");
-		expect(w.find(".jv-wam-name").text()).toBe("Jarvis");
 	});
 
 	it("is FROM Jara for a Jara user, name and mark together", () => {
 		const w = mount(WelcomeAssistantMessage, { props: props({ speaker: "Jara", persona: "Jara" }) });
-		expect(w.find(".jv-wam-name").text()).toBe("Jara");
 		expect(w.text()).toContain("I'm Jara, your AI teammate");
 		expect(w.text()).not.toContain("I'm Jarvis");
 		// Jara's own mark, as PersonaPill draws her.
@@ -33,9 +32,22 @@ describe("WelcomeAssistantMessage copy", () => {
 
 	it("carries the tenant brand with no hardcoded Jarvis anywhere", () => {
 		const w = mount(WelcomeAssistantMessage, { props: props({ speaker: "Aria" }) });
-		expect(w.find(".jv-wam-name").text()).toBe("Aria");
 		expect(w.text()).toContain("I'm Aria, your AI teammate");
 		expect(w.text()).not.toContain("Jarvis");
+	});
+
+	it("shows the tenant's own mark, not Jara's orb, for a branded Jara user", () => {
+		// The reconciliation end to end: the resolver decides both halves, and the
+		// component must render a brand mark (which is where a tenant logo lands)
+		// alongside the brand name - never an orb beside a brand name.
+		const branded = { agentName: "Aria", isWhitelabeled: true, persona: "Jara" };
+		const persona = homeIntroPersona(branded);
+		const speaker = homeIntroSpeaker({ ...branded, persona });
+		const w = mount(WelcomeAssistantMessage, { props: props({ speaker, persona }) });
+		expect(w.find(".jv-mark").exists()).toBe(true);
+		expect(w.find(".jv-wam-orb").exists()).toBe(false);
+		expect(w.text()).toContain("I'm Aria, your AI teammate");
+		expect(w.text()).not.toContain("Jara");
 	});
 
 	it("renders the default brand mark for the default persona", () => {
@@ -82,6 +94,28 @@ describe("WelcomeAssistantMessage presentation honesty", () => {
 		expect(root.attributes("data-presentation-only")).toBe("true");
 	});
 
+	it("draws no visible name line, matching a real assistant turn", () => {
+		// ChatView passes no `sender` to Message.vue, so assistant rows render the
+		// avatar and the body only. A bold name here would make the introduction
+		// look like a different KIND of message than every reply that follows it.
+		const w = mount(WelcomeAssistantMessage, { props: props({ speaker: "Aria" }) });
+		expect(w.find(".jv-wam-name").exists()).toBe(false);
+		expect(w.find(".jv-wam-who").exists()).toBe(false);
+	});
+
+	it("keeps a heading for screen readers, visually hidden and matching the label", () => {
+		// Replacing the hero <h1> removed the only landmark in the empty state; this
+		// puts one back without printing a name the design does not want.
+		const w = mount(WelcomeAssistantMessage, { props: props({ speaker: "Aria" }) });
+		const h = w.find("h2");
+		expect(h.exists()).toBe(true);
+		expect(h.text()).toBe("Welcome message from Aria");
+		expect(h.text()).toBe(w.find("section.jv-wam").attributes("aria-label"));
+		// Visually hidden, NOT removed from the accessibility tree.
+		expect(h.classes()).toContain("jv-wam-sr");
+		expect(h.attributes("aria-hidden")).toBeUndefined();
+	});
+
 	it("claims no timestamp, no model and no tool activity", () => {
 		const w = mount(WelcomeAssistantMessage, { props: props() });
 		const html = w.html();
@@ -122,6 +156,15 @@ describe("ChatView wiring", () => {
 		expect(bubble).toBeGreaterThan(branch);
 		expect(composer === -1 || bubble < composer).toBe(true);
 		expect(src).toContain('v-if="showHomeIntro"');
+	});
+
+	it("gates the bubble on the empty state AND the pending flag", () => {
+		// The conjunct IS the invariant. `homeIntroPending` alone would draw the
+		// bubble over a live thread; `showWelcome` alone would draw it on every
+		// empty chat forever. Dropping either half is the regression.
+		expect(src).toContain(
+			"const showHomeIntro = computed(() => showWelcome.value && homeIntroPending.value);"
+		);
 	});
 
 	it("suppresses the business-note banner while the introduction shows", () => {

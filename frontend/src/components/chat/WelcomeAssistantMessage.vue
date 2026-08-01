@@ -20,20 +20,20 @@
       page content on arrival, not as an update being announced.
 
   Visually it is the same shell as a real assistant message (Message.vue's
-  variant="row"): avatar column, identity line, 14px/1.6 body. The identity-line
-  and body rules are copied rather than imported because Vue scopes styles per
-  component and Message.vue's are not exported.
+  variant="row"): avatar column and 14px/1.6 body, with NO visible name line -
+  chat's assistant passes no `sender`, so its rows draw none either, and the
+  avatar is the identity. The body rules are copied rather than imported because
+  Vue scopes styles per component and Message.vue's are not exported.
 -->
 <template>
-	<section
-		class="jv-wam"
-		data-presentation-only="true"
-		:aria-label="`Welcome message from ${speaker}`"
-	>
+	<section class="jv-wam" data-presentation-only="true" :aria-label="regionLabel">
 		<div class="jv-wam-avatar">
 			<!-- Persona-consistent mark, mirroring PersonaPill (the only other place
-			     the app draws a persona): Jarvis renders the brand mark, which is
-			     itself whitelabel-aware; Jara renders her star orb. -->
+			     the app draws a persona): the default renders the brand mark, which
+			     is itself whitelabel-aware (a tenant logo lands HERE); Jara renders
+			     her star orb. `persona` arrives already reconciled with the brand by
+			     lib/homeIntro.homeIntroPersona, so a whitelabelled workspace can
+			     never show Jara's orb where its own logo belongs. -->
 			<JarvisMark v-if="persona !== 'Jara'" :size="28" :radius="7" />
 			<span v-else class="jv-wam-orb jara" aria-hidden="true">
 				<svg viewBox="0 0 24 24" fill="#fff">
@@ -42,9 +42,14 @@
 			</span>
 		</div>
 		<div class="jv-wam-col">
-			<div class="jv-wam-who">
-				<b class="jv-wam-name">{{ speaker }}</b>
-			</div>
+			<!-- Identity is the avatar, exactly as a real assistant turn renders it
+			     (ChatView passes no `sender` to Message.vue, so no name line is drawn
+			     there either) - a bold name here would make the introduction look
+			     like a different kind of message than every reply that follows.
+			     The heading survives visually hidden: it restores the landmark that
+			     replacing the hero <h1> removed, so screen-reader heading navigation
+			     still lands on this region. Same text as the section's aria-label. -->
+			<h2 class="jv-wam-sr">{{ regionLabel }}</h2>
 			<div class="jv-wam-body">
 				<p>Hi {{ greetingName }} — I'm {{ speaker }}, your AI teammate inside your ERP.</p>
 				<p>
@@ -72,8 +77,9 @@ const props = defineProps({
 	// resolved by lib/homeIntro.homeIntroSpeaker so this component holds no
 	// branding/persona precedence logic of its own.
 	speaker: { type: String, required: true },
-	// "Jarvis" | "Jara", already gated by the persona kill switch. Drives the
-	// avatar only; the name comes from `speaker`.
+	// "Jarvis" | "Jara", already reconciled with the tenant brand and gated by
+	// the persona kill switch (lib/homeIntro.homeIntroPersona). Drives the avatar
+	// only; the name comes from `speaker`, which the same resolver pair decides.
 	persona: { type: String, default: "Jarvis" },
 	firstName: { type: String, default: "" },
 });
@@ -81,6 +87,9 @@ const props = defineProps({
 // A blank/absent first name (a fresh User with no full name) must not render
 // "Hi  — I'm …".
 const greetingName = computed(() => (props.firstName || "").trim() || "there");
+// One string, two consumers (the section's accessible name and the hidden
+// heading) so they can never drift apart.
+const regionLabel = computed(() => `Welcome message from ${props.speaker}`);
 
 // Best-effort seen-ack, fired once when the bubble actually reaches the DOM.
 // The parent owns the request; a failure there is swallowed and simply means
@@ -104,16 +113,20 @@ onMounted(() => emit("seen"));
 	flex: 1;
 	min-width: 0;
 }
-.jv-wam-who {
-	display: flex;
-	align-items: baseline;
-	gap: 8px;
-	margin-bottom: 4px;
-}
-.jv-wam-name {
-	font-size: 13px;
-	font-weight: 600;
-	color: var(--text);
+/* Visually hidden, still in the accessibility tree (same recipe as ChatView's
+   .jv-sr live region). Not `display: none` / `visibility: hidden`, which would
+   take the heading out of the tree along with the pixels. */
+.jv-wam-sr {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
 }
 .jv-wam-body {
 	font-size: 14px;

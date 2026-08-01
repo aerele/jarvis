@@ -217,7 +217,13 @@
 			     is what I do" is the one place they must never meet. Nothing is
 			     consumed by skipping it — the cadence counter is bumped server-side by
 			     create_or_focus_empty and maybe_greet is a pure reader, so the card
-			     simply returns on the next multiple-of-three chat. -->
+			     simply returns on the next multiple-of-three chat.
+			     Known edge, accepted: the suppression lifts the instant the first
+			     message lands (showWelcome goes false), so a user whose very first
+			     chat is ALSO a cadence tick sees the card appear as their first turn
+			     starts. It needs the introduction and a multiple-of-three chat count
+			     at the same moment, which the v2_10 backfill leaves to essentially
+			     nobody — a brand-new user's first chat is count 1. -->
 			<div v-if="bizGreeting.show && !showHomeIntro" class="jv-greeting-banner">
 				<div class="jv-nudge" style="margin: 0">
 					<div class="jv-nudge-head">
@@ -3453,7 +3459,11 @@ import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import PersonaPill from "@/components/chat/PersonaPill.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
-import { homeIntroDue, homeIntroSpeaker } from "@/lib/homeIntro";
+import {
+	homeIntroDue,
+	homeIntroPersona as resolveHomeIntroPersona,
+	homeIntroSpeaker,
+} from "@/lib/homeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { dashboardForConversation } from "@/api/dashboards";
@@ -4571,11 +4581,16 @@ const homeIntroPending = ref(false);
 const homeIntroVersion = ref(0);
 let _homeIntroAcked = false;
 const showHomeIntro = computed(() => showWelcome.value && homeIntroPending.value);
-// Persona drives the avatar and (on an unbranded workspace) the name. Gated by
-// the same kill switch the boot payload reports: with persona_enabled off the
-// turns answer in the default voice, so the bubble must not sign as Jara.
+// Persona drives the avatar and (on an unbranded workspace) the name. Both the
+// whitelabel and kill-switch rules live in one resolver so the mark and the
+// name are decided from the same predicate — a logo-only tenant gets its own
+// logo, never Jara's orb beside a brand name.
 const homeIntroPersona = computed(() =>
-	ui.value.persona_enabled !== false && store.preferredPersona === "Jara" ? "Jara" : "Jarvis"
+	resolveHomeIntroPersona({
+		isWhitelabeled,
+		personaEnabled: ui.value.persona_enabled,
+		persona: store.preferredPersona,
+	})
 );
 const homeIntroSpeakerName = computed(() =>
 	homeIntroSpeaker({ agentName, isWhitelabeled, persona: homeIntroPersona.value })

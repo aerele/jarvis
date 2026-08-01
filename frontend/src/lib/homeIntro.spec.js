@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { homeIntroDue, homeIntroSpeaker } from "./homeIntro.js";
+import { homeIntroDue, homeIntroPersona, homeIntroSpeaker } from "./homeIntro.js";
 
 /**
  * The cadence and the identity of the first-chat introduction. Both are pure
@@ -38,6 +38,46 @@ describe("homeIntroDue", () => {
 		expect(homeIntroDue({})).toBe(false);
 		expect(homeIntroDue(null)).toBe(false);
 		expect(homeIntroDue(undefined)).toBe(false);
+	});
+});
+
+describe("homeIntroPersona", () => {
+	it("keeps the user's persona on an unbranded workspace", () => {
+		expect(homeIntroPersona({ isWhitelabeled: false, persona: "Jara" })).toBe("Jara");
+		expect(homeIntroPersona({ isWhitelabeled: false, persona: "Jarvis" })).toBe("Jarvis");
+	});
+
+	it("forces the default persona on ANY whitelabelled workspace", () => {
+		// isWhitelabeled is @/branding's compound flag (custom name OR logo). A
+		// logo-only tenant must get its own logo in the avatar - JarvisMark renders
+		// brand_logo_url - not Jara's purple orb.
+		expect(homeIntroPersona({ isWhitelabeled: true, persona: "Jara" })).toBe("Jarvis");
+	});
+
+	it("agrees with the speaker so the mark and the name can never disagree", () => {
+		// The pairing is the actual invariant: whatever these two return, the
+		// avatar and the name must describe the same identity.
+		const brandedJara = { agentName: "Aria", isWhitelabeled: true, persona: "Jara" };
+		const persona = homeIntroPersona(brandedJara);
+		expect(persona).toBe("Jarvis"); // => brand mark (with the tenant logo)
+		expect(homeIntroSpeaker({ ...brandedJara, persona })).toBe("Aria"); // => brand name
+	});
+
+	it("follows the persona kill switch", () => {
+		// persona_enabled off => turns answer in the default voice, so the bubble
+		// must not present itself as Jara either.
+		expect(
+			homeIntroPersona({ isWhitelabeled: false, personaEnabled: false, persona: "Jara" })
+		).toBe("Jarvis");
+		// An older backend omits the key entirely; that reads as ON.
+		expect(
+			homeIntroPersona({ isWhitelabeled: false, personaEnabled: undefined, persona: "Jara" })
+		).toBe("Jara");
+	});
+
+	it("never returns an unknown persona", () => {
+		expect(homeIntroPersona({ persona: "Loki" })).toBe("Jarvis");
+		expect(homeIntroPersona()).toBe("Jarvis");
 	});
 });
 

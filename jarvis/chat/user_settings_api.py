@@ -182,32 +182,44 @@ def mark_home_intro_seen(version: int = 0) -> dict:
 	must never block chat, so the client ignores failures - the only cost of a
 	lost ack is the introduction appearing again on the next empty chat home.
 
-	Idempotent and monotonic: replays are no-ops, and a stale client can never
-	LOWER a version already acknowledged (which would re-show an introduction
-	the user has seen). ``version`` is clamped to ``HOME_INTRO_VERSION`` so a
-	client cannot mute a future introduction by acking a version that does not
-	exist yet.
+	Idempotent and monotonic, and enforced by the DB rather than by a read
+	followed by a write: the whole update is ONE conditional UPDATE whose
+	``home_intro_seen_version < %(v)s`` predicate is the monotonicity guard, so
+	two tabs racing the ack (or a stale tab replaying an older version) cannot
+	interleave into a lowered value. ``version`` is clamped to
+	``HOME_INTRO_VERSION`` first, so a client can neither invent a version nor
+	mute a future introduction by acking one that does not exist yet.
 
-	Uses the same per-user row pattern as ``update_my_settings``:
-	``get_or_create_user_settings`` (Jarvis User's permlevel-0 grant is
-	``if_owner`` with NO create, so a user with no row yet must not 403) plus an
-	``ignore_permissions`` save of permlevel-0 app-state fields on the caller's
-	own row.
+	``get_or_create_user_settings`` is called ONLY to guarantee the row exists -
+	Jarvis User's permlevel-0 grant is ``if_owner`` with NO create, so a user
+	meeting the introduction before they have a row must not 403.
+
+	Deliberately NOT a ``doc.save()``, and deliberately NOT bumping ``modified``.
+	This row is written concurrently by several server paths that use raw,
+	``update_modified=False`` writes on single fields (``admin_set_user_limit``
+	on ``monthly_token_limit``, ``usage``'s atomic counter SQL,
+	``greeting``'s cadence counter). A full-doc save writes back EVERY field
+	from a snapshot taken before those writes, and because they leave
+	``modified`` untouched there is no timestamp mismatch to catch it: an admin
+	setting a user's monthly spend cap in the same moment this user's browser
+	acks the introduction would have the cap silently reverted to the stale
+	value. Touching exactly the two columns this endpoint owns removes that
+	whole class of interaction.
 	"""
 	require_jarvis_access()
 	wanted = min(max(0, cint(version)), HOME_INTRO_VERSION)
-	doc = usage.get_or_create_user_settings(frappe.session.user)
-	# getattr, not a bare read: in the migrate window before home_intro_seen_version
-	# syncs onto the doc's meta this would AttributeError and 500 the ack (the same
-	# trap _settings_payload documents for preferred_persona).
-	seen = cint(getattr(doc, "home_intro_seen_version", 0))
-	if wanted > seen:
-		doc.home_intro_seen_version = wanted
-		doc.home_intro_seen_at = frappe.utils.now_datetime()
-		# ignore_permissions: owner-scoped row by construction (we loaded the
-		# caller's own), and only permlevel-0 app-state fields are touched.
-		doc.save(ignore_permissions=True)
-		seen = wanted
+	user = frappe.session.user
+	usage.get_or_create_user_settings(user)  # row existence only; never saved here
+	if wanted:
+		frappe.db.sql(
+			"""
+			UPDATE `tabJarvis User Settings`
+			SET home_intro_seen_version = %(version)s, home_intro_seen_at = %(now)s
+			WHERE user = %(user)s AND home_intro_seen_version < %(version)s
+			""",
+			{"version": wanted, "now": frappe.utils.now_datetime(), "user": user},
+		)
+	seen = cint(frappe.db.get_value(USER_SETTINGS, {"user": user}, "home_intro_seen_version"))
 	return {"ok": True, "data": {"home_intro_seen_version": seen}}
 
 

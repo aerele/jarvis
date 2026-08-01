@@ -32,6 +32,32 @@ export function homeIntroDue(ui) {
 }
 
 /**
+ * Which persona the bubble RENDERS AS — the avatar, and (through
+ * homeIntroSpeaker) the name.
+ *
+ * `isWhitelabeled` is @/branding's compound flag: true when the tenant has set
+ * a custom agent name OR uploaded a logo. Either one makes the brand the
+ * identity, so the persona is forced back to the default and JarvisMark draws
+ * the tenant's own logo. Without this, a logo-only tenant whose user prefers
+ * Jara would get Jara's purple orb where their logo belongs, and (via
+ * homeIntroSpeaker, which already defers to the brand) a name that disagrees
+ * with the mark beside it. Name and avatar are decided from the same predicate
+ * here so they cannot drift apart.
+ *
+ * `personaEnabled` is the Jarvis Settings kill switch as reported by the boot
+ * payload: off means turns answer in the default voice, so the bubble must not
+ * present itself as Jara either. `undefined` (an older backend that does not
+ * send the key) reads as ON, matching the rest of the SPA.
+ *
+ * @param {{isWhitelabeled?: boolean, personaEnabled?: boolean, persona?: string}} arg
+ */
+export function homeIntroPersona({ isWhitelabeled, personaEnabled, persona } = {}) {
+	if (isWhitelabeled) return DEFAULT_NAME;
+	if (personaEnabled === false) return DEFAULT_NAME;
+	return persona === "Jara" ? "Jara" : DEFAULT_NAME;
+}
+
+/**
  * Who the bubble is FROM.
  *
  * Two independent identities meet here and the precedence matters:
@@ -45,9 +71,10 @@ export function homeIntroDue(ui) {
  *     there simply greets a Jara user as Jara — which is the whole point of the
  *     preference.
  *
- * `persona` must already be gated by the persona kill switch by the caller: a
- * bench with persona_enabled off answers in the default voice, so the bubble
- * must not sign a name the turns will not use.
+ * `persona` is expected to be homeIntroPersona()'s output, which has already
+ * applied the whitelabel and kill-switch rules; the `isWhitelabeled` check is
+ * kept here too so the two can never disagree even if a caller passes a raw
+ * preference.
  *
  * @param {{agentName?: string, isWhitelabeled?: boolean, persona?: string}} arg
  */
