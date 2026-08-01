@@ -19,15 +19,30 @@
 /** Longest failure reason we will put in front of a customer. */
 const MAX_DETAIL = 240;
 
+// The exact marker BOTH teardown paths write into `last_sync_status`:
+// jarvis/onboarding.py's _DISCONNECTED_LLM_FIELDS (Disconnect from AI) and
+// jarvis/oauth/api.py's disconnect (Disconnect chat subscription).
+//
+// It is not an apply outcome, which is why it never matched a prefix above: there
+// is no apply and no subject left to report on. It still has to be a NAMED state
+// here rather than an unrecognised one. Falling through to "Status unavailable"
+// described a deliberate teardown as a fault, and it left the AI models pane with
+// nothing at all to show for a disconnect (its strip hides an "idle" kind), so a
+// disconnect that fully succeeded was indistinguishable from one that never ran.
+const DISCONNECTED = "disconnected";
+
 /**
  * @param {string} raw - a `last_sync_status` value, possibly empty or unrecognised.
- * @returns {{kind: "pending"|"ok"|"failed"|"unknown", text: string, detail: string}}
+ * @returns {{kind: "pending"|"ok"|"failed"|"disconnected"|"unknown", text: string, detail: string}}
  */
 export function humaniseSyncStatus(raw) {
 	const s = typeof raw === "string" ? raw.trim() : "";
 	if (!s) return { kind: "unknown", text: "Not synced yet", detail: "" };
 
 	const head = s.toLowerCase();
+	if (head === DISCONNECTED) {
+		return { kind: "disconnected", text: "Disconnected", detail: "" };
+	}
 	if (head.startsWith("pending")) {
 		return { kind: "pending", text: "Applying your changes", detail: "" };
 	}
@@ -53,6 +68,11 @@ export function isSyncPending(raw) {
 /** True when the last apply ended badly. */
 export function isSyncFailed(raw) {
 	return humaniseSyncStatus(raw).kind === "failed";
+}
+
+/** True when the customer tore the AI connection down on purpose. */
+export function isSyncDisconnected(raw) {
+	return humaniseSyncStatus(raw).kind === "disconnected";
 }
 
 /**

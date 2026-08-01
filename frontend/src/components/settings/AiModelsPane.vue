@@ -22,10 +22,18 @@
 			}}</span>
 		</template>
 
-		<div v-if="directSubLoading" class="text-p-sm text-ink-gray-6">Loading…</div>
+		<!-- FIRST probe only. Both branches REPLACE the editor, so gating them on
+		     "a probe is in flight" (which is what directSubLoading alone means)
+		     unmounted LlmPoolEditor on every background re-probe and rebuilt it
+		     with empty state. See loadDirectSub for why that silently broke
+		     Disconnect (jarvis#574). Once a probe has succeeded the editor stays
+		     mounted for the life of the pane. -->
+		<div v-if="!directSubReady && directSubLoading" class="text-p-sm text-ink-gray-6">
+			Loading…
+		</div>
 
 		<Button
-			v-else-if="directSubErr"
+			v-else-if="!directSubReady && directSubErr"
 			variant="subtle"
 			label="Retry"
 			iconLeft="refresh-cw"
@@ -40,16 +48,30 @@
 		     synthesizes a read-oriented row for it (Reconnect embeds
 		     DirectSubscriptionCard inline; Remove disconnects) without ever
 		     round-tripping it through save_llm_pool. -->
-		<div v-else class="jv-pane-fill h-full">
-			<LlmPoolEditor
-				ref="poolEditor"
-				:editable="isSM"
-				:directStatus="directSub"
-				:hostScrim="true"
-				@saved="onSaved"
-				@direct-changed="onDirectChanged"
+		<template v-else>
+			<!-- A re-probe that failed keeps its retry affordance, but BESIDE the
+			     editor rather than instead of it: the last good directStatus is
+			     still on screen and still correct. -->
+			<Button
+				v-if="directSubErr"
+				class="mb-3"
+				variant="subtle"
+				label="Retry"
+				iconLeft="refresh-cw"
+				:loading="directSubLoading"
+				@click="loadDirectSub"
 			/>
-		</div>
+			<div class="jv-pane-fill h-full">
+				<LlmPoolEditor
+					ref="poolEditor"
+					:editable="isSM"
+					:directStatus="directSub"
+					:hostScrim="true"
+					@saved="onSaved"
+					@direct-changed="onDirectChanged"
+				/>
+			</div>
+		</template>
 
 		<!-- Pane-wide busy scrim (jarvis#559): LlmPoolEditor's own scrim only ever
 		     covered its own box, so the pane's status line below it (same editor,
@@ -75,6 +97,7 @@ import { getDirectSubscriptionStatus } from "@/api";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
+import { isSyncDisconnected } from "@/lib/syncStatus";
 import { agentName } from "@/branding";
 
 // Template ref onto LlmPoolEditor's exposed { save, busy } - read busy.active/
@@ -106,6 +129,11 @@ let savedTimer = null;
 const directSub = ref({ is_direct_subscription: false });
 const directSubLoading = ref(true);
 const directSubErr = ref("");
+// True once a probe has come back cleanly, so the template can tell a FIRST load
+// (nothing to render yet) from a background re-probe (the editor is live and must
+// not be torn down). Never reset: a later probe failing does not un-know the last
+// good answer.
+const directSubReady = ref(false);
 // SettingsPane's single error surface (design.md anti-pattern 16) takes a
 // short user-facing string; the retry Button sits in the body, the same
 // errorMessage/Retry split every migrated pane in this dialog uses.
@@ -128,10 +156,17 @@ async function loadDirectSub() {
 		directSub.value = (await Promise.race([getDirectSubscriptionStatus(), timeout])) || {
 			is_direct_subscription: false,
 		};
+		directSubReady.value = true;
 	} catch (e) {
 		// Don't silently drop a real direct-subscription tenant onto the empty
-		// pool editor — surface a retryable error instead of a dead end.
-		directSub.value = { is_direct_subscription: false };
+		// pool editor: surface a retryable error instead of a dead end.
+		//
+		// Only for the FIRST probe. Blanking a directStatus the editor is already
+		// rendering would delete a live subscription row off the screen because a
+		// background re-probe timed out, which is the same class of lie the
+		// unmount below used to tell. Keep the last good answer and let the retry
+		// button say the refresh failed.
+		if (!directSubReady.value) directSub.value = { is_direct_subscription: false };
 		directSubErr.value =
 			(e && (e.message || e._server_messages)) || "Couldn't load your AI connection.";
 		errorMessage.value = "Couldn't load your AI connection.";
@@ -152,7 +187,10 @@ async function onDirectChanged() {
 // synthesized direct row through save_llm_pool - but re-probing stays cheap
 // insurance against drift).
 async function onSaved(sync) {
-	savedNote.value = sync && sync.pending ? "Saved, syncing…" : "Saved";
+	// A Disconnect emits through the same channel (the host has to re-probe after
+	// one too), and "Saved" is the wrong word for having deleted every credential.
+	if (isSyncDisconnected(sync && sync.last_sync_status)) savedNote.value = "Disconnected";
+	else savedNote.value = sync && sync.pending ? "Saved, syncing…" : "Saved";
 	clearTimeout(savedTimer);
 	savedTimer = setTimeout(() => {
 		savedNote.value = "";

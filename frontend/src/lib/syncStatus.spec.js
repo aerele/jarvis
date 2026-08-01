@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { humaniseSyncStatus, isSyncPending, isSyncFailed } from "@/lib/syncStatus";
+import {
+	humaniseSyncStatus,
+	isSyncPending,
+	isSyncFailed,
+	isSyncDisconnected,
+} from "@/lib/syncStatus";
 
 // Every real value below was copied from a backend write site, not invented, so a
 // wording change in jarvis/onboarding.py that breaks the prefix contract fails here.
@@ -106,5 +111,30 @@ describe("isSyncPending / isSyncFailed", () => {
 		expect(isSyncPending("ok")).toBe(false);
 		expect(isSyncFailed("failed: nope")).toBe(true);
 		expect(isSyncFailed("")).toBe(false);
+	});
+});
+
+// jarvis#574: BOTH teardown paths write this exact marker, jarvis/onboarding.py's
+// _DISCONNECTED_LLM_FIELDS and jarvis/oauth/api.py's disconnect. It used to fall
+// through to "unknown", so a disconnect that deleted every credential showed
+// nothing, and the customer could not tell a success from an operation that never
+// ran. Copied from the backend write site, not invented.
+describe("humaniseSyncStatus, disconnected", () => {
+	it("names a deliberate teardown instead of reading it as a fault", () => {
+		const out = humaniseSyncStatus("disconnected");
+		expect(out.kind).toBe("disconnected");
+		expect(out.text).toBe("Disconnected");
+	});
+
+	it("is neither pending nor failed, so no poller waits on it", () => {
+		expect(isSyncPending("disconnected")).toBe(false);
+		expect(isSyncFailed("disconnected")).toBe(false);
+		expect(isSyncDisconnected("disconnected")).toBe(true);
+	});
+
+	it("does not claim a disconnect for any other status", () => {
+		for (const s of ["", "ok", "ok (pool via admin)", "pending: anything", "failed: nope"]) {
+			expect(isSyncDisconnected(s)).toBe(false);
+		}
 	});
 });
