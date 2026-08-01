@@ -188,6 +188,88 @@ def get_preset_catalog() -> list:
 	return admin_client.get_preset_catalog()
 
 
+def _subscription_upstream(sub: dict) -> str:
+	"""The one upstream a posted subscription block's accounts agree on, or "".
+
+	Two rows are only folded together when this matches, so folding can never
+	manufacture the mixed-upstream row ``validate_models`` rejects.
+	"""
+	seen = {(a.get("upstream") or "").strip() for a in (sub.get("accounts") or []) if isinstance(a, dict)}
+	seen.discard("")
+	return seen.pop() if len(seen) == 1 else ""
+
+
+def _merge_subscription_accounts(target: list, incoming: list) -> None:
+	"""Append ``incoming`` accounts onto ``target``, skipping account_refs already
+	there.
+
+	A ref that arrives twice contributes only its ``oauth_blob``, and only when the
+	copy already held carries none: a client that posts the same account in two
+	rows (one of them reloaded, so blank) must end up with the credential, not with
+	the ``duplicate_account_ref`` rejection ``validate_models`` would otherwise
+	raise.
+	"""
+	by_ref = {}
+	for a in target:
+		ref = a.get("account_ref") if isinstance(a, dict) else None
+		if ref:
+			by_ref[ref] = a
+	for a in incoming:
+		ref = a.get("account_ref") if isinstance(a, dict) else None
+		held = by_ref.get(ref) if ref else None
+		if held is None:
+			copy = dict(a) if isinstance(a, dict) else a
+			target.append(copy)
+			if ref:
+				by_ref[ref] = copy
+		elif not (held.get("oauth_blob") or "").strip():
+			held["oauth_blob"] = a.get("oauth_blob") or ""
+
+
+def _coalesce_subscription_models(models: list) -> list:
+	"""Fold posted subscription rows that name the SAME model into ONE row holding
+	all of their accounts.
+
+	Every subscription model in a pool renders through ONE shared Bifrost provider
+	entry ("cliproxy-subs"), so two rows naming the same model render duplicate
+	routing targets and ``llm_proxy.validate()`` rejects the WHOLE spec with
+	``duplicate_subscription_model``. The pool editor's "+ Add a model" flow seeds
+	its new row on the chosen provider's default model id, so a customer adding a
+	SECOND account of a provider they already use posted exactly that pair - and
+	only learned it was refused after completing a full OAuth sign-in (#575).
+
+	Pooling several accounts of one provider is the whole point of the subscription
+	tier, so the honest reading of that payload is "another account for this model",
+	never "a second model". Fold rather than reject: a rejection would ALSO lock any
+	tenant that already stored such a pair out of every Jarvis Settings save, since
+	``on_update`` re-validates on every write, and it would still cost the customer
+	the sign-in they just completed.
+
+	API-key rows pass through untouched - ``llm_proxy.validate`` scopes their
+	duplicate check to (provider, model) pairs and they carry no accounts to merge.
+	"""
+	out: list = []
+	folded: dict[tuple[str, str], dict] = {}
+	for m in models:
+		sub = m.get("subscription") if isinstance(m, dict) else None
+		if not isinstance(sub, dict):
+			out.append(m)
+			continue
+		key = ((m.get("model") or "").strip(), _subscription_upstream(sub))
+		target = folded.get(key)
+		if target is None:
+			row = dict(m)
+			row["subscription"] = dict(sub)
+			row["subscription"]["accounts"] = [
+				dict(a) if isinstance(a, dict) else a for a in (sub.get("accounts") or [])
+			]
+			folded[key] = row
+			out.append(row)
+			continue
+		_merge_subscription_accounts(target["subscription"]["accounts"], sub.get("accounts") or [])
+	return out
+
+
 @frappe.whitelist()
 def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: str = "failover") -> dict:
 	"""Write the customer's multi-model LLM pool into Jarvis Settings.models[]
@@ -207,6 +289,10 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 		models = json.loads(models)
 	if not isinstance(models, list) or not models:
 		raise frappe.ValidationError("models must be a non-empty list")
+	# Several accounts of one provider belong on ONE model row (see #575). Fold
+	# before anything is read or written so the merge covers every client of this
+	# endpoint, not just the SPA that happens to have the fix.
+	models = _coalesce_subscription_models(models)
 	if routing_mode != "failover":
 		raise frappe.ValidationError("routing_mode must be 'failover' in v1")
 
