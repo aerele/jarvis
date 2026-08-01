@@ -29,9 +29,7 @@ from jarvis.permissions import grant_onboarding_admin, require_jarvis_admin
 # error from the customer. The onboarding view keys its reconnect OFFER off the
 # looser pair, which is fine for a display hint but too loose for control flow.
 # exc_type is the primary signal; this only runs when admin sent none.
-_DUPLICATE_SIGNUP_RE = re.compile(
-	r"account\b.{0,60}?already\s+(?:exists|registered or pending)", re.I | re.S
-)
+_DUPLICATE_SIGNUP_RE = re.compile(r"account\b.{0,60}?already\s+(?:exists|registered or pending)", re.I | re.S)
 
 
 def _require_admin_url() -> None:
