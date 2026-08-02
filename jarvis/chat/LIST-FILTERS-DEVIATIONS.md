@@ -409,6 +409,88 @@ believed was open-ended to a single day.
 `Timespan` is unaffected: it feeds `_between_bounds` a server-computed
 two-element range, which is why the tests assert it still resolves.
 
+### D14-b — malformed / non-finite numerics fail closed (round-2 P1-01)
+
+D14 keeps *blank* → `0`, but `flt`/`cint` also silently turn `"abc"` into `0` and
+accept `inf`/`nan`. Those are NOT at parity: a nonblank value that is not a finite
+number is rejected with `list_filter_invalid_value` (`_as_number` parses with
+`float()` and checks `math.isfinite`), so a hand-edited URL or direct API call
+cannot answer a different question from the one asked, and a non-finite value can
+never reach the DB binder as a driver error outside the stable code. `Int`/
+`Duration` keep Frappe's `cint` truncation of a *finite* fractional value
+(`"3.7"` → `3`) — documented, not silent.
+
+## D15 — Long Text inherits Data's operator set (effective-Data, stricter)
+
+Frappe's `Filter.set_fieldtype` scrubs string-like controls (Text, Small Text,
+Text Editor, Attach, Attach Image, Tag, Phone, JSON, Comments, Barcode, Dynamic
+Link, Read Only, Assign, Color) to an effective `Data` value control, and
+`hide_invalid_conditions` then picks
+`invalid_condition_map[original_type] || invalid_condition_map[effective]`. A
+type with no row of its own therefore inherits Data's `(Between, Timespan)`
+invalid set. The original implementation looked at the original type only
+(round-2 P0-03), so Small Text / Text / JSON / Dynamic Link advertised `Between`
+and the frontend rendered a **date range over a text column**. `invalid_conditions()`
+now models the fallback, and the golden matrix in `test_list_filters_f8` asserts
+`Between`/`Timespan` are absent at schema AND rejected by the compiler for every
+converted type. `_comments` (a standard `Text` field) is covered by the same rule.
+
+`Long Text` is a **deliberate Jarvis addition** to the effective-Data set: Frappe
+neither scrubs it nor gives it a map row, i.e. it offers `Between` on a prose body
+— the exact non-temporal-date-range nonsense this fix removes. Types that DO have
+their own row (Code, HTML Editor, Markdown Editor, Color, Password) keep it
+(`original_type` wins) and are unaffected.
+
+## D16 — two Table fields to one child DocType share one `EXISTS` (explicit)
+
+When a parent reaches ONE child DocType through TWO Table fields, the catalog
+lists each child field ONCE (deduped by `(child DocType, fieldname)` via `seen`),
+and a clause on that child compiles to a single `EXISTS` keyed by the child
+DocType (D4) — so it matches a row reached through **either** container. This is
+the known `parentfield` ambiguity, now made explicit and tested
+(`TestTwoTableFieldsSameChild`) rather than left to chance. If a future surface
+needs container-specific child filtering it must carry the `parentfield` on the
+clause; deferred until a real surface needs it.
+
+## Runtime capability flag + telemetry (round-2 P1-05)
+
+- **Per-view flag (default ON).** `view_filters_enabled(view_key)` reads the
+  opt-OUT list `jarvis_list_filters_v2_off` from `site_config.json`
+  (`frappe.conf`, the admission-flag pattern). A migrated view is live unless
+  listed, so the switch is only ever a rollback. OFF makes `get_list_filter_schema`
+  decline (the client degrades to legacy transport with the Filter action still
+  visible). The COMPILE path deliberately does NOT consult the flag: a clause a
+  stale client still sends is answered or coded, never silently dropped
+  (do-not-regress rule 8). `list_filters_capabilities()` exposes the
+  `{view_key: enabled}` map so a surface can pick transport at mount.
+- **Structural telemetry.** `emit_filter_telemetry` logs, through a dedicated
+  INFO logger (the `latency.py` pattern), one line per compiled request: view,
+  clause count, whether a child clause was used, the per-clause `{fieldtype,
+  operator}` shape, a duration BUCKET, and — on rejection — the stable error
+  code. It NEVER logs a filter value (do-not-regress rule 4). Query-level
+  duration/row telemetry at each endpoint is deferred (ledgered) — the compile
+  boundary is the one place that already sees every migrated request.
+
+## `schema_revision` hashes the full contract (round-2 P1-10)
+
+`_schema_digest` now hashes every field key the wire carries (doctype, fieldname,
+label, fieldtype, options, default_operator, operators, standard/child/json_array
+markers) plus the limits block — not the earlier five-key subset — so a relabel,
+a Select-option edit, a Link-target change or a limits change all change the
+public `schema_revision`. A caching/ETag consumer can trust it as a real revision.
+
+## Discovery widening (round-2 P0-04)
+
+The Phase-0 completeness sweep (`test_list_registry._whitelisted_list_callables`)
+walks `jarvis.chat` AND `jarvis.support`, matches the `list_*` **and**
+`admin_list_*` naming families (so `jarvis.support.api.list_tickets` and
+`user_settings_api.admin_list_user_usage` are visible), and honours the
+`list_registry.list_surface_endpoint` annotation for any differently-named
+collection endpoint. Inventory / migration / wiring are asserted separately; the
+"no pending active view" gate stays deferred to the final round — this round the
+audit REPORTS the migrated-vs-pending split and fails only on an UNCLASSIFIED
+collection.
+
 ---
 
 # MIGRATION-CHECKLIST
@@ -526,3 +608,32 @@ rather than a test.
 - [ ] The legacy argument is removed only after every shipped client sends v2
       (plan §10 Phase 5). Until then both paths must keep working, and the
       per-surface test asserting that is what makes the sunset safe to schedule.
+
+---
+
+# PER-VIEW SIGN-OFF (Wave F8) — the five migrated views
+
+Round-2 P1-12: a completed artefact for the five views flipped to `MIGRATED`,
+replacing the empty template above for them. Catalog counts are Administrator
+(the ceiling); floor-role width is reported by
+`test_list_registry.TestCuratedFilterWidthGap.test_floor_role_catalog`.
+
+| View | Endpoint | Fixed predicate (scope) | DocPerm/permlevel gate | admin main / child | Withheld fields | Wrapper-wire test | Telemetry |
+|---|---|---|---|---|---|---|---|
+| skills | `custom_skills_api.list_custom_skills_page` | owner OR shared-with-me (DocShare id set) | Jarvis User read; permlevel enforced (`skill_bundle` moat) | 19 / 2 | — | `frontend/tests/list-filters/wrapperWire.spec.js` (Skills) | compile emits view=`skills` |
+| macros | `macros_api.list_macros_page` | owner-scoped | Jarvis User read; child `Jarvis Macro Step` via parent perms | 22 / 5 | — | `wrapperWire.spec.js` (Macros) | view=`macros` |
+| saved_dashboards | `dashboards_api.list_dashboards_page` | scope (mine/role/org) visibility | Jarvis User read | 20 / 3 | — | `frontend/tests/list-filters/wave1Wrappers.spec.js` (Dashboards) | view=`saved_dashboards` |
+| triggers | `triggers_api.list_triggers_page` | owner/manager scope | Jarvis User read; **excluded_fields** redact automation logic | 19 / 0 | `condition`, `script_body`, `llm_instruction` (D1-b) | `wave1Wrappers.spec.js` (Triggers) | view=`triggers` |
+| wiki_pages | `wiki.list_wiki_pages_page` | scope_filter (all/org/role/mine) + write matrix | Jarvis User read | 27 / 0 | — | `wave1Wrappers.spec.js` (Wiki) | view=`wiki_pages` |
+
+Transport: all five send `filters_v2` (JSON, omitted when empty) through the ONE
+shared encoder `frontend/src/api/listPageArgs.js` — Skills/Macros via `api.js`,
+Dashboards/Triggers via `api/dashboards.js`/`api/triggers.js`, Wiki via
+`api/wiki.js`'s bespoke shape reusing `encodeFiltersV2`. Each wrapper has a
+wire-contract test asserting the exact `frappe-ui.call` args for the empty and
+nonempty cases (the round-2 P0-01 gap: Dashboards and Triggers rebuilt the
+request without `filters_v2`).
+
+Deferred for these views (ledgered, not this round): browser result-narrowing
+matrix, projections (File Box/Support), Waves 2-3, per-endpoint query-duration
+telemetry, Dynamic Link value picker, nested-set operators.
