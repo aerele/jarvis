@@ -1,0 +1,18 @@
+{
+  "contract_version": 2,
+  "name": "duplicate_409",
+  "description": "Guest signup for an (email, company) that already has an account. A deliberate 409 carrying BOTH Frappe's exc_type and the stable code; the bench keys its failed-payment resume off one of those, never off the message prose. This is the THROWN wire shape: the error object sits at the top level next to exc_type, with no `message` wrapper and no `ok` key.",
+  "endpoint": "jarvis_admin_v2.billing.signup.signup",
+  "http_status": 409,
+  "volatile": [
+    "body.error.message"
+  ],
+  "body": {
+    "exc_type": "DuplicateEntryError",
+    "error": {
+      "code": "ACCOUNT_ALREADY_EXISTS",
+      "message": "An account for this email and company already exists.",
+      "recovery": "authenticate_or_reconnect"
+    }
+  }
+}

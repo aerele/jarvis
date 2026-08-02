@@ -1,0 +1,35 @@
+{
+  "contract_version": 2,
+  "name": "resume_intent",
+  "description": "Authenticated failed-payment retry on a Pending Payment signup: a fresh checkout handle on a NEW intent generation, on the same subscription. Never a second account, never a second subscription. Carries the billing disclosure (plan, signup fee, what is actually due today) and the account identity a reloaded wizard renders.",
+  "endpoint": "jarvis_admin_v2.billing.signup.resume_pending_signup",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.razorpay_key_id",
+    "body.message.data.razorpay_order_id",
+    "body.message.data.attempt_id"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "PAYMENT_CONFIRMATION_PENDING",
+        "payment_provider": "razorpay",
+        "amount_inr": 12000.0,
+        "plan": {
+          "name": "oc-test-annual",
+          "label": "oc-test-annual"
+        },
+        "signup_fee_inr": 0.0,
+        "due_today_inr": 12000.0,
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "razorpay_key_id": "rzp_test_placeholder",
+        "razorpay_order_id": "order_placeholder",
+        "attempt_id": "att_placeholder",
+        "generation": 2
+      }
+    }
+  }
+}

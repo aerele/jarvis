@@ -1,0 +1,27 @@
+{
+  "contract_version": 2,
+  "name": "state_no_current_intent",
+  "description": "Authenticated state poll for a signup that is awaiting payment but holds no usable checkout handle - the commonest way is a retry whose replacement intent failed to create at the gateway, which now leaves the handles CLEARED rather than pointing at a released mandate. A status check REPORTS this and never repairs it; creating an intent is resume_pending_signup's job and only on an explicit customer action.",
+  "endpoint": "jarvis_admin_v2.billing.signup.get_signup_payment_state",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.attempt_id",
+    "body.message.data.payment_last_checked_at"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "NO_CURRENT_INTENT",
+        "pending_verification": false,
+        "subscription_status": "Pending Payment",
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "payment_last_checked_at": "2026-08-01 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1
+      }
+    }
+  }
+}

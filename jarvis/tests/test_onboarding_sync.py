@@ -5,7 +5,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import onboarding
+from jarvis import onboarding, onboarding_contract
 
 
 def _set_token(value, secret="secret"):
@@ -38,6 +38,7 @@ _SNAPSHOTTED_FIELDS = (
 	"jarvis_admin_api_secret",
 	"jarvis_admin_customer_email",
 	"jarvis_admin_customer_password",
+	"signup_context",
 	"agent_url",
 	"agent_token",
 	"release_notice_active",
@@ -315,7 +316,12 @@ class TestSignupEmailVerification(FrappeTestCase):
 				"ok": True,
 				"api_key": "verify-key",
 				"api_secret": "verify-secret",
-				"customer": "alice@example.com",
+				# Contract truth: ``customer`` is admin's SYNTHETIC OAuth login
+				# (_synthetic_login), not a deliverable address. The bench stores
+				# it as the grant username and must never render it.
+				"customer": "cust-3a91f0c2b7de@jarvis.invalid",
+				"email": "alice@example.com",
+				"company": "Acme",
 				"pending_verification": True,
 			},
 		):
@@ -334,11 +340,17 @@ class TestSignupEmailVerification(FrappeTestCase):
 			s.get_password("jarvis_admin_api_secret", raise_exception=False),
 			"verify-secret",
 		)
-		# The customer email (OAuth grant username) is persisted now; the
-		# password is deliberately absent on the verify-on response (admin
-		# defers it to the verified poll).
-		self.assertEqual(s.get("jarvis_admin_customer_email"), "alice@example.com")
+		# The OAuth grant username is persisted now; the password is deliberately
+		# absent on the verify-on response (admin defers it to the verified
+		# poll). What is stored is the synthetic login — which is exactly why no
+		# code may treat this field as the customer's address.
+		self.assertEqual(s.get("jarvis_admin_customer_email"), "cust-3a91f0c2b7de@jarvis.invalid")
 		self.assertFalse(s.get_password("jarvis_admin_customer_password", raise_exception=False) or "")
+		# The address a resumed wizard renders lives in the signup context, from
+		# admin's server truth.
+		context = onboarding_contract.load()
+		self.assertEqual(context["email"], "alice@example.com")
+		self.assertEqual(context["company"], "Acme")
 
 	def test_start_signup_legacy_response_still_persists_key_secret(self):
 		# Regression pin: the flag-off (legacy) response shape must keep
@@ -351,8 +363,10 @@ class TestSignupEmailVerification(FrappeTestCase):
 				"ok": True,
 				"api_key": "legacy-key",
 				"api_secret": "legacy-secret",
-				"customer": "bob@example.com",
+				"customer": "cust-b0b7e1d2c3f4@jarvis.invalid",
 				"customer_password": "bob-pw",
+				"email": "bob@example.com",
+				"company": "Bob Inc",
 				"razorpay_key_id": "rzp_test_X",
 				"razorpay_order_id": "order_LEGACY",
 				"amount_inr": 12000,
@@ -370,12 +384,20 @@ class TestSignupEmailVerification(FrappeTestCase):
 			"legacy-key",
 		)
 		# Flag-off path carries the OAuth password in the signup response; the
-		# bench persists it (+ the email) for bearer auth on subsequent calls.
-		self.assertEqual(s.get("jarvis_admin_customer_email"), "bob@example.com")
+		# bench persists it (+ the synthetic grant username) for bearer auth on
+		# subsequent calls.
+		self.assertEqual(s.get("jarvis_admin_customer_email"), "cust-b0b7e1d2c3f4@jarvis.invalid")
 		self.assertEqual(
 			s.get_password("jarvis_admin_customer_password", raise_exception=False),
 			"bob-pw",
 		)
+		# No credential ever reaches the plain-text context field.
+		context = onboarding_contract.load()
+		self.assertEqual(context["email"], "bob@example.com")
+		self.assertNotIn("api_key", context)
+		self.assertNotIn("api_secret", context)
+		self.assertNotIn("customer", context)
+		self.assertNotIn("customer_password", context)
 
 	def test_check_signup_payment_state_returns_pending(self):
 		# Customer hasn't clicked the link yet - admin returns
@@ -833,62 +855,203 @@ class TestWorkspaceReset(FrappeTestCase):
 
 
 class TestSignupResumeFallback(FrappeTestCase):
-	"""Failed-payment retry: the dedup rejection falls back to the authenticated
-	resume only when this bench holds creds for that same email."""
+	"""Failed-payment retry against CONTRACT-TRUE mocks.
 
-	_DUP = "An account with this email is already registered or pending."
+	The dead end had two independent kills and this class used to encode both:
+
+	1. the resume gate string-matched "already registered or pending"; admin
+	   reworded that sentence on 2026-07-26 and the gate stopped matching. The
+	   only surviving copy of the old wording in this tree was THIS suite's
+	   ``_DUP`` fixture, which is why all four tests stayed green while the
+	   feature was dead;
+	2. the gate then compared the typed email against
+	   ``jarvis_admin_customer_email`` — which holds admin's SYNTHETIC OAuth
+	   login ``cust-<hash>@jarvis.invalid``, never a real address. The old mocks
+	   returned a real email there, so the fiction that hid this kill lived in
+	   the fixtures too.
+
+	These mocks now say what admin says: the duplicate arrives as a CODE (or as
+	Frappe's exception class), and ``customer`` is the synthetic login with the
+	real address nowhere in Settings."""
+
+	# What admin's _synthetic_login actually mints, and what write_connection
+	# stores verbatim as jarvis_admin_customer_email.
+	_SYNTHETIC_LOGIN = "cust-9f2b1c4d5e6a@jarvis.invalid"
+	# Admin's current duplicate copy. Pinned ONLY to prove nothing branches on
+	# it: every test below passes a code or an exc_type, and the one that passes
+	# neither must NOT resume.
+	_DUP_COPY = "An account for this email and company already exists."
 
 	def setUp(self):
 		self._snap = _snapshot_settings()
 		s = frappe.get_single("Jarvis Settings")
 		_set_token("tok")
 		s.db_set("jarvis_admin_url", "https://fleet.example.test")
-		s.db_set("jarvis_admin_customer_email", "resume-me@example.com")
+		# Contract truth: the stored "customer email" is admin's synthetic OAuth
+		# login. Comparing a typed address against it can only ever be False.
+		s.db_set("jarvis_admin_customer_email", self._SYNTHETIC_LOGIN)
+		s.db_set("signup_context", "")
 		frappe.db.commit()
 
 	def tearDown(self):
 		_restore_settings(self._snap)
 
-	def _signup_raises(self, msg):
+	def _signup_raises(self, err):
+		return patch("jarvis.onboarding.admin_client.signup", side_effect=err)
+
+	def _duplicate_coded(self):
+		"""The RETURNED/THROWN contract shape: a stable code beside exc_type."""
+		from jarvis.exceptions import AdminContractError
+
+		return AdminContractError(
+			self._DUP_COPY,
+			code="ACCOUNT_ALREADY_EXISTS",
+			recovery="authenticate_or_reconnect",
+			error={
+				"code": "ACCOUNT_ALREADY_EXISTS",
+				"message": self._DUP_COPY,
+				"recovery": "authenticate_or_reconnect",
+			},
+			exc_type="DuplicateEntryError",
+			http_status=409,
+		)
+
+	def _duplicate_legacy(self):
+		"""A control plane older than the contract: Frappe's exception class and
+		a sentence, and no code anywhere."""
 		from jarvis.exceptions import AdminValidationError
 
-		return patch("jarvis.onboarding.admin_client.signup", side_effect=AdminValidationError(msg))
+		return AdminValidationError(
+			"An account with this email is already registered or pending.",
+			exc_type="DuplicateEntryError",
+		)
 
-	def test_dedup_with_matching_creds_resumes(self):
-		with (
-			self._signup_raises(self._DUP),
-			patch(
-				"jarvis.onboarding.admin_client.resume_pending_signup",
-				return_value={"payment_provider": "razorpay", "razorpay_order_id": "order_R2"},
-			) as resume,
-		):
+	def _resume_ok(self, order="order_R2"):
+		return patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value={
+				"payment_provider": "razorpay",
+				"razorpay_order_id": order,
+				"code": "PAYMENT_CONFIRMATION_PENDING",
+				"attempt_id": "att_7c2",
+				"generation": 2,
+				# Server truth for the identity: admin's real contact email, NOT
+				# the synthetic login and NOT what the wizard typed.
+				"email": "owner@acme.example",
+				"company": "Acme",
+			},
+		)
+
+	def test_coded_duplicate_resumes(self):
+		"""The headline. A coded duplicate reaches the resume with no prose read
+		and no email compared — the retry a declined card needs."""
+		with self._signup_raises(self._duplicate_coded()), self._resume_ok() as resume:
 			out = onboarding.start_signup("Resume-Me@example.com ", "Co", "some-plan")
-		resume.assert_called_once_with("some-plan", provider=None)
+		self.assertEqual(resume.call_count, 1)
+		self.assertEqual(resume.call_args.args[0], "some-plan")
 		self.assertEqual(out["razorpay_order_id"], "order_R2")
 
-	def test_dedup_with_different_email_reraises(self):
-		with (
-			self._signup_raises(self._DUP),
-			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
-			self.assertRaises(frappe.ValidationError),
-		):
-			onboarding.start_signup("someone-else@example.com", "Co", "some-plan")
-		resume.assert_not_called()
+	def test_duplicate_resumes_though_the_stored_login_can_never_match(self):
+		"""Kill #2, pinned. Settings hold the synthetic login; the customer types
+		a real address; the two are structurally never equal. Possession of the
+		credentials is the ownership proof, so the retry still succeeds."""
+		stored = frappe.db.get_single_value("Jarvis Settings", "jarvis_admin_customer_email")
+		self.assertEqual(stored, self._SYNTHETIC_LOGIN)
+		self.assertNotEqual(stored, "resume-me@example.com")
+		with self._signup_raises(self._duplicate_coded()), self._resume_ok("order_R9") as resume:
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_called_once()
+		self.assertEqual(out["razorpay_order_id"], "order_R9")
 
-	def test_non_dedup_error_reraises(self):
+	def test_any_typed_address_resumes_this_benchs_own_attempt(self):
+		"""No caller-supplied identifier chooses the record. Whatever was typed,
+		the resume authenticates as THIS bench and admin answers about the
+		account those credentials belong to — whose identity the response then
+		reports."""
+		with self._signup_raises(self._duplicate_coded()), self._resume_ok("order_RX") as resume:
+			out = onboarding.start_signup("somebody-completely-else@example.com", "Co", "some-plan")
+		resume.assert_called_once()
+		self.assertEqual(out["email"], "owner@acme.example")
+
+	def test_legacy_admin_duplicate_still_resumes_on_exc_type(self):
+		"""A fleet mid-upgrade: no contract code, only Frappe's exception class.
+		Every admin ever deployed throws DuplicateEntryError here, which is why
+		the prose fallback could be deleted rather than widened."""
+		with self._signup_raises(self._duplicate_legacy()), self._resume_ok("order_R4") as resume:
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_called_once()
+		self.assertEqual(out["razorpay_order_id"], "order_R4")
+
+	def test_the_duplicate_sentence_alone_never_resumes(self):
+		"""The regression that started all of this, inverted: prose is not a
+		signal. An error carrying admin's exact duplicate copy but NO machine
+		marker must not divert into the resume — that is the branch that rotted
+		the moment somebody improved the wording."""
+		from jarvis.exceptions import AdminValidationError
+
 		with (
-			self._signup_raises("Unsupported payment provider."),
+			self._signup_raises(AdminValidationError(self._DUP_COPY)),
 			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
 			self.assertRaises(frappe.ValidationError),
 		):
 			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
 		resume.assert_not_called()
 
-	def test_failed_resume_reraises_original_duplicate(self):
+	def test_no_credentials_no_resume(self):
+		"""Ownership is proven by credentials, so a bench holding none has
+		nothing to prove it with — a wiped site's path is reconnect, not resume."""
+		_set_token("")
+		with (
+			self._signup_raises(self._duplicate_coded()),
+			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_not_called()
+
+	def test_a_double_submit_reuses_one_idempotency_key(self):
+		"""Two clicks, one gateway object: admin returns the intent a key it has
+		already seen created, so the second submit must arrive under the SAME
+		key. The key is persisted before the call, which is what covers the case
+		it exists for — the response that never comes back."""
+		with self._signup_raises(self._duplicate_coded()), self._resume_ok() as resume:
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		self.assertEqual(resume.call_count, 2)
+		first = resume.call_args_list[0].kwargs["idempotency_key"]
+		second = resume.call_args_list[1].kwargs["idempotency_key"]
+		self.assertTrue(first)
+		self.assertEqual(first, second)
+
+	def test_a_retry_after_a_decline_mints_a_new_key(self):
+		"""...and the opposite, because reusing it there is worse than not
+		having one: admin would hand back the very intent the gateway refused,
+		and the customer could never escape it."""
+		with self._signup_raises(self._duplicate_coded()), self._resume_ok() as resume:
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			first = resume.call_args.kwargs["idempotency_key"]
+			# The gateway refuses that intent; the wizard's status check records it.
+			onboarding_contract.update(code=onboarding_contract.PAYMENT_DECLINED)
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			second = resume.call_args.kwargs["idempotency_key"]
+		self.assertNotEqual(first, second)
+
+	def test_non_dedup_error_reraises(self):
 		from jarvis.exceptions import AdminValidationError
 
 		with (
-			self._signup_raises(self._DUP),
+			self._signup_raises(AdminValidationError("Unsupported payment provider.")),
+			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_not_called()
+
+	def test_failed_resume_surfaces_the_original_duplicate(self):
+		from jarvis.exceptions import AdminValidationError
+
+		with (
+			self._signup_raises(self._duplicate_coded()),
 			patch(
 				"jarvis.onboarding.admin_client.resume_pending_signup",
 				side_effect=AdminValidationError("signup is not awaiting payment; nothing to resume"),
@@ -896,7 +1059,247 @@ class TestSignupResumeFallback(FrappeTestCase):
 			self.assertRaises(frappe.ValidationError) as ctx,
 		):
 			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
-		self.assertIn("already registered", str(ctx.exception))
+		self.assertIn("already exists", str(ctx.exception))
+
+	def test_a_thrown_duplicate_still_delivers_its_code(self):
+		"""A throw is how this endpoint reports failure, and the SPA still has to
+		branch. The machine-readable error rides on the response next to Frappe's
+		exc_type — the same mechanism admin uses, read from the other end."""
+		from jarvis.exceptions import AdminValidationError
+
+		with (
+			self._signup_raises(self._duplicate_coded()),
+			patch(
+				"jarvis.onboarding.admin_client.resume_pending_signup",
+				side_effect=AdminValidationError("nothing to resume"),
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		self.assertEqual(frappe.local.response.get("error", {}).get("code"), "ACCOUNT_ALREADY_EXISTS")
+		self.assertEqual(frappe.local.response.get("error", {}).get("recovery"), "authenticate_or_reconnect")
+
+
+class TestOnboardingFacadeEndpoints(FrappeTestCase):
+	"""The three surfaces the payment page calls, and the local context they
+	keep. Each returns admin's envelope UNFILTERED plus a non-secret context
+	block; a failure comes back under a deliberate 4xx/5xx, never as an
+	``ok: false`` body wearing a 200."""
+
+	# One realistic passive-poll envelope, shaped exactly like admin's
+	# reconcile_pending / state fixtures.
+	_STATE = {
+		"contract_version": 2,
+		"code": "PAYMENT_CONFIRMATION_PENDING",
+		"pending_verification": False,
+		"payment_provider": "razorpay",
+		"amount_inr": 12000.0,
+		"plan": {"name": "annual", "label": "Annual"},
+		"signup_fee_inr": 0.0,
+		"due_today_inr": 12000.0,
+		"email": "owner@acme.example",
+		"company": "Acme",
+		"razorpay_key_id": "rzp_test_X",
+		"razorpay_order_id": "order_A1",
+		"can_initiate_payment": True,
+		"can_check_status": True,
+		"can_reconnect": False,
+		"attempt_id": "att_7c2",
+		"generation": 1,
+	}
+
+	def setUp(self):
+		self._snap = _snapshot_settings()
+		s = frappe.get_single("Jarvis Settings")
+		_set_token("tok")
+		s.db_set("jarvis_admin_url", "https://fleet.example.test")
+		s.db_set("signup_context", "")
+		frappe.db.commit()
+		frappe.local.response.pop("http_status_code", None)
+
+	def tearDown(self):
+		frappe.local.response.pop("http_status_code", None)
+		_restore_settings(self._snap)
+
+	def test_state_passes_the_envelope_through_untouched(self):
+		with patch(
+			"jarvis.onboarding.admin_client.get_signup_payment_state",
+			return_value=dict(self._STATE, some_future_field="from a newer admin"),
+		):
+			out = onboarding.get_onboarding_state()
+		self.assertTrue(out["ok"])
+		self.assertEqual(out["contract_version"], 2)
+		self.assertEqual(out["data"]["code"], "PAYMENT_CONFIRMATION_PENDING")
+		self.assertTrue(out["data"]["can_initiate_payment"])
+		self.assertFalse(out["data"]["can_reconnect"])
+		# Additive-only is admin's rule; not filtering is what makes it true here.
+		self.assertEqual(out["data"]["some_future_field"], "from a newer admin")
+
+	def test_state_records_the_display_context(self):
+		with patch(
+			"jarvis.onboarding.admin_client.get_signup_payment_state",
+			return_value=self._STATE,
+		):
+			out = onboarding.get_onboarding_state()
+		context = out["context"]
+		self.assertEqual(context["email"], "owner@acme.example")
+		self.assertEqual(context["company"], "Acme")
+		self.assertEqual(context["plan"], "annual")
+		self.assertEqual(context["plan_label"], "Annual")
+		self.assertEqual(context["attempt_id"], "att_7c2")
+		self.assertEqual(context["due_today_inr"], 12000.0)
+		self.assertEqual(context["code"], "PAYMENT_CONFIRMATION_PENDING")
+		# Survives a restart: it is persisted, not assembled per request.
+		self.assertEqual(onboarding_contract.load()["attempt_id"], "att_7c2")
+
+	def test_state_persists_the_oauth_password_it_is_handed(self):
+		"""Admin delivers the login password on whichever poll first runs after
+		the email is confirmed. Whichever surface receives it must persist it or
+		the bench never gets bearer auth."""
+		with patch(
+			"jarvis.onboarding.admin_client.get_signup_payment_state",
+			return_value=dict(self._STATE, customer_password="pw-once"),
+		):
+			onboarding.get_onboarding_state()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("jarvis_admin_customer_password", raise_exception=False), "pw-once")
+		self.assertNotIn("customer_password", onboarding_contract.load())
+
+	def test_a_failure_is_a_deliberate_4xx_not_an_ok_false_200(self):
+		from jarvis.exceptions import AdminContractError
+
+		with patch(
+			"jarvis.onboarding.admin_client.get_signup_payment_state",
+			side_effect=AdminContractError(
+				"This signup is already paid. Continue setup.",
+				code="PAYMENT_ALREADY_ACTIVE",
+				recovery="continue_setup",
+				error={
+					"code": "PAYMENT_ALREADY_ACTIVE",
+					"message": "This signup is already paid. Continue setup.",
+					"recovery": "continue_setup",
+					"subscription_status": "Active",
+				},
+				http_status=409,
+			),
+		):
+			out = onboarding.get_onboarding_state()
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "PAYMENT_ALREADY_ACTIVE")
+		self.assertEqual(out["error"]["recovery"], "continue_setup")
+		self.assertEqual(out["error"]["subscription_status"], "Active")
+		self.assertEqual(frappe.local.response.http_status_code, 409)
+
+	def test_a_rate_limit_is_not_reported_as_a_decline(self):
+		from jarvis.exceptions import AdminRateLimitedError
+
+		with patch(
+			"jarvis.onboarding.admin_client.check_signup_payment_status",
+			side_effect=AdminRateLimitedError(
+				"We're still checking with your payment provider.",
+				retry_after_seconds=30,
+				code="PAYMENT_CHECK_RATE_LIMITED",
+				recovery="retry",
+				error={"code": "PAYMENT_CHECK_RATE_LIMITED", "retry_after_seconds": 30},
+			),
+		):
+			out = onboarding.check_signup_payment_status()
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "PAYMENT_CHECK_RATE_LIMITED")
+		self.assertEqual(out["error"]["retry_after_seconds"], 30)
+		self.assertEqual(frappe.local.response.http_status_code, 429)
+
+	def test_the_check_carries_its_two_extra_facts(self):
+		with patch(
+			"jarvis.onboarding.admin_client.check_signup_payment_status",
+			return_value=dict(
+				self._STATE,
+				gateway_consulted=True,
+				awaiting_manual_reconciliation=True,
+				can_initiate_payment=False,
+			),
+		):
+			out = onboarding.check_signup_payment_status()
+		self.assertTrue(out["data"]["gateway_consulted"])
+		self.assertTrue(out["data"]["awaiting_manual_reconciliation"])
+		self.assertFalse(out["data"]["can_initiate_payment"])
+
+	def test_initiate_uses_the_plan_the_signup_was_started_with(self):
+		onboarding_contract.update(plan="annual", payment_provider="cashfree")
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value=self._STATE,
+		) as resume:
+			out = onboarding.initiate_signup_payment()
+		self.assertTrue(out["ok"])
+		self.assertEqual(resume.call_args.args[0], "annual")
+		self.assertEqual(resume.call_args.kwargs["provider"], "cashfree")
+
+	def test_initiate_double_click_reuses_one_key(self):
+		onboarding_contract.update(plan="annual")
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value=self._STATE,
+		) as resume:
+			onboarding.initiate_signup_payment()
+			first = resume.call_args.kwargs["idempotency_key"]
+			onboarding.initiate_signup_payment()
+			second = resume.call_args.kwargs["idempotency_key"]
+		self.assertTrue(first)
+		self.assertEqual(first, second)
+
+	def test_initiate_honours_a_supplied_key_verbatim(self):
+		onboarding_contract.update(plan="annual")
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value=self._STATE,
+		) as resume:
+			onboarding.initiate_signup_payment(idempotency_key="caller-chose-this")
+		self.assertEqual(resume.call_args.kwargs["idempotency_key"], "caller-chose-this")
+
+	def test_initiate_with_no_signup_refuses_with_a_code(self):
+		"""Nothing local and nothing named: a coded refusal, never a guess.
+		Initiating on the wrong plan is a wrong charge."""
+		with patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume:
+			out = onboarding.initiate_signup_payment()
+		resume.assert_not_called()
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], onboarding_contract.BENCH_NO_SIGNUP_CONTEXT)
+		self.assertEqual(frappe.local.response.http_status_code, 409)
+
+	def test_a_refused_initiate_still_updates_what_the_page_renders(self):
+		"""A wizard reloading onto "already paid" has to render that, not the
+		plan it was about to charge for."""
+		from jarvis.exceptions import AdminContractError
+
+		onboarding_contract.update(plan="annual")
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			side_effect=AdminContractError(
+				"This signup is already paid. Continue setup.",
+				code="PAYMENT_ALREADY_ACTIVE",
+				error={
+					"code": "PAYMENT_ALREADY_ACTIVE",
+					"message": "This signup is already paid. Continue setup.",
+					"subscription_status": "Active",
+					"attempt_id": "att_7c2",
+				},
+				http_status=409,
+			),
+		):
+			out = onboarding.initiate_signup_payment()
+		self.assertEqual(out["context"]["code"], "PAYMENT_ALREADY_ACTIVE")
+		self.assertEqual(out["context"]["subscription_status"], "Active")
+
+	def test_the_context_never_leaves_the_idempotency_key_on_the_wire(self):
+		onboarding_contract.update(plan="annual")
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value=self._STATE,
+		):
+			out = onboarding.initiate_signup_payment()
+		self.assertNotIn("idempotency_key", out["context"])
+		self.assertTrue(onboarding_contract.load()["idempotency_key"])
 
 
 class TestAccountReconnect(FrappeTestCase):

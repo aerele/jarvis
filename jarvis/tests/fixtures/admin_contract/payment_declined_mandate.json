@@ -1,0 +1,19 @@
+{
+  "contract_version": 2,
+  "name": "payment_declined_mandate",
+  "description": "A Cashfree AUTOPAY confirm where the mandate is NOT authorized at the gateway (the customer abandoned the redirect, or the authorization failed). Distinct from PAYMENT_CONFIRMATION_PENDING, which is what an e-NACH still awaiting the customer's bank returns: a decline means a NEW intent is the recovery, pending means poll again.",
+  "endpoint": "jarvis_admin_v2.api.tenant.confirm_payment",
+  "http_status": 402,
+  "volatile": [
+    "body.message.error.message"
+  ],
+  "body": {
+    "message": {
+      "ok": false,
+      "error": {
+        "code": "PAYMENT_DECLINED",
+        "message": "This Cashfree mandate is not authorized."
+      }
+    }
+  }
+}

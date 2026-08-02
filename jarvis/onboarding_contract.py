@@ -1,0 +1,382 @@
+"""The bench half of the onboarding / payment-recovery contract with admin.
+
+Admin publishes a machine vocabulary (``jarvis_admin_v2/billing/codes.py``) and
+a corpus of wire fixtures; this module is what the bench reads it WITH. Three
+jobs, all of them consequences of one incident:
+
+  1. **Codes, never prose.** Admin reworded its duplicate-signup message on
+     2026-07-26. The bench's failed-payment resume string-matched the old
+     sentence, so from that day every customer whose card was declined hit a
+     dead end - and both repositories' suites stayed green, because each side
+     kept its own copy of the sentence. Nothing here branches on a message.
+  2. **Identity is proven by CREDENTIALS, never by an email comparison.** The
+     resume gate also compared the user's typed address against the stored
+     ``jarvis_admin_customer_email``, which holds admin's SYNTHETIC OAuth login
+     (``cust-<hash>@jarvis.invalid``, signup.py ``_synthetic_login``) - never
+     equal to a real address, so the gate was structurally dead even with the
+     wording fixed. Possession of the credentials the first signup minted IS
+     the ownership proof; admin resolves the customer from authentication.
+  3. **Local display context.** A reloaded wizard used to render the SITE
+     admin's email as the address a verification link was sent to. The bench
+     keeps a small non-secret snapshot of whose signup this is, and server
+     truth from admin overwrites it whenever a response carries any.
+
+The vendored fixture corpus in ``jarvis/tests/fixtures/admin_contract/`` is the
+executable half of this file's claims - see its PROVENANCE.md.
+"""
+
+import json
+import secrets
+
+import frappe
+
+# The contract vocabulary version this bench is written against
+# (``codes.CONTRACT_VERSION`` on the admin side). Bumped only on a BREAKING
+# shape change; a new CODE is additive and does not move it. Recorded in the
+# local context so a support conversation can tell which vocabulary a stuck
+# wizard was answered in.
+CONTRACT_VERSION = 2
+
+# --------------------------------------------------------------------------- #
+# admin's codes (append-only vocabulary; a shipped code's meaning never changes)
+# --------------------------------------------------------------------------- #
+#: Guest signup refused: this (email, company) already has an account. Says
+#: NOTHING about that account's status - deliberately, so the endpoint cannot be
+#: used to enumerate. This is the code the failed-payment resume keys off.
+ACCOUNT_ALREADY_EXISTS = "ACCOUNT_ALREADY_EXISTS"
+#: The signup exists but the address is unproven; nothing happens until the
+#: magic link is clicked.
+SIGNUP_VERIFICATION_REQUIRED = "SIGNUP_VERIFICATION_REQUIRED"
+#: An intent exists and the gateway has not said money moved. Poll; do not
+#: re-initiate.
+PAYMENT_CONFIRMATION_PENDING = "PAYMENT_CONFIRMATION_PENDING"
+#: The gateway says this attempt will not complete. A NEW intent is the recovery.
+PAYMENT_DECLINED = "PAYMENT_DECLINED"
+#: Already paid. Terminal for the payment step - continue setup, never a second
+#: intent.
+PAYMENT_ALREADY_ACTIVE = "PAYMENT_ALREADY_ACTIVE"
+#: Awaiting payment with no usable checkout handle. Only an explicit initiate
+#: may create one.
+NO_CURRENT_INTENT = "NO_CURRENT_INTENT"
+#: Paid, live and already running: the recovery is the emailed reconnect code,
+#: never a new signup and never another payment.
+ACCOUNT_RECONNECT_REQUIRED = "ACCOUNT_RECONNECT_REQUIRED"
+#: A mandate the gateway has already AUTHORIZED. Money moved; the recovery is
+#: confirm, and a second intent would authorize a second mandate.
+PAYMENT_AUTHORIZED_PENDING_CONFIRM = "PAYMENT_AUTHORIZED_PENDING_CONFIRM"
+#: A handle exists but the gateway would not hand back the session token it has
+#: to be opened with. Retryable, and NOT a decline.
+INTENT_HANDLE_UNAVAILABLE = "INTENT_HANDLE_UNAVAILABLE"
+#: Past the signup stage: renewal, reconnect or support, not a checkout.
+SIGNUP_TERMINAL = "SIGNUP_TERMINAL"
+#: A request field violated a documented bound (today: an over-long
+#: idempotency_key).
+INVALID_REQUEST = "INVALID_REQUEST"
+#: Too many provider-truth checks for this account. Asserts NOTHING about the
+#: payment - wait ``retry_after_seconds`` and ask again.
+PAYMENT_CHECK_RATE_LIMITED = "PAYMENT_CHECK_RATE_LIMITED"
+
+# --------------------------------------------------------------------------- #
+# bench-local codes
+# --------------------------------------------------------------------------- #
+# Failures that never reached admin's contract at all: transport, authentication,
+# an admin too old to send a code. Prefixed so they can never be confused with -
+# or collide with a future addition to - admin's append-only vocabulary.
+BENCH_ADMIN_UNREACHABLE = "BENCH_ADMIN_UNREACHABLE"
+BENCH_ADMIN_AUTH_FAILED = "BENCH_ADMIN_AUTH_FAILED"
+BENCH_ADMIN_REJECTED = "BENCH_ADMIN_REJECTED"
+BENCH_RATE_LIMITED = "BENCH_RATE_LIMITED"
+#: No plan is known for an initiate: the local context is empty (a bench that
+#: never ran a signup, or one whose settings were reset) and the caller named
+#: none.
+BENCH_NO_SIGNUP_CONTEXT = "BENCH_NO_SIGNUP_CONTEXT"
+
+RECOVERY_RETRY = "retry"
+RECOVERY_CONTINUE_SETUP = "continue_setup"
+RECOVERY_CONTACT_SUPPORT = "contact_support"
+RECOVERY_AUTHENTICATE_OR_RECONNECT = "authenticate_or_reconnect"
+
+# The codes whose recovery IS a new intent: whatever the stored idempotency key
+# bought can no longer be paid. Reusing the key there would be actively wrong -
+# admin returns the intent a key it has already seen created, so a customer
+# retrying after a decline would be handed the dead order back and could never
+# escape it. Everything else reuses the key, which is what makes a double-click
+# (or a retried POST, or a refreshed pay screen) converge on ONE gateway object.
+_SPENT_INTENT_CODES = frozenset(
+	{
+		PAYMENT_DECLINED,
+		NO_CURRENT_INTENT,
+		INTENT_HANDLE_UNAVAILABLE,
+	}
+)
+
+
+def is_duplicate_signup(err) -> bool:
+	"""Is this admin rejection "that (email, company) already has an account"?
+
+	Two machine signals, both stable, NEITHER of them prose:
+
+	- ``error.code == ACCOUNT_ALREADY_EXISTS`` - the contract's own answer;
+	- ``exc_type == "DuplicateEntryError"`` - what an admin older than the
+	  contract sends, and still sends. Every version of admin's
+	  ``_reject_duplicate_email`` back to the v2 fork throws
+	  ``frappe.DuplicateEntryError``, whose ``http_status_code`` puts the 409 on
+	  the wire, so this branch covers a mid-upgrade fleet with no prose fallback
+	  needed anywhere.
+
+	The substring match this replaces (``"already registered or pending" in
+	str(err)``) is what made the failed-payment resume unreachable for every
+	real customer the day admin improved its wording."""
+	if getattr(err, "code", "") == ACCOUNT_ALREADY_EXISTS:
+		return True
+	return getattr(err, "exc_type", None) == "DuplicateEntryError"
+
+
+# --------------------------------------------------------------------------- #
+# local display context
+# --------------------------------------------------------------------------- #
+#: Jarvis Settings field holding the JSON snapshot. Non-secret by construction -
+#: see _ADMIN_KEYS, an allowlist rather than a copy of admin's payload, so a
+#: response carrying api_key / api_secret / customer_password can never leak
+#: into it.
+CONTEXT_FIELD = "signup_context"
+
+# What the bench keeps out of an admin envelope. Display facts and machine codes
+# only: identity as the customer typed it, what they are buying, where the
+# attempt got to.
+_ADMIN_KEYS = (
+	# opaque per-attempt handle - the one identifier support and the bench may
+	# both quote (contract rule 3 keeps document names on admin's side)
+	"attempt_id",
+	"generation",
+	"contract_version",
+	# server-side identity truth; overwrites whatever the wizard prefilled
+	"email",
+	"company",
+	# what is being bought, and what is actually due today
+	"payment_provider",
+	"amount_inr",
+	"signup_fee_inr",
+	"due_today_inr",
+	"trial_days",
+	"effective_trial_days",
+	"effective_first_charge_at",
+	# where the attempt got to
+	"code",
+	"recovery",
+	"subscription_status",
+	"pending_verification",
+	"verification_expires_at",
+	"payment_last_checked_at",
+)
+
+# Never persisted, and asserted on: the signup response carries the account's
+# credentials in the same dict as its display fields.
+_NEVER_PERSIST = ("api_key", "api_secret", "customer", "customer_password", "agent_token")
+
+# Held locally, never sent to the browser. The key is the bench's receipt for an
+# initiation; handing it to the SPA would invite it to echo the same key back on
+# a genuine second attempt, which is exactly the replay that returns the dead
+# intent.
+_LOCAL_ONLY_KEYS = ("idempotency_key",)
+
+
+def load() -> dict:
+	"""The stored context, or ``{}``. Never raises on a malformed value - a
+	wizard must not be bricked by its own bookkeeping."""
+	raw = frappe.db.get_single_value("Jarvis Settings", CONTEXT_FIELD) or ""
+	if not raw:
+		return {}
+	try:
+		out = json.loads(raw)
+	except (ValueError, TypeError):
+		return {}
+	return out if isinstance(out, dict) else {}
+
+
+def save(context: dict) -> None:
+	"""Persist the context. ``db_set`` for the same reason write_connection uses
+	it - Jarvis Settings' ``on_update`` pushes credentials to the container, and
+	onboarding must not trigger that. ``update_modified=False`` keeps a 2-second
+	wizard poll from churning the Single's timestamp.
+
+	The secret sweep is the last line of defence, not the first: ``absorb``'s
+	allowlist is what keeps credentials out of here, and this makes a future
+	caller that hands the field a raw admin payload fail safe instead of parking
+	an api_secret in a plain-text Settings column."""
+	clean = {k: v for k, v in (context or {}).items() if k not in _NEVER_PERSIST}
+	settings = frappe.get_single("Jarvis Settings")
+	settings.db_set(CONTEXT_FIELD, json.dumps(clean, sort_keys=True), update_modified=False)
+
+
+def update(**fields) -> dict:
+	"""Merge non-empty fields into the stored context and return the result.
+
+	Empty values are dropped rather than written: a poll that answers with no
+	``amount_inr`` (a verification-stage response, say) must not erase the amount
+	a later screen still has to render. Writes only on a real change, so the
+	wizard's polling costs no DB writes once the state is steady."""
+	context = load()
+	merged = dict(context)
+	for key, value in fields.items():
+		if value in (None, "", {}, []):
+			continue
+		merged[key] = value
+	if merged != context:
+		merged["updated_at"] = frappe.utils.now()
+		save(merged)
+	return merged
+
+
+def absorb(payload: dict | None) -> dict:
+	"""Fold an admin envelope's DISPLAY facts into the local context.
+
+	An allowlist, never a copy: the signup response carries the account's
+	credentials beside its display fields, and a blanket merge would park them in
+	a plain-text Settings field. ``plan`` arrives as ``{"name", "label"}`` from
+	the state/resume surfaces and as a bare string from the bench's own signup
+	call, so both are folded to ``plan`` + ``plan_label``."""
+	if not isinstance(payload, dict):
+		return load()
+	fields = {key: payload.get(key) for key in _ADMIN_KEYS if key in payload}
+	plan = payload.get("plan")
+	if isinstance(plan, dict):
+		fields["plan"] = plan.get("name") or ""
+		fields["plan_label"] = plan.get("label") or ""
+	elif isinstance(plan, str):
+		fields["plan"] = plan
+	return update(**fields)
+
+
+def wire(context: dict | None = None) -> dict:
+	"""The context block a facade response carries, minus anything local-only."""
+	context = load() if context is None else context
+	return {k: v for k, v in context.items() if k not in _LOCAL_ONLY_KEYS}
+
+
+def clear() -> None:
+	"""Drop the context (bench reset / disconnect)."""
+	save({})
+
+
+# --------------------------------------------------------------------------- #
+# idempotency
+# --------------------------------------------------------------------------- #
+def next_idempotency_key(*, supplied: str | None = None, context: dict | None = None) -> str:
+	"""The key for the payment initiation about to be made.
+
+	``supplied`` (from the caller) wins verbatim - including an over-long one,
+	which admin answers with a coded ``INVALID_REQUEST`` it can fix. Silently
+	truncating would hand it a DIFFERENT key than the one it thinks it sent, and
+	an idempotency key that is not the caller's is worse than none.
+
+	Otherwise: reuse the stored key while the intent it bought is still payable
+	(so a double-click, a retried POST and a refreshed pay screen all converge on
+	one gateway object), and mint a fresh one once the last code says the
+	recovery IS a new intent - because admin answers a key it has already seen
+	with the intent that key created, and after a decline that is precisely the
+	order the customer cannot pay.
+
+	The key carries no identity: it is a receipt, admin stores only its SHA-256,
+	and anything derived from the customer would put an identifier in a field
+	operators read."""
+	if supplied and supplied.strip():
+		return supplied.strip()
+	context = load() if context is None else context
+	stored = (context.get("idempotency_key") or "").strip()
+	if stored and context.get("code") not in _SPENT_INTENT_CODES:
+		return stored
+	return f"bench-{secrets.token_urlsafe(24)}"
+
+
+# --------------------------------------------------------------------------- #
+# wire shaping
+# --------------------------------------------------------------------------- #
+def error_object(err) -> tuple[dict, int]:
+	"""One admin_client exception -> (wire error object, HTTP status).
+
+	A contract error passes through as ITSELF: admin's code, its recovery hint
+	and every extra it carried (``retry_after_seconds``, ``subscription_status``,
+	``attempt_id``) reach the caller unaltered, because re-deriving them here is
+	how one side's vocabulary becomes two. Everything else - transport,
+	authentication, an admin too old to speak the contract - gets a BENCH_* code
+	so its provenance is unambiguous."""
+	from jarvis.exceptions import (
+		AdminAuthError,
+		AdminContractError,
+		AdminRateLimitedError,
+		AdminUnreachableError,
+		AdminValidationError,
+	)
+
+	if isinstance(err, AdminContractError):
+		out = dict(err.error)
+		out.setdefault("code", err.code)
+		out.setdefault("message", str(err))
+		return out, (err.http_status or 409)
+	if isinstance(err, AdminRateLimitedError):
+		out = dict(err.error) if err.error else {}
+		out.setdefault("code", err.code or BENCH_RATE_LIMITED)
+		out.setdefault("message", str(err))
+		out.setdefault("recovery", err.recovery or RECOVERY_RETRY)
+		if err.retry_after_seconds:
+			out.setdefault("retry_after_seconds", err.retry_after_seconds)
+		return out, 429
+	if isinstance(err, AdminAuthError):
+		return {
+			"code": BENCH_ADMIN_AUTH_FAILED,
+			"message": str(err),
+			"recovery": RECOVERY_CONTACT_SUPPORT,
+		}, (err.status_code or 401)
+	if isinstance(err, AdminValidationError):
+		# An admin older than the contract: a real rejection with a real
+		# message, and no machine code anywhere in it. Fail closed onto the
+		# generic branch rather than reading the sentence.
+		out = {"code": BENCH_ADMIN_REJECTED, "message": str(err), "recovery": RECOVERY_RETRY}
+		if getattr(err, "exc_type", None):
+			out["exc_type"] = err.exc_type
+		return out, 409
+	if isinstance(err, AdminUnreachableError):
+		return {
+			"code": BENCH_ADMIN_UNREACHABLE,
+			"message": str(err),
+			"recovery": RECOVERY_RETRY,
+		}, 502
+	return {"code": BENCH_ADMIN_REJECTED, "message": str(err), "recovery": RECOVERY_RETRY}, 500
+
+
+def stamp_error(error: dict) -> None:
+	"""Park the machine-readable error on a response that is about to carry a
+	RAISED exception, so a throw still delivers the contract.
+
+	``frappe.utils.response.build_response`` serializes ``frappe.local.response``
+	verbatim, which is what puts the object on the wire next to Frappe's own
+	``exc_type`` - the same mechanism admin's ``codes.stamp_error`` uses, read
+	from the other end. Call it immediately before the throw: it mutates the
+	response, so a caller that CATCHES the throw would otherwise leave a stale
+	error on an eventually-successful reply."""
+	frappe.local.response["error"] = error
+
+
+def success(data: dict, *, context: dict | None = None) -> dict:
+	"""A facade success: admin's envelope verbatim, plus the local context.
+
+	``data`` is NOT filtered. Every capability flag, disclosure field and code
+	admin added - including ones this bench build has never heard of - reaches
+	the caller, which is what makes an additive admin release a no-op here."""
+	return {
+		"ok": True,
+		"contract_version": int((data or {}).get("contract_version") or CONTRACT_VERSION),
+		"data": data or {},
+		"context": wire(context),
+	}
+
+
+def failure(error: dict, status: int, *, context: dict | None = None) -> dict:
+	"""A facade failure: the contract error, under a DELIBERATE 4xx/5xx.
+
+	Never ``{"ok": false}`` on a 200 - the same rule that governs admin's half of
+	this contract, for the same reason: a success-shaped body under a success
+	status is a failure every reader has to be told about out of band."""
+	frappe.local.response.http_status_code = status
+	return {"ok": False, "error": error, "context": wire(context)}
