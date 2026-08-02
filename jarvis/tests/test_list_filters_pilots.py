@@ -130,12 +130,20 @@ def _mk_macro(owner: str, name: str, enabled=1, steps=None) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Structural proof: the emitted WHERE is byte-identical to the legacy one.
+# Structural check on the ASSEMBLER (not on the pilots).
 # --------------------------------------------------------------------------- #
-class TestScopePredicateUnchanged(unittest.TestCase):
-	"""The pre-migration endpoints built ``" AND ".join(conds)`` by hand. These
-	are those exact strings, per branch, compared against what the shared query
-	object emits with no user clauses."""
+class TestQueryObjectReproducesTheLegacyPredicates(unittest.TestCase):
+	"""What this proves, precisely: :class:`ListFilterQuery`, fed the same
+	server-authored predicates the pre-migration endpoints built by hand, emits
+	the same WHERE — modulo the defensive parenthesisation the joiner now adds
+	around every part, which is semantically inert.
+
+	What it does NOT prove: that the pilots feed it the right predicates. That is
+	:class:`TestPilotEqualityOfScope` below, which exercises the real endpoints
+	and compares real result envelopes. This class would still pass if someone
+	deleted a ``server_condition`` call from ``list_custom_skills_page``; that
+	one would not.
+	"""
 
 	def _skills_query(self, scope, shared, search=None, legacy=None):
 		q = list_filters.new_query("skills", user=USER_A)
@@ -162,12 +170,15 @@ class TestScopePredicateUnchanged(unittest.TestCase):
 		return q
 
 	def test_skills_scope_branches(self):
+		# Right-hand side = the exact pre-migration string, wrapped by the
+		# joiner's defensive parentheses (see _and(): a predicate with a
+		# top-level OR must not bind loosely into the AND-chain).
 		cases = [
-			((None, ()), "owner = %(me)s"),
-			((None, ("s1",)), "(owner = %(me)s OR (name IN %(shared)s AND enabled = 1))"),
-			(("mine", ("s1",)), "owner = %(me)s"),
-			(("shared", ()), "1=0"),
-			(("shared", ("s1",)), "(name IN %(shared)s AND enabled = 1)"),
+			((None, ()), "(owner = %(me)s)"),
+			((None, ("s1",)), "((owner = %(me)s OR (name IN %(shared)s AND enabled = 1)))"),
+			(("mine", ("s1",)), "(owner = %(me)s)"),
+			(("shared", ()), "(1=0)"),
+			(("shared", ("s1",)), "((name IN %(shared)s AND enabled = 1))"),
 		]
 		for (scope, shared), expected in cases:
 			with self.subTest(scope=scope, shared=bool(shared)):
@@ -182,8 +193,8 @@ class TestScopePredicateUnchanged(unittest.TestCase):
 		)
 		self.assertEqual(
 			q.where(),
-			"owner = %(me)s AND (skill_name LIKE %(q)s OR description LIKE %(q)s) "
-			"AND enabled = %(enabled)s AND user_invocable = %(user_invocable)s",
+			"(owner = %(me)s) AND ((skill_name LIKE %(q)s OR description LIKE %(q)s)) "
+			"AND (enabled = %(enabled)s) AND (user_invocable = %(user_invocable)s)",
 		)
 		self.assertEqual(q.params(), {"me": USER_A, "q": "%x%", "enabled": 1, "user_invocable": 0})
 
@@ -197,9 +208,9 @@ class TestScopePredicateUnchanged(unittest.TestCase):
 		q.apply([])
 		self.assertEqual(
 			q.where(),
-			"owner = %(me)s AND (macro_name LIKE %(q)s OR description LIKE %(q)s) "
-			"AND enabled = %(enabled)s AND schedule_enabled = %(schedule_enabled)s "
-			"AND schedule_frequency = %(schedule_frequency)s",
+			"(owner = %(me)s) AND ((macro_name LIKE %(q)s OR description LIKE %(q)s)) "
+			"AND (enabled = %(enabled)s) AND (schedule_enabled = %(schedule_enabled)s) "
+			"AND (schedule_frequency = %(schedule_frequency)s)",
 		)
 
 
@@ -333,6 +344,20 @@ class TestPilotEqualityOfScope(unittest.TestCase):
 		self.assertEqual({r["macro_name"] for r in res["rows"]}, {"lfp-macro-a"})
 		self.assertEqual(res["total"], 1)
 
+	def test_a_rejected_filter_is_an_envelope_not_an_empty_list(self):
+		"""The failure mode a filtered list must never have: the SPA's list
+		composable reads ``res.rows`` and falls back to ``[]``, so a rejection
+		returned as a bare 200 would render as 'no results' — a wrong answer that
+		looks like a right one."""
+		res = self._macros(
+			USER_A,
+			filters_v2=[{"doctype": MACRO, "fieldname": "no_such_field", "operator": "=", "value": "x"}],
+		)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["code"], "list_filter_unknown_field")
+		self.assertTrue(res["error"]["message"])
+		self.assertNotIn("rows", res)
+
 	def test_schema_endpoint_is_jarvis_user_gated_and_view_scoped(self):
 		from jarvis.chat.list_filters import get_list_filter_schema
 
@@ -342,3 +367,96 @@ class TestPilotEqualityOfScope(unittest.TestCase):
 		self.assertEqual(schema["contract_version"], list_filters.CONTRACT_VERSION)
 		self.assertTrue(schema["schema_revision"])
 		self.assertEqual(schema["limits"]["max_clauses"], list_filters.MAX_CLAUSES)
+
+
+# --------------------------------------------------------------------------- #
+# U1-1: the stable codes reach THE WIRE.
+# --------------------------------------------------------------------------- #
+class TestErrorCodesOnTheWire(unittest.TestCase):
+	"""Asserts on the serialized HTTP response — status line and JSON body — not
+	on the Python object the endpoint returned.
+
+	A code that only exists as an attribute on an exception inside the worker is
+	not a contract. This drives the request through Frappe's real dispatch
+	(``execute_cmd``) and its real serializer (``build_response('json')``), which
+	is what a browser would receive.
+	"""
+
+	@staticmethod
+	def _request(cmd: str, **params) -> tuple[int, dict]:
+		import json as _json
+
+		from frappe.handler import execute_cmd
+		from frappe.utils.response import build_response
+		from werkzeug.test import EnvironBuilder
+		from werkzeug.wrappers import Request
+
+		saved = (
+			getattr(frappe.local, "response", None),
+			getattr(frappe.local, "form_dict", None),
+			getattr(frappe.local, "request", None),
+			getattr(frappe.local, "message_log", None),
+		)
+		try:
+			# A REAL request object on the real /api/method path: execute_cmd
+			# checks the verb against the whitelist's allowed set, and the JSON
+			# serializer reads the path to pick its response version.
+			frappe.local.request = Request(
+				EnvironBuilder(path=f"/api/method/{cmd}", method="GET").get_environ()
+			)
+			frappe.local.response = frappe._dict({"type": "json"})
+			frappe.local.form_dict = frappe._dict({"cmd": cmd, **params})
+			frappe.local.message_log = []
+			data = execute_cmd(cmd)
+			if data is not None:
+				frappe.local.response["message"] = data
+			response = build_response("json")
+			return response.status_code, _json.loads(response.get_data(as_text=True))
+		finally:
+			frappe.local.response, frappe.local.form_dict, frappe.local.request, frappe.local.message_log = (
+				saved
+			)
+
+	def test_unknown_field_serializes_as_a_coded_4xx(self):
+		with _as(USER_A):
+			status, body = self._request(
+				"jarvis.chat.macros_api.list_macros_page",
+				filters_v2='[{"doctype": "Jarvis Macro", "fieldname": "nope", "operator": "=", "value": "x"}]',
+			)
+		self.assertEqual(status, 417)
+		self.assertEqual(body["message"]["ok"], False)
+		self.assertEqual(body["message"]["error"]["code"], "list_filter_unknown_field")
+		# The human-readable half rides along too, in Frappe's own channel, so an
+		# existing client that only knows _server_messages still shows something.
+		self.assertTrue(body.get("_server_messages"))
+
+	def test_malformed_payload_serializes_as_400(self):
+		with _as(USER_A):
+			status, body = self._request(
+				"jarvis.chat.custom_skills_api.list_custom_skills_page", filters_v2="{not json"
+			)
+		self.assertEqual(status, 400)
+		self.assertEqual(body["message"]["error"]["code"], "list_filter_bad_payload")
+
+	def test_schema_endpoint_serializes_its_code_too(self):
+		with _as(USER_A):
+			status, body = self._request(
+				"jarvis.chat.list_filters.get_list_filter_schema", view_key="not-a-view"
+			)
+		self.assertEqual(status, 417)
+		self.assertEqual(body["message"]["error"]["code"], "list_filter_unknown_view")
+
+	def test_a_successful_call_keeps_status_200_and_the_bare_envelope(self):
+		"""Non-vacuity: the boundary must not have turned every response into an
+		envelope — the success shape is frozen and the SPA reads it directly."""
+		with _as(USER_A):
+			status, body = self._request("jarvis.chat.macros_api.list_macros_page")
+		self.assertEqual(status, 200)
+		self.assertIn("rows", body["message"])
+		self.assertNotIn("ok", body["message"])
+
+	def test_a_legacy_filter_error_is_left_alone(self):
+		"""The boundary catches ListFilterError only. The legacy ``filters``
+		contract still throws, which is what its existing callers expect."""
+		with _as(USER_A), self.assertRaises(frappe.ValidationError):
+			self._request("jarvis.chat.macros_api.list_macros_page", filters='{"bogus_key": 1}')

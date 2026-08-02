@@ -74,6 +74,16 @@ class ListView:
 	``scope`` field, a genuinely confusable collision). The Phase-0 audit needs
 	that mapping to compare curated width against the metadata catalog without
 	guessing.
+
+	``excluded_fields`` is the view's own withholding list, and it is a SECURITY
+	control, not a taste one. Permlevel (C08-1) stops a field the *DocType* hides;
+	it cannot stop a field the *endpoint* hides. Triggers is the live example: the
+	rows it returns redact ``condition`` / ``script_body`` / ``llm_instruction``
+	for non-managers (``triggers_api._trigger_detail``), so offering those as
+	filters would rebuild the redacted logic one LIKE at a time. Anything a view's
+	projection withholds from its rows MUST appear here before that view is
+	flipped to ``MIGRATED``. Entries are plain fieldnames of ``root_doctype``, or
+	``"Child DocType.fieldname"`` to withhold one child field.
 	"""
 
 	view_key: str
@@ -90,6 +100,7 @@ class ListView:
 	wave: int | None = None
 	status: str = PENDING
 	curated_filters: dict[str, str | None] = field(default_factory=dict)
+	excluded_fields: tuple[str, ...] = ()
 	#: Distinguishes two views served by one endpoint (learning queue/decided).
 	variant: str = ""
 	reason: str = ""
@@ -196,7 +207,15 @@ _VIEWS: tuple[ListView, ...] = (
 			"target_doctype": "target_doctype",
 			"doc_event": "doc_event",
 		},
-		notes="Manager/non-manager row redaction must survive migration.",
+		excluded_fields=("condition", "script_body", "llm_instruction"),
+		notes=(
+			"Manager/non-manager row redaction must survive migration: "
+			"triggers_api._trigger_detail blanks condition/script_body/"
+			"llm_instruction for non-managers, so those three are withheld from "
+			"the filter catalog too — a LIKE oracle would rebuild them. Withheld "
+			"unconditionally (for managers as well): a per-role exclusion needs a "
+			"view-declared predicate, which is deliberately deferred."
+		),
 	),
 	ListView(
 		view_key="trigger_activity",
@@ -438,6 +457,46 @@ _VIEWS: tuple[ListView, ...] = (
 )
 
 _BY_KEY: dict[str, ListView] = {v.view_key: v for v in _VIEWS}
+
+
+#: Whitelisted ``list_*`` endpoints under ``jarvis/chat`` that are deliberately
+#: NOT document-list views, each with its classification. The new-surface audit
+#: sweeps every such callable and fails unless it appears in a registered view's
+#: ``endpoints`` or here — so a new list endpoint cannot ship unclassified, which
+#: was the registry's one remaining loophole (it could only prove that what IS
+#: registered is well-formed, never that nothing is missing).
+NON_LIST_ENDPOINTS: dict[str, str] = {
+	# Unpaginated companions of a registered paginated list. They exist for a
+	# dropdown / autocomplete / first-paint and return a capped slice with no
+	# filter, sort or page contract. The registered *_page endpoint is the
+	# document-list view; these are its accelerators and migrate with it.
+	"jarvis.chat.agents_api.list_agents": "unpaginated companion of agents_catalog (list_agents_page)",
+	"jarvis.chat.agents_api.list_runs": "unpaginated companion of agent_runs (list_runs_page)",
+	"jarvis.chat.approvals_api.list_approvals": "unpaginated companion of approvals (list_approvals_page)",
+	"jarvis.chat.custom_skills_api.list_custom_skills": (
+		"composer '/' autocomplete feed for skills; unpaginated companion of the skills view"
+	),
+	"jarvis.chat.filebox.list_inbound": "unpaginated companion of file_box (list_inbound_page)",
+	"jarvis.chat.macros_api.list_macros": (
+		"Settings macro-runs dropdown feed; unpaginated companion of the macros view"
+	),
+	# Not document collections at all: option/name strings for a control.
+	"jarvis.chat.api.list_tools": "tool NAMES available to the caller — strings, not documents",
+	"jarvis.chat.personalise_api.list_role_options": "role name strings for a picker",
+	"jarvis.chat.custom_skills_api.list_shareable_users": "user picker feed for the share dialog",
+	"jarvis.chat.app_learning_api.list_custom_apps": "installed app names on the bench — not documents",
+	# Configuration, not a browsable collection.
+	"jarvis.chat.personalise_api.list_question_rules": (
+		"the question-bank rule configuration rendered as a settings form, not a list view"
+	),
+	# Transient per-session state, keyed by token and scoped to the caller's own
+	# live turns. It has no identity that survives the turn, no page and no sort.
+	"jarvis.chat.actions_api.list_pending_confirmations": (
+		"re-surfaces the caller's OWN currently-parked confirmation cards after a "
+		"reload; items are live in-flight tokens, not stored documents — they "
+		"vanish when the turn resolves, so there is nothing to page, sort or filter"
+	),
+}
 
 
 # --------------------------------------------------------------------------- #

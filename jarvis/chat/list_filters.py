@@ -29,13 +29,33 @@ author wrote (plus its values as bound params), :meth:`~ListFilterQuery.apply`
 takes client clauses and can only ever turn them into bound parameters. The two
 meet exactly once, as already-built strings, in :meth:`~ListFilterQuery.where`.
 
+**Every migrating endpoint wears the same error boundary.** A stable code is
+worthless if it dies inside the Python process, so :func:`filter_errors_to_envelope`
+converts a :class:`ListFilterError` into the repo's ``{ok: false, error: {code,
+message}}`` envelope (the ``dashboards_api._error_envelope`` shape) with a
+deliberate 4xx status, and every list endpoint that accepts ``filters_v2``
+declares it::
+
+    @frappe.whitelist()
+    @require_jarvis_user
+    @filter_errors_to_envelope
+    def list_widgets_page(..., filters_v2: str | list | None = None) -> dict:
+
+Order matters: the access gate stays OUTSIDE (a PermissionError is a different
+contract and must keep its 403), and the wrapper only covers the body. The 4xx is
+what stops a client from reading a rejected filter as an empty result set — the
+one failure mode a filtered list must never have.
+
 Deliberate deviations from Frappe parity are documented, with rationale, in
-``jarvis/chat/LIST-FILTERS-DEVIATIONS.md``. Reviewers cite that file; the future
-golden-matrix test (plan §11.5) is written against it.
+``jarvis/chat/LIST-FILTERS-DEVIATIONS.md``, which also carries the
+MIGRATION-CHECKLIST every surface works through before it flips to ``MIGRATED``.
+Reviewers cite that file; the future golden-matrix test (plan §11.5) is written
+against it.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -80,6 +100,19 @@ ERR_INVALID_VALUE = "list_filter_invalid_value"
 ERR_TOO_MANY_CLAUSES = "list_filter_too_many_clauses"
 ERR_TOO_MANY_VALUES = "list_filter_too_many_values"
 ERR_VALUE_TOO_LONG = "list_filter_value_too_long"
+#: The schema could not be built at all (metadata missing, table gone). Distinct
+#: from "your clause is wrong": it is OUR fault, and it fails closed rather than
+#: reaching the client as a raw 500 with a traceback-shaped message.
+ERR_SCHEMA_UNAVAILABLE = "list_filter_schema_unavailable"
+
+#: A malformed payload is a bad REQUEST; everything else is a well-formed request
+#: carrying an invalid filter, which is Frappe's ValidationError status; and an
+#: unbuildable schema is ours, not the caller's.
+_HTTP_STATUS_BY_CODE: dict[str, int] = {
+	ERR_BAD_PAYLOAD: 400,
+	ERR_SCHEMA_UNAVAILABLE: 503,
+}
+_DEFAULT_ERROR_STATUS = 417
 
 
 class ListFilterError(frappe.ValidationError):
@@ -96,6 +129,43 @@ def _fail(code: str, message: str) -> None:
 	# msgprint(raise_exception=<instance>) keeps the instance (and therefore the
 	# code) while still populating `messages[0]` for the SPA's error surface.
 	frappe.msgprint(message, raise_exception=err, title=_("Filter"), indicator="red")
+
+
+def error_envelope(code: str, message: str) -> dict:
+	"""The repo's ``{ok: false, error: {code, message}}`` shape (same as
+	``dashboards_api._error_envelope``)."""
+	return {"ok": False, "error": {"code": code, "message": message}}
+
+
+def filter_errors_to_envelope(fn):
+	"""Endpoint boundary: a :class:`ListFilterError` becomes the ``{ok: false,
+	error: {code, message}}`` envelope with a deliberate 4xx/5xx status.
+
+	Without this the stable codes never leave the Python process — Frappe would
+	render the ValidationError as a generic 417 whose body carries only the
+	human message, so a client could not branch on *why* a filter was rejected.
+
+	The status is the load-bearing half: it is what stops the SPA's list
+	composable from reading a rejected filter as ``rows: []`` and silently
+	showing an empty, apparently-correct list. Every other exception is left
+	alone (an unexpected bug must still surface as a 500).
+	"""
+
+	@functools.wraps(fn)
+	def wrapper(*args, **kwargs):
+		try:
+			return fn(*args, **kwargs)
+		except ListFilterError as e:
+			code = getattr(e, "filter_error_code", ERR_BAD_PAYLOAD)
+			try:
+				frappe.local.response["http_status_code"] = _HTTP_STATUS_BY_CODE.get(
+					code, _DEFAULT_ERROR_STATUS
+				)
+			except Exception:
+				pass
+			return error_envelope(code, frappe.utils.strip_html(str(e)).strip())
+
+	return wrapper
 
 
 # --------------------------------------------------------------------------- #
@@ -232,19 +302,31 @@ def _fallback_sql(fieldtype: str) -> str:
 	return "''"
 
 
-def default_operator(fieldname: str, fieldtype: str, is_large_table: bool = False) -> str:
-	"""Frappe's ``frappe.ui.filter_utils.get_default_condition`` (filter.js:516-529),
-	copied rather than approximated.
+#: Free-text bodies a human types prose into. D5-a: these default to ``like``,
+#: which is a deliberate divergence from Frappe (see the ledger). NOT included:
+#: ``Code``/``HTML Editor``/``Markdown Editor`` (machine-shaped content, where an
+#: exact match is the useful question) and ``Data`` (which keeps Frappe's
+#: large-table rule below).
+_FREE_TEXT_FIELDTYPES = frozenset({"Small Text", "Long Text", "Text", "Text Editor"})
 
-	Plan §5.1's table claimed a ``like`` default for every "text-like" family
-	(Small Text, Long Text, Attach, Phone, Barcode, Color...). Frappe does not:
-	only ``Data`` (and only on a non-large table) defaults to ``like``;
-	Date/Datetime default to ``Between``; EVERYTHING else defaults to ``=``.
-	We follow Frappe. Deviation ledger D5 records the difference.
+
+def default_operator(fieldname: str, fieldtype: str, is_large_table: bool = False) -> str:
+	"""Default condition per field family.
+
+	Frappe's ``get_default_condition`` (filter.js:516-529) gives ``like`` only to
+	``Data`` on a non-large table, ``Between`` to Date/Datetime, and ``=`` to
+	everything else — so a Small Text ``description`` defaults to an exact match,
+	which is almost never what a user typing three words into a Description filter
+	means. Plan §5.1 assumed ``like`` for all text-like families and was wrong
+	about Frappe; the judgment's ruling (D5-a) is to diverge deliberately for the
+	four free-text bodies while keeping Frappe's rule everywhere else. ``=`` stays
+	selectable on all of them.
 	"""
 	if fieldname in _JSON_ARRAY_FIELDS:
 		return OP_LIKE
 	if fieldtype == "Data" and not is_large_table:
+		return OP_LIKE
+	if fieldtype in _FREE_TEXT_FIELDTYPES:
 		return OP_LIKE
 	if fieldtype in ("Date", "Datetime"):
 		return OP_BETWEEN
@@ -290,10 +372,11 @@ def _filterable_root(view: list_registry.ListView) -> str:
 
 
 def _table_columns(doctype: str) -> set[str]:
-	try:
-		return set(frappe.db.get_table_columns(doctype))
-	except Exception:
-		return set()
+	"""Real columns of the table. Deliberately NOT exception-swallowing: an empty
+	set would silently disable the column check below and quietly widen the
+	catalog. A missing table is a schema failure — :func:`get_schema` turns it
+	into ``list_filter_schema_unavailable``."""
+	return set(frappe.db.get_table_columns(doctype))
 
 
 def _is_large_table(meta) -> bool:
@@ -345,7 +428,13 @@ def _entry(
 	}
 
 
-def build_field_catalog(root_doctype: str, user: str | None = None) -> list[dict]:
+def build_field_catalog(
+	root_doctype: str,
+	user: str | None = None,
+	*,
+	view: list_registry.ListView | None = None,
+	excluded_fields: tuple[str, ...] | list[str] = (),
+) -> list[dict]:
 	"""The filterable-field catalog for ``root_doctype`` as seen by ``user``.
 
 	Plan §4: applicable standard fields + every stored, non-virtual,
@@ -354,10 +443,26 @@ def build_field_catalog(root_doctype: str, user: str | None = None) -> list[dict
 	(doctype, fieldname) as Frappe does. Hidden / not-in-list-view fields are NOT
 	excluded: Frappe filters on readable metadata, not on visible columns.
 
+	``view`` threads the registered surface through, so its
+	:attr:`~jarvis.chat.list_registry.ListView.excluded_fields` are withheld here
+	rather than by every caller remembering to. That is the P1 control: permlevel
+	stops what the DOCTYPE hides, ``excluded_fields`` stops what the ENDPOINT
+	hides (Triggers' redacted logic fields being the live case). A withheld field
+	is simply absent, so the compiler rejects it with the same
+	``list_filter_unknown_field`` as a misspelling — the oracle rule holds.
+
 	Exposed as a public helper (not just via the view registry) so the Phase-0
 	audit and the permlevel regression can point it at a DocType directly.
 	"""
 	user = user or frappe.session.user
+	excluded = {str(x) for x in excluded_fields}
+	if view is not None:
+		excluded |= {str(x) for x in view.excluded_fields}
+	# "fieldname" withholds a main/standard field; "Child DocType.fieldname"
+	# withholds one child field.
+	excluded_main = {x for x in excluded if "." not in x}
+	excluded_child = {tuple(x.split(".", 1)) for x in excluded if "." in x}
+
 	meta = frappe.get_meta(root_doctype)
 	levels = _permlevels(meta, user)
 	if 0 not in levels:
@@ -375,6 +480,8 @@ def build_field_catalog(root_doctype: str, user: str | None = None) -> list[dict
 	for std in _STANDARD_FIELDS:
 		fieldname = std["fieldname"]
 		if fieldname == "docstatus" and not submittable:
+			continue
+		if fieldname in excluded_main:
 			continue
 		if fieldname in _OPTIONAL_COLUMNS and fieldname not in columns:
 			continue
@@ -404,6 +511,8 @@ def build_field_catalog(root_doctype: str, user: str | None = None) -> list[dict
 			continue
 		if df.fieldtype in NO_VALUE_FIELDTYPES or df.fieldtype in SECRET_FIELDTYPES:
 			continue
+		if fieldname in excluded_main:
+			continue
 		if int(df.permlevel or 0) not in levels:
 			continue
 		if columns and fieldname not in columns:
@@ -423,10 +532,9 @@ def build_field_catalog(root_doctype: str, user: str | None = None) -> list[dict
 	children: list[dict] = []
 	for container in child_containers:
 		child_dt = container.options
-		try:
-			child_meta = frappe.get_meta(child_dt)
-		except Exception:
-			continue
+		# No swallow: a Table pointing at a missing child DocType is a broken
+		# schema, and silently dropping its fields would be a silent narrowing.
+		child_meta = frappe.get_meta(child_dt)
 		child_levels = _permlevels(child_meta, user, parenttype=root_doctype)
 		if 0 not in child_levels:
 			continue
@@ -444,6 +552,8 @@ def build_field_catalog(root_doctype: str, user: str | None = None) -> list[dict
 				continue
 			# Nested tables are not recursively filterable (plan §4.3).
 			if df.fieldtype in NO_VALUE_FIELDTYPES or df.fieldtype in SECRET_FIELDTYPES:
+				continue
+			if (child_dt, fieldname) in excluded_child:
 				continue
 			if int(df.permlevel or 0) not in child_levels:
 				continue
@@ -494,17 +604,14 @@ def _meta_fingerprint(root_doctype: str, user: str) -> str:
 	have to remember to bust anything.
 	"""
 	parts: list[str] = []
-	try:
-		meta = frappe.get_meta(root_doctype)
-	except Exception:
-		return "no-meta"
+	# No swallow anywhere in here: a fingerprint computed from partial metadata
+	# would be a STABLE key for an INCOMPLETE catalog, i.e. a cached wrong answer.
+	# get_schema turns any failure into list_filter_schema_unavailable.
+	meta = frappe.get_meta(root_doctype)
 	metas = [(root_doctype, meta)]
 	for df in meta.fields:
 		if df.fieldtype in TABLE_FIELDTYPES and df.options:
-			try:
-				metas.append((df.options, frappe.get_meta(df.options)))
-			except Exception:
-				continue
+			metas.append((df.options, frappe.get_meta(df.options)))
 	for name, m in metas:
 		parts.append(name)
 		parts.append(str(getattr(m, "modified", "")))
@@ -522,9 +629,24 @@ def get_schema(view_key: str, user: str | None = None) -> dict:
 	user = user or frappe.session.user
 	view = resolve_view(view_key)
 	root = _filterable_root(view)
+	try:
+		return _build_schema(view, root, user)
+	except ListFilterError:
+		raise
+	except Exception:
+		# Metadata gone, table dropped mid-migrate, a broken child DocType: the
+		# caller gets a stable code and no rows, never a raw 500 whose body the
+		# SPA would render as a mystery toast.
+		frappe.log_error(
+			title="list filter schema unavailable",
+			message=f"{view_key} / {root}\n{frappe.get_traceback()}",
+		)
+		_fail(ERR_SCHEMA_UNAVAILABLE, _("Filters are unavailable for this list right now."))
 
+
+def _build_schema(view: list_registry.ListView, root: str, user: str) -> dict:
 	fingerprint = _meta_fingerprint(root, user)
-	key = _cache_key(view_key, user, fingerprint)
+	key = _cache_key(view.view_key, user, fingerprint)
 	try:
 		cached = frappe.cache().get_value(key)
 	except Exception:
@@ -532,7 +654,7 @@ def get_schema(view_key: str, user: str | None = None) -> dict:
 	if isinstance(cached, dict) and cached.get("contract_version") == CONTRACT_VERSION:
 		return cached
 
-	fields = build_field_catalog(root, user=user)
+	fields = build_field_catalog(root, user=user, view=view)
 	meta = frappe.get_meta(root)
 	schema = {
 		"contract_version": CONTRACT_VERSION,
@@ -558,12 +680,21 @@ def get_schema(view_key: str, user: str | None = None) -> dict:
 
 @frappe.whitelist()
 @require_jarvis_user
+@filter_errors_to_envelope
 def get_list_filter_schema(view_key: str) -> dict:
 	"""Fields THIS caller may filter ``view_key`` on, with per-field operators.
 
 	Jarvis-user gated. Never trust the browser's copy of this: every clause is
 	re-validated against a freshly resolved schema at query time.
+
+	Answers only for views whose endpoint actually accepts ``filters_v2``. A
+	registered-but-unmigrated view would otherwise hand a client a perfectly
+	valid schema it has nowhere to send — the UI would render a filter panel
+	whose every clause the list endpoint ignores, which is worse than no panel.
 	"""
+	view = resolve_view(view_key)
+	if view.status != list_registry.MIGRATED:
+		_fail(ERR_VIEW_NOT_FILTERABLE, _("This list does not support field filters yet."))
 	return get_schema(view_key)
 
 
@@ -611,6 +742,15 @@ def parse_clauses(clauses: Any) -> list[dict]:
 	return out
 
 
+def _guard_length(value: Any) -> None:
+	"""The §9 length cap, applied to the RAW value before any fieldtype branch.
+
+	It used to live only on the text path, so a megabyte of digits aimed at an Int
+	field, or a pathological date string, was parsed first and capped never."""
+	if isinstance(value, str | bytes) and len(value) > MAX_VALUE_CHARS:
+		_fail(ERR_VALUE_TOO_LONG, _("A filter value may not exceed {0} characters.").format(MAX_VALUE_CHARS))
+
+
 def _cap_text(value: Any) -> str:
 	text = "" if value is None else str(value)
 	if len(text) > MAX_VALUE_CHARS:
@@ -636,12 +776,39 @@ def _select_options(entry: dict) -> list[str] | None:
 	return [o.strip() for o in options.split("\n")]
 
 
+_TEMPORAL_FIELDTYPES = frozenset({"Date", "Datetime", "Time"})
+
+
 def _scalar(entry: dict, operator: str, value: Any) -> Any:
 	"""Normalize ONE scalar value by fieldtype, mirroring db_query's per-family
 	conversions. The result is always a bound parameter, never SQL."""
 	from frappe.utils import get_datetime, get_time, getdate
 
+	_guard_length(value)
 	fieldtype = entry["fieldtype"]
+
+	if fieldtype in _TEMPORAL_FIELDTYPES:
+		# Frappe's getdate(None)/get_datetime(None) return TODAY/NOW, and
+		# getdate("") does the same. Inherited, an omitted or blank date bound
+		# would quietly become "today" — a filter that answers a question nobody
+		# asked, and the answer looks plausible. Reject instead.
+		if value is None or (isinstance(value, str) and not value.strip()):
+			_fail(ERR_INVALID_VALUE, _("{0} needs a value.").format(entry["label"]))
+		try:
+			if fieldtype == "Date":
+				parsed = getdate(value)
+			elif fieldtype == "Datetime":
+				parsed = get_datetime(value)
+			else:
+				parsed = get_time(value)
+		except Exception:
+			parsed = None
+		if parsed is None:
+			# get_datetime/get_time return None (rather than raising) on several
+			# unparseable shapes; str(None) would bind the literal "None".
+			_fail(ERR_INVALID_VALUE, _("{0} needs a valid date or time.").format(entry["label"]))
+		return parsed.strftime("%H:%M:%S.%f") if fieldtype == "Time" else str(parsed)
+
 	if fieldtype == "Check":
 		text = str(value).strip().lower()
 		if text in ("1", "true", "yes"):
@@ -650,22 +817,10 @@ def _scalar(entry: dict, operator: str, value: Any) -> Any:
 			return 0
 		_fail(ERR_INVALID_VALUE, _("{0} is a checkbox: use 0 or 1.").format(entry["label"]))
 	if fieldtype in NUMERIC_FIELDTYPES:
+		# NOTE: flt("")/cint("") == 0, so a blank numeric filter means "= 0".
+		# That is Frappe's behaviour (db_query does flt(f.value)) and is left at
+		# parity deliberately — see the ledger's D14 note.
 		return _as_number(entry, value)
-	if fieldtype == "Date":
-		try:
-			return str(getdate(value))
-		except Exception:
-			_fail(ERR_INVALID_VALUE, _("{0} needs a valid date.").format(entry["label"]))
-	if fieldtype == "Datetime":
-		try:
-			return str(get_datetime(value))
-		except Exception:
-			_fail(ERR_INVALID_VALUE, _("{0} needs a valid date and time.").format(entry["label"]))
-	if fieldtype == "Time":
-		try:
-			return get_time(value).strftime("%H:%M:%S.%f")
-		except Exception:
-			_fail(ERR_INVALID_VALUE, _("{0} needs a valid time.").format(entry["label"]))
 
 	text = _cap_text(value)
 	options = _select_options(entry)
@@ -695,6 +850,7 @@ def _between_bounds(entry: dict, value: Any) -> tuple[str, str]:
 
 	from frappe.utils import get_datetime, getdate, nowdate
 
+	_guard_length(value)
 	if isinstance(value, str):
 		try:
 			parsed = json.loads(value)
@@ -808,6 +964,17 @@ def _column(ref: str, fieldname: str) -> str:
 	return f"{ref}.`{fieldname}`"
 
 
+def _and(parts: list[str]) -> str:
+	"""AND-join, parenthesising EVERY part.
+
+	Structural, not cosmetic: an unparenthesised join means a predicate
+	containing a top-level ``OR`` binds loosely and silently widens the whole
+	WHERE. The skills scope predicate is literally ``a OR (b AND c)``, and any
+	future endpoint author writing one is one keystroke from that bug. Making the
+	joiner defensive removes the footgun from every caller at once."""
+	return " AND ".join(f"({p})" for p in parts if p)
+
+
 def _compile_clause(clause: _Clause, ref: str) -> tuple[str, dict]:
 	"""One clause → (SQL with named placeholders, params). Identifiers come only
 	from the resolved schema entry; every value is a bound parameter."""
@@ -829,9 +996,17 @@ def _compile_clause(clause: _Clause, ref: str) -> tuple[str, dict]:
 
 	if op in (OP_IN, OP_NOT_IN):
 		sql_op = "IN" if op == OP_IN else "NOT IN"
-		# `in` over a nullable column coalesces exactly as db_query does, so an
-		# empty-string member still matches NULL rows.
-		if fieldtype in NON_NULLABLE_FIELDTYPES or fieldname in ("name", "creation", "modified"):
+		# db_query's rule, precisely: for `in` it clears can_be_null unless the
+		# value list is empty or contains a falsy member — and we reject empty
+		# lists (D9) and strip blank members, so `in` NEVER coalesces. Wrapping it
+		# anyway (as this did) defeats index use on every `in` filter for no
+		# semantic gain. `not in` keeps the wrapper, because NULL NOT IN (...) is
+		# NULL and those rows would silently vanish — which IS frappe's rule.
+		if (
+			op == OP_IN
+			or fieldtype in NON_NULLABLE_FIELDTYPES
+			or fieldname in ("name", "creation", "modified")
+		):
 			return (f"{col} {sql_op} %({p0})s", {p0: tuple(clause.value)})
 		return (
 			f"ifnull({col}, {_fallback_sql(fieldtype)}) {sql_op} %({p0})s",
@@ -879,6 +1054,16 @@ class CompiledFilters:
 		return [dim for dim, _sql in self.main] + [dim for dim, _dt, _sql in self.child]
 
 	def fragment(self, exclude_dimension: tuple[str, str] | None = None) -> str:
+		"""One AND-joined SQL string for a caller assembling its own WHERE."""
+		return _and(self.fragments(exclude_dimension))
+
+	def fragments(self, exclude_dimension: tuple[str, str] | None = None) -> list[str]:
+		"""The compiled clauses as SEPARATE parts.
+
+		:class:`ListFilterQuery` consumes this rather than :meth:`fragment` so
+		each user clause is parenthesised exactly once in the final WHERE instead
+		of the whole user block being wrapped again around already-wrapped parts.
+		"""
 		parts = [sql for dim, sql in self.main if dim != exclude_dimension]
 		groups: dict[str, list[str]] = {}
 		for dim, child_dt, sql in self.child:
@@ -887,7 +1072,7 @@ class CompiledFilters:
 			groups.setdefault(child_dt, []).append(sql)
 		for child_dt in sorted(groups):
 			alias = self.child_alias[child_dt]
-			inner = " AND ".join(groups[child_dt])
+			inner = _and(groups[child_dt])
 			# ONE EXISTS per child DocType with every clause on that child ANDed
 			# INSIDE it: that preserves Frappe's single-join meaning, where two
 			# conditions on one child table must be satisfied by the SAME child
@@ -898,7 +1083,7 @@ class CompiledFilters:
 				f"WHERE `{alias}`.`parent` = {self.ref}.`name` "
 				f"AND `{alias}`.`parenttype` = %({alias}_pt)s AND ({inner}))"
 			)
-		return " AND ".join(parts)
+		return parts
 
 
 def compile_validated(root_doctype: str, clauses: list[_Clause], ref: str) -> CompiledFilters:
@@ -930,11 +1115,25 @@ def compile_list_filters(
 	alias: str | None = None,
 	user: str | None = None,
 ) -> CompiledFilters:
-	"""Resolve the view, rebuild THIS caller's schema, validate, compile."""
-	schema = get_schema(view_key, user=user)
-	root = schema["root_doctype"]
+	"""Resolve the view, rebuild THIS caller's schema, validate, compile.
+
+	SHORT-CIRCUIT: the payload is parsed first, and an absent or empty one returns
+	an empty :class:`CompiledFilters` without touching metadata, the schema cache
+	or the database. That is the >99% path — every list load that has no filters
+	on it — and it matters twice over: the migrated endpoints keep exactly their
+	pre-migration cost, and a metadata problem in the filter layer cannot take
+	down an unfiltered list. The view is still resolved (a bad ``view_key`` is a
+	contract error whether or not clauses came with it), but that is a dict
+	lookup.
+	"""
+	items = parse_clauses(clauses)
+	view = resolve_view(view_key)
+	root = _filterable_root(view)
 	ref = f"`{alias}`" if alias else f"`tab{root}`"
-	return compile_validated(root, validate_clauses(schema, clauses), ref)
+	if not items:
+		return CompiledFilters(root_doctype=root, ref=ref)
+	schema = get_schema(view_key, user=user)
+	return compile_validated(root, validate_clauses(schema, items), ref)
 
 
 def compile_filters_v2(
@@ -1024,17 +1223,21 @@ class ListFilterQuery:
 	def where(self, *, exclude_dimension: tuple[str, str] | None = None) -> str:
 		parts = list(self._server_conds)
 		if self._compiled:
-			fragment = self._compiled.fragment(exclude_dimension)
-			if fragment:
-				parts.append(fragment)
-		return " AND ".join(parts) if parts else "1=1"
+			parts.extend(self._compiled.fragments(exclude_dimension))
+		return _and(parts) or "1=1"
 
 	def params(self, extra: dict | None = None) -> dict:
+		"""The merged bind map. ``extra`` carries the endpoint's non-predicate
+		params (``start``, ``page_length``); a collision with an already-bound
+		name is a programming error and raises rather than silently overwriting a
+		predicate's value — which would change what the WHERE means."""
 		out = dict(self._server_params)
 		if self._compiled:
 			out.update(self._compiled.params)
-		if extra:
-			out.update(extra)
+		for name, value in (extra or {}).items():
+			if name in out:
+				raise ValueError(f"parameter {name!r} is already bound by this query")
+			out[name] = value
 		return out
 
 

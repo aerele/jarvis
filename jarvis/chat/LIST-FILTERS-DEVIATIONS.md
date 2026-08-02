@@ -39,7 +39,73 @@ C08-1 makes this binding, and it is why the compiler may never be replaced by
 "exists but you may not read it" from "does not exist" is itself the oracle.
 
 **Tested:** `test_list_filters.py` — two roles, both directions, on a real
-permlevel-1 field.
+permlevel-1 field (main *and* child, since child permlevel access is evaluated
+against the parent's permissions and can therefore be wrong independently).
+
+### D1-a — permlevel access is `if_owner`-blind (inherited limitation)
+
+Frappe's `Meta.get_permlevel_access()` checks only `perm.role in roles and
+perm.read`. It **ignores `if_owner`**. So a DocPerm pair that means "you may read
+your own row, and these extra columns on it" reads, to the permlevel machinery,
+as "this role has level-1 access to the whole table".
+
+The live example is `Jarvis User Settings`:
+
+| role | permlevel | read | if_owner |
+|---|---:|---:|---|
+| Jarvis User | 0 | 1 | **1** |
+| Jarvis User | 1 | 1 | — |
+
+Intent: a user sees their own usage counters. Effect on the *catalog*: a plain
+Jarvis User gets every permlevel-1 field (`month_tokens`, `monthly_token_limit`,
+`total_tokens`, …) offered as filterable. The floor-role audit in
+`test_list_registry.py` prints exactly this (`settings_user_usage_admin
+floor_main=27` for a Jarvis User).
+
+That is **not** currently a leak, because `admin_list_user_usage` is
+`require_jarvis_admin()`-gated and the view is `PENDING`. It becomes one the
+moment a view over that doctype is migrated with an owner-scoped SQL predicate,
+because row scoping (`if_owner`) and column scoping (permlevel) are enforced by
+two different mechanisms and only one of them is in the catalog.
+
+We do **not** try to out-think Frappe here (re-deriving `if_owner` semantics into
+the permlevel calculation would diverge from every other permlevel consumer in
+the framework). Instead the risk is handled structurally, by the migration
+invariant below and by `excluded_fields` (D1-b).
+
+### D1-b — `excluded_fields`: what the ENDPOINT hides
+
+Permlevel stops a field the *DocType* hides. It cannot stop a field the
+*endpoint* hides. `Jarvis Trigger.condition`, `.script_body` and
+`.llm_instruction` are permlevel **0** — every reader of the doctype may read
+them — yet `triggers_api._trigger_detail` blanks all three for non-managers. A
+filter over them would rebuild the redacted automation logic one `LIKE` at a
+time, and no permlevel check would ever notice.
+
+So a registered view declares `excluded_fields`, and those fields are absent from
+the schema and rejected by the compiler with the same
+`list_filter_unknown_field`. Triggers declares its three today, while still
+`PENDING`, so the guard is in place before the surface can be flipped.
+
+Withholding is **unconditional** — a manager loses filterability on those three
+as well. A per-role exclusion would need the view to declare a predicate, which
+is deliberately deferred: the conservative direction costs a manager one filter,
+the permissive direction costs the customer their automation logic.
+
+### The migration invariant (both of the above, as one rule)
+
+> A view may be flipped to `MIGRATED` only if
+> **(1)** its SQL scope is a subset of the root DocType's ORM read scope for
+> every role that can call it, and
+> **(2)** everything its projection withholds from the rows it returns appears in
+> `excluded_fields`.
+
+(1) is the answer to D1-a: the catalog is derived from doctype-level permissions,
+so if the endpoint's hand-written `WHERE` is *narrower* than the doctype's own
+read rule the schema is safe, and if it is *wider* the schema is a licence to
+read rows the ORM would have refused. (2) is the answer to D1-b. Neither is
+machine-checkable in general, which is precisely why it is written down and why
+the checklist at the end of this file makes someone assert it per surface.
 
 ---
 
@@ -73,10 +139,11 @@ representation — i.e. it is a promise the data shape cannot keep. C08-2 requir
 "like semantics or don't ship them"; this is the like-semantics option.
 
 **Related, NOT deviated:** `_comments` is also a JSON blob, and Frappe treats it
-as plain `Text` with an `=` default. We keep Frappe's behaviour there rather than
-extending D3, so the parity surface stays small — but the same "an equality
-filter on `_comments` will not match" caveat applies. Revisit if a surface ever
-exposes it prominently.
+as plain `Text` — so Frappe's default on it is `=`, which can essentially never
+match. We do not extend D3's operator restriction to it (the parity surface stays
+small), but D5-a moves `Text` to a `like` default, which incidentally makes
+`_comments` behave sensibly. Its full operator set is still Frappe's, so an
+equality filter remains selectable and remains useless.
 
 ---
 
@@ -123,11 +190,36 @@ Plan §5.1 says "Data **and user-facing text-like fields** → `like`". Frappe's
 | `_assign`, `_liked_by` | (not covered) | `like` | `like` |
 | everything else | `=` | `=` | `=` |
 
-**Jarvis follows Frappe.** `like` remains *selectable* on every one of those
-families (it is only the default that differs), which is what plan §5.1's own
-closing sentence requires. The large-table rule is honoured via Frappe's own
-`Meta.check_if_large_table` heuristic and reported to the client as
+**Jarvis follows Frappe except for D5-a below.** `like` remains *selectable* on
+every one of those families (it is only the default that differs), which is what
+plan §5.1's own closing sentence requires. The large-table rule is honoured via
+Frappe's own `Meta.check_if_large_table` heuristic and reported to the client as
 `is_large_table` so the UI can explain the changed default.
+
+## D5-a — free-text bodies default to `like` (deliberate divergence)
+
+`Small Text`, `Long Text`, `Text` and `Text Editor` default to **`like`**, not
+Frappe's `=`.
+
+**Why.** These four are where a human types prose: `description`,
+`instructions`, `question`, `review_note`. Frappe's `=` on them means a user who
+types three words into a Description filter gets zero results and no explanation
+— the control looks broken, and the recovery (open the operator menu, discover
+"Like", re-run) is a step most people will not take. Frappe's `like` default for
+`Data` exists for exactly this reason; the families it omits are the ones where
+the argument is *stronger*, not weaker.
+
+**Why not extend it further.** `Code`, `HTML Editor` and `Markdown Editor` stay
+at `=`: their content is machine-shaped, and a substring match across a stored
+script is both a worse question and a more expensive scan. `Data` keeps Frappe's
+rule intact, including the large-table downgrade to `=`.
+
+**Cost.** `like '%x%'` cannot use an index — but there is no cost *basis* for
+treating these four as large-table risks: Frappe's own `is_large_table` heuristic
+is table-level, not column-level, and none of these columns is indexed under
+either default, so the query plan is a scan either way. If a surface ever proves
+otherwise, the escape hatch already exists (`is_large_table` is reported in the
+schema and `=` stays selectable).
 
 ---
 
@@ -258,6 +350,142 @@ recorded because the asymmetry looks like a bug until you know it is not.
   `FieldSelect.add_field_option`.
 * **`Table MultiSelect` exposes only its Link value field**, matching
   `FieldSelect.build_options`.
-* **`ifnull(...)` null-handling** per operator/family is copied from
-  `db_query.prepare_filter_condition`, so `!=` still matches NULL rows the way
-  Frappe's does.
+
+### `ifnull(...)` null-handling: mirrored, not copied
+
+An earlier draft of this file claimed the null handling was "copied from
+`db_query.prepare_filter_condition`". That was overstated, and the correction
+matters because a reader would otherwise assume parity in branches we never
+reproduced. What is actually mirrored:
+
+| Rule | Source | Ours |
+|---|---|---|
+| `can_be_null` is False for `name` / `creation` / `modified` | db_query | same |
+| `can_be_null` is False for Check/Int/Float/Currency/Percent | db_query | same |
+| `can_be_null` is False for `>` / `>=` on Date/Datetime | db_query | same |
+| `can_be_null` is False when the value is truthy and the op is `=` or `like` | db_query | same |
+| `is set` → `ifnull(col,'') != ''`; `is not set` → `= ''` | db_query | same |
+| `in` does **not** coalesce (non-empty list, no falsy member) | db_query | same |
+| `not in` **does** coalesce | db_query | same |
+| per-family fallback literal (`0`, `''`, `'0001-01-01'`, …) | db_query | same |
+
+What is **not** reproduced: db_query's `not_nullable` DocField flag, its
+`Column`-valued comparisons, its `previous`/`next` operators, its
+`additional_filters_config` hook operators, and its index-friendly rewrite of
+`ifnull(col, fb) = fb` into `(col IS NULL OR col = fb)`. None of those are
+reachable through this contract today; if one becomes reachable it gets a row in
+this table or a deviation of its own.
+
+## D14 — a blank numeric filter means `= 0` (Frappe parity, stated)
+
+`flt("")` and `cint("")` are `0`, so an `Int`/`Float`/`Currency`/`Percent` filter
+submitted with an empty value compiles to `= 0` rather than being rejected. That
+is what `db_query` does (`value = flt(f.value)`), and it is left at parity.
+
+The temporal families are **not** left at parity — see the `_scalar` guard:
+`getdate(None)`, `getdate("")` and `get_datetime(None)` all return *today/now* in
+Frappe, so an omitted date bound would silently become "today" and return a
+plausible-looking wrong answer. Those are rejected with
+`list_filter_invalid_value`. The asymmetry is deliberate: `= 0` is visibly odd in
+the result set, "everything from today" is not.
+
+---
+
+# MIGRATION-CHECKLIST
+
+Work through this before flipping a registered view's `status` to `MIGRATED`.
+Most of it is not machine-checkable, which is why it is a list a person signs off
+rather than a test.
+
+## 1. Prove the scope invariant (D1 / D1-a)
+
+- [ ] Write down the endpoint's fixed `WHERE`, and the root DocType's DocPerm
+      rows (role, permlevel, `read`, `if_owner`).
+- [ ] Assert **SQL scope ⊆ ORM read scope** for every role that can call it. If
+      the endpoint is *wider* than the doctype's own read rule — a reviewer-gated
+      raw-SQL list that deliberately sidesteps `if_owner`, e.g.
+      `list_skill_promotion_requests` — the catalog is derived from the wrong
+      authority and the view is **not** ready to migrate.
+- [ ] Check the DocPerm table for the D1-a shape: a permlevel-0 row with
+      `if_owner=1` **plus** a permlevel-N row without it. If present, every
+      permlevel-N field is catalog-visible to that role regardless of ownership.
+
+## 2. Run the per-role catalog diff
+
+- [ ] `build_field_catalog(root, user=<floor role user>, view=view)` vs
+      `user="Administrator"`. The floor number is what most staff will see.
+- [ ] Reconcile every field in the diff: each one is either genuinely
+      privileged (fine) or a permlevel that does not mean what its author thought
+      (fix the doctype, not the filter layer).
+- [ ] Confirm every **current curated filter key** survives at the floor role.
+      If it does not, migrating silently removes a filter ordinary users have
+      today. (`test_list_registry.test_floor_role_catalog` asserts this.)
+- [ ] **The Approvals trap:** `Jarvis Approval Request.status` is **permlevel 1**,
+      and it works today only because the doctype ships explicit permlevel-1
+      DocPerm rows for `Jarvis User` and `System Manager`. Anyone "tidying up"
+      those rows removes `status` from the schema and breaks the board. Do not
+      remove them; do check they are still there at migration time.
+
+## 3. Declare what the projection withholds (D1-b)
+
+- [ ] List every field the endpoint blanks, redacts, or omits from its row
+      payload for *any* role.
+- [ ] Put each one in `excluded_fields` (`fieldname`, or
+      `"Child DocType.fieldname"`).
+- [ ] `test_list_registry.test_excluded_fields_name_real_fields` catches typos;
+      nothing catches an omission, so this step is the control.
+
+## 4. Wire the endpoint
+
+- [ ] Additive, **type-annotated** `filters_v2: str | list | None = None`
+      (`require_type_annotated_api_methods` is on; an un-annotated param 500s).
+- [ ] Keep the legacy `filters` argument for the compatibility window.
+- [ ] Decorate: `@frappe.whitelist()` → `@require_jarvis_user` →
+      `@filter_errors_to_envelope`, in that order.
+- [ ] Move the fixed predicate onto `ListFilterQuery.server_condition(...)`:
+      named placeholders only (no `%s`), no parameter name starting with `jf`
+      (that namespace belongs to compiled user values), and values passed as
+      kwargs — never interpolated into the SQL string.
+- [ ] Server-authored `IN` lists stay on the server side, where the §9 client
+      caps do not apply.
+- [ ] Rows, `total` and `has_more` all use `q.where()`.
+
+## 5. Facets (D12)
+
+- [ ] A facet over dimension *d* uses `q.where(exclude_dimension=(doctype, d))`,
+      **not** the full `where()` and not an unfiltered count. Dropping the
+      facet's own dimension is what keeps the tab strip populated when a tab is
+      selected.
+
+## 6. Prove equality of scope
+
+- [ ] `filters_v2` absent / `None` / `[]` / `"[]"` returns an envelope identical
+      to the pre-migration one, at **two roles** (an ordinary user and a
+      System Manager).
+- [ ] A clause naming another user's rows returns nothing — it narrows, never
+      widens.
+
+## 7. UI notes for whoever builds the panel
+
+- **Select with a leading blank option.** A `Select` whose options string starts
+  with a newline has `""` as a legitimate value, and `""` means *not set*. The
+  schema passes the options through verbatim, blank included; the control must
+  render that entry as "Not set" rather than an empty row, and must not confuse
+  it with "no filter". (Alternatively offer the `is` operator, which expresses
+  the same question explicitly.)
+- **Dynamic Link.** Fully catalogued (fieldtype, options = the controlling
+  fieldname) and compiles correctly as a plain value comparison, but the *value
+  control* cannot be a Link picker until the panel reads the controlling field's
+  current value to know which DocType to search. Until then it renders as a text
+  input. Not a deviation — an unbuilt UI affordance, recorded so nobody
+  rediscovers it as a bug.
+- **`is_large_table`** is reported per view; when true the `Data` default is `=`
+  and the UI should say why.
+
+## 8. Track the sunset
+
+- [ ] Note the legacy `filters` callers for this surface (SPA page, PWA, any
+      other client — `personalise_notes` and `file_box` each have two).
+- [ ] The legacy argument is removed only after every shipped client sends v2
+      (plan §10 Phase 5). Until then both paths must keep working, and the
+      per-surface test asserting that is what makes the sunset safe to schedule.

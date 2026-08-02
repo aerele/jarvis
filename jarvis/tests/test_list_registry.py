@@ -21,12 +21,18 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import pkgutil
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import list_registry
 from jarvis.chat.list_filters import build_field_catalog
+
+#: A user holding ONLY the app-access role — the floor every Jarvis customer's
+#: ordinary staff sits on. Administrator's catalog is the ceiling; this is the
+#: number that actually reaches most people.
+FLOOR_USER = "lfr-floor@example.com"
 
 #: Every surface that must be registered. A rename is fine; a disappearance is
 #: not. Mirrors plan 08 §3.3 + the 8 ListPage consumers + the Settings surfaces,
@@ -68,6 +74,56 @@ def _resolve(dotted: str):
 	module_path, _, attr = dotted.rpartition(".")
 	module = importlib.import_module(module_path)
 	return getattr(module, attr)
+
+
+def _ensure_floor_user() -> str:
+	from jarvis.permissions import ensure_jarvis_user_role
+
+	ensure_jarvis_user_role()
+	if not frappe.db.exists("User", FLOOR_USER):
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": FLOOR_USER,
+				"first_name": "lfr-floor",
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+			}
+		)
+		u.flags.ignore_permissions = True
+		u.insert()
+		frappe.db.commit()
+	doc = frappe.get_doc("User", FLOOR_USER)
+	roles = set(frappe.get_roles(FLOOR_USER))
+	if "Jarvis User" not in roles:
+		doc.add_roles("Jarvis User")
+	extra = roles & {"System Manager", "Jarvis Admin", "Jarvis Skill Reviewer"}
+	if extra:
+		doc.remove_roles(*extra)
+	frappe.db.commit()
+	frappe.clear_cache(user=FLOOR_USER)
+	return FLOOR_USER
+
+
+def _whitelisted_list_callables() -> dict[str, object]:
+	"""Every whitelisted ``list_*`` callable under ``jarvis/chat``.
+
+	Import errors are NOT swallowed: a module that fails to import would silently
+	shrink the sweep, which is exactly the loophole this audit closes."""
+	import jarvis.chat
+
+	found: dict[str, object] = {}
+	for info in pkgutil.walk_packages(jarvis.chat.__path__, prefix="jarvis.chat."):
+		module = importlib.import_module(info.name)
+		for name, fn in vars(module).items():
+			if not name.startswith("list_") or not callable(fn):
+				continue
+			if getattr(fn, "__module__", None) != module.__name__:
+				continue  # re-export
+			if fn in frappe.whitelisted:
+				found[f"{module.__name__}.{name}"] = fn
+	return found
 
 
 class TestListRegistryIntegrity(FrappeTestCase):
@@ -128,6 +184,56 @@ class TestListRegistryIntegrity(FrappeTestCase):
 					"a projection must say what it projects from",
 				)
 
+	def test_no_unclassified_list_endpoint_exists(self):
+		"""The audit's one remaining hole, closed.
+
+		Everything above proves that what IS registered is well-formed; nothing
+		proved that nothing is MISSING. This sweeps every whitelisted ``list_*``
+		callable under jarvis/chat and requires each to be either a registered
+		view's endpoint or an explicitly classified non-list. A new list endpoint
+		therefore cannot ship without someone writing down what it is.
+		"""
+		registered = {e for v in list_registry.all_views() for e in v.endpoints}
+		unclassified = sorted(
+			set(_whitelisted_list_callables()) - registered - set(list_registry.NON_LIST_ENDPOINTS)
+		)
+		self.assertFalse(
+			unclassified,
+			"whitelisted list endpoints with no classification — register them as a "
+			"ListView or add them to list_registry.NON_LIST_ENDPOINTS with a written "
+			f"reason: {unclassified}",
+		)
+
+	def test_non_list_allowlist_is_argued_and_live(self):
+		live = _whitelisted_list_callables()
+		for dotted, reason in list_registry.NON_LIST_ENDPOINTS.items():
+			with self.subTest(endpoint=dotted):
+				self.assertTrue(len(reason) > 20, "an allowlisted endpoint needs a real reason")
+				self.assertIn(
+					dotted,
+					live,
+					"stale allowlist entry: this endpoint no longer exists (or is no "
+					"longer whitelisted), so the entry is now hiding nothing",
+				)
+
+	def test_excluded_fields_name_real_fields(self):
+		"""A typo in ``excluded_fields`` protects nothing, silently."""
+		for view in list_registry.all_views():
+			if not view.excluded_fields or not view.root_doctype:
+				continue
+			meta = frappe.get_meta(view.root_doctype)
+			for spec in view.excluded_fields:
+				with self.subTest(view=view.view_key, field=spec):
+					if "." in spec:
+						child_dt, fieldname = spec.split(".", 1)
+						self.assertTrue(frappe.get_meta(child_dt).get_field(fieldname))
+					else:
+						self.assertTrue(
+							meta.get_field(spec),
+							f"{view.view_key} excludes {spec!r}, which is not a field of "
+							f"{view.root_doctype}",
+						)
+
 	def test_migrated_views_actually_accept_filters_v2(self):
 		"""'migrated' is a claim; this checks the wiring behind it."""
 		migrated = list_registry.filterable_views()
@@ -157,7 +263,7 @@ class TestCuratedFilterWidthGap(FrappeTestCase):
 		report: list[str] = []
 		for view in list_registry.document_list_views():
 			with self.subTest(view=view.view_key):
-				catalog = build_field_catalog(view.root_doctype, user="Administrator")
+				catalog = build_field_catalog(view.root_doctype, user="Administrator", view=view)
 				self.assertTrue(catalog, f"{view.root_doctype} produced an empty catalog")
 				main = {f["fieldname"] for f in catalog if not f["is_child"]}
 				child = {(f["doctype"], f["fieldname"]) for f in catalog if f["is_child"]}
@@ -182,6 +288,58 @@ class TestCuratedFilterWidthGap(FrappeTestCase):
 					f"gap={len(main) - len(curated):>3}"
 				)
 		print("\nPhase-0 filter width gap (curated vs metadata):\n" + "\n".join(report))
+
+	def test_floor_role_catalog(self):
+		"""U1-2: the same comparison at the FLOOR role, not just Administrator.
+
+		Administrator holds every role, so its catalog is the ceiling — a width
+		claim measured there can be wildly wrong for the person actually using
+		the list. This runs the audit as a user holding only ``Jarvis User`` and
+		reports the real per-surface number, including the surfaces where that
+		user sees NOTHING (reviewer/admin-gated queues), which is itself the
+		answer to 'what does filtering look like for ordinary staff'.
+		"""
+		floor = _ensure_floor_user()
+		report: list[str] = []
+		for view in list_registry.document_list_views():
+			with self.subTest(view=view.view_key):
+				catalog = build_field_catalog(view.root_doctype, user=floor, view=view)
+				main = {f["fieldname"] for f in catalog if not f["is_child"]}
+				if not main:
+					# No level-0 read for the floor role: the surface is gated to
+					# reviewers/admins. Correct, and worth reporting.
+					report.append(f"  {view.view_key:<28} floor_main=  0  (no access at the floor role)")
+					continue
+				curated = {v for v in view.curated_filters.values() if v}
+				missing = curated - main
+				self.assertFalse(
+					missing,
+					f"{view.view_key} curates {sorted(missing)}, which the floor role "
+					f"cannot read — the CURRENT endpoint filters on a field the "
+					f"migrated schema would have to withhold, so migrating it would "
+					f"silently change behaviour for ordinary users",
+				)
+				report.append(
+					f"  {view.view_key:<28} floor_main={len(main):>3}  "
+					f"curated={len(curated):>2}  gap={len(main) - len(curated):>3}"
+				)
+		print("\nFloor-role (Jarvis User only) filter width:\n" + "\n".join(report))
+
+	def test_view_excluded_fields_are_withheld_from_the_catalog(self):
+		"""P1: a view's own withholding list actually removes fields."""
+		for view in list_registry.document_list_views():
+			if not view.excluded_fields:
+				continue
+			with self.subTest(view=view.view_key):
+				withheld = build_field_catalog(view.root_doctype, user="Administrator", view=view)
+				unfiltered = build_field_catalog(view.root_doctype, user="Administrator")
+				names = {(f["doctype"], f["fieldname"]) for f in withheld}
+				all_names = {(f["doctype"], f["fieldname"]) for f in unfiltered}
+				for spec in view.excluded_fields:
+					key = tuple(spec.split(".", 1)) if "." in spec else (view.root_doctype, spec)
+					# Non-vacuity: the field IS otherwise catalogable.
+					self.assertIn(key, all_names, f"{spec} was never in the catalog — test is vacuous")
+					self.assertNotIn(key, names, f"{view.view_key} failed to withhold {spec}")
 
 	def test_catalog_never_leaks_structural_or_secret_fields(self):
 		from jarvis.chat.list_filters import NO_VALUE_FIELDTYPES, SECRET_FIELDTYPES

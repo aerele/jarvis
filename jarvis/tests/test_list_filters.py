@@ -28,7 +28,7 @@ import unittest
 
 import frappe
 
-from jarvis.chat import list_filters
+from jarvis.chat import list_filters, list_registry
 from jarvis.chat.list_filters import (
 	ERR_INVALID_OPERATOR,
 	ERR_INVALID_VALUE,
@@ -217,6 +217,20 @@ class TestPermlevelEndToEnd(unittest.TestCase):
 		frappe.set_user("Administrator")
 		from frappe.permissions import add_permission, update_permission_property
 
+		# Snapshot the Custom DocPerm rows that existed BEFORE we touched
+		# anything. reset_perms() would delete every Custom DocPerm for the
+		# doctype, which on a site that had legitimately customized permissions
+		# is a destructive teardown that silently changes the site.
+		cls._perms_before = {
+			"Jarvis Custom Skill": set(
+				frappe.get_all("Custom DocPerm", filters={"parent": SKILL}, pluck="name")
+			),
+			"Jarvis Macro": set(
+				frappe.get_all("Custom DocPerm", filters={"parent": MACRO}, pluck="name")
+			),
+		}
+
+		# (a) a MAIN field pushed above the caller's permlevel …
 		frappe.make_property_setter(
 			{
 				"doctype": SKILL,
@@ -228,25 +242,48 @@ class TestPermlevelEndToEnd(unittest.TestCase):
 			is_system_generated=False,
 			validate_fields_for_doctype=False,
 		)
-		add_permission(SKILL, PERMLEVEL_ROLE, 1)
-		update_permission_property(SKILL, PERMLEVEL_ROLE, 1, "read", 1)
+		# (b) … and a CHILD field, whose permlevel access is evaluated against the
+		# PARENT's permissions (Meta.get_permissions with parenttype).
+		frappe.make_property_setter(
+			{
+				"doctype": "Jarvis Macro Step",
+				"fieldname": "prompt",
+				"property": "permlevel",
+				"value": 1,
+				"property_type": "Int",
+			},
+			is_system_generated=False,
+			validate_fields_for_doctype=False,
+		)
+		for dt in (SKILL, MACRO):
+			add_permission(dt, PERMLEVEL_ROLE, 1)
+			update_permission_property(dt, PERMLEVEL_ROLE, 1, "read", 1)
 		frappe.db.commit()
-		frappe.clear_cache(doctype=SKILL)
+		frappe.clear_cache()
 
 	@classmethod
 	def tearDownClass(cls):
 		frappe.set_user("Administrator")
-		from frappe.permissions import reset_perms
-
 		for name in frappe.get_all(
 			"Property Setter",
-			filters={"doc_type": SKILL, "field_name": "instructions", "property": "permlevel"},
+			filters={
+				"doc_type": ["in", [SKILL, "Jarvis Macro Step"]],
+				"property": "permlevel",
+				"field_name": ["in", ["instructions", "prompt"]],
+			},
 			pluck="name",
 		):
 			frappe.delete_doc("Property Setter", name, force=True, ignore_permissions=True)
-		reset_perms(SKILL)
+		# Restore EXACTLY what was there: delete only the Custom DocPerm rows this
+		# fixture caused to exist (add_permission's setup_custom_perms copies the
+		# standard rows in on first use, so on a stock site "before" is empty and
+		# this removes all of them, returning the doctype to its standard perms).
+		for dt, before in cls._perms_before.items():
+			for name in frappe.get_all("Custom DocPerm", filters={"parent": dt}, pluck="name"):
+				if name not in before:
+					frappe.delete_doc("Custom DocPerm", name, force=True, ignore_permissions=True)
 		frappe.db.commit()
-		frappe.clear_cache(doctype=SKILL)
+		frappe.clear_cache()
 
 	def test_schema_shows_the_field_only_to_the_privileged_role(self):
 		privileged = get_schema("skills", user=USER_A)
@@ -274,6 +311,26 @@ class TestPermlevelEndToEnd(unittest.TestCase):
 		self.assertNotIn("secret", fragment)
 		self.assertIn("%secret%", compiled.params.values())
 
+	def test_child_field_above_permlevel_is_withheld_and_rejected(self):
+		"""Child permlevel access is read off the PARENT's permissions, so this
+		path has its own way to be wrong."""
+		privileged = get_schema("macros", user=USER_A)
+		ordinary = get_schema("macros", user=USER_B)
+		self.assertIsNotNone(
+			_entry(privileged, "Jarvis Macro Step", "prompt"),
+			"the child permlevel-1 grant did not take effect — test would be vacuous",
+		)
+		self.assertIsNone(_entry(ordinary, "Jarvis Macro Step", "prompt"))
+		# Non-vacuity: the sibling child field is still there for the ordinary role.
+		self.assertIsNotNone(_entry(ordinary, "Jarvis Macro Step", "label"))
+
+		clause = [{"doctype": "Jarvis Macro Step", "fieldname": "prompt", "operator": "=", "value": "x"}]
+		with self.assertRaises(ListFilterError) as caught:
+			compile_list_filters("macros", clause, user=USER_B)
+		self.assertEqual(caught.exception.filter_error_code, ERR_UNKNOWN_FIELD)
+		# …and the privileged role can still use it.
+		self.assertIn("`prompt`", compile_list_filters("macros", clause, user=USER_A).fragment())
+
 	def test_schema_cache_never_serves_one_user_to_another(self):
 		# Warm A, then B, then A again: B's build must not evict or overwrite A's.
 		first_a = get_schema("skills", user=USER_A)
@@ -283,6 +340,70 @@ class TestPermlevelEndToEnd(unittest.TestCase):
 		self.assertIsNone(_entry(b, SKILL, "instructions"))
 		self.assertIsNotNone(_entry(second_a, SKILL, "instructions"))
 		self.assertNotEqual(first_a["schema_revision"], b["schema_revision"])
+
+
+class TestViewExcludedFields(unittest.TestCase):
+	"""P1: permlevel stops what the DOCTYPE hides; ``excluded_fields`` stops what
+	the ENDPOINT hides.
+
+	Triggers is the live case: ``triggers_api._trigger_detail`` blanks
+	``condition`` / ``script_body`` / ``llm_instruction`` for non-managers, so a
+	filter over them would rebuild the redacted automation logic one LIKE at a
+	time — a leak permlevel cannot see, because the DocType marks those fields
+	permlevel 0.
+	"""
+
+	REDACTED = ("condition", "script_body", "llm_instruction")
+
+	def test_registry_declares_the_redacted_trigger_fields(self):
+		view = list_registry.get_view("triggers")
+		self.assertEqual(set(view.excluded_fields), set(self.REDACTED))
+
+	def test_excluded_fields_are_absent_from_the_schema(self):
+		schema = get_schema("triggers", user=USER_SM)
+		names = {f["fieldname"] for f in schema["fields"]}
+		# Non-vacuity: the schema is otherwise populated, and the fields really
+		# exist on the DocType (so their absence is our doing, not the metadata's).
+		self.assertIn("enabled", names)
+		meta = frappe.get_meta("Jarvis Trigger")
+		for fieldname in self.REDACTED:
+			self.assertIsNotNone(meta.get_field(fieldname), f"{fieldname} vanished from Jarvis Trigger")
+			self.assertNotIn(fieldname, names)
+
+	def test_excluded_fields_are_rejected_by_the_compiler(self):
+		for fieldname in self.REDACTED:
+			with self.subTest(field=fieldname):
+				clause = [
+					{
+						"doctype": "Jarvis Trigger",
+						"fieldname": fieldname,
+						"operator": "like",
+						"value": "frappe.db",
+					}
+				]
+				with self.assertRaises(ListFilterError) as caught:
+					compile_list_filters("triggers", clause, user=USER_SM)
+				# Same code as a misspelling: "withheld" must not be a
+				# distinguishable answer, or the rejection is itself the oracle.
+				self.assertEqual(caught.exception.filter_error_code, ERR_UNKNOWN_FIELD)
+
+	def test_a_non_excluded_field_on_the_same_view_still_works(self):
+		"""Non-vacuity for the whole class: the view is otherwise filterable."""
+		compiled = compile_list_filters(
+			"triggers",
+			[{"doctype": "Jarvis Trigger", "fieldname": "enabled", "operator": "=", "value": 1}],
+			user=USER_SM,
+		)
+		self.assertIn("`enabled`", compiled.fragment())
+
+	def test_exclusion_can_name_a_child_field(self):
+		"""The ``Child DocType.fieldname`` form, proven directly on the builder."""
+		catalog = build_field_catalog(
+			MACRO, user=USER_SM, excluded_fields=("Jarvis Macro Step.label",)
+		)
+		pairs = {(f["doctype"], f["fieldname"]) for f in catalog}
+		self.assertNotIn(("Jarvis Macro Step", "label"), pairs)
+		self.assertIn(("Jarvis Macro Step", "model_override"), pairs)
 
 
 # --------------------------------------------------------------------------- #
@@ -337,9 +458,25 @@ class TestCatalogShape(unittest.TestCase):
 		small_text = _entry(schema, MACRO, "description")
 		self.assertEqual(
 			small_text["default_operator"],
-			"=",
-			"deviation D5: Frappe defaults Small Text to '=', not 'like' as plan §5.1 claimed",
+			"like",
+			"deviation D5-a: we diverge from Frappe (which defaults Small Text to "
+			"'=') because a Description filter almost always means 'contains'",
 		)
+		self.assertIn("=", small_text["operators"], "exact match must stay selectable")
+
+	def test_free_text_families_default_to_like_but_code_does_not(self):
+		"""D5-a's boundary: prose bodies get `like`, machine-shaped content does not."""
+		skills = get_schema("skills", user=USER_A)
+		long_text = _entry(skills, SKILL, "instructions")
+		if long_text is not None:  # absent while the permlevel fixture is active
+			self.assertEqual(long_text["default_operator"], "like")
+		self.assertEqual(list_filters.default_operator("body", "Text"), "like")
+		self.assertEqual(list_filters.default_operator("body", "Text Editor"), "like")
+		self.assertEqual(list_filters.default_operator("body", "Code"), "=")
+		self.assertEqual(list_filters.default_operator("body", "HTML Editor"), "=")
+		# Data keeps Frappe's large-table rule.
+		self.assertEqual(list_filters.default_operator("x", "Data", False), "like")
+		self.assertEqual(list_filters.default_operator("x", "Data", True), "=")
 
 	def test_json_array_standard_fields_are_like_only(self):
 		schema = get_schema("skills", user=USER_A)
@@ -432,6 +569,58 @@ class TestFailsClosed(unittest.TestCase):
 	def test_is_needs_set_or_not_set(self):
 		clause = [{"doctype": MACRO, "fieldname": "description", "operator": "is", "value": "yes"}]
 		self.assertEqual(self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_INVALID_VALUE)
+
+	def test_blank_date_is_rejected_instead_of_meaning_today(self):
+		"""frappe's getdate(None)/getdate("") return TODAY. Inheriting that turns
+		an omitted bound into a filter nobody asked for, whose answer looks
+		plausible."""
+		# NB: Datetime rejects "=" outright (frappe's invalid_condition_map), so the
+		# Datetime leg uses a comparison — otherwise the operator gate would fire
+		# first and this would prove nothing about value normalization.
+		for blank in (None, "", "   "):
+			for field, op in (("last_run_at", ">"), ("schedule_time", "=")):
+				with self.subTest(value=blank, field=field):
+					clause = [{"doctype": MACRO, "fieldname": field, "operator": op, "value": blank}]
+					self.assertEqual(
+						self._code(compile_list_filters, "macros", clause, user=USER_A),
+						ERR_INVALID_VALUE,
+					)
+
+	def test_unparseable_date_is_rejected(self):
+		clause = [{"doctype": MACRO, "fieldname": "last_run_at", "operator": ">", "value": "not-a-date"}]
+		self.assertEqual(self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_INVALID_VALUE)
+
+	def test_a_valid_date_still_compiles(self):
+		"""Non-vacuity for the two tests above."""
+		compiled = compile_list_filters(
+			"macros",
+			[{"doctype": MACRO, "fieldname": "last_run_at", "operator": ">", "value": "2026-07-01"}],
+			user=USER_A,
+		)
+		self.assertIn("2026-07-01 00:00:00", [str(v) for v in compiled.params.values()])
+
+	def test_length_cap_applies_to_non_text_fieldtypes_too(self):
+		"""The cap used to live only on the text branch, so a megabyte aimed at a
+		date or a number was parsed first and capped never."""
+		huge = "9" * (list_filters.MAX_VALUE_CHARS + 1)
+		for field, op in (("last_run_at", ">"), ("schedule_frequency", "=")):
+			with self.subTest(field=field):
+				clause = [{"doctype": MACRO, "fieldname": field, "operator": op, "value": huge}]
+				self.assertEqual(
+					self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_VALUE_TOO_LONG
+				)
+
+	def test_schema_endpoint_refuses_a_registered_but_unmigrated_view(self):
+		from jarvis.chat.list_filters import get_list_filter_schema
+
+		orig = frappe.session.user
+		frappe.set_user(USER_SM)
+		try:
+			res = get_list_filter_schema("triggers")
+		finally:
+			frappe.set_user(orig)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["code"], ERR_VIEW_NOT_FILTERABLE)
 
 	def test_password_fieldtype_is_never_offered(self):
 		# Deviation D2. Proven structurally: no catalog on any registered
@@ -630,7 +819,7 @@ class TestQueryBarrierAndFacets(unittest.TestCase):
 		q.server_condition("owner = %(me)s", me=USER_A)
 		q.apply([{"doctype": MACRO, "fieldname": "enabled", "operator": "=", "value": 1}])
 		where = q.where()
-		self.assertTrue(where.startswith("owner = %(me)s AND "), where)
+		self.assertTrue(where.startswith("(owner = %(me)s) AND "), where)
 		self.assertIn("`tabJarvis Macro`.`enabled`", where)
 		# The user parameter namespace is disjoint from the server's.
 		user_params = [k for k in q.params() if k.startswith(list_filters.USER_PARAM_PREFIX)]
@@ -651,8 +840,31 @@ class TestQueryBarrierAndFacets(unittest.TestCase):
 		q = new_query("macros", user=USER_A)
 		q.server_condition("owner = %(me)s", me=USER_A)
 		q.apply(None)
-		self.assertEqual(q.where(), "owner = %(me)s")
+		self.assertEqual(q.where(), "(owner = %(me)s)")
 		self.assertEqual(q.params(), {"me": USER_A})
+
+	def test_every_where_part_is_parenthesised(self):
+		"""Structural: an unparenthesised join lets a top-level OR in one
+		predicate bind loosely and silently widen the whole WHERE. The skills
+		scope predicate IS such an OR."""
+		q = new_query("skills", user=USER_A)
+		q.server_condition("(owner = %(me)s OR name IN %(shared)s)", me=USER_A, shared=("a",))
+		q.server_condition("enabled = %(enabled)s", enabled=1)
+		q.apply([{"doctype": SKILL, "fieldname": "user_invocable", "operator": "=", "value": 1}])
+		where = q.where()
+		self.assertEqual(
+			where,
+			"((owner = %(me)s OR name IN %(shared)s)) AND (enabled = %(enabled)s) "
+			"AND (`tabJarvis Custom Skill`.`user_invocable` = %(jf0_0)s)",
+		)
+
+	def test_params_refuses_to_overwrite_a_bound_predicate_value(self):
+		q = new_query("macros", user=USER_A)
+		q.server_condition("owner = %(me)s", me=USER_A)
+		q.apply([])
+		self.assertEqual(q.params({"start": 0, "page_length": 20})["start"], 0)
+		with self.assertRaises(ValueError):
+			q.params({"me": "someone-else@example.com"})
 
 	def test_facet_query_drops_only_its_own_dimension(self):
 		q = new_query("macros", user=USER_A)
@@ -690,7 +902,33 @@ class TestQueryBarrierAndFacets(unittest.TestCase):
 		q = new_query("macros", user=USER_A)
 		q.server_condition("owner = %(me)s", me=USER_A)
 		q.apply([{"doctype": "Jarvis Macro Step", "fieldname": "label", "operator": "=", "value": "a"}])
-		self.assertEqual(q.where(exclude_dimension=("Jarvis Macro Step", "label")), "owner = %(me)s")
+		self.assertEqual(q.where(exclude_dimension=("Jarvis Macro Step", "label")), "(owner = %(me)s)")
+
+	def test_empty_payload_never_touches_metadata_or_the_schema_cache(self):
+		"""The >99% path. A list with no filters on it must cost what it cost
+		before the migration, and must not be able to fail because of the filter
+		layer at all."""
+		import unittest.mock as mock
+
+		with mock.patch.object(list_filters, "get_schema", side_effect=AssertionError("schema built")):
+			for empty in (None, "", "   ", [], "[]"):
+				with self.subTest(payload=empty):
+					q = new_query("macros", user=USER_A)
+					q.server_condition("owner = %(me)s", me=USER_A)
+					q.apply(empty)
+					self.assertEqual(q.where(), "(owner = %(me)s)")
+			# …and a NON-empty payload does build the schema (non-vacuity).
+			with self.assertRaises(AssertionError):
+				new_query("macros", user=USER_A).apply(
+					[{"doctype": MACRO, "fieldname": "enabled", "operator": "=", "value": 1}]
+				)
+
+	def test_unknown_view_still_fails_closed_on_the_empty_path(self):
+		"""The short-circuit must not become a way to smuggle a bad view_key past
+		the contract check."""
+		with self.assertRaises(ListFilterError) as caught:
+			compile_list_filters("not-a-view", [], user=USER_A)
+		self.assertEqual(caught.exception.filter_error_code, ERR_UNKNOWN_VIEW)
 
 
 # --------------------------------------------------------------------------- #
@@ -769,6 +1007,26 @@ class TestTypedCompilation(unittest.TestCase):
 		)
 		self.assertIn("IN %(", compiled.fragment())
 		self.assertIn(("a", "b"), compiled.params.values())
+
+	def test_in_does_not_coalesce_but_not_in_does(self):
+		"""db_query's actual rule: `in` clears can_be_null when the value list is
+		non-empty and has no falsy member (which ours always is — D9 rejects the
+		empty list), so wrapping it in ifnull() only costs the index. `not in`
+		keeps the wrapper, because NULL NOT IN (...) is NULL and those rows would
+		silently vanish."""
+		inc = compile_list_filters(
+			"macros",
+			[{"doctype": MACRO, "fieldname": "macro_name", "operator": "in", "value": ["a"]}],
+			user=USER_A,
+		).fragment()
+		exc = compile_list_filters(
+			"macros",
+			[{"doctype": MACRO, "fieldname": "macro_name", "operator": "not in", "value": ["a"]}],
+			user=USER_A,
+		).fragment()
+		self.assertNotIn("ifnull", inc)
+		self.assertIn("`tabJarvis Macro`.`macro_name` IN %(", inc)
+		self.assertIn("ifnull", exc)
 
 	def test_check_normalizes_to_zero_or_one(self):
 		compiled = compile_list_filters(

@@ -167,6 +167,7 @@ _order_by = list_filters.order_by
 
 @frappe.whitelist()
 @require_jarvis_user
+@list_filters.filter_errors_to_envelope
 def list_custom_skills_page(
 	search: str = "",
 	filters: str | dict | None = None,
