@@ -268,9 +268,20 @@ export function useListPage({
 		return fetchRows("keep");
 	}
 
-	function setFilter(key, value) {
+	// A quick filter becomes a v2 clause only when a root is known WITHOUT the
+	// schema (a declaredRoot). On that path the flag has not been learned from the
+	// schema yet, so learn it here before the clause can reach the wire (M1.3). No
+	// cost once known (ensureCapability short-circuits), and none at all for a
+	// legacy-only quick filter.
+	async function ensureQuickCapability() {
+		if (viewKey && !capabilityKnown && !schema.value && rootDoctype())
+			await ensureCapability();
+	}
+
+	async function setFilter(key, value) {
 		if (value === "" || value == null) delete filters[key];
 		else filters[key] = value;
+		await ensureQuickCapability();
 		materializeQuick([key]);
 		writeUrl();
 		return resetLoad();
@@ -278,7 +289,7 @@ export function useListPage({
 	// Replace the whole filter set (ListPage's update:filters emits a plain
 	// object); empty values are stripped so the backend's strict key/value
 	// whitelists never see blanks.
-	function setFilters(next) {
+	async function setFilters(next) {
 		const before = { ...filters };
 		for (const k of Object.keys(filters)) delete filters[k];
 		for (const [k, v] of Object.entries(next || {})) {
@@ -290,6 +301,7 @@ export function useListPage({
 		const changed = Object.keys(quickClauses).filter(
 			(k) => String(before[k] ?? "") !== String(filters[k] ?? "")
 		);
+		if (changed.length) await ensureQuickCapability();
 		materializeQuick(changed);
 		writeUrl();
 		return resetLoad();
@@ -655,13 +667,19 @@ export function useListPage({
 
 	onMounted(async () => {
 		if (viewKey) {
-			// Learn v2 availability BEFORE the first emission whenever something could
-			// emit before the panel opens (M1.3): a declaredRoot lets a quick filter
-			// become a v2 clause pre-schema, and a URL arrives with clauses. A plain
-			// lazy list emits nothing until its panel opens, so it pays for no probe —
-			// the schema fetch on first open learns the flag for it. Flag off ⇒
-			// filtersV2Disabled is set here, so ZERO filters_v2 leaves on any path.
-			if (declaredRoot || urlSeed !== null) await ensureCapability();
+			// Learn v2 availability BEFORE the first EMISSION (M1.3), but do not delay
+			// first paint for it when nothing emits at mount. Something emits at mount
+			// only when the URL carried clauses or the toolbar arrived with an initial
+			// quick filter; then we AWAIT the probe (correctness over a few ms). A
+			// declaredRoot list with no initial filter emits nothing yet, so we merely
+			// WARM the probe (no await) — it is ready by the time a quick edit could
+			// turn into a v2 clause, and setFilters awaits it if it somehow is not.
+			const initialQuick = Object.keys(quickClauses).some(
+				(k) => filters[k] !== undefined && String(filters[k]) !== ""
+			);
+			const emitsAtMount = (urlSeed && urlSeed.clauses.length) || initialQuick;
+			if (emitsAtMount) await ensureCapability();
+			else if (declaredRoot) ensureCapability();
 			// A link may have arrived with filters: the catalog decides which of
 			// them this caller may still use, and that answer must precede page one.
 			// Same function the watcher uses, so the two cannot drift.
