@@ -28,6 +28,15 @@ from jarvis.permissions import require_jarvis_access, require_jarvis_admin
 # below; never rely on the declared parameter types for runtime safety.
 USER_SETTINGS = "Jarvis User Settings"
 
+# Version of the chat-home introduction the SPA currently renders (the static,
+# assistant-styled welcome bubble - presentation only, never a Jarvis Chat
+# Message row). The server owns this number, not the client: the boot payload
+# publishes it (get_chat_ui_settings) and mark_home_intro_seen clamps to it, so
+# a client can neither invent a version nor mute a future one. Bump it ONLY
+# when the introduction's content materially changes and every user should see
+# it once more.
+HOME_INTRO_VERSION = 1
+
 
 def _s(x) -> str:
 	"""Coerce a whitelisted string arg to trimmed text. The runtime type gate is
@@ -163,6 +172,55 @@ def update_my_settings(
 	# caller's own row), and only permlevel-0 pref fields are touched here.
 	doc.save(ignore_permissions=True)
 	return {"ok": True, "data": _settings_payload(doc)}
+
+
+@frappe.whitelist()
+def mark_home_intro_seen(version: int = 0) -> dict:
+	"""Record that the caller has been shown the chat-home introduction.
+
+	Fired best-effort by the SPA when the welcome bubble actually renders. It
+	must never block chat, so the client ignores failures - the only cost of a
+	lost ack is the introduction appearing again on the next empty chat home.
+
+	Idempotent and monotonic, and enforced by the DB rather than by a read
+	followed by a write: the whole update is ONE conditional UPDATE whose
+	``home_intro_seen_version < %(v)s`` predicate is the monotonicity guard, so
+	two tabs racing the ack (or a stale tab replaying an older version) cannot
+	interleave into a lowered value. ``version`` is clamped to
+	``HOME_INTRO_VERSION`` first, so a client can neither invent a version nor
+	mute a future introduction by acking one that does not exist yet.
+
+	``get_or_create_user_settings`` is called ONLY to guarantee the row exists -
+	Jarvis User's permlevel-0 grant is ``if_owner`` with NO create, so a user
+	meeting the introduction before they have a row must not 403.
+
+	Deliberately NOT a ``doc.save()``, and deliberately NOT bumping ``modified``.
+	This row is written concurrently by several server paths that use raw,
+	``update_modified=False`` writes on single fields (``admin_set_user_limit``
+	on ``monthly_token_limit``, ``usage``'s atomic counter SQL,
+	``greeting``'s cadence counter). A full-doc save writes back EVERY field
+	from a snapshot taken before those writes, and because they leave
+	``modified`` untouched there is no timestamp mismatch to catch it: an admin
+	setting a user's monthly spend cap in the same moment this user's browser
+	acks the introduction would have the cap silently reverted to the stale
+	value. Touching exactly the two columns this endpoint owns removes that
+	whole class of interaction.
+	"""
+	require_jarvis_access()
+	wanted = min(max(0, cint(version)), HOME_INTRO_VERSION)
+	user = frappe.session.user
+	usage.get_or_create_user_settings(user)  # row existence only; never saved here
+	if wanted:
+		frappe.db.sql(
+			"""
+			UPDATE `tabJarvis User Settings`
+			SET home_intro_seen_version = %(version)s, home_intro_seen_at = %(now)s
+			WHERE user = %(user)s AND home_intro_seen_version < %(version)s
+			""",
+			{"version": wanted, "now": frappe.utils.now_datetime(), "user": user},
+		)
+	seen = cint(frappe.db.get_value(USER_SETTINGS, {"user": user}, "home_intro_seen_version"))
+	return {"ok": True, "data": {"home_intro_seen_version": seen}}
 
 
 @frappe.whitelist()
