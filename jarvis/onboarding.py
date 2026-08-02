@@ -505,7 +505,9 @@ def _clear_llm_secrets(settings) -> None:
 
 
 @frappe.whitelist()
-def start_signup(email: str, company: str, plan: str, provider: str | None = None) -> dict:
+def start_signup(
+	email: str, company: str, plan: str, provider: str | None = None, billing: dict | None = None
+) -> dict:
 	"""Guest signup → store the api_token → return the Razorpay handles for Checkout.
 
 	Gated on System Manager (Sprint-1 Important from the 2026-06-16 code
@@ -532,9 +534,9 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	require_jarvis_admin()
 	_require_admin_url()
 	try:
-		data = _surface(admin_client.signup, email, company, plan, provider=provider)
+		data = _surface(admin_client.signup, email, company, plan, provider=provider, billing=billing)
 	except frappe.ValidationError as e:
-		resumed = _try_resume_pending_signup(e, email, plan, provider)
+		resumed = _try_resume_pending_signup(e, email, plan, provider, billing)
 		if resumed is None:
 			raise
 		data = resumed
@@ -562,7 +564,9 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	return data
 
 
-def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None) -> dict | None:
+def _try_resume_pending_signup(
+	err, email: str, plan: str, provider: str | None, billing: dict | None = None
+) -> dict | None:
 	"""Failed-payment retry: when guest signup is rejected as a duplicate and
 	this bench already holds credentials for THAT email (persisted by the first
 	attempt), resume the pending signup through admin's authenticated
@@ -582,7 +586,7 @@ def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None)
 	if not has_creds or stored_email != (email or "").strip().lower():
 		return None
 	try:
-		return admin_client.resume_pending_signup(plan, provider=provider)
+		return admin_client.resume_pending_signup(plan, provider=provider, billing=billing)
 	except Exception:
 		# Deliberate fallthrough to the original duplicate error (a rejected
 		# resume usually means a REAL duplicate), but leave a trace so a broken
@@ -592,6 +596,19 @@ def _try_resume_pending_signup(err, email: str, plan: str, provider: str | None)
 			message=frappe.get_traceback(),
 		)
 		return None
+
+
+@frappe.whitelist()
+def update_billing(billing: dict) -> dict:
+	"""Authenticated billing-only edit facade (Plan 01, post-intent Review & Pay
+	"Edit"): forwards to admin's ``update_pending_billing`` on the owned pending
+	Customer. Does NOT create or replace a payment intent and never calls guest
+	signup. Gated on Jarvis Admin like the rest of onboarding; admin re-checks
+	ownership + Pending Payment status. Returns admin's data
+	(``billing_saved`` + normalized ``billing`` summary) un-flattened."""
+	require_jarvis_admin()
+	_require_admin_url()
+	return _surface(admin_client.update_pending_billing, billing)
 
 
 @frappe.whitelist()
@@ -682,6 +699,150 @@ def get_account_defaults() -> dict:
 		# its placeholder, exactly like the desk auto-fetch's silent no-op.
 		company, companies = "", []
 	return {"email": email, "company": company, "companies": companies}
+
+
+def _company_defaults_error(code: str, message: str, http_status: int) -> dict:
+	"""Coded error envelope for get_company_onboarding_defaults, mirroring admin
+	signup.py's {"ok": False, "error": {"code": ...}} shape so the SPA keys on a
+	stable code, never a prose message. ``message`` never carries billing PII."""
+	frappe.local.response.http_status_code = http_status
+	return {"ok": False, "error": {"code": code, "message": message}}
+
+
+def _resolve_company_contact(company: str) -> dict | None:
+	"""Primary Contact for the Company + a phone number.
+
+	``frappe.contacts...get_default_contact`` is raw SQL that checks NO permission
+	(C01-3), so we re-check Contact read permission ourselves and leak nothing if
+	it is not readable. Phone falls back mobile_no -> phone -> child ``phone_nos``
+	rows (C01-4: the denormalized fields are blank unless a child row carries the
+	primary flag)."""
+	from frappe.contacts.doctype.contact.contact import get_default_contact
+
+	try:
+		contact_name = get_default_contact("Company", company)
+	except Exception:
+		contact_name = None
+	if not contact_name or not frappe.has_permission("Contact", "read", doc=contact_name):
+		return None
+	c = frappe.db.get_value(
+		"Contact",
+		contact_name,
+		["name", "first_name", "last_name", "company_name", "mobile_no", "phone"],
+		as_dict=True,
+	)
+	if not c:
+		return None
+	phone = (c.mobile_no or "").strip() or (c.phone or "").strip() or _contact_child_phone(contact_name)
+	display = " ".join(p for p in (c.first_name, c.last_name) if p).strip() or (c.company_name or "")
+	out = {"name": c.name}
+	if display:
+		out["display_name"] = display
+	if phone:
+		out["phone"] = phone
+	return out
+
+
+def _contact_child_phone(contact_name: str) -> str:
+	"""Deterministic phone from a Contact's child ``phone_nos`` rows (C01-4):
+	primary mobile, then primary phone, then the first non-empty row by idx."""
+	rows = frappe.get_all(
+		"Contact Phone",
+		filters={"parent": contact_name, "parenttype": "Contact"},
+		fields=["phone", "is_primary_phone", "is_primary_mobile_no"],
+		order_by="idx asc",
+	)
+	for want in ("is_primary_mobile_no", "is_primary_phone"):
+		for r in rows:
+			if r.get(want) and (r.phone or "").strip():
+				return r.phone.strip()
+	for r in rows:
+		if (r.phone or "").strip():
+			return r.phone.strip()
+	return ""
+
+
+def _resolve_company_billing_address(company: str) -> dict | None:
+	"""Primary billing Address for the Company, as an allowlisted presentation dict.
+
+	ERPNext is OPTIONAL (C01-1): this deliberately does NOT call
+	``erpnext...get_default_company_address`` \u2014 that helper both requires ERPNext
+	(jarvis is a frappe-only app) AND does not select a primary address (its
+	``max()`` over unset ``is_primary_address`` flags returns an arbitrary
+	SQL-order row \u2014 C01-2). Instead we run the frappe-only Dynamic Link query that
+	works on every bench and filter EXPLICITLY on ``is_primary_address = 1``,
+	excluding disabled rows. Nothing flagged primary -> return NOTHING, never a
+	warehouse/shipping address dressed up as billing. Own read-permission check
+	(C01-3). GSTIN is read only when the field exists in Address metadata (India
+	Compliance not installed on frappe-only benches)."""
+	linked = frappe.get_all(
+		"Dynamic Link",
+		filters={"link_doctype": "Company", "link_name": company, "parenttype": "Address"},
+		pluck="parent",
+	)
+	if not linked:
+		return None
+	primary = frappe.get_all(
+		"Address",
+		filters={"name": ["in", linked], "is_primary_address": 1, "disabled": 0},
+		pluck="name",
+		order_by="modified desc",
+		limit=1,
+	)
+	if not primary or not frappe.has_permission("Address", "read", doc=primary[0]):
+		return None
+	has_gstin = frappe.get_meta("Address").has_field("gstin")
+	fields = ["name", "address_line1", "address_line2", "city", "state", "pincode", "country"]
+	if has_gstin:
+		fields.append("gstin")
+	a = frappe.db.get_value("Address", primary[0], fields, as_dict=True)
+	if not a:
+		return None
+	out = {"name": a.name}
+	for k in ("address_line1", "address_line2", "city", "state", "pincode", "country"):
+		if a.get(k):
+			out[k] = a.get(k)
+	if has_gstin and a.get("gstin"):
+		out["gstin"] = a.get("gstin")
+	return out
+
+
+@frappe.whitelist()
+def get_company_onboarding_defaults(company: str) -> dict:
+	"""ERP-derived billing defaults for ONE selected Company (Plan 01): its primary
+	Contact's phone and its primary billing Address (+ optional India Compliance
+	GSTIN). Behind the same onboarding-admin gate as the rest of onboarding.
+
+	Returns an allowlisted PRESENTATION dict \u2014 never whole Contact/Address
+	documents, never unrelated fields:
+
+	    {"ok": True, "data": {"company": "...",
+	        "contact": {"name","display_name","phone"},
+	        "billing_address": {"name","address_line1","address_line2","city",
+	                            "state","pincode","country","gstin"}}}
+
+	``contact`` / ``billing_address`` are omitted when nothing resolves (so a site
+	without linked Contact/Address still onboards). Failures carry a stable code:
+	COMPANY_DEFAULTS_NOT_FOUND (blank/unknown company) or COMPANY_DEFAULTS_FORBIDDEN
+	(company not readable). Neither the Frappe contact helper nor the Dynamic Link
+	query checks permission, so every read gate here is ours (C01-3)."""
+	require_jarvis_admin()
+	company = (company or "").strip()
+	if not company:
+		return _company_defaults_error("COMPANY_DEFAULTS_NOT_FOUND", "company is required", 400)
+	if not frappe.db.exists("Company", company):
+		return _company_defaults_error("COMPANY_DEFAULTS_NOT_FOUND", "unknown company", 404)
+	if not frappe.has_permission("Company", "read", doc=company):
+		return _company_defaults_error("COMPANY_DEFAULTS_FORBIDDEN", "not permitted to read this company", 403)
+
+	data: dict = {"company": company}
+	contact = _resolve_company_contact(company)
+	if contact:
+		data["contact"] = contact
+	address = _resolve_company_billing_address(company)
+	if address:
+		data["billing_address"] = address
+	return {"ok": True, "data": data}
 
 
 @frappe.whitelist()

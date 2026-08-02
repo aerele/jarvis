@@ -176,6 +176,7 @@ def signup(
 	plan: str,
 	coupon: str | None = None,
 	provider: str | None = None,
+	billing: dict | None = None,
 ) -> dict:
 	"""Guest signup against admin. Returns admin's data dict, which carries a
 	``payment_provider`` discriminator plus that gateway's checkout handles:
@@ -197,6 +198,11 @@ def signup(
 
 	``provider`` (optional) requests a specific gateway; admin defaults to
 	razorpay when omitted or unsupported.
+
+	``billing`` (optional, Plan 01) is a typed snapshot admin normalizes and
+	stores on the Customer in the signup transaction; the response echoes
+	``billing_saved: true`` only when a NEW admin persisted it (an older admin
+	drops the unknown kwarg and never echoes it).
 	"""
 	body = {
 		"email": email,
@@ -209,10 +215,12 @@ def signup(
 		body["coupon"] = coupon
 	if provider:
 		body["provider"] = provider
+	if billing:
+		body["billing"] = billing
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 
-def resume_pending_signup(plan: str, provider: str | None = None) -> dict:
+def resume_pending_signup(plan: str, provider: str | None = None, billing: dict | None = None) -> dict:
 	"""Authenticated failed-payment resume: re-issues checkout handles for the
 	caller's own Pending Payment signup, optionally on a different plan/provider.
 	Returns the same checkout-fields shape as signup's sync path (no credentials
@@ -221,7 +229,18 @@ def resume_pending_signup(plan: str, provider: str | None = None) -> dict:
 	body: dict = {"plan": plan}
 	if provider:
 		body["provider"] = provider
+	if billing:
+		body["billing"] = billing
 	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)
+
+
+def update_pending_billing(billing: dict) -> dict:
+	"""Authenticated billing-only edit: update the caller's owned Pending Payment
+	Customer WITHOUT re-issuing a payment intent (the post-intent Review & Pay
+	"Edit" path). Returns admin's data (``billing_saved`` + normalized ``billing``
+	summary). Raises AdminValidationError on a rejected payload or a non-resumable
+	status."""
+	return _post(path=_m("billing.signup.update_pending_billing"), body={"billing": billing})
 
 
 def reconnect_eligibility(email: str, company_name: str = "") -> dict:
