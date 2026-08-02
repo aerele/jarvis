@@ -217,6 +217,26 @@ describe("P1-2 an unreadable link is never a silently unfiltered list", () => {
 		expect(api.filterNotice.value).toMatch(/too large to share as a link/);
 	});
 
+	// A4 tail: "your link is stale" and "there is no link" are different problems.
+	it("says the filter set is not in the address bar when there was no link to keep", async () => {
+		const opts = base({ storageKey: "a3b" });
+		const { route, router } = routerDouble();
+		const api = host({ ...opts, route, router });
+		await flushPromises();
+
+		const huge = Array.from({ length: 9 }, () =>
+			makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "x".repeat(1000) })
+		);
+		await api.setClauses(huge);
+		await flushPromises();
+
+		expect(route.query[URL_PARAM]).toBeUndefined();
+		expect(opts.fetchFn.mock.calls.at(-1)[0].filters_v2).toHaveLength(9); // still applied
+		expect(api.filterNotice.value).toBe(
+			"This filter set is too large to share as a link — it is applied, but it is not in the address bar."
+		);
+	});
+
 	it("reports rows inside a readable payload that were not clauses", async () => {
 		const opts = base({ storageKey: "a4" });
 		const { route, router } = routerDouble({

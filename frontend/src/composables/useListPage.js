@@ -34,6 +34,7 @@ import {
 	skippedNotice,
 	UNREADABLE_NOTICE,
 	URL_TOO_LARGE_NOTICE,
+	URL_TOO_LARGE_UNSHARED_NOTICE,
 	filterErrorInfo,
 } from "@/components/list/filterModel";
 
@@ -415,7 +416,11 @@ export function useListPage({
 		if (isUrlPayloadTooLarge(param)) {
 			if (!urlTooLarge) {
 				urlTooLarge = true;
-				noteFilter(URL_TOO_LARGE_NOTICE);
+				// Whether a shareable address survives decides which half of the
+				// truth to tell: an older param is still copyable, nothing at all is
+				// not, and a user who copies the URL either way must not be misled.
+				const current = (route.query && route.query[URL_PARAM]) || "";
+				noteFilter(current ? URL_TOO_LARGE_NOTICE : URL_TOO_LARGE_UNSHARED_NOTICE);
 			}
 			return;
 		}

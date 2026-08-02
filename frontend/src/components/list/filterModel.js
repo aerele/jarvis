@@ -590,9 +590,13 @@ export function skippedNotice(n) {
 	} not valid and ${n === 1 ? "was" : "were"} ignored.`;
 }
 
-/** The filter set is real, but too big to hand to someone as a link. */
+// The filter set is real and applied, but too big to put in a URL. Two cases,
+// because "your link is stale" and "there is no link" are different problems:
+// one leaves a shareable address behind, the other never had one.
 export const URL_TOO_LARGE_NOTICE =
 	"This filter set is too large to share as a link — the address bar keeps the last shareable one.";
+export const URL_TOO_LARGE_UNSHARED_NOTICE =
+	"This filter set is too large to share as a link — it is applied, but it is not in the address bar.";
 
 // ── server error codes → what the panel does about it ───────────────────────
 export const ERR_UNKNOWN_VIEW = "list_filter_unknown_view";

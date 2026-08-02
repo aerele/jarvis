@@ -114,6 +114,65 @@ describe("Link search", () => {
 		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(true);
 	});
 
+	// R1: the fallback must be a detour, not a one-way door. A typo used to
+	// downgrade the row to a text input for the rest of its life.
+	it("restores the picker as soon as a query matches again", async () => {
+		apiDouble.searchLink.mockResolvedValue([]);
+		const w = mountControl(OWNER, clauseForEntry(OWNER));
+		await flushPromises();
+
+		// a typo: nothing matches, the row degrades
+		w.findComponent({ name: "Autocomplete" }).vm.$emit("update:query", "annn");
+		await new Promise((r) => setTimeout(r, 350));
+		await flushPromises();
+		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(false);
+		expect(w.text()).toContain("No User matched — enter the name directly.");
+
+		// the correction is typed into the fallback input, which keeps searching
+		apiDouble.searchLink.mockResolvedValue([{ value: "ann@x.com", label: "Ann" }]);
+		await w.find('input[type="text"]').setValue("ann");
+		await new Promise((r) => setTimeout(r, 350));
+		await flushPromises();
+
+		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(true);
+		expect(w.text()).not.toContain("enter the name directly");
+		expect(w.findComponent({ name: "Autocomplete" }).props("options")).toHaveLength(1);
+	});
+
+	it("recovers a multi-Link too, whose fallback is chips so the list stays a list", async () => {
+		apiDouble.searchLink.mockResolvedValue([]);
+		const clause = setOperator(clauseForEntry(OWNER), "in");
+		const w = mountControl(OWNER, clause);
+		await flushPromises();
+		w.findComponent({ name: "Autocomplete" }).vm.$emit("update:query", "zzz");
+		await new Promise((r) => setTimeout(r, 350));
+		await flushPromises();
+		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(false);
+
+		// chips, not a bare text box: an `in` clause must not come back a string
+		await w.find('input[type="text"]').setValue("someone@x.com");
+		await w.find('input[type="text"]').trigger("keydown", { key: "Enter" });
+		expect(patch(w)).toEqual({ value: ["someone@x.com"], immediate: true });
+
+		apiDouble.searchLink.mockResolvedValue([{ value: "ann@x.com", label: "Ann" }]);
+		await w.find('input[type="text"]').setValue("ann");
+		await new Promise((r) => setTimeout(r, 350));
+		await flushPromises();
+		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(true);
+	});
+
+	it("names both Autocomplete controls the way the 16 plain ones are named", async () => {
+		apiDouble.searchLink.mockResolvedValue([]);
+		const link = mountControl(OWNER, clauseForEntry(OWNER), { rowName: "Created By (filter 2)" });
+		await flushPromises();
+		expect(link.find('[role="group"]').attributes("aria-label")).toBe(
+			"Value for Created By (filter 2)"
+		);
+
+		const multi = mountControl(SCOPE, setOperator(clauseForEntry(SCOPE), "in"));
+		expect(multi.find('[role="group"]').attributes("aria-label")).toBe("Value for Scope");
+	});
+
 	it("has no picker at all for a Dynamic Link, whose target is not yet known", () => {
 		const dynamic = { ...OWNER, fieldtype: "Dynamic Link", options: "ref_doctype" };
 		const w = mountControl(dynamic, { ...clauseForEntry(OWNER), operator: "=" });

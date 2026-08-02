@@ -1,7 +1,7 @@
 <template>
 	<!-- Check → Yes/No mapped to 1/0 (plan §5.1) -->
 	<FormControl
-		v-if="control === 'check'"
+		v-if="rendered === 'check'"
 		type="select"
 		:aria-label="ariaLabel"
 		:options="YES_NO"
@@ -13,7 +13,7 @@
 	     'not set', so it is labelled rather than dropped, and the "no filter"
 	     choice is removing the row - not picking an empty line. -->
 	<FormControl
-		v-else-if="control === 'select'"
+		v-else-if="rendered === 'select'"
 		type="select"
 		:aria-label="ariaLabel"
 		:options="selectChoices"
@@ -23,7 +23,7 @@
 
 	<!-- is set / is not set -->
 	<FormControl
-		v-else-if="control === 'is'"
+		v-else-if="rendered === 'is'"
 		type="select"
 		:aria-label="ariaLabel"
 		:options="IS_OPTIONS"
@@ -32,7 +32,7 @@
 	/>
 
 	<FormControl
-		v-else-if="control === 'timespan'"
+		v-else-if="rendered === 'timespan'"
 		type="select"
 		:aria-label="ariaLabel"
 		:options="timespanChoices"
@@ -43,7 +43,7 @@
 	<!-- Between: BOTH bounds are required. The server rejects a half-open range
 	     rather than silently substituting today (deviation D14-a), so the row
 	     stays pending here until both are set and is never sent half-filled. -->
-	<div v-else-if="control === 'between-date'" class="flex items-center gap-1">
+	<div v-else-if="rendered === 'between-date'" class="flex items-center gap-1">
 		<DatePicker
 			class="!min-w-[110px]"
 			placeholder="From"
@@ -59,7 +59,7 @@
 			@update:modelValue="(v) => emitPair(1, v)"
 		/>
 	</div>
-	<div v-else-if="control === 'between-datetime'" class="flex items-center gap-1">
+	<div v-else-if="rendered === 'between-datetime'" class="flex items-center gap-1">
 		<FormControl
 			type="datetime-local"
 			class="!min-w-[130px]"
@@ -77,28 +77,28 @@
 	</div>
 
 	<DatePicker
-		v-else-if="control === 'date'"
+		v-else-if="rendered === 'date'"
 		:aria-label="ariaLabel"
 		placeholder="Pick a date"
 		:modelValue="scalar"
 		@update:modelValue="(v) => emitValue(v)"
 	/>
 	<FormControl
-		v-else-if="control === 'datetime'"
+		v-else-if="rendered === 'datetime'"
 		type="datetime-local"
 		:aria-label="ariaLabel"
 		:modelValue="toDatetimeInput(scalar)"
 		@update:modelValue="(v) => emitValue(fromDatetimeInput(v))"
 	/>
 	<FormControl
-		v-else-if="control === 'time'"
+		v-else-if="rendered === 'time'"
 		type="time"
 		:aria-label="ariaLabel"
 		:modelValue="scalar"
 		@update:modelValue="(v) => emitValue(v)"
 	/>
 	<FormControl
-		v-else-if="control === 'number'"
+		v-else-if="rendered === 'number'"
 		type="number"
 		:aria-label="ariaLabel"
 		placeholder="Value"
@@ -108,40 +108,52 @@
 
 	<!-- Link: permission-aware search, titles shown, NAMES submitted (plan §5.3).
 	     Backed by frappe.desk.search.search_link, the same endpoint the chat
-	     mentions and the trigger DocType picker already use. -->
-	<Autocomplete
-		v-else-if="(control === 'link' || control === 'multi-link') && !linkFallback"
-		:multiple="control === 'multi-link'"
-		:options="linkOptions"
-		:loading="linkLoading"
-		:modelValue="linkModel"
-		:placeholder="`Search ${linkTargetName}…`"
-		bodyClasses="min-w-[16rem]"
-		@update:query="onLinkQuery"
-		@update:modelValue="onLinkPick"
-	/>
-
-	<!-- The picker cannot help here: no searchable target (Dynamic Link before
-	     its controlling field is read), the caller may not search that DocType,
-	     or the search came back empty. The filter is still perfectly usable —
-	     its value IS the document name — so type it. -->
+	     mentions and the trigger DocType picker already use.
+	     role=group + aria-label: frappe-ui's Autocomplete owns its own trigger
+	     element, so the name goes on a labelled group around it rather than on a
+	     node the component may re-render. Same string as the 16 plain controls. -->
 	<div
-		v-else-if="control === 'link' || control === 'multi-link'"
-		class="flex flex-col gap-1"
+		v-else-if="rendered === 'link' || rendered === 'multi-link'"
+		role="group"
+		:aria-label="ariaLabel"
 	>
+		<Autocomplete
+			:multiple="rendered === 'multi-link'"
+			:options="linkOptions"
+			:loading="linkLoading"
+			:modelValue="linkModel"
+			:placeholder="`Search ${linkTargetName}…`"
+			bodyClasses="min-w-[16rem]"
+			@update:query="onLinkQuery"
+			@update:modelValue="onLinkPick"
+		/>
+	</div>
+
+	<!-- The picker cannot help right now: no searchable target (Dynamic Link
+	     before its controlling field is read), the caller may not search that
+	     DocType, or the last query matched nothing. The filter is still perfectly
+	     usable — its value IS the document name — so type it. Typing here keeps
+	     searching, so a typo is a detour and not a dead end: the moment a query
+	     matches, the picker comes back. -->
+	<div v-else-if="rendered === 'link-text'" class="flex flex-col gap-1">
 		<FormControl
 			type="text"
 			:aria-label="ariaLabel"
 			placeholder="Enter the exact name"
 			:modelValue="scalar"
-			@update:modelValue="(v) => emitValue(v, { immediate: false })"
+			@update:modelValue="onLinkText"
 		/>
 		<span v-if="linkFallbackReason" class="text-p-xs text-ink-gray-5">
 			{{ linkFallbackReason }}
 		</span>
 	</div>
 
-	<div v-else-if="control === 'multi-select'" class="flex flex-col gap-1">
+	<div
+		v-else-if="rendered === 'multi-select'"
+		class="flex flex-col gap-1"
+		role="group"
+		:aria-label="ariaLabel"
+	>
 		<Autocomplete
 			:multiple="true"
 			:options="selectChoices"
@@ -155,7 +167,7 @@
 
 	<!-- in / not in over a free-text family: real chips, never a comma string
 	     the server has to split (deviation D10). -->
-	<div v-else-if="control === 'multi'" class="flex flex-col gap-1">
+	<div v-else-if="rendered === 'multi'" class="flex flex-col gap-1">
 		<div v-if="list.length" class="flex flex-wrap items-center gap-1">
 			<Badge v-for="(v, i) in list" :key="`${v}-${i}`" variant="subtle" theme="gray">
 				<span class="max-w-[10rem] truncate">{{ v }}</span>
@@ -238,6 +250,20 @@ const IS_OPTIONS = [
 ];
 
 const control = computed(() => controlFor(props.entry, props.clause.operator));
+
+/**
+ * What actually renders. Identical to `control` except when the Link picker has
+ * nothing to offer, where a single Link degrades to a name input and a multi
+ * Link degrades to CHIPS — a list has to stay a list, or an `in` clause would
+ * come back as a bare string.
+ */
+const rendered = computed(() => {
+	const c = control.value;
+	if ((c === "link" || c === "multi-link") && linkFallback.value) {
+		return c === "multi-link" ? "multi" : "link-text";
+	}
+	return c;
+});
 const ariaLabel = computed(
 	() =>
 		`Value for ${
@@ -321,6 +347,15 @@ function onChipKey(event) {
 function onDraft(v) {
 	draft.value = v;
 	chipNote.value = "";
+	// A multi-Link that fell back to chips is still a Link: keep searching so a
+	// corrected query restores the picker.
+	if (linkTargetName.value) onLinkQuery(v);
+}
+
+/** The single-Link fallback: the value IS the name, and it is also a query. */
+function onLinkText(v) {
+	emitValue(v, { immediate: false });
+	onLinkQuery(v);
 }
 function commitChip() {
 	const text = String(draft.value || "").trim();
@@ -392,10 +427,16 @@ async function loadLinks(query) {
 			value: String(r.value),
 			description: r.label && r.label !== r.value ? String(r.value) : r.description || "",
 		}));
-		// Nothing came back for something the user actually typed: the picker has
-		// no more to offer, so hand them the input that can still express the
-		// filter rather than an empty dropdown.
-		if (!linkOptions.value.length && String(query || "").trim()) {
+		if (linkOptions.value.length) {
+			// Rows came back, so the picker is useful again. Clearing HERE rather
+			// than on entry to loadLinks means the control never flickers while a
+			// query is in flight — and it means a typo downgrades the row only for
+			// as long as the typo lasts.
+			linkFallbackReason.value = "";
+		} else if (String(query || "").trim()) {
+			// Nothing came back for something the user actually typed: the picker
+			// has no more to offer, so hand them the input that can still express
+			// the filter rather than an empty dropdown.
 			linkFallbackReason.value = `No ${doctype} matched — enter the name directly.`;
 		}
 	} catch (e) {
