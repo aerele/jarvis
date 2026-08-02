@@ -93,6 +93,25 @@ test("degradedMessage: a suspended subscription gets the renewal line, not the g
   );
 });
 
+// A control-plane outage on a workspace nothing has confirmed yet
+// (account.py::_admin_unreachable_verdict). It used to fall to the generic line,
+// which tells the customer to ask an administrator to finish reconnecting - there
+// is nothing to reconnect and no administrator can help.
+test("degradedMessage: an unconfirmed readiness verdict says retry, not 'ask your administrator'", () => {
+  const generic = degradedMessage({ ready: false, reason: "llm_credentials" });
+  const msg = degradedMessage({ ready: false, reason: "readiness_unconfirmed" });
+  assert.notEqual(msg, generic);
+  assert.match(msg, /try again/i);
+  assert.equal(
+    degradedMessage({
+      ready: false,
+      reason: "readiness_unconfirmed",
+      detail: "We couldn't confirm your workspace is ready yet.",
+    }),
+    "We couldn't confirm your workspace is ready yet."
+  );
+});
+
 // The reason set belongs to account.py. Printing a raw detail for a reason this
 // module does not recognise would leak whatever wording a future backend change
 // happens to attach, into a banner written for a different situation.

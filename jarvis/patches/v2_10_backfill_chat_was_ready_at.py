@@ -13,16 +13,24 @@ on working customers - the exact regression the established cohort exists to
 prevent.
 
 Grandfather rule (mirrors v1_10 / v2_00): a workspace that is onboarded
-(jarvis_admin_api_key present) AND whose LLM config has been CONFIRMED applied at
-least once - the same evidence is_ready_for_chat itself gates on, per
+(jarvis_admin_api_key present) AND carries the marker its own leg is gated on -
+the same evidence is_ready_for_chat itself opens chat with, per
 account._llm_apply_confirmed - was chat-ready before this deploy and must stay
-so. The marker is stamped from that apply's own timestamp, not from now(): it is
-a claim about the past, and back-dating it keeps the daily refresh honest.
+so. The marker is stamped from that leg's own timestamp, not from now(): it is a
+claim about the past, and back-dating it keeps the daily refresh honest.
 
-NOT stamped: a workspace with no admin key (never signed up) or no confirmed
-apply on any leg (its container has demonstrably never been serving its config).
-Those are the onboarding-stage cohort by definition, and this patch must not
-manufacture history for them - their marker sets on their first real Ready.
+Those three markers are not equally strong, and the difference is inherited
+rather than introduced here: llm_pool_synced_at and llm_direct_synced_at are
+stamped on a CONFIRMED apply, while llm_oauth_connected_at is stamped when the
+grant completes and the auth-profile blob is PUSHED (jarvis/oauth/api.py) - a
+push, not a confirmation. It is used anyway because it is exactly the evidence
+the live gate already accepts for that leg; grandfathering must reproduce the
+pre-deploy verdict, not a stricter one it was never held to.
+
+NOT stamped: a workspace with no admin key (never signed up) or no applied marker
+on any leg (nothing has ever been pushed to its container). Those are the
+onboarding-stage cohort by definition, and this patch must not manufacture
+history for them - their marker sets on their first real Ready.
 
 Reads go through the document API, NOT frappe.db.get_single_value, for the same
 empty-Datetime coercion reason documented in v1_10.
@@ -40,8 +48,8 @@ def execute():
 	# Whichever leg this workspace syncs through - pool marker for a pool (incl. a
 	# BYO api-key pool), the OAuth connect stamp for a direct subscription/oauth
 	# tenant, the direct apply marker otherwise. Read permissively rather than
-	# re-deriving the leg: any ONE confirmed apply is evidence enough that a
-	# container was serving this workspace.
+	# re-deriving the leg: any ONE of these is what the live gate would have
+	# accepted for this workspace, which is the bar for grandfathering.
 	confirmed = (
 		settings.get("llm_pool_synced_at")
 		or settings.get("llm_direct_synced_at")

@@ -149,6 +149,24 @@ def _set_ready_marker(value) -> None:
 	)
 
 
+def _set_stored_connection(present: bool):
+	"""The other half of "established": _has_been_chat_ready reads the RAW
+	jarvis_admin_api_key column (a mask, never the secret - see
+	jarvis/_password_utils.py), so a test that wants a cohort must say which,
+	rather than inherit whatever this site's onboarding state happens to be.
+
+	Returns the previous raw value so the caller can put it back."""
+	prior = account._settings_raw(("jarvis_admin_api_key",)).get("jarvis_admin_api_key")
+	frappe.db.set_value(
+		"Jarvis Settings",
+		"Jarvis Settings",
+		"jarvis_admin_api_key",
+		"*" * 10 if present else "",
+		update_modified=False,
+	)
+	return prior
+
+
 class TestAdminChatGate(FrappeTestCase):
 	"""jarvis.account._admin_chat_gate — the final managed ready-gate for
 	is_ready_for_chat. v1-tolerant; positive verdict cached against the config
@@ -173,11 +191,19 @@ class TestAdminChatGate(FrappeTestCase):
 		s = frappe.get_single("Jarvis Settings")
 		self._rn_snap = {f: s.get(f) for f in self._RELEASE_FIELDS}
 		self._marker_snap = account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at")
+		self._key_snap = _set_stored_connection(True)
 		_set_ready_marker("2026-01-01 00:00:00")
 
 	def tearDown(self):
 		account._bust_chat_gate()
 		_set_ready_marker(self._marker_snap)
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"jarvis_admin_api_key",
+			self._key_snap,
+			update_modified=False,
+		)
 		s = frappe.get_single("Jarvis Settings")
 		for f, v in self._rn_snap.items():
 			s.db_set(f, v)
@@ -306,7 +332,46 @@ class TestAdminChatGate(FrappeTestCase):
 		self.assertEqual(out["reason"], "readiness_unconfirmed")
 		self.assertTrue(out["retryable"])
 		self.assertTrue(out["detail"], "the customer must be told something they can act on")
-		# Still never negative-cached: the very next call re-asks.
+
+	def test_the_unconfirmed_verdict_is_briefly_cached(self):
+		"""The wizard polls this every 2.5s. Re-asking a control plane that is
+		already failing, once per beat per open tab, is how a bench turns an outage
+		into a second one - so the UNCONFIRMED code (and only it) gets a few
+		seconds. The verdict served from that entry is identical."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		_set_ready_marker(None)
+		with patch.object(
+			admin_client, "get_connection", side_effect=AdminUnreachableError("admin is unreachable")
+		) as gc:
+			first = account._admin_chat_gate()
+			second = account._admin_chat_gate()
+		gc.assert_called_once()
+		self.assertEqual(first, second)
+		self.assertLessEqual(account._UNCONFIRMED_CACHE_TTL_S, 10, "'retryable' has to stay true")
+
+	def test_the_cached_unconfirmed_entry_re_derives_the_cohort(self):
+		"""Only the FACT of the outage is cached, never the cohort decision: a
+		workspace that becomes established inside the window is answered as one."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		_set_ready_marker(None)
+		with patch.object(
+			admin_client, "get_connection", side_effect=AdminUnreachableError("admin is unreachable")
+		):
+			self.assertFalse(account._admin_chat_gate()["ready"])
+			_set_ready_marker("2026-01-01 00:00:00")
+			self.assertTrue(account._admin_chat_gate()["ready"])
+
+	def test_a_rendered_not_ready_verdict_is_still_never_cached(self):
+		"""The short cache is for "nobody answered", not for an answer. A container
+		that finishes provisioning must be seen on the next call, not in 5s."""
+		with patch.object(
+			admin_client, "get_connection", return_value={"chat_readiness": "Provisioning"}
+		) as gc:
+			account._admin_chat_gate()
+			account._admin_chat_gate()
+		self.assertEqual(gc.call_count, 2)
 		self.assertIsNone(self._cached_verdict())
 
 	def test_pending_payment_403_is_not_a_blind_ready(self):
@@ -510,24 +575,53 @@ class TestLlmMissingVerdict(FrappeTestCase):
 		out, _ = self._verdict(self._S(), conn={})
 		self.assertEqual(out["reason"], "llm_credentials")
 
-	def test_a_403_hard_gates_the_never_synced_workspace(self):
-		"""The dead-code fix. get_connection 403s every un-paid customer state
-		(jarvis_admin_v2.api._auth.current_customer, allow_pending False), so the
-		Pending Payment customer this hard gate was written for never reached it -
-		they took the generic "admin unknown" path and landed in the chat app.
-
-		Reachable only past never_synced, so no established workspace can hit it."""
+	def _auth_error(self, message, status_code=403):
 		from jarvis.exceptions import AdminAuthError
 
-		out, _ = self._verdict(self._S(), raises=AdminAuthError("admin returned 403", status_code=403))
-		self.assertEqual(out["reason"], "llm_setup")
+		return AdminAuthError(message, status_code=status_code)
+
+	def test_a_403_naming_a_never_paid_state_hard_gates(self):
+		"""The dead-code fix. get_connection 403s an unpaid customer at
+		jarvis_admin_v2.api._auth.current_customer (allow_pending False) instead of
+		answering with a subscription_status, so the Pending Payment customer this
+		hard gate was written for never reached it - they took the generic "admin
+		unknown" path and landed in the chat app.
+
+		Reachable only past never_synced, so no established workspace can hit it."""
+		for message in (
+			"customer status: Pending Payment",
+			"customer status: Pending Verification",
+			"not a Jarvis Customer",
+		):
+			with self.subTest(message=message):
+				out, _ = self._verdict(self._S(), raises=self._auth_error(message))
+				self.assertEqual(out["reason"], "llm_setup")
+
+	def test_a_cancelled_customer_stays_soft(self):
+		"""Cancelled is an ENDED account, not a half-finished signup: the renew
+		banner owns it, and the wizard would dead-end it at signup's duplicate
+		guard. Hard-gating would also take /billing - the one page that can fix
+		it - away from them."""
+		out, _ = self._verdict(self._S(), raises=self._auth_error("customer status: Cancelled"))
+		self.assertEqual(out["reason"], "llm_credentials")
+
+	def test_an_anonymous_403_stays_soft(self):
+		"""A 403 with no body of admin's - a proxy, a WAF, a hardened control plane
+		that ships exc_type without the sentence - is not evidence of anything about
+		this customer. Guessing "never paid" from it would lock an Active customer
+		out of chat on an infrastructure hiccup."""
+		for message in ("admin returned 403", "PermissionError", "", "<html>403 Forbidden</html>"):
+			with self.subTest(message=message):
+				out, _ = self._verdict(self._S(), raises=self._auth_error(message))
+				self.assertEqual(out["reason"], "llm_credentials")
 
 	def test_a_401_is_still_treated_as_unknown(self):
 		"""401 is a stale/rotated token - a bench problem, not a statement about the
-		customer's subscription. It must not hard-gate anyone to the wizard."""
-		from jarvis.exceptions import AdminAuthError
-
-		out, _ = self._verdict(self._S(), raises=AdminAuthError("admin returned 401", status_code=401))
+		customer's subscription. It must not hard-gate anyone to the wizard, even
+		carrying words that would qualify on a 403."""
+		out, _ = self._verdict(
+			self._S(), raises=self._auth_error("customer status: Pending Payment", status_code=401)
+		)
 		self.assertEqual(out["reason"], "llm_credentials")
 
 	def test_an_established_workspace_never_reaches_the_403_branch(self):
@@ -549,12 +643,20 @@ class TestReplacedSiteIsExplained(FrappeTestCase):
 		# The two "still fails open" cases below are about the ESTABLISHED cohort -
 		# pin it rather than inherit whatever this site happens to be.
 		self._marker_snap = account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at")
+		self._key_snap = _set_stored_connection(True)
 		_set_ready_marker("2026-01-01 00:00:00")
 
 	def tearDown(self):
 		frappe.cache().delete_value(account._REPLACED_CACHE_KEY)
 		account._bust_chat_gate()
 		_set_ready_marker(self._marker_snap)
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"jarvis_admin_api_key",
+			self._key_snap,
+			update_modified=False,
+		)
 
 	def test_an_auth_failure_on_a_replaced_site_explains_itself(self):
 		with (
@@ -610,6 +712,54 @@ class TestReplacedSiteIsExplained(FrappeTestCase):
 		self.assertEqual(out["reason"], "site_replaced")
 
 
+class TestResetEndsTheEstablishedClaim(FrappeTestCase):
+	"""chat_was_ready_at is a claim about the TENANCY that earned it. A reset ends
+	that tenancy, so the marker has to go with it - otherwise the site whose
+	container is most certainly not serving yet is the one whose chat is held open
+	through an outage."""
+
+	def setUp(self):
+		account._bust_chat_gate()
+		self._marker_snap = account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at")
+		self._key_snap = _set_stored_connection(True)
+
+	def tearDown(self):
+		_set_ready_marker(self._marker_snap)
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"jarvis_admin_api_key",
+			self._key_snap,
+			update_modified=False,
+		)
+		account._bust_chat_gate()
+
+	def test_the_marker_is_in_the_connection_reset_spec(self):
+		"""That settings_reset.apply actually NULLs every field in ``null`` is
+		covered generically by test_dev's reset harness, which plants a value in
+		each and asserts it comes back NULL. Running a real CONNECTION reset from
+		here instead would tear this site's credentials down for whatever runs
+		next - the reset is deliberately not transactional about __Auth."""
+		from jarvis import settings_reset
+
+		self.assertIn("chat_was_ready_at", settings_reset.CONNECTION.null)
+		self.assertIn("chat_was_ready_at", settings_reset.FULL.null)
+
+	def test_a_reconnected_site_fails_closed_until_it_earns_a_new_ready(self):
+		"""Why the marker has to be in that spec: the reconnect writes a fresh admin
+		key within seconds, so the "stored connection" half of _has_been_chat_ready
+		is satisfied again immediately. Only clearing the marker keeps the NEW
+		tenancy - whose container is the one thing definitely not serving yet - in
+		the onboarding-stage cohort."""
+		_set_ready_marker(None)  # what the reset leaves behind
+		_set_stored_connection(True)  # what the reconnect writes back
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		self.assertFalse(account._has_been_chat_ready(raw))
+		with patch.object(admin_client, "get_connection", side_effect=Exception("admin 500")):
+			out = account._admin_chat_gate()
+		self.assertEqual(out["reason"], "readiness_unconfirmed")
+
+
 class TestIsReadyForChatCohorts(FrappeTestCase):
 	"""is_ready_for_chat end to end (its managed ready-exit), not just the gate:
 	the reason the customer's browser actually receives when the control plane
@@ -617,13 +767,22 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 
 	The workspace is pinned onto the subscription/oauth leg (connected marker set,
 	pool mode off) so the run reaches _admin_chat_gate deterministically instead of
-	depending on whatever this site's LLM config happens to be."""
+	depending on whatever this site's LLM config happens to be. is_ready_for_chat
+	reads the admin key through get_password, so this class provisions a real
+	encrypted one for the duration rather than the raw mask the gate-level tests
+	use."""
 
 	_FIELDS = ("llm_auth_mode", "llm_oauth_connected_at", "chat_was_ready_at")
 
 	def setUp(self):
+		from jarvis._password_utils import set_settings_password
+
 		account._bust_chat_gate()
 		self._snap = account._settings_raw(self._FIELDS)
+		self._key_snap = account._settings_raw(("jarvis_admin_api_key",)).get("jarvis_admin_api_key")
+		set_settings_password(
+			frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key", "test-only-readiness-key"
+		)
 		self._write(
 			{
 				"llm_auth_mode": "subscription",
@@ -635,8 +794,18 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		self._pool_off.start()
 
 	def tearDown(self):
+		from jarvis._password_utils import clear_settings_password
+
 		self._pool_off.stop()
+		clear_settings_password(frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key")
 		self._write({f: self._snap.get(f) for f in self._FIELDS})
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"jarvis_admin_api_key",
+			self._key_snap,
+			update_modified=False,
+		)
 		account._bust_chat_gate()
 
 	def _write(self, values: dict) -> None:

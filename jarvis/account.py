@@ -87,6 +87,27 @@ _UNCONFIRMED_REASON = "readiness_unconfirmed"
 _UNCONFIRMED_DETAIL = (
 	"We couldn't confirm your workspace is ready yet. This usually clears in a moment - please retry."
 )
+# Short enough that "retryable" stays true in practice (the wizard's poll is 2.5s
+# and a recovered control plane must be seen within a beat or two), long enough
+# that an outage does not turn one wizard into 30 admin round-trips a minute.
+# Applies to THIS code alone: a real not-ready verdict is never cached.
+_UNCONFIRMED_CACHE_TTL_S = 5
+
+# Admin's own words for a customer that has NEVER paid, from
+# jarvis_admin_v2.api._auth.current_customer. Matched on the message because the
+# wire carries nothing better: every refusal that function makes is a 403, and
+# only the sentence separates a half-finished signup from a lapsed customer whose
+# renew banner must keep working.
+#
+# An ALLOWLIST: "customer status: Cancelled", an empty body, a proxy's own 403 and
+# anything unrecognised all fall through to the soft verdict. Being wrong in the
+# hard direction locks a customer out of chat AND /billing; being wrong in the
+# soft direction shows a banner one step too late.
+_NEVER_PAID_403_MARKERS = (
+	"customer status: pending payment",
+	"customer status: pending verification",
+	"not a jarvis customer",
+)
 
 
 def _settings_raw(fields: tuple[str, ...]) -> dict:
@@ -118,6 +139,22 @@ def _settings_raw(fields: tuple[str, ...]) -> dict:
 	return {f: v for f, v in rows}
 
 
+def _is_never_paid_403(err) -> bool:
+	"""Does this admin rejection carry admin's OWN evidence that the customer has
+	never paid? Anything less is not evidence - see _NEVER_PAID_403_MARKERS.
+
+	Note what a production admin actually puts on the wire: Frappe only includes
+	the exception sentence when tracebacks are allowed (frappe/utils/response.py
+	``report_error`` / ``is_traceback_allowed``), so a hardened control plane sends
+	back ``exc_type`` alone and this correctly returns False. The hard gate is the
+	exception, not the rule.
+	"""
+	if getattr(err, "status_code", None) != 403:
+		return False
+	message = str(err or "").strip().lower()
+	return any(marker in message for marker in _NEVER_PAID_403_MARKERS)
+
+
 def _gate_revision(raw: dict) -> str:
 	"""Short digest of the local readiness inputs - the cached verdict's identity.
 
@@ -137,8 +174,15 @@ def _has_been_chat_ready(raw: dict) -> bool:
 	were torn down (reconnected on another site, reset) in the cohort whose chat
 	is protected during an outage, and it is precisely that workspace whose chat
 	cannot work. The admin key alone is just "signup happened", which every
-	half-onboarded customer also has.
+	half-onboarded customer also has. settings_reset.CONNECTION clears the marker
+	with the rest of the tenancy, so a reset site must earn a new Ready.
 	"""
+	if not frappe.get_meta(SETTINGS).get_field(_READY_MARKER_FIELD):
+		# Code running ahead of its migration: the field does not exist, so NO
+		# workspace can be established and every established customer would fail
+		# closed together. Insurance for a hand-rolled deploy that restarts before
+		# it migrates; self-disarming the moment `bench migrate` adds the field.
+		return True
 	return bool(raw.get(_READY_MARKER_FIELD)) and bool((raw.get("jarvis_admin_api_key") or "").strip())
 
 
@@ -153,6 +197,22 @@ def _marker_is_fresh(current) -> bool:
 		return False
 
 
+def _write_is_durable() -> bool:
+	"""Would a write made right now survive the end of this request?
+
+	Frappe commits only for an UNSAFE method and rolls everything else back
+	(frappe/app.py ``sync_database``, frappe/auth.py ``UNSAFE_HTTP_METHODS``), so a
+	marker written during the desk's boot GET is discarded anyway - and writing it
+	regardless would burn a row-lock on Singles on every page load of every user
+	for nothing. The paths that matter are POSTs (the SPA's readiness call, a chat
+	send) and background jobs, which is where the marker actually becomes durable.
+	"""
+	request = getattr(frappe.local, "request", None)
+	if request is None:
+		return True  # background job, CLI, test: no request to be rolled back
+	return (getattr(request, "method", "") or "").upper() in ("POST", "PUT", "DELETE", "PATCH")
+
+
 def _mark_chat_ready(raw: dict) -> None:
 	"""Record that admin has confirmed this workspace Ready.
 
@@ -164,7 +224,7 @@ def _mark_chat_ready(raw: dict) -> None:
 	not churn on its own bookkeeping.
 	"""
 	try:
-		if _marker_is_fresh(raw.get(_READY_MARKER_FIELD)):
+		if _marker_is_fresh(raw.get(_READY_MARKER_FIELD)) or not _write_is_durable():
 			return
 		frappe.db.set_value(
 			SETTINGS, SETTINGS, _READY_MARKER_FIELD, frappe.utils.now(), update_modified=False
@@ -189,8 +249,10 @@ def _admin_unreachable_verdict(raw: dict) -> dict:
 	rendered, just an admission that nobody could confirm one - so the wizard
 	keeps polling instead of declaring setup finished.
 
-	Never negative-cached, on either branch: a recovered control plane is re-asked
-	on the very next call.
+	The closed branch is cached for _UNCONFIRMED_CACHE_TTL_S (the gate does the
+	caching, since it owns the key) - long enough to stop a 2.5s poll turning one
+	outage into an admin round-trip per beat, short enough that "retryable" is not
+	a lie. A verdict admin actually RENDERED is still never cached.
 	"""
 	if _has_been_chat_ready(raw):
 		return {"ready": True, "reason": None, "billing_notice": {}}
@@ -222,15 +284,17 @@ def _admin_chat_gate() -> dict:
 	- Resilience: a ``get_connection`` failure (unreachable / auth / timeout) is
 	  answered by cohort - fail open for an established workspace, fail closed
 	  with a retryable code for one that has never been confirmed ready. See
-	  ``_admin_unreachable_verdict``. Neither is negative-cached, so a transient
-	  block or error clears on the very next load rather than sticking for the
-	  TTL.
+	  ``_admin_unreachable_verdict``. A verdict admin RENDERED is never cached, so
+	  a transient block clears on the very next load; the unconfirmed verdict gets
+	  a few seconds so a polling wizard cannot amplify an outage.
 	"""
 	raw = _settings_raw(_GATE_STATE_FIELDS)
 	cache = frappe.cache()
 	cache_key = f"{_CHAT_GATE_CACHE_KEY}:{_gate_revision(raw)}"
 	cached = cache.get_value(cache_key)
 	if cached:
+		if isinstance(cached, dict) and cached.get("unconfirmed"):
+			return _admin_unreachable_verdict(raw)
 		# The billing banner rides the cached verdict. Caching a bare flag would
 		# hide an expiring/grace notice for the whole TTL on every ready load.
 		# Tolerate the pre-upgrade shape (a bare 1) rather than re-asking admin.
@@ -245,7 +309,14 @@ def _admin_chat_gate() -> dict:
 		moved = _site_replacement()
 		if moved.get("replaced"):
 			return {"ready": False, "reason": "site_replaced", "replaced_notice": moved, "billing_notice": {}}
-		return _admin_unreachable_verdict(raw)
+		verdict = _admin_unreachable_verdict(raw)
+		if verdict.get("reason") == _UNCONFIRMED_REASON:
+			# Same revision key as the positive verdict, so a save drops this too -
+			# a customer who fixes their config is never held behind an outage's
+			# leftovers. Re-derived on read rather than stored, so the cohort is
+			# re-evaluated even inside the window.
+			cache.set_value(cache_key, {"unconfirmed": True}, expires_in_sec=_UNCONFIRMED_CACHE_TTL_S)
+		return verdict
 	# Refresh the locally-mirrored release notice on this gate's cadence so an
 	# active user sees an activate/clear without waiting for the daily sync.
 	release_notice.persist(conn.get("release_notice") or {})
@@ -458,22 +529,23 @@ def _llm_missing_verdict(settings) -> dict:
 
 		sub_status = (admin_client.get_connection(timeout_s=8) or {}).get("subscription_status") or ""
 	except AdminAuthError as e:
-		# 403 is admin REACHED and refusing this site's principal, and the endpoint
-		# that decides it (jarvis_admin_v2.api._auth.current_customer, allow_pending
-		# False) refuses exactly the customer states that mean "not paid up": Pending
-		# Payment, Pending Verification, Suspended, Cancelled. Reading that as
-		# "subscription state unknown" is what made the llm_setup gate below
-		# UNREACHABLE for the cohort it was written for — a Pending Payment customer
-		# 403s here, fell through to the soft banner, and landed in the chat app with
-		# a "no AI connected" note instead of back in the wizard that can finish
-		# their payment.
+		# A 403 is admin REACHED and refusing this site's principal. That refusal is
+		# how the llm_setup gate below came to be UNREACHABLE for the cohort it was
+		# written for: a Pending Payment customer 403s at
+		# jarvis_admin_v2.api._auth.current_customer (allow_pending False) instead of
+		# answering with a subscription_status, so they fell through to the soft
+		# banner and landed in the chat app with a "no AI connected" note rather than
+		# back in the wizard that can finish their payment.
 		#
-		# Safe only because never_synced has already excluded every workspace that
-		# ever had a working LLM: what is left is a customer admin refuses AND who
-		# has never had an AI connection at all, i.e. chat cannot work for them by
-		# either measure. A lapsed customer who DID connect one keeps the soft
-		# renew-banner path above, untouched.
-		if getattr(e, "status_code", None) == 403:
+		# ONLY the never-paid shapes hard-gate, and only when admin's own words say
+		# so - see _is_never_paid_403. Every other 403 (Cancelled, a bodyless
+		# proxy/WAF rejection, anything unrecognised) stays SOFT, because the
+		# renew/suspension banner owns those states and the wizard would dead-end
+		# them at signup's duplicate guard. Suspended cannot arrive here at all:
+		# Jarvis Customer propagates Suspended to User.enabled=0
+		# (jarvis_admin_v2/.../jarvis_customer.py:81), so that customer's bench is
+		# rejected by Frappe auth with a 401 long before current_customer runs.
+		if _is_never_paid_403(e):
 			return {"ready": False, "reason": "llm_setup"}
 		sub_status = ""
 	except Exception:
@@ -824,7 +896,14 @@ def _bust_chat_gate() -> None:
 	was replaced in between is exactly what the revision exists to prevent.
 
 	Prefix delete, not a single key: the entry to drop is whichever revision is
-	live, and after a save that is no longer the one this call would compute."""
+	live, and after a save that is no longer the one this call would compute.
+
+	DO NOT call this from a hot path. ``delete_keys`` is a Redis KEYS scan of the
+	whole keyspace, which is fine for the handful of rare, human-triggered actions
+	that call it (a billing change, an LLM save, a disconnect, a reconnect) and is
+	not fine per request or per chat turn. A caller that needs invalidation on a
+	hot path wants the config revision instead - it costs nothing and is already
+	how every routine change is picked up."""
 	try:
 		frappe.cache().delete_keys(_CHAT_GATE_CACHE_KEY)
 	except Exception:
