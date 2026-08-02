@@ -212,13 +212,22 @@ describe("URL state", () => {
 			],
 		});
 		const { route, router } = routerDouble({ [URL_PARAM]: param });
-		const { api } = host({ fetchFn, storageKey: "u3", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u3",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 
 		expect(api.filterNotice.value).toBe(
 			"1 filter from this link is no longer available on this list and was removed."
 		);
-		expect(fetchFn.mock.calls[0][0].filters_v2.map((c) => c.fieldname)).toEqual(["description"]);
+		expect(fetchFn.mock.calls[0][0].filters_v2.map((c) => c.fieldname)).toEqual([
+			"description",
+		]);
 		// the URL is rewritten to what is actually in force
 		expect(JSON.parse(route.query[URL_PARAM]).c).toHaveLength(1);
 
@@ -239,7 +248,14 @@ describe("URL state", () => {
 			c: [["Jarvis Custom Skill", "description", "like", "month end"]],
 		});
 		const { route, router } = routerDouble({ [URL_PARAM]: param });
-		const { api } = host({ fetchFn, storageKey: "u4", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u4",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 
 		expect(api.filterSchemaState.value).toBe("error");
@@ -250,7 +266,14 @@ describe("URL state", () => {
 		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
 		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
 		const { route, router, navigate } = routerDouble();
-		const { api } = host({ fetchFn, storageKey: "u5", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u5",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 
 		await api.setClauses([clause(DESCRIPTION, "month end")]);
@@ -282,7 +305,14 @@ describe("URL state", () => {
 		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
 		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
 		const { route, router, navigate } = routerDouble();
-		const { api } = host({ fetchFn, storageKey: "u5b", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u5b",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 		await api.setClauses([clause(DESCRIPTION, "month end")]);
 		await flushPromises();
@@ -300,7 +330,14 @@ describe("URL state", () => {
 		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
 		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
 		const { route, router } = routerDouble();
-		const { api } = host({ fetchFn, storageKey: "u5c", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u5c",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 		await api.setClauses([clause(DESCRIPTION, "month end")]);
 		await api.setClauses([]);
@@ -423,7 +460,10 @@ describe("quick filters ⇄ clauses", () => {
 describe("coded rejections (never a dead-end toast)", () => {
 	it("surfaces the mapped copy instead of the generic error toast", async () => {
 		const fetchFn = vi.fn(async () => {
-			throw envelopeError("list_filter_invalid_value", "Created On needs a start and an end.");
+			throw envelopeError(
+				"list_filter_invalid_value",
+				"Created On needs a start and an end."
+			);
 		});
 		const { api } = host({ fetchFn, storageKey: "e1", viewKey: "skills" });
 		await flushPromises();
@@ -459,9 +499,15 @@ describe("coded rejections (never a dead-end toast)", () => {
 		expect(api.filterClauses.value).toHaveLength(1);
 
 		// the field is gone from the caller's catalog now
-		schema = { ...SKILLS_SCHEMA, fields: SKILLS_SCHEMA.fields.filter((f) => f.fieldname !== "description") };
+		schema = {
+			...SKILLS_SCHEMA,
+			fields: SKILLS_SCHEMA.fields.filter((f) => f.fieldname !== "description"),
+		};
 		fetchFn.mockImplementationOnce(async () => {
-			throw envelopeError("list_filter_unknown_field", "That field cannot be filtered on this list.");
+			throw envelopeError(
+				"list_filter_unknown_field",
+				"That field cannot be filtered on this list."
+			);
 		});
 		await api.resetLoad();
 		await flushPromises();
@@ -478,7 +524,10 @@ describe("coded rejections (never a dead-end toast)", () => {
 	it("reads a rejection that arrives as a resolved envelope as a rejection", async () => {
 		const fetchFn = vi.fn(async () => ({
 			ok: false,
-			error: { code: "list_filter_too_many_clauses", message: "At most 20 filters at a time." },
+			error: {
+				code: "list_filter_too_many_clauses",
+				message: "At most 20 filters at a time.",
+			},
 		}));
 		const { api } = host({ fetchFn, storageKey: "e4", viewKey: "skills" });
 		await flushPromises();
@@ -489,7 +538,8 @@ describe("coded rejections (never a dead-end toast)", () => {
 	it("clears the rejection once a request succeeds", async () => {
 		let fail = true;
 		const fetchFn = vi.fn(async () => {
-			if (fail) throw envelopeError("list_filter_invalid_value", "Description needs a value.");
+			if (fail)
+				throw envelopeError("list_filter_invalid_value", "Description needs a value.");
 			return { rows: [{ name: "a" }], total: 1 };
 		});
 		const { api } = host({ fetchFn, storageKey: "e5", viewKey: "skills" });

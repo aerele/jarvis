@@ -85,14 +85,7 @@ export const TIMESPANS = [
 	"next year",
 ];
 
-const NUMERIC_FIELDTYPES = new Set([
-	"Int",
-	"Float",
-	"Currency",
-	"Percent",
-	"Duration",
-	"Rating",
-]);
+const NUMERIC_FIELDTYPES = new Set(["Int", "Float", "Currency", "Percent", "Duration", "Rating"]);
 
 /** "last 7 days" → "Last 7 days". The WIRE value is never touched. */
 export function timespanLabel(token) {
@@ -101,10 +94,7 @@ export function timespanLabel(token) {
 }
 
 export function operatorLabel(operator, fieldtype) {
-	if (
-		(fieldtype === "Date" || fieldtype === "Datetime") &&
-		TEMPORAL_OPERATOR_LABELS[operator]
-	) {
+	if ((fieldtype === "Date" || fieldtype === "Datetime") && TEMPORAL_OPERATOR_LABELS[operator]) {
 		return TEMPORAL_OPERATOR_LABELS[operator];
 	}
 	return OPERATOR_LABELS[operator] || operator;
@@ -284,7 +274,8 @@ export function controlFor(entry, operator) {
 	const fieldtype = entry.fieldtype;
 	if (operator === "is") return "is";
 	if (operator === "Timespan") return "timespan";
-	if (operator === "Between") return fieldtype === "Datetime" ? "between-datetime" : "between-date";
+	if (operator === "Between")
+		return fieldtype === "Datetime" ? "between-datetime" : "between-date";
 	if (operator === "in" || operator === "not in") {
 		if (fieldtype === "Link") return "multi-link";
 		if (fieldtype === "Select" && selectOptions(entry)) return "multi-select";
@@ -396,7 +387,12 @@ export function isShapeComplete(clause) {
 		case "not in":
 			return Array.isArray(value) && value.some((v) => !isBlank(v));
 		case "Between":
-			return Array.isArray(value) && value.length === 2 && !isBlank(value[0]) && !isBlank(value[1]);
+			return (
+				Array.isArray(value) &&
+				value.length === 2 &&
+				!isBlank(value[0]) &&
+				!isBlank(value[1])
+			);
 		case "Timespan":
 			return TIMESPANS.includes(String(value || "").trim());
 		default:
@@ -533,7 +529,12 @@ export function parseClauseParam(raw, viewKey, schema) {
 			continue;
 		}
 		const [doctype, fieldname, operator, value] = row;
-		if (typeof doctype !== "string" || typeof fieldname !== "string" || !doctype || !fieldname) {
+		if (
+			typeof doctype !== "string" ||
+			typeof fieldname !== "string" ||
+			!doctype ||
+			!fieldname
+		) {
 			skipped += 1;
 			continue;
 		}

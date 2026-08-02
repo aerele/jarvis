@@ -213,7 +213,9 @@ def list_custom_skills_page(
 			q.server_condition("(name IN %(shared)s AND enabled = 1)", shared=shared)
 	else:  # both
 		if shared:
-			q.server_condition("(owner = %(me)s OR (name IN %(shared)s AND enabled = 1))", me=me, shared=shared)
+			q.server_condition(
+				"(owner = %(me)s OR (name IN %(shared)s AND enabled = 1))", me=me, shared=shared
+			)
 		else:
 			q.server_condition("owner = %(me)s", me=me)
 
@@ -229,7 +231,9 @@ def list_custom_skills_page(
 	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _SKILLS_SORTABLE, "skill_name", "asc")
 
-	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Custom Skill` WHERE {where}", params)[0][0]
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Custom Skill` WHERE {where}", params)[
+		0
+	][0]
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, skill_name, description, user_invocable, enabled, modified, owner,
 			ifnull(scope, 'Org') AS scope

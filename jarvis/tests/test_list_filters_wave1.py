@@ -544,7 +544,9 @@ class TestBoundedExecution(Wave1Base):
 			with self.subTest(endpoint=fn):
 				source = (app / module).read_text()
 				body = source[source.index(f"def {fn}(") :]
-				body = body[: body.index("\n@frappe.whitelist()")] if "\n@frappe.whitelist()" in body else body
+				body = (
+					body[: body.index("\n@frappe.whitelist()")] if "\n@frappe.whitelist()" in body else body
+				)
 				self.assertEqual(
 					body.count("list_filters.bounded_sql("),
 					2,
@@ -618,4 +620,6 @@ class TestCatalogIsBrowsable(Wave1Base):
 			{f["group"] for f in fields if f["is_standard"]},
 			{list_filters.STANDARD_FIELD_GROUP},
 		)
-		self.assertNotIn(list_filters.STANDARD_FIELD_GROUP, {f["group"] for f in fields if not f["is_standard"]})
+		self.assertNotIn(
+			list_filters.STANDARD_FIELD_GROUP, {f["group"] for f in fields if not f["is_standard"]}
+		)

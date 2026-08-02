@@ -188,9 +188,7 @@ def list_triggers_page(
 
 	q = list_filters.new_query("triggers")
 	if search:
-		q.server_condition(
-			"(trigger_name LIKE %(q)s OR target_doctype LIKE %(q)s)", q=f"%{_lk(search)}%"
-		)
+		q.server_condition("(trigger_name LIKE %(q)s OR target_doctype LIKE %(q)s)", q=f"%{_lk(search)}%")
 	if "enabled" in f:
 		q.server_condition("enabled = %(enabled)s", enabled=_bool01(f["enabled"]))
 	if "action_type" in f:

@@ -630,7 +630,10 @@ def build_field_catalog(
 
 def _schema_digest(fields: list[dict]) -> str:
 	payload = json.dumps(
-		[[f["doctype"], f["fieldname"], f["fieldtype"], f["default_operator"], f["operators"]] for f in fields],
+		[
+			[f["doctype"], f["fieldname"], f["fieldtype"], f["default_operator"], f["operators"]]
+			for f in fields
+		],
 		sort_keys=True,
 	)
 	return hashlib.sha256(payload.encode()).hexdigest()[:16]
@@ -669,7 +672,9 @@ def _meta_fingerprint(root_doctype: str, user: str) -> str:
 		for df in m.fields:
 			parts.append(f"{df.fieldname}:{df.fieldtype}:{int(df.permlevel or 0)}:{df.options or ''}")
 		for perm in getattr(m, "permissions", []) or []:
-			parts.append(f"P{perm.get('role')}:{int(perm.get('permlevel') or 0)}:{int(perm.get('read') or 0)}")
+			parts.append(
+				f"P{perm.get('role')}:{int(perm.get('permlevel') or 0)}:{int(perm.get('read') or 0)}"
+			)
 	return hashlib.sha256("|".join(parts).encode()).hexdigest()[:24]
 
 
@@ -813,7 +818,10 @@ def parse_clauses(clauses: Any) -> list[dict]:
 	out: list[dict] = []
 	for item in raw:
 		if not isinstance(item, dict):
-			_fail(ERR_BAD_PAYLOAD, _("Each filter must be an object with doctype, fieldname, operator and value."))
+			_fail(
+				ERR_BAD_PAYLOAD,
+				_("Each filter must be an object with doctype, fieldname, operator and value."),
+			)
 		out.append(item)
 	return out
 
@@ -964,6 +972,7 @@ def _between_bounds(entry: dict, value: Any) -> tuple[str, str]:
 	frm, to = value[0], value[1]
 
 	if entry["fieldtype"] == "Datetime":
+
 		def _expand(raw, end: bool):
 			if isinstance(raw, str) and " " in raw.strip():
 				return get_datetime(raw)
@@ -1308,9 +1317,7 @@ class ListFilterQuery:
 		"""Validate + compile client clauses. Idempotent per query object."""
 		if self._compiled is not None:
 			raise ValueError("filters_v2 already applied to this query")
-		self._compiled = compile_list_filters(
-			self.view_key, clauses, alias=self.alias, user=self.user
-		)
+		self._compiled = compile_list_filters(self.view_key, clauses, alias=self.alias, user=self.user)
 		return self
 
 	@property

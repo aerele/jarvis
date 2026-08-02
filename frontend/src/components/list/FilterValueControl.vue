@@ -461,7 +461,9 @@ const listModel = computed(() => list.value.map((v) => ({ label: v, value: v }))
 
 function onLinkPick(option) {
 	if (control.value === "multi-link") {
-		const picked = (option || []).map((o) => (o && o.value != null ? String(o.value) : String(o)));
+		const picked = (option || []).map((o) =>
+			o && o.value != null ? String(o.value) : String(o)
+		);
 		emitList(picked);
 		return;
 	}
