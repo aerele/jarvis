@@ -213,7 +213,9 @@ def list_custom_skills_page(
 			q.server_condition("(name IN %(shared)s AND enabled = 1)", shared=shared)
 	else:  # both
 		if shared:
-			q.server_condition("(owner = %(me)s OR (name IN %(shared)s AND enabled = 1))", me=me, shared=shared)
+			q.server_condition(
+				"(owner = %(me)s OR (name IN %(shared)s AND enabled = 1))", me=me, shared=shared
+			)
 		else:
 			q.server_condition("owner = %(me)s", me=me)
 

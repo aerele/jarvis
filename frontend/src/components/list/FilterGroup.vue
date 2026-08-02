@@ -36,7 +36,10 @@
 					</div>
 					<div v-else-if="schemaState === 'error'" class="flex flex-col gap-3 p-3">
 						<div class="flex items-start gap-2">
-							<FeatherIcon name="alert-circle" class="mt-0.5 size-4 text-ink-red-4" />
+							<FeatherIcon
+								name="alert-circle"
+								class="mt-0.5 size-4 text-ink-red-4"
+							/>
 							<div class="flex flex-col gap-1">
 								<span class="text-base font-medium text-ink-gray-8">
 									Filter fields couldn't be loaded

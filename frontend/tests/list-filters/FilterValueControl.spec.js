@@ -163,7 +163,9 @@ describe("Link search", () => {
 
 	it("names both Autocomplete controls the way the 16 plain ones are named", async () => {
 		apiDouble.searchLink.mockResolvedValue([]);
-		const link = mountControl(OWNER, clauseForEntry(OWNER), { rowName: "Created By (filter 2)" });
+		const link = mountControl(OWNER, clauseForEntry(OWNER), {
+			rowName: "Created By (filter 2)",
+		});
 		await flushPromises();
 		expect(link.find('[role="group"]').attributes("aria-label")).toBe(
 			"Value for Created By (filter 2)"
@@ -199,7 +201,11 @@ describe("Link search", () => {
 	});
 
 	it("clears to nothing rather than to a stale name", () => {
-		const w = mountControl(OWNER, { ...clauseForEntry(OWNER), value: "a@x.com", display: "A" });
+		const w = mountControl(OWNER, {
+			...clauseForEntry(OWNER),
+			value: "a@x.com",
+			display: "A",
+		});
 		w.findComponent({ name: "Autocomplete" }).vm.$emit("update:modelValue", null);
 		expect(patch(w)).toEqual({ value: "", display: null, immediate: true });
 	});
@@ -233,7 +239,10 @@ describe("multi-value", () => {
 	});
 
 	it("removes the chip whose X was pressed", async () => {
-		const clause = { ...setOperator(clauseForEntry(DESCRIPTION), "in"), value: ["a", "b", "c"] };
+		const clause = {
+			...setOperator(clauseForEntry(DESCRIPTION), "in"),
+			value: ["a", "b", "c"],
+		};
 		const w = mountControl(DESCRIPTION, clause);
 		await w.find('button[aria-label="Remove b"]').trigger("click");
 		expect(patch(w)).toEqual({ value: ["a", "c"], immediate: true });
@@ -296,7 +305,11 @@ describe("multi-value", () => {
 		const w = mountControl(SCOPE, setOperator(clauseForEntry(SCOPE), "in"));
 		const picker = w.findComponent({ name: "Autocomplete" });
 		expect(picker.props("multiple")).toBe(true);
-		expect(picker.props("options").map((o) => o.label)).toEqual(["Not set", "Org", "Personal"]);
+		expect(picker.props("options").map((o) => o.label)).toEqual([
+			"Not set",
+			"Org",
+			"Personal",
+		]);
 	});
 });
 
@@ -311,7 +324,13 @@ describe("scalar families", () => {
 
 	it("marks a typed number as debounceable and a picked date as immediate", async () => {
 		const number = mountControl(
-			{ ...CREATION, fieldtype: "Int", label: "Index", operators: ["="], default_operator: "=" },
+			{
+				...CREATION,
+				fieldtype: "Int",
+				label: "Index",
+				operators: ["="],
+				default_operator: "=",
+			},
 			{ ...clauseForEntry(CREATION), operator: "=", value: "" }
 		);
 		await number.find('input[type="number"]').setValue("12");
@@ -331,7 +350,9 @@ describe("scalar families", () => {
 
 		await w.setProps({ clause: { ...clause, value: ["2026-01-01 09:30:00", ""] } });
 		// and the stored value round-trips back into the input's own T-form
-		expect(w.findAll('input[type="datetime-local"]')[0].element.value).toBe("2026-01-01T09:30");
+		expect(w.findAll('input[type="datetime-local"]')[0].element.value).toBe(
+			"2026-01-01T09:30"
+		);
 		await w.findAll('input[type="datetime-local"]')[1].setValue("2026-02-01T17:45");
 		expect(patch(w)).toEqual({
 			value: ["2026-01-01 09:30:00", "2026-02-01 17:45:00"],

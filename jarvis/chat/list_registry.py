@@ -47,9 +47,7 @@ EXCLUDED_NOT_A_LIST = "excluded_not_a_list"
 # it to DOCUMENT_LIST *and* adopt the contract (plan §7).
 EXCLUDED_DORMANT = "excluded_dormant"
 
-CLASSIFICATIONS = frozenset(
-	{DOCUMENT_LIST, PROJECTION, EXCLUDED_NOT_A_LIST, EXCLUDED_DORMANT}
-)
+CLASSIFICATIONS = frozenset({DOCUMENT_LIST, PROJECTION, EXCLUDED_NOT_A_LIST, EXCLUDED_DORMANT})
 #: Classifications that must carry a ``reason``.
 EXCLUDED_CLASSIFICATIONS = frozenset({EXCLUDED_NOT_A_LIST, EXCLUDED_DORMANT})
 
@@ -179,7 +177,12 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.wiki.list_wiki_pages_page",),
 		surface="frontend/src/pages/skills/WikiTab.vue",
 		wave=1,
-		curated_filters={"page_type": "page_type", "scope_filter": None, "attention": None, "archived": "status"},
+		curated_filters={
+			"page_type": "page_type",
+			"scope_filter": None,
+			"attention": None,
+			"archived": "status",
+		},
 		notes="`scope_filter` (all|org|role|mine) and `attention` are view predicates, not single fields; `archived` is a two-valued view switch over `status` (Active vs Archived).",
 	),
 	ListView(
@@ -304,7 +307,11 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.approvals_api.list_approvals_page",),
 		surface="frontend/src/pages/approvals/ApprovalsBoard.vue",
 		wave=2,
-		curated_filters={"status": "status", "document_type": "document_type", "conversation": "conversation"},
+		curated_filters={
+			"status": "status",
+			"document_type": "document_type",
+			"conversation": "conversation",
+		},
 		notes="Computed `shared` flag + DocShare/owner visibility. Its document_type facet deliberately drops its own dimension — the C08-3 rule this module implements.",
 	),
 	ListView(

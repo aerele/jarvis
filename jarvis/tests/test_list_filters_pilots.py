@@ -189,7 +189,10 @@ class TestQueryObjectReproducesTheLegacyPredicates(unittest.TestCase):
 			None,
 			(),
 			search="%x%",
-			legacy=[("enabled = %(enabled)s", {"enabled": 1}), ("user_invocable = %(user_invocable)s", {"user_invocable": 0})],
+			legacy=[
+				("enabled = %(enabled)s", {"enabled": 1}),
+				("user_invocable = %(user_invocable)s", {"user_invocable": 0}),
+			],
 		)
 		self.assertEqual(
 			q.where(),
@@ -294,7 +297,9 @@ class TestPilotEqualityOfScope(unittest.TestCase):
 
 		res = self._macros(
 			USER_A,
-			filters_v2=[{"doctype": MACRO, "fieldname": "macro_name", "operator": "like", "value": "lfp-macro"}],
+			filters_v2=[
+				{"doctype": MACRO, "fieldname": "macro_name", "operator": "like", "value": "lfp-macro"}
+			],
 		)
 		self.assertEqual({r["macro_name"] for r in res["rows"]}, {"lfp-macro-a", "lfp-macro-a2"})
 
@@ -303,7 +308,9 @@ class TestPilotEqualityOfScope(unittest.TestCase):
 		the migration must not have loosened that."""
 		res = self._macros(
 			USER_SM,
-			filters_v2=[{"doctype": MACRO, "fieldname": "macro_name", "operator": "like", "value": "lfp-macro"}],
+			filters_v2=[
+				{"doctype": MACRO, "fieldname": "macro_name", "operator": "like", "value": "lfp-macro"}
+			],
 		)
 		self.assertEqual({r["macro_name"] for r in res["rows"]}, {"lfp-macro-sm"})
 
@@ -339,7 +346,9 @@ class TestPilotEqualityOfScope(unittest.TestCase):
 	def test_child_filter_through_the_macros_endpoint(self):
 		res = self._macros(
 			USER_A,
-			filters_v2=[{"doctype": "Jarvis Macro Step", "fieldname": "label", "operator": "=", "value": "build"}],
+			filters_v2=[
+				{"doctype": "Jarvis Macro Step", "fieldname": "label", "operator": "=", "value": "build"}
+			],
 		)
 		self.assertEqual({r["macro_name"] for r in res["rows"]}, {"lfp-macro-a"})
 		self.assertEqual(res["total"], 1)

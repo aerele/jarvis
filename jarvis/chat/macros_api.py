@@ -169,9 +169,7 @@ def list_macros_page(
 	q.server_condition("owner = %(me)s", me=me)
 
 	if search:
-		q.server_condition(
-			"(macro_name LIKE %(q)s OR description LIKE %(q)s)", q=f"%{_lk(search)}%"
-		)
+		q.server_condition("(macro_name LIKE %(q)s OR description LIKE %(q)s)", q=f"%{_lk(search)}%")
 	if "enabled" in f:
 		q.server_condition("enabled = %(enabled)s", enabled=_bool01(f["enabled"]))
 	if "schedule_enabled" in f:

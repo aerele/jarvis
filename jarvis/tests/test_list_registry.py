@@ -230,8 +230,7 @@ class TestListRegistryIntegrity(FrappeTestCase):
 					else:
 						self.assertTrue(
 							meta.get_field(spec),
-							f"{view.view_key} excludes {spec!r}, which is not a field of "
-							f"{view.root_doctype}",
+							f"{view.view_key} excludes {spec!r}, which is not a field of {view.root_doctype}",
 						)
 
 	def test_migrated_views_actually_accept_filters_v2(self):
@@ -242,7 +241,9 @@ class TestListRegistryIntegrity(FrappeTestCase):
 			for dotted in view.endpoints:
 				with self.subTest(view=view.view_key, endpoint=dotted):
 					params = inspect.signature(_resolve(dotted)).parameters
-					self.assertIn("filters_v2", params, f"{dotted} claims filters_v2 but has no such parameter")
+					self.assertIn(
+						"filters_v2", params, f"{dotted} claims filters_v2 but has no such parameter"
+					)
 					self.assertIn(
 						"filters",
 						params,

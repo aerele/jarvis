@@ -97,7 +97,9 @@ export function useListPage({
 
 	// The URL is parsed BEFORE the first fetch so a shared link's clauses are in
 	// the request that builds page one, not applied a render later.
-	const urlSeed = route ? parseClauseParam(route.query && route.query[URL_PARAM], viewKey) : null;
+	const urlSeed = route
+		? parseClauseParam(route.query && route.query[URL_PARAM], viewKey)
+		: null;
 	if (urlSeed && urlSeed.clauses.length) filterClauses.value = urlSeed.clauses;
 	// The last `fv2` value THIS composable put in the URL. Two jobs: recognising
 	// the router's echo of our own write, and telling an authored clear apart
@@ -252,7 +254,12 @@ export function useListPage({
 				}
 				schema.value = res || null;
 				schemaState.value = res ? "ready" : "error";
-				if (!res) schemaError.value = { code: "", kind: "transient", message: "No fields returned." };
+				if (!res)
+					schemaError.value = {
+						code: "",
+						kind: "transient",
+						message: "No fields returned.",
+					};
 				return schema.value;
 			})
 			.catch((e) => {
@@ -270,7 +277,6 @@ export function useListPage({
 			});
 		return schemaInflight;
 	}
-
 
 	/**
 	 * Plan §8 steps 3-4: keep what is still filterable, and SAY what was not.
@@ -365,7 +371,10 @@ export function useListPage({
 	 */
 	function adoptQuickOnSchemaReady() {
 		const keys = Object.keys(quickClauses).filter(
-			(k) => filters[k] !== undefined && String(filters[k]) !== "" && !clausesOn(quickClauses[k]).length
+			(k) =>
+				filters[k] !== undefined &&
+				String(filters[k]) !== "" &&
+				!clausesOn(quickClauses[k]).length
 		);
 		return materializeQuick(keys);
 	}
@@ -512,7 +521,8 @@ export function useListPage({
 			// A link may have arrived with filters: the catalog decides which of
 			// them this caller may still use, and that answer must precede page one.
 			// Same function the watcher uses, so the two cannot drift.
-			if (urlSeed !== null) await applyUrlClauses((route.query && route.query[URL_PARAM]) || "");
+			if (urlSeed !== null)
+				await applyUrlClauses((route.query && route.query[URL_PARAM]) || "");
 			else {
 				// No payload at all — but the page may still have handed us initial
 				// quick filters, and those are canonical too.

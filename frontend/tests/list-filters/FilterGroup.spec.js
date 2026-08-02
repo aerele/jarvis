@@ -65,7 +65,10 @@ describe("rows", () => {
 		const checkOperators = selects[0].findAll("option").map((o) => o.attributes("value"));
 		expect(checkOperators).toEqual(["="]);
 		// Datetime's default is Between (D5), and it never offers like/in.
-		const dtOperators = w.findAll("select")[2].findAll("option").map((o) => o.attributes("value"));
+		const dtOperators = w
+			.findAll("select")[2]
+			.findAll("option")
+			.map((o) => o.attributes("value"));
 		expect(dtOperators).toContain("Between");
 		expect(dtOperators).not.toContain("like");
 		expect(w.findAll("select")[2].element.value).toBe("Between");
@@ -109,7 +112,11 @@ describe("value controls, one per family", () => {
 	it("Select → metadata options with the leading blank labelled 'Not set'", () => {
 		const w = mountPanel({ clauses: [clauseForEntry(SCOPE)] });
 		const value = w.findAll("select")[1];
-		expect(value.findAll("option").map((o) => o.text())).toEqual(["Not set", "Org", "Personal"]);
+		expect(value.findAll("option").map((o) => o.text())).toEqual([
+			"Not set",
+			"Org",
+			"Personal",
+		]);
 	});
 
 	it("Date/Datetime Between → two bounds, both required", () => {
@@ -149,7 +156,10 @@ describe("value controls, one per family", () => {
 	it("`is` → set / not set, whatever the family", () => {
 		const w = mountPanel({ clauses: [setOperator(clauseForEntry(SCOPE), "is")] });
 		const value = w.findAll("select")[1];
-		expect(value.findAll("option").map((o) => o.attributes("value"))).toEqual(["set", "not set"]);
+		expect(value.findAll("option").map((o) => o.attributes("value"))).toEqual([
+			"set",
+			"not set",
+		]);
 	});
 
 	it("`in` over a free-text family → chips, never a comma string (D10)", async () => {
@@ -175,9 +185,11 @@ describe("value controls, one per family", () => {
 describe("editing", () => {
 	it("adds a row seeded with the field's default operator", () => {
 		const w = mountPanel();
-		w.findAllComponents({ name: "Autocomplete" }).at(-1).vm.$emit("update:modelValue", {
-			value: fieldKey("Jarvis Custom Skill", "creation"),
-		});
+		w.findAllComponents({ name: "Autocomplete" })
+			.at(-1)
+			.vm.$emit("update:modelValue", {
+				value: fieldKey("Jarvis Custom Skill", "creation"),
+			});
 		expect(lastClauses(w)).toHaveLength(1);
 		expect(lastClauses(w)[0]).toMatchObject({
 			doctype: "Jarvis Custom Skill",
@@ -189,9 +201,11 @@ describe("editing", () => {
 
 	it("allows the SAME field twice and keeps both rows independent", async () => {
 		const w = mountPanel({ clauses: [withValue(DESCRIPTION, "month")] });
-		w.findAllComponents({ name: "Autocomplete" }).at(-1).vm.$emit("update:modelValue", {
-			value: fieldKey("Jarvis Custom Skill", "description"),
-		});
+		w.findAllComponents({ name: "Autocomplete" })
+			.at(-1)
+			.vm.$emit("update:modelValue", {
+				value: fieldKey("Jarvis Custom Skill", "description"),
+			});
 		const next = lastClauses(w);
 		expect(next).toHaveLength(2);
 		expect(next[0].id).not.toBe(next[1].id);
@@ -204,7 +218,11 @@ describe("editing", () => {
 	});
 
 	it("removes exactly the row whose X was pressed", async () => {
-		const clauses = [withValue(DESCRIPTION, "a"), withValue(ENABLED, "1"), withValue(IDX, "3")];
+		const clauses = [
+			withValue(DESCRIPTION, "a"),
+			withValue(ENABLED, "1"),
+			withValue(IDX, "3"),
+		];
 		const w = mountPanel({ clauses });
 		await w.find('button[aria-label="Remove filter on Enabled"]').trigger("click");
 		expect(lastClauses(w).map((c) => c.fieldname)).toEqual(["description", "idx"]);
@@ -215,7 +233,11 @@ describe("editing", () => {
 		w.findAllComponents({ name: "Autocomplete" })[0].vm.$emit("update:modelValue", {
 			value: fieldKey("Jarvis Custom Skill", "enabled"),
 		});
-		expect(lastClauses(w)[0]).toMatchObject({ fieldname: "enabled", operator: "=", value: "" });
+		expect(lastClauses(w)[0]).toMatchObject({
+			fieldname: "enabled",
+			operator: "=",
+			value: "",
+		});
 	});
 
 	// P2-3: the panel tells useListPage which mutations are still being typed.
@@ -359,7 +381,11 @@ describe("rejections the server coded", () => {
 	it("keeps an unattributable rejection at panel level rather than blaming a row", () => {
 		const w = mountPanel({
 			clauses: [withValue(DESCRIPTION, "a")],
-			error: { code: "list_filter_bad_payload", kind: "row", message: "Filters are not valid JSON." },
+			error: {
+				code: "list_filter_bad_payload",
+				kind: "row",
+				message: "Filters are not valid JSON.",
+			},
 		});
 		expect(w.find(".error-message").text()).toBe("Filters are not valid JSON.");
 	});
@@ -390,12 +416,16 @@ describe("accessibility", () => {
 	// user restarts from the top of the page.
 	it("moves focus into a row it just added", async () => {
 		const w = mountPanel({ attachTo: document.body });
-		w.findAllComponents({ name: "Autocomplete" }).at(-1).vm.$emit("update:modelValue", {
-			value: fieldKey("Jarvis Custom Skill", "description"),
-		});
+		w.findAllComponents({ name: "Autocomplete" })
+			.at(-1)
+			.vm.$emit("update:modelValue", {
+				value: fieldKey("Jarvis Custom Skill", "description"),
+			});
 		await w.setProps({ clauses: lastClauses(w) });
 		await nextTick();
-		expect(document.activeElement.getAttribute("aria-label")).toBe("Condition for Description");
+		expect(document.activeElement.getAttribute("aria-label")).toBe(
+			"Condition for Description"
+		);
 		w.unmount();
 	});
 
@@ -414,20 +444,31 @@ describe("accessibility", () => {
 	// tell apart.
 	it("gives repeated fields a positional cue, and leaves unique ones clean", async () => {
 		const w = mountPanel({
-			clauses: [withValue(CREATION, ["2026-01-01", "2026-02-01"]), withValue(DESCRIPTION, "a"), withValue(CREATION, ["2026-03-01", "2026-04-01"])],
+			clauses: [
+				withValue(CREATION, ["2026-01-01", "2026-02-01"]),
+				withValue(DESCRIPTION, "a"),
+				withValue(CREATION, ["2026-03-01", "2026-04-01"]),
+			],
 		});
 		const labels = w.findAll("select").map((s) => s.attributes("aria-label"));
 		expect(labels).toContain("Condition for Created On (filter 1)");
 		expect(labels).toContain("Condition for Created On (filter 2)");
 		expect(labels).toContain("Condition for Description");
-		expect(w.find('button[aria-label="Remove filter on Created On (filter 2)"]').exists()).toBe(true);
+		expect(
+			w.find('button[aria-label="Remove filter on Created On (filter 2)"]').exists()
+		).toBe(true);
 		expect(w.find('button[aria-label="Remove filter on Description"]').exists()).toBe(true);
 	});
 
 	it("carries the positional cue into the value control too", () => {
-		const w = mountPanel({ clauses: [withValue(DESCRIPTION, "a"), withValue(DESCRIPTION, "b")] });
+		const w = mountPanel({
+			clauses: [withValue(DESCRIPTION, "a"), withValue(DESCRIPTION, "b")],
+		});
 		const labels = w.findAll('input[type="text"]').map((i) => i.attributes("aria-label"));
-		expect(labels).toEqual(["Value for Description (filter 1)", "Value for Description (filter 2)"]);
+		expect(labels).toEqual([
+			"Value for Description (filter 1)",
+			"Value for Description (filter 2)",
+		]);
 	});
 
 	// U1-1: clearing empties the row list, so focus has nowhere natural to go.
@@ -454,7 +495,9 @@ describe("accessibility", () => {
 		const w = mountPanel({ clauses: [withValue(DESCRIPTION, "a")] });
 		expect(w.find("button").attributes("aria-label")).toBe("Filter (1 active)");
 		expect(w.find("select").attributes("aria-label")).toBe("Condition for Description");
-		expect(w.find('input[type="text"]').attributes("aria-label")).toBe("Value for Description");
+		expect(w.find('input[type="text"]').attributes("aria-label")).toBe(
+			"Value for Description"
+		);
 		expect(w.find('button[aria-label="Remove filter on Description"]').exists()).toBe(true);
 		expect(w.find('[role="group"][aria-label="Filters"]').exists()).toBe(true);
 	});
