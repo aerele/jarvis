@@ -340,6 +340,61 @@ recorded because the asymmetry looks like a bug until you know it is not.
 
 ---
 
+## D15 — child fields are labelled by the PARENT's Table field
+
+**Frappe** (and plan §4.3) labels a child field `Field label (Child DocType)` —
+"Prompt (Jarvis Macro Step)", "Source Name (Jarvis Dashboard Source)".
+
+**Jarvis** uses the parent's own Table-field label instead — "Prompt (Steps)",
+"Source Name (Data Sources)" — and files the picker section under the same word.
+It falls back to the child DocType name when the Table field carries no label.
+
+**Why:** the child DocType name is an implementation detail the user has never
+seen. On the form they filled in, that table is called "Steps" or "Data
+Sources"; "Jarvis Dashboard Source" appears nowhere in their experience of the
+product. The picker is a browsing surface, and the words in it should be the
+words on the page.
+
+**What is NOT changed:** identity. A child field is still `(DocType, fieldname)`
+on the wire, in the URL payload and in the compiler, exactly as D4 describes —
+this is a display string only, so nothing about validation, compilation or
+`EXISTS` grouping depends on it.
+
+---
+
+## D16 — a compiled list statement has a wall-clock ceiling
+
+**Frappe:** none. `max_statement_time` is 0 (unlimited) on a stock bench, and
+`db_query` imposes no ceiling of its own.
+
+**Jarvis:** every migrated list runs its rows AND its count under
+`SET STATEMENT max_statement_time=N FOR ...` (`list_filters.bounded_sql`,
+N = `STATEMENT_TIMEOUT_SECONDS`, currently 10). A breach is
+`list_filter_query_too_expensive` — a coded envelope, distinct from a validation
+error, so the panel can say "narrow it" rather than "fix it".
+
+**Why:** full-metadata filtering is the point of the plan, so the expensive
+capabilities stay — a `like` over a Text body is the most valuable filter the
+wiki has and cannot use an index (measured ~156ms over 5k rows, and a list
+request runs the WHERE twice, COUNT then SELECT). What is bounded is the COST,
+not the capability, and it bounds equally whatever unindexed combination a later
+wave invents.
+
+**Why per-STATEMENT and not `SET SESSION`:** Frappe pools and reuses
+connections, so a session variable set here would apply to whatever ran next on
+that connection — including background jobs — and "reset it afterwards" is one
+early return away from leaking. `SET STATEMENT` has no state to leave behind.
+
+**Ledger for wave 2** (revisit if the ceiling proves insufficient at scale): the
+double execution of the same WHERE (COUNT + SELECT) means the worst case per
+request is ~2N; requiring a prefix on `like`, or restricting `like` on the Text
+families, remain the options if bounding cost stops being enough.
+
+**Degrades:** the syntax is MariaDB-specific; on any other backend the query
+runs unbounded rather than failing on syntax the server would reject.
+
+---
+
 ## Non-deviations worth stating
 
 * **Hidden / not-in-list-view fields are filterable.** Frappe filters on readable

@@ -477,7 +477,11 @@ const emptyState = computed(() => {
 				'preferences, your own working notes. Use "New page" and pick the ' +
 				"Personal scope to create your first one.",
 		};
-	if (Object.keys(filters).length)
+	// Panel clauses count as "filtered" too. Without this a panel-only narrowing
+	// to zero rows claimed "No wiki pages yet" — on a knowledge base that reads
+	// as data loss, which is the single most alarming thing this list can say
+	// (design.md §3.8).
+	if (Object.keys(filters).length || (filterState.value?.activeCount || 0) > 0)
 		return {
 			icon: "book-open",
 			title: "No pages match",

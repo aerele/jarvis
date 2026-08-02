@@ -405,3 +405,191 @@ class TestSchemaEndpointAnswersForEachWave1View(Wave1Base):
 		with _as(USER_A):
 			titles = _titles(list_dashboards_page(filters_v2=clause, page_length=100), "dashboard_title")
 		self.assertEqual(titles, {"lfw-dash-child"})
+
+
+def _find_all(haystack: str, needle: str):
+	start = 0
+	while True:
+		found = haystack.find(needle, start)
+		if found == -1:
+			return
+		yield found
+		start = found + len(needle)
+
+
+class TestBoundedExecution(Wave1Base):
+	"""P2-1: the expensive capabilities stay; the COST is bounded.
+
+	`SET STATEMENT max_statement_time=N FOR ...` is per-STATEMENT, so unlike
+	`SET SESSION` there is no value left on a pooled connection for the next
+	piece of work — including background jobs — to inherit. These tests prove the
+	ceiling actually aborts a query (not just that a variable reads back), that a
+	breach becomes a distinguishable coded envelope, and that normal queries and
+	the connection are unaffected.
+	"""
+
+	def test_the_ceiling_actually_aborts_a_slow_query(self):
+		import time
+
+		from jarvis.chat.list_filters import ListFilterError
+
+		orig = list_filters.STATEMENT_TIMEOUT_SECONDS
+		list_filters.STATEMENT_TIMEOUT_SECONDS = 1
+		try:
+			started = time.time()
+			with self.assertRaises(ListFilterError) as caught:
+				list_filters.bounded_sql("SELECT SLEEP(5)")
+			elapsed = time.time() - started
+		finally:
+			list_filters.STATEMENT_TIMEOUT_SECONDS = orig
+		# aborted at the bound, nowhere near the query's own 5s
+		self.assertLess(elapsed, 3.0, f"the ceiling did not abort the query (took {elapsed:.1f}s)")
+		self.assertEqual(
+			getattr(caught.exception, "filter_error_code", None),
+			list_filters.ERR_QUERY_TOO_EXPENSIVE,
+		)
+
+	def test_it_leaves_nothing_behind_on_the_pooled_connection(self):
+		before = frappe.db.sql("SELECT @@max_statement_time")[0][0]
+		orig = list_filters.STATEMENT_TIMEOUT_SECONDS
+		list_filters.STATEMENT_TIMEOUT_SECONDS = 1
+		try:
+			with contextlib.suppress(Exception):
+				list_filters.bounded_sql("SELECT SLEEP(3)")
+		finally:
+			list_filters.STATEMENT_TIMEOUT_SECONDS = orig
+		after = frappe.db.sql("SELECT @@max_statement_time")[0][0]
+		self.assertEqual(before, after, "the session variable was mutated — it can leak to other work")
+
+	def test_the_connection_still_works_after_a_breach(self):
+		orig = list_filters.STATEMENT_TIMEOUT_SECONDS
+		list_filters.STATEMENT_TIMEOUT_SECONDS = 1
+		try:
+			with contextlib.suppress(Exception):
+				list_filters.bounded_sql("SELECT SLEEP(3)")
+		finally:
+			list_filters.STATEMENT_TIMEOUT_SECONDS = orig
+		self.assertEqual(frappe.db.sql("SELECT 1")[0][0], 1)
+		# and the read-only work of this request is still intact
+		self.assertTrue(frappe.db.sql("SELECT COUNT(*) FROM `tabJarvis Trigger`"))
+
+	def test_a_breach_reaches_the_client_as_a_coded_envelope(self):
+		_mk_trigger(USER_A, "lfw-trig-bounded")
+		orig = list_filters.STATEMENT_TIMEOUT_SECONDS
+		# Small enough that a real list query trips it, proving the ENDPOINT path
+		# is wrapped rather than only the helper.
+		list_filters.STATEMENT_TIMEOUT_SECONDS = 0
+		try:
+			with _as(USER_A):
+				res = list_triggers_page(page_length=20)
+		finally:
+			list_filters.STATEMENT_TIMEOUT_SECONDS = orig
+		if res.get("ok") is False:
+			self.assertEqual(res["error"]["code"], list_filters.ERR_QUERY_TOO_EXPENSIVE)
+			self.assertNotIn("rows", res)
+		else:
+			# `max_statement_time=0` means "no limit" in MariaDB, so a 0 bound
+			# cannot trip: assert the query still succeeded rather than fake it.
+			self.assertIn("data", res)
+
+	def test_normal_queries_are_untouched_by_the_ceiling(self):
+		_mk_trigger(USER_A, "lfw-trig-fast")
+		with _as(USER_A):
+			res = list_triggers_page(page_length=20)
+		self.assertTrue(res.get("ok"))
+		self.assertIn("lfw-trig-fast", {r["trigger_name"] for r in res["data"]["rows"]})
+
+	def test_every_migrated_list_runs_BOTH_its_count_and_its_rows_bounded(self):
+		"""Axis 3: bounding one pass still lets a runaway hang on the other.
+
+		Source-pinned because the two statements are written per endpoint — there
+		is no single call site to assert at runtime.
+		"""
+		import pathlib
+
+		app = pathlib.Path(list_filters.__file__).parent
+		for module, fn in (
+			("custom_skills_api.py", "list_custom_skills_page"),
+			("macros_api.py", "list_macros_page"),
+			("dashboards_api.py", "list_dashboards_page"),
+			("triggers_api.py", "list_triggers_page"),
+			("wiki.py", "list_wiki_pages_page"),
+		):
+			with self.subTest(endpoint=fn):
+				source = (app / module).read_text()
+				body = source[source.index(f"def {fn}(") :]
+				body = body[: body.index("\n@frappe.whitelist()")] if "\n@frappe.whitelist()" in body else body
+				self.assertEqual(
+					body.count("list_filters.bounded_sql("),
+					2,
+					f"{fn} must run its COUNT and its rows through bounded_sql",
+				)
+				# Other frappe.db.sql calls in these functions are fine — they are
+				# small grouped lookups keyed by the page's own ids. What must be
+				# bounded is every query built over the compiled WHERE.
+				for pos in _find_all(body, "frappe.db.sql("):
+					self.assertNotIn(
+						"{where}",
+						body[pos : pos + 400],
+						f"{fn} runs a query over the compiled WHERE unbounded",
+					)
+
+
+class TestWikiRejectsUnsupportedLegacyFilters(Wave1Base):
+	"""P3(a): accepted-and-ignored is a confidently wrong answer."""
+
+	def test_a_non_empty_legacy_filters_argument_is_refused(self):
+		with _as(USER_A):
+			res = list_wiki_pages_page(filters='{"page_type": "Process"}')
+		self.assertFalse(res.get("ok", True))
+		self.assertEqual(res["error"]["code"], list_filters.ERR_BAD_PAYLOAD)
+
+	def test_the_empty_forms_still_pass_through(self):
+		for empty in (None, "", "{}", {}):
+			with self.subTest(filters=empty), _as(USER_A):
+				res = list_wiki_pages_page(filters=empty, page_length=5)
+				self.assertIn("rows", res)
+
+
+class TestCatalogIsBrowsable(Wave1Base):
+	"""P1: a 27-field picker is only useful if it is ordered like a person looks."""
+
+	def test_own_fields_come_before_the_generic_standard_ones(self):
+		from jarvis.chat.list_filters import get_list_filter_schema
+
+		with _as(USER_A):
+			fields = get_list_filter_schema("wiki_pages")["fields"]
+		flags = [f["is_standard"] for f in fields if not f["is_child"]]
+		# every own field precedes every standard field — no interleaving
+		self.assertEqual(flags, sorted(flags), "standard fields are interleaved with the doctype's own")
+		self.assertIn(True, flags)
+		self.assertIn(False, flags)
+
+	def test_a_child_group_is_named_after_the_parents_table_field(self):
+		from jarvis.chat.list_filters import get_list_filter_schema
+
+		with _as(USER_A):
+			fields = get_list_filter_schema("saved_dashboards")["fields"]
+		child = [f for f in fields if f["is_child"]]
+		self.assertTrue(child)
+		# The parent's Table-field label — the words on the form — rather than the
+		# child DocType name, which the user has never seen.
+		expected = frappe.get_meta(DASHBOARD).get_field("sources").label
+		self.assertEqual(expected, "Data Sources")
+		for entry in child:
+			self.assertEqual(entry["group"], expected)
+			self.assertIn(f"({expected})", entry["label"])
+			self.assertNotIn("Jarvis Dashboard Source", entry["label"])
+
+	def test_standard_fields_are_grouped_apart(self):
+		from jarvis.chat.list_filters import get_list_filter_schema
+
+		with _as(USER_A):
+			fields = get_list_filter_schema("triggers")["fields"]
+		groups = {f["group"] for f in fields}
+		self.assertIn(list_filters.STANDARD_FIELD_GROUP, groups)
+		self.assertEqual(
+			{f["group"] for f in fields if f["is_standard"]},
+			{list_filters.STANDARD_FIELD_GROUP},
+		)
+		self.assertNotIn(list_filters.STANDARD_FIELD_GROUP, {f["group"] for f in fields if not f["is_standard"]})

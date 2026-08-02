@@ -157,7 +157,12 @@ export function fieldOptions(schema) {
 	const groups = [];
 	const byGroup = new Map();
 	for (const entry of (schema && schema.fields) || []) {
-		const group = entry.is_child ? entry.doctype : rootLabel;
+		// The server names the section: the list's own name for its fields, the
+		// PARENT's Table-field label for a child table ("Sources", not
+		// "Jarvis Dashboard Source"), and a separate section for the generic
+		// standard fields. Falling back to the old derivation keeps an older
+		// server's schema renderable.
+		const group = entry.group || (entry.is_child ? entry.doctype : rootLabel);
 		if (!byGroup.has(group)) {
 			const bucket = { group, items: [] };
 			byGroup.set(group, bucket);
@@ -609,6 +614,7 @@ export const ERR_TOO_MANY_CLAUSES = "list_filter_too_many_clauses";
 export const ERR_TOO_MANY_VALUES = "list_filter_too_many_values";
 export const ERR_VALUE_TOO_LONG = "list_filter_value_too_long";
 export const ERR_SCHEMA_UNAVAILABLE = "list_filter_schema_unavailable";
+export const ERR_QUERY_TOO_EXPENSIVE = "list_filter_query_too_expensive";
 
 /**
  * How the panel treats each code:
@@ -628,6 +634,11 @@ export const FILTER_ERROR_KIND = {
 	[ERR_TOO_MANY_CLAUSES]: "cap",
 	[ERR_TOO_MANY_VALUES]: "cap",
 	[ERR_SCHEMA_UNAVAILABLE]: "transient",
+	// Its own kind: the filter is VALID, it just costs too much to run. "Narrow
+	// it" is the action, and retrying unchanged is futile — so this is neither a
+	// row error (nothing is wrong with the clause) nor transient (waiting will
+	// not help).
+	[ERR_QUERY_TOO_EXPENSIVE]: "cost",
 };
 
 const FALLBACK_COPY = {
@@ -641,6 +652,8 @@ const FALLBACK_COPY = {
 	[ERR_TOO_MANY_CLAUSES]: "Too many filters at once.",
 	[ERR_TOO_MANY_VALUES]: "Too many values in one condition.",
 	[ERR_SCHEMA_UNAVAILABLE]: "Filters are unavailable for this list right now.",
+	[ERR_QUERY_TOO_EXPENSIVE]:
+		"That filter is too broad to run on this list — narrow it and try again.",
 };
 
 function envelopeIn(candidate) {

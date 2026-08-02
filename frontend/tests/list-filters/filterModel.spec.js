@@ -55,11 +55,26 @@ describe("field catalog", () => {
 		expect(index.get(fieldKey("Jarvis Custom Skill", "prompt"))).toBeUndefined();
 	});
 
-	it("groups the picker parent-first, then one group per child DocType", () => {
+	it("groups the picker by the section the SERVER named", () => {
+		// The server files each field: the list's own name, "General" for the
+		// generic standard fields, and the PARENT's Table-field label for a child
+		// table (D15) — never the child DocType name, which the user has not seen.
+		const withGroups = {
+			...SCHEMA,
+			fields: [
+				{ ...DESCRIPTION, group: "Skills" },
+				{ ...OWNER, group: "General" },
+				{ ...STEP_PROMPT, group: "Steps", label: "Prompt (Steps)" },
+			],
+		};
+		const groups = fieldOptions(withGroups);
+		expect(groups.map((g) => g.group)).toEqual(["Skills", "General", "Steps"]);
+		expect(groups[2].items[0].label).toBe("Prompt (Steps)");
+	});
+
+	it("falls back to the old derivation for a schema with no group marker", () => {
 		const groups = fieldOptions(SCHEMA);
 		expect(groups.map((g) => g.group)).toEqual(["Skills", "Jarvis Macro Step"]);
-		expect(groups[0].items.map((i) => i.label)).toContain("Description");
-		expect(groups[1].items[0].label).toBe("Prompt (Jarvis Macro Step)");
 	});
 
 	it("reads the server's limits, falling back when the schema is absent", () => {
@@ -451,8 +466,20 @@ describe("server error codes → what the panel does", () => {
 		});
 	});
 
+	it("gives an over-expensive query its own kind, not a validation kind", () => {
+		// "narrow this" is a different instruction to the user than "fix this",
+		// and retrying an unchanged expensive filter is futile — so it is neither
+		// a row error nor transient.
+		const info = filterErrorInfo(
+			thrownBy("list_filter_query_too_expensive", "That filter is too broad to run on this list.")
+		);
+		expect(info.kind).toBe("cost");
+		expect(info.message).toMatch(/too broad/);
+	});
+
 	it("classifies every code the compiler can raise", () => {
 		const kinds = {
+			list_filter_query_too_expensive: "cost",
 			list_filter_unknown_field: "schema",
 			list_filter_invalid_operator: "schema",
 			list_filter_view_not_filterable: "schema",

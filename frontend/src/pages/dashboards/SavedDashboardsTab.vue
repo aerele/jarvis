@@ -162,8 +162,14 @@ const {
 
 // §3.8: when a search/filter is active but matches nothing, the empty state
 // must point at the filters, not read "you have nothing saved".
-const hasActiveFilter = computed(() =>
-	Boolean((filters.search || "").trim() || filters.scope || filters.dashboard_type)
+// "Is anything narrowing this list?" — which since the migration includes the
+// FilterGroup panel, not just the quick-filter strip. Reading only the legacy
+// object made a panel-only narrowing to zero rows render "No dashboards yet",
+// telling someone their saved work was gone (design.md §3.8).
+const hasActiveFilter = computed(
+	() =>
+		Boolean((filters.search || "").trim() || filters.scope || filters.dashboard_type) ||
+		(filterState.value?.activeCount || 0) > 0
 );
 const emptyState = computed(() =>
 	hasActiveFilter.value

@@ -209,8 +209,8 @@ def list_triggers_page(
 	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _TRIGGER_SORTABLE, "modified")
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger` WHERE {where}", params)[0][0]
+	rows = list_filters.bounded_sql(
 		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event,
 		action_type, description, modified, owner
 		FROM `tabJarvis Trigger`

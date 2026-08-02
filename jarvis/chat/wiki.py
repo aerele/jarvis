@@ -1163,6 +1163,12 @@ def request_wiki_promotion(page: str, to_scope: str, target_role: str = "", note
 	page itself is untouched; promotion is a request, never a self-service
 	scope switch. ``page`` accepts a docname or a slug."""
 	_require_system_user()
+	# This surface never had a JSON `filters` blob — its curated controls are
+	# named parameters — so anything non-empty here is a caller that thinks it is
+	# filtering and is not. Fail loudly with the shared code rather than return a
+	# confidently wrong (unfiltered) list.
+	if filters not in (None, "", "{}", {}):
+		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 
 	page = (page or "").strip()
@@ -1419,6 +1425,12 @@ def list_wiki_pages_page(
 	scope is the whole table and this SQL scope — status plus the Org/Role/User
 	visibility fragment — is strictly narrower."""
 	_require_system_user()
+	# This surface never had a JSON `filters` blob — its curated controls are
+	# named parameters — so anything non-empty here is a caller that thinks it is
+	# filtering and is not. Fail loudly with the shared code rather than return a
+	# confidently wrong (unfiltered) list.
+	if filters not in (None, "", "{}", {}):
+		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 	page, pl, offset = _clamp_paging(page, page_length)
 
@@ -1457,11 +1469,13 @@ def list_wiki_pages_page(
 
 	q.apply(filters_v2)
 	where = q.where()
-	values = q.params()
+	# `params()` raises on a collision with an already-bound predicate name, which
+	# a bare dict update would have silently overwritten — and overwriting a
+	# predicate's value changes what the WHERE means.
+	values = q.params({"limit": pl, "offset": offset})
 
-	total = cint(frappe.db.sql(f"select count(*) from `tabJarvis Wiki Page` where {where}", values)[0][0])
-	values.update({"limit": pl, "offset": offset})
-	rows = frappe.db.sql(
+	total = cint(list_filters.bounded_sql(f"select count(*) from `tabJarvis Wiki Page` where {where}", values)[0][0])
+	rows = list_filters.bounded_sql(
 		f"""select name, slug, title, page_type, ifnull(scope, 'Org') as scope,
 			target_role, target_user, ref_doctype, ref_name, summary, status,
 			contradiction_flag, last_confirmed_at, modified
@@ -1494,6 +1508,12 @@ def get_wiki_caps() -> dict:
 	"""The caller's wiki capabilities + the SM settings surfaced in the Wiki
 	tab header (knowledge language, last lint run)."""
 	_require_system_user()
+	# This surface never had a JSON `filters` blob — its curated controls are
+	# named parameters — so anything non-empty here is a caller that thinks it is
+	# filtering and is not. Fail loudly with the shared code rather than return a
+	# confidently wrong (unfiltered) list.
+	if filters not in (None, "", "{}", {}):
+		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 	from jarvis.chat import knowledge_language
 
@@ -1529,6 +1549,12 @@ def get_wiki_page(slug: str) -> dict:
 	leaked); ``can_edit``/``can_archive`` are the server-computed write-matrix
 	flags the UI trusts (save/archive re-check)."""
 	_require_system_user()
+	# This surface never had a JSON `filters` blob — its curated controls are
+	# named parameters — so anything non-empty here is a caller that thinks it is
+	# filtering and is not. Fail loudly with the shared code rather than return a
+	# confidently wrong (unfiltered) list.
+	if filters not in (None, "", "{}", {}):
+		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 	slug = (slug or "").strip().lower()
 	name = frappe.db.get_value(WIKI, {"slug": slug}, "name")
@@ -1582,6 +1608,12 @@ def create_wiki_page(
 	return ``{ok: False, reason}`` (the dialog shows the reason); malformed
 	input throws."""
 	_require_system_user()
+	# This surface never had a JSON `filters` blob — its curated controls are
+	# named parameters — so anything non-empty here is a caller that thinks it is
+	# filtering and is not. Fail loudly with the shared code rather than return a
+	# confidently wrong (unfiltered) list.
+	if filters not in (None, "", "{}", {}):
+		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 
 	title = " ".join(str(title or "").split())

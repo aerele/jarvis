@@ -246,8 +246,8 @@ def list_dashboards_page(
 	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _DASHBOARD_SORTABLE, "modified")
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Dashboard` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Dashboard` WHERE {where}", params)[0][0]
+	rows = list_filters.bounded_sql(
 		f"""SELECT name, dashboard_title, description, dashboard_type, scope,
 		target_role, target_user, owner, modified
 		FROM `tabJarvis Dashboard`

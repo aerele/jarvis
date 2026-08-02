@@ -88,6 +88,24 @@ export function frappeUiStubs() {
 		},
 		LoadingIndicator: { name: "LoadingIndicator", template: `<span class="loading" />` },
 		FeatherIcon: { name: "FeatherIcon", props: ["name"], template: `<i :data-name="name" />` },
+		Dropdown: {
+			name: "Dropdown",
+			props: ["options"],
+			template: `<div class="dropdown"><slot /></div>`,
+		},
+		Dialog: {
+			name: "Dialog",
+			props: ["options", "modelValue"],
+			template: `<div class="dialog"><slot name="body-content" /></div>`,
+		},
+		Breadcrumbs: { name: "Breadcrumbs", props: ["items"], template: `<nav />` },
+		Switch: {
+			name: "Switch",
+			props: ["modelValue", "label"],
+			emits: ["update:modelValue"],
+			template: `<button class="switch" @click="$emit('update:modelValue', !modelValue)" />`,
+		},
+		Avatar: { name: "Avatar", props: ["label", "size"], template: `<span class="avatar" />` },
 		Badge: {
 			name: "Badge",
 			props: ["variant", "theme", "label"],

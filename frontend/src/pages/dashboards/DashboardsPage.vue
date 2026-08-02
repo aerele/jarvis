@@ -249,7 +249,10 @@ function applyHash() {
 function setTab(v) {
 	if (v === activeTab.value) return;
 	activeTab.value = v;
-	router.push({ hash: v === "builder" ? "" : `#${v}`, query: route.query });
+	// Spread, like every other navigation on this page: handing the router the
+	// live reactive query object rather than a copy invites an aliasing bug the
+	// day anything mutates it mid-navigation.
+	router.push({ hash: v === "builder" ? "" : `#${v}`, query: { ...route.query } });
 }
 applyHash();
 // back/forward restores the tab (guard to this route so other pages' hashes

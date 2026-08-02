@@ -65,6 +65,17 @@ describe("only the migrated surfaces drive FilterGroup", () => {
 		expect(source).toContain(`viewKey: "${key}"`);
 	});
 
+	// A panel-only narrowing to zero rows must not read as "you have nothing" —
+	// on a knowledge base that reads as data loss (design.md §3.8). Both pages
+	// have to consult the canonical clause count, not only the legacy quick
+	// filters, when deciding which empty state to show.
+	it.each([
+		"src/pages/dashboards/SavedDashboardsTab.vue",
+		"src/pages/skills/WikiTab.vue",
+	])("%s decides its empty state from the clause count too", (path) => {
+		expect(read(path)).toMatch(/filterState\.value\?\.activeCount/);
+	});
+
 	// If FilterButton is ever deleted before waves 2-4 land, the remaining lists lose their
 	// filter action silently. Pin it.
 	it("keeps FilterButton in the tree and wired into ListPage", () => {

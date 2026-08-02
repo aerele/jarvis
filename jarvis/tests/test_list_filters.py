@@ -425,10 +425,20 @@ class TestCatalogShape(unittest.TestCase):
 		self.assertIn(("Jarvis Macro Step", "label"), child)
 		self.assertIn(("Jarvis Macro Step", "prompt"), child)
 
-	def test_child_fields_are_labelled_the_frappe_way(self):
+	def test_child_fields_are_labelled_by_their_parents_table_field(self):
+		"""Deviation D15: the PARENT's word for the table, not the child DocType.
+
+		Frappe (and plan §4.3) writes "Prompt (Jarvis Macro Step)". We write
+		"Prompt (Steps)" — the label on the form the user has actually seen. The
+		identity is unchanged: a child field is still (DocType, fieldname), so
+		nothing about compilation or the wire depends on this string.
+		"""
 		schema = get_schema("macros", user=USER_A)
+		table_label = frappe.get_meta(MACRO).get_field("steps").label
 		entry = _entry(schema, "Jarvis Macro Step", "label")
-		self.assertTrue(entry["label"].endswith("(Jarvis Macro Step)"), entry["label"])
+		self.assertTrue(entry["label"].endswith(f"({table_label})"), entry["label"])
+		self.assertNotIn("Jarvis Macro Step", entry["label"])
+		self.assertEqual(entry["group"], table_label)
 
 	def test_operator_vocabulary_matches_frappe_per_family(self):
 		schema = get_schema("macros", user=USER_A)
