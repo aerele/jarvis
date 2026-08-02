@@ -18,6 +18,7 @@ import {
 	isTerminalForPayment,
 	provisioningOwner,
 	remainingCooldownSeconds,
+	sanitizeCheckoutNote,
 } from "./paymentMachine.js";
 
 const CONTRACT = (over = {}) => ({
@@ -1141,4 +1142,113 @@ test("P1-3: RESTART preserves a state where a payment may be recoverable", () =>
 	// Paid is never abandoned.
 	const paid = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
 	assert.equal(reduce(paid, { type: EVENTS.RESTART }).value, STATES.PAID);
+});
+
+// ---------------------------------------------------------------------------
+// X1 / B2-1: an open-timeout may not re-arm initiate over a live sheet
+// ---------------------------------------------------------------------------
+function openSheet() {
+	let s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" })
+	);
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPENED });
+	assert.equal(s.value, STATES.CHECKOUT_OPEN);
+	return s;
+}
+
+test("X1: an open-timeout vetoes initiate and offers only a check", () => {
+	let s = openSheet();
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPEN_TIMED_OUT });
+	assert.equal(s.value, STATES.UNKNOWN);
+	assert.equal(s.checkoutMayBeOpen, true);
+	assert.equal(s.checkRequired, true);
+	// The mandatory reconcile lands a pending answer whose can_initiate is TRUE -
+	// and the veto must survive it: the page cannot re-arm "start a new payment"
+	// while the sheet may still be open and payable.
+	s = reduce(
+		s,
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+			can_initiate_payment: true,
+			can_check_status: true,
+		})
+	);
+	assert.equal(s.checkoutMayBeOpen, true, "a check must not clear the veto");
+	assert.equal(s.canInitiate, false, "initiate stays vetoed while the sheet may be open");
+	assert.equal(s.canCheck, true, "check is the only forward action");
+});
+
+test("X1: the veto lifts only when the sheet actually closes and a check runs", () => {
+	let s = openSheet();
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPEN_TIMED_OUT });
+	// The timed-out sheet finally closed with no success.
+	s = reduce(s, { type: EVENTS.CHECKOUT_SHEET_CLOSED });
+	assert.equal(s.checkoutMayBeOpen, false);
+	assert.equal(s.checkRequired, true);
+	// Now a check re-arms initiate.
+	s = reduce(
+		s,
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+			can_initiate_payment: true,
+			can_check_status: true,
+		})
+	);
+	assert.equal(s.canInitiate, true, "initiate re-armed after the sheet closed + a check ran");
+});
+
+test("X1: a late gateway callback (a real post-deadline payment) clears the veto", () => {
+	let s = openSheet();
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPEN_TIMED_OUT });
+	assert.equal(s.checkoutMayBeOpen, true);
+	// The sheet the customer never closed finally paid: the late callback lands.
+	s = reduce(s, { type: EVENTS.GATEWAY_CALLBACK });
+	assert.equal(s.value, STATES.CONFIRMING);
+	assert.equal(s.checkoutMayBeOpen, false);
+});
+
+test("X1: a fresh open clears the veto", () => {
+	let s = openSheet();
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPEN_TIMED_OUT });
+	// A new intent arrives (advanced generation) and its sheet opens.
+	s = reduce(
+		s,
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, { generation: 2, razorpay_order_id: "o2" })
+	);
+	assert.equal(s.checkoutMayBeOpen, false, "a replacement intent drops the stale veto");
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPENED });
+	assert.equal(s.checkoutMayBeOpen, false);
+});
+
+// ---------------------------------------------------------------------------
+// X2: an internal deadline label can never reach the customer-facing note
+// ---------------------------------------------------------------------------
+test("X2: sanitizeCheckoutNote drops the internal timeout signature, keeps SDK strings", () => {
+	assert.equal(sanitizeCheckoutNote("payment request timed out: open"), "");
+	assert.equal(sanitizeCheckoutNote("  Payment request timed out: confirm "), "");
+	assert.equal(
+		sanitizeCheckoutNote("An ad blocker stopped the checkout."),
+		"An ad blocker stopped the checkout."
+	);
+	assert.equal(sanitizeCheckoutNote(""), "");
+	assert.equal(sanitizeCheckoutNote(null), "");
+});
+
+test("X2: a CHECKOUT_FAILED carrying the internal timeout string stores no note", () => {
+	let s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" })
+	);
+	s = reduce(s, { type: EVENTS.CHECKOUT_FAILED, message: "payment request timed out: open" });
+	assert.equal(s.value, STATES.FAILED_RETRYABLE);
+	assert.equal(s.checkoutNote, "", "the internal leak string is filtered at the source");
+	// A genuine SDK reason still survives.
+	let g = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" })
+	);
+	g = reduce(g, {
+		type: EVENTS.CHECKOUT_FAILED,
+		message: "An ad blocker stopped the checkout.",
+	});
+	assert.equal(g.checkoutNote, "An ad blocker stopped the checkout.");
 });

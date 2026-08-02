@@ -184,3 +184,36 @@ describe("openCheckout", () => {
 		await expect(openCheckout(ORDER_HANDLES)).rejects.toThrow("blocked");
 	});
 });
+
+describe("openCheckout teardown (X1)", () => {
+	it("aborting the signal asks Razorpay to close, which resolves a dismissal", async () => {
+		const calls = [];
+		// A stub whose .close() behaves like the real SDK: it fires ondismiss.
+		window.Razorpay = vi.fn(function (opts) {
+			const entry = { opts, closed: false };
+			calls.push(entry);
+			this.open = () => {};
+			this.close = () => {
+				entry.closed = true;
+				opts.modal.ondismiss();
+			};
+		});
+		const controller = new AbortController();
+		const p = openCheckout(ORDER_HANDLES, "Plan upgrade", { signal: controller.signal });
+		await vi.waitFor(() => expect(calls).toHaveLength(1));
+		controller.abort();
+		expect(calls[0].closed).toBe(true);
+		await expect(p).resolves.toEqual({ status: CHECKOUT_DISMISSED });
+	});
+
+	it("a build with no close() is a silent no-op on abort (never relied on)", async () => {
+		const calls = stubRazorpay(); // this stub instance has no .close
+		const controller = new AbortController();
+		const p = openCheckout(ORDER_HANDLES, "Plan upgrade", { signal: controller.signal });
+		await vi.waitFor(() => expect(calls).toHaveLength(1));
+		expect(() => controller.abort()).not.toThrow();
+		// The sheet stays open; a later dismiss still resolves normally.
+		calls[0].opts.modal.ondismiss();
+		await expect(p).resolves.toEqual({ status: CHECKOUT_DISMISSED });
+	});
+});

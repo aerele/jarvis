@@ -1643,3 +1643,113 @@ describe("P1-7: resumed identity never falls back to prefill (machine half)", ()
 		expect(flow.state.value.summary && flow.state.value.summary.email).toBeFalsy();
 	});
 });
+
+describe("X1 / B2-1: a sheet that settles AFTER the open deadline", () => {
+	const flush = async () => {
+		for (let i = 0; i < 80; i++) await Promise.resolve();
+	};
+
+	test("a late SUCCESS still confirms exactly once, and initiate is never offered meanwhile", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		// Let the open deadline elapse: the sheet is still open, machine enters the
+		// checkoutMayBeOpen recovery and reconciles a pending answer.
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.checkoutMayBeOpen).toBe(true);
+		expect(flow.state.value.canInitiate).toBe(false);
+		expect(api.confirmSignupPayment).not.toHaveBeenCalled();
+		// The customer finally pays in the still-open sheet, long after our deadline.
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		// The late result ran the NORMAL confirm path - not dropped - exactly once.
+		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+
+	test("a late DISMISS lands on a check-first recovery, clears the veto, never charges", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.checkoutMayBeOpen).toBe(true);
+		const checksBefore = api.checkSignupPaymentStatus.mock.calls.length;
+		resolveSheet({ status: CHECKOUT_DISMISSED });
+		await flush();
+		expect(flow.state.value.checkoutMayBeOpen).toBe(false);
+		expect(api.checkSignupPaymentStatus.mock.calls.length).toBeGreaterThan(checksBefore);
+		expect(api.confirmSignupPayment).not.toHaveBeenCalled();
+		expect(flow.state.value.value).not.toBe(STATES.PAID);
+	});
+
+	test("a late success is DROPPED after a hard teardown (leaving Pay / unmount)", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		flow.cancelInFlight(); // the page tore down: the late result must be abandoned
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		expect(api.confirmSignupPayment).not.toHaveBeenCalled();
+	});
+
+	test("a benign Check taken after the timeout does NOT drop the later real payment", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		// The customer, waiting, taps Check (a benign action - it bumps the action
+		// token). The late payment must still confirm despite that bump.
+		await flow.checkStatus();
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+});
+
+describe("X5 / B2-6: a frozen checkout_open with no live opener", () => {
+	test("hydrate exits it safely instead of trapping the customer forever", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow } = makeFlow({ openCheckout });
+		const p = flow.submitReview(SIGNUP);
+		for (let i = 0; i < 80 && flow.state.value.value !== STATES.CHECKOUT_OPEN; i++) {
+			await Promise.resolve();
+		}
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		// The opener is abandoned (leaving Pay / unmount): sheet gone, state frozen.
+		flow.cancelInFlight();
+		const out = await flow.hydrate();
+		expect(out.superseded).not.toBe(true);
+		expect(flow.state.value.value).not.toBe(STATES.CHECKOUT_OPEN);
+		// Clean up the abandoned opener so the open-deadline timer does not linger.
+		resolveSheet({ status: CHECKOUT_DISMISSED });
+		await p;
+	});
+
+	test("a LIVE sheet is still protected (the normal refusal is not weakened)", async () => {
+		let releaseSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (releaseSheet = r)));
+		const { flow } = makeFlow({ openCheckout });
+		const p = flow.submitReview(SIGNUP);
+		for (let i = 0; i < 80 && flow.state.value.value !== STATES.CHECKOUT_OPEN; i++) {
+			await Promise.resolve();
+		}
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		// No cancel: the opener is genuinely live, so hydrate must still refuse.
+		const out = await flow.hydrate();
+		expect(out.superseded).toBe(true);
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		releaseSheet({ status: CHECKOUT_DISMISSED });
+		await p;
+	});
+});
