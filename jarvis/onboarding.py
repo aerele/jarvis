@@ -521,11 +521,15 @@ def _clear_llm_secrets(settings) -> None:
 def start_signup(email: str, company: str, plan: str, provider: str | None = None) -> dict:
 	"""Guest signup → store the api_token → return the Razorpay handles for Checkout.
 
-	Gated on System Manager (Sprint-1 Important from the 2026-06-16 code
-	review): the customer signing up is configuring Jarvis for their entire
-	site, which is a System Manager operation on Frappe by convention.
-	Without this, a non-admin staff user could initiate a paid signup using
-	a different email/company under the site's admin contract.
+	Gated on ``require_jarvis_admin`` (Sprint-1 Important from the 2026-06-16
+	code review): the customer signing up is configuring Jarvis for their entire
+	site. Note what that gate actually is — ``JARVIS_ADMIN_ROLES``, i.e. System
+	Manager OR the ``Jarvis Admin`` role, plus Administrator — NOT System Manager
+	alone, which this docstring claimed for a year. It matters here because
+	``grant_onboarding_admin`` below hands out ``Jarvis Admin``, so every user
+	who completes an onboarding can reach this endpoint afterwards. Without the
+	gate, any staff user could initiate a paid signup using a different
+	email/company under the site's admin contract.
 
 	Requires ``Jarvis Settings.jarvis_admin_url`` to be set first. Otherwise
 	admin_client falls back to the DEFAULT_ADMIN_URL, which on a multi-site
@@ -550,11 +554,16 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	# credentials saved" race), and the resumed wizard has a real address to
 	# render instead of prefilling the site admin's. Server truth from admin
 	# overwrites it below.
+	#
+	# Identity ONLY. The plan and the provider are deliberately NOT written here:
+	# they are what a later initiate charges on, and a REQUESTED plan is not a
+	# confirmed one. Writing them pre-call meant a plan admin rejected (disabled,
+	# zero-priced, a gateway the operator switched off) became this site's sticky
+	# default, and the next Pay click charged on it. They land in absorb(), from
+	# a response admin actually agreed to.
 	onboarding_contract.update(
 		email=(email or "").strip(),
 		company=(company or "").strip(),
-		plan=plan,
-		payment_provider=(provider or "").strip().lower(),
 		contract_version=onboarding_contract.CONTRACT_VERSION,
 	)
 	try:
@@ -663,19 +672,45 @@ def _reserve_idempotency_key(*, supplied: str | None = None, context: dict | Non
 	return key
 
 
-def _absorb_signup_state(data: dict) -> dict:
+def _absorb_signup_state(data: dict, *, from_check: bool = False) -> dict:
 	"""Fold an authenticated state/check envelope into local state.
 
 	Admin delivers the customer's OAuth password on whichever poll first runs
 	after the email is confirmed (kept until TTL rather than deleted on read, so
 	a dropped response is recoverable) — both the passive poll and the
 	provider-truth check can carry it, and whichever one the wizard happens to
-	call must persist it or the bench never gets bearer auth."""
+	call must persist it or the bench never gets bearer auth. It is persisted
+	HERE, from the original envelope, and stripped from the copy that goes back
+	to the browser.
+
+	``from_check`` marks a provider-truth answer, which is additionally
+	authoritative about the reconciliation flag — see
+	``onboarding_contract.absorb_check``."""
 	if not isinstance(data, dict):
 		return onboarding_contract.load()
 	if data.get("customer_password"):
 		write_connection({"customer_password": data["customer_password"]})
+	if from_check:
+		return onboarding_contract.absorb_check(data)
 	return onboarding_contract.absorb(data)
+
+
+def _no_signup_here() -> dict:
+	"""The day-one answer: this site has never started a signup.
+
+	A bench with no admin credentials cannot authenticate anything, so asking the
+	control plane is a guaranteed 401 - which the facade would then dress up as
+	"admin authentication failed; contact support" and show to somebody whose only
+	mistake was opening the page before signing up. Answered locally, with no
+	network call and copy that describes the actual situation."""
+	return onboarding_contract.failure(
+		{
+			"code": onboarding_contract.BENCH_NO_SIGNUP_CONTEXT,
+			"message": "no signup has been started on this site yet",
+			"recovery": onboarding_contract.RECOVERY_RETRY,
+		},
+		409,
+	)
 
 
 @frappe.whitelist()
@@ -689,19 +724,23 @@ def get_onboarding_state() -> dict:
 	provider.
 
 	Returns ``{ok, contract_version, data, context}``. ``data`` is admin's
-	envelope verbatim — its ``code``, its ``can_initiate_payment`` /
-	``can_check_status`` / ``can_reconnect`` capability flags, its billing
-	disclosure — passed through unfiltered so an additive admin release needs no
-	bench change to reach the page. Gate a Pay button on ``can_initiate_payment``
-	and a reconnect offer on ``can_reconnect``; never re-derive either from a
-	status string, and never from a message.
+	envelope — its ``code``, its ``can_initiate_payment`` / ``can_check_status`` /
+	``can_reconnect`` capability flags, its billing disclosure — passed through
+	unfiltered except for credential-shaped keys, so an additive admin release
+	needs no bench change to reach the page. Gate a Pay button on
+	``can_initiate_payment`` and a reconnect offer on ``can_reconnect``; never
+	re-derive either from a status string, and never from a message.
 
 	A failure answers with the same envelope under a DELIBERATE 4xx/5xx and
-	``ok: false`` — never a success-shaped body under a success status.
+	``ok: false`` — never a success-shaped body under a success status. A site
+	that has not signed up yet is answered locally, without a doomed call.
 
-	Same System-Manager gating as the rest of onboarding."""
+	Gated on Jarvis Admin (``JARVIS_ADMIN_ROLES`` — System Manager OR the Jarvis
+	Admin role, plus Administrator), like the rest of onboarding."""
 	require_jarvis_admin()
 	_require_admin_url()
+	if not _has_admin_credentials(frappe.get_single("Jarvis Settings")):
+		return _no_signup_here()
 	try:
 		data = admin_client.get_signup_payment_state()
 	except _ADMIN_ERRORS as e:
@@ -728,22 +767,49 @@ def initiate_signup_payment(
 	the local context); passing them switches plan or gateway on the retry,
 	exactly as admin's resume allows.
 
-	``idempotency_key`` is honoured verbatim when given. When it is not, the
-	bench supplies one itself: the stored key is reused while the intent it
-	bought is still payable — so a double-clicked Pay button, a retried POST and
-	a refreshed page converge on ONE gateway object — and a fresh key is minted
-	once the last known code says the recovery is a new intent. It is persisted
-	before the call, because the case it exists for is the response that never
-	arrives.
+	``idempotency_key`` is honoured verbatim when given, and REFUSED locally when
+	it cannot work — an over-long key is answered here, with nothing persisted,
+	because the stored key is what the next attempt reuses and storing one admin
+	rejects is a brick the customer cannot clear. When none is given the bench
+	supplies its own: the stored key is reused while the intent it bought is still
+	payable — so a double-clicked Pay button, a retried POST and a refreshed page
+	converge on ONE gateway object — and a fresh key is minted once the last known
+	code says the recovery is a new intent. It is persisted before the call,
+	because the case it exists for is the response that never arrives.
+
+	Refused locally, before any network call, while the last provider-truth check
+	says money is awaiting manual reconciliation: the gateway is holding a payment
+	an operator has not been able to place, and a second intent would take a
+	second one for it.
 
 	Returns the same ``{ok, contract_version, data, context}`` envelope as
 	``get_onboarding_state``. A coded conflict (already paid, terminal,
 	verification still pending) comes back as ``ok: false`` with admin's code
 	under its deliberate 4xx — ``PAYMENT_ALREADY_ACTIVE`` in particular means
-	continue setup and MUST NOT be retried into a second charge."""
+	continue setup and MUST NOT be retried into a second charge.
+
+	Gated on Jarvis Admin (``JARVIS_ADMIN_ROLES``), like the rest of onboarding."""
 	require_jarvis_admin()
 	_require_admin_url()
 	context = onboarding_contract.load()
+	key_error = onboarding_contract.supplied_key_error(idempotency_key)
+	if key_error:
+		return onboarding_contract.failure(key_error, 400, context=context)
+	if onboarding_contract.awaiting_reconciliation(context):
+		# The customer has already paid something the gateway is holding, and the
+		# code that came with it is the ordinary PENDING one - deliberately, so a
+		# wizard does not invite a second payment - which means nothing in the code
+		# alone stops this call. The flag does. It clears when a later check says
+		# the operator placed the money.
+		return onboarding_contract.failure(
+			{
+				"code": onboarding_contract.BENCH_AWAITING_RECONCILIATION,
+				"message": "we're still confirming a payment on this signup; no new payment is needed",
+				"recovery": onboarding_contract.RECOVERY_CHECK_STATUS,
+			},
+			409,
+			context=context,
+		)
 	plan = (plan or context.get("plan") or "").strip()
 	if not plan:
 		# Nothing local to resume with and nothing named. A coded refusal rather
@@ -766,11 +832,13 @@ def initiate_signup_payment(
 		)
 	except _ADMIN_ERRORS as e:
 		error, status = onboarding_contract.error_object(e)
-		# The codes on a refusal carry state too (which attempt, which
-		# subscription status), and a wizard that reloads after one has to render
-		# it. Absorbing the error object is how the page shows "already paid"
-		# rather than the plan it was about to charge for.
-		return onboarding_contract.failure(error, status, context=onboarding_contract.absorb(error))
+		# Only a PAYMENT-STATE code updates what the page renders and what the next
+		# key does. A rate-limit backoff and a transport failure describe this CALL,
+		# not the money: absorbing "you are asking too often" as the payment's state
+		# would mint a fresh intent on the next click.
+		return onboarding_contract.failure(
+			error, status, context=onboarding_contract.absorb_payment_outcome(e)
+		)
 	context = _absorb_signup_state(data)
 	return onboarding_contract.success(data, context=context)
 
@@ -801,15 +869,24 @@ def check_signup_payment_status() -> dict:
 
 	Rate-limited per customer: ``PAYMENT_CHECK_RATE_LIMITED`` means wait
 	``retry_after_seconds`` and ask again. It asserts nothing about the payment
-	and must never be rendered as a decline."""
+	and must never be rendered as a decline.
+
+	This is also the ONLY surface that may lower the reconciliation flag, because
+	admin sends it only when it is true — so an ordinary poll can raise it and
+	nothing could ever clear it. Running a check is how a customer refused a retry
+	gets out of that state once the operator has placed the money.
+
+	Gated on Jarvis Admin (``JARVIS_ADMIN_ROLES``), like the rest of onboarding."""
 	require_jarvis_admin()
 	_require_admin_url()
+	if not _has_admin_credentials(frappe.get_single("Jarvis Settings")):
+		return _no_signup_here()
 	try:
 		data = admin_client.check_signup_payment_status()
 	except _ADMIN_ERRORS as e:
 		error, status = onboarding_contract.error_object(e)
 		return onboarding_contract.failure(error, status)
-	context = _absorb_signup_state(data)
+	context = _absorb_signup_state(data, from_check=True)
 	return onboarding_contract.success(data, context=context)
 
 
@@ -913,8 +990,10 @@ def check_signup_payment_state() -> dict:
 	``pending_verification`` to decide whether to keep showing the
 	"check your email" screen or to open Razorpay Checkout.
 
-	Gated on System Manager for the same reason as start_signup: this is
-	part of the same paid-signup flow on the customer's bench.
+	Gated on ``require_jarvis_admin`` (``JARVIS_ADMIN_ROLES``: System Manager or
+	the Jarvis Admin role, plus Administrator) for the same reason as
+	start_signup: this is part of the same paid-signup flow on the customer's
+	bench.
 	"""
 	require_jarvis_admin()
 	_require_admin_url()
@@ -926,25 +1005,46 @@ def check_signup_payment_state() -> dict:
 	# what a poll persists; the flat return shape this endpoint's caller expects
 	# is unchanged.
 	_absorb_signup_state(data)
-	return data
+	# ...and the password does NOT go on to the browser. It was persisted above
+	# and the page has no use for it (verifyPollAction never reads it); returning
+	# admin's dict verbatim put a plaintext login secret in an HTTP response body
+	# on every verified poll.
+	return onboarding_contract.strip_credentials(data)
 
 
 @frappe.whitelist()
 def finish_payment(payload: dict | str) -> dict:
 	"""Confirm Checkout success → store the returned container connection.
 
-	Gated on System Manager: writes container connection (agent_url,
-	agent_token) into Jarvis Settings.
+	Gated on ``require_jarvis_admin`` (``JARVIS_ADMIN_ROLES``: System Manager or
+	the Jarvis Admin role, plus Administrator): writes container connection
+	(agent_url, agent_token) into Jarvis Settings.
+
+	A FAILED confirm is where the wizard learns a payment was refused, and that
+	verdict has to reach the local context or the next Pay click reuses the
+	idempotency key that bought the refused intent — and admin hands back the
+	dead order. Only a payment-state code is absorbed; a transport failure here
+	says nothing about the money.
 	"""
 	require_jarvis_admin()
 	if isinstance(payload, str):
 		payload = json.loads(payload)
-	data = _surface(admin_client.confirm_payment, payload)
+	try:
+		data = admin_client.confirm_payment(payload)
+	except _ADMIN_ERRORS as e:
+		onboarding_contract.absorb_payment_outcome(e)
+		_throw_admin_error(e)  # always raises
 	write_connection(data)
 	# PART 4 REVISED, TASK 48: the AUTHORITATIVE "onboarding AND paying" grant —
 	# make the paying user a Jarvis Admin once payment confirms and the connection
 	# is written. Idempotent with the start_signup grant.
 	grant_onboarding_admin()
+	onboarding_contract.absorb(data)
+	# NOT stripped, deliberately and for now: this response carries ``agent_token``
+	# and the SPA parks the whole dict in ``state.successData``. It is the same
+	# family of leak as the poll's ``customer_password`` and it wants the same
+	# treatment, but the blast radius is the checkout completion path rather than
+	# a poll, so it is raised for judgment instead of changed here.
 	return data
 
 

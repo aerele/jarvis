@@ -86,15 +86,35 @@ BENCH_ADMIN_UNREACHABLE = "BENCH_ADMIN_UNREACHABLE"
 BENCH_ADMIN_AUTH_FAILED = "BENCH_ADMIN_AUTH_FAILED"
 BENCH_ADMIN_REJECTED = "BENCH_ADMIN_REJECTED"
 BENCH_RATE_LIMITED = "BENCH_RATE_LIMITED"
-#: No plan is known for an initiate: the local context is empty (a bench that
-#: never ran a signup, or one whose settings were reset) and the caller named
-#: none.
+#: No signup is known on this site: no admin credentials at all (a bench on day
+#: one, or one whose settings were reset), or nothing local to name a plan with
+#: and the caller named none.
+#:
+#: Deliberately ONE code for both rather than a separate BENCH_NOT_STARTED. The
+#: caller's decision is identical - show the signup form - and a wizard with two
+#: codes for one decision grows a branch that can only ever disagree with itself.
 BENCH_NO_SIGNUP_CONTEXT = "BENCH_NO_SIGNUP_CONTEXT"
+#: A provider-truth check found money the control plane could not credit to this
+#: exact attempt, and an operator is placing it. Refused HERE, before the network:
+#: the customer has already paid, and the one thing that must not happen next is
+#: a second intent. Bench-local because the refusal is this facade's - admin's
+#: own durable guard is a separate, ledgered piece of work.
+BENCH_AWAITING_RECONCILIATION = "BENCH_AWAITING_RECONCILIATION"
 
 RECOVERY_RETRY = "retry"
 RECOVERY_CONTINUE_SETUP = "continue_setup"
 RECOVERY_CONTACT_SUPPORT = "contact_support"
 RECOVERY_AUTHENTICATE_OR_RECONNECT = "authenticate_or_reconnect"
+#: Bench-local hint, not one of admin's five: "ask the gateway again, and I will
+#: know more". Advisory like every recovery hint, so an admin that later adopts
+#: the name loses nothing and a consumer that does not know it ignores it.
+RECOVERY_CHECK_STATUS = "check_status"
+
+#: Admin's cap on an idempotency key (``billing/signup.py _MAX_IDEMPOTENCY_KEY_LEN``).
+#: Mirrored rather than discovered: a key admin refuses must never be PERSISTED
+#: here, because the stored key is what the next attempt reuses - see
+#: next_idempotency_key.
+MAX_IDEMPOTENCY_KEY_LEN = 128
 
 # The codes whose recovery IS a new intent: whatever the stored idempotency key
 # bought can no longer be paid. Reusing the key there would be actively wrong -
@@ -102,11 +122,38 @@ RECOVERY_AUTHENTICATE_OR_RECONNECT = "authenticate_or_reconnect"
 # retrying after a decline would be handed the dead order back and could never
 # escape it. Everything else reuses the key, which is what makes a double-click
 # (or a retried POST, or a refreshed pay screen) converge on ONE gateway object.
+#
+# INVALID_REQUEST is in the set for the opposite reason and it is load-bearing: a
+# key admin REFUSED bought nothing at all, so a bench that kept reusing it would
+# replay the same refusal forever with no way out but a settings reset. Validation
+# below is what stops such a key being stored; this is what frees a bench that
+# stored one anyway (an older build, or a bound admin tightens later).
 _SPENT_INTENT_CODES = frozenset(
 	{
 		PAYMENT_DECLINED,
 		NO_CURRENT_INTENT,
 		INTENT_HANDLE_UNAVAILABLE,
+		INVALID_REQUEST,
+	}
+)
+
+# Admin's PAYMENT-STATE vocabulary: the codes that describe where this signup's
+# money actually is. Only these may be folded into the local context, because the
+# context drives the idempotency decision and a rendered stage - and a transport
+# failure, a rate-limit backoff or a bench-local refusal says NOTHING about
+# either. Absorbing "you are asking too often" as the payment's state is how a
+# backoff would come to mint a fresh intent.
+_PAYMENT_STATE_CODES = frozenset(
+	{
+		SIGNUP_VERIFICATION_REQUIRED,
+		PAYMENT_CONFIRMATION_PENDING,
+		PAYMENT_DECLINED,
+		PAYMENT_ALREADY_ACTIVE,
+		NO_CURRENT_INTENT,
+		ACCOUNT_RECONNECT_REQUIRED,
+		PAYMENT_AUTHORIZED_PENDING_CONFIRM,
+		INTENT_HANDLE_UNAVAILABLE,
+		SIGNUP_TERMINAL,
 	}
 )
 
@@ -168,6 +215,11 @@ _ADMIN_KEYS = (
 	"pending_verification",
 	"verification_expires_at",
 	"payment_last_checked_at",
+	# Money the gateway holds that could not be credited to this attempt. Kept
+	# because it OUTLIVES the response that reported it: an operator is placing
+	# that payment, and until a later check says otherwise this bench must refuse
+	# to open a second intent. See awaiting_reconciliation().
+	"awaiting_manual_reconciliation",
 )
 
 # Never persisted, and asserted on: the signup response carries the account's
@@ -180,15 +232,80 @@ _NEVER_PERSIST = ("api_key", "api_secret", "customer", "customer_password", "age
 # intent.
 _LOCAL_ONLY_KEYS = ("idempotency_key",)
 
+# Fields whose value changes on every single poll and means nothing on its own.
+# They are excluded from change DETECTION only - they still ride along in a write
+# that something real triggered. Without this a wizard polling every 2 seconds
+# rewrites the Single forever, because the timestamp is different every time.
+_VOLATILE_KEYS = ("payment_last_checked_at", "gateway_consulted", "updated_at")
+
+# Credential-shaped keys that must never reach the browser, wherever in an admin
+# envelope they appear. The bench persists them (write_connection) and then hands
+# the SAME dict onward, so "we only return what admin sent" was, on the verified
+# poll, a plaintext password in an HTTP response body the page had no use for.
+# Stripping is by KEY, on the way out, so a future admin field named like a
+# credential is caught without a bench release.
+_WIRE_STRIP = ("api_key", "api_secret", "customer_password", "agent_token")
+
+
+def strip_credentials(data: dict | None) -> dict:
+	"""A copy of ``data`` with every credential-shaped key removed.
+
+	The persist path reads the ORIGINAL before this runs; only the wire copy is
+	stripped. ``customer`` is deliberately NOT here - it is the synthetic OAuth
+	login, useless without the password, and the legacy verify flow's JS reads it
+	off the signup response. It has no business being RENDERED, which is what the
+	context block's real email is for."""
+	if not isinstance(data, dict):
+		return {}
+	return {k: v for k, v in data.items() if k not in _WIRE_STRIP}
+
+
+#: One Error Log per hour, not one per poll, for the deploy window below.
+_MISSING_FIELD_LOG_KEY = "jarvis:signup_context:missing_field_logged"
+
+
+def _field_installed() -> bool:
+	"""Does the INSTALLED doctype have the context field?
+
+	``frappe.get_meta().has_field`` and not ``frappe.db.has_column``: Jarvis
+	Settings is a Single, so it has no table of its own and ``has_column`` raises
+	``ProgrammingError('DocType', 'Jarvis Settings')`` when asked. Verified on
+	this bench rather than assumed."""
+	try:
+		return bool(frappe.get_meta("Jarvis Settings").has_field(CONTEXT_FIELD))
+	except Exception:
+		return False
+
+
+def _note_missing_field() -> None:
+	"""Say ONCE an hour that the field is missing. A wizard polls every couple of
+	seconds; an un-throttled log here would bury the Error Log it is trying to
+	warn through."""
+	cache = frappe.cache()
+	if cache.get_value(_MISSING_FIELD_LOG_KEY):
+		return
+	cache.set_value(_MISSING_FIELD_LOG_KEY, 1, expires_in_sec=3600)
+	frappe.log_error(
+		title="signup context field missing - run bench migrate",
+		message=(
+			f"Jarvis Settings.{CONTEXT_FIELD} is not on the installed doctype, so the onboarding "
+			"display context and the payment idempotency key are not being kept. Signup still "
+			"works; a double-click may open two checkouts. Run `bench --site <site> migrate`."
+		),
+	)
+
 
 def load() -> dict:
 	"""The stored context, or ``{}``.
 
-	Never raises. Two ways it can find nothing and both are survivable: a
-	malformed value (hand-edited, half-written), and a bench between a code
-	deploy and its ``bench migrate``, where ``get_single_value`` throws on a
-	field the installed doctype does not have yet. A wizard must not be bricked
-	by its own bookkeeping."""
+	Never raises. Three ways it can find nothing and all are survivable: nothing
+	stored yet, a malformed value (hand-edited, half-written), and a bench between
+	a code deploy and its ``bench migrate`` - where ``get_single_value`` THROWS on
+	a field the installed doctype does not have. A wizard must not be bricked by
+	its own bookkeeping."""
+	if not _field_installed():
+		_note_missing_field()
+		return {}
 	try:
 		raw = frappe.db.get_single_value("Jarvis Settings", CONTEXT_FIELD) or ""
 	except Exception:
@@ -213,23 +330,31 @@ def save(context: dict) -> None:
 	caller that hands the field a raw admin payload fail safe instead of parking
 	an api_secret in a plain-text Settings column.
 
-	Best-effort, and deliberately so. ``db_set`` REJECTS a field the installed
-	doctype does not have ("Field ... does not exist"), which is precisely the
-	state of a bench between a code deploy and its ``bench migrate``. Letting
-	that abort the call would take signup itself down in that window - a strictly
-	worse failure than the one this snapshot exists to prevent - so a wizard is
-	never bricked by its own bookkeeping, on the write side as much as the read
-	side. The cost of the degraded window is a display block the page falls back
-	from, and an idempotency key that is not remembered across a double-click."""
+	SKIPPED entirely when the installed doctype has no such field - the state of a
+	bench between a code deploy and its ``bench migrate``. Checking rather than
+	catching, because the two write layers disagree about what happens then and
+	both answers are bad: ``Document.db_set`` raises (it reads the value back, and
+	the read is what throws), while ``frappe.db.set_single_value`` validates
+	NOTHING and silently writes an orphan ``tabSingles`` row that the next migrate
+	does not clean up. Losing a display snapshot for one deploy window is a bad
+	day; taking signup down, or leaving rows behind, is worse."""
+	if not _field_installed():
+		_note_missing_field()
+		return
 	clean = {k: v for k, v in (context or {}).items() if k not in _NEVER_PERSIST}
 	settings = frappe.get_single("Jarvis Settings")
 	try:
 		settings.db_set(CONTEXT_FIELD, json.dumps(clean, sort_keys=True), update_modified=False)
 	except Exception:
 		frappe.log_error(
-			title="signup context not persisted (run bench migrate?)",
+			title="signup context not persisted",
 			message=frappe.get_traceback(),
 		)
+
+
+def _material(context: dict) -> dict:
+	"""The part of a context that a write would be ABOUT."""
+	return {k: v for k, v in context.items() if k not in _VOLATILE_KEYS}
 
 
 def update(**fields) -> dict:
@@ -237,18 +362,26 @@ def update(**fields) -> dict:
 
 	Empty values are dropped rather than written: a poll that answers with no
 	``amount_inr`` (a verification-stage response, say) must not erase the amount
-	a later screen still has to render. Writes only on a real change, so the
-	wizard's polling costs no DB writes once the state is steady."""
+	a later screen still has to render. ``False`` and ``0`` are NOT empty and are
+	written - ``awaiting_manual_reconciliation: False`` is how a cleared incident
+	is recorded, and dropping it would leave the refusal it drives stuck on
+	forever.
+
+	A write happens only when something MATERIAL changed. The wizard polls every
+	couple of seconds and every answer carries a fresh ``payment_last_checked_at``,
+	so comparing whole dicts made a steady state write the Single on every tick -
+	each write clearing the document cache for every other request on the site."""
 	context = load()
 	merged = dict(context)
 	for key, value in fields.items():
 		if value in (None, "", {}, []):
 			continue
 		merged[key] = value
-	if merged != context:
+	if _material(merged) != _material(context):
 		merged["updated_at"] = frappe.utils.now()
 		save(merged)
-	return merged
+		return merged
+	return context
 
 
 def absorb(payload: dict | None) -> dict:
@@ -271,6 +404,59 @@ def absorb(payload: dict | None) -> dict:
 	return update(**fields)
 
 
+def absorb_check(payload: dict | None) -> dict:
+	"""``absorb`` for a PROVIDER-TRUTH check, which is additionally authoritative
+	about the reconciliation flag.
+
+	Admin sends ``awaiting_manual_reconciliation`` only when it is TRUE, so an
+	ordinary absorb can raise the flag and nothing can ever lower it: the customer
+	would be refused a retry forever, on an incident an operator closed weeks ago.
+	A check is the one surface entitled to say the flag is FALSE, so it says so
+	explicitly."""
+	context = absorb(payload)
+	if not isinstance(payload, dict):
+		return context
+	return update(awaiting_manual_reconciliation=bool(payload.get("awaiting_manual_reconciliation")))
+
+
+def absorb_payment_outcome(err) -> dict:
+	"""Fold a FAILED admin call into the context - but only when it actually
+	reported the payment's state.
+
+	The context drives two decisions (what the page renders, and whether the next
+	initiation reuses its idempotency key), so what may enter it is admin's
+	payment-state vocabulary and nothing else. A rate-limit backoff, a transport
+	failure or a bench-local refusal describes THIS CALL, not the money: absorbing
+	"you are asking too often" as the payment's state would let a backoff mint a
+	fresh intent, and absorbing a network blip would overwrite a real decline.
+
+	Narrow on purpose - the code, its recovery hint and the check stamp. A refusal
+	is not a state read, and the fields it happens to carry are not a substitute
+	for one."""
+	code = getattr(err, "stable_code", "") or getattr(err, "code", "")
+	if code not in _PAYMENT_STATE_CODES:
+		return load()
+	error = getattr(err, "error", None) or {}
+	return update(
+		code=code,
+		recovery=error.get("recovery") or "",
+		payment_last_checked_at=error.get("payment_last_checked_at") or "",
+	)
+
+
+def awaiting_reconciliation(context: dict | None = None) -> bool:
+	"""Did the last provider-truth check find money an operator still has to
+	place?
+
+	While it did, this bench refuses to open another intent. The customer has
+	already paid something the gateway is holding, and the code that comes with it
+	is the ordinary pending one - deliberately, because a decline would invite a
+	second payment - so nothing in the code alone stops a retry. The flag is what
+	stops it."""
+	context = load() if context is None else context
+	return bool(context.get("awaiting_manual_reconciliation"))
+
+
 def wire(context: dict | None = None) -> dict:
 	"""The context block a facade response carries, minus anything local-only."""
 	context = load() if context is None else context
@@ -285,13 +471,41 @@ def clear() -> None:
 # --------------------------------------------------------------------------- #
 # idempotency
 # --------------------------------------------------------------------------- #
+def supplied_key_error(supplied: str | None) -> dict | None:
+	"""Why a caller-supplied idempotency key is unusable, or None.
+
+	Checked HERE, before the key is persisted, and that order is the whole point.
+	The stored key is what the NEXT attempt reuses, so a key admin will refuse
+	must never be written: the previous shape stored it, admin answered
+	``INVALID_REQUEST``, and every subsequent attempt replayed the same refusal
+	from the same stored key - a self-inflicted brick with no way out but a
+	settings reset.
+
+	The bound mirrors admin's ``_MAX_IDEMPOTENCY_KEY_LEN``. Duplicating a remote
+	constant is a drift risk taken deliberately: a local refusal costs one HTTP
+	round trip and leaves nothing behind, and the wrong direction of drift (ours
+	stricter) is a caller told to shorten a key, while the other (ours looser) is
+	the exact 400 admin already answers - which the INVALID_REQUEST entry in
+	_SPENT_INTENT_CODES then clears rather than sticks on."""
+	supplied = (supplied or "").strip()
+	if not supplied:
+		return None
+	if len(supplied) > MAX_IDEMPOTENCY_KEY_LEN:
+		return {
+			"code": INVALID_REQUEST,
+			"message": f"idempotency_key must be at most {MAX_IDEMPOTENCY_KEY_LEN} characters",
+			"recovery": RECOVERY_RETRY,
+		}
+	return None
+
+
 def next_idempotency_key(*, supplied: str | None = None, context: dict | None = None) -> str:
 	"""The key for the payment initiation about to be made.
 
-	``supplied`` (from the caller) wins verbatim - including an over-long one,
-	which admin answers with a coded ``INVALID_REQUEST`` it can fix. Silently
-	truncating would hand it a DIFFERENT key than the one it thinks it sent, and
-	an idempotency key that is not the caller's is worse than none.
+	``supplied`` (from the caller) wins verbatim. Never truncated: a key that is
+	not the one the caller thinks it sent is worse than no key at all, so an
+	unusable one is REFUSED by the endpoint (see supplied_key_error) instead of
+	being quietly rewritten into a different request.
 
 	Otherwise: reuse the stored key while the intent it bought is still payable
 	(so a double-click, a retried POST and a refreshed pay screen all converge on
@@ -328,6 +542,7 @@ def error_object(err) -> tuple[dict, int]:
 		AdminAuthError,
 		AdminContractError,
 		AdminRateLimitedError,
+		AdminRejectedError,
 		AdminUnreachableError,
 		AdminValidationError,
 	)
@@ -359,6 +574,18 @@ def error_object(err) -> tuple[dict, int]:
 		if getattr(err, "exc_type", None):
 			out["exc_type"] = err.exc_type
 		return out, 409
+	if isinstance(err, AdminRejectedError):
+		# Admin was REACHED and permanently refused (its fleet layer answers a
+		# config it can never accept with a 502 carrying its own error.code). It
+		# is a subclass of AdminUnreachableError, so it must be answered before
+		# that branch - collapsing it into "unreachable" is the exact mistake
+		# jarvis #542 was about: a deterministic refusal recorded as "still
+		# landing", which a caller then waits out forever.
+		return {
+			"code": err.code or BENCH_ADMIN_REJECTED,
+			"message": err.detail or str(err),
+			"recovery": RECOVERY_CONTACT_SUPPORT,
+		}, 502
 	if isinstance(err, AdminUnreachableError):
 		return {
 			"code": BENCH_ADMIN_UNREACHABLE,
@@ -382,17 +609,33 @@ def stamp_error(error: dict) -> None:
 
 
 def success(data: dict, *, context: dict | None = None) -> dict:
-	"""A facade success: admin's envelope verbatim, plus the local context.
+	"""A facade success: admin's envelope plus the local context.
 
-	``data`` is NOT filtered. Every capability flag, disclosure field and code
-	admin added - including ones this bench build has never heard of - reaches
-	the caller, which is what makes an additive admin release a no-op here."""
+	Additive by default and subtractive only for credentials. Every capability
+	flag, disclosure field and code admin added - including ones this bench build
+	has never heard of - reaches the caller, which is what makes an additive admin
+	release a no-op here; the ONE exception is the credential-shaped keys
+	``strip_credentials`` removes, because "return exactly what admin sent" put
+	the customer's OAuth password in an HTTP response body on the verified poll.
+	The bench has already persisted it by the time this runs; the page never
+	wanted it."""
+	data = data or {}
 	return {
 		"ok": True,
-		"contract_version": int((data or {}).get("contract_version") or CONTRACT_VERSION),
-		"data": data or {},
+		"contract_version": _int_or(data.get("contract_version"), CONTRACT_VERSION),
+		"data": strip_credentials(data),
 		"context": wire(context),
 	}
+
+
+def _int_or(value, fallback: int) -> int:
+	"""``int(value)``, or ``fallback`` when it is not a number. A malformed
+	``contract_version`` from a proxy or a half-upgraded admin is a bad field, not
+	a reason to 500 the payment page."""
+	try:
+		return int(value)
+	except (TypeError, ValueError):
+		return fallback
 
 
 def failure(error: dict, status: int, *, context: dict | None = None) -> dict:

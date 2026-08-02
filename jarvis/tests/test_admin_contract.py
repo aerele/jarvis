@@ -23,6 +23,7 @@ Three properties these tests exist to hold:
     never falls back to reading the sentence.
 """
 
+import hashlib
 import json
 import os
 from unittest.mock import MagicMock, patch
@@ -346,6 +347,118 @@ class TestDeclineCodes(_ContractCase):
 	def test_terminal_signup_is_not_a_checkout(self):
 		data = self.replay("signup_terminal")
 		self.assertEqual(data["code"], onboarding_contract.SIGNUP_TERMINAL)
+
+
+class TestTheCorpusIsWhatItClaims(_ContractCase):
+	"""PROVENANCE.md carries a checksum table. A table nobody recomputes is a
+	comment, and a vendored file edited in place to make a test pass is exactly
+	the drift this directory exists to prevent."""
+
+	def _provenance(self) -> str:
+		with open(os.path.join(FIXTURE_DIR, "PROVENANCE.md")) as fh:
+			return fh.read()
+
+	def _declared(self) -> dict:
+		out = {}
+		for line in self._provenance().splitlines():
+			parts = line.split()
+			if len(parts) == 2 and len(parts[0]) == 64 and parts[1].endswith(".json"):
+				out[parts[1]] = parts[0]
+		return out
+
+	def test_every_vendored_file_matches_its_recorded_checksum(self):
+		declared = self._declared()
+		self.assertTrue(declared, "PROVENANCE.md must carry the vendored checksum table")
+		for name, want in declared.items():
+			with self.subTest(fixture=name):
+				with open(os.path.join(FIXTURE_DIR, name), "rb") as fh:
+					got = hashlib.sha256(fh.read()).hexdigest()
+				self.assertEqual(got, want, f"{name} differs from the vendored copy - re-sync, do not re-pin")
+
+	def test_every_file_is_either_vendored_or_declares_itself_bench_authored(self):
+		"""No third category. A file that is neither a checksummed copy of
+		admin's nor an explicit bench-authored case is a local invention wearing
+		the authority of a contract."""
+		declared = self._declared()
+		for name in sorted(os.listdir(FIXTURE_DIR)):
+			if not name.endswith(".json"):
+				continue
+			with self.subTest(fixture=name):
+				if name in declared:
+					continue
+				produced_by = _load(name[: -len(".json")]).get("produced_by", "")
+				self.assertTrue(
+					produced_by.startswith("BENCH-AUTHORED"),
+					f"{name} is not in the vendored table and does not declare itself bench-authored",
+				)
+
+
+class TestTheDuplicateCodeBranchIsReal(_ContractCase):
+	"""Every VENDORED duplicate fixture carries ``exc_type``, so the bench's
+	``error.code`` branch was never the thing under test - delete it and the
+	suite stayed green. The code-only fixture is what tests it."""
+
+	def test_a_coded_duplicate_with_no_exc_type_is_still_a_duplicate(self):
+		err = self.replay_error("duplicate_409_code_only")
+		self.assertEqual(err.code, onboarding_contract.ACCOUNT_ALREADY_EXISTS)
+		self.assertIsNone(err.exc_type, "the fixture must carry no exc_type, or it tests nothing")
+		self.assertTrue(
+			onboarding_contract.is_duplicate_signup(err),
+			"the code alone must reach the resume; exc_type is Frappe's framing, not the contract",
+		)
+
+	def test_the_poll_has_a_verification_state_of_its_own(self):
+		"""The state a wizard sits in longest. Its capability flags differ from
+		the resume endpoint's answer for the same cohort: nothing has been
+		charged, so there is nothing to initiate and nothing to check."""
+		data = self.replay("state_verification_required")
+		self.assertEqual(data["code"], onboarding_contract.SIGNUP_VERIFICATION_REQUIRED)
+		self.assertTrue(data["pending_verification"])
+		self.assertFalse(data["can_initiate_payment"])
+		self.assertFalse(data["can_check_status"])
+		self.assertIn("verification_expires_at", data)
+
+
+class TestReaderEdges(_ContractCase):
+	def test_a_codeless_top_level_error_does_not_hide_the_coded_one(self):
+		"""Two ``error`` objects, only one of them the contract's. Stopping at
+		the first one seen reported "no contract" for a response that carried
+		one, which fails closed into the generic branch and loses the code."""
+		body = {
+			"error": {"message": "gateway says something went wrong"},
+			"message": {
+				"ok": False,
+				"error": {"code": "PAYMENT_ALREADY_ACTIVE", "recovery": "continue_setup"},
+			},
+		}
+		with (
+			patch("requests.post", MagicMock(return_value=_mock_response(409, body))),
+			self.assertRaises(AdminContractError) as ctx,
+		):
+			admin_client.resume_pending_signup("some-plan")
+		self.assertEqual(ctx.exception.code, onboarding_contract.PAYMENT_ALREADY_ACTIVE)
+
+	def test_a_permanent_refusal_is_not_reported_as_an_outage(self):
+		"""AdminRejectedError is a SUBCLASS of AdminUnreachableError, so a facade
+		that checks the parent first turns a deterministic refusal into "admin is
+		unwell, keep waiting" - jarvis #542, in a new place."""
+		from jarvis.exceptions import AdminRejectedError
+
+		error, status = onboarding_contract.error_object(
+			AdminRejectedError(
+				"admin returned a 502 error: bad provider slug",
+				code="FleetConfigError",
+				detail="bad provider slug",
+			)
+		)
+		self.assertEqual(error["code"], "FleetConfigError")
+		self.assertEqual(error["message"], "bad provider slug")
+		self.assertNotEqual(error["code"], onboarding_contract.BENCH_ADMIN_UNREACHABLE)
+		self.assertEqual(status, 502)
+
+	def test_a_malformed_contract_version_does_not_break_the_page(self):
+		out = onboarding_contract.success({"code": "X", "contract_version": "not-a-number"})
+		self.assertEqual(out["contract_version"], onboarding_contract.CONTRACT_VERSION)
 
 
 class TestFacadeErrorObjects(_ContractCase):

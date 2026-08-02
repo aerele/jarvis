@@ -1,11 +1,20 @@
-# Vendored admin contract fixtures
+# Admin contract fixtures
 
-These JSON files are **not ours**. They are a byte-for-byte copy of the wire
-contract the control plane publishes for the signup / payment-recovery flow, and
-they are here so this repository's tests replay the *other* side's published
-truth instead of a local re-statement of it.
+Two kinds of file live here and the difference is load-bearing.
 
-## Source
+**Vendored** (the table below): byte-for-byte copies of the wire contract the
+control plane publishes. They are **not ours** — they are here so this
+repository's tests replay the *other* side's published truth instead of a local
+re-statement of it.
+
+**Bench-authored** (listed at the bottom): cases this bench must survive that the
+admin corpus does not yet contain. They carry a `produced_by` field saying so.
+They are not checksummed against admin, they are not evidence of what admin
+sends, and each one has an admin-side twin ledgered for the next admin round.
+Keeping them in the same directory is deliberate — the reader under test is the
+same, and the alternative is a second loader nobody runs.
+
+## Source (vendored files only)
 
 | | |
 |---|---|
@@ -40,6 +49,16 @@ e6353a18b9b9ab9ad2d0cf344517defb5b162cc893078637810f7a25a5376b24  state_mandate_
 43dc1fb4574e760455601ee5428ee7fbc6b20d89ea2a5c5c4d415b0d5822db41  state_no_current_intent.json
 bdd79f8c19879c4cfe9b5871e10f9334c83678951e247fb90a9eab1cb73cecc6  verification_required.json
 ```
+
+`test_admin_contract.py` recomputes that table and fails on a mismatch, so a
+vendored file edited in place is caught rather than argued about.
+
+## Bench-authored files (NOT vendored, NOT checksummed)
+
+| file | why it exists | admin-side twin |
+|---|---|---|
+| `duplicate_409_code_only.json` | Every vendored duplicate fixture carries `exc_type`, so the bench's `error.code` branch was never actually exercised — delete it and the suite stayed green. This is the returned-envelope form (`codes.error_response`, no `exc_type`), which is what the contract says a coded rejection is. | **LEDGERED**: admin adds the same case, or states that the guest duplicate will always be a raise. |
+| `state_verification_required.json` | The passive poll's answer while the magic link is unclicked — the state a wizard sits in longest and had no fixture for. `verification_required.json` is the *resume* endpoint's version of the same cohort; the capability flags differ. | **LEDGERED**: admin adds the poll-side case beside its resume-side one. |
 
 ## Why a copy exists at all
 

@@ -1601,7 +1601,13 @@ def _contract_error(payload) -> dict:
 	if not isinstance(payload, dict):
 		return {}
 	err = payload.get("error")
-	if not isinstance(err, dict):
+	if not (isinstance(err, dict) and err.get("code")):
+		# Fall THROUGH rather than give up: a top-level ``error`` that carries no
+		# code does not mean there is no contract, only that this depth is not
+		# where it is. A response can legitimately hold both (a framework-shaped
+		# hint at the top, admin's coded envelope under ``message``), and the
+		# earlier shape - which stopped at the first ``error`` object it saw -
+		# would have read the codeless one and reported "no contract".
 		inner = payload.get("message")
 		err = inner.get("error") if isinstance(inner, dict) else None
 	if not isinstance(err, dict) or not err.get("code"):

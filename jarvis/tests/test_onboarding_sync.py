@@ -1036,36 +1036,72 @@ class TestSignupResumeFallback(FrappeTestCase):
 			second = resume.call_args.kwargs["idempotency_key"]
 		self.assertNotEqual(first, second)
 
-	def test_an_unmigrated_bench_degrades_instead_of_breaking(self):
-		"""Between a code deploy and its ``bench migrate`` the context field does
-		not exist yet, and Frappe REFUSES both reads and writes of a field its
-		installed doctype has never heard of. Signup must survive that window:
-		losing a display snapshot is a bad day, taking signup down is a worse
-		one."""
-		import frappe.model.document as document_module
+	def test_frappe_really_does_refuse_a_field_the_doctype_lacks(self):
+		"""The premise of the guard, asserted against REAL frappe rather than a
+		mock — and the two write layers do not agree, which is why the guard
+		checks instead of catching:
 
-		real_get = frappe.db.get_single_value
-		real_db_set = document_module.Document.db_set
+		  - a READ of a field the installed doctype lacks THROWS
+		    (``get_single_value`` looks the field up in meta and refuses);
+		  - ``frappe.db.set_single_value`` validates NOTHING and silently writes
+		    an orphan ``tabSingles`` row that no migrate cleans up.
 
-		def unmigrated_get(doctype, fieldname, *a, **kw):
-			if doctype == "Jarvis Settings" and fieldname == onboarding_contract.CONTEXT_FIELD:
-				frappe.throw("Field signup_context does not exist on Jarvis Settings")
-			return real_get(doctype, fieldname, *a, **kw)
+		So "just catch the exception" would have left orphan rows behind on every
+		bench deployed ahead of its migrate."""
+		scratch = "zz_signup_context_probe"
+		try:
+			with self.assertRaises(Exception):
+				frappe.db.get_single_value("Jarvis Settings", scratch)
+			frappe.db.set_single_value("Jarvis Settings", scratch, "written-anyway")
+			rows = frappe.db.sql(
+				"select value from tabSingles where doctype=%s and field=%s", ("Jarvis Settings", scratch)
+			)
+			self.assertTrue(rows, "set_single_value writes without validating - that is the hazard")
+		finally:
+			frappe.db.delete("Singles", {"doctype": "Jarvis Settings", "field": scratch})
+			frappe.db.commit()
 
-		def unmigrated_db_set(self, fieldname, value=None, *a, **kw):
-			if fieldname == onboarding_contract.CONTEXT_FIELD:
-				frappe.throw("Field signup_context does not exist on Jarvis Settings")
-			return real_db_set(self, fieldname, value, *a, **kw)
+	def test_an_unmigrated_bench_degrades_and_leaves_no_orphan_row(self):
+		"""The deploy window itself: code is live, ``bench migrate`` has not run,
+		so the installed doctype has no such field. Everything below is real
+		frappe except the one fact that differs in that window.
 
+		Signup must survive it — losing a display snapshot is a bad day, taking
+		signup down is a worse one — and it must not write the row it cannot
+		legitimately write."""
+		before = frappe.db.get_single_value("Jarvis Settings", onboarding_contract.CONTEXT_FIELD)
+		real_get_meta = frappe.get_meta
+
+		class _MetaMissingTheField:
+			def __init__(self, meta):
+				self._meta = meta
+
+			def has_field(self, fieldname):
+				if fieldname == onboarding_contract.CONTEXT_FIELD:
+					return False
+				return self._meta.has_field(fieldname)
+
+			def __getattr__(self, name):
+				return getattr(self._meta, name)
+
+		def unmigrated_meta(doctype, *a, **kw):
+			meta = real_get_meta(doctype, *a, **kw)
+			return _MetaMissingTheField(meta) if doctype == "Jarvis Settings" else meta
+
+		frappe.cache().delete_value(onboarding_contract._MISSING_FIELD_LOG_KEY)
 		with (
-			patch.object(frappe.db, "get_single_value", unmigrated_get),
-			patch.object(document_module.Document, "db_set", unmigrated_db_set),
+			patch.object(frappe, "get_meta", unmigrated_meta),
 			self._signup_raises(self._duplicate_coded()),
 			self._resume_ok("order_RM") as resume,
 		):
 			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
 		resume.assert_called_once()
 		self.assertEqual(out["razorpay_order_id"], "order_RM")
+		self.assertEqual(
+			frappe.db.get_single_value("Jarvis Settings", onboarding_contract.CONTEXT_FIELD),
+			before,
+			"nothing may be written to a field the installed doctype does not have",
+		)
 
 	def test_non_dedup_error_reraises(self):
 		from jarvis.exceptions import AdminValidationError
@@ -1300,7 +1336,12 @@ class TestOnboardingFacadeEndpoints(FrappeTestCase):
 
 	def test_a_refused_initiate_still_updates_what_the_page_renders(self):
 		"""A wizard reloading onto "already paid" has to render that, not the
-		plan it was about to charge for."""
+		plan it was about to charge for.
+
+		The CODE and its recovery hint, and nothing else: a refusal is not a state
+		read. The fields it happens to carry describe why this call was refused,
+		not where the money is, and treating them as a state read is how a
+		rate-limit answer would come to overwrite a real decline."""
 		from jarvis.exceptions import AdminContractError
 
 		onboarding_contract.update(plan="annual")
@@ -1312,6 +1353,7 @@ class TestOnboardingFacadeEndpoints(FrappeTestCase):
 				error={
 					"code": "PAYMENT_ALREADY_ACTIVE",
 					"message": "This signup is already paid. Continue setup.",
+					"recovery": "continue_setup",
 					"subscription_status": "Active",
 					"attempt_id": "att_7c2",
 				},
@@ -1320,7 +1362,302 @@ class TestOnboardingFacadeEndpoints(FrappeTestCase):
 		):
 			out = onboarding.initiate_signup_payment()
 		self.assertEqual(out["context"]["code"], "PAYMENT_ALREADY_ACTIVE")
-		self.assertEqual(out["context"]["subscription_status"], "Active")
+		self.assertEqual(out["context"]["recovery"], "continue_setup")
+		# The full error object still reaches the page - it just does not become
+		# the persisted state.
+		self.assertEqual(out["error"]["subscription_status"], "Active")
+
+	# ---- P0-1: credentials must not ride the response back to the browser ----
+
+	def test_the_state_poll_never_returns_the_login_password(self):
+		"""Admin delivers the OAuth password on the first poll after the email is
+		confirmed. The bench PERSISTS it; the page has no use for it; returning
+		admin's dict verbatim put a plaintext login secret in an HTTP response
+		body on every verified poll, where it lands in browser caches, devtools
+		and any proxy log on the way."""
+		with patch(
+			"jarvis.onboarding.admin_client.get_signup_payment_state",
+			return_value=dict(self._STATE, customer_password="pw-once", api_key="k", api_secret="s"),
+		):
+			out = onboarding.get_onboarding_state()
+		for leaked in ("customer_password", "api_key", "api_secret"):
+			self.assertNotIn(leaked, out["data"], f"{leaked} must never reach the browser")
+		# ...and it was still persisted, which is the point of receiving it.
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("jarvis_admin_customer_password", raise_exception=False), "pw-once")
+
+	def test_the_provider_check_never_returns_the_login_password(self):
+		with patch(
+			"jarvis.onboarding.admin_client.check_signup_payment_status",
+			return_value=dict(self._STATE, customer_password="pw-once"),
+		):
+			out = onboarding.check_signup_payment_status()
+		self.assertNotIn("customer_password", out["data"])
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("jarvis_admin_customer_password", raise_exception=False), "pw-once")
+
+	def test_the_legacy_poll_never_returns_the_login_password(self):
+		"""Same leak, older endpoint, still live: this is the one the shipped
+		wizard actually calls."""
+		with patch(
+			"jarvis.onboarding.admin_client.get_signup_payment_state",
+			return_value=dict(self._STATE, customer_password="pw-once"),
+		):
+			out = onboarding.check_signup_payment_state()
+		self.assertNotIn("customer_password", out)
+		self.assertEqual(out["code"], "PAYMENT_CONFIRMATION_PENDING", "the rest of the payload is untouched")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("jarvis_admin_customer_password", raise_exception=False), "pw-once")
+
+	# ---- P0-2: a key that cannot work must not be stored ----
+
+	def test_an_unusable_key_is_refused_locally_and_never_persisted(self):
+		onboarding_contract.update(plan="annual")
+		with patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume:
+			out = onboarding.initiate_signup_payment(idempotency_key="x" * 400)
+		resume.assert_not_called()
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], onboarding_contract.INVALID_REQUEST)
+		self.assertEqual(frappe.local.response.http_status_code, 400)
+		self.assertNotIn("idempotency_key", onboarding_contract.load())
+
+	def test_an_unusable_key_does_not_brick_the_next_attempt(self):
+		"""The self-inflicted brick: the over-long key used to be PERSISTED, admin
+		answered INVALID_REQUEST, and every later attempt replayed the same stored
+		key into the same refusal with no way out but a settings reset. Three
+		identical sends, then a normal one."""
+		onboarding_contract.update(plan="annual")
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value=self._STATE,
+		) as resume:
+			for _ in range(3):
+				refused = onboarding.initiate_signup_payment(idempotency_key="x" * 400)
+				self.assertEqual(refused["error"]["code"], onboarding_contract.INVALID_REQUEST)
+			resume.assert_not_called()
+			out = onboarding.initiate_signup_payment()
+		self.assertTrue(out["ok"])
+		self.assertTrue(onboarding_contract.load()["idempotency_key"])
+
+	def test_a_refused_key_that_did_get_stored_still_frees_itself(self):
+		"""Belt and braces for a key an older build stored, or one a bound admin
+		tightens the bound on later: INVALID_REQUEST is a SPENT key, so the next
+		attempt mints rather than replaying the refusal."""
+		onboarding_contract.update(
+			plan="annual",
+			idempotency_key="stale-refused-key",
+			code=onboarding_contract.INVALID_REQUEST,
+		)
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value=self._STATE,
+		) as resume:
+			onboarding.initiate_signup_payment()
+		self.assertNotEqual(resume.call_args.kwargs["idempotency_key"], "stale-refused-key")
+
+	# ---- P1-2: money an operator is still placing ----
+
+	def test_a_parked_payment_refuses_a_new_intent_without_a_network_call(self):
+		"""The gateway holds a payment that could not be credited to this attempt
+		and an operator is placing it. The CODE stays the ordinary pending one -
+		deliberately, so a wizard does not invite a second payment - which means
+		nothing in the code alone stops a retry. The flag does."""
+		onboarding_contract.update(plan="annual")
+		with patch(
+			"jarvis.onboarding.admin_client.check_signup_payment_status",
+			return_value=dict(
+				self._STATE,
+				gateway_consulted=True,
+				awaiting_manual_reconciliation=True,
+				can_initiate_payment=False,
+			),
+		):
+			onboarding.check_signup_payment_status()
+		with patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume:
+			out = onboarding.initiate_signup_payment()
+		resume.assert_not_called()
+		self.assertEqual(out["error"]["code"], onboarding_contract.BENCH_AWAITING_RECONCILIATION)
+		self.assertEqual(out["error"]["recovery"], onboarding_contract.RECOVERY_CHECK_STATUS)
+		self.assertEqual(frappe.local.response.http_status_code, 409)
+
+	def test_a_later_check_clears_the_refusal(self):
+		"""Admin sends the flag only when it is TRUE, so an ordinary absorb can
+		raise it and nothing could ever lower it - the customer would be refused
+		forever over an incident closed weeks ago. The check is the one surface
+		entitled to say it is false, and it says so explicitly."""
+		onboarding_contract.update(plan="annual", awaiting_manual_reconciliation=True)
+		with patch(
+			"jarvis.onboarding.admin_client.check_signup_payment_status",
+			return_value=dict(self._STATE, gateway_consulted=True),
+		):
+			onboarding.check_signup_payment_status()
+		self.assertFalse(onboarding_contract.awaiting_reconciliation())
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value=self._STATE,
+		) as resume:
+			out = onboarding.initiate_signup_payment()
+		resume.assert_called_once()
+		self.assertTrue(out["ok"])
+
+	# ---- P1-3 / U1-2: only a payment-state code may become the payment's state ----
+
+	def test_a_decline_confirmed_through_finish_payment_mints_a_fresh_key(self):
+		"""Where a refusal is actually LEARNED: the browser comes back from
+		checkout and confirm says the gateway refused it. If that verdict does not
+		reach the context, the next Pay click reuses the key that bought the
+		refused intent - and admin, correctly, hands the dead order back."""
+		from jarvis.exceptions import AdminContractError
+
+		onboarding_contract.update(plan="annual", idempotency_key="key-of-the-dead-intent")
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.confirm_payment",
+				side_effect=AdminContractError(
+					"This Cashfree mandate is not authorized.",
+					code="PAYMENT_DECLINED",
+					error={"code": "PAYMENT_DECLINED", "message": "This Cashfree mandate is not authorized."},
+					http_status=402,
+				),
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.finish_payment({"provider": "cashfree"})
+		self.assertEqual(onboarding_contract.load()["code"], onboarding_contract.PAYMENT_DECLINED)
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			return_value=self._STATE,
+		) as resume:
+			onboarding.initiate_signup_payment()
+		self.assertNotEqual(resume.call_args.kwargs["idempotency_key"], "key-of-the-dead-intent")
+
+	def test_a_backoff_is_not_absorbed_as_the_payments_state(self):
+		"""Being told you are asking too often says nothing about the money.
+		Absorbing it as the payment's state would overwrite a real decline and,
+		worse, let a backoff decide whether the next click opens a gateway
+		object."""
+		from jarvis.exceptions import AdminRateLimitedError
+
+		onboarding_contract.update(plan="annual", code=onboarding_contract.PAYMENT_DECLINED)
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			side_effect=AdminRateLimitedError(
+				"try again shortly",
+				retry_after_seconds=30,
+				code="PAYMENT_CHECK_RATE_LIMITED",
+				error={"code": "PAYMENT_CHECK_RATE_LIMITED"},
+			),
+		):
+			out = onboarding.initiate_signup_payment()
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "PAYMENT_CHECK_RATE_LIMITED")
+		self.assertEqual(
+			onboarding_contract.load()["code"],
+			onboarding_contract.PAYMENT_DECLINED,
+			"the real payment verdict must survive a rate-limit answer",
+		)
+
+	def test_an_unreachable_admin_is_not_absorbed_either(self):
+		from jarvis.exceptions import AdminUnreachableError
+
+		onboarding_contract.update(plan="annual", code=onboarding_contract.PAYMENT_CONFIRMATION_PENDING)
+		with patch(
+			"jarvis.onboarding.admin_client.resume_pending_signup",
+			side_effect=AdminUnreachableError("admin is unreachable"),
+		):
+			out = onboarding.initiate_signup_payment()
+		self.assertEqual(out["error"]["code"], onboarding_contract.BENCH_ADMIN_UNREACHABLE)
+		self.assertEqual(onboarding_contract.load()["code"], onboarding_contract.PAYMENT_CONFIRMATION_PENDING)
+
+	# ---- U0: day one ----
+
+	def test_a_site_that_never_signed_up_is_answered_locally(self):
+		"""A bench with no credentials cannot authenticate anything, so the call
+		is a guaranteed 401 that the facade would dress up as "admin
+		authentication failed; contact support" - shown to somebody whose only
+		mistake was opening the page early."""
+		_set_token("")
+		with patch("jarvis.onboarding.admin_client.get_signup_payment_state") as poll:
+			out = onboarding.get_onboarding_state()
+		poll.assert_not_called()
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], onboarding_contract.BENCH_NO_SIGNUP_CONTEXT)
+		self.assertNotIn("support", out["error"]["message"].lower())
+		self.assertNotEqual(out["error"]["code"], onboarding_contract.BENCH_ADMIN_AUTH_FAILED)
+
+	def test_the_provider_check_guards_day_one_the_same_way(self):
+		_set_token("")
+		with patch("jarvis.onboarding.admin_client.check_signup_payment_status") as check:
+			out = onboarding.check_signup_payment_status()
+		check.assert_not_called()
+		self.assertEqual(out["error"]["code"], onboarding_contract.BENCH_NO_SIGNUP_CONTEXT)
+
+	# ---- P2: the bookkeeping must not cost more than it is worth ----
+
+	def test_a_steady_poll_writes_nothing(self):
+		"""Every answer carries a fresh payment_last_checked_at, so comparing
+		whole dicts made a wizard polling every two seconds rewrite the Single on
+		every tick - and every write clears the document cache for every other
+		request on the site."""
+		with patch(
+			"jarvis.onboarding.admin_client.get_signup_payment_state",
+			return_value=dict(self._STATE, payment_last_checked_at="2026-08-02 00:00:00.000000"),
+		):
+			onboarding.get_onboarding_state()
+		with patch.object(onboarding_contract, "save", wraps=onboarding_contract.save) as save:
+			for i in range(5):
+				with patch(
+					"jarvis.onboarding.admin_client.get_signup_payment_state",
+					return_value=dict(self._STATE, payment_last_checked_at=f"2026-08-02 00:00:0{i}.000000"),
+				):
+					onboarding.get_onboarding_state()
+			self.assertEqual(save.call_count, 0, "a steady state must cost no writes")
+			# ...and something real still writes.
+			with patch(
+				"jarvis.onboarding.admin_client.get_signup_payment_state",
+				return_value=dict(self._STATE, code="PAYMENT_DECLINED"),
+			):
+				onboarding.get_onboarding_state()
+			self.assertEqual(save.call_count, 1)
+
+	def test_save_sweeps_credentials_out_of_a_raw_payload(self):
+		"""The allowlist in absorb() is the first line; this is the last. A future
+		caller that hands the store a raw admin payload must fail safe, not park
+		an api_secret in a plain-text Settings column."""
+		onboarding_contract.save(
+			{
+				"email": "owner@acme.example",
+				"api_key": "k",
+				"api_secret": "s",
+				"customer_password": "pw",
+				"agent_token": "t",
+				"customer": "cust-abc@jarvis.invalid",
+			}
+		)
+		raw = frappe.db.get_single_value("Jarvis Settings", onboarding_contract.CONTEXT_FIELD) or ""
+		for leaked in ("api_key", "api_secret", "customer_password", "agent_token", "cust-abc"):
+			self.assertNotIn(leaked, raw)
+		self.assertIn("owner@acme.example", raw)
+
+	def test_a_rejected_plan_does_not_become_the_sticky_default(self):
+		"""A REQUESTED plan is not a confirmed one. Writing it before the call
+		meant a plan admin refused (disabled, zero-priced, a gateway switched off)
+		became this site's default, and the next Pay click charged on it."""
+		from jarvis.exceptions import AdminValidationError
+
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.signup",
+				side_effect=AdminValidationError("This plan has no payable amount."),
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.start_signup("owner@acme.example", "Acme", "a-plan-admin-refuses")
+		self.assertNotIn("plan", onboarding_contract.load())
+		with patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume:
+			out = onboarding.initiate_signup_payment()
+		resume.assert_not_called()
+		self.assertEqual(out["error"]["code"], onboarding_contract.BENCH_NO_SIGNUP_CONTEXT)
 
 	def test_the_context_never_leaves_the_idempotency_key_on_the_wire(self):
 		onboarding_contract.update(plan="annual")
