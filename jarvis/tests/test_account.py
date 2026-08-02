@@ -140,14 +140,28 @@ class TestAccountGatesFailClosed(FrappeTestCase):
 		prev.assert_not_called()
 
 
+def _set_ready_marker(value) -> None:
+	"""Put this site in the ESTABLISHED cohort (a timestamp) or the never-ready
+	one (None). Written raw + update_modified=False, exactly as the gate writes
+	it, so the gate's own revision is unaffected."""
+	frappe.db.set_value(
+		"Jarvis Settings", "Jarvis Settings", "chat_was_ready_at", value, update_modified=False
+	)
+
+
 class TestAdminChatGate(FrappeTestCase):
 	"""jarvis.account._admin_chat_gate — the final managed ready-gate for
-	is_ready_for_chat. Fail-open, v1-tolerant, positive verdict cached ~2 min.
-	admin_client.get_connection is mocked."""
+	is_ready_for_chat. v1-tolerant; positive verdict cached against the config
+	revision. admin_client.get_connection is mocked.
+
+	Every test here pins the ESTABLISHED cohort (chat_was_ready_at set) unless it
+	is specifically about the never-ready one, so a verdict never depends on
+	whatever state the site happens to carry."""
 
 	# The gate now mirrors the release notice onto Jarvis Settings as a side
-	# effect (persist({}) when the mock carries none), so snapshot/restore those
-	# fields to avoid clobbering a real site's operator state.
+	# effect (persist({}) when the mock carries none), and stamps the ready
+	# marker, so snapshot/restore those fields to avoid clobbering a real site's
+	# operator state.
 	_RELEASE_FIELDS = (
 		"release_notice_active",
 		"latest_jarvis_version",
@@ -155,16 +169,24 @@ class TestAdminChatGate(FrappeTestCase):
 	)
 
 	def setUp(self):
-		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+		account._bust_chat_gate()
 		s = frappe.get_single("Jarvis Settings")
 		self._rn_snap = {f: s.get(f) for f in self._RELEASE_FIELDS}
+		self._marker_snap = account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at")
+		_set_ready_marker("2026-01-01 00:00:00")
 
 	def tearDown(self):
-		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+		account._bust_chat_gate()
+		_set_ready_marker(self._marker_snap)
 		s = frappe.get_single("Jarvis Settings")
 		for f, v in self._rn_snap.items():
 			s.db_set(f, v)
 		frappe.db.commit()
+
+	def _cached_verdict(self):
+		"""The live revision's cached entry, or None."""
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		return frappe.cache().get_value(f"{account._CHAT_GATE_CACHE_KEY}:{account._gate_revision(raw)}")
 
 	def test_release_notice_persisted_on_gate(self):
 		# The gate mirrors an active notice so boot can read it; the returned
@@ -253,7 +275,9 @@ class TestAdminChatGate(FrappeTestCase):
 				account._admin_chat_gate(), {"ready": True, "reason": None, "billing_notice": {}}
 			)
 
-	def test_fails_open_on_admin_error(self):
+	def test_established_workspace_fails_open_on_admin_error(self):
+		"""An outage of the control plane is not an outage of the container. A
+		workspace admin has already confirmed Ready keeps its chat."""
 		from jarvis.exceptions import AdminUnreachableError
 
 		with patch.object(
@@ -262,9 +286,63 @@ class TestAdminChatGate(FrappeTestCase):
 			self.assertEqual(
 				account._admin_chat_gate(), {"ready": True, "reason": None, "billing_notice": {}}
 			)
-		# Fail-open verdict must NOT be negative-cached: a recovered admin is
-		# re-probed on the next call rather than being blocked for the TTL.
-		self.assertIsNone(frappe.cache().get_value(account._CHAT_GATE_CACHE_KEY))
+		# Fail-open verdict must NOT be cached: a recovered admin is re-probed on
+		# the next call rather than this shrug standing in for a verdict.
+		self.assertIsNone(self._cached_verdict())
+
+	def test_never_ready_workspace_fails_closed_on_admin_error(self):
+		"""The inversion of the old blanket fail-open. Nothing has ever confirmed a
+		container is serving this workspace, so "probably fine" is a guess - and
+		acting on it is what drops a half-onboarded customer into a chat that
+		cannot answer. Retryable: it is the absence of a verdict, not one."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		_set_ready_marker(None)
+		with patch.object(
+			admin_client, "get_connection", side_effect=AdminUnreachableError("admin is unreachable")
+		):
+			out = account._admin_chat_gate()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "readiness_unconfirmed")
+		self.assertTrue(out["retryable"])
+		self.assertTrue(out["detail"], "the customer must be told something they can act on")
+		# Still never negative-cached: the very next call re-asks.
+		self.assertIsNone(self._cached_verdict())
+
+	def test_pending_payment_403_is_not_a_blind_ready(self):
+		"""jarvis_admin_v2.api._auth.current_customer answers a Pending Payment
+		customer with 403, so this gate NEVER hears "not ready" for them - it hears
+		an exception. The old code shrugged that off as ready."""
+		from jarvis.exceptions import AdminAuthError
+
+		_set_ready_marker(None)
+		with patch.object(
+			admin_client, "get_connection", side_effect=AdminAuthError("admin returned 403", status_code=403)
+		):
+			out = account._admin_chat_gate()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "readiness_unconfirmed")
+
+	def test_ready_stamps_the_established_marker(self):
+		_set_ready_marker(None)
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
+			account._admin_chat_gate()
+		self.assertTrue(account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at"))
+
+	def test_a_fresh_marker_is_not_rewritten_on_every_pass(self):
+		"""The gate runs on every uncached page load; the marker is only ever read
+		as "is it set", so re-stamping it would be a DB write per load for nothing."""
+		fresh = frappe.utils.now()
+		_set_ready_marker(fresh)
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
+			account._admin_chat_gate()
+		self.assertEqual(account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at"), fresh)
+
+	def test_a_blocking_verdict_still_wins_over_the_cohort(self):
+		"""Cohort only decides what to do when admin cannot be ASKED. An answer of
+		"Suspended" is an answer, and an established workspace gets it."""
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Suspended"}):
+			self.assertEqual(account._admin_chat_gate()["reason"], "subscription_suspended")
 
 	def test_billing_notice_is_passed_through(self):
 		# The expiry banner rides this verdict; admin owns the wording, the gate
@@ -276,7 +354,7 @@ class TestAdminChatGate(FrappeTestCase):
 			return_value={"chat_readiness": "Ready", "billing_notice": notice},
 		):
 			self.assertEqual(account._admin_chat_gate()["billing_notice"], notice)
-		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+		account._bust_chat_gate()
 		with patch.object(
 			admin_client,
 			"get_connection",
@@ -295,7 +373,93 @@ class TestAdminChatGate(FrappeTestCase):
 		# A transient block must clear on the next call, not stick for the TTL.
 		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Provisioning"}):
 			account._admin_chat_gate()
-		self.assertIsNone(frappe.cache().get_value(account._CHAT_GATE_CACHE_KEY))
+		self.assertIsNone(self._cached_verdict())
+
+	def test_a_config_change_drops_the_cached_verdict(self):
+		"""The C05-1 stale window: a save changed what the container is being asked
+		to run, so the verdict admin gave about the PREVIOUS config is finished -
+		it must not be served for the rest of the TTL.
+
+		The new status is unique per run rather than a literal: this site may
+		already be sitting on any given status string, and an unchanged value is
+		correctly NOT a new revision."""
+		status_snap = account._settings_raw(("last_sync_status",)).get("last_sync_status")
+		try:
+			with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}) as gc:
+				account._admin_chat_gate()
+				frappe.db.set_value(
+					"Jarvis Settings",
+					"Jarvis Settings",
+					"last_sync_status",
+					f"pending: admin applying config ({frappe.generate_hash(length=8)})",
+					update_modified=False,
+				)
+				account._admin_chat_gate()
+			self.assertEqual(gc.call_count, 2, "a config change must force a fresh admin verdict")
+		finally:
+			frappe.db.set_value(
+				"Jarvis Settings", "Jarvis Settings", "last_sync_status", status_snap, update_modified=False
+			)
+
+	def test_an_unchanged_config_keeps_serving_the_cached_verdict(self):
+		"""The other half: rewriting the same values is not a new configuration, and
+		must not cost an admin round-trip per page load."""
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}) as gc:
+			account._admin_chat_gate()
+			raw = account._settings_raw(account._GATE_STATE_FIELDS)
+			frappe.db.set_value(
+				"Jarvis Settings",
+				"Jarvis Settings",
+				"last_sync_status",
+				raw.get("last_sync_status"),
+				update_modified=False,
+			)
+			account._admin_chat_gate()
+		gc.assert_called_once()
+
+	def test_every_revision_is_dropped_by_a_bust(self):
+		"""_bust_chat_gate is called after a save has ALREADY moved the revision, so
+		deleting only the revision it can compute would miss the live entry."""
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}) as gc:
+			account._admin_chat_gate()
+			account._bust_chat_gate()
+			account._admin_chat_gate()
+		self.assertEqual(gc.call_count, 2)
+
+	def test_the_revision_reads_an_empty_datetime_marker_as_unset(self):
+		"""Regression pin for the read itself. frappe.db.get_value /
+		get_single_value cast an empty Datetime single to datetime(1, 1, 1) —
+		TRUTHY — which would have put every workspace that has merely SAVED its
+		settings into the established cohort and quietly restored the fail-open the
+		gate exists to remove."""
+		frappe.db.sql(
+			"""delete from `tabSingles` where doctype=%s and `field`=%s""",
+			("Jarvis Settings", "chat_was_ready_at"),
+		)
+		frappe.db.sql(
+			"""insert into `tabSingles` (doctype, `field`, `value`) values (%s,%s,%s)""",
+			("Jarvis Settings", "chat_was_ready_at", None),
+		)
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		self.assertIsNone(raw.get("chat_was_ready_at"))
+		self.assertFalse(account._has_been_chat_ready(raw))
+		self.assertTrue(
+			frappe.db.get_value("Jarvis Settings", "Jarvis Settings", ["chat_was_ready_at"], as_dict=True)[
+				"chat_was_ready_at"
+			],
+			"if this ever reads falsy the cast changed and the raw read can be simplified",
+		)
+
+	def test_an_established_workspace_needs_its_admin_credentials_too(self):
+		"""The marker on its own would protect a workspace whose connection was torn
+		down - the one workspace whose chat provably cannot work."""
+		self.assertFalse(account._has_been_chat_ready({"chat_was_ready_at": "2026-01-01 00:00:00"}))
+		self.assertFalse(account._has_been_chat_ready({"jarvis_admin_api_key": "**********"}))
+		self.assertTrue(
+			account._has_been_chat_ready(
+				{"chat_was_ready_at": "2026-01-01 00:00:00", "jarvis_admin_api_key": "**********"}
+			)
+		)
 
 
 class TestLlmMissingVerdict(FrappeTestCase):
@@ -346,6 +510,33 @@ class TestLlmMissingVerdict(FrappeTestCase):
 		out, _ = self._verdict(self._S(), conn={})
 		self.assertEqual(out["reason"], "llm_credentials")
 
+	def test_a_403_hard_gates_the_never_synced_workspace(self):
+		"""The dead-code fix. get_connection 403s every un-paid customer state
+		(jarvis_admin_v2.api._auth.current_customer, allow_pending False), so the
+		Pending Payment customer this hard gate was written for never reached it -
+		they took the generic "admin unknown" path and landed in the chat app.
+
+		Reachable only past never_synced, so no established workspace can hit it."""
+		from jarvis.exceptions import AdminAuthError
+
+		out, _ = self._verdict(self._S(), raises=AdminAuthError("admin returned 403", status_code=403))
+		self.assertEqual(out["reason"], "llm_setup")
+
+	def test_a_401_is_still_treated_as_unknown(self):
+		"""401 is a stale/rotated token - a bench problem, not a statement about the
+		customer's subscription. It must not hard-gate anyone to the wizard."""
+		from jarvis.exceptions import AdminAuthError
+
+		out, _ = self._verdict(self._S(), raises=AdminAuthError("admin returned 401", status_code=401))
+		self.assertEqual(out["reason"], "llm_credentials")
+
+	def test_an_established_workspace_never_reaches_the_403_branch(self):
+		s = self._S()
+		s.llm_direct_synced_at = "2026-01-01 00:00:00"
+		out, gc = self._verdict(s, raises=AdminValidationError("should not be called"))
+		self.assertEqual(out["reason"], "llm_credentials")
+		gc.assert_not_called()
+
 
 class TestReplacedSiteIsExplained(FrappeTestCase):
 	"""A site whose account was reconnected elsewhere can no longer authenticate.
@@ -354,11 +545,16 @@ class TestReplacedSiteIsExplained(FrappeTestCase):
 
 	def setUp(self):
 		frappe.cache().delete_value(account._REPLACED_CACHE_KEY)
-		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+		account._bust_chat_gate()
+		# The two "still fails open" cases below are about the ESTABLISHED cohort -
+		# pin it rather than inherit whatever this site happens to be.
+		self._marker_snap = account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at")
+		_set_ready_marker("2026-01-01 00:00:00")
 
 	def tearDown(self):
 		frappe.cache().delete_value(account._REPLACED_CACHE_KEY)
-		frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+		account._bust_chat_gate()
+		_set_ready_marker(self._marker_snap)
 
 	def test_an_auth_failure_on_a_replaced_site_explains_itself(self):
 		with (
@@ -388,7 +584,7 @@ class TestReplacedSiteIsExplained(FrappeTestCase):
 			patch.object(account.admin_client, "site_replacement", return_value={"replaced": True}) as probe,
 		):
 			account._admin_chat_gate()
-			frappe.cache().delete_value(account._CHAT_GATE_CACHE_KEY)
+			account._bust_chat_gate()
 			account._admin_chat_gate()
 		self.assertEqual(probe.call_count, 1)
 
@@ -399,3 +595,67 @@ class TestReplacedSiteIsExplained(FrappeTestCase):
 		):
 			out = account._admin_chat_gate()
 		self.assertTrue(out["ready"], "cannot prove a replacement, so do not invent one")
+
+	def test_a_replacement_probe_still_wins_on_a_never_ready_site(self):
+		"""site_replaced names a specific, actionable state. The onboarding-stage
+		fallback must not swallow it - it is checked first for both cohorts."""
+		_set_ready_marker(None)
+		with (
+			patch.object(account.admin_client, "get_connection", side_effect=Exception("401")),
+			patch.object(
+				account.admin_client, "site_replacement", return_value={"replaced": True, "moved_to": "x"}
+			),
+		):
+			out = account._admin_chat_gate()
+		self.assertEqual(out["reason"], "site_replaced")
+
+
+class TestIsReadyForChatCohorts(FrappeTestCase):
+	"""is_ready_for_chat end to end (its managed ready-exit), not just the gate:
+	the reason the customer's browser actually receives when the control plane
+	cannot be asked.
+
+	The workspace is pinned onto the subscription/oauth leg (connected marker set,
+	pool mode off) so the run reaches _admin_chat_gate deterministically instead of
+	depending on whatever this site's LLM config happens to be."""
+
+	_FIELDS = ("llm_auth_mode", "llm_oauth_connected_at", "chat_was_ready_at")
+
+	def setUp(self):
+		account._bust_chat_gate()
+		self._snap = account._settings_raw(self._FIELDS)
+		self._write(
+			{
+				"llm_auth_mode": "subscription",
+				"llm_oauth_connected_at": "2026-01-01 00:00:00",
+				"chat_was_ready_at": None,
+			}
+		)
+		self._pool_off = patch.object(account, "compute_pool_mode", return_value=False)
+		self._pool_off.start()
+
+	def tearDown(self):
+		self._pool_off.stop()
+		self._write({f: self._snap.get(f) for f in self._FIELDS})
+		account._bust_chat_gate()
+
+	def _write(self, values: dict) -> None:
+		for f, v in values.items():
+			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", f, v, update_modified=False)
+
+	def test_a_never_ready_workspace_is_not_told_it_is_ready(self):
+		with patch.object(admin_client, "get_connection", side_effect=Exception("admin 500")):
+			out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"], "plan 05's whole premise: this cannot be labelled ready")
+		self.assertEqual(out["reason"], "readiness_unconfirmed")
+
+	def test_an_established_workspace_is_unaffected(self):
+		self._write({"chat_was_ready_at": "2026-01-01 00:00:00"})
+		with patch.object(admin_client, "get_connection", side_effect=Exception("admin 500")):
+			out = account.is_ready_for_chat()
+		self.assertTrue(out["ready"])
+
+	def test_the_happy_path_is_unchanged(self):
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
+			out = account.is_ready_for_chat()
+		self.assertEqual(out, {"ready": True, "reason": None, "billing_notice": {}})

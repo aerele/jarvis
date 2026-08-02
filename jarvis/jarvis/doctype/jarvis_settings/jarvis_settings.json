@@ -93,6 +93,7 @@
   "last_sync_status",
   "llm_pool_synced_at",
   "llm_direct_synced_at",
+  "chat_was_ready_at",
   "installed_apps_synced",
   "last_subscription_status",
   "last_sync_warnings",
@@ -694,6 +695,13 @@
    "fieldname": "llm_direct_synced_at",
    "fieldtype": "Datetime",
    "label": "LLM Direct Synced At",
+   "read_only": 1
+  },
+  {
+   "description": "Set the first time admin confirmed this workspace chat-Ready (refreshed at most daily). Marks the workspace as ESTABLISHED: an unreachable control plane leaves its chat open, while a workspace that has never been confirmed fails closed with a retryable verdict instead of being told it is ready - see _admin_chat_gate in jarvis/account.py.",
+   "fieldname": "chat_was_ready_at",
+   "fieldtype": "Datetime",
+   "label": "Chat Was Ready At",
    "read_only": 1
   },
   {
