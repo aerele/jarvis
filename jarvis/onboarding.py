@@ -548,6 +548,15 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	"""
 	require_jarvis_admin()
 	_require_admin_url()
+	# Money the gateway is holding that an operator has not been able to place
+	# stops the WHOLE endpoint, not just the resume half below. The context is
+	# bench-level, so a raised flag means THIS bench's money is parked — and
+	# letting a fresh signup through while it is would be strictly worse than
+	# letting a retry through: a second account, on top of a payment nobody has
+	# managed to credit to the first. A status check is the documented way out
+	# and clears the flag on any answer.
+	if onboarding_contract.awaiting_reconciliation():
+		_refuse_while_money_is_parked()  # always raises
 	# The identity the customer TYPED, before admin is asked anything. Two
 	# reasons it is written first: a response lost in transit still leaves the
 	# bench knowing whose signup this was (plan 03's "bench response lost after
@@ -602,7 +611,14 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	# above: admin's envelope carries the account's real email and company, the
 	# plan label, and what is actually due today.
 	onboarding_contract.absorb(data)
-	return data
+	# Credentials do not go back to the browser. This response is the one that
+	# CARRIES them — api_key, api_secret and (on the flag-off path) the OAuth
+	# login password — and write_connection above has already stored every one.
+	# Both paths return through here, so the resumed retry is covered with the
+	# fresh signup. The wizard reads ``pending_verification`` and the checkout
+	# handles and nothing else (OnboardingView runStartPay → launchCheckout);
+	# no key stripped here is read anywhere in frontend/src.
+	return onboarding_contract.strip_credentials(data)
 
 
 def _try_resume_pending_signup(err, plan: str, provider: str | None) -> dict | None:
@@ -693,6 +709,24 @@ def _absorb_signup_state(data: dict, *, from_check: bool = False) -> dict:
 	if from_check:
 		return onboarding_contract.absorb_check(data)
 	return onboarding_contract.absorb(data)
+
+
+def _refuse_while_money_is_parked() -> None:
+	"""Refuse an onboarding action while a payment is awaiting manual
+	reconciliation. Always raises.
+
+	Used by the surfaces that THROW (start_signup) rather than return an
+	envelope; ``initiate_signup_payment`` expresses the same refusal as an
+	``ok: false`` body. Both carry the same code, the same recovery hint and the
+	same 409 — the status coming off the exception class, because a throw's
+	status is a property of its type and nothing else."""
+	error = {
+		"code": onboarding_contract.BENCH_AWAITING_RECONCILIATION,
+		"message": "we're still confirming a payment on this signup; no new payment is needed",
+		"recovery": onboarding_contract.RECOVERY_CHECK_STATUS,
+	}
+	onboarding_contract.stamp_error(error)
+	frappe.throw(error["message"], onboarding_contract.SignupConflictError)
 
 
 def _no_signup_here() -> dict:
@@ -791,6 +825,13 @@ def initiate_signup_payment(
 	Gated on Jarvis Admin (``JARVIS_ADMIN_ROLES``), like the rest of onboarding."""
 	require_jarvis_admin()
 	_require_admin_url()
+	if not _has_admin_credentials(frappe.get_single("Jarvis Settings")):
+		# The one endpoint that could still reach admin unauthenticated: a bench
+		# whose credentials were cleared (reset, reconnect onto another account)
+		# but whose signup context survived would sail past the plan check below
+		# on a remembered plan and earn the guaranteed 401 the day-one guard
+		# exists to kill.
+		return _no_signup_here()
 	context = onboarding_contract.load()
 	key_error = onboarding_contract.supplied_key_error(idempotency_key)
 	if key_error:
@@ -1040,12 +1081,18 @@ def finish_payment(payload: dict | str) -> dict:
 	# is written. Idempotent with the start_signup grant.
 	grant_onboarding_admin()
 	onboarding_contract.absorb(data)
-	# NOT stripped, deliberately and for now: this response carries ``agent_token``
-	# and the SPA parks the whole dict in ``state.successData``. It is the same
-	# family of leak as the poll's ``customer_password`` and it wants the same
-	# treatment, but the blast radius is the checkout completion path rather than
-	# a poll, so it is raised for judgment instead of changed here.
-	return data
+	# ``agent_token`` does not go back to the browser either, and the reason this
+	# is not merely tidiness: admin's confirm_payment has a REPLAY branch that
+	# re-serves the connection payload for a payment id it has already recorded
+	# (api/tenant.py, the Cashfree arm keyed on a caller-supplied order id with no
+	# signature). That makes this endpoint a repeatable token read rather than a
+	# one-shot checkout completion — and its gate is require_jarvis_admin, which
+	# grant_onboarding_admin hands to every user who finishes an onboarding.
+	# The bench still consumes the token internally: write_connection above stored
+	# it. The SPA parks this dict in ``state.successData`` and reads exactly two
+	# fields from it, ``agent_url`` and ``tenant_status`` (proceedAfterPay), both
+	# of which survive.
+	return onboarding_contract.strip_credentials(data)
 
 
 @frappe.whitelist()

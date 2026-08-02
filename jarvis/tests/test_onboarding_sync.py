@@ -1128,6 +1128,116 @@ class TestSignupResumeFallback(FrappeTestCase):
 			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
 		self.assertIn("already exists", str(ctx.exception))
 
+	def test_the_fresh_signup_response_carries_no_credentials(self):
+		"""start_signup's response is the one that CARRIES the account's
+		credentials — api_key, api_secret and, on the flag-off path, the OAuth
+		login password. write_connection stores every one of them before this
+		returns; none of them belongs in an HTTP response body."""
+		with patch(
+			"jarvis.onboarding.admin_client.signup",
+			return_value={
+				"api_key": "k",
+				"api_secret": "s",
+				"customer": "cust-abc@jarvis.invalid",
+				"customer_password": "pw",
+				"agent_token": "tok",
+				"razorpay_order_id": "order_FRESH",
+				"email": "owner@acme.example",
+			},
+		):
+			out = onboarding.start_signup("owner@acme.example", "Acme", "annual")
+		for leaked in ("api_key", "api_secret", "customer_password", "agent_token"):
+			self.assertNotIn(leaked, out, f"{leaked} must not reach the browser")
+		self.assertEqual(out["razorpay_order_id"], "order_FRESH", "the checkout handles survive")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("jarvis_admin_api_key", raise_exception=False), "k")
+		self.assertEqual(s.get_password("jarvis_admin_customer_password", raise_exception=False), "pw")
+
+	def test_the_resumed_signup_response_carries_no_credentials_either(self):
+		"""Both paths return through the same statement, and the retry is the one
+		a real customer hits."""
+		with (
+			self._signup_raises(self._duplicate_coded()),
+			patch(
+				"jarvis.onboarding.admin_client.resume_pending_signup",
+				return_value={
+					"api_key": "k2",
+					"api_secret": "s2",
+					"customer_password": "pw2",
+					"razorpay_order_id": "order_RESUMED",
+				},
+			),
+		):
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		for leaked in ("api_key", "api_secret", "customer_password", "agent_token"):
+			self.assertNotIn(leaked, out)
+		self.assertEqual(out["razorpay_order_id"], "order_RESUMED")
+
+	def test_finish_payment_never_hands_back_the_agent_token(self):
+		"""Not tidiness: admin's confirm_payment re-serves the connection payload
+		for a payment id it has already recorded, so this endpoint is a REPEATABLE
+		token read — behind a gate (require_jarvis_admin) that
+		grant_onboarding_admin hands to every user who finishes an onboarding."""
+		with patch(
+			"jarvis.onboarding.admin_client.confirm_payment",
+			return_value={
+				"agent_url": "ws://container.example",
+				"agent_token": "the-container-token",
+				"tenant_status": "running",
+			},
+		):
+			out = onboarding.finish_payment({"razorpay_payment_id": "pay_1"})
+		self.assertNotIn("agent_token", out)
+		# The two fields the SPA actually reads off this response survive.
+		self.assertEqual(out["agent_url"], "ws://container.example")
+		self.assertEqual(out["tenant_status"], "running")
+		# ...and the bench still consumed the token internally.
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("agent_token", raise_exception=False), "the-container-token")
+
+	def test_parked_money_stops_the_whole_signup_not_just_the_resume(self):
+		"""Refusing only the resume would let a FRESH signup through while a
+		payment sits unplaceable — a second account on top of money nobody has
+		managed to credit to the first, which is strictly worse than the retry it
+		was meant to prevent."""
+		onboarding_contract.update(awaiting_manual_reconciliation=True)
+		with (
+			patch("jarvis.onboarding.admin_client.signup") as signup,
+			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		signup.assert_not_called()
+		resume.assert_not_called()
+		self.assertEqual(
+			frappe.local.response.get("error", {}).get("code"),
+			onboarding_contract.BENCH_AWAITING_RECONCILIATION,
+		)
+		self.assertEqual(
+			frappe.local.response.get("error", {}).get("recovery"),
+			onboarding_contract.RECOVERY_CHECK_STATUS,
+		)
+		self.assertEqual(
+			getattr(type(ctx.exception), "http_status_code", None),
+			409,
+			"a conflict must reach the wire as 409, which comes off the exception CLASS",
+		)
+
+	def test_a_check_clears_the_parked_refusal_for_signup_too(self):
+		onboarding_contract.update(awaiting_manual_reconciliation=True)
+		with patch(
+			"jarvis.onboarding.admin_client.check_signup_payment_status",
+			return_value={"code": "PAYMENT_CONFIRMATION_PENDING", "gateway_consulted": True},
+		):
+			onboarding.check_signup_payment_status()
+		with (
+			self._signup_raises(self._duplicate_coded()),
+			self._resume_ok("order_AFTER") as resume,
+		):
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_called_once()
+		self.assertEqual(out["razorpay_order_id"], "order_AFTER")
+
 	def test_a_thrown_duplicate_still_delivers_its_code(self):
 		"""A throw is how this endpoint reports failure, and the SPA still has to
 		branch. The machine-readable error rides on the response next to Frappe's
@@ -1439,21 +1549,47 @@ class TestOnboardingFacadeEndpoints(FrappeTestCase):
 		self.assertTrue(out["ok"])
 		self.assertTrue(onboarding_contract.load()["idempotency_key"])
 
-	def test_a_refused_key_that_did_get_stored_still_frees_itself(self):
-		"""Belt and braces for a key an older build stored, or one a bound admin
-		tightens the bound on later: INVALID_REQUEST is a SPENT key, so the next
-		attempt mints rather than replaying the refusal."""
-		onboarding_contract.update(
-			plan="annual",
-			idempotency_key="stale-refused-key",
-			code=onboarding_contract.INVALID_REQUEST,
+	def test_a_stored_bad_key_heals_itself_end_to_end(self):
+		"""The brick as an older build would leave it: a key admin refuses, ALREADY
+		in the context, with no code planted beside it. Nothing here hand-writes
+		the verdict — it has to come back from admin, through
+		absorb_payment_outcome, and free the next attempt on its own.
+
+		This is the test that failed to be a test the first time: it asserted the
+		self-heal from a context state (``code: INVALID_REQUEST``) that no code
+		path could actually produce, because INVALID_REQUEST was not absorbable.
+		The brick survived underneath a green test."""
+		from jarvis.exceptions import AdminContractError
+
+		onboarding_contract.update(plan="annual", idempotency_key="x" * 400)
+		self.assertNotIn("code", onboarding_contract.load(), "no verdict may be pre-planted")
+
+		refusal = AdminContractError(
+			"idempotency_key must be at most 128 characters",
+			code="INVALID_REQUEST",
+			recovery="retry",
+			error={"code": "INVALID_REQUEST", "message": "idempotency_key must be at most 128 characters"},
+			http_status=400,
 		)
+		with patch("jarvis.onboarding.admin_client.resume_pending_signup", side_effect=refusal) as resume:
+			first = onboarding.initiate_signup_payment()
+		self.assertEqual(resume.call_args.kwargs["idempotency_key"], "x" * 400, "the stored key was sent")
+		self.assertEqual(first["error"]["code"], onboarding_contract.INVALID_REQUEST)
+		self.assertEqual(
+			onboarding_contract.load()["code"],
+			onboarding_contract.INVALID_REQUEST,
+			"admin's verdict on the key must be recorded, or the next attempt replays it",
+		)
+
 		with patch(
 			"jarvis.onboarding.admin_client.resume_pending_signup",
 			return_value=self._STATE,
 		) as resume:
-			onboarding.initiate_signup_payment()
-		self.assertNotEqual(resume.call_args.kwargs["idempotency_key"], "stale-refused-key")
+			second = onboarding.initiate_signup_payment()
+		self.assertNotEqual(
+			resume.call_args.kwargs["idempotency_key"], "x" * 400, "the refused key must not be replayed"
+		)
+		self.assertTrue(second["ok"])
 
 	# ---- P1-2: money an operator is still placing ----
 
@@ -1591,6 +1727,18 @@ class TestOnboardingFacadeEndpoints(FrappeTestCase):
 			out = onboarding.check_signup_payment_status()
 		check.assert_not_called()
 		self.assertEqual(out["error"]["code"], onboarding_contract.BENCH_NO_SIGNUP_CONTEXT)
+
+	def test_initiate_guards_cleared_credentials_with_a_surviving_context(self):
+		"""The one endpoint that could still reach admin unauthenticated: the plan
+		check would pass on a remembered plan, and the call would earn the exact
+		401 the day-one guard exists to stop being shown as "contact support"."""
+		onboarding_contract.update(plan="annual")
+		_set_token("")
+		with patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume:
+			out = onboarding.initiate_signup_payment()
+		resume.assert_not_called()
+		self.assertEqual(out["error"]["code"], onboarding_contract.BENCH_NO_SIGNUP_CONTEXT)
+		self.assertNotEqual(out["error"]["code"], onboarding_contract.BENCH_ADMIN_AUTH_FAILED)
 
 	# ---- P2: the bookkeeping must not cost more than it is worth ----
 

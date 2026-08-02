@@ -137,12 +137,18 @@ _SPENT_INTENT_CODES = frozenset(
 	}
 )
 
-# Admin's PAYMENT-STATE vocabulary: the codes that describe where this signup's
-# money actually is. Only these may be folded into the local context, because the
-# context drives the idempotency decision and a rendered stage - and a transport
-# failure, a rate-limit backoff or a bench-local refusal says NOTHING about
-# either. Absorbing "you are asking too often" as the payment's state is how a
-# backoff would come to mint a fresh intent.
+# The codes a FAILED call may write into the local context. Almost all of them
+# are admin's payment-state vocabulary - what this signup's money is actually
+# doing - because the context drives both what the page renders and whether the
+# next initiation reuses its key, and a transport failure or a rate-limit backoff
+# says nothing about either. Absorbing "you are asking too often" as the
+# payment's state is how a backoff would come to mint a fresh intent.
+#
+# INVALID_REQUEST is the one member that is NOT a payment state, and it is here
+# on purpose: it is the verdict on the KEY. Without it the self-heal below is
+# unreachable - a stored key admin refuses can never be recorded as refused, so
+# _SPENT_INTENT_CODES never sees it and every later attempt replays the same
+# refusal. Its presence is what makes that brick clear itself on the next click.
 _PAYMENT_STATE_CODES = frozenset(
 	{
 		SIGNUP_VERIFICATION_REQUIRED,
@@ -154,8 +160,23 @@ _PAYMENT_STATE_CODES = frozenset(
 		PAYMENT_AUTHORIZED_PENDING_CONFIRM,
 		INTENT_HANDLE_UNAVAILABLE,
 		SIGNUP_TERMINAL,
+		INVALID_REQUEST,
 	}
 )
+
+
+class SignupConflictError(frappe.ValidationError):
+	"""A bench-side refusal that reaches the wire as 409, not 417.
+
+	``handle_exception`` reads the status off the exception CLASS
+	(``getattr(e, "http_status_code", 500)``), so hand-setting
+	``frappe.local.response.http_status_code`` before a throw is overwritten by
+	``report_error`` - the status is a property of the type and nothing else.
+	Plain ``frappe.ValidationError`` is 417, which no HTTP client reads as "this
+	conflicts with the state you are already in". Mirrors admin's own
+	``codes.InvalidRequestError``, from the other end of the same contract."""
+
+	http_status_code = 409
 
 
 def is_duplicate_signup(err) -> bool:
@@ -331,13 +352,15 @@ def save(context: dict) -> None:
 	an api_secret in a plain-text Settings column.
 
 	SKIPPED entirely when the installed doctype has no such field - the state of a
-	bench between a code deploy and its ``bench migrate``. Checking rather than
-	catching, because the two write layers disagree about what happens then and
-	both answers are bad: ``Document.db_set`` raises (it reads the value back, and
-	the read is what throws), while ``frappe.db.set_single_value`` validates
-	NOTHING and silently writes an orphan ``tabSingles`` row that the next migrate
-	does not clean up. Losing a display snapshot for one deploy window is a bad
-	day; taking signup down, or leaving rows behind, is worse."""
+	bench between a code deploy and its ``bench migrate``. CHECKING rather than
+	catching, and the difference is the whole reason this guard exists: writing a
+	Single validates NOTHING against meta. ``Document.db_set`` does not raise on a
+	field the doctype has never heard of - verified on frappe 16.25.0 against a
+	field with no prior row - it silently inserts an orphan ``tabSingles`` row
+	that no migrate cleans up and no read can ever get back (``get_single_value``
+	looks the field up in meta and THROWS, which is the asymmetry). A guard
+	written as try/except would therefore have caught nothing and littered every
+	bench deployed ahead of its migrate."""
 	if not _field_installed():
 		_note_missing_field()
 		return

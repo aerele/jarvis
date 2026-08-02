@@ -60,6 +60,29 @@ vendored file edited in place is caught rather than argued about.
 | `duplicate_409_code_only.json` | Every vendored duplicate fixture carries `exc_type`, so the bench's `error.code` branch was never actually exercised — delete it and the suite stayed green. This is the returned-envelope form (`codes.error_response`, no `exc_type`), which is what the contract says a coded rejection is. | **LEDGERED**: admin adds the same case, or states that the guest duplicate will always be a raise. |
 | `state_verification_required.json` | The passive poll's answer while the magic link is unclicked — the state a wizard sits in longest and had no fixture for. `verification_required.json` is the *resume* endpoint's version of the same cohort; the capability flags differ. | **LEDGERED**: admin adds the poll-side case beside its resume-side one. |
 
+## Ledger — known gaps, deliberately not closed here
+
+Recorded rather than fixed, each because closing it here would be worse than
+carrying it:
+
+1. **Admin has no durable parked-money marker.** The bench refuses to open a new
+   intent while the last provider-truth check reported
+   `awaiting_manual_reconciliation` (`onboarding_contract.awaiting_reconciliation`),
+   and that refusal now covers `start_signup` as well as
+   `initiate_signup_payment`. But it is bench-local state: a settings reset, a
+   rebuilt site, or a second bench pointed at the same account does not have it.
+   The durable guard belongs on admin's own `resume_pending_signup`, beside a
+   parked marker on the subscription row. **Next admin round.**
+2. **`onboarding_contract.clear()` has no callers.** The signup context — plan,
+   idempotency key, and the reconciliation flag — survives
+   `request_workspace_reset`, so a reset workspace keeps a stale plan as its
+   sticky default. Not wired in here for two reasons: the natural call site sits
+   inside the hunk zone another in-flight branch is editing, and clearing the
+   context also clears the parked-money flag, which would silently drop the
+   refusal in (1) for exactly the customer most likely to be resetting. It lands
+   with the admin-side durable marker, which makes the flag survivable.
+3. **Both bench-authored fixtures need admin-side twins** — see the table above.
+
 ## Why a copy exists at all
 
 Because the last time each side kept its own statement of this contract, both
