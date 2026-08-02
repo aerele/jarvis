@@ -286,7 +286,11 @@ describe("P1-2 an unreadable link is never a silently unfiltered list", () => {
 		const api = host({ ...opts, route, router });
 		await flushPromises();
 		expect(opts.fetchFn.mock.calls[0][0].filters_v2).toHaveLength(1);
-		expect(api.filterNotice.value).toMatch(/1 filter in this link was not valid/);
+		// UX2: the skipped row is a `description` clause with a junk operator, so the
+		// catalog resolves its label and the notice NAMES the affected field.
+		expect(api.filterNotice.value).toMatch(
+			/The Description filter in this link wasn't valid and was ignored/
+		);
 	});
 });
 

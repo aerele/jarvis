@@ -34,6 +34,29 @@
 						<LoadingIndicator class="size-4" />
 						<span>Loading fields…</span>
 					</div>
+					<!-- rolled back to legacy transport: an operator turned filters off
+					     for this list. This is NOT transient, so there is no "Try again"
+					     (it cannot succeed) — only honest copy and a way to tidy any
+					     leftover link filters. -->
+					<div v-else-if="schemaState === 'disabled'" class="flex flex-col gap-3 p-3">
+						<div class="flex items-start gap-2">
+							<FeatherIcon name="slash" class="mt-0.5 size-4 text-ink-gray-5" />
+							<div class="flex flex-col gap-1">
+								<span class="text-base font-medium text-ink-gray-8">
+									Filters are turned off for this list
+								</span>
+								<span class="text-p-sm text-ink-gray-6">{{ schemaMessage }}</span>
+							</div>
+						</div>
+						<div v-if="clauses.length" class="flex items-center gap-2">
+							<Button
+								variant="ghost"
+								label="Clear all filters"
+								class="!text-ink-gray-5"
+								@click="clearAll"
+							/>
+						</div>
+					</div>
 					<div v-else-if="schemaState === 'error'" class="flex flex-col gap-3 p-3">
 						<div class="flex items-start gap-2">
 							<FeatherIcon
