@@ -7,9 +7,11 @@ introduce Jarvis to people who have been using it for months - the moment they
 next opened an empty chat home they would be told what File Box is.
 
 The signal for "this user already knows" is deliberately behavioural rather
-than temporal: they own at least one conversation that has at least one
+than temporal: they own a conversation in which they have actually SENT a
 message. A conversation with no messages proves nothing (an abandoned New Chat,
-or a File Box drop that never sent), so it does not count.
+or a File Box drop that never sent), and neither does one holding only
+assistant messages - ``proactive.start_conversation`` mints exactly that shape,
+unprompted, for a user who may never open it.
 
 Bulk SQL in two statements, both idempotent:
 
@@ -31,23 +33,32 @@ Bulk SQL in two statements, both idempotent:
 Both statements join ``tabUser`` so a conversation left behind by a deleted
 user cannot mint an orphan settings row pointing at a User that is gone.
 
-Genuinely new users - no conversations, or only empty ones - are untouched and
-see the introduction, which is the whole point of the feature.
+Genuinely new users - no conversations, only empty ones, or only ones Jarvis
+seeded and they never answered - are untouched and see the introduction, which
+is the whole point of the feature.
 """
 
 import frappe
 
 SETTINGS = "Jarvis User Settings"
 
-# Users with real chat history: at least one conversation carrying at least one
-# message. Shared by both statements below so the two can never disagree on who
-# counts as a veteran.
+# Users with real chat history: at least one conversation in which they have
+# actually SENT something. Shared by both statements below so the two can never
+# disagree on who counts as a veteran.
+#
+# ``m.role = 'user'`` is the whole discriminator, and ownership cannot stand in
+# for it. ``proactive.start_conversation`` seeds a conversation with a single
+# assistant message and then hands BOTH the conversation and the message over to
+# the recipient (proactive.py:50-55), so a thread Jarvis started unprompted is
+# owner-identical to one the user opened themselves - and the user may never
+# have read it. Keying on the role means a veteran is someone who has typed.
 _VETERANS = """
 	SELECT DISTINCT c.owner AS user
 	FROM `tabJarvis Conversation` c
 	JOIN `tabUser` u ON u.name = c.owner
 	WHERE EXISTS (
-		SELECT 1 FROM `tabJarvis Chat Message` m WHERE m.conversation = c.name
+		SELECT 1 FROM `tabJarvis Chat Message` m
+		WHERE m.conversation = c.name AND m.role = 'user'
 	)
 """
 

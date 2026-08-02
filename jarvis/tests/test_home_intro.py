@@ -504,6 +504,49 @@ class TestVeteranBackfill(_IntroTestBase):
 		self.assertGreater(ui["home_intro_version"], ui["home_intro_seen_version"])
 		frappe.set_user("Administrator")
 
+	def test_a_proactive_conversation_is_not_history(self):
+		"""A conversation Jarvis started ON its own is not evidence the user has
+		used Jarvis - they may never have opened it.
+
+		Ownership cannot tell the two apart: ``proactive.start_conversation``
+		inserts the assistant message, then hands BOTH the conversation and the
+		message over to the recipient (proactive.py:50-55), so a machine-seeded
+		thread looks owner-identical to one the user typed in. The discriminator
+		is the ROLE - a veteran is someone who has actually sent a message.
+		"""
+		usage.get_or_create_user_settings(USER_B)
+		conv = frappe.get_doc(
+			{"doctype": CONV, "title": "Message from Jarvis", "status": "Active"}
+		).insert(ignore_permissions=True)
+		msg = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conv.name,
+				"seq": 1,
+				"role": "assistant",
+				"content": "Your GST filing is due in 3 days.",
+			}
+		).insert(ignore_permissions=True)
+		# The ownership hand-off, exactly as start_conversation performs it.
+		frappe.db.set_value(CONV, conv.name, "owner", USER_B, update_modified=False)
+		frappe.db.set_value(MSG, msg.name, "owner", USER_B, update_modified=False)
+		frappe.db.commit()
+
+		self._run_patch()
+		self.assertEqual(
+			self._seen(USER_B),
+			0,
+			"a conversation Jarvis seeded was mistaken for the user's own history",
+		)
+		# ...and one real reply from them flips it, so the rule is about the role,
+		# not about proactive conversations being excluded wholesale.
+		frappe.get_doc(
+			{"doctype": MSG, "conversation": conv.name, "seq": 2, "role": "user", "content": "thanks"}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		self._run_patch()
+		self.assertEqual(self._seen(USER_B), 1)
+
 	def test_an_empty_conversation_is_not_history(self):
 		"""An abandoned New Chat (or a File Box drop that never sent) proves the
 		user has seen nothing, so it must not grandfather them."""
