@@ -13,6 +13,7 @@ import {
 	initialState,
 	reduce,
 	canOpenCheckout,
+	handlesForProvider,
 	isTerminalForPayment,
 	provisioningOwner,
 	remainingCooldownSeconds,
@@ -603,6 +604,71 @@ test("canOpenCheckout answers exactly what CHECKOUT_OPENED will accept", () => {
 	assert.equal(canOpenCheckout(noHandles), false);
 	assert.equal(canOpenCheckout(null), false);
 	assert.equal(canOpenCheckout({}), false);
+});
+
+// ---------------------------------------------------------------------------
+// handlesForProvider: the sheet is built for ONE gateway
+// ---------------------------------------------------------------------------
+test("the provider partition covers every handle the reducer keeps", () => {
+	// Driven through the reducer on purpose: `kept` is the REAL HANDLE_KEYS, not a
+	// copy of it, so a handle added to the table without a gateway family fails
+	// here instead of silently leaking into the other gateway's sheet.
+	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+		razorpay_order_id: "o",
+		razorpay_subscription_id: "rs",
+		razorpay_key_id: "k",
+		payment_session_id: "ps",
+		cashfree_order_id: "co",
+		cashfree_subscription_id: "cs",
+		subscription_session_id: "ss",
+		cashfree_app_id: "app",
+		cashfree_env: "sandbox",
+		amount_inr: 4999,
+		not_a_handle: "x",
+	}));
+	const kept = Object.keys(s.handles);
+	assert.equal(kept.includes("not_a_handle"), false);
+	const rzp = Object.keys(handlesForProvider(s.handles, "razorpay"));
+	const cfr = Object.keys(handlesForProvider(s.handles, "cashfree"));
+	for (const k of kept) {
+		assert.ok(rzp.includes(k) || cfr.includes(k), `${k} belongs to no gateway family`);
+	}
+	// Only the price is shared; everything else lands in exactly one family.
+	assert.deepEqual(rzp.filter((k) => cfr.includes(k)), ["amount_inr"]);
+	assert.deepEqual(rzp, ["razorpay_order_id", "razorpay_subscription_id", "razorpay_key_id", "amount_inr"]);
+	assert.deepEqual(cfr, [
+		"payment_session_id",
+		"cashfree_order_id",
+		"cashfree_subscription_id",
+		"subscription_session_id",
+		"cashfree_app_id",
+		"cashfree_env",
+		"amount_inr",
+	]);
+});
+
+test("an unnamed or unrecognised gateway is not a licence to drop handles", () => {
+	const h = { razorpay_order_id: "o", razorpay_key_id: "k", cashfree_env: "sandbox" };
+	assert.deepEqual(handlesForProvider(h, ""), h);
+	assert.deepEqual(handlesForProvider(h, null), h);
+	assert.deepEqual(handlesForProvider(h, "some_new_gateway"), h);
+	// ...and the recognised names are matched the way billingCheckout matches them.
+	assert.deepEqual(handlesForProvider(h, " Razorpay "), { razorpay_order_id: "o", razorpay_key_id: "k" });
+	assert.deepEqual(handlesForProvider(null, "razorpay"), {});
+});
+
+test("a narrowing that leaves nothing to open is a stale LABEL, not a mixed set", () => {
+	// The provider field is sticky; the handles are coherent for one gateway. This
+	// is not the accumulation the partition exists for, so the set is left alone
+	// rather than turned into a sheet that cannot open.
+	const cashfreeOnly = { payment_session_id: "ps", cashfree_order_id: "co", cashfree_env: "sandbox" };
+	assert.deepEqual(handlesForProvider(cashfreeOnly, "razorpay"), cashfreeOnly);
+	// A key family with no OPENABLE handle in it does not count as narrowable
+	// either - razorpay_key_id alone raises nothing.
+	assert.deepEqual(handlesForProvider({ ...cashfreeOnly, razorpay_key_id: "k" }, "razorpay"), {
+		...cashfreeOnly,
+		razorpay_key_id: "k",
+	});
 });
 
 test("paid is a floor for the OPEN too - a late sheet cannot reopen a settled signup", () => {

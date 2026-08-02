@@ -36,6 +36,7 @@ import {
 	EVENTS,
 	STATES,
 	canOpenCheckout,
+	handlesForProvider,
 	initialState,
 	reduce,
 	noteStatusCheck,
@@ -264,9 +265,13 @@ export function createPaymentFlow(deps) {
 			return;
 		}
 		// Opened on what the MACHINE kept, never on the raw answer: the reducer is
-		// the thing that knows which handles belong to the live intent.
-		const handles = { ...state.value.handles };
+		// the thing that knows which handles belong to the live intent. And kept
+		// handles ACCUMULATE - a same-generation answer merges into them - so they
+		// are narrowed to the gateway the machine names before anything classifies
+		// them, or a stale session from the other gateway captures the shape and
+		// opens the wrong sheet on a live order.
 		const prov = state.value.provider || provider;
+		const handles = handlesForProvider(state.value.handles, prov);
 		if (prov && !handles.payment_provider) handles.payment_provider = prov;
 		const my = token;
 		let out;

@@ -90,6 +90,45 @@ const HANDLE_KEYS = [
 	"amount_inr",
 ];
 
+// Which gateway each of those handles belongs to, partitioned once. Derived
+// from what the openers actually read: useRazorpay (razorpay_key_id, and either
+// razorpay_subscription_id or razorpay_order_id + amount_inr), useCashfree
+// (cashfree_env, payment_session_id, cashfree_order_id), and the wizard's own
+// autopay-mandate arm in OnboardingView (cashfree_env, subscription_session_id).
+//
+// It exists because handles ACCUMULATE: a same-generation answer merges rather
+// than replaces (see applyContract), and a same-generation answer is a designed
+// event - the bench reuses its idempotency key so retries converge on one
+// gateway object. classifyOnboardingHandles then sniffs the mandate SHAPE before
+// it ever consults payment_provider, so an accumulated set is classified by
+// whichever shape it matches first: a stale Cashfree session sitting beside a
+// live Razorpay order classifies as a mandate, and the customer is sent to a
+// full-page Cashfree redirect for a Razorpay order. Narrowing to the named
+// gateway's own keys is what keeps the shape honest.
+const RAZORPAY_HANDLE_KEYS = new Set([
+	"razorpay_order_id",
+	"razorpay_subscription_id",
+	"razorpay_key_id",
+]);
+const CASHFREE_HANDLE_KEYS = new Set([
+	// Cashfree's, despite the gateway-neutral name - it is what the Cashfree SDK
+	// is handed as `paymentSessionId`, and what classifyHandles reads as a
+	// Cashfree order.
+	"payment_session_id",
+	"cashfree_order_id",
+	"cashfree_subscription_id",
+	"subscription_session_id",
+	"cashfree_app_id",
+	"cashfree_env",
+]);
+// Not a gateway handle at all: the price the sheet displays. It belongs to
+// whichever sheet opens.
+const NEUTRAL_HANDLE_KEYS = new Set(["amount_inr"]);
+const PROVIDER_HANDLE_KEYS = {
+	razorpay: RAZORPAY_HANDLE_KEYS,
+	cashfree: CASHFREE_HANDLE_KEYS,
+};
+
 export function isTerminalForPayment(value) {
 	return TERMINAL_FOR_PAYMENT.has(value);
 }
@@ -381,13 +420,49 @@ export function reduce(state, event, opts = {}) {
 export function canOpenCheckout(state) {
 	const s = state || {};
 	if (PAID_FLOOR.has(s.value)) return false;
-	const h = s.handles || {};
+	return hasOpenableHandle(s.handles);
+}
+
+// The four handles that are, on their own, enough to raise a sheet.
+function hasOpenableHandle(handles) {
+	const h = handles || {};
 	return !!(
 		h.razorpay_order_id ||
 		h.razorpay_subscription_id ||
 		h.payment_session_id ||
 		h.subscription_session_id
 	);
+}
+
+/**
+ * The handles a sheet may be built from for ONE named gateway.
+ *
+ * Handles accumulate across same-generation answers, and the checkout
+ * dispatcher classifies by SHAPE before it looks at any provider field - so the
+ * set handed to an SDK must first be narrowed to the gateway the machine names,
+ * plus the provider-neutral keys (the price). Nothing else changes: the reducer
+ * still keeps everything it was told, and this is applied where the sheet is
+ * built.
+ *
+ * Two deliberate non-narrowings, both of them "we have no basis, so do not
+ * guess":
+ *   - an absent or unrecognised provider has no key family, so the full set is
+ *     returned unchanged (an unfamiliar discriminator is not a licence to drop
+ *     handles the answer actually carried);
+ *   - a narrowing that would leave nothing openable means the provider LABEL is
+ *     stale relative to the handles, not that two gateways are mixed - the set
+ *     is coherent for exactly one gateway, so it is returned unchanged rather
+ *     than turned into a dead end.
+ */
+export function handlesForProvider(handles, provider) {
+	const full = { ...(handles || {}) };
+	const family = PROVIDER_HANDLE_KEYS[String(provider || "").trim().toLowerCase()];
+	if (!family) return full;
+	const narrowed = {};
+	for (const k of Object.keys(full)) {
+		if (family.has(k) || NEUTRAL_HANDLE_KEYS.has(k)) narrowed[k] = full[k];
+	}
+	return hasOpenableHandle(narrowed) ? narrowed : full;
 }
 
 function illegal(state, strict, why) {

@@ -6,6 +6,7 @@
 import { describe, test, expect, vi } from "vitest";
 
 import { CHECKOUT_SUCCESS, CHECKOUT_DISMISSED } from "@/lib/useRazorpay";
+import { classifyOnboardingHandles } from "@/onboarding/onboardingCheckout";
 import { CODES } from "@/onboarding/paymentCodes";
 import { STATES } from "@/onboarding/paymentMachine";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
@@ -556,6 +557,232 @@ describe("the machine decides what opens", () => {
 		expect(flow.state.value.busy).toBe(null);
 		expect(flow.state.value.canInitiate).toBe(true);
 		expect(flow.state.value.canCheck).toBe(true);
+	});
+});
+
+describe("the sheet is built for the gateway the machine names", () => {
+	// applyContract MERGES handles at an equal generation and replaces them
+	// wholesale only when the generation advances - and a same-generation answer
+	// is a DESIGNED event, not a race: the bench reuses its stored idempotency key
+	// so a double-clicked Pay, a retried POST and a refreshed page converge on one
+	// gateway object. Meanwhile classifyOnboardingHandles sniffs the MANDATE SHAPE
+	// before it ever consults payment_provider. So a set that has accumulated two
+	// gateways' keys is classified by whichever shape it matches first: a stale
+	// Cashfree session sitting beside a live Razorpay order sent the customer to a
+	// full-page Cashfree redirect for a Razorpay order. The sheet must be built
+	// from the handles of the gateway the MACHINE NAMES, and nothing else.
+	const CASHFREE_KEYS = [
+		"payment_session_id",
+		"cashfree_order_id",
+		"cashfree_subscription_id",
+		"subscription_session_id",
+		"cashfree_app_id",
+		"cashfree_env",
+	];
+	const RAZORPAY_KEYS = ["razorpay_order_id", "razorpay_subscription_id", "razorpay_key_id"];
+
+	function recordingFlow(api) {
+		const handed = [];
+		const openCheckout = vi.fn(async (h) => {
+			handed.push(h);
+			return { status: CHECKOUT_DISMISSED };
+		});
+		const { flow } = makeFlow({ api, openCheckout, options: { strict: false } });
+		return { flow, handed, openCheckout };
+	}
+
+	test("a cross-provider merge built by a STATUS CHECK never reaches the SDK", async () => {
+		// No initiate is needed to build the mix: checkStatus absorbs answers too.
+		const api = makeApi({
+			initiateSignupPayment: vi
+				.fn()
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "cashfree",
+						subscription_session_id: "cf_sub_sess",
+						cashfree_env: "sandbox",
+						can_check_status: true,
+					})
+				)
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5, // the SAME intent: the bench converged the retry onto it
+						payment_provider: "razorpay",
+						razorpay_order_id: "order_RZP",
+						razorpay_key_id: "k",
+						can_check_status: true,
+					})
+				),
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 5,
+					payment_provider: "razorpay",
+					razorpay_order_id: "order_RZP",
+					razorpay_key_id: "k",
+					can_check_status: true,
+				})
+			),
+		});
+		const { flow, handed } = recordingFlow(api);
+		await flow.initiatePayment({ plan: "pro", provider: "cashfree" }); // the mandate
+		await flow.checkStatus(); // a plain status read, carrying the other gateway
+		await flow.initiatePayment({ plan: "pro", provider: "razorpay" });
+		// The reducer's merge is untouched - this is a fix at the sheet, not in the
+		// transition table.
+		expect(flow.state.value.handles).toEqual({
+			subscription_session_id: "cf_sub_sess",
+			cashfree_env: "sandbox",
+			razorpay_order_id: "order_RZP",
+			razorpay_key_id: "k",
+		});
+		expect(flow.state.value.provider).toBe("razorpay");
+		expect(handed[1]).toEqual({
+			razorpay_order_id: "order_RZP",
+			razorpay_key_id: "k",
+			payment_provider: "razorpay",
+		});
+		for (const k of CASHFREE_KEYS) expect(handed[1]).not.toHaveProperty(k);
+		expect(classifyOnboardingHandles(handed[1])).toBe("razorpay");
+		expect(flow.state.value.illegalTransitions).toBe(0);
+	});
+
+	test("the mirror direction - a stale Razorpay subscription cannot capture a Cashfree order", async () => {
+		const api = makeApi({
+			initiateSignupPayment: vi
+				.fn()
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "razorpay",
+						razorpay_subscription_id: "sub_RZP",
+						razorpay_key_id: "k",
+						can_check_status: true,
+					})
+				)
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "cashfree",
+						payment_session_id: "sess_CF",
+						cashfree_order_id: "cf_1",
+						cashfree_env: "sandbox",
+						can_check_status: true,
+					})
+				),
+		});
+		const { flow, handed } = recordingFlow(api);
+		await flow.initiatePayment({ plan: "pro", provider: "razorpay" });
+		await flow.initiatePayment({ plan: "pro", provider: "cashfree" });
+		expect(flow.state.value.provider).toBe("cashfree");
+		expect(handed[1]).toEqual({
+			payment_session_id: "sess_CF",
+			cashfree_order_id: "cf_1",
+			cashfree_env: "sandbox",
+			payment_provider: "cashfree",
+		});
+		for (const k of RAZORPAY_KEYS) expect(handed[1]).not.toHaveProperty(k);
+		expect(classifyOnboardingHandles(handed[1])).toBe("cashfree_order");
+		expect(flow.state.value.illegalTransitions).toBe(0);
+	});
+
+	test("CONTROL: an ordinary same-provider retry still opens on the newest handles", async () => {
+		const api = makeApi({
+			initiateSignupPayment: vi
+				.fn()
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "razorpay",
+						razorpay_order_id: "order_A",
+						razorpay_key_id: "k",
+						amount_inr: 4999,
+						can_check_status: true,
+					})
+				)
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "razorpay",
+						razorpay_order_id: "order_B",
+						razorpay_key_id: "k",
+						amount_inr: 4999,
+						can_check_status: true,
+					})
+				),
+		});
+		const { flow, handed } = recordingFlow(api);
+		await flow.initiatePayment({ plan: "pro", provider: "razorpay" });
+		await flow.initiatePayment({ plan: "pro", provider: "razorpay" });
+		// The price rides along with either gateway - it is not a handle.
+		expect(handed[1]).toEqual({
+			razorpay_order_id: "order_B",
+			razorpay_key_id: "k",
+			amount_inr: 4999,
+			payment_provider: "razorpay",
+		});
+		expect(classifyOnboardingHandles(handed[1])).toBe("razorpay");
+		expect(flow.state.value.illegalTransitions).toBe(0);
+	});
+
+	test("CONTROL: an advanced generation replaces the set wholesale, as it always did", async () => {
+		const api = makeApi({
+			initiateSignupPayment: vi
+				.fn()
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "cashfree",
+						subscription_session_id: "cf_sub_sess",
+						cashfree_env: "sandbox",
+						can_check_status: true,
+					})
+				)
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 6, // a NEW intent: the old order is dead
+						payment_provider: "razorpay",
+						razorpay_order_id: "order_RZP",
+						razorpay_key_id: "k",
+						amount_inr: 4999,
+						can_check_status: true,
+					})
+				),
+		});
+		const { flow, handed } = recordingFlow(api);
+		await flow.initiatePayment({ plan: "pro", provider: "cashfree" });
+		await flow.initiatePayment({ plan: "pro", provider: "razorpay" });
+		expect(flow.state.value.handles).toEqual({
+			razorpay_order_id: "order_RZP",
+			razorpay_key_id: "k",
+			amount_inr: 4999,
+		});
+		expect(handed[1]).toEqual({
+			razorpay_order_id: "order_RZP",
+			razorpay_key_id: "k",
+			amount_inr: 4999,
+			payment_provider: "razorpay",
+		});
+		expect(classifyOnboardingHandles(handed[1])).toBe("razorpay");
+		expect(flow.state.value.illegalTransitions).toBe(0);
 	});
 });
 
