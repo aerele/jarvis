@@ -92,6 +92,9 @@ describe("the first payment", () => {
 		expect(openCheckout).toHaveBeenCalledTimes(1);
 		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
 		expect(flow.state.value.value).toBe(STATES.PAID);
+		// The silent counter, read as an oracle: a happy path that racks one up has
+		// done something the machine refused to record.
+		expect(flow.state.value.illegalTransitions).toBe(0);
 	});
 
 	test("a signup still awaiting verification shows no payment action", async () => {
@@ -343,6 +346,7 @@ describe("verification continues in one round trip", () => {
 		await flow.verifyAndContinue();
 		expect(openCheckout).toHaveBeenCalledTimes(1);
 		expect(flow.state.value.value).toBe(STATES.PAID);
+		expect(flow.state.value.illegalTransitions).toBe(0);
 	});
 
 	test("the verify button guards its own round trip", async () => {
@@ -409,6 +413,190 @@ describe("verification continues in one round trip", () => {
 	});
 });
 
+describe("the machine decides what opens", () => {
+	// The SPA must never open a gateway sheet the machine refused. The decision to
+	// open used to be read off the ANSWER (`decoded.data`) while the reducer gates
+	// CHECKOUT_OPENED on the STATE's handles - and three of applyContract's early
+	// returns never merge an answer's handles into the state (the generation
+	// fence, the unattributable branch, the paid floor). When the two disagreed
+	// the transition was refused SILENTLY, so an interactive card stayed on screen
+	// underneath an opening sheet.
+	//
+	// These run NON-strict on purpose: production passes no `strict`, so the
+	// refusal is counted rather than thrown, and `illegalTransitions` is the
+	// oracle. Under strict the refusal throws into runCheckout's own catch and the
+	// bug hides behind a CHECKOUT_FAILED.
+	const PAYABLE = {
+		attempt_id: "att_1",
+		payment_provider: "razorpay",
+		razorpay_order_id: "order_verified",
+		razorpay_key_id: "k",
+		can_initiate_payment: true,
+		can_check_status: true,
+	};
+	// The state every one of these builds from, through the real flow: a signup
+	// that has been started and is waiting on the magic link.
+	const unverified = (generation) =>
+		vi.fn(async () =>
+			ENVELOPE({
+				code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+				pending_verification: true,
+				attempt_id: "att_1",
+				generation,
+				can_initiate_payment: false,
+			})
+		);
+
+	test("an UNATTRIBUTABLE verify answer opens nothing and leaves a live card", async () => {
+		const api = makeApi({
+			startSignup: unverified(0),
+			// No generation at all: the reducer cannot attribute these handles to the
+			// live intent and keeps its own (which are empty), so it would refuse the
+			// open. The flow must refuse it too.
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({ code: CODES.PAYMENT_CONFIRMATION_PENDING, ...PAYABLE })
+			),
+		});
+		const { flow, openCheckout } = makeFlow({ api, options: { strict: false } });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+		await flow.verifyAndContinue();
+		expect(openCheckout).not.toHaveBeenCalled();
+		expect(flow.state.value.illegalTransitions).toBe(0);
+		// ...and what the customer is left looking at is a card they can use, not a
+		// spinner over an invisible sheet.
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		expect(flow.state.value.busy).toBe(null);
+		expect(flow.state.value.canInitiate).toBe(true);
+	});
+
+	test("a GENERATION-FENCED verify answer opens nothing and keeps Verify alive", async () => {
+		const api = makeApi({
+			startSignup: unverified(7),
+			// A losing generation: the reducer's fence discards this answer outright,
+			// handles included. Opening on them is opening a DEAD order.
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					...PAYABLE,
+					generation: 2,
+					razorpay_order_id: "order_STALE",
+				})
+			),
+		});
+		const { flow, openCheckout } = makeFlow({ api, options: { strict: false } });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		expect(flow.state.value.generation).toBe(7);
+		await flow.verifyAndContinue();
+		expect(openCheckout).not.toHaveBeenCalled();
+		expect(flow.state.value.illegalTransitions).toBe(0);
+		// The answer was refused, so nothing about the page moved: the customer is
+		// still on the verify screen with a live button.
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+		expect(flow.state.value.busy).toBe(null);
+	});
+
+	test("an ACCEPTED verify answer opens exactly one sheet, on the handles the machine kept", async () => {
+		const api = makeApi({
+			startSignup: unverified(0),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({ code: CODES.PAYMENT_CONFIRMATION_PENDING, ...PAYABLE, generation: 1 })
+			),
+		});
+		let flow;
+		let atOpen = null;
+		let handedTo = null;
+		const openCheckout = vi.fn(async (handles) => {
+			handedTo = handles;
+			const st = flow.state.value;
+			atOpen = { value: st.value, busy: st.busy, handles: { ...st.handles }, provider: st.provider };
+			return { status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_1" } };
+		});
+		({ flow } = makeFlow({ api, openCheckout, options: { strict: false } }));
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.verifyAndContinue();
+		expect(openCheckout).toHaveBeenCalledTimes(1);
+		// The busy view while the sheet opens - nothing to press underneath it.
+		expect(atOpen.value).toBe(STATES.CHECKOUT_OPEN);
+		expect(atOpen.busy).toBe(null);
+		// The gateway is handed exactly what the machine accepted, never the raw
+		// answer: if the reducer did not keep it, it does not reach the sheet.
+		expect(handedTo).toEqual({ ...atOpen.handles, payment_provider: atOpen.provider });
+		expect(flow.state.value.illegalTransitions).toBe(0);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+
+	test("a RETRY whose answer the machine refuses opens nothing and leaves the card usable", async () => {
+		// initiatePayment had the identical disagreement, on the surface where it
+		// costs the most: the recovery card, whose two buttons are the customer's
+		// only way forward. A refused answer must give them back, not raise a sheet
+		// over them (and not strand the flag that disables them either).
+		const api = makeApi({
+			// A resumed page that knows its generation but holds no handles - the
+			// state read carries none, exactly as the default admin answer does.
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 7,
+					can_initiate_payment: true,
+					can_check_status: true,
+				})
+			),
+			initiateSignupPayment: vi.fn(async () =>
+				ENVELOPE({ code: CODES.PAYMENT_CONFIRMATION_PENDING, ...PAYABLE, generation: 3 })
+			),
+		});
+		const { flow, openCheckout } = makeFlow({ api, options: { strict: false } });
+		await flow.hydrate();
+		expect(flow.state.value.canInitiate).toBe(true);
+		await flow.initiatePayment({ plan: "pro" });
+		expect(openCheckout).not.toHaveBeenCalled();
+		expect(flow.state.value.illegalTransitions).toBe(0);
+		expect(flow.state.value.busy).toBe(null);
+		expect(flow.state.value.canInitiate).toBe(true);
+		expect(flow.state.value.canCheck).toBe(true);
+	});
+});
+
+describe("cancelInFlight", () => {
+	// Every release path is fenced on `my === token`, so the bump that invalidates
+	// the in-flight work also invalidates its own release. After a cancel the busy
+	// flag belongs to nobody, and leaving it set is a dead button forever.
+	test("a cancel mid-verify does not strand the busy flag", async () => {
+		let flow;
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () => {
+				flow.cancelInFlight();
+				return ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+					payment_provider: "razorpay",
+					razorpay_order_id: "order_1",
+					razorpay_key_id: "k",
+				});
+			}),
+		});
+		({ flow } = makeFlow({ api }));
+		await flow.verifyAndContinue();
+		expect(flow.state.value.busy).toBe(null);
+	});
+
+	test("a cancel mid-check does not strand the busy flag", async () => {
+		let flow;
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () => {
+				flow.cancelInFlight();
+				return ENVELOPE({ code: CODES.PAYMENT_CONFIRMATION_PENDING, attempt_id: "att_1", generation: 1 });
+			}),
+		});
+		({ flow } = makeFlow({ api }));
+		await flow.checkStatus();
+		expect(flow.state.value.busy).toBe(null);
+	});
+});
+
 describe("the generation fence", () => {
 	test("a superseded initiate's answer is discarded BY THE FENCE, not by luck", async () => {
 		// The previous version of this test was worthless: its stale answer both
@@ -462,8 +650,14 @@ describe("the generation fence", () => {
 		// testing the fence, and should fail loudly rather than pass for free.
 		expect(valueAfterWinner).not.toBe(STATES.PAID);
 		expect(valueAfterWinner).not.toBe(STATES.PROVISIONING);
+		expect(valueAfterWinner).not.toBe(STATES.PROVISIONING_DELAYED);
 		resolveSlow();
 		await first;
+		// THE consequence a dead fence has, and the one nothing here asserted: the
+		// stale answer is absorbed, its dead order id merges over the live one, and
+		// a SECOND gateway sheet opens on `order_STALE`. The state assertions below
+		// cannot see it - the dismissed sheet re-lands the same state either way.
+		expect(openCheckout).toHaveBeenCalledTimes(1);
 		expect(flow.state.value.value).toBe(valueAfterWinner);
 		expect(flow.state.value.code).toBe(codeAfterWinner);
 		expect(flow.state.value.code).not.toBe(CODES.PAYMENT_DECLINED);

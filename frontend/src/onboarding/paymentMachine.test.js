@@ -12,6 +12,7 @@ import {
 	EVENTS,
 	initialState,
 	reduce,
+	canOpenCheckout,
 	isTerminalForPayment,
 	provisioningOwner,
 	remainingCooldownSeconds,
@@ -576,6 +577,45 @@ test("an illegal transition in production is ignored and counted, never applied"
 test("a checkout cannot be opened from a state with no handles", () => {
 	const s = initialState();
 	assert.throws(() => reduce(s, { type: EVENTS.CHECKOUT_OPENED }, { strict: true }));
+});
+
+// ---------------------------------------------------------------------------
+// canOpenCheckout: the ONE predicate the orchestrator must ask before it opens
+// ---------------------------------------------------------------------------
+test("canOpenCheckout answers exactly what CHECKOUT_OPENED will accept", () => {
+	const cold = initialState();
+	assert.equal(canOpenCheckout(cold), false);
+	const live = reduce(cold, at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	assert.equal(canOpenCheckout(live), true);
+	assert.equal(reduce(live, { type: EVENTS.CHECKOUT_OPENED }).value, STATES.CHECKOUT_OPEN);
+	// The handles the reducer REFUSED to merge are not openable, whatever the
+	// answer that carried them said: a gen-less answer over a known generation
+	// contributes none, and a losing generation is discarded whole.
+	const unattributable = reduce(live, CONTRACT({
+		code: CODES.PAYMENT_CONFIRMATION_PENDING,
+		data: { attempt_id: "att_1", razorpay_order_id: "order_UNATTRIBUTABLE" },
+	}));
+	assert.equal(unattributable.handles.razorpay_order_id, "o");
+	const noHandles = reduce(initialState(), CONTRACT({
+		code: CODES.PAYMENT_CONFIRMATION_PENDING,
+		data: { attempt_id: "att_1", generation: 1 },
+	}));
+	assert.equal(canOpenCheckout(noHandles), false);
+	assert.equal(canOpenCheckout(null), false);
+	assert.equal(canOpenCheckout({}), false);
+});
+
+test("paid is a floor for the OPEN too - a late sheet cannot reopen a settled signup", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	s = reduce(s, { type: EVENTS.CONFIRM_SUCCEEDED, data: {} });
+	assert.equal(s.value, STATES.PAID);
+	// The handles survive the confirm by design, so nothing but the floor stands
+	// between a late/duplicate open and a live sheet over a paid signup.
+	assert.equal(s.handles.razorpay_order_id, "o");
+	assert.equal(canOpenCheckout(s), false);
+	const out = reduce(s, { type: EVENTS.CHECKOUT_OPENED }, { strict: true });
+	assert.equal(out.value, STATES.PAID, "a late open is a no-op above the floor");
+	assert.equal(out.illegalTransitions, 0, "...and a no-op, not a counted illegality");
 });
 
 // ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ import { CODES } from "./paymentCodes.js";
 import {
 	EVENTS,
 	STATES,
+	canOpenCheckout,
 	initialState,
 	reduce,
 	noteStatusCheck,
@@ -93,6 +94,13 @@ export function createPaymentFlow(deps) {
 
 	function cancelInFlight() {
 		token += 1;
+		// ...and the flag those calls were holding. Every release path is fenced on
+		// `my === token`, so the bump that invalidates the in-flight work also
+		// invalidates its own release: a cancel mid-round-trip left `busy` set
+		// forever, which is a dead Verify button (or two dead recovery actions) on a
+		// page whose whole job is to offer the customer a way forward. Once nothing
+		// is in flight, busy belongs to nobody.
+		if (state.value.busy !== null) state.value = { ...state.value, busy: null };
 	}
 
 	// ---- the read/decode seam ----------------------------------------------
@@ -188,10 +196,18 @@ export function createPaymentFlow(deps) {
 			// Verified and payable: open the checkout this same click. runCheckout
 			// drives its own state from here, so the guard is released first -
 			// leaving it set would disable the recovery card the sheet returns to.
-			if (hasOpenableHandles(decoded.data)) {
+			//
+			// Payable is asked of the MACHINE, not of the answer. Reading it off
+			// `decoded.data` asked a different question, and the two could disagree:
+			// an answer the reducer refused (no generation to attribute it to, a
+			// losing generation) still looked payable here, so a sheet opened while
+			// the machine stayed on the card behind it - Verify or Initiate live
+			// under an opening gateway, and in the fenced case the sheet was raised
+			// on the DEAD order the reducer had just thrown away.
+			if (canOpenCheckout(state.value)) {
 				opened = true;
 				releaseVerifyGuard(my);
-				await runCheckout(decoded, decoded.data.payment_provider);
+				await runCheckout();
 			}
 		} finally {
 			// Cleared on every exit, including a thrown round trip: a stuck busy flag
@@ -215,7 +231,7 @@ export function createPaymentFlow(deps) {
 		const code = absorb(decoded);
 		if (!decoded.ok) return; // parked-money / duplicate / terminal - the reducer rendered it
 		if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return; // wait for the magic link
-		await runCheckout(decoded, provider);
+		await runCheckout(provider);
 	}
 
 	// ---- initiate (retry): authenticated, no idempotency key from the SPA ---
@@ -229,13 +245,29 @@ export function createPaymentFlow(deps) {
 		const code = absorb(decoded);
 		if (!decoded.ok) return;
 		if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return;
-		await runCheckout(decoded, provider);
+		await runCheckout(provider);
 	}
 
 	// ---- the shared checkout tail ------------------------------------------
-	async function runCheckout(decoded, provider) {
-		const handles = { ...decoded.data };
-		if (provider && !handles.payment_provider) handles.payment_provider = provider;
+	// The ONE place a sheet is opened, and the one place that decides whether it
+	// may be: `canOpenCheckout` is the reducer's own CHECKOUT_OPENED guard, so a
+	// refusal here and a refusal there cannot drift apart. If the machine did not
+	// take the answer, nothing opens and the caller's state renders as it stands.
+	async function runCheckout(provider) {
+		if (!canOpenCheckout(state.value)) {
+			// Nothing opened, so nothing is in flight: release the flag the caller
+			// took. The reducer clears `busy` on every answer it accepts, but the
+			// answers this branch exists for are the ones it REFUSES (it returns the
+			// previous state untouched, flag and all) - and the card the customer is
+			// left on is the one whose buttons that flag disables.
+			if (state.value.busy !== null) state.value = { ...state.value, busy: null };
+			return;
+		}
+		// Opened on what the MACHINE kept, never on the raw answer: the reducer is
+		// the thing that knows which handles belong to the live intent.
+		const handles = { ...state.value.handles };
+		const prov = state.value.provider || provider;
+		if (prov && !handles.payment_provider) handles.payment_provider = prov;
 		const my = token;
 		let out;
 		try {
@@ -457,17 +489,6 @@ export function createPaymentFlow(deps) {
 		cancelInFlight,
 		tickCooldown,
 	};
-}
-
-// Does this envelope carry a gateway handle the wizard could actually open?
-function hasOpenableHandles(data) {
-	const d = data || {};
-	return !!(
-		d.razorpay_order_id ||
-		d.razorpay_subscription_id ||
-		d.payment_session_id ||
-		d.subscription_session_id
-	);
 }
 
 function isPaidState(value) {

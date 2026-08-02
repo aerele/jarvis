@@ -258,7 +258,12 @@ export function reduce(state, event, opts = {}) {
 			return applyContract(state, event.decoded || {}, opts);
 
 		case EVENTS.CHECKOUT_OPENED: {
-			if (!hasOpenableHandles(state)) return illegal(state, strict, "checkout without handles");
+			// Paid is a floor here too. Every other late gateway event is already a
+			// no-op above it; an open is the one that would have taken a settled
+			// signup back to a live sheet (a second tab, a click that landed after
+			// the confirm), which is the same class of harm the floor exists for.
+			if (PAID_FLOOR.has(state.value)) return state;
+			if (!canOpenCheckout(state)) return illegal(state, strict, "checkout without handles");
 			return { ...state, value: STATES.CHECKOUT_OPEN, busy: null };
 		}
 
@@ -362,8 +367,21 @@ export function reduce(state, event, opts = {}) {
 	}
 }
 
-function hasOpenableHandles(state) {
-	const h = state.handles || {};
+/**
+ * Can a gateway sheet be opened from THIS state?
+ *
+ * The single predicate both the reducer's CHECKOUT_OPENED guard and the
+ * orchestrator's decide-to-open read, so the SPA can never open a sheet the
+ * machine would refuse. The orchestrator used to answer the same question from
+ * the ANSWER it had just received, which is a different question: three of
+ * applyContract's early returns (the generation fence, an unattributable answer,
+ * the paid floor) deliberately keep an answer's handles OUT of the state, and a
+ * handle the reducer refused is a dead order to send a customer to.
+ */
+export function canOpenCheckout(state) {
+	const s = state || {};
+	if (PAID_FLOOR.has(s.value)) return false;
+	const h = s.handles || {};
 	return !!(
 		h.razorpay_order_id ||
 		h.razorpay_subscription_id ||
