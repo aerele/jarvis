@@ -51,6 +51,18 @@ class TestCompanyDefaultsEndpoint(FrappeTestCase):
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["error"]["code"], "COMPANY_DEFAULTS_NOT_FOUND")
 
+	def test_frappe_only_bench_no_company_doctype(self):
+		"""C01-1: on a frappe-only bench the Company doctype is absent; the endpoint
+		returns a clean NOT_FOUND rather than 500-ing on the missing table."""
+
+		def _exists(dt, *a, **k):
+			return False if dt == "DocType" else None
+
+		with patch("frappe.db.exists", side_effect=_exists):
+			out = onboarding.get_company_onboarding_defaults("Aerele")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "COMPANY_DEFAULTS_NOT_FOUND")
+
 	def test_unreadable_company_forbidden(self):
 		with (
 			patch("frappe.db.exists", return_value=True),
@@ -97,8 +109,12 @@ class TestResolveContact(FrappeTestCase):
 
 	def _contact_row(self, mobile="", phone=""):
 		return frappe._dict(
-			name="CNT-1", first_name="Vignesh", last_name="S", company_name="Aerele",
-			mobile_no=mobile, phone=phone,
+			name="CNT-1",
+			first_name="Vignesh",
+			last_name="S",
+			company_name="Aerele",
+			mobile_no=mobile,
+			phone=phone,
 		)
 
 	def test_no_default_contact_returns_none(self):
@@ -116,7 +132,9 @@ class TestResolveContact(FrappeTestCase):
 		with (
 			patch(self._C, return_value="CNT-1"),
 			patch("frappe.has_permission", return_value=True),
-			patch("frappe.db.get_value", return_value=self._contact_row(mobile="+91-MOBILE", phone="+91-PHONE")),
+			patch(
+				"frappe.db.get_value", return_value=self._contact_row(mobile="+91-MOBILE", phone="+91-PHONE")
+			),
 		):
 			out = onboarding._resolve_company_contact("Aerele")
 		self.assertEqual(out["phone"], "+91-MOBILE")
@@ -163,24 +181,30 @@ class TestChildPhone(FrappeTestCase):
 			return onboarding._contact_child_phone("CNT-1")
 
 	def test_primary_mobile_wins(self):
-		phone = self._run([
-			{"phone": "A", "is_primary_phone": 1, "is_primary_mobile_no": 0},
-			{"phone": "B", "is_primary_phone": 0, "is_primary_mobile_no": 1},
-		])
+		phone = self._run(
+			[
+				{"phone": "A", "is_primary_phone": 1, "is_primary_mobile_no": 0},
+				{"phone": "B", "is_primary_phone": 0, "is_primary_mobile_no": 1},
+			]
+		)
 		self.assertEqual(phone, "B")
 
 	def test_primary_phone_over_first(self):
-		phone = self._run([
-			{"phone": "A", "is_primary_phone": 0, "is_primary_mobile_no": 0},
-			{"phone": "B", "is_primary_phone": 1, "is_primary_mobile_no": 0},
-		])
+		phone = self._run(
+			[
+				{"phone": "A", "is_primary_phone": 0, "is_primary_mobile_no": 0},
+				{"phone": "B", "is_primary_phone": 1, "is_primary_mobile_no": 0},
+			]
+		)
 		self.assertEqual(phone, "B")
 
 	def test_first_non_empty_fallback(self):
-		phone = self._run([
-			{"phone": "", "is_primary_phone": 0, "is_primary_mobile_no": 0},
-			{"phone": "C", "is_primary_phone": 0, "is_primary_mobile_no": 0},
-		])
+		phone = self._run(
+			[
+				{"phone": "", "is_primary_phone": 0, "is_primary_mobile_no": 0},
+				{"phone": "C", "is_primary_phone": 0, "is_primary_mobile_no": 0},
+			]
+		)
 		self.assertEqual(phone, "C")
 
 	def test_no_rows(self):
@@ -190,8 +214,13 @@ class TestChildPhone(FrappeTestCase):
 class TestResolveAddress(FrappeTestCase):
 	def _address_row(self, gstin=None):
 		row = frappe._dict(
-			name="ADD-1", address_line1="12 MG Road", address_line2="", city="Chennai",
-			state="Tamil Nadu", pincode="600001", country="India",
+			name="ADD-1",
+			address_line1="12 MG Road",
+			address_line2="",
+			city="Chennai",
+			state="Tamil Nadu",
+			pincode="600001",
+			country="India",
 		)
 		if gstin is not None:
 			row.gstin = gstin
@@ -282,5 +311,7 @@ class TestResolveAddress(FrappeTestCase):
 		address resolution succeeds — proof the frappe-only Dynamic Link path is the
 		mechanism, not erpnext.get_default_company_address."""
 		with patch.dict(sys.modules, {"erpnext.setup.doctype.company.company": None}):
-			out = self._resolve_with_meta(has_gstin=True, address_row=self._address_row(gstin="33ABCDE1234F1Z5"))
+			out = self._resolve_with_meta(
+				has_gstin=True, address_row=self._address_row(gstin="33ABCDE1234F1Z5")
+			)
 		self.assertEqual(out["city"], "Chennai")

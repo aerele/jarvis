@@ -863,7 +863,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			) as resume,
 		):
 			out = onboarding.start_signup("Resume-Me@example.com ", "Co", "some-plan")
-		resume.assert_called_once_with("some-plan", provider=None)
+		resume.assert_called_once_with("some-plan", provider=None, billing=None)
 		self.assertEqual(out["razorpay_order_id"], "order_R2")
 
 	def test_dedup_with_different_email_reraises(self):

@@ -830,10 +830,16 @@ def get_company_onboarding_defaults(company: str) -> dict:
 	company = (company or "").strip()
 	if not company:
 		return _company_defaults_error("COMPANY_DEFAULTS_NOT_FOUND", "company is required", 400)
-	if not frappe.db.exists("Company", company):
+	# Company is an ERPNext doctype and jarvis runs on frappe-only benches too
+	# (C01-1). Guard the doctype's existence first so frappe.db.exists("Company", …)
+	# can't 500 on a missing table — a frappe-only site simply has no company to
+	# resolve.
+	if not frappe.db.exists("DocType", "Company") or not frappe.db.exists("Company", company):
 		return _company_defaults_error("COMPANY_DEFAULTS_NOT_FOUND", "unknown company", 404)
 	if not frappe.has_permission("Company", "read", doc=company):
-		return _company_defaults_error("COMPANY_DEFAULTS_FORBIDDEN", "not permitted to read this company", 403)
+		return _company_defaults_error(
+			"COMPANY_DEFAULTS_FORBIDDEN", "not permitted to read this company", 403
+		)
 
 	data: dict = {"company": company}
 	contact = _resolve_company_contact(company)
