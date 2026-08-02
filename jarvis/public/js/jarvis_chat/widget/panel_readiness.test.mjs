@@ -99,7 +99,10 @@ test("degradedMessage: a suspended subscription gets the renewal line, not the g
 // is nothing to reconnect and no administrator can help.
 test("degradedMessage: an unconfirmed readiness verdict says retry, not 'ask your administrator'", () => {
   const generic = degradedMessage({ ready: false, reason: "llm_credentials" });
-  const msg = degradedMessage({ ready: false, reason: "readiness_unconfirmed" });
+  const msg = degradedMessage({
+    ready: false,
+    reason: "readiness_unconfirmed",
+  });
   assert.notEqual(msg, generic);
   assert.match(msg, /try again/i);
   assert.equal(
