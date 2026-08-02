@@ -95,11 +95,23 @@ function applyHash() {
 	const h = (route.hash || "").replace(/^#/, "").split("?")[0];
 	activeTab.value = h === "activity" ? "activity" : "triggers";
 }
+// Activity's `?trigger=` deep-link is the only key that belongs to ONE tab.
+// Everything else in the query belongs to the page — above all the Triggers
+// list's `fv2` filter set — and survives a tab switch in both directions.
+//
+// This used to replace the whole query with `{}` on the way back, which was
+// harmless while Triggers owned nothing in the URL and became a silent wipe of
+// the user's filters the moment this surface migrated. Same shape as
+// DashboardsPage's `_withoutEditSeed`.
+function _withoutActivitySeed() {
+	const q = { ...route.query };
+	delete q.trigger;
+	return q;
+}
 function setTab(v) {
 	if (v === activeTab.value) return;
 	activeTab.value = v;
-	// leaving Activity also drops a stale ?trigger= deep-link filter
-	const query = v === "activity" ? route.query : {};
+	const query = v === "activity" ? { ...route.query } : _withoutActivitySeed();
 	router.push({ hash: v === "triggers" ? "" : `#${v}`, query });
 }
 applyHash();

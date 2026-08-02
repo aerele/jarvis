@@ -10,7 +10,7 @@
 		:total="total"
 		:has-more="hasMore"
 		:quick-filters="quickFilters"
-		:filter-defs="filterDefs"
+		:filter-state="filterState"
 		:filters="filters"
 		:sort-options="sortOptions"
 		:sort="sort"
@@ -20,6 +20,9 @@
 		storage-key="dashboards"
 		:empty-state="emptyState"
 		@update:filters="setFilters"
+		@update:filter-clauses="setClauses"
+		@request-filter-schema="requestSchema"
+		@dismiss-filter-notice="dismissFilterNotice"
 		@update:sort="(s) => setSort(s.field, s.dir)"
 		@update:page-length="(v) => (pageLength = v)"
 		@load-more="loadMore"
@@ -71,11 +74,17 @@
 // envelope list (MacrosList wiring minus the TabBar/header - the host page
 // owns those). Rows route to the read-only DashboardView page.
 import { computed } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { Badge, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { listDashboardsPage } from "@/api/dashboards";
+
+// /dashboards is a TABBED route (Builder | Saved): the `fv2` payload carries its
+// view key, and every tab navigation carries the query (judgment C08-7).
+const route = useRoute();
+const router = useRouter();
 
 const SCOPE_OPTIONS = [
 	{ label: "All", value: "" },
@@ -106,10 +115,12 @@ const quickFilters = [
 	{ key: "scope", label: "Visibility", type: "select", options: SCOPE_OPTIONS },
 	{ key: "dashboard_type", label: "Type", type: "select", options: TYPE_OPTIONS },
 ];
-const filterDefs = [
-	{ key: "scope", label: "Visibility", type: "select", options: SCOPE_OPTIONS },
-	{ key: "dashboard_type", label: "Type", type: "select", options: TYPE_OPTIONS },
-];
+// plan 08 wave 1: the curated `filterDefs` array is GONE as the filter catalog.
+// The panel is generated from the server schema for view_key "saved_dashboards"
+// — every readable Jarvis Dashboard field, its standard fields, and the
+// Jarvis Dashboard Source child fields (one EXISTS, deviation D4). Both quick
+// controls map 1:1 onto a canonical field, so both stay in sync with the panel.
+const QUICK_CLAUSES = { scope: "scope", dashboard_type: "dashboard_type" };
 
 const sortOptions = [
 	{ label: "Updated", value: "modified" },
@@ -130,6 +141,10 @@ const {
 	pageLength,
 	resetLoad,
 	loadMore,
+	filterState,
+	setClauses,
+	requestSchema,
+	dismissFilterNotice,
 } = useListPage({
 	fetchFn: (p) => {
 		const { search: q, ...rest } = p.filters || {};
@@ -137,12 +152,24 @@ const {
 	},
 	defaultSort: DEFAULT_SORT,
 	storageKey: "dashboards",
+	viewKey: "saved_dashboards",
+	quickClauses: QUICK_CLAUSES,
+	// The view's identity (mirrors its list_registry entry), NOT a field catalog.
+	rootDoctype: "Jarvis Dashboard",
+	route,
+	router,
 });
 
 // §3.8: when a search/filter is active but matches nothing, the empty state
 // must point at the filters, not read "you have nothing saved".
-const hasActiveFilter = computed(() =>
-	Boolean((filters.search || "").trim() || filters.scope || filters.dashboard_type)
+// "Is anything narrowing this list?" — which since the migration includes the
+// FilterGroup panel, not just the quick-filter strip. Reading only the legacy
+// object made a panel-only narrowing to zero rows render "No dashboards yet",
+// telling someone their saved work was gone (design.md §3.8).
+const hasActiveFilter = computed(
+	() =>
+		Boolean((filters.search || "").trim() || filters.scope || filters.dashboard_type) ||
+		(filterState.value?.activeCount || 0) > 0
 );
 const emptyState = computed(() =>
 	hasActiveFilter.value

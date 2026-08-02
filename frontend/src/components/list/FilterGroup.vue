@@ -323,7 +323,7 @@ const rowErrorId = computed(() => attributeError(props.error, props.clauses, ind
 const panelError = computed(() => {
 	const error = props.error;
 	if (!error) return "";
-	if (error.kind === "cap") return error.message;
+	if (error.kind === "cap" || error.kind === "cost") return error.message;
 	if (error.kind === "row" && rowErrorId.value) return ""; // shown on the row
 	return error.message;
 });

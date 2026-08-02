@@ -29,7 +29,7 @@ import time
 import frappe
 from frappe import _
 
-from jarvis.chat import dashboard_permissions
+from jarvis.chat import dashboard_permissions, list_filters
 from jarvis.chat.macros_api import _clamp_page, _lk, _load_filters
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
@@ -190,9 +190,11 @@ def get_dashboards_caps() -> dict:
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
 @require_jarvis_user
+@list_filters.filter_errors_to_envelope
 def list_dashboards_page(
 	search: str = "",
 	filters: str = "{}",
+	filters_v2: str | list | None = None,
 	sort_field: str = "modified",
 	sort_dir: str = "desc",
 	start: int = 0,
@@ -200,38 +202,52 @@ def list_dashboards_page(
 ) -> dict:
 	"""Scope-visible dashboards, server-side search / filter / sort / paginate.
 	Raw SQL bypasses the ORM permission hooks, so the visibility fragment is
-	spliced into the WHERE for non-admins. Frozen envelope in ``data``."""
+	spliced into the WHERE for non-admins. Frozen envelope in ``data``.
+
+	``filters_v2`` (plan 08 §6.2) is ADDITIVE: the canonical clause list,
+	validated and compiled against this caller's schema by
+	``jarvis.chat.list_filters``. Legacy ``filters`` keeps working unchanged for
+	the compatibility window. The visibility fragment below is server-authored
+	and stays on the query object's server side, so a user clause is ANDed
+	INSIDE it and can never widen it (C08-5).
+
+	Scope invariant (MIGRATION-CHECKLIST §1): every role that reaches this
+	endpoint holds a permlevel-0 ``read`` on Jarvis Dashboard with no
+	``if_owner``, so the ORM read scope is the whole table and this SQL scope —
+	owner OR Org OR the caller's Role OR a User-scoped row addressed to them — is
+	strictly narrower. The catalog is therefore derived from the right authority.
+	"""
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _DASHBOARD_FILTERS)
 
-	conds = ["1=1"]
-	params: dict = {"start": start, "page_length": pl}
+	q = list_filters.new_query("saved_dashboards")
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(dashboard_title LIKE %(q)s OR description LIKE %(q)s)")
+		q.server_condition(
+			"(dashboard_title LIKE %(q)s OR description LIKE %(q)s)", q=f"%{_lk(search)}%"
+		)
 	if "scope" in f:
 		if f["scope"] not in _SCOPES:
 			frappe.throw(_("Invalid scope filter."))
-		params["scope"] = f["scope"]
-		conds.append("scope = %(scope)s")
+		q.server_condition("scope = %(scope)s", scope=f["scope"])
 	if "dashboard_type" in f:
 		if f["dashboard_type"] not in _TYPES:
 			frappe.throw(_("Invalid dashboard_type filter."))
-		params["dashboard_type"] = f["dashboard_type"]
-		conds.append("dashboard_type = %(dashboard_type)s")
+		q.server_condition("dashboard_type = %(dashboard_type)s", dashboard_type=f["dashboard_type"])
 	if "owner" in f:
-		params["owner"] = str(f["owner"])
-		conds.append("owner = %(owner)s")
+		q.server_condition("owner = %(owner)s", owner=str(f["owner"]))
 	if not has_jarvis_admin_access():
 		# Values inside are frappe.db.escape'd; spliced (not parameterized)
-		# because the role list is variable-length — same as the wiki list.
-		conds.append(dashboard_permissions.visible_scope_condition())
+		# because the role list is variable-length — same as the wiki list. It
+		# carries no placeholders, so it needs no bound params of its own.
+		q.server_condition(dashboard_permissions.visible_scope_condition())
 
-	where = " AND ".join(conds)
+	q.apply(filters_v2)
+	where = q.where()
+	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _DASHBOARD_SORTABLE, "modified")
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Dashboard` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Dashboard` WHERE {where}", params)[0][0]
+	rows = list_filters.bounded_sql(
 		f"""SELECT name, dashboard_title, description, dashboard_type, scope,
 		target_role, target_user, owner, modified
 		FROM `tabJarvis Dashboard`

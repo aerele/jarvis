@@ -44,7 +44,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
-from jarvis.chat import wiki_permissions
+from jarvis.chat import list_filters, wiki_permissions
 from jarvis.chat.events import publish_to_user
 from jarvis.jarvis.doctype.jarvis_wiki_page.jarvis_wiki_page import (
 	MAX_BODY_LEN,
@@ -1384,6 +1384,7 @@ def _promote_body_into_target(req, reviewer: str) -> str:
 # SPA endpoints
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
+@list_filters.filter_errors_to_envelope
 def list_wiki_pages_page(
 	search: str | None = None,
 	page_type: str | None = None,
@@ -1392,6 +1393,8 @@ def list_wiki_pages_page(
 	archived: int = 0,
 	page: int = 1,
 	page_length: int = 20,
+	filters: str | dict | None = None,
+	filters_v2: str | list | None = None,
 ) -> dict:
 	"""Active wiki pages VISIBLE to the caller, newest-modified first.
 	Envelope: ``{rows, total, has_more, page, page_length}``; each row carries
@@ -1401,48 +1404,72 @@ def list_wiki_pages_page(
 	last_confirmed_at missing / older than 90 days — computed in SQL). Raw SQL
 	because the visibility fragment + OR-search + a real COUNT(*) don't fit
 	get_all (``frappe.db.count`` takes no or_filters, and materializing every
-	matching name per request does not scale)."""
+	matching name per request does not scale).
+
+	``filters_v2`` (plan 08 §6.2) is ADDITIVE: the canonical clause list,
+	validated and compiled against this caller's schema. This surface never had
+	a JSON ``filters`` argument — its curated controls are named parameters —
+	so ``filters`` is accepted and ignored purely to keep the migration
+	contract uniform (``test_migrated_views_actually_accept_filters_v2``
+	requires the legacy argument to still exist for the compatibility window).
+
+	Scope invariant (MIGRATION-CHECKLIST §1): the gate is ``_require_system_user``,
+	and Frappe grants every System User the ``Desk User`` role, which this
+	DocType grants a permlevel-0 ``read`` with no ``if_owner``. So the ORM read
+	scope is the whole table and this SQL scope — status plus the Org/Role/User
+	visibility fragment — is strictly narrower."""
 	_require_system_user()
+	# This surface never had a JSON `filters` blob — its curated controls are
+	# named parameters — so anything non-empty here is a caller that thinks it is
+	# filtering and is not. Fail loudly with the shared code rather than return a
+	# confidently wrong (unfiltered) list.
+	if filters not in (None, "", "{}", {}):
+		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 	page, pl, offset = _clamp_paging(page, page_length)
 
 	# archived=1 lists Archived pages instead (still visibility-filtered) so
 	# an accidental archive is recoverable from the SPA, not only from Desk.
-	conditions = ["status = 'Archived'" if cint(archived) else "status = 'Active'"]
-	values: dict = {}
+	q = list_filters.new_query("wiki_pages")
+	q.server_condition("status = 'Archived'" if cint(archived) else "status = 'Active'")
 	# Pre-escaped by wiki_permissions (frappe.db.escape) — no placeholders.
 	vis = (wiki_permissions.visible_scope_condition(user) or "").strip()
 	if vis:
-		conditions.append(f"({vis})")
+		q.server_condition(f"({vis})")
 	if page_type:
 		if page_type not in PAGE_TYPES:
 			frappe.throw(_("Invalid page type filter."))
-		conditions.append("page_type = %(page_type)s")
-		values["page_type"] = page_type
+		q.server_condition("page_type = %(page_type)s", page_type=page_type)
 	scope_filter = str(scope_filter).strip().lower() if scope_filter else "all"
 	if scope_filter not in ("all", "org", "role", "mine"):
 		frappe.throw(_("Invalid scope filter."))
 	if scope_filter == "org":
 		# Pre-backfill rows read as Org (scope is NULL until the patch runs).
-		conditions.append("ifnull(scope, '') in ('', 'Org')")
+		q.server_condition("ifnull(scope, '') in ('', 'Org')")
 	elif scope_filter == "role":
-		conditions.append("scope = 'Role'")
+		q.server_condition("scope = 'Role'")
 	elif scope_filter == "mine":
-		conditions.append("(scope = 'User' and target_user = %(me)s)")
-		values["me"] = user
+		q.server_condition("(scope = 'User' and target_user = %(me)s)", me=user)
 	if search:
-		values["like"] = f"%{str(search).strip()[:140]}%"
-		conditions.append("(slug like %(like)s or title like %(like)s or summary like %(like)s)")
-	if cint(attention):
-		values["stale_cutoff"] = frappe.utils.add_to_date(now_datetime(), days=-_STALE_DAYS)
-		conditions.append(
-			"(contradiction_flag = 1 or last_confirmed_at is null or last_confirmed_at < %(stale_cutoff)s)"
+		q.server_condition(
+			"(slug like %(like)s or title like %(like)s or summary like %(like)s)",
+			like=f"%{str(search).strip()[:140]}%",
 		)
-	where = " and ".join(conditions)
+	if cint(attention):
+		q.server_condition(
+			"(contradiction_flag = 1 or last_confirmed_at is null or last_confirmed_at < %(stale_cutoff)s)",
+			stale_cutoff=frappe.utils.add_to_date(now_datetime(), days=-_STALE_DAYS),
+		)
 
-	total = cint(frappe.db.sql(f"select count(*) from `tabJarvis Wiki Page` where {where}", values)[0][0])
-	values.update({"limit": pl, "offset": offset})
-	rows = frappe.db.sql(
+	q.apply(filters_v2)
+	where = q.where()
+	# `params()` raises on a collision with an already-bound predicate name, which
+	# a bare dict update would have silently overwritten — and overwriting a
+	# predicate's value changes what the WHERE means.
+	values = q.params({"limit": pl, "offset": offset})
+
+	total = cint(list_filters.bounded_sql(f"select count(*) from `tabJarvis Wiki Page` where {where}", values)[0][0])
+	rows = list_filters.bounded_sql(
 		f"""select name, slug, title, page_type, ifnull(scope, 'Org') as scope,
 			target_role, target_user, ref_doctype, ref_name, summary, status,
 			contradiction_flag, last_confirmed_at, modified
