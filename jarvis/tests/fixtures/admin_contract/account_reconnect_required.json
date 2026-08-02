@@ -1,0 +1,32 @@
+{
+  "contract_version": 2,
+  "name": "account_reconnect_required",
+  "description": "An authenticated state/check call for an account that is genuinely paid and has been running long enough to be an EXISTING setup rather than the signup anybody is finishing. 'Continue setup' would point this caller at a container it holds no credentials for; the emailed reconnect code is the path, and no payment is owed. Emitted by the authenticated surfaces ONLY - the guest duplicate rejection stays generic (ACCOUNT_ALREADY_EXISTS), because saying 'reconnect' to an unauthenticated caller would disclose that the account is live. A caller decides whether to OFFER reconnect from can_reconnect, which every envelope carries.",
+  "endpoint": "jarvis_admin_v2.billing.signup.check_signup_payment_status",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.attempt_id",
+    "body.message.data.payment_last_checked_at"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "ACCOUNT_RECONNECT_REQUIRED",
+        "pending_verification": false,
+        "subscription_status": "Active",
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "can_initiate_payment": false,
+        "can_check_status": false,
+        "can_reconnect": true,
+        "payment_last_checked_at": "2026-08-02 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1,
+        "gateway_consulted": false,
+        "recovery": "authenticate_or_reconnect"
+      }
+    }
+  }
+}

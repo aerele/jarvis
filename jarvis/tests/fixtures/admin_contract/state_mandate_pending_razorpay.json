@@ -1,0 +1,42 @@
+{
+  "contract_version": 2,
+  "name": "state_mandate_pending_razorpay",
+  "description": "Authenticated state poll for a RAZORPAY autopay signup awaiting mandate authorization. Kept beside state_mandate_pending because the two gateways' mandate handles are NOT the same shape and a reader must cope with both: Razorpay Checkout opens straight against the subscription id, so there is no browser session token here at all (and therefore INTENT_HANDLE_UNAVAILABLE can never arise on this path), while Cashfree's handle is useless without subscription_session_id. The trial disclosure fields are the same on both.",
+  "endpoint": "jarvis_admin_v2.billing.signup.get_signup_payment_state",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.razorpay_key_id",
+    "body.message.data.razorpay_subscription_id",
+    "body.message.data.effective_first_charge_at",
+    "body.message.data.payment_last_checked_at",
+    "body.message.data.attempt_id"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "PAYMENT_CONFIRMATION_PENDING",
+        "pending_verification": false,
+        "payment_provider": "razorpay",
+        "amount_inr": 999.0,
+        "plan": {
+          "name": "oc-test-rzp-monthly",
+          "label": "oc-test-rzp-monthly"
+        },
+        "signup_fee_inr": 0.0,
+        "due_today_inr": 0.0,
+        "effective_first_charge_at": 0,
+        "effective_trial_days": 14,
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "razorpay_key_id": "rzp_test_placeholder",
+        "razorpay_subscription_id": "sub_placeholder",
+        "trial_days": 14,
+        "payment_last_checked_at": "2026-08-01 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1
+      }
+    }
+  }
+}

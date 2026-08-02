@@ -1,0 +1,22 @@
+{
+  "contract_version": 2,
+  "name": "payment_check_rate_limited",
+  "description": "This account has asked for provider truth too often. Every uncached check spends a gateway call, so the cap is per CUSTOMER (the stock per-IP limiter is either one bench behind a NAT or a hundred behind a proxy). NOTHING is asserted about the payment - the caller waits `retry_after_seconds` and asks again, and MUST NOT treat this as a decline or offer to pay again. It carries a code rather than a bare 429 because 'back off' and 'your payment failed' are opposite instructions and a caller that can only read the status has to guess which one it got.",
+  "endpoint": "jarvis_admin_v2.billing.signup.check_signup_payment_status",
+  "http_status": 429,
+  "volatile": [
+    "body.message.error.message",
+    "body.message.error.retry_after_seconds"
+  ],
+  "body": {
+    "message": {
+      "ok": false,
+      "error": {
+        "code": "PAYMENT_CHECK_RATE_LIMITED",
+        "message": "We're still checking with your payment provider. Please try again in a moment.",
+        "recovery": "retry",
+        "retry_after_seconds": 1234
+      }
+    }
+  }
+}
