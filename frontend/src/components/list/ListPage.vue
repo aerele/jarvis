@@ -42,13 +42,28 @@
 					:loading="loading"
 					@click="$emit('refresh')"
 				/>
-				<!-- A page with no filter dimensions (e.g. Support, where Status is the
-				     only facet and it already rides the quick-filter strip) would
-				     otherwise render a dead Filter button whose popover only says
-				     "Empty - Choose a field to filter by". Mirror ColumnsButton's own
-				     v-if and drop it entirely. -->
+				<!-- Two filter surfaces, never both. A MIGRATED list (plan 08: it
+				     passes `filterState` with a registered view key) gets the shared
+				     schema-driven FilterGroup, whose field set is the server's
+				     per-caller catalog. Everything else keeps FilterButton and its
+				     page-authored `filterDefs` until its own wave migrates.
+				     A page with no filter dimensions at all (e.g. Support, where
+				     Status is the only facet and it already rides the quick-filter
+				     strip) would otherwise render a dead Filter button whose popover
+				     only says "Empty - Choose a field to filter by". Mirror
+				     ColumnsButton's own v-if and drop it entirely. -->
+				<FilterGroup
+					v-if="filterState && filterState.viewKey"
+					:schema="filterState.schema"
+					:schema-state="filterState.schemaState"
+					:schema-error="filterState.schemaError"
+					:clauses="filterState.clauses"
+					:error="filterState.error"
+					@update:clauses="(c) => $emit('update:filterClauses', c)"
+					@request-schema="$emit('request-filter-schema')"
+				/>
 				<FilterButton
-					v-if="filterDefs.length"
+					v-else-if="filterDefs.length"
 					:filter-defs="filterDefs"
 					:filters="filters"
 					@update:filters="(f) => $emit('update:filters', f)"
@@ -65,6 +80,44 @@
 					:storage-key="storageKey"
 					@update:hidden="(keys) => (hiddenKeys = keys)"
 				/>
+			</div>
+		</div>
+
+		<!-- Filter notices ride ABOVE the banner slot and OUTSIDE the popover: a
+		     link whose clauses no longer exist, and a rejection the server coded,
+		     both have to be readable without opening the panel that caused them
+		     (plan §8 step 4, "visibly report dropped/unavailable clauses"). -->
+		<div v-if="filterNotice" class="px-5 pb-3">
+			<div
+				class="flex items-center justify-between gap-2 rounded-md p-2"
+				:class="filterNotice.tone === 'error' ? 'bg-surface-red-2' : 'bg-surface-amber-2'"
+				role="status"
+			>
+				<div class="flex items-center gap-2">
+					<FeatherIcon
+						:name="filterNotice.tone === 'error' ? 'alert-triangle' : 'info'"
+						class="size-4"
+						:class="filterNotice.tone === 'error' ? 'text-ink-red-3' : 'text-ink-amber-3'"
+					/>
+					<span class="text-base font-medium text-ink-gray-8">
+						{{ filterNotice.message }}
+					</span>
+				</div>
+				<div class="flex items-center gap-1">
+					<Button
+						v-if="filterNotice.retry"
+						label="Retry"
+						:loading="loading"
+						@click="$emit('refresh')"
+					/>
+					<Button
+						v-if="filterNotice.dismissible"
+						variant="ghost"
+						icon="x"
+						aria-label="Dismiss"
+						@click="$emit('dismiss-filter-notice')"
+					/>
+				</div>
 			</div>
 		</div>
 
@@ -210,6 +263,7 @@ import {
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import FilterButton from "@/components/list/FilterButton.vue";
+import FilterGroup from "@/components/list/FilterGroup.vue";
 import SortButton from "@/components/list/SortButton.vue";
 import ColumnsButton from "@/components/list/ColumnsButton.vue";
 
@@ -226,6 +280,9 @@ const props = defineProps({
 	quickFilters: { type: Array, default: () => [] }, // [{key,label,type,options}]
 	filterDefs: { type: Array, default: () => [] }, // [{key,label,type:'select'|'daterange',options}]
 	filters: { type: Object, default: () => ({}) },
+	// plan 08: useListPage's `filterState` for a MIGRATED surface. Null (the
+	// default) keeps the legacy FilterButton path for every unmigrated list.
+	filterState: { type: Object, default: null },
 	sortOptions: { type: Array, default: () => [] }, // [{label, value}]
 	sort: { type: Object, default: () => ({ field: "", dir: "" }) },
 	pageLength: { type: Number, default: 20 },
@@ -239,12 +296,36 @@ const props = defineProps({
 
 const emit = defineEmits([
 	"update:filters",
+	"update:filterClauses",
+	"request-filter-schema",
+	"dismiss-filter-notice",
 	"update:sort",
 	"update:pageLength",
 	"loadMore",
 	"refresh",
 	"update:selections",
 ]);
+
+// One notice strip, two sources. The dropped-clause note is dismissible (the
+// user has read it and the clauses are already gone); a coded rejection is not,
+// because it is still true — it clears when a request succeeds. `transient`
+// (our schema/service, not the user's filter) is the only one worth a Retry.
+const filterNotice = computed(() => {
+	const state = props.filterState;
+	if (!state) return null;
+	if (state.error) {
+		return {
+			message: state.error.message,
+			tone: state.error.kind === "transient" ? "warning" : "error",
+			retry: state.error.kind === "transient",
+			dismissible: false,
+		};
+	}
+	if (state.notice) {
+		return { message: state.notice, tone: "warning", retry: false, dismissible: true };
+	}
+	return null;
+});
 
 // §14 F2 - ColumnsButton owns useStorage('jarvis-cols-'+storageKey) and pushes
 // the hidden-key list up; ListPage filters the visible columns from it.

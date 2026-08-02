@@ -18,7 +18,7 @@
 			:total="total"
 			:has-more="hasMore"
 			:quick-filters="quickFilters"
-			:filter-defs="filterDefs"
+			:filter-state="filterState"
 			:filters="filters"
 			:sort-options="sortOptions"
 			:sort="sort"
@@ -34,6 +34,9 @@
 					'Turn a chat into a repeatable macro with Save as macro, or create one here with New Macro.',
 			}"
 			@update:filters="setFilters"
+			@update:filter-clauses="setClauses"
+			@request-filter-schema="requestSchema"
+			@dismiss-filter-notice="dismissFilterNotice"
 			@update:sort="(s) => setSort(s.field, s.dir)"
 			@update:page-length="(v) => (pageLength = v)"
 			@load-more="loadMore"
@@ -130,7 +133,7 @@
 // schedule badge cells, inline ghost Run cell (gated while summarizing), bulk
 // delete (incl. run history) and macro:merged live refresh.
 import { ref, computed, inject, onMounted, onBeforeUnmount } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { Button, Badge, Tooltip, Dropdown, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import TabBar from "@/components/list/TabBar.vue";
@@ -145,6 +148,10 @@ const props = defineProps({
 });
 
 const router = useRouter();
+// /macros and /macros/runs are two routes over one component, so the `fv2`
+// clause payload carries its view key and the Runs tab's URL never applies the
+// Macros tab's filters (judgment C08-7).
+const route = useRoute();
 const socket = inject("$socket");
 
 function errMsg(e) {
@@ -174,12 +181,6 @@ const SCHEDULE_OPTIONS = [
 	{ label: "Scheduled", value: "1" },
 	{ label: "Manual", value: "0" },
 ];
-const FREQUENCY_OPTIONS = [
-	{ label: "All", value: "" },
-	{ label: "Daily", value: "daily" },
-	{ label: "Weekly", value: "weekly" },
-	{ label: "Monthly", value: "monthly" },
-];
 
 const columns = [
 	{ label: "Name", key: "macro_name", width: 2 },
@@ -199,11 +200,14 @@ const quickFilters = [
 	{ key: "enabled", label: "Status", type: "select", options: ENABLED_OPTIONS },
 	{ key: "schedule_enabled", label: "Schedule", type: "select", options: SCHEDULE_OPTIONS },
 ];
-const filterDefs = [
-	{ key: "enabled", label: "Status", type: "select", options: ENABLED_OPTIONS },
-	{ key: "schedule_enabled", label: "Schedule", type: "select", options: SCHEDULE_OPTIONS },
-	{ key: "schedule_frequency", label: "Frequency", type: "select", options: FREQUENCY_OPTIONS },
-];
+// plan 08 wave 1: the curated `filterDefs` array is GONE as the filter catalog.
+// The Filter panel is generated from the server schema for view_key "macros",
+// which is every readable Jarvis Macro field plus the standard fields plus the
+// Jarvis Macro Step child fields (compiled as one EXISTS, deviation D4) —
+// `schedule_frequency`, which used to need this array, is just one of them now.
+// Both remaining quick controls map 1:1 onto a canonical field, so both stay in
+// sync with the panel in either direction.
+const QUICK_CLAUSES = { enabled: "enabled", schedule_enabled: "schedule_enabled" };
 
 const sortOptions = [
 	{ label: "Updated", value: "modified" },
@@ -226,6 +230,10 @@ const {
 	resetLoad,
 	loadMore,
 	refreshKeep,
+	filterState,
+	setClauses,
+	requestSchema,
+	dismissFilterNotice,
 } = useListPage({
 	fetchFn: (p) => {
 		const { search: q, ...rest } = p.filters || {};
@@ -233,6 +241,10 @@ const {
 	},
 	defaultSort: DEFAULT_SORT,
 	storageKey: "macros",
+	viewKey: "macros",
+	quickClauses: QUICK_CLAUSES,
+	route,
+	router,
 });
 
 function getRowRoute(row) {

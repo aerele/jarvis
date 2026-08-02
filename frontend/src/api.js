@@ -210,8 +210,16 @@ export const getActiveTurn = (conversation) =>
 	call("jarvis.chat.admission.active_turn_for_conversation", { conversation });
 
 // Mentions: reuse Frappe's built-in Link-field search (no custom backend).
-export const searchLink = (doctype, txt) =>
-	call("frappe.desk.search.search_link", { doctype, txt: txt || "", page_length: 8 });
+// `pageLength` defaults to the mention picker's 8; the list FilterGroup asks for
+// plan 08 §9's Link-suggestion cap of 20. Frappe's own search_link enforces the
+// target DocType's read permission + user permissions, which is why plan 08 adds
+// no second search endpoint.
+export const searchLink = (doctype, txt, pageLength) =>
+	call("frappe.desk.search.search_link", {
+		doctype,
+		txt: txt || "",
+		page_length: pageLength || 8,
+	});
 
 // Field metadata for the record-edit action card: powers Link/Select/Date
 // controls (returns {ok, doctype, fields:[{fieldname,label,fieldtype,options}]}).
@@ -429,14 +437,29 @@ export const getAgentAdminOverview = () => call(AG + "get_agent_admin_overview")
 // `_page` normalizes the request args (search/filters/sort/paging) exactly as
 // the four backend endpoints expect; `filters` is JSON-encoded here so the SPA
 // passes a plain object and the server `frappe.parse_json`s it.
-const _page = (p = {}) => ({
-	search: p.search || "",
-	filters: JSON.stringify(p.filters || {}),
-	sort_field: p.sort_field || "",
-	sort_dir: p.sort_dir || "",
-	start: p.start || 0,
-	page_length: p.page_length || 20,
-});
+const _page = (p = {}) => {
+	const args = {
+		search: p.search || "",
+		filters: JSON.stringify(p.filters || {}),
+		sort_field: p.sort_field || "",
+		sort_dir: p.sort_dir || "",
+		start: p.start || 0,
+		page_length: p.page_length || 20,
+	};
+	// plan 08 §6.2: `filters_v2` is ADDITIVE and only sent when a migrated
+	// surface actually has clauses, so an unmigrated endpoint never sees an
+	// argument it does not declare.
+	if (Array.isArray(p.filters_v2) && p.filters_v2.length) {
+		args.filters_v2 = JSON.stringify(p.filters_v2);
+	}
+	return args;
+};
+
+// plan 08 §6.1: the fields THIS caller may filter `view_key` on, with the
+// per-field operators and defaults. Answers only for MIGRATED views; every
+// rejection carries a stable `list_filter_*` code (see filterModel.js).
+export const getListFilterSchema = (viewKey) =>
+	call("jarvis.chat.list_filters.get_list_filter_schema", { view_key: viewKey });
 export const listCustomSkillsPage = (p) => call(SK + "list_custom_skills_page", _page(p));
 export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));
