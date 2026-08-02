@@ -1455,8 +1455,11 @@ def get_chat_ui_settings() -> dict:
 		# Chat-home introduction (the static welcome bubble): the version the SPA
 		# should render. Paired with ``home_intro_seen_version`` below - the bubble
 		# shows only while this is greater. The server owns the number so a client
-		# can neither invent one nor mute a future introduction.
-		"home_intro_version": user_settings_api.HOME_INTRO_VERSION,
+		# can neither invent one nor mute a future introduction. When the operator
+		# kill switch is off the version drops to 0, so homeIntroDue is false for
+		# every user and the compact hero shows instead - no SPA change, same
+		# fail-quiet path as an old backend that never sent the key.
+		"home_intro_version": (user_settings_api.HOME_INTRO_VERSION if _home_intro_feature_enabled() else 0),
 		# auto-apply is per-conversation now (issue #186); the frontend reads
 		# ``auto_apply`` from the conversation payload, not this global endpoint.
 	}
@@ -1477,6 +1480,27 @@ def get_chat_ui_settings() -> dict:
 	if seen is not None:
 		ui["home_intro_seen_version"] = seen
 	return ui
+
+
+def _home_intro_feature_enabled() -> bool:
+	"""The first-chat welcome kill switch (``Jarvis Settings.home_intro_enabled``),
+	NULL=ON. Same idiom as ``_persona_feature_enabled`` / greeting's
+	``_voice_features_enabled``: probes the ``tabSingles`` row directly rather than
+	``get_single_value``, which coerces an unset Check to 0 (indistinguishable from
+	an operator explicitly disabling it) and would ship the welcome OFF for every
+	un-backfilled bench and fresh install. "No row" is the default (ON); only a
+	stored 0 is OFF. Best-effort (N8): a read failure shows the welcome rather than
+	500-ing the whole bootstrap."""
+	try:
+		row = frappe.db.sql(
+			"select value from tabSingles where doctype=%s and field=%s",
+			("Jarvis Settings", "home_intro_enabled"),
+		)
+	except Exception:
+		return True
+	if not row:
+		return True
+	return bool(frappe.utils.cint(row[0][0]))
 
 
 def _home_intro_seen_version() -> int | None:

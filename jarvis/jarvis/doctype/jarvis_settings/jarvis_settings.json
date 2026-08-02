@@ -49,6 +49,7 @@
   "voice_features_enabled",
   "wiki_enabled",
   "persona_enabled",
+  "home_intro_enabled",
   "wiki_nudge_cooldown_hours",
   "voice_notes_last_processed_at",
   "voice_notes_last_process_status",
@@ -377,6 +378,13 @@
    "label": "Enable Persona Picker",
    "default": "1",
    "description": "Jarvis/Jara voice picker in the composer. An explicit 0 hides the pill and stops the persona clause fleet-wide. Readers treat an unset value as ON."
+  },
+  {
+   "fieldname": "home_intro_enabled",
+   "fieldtype": "Check",
+   "label": "Enable First-Chat Welcome",
+   "default": "1",
+   "description": "The static, assistant-styled first-chat introduction on the empty chat home. An explicit 0 suppresses it fleet-wide (the compact hero shows instead); it never re-lectures a user who has already seen it. Readers treat an unset value as ON (Single defaults are not backfilled on migrate)."
   },
   {
    "fieldname": "wiki_nudge_cooldown_hours",
