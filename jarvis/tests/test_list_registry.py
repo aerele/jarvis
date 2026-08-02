@@ -113,26 +113,53 @@ def _ensure_floor_user() -> str:
 #: classified.
 _SWEPT_PACKAGES = ("jarvis.chat", "jarvis.support")
 
-#: Naming families that mark a whitelisted callable as a candidate list endpoint.
-#: `list_*` misses `admin_list_user_usage`; `admin_list_*` catches it. Anything
-#: outside these families declares itself with the annotation instead.
-_LIST_NAME_PREFIXES = ("list_", "admin_list_")
+#: Collection-SHAPED name families (S7). The audit used to key ONLY on
+#: `list_*`/`admin_list_*`, so a collection endpoint named anything else — a
+#: `search_*`, a `*_feed`, a `browse_*`, a `get_*_rows` — evaded discovery
+#: entirely and could ship unclassified. Discovery now recognises the whole family
+#: of collection verbs/suffixes (a prefix, a suffix, or a whole-word token), so a
+#: list endpoint can no longer hide behind its name; the `list_surface_endpoint`
+#: annotation remains the escape hatch for a genuinely oddly-named one.
+_LIST_NAME_PREFIXES = ("list_", "admin_list_", "search_", "browse_", "recent_", "all_")
+_LIST_NAME_SUFFIXES = (
+	"_list",
+	"_feed",
+	"_history",
+	"_activity",
+	"_runs",
+	"_rows",
+	"_records",
+	"_entries",
+	"_results",
+)
+#: Whole-word tokens (split on `_`) that mark a collection: `search_records`,
+#: `get_activity_feed`, `fetch_rows`.
+_LIST_NAME_TOKENS = frozenset({"list", "search", "browse", "feed", "history", "activity", "roster"})
 
 
 def _looks_like_list_endpoint(name: str, fn) -> bool:
 	if list_registry.is_list_surface_endpoint(fn):
 		return True
-	return any(name.startswith(p) for p in _LIST_NAME_PREFIXES)
+	if any(name.startswith(p) for p in _LIST_NAME_PREFIXES):
+		return True
+	if any(name.endswith(s) for s in _LIST_NAME_SUFFIXES):
+		return True
+	return bool(set(name.split("_")) & _LIST_NAME_TOKENS)
 
 
 def _whitelisted_list_callables() -> dict[str, object]:
 	"""Every whitelisted list-endpoint candidate across the customer API packages.
 
-	Widened for P0-04: it walks `jarvis.chat` AND `jarvis.support`, matches the
-	`list_*`/`admin_list_*` naming families (not `list_*` alone), and honours the
-	`list_surface_endpoint` annotation for anything named differently. Import
-	errors are NOT swallowed: a module that fails to import would silently shrink
-	the sweep, which is exactly the loophole this audit closes."""
+	Widened for P0-04 and again for S7: it walks `jarvis.chat` AND `jarvis.support`
+	and matches the WHOLE family of collection-shaped names — `list_*`/`admin_list_*`
+	plus `search_*`/`browse_*`/`recent_*`/`all_*` prefixes, `_feed`/`_history`/
+	`_activity`/`_runs`/`_rows`/`_records`/`_results`/`_entries`/`_list` suffixes, and
+	the `list`/`search`/`browse`/`feed`/`history`/`activity`/`roster` whole-word
+	tokens — so a collection endpoint can no longer evade discovery by being named
+	something other than `list_*` (the round-2 hole). `list_surface_endpoint` remains
+	the annotation escape hatch for a genuinely oddly-named one. Import errors are NOT
+	swallowed: a module that fails to import would silently shrink the sweep, which is
+	exactly the loophole this audit closes."""
 	found: dict[str, object] = {}
 	for package in _SWEPT_PACKAGES:
 		root = importlib.import_module(package)
@@ -210,10 +237,13 @@ class TestListRegistryIntegrity(FrappeTestCase):
 		"""The audit's one remaining hole, closed.
 
 		Everything above proves that what IS registered is well-formed; nothing
-		proved that nothing is MISSING. This sweeps every whitelisted ``list_*``
-		callable under jarvis/chat and requires each to be either a registered
-		view's endpoint or an explicitly classified non-list. A new list endpoint
-		therefore cannot ship without someone writing down what it is.
+		proved that nothing is MISSING. This sweeps every whitelisted
+		COLLECTION-SHAPED callable under jarvis/chat and jarvis/support — the full
+		name family, not `list_*` alone (S7) — and requires each to be either a
+		registered view's endpoint or an explicitly classified non-list. A new list
+		endpoint therefore cannot ship without someone writing down what it is, and
+		it can no longer slip past by being named `search_*`, `*_feed`, `*_history`
+		or the like.
 		"""
 		registered = {e for v in list_registry.all_views() for e in v.endpoints}
 		unclassified = sorted(
