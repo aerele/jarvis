@@ -511,6 +511,13 @@ rather than a test.
   rediscovers it as a bug.
 - **`is_large_table`** is reported per view; when true the `Data` default is `=`
   and the UI should say why.
+- **Filters are sticky across navigation** (ruled, Frappe-consistent): bare
+  sidebar / command-palette navigation back to a list preserves its active
+  filters, and every tab switch within a list's own shell carries the `fv2`
+  query param, because a tab is a view of one page and not a reset. **Clear All
+  is the only unfilter affordance** — no navigation may quietly drop a filter
+  set, which is why the URL param is the state of record and the panel refuses
+  to write one too large to survive the round trip.
 
 ## 8. Track the sunset
 
