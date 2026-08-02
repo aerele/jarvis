@@ -262,13 +262,7 @@ describe("URL state", () => {
 		expect(router.replace.mock.calls.length).toBe(writes);
 		expect(fetchFn.mock.calls.length).toBe(calls);
 
-		// Back to the unfiltered URL
-		navigate({});
-		await flushPromises();
-		expect(api.filterClauses.value).toEqual([]);
-		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
-
-		// Forward again
+		// A navigation to a DIFFERENT payload is honoured
 		navigate({
 			[URL_PARAM]: JSON.stringify({
 				v: 1,
@@ -278,6 +272,42 @@ describe("URL state", () => {
 		});
 		await flushPromises();
 		expect(fetchFn.mock.calls.at(-1)[0].filters_v2[0].value).toBe("back again");
+	});
+
+	// P1-1: inside one mounted list, a transition to NO param is a navigation
+	// that dropped the query (a tab switch resolves `{name}`/`{hash}` without
+	// it), never an intentional clear — an intentional clear goes through
+	// setClauses. The composable re-asserts what is actually in force.
+	it("ignores a transition-to-empty it did not author, and puts the param back", async () => {
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
+		const { route, router, navigate } = routerDouble();
+		const { api } = host({ fetchFn, storageKey: "u5b", viewKey: "skills", route, router, fetchSchema });
+		await flushPromises();
+		await api.setClauses([clause(DESCRIPTION, "month end")]);
+		await flushPromises();
+		const fetches = fetchFn.mock.calls.length;
+
+		navigate({}); // the tab switch
+		await flushPromises();
+
+		expect(api.filterClauses.value).toHaveLength(1);
+		expect(JSON.parse(route.query[URL_PARAM]).c[0][3]).toBe("month end");
+		expect(fetchFn.mock.calls.length).toBe(fetches); // and no wasted refetch
+	});
+
+	it("still honours an authored clear", async () => {
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
+		const { route, router } = routerDouble();
+		const { api } = host({ fetchFn, storageKey: "u5c", viewKey: "skills", route, router, fetchSchema });
+		await flushPromises();
+		await api.setClauses([clause(DESCRIPTION, "month end")]);
+		await api.setClauses([]);
+		await flushPromises();
+		expect(route.query[URL_PARAM]).toBeUndefined();
+		expect(api.filterClauses.value).toEqual([]);
+		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
 	});
 
 	it("ignores a payload a sibling tab on the same route wrote", async () => {

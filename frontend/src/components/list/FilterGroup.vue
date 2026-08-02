@@ -3,6 +3,7 @@
 		<Popover placement="bottom-end" @open="onOpen">
 			<template #target="{ togglePopover }">
 				<Button
+					ref="triggerEl"
 					label="Filter"
 					iconLeft="filter"
 					:class="count ? 'rounded-r-none' : ''"
@@ -90,7 +91,7 @@
 										<div class="w-32 shrink-0">
 											<FormControl
 												type="select"
-												:aria-label="`Condition for ${labelOf(clause)}`"
+												:aria-label="`Condition for ${rowName(i)}`"
 												:options="operatorOptions(clause)"
 												:modelValue="clause.operator"
 												@update:modelValue="(v) => pickOperator(i, v)"
@@ -101,6 +102,7 @@
 											<FilterValueControl
 												:entry="entryOf(clause)"
 												:clause="clause"
+												:row-name="rowName(i)"
 												:max-values="limits.max_in_values"
 												@update:value="(v) => setValue(i, v)"
 											/>
@@ -108,7 +110,7 @@
 										<Button
 											variant="ghost"
 											icon="x"
-											:aria-label="`Remove filter on ${labelOf(clause)}`"
+											:aria-label="`Remove filter on ${rowName(i)}`"
 											@click="removeAt(i)"
 										/>
 									</div>
@@ -174,7 +176,7 @@
 			class="rounded-l-none border-l"
 			:tooltip="'Clear all filters'"
 			aria-label="Clear all filters"
-			@click="clearAll"
+			@click="clearAll({ toTrigger: true })"
 		/>
 	</div>
 </template>
@@ -275,6 +277,33 @@ function operatorOptions(clause) {
 	}));
 }
 
+/**
+ * What a screen reader calls this row.
+ *
+ * The same field may legitimately appear more than once (that is the whole
+ * point of clauses over a `{key: value}` object), and "Condition for Created On"
+ * announced twice is two controls a non-sighted user cannot tell apart. Repeats
+ * get a 1-based ordinal; a label that appears once is left clean.
+ */
+const rowNames = computed(() => {
+	const counts = new Map();
+	for (const clause of props.clauses) {
+		const label = labelOf(clause);
+		counts.set(label, (counts.get(label) || 0) + 1);
+	}
+	const seen = new Map();
+	return props.clauses.map((clause) => {
+		const label = labelOf(clause);
+		if ((counts.get(label) || 0) < 2) return label;
+		const n = (seen.get(label) || 0) + 1;
+		seen.set(label, n);
+		return `${label} (filter ${n})`;
+	});
+});
+function rowName(i) {
+	return rowNames.value[i] || "field";
+}
+
 function isPending(clause) {
 	return !isComplete(clause, entryOf(clause));
 }
@@ -300,8 +329,11 @@ const panelError = computed(() => {
 });
 
 // ── mutations (always emit a NEW array; the parent owns the state) ──────────
-function replace(next) {
-	emit("update:clauses", next);
+// `immediate: false` says "the user is still typing": useListPage applies the
+// model at once but waits out its debounce before turning it into a request and
+// a URL. Every other mutation is a discrete decision and commits now.
+function replace(next, opts) {
+	emit("update:clauses", next, opts || { immediate: true });
 }
 
 function lookup(option) {
@@ -315,6 +347,7 @@ function lookup(option) {
 // drops focus on <body> and a keyboard user restarts from the top of the page.
 const rowsEl = ref(null);
 const addEl = ref(null);
+const triggerEl = ref(null);
 // Where focus should land once the PARENT has applied the change. Focusing at
 // mutation time would race the round trip through useListPage, so the intent is
 // recorded here and spent when the row count actually moves.
@@ -330,8 +363,24 @@ watch(
 	}
 );
 
+// `ref` on a component hands back the instance, not the element.
+function elementOf(handle) {
+	const el = handle && (handle.$el || handle);
+	return el && el.focus ? el : null;
+}
+
 function focusRow(i) {
 	nextTick(() => {
+		if (focusTarget === "trigger") {
+			// The clear-X outside the popover: the popover is closed, so there is no
+			// row to land on and "+ Add Filter" is not on screen either. Focus goes
+			// back to the control the user just pressed next to.
+			focusTarget = null;
+			const trigger = elementOf(triggerEl.value);
+			if (trigger) trigger.focus();
+			return;
+		}
+		focusTarget = null;
 		const rows = rowsEl.value ? rowsEl.value.querySelectorAll("[data-filter-row]") : [];
 		const row = rows.length ? rows[Math.min(i, rows.length - 1)] : null;
 		const control = row && row.querySelector("select, input, button");
@@ -339,11 +388,11 @@ function focusRow(i) {
 			control.focus();
 			return;
 		}
-		// `ref` on a component hands back the instance, not the element.
-		const add = addEl.value && (addEl.value.$el || addEl.value);
-		if (add && add.focus) add.focus();
+		const add = elementOf(addEl.value);
+		if (add) add.focus();
 	});
 }
+let focusTarget = null;
 
 function addFilter(option) {
 	const entry = lookup(option);
@@ -364,10 +413,11 @@ function pickOperator(i, operator) {
 	next[i] = setOperator(next[i], operator);
 	replace(next);
 }
-function setValue(i, value) {
+function setValue(i, patch) {
+	const { immediate, ...value } = patch || {};
 	const next = props.clauses.slice();
 	next[i] = { ...next[i], ...value };
-	replace(next);
+	replace(next, { immediate: immediate !== false });
 }
 function removeAt(i) {
 	const next = props.clauses.slice();
@@ -375,8 +425,13 @@ function removeAt(i) {
 	focusIntent = i;
 	replace(next);
 }
-function clearAll() {
+function clearAll(opts) {
 	if (!props.clauses.length) return;
+	// Clearing empties the row list, so focus has nowhere natural to go: from
+	// inside the popover it lands on "+ Add Filter" (via focusRow's fallback),
+	// from the outer split button it goes back to the Filter trigger.
+	focusTarget = opts && opts.toTrigger ? "trigger" : null;
+	focusIntent = 0;
 	replace([]);
 }
 </script>

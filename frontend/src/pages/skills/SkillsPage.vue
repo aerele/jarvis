@@ -134,10 +134,10 @@ function applyHash() {
 	else if (h === "analysis" && analysisAllowed.value) activeTab.value = "analysis";
 	else if (h === "learning" && reviewAllowed.value) {
 		activeTab.value = "review";
-		router.replace({ hash: "#review" });
+		router.replace({ hash: "#review", query: { ...route.query } });
 	} else if (h === "business" && personaliseAllowed.value) {
 		activeTab.value = "personalise";
-		router.replace({ hash: "#personalise" });
+		router.replace({ hash: "#personalise", query: { ...route.query } });
 	} else if (h === "personalise" && personaliseAllowed.value) activeTab.value = "personalise";
 	else if (h === "wiki" && personaliseAllowed.value) activeTab.value = "wiki";
 	else if (h === "graph" && graph3dOn && personaliseAllowed.value) activeTab.value = "graph";
@@ -149,7 +149,7 @@ function applyHash() {
 		// the caps probe settles: the setup-time applyHash() runs with all gates
 		// still false, and clearing there would destroy a legitimate deep link
 		// (#personalise) before the probe can honor it.
-		if (h && probeSettled) router.replace({ hash: "" });
+		if (h && probeSettled) router.replace({ hash: "", query: { ...route.query } });
 	}
 }
 let probeSettled = false;
@@ -160,7 +160,10 @@ function setTab(v) {
 	if ((v === "personalise" || v === "wiki") && !personaliseAllowed.value) return;
 	if (v === "graph" && !(graph3dOn && personaliseAllowed.value)) return;
 	activeTab.value = v;
-	router.push({ hash: v === "skills" ? "" : `#${v}` });
+	// The query rides along: a `{hash}` location resolves WITHOUT the current
+	// query, so switching tabs used to throw away the Skills list's `fv2` filter
+	// payload (and the tab strip is a view of one page, not a reset).
+	router.push({ hash: v === "skills" ? "" : `#${v}`, query: { ...route.query } });
 }
 applyHash();
 // back/forward restores the tab (guard to this route so other pages' hashes,

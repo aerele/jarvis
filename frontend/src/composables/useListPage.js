@@ -25,10 +25,15 @@ import {
 	activeCount,
 	makeClause,
 	isComplete,
+	isShapeComplete,
 	serializeClauses,
 	parseClauseParam,
+	isUrlPayloadTooLarge,
 	reconcileClauses,
 	droppedNotice,
+	skippedNotice,
+	UNREADABLE_NOTICE,
+	URL_TOO_LARGE_NOTICE,
 	filterErrorInfo,
 } from "@/components/list/filterModel";
 
@@ -44,9 +49,18 @@ export function useListPage({
 	// ── plan 08 ──
 	viewKey = "", // registered list view; "" keeps the legacy-only behaviour
 	quickClauses = {}, // {quickFilterKey: fieldname} — the 1:1 mappings only
+	// The view's root DocType. NOT a field catalog — that only ever comes from
+	// the server — but the view's identity, mirroring its list_registry entry. It
+	// is what lets a quick filter become a canonical, shareable clause BEFORE the
+	// catalog has been fetched; once the schema lands its own `root_doctype` wins.
+	rootDoctype: declaredRoot = "",
 	route = null, // vue-router route/router; omitted ⇒ no URL state
 	router = null,
 	fetchSchema = null, // injectable for tests; defaults to the real endpoint
+	// How long a typed value waits before it becomes a request (P2-3). Applies to
+	// the whole clause model, so it covers every control family regardless of what
+	// props the individual input happens to support.
+	clauseDebounceMs = 300,
 }) {
 	const rows = ref([]);
 	const total = ref(0);
@@ -84,6 +98,9 @@ export function useListPage({
 	// the request that builds page one, not applied a render later.
 	const urlSeed = route ? parseClauseParam(route.query && route.query[URL_PARAM], viewKey) : null;
 	if (urlSeed && urlSeed.clauses.length) filterClauses.value = urlSeed.clauses;
+	// The last `fv2` value THIS composable put in the URL. Two jobs: recognising
+	// the router's echo of our own write, and telling an authored clear apart
+	// from a navigation that dropped our query (see the watcher).
 	let lastWrittenUrl = (route && route.query && route.query[URL_PARAM]) || "";
 
 	function wireClauses() {
@@ -263,9 +280,13 @@ export function useListPage({
 		const { kept, dropped } = reconcileClauses(filterClauses.value, index.value);
 		if (!dropped.length) return false;
 		filterClauses.value = kept;
-		filterNotice.value = droppedNotice(dropped);
+		noteFilter(droppedNotice(dropped));
 		writeUrl();
 		return true;
+	}
+	/** Newest notice wins; they are all "something you asked for did not happen". */
+	function noteFilter(message) {
+		if (message) filterNotice.value = message;
 	}
 	function dismissFilterNotice() {
 		filterNotice.value = "";
@@ -275,8 +296,11 @@ export function useListPage({
 	// Only 1:1 mappings live in `quickClauses`: a quick control that is an
 	// ownership/scope pseudo-filter (Skills' mine|shared) has no canonical field
 	// behind it and stays legacy-only.
+	// The schema's answer wins once it exists; before that, the view's declared
+	// identity stands in, so a quick filter is canonical (and shareable) from the
+	// first click rather than only after someone opens the panel.
 	function rootDoctype() {
-		return (schema.value && schema.value.root_doctype) || "";
+		return (schema.value && schema.value.root_doctype) || declaredRoot || "";
 	}
 	function clausesOn(fieldname) {
 		const root = rootDoctype();
@@ -285,15 +309,17 @@ export function useListPage({
 
 	/** quick control → canonical clause (replaces whatever was on that field). */
 	function materializeQuick(keys) {
-		if (!schema.value || !keys || !keys.length) return;
 		const root = rootDoctype();
+		if (!root || !keys || !keys.length) return false;
 		let next = filterClauses.value;
 		let touched = false;
 		for (const key of keys) {
 			const fieldname = quickClauses[key];
 			if (!fieldname) continue;
-			const entry = entryFor(index.value, { doctype: root, fieldname });
-			if (!entry) continue;
+			// With a catalog, a quick key that is not in it stays legacy-only — we
+			// will not invent a clause the server would reject. Without one, the
+			// shape is all we can check, and that is enough to build the clause.
+			if (schema.value && !entryFor(index.value, { doctype: root, fieldname })) continue;
 			const value = filters[key];
 			next = next.filter((c) => !(c.doctype === root && c.fieldname === fieldname));
 			if (value !== undefined && value !== null && String(value) !== "") {
@@ -305,6 +331,7 @@ export function useListPage({
 			touched = true;
 		}
 		if (touched) filterClauses.value = next;
+		return touched;
 	}
 
 	/**
@@ -314,34 +341,62 @@ export function useListPage({
 	 * leaves the legacy argument out of the request) rather than lying.
 	 */
 	function reflectQuick() {
-		if (!schema.value) return;
 		const root = rootDoctype();
+		if (!root) return;
 		for (const [key, fieldname] of Object.entries(quickClauses)) {
 			const entry = entryFor(index.value, { doctype: root, fieldname });
-			if (!entry) continue;
+			if (schema.value && !entry) continue;
 			const matches = clausesOn(fieldname);
 			const only = matches.length === 1 ? matches[0] : null;
-			if (only && only.operator === "=" && isComplete(only, entry)) filters[key] = String(only.value);
+			const complete = only && (entry ? isComplete(only, entry) : isShapeComplete(only));
+			if (only && only.operator === "=" && complete) filters[key] = String(only.value);
 			else delete filters[key];
 		}
 	}
 
 	/**
-	 * The one-time handshake when the schema lands: whatever the toolbar already
-	 * shows becomes canonical, so opening the panel does not appear to lose the
-	 * quick filter the user set before it loaded.
+	 * Whatever the toolbar already shows becomes canonical. Runs on mount and
+	 * again when the catalog lands, and it must run BEFORE `reflectQuick` in both
+	 * places: reflect derives the quick control FROM the clauses, so reflecting
+	 * first on a URL-seeded mount would see no clause for `enabled` and delete the
+	 * page's own initial quick filter (waves 2-4 inherit this path — File Box
+	 * mounts with a status filter already set).
 	 */
 	function adoptQuickOnSchemaReady() {
 		const keys = Object.keys(quickClauses).filter(
 			(k) => filters[k] !== undefined && String(filters[k]) !== "" && !clausesOn(quickClauses[k]).length
 		);
-		materializeQuick(keys);
+		return materializeQuick(keys);
 	}
 
-	function setClauses(next) {
+	/**
+	 * @param next   the new clause array
+	 * @param opts   `{immediate: false}` for a value still being typed — the model
+	 *               and the panel update at once, but the request and the URL wait
+	 *               out `clauseDebounceMs`. Discrete picks stay instant.
+	 */
+	function setClauses(next, opts) {
 		filterClauses.value = Array.isArray(next) ? next : [];
 		filterError.value = null;
 		reflectQuick();
+		if (opts && opts.immediate === false) return scheduleClauseCommit();
+		return commitClauses();
+	}
+
+	// One debounce for the whole clause model (P2-3). Debouncing inside each
+	// control would cover only the families whose input happens to support it —
+	// this covers every one of them, including future ones.
+	let clauseTimer = null;
+	function scheduleClauseCommit() {
+		clearTimeout(clauseTimer);
+		clauseTimer = setTimeout(() => {
+			clauseTimer = null;
+			commitClauses();
+		}, clauseDebounceMs);
+	}
+	function commitClauses() {
+		clearTimeout(clauseTimer);
+		clauseTimer = null;
 		writeUrl();
 		return resetLoad();
 	}
@@ -354,11 +409,25 @@ export function useListPage({
 	function writeUrl() {
 		if (!viewKey || !route || !router) return;
 		const param = serializeClauses(viewKey, filterClauses.value, index.value);
+		// A payload past the bound would be written and then read back as
+		// UNREADABLE on the next load — the app handing the user a broken link it
+		// made itself. Keep the last shareable param instead, and say so once.
+		if (isUrlPayloadTooLarge(param)) {
+			if (!urlTooLarge) {
+				urlTooLarge = true;
+				noteFilter(URL_TOO_LARGE_NOTICE);
+			}
+			return;
+		}
+		urlTooLarge = false;
 		const current = (route.query && route.query[URL_PARAM]) || "";
 		if (param === current) {
 			lastWrittenUrl = param;
 			return;
 		}
+		// Having nothing to write is not a licence to delete someone else's
+		// payload: on a shared route the param may belong to a sibling tab's list.
+		if (!param && current && parseClauseParam(current, viewKey) === null) return;
 		const query = { ...(route.query || {}) };
 		if (param) query[URL_PARAM] = param;
 		else delete query[URL_PARAM];
@@ -366,21 +435,60 @@ export function useListPage({
 		const nav = router.replace({ query });
 		if (nav && typeof nav.catch === "function") nav.catch(() => {});
 	}
+	let urlTooLarge = false;
+
+	/**
+	 * The ONE path from a `fv2` string to applied state — used by the first load
+	 * and by every later navigation, so back/forward gets exactly the grace the
+	 * first load gets: fetch the catalog if we do not have one, reconcile against
+	 * it, report what was dropped, then adopt-and-reflect the quick controls.
+	 */
+	async function applyUrlClauses(raw) {
+		const parsed = parseClauseParam(raw, viewKey, schema.value);
+		if (parsed === null && raw) return false; // addressed to a sibling tab's list
+		if (parsed === null) {
+			filterClauses.value = []; // no payload: an authored clear
+		} else if (parsed.unreadable) {
+			filterClauses.value = [];
+			noteFilter(UNREADABLE_NOTICE);
+		} else {
+			filterClauses.value = parsed.clauses;
+			noteFilter(skippedNotice(parsed.skipped));
+		}
+		filterError.value = null;
+		if (filterClauses.value.length && !schema.value) await ensureSchema();
+		if (schema.value) dropUnavailableClauses();
+		// Adopt BEFORE reflect: see adoptQuickOnSchemaReady.
+		adoptQuickOnSchemaReady();
+		reflectQuick();
+		writeUrl();
+		// A catalog we could not build is OUR failure, not the link's: the clauses
+		// still go to the server, which re-validates them and answers with a coded
+		// rejection if they are wrong. Dropping them here would silently show an
+		// UNfiltered list for a filtered URL.
+		return true;
+	}
 
 	let stopUrlWatch = null;
 	if (viewKey && route) {
 		stopUrlWatch = watch(
 			() => (route.query && route.query[URL_PARAM]) || "",
-			(raw) => {
+			async (raw) => {
 				// Our own write, echoed back by the router - not a navigation.
 				if (raw === lastWrittenUrl) return;
+				// A transition to NO param that we did not author. Inside one mounted
+				// list that is a navigation which dropped the query - a tab switch
+				// through `router.push({name})` or `{hash}`, both of which resolve
+				// without the current query - not an intentional clear, because an
+				// intentional clear goes through setClauses and sets lastWrittenUrl
+				// first. Re-assert what is actually in force rather than silently
+				// wiping the user's filters.
+				if (!raw && lastWrittenUrl) {
+					writeUrl();
+					return;
+				}
 				lastWrittenUrl = raw;
-				const parsed = parseClauseParam(raw, viewKey, schema.value);
-				filterClauses.value = parsed ? parsed.clauses : [];
-				filterError.value = null;
-				if (schema.value) dropUnavailableClauses();
-				reflectQuick();
-				resetLoad();
+				if (await applyUrlClauses(raw)) resetLoad();
 			}
 		);
 	}
@@ -395,23 +503,24 @@ export function useListPage({
 	watch(pageLength, () => resetLoad());
 
 	onMounted(async () => {
-		if (viewKey && filterClauses.value.length) {
-			// A link arrived with filters: the catalog decides which of them this
-			// caller may still use, and that answer must precede page one.
-			await ensureSchema();
-			if (schema.value) {
-				dropUnavailableClauses();
+		if (viewKey) {
+			// A link may have arrived with filters: the catalog decides which of
+			// them this caller may still use, and that answer must precede page one.
+			// Same function the watcher uses, so the two cannot drift.
+			if (urlSeed !== null) await applyUrlClauses((route.query && route.query[URL_PARAM]) || "");
+			else {
+				// No payload at all — but the page may still have handed us initial
+				// quick filters, and those are canonical too.
+				adoptQuickOnSchemaReady();
 				reflectQuick();
+				writeUrl();
 			}
-			// A schema we could not build is OUR failure, not the link's: the
-			// clauses still go to the server, which re-validates them and answers
-			// with a coded rejection if they are wrong. Dropping them here would
-			// silently show an UNfiltered list for a filtered URL.
 		}
 		resetLoad();
 	});
 	onBeforeUnmount(() => {
 		clearTimeout(searchTimer);
+		clearTimeout(clauseTimer);
 		schemaSeq += 1; // fence any in-flight schema response
 		if (stopUrlWatch) stopUrlWatch();
 	});
@@ -442,7 +551,7 @@ export function useListPage({
 		}
 		return ensureSchema().then((res) => {
 			if (res) {
-				adoptQuickOnSchemaReady();
+				if (adoptQuickOnSchemaReady()) writeUrl();
 				dropUnavailableClauses();
 			}
 			return res;

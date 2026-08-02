@@ -59,7 +59,7 @@
 					:schema-error="filterState.schemaError"
 					:clauses="filterState.clauses"
 					:error="filterState.error"
-					@update:clauses="(c) => $emit('update:filterClauses', c)"
+					@update:clauses="(c, o) => $emit('update:filterClauses', c, o)"
 					@request-schema="$emit('request-filter-schema')"
 				/>
 				<FilterButton
@@ -86,32 +86,37 @@
 		<!-- Filter notices ride ABOVE the banner slot and OUTSIDE the popover: a
 		     link whose clauses no longer exist, and a rejection the server coded,
 		     both have to be readable without opening the panel that caused them
-		     (plan §8 step 4, "visibly report dropped/unavailable clauses"). -->
-		<div v-if="filterNotice" class="px-5 pb-3">
+		     (plan §8 step 4, "visibly report dropped/unavailable clauses").
+		     They STACK — a rejection does not hide the note explaining that some
+		     of the link's filters were removed, because the note is often the
+		     reason the results look wrong. -->
+		<div v-if="filterNotices.length" class="flex flex-col gap-2 px-5 pb-3">
 			<div
+				v-for="notice in filterNotices"
+				:key="notice.key"
 				class="flex items-center justify-between gap-2 rounded-md p-2"
-				:class="filterNotice.tone === 'error' ? 'bg-surface-red-2' : 'bg-surface-amber-2'"
+				:class="notice.tone === 'error' ? 'bg-surface-red-2' : 'bg-surface-amber-2'"
 				role="status"
 			>
 				<div class="flex items-center gap-2">
 					<FeatherIcon
-						:name="filterNotice.tone === 'error' ? 'alert-triangle' : 'info'"
+						:name="notice.tone === 'error' ? 'alert-triangle' : 'info'"
 						class="size-4"
-						:class="filterNotice.tone === 'error' ? 'text-ink-red-3' : 'text-ink-amber-3'"
+						:class="notice.tone === 'error' ? 'text-ink-red-3' : 'text-ink-amber-3'"
 					/>
 					<span class="text-base font-medium text-ink-gray-8">
-						{{ filterNotice.message }}
+						{{ notice.message }}
 					</span>
 				</div>
 				<div class="flex items-center gap-1">
 					<Button
-						v-if="filterNotice.retry"
+						v-if="notice.retry"
 						label="Retry"
 						:loading="loading"
 						@click="$emit('refresh')"
 					/>
 					<Button
-						v-if="filterNotice.dismissible"
+						v-if="notice.dismissible"
 						variant="ghost"
 						icon="x"
 						aria-label="Dismiss"
@@ -306,25 +311,33 @@ const emit = defineEmits([
 	"update:selections",
 ]);
 
-// One notice strip, two sources. The dropped-clause note is dismissible (the
-// user has read it and the clauses are already gone); a coded rejection is not,
-// because it is still true — it clears when a request succeeds. `transient`
-// (our schema/service, not the user's filter) is the only one worth a Retry.
-const filterNotice = computed(() => {
+// Two sources, stacked, note first. The note is dismissible (the user has read
+// it and the clauses are already gone); a coded rejection is not, because it is
+// still true — it clears when a request succeeds. `transient` (our schema or
+// service, not the user's filter) is the only one worth a Retry.
+const filterNotices = computed(() => {
 	const state = props.filterState;
-	if (!state) return null;
+	if (!state) return [];
+	const notices = [];
+	if (state.notice) {
+		notices.push({
+			key: "notice",
+			message: state.notice,
+			tone: "warning",
+			retry: false,
+			dismissible: true,
+		});
+	}
 	if (state.error) {
-		return {
+		notices.push({
+			key: "error",
 			message: state.error.message,
 			tone: state.error.kind === "transient" ? "warning" : "error",
 			retry: state.error.kind === "transient",
 			dismissible: false,
-		};
+		});
 	}
-	if (state.notice) {
-		return { message: state.notice, tone: "warning", retry: false, dismissible: true };
-	}
-	return null;
+	return notices;
 });
 
 // §14 F2 - ColumnsButton owns useStorage('jarvis-cols-'+storageKey) and pushes

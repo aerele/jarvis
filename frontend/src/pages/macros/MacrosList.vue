@@ -167,7 +167,14 @@ const activeTab = computed(() => (props.tab === "runs" ? "runs" : "macros"));
 
 function onTab(v) {
 	if (v === activeTab.value) return;
-	router.push(v === "runs" ? { name: "MacroRuns" } : { name: "MacrosList" });
+	// Carry the query across. A named location without one resolves to a URL with
+	// NO query at all, so a bare `router.push({name:'MacroRuns'})` silently threw
+	// away the `fv2` filter payload — switch to Runs and back and every filter was
+	// gone. The tab is a different route over the same list state, not a reset.
+	router.push({
+		name: v === "runs" ? "MacroRuns" : "MacrosList",
+		query: { ...route.query },
+	});
 }
 
 // ── list config ──────────────────────────────────────────────────────────────
@@ -243,6 +250,10 @@ const {
 	storageKey: "macros",
 	viewKey: "macros",
 	quickClauses: QUICK_CLAUSES,
+	// The view's identity (it mirrors this view's list_registry entry), NOT a
+	// field catalog — that only ever comes from the server. It lets a quick
+	// filter become a canonical, shareable clause before the catalog is fetched.
+	rootDoctype: "Jarvis Macro",
 	route,
 	router,
 });

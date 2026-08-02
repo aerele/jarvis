@@ -212,6 +212,10 @@ const {
 	storageKey: "skills",
 	viewKey: "skills",
 	quickClauses: QUICK_CLAUSES,
+	// The view's identity (it mirrors this view's list_registry entry), NOT a
+	// field catalog — that only ever comes from the server. It lets a quick
+	// filter become a canonical, shareable clause before the catalog is fetched.
+	rootDoctype: "Jarvis Custom Skill",
 	route,
 	router,
 });

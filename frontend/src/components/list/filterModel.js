@@ -29,7 +29,9 @@ export const DEFAULT_LIMITS = {
 export const MAX_URL_CHARS = 8000;
 
 // Operator vocabulary, labelled as Frappe labels them. The schema decides WHICH
-// of these a field offers; this map only supplies the words.
+// of these a field offers; this map only supplies the words. Its KEYS are also
+// the whole operator vocabulary — a URL naming anything else is not a clause we
+// can render, whatever the schema says.
 export const OPERATOR_LABELS = {
 	"=": "equals",
 	"!=": "not equals",
@@ -54,6 +56,9 @@ const TEMPORAL_OPERATOR_LABELS = {
 	">=": "on or after",
 	"<=": "on or before",
 };
+
+/** Every operator the wire understands. Derived, so the two cannot drift. */
+export const OPERATORS = Object.freeze(Object.keys(OPERATOR_LABELS));
 
 /** frappe.utils.data.get_timespan_date_range's accepted tokens, in its own order. */
 export const TIMESPANS = [
@@ -88,6 +93,12 @@ const NUMERIC_FIELDTYPES = new Set([
 	"Duration",
 	"Rating",
 ]);
+
+/** "last 7 days" → "Last 7 days". The WIRE value is never touched. */
+export function timespanLabel(token) {
+	const text = String(token || "");
+	return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+}
 
 export function operatorLabel(operator, fieldtype) {
 	if (
@@ -465,31 +476,69 @@ function boundValue(value, limits) {
 	return String(value).slice(0, limits.max_value_chars);
 }
 
+/** True when a payload is too long to put in a URL that will survive the trip. */
+export function isUrlPayloadTooLarge(param) {
+	return typeof param === "string" && param.length > MAX_URL_CHARS;
+}
+
 /**
- * Parse and BOUND a `fv2=` payload (plan §8 step 2). Anything malformed reads as
- * "no filters" rather than throwing a page away; anything oversized is refused
- * before it is parsed.
+ * The result of a payload we could not read AT ALL — truncated in a chat client,
+ * over the length bound, hand-mangled, or written by a newer contract version.
+ *
+ * This is deliberately NOT `null`. `null` means "there is nothing here for us"
+ * (no param, or a payload addressed to a sibling tab's list) and is correctly
+ * silent; `unreadable` means "there WAS a filter set in this link and it is
+ * gone", which the user has to be told, because the alternative is a list that
+ * looks like an answer to a question it never asked.
+ */
+export function unreadableClauses() {
+	return { unreadable: true, viewKey: "", clauses: [], skipped: 0 };
+}
+
+/**
+ * Parse and BOUND a `fv2=` payload (plan §8 step 2).
+ *
+ * Returns one of:
+ *   null                                   nothing here for us (silent)
+ *   {unreadable:true, clauses:[]}          there was a payload; say so
+ *   {viewKey, clauses, skipped}            readable; `skipped` rows were junk
  */
 export function parseClauseParam(raw, viewKey, schema) {
-	if (!raw || typeof raw !== "string" || raw.length > MAX_URL_CHARS) return null;
+	if (!raw || typeof raw !== "string") return null;
+	if (isUrlPayloadTooLarge(raw)) return unreadableClauses();
 	let data;
 	try {
 		data = JSON.parse(raw);
 	} catch (e) {
-		return null;
+		return unreadableClauses();
 	}
-	if (!data || typeof data !== "object" || data.v !== URL_CONTRACT_VERSION) return null;
-	if (!Array.isArray(data.c)) return null;
-	// A payload written for a sibling tab's list is not ours to interpret.
+	if (!data || typeof data !== "object" || Array.isArray(data)) return unreadableClauses();
+	// A payload written for a sibling tab's list is not ours to interpret — and
+	// not ours to complain about either. Checked BEFORE the version, so a future
+	// contract on another tab stays silent here.
 	if (viewKey && data.k && data.k !== viewKey) return null;
+	if (data.v !== URL_CONTRACT_VERSION) return unreadableClauses();
+	if (!Array.isArray(data.c)) return unreadableClauses();
 	const limits = limitsOf(schema);
 	const clauses = [];
+	let skipped = Math.max(0, data.c.length - limits.max_clauses);
 	for (const row of data.c.slice(0, limits.max_clauses)) {
-		if (!Array.isArray(row) || row.length < 3) continue;
+		if (!Array.isArray(row) || row.length < 3) {
+			skipped += 1;
+			continue;
+		}
 		const [doctype, fieldname, operator, value] = row;
-		if (typeof doctype !== "string" || typeof fieldname !== "string") continue;
-		if (typeof operator !== "string" || !operator) continue;
-		if (!doctype || !fieldname) continue;
+		if (typeof doctype !== "string" || typeof fieldname !== "string" || !doctype || !fieldname) {
+			skipped += 1;
+			continue;
+		}
+		// The operator vocabulary is closed. An unknown one cannot be rendered
+		// (no control, no label) and cannot be compiled, so keeping the row would
+		// only produce a filter that silently never applies.
+		if (typeof operator !== "string" || !OPERATORS.includes(operator)) {
+			skipped += 1;
+			continue;
+		}
 		clauses.push(
 			makeClause({
 				doctype,
@@ -499,7 +548,7 @@ export function parseClauseParam(raw, viewKey, schema) {
 			})
 		);
 	}
-	return { viewKey: data.k || viewKey || "", clauses };
+	return { unreadable: false, viewKey: data.k || viewKey || "", clauses, skipped };
 }
 
 /**
@@ -528,6 +577,22 @@ export function droppedNotice(dropped) {
 		n === 1 ? "is" : "are"
 	} no longer available on this list and ${n === 1 ? "was" : "were"} removed.`;
 }
+
+/** A payload that arrived but could not be read at all. Never silent. */
+export const UNREADABLE_NOTICE =
+	"The filters in this link couldn't be read, so this list is unfiltered.";
+
+/** Rows inside a readable payload that were not clauses. */
+export function skippedNotice(n) {
+	if (!n) return "";
+	return `${n} filter${n === 1 ? "" : "s"} in this link ${
+		n === 1 ? "was" : "were"
+	} not valid and ${n === 1 ? "was" : "were"} ignored.`;
+}
+
+/** The filter set is real, but too big to hand to someone as a link. */
+export const URL_TOO_LARGE_NOTICE =
+	"This filter set is too large to share as a link — the address bar keeps the last shareable one.";
 
 // ── server error codes → what the panel does about it ───────────────────────
 export const ERR_UNKNOWN_VIEW = "list_filter_unknown_view";
@@ -633,9 +698,31 @@ export function attributeError(error, clauses, index) {
 	for (const clause of clauses || []) {
 		const entry = entryFor(index, clause);
 		const label = entry && entry.label;
-		if (!label || message.indexOf(label) === -1) continue;
+		if (!label || !mentionsLabel(message, label)) continue;
 		if (match) return null; // ambiguous (same field twice) — don't guess
 		match = clause.id;
 	}
 	return match;
+}
+
+const LABEL_CACHE = new Map();
+
+/**
+ * Whether a message names this field, on WORD boundaries.
+ *
+ * A substring test blames the wrong row for any short label: a field labelled
+ * "e" matches "Qty must be a number." and the error lands on a row that has
+ * nothing to do with it. Labels are user data (they carry translations,
+ * brackets, punctuation), so the pattern is escaped, and `\b` is not enough
+ * because a label may start or end with a non-word character — hence the
+ * explicit non-word-or-edge guards.
+ */
+function mentionsLabel(message, label) {
+	let re = LABEL_CACHE.get(label);
+	if (!re) {
+		const escaped = String(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		re = new RegExp(`(^|\\W)${escaped}(\\W|$)`);
+		LABEL_CACHE.set(label, re);
+	}
+	return re.test(message);
 }

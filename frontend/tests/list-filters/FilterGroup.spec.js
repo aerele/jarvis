@@ -218,6 +218,27 @@ describe("editing", () => {
 		expect(lastClauses(w)[0]).toMatchObject({ fieldname: "enabled", operator: "=", value: "" });
 	});
 
+	// P2-3: the panel tells useListPage which mutations are still being typed.
+	it("marks a typed value as debounceable and every discrete pick as immediate", async () => {
+		const w = mountPanel({ clauses: [clauseForEntry(DESCRIPTION)] });
+		await w.find('input[type="text"]').setValue("month");
+		expect(w.emitted("update:clauses").at(-1)[1]).toEqual({ immediate: false });
+
+		await w.findAll("select")[0].setValue("=");
+		expect(w.emitted("update:clauses").at(-1)[1]).toEqual({ immediate: true });
+
+		await w.setProps({ clauses: [clauseForEntry(ENABLED)] });
+		await w.findAll("select")[1].setValue("0");
+		expect(w.emitted("update:clauses").at(-1)[1]).toEqual({ immediate: true });
+	});
+
+	it("never lets the immediacy flag leak into the clause itself", async () => {
+		const w = mountPanel({ clauses: [clauseForEntry(DESCRIPTION)] });
+		await w.find('input[type="text"]').setValue("month");
+		expect(lastClauses(w)[0]).not.toHaveProperty("immediate");
+		expect(lastClauses(w)[0].value).toBe("month");
+	});
+
 	it("clears everything from either affordance", async () => {
 		const w = mountPanel({ clauses: [withValue(DESCRIPTION, "a")] });
 		await w.find('button[aria-label="Clear all filters"]').trigger("click");
@@ -354,6 +375,47 @@ describe("accessibility", () => {
 		await w.setProps({ clauses: lastClauses(w) });
 		await nextTick();
 		expect(document.activeElement.getAttribute("aria-label")).toBe("Condition for Index");
+		w.unmount();
+	});
+
+	// U1-2: the same field may be filtered twice on purpose. "Condition for
+	// Created On" announced twice is two controls a screen-reader user cannot
+	// tell apart.
+	it("gives repeated fields a positional cue, and leaves unique ones clean", async () => {
+		const w = mountPanel({
+			clauses: [withValue(CREATION, ["2026-01-01", "2026-02-01"]), withValue(DESCRIPTION, "a"), withValue(CREATION, ["2026-03-01", "2026-04-01"])],
+		});
+		const labels = w.findAll("select").map((s) => s.attributes("aria-label"));
+		expect(labels).toContain("Condition for Created On (filter 1)");
+		expect(labels).toContain("Condition for Created On (filter 2)");
+		expect(labels).toContain("Condition for Description");
+		expect(w.find('button[aria-label="Remove filter on Created On (filter 2)"]').exists()).toBe(true);
+		expect(w.find('button[aria-label="Remove filter on Description"]').exists()).toBe(true);
+	});
+
+	it("carries the positional cue into the value control too", () => {
+		const w = mountPanel({ clauses: [withValue(DESCRIPTION, "a"), withValue(DESCRIPTION, "b")] });
+		const labels = w.findAll('input[type="text"]').map((i) => i.attributes("aria-label"));
+		expect(labels).toEqual(["Value for Description (filter 1)", "Value for Description (filter 2)"]);
+	});
+
+	// U1-1: clearing empties the row list, so focus has nowhere natural to go.
+	it("moves focus to + Add Filter when Clear All empties the panel", async () => {
+		const w = mountPanel({ clauses: [withValue(DESCRIPTION, "a")], attachTo: document.body });
+		const clear = w.findAll("button").find((b) => b.text() === "Clear All Filters");
+		await clear.trigger("click");
+		await w.setProps({ clauses: [] });
+		await nextTick();
+		expect(document.activeElement.textContent).toContain("+ Add Filter");
+		w.unmount();
+	});
+
+	it("returns focus to the Filter trigger when the outer clear-X is used", async () => {
+		const w = mountPanel({ clauses: [withValue(DESCRIPTION, "a")], attachTo: document.body });
+		await w.find('button[aria-label="Clear all filters"]').trigger("click");
+		await w.setProps({ clauses: [] });
+		await nextTick();
+		expect(document.activeElement.getAttribute("aria-label")).toBe("Filter");
 		w.unmount();
 	});
 

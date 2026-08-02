@@ -155,6 +155,28 @@ describe("the filter notice strip is readable without opening the panel", () => 
 		expect(w.emitted("dismiss-filter-notice")).toHaveLength(1);
 	});
 
+	// P3-3: the note is often the REASON the results look wrong, so a rejection
+	// arriving later must not hide it.
+	it("stacks the note and the rejection, note first", () => {
+		const w = mount(ListPage, {
+			props: {
+				columns: [],
+				rows: [],
+				filterState: state({
+					notice: "1 filter from this link is no longer available.",
+					error: { code: "list_filter_invalid_value", kind: "row", message: "Bad value." },
+				}),
+			},
+		});
+		const strips = w.findAll('[role="status"]');
+		expect(strips).toHaveLength(2);
+		expect(strips[0].text()).toContain("no longer available");
+		expect(strips[1].text()).toContain("Bad value.");
+		// only the note is dismissible
+		expect(strips[0].find('button[aria-label="Dismiss"]').exists()).toBe(true);
+		expect(strips[1].find('button[aria-label="Dismiss"]').exists()).toBe(false);
+	});
+
 	it("offers Retry for a transient failure and no dismiss for a live rejection", () => {
 		const transient = mount(ListPage, {
 			props: {

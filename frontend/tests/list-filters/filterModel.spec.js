@@ -22,6 +22,10 @@ import {
 	droppedNotice,
 	filterErrorInfo,
 	attributeError,
+	isUrlPayloadTooLarge,
+	skippedNotice,
+	OPERATORS,
+	timespanLabel,
 	toDatetimeInput,
 	fromDatetimeInput,
 	MAX_URL_CHARS,
@@ -94,6 +98,12 @@ describe("clause construction", () => {
 	it("does not carry a value across incompatible shapes", () => {
 		const between = { ...clauseForEntry(CREATION), value: ["2026-01-01", "2026-02-01"] };
 		expect(setOperator(between, "Timespan").value).toBe("");
+	});
+
+	it("sentence-cases a timespan for reading without touching the wire token", () => {
+		expect(timespanLabel("last 7 days")).toBe("Last 7 days");
+		expect(timespanLabel("this quarter")).toBe("This quarter");
+		expect(timespanLabel("")).toBe("");
 	});
 
 	it("labels date comparisons the way Frappe does", () => {
@@ -288,12 +298,71 @@ describe("URL state", () => {
 		expect(parseClauseParam(param, "macros", SCHEMA).clauses).toHaveLength(1);
 	});
 
-	it("reads junk, a wrong version and an oversized payload as 'no filters'", () => {
-		expect(parseClauseParam("not json", "skills")).toBeNull();
-		expect(parseClauseParam(JSON.stringify({ v: 99, k: "skills", c: [] }), "skills")).toBeNull();
-		expect(parseClauseParam(JSON.stringify({ v: 1, k: "skills" }), "skills")).toBeNull();
-		const huge = JSON.stringify({ v: 1, k: "skills", c: [["a", "b", "=", "x".repeat(MAX_URL_CHARS)]] });
-		expect(parseClauseParam(huge, "skills")).toBeNull();
+	// P1-2: "could not read this" and "nothing here for us" are DIFFERENT
+	// answers. Collapsing them into null is what made a mangled link show a
+	// silently unfiltered list.
+	it("marks junk, a wrong version and an oversized payload UNREADABLE, not empty", () => {
+		for (const raw of [
+			"not json",
+			JSON.stringify({ v: 99, k: "skills", c: [] }),
+			JSON.stringify({ v: 1, k: "skills" }),
+			JSON.stringify([1, 2, 3]),
+			JSON.stringify({ v: 1, k: "skills", c: [["a", "b", "=", "x".repeat(MAX_URL_CHARS)]] }),
+		]) {
+			const parsed = parseClauseParam(raw, "skills");
+			expect(parsed).not.toBeNull();
+			expect(parsed.unreadable).toBe(true);
+			expect(parsed.clauses).toEqual([]);
+		}
+	});
+
+	it("stays SILENT only when there is genuinely nothing addressed to us", () => {
+		expect(parseClauseParam("", "skills")).toBeNull();
+		expect(parseClauseParam(undefined, "skills")).toBeNull();
+		// a sibling tab's payload: not ours to read and not ours to complain about
+		expect(parseClauseParam(JSON.stringify({ v: 1, k: "learning", c: [] }), "skills")).toBeNull();
+		// ...even on a contract version we do not know
+		expect(parseClauseParam(JSON.stringify({ v: 9, k: "learning", c: [] }), "skills")).toBeNull();
+	});
+
+	it("knows when a payload is too large to be a URL", () => {
+		expect(isUrlPayloadTooLarge("x".repeat(MAX_URL_CHARS))).toBe(false);
+		expect(isUrlPayloadTooLarge("x".repeat(MAX_URL_CHARS + 1))).toBe(true);
+		expect(isUrlPayloadTooLarge("")).toBe(false);
+	});
+
+	it("counts the rows it had to skip instead of dropping them silently", () => {
+		const parsed = parseClauseParam(
+			JSON.stringify({
+				v: 1,
+				k: "skills",
+				c: [
+					["Jarvis Custom Skill", "description", "like", "keep"],
+					["Jarvis Custom Skill", "description", "DROP TABLE", "x"], // not an operator
+					["Jarvis Custom Skill", "description"], // too short
+				],
+			}),
+			"skills",
+			SCHEMA
+		);
+		expect(parsed.clauses).toHaveLength(1);
+		expect(parsed.skipped).toBe(2);
+		expect(skippedNotice(parsed.skipped)).toMatch(/2 filters in this link were not valid/);
+		expect(skippedNotice(0)).toBe("");
+	});
+
+	it("rejects an operator outside the closed vocabulary", () => {
+		for (const op of ["DROP", "=;--", "BETWEEN", "Like"]) {
+			const parsed = parseClauseParam(
+				JSON.stringify({ v: 1, k: "skills", c: [["Jarvis Custom Skill", "description", op, "x"]] }),
+				"skills",
+				SCHEMA
+			);
+			expect(parsed.clauses).toEqual([]);
+			expect(parsed.skipped).toBe(1);
+		}
+		expect(OPERATORS).toContain("Between");
+		expect(OPERATORS).toContain("like");
 	});
 
 	it("bounds what a hand-edited URL can inflate", () => {
@@ -301,6 +370,7 @@ describe("URL state", () => {
 		for (let i = 0; i < 40; i += 1) rows.push(["Jarvis Custom Skill", "description", "like", "x"]);
 		const parsed = parseClauseParam(JSON.stringify({ v: 1, k: "skills", c: rows }), "skills", SCHEMA);
 		expect(parsed.clauses).toHaveLength(20); // schema limits.max_clauses
+		expect(parsed.skipped).toBe(20); // and the overflow is REPORTED
 		const long = JSON.stringify({
 			v: 1,
 			k: "skills",
@@ -326,6 +396,7 @@ describe("URL state", () => {
 		);
 		expect(parsed.clauses).toHaveLength(1);
 		expect(parsed.clauses[0].value).toBe("keep me");
+		expect(parsed.skipped).toBe(3);
 	});
 });
 
@@ -431,6 +502,32 @@ describe("attributing a row-level rejection", () => {
 	it("blames the row whose field label the server named", () => {
 		const error = { code: "list_filter_invalid_value", kind: "row", message: "Created On needs a start and an end." };
 		expect(attributeError(error, clauses, index)).toBe(clauses[1].id);
+	});
+
+	// P3-1: a substring test blames a one-letter label for every message that
+	// happens to contain that letter.
+	it("matches on word boundaries, not substrings", () => {
+		const shortLabel = { ...DESCRIPTION, fieldname: "note", label: "e" };
+		const shortIndex = schemaIndex({ ...SCHEMA, fields: [shortLabel] });
+		const rows = [{ ...clauseForEntry(shortLabel), value: "x" }];
+		const error = { kind: "row", code: "list_filter_invalid_value", message: "Qty must be a number." };
+		expect(attributeError(error, rows, shortIndex)).toBeNull();
+		// but it still finds the label when the message really names it
+		expect(
+			attributeError({ ...error, message: "e needs a value." }, rows, shortIndex)
+		).toBe(rows[0].id);
+	});
+
+	it("survives a label full of regex punctuation", () => {
+		const child = { ...STEP_PROMPT, label: "Prompt (Jarvis Macro Step)" };
+		const childIndex = schemaIndex({ ...SCHEMA, fields: [child] });
+		const rows = [{ ...clauseForEntry(child), value: "x" }];
+		const error = {
+			kind: "row",
+			code: "list_filter_invalid_value",
+			message: "Prompt (Jarvis Macro Step) needs a value.",
+		};
+		expect(attributeError(error, rows, childIndex)).toBe(rows[0].id);
 	});
 
 	it("blames nobody when the label is ambiguous or absent", () => {
