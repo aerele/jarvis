@@ -102,6 +102,24 @@ describe("request generation", () => {
 		expect(sent.filters_v2).toHaveLength(1);
 	});
 
+	it("falls back to legacy transport when the view is rolled back (P1-05)", async () => {
+		// The server flag turned filters_v2 off for this view: its schema endpoint
+		// declines with view_not_filterable. The list must still load, sending NO
+		// filters_v2 (legacy transport) — never a coded rejection read as empty.
+		const fetchFn = vi.fn(async () => ({ rows: [{ name: "a" }], total: 1 }));
+		const fetchSchema = vi.fn(async () => ({
+			ok: false,
+			error: { code: "list_filter_view_not_filterable", message: "off" },
+		}));
+		const { api } = host({ fetchFn, storageKey: "t3b", viewKey: "macros", fetchSchema });
+		await flushPromises();
+		// A clause is set, but the rollback means it never reaches the wire.
+		await api.requestSchema();
+		await api.setClauses([clause(DESCRIPTION, "x")]);
+		await flushPromises();
+		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
+	});
+
 	it("resets to page one on any clause change", async () => {
 		const fetchFn = vi.fn(async () => ({ rows: [{ name: "a" }], total: 9, has_more: true }));
 		const { api } = host({ fetchFn, storageKey: "t3", viewKey: "skills" });

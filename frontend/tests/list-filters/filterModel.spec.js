@@ -135,6 +135,20 @@ describe("control families", () => {
 		expect(controlFor(DESCRIPTION, "in")).toBe("multi");
 	});
 
+	it("never renders a date range for a non-temporal field (P0-03)", () => {
+		// Between only produces a date-range control for Date/Datetime. A clause
+		// that carries Between on a text/number field (hand-edited URL, stale link)
+		// must NOT render two date pickers over it — the server never offers it and
+		// reconcile drops it; this is the belt.
+		for (const entry of [DESCRIPTION, IDX, ENABLED, SCOPE, OWNER]) {
+			const control = controlFor(entry, "Between");
+			expect(control).not.toBe("between-date");
+			expect(control).not.toBe("between-datetime");
+		}
+		// …but the temporal families still get their range control.
+		expect(controlFor(CREATION, "Between")).toBe("between-datetime");
+	});
+
 	it("renders a Select's leading blank as 'Not set' instead of an empty row", () => {
 		expect(selectControlOptions(SCOPE)).toEqual([
 			{ label: "Not set", value: "" },
@@ -397,12 +411,64 @@ describe("URL state", () => {
 		);
 		expect(parsed.clauses).toHaveLength(20); // schema limits.max_clauses
 		expect(parsed.skipped).toBe(20); // and the overflow is REPORTED
+	});
+
+	it("rejects an oversize value rather than silently truncating it (P1-02)", () => {
+		// An oversize scalar is REJECTED and reported as bounded — never sliced to
+		// max_value_chars, which would turn "match this exact value" into "match
+		// this prefix". (This replaces the old assertion that expected a 2000-char
+		// value to become 1000 with skipped=0 — the misleading spec the review found.)
 		const long = JSON.stringify({
 			v: 1,
 			k: "skills",
 			c: [["Jarvis Custom Skill", "description", "like", "y".repeat(2000)]],
 		});
-		expect(parseClauseParam(long, "skills", SCHEMA).clauses[0].value).toHaveLength(1000);
+		const scalar = parseClauseParam(long, "skills", SCHEMA);
+		expect(scalar.clauses).toHaveLength(0);
+		expect(scalar.bounded).toBe(1);
+
+		// An oversize MEMBER of an `in` list is rejected too.
+		const member = parseClauseParam(
+			JSON.stringify({
+				v: 1,
+				k: "skills",
+				c: [["Jarvis Custom Skill", "description", "in", ["ok", "y".repeat(2000)]]],
+			}),
+			"skills",
+			SCHEMA
+		);
+		expect(member.clauses).toHaveLength(0);
+		expect(member.bounded).toBe(1);
+
+		// An over-COUNT `in` list (more than max_in_values members) is rejected,
+		// not silently sliced.
+		const tooMany = [];
+		for (let i = 0; i < 101; i += 1) tooMany.push(String(i));
+		const list = parseClauseParam(
+			JSON.stringify({
+				v: 1,
+				k: "skills",
+				c: [["Jarvis Custom Skill", "description", "in", tooMany]],
+			}),
+			"skills",
+			SCHEMA
+		);
+		expect(list.clauses).toHaveLength(0);
+		expect(list.bounded).toBe(1);
+
+		// A value AT the bound is kept, unchanged.
+		const ok = parseClauseParam(
+			JSON.stringify({
+				v: 1,
+				k: "skills",
+				c: [["Jarvis Custom Skill", "description", "like", "y".repeat(1000)]],
+			}),
+			"skills",
+			SCHEMA
+		);
+		expect(ok.clauses).toHaveLength(1);
+		expect(ok.clauses[0].value).toHaveLength(1000);
+		expect(ok.bounded).toBe(0);
 	});
 
 	it("skips structurally broken rows without losing the good ones", () => {

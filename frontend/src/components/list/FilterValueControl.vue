@@ -418,7 +418,17 @@ async function loadLinks(query) {
 	const seq = ++linkSeq;
 	linkLoading.value = true;
 	try {
-		const rows = await searchLink(doctype, query, LINK_PAGE_LENGTH);
+		// P1-06: pass WHERE this Link is used (its schema entry's own doctype +
+		// fieldname) so a custom search_link hook / user-permission rule can key
+		// off it. Untrusted context — the server still enforces the target's read
+		// permission — and the values come from the shared schema, not the client.
+		const rows = await searchLink(
+			doctype,
+			query,
+			LINK_PAGE_LENGTH,
+			props.entry && props.entry.doctype,
+			props.entry && props.entry.fieldname
+		);
 		if (seq !== linkSeq) return; // stale - a newer keystroke superseded this
 		linkOptions.value = (rows || []).map((r) => ({
 			// Title when the DocType has one, name otherwise; the VALUE is always
