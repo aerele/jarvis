@@ -256,7 +256,6 @@ export const getAccountDefaults = () => call("jarvis.onboarding.get_account_defa
 export const syncConnection = () => call("jarvis.onboarding.sync_connection");
 export const startSignup = (email, company, plan, provider) =>
 	call("jarvis.onboarding.start_signup", { email, company, plan, provider });
-export const checkSignupPaymentState = () => call("jarvis.onboarding.check_signup_payment_state");
 export const finishPayment = (payload) => call("jarvis.onboarding.finish_payment", { payload });
 
 // --- Payment state machine (plan 02 / plan 03 contract) ---------------------

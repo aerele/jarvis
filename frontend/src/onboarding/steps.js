@@ -134,38 +134,3 @@ export function syncStatusNote(status, agent = DEFAULT_AGENT_NAME) {
 	}
 	return `Setup hit a problem (${s}). Check the AI connection and save again - or continue to ${agent} and retry from Settings.`;
 }
-
-// Branch decision for the "I've verified my email" poll. Admin's
-// get_signup_payment_state (jarvis_admin_v2/billing/signup.py) returns one of
-// THREE shapes: still-pending, paid-plan order handles, or the free/trial
-// completion {pending_verification: false, subscription_status: "..."} with
-// no order (verification WAS the whole signup). Pure so the free-plan branch
-// - the one that used to dead-end on "Signup state has changed" - stays
-// unit-tested.
-//   {kind: "wait"}                          - link not clicked yet (or empty resp)
-//   {kind: "checkout", provider: "..."}     - paid plan: open the provider's Checkout
-//   {kind: "complete"}                      - free/trial plan: already Active, skip
-//                                             payment and go straight to provisioning
-//   {kind: "halted", status: "..."}         - Cancelled/Expired/etc: dead sub, tell
-//                                             the customer instead of the generic
-//                                             "state changed" shrug
-//   {kind: "stale"}                         - unrecognized shape: ask for a refresh
-export function verifyPollAction(d) {
-	if (!d || d.pending_verification) return { kind: "wait" };
-	// checkout covers both gateways in both shapes: Razorpay (one-shot order
-	// `razorpay_order_id`, autopay mandate `razorpay_subscription_id`) and
-	// Cashfree (one-shot order `payment_session_id`, autopay mandate
-	// `subscription_session_id`). Missing the mandate token here would strand a
-	// resuming Cashfree autopay customer on "stale" with no way to pay.
-	// The provider rides the response so the caller launches the right SDK;
-	// absent ⇒ razorpay (an older admin that predates the discriminator).
-	const prov = (d.payment_provider || d.provider || "").toLowerCase();
-	const hasRz = d.razorpay_order_id || d.razorpay_subscription_id;
-	const hasCf = d.payment_session_id || d.subscription_session_id;
-	if (hasRz || hasCf) {
-		return { kind: "checkout", provider: prov || (hasCf ? "cashfree" : "razorpay") };
-	}
-	if (d.subscription_status === "Active") return { kind: "complete" };
-	if (d.subscription_status) return { kind: "halted", status: String(d.subscription_status) };
-	return { kind: "stale" };
-}

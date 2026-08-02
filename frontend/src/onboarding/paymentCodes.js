@@ -77,8 +77,13 @@ export const ACTIONS = {
 	CHECK: "check",
 	/** Create or reuse a checkout intent and open the gateway. May charge. */
 	INITIATE: "initiate",
-	/** Finish a payment the gateway has already authorized. Never a second intent. */
-	CONFIRM: "confirm",
+	// There is deliberately NO client-driven CONFIRM affordance. See the
+	// PAYMENT_AUTHORIZED_PENDING_CONFIRM row: admin's confirm_payment
+	// signature-verifies before any branch and needs a gateway-issued
+	// payment id + signature from a live Checkout callback, which the browser
+	// cannot have - admin emits that code precisely because it could not resolve
+	// the authorization payment id itself. A Confirm button there was a button
+	// that returned a byte-identical screen forever.
 	/** Paid: leave the payment step. */
 	CONTINUE: "continue",
 	/** Email a code and connect this site to an account that already paid. */
@@ -153,12 +158,21 @@ const TABLE = {
 		actions: [ACTIONS.RECONNECT],
 	},
 	[CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM]: {
+		// A WAIT state, not an action state. The authorization is real and sits at
+		// the gateway; what has NOT happened is the bank confirming the mandate.
+		// Nothing the browser can send finishes it (admin's confirm_payment needs a
+		// gateway-issued payment id + signature that only a live Checkout callback
+		// produces, and admin emits this code exactly when it could not resolve
+		// that id), so the resolution is server-side: the gateway webhook activates
+		// the subscription when the mandate confirms. Checking is the only safe
+		// thing to offer, and after a few checks the support handoff is the exit -
+		// an e-NACH can pend indefinitely by design.
 		headline: "Your payment is authorized.",
 		body:
-			"The gateway has your authorization and we only need to finish it off. " +
-			"Do not start another payment - that would authorize a second one.",
+			"Your bank is still confirming the auto-pay mandate, which can take a little while. " +
+			"We are watching for it - please do not pay again, as that would authorize a second mandate.",
 		tone: TONE.STATUS,
-		actions: [ACTIONS.CONFIRM, ACTIONS.CHECK],
+		actions: [ACTIONS.CHECK],
 	},
 	[CODES.INTENT_HANDLE_UNAVAILABLE]: {
 		headline: "The payment provider did not open a checkout session.",
@@ -174,11 +188,14 @@ const TABLE = {
 	},
 	[CODES.INVALID_REQUEST]: {
 		headline: "That payment request could not be accepted.",
-		body: "Nothing was charged. Starting a fresh attempt clears it.",
+		body: "Nothing was charged. Checking the status is safe, and a fresh attempt clears it.",
 		tone: TONE.ALERT,
 		// A refused request bought nothing, so the recovery is a NEW attempt - and
-		// the refused receipt must never be sent again. See mintFreshKey.
-		actions: [ACTIONS.INITIATE],
+		// the refused receipt must never be sent again (see mintFreshKey). CHECK
+		// rides along because the refusal arrives as a failure envelope, which
+		// carries no capability flags at all: without a read-only action here the
+		// screen could render with its single button disabled and nothing else.
+		actions: [ACTIONS.CHECK, ACTIONS.INITIATE],
 		mintFreshKey: true,
 	},
 	[CODES.PAYMENT_CHECK_RATE_LIMITED]: {
@@ -273,7 +290,6 @@ export function copyFor(code, flags = {}) {
 export const ACTION_LABELS = {
 	[ACTIONS.CHECK]: "Check payment status",
 	[ACTIONS.INITIATE]: "Initiate payment again",
-	[ACTIONS.CONFIRM]: "Confirm payment",
 	[ACTIONS.CONTINUE]: "Continue",
 	[ACTIONS.RECONNECT]: "Reconnect this site",
 	[ACTIONS.VERIFY]: "I've verified my email",

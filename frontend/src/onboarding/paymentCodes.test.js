@@ -81,10 +81,20 @@ test("a paid signup offers no payment action at all", () => {
 	}
 });
 
-test("PAYMENT_AUTHORIZED_PENDING_CONFIRM offers confirm, never a second intent", () => {
+test("PAYMENT_AUTHORIZED_PENDING_CONFIRM is a WAIT state: check only, never confirm, never pay", () => {
+	// The client cannot confirm this. Admin emits this code precisely BECAUSE it
+	// could not resolve the authorization payment id, and its confirm_payment
+	// signature-verifies before any branch (api/tenant.py) - so a browser-built
+	// payload is a guaranteed 402 and a Confirm button is a dead end that returns
+	// a byte-identical screen forever. The gateway webhook is the real resolver;
+	// the support handoff after N checks is this state's exit.
 	const entry = copyFor(CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM);
-	assert.ok(entry.actions.includes(ACTIONS.CONFIRM));
-	assert.ok(!entry.actions.includes(ACTIONS.INITIATE));
+	assert.deepEqual(entry.actions, [ACTIONS.CHECK]);
+	assert.ok(!entry.actions.includes(ACTIONS.INITIATE), "a second intent authorizes a second mandate");
+	// The vocabulary itself must not carry a confirm affordance any more.
+	assert.equal(ACTIONS.CONFIRM, undefined);
+	assert.ok(/authoriz/i.test(entry.headline + entry.body));
+	assert.ok(/not pay again|don't pay again|do not pay again/i.test(entry.body));
 });
 
 test("the day-one code invites a signup, never support", () => {

@@ -41,6 +41,17 @@ import {
 	isTerminalForPayment,
 } from "./paymentMachine.js";
 
+// Codes that END a confirm poll: the gateway has decided, and asking again just
+// spends another live call on an answer that will not change.
+const DECIDED_CONFIRM_CODES = new Set([
+	CODES.PAYMENT_DECLINED,
+	CODES.PAYMENT_ALREADY_ACTIVE,
+	CODES.SIGNUP_TERMINAL,
+	CODES.ACCOUNT_RECONNECT_REQUIRED,
+	CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM,
+	CODES.BENCH_AWAITING_RECONCILIATION,
+]);
+
 const PROVISIONING_ATTEMPTS = 45; // ~45 × 2s ≈ 90s (was proceedAfterPay)
 const PROVISIONING_INTERVAL_MS = 2000;
 const CASHFREE_CONFIRM_ATTEMPTS = 12; // 12 × 3s (was confirmCashfree)
@@ -72,6 +83,8 @@ export function createPaymentFlow(deps) {
 	// (a superseded loop, a stale slow response), which is a separate concern
 	// from the server's intent generation the reducer fences on.
 	let token = 0;
+	// Guards the 90s provisioning poll against re-entry (see waitForProvisioning).
+	let provisioningInFlight = false;
 
 	function apply(event) {
 		state.value = reduce(state.value, event, { strict, nowMs: now() });
@@ -118,7 +131,22 @@ export function createPaymentFlow(deps) {
 	 * NOT read "has llm_credentials" as "has paid".
 	 */
 	async function hydrate() {
+		// The 14th fence point. A mount read is slow (it is the first request of
+		// the page) and can land AFTER the customer has already opened a checkout
+		// sheet from a second tab or a fast click - at which point absorbing it
+		// reset a LIVE gateway session back to `review`, with the sheet still open
+		// over the top of it.
+		const my = token;
 		const decoded = ingest(await api.getOnboardingState());
+		if (my !== token) return { paid: null, truthKnown: false, notStarted: false, superseded: true };
+		// ...and the fence that the token alone cannot draw: a mount read and the
+		// checkout it races share one token (nothing bumps between them), so the
+		// STATE is the discriminator. hydrate() is the PASSIVE read; it must never
+		// unseat a gateway interaction that is already in front of the customer.
+		const live = state.value.value;
+		if (live === STATES.CHECKOUT_OPEN || live === STATES.CONFIRMING) {
+			return { paid: null, truthKnown: false, notStarted: false, superseded: true };
+		}
 		if (decoded.code === CLIENT_OFFLINE || decoded.code === CODES.BENCH_ADMIN_UNREACHABLE) {
 			absorb(decoded);
 			return { paid: null, truthKnown: false, notStarted: false };
@@ -129,6 +157,27 @@ export function createPaymentFlow(deps) {
 		}
 		const paid = isPaidState(state.value.value);
 		return { paid, truthKnown: true, notStarted: false };
+	}
+
+	// ---- "I've verified my email" ------------------------------------------
+	// One round trip, like the flow this replaced. The retired onVerifyCheck
+	// polled and, if the answer carried checkout handles, opened the gateway on
+	// the SAME click. Routing this action at a bare hydrate() cost the customer an
+	// extra click and an extra round trip, and - worse - showed them
+	// failure-framed recovery copy at the exact moment their verification had
+	// just succeeded. So: re-read, and if the signup is now payable, go straight
+	// to the sheet.
+	async function verifyAndContinue() {
+		const my = token;
+		const decoded = ingest(await api.getOnboardingState());
+		if (my !== token) return;
+		const code = absorb(decoded);
+		if (!decoded.ok) return;
+		if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return; // still unclicked
+		// Verified and payable: open the checkout this same click.
+		if (hasOpenableHandles(decoded.data)) {
+			await runCheckout(decoded, decoded.data.payment_provider);
+		}
 	}
 
 	// ---- submit review: start the signup exactly once ----------------------
@@ -194,29 +243,28 @@ export function createPaymentFlow(deps) {
 		}
 	}
 
-	// The confirm_required action: a mandate the gateway has already AUTHORIZED
-	// (PAYMENT_AUTHORIZED_PENDING_CONFIRM). The recovery is to CONFIRM it - a
-	// second intent would authorize a second mandate - through the same OLD-shape
-	// finish_payment endpoint a callback would have used. The handles the state
-	// carries are the confirm payload; provider rides so admin branches right.
-	async function confirmAuthorized() {
-		const h = state.value.handles || {};
-		const payload = state.value.provider === "cashfree"
-			? { provider: "cashfree", cashfree_order_id: h.cashfree_order_id, cashfree_subscription_id: h.cashfree_subscription_id }
-			: {
-					razorpay_subscription_id: h.razorpay_subscription_id,
-					razorpay_order_id: h.razorpay_order_id,
-			  };
-		await confirmOnce(payload);
-	}
-
+	// NOTE: there is deliberately no client-driven "confirm an authorized mandate"
+	// action. PAYMENT_AUTHORIZED_PENDING_CONFIRM is a WAIT state: admin's
+	// confirm_payment signature-verifies before any branch and needs a
+	// gateway-issued payment id + signature that only a live Checkout callback
+	// produces - and admin emits that code precisely BECAUSE it could not resolve
+	// the authorization payment id itself. Every client-built payload 402s, so a
+	// Confirm button returned a byte-identical screen forever with no other
+	// affordance (can_initiate_payment is false by design there). The real
+	// resolver is the gateway webhook; the support handoff after N checks is that
+	// state's exit. confirmOnce below is reached only from a REAL callback.
 	async function confirmOnce(payload) {
 		apply({ type: EVENTS.GATEWAY_CALLBACK });
 		const my = token;
 		const res = await api.confirmSignupPayment(payload);
 		if (my !== token) return;
 		const decoded = ingest(res);
-		if (decoded.ok) {
+		// A 200 is NOT a payment. Read what the body actually says: only admin's
+		// connection payload (allocated, or the allocation-failure shape that still
+		// records the money) means confirmed. A bare 200 with an empty or unrelated
+		// body used to fire CONFIRM_SUCCEEDED and land the customer on "paid" with
+		// nothing behind it.
+		if (decoded.ok && effectiveCode(decoded) === CODES.PAYMENT_ALREADY_ACTIVE) {
 			apply({ type: EVENTS.CONFIRM_SUCCEEDED, data: decoded.data });
 			return;
 		}
@@ -237,8 +285,18 @@ export function createPaymentFlow(deps) {
 			if (my !== token) return;
 			const decoded = ingest(await api.confirmSignupPayment(payload));
 			if (my !== token) return;
-			if (decoded.ok) {
+			if (decoded.ok && effectiveCode(decoded) === CODES.PAYMENT_ALREADY_ACTIVE) {
 				apply({ type: EVENTS.CONFIRM_SUCCEEDED, data: decoded.data });
+				return;
+			}
+			// A DECIDED answer ends the loop. Only "not settled yet" is worth another
+			// pass: re-polling a gateway that has already said DECLINED eleven more
+			// times spends eleven live Cashfree calls, delays the verdict by half a
+			// minute, and then throws the coded decline away in favour of a generic
+			// "we could not determine" - the one thing the customer already knew.
+			if (DECIDED_CONFIRM_CODES.has(decoded.code)) {
+				apply({ type: EVENTS.CONFIRM_FAILED, decoded });
+				await reconcileAfterFailure();
 				return;
 			}
 			await sleep(CASHFREE_CONFIRM_INTERVAL_MS);
@@ -255,15 +313,28 @@ export function createPaymentFlow(deps) {
 	// says (pending stays pending, a decline becomes a decline, paid advances),
 	// and count it toward the client-local support ceiling.
 	async function checkStatus() {
+		// In-flight guard. Without it the Check button stayed live through its own
+		// round trip, so an impatient customer fired N concurrent provider-truth
+		// calls - each one spending a gateway call against the per-account cap,
+		// burning the client-local support counter in seconds, and walking straight
+		// into the rate limit that this page then has to explain.
+		if (state.value.busy === "checking") return;
 		const my = token;
-		const res = await api.checkSignupPaymentStatus();
-		if (my !== token) return;
-		const decoded = ingest(res);
-		absorb(decoded);
-		// A rate limit asserts nothing about the money and is not a "check" that
-		// counts toward the support ceiling - the customer never got an answer.
-		if (decoded.code !== CODES.PAYMENT_CHECK_RATE_LIMITED) {
-			state.value = noteStatusCheck(state.value);
+		state.value = { ...state.value, busy: "checking" };
+		try {
+			const res = await api.checkSignupPaymentStatus();
+			if (my !== token) return;
+			const decoded = ingest(res);
+			absorb(decoded);
+			// A rate limit asserts nothing about the money and is not a "check" that
+			// counts toward the support ceiling - the customer never got an answer.
+			if (decoded.code !== CODES.PAYMENT_CHECK_RATE_LIMITED) {
+				state.value = noteStatusCheck(state.value);
+			}
+		} finally {
+			if (my === token && state.value.busy === "checking") {
+				state.value = { ...state.value, busy: null };
+			}
 		}
 	}
 
@@ -284,11 +355,36 @@ export function createPaymentFlow(deps) {
 		}
 		if (decoded.code === CODES.PAYMENT_CHECK_RATE_LIMITED) {
 			absorb(decoded);
+			return;
+		}
+		// Money the gateway is holding that an operator has to place. This is the
+		// single most important thing a mandatory check can learn, and dropping it
+		// meant the page went straight back to offering "Initiate payment again" on
+		// a signup that has ALREADY been paid once. The facade also refuses the
+		// click server-side, so this is the second lock rather than the only one -
+		// but a customer must never be invited to pay twice in the first place.
+		if (decoded.ok && (decoded.data || {}).awaiting_manual_reconciliation) {
+			absorb(decoded);
 		}
 	}
 
 	// ---- provisioning: the old proceedAfterPay loop, fenced ----------------
 	async function waitForProvisioning() {
+		// Re-entrancy guard. "Check setup status" is a 90-second loop behind a
+		// button that never disabled itself, and the state does not leave
+		// PROVISIONING_DELAYED while it runs - so every impatient click spawned
+		// ANOTHER concurrent 45x2s loop, all sharing one token that nothing bumps,
+		// all polling sync_connection forever.
+		if (provisioningInFlight) return { status: "already_running" };
+		provisioningInFlight = true;
+		try {
+			return await runProvisioningPoll();
+		} finally {
+			provisioningInFlight = false;
+		}
+	}
+
+	async function runProvisioningPoll() {
 		const my = token;
 		// The transition into provisioning is legal only from paid - the readiness
 		// gate owns this surface, and `unknown -> provisioning` is the illegal move
@@ -327,14 +423,25 @@ export function createPaymentFlow(deps) {
 	return {
 		state,
 		hydrate,
+		verifyAndContinue,
 		submitReview,
 		initiatePayment,
-		confirmAuthorized,
 		checkStatus,
 		waitForProvisioning,
 		cancelInFlight,
 		tickCooldown,
 	};
+}
+
+// Does this envelope carry a gateway handle the wizard could actually open?
+function hasOpenableHandles(data) {
+	const d = data || {};
+	return !!(
+		d.razorpay_order_id ||
+		d.razorpay_subscription_id ||
+		d.payment_session_id ||
+		d.subscription_session_id
+	);
 }
 
 function isPaidState(value) {

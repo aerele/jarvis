@@ -205,10 +205,175 @@ describe("the rate limit", () => {
 		expect(flow.state.value.checkCooldownUntil).toBe(1_000_000 + 42_000);
 		expect(api.initiateSignupPayment).not.toHaveBeenCalled();
 	});
+
+	test("a 429 is NOT a check the customer got an answer to", async () => {
+		// The support ceiling counts answers, not attempts. Counting a backoff
+		// would march an impatient customer to the support handoff without a
+		// single provider-truth reply behind it.
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				REFUSAL(
+					{ code: CODES.PAYMENT_CHECK_RATE_LIMITED, message: "", recovery: "retry", retry_after_seconds: 5 },
+					429
+				)
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.hydrate();
+		for (let i = 0; i < 8; i++) await flow.checkStatus();
+		expect(flow.state.value.supportChecks.checks).toBe(0);
+		expect(flow.state.value.supportOffered).toBe(false);
+	});
+
+	test("the cooldown re-arms the Check button through the flow's own clock", async () => {
+		// The reducer must get a real clock however the flow passes it. tickCooldown
+		// sends {type} with the time in opts; reading only event.nowMs left the
+		// cooldown stuck forever and the charging action as the page's only live
+		// control.
+		let now = 1_000_000;
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				REFUSAL(
+					{ code: CODES.PAYMENT_CHECK_RATE_LIMITED, message: "", recovery: "retry", retry_after_seconds: 60 },
+					429
+				)
+			),
+		});
+		const { flow } = makeFlow({ api, now: () => now });
+		await flow.hydrate();
+		await flow.checkStatus();
+		expect(flow.state.value.canCheck).toBe(false);
+		now += 61_000;
+		flow.tickCooldown();
+		expect(flow.state.value.checkCooldownUntil).toBe(0);
+		expect(flow.state.value.canCheck).toBe(true);
+	});
+});
+
+describe("the confirm is not a transport check", () => {
+	test("a 200 with an empty body is NOT a payment", async () => {
+		const api = makeApi({
+			confirmSignupPayment: vi.fn(async () => ({ status: 200, body: { message: {} } })),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).not.toBe(STATES.PAID);
+		expect(api.checkSignupPaymentStatus).toHaveBeenCalled();
+	});
+
+	test("admin's allocation-FAILURE confirm is paid, and its reason reaches the page", async () => {
+		const api = makeApi({
+			confirmSignupPayment: vi.fn(async () => ({
+				status: 200,
+				body: {
+					message: {
+						tenant_status: "pending",
+						agent_url: "",
+						chat_readiness: "Provisioning",
+						chat_readiness_reason: "Something went wrong finishing setup — our team has been alerted.",
+					},
+				},
+			})),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).toBe(STATES.PAID);
+		expect(flow.state.value.provisioningNote).toMatch(/our team has been alerted/);
+	});
+
+	test("a Cashfree confirm poll STOPS on a decided decline instead of re-asking 11 times", async () => {
+		const confirm = vi.fn(async () => ({
+			status: 402,
+			body: {
+				exc_type: "ValidationError",
+				error: { code: CODES.PAYMENT_DECLINED, message: "This Cashfree mandate is not authorized." },
+			},
+		}));
+		const openCheckout = vi.fn(async () => ({
+			status: CHECKOUT_SUCCESS,
+			payload: { provider: "cashfree", cashfree_order_id: "cf_1" },
+			pollConfirm: true,
+		}));
+		const { flow } = makeFlow({ api: makeApi({ confirmSignupPayment: confirm }), openCheckout });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(confirm).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.code).toBe(CODES.PAYMENT_DECLINED);
+		expect(flow.state.value.value).toBe(STATES.FAILED_RETRYABLE);
+	});
+});
+
+describe("check-on-failure keeps the fact that matters", () => {
+	test("parked money learned by the mandatory check suppresses the pay affordance", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+					can_initiate_payment: false,
+					can_check_status: true,
+					awaiting_manual_reconciliation: true,
+				})
+			),
+		});
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const { flow } = makeFlow({ api, openCheckout });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.awaitingReconciliation).toBe(true);
+		expect(flow.state.value.canInitiate).toBe(false);
+	});
+});
+
+describe("verification continues in one round trip", () => {
+	test("a verified signup opens its checkout on the same click", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+					payment_provider: "razorpay",
+					razorpay_order_id: "order_1",
+					razorpay_key_id: "k",
+					can_check_status: true,
+				})
+			),
+		});
+		const { flow, openCheckout } = makeFlow({ api });
+		await flow.verifyAndContinue();
+		expect(openCheckout).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+
+	test("a still-unverified signup opens nothing and keeps its own copy", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+					pending_verification: true,
+					attempt_id: "att_1",
+					generation: 0,
+				})
+			),
+		});
+		const { flow, openCheckout } = makeFlow({ api });
+		await flow.verifyAndContinue();
+		expect(openCheckout).not.toHaveBeenCalled();
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+	});
 });
 
 describe("the generation fence", () => {
-	test("a superseded initiate's answer is discarded", async () => {
+	test("a superseded initiate's answer is discarded BY THE FENCE, not by luck", async () => {
+		// The previous version of this test was worthless: its stale answer both
+		// carried a LOSING generation (so the reducer's own generation fence caught
+		// it) and reached `paid` (so the paid floor caught it too), and it asserted
+		// only "the code is not DECLINED" - which two other mechanisms already
+		// guaranteed. Deleting the client fence left it green.
+		//
+		// This version isolates the client fence: the stale answer carries the SAME
+		// generation as the live one and a perfectly acceptable non-paid code, so
+		// NOTHING in the reducer would reject it. Only the flow's own token can.
 		let resolveSlow;
 		const slow = new Promise((r) => (resolveSlow = r));
 		const api = makeApi({
@@ -219,27 +384,80 @@ describe("the generation fence", () => {
 					return ENVELOPE({
 						code: CODES.PAYMENT_DECLINED,
 						attempt_id: "att_1",
-						generation: 1,
+						generation: 7, // same generation as the winner below
+						razorpay_order_id: "order_STALE",
+						razorpay_key_id: "k",
 					});
 				})
 				.mockImplementationOnce(async () =>
 					ENVELOPE({
 						code: CODES.PAYMENT_CONFIRMATION_PENDING,
 						attempt_id: "att_1",
-						generation: 2,
-						razorpay_order_id: "order_2",
+						generation: 7,
+						razorpay_order_id: "order_LIVE",
 						razorpay_key_id: "k",
 					})
 				),
 		});
 		const { flow } = makeFlow({ api });
 		const first = flow.initiatePayment({ plan: "pro" });
-		flow.cancelInFlight();
+		flow.cancelInFlight(); // the customer moved on; the first answer is now stale
 		await flow.initiatePayment({ plan: "pro" });
+		const codeAfterWinner = flow.state.value.code;
+		const handleAfterWinner = flow.state.value.handles.razorpay_order_id;
 		resolveSlow();
 		await first;
-		// The slow first answer must not repaint the page it no longer describes.
+		expect(flow.state.value.code).toBe(codeAfterWinner);
 		expect(flow.state.value.code).not.toBe(CODES.PAYMENT_DECLINED);
+		expect(flow.state.value.handles.razorpay_order_id).toBe(handleAfterWinner);
+		expect(handleAfterWinner).toBe("order_LIVE");
+	});
+
+	test("a slow MOUNT read cannot reset a checkout that is already open", async () => {
+		// The mount read and the checkout it races share one token (nothing bumps
+		// between them), so the machine STATE is the only discriminator. Without
+		// this guard a stale day-one answer landed while the gateway sheet was open
+		// and reset the page to `review` underneath it.
+		let releaseSheet;
+		const sheetOpen = new Promise((r) => (releaseSheet = r));
+		const openCheckout = vi.fn(async () => {
+			await sheetOpen;
+			return { status: CHECKOUT_DISMISSED };
+		});
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				REFUSAL({ code: CODES.BENCH_NO_SIGNUP_CONTEXT, message: "", recovery: "retry" })
+			),
+		});
+		const { flow } = makeFlow({ api, openCheckout });
+		const paying = flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		await Promise.resolve();
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		const out = await flow.hydrate();
+		expect(out.superseded).toBe(true);
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		releaseSheet();
+		await paying;
+	});
+
+	test("the provisioning poll refuses to run twice at once", async () => {
+		let inFlight = 0;
+		let peak = 0;
+		const api = makeApi({
+			syncConnection: vi.fn(async () => {
+				inFlight += 1;
+				peak = Math.max(peak, inFlight);
+				await Promise.resolve();
+				inFlight -= 1;
+				return { synced: false, tenant_status: "pending" };
+			}),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		const a = flow.waitForProvisioning();
+		const b = flow.waitForProvisioning();
+		const [, second] = await Promise.all([a, b]);
+		expect(second.status).toBe("already_running");
+		expect(peak).toBe(1);
 	});
 
 	test("the provisioning poll stops when its attempt is superseded", async () => {

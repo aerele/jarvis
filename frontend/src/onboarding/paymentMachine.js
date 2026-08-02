@@ -130,6 +130,8 @@ export function initialState() {
 		supportChecks: emptyCounter(),
 		supportOffered: false,
 		illegalTransitions: 0,
+		// admin's own sentence for a paid-but-not-provisioned workspace.
+		provisioningNote: "",
 	};
 }
 
@@ -152,8 +154,17 @@ function buildSummary(prev, data, context) {
 		(typeof data.plan === "string" ? data.plan : "") ||
 		(prev && prev.planLabel) ||
 		"";
+	// The plan NAME (not its label): what a retry must initiate on. Rendering uses
+	// planLabel; initiate uses this, and getting them confused is a wrong charge.
+	const planName =
+		(data.plan && typeof data.plan === "object" && data.plan.name) ||
+		(typeof data.plan === "string" ? data.plan : "") ||
+		context.plan ||
+		(prev && prev.plan) ||
+		"";
 	const num = (v, fallback) => (v === null || v === undefined || v === "" ? fallback : Number(v));
 	return {
+		plan: planName,
 		email: data.email || context.email || (prev && prev.email) || "",
 		company: data.company || context.company || (prev && prev.company) || "",
 		planLabel,
@@ -230,6 +241,15 @@ function recomputeCanCheck(next, nowMs) {
  */
 export function reduce(state, event, opts = {}) {
 	const strict = !!opts.strict;
+	// ONE clock resolution for every case that reads time. Callers pass it two
+	// ways - the tests put it on the event, usePaymentFlow.apply() puts it in
+	// opts - and reading only one of them is what left the rate-limit cooldown
+	// permanently stuck: tickCooldown() sent {type} with the clock in opts, the
+	// guard saw `event.nowMs || 0` = 0, returned the state unchanged forever, and
+	// the Check button stayed dead while its label (read from the view's own
+	// clock) recovered. That inverted this module's status-first rule - the safe
+	// action was disabled and the charging action was the only one left alive.
+	const nowMs = event.nowMs != null ? event.nowMs : opts.nowMs != null ? opts.nowMs : 0;
 	switch (event.type) {
 		case EVENTS.SUBMIT_REVIEW:
 			return { ...state, value: STATES.STARTING_SIGNUP, busy: "starting", transportError: false };
@@ -268,8 +288,23 @@ export function reduce(state, event, opts = {}) {
 			return { ...state, value: STATES.CONFIRMING, busy: "confirming" };
 		}
 
-		case EVENTS.CONFIRM_SUCCEEDED:
-			return { ...state, value: STATES.PAID, busy: null, checkRequired: false, transportError: false };
+		case EVENTS.CONFIRM_SUCCEEDED: {
+			// Keep what the confirm actually said. admin's allocation-failure branch
+			// answers ok:True with a real customer sentence in
+			// `chat_readiness_reason` and NO container - discarding it left the
+			// customer watching a 90-second spinner instead of reading the one line
+			// that explained it.
+			const d = event.data || {};
+			return {
+				...state,
+				value: STATES.PAID,
+				busy: null,
+				checkRequired: false,
+				transportError: false,
+				provisioningNote: d.chat_readiness_reason || state.provisioningNote || "",
+				handles: state.handles,
+			};
+		}
 
 		case EVENTS.CONFIRM_FAILED: {
 			if (PAID_FLOOR.has(state.value)) return state;
@@ -284,16 +319,22 @@ export function reduce(state, event, opts = {}) {
 		}
 
 		case EVENTS.RATE_LIMITED: {
-			const nowMs = event.nowMs || 0;
 			const secs = Number(event.retryAfterSeconds) || 0;
 			const until = nowMs + (secs > 0 ? secs * 1000 : DEFAULT_COOLDOWN_MS);
-			const next = { ...state, checkCooldownUntil: until };
+			// A 429 can be the FIRST thing a cold page hears, and its envelope
+			// carries no capability flags (a failure body has no `data`). Default
+			// the read-only capability to true so the page is not left with the
+			// charging action as its only live control once the window passes.
+			const next = {
+				...state,
+				checkCooldownUntil: until,
+				_backendCanCheck: state._backendCanCheck == null ? true : state._backendCanCheck,
+			};
 			next.canCheck = recomputeCanCheck(next, nowMs);
 			return next;
 		}
 
 		case EVENTS.COOLDOWN_ELAPSED: {
-			const nowMs = event.nowMs || 0;
 			if (state.checkCooldownUntil && nowMs < state.checkCooldownUntil) return state;
 			const next = { ...state, checkCooldownUntil: 0 };
 			next.canCheck = recomputeCanCheck(next, nowMs);
@@ -399,11 +440,29 @@ function applyContract(state, decoded, opts) {
 	if (isFailure && !PAYMENT_STATE_CODES.has(code)) {
 		// A page that already knows a payment state keeps it, and only flags that
 		// the check itself failed. A page that knows nothing renders unknown.
+		//
+		// Either way the read-only capability defaults TRUE when nothing is known.
+		// A failure envelope (onboarding_contract.failure) carries no `data` at
+		// all, so no capability flag can ever arrive on one - and without this a
+		// cold mount that first hears a transport failure rendered a screen whose
+		// only offered action was disabled. Checking is a read: it creates no
+		// intent and charges nothing, so offering it is always safe. `initiate` is
+		// deliberately NOT defaulted - that one can take money.
+		const withCheck = (next) => {
+			const out = { ...next, _backendCanCheck: next._backendCanCheck == null ? true : next._backendCanCheck };
+			out.canCheck = recomputeCanCheck(out, opts.nowMs);
+			return out;
+		};
 		if (state.code && PAYMENT_STATE_CODES.has(state.code)) {
-			return { ...state, transportError: true, busy: null, message: decoded.message || state.message };
+			return withCheck({
+				...state,
+				transportError: true,
+				busy: null,
+				message: decoded.message || state.message,
+			});
 		}
 		if (PAID_FLOOR.has(state.value)) return state;
-		return { ...state, value: STATES.UNKNOWN, transportError: true, busy: null, code };
+		return withCheck({ ...state, value: STATES.UNKNOWN, transportError: true, busy: null, code });
 	}
 
 	// ---- a real payment state.
@@ -416,6 +475,12 @@ function applyContract(state, decoded, opts) {
 	const handles = pickHandles(data);
 	const supersededGen =
 		incomingGen != null && state.generation != null && Number(incomingGen) > Number(state.generation);
+	// An answer carrying NO generation cannot be attributed to the current
+	// intent, and the generation fence above cannot judge it. Its CODE is still
+	// honoured - an older control plane is entitled to report a decline - but its
+	// HANDLES are not merged over a live intent's, which is how a dead order id
+	// came back to sit beside a live one after a gen-less failure landed.
+	const unattributable = incomingGen == null && state.generation != null;
 
 	const next = {
 		...state,
@@ -428,8 +493,9 @@ function applyContract(state, decoded, opts) {
 		generation: incomingGen != null ? Number(incomingGen) : state.generation,
 		provider: (data.payment_provider || state.provider || null) && (data.payment_provider || state.provider),
 		// A newer generation REPLACES the previous intent's handles wholesale (the
-		// old order is dead); same/again keeps and merges.
-		handles: supersededGen ? handles : { ...state.handles, ...handles },
+		// old order is dead); same/again keeps and merges; an unattributable
+		// answer contributes none.
+		handles: supersededGen ? handles : unattributable ? state.handles : { ...state.handles, ...handles },
 		lastCheckedAt: data.payment_last_checked_at || state.lastCheckedAt,
 		verificationExpiresAt: data.verification_expires_at || state.verificationExpiresAt,
 		awaitingReconciliation: !!data.awaiting_manual_reconciliation,
@@ -456,7 +522,19 @@ function applyContract(state, decoded, opts) {
 	// initiate. A code that is definitionally paid/terminal never offers initiate
 	// regardless of what a flag says.
 	const backendCanInitiate = "can_initiate_payment" in data ? !!data.can_initiate_payment : next.canInitiate;
-	next._backendCanCheck = "can_check_status" in data ? !!data.can_check_status : (state._backendCanCheck || false);
+	// Same read-only default as the transport branch, and for the same reason: a
+	// coded FAILURE (already-paid, terminal, parked money, an invalid key) rides
+	// onboarding_contract.failure, which carries no `data` and therefore no
+	// capability flag - so a cold page that first hears one of those had no way
+	// to learn that checking was allowed, and rendered its buttons all disabled.
+	// Checking creates no intent and charges nothing; `initiate` is never
+	// defaulted this way, because that one can take money.
+	next._backendCanCheck =
+		"can_check_status" in data
+			? !!data.can_check_status
+			: state._backendCanCheck == null
+			? true
+			: state._backendCanCheck;
 	next.canInitiate =
 		backendCanInitiate && !next.awaitingReconciliation && !isTerminalForPayment(next.value);
 	next.canCheck = recomputeCanCheck(next, opts.nowMs);

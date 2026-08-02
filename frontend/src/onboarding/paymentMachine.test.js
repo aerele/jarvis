@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { CODES } from "./paymentCodes.js";
+import { CODES, ADMIN_CODES, BENCH_CODES, ACTIONS, copyFor } from "./paymentCodes.js";
 import {
 	STATES,
 	EVENTS,
@@ -378,6 +378,143 @@ test("the reconciliation FLAG on an ordinary pending answer also suppresses it",
 	}));
 	assert.equal(s.awaitingReconciliation, true);
 	assert.equal(s.canInitiate, false);
+});
+
+// ---------------------------------------------------------------------------
+// THE DEAD-END INVARIANT
+//
+// The class-level guard, not a point fix: walk every code the facade can send,
+// on a COLD MOUNT (where a failure envelope carries no `data` at all, so no
+// capability flag can ever arrive - onboarding_contract.failure returns only
+// {ok:false, error, context}), and assert the rendered screen always leaves the
+// customer at least one thing to press. A screen with no enabled control is a
+// dead end whatever its copy says.
+// ---------------------------------------------------------------------------
+function enabledActionsFor(s) {
+	const copy = copyFor(s.code, { awaitingReconciliation: s.awaitingReconciliation });
+	const acts = [...copy.actions];
+	if (s.supportOffered && !acts.includes(ACTIONS.SUPPORT)) acts.push(ACTIONS.SUPPORT);
+	return acts.filter((a) => {
+		if (a === ACTIONS.CHECK) return s.canCheck;
+		if (a === ACTIONS.INITIATE) return s.canInitiate;
+		return true; // support / reconnect / restart / verify / continue are always live
+	});
+}
+
+// A screen is a DEAD END when nothing is pressable AND nothing tells the
+// customer that something is about to become pressable. A rate-limit cooldown is
+// deliberately NOT a dead end: its button is disabled, but it carries a live
+// countdown ("Check again in 30s") and re-arms itself, which is a timed wait
+// rather than a trap. Anything else with no live control is the real defect.
+function isDeadEnd(s, nowMs = 0) {
+	if (enabledActionsFor(s).length > 0) return false;
+	return remainingCooldownSeconds(s, nowMs) <= 0;
+}
+
+test("INVARIANT: every code, arriving as a cold-mount FAILURE, leaves an enabled action", () => {
+	for (const code of [...ADMIN_CODES, ...BENCH_CODES]) {
+		const s = reduce(initialState(), {
+			type: EVENTS.CONTRACT_STATE,
+			// exactly what onboarding_contract.failure() puts on the wire: no `data`
+			decoded: { ok: false, code, message: "", recovery: "", data: {}, context: {} },
+		});
+		assert.ok(
+			!isDeadEnd(s),
+			`DEAD END: ${code} (state=${s.value}) renders no enabled action and no countdown`
+		);
+	}
+});
+
+test("INVARIANT: every code, arriving as a SUCCESS with no capability flags, leaves an enabled action", () => {
+	for (const code of [...ADMIN_CODES, ...BENCH_CODES]) {
+		const s = reduce(initialState(), {
+			type: EVENTS.CONTRACT_STATE,
+			decoded: { ok: true, code, data: { attempt_id: "att_1" }, context: {} },
+		});
+		assert.ok(
+			!isDeadEnd(s),
+			`DEAD END: ${code} (state=${s.value}) renders no enabled action and no countdown`
+		);
+	}
+});
+
+test("INVARIANT: a rate-limited page still has a live action once the window passes", () => {
+	let s = reduce(initialState(), {
+		type: EVENTS.CONTRACT_STATE,
+		decoded: { ok: false, code: CODES.PAYMENT_CHECK_RATE_LIMITED, data: {}, context: {} },
+	});
+	s = reduce(s, { type: EVENTS.RATE_LIMITED, retryAfterSeconds: 60, nowMs: 1000 });
+	assert.equal(s.canCheck, false, "cooled down while the window is open");
+	s = reduce(s, { type: EVENTS.COOLDOWN_ELAPSED, nowMs: 62_000 });
+	assert.ok(enabledActionsFor(s).length > 0, "the check must come back after the window");
+	assert.ok(!isDeadEnd(s, 62_000));
+});
+
+// ---------------------------------------------------------------------------
+// the cooldown clock reaches the reducer however the caller passes it
+// ---------------------------------------------------------------------------
+test("COOLDOWN_ELAPSED lifts the cooldown when the clock arrives in OPTS (the flow's shape)", () => {
+	// usePaymentFlow.apply() passes the clock in opts, not on the event. Reading
+	// only event.nowMs made the guard see 0 forever, so the Check button looked
+	// armed (its label recovers from the view's own clock) and was permanently
+	// dead - leaving "pay again" as the only live control on the page.
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { can_check_status: true }));
+	s = reduce(s, { type: EVENTS.RATE_LIMITED, retryAfterSeconds: 45, nowMs: 1_000_000 });
+	assert.equal(s.canCheck, false);
+	const viaOpts = reduce(s, { type: EVENTS.COOLDOWN_ELAPSED }, { nowMs: 1_046_000 });
+	assert.equal(viaOpts.checkCooldownUntil, 0);
+	assert.equal(viaOpts.canCheck, true);
+});
+
+test("RATE_LIMITED takes its clock from opts too", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { can_check_status: true }));
+	s = reduce(s, { type: EVENTS.RATE_LIMITED, retryAfterSeconds: 30 }, { nowMs: 500_000 });
+	assert.equal(s.checkCooldownUntil, 530_000);
+});
+
+// ---------------------------------------------------------------------------
+// paid is a floor - the guards that had NO coverage (deleting them stayed green)
+// ---------------------------------------------------------------------------
+test("a late CONFIRM_FAILED cannot unseat a paid page", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
+	assert.equal(s.value, STATES.PAID);
+	s = reduce(s, {
+		type: EVENTS.CONFIRM_FAILED,
+		decoded: { ok: false, code: CODES.PAYMENT_DECLINED, message: "late decline" },
+	});
+	assert.equal(s.value, STATES.PAID);
+});
+
+test("a late CHECKOUT_FAILED cannot unseat a paid page", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
+	s = reduce(s, { type: EVENTS.CHECKOUT_FAILED, message: "sdk died after the fact" });
+	assert.equal(s.value, STATES.PAID);
+});
+
+test("a late GATEWAY_CALLBACK cannot drag a paid page back into confirming", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
+	s = reduce(s, { type: EVENTS.GATEWAY_CALLBACK });
+	assert.equal(s.value, STATES.PAID);
+});
+
+// ---------------------------------------------------------------------------
+// the generation fence, including the gen-less hole
+// ---------------------------------------------------------------------------
+test("an answer with NO generation never merges its handles over a live intent", () => {
+	// A legacy/failure answer carries no generation, so it cannot be attributed
+	// to the current intent. Its CODE is still honoured (an older control plane
+	// is entitled to report a decline), but its handles are not: merging them
+	// resurrected a dead order id alongside a live one.
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+		generation: 5,
+		razorpay_order_id: "order_LIVE",
+	}));
+	s = reduce(s, CONTRACT({
+		code: CODES.PAYMENT_DECLINED,
+		data: { attempt_id: "att_1", razorpay_order_id: "order_ANCIENT" },
+	}));
+	assert.equal(s.generation, 5);
+	assert.equal(s.handles.razorpay_order_id, "order_LIVE", "a gen-less answer must not replant handles");
 });
 
 // ---------------------------------------------------------------------------

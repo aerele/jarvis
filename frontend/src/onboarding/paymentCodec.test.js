@@ -257,3 +257,47 @@ test("effectiveCode: a flat already-Active response is paid", () => {
 test("effectiveCode: a flat response with nothing to go on stays unknown", () => {
 	assert.equal(effectiveCode({ ok: true, code: "", data: {} }), CLIENT_UNREADABLE);
 });
+
+// A 200 must not mean paid. confirm_payment answers FLAT, and only the
+// connection-payload shape means admin actually confirmed the money.
+test("effectiveCode: a confirm that returns the connection payload is paid", () => {
+	assert.equal(
+		effectiveCode({
+			ok: true,
+			code: "",
+			data: { tenant_status: "running", agent_url: "https://pod", chat_readiness: "Ready" },
+		}),
+		CODES.PAYMENT_ALREADY_ACTIVE
+	);
+});
+
+test("effectiveCode: admin's allocation-FAILURE confirm is still paid, and keeps its reason", () => {
+	// api/tenant.py returns {"ok": True, data: _pending_payload("Something went
+	// wrong finishing setup - our team has been alerted.")} when the payment was
+	// recorded but allocation blew up. The money DID move, so it is paid; what
+	// must not happen is the customer getting a 90-second spinner instead of that
+	// sentence. _pending_payload carries tenant_status:"pending" and a BLANK
+	// agent_url, so the discriminator cannot be agent_url truthiness.
+	const decoded = {
+		ok: true,
+		code: "",
+		data: {
+			tenant_status: "pending",
+			agent_url: "",
+			chat_readiness: "Provisioning",
+			chat_readiness_reason: "Something went wrong finishing setup — our team has been alerted.",
+		},
+	};
+	assert.equal(effectiveCode(decoded), CODES.PAYMENT_ALREADY_ACTIVE);
+});
+
+test("effectiveCode: an empty or junk 200 body is NOT paid", () => {
+	// The fuzz cases that used to advance straight to PAID because the old
+	// confirm path fired on decoded.ok alone.
+	assert.equal(effectiveCode({ ok: true, code: "", data: {} }), CLIENT_UNREADABLE);
+	assert.equal(effectiveCode({ ok: true, code: "", data: [] }), CLIENT_UNREADABLE);
+	assert.equal(
+		effectiveCode({ ok: true, code: "", data: { some: "unrelated", fields: 1 } }),
+		CLIENT_UNREADABLE
+	);
+});

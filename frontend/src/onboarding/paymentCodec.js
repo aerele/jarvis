@@ -182,9 +182,12 @@ export function decode(res) {
  * The code a decoded SUCCESS actually means.
  *
  * A coded envelope is taken at its word. A FLAT legacy success (a pre-contract
- * start_signup / verify poll) carries no code, so its fields are mapped onto the
- * vocabulary the same way steps.verifyPollAction did - handles ⇒ a live intent,
- * pending_verification ⇒ verification, Active ⇒ paid. Anything with nothing to
+ * start_signup, or finish_payment, neither of which returns the contract
+ * envelope) carries no code, so its fields are mapped onto the vocabulary
+ * STRUCTURALLY - handles ⇒ a live intent, pending_verification ⇒ verification,
+ * Active or a connection payload ⇒ paid - never by reading a message. This
+ * replaces the retired steps.verifyPollAction, which was the last place two
+ * different readings of these shapes could drift apart. Anything with nothing to
  * go on is honestly unknown rather than guessed.
  */
 export function effectiveCode(decoded) {
@@ -201,5 +204,14 @@ export function effectiveCode(decoded) {
 		d.cashfree_subscription_id;
 	if (hasHandles) return CODES.PAYMENT_CONFIRMATION_PENDING;
 	if (d.subscription_status === "Active") return CODES.PAYMENT_ALREADY_ACTIVE;
+	// finish_payment's success is FLAT and carries no code: what it returns is a
+	// CONNECTION payload, which is admin's way of saying the money is confirmed.
+	// Both of its success shapes are paid - the allocated one
+	// (`_connection_payload`) and the allocation-FAILURE one (`_pending_payload`,
+	// which records the payment and pages ops) - so the discriminator is the
+	// presence of the tenant/connection keys, NOT `agent_url` being truthy
+	// (_pending_payload sets agent_url to ""). This is what stops a bare 200 with
+	// an empty or unrelated body from being read as a completed payment.
+	if ("tenant_status" in d || "agent_url" in d) return CODES.PAYMENT_ALREADY_ACTIVE;
 	return CLIENT_UNREADABLE;
 }

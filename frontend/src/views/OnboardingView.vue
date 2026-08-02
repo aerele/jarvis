@@ -358,6 +358,24 @@
 											Your workspace is taking a little longer than usual to come
 											online. Your payment is complete — nothing more is owed.
 										</p>
+										<!-- admin's OWN sentence when it recorded the payment but the
+											 allocation failed and ops were paged. It used to be
+											 discarded, leaving the customer on a 90-second spinner
+											 with no idea a human already knew. -->
+										<p
+											v-if="pay.provisioningNote"
+											class="mt-1.5 text-p-sm text-ink-gray-7"
+											role="status"
+										>
+											{{ pay.provisioningNote }}
+										</p>
+										<p
+											v-if="setupRecheckNote"
+											class="mt-1.5 text-p-sm text-ink-gray-5"
+											role="status"
+										>
+											{{ setupRecheckNote }}
+										</p>
 									</div>
 									<!-- Deliberately NOT aria-hidden: JvSpinner is its own status
 										 region and, while provisioning runs, the only thing on screen
@@ -372,6 +390,9 @@
 								<div v-if="provisioningDelayed" class="ob-foot justify-end">
 									<Button
 										variant="solid"
+										:disabled="recheckingSetup"
+										:loading="recheckingSetup"
+										loading-text="Checking…"
 										label="Check setup status"
 										@click="recheckProvisioning"
 									/>
@@ -382,7 +403,7 @@
 							<template v-else-if="showVerify">
 								<div class="ob-body">
 									<div class="ob-head">
-										<h1>Check your email</h1>
+										<h1 ref="recoveryHeading" tabindex="-1">Check your email</h1>
 										<p>
 											We sent a confirmation link to <b>{{ payEmail }}</b
 											>. Click the link to verify your address, then come back
@@ -425,8 +446,20 @@
 							<template v-else-if="showRecovery">
 								<div class="ob-body ob-body--center">
 									<div class="ob-head">
-										<h1>{{ payCopy.headline }}</h1>
+										<h1 ref="recoveryHeading" tabindex="-1">{{ payCopy.headline }}</h1>
 										<p :role="recoveryRole">{{ payCopy.body }}</p>
+										<!-- The captured, customer-facing detail from the thing that
+											 actually failed (an ad-blocker eating the SDK, a gateway
+											 that would not open). Without this the page showed only
+											 the PREVIOUS code's generic copy and the real reason went
+											 nowhere. -->
+										<p
+											v-if="payDetail"
+											class="mt-1.5 text-p-sm text-ink-gray-5"
+											role="status"
+										>
+											{{ payDetail }}
+										</p>
 									</div>
 									<div
 										v-if="paySummaryRows.length"
@@ -454,20 +487,32 @@
 										— we'll place it for you. Please don't pay again.
 									</p>
 								</div>
-								<div
-									class="ob-foot"
-									:class="recoveryActions.length < 2 ? 'justify-end' : ''"
-								>
-									<Button
-										v-for="a in recoveryActions"
-										:key="a"
-										:variant="payActionVariant(a)"
-										:disabled="payActionDisabled(a)"
-										:loading="payBusyView && a === recoveryActions[0]"
-										loading-text="Working…"
-										:label="payActionLabel(a)"
-										@click="onPayAction(a)"
-									/>
+								<div class="ob-foot">
+									<!-- A way back, always. A recovery screen with only forward
+										 actions - each of which the backend may have disabled - was
+										 how a customer could end up on a card with nothing to press. -->
+									<button
+										class="ob-back"
+										:disabled="checking || initiating"
+										@click="goBack"
+									>
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
+									</button>
+									<div class="flex items-center gap-2">
+										<Button
+											v-for="a in recoveryActions"
+											:key="a"
+											:variant="payActionVariant(a)"
+											:disabled="payActionDisabled(a)"
+											:loading="payActionLoading(a)"
+											loading-text="Working…"
+											:label="payActionLabel(a)"
+											@click="onPayAction(a)"
+										/>
+									</div>
 								</div>
 							</template>
 							<!-- Review (fresh start): the customer chose a plan and entered
@@ -812,7 +857,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { Button, FormControl, FeatherIcon } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
@@ -852,7 +897,7 @@ import {
 	STATES as PAY_STATES,
 	remainingCooldownSeconds,
 } from "@/onboarding/paymentMachine";
-import { CODES, ACTIONS, ACTION_LABELS, TONE, copyFor } from "@/onboarding/paymentCodes";
+import { ACTIONS, ACTION_LABELS, TONE, copyFor } from "@/onboarding/paymentCodes";
 
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
@@ -1361,30 +1406,53 @@ function relativeSince(ts) {
 	return `${Math.round(hrs / 24)} d ago`;
 }
 
-// "Check setup status" from the provisioning_delayed projection: re-run the
-// fenced provisioning poll and advance to Connect if the container is now ready.
+// "Check setup status" from the provisioning_delayed projection. The poll is a
+// 90-second loop, so the button guards itself: the machine state does not change
+// while it runs, and without this every impatient click spawned another
+// concurrent loop (the flow now refuses re-entry too - this is the visible half).
+const recheckingSetup = ref(false);
+const setupRecheckNote = ref("");
 async function recheckProvisioning() {
-	const out = await flow.waitForProvisioning();
-	if (out.status === "ready") state.step = "connect";
+	if (recheckingSetup.value) return;
+	recheckingSetup.value = true;
+	setupRecheckNote.value = "";
+	try {
+		const out = await flow.waitForProvisioning();
+		if (out.status === "ready") {
+			state.step = "connect";
+			return;
+		}
+		// Do not discard the outcome: a silent 90 seconds followed by the same
+		// screen reads as a broken button.
+		setupRecheckNote.value =
+			out.status === "delayed"
+				? "Still preparing your workspace. Your payment is complete — you can leave this page and come back."
+				: "";
+	} finally {
+		recheckingSetup.value = false;
+	}
 }
 // Sub-screen selectors. review is the fresh-start card (local plan/email chosen
 // on the Details step); every other sub-screen renders from server truth in the
 // machine (pay.summary), never from a prefill (C02-3).
-const showReview = computed(
-	() => pay.value.value === S.REVIEW && !payBusyView.value
-);
 const showVerify = computed(() => pay.value.value === S.VERIFICATION_REQUIRED);
 const showProvisioning = computed(
 	() => pay.value.value === S.PROVISIONING || pay.value.value === S.PROVISIONING_DELAYED
 );
 const showPaidFlash = computed(() => pay.value.value === S.PAID);
+// The FULL-SCREEN busy view is only for the phases where there is genuinely
+// nothing to press: starting the signup, the sheet being open, confirming.
+// A status check or a retry deliberately does NOT hide the recovery card -
+// plan 02 §a11y is explicit that both buttons must not be replaced by an
+// indefinite spinner; they are disabled in place instead (see payActionDisabled).
 const payBusyView = computed(
 	() =>
-		!!pay.value.busy ||
 		pay.value.value === S.STARTING_SIGNUP ||
 		pay.value.value === S.CHECKOUT_OPEN ||
 		pay.value.value === S.CONFIRMING
 );
+const checking = computed(() => pay.value.busy === "checking");
+const initiating = computed(() => pay.value.busy === "initiating");
 const showRecovery = computed(
 	() =>
 		!payBusyView.value &&
@@ -1398,6 +1466,14 @@ const showRecovery = computed(
 // (plan 02 §a11y - a pending payment announced as an alert on every poll is a
 // flashing banner to a screen reader).
 const recoveryRole = computed(() => (payCopy.value.tone === TONE.ALERT ? "alert" : "status"));
+// The specific, customer-facing detail the machine captured (an SDK that would
+// not load, a gateway that refused to open, admin's own sentence on a coded
+// refusal). Suppressed when it merely repeats the coded copy.
+const payDetail = computed(() => {
+	const m = (pay.value.message || "").trim();
+	if (!m) return "";
+	return m === payCopy.value.body || m === payCopy.value.headline ? "" : m;
+});
 const provisioningDelayed = computed(() => pay.value.value === S.PROVISIONING_DELAYED);
 
 // The busy-screen line ("Confirming with Razorpay/Cashfree…").
@@ -1416,12 +1492,17 @@ const payBusyLabel = computed(() => {
 const nowMs = ref(Date.now());
 let cooldownTimer = null;
 const checkCountdown = computed(() => remainingCooldownSeconds(pay.value, nowMs.value));
-const checkLabel = computed(() => {
-	if (pay.value.awaitingReconciliation || pay.value.transportError) return ACTION_LABELS[ACTIONS.CHECK];
-	return checkCountdown.value > 0
+const checkLabel = computed(() =>
+	// The countdown wins whenever there IS one. Gating it on
+	// !awaitingReconciliation && !transportError meant that a parked-payment page
+	// (or one whose last check failed) that ALSO hit the rate limit showed a plain
+	// "Check payment status" over a disabled button with no explanation of when it
+	// would work again - which is the dead-looking-button complaint in its most
+	// confusing form.
+	checkCountdown.value > 0
 		? `Check again in ${checkCountdown.value}s`
-		: ACTION_LABELS[ACTIONS.CHECK];
-});
+		: ACTION_LABELS[ACTIONS.CHECK]
+);
 
 // The action buttons for the recovery card, in the table's order (status-first).
 // The support affordance is appended when the client-local check ceiling is hit
@@ -1438,8 +1519,19 @@ function payActionLabel(a) {
 	return ACTION_LABELS[a] || "";
 }
 function payActionDisabled(a) {
+	// Any mutating call in flight disables BOTH recovery actions (plan 02: server
+	// idempotency, not button state, is what prevents duplicate intents - but a
+	// double-click should still not fire twice). A status check disables itself
+	// and the retry, so an impatient customer cannot stack concurrent
+	// provider-truth calls into the rate limit.
+	if (checking.value || initiating.value) return true;
 	if (a === ACTIONS.CHECK) return !pay.value.canCheck;
 	if (a === ACTIONS.INITIATE) return !pay.value.canInitiate;
+	return false;
+}
+function payActionLoading(a) {
+	if (a === ACTIONS.CHECK) return checking.value;
+	if (a === ACTIONS.INITIATE) return initiating.value;
 	return false;
 }
 function payActionVariant(a) {
@@ -1449,10 +1541,19 @@ function payActionVariant(a) {
 }
 async function onPayAction(a) {
 	if (a === ACTIONS.CHECK) return flow.checkStatus();
-	if (a === ACTIONS.INITIATE) return flow.initiatePayment({ plan: payPlan.value, provider: state.paymentProvider });
-	if (a === ACTIONS.CONFIRM) return flow.confirmAuthorized();
+	if (a === ACTIONS.INITIATE) {
+		// Provider from SERVER TRUTH, not the local default. A resumed Cashfree
+		// signup renders "Payment method: Cashfree" one line above this button
+		// while state.paymentProvider still held the razorpay seed - and the bench
+		// takes a passed provider verbatim, so the retry silently opened a second
+		// live intent on a DIFFERENT gateway.
+		return flow.initiatePayment({
+			plan: payPlan.value,
+			provider: pay.value.provider || state.paymentProvider,
+		});
+	}
 	if (a === ACTIONS.RECONNECT) return startReconnect();
-	if (a === ACTIONS.VERIFY) return flow.hydrate();
+	if (a === ACTIONS.VERIFY) return flow.verifyAndContinue();
 	if (a === ACTIONS.SUPPORT) {
 		window.location.href = "mailto:support@aerele.in?subject=Jarvis%20onboarding%20payment";
 		return;
@@ -1464,9 +1565,28 @@ async function onPayAction(a) {
 }
 
 // The plan a retry initiates on: the one the customer chose locally, or (on a
-// resumed session with no local choice) the one server truth named. Never a
-// guess - initiating on the wrong plan is a wrong charge.
+// resumed session with no local choice) the plan NAME server truth named -
+// summary.plan, not summary.planLabel, because the label is display text and the
+// bench resumes on the name. Never a guess: initiating on the wrong plan is a
+// wrong charge, and passing "" lets the bench fall back to its own stored
+// context rather than inventing one here.
 const payPlan = computed(() => state.planName || pay.value.summary?.plan || "");
+
+// Focus management (plan 02 §Accessibility). A gateway sheet steals focus into
+// its own iframe and takes it away when it closes, so a keyboard or screen-reader
+// user is left with focus on nothing when the recovery screen appears. A live
+// region announces the text but does not MOVE anyone - so the status heading is
+// focused explicitly on each transition into a recovery/verify state.
+const recoveryHeading = ref(null);
+watch(
+	() => pay.value.value,
+	async () => {
+		if (!showRecovery.value && !showVerify.value) return;
+		await nextTick();
+		const el = recoveryHeading.value;
+		if (el && typeof el.focus === "function") el.focus();
+	}
+);
 
 // Click handler for the review card's single Pay CTA. Fires start_signup exactly
 // once through the flow; the machine takes it from there (verify / checkout /
