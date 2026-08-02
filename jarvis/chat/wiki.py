@@ -1163,12 +1163,6 @@ def request_wiki_promotion(page: str, to_scope: str, target_role: str = "", note
 	page itself is untouched; promotion is a request, never a self-service
 	scope switch. ``page`` accepts a docname or a slug."""
 	_require_system_user()
-	# This surface never had a JSON `filters` blob — its curated controls are
-	# named parameters — so anything non-empty here is a caller that thinks it is
-	# filtering and is not. Fail loudly with the shared code rather than return a
-	# confidently wrong (unfiltered) list.
-	if filters not in (None, "", "{}", {}):
-		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 
 	page = (page or "").strip()
@@ -1508,12 +1502,6 @@ def get_wiki_caps() -> dict:
 	"""The caller's wiki capabilities + the SM settings surfaced in the Wiki
 	tab header (knowledge language, last lint run)."""
 	_require_system_user()
-	# This surface never had a JSON `filters` blob — its curated controls are
-	# named parameters — so anything non-empty here is a caller that thinks it is
-	# filtering and is not. Fail loudly with the shared code rather than return a
-	# confidently wrong (unfiltered) list.
-	if filters not in (None, "", "{}", {}):
-		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 	from jarvis.chat import knowledge_language
 
@@ -1549,12 +1537,6 @@ def get_wiki_page(slug: str) -> dict:
 	leaked); ``can_edit``/``can_archive`` are the server-computed write-matrix
 	flags the UI trusts (save/archive re-check)."""
 	_require_system_user()
-	# This surface never had a JSON `filters` blob — its curated controls are
-	# named parameters — so anything non-empty here is a caller that thinks it is
-	# filtering and is not. Fail loudly with the shared code rather than return a
-	# confidently wrong (unfiltered) list.
-	if filters not in (None, "", "{}", {}):
-		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 	slug = (slug or "").strip().lower()
 	name = frappe.db.get_value(WIKI, {"slug": slug}, "name")
@@ -1608,12 +1590,6 @@ def create_wiki_page(
 	return ``{ok: False, reason}`` (the dialog shows the reason); malformed
 	input throws."""
 	_require_system_user()
-	# This surface never had a JSON `filters` blob — its curated controls are
-	# named parameters — so anything non-empty here is a caller that thinks it is
-	# filtering and is not. Fail loudly with the shared code rather than return a
-	# confidently wrong (unfiltered) list.
-	if filters not in (None, "", "{}", {}):
-		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 
 	title = " ".join(str(title or "").split())

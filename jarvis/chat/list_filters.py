@@ -1419,7 +1419,13 @@ def bounded_sql(query: str, values: Any = None, **kwargs: Any):
 	args = () if values is None else (values,)
 	if not _statement_timeout_supported():
 		return frappe.db.sql(query, *args, **kwargs)
-	bounded = f"SET STATEMENT max_statement_time={int(STATEMENT_TIMEOUT_SECONDS)} FOR {query.lstrip()}"
+	# Formatted as a FLOAT, deliberately. `int()` truncated a sub-second bound to
+	# 0, and MariaDB reads 0 as "no limit" — so the one edit this feature invites
+	# (tightening the bound because 10s felt slow) would have silently removed
+	# the ceiling instead of lowering it. MariaDB's max_statement_time takes
+	# fractional seconds, so there is nothing to round for.
+	seconds = float(STATEMENT_TIMEOUT_SECONDS)
+	bounded = f"SET STATEMENT max_statement_time={seconds} FOR {query.lstrip()}"
 	try:
 		return frappe.db.sql(bounded, *args, **kwargs)
 	except Exception as e:

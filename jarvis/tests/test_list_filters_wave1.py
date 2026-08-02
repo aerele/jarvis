@@ -492,6 +492,32 @@ class TestBoundedExecution(Wave1Base):
 			# cannot trip: assert the query still succeeded rather than fake it.
 			self.assertIn("data", res)
 
+	def test_a_sub_second_bound_is_not_silently_truncated_to_no_limit(self):
+		"""P3: `int(0.5)` is 0, and MariaDB reads 0 as NO LIMIT.
+
+		The bound is 10 today, so nothing is live — but lowering it is exactly
+		the tuning this feature invites, and truncation would have removed the
+		ceiling at the moment someone tried to tighten it.
+		"""
+		import time
+
+		from jarvis.chat.list_filters import ListFilterError
+
+		orig = list_filters.STATEMENT_TIMEOUT_SECONDS
+		list_filters.STATEMENT_TIMEOUT_SECONDS = 0.5
+		try:
+			started = time.time()
+			with self.assertRaises(ListFilterError) as caught:
+				list_filters.bounded_sql("SELECT SLEEP(4)")
+			elapsed = time.time() - started
+		finally:
+			list_filters.STATEMENT_TIMEOUT_SECONDS = orig
+		self.assertLess(elapsed, 2.0, f"a 0.5s bound did not apply (took {elapsed:.1f}s)")
+		self.assertEqual(
+			getattr(caught.exception, "filter_error_code", None),
+			list_filters.ERR_QUERY_TOO_EXPENSIVE,
+		)
+
 	def test_normal_queries_are_untouched_by_the_ceiling(self):
 		_mk_trigger(USER_A, "lfw-trig-fast")
 		with _as(USER_A):

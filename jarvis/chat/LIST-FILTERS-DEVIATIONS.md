@@ -393,6 +393,20 @@ families, remain the options if bounding cost stops being enough.
 **Degrades:** the syntax is MariaDB-specific; on any other backend the query
 runs unbounded rather than failing on syntax the server would reject.
 
+**The bound is formatted as a FLOAT, on purpose.** `int()` truncates a
+sub-second bound to `0`, and MariaDB reads `0` as *no limit* — so the one edit
+this feature invites (tightening the ceiling because 10s felt slow) would have
+silently removed it instead of lowering it. `max_statement_time` takes
+fractional seconds, so there is nothing to round for.
+
+**Known, unreachable (recorded rather than fixed):** `_is_statement_timeout`
+identifies the breach by errno and falls back to matching
+`"max_statement_time exceeded"` in the message. A crafted exception string could
+in principle reach that fallback — but nothing a user controls appears in it:
+the bound is a module constant, never a request value, and the driver's message
+carries no filter input. Reviewed and left as-is; if a future caller ever lets
+request data into an exception message on this path, the fallback goes.
+
 ---
 
 ## Non-deviations worth stating
