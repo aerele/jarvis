@@ -1,9 +1,13 @@
-// P0-01 surface-to-wrapper integration: the full browser transport chain for
-// each migrated view — useListPage (what every page mounts) driving the REAL
-// feature wrapper as its fetchFn, through to frappe-ui's `call`. This is the
-// end-to-end evidence that a canonical clause set on a page reaches the endpoint
-// as filters_v2, not just that each link works in isolation. (Mounting each full
-// .vue page adds only a fragile dependency tree over this identical chain.)
+// P0-01/S6 surface-to-wrapper integration: the full browser transport chain for
+// each migrated view — useListPage (what every page mounts) driving the page's
+// REAL adapter AND its REAL feature wrapper as fetchFn (`wrapper(adapt(p))`, the
+// exact shape each .vue mounts), through to frappe-ui's `call`. That closes the
+// gap the header used to overclaim: the adapter is now IN the chain, so a
+// filters_v2 dropped in the page's parameter mapping — not just the wrapper —
+// fails here too. This is the end-to-end evidence that a canonical clause set on a
+// page reaches the endpoint as filters_v2, not just that each link works in
+// isolation. (Mounting each full .vue page adds only a fragile dependency tree
+// over this identical chain.)
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { defineComponent } from "vue";
 import { mount, flushPromises } from "@vue/test-utils";
@@ -22,6 +26,9 @@ import { listCustomSkillsPage, listMacrosPage } from "@/api";
 import { listDashboardsPage } from "@/api/dashboards";
 import { listTriggersPage } from "@/api/triggers";
 import { listWikiPagesPage } from "@/api/wiki";
+// The REAL page adapters (S6): the chain is only end-to-end if fetchFn is what a
+// page actually mounts — wrapper(adapter(p)) — not the bare wrapper.
+import { searchSplitArgs, buildWikiListArgs } from "@/pages/list/listAdapters";
 
 function host(options) {
 	let api = null;
@@ -98,11 +105,14 @@ const VIEWS = [
 
 beforeEach(() => callDouble.mockClear());
 
-describe("migrated surface → wrapper → wire carries filters_v2 (P0-01)", () => {
+describe("migrated surface → PAGE ADAPTER → wrapper → wire carries filters_v2 (P0-01/S6)", () => {
 	it.each(VIEWS)("%s", async (key, wrapper, method, root, fieldname) => {
 		let n = 0;
+		// Drive the wrapper through the REAL page adapter, exactly as the .vue mounts
+		// it — so a dropped `filters_v2` in the adapter (not just the wrapper) fails.
+		const adapt = key === "wiki_pages" ? buildWikiListArgs : searchSplitArgs;
 		const api = host({
-			fetchFn: wrapper,
+			fetchFn: (p) => wrapper(adapt(p)),
 			storageKey: `st-${key}`,
 			viewKey: key,
 			fetchSchema: async () => schemaFor(root, fieldname),

@@ -135,6 +135,7 @@ import { useRoute, useRouter } from "vue-router";
 import { Badge, Button, Dropdown, Switch, Tooltip, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
+import { searchSplitArgs } from "@/pages/list/listAdapters";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiTriggers from "@/api/triggers";
 
@@ -229,10 +230,7 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		const { search: q, ...rest } = p.filters || {};
-		return apiTriggers.listTriggersPage({ ...p, search: q || p.search || "", filters: rest });
-	},
+	fetchFn: (p) => apiTriggers.listTriggersPage(searchSplitArgs(p)),
 	defaultSort: DEFAULT_SORT,
 	storageKey: "triggers",
 	viewKey: "triggers",

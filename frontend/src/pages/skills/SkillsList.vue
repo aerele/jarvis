@@ -119,6 +119,7 @@ import { useRoute, useRouter } from "vue-router";
 import { Button, Badge, Avatar, Tooltip, Dropdown, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
+import { searchSplitArgs } from "@/pages/list/listAdapters";
 import SyncPill from "./SyncPill.vue";
 import { session } from "@/data/session";
 import { timeAgo, exactDate } from "@/utils/datetime";
@@ -202,12 +203,9 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		// the backend whitelists filter keys and throws on "search" - strip it
-		// out of filters and send it as the envelope's search param instead
-		const { search: q, ...rest } = p.filters || {};
-		return api.listCustomSkillsPage({ ...p, search: q || p.search || "", filters: rest });
-	},
+	// searchSplitArgs moves `search` out of the whitelisted `filters` object and
+	// forwards everything else — filters_v2 included — through the spread (S6).
+	fetchFn: (p) => api.listCustomSkillsPage(searchSplitArgs(p)),
 	defaultSort: DEFAULT_SORT,
 	storageKey: "skills",
 	viewKey: "skills",

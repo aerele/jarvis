@@ -78,6 +78,7 @@ import { useRoute, useRouter } from "vue-router";
 import { Badge, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
+import { searchSplitArgs } from "@/pages/list/listAdapters";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { listDashboardsPage } from "@/api/dashboards";
 
@@ -146,10 +147,7 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		const { search: q, ...rest } = p.filters || {};
-		return listDashboardsPage({ ...p, search: q || p.search || "", filters: rest });
-	},
+	fetchFn: (p) => listDashboardsPage(searchSplitArgs(p)),
 	defaultSort: DEFAULT_SORT,
 	storageKey: "dashboards",
 	viewKey: "saved_dashboards",
