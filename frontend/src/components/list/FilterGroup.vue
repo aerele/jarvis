@@ -1,6 +1,6 @@
 <template>
 	<div class="flex items-center">
-		<Popover placement="bottom-end" @open="onOpen">
+		<Popover placement="bottom-end" @update:show="onShowChange">
 			<template #target="{ togglePopover }">
 				<Button
 					ref="triggerEl"
@@ -244,8 +244,22 @@ const capReached = computed(() => props.clauses.length >= limits.value.max_claus
 // clauses, because those must be reconciled before the first page is fetched.)
 // Retry re-emits the same request: the parent flips schemaState to "loading",
 // which is why this button has no loading state of its own.
-function onOpen() {
-	if (props.schemaState === "idle") emit("request-schema");
+//
+// The signal is `update:show`, NOT `open`. frappe-ui's Popover emits `open`
+// only from its reka-ui root, and it binds that root's `v-model:open` with a
+// real boolean - so the root is controlled and reports only the changes IT
+// starts (outside click, Escape). This panel opens from a Button inside the
+// `#target` slot, which runs frappe-ui's own `isOpen` setter and emits
+// `update:show` alone. Listening for `open` meant the catalog was never
+// requested and the field picker was permanently empty.
+//
+// `update:show` fires on the way down as well as up, and reka relays one
+// dismissal as two identical emissions, so only a real change of state counts.
+let lastShown = false;
+function onShowChange(shown) {
+	if (shown === lastShown) return;
+	lastShown = shown;
+	if (shown && props.schemaState === "idle") emit("request-schema");
 }
 
 const schemaMessage = computed(
