@@ -932,3 +932,213 @@ test("trial disclosure survives into the summary", () => {
 	assert.equal(s.summary.dueTodayInr, 0);
 	assert.equal(s.isMandate, true);
 });
+
+// ===========================================================================
+// Round-2 hardening: fail-closed checkout, attempt fence, callback identity,
+// the safe checkout-return exit, and the server-truth-gated restart.
+// ===========================================================================
+
+// ---- P1-1: canOpenCheckout fails closed on the source state ---------------
+test("P1-1: a retained handle cannot open a sheet from a settled recovery state", () => {
+	// Each of these carries a perfectly openable handle, but the STATE forbids a
+	// blind Pay: the authorization already exists, the account must reconnect, or
+	// the signup is terminal. The old predicate looked only at paid + handle and
+	// returned true for all three.
+	const handle = { razorpay_order_id: "o", razorpay_key_id: "k", generation: 1 };
+	for (const code of [
+		CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM,
+		CODES.ACCOUNT_RECONNECT_REQUIRED,
+		CODES.SIGNUP_TERMINAL,
+	]) {
+		const s = reduce(initialState(), at(code, handle));
+		assert.ok(s.handles.razorpay_order_id, `${code} kept the handle`);
+		assert.equal(canOpenCheckout(s), false, `${code} must not open a retained handle`);
+		// ...and the reducer's own CHECKOUT_OPENED guard agrees (no drift).
+		const out = reduce(s, { type: EVENTS.CHECKOUT_OPENED });
+		assert.notEqual(out.value, STATES.CHECKOUT_OPEN, `${code} open is refused`);
+	}
+});
+
+test("P1-1: verification never opens a retained handle either", () => {
+	const s = reduce(
+		initialState(),
+		at(CODES.SIGNUP_VERIFICATION_REQUIRED, {
+			pending_verification: true,
+			razorpay_order_id: "o",
+			razorpay_key_id: "k",
+		})
+	);
+	assert.equal(canOpenCheckout(s), false);
+});
+
+// ---- P1-4: the attempt fence sits ahead of the generation compare ---------
+test("P1-4: a different attempt at the SAME generation does not merge handles", () => {
+	let s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+			attempt_id: "att_1",
+			generation: 3,
+			razorpay_order_id: "order_OLD",
+			razorpay_key_id: "k",
+		})
+	);
+	s = reduce(
+		s,
+		CONTRACT({
+			code: CODES.PAYMENT_CONFIRMATION_PENDING,
+			data: {
+				attempt_id: "att_2",
+				generation: 3,
+				razorpay_order_id: "order_NEW",
+				razorpay_key_id: "k",
+			},
+		})
+	);
+	assert.equal(s.attemptId, "att_2");
+	assert.equal(s.handles.razorpay_order_id, "order_NEW", "the new attempt replaces");
+	assert.equal(s.generation, 3);
+});
+
+test("P1-4: a new attempt at a LOWER generation is a replacement, not a stale reject", () => {
+	let s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+			attempt_id: "att_1",
+			generation: 5,
+			razorpay_order_id: "order_OLD",
+			razorpay_key_id: "k",
+		})
+	);
+	s = reduce(
+		s,
+		CONTRACT({
+			code: CODES.PAYMENT_CONFIRMATION_PENDING,
+			data: {
+				attempt_id: "att_2",
+				generation: 2, // lower than the old attempt's 5
+				razorpay_order_id: "order_NEW",
+				razorpay_key_id: "k",
+			},
+		})
+	);
+	// The generation fence must NOT swallow this - it is a different intent.
+	assert.equal(s.attemptId, "att_2");
+	assert.equal(s.generation, 2);
+	assert.equal(s.handles.razorpay_order_id, "order_NEW");
+});
+
+test("P1-4: a LOSING generation of the SAME attempt is still rejected outright", () => {
+	let s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+			attempt_id: "att_1",
+			generation: 5,
+			razorpay_order_id: "order_LIVE",
+			razorpay_key_id: "k",
+		})
+	);
+	const before = s;
+	s = reduce(
+		s,
+		CONTRACT({
+			code: CODES.PAYMENT_DECLINED,
+			data: { attempt_id: "att_1", generation: 3, razorpay_order_id: "order_STALE" },
+		})
+	);
+	assert.equal(s, before, "a same-attempt losing generation is a no-op");
+});
+
+// ---- P1-5: gateway-event source + callback-identity guards ----------------
+test("P1-5: a stale-attempt callback is a no-op, not a mutation", () => {
+	let s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+			attempt_id: "att_NEW",
+			generation: 2,
+			razorpay_order_id: "o",
+			razorpay_key_id: "k",
+		})
+	);
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPENED });
+	assert.equal(s.value, STATES.CHECKOUT_OPEN);
+	// A callback from an OLD sheet (att_OLD) must not drive this newer intent.
+	const out = reduce(s, { type: EVENTS.GATEWAY_CALLBACK, attemptId: "att_OLD", generation: 1 });
+	assert.equal(out.value, STATES.CHECKOUT_OPEN, "stale callback did not confirm the new intent");
+});
+
+test("P1-5: gateway events cannot move a settled recovery state", () => {
+	const terminal = reduce(initialState(), at(CODES.SIGNUP_TERMINAL));
+	assert.equal(terminal.value, STATES.FAILED_TERMINAL);
+	// A late dismiss/callback from an old sheet must not unseat terminal/reconnect.
+	assert.equal(
+		reduce(terminal, { type: EVENTS.CHECKOUT_DISMISSED }).value,
+		STATES.FAILED_TERMINAL
+	);
+	assert.equal(
+		reduce(terminal, { type: EVENTS.GATEWAY_CALLBACK }).value,
+		STATES.FAILED_TERMINAL
+	);
+	const reconnect = reduce(initialState(), at(CODES.ACCOUNT_RECONNECT_REQUIRED));
+	assert.equal(reduce(reconnect, { type: EVENTS.CHECKOUT_FAILED }).value, STATES.RECONNECT);
+});
+
+test("P1-5: CONFIRM_SUCCEEDED is legal only from confirming", () => {
+	const s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o", razorpay_key_id: "k" })
+	);
+	// From UNKNOWN (not confirming): a no-op in production, a throw in strict.
+	assert.equal(reduce(s, { type: EVENTS.CONFIRM_SUCCEEDED, data: {} }).value, STATES.UNKNOWN);
+	assert.throws(() => reduce(s, { type: EVENTS.CONFIRM_SUCCEEDED, data: {} }, { strict: true }));
+});
+
+// ---- P0-2: the safe checkout-return exit ----------------------------------
+test("P0-2: RETURNED_FROM_CHECKOUT leaves checkout_open for a checkable unknown", () => {
+	let s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o", razorpay_key_id: "k" })
+	);
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPENED });
+	assert.equal(s.value, STATES.CHECKOUT_OPEN);
+	s = reduce(s, { type: EVENTS.RETURNED_FROM_CHECKOUT });
+	assert.equal(s.value, STATES.UNKNOWN, "the sheet is gone; do not assume dismissal");
+	assert.equal(s.checkRequired, true, "server truth must be reconciled");
+});
+
+test("P0-2: RETURNED_FROM_CHECKOUT never assumes anything from a non-checkout state", () => {
+	const paid = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
+	assert.equal(reduce(paid, { type: EVENTS.RETURNED_FROM_CHECKOUT }).value, STATES.PAID);
+	const review = initialState();
+	assert.equal(reduce(review, { type: EVENTS.RETURNED_FROM_CHECKOUT }).value, STATES.REVIEW);
+});
+
+// ---- P1-3: the server-truth-gated restart ---------------------------------
+test("P1-3: RESTART resets a day-one / account-exists state to a fresh review", () => {
+	const exists = reduce(
+		initialState(),
+		CONTRACT({ code: CODES.ACCOUNT_ALREADY_EXISTS, ok: false, data: {} })
+	);
+	const reset = reduce(exists, { type: EVENTS.RESTART });
+	assert.equal(reset.value, STATES.REVIEW);
+	assert.equal(reset.code, "");
+	assert.equal(reset.handles.razorpay_order_id, undefined);
+});
+
+test("P1-3: RESTART preserves a state where a payment may be recoverable", () => {
+	// Authorized-pending-confirm: an authorization exists at the gateway. A blind
+	// reset would orphan it, so the machine is preserved.
+	const authd = reduce(
+		initialState(),
+		at(CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM, { attempt_id: "att_1", generation: 1 })
+	);
+	assert.equal(reduce(authd, { type: EVENTS.RESTART }).value, STATES.CONFIRM_REQUIRED);
+	// Parked money is preserved too.
+	const parked = reduce(
+		initialState(),
+		CONTRACT({ code: CODES.BENCH_AWAITING_RECONCILIATION, ok: false, data: {} })
+	);
+	assert.equal(reduce(parked, { type: EVENTS.RESTART }).awaitingReconciliation, true);
+	// Paid is never abandoned.
+	const paid = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
+	assert.equal(reduce(paid, { type: EVENTS.RESTART }).value, STATES.PAID);
+});
