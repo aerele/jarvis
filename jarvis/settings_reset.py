@@ -84,6 +84,13 @@ CONNECTION = ResetSpec(
 	),
 	null=(
 		"last_sync_at",
+		# "this workspace has been chat-Ready" is a claim about the TENANCY that
+		# earned it, and a reset ends that tenancy. Left set, the readiness gate
+		# would keep failing OPEN through the new tenancy's provisioning
+		# (account._has_been_chat_ready) - i.e. the reset site, whose container is
+		# the one thing that definitely is not serving yet, would be the one told
+		# its chat is fine. It re-earns the marker on its first real Ready.
+		"chat_was_ready_at",
 		"agent_token_issued_at",
 		"custom_skills_synced_at",
 		"agent_skills_synced_at",

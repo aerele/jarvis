@@ -116,6 +116,12 @@ def write_connection(data: dict) -> None:
 	# account): a bearer minted from the old ones would outlive them.
 	if any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password")):
 		admin_client.clear_cached_token()
+	# This is the write that can point the workspace at a DIFFERENT container or a
+	# different admin principal, so any cached readiness verdict describes a
+	# connection that is no longer the current one.
+	from jarvis.account import _bust_chat_gate
+
+	_bust_chat_gate()
 	# NB: the release notice is deliberately NOT mirrored here. Several callers
 	# pass a partial payload (a password, a customer email), and an absent notice
 	# key means "cleared" - which would drop a live notice. It is persisted only
@@ -383,6 +389,14 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 	# compute_pool_mode/compute_proxy_active, mirror models[0], enqueue pool/creds sync.
 	s.save(ignore_permissions=True)
 	frappe.db.commit()
+	# The pool this workspace runs on just changed, so the readiness verdict admin
+	# gave about the PREVIOUS one is finished. account._admin_chat_gate keys its
+	# cache by config revision and this save moves it, so the old entry is already
+	# unreachable; the explicit drop covers the revision returning to a previous
+	# value inside the TTL (see _bust_chat_gate).
+	from jarvis.account import _bust_chat_gate
+
+	_bust_chat_gate()
 
 	row = (
 		frappe.db.get_value(
@@ -465,6 +479,10 @@ def disconnect_llm() -> dict:
 	for field, value in _DISCONNECTED_LLM_FIELDS.items():
 		settings.db_set(field, value, update_modified=False)
 	frappe.db.commit()
+	# There is no connection left for a cached "Ready" to be about.
+	from jarvis.account import _bust_chat_gate
+
+	_bust_chat_gate()
 	return {"disconnected": True, "last_sync_status": "disconnected"}
 
 
@@ -1019,6 +1037,11 @@ def save_llm_creds(
 		s.flags.force_admin_sync = True
 	s.save(ignore_permissions=True)
 	frappe.db.commit()
+	# Same reason as save_llm_pool's: the cached readiness verdict was about the
+	# credential this save replaced.
+	from jarvis.account import _bust_chat_gate
+
+	_bust_chat_gate()
 	# on_update writes last_sync_* via frappe.db.set_value so the
 	# in-memory ``s`` doc is stale. Fetch JUST the two fields we
 	# need rather than reloading the entire Singles doc (the previous

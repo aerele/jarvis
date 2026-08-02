@@ -63,6 +63,16 @@ export const SUSPENDED_FALLBACK =
 const GENERIC_DEGRADED =
   "Jarvis isn't fully set up, so replies may fail. Ask your administrator to finish reconnecting it.";
 
+// account.py could not reach its control plane AND this workspace has never been
+// confirmed chat-ready, so nobody knows whether a container is serving it
+// (jarvis/account.py::_admin_unreachable_verdict). Retryable by construction:
+// this is the absence of a verdict, not one. Without a case of its own it fell
+// to GENERIC_DEGRADED, which tells the customer to ask an administrator to
+// finish reconnecting - wrong twice over, since nothing is misconfigured and no
+// administrator can shorten an outage.
+const UNCONFIRMED_DEGRADED =
+  "We couldn't confirm Jarvis is ready, so replies may fail. This usually clears in a moment - try again shortly.";
+
 // Copy for the degraded banner, structured to match steps.js's suspensionNotice
 // so the two surfaces cannot drift apart on the same verdict.
 //
@@ -75,6 +85,11 @@ const GENERIC_DEGRADED =
 //   container_provisioning  admin's sentence when it has one (this is the path
 //                           that carries the quota and cooldown wording), else
 //                           the generic line.
+//   readiness_unconfirmed   the "try again shortly" line. account.py always
+//                           attaches a detail here, but the fallback is the
+//                           retryable one either way - never the generic
+//                           "ask your administrator", which names a person who
+//                           cannot help with a control-plane outage.
 //   anything else           the generic line. Do NOT print a raw `detail` for
 //                           an unrecognised reason: the reason set is owned by
 //                           account.py and a future addition would leak
@@ -84,5 +99,6 @@ export function degradedMessage(resp) {
   const detail = (resp && resp.detail) || "";
   if (reason === "subscription_suspended") return detail || SUSPENDED_FALLBACK;
   if (reason === "container_provisioning") return detail || GENERIC_DEGRADED;
+  if (reason === "readiness_unconfirmed") return detail || UNCONFIRMED_DEGRADED;
   return GENERIC_DEGRADED;
 }
