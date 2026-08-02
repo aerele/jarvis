@@ -31,21 +31,26 @@ import FilterGroup from "@/components/list/FilterGroup.vue";
 const root = resolve(__dirname, "../..");
 const read = (p) => readFileSync(resolve(root, p), "utf8");
 
-// The two surfaces this wave migrates, and the six that must NOT move with it.
+// The migrated surfaces (Phase-2 pilots + wave 1) and the ones that must NOT
+// have moved with them. Wave 1 added saved dashboards, triggers and wiki; File
+// Box and Support are wave-1 PROJECTIONS deferred to their own milestones (no
+// metadata catalog yet, C08-4), and Trigger Activity is held back because its
+// floor-role catalog is empty (its DocType reads System-Manager-only — see
+// test_list_registry.test_floor_role_catalog).
 const MIGRATED = {
 	skills: "src/pages/skills/SkillsList.vue",
 	macros: "src/pages/macros/MacrosList.vue",
+	saved_dashboards: "src/pages/dashboards/SavedDashboardsTab.vue",
+	triggers: "src/pages/triggers/TriggersListPane.vue",
+	wiki_pages: "src/pages/skills/WikiTab.vue",
 };
 const UNMIGRATED = [
-	"src/pages/dashboards/SavedDashboardsTab.vue",
 	"src/pages/files/FilesList.vue",
-	"src/pages/skills/WikiTab.vue",
 	"src/pages/support/SupportListPage.vue",
 	"src/pages/triggers/ActivityTab.vue",
-	"src/pages/triggers/TriggersListPane.vue",
 ];
 
-describe("only the two pilot surfaces move", () => {
+describe("only the migrated surfaces drive FilterGroup", () => {
 	it.each(UNMIGRATED)("%s still drives the legacy FilterButton", (path) => {
 		const source = read(path);
 		expect(source).toContain(":filter-defs=");
@@ -60,7 +65,7 @@ describe("only the two pilot surfaces move", () => {
 		expect(source).toContain(`viewKey: "${key}"`);
 	});
 
-	// If FilterButton is ever deleted before waves 2-4 land, six lists lose their
+	// If FilterButton is ever deleted before waves 2-4 land, the remaining lists lose their
 	// filter action silently. Pin it.
 	it("keeps FilterButton in the tree and wired into ListPage", () => {
 		expect(read("src/components/list/FilterButton.vue")).toContain("filterDefs");

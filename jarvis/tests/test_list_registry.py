@@ -306,8 +306,26 @@ class TestCuratedFilterWidthGap(FrappeTestCase):
 				catalog = build_field_catalog(view.root_doctype, user=floor, view=view)
 				main = {f["fieldname"] for f in catalog if not f["is_child"]}
 				if not main:
-					# No level-0 read for the floor role: the surface is gated to
-					# reviewers/admins. Correct, and worth reporting.
+					# No level-0 read for the floor role. For a PENDING surface
+					# that is just a fact worth reporting — the list is gated to
+					# reviewers/admins. For a MIGRATED one it is a DEFECT, and the
+					# reason Trigger Activity is not in wave 1: its endpoint is
+					# `require_jarvis_user` but its DocType grants read to System
+					# Manager alone, so an ordinary user still gets rows while the
+					# catalog — derived from the doctype — is empty. They would see
+					# a Filter panel with no fields at all, and every filter they
+					# have today would silently disappear. That is the
+					# MIGRATION-CHECKLIST §1 invariant (SQL scope ⊆ ORM read scope)
+					# failing, and it has to fail loudly here rather than in a
+					# customer's list.
+					self.assertNotEqual(
+						view.status,
+						list_registry.MIGRATED,
+						f"{view.view_key} is MIGRATED but its catalog is EMPTY at the floor "
+						f"role: the endpoint returns rows this role cannot read through the "
+						f"ORM, so the schema is derived from the wrong authority "
+						f"(MIGRATION-CHECKLIST §1). Fix the DocPerms or keep the view PENDING.",
+					)
 					report.append(f"  {view.view_key:<28} floor_main=  0  (no access at the floor role)")
 					continue
 				curated = {v for v in view.curated_filters.values() if v}

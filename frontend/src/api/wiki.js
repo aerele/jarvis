@@ -11,8 +11,8 @@ const WK = "jarvis.chat.wiki.";
 // Envelope {rows, total, has_more, page, page_length}; rows carry scope +
 // stale/contradiction flags. scope_filter: all | org | role | mine.
 // attention=1 keeps only pages needing review (conflicting or stale).
-export const listWikiPagesPage = (p = {}) =>
-	call(WK + "list_wiki_pages_page", {
+export const listWikiPagesPage = (p = {}) => {
+	const args = {
 		search: p.search || "",
 		page_type: p.page_type || "",
 		scope_filter: p.scope_filter || "all",
@@ -20,7 +20,15 @@ export const listWikiPagesPage = (p = {}) =>
 		archived: p.archived ? 1 : 0,
 		page: p.page || 1,
 		page_length: p.page_length || 20,
-	});
+	};
+	// plan 08 §6.2: additive, and only sent when there are clauses — this
+	// endpoint keeps its bespoke named-parameter shape (it never had a JSON
+	// `filters` blob), so nothing else about the call changes.
+	if (Array.isArray(p.filters_v2) && p.filters_v2.length) {
+		args.filters_v2 = JSON.stringify(p.filters_v2);
+	}
+	return call(WK + "list_wiki_pages_page", args);
+};
 
 // {creatable_scopes, manageable_roles, is_sm, knowledge_language,
 //  wiki_lint_last_run_at, wiki_lint_summary} - the caller's capabilities +

@@ -598,7 +598,9 @@ function newDashboard() {
 	confirmDiscard(() => {
 		clearBuilder();
 		activeTab.value = "builder";
-		router.push({ hash: "", query: {} });
+		// Drop the ?edit seed, NOT the whole query: `fv2` is the Saved tab's
+		// filter set, and only Clear All unfilters a list.
+		router.push({ hash: "", query: _withoutEditSeed() });
 	});
 }
 
@@ -606,7 +608,7 @@ function newDashboard() {
 function resetBuilder() {
 	confirmDiscard(() => {
 		clearBuilder();
-		if (route.query.edit) router.replace({ query: {}, hash: route.hash });
+		if (route.query.edit) router.replace({ query: _withoutEditSeed(), hash: route.hash });
 	});
 }
 
@@ -742,6 +744,14 @@ async function resumeAdoption(name) {
 
 // Drop the promotion keys once it has settled, so a reload/back does not replay
 // it — the editSeed discipline, one route write.
+// The ?edit seed alone. Everything else in the query belongs to somebody —
+// `fv2` to the Saved list, the promotion keys to stripPromotionQuery.
+function _withoutEditSeed() {
+	const q = { ...route.query };
+	delete q.edit;
+	return q;
+}
+
 function stripPromotionQuery(hash = route.hash) {
 	if (route.name !== "DashboardsPage") return;
 	if (route.query.chat === undefined && route.query.canvas === undefined) return;

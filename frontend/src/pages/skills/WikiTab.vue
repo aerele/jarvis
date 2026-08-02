@@ -10,13 +10,16 @@
 			:total="total"
 			:has-more="hasMore"
 			:quick-filters="quickFilters"
-			:filter-defs="filterDefs"
+			:filter-state="filterState"
 			:filters="filters"
 			:page-length="pageLength"
 			:on-row-click="openRow"
 			storage-key="wiki"
 			:empty-state="emptyState"
 			@update:filters="setFilters"
+			@update:filter-clauses="setClauses"
+			@request-filter-schema="requestSchema"
+			@dismiss-filter-notice="dismissFilterNotice"
 			@update:page-length="(v) => (pageLength = v)"
 			@load-more="loadMore"
 			@refresh="resetLoad"
@@ -290,6 +293,7 @@
 // creatable_scopes isn't empty; SMs also get the settings popover (knowledge
 // language, mirror sync, health check).
 import { reactive, ref, computed, onMounted } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
 	Autocomplete,
 	Badge,
@@ -319,6 +323,11 @@ import {
 	runWikiLintNow,
 } from "@/api/wiki";
 import { agentName } from "@/branding";
+
+// /skills is a TABBED shell; the `fv2` payload carries its view key so a sibling
+// tab's filters are never half-applied here (judgment C08-7).
+const route = useRoute();
+const router = useRouter();
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
@@ -402,11 +411,16 @@ const quickFilters = [
 	// "View", not "Attention": it also carries the Archived lifecycle view
 	{ key: "attention", label: "View", type: "select", options: ATTENTION_OPTIONS },
 ];
-const filterDefs = [
-	{ key: "scope", label: "Scope", type: "select", options: SCOPE_OPTIONS },
-	{ key: "page_type", label: "Type", type: "select", options: TYPE_OPTIONS },
-	{ key: "attention", label: "View", type: "select", options: ATTENTION_OPTIONS },
-];
+// plan 08 wave 1: the curated `filterDefs` array is GONE as the filter catalog.
+// The panel is generated from the server schema for view_key "wiki_pages".
+//
+// Only `page_type` maps 1:1 onto a canonical field. The other two quick controls
+// stay legacy-only on purpose, and the registry says why: `scope` is the
+// all|org|role|mine VIEW predicate (not the doctype's `scope` field — "mine"
+// means scope='User' AND target_user=me, which no single clause expresses), and
+// `attention` is a staleness/contradiction predicate that also carries the
+// Archived lifecycle switch over `status`.
+const QUICK_CLAUSES = { page_type: "page_type" };
 
 // ── list state (server envelope; endpoint paginates by page number) ──────────
 const {
@@ -421,6 +435,10 @@ const {
 	resetLoad,
 	loadMore,
 	refreshKeep,
+	filterState,
+	setClauses,
+	requestSchema,
+	dismissFilterNotice,
 } = useListPage({
 	fetchFn: (p) => {
 		const f = p.filters || {};
@@ -434,9 +452,15 @@ const {
 			// kit sends a start offset; the endpoint takes a page number
 			page: Math.floor((p.start || 0) / pl) + 1,
 			page_length: pl,
+			filters_v2: p.filters_v2,
 		});
 	},
 	storageKey: "wiki",
+	viewKey: "wiki_pages",
+	quickClauses: QUICK_CLAUSES,
+	rootDoctype: "Jarvis Wiki Page",
+	route,
+	router,
 });
 
 // Archive vs Restore in the actions column keys off the lifecycle view:
