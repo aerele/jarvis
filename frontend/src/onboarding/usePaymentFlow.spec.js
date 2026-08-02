@@ -35,7 +35,11 @@ function makeApi(over = {}) {
 			})
 		),
 		getOnboardingState: vi.fn(async () =>
-			ENVELOPE({ code: CODES.PAYMENT_CONFIRMATION_PENDING, attempt_id: "att_1", generation: 1 })
+			ENVELOPE({
+				code: CODES.PAYMENT_CONFIRMATION_PENDING,
+				attempt_id: "att_1",
+				generation: 1,
+			})
 		),
 		initiateSignupPayment: vi.fn(async () =>
 			ENVELOPE({
@@ -68,7 +72,10 @@ function makeFlow(over = {}) {
 	const api = over.api || makeApi();
 	const openCheckout =
 		over.openCheckout ||
-		vi.fn(async () => ({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_1" } }));
+		vi.fn(async () => ({
+			status: CHECKOUT_SUCCESS,
+			payload: { razorpay_payment_id: "pay_1" },
+		}));
 	const store = new Map();
 	const flow = createPaymentFlow({
 		api,
@@ -88,7 +95,12 @@ function makeFlow(over = {}) {
 describe("the first payment", () => {
 	test("a review submit signs up exactly once and opens the sheet it was handed", async () => {
 		const { flow, api, openCheckout } = makeFlow();
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		expect(api.startSignup).toHaveBeenCalledTimes(1);
 		expect(openCheckout).toHaveBeenCalledTimes(1);
 		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
@@ -159,7 +171,10 @@ describe("check-on-failure is mandatory", () => {
 		const api = makeApi({
 			confirmSignupPayment: vi.fn(async () => ({
 				status: 417,
-				body: { exc_type: "ValidationError", error: { code: "", message: "gateway timeout" } },
+				body: {
+					exc_type: "ValidationError",
+					error: { code: "", message: "gateway timeout" },
+				},
 			})),
 		});
 		const { flow } = makeFlow({ api });
@@ -217,7 +232,12 @@ describe("the rate limit", () => {
 		const api = makeApi({
 			checkSignupPaymentStatus: vi.fn(async () =>
 				REFUSAL(
-					{ code: CODES.PAYMENT_CHECK_RATE_LIMITED, message: "", recovery: "retry", retry_after_seconds: 5 },
+					{
+						code: CODES.PAYMENT_CHECK_RATE_LIMITED,
+						message: "",
+						recovery: "retry",
+						retry_after_seconds: 5,
+					},
 					429
 				)
 			),
@@ -238,7 +258,12 @@ describe("the rate limit", () => {
 		const api = makeApi({
 			checkSignupPaymentStatus: vi.fn(async () =>
 				REFUSAL(
-					{ code: CODES.PAYMENT_CHECK_RATE_LIMITED, message: "", recovery: "retry", retry_after_seconds: 60 },
+					{
+						code: CODES.PAYMENT_CHECK_RATE_LIMITED,
+						message: "",
+						recovery: "retry",
+						retry_after_seconds: 60,
+					},
 					429
 				)
 			),
@@ -274,7 +299,8 @@ describe("the confirm is not a transport check", () => {
 						tenant_status: "pending",
 						agent_url: "",
 						chat_readiness: "Provisioning",
-						chat_readiness_reason: "Something went wrong finishing setup — our team has been alerted.",
+						chat_readiness_reason:
+							"Something went wrong finishing setup — our team has been alerted.",
 					},
 				},
 			})),
@@ -290,7 +316,10 @@ describe("the confirm is not a transport check", () => {
 			status: 402,
 			body: {
 				exc_type: "ValidationError",
-				error: { code: CODES.PAYMENT_DECLINED, message: "This Cashfree mandate is not authorized." },
+				error: {
+					code: CODES.PAYMENT_DECLINED,
+					message: "This Cashfree mandate is not authorized.",
+				},
 			},
 		}));
 		const openCheckout = vi.fn(async () => ({
@@ -298,7 +327,10 @@ describe("the confirm is not a transport check", () => {
 			payload: { provider: "cashfree", cashfree_order_id: "cf_1" },
 			pollConfirm: true,
 		}));
-		const { flow } = makeFlow({ api: makeApi({ confirmSignupPayment: confirm }), openCheckout });
+		const { flow } = makeFlow({
+			api: makeApi({ confirmSignupPayment: confirm }),
+			openCheckout,
+		});
 		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
 		expect(confirm).toHaveBeenCalledTimes(1);
 		expect(flow.state.value.code).toBe(CODES.PAYMENT_DECLINED);
@@ -459,7 +491,12 @@ describe("the machine decides what opens", () => {
 			),
 		});
 		const { flow, openCheckout } = makeFlow({ api, options: { strict: false } });
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
 		await flow.verifyAndContinue();
 		expect(openCheckout).not.toHaveBeenCalled();
@@ -486,7 +523,12 @@ describe("the machine decides what opens", () => {
 			),
 		});
 		const { flow, openCheckout } = makeFlow({ api, options: { strict: false } });
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		expect(flow.state.value.generation).toBe(7);
 		await flow.verifyAndContinue();
 		expect(openCheckout).not.toHaveBeenCalled();
@@ -510,11 +552,21 @@ describe("the machine decides what opens", () => {
 		const openCheckout = vi.fn(async (handles) => {
 			handedTo = handles;
 			const st = flow.state.value;
-			atOpen = { value: st.value, busy: st.busy, handles: { ...st.handles }, provider: st.provider };
+			atOpen = {
+				value: st.value,
+				busy: st.busy,
+				handles: { ...st.handles },
+				provider: st.provider,
+			};
 			return { status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_1" } };
 		});
 		({ flow } = makeFlow({ api, openCheckout, options: { strict: false } }));
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		await flow.verifyAndContinue();
 		expect(openCheckout).toHaveBeenCalledTimes(1);
 		// The busy view while the sheet opens - nothing to press underneath it.
@@ -930,7 +982,11 @@ describe("cancelInFlight", () => {
 		const api = makeApi({
 			checkSignupPaymentStatus: vi.fn(async () => {
 				flow.cancelInFlight();
-				return ENVELOPE({ code: CODES.PAYMENT_CONFIRMATION_PENDING, attempt_id: "att_1", generation: 1 });
+				return ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+				});
 			}),
 		});
 		({ flow } = makeFlow({ api }));
@@ -1182,7 +1238,14 @@ describe("the idempotency key", () => {
 			initiateSignupPayment: vi
 				.fn()
 				.mockImplementationOnce(async () =>
-					REFUSAL({ code: CODES.INVALID_REQUEST, message: "idempotency_key too long", recovery: "retry" }, 400)
+					REFUSAL(
+						{
+							code: CODES.INVALID_REQUEST,
+							message: "idempotency_key too long",
+							recovery: "retry",
+						},
+						400
+					)
 				)
 				.mockImplementationOnce(async () =>
 					ENVELOPE({

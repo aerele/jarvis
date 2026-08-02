@@ -344,19 +344,26 @@
 							<template v-if="showPaidFlash || showProvisioning">
 								<div class="ob-body">
 									<div class="ob-head">
-										<h1>{{ paySummaryTrial ? "Free trial started" : "Payment confirmed" }}</h1>
+										<h1>
+											{{
+												paySummaryTrial
+													? "Free trial started"
+													: "Payment confirmed"
+											}}
+										</h1>
 										<p v-if="!provisioningDelayed" role="status">
 											{{
 												paySummaryTrial
 													? "Auto-pay authorized — nothing charged until your trial ends."
 													: "Payment received."
 											}}
-											We're preparing your {{ agentName }} workspace. This usually
-											takes under a minute…
+											We're preparing your {{ agentName }} workspace. This
+											usually takes under a minute…
 										</p>
 										<p v-else role="status">
-											Your workspace is taking a little longer than usual to come
-											online. Your payment is complete — nothing more is owed.
+											Your workspace is taking a little longer than usual to
+											come online. Your payment is complete — nothing more is
+											owed.
 										</p>
 										<!-- admin's OWN sentence when it recorded the payment but the
 											 allocation failed and ops were paged. It used to be
@@ -403,18 +410,20 @@
 							<template v-else-if="showVerify">
 								<div class="ob-body">
 									<div class="ob-head">
-										<h1 ref="recoveryHeading" tabindex="-1">Check your email</h1>
+										<h1 ref="recoveryHeading" tabindex="-1">
+											Check your email
+										</h1>
 										<p>
 											We sent a confirmation link to <b>{{ payEmail }}</b
-											>. Click the link to verify your address, then come back
-											here and continue.
+											>. Click the link to verify your address, then come
+											back here and continue.
 										</p>
 									</div>
 									<p class="text-center text-p-sm text-ink-gray-5" role="status">
 										<template v-if="payVerifyExpiry"
 											>This link expires on {{ payVerifyExpiry }}. </template
-										><template v-else>The link expires in 24 hours. </template>Check
-										your spam folder if it doesn't arrive.
+										><template v-else>The link expires in 24 hours. </template
+										>Check your spam folder if it doesn't arrive.
 									</p>
 								</div>
 								<div class="ob-foot justify-end">
@@ -447,7 +456,9 @@
 							<template v-else-if="showRecovery">
 								<div class="ob-body ob-body--center">
 									<div class="ob-head">
-										<h1 ref="recoveryHeading" tabindex="-1">{{ payCopy.headline }}</h1>
+										<h1 ref="recoveryHeading" tabindex="-1">
+											{{ payCopy.headline }}
+										</h1>
 										<p :role="recoveryRole">{{ payCopy.body }}</p>
 										<!-- The captured, customer-facing detail from the thing that
 											 actually failed (an ad-blocker eating the SDK, a gateway
@@ -470,10 +481,16 @@
 											v-for="(row, i) in paySummaryRows"
 											:key="row.label"
 											class="flex items-center justify-between gap-3 px-4 py-2.5 text-p-sm"
-											:class="i < paySummaryRows.length - 1 ? 'border-b border-outline-gray-1' : ''"
+											:class="
+												i < paySummaryRows.length - 1
+													? 'border-b border-outline-gray-1'
+													: ''
+											"
 										>
 											<span class="text-ink-gray-5">{{ row.label }}</span>
-											<b class="font-medium text-ink-gray-9">{{ row.value }}</b>
+											<b class="font-medium text-ink-gray-9">{{
+												row.value
+											}}</b>
 										</div>
 									</div>
 									<p
@@ -678,9 +695,9 @@
 											@click="startReconnect"
 										/>
 										<p class="mt-1.5 text-p-sm text-ink-gray-5">
-											We'll email a code to {{ payEmail }} — enter it to connect
-											this site to your existing subscription. Nothing to pay
-											again.
+											We'll email a code to {{ payEmail }} — enter it to
+											connect this site to your existing subscription.
+											Nothing to pay again.
 										</p>
 									</div>
 								</div>
@@ -894,10 +911,7 @@ import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
 import { openOnboardingCheckout } from "@/onboarding/onboardingCheckout";
-import {
-	STATES as PAY_STATES,
-	remainingCooldownSeconds,
-} from "@/onboarding/paymentMachine";
+import { STATES as PAY_STATES, remainingCooldownSeconds } from "@/onboarding/paymentMachine";
 import { ACTIONS, ACTION_LABELS, TONE, copyFor } from "@/onboarding/paymentCodes";
 
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
@@ -1172,7 +1186,10 @@ async function reconcileMidFlightSignup() {
 		} catch (e) {
 			/* readiness is advisory here - fall through to the pay projection */
 		}
-		if (ready && (ready.reason === "llm_credentials" || ready.reason === "llm_pool_provisioning")) {
+		if (
+			ready &&
+			(ready.reason === "llm_credentials" || ready.reason === "llm_pool_provisioning")
+		) {
 			state.reconciledConnect = true;
 			state.step = "connect";
 			return;
@@ -1376,10 +1393,16 @@ const paySummaryRows = computed(() => {
 	const s = pay.value.summary || {};
 	const rows = [];
 	if (pay.value.provider) {
-		rows.push({ label: "Payment method", value: pay.value.provider === "cashfree" ? "Cashfree" : "Razorpay" });
+		rows.push({
+			label: "Payment method",
+			value: pay.value.provider === "cashfree" ? "Cashfree" : "Razorpay",
+		});
 	}
 	if (s.dueTodayInr != null && !Number.isNaN(s.dueTodayInr)) {
-		rows.push({ label: "Amount", value: paySummaryTrial.value ? "₹0 today" : inr(s.dueTodayInr) });
+		rows.push({
+			label: "Amount",
+			value: paySummaryTrial.value ? "₹0 today" : inr(s.dueTodayInr),
+		});
 	}
 	const ref = maskedIntentRef.value;
 	if (ref) rows.push({ label: "Reference", value: ref });

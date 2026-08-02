@@ -147,7 +147,8 @@ export function createPaymentFlow(deps) {
 		// over the top of it.
 		const my = token;
 		const decoded = ingest(await api.getOnboardingState());
-		if (my !== token) return { paid: null, truthKnown: false, notStarted: false, superseded: true };
+		if (my !== token)
+			return { paid: null, truthKnown: false, notStarted: false, superseded: true };
 		// ...and the fence that the token alone cannot draw: a mount read and the
 		// checkout it races share one token (nothing bumps between them), so the
 		// STATE is the discriminator. hydrate() is the PASSIVE read; it must never

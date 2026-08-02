@@ -205,7 +205,8 @@ function buildSummary(prev, data, context) {
 		context.plan ||
 		(prev && prev.plan) ||
 		"";
-	const num = (v, fallback) => (v === null || v === undefined || v === "" ? fallback : Number(v));
+	const num = (v, fallback) =>
+		v === null || v === undefined || v === "" ? fallback : Number(v);
 	return {
 		plan: planName,
 		email: data.email || context.email || (prev && prev.email) || "",
@@ -214,7 +215,8 @@ function buildSummary(prev, data, context) {
 		amountInr: num(data.amount_inr, prev ? prev.amountInr : null),
 		dueTodayInr: num(data.due_today_inr, prev ? prev.dueTodayInr : null),
 		signupFeeInr: num(data.signup_fee_inr, prev ? prev.signupFeeInr : null),
-		trialDays: num(data.effective_trial_days ?? data.trial_days, prev ? prev.trialDays : 0) || 0,
+		trialDays:
+			num(data.effective_trial_days ?? data.trial_days, prev ? prev.trialDays : 0) || 0,
 	};
 }
 
@@ -270,7 +272,8 @@ function recomputeCanCheck(next, nowMs) {
 	// The check button is live when the backend permits it AND we are not in a
 	// rate-limit cooldown. A missing `nowMs` (most reducer calls) leaves an
 	// existing cooldown in force - only an explicit clock tick lifts it.
-	const cooling = next.checkCooldownUntil > 0 && (nowMs == null || nowMs < next.checkCooldownUntil);
+	const cooling =
+		next.checkCooldownUntil > 0 && (nowMs == null || nowMs < next.checkCooldownUntil);
 	return next._backendCanCheck && !cooling;
 }
 
@@ -295,7 +298,12 @@ export function reduce(state, event, opts = {}) {
 	const nowMs = event.nowMs != null ? event.nowMs : opts.nowMs != null ? opts.nowMs : 0;
 	switch (event.type) {
 		case EVENTS.SUBMIT_REVIEW:
-			return { ...state, value: STATES.STARTING_SIGNUP, busy: "starting", transportError: false };
+			return {
+				...state,
+				value: STATES.STARTING_SIGNUP,
+				busy: "starting",
+				transportError: false,
+			};
 
 		case EVENTS.CONTRACT_STATE:
 			return applyContract(state, event.decoded || {}, opts);
@@ -400,7 +408,11 @@ export function reduce(state, event, opts = {}) {
 
 		case EVENTS.PROVISIONING_DELAYED: {
 			if (state.value !== STATES.PROVISIONING) {
-				return illegal(state, strict, "provisioning_delayed from a non-provisioning state");
+				return illegal(
+					state,
+					strict,
+					"provisioning_delayed from a non-provisioning state"
+				);
 			}
 			return { ...state, value: STATES.PROVISIONING_DELAYED };
 		}
@@ -464,7 +476,12 @@ function hasOpenableHandle(handles) {
  */
 export function handlesForProvider(handles, provider) {
 	const full = { ...(handles || {}) };
-	const named = PROVIDER_HANDLE_KEYS[String(provider || "").trim().toLowerCase()];
+	const named =
+		PROVIDER_HANDLE_KEYS[
+			String(provider || "")
+				.trim()
+				.toLowerCase()
+		];
 	if (!named) return full;
 	const family = hasOpenableHandle(narrowToFamily(full, named))
 		? named
@@ -490,7 +507,8 @@ function illegal(state, strict, why) {
 function applyContract(state, decoded, opts) {
 	const code = decoded.code || "";
 	const data = (decoded.data && typeof decoded.data === "object" && decoded.data) || {};
-	const context = (decoded.context && typeof decoded.context === "object" && decoded.context) || {};
+	const context =
+		(decoded.context && typeof decoded.context === "object" && decoded.context) || {};
 
 	// ---- the generation fence: a stale answer from a superseded intent is
 	// ignored OUTRIGHT (same object back, so a two-tab race cannot even repaint).
@@ -516,9 +534,10 @@ function applyContract(state, decoded, opts) {
 		if (PAID_FLOOR.has(state.value)) return state;
 		const next = {
 			...state,
-			value: state.value === STATES.REVIEW || state.value === STATES.STARTING_SIGNUP
-				? STATES.UNKNOWN
-				: state.value,
+			value:
+				state.value === STATES.REVIEW || state.value === STATES.STARTING_SIGNUP
+					? STATES.UNKNOWN
+					: state.value,
 			busy: null,
 			awaitingReconciliation: true,
 			canInitiate: false,
@@ -565,7 +584,10 @@ function applyContract(state, decoded, opts) {
 		// intent and charges nothing, so offering it is always safe. `initiate` is
 		// deliberately NOT defaulted - that one can take money.
 		const withCheck = (next) => {
-			const out = { ...next, _backendCanCheck: next._backendCanCheck == null ? true : next._backendCanCheck };
+			const out = {
+				...next,
+				_backendCanCheck: next._backendCanCheck == null ? true : next._backendCanCheck,
+			};
 			out.canCheck = recomputeCanCheck(out, opts.nowMs);
 			return out;
 		};
@@ -578,7 +600,13 @@ function applyContract(state, decoded, opts) {
 			});
 		}
 		if (PAID_FLOOR.has(state.value)) return state;
-		return withCheck({ ...state, value: STATES.UNKNOWN, transportError: true, busy: null, code });
+		return withCheck({
+			...state,
+			value: STATES.UNKNOWN,
+			transportError: true,
+			busy: null,
+			code,
+		});
 	}
 
 	// ---- a real payment state.
@@ -590,7 +618,9 @@ function applyContract(state, decoded, opts) {
 
 	const handles = pickHandles(data);
 	const supersededGen =
-		incomingGen != null && state.generation != null && Number(incomingGen) > Number(state.generation);
+		incomingGen != null &&
+		state.generation != null &&
+		Number(incomingGen) > Number(state.generation);
 	// An answer carrying NO generation cannot be attributed to the current
 	// intent, and the generation fence above cannot judge it. Its CODE is still
 	// honoured - an older control plane is entitled to report a decline - but its
@@ -607,11 +637,17 @@ function applyContract(state, decoded, opts) {
 		transportError: false,
 		attemptId: data.attempt_id || state.attemptId,
 		generation: incomingGen != null ? Number(incomingGen) : state.generation,
-		provider: (data.payment_provider || state.provider || null) && (data.payment_provider || state.provider),
+		provider:
+			(data.payment_provider || state.provider || null) &&
+			(data.payment_provider || state.provider),
 		// A newer generation REPLACES the previous intent's handles wholesale (the
 		// old order is dead); same/again keeps and merges; an unattributable
 		// answer contributes none.
-		handles: supersededGen ? handles : unattributable ? state.handles : { ...state.handles, ...handles },
+		handles: supersededGen
+			? handles
+			: unattributable
+			? state.handles
+			: { ...state.handles, ...handles },
 		lastCheckedAt: data.payment_last_checked_at || state.lastCheckedAt,
 		verificationExpiresAt: data.verification_expires_at || state.verificationExpiresAt,
 		awaitingReconciliation: !!data.awaiting_manual_reconciliation,
@@ -637,7 +673,8 @@ function applyContract(state, decoded, opts) {
 	// Capability flags: honour the backend, then let the reconciliation flag veto
 	// initiate. A code that is definitionally paid/terminal never offers initiate
 	// regardless of what a flag says.
-	const backendCanInitiate = "can_initiate_payment" in data ? !!data.can_initiate_payment : next.canInitiate;
+	const backendCanInitiate =
+		"can_initiate_payment" in data ? !!data.can_initiate_payment : next.canInitiate;
 	// Same read-only default as the transport branch, and for the same reason: a
 	// coded FAILURE (already-paid, terminal, parked money, an invalid key) rides
 	// onboarding_contract.failure, which carries no `data` and therefore no

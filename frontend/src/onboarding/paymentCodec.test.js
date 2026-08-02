@@ -14,12 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-	decode,
-	effectiveCode,
-	CLIENT_OFFLINE,
-	CLIENT_UNREADABLE,
-} from "./paymentCodec.js";
+import { decode, effectiveCode, CLIENT_OFFLINE, CLIENT_UNREADABLE } from "./paymentCodec.js";
 import { CODES } from "./paymentCodes.js";
 
 // ---------------------------------------------------------------------------
@@ -32,7 +27,11 @@ test("decode: a facade success carries data, context and the contract version", 
 			message: {
 				ok: true,
 				contract_version: 2,
-				data: { code: CODES.PAYMENT_CONFIRMATION_PENDING, attempt_id: "att_1", generation: 2 },
+				data: {
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 2,
+				},
 				context: { email: "a@b.com", plan: "pro" },
 			},
 		},
@@ -121,8 +120,10 @@ test("decode: a stamped throw is read from the response body's own error key", (
 		status: 417,
 		body: {
 			exc_type: "ValidationError",
-			exception: "frappe.exceptions.ValidationError: This Cashfree mandate is not authorized.",
-			_server_messages: '["{\\"message\\": \\"This Cashfree mandate is not authorized.\\"}"]',
+			exception:
+				"frappe.exceptions.ValidationError: This Cashfree mandate is not authorized.",
+			_server_messages:
+				'["{\\"message\\": \\"This Cashfree mandate is not authorized.\\"}"]',
 			error: {
 				code: CODES.PAYMENT_DECLINED,
 				message: "This Cashfree mandate is not authorized.",
@@ -143,7 +144,11 @@ test("decode: a stamped throw's message beats the server-message prose", () => {
 		body: {
 			exc_type: "ValidationError",
 			_server_messages: '["{\\"message\\": \\"admin is unreachable right now\\"}"]',
-			error: { code: CODES.BENCH_ADMIN_UNREACHABLE, message: "connect timeout", recovery: "retry" },
+			error: {
+				code: CODES.BENCH_ADMIN_UNREACHABLE,
+				message: "connect timeout",
+				recovery: "retry",
+			},
 		},
 	});
 	assert.equal(out.code, CODES.BENCH_ADMIN_UNREACHABLE);
@@ -181,7 +186,10 @@ test("decode: an unstamped, unrecognised throw is honestly unknown", () => {
 test("decode: a 403 is a permission problem, not a payment verdict", () => {
 	const out = decode({
 		status: 403,
-		body: { exc_type: "PermissionError", _server_messages: '["{\\"message\\": \\"Not permitted\\"}"]' },
+		body: {
+			exc_type: "PermissionError",
+			_server_messages: '["{\\"message\\": \\"Not permitted\\"}"]',
+		},
 	});
 	assert.equal(out.code, CLIENT_UNREADABLE);
 	assert.equal(out.ok, false);
@@ -285,7 +293,8 @@ test("effectiveCode: admin's allocation-FAILURE confirm is still paid, and keeps
 			tenant_status: "pending",
 			agent_url: "",
 			chat_readiness: "Provisioning",
-			chat_readiness_reason: "Something went wrong finishing setup — our team has been alerted.",
+			chat_readiness_reason:
+				"Something went wrong finishing setup — our team has been alerted.",
 		},
 	};
 	assert.equal(effectiveCode(decoded), CODES.PAYMENT_ALREADY_ACTIVE);
