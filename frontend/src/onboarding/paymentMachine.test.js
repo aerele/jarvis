@@ -270,6 +270,43 @@ test("a 429 leaves the payment state exactly where it was", () => {
 	assert.equal(s.canCheck, false, "the check button is the only thing a 429 disables");
 });
 
+test("a COLD 429 renders the rate-limit row, not the alarming catch-all", () => {
+	// The first thing this page has ever been told is "you asked too often". The
+	// cooldown alone left `code` empty, which rendered "We could not determine the
+	// payment status" - a sentence about the MONEY - for a message that says
+	// nothing about the money at all. The rate-limit row's own copy was
+	// unreachable in production.
+	const s = reduce(initialState(), {
+		type: EVENTS.CONTRACT_STATE,
+		decoded: {
+			ok: false,
+			code: CODES.PAYMENT_CHECK_RATE_LIMITED,
+			retryAfterSeconds: 30,
+			data: {},
+			context: {},
+		},
+	});
+	assert.equal(s.code, CODES.PAYMENT_CHECK_RATE_LIMITED);
+	assert.equal(copyFor(s.code).headline, copyFor(CODES.PAYMENT_CHECK_RATE_LIMITED).headline);
+	assert.ok(s.checkCooldownUntil > 0);
+});
+
+test("a 429 over a KNOWN payment state leaves that state's copy alone", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { can_check_status: true }));
+	s = reduce(s, {
+		type: EVENTS.CONTRACT_STATE,
+		decoded: {
+			ok: false,
+			code: CODES.PAYMENT_CHECK_RATE_LIMITED,
+			retryAfterSeconds: 30,
+			data: {},
+			context: {},
+		},
+	});
+	assert.equal(s.code, CODES.PAYMENT_CONFIRMATION_PENDING, "the money is still where it was");
+	assert.ok(s.checkCooldownUntil > 0, "but the check is still cooled down");
+});
+
 test("a 429 with no hint still cools down for a sane default", () => {
 	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING));
 	s = reduce(s, { type: EVENTS.RATE_LIMITED, nowMs: 0 });
@@ -478,9 +515,13 @@ test("RATE_LIMITED takes its clock from opts too", () => {
 test("a late CONFIRM_FAILED cannot unseat a paid page", () => {
 	let s = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
 	assert.equal(s.value, STATES.PAID);
+	// code:"" deliberately - that is the shape confirmCashfreeLoop's ceiling exit
+	// emits verbatim, and it is the ONLY shape that reaches CONFIRM_FAILED's own
+	// paid-floor guard. A coded decline here would route through applyContract and
+	// be caught by THAT floor instead, leaving this guard untested.
 	s = reduce(s, {
 		type: EVENTS.CONFIRM_FAILED,
-		decoded: { ok: false, code: CODES.PAYMENT_DECLINED, message: "late decline" },
+		decoded: { ok: false, code: "", message: "late timeout" },
 	});
 	assert.equal(s.value, STATES.PAID);
 });

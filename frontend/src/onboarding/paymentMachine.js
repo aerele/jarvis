@@ -427,11 +427,19 @@ function applyContract(state, decoded, opts) {
 	// also raises the RATE_LIMITED event with the parsed retry_after).
 	if (code === CODES.PAYMENT_CHECK_RATE_LIMITED) {
 		if (PAID_FLOOR.has(state.value)) return state;
-		return reduce(state, {
+		const next = reduce(state, {
 			type: EVENTS.RATE_LIMITED,
 			retryAfterSeconds: decoded.retryAfterSeconds || 0,
 			nowMs: opts.nowMs || 0,
 		});
+		// A 429 over a KNOWN payment state must not overwrite it - the money is
+		// still wherever it was, and "you asked too often" is not a payment
+		// verdict. But on a COLD page this is the only thing we have been told,
+		// and leaving code empty rendered the alarming catch-all ("We could not
+		// determine the payment status") instead of this code's own truthful
+		// row, whose copy was otherwise unreachable.
+		if (PAYMENT_STATE_CODES.has(state.code)) return next;
+		return { ...next, code };
 	}
 
 	// ---- a transport / non-payment failure says NOTHING about the money.

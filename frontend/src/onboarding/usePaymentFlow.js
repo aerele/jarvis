@@ -108,12 +108,12 @@ export function createPaymentFlow(deps) {
 			apply({ type: EVENTS.CONTRACT_STATE, decoded: { ...decoded, code } });
 			return code;
 		}
-		// A rate limit is the one failure with a parsed backoff to hand the
-		// reducer as its own event (so the cooldown clock is set from `now`).
-		if (decoded.code === CODES.PAYMENT_CHECK_RATE_LIMITED) {
-			apply({ type: EVENTS.RATE_LIMITED, retryAfterSeconds: decoded.retryAfterSeconds, nowMs: now() });
-			return decoded.code;
-		}
+		// Every failure - rate limits included - goes through the ONE contract
+		// path. The rate limit used to be special-cased into a bare RATE_LIMITED
+		// event here, which set the cooldown but never the code, so a cold page
+		// whose first answer was a 429 rendered the alarming catch-all instead of
+		// this code's own row. applyContract sets the cooldown AND the code (and
+		// still refuses to overwrite a known payment state with it).
 		apply({ type: EVENTS.CONTRACT_STATE, decoded });
 		return decoded.code;
 	}
@@ -168,15 +168,41 @@ export function createPaymentFlow(deps) {
 	// just succeeded. So: re-read, and if the signup is now payable, go straight
 	// to the sheet.
 	async function verifyAndContinue() {
+		// The same in-flight guard its siblings hold, and it matters MORE here than
+		// on either of them: this path opens the checkout on success, so an
+		// un-guarded triple-click did not merely spend three provider-truth calls
+		// against the hourly cap - it stacked three gateway sheets on top of each
+		// other. (Not a double charge: one order id, payable once at the gateway,
+		// and the PAID floor absorbs the late dismissals. A broken money screen all
+		// the same.)
+		if (state.value.busy === "verifying") return;
 		const my = token;
-		const decoded = ingest(await api.getOnboardingState());
-		if (my !== token) return;
-		const code = absorb(decoded);
-		if (!decoded.ok) return;
-		if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return; // still unclicked
-		// Verified and payable: open the checkout this same click.
-		if (hasOpenableHandles(decoded.data)) {
-			await runCheckout(decoded, decoded.data.payment_provider);
+		state.value = { ...state.value, busy: "verifying" };
+		let opened = false;
+		try {
+			const decoded = ingest(await api.getOnboardingState());
+			if (my !== token) return;
+			const code = absorb(decoded);
+			if (!decoded.ok) return;
+			if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return; // still unclicked
+			// Verified and payable: open the checkout this same click. runCheckout
+			// drives its own state from here, so the guard is released first -
+			// leaving it set would disable the recovery card the sheet returns to.
+			if (hasOpenableHandles(decoded.data)) {
+				opened = true;
+				releaseVerifyGuard(my);
+				await runCheckout(decoded, decoded.data.payment_provider);
+			}
+		} finally {
+			// Cleared on every exit, including a thrown round trip: a stuck busy flag
+			// is the same class of trap as a cooldown that never lifts.
+			if (!opened) releaseVerifyGuard(my);
+		}
+	}
+
+	function releaseVerifyGuard(my) {
+		if (my === token && state.value.busy === "verifying") {
+			state.value = { ...state.value, busy: null };
 		}
 	}
 

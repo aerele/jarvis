@@ -420,7 +420,8 @@
 								<div class="ob-foot justify-end">
 									<Button
 										variant="solid"
-										:loading="payBusyView"
+										:disabled="verifying"
+										:loading="verifying || payBusyView"
 										loading-text="Working…"
 										label="I've verified my email"
 										@click="onPayAction(A.VERIFY)"
@@ -1453,6 +1454,10 @@ const payBusyView = computed(
 );
 const checking = computed(() => pay.value.busy === "checking");
 const initiating = computed(() => pay.value.busy === "initiating");
+// The verify round trip OPENS the checkout on success, so an unguarded
+// triple-click stacked three gateway sheets. The flow holds the same in-flight
+// guard its siblings do; this is the half the customer can see.
+const verifying = computed(() => pay.value.busy === "verifying");
 const showRecovery = computed(
 	() =>
 		!payBusyView.value &&

@@ -345,6 +345,52 @@ describe("verification continues in one round trip", () => {
 		expect(flow.state.value.value).toBe(STATES.PAID);
 	});
 
+	test("the verify button guards its own round trip", async () => {
+		// The last unguarded action. Its two siblings (checkStatus, initiatePayment)
+		// each hold a busy flag; without one here an impatient customer on the
+		// "check your email" screen fires N concurrent state reads, and - because
+		// this path OPENS THE CHECKOUT on success - N of them can race into opening
+		// a gateway sheet.
+		let inFlight = 0;
+		let peak = 0;
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () => {
+				inFlight += 1;
+				peak = Math.max(peak, inFlight);
+				await Promise.resolve();
+				inFlight -= 1;
+				return ENVELOPE({
+					code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+					pending_verification: true,
+					attempt_id: "att_1",
+					generation: 0,
+				});
+			}),
+		});
+		const { flow } = makeFlow({ api });
+		await Promise.all([
+			flow.verifyAndContinue(),
+			flow.verifyAndContinue(),
+			flow.verifyAndContinue(),
+		]);
+		expect(peak).toBe(1);
+		expect(api.getOnboardingState).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.busy).toBe(null);
+	});
+
+	test("the verify guard clears even when the round trip throws", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () => {
+				throw new Error("network died mid-verify");
+			}),
+		});
+		const { flow } = makeFlow({ api });
+		await expect(flow.verifyAndContinue()).rejects.toThrow();
+		// A stuck busy flag would leave the button disabled forever - the same
+		// class of trap as the cooldown that never lifted.
+		expect(flow.state.value.busy).toBe(null);
+	});
+
 	test("a still-unverified signup opens nothing and keeps its own copy", async () => {
 		const api = makeApi({
 			getOnboardingState: vi.fn(async () =>
@@ -399,14 +445,26 @@ describe("the generation fence", () => {
 					})
 				),
 		});
-		const { flow } = makeFlow({ api });
+		// ...and the winner must NOT reach `paid`, or the PAID FLOOR becomes the
+		// thing rejecting the stale answer and the client fence is again untested.
+		// A dismissed sheet leaves the page on a live, non-terminal state that a
+		// stale CONTRACT_STATE is perfectly entitled to overwrite - so the ONLY
+		// thing standing between the two is the token.
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const { flow } = makeFlow({ api, openCheckout });
 		const first = flow.initiatePayment({ plan: "pro" });
 		flow.cancelInFlight(); // the customer moved on; the first answer is now stale
 		await flow.initiatePayment({ plan: "pro" });
+		const valueAfterWinner = flow.state.value.value;
 		const codeAfterWinner = flow.state.value.code;
 		const handleAfterWinner = flow.state.value.handles.razorpay_order_id;
+		// Guard the guard: if the winner ever reaches paid this test has stopped
+		// testing the fence, and should fail loudly rather than pass for free.
+		expect(valueAfterWinner).not.toBe(STATES.PAID);
+		expect(valueAfterWinner).not.toBe(STATES.PROVISIONING);
 		resolveSlow();
 		await first;
+		expect(flow.state.value.value).toBe(valueAfterWinner);
 		expect(flow.state.value.code).toBe(codeAfterWinner);
 		expect(flow.state.value.code).not.toBe(CODES.PAYMENT_DECLINED);
 		expect(flow.state.value.handles.razorpay_order_id).toBe(handleAfterWinner);
