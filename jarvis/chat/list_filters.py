@@ -637,11 +637,36 @@ def get_schema(view_key: str, user: str | None = None) -> dict:
 		# Metadata gone, table dropped mid-migrate, a broken child DocType: the
 		# caller gets a stable code and no rows, never a raw 500 whose body the
 		# SPA would render as a mystery toast.
+		#
+		# Logged at most once per view per TTL. A broken DocType breaks EVERY list
+		# load for every user on that surface, so an unguarded log_error turns one
+		# schema fault into an Error Log flood that buries the entry explaining it
+		# (and writes a row per request while the site is already unhealthy).
+		_log_schema_failure(view_key, root)
+		_fail(ERR_SCHEMA_UNAVAILABLE, _("Filters are unavailable for this list right now."))
+
+
+#: How long one view's schema failure stays deduped in the Error Log.
+SCHEMA_FAILURE_LOG_TTL = 900
+
+
+def _log_schema_failure(view_key: str, root: str) -> None:
+	key = f"jarvis:list-filter-schema-fail:{view_key}"
+	try:
+		cache = frappe.cache()
+		if cache.get_value(key):
+			return
+		cache.set_value(key, "1", expires_in_sec=SCHEMA_FAILURE_LOG_TTL)
+	except Exception:
+		# No cache: log anyway. Losing the dedupe is better than losing the fault.
+		pass
+	try:
 		frappe.log_error(
 			title="list filter schema unavailable",
 			message=f"{view_key} / {root}\n{frappe.get_traceback()}",
 		)
-		_fail(ERR_SCHEMA_UNAVAILABLE, _("Filters are unavailable for this list right now."))
+	except Exception:
+		pass
 
 
 def _build_schema(view: list_registry.ListView, root: str, user: str) -> dict:
@@ -779,6 +804,19 @@ def _select_options(entry: dict) -> list[str] | None:
 _TEMPORAL_FIELDTYPES = frozenset({"Date", "Datetime", "Time"})
 
 
+def _is_blank_temporal(value: Any) -> bool:
+	"""True for anything Frappe's date helpers would silently turn into today/now.
+
+	``getdate()`` / ``get_datetime()`` begin with ``if not string_date:`` and
+	return the current date/time — so falsiness is the ONLY thing they check.
+	``0``, ``False``, ``[]`` and ``{}`` therefore all mean "today" to them, and
+	none of them is a date. This is the single predicate both the scalar path and
+	the ``Between`` bounds use, so the two cannot drift apart again."""
+	if isinstance(value, str):
+		return not value.strip()
+	return not value
+
+
 def _scalar(entry: dict, operator: str, value: Any) -> Any:
 	"""Normalize ONE scalar value by fieldtype, mirroring db_query's per-family
 	conversions. The result is always a bound parameter, never SQL."""
@@ -788,11 +826,11 @@ def _scalar(entry: dict, operator: str, value: Any) -> Any:
 	fieldtype = entry["fieldtype"]
 
 	if fieldtype in _TEMPORAL_FIELDTYPES:
-		# Frappe's getdate(None)/get_datetime(None) return TODAY/NOW, and
-		# getdate("") does the same. Inherited, an omitted or blank date bound
+		# Frappe's getdate(None)/get_datetime(None) return TODAY/NOW, and every
+		# other falsy value does the same. Inherited, an omitted or blank date
 		# would quietly become "today" — a filter that answers a question nobody
 		# asked, and the answer looks plausible. Reject instead.
-		if value is None or (isinstance(value, str) and not value.strip()):
+		if _is_blank_temporal(value):
 			_fail(ERR_INVALID_VALUE, _("{0} needs a value.").format(entry["label"]))
 		try:
 			if fieldtype == "Date":
@@ -843,12 +881,19 @@ def _like_value(value: Any) -> str:
 
 
 def _between_bounds(entry: dict, value: Any) -> tuple[str, str]:
-	"""Frappe's get_between_date_filter semantics, as bound values rather than
-	interpolated literals: a bare date on a Datetime field expands to
-	[00:00:00, 23:59:59.999999]; a missing bound falls back to today."""
+	"""Frappe's get_between_date_filter expansion — a bare date on a Datetime
+	field becomes [00:00:00, 23:59:59.999999] — as bound values rather than
+	interpolated literals, but WITHOUT its today-fallback for a missing bound.
+
+	``Between`` is the default operator for Date and Datetime, so it is the first
+	path a client reaches, and Frappe answers a half-empty range by quietly
+	substituting today at both ends. That is the same silent-wrong-answer class
+	the scalar guard rejects, arrived at through the more common door. Both
+	bounds must be present and non-blank. Declared deviation, D14.
+	"""
 	import datetime
 
-	from frappe.utils import get_datetime, getdate, nowdate
+	from frappe.utils import get_datetime, getdate
 
 	_guard_length(value)
 	if isinstance(value, str):
@@ -859,8 +904,13 @@ def _between_bounds(entry: dict, value: Any) -> tuple[str, str]:
 			value = [v.strip() for v in value.split(",")]
 	if not isinstance(value, list | tuple):
 		value = [value]
-	frm = value[0] if len(value) >= 1 and value[0] not in (None, "") else nowdate()
-	to = value[1] if len(value) >= 2 and value[1] not in (None, "") else nowdate()
+	# The cap has to be re-applied per element: the raw payload can be a short
+	# JSON string (or a list) whose MEMBERS are megabytes.
+	for element in value:
+		_guard_length(element)
+	if len(value) != 2 or any(_is_blank_temporal(v) for v in value[:2]):
+		_fail(ERR_INVALID_VALUE, _("{0} needs a start and an end.").format(entry["label"]))
+	frm, to = value[0], value[1]
 
 	if entry["fieldtype"] == "Datetime":
 		def _expand(raw, end: bool):

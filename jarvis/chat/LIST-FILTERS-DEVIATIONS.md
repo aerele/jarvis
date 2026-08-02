@@ -382,12 +382,32 @@ this table or a deviation of its own.
 submitted with an empty value compiles to `= 0` rather than being rejected. That
 is what `db_query` does (`value = flt(f.value)`), and it is left at parity.
 
-The temporal families are **not** left at parity — see the `_scalar` guard:
-`getdate(None)`, `getdate("")` and `get_datetime(None)` all return *today/now* in
-Frappe, so an omitted date bound would silently become "today" and return a
-plausible-looking wrong answer. Those are rejected with
-`list_filter_invalid_value`. The asymmetry is deliberate: `= 0` is visibly odd in
-the result set, "everything from today" is not.
+The temporal families are **not** left at parity. Frappe's date helpers open with
+`if not string_date:` and return *today/now*, so **falsiness is the only thing
+they check** — `None`, `""`, `0`, `False`, `[]` and `{}` all mean "today" to
+`getdate()`. A blank or malformed date bound would therefore return a
+plausible-looking answer to a question nobody asked. Every one of those is
+rejected with `list_filter_invalid_value`.
+
+The asymmetry with numerics is deliberate: `= 0` is visibly odd in the result
+set; "everything from today" is not.
+
+### D14-a — `Between` requires both bounds (no `nowdate()` fallback)
+
+`db_query.get_between_date_filter` documents its own fallback: *"If any of filter
+part (to or from) are missing then start or end of current day is assumed."* We
+do not inherit it. A `Between` with a missing, blank or falsy bound —
+`None`, `""`, `[]`, `["", ""]`, `[None, None]`, `{}`, a one-element list, or a
+pair with one blank end — is rejected.
+
+This is the deviation that matters most in practice, because **`Between` is the
+*default* operator for Date and Datetime** (D5 / `get_default_condition`). It is
+the first thing a client hits on those families, so Frappe's fallback is not an
+edge case here — it is the common path, and it silently narrows a range the user
+believed was open-ended to a single day.
+
+`Timespan` is unaffected: it feeds `_between_bounds` a server-computed
+two-element range, which is why the tests assert it still resolves.
 
 ---
 
@@ -449,6 +469,16 @@ rather than a test.
 - [ ] Server-authored `IN` lists stay on the server side, where the §9 client
       caps do not apply.
 - [ ] Rows, `total` and `has_more` all use `q.where()`.
+- [ ] **Pin the SUCCESS envelope shape and do not change it.** The pilots
+      (`list_custom_skills_page`, `list_macros_page`) return the bare
+      `{rows, total, has_more, start, page_length}` dict, which is what
+      `useListPage` reads directly — only the *error* path is an envelope.
+      **Exception to reconcile:** `list_triggers_page`, `list_activity_page` and
+      `list_dashboards_page` already return `{ok: true, data: {...}}`. Those
+      surfaces keep their existing success shape at migration (changing it is a
+      client break unrelated to filters); just make sure the error envelope the
+      boundary returns is distinguishable from their success one — it is, since
+      `ok` is `false` and there is no `data` key.
 
 ## 5. Facets (D12)
 

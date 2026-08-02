@@ -586,6 +586,104 @@ class TestFailsClosed(unittest.TestCase):
 						ERR_INVALID_VALUE,
 					)
 
+	# `Jarvis Learned Pattern.snoozed_until` is the only Date field on a registered
+	# doctype-backed view, and the view is reviewer-gated — so the Date legs below
+	# run as the System Manager fixture rather than the ordinary one.
+	LEARNED = "Jarvis Learned Pattern"
+	DATE_FIELD = "snoozed_until"
+
+	def test_falsy_non_string_date_values_are_rejected(self):
+		"""R-1: ``getdate()`` only checks falsiness, so 0 / False / [] / {} all
+		return TODAY. Datetime and Time already rejected these; Date did not."""
+		meta_field = frappe.get_meta(self.LEARNED).get_field(self.DATE_FIELD)
+		self.assertEqual(meta_field.fieldtype, "Date", "fixture drifted — test would not cover Date")
+		for bad in (0, False, [], {}):
+			with self.subTest(value=bad):
+				clause = [
+					{"doctype": self.LEARNED, "fieldname": self.DATE_FIELD, "operator": "=", "value": bad}
+				]
+				self.assertEqual(
+					self._code(compile_list_filters, "learning_queue", clause, user=USER_SM),
+					ERR_INVALID_VALUE,
+				)
+
+	def test_a_valid_date_equality_still_compiles(self):
+		"""Non-vacuity for R-1."""
+		compiled = compile_list_filters(
+			"learning_queue",
+			[{"doctype": self.LEARNED, "fieldname": self.DATE_FIELD, "operator": "=", "value": "2026-07-01"}],
+			user=USER_SM,
+		)
+		self.assertIn("2026-07-01", [str(v) for v in compiled.params.values()])
+
+	def test_blank_between_bounds_are_rejected(self):
+		"""R-2: ``Between`` is the DEFAULT operator for Date/Datetime, so it is the
+		first path a client hits — and frappe's get_between_date_filter falls back
+		to *today* for any missing bound. A range nobody chose, silently answered.
+		"""
+		blanks = (None, "", "   ", [], ["", ""], [None, None], {}, ["2026-07-01"], [None, "2026-07-01"])
+		cases = ((MACRO, "last_run_at", "macros", USER_A), (self.LEARNED, self.DATE_FIELD, "learning_queue", USER_SM))
+		for doctype, fieldname, view, user in cases:
+			for payload in blanks:
+				with self.subTest(field=fieldname, value=payload):
+					clause = [
+						{"doctype": doctype, "fieldname": fieldname, "operator": "Between", "value": payload}
+					]
+					self.assertEqual(
+						self._code(compile_list_filters, view, clause, user=user), ERR_INVALID_VALUE
+					)
+
+	def test_a_complete_between_range_still_compiles(self):
+		"""Non-vacuity for R-2, on both families."""
+		dt = compile_list_filters(
+			"macros",
+			[
+				{
+					"doctype": MACRO,
+					"fieldname": "last_run_at",
+					"operator": "Between",
+					"value": ["2026-07-01", "2026-07-31"],
+				}
+			],
+			user=USER_A,
+		)
+		self.assertIn("BETWEEN", dt.fragment())
+		date = compile_list_filters(
+			"learning_queue",
+			[
+				{
+					"doctype": self.LEARNED,
+					"fieldname": self.DATE_FIELD,
+					"operator": "Between",
+					"value": ["2026-07-01", "2026-07-31"],
+				}
+			],
+			user=USER_SM,
+		)
+		self.assertEqual(sorted(str(v) for v in date.params.values()), ["2026-07-01", "2026-07-31"])
+
+	def test_timespan_still_resolves_through_the_between_path(self):
+		"""Non-vacuity: the stricter bound check must not break Timespan, which
+		feeds _between_bounds a server-computed two-element range."""
+		compiled = compile_list_filters(
+			"learning_queue",
+			[{"doctype": self.LEARNED, "fieldname": self.DATE_FIELD, "operator": "Timespan", "value": "this month"}],
+			user=USER_SM,
+		)
+		self.assertIn("BETWEEN", compiled.fragment())
+		self.assertEqual(len(compiled.params), 2)
+
+	def test_between_caps_each_element_not_just_the_payload(self):
+		"""P3: the length guard ran on the raw value, so a list whose MEMBER was
+		80KB slipped past it."""
+		huge = "9" * (list_filters.MAX_VALUE_CHARS + 1)
+		clause = [
+			{"doctype": MACRO, "fieldname": "last_run_at", "operator": "Between", "value": [huge, huge]}
+		]
+		self.assertEqual(
+			self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_VALUE_TOO_LONG
+		)
+
 	def test_unparseable_date_is_rejected(self):
 		clause = [{"doctype": MACRO, "fieldname": "last_run_at", "operator": ">", "value": "not-a-date"}]
 		self.assertEqual(self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_INVALID_VALUE)
