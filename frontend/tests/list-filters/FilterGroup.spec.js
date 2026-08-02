@@ -285,14 +285,45 @@ describe("editing", () => {
 });
 
 describe("schema states", () => {
+	// These drive the panel the way a person does — by pressing the Filter
+	// button — rather than by hand-emitting the event the panel happens to
+	// listen for. The distinction is the whole defect: frappe-ui's Popover does
+	// not emit `open` for a trigger inside its own `#target` slot, so a spec
+	// that emitted `open` itself passed while the picker sat empty in a browser.
+	const openPanel = (w) => w.find('button[aria-label="Filter"]').trigger("click");
+
 	it("asks for the catalog on FIRST open only", async () => {
 		const w = mountPanel({ schema: null, schemaState: "idle" });
 		expect(w.emitted("request-schema")).toBeUndefined();
-		w.findComponent({ name: "Popover" }).vm.$emit("open");
+		await openPanel(w);
 		expect(w.emitted("request-schema")).toHaveLength(1);
 
 		await w.setProps({ schema: SKILLS_SCHEMA, schemaState: "ready" });
-		w.findComponent({ name: "Popover" }).vm.$emit("open");
+		await openPanel(w);
+		expect(w.emitted("request-schema")).toHaveLength(1);
+	});
+
+	// `update:show` fires on the way down as well as up, and reka-ui's own
+	// open path relays it twice. Neither may turn into a second metadata walk.
+	it("does not re-ask across an open → close → open cycle", async () => {
+		const w = mountPanel({ schema: null, schemaState: "idle" });
+		await openPanel(w);
+		expect(w.emitted("request-schema")).toHaveLength(1);
+
+		// the parent answers the way useListPage does
+		await w.setProps({ schemaState: "loading" });
+		await openPanel(w); // closes
+		await w.setProps({ schema: SKILLS_SCHEMA, schemaState: "ready" });
+		await openPanel(w); // opens again
+		expect(w.emitted("request-schema")).toHaveLength(1);
+	});
+
+	it("asks once when reka-ui reports the open instead", async () => {
+		const w = mountPanel({ schema: null, schemaState: "idle" });
+		// The outside-driven path emits update:show twice AND open once; the
+		// panel must still make exactly one request out of it.
+		w.findComponent({ name: "Popover" }).vm.rekaUpdateOpen(true);
+		await nextTick();
 		expect(w.emitted("request-schema")).toHaveLength(1);
 	});
 
