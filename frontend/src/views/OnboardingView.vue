@@ -219,7 +219,13 @@
 										type="email"
 										variant="outline"
 										label="Work email"
-										v-model="state.email"
+										:model-value="state.email"
+										@update:model-value="
+											(v) => {
+												state.email = v;
+												state.identityFromUser = true;
+											}
+										"
 										placeholder="you@company.com"
 										autocomplete="email"
 										required
@@ -242,7 +248,12 @@
 										<JvCombo
 											id="jv-ob-company"
 											:model-value="state.company"
-											@update:model-value="(v) => (state.company = v)"
+											@update:model-value="
+												(v) => {
+													state.company = v;
+													state.identityFromUser = true;
+												}
+											"
 											allow-custom
 											aria-required
 											autocomplete="organization"
@@ -542,8 +553,8 @@
 										<p>
 											{{
 												isTrialPlan
-													? "Confirm the details below. You'll authorize auto-pay securely via Razorpay — nothing is charged until your trial ends."
-													: "Confirm the details below. You'll complete payment securely via Razorpay."
+													? "Confirm the details below. You'll authorize auto-pay securely — nothing is charged until your trial ends."
+													: "Confirm the details below. You'll complete payment securely."
 											}}
 										</p>
 									</div>
@@ -584,6 +595,7 @@
 										</div>
 									</div>
 									<div
+										v-if="state.paymentProvider"
 										class="mx-auto mt-3.5 flex max-w-[560px] items-center justify-center gap-1.5 text-center text-xs text-ink-gray-5"
 									>
 										<FeatherIcon name="lock" class="h-3.5 w-3.5" />
@@ -594,6 +606,18 @@
 												: "Razorpay"
 										}}
 									</div>
+									<!-- Provider discovery failed (P2-6): never present a gateway
+										 the control plane did not confirm. Offer a Retry instead. -->
+									<p
+										v-else-if="state.providersError"
+										class="mx-auto mt-3.5 max-w-[560px] text-center text-xs text-ink-gray-5"
+										role="status"
+									>
+										Payment options are unavailable right now.
+										<button class="ob-link" @click="loadPaymentProviders">
+											Retry
+										</button>
+									</p>
 									<div
 										v-if="showProviderChooser"
 										class="ob-provseg mx-auto mt-3.5 flex max-w-[360px] gap-1 rounded-xl border border-outline-gray-1 bg-surface-gray-2 p-1"
@@ -714,7 +738,7 @@
 									</button>
 									<Button
 										variant="solid"
-										:disabled="payBusyView"
+										:disabled="payBusyView || !payProviderReady"
 										:loading="payBusyView"
 										loading-text="Working…"
 										:label="payCta"
@@ -955,6 +979,13 @@ const state = reactive({
 	billingAddress: "",
 	city: "",
 	gstin: "",
+	// True once the customer THEMSELVES typed the email/company (not prefilled
+	// from getAccountDefaults). Recovery/reconnect identity must never fall back to
+	// prefill - a resumed page's prefill can be the SITE ADMIN's email, not the
+	// payer's (plan 02 P1-7 / C02-3). The fresh flow may use what the user typed;
+	// recovery uses server truth or an honest placeholder, never this unless the
+	// user set it.
+	identityFromUser: false,
 	// plan (Choose Your Plan step)
 	plans: [],
 	planName: null,
@@ -969,11 +1000,16 @@ const state = reactive({
 	reconnectNeedsCompany: false,
 	reconnectCode: "",
 	reconnectResentIn: 0,
-	paymentProvider: "razorpay", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
-	// Gateways the operator has actually enabled, narrowed to what this build
-	// can render. Starts as razorpay-only so the step is never briefly empty
-	// while the lookup is in flight, and stays that way if the lookup fails.
-	availableProviders: ["razorpay"],
+	paymentProvider: "", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
+	// Gateways the operator has actually enabled, narrowed to what this build can
+	// render. Starts EMPTY and stays empty on a discovery failure (plan 02 P2-6):
+	// seeding "razorpay" faked a choice the control plane never confirmed, so a
+	// bench whose default is Cashfree (or where Razorpay is disabled) would have
+	// presented - and submitted - a processor the server then rejects. An empty
+	// list degrades to a clear unavailable/retry state instead of inventing one.
+	availableProviders: [],
+	providersLoading: false,
+	providersError: false,
 	// payErr / payBusy drive the reconnect-code step's own error + button state
 	// (the payment machine owns everything on the Pay step).
 	payErr: "",
@@ -1099,31 +1135,51 @@ function chooseProvider(p) {
 }
 
 // Ask the control plane which gateways are live and preselect its default.
-// Fail-open and non-blocking: the wizard must render even if this never
-// answers, and the razorpay-only seed above is the floor.
+// Fail-CLOSED (plan 02 P2-6): if discovery fails or returns nothing, the wizard
+// degrades to a clear unavailable/retry state and NEVER invents a provider - a
+// gateway the server would reject must not be presented or submitted. It is not
+// expected to charge (the server refuses it), but it is a poor recovery, so we
+// surface a Retry instead.
 async function loadPaymentProviders() {
+	state.providersLoading = true;
+	state.providersError = false;
 	try {
 		const r = (await listPaymentProviders()) || {};
 		const providers = Array.isArray(r.providers) ? r.providers.filter(Boolean) : [];
-		if (!providers.length) return;
+		if (!providers.length) {
+			state.availableProviders = [];
+			state.paymentProvider = "";
+			state.providersError = true;
+			return;
+		}
 		state.availableProviders = providers;
 		// Preselect admin's default; never leave the selection pointing at a
 		// gateway that is no longer offered, or Pay would post a provider the
 		// server refuses.
 		const preferred = providers.includes(r.default) ? r.default : providers[0];
 		if (!providers.includes(state.paymentProvider)) state.paymentProvider = preferred;
-		else if (providers.length === 1) state.paymentProvider = providers[0];
 	} catch (e) {
-		// Keep the seed: a control-plane blip must not block payment entirely.
+		state.availableProviders = [];
+		state.paymentProvider = "";
+		state.providersError = true;
+	} finally {
+		state.providersLoading = false;
 	}
 }
 
-// Pay CTA copy: "Start free trial" for an autopay trial (nothing due
-// today); "Pay ₹X" for a plain paid plan.
+// Pay CTA copy (plan 02 P2-2). The first click starts the signup and may need
+// email verification BEFORE any gateway opens, so it must not promise an
+// immediate charge ("Pay ₹X" overstated it): a paid plan reads "Continue to
+// payment"; an autopay trial keeps its trial wording (C02-4), since that click
+// authorizes the auto-pay mandate rather than charging today.
 const payCta = computed(() => {
 	if (isTrialPlan.value) return "Start free trial";
-	return `Pay ${inr(selectedPlan.value.price_inr)}`;
+	return "Continue to payment";
 });
+// A gateway must be confirmed by discovery before the first click (P2-6). Both a
+// paid plan and an autopay trial need one (the trial authorizes a mandate), so
+// the CTA is disabled until then and the unavailable/retry note stands in for it.
+const payProviderReady = computed(() => !!state.paymentProvider);
 
 // Review-card labels (preview .rev): "Pro · Monthly" plan row and a plain
 // amount in the emphasized total row.
@@ -1338,11 +1394,45 @@ function ensureCashfreeLoaded() {
 	});
 	return cashfreeLoadPromise;
 }
+// A persisted marker that we are LEAVING this page for a full-page gateway
+// checkout (the Cashfree mandate redirect). On the way back - a bfcache restore
+// or a tab regaining focus with the old checkout_open state still frozen in
+// memory - the pageshow/visibility handlers read it and drive the machine's
+// explicit, safe RETURNED_FROM_CHECKOUT exit instead of leaving the customer on
+// a permanent "Opening secure checkout…" screen (plan 02 P0-2). Session-scoped
+// and non-secret: it holds no gateway id or payload, only that we left.
+const CHECKOUT_NAV_KEY = "jarvis-onboarding-checkout-nav";
+function markExternalCheckoutNav() {
+	try {
+		window.sessionStorage.setItem(CHECKOUT_NAV_KEY, "1");
+	} catch (e) {
+		/* private mode / storage disabled - the SPA return path still hydrates fresh */
+	}
+}
+function readExternalCheckoutNav() {
+	try {
+		return window.sessionStorage.getItem(CHECKOUT_NAV_KEY) === "1";
+	} catch (e) {
+		return false;
+	}
+}
+function clearExternalCheckoutNav() {
+	try {
+		window.sessionStorage.removeItem(CHECKOUT_NAV_KEY);
+	} catch (e) {
+		/* no-op */
+	}
+}
+
 async function openCashfreeMandate(handles) {
 	await ensureCashfreeLoaded();
 	const cf = window.Cashfree({
 		mode: handles.cashfree_env === "production" ? "production" : "sandbox",
 	});
+	// Record the external navigation BEFORE the redirect fires (P0-2): once
+	// subscriptionsCheckout submits, the browser is leaving and no later code on
+	// this instance is guaranteed to run.
+	markExternalCheckoutNav();
 	// {redirect:true}; resolves the moment the form submits, so there is nothing
 	// to await and the browser is leaving. The SDK resolves with {error} rather
 	// than throwing for bad input.
@@ -1350,7 +1440,10 @@ async function openCashfreeMandate(handles) {
 		subsSessionId: handles.subscription_session_id,
 		redirectTarget: "_self",
 	});
-	if (r && r.error) throw new Error("Couldn't start the auto-pay authorisation. Try again.");
+	if (r && r.error) {
+		clearExternalCheckoutNav();
+		throw new Error("Couldn't start the auto-pay authorisation. Try again.");
+	}
 	return { status: "redirected" };
 }
 
@@ -1358,6 +1451,39 @@ const flow = createPaymentFlow({
 	api: onboardingPaymentApi,
 	openCheckout: (handles, opts) =>
 		openOnboardingCheckout(handles, { ...opts, openMandate: openCashfreeMandate }),
+	// Persist the (attempt, generation) support-check count so a refresh between
+	// checks does not reset the "offer a human" moment (P2-5). Non-secret only.
+	storage: {
+		get: (k) => {
+			try {
+				return window.localStorage.getItem(k);
+			} catch (e) {
+				return null;
+			}
+		},
+		set: (k, v) => {
+			try {
+				window.localStorage.setItem(k, v);
+			} catch (e) {
+				/* no-op */
+			}
+		},
+	},
+	// PII-free transition telemetry (P2-3): forwarded to the admin error-report
+	// surface. The payload is only the shape of the move (from/to/code/provider/
+	// generation/bucket/source) - never email, company, address, a gateway
+	// payload, a payment id, or a token.
+	telemetry: (ev) => {
+		try {
+			reportError({
+				surface: "onboarding_payment",
+				error_code: ev.event,
+				message: JSON.stringify(ev),
+			});
+		} catch (e) {
+			/* telemetry must never break the flow */
+		}
+	},
 });
 // The reactive machine state the template renders from.
 const pay = computed(() => flow.state.value);
@@ -1371,9 +1497,27 @@ const payCopy = computed(() =>
 	copyFor(pay.value.code, { awaitingReconciliation: pay.value.awaitingReconciliation })
 );
 
-// Server-truth identity for the resumed/recovery screens (C02-3: never the
-// prefill). Falls back to the locally typed email on the fresh review path.
-const payEmail = computed(() => pay.value.summary?.email || state.email || "your email");
+// Server-truth identity for the resumed/recovery screens (C02-3 / P1-7: never the
+// prefill). On any server-driven screen the recipient is admin's identity or an
+// honest placeholder - never state.email unless the CUSTOMER typed it this
+// session (identityFromUser), because a resumed page's prefill can be the SITE
+// ADMIN's email. The fresh review/starting path may use what the user typed.
+const payEmail = computed(() => {
+	const server = pay.value.summary?.email;
+	if (server) return server;
+	const onServerScreen = pay.value.value !== S.REVIEW && pay.value.value !== S.STARTING_SIGNUP;
+	if (onServerScreen) {
+		return state.identityFromUser && state.email ? state.email : "your email address";
+	}
+	return state.email || "your email address";
+});
+// The identity a reconnect submits - server truth first, then the user's OWN
+// typed values, NEVER the prefill (P1-7). Empty when neither exists, which
+// disables the reconnect action until an identity is available.
+const reconnectIdentity = computed(() => ({
+	email: pay.value.summary?.email || (state.identityFromUser ? state.email.trim() : ""),
+	company: pay.value.summary?.company || (state.identityFromUser ? state.company.trim() : ""),
+}));
 const paySummaryTrial = computed(() => (pay.value.summary?.trialDays || 0) > 0);
 // The verification link's expiry, rendered plainly when the backend sends one so
 // the page can say how long is left instead of "check your email" forever.
@@ -1498,7 +1642,10 @@ const recoveryRole = computed(() => (payCopy.value.tone === TONE.ALERT ? "alert"
 // not load, a gateway that refused to open, admin's own sentence on a coded
 // refusal). Suppressed when it merely repeats the coded copy.
 const payDetail = computed(() => {
-	const m = (pay.value.message || "").trim();
+	// The message admin/the codec attached, or - when there is none - the "the
+	// checkout could not open" note carried as presentation metadata across the
+	// mandatory reconcile (P0-1). Suppressed when it merely repeats the coded copy.
+	const m = (pay.value.message || "").trim() || (pay.value.checkoutNote || "").trim();
 	if (!m) return "";
 	return m === payCopy.value.body || m === payCopy.value.headline ? "" : m;
 });
@@ -1555,6 +1702,12 @@ function payActionDisabled(a) {
 	if (checking.value || initiating.value) return true;
 	if (a === ACTIONS.CHECK) return !pay.value.canCheck;
 	if (a === ACTIONS.INITIATE) return !pay.value.canInitiate;
+	// Reconnect needs a real identity to send (P1-7): server truth or what the
+	// customer themselves typed - never the site-admin prefill. Disabled until one
+	// exists.
+	if (a === ACTIONS.RECONNECT) {
+		return !reconnectIdentity.value.email || !reconnectIdentity.value.company;
+	}
 	return false;
 }
 function payActionLoading(a) {
@@ -1587,8 +1740,14 @@ async function onPayAction(a) {
 		return;
 	}
 	if (a === ACTIONS.RESTART) {
-		flow.cancelInFlight();
-		state.step = "details";
+		// Server-truth-gated reset (P1-3): the flow resets the machine only when no
+		// recoverable payment can be behind the current code, otherwise it preserves
+		// the attempt and its recovery affordances. Editing details is offered only
+		// when the reset actually happened - a preserved state keeps the customer on
+		// their recovery card (status/reconnect/support), never on a fresh review
+		// that would re-run start_signup over live money.
+		const { reset } = flow.restart();
+		if (reset) state.step = "details";
 	}
 }
 
@@ -1655,7 +1814,8 @@ async function resendReconnectCode() {
 	if (state.reconnectResentIn > 0) return;
 	state.payErr = "";
 	try {
-		const d = await startAccountReconnect(state.email, state.company);
+		const id = reconnectIdentity.value;
+		const d = await startAccountReconnect(id.email, id.company);
 		state.reconnectRequestId = (d && d.request) || state.reconnectRequestId;
 		state.reconnectCode = "";
 		state.reconnectResentIn = 30;
@@ -1712,7 +1872,10 @@ async function startReconnect() {
 	// card's can_reconnect offer.
 	state.reconnectFrom = state.step === "reconnect" ? state.reconnectFrom : state.step;
 	try {
-		const d = await startAccountReconnect(state.email, state.company);
+		// Authoritative identity only (P1-7): server truth, or what the customer
+		// themselves typed - never the site-admin prefill.
+		const id = reconnectIdentity.value;
+		const d = await startAccountReconnect(id.email, id.company);
 		state.reconnectRequestId = (d && d.request) || "";
 		state.step = "reconnect";
 	} catch (e) {
@@ -1949,9 +2112,13 @@ watch(
 
 // A 1s ticker for the rate-limit countdown: updates the displayed seconds and,
 // when the cooldown elapses, re-enables the Check button through the machine.
+// This watcher also owns the Pay-step lifecycle (plan 02 P1-8): leaving Pay
+// invalidates any in-flight client work (a status reconcile still running after
+// a dismissal, a confirm poll) so its late response cannot reroute a hidden
+// component; re-entering Pay hydrates fresh server truth.
 watch(
 	() => state.step,
-	(s) => {
+	(s, prev) => {
 		if (s === "pay" && !cooldownTimer) {
 			cooldownTimer = setInterval(() => {
 				nowMs.value = Date.now();
@@ -1963,10 +2130,23 @@ watch(
 			clearInterval(cooldownTimer);
 			cooldownTimer = null;
 		}
+		// Leaving Pay: cancel in-flight client handlers (never pretend to cancel
+		// server reconciliation - the token just drops the late response).
+		if (prev === "pay" && s !== "pay") flow.cancelInFlight();
+		// Re-entering Pay after editing details / cancelling reconnect: a fresh,
+		// authoritative hydrate, never a stale in-memory state.
+		if (s === "pay" && (prev === "details" || prev === "reconnect")) {
+			reconcileMidFlightSignup();
+		}
 	}
 );
 onUnmounted(() => {
 	if (cooldownTimer) clearInterval(cooldownTimer);
+	// Invalidate any in-flight client work so a late response cannot touch a
+	// torn-down component (P1-8), and drop the checkout-return listeners.
+	flow.cancelInFlight();
+	window.removeEventListener("pageshow", onCheckoutPageShow);
+	document.removeEventListener("visibilitychange", onCheckoutVisibility);
 });
 
 // Report payment failures to the admin as they surface. The machine holds them
@@ -2004,10 +2184,35 @@ async function prefillAccount() {
 	}
 }
 
+// Returning from a full-page gateway checkout (plan 02 P0-2). A bfcache restore
+// (pageshow with event.persisted) brings back the OLD instance with checkout_open
+// frozen in memory and the sheet long gone; a tab regaining focus can do the same
+// after a redirect. Gated on the external-nav marker so an ordinary tab-switch on
+// a Razorpay modal (which sets no marker and is still on-screen) is never force
+// -exited. hydrate() deliberately refuses to leave checkout_open, so this drives
+// the machine's explicit, safe RETURNED_FROM_CHECKOUT exit + server reconcile.
+function handleCheckoutReturn() {
+	if (!readExternalCheckoutNav()) return;
+	const v = pay.value.value;
+	if (v !== S.CHECKOUT_OPEN && v !== S.CONFIRMING) return;
+	clearExternalCheckoutNav();
+	flow.returnFromCheckout();
+}
+function onCheckoutPageShow(e) {
+	// Only a bfcache restore needs handling here; a normal load re-mounts fresh
+	// and hydrate() reads server truth on its own.
+	if (e && e.persisted) handleCheckoutReturn();
+}
+function onCheckoutVisibility() {
+	if (document.visibilityState === "visible") handleCheckoutReturn();
+}
+
 onMounted(async () => {
 	prefillAccount();
 	restoreBillingDetails();
 	loadPaymentProviders();
+	window.addEventListener("pageshow", onCheckoutPageShow);
+	document.addEventListener("visibilitychange", onCheckoutVisibility);
 	await reconcileMidFlightSignup();
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"
