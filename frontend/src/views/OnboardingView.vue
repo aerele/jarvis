@@ -333,96 +333,191 @@
 							</div>
 						</section>
 
-						<!-- ===== Review & Pay (renderPay / renderVerifyEmail / startPay /
-							 openCheckout preserved verbatim in behavior) ===== -->
+						<!-- ===== Review & Pay — the strict payment state machine (plan 02).
+							 Sub-screens are driven by the machine state (pay.value), never by
+							 an HTTP status or an error message. ===== -->
 						<section v-else-if="state.step === 'pay'" class="ob-screen">
-							<template v-if="state.provisioning || state.provisionErr">
+							<!-- Paid: the payment step is over. Receipt + workspace-setup
+								 projection, rendered separately (plan 02 §Paid/provisioning).
+								 Provisioning belongs to the readiness gate, so this shows status
+								 only and never a payment action. -->
+							<template v-if="showPaidFlash || showProvisioning">
 								<div class="ob-body">
 									<div class="ob-head">
-										<h1>Setting up your workspace</h1>
-										<p v-if="state.provisioning">
+										<h1>{{ paySummaryTrial ? "Free trial started" : "Payment confirmed" }}</h1>
+										<p v-if="!provisioningDelayed" role="status">
 											{{
-												isTrialPlan
+												paySummaryTrial
 													? "Auto-pay authorized — nothing charged until your trial ends."
 													: "Payment received."
 											}}
-											We're provisioning your {{ agentName }} workspace. This
-											usually takes under a minute…
+											We're preparing your {{ agentName }} workspace. This usually
+											takes under a minute…
+										</p>
+										<p v-else role="status">
+											Your workspace is taking a little longer than usual to come
+											online. Your payment is complete — nothing more is owed.
+										</p>
+										<!-- admin's OWN sentence when it recorded the payment but the
+											 allocation failed and ops were paged. It used to be
+											 discarded, leaving the customer on a 90-second spinner
+											 with no idea a human already knew. -->
+										<p
+											v-if="pay.provisioningNote"
+											class="mt-1.5 text-p-sm text-ink-gray-7"
+											role="status"
+										>
+											{{ pay.provisioningNote }}
+										</p>
+										<p
+											v-if="setupRecheckNote"
+											class="mt-1.5 text-p-sm text-ink-gray-5"
+											role="status"
+										>
+											{{ setupRecheckNote }}
 										</p>
 									</div>
-									<!-- Deliberately NOT aria-hidden. JvSpinner is its own status
-										 region, and while provisioning runs this is the only thing on
-										 screen saying the workspace is still being built. -->
+									<!-- Deliberately NOT aria-hidden: JvSpinner is its own status
+										 region and, while provisioning runs, the only thing on screen
+										 saying the workspace is still being built. -->
 									<div
-										v-if="state.provisioning"
+										v-if="!provisioningDelayed"
 										class="mt-2.5 flex justify-center"
 									>
 										<JvSpinner :size="72" />
 									</div>
-									<Banner
-										v-if="state.provisionErr"
-										type="error"
-										:message="state.provisionErr"
-										role="alert"
-									/>
 								</div>
-								<div v-if="state.provisionErr" class="ob-foot justify-end">
+								<div v-if="provisioningDelayed" class="ob-foot justify-end">
 									<Button
 										variant="solid"
-										label="Retry"
-										@click="proceedAfterPay"
+										:disabled="recheckingSetup"
+										:loading="recheckingSetup"
+										loading-text="Checking…"
+										label="Check setup status"
+										@click="recheckProvisioning"
 									/>
 								</div>
 							</template>
-							<template v-else-if="state.payPhase === 'verify'">
+							<!-- Email verification still pending: no payment action until the
+								 link is clicked. -->
+							<template v-else-if="showVerify">
 								<div class="ob-body">
 									<div class="ob-head">
-										<h1>Check your email</h1>
+										<h1 ref="recoveryHeading" tabindex="-1">Check your email</h1>
 										<p>
-											We sent a confirmation link to
-											<b>{{ state.email || "your email" }}</b
-											>. Click the link to verify your address, then come
-											back here and click the button below to continue to
-											payment.
+											We sent a confirmation link to <b>{{ payEmail }}</b
+											>. Click the link to verify your address, then come back
+											here and continue.
 										</p>
 									</div>
-									<p class="text-center text-p-sm text-ink-gray-5">
-										The link expires in 24 hours. Check your spam folder if it
-										doesn't arrive.
+									<p class="text-center text-p-sm text-ink-gray-5" role="status">
+										<template v-if="payVerifyExpiry"
+											>This link expires on {{ payVerifyExpiry }}. </template
+										><template v-else>The link expires in 24 hours. </template>Check
+										your spam folder if it doesn't arrive.
 									</p>
-									<Banner
-										v-if="state.payErr"
-										type="error"
-										:message="state.payErr"
-									/>
 								</div>
 								<div class="ob-foot justify-end">
 									<Button
 										variant="solid"
-										:loading="state.payBusy"
+										:disabled="verifying"
+										:loading="verifying || payBusyView"
 										loading-text="Working…"
 										label="I've verified my email"
-										@click="onVerifyCheck"
+										@click="onPayAction(A.VERIFY)"
 									/>
 								</div>
 							</template>
-							<template v-else-if="state.successData">
-								<div class="ob-body">
+							<!-- In flight: starting signup, checkout open, or confirming.
+								 A bounded status region, never an indefinite spinner replacing
+								 both recovery buttons (plan 02 §a11y). -->
+							<template v-else-if="payBusyView">
+								<div class="ob-body ob-body--center">
 									<div class="ob-head">
-										<h1>
-											{{
-												isTrialPlan
-													? "Free trial started"
-													: "Payment complete"
-											}}
-										</h1>
-										<p>You're all set. Continue to connect your AI.</p>
+										<h1 role="status">{{ payBusyLabel }}</h1>
+									</div>
+									<div class="mt-2.5 flex justify-center">
+										<JvSpinner :size="56" />
 									</div>
 								</div>
-								<div class="ob-foot justify-end">
-									<Button variant="solid" label="Continue" @click="goNext" />
+							</template>
+							<!-- Recovery: unknown / retryable / terminal / confirm-required /
+								 reconnect. Coded copy + the two named recovery actions in
+								 status-first order. -->
+							<template v-else-if="showRecovery">
+								<div class="ob-body ob-body--center">
+									<div class="ob-head">
+										<h1 ref="recoveryHeading" tabindex="-1">{{ payCopy.headline }}</h1>
+										<p :role="recoveryRole">{{ payCopy.body }}</p>
+										<!-- The captured, customer-facing detail from the thing that
+											 actually failed (an ad-blocker eating the SDK, a gateway
+											 that would not open). Without this the page showed only
+											 the PREVIOUS code's generic copy and the real reason went
+											 nowhere. -->
+										<p
+											v-if="payDetail"
+											class="mt-1.5 text-p-sm text-ink-gray-5"
+											role="status"
+										>
+											{{ payDetail }}
+										</p>
+									</div>
+									<div
+										v-if="paySummaryRows.length"
+										class="mx-auto w-full max-w-[420px] overflow-hidden rounded-lg border border-outline-gray-1"
+									>
+										<div
+											v-for="(row, i) in paySummaryRows"
+											:key="row.label"
+											class="flex items-center justify-between gap-3 px-4 py-2.5 text-p-sm"
+											:class="i < paySummaryRows.length - 1 ? 'border-b border-outline-gray-1' : ''"
+										>
+											<span class="text-ink-gray-5">{{ row.label }}</span>
+											<b class="font-medium text-ink-gray-9">{{ row.value }}</b>
+										</div>
+									</div>
+									<p
+										v-if="pay.supportOffered"
+										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+										role="status"
+									>
+										Still not resolved after a few checks?
+										<button class="ob-link" @click="onPayAction(A.SUPPORT)">
+											Contact support
+										</button>
+										— we'll place it for you. Please don't pay again.
+									</p>
+								</div>
+								<div class="ob-foot">
+									<!-- A way back, always. A recovery screen with only forward
+										 actions - each of which the backend may have disabled - was
+										 how a customer could end up on a card with nothing to press. -->
+									<button
+										class="ob-back"
+										:disabled="checking || initiating"
+										@click="goBack"
+									>
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
+									</button>
+									<div class="flex items-center gap-2">
+										<Button
+											v-for="a in recoveryActions"
+											:key="a"
+											:variant="payActionVariant(a)"
+											:disabled="payActionDisabled(a)"
+											:loading="payActionLoading(a)"
+											loading-text="Working…"
+											:label="payActionLabel(a)"
+											@click="onPayAction(a)"
+										/>
+									</div>
 								</div>
 							</template>
+							<!-- Review (fresh start): the customer chose a plan and entered
+								 details locally, and clicks once to start the signup. -->
 							<template v-else>
 								<div class="ob-body">
 									<div class="ob-head">
@@ -569,14 +664,12 @@
 											/>
 										</button>
 									</div>
-									<Banner
-										v-if="state.payErr"
-										type="error"
-										:message="state.payErr"
-										class="mx-auto mt-3.5 max-w-[560px]"
-									/>
+									<!-- Reconnect offer, gated ONLY on the backend's can_reconnect
+										 probe (C02-5): no prose matching. Shown when the control
+										 plane says this (email, company) has a paid account a
+										 reconnect would find. -->
 									<div
-										v-if="state.reconnectOffered && !state.payBusy"
+										v-if="pay.canReconnect"
 										class="mx-auto mt-2 max-w-[560px] text-center"
 									>
 										<Button
@@ -585,16 +678,16 @@
 											@click="startReconnect"
 										/>
 										<p class="mt-1.5 text-p-sm text-ink-gray-5">
-											We'll email a code to {{ state.email }} — enter it to
-											connect this site to your existing subscription.
-											Nothing to pay again.
+											We'll email a code to {{ payEmail }} — enter it to connect
+											this site to your existing subscription. Nothing to pay
+											again.
 										</p>
 									</div>
 								</div>
 								<div class="ob-foot">
 									<button
 										class="ob-back"
-										:disabled="state.payBusy"
+										:disabled="payBusyView"
 										@click="goBack"
 									>
 										<FeatherIcon
@@ -604,8 +697,8 @@
 									</button>
 									<Button
 										variant="solid"
-										:disabled="state.payBusy"
-										:loading="state.payBusy"
+										:disabled="payBusyView"
+										:loading="payBusyView"
 										loading-text="Working…"
 										:label="payCta"
 										@click="onPayClick"
@@ -765,7 +858,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, computed, onMounted, watch } from "vue";
+import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { Button, FormControl, FeatherIcon } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
@@ -780,14 +873,12 @@ import {
 	STEPS_MANAGED,
 	nextStep,
 	prevStep,
-	verifyPollAction,
 	notReadyNote,
 	syncStatusNote,
 	planSubtitleFor,
 } from "@/onboarding/steps";
 import { inr, planAmount, planSuffix } from "@/account/format";
 import {
-	checkSignupPaymentState,
 	isReadyForChat,
 	getLlmSyncStatus,
 	listPlans,
@@ -795,14 +886,19 @@ import {
 	reconnectAvailable,
 	startAccountReconnect,
 	checkAccountReconnect,
-	startSignup,
-	finishPayment,
 	getAccountDefaults,
-	syncConnection,
+	onboardingPaymentApi,
 } from "@/api";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
+import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
+import { openOnboardingCheckout } from "@/onboarding/onboardingCheckout";
+import {
+	STATES as PAY_STATES,
+	remainingCooldownSeconds,
+} from "@/onboarding/paymentMachine";
+import { ACTIONS, ACTION_LABELS, TONE, copyFor } from "@/onboarding/paymentCodes";
 
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
@@ -850,9 +946,9 @@ const state = reactive({
 	planName: null,
 	plansLoading: false,
 	plansErr: "",
-	// pay (renderPay / renderVerifyEmail / startPay / openCheckout)
-	payPhase: "review", // "review" | "verify" - step-3 sub-screens
-	reconnectOffered: false,
+	// pay: the payment sub-state lives in the machine (usePaymentFlow / `pay`),
+	// NOT here. These fields belong to the reconnect-code step and the review
+	// card's local choices only.
 	reconnectRequestId: "",
 	reconnectFrom: "",
 	reconnectEligible: false,
@@ -864,6 +960,8 @@ const state = reactive({
 	// can render. Starts as razorpay-only so the step is never briefly empty
 	// while the lookup is in flight, and stays that way if the lookup fails.
 	availableProviders: ["razorpay"],
+	// payErr / payBusy drive the reconnect-code step's own error + button state
+	// (the payment machine owns everything on the Pay step).
 	payErr: "",
 	payBusy: false,
 	// True when reconcile landed us directly on "connect" (signup + payment
@@ -871,12 +969,6 @@ const state = reactive({
 	// context, so Back to Review & Pay is hidden (it would re-run start_signup
 	// with empty args).
 	reconciledConnect: false,
-	successData: null,
-	// provisioning gate: after pay, the openclaw container is still spinning up.
-	// We block entry to the Connect step until it's running (else save_llm_pool
-	// has no container to configure).
-	provisioning: false,
-	provisionErr: "",
 	// post-save readiness recheck (Connect funnels through
 	// afterSaveRecheckReady/forceContinue below). finishSubtitle swaps the
 	// spinner's default line for a calm "this can take a few minutes" message
@@ -1047,64 +1139,58 @@ function startWizard() {
 	state.step = nextStep(steps.value, "intro");
 }
 // ---- on-mount reconcile: resume a mid-flight signup ------------------------
-// A mid-flight signup must land on the right step, NOT the intro tour - the
-// tour shows only for a fresh, not-started onboarding (the default "intro"
-// step stands when nothing below matches).
+// The mount contract (plan 02 §Reload and multi-tab recovery). A mid-flight
+// signup must land on the right step, NOT the intro tour, and the payment
+// machine already holds the authoritative sub-state - the job here is to route
+// STEPS from server truth.
 //
-// Best-effort reconcile: use is_ready_for_chat's `reason` to pick the right
-// track/step, then (for the managed "signup not done yet" case) poll
-// check_signup_payment_state to see whether there's a live order/verification
-// to resume. Fails open on any error (no admin URL configured yet, not a
-// System Manager, admin API unreachable are all expected on a genuine first
-// run) - falls back to the default "intro" step.
-//
-// check_signup_payment_state is, on desk, ONLY ever called from the "check
-// your email" screen (renderVerifyEmail's "I've verified" button,
-// jarvis_onboarding.js ~1612) - never from a fresh pay-review screen. So
-// EITHER truthy result here (a live razorpay_order_id, or still-
-// pending_verification) maps to that same desk sub-screen, not to the review
-// screen (which would re-call start_signup - untested for idempotency and not
-// a real desk code path). onVerifyCheck() below re-polls
-// check_signup_payment_state itself and branches on the same two fields, so
-// landing here in "verify" phase re-derives the correct next action either
-// way. Known gap: email/company/plan text are blank on a resumed session
-// (never persisted) until the customer re-verifies - cosmetic only.
+// The C02-1 correction is the whole point of the ordering below: is_ready_for_chat's
+// `llm_credentials` reason is NOT "has paid". Credentials persist at signup,
+// BEFORE payment, so a customer who reached the old
+// `llm_credentials → connect` shortcut on that reason alone could be dropped on
+// Connect while their payment was never made. So payment truth
+// (get_onboarding_state, via flow.hydrate) is consulted FIRST, and only a paid
+// answer lets the connect shortcut fire. Fails open (default intro) on any error.
 async function reconcileMidFlightSignup() {
+	let truth;
 	try {
-		const ready = await isReadyForChat();
-		if (
-			ready &&
-			(ready.reason === "llm_credentials" || ready.reason === "llm_pool_provisioning")
-		) {
-			// Signup + payment already done; only the AI connection is missing
-			// (llm_credentials) or a configured pool never finished its first
-			// apply (llm_pool_provisioning) - both resume at the connect step,
-			// whose sync-status poller shows the pending/failed state. Mark the
-			// resume so the Connect step hides Back (no local signup context to
-			// return to - see state.reconciledConnect).
-			state.step = "connect";
+		truth = await flow.hydrate(); // {paid: true|false|null, truthKnown, notStarted}
+	} catch (e) {
+		return; // fail open to the intro tour
+	}
+	// Day one: no signup on this site. Leave the default intro tour (fresh start).
+	if (truth.notStarted) return;
+
+	if (truth.paid === true) {
+		// Paid - so, and only so, the connect shortcut is allowed. Ask readiness
+		// for the fine-grained "what is left": a missing AI connection resumes at
+		// Connect; anything else (paid, still provisioning) shows the machine's
+		// provisioning projection on the Pay step.
+		let ready = null;
+		try {
+			ready = await isReadyForChat();
+		} catch (e) {
+			/* readiness is advisory here - fall through to the pay projection */
+		}
+		if (ready && (ready.reason === "llm_credentials" || ready.reason === "llm_pool_provisioning")) {
 			state.reconciledConnect = true;
+			state.step = "connect";
 			return;
 		}
-		// reason === "signup" (or call failed) - no completed signup yet, but
-		// one may still be mid-flight (started, awaiting verification/payment).
-		//
-		// The in-flight test goes through verifyPollAction rather than naming
-		// order ids here. This gate used to check razorpay_order_id only, which
-		// made it blind to BOTH Cashfree shapes - and a Cashfree mandate is
-		// exactly the case that needs it, because authorising one is a full-page
-		// redirect that lands back here with the wizard's in-memory state gone.
-		// Falling through dropped the customer at "intro", as if they had never
-		// signed up, moments after they authorised. verifyPollAction is the one
-		// place that knows every gateway/shape, so the two cannot drift again.
-		const pay = await checkSignupPaymentState();
-		if (pay && (pay.pending_verification || verifyPollAction(pay).kind === "checkout")) {
-			state.step = "pay";
-			state.payPhase = "verify";
-		}
-		// else: nothing in flight - leave the default "intro" step (fresh start).
-	} catch (e) {
-		// Fail-open - never block the wizard from rendering.
+		// Paid but not yet chat-ready (container provisioning): land on Pay, where
+		// the machine renders the paid receipt + "preparing your workspace".
+		state.step = "pay";
+		return;
+	}
+
+	// Not paid, or payment truth could not be established. Either way the connect
+	// shortcut must NOT fire - "has credentials" is not "has paid". If hydrate()
+	// absorbed a real payment state (verification / unknown / failed /
+	// confirm_required / reconnect), render it on the Pay step; the reconnect
+	// state shows its offer there too. A customer who has genuinely not started
+	// anything leaves the machine on REVIEW and stays on the intro tour.
+	if (pay.value.value !== S.REVIEW) {
+		state.step = "pay";
 	}
 }
 
@@ -1196,176 +1282,340 @@ function onDetailsSubmit() {
 		return;
 	}
 	persistBillingDetails();
-	// Entering Review & Pay fresh from Details: reset the pay sub-state. This
-	// includes reconnectOffered, not just payErr - otherwise a reconnect offer
-	// raised by a duplicate email on an earlier attempt survives a Back, an
-	// edit to a genuinely new email, and a Continue, and is shown pointing at
-	// an address that was never rejected.
-	state.payPhase = "review";
+	// Entering Review & Pay fresh from Details: the payment machine owns the pay
+	// sub-state now, and a fresh review renders from its REVIEW state. Clear the
+	// reconnect-code step's own error surface so a stale one does not linger.
 	state.payErr = "";
-	state.reconnectOffered = false;
 	goNext();
 }
 
-// ---- Pay (renderPay / renderVerifyEmail / startPay / openCheckout,
-// jarvis_onboarding.js ~515 & ~1575-1682) ------------------------------------
-// Signup fires at the Details → Pay boundary via this step's single CTA:
-// the customer reviews, clicks once, and that click runs startSignup →
-// verify-email/checkout branches EXACTLY as the desk flow does. start_signup
-// is deliberately NOT fired on step entry: it is not idempotent-tested, and
-// Back-then-Continue would re-call it.
+// ---- Pay: the strict payment state machine (plan 02) ------------------------
+// The wizard consumes @/onboarding/usePaymentFlow - a pure reducer
+// (paymentMachine) plus an orchestrator that owns every side effect - instead of
+// the old tangle of payPhase/successData/provisioning flags and inline checkout
+// code. The machine keys on the backend's CODE, never on HTTP status prose, and
+// its ONE invariant is that nothing but an authoritative paid answer leaves the
+// Pay page. Checkout sheets are opened through the SHIPPED billing layer
+// (onboardingCheckout → billingCheckout/useRazorpay/useCashfree), not a second
+// orchestrator here.
 
-// Lazy-load the Razorpay Checkout script (mirrors desk's page-load
-// `frappe.require("https://checkout.razorpay.com/v1/checkout.js")`, ~line 18)
-// as a promise so openCheckout() can await it instead of racing window.Razorpay.
-let razorpayLoadPromise = null;
-function ensureRazorpayLoaded() {
-	if (window.Razorpay) return Promise.resolve();
-	if (razorpayLoadPromise) return razorpayLoadPromise;
-	razorpayLoadPromise = new Promise((resolve, reject) => {
+// The Cashfree autopay MANDATE opener: a full-page subscriptionsCheckout
+// redirect, the one shape the Account billing page refuses and the wizard owns.
+// The order/Razorpay openers load their own SDKs; this one lives here because it
+// is the view that owns the return journey - admin points Cashfree's return_url
+// at jarvis_pay_return, which lands back on this wizard and resumes via the
+// mount reconcile below.
+let cashfreeLoadPromise = null;
+function ensureCashfreeLoaded() {
+	if (window.Cashfree) return Promise.resolve();
+	if (cashfreeLoadPromise) return cashfreeLoadPromise;
+	cashfreeLoadPromise = new Promise((resolve, reject) => {
 		const s = document.createElement("script");
-		s.src = "https://checkout.razorpay.com/v1/checkout.js";
+		s.src = "https://sdk.cashfree.com/js/v3/cashfree.js";
 		s.onload = () => resolve();
 		s.onerror = () => {
-			razorpayLoadPromise = null;
-			reject(new Error("Couldn't load the Razorpay checkout script."));
+			cashfreeLoadPromise = null;
+			reject(new Error("Couldn't load the Cashfree checkout script."));
 		};
 		document.head.appendChild(s);
 	});
-	return razorpayLoadPromise;
+	return cashfreeLoadPromise;
 }
-
-// Preload the checkout script on entering the Pay step (harmless if unused).
-async function enterPayStep() {
-	ensureRazorpayLoaded().catch(() => {
-		/* surfaced later if actually needed */
+async function openCashfreeMandate(handles) {
+	await ensureCashfreeLoaded();
+	const cf = window.Cashfree({
+		mode: handles.cashfree_env === "production" ? "production" : "sandbox",
 	});
+	// {redirect:true}; resolves the moment the form submits, so there is nothing
+	// to await and the browser is leaving. The SDK resolves with {error} rather
+	// than throwing for bad input.
+	const r = await cf.subscriptionsCheckout({
+		subsSessionId: handles.subscription_session_id,
+		redirectTarget: "_self",
+	});
+	if (r && r.error) throw new Error("Couldn't start the auto-pay authorisation. Try again.");
+	return { status: "redirected" };
 }
 
-// Click handler for the Pay button.
+const flow = createPaymentFlow({
+	api: onboardingPaymentApi,
+	openCheckout: (handles, opts) =>
+		openOnboardingCheckout(handles, { ...opts, openMandate: openCashfreeMandate }),
+});
+// The reactive machine state the template renders from.
+const pay = computed(() => flow.state.value);
+
+// ---- pay-step view model ----------------------------------------------------
+const S = PAY_STATES;
+const A = ACTIONS;
+// The coded copy for the current state (headline, body, tone, actions), with the
+// reconciliation flag switching the pending row to its money-parked variant.
+const payCopy = computed(() =>
+	copyFor(pay.value.code, { awaitingReconciliation: pay.value.awaitingReconciliation })
+);
+
+// Server-truth identity for the resumed/recovery screens (C02-3: never the
+// prefill). Falls back to the locally typed email on the fresh review path.
+const payEmail = computed(() => pay.value.summary?.email || state.email || "your email");
+const paySummaryTrial = computed(() => (pay.value.summary?.trialDays || 0) > 0);
+// The verification link's expiry, rendered plainly when the backend sends one so
+// the page can say how long is left instead of "check your email" forever.
+const payVerifyExpiry = computed(() => {
+	const raw = pay.value.verificationExpiresAt;
+	if (!raw) return "";
+	// Admin sends a Frappe datetime ("YYYY-MM-DD HH:mm:ss[.ffffff]"). Show the
+	// date portion; a full localisation is not worth a dependency here.
+	return String(raw).slice(0, 16).replace("T", " ");
+});
+
+// The resumed-summary rows on a recovery card: provider, amount, a masked intent
+// reference where safe, and the last time we actually checked (plan 02 §Unknown/
+// failed). Read from the machine (server truth), and last-checked from `data`,
+// never the persisted context (which keeps a stale stamp by design).
+const paySummaryRows = computed(() => {
+	const s = pay.value.summary || {};
+	const rows = [];
+	if (pay.value.provider) {
+		rows.push({ label: "Payment method", value: pay.value.provider === "cashfree" ? "Cashfree" : "Razorpay" });
+	}
+	if (s.dueTodayInr != null && !Number.isNaN(s.dueTodayInr)) {
+		rows.push({ label: "Amount", value: paySummaryTrial.value ? "₹0 today" : inr(s.dueTodayInr) });
+	}
+	const ref = maskedIntentRef.value;
+	if (ref) rows.push({ label: "Reference", value: ref });
+	if (pay.value.lastCheckedAt) {
+		rows.push({ label: "Last checked", value: relativeSince(pay.value.lastCheckedAt) });
+	}
+	return rows;
+});
+// A short, safe intent reference: the attempt id's tail, never a gateway order id
+// or a document name (those stay on admin's side).
+const maskedIntentRef = computed(() => {
+	const id = pay.value.attemptId || "";
+	if (!id) return "";
+	return id.length > 6 ? `…${id.slice(-6)}` : id;
+});
+function relativeSince(ts) {
+	const t = Date.parse(String(ts).replace(" ", "T"));
+	if (Number.isNaN(t)) return "just now";
+	const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+	if (secs < 60) return "just now";
+	const mins = Math.round(secs / 60);
+	if (mins < 60) return `${mins} min ago`;
+	const hrs = Math.round(mins / 60);
+	if (hrs < 24) return `${hrs} h ago`;
+	return `${Math.round(hrs / 24)} d ago`;
+}
+
+// "Check setup status" from the provisioning_delayed projection. The poll is a
+// 90-second loop, so the button guards itself: the machine state does not change
+// while it runs, and without this every impatient click spawned another
+// concurrent loop (the flow now refuses re-entry too - this is the visible half).
+const recheckingSetup = ref(false);
+const setupRecheckNote = ref("");
+async function recheckProvisioning() {
+	if (recheckingSetup.value) return;
+	recheckingSetup.value = true;
+	setupRecheckNote.value = "";
+	try {
+		const out = await flow.waitForProvisioning();
+		if (out.status === "ready") {
+			state.step = "connect";
+			return;
+		}
+		// Do not discard the outcome: a silent 90 seconds followed by the same
+		// screen reads as a broken button.
+		setupRecheckNote.value =
+			out.status === "delayed"
+				? "Still preparing your workspace. Your payment is complete — you can leave this page and come back."
+				: "";
+	} finally {
+		recheckingSetup.value = false;
+	}
+}
+// Sub-screen selectors. review is the fresh-start card (local plan/email chosen
+// on the Details step); every other sub-screen renders from server truth in the
+// machine (pay.summary), never from a prefill (C02-3).
+const showVerify = computed(() => pay.value.value === S.VERIFICATION_REQUIRED);
+const showProvisioning = computed(
+	() => pay.value.value === S.PROVISIONING || pay.value.value === S.PROVISIONING_DELAYED
+);
+const showPaidFlash = computed(() => pay.value.value === S.PAID);
+// The FULL-SCREEN busy view is only for the phases where there is genuinely
+// nothing to press: starting the signup, the sheet being open, confirming.
+// A status check or a retry deliberately does NOT hide the recovery card -
+// plan 02 §a11y is explicit that both buttons must not be replaced by an
+// indefinite spinner; they are disabled in place instead (see payActionDisabled).
+const payBusyView = computed(
+	() =>
+		pay.value.value === S.STARTING_SIGNUP ||
+		pay.value.value === S.CHECKOUT_OPEN ||
+		pay.value.value === S.CONFIRMING
+);
+const checking = computed(() => pay.value.busy === "checking");
+const initiating = computed(() => pay.value.busy === "initiating");
+// The verify round trip OPENS the checkout on success, so an unguarded
+// triple-click stacked three gateway sheets. The flow holds the same in-flight
+// guard its siblings do; this is the half the customer can see.
+const verifying = computed(() => pay.value.busy === "verifying");
+const showRecovery = computed(
+	() =>
+		!payBusyView.value &&
+		(pay.value.value === S.UNKNOWN ||
+			pay.value.value === S.FAILED_RETRYABLE ||
+			pay.value.value === S.FAILED_TERMINAL ||
+			pay.value.value === S.CONFIRM_REQUIRED ||
+			pay.value.value === S.RECONNECT)
+);
+// role=alert only for an actionable failure; role=status for pending/info
+// (plan 02 §a11y - a pending payment announced as an alert on every poll is a
+// flashing banner to a screen reader).
+const recoveryRole = computed(() => (payCopy.value.tone === TONE.ALERT ? "alert" : "status"));
+// The specific, customer-facing detail the machine captured (an SDK that would
+// not load, a gateway that refused to open, admin's own sentence on a coded
+// refusal). Suppressed when it merely repeats the coded copy.
+const payDetail = computed(() => {
+	const m = (pay.value.message || "").trim();
+	if (!m) return "";
+	return m === payCopy.value.body || m === payCopy.value.headline ? "" : m;
+});
+const provisioningDelayed = computed(() => pay.value.value === S.PROVISIONING_DELAYED);
+
+// The busy-screen line ("Confirming with Razorpay/Cashfree…").
+const payBusyLabel = computed(() => {
+	if (pay.value.value === S.CONFIRMING) {
+		const prov = pay.value.provider === "cashfree" ? "Cashfree" : "Razorpay";
+		return `Confirming with ${prov}…`;
+	}
+	if (pay.value.value === S.STARTING_SIGNUP) return "Starting your signup…";
+	return "Opening secure checkout…";
+});
+
+// The rate-limit countdown: a live seconds value the Check button reads. Driven
+// by a 1s ticker that also lets the machine re-enable the button when the
+// cooldown elapses.
+const nowMs = ref(Date.now());
+let cooldownTimer = null;
+const checkCountdown = computed(() => remainingCooldownSeconds(pay.value, nowMs.value));
+const checkLabel = computed(() =>
+	// The countdown wins whenever there IS one. Gating it on
+	// !awaitingReconciliation && !transportError meant that a parked-payment page
+	// (or one whose last check failed) that ALSO hit the rate limit showed a plain
+	// "Check payment status" over a disabled button with no explanation of when it
+	// would work again - which is the dead-looking-button complaint in its most
+	// confusing form.
+	checkCountdown.value > 0
+		? `Check again in ${checkCountdown.value}s`
+		: ACTION_LABELS[ACTIONS.CHECK]
+);
+
+// The action buttons for the recovery card, in the table's order (status-first).
+// The support affordance is appended when the client-local check ceiling is hit
+// even if the code's own actions don't list it (a pending payment the customer
+// has checked many times).
+const recoveryActions = computed(() => {
+	const acts = [...payCopy.value.actions];
+	if (pay.value.supportOffered && !acts.includes(ACTIONS.SUPPORT)) acts.push(ACTIONS.SUPPORT);
+	return acts;
+});
+
+function payActionLabel(a) {
+	if (a === ACTIONS.CHECK) return checkLabel.value;
+	return ACTION_LABELS[a] || "";
+}
+function payActionDisabled(a) {
+	// Any mutating call in flight disables BOTH recovery actions (plan 02: server
+	// idempotency, not button state, is what prevents duplicate intents - but a
+	// double-click should still not fire twice). A status check disables itself
+	// and the retry, so an impatient customer cannot stack concurrent
+	// provider-truth calls into the rate limit.
+	if (checking.value || initiating.value) return true;
+	if (a === ACTIONS.CHECK) return !pay.value.canCheck;
+	if (a === ACTIONS.INITIATE) return !pay.value.canInitiate;
+	return false;
+}
+function payActionLoading(a) {
+	if (a === ACTIONS.CHECK) return checking.value;
+	if (a === ACTIONS.INITIATE) return initiating.value;
+	return false;
+}
+function payActionVariant(a) {
+	// Status-first: the primary (solid) action is whichever appears first, which
+	// the copy table already orders as Check where double-payment is possible.
+	return recoveryActions.value[0] === a ? "solid" : "subtle";
+}
+async function onPayAction(a) {
+	if (a === ACTIONS.CHECK) return flow.checkStatus();
+	if (a === ACTIONS.INITIATE) {
+		// Provider from SERVER TRUTH, not the local default. A resumed Cashfree
+		// signup renders "Payment method: Cashfree" one line above this button
+		// while state.paymentProvider still held the razorpay seed - and the bench
+		// takes a passed provider verbatim, so the retry silently opened a second
+		// live intent on a DIFFERENT gateway.
+		return flow.initiatePayment({
+			plan: payPlan.value,
+			provider: pay.value.provider || state.paymentProvider,
+		});
+	}
+	if (a === ACTIONS.RECONNECT) return startReconnect();
+	if (a === ACTIONS.VERIFY) return flow.verifyAndContinue();
+	if (a === ACTIONS.SUPPORT) {
+		window.location.href = "mailto:support@aerele.in?subject=Jarvis%20onboarding%20payment";
+		return;
+	}
+	if (a === ACTIONS.RESTART) {
+		flow.cancelInFlight();
+		state.step = "details";
+	}
+}
+
+// The plan a retry initiates on: the one the customer chose locally, or (on a
+// resumed session with no local choice) the plan NAME server truth named -
+// summary.plan, not summary.planLabel, because the label is display text and the
+// bench resumes on the name. Never a guess: initiating on the wrong plan is a
+// wrong charge, and passing "" lets the bench fall back to its own stored
+// context rather than inventing one here.
+const payPlan = computed(() => state.planName || pay.value.summary?.plan || "");
+
+// Focus management (plan 02 §Accessibility). A gateway sheet steals focus into
+// its own iframe and takes it away when it closes, so a keyboard or screen-reader
+// user is left with focus on nothing when the recovery screen appears. A live
+// region announces the text but does not MOVE anyone - so the status heading is
+// focused explicitly on each transition into a recovery/verify state.
+const recoveryHeading = ref(null);
+watch(
+	() => pay.value.value,
+	async () => {
+		if (!showRecovery.value && !showVerify.value) return;
+		await nextTick();
+		const el = recoveryHeading.value;
+		if (el && typeof el.focus === "function") el.focus();
+	}
+);
+
+// Click handler for the review card's single Pay CTA. Fires start_signup exactly
+// once through the flow; the machine takes it from there (verify / checkout /
+// parked-money / duplicate all land on their own sub-screen).
 async function onPayClick() {
-	state.payErr = "";
-	// A fresh attempt starts clean: a reconnect offer raised by a previous
-	// failure must not survive into this one. runStartPay's catch below sets
-	// it again if this attempt also hits a duplicate-email rejection.
-	state.reconnectOffered = false;
-	// Guard against a signup with empty args: on a reconciled resume (or any
-	// state loss) there is no local plan/email/company, and startSignup(email,
-	// company, null) would create a broken signup upstream.
 	if (!state.planName || !state.email || !state.company) {
-		state.payErr =
+		// A signup with empty args would create a broken record upstream. This is
+		// the fresh-start guard; a resumed session renders from server truth and
+		// uses Initiate, not this button.
+		state.detailsErr =
 			"Your signup details are missing. Please go back and pick a plan and enter your details again.";
+		state.step = "details";
 		return;
 	}
-	state.payBusy = true;
-	await runStartPay();
-}
-
-function _sleep(ms) {
-	return new Promise((r) => setTimeout(r, ms));
-}
-
-// Provisioning gate: after pay, the openclaw container is still spinning up.
-// Don't enter Connect until it's running - otherwise save_llm_pool there has
-// no container to configure. If pay already returned a running tenant, advance
-// immediately; otherwise poll sync_connection until the container is ready.
-async function proceedAfterPay() {
-	const sd = state.successData || {};
-	if (sd.agent_url || sd.tenant_status === "running") {
-		goNext();
-		return;
-	}
-	state.provisioning = true;
-	state.provisionErr = "";
-	for (let i = 0; i < 45; i++) {
-		// ~45 × 2s ≈ 90s
-		try {
-			const r = await syncConnection();
-			if (r && (r.synced || r.tenant_status === "running")) {
-				state.provisioning = false;
-				goNext();
-				return;
-			}
-		} catch (e) {
-			/* transient admin/agent hiccup - keep polling */
-		}
-		await _sleep(2000);
-	}
-	state.provisioning = false;
-	state.provisionErr =
-		"Your workspace is still being set up. This can take a minute. Retry when you're ready.";
-}
-
-async function runStartPay() {
-	try {
-		const d = await startSignup(
-			state.email,
-			state.company,
-			state.planName,
-			state.paymentProvider
-		);
-		if (d && d.pending_verification) {
-			state.payPhase = "verify";
-			state.payBusy = false;
-			return;
-		}
-		await launchCheckout(d);
-	} catch (e) {
-		state.payBusy = false;
-		state.payErr = errMsg(e);
-		// The duplicate-email rejection on a FRESH bench (no stored creds to
-		// auto-resume with) usually means "my old site died" - offer the
-		// reconnect path instead of the dead end. Match both the pre- and
-		// post-multi-company wording ("already registered or pending" and
-		// "...email and company already exists").
-		state.reconnectOffered = /already registered or pending|already exists/i.test(
-			state.payErr
-		);
-	}
-}
-
-// "I've verified my email" click handler: re-poll check_signup_payment_state
-// and branch via verifyPollAction (steps.js - pure + unit-tested). Paid plans
-// continue to Razorpay Checkout; free/trial plans are already Active after
-// the email click (verification IS the whole signup), so they skip payment
-// and go straight to the provisioning gate - the poll response also carried
-// customer_password, which the bench endpoint already persisted.
-async function onVerifyCheck() {
-	state.payErr = "";
-	state.payBusy = true;
-	try {
-		const d = await checkSignupPaymentState();
-		const action = verifyPollAction(d);
-		if (action.kind === "checkout") {
-			await launchCheckout(d, action.provider);
-			return;
-		}
-		if (action.kind === "complete") {
-			// No connection handles in this response - proceedAfterPay polls
-			// sync_connection until the container is assigned + running.
-			state.successData = d || {};
-			state.payBusy = false;
-			await proceedAfterPay();
-			return;
-		}
-		state.payBusy = false;
-		if (action.kind === "wait") {
-			state.payErr =
-				"We haven't received your verification yet. Click the link in your email, then try again.";
-		} else if (action.kind === "halted") {
-			state.payErr = `This signup is ${action.status.toLowerCase()} and can't continue. Start a new signup or contact support.`;
-		} else {
-			state.payErr = "Signup state has changed. Refresh this page to continue.";
-		}
-	} catch (e) {
-		state.payBusy = false;
-		state.payErr = errMsg(e);
-	}
+	await flow.submitReview({
+		email: state.email,
+		company: state.company,
+		plan: state.planName,
+		provider: state.paymentProvider,
+	});
 }
 
 function cancelReconnect() {
 	state.step = state.reconnectFrom || "pay";
-	state.payPhase = "review";
 	state.payErr = "";
 	state.reconnectRequestId = "";
 	state.reconnectCode = "";
@@ -1405,16 +1655,15 @@ async function submitReconnectCode() {
 			state.reconnectCode.trim()
 		);
 		if (d && d.status === "connected") {
-			state.successData = {};
 			state.payBusy = false;
-			// Re-anchor to the funnel BEFORE handing over. proceedAfterPay() advances
-			// relative to state.step and renders its progress inside the pay step, but
-			// `reconnect` deliberately sits outside STEPS_MANAGED (that is what hides the
-			// rail) and stepIndex() clamps an unknown step to 0 - so advancing from here
-			// dropped the customer back on Details, which promptly re-offered the
-			// reconnect they had just completed instead of taking them to chat.
-			state.step = "pay";
-			await proceedAfterPay();
+			// Reconnect rotated this site onto an EXISTING, already-paid account
+			// whose container is live - so the payment machine is not involved at
+			// all (the old code faked a paid transition through successData = {}).
+			// Only the LLM step needs re-doing on this fresh site: go straight to
+			// Connect, and mark it a reconciled resume so Connect hides Back (there
+			// is no local signup context to return to).
+			state.reconciledConnect = true;
+			state.step = "connect";
 			return;
 		}
 		state.payErr =
@@ -1433,11 +1682,11 @@ async function submitReconnectCode() {
 // plan or reach a payment wall) and from a rejected pay attempt.
 async function startReconnect() {
 	state.payErr = "";
-	state.reconnectOffered = false;
 	state.reconnectCode = "";
 	state.payBusy = true;
-	// Where to return on Back/cancel: reconnect can now be entered from Details
-	// (before any plan is chosen) as well as from a rejected pay attempt.
+	// Where to return on Back/cancel: reconnect can be entered from Details
+	// (before any plan is chosen), from the recovery card, and from the review
+	// card's can_reconnect offer.
 	state.reconnectFrom = state.step === "reconnect" ? state.reconnectFrom : state.step;
 	try {
 		const d = await startAccountReconnect(state.email, state.company);
@@ -1445,186 +1694,9 @@ async function startReconnect() {
 		state.step = "reconnect";
 	} catch (e) {
 		state.payErr = errMsg(e);
-		state.reconnectOffered = true;
 	} finally {
 		state.payBusy = false;
 	}
-}
-
-// Cashfree Checkout v3 SDK, DOM-injected at runtime (mirrors ensureRazorpayLoaded)
-// so it stays out of the self-contained SPA bundle.
-let cashfreeLoadPromise = null;
-function ensureCashfreeLoaded() {
-	if (window.Cashfree) return Promise.resolve();
-	if (cashfreeLoadPromise) return cashfreeLoadPromise;
-	cashfreeLoadPromise = new Promise((resolve, reject) => {
-		const s = document.createElement("script");
-		s.src = "https://sdk.cashfree.com/js/v3/cashfree.js";
-		s.onload = () => resolve();
-		s.onerror = () => {
-			cashfreeLoadPromise = null;
-			reject(new Error("Couldn't load the Cashfree checkout script."));
-		};
-		document.head.appendChild(s);
-	});
-	return cashfreeLoadPromise;
-}
-
-// Provider dispatcher: the admin response (or the verify-poll action) carries a
-// payment_provider discriminator; launch the matching gateway. Defaults to
-// razorpay so nothing changes when admin returns no discriminator.
-function launchCheckout(d, provider) {
-	const p = (provider || (d && d.payment_provider) || "razorpay").toLowerCase();
-	if (p === "cashfree") return openCashfreeCheckout(d);
-	return openRazorpayCheckout(d);
-}
-
-// Cashfree checkout. Unlike Razorpay there is NO client-side signature: after
-// the modal we confirm SERVER-SIDE by polling finish_payment, which makes admin
-// fetch the real order status from Cashfree. A forged "success" can't activate.
-async function openCashfreeCheckout(d) {
-	try {
-		await ensureCashfreeLoaded();
-	} catch (e) {
-		state.payBusy = false;
-		state.payErr = "Couldn't load the payment form. Check your connection and try again.";
-		return;
-	}
-	state.payBusy = false;
-	let cf;
-	try {
-		cf = window.Cashfree({ mode: d.cashfree_env === "production" ? "production" : "sandbox" });
-	} catch (e) {
-		state.payErr = "Couldn't start Cashfree checkout.";
-		return;
-	}
-	// Paid MONTHLY plans authorize a recurring mandate instead of paying an
-	// order, and the two are NOT interchangeable: the mandate carries a
-	// subscription_session_id and needs subscriptionsCheckout({subsSessionId}).
-	// Passing it to checkout({paymentSessionId}) fails.
-	if (d.subscription_session_id) {
-		return openCashfreeMandate(cf, d);
-	}
-
-	try {
-		// _modal keeps the SPA mounted (a full redirect would tear down wizard state).
-		await cf.checkout({ paymentSessionId: d.payment_session_id, redirectTarget: "_modal" });
-	} catch (e) {
-		// modal error / user close: fall through to the confirm poll - the payment
-		// may still have succeeded, and the server-side poll is what decides.
-	}
-	state.payBusy = true;
-	await confirmCashfree(d.cashfree_order_id);
-}
-
-// Mandate authorization (autopay monthly). This is a REDIRECT journey, not the
-// order flow's modal, and that is imposed by the SDK rather than chosen:
-// subscriptionsCheckout POSTs a form whose target is the raw redirectTarget, so
-// "_modal" would open a window literally named _modal instead of an overlay.
-// It also resolves the moment the form is submitted - {redirect:true} - so
-// there is nothing to await and no result to inspect.
-//
-// The customer therefore leaves the wizard. Admin sets Cashfree's return_url to
-// this page, and on the way back the wizard's normal resume path
-// (verifyPollAction -> finish_payment) confirms the mandate server-side, exactly
-// as it already does after email verification. Nothing trusts the redirect
-// itself: confirm refuses any mandate Cashfree does not report ACTIVE.
-async function openCashfreeMandate(cf, d) {
-	try {
-		const r = await cf.subscriptionsCheckout({
-			subsSessionId: d.subscription_session_id,
-			redirectTarget: "_self",
-		});
-		// The SDK resolves with {error} rather than throwing for bad input.
-		if (r && r.error) {
-			state.payBusy = false;
-			state.payErr = "Couldn't start the auto-pay authorisation. Try again.";
-		}
-	} catch (e) {
-		state.payBusy = false;
-		state.payErr = "Couldn't start the auto-pay authorisation. Try again.";
-	}
-}
-
-// Poll finish_payment (→ admin confirm_payment → Cashfree Get Order/Payments).
-// Succeeds once Cashfree reports the order PAID (sync confirm or the webhook,
-// whichever lands first); both converge idempotently on activation.
-async function confirmCashfree(cashfree_order_id) {
-	for (let i = 0; i < 12; i++) {
-		try {
-			const rr = await finishPayment({ provider: "cashfree", cashfree_order_id });
-			state.successData = rr;
-			state.payBusy = false;
-			await proceedAfterPay();
-			return;
-		} catch (e) {
-			// Not confirmed yet (order not PAID, or a transient) - wait and retry.
-			await _sleep(3000);
-		}
-	}
-	state.payBusy = false;
-	state.payErr =
-		"We couldn't confirm your payment yet. If you completed it, it'll finalize shortly — refresh in a moment.";
-}
-
-// Razorpay Checkout - options object + success handler ported verbatim from
-// desk openCheckout (jarvis_onboarding.js ~1646-1676). See task-4-report.md
-// for the field-by-field comparison against the desk source.
-async function openRazorpayCheckout(d) {
-	try {
-		await ensureRazorpayLoaded();
-	} catch (e) {
-		state.payBusy = false;
-		state.payErr = "Couldn't load the payment form. Check your connection and try again.";
-		return;
-	}
-	state.payBusy = false;
-	// Two Checkout modes sharing one options object: a one-shot order
-	// (order_id) or an autopay-trial mandate authorization (subscription_id -
-	// Razorpay collects the recurring-payment consent; the first charge fires
-	// at the trial's end, server-side). The success payload mirrors the mode:
-	// order checkouts return razorpay_order_id, subscription checkouts return
-	// razorpay_subscription_id; finishPayment forwards whichever is present.
-	const rzOpts = {
-		key: d.razorpay_key_id,
-		name: agentName,
-		description: d.razorpay_subscription_id
-			? `${agentName} subscription (auto-pay after trial)`
-			: `${agentName} subscription`,
-		handler: (res) => {
-			state.payBusy = true;
-			finishPayment({
-				razorpay_payment_id: res.razorpay_payment_id,
-				razorpay_order_id: res.razorpay_order_id,
-				razorpay_subscription_id: res.razorpay_subscription_id,
-				razorpay_signature: res.razorpay_signature,
-			})
-				.then((rr) => {
-					state.successData = rr;
-					state.payBusy = false;
-					proceedAfterPay(); // gate on provisioning before → "connect"
-				})
-				.catch((e) => {
-					state.payBusy = false;
-					state.payErr = errMsg(e);
-				});
-		},
-		// Razorpay dismiss (customer closed Checkout without paying) - same
-		// message as desk's modal.ondismiss, shown inline instead of via
-		// frappe.show_alert (no toast primitive on this surface yet).
-		modal: {
-			ondismiss: () => {
-				state.payBusy = false;
-				state.payErr = isTrialPlan.value
-					? "Authorization cancelled. Click Start free trial to try again."
-					: "Payment cancelled. Click Pay to try again.";
-			},
-		},
-	};
-	if (d.razorpay_subscription_id) rzOpts.subscription_id = d.razorpay_subscription_id;
-	else rzOpts.order_id = d.razorpay_order_id;
-	const rz = new window.Razorpay(rzOpts);
-	rz.open();
 }
 
 // ---- post-save readiness recheck (Connect) ----------------------------------
@@ -1819,27 +1891,78 @@ async function saveConnect() {
 }
 
 // Enter-step triggers: load the plan list on reaching "plan" (first entry
-// from the tour, or a "Back" from details), and probe dev-mode + preload
-// Razorpay on reaching "pay".
+// from the tour, or a "Back" from details). The checkout SDKs load themselves
+// on demand (useRazorpay/useCashfree), so the Pay step no longer preloads.
 watch(
 	() => state.step,
 	(s) => {
 		if (s === "plan" && !state.plans.length && !state.plansLoading) {
 			loadPlansSafe();
 		}
-		if (s === "pay") enterPayStep();
 	}
 );
 
-// Report onboarding/payment failures to the admin as they surface. These are
-// caught-and-shown (not thrown), so the global handler never sees them; one
-// watcher covers every payErr/provisionErr assignment above.
+// Payment machine reached PAID: the readiness/connect gate owns provisioning, so
+// this drives the paid→provisioning→connect handoff. flow.waitForProvisioning()
+// transitions the machine into provisioning and polls sync_connection (the fenced
+// former proceedAfterPay loop); on ready we advance to Connect, on a delayed
+// timeout the machine stays in provisioning_delayed and the page offers "Check
+// setup status". Guarded so it fires once per paid transition.
+let provisioningRun = false;
 watch(
-	() => [state.payErr, state.provisionErr],
-	([pay, prov]) => {
-		if (pay) reportError({ surface: "onboarding", error_code: "payment", message: pay });
-		if (prov)
-			reportError({ surface: "onboarding", error_code: "provisioning", message: prov });
+	() => pay.value.value,
+	async (v) => {
+		if (v === PAY_STATES.PAID && !provisioningRun) {
+			provisioningRun = true;
+			const out = await flow.waitForProvisioning();
+			if (out.status === "ready") {
+				state.step = "connect";
+			}
+			// delayed / superseded: stay put; the machine renders the projection.
+			provisioningRun = false;
+		}
+	}
+);
+
+// A 1s ticker for the rate-limit countdown: updates the displayed seconds and,
+// when the cooldown elapses, re-enables the Check button through the machine.
+watch(
+	() => state.step,
+	(s) => {
+		if (s === "pay" && !cooldownTimer) {
+			cooldownTimer = setInterval(() => {
+				nowMs.value = Date.now();
+				if (pay.value.checkCooldownUntil && nowMs.value >= pay.value.checkCooldownUntil) {
+					flow.tickCooldown();
+				}
+			}, 1000);
+		} else if (s !== "pay" && cooldownTimer) {
+			clearInterval(cooldownTimer);
+			cooldownTimer = null;
+		}
+	}
+);
+onUnmounted(() => {
+	if (cooldownTimer) clearInterval(cooldownTimer);
+});
+
+// Report payment failures to the admin as they surface. The machine holds them
+// as caught state (never thrown), so the global handler never sees them; this
+// watcher fires on any coded failure the machine renders.
+watch(
+	() => [pay.value.code, pay.value.transportError, state.payErr],
+	([code, transportErr, reconnectErr]) => {
+		const failing =
+			pay.value.value === PAY_STATES.FAILED_RETRYABLE ||
+			pay.value.value === PAY_STATES.FAILED_TERMINAL ||
+			transportErr;
+		if (failing && code) {
+			reportError({ surface: "onboarding", error_code: "payment", message: code });
+		}
+		// The reconnect-code step still surfaces its own errors through payErr.
+		if (reconnectErr) {
+			reportError({ surface: "onboarding", error_code: "reconnect", message: reconnectErr });
+		}
 	}
 );
 

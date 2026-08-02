@@ -269,8 +269,60 @@ export const getAccountDefaults = () => call("jarvis.onboarding.get_account_defa
 export const syncConnection = () => call("jarvis.onboarding.sync_connection");
 export const startSignup = (email, company, plan, provider) =>
 	call("jarvis.onboarding.start_signup", { email, company, plan, provider });
-export const checkSignupPaymentState = () => call("jarvis.onboarding.check_signup_payment_state");
 export const finishPayment = (payload) => call("jarvis.onboarding.finish_payment", { payload });
+
+// --- Payment state machine (plan 02 / plan 03 contract) ---------------------
+// These wrap the SAME whitelisted endpoints, but they must NOT go through
+// frappe-ui's `call`: `call` throws on a 4xx and keeps only a decoded message,
+// while the whole payment contract lives in the RESPONSE BODY - the stamped
+// `error` object on a throw, the `{ok, data, context}` envelope on a coded 4xx.
+// `rawOnboardingCall` returns `{status, body, networkError}` untouched, and
+// @/onboarding/paymentCodec.decode reads it. usePaymentFlow consumes this map.
+async function rawOnboardingCall(method, args) {
+	const headers = {
+		Accept: "application/json",
+		"Content-Type": "application/json; charset=utf-8",
+		"X-Frappe-Site-Name": window.location.hostname,
+	};
+	if (window.csrf_token && window.csrf_token !== "{{ csrf_token }}") {
+		headers["X-Frappe-CSRF-Token"] = window.csrf_token;
+	}
+	try {
+		const res = await fetch(`/api/method/${method}`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(args || {}),
+		});
+		let body = null;
+		try {
+			body = await res.json();
+		} catch (e) {
+			body = null; // an HTML error page, an empty 502 - decode() treats it as unreadable
+		}
+		return { status: res.status, body };
+	} catch (e) {
+		// fetch itself rejected: offline, DNS, CORS. Never a payment verdict.
+		return { status: 0, body: null, networkError: true };
+	}
+}
+
+// The raw-response endpoint map usePaymentFlow is constructed with. Kept as one
+// object so the flow's dependency surface is explicit and stubbable in tests.
+export const onboardingPaymentApi = {
+	getOnboardingState: () => rawOnboardingCall("jarvis.onboarding.get_onboarding_state"),
+	startSignup: ({ email, company, plan, provider }) =>
+		rawOnboardingCall("jarvis.onboarding.start_signup", { email, company, plan, provider }),
+	initiateSignupPayment: ({ plan, provider }) =>
+		// Deliberately NO idempotency_key: the bench owns that receipt
+		// (onboarding_contract.next_idempotency_key). Passing one from the browser
+		// invites a replay of a dead intent.
+		rawOnboardingCall("jarvis.onboarding.initiate_signup_payment", { plan, provider }),
+	checkSignupPaymentStatus: () =>
+		rawOnboardingCall("jarvis.onboarding.check_signup_payment_status"),
+	confirmSignupPayment: (payload) =>
+		rawOnboardingCall("jarvis.onboarding.finish_payment", { payload }),
+	syncConnection: () => call("jarvis.onboarding.sync_connection"),
+};
 export const isOnboarded = () => call("jarvis.account.is_onboarded");
 // args: {provider, model, api_key, base_url, auth_mode, force}
 export const saveLlmCreds = (args) => call("jarvis.onboarding.save_llm_creds", args);
