@@ -260,12 +260,23 @@ def record_home_intro_event(
 			return {"ok": True}
 		import hashlib
 
+		# Salt the caller hash with a stable per-site secret before truncating: a
+		# bare SHA1 of the email is trivially reversible by dictionary/rainbow attack
+		# over the small, enumerable address space. encryption_key is Frappe's own
+		# per-site secret (site_config.json), present on every provisioned site and
+		# constant across restarts, so the same user still hashes to the same value
+		# within a site but the digest is no longer a bare email hash. Read-only via
+		# frappe.conf (never get_encryption_key, which would WRITE a key on the rare
+		# site missing one); on that theoretical site we fall back to the site name -
+		# a weak salt, but still not a bare email digest and it can never break this
+		# best-effort telemetry.
+		salt = frappe.conf.get("encryption_key") or getattr(frappe.local, "site", "") or ""
 		entry = {
 			"kind": "home_intro",
 			"event": ev,
 			"ts": frappe.utils.now(),
 			"site": getattr(frappe.local, "site", None),
-			"user_hash": hashlib.sha1((frappe.session.user or "").encode()).hexdigest()[:12],
+			"user_hash": hashlib.sha1(f"{salt}:{frappe.session.user or ''}".encode()).hexdigest()[:12],
 			"version": cint(version),
 		}
 		cat = _s(category)

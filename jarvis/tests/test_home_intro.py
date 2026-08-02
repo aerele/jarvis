@@ -444,11 +444,26 @@ class TestFieldPermlevelIntegrity(_IntroTestBase):
 		# Seed the row AS the user so if_owner holds and owner == USER_A.
 		frappe.set_user(USER_A)
 		usage.get_or_create_user_settings(USER_A)
+		# Seed GENUINE nonzero stored values through the permlevel-bypassing writers
+		# the real endpoints use (raw db.set_value, exactly like admin_set_user_limit
+		# and the greeting cadence). This is what makes the assertions below actually
+		# prove the grant: a seed-nothing test asserting the field "stays 0" is also
+		# satisfied when Frappe RESETS the field to its schema default instead of
+		# preserving the persisted DB value, so it never distinguishes the correct
+		# "stripped, DB value preserved" outcome from a broken "reset to default"
+		# one. HOME_INTRO_VERSION is 1, so the endpoint clamps any higher ack - we
+		# force 3 via raw SQL so the stored value is a real, un-defaultable number
+		# that the generic write must neither raise (to 999) nor drop (to 0).
+		frappe.db.set_value(USETT, {"user": USER_A}, "home_intro_seen_version", 3, update_modified=False)
+		frappe.db.set_value(
+			USETT, {"user": USER_A}, "business_greeting_chat_count", 42, update_modified=False
+		)
 		frappe.db.commit()
 
 		# A plain Jarvis User performs a generic owner-level document update — the
 		# exact bypass the invariant must resist. permlevel-1 with only a read grant
-		# means Frappe strips these fields on save rather than persisting them.
+		# means Frappe strips these fields on save rather than persisting them,
+		# leaving the seeded DB value untouched.
 		doc = frappe.get_doc(USETT, {"user": USER_A})
 		doc.home_intro_seen_version = 999
 		doc.business_greeting_state = "Dismissed"
@@ -468,9 +483,14 @@ class TestFieldPermlevelIntegrity(_IntroTestBase):
 			],
 			as_dict=True,
 		)
-		self.assertEqual(cint(row.home_intro_seen_version), 0, "generic write set a future seen version")
+		# The seeded values SURVIVE: not raised to 999/777 (the write was blocked) and
+		# not dropped to the default 0 (a reset-to-default bug the old ==0 assertion
+		# could not have caught).
+		self.assertEqual(cint(row.home_intro_seen_version), 3, "generic write mutated the seen version")
+		self.assertEqual(cint(row.business_greeting_chat_count), 42, "generic write mutated the chat count")
+		# These two were never seeded, so the stripped generic write must simply leave
+		# them at their defaults.
 		self.assertIn(row.business_greeting_state or "", ("",), "generic write dismissed the greeting")
-		self.assertEqual(cint(row.business_greeting_chat_count), 0)
 		self.assertEqual(cint(row.business_greeting_hidden_at_count), 0)
 
 	def test_mark_home_intro_seen_still_advances_via_the_endpoint(self):
@@ -594,6 +614,45 @@ class TestFeatureFlag(_IntroTestBase):
 		self.assertEqual(ui["home_intro_version"], 0)
 		frappe.set_user("Administrator")
 		# Not committed; FrappeTestCase rolls the flag back to its default.
+
+
+# --------------------------------------------------------------------------- #
+# 3d-bis. Telemetry caller-hash is salted, not a bare email digest
+# --------------------------------------------------------------------------- #
+class TestTelemetryUserHash(_IntroTestBase):
+	"""``record_home_intro_event`` records the caller only as a hash, and that hash
+	must be SALTED with a site-local secret: a bare SHA1 of the email is trivially
+	reversible by dictionary/rainbow attack over the small, enumerable address
+	space. This pins the salt so a future edit cannot silently regress to a bare
+	digest of the email."""
+
+	def _emit_and_capture(self) -> dict:
+		"""Fire one event as USER_A and return the parsed JSON the sink logged (the
+		event is best-effort and writes exactly one JSON line to its logger)."""
+		import json
+
+		captured: dict = {}
+		logger = frappe.logger(user_settings_api._HOME_INTRO_LOGGER)
+		frappe.set_user(USER_A)
+		with patch.object(logger, "info", side_effect=lambda line: captured.update(json.loads(line))):
+			out = user_settings_api.record_home_intro_event(event="displayed", version=1)
+		frappe.set_user("Administrator")
+		self.assertTrue(out["ok"])
+		return captured
+
+	def test_user_hash_is_salted_not_a_bare_email_digest(self):
+		import hashlib
+
+		entry = self._emit_and_capture()
+		self.assertIn("user_hash", entry)
+		bare = hashlib.sha1(USER_A.encode()).hexdigest()[:12]
+		self.assertNotEqual(
+			entry["user_hash"], bare, "user_hash is a bare, rainbow-reversible sha1 of the email"
+		)
+		# Still a stable 12-char hex digest: same user + same site secret => same
+		# hash, so the sink can group a user's events without ever storing the email.
+		self.assertEqual(len(entry["user_hash"]), 12)
+		self.assertEqual(entry["user_hash"], self._emit_and_capture()["user_hash"])
 
 
 # --------------------------------------------------------------------------- #

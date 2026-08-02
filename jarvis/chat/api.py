@@ -1484,23 +1484,18 @@ def get_chat_ui_settings() -> dict:
 
 def _home_intro_feature_enabled() -> bool:
 	"""The first-chat welcome kill switch (``Jarvis Settings.home_intro_enabled``),
-	NULL=ON. Same idiom as ``_persona_feature_enabled`` / greeting's
-	``_voice_features_enabled``: probes the ``tabSingles`` row directly rather than
-	``get_single_value``, which coerces an unset Check to 0 (indistinguishable from
-	an operator explicitly disabling it) and would ship the welcome OFF for every
-	un-backfilled bench and fresh install. "No row" is the default (ON); only a
-	stored 0 is OFF. Best-effort (N8): a read failure shows the welcome rather than
-	500-ing the whole bootstrap."""
+	NULL=ON. Delegates to turn_handler's canonical ``_jarvis_settings_flag_null_on``
+	probe - the same one behind the persona pill - so both kill switches read
+	tabSingles identically ("no row" is the default ON; only a stored 0 is OFF) and
+	neither trips the get_single_value unset-Check-coerces-to-0 trap that would ship
+	the feature OFF for every un-backfilled bench and fresh install. Best-effort
+	(N8): a read failure shows the welcome rather than 500-ing the whole bootstrap."""
 	try:
-		row = frappe.db.sql(
-			"select value from tabSingles where doctype=%s and field=%s",
-			("Jarvis Settings", "home_intro_enabled"),
-		)
+		from jarvis.chat.turn_handler import _jarvis_settings_flag_null_on
+
+		return _jarvis_settings_flag_null_on("home_intro_enabled")
 	except Exception:
 		return True
-	if not row:
-		return True
-	return bool(frappe.utils.cint(row[0][0]))
 
 
 def _home_intro_seen_version() -> int | None:
