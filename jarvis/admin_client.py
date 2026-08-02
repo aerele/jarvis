@@ -170,6 +170,25 @@ def _admin_url(settings) -> str:
 # (an older bench omits this, and admin falls back to razorpay).
 SUPPORTED_PROVIDERS = ("razorpay", "cashfree")
 
+# Plan-09 WS2 capability advert (frozen contract). Tells admin, in the
+# signup-payment envelope, that this bench understands the admin-hosted pay page
+# (``admin_pay_page_v1``) and which provider checkout SHAPES it can render. This
+# is BEHAVIOR-NEUTRAL predeployment: today's admin ignores keys it does not
+# declare as arguments (Frappe drops unknown form_dict entries — the same
+# mechanism that lets ``supported_providers``/``jarvis_version`` ride an old
+# admin), so nothing changes now. A later admin negotiates a token-only response
+# for capable benches off this advert and hard-fails incapable ones
+# pre-provider-object (plan-09 §R P0-4). The names here are the frozen contract —
+# keep them in lockstep with the admin side; do NOT rename without a coordinated
+# admin change. ``_client_capabilities()`` hands each caller a fresh dict so a
+# body mutation can never corrupt the shared template.
+PAY_PAGE_CAPABILITY = "admin_pay_page_v1"
+PROVIDER_SHAPES = ("razorpay_order", "razorpay_mandate", "cashfree_order", "cashfree_mandate")
+
+
+def _client_capabilities() -> dict:
+	return {"pay_page": PAY_PAGE_CAPABILITY, "provider_shapes": list(PROVIDER_SHAPES)}
+
 
 def signup(
 	email: str,
@@ -205,6 +224,7 @@ def signup(
 		"plan": plan,
 		"frappe_site_url": frappe.utils.get_url(),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
+		"client_capabilities": _client_capabilities(),
 	}
 	if coupon:
 		body["coupon"] = coupon
@@ -231,7 +251,7 @@ def resume_pending_signup(plan: str, provider: str | None = None, idempotency_ke
 	Raises AdminContractError carrying admin's ``code`` on a coded conflict
 	(PAYMENT_ALREADY_ACTIVE, SIGNUP_TERMINAL, ...); a plain AdminValidationError
 	from an admin too old to send one."""
-	body: dict = {"plan": plan}
+	body: dict = {"plan": plan, "client_capabilities": _client_capabilities()}
 	if provider:
 		body["provider"] = provider
 	if idempotency_key:
