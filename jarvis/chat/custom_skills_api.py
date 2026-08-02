@@ -17,6 +17,7 @@ import contextlib
 import frappe
 from frappe import _
 
+from jarvis.chat import list_filters
 from jarvis.chat.custom_skills import (
 	MANAGED_OWNER,
 	MAX_SKILLS_PER_PUSH,
@@ -153,74 +154,24 @@ _SKILLS_SORTABLE = {"skill_name": "skill_name", "modified": "modified", "enabled
 _SKILLS_FILTERS = {"scope", "enabled", "user_invocable"}
 
 
-def _lk(s: str) -> str:
-	"""Escape LIKE wildcards in user search input (``\\`` is the default escape)."""
-	return (s or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _clamp_page(start, page_length) -> tuple[int, int]:
-	try:
-		start = max(0, int(start or 0))
-	except (TypeError, ValueError):
-		start = 0
-	try:
-		pl = int(page_length or 20)
-	except (TypeError, ValueError):
-		pl = 20
-	return start, max(1, min(pl, 100))
-
-
-def _bool01(v) -> int:
-	try:
-		iv = int(v)
-	except (TypeError, ValueError):
-		frappe.throw(_("Filter value must be 0 or 1."))
-	if iv not in (0, 1):
-		frappe.throw(_("Filter value must be 0 or 1."))
-	return iv
-
-
-def _load_filters(filters, allowed: set) -> dict:
-	"""Parse ``filters`` (JSON string or dict), whitelist keys (unknown → throw),
-	and drop empty values (an empty value = 'not filtering'; ``0`` is kept)."""
-	if isinstance(filters, str):
-		if filters.strip():
-			try:
-				raw = frappe.parse_json(filters)
-			except Exception:
-				raw = {}
-		else:
-			raw = {}
-	else:
-		raw = filters or {}
-	if not isinstance(raw, dict):
-		raw = {}
-	out: dict = {}
-	for k, v in raw.items():
-		if k not in allowed:
-			frappe.throw(_("Unknown filter: {0}").format(k))
-		if v in (None, ""):
-			continue
-		out[k] = v
-	return out
-
-
-def _order_by(sort_field, sort_dir, sortable: dict, default_field, default_dir, prefix="") -> str:
-	"""Build a safe ORDER BY: only whitelisted columns, direction normalized to
-	asc/desc, a ``name`` tiebreak for stable OFFSET pagination. No user input is
-	ever interpolated (columns come from ``sortable``; dir is a literal)."""
-	col = sortable.get(sort_field or "")
-	if not col:
-		return f"{prefix}`{sortable[default_field]}` {default_dir}, {prefix}`name` asc"
-	d = "desc" if (sort_dir or "").lower() == "desc" else "asc"
-	return f"{prefix}`{col}` {d}, {prefix}`name` asc"
+# C08-5: ``_lk`` / ``_clamp_page`` / ``_bool01`` / ``_load_filters`` /
+# ``_order_by`` were copied into six list modules and had begun to drift. The
+# canonical implementations now live in ``jarvis.chat.list_filters``; these
+# private names stay bound for this module's own readers.
+_lk = list_filters.escape_like
+_clamp_page = list_filters.clamp_page
+_bool01 = list_filters.bool01
+_load_filters = list_filters.load_legacy_filters
+_order_by = list_filters.order_by
 
 
 @frappe.whitelist()
 @require_jarvis_user
+@list_filters.filter_errors_to_envelope
 def list_custom_skills_page(
 	search: str = "",
 	filters: str | dict | None = None,
+	filters_v2: str | list | None = None,
 	sort_field: str = "",
 	sort_dir: str = "",
 	start: int = 0,
@@ -232,44 +183,50 @@ def list_custom_skills_page(
 	shared-with-me rows (``enabled=1`` only) — expressed in ONE owner-scoped SQL
 	WHERE so ``page_length``/``start`` slice the real result set (never a
 	post-filtered page). Envelope: ``{rows, total, has_more, start, page_length}``.
+
+	``filters_v2`` (plan 08 §6.2) is ADDITIVE: the canonical clause list, validated
+	and compiled against this caller's schema by ``jarvis.chat.list_filters``.
+	Legacy ``filters`` keeps working unchanged for the compatibility window. The
+	own/shared scope predicate below is server-authored and stays on the query
+	object's server side, so a user clause is ANDed INSIDE it and can never widen
+	it (C08-5).
 	"""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _SKILLS_FILTERS)
 	shared = tuple(_skill_names_shared_with(me))
 
-	conds: list[str] = []
-	params: dict = {"me": me, "start": start, "page_length": pl}
+	q = list_filters.new_query("skills")
 
 	scope = f.get("scope")
 	if scope is not None and scope not in ("mine", "shared"):
 		frappe.throw(_("Invalid scope filter."))
+	# The shared-name IN list is SERVER-authored (it is this user's DocShare-like
+	# grant set, not request input), so the §9 client cap on `in` values does not
+	# apply to it — C08-5.
 	if scope == "mine":
-		conds.append("owner = %(me)s")
+		q.server_condition("owner = %(me)s", me=me)
 	elif scope == "shared":
 		if not shared:
-			conds.append("1=0")
+			q.server_condition("1=0")
 		else:
-			params["shared"] = shared
-			conds.append("(name IN %(shared)s AND enabled = 1)")
+			q.server_condition("(name IN %(shared)s AND enabled = 1)", shared=shared)
 	else:  # both
 		if shared:
-			params["shared"] = shared
-			conds.append("(owner = %(me)s OR (name IN %(shared)s AND enabled = 1))")
+			q.server_condition("(owner = %(me)s OR (name IN %(shared)s AND enabled = 1))", me=me, shared=shared)
 		else:
-			conds.append("owner = %(me)s")
+			q.server_condition("owner = %(me)s", me=me)
 
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(skill_name LIKE %(q)s OR description LIKE %(q)s)")
+		q.server_condition("(skill_name LIKE %(q)s OR description LIKE %(q)s)", q=f"%{_lk(search)}%")
 	if "enabled" in f:
-		params["enabled"] = _bool01(f["enabled"])
-		conds.append("enabled = %(enabled)s")
+		q.server_condition("enabled = %(enabled)s", enabled=_bool01(f["enabled"]))
 	if "user_invocable" in f:
-		params["user_invocable"] = _bool01(f["user_invocable"])
-		conds.append("user_invocable = %(user_invocable)s")
+		q.server_condition("user_invocable = %(user_invocable)s", user_invocable=_bool01(f["user_invocable"]))
 
-	where = " AND ".join(conds)
+	q.apply(filters_v2)
+	where = q.where()
+	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _SKILLS_SORTABLE, "skill_name", "asc")
 
 	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Custom Skill` WHERE {where}", params)[0][0]
