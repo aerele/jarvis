@@ -50,3 +50,14 @@ export function recordCheck(counter, intent = {}) {
 export function shouldOfferSupport(counter) {
 	return !!counter && counter.checks >= SUPPORT_AFTER_CHECKS;
 }
+
+/**
+ * The (attempt, generation) key, exported so the orchestrator can persist the
+ * check count under the SAME key this module counts by (P2-5) - a refresh
+ * between checks then restores the count instead of resetting the support offer.
+ * Non-secret by construction: an attempt-id tail plus a generation number, the
+ * same identity the recovery card already renders as a masked reference.
+ */
+export function counterKey(intent) {
+	return keyOf(intent);
+}

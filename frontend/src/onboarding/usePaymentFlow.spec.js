@@ -164,7 +164,12 @@ describe("check-on-failure is mandatory", () => {
 		const { flow, api } = makeFlow({ openCheckout });
 		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
 		expect(api.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
-		expect(flow.state.value.value).toBe(STATES.FAILED_RETRYABLE);
+		// The mandatory check found the intent still pending, so the page reflects
+		// server truth (a checkable UNKNOWN) - the old code froze on the SDK-failure
+		// framing and discarded the answer (P0-1). The "could not open" reason
+		// survives as presentation metadata, never as a preserved code/state.
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		expect(flow.state.value.checkoutNote).toBe("Could not load the payment form.");
 	});
 
 	test("a failed confirm checks rather than declaring a failure", async () => {
@@ -1081,7 +1086,11 @@ describe("the generation fence", () => {
 		});
 		const { flow } = makeFlow({ api, openCheckout });
 		const paying = flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
-		await Promise.resolve();
+		// Flush microtasks until the sheet is open (the deadline wrapper adds a few
+		// hops before start_signup resolves; the count is incidental to the race).
+		for (let i = 0; i < 50 && flow.state.value.value !== STATES.CHECKOUT_OPEN; i++) {
+			await Promise.resolve();
+		}
 		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
 		const out = await flow.hydrate();
 		expect(out.superseded).toBe(true);

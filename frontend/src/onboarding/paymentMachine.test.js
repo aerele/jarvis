@@ -810,6 +810,10 @@ test("paid is a floor for the OPEN too - a late sheet cannot reopen a settled si
 		initialState(),
 		at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" })
 	);
+	// Reach paid the way the flow always does - a real confirm-in-progress. (The
+	// reducer now refuses CONFIRM_SUCCEEDED from any state but `confirming`, so a
+	// shortcut here would be testing an event the orchestrator never fires.)
+	s = reduce(s, { type: EVENTS.GATEWAY_CALLBACK });
 	s = reduce(s, { type: EVENTS.CONFIRM_SUCCEEDED, data: {} });
 	assert.equal(s.value, STATES.PAID);
 	// The handles survive the confirm by design, so nothing but the floor stands
