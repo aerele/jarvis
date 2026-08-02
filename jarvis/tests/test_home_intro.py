@@ -107,9 +107,7 @@ class _IntroTestBase(FrappeTestCase):
 		frappe.set_user(self._orig_user)
 
 	def _seen(self, user: str) -> int:
-		return frappe.utils.cint(
-			frappe.db.get_value(USETT, {"user": user}, "home_intro_seen_version")
-		)
+		return frappe.utils.cint(frappe.db.get_value(USETT, {"user": user}, "home_intro_seen_version"))
 
 
 # --------------------------------------------------------------------------- #
@@ -267,9 +265,7 @@ class TestAckAtomicity(_IntroTestBase):
 
 		def racing_admin_write(user):
 			doc = real(user)
-			frappe.db.set_value(
-				USETT, {"user": user}, "monthly_token_limit", 50000, update_modified=False
-			)
+			frappe.db.set_value(USETT, {"user": user}, "monthly_token_limit", 50000, update_modified=False)
 			return doc
 
 		frappe.set_user(USER_A)
@@ -327,9 +323,7 @@ class TestLifecycleInvariants(_IntroTestBase):
 		convs = frappe.get_all(CONV, filters={"owner": user}, pluck="name")
 		msgs = frappe.db.count(MSG, {"conversation": ["in", convs]}) if convs else 0
 		sessions = frappe.db.count(SESSION, {"user": user})
-		row = frappe.db.get_value(
-			USETT, {"user": user}, ["month_tokens", "total_tokens"], as_dict=True
-		)
+		row = frappe.db.get_value(USETT, {"user": user}, ["month_tokens", "total_tokens"], as_dict=True)
 		return (
 			len(convs),
 			msgs,
@@ -381,9 +375,7 @@ class TestLifecycleInvariants(_IntroTestBase):
 		frappe.get_doc(
 			{"doctype": MSG, "conversation": conv, "seq": 1, "role": "user", "content": "hello"}
 		).insert(ignore_permissions=True)
-		rows = frappe.get_all(
-			MSG, filters={"conversation": conv}, fields=["seq", "role"], order_by="seq asc"
-		)
+		rows = frappe.get_all(MSG, filters={"conversation": conv}, fields=["seq", "role"], order_by="seq asc")
 		self.assertEqual([(r.seq, r.role) for r in rows], [(1, "user")])
 		frappe.set_user("Administrator")
 
@@ -407,9 +399,7 @@ class TestLifecycleInvariants(_IntroTestBase):
 			MSG, filters={"conversation": conv}, fields=["name", "seq", "role", "content"]
 		)
 		user_settings_api.mark_home_intro_seen(version=1)
-		after = frappe.get_all(
-			MSG, filters={"conversation": conv}, fields=["name", "seq", "role", "content"]
-		)
+		after = frappe.get_all(MSG, filters={"conversation": conv}, fields=["name", "seq", "role", "content"])
 		self.assertEqual(before, after)
 		self.assertEqual(len(after), 1)
 		frappe.set_user("Administrator")
@@ -515,9 +505,9 @@ class TestVeteranBackfill(_IntroTestBase):
 		is the ROLE - a veteran is someone who has actually sent a message.
 		"""
 		usage.get_or_create_user_settings(USER_B)
-		conv = frappe.get_doc(
-			{"doctype": CONV, "title": "Message from Jarvis", "status": "Active"}
-		).insert(ignore_permissions=True)
+		conv = frappe.get_doc({"doctype": CONV, "title": "Message from Jarvis", "status": "Active"}).insert(
+			ignore_permissions=True
+		)
 		msg = frappe.get_doc(
 			{
 				"doctype": MSG,

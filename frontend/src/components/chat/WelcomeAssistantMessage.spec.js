@@ -13,7 +13,12 @@ import { homeIntroPersona, homeIntroSpeaker } from "@/lib/homeIntro";
  * badge, no live region, no tool row).
  */
 
-const props = (over = {}) => ({ speaker: "Jarvis", persona: "Jarvis", firstName: "Vignesh", ...over });
+const props = (over = {}) => ({
+	speaker: "Jarvis",
+	persona: "Jarvis",
+	firstName: "Vignesh",
+	...over,
+});
 
 describe("WelcomeAssistantMessage copy", () => {
 	it("greets by first name and signs with the speaker", () => {
@@ -22,7 +27,9 @@ describe("WelcomeAssistantMessage copy", () => {
 	});
 
 	it("is FROM Jara for a Jara user, name and mark together", () => {
-		const w = mount(WelcomeAssistantMessage, { props: props({ speaker: "Jara", persona: "Jara" }) });
+		const w = mount(WelcomeAssistantMessage, {
+			props: props({ speaker: "Jara", persona: "Jara" }),
+		});
 		expect(w.text()).toContain("I'm Jara, your AI teammate");
 		expect(w.text()).not.toContain("I'm Jarvis");
 		// Jara's own mark, as PersonaPill draws her.
@@ -140,10 +147,7 @@ describe("WelcomeAssistantMessage presentation honesty", () => {
  * the regression they exist to catch. They prove wiring, not behaviour.
  */
 describe("ChatView wiring", () => {
-	const src = fs.readFileSync(
-		path.resolve(__dirname, "../../views/ChatView.vue"),
-		"utf8"
-	);
+	const src = fs.readFileSync(path.resolve(__dirname, "../../views/ChatView.vue"), "utf8");
 
 	it("renders the bubble only inside the empty-state branch", () => {
 		// => it can never draw over a conversation that has messages, which is

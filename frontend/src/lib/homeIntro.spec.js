@@ -98,9 +98,9 @@ describe("homeIntroSpeaker", () => {
 		// agent_name is what the agent calls itself in every turn
 		// (turn_handler._assistant_name_clause); the persona is a voice, not a
 		// product name, so a whitelabelled workspace is never greeted by "Jara".
-		expect(homeIntroSpeaker({ agentName: "Aria", isWhitelabeled: true, persona: "Jara" })).toBe(
-			"Aria"
-		);
+		expect(
+			homeIntroSpeaker({ agentName: "Aria", isWhitelabeled: true, persona: "Jara" })
+		).toBe("Aria");
 		expect(
 			homeIntroSpeaker({ agentName: "Aria", isWhitelabeled: true, persona: "Jarvis" })
 		).toBe("Aria");
