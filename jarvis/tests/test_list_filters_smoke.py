@@ -1,4 +1,4 @@
-"""Every whitelisted endpoint on a migrated surface still ANSWERS.
+"""Did a filter migration break the surface it migrated?
 
 This exists because of a defect the whole filter suite missed. A guard meant for
 one wiki function was pasted into five, and four of them have no ``filters``
@@ -8,21 +8,41 @@ at all; pages could not be opened or created; the promotion flow was dead. All
 139 tests were green, because they cover the filter CONTRACT exhaustively and
 the endpoints around it not at all.
 
-The class of bug is "edits that read correctly at every call site and only
-binding-resolution or execution exposes". The cheap, complete answer is to call
-every endpoint on every migrated surface once, with no filter arguments, and
-assert it returns rather than raises. It does not check WHAT they return — the
-contract suites do that — only that a migration did not break the surface it
-migrated.
+The class of bug is "an edit that reads correctly at every call site, and only
+binding-resolution or execution exposes". TWO complementary nets, because
+neither alone closes it:
 
-Deliberately parameterless: a migration touches the filter arguments, so the
-call that proves nothing was collaterally broken is the one that passes none.
+**What each one actually covers — stated precisely, because an inflated
+coverage claim is itself the failure mode here.** A future reviewer will trust
+these sentences instead of re-deriving them; this branch has already lost time
+twice to a claim that read as broader than it was.
+
+1. :class:`TestMigratedSurfacesStillAnswer` — DYNAMIC. Calls, of the ~66
+   whitelisted endpoints on migrated surfaces, only the ~20 that take no
+   required argument and do not mutate; plus four regressions named explicitly
+   because the paste hit them. It necessarily skips everything needing an
+   argument and everything with side effects, so it is NOT a complete sweep. Its
+   value is that it exercises the real call path, so it catches breakage that no
+   static reading would — a bad default, an import-time failure, a decorator
+   applied in the wrong order.
+
+2. :class:`TestNoUnboundNamesOnMigratedSurfaces` — STATIC. Reads the source, so
+   it covers ALL of them regardless of arity or side effects, which is the half
+   the dynamic net structurally cannot reach. It only finds ONE shape of bug: a
+   name loaded with nothing binding it. That is exactly the shape of this
+   incident, and it is the one that would have caught the same paste in
+   ``save_wiki_page`` — same file, same surface, same commit — where a smoke
+   test must not go, because saving a page is a mutation.
+
+Neither checks WHAT an endpoint returns; the contract suites do that.
 """
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import inspect
+import pathlib
 import unittest
 
 import frappe
@@ -125,7 +145,14 @@ _MUTATING = ("create_", "update_", "delete_", "save_", "apply_", "request_", "ap
 
 
 class TestMigratedSurfacesStillAnswer(unittest.TestCase):
-	"""A bare call to every read endpoint of every migrated surface."""
+	"""A bare call to the endpoints that CAN be called bare.
+
+	Not a sweep of the surface: of ~66 whitelisted endpoints it reaches ~20 (the
+	parameterless, non-mutating reads) plus four named regressions. See the
+	module docstring for why that is the honest boundary, and
+	:class:`TestNoUnboundNamesOnMigratedSurfaces` for the half that covers the
+	rest.
+	"""
 
 	#: These are the errors that mean "a code change broke this endpoint", as
 	#: opposed to "this endpoint declined the request", which is a real answer.
@@ -198,3 +225,152 @@ class TestMigratedSurfacesStillAnswer(unittest.TestCase):
 						self.fail(f"{fn.__name__} raised {type(e).__name__}: {e}")
 					except Exception:
 						pass  # a clean refusal is fine; a NameError is not
+
+
+# --------------------------------------------------------------------------- #
+# The other half: a STATIC pass, covering what a call-based net structurally
+# cannot.
+# --------------------------------------------------------------------------- #
+def _bound_names(fn: ast.AST) -> set[str]:
+	"""Every name a function body binds, erring towards MORE bound, never fewer.
+
+	Python function scope is flat, so a name bound anywhere in the body is bound
+	throughout it. Under-reporting a binder here would produce a FALSE ALARM, so
+	every binding form is covered — parameters, assignment and its augmented and
+	annotated forms, tuple/star unpacking, `for` targets, `with ... as`,
+	`except ... as`, walrus, comprehension targets, imports, `global`/`nonlocal`,
+	nested defs and classes, lambda parameters, and match captures.
+	"""
+	bound: set[str] = set()
+
+	def add_target(node: ast.AST) -> None:
+		for sub in ast.walk(node):
+			if isinstance(sub, ast.Name):
+				bound.add(sub.id)
+
+	def add_args(args: ast.arguments) -> None:
+		for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+			bound.add(a.arg)
+		if args.vararg:
+			bound.add(args.vararg.arg)
+		if args.kwarg:
+			bound.add(args.kwarg.arg)
+
+	if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+		add_args(fn.args)
+
+	for node in ast.walk(fn):
+		if isinstance(node, ast.Assign):
+			for t in node.targets:
+				add_target(t)
+		elif isinstance(node, ast.AugAssign | ast.AnnAssign):
+			add_target(node.target)
+		elif isinstance(node, ast.For | ast.AsyncFor):
+			add_target(node.target)
+		elif isinstance(node, ast.comprehension):
+			add_target(node.target)
+		elif isinstance(node, ast.NamedExpr):
+			add_target(node.target)
+		elif isinstance(node, ast.withitem):
+			if node.optional_vars is not None:
+				add_target(node.optional_vars)
+		elif isinstance(node, ast.ExceptHandler):
+			if node.name:
+				bound.add(node.name)
+		elif isinstance(node, ast.Import | ast.ImportFrom):
+			for alias in node.names:
+				bound.add((alias.asname or alias.name).split(".")[0])
+		elif isinstance(node, ast.Global | ast.Nonlocal):
+			bound.update(node.names)
+		elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+			bound.add(node.name)
+			if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+				add_args(node.args)
+		elif isinstance(node, ast.Lambda):
+			add_args(node.args)
+		elif isinstance(node, ast.MatchAs | ast.MatchStar):
+			if node.name:
+				bound.add(node.name)
+		elif isinstance(node, ast.MatchMapping):
+			if node.rest:
+				bound.add(node.rest)
+	return bound
+
+
+def _module_level_names(tree: ast.Module) -> set[str]:
+	names: set[str] = set()
+	for node in tree.body:
+		if isinstance(node, ast.Assign):
+			for t in node.targets:
+				for sub in ast.walk(t):
+					if isinstance(sub, ast.Name):
+						names.add(sub.id)
+		elif isinstance(node, ast.AugAssign | ast.AnnAssign):
+			for sub in ast.walk(node.target):
+				if isinstance(sub, ast.Name):
+					names.add(sub.id)
+		elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+			names.add(node.name)
+		elif isinstance(node, ast.Import | ast.ImportFrom):
+			for alias in node.names:
+				names.add((alias.asname or alias.name).split(".")[0])
+		elif isinstance(node, ast.Try):
+			for sub in ast.walk(node):
+				if isinstance(sub, ast.Import | ast.ImportFrom):
+					for alias in sub.names:
+						names.add((alias.asname or alias.name).split(".")[0])
+	return names
+
+
+def _scan_unbound(modules: list[str]) -> list[str]:
+	"""Every `Name` load with nothing binding it, across whole modules."""
+	import builtins
+	import importlib
+
+	builtin_names = set(dir(builtins))
+	findings: list[str] = []
+	for dotted in modules:
+		path = pathlib.Path(importlib.import_module(dotted).__file__)
+		tree = ast.parse(path.read_text())
+		module_names = _module_level_names(tree)
+		for fn in tree.body:
+			if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+				continue
+			available = _bound_names(fn) | module_names | builtin_names
+			for node in ast.walk(fn):
+				if not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)):
+					continue
+				if node.id in available:
+					continue
+				findings.append(f"{path.name}:{fn.name}() line {node.lineno} -> {node.id}")
+	return findings
+
+
+class TestNoUnboundNamesOnMigratedSurfaces(unittest.TestCase):
+	"""A name loaded with nothing binding it — the shape of the wiki P0.
+
+	This is the half the call-based net cannot reach. Of the 66 whitelisted
+	endpoints on migrated surfaces the smoke net calls 20: it necessarily skips
+	everything that needs an argument and everything that mutates. The paste that
+	broke this branch landed in four functions; had it also landed in
+	``save_wiki_page`` — same file, same surface, same commit — no call-based test
+	would have seen it, because saving a wiki page is a mutation a smoke test must
+	not perform.
+
+	Reading the source needs no database, no session and no side effects, so it
+	covers ALL of them regardless of arity or mutation.
+	"""
+
+	def test_no_function_on_a_migrated_surface_loads_an_unbound_name(self):
+		modules = sorted(_modules_under_test())
+		self.assertTrue(modules, "no migrated surfaces — the static pass has no subject")
+		# Scanned in a helper so the failing frame holds the FINDINGS and not the
+		# several-thousand-name scratch sets — a wall of locals is the difference
+		# between a failure someone acts on and one they scroll past.
+		findings = _scan_unbound(modules)
+		self.assertEqual(
+			findings,
+			[],
+			"a name is loaded with nothing binding it — this endpoint raises NameError "
+			"the moment it is called:\n  " + "\n  ".join(findings),
+		)
