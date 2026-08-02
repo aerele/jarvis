@@ -182,9 +182,17 @@ _LOCAL_ONLY_KEYS = ("idempotency_key",)
 
 
 def load() -> dict:
-	"""The stored context, or ``{}``. Never raises on a malformed value - a
-	wizard must not be bricked by its own bookkeeping."""
-	raw = frappe.db.get_single_value("Jarvis Settings", CONTEXT_FIELD) or ""
+	"""The stored context, or ``{}``.
+
+	Never raises. Two ways it can find nothing and both are survivable: a
+	malformed value (hand-edited, half-written), and a bench between a code
+	deploy and its ``bench migrate``, where ``get_single_value`` throws on a
+	field the installed doctype does not have yet. A wizard must not be bricked
+	by its own bookkeeping."""
+	try:
+		raw = frappe.db.get_single_value("Jarvis Settings", CONTEXT_FIELD) or ""
+	except Exception:
+		return {}
 	if not raw:
 		return {}
 	try:
@@ -203,10 +211,25 @@ def save(context: dict) -> None:
 	The secret sweep is the last line of defence, not the first: ``absorb``'s
 	allowlist is what keeps credentials out of here, and this makes a future
 	caller that hands the field a raw admin payload fail safe instead of parking
-	an api_secret in a plain-text Settings column."""
+	an api_secret in a plain-text Settings column.
+
+	Best-effort, and deliberately so. ``db_set`` REJECTS a field the installed
+	doctype does not have ("Field ... does not exist"), which is precisely the
+	state of a bench between a code deploy and its ``bench migrate``. Letting
+	that abort the call would take signup itself down in that window - a strictly
+	worse failure than the one this snapshot exists to prevent - so a wizard is
+	never bricked by its own bookkeeping, on the write side as much as the read
+	side. The cost of the degraded window is a display block the page falls back
+	from, and an idempotency key that is not remembered across a double-click."""
 	clean = {k: v for k, v in (context or {}).items() if k not in _NEVER_PERSIST}
 	settings = frappe.get_single("Jarvis Settings")
-	settings.db_set(CONTEXT_FIELD, json.dumps(clean, sort_keys=True), update_modified=False)
+	try:
+		settings.db_set(CONTEXT_FIELD, json.dumps(clean, sort_keys=True), update_modified=False)
+	except Exception:
+		frappe.log_error(
+			title="signup context not persisted (run bench migrate?)",
+			message=frappe.get_traceback(),
+		)
 
 
 def update(**fields) -> dict:

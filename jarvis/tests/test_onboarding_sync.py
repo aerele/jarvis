@@ -1036,6 +1036,37 @@ class TestSignupResumeFallback(FrappeTestCase):
 			second = resume.call_args.kwargs["idempotency_key"]
 		self.assertNotEqual(first, second)
 
+	def test_an_unmigrated_bench_degrades_instead_of_breaking(self):
+		"""Between a code deploy and its ``bench migrate`` the context field does
+		not exist yet, and Frappe REFUSES both reads and writes of a field its
+		installed doctype has never heard of. Signup must survive that window:
+		losing a display snapshot is a bad day, taking signup down is a worse
+		one."""
+		import frappe.model.document as document_module
+
+		real_get = frappe.db.get_single_value
+		real_db_set = document_module.Document.db_set
+
+		def unmigrated_get(doctype, fieldname, *a, **kw):
+			if doctype == "Jarvis Settings" and fieldname == onboarding_contract.CONTEXT_FIELD:
+				frappe.throw("Field signup_context does not exist on Jarvis Settings")
+			return real_get(doctype, fieldname, *a, **kw)
+
+		def unmigrated_db_set(self, fieldname, value=None, *a, **kw):
+			if fieldname == onboarding_contract.CONTEXT_FIELD:
+				frappe.throw("Field signup_context does not exist on Jarvis Settings")
+			return real_db_set(self, fieldname, value, *a, **kw)
+
+		with (
+			patch.object(frappe.db, "get_single_value", unmigrated_get),
+			patch.object(document_module.Document, "db_set", unmigrated_db_set),
+			self._signup_raises(self._duplicate_coded()),
+			self._resume_ok("order_RM") as resume,
+		):
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+		resume.assert_called_once()
+		self.assertEqual(out["razorpay_order_id"], "order_RM")
+
 	def test_non_dedup_error_reraises(self):
 		from jarvis.exceptions import AdminValidationError
 
