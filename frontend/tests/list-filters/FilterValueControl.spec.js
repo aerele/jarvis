@@ -31,8 +31,16 @@ describe("Link search", () => {
 		vi.useFakeTimers();
 		const w = mountControl(OWNER, clauseForEntry(OWNER));
 		const picker = w.findComponent({ name: "Autocomplete" });
-		// P3-2: the dropdown is not empty when it opens — one query fires on mount
-		expect(apiDouble.searchLink).toHaveBeenCalledWith("User", "", 20);
+		// P3-2: the dropdown is not empty when it opens — one query fires on mount.
+		// P1-06: the call carries the Link's source context (the entry's own
+		// doctype + fieldname) so a custom search_link hook can key off it.
+		expect(apiDouble.searchLink).toHaveBeenCalledWith(
+			"User",
+			"",
+			20,
+			"Jarvis Custom Skill",
+			"owner"
+		);
 		apiDouble.searchLink.mockClear();
 		picker.vm.$emit("update:query", "a");
 		picker.vm.$emit("update:query", "an");
@@ -40,7 +48,13 @@ describe("Link search", () => {
 		expect(apiDouble.searchLink).not.toHaveBeenCalled();
 		vi.advanceTimersByTime(300);
 		expect(apiDouble.searchLink).toHaveBeenCalledTimes(1);
-		expect(apiDouble.searchLink).toHaveBeenCalledWith("User", "ann", 20);
+		expect(apiDouble.searchLink).toHaveBeenCalledWith(
+			"User",
+			"ann",
+			20,
+			"Jarvis Custom Skill",
+			"owner"
+		);
 	});
 
 	// The defect this fences: a slow "an" response landing AFTER "ann" and

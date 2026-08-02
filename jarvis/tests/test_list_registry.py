@@ -106,23 +106,45 @@ def _ensure_floor_user() -> str:
 	return FLOOR_USER
 
 
+#: Customer-facing API packages the discovery sweep walks. `jarvis.chat` was the
+#: only one before (P0-04): `jarvis.support.api.list_tickets` lived outside it and
+#: could never be discovered. A collection endpoint added to any of these — or
+#: annotated anywhere via `list_registry.list_surface_endpoint` — must be
+#: classified.
+_SWEPT_PACKAGES = ("jarvis.chat", "jarvis.support")
+
+#: Naming families that mark a whitelisted callable as a candidate list endpoint.
+#: `list_*` misses `admin_list_user_usage`; `admin_list_*` catches it. Anything
+#: outside these families declares itself with the annotation instead.
+_LIST_NAME_PREFIXES = ("list_", "admin_list_")
+
+
+def _looks_like_list_endpoint(name: str, fn) -> bool:
+	if list_registry.is_list_surface_endpoint(fn):
+		return True
+	return any(name.startswith(p) for p in _LIST_NAME_PREFIXES)
+
+
 def _whitelisted_list_callables() -> dict[str, object]:
-	"""Every whitelisted ``list_*`` callable under ``jarvis/chat``.
+	"""Every whitelisted list-endpoint candidate across the customer API packages.
 
-	Import errors are NOT swallowed: a module that fails to import would silently
-	shrink the sweep, which is exactly the loophole this audit closes."""
-	import jarvis.chat
-
+	Widened for P0-04: it walks `jarvis.chat` AND `jarvis.support`, matches the
+	`list_*`/`admin_list_*` naming families (not `list_*` alone), and honours the
+	`list_surface_endpoint` annotation for anything named differently. Import
+	errors are NOT swallowed: a module that fails to import would silently shrink
+	the sweep, which is exactly the loophole this audit closes."""
 	found: dict[str, object] = {}
-	for info in pkgutil.walk_packages(jarvis.chat.__path__, prefix="jarvis.chat."):
-		module = importlib.import_module(info.name)
-		for name, fn in vars(module).items():
-			if not name.startswith("list_") or not callable(fn):
-				continue
-			if getattr(fn, "__module__", None) != module.__name__:
-				continue  # re-export
-			if fn in frappe.whitelisted:
-				found[f"{module.__name__}.{name}"] = fn
+	for package in _SWEPT_PACKAGES:
+		root = importlib.import_module(package)
+		for info in pkgutil.walk_packages(root.__path__, prefix=f"{package}."):
+			module = importlib.import_module(info.name)
+			for name, fn in vars(module).items():
+				if not callable(fn) or not _looks_like_list_endpoint(name, fn):
+					continue
+				if getattr(fn, "__module__", None) != module.__name__:
+					continue  # re-export
+				if fn in frappe.whitelisted:
+					found[f"{module.__name__}.{name}"] = fn
 	return found
 
 
@@ -232,6 +254,34 @@ class TestListRegistryIntegrity(FrappeTestCase):
 							meta.get_field(spec),
 							f"{view.view_key} excludes {spec!r}, which is not a field of {view.root_doctype}",
 						)
+
+	def test_active_views_are_classified_and_migration_status_is_reported(self):
+		"""Migration completeness, SEPARATE from inventory and wiring (P0-04).
+
+		Waves 2-3 are deferred, so this round does NOT enforce 'no pending active
+		view' — that is the FINAL-round gate. What it enforces now is that every
+		ACTIVE (non-excluded) collection is CLASSIFIED (migrated or pending, never
+		an unknown status), and it prints the truthful migrated-vs-pending split so
+		the handoff cannot claim more than is built.
+		"""
+		active = [v for v in list_registry.all_views() if not v.is_excluded]
+		migrated = [v for v in active if v.status == list_registry.MIGRATED]
+		pending = [v for v in active if v.status == list_registry.PENDING]
+		for view in active:
+			with self.subTest(view=view.view_key):
+				self.assertIn(
+					view.status,
+					{list_registry.MIGRATED, list_registry.PENDING},
+					f"{view.view_key} is active but has no migration classification",
+				)
+		# Every active view is exactly one of the two — nothing unclassified.
+		self.assertEqual(len(migrated) + len(pending), len(active))
+		print(
+			f"\nPlan-08 migration status: {len(migrated)} migrated, {len(pending)} pending, "
+			f"of {len(active)} active views."
+			f"\n  migrated: {sorted(v.view_key for v in migrated)}"
+			f"\n  pending:  {sorted(v.view_key for v in pending)}"
+		)
 
 	def test_migrated_views_actually_accept_filters_v2(self):
 		"""'migrated' is a claim; this checks the wiring behind it."""

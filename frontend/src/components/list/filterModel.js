@@ -274,8 +274,16 @@ export function controlFor(entry, operator) {
 	const fieldtype = entry.fieldtype;
 	if (operator === "is") return "is";
 	if (operator === "Timespan") return "timespan";
-	if (operator === "Between")
-		return fieldtype === "Datetime" ? "between-datetime" : "between-date";
+	if (operator === "Between") {
+		if (fieldtype === "Datetime") return "between-datetime";
+		if (fieldtype === "Date") return "between-date";
+		// P0-03: the server never offers Between on a non-temporal field (its
+		// effective-Data operator set removes it), so a clause that still carries
+		// Between on one can only be a hand-edited URL or a stale link. Reconcile
+		// drops it; this is the belt — NEVER render a date range over a text/number
+		// column, fall through to the field's own control instead.
+		return "text";
+	}
 	if (operator === "in" || operator === "not in") {
 		if (fieldtype === "Link") return "multi-link";
 		if (fieldtype === "Select" && selectOptions(entry)) return "multi-select";
@@ -467,14 +475,28 @@ export function serializeClauses(viewKey, clauses, index) {
 	});
 }
 
-function boundValue(value, limits) {
-	if (Array.isArray(value)) {
-		return value
-			.slice(0, limits.max_in_values)
-			.map((v) => String(v == null ? "" : v).slice(0, limits.max_value_chars));
-	}
+/** Normalize a URL value to its clause shape WITHOUT truncating (P1-02). */
+function shapeValue(value) {
+	if (Array.isArray(value)) return value.map((v) => String(v == null ? "" : v));
 	if (value === null || value === undefined) return "";
-	return String(value).slice(0, limits.max_value_chars);
+	return String(value);
+}
+
+/**
+ * Whether a URL value is over a §9 bound (P1-02). Three distinct cases — an
+ * oversize scalar, an oversize member of a list, or an over-count list — all
+ * mean the same thing to the reader: the clause was mangled in the URL and must
+ * be REJECTED, never silently reshaped into a different valid query. The old
+ * `boundValue` sliced arrays and strings and reported nothing, so "match this
+ * exact value" quietly became "match this prefix".
+ */
+function exceedsBounds(value, limits) {
+	if (Array.isArray(value)) {
+		if (value.length > limits.max_in_values) return true;
+		return value.some((v) => String(v == null ? "" : v).length > limits.max_value_chars);
+	}
+	if (value === null || value === undefined) return false;
+	return String(value).length > limits.max_value_chars;
 }
 
 /** True when a payload is too long to put in a URL that will survive the trip. */
@@ -493,7 +515,7 @@ export function isUrlPayloadTooLarge(param) {
  * looks like an answer to a question it never asked.
  */
 export function unreadableClauses() {
-	return { unreadable: true, viewKey: "", clauses: [], skipped: 0 };
+	return { unreadable: true, viewKey: "", clauses: [], skipped: 0, bounded: 0 };
 }
 
 /**
@@ -523,6 +545,10 @@ export function parseClauseParam(raw, viewKey, schema) {
 	const limits = limitsOf(schema);
 	const clauses = [];
 	let skipped = Math.max(0, data.c.length - limits.max_clauses);
+	// Over-bound values are a DISTINCT outcome from a structurally broken row:
+	// the clause was well-formed but too large to carry, and it is rejected, not
+	// truncated (P1-02).
+	let bounded = 0;
 	for (const row of data.c.slice(0, limits.max_clauses)) {
 		if (!Array.isArray(row) || row.length < 3) {
 			skipped += 1;
@@ -545,16 +571,17 @@ export function parseClauseParam(raw, viewKey, schema) {
 			skipped += 1;
 			continue;
 		}
-		clauses.push(
-			makeClause({
-				doctype,
-				fieldname,
-				operator,
-				value: boundValue(value === undefined ? emptyValueFor(operator) : value, limits),
-			})
-		);
+		const raw = value === undefined ? emptyValueFor(operator) : value;
+		// Reject an oversize scalar, an oversize member, or an over-count list —
+		// never silently reshape "match this exact value" into "match this prefix"
+		// or drop the last member of an `in` (P1-02).
+		if (exceedsBounds(raw, limits)) {
+			bounded += 1;
+			continue;
+		}
+		clauses.push(makeClause({ doctype, fieldname, operator, value: shapeValue(raw) }));
 	}
-	return { unreadable: false, viewKey: data.k || viewKey || "", clauses, skipped };
+	return { unreadable: false, viewKey: data.k || viewKey || "", clauses, skipped, bounded };
 }
 
 /**
@@ -594,6 +621,19 @@ export function skippedNotice(n) {
 	return `${n} filter${n === 1 ? "" : "s"} in this link ${
 		n === 1 ? "was" : "were"
 	} not valid and ${n === 1 ? "was" : "were"} ignored.`;
+}
+
+/**
+ * Clauses in a readable payload whose value was over a size/count bound (P1-02).
+ * Distinct from `skippedNotice`: those rows were malformed, these were well-formed
+ * but too large to carry, and were rejected rather than truncated into a
+ * different question.
+ */
+export function boundedNotice(n) {
+	if (!n) return "";
+	return `${n} filter${n === 1 ? "" : "s"} in this link ${
+		n === 1 ? "was" : "were"
+	} too large to apply and ${n === 1 ? "was" : "were"} left off.`;
 }
 
 // The filter set is real and applied, but too big to put in a URL. Two cases,

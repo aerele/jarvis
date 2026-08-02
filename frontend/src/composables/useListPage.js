@@ -32,10 +32,12 @@ import {
 	reconcileClauses,
 	droppedNotice,
 	skippedNotice,
+	boundedNotice,
 	UNREADABLE_NOTICE,
 	URL_TOO_LARGE_NOTICE,
 	URL_TOO_LARGE_UNSHARED_NOTICE,
 	filterErrorInfo,
+	ERR_VIEW_NOT_FILTERABLE,
 } from "@/components/list/filterModel";
 
 function errMsg(e) {
@@ -85,6 +87,12 @@ export function useListPage({
 	const schemaError = ref(null);
 	const filterError = ref(null); // {code, kind, message} from the last request
 	const filterNotice = ref(""); // "N filters ... were removed."
+	// P1-05: the server rolled this view back to legacy transport (its schema
+	// endpoint declined with view_not_filterable). We stop SENDING filters_v2 —
+	// the request goes the legacy way — but the Filter action stays visible; it
+	// simply reports that the catalog is unavailable. The compile path server-side
+	// still honours any v2 a stale tab sends, so nothing is silently dropped.
+	const filtersV2Disabled = ref(false);
 	const index = computed(() => schemaIndex(schema.value));
 	const schemaFetcher = fetchSchema || ((key) => api.getListFilterSchema(key));
 
@@ -107,6 +115,8 @@ export function useListPage({
 	let lastWrittenUrl = (route && route.query && route.query[URL_PARAM]) || "";
 
 	function wireClauses() {
+		// Rolled back to legacy transport (P1-05): send no v2 clauses at all.
+		if (filtersV2Disabled.value) return [];
 		// Only COMPLETE clauses reach the wire; a half-filled row is pending, and
 		// pending is not a filter (plan §6.4: "no fetch until an incomplete clause
 		// becomes valid").
@@ -250,6 +260,9 @@ export function useListPage({
 				if (info) {
 					schemaState.value = "error";
 					schemaError.value = info;
+					// A view rolled back via the runtime flag declines here; drop to
+					// legacy transport so the list still loads (P1-05).
+					if (info.code === ERR_VIEW_NOT_FILTERABLE) filtersV2Disabled.value = true;
 					return null;
 				}
 				schema.value = res || null;
@@ -467,7 +480,10 @@ export function useListPage({
 			noteFilter(UNREADABLE_NOTICE);
 		} else {
 			filterClauses.value = parsed.clauses;
-			noteFilter(skippedNotice(parsed.skipped));
+			// A bounded (too-large) clause and a malformed one are different
+			// truths; prefer the bounded notice when both happened, since it is the
+			// less obvious one. Either way the user is told, never silently served.
+			noteFilter(boundedNotice(parsed.bounded) || skippedNotice(parsed.skipped));
 		}
 		filterError.value = null;
 		if (filterClauses.value.length && !schema.value) await ensureSchema();

@@ -490,6 +490,12 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 	"jarvis.chat.macros_api.list_macros": (
 		"Settings macro-runs dropdown feed; unpaginated companion of the macros view"
 	),
+	# The filters_v2 runtime-capability probe (P1-05): returns the per-view
+	# {view_key: enabled} map so a surface can pick transport at mount. It is
+	# metadata ABOUT the list views, not a list of documents.
+	"jarvis.chat.list_filters.list_filters_capabilities": (
+		"the filters_v2 per-view capability map (P1-05) — a config probe, not a document list"
+	),
 	# Not document collections at all: option/name strings for a control.
 	"jarvis.chat.api.list_tools": "tool NAMES available to the caller — strings, not documents",
 	"jarvis.chat.personalise_api.list_role_options": "role name strings for a picker",
@@ -536,3 +542,28 @@ def filterable_views() -> tuple[ListView, ...]:
 
 def endpoints_by_view() -> dict[str, tuple[str, ...]]:
 	return {v.view_key: v.endpoints for v in _VIEWS}
+
+
+# --------------------------------------------------------------------------- #
+# Discovery annotation (P0-04)
+# --------------------------------------------------------------------------- #
+#: Attribute a whitelisted callable can carry to declare itself a document-list
+#: endpoint for the Phase-0 discovery sweep, REGARDLESS of its name. The sweep
+#: matches the ``list_*`` / ``admin_list_*`` naming families across the customer
+#: API packages, but a differently-named collection endpoint (``search_records``,
+#: a bespoke feed) would otherwise evade discovery — decorate it with
+#: :func:`list_surface_endpoint` and it is caught and must be classified.
+LIST_SURFACE_ATTR = "_jarvis_list_surface"
+
+
+def list_surface_endpoint(fn):
+	"""Mark a whitelisted callable as a document-list endpoint for the registry
+	audit (see :data:`LIST_SURFACE_ATTR`). Purely declarative — it changes no
+	runtime behaviour, it only makes the endpoint visible to the completeness
+	sweep so it cannot ship unclassified."""
+	setattr(fn, LIST_SURFACE_ATTR, True)
+	return fn
+
+
+def is_list_surface_endpoint(fn) -> bool:
+	return bool(getattr(fn, LIST_SURFACE_ATTR, False))
