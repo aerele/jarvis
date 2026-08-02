@@ -77,7 +77,7 @@ const TERMINAL_FOR_PAYMENT = new Set([
 // above it. Late polls, late declines and late callbacks cannot move it.
 const PAID_FLOOR = new Set([STATES.PAID, STATES.PROVISIONING, STATES.PROVISIONING_DELAYED]);
 
-const HANDLE_KEYS = [
+export const HANDLE_KEYS = [
 	"razorpay_order_id",
 	"razorpay_subscription_id",
 	"razorpay_key_id",
@@ -128,6 +128,10 @@ const PROVIDER_HANDLE_KEYS = {
 	razorpay: RAZORPAY_HANDLE_KEYS,
 	cashfree: CASHFREE_HANDLE_KEYS,
 };
+// Every family, for the case where the NAMED one turns out to hold nothing that
+// can open. Only one of them can hold the openable handles at that point, so
+// there is a right answer here and no guess involved.
+const FAMILIES = [RAZORPAY_HANDLE_KEYS, CASHFREE_HANDLE_KEYS];
 
 export function isTerminalForPayment(value) {
 	return TERMINAL_FOR_PAYMENT.has(value);
@@ -444,25 +448,36 @@ function hasOpenableHandle(handles) {
  * still keeps everything it was told, and this is applied where the sheet is
  * built.
  *
- * Two deliberate non-narrowings, both of them "we have no basis, so do not
- * guess":
- *   - an absent or unrecognised provider has no key family, so the full set is
- *     returned unchanged (an unfamiliar discriminator is not a licence to drop
- *     handles the answer actually carried);
- *   - a narrowing that would leave nothing openable means the provider LABEL is
- *     stale relative to the handles, not that two gateways are mixed - the set
- *     is coherent for exactly one gateway, so it is returned unchanged rather
- *     than turned into a dead end.
+ * The provider LABEL is sticky, so it can name a gateway whose keys in the set
+ * are all stale. That is not the accumulation this exists for: once the named
+ * family holds nothing openable, only the OTHER family can, so the sheet is
+ * built from that one. Handing over the whole set instead left the named
+ * family's leftovers in it - and a leftover that opens nothing can still decide
+ * the classification, which is exactly how a dead Cashfree subscription id
+ * captured a live Razorpay order.
+ *
+ * The one deliberate non-narrowing, and it is "we have no basis, so do not
+ * guess": an absent or unrecognised provider has no key family, so the full set
+ * is returned unchanged - an unfamiliar discriminator is not a licence to drop
+ * handles the answer actually carried. (Nothing openable anywhere is the same
+ * answer for the same reason; the caller has already refused to open it.)
  */
 export function handlesForProvider(handles, provider) {
 	const full = { ...(handles || {}) };
-	const family = PROVIDER_HANDLE_KEYS[String(provider || "").trim().toLowerCase()];
-	if (!family) return full;
-	const narrowed = {};
-	for (const k of Object.keys(full)) {
-		if (family.has(k) || NEUTRAL_HANDLE_KEYS.has(k)) narrowed[k] = full[k];
+	const named = PROVIDER_HANDLE_KEYS[String(provider || "").trim().toLowerCase()];
+	if (!named) return full;
+	const family = hasOpenableHandle(narrowToFamily(full, named))
+		? named
+		: FAMILIES.find((f) => hasOpenableHandle(narrowToFamily(full, f)));
+	return family ? narrowToFamily(full, family) : full;
+}
+
+function narrowToFamily(handles, family) {
+	const out = {};
+	for (const k of Object.keys(handles)) {
+		if (family.has(k) || NEUTRAL_HANDLE_KEYS.has(k)) out[k] = handles[k];
 	}
-	return hasOpenableHandle(narrowed) ? narrowed : full;
+	return out;
 }
 
 function illegal(state, strict, why) {

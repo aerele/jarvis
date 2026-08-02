@@ -10,6 +10,7 @@ import { CODES, ADMIN_CODES, BENCH_CODES, ACTIONS, copyFor } from "./paymentCode
 import {
 	STATES,
 	EVENTS,
+	HANDLE_KEYS,
 	initialState,
 	reduce,
 	canOpenCheckout,
@@ -610,24 +611,17 @@ test("canOpenCheckout answers exactly what CHECKOUT_OPENED will accept", () => {
 // handlesForProvider: the sheet is built for ONE gateway
 // ---------------------------------------------------------------------------
 test("the provider partition covers every handle the reducer keeps", () => {
-	// Driven through the reducer on purpose: `kept` is the REAL HANDLE_KEYS, not a
-	// copy of it, so a handle added to the table without a gateway family fails
-	// here instead of silently leaking into the other gateway's sheet.
-	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, {
-		razorpay_order_id: "o",
-		razorpay_subscription_id: "rs",
-		razorpay_key_id: "k",
-		payment_session_id: "ps",
-		cashfree_order_id: "co",
-		cashfree_subscription_id: "cs",
-		subscription_session_id: "ss",
-		cashfree_app_id: "app",
-		cashfree_env: "sandbox",
-		amount_inr: 4999,
-		not_a_handle: "x",
-	}));
+	// The fixture is BUILT FROM the real HANDLE_KEYS, so a key added to the table
+	// enters `kept` automatically and fails here for having no gateway family.
+	// Hardcoding the fixture made this alarm silent on exactly that drift: the
+	// reducer copies only the keys an answer actually carried, so a new table
+	// entry the fixture did not mention never reached the assertion.
+	const answer = { not_a_handle: "x" };
+	for (const k of HANDLE_KEYS) answer[k] = k === "amount_inr" ? 4999 : `v_${k}`;
+	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, answer));
 	const kept = Object.keys(s.handles);
 	assert.equal(kept.includes("not_a_handle"), false);
+	assert.deepEqual(kept.slice().sort(), HANDLE_KEYS.slice().sort(), "the reducer keeps exactly the table");
 	const rzp = Object.keys(handlesForProvider(s.handles, "razorpay"));
 	const cfr = Object.keys(handlesForProvider(s.handles, "cashfree"));
 	for (const k of kept) {
@@ -635,15 +629,15 @@ test("the provider partition covers every handle the reducer keeps", () => {
 	}
 	// Only the price is shared; everything else lands in exactly one family.
 	assert.deepEqual(rzp.filter((k) => cfr.includes(k)), ["amount_inr"]);
-	assert.deepEqual(rzp, ["razorpay_order_id", "razorpay_subscription_id", "razorpay_key_id", "amount_inr"]);
-	assert.deepEqual(cfr, [
-		"payment_session_id",
-		"cashfree_order_id",
-		"cashfree_subscription_id",
-		"subscription_session_id",
+	assert.deepEqual(rzp.slice().sort(), ["amount_inr", "razorpay_key_id", "razorpay_order_id", "razorpay_subscription_id"]);
+	assert.deepEqual(cfr.slice().sort(), [
+		"amount_inr",
 		"cashfree_app_id",
 		"cashfree_env",
-		"amount_inr",
+		"cashfree_order_id",
+		"cashfree_subscription_id",
+		"payment_session_id",
+		"subscription_session_id",
 	]);
 });
 
@@ -657,18 +651,31 @@ test("an unnamed or unrecognised gateway is not a licence to drop handles", () =
 	assert.deepEqual(handlesForProvider(null, "razorpay"), {});
 });
 
-test("a narrowing that leaves nothing to open is a stale LABEL, not a mixed set", () => {
-	// The provider field is sticky; the handles are coherent for one gateway. This
-	// is not the accumulation the partition exists for, so the set is left alone
-	// rather than turned into a sheet that cannot open.
+test("a named gateway that can open nothing yields to the one that can", () => {
+	// The provider field is sticky, so it can name a gateway whose keys are all
+	// stale. That is a stale LABEL over a set that is coherent for the OTHER
+	// gateway - only one family can hold the openable handles once the named one
+	// holds none - so the sheet is built from that family rather than from the
+	// whole set. Handing over the named family's leftovers is what let a rider
+	// key (one that opens nothing but still classifies) claim the sheet.
 	const cashfreeOnly = { payment_session_id: "ps", cashfree_order_id: "co", cashfree_env: "sandbox" };
 	assert.deepEqual(handlesForProvider(cashfreeOnly, "razorpay"), cashfreeOnly);
-	// A key family with no OPENABLE handle in it does not count as narrowable
-	// either - razorpay_key_id alone raises nothing.
-	assert.deepEqual(handlesForProvider({ ...cashfreeOnly, razorpay_key_id: "k" }, "razorpay"), {
-		...cashfreeOnly,
-		razorpay_key_id: "k",
-	});
+	// razorpay_key_id opens nothing on its own, so it does not make the razorpay
+	// family the one to build from - and it does not ride along either.
+	assert.deepEqual(handlesForProvider({ ...cashfreeOnly, razorpay_key_id: "k" }, "razorpay"), cashfreeOnly);
+	// The mirror: a stale Cashfree subscription id is not openable, so a live
+	// Razorpay order decides the set - and no Cashfree key reaches the sheet.
+	assert.deepEqual(
+		handlesForProvider(
+			{ cashfree_subscription_id: "cs", cashfree_env: "sandbox", razorpay_order_id: "o", razorpay_key_id: "k" },
+			"cashfree"
+		),
+		{ razorpay_order_id: "o", razorpay_key_id: "k" }
+	);
+	// Nothing openable anywhere: there is no family to prefer, so the set is left
+	// exactly as it was (runCheckout has already refused to open it).
+	const dead = { razorpay_key_id: "k", cashfree_env: "sandbox" };
+	assert.deepEqual(handlesForProvider(dead, "razorpay"), dead);
 });
 
 test("paid is a floor for the OPEN too - a late sheet cannot reopen a settled signup", () => {

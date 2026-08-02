@@ -739,6 +739,121 @@ describe("the sheet is built for the gateway the machine names", () => {
 		expect(flow.state.value.illegalTransitions).toBe(0);
 	});
 
+	test("a rider that cannot open anything never claims the sheet from a live order", async () => {
+		// `cashfree_subscription_id` opens NOTHING on its own (the mandate opener
+		// reads subscription_session_id), so it does not make its own family
+		// openable - which sends the narrowing to its fallback. It was still
+		// decisive at classification time, so the fallback's set handed a live
+		// Razorpay order to a Cashfree mandate redirect.
+		const api = makeApi({
+			initiateSignupPayment: vi
+				.fn()
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "cashfree",
+						cashfree_subscription_id: "cf_sub_STALE", // no session id: nothing to open
+						cashfree_env: "sandbox",
+						can_check_status: true,
+					})
+				)
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						// names no provider, so the machine's label stays `cashfree`
+						razorpay_order_id: "order_LIVE",
+						razorpay_key_id: "k",
+						amount_inr: 4999,
+						can_check_status: true,
+					})
+				),
+		});
+		const { flow, handed } = recordingFlow(api);
+		await flow.initiatePayment({ plan: "pro", provider: "cashfree" });
+		expect(handed).toHaveLength(0); // nothing openable yet - no sheet was raised
+		await flow.initiatePayment({ plan: "pro" });
+		expect(flow.state.value.provider).toBe("cashfree"); // the label is stale, and stays stale
+		expect(handed).toHaveLength(1);
+		expect(classifyOnboardingHandles(handed[0])).toBe("razorpay");
+		for (const k of CASHFREE_KEYS) expect(handed[0]).not.toHaveProperty(k);
+		expect(handed[0]).toEqual({
+			razorpay_order_id: "order_LIVE",
+			razorpay_key_id: "k",
+			amount_inr: 4999,
+			// The machine's own provider, passed along as it always was. The sheet no
+			// longer depends on it: a handle decides the classification first.
+			payment_provider: "cashfree",
+		});
+		expect(flow.state.value.illegalTransitions).toBe(0);
+	});
+
+	test("the same rider does not outrank a live session INSIDE its own family", async () => {
+		// Narrowing cannot help here - both keys are Cashfree's - so this one is
+		// settled purely by refusing to classify on a key that opens nothing.
+		const api = makeApi({
+			initiateSignupPayment: vi
+				.fn()
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "cashfree",
+						cashfree_subscription_id: "cf_sub_STALE",
+						cashfree_env: "sandbox",
+						can_check_status: true,
+					})
+				)
+				.mockImplementationOnce(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 5,
+						payment_provider: "cashfree",
+						payment_session_id: "sess_LIVE",
+						cashfree_order_id: "cf_order_LIVE",
+						cashfree_env: "sandbox",
+						can_check_status: true,
+					})
+				),
+		});
+		const { flow, handed } = recordingFlow(api);
+		await flow.initiatePayment({ plan: "pro", provider: "cashfree" });
+		await flow.initiatePayment({ plan: "pro", provider: "cashfree" });
+		expect(handed).toHaveLength(1);
+		expect(classifyOnboardingHandles(handed[0])).toBe("cashfree_order");
+		expect(handed[0].payment_session_id).toBe("sess_LIVE");
+		expect(handed[0].cashfree_order_id).toBe("cf_order_LIVE");
+		expect(flow.state.value.illegalTransitions).toBe(0);
+	});
+
+	test("CONTROL: a real mandate still takes the mandate journey", async () => {
+		const api = makeApi({
+			initiateSignupPayment: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 5,
+					payment_provider: "cashfree",
+					subscription_session_id: "sub_sess_LIVE",
+					cashfree_subscription_id: "cf_sub_LIVE",
+					cashfree_env: "sandbox",
+					can_check_status: true,
+				})
+			),
+		});
+		const { flow, handed } = recordingFlow(api);
+		await flow.initiatePayment({ plan: "pro", provider: "cashfree" });
+		expect(handed).toHaveLength(1);
+		expect(classifyOnboardingHandles(handed[0])).toBe("cashfree_mandate");
+		expect(handed[0].subscription_session_id).toBe("sub_sess_LIVE");
+		expect(flow.state.value.illegalTransitions).toBe(0);
+	});
+
 	test("CONTROL: an advanced generation replaces the set wholesale, as it always did", async () => {
 		const api = makeApi({
 			initiateSignupPayment: vi

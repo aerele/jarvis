@@ -29,9 +29,28 @@ describe("classifyOnboardingHandles", () => {
 		expect(classifyOnboardingHandles({ subscription_session_id: "sess" })).toBe(
 			CHECKOUT_CASHFREE_MANDATE
 		);
-		expect(classifyOnboardingHandles({ cashfree_subscription_id: "jrvs_1" })).toBe(
+	});
+
+	test("the mandate is the SESSION id - the subscription id alone opens nothing", () => {
+		// openCashfreeMandate is handed `subsSessionId: handles.subscription_session_id`
+		// and nothing else, so a set without one cannot raise a mandate however
+		// Cashfree-ish it looks. Claiming the mandate shape on `cashfree_subscription_id`
+		// promised a sheet that could not open - and, because the sniff runs first,
+		// let that stale rider outrank a LIVE order sitting beside it.
+		expect(classifyOnboardingHandles({ cashfree_subscription_id: "jrvs_1" })).not.toBe(
 			CHECKOUT_CASHFREE_MANDATE
 		);
+		// A live order beside the rider is classified as the order it is.
+		expect(
+			classifyOnboardingHandles({ cashfree_subscription_id: "jrvs_1", razorpay_order_id: "o" })
+		).toBe(CHECKOUT_RAZORPAY);
+		expect(
+			classifyOnboardingHandles({ cashfree_subscription_id: "jrvs_1", payment_session_id: "p" })
+		).toBe(CHECKOUT_CASHFREE_ORDER);
+		// ...and a real mandate is untouched: the session id still decides, first.
+		expect(
+			classifyOnboardingHandles({ cashfree_subscription_id: "jrvs_1", subscription_session_id: "sess" })
+		).toBe(CHECKOUT_CASHFREE_MANDATE);
 	});
 
 	test("no handles at all is not a checkout", () => {

@@ -36,13 +36,31 @@ export const CHECKOUT_CASHFREE_MANDATE = "cashfree_mandate";
  * first: a mandate carries no order id and would otherwise fall through to a
  * shape it is not. Everything the shipped classifier already resolves is
  * delegated verbatim, so the two cannot drift.
+ *
+ * What the mandate check tests is `subscription_session_id` and nothing else -
+ * the one key `openCashfreeMandate` actually reads (`subsSessionId`). Handles
+ * ACCUMULATE across same-generation answers, so a set can carry a leftover
+ * `cashfree_subscription_id` from an intent that is long dead; claiming the
+ * mandate shape on it promised a sheet that cannot be raised (subsSessionId
+ * undefined), and, because this test runs first, let that leftover outrank a
+ * LIVE order sitting beside it - a full-page Cashfree redirect for a Razorpay
+ * order. A classification that names a sheet the opener cannot open is wrong by
+ * construction.
  */
 export function classifyOnboardingHandles(handles) {
 	const h = handles || {};
-	if (h.subscription_session_id || h.cashfree_subscription_id) {
+	if (h.subscription_session_id) {
 		return CHECKOUT_CASHFREE_MANDATE;
 	}
-	return classifyHandles(h);
+	// The same leftover seen from the other side: billingCheckout refuses any set
+	// carrying `cashfree_subscription_id` as UNSUPPORTED on sight - correct for a
+	// settings page with no mandate journey, but here it would bury a live
+	// Cashfree ORDER (or a Razorpay one) sharing the set behind a key that opens
+	// nothing. It has no vote in the delegation; what it belongs to has already
+	// been decided above.
+	const openable = { ...h };
+	delete openable.cashfree_subscription_id;
+	return classifyHandles(openable);
 }
 
 /** Thrown for handles this build cannot render. Its message is customer-facing. */
