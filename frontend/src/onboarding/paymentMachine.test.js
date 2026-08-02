@@ -1,0 +1,490 @@
+// The pay page's transition table. Pure: no Vue, no network, no timers - the
+// orchestrator owns every side effect so this file can assert the ONE rule the
+// whole plan exists for: nothing but an authoritative paid answer leaves the
+// Pay page.
+
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { CODES } from "./paymentCodes.js";
+import {
+	STATES,
+	EVENTS,
+	initialState,
+	reduce,
+	isTerminalForPayment,
+	provisioningOwner,
+	remainingCooldownSeconds,
+} from "./paymentMachine.js";
+
+const CONTRACT = (over = {}) => ({
+	type: EVENTS.CONTRACT_STATE,
+	decoded: {
+		ok: true,
+		code: CODES.PAYMENT_CONFIRMATION_PENDING,
+		message: "",
+		recovery: "",
+		data: { attempt_id: "att_1", generation: 1, can_initiate_payment: true, can_check_status: true },
+		context: {},
+		httpStatus: 200,
+		...over,
+	},
+});
+
+function at(code, data = {}) {
+	return CONTRACT({
+		code,
+		ok: true,
+		data: { attempt_id: "att_1", generation: 1, ...data },
+	});
+}
+
+// ---------------------------------------------------------------------------
+// the shape of a fresh page
+// ---------------------------------------------------------------------------
+test("initialState starts on review with nothing to check and nothing to pay", () => {
+	const s = initialState();
+	assert.equal(s.value, STATES.REVIEW);
+	assert.equal(s.attemptId, null);
+	assert.equal(s.generation, null);
+	assert.equal(s.canCheck, false);
+	assert.equal(s.canInitiate, false);
+});
+
+// ---------------------------------------------------------------------------
+// legal transitions, keyed on the CODE and never on an HTTP status
+// ---------------------------------------------------------------------------
+test("submitting review starts the signup", () => {
+	const s = reduce(initialState(), { type: EVENTS.SUBMIT_REVIEW });
+	assert.equal(s.value, STATES.STARTING_SIGNUP);
+	assert.equal(s.busy, "starting");
+});
+
+test("SIGNUP_VERIFICATION_REQUIRED parks on the verification screen with no pay button", () => {
+	const s = reduce(initialState(), at(CODES.SIGNUP_VERIFICATION_REQUIRED, {
+		pending_verification: true,
+		verification_expires_at: "2026-08-03 00:00:00",
+		can_initiate_payment: false,
+	}));
+	assert.equal(s.value, STATES.VERIFICATION_REQUIRED);
+	assert.equal(s.canInitiate, false);
+	assert.equal(s.verificationExpiresAt, "2026-08-03 00:00:00");
+});
+
+test("a live intent with handles is checkout-openable, and pending is not a failure", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+		razorpay_order_id: "order_1",
+		razorpay_key_id: "k",
+		payment_provider: "razorpay",
+		can_initiate_payment: true,
+		can_check_status: true,
+	}));
+	assert.equal(s.value, STATES.UNKNOWN);
+	assert.equal(s.provider, "razorpay");
+	assert.equal(s.handles.razorpay_order_id, "order_1");
+	assert.equal(s.canCheck, true);
+});
+
+test("a decline is retryable and stays on Pay", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_DECLINED, { can_initiate_payment: true }));
+	assert.equal(s.value, STATES.FAILED_RETRYABLE);
+	assert.equal(s.canInitiate, true);
+});
+
+test("SIGNUP_TERMINAL is terminal: no blind payment retry", () => {
+	const s = reduce(initialState(), at(CODES.SIGNUP_TERMINAL, {
+		subscription_status: "Cancelled",
+		can_initiate_payment: false,
+	}));
+	assert.equal(s.value, STATES.FAILED_TERMINAL);
+	assert.equal(s.canInitiate, false);
+});
+
+test("PAYMENT_ALREADY_ACTIVE is the only code that means paid", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE, {
+		subscription_status: "Active",
+		can_initiate_payment: false,
+	}));
+	assert.equal(s.value, STATES.PAID);
+	assert.equal(s.canInitiate, false);
+});
+
+// ---------------------------------------------------------------------------
+// the two NEW states
+// ---------------------------------------------------------------------------
+test("PAYMENT_AUTHORIZED_PENDING_CONFIRM lands on confirm_required, not on a retry", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM, {
+		razorpay_subscription_id: "sub_1",
+		payment_provider: "razorpay",
+		can_initiate_payment: false,
+		can_check_status: true,
+	}));
+	assert.equal(s.value, STATES.CONFIRM_REQUIRED);
+	assert.equal(s.canInitiate, false);
+	// Money already moved at the gateway; a second intent authorizes a second
+	// mandate. The handles are kept because confirm needs them.
+	assert.equal(s.handles.razorpay_subscription_id, "sub_1");
+});
+
+test("ACCOUNT_RECONNECT_REQUIRED lands on reconnect - never on a fake paid state", () => {
+	const s = reduce(initialState(), at(CODES.ACCOUNT_RECONNECT_REQUIRED, {
+		subscription_status: "Active",
+		can_reconnect: true,
+		can_initiate_payment: false,
+	}));
+	assert.equal(s.value, STATES.RECONNECT);
+	assert.equal(s.canReconnect, true);
+	assert.equal(s.canInitiate, false);
+});
+
+test("can_reconnect on any envelope raises the offer without changing the state", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { can_reconnect: true }));
+	assert.equal(s.canReconnect, true);
+	assert.equal(s.value, STATES.UNKNOWN);
+});
+
+// ---------------------------------------------------------------------------
+// checkout: dismissal, late callbacks, and the mandatory check-on-failure
+// ---------------------------------------------------------------------------
+test("a dismissed sheet is unknown, never 'failed' - and never advances", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPENED });
+	assert.equal(s.value, STATES.CHECKOUT_OPEN);
+	s = reduce(s, { type: EVENTS.CHECKOUT_DISMISSED });
+	assert.equal(s.value, STATES.UNKNOWN);
+	assert.equal(s.checkRequired, true, "a closed sheet must force a status check");
+});
+
+test("an SDK failure before the sheet opens is retryable and also forces a check", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	s = reduce(s, { type: EVENTS.CHECKOUT_FAILED, message: "Could not load the payment form." });
+	assert.equal(s.value, STATES.FAILED_RETRYABLE);
+	assert.equal(s.checkRequired, true);
+});
+
+test("a gateway callback confirms; a confirm timeout falls back to unknown, not to paid", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	s = reduce(s, { type: EVENTS.CHECKOUT_OPENED });
+	s = reduce(s, { type: EVENTS.GATEWAY_CALLBACK });
+	assert.equal(s.value, STATES.CONFIRMING);
+	s = reduce(s, { type: EVENTS.CONFIRM_FAILED, decoded: { ok: false, code: "", message: "timeout" } });
+	assert.equal(s.value, STATES.UNKNOWN);
+	assert.equal(s.checkRequired, true);
+});
+
+test("a confirm that returns a coded decline renders the decline", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	s = reduce(s, { type: EVENTS.GATEWAY_CALLBACK });
+	s = reduce(s, {
+		type: EVENTS.CONFIRM_FAILED,
+		decoded: { ok: false, code: CODES.PAYMENT_DECLINED, message: "not authorized" },
+	});
+	assert.equal(s.value, STATES.FAILED_RETRYABLE);
+	assert.equal(s.code, CODES.PAYMENT_DECLINED);
+});
+
+test("CONFIRM_SUCCEEDED is paid", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	s = reduce(s, { type: EVENTS.GATEWAY_CALLBACK });
+	s = reduce(s, { type: EVENTS.CONFIRM_SUCCEEDED, data: { tenant_status: "running" } });
+	assert.equal(s.value, STATES.PAID);
+});
+
+// ---------------------------------------------------------------------------
+// paid is monotonic
+// ---------------------------------------------------------------------------
+test("dismiss AFTER a success stays paid", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	s = reduce(s, { type: EVENTS.GATEWAY_CALLBACK });
+	s = reduce(s, { type: EVENTS.CONFIRM_SUCCEEDED, data: {} });
+	s = reduce(s, { type: EVENTS.CHECKOUT_DISMISSED });
+	assert.equal(s.value, STATES.PAID);
+});
+
+test("a late pending answer never regresses a paid page", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE, { subscription_status: "Active" }));
+	assert.equal(s.value, STATES.PAID);
+	s = reduce(s, at(CODES.PAYMENT_CONFIRMATION_PENDING));
+	assert.equal(s.value, STATES.PAID);
+});
+
+test("a late decline never regresses a paid page either", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
+	s = reduce(s, at(CODES.PAYMENT_DECLINED));
+	assert.equal(s.value, STATES.PAID);
+});
+
+test("provisioning does not regress to a payment state", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_ALREADY_ACTIVE));
+	s = reduce(s, { type: EVENTS.PROVISIONING_STARTED });
+	assert.equal(s.value, STATES.PROVISIONING);
+	s = reduce(s, at(CODES.PAYMENT_CONFIRMATION_PENDING));
+	assert.equal(s.value, STATES.PROVISIONING);
+});
+
+// ---------------------------------------------------------------------------
+// the generation fence: two tabs, a stale response, a superseded intent
+// ---------------------------------------------------------------------------
+test("a response from an OLDER generation is ignored outright", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { generation: 3 }));
+	const before = s;
+	s = reduce(s, at(CODES.PAYMENT_DECLINED, { generation: 2 }));
+	assert.equal(s, before, "a stale generation must not even produce a new object");
+});
+
+test("a NEWER generation supersedes, and clears the previous intent's handles", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+		generation: 1,
+		razorpay_order_id: "order_old",
+	}));
+	s = reduce(s, at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+		generation: 2,
+		razorpay_order_id: "order_new",
+	}));
+	assert.equal(s.generation, 2);
+	assert.equal(s.handles.razorpay_order_id, "order_new");
+});
+
+test("an envelope with no generation is not treated as generation zero", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { generation: 4 }));
+	const next = reduce(s, CONTRACT({ code: CODES.PAYMENT_DECLINED, data: { attempt_id: "att_1" } }));
+	// No generation to compare: the answer is accepted (a legacy admin), but the
+	// known generation survives it.
+	assert.equal(next.value, STATES.FAILED_RETRYABLE);
+	assert.equal(next.generation, 4);
+});
+
+// ---------------------------------------------------------------------------
+// the rate limit is an OVERLAY, not a state
+// ---------------------------------------------------------------------------
+test("a 429 leaves the payment state exactly where it was", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { razorpay_order_id: "o" }));
+	const before = s.value;
+	s = reduce(s, {
+		type: EVENTS.RATE_LIMITED,
+		retryAfterSeconds: 30,
+		nowMs: 1_000_000,
+	});
+	assert.equal(s.value, before);
+	assert.equal(s.checkCooldownUntil, 1_000_000 + 30_000);
+	assert.equal(s.canCheck, false, "the check button is the only thing a 429 disables");
+});
+
+test("a 429 with no hint still cools down for a sane default", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING));
+	s = reduce(s, { type: EVENTS.RATE_LIMITED, nowMs: 0 });
+	assert.ok(s.checkCooldownUntil > 0);
+});
+
+test("the countdown counts down, rounds UP, and never goes negative", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING));
+	s = reduce(s, { type: EVENTS.RATE_LIMITED, retryAfterSeconds: 30, nowMs: 1000 });
+	assert.equal(remainingCooldownSeconds(s, 1000), 30);
+	assert.equal(remainingCooldownSeconds(s, 1500), 30, "half a second left still reads as a second");
+	assert.equal(remainingCooldownSeconds(s, 21_000), 10);
+	assert.equal(remainingCooldownSeconds(s, 31_000), 0);
+	assert.equal(remainingCooldownSeconds(s, 99_000), 0);
+});
+
+test("the cooldown lifts on its own once the clock passes it", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { can_check_status: true }));
+	s = reduce(s, { type: EVENTS.RATE_LIMITED, retryAfterSeconds: 5, nowMs: 0 });
+	assert.equal(s.canCheck, false);
+	s = reduce(s, { type: EVENTS.COOLDOWN_ELAPSED, nowMs: 6000 });
+	assert.equal(s.canCheck, true);
+	assert.equal(s.checkCooldownUntil, 0);
+});
+
+// ---------------------------------------------------------------------------
+// transport failures say nothing about the money
+// ---------------------------------------------------------------------------
+test("a transport failure does not overwrite a known payment state", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_DECLINED));
+	s = reduce(s, {
+		type: EVENTS.CONTRACT_STATE,
+		decoded: { ok: false, code: CODES.BENCH_ADMIN_UNREACHABLE, message: "timeout", data: {} },
+	});
+	assert.equal(s.code, CODES.PAYMENT_DECLINED, "the last known payment code survives");
+	assert.equal(s.value, STATES.FAILED_RETRYABLE);
+	assert.ok(s.transportError, "but the page must say the check itself failed");
+});
+
+test("a transport failure on a page that knows NOTHING renders unknown", () => {
+	const s = reduce(initialState(), {
+		type: EVENTS.CONTRACT_STATE,
+		decoded: { ok: false, code: CODES.BENCH_ADMIN_UNREACHABLE, message: "timeout", data: {} },
+	});
+	assert.equal(s.value, STATES.UNKNOWN);
+});
+
+// ---------------------------------------------------------------------------
+// the day-one guard
+// ---------------------------------------------------------------------------
+test("BENCH_NO_SIGNUP_CONTEXT is a fresh start, never a support screen", () => {
+	const s = reduce(initialState(), {
+		type: EVENTS.CONTRACT_STATE,
+		decoded: { ok: false, code: CODES.BENCH_NO_SIGNUP_CONTEXT, message: "", data: {} },
+	});
+	assert.equal(s.value, STATES.REVIEW);
+	assert.equal(s.notStarted, true);
+});
+
+// ---------------------------------------------------------------------------
+// the money-parked refusal
+// ---------------------------------------------------------------------------
+test("BENCH_AWAITING_RECONCILIATION suppresses the pay affordance", () => {
+	let s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, { can_initiate_payment: true }));
+	s = reduce(s, {
+		type: EVENTS.CONTRACT_STATE,
+		decoded: {
+			ok: false,
+			code: CODES.BENCH_AWAITING_RECONCILIATION,
+			message: "still confirming",
+			recovery: "check_status",
+			data: {},
+		},
+	});
+	assert.equal(s.canInitiate, false);
+	assert.equal(s.awaitingReconciliation, true);
+});
+
+test("BENCH_AWAITING_RECONCILIATION also arrives from the SIGNUP submit path", () => {
+	// start_signup refuses too, not only initiate: money is parked and the one
+	// thing that must not happen next is another checkout - including a fresh
+	// one opened by clicking Pay on a page that thinks nothing has started.
+	let s = reduce(initialState(), { type: EVENTS.SUBMIT_REVIEW });
+	assert.equal(s.value, STATES.STARTING_SIGNUP);
+	s = reduce(s, {
+		type: EVENTS.CONTRACT_STATE,
+		decoded: {
+			ok: false,
+			code: CODES.BENCH_AWAITING_RECONCILIATION,
+			message: "we're still confirming a payment on this signup",
+			recovery: "check_status",
+			data: {},
+		},
+	});
+	assert.equal(s.value, STATES.UNKNOWN);
+	assert.equal(s.awaitingReconciliation, true);
+	assert.equal(s.canInitiate, false);
+	assert.equal(s.canCheck, true, "check status is the recovery this code names");
+	assert.equal(s.busy, null);
+});
+
+test("the reconciliation FLAG on an ordinary pending answer also suppresses it", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+		can_initiate_payment: false,
+		awaiting_manual_reconciliation: true,
+	}));
+	assert.equal(s.awaitingReconciliation, true);
+	assert.equal(s.canInitiate, false);
+});
+
+// ---------------------------------------------------------------------------
+// illegal transitions
+// ---------------------------------------------------------------------------
+test("unknown -> provisioning is illegal and throws in strict mode", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING));
+	assert.throws(() => reduce(s, { type: EVENTS.PROVISIONING_STARTED }, { strict: true }));
+});
+
+test("an illegal transition in production is ignored and counted, never applied", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING));
+	const out = reduce(s, { type: EVENTS.PROVISIONING_STARTED });
+	assert.equal(out.value, STATES.UNKNOWN);
+	assert.equal(out.illegalTransitions, 1);
+});
+
+test("a checkout cannot be opened from a state with no handles", () => {
+	const s = initialState();
+	assert.throws(() => reduce(s, { type: EVENTS.CHECKOUT_OPENED }, { strict: true }));
+});
+
+// ---------------------------------------------------------------------------
+// the provisioning boundary
+// ---------------------------------------------------------------------------
+test("provisioning is owned by the readiness gate, not by the payment endpoints", () => {
+	assert.equal(provisioningOwner(STATES.PROVISIONING), "readiness");
+	assert.equal(provisioningOwner(STATES.PROVISIONING_DELAYED), "readiness");
+	assert.equal(provisioningOwner(STATES.UNKNOWN), "payment");
+	assert.equal(provisioningOwner(STATES.CONFIRM_REQUIRED), "payment");
+});
+
+test("isTerminalForPayment covers exactly the states that must never show a pay button", () => {
+	assert.equal(isTerminalForPayment(STATES.PAID), true);
+	assert.equal(isTerminalForPayment(STATES.PROVISIONING), true);
+	assert.equal(isTerminalForPayment(STATES.PROVISIONING_DELAYED), true);
+	assert.equal(isTerminalForPayment(STATES.FAILED_TERMINAL), true);
+	assert.equal(isTerminalForPayment(STATES.RECONNECT), true);
+	assert.equal(isTerminalForPayment(STATES.UNKNOWN), false);
+	assert.equal(isTerminalForPayment(STATES.FAILED_RETRYABLE), false);
+});
+
+// ---------------------------------------------------------------------------
+// rehydration: server truth wins over anything the page remembers
+// ---------------------------------------------------------------------------
+test("REHYDRATE takes the summary from the server context, never from a prefill", () => {
+	const s = reduce(initialState(), CONTRACT({
+		code: CODES.PAYMENT_CONFIRMATION_PENDING,
+		data: {
+			attempt_id: "att_9",
+			generation: 1,
+			email: "real@customer.com",
+			company: "Acme",
+			plan: { name: "pro", label: "Pro" },
+			amount_inr: 12000,
+			due_today_inr: 12000,
+		},
+		context: { email: "real@customer.com", company: "Acme", plan_label: "Pro" },
+	}));
+	assert.equal(s.summary.email, "real@customer.com");
+	assert.equal(s.summary.company, "Acme");
+	assert.equal(s.summary.planLabel, "Pro");
+	assert.equal(s.summary.dueTodayInr, 12000);
+	assert.equal(s.attemptId, "att_9");
+});
+
+test("'last checked' is read from data, never from the persisted context", () => {
+	// Zero-write polling: in steady state the persisted context deliberately
+	// keeps a STALE payment_last_checked_at (a write per poll would clear the
+	// document cache for every request on the site). The fresh stamp rides in
+	// `data`, so a page that rendered the context's copy would tell the customer
+	// their payment was last checked minutes before it actually was.
+	const s = reduce(initialState(), CONTRACT({
+		code: CODES.PAYMENT_CONFIRMATION_PENDING,
+		data: {
+			attempt_id: "att_1",
+			generation: 1,
+			payment_last_checked_at: "2026-08-02 10:30:00.000000",
+		},
+		context: { payment_last_checked_at: "2026-08-02 09:00:00.000000" },
+	}));
+	assert.equal(s.lastCheckedAt, "2026-08-02 10:30:00.000000");
+});
+
+test("an envelope with no fresh stamp keeps the previous one rather than inventing one", () => {
+	let s = reduce(initialState(), CONTRACT({
+		code: CODES.PAYMENT_CONFIRMATION_PENDING,
+		data: { attempt_id: "att_1", generation: 1, payment_last_checked_at: "2026-08-02 10:30:00" },
+		context: {},
+	}));
+	s = reduce(s, CONTRACT({
+		code: CODES.PAYMENT_CONFIRMATION_PENDING,
+		data: { attempt_id: "att_1", generation: 1 },
+		context: { payment_last_checked_at: "2026-08-02 09:00:00" },
+	}));
+	assert.equal(s.lastCheckedAt, "2026-08-02 10:30:00");
+});
+
+test("trial disclosure survives into the summary", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_CONFIRMATION_PENDING, {
+		trial_days: 14,
+		effective_trial_days: 14,
+		due_today_inr: 0,
+		amount_inr: 999,
+		razorpay_subscription_id: "sub_1",
+	}));
+	assert.equal(s.summary.trialDays, 14);
+	assert.equal(s.summary.dueTodayInr, 0);
+	assert.equal(s.isMandate, true);
+});
