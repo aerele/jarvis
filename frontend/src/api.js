@@ -453,6 +453,12 @@ export const getAgentAdminOverview = () => call(AG + "get_agent_admin_overview")
 // rejection carries a stable `list_filter_*` code (see filterModel.js).
 export const getListFilterSchema = (viewKey) =>
 	call("jarvis.chat.list_filters.get_list_filter_schema", { view_key: viewKey });
+// plan 08 §P1-05 / M1.3: the per-view {view_key: enabled} capability map, so a
+// list can learn whether filters_v2 is on for its view BEFORE emitting any clause
+// (a rolled-back view must send zero filters_v2 on every path). Cheap — the flag
+// map only, no field catalog.
+export const getListFilterCapabilities = () =>
+	call("jarvis.chat.list_filters.list_filters_capabilities");
 export const listCustomSkillsPage = (p) => call(SK + "list_custom_skills_page", _page(p));
 export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));

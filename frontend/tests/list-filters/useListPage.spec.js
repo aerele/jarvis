@@ -640,3 +640,122 @@ describe("schema fetching", () => {
 		expect(api.filterState.value.viewKey).toBe("");
 	});
 });
+
+describe("rolled-back view (the flag contract, M1)", () => {
+	it("emits ZERO filters_v2 on the quick-filter path when the view is off (S3/M1.3)", async () => {
+		// A declaredRoot lets a quick filter become a v2 clause BEFORE the schema is
+		// fetched — the exact path that used to emit without ever consulting the flag.
+		// The mount-time capability probe closes it.
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		const fetchCapabilities = vi.fn(async () => ({ macros: false }));
+		const { api } = host({
+			fetchFn,
+			storageKey: "cap1",
+			viewKey: "macros",
+			rootDoctype: "Jarvis Macro",
+			quickClauses: { enabled: "enabled" },
+			initialFilters: { enabled: "1" },
+			fetchCapabilities,
+		});
+		await flushPromises();
+		expect(fetchCapabilities).toHaveBeenCalled();
+		expect(fetchFn.mock.calls[0][0].filters_v2).toEqual([]);
+		// legacy transport still carries the quick filter, so the list is not broken
+		expect(fetchFn.mock.calls[0][0].filters).toEqual({ enabled: "1" });
+		// and a RUNTIME quick change still emits no v2
+		await api.setFilters({ enabled: "0" });
+		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
+	});
+
+	it("does not apply or count a shared link's filters when off, and says so (M1.4)", async () => {
+		const fetchFn = vi.fn(async () => ({ rows: [{ name: "a" }], total: 1 }));
+		const fetchCapabilities = vi.fn(async () => ({ macros: false }));
+		const param = JSON.stringify({
+			v: 1,
+			k: "macros",
+			c: [["Jarvis Macro", "macro_name", "like", "x"]],
+		});
+		const { route, router } = routerDouble({ [URL_PARAM]: param });
+		const fetchSchema = vi.fn();
+		const { api } = host({
+			fetchFn,
+			storageKey: "cap2",
+			viewKey: "macros",
+			route,
+			router,
+			fetchSchema,
+			fetchCapabilities,
+		});
+		await flushPromises();
+		// not applied (unfiltered rows), not counted (zero badge), and honestly noticed
+		expect(fetchFn.mock.calls[0][0].filters_v2).toEqual([]);
+		expect(api.filterState.value.activeCount).toBe(0);
+		expect(api.filterState.value.filtersDisabled).toBe(true);
+		expect(api.filterNotice.value).toMatch(/turned off for this list/);
+		// distinct DISABLED state, and no catalog fetch a retry could chase (UX1)
+		expect(api.filterSchemaState.value).toBe("disabled");
+		await api.requestSchema();
+		expect(fetchSchema).not.toHaveBeenCalled();
+	});
+
+	it("renders a disabled view distinctly from a transient schema failure (UX1)", async () => {
+		const disabled = host({
+			fetchFn: vi.fn(async () => ({ rows: [], total: 0 })),
+			storageKey: "cap3",
+			viewKey: "macros",
+			fetchSchema: vi.fn(async () => ({
+				ok: false,
+				error: { code: "list_filter_view_rolled_back", message: "off" },
+			})),
+		});
+		await flushPromises();
+		await disabled.api.requestSchema();
+		expect(disabled.api.filterSchemaState.value).toBe("disabled");
+
+		let attempts = 0;
+		const transient = host({
+			fetchFn: vi.fn(async () => ({ rows: [], total: 0 })),
+			storageKey: "cap4",
+			viewKey: "skills",
+			fetchSchema: vi.fn(async () => {
+				attempts += 1;
+				throw envelopeError("list_filter_schema_unavailable", "Down.");
+			}),
+		});
+		await flushPromises();
+		await transient.api.requestSchema();
+		expect(transient.api.filterSchemaState.value).toBe("error"); // transient keeps retry
+		await transient.api.requestSchema();
+		expect(attempts).toBe(2); // a transient failure CAN be retried; disabled cannot
+	});
+
+	it("reports bounded AND skipped together, each naming its field (N4/UX2)", async () => {
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
+		const big = "x".repeat(1001);
+		const param = JSON.stringify({
+			v: 1,
+			k: "skills",
+			c: [
+				["Jarvis Custom Skill", "description", "like", "keep"],
+				["Jarvis Custom Skill", "description", "like", big], // bounded (too large)
+				["Jarvis Custom Skill", "description", "NOPE", "y"], // skipped (bad operator)
+			],
+		});
+		const { route, router } = routerDouble({ [URL_PARAM]: param });
+		const { api } = host({
+			fetchFn,
+			storageKey: "n4",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
+		await flushPromises();
+		const notice = api.filterNotice.value;
+		expect(notice).toMatch(/too large to apply/); // bounded reported
+		expect(notice).toMatch(/wasn't valid|not valid/); // skipped reported — BOTH, not one
+		expect(notice).toMatch(/Description/); // UX2: the field is named
+		expect(fetchFn.mock.calls[0][0].filters_v2).toHaveLength(1); // only the good one
+	});
+});

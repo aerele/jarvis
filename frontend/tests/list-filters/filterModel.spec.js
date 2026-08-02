@@ -24,6 +24,9 @@ import {
 	attributeError,
 	isUrlPayloadTooLarge,
 	skippedNotice,
+	boundedNotice,
+	nameList,
+	labelsFor,
 	OPERATORS,
 	timespanLabel,
 	toDatetimeInput,
@@ -539,6 +542,43 @@ describe("reconciliation against this caller's catalog (plan §8 steps 3-4)", ()
 	});
 });
 
+describe("notices name the affected fields (UX2)", () => {
+	const index = schemaIndex(SCHEMA);
+
+	it("nameList reads as a person would say it", () => {
+		expect(nameList([])).toBe("");
+		expect(nameList(["Description"])).toBe("Description");
+		expect(nameList(["Description", "Enabled"])).toBe("Description and Enabled");
+		expect(nameList(["A", "B", "C", "D"])).toBe("A, B and 2 more");
+	});
+
+	it("labelsFor resolves catalog labels and skips fields absent from it", () => {
+		expect(
+			labelsFor([{ doctype: "Jarvis Custom Skill", fieldname: "description" }], index)
+		).toEqual([DESCRIPTION.label]);
+		// a field NOT in the catalog yields no label (a raw fieldname is not a label)
+		expect(
+			labelsFor([{ doctype: "Jarvis Custom Skill", fieldname: "skill_bundle" }], index)
+		).toEqual([]);
+	});
+
+	it("boundedNotice / skippedNotice name the fields when the catalog can resolve them", () => {
+		const labels = [DESCRIPTION.label];
+		expect(boundedNotice(1, labels)).toMatch(new RegExp(`The ${DESCRIPTION.label} filter`));
+		expect(boundedNotice(1, labels)).toMatch(/too large to apply/);
+		expect(skippedNotice(1, labels)).toMatch(new RegExp(`The ${DESCRIPTION.label} filter`));
+		// with no resolvable labels it falls back to the honest count
+		expect(boundedNotice(2, [])).toMatch(/^2 filters in this link were too large/);
+		expect(skippedNotice(2, [])).toMatch(/^2 filters in this link were not valid/);
+	});
+
+	it("droppedNotice names a field when it IS still in the catalog", () => {
+		expect(
+			droppedNotice([{ doctype: "Jarvis Custom Skill", fieldname: "description" }], index)
+		).toMatch(new RegExp(`^${DESCRIPTION.label} is no longer available`));
+	});
+});
+
 describe("server error codes → what the panel does", () => {
 	// The exact shape frappe-ui's `call` builds for a deliberate 4xx: the human
 	// message from _server_messages, then the response body's `message` key —
@@ -581,7 +621,10 @@ describe("server error codes → what the panel does", () => {
 			list_filter_query_too_expensive: "cost",
 			list_filter_unknown_field: "schema",
 			list_filter_invalid_operator: "schema",
-			list_filter_view_not_filterable: "schema",
+			// A view that is off (never migrated, or rolled back by the flag) is a
+			// DISABLED state — no retry — not a transient schema failure (UX1).
+			list_filter_view_not_filterable: "disabled",
+			list_filter_view_rolled_back: "disabled",
 			list_filter_too_many_clauses: "cap",
 			list_filter_too_many_values: "cap",
 			list_filter_invalid_value: "row",

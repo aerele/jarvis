@@ -486,8 +486,17 @@ number is rejected with `list_filter_invalid_value` (`_as_number` parses with
 `float()` and checks `math.isfinite`), so a hand-edited URL or direct API call
 cannot answer a different question from the one asked, and a non-finite value can
 never reach the DB binder as a driver error outside the stable code. `Int`/
-`Duration` keep Frappe's `cint` truncation of a *finite* fractional value
-(`"3.7"` → `3`) — documented, not silent.
+`Duration` truncate a *finite* fractional value toward zero (`"3.7"` → `3`,
+`int(float(...))`, matching `cint`) — documented, not silent.
+
+**Thousands separators (S10).** `frappe.utils.flt` strips commas before parsing
+(`s.replace(",", "")`), so a human-shaped `"10,500.50"` is a valid number in
+Frappe. `_as_number` now does the same strip BEFORE the strict `float()` +
+`isfinite` check, and — critically — binds the SAME stripped value it validated
+(one parser for validate and bind), so the number the DB sees is provably the
+number that passed the finite check. `"abc"`, `"1,2,a"` and non-finite values are
+still rejected after the strip; the comma strip widens acceptance to real numbers,
+it does not open a hole.
 
 ## D15 — Long Text inherits Data's operator set (effective-Data, stricter)
 
@@ -510,16 +519,34 @@ neither scrubs it nor gives it a map row, i.e. it offers `Between` on a prose bo
 their own row (Code, HTML Editor, Markdown Editor, Color, Password) keep it
 (`original_type` wins) and are unaffected.
 
-## D16 — two Table fields to one child DocType share one `EXISTS` (explicit)
+## D16 — child `EXISTS` is scoped to the containers the caller may read (M2)
 
 When a parent reaches ONE child DocType through TWO Table fields, the catalog
 lists each child field ONCE (deduped by `(child DocType, fieldname)` via `seen`),
 and a clause on that child compiles to a single `EXISTS` keyed by the child
-DocType (D4) — so it matches a row reached through **either** container. This is
-the known `parentfield` ambiguity, now made explicit and tested
-(`TestTwoTableFieldsSameChild`) rather than left to chance. If a future surface
-needs container-specific child filtering it must carry the `parentfield` on the
-clause; deferred until a real surface needs it.
+DocType (D4). That `EXISTS` now binds
+`parentfield IN (<containers this caller may read>)`, computed at schema build
+from the readable containers for that child DocType and carried on the entry as
+`parentfields`.
+
+This CLOSES a container-permission bypass (round-2 M2). The old `EXISTS` matched
+`parent = ... AND parenttype = ...` only, so it matched **any** row of the child
+DocType attached to the parent — including rows under a *sibling* Table field the
+caller cannot read (its own permlevel raised, or the endpoint withholding it via
+`excluded_fields`). Because the same child DocType, same `parent` and same
+`parenttype` are shared across containers and told apart only by `parentfield`,
+a floor user filtering through a readable container leaked rows attached to the
+hidden one, character by character. Binding `parentfield IN (readable containers)`
+removes exactly those rows.
+
+The same-row semantics survive: a matching child row has ONE `parentfield`, so two
+clauses inside the one `EXISTS` are still satisfied by the SAME row under the SAME
+readable container. The both-readable case is unchanged — a System Manager (or any
+role that reads every container) gets every container in the bound set and keeps
+matching a row under either. Verified by `TestContainerParentfieldLeak`
+(behavioural leak + floor-user bind + privileged both-container + view-exclusion)
+and `TestMultiSelectContainerParentfieldScoping` (the Table MultiSelect
+equivalent, whose binding is keyed on the container fieldname identically).
 
 ## Runtime capability flag + telemetry (round-2 P1-05)
 
@@ -532,6 +559,22 @@ clause; deferred until a real surface needs it.
   stale client still sends is answered or coded, never silently dropped
   (do-not-regress rule 8). `list_filters_capabilities()` exposes the
   `{view_key: enabled}` map so a surface can pick transport at mount.
+- **The kill switch fails CLOSED (M1).** The valid shapes for
+  `jarvis_list_filters_v2_off` are a list of view-key strings, a single string, or
+  absent/empty. ANYTHING else — a bool (`true`), an int, a dict, a list with a
+  non-string member — is a misconfiguration, and a rollback switch must never fail
+  open on one. `_disabled_views` used to raise inside its set comprehension on a
+  bool and fall through to `set()` (silently re-enabling every view the operator
+  meant to disable); it now disables EVERY migrated view and writes one deduped,
+  loud `frappe.log_error`. Over-disabling is the safe direction; a typo can never
+  silently re-enable.
+- **Rolled-back ≠ never-migrated (M1).** `get_list_filter_schema` distinguishes a
+  MIGRATED view rolled back by the flag (`list_filter_view_rolled_back` —
+  "Filters are turned off for this list", no client retry) from a genuinely
+  unmigrated one (`list_filter_view_not_filterable` — "not supported yet"). The two
+  used to share one code and message, so a shared link's filters vanished behind an
+  active-looking badge with no honest notice; the client now tells the truth about
+  which case it is in.
 - **Structural telemetry.** `emit_filter_telemetry` logs, through a dedicated
   INFO logger (the `latency.py` pattern), one line per compiled request: view,
   clause count, whether a child clause was used, the per-clause `{fieldtype,
