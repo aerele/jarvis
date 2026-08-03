@@ -123,31 +123,36 @@ def _read_and_clear_turn_flag(conversation: str) -> bool:
 		return False
 
 
-# Global-default key under which a randomly-generated per-site salt is persisted
-# on the rare site that has no encryption_key. Written once, read thereafter.
-_SALT_DEFAULT_KEY = "jarvis_telemetry_user_salt"
+# Process-local random salt, generated once, used ONLY on the rare site that has
+# no encryption_key. Deliberately NOT persisted to the DB: _user_hash runs in the
+# hot, best-effort telemetry path, and a DB write there is both a side effect
+# telemetry must never have and a cache-clearing hazard (frappe.db.set_default
+# clears the defaults cache, which broke an unrelated tool-telemetry turn flag).
+# Per-process is enough here - it is not the public site name (the actual defect),
+# it is not reversible without the secret, and it is stable within a worker so
+# events still group; a best-effort analytics salt need not survive a restart.
+_fallback_salt = ""
 
 
 def _site_salt() -> str:
-	"""A stable, per-site secret used to salt user hashes so a bare email digest
-	is not rainbow-reversible over the small, enumerable address space.
+	"""A stable secret used to salt user hashes so a bare email digest is not
+	rainbow-reversible over the small, enumerable address space.
 
 	Prefer Frappe's own ``encryption_key`` (per-site, in site_config.json, present
 	on every provisioned site, never emitted to any log). On the rare site missing
-	one, generate a random salt ONCE and persist it as a global default so it is
-	stable across restarts - crucially NOT the site name, which the telemetry line
-	itself emits in cleartext (a public salt is equivalent to no salt). Read-only
-	via ``frappe.conf`` (never ``get_encryption_key``, which would WRITE a key).
-	Best-effort: any failure yields "" so telemetry never breaks a tool call."""
+	one, use a process-local random salt generated once - crucially NOT the site
+	name, which the telemetry line itself emits in cleartext (a public salt is
+	equivalent to no salt), and NOT a DB-persisted value (no write in this hot
+	path). Read-only via ``frappe.conf`` (never ``get_encryption_key``, which would
+	WRITE a key). Best-effort: any failure yields "" so telemetry never breaks."""
 	try:
 		key = frappe.conf.get("encryption_key")
 		if key:
 			return key
-		salt = frappe.db.get_default(_SALT_DEFAULT_KEY)
-		if not salt:
-			salt = frappe.generate_hash(length=32)
-			frappe.db.set_default(_SALT_DEFAULT_KEY, salt)
-		return salt
+		global _fallback_salt
+		if not _fallback_salt:
+			_fallback_salt = frappe.generate_hash(length=32)
+		return _fallback_salt
 	except Exception:
 		return ""
 
