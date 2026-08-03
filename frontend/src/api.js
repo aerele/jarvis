@@ -232,11 +232,19 @@ export const getPresetCatalog = () => call("jarvis.onboarding.get_preset_catalog
 // calls that. See jarvis.chat.api.get_model_catalog_ui.
 export const getModelCatalogUi = () => call("jarvis.chat.api.get_model_catalog_ui");
 export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_status");
-export const saveLlmPool = (models, preset = null, routingMode = "failover") =>
+// Persist the desired pool AND return the durable apply-operation descriptor the
+// Start-chatting controller follows (plan-05 D2). Returns (unwrapped)
+// { apply_operation: <12-key descriptor|null>, idempotency_key, resumable }.
+// The idempotency_key makes a re-call after a lost response dedupe on admin
+// rather than mint a second desired version; resumable:true with
+// apply_operation:null means the descriptor is available under the SAME key on a
+// re-call (a bench→admin timeout after a server-side retry).
+export const saveLlmPool = (models, preset = null, routingMode = "failover", idempotencyKey = "") =>
 	call("jarvis.onboarding.save_llm_pool", {
 		models: JSON.stringify(models),
 		preset: preset || "",
 		routing_mode: routingMode,
+		idempotency_key: idempotencyKey || "",
 	});
 // Tear the whole AI connection down: deletes every stored credential on the
 // bench (models[] rows + the legacy flat fields) and asks admin to delete them
@@ -272,7 +280,9 @@ export const saveLlmCreds = (args) => call("jarvis.onboarding.save_llm_creds", a
 // paste the redirected URL back → complete captures the account (no side effects).
 export const beginPoolAccountSignin = (provider, model) =>
 	call("jarvis.oauth.api.begin_pool_account_signin", { provider, model });
-// complete is capture-only → { account_ref, label, oauth_blob, account_email }
+// complete is capture-only → { capture_id, account_ref, label, account_email,
+// provider, upstream }. The oauth blob NEVER crosses the wire (plan-05 D2): the
+// server holds it under capture_id and merges it by account_ref at save time.
 export const completePoolAccountSignin = (nonce, redirectedUrl) =>
 	call("jarvis.oauth.api.complete_pool_account_signin", {
 		nonce,
@@ -280,9 +290,19 @@ export const completePoolAccountSignin = (nonce, redirectedUrl) =>
 	});
 // Device-code (Kimi) capture: begin returns { device_flow:true, user_code,
 // verification_uri, interval }; poll on `interval` → { status:"pending" } until
-// the user approves, then the same capture-only { account_ref, label, oauth_blob }.
+// the user approves, then the same capture-only { status:"ok", capture_id,
+// account_ref, label, account_email, provider, upstream } (no oauth blob).
 export const pollPoolAccountSignin = (nonce) =>
 	call("jarvis.oauth.api.poll_pool_account_signin", { nonce });
+// The current user's un-consumed, un-expired OAuth captures, so a reload (or the
+// error-banner Retry that re-runs load()) rehydrates a just-connected account
+// without a second sign-in (plan-05 D2). → { captures: [{ capture_id,
+// account_ref, label, account_email, provider, upstream, expires_at }] }.
+export const getPendingOauthCaptures = () => call("jarvis.oauth.api.list_pending_captures");
+// Revoke + erase a pending capture server-side when the customer removes an
+// unsaved just-connected account. → {}.
+export const cancelPendingOauthCapture = (captureId) =>
+	call("jarvis.oauth.api.cancel_pending_capture", { capture_id: captureId });
 
 // --- DIRECT single chat-subscription (legacy flat-field path) ---------------
 // Existing customers who onboarded a single chat subscription keep their creds
