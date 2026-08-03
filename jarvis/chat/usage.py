@@ -140,7 +140,7 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	override when it has one, else the RUNTIME identity persisted on the session
 	entry after the run (``entry.model`` / ``entry.modelProvider``). The runtime
 	half is why an unpinned conversation reports the model that actually answered
-	rather than the chain's primary: openclaw only keeps its ``model.fallbacks``
+	rather than the chain's primary: the agent only keeps its ``model.fallbacks``
 	chain live for a session with no override (see
 	``turn_handler._session_model_for``), and a failover rewrites the entry.
 

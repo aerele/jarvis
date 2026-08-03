@@ -1855,7 +1855,7 @@ class TestPrepareActorFencing(_PipelineCase):
 class _ModelRowSess(_FakeSess):
 	"""``_FakeSess`` whose ``sessions.list`` returns a caller-supplied row.
 
-	The row is the REAL openclaw payload shape, not a convenience dict: the field
+	The row is the REAL agent payload shape, not a convenience dict: the field
 	names and their casing are what ``buildGatewaySessionRow`` emits in
 	ghcr.io/openclaw/openclaw:2026.6.8 (``key``, ``model``, ``modelProvider``,
 	``totalTokensFresh``, ``inputTokens``, ``outputTokens``, ``totalTokens``), so
@@ -1948,7 +1948,7 @@ class TestReplyModelAttribution(_PipelineCase):
 		)
 
 	def test_row_without_a_model_leaves_the_stamp_blank(self):
-		# An openclaw-direct pool that never resolved a model reports no model at
+		# An agent-direct pool that never resolved a model reports no model at
 		# all. Writing "" over the field would be indistinguishable from a real
 		# answer of "unknown"; leave it blank and let the UI say nothing.
 		rid = "pmp_model_absent"
