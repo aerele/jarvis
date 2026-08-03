@@ -239,7 +239,12 @@ export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_statu
 // rather than mint a second desired version; resumable:true with
 // apply_operation:null means the descriptor is available under the SAME key on a
 // re-call (a bench→admin timeout after a server-side retry).
-export const saveLlmPool = (models, preset = null, routingMode = "failover", idempotencyKey = "") =>
+export const saveLlmPool = (
+	models,
+	preset = null,
+	routingMode = "failover",
+	idempotencyKey = ""
+) =>
 	call("jarvis.onboarding.save_llm_pool", {
 		models: JSON.stringify(models),
 		preset: preset || "",
