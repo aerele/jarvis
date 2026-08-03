@@ -107,9 +107,7 @@ class _IntroTestBase(FrappeTestCase):
 		frappe.set_user(self._orig_user)
 
 	def _seen(self, user: str) -> int:
-		return frappe.utils.cint(
-			frappe.db.get_value(USETT, {"user": user}, "home_intro_seen_version")
-		)
+		return frappe.utils.cint(frappe.db.get_value(USETT, {"user": user}, "home_intro_seen_version"))
 
 
 # --------------------------------------------------------------------------- #
@@ -267,9 +265,7 @@ class TestAckAtomicity(_IntroTestBase):
 
 		def racing_admin_write(user):
 			doc = real(user)
-			frappe.db.set_value(
-				USETT, {"user": user}, "monthly_token_limit", 50000, update_modified=False
-			)
+			frappe.db.set_value(USETT, {"user": user}, "monthly_token_limit", 50000, update_modified=False)
 			return doc
 
 		frappe.set_user(USER_A)
@@ -327,9 +323,7 @@ class TestLifecycleInvariants(_IntroTestBase):
 		convs = frappe.get_all(CONV, filters={"owner": user}, pluck="name")
 		msgs = frappe.db.count(MSG, {"conversation": ["in", convs]}) if convs else 0
 		sessions = frappe.db.count(SESSION, {"user": user})
-		row = frappe.db.get_value(
-			USETT, {"user": user}, ["month_tokens", "total_tokens"], as_dict=True
-		)
+		row = frappe.db.get_value(USETT, {"user": user}, ["month_tokens", "total_tokens"], as_dict=True)
 		return (
 			len(convs),
 			msgs,
@@ -381,9 +375,7 @@ class TestLifecycleInvariants(_IntroTestBase):
 		frappe.get_doc(
 			{"doctype": MSG, "conversation": conv, "seq": 1, "role": "user", "content": "hello"}
 		).insert(ignore_permissions=True)
-		rows = frappe.get_all(
-			MSG, filters={"conversation": conv}, fields=["seq", "role"], order_by="seq asc"
-		)
+		rows = frappe.get_all(MSG, filters={"conversation": conv}, fields=["seq", "role"], order_by="seq asc")
 		self.assertEqual([(r.seq, r.role) for r in rows], [(1, "user")])
 		frappe.set_user("Administrator")
 
@@ -407,9 +399,7 @@ class TestLifecycleInvariants(_IntroTestBase):
 			MSG, filters={"conversation": conv}, fields=["name", "seq", "role", "content"]
 		)
 		user_settings_api.mark_home_intro_seen(version=1)
-		after = frappe.get_all(
-			MSG, filters={"conversation": conv}, fields=["name", "seq", "role", "content"]
-		)
+		after = frappe.get_all(MSG, filters={"conversation": conv}, fields=["name", "seq", "role", "content"])
 		self.assertEqual(before, after)
 		self.assertEqual(len(after), 1)
 		frappe.set_user("Administrator")
@@ -434,6 +424,386 @@ class TestLifecycleInvariants(_IntroTestBase):
 		)
 		self.assertEqual(count_after, count_before)
 		self.assertEqual(count_before, 1)
+		frappe.set_user("Administrator")
+
+
+# --------------------------------------------------------------------------- #
+# 3b. Field permlevel integrity (round-two P1-02)
+# --------------------------------------------------------------------------- #
+class TestFieldPermlevelIntegrity(_IntroTestBase):
+	"""The cadence fields (``home_intro_seen_version``/``_at`` and the three
+	``business_greeting_*`` fields) are server-owned app state, written only by
+	whitelisted endpoints through raw SQL / ``db.set_value`` that bypass permlevel.
+	They now sit at permlevel 1: a Jarvis User can READ them but a generic
+	owner-level document update cannot WRITE them, so the "server owns the
+	version" invariant holds outside the dedicated endpoint (previously an
+	ordinary Desk/REST save could set the seen version to 999 and mute every
+	future introduction)."""
+
+	def test_generic_owner_document_write_cannot_mutate_server_owned_fields(self):
+		# Seed the row AS the user so if_owner holds and owner == USER_A.
+		frappe.set_user(USER_A)
+		usage.get_or_create_user_settings(USER_A)
+		# Seed GENUINE nonzero stored values through the permlevel-bypassing writers
+		# the real endpoints use (raw db.set_value, exactly like admin_set_user_limit
+		# and the greeting cadence). This is what makes the assertions below actually
+		# prove the grant: a seed-nothing test asserting the field "stays 0" is also
+		# satisfied when Frappe RESETS the field to its schema default instead of
+		# preserving the persisted DB value, so it never distinguishes the correct
+		# "stripped, DB value preserved" outcome from a broken "reset to default"
+		# one. HOME_INTRO_VERSION is 1, so the endpoint clamps any higher ack - we
+		# force 3 via raw SQL so the stored value is a real, un-defaultable number
+		# that the generic write must neither raise (to 999) nor drop (to 0).
+		# All four fields are seeded to real, un-defaultable values so a generic
+		# write that ATTEMPTS to change each one is distinguishable from both a raise
+		# and a reset-to-default. state is seeded Dismissed / hidden_at 555 (the two
+		# the old test left at their 0/"" defaults, so its "stays 0" assertions also
+		# passed under a reset-to-default and never proved the strip).
+		frappe.db.set_value(USETT, {"user": USER_A}, "home_intro_seen_version", 3, update_modified=False)
+		frappe.db.set_value(
+			USETT, {"user": USER_A}, "business_greeting_chat_count", 42, update_modified=False
+		)
+		frappe.db.set_value(
+			USETT, {"user": USER_A}, "business_greeting_state", "Dismissed", update_modified=False
+		)
+		frappe.db.set_value(
+			USETT, {"user": USER_A}, "business_greeting_hidden_at_count", 555, update_modified=False
+		)
+		frappe.db.commit()
+
+		# A plain Jarvis User performs a generic owner-level document update — the
+		# exact bypass the invariant must resist. Every attempt moves the field AWAY
+		# from its seeded value; permlevel-1 with only a read grant means Frappe
+		# strips these fields on save rather than persisting them, leaving the seeded
+		# DB value untouched.
+		doc = frappe.get_doc(USETT, {"user": USER_A})
+		doc.home_intro_seen_version = 999
+		doc.business_greeting_state = ""  # attempt to un-dismiss
+		doc.business_greeting_chat_count = 777
+		doc.business_greeting_hidden_at_count = 888
+		doc.save()  # NOT ignore_permissions: the permlevel-1 grant must win
+
+		frappe.set_user("Administrator")
+		row = frappe.db.get_value(
+			USETT,
+			{"user": USER_A},
+			[
+				"home_intro_seen_version",
+				"business_greeting_state",
+				"business_greeting_chat_count",
+				"business_greeting_hidden_at_count",
+			],
+			as_dict=True,
+		)
+		# All four seeded values SURVIVE: not raised to 999/777/888 (the write was
+		# blocked) and not dropped to their defaults (a reset-to-default bug the old
+		# ==0/=="" assertions could not have caught, since they never seeded a nonzero
+		# value for state / hidden_at to begin with).
+		self.assertEqual(cint(row.home_intro_seen_version), 3, "generic write mutated the seen version")
+		self.assertEqual(cint(row.business_greeting_chat_count), 42, "generic write mutated the chat count")
+		self.assertEqual(row.business_greeting_state, "Dismissed", "generic write un-dismissed the greeting")
+		self.assertEqual(
+			cint(row.business_greeting_hidden_at_count), 555, "generic write mutated the hidden-at count"
+		)
+
+	def test_jarvis_user_can_read_the_permlevel1_fields_via_the_grant(self):
+		"""The write-strip assertions above hold whether or not the permlevel-1 READ
+		grant exists (a user with NO permlevel-1 perm at all also cannot write), so
+		they never actually exercise the ``role: Jarvis User, permlevel: 1, read: 1``
+		DocPerm row the class docstring names. This is the other half of that promise:
+		a Jarvis User CAN read these fields. Delete the grant row and
+		``apply_fieldlevel_read_permissions`` strips the field to None - so this
+		reddens if the grant is dropped, which the strip test alone never would."""
+		frappe.set_user(USER_A)
+		usage.get_or_create_user_settings(USER_A)
+		# A real, non-default stored value so a strip is unambiguous (None != 3).
+		frappe.db.set_value(USETT, {"user": USER_A}, "home_intro_seen_version", 3, update_modified=False)
+		frappe.db.commit()
+		# The permlevel-respecting read path (what Desk/REST would apply), AS the
+		# user - Administrator is short-circuited by apply_fieldlevel_read_permissions.
+		doc = frappe.get_doc(USETT, {"user": USER_A})
+		doc.apply_fieldlevel_read_permissions()
+		self.assertEqual(
+			cint(doc.get("home_intro_seen_version")),
+			3,
+			"the permlevel-1 read grant for Jarvis User is missing - the field was stripped",
+		)
+		frappe.set_user("Administrator")
+
+	def test_mark_home_intro_seen_still_advances_via_the_endpoint(self):
+		"""The whitelisted endpoint's raw SQL bypasses permlevel, so it still
+		advances the caller's own row after the fields moved to permlevel 1."""
+		frappe.set_user(USER_A)
+		out = user_settings_api.mark_home_intro_seen(version=1)
+		self.assertTrue(out["ok"])
+		self.assertEqual(get_chat_ui_settings()["home_intro_seen_version"], 1)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._seen(USER_A), 1)
+
+	def test_endpoint_still_cannot_touch_another_users_row(self):
+		frappe.set_user(USER_B)
+		user_settings_api.mark_home_intro_seen(version=1)
+		frappe.set_user(USER_A)
+		user_settings_api.mark_home_intro_seen(version=1)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._seen(USER_A), 1)
+		self.assertEqual(self._seen(USER_B), 1)
+
+	def test_business_greeting_endpoints_still_function(self):
+		"""The greeting cadence writes through raw SQL (increment) and
+		``db.set_value`` (hide/dismiss), both permlevel-bypassing, so moving the
+		fields to permlevel 1 does not break them."""
+		from jarvis.chat import greeting
+
+		frappe.set_user(USER_A)
+		greeting.increment_new_chat_count(USER_A)
+		greeting.increment_new_chat_count(USER_A)
+		greeting.increment_new_chat_count(USER_A)
+		greeting.hide_greeting()
+		greeting.dismiss_greeting()
+		frappe.set_user("Administrator")
+		row = frappe.db.get_value(
+			USETT,
+			{"user": USER_A},
+			["business_greeting_chat_count", "business_greeting_state", "business_greeting_hidden_at_count"],
+			as_dict=True,
+		)
+		self.assertEqual(cint(row.business_greeting_chat_count), 3)
+		self.assertEqual(row.business_greeting_state, "Dismissed")
+		self.assertEqual(cint(row.business_greeting_hidden_at_count), 3)
+
+
+# --------------------------------------------------------------------------- #
+# 3c. Reset preservation (round-two P2-02)
+# --------------------------------------------------------------------------- #
+class TestResetPreservation(_IntroTestBase):
+	"""Two already-decided semantics that Plan 06 relies on but never tested:
+	clearing chat history and wiping workspace content both PRESERVE the per-user
+	seen version. A future reset refactor that added ``Jarvis User Settings`` to a
+	wipe list would silently re-onboard every user — these are that regression
+	net."""
+
+	def test_clear_chat_history_preserves_the_seen_version(self):
+		from jarvis.chat.api import clear_chat_history
+
+		frappe.set_user(USER_A)
+		conv = create_or_focus_empty()
+		frappe.get_doc(
+			{"doctype": MSG, "conversation": conv, "seq": 1, "role": "user", "content": "hi"}
+		).insert(ignore_permissions=True)
+		user_settings_api.mark_home_intro_seen(version=1)
+		clear_chat_history()
+		# The user's history is gone...
+		self.assertEqual(len(frappe.get_all(CONV, filters={"owner": USER_A})), 0)
+		# ...but the intro cadence survives, so a reload shows the compact hero.
+		self.assertEqual(get_chat_ui_settings()["home_intro_seen_version"], 1)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._seen(USER_A), 1)
+
+	def test_workspace_content_wipe_preserves_the_seen_version(self):
+		from jarvis import onboarding
+
+		# Structural net: the settings doctype must never join the wipe list.
+		self.assertNotIn(USETT, onboarding._WIPE_DOCTYPES)
+
+		frappe.set_user(USER_A)
+		user_settings_api.mark_home_intro_seen(version=1)
+		# Commit the seed so it is durable: the rollback below (which undoes the
+		# wipe's site-wide deletes) must not also revert the seen version, and
+		# mark_home_intro_seen's own UPDATE is not committed by the endpoint.
+		frappe.db.commit()
+		frappe.set_user("Administrator")
+		self.assertEqual(self._seen(USER_A), 1)
+
+		# Run the ACTUAL production wipe, then roll back its site-wide deletes (the
+		# committed seen row above is unaffected by the rollback).
+		try:
+			onboarding._wipe_workspace_content()
+			self.assertEqual(self._seen(USER_A), 1, "the workspace wipe cleared the seen version")
+		finally:
+			frappe.db.rollback()
+		self.assertEqual(self._seen(USER_A), 1)
+
+
+# --------------------------------------------------------------------------- #
+# 3d. Operator kill switch (plan-07 ruling 07-c)
+# --------------------------------------------------------------------------- #
+class TestFeatureFlag(_IntroTestBase):
+	"""``Jarvis Settings.home_intro_enabled`` (default ON) gates the welcome. Off
+	drops ``home_intro_version`` to 0 in the boot payload, so ``homeIntroDue`` is
+	false for every user and the compact hero shows — the same fail-quiet path as
+	an old backend that never sent the key (no SPA change needed)."""
+
+	def test_flag_on_offers_the_current_version(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value("Jarvis Settings", "home_intro_enabled", 1)
+		frappe.set_user(USER_A)
+		self.assertEqual(get_chat_ui_settings()["home_intro_version"], user_settings_api.HOME_INTRO_VERSION)
+		frappe.set_user("Administrator")
+
+	def test_flag_off_suppresses_the_intro(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value("Jarvis Settings", "home_intro_enabled", 0)
+		frappe.set_user(USER_A)
+		ui = get_chat_ui_settings()
+		# Version 0 => current(0) is never greater than any seen value, so the
+		# introduction is not due for anyone.
+		self.assertEqual(ui["home_intro_version"], 0)
+		frappe.set_user("Administrator")
+		# Not committed; FrappeTestCase rolls the flag back to its default.
+
+
+# --------------------------------------------------------------------------- #
+# 3d-ter. The write-path backfill for the kill switch (patch v2_11) - the D2
+# blocker: without it the very first full Jarvis Settings save disables the
+# welcome permanently and invisibly.
+# --------------------------------------------------------------------------- #
+class TestFeatureFlagBackfill(_IntroTestBase):
+	"""``home_intro_enabled`` has field default "1" and NULL=ON readers, but that
+	protects only the READ path. A full ``Jarvis Settings.save()`` (onboarding LLM
+	connect, a re-sync, ANY Desk save) coerces the unset Check to 0 via
+	``get_valid_dict`` and writes an explicit "0" row - silently disabling the
+	first-chat welcome fleet-wide with no admin action. Patch v2_11 seeds a real
+	"1" row before any such save can run, exactly as v2_09 does for
+	``persona_enabled``; it seeds ONLY when the row is absent so an admin's explicit
+	0 survives a re-run."""
+
+	_Q = ("Jarvis Settings", "home_intro_enabled")
+	_SEL = "select value from tabSingles where doctype=%s and field=%s"
+
+	def tearDown(self):
+		# These tests deliberately delete / flip the committed kill switch, and the
+		# base tearDown commits (it does not roll back). Always restore the default
+		# ON so a body that raises mid-test cannot leave the switch OFF for the rest
+		# of the run (which reads default ON in TestVeteranBackfill / TestCadence).
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value("Jarvis Settings", "home_intro_enabled", 1)
+		super().tearDown()
+
+	def test_backfill_seeds_when_absent_and_never_clobbers_admin_zero(self):
+		from jarvis.patches.v2_11_backfill_home_intro_enabled import execute as backfill
+
+		frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", self._Q)
+		backfill()
+		self.assertEqual(int(frappe.db.sql(self._SEL, self._Q)[0][0]), 1)  # absent -> seeded 1
+		frappe.db.set_single_value("Jarvis Settings", "home_intro_enabled", 0)
+		backfill()
+		self.assertEqual(int(frappe.db.sql(self._SEL, self._Q)[0][0]), 0)  # explicit 0 preserved
+		frappe.db.set_single_value("Jarvis Settings", "home_intro_enabled", 1)
+
+	def test_full_settings_save_keeps_the_welcome_on_after_backfill(self):
+		# The exact D2 sequence: an existing settings Single whose row predates the
+		# field (unset, NULL=ON at read) undergoes a full save-then-read cycle.
+		from jarvis.patches.v2_11_backfill_home_intro_enabled import execute as backfill
+
+		frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", self._Q)
+		# Sanity: NULL=ON holds at the reader while the row is absent.
+		frappe.set_user(USER_A)
+		self.assertEqual(get_chat_ui_settings()["home_intro_version"], user_settings_api.HOME_INTRO_VERSION)
+		frappe.set_user("Administrator")
+		# The backfill (the mechanism under test) seeds a real 1 BEFORE the save.
+		backfill()
+		# A full save is what onboarding LLM connect / a re-sync / any Desk save runs.
+		frappe.get_single("Jarvis Settings").save(ignore_permissions=True)
+		# The welcome must still be live: without the backfill the save coerces the
+		# unset Check to a stored 0 and this drops to 0 (the invisible kill).
+		frappe.set_user(USER_A)
+		self.assertEqual(
+			get_chat_ui_settings()["home_intro_version"],
+			user_settings_api.HOME_INTRO_VERSION,
+			"a full Jarvis Settings save disabled the welcome despite the backfill",
+		)
+		frappe.set_user("Administrator")
+		# And the stored value is a real 1, not the coerced 0.
+		self.assertEqual(int(frappe.db.sql(self._SEL, self._Q)[0][0]), 1)
+		frappe.db.set_single_value("Jarvis Settings", "home_intro_enabled", 1)
+
+	def test_save_without_backfill_writes_the_coercing_zero(self):
+		# The negative control that proves the mechanism is real (not that the save
+		# is harmless): with NO backfill, the same full save coerces the unset Check
+		# to a stored 0 and the welcome goes dark. This is the state v2_11 prevents.
+		frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", self._Q)
+		frappe.get_single("Jarvis Settings").save(ignore_permissions=True)
+		self.assertEqual(int(frappe.db.sql(self._SEL, self._Q)[0][0]), 0)
+		frappe.set_user(USER_A)
+		self.assertEqual(get_chat_ui_settings()["home_intro_version"], 0)
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value("Jarvis Settings", "home_intro_enabled", 1)
+
+
+# --------------------------------------------------------------------------- #
+# 3d-bis. Telemetry caller-hash is salted, not a bare email digest
+# --------------------------------------------------------------------------- #
+class TestTelemetryUserHash(_IntroTestBase):
+	"""``record_home_intro_event`` records the caller only as a hash, and that hash
+	must be SALTED with a site-local secret: a bare SHA1 of the email is trivially
+	reversible by dictionary/rainbow attack over the small, enumerable address
+	space. This pins the salt so a future edit cannot silently regress to a bare
+	digest of the email."""
+
+	def _emit_and_capture(self) -> dict:
+		"""Fire one event as USER_A and return the parsed JSON the sink logged (the
+		event is best-effort and writes exactly one JSON line to its logger)."""
+		import json
+
+		captured: dict = {}
+		logger = frappe.logger(user_settings_api._HOME_INTRO_LOGGER)
+		frappe.set_user(USER_A)
+		with patch.object(logger, "info", side_effect=lambda line: captured.update(json.loads(line))):
+			out = user_settings_api.record_home_intro_event(event="displayed", version=1)
+		frappe.set_user("Administrator")
+		self.assertTrue(out["ok"])
+		return captured
+
+	def test_user_hash_is_salted_not_a_bare_email_digest(self):
+		import hashlib
+
+		entry = self._emit_and_capture()
+		self.assertIn("user_hash", entry)
+		bare = hashlib.sha1(USER_A.encode()).hexdigest()[:12]
+		self.assertNotEqual(
+			entry["user_hash"], bare, "user_hash is a bare, rainbow-reversible sha1 of the email"
+		)
+		# Still a stable 12-char hex digest: same user + same site secret => same
+		# hash, so the sink can group a user's events without ever storing the email.
+		self.assertEqual(len(entry["user_hash"]), 12)
+		self.assertEqual(entry["user_hash"], self._emit_and_capture()["user_hash"])
+
+
+# --------------------------------------------------------------------------- #
+# 3e. The real first-send path (round-two P1-03 #10 / closure evidence #7)
+# --------------------------------------------------------------------------- #
+class TestRealFirstSend(_IntroTestBase):
+	"""Exercise the production ``send_message`` persist path (not a manual row
+	insert) so the transcript contract is tied to real code: the first stored
+	message is the user's own at seq 1, nothing precedes it, and the title is not
+	the raw prompt. The async worker (validate_can_send / dispatch) is mocked so
+	the test stays hermetic without an LLM or an RQ worker."""
+
+	def test_real_send_begins_the_transcript_with_the_user_message(self):
+		from jarvis.chat import api as chat_api
+
+		frappe.set_user(USER_A)
+		conv = create_or_focus_empty()
+		user_settings_api.mark_home_intro_seen(version=1)
+		with (
+			patch.object(chat_api, "validate_can_send", return_value=(True, None)),
+			patch.object(chat_api.admission, "turn_machine_enabled", return_value=False),
+			patch.object(chat_api, "_dispatch_turn", return_value=None),
+		):
+			out = chat_api.send_message(conversation=conv, message="hello there")
+		self.assertTrue(out["ok"], out)
+		rows = frappe.get_all(
+			MSG, filters={"conversation": conv}, fields=["seq", "role", "content"], order_by="seq asc"
+		)
+		# The transcript begins with the user's message at seq 1 — no welcome text,
+		# no assistant seed ahead of it.
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].seq, 1)
+		self.assertEqual(rows[0].role, "user")
+		self.assertEqual(rows[0].content, "hello there")
+		# Title is NOT the raw first message (the worker autotitles later).
+		self.assertNotEqual(frappe.db.get_value(CONV, conv, "title"), "hello there")
 		frappe.set_user("Administrator")
 
 
@@ -515,9 +885,9 @@ class TestVeteranBackfill(_IntroTestBase):
 		is the ROLE - a veteran is someone who has actually sent a message.
 		"""
 		usage.get_or_create_user_settings(USER_B)
-		conv = frappe.get_doc(
-			{"doctype": CONV, "title": "Message from Jarvis", "status": "Active"}
-		).insert(ignore_permissions=True)
+		conv = frappe.get_doc({"doctype": CONV, "title": "Message from Jarvis", "status": "Active"}).insert(
+			ignore_permissions=True
+		)
 		msg = frappe.get_doc(
 			{
 				"doctype": MSG,

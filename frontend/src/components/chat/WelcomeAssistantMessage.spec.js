@@ -13,7 +13,12 @@ import { homeIntroPersona, homeIntroSpeaker } from "@/lib/homeIntro";
  * badge, no live region, no tool row).
  */
 
-const props = (over = {}) => ({ speaker: "Jarvis", persona: "Jarvis", firstName: "Vignesh", ...over });
+const props = (over = {}) => ({
+	speaker: "Jarvis",
+	persona: "Jarvis",
+	firstName: "Vignesh",
+	...over,
+});
 
 describe("WelcomeAssistantMessage copy", () => {
 	it("greets by first name and signs with the speaker", () => {
@@ -22,7 +27,9 @@ describe("WelcomeAssistantMessage copy", () => {
 	});
 
 	it("is FROM Jara for a Jara user, name and mark together", () => {
-		const w = mount(WelcomeAssistantMessage, { props: props({ speaker: "Jara", persona: "Jara" }) });
+		const w = mount(WelcomeAssistantMessage, {
+			props: props({ speaker: "Jara", persona: "Jara" }),
+		});
 		expect(w.text()).toContain("I'm Jara, your AI teammate");
 		expect(w.text()).not.toContain("I'm Jarvis");
 		// Jara's own mark, as PersonaPill draws her.
@@ -88,7 +95,13 @@ describe("WelcomeAssistantMessage presentation honesty", () => {
 	it("is a labelled region, never a live region", () => {
 		const w = mount(WelcomeAssistantMessage, { props: props({ speaker: "Aria" }) });
 		const root = w.find("section.jv-wam");
-		expect(root.attributes("aria-label")).toBe("Welcome message from Aria");
+		const h = w.find("h1.jv-wam-sr");
+		// The name lives in ONE place — the hidden heading — and the section points
+		// at it with aria-labelledby, so a screen reader announces it once (not the
+		// old region label + heading duplicate).
+		expect(root.attributes("aria-labelledby")).toBe(h.attributes("id"));
+		expect(root.attributes("aria-label")).toBeUndefined();
+		expect(h.text()).toBe("Welcome message from Aria");
 		expect(root.attributes("aria-live")).toBeUndefined();
 		expect(root.attributes("role")).toBeUndefined(); // <section> + name IS a region
 		expect(root.attributes("data-presentation-only")).toBe("true");
@@ -103,17 +116,27 @@ describe("WelcomeAssistantMessage presentation honesty", () => {
 		expect(w.find(".jv-wam-who").exists()).toBe(false);
 	});
 
-	it("keeps a heading for screen readers, visually hidden and matching the label", () => {
-		// Replacing the hero <h1> removed the only landmark in the empty state; this
-		// puts one back without printing a name the design does not want.
+	it("restores a coherent level-one heading, visually hidden", () => {
+		// The compact hero's <h1> is replaced by the intro; the landmark returns as
+		// a visually hidden <h1> (NOT an <h2>), so the empty state keeps a single,
+		// correct top-level heading instead of jumping straight to level 2.
 		const w = mount(WelcomeAssistantMessage, { props: props({ speaker: "Aria" }) });
-		const h = w.find("h2");
+		expect(w.find("h2").exists()).toBe(false);
+		const h = w.find("h1");
 		expect(h.exists()).toBe(true);
 		expect(h.text()).toBe("Welcome message from Aria");
-		expect(h.text()).toBe(w.find("section.jv-wam").attributes("aria-label"));
 		// Visually hidden, NOT removed from the accessibility tree.
 		expect(h.classes()).toContain("jv-wam-sr");
 		expect(h.attributes("aria-hidden")).toBeUndefined();
+	});
+
+	it("gives each welcome a unique heading id so two on a page never collide", () => {
+		const a = mount(WelcomeAssistantMessage, { props: props() });
+		const b = mount(WelcomeAssistantMessage, { props: props() });
+		const idA = a.find("h1").attributes("id");
+		const idB = b.find("h1").attributes("id");
+		expect(idA).toBeTruthy();
+		expect(idA).not.toBe(idB);
 	});
 
 	it("claims no timestamp, no model and no tool activity", () => {
@@ -133,15 +156,16 @@ describe("WelcomeAssistantMessage presentation honesty", () => {
 
 /**
  * ChatView.vue cannot be mounted in a unit test (it is a ~12k-line view with a
- * socket, a router and two dozen bootstrap calls), so the two gates that live
- * in its template are pinned at the source level instead. These assertions are
- * deliberately literal: they fail loudly if someone moves the bubble out of the
- * empty-state branch or drops the greeting-banner suppression, which is exactly
- * the regression they exist to catch. They prove wiring, not behaviour.
+ * socket, a router and two dozen bootstrap calls), so the template GATES it owns
+ * are pinned at the source level. The boot/latch/ack BEHAVIOUR now lives in the
+ * useHomeIntro composable and is executed in composables/useHomeIntro.spec.js —
+ * these assertions are honestly labelled architectural tripwires (placement and
+ * wiring), not the lifecycle matrix.
  */
-describe("ChatView wiring", () => {
-	const src = fs.readFileSync(
-		path.resolve(__dirname, "../../views/ChatView.vue"),
+describe("ChatView wiring (source tripwires, not behaviour)", () => {
+	const src = fs.readFileSync(path.resolve(__dirname, "../../views/ChatView.vue"), "utf8");
+	const composable = fs.readFileSync(
+		path.resolve(__dirname, "../../composables/useHomeIntro.js"),
 		"utf8"
 	);
 
@@ -158,11 +182,17 @@ describe("ChatView wiring", () => {
 		expect(src).toContain('v-if="showHomeIntro"');
 	});
 
-	it("gates the bubble on the empty state AND the pending flag", () => {
+	it("drives the intro state from the extracted composable, not inline in the view", () => {
+		expect(src).toContain('import { useHomeIntro } from "@/composables/useHomeIntro"');
+		expect(src).toContain("} = useHomeIntro({");
+		expect(src).toContain("initHomeIntro();"); // boot init call
+	});
+
+	it("gates the bubble on the empty state AND the pending flag (in the composable)", () => {
 		// The conjunct IS the invariant. `homeIntroPending` alone would draw the
 		// bubble over a live thread; `showWelcome` alone would draw it on every
 		// empty chat forever. Dropping either half is the regression.
-		expect(src).toContain(
+		expect(composable).toContain(
 			"const showHomeIntro = computed(() => showWelcome.value && homeIntroPending.value);"
 		);
 	});
@@ -175,5 +205,25 @@ describe("ChatView wiring", () => {
 		expect(src.indexOf("<WelcomeAssistantMessage")).toBeLessThan(
 			src.indexOf('class="jv-welcome-grid"')
 		);
+	});
+
+	it("moves the welcome viewport off inline styles onto overflow-safe classes", () => {
+		// P1-01: the scroll viewport must not centre with justify-content:center
+		// (unsafe centring clips the top when the content overflows). Classes, not
+		// inline styles, so the overflow-safe rules can win and tests can target it.
+		expect(src).toContain('class="jv-welcome-scroll"');
+		expect(src).toContain('class="jv-welcome-col"');
+		expect(src).toContain("justify-content: flex-start;");
+		expect(src).toContain("margin-block: auto;");
+	});
+
+	it("routes suggestion clicks through the fill+telemetry wrapper and still fills, never sends", () => {
+		expect(src).toContain('@click="onWelcomeSuggestion(s)"');
+		// The wrapper records the category then FILLS the composer — it must not send.
+		const fn = src.slice(src.indexOf("function onWelcomeSuggestion"));
+		const body = fn.slice(0, fn.indexOf("}") + 1);
+		expect(body).toContain("noteWelcomeSuggestion(");
+		expect(body).toContain("fillInput(s.prompt)");
+		expect(body).not.toContain("sendMessage");
 	});
 });

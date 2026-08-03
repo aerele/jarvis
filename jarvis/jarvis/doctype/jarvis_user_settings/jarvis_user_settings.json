@@ -76,36 +76,49 @@
       "fieldtype": "Select",
       "label": "Business Greeting State",
       "options": "\nDismissed",
-      "description": "Merged from Jarvis User Preference. Blank = eligible for the every-third-new-chat greeting; Dismissed = permanent 'Don't ask again' (DB-only so cache flushes can't resurrect it)."
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Merged from Jarvis User Preference. Blank = eligible for the every-third-new-chat greeting; Dismissed = permanent 'Don't ask again' (DB-only so cache flushes can't resurrect it). Permlevel 1: server-owned app state, written only by jarvis.chat.greeting via raw db calls that bypass permlevel — a Jarvis User can read but never write it through a generic document update."
     },
     {
       "fieldname": "business_greeting_chat_count",
       "fieldtype": "Int",
       "label": "Business Greeting Chat Count",
       "default": "0",
-      "description": "Merged from Jarvis User Preference. Counts genuinely-new chats; drives the multiple-of-3 greeting cadence."
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Merged from Jarvis User Preference. Counts genuinely-new chats; drives the multiple-of-3 greeting cadence. Permlevel 1: server-owned (jarvis.chat.greeting.increment_new_chat_count), read-only to a Jarvis User."
     },
     {
       "fieldname": "business_greeting_hidden_at_count",
       "fieldtype": "Int",
       "label": "Business Greeting Hidden At Count",
       "default": "0",
-      "description": "Merged from Jarvis User Preference. Chat count at which the card was last 'Maybe later'-ed; keeps a refresh from re-showing it."
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Merged from Jarvis User Preference. Chat count at which the card was last 'Maybe later'-ed; keeps a refresh from re-showing it. Permlevel 1: server-owned (jarvis.chat.greeting), read-only to a Jarvis User."
     },
     {
       "fieldname": "home_intro_seen_version",
       "fieldtype": "Int",
       "label": "Home Intro Seen Version",
       "default": "0",
-      "description": "Highest chat-home introduction version this user has been shown (0 = never). Monotonic; only jarvis.chat.user_settings_api.mark_home_intro_seen writes it. Bumping HOME_INTRO_VERSION re-shows the introduction once."
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Highest chat-home introduction version this user has been shown (0 = never). Monotonic; only jarvis.chat.user_settings_api.mark_home_intro_seen writes it (raw SQL, permlevel-bypassing). Permlevel 1: a Jarvis User can read this but a generic owner-level document update CANNOT write it, so a client can neither invent a future version nor mute the next introduction. Bumping HOME_INTRO_VERSION re-shows the introduction once."
     },
     {
       "fieldname": "home_intro_seen_at",
       "fieldtype": "Datetime",
       "label": "Home Intro Seen At",
+      "permlevel": 1,
       "read_only": 1,
       "no_copy": 1,
-      "description": "When home_intro_seen_version was last advanced."
+      "description": "When home_intro_seen_version was last advanced. Permlevel 1: server-owned, read-only to a Jarvis User."
     },
     { "fieldname": "usage_limits_tab", "fieldtype": "Tab Break", "label": "Usage & limits" },
     {

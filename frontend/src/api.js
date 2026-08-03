@@ -77,6 +77,17 @@ export const setUserTheme = (theme) => call(US + "set_user_theme", { theme });
 // whose only cost is the introduction appearing once more.
 export const markHomeIntroSeen = (version) =>
 	call(US + "mark_home_intro_seen", { version: version || 0 });
+// Bounded, privacy-free chat-home introduction telemetry (displayed /
+// suggestion_selected / first_prompt). The server allow-lists every field and
+// hashes the caller — no message content, prompt text, or user name is sent.
+// Best-effort: the caller swallows failures, telemetry must never affect chat.
+export const recordHomeIntroEvent = (event, payload) =>
+	call(US + "record_home_intro_event", {
+		event,
+		version: (payload && payload.version) || 0,
+		category: (payload && payload.category) || "",
+		bucket: (payload && payload.bucket) || "",
+	});
 // Jarvis Admin (or System Manager) only — server re-checks independently of
 // the client's window.is_jarvis_admin gate.
 export const adminListUserUsage = () => call(US + "admin_list_user_usage");

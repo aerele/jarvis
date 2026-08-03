@@ -26,7 +26,7 @@
   Vue scopes styles per component and Message.vue's are not exported.
 -->
 <template>
-	<section class="jv-wam" data-presentation-only="true" :aria-label="regionLabel">
+	<section class="jv-wam" data-presentation-only="true" :aria-labelledby="headingId">
 		<div class="jv-wam-avatar">
 			<!-- Persona-consistent mark, mirroring PersonaPill (the only other place
 			     the app draws a persona): the default renders the brand mark, which
@@ -46,10 +46,13 @@
 			     (ChatView passes no `sender` to Message.vue, so no name line is drawn
 			     there either) - a bold name here would make the introduction look
 			     like a different kind of message than every reply that follows.
-			     The heading survives visually hidden: it restores the landmark that
-			     replacing the hero <h1> removed, so screen-reader heading navigation
-			     still lands on this region. Same text as the section's aria-label. -->
-			<h2 class="jv-wam-sr">{{ regionLabel }}</h2>
+			     The heading survives visually hidden as an <h1>: it RESTORES the
+			     level-one landmark that replacing the compact hero's <h1> removed, so
+			     the empty state keeps a coherent heading hierarchy and screen-reader
+			     heading navigation still lands here. It is ALSO the region's single
+			     accessible name (the section points at it with aria-labelledby), so
+			     the name is stated exactly once — no duplicate aria-label. -->
+			<h1 :id="headingId" class="jv-wam-sr">{{ regionLabel }}</h1>
 			<div class="jv-wam-body">
 				<p>Hi {{ greetingName }} — I'm {{ speaker }}, your AI teammate inside your ERP.</p>
 				<p>
@@ -69,7 +72,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from "vue";
+import { computed, onMounted, getCurrentInstance } from "vue";
 import JarvisMark from "@/components/JarvisMark.vue";
 
 const props = defineProps({
@@ -87,8 +90,12 @@ const props = defineProps({
 // A blank/absent first name (a fresh User with no full name) must not render
 // "Hi  — I'm …".
 const greetingName = computed(() => (props.firstName || "").trim() || "there");
-// One string, two consumers (the section's accessible name and the hidden
-// heading) so they can never drift apart.
+// The region's accessible name lives in exactly ONE place: the visually hidden
+// <h1>. The section names itself through aria-labelledby pointing at it, so the
+// name is announced once (region + heading no longer duplicate it). Vue 3.4 has
+// no useId; the component instance uid is unique and stable, so two welcomes on
+// one page never share an id.
+const headingId = `jv-wam-h-${getCurrentInstance()?.uid ?? 0}`;
 const regionLabel = computed(() => `Welcome message from ${props.speaker}`);
 
 // Best-effort seen-ack, fired once when the bubble actually reaches the DOM.

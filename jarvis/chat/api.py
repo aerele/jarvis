@@ -1362,7 +1362,9 @@ def get_chat_ui_settings() -> dict:
 	# fields (provider, model, tier, order) reach the browser: ``Jarvis LLM Pool
 	# Model`` also carries ``api_key`` and ``subscription_accounts`` as Password
 	# fields, which must never leave the server. Iterating the child rows (not
-	# get_all) keeps this on the already cached Single doc.
+	# get_all) reuses the Single doc already loaded above via get_single - a fresh,
+	# deliberately UNcached read (get_single, not get_cached_doc), so a just-edited
+	# pool is reflected - instead of issuing a second query.
 	#
 	# Display-provider derivation: subscription-mode rows store provider="" BY
 	# DESIGN — the write pipeline omits it to dodge a Bifrost subscription-field
@@ -1455,8 +1457,11 @@ def get_chat_ui_settings() -> dict:
 		# Chat-home introduction (the static welcome bubble): the version the SPA
 		# should render. Paired with ``home_intro_seen_version`` below - the bubble
 		# shows only while this is greater. The server owns the number so a client
-		# can neither invent one nor mute a future introduction.
-		"home_intro_version": user_settings_api.HOME_INTRO_VERSION,
+		# can neither invent one nor mute a future introduction. When the operator
+		# kill switch is off the version drops to 0, so homeIntroDue is false for
+		# every user and the compact hero shows instead - no SPA change, same
+		# fail-quiet path as an old backend that never sent the key.
+		"home_intro_version": (user_settings_api.HOME_INTRO_VERSION if _home_intro_feature_enabled() else 0),
 		# auto-apply is per-conversation now (issue #186); the frontend reads
 		# ``auto_apply`` from the conversation payload, not this global endpoint.
 	}
@@ -1477,6 +1482,22 @@ def get_chat_ui_settings() -> dict:
 	if seen is not None:
 		ui["home_intro_seen_version"] = seen
 	return ui
+
+
+def _home_intro_feature_enabled() -> bool:
+	"""The first-chat welcome kill switch (``Jarvis Settings.home_intro_enabled``),
+	NULL=ON. Delegates to turn_handler's canonical ``_jarvis_settings_flag_null_on``
+	probe - the same one behind the persona pill - so both kill switches read
+	tabSingles identically ("no row" is the default ON; only a stored 0 is OFF) and
+	neither trips the get_single_value unset-Check-coerces-to-0 trap that would ship
+	the feature OFF for every un-backfilled bench and fresh install. Best-effort
+	(N8): a read failure shows the welcome rather than 500-ing the whole bootstrap."""
+	try:
+		from jarvis.chat.turn_handler import _jarvis_settings_flag_null_on
+
+		return _jarvis_settings_flag_null_on("home_intro_enabled")
+	except Exception:
+		return True
 
 
 def _home_intro_seen_version() -> int | None:

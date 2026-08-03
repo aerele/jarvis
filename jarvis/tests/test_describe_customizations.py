@@ -374,6 +374,21 @@ class TestToolTelemetry(_CustDiscFixtures):
 		self.assertGreater(entry["result_chars"], 0)
 		self.assertNotIn("Administrator", str(entry))  # user is hashed
 
+	def test_user_hash_is_salted_not_a_bare_email_digest(self):
+		# D9: the tool-telemetry caller hash must be SALTED with a per-site secret,
+		# not a bare sha1(email) that a dictionary/rainbow attack reverses over the
+		# small, enumerable address space. Reddens if _user_hash drops the salt.
+		import hashlib
+
+		from jarvis import telemetry
+
+		email = "telemetry-hash@example.test"
+		bare = hashlib.sha1(email.encode()).hexdigest()[:12]
+		h = telemetry._user_hash(email)
+		self.assertNotEqual(h, bare, "telemetry user_hash is a bare, reversible sha1 of the email")
+		self.assertEqual(len(h), 12)
+		self.assertEqual(h, telemetry._user_hash(email))  # stable within a site
+
 	def test_untracked_tool_is_noop(self):
 		from jarvis import telemetry
 

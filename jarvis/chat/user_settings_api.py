@@ -223,6 +223,70 @@ def mark_home_intro_seen(version: int = 0) -> dict:
 	return {"ok": True, "data": {"home_intro_seen_version": seen}}
 
 
+# Chat-home introduction telemetry: a bounded, privacy-free product-analytics
+# sink (design section: Plan 06 telemetry). Everything is allow-listed - the
+# event name, the suggestion category, and the time-to-first-prompt bucket - so
+# no message content, no prompt text, and no user name can ever reach the log.
+# The caller is recorded only as a SALTED SHA1 hash (per-site secret, never the
+# email in the clear), via the same jarvis/telemetry._user_hash helper. Emits one
+# JSON line to a dedicated logger and NEVER raises (telemetry must not break the
+# empty-chat home).
+_HOME_INTRO_EVENTS = frozenset({"displayed", "acknowledged", "suggestion_selected", "first_prompt"})
+_HOME_INTRO_CATEGORIES = frozenset({"analyse", "action", "search", "draft"})
+_HOME_INTRO_BUCKETS = frozenset({"0-5s", "5-15s", "15-60s", "1-5m", "5m+", "unknown"})
+_HOME_INTRO_LOGGER = "jarvis.home_intro_telemetry"
+
+
+@frappe.whitelist()
+def record_home_intro_event(
+	event: str,
+	version: int = 0,
+	category: str = "",
+	bucket: str = "",
+) -> dict:
+	"""Record one bounded chat-home introduction telemetry event.
+
+	Fired best-effort by the SPA (welcome displayed, a suggestion category
+	chosen, time-to-first-accepted-prompt bucket). PRIVACY-BOUNDED by
+	construction: the event name, category and bucket are all allow-listed, the
+	version is an int, and the caller is stored only as a hash - no message
+	content, prompt text, or user name is ever emitted. Unknown values are
+	dropped rather than logged. Always returns ``{"ok": True}`` and never raises,
+	so a telemetry failure can never affect chat.
+	"""
+	try:
+		require_jarvis_access()
+		ev = _s(event)
+		if ev not in _HOME_INTRO_EVENTS:
+			return {"ok": True}
+		from jarvis.telemetry import _user_hash
+
+		# Caller recorded only as a SALTED SHA1 (per-site secret, never the public
+		# site name): a bare email digest is trivially reversible by dictionary/
+		# rainbow attack over the small, enumerable address space. Shared with
+		# jarvis/telemetry.py so both sinks hash identically.
+		entry = {
+			"kind": "home_intro",
+			"event": ev,
+			"ts": frappe.utils.now(),
+			"site": getattr(frappe.local, "site", None),
+			"user_hash": _user_hash(frappe.session.user),
+			"version": cint(version),
+		}
+		cat = _s(category)
+		if ev == "suggestion_selected" and cat in _HOME_INTRO_CATEGORIES:
+			entry["category"] = cat
+		bkt = _s(bucket)
+		if ev == "first_prompt" and bkt in _HOME_INTRO_BUCKETS:
+			entry["bucket"] = bkt
+		frappe.logger(_HOME_INTRO_LOGGER).info(frappe.as_json(entry))
+	except Exception:
+		# Telemetry is never load-bearing; swallow everything (incl. an access
+		# failure) so it cannot surface an error onto the empty-chat home.
+		pass
+	return {"ok": True}
+
+
 @frappe.whitelist()
 def admin_list_user_usage() -> dict:
 	"""Every user with a settings row, joined to enabled site users: usage
