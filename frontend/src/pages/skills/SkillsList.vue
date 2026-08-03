@@ -7,7 +7,7 @@
 		:total="total"
 		:has-more="hasMore"
 		:quick-filters="quickFilters"
-		:filter-defs="filterDefs"
+		:filter-state="filterState"
 		:filters="filters"
 		:sort-options="sortOptions"
 		:sort="sort"
@@ -22,6 +22,9 @@
 			description: 'Create a skill to teach Jarvis reusable instructions.',
 		}"
 		@update:filters="setFilters"
+		@update:filter-clauses="setClauses"
+		@request-filter-schema="requestSchema"
+		@dismiss-filter-notice="dismissFilterNotice"
 		@update:sort="(s) => setSort(s.field, s.dir)"
 		@update:page-length="(v) => (pageLength = v)"
 		@load-more="loadMore"
@@ -112,7 +115,7 @@
 // (apply pipeline status, 3s poll while pending), bulk delete with skip
 // reasons (owner-only rows), rows → /skills/:id, New Skill → /skills/new.
 import { ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { Button, Badge, Avatar, Tooltip, Dropdown, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
@@ -123,6 +126,10 @@ import * as api from "@/api";
 import * as apiSkills from "@/api/skills";
 
 const router = useRouter();
+// /skills is a TABBED shell (Skills | Learning), so the `fv2` query param is
+// shared with a sibling tab; the payload carries its view key and a foreign one
+// is ignored rather than half-applied (judgment C08-7).
+const route = useRoute();
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
@@ -140,11 +147,6 @@ const ENABLED_OPTIONS = [
 	{ label: "All", value: "" },
 	{ label: "Enabled", value: "1" },
 	{ label: "Disabled", value: "0" },
-];
-const INVOCABLE_OPTIONS = [
-	{ label: "All", value: "" },
-	{ label: "Invocable", value: "1" },
-	{ label: "Not invocable", value: "0" },
 ];
 
 const columns = [
@@ -164,11 +166,17 @@ const quickFilters = [
 	{ key: "scope", label: "Ownership", type: "select", options: OWNERSHIP_OPTIONS },
 	{ key: "enabled", label: "Status", type: "select", options: ENABLED_OPTIONS },
 ];
-const filterDefs = [
-	{ key: "scope", label: "Ownership", type: "select", options: OWNERSHIP_OPTIONS },
-	{ key: "enabled", label: "Status", type: "select", options: ENABLED_OPTIONS },
-	{ key: "user_invocable", label: "User invocable", type: "select", options: INVOCABLE_OPTIONS },
-];
+// plan 08 wave 1: the curated `filterDefs` array is GONE as the filter catalog.
+// The Filter panel is now generated from the server schema for view_key
+// "skills", so every readable field of Jarvis Custom Skill (plus its standard
+// fields) is filterable — `user_invocable`, which used to need this array, is
+// simply one of them now.
+//
+// `enabled` is the one quick control with a 1:1 canonical field behind it, so it
+// synchronises both ways with the panel. `scope` stays legacy-only on purpose:
+// mine|shared is an OWNERSHIP pseudo-filter over a server-authored share list,
+// not the doctype's `scope` field (see list_registry's note on this view).
+const QUICK_CLAUSES = { enabled: "enabled" };
 
 const sortOptions = [
 	{ label: "Name", value: "skill_name" },
@@ -189,6 +197,10 @@ const {
 	pageLength,
 	resetLoad,
 	loadMore,
+	filterState,
+	setClauses,
+	requestSchema,
+	dismissFilterNotice,
 } = useListPage({
 	fetchFn: (p) => {
 		// the backend whitelists filter keys and throws on "search" - strip it
@@ -198,6 +210,14 @@ const {
 	},
 	defaultSort: DEFAULT_SORT,
 	storageKey: "skills",
+	viewKey: "skills",
+	quickClauses: QUICK_CLAUSES,
+	// The view's identity (it mirrors this view's list_registry entry), NOT a
+	// field catalog — that only ever comes from the server. It lets a quick
+	// filter become a canonical, shareable clause before the catalog is fetched.
+	rootDoctype: "Jarvis Custom Skill",
+	route,
+	router,
 });
 
 function getRowRoute(row) {
