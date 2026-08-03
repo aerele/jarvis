@@ -123,8 +123,40 @@ def _read_and_clear_turn_flag(conversation: str) -> bool:
 		return False
 
 
+# Global-default key under which a randomly-generated per-site salt is persisted
+# on the rare site that has no encryption_key. Written once, read thereafter.
+_SALT_DEFAULT_KEY = "jarvis_telemetry_user_salt"
+
+
+def _site_salt() -> str:
+	"""A stable, per-site secret used to salt user hashes so a bare email digest
+	is not rainbow-reversible over the small, enumerable address space.
+
+	Prefer Frappe's own ``encryption_key`` (per-site, in site_config.json, present
+	on every provisioned site, never emitted to any log). On the rare site missing
+	one, generate a random salt ONCE and persist it as a global default so it is
+	stable across restarts - crucially NOT the site name, which the telemetry line
+	itself emits in cleartext (a public salt is equivalent to no salt). Read-only
+	via ``frappe.conf`` (never ``get_encryption_key``, which would WRITE a key).
+	Best-effort: any failure yields "" so telemetry never breaks a tool call."""
+	try:
+		key = frappe.conf.get("encryption_key")
+		if key:
+			return key
+		salt = frappe.db.get_default(_SALT_DEFAULT_KEY)
+		if not salt:
+			salt = frappe.generate_hash(length=32)
+			frappe.db.set_default(_SALT_DEFAULT_KEY, salt)
+		return salt
+	except Exception:
+		return ""
+
+
 def _user_hash(user: str | None) -> str:
-	return hashlib.sha1((user or "").encode()).hexdigest()[:12]
+	"""SHA1 of the caller, SALTED with a per-site secret (never the public site
+	name) and truncated - stable within a site so events can be grouped, but not a
+	bare email digest that a dictionary/rainbow attack could reverse."""
+	return hashlib.sha1(f"{_site_salt()}:{user or ''}".encode()).hexdigest()[:12]
 
 
 def _result_chars(result) -> int:

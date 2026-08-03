@@ -1362,7 +1362,9 @@ def get_chat_ui_settings() -> dict:
 	# fields (provider, model, tier, order) reach the browser: ``Jarvis LLM Pool
 	# Model`` also carries ``api_key`` and ``subscription_accounts`` as Password
 	# fields, which must never leave the server. Iterating the child rows (not
-	# get_all) keeps this on the already cached Single doc.
+	# get_all) reuses the Single doc already loaded above via get_single - a fresh,
+	# deliberately UNcached read (get_single, not get_cached_doc), so a just-edited
+	# pool is reflected - instead of issuing a second query.
 	#
 	# Display-provider derivation: subscription-mode rows store provider="" BY
 	# DESIGN — the write pipeline omits it to dodge a Bifrost subscription-field

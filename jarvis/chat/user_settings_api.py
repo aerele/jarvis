@@ -227,9 +227,10 @@ def mark_home_intro_seen(version: int = 0) -> dict:
 # sink (design section: Plan 06 telemetry). Everything is allow-listed - the
 # event name, the suggestion category, and the time-to-first-prompt bucket - so
 # no message content, no prompt text, and no user name can ever reach the log.
-# The caller is recorded only as a salted-free SHA1 hash, exactly like
-# jarvis/telemetry.py. Emits one JSON line to a dedicated logger and NEVER raises
-# (telemetry must not break the empty-chat home).
+# The caller is recorded only as a SALTED SHA1 hash (per-site secret, never the
+# email in the clear), via the same jarvis/telemetry._user_hash helper. Emits one
+# JSON line to a dedicated logger and NEVER raises (telemetry must not break the
+# empty-chat home).
 _HOME_INTRO_EVENTS = frozenset({"displayed", "acknowledged", "suggestion_selected", "first_prompt"})
 _HOME_INTRO_CATEGORIES = frozenset({"analyse", "action", "search", "draft"})
 _HOME_INTRO_BUCKETS = frozenset({"0-5s", "5-15s", "15-60s", "1-5m", "5m+", "unknown"})
@@ -258,25 +259,18 @@ def record_home_intro_event(
 		ev = _s(event)
 		if ev not in _HOME_INTRO_EVENTS:
 			return {"ok": True}
-		import hashlib
+		from jarvis.telemetry import _user_hash
 
-		# Salt the caller hash with a stable per-site secret before truncating: a
-		# bare SHA1 of the email is trivially reversible by dictionary/rainbow attack
-		# over the small, enumerable address space. encryption_key is Frappe's own
-		# per-site secret (site_config.json), present on every provisioned site and
-		# constant across restarts, so the same user still hashes to the same value
-		# within a site but the digest is no longer a bare email hash. Read-only via
-		# frappe.conf (never get_encryption_key, which would WRITE a key on the rare
-		# site missing one); on that theoretical site we fall back to the site name -
-		# a weak salt, but still not a bare email digest and it can never break this
-		# best-effort telemetry.
-		salt = frappe.conf.get("encryption_key") or getattr(frappe.local, "site", "") or ""
+		# Caller recorded only as a SALTED SHA1 (per-site secret, never the public
+		# site name): a bare email digest is trivially reversible by dictionary/
+		# rainbow attack over the small, enumerable address space. Shared with
+		# jarvis/telemetry.py so both sinks hash identically.
 		entry = {
 			"kind": "home_intro",
 			"event": ev,
 			"ts": frappe.utils.now(),
 			"site": getattr(frappe.local, "site", None),
-			"user_hash": hashlib.sha1(f"{salt}:{frappe.session.user or ''}".encode()).hexdigest()[:12],
+			"user_hash": _user_hash(frappe.session.user),
 			"version": cint(version),
 		}
 		cat = _s(category)
