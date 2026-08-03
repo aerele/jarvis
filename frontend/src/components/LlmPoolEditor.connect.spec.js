@@ -150,6 +150,30 @@ describe("§10.3 API-key probe gate (P0-09)", () => {
 		expect(w.vm.startBlockedReason).toMatch(/test/i);
 	});
 
+	it("re-typing the EXACT previously-probed key still requires a re-probe (pass is reset, not just shadowed)", async () => {
+		const w = await mountOnboarding();
+		const r = await makeApiKeyRow(w); // apiKey "sk-live"
+		api.testLlmApiKey.mockResolvedValue({ ok: true, checks: [{ detail: "accepted" }] });
+		await w.vm.testSingleModeRow();
+		await flushPromises();
+		expect(w.vm.canStart).toBe(true);
+
+		// Edit AWAY, then back to the exact value the pass was earned on.
+		r.apiKey = "sk-different";
+		await flushPromises();
+		expect(w.vm.canStart).toBe(false);
+
+		r.apiKey = "sk-live";
+		await flushPromises();
+		// The stored pass was CLEARED on the first edit, so identity-equality alone must
+		// not re-enable Start - the customer must probe the reinstated key again. (A
+		// mutant that drops the passIdentity reset would show canStart=true here with no
+		// visible green probe.)
+		expect(w.vm.canStart).toBe(false);
+		expect(w.vm.smTest.result).toBe(null);
+		expect(w.vm.startBlockedReason).toMatch(/test/i);
+	});
+
 	it("a local provider (ollama) needs NO probe to Start", async () => {
 		const w = await mountOnboarding();
 		await makeApiKeyRow(w, { provider: "ollama", model: "llama3", apiKey: "" });

@@ -246,6 +246,32 @@ describe("§10.4 resume, resumable, terminal semantics", () => {
 		expect(routerReplace).toHaveBeenCalledTimes(1);
 	});
 
+	it("a descriptor-less refusal with a cooldown is a truthful retry, NOT a readiness poll", async () => {
+		// Operation path (mode:"operation"), no descriptor, not resumable, carrying a
+		// rate-limit cooldown: this is a SAVE refusal, not a legacy fallback. It must
+		// enter the cooldown retry state and must NOT drift into followLegacyReadiness
+		// (which would silently poll isReadyForChat for ~75s). Pins the mode==="legacy"
+		// branch guard in resolveAndFollow.
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({ apply_operation: null, resumable: false, mode: "operation", retry_after_seconds: 30 }),
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear(); // ignore the one mount-time readiness probe
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await p;
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.retryAfter).toBe(30); // the truthful cooldown, not a spinner
+		expect(api.isReadyForChat).not.toHaveBeenCalled(); // did NOT fall into the legacy poll
+		expect(api.getLlmApplyOperation).not.toHaveBeenCalled(); // no operation opened
+		expect(routerReplace).not.toHaveBeenCalled();
+		w.unmount(); // clear the cooldown countdown interval
+	});
+
 	it("unmounting aborts the controller and never navigates afterwards", async () => {
 		api.getLlmApplyOperation.mockResolvedValue(pending); // never terminal
 		vi.useFakeTimers();
@@ -282,5 +308,48 @@ describe("§10.4 mode:legacy fallback (no durable operation)", () => {
 		expect(forgetReadySpy).toHaveBeenCalledTimes(1);
 		expect(routerReplace).toHaveBeenCalledTimes(1);
 		expect(routerReplace).toHaveBeenCalledWith({ name: "Chat" });
+	});
+
+	it("a never-ready legacy poll is BOUNDED and ends fail-closed on Connect (no nav)", async () => {
+		// Proves the LEGACY_READY_ATTEMPTS bound and that a persistently-not-ready
+		// workspace lands on a Retry state rather than navigating or spinning forever.
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({ apply_operation: null, resumable: false, mode: "legacy" }),
+		});
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "signup" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear(); // ignore the one mount-time readiness probe
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(30 * 2500); // cover all attempts' backoff
+		await p;
+
+		expect(api.isReadyForChat).toHaveBeenCalledTimes(30); // exactly LEGACY_READY_ATTEMPTS
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(routerReplace).not.toHaveBeenCalled();
+	});
+
+	it("a THROWING isReadyForChat is not a verdict: the legacy poll stays fail-closed", async () => {
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({ apply_operation: null, resumable: false, mode: "legacy" }),
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear(); // ignore the one mount-time readiness probe
+		api.isReadyForChat.mockRejectedValue(new Error("bench hiccup"));
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(30 * 2500);
+		await p;
+
+		// Every poll threw, so none was ever read as "ready": no navigation.
+		expect(api.isReadyForChat).toHaveBeenCalledTimes(30);
+		expect(routerReplace).not.toHaveBeenCalled();
+		expect(w.vm.state.connectPhase).toBe("retry");
 	});
 });
