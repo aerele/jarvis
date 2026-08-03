@@ -192,6 +192,9 @@ def list_active(user: str | None = None) -> list[dict]:
 			"owner_user": user,
 			"consumed_at": ["is", "not set"],
 			"expires_at": [">", now_datetime()],
+			# Only a still-live capture rehydrates - a cancelled/revoked one (its
+			# ciphertext already erased) must never reappear as resumable.
+			"revocation_state": "pending",
 		},
 		fields=[
 			"capture_id",
