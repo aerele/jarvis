@@ -483,16 +483,6 @@
 										>
 											{{ payDetail }}
 										</p>
-										<!-- X1: a prior sheet may still be open. Steer the customer to
-											 finish/close it; initiate is vetoed at the machine and dropped
-											 from the actions, so Check is the only forward move. -->
-										<p
-											v-if="checkoutMayBeOpenNote"
-											class="mt-1.5 text-p-sm text-ink-gray-5"
-											role="status"
-										>
-											{{ checkoutMayBeOpenNote }}
-										</p>
 									</div>
 									<div
 										v-if="paySummaryRows.length"
@@ -589,6 +579,26 @@
 											@click="onPayAction(a)"
 										/>
 									</div>
+								</div>
+							</template>
+							<!-- plan-09 07-c: rollout flag off → a maintenance hold instead of a
+								 fresh checkout. No fallback to any old path. -->
+							<template v-else-if="showMaintenanceHold">
+								<div class="ob-body ob-body--center">
+									<div class="ob-head">
+										<h1>Payments are paused right now</h1>
+										<p>
+											We're doing some scheduled maintenance on secure
+											payments. Nothing has been charged — please check back
+											shortly, or contact support if you need to get set up
+											today.
+										</p>
+									</div>
+									<Button
+										variant="subtle"
+										label="Contact support"
+										@click="onPayAction(A.SUPPORT)"
+									/>
 								</div>
 							</template>
 							<!-- Review (fresh start): the customer chose a plan and entered
@@ -988,12 +998,7 @@ import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
-import { openOnboardingCheckout } from "@/onboarding/onboardingCheckout";
-import {
-	STATES as PAY_STATES,
-	remainingCooldownSeconds,
-	sanitizeCheckoutNote,
-} from "@/onboarding/paymentMachine";
+import { STATES as PAY_STATES, remainingCooldownSeconds } from "@/onboarding/paymentMachine";
 import { ACTIONS, ACTION_LABELS, TONE, copyFor } from "@/onboarding/paymentCodes";
 import { CHECKOUT_NAV_KEY, shouldHonorCheckoutReturn } from "@/onboarding/checkoutNav";
 import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
@@ -1070,6 +1075,12 @@ const state = reactive({
 	availableProviders: [],
 	providersLoading: false,
 	providersError: false,
+	// plan-09 07-c rollout flag (site-level boolean, default ON). The admin-hosted
+	// checkout is the ONLY payment path after cutover, so this does NOT toggle
+	// old-vs-new behaviour - it gates ROLLOUT MESSAGING: when the operator disables
+	// it, the pay step shows a maintenance hold instead of taking the customer to
+	// checkout. Defaults ON (an older backend that omits the key stays enabled).
+	paymentUiV2: true,
 	// payErr / payBusy drive the reconnect-code step's own error + button state
 	// (the payment machine owns everything on the Pay step).
 	payErr: "",
@@ -1216,6 +1227,8 @@ async function loadPaymentProviders() {
 	state.providersError = false;
 	try {
 		const r = (await listPaymentProviders()) || {};
+		// plan-09 07-c: the rollout flag. Absent on an older backend → default ON.
+		state.paymentUiV2 = r.payment_ui_v2 !== false;
 		// Narrow to the gateways this wizard can actually render and open (D10). The
 		// chooser draws a Razorpay/Cashfree chip and the checkout dispatcher only
 		// knows those two families, so a third gateway the control plane names would
@@ -1442,47 +1455,30 @@ function onDetailsSubmit() {
 	goNext();
 }
 
-// ---- Pay: the strict payment state machine (plan 02) ------------------------
+// ---- Pay: the strict payment state machine (plan 02 + plan-09 WS7) ----------
 // The wizard consumes @/onboarding/usePaymentFlow - a pure reducer
 // (paymentMachine) plus an orchestrator that owns every side effect - instead of
 // the old tangle of payPhase/successData/provisioning flags and inline checkout
 // code. The machine keys on the backend's CODE, never on HTTP status prose, and
 // its ONE invariant is that nothing but an authoritative paid answer leaves the
-// Pay page. Checkout sheets are opened through the SHIPPED billing layer
-// (onboardingCheckout → billingCheckout/useRazorpay/useCashfree), not a second
-// orchestrator here.
+// Pay page.
+//
+// plan-09 WS7 (the admin-hosted checkout cutover): the wizard opens NO gateway
+// SDK on this origin. A payable answer carries a pay-page token plus the bench's
+// OWN attested origin, and the customer is TOP-LEVEL NAVIGATED to
+// `{origin}/jarvis-checkout#t=<token>` (flow.navigateToPay → the injected
+// `navigate` below). There is no in-page sheet, no tenant-origin SDK, and no
+// fallback: a token with no attested origin, or a pre-cutover admin's raw handles
+// with no token, fails the step closed with honest copy.
 
-// The Cashfree autopay MANDATE opener: a full-page subscriptionsCheckout
-// redirect, the one shape the Account billing page refuses and the wizard owns.
-// The order/Razorpay openers load their own SDKs; this one lives here because it
-// is the view that owns the return journey - admin points Cashfree's return_url
-// at jarvis_pay_return, which lands back on this wizard and resumes via the
-// mount reconcile below.
-let cashfreeLoadPromise = null;
-function ensureCashfreeLoaded() {
-	if (window.Cashfree) return Promise.resolve();
-	if (cashfreeLoadPromise) return cashfreeLoadPromise;
-	cashfreeLoadPromise = new Promise((resolve, reject) => {
-		const s = document.createElement("script");
-		s.src = "https://sdk.cashfree.com/js/v3/cashfree.js";
-		s.onload = () => resolve();
-		s.onerror = () => {
-			cashfreeLoadPromise = null;
-			reject(new Error("Couldn't load the Cashfree checkout script."));
-		};
-		document.head.appendChild(s);
-	});
-	return cashfreeLoadPromise;
-}
-// A persisted marker that we are LEAVING this page for a full-page gateway
-// checkout (the Cashfree mandate redirect). On the way back - a bfcache restore
-// or a tab regaining focus with the old checkout_open state still frozen in
-// memory - the pageshow/visibility handlers read it and drive the machine's
-// explicit, safe RETURNED_FROM_CHECKOUT exit instead of leaving the customer on
-// a permanent "Opening secure checkout…" screen (plan 02 P0-2). Session-scoped
-// and non-secret: it holds no gateway id or payload, only that we left.
-// STAMPED with the live attempt id (X3), not a bare "1": a leftover marker from
-// attempt N must never drive a returnFromCheckout during attempt N+1's live sheet.
+// A session-scoped, non-secret marker that we are LEAVING this page for the
+// admin-hosted pay page. On the way back - a bfcache restore or a tab regaining
+// focus with checkout_open still frozen in memory - the pageshow/visibility
+// handlers read it and drive the machine's explicit, safe RETURNED_FROM_CHECKOUT
+// exit instead of leaving the customer on a permanent "Taking you to the secure
+// payment page…" screen (plan 02 P0-2). STAMPED with the live attempt id (X3),
+// not a bare "1": a leftover marker from attempt N must never drive a
+// returnFromCheckout during attempt N+1.
 function markExternalCheckoutNav(attemptId) {
 	try {
 		window.sessionStorage.setItem(CHECKOUT_NAV_KEY, String(attemptId || "1"));
@@ -1505,33 +1501,18 @@ function clearExternalCheckoutNav() {
 	}
 }
 
-async function openCashfreeMandate(handles) {
-	await ensureCashfreeLoaded();
-	const cf = window.Cashfree({
-		mode: handles.cashfree_env === "production" ? "production" : "sandbox",
-	});
-	// Record the external navigation BEFORE the redirect fires (P0-2), stamped with
-	// the live attempt id (X3) so the return path cannot be triggered by a marker
-	// left over from a previous attempt.
-	markExternalCheckoutNav(pay.value.attemptId);
-	// {redirect:true}; resolves the moment the form submits, so there is nothing
-	// to await and the browser is leaving. The SDK resolves with {error} rather
-	// than throwing for bad input.
-	const r = await cf.subscriptionsCheckout({
-		subsSessionId: handles.subscription_session_id,
-		redirectTarget: "_self",
-	});
-	if (r && r.error) {
-		clearExternalCheckoutNav();
-		throw new Error("Couldn't start the auto-pay authorisation. Try again.");
-	}
-	return { status: "redirected" };
-}
-
 const flow = createPaymentFlow({
 	api: onboardingPaymentApi,
-	openCheckout: (handles, opts) =>
-		openOnboardingCheckout(handles, { ...opts, openMandate: openCashfreeMandate }),
+	// The DOM half of the top-level navigation (WS7): stamp the external-nav
+	// marker with the live attempt id BEFORE the browser leaves, so the return
+	// path can recognise this attempt's checkout, then same-tab navigate. The URL
+	// is built by the flow/reducer from the bench's OWN attested origin + the
+	// frozen `/jarvis-checkout` path + the token in the fragment - never a URL
+	// admin supplied.
+	navigate: ({ url, attemptId }) => {
+		markExternalCheckoutNav(attemptId);
+		window.location.assign(url);
+	},
 	// Persist the (attempt, generation) support-check count so a refresh between
 	// checks does not reset the "offer a human" moment (P2-5). Non-secret only.
 	storage: {
@@ -1687,10 +1668,7 @@ const showPaidFlash = computed(() => pay.value.value === S.PAID);
 // plan 02 §a11y is explicit that both buttons must not be replaced by an
 // indefinite spinner; they are disabled in place instead (see payActionDisabled).
 const payBusyView = computed(
-	() =>
-		pay.value.value === S.STARTING_SIGNUP ||
-		pay.value.value === S.CHECKOUT_OPEN ||
-		pay.value.value === S.CONFIRMING
+	() => pay.value.value === S.STARTING_SIGNUP || pay.value.value === S.CHECKOUT_OPEN
 );
 const checking = computed(() => pay.value.busy === "checking");
 const initiating = computed(() => pay.value.busy === "initiating");
@@ -1715,35 +1693,24 @@ const recoveryRole = computed(() => (payCopy.value.tone === TONE.ALERT ? "alert"
 // not load, a gateway that refused to open, admin's own sentence on a coded
 // refusal). Suppressed when it merely repeats the coded copy.
 const payDetail = computed(() => {
-	// The message admin/the codec attached, or - when there is none - the "the
-	// checkout could not open" note carried as presentation metadata across the
-	// mandatory reconcile (P0-1). Both are run through sanitizeCheckoutNote at the
-	// render path (X2) so no untagged internal string (a deadline abort's "payment
-	// request timed out: …") can ever reach the customer, even if a future code path
-	// forwarded one. Suppressed when it merely repeats the coded copy.
-	const m =
-		sanitizeCheckoutNote(pay.value.message) || sanitizeCheckoutNote(pay.value.checkoutNote);
+	// The customer-facing message admin/the codec attached to the current state
+	// (e.g. a decline reason). Suppressed when it merely repeats the coded copy.
+	const m = pay.value.message || "";
 	if (!m) return "";
 	return m === payCopy.value.body || m === payCopy.value.headline ? "" : m;
 });
-// The X1 recovery note: shown when a prior sheet may still be open, telling the
-// customer to finish or close it before anything else. It is the copy half of the
-// machine-level initiate veto (checkoutMayBeOpen).
-const checkoutMayBeOpenNote = computed(() =>
-	pay.value.checkoutMayBeOpen
-		? "If the payment window is still open, finish or close it first."
-		: ""
-);
 const provisioningDelayed = computed(() => pay.value.value === S.PROVISIONING_DELAYED);
+// plan-09 07-c: with the rollout flag OFF, a fresh customer reaching the pay step
+// sees a maintenance hold instead of the review/pay card - there is no old path to
+// fall back to (owner decision 4). Only replaces the FRESH review card; a customer
+// with real server state (paid, verifying, a recovery) still sees their own state.
+const showMaintenanceHold = computed(() => !state.paymentUiV2 && pay.value.value === S.REVIEW);
 
-// The busy-screen line ("Confirming with Razorpay/Cashfree…").
+// The busy-screen line. CHECKOUT_OPEN is the copy MOMENT before the browser
+// top-level-navigates to the admin-hosted pay page (WS7).
 const payBusyLabel = computed(() => {
-	if (pay.value.value === S.CONFIRMING) {
-		const prov = pay.value.provider === "cashfree" ? "Cashfree" : "Razorpay";
-		return `Confirming with ${prov}…`;
-	}
 	if (pay.value.value === S.STARTING_SIGNUP) return "Starting your signup…";
-	return "Opening secure checkout…";
+	return "Taking you to Jarvis' secure payment page…";
 });
 
 // The rate-limit countdown: a live seconds value the Check button reads. Driven
@@ -1769,11 +1736,7 @@ const checkLabel = computed(() =>
 // even if the code's own actions don't list it (a pending payment the customer
 // has checked many times).
 const recoveryActions = computed(() => {
-	let acts = [...payCopy.value.actions];
-	// While a prior sheet may still be open (X1), Check is the ONLY forward action:
-	// drop Initiate entirely (the machine veto also disables it, this removes the
-	// dead button too) so the customer is steered to finish/close the live sheet.
-	if (pay.value.checkoutMayBeOpen) acts = acts.filter((a) => a !== ACTIONS.INITIATE);
+	const acts = [...payCopy.value.actions];
 	if (pay.value.supportOffered && !acts.includes(ACTIONS.SUPPORT)) acts.push(ACTIONS.SUPPORT);
 	return acts;
 });
@@ -1898,6 +1861,9 @@ watch(
 // once through the flow; the machine takes it from there (verify / checkout /
 // parked-money / duplicate all land on their own sub-screen).
 async function onPayClick() {
+	// plan-09 07-c: the CTA is hidden behind the maintenance hold when the flag is
+	// off; guard the handler too so a stray/programmatic click cannot start a signup.
+	if (!state.paymentUiV2) return;
 	if (!state.planName || !state.email || !state.company) {
 		// A signup with empty args would create a broken record upstream. This is
 		// the fresh-start guard; a resumed session renders from server truth and
@@ -2313,8 +2279,7 @@ async function prefillAccount() {
 function handleCheckoutReturn() {
 	const marker = readExternalCheckoutNav();
 	if (!marker) return;
-	const v = pay.value.value;
-	const inCheckout = v === S.CHECKOUT_OPEN || v === S.CONFIRMING;
+	const inCheckout = pay.value.value === S.CHECKOUT_OPEN;
 	// A marker from a previous attempt (or when no sheet is open) is stale: clear it
 	// without driving a returnFromCheckout, so it can never drop a live confirm (X3).
 	if (!shouldHonorCheckoutReturn({ marker, inCheckout, attemptId: pay.value.attemptId })) {
@@ -2344,8 +2309,8 @@ onMounted(async () => {
 	// during that await could honour a prior attempt's leftover marker. A fresh
 	// mount is never mid-sheet (state is review until a sheet is opened), so this
 	// only ever drops a genuinely stale marker; a bfcache restore does not re-run
-	// onMounted, so a live restored sheet is untouched.
-	if (pay.value.value !== S.CHECKOUT_OPEN && pay.value.value !== S.CONFIRMING) {
+	// onMounted, so a live restored checkout is untouched.
+	if (pay.value.value !== S.CHECKOUT_OPEN) {
 		clearExternalCheckoutNav();
 	}
 	await reconcileMidFlightSignup();

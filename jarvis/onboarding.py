@@ -182,16 +182,37 @@ def list_payment_providers() -> dict:
 	blip must not leave a customer unable to pay at all. Razorpay is the gateway
 	that supports every flow, so it is the safe floor.
 	"""
+	ui_v2 = _payment_ui_v2_enabled()
 	try:
 		data = admin_client.get_payment_providers() or {}
 	except Exception:
-		return {"providers": ["razorpay"], "default": "razorpay"}
+		return {"providers": ["razorpay"], "default": "razorpay", "payment_ui_v2": ui_v2}
 
 	providers = [p for p in (data.get("providers") or []) if p in admin_client.SUPPORTED_PROVIDERS]
 	if not providers:
-		return {"providers": ["razorpay"], "default": "razorpay"}
+		return {"providers": ["razorpay"], "default": "razorpay", "payment_ui_v2": ui_v2}
 	default = (data.get("default") or "").strip().lower()
-	return {"providers": providers, "default": default if default in providers else providers[0]}
+	return {
+		"providers": providers,
+		"default": default if default in providers else providers[0],
+		"payment_ui_v2": ui_v2,
+	}
+
+
+def _payment_ui_v2_enabled() -> bool:
+	"""The plan-09 07-c payment-UI rollout flag. Site-level boolean, DEFAULT ON.
+
+	The admin-hosted checkout is the ONLY payment path after cutover (no fallback,
+	owner decision 4), so this flag does NOT toggle old-vs-new behaviour — the old
+	tenant-origin SDK path no longer exists. It gates ROLLOUT MESSAGING only: when
+	explicitly disabled (``jarvis_payment_ui_v2 = 0`` in site config) the pay step
+	shows a maintenance-style honest hold instead of taking the customer to
+	checkout, so an operator can pause new checkouts on a bench without shipping
+	code. Unset / None = ON."""
+	value = frappe.conf.get("jarvis_payment_ui_v2")
+	if value is None:
+		return True
+	return bool(value)
 
 
 @frappe.whitelist()
@@ -618,7 +639,12 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	# fresh signup. The wizard reads ``pending_verification`` and the checkout
 	# handles and nothing else (OnboardingView runStartPay → launchCheckout);
 	# no key stripped here is read anywhere in frontend/src.
-	return onboarding_contract.strip_credentials(data)
+	#
+	# augment_pay_page is behaviour-neutral unless admin returned a pay-page token
+	# (plan-09 WS7): on a token answer it attaches the bench's OWN attested pay
+	# origin so the wizard top-level-navigates to the admin-hosted checkout instead
+	# of opening a gateway SDK on this origin.
+	return onboarding_contract.augment_pay_page(onboarding_contract.strip_credentials(data))
 
 
 def _try_resume_pending_signup(err, plan: str, provider: str | None) -> dict | None:

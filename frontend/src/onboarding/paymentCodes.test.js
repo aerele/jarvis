@@ -16,10 +16,13 @@ import {
 	UNKNOWN_COPY,
 } from "./paymentCodes.js";
 
-test("the vocabulary is 12 admin codes + 6 bench codes = 18", () => {
+test("the vocabulary is 12 admin codes + 9 bench codes = 21", () => {
+	// +3 bench codes from the plan-09 WS7 cutover: PAYMENT_PAGE_REDIRECT (the
+	// navigate-to-pay signal), BENCH_PAY_ORIGIN_UNCONFIGURED (a token we cannot
+	// navigate with) and CLIENT_UPGRADE_REQUIRED (a pre-cutover admin's raw handles).
 	assert.equal(ADMIN_CODES.length, 12);
-	assert.equal(BENCH_CODES.length, 6);
-	assert.equal(new Set([...ADMIN_CODES, ...BENCH_CODES]).size, 18);
+	assert.equal(BENCH_CODES.length, 9);
+	assert.equal(new Set([...ADMIN_CODES, ...BENCH_CODES]).size, 21);
 });
 
 test("every code in the vocabulary has its own copy row", () => {

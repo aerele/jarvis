@@ -45,6 +45,22 @@ export const CODES = {
 	BENCH_RATE_LIMITED: "BENCH_RATE_LIMITED",
 	BENCH_NO_SIGNUP_CONTEXT: "BENCH_NO_SIGNUP_CONTEXT",
 	BENCH_AWAITING_RECONCILIATION: "BENCH_AWAITING_RECONCILIATION",
+	// plan-09 WS7 (bench-local): the admin-hosted pay-page cutover.
+	//
+	// PAYMENT_PAGE_REDIRECT — a token-bearing answer that is navigable (the bench's
+	// configured origin is attested against admin's non-navigable digest). The
+	// orchestrator top-level-navigates to the pay page from it, so its copy is only
+	// ever seen for the instant before the browser leaves.
+	PAYMENT_PAGE_REDIRECT: "PAYMENT_PAGE_REDIRECT",
+	// BENCH_PAY_ORIGIN_UNCONFIGURED — a token arrived but the bench cannot navigate
+	// with it: jarvis_pay_origin is unset/invalid, or its digest did not match
+	// admin's attestation. NO FALLBACK (owner decision 4): an honest config hold
+	// with a support hint, never a gateway sheet on this origin.
+	BENCH_PAY_ORIGIN_UNCONFIGURED: "BENCH_PAY_ORIGIN_UNCONFIGURED",
+	// CLIENT_UPGRADE_REQUIRED — a pre-cutover admin answered with raw provider
+	// handles and NO token. The bench opens no sheet for those any more; this is
+	// the CLIENT_UPGRADE_REQUIRED-style honest hold (§R P0-4).
+	CLIENT_UPGRADE_REQUIRED: "CLIENT_UPGRADE_REQUIRED",
 };
 
 export const ADMIN_CODES = [
@@ -69,6 +85,10 @@ export const BENCH_CODES = [
 	CODES.BENCH_RATE_LIMITED,
 	CODES.BENCH_NO_SIGNUP_CONTEXT,
 	CODES.BENCH_AWAITING_RECONCILIATION,
+	// plan-09 WS7 cutover codes
+	CODES.PAYMENT_PAGE_REDIRECT,
+	CODES.BENCH_PAY_ORIGIN_UNCONFIGURED,
+	CODES.CLIENT_UPGRADE_REQUIRED,
 ];
 
 /** The recovery affordances a row may ask for. */
@@ -251,6 +271,37 @@ const TABLE = {
 			"and someone here is placing it. Nothing more is owed - please do not pay again.",
 		tone: TONE.STATUS,
 		actions: [ACTIONS.CHECK],
+	},
+	// ---- plan-09 WS7: the admin-hosted pay-page cutover -----------------
+	[CODES.PAYMENT_PAGE_REDIRECT]: {
+		// The orchestrator top-level-navigates away the instant this lands, so this
+		// row is only ever a flash. It is the copy MOMENT the plan names.
+		headline: "Taking you to the secure payment page…",
+		body: "Nothing is charged until you complete payment on the next screen.",
+		tone: TONE.STATUS,
+		actions: [],
+	},
+	[CODES.BENCH_PAY_ORIGIN_UNCONFIGURED]: {
+		// A token arrived but this site cannot navigate to checkout: the pay origin
+		// is unset, or its digest did not match admin's attestation. NO FALLBACK -
+		// no sheet opens on this origin. Honest hold + a human.
+		headline: "Secure payment isn't set up on this site yet.",
+		body:
+			"Nothing has been charged. This site's payment page still needs to be configured - " +
+			"please contact support and we'll get you paid up without any double charge.",
+		tone: TONE.ALERT,
+		actions: [ACTIONS.SUPPORT],
+	},
+	[CODES.CLIENT_UPGRADE_REQUIRED]: {
+		// A pre-cutover control plane answered with raw provider handles and no
+		// token. The bench no longer opens a sheet for those (§R P0-4); this is the
+		// honest hold, never a silent fallback to the old SDK path.
+		headline: "Secure checkout is temporarily unavailable.",
+		body:
+			"Nothing has been charged. Our payment service is being updated - " +
+			"please try again shortly, or contact support if it persists.",
+		tone: TONE.ALERT,
+		actions: [ACTIONS.SUPPORT],
 	},
 };
 

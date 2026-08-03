@@ -200,9 +200,25 @@ export function decode(res) {
  */
 export function effectiveCode(decoded) {
 	if (!decoded) return CLIENT_UNREADABLE;
-	if (decoded.code) return decoded.code;
 	const d = decoded.data || {};
+	// plan-09 WS7: a live pay-page token is the navigate-to-pay capability. A
+	// token-bearing flat success is decodable (never CLIENT_UNREADABLE), and a
+	// token OVERRIDES a bare INTENT_HANDLE_UNAVAILABLE (the authenticated read
+	// envelope re-serves the live token; carried v4 ruling). It does NOT override
+	// verification (the customer verifies first, then the same token is used), a
+	// paid/terminal/reconnect verdict, or the money-parked refusal.
+	const hasToken = !!d.pay_page_token;
+	if (decoded.code) {
+		if (hasToken && decoded.code === CODES.INTENT_HANDLE_UNAVAILABLE) {
+			return CODES.PAYMENT_PAGE_REDIRECT;
+		}
+		return decoded.code;
+	}
 	if (d.pending_verification) return CODES.SIGNUP_VERIFICATION_REQUIRED;
+	if (hasToken) return CODES.PAYMENT_PAGE_REDIRECT;
+	// NO FALLBACK (§R P0-4): a pre-cutover admin's raw provider handles, with no
+	// token, are NOT a live intent to open a sheet on - they are the honest
+	// upgrade-required hold. The bench opens no gateway SDK on its own origin.
 	const hasHandles =
 		d.razorpay_order_id ||
 		d.razorpay_subscription_id ||
@@ -210,7 +226,7 @@ export function effectiveCode(decoded) {
 		d.cashfree_order_id ||
 		d.subscription_session_id ||
 		d.cashfree_subscription_id;
-	if (hasHandles) return CODES.PAYMENT_CONFIRMATION_PENDING;
+	if (hasHandles) return CODES.CLIENT_UPGRADE_REQUIRED;
 	if (d.subscription_status === "Active") return CODES.PAYMENT_ALREADY_ACTIVE;
 	// finish_payment's success is FLAT and carries no code: what it returns is a
 	// CONNECTION payload, which is admin's way of saying the money is confirmed.
