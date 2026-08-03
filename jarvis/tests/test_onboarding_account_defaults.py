@@ -68,14 +68,45 @@ class TestUndeliverable(FrappeTestCase):
 
 
 def _caller_email(value):
-	"""Mock ONLY the ("User", ..., "email") lookup. A blanket return_value would
-	also answer any other get_value the endpoint grows later, which would then
-	silently receive an email address."""
+	"""Mock ONLY the endpoint's caller-email lookup — ``frappe.db.get_value("User",
+	user, "email")`` — and delegate every other ``get_value`` to the real function.
+
+	A blanket ``return_value`` would answer any get_value the endpoint grows later,
+	which would then silently receive an email address. A blanket ``side_effect`` is
+	worse: on a cold cache Frappe's own first read of the User doctype meta goes
+	through this same ``frappe.db.get_value``, so intercepting it broadly poisons the
+	meta cache (``DocType None not found``) for every later test in the process.
+	Matching the exact ``("User", …, "email")`` shape keeps the mock to the one call
+	the endpoint makes."""
+	real_get_value = frappe.db.get_value
 
 	def side_effect(doctype, *args, **kwargs):
-		return value if doctype == "User" else None
+		fieldname = kwargs.get("fieldname", args[1] if len(args) >= 2 else None)
+		if doctype == "User" and fieldname == "email":
+			return value
+		return real_get_value(doctype, *args, **kwargs)
 
 	return patch("frappe.db.get_value", side_effect=side_effect)
+
+
+def _company_rows(rows=(), *, raises=False):
+	"""Mock ONLY the endpoint's ``frappe.get_all("Company", …)`` query and delegate
+	every other ``get_all`` to the real function.
+
+	Patching ``frappe.get_all`` broadly intercepts Frappe's own internal ``get_all``
+	calls (metadata, permissions) whenever the cache is cold, which fails those reads
+	and poisons the process. Narrowing to ``doctype == "Company"`` leaves Frappe's
+	machinery untouched while still standing in for the single query under test."""
+	real_get_all = frappe.get_all
+
+	def side_effect(doctype, *args, **kwargs):
+		if doctype == "Company":
+			if raises:
+				raise Exception("no Company doctype")
+			return list(rows)
+		return real_get_all(doctype, *args, **kwargs)
+
+	return patch("frappe.get_all", side_effect=side_effect)
 
 
 class TestAccountDefaults(FrappeTestCase):
@@ -92,9 +123,14 @@ class TestAccountDefaults(FrappeTestCase):
 		self.assertEqual(out["email"], "")
 
 	def test_user_default_company_wins(self):
+		# _company_rows([]) stands in for the Company query so the test states its
+		# point -- user default beats global default -- on a frappe-only site too,
+		# where the real "Company" doctype (ERPNext) does not exist and the endpoint
+		# would otherwise fall into its silent no-op and blank the company out.
 		with (
 			patch("frappe.defaults.get_user_default", return_value="Aerele"),
 			patch("frappe.defaults.get_global_default", return_value="Other"),
+			_company_rows([]),
 		):
 			out = onboarding.get_account_defaults()
 		self.assertEqual(out["company"], "Aerele")
@@ -103,7 +139,7 @@ class TestAccountDefaults(FrappeTestCase):
 		with (
 			patch("frappe.defaults.get_user_default", return_value=None),
 			patch("frappe.defaults.get_global_default", return_value=None),
-			patch("frappe.get_all", return_value=[frappe._dict(name="Only Co")]),
+			_company_rows([frappe._dict(name="Only Co")]),
 		):
 			out = onboarding.get_account_defaults()
 		self.assertEqual(out["company"], "Only Co")
@@ -114,7 +150,7 @@ class TestAccountDefaults(FrappeTestCase):
 		with (
 			patch("frappe.defaults.get_user_default", return_value=None),
 			patch("frappe.defaults.get_global_default", return_value=None),
-			patch("frappe.get_all", return_value=rows),
+			_company_rows(rows),
 		):
 			out = onboarding.get_account_defaults()
 		self.assertEqual(out["company"], "")
@@ -124,7 +160,7 @@ class TestAccountDefaults(FrappeTestCase):
 		with (
 			patch("frappe.defaults.get_user_default", return_value=None),
 			patch("frappe.defaults.get_global_default", return_value=None),
-			patch("frappe.get_all", side_effect=Exception("no Company doctype")),
+			_company_rows(raises=True),
 		):
 			out = onboarding.get_account_defaults()
 		self.assertEqual(out["company"], "")
