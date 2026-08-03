@@ -891,6 +891,7 @@ class TestAuthorityAnchorFence(FrappeTestCase):
 		account._READY_MARKER_FIELD,
 		account._READY_ANCHOR_FIELD,
 		"agent_url",
+		"tenant_authority_generation",
 		"jarvis_admin_api_key",
 	)
 
