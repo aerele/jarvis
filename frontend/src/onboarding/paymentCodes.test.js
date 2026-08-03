@@ -90,7 +90,10 @@ test("PAYMENT_AUTHORIZED_PENDING_CONFIRM is a WAIT state: check only, never conf
 	// the support handoff after N checks is this state's exit.
 	const entry = copyFor(CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM);
 	assert.deepEqual(entry.actions, [ACTIONS.CHECK]);
-	assert.ok(!entry.actions.includes(ACTIONS.INITIATE), "a second intent authorizes a second mandate");
+	assert.ok(
+		!entry.actions.includes(ACTIONS.INITIATE),
+		"a second intent authorizes a second mandate"
+	);
 	// The vocabulary itself must not carry a confirm affordance any more.
 	assert.equal(ACTIONS.CONFIRM, undefined);
 	assert.ok(/authoriz/i.test(entry.headline + entry.body));

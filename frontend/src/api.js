@@ -299,7 +299,7 @@ export const finishPayment = (payload) => call("jarvis.onboarding.finish_payment
 // `error` object on a throw, the `{ok, data, context}` envelope on a coded 4xx.
 // `rawOnboardingCall` returns `{status, body, networkError}` untouched, and
 // @/onboarding/paymentCodec.decode reads it. usePaymentFlow consumes this map.
-async function rawOnboardingCall(method, args) {
+async function rawOnboardingCall(method, args, opts = {}) {
 	const headers = {
 		Accept: "application/json",
 		"Content-Type": "application/json; charset=utf-8",
@@ -313,6 +313,14 @@ async function rawOnboardingCall(method, args) {
 			method: "POST",
 			headers,
 			body: JSON.stringify(args || {}),
+			// The client-side deadline (plan 02 P0-3). usePaymentFlow races every
+			// payment call against a wall-clock timeout and aborts this signal when it
+			// fires, so a stalled proxy/never-settling fetch cannot leave the customer
+			// on a permanent busy screen. An abort is a CLIENT signal only - the flow
+			// treats it as truth-UNKNOWN and reconciles server truth, never as a
+			// payment verdict, because aborting the browser does not cancel server
+			// work.
+			signal: opts.signal,
 		});
 		let body = null;
 		try {
@@ -322,26 +330,36 @@ async function rawOnboardingCall(method, args) {
 		}
 		return { status: res.status, body };
 	} catch (e) {
-		// fetch itself rejected: offline, DNS, CORS. Never a payment verdict.
+		// fetch itself rejected: offline, DNS, CORS - OR the deadline aborted it. An
+		// AbortError must propagate so the flow's timeout race sees the timeout (it
+		// is racing this promise against its own timer); everything else is a
+		// networkError, never a payment verdict.
+		if (e && e.name === "AbortError") throw e;
 		return { status: 0, body: null, networkError: true };
 	}
 }
 
 // The raw-response endpoint map usePaymentFlow is constructed with. Kept as one
 // object so the flow's dependency surface is explicit and stubbable in tests.
+// Each method takes an optional `{signal}` so the flow can bound it (P0-3).
 export const onboardingPaymentApi = {
-	getOnboardingState: () => rawOnboardingCall("jarvis.onboarding.get_onboarding_state"),
-	startSignup: ({ email, company, plan, provider }) =>
-		rawOnboardingCall("jarvis.onboarding.start_signup", { email, company, plan, provider }),
-	initiateSignupPayment: ({ plan, provider }) =>
+	getOnboardingState: (opts) =>
+		rawOnboardingCall("jarvis.onboarding.get_onboarding_state", {}, opts),
+	startSignup: ({ email, company, plan, provider }, opts) =>
+		rawOnboardingCall(
+			"jarvis.onboarding.start_signup",
+			{ email, company, plan, provider },
+			opts
+		),
+	initiateSignupPayment: ({ plan, provider }, opts) =>
 		// Deliberately NO idempotency_key: the bench owns that receipt
 		// (onboarding_contract.next_idempotency_key). Passing one from the browser
 		// invites a replay of a dead intent.
-		rawOnboardingCall("jarvis.onboarding.initiate_signup_payment", { plan, provider }),
-	checkSignupPaymentStatus: () =>
-		rawOnboardingCall("jarvis.onboarding.check_signup_payment_status"),
-	confirmSignupPayment: (payload) =>
-		rawOnboardingCall("jarvis.onboarding.finish_payment", { payload }),
+		rawOnboardingCall("jarvis.onboarding.initiate_signup_payment", { plan, provider }, opts),
+	checkSignupPaymentStatus: (opts) =>
+		rawOnboardingCall("jarvis.onboarding.check_signup_payment_status", {}, opts),
+	confirmSignupPayment: (payload, opts) =>
+		rawOnboardingCall("jarvis.onboarding.finish_payment", { payload }, opts),
 	syncConnection: () => call("jarvis.onboarding.sync_connection"),
 };
 export const isOnboarded = () => call("jarvis.account.is_onboarded");

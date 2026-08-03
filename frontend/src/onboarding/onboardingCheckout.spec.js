@@ -18,8 +18,12 @@ import {
 describe("classifyOnboardingHandles", () => {
 	test("delegates the shapes the shipped classifier already knows", () => {
 		expect(classifyOnboardingHandles({ razorpay_order_id: "o" })).toBe(CHECKOUT_RAZORPAY);
-		expect(classifyOnboardingHandles({ razorpay_subscription_id: "s" })).toBe(CHECKOUT_RAZORPAY);
-		expect(classifyOnboardingHandles({ payment_session_id: "p" })).toBe(CHECKOUT_CASHFREE_ORDER);
+		expect(classifyOnboardingHandles({ razorpay_subscription_id: "s" })).toBe(
+			CHECKOUT_RAZORPAY
+		);
+		expect(classifyOnboardingHandles({ payment_session_id: "p" })).toBe(
+			CHECKOUT_CASHFREE_ORDER
+		);
 	});
 
 	test("the Cashfree mandate is the wizard's own branch, not 'unsupported'", () => {
@@ -42,14 +46,23 @@ describe("classifyOnboardingHandles", () => {
 		);
 		// A live order beside the rider is classified as the order it is.
 		expect(
-			classifyOnboardingHandles({ cashfree_subscription_id: "jrvs_1", razorpay_order_id: "o" })
+			classifyOnboardingHandles({
+				cashfree_subscription_id: "jrvs_1",
+				razorpay_order_id: "o",
+			})
 		).toBe(CHECKOUT_RAZORPAY);
 		expect(
-			classifyOnboardingHandles({ cashfree_subscription_id: "jrvs_1", payment_session_id: "p" })
+			classifyOnboardingHandles({
+				cashfree_subscription_id: "jrvs_1",
+				payment_session_id: "p",
+			})
 		).toBe(CHECKOUT_CASHFREE_ORDER);
 		// ...and a real mandate is untouched: the session id still decides, first.
 		expect(
-			classifyOnboardingHandles({ cashfree_subscription_id: "jrvs_1", subscription_session_id: "sess" })
+			classifyOnboardingHandles({
+				cashfree_subscription_id: "jrvs_1",
+				subscription_session_id: "sess",
+			})
 		).toBe(CHECKOUT_CASHFREE_MANDATE);
 	});
 
@@ -65,8 +78,14 @@ describe("openOnboardingCheckout", () => {
 	let openMandate;
 
 	beforeEach(() => {
-		openRazorpay = vi.fn(async () => ({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "p" } }));
-		openCashfree = vi.fn(async () => ({ status: CHECKOUT_SUCCESS, payload: { provider: "cashfree" } }));
+		openRazorpay = vi.fn(async () => ({
+			status: CHECKOUT_SUCCESS,
+			payload: { razorpay_payment_id: "p" },
+		}));
+		openCashfree = vi.fn(async () => ({
+			status: CHECKOUT_SUCCESS,
+			payload: { provider: "cashfree" },
+		}));
 		openMandate = vi.fn(async () => ({ status: "redirected" }));
 	});
 

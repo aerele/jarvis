@@ -8,7 +8,7 @@ import { describe, test, expect, vi } from "vitest";
 import { CHECKOUT_SUCCESS, CHECKOUT_DISMISSED } from "@/lib/useRazorpay";
 import { classifyOnboardingHandles } from "@/onboarding/onboardingCheckout";
 import { CODES } from "@/onboarding/paymentCodes";
-import { STATES } from "@/onboarding/paymentMachine";
+import { STATES, canOpenCheckout } from "@/onboarding/paymentMachine";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
 
 const ENVELOPE = (data, over = {}) => ({
@@ -35,7 +35,11 @@ function makeApi(over = {}) {
 			})
 		),
 		getOnboardingState: vi.fn(async () =>
-			ENVELOPE({ code: CODES.PAYMENT_CONFIRMATION_PENDING, attempt_id: "att_1", generation: 1 })
+			ENVELOPE({
+				code: CODES.PAYMENT_CONFIRMATION_PENDING,
+				attempt_id: "att_1",
+				generation: 1,
+			})
 		),
 		initiateSignupPayment: vi.fn(async () =>
 			ENVELOPE({
@@ -68,7 +72,10 @@ function makeFlow(over = {}) {
 	const api = over.api || makeApi();
 	const openCheckout =
 		over.openCheckout ||
-		vi.fn(async () => ({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_1" } }));
+		vi.fn(async () => ({
+			status: CHECKOUT_SUCCESS,
+			payload: { razorpay_payment_id: "pay_1" },
+		}));
 	const store = new Map();
 	const flow = createPaymentFlow({
 		api,
@@ -88,7 +95,12 @@ function makeFlow(over = {}) {
 describe("the first payment", () => {
 	test("a review submit signs up exactly once and opens the sheet it was handed", async () => {
 		const { flow, api, openCheckout } = makeFlow();
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		expect(api.startSignup).toHaveBeenCalledTimes(1);
 		expect(openCheckout).toHaveBeenCalledTimes(1);
 		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
@@ -152,14 +164,22 @@ describe("check-on-failure is mandatory", () => {
 		const { flow, api } = makeFlow({ openCheckout });
 		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
 		expect(api.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
-		expect(flow.state.value.value).toBe(STATES.FAILED_RETRYABLE);
+		// The mandatory check found the intent still pending, so the page reflects
+		// server truth (a checkable UNKNOWN) - the old code froze on the SDK-failure
+		// framing and discarded the answer (P0-1). The "could not open" reason
+		// survives as presentation metadata, never as a preserved code/state.
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		expect(flow.state.value.checkoutNote).toBe("Could not load the payment form.");
 	});
 
 	test("a failed confirm checks rather than declaring a failure", async () => {
 		const api = makeApi({
 			confirmSignupPayment: vi.fn(async () => ({
 				status: 417,
-				body: { exc_type: "ValidationError", error: { code: "", message: "gateway timeout" } },
+				body: {
+					exc_type: "ValidationError",
+					error: { code: "", message: "gateway timeout" },
+				},
 			})),
 		});
 		const { flow } = makeFlow({ api });
@@ -217,7 +237,12 @@ describe("the rate limit", () => {
 		const api = makeApi({
 			checkSignupPaymentStatus: vi.fn(async () =>
 				REFUSAL(
-					{ code: CODES.PAYMENT_CHECK_RATE_LIMITED, message: "", recovery: "retry", retry_after_seconds: 5 },
+					{
+						code: CODES.PAYMENT_CHECK_RATE_LIMITED,
+						message: "",
+						recovery: "retry",
+						retry_after_seconds: 5,
+					},
 					429
 				)
 			),
@@ -238,7 +263,12 @@ describe("the rate limit", () => {
 		const api = makeApi({
 			checkSignupPaymentStatus: vi.fn(async () =>
 				REFUSAL(
-					{ code: CODES.PAYMENT_CHECK_RATE_LIMITED, message: "", recovery: "retry", retry_after_seconds: 60 },
+					{
+						code: CODES.PAYMENT_CHECK_RATE_LIMITED,
+						message: "",
+						recovery: "retry",
+						retry_after_seconds: 60,
+					},
 					429
 				)
 			),
@@ -274,7 +304,8 @@ describe("the confirm is not a transport check", () => {
 						tenant_status: "pending",
 						agent_url: "",
 						chat_readiness: "Provisioning",
-						chat_readiness_reason: "Something went wrong finishing setup — our team has been alerted.",
+						chat_readiness_reason:
+							"Something went wrong finishing setup — our team has been alerted.",
 					},
 				},
 			})),
@@ -290,7 +321,10 @@ describe("the confirm is not a transport check", () => {
 			status: 402,
 			body: {
 				exc_type: "ValidationError",
-				error: { code: CODES.PAYMENT_DECLINED, message: "This Cashfree mandate is not authorized." },
+				error: {
+					code: CODES.PAYMENT_DECLINED,
+					message: "This Cashfree mandate is not authorized.",
+				},
 			},
 		}));
 		const openCheckout = vi.fn(async () => ({
@@ -298,7 +332,10 @@ describe("the confirm is not a transport check", () => {
 			payload: { provider: "cashfree", cashfree_order_id: "cf_1" },
 			pollConfirm: true,
 		}));
-		const { flow } = makeFlow({ api: makeApi({ confirmSignupPayment: confirm }), openCheckout });
+		const { flow } = makeFlow({
+			api: makeApi({ confirmSignupPayment: confirm }),
+			openCheckout,
+		});
 		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
 		expect(confirm).toHaveBeenCalledTimes(1);
 		expect(flow.state.value.code).toBe(CODES.PAYMENT_DECLINED);
@@ -459,7 +496,12 @@ describe("the machine decides what opens", () => {
 			),
 		});
 		const { flow, openCheckout } = makeFlow({ api, options: { strict: false } });
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
 		await flow.verifyAndContinue();
 		expect(openCheckout).not.toHaveBeenCalled();
@@ -486,7 +528,12 @@ describe("the machine decides what opens", () => {
 			),
 		});
 		const { flow, openCheckout } = makeFlow({ api, options: { strict: false } });
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		expect(flow.state.value.generation).toBe(7);
 		await flow.verifyAndContinue();
 		expect(openCheckout).not.toHaveBeenCalled();
@@ -510,11 +557,21 @@ describe("the machine decides what opens", () => {
 		const openCheckout = vi.fn(async (handles) => {
 			handedTo = handles;
 			const st = flow.state.value;
-			atOpen = { value: st.value, busy: st.busy, handles: { ...st.handles }, provider: st.provider };
+			atOpen = {
+				value: st.value,
+				busy: st.busy,
+				handles: { ...st.handles },
+				provider: st.provider,
+			};
 			return { status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_1" } };
 		});
 		({ flow } = makeFlow({ api, openCheckout, options: { strict: false } }));
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		await flow.verifyAndContinue();
 		expect(openCheckout).toHaveBeenCalledTimes(1);
 		// The busy view while the sheet opens - nothing to press underneath it.
@@ -930,7 +987,11 @@ describe("cancelInFlight", () => {
 		const api = makeApi({
 			checkSignupPaymentStatus: vi.fn(async () => {
 				flow.cancelInFlight();
-				return ENVELOPE({ code: CODES.PAYMENT_CONFIRMATION_PENDING, attempt_id: "att_1", generation: 1 });
+				return ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+				});
 			}),
 		});
 		({ flow } = makeFlow({ api }));
@@ -1025,7 +1086,11 @@ describe("the generation fence", () => {
 		});
 		const { flow } = makeFlow({ api, openCheckout });
 		const paying = flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
-		await Promise.resolve();
+		// Flush microtasks until the sheet is open (the deadline wrapper adds a few
+		// hops before start_signup resolves; the count is incidental to the race).
+		for (let i = 0; i < 50 && flow.state.value.value !== STATES.CHECKOUT_OPEN; i++) {
+			await Promise.resolve();
+		}
 		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
 		const out = await flow.hydrate();
 		expect(out.superseded).toBe(true);
@@ -1182,7 +1247,14 @@ describe("the idempotency key", () => {
 			initiateSignupPayment: vi
 				.fn()
 				.mockImplementationOnce(async () =>
-					REFUSAL({ code: CODES.INVALID_REQUEST, message: "idempotency_key too long", recovery: "retry" }, 400)
+					REFUSAL(
+						{
+							code: CODES.INVALID_REQUEST,
+							message: "idempotency_key too long",
+							recovery: "retry",
+						},
+						400
+					)
 				)
 				.mockImplementationOnce(async () =>
 					ENVELOPE({
@@ -1201,5 +1273,577 @@ describe("the idempotency key", () => {
 		const second = api.initiateSignupPayment.mock.calls[1][0] || {};
 		expect(second.idempotency_key).toBeUndefined();
 		expect(flow.state.value.code).toBe(CODES.PAYMENT_CONFIRMATION_PENDING);
+	});
+});
+
+// ===========================================================================
+// Round-2 hardening (plan 02): the reproduced review probes, as regression
+// tests. Each fails if its own mechanism is removed.
+// ===========================================================================
+
+const SIGNUP = { email: "a@b.com", company: "Acme", plan: "pro" };
+
+describe("P0-1: the mandatory reconcile absorbs every authoritative answer", () => {
+	test("dismiss -> check says authorized-pending-confirm -> no Initiate, correct copy", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM,
+					attempt_id: "att_1",
+					generation: 1,
+					can_initiate_payment: false,
+					can_check_status: true,
+				})
+			),
+		});
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const { flow } = makeFlow({ api, openCheckout });
+		await flow.submitReview(SIGNUP);
+		expect(flow.state.value.value).toBe(STATES.CONFIRM_REQUIRED);
+		expect(flow.state.value.code).toBe(CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM);
+		expect(flow.state.value.canInitiate).toBe(false);
+	});
+
+	test("dismiss -> check says terminal -> no retained handle can open", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.SIGNUP_TERMINAL,
+					attempt_id: "att_1",
+					generation: 1,
+					can_initiate_payment: false,
+				})
+			),
+		});
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const { flow } = makeFlow({ api, openCheckout });
+		await flow.submitReview(SIGNUP);
+		expect(flow.state.value.value).toBe(STATES.FAILED_TERMINAL);
+		expect(flow.state.value.canInitiate).toBe(false);
+		// The original pending handle is still in state, but the terminal source
+		// state forbids opening it.
+		expect(canOpenCheckout(flow.state.value)).toBe(false);
+	});
+
+	test("dismiss -> check says reconnect -> reconnect state, no Initiate", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.ACCOUNT_RECONNECT_REQUIRED,
+					attempt_id: "att_1",
+					generation: 1,
+					can_reconnect: true,
+					can_initiate_payment: false,
+				})
+			),
+		});
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const { flow } = makeFlow({ api, openCheckout });
+		await flow.submitReview(SIGNUP);
+		expect(flow.state.value.value).toBe(STATES.RECONNECT);
+		expect(flow.state.value.canInitiate).toBe(false);
+	});
+
+	test("dismiss -> check returns pending with can_initiate=false -> the old true is replaced", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+					can_initiate_payment: false,
+					can_check_status: true,
+				})
+			),
+		});
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const { flow } = makeFlow({ api, openCheckout });
+		// start_signup seeded can_initiate_payment:true.
+		await flow.submitReview(SIGNUP);
+		expect(flow.state.value.canInitiate).toBe(false);
+	});
+
+	test("the 'checkout could not open' reason survives as presentation metadata, not as state", async () => {
+		const openCheckout = vi.fn(async () => {
+			throw new Error("An ad blocker stopped the checkout.");
+		});
+		const { flow } = makeFlow({ openCheckout });
+		await flow.submitReview(SIGNUP);
+		// The mandatory check found the intent still pending (default): the state is
+		// server truth, and the reason rides in checkoutNote (never a frozen state).
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		expect(flow.state.value.checkoutNote).toBe("An ad blocker stopped the checkout.");
+	});
+});
+
+describe("P0-3: every payment wait is bounded", () => {
+	const never = () => new Promise(() => {});
+
+	test("a never-settling start does not strand the page - it reconciles to a checkable unknown", async () => {
+		const api = makeApi({ startSignup: vi.fn(never) });
+		const { flow } = makeFlow({ api, options: { fetchDeadlineMs: 10 } });
+		await flow.submitReview(SIGNUP); // resolves despite the hung start
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		expect(flow.state.value.canCheck).toBe(true);
+	});
+
+	test("even a total blackout (start AND check hang) still resolves, never a frozen spinner", async () => {
+		const api = makeApi({ startSignup: vi.fn(never), checkSignupPaymentStatus: vi.fn(never) });
+		const { flow } = makeFlow({ api, options: { fetchDeadlineMs: 10 } });
+		await flow.submitReview(SIGNUP);
+		// Truth is unknown, but the customer is not trapped on Starting…; the
+		// read-only check is offered.
+		expect([STATES.UNKNOWN, STATES.REVIEW]).toContain(flow.state.value.value);
+		expect(flow.state.value.busy).toBe(null);
+	});
+
+	test("a never-settling checkout open times out into a retryable, checked recovery", async () => {
+		const openCheckout = vi.fn(never);
+		const { flow } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		await flow.submitReview(SIGNUP);
+		expect(flow.state.value.value).not.toBe(STATES.CHECKOUT_OPEN);
+		expect(flow.state.value.busy).toBe(null);
+	});
+
+	test("a never-settling confirm falls to unknown and reconciles, never to paid", async () => {
+		const api = makeApi({ confirmSignupPayment: vi.fn(never) });
+		const openCheckout = vi.fn(async () => ({
+			status: CHECKOUT_SUCCESS,
+			payload: { razorpay_payment_id: "p" },
+		}));
+		const { flow } = makeFlow({ api, openCheckout, options: { fetchDeadlineMs: 10 } });
+		await flow.submitReview(SIGNUP);
+		expect(flow.state.value.value).not.toBe(STATES.PAID);
+		expect(flow.state.value.busy).toBe(null);
+	});
+});
+
+describe("P1-2: method-level serialization", () => {
+	test("three concurrent submitReview calls -> one start, one sheet", async () => {
+		const { flow, api, openCheckout } = makeFlow();
+		await Promise.all([
+			flow.submitReview(SIGNUP),
+			flow.submitReview(SIGNUP),
+			flow.submitReview(SIGNUP),
+		]);
+		expect(api.startSignup).toHaveBeenCalledTimes(1);
+		expect(openCheckout).toHaveBeenCalledTimes(1);
+	});
+
+	test("three concurrent initiatePayment calls -> one initiate, one sheet", async () => {
+		const { flow, api, openCheckout } = makeFlow();
+		await Promise.all([
+			flow.initiatePayment({ plan: "pro" }),
+			flow.initiatePayment({ plan: "pro" }),
+			flow.initiatePayment({ plan: "pro" }),
+		]);
+		expect(api.initiateSignupPayment).toHaveBeenCalledTimes(1);
+		expect(openCheckout).toHaveBeenCalledTimes(1);
+	});
+
+	test("check vs initiate race -> exactly one legal action runs", async () => {
+		const { flow, api } = makeFlow();
+		await Promise.all([flow.checkStatus(), flow.initiatePayment({ plan: "pro" })]);
+		// The check took the lock first; the initiate was refused - one live action.
+		expect(api.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+		expect(api.initiateSignupPayment).not.toHaveBeenCalled();
+	});
+
+	test("verify vs initiate race -> exactly one legal action runs", async () => {
+		const { flow, api } = makeFlow();
+		await Promise.all([flow.verifyAndContinue(), flow.initiatePayment({ plan: "pro" })]);
+		expect(api.getOnboardingState).toHaveBeenCalledTimes(1);
+		expect(api.initiateSignupPayment).not.toHaveBeenCalled();
+	});
+});
+
+describe("P0-2: the safe return from an external checkout", () => {
+	test("a Cashfree-mandate redirect leaves checkout_open; returnFromCheckout reconciles it", async () => {
+		const openCheckout = vi.fn(async () => ({ status: "redirected", leavesPage: true }));
+		const { flow, api } = makeFlow({ openCheckout });
+		await flow.submitReview(SIGNUP);
+		// The browser left for the gateway - the machine is parked on checkout_open.
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		// The bfcache/return path: explicit safe exit + server reconcile (default
+		// check = pending), never an assumed dismissal.
+		const out = await flow.returnFromCheckout();
+		expect(out.returned).toBe(true);
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		expect(flow.state.value.canCheck).toBe(true);
+		expect(api.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+	});
+
+	test("returnFromCheckout is a no-op when no checkout is open", async () => {
+		const { flow } = makeFlow();
+		const out = await flow.returnFromCheckout();
+		expect(out.returned).toBe(false);
+	});
+});
+
+describe("P1-3: server-truth-gated restart", () => {
+	test("account-exists restart resets to a fresh review", async () => {
+		const api = makeApi({
+			startSignup: vi.fn(async () =>
+				REFUSAL({ code: CODES.ACCOUNT_ALREADY_EXISTS, message: "exists" })
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.submitReview(SIGNUP);
+		const { reset } = flow.restart();
+		expect(reset).toBe(true);
+		expect(flow.state.value.value).toBe(STATES.REVIEW);
+	});
+
+	test("an authorized-pending state is preserved, not reset", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM,
+					attempt_id: "att_1",
+					generation: 1,
+					can_initiate_payment: false,
+				})
+			),
+		});
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const { flow } = makeFlow({ api, openCheckout });
+		await flow.submitReview(SIGNUP);
+		expect(flow.state.value.value).toBe(STATES.CONFIRM_REQUIRED);
+		const { reset } = flow.restart();
+		expect(reset).toBe(false);
+		expect(flow.state.value.value).toBe(STATES.CONFIRM_REQUIRED);
+	});
+});
+
+describe("P1-8: leaving Pay invalidates in-flight work", () => {
+	test("a late reconcile answer after cancelInFlight cannot move the machine", async () => {
+		let resolveCheck;
+		const slow = new Promise((r) => (resolveCheck = r));
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () => {
+				await slow;
+				return ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					subscription_status: "Active",
+					attempt_id: "att_1",
+					generation: 1,
+				});
+			}),
+		});
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const { flow } = makeFlow({ api, openCheckout });
+		const paying = flow.submitReview(SIGNUP); // dismiss -> reconcile awaits slow
+		await Promise.resolve();
+		flow.cancelInFlight(); // the customer left Pay
+		resolveCheck();
+		await paying;
+		// The late "paid" answer belongs to a superseded token: it must not have
+		// advanced the machine to paid behind a torn-down/left surface.
+		expect(flow.state.value.value).not.toBe(STATES.PAID);
+	});
+});
+
+describe("P2-3: transition telemetry is PII-free", () => {
+	test("no email/company/handle/payment-id reaches the sink, and the shape is right", async () => {
+		const events = [];
+		const { flow } = makeFlow({
+			options: { telemetry: (e) => events.push(e) },
+		});
+		await flow.submitReview({
+			email: "secret@example.com",
+			company: "SecretCorp Ltd",
+			plan: "pro",
+		});
+		const blob = JSON.stringify(events);
+		expect(blob).not.toContain("secret@example.com");
+		expect(blob).not.toContain("SecretCorp");
+		expect(blob).not.toContain("order_1");
+		expect(blob).not.toContain("pay_1");
+		expect(events.some((e) => e.event === "payment_transition")).toBe(true);
+		for (const e of events) {
+			expect(e.email).toBeUndefined();
+			expect(e.company).toBeUndefined();
+			expect(e.handles).toBeUndefined();
+			if (e.event === "payment_transition") {
+				expect(e).toHaveProperty("from");
+				expect(e).toHaveProperty("to");
+				expect(e).toHaveProperty("elapsed_bucket");
+			}
+		}
+	});
+});
+
+describe("P2-5: the support counter survives a refresh", () => {
+	test("a persisted (attempt, generation) count is restored on the next mount", async () => {
+		const store = new Map();
+		const storage = { get: (k) => store.get(k) || null, set: (k, v) => store.set(k, v) };
+		const mkApi = () =>
+			makeApi({
+				checkSignupPaymentStatus: vi.fn(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 1,
+						can_check_status: true,
+					})
+				),
+			});
+		const openCheckout = vi.fn(async () => ({ status: CHECKOUT_DISMISSED }));
+		const flow1 = createPaymentFlow({
+			api: mkApi(),
+			openCheckout,
+			sleep: async () => {},
+			now: () => 1_000_000,
+			storage,
+			strict: true,
+		});
+		await flow1.submitReview(SIGNUP); // -> UNKNOWN pending att_1/gen1
+		for (let i = 0; i < 4; i++) await flow1.checkStatus();
+		expect(flow1.state.value.supportOffered).toBe(true);
+
+		// A fresh page (new machine, same storage) hydrating the same intent
+		// restores the count instead of resetting the offer.
+		const flow2 = createPaymentFlow({
+			api: makeApi({
+				getOnboardingState: vi.fn(async () =>
+					ENVELOPE({
+						code: CODES.PAYMENT_CONFIRMATION_PENDING,
+						attempt_id: "att_1",
+						generation: 1,
+						can_check_status: true,
+					})
+				),
+			}),
+			openCheckout,
+			sleep: async () => {},
+			now: () => 1_000_000,
+			storage,
+			strict: true,
+		});
+		await flow2.hydrate();
+		expect(flow2.state.value.supportOffered).toBe(true);
+	});
+});
+
+describe("P1-7: resumed identity never falls back to prefill (machine half)", () => {
+	test("an answer with no email leaves the summary email blank for the view's placeholder", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.ACCOUNT_RECONNECT_REQUIRED,
+					attempt_id: "att_1",
+					generation: 1,
+					can_reconnect: true,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.hydrate();
+		expect(flow.state.value.value).toBe(STATES.RECONNECT);
+		expect(flow.state.value.summary && flow.state.value.summary.email).toBeFalsy();
+	});
+});
+
+describe("X1 / B2-1: a sheet that settles AFTER the open deadline", () => {
+	const flush = async () => {
+		for (let i = 0; i < 80; i++) await Promise.resolve();
+	};
+
+	test("a late SUCCESS still confirms exactly once, and initiate is never offered meanwhile", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		// Let the open deadline elapse: the sheet is still open, machine enters the
+		// checkoutMayBeOpen recovery and reconciles a pending answer.
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.checkoutMayBeOpen).toBe(true);
+		expect(flow.state.value.canInitiate).toBe(false);
+		expect(api.confirmSignupPayment).not.toHaveBeenCalled();
+		// The customer finally pays in the still-open sheet, long after our deadline.
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		// The late result ran the NORMAL confirm path - not dropped - exactly once.
+		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+
+	test("a late DISMISS lands on a check-first recovery, clears the veto, never charges", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.checkoutMayBeOpen).toBe(true);
+		const checksBefore = api.checkSignupPaymentStatus.mock.calls.length;
+		resolveSheet({ status: CHECKOUT_DISMISSED });
+		await flush();
+		expect(flow.state.value.checkoutMayBeOpen).toBe(false);
+		expect(api.checkSignupPaymentStatus.mock.calls.length).toBeGreaterThan(checksBefore);
+		expect(api.confirmSignupPayment).not.toHaveBeenCalled();
+		expect(flow.state.value.value).not.toBe(STATES.PAID);
+	});
+
+	test("a late success is DROPPED after a hard teardown (leaving Pay / unmount)", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		flow.cancelInFlight(); // the page tore down: the late result must be abandoned
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		expect(api.confirmSignupPayment).not.toHaveBeenCalled();
+	});
+
+	test("a benign Check taken after the timeout does NOT drop the later real payment", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		// The customer, waiting, taps Check (a benign action - it bumps the action
+		// token). The late payment must still confirm despite that bump.
+		await flow.checkStatus();
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+});
+
+describe("X5 / B2-6: a frozen checkout_open with no live opener", () => {
+	test("hydrate exits it safely instead of trapping the customer forever", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const { flow } = makeFlow({ openCheckout });
+		const p = flow.submitReview(SIGNUP);
+		for (let i = 0; i < 80 && flow.state.value.value !== STATES.CHECKOUT_OPEN; i++) {
+			await Promise.resolve();
+		}
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		// The opener is abandoned (leaving Pay / unmount): sheet gone, state frozen.
+		flow.cancelInFlight();
+		const out = await flow.hydrate();
+		expect(out.superseded).not.toBe(true);
+		expect(flow.state.value.value).not.toBe(STATES.CHECKOUT_OPEN);
+		// Clean up the abandoned opener so the open-deadline timer does not linger.
+		resolveSheet({ status: CHECKOUT_DISMISSED });
+		await p;
+	});
+
+	test("a LIVE sheet is still protected (the normal refusal is not weakened)", async () => {
+		let releaseSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (releaseSheet = r)));
+		const { flow } = makeFlow({ openCheckout });
+		const p = flow.submitReview(SIGNUP);
+		for (let i = 0; i < 80 && flow.state.value.value !== STATES.CHECKOUT_OPEN; i++) {
+			await Promise.resolve();
+		}
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		// No cancel: the opener is genuinely live, so hydrate must still refuse.
+		const out = await flow.hydrate();
+		expect(out.superseded).toBe(true);
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		releaseSheet({ status: CHECKOUT_DISMISSED });
+		await p;
+	});
+});
+
+describe("bench re-probe: late-continuation vs recovery actions", () => {
+	const flush = async () => {
+		for (let i = 0; i < 80; i++) await Promise.resolve();
+	};
+
+	test("D3: a REFUSED restart preserves the late continuation - a later success still confirms once", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		// After the timeout, the reconcile answers a plain PENDING (the makeApi
+		// default) - a state that is NOT restart-safe, so "Start again" is refused.
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.checkoutMayBeOpen).toBe(true);
+		// The customer taps "Start again" while the sheet is still open. Money may be
+		// recoverable, so it is REFUSED (the customer stays on recovery).
+		const { reset } = flow.restart();
+		expect(reset).toBe(false);
+		// The still-open sheet finally succeeds AFTER the refused restart. Pre-fix,
+		// restart's UNCONDITIONAL cancelInFlight bumped disposeEpoch and fenced this
+		// continuation out entirely (0 confirms - the money was lost). Post-fix it runs.
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+
+	test("D6: a late sheet FAILURE lifts the may-be-open veto instead of latching it forever", async () => {
+		let rejectSheet;
+		const openCheckout = vi.fn(() => new Promise((_res, rej) => (rejectSheet = rej)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.checkoutMayBeOpen).toBe(true);
+		const checksBefore = api.checkSignupPaymentStatus.mock.calls.length;
+		// The still-open sheet finally FAILS (an SDK error) long after our deadline.
+		rejectSheet(new Error("sdk exploded late"));
+		await flush();
+		// Pre-fix the rejection handler only cleared openInFlight and never fired
+		// CHECKOUT_SHEET_CLOSED, so checkoutMayBeOpen latched true forever - canInitiate
+		// dead, the only escape a full reload. Post-fix the veto lifts and a check runs.
+		expect(flow.state.value.checkoutMayBeOpen).toBe(false);
+		expect(api.checkSignupPaymentStatus.mock.calls.length).toBeGreaterThan(checksBefore);
+		expect(api.confirmSignupPayment).not.toHaveBeenCalled();
+	});
+
+	test("D7: a late success at confirm_required completes the confirm, not an illegal limbo", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const api = makeApi({
+			// After the timeout, a status Check resolves the intent to authorized-
+			// pending-confirm (a very likely real answer) -> state confirm_required.
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM,
+					attempt_id: "att_1",
+					generation: 1,
+					can_initiate_payment: false,
+				})
+			),
+			confirmSignupPayment: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					subscription_status: "Active",
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		// strict:false to observe PRODUCTION behaviour (illegal transitions counted,
+		// not thrown) - the exact shape the probe measured.
+		const { flow } = makeFlow({
+			api,
+			openCheckout,
+			options: { openDeadlineMs: 10, strict: false },
+		});
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.value).toBe(STATES.CONFIRM_REQUIRED);
+		// The still-open sheet finally succeeds, landing at confirm_required. Pre-fix
+		// GATEWAY_CALLBACK and CONFIRM_SUCCEEDED were BOTH illegal from there: the money
+		// was confirmed (1 call) but 2 illegal transitions accrued and the customer was
+		// stranded on the pending card. Post-fix it drives confirm -> paid cleanly.
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+		expect(flow.state.value.illegalTransitions).toBe(0);
 	});
 });

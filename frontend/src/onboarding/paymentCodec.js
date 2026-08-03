@@ -102,7 +102,8 @@ export function decode(res) {
 	const envelope = body.message;
 	if (envelope && typeof envelope === "object" && typeof envelope.ok === "boolean") {
 		if (envelope.ok) {
-			const data = (envelope.data && typeof envelope.data === "object" && envelope.data) || {};
+			const data =
+				(envelope.data && typeof envelope.data === "object" && envelope.data) || {};
 			return {
 				ok: true,
 				code: data.code || "",
@@ -112,19 +113,26 @@ export function decode(res) {
 				excType: "",
 				contractVersion: envelope.contract_version ?? null,
 				data,
-				context: (envelope.context && typeof envelope.context === "object" && envelope.context) || {},
+				context:
+					(envelope.context &&
+						typeof envelope.context === "object" &&
+						envelope.context) ||
+					{},
 				error: {},
 				httpStatus: status,
 			};
 		}
-		const error = (envelope.error && typeof envelope.error === "object" && envelope.error) || {};
+		const error =
+			(envelope.error && typeof envelope.error === "object" && envelope.error) || {};
 		return verdict({
 			code: error.code || CLIENT_UNREADABLE,
 			message: error.message || "",
 			recovery: error.recovery || "",
 			retryAfterSeconds: Number(error.retry_after_seconds) || 0,
 			contractVersion: envelope.contract_version ?? null,
-			context: (envelope.context && typeof envelope.context === "object" && envelope.context) || {},
+			context:
+				(envelope.context && typeof envelope.context === "object" && envelope.context) ||
+				{},
 			error,
 			httpStatus: status,
 		});

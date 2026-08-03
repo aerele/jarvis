@@ -52,11 +52,32 @@ export const EVENTS = {
 	CHECKOUT_OPENED: "CHECKOUT_OPENED",
 	CHECKOUT_DISMISSED: "CHECKOUT_DISMISSED",
 	CHECKOUT_FAILED: "CHECKOUT_FAILED",
+	// The gateway open did not settle inside the (generous) open deadline. Unlike
+	// CHECKOUT_FAILED this is NOT "the sheet could not open" - an in-page modal
+	// (Razorpay netbanking / UPI-collect) can sit open and PAYABLE long past the
+	// deadline, so we must not re-arm "start a new payment" over a live sheet
+	// (B2-1). It leaves the busy screen for a checkable UNKNOWN and VETOES initiate
+	// (checkoutMayBeOpen) until the sheet actually closes and a check has run.
+	CHECKOUT_OPEN_TIMED_OUT: "CHECKOUT_OPEN_TIMED_OUT",
+	// A previously timed-out sheet finally closed WITHOUT a success (a late
+	// dismiss, or a programmatic teardown). Clears the checkoutMayBeOpen veto and
+	// requires a check; never a verdict of its own.
+	CHECKOUT_SHEET_CLOSED: "CHECKOUT_SHEET_CLOSED",
+	// The customer came back to a checkout the page had opened - a bfcache
+	// restore, a top-level redirect return, or a tab regaining focus after a
+	// full-page mandate. NOT a dismissal: it asserts nothing about the money, only
+	// that the sheet is no longer in front of us, so it leaves the busy screen for
+	// a checkable UNKNOWN and the orchestrator reconciles server truth (P0-2).
+	RETURNED_FROM_CHECKOUT: "RETURNED_FROM_CHECKOUT",
 	GATEWAY_CALLBACK: "GATEWAY_CALLBACK",
 	CONFIRM_SUCCEEDED: "CONFIRM_SUCCEEDED",
 	CONFIRM_FAILED: "CONFIRM_FAILED",
 	RATE_LIMITED: "RATE_LIMITED",
 	COOLDOWN_ELAPSED: "COOLDOWN_ELAPSED",
+	// "Start again" - a server-truth-gated reset. The reducer resets to a fresh
+	// review ONLY for codes where no recoverable payment can exist; otherwise it
+	// preserves the attempt and its status/reconnect/support affordances (P1-3).
+	RESTART: "RESTART",
 	PROVISIONING_STARTED: "PROVISIONING_STARTED",
 	PROVISIONING_DELAYED: "PROVISIONING_DELAYED",
 };
@@ -76,6 +97,49 @@ const TERMINAL_FOR_PAYMENT = new Set([
 // Once here, a payment answer is a no-op: paid is a floor and provisioning sits
 // above it. Late polls, late declines and late callbacks cannot move it.
 const PAID_FLOOR = new Set([STATES.PAID, STATES.PROVISIONING, STATES.PROVISIONING_DELAYED]);
+
+// The ONLY states a gateway sheet may be opened from (P1-1). A live, unsettled
+// intent that still has a real handle - never a settled recovery state. Opening
+// from confirm_required (the authorization already exists), reconnect, terminal,
+// verification (nothing to pay yet), or the paid floor is exactly the "blind Pay"
+// the plan forbids: those states can still hold a retained handle from an earlier
+// same-generation answer, and the old predicate would have opened on it.
+const CHECKOUT_OPENABLE_STATES = new Set([STATES.UNKNOWN, STATES.FAILED_RETRYABLE]);
+
+// The states a stray gateway event (dismiss/fail/callback) may legally act on: a
+// live, unsettled intent or a sheet that is actually open/confirming. It must
+// NEVER move a settled recovery state (terminal/reconnect/authorized-pending), a
+// verification wait, or the paid floor - a late event from a superseded sheet
+// would otherwise drag one of those backwards (P1-5). Dismiss is tighter still
+// (a sheet has to have been open to be dismissed), and CONFIRM_SUCCEEDED - the
+// one event that mints PAID - is tightest of all (only from confirming).
+const GATEWAY_EVENT_SOURCES = new Set([
+	STATES.CHECKOUT_OPEN,
+	STATES.UNKNOWN,
+	STATES.FAILED_RETRYABLE,
+]);
+// GATEWAY_CALLBACK has ONE extra legal source over the rest: confirm_required
+// (D7). A post-deadline sheet SUCCESS (the X1 late continuation) can land after a
+// status Check has already resolved the intent to PAYMENT_AUTHORIZED_PENDING_
+// CONFIRM. The authorization exists and the late callback carries the very
+// gateway payment id + signature that confirms it, so it must be allowed to drive
+// the confirm (-> confirming -> paid) rather than counting as an illegal
+// transition and stranding the customer on the pending card while the money IS
+// taken. Kept separate from GATEWAY_EVENT_SOURCES so dismiss/checkout-failed do
+// NOT gain confirm_required (those must never act on a settled recovery). The
+// identity fence (callbackStale) still rejects a genuinely superseded callback.
+const GATEWAY_CALLBACK_SOURCES = new Set([...GATEWAY_EVENT_SOURCES, STATES.CONFIRM_REQUIRED]);
+const DISMISS_SOURCES = new Set([STATES.CHECKOUT_OPEN]);
+const RETURN_SOURCES = new Set([STATES.CHECKOUT_OPEN, STATES.CONFIRMING]);
+
+// Codes for which "Start again" may safely wipe the machine: no recoverable
+// payment can be sitting behind them, so a fresh review is honest. Any other code
+// - and any parked-money flag - preserves the attempt instead (P1-3).
+const RESTART_SAFE_CODES = new Set([
+	CODES.BENCH_NO_SIGNUP_CONTEXT,
+	CODES.NO_CURRENT_INTENT,
+	CODES.ACCOUNT_ALREADY_EXISTS,
+]);
 
 export const HANDLE_KEYS = [
 	"razorpay_order_id",
@@ -169,6 +233,19 @@ export function initialState() {
 		checkRequired: false,
 		notStarted: false,
 		transportError: false,
+		// Presentation-only detail from the thing that failed to OPEN a sheet (an
+		// ad-blocker eating the SDK, a gateway that would not launch). It is never a
+		// payment verdict, so it rides alongside whatever authoritative code the
+		// mandatory reconcile then discovers - it must not preserve a stale code,
+		// state, or capability over that answer (P0-1). Cleared on a fresh
+		// open/attempt.
+		checkoutNote: "",
+		// Set when an open times out while the sheet MAY still be open and payable
+		// (B2-1). While true, initiate is vetoed at the machine (not just in copy):
+		// the page cannot offer "start a new payment" over a live gateway sheet. It
+		// lifts only when the sheet actually closes (CHECKOUT_SHEET_CLOSED /
+		// GATEWAY_CALLBACK / a fresh open) and a status check has run after closure.
+		checkoutMayBeOpen: false,
 		checkCooldownUntil: 0,
 		supportChecks: emptyCounter(),
 		supportOffered: false,
@@ -205,7 +282,8 @@ function buildSummary(prev, data, context) {
 		context.plan ||
 		(prev && prev.plan) ||
 		"";
-	const num = (v, fallback) => (v === null || v === undefined || v === "" ? fallback : Number(v));
+	const num = (v, fallback) =>
+		v === null || v === undefined || v === "" ? fallback : Number(v);
 	return {
 		plan: planName,
 		email: data.email || context.email || (prev && prev.email) || "",
@@ -214,7 +292,8 @@ function buildSummary(prev, data, context) {
 		amountInr: num(data.amount_inr, prev ? prev.amountInr : null),
 		dueTodayInr: num(data.due_today_inr, prev ? prev.dueTodayInr : null),
 		signupFeeInr: num(data.signup_fee_inr, prev ? prev.signupFeeInr : null),
-		trialDays: num(data.effective_trial_days ?? data.trial_days, prev ? prev.trialDays : 0) || 0,
+		trialDays:
+			num(data.effective_trial_days ?? data.trial_days, prev ? prev.trialDays : 0) || 0,
 	};
 }
 
@@ -270,7 +349,8 @@ function recomputeCanCheck(next, nowMs) {
 	// The check button is live when the backend permits it AND we are not in a
 	// rate-limit cooldown. A missing `nowMs` (most reducer calls) leaves an
 	// existing cooldown in force - only an explicit clock tick lifts it.
-	const cooling = next.checkCooldownUntil > 0 && (nowMs == null || nowMs < next.checkCooldownUntil);
+	const cooling =
+		next.checkCooldownUntil > 0 && (nowMs == null || nowMs < next.checkCooldownUntil);
 	return next._backendCanCheck && !cooling;
 }
 
@@ -295,7 +375,12 @@ export function reduce(state, event, opts = {}) {
 	const nowMs = event.nowMs != null ? event.nowMs : opts.nowMs != null ? opts.nowMs : 0;
 	switch (event.type) {
 		case EVENTS.SUBMIT_REVIEW:
-			return { ...state, value: STATES.STARTING_SIGNUP, busy: "starting", transportError: false };
+			return {
+				...state,
+				value: STATES.STARTING_SIGNUP,
+				busy: "starting",
+				transportError: false,
+			};
 
 		case EVENTS.CONTRACT_STATE:
 			return applyContract(state, event.decoded || {}, opts);
@@ -307,11 +392,52 @@ export function reduce(state, event, opts = {}) {
 			// the confirm), which is the same class of harm the floor exists for.
 			if (PAID_FLOOR.has(state.value)) return state;
 			if (!canOpenCheckout(state)) return illegal(state, strict, "checkout without handles");
-			return { ...state, value: STATES.CHECKOUT_OPEN, busy: null };
+			// A fresh sheet clears any earlier "the checkout could not open" note and
+			// the "a previous sheet may still be open" veto - this IS the new sheet.
+			return {
+				...state,
+				value: STATES.CHECKOUT_OPEN,
+				busy: null,
+				checkoutNote: "",
+				checkoutMayBeOpen: false,
+			};
+		}
+
+		case EVENTS.CHECKOUT_OPEN_TIMED_OUT: {
+			if (PAID_FLOOR.has(state.value)) return state;
+			if (callbackStale(state, event)) return state;
+			if (state.value !== STATES.CHECKOUT_OPEN) {
+				return illegal(state, strict, "open-timeout outside an open checkout");
+			}
+			// The sheet did not settle in time and MAY still be open & payable. Leave
+			// the busy screen for a checkable UNKNOWN, but VETO initiate so the page
+			// cannot re-arm "start a new payment" over a live sheet (B2-1). The veto
+			// lifts on CHECKOUT_SHEET_CLOSED / GATEWAY_CALLBACK, never on a check.
+			return {
+				...state,
+				value: STATES.UNKNOWN,
+				busy: null,
+				checkRequired: true,
+				checkoutMayBeOpen: true,
+			};
+		}
+
+		case EVENTS.CHECKOUT_SHEET_CLOSED: {
+			// A timed-out sheet finally closed with no success (late dismiss / SDK
+			// teardown). It asserts nothing about the money - only that the sheet is
+			// gone - so it clears the veto and requires a check. Legal from any
+			// non-floor state; a stray one on the paid floor is a no-op.
+			if (PAID_FLOOR.has(state.value)) return state;
+			if (callbackStale(state, event)) return state;
+			return { ...state, busy: null, checkRequired: true, checkoutMayBeOpen: false };
 		}
 
 		case EVENTS.CHECKOUT_DISMISSED: {
 			if (PAID_FLOOR.has(state.value)) return state; // paid wins over a late dismiss
+			if (callbackStale(state, event)) return state; // a superseded sheet's dismiss
+			if (!DISMISS_SOURCES.has(state.value)) {
+				return illegal(state, strict, "dismiss from a state with no open sheet");
+			}
 			return {
 				...state,
 				value: STATES.UNKNOWN,
@@ -322,21 +448,67 @@ export function reduce(state, event, opts = {}) {
 
 		case EVENTS.CHECKOUT_FAILED: {
 			if (PAID_FLOOR.has(state.value)) return state;
+			if (callbackStale(state, event)) return state;
+			if (!GATEWAY_EVENT_SOURCES.has(state.value)) {
+				return illegal(state, strict, "checkout-failed from a settled state");
+			}
 			return {
 				...state,
 				value: STATES.FAILED_RETRYABLE,
 				busy: null,
-				message: event.message || state.message,
+				// The SDK/gateway reason is PRESENTATION metadata, not a verdict: it
+				// rides in its own field so the mandatory reconcile that follows can
+				// overwrite message/code/state without losing it (P0-1). It is
+				// SANITIZED first (X2): a deadline abort's internal label ("payment
+				// request timed out: <label>") is a client signal, never a customer
+				// message, so it is dropped here - the one chokepoint that feeds the
+				// note render path - while genuine SDK/customer-authored strings pass.
+				checkoutNote: sanitizeCheckoutNote(event.message) || state.checkoutNote || "",
 				checkRequired: true,
 			};
 		}
 
 		case EVENTS.GATEWAY_CALLBACK: {
 			if (PAID_FLOOR.has(state.value)) return state;
-			return { ...state, value: STATES.CONFIRMING, busy: "confirming" };
+			if (callbackStale(state, event)) return state;
+			if (!GATEWAY_CALLBACK_SOURCES.has(state.value)) {
+				return illegal(state, strict, "gateway callback from a settled state");
+			}
+			// A callback arriving means the sheet closed - clear any "may still be
+			// open" veto (X1: a late post-deadline payment lands here).
+			return {
+				...state,
+				value: STATES.CONFIRMING,
+				busy: "confirming",
+				checkoutMayBeOpen: false,
+			};
+		}
+
+		case EVENTS.RETURNED_FROM_CHECKOUT: {
+			// The sheet is gone (bfcache restore, redirect return, tab refocus). Do
+			// NOT assume dismissal or paid: leave the actionless busy screen for a
+			// checkable UNKNOWN and let the orchestrator reconcile server truth. Only
+			// legal while a sheet was actually open/confirming; a stray pageshow in
+			// any other state is a no-op (never a regression).
+			if (PAID_FLOOR.has(state.value)) return state;
+			if (!RETURN_SOURCES.has(state.value)) return state;
+			return {
+				...state,
+				value: STATES.UNKNOWN,
+				busy: null,
+				checkRequired: true,
+				checkoutMayBeOpen: false,
+			};
 		}
 
 		case EVENTS.CONFIRM_SUCCEEDED: {
+			// The one event that mints PAID, so it is the tightest-guarded: only a
+			// real confirm-in-progress can complete, and only for the live attempt.
+			if (state.value !== STATES.CONFIRMING) {
+				if (PAID_FLOOR.has(state.value)) return state;
+				return illegal(state, strict, "confirm-succeeded outside a confirm");
+			}
+			if (callbackStale(state, event)) return state;
 			// Keep what the confirm actually said. admin's allocation-failure branch
 			// answers ok:True with a real customer sentence in
 			// `chat_readiness_reason` and NO container - discarding it left the
@@ -349,6 +521,7 @@ export function reduce(state, event, opts = {}) {
 				busy: null,
 				checkRequired: false,
 				transportError: false,
+				checkoutMayBeOpen: false,
 				provisioningNote: d.chat_readiness_reason || state.provisioningNote || "",
 				handles: state.handles,
 			};
@@ -356,6 +529,10 @@ export function reduce(state, event, opts = {}) {
 
 		case EVENTS.CONFIRM_FAILED: {
 			if (PAID_FLOOR.has(state.value)) return state;
+			if (callbackStale(state, event)) return state;
+			if (state.value !== STATES.CONFIRMING) {
+				return illegal(state, strict, "confirm-failed outside a confirm");
+			}
 			const decoded = event.decoded || {};
 			// A confirm that returned a coded decline renders that decline; a bare
 			// timeout/transport failure falls back to unknown and forces a check -
@@ -389,6 +566,16 @@ export function reduce(state, event, opts = {}) {
 			return next;
 		}
 
+		case EVENTS.RESTART: {
+			// "Start again" is only a real reset when no recoverable payment can be
+			// behind the current code (P1-3). Money in flight - the paid floor, a
+			// parked-reconciliation flag, an authorization pending confirm, a live
+			// pending intent - preserves the attempt and its recovery affordances
+			// instead, so a blind local reset can never orphan a payment.
+			if (!canSafelyRestart(state)) return state;
+			return { ...initialState(), value: STATES.REVIEW };
+		}
+
 		case EVENTS.PROVISIONING_STARTED: {
 			// Legal ONLY from paid - provisioning is the readiness gate's, and
 			// `unknown -> provisioning` is the illegal transition plan 02 names.
@@ -400,7 +587,11 @@ export function reduce(state, event, opts = {}) {
 
 		case EVENTS.PROVISIONING_DELAYED: {
 			if (state.value !== STATES.PROVISIONING) {
-				return illegal(state, strict, "provisioning_delayed from a non-provisioning state");
+				return illegal(
+					state,
+					strict,
+					"provisioning_delayed from a non-provisioning state"
+				);
 			}
 			return { ...state, value: STATES.PROVISIONING_DELAYED };
 		}
@@ -423,7 +614,12 @@ export function reduce(state, event, opts = {}) {
  */
 export function canOpenCheckout(state) {
 	const s = state || {};
-	if (PAID_FLOOR.has(s.value)) return false;
+	// Fail closed on the SOURCE STATE first (P1-1). Only a live, unsettled intent
+	// may raise a sheet: confirm_required (the authorization already exists),
+	// reconnect, terminal, verification, the paid floor and provisioning all keep
+	// their retained handles OUT of reach here, so a stale handle can never open a
+	// blind Pay from a state whose whole point is that paying again is unsafe.
+	if (!CHECKOUT_OPENABLE_STATES.has(s.value)) return false;
 	return hasOpenableHandle(s.handles);
 }
 
@@ -464,7 +660,12 @@ function hasOpenableHandle(handles) {
  */
 export function handlesForProvider(handles, provider) {
 	const full = { ...(handles || {}) };
-	const named = PROVIDER_HANDLE_KEYS[String(provider || "").trim().toLowerCase()];
+	const named =
+		PROVIDER_HANDLE_KEYS[
+			String(provider || "")
+				.trim()
+				.toLowerCase()
+		];
 	if (!named) return full;
 	const family = hasOpenableHandle(narrowToFamily(full, named))
 		? named
@@ -480,9 +681,72 @@ function narrowToFamily(handles, family) {
 	return out;
 }
 
+// The internal signature a deadline abort stamps on its Error message
+// (usePaymentFlow.deadlined: "payment request timed out: <label>"). It is a
+// CLIENT signal - it says nothing about the gateway - so it must never reach the
+// customer-facing note. Everything else (genuine SDK / customer-authored strings
+// like "An ad blocker stopped the checkout.") passes through unchanged.
+const INTERNAL_TIMEOUT_NOTE_PREFIX = /^\s*payment request timed out/i;
+
+/**
+ * Sanitize a would-be checkout note before it is stored (X2). The stored note is
+ * the single source the render path (OnboardingView.payDetail) reads, so filtering
+ * an untagged internal string here guarantees it can never be shown. A prefix
+ * filter (not an allowlist) is used deliberately: SDK/customer strings are open-
+ * ended and legitimate, while the one internal leak has a fixed, known prefix.
+ */
+export function sanitizeCheckoutNote(msg) {
+	const s = (msg == null ? "" : String(msg)).trim();
+	if (!s) return "";
+	if (INTERNAL_TIMEOUT_NOTE_PREFIX.test(s)) return "";
+	return s;
+}
+
 function illegal(state, strict, why) {
 	if (strict) throw new Error(`illegal transition: ${why} (from ${state.value})`);
 	return { ...state, illegalTransitions: state.illegalTransitions + 1 };
+}
+
+/**
+ * A gateway event (dismiss/fail/callback/confirm) carrying an attempt or
+ * generation identity that no longer matches the live intent is from a
+ * SUPERSEDED sheet - a second tab, a late callback from an old order. The
+ * orchestrator's token fences most of these within one component instance; this
+ * is the reducer-level backstop the plan asked for (P1-5): a stale-identity
+ * callback is a no-op here (the orchestrator reconciles server truth), never a
+ * mutation by event name alone. Absent identity (the existing internal events
+ * carry none) is not stale - only a present, mismatched one is.
+ */
+function callbackStale(state, event) {
+	if (
+		event.attemptId != null &&
+		state.attemptId != null &&
+		event.attemptId !== state.attemptId
+	) {
+		return true;
+	}
+	if (
+		event.generation != null &&
+		state.generation != null &&
+		Number(event.generation) < Number(state.generation)
+	) {
+		return true;
+	}
+	return false;
+}
+
+/**
+ * May "Start again" wipe the machine? Only when no recoverable payment can be
+ * behind the current code (P1-3). The paid floor and a parked-reconciliation
+ * flag are always preserved; otherwise the code must be one that definitionally
+ * carries no money on this signup, or a page that never left review.
+ */
+export function canSafelyRestart(state) {
+	const s = state || {};
+	if (PAID_FLOOR.has(s.value)) return false;
+	if (s.awaitingReconciliation) return false;
+	if (s.value === STATES.REVIEW) return true;
+	return RESTART_SAFE_CODES.has(s.code);
 }
 
 // ---- CONTRACT_STATE: the big one -------------------------------------------
@@ -490,14 +754,29 @@ function illegal(state, strict, why) {
 function applyContract(state, decoded, opts) {
 	const code = decoded.code || "";
 	const data = (decoded.data && typeof decoded.data === "object" && decoded.data) || {};
-	const context = (decoded.context && typeof decoded.context === "object" && decoded.context) || {};
+	const context =
+		(decoded.context && typeof decoded.context === "object" && decoded.context) || {};
 
-	// ---- the generation fence: a stale answer from a superseded intent is
-	// ignored OUTRIGHT (same object back, so a two-tab race cannot even repaint).
-	// A missing generation is NOT zero - a legacy admin sends none, and the known
-	// generation must survive such an answer rather than being reset by it.
+	// ---- the ATTEMPT fence, ahead of the generation compare (P1-4). A different
+	// attempt id is a different intent, so it is judged on its own terms: its
+	// handles never merge into the previous attempt's, and it is NEVER rejected by
+	// the generation counter (a legitimate replacement attempt may even carry a
+	// lower generation - a fresh intent starting its own count). The generation
+	// fence below therefore governs only answers of the SAME attempt (or an
+	// unattributable one), which is the only place a "stale poll" comparison means
+	// anything.
 	const incomingGen = data.generation;
+	const incomingAttempt = data.attempt_id;
+	const attemptChanged =
+		incomingAttempt != null && state.attemptId != null && incomingAttempt !== state.attemptId;
+
+	// ---- the generation fence: a stale answer from a superseded intent of the
+	// SAME attempt is ignored OUTRIGHT (same object back, so a two-tab race cannot
+	// even repaint). A missing generation is NOT zero - a legacy admin sends none,
+	// and the known generation must survive such an answer rather than being reset
+	// by it.
 	if (
+		!attemptChanged &&
 		incomingGen != null &&
 		state.generation != null &&
 		Number(incomingGen) < Number(state.generation)
@@ -516,9 +795,10 @@ function applyContract(state, decoded, opts) {
 		if (PAID_FLOOR.has(state.value)) return state;
 		const next = {
 			...state,
-			value: state.value === STATES.REVIEW || state.value === STATES.STARTING_SIGNUP
-				? STATES.UNKNOWN
-				: state.value,
+			value:
+				state.value === STATES.REVIEW || state.value === STATES.STARTING_SIGNUP
+					? STATES.UNKNOWN
+					: state.value,
 			busy: null,
 			awaitingReconciliation: true,
 			canInitiate: false,
@@ -565,7 +845,10 @@ function applyContract(state, decoded, opts) {
 		// intent and charges nothing, so offering it is always safe. `initiate` is
 		// deliberately NOT defaulted - that one can take money.
 		const withCheck = (next) => {
-			const out = { ...next, _backendCanCheck: next._backendCanCheck == null ? true : next._backendCanCheck };
+			const out = {
+				...next,
+				_backendCanCheck: next._backendCanCheck == null ? true : next._backendCanCheck,
+			};
 			out.canCheck = recomputeCanCheck(out, opts.nowMs);
 			return out;
 		};
@@ -578,7 +861,13 @@ function applyContract(state, decoded, opts) {
 			});
 		}
 		if (PAID_FLOOR.has(state.value)) return state;
-		return withCheck({ ...state, value: STATES.UNKNOWN, transportError: true, busy: null, code });
+		return withCheck({
+			...state,
+			value: STATES.UNKNOWN,
+			transportError: true,
+			busy: null,
+			code,
+		});
 	}
 
 	// ---- a real payment state.
@@ -590,13 +879,22 @@ function applyContract(state, decoded, opts) {
 
 	const handles = pickHandles(data);
 	const supersededGen =
-		incomingGen != null && state.generation != null && Number(incomingGen) > Number(state.generation);
+		!attemptChanged &&
+		incomingGen != null &&
+		state.generation != null &&
+		Number(incomingGen) > Number(state.generation);
 	// An answer carrying NO generation cannot be attributed to the current
 	// intent, and the generation fence above cannot judge it. Its CODE is still
 	// honoured - an older control plane is entitled to report a decline - but its
 	// HANDLES are not merged over a live intent's, which is how a dead order id
-	// came back to sit beside a live one after a gen-less failure landed.
-	const unattributable = incomingGen == null && state.generation != null;
+	// came back to sit beside a live one after a gen-less failure landed. A
+	// changed attempt is not "unattributable" - it is attributable to a DIFFERENT
+	// intent, which is handled by the replace path below.
+	const unattributable = !attemptChanged && incomingGen == null && state.generation != null;
+	// A new attempt (P1-4) or an advanced generation is a fresh intent: it
+	// REPLACES the previous handles wholesale rather than merging over them, and
+	// resets the client-local support counter with its live checkout.
+	const replaceHandles = attemptChanged || supersededGen;
 
 	const next = {
 		...state,
@@ -605,13 +903,29 @@ function applyContract(state, decoded, opts) {
 		recovery: decoded.recovery || data.recovery || "",
 		busy: null,
 		transportError: false,
-		attemptId: data.attempt_id || state.attemptId,
-		generation: incomingGen != null ? Number(incomingGen) : state.generation,
-		provider: (data.payment_provider || state.provider || null) && (data.payment_provider || state.provider),
-		// A newer generation REPLACES the previous intent's handles wholesale (the
-		// old order is dead); same/again keeps and merges; an unattributable
-		// answer contributes none.
-		handles: supersededGen ? handles : unattributable ? state.handles : { ...state.handles, ...handles },
+		// A fresh intent (new attempt or advanced generation) also drops the stale
+		// "the checkout could not open" note AND the "a previous sheet may still be
+		// open" veto from the intent it replaces. A same-intent answer (a check while
+		// a timed-out sheet is still open) keeps the veto - only the sheet actually
+		// closing lifts it.
+		checkoutNote: replaceHandles ? "" : state.checkoutNote,
+		checkoutMayBeOpen: replaceHandles ? false : state.checkoutMayBeOpen,
+		attemptId: incomingAttempt || state.attemptId,
+		// A new attempt with no generation of its own resets the counter to unknown
+		// rather than inheriting the replaced intent's.
+		generation:
+			incomingGen != null ? Number(incomingGen) : attemptChanged ? null : state.generation,
+		provider:
+			(data.payment_provider || state.provider || null) &&
+			(data.payment_provider || state.provider),
+		// A newer generation or a new attempt REPLACES the previous intent's
+		// handles wholesale (the old order is dead); same attempt/generation keeps
+		// and merges; an unattributable answer contributes none.
+		handles: replaceHandles
+			? handles
+			: unattributable
+			? state.handles
+			: { ...state.handles, ...handles },
 		lastCheckedAt: data.payment_last_checked_at || state.lastCheckedAt,
 		verificationExpiresAt: data.verification_expires_at || state.verificationExpiresAt,
 		awaitingReconciliation: !!data.awaiting_manual_reconciliation,
@@ -621,12 +935,12 @@ function applyContract(state, decoded, opts) {
 
 	if (mapped) next.value = mapped;
 
-	// A new intent (the generation advanced) is a fresh start for the client-
-	// local support counter: the customer has a live checkout in front of them
-	// again, so the "you have checked many times" offer from the previous intent
-	// is put away. Keyed the same way supportHandoff keys it - (attempt,
-	// generation) - so this and recordCheck cannot disagree.
-	if (supersededGen) {
+	// A fresh intent (a new attempt, or the generation advanced) is a fresh start
+	// for the client-local support counter: the customer has a live checkout in
+	// front of them again, so the "you have checked many times" offer from the
+	// previous intent is put away. Keyed the same way supportHandoff keys it -
+	// (attempt, generation) - so this and recordCheck cannot disagree.
+	if (replaceHandles) {
 		next.supportChecks = emptyCounter();
 		next.supportOffered = false;
 	}
@@ -637,7 +951,8 @@ function applyContract(state, decoded, opts) {
 	// Capability flags: honour the backend, then let the reconciliation flag veto
 	// initiate. A code that is definitionally paid/terminal never offers initiate
 	// regardless of what a flag says.
-	const backendCanInitiate = "can_initiate_payment" in data ? !!data.can_initiate_payment : next.canInitiate;
+	const backendCanInitiate =
+		"can_initiate_payment" in data ? !!data.can_initiate_payment : next.canInitiate;
 	// Same read-only default as the transport branch, and for the same reason: a
 	// coded FAILURE (already-paid, terminal, parked money, an invalid key) rides
 	// onboarding_contract.failure, which carries no `data` and therefore no
@@ -652,7 +967,13 @@ function applyContract(state, decoded, opts) {
 			? true
 			: state._backendCanCheck;
 	next.canInitiate =
-		backendCanInitiate && !next.awaitingReconciliation && !isTerminalForPayment(next.value);
+		backendCanInitiate &&
+		!next.awaitingReconciliation &&
+		!isTerminalForPayment(next.value) &&
+		// The B2-1 veto: never offer a new payment while a prior sheet may still be
+		// open and payable. It survives the mandatory reconcile (a check does not
+		// clear it), so the page cannot re-arm initiate under a live gateway sheet.
+		!next.checkoutMayBeOpen;
 	next.canCheck = recomputeCanCheck(next, opts.nowMs);
 
 	return next;

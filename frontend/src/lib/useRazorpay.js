@@ -70,8 +70,14 @@ export function loadRazorpay() {
  * @param {object} handles  start_upgrade / start_downgrade / renew response
  * @param {string} description  the line the customer sees in the sheet
  */
-export async function openCheckout(handles, description = "Subscription payment") {
+export async function openCheckout(handles, description = "Subscription payment", opts = {}) {
 	const Razorpay = await loadRazorpay();
+	// A best-effort teardown signal (X1): the onboarding orchestrator aborts it when
+	// the open deadline elapses, so we ask Razorpay to close the modal. Never relied
+	// on - Checkout's own `ondismiss` then settles this promise as a dismissal, and
+	// if the SDK build has no `.close()` the caller's machine-level veto still
+	// protects. Harmless for the billing page, which passes no signal.
+	const signal = opts && opts.signal;
 	return new Promise((resolve, reject) => {
 		// Razorpay may fire BOTH callbacks on a successful payment: `handler`
 		// runs first, then the sheet closes and some versions also run
@@ -122,7 +128,23 @@ export async function openCheckout(handles, description = "Subscription payment"
 		}
 
 		try {
-			new Razorpay(opts).open();
+			const rzp = new Razorpay(opts);
+			rzp.open();
+			// Wire the teardown AFTER a successful open, so an abort tries to close the
+			// live modal (which triggers `ondismiss` -> a dismissal settle). Guarded:
+			// a missing `.close()` or an already-settled promise is a silent no-op.
+			if (signal) {
+				const onAbort = () => {
+					if (settled) return;
+					try {
+						if (typeof rzp.close === "function") rzp.close();
+					} catch (e) {
+						/* SDK without a programmatic close - the caller's veto still protects */
+					}
+				};
+				if (signal.aborted) onAbort();
+				else signal.addEventListener("abort", onAbort, { once: true });
+			}
 		} catch (e) {
 			settle(reject, e);
 		}

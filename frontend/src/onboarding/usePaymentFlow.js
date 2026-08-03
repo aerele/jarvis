@@ -36,12 +36,27 @@ import {
 	EVENTS,
 	STATES,
 	canOpenCheckout,
+	canSafelyRestart,
 	handlesForProvider,
 	initialState,
 	reduce,
 	noteStatusCheck,
 	isTerminalForPayment,
 } from "./paymentMachine.js";
+import { counterKey, shouldOfferSupport } from "./supportHandoff.js";
+
+// The support-counter persistence key prefix (P2-5). Stores only a non-secret
+// (attempt, generation) key and its integer check count under the injected
+// storage - never a gateway id, payload, or token.
+const SUPPORT_KEY_PREFIX = "jvpay:sc:";
+
+function elapsedBucket(ms) {
+	if (!(ms >= 0)) return "unknown";
+	if (ms < 1000) return "<1s";
+	if (ms < 5000) return "1-5s";
+	if (ms < 30_000) return "5-30s";
+	return ">30s";
+}
 
 // Codes that END a confirm poll: the gateway has decided, and asking again just
 // spends another live call on an answer that will not change.
@@ -76,6 +91,18 @@ export function createPaymentFlow(deps) {
 		now = () => Date.now(),
 		storage = memoryStorage(),
 		strict = false,
+		// PII-free transition sink (P2-3). Called with {event, from, to, code,
+		// provider, generation, elapsed_bucket, source} on every state change, and
+		// {event:"payment_illegal_transition", ...} when the reducer counts one. It
+		// carries NO email/company/address/handle/payment-id/token - only the shape
+		// of the move. Default is a no-op so node --test never needs a sink.
+		telemetry = () => {},
+		// Wall-clock deadlines (P0-3). Every payment fetch is raced against
+		// `fetchDeadlineMs`; the provider-open await (an SDK that may never settle)
+		// against the far more generous `openDeadlineMs`. A deadline is a CLIENT
+		// abort, never a server verdict - every timeout reconciles server truth.
+		fetchDeadlineMs = 30_000,
+		openDeadlineMs = 20 * 60_000,
 	} = deps;
 
 	const state = ref(initialState());
@@ -83,25 +110,152 @@ export function createPaymentFlow(deps) {
 	// resumes after `cancelInFlight` compares against it and bails. NOT the
 	// server's payment generation - this fences the CLIENT's in-flight work
 	// (a superseded loop, a stale slow response), which is a separate concern
-	// from the server's intent generation the reducer fences on.
+	// from the server's intent generation the reducer fences on. A NEW token is
+	// minted per action (P1-2), so a late answer from a finished-then-abandoned
+	// action is fenced even without an explicit cancel.
 	let token = 0;
+	// A SECOND counter, bumped ONLY by a hard teardown/reset (cancelInFlight:
+	// leaving Pay, unmount, restart, external-return) - never by beginAction. It
+	// fences the ONE piece of work that must outlive a benign action-token bump: a
+	// gateway sheet that settles AFTER its open-deadline (X1 / B2-1). The action
+	// token is bumped by every ordinary action (a status Check taken after the
+	// timeout), so fencing a late post-deadline PAYMENT on `token` would drop it the
+	// moment the customer checked. `disposeEpoch` moves only when the page is truly
+	// done with this sheet, which is exactly when a late result must be abandoned.
+	// The reducer's identity fence (callbackStale) is the second gate for a late
+	// sheet a NEW intent has superseded.
+	let disposeEpoch = 0;
+	// True while a gateway sheet promise is unsettled. A checkout that timed out but
+	// whose sheet is still open keeps this true (the late continuation may fire);
+	// it goes false only when the sheet actually settles or is torn down. hydrate
+	// reads it (X5 / B2-6) to distinguish a LIVE sheet - which a passive read must
+	// never unseat - from a FROZEN checkout_open with no opener behind it.
+	let openInFlight = false;
+	// The one incompatible-action lock (P1-2). submitReview / initiatePayment /
+	// checkStatus / verifyAndContinue all take it before their first API call, so
+	// a burst of clicks - or a check racing an initiate - produces exactly one
+	// live action and one gateway open. `lockToken` is the token that holds it, so
+	// a release only ever frees the lock it took (never a later action's).
+	let actionLock = false;
+	let lockToken = 0;
 	// Guards the 90s provisioning poll against re-entry (see waitForProvisioning).
 	let provisioningInFlight = false;
+	// For the elapsed-time bucket on transition telemetry.
+	let lastTransitionAt = now();
 
 	function apply(event) {
-		state.value = reduce(state.value, event, { strict, nowMs: now() });
-		return state.value;
+		const before = state.value;
+		const next = reduce(before, event, { strict, nowMs: now() });
+		state.value = next;
+		emitTransition(before, next, event);
+		return next;
+	}
+
+	function emitTransition(before, next, event) {
+		try {
+			if (before.value !== next.value) {
+				const t = now();
+				const elapsed = t - lastTransitionAt;
+				lastTransitionAt = t;
+				telemetry({
+					event: "payment_transition",
+					from: before.value,
+					to: next.value,
+					code: next.code || "",
+					provider: next.provider || "",
+					generation: next.generation == null ? null : Number(next.generation),
+					elapsed_bucket: elapsedBucket(elapsed),
+					source: event.type,
+				});
+			}
+			if (next.illegalTransitions > before.illegalTransitions) {
+				telemetry({
+					event: "payment_illegal_transition",
+					from: before.value,
+					attempted: event.type,
+					code: next.code || "",
+					generation: next.generation == null ? null : Number(next.generation),
+				});
+			}
+		} catch (e) {
+			// Telemetry must never break the machine.
+		}
+	}
+
+	// Take the one action lock, mint this action's token, and (optionally) show a
+	// busy flag. Returns the fresh token, or 0 when an incompatible action already
+	// holds the lock - the caller then does nothing (the burst guard).
+	function beginAction(displayBusy) {
+		if (actionLock) return 0;
+		actionLock = true;
+		token += 1;
+		lockToken = token;
+		if (displayBusy) state.value = { ...state.value, busy: displayBusy };
+		return token;
+	}
+
+	// Release the lock IF this token still holds it, and clear any busy flag it
+	// left. Fenced on `lockToken === my` so a cancelled action's late release
+	// cannot free a newer action's lock.
+	function endAction(my) {
+		if (lockToken !== my) return;
+		actionLock = false;
+		if (state.value.busy !== null) state.value = { ...state.value, busy: null };
 	}
 
 	function cancelInFlight() {
 		token += 1;
-		// ...and the flag those calls were holding. Every release path is fenced on
-		// `my === token`, so the bump that invalidates the in-flight work also
+		// A hard teardown/reset: abandon the sheet continuation too (X1) and mark no
+		// sheet in flight (X5), so a frozen checkout_open can be safely exited.
+		disposeEpoch += 1;
+		openInFlight = false;
+		// Abandon whatever is in flight: free the lock so a fresh action may start,
+		// and drop the flag those calls were holding. Every release path is fenced
+		// on `my === token`, so the bump that invalidates the in-flight work also
 		// invalidates its own release: a cancel mid-round-trip left `busy` set
 		// forever, which is a dead Verify button (or two dead recovery actions) on a
 		// page whose whole job is to offer the customer a way forward. Once nothing
-		// is in flight, busy belongs to nobody.
+		// is in flight, the lock and busy belong to nobody.
+		actionLock = false;
 		if (state.value.busy !== null) state.value = { ...state.value, busy: null };
+	}
+
+	// Race a payment fetch/SDK-open against a wall-clock deadline (P0-3). On
+	// timeout it aborts the browser wait (via AbortSignal where the api honours
+	// one) and rejects with `isTimeout`; it NEVER resolves to a fabricated answer,
+	// because a client abort says nothing about what the server did - the caller
+	// reconciles server truth after every timeout.
+	async function deadlined(fn, ms, label) {
+		const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+		let timer = null;
+		try {
+			return await new Promise((resolve, reject) => {
+				timer = setTimeout(() => {
+					if (controller) {
+						try {
+							controller.abort();
+						} catch (e) {
+							/* jsdom without abort support */
+						}
+					}
+					const err = new Error(`payment request timed out: ${label}`);
+					err.isTimeout = true;
+					reject(err);
+				}, ms);
+				Promise.resolve()
+					.then(() => fn(controller ? controller.signal : undefined))
+					.then(resolve, reject);
+			});
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	}
+
+	// A decoded "the network never answered" verdict, routed through the reducer's
+	// existing transport path so a timeout/abort becomes truth-UNKNOWN (keeping any
+	// known payment state, offering the read-only check) - never a decline.
+	function offlineDecoded() {
+		return ingest({ status: 0, body: null, networkError: true });
 	}
 
 	// ---- the read/decode seam ----------------------------------------------
@@ -140,18 +294,58 @@ export function createPaymentFlow(deps) {
 	 * NOT read "has llm_credentials" as "has paid".
 	 */
 	async function hydrate() {
+		// X5 / B2-6: a FROZEN checkout_open (a hard teardown - leaving Pay via
+		// returnFromCheckout, or an unmounted/torn-down instance - abandoned the opener
+		// and left the state stuck) with NO live opener behind it must not trap the
+		// customer on "Opening secure checkout…" forever. Only a teardown that bumps
+		// disposeEpoch clears openInFlight; a REFUSED restart deliberately does NOT
+		// (D3), so a live post-deadline sheet keeps openInFlight true and is never
+		// mistaken for a frozen one here. hydrate otherwise refuses to leave a live
+		// sheet (the passive-read rule below); this narrow exception fires ONLY when
+		// nothing is actually opening, taking the explicit, safe RETURNED_FROM_CHECKOUT
+		// exit so the read below reconciles truth. Scoped to checkout_open (a confirming
+		// state is bounded by the confirm's own deadline and must not be unseated by a
+		// passive read), and it does NOT weaken the normal refusal: a genuinely live
+		// sheet keeps openInFlight true and is still protected.
+		if (state.value.value === STATES.CHECKOUT_OPEN && !openInFlight) {
+			apply({ type: EVENTS.RETURNED_FROM_CHECKOUT }); // now UNKNOWN; the read below reconciles
+		}
 		// The 14th fence point. A mount read is slow (it is the first request of
 		// the page) and can land AFTER the customer has already opened a checkout
 		// sheet from a second tab or a fast click - at which point absorbing it
 		// reset a LIVE gateway session back to `review`, with the sheet still open
 		// over the top of it.
 		const my = token;
-		const decoded = ingest(await api.getOnboardingState());
-		if (my !== token) return { paid: null, truthKnown: false, notStarted: false, superseded: true };
+		let decoded;
+		try {
+			decoded = ingest(
+				await deadlined(
+					(signal) => api.getOnboardingState({ signal }),
+					fetchDeadlineMs,
+					"state"
+				)
+			);
+		} catch (e) {
+			// The mount read timed out or the network died. Truth is UNKNOWN. Do NOT
+			// unseat a live sheet (state guard below still applies), and never claim
+			// not-paid from a client abort.
+			if (my !== token)
+				return { paid: null, truthKnown: false, notStarted: false, superseded: true };
+			const liveNow = state.value.value;
+			if (liveNow === STATES.CHECKOUT_OPEN || liveNow === STATES.CONFIRMING) {
+				return { paid: null, truthKnown: false, notStarted: false, superseded: true };
+			}
+			absorb(offlineDecoded());
+			return { paid: null, truthKnown: false, notStarted: false };
+		}
+		if (my !== token)
+			return { paid: null, truthKnown: false, notStarted: false, superseded: true };
 		// ...and the fence that the token alone cannot draw: a mount read and the
 		// checkout it races share one token (nothing bumps between them), so the
 		// STATE is the discriminator. hydrate() is the PASSIVE read; it must never
-		// unseat a gateway interaction that is already in front of the customer.
+		// unseat a gateway interaction that is already in front of the customer. The
+		// ONLY safe exit from checkout_open is the explicit returnFromCheckout()
+		// path (P0-2), never this passive read.
 		const live = state.value.value;
 		if (live === STATES.CHECKOUT_OPEN || live === STATES.CONFIRMING) {
 			return { paid: null, truthKnown: false, notStarted: false, superseded: true };
@@ -161,6 +355,9 @@ export function createPaymentFlow(deps) {
 			return { paid: null, truthKnown: false, notStarted: false };
 		}
 		const code = absorb(decoded);
+		// Server truth now names the (attempt, generation): restore any persisted
+		// support count for it, so a refresh between checks does not reset the offer.
+		restoreSupport();
 		if (decoded.notStarted || code === CODES.BENCH_NO_SIGNUP_CONTEXT) {
 			return { paid: false, truthKnown: true, notStarted: true };
 		}
@@ -184,19 +381,24 @@ export function createPaymentFlow(deps) {
 		// other. (Not a double charge: one order id, payable once at the gateway,
 		// and the PAID floor absorbs the late dismissals. A broken money screen all
 		// the same.)
-		if (state.value.busy === "verifying") return;
-		const my = token;
-		state.value = { ...state.value, busy: "verifying" };
+		const my = beginAction("verifying");
+		if (!my) return; // an incompatible action already holds the lock (P1-2)
 		let opened = false;
 		try {
-			const decoded = ingest(await api.getOnboardingState());
+			const decoded = ingest(
+				await deadlined(
+					(signal) => api.getOnboardingState({ signal }),
+					fetchDeadlineMs,
+					"state"
+				)
+			);
 			if (my !== token) return;
 			const code = absorb(decoded);
 			if (!decoded.ok) return;
 			if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return; // still unclicked
 			// Verified and payable: open the checkout this same click. runCheckout
-			// drives its own state from here, so the guard is released first -
-			// leaving it set would disable the recovery card the sheet returns to.
+			// drives its own state from here, so the lock is released first - leaving
+			// it held would disable the recovery card the sheet returns to.
 			//
 			// Payable is asked of the MACHINE, not of the answer. Reading it off
 			// `decoded.data` asked a different question, and the two could disagree:
@@ -207,46 +409,81 @@ export function createPaymentFlow(deps) {
 			// on the DEAD order the reducer had just thrown away.
 			if (canOpenCheckout(state.value)) {
 				opened = true;
-				releaseVerifyGuard(my);
+				endAction(my);
 				await runCheckout();
 			}
 		} finally {
-			// Cleared on every exit, including a thrown round trip: a stuck busy flag
-			// is the same class of trap as a cooldown that never lifts.
-			if (!opened) releaseVerifyGuard(my);
-		}
-	}
-
-	function releaseVerifyGuard(my) {
-		if (my === token && state.value.busy === "verifying") {
-			state.value = { ...state.value, busy: null };
+			// Released on every exit, including a thrown/timed-out round trip: a stuck
+			// lock is the same class of trap as a cooldown that never lifts. (When we
+			// opened, the lock was already released above.)
+			if (!opened) endAction(my);
 		}
 	}
 
 	// ---- submit review: start the signup exactly once ----------------------
 	async function submitReview({ email, company, plan, provider } = {}) {
-		apply({ type: EVENTS.SUBMIT_REVIEW });
-		const my = token;
-		const decoded = ingest(await api.startSignup({ email, company, plan, provider }));
-		if (my !== token) return;
-		const code = absorb(decoded);
-		if (!decoded.ok) return; // parked-money / duplicate / terminal - the reducer rendered it
-		if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return; // wait for the magic link
-		await runCheckout(provider);
+		const my = beginAction(null); // SUBMIT_REVIEW sets the busy flag itself
+		if (!my) return; // a burst of clicks produces exactly one start (P1-2)
+		try {
+			apply({ type: EVENTS.SUBMIT_REVIEW });
+			let decoded;
+			try {
+				decoded = ingest(
+					await deadlined(
+						(signal) =>
+							api.startSignup({ email, company, plan, provider }, { signal }),
+						fetchDeadlineMs,
+						"start"
+					)
+				);
+			} catch (e) {
+				if (my !== token) return;
+				// The start timed out/died: truth UNKNOWN, then a bounded reconcile so
+				// the customer lands on a checkable recovery, never a frozen spinner.
+				absorb(offlineDecoded());
+				await reconcileAfterFailure();
+				return;
+			}
+			if (my !== token) return;
+			const code = absorb(decoded);
+			if (!decoded.ok) return; // parked-money / duplicate / terminal - the reducer rendered it
+			if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return; // wait for the magic link
+			await runCheckout(provider);
+		} finally {
+			endAction(my);
+		}
 	}
 
 	// ---- initiate (retry): authenticated, no idempotency key from the SPA ---
 	async function initiatePayment({ plan, provider } = {}) {
-		state.value = { ...state.value, busy: "initiating" };
-		const my = token;
-		// No idempotency_key: the bench mints/reuses its own receipt. Passing one
-		// would let the browser replay a dead intent.
-		const decoded = ingest(await api.initiateSignupPayment({ plan, provider }));
-		if (my !== token) return;
-		const code = absorb(decoded);
-		if (!decoded.ok) return;
-		if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return;
-		await runCheckout(provider);
+		const my = beginAction("initiating");
+		if (!my) return; // one initiate per burst; a check-vs-initiate race yields one (P1-2)
+		try {
+			let decoded;
+			try {
+				// No idempotency_key: the bench mints/reuses its own receipt. Passing
+				// one would let the browser replay a dead intent.
+				decoded = ingest(
+					await deadlined(
+						(signal) => api.initiateSignupPayment({ plan, provider }, { signal }),
+						fetchDeadlineMs,
+						"initiate"
+					)
+				);
+			} catch (e) {
+				if (my !== token) return;
+				absorb(offlineDecoded());
+				await reconcileAfterFailure();
+				return;
+			}
+			if (my !== token) return;
+			const code = absorb(decoded);
+			if (!decoded.ok) return;
+			if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return;
+			await runCheckout(provider);
+		} finally {
+			endAction(my);
+		}
 	}
 
 	// ---- the shared checkout tail ------------------------------------------
@@ -274,35 +511,163 @@ export function createPaymentFlow(deps) {
 		const handles = handlesForProvider(state.value.handles, prov);
 		if (prov && !handles.payment_provider) handles.payment_provider = prov;
 		const my = token;
+		// The identity of the intent this sheet belongs to, captured at open time
+		// and threaded onto every subsequent gateway event (P1-5). A callback that
+		// arrives against a different attempt/older generation is a reducer-level
+		// no-op - a late sheet cannot mutate a newer intent by event name alone.
+		const identity = {
+			attemptId: state.value.attemptId,
+			generation: state.value.generation,
+		};
+
+		apply({ type: EVENTS.CHECKOUT_OPENED });
+
+		// The open is bounded (P0-3) - but a bounded WAIT is NOT a closed SHEET. An
+		// in-page gateway modal (Razorpay netbanking / UPI-collect) can sit open and
+		// PAYABLE for many minutes; our deadline only bounds how long WE wait, not the
+		// sheet. So the open is handled in three deliberate parts (X1 / B2-1):
+		//   1. A teardown-capable AbortSignal is handed to the opener and aborted on
+		//      timeout (best-effort: some SDKs expose a programmatic close, some do
+		//      not - correctness never relies on it).
+		//   2. The ORIGINAL sheet promise keeps a continuation attached, fenced on
+		//      disposeEpoch (NOT the action token), so a payment that lands AFTER the
+		//      deadline still runs the normal confirm path instead of being dropped
+		//      while the page re-arms "start a new payment".
+		//   3. On timeout we enter the checkoutMayBeOpen recovery (CHECKOUT_OPEN_TIMED
+		//      OUT), which vetoes initiate at the machine until the sheet closes.
+		const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+		openInFlight = true;
+		const sheet = Promise.resolve().then(() =>
+			openCheckout(handles, {
+				description: "Jarvis subscription",
+				signal: controller ? controller.signal : undefined,
+			})
+		);
+		const myDispose = disposeEpoch;
+		// `deadlineFired` is the discriminator between the in-time path and the late
+		// continuation, set SYNCHRONOUSLY the instant the deadline elapses so there is
+		// no ordering race: a sheet that resolves before it is owned by the in-time
+		// await; one that resolves after is owned by the continuation below.
+		let deadlineFired = false;
+		// The late continuation, on the ORIGINAL sheet promise. It acts ONLY once the
+		// deadline has fired AND the page has not been torn down (disposeEpoch
+		// unchanged). A benign action-token bump (a status Check taken after the
+		// timeout) does NOT drop it - that is the whole point: a real post-deadline
+		// payment must still confirm. A hard teardown (cancelInFlight) does drop it.
+		sheet.then(
+			(lateOut) => {
+				openInFlight = false;
+				if (!deadlineFired || myDispose !== disposeEpoch) return;
+				return settleSheetResult(
+					lateOut,
+					identity,
+					() => myDispose === disposeEpoch,
+					true
+				);
+			},
+			async () => {
+				// A late open-FAILURE after we already timed out and reconciled (D6). The
+				// sheet is GONE, but the timeout path left checkoutMayBeOpen=true (the veto
+				// that keeps initiate off over a maybe-live sheet). Nothing else lifts it:
+				// no reducer path clears it from `unknown` - RETURNED_FROM_CHECKOUT is a
+				// no-op there - so without firing CHECKOUT_SHEET_CLOSED here the customer's
+				// only escape was a full page reload. Fire it (fenced exactly like the
+				// success continuation) to lift the veto and require a check, then reconcile.
+				openInFlight = false;
+				if (!deadlineFired || myDispose !== disposeEpoch) return;
+				apply({ type: EVENTS.CHECKOUT_SHEET_CLOSED, ...identity });
+				await reconcileAfterFailure();
+			}
+		);
+
 		let out;
+		let timer = null;
 		try {
-			apply({ type: EVENTS.CHECKOUT_OPENED });
-			out = await openCheckout(handles, { description: "Jarvis subscription" });
+			out = await new Promise((resolve, reject) => {
+				timer = setTimeout(() => {
+					deadlineFired = true;
+					// Attempt a programmatic teardown (X1, best-effort - never relied on).
+					if (controller) {
+						try {
+							controller.abort();
+						} catch (e) {
+							/* SDK/environment without abort support - the veto still protects */
+						}
+					}
+					const err = new Error("payment request timed out: open");
+					err.isTimeout = true;
+					reject(err);
+				}, openDeadlineMs);
+				// Only settle the in-time race while the deadline has NOT fired; a late
+				// settle is handled by the continuation above, never here.
+				sheet.then(
+					(v) => {
+						if (!deadlineFired) resolve(v);
+					},
+					(e) => {
+						if (!deadlineFired) reject(e);
+					}
+				);
+			});
 		} catch (e) {
-			// The sheet could not be opened at all. Stay on Pay, retryable, and -
-			// mandatory - go and ASK the gateway rather than guess.
+			if (timer) clearTimeout(timer);
+			if (e && e.isTimeout) {
+				// The sheet did not settle in time and MAY still be open. Do NOT fire
+				// CHECKOUT_FAILED (that re-arms initiate - the double-charge path). Enter
+				// the "may still be open" recovery and reconcile; the late continuation
+				// still processes a genuine post-deadline result.
+				if (my !== token) return;
+				apply({ type: EVENTS.CHECKOUT_OPEN_TIMED_OUT, ...identity });
+				await reconcileAfterFailure();
+				return;
+			}
+			// A genuine open FAILURE (the SDK could not launch at all): stay on Pay,
+			// retryable, and reconcile. Its message is a customer-authored SDK string,
+			// safe to surface; a deadline abort never reaches this branch (it is tagged
+			// isTimeout above), and the reducer sanitizes the note regardless (X2).
 			if (my !== token) return;
-			apply({ type: EVENTS.CHECKOUT_FAILED, message: e && e.message });
+			apply({ type: EVENTS.CHECKOUT_FAILED, message: e && e.message, ...identity });
 			await reconcileAfterFailure();
 			return;
 		}
+		if (timer) clearTimeout(timer);
 		if (my !== token) return;
+		await settleSheetResult(out, identity, () => my === token, false);
+	}
 
-		if (out.leavesPage) return; // Cashfree mandate: the browser is redirecting away
-
+	// Process a settled gateway-sheet result (leaves-page / dismissed / success),
+	// shared by the in-time path and the post-deadline late continuation (X1). The
+	// two differ only in their fence (`isLive`) and in how a dismiss is folded: a
+	// live dismiss is CHECKOUT_DISMISSED (from an open sheet), a LATE dismiss is
+	// CHECKOUT_SHEET_CLOSED (the timed-out sheet finally closed) - which lifts the
+	// checkoutMayBeOpen veto. Both then reconcile server truth.
+	async function settleSheetResult(out, identity, isLive, late) {
+		if (!out || !isLive()) return;
+		if (out.leavesPage) {
+			// An in-time leavesPage is a genuine redirect: the browser is navigating
+			// away, nothing more to do. But a LATE one (post-deadline continuation)
+			// arrives on a page that already timed out and is holding the
+			// checkoutMayBeOpen veto; if the redirect does not actually take (a blocked
+			// navigation, a returned bfcache), that veto would latch initiate off
+			// forever (D6). Lift it the same way a late dismiss does.
+			if (late) apply({ type: EVENTS.CHECKOUT_SHEET_CLOSED, ...identity });
+			return;
+		}
 		if (out.status === "dismissed") {
-			apply({ type: EVENTS.CHECKOUT_DISMISSED });
+			apply({
+				type: late ? EVENTS.CHECKOUT_SHEET_CLOSED : EVENTS.CHECKOUT_DISMISSED,
+				...identity,
+			});
 			await reconcileAfterFailure(); // check-on-failure
 			return;
 		}
-
 		// A success from the sheet: confirm it. Cashfree orders have no client
 		// signature and settle only server-side, so they poll the confirm; a
 		// Razorpay success confirms once.
 		if (out.pollConfirm) {
-			await confirmCashfreeLoop(out.payload);
+			await confirmCashfreeLoop(out.payload, identity);
 		} else {
-			await confirmOnce(out.payload);
+			await confirmOnce(out.payload, identity);
 		}
 	}
 
@@ -316,40 +681,80 @@ export function createPaymentFlow(deps) {
 	// affordance (can_initiate_payment is false by design there). The real
 	// resolver is the gateway webhook; the support handoff after N checks is that
 	// state's exit. confirmOnce below is reached only from a REAL callback.
-	async function confirmOnce(payload) {
-		apply({ type: EVENTS.GATEWAY_CALLBACK });
+	async function confirmOnce(payload, identity = {}) {
+		apply({ type: EVENTS.GATEWAY_CALLBACK, ...identity });
 		const my = token;
-		const res = await api.confirmSignupPayment(payload);
+		let decoded;
+		try {
+			decoded = ingest(
+				await deadlined(
+					(signal) => api.confirmSignupPayment(payload, { signal }),
+					fetchDeadlineMs,
+					"confirm"
+				)
+			);
+		} catch (e) {
+			// The confirm round-trip timed out/died. NOT a failure and NOT a paid:
+			// fall to unknown and reconcile - the money may have landed past a
+			// dropped response.
+			if (my !== token) return;
+			apply({
+				type: EVENTS.CONFIRM_FAILED,
+				decoded: { ok: false, code: "", message: "" },
+				...identity,
+			});
+			await reconcileAfterFailure();
+			return;
+		}
 		if (my !== token) return;
-		const decoded = ingest(res);
 		// A 200 is NOT a payment. Read what the body actually says: only admin's
 		// connection payload (allocated, or the allocation-failure shape that still
 		// records the money) means confirmed. A bare 200 with an empty or unrelated
 		// body used to fire CONFIRM_SUCCEEDED and land the customer on "paid" with
 		// nothing behind it.
 		if (decoded.ok && effectiveCode(decoded) === CODES.PAYMENT_ALREADY_ACTIVE) {
-			apply({ type: EVENTS.CONFIRM_SUCCEEDED, data: decoded.data });
+			apply({ type: EVENTS.CONFIRM_SUCCEEDED, data: decoded.data, ...identity });
 			return;
 		}
-		// A coded decline renders as itself; anything else falls to unknown AND
-		// checks provider truth - the payment may have succeeded past a dropped
-		// confirm round-trip.
-		apply({ type: EVENTS.CONFIRM_FAILED, decoded });
+		// A DECIDED answer (a coded decline, terminal, reconnect, authorized-pending,
+		// parked money) is already authoritative: render it and stop. Reconciling on
+		// top would overwrite a definite verdict with a fresh "pending" read (P0-1's
+		// mirror image - the mandatory check exists for AMBIGUOUS outcomes, not to
+		// downgrade a verdict the gateway just gave us).
+		apply({ type: EVENTS.CONFIRM_FAILED, decoded, ...identity });
+		if (DECIDED_CONFIRM_CODES.has(decoded.code)) return;
+		// Ambiguous (a bare failure, an unreadable body): the payment may have landed
+		// past a dropped confirm round-trip, so ask provider truth.
 		await reconcileAfterFailure();
 	}
 
 	// The old confirmCashfree loop, fenced. 12 × 3s: Cashfree confirms server-
 	// side (admin fetches the real order status), so this polls until PAID or
 	// the ceiling, and STOPS the moment its generation is superseded.
-	async function confirmCashfreeLoop(payload) {
-		apply({ type: EVENTS.GATEWAY_CALLBACK });
+	async function confirmCashfreeLoop(payload, identity = {}) {
+		apply({ type: EVENTS.GATEWAY_CALLBACK, ...identity });
 		const my = token;
 		for (let i = 0; i < CASHFREE_CONFIRM_ATTEMPTS; i++) {
 			if (my !== token) return;
-			const decoded = ingest(await api.confirmSignupPayment(payload));
+			let decoded;
+			try {
+				decoded = ingest(
+					await deadlined(
+						(signal) => api.confirmSignupPayment(payload, { signal }),
+						fetchDeadlineMs,
+						"confirm"
+					)
+				);
+			} catch (e) {
+				// A single poll timed out - "not settled yet", not a verdict. Sleep
+				// and try again; the loop's own attempt ceiling still bounds it.
+				if (my !== token) return;
+				await sleep(CASHFREE_CONFIRM_INTERVAL_MS);
+				continue;
+			}
 			if (my !== token) return;
 			if (decoded.ok && effectiveCode(decoded) === CODES.PAYMENT_ALREADY_ACTIVE) {
-				apply({ type: EVENTS.CONFIRM_SUCCEEDED, data: decoded.data });
+				apply({ type: EVENTS.CONFIRM_SUCCEEDED, data: decoded.data, ...identity });
 				return;
 			}
 			// A DECIDED answer ends the loop. Only "not settled yet" is worth another
@@ -358,8 +763,9 @@ export function createPaymentFlow(deps) {
 			// minute, and then throws the coded decline away in favour of a generic
 			// "we could not determine" - the one thing the customer already knew.
 			if (DECIDED_CONFIRM_CODES.has(decoded.code)) {
-				apply({ type: EVENTS.CONFIRM_FAILED, decoded });
-				await reconcileAfterFailure();
+				// Authoritative verdict - render it and stop, no reconcile (it would
+				// only downgrade a decided decline to a generic pending; P0-1).
+				apply({ type: EVENTS.CONFIRM_FAILED, decoded, ...identity });
 				return;
 			}
 			await sleep(CASHFREE_CONFIRM_INTERVAL_MS);
@@ -367,7 +773,11 @@ export function createPaymentFlow(deps) {
 		if (my !== token) return;
 		// Never confirmed inside the window. Do NOT claim a failure - fall to
 		// unknown and let a status check (or the webhook) settle it.
-		apply({ type: EVENTS.CONFIRM_FAILED, decoded: { ok: false, code: "", message: "" } });
+		apply({
+			type: EVENTS.CONFIRM_FAILED,
+			decoded: { ok: false, code: "", message: "" },
+			...identity,
+		});
 		await reconcileAfterFailure();
 	}
 
@@ -376,58 +786,147 @@ export function createPaymentFlow(deps) {
 	// says (pending stays pending, a decline becomes a decline, paid advances),
 	// and count it toward the client-local support ceiling.
 	async function checkStatus() {
-		// In-flight guard. Without it the Check button stayed live through its own
-		// round trip, so an impatient customer fired N concurrent provider-truth
-		// calls - each one spending a gateway call against the per-account cap,
-		// burning the client-local support counter in seconds, and walking straight
-		// into the rate limit that this page then has to explain.
-		if (state.value.busy === "checking") return;
-		const my = token;
-		state.value = { ...state.value, busy: "checking" };
+		// The one action lock (P1-2). Without it the Check button stayed live
+		// through its own round trip - an impatient customer fired N concurrent
+		// provider-truth calls, each spending a gateway call against the per-account
+		// cap, and a Check racing an Initiate produced two live actions. The lock
+		// makes a check-vs-initiate burst resolve to exactly one action.
+		const my = beginAction("checking");
+		if (!my) return;
 		try {
-			const res = await api.checkSignupPaymentStatus();
+			let decoded;
+			try {
+				decoded = ingest(
+					await deadlined(
+						(signal) => api.checkSignupPaymentStatus({ signal }),
+						fetchDeadlineMs,
+						"check"
+					)
+				);
+			} catch (e) {
+				// A timed-out check says nothing about the money: route the offline
+				// answer through the reducer (keeps any known state, re-enables Check).
+				// It is NOT a check the customer got an answer to, so it does not count
+				// toward the support ceiling.
+				if (my !== token) return;
+				absorb(offlineDecoded());
+				return;
+			}
 			if (my !== token) return;
-			const decoded = ingest(res);
 			absorb(decoded);
 			// A rate limit asserts nothing about the money and is not a "check" that
 			// counts toward the support ceiling - the customer never got an answer.
 			if (decoded.code !== CODES.PAYMENT_CHECK_RATE_LIMITED) {
 				state.value = noteStatusCheck(state.value);
+				persistSupport(state.value);
 			}
 		} finally {
-			if (my === token && state.value.busy === "checking") {
-				state.value = { ...state.value, busy: null };
-			}
+			endAction(my);
 		}
 	}
 
-	// Check-on-failure: mandatory after a dead/dismissed checkout or a failed
-	// confirm. Its ONE job is to catch a payment that actually landed - so only a
-	// PAID discovery moves the page, and a non-paid answer leaves the failure
-	// framing (and its "try again" copy) exactly where it was rather than
-	// downgrading it to a generic pending. It is not a user check, so it does not
-	// count toward the support ceiling. A rate limit still sets the cooldown.
+	// Check-on-failure: mandatory after a dead/dismissed checkout, a failed confirm,
+	// a timed-out mutation, or a return from an external checkout. It routes EVERY
+	// authoritative answer through the reducer (P0-1) - not just paid/rate-limit/
+	// parked-money. The old code discarded everything else and kept the stale
+	// failure framing over it, so an answer of "authorized; do not pay again"
+	// (PAYMENT_AUTHORIZED_PENDING_CONFIRM), a reconnect, a terminal, or a pending
+	// whose can_initiate flipped to false still rendered "Initiate payment again".
+	// The reducer already knows how to fold each of those safely - a transport
+	// failure becomes truth-unknown while KEEPING any known payment state; paid is
+	// a floor; a decline renders as itself - so the one correct thing to do is give
+	// it the answer. A "the checkout could not open" note survives as presentation
+	// metadata (state.checkoutNote), never as a preserved code/state/capability.
 	async function reconcileAfterFailure() {
 		const my = token;
-		const res = await api.checkSignupPaymentStatus();
+		let decoded;
+		try {
+			decoded = ingest(
+				await deadlined(
+					(signal) => api.checkSignupPaymentStatus({ signal }),
+					fetchDeadlineMs,
+					"check"
+				)
+			);
+		} catch (e) {
+			// The mandatory check itself timed out/died. Truth is UNKNOWN, never a
+			// verdict: route the offline answer through the reducer (which keeps a
+			// known payment state and offers the read-only check) and stop - no
+			// recursion, no fabricated failure.
+			if (my !== token) return;
+			absorb(offlineDecoded());
+			return;
+		}
 		if (my !== token) return;
-		const decoded = ingest(res);
-		if (decoded.ok && effectiveCode(decoded) === CODES.PAYMENT_ALREADY_ACTIVE) {
-			absorb(decoded);
+		absorb(decoded);
+	}
+
+	// ---- return from an external checkout (P0-2) ---------------------------
+	// The explicit, SAFE exit from checkout_open/confirming: a bfcache restore, a
+	// top-level redirect return, or a tab regaining focus after a full-page
+	// mandate. hydrate() deliberately refuses to leave checkout_open (a passive
+	// read must never unseat a live sheet); this is the ONE path that does, and it
+	// never assumes dismissal - it leaves the busy screen for a checkable UNKNOWN
+	// and reconciles server truth.
+	async function returnFromCheckout() {
+		const v = state.value.value;
+		if (v !== STATES.CHECKOUT_OPEN && v !== STATES.CONFIRMING) return { returned: false };
+		cancelInFlight(); // the sheet is gone; abandon any client work it left
+		apply({ type: EVENTS.RETURNED_FROM_CHECKOUT });
+		await reconcileAfterFailure();
+		return { returned: true };
+	}
+
+	// ---- "Start again" (P1-3): a server-truth-gated reset -------------------
+	// Resets the machine to a fresh review ONLY when no recoverable payment can be
+	// behind the current code (the reducer's canSafelyRestart decides); otherwise
+	// it preserves the attempt and its status/reconnect/support affordances. The
+	// caller uses `reset` to decide whether editing details is safe or the customer
+	// should stay on their recovery card.
+	function restart() {
+		// Consult the reset predicate FIRST and tear down ONLY on the reset branch
+		// (D3). cancelInFlight bumps disposeEpoch, which is the exact fence the X1 late
+		// continuation rides on: an unconditional cancel here dropped a genuine
+		// post-deadline confirm whenever the restart was REFUSED (money may still be
+		// recoverable, so the customer is correctly kept on recovery - but the sheet
+		// they are still in can settle success later, and that must not be abandoned).
+		// canSafelyRestart is the same predicate the RESTART reducer gates on, so the
+		// teardown decision and `reset` can never disagree.
+		const willReset = canSafelyRestart(state.value);
+		if (willReset) cancelInFlight();
+		const after = apply({ type: EVENTS.RESTART });
+		return { reset: after.value === STATES.REVIEW };
+	}
+
+	// ---- support-counter persistence (P2-5) --------------------------------
+	function persistSupport(s) {
+		if (s.attemptId == null && s.generation == null) return;
+		try {
+			const key = SUPPORT_KEY_PREFIX + counterKey(s);
+			storage.set(key, String((s.supportChecks && s.supportChecks.checks) || 0));
+		} catch (e) {
+			/* storage may be unavailable/full - the counter simply falls back to memory */
+		}
+	}
+
+	function restoreSupport() {
+		const s = state.value;
+		if (s.attemptId == null && s.generation == null) return;
+		let raw = null;
+		try {
+			raw = storage.get(SUPPORT_KEY_PREFIX + counterKey(s));
+		} catch (e) {
 			return;
 		}
-		if (decoded.code === CODES.PAYMENT_CHECK_RATE_LIMITED) {
-			absorb(decoded);
-			return;
-		}
-		// Money the gateway is holding that an operator has to place. This is the
-		// single most important thing a mandatory check can learn, and dropping it
-		// meant the page went straight back to offering "Initiate payment again" on
-		// a signup that has ALREADY been paid once. The facade also refuses the
-		// click server-side, so this is the second lock rather than the only one -
-		// but a customer must never be invited to pay twice in the first place.
-		if (decoded.ok && (decoded.data || {}).awaiting_manual_reconciliation) {
-			absorb(decoded);
+		const n = Number(raw);
+		const have = (s.supportChecks && s.supportChecks.checks) || 0;
+		if (Number.isFinite(n) && n > have) {
+			const counter = { key: counterKey(s), checks: n };
+			state.value = {
+				...s,
+				supportChecks: counter,
+				supportOffered: shouldOfferSupport(counter),
+			};
 		}
 	}
 
@@ -460,7 +959,10 @@ export function createPaymentFlow(deps) {
 			if (my !== token) return { status: "superseded" };
 			let r;
 			try {
-				r = await api.syncConnection();
+				// Bounded like every other payment wait (P0-3): a sync_connection that
+				// never settles times out into "not ready yet" and the loop moves on,
+				// rather than hanging one iteration forever.
+				r = await deadlined(() => api.syncConnection(), fetchDeadlineMs, "sync");
 			} catch (e) {
 				r = null;
 			}
@@ -491,6 +993,8 @@ export function createPaymentFlow(deps) {
 		initiatePayment,
 		checkStatus,
 		waitForProvisioning,
+		returnFromCheckout,
+		restart,
 		cancelInFlight,
 		tickCooldown,
 	};
