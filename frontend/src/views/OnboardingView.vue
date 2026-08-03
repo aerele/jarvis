@@ -877,22 +877,70 @@
 						<section v-else-if="state.step === 'connect'" class="ob-screen">
 							<div class="ob-body">
 								<div v-show="state.finishing">
-									<div class="ob-head">
-										<h1>Setting up {{ agentName }}</h1>
-										<p>
-											{{
-												state.finishSubtitle ||
-												"Bringing your workspace online, taking you to chat…"
-											}}
-										</p>
-									</div>
-									<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
-										 canvas fills via absolute+inset-0, and percentage heights
-										 don't resolve against a min-height parent - see its own
-										 comment. Don't change this to a fixed h-*. -->
-									<div class="relative mt-2 min-h-[380px] flex-1">
-										<SetupNeuralNet :dark="dark" />
-									</div>
+									<!-- Working / finishing: the calm setup screen while the ONE
+										 apply operation converges (plan-05 D2). -->
+									<template
+										v-if="
+											!state.connectPhase ||
+											state.connectPhase === 'working' ||
+											state.connectPhase === 'finishing'
+										"
+									>
+										<div class="ob-head">
+											<h1>Setting up {{ agentName }}</h1>
+											<p>
+												{{
+													state.finishSubtitle ||
+													"Bringing your workspace online, taking you to chat…"
+												}}
+											</p>
+										</div>
+										<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
+											 canvas fills via absolute+inset-0, and percentage heights
+											 don't resolve against a min-height parent - see its own
+											 comment. Don't change this to a fixed h-*. -->
+										<div class="relative mt-2 min-h-[380px] flex-1">
+											<SetupNeuralNet :dark="dark" />
+										</div>
+									</template>
+									<!-- A non-ready terminal (retry / superseded / support) or a
+										 deadline timeout: stay HERE with a real recovery action.
+										 Never a "continue anyway" jump into a chat that cannot yet
+										 answer (review P0-08). -->
+									<template v-else>
+										<div class="ob-head">
+											<h1>
+												{{
+													state.connectPhase === "superseded"
+														? "Your workspace changed"
+														: "Still finishing setup"
+												}}
+											</h1>
+											<p>{{ state.connectMessage }}</p>
+										</div>
+										<div class="mx-auto mt-4 max-w-[640px]">
+											<Banner
+												v-if="state.retryAfter > 0"
+												type="info"
+												:message="`You can retry in ${state.retryAfter}s.`"
+											/>
+											<div class="mt-4 flex justify-center">
+												<Button
+													v-if="state.connectPhase === 'superseded'"
+													variant="solid"
+													label="Reload and retry"
+													@click="reloadConnect"
+												/>
+												<Button
+													v-else
+													variant="solid"
+													:disabled="state.retryAfter > 0"
+													label="Retry"
+													@click="retryConnect"
+												/>
+											</div>
+										</div>
+									</template>
 								</div>
 								<div v-show="!state.finishing">
 									<div class="ob-head">
@@ -909,23 +957,21 @@
 											:editable="true"
 											:modes="['quick']"
 											:footerless="true"
-											@saved="onConnected"
 											@ready="connectReady = $event"
 										/>
+										<!-- Why the last Start was refused: a rejected apply verdict
+											 (error) or the start gate (no passing probe / no account). -->
+										<Banner
+											v-if="state.connectBlockReason"
+											class="mt-3"
+											:type="
+												state.connectPhase === 'rejected'
+													? 'error'
+													: 'warning'
+											"
+											:message="state.connectBlockReason"
+										/>
 									</div>
-									<Banner
-										v-if="state.finishNote"
-										type="info"
-										:message="state.finishNote"
-									>
-										<template #action>
-											<Button
-												variant="solid"
-												:label="`Continue to ${agentName}`"
-												@click="forceContinue"
-											/>
-										</template>
-									</Banner>
 								</div>
 							</div>
 							<div v-if="!state.finishing" class="ob-foot">
@@ -965,6 +1011,7 @@
 
 <script setup>
 import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
+import { useRouter } from "vue-router";
 import { Button, FormControl, FeatherIcon } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
@@ -975,18 +1022,11 @@ import Banner from "@/components/Banner.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
 import cashfreeLogo from "@/assets/cashfree.png";
-import {
-	STEPS_MANAGED,
-	nextStep,
-	prevStep,
-	notReadyNote,
-	syncStatusNote,
-	planSubtitleFor,
-} from "@/onboarding/steps";
+import { STEPS_MANAGED, nextStep, prevStep, planSubtitleFor } from "@/onboarding/steps";
 import { inr, planAmount, planSuffix } from "@/account/format";
 import {
 	isReadyForChat,
-	getLlmSyncStatus,
+	getLlmApplyOperation,
 	listPlans,
 	listPaymentProviders,
 	reconnectAvailable,
@@ -995,6 +1035,13 @@ import {
 	getAccountDefaults,
 	onboardingPaymentApi,
 } from "@/api";
+import {
+	createOperationController,
+	classifyOperation,
+	operationStore,
+	OP_PHASE,
+} from "@/lib/llmOperation.js";
+import { forgetReady } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
@@ -1004,6 +1051,7 @@ import { ACTIONS, ACTION_LABELS, TONE, copyFor } from "@/onboarding/paymentCodes
 import { CHECKOUT_NAV_KEY, shouldHonorCheckoutReturn } from "@/onboarding/checkoutNav";
 import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
 
+const router = useRouter();
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
 // The 4 named wizard steps shown on the rail. The intro tour is chromeless
@@ -1091,13 +1139,20 @@ const state = reactive({
 	// context, so Back to Review & Pay is hidden (it would re-run start_signup
 	// with empty args).
 	reconciledConnect: false,
-	// post-save readiness recheck (Connect funnels through
-	// afterSaveRecheckReady/forceContinue below). finishSubtitle swaps the
-	// spinner's default line for a calm "this can take a few minutes" message
-	// once the sync is confirmed still-converging server-side (F2 pending).
+	// Connect (Start chatting) is driven by ONE durable apply-operation controller
+	// (plan-05 D2). `finishing` covers the editor with the setup screen; connectPhase
+	// is the controller-projected UI phase ("" = editable form; working/finishing =
+	// spinner; retry/superseded/support = a recovery panel with a real action; a
+	// REJECTED verdict returns to the editable form with connectBlockReason set).
+	// finishSubtitle is the spinner's state-derived line. retryAfter counts down a
+	// per-operation rate-limit cooldown; connectBlockReason is the inline reason the
+	// gate refused (no probe / no account) when the form is still shown.
 	finishing: false,
-	finishNote: "",
 	finishSubtitle: "",
+	connectPhase: "",
+	connectMessage: "",
+	connectBlockReason: "",
+	retryAfter: 0,
 });
 
 const steps = computed(() => STEPS_MANAGED);
@@ -1971,195 +2026,412 @@ async function startReconnect() {
 	}
 }
 
-// ---- post-save readiness recheck (Connect) ----------------------------------
-// CRITICAL: the router's first-run guard (router/index.js) caches its
-// is_ready_for_chat probe in a module-level `readyPromise` for the lifetime
-// of the page - it never invalidates mid-session. So a plain
-// `router.push({ name: "Chat" })` right after completing onboarding would
-// read that STALE "not ready" cache and bounce straight back to
-// /onboarding. The completion path (onConnected below) instead does a FULL
-// PAGE RELOAD via window.location.assign("/jarvis/") once ready, which
-// re-imports the router module from scratch and re-runs the readiness check
-// fresh.
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Defect-2 fix (2026-07-23 out-of-quota trace): this used to be 5 attempts * 800ms -
-// about 4 SECONDS - while waitForSyncTerminal below budgets up to 15 MINUTES for the
-// same save's provisioning job. That asymmetry was never intentional; it is a leftover
-// from when the sync job's terminal flip and admin's chat-readiness verdict
-// (_admin_chat_gate in jarvis/account.py, the FINAL check inside is_ready_for_chat)
-// were assumed to settle in lockstep. In practice the chat-readiness verdict is a
-// SEPARATE admin round-trip that can lag the sync job's own terminal state by tens of
-// seconds, so a 4s budget almost always timed out before the real verdict - ready, or
-// a specific not-ready reason + detail - ever came back, and the customer got a
-// made-up generic sentence instead of the truth admin already knew. ~75s gives that
-// final check room to actually catch up, without making a genuinely-stuck customer
-// wait dramatically longer than before.
-const READINESS_POLL_ATTEMPTS = 30;
-const READINESS_POLL_INTERVAL_MS = 2500;
-
-// Poll is_ready_for_chat a few times (short backoff) rather than trusting a
-// single check - the save itself (a pool save) can return before whatever
-// it kicked off (e.g. proxy provisioning) is fully
-// reflected. Fails closed (ready:false) on a persistent error; callers treat
-// "not ready yet" as advisory, not fatal - see finishNote below.
+// ---- Connect: the ONE durable apply-operation controller --------------------
+// "Start chatting" is a single awaited transaction (plan-05 D2, review §8/§10.4).
+// The editor persists the desired pool and hands back a durable apply-operation
+// descriptor; ONE createOperationController follows exactly that operation to a
+// terminal state, and navigation to Chat happens exactly once, only on an
+// authoritative `ready`. Every non-ready terminal (retry, rejected, superseded,
+// timeout) stays on THIS step with a real recovery action - there is no "continue
+// anyway" escape hatch into a chat that cannot answer (review P0-01/P0-08).
 //
-// Defect-1 fix: records the LAST OBSERVED {reason, detail} even on a losing poll,
-// instead of collapsing the whole result to a bare boolean - the caller needs the
-// real reason to tell the customer the truth (e.g. "Your OpenAI account has reached
-// its usage limit...") rather than a generic "still finishing" shrug. Only a THROWN
-// error (network hiccup) is swallowed and ignored; a RETURNED {ready:false, ...} is a
-// real verdict and overwrites whatever came before it.
-async function waitUntilReady(
-	attempts = READINESS_POLL_ATTEMPTS,
-	delayMs = READINESS_POLL_INTERVAL_MS
-) {
-	let last = { reason: null, detail: "" };
-	for (let i = 0; i < attempts; i++) {
-		try {
-			const r = await isReadyForChat();
-			if (r && r.ready) return { ready: true, reason: null, detail: "" };
-			if (r) last = { reason: r.reason || null, detail: r.detail || "" };
-		} catch (e) {
-			// keep retrying - transient network hiccups shouldn't strand the user
-		}
-		if (i < attempts - 1) await sleep(delayMs);
-	}
-	return { ready: false, ...last };
+// The router's first-run guard (router/index.js) memoizes its readiness probe in a
+// module-level readyPromise; forgetReady() clears that memo so router.replace re-runs
+// the guard fresh and reaches Chat - no full-page reload needed (review P0-01/P1-06).
+
+// Small awaitable delay used by the controller's bounded readiness/resume loops.
+function _sleep(ms) {
+	return new Promise((r) => setTimeout(r, ms));
 }
 
-// Manual fallback for the "still not ready" case: never hard-block. The
-// customer can always force their way to Chat; if something's genuinely
-// still missing, Chat/Account will surface that.
-function forceContinue() {
-	window.location.assign("/jarvis/");
-}
-
-// First-time provisioning runs in a background job whose budget is minutes
-// (cold container provision + proxy sidecars), not seconds. Readiness only
-// flips once that job APPLIES the pool, so before probing is_ready_for_chat
-// we follow the job itself: poll get_llm_sync_status until it leaves
-// "pending:". The ceiling is a UX bound, not a correctness guarantee: it
-// clears the backend's 600s job envelope (ADMIN_SYNC_RQ_TIMEOUT_S) plus one
-// lock-loss retry hop; a pathological retry chain can honestly outlast it,
-// in which case the caller falls through to the "still finishing" note with
-// a manual continue - never a hard block. Returns the terminal sync dict,
-// or null on timeout.
-async function waitForSyncTerminal(maxMs = 15 * 60 * 1000, intervalMs = 3000) {
-	const deadline = Date.now() + maxMs;
-	for (;;) {
-		try {
-			const s = await getLlmSyncStatus();
-			// "pending:" (incl. "pending: admin applying config") is NOT terminal
-			// - the admin persisted the config and a reconcile is finishing the
-			// apply. Keep following it; surface a calm reassurance rather than the
-			// red failure note. Only ok/failed (not pending) ends the loop.
-			if (s && !s.pending) return s;
-			if (s && s.pending) {
-				state.finishSubtitle =
-					"Finishing setup — this can take a few minutes. We’ll keep at it; " +
-					"you can safely wait or come back.";
-			}
-		} catch (e) {
-			// transient network hiccups shouldn't strand the user
-		}
-		if (Date.now() >= deadline) return null;
-		await sleep(intervalMs);
-	}
-}
-
-// Shared tail for both completion paths: optionally follow an in-flight
-// provisioning sync to a terminal state, then poll for readiness, then
-// either auto-reload (the common case) or leave a "still finishing" note
-// with a manual continue button so the user is never stuck on a spinner.
-//
-// followSync is ONLY for the pool path (save_llm_pool writes a "pending:"
-// status synchronously before returning, so a sync from THIS save is
-// observable as pending right now). A no-op / container-owned save enqueues
-// nothing, and the field may then hold a STALE terminal "failed:" (or a stale
-// "pending:" from an abandoned earlier attempt), which must not block an
-// actually-ready tenant. Hence: only follow a sync we can see in flight.
-async function afterSaveRecheckReady({ followSync = false } = {}) {
-	state.finishNote = "";
-	state.finishSubtitle = "";
-	state.finishing = true;
-	if (followSync) {
-		// save_llm_pool writes "pending:" synchronously before its response,
-		// and onConnected only fires after a successful save - so whatever
-		// this probe reads is THIS save's sync: still pending (follow it to
-		// terminal) or already terminal (a fast failure, e.g. an immediate
-		// auth error - which must surface its actionable status, not fall
-		// through to a generic "still finishing" note that hides the
-		// diagnostic the status field already carries).
-		let terminal = null;
-		try {
-			const s0 = await getLlmSyncStatus();
-			terminal = s0 && s0.pending ? await waitForSyncTerminal() : s0;
-		} catch (e) {
-			// status probe is advisory - fall through to the readiness poll
-		}
-		const status = ((terminal && terminal.last_sync_status) || "").trim();
-		if (status.startsWith("failed") || status.startsWith("skipped")) {
-			state.finishing = false;
-			// Defect fix (2026-07-23 out-of-quota trace): when the status carries a
-			// real customer sentence (jarvis_settings.py now writes
-			// "failed: Your OpenAI account has reached its usage limit..." for
-			// this exact case), render it directly - burying "Your OpenAI account
-			// has reached its usage limit. It resets in about 27 hours." inside
-			// "Setup hit a problem (...)" reads as developer text a customer
-			// should never have to parse. syncStatusNote keeps the wrapper for
-			// statuses that are genuinely opaque ("failed: unexpected error; see
-			// Error Log", "failed: auth: ...", "skipped: no longer pool-valid...").
-			// The wrapper copy itself lives in steps.js and is whitelabelled there
-			// via `agentName`, so develop's branding is preserved.
-			state.finishNote = syncStatusNote(status, agentName);
-			return;
-		}
-	}
-	const result = await waitUntilReady();
-	if (result.ready) {
-		// Keep the "Setting up Jarvis" spinner up THROUGH the full-page reload.
-		// Flipping finishing off first re-shows the editor for a frame before
-		// the browser navigates. Leave it on; location.assign tears the page down.
-		window.location.assign("/jarvis/");
-		return;
-	}
-	state.finishing = false;
-	// Defect-1 fix: render the backend's OWN sentence (is_ready_for_chat's `detail`,
-	// admin-owned wording - e.g. "Your OpenAI account has reached its usage limit. It
-	// resets in about 27 hours.") instead of a made-up generic one. notReadyNote falls
-	// back to the old generic copy only when the backend truly has no wording for this
-	// reason yet (an older admin, or a reason account.py hasn't wired a sentence for) -
-	// see steps.js, where that fallback is whitelabelled via `agentName` so develop's
-	// branding survives. The "Continue to <agent>" action below now sits right next to
-	// whichever of the two is showing, so it always reads as an honest choice rather
-	// than an unexplained escape hatch.
-	state.finishNote = notReadyNote(result.detail, agentName);
-}
-
-// ---- Connect (renders <LlmPoolEditor>) - the component itself owns
-// Quick/Preset/Custom + save_llm_pool; this is only the post-save readiness
-// handoff. ---------------------------------------------------------------
-function onConnected(sync) {
-	afterSaveRecheckReady({ followSync: true });
-}
-
-// The Connect footer (Back + Connect & Finish) lives here, not inside
-// LlmPoolEditor (:footerless), so it matches every other step's footer. Save
-// is triggered on the editor via its exposed save() method.
 const poolRef = ref(null);
 const savingConnect = ref(false);
-// True once the embedded editor reports a savable config (account connected,
-// or API key filled) - gates the Connect & Finish button.
+// True once the embedded editor reports a savable config (account connected, or an
+// API key filled) - gates the "Start chatting" button (@ready from the editor). The
+// STRICTER start gate (a passing probe for a freshly-typed remote key) is enforced in
+// saveConnect via the editor's exposed canStart, with an inline reason when it refuses.
 const connectReady = ref(false);
+
+// Persist ONLY opaque handles across a reload: the operation id (operationStore) and
+// the idempotency key. Never a credential, never a token.
+const opStore = operationStore();
+const IDEM_STORE_KEY = "jarvis.llm_apply.idempotency_key";
+function rememberIdem(key) {
+	try {
+		if (key) sessionStorage.setItem(IDEM_STORE_KEY, key);
+	} catch (e) {
+		/* private-mode / quota: resume is best-effort */
+	}
+}
+function recallIdem() {
+	try {
+		return sessionStorage.getItem(IDEM_STORE_KEY) || "";
+	} catch (e) {
+		return "";
+	}
+}
+function forgetIdem() {
+	try {
+		sessionStorage.removeItem(IDEM_STORE_KEY);
+	} catch (e) {
+		/* ignore */
+	}
+}
+function newIdemKey() {
+	try {
+		if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+	} catch (e) {
+		/* fall through to the timestamp+random fallback */
+	}
+	return `idem-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// The single controller, the op it is currently following, and a one-shot navigation
+// guard so a duplicate terminal (or a re-entry) can never navigate twice.
+let opController = null;
+const currentOpId = ref("");
+const navigated = ref(false);
+let retryTimer = null;
+
+function ensureController() {
+	if (opController) return opController;
+	opController = createOperationController({
+		poll: (id) => getLlmApplyOperation(id),
+		onUpdate: onOpUpdate,
+		store: opStore,
+		isVisible: () => typeof document === "undefined" || document.visibilityState !== "hidden",
+		onVisible: (cb) => {
+			const h = () => {
+				if (typeof document === "undefined" || document.visibilityState !== "hidden") cb();
+			};
+			if (typeof document !== "undefined") document.addEventListener("visibilitychange", h);
+			return () => {
+				if (typeof document !== "undefined")
+					document.removeEventListener("visibilitychange", h);
+			};
+		},
+	});
+	return opController;
+}
+
+function stopRetryCountdown() {
+	if (retryTimer) {
+		clearInterval(retryTimer);
+		retryTimer = null;
+	}
+}
+function startRetryCountdown() {
+	stopRetryCountdown();
+	if (!(state.retryAfter > 0)) return;
+	retryTimer = setInterval(() => {
+		state.retryAfter = Math.max(0, state.retryAfter - 1);
+		if (state.retryAfter <= 0) stopRetryCountdown();
+	}, 1000);
+}
+
+// Side-effect-free render hook: project each operation phase into the setup screen's
+// copy. Navigation lives in onTerminal, never here.
+function onOpUpdate(ui) {
+	const phase = ui && ui.phase;
+	if (phase === OP_PHASE.REJECTED) {
+		// The input is the problem: return to the editable form with the reason.
+		state.finishing = false;
+		state.connectPhase = "rejected";
+		state.connectBlockReason =
+			(ui && ui.message) ||
+			"That AI configuration was rejected. Edit your key or connection and try again.";
+		return;
+	}
+	state.finishing = true;
+	if (phase === OP_PHASE.FINISHING) {
+		state.connectPhase = "finishing";
+		state.connectMessage = "";
+		state.finishSubtitle = "Saved. Finishing setup — this can take a minute.";
+	} else if (phase === OP_PHASE.RETRY) {
+		state.connectPhase = "retry";
+		state.connectMessage = (ui && ui.message) || "We hit a snag applying your AI connection.";
+		state.retryAfter = (ui && ui.retryAfterSeconds) || 0;
+		startRetryCountdown();
+	} else if (phase === OP_PHASE.SUPERSEDED) {
+		state.connectPhase = "superseded";
+		state.connectMessage =
+			(ui && ui.message) ||
+			"Your workspace assignment changed. Reload this page and try again.";
+	} else {
+		// WORKING (pending / applying), and the descriptor seed.
+		state.connectPhase = "working";
+		state.connectMessage = "";
+		state.finishSubtitle = "Bringing your workspace online, taking you to chat…";
+	}
+}
+
+// Navigate to Chat exactly once, only on an authoritative ready. forgetReady() clears
+// the router's memoized readiness so its guard re-checks fresh, and router.replace
+// re-runs that guard → Chat.
+function navigateToChat() {
+	if (navigated.value) return;
+	navigated.value = true;
+	stopRetryCountdown();
+	forgetIdem();
+	opStore.forget();
+	forgetReady();
+	router.replace({ name: "Chat" });
+}
+
+// The terminal handler for a followed operation. READY → navigate once; every other
+// terminal (or a deadline timeout) stays here with a recovery action.
+function onTerminal(status) {
+	stopRetryCountdown();
+	if (!status) {
+		enterSupport();
+		return;
+	}
+	if (status.timedOut) {
+		// The deadline released us, not the job: it is still finishing server-side.
+		state.finishing = true;
+		state.connectPhase = "retry";
+		state.connectMessage =
+			"Setup is taking longer than usual. It's still finishing on its own — you can keep waiting or retry.";
+		state.retryAfter = 0;
+		return;
+	}
+	const ui = classifyOperation(status);
+	if (ui.canNavigate) {
+		navigateToChat();
+		return;
+	}
+	// A non-navigable terminal. onOpUpdate already rendered the matching phase; a
+	// rejected/superseded attempt is DONE, so the next Start mints a fresh operation -
+	// drop the idempotency key. A retry re-follows the SAME op, so its key is kept.
+	if (ui.phase === OP_PHASE.REJECTED || ui.phase === OP_PHASE.SUPERSEDED) forgetIdem();
+}
+
+function enterSupport() {
+	state.finishing = true;
+	state.connectPhase = "support";
+	state.connectMessage =
+		"We couldn't finish setting up your AI connection. Please try again in a moment.";
+	// A support dead-end is terminal for THIS attempt (F1/F8): drop the idempotency
+	// key so the next Start mints a fresh one. Otherwise a poisoned key (e.g. a 409
+	// IdempotencyKeyConflict, or an old-admin descriptor-less response) would make
+	// every subsequent Retry re-submit the same conflicting key and dead-end again.
+	forgetIdem();
+}
+
+// Follow a descriptor (or a bare op id on resume) to its terminal state. Supersession
+// / unmount rejects with {aborted:true}, which is not an error to surface.
+async function followDescriptor(descriptorOrId) {
+	currentOpId.value =
+		typeof descriptorOrId === "string"
+			? descriptorOrId
+			: (descriptorOrId && descriptorOrId.operation_id) || "";
+	state.finishing = true;
+	state.connectPhase = "working";
+	let terminal;
+	try {
+		terminal = await ensureController().follow(descriptorOrId);
+	} catch (e) {
+		if (e && e.aborted) return; // superseded or unmounted: expected, not an error
+		enterSupport();
+		return;
+	}
+	onTerminal(terminal);
+}
+
+// Turn a save_llm_pool RESULT into a terminal outcome. Precedence (backend contract,
+// refined 2026-08-03):
+//   apply_operation present               → follow that ONE durable operation.
+//   resumable (op exists under same key)  → re-call save with the SAME idempotency
+//                                           key, bounded, to obtain the descriptor.
+//   mode === "legacy"                     → a single BYO api-key model whose admin
+//                                           creds endpoint mints NO operation: fall
+//                                           back to a bounded readiness poll (fail-
+//                                           closed, no bypass).
+//   else (operation path, null op, not    → a save refusal. A save-level rate-limit
+//   resumable)                              cooldown (retry_after_seconds) is shown
+//                                           truthfully; otherwise a support state.
+// Never a silent ready.
+const RESUME_MAX = 3;
+async function resolveAndFollow(result, idem) {
+	let r = result;
+	let tries = 0;
+	while (r && !r.apply_operation) {
+		if (r.resumable) {
+			if (tries >= RESUME_MAX || !poolRef.value) {
+				enterSupport();
+				return;
+			}
+			tries += 1;
+			const again = await poolRef.value.save(idem); // same key → admin dedupes
+			if (!again || !again.ok) {
+				enterSupport();
+				return;
+			}
+			r = again.result;
+			continue;
+		}
+		if (r.mode === "legacy") {
+			await followLegacyReadiness();
+			return;
+		}
+		// Operation path, no descriptor, not resumable: a refusal (e.g. a rate limit).
+		enterSaveRefusal((r && r.retry_after_seconds) || 0);
+		return;
+	}
+	await followDescriptor(r.apply_operation);
+}
+
+// Legacy fallback (single BYO api-key model, mode:"legacy"): admin's creds endpoint
+// mints no durable operation, so there is nothing to follow - poll readiness instead,
+// bounded and fail-closed. On ready → navigate once; on timeout / persistent not-ready
+// → the SAME support/retry state a non-navigable terminal gets (stay on Connect, offer
+// Retry). Deliberately NO "continue anyway" bypass (review P0-08).
+const LEGACY_READY_ATTEMPTS = 30;
+const LEGACY_READY_INTERVAL_MS = 2500;
+async function followLegacyReadiness() {
+	state.finishing = true;
+	state.connectPhase = "working";
+	state.finishSubtitle = "Bringing your workspace online, taking you to chat…";
+	for (let i = 0; i < LEGACY_READY_ATTEMPTS; i++) {
+		if (navigated.value) return;
+		let r = null;
+		try {
+			r = await isReadyForChat();
+		} catch (e) {
+			// transient: a readiness call that throws is not a verdict - keep polling
+		}
+		if (r && r.ready) {
+			navigateToChat();
+			return;
+		}
+		if (i < LEGACY_READY_ATTEMPTS - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
+	}
+	state.finishing = true;
+	state.connectPhase = "retry";
+	state.connectMessage =
+		"Setup is taking longer than usual. It's still finishing on its own — you can keep waiting or retry.";
+	state.retryAfter = 0;
+}
+
+// A save that was REFUSED before any operation opened. A rate-limit carries a cooldown
+// (retry_after_seconds): honour it truthfully and never auto-resubmit. currentOpId
+// stays empty, so retryConnect re-runs saveConnect (reusing the persisted key) once the
+// cooldown elapses.
+function enterSaveRefusal(retryAfterSeconds) {
+	state.finishing = true;
+	if (retryAfterSeconds > 0) {
+		state.connectPhase = "retry";
+		state.connectMessage =
+			"Too many changes in a short time. Please wait a moment, then retry.";
+		state.retryAfter = retryAfterSeconds;
+		startRetryCountdown();
+	} else {
+		enterSupport();
+	}
+}
+
+// The sole controller. One click = one save = one followed operation; a second click
+// while in flight is a no-op (the savingConnect guard + the controller's own
+// supersession). The idempotency key is minted once per attempt and persisted BEFORE
+// the save, so a lost response can resume by re-calling save with the same key.
 async function saveConnect() {
+	if (savingConnect.value || navigated.value) return;
 	if (!poolRef.value) return;
+	// Require a savable + validated config: subscription → a capture/stored account;
+	// remote api_key → a passing probe bound to the current fields; local → fields set.
+	if (!poolRef.value.canStart) {
+		state.finishing = false;
+		state.connectPhase = "";
+		state.connectBlockReason =
+			poolRef.value.startBlockedReason || "Connect a model to continue.";
+		return;
+	}
+	state.connectBlockReason = "";
 	savingConnect.value = true;
 	try {
-		await poolRef.value.save();
+		let idem = recallIdem();
+		if (!idem) {
+			idem = newIdemKey();
+			rememberIdem(idem); // persist BEFORE save so a lost response can resume
+		}
+		const res = await poolRef.value.save(idem);
+		if (!res || !res.ok) {
+			// A validation / persist error keeps the customer on the editable form; the
+			// attempt never opened an operation, so the key can be dropped.
+			state.finishing = false;
+			state.connectPhase = "";
+			state.connectBlockReason =
+				(res && res.error) || "We couldn't save your AI connection. Please try again.";
+			forgetIdem();
+			return;
+		}
+		await resolveAndFollow(res.result, idem);
 	} finally {
 		savingConnect.value = false;
 	}
+}
+
+// Recovery action shared by the retry / timeout / support states. It re-FOLLOWS the
+// same operation (never a second save) when one exists; otherwise (an idem-only lost
+// response, or a support state before any op) it re-runs saveConnect, which reuses the
+// persisted idempotency key so admin dedupes.
+function retryConnect() {
+	if (state.retryAfter > 0) return; // honour the cooldown
+	state.connectMessage = "";
+	if (currentOpId.value) {
+		followDescriptor(currentOpId.value);
+		return;
+	}
+	saveConnect();
+}
+
+// Superseded: the current operation is dead; the honest recovery is a clean reload
+// that re-follows whatever operation now owns the truth.
+function reloadConnect() {
+	window.location.reload();
+}
+
+// Back to the editable form to fix a rejected configuration.
+function editConnect() {
+	stopRetryCountdown();
+	state.finishing = false;
+	state.connectPhase = "";
+	state.connectMessage = "";
+}
+
+// Resume an in-flight apply on mount (reload mid-apply): follow the SAME operation
+// rather than showing an editable form over a running one (review P1-05). If only the
+// idempotency key survived (the save response was lost before the op id was stored),
+// recover the descriptor by re-calling save with that key once the editor has reloaded
+// the saved config.
+async function maybeResumeConnect() {
+	const opId = opStore.recall();
+	if (opId) {
+		state.step = "connect";
+		state.reconciledConnect = true; // no local pay context on a resume
+		navigated.value = false;
+		await followDescriptor(opId);
+		return;
+	}
+	const idem = recallIdem();
+	if (!idem) return;
+	state.step = "connect";
+	state.reconciledConnect = true;
+	navigated.value = false;
+	// Wait (bounded) for the connect editor to mount and reload the persisted config so
+	// its save() rebuilds the same payload the lost attempt sent.
+	for (let i = 0; i < 40 && !(poolRef.value && poolRef.value.canStart); i++) {
+		await _sleep(100);
+	}
+	if (!(poolRef.value && poolRef.value.canStart)) {
+		// Couldn't auto-resume: leave the editable form. A fresh Start supersedes the
+		// orphaned operation, so drop the stale key.
+		forgetIdem();
+		return;
+	}
+	const res = await poolRef.value.save(idem);
+	if (res && res.ok) await resolveAndFollow(res.result, idem);
+	else forgetIdem();
 }
 
 // Enter-step triggers: load the plan list on reaching "plan" (first entry
@@ -2316,10 +2588,20 @@ onMounted(async () => {
 		clearExternalCheckoutNav();
 	}
 	await reconcileMidFlightSignup();
+	// Resume an apply that was in flight when the page was last closed/reloaded: follow
+	// the SAME operation rather than showing an editable form over a running one (P1-05).
+	await maybeResumeConnect();
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"
 	// and skip it (the step-entry watch still covers every other path).
 	if (state.step === "intro" && !state.plans.length && !state.plansLoading) loadPlansSafe();
+});
+
+// Tear down the single controller (kills its timers; the {aborted:true} rejection is
+// swallowed by followDescriptor) and the retry countdown when the wizard unmounts.
+onUnmounted(() => {
+	if (opController) opController.abort();
+	stopRetryCountdown();
 });
 </script>
 

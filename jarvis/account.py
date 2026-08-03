@@ -765,16 +765,69 @@ def get_llm_apply_operation(operation_id: str) -> dict:
 	single Start-chatting controller to follow one operation to a terminal state.
 
 	A thin System-Manager-gated shim over admin's read-only endpoint (see
-	admin_client.get_llm_apply_operation): it never mutates and never spends the
-	apply rate bucket, so the controller polls it with backoff. The bench holds no
-	operation state of its own - admin owns the operation's truth - so this
-	forwards the opaque id and surfaces admin's §8.4 status verbatim. Errors arrive
-	as clean frappe.throw toasts via the shared _surface helper; the SPA client
-	seam (frontend/src/lib/llmOperation.js) treats a transport failure as
-	"keep polling", not a verdict.
+	admin_client.get_llm_apply_operation): it never spends the apply rate bucket, so
+	the controller polls it with backoff. The bench holds no operation state of its
+	own - admin owns the operation's truth - so this forwards the opaque id and
+	surfaces admin's §8.4 status verbatim. Errors arrive as clean frappe.throw
+	toasts via the shared _surface helper; the SPA client seam
+	(frontend/src/lib/llmOperation.js) treats a transport failure as "keep polling",
+	not a verdict.
+
+	Side effect (plan-05 D2 paired follow-up): admin moved the fleet push OFF the
+	synchronous save (admin #193), so ``save_llm_pool`` no longer sees an inline
+	apply result to stamp the AI-models per-model verdicts from. Admin now carries
+	the fleet's probe verdicts on the CONVERGED operation status, so this fold them
+	into the same bench settings cache the settings panel already reads - see
+	``_persist_operation_probe_verdicts``. That makes this poll a (bounded) writer,
+	so it must be reached over POST (frappe-ui's ``call`` always POSTs) for the
+	write to be durable; a read that never converges writes nothing.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.get_llm_apply_operation, operation_id)
+	status = _surface(admin_client.get_llm_apply_operation, operation_id)
+	_persist_operation_probe_verdicts(status)
+	return status
+
+
+def _persist_operation_probe_verdicts(status: dict) -> None:
+	"""Fold the fleet's probe verdicts off a converged operation status into the
+	bench settings cache the AI-models panel reads (``last_subscription_status`` /
+	``last_sync_warnings`` / ``last_model_statuses`` via ``get_llm_config`` ->
+	LlmPoolEditor). Plan-05 D2 paired follow-up: admin #193 moved the fleet push off
+	the synchronous save, so these verdicts arrive on the operation status once the
+	apply has CONVERGED rather than on the save's (now push-less) return - without
+	this, the panel would blank after a save with nothing to repopulate it.
+
+	Present ONLY once converged; ABSENT (still applying, or an old admin) leaves the
+	prior verdicts intact - never blanks them. An ``unchanged`` no-op apply ran no
+	probe, so its "unchecked" / ``[]`` must not discard the last real verdict (same
+	rule as ``jarvis_settings._stamp_pool_applied_ok``). A no-op when the values
+	already match, so a hot poll does not churn the Singles row.
+
+	NOTE: the exact field shape (subscription_status: str, warnings: list,
+	model_statuses: list, unchanged: bool) mirrors the fleet-agent verdict contract
+	the async worker already persists; it must match the shape admin's operation
+	status projection emits (admin plan-05 branch). Never coerces a mismatch."""
+	if not isinstance(status, dict):
+		return
+	# Not converged yet (still applying) / an old admin: no probe fields -> leave the
+	# last real verdict untouched rather than blanking the panel.
+	if not any(k in status for k in ("subscription_status", "warnings", "model_statuses")):
+		return
+	# A byte-identical no-op apply ran no probe (contract 1.10 unchanged=true): its
+	# "unchecked"/[] would discard the last real verdict. Keep the prior values.
+	if status.get("unchanged"):
+		return
+	fields = {
+		"last_subscription_status": str(status.get("subscription_status") or ""),
+		"last_sync_warnings": frappe.as_json(status.get("warnings") or []),
+		"last_model_statuses": frappe.as_json(status.get("model_statuses") or []),
+	}
+	current = (
+		frappe.db.get_value("Jarvis Settings", "Jarvis Settings", list(fields.keys()), as_dict=True) or {}
+	)
+	if all((current.get(k) or "") == v for k, v in fields.items()):
+		return  # unchanged from what is stored - do not churn the Singles row per poll
+	frappe.db.set_value("Jarvis Settings", "Jarvis Settings", fields, update_modified=False)
 
 
 @frappe.whitelist()

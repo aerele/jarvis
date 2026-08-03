@@ -1232,12 +1232,29 @@ def reset_workspace_state() -> dict:
 	return _post(path=_m("api.tenant_request.get_request_state"), body={}, timeout_s=8)
 
 
-def post_update_llm_pool(*, spec: dict, api_keys: dict, oauth_blobs: dict) -> dict:
+def post_update_llm_pool(
+	*,
+	spec: dict,
+	api_keys: dict,
+	oauth_blobs: dict,
+	idempotency_key: str | None = None,
+	timeout_s: int | None = None,
+) -> dict:
 	"""POST a PoolSpec + separated secrets to admin → fleet-agent → openclaw.
 
 	``spec``        : secret-free PoolSpec dict (name, routing_mode, models).
 	``api_keys``    : mapping ref → plaintext key (e.g. {"POOL_KEY_0": "sk-..."}).
 	``oauth_blobs`` : mapping account_ref → parsed OAuth blob dict.
+	``idempotency_key`` (plan-05 D2): opaque per-Start-chatting-attempt key. Admin
+	    dedupes a retry carrying the same key to the SAME durable apply operation
+	    (no new desired version, refunds the rate token, does not re-drive the
+	    push), so a double-click / lost-response resume converges on one operation.
+	    Omitted (None) preserves the pre-plan05 behaviour for internal callers.
+	``timeout_s`` (plan-05 D2, F2/F3): a SHORT bound for the synchronous
+	    descriptor-obtain from ``sync_pool_now`` - well under the gunicorn budget.
+	    A timeout here is not a lost apply: admin commits desired + operation before
+	    the fleet push, so the operation exists and the caller resumes via the same
+	    idempotency key. None keeps the long DEFAULT_TIMEOUT_S for the async worker.
 
 	The admin endpoint merges the secrets with the spec before forwarding to
 	fleet-agent. Implemented in T3 (jarvis_admin); this stub is the bench-side
@@ -1255,15 +1272,16 @@ def post_update_llm_pool(*, spec: dict, api_keys: dict, oauth_blobs: dict) -> di
 	# installed_apps: the pool-safe leg of the migrate-time resync (mirrors
 	# post_update_llm_creds). A new admin persists it before the fleet forward
 	# and echoes installed_apps_persisted; an old admin ignores the extra field.
-	return _post(
-		path=_m("api.tenant.update_llm_pool"),
-		body={
-			"spec": spec,
-			"api_keys": api_keys,
-			"oauth_blobs": oauth_blobs,
-			"installed_apps": frappe.get_installed_apps(),
-		},
-	)
+	body = {
+		"spec": spec,
+		"api_keys": api_keys,
+		"oauth_blobs": oauth_blobs,
+		"installed_apps": frappe.get_installed_apps(),
+	}
+	if idempotency_key:
+		body["idempotency_key"] = idempotency_key
+	kw = {"timeout_s": timeout_s} if timeout_s is not None else {}
+	return _post(path=_m("api.tenant.update_llm_pool"), body=body, **kw)
 
 
 def get_llm_apply_operation(operation_id: str, *, timeout_s: int = 8) -> dict:

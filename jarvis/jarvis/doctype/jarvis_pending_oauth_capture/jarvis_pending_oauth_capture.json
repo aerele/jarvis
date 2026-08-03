@@ -1,0 +1,169 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:capture_id",
+ "creation": "2026-08-03 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "capture_id",
+  "owner_user",
+  "provider",
+  "upstream",
+  "openclaw_provider",
+  "provider_subject_hash",
+  "safe_label",
+  "account_email",
+  "account_ref",
+  "bound_agent_url",
+  "nonce_hash",
+  "encrypted_oauth_blob",
+  "expires_at",
+  "consumed_at",
+  "consumed_by_operation",
+  "revocation_state",
+  "revocation_attempts"
+ ],
+ "fields": [
+  {
+   "fieldname": "capture_id",
+   "fieldtype": "Data",
+   "label": "Capture ID",
+   "reqd": 1,
+   "unique": 1,
+   "read_only": 1,
+   "description": "Opaque id (oacap_<hex>) handed to the browser after an OAuth token exchange. The DocType name IS this id (autoname field:capture_id), so it is the only handle the SPA ever holds - the minted provider token never leaves the server."
+  },
+  {
+   "fieldname": "owner_user",
+   "fieldtype": "Data",
+   "label": "Owner User",
+   "reqd": 1,
+   "read_only": 1,
+   "description": "The user who began (and may consume) this sign-in. consume/list are gated on this equalling frappe.session.user so one System Manager can never consume a peer's pending capture."
+  },
+  {
+   "fieldname": "provider",
+   "fieldtype": "Data",
+   "label": "Provider",
+   "read_only": 1,
+   "description": "Jarvis provider label (e.g. 'OpenAI', 'Kimi (Moonshot)')."
+  },
+  {
+   "fieldname": "upstream",
+   "fieldtype": "Data",
+   "label": "Upstream",
+   "read_only": 1,
+   "description": "cliproxy pool upstream ('openai' | 'xai' | 'kimi'), the value the pool subscription account row is stored under."
+  },
+  {
+   "fieldname": "openclaw_provider",
+   "fieldtype": "Data",
+   "label": "Openclaw Provider",
+   "read_only": 1,
+   "description": "The openclaw_provider key (used only to look up the provider's token-revocation endpoint on expiry/cancel)."
+  },
+  {
+   "fieldname": "provider_subject_hash",
+   "fieldtype": "Data",
+   "label": "Provider Subject Hash",
+   "read_only": 1,
+   "description": "sha256 of the provider's STABLE subject (accountId, else email) - the idempotency key for folding two captures of the same account without storing the raw subject. Empty when the provider returns no stable subject (device-code Kimi)."
+  },
+  {
+   "fieldname": "safe_label",
+   "fieldtype": "Data",
+   "label": "Safe Label",
+   "read_only": 1,
+   "description": "Non-secret display label (the account email, or a synthesized 'Kimi <ref-tail>'). Returned to the browser; never a token."
+  },
+  {
+   "fieldname": "account_email",
+   "fieldtype": "Data",
+   "label": "Account Email",
+   "read_only": 1,
+   "description": "The account email the sign-in reported, for display parity with the pre-capture flow. Empty for device-code providers. Never written to logs/telemetry."
+  },
+  {
+   "fieldname": "account_ref",
+   "fieldtype": "Data",
+   "label": "Account Ref",
+   "read_only": 1,
+   "description": "The SUB_<hex> per-account ref the pool subscription row keys on (^[A-Za-z0-9_-]{1,64}$). Stable across the capture's life so save_llm_pool can fold the consumed blob onto the right account row."
+  },
+  {
+   "fieldname": "bound_agent_url",
+   "fieldtype": "Data",
+   "label": "Bound Agent URL",
+   "read_only": 1,
+   "description": "The workspace connection identity (agent_url) at mint time. consume refuses a capture whose bound value no longer matches the current connection - a workspace reset / reconnect / tenant move between sign-in and save invalidates the capture (review F10 / §10.2), a bench-side complement to the admin operation's authority-generation fence. Empty (onboarding before first provision) matches empty."
+  },
+  {
+   "fieldname": "nonce_hash",
+   "fieldtype": "Data",
+   "label": "Nonce Hash",
+   "read_only": 1,
+   "description": "sha256 of the originating OAuth nonce, for audit correlation only (the nonce itself is single-use and already burned by the time this row exists)."
+  },
+  {
+   "fieldname": "encrypted_oauth_blob",
+   "fieldtype": "Password",
+   "label": "Encrypted OAuth Blob",
+   "description": "The minted openclaw OAuth blob (JSON). A Password field, so it lives ENCRYPTED in Frappe's __Auth store - the table column holds only a mask, never plaintext, and it is never returned by any read endpoint. Erased (set blank -> __Auth row dropped) once consumed into a desired-state save, or after the expiry sweeper has revoked the provider token."
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Expires At",
+   "reqd": 1,
+   "read_only": 1,
+   "description": "When this capture stops being resumable. The sweeper revokes the provider token and erases the ciphertext past this instant."
+  },
+  {
+   "fieldname": "consumed_at",
+   "fieldtype": "Datetime",
+   "label": "Consumed At",
+   "read_only": 1,
+   "description": "Set by the atomic once-only consume claim (a conditional UPDATE ... WHERE consumed_at IS NULL). A non-null value means the blob was adopted into a desired-state save and the ciphertext erased; a second consume of the same capture claims zero rows and is refused."
+  },
+  {
+   "fieldname": "consumed_by_operation",
+   "fieldtype": "Data",
+   "label": "Consumed By Operation",
+   "read_only": 1,
+   "description": "The admin LLM-apply operation id that adopted this capture (audit trail). Recorded after the save returns the durable descriptor."
+  },
+  {
+   "fieldname": "revocation_state",
+   "fieldtype": "Select",
+   "label": "Revocation State",
+   "options": "pending\nrevoked\nunsupported\nfailed\nconsumed",
+   "default": "pending",
+   "read_only": 1,
+   "description": "Lifecycle of the minted provider token: pending (live, resumable) -> consumed (adopted into a save; the container now owns it) | revoked (sweeper revoked it) | unsupported (provider has no revocation endpoint we can call; ciphertext erased, token left to expire) | failed (a transient revoke error; the sweeper retries, then alerts)."
+  },
+  {
+   "fieldname": "revocation_attempts",
+   "fieldtype": "Int",
+   "label": "Revocation Attempts",
+   "default": "0",
+   "read_only": 1,
+   "description": "How many times the sweeper has tried to revoke this token, so a persistently-failing provider is bounded and then alerted rather than retried forever."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-03 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Pending OAuth Capture",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [],
+ "quick_entry": 0,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
