@@ -106,7 +106,12 @@ test("the import detector flags a real import but not a comment mention", () => 
 // Every .vue/.js under src/pages/billing - BillingPage and its components.
 function billingFiles() {
 	return readdirSync(BILLING)
-		.filter((f) => (f.endsWith(".vue") || f.endsWith(".js")) && !f.endsWith(".test.js") && !f.endsWith(".spec.js"))
+		.filter(
+			(f) =>
+				(f.endsWith(".vue") || f.endsWith(".js")) &&
+				!f.endsWith(".test.js") &&
+				!f.endsWith(".spec.js")
+		)
 		.map((f) => join(BILLING, f));
 }
 
