@@ -240,18 +240,52 @@ test("effectiveCode: a flat pending_verification maps onto the contract vocabula
 	);
 });
 
-test("effectiveCode: a flat response carrying handles is a live intent", () => {
+// plan-09 WS7: a pay-page token is the navigate-to-pay capability, and it is
+// decodable (never CLIENT_UNREADABLE).
+test("effectiveCode: a flat token answer is a navigate-to-pay redirect", () => {
+	assert.equal(
+		effectiveCode({ ok: true, code: "", data: { pay_page_token: "tok_1" } }),
+		CODES.PAYMENT_PAGE_REDIRECT
+	);
+});
+
+// A valid token OVERRIDES a bare INTENT_HANDLE_UNAVAILABLE (the read envelope
+// re-serves the live token; carried v4 ruling).
+test("effectiveCode: a token overrides INTENT_HANDLE_UNAVAILABLE", () => {
+	assert.equal(
+		effectiveCode({
+			ok: true,
+			code: CODES.INTENT_HANDLE_UNAVAILABLE,
+			data: { pay_page_token: "tok_1" },
+		}),
+		CODES.PAYMENT_PAGE_REDIRECT
+	);
+	// ...but does NOT override verification, a paid/terminal/reconnect verdict, etc.
+	assert.equal(
+		effectiveCode({
+			ok: true,
+			code: CODES.PAYMENT_ALREADY_ACTIVE,
+			data: { pay_page_token: "tok_1" },
+		}),
+		CODES.PAYMENT_ALREADY_ACTIVE
+	);
+});
+
+// NO FALLBACK (§R P0-4): a pre-cutover admin's raw provider handles with NO token
+// are the honest upgrade-required hold, NOT a live intent to open a sheet on. The
+// bench opens no gateway SDK on its own origin any more.
+test("effectiveCode: raw handles with no token are CLIENT_UPGRADE_REQUIRED, not a live intent", () => {
 	assert.equal(
 		effectiveCode({
 			ok: true,
 			code: "",
 			data: { razorpay_order_id: "order_1", razorpay_key_id: "k" },
 		}),
-		CODES.PAYMENT_CONFIRMATION_PENDING
+		CODES.CLIENT_UPGRADE_REQUIRED
 	);
 	assert.equal(
 		effectiveCode({ ok: true, code: "", data: { subscription_session_id: "s_1" } }),
-		CODES.PAYMENT_CONFIRMATION_PENDING
+		CODES.CLIENT_UPGRADE_REQUIRED
 	);
 });
 

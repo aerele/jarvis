@@ -952,6 +952,73 @@ class TestClientCapabilityAdvert(FrappeTestCase):
 		self.assertEqual(out, legacy_data)
 
 
+class TestPublicOriginSweep(FrappeTestCase):
+	"""plan-09 P1-5: the bench half of the ``get_url`` sweep. The ``frappe_site_url``
+	the bench hands admin must NOT be derivable from the request ``Host`` header (a
+	guest could otherwise choose the tenant's recorded site URL / magic-link base).
+	The fix is ``allow_header_override=False`` on the fallback, with a configured
+	``host_name`` preferred."""
+
+	def tearDown(self):
+		_settings_clear_admin()
+		for k in ("host_name", "hostname", "restart_supervisor_on_update", "restart_systemd_on_update"):
+			frappe.conf.pop(k, None)
+
+	def test_public_origin_prefers_configured_host_name(self):
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
+
+	def test_public_origin_normalizes_a_bare_host_name_to_https(self):
+		frappe.conf["host_name"] = "tenant.example.com"
+		self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
+
+	def test_public_origin_falls_back_with_header_override_OFF(self):
+		# No host_name → the get_url fallback MUST be called with
+		# allow_header_override=False (the load-bearing anti-injection fix).
+		frappe.conf.pop("host_name", None)
+		frappe.conf.pop("hostname", None)
+		with patch("frappe.utils.get_url", return_value="https://fallback.example.com") as gu:
+			out = admin_client._public_origin()
+		gu.assert_called_once_with(allow_header_override=False)
+		self.assertEqual(out, "https://fallback.example.com")
+
+	def test_http_fallback_on_a_production_bench_warns_but_does_not_throw(self):
+		frappe.conf.pop("host_name", None)
+		frappe.conf.pop("hostname", None)
+		frappe.conf["restart_supervisor_on_update"] = 1  # marks a production bench
+		with patch("frappe.utils.get_url", return_value="http://dev.local"):
+			# Must NOT raise (would break signup on an unconfigured bench).
+			out = admin_client._public_origin()
+		self.assertEqual(out, "http://dev.local")
+
+	def test_signup_sends_the_swept_origin_never_the_raw_header(self):
+		_settings_clear_admin()  # guest signup path
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(captured["json"]["frappe_site_url"], "https://tenant.example.com")
+
+	def test_reconnect_and_replacement_seams_use_the_swept_origin(self):
+		_settings_clear_admin()
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		seen = []
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			seen.append(json.get("frappe_site_url"))
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.site_replacement()
+			admin_client.request_account_reconnect("e@x.com", "Co")
+		self.assertEqual(seen, ["https://tenant.example.com", "https://tenant.example.com"])
+
+
 class TestPostUpdateLlmCredsAuthMode(FrappeTestCase):
 	def setUp(self):
 		_settings_for_admin()

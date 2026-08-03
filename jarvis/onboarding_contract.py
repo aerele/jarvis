@@ -25,8 +25,11 @@ The vendored fixture corpus in ``jarvis/tests/fixtures/admin_contract/`` is the
 executable half of this file's claims - see its PROVENANCE.md.
 """
 
+import hashlib
+import hmac
 import json
 import secrets
+from urllib.parse import urlsplit
 
 import frappe
 
@@ -279,6 +282,89 @@ def strip_credentials(data: dict | None) -> dict:
 	if not isinstance(data, dict):
 		return {}
 	return {k: v for k, v in data.items() if k not in _WIRE_STRIP}
+
+
+# --------------------------------------------------------------------------- #
+# plan-09 WS7: the admin-hosted pay page. The bench builds the checkout URL from
+# its OWN configured origin and never navigates to a URL admin supplied; admin's
+# response instead carries a NON-NAVIGABLE origin digest (§R P0-3) the bench
+# cross-checks against its own configured origin before the frontend navigates.
+# --------------------------------------------------------------------------- #
+#: Site-config-only, NO code default (owner decision 3): the fleet origin the
+#: bench top-level-navigates to for checkout. Missing/mismatched = fail closed
+#: with honest copy, never a fallback (owner decision 4).
+CONF_PAY_ORIGIN = "jarvis_pay_origin"
+#: The frozen envelope key admin uses for the pay-page token (brief §Frozen
+#: contract). Its presence is what turns a response into a navigate-to-pay one.
+PAY_PAGE_TOKEN_KEY = "pay_page_token"
+#: Admin's non-navigable attestation of ITS canonical origin: the sha256 hex of
+#: ``https://<host>``. The bench recomputes the digest of its OWN configured
+#: origin and compares — agreement proves both sides mean the same origin without
+#: admin handing the bench anything navigable.
+PAY_ORIGIN_DIGEST_KEY = "pay_origin_digest"
+
+
+def _normalize_pay_origin(raw: str | None) -> str:
+	"""Normalize a configured pay origin to ``https://<host>`` (lowercased host, no
+	path/query/fragment/credentials), or "" when unusable.
+
+	Kept in lockstep with the admin-side ``canonical_pay_origin`` normalization
+	(jarvis_admin_v2 ``billing/checkout/origin.py``) so the two sha256 digests
+	agree byte-for-byte. Deliberately does NOT enforce the registered-host
+	allowlist — that is admin's authority; the bench only needs a canonical string
+	to digest and to build its own URL from."""
+	raw = (raw or "").strip()
+	if not raw:
+		return ""
+	parts = urlsplit(raw)
+	if parts.scheme != "https":
+		return ""
+	if parts.username or parts.password:
+		return ""
+	if parts.path not in ("", "/") or parts.query or parts.fragment:
+		return ""
+	host = (parts.hostname or "").lower()
+	if not host or "." not in host:
+		return ""
+	return f"https://{host}"
+
+
+def pay_origin_digest(origin: str) -> str:
+	"""The sha256 hex of a normalized origin — the shared, non-navigable digest."""
+	return hashlib.sha256((origin or "").encode("utf-8")).hexdigest()
+
+
+def augment_pay_page(data: dict) -> dict:
+	"""Attach the bench's OWN attested pay origin to a token-bearing response.
+
+	BEHAVIOUR-NEUTRAL unless admin sent a ``pay_page_token``: an old admin, or any
+	non-token answer (a coded state, a paid connection payload), is returned
+	untouched. On a token answer it injects two frontend-read fields:
+
+	  * ``pay_origin`` — the bench's configured, normalized ``jarvis_pay_origin``
+	    (``https://<host>``), or "" when unset/invalid. The frontend builds
+	    ``{pay_origin}/jarvis-checkout#t=<token>`` from this; an empty value fails
+	    the pay step CLOSED with honest copy (owner decisions 3/4 — NO default,
+	    NO fallback).
+	  * ``pay_origin_attested`` — True iff ``pay_origin`` is set AND its sha256
+	    digest equals admin's non-navigable ``pay_origin_digest`` (§R P0-3). The
+	    frontend refuses to navigate unless this is True, so a config split-brain
+	    (bench pointed at one origin, admin minted a token for another) fails
+	    closed instead of sending the customer to the wrong host.
+
+	The bench NEVER navigates to a URL from admin's body: it builds the URL from
+	its own config, and this is only the cross-check that admin agrees."""
+	if not isinstance(data, dict) or not data.get(PAY_PAGE_TOKEN_KEY):
+		return data
+	origin = _normalize_pay_origin(frappe.conf.get(CONF_PAY_ORIGIN))
+	admin_digest = (data.get(PAY_ORIGIN_DIGEST_KEY) or "").strip().lower()
+	attested = (
+		bool(origin) and bool(admin_digest) and hmac.compare_digest(pay_origin_digest(origin), admin_digest)
+	)
+	out = dict(data)
+	out["pay_origin"] = origin
+	out["pay_origin_attested"] = attested
+	return out
 
 
 #: One Error Log per hour, not one per poll, for the deploy window below.
@@ -646,7 +732,7 @@ def success(data: dict, *, context: dict | None = None) -> dict:
 	return {
 		"ok": True,
 		"contract_version": _int_or(data.get("contract_version"), CONTRACT_VERSION),
-		"data": strip_credentials(data),
+		"data": augment_pay_page(strip_credentials(data)),
 		"context": wire(context),
 	}
 

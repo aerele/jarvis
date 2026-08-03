@@ -190,6 +190,54 @@ def _client_capabilities() -> dict:
 	return {"pay_page": PAY_PAGE_CAPABILITY, "provider_shapes": list(PROVIDER_SHAPES)}
 
 
+def _is_production_bench() -> bool:
+	"""True on a bench booted in production mode (supervisor/systemd managed). Used
+	only to decide whether an ``http://`` public origin is a misconfiguration worth
+	warning about — the injection fix below is identical everywhere. Mirrors the
+	admin-side ``origin._is_production_site`` (jarvis_admin_v2 WS5)."""
+	return bool(
+		frappe.conf.get("restart_supervisor_on_update") or frappe.conf.get("restart_systemd_on_update")
+	)
+
+
+def _public_origin() -> str:
+	"""A public site origin for the ``frappe_site_url`` this bench hands admin.
+
+	The bench half of the plan-09 P1-5 ``get_url`` sweep. A bare
+	``frappe.utils.get_url()`` derives the host from the request ``Host`` header
+	when ``host_name`` is unset (``get_url``'s own ``allow_header_override`` path —
+	proven reachable on this very environment), so a guest spoofing ``Host:`` on a
+	signup / reconnect / replacement-lookup POST could choose the
+	``frappe_site_url`` admin records for this tenant and the base of the magic
+	link admin then mails. The load-bearing fix is ``allow_header_override=False``:
+	it kills that injection vector.
+
+	Resolution order mirrors the admin-side ``admin_public_origin`` (jarvis_admin_v2
+	WS5): a configured ``host_name`` (validated https) wins; otherwise the site
+	fallback from ``get_url`` with header override OFF. An ``http://`` base on a
+	production bench is a misconfiguration — but it is caught at DEPLOY time by the
+	readiness gate, NOT by throwing here: throwing would break signup on any bench
+	where ``host_name`` is unset (every dev bench), and the injection vector is
+	already closed regardless of scheme."""
+	from urllib.parse import urlsplit
+
+	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
+	if host_name:
+		if not host_name.startswith(("http://", "https://")):
+			host_name = "https://" + host_name
+		parts = urlsplit(host_name)
+		if parts.scheme == "https" and parts.hostname and "." in parts.hostname:
+			return f"https://{parts.hostname.lower()}"
+
+	base = (frappe.utils.get_url(allow_header_override=False) or "").rstrip("/")
+	if base.startswith("http://") and _is_production_bench():
+		frappe.logger("jarvis.onboarding").warning(
+			"frappe_site_url resolved to an http base on a production bench; "
+			"set host_name to an https origin (deploy readiness gates this)"
+		)
+	return base
+
+
 def signup(
 	email: str,
 	company_name: str,
@@ -222,7 +270,7 @@ def signup(
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
-		"frappe_site_url": frappe.utils.get_url(),
+		"frappe_site_url": _public_origin(),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
 		"client_capabilities": _client_capabilities(),
 	}
@@ -279,7 +327,7 @@ def site_replacement() -> dict:
 	Returns ``{replaced, at, moved_to}``; treat any failure as "not replaced"."""
 	return _post_guest(
 		path=_m("billing.reconnect.check_site_replaced"),
-		body={"frappe_site_url": frappe.utils.get_url()},
+		body={"frappe_site_url": _public_origin()},
 		timeout_s=8,
 	)
 
@@ -292,7 +340,7 @@ def request_account_reconnect(email: str, company_name: str = "") -> dict:
 	when one email owns several company accounts (multi-company identity)."""
 	return _post_guest(
 		path=_m("billing.reconnect.request_account_reconnect"),
-		body={"email": email, "company_name": company_name, "frappe_site_url": frappe.utils.get_url()},
+		body={"email": email, "company_name": company_name, "frappe_site_url": _public_origin()},
 	)
 
 

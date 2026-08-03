@@ -1,5 +1,13 @@
 """Landing pad for a payment gateway's redirect back into the wizard.
 
+HISTORICAL / pre-cutover route (plan-09 §0.7, P0-8). After the WS7 cutover the
+tenant bench no longer initiates any gateway checkout on its own origin: all
+checkout is top-level navigation to the admin-hosted pay page
+(``{jarvis_pay_origin}/jarvis-checkout``), and a Cashfree mandate now returns
+cross-site to admin's ``/jarvis-checkout/return`` — never here. This page stays
+alive for the lifetime of mandates authorised BEFORE cutover (a rollback must
+keep return routes serving), which is why it is not removed.
+
 Exists because of one browser rule. Frappe sets its session cookie with
 ``samesite="Lax"`` (frappe/auth.py), and Lax withholds the cookie on a
 CROSS-SITE POST while still sending it on a top-level GET. Cashfree returns
@@ -16,8 +24,8 @@ renders for the logged-in customer exactly as it would have.
 
 Deliberately NOT carrying the gateway's status through: it is unverified client
 input, and confirmation is a server-side fetch either way. The wizard resumes by
-asking admin what actually happened (reconcileMidFlightSignup -> finish_payment),
-which is the only account of the payment we trust.
+asking admin what actually happened (reconcileMidFlightSignup -> flow.hydrate()
+over get_onboarding_state), which is the only account of the payment we trust.
 """
 
 import frappe
