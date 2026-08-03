@@ -451,6 +451,13 @@ this table or a deviation of its own.
 submitted with an empty value compiles to `= 0` rather than being rejected. That
 is what `db_query` does (`value = flt(f.value)`), and it is left at parity.
 
+Concretely, `_as_number` returns `0` for **both** a blank/whitespace string
+(`""`, `"  "`) **and** `None` (`if value is None or (isinstance(value, str) and
+not value.strip()): return 0`). This is deliberate parity, not an oversight: an
+earlier review expected `None`/`""` to be *rejected*, but `flt(None)` is `0.0`
+just as `flt("")` is, so rejecting them would be the deviation — the code is
+right, and it says `0` for the empty numeric on purpose.
+
 The temporal families are **not** left at parity. Frappe's date helpers open with
 `if not string_date:` and return *today/now*, so **falsiness is the only thing
 they check** — `None`, `""`, `0`, `False`, `[]` and `{}` all mean "today" to

@@ -667,6 +667,56 @@ describe("rolled-back view (the flag contract, M1)", () => {
 		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
 	});
 
+	it("emits ZERO filters_v2 for a quick filter clicked WHILE the mount probe is in flight (D5)", async () => {
+		// The prior test used initialFilters, which takes the AWAIT-at-mount branch —
+		// so it passed even with `await ensureCapability()` deleted from
+		// ensureQuickCapability. This is the branch that actually exercises the guard:
+		// a declaredRoot list with NO initial filter only WARMS the probe (no await),
+		// and a quick filter clicked before it resolves must still wait for it.
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		let resolveCap;
+		const fetchCapabilities = vi.fn(() => new Promise((r) => (resolveCap = r)));
+		const { api } = host({
+			fetchFn,
+			storageKey: "cap-inflight",
+			viewKey: "macros",
+			rootDoctype: "Jarvis Macro", // declaredRoot: a quick filter can become v2 pre-schema
+			quickClauses: { enabled: "enabled" },
+			// no initialFilters, no URL seed → emitsAtMount is false → probe only WARMED
+			fetchCapabilities,
+		});
+		await nextTick(); // onMounted has warmed the probe; it is still unresolved
+		// The user clicks a quick filter WHILE the probe is in flight.
+		const pending = api.setFilter("enabled", "1");
+		resolveCap({ macros: false }); // the probe now resolves: view is rolled back
+		await pending;
+		await flushPromises();
+		// The clause never reached the wire on filters_v2 — on any call.
+		for (const call of fetchFn.mock.calls) expect(call[0].filters_v2).toEqual([]);
+		// legacy transport still carried the quick filter, so the list is not broken
+		expect(fetchFn.mock.calls.at(-1)[0].filters).toEqual({ enabled: "1" });
+	});
+
+	it("a lazy view (no declaredRoot/URL seed) still warms the probe at mount, so setClauses emits ZERO filters_v2 (D11)", async () => {
+		// A lazy view — no declaredRoot, no URL seed, no initial quick filter — used to
+		// run NO capability probe at mount, so setClauses (the panel's public entry)
+		// could emit a clause on a rolled-back view. The mount now WARMS the probe for
+		// every view, so by the time the panel commits a clause the flag is known.
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		const fetchCapabilities = vi.fn(async () => ({ macros: false }));
+		const { api } = host({
+			fetchFn,
+			storageKey: "d11",
+			viewKey: "macros",
+			fetchCapabilities,
+		});
+		await flushPromises();
+		expect(fetchCapabilities).toHaveBeenCalled(); // warmed at mount even though nothing emitted
+		await api.setClauses([clause(DESCRIPTION, "x")]);
+		await flushPromises();
+		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
+	});
+
 	it("does not apply or count a shared link's filters when off, and says so (M1.4)", async () => {
 		const fetchFn = vi.fn(async () => ({ rows: [{ name: "a" }], total: 1 }));
 		const fetchCapabilities = vi.fn(async () => ({ macros: false }));

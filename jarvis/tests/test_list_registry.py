@@ -131,6 +131,13 @@ _LIST_NAME_SUFFIXES = (
 	"_records",
 	"_entries",
 	"_results",
+	# The house convention for a paginated list getter is `list_<thing>_page`; the
+	# `list_` prefix already catches those, but a collection endpoint spelled
+	# `get_<thing>_page` (or any `*_page` that is NOT list-prefixed) would slip the
+	# net, so the suffix is swept too. This also pulls in the single-document
+	# `*_page` CRUD verbs (e.g. `get_wiki_page`), which are then argued as non-lists
+	# in `NON_LIST_ENDPOINTS` — exactly the "write down what it is" the audit wants.
+	"_page",
 )
 #: Whole-word tokens (split on `_`) that mark a collection: `search_records`,
 #: `get_activity_feed`, `fetch_rows`.

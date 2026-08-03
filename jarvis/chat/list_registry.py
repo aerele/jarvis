@@ -516,6 +516,16 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 		"global command-palette search across entities — a ranked hit list, not a "
 		"single-DocType browsable list view"
 	),
+	# Single-document `*_page` operations. Collection-shaped ONLY by the `_page`
+	# suffix the S7 sweep now recognises; each acts on ONE wiki page by slug and has
+	# no pageable row collection of its own. Registered so the suffix widening does
+	# not let a genuine `get_<thing>_page` list slip past unargued.
+	"jarvis.chat.wiki.get_wiki_page": "reads ONE wiki page by slug — a document getter, not a list",
+	"jarvis.chat.wiki.create_wiki_page": "creates ONE wiki page — a mutation, not a list",
+	"jarvis.chat.wiki.save_wiki_page": "saves ONE wiki page — a mutation, not a list",
+	"jarvis.chat.wiki.archive_wiki_page": "archives ONE wiki page by slug — a mutation, not a list",
+	"jarvis.chat.wiki.delete_wiki_page": "deletes ONE wiki page by slug — a mutation, not a list",
+	"jarvis.chat.wiki.restore_wiki_page": "restores ONE wiki page by slug — a mutation, not a list",
 	# Per-document detail feeds and aggregates: no independent, pageable row
 	# collection of their own.
 	"jarvis.chat.wiki.get_wiki_graph_history": (

@@ -67,8 +67,12 @@ from frappe import _
 from jarvis.chat import list_registry
 from jarvis.permissions import require_jarvis_user
 
-#: Bumped when the wire shape of the schema or a clause changes.
-CONTRACT_VERSION = 1
+#: Bumped when the wire shape of the schema or a clause changes. Also bumped to
+#: DISCARD schemas cached by an older build: v1 cached child entries whose
+#: ``parentfields`` list could be empty, which the compiler turned into a
+#: ``parentfield IN ()`` SQL syntax error on a restart-only deploy. v2 rebuilds
+#: the cache cold, and the compiler now fails closed on such an entry regardless.
+CONTRACT_VERSION = 2
 
 # --------------------------------------------------------------------------- #
 # Limits (plan §9). These bound CLIENT input only — a server-authored predicate
@@ -920,17 +924,25 @@ def _disabled_views() -> set[str]:
 	"""View keys rolled back to legacy transport — a KILL SWITCH that fails CLOSED.
 
 	The valid shapes are a list/tuple of view-key strings, a single view-key
-	string, or absent/empty (⇒ nothing disabled, every migrated view ON). ANYTHING
-	else is a misconfiguration, and a kill switch must never fail OPEN on one: the
-	old code did ``{str(v) for v in off}`` inside a ``try``, so
+	string, or absent/empty/off (⇒ nothing disabled, every migrated view ON).
+	``False``/``0`` count as "off": for a key named ``*_off`` they are the most
+	natural spelling of "kill switch not engaged", so they must read as "disable
+	nothing", never fall through to fail-closed. ANYTHING else is a
+	misconfiguration, and a kill switch must never fail OPEN on one: the old code
+	did ``{str(v) for v in off}`` inside a ``try``, so
 	``"jarvis_list_filters_v2_off": true`` (a bool) raised ``TypeError`` and fell
 	through to ``set()`` — silently re-enabling every view the operator meant to
-	turn off. Now a malformed value disables EVERY migrated view and logs once,
-	loudly. Over-disabling is the safe direction for a rollback switch; a typo can
-	never silently re-enable.
+	turn off. Now a malformed value (``True``/``1``, a dict, a mixed list) disables
+	EVERY migrated view and logs once, loudly. Over-disabling is the safe direction
+	for a rollback switch; a typo can never silently re-enable.
 	"""
 	off = frappe.conf.get(CONF_KEY_V2_OFF)
-	if off in (None, "", [], ()):
+	# ``False``/``0`` are listed explicitly: they are NOT equal to any of
+	# ``None``/``""``/``[]``/``()`` under ``==``, so without them a ``false`` or
+	# ``0`` kill switch would fall through to the fail-closed branch and silently
+	# disable every migrated view. ``True``/``1`` deliberately do NOT match here —
+	# they are ambiguous junk and must fail closed.
+	if off in (None, "", [], (), False, 0):
 		return set()
 	if isinstance(off, str):
 		return {off} if off else set()
@@ -1546,8 +1558,17 @@ def compile_validated(root_doctype: str, clauses: list[_Clause], ref: str) -> Co
 			dt = clause.entry["doctype"]
 			parentfields_by_dt[dt] = tuple(sorted(clause.entry.get("parentfields") or ()))
 	for dt, alias in alias_map.items():
+		pf = parentfields_by_dt.get(dt, ())
+		if not pf:
+			# A child clause must carry at least one readable parent container.
+			# Binding an empty tuple would render ``parentfield IN ()`` — a hard
+			# MariaDB syntax error (pymysql prints the empty tuple literally), so a
+			# stale pre-v2 cached schema entry (no ``parentfields``) would otherwise
+			# 500 every child-table filter for up to SCHEMA_CACHE_TTL after a
+			# restart-only deploy. Fail closed with the stable invalid-field code.
+			_fail(ERR_UNKNOWN_FIELD, _("That field cannot be filtered on this list."))
 		compiled.params[f"{alias}_pt"] = root_doctype
-		compiled.params[f"{alias}_pf"] = parentfields_by_dt.get(dt, ())
+		compiled.params[f"{alias}_pf"] = pf
 	for clause in clauses:
 		entry = clause.entry
 		if entry["is_child"]:
