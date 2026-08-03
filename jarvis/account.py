@@ -76,6 +76,24 @@ def _admin_chat_gate() -> dict:
 	release_notice.persist(conn.get("release_notice") or {})
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
+		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver
+		# found the customer's serving row ambiguous or the pointer invalid, so
+		# there is NO single container we may serve. Admin already returned the
+		# safe TENANT_AUTHORITY_REPAIR_REQUIRED envelope (chat_readiness =
+		# "SupportRequired", every self-service action withdrawn) and paged ops.
+		# The bench must surface that as its own honest not-ready state: NOT
+		# "container_provisioning" (which invites the customer to keep waiting for
+		# a container that isn't coming) and NOT "subscription_suspended" (which
+		# offers a Renew that cannot help and could double-charge). The admin's
+		# own sentence - "your payment is safe, please don't retry" - rides
+		# ``detail`` and is the customer-facing copy.
+		if conn["chat_readiness"] == "SupportRequired":
+			return {
+				"ready": False,
+				"reason": "authority_repair_required",
+				"billing_notice": {},
+				"detail": conn.get("chat_readiness_reason") or "",
+			}
 		suspended = conn["chat_readiness"] == "Suspended"
 		return {
 			"ready": False,
@@ -168,6 +186,11 @@ def is_ready_for_chat() -> dict:
 	  the container isn't chat-ready yet (chat_readiness != "Ready"). Set only by
 	  the final ``_admin_chat_gate`` at the managed ready-exits; fail-open and
 	  v1-tolerant (see ``_admin_chat_gate``).
+	- ``"authority_repair_required"`` - admin reports an authority-repair incident
+	  (chat_readiness == "SupportRequired"): the customer's serving container is
+	  ambiguous/invalid and support has been paged. A safe blocked state - the
+	  customer must NOT retry payment or reconnect; ``detail`` carries admin's own
+	  reassurance (see ``_admin_chat_gate``, review plan 04 P0-6).
 	- ``None`` when ``ready`` is True.
 	"""
 	settings = frappe.get_single("Jarvis Settings")

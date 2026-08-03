@@ -108,10 +108,40 @@ def write_connection(data: dict) -> None:
 		s.db_set("jarvis_admin_customer_email", data["customer"])
 	if data.get("customer_password"):
 		set_settings_password(s, "jarvis_admin_customer_password", data["customer_password"])
+	# Connection block, guarded by the monotonic tenant-authority generation
+	# (review plan 04 P0-5). A slow poll carrying an OLDER authority generation
+	# than the one already accepted must NOT overwrite the connection, or a
+	# customer whose container just moved/repaired is silently regressed onto the
+	# old one. guard() advances the stored (generation, handle) only on ACCEPT, so
+	# the secrets and the authority receipt move together. Credential fields above
+	# are unguarded: they carry no generation and are never part of the race.
 	if data.get("agent_url"):
-		s.db_set("agent_url", data["agent_url"])
-	if data.get("agent_token"):
-		set_settings_password(s, "agent_token", data["agent_token"])
+		from jarvis import tenant_authority
+
+		write_conn = True
+		try:
+			outcome = tenant_authority.guard(s, data)
+		except tenant_authority.AuthorityInvariantError:
+			# Same generation, different serving container: never resolve by
+			# guessing. HOLD the current connection and let the next poll retry
+			# ("hold + re-poll"), never downgrade onto the other container. Recorded
+			# once (deduped) so a divergence that does not clear stays visible.
+			write_conn = False
+			tenant_authority.log_invariant_once(
+				data.get(tenant_authority.GEN_FIELD),
+				s.get(tenant_authority.HANDLE_FIELD),
+				data.get(tenant_authority.HANDLE_FIELD),
+			)
+		else:
+			if outcome == tenant_authority.REJECT:
+				write_conn = False
+				tenant_authority.log_stale_once(
+					s.get(tenant_authority.GEN_FIELD), data.get(tenant_authority.GEN_FIELD)
+				)
+		if write_conn:
+			s.db_set("agent_url", data["agent_url"])
+			if data.get("agent_token"):
+				set_settings_password(s, "agent_token", data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them.
 	if any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password")):
@@ -641,6 +671,15 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	data = _surface(admin_client.get_reconnect_state, request_id, code) or {}
 	if data.get("status") != "ready":
 		return {"status": data.get("status") or "expired"}
+	# A reconnect deliberately re-points this bench at an existing account's
+	# container, whose authority generation is unrelated to whatever this site
+	# last held. Forget the accepted (generation, handle) BEFORE riding
+	# sync_connection, or a stored generation higher than the reconnected
+	# account's would reject its connection as "older" and strand the site
+	# (review plan 04 P0-5).
+	from jarvis import tenant_authority
+
+	tenant_authority.clear(frappe.get_single("Jarvis Settings"))
 	write_connection(
 		{
 			"api_key": data.get("api_key", ""),
@@ -840,12 +879,17 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	them) the LLM config + ``*_synced_at`` markers — the control plane carries
 	those onto the new container; clearing them would eject the customer into
 	the setup wizard."""
+	from jarvis import tenant_authority
 	from jarvis._password_utils import clear_settings_password
 	from jarvis.account import _bust_chat_gate
 	from jarvis.chat.device import clear_credentials
 
 	settings.db_set("agent_url", "")
 	clear_settings_password(settings, "agent_token")
+	# The rebuilt container is a new authority generation; forget the accepted
+	# (generation, handle) so the poll that re-attaches it is not rejected as
+	# "older" than the pre-reset generation (review plan 04 P0-5).
+	tenant_authority.clear(settings)
 	clear_credentials()
 	settings.db_set(
 		"last_sync_status", _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS

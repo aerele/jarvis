@@ -57,6 +57,10 @@ CONNECTION = ResetSpec(
 		# lets a reset bench still authenticate as the previous customer.
 		"jarvis_admin_customer_email",
 		"agent_url",
+		# The opaque handle of the last accepted authority-fenced connection
+		# (review plan 04 P0-5). A reset re-points this bench at a fresh tenancy,
+		# so the previous handle must not linger and trip the identity check.
+		"tenant_authority_handle",
 		"chat_device_id",
 		"chat_device_public_key",
 		# Per-push statuses that otherwise read as "already sent" on a fresh site
@@ -90,7 +94,15 @@ CONNECTION = ResetSpec(
 		"learned_skills_synced_at",
 		"wiki_mirror_last_synced_at",
 	),
-	zero=("agent_catalog_dirty", "agent_catalog_version", "release_notice_active"),
+	zero=(
+		"agent_catalog_dirty",
+		"agent_catalog_version",
+		"release_notice_active",
+		# Forget the accepted authority generation so the fresh tenancy's first
+		# connection is accepted on its own terms, not rejected as "older" than
+		# the previous tenancy's generation (review plan 04 P0-5).
+		"tenant_authority_generation",
+	),
 )
 
 FULL = CONNECTION | LLM

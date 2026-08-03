@@ -129,10 +129,18 @@ export async function billingNoticeOf() {
 // dedicated banner was built for. One reason, one accessor: this one answers
 // "what did the backend say", needsLlmConnection() below answers "is there an
 // AI attached at all".
+// "authority_repair_required" (review plan 04 P0-6) shares this accessor and the
+// same generic, CTA-less "Chat may not work yet" banner: admin found the
+// customer's serving container ambiguous/invalid and paged support, so the ONLY
+// safe thing this UI can do is show admin's own reassurance ("your payment is
+// safe, please don't retry") - never a Renew or Reconnect action, both of which
+// could make it worse. Like container_provisioning it carries the backend's own
+// `detail`, so it belongs here rather than on any billing/AI-connect banner.
 export async function readinessDetailOf() {
 	const r = await checkReady();
 	if (!r || r.ready) return "";
-	if (r.reason === "container_provisioning") return r.detail || "";
+	if (r.reason === "container_provisioning" || r.reason === "authority_repair_required")
+		return r.detail || "";
 	return "";
 }
 
