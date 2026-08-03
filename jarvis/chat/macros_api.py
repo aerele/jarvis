@@ -188,8 +188,8 @@ def list_macros_page(
 	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _MACROS_SORTABLE, "macro_name", "asc")
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
+	rows = list_filters.bounded_sql(
 		f"""SELECT name, macro_name, description, enabled, stop_on_error,
 		schedule_enabled, schedule_frequency, schedule_time, next_run_at,
 		last_run_at, modified, merge_status,

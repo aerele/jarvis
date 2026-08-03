@@ -170,6 +170,7 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.dashboards_api.list_dashboards_page",),
 		surface="frontend/src/pages/dashboards/SavedDashboardsTab.vue",
 		wave=1,
+		status=MIGRATED,
 		curated_filters={"scope": "scope", "dashboard_type": "dashboard_type", "owner": "owner"},
 	),
 	ListView(
@@ -180,6 +181,7 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.wiki.list_wiki_pages_page",),
 		surface="frontend/src/pages/skills/WikiTab.vue",
 		wave=1,
+		status=MIGRATED,
 		curated_filters={
 			"page_type": "page_type",
 			"scope_filter": None,
@@ -207,6 +209,7 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.triggers_api.list_triggers_page",),
 		surface="frontend/src/pages/triggers/TriggersListPane.vue",
 		wave=1,
+		status=MIGRATED,
 		curated_filters={
 			"enabled": "enabled",
 			"action_type": "action_type",

@@ -5,14 +5,19 @@
 // the fetchFn. Wiki wrappers used to live in src/api/voice.js; voice.js
 // re-exports `dismissWikiNudge` so ChatView's namespace import keeps working.
 import { call } from "frappe-ui";
+import { encodeFiltersV2 } from "./listPageArgs";
 
 const WK = "jarvis.chat.wiki.";
 
 // Envelope {rows, total, has_more, page, page_length}; rows carry scope +
 // stale/contradiction flags. scope_filter: all | org | role | mine.
 // attention=1 keeps only pages needing review (conflicting or stale).
-export const listWikiPagesPage = (p = {}) =>
-	call(WK + "list_wiki_pages_page", {
+export const listWikiPagesPage = (p = {}) => {
+	// Wiki keeps its bespoke named-parameter shape (page-numbered, no JSON
+	// `filters` blob), so it can't use `listPageArgs`, but it uses the SAME shared
+	// `encodeFiltersV2` for the filters_v2 half (plan 08 P0-01) — additive, only
+	// when there are clauses — instead of an inline copy that could drift.
+	const args = {
 		search: p.search || "",
 		page_type: p.page_type || "",
 		scope_filter: p.scope_filter || "all",
@@ -20,7 +25,9 @@ export const listWikiPagesPage = (p = {}) =>
 		archived: p.archived ? 1 : 0,
 		page: p.page || 1,
 		page_length: p.page_length || 20,
-	});
+	};
+	return call(WK + "list_wiki_pages_page", encodeFiltersV2(args, p));
+};
 
 // {creatable_scopes, manageable_roles, is_sm, knowledge_language,
 //  wiki_lint_last_run_at, wiki_lint_summary} - the caller's capabilities +

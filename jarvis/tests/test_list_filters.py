@@ -421,10 +421,20 @@ class TestCatalogShape(unittest.TestCase):
 		self.assertIn(("Jarvis Macro Step", "label"), child)
 		self.assertIn(("Jarvis Macro Step", "prompt"), child)
 
-	def test_child_fields_are_labelled_the_frappe_way(self):
+	def test_child_fields_are_labelled_by_their_parents_table_field(self):
+		"""Deviation D15: the PARENT's word for the table, not the child DocType.
+
+		Frappe (and plan §4.3) writes "Prompt (Jarvis Macro Step)". We write
+		"Prompt (Steps)" — the label on the form the user has actually seen. The
+		identity is unchanged: a child field is still (DocType, fieldname), so
+		nothing about compilation or the wire depends on this string.
+		"""
 		schema = get_schema("macros", user=USER_A)
+		table_label = frappe.get_meta(MACRO).get_field("steps").label
 		entry = _entry(schema, "Jarvis Macro Step", "label")
-		self.assertTrue(entry["label"].endswith("(Jarvis Macro Step)"), entry["label"])
+		self.assertTrue(entry["label"].endswith(f"({table_label})"), entry["label"])
+		self.assertNotIn("Jarvis Macro Step", entry["label"])
+		self.assertEqual(entry["group"], table_label)
 
 	def test_operator_vocabulary_matches_frappe_per_family(self):
 		schema = get_schema("macros", user=USER_A)
@@ -709,16 +719,30 @@ class TestFailsClosed(unittest.TestCase):
 				)
 
 	def test_schema_endpoint_refuses_a_registered_but_unmigrated_view(self):
+		"""A view whose endpoint cannot yet take the clauses gets no schema.
+
+		The example is picked from the registry rather than named, because each
+		migration wave retires whichever view was hardcoded here — this test used
+		to name ``triggers`` and went green-but-meaningless the moment triggers
+		migrated. Reading the registry keeps it honest for every later wave.
+		"""
+		from jarvis.chat import list_registry
 		from jarvis.chat.list_filters import get_list_filter_schema
+
+		pending = [v for v in list_registry.document_list_views() if v.status == list_registry.PENDING]
+		if not pending:
+			self.skipTest("every document list has migrated — this guard has no subject left")
 
 		orig = frappe.session.user
 		frappe.set_user(USER_SM)
 		try:
-			res = get_list_filter_schema("triggers")
+			for view in pending:
+				with self.subTest(view=view.view_key):
+					res = get_list_filter_schema(view.view_key)
+					self.assertFalse(res["ok"], f"{view.view_key} is PENDING but answered with a schema")
+					self.assertEqual(res["error"]["code"], ERR_VIEW_NOT_FILTERABLE)
 		finally:
 			frappe.set_user(orig)
-		self.assertFalse(res["ok"])
-		self.assertEqual(res["error"]["code"], ERR_VIEW_NOT_FILTERABLE)
 
 	def test_password_fieldtype_is_never_offered(self):
 		# Deviation D2. Proven structurally: no catalog on any registered

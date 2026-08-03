@@ -90,6 +90,23 @@ MAX_PAGE_LENGTH = 100
 #: (role grants, DocPerm edits made outside the desk).
 SCHEMA_CACHE_TTL = 300
 
+#: Wall-clock ceiling, in seconds, for ONE compiled list statement.
+#:
+#: Full-metadata filtering is the point of plan 08, so the expensive capabilities
+#: stay: a ``like`` over a Text body is the most valuable filter the wiki has, and
+#: it cannot use an index. What is bounded is the COST, not the capability — this
+#: catches a Text scan on a huge table, and equally an unindexed combination some
+#: later wave invents, without anyone having to predict which.
+#:
+#: The number: a measured Text ``like`` scan runs ~156ms over 5k rows, so a
+#: linear extrapolation puts 10s at roughly 320k rows on that same shape. No
+#: tenant is near that, which is the property wanted — in normal use this never
+#: fires, and it still stops a pathological query from occupying a worker
+#: indefinitely (``max_statement_time`` is 0 on this bench, i.e. no ceiling at
+#: all today). NOTE it is per STATEMENT, and a list request runs two (COUNT then
+#: SELECT), so the worst case per request is ~2x this.
+STATEMENT_TIMEOUT_SECONDS = 10
+
 # --------------------------------------------------------------------------- #
 # Stable error codes (plan §6.3 / §11.3: every rejection is coded, and every
 # unknown thing fails CLOSED — we never silently strip a clause the way
@@ -116,6 +133,11 @@ ERR_VALUE_TOO_LONG = "list_filter_value_too_long"
 #: from "your clause is wrong": it is OUR fault, and it fails closed rather than
 #: reaching the client as a raw 500 with a traceback-shaped message.
 ERR_SCHEMA_UNAVAILABLE = "list_filter_schema_unavailable"
+#: The filter was VALID and simply cost too much to run (see :func:`bounded_sql`).
+#: Deliberately its own code: "narrow this" is a different instruction to the user
+#: than "fix this", and a panel that conflated them would send someone hunting for
+#: a mistake they did not make.
+ERR_QUERY_TOO_EXPENSIVE = "list_filter_query_too_expensive"
 
 #: A malformed payload is a bad REQUEST; everything else is a well-formed request
 #: carrying an invalid filter, which is Frappe's ValidationError status; and an
@@ -352,6 +374,12 @@ _STANDARD_FIELDS: tuple[dict, ...] = (
 #: (C08-2), so we must not offer one that has no column.
 _OPTIONAL_COLUMNS = frozenset({"_user_tags", "_comments", "_assign", "_liked_by"})
 
+#: Picker section for the generic standard/meta fields (ID, Created By, Tags,
+#: Comments…). They are filterable and stay filterable — they are just not what
+#: someone is looking for when they open the picker, so they get their own
+#: section rather than a share of the alphabet.
+STANDARD_FIELD_GROUP = "General"
+
 #: Stored as a JSON array (``["a@x.com", "b@x.com"]``), so `=` can never hit.
 #: Frappe special-cases their DEFAULT to `like` but still offers `=`/`in`; we
 #: restrict them to the like family so the schema cannot promise a match that is
@@ -492,6 +520,7 @@ def _entry(
 	is_standard: bool = False,
 	is_child: bool = False,
 	is_large_table: bool = False,
+	group: str = "",
 	parentfields: tuple[str, ...] = (),
 ) -> dict:
 	fieldname = df["fieldname"]
@@ -507,6 +536,13 @@ def _entry(
 		"options": options,
 		"is_standard": bool(is_standard),
 		"is_child": bool(is_child),
+		# What the picker should file this field under. For a child field that is
+		# the PARENT's Table-field label ("Sources"), which is the word on the
+		# form the user actually knows — the raw child DocType name
+		# ("Jarvis Dashboard Source") is an implementation detail they have never
+		# seen. Standard/meta fields get their own group so they can be shown as a
+		# distinct section instead of interleaved with the doctype's own fields.
+		"group": group,
 		"json_array": fieldname in _JSON_ARRAY_FIELDS,
 		"default_operator": default_operator(fieldname, fieldtype, is_large_table),
 		"operators": list(allowed_operators(fieldname, fieldtype)),
@@ -563,6 +599,9 @@ def build_field_catalog(
 		return []
 
 	large = _is_large_table(meta)
+	# The doctype's own fields are filed under the LIST's name when the view
+	# supplies one ("Skills"), which is what the user sees at the top of the page.
+	own_group = (view.label if view is not None and view.label else None) or _(root_doctype)
 	columns = _table_columns(root_doctype)
 	submittable = bool(getattr(meta, "is_submittable", 0))
 
@@ -587,6 +626,7 @@ def build_field_catalog(
 				label=_(std["label"]),
 				is_standard=True,
 				is_large_table=large,
+				group=STANDARD_FIELD_GROUP,
 			)
 		)
 
@@ -626,6 +666,7 @@ def build_field_catalog(
 				{"fieldname": fieldname, "fieldtype": df.fieldtype, "options": df.options},
 				label=_(df.label or fieldname),
 				is_large_table=large,
+				group=own_group,
 			)
 		)
 
@@ -645,6 +686,9 @@ def build_field_catalog(
 	children: list[dict] = []
 	for container in child_containers:
 		child_dt = container.options
+		# The parent's own word for this table ("Sources"), falling back to the
+		# child DocType only when the Table field carries no label.
+		container_label = _(container.label) if container.label else _(child_dt)
 		# No swallow: a Table pointing at a missing child DocType is a broken
 		# schema, and silently dropping its fields would be a silent narrowing.
 		child_meta = frappe.get_meta(child_dt)
@@ -679,15 +723,22 @@ def build_field_catalog(
 				_entry(
 					child_dt,
 					{"fieldname": fieldname, "fieldtype": df.fieldtype, "options": df.options},
-					label=f"{_(df.label or fieldname)} ({_(child_dt)})",
+					label=f"{_(df.label or fieldname)} ({container_label})",
 					is_child=True,
 					is_large_table=large,
+					group=container_label,
 					parentfields=tuple(readable_parentfields.get(child_dt, ())),
 				)
 			)
 
-	main.sort(key=lambda e: (e["label"], e["doctype"], e["fieldname"]))
-	children.sort(key=lambda e: (e["label"], e["doctype"], e["fieldname"]))
+	# Order: the doctype's OWN fields, then the 11 generic standard/meta fields,
+	# then child tables. Sorting the whole main block alphabetically put a third
+	# of a 27-field list — Frappe plumbing like "Assigned To", "Comments",
+	# "Liked By" — in between "Scope" and "Title", which is the opposite of how
+	# anyone looks for a field. `is_standard` is the stable marker; within each
+	# group it stays alphabetical.
+	main.sort(key=lambda e: (bool(e["is_standard"]), e["label"], e["doctype"], e["fieldname"]))
+	children.sort(key=lambda e: (e["group"], e["label"], e["doctype"], e["fieldname"]))
 	return main + children
 
 
@@ -1680,6 +1731,96 @@ class ListFilterQuery:
 def new_query(view_key: str, *, alias: str | None = None, user: str | None = None) -> ListFilterQuery:
 	"""Start a list query for ``view_key`` (see :class:`ListFilterQuery`)."""
 	return ListFilterQuery(view_key, alias=alias, user=user)
+
+
+# --------------------------------------------------------------------------- #
+# Bounded execution
+# --------------------------------------------------------------------------- #
+#: MariaDB ER_STATEMENT_TIMEOUT.
+_STATEMENT_TIMEOUT_ERRNO = 1969
+
+
+def _is_statement_timeout(exc: BaseException) -> bool:
+	"""Did this exception come from the statement ceiling, not from bad SQL?
+
+	Checked by errno first and by message only as a fallback, and across the
+	wrapper chain, because the driver exception can arrive re-raised.
+	"""
+	seen = (exc, getattr(exc, "orig", None), getattr(exc, "__cause__", None))
+	for candidate in seen:
+		if candidate is None:
+			continue
+		args = getattr(candidate, "args", ()) or ()
+		if args and args[0] == _STATEMENT_TIMEOUT_ERRNO:
+			return True
+	return "max_statement_time exceeded" in str(exc)
+
+
+def _statement_timeout_supported() -> bool:
+	# `SET STATEMENT ... FOR` is MariaDB syntax. On anything else we degrade to
+	# an unbounded query rather than emit SQL the server will reject — a list
+	# that works is better than a list that 500s over a safety net.
+	return getattr(frappe.db, "db_type", "mariadb") == "mariadb"
+
+
+def reject_unsupported_legacy_filters(view_key: str) -> None:
+	"""For a migrated surface whose endpoint has no legacy ``filters`` semantics.
+
+	The migration contract requires the legacy argument to still EXIST (the
+	compatibility window is not over and
+	``test_migrated_views_actually_accept_filters_v2`` checks for it), but a
+	surface whose curated controls are named parameters has nothing to do with a
+	value passed there. Accepting and ignoring it means a caller that believes it
+	is filtering gets a confidently wrong, wider-than-asked-for list — the exact
+	silent-widening this contract exists to prevent — so say so instead.
+	"""
+	_fail(
+		ERR_BAD_PAYLOAD,
+		_("This list does not accept the legacy filters argument; use filters_v2."),
+	)
+
+
+def bounded_sql(query: str, values: Any = None, **kwargs: Any):
+	"""``frappe.db.sql`` under a per-STATEMENT wall-clock ceiling.
+
+	Every migrated list runs its rows AND its count through here, so a runaway
+	filter cannot occupy a worker indefinitely on either pass.
+
+	``SET STATEMENT max_statement_time=N FOR <query>`` is deliberate, over the
+	obvious ``SET SESSION``: Frappe pools and reuses connections, so a session
+	variable set here would silently apply to whatever ran next on that
+	connection — including background jobs — and any "reset it afterwards" is
+	one early return or exception away from leaking. The per-statement form has
+	no state to leak and nothing to reset; the scope IS the statement.
+
+	A breach becomes :data:`ERR_QUERY_TOO_EXPENSIVE`, so it reaches the client as
+	the same coded envelope as any other filter rejection instead of a raw 500 —
+	and as a code the panel can render as "narrow this", which is the only action
+	that helps. The statement is aborted; the connection and the (read-only)
+	transaction are untouched.
+	"""
+	# `values=None` is NOT frappe's default (it is an empty tuple), and passing
+	# None through makes the driver attempt `query % None` and raise before the
+	# query ever runs. Forward the argument only when there is one.
+	args = () if values is None else (values,)
+	if not _statement_timeout_supported():
+		return frappe.db.sql(query, *args, **kwargs)
+	# Formatted as a FLOAT, deliberately. `int()` truncated a sub-second bound to
+	# 0, and MariaDB reads 0 as "no limit" — so the one edit this feature invites
+	# (tightening the bound because 10s felt slow) would have silently removed
+	# the ceiling instead of lowering it. MariaDB's max_statement_time takes
+	# fractional seconds, so there is nothing to round for.
+	seconds = float(STATEMENT_TIMEOUT_SECONDS)
+	bounded = f"SET STATEMENT max_statement_time={seconds} FOR {query.lstrip()}"
+	try:
+		return frappe.db.sql(bounded, *args, **kwargs)
+	except Exception as e:
+		if not _is_statement_timeout(e):
+			raise
+		_fail(
+			ERR_QUERY_TOO_EXPENSIVE,
+			_("That filter is too broad to run on this list — narrow it and try again."),
+		)
 
 
 def apply_filters_v2(
