@@ -312,7 +312,7 @@ def _stamp_reply_model(ctx: _Ctx, row: dict | None) -> None:
 	``role='assistant'`` is in the WHERE clause, not just implied by
 	``turn.assistant_message``: the field is meaningless on a user or tool row and
 	a mislinked turn must not be able to write one. A blank model (no row, or a
-	session the gateway does not name a model for - an openclaw-direct pool that
+	session the gateway does not name a model for - an agent-direct pool that
 	never resolved one) leaves the row untouched rather than writing "" over a
 	value an earlier finalize cycle already got right.
 

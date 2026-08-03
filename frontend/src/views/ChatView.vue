@@ -4485,7 +4485,7 @@ function elapsedLabel(m) {
 }
 // Per-reply model attribution (jarvis#560). m.model / m.provider are stamped on
 // the assistant row at finalize and name the model that ACTUALLY answered, which
-// is not always the one the user picked: an unpinned thread keeps openclaw's
+// is not always the one the user picked: an unpinned thread keeps the agent's
 // failover chain live, so a substitution otherwise leaves no trace anywhere. The
 // show/hide rule lives in @/utils/modelBadge (unit-tested there) because a rule
 // that hides too eagerly would suppress the whole signal without failing.
