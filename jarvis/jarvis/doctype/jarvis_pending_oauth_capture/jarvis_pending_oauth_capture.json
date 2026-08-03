@@ -16,6 +16,7 @@
   "safe_label",
   "account_email",
   "account_ref",
+  "bound_agent_url",
   "nonce_hash",
   "encrypted_oauth_blob",
   "expires_at",
@@ -90,6 +91,13 @@
    "label": "Account Ref",
    "read_only": 1,
    "description": "The SUB_<hex> per-account ref the pool subscription row keys on (^[A-Za-z0-9_-]{1,64}$). Stable across the capture's life so save_llm_pool can fold the consumed blob onto the right account row."
+  },
+  {
+   "fieldname": "bound_agent_url",
+   "fieldtype": "Data",
+   "label": "Bound Agent URL",
+   "read_only": 1,
+   "description": "The workspace connection identity (agent_url) at mint time. consume refuses a capture whose bound value no longer matches the current connection - a workspace reset / reconnect / tenant move between sign-in and save invalidates the capture (review F10 / §10.2), a bench-side complement to the admin operation's authority-generation fence. Empty (onboarding before first provision) matches empty."
   },
   {
    "fieldname": "nonce_hash",

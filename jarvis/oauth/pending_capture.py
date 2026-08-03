@@ -87,6 +87,19 @@ def _nonce_hash(nonce: str) -> str:
 	return hashlib.sha256(nonce.encode("utf-8")).hexdigest()
 
 
+def _connection_anchor() -> str:
+	"""The workspace's current connection identity (agent_url) - the bench-side
+	signal a capture is bound to (F10 / §10.2). A workspace reset / reconnect / tenant
+	move changes it, so a capture minted against the old identity is refused at
+	consume. Empty during onboarding before the first container is provisioned; an
+	empty-bound capture consumed while still empty matches (the normal first-onboard
+	path, where the consume itself triggers provisioning)."""
+	try:
+		return (frappe.db.get_single_value("Jarvis Settings", "agent_url") or "").strip()
+	except Exception:
+		return ""
+
+
 def _safe_view(doc_or_row) -> dict:
 	"""The ONLY shape a read path returns: opaque id + non-secret display metadata.
 	Never the blob, never a token. ``expires_at`` is stringified for the wire."""
@@ -162,6 +175,7 @@ def create_capture(
 		existing.openclaw_provider = openclaw_provider
 		existing.account_email = account_email or existing.account_email
 		existing.safe_label = safe_label or existing.safe_label
+		existing.bound_agent_url = _connection_anchor()
 		existing.nonce_hash = _nonce_hash(nonce)
 		existing.expires_at = add_to_date(now_datetime(), minutes=CAPTURE_TTL_MINUTES)
 		existing.revocation_state = "pending"
@@ -179,6 +193,7 @@ def create_capture(
 	doc.safe_label = safe_label or account_email or ""
 	doc.account_email = account_email or ""
 	doc.account_ref = account_ref
+	doc.bound_agent_url = _connection_anchor()
 	doc.nonce_hash = _nonce_hash(nonce)
 	doc.encrypted_oauth_blob = oauth_blob
 	doc.expires_at = add_to_date(now_datetime(), minutes=CAPTURE_TTL_MINUTES)
@@ -240,7 +255,7 @@ def consume_capture(capture_id: str) -> str:
 	if not capture_id:
 		raise CaptureError("unknown capture")
 	rows = frappe.db.sql(
-		"""SELECT name, consumed_at, expires_at
+		"""SELECT name, consumed_at, expires_at, bound_agent_url
 		   FROM `tabJarvis Pending OAuth Capture`
 		   WHERE capture_id = %s AND owner_user = %s
 		   FOR UPDATE""",
@@ -254,6 +269,13 @@ def consume_capture(capture_id: str) -> str:
 		raise CaptureAlreadyConsumed("capture already used")
 	if get_datetime(row.expires_at) <= now_datetime():
 		raise CaptureError("capture expired")
+	# Authority/connection fence (F10 / §10.2): a workspace reset / reconnect / tenant
+	# move between sign-in and save changed the connection identity, so this capture
+	# was minted against a workspace this bench no longer points at - refuse it. (The
+	# admin operation carries the authority-generation fence; this is its bench-side
+	# complement so a stale credential is not adopted post-move.)
+	if (row.bound_agent_url or "") != _connection_anchor():
+		raise CaptureError("capture no longer matches this workspace connection")
 
 	from frappe.utils.password import get_decrypted_password
 

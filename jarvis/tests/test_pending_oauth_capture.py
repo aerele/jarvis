@@ -120,6 +120,26 @@ class TestPendingCapture(FrappeTestCase):
 		with self.assertRaises(pc.CaptureError):
 			pc.consume_capture(view["capture_id"])
 
+	def test_consume_refuses_after_connection_identity_changes(self):
+		# F10 / §10.2: a workspace reset / reconnect / tenant move between sign-in and
+		# save changes the connection identity (agent_url) - a capture minted against
+		# the old one must not be adopted afterwards. (rollback in tearDown restores
+		# the settings write.)
+		frappe.db.set_value(
+			"Jarvis Settings", "Jarvis Settings", "agent_url", "https://old.example", update_modified=False
+		)
+		view = _mk()  # bound to https://old.example
+		frappe.db.set_value(
+			"Jarvis Settings", "Jarvis Settings", "agent_url", "https://new.example", update_modified=False
+		)
+		with self.assertRaises(pc.CaptureError) as cm:
+			pc.consume_capture(view["capture_id"])
+		self.assertNotIsInstance(cm.exception, pc.CaptureAlreadyConsumed)
+		# The unadopted capture is still un-consumed (a later legitimate flow / the
+		# sweeper handles it) - it was refused, not silently burned.
+		name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
+		self.assertIsNone(frappe.db.get_value(DT, name, "consumed_at"))
+
 	# ---- rehydrate (reload resume) ----
 
 	def test_list_active_rehydrates_without_blob_and_hides_consumed(self):
