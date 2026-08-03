@@ -21,6 +21,7 @@ import requests
 
 from jarvis.exceptions import (
 	AdminAuthError,
+	AdminContractError,
 	AdminRateLimitedError,
 	AdminRejectedError,
 	AdminUnreachableError,
@@ -212,15 +213,29 @@ def signup(
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 
-def resume_pending_signup(plan: str, provider: str | None = None) -> dict:
+def resume_pending_signup(plan: str, provider: str | None = None, idempotency_key: str | None = None) -> dict:
 	"""Authenticated failed-payment resume: re-issues checkout handles for the
 	caller's own Pending Payment signup, optionally on a different plan/provider.
 	Returns the same checkout-fields shape as signup's sync path (no credentials
 	— the bench already holds them; that's how this call authenticates).
-	Raises AdminValidationError when there is nothing to resume (409)."""
+
+	``idempotency_key`` makes the retry safe to repeat: admin hashes it onto the
+	subscription with the handles it mints, so a replay of the SAME key returns
+	the intent that key already created instead of opening a second gateway
+	object. A double-submitted wizard, a retried POST and a refreshed pay screen
+	converge on one order. A key admin has not seen is a NEW intent, which is
+	what a genuine second attempt after a decline needs - so the bench mints per
+	attempt, not per lifetime (jarvis.onboarding_contract.next_idempotency_key).
+	Omitted when None, exactly as an older bench sends nothing.
+
+	Raises AdminContractError carrying admin's ``code`` on a coded conflict
+	(PAYMENT_ALREADY_ACTIVE, SIGNUP_TERMINAL, ...); a plain AdminValidationError
+	from an admin too old to send one."""
 	body: dict = {"plan": plan}
 	if provider:
 		body["provider"] = provider
+	if idempotency_key:
+		body["idempotency_key"] = idempotency_key
 	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)
 
 
@@ -289,6 +304,42 @@ def get_signup_payment_state() -> dict:
 	"""
 	return _post(
 		path=_m("billing.signup.get_signup_payment_state"),
+		body={},
+	)
+
+
+def check_signup_payment_status() -> dict:
+	"""Authenticated PROVIDER-TRUTH check on this signup's payment.
+
+	The authoritative half of the payment surface, and the difference from
+	``get_signup_payment_state`` is where the answer comes from: the poll reads
+	admin's own subscription row and never asks a gateway whether money moved,
+	while this asks the GATEWAY and converges a verified payment through the
+	same activation seam a callback or a webhook would have used. It is what a
+	customer whose checkout redirect died and whose webhook was lost can click -
+	their money is captured at the gateway and nothing else in the flow will
+	ever notice.
+
+	Takes no arguments by contract: admin resolves the customer from the
+	authentication this call carries and every remote identifier off their own
+	row, so there is nothing a caller can substitute to aim a check at somebody
+	else's payment.
+
+	Same envelope as the poll (``code`` + the ``can_*`` capability flags), plus
+	two facts only a check can state: ``gateway_consulted`` (whether a provider
+	was really reached in THIS call - false when it failed and false when the
+	answer came from the short cache) and ``awaiting_manual_reconciliation``
+	(present only when true: the gateway holds money we could not credit to this
+	exact subscription and generation, an operator is placing it, and a Pay
+	affordance must be suppressed - the code stays the ordinary pending one
+	because a decline here would invite a SECOND payment).
+
+	Never creates or replaces an intent. A decline or a dead handle is a REPORT;
+	opening the replacement is ``resume_pending_signup``'s job, on an explicit
+	customer action. Rate-limited per customer: a 429 carrying
+	``PAYMENT_CHECK_RATE_LIMITED`` is "wait and ask again", NOT a decline."""
+	return _post(
+		path=_m("billing.signup.check_signup_payment_status"),
 		body={},
 	)
 
@@ -1521,6 +1572,77 @@ def _envelope_error_message(envelope) -> str:
 	return _scrub_secrets(err.get("message") or "")
 
 
+def _contract_error(payload) -> dict:
+	"""The onboarding contract's machine-readable ``error`` object, or ``{}``.
+
+	ONE reader for the contract's TWO wire shapes. A whitelisted method's RETURN
+	value and a RAISED exception do not serialize the same way, so the identical
+	``error`` object sits at two different depths::
+
+	    returned   {"message": {"ok": false, "error": {"code": ...}}}
+	    thrown     {"exc_type": "DuplicateEntryError", "error": {"code": ...}}
+
+	Unifying them admin-side is a coordinated release against benches already in
+	the field, so the contract's answer is a reader that accepts both: top level
+	first, then under ``message``. (See the admin repo's
+	``tests/billing/fixtures/README.md``; the vendored copy of that corpus in
+	``jarvis/tests/fixtures/admin_contract/`` is what pins this function.)
+
+	FAIL CLOSED on anything else. An admin older than the contract emits no
+	``error`` object at all - only Frappe's ``exc_type`` and a sentence - and the
+	answer to that is the generic path plus ``exc_type``, NEVER a prose parse.
+	Requiring ``code`` is what makes "unknown shape" and "no contract" the same
+	branch, so a future shape cannot be half-read.
+
+	The message is scrubbed here (the single bottleneck every upstream-controlled
+	string crosses); the rest of the object is admin's, verbatim - contract rule
+	3 keeps internal document names out of it, and a facade needs the extras
+	(``retry_after_seconds``, ``subscription_status``, ``attempt_id``) intact."""
+	if not isinstance(payload, dict):
+		return {}
+	err = payload.get("error")
+	if not (isinstance(err, dict) and err.get("code")):
+		# Fall THROUGH rather than give up: a top-level ``error`` that carries no
+		# code does not mean there is no contract, only that this depth is not
+		# where it is. A response can legitimately hold both (a framework-shaped
+		# hint at the top, admin's coded envelope under ``message``), and the
+		# earlier shape - which stopped at the first ``error`` object it saw -
+		# would have read the codeless one and reported "no contract".
+		inner = payload.get("message")
+		err = inner.get("error") if isinstance(inner, dict) else None
+	if not isinstance(err, dict) or not err.get("code"):
+		return {}
+	out = dict(err)
+	out["message"] = _scrub_secrets(str(err.get("message") or ""))
+	return out
+
+
+def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
+	"""Build the known-4xx rejection, preserving admin's contract when it sent
+	one (returned for the caller to ``raise``).
+
+	AdminContractError is a SUBCLASS of AdminValidationError, so this is a strict
+	widening: every caller that only knows the parent - the whole non-onboarding
+	surface - sees the same class and the same ``str(e)`` it saw before, and only
+	a caller that asks for ``code`` notices the difference."""
+	err = _contract_error(payload)
+	if not err:
+		return AdminValidationError(message, exc_type=exc_type or None)
+	# The contract's own display copy wins over Frappe's generic extraction: on
+	# the THROWN shape the latter degrades to the bare exception class name when
+	# the body carries no _server_messages, and "DuplicateEntryError" is not a
+	# sentence to put in front of a customer.
+	return AdminContractError(
+		err.get("message") or message or f"admin returned {status}",
+		code=str(err.get("code") or ""),
+		contract_code=str(err.get("contract_code") or ""),
+		recovery=str(err.get("recovery") or ""),
+		error=err,
+		exc_type=exc_type or None,
+		http_status=status,
+	)
+
+
 # Admin ``error.code`` values that name a PERMANENT rejection: the admin was
 # reached, validated the request and refused it, so re-sending the SAME payload
 # can never converge. jarvis_admin_v2's @fleet_endpoint answers a FleetError
@@ -1618,9 +1740,16 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		)
 	if resp.status_code == 429:
 		err = (envelope or {}).get("error", {}) if isinstance(envelope, dict) else {}
+		# A CODED 429 (PAYMENT_CHECK_RATE_LIMITED) is "wait and ask again" and
+		# must never be rendered as a decline; carry its code so a caller can
+		# tell it from the stock per-IP limiter's bare status.
+		contract = _contract_error(payload)
 		raise AdminRateLimitedError(
 			_envelope_error_message(envelope) or clean or "rate_limited",
 			retry_after_seconds=int(err.get("retry_after_seconds") or 0),
+			code=str(contract.get("code") or ""),
+			recovery=str(contract.get("recovery") or ""),
+			error=contract,
 		)
 
 	# Frappe-wrapped raised exception with no unambiguous status. Route
@@ -1628,7 +1757,11 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	# class isn't recognised.
 	if exc_type:
 		if exc_type in ("ValidationError", "DuplicateEntryError", "DoesNotExistError"):
-			raise AdminValidationError(clean)
+			# The THROWN wire shape: admin's contract ``error`` object rides at
+			# the top level next to exc_type. Both survive here - the code for a
+			# reader that has one, exc_type for the pre-contract admin that
+			# sends nothing else.
+			raise _rejection(clean, payload=payload, status=resp.status_code, exc_type=exc_type)
 		# AuthenticationError ~ a token/credential failure (retry-eligible, 401);
 		# PermissionError ~ an authorization denial (terminal, 403). Tag the
 		# status so _post re-mints on the former but surfaces the latter as-is.
@@ -1650,7 +1783,12 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# allowlist above) and must surface its clean message; only a 5xx is a
 		# genuine admin fault.
 		if 400 <= resp.status_code < 500:
-			raise AdminValidationError(clean or f"admin returned {resp.status_code}")
+			raise _rejection(
+				clean or f"admin returned {resp.status_code}",
+				payload=payload,
+				status=resp.status_code,
+				exc_type=exc_type,
+			)
 		raise AdminUnreachableError(clean or f"admin returned an unrecognised error: {exc_type}")
 	# Sprint-3 PR-8 (2026-06-16 review): a 4xx response with the
 	# structured envelope ({"ok": false, "error": {...}}) is a
@@ -1683,7 +1821,10 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			)
 			msg = f"admin returned {resp.status_code}"
 		if 400 <= resp.status_code < 500:
-			raise AdminValidationError(msg)
+			# The RETURNED wire shape: {"message": {"ok": false, "error": {...}}}
+			# under a deliberate 4xx. Same error object as the thrown form, one
+			# depth lower, and the same class comes out of here.
+			raise _rejection(msg, payload=payload, status=resp.status_code)
 		rejected = _permanent_rejection_code(envelope)
 		if rejected:
 			raise AdminRejectedError(

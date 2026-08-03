@@ -1,0 +1,17 @@
+{
+  "contract_version": 1,
+  "name": "legacy_v1_duplicate_409",
+  "description": "HISTORICAL, and NOT produced by this admin any more. The duplicate rejection as every admin before this contract shipped it: a 409 whose only machine-readable part is Frappe's exc_type, with the reason carried in prose that was reworded on 2026-07-26 and killed the bench's failed-payment resume. A reader that has to work against a fleet mid-upgrade will meet this shape from an older control plane, so it must fall back to (http_status, exc_type) when `error.code` is absent - and must NEVER branch on the sentence, which is exactly what broke.",
+  "produced_by": "pre-contract admin (historical; asserted for shape only, not against this serializer)",
+  "endpoint": "jarvis_admin_v2.billing.signup.signup",
+  "http_status": 409,
+  "volatile": [
+    "body.exception",
+    "body._server_messages"
+  ],
+  "body": {
+    "exc_type": "DuplicateEntryError",
+    "exception": "frappe.exceptions.DuplicateEntryError: An account for this email already exists.",
+    "_server_messages": "[\"{\\\"message\\\": \\\"An account for this email already exists.\\\"}\"]"
+  }
+}

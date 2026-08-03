@@ -1,0 +1,32 @@
+{
+  "contract_version": 2,
+  "name": "reconcile_paid_active",
+  "description": "The recovery this endpoint exists for: the customer paid, the checkout callback died and the webhook never arrived, so the row still said Pending Payment. A provider-truth check found the captured payment at the gateway and converged through the ordinary activation seam under the gateway's own payment id - so the callback that later turns up, and the late webhook, are no-ops rather than second activations. The answer is the ordinary PAYMENT_ALREADY_ACTIVE the wizard already knows: continue setup.",
+  "endpoint": "jarvis_admin_v2.billing.signup.check_signup_payment_status",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.attempt_id",
+    "body.message.data.payment_last_checked_at"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "PAYMENT_ALREADY_ACTIVE",
+        "pending_verification": false,
+        "subscription_status": "Active",
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "can_initiate_payment": false,
+        "can_check_status": false,
+        "can_reconnect": false,
+        "payment_last_checked_at": "2026-08-02 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1,
+        "gateway_consulted": true,
+        "recovery": "continue_setup"
+      }
+    }
+  }
+}

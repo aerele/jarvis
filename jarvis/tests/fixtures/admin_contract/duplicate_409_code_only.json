@@ -1,0 +1,21 @@
+{
+  "contract_version": 2,
+  "name": "duplicate_409_code_only",
+  "description": "The duplicate rejection in its RETURNED form: admin's codes.error_response envelope, nested under Frappe's `message` key, with the stable code and NO exc_type anywhere. Admin does not emit this today - the guest rejection is a raised DuplicateEntryError - but the contract says codes are the machine-readable part and exc_type is Frappe's incidental framing, so a reader that only works when BOTH are present is one refactor away from the original dead end. Every other duplicate fixture carries exc_type, which means the bench's code branch was never the thing being tested. This is the fixture that tests it.",
+  "produced_by": "BENCH-AUTHORED forward-compatibility case (not vendored; see PROVENANCE.md). The admin-side twin is ledgered for the next admin round.",
+  "endpoint": "jarvis_admin_v2.billing.signup.signup",
+  "http_status": 409,
+  "volatile": [
+    "body.message.error.message"
+  ],
+  "body": {
+    "message": {
+      "ok": false,
+      "error": {
+        "code": "ACCOUNT_ALREADY_EXISTS",
+        "message": "An account for this email and company already exists.",
+        "recovery": "authenticate_or_reconnect"
+      }
+    }
+  }
+}
