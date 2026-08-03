@@ -230,7 +230,10 @@
 										type="tel"
 										variant="outline"
 										label="Contact number (optional)"
-										v-model="state.contact"
+										:model-value="billing.fields.contact.value"
+										@update:model-value="
+											(v) => billing.setUserValue('contact', v)
+										"
 										placeholder="+91 98765 43210"
 										autocomplete="tel"
 										@keydown.enter="onDetailsSubmit"
@@ -257,15 +260,17 @@
 										Billing
 									</div>
 									<div class="col-span-2 -mt-1 text-p-xs text-ink-gray-5">
-										Billing details are kept with your account for upcoming
-										invoicing.
+										{{ billing.promiseCopy.value }}
 									</div>
 									<FormControl
 										class="col-span-2"
 										type="text"
 										variant="outline"
 										label="Billing address (optional)"
-										v-model="state.billingAddress"
+										:model-value="billing.fields.address.value"
+										@update:model-value="
+											(v) => billing.setUserValue('address', v)
+										"
 										placeholder="Street, area"
 										autocomplete="street-address"
 										@keydown.enter="onDetailsSubmit"
@@ -274,7 +279,10 @@
 										type="text"
 										variant="outline"
 										label="City (optional)"
-										v-model="state.city"
+										:model-value="billing.fields.city.value"
+										@update:model-value="
+											(v) => billing.setUserValue('city', v)
+										"
 										placeholder="Chennai"
 										autocomplete="address-level2"
 										@keydown.enter="onDetailsSubmit"
@@ -283,7 +291,10 @@
 										type="text"
 										variant="outline"
 										label="GSTIN (optional)"
-										v-model="state.gstin"
+										:model-value="billing.fields.gstin.value"
+										@update:model-value="
+											(v) => billing.setUserValue('gstin', v)
+										"
 										placeholder="33ABCDE1234F1Z5"
 										@keydown.enter="onDetailsSubmit"
 									/>
@@ -463,6 +474,16 @@
 											}}</b>
 										</div>
 										<div
+											v-for="row in billing.reviewRows.value"
+											:key="row.key"
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">{{ row.label }}</span
+											><b class="font-medium text-ink-gray-9">{{
+												row.value
+											}}</b>
+										</div>
+										<div
 											class="flex items-center justify-between gap-3 bg-surface-gray-1 px-4 py-3 text-p-sm"
 										>
 											<span class="text-ink-gray-5">Due today</span
@@ -470,6 +491,19 @@
 												dueTodayLabel
 											}}</b>
 										</div>
+									</div>
+									<div
+										v-if="billing.reviewRows.value.length"
+										class="mx-auto mt-2 flex max-w-[560px] items-center justify-between gap-3 text-p-xs text-ink-gray-5"
+									>
+										<span>{{ billing.promiseCopy.value }}</span>
+										<button
+											class="ob-link shrink-0"
+											:disabled="state.payBusy"
+											@click="editBilling"
+										>
+											Edit
+										</button>
 									</div>
 									<div
 										class="mx-auto mt-3.5 flex max-w-[560px] items-center justify-center gap-1.5 text-center text-xs text-ink-gray-5"
@@ -798,11 +832,15 @@ import {
 	startSignup,
 	finishPayment,
 	getAccountDefaults,
+	getCompanyOnboardingDefaults,
+	updateBilling,
 	syncConnection,
 } from "@/api";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
+import { readCookie } from "@/lib/user";
+import { useBillingDetails, billingEditAction } from "@/onboarding/useBillingDetails";
 
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
@@ -834,17 +872,16 @@ const state = reactive({
 	company: "",
 	companies: [],
 	detailsErr: "",
-	// Collected by the redesign but NOT submitted yet:
-	// jarvis.onboarding.start_signup(email, company, plan) and
-	// admin_client.signup(email, company_name, plan, coupon=None) accept no
-	// contact/billing kwargs, and the admin-side signup contract is external
-	// to this repo. Threading them through would break the API contract.
-	// TODO(backend): pass contact + billingAddress/city/gstin through
-	// start_signup → admin signup once those endpoints accept them.
-	contact: "",
-	billingAddress: "",
-	city: "",
-	gstin: "",
+	// The four billing inputs (contact phone, address, city, GSTIN) live in the
+	// `billing` composable below (provenance-aware, fenced, namespaced) — Plan 01.
+	// True once a payment intent exists (a signup call created checkout handles,
+	// or reconcile found a live mid-flight order): billing edits then save through
+	// the authenticated update_billing facade, never a fresh guest signup.
+	intentExists: false,
+	// True while the customer is editing billing after returning from Review & Pay
+	// (the card's "Edit" button), so onDetailsSubmit returns to Pay instead of
+	// walking forward through Plan.
+	billingEditReturn: false,
 	// plan (Choose Your Plan step)
 	plans: [],
 	planName: null,
@@ -884,6 +921,15 @@ const state = reactive({
 	finishing: false,
 	finishNote: "",
 	finishSubtitle: "",
+});
+
+// Plan 01 billing state. Namespaced by site identity + logged-in user so one
+// site's / user's transitional billing PII can never prefill another's on a
+// shared browser (P0-02/C01-6). Owns provenance, the stale-response fence, the
+// ack-gated storage promise, and the Review & Pay ↔ payload single source.
+const billing = useBillingDetails({
+	site: (typeof window !== "undefined" && window.location && window.location.host) || "",
+	user: readCookie("user_id") || "",
 });
 
 const steps = computed(() => STEPS_MANAGED);
@@ -939,6 +985,15 @@ watch(
 		eligibilityTimer = setTimeout(refreshReconnectEligibility, 500);
 	},
 	{ immediate: true }
+);
+// Plan 01: a Company change re-fetches ERP-derived billing defaults (debounced +
+// fenced inside fetchCompanyDefaults). Fires on the prefilled default Company too
+// (harmless: it only fills empty/erp_default fields, never user edits). immediate
+// is off so it doesn't race prefillAccount/restore on mount — onMounted kicks the
+// first fetch explicitly after both have run.
+watch(
+	() => state.company,
+	() => scheduleCompanyDefaults()
 );
 const frameSub = computed(() => FRAME_SUBS[state.step] || "Set up your workspace");
 
@@ -1098,9 +1153,18 @@ async function reconcileMidFlightSignup() {
 		// signed up, moments after they authorised. verifyPollAction is the one
 		// place that knows every gateway/shape, so the two cannot drift again.
 		const pay = await checkSignupPaymentState();
+		// Cross-device recovery (Plan 01 §6): admin's authenticated state response
+		// carries the normalized billing snapshot for the owned Pending Payment
+		// customer. Server truth wins over any local remnant, and hydrating retires
+		// the local snapshot. Presence of this row also proves an intent exists, so
+		// later edits route through update_billing rather than a fresh signup.
+		if (pay && billing.hydrateServerSnapshot(pay.billing)) {
+			state.intentExists = true;
+		}
 		if (pay && (pay.pending_verification || verifyPollAction(pay).kind === "checkout")) {
 			state.step = "pay";
 			state.payPhase = "verify";
+			state.intentExists = true;
 		}
 		// else: nothing in flight - leave the default "intro" step (fresh start).
 	} catch (e) {
@@ -1151,38 +1215,40 @@ function onPlanContinue() {
 
 // ---- Details (Your Details) -------------------------------------------------
 // Validation matches the old Account step verbatim: email regex + non-empty
-// company. The contact/billing fields are collected but not (yet) submitted -
-// see the TODO(backend) note on `state` above. Until the backend accepts
-// them, they're persisted to localStorage on submit so they survive reloads
-// and can be backfilled once the signup contract carries them.
-const BILLING_LS_KEY = "jarvis-onboarding-billing";
-function persistBillingDetails() {
+// company. The four billing inputs are provenance-aware state owned by the
+// `billing` composable (Plan 01): edits are user-owned, the transitional
+// localStorage snapshot is namespaced by site+user and cleared only after
+// admin's billing_saved ack, and a Company change fetches ERP-derived defaults
+// behind a stale-response fence (fetchCompanyDefaults below).
+
+// ERP-derived billing defaults for the selected Company. Debounced (the Company
+// combo emits on every keystroke), fenced (beginCompanyFetch mints a monotonic
+// generation; applyDefaults drops anything that isn't the newest request for the
+// still-selected Company), and fail-closed (any error just leaves the fields as
+// beginCompanyFetch left them — prior-Company ERP values cleared, user edits kept).
+// Telemetry is presence-only: a stable code, never a billing value.
+let companyDefaultsTimer = null;
+function scheduleCompanyDefaults() {
+	if (companyDefaultsTimer) clearTimeout(companyDefaultsTimer);
+	companyDefaultsTimer = setTimeout(fetchCompanyDefaults, 300);
+}
+async function fetchCompanyDefaults() {
+	const company = (state.company || "").trim();
+	// beginCompanyFetch clears prior-Company erp_default values (and mints the
+	// generation) whether or not a network call follows, so a switch to a custom
+	// Company that resolves nothing still drops the previous Company's ERP data.
+	const gen = billing.beginCompanyFetch(company);
+	if (!company) return;
 	try {
-		window.localStorage.setItem(
-			BILLING_LS_KEY,
-			JSON.stringify({
-				contact: state.contact,
-				billingAddress: state.billingAddress,
-				city: state.city,
-				gstin: state.gstin,
-			})
-		);
+		const resp = await getCompanyOnboardingDefaults(company);
+		if (resp && resp.ok) billing.applyDefaults(resp, gen, company);
 	} catch (e) {
-		/* storage full/blocked - purely best-effort */
+		// COMPANY_DEFAULTS_FORBIDDEN / _NOT_FOUND surface as a 4xx (thrown here);
+		// nothing to apply. Presence-only report, no PII.
+		reportError({ surface: "onboarding", error_code: "company_defaults", message: "" });
 	}
 }
-// Restore on mount; never overwrites something the user already typed.
-function restoreBillingDetails() {
-	try {
-		const d = JSON.parse(window.localStorage.getItem(BILLING_LS_KEY) || "{}");
-		if (d.contact && !state.contact) state.contact = d.contact;
-		if (d.billingAddress && !state.billingAddress) state.billingAddress = d.billingAddress;
-		if (d.city && !state.city) state.city = d.city;
-		if (d.gstin && !state.gstin) state.gstin = d.gstin;
-	} catch (e) {
-		/* corrupt entry - ignore */
-	}
-}
+
 function onDetailsSubmit() {
 	state.detailsErr = "";
 	state.email = (state.email || "").trim();
@@ -1195,7 +1261,16 @@ function onDetailsSubmit() {
 		state.detailsErr = "Company name is required.";
 		return;
 	}
-	persistBillingDetails();
+	billing.persist();
+	// Editing billing after Review & Pay: return straight to Pay, and — once an
+	// intent exists — save the edit through the authenticated update_billing
+	// facade (NEVER a fresh guest signup, which would create/replace the intent).
+	if (state.billingEditReturn) {
+		state.billingEditReturn = false;
+		saveBillingEdit();
+		state.step = "pay";
+		return;
+	}
 	// Entering Review & Pay fresh from Details: reset the pay sub-state. This
 	// includes reconnectOffered, not just payErr - otherwise a reconnect offer
 	// raised by a duplicate email on an earlier attempt survives a Back, an
@@ -1205,6 +1280,28 @@ function onDetailsSubmit() {
 	state.payErr = "";
 	state.reconnectOffered = false;
 	goNext();
+}
+
+// The Review & Pay card's "Edit" affordance: return to Details WITHOUT touching
+// the payment intent. If one already exists the subsequent Continue persists via
+// update_billing; otherwise it just walks back to the card.
+function editBilling() {
+	state.billingEditReturn = true;
+	state.step = "details";
+}
+
+// Persist a post-intent billing edit through the authenticated facade. Best-
+// effort: a failure keeps the local snapshot (promise stays honest) and reports
+// presence-only. billingEditAction is the single source of truth for "which
+// path" so the choice is unit-tested (never guest signup).
+async function saveBillingEdit() {
+	if (billingEditAction(state.intentExists) !== "update_billing") return;
+	try {
+		const d = (await updateBilling(billing.buildBilling())) || {};
+		billing.markBillingSaved(d.billing_saved === true);
+	} catch (e) {
+		reportError({ surface: "onboarding", error_code: "billing_update", message: "" });
+	}
 }
 
 // ---- Pay (renderPay / renderVerifyEmail / startPay / openCheckout,
@@ -1298,12 +1395,20 @@ async function proceedAfterPay() {
 
 async function runStartPay() {
 	try {
+		// Plan 01: the normalized billing snapshot rides the signup call. The bench
+		// forwards it to admin UNMODIFIED and echoes billing_saved only when a new
+		// admin persisted it (an older admin drops the kwarg — promise stays honest).
 		const d = await startSignup(
 			state.email,
 			state.company,
 			state.planName,
-			state.paymentProvider
+			state.paymentProvider,
+			billing.buildBilling()
 		);
+		// A checkout intent now exists: further billing edits go through the
+		// authenticated update_billing facade, not a fresh guest signup.
+		state.intentExists = true;
+		billing.markBillingSaved(d && d.billing_saved === true);
 		if (d && d.pending_verification) {
 			state.payPhase = "verify";
 			state.payBusy = false;
@@ -1859,8 +1964,16 @@ async function prefillAccount() {
 }
 
 onMounted(async () => {
-	prefillAccount();
-	restoreBillingDetails();
+	// Restore the namespaced local billing snapshot FIRST: restored values are
+	// user-owned (local_restore), so the Company-defaults fetch prefillAccount
+	// triggers can only fill fields the customer left blank.
+	billing.restore();
+	await prefillAccount();
+	// prefillAccount may set the default Company synchronously; the watcher fires,
+	// but kick a fetch explicitly too in case the prefilled value equalled the
+	// combo's initial value (no change event) — beginCompanyFetch is idempotent
+	// for the same Company (it never clears same-Company erp_default values).
+	if ((state.company || "").trim()) scheduleCompanyDefaults();
 	loadPaymentProviders();
 	await reconcileMidFlightSignup();
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
