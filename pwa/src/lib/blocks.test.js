@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseCards, stripAgentBlocks, toolStatus } from "./blocks.js";
+import { countDiagrams, parseCards, stripAgentBlocks, toolStatus } from "./blocks.js";
 
 const fence = (kind, body) => "```" + kind + "\n" + body + "\n```";
 
@@ -21,12 +21,32 @@ test("stripAgentBlocks: removes every control fence from the prose", () => {
 	}
 });
 
-test("stripAgentBlocks: strips an xychart mermaid block but keeps ordinary mermaid", () => {
+test("stripAgentBlocks: strips both xychart charts and ordinary mermaid diagrams", () => {
+	// xychart-beta is a data chart (rendered by ChartCard); it must not leak.
 	const xy = stripAgentBlocks(`Text\n${fence("mermaid", "xychart-beta\n  title x")}\nEnd`);
 	assert.ok(!xy.includes("xychart-beta"));
+	assert.equal(xy, "Text\n\nEnd");
 
+	// An ordinary diagram (flowchart) can't be drawn here, so it is stripped from
+	// the prose too — a chip (countDiagrams) links it to the web chat instead of
+	// leaving raw ``` source on screen.
 	const flow = `Text\n${fence("mermaid", "graph TD;\n  A-->B;")}\nEnd`;
-	assert.ok(stripAgentBlocks(flow).includes("graph TD"), "a normal diagram must survive");
+	const out = stripAgentBlocks(flow);
+	assert.ok(!out.includes("graph TD"), "a diagram must not leak as raw source");
+	assert.equal(out, "Text\n\nEnd");
+});
+
+test("countDiagrams: counts flowchart-style mermaid, ignores xychart data charts", () => {
+	assert.equal(countDiagrams(`a\n${fence("mermaid", "flowchart TD\n A-->B")}\nb`), 1);
+	assert.equal(countDiagrams(fence("mermaid", "xychart-beta\n bar [1,2]")), 0);
+	assert.equal(countDiagrams("no diagrams here"), 0);
+	assert.equal(countDiagrams(""), 0);
+	assert.equal(countDiagrams(null), 0);
+	const two = `${fence("mermaid", "graph TD\n A-->B")}\n\n${fence(
+		"mermaid",
+		"sequenceDiagram\n A->>B: hi"
+	)}`;
+	assert.equal(countDiagrams(two), 2);
 });
 
 test("stripAgentBlocks: leaves a plain code block alone", () => {

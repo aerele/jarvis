@@ -343,6 +343,41 @@ _INVALID_CONFIRM = {
 	},
 }
 
+_CONFIRMATION_UNAVAILABLE = {
+	"ok": False,
+	"error": {
+		"type": "ConfirmationUnavailableError",
+		"message": (
+			"Confirmation storage is temporarily unavailable. Nothing was changed "
+			"by this request. Keep this card and try again shortly."
+		),
+	},
+}
+
+_CONFIRMATION_OUTCOME_UNKNOWN = {
+	"ok": False,
+	"error": {
+		"type": "ConfirmationOutcomeUnknownError",
+		"message": (
+			"The confirmation token's storage outcome could not be verified. The "
+			"business action was not run by this request. Refresh the confirmations "
+			"before trying again."
+		),
+	},
+}
+
+
+def _confirmation_storage_error(exc) -> dict:
+	"""Stable user envelope for a Redis failure; never mislabel it as expiry."""
+	from jarvis.chat import pending_confirm
+
+	frappe.logger("jarvis.pending_confirm").error(
+		"confirmation endpoint stopped before the business action: %s", type(exc).__name__
+	)
+	if isinstance(exc, pending_confirm.PendingConfirmOutcomeUnknown):
+		return _CONFIRMATION_OUTCOME_UNKNOWN
+	return _CONFIRMATION_UNAVAILABLE
+
 
 @frappe.whitelist()
 @require_jarvis_user
@@ -384,16 +419,19 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	from jarvis.chat import pending_confirm
 
 	token = (token or "").strip()
-	record = pending_confirm.peek(token)
-	if not record:
-		return _INVALID_CONFIRM
+	try:
+		record = pending_confirm.peek(token, strict=True)
+		if not record:
+			return _INVALID_CONFIRM
 
-	# Real conversation guard (#11): if the caller passed the conversation the
-	# click came from, enforce it; otherwise fall back to the record's own
-	# conversation (owner + single-use remain the guarantees).
-	passed_conv = (conversation or "").strip()
-	guard_conv = passed_conv if passed_conv else record.get("conversation")
-	record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
+		# Real conversation guard (#11): if the caller passed the conversation the
+		# click came from, enforce it; otherwise fall back to the record's own
+		# conversation (owner + single-use remain the guarantees).
+		passed_conv = (conversation or "").strip()
+		guard_conv = passed_conv if passed_conv else record.get("conversation")
+		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		return _confirmation_storage_error(exc)
 	if not record:
 		return _INVALID_CONFIRM
 
@@ -536,15 +574,18 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	from jarvis.chat import pending_confirm
 
 	token = (token or "").strip()
-	record = pending_confirm.peek(token)
-	if not record:
-		return {"ok": True, "data": {"status": "already_handled"}}
+	try:
+		record = pending_confirm.peek(token, strict=True)
+		if not record:
+			return {"ok": True, "data": {"status": "already_handled"}}
 
-	# Same owner + conversation binding as confirm_tool: consume atomically so a
-	# concurrent Confirm and Discard cannot both win.
-	passed_conv = (conversation or "").strip()
-	guard_conv = passed_conv if passed_conv else record.get("conversation")
-	record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
+		# Same owner + conversation binding as confirm_tool: consume atomically so a
+		# concurrent Confirm and Discard cannot both win.
+		passed_conv = (conversation or "").strip()
+		guard_conv = passed_conv if passed_conv else record.get("conversation")
+		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		return _confirmation_storage_error(exc)
 	if not record:
 		return {"ok": True, "data": {"status": "already_handled"}}
 
@@ -595,5 +636,8 @@ def list_pending_confirmations(conversation: str | None = None) -> dict:
 	# terminal use (pending_confirm.list_items_for_owner) so the three cannot drift
 	# and no internal field leaks. The park-time preview is returned verbatim (F2 -
 	# never a re-run dry-run) and the per-record F3 guard both live in the helper.
-	items = pending_confirm.list_items_for_owner(frappe.session.user, conversation=conv)
+	try:
+		items = pending_confirm.list_items_for_owner(frappe.session.user, conversation=conv, strict=True)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		return _confirmation_storage_error(exc)
 	return {"ok": True, "data": {"pending": items}}

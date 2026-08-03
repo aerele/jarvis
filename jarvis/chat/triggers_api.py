@@ -15,6 +15,7 @@ from frappe import _
 from frappe.utils import add_to_date, cint, getdate, now_datetime
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
+from jarvis.chat import list_filters
 from jarvis.chat.macros_api import _bool01, _clamp_page, _lk, _load_filters
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 from jarvis.triggers.engine import (
@@ -151,9 +152,11 @@ def get_triggers_caps() -> dict:
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
 @require_jarvis_user
+@list_filters.filter_errors_to_envelope
 def list_triggers_page(
 	search: str = "",
 	filters: str = "{}",
+	filters_v2: str | list | None = None,
 	sort_field: str = "modified",
 	sort_dir: str = "desc",
 	start: int = 0,
@@ -161,37 +164,51 @@ def list_triggers_page(
 ) -> dict:
 	"""Org-wide triggers (read is not row-scoped), server-side search / filter
 	/ sort / paginate, plus per-row activity stats (one grouped query for the
-	page's ids). Frozen envelope in ``data``."""
+	page's ids). Frozen envelope in ``data``.
+
+	``filters_v2`` (plan 08 §6.2) is ADDITIVE and validated against this
+	caller's schema; legacy ``filters`` keeps working for the compatibility
+	window.
+
+	Scope invariant (MIGRATION-CHECKLIST §1): reads are org-wide here — every
+	role that reaches this endpoint holds a permlevel-0 ``read`` on Jarvis
+	Trigger with no ``if_owner``, and this query adds no row predicate, so the
+	SQL scope EQUALS the ORM read scope.
+
+	Withholding (D1-b): ``condition`` / ``script_body`` / ``llm_instruction``
+	are the trigger's LOGIC and are redacted from non-managers by
+	``_trigger_detail``. This list never selects them either — but omission from
+	a SELECT is not withholding from a FILTER, and a ``like`` filter over them
+	would rebuild the redacted logic one character at a time. The registry
+	declares all three in ``excluded_fields``, so they are absent from the
+	catalog and rejected by the compiler.
+	"""
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _TRIGGER_FILTERS)
 
-	conds = ["1=1"]
-	params: dict = {"start": start, "page_length": pl}
+	q = list_filters.new_query("triggers")
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(trigger_name LIKE %(q)s OR target_doctype LIKE %(q)s)")
+		q.server_condition("(trigger_name LIKE %(q)s OR target_doctype LIKE %(q)s)", q=f"%{_lk(search)}%")
 	if "enabled" in f:
-		params["enabled"] = _bool01(f["enabled"])
-		conds.append("enabled = %(enabled)s")
+		q.server_condition("enabled = %(enabled)s", enabled=_bool01(f["enabled"]))
 	if "action_type" in f:
 		if f["action_type"] not in _ACTION_TYPES:
 			frappe.throw(_("Invalid action_type filter."))
-		params["action_type"] = f["action_type"]
-		conds.append("action_type = %(action_type)s")
+		q.server_condition("action_type = %(action_type)s", action_type=f["action_type"])
 	if "target_doctype" in f:
-		params["target_doctype"] = str(f["target_doctype"])
-		conds.append("target_doctype = %(target_doctype)s")
+		q.server_condition("target_doctype = %(target_doctype)s", target_doctype=str(f["target_doctype"]))
 	if "doc_event" in f:
 		if f["doc_event"] not in SUPPORTED_EVENTS:
 			frappe.throw(_("Invalid doc_event filter."))
-		params["doc_event"] = f["doc_event"]
-		conds.append("doc_event = %(doc_event)s")
+		q.server_condition("doc_event = %(doc_event)s", doc_event=f["doc_event"])
 
-	where = " AND ".join(conds)
+	q.apply(filters_v2)
+	where = q.where()
+	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _TRIGGER_SORTABLE, "modified")
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger` WHERE {where}", params)[0][0]
+	rows = list_filters.bounded_sql(
 		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event,
 		action_type, description, modified, owner
 		FROM `tabJarvis Trigger`

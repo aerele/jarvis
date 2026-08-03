@@ -90,3 +90,34 @@ test("junk input yields a usable layout rather than NaN", () => {
   assert.ok(Number.isFinite(l.left) && Number.isFinite(l.top));
   assert.ok(Number.isFinite(l.width) && Number.isFinite(l.height));
 });
+
+// ---- user-preferred size (the pref arg) ----
+const RIGHT_FAB = { x: 1440 - 54 - 16, y: 700, size: FAB };
+
+test("pref: a larger saved size grows the panel and stays on-screen", () => {
+  const l = panelLayout(RIGHT_FAB, VP, { width: 560, height: 720 });
+  assert.equal(l.width, 560);
+  assert.equal(l.height, 720);
+  assert.equal(l.side, "left");
+  assert.ok(l.left >= MARGIN, "never off the left edge");
+  assert.ok(l.top >= VP.top + MARGIN, "never under the navbar");
+});
+
+test("pref: a sub-default size is floored to the default (never shrinks)", () => {
+  const l = panelLayout(RIGHT_FAB, VP, { width: 200, height: 200 });
+  assert.equal(l.width, PANEL_W);
+  assert.equal(l.height, PANEL_MAX_H);
+});
+
+test("pref: is capped to the viewport, never past the margins", () => {
+  const l = panelLayout(RIGHT_FAB, VP, { width: 99999, height: 99999 });
+  assert.equal(l.width, VP.vw - MARGIN * 2);
+  assert.equal(l.height, VP.vh - VP.top - MARGIN * 2);
+});
+
+test("pref: absent (or null) is identical to the default layout", () => {
+  const a = panelLayout(RIGHT_FAB, VP);
+  assert.deepEqual(a, panelLayout(RIGHT_FAB, VP, null));
+  assert.equal(a.width, PANEL_W);
+  assert.equal(a.height, PANEL_MAX_H);
+});

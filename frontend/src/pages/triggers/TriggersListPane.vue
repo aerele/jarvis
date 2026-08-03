@@ -8,7 +8,7 @@
 		:total="total"
 		:has-more="hasMore"
 		:quick-filters="quickFilters"
-		:filter-defs="filterDefs"
+		:filter-state="filterState"
 		:filters="filters"
 		:sort-options="sortOptions"
 		:sort="sort"
@@ -24,6 +24,9 @@
 				'Ask in the chat on the left — e.g. \'Warn me when a Sales Invoice over 1 lakh is submitted\'',
 		}"
 		@update:filters="setFilters"
+		@update:filter-clauses="setClauses"
+		@request-filter-schema="requestSchema"
+		@dismiss-filter-notice="dismissFilterNotice"
 		@update:sort="(s) => setSort(s.field, s.dir)"
 		@update:page-length="(v) => (pageLength = v)"
 		@load-more="loadMore"
@@ -128,10 +131,11 @@
 // pane via the exposed refresh() when the chat pane's run ends or a
 // trigger:changed frame arrives.
 import { ref, computed } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { Badge, Button, Dropdown, Switch, Tooltip, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
+import { triggersListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiTriggers from "@/api/triggers";
 
@@ -140,6 +144,9 @@ const props = defineProps({
 });
 
 const router = useRouter();
+// /triggers is a TABBED route (Triggers | Activity); the payload carries its view
+// key so the Activity tab never applies this list's filters (judgment C08-7).
+const route = useRoute();
 
 function errMsg(e) {
 	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
@@ -184,11 +191,12 @@ const quickFilters = computed(() => [
 	{ key: "enabled", label: "Status", type: "select", options: ENABLED_OPTIONS },
 	{ key: "action_type", label: "Action", type: "select", options: ACTION_OPTIONS },
 ]);
-const filterDefs = computed(() => [
-	{ key: "enabled", label: "Status", type: "select", options: ENABLED_OPTIONS },
-	{ key: "action_type", label: "Action", type: "select", options: ACTION_OPTIONS },
-	{ key: "doc_event", label: "Event", type: "select", options: eventOptions.value },
-]);
+// plan 08 wave 1: the curated `filterDefs` array is GONE as the filter catalog.
+// The panel is generated from the server schema for view_key "triggers". The
+// trigger's LOGIC fields (condition / script_body / llm_instruction) are
+// withheld by the registry's `excluded_fields`, because a `like` filter over
+// them would rebuild what _trigger_detail redacts from non-managers (D1-b).
+const QUICK_CLAUSES = { enabled: "enabled", action_type: "action_type" };
 
 // backend _TRIGGER_SORTABLE whitelist (unknown fields THROW, stricter than
 // macros): modified · trigger_name · target_doctype · doc_event · action_type
@@ -217,13 +225,19 @@ const {
 	resetLoad,
 	loadMore,
 	refreshKeep,
+	filterState,
+	setClauses,
+	requestSchema,
+	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		const { search: q, ...rest } = p.filters || {};
-		return apiTriggers.listTriggersPage({ ...p, search: q || p.search || "", filters: rest });
-	},
+	fetchFn: triggersListFetch,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "triggers",
+	viewKey: "triggers",
+	quickClauses: QUICK_CLAUSES,
+	rootDoctype: "Jarvis Trigger",
+	route,
+	router,
 });
 
 // the parent (TriggersPage) calls this on chat run:end / trigger:changed

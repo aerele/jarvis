@@ -20,17 +20,125 @@ from jarvis.admin_client import (
 	post_update_llm_creds,
 )
 
+# jarvis #566. These fixtures used to configure the REAL Jarvis Settings Single
+# and then, on teardown, call remove_encrypted_password() on three of its
+# Password fields. Both halves committed, so the whole thing escaped
+# FrappeTestCase's rollback, and running this module against a real site
+# permanently destroyed that site's control-plane credentials. That is not
+# theoretical: it took site.jarvis's jarvis_admin_api_key, api_secret and
+# customer_password on 2026-07-30 and they had to be restored by hand.
+#
+# The teardown's deletion was load-bearing GIVEN the setup: db_set on a Password
+# field writes the plaintext straight to tabSingles and never touches __Auth
+# (jarvis/_password_utils.py documents this), and BaseDocument.get_password
+# prefers that column but FALLS BACK to __Auth once it is blanked. So on a real
+# doc, "cleared" could not be made to read as cleared without dropping the
+# site's own rows. The fix is therefore not to soften the teardown but to stop
+# using a real doc.
+#
+# Nothing here needs one. Everything admin_client reads off Jarvis Settings is
+# three things - jarvis_admin_url, jarvis_admin_customer_email and
+# get_password() - so a plain object serves the whole surface while writing no
+# tabSingles row, no __Auth row and no commit. Same seam
+# TestPermanentRejectionClassification already uses; #542 proved it there and
+# this generalises it to the module.
+
+
+class _FakeSettings:
+	"""Stand-in for the Jarvis Settings Single, for admin_client's readers only.
+
+	``get_password`` mirrors ``BaseDocument.get_password``'s contract minus the
+	``__Auth`` fallback, which is the entire point: there is no encrypted store
+	behind this, so a field that was cleared reads as cleared and cannot serve a
+	real credential left over from the site.
+	"""
+
+	_FIELDS = (
+		"jarvis_admin_url",
+		"jarvis_admin_customer_email",
+		"jarvis_admin_api_key",
+		"jarvis_admin_api_secret",
+		"jarvis_admin_customer_password",
+	)
+
+	def __init__(self):
+		self.reset()
+
+	def reset(self):
+		for field in self._FIELDS:
+			setattr(self, field, "")
+
+	def get_password(self, fieldname="password", raise_exception=True):
+		value = getattr(self, fieldname, "") or ""
+		if not value and raise_exception:
+			frappe.throw(f"Password not found for Jarvis Settings {fieldname}")
+		return value
+
+	def db_set(self, fieldname, value=None, **kwargs):
+		"""Accepts both call shapes the real Document.db_set does. Writes to this
+		object alone - the tests that reach for it are configuring the fixture,
+		not asserting on persistence."""
+		for field, val in (fieldname if isinstance(fieldname, dict) else {fieldname: value}).items():
+			setattr(self, field, val)
+
+
+_ADMIN_SETTINGS = _FakeSettings()
+_REAL_GET_SINGLE = frappe.get_single
+_get_single_patcher = None
+
+
+def _fake_get_single(doctype, *args, **kwargs):
+	"""Serve the fake for Jarvis Settings ONLY; every other doctype still
+	resolves normally, so this cannot quietly change unrelated behaviour."""
+	if doctype == "Jarvis Settings":
+		return _ADMIN_SETTINGS
+	return _REAL_GET_SINGLE(doctype, *args, **kwargs)
+
+
+def setUpModule():
+	global _get_single_patcher
+	_get_single_patcher = patch("frappe.get_single", side_effect=_fake_get_single)
+	_get_single_patcher.start()
+
+
+def tearDownModule():
+	if _get_single_patcher is not None:
+		_get_single_patcher.stop()
+
+
+def _require_fake_settings():
+	"""Refuse to run against a real Single. Without this, a runner that skipped
+	the module fixture would send every helper below straight back at the site's
+	own Jarvis Settings - silently, which is exactly how #566 went unnoticed."""
+	if frappe.get_single("Jarvis Settings") is not _ADMIN_SETTINGS:
+		raise RuntimeError(
+			"test_admin_client fixtures require the module-level frappe.get_single patch; "
+			"refusing to touch the real Jarvis Settings (see jarvis #566)"
+		)
+
+
+def _admin_settings():
+	"""The ONLY sanctioned way for a test in this module to hold the settings doc.
+
+	A bare frappe.get_single here would be correct while the module patch is up and
+	catastrophic if it ever is not, and it reads identically in both cases - so the
+	guard has to sit in front of every reach for the doc, not just the three fixture
+	helpers. Checking first also keeps the failure ordered: a test that grabbed the
+	real Single and then wrote to it would blow up in its own `finally` cleanup,
+	AFTER the write it was supposed to prevent."""
+	_require_fake_settings()
+	return frappe.get_single("Jarvis Settings")
+
 
 def _settings_for_admin(
 	admin_url="https://admin.example.com", api_key="customer-key-123", api_secret="customer-secret-456"
 ):
-	"""Configure Jarvis Settings for the admin path. Uses db_set to bypass
-	read_only on the fields."""
-	settings = frappe.get_single("Jarvis Settings")
-	settings.db_set("jarvis_admin_url", admin_url)
-	settings.db_set("jarvis_admin_api_key", api_key)
-	settings.db_set("jarvis_admin_api_secret", api_secret)
-	frappe.db.commit()
+	"""Configure the fake Jarvis Settings for the api_key:api_secret path."""
+	_require_fake_settings()
+	_ADMIN_SETTINGS.reset()
+	_ADMIN_SETTINGS.jarvis_admin_url = admin_url
+	_ADMIN_SETTINGS.jarvis_admin_api_key = api_key
+	_ADMIN_SETTINGS.jarvis_admin_api_secret = api_secret
 
 
 def _settings_for_oauth(
@@ -40,30 +148,24 @@ def _settings_for_oauth(
 	api_key="",
 	api_secret="",
 ):
-	"""Configure Jarvis Settings for the OAuth bearer path. By default no
+	"""Configure the fake Jarvis Settings for the OAuth bearer path. By default no
 	api_key/secret so the bearer path is exercised in isolation; pass them to
 	test the 401 -> legacy fallback."""
-	settings = frappe.get_single("Jarvis Settings")
-	settings.db_set("jarvis_admin_url", admin_url)
-	settings.db_set("jarvis_admin_customer_email", email)
-	settings.db_set("jarvis_admin_customer_password", password)
-	settings.db_set("jarvis_admin_api_key", api_key)
-	settings.db_set("jarvis_admin_api_secret", api_secret)
-	frappe.db.commit()
+	_require_fake_settings()
+	_ADMIN_SETTINGS.reset()
+	_ADMIN_SETTINGS.jarvis_admin_url = admin_url
+	_ADMIN_SETTINGS.jarvis_admin_customer_email = email
+	_ADMIN_SETTINGS.jarvis_admin_customer_password = password
+	_ADMIN_SETTINGS.jarvis_admin_api_key = api_key
+	_ADMIN_SETTINGS.jarvis_admin_api_secret = api_secret
 	frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
 
 
 def _settings_clear_admin():
-	from frappe.utils.password import remove_encrypted_password
-
-	settings = frappe.get_single("Jarvis Settings")
-	settings.db_set("jarvis_admin_url", "")
-	settings.db_set("jarvis_admin_customer_email", "")
-	# Password fields need __Auth cleared too, not just the column.
-	for f in ("jarvis_admin_api_key", "jarvis_admin_api_secret", "jarvis_admin_customer_password"):
-		remove_encrypted_password("Jarvis Settings", "Jarvis Settings", f)
-		settings.db_set(f, "")
-	frappe.db.commit()
+	"""Blank every admin field. No __Auth row exists behind the fake, so this is
+	the whole of "not onboarded" - nothing is deleted and nothing to restore."""
+	_require_fake_settings()
+	_ADMIN_SETTINGS.reset()
 	frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
 
 
@@ -709,11 +811,10 @@ class TestMissingConfig(FrappeTestCase):
 		"""api_key + api_secret are required; missing either raises early."""
 		from jarvis.exceptions import AdminAuthError
 
-		settings = frappe.get_single("Jarvis Settings")
+		settings = _admin_settings()
 		settings.db_set("jarvis_admin_url", "https://admin.example.com")
 		settings.db_set("jarvis_admin_api_key", "")
 		settings.db_set("jarvis_admin_api_secret", "")
-		frappe.db.commit()
 		try:
 			with self.assertRaises(AdminAuthError):
 				post_update_llm_creds("p", "m", "b", "k")
@@ -723,11 +824,10 @@ class TestMissingConfig(FrappeTestCase):
 	def test_no_secret_raises_auth_error(self):
 		from jarvis.exceptions import AdminAuthError
 
-		settings = frappe.get_single("Jarvis Settings")
+		settings = _admin_settings()
 		settings.db_set("jarvis_admin_url", "https://admin.example.com")
 		settings.db_set("jarvis_admin_api_key", "some-key")
 		settings.db_set("jarvis_admin_api_secret", "")
-		frappe.db.commit()
 		try:
 			with self.assertRaises(AdminAuthError):
 				post_update_llm_creds("p", "m", "b", "k")
@@ -863,6 +963,160 @@ class TestOnboardingClient(FrappeTestCase):
 		):
 			out = admin_client.get_preset_catalog()
 		self.assertEqual(out, BUNDLED_PRESET_CATALOG)
+
+
+_EXPECTED_ADVERT = {
+	"pay_page": "admin_pay_page_v1",
+	"provider_shapes": [
+		"razorpay_order",
+		"razorpay_mandate",
+		"cashfree_order",
+		"cashfree_mandate",
+	],
+}
+
+
+class TestClientCapabilityAdvert(FrappeTestCase):
+	"""Plan-09 WS2: behavior-neutral pay-page capability advert.
+
+	The bench advertises ``admin_pay_page_v1`` + the provider checkout shapes it
+	understands on every signup-payment initiation/resume call. Today's admin
+	ignores the field (Frappe drops unknown form_dict keys), so this is purely
+	outbound predeployment — these tests pin (a) the advert rides both seams,
+	(b) the frozen contract names are exact, (c) a reply carrying no new keys
+	decodes byte-for-byte as it did before the advert existed.
+	"""
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def test_advert_constant_matches_frozen_contract(self):
+		self.assertEqual(admin_client.PAY_PAGE_CAPABILITY, "admin_pay_page_v1")
+		self.assertEqual(
+			list(admin_client.PROVIDER_SHAPES),
+			["razorpay_order", "razorpay_mandate", "cashfree_order", "cashfree_mandate"],
+		)
+		self.assertEqual(admin_client._client_capabilities(), _EXPECTED_ADVERT)
+
+	def test_helper_returns_a_fresh_copy(self):
+		# A caller mutating the returned advert (it becomes a request body) must
+		# not corrupt the next call's advert.
+		first = admin_client._client_capabilities()
+		first["pay_page"] = "tampered"
+		first["provider_shapes"].append("tampered")
+		self.assertEqual(admin_client._client_capabilities(), _EXPECTED_ADVERT)
+
+	def test_signup_carries_capability_advert(self):
+		_settings_clear_admin()  # guest signup path
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(captured["json"]["client_capabilities"], _EXPECTED_ADVERT)
+
+	def test_resume_pending_signup_carries_capability_advert(self):
+		_settings_for_admin()  # authenticated resume path
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.resume_pending_signup("Annual Plan")
+		self.assertEqual(captured["json"]["client_capabilities"], _EXPECTED_ADVERT)
+
+	def test_response_without_new_keys_decodes_unchanged(self):
+		# Behavior neutrality: an admin that ignores the advert replies exactly as
+		# before, and the decoded result is the same dict the bench saw pre-WS2.
+		# The advert is outbound-only; it never touches the reply path.
+		_settings_clear_admin()
+		legacy_data = {
+			"api_key": "k",
+			"api_secret": "s",
+			"payment_provider": "razorpay",
+			"razorpay_order_id": "order_R",
+			"razorpay_key_id": "rzp",
+			"amount_inr": 1500,
+		}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			return _mock_response(200, json_body={"message": {"ok": True, "data": dict(legacy_data)}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			out = admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(out, legacy_data)
+
+
+class TestPublicOriginSweep(FrappeTestCase):
+	"""plan-09 P1-5: the bench half of the ``get_url`` sweep. The ``frappe_site_url``
+	the bench hands admin must NOT be derivable from the request ``Host`` header (a
+	guest could otherwise choose the tenant's recorded site URL / magic-link base).
+	The fix is ``allow_header_override=False`` on the fallback, with a configured
+	``host_name`` preferred."""
+
+	def tearDown(self):
+		_settings_clear_admin()
+		for k in ("host_name", "hostname", "restart_supervisor_on_update", "restart_systemd_on_update"):
+			frappe.conf.pop(k, None)
+
+	def test_public_origin_prefers_configured_host_name(self):
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
+
+	def test_public_origin_normalizes_a_bare_host_name_to_https(self):
+		frappe.conf["host_name"] = "tenant.example.com"
+		self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
+
+	def test_public_origin_falls_back_with_header_override_OFF(self):
+		# No host_name → the get_url fallback MUST be called with
+		# allow_header_override=False (the load-bearing anti-injection fix).
+		frappe.conf.pop("host_name", None)
+		frappe.conf.pop("hostname", None)
+		with patch("frappe.utils.get_url", return_value="https://fallback.example.com") as gu:
+			out = admin_client._public_origin()
+		gu.assert_called_once_with(allow_header_override=False)
+		self.assertEqual(out, "https://fallback.example.com")
+
+	def test_http_fallback_on_a_production_bench_warns_but_does_not_throw(self):
+		frappe.conf.pop("host_name", None)
+		frappe.conf.pop("hostname", None)
+		frappe.conf["restart_supervisor_on_update"] = 1  # marks a production bench
+		with patch("frappe.utils.get_url", return_value="http://dev.local"):
+			# Must NOT raise (would break signup on an unconfigured bench).
+			out = admin_client._public_origin()
+		self.assertEqual(out, "http://dev.local")
+
+	def test_signup_sends_the_swept_origin_never_the_raw_header(self):
+		_settings_clear_admin()  # guest signup path
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(captured["json"]["frappe_site_url"], "https://tenant.example.com")
+
+	def test_reconnect_and_replacement_seams_use_the_swept_origin(self):
+		_settings_clear_admin()
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		seen = []
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			seen.append(json.get("frappe_site_url"))
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.site_replacement()
+			admin_client.request_account_reconnect("e@x.com", "Co")
+		self.assertEqual(seen, ["https://tenant.example.com", "https://tenant.example.com"])
 
 
 class TestPostUpdateLlmCredsAuthMode(FrappeTestCase):
@@ -1426,3 +1680,55 @@ class TestAdminAppNamespace(FrappeTestCase):
 		)
 		with patch.dict(frappe.local.conf, {"jarvis_admin_app": "jarvis_admin_v2"}):
 			self.assertNotIn("jarvis_admin", admin_client._OAUTH_TOKEN_PATH)
+
+
+class TestFixturesCannotDestroySiteCredentials(FrappeTestCase):
+	"""jarvis #566: pins the safety property of this module's own fixtures.
+
+	They previously committed writes to the real Jarvis Settings Single and
+	dropped three of its Password fields from __Auth on teardown, which took
+	site.jarvis's control-plane credentials on 2026-07-30. The damage was silent
+	- the teardown restored nothing and the failures surfaced much later, in
+	admin calls with no visible link back to a test run - so the guard against
+	it needs to be an assertion rather than a comment.
+	"""
+
+	def tearDown(self):
+		_ADMIN_SETTINGS.reset()
+
+	def test_no_fixture_removes_an_encrypted_password(self):
+		"""The exact operation from the incident. Patched at its definition site
+		so a lazy `from frappe.utils.password import ...` inside a helper is
+		caught too."""
+		with patch("frappe.utils.password.remove_encrypted_password") as removed:
+			_settings_for_admin()
+			_settings_for_oauth()
+			_settings_clear_admin()
+		removed.assert_not_called()
+
+	def test_the_module_resolves_jarvis_settings_to_the_fake(self):
+		self.assertIs(frappe.get_single("Jarvis Settings"), _ADMIN_SETTINGS)
+
+	def test_other_doctypes_still_resolve_normally(self):
+		"""The patch is scoped by doctype, so it cannot quietly change behaviour
+		for anything this module did not intend to fake."""
+		self.assertIsNot(frappe.get_single("System Settings"), _ADMIN_SETTINGS)
+
+	def test_a_cleared_credential_reads_as_cleared(self):
+		"""What the destructive teardown was actually FOR. On the real doc,
+		blanking the column made get_password fall through to __Auth and hand
+		back the site's own secret, so "not onboarded" tests could only be made
+		honest by deleting it. With no encrypted store behind the fake, blank is
+		simply blank."""
+		_settings_for_admin(api_key="fixture-key", api_secret="fixture-secret")
+		_settings_clear_admin()
+		settings = _admin_settings()
+		for field in ("jarvis_admin_api_key", "jarvis_admin_api_secret", "jarvis_admin_customer_password"):
+			self.assertEqual(settings.get_password(field, raise_exception=False), "")
+
+	def test_a_fixture_refuses_to_run_against_the_real_single(self):
+		"""A runner that skipped setUpModule would otherwise send every helper
+		straight back at the site's own settings, silently."""
+		with patch("frappe.get_single", _REAL_GET_SINGLE):
+			with self.assertRaises(RuntimeError):
+				_settings_clear_admin()

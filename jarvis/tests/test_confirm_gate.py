@@ -389,6 +389,56 @@ class TestConfirmTool(FrappeTestCase):
 		self.assertFalse(res["ok"])
 		self.assertEqual(res["error"]["type"], "InvalidConfirmation")
 
+	def test_confirm_storage_failure_is_not_reported_as_expiry_and_executes_nothing(self):
+		desc = "jarvis-test-confirm-storage-unavailable"
+		token = self._park(
+			"create_doc",
+			{"doctype": "ToDo", "values": {"description": desc}},
+		)
+		failure = pending_confirm.PendingConfirmStorageError("read unavailable")
+		with patch.object(pending_confirm, "peek", side_effect=failure):
+			with patch("jarvis.api.dispatch_confirmed") as dispatch:
+				with patch.object(frappe, "logger"):
+					res = confirm_tool(token)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["type"], "ConfirmationUnavailableError")
+		self.assertIn("Nothing was changed", res["error"]["message"])
+		dispatch.assert_not_called()
+		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
+		self.assertIsNotNone(pending_confirm.peek(token))
+
+	def test_confirm_unknown_consume_outcome_has_distinct_error_and_executes_nothing(self):
+		desc = "jarvis-test-confirm-outcome-unknown"
+		token = self._park(
+			"create_doc",
+			{"doctype": "ToDo", "values": {"description": desc}},
+		)
+		failure = pending_confirm.PendingConfirmOutcomeUnknown("recovery unavailable")
+		with patch.object(pending_confirm, "consume", side_effect=failure):
+			with patch("jarvis.api.dispatch_confirmed") as dispatch:
+				with patch.object(frappe, "logger"):
+					res = confirm_tool(token)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["type"], "ConfirmationOutcomeUnknownError")
+		self.assertIn("business action was not run", res["error"]["message"])
+		dispatch.assert_not_called()
+		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
+
+	def test_dismiss_storage_failure_keeps_token_and_reports_unavailable(self):
+		from jarvis.chat.actions_api import dismiss_tool
+
+		token = self._park(
+			"create_doc",
+			{"doctype": "ToDo", "values": {"description": "dismiss-storage"}},
+		)
+		failure = pending_confirm.PendingConfirmStorageError("read unavailable")
+		with patch.object(pending_confirm, "peek", side_effect=failure):
+			with patch.object(frappe, "logger"):
+				res = dismiss_tool(token)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["type"], "ConfirmationUnavailableError")
+		self.assertIsNotNone(pending_confirm.peek(token))
+
 
 class TestGatedToolRefusesModelPreview(FrappeTestCase):
 	"""Fix #14: a gated write called with ``preview=True`` must NOT take the
@@ -825,6 +875,17 @@ class TestListPendingConfirmations(FrappeTestCase):
 		finally:
 			frappe.set_user(original)
 
+	def test_storage_failure_returns_error_instead_of_authoritative_empty_list(self):
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		failure = pending_confirm.PendingConfirmStorageError("index unavailable")
+		with patch.object(pending_confirm, "list_items_for_owner", side_effect=failure):
+			with patch.object(frappe, "logger"):
+				res = list_pending_confirmations()
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["type"], "ConfirmationUnavailableError")
+		self.assertNotIn("data", res)
+
 
 class TestCreateDocsGate(FrappeTestCase):
 	def test_create_docs_parks_one_card_and_dry_runs_batch(self):
@@ -988,6 +1049,19 @@ class TestSequentialConfirmationGuard(FrappeTestCase):
 		self.assertFalse(r2["ok"])
 		self.assertEqual(r2["error"]["code"], "ConfirmationPendingError")
 		self.assertIsNone(cap2.get("token"))  # no second token minted
+
+	def test_single_flight_storage_failure_fails_closed_without_parking(self):
+		failure = pending_confirm.PendingConfirmStorageError("index unavailable")
+		with patch.object(pending_confirm, "list_for_owner", side_effect=failure):
+			with patch.object(pending_confirm, "mint") as mint:
+				r = api._run_tool(
+					"create_doc",
+					{"doctype": "ToDo", "values": {"description": "seq-storage"}},
+					conversation="seq-guard-storage",
+				)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "ConfirmationUnavailableError")
+		mint.assert_not_called()
 
 	def test_pending_card_does_not_block_a_different_conversation(self):
 		with _spy_mint()[0]:

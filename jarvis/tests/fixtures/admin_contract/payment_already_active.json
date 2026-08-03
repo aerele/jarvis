@@ -1,0 +1,23 @@
+{
+  "contract_version": 2,
+  "name": "payment_already_active",
+  "description": "Retry against a signup that is already paid - most often the webhook activated between the failed checkout and the retry. A distinct, actionable answer instead of the old blanket NotResumable, and never a second payment intent.",
+  "endpoint": "jarvis_admin_v2.billing.signup.resume_pending_signup",
+  "http_status": 409,
+  "volatile": [
+    "body.message.error.attempt_id",
+    "body.message.error.message"
+  ],
+  "body": {
+    "message": {
+      "ok": false,
+      "error": {
+        "code": "PAYMENT_ALREADY_ACTIVE",
+        "message": "This signup is already paid. Continue setup.",
+        "recovery": "continue_setup",
+        "subscription_status": "Active",
+        "attempt_id": "att_placeholder"
+      }
+    }
+  }
+}

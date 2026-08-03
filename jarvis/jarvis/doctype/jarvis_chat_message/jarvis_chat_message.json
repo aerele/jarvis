@@ -195,7 +195,7 @@
       "length": 140,
       "read_only": 1,
       "no_copy": 1,
-      "description": "jarvis#560 - the model that actually PRODUCED this reply, stamped on assistant rows only. Read at finalize from the gateway's sessions.list row for this turn's session (the same row the per-model usage bucket is billed against, so the transcript and the usage pane can never disagree). It names the model that answered, which is not always the one requested: an unpinned conversation keeps openclaw's failover chain live, so a substitution lands here with no other trace. Blank on legacy rows and on turns whose session row never named a model."
+      "description": "jarvis#560 - the model that actually PRODUCED this reply, stamped on assistant rows only. Read at finalize from the gateway's sessions.list row for this turn's session (the same row the per-model usage bucket is billed against, so the transcript and the usage pane can never disagree). It names the model that answered, which is not always the one requested: an unpinned conversation keeps the agent's failover chain live, so a substitution lands here with no other trace. Blank on legacy rows and on turns whose session row never named a model."
     },
     {
       "fieldname": "provider",
@@ -204,7 +204,7 @@
       "length": 140,
       "read_only": 1,
       "no_copy": 1,
-      "description": "jarvis#560 - the openclaw provider id that served this reply (sessions.list `modelProvider`, e.g. `gemini`, `openai_compat`), paired with `model`. Two providers can expose the same model id, so the pair is what identifies the run for an audit or an incident review."
+      "description": "jarvis#560 - the agent provider id that served this reply (sessions.list `modelProvider`, e.g. `gemini`, `openai_compat`), paired with `model`. Two providers can expose the same model id, so the pair is what identifies the run for an audit or an incident review."
     },
     {
       "fieldname": "hidden",

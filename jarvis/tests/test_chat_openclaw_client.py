@@ -1000,7 +1000,7 @@ class TestSessionsListModelIdentity(FrappeTestCase):
 		)
 
 	def test_row_that_names_no_model_decodes_as_blank(self):
-		# An openclaw-direct pool that never resolved a model omits both fields;
+		# An agent-direct pool that never resolved a model omits both fields;
 		# the decoder must answer "" rather than invent one, so the assistant row
 		# is left unattributed instead of falsely attributed.
 		sess, ws = _build_session()

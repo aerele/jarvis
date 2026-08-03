@@ -150,25 +150,114 @@ class AdminAuthError(JarvisError):
 	*authorization* denial (403 - the same customer principal backs both the
 	bearer and the legacy api_key:api_secret, so re-minting and the legacy
 	fallback would just replay into the same 403 while storming the token
-	endpoint). None when the status isn't known."""
+	endpoint). None when the status isn't known.
 
-	def __init__(self, message: str, *, status_code: int | None = None):
+	``code`` carries admin's structured ``error.code`` from the refusal envelope
+	when present (e.g. ``PENDING_PAYMENT``), so a caller can branch on a stable
+	machine token instead of parsing the human sentence a hardened control plane
+	may omit - see jarvis.account._is_never_paid_403. Empty when admin sent none."""
+
+	def __init__(self, message: str, *, status_code: int | None = None, code: str = ""):
 		super().__init__(message)
 		self.status_code = status_code
+		self.code = code
 
 
 class AdminValidationError(JarvisError):
 	"""jarvis_admin raised a Frappe ValidationError (or similar user-input
 	error) inside a whitelisted endpoint. Carries the clean operator-facing
-	message - never the traceback dump."""
+	message - never the traceback dump.
+
+	``exc_type`` is admin's own exception CLASS name ("DuplicateEntryError",
+	"ValidationError", ...) when the response declared one, else None. A caller
+	that needs to know WHICH rejection this is branches on that - or, better, on
+	the ``code`` an AdminContractError carries. Never on the message: the
+	failed-payment resume matched the substring "already registered or pending",
+	admin reworded the sentence on 2026-07-26, and the resume was unreachable
+	for every declined-card customer while both repositories stayed green."""
+
+	def __init__(self, message: str, *, exc_type: str | None = None):
+		super().__init__(message)
+		self.exc_type = exc_type
+
+
+class AdminContractError(AdminValidationError):
+	"""jarvis_admin refused the request with a MACHINE-READABLE error from the
+	onboarding/payment contract (``jarvis_admin_v2/billing/codes.py``).
+
+	The contract's whole point is that the caller branches on ``code`` and only
+	*renders* ``message``. This class is what carries the code across
+	admin_client's boundary, which used to flatten every known 4xx into a bare
+	AdminValidationError holding nothing but prose.
+
+	- ``code``          - admin's ``error.code`` (ACCOUNT_ALREADY_EXISTS, ...).
+	- ``contract_code`` - the stable code where a path already shipped a legacy
+	  identifier in ``code`` (Razorpay's "BadPaymentSignature", Cashfree's
+	  "PaymentNotConfirmed"); the legacy string stays where deployed benches
+	  look for it and the contract value rides beside it. Prefer
+	  ``stable_code``, which picks it when present.
+	- ``recovery``      - the advisory next action ("retry", "continue_setup",
+	  "authenticate_or_reconnect", ...). Advisory: the code alone decides, and
+	  an unknown hint is ignored.
+	- ``error``         - the whole ``error`` object, so a facade can hand the
+	  contract onward without re-deriving it (extras like
+	  ``retry_after_seconds``, ``subscription_status``, ``attempt_id`` live
+	  here). Contract rule 3 keeps internal document names out of it.
+	- ``http_status``   - the deliberate 4xx admin chose.
+
+	A SUBCLASS of AdminValidationError on purpose: every existing catch site
+	already handles that class and keeps working unchanged, and ``str(e)`` is
+	still the same clean message. An admin too old to send a code raises the
+	plain parent instead - that is the fail-closed path, never a prose parse."""
+
+	def __init__(
+		self,
+		message: str,
+		*,
+		code: str = "",
+		contract_code: str = "",
+		recovery: str = "",
+		error: dict | None = None,
+		exc_type: str | None = None,
+		http_status: int = 0,
+	):
+		super().__init__(message, exc_type=exc_type)
+		self.code = code
+		self.contract_code = contract_code
+		self.recovery = recovery
+		self.error = error or {}
+		self.http_status = http_status
+
+	@property
+	def stable_code(self) -> str:
+		"""``contract_code`` when admin sent one, else ``code``."""
+		return self.contract_code or self.code
 
 
 class AdminRateLimitedError(JarvisError):
 	"""jarvis_admin returned HTTP 429 - caller should back off and retry later.
 
 	``retry_after_seconds`` carries the body's hint when the admin provides
-	one (0 if absent)."""
+	one (0 if absent).
 
-	def __init__(self, message: str = "rate_limited", retry_after_seconds: int = 0):
+	``code`` / ``recovery`` / ``error`` carry the contract payload when the 429
+	is a CODED one (today: ``PAYMENT_CHECK_RATE_LIMITED``, the per-customer cap
+	on provider-truth checks) rather than the stock per-IP limiter's bare
+	status. They matter because "back off" and "your payment failed" are
+	opposite instructions to a wizard, and a caller that can only read the
+	status has to guess which one it got."""
+
+	def __init__(
+		self,
+		message: str = "rate_limited",
+		retry_after_seconds: int = 0,
+		*,
+		code: str = "",
+		recovery: str = "",
+		error: dict | None = None,
+	):
 		super().__init__(message)
 		self.retry_after_seconds = retry_after_seconds
+		self.code = code
+		self.recovery = recovery
+		self.error = error or {}

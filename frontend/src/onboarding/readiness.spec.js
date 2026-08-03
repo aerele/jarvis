@@ -57,6 +57,22 @@ describe("readiness verdict ownership", () => {
 		expect(await needsLlmConnection()).toBe(false);
 	});
 
+	it("shows authority_repair_required on the generic banner, never a CTA one", async () => {
+		// review plan 04 P0-6: the safe blocked state must surface admin's own
+		// reassurance and NOTHING that offers payment/reconnect. It rides the same
+		// generic detail banner as container_provisioning, and needsLlmConnection
+		// (the only accessor with a CTA) must stay silent for it.
+		verdict({
+			ready: false,
+			reason: "authority_repair_required",
+			detail: "Your payment is safe — please don't retry payment.",
+		});
+		expect(await readinessDetailOf()).toBe(
+			"Your payment is safe — please don't retry payment."
+		);
+		expect(await needsLlmConnection()).toBe(false);
+	});
+
 	it("leaves subscription_suspended to its own Renew banner", async () => {
 		verdict({ ready: false, reason: "subscription_suspended", detail: "Renew to continue." });
 		expect(await readinessDetailOf()).toBe("");
@@ -84,6 +100,7 @@ describe("readiness verdict ownership", () => {
 			"llm_pool_provisioning",
 			"llm_provisioning",
 			"container_provisioning",
+			"authority_repair_required",
 			"subscription_suspended",
 			null,
 		];

@@ -23,13 +23,27 @@ const STRIP_RES = [
 	/```jarvis-macro[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-chart[ \t]*\n[\s\S]*?```/g,
 	/```mermaid[ \t]*\n[ \t]*xychart-beta[\s\S]*?```/g,
+	// A mermaid block that is NOT xychart-beta is a DIAGRAM (flowchart etc.) the
+	// PWA can't draw. Strip it so it doesn't leak as a raw code block; the chip
+	// from countDiagrams opens it in the web chat instead.
+	/```mermaid[ \t]*\n(?![ \t]*xychart-beta)[\s\S]*?```/g,
 ];
+
+// Separate object (not shared with STRIP_RES) so its /g lastIndex can't collide.
+const DIAGRAM_RE = /```mermaid[ \t]*\n(?![ \t]*xychart-beta)[\s\S]*?```/g;
 
 /** The agent's prose, with every control block removed. */
 export function stripAgentBlocks(text) {
 	let t = text || "";
 	for (const re of STRIP_RES) t = t.replace(re, "");
 	return t.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** How many mermaid DIAGRAMS (flowcharts etc., not data charts) the reply holds. */
+export function countDiagrams(text) {
+	if (!text || !text.includes("```mermaid")) return 0;
+	const m = text.match(DIAGRAM_RE);
+	return m ? m.length : 0;
 }
 
 /** ```jarvis-cards``` → {title, cards:[{title, subtitle, doctype, name, fields}]}. */

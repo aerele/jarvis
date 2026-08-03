@@ -211,8 +211,20 @@
 			     crowds the composer or the send button. "Maybe later" just hides the card
 			     client-side for this chat - the cadence itself is the snooze, so it comes
 			     back on the next multiple-of-three chat with no follow-up question. "Don't
-			     ask again" is the durable, permanent, server-side dismiss. -->
-			<div v-if="bizGreeting.show" class="jv-greeting-banner">
+			     ask again" is the durable, permanent, server-side dismiss.
+			     Suppressed while the first-chat introduction is on screen: both draw
+			     above the welcome column, and stacking a nudge on top of "hello, here
+			     is what I do" is the one place they must never meet. Nothing is
+			     consumed by skipping it — the cadence counter is bumped server-side by
+			     create_or_focus_empty and maybe_greet is a pure reader, so the card
+			     simply returns on the next multiple-of-three chat.
+			     Known edge, accepted: the suppression lifts the instant the first
+			     message lands (showWelcome goes false), so a user whose very first
+			     chat is ALSO a cadence tick sees the card appear as their first turn
+			     starts. It needs the introduction and a multiple-of-three chat count
+			     at the same moment, which the v2_10 backfill leaves to essentially
+			     nobody — a brand-new user's first chat is count 1. -->
+			<div v-if="bizGreeting.show && !showHomeIntro" class="jv-greeting-banner">
 				<div class="jv-nudge" style="margin: 0">
 					<div class="jv-nudge-head">
 						<div class="jv-nudge-q">
@@ -287,52 +299,57 @@
 				</svg>
 			</div>
 			<!-- ===== WELCOME ===== -->
-			<div
-				v-else-if="showWelcome"
-				style="
-					flex: 1;
-					overflow-y: auto;
-					display: flex;
-					flex-direction: column;
-					align-items: center;
-					justify-content: center;
-					padding: 32px;
-				"
-			>
-				<div style="width: 100%; max-width: 680px; text-align: center">
-					<!-- The brand mark, from its single source of truth. This was a
-					     hand-pasted copy whose gradient read `var(--cta)` as its first
-					     stop; when #294 repointed --cta from indigo to near-black, this
-					     mark silently became near-black->purple while the sidebar mark
-					     (UserMenu) stayed blue->purple — two different logos on one
-					     screen. The purple glow shadow is dropped (design.md §5 #4). -->
-					<JarvisMark :size="54" :radius="14" style="margin: 0 auto 18px" />
-					<h1
-						class="jv-welcome-h1"
-						style="
-							font-size: 30px;
-							font-weight: 640;
-							letter-spacing: -0.03em;
-							margin: 0 0 8px;
-							overflow-wrap: anywhere;
-						"
-					>
-						{{ greeting }}, {{ firstName }}
-					</h1>
-					<p
-						style="
-							font-size: 14.5px;
-							color: var(--text-2);
-							margin: 0 0 26px;
-							line-height: 1.5;
-						"
-					>
-						Ask about your ERP data, run a workflow, or draft something.
-						{{ agentName }}
-						is connected to your
-						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
-						instance.
-					</p>
+			<!-- Scroll viewport + inner column are CLASSES, not inline styles: inline
+			     styles cannot be overridden, and the overflow-safe centring below
+			     (jv-welcome-scroll/jv-welcome-col) has to win on short/zoomed
+			     viewports. See the style block for the centre-when-it-fits rationale. -->
+			<div v-else-if="showWelcome" class="jv-welcome-scroll">
+				<div class="jv-welcome-col">
+					<!-- First empty chat home (per user, versioned): the assistant-styled
+					     introduction REPLACES the compact hero, then never lectures
+					     again. Static presentation only — see WelcomeAssistantMessage. -->
+					<WelcomeAssistantMessage
+						v-if="showHomeIntro"
+						:speaker="homeIntroSpeakerName"
+						:persona="homeIntroPersona"
+						:firstName="firstName"
+						@seen="ackHomeIntro"
+					/>
+					<template v-else>
+						<!-- The brand mark, from its single source of truth. This was a
+						     hand-pasted copy whose gradient read `var(--cta)` as its first
+						     stop; when #294 repointed --cta from indigo to near-black, this
+						     mark silently became near-black->purple while the sidebar mark
+						     (UserMenu) stayed blue->purple — two different logos on one
+						     screen. The purple glow shadow is dropped (design.md §5 #4). -->
+						<JarvisMark :size="54" :radius="14" style="margin: 0 auto 18px" />
+						<h1
+							class="jv-welcome-h1"
+							style="
+								font-size: 30px;
+								font-weight: 640;
+								letter-spacing: -0.03em;
+								margin: 0 0 8px;
+								overflow-wrap: anywhere;
+							"
+						>
+							{{ greeting }}, {{ firstName }}
+						</h1>
+						<p
+							style="
+								font-size: 14.5px;
+								color: var(--text-2);
+								margin: 0 0 26px;
+								line-height: 1.5;
+							"
+						>
+							Ask about your ERP data, run a workflow, or draft something.
+							{{ agentName }}
+							is connected to your
+							<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
+							instance.
+						</p>
+					</template>
 					<div
 						class="jv-welcome-grid"
 						style="
@@ -347,7 +364,7 @@
 							:key="s.title"
 							type="button"
 							class="jv-suggest"
-							@click="fillInput(s.prompt)"
+							@click="onWelcomeSuggestion(s)"
 							style="
 								display: flex;
 								gap: 11px;
@@ -3396,7 +3413,7 @@ import {
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import * as api from "@/api";
 import * as voice from "@/api/voice";
-import { agentName } from "@/branding";
+import { agentName, isWhitelabeled } from "@/branding";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { useDictationRecorder } from "@/composables/useDictationRecorder";
 import { createVoiceDictationStore } from "@/utils/voiceDictationStore";
@@ -3434,6 +3451,8 @@ import Composer from "@/components/chat/Composer.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import PersonaPill from "@/components/chat/PersonaPill.vue";
 import AskCard from "@/components/chat/AskCard.vue";
+import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
+import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { dashboardForConversation } from "@/api/dashboards";
@@ -4485,7 +4504,7 @@ function elapsedLabel(m) {
 }
 // Per-reply model attribution (jarvis#560). m.model / m.provider are stamped on
 // the assistant row at finalize and name the model that ACTUALLY answered, which
-// is not always the one the user picked: an unpinned thread keeps openclaw's
+// is not always the one the user picked: an unpinned thread keeps the agent's
 // failover chain live, so a substitution otherwise leaves no trace anywhere. The
 // show/hide rule lives in @/utils/modelBadge (unit-tested there) because a rule
 // that hides too eagerly would suppress the whole signal without failing.
@@ -4539,6 +4558,45 @@ const showWelcome = computed(
 	() => !booting.value && (!currentId.value || visibleMessages.value.length === 0)
 );
 
+// ---- first-chat introduction (the static assistant-styled welcome bubble) ----
+// The boot/latch/ack transition lives in useHomeIntro (composable) so it can be
+// behaviour-tested without mounting this view. It is resolved ONCE from the boot
+// payload (both numbers land in `ui` before booting flips false, so the bubble
+// can never flash in or out) via initFromBoot() below, then latched for the
+// session: the introduction stays while the user is on an empty chat home and
+// retires the moment any real message is on screen (their first send, or opening
+// a chat that already has content). It never draws over a conversation that has
+// messages (a proactive one included) because showWelcome is false there by
+// definition. The ack is fire-and-forget; a failed ack only means the intro may
+// appear again on a later page load, and must never gate the composer.
+const {
+	showHomeIntro,
+	homeIntroPersona,
+	homeIntroSpeakerName,
+	initFromBoot: initHomeIntro,
+	ackHomeIntro,
+	noteSuggestionSelected: noteWelcomeSuggestion,
+} = useHomeIntro({
+	showWelcome,
+	booting,
+	visibleCount: () => visibleMessages.value.length,
+	ui,
+	isWhitelabeled,
+	agentName,
+	getPersona: () => store.preferredPersona,
+	markSeen: (v) => api.markHomeIntroSeen(v),
+	// Bounded, privacy-free UI telemetry (no message content, no user name). The
+	// backend endpoint hashes the caller and allow-lists the fields; a failure
+	// here never touches chat.
+	emitTelemetry: (event, payload) => {
+		try {
+			api.recordHomeIntroEvent(event, payload);
+		} catch (e) {
+			/* fire-and-forget */
+		}
+	},
+});
+
 // settings/overview derived metrics (all from data we already hold)
 const convCount = computed(() => store.conversations.length);
 const msgCount = computed(() => visibleMessages.value.length);
@@ -4591,6 +4649,7 @@ const convStreaming = computed(() => store.streamingConvId === currentId.value);
 
 const suggestions = [
 	{
+		category: "analyse",
 		title: "Analyse data",
 		prompt: "Which sales orders are overdue this month?",
 		bg: "var(--cta-bg)",
@@ -4598,6 +4657,7 @@ const suggestions = [
 		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 9l-5 5-3-3-4 4"/></svg>',
 	},
 	{
+		category: "action",
 		title: "Take an action",
 		prompt: "Draft a document for me to review",
 		bg: "var(--green-bg)",
@@ -4605,6 +4665,7 @@ const suggestions = [
 		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>',
 	},
 	{
+		category: "search",
 		title: "Search records",
 		prompt: "Search for a customer or contact",
 		bg: "var(--amber-bg)",
@@ -4612,6 +4673,7 @@ const suggestions = [
 		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
 	},
 	{
+		category: "draft",
 		title: "Draft content",
 		prompt: "Write a follow-up email to a lead",
 		bg: "rgba(139,92,246,.12)",
@@ -4619,6 +4681,15 @@ const suggestions = [
 		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
 	},
 ];
+
+// A welcome suggestion card was chosen: record its category (a stable token,
+// never the prompt text) for the intro telemetry, then fill the composer. It
+// fills, never sends — the do-not-regress rule that a suggestion must not
+// auto-send is unchanged.
+function onWelcomeSuggestion(s) {
+	noteWelcomeSuggestion(s.category || s.title);
+	fillInput(s.prompt);
+}
 
 // Inline action blocks the agent emits: a rich ```jarvis-action JSON card (a doc
 // create/update confirm, or an email draft), or a simple ```confirm label as a
@@ -5732,6 +5803,10 @@ function removePending(token) {
 	if (!token) return;
 	pendingActions.value = pendingActions.value.filter((x) => x.token !== token);
 }
+function confirmationStorageUnavailable(response) {
+	const type = response && response.error && response.error.type;
+	return type === "ConfirmationUnavailableError" || type === "ConfirmationOutcomeUnknownError";
+}
 // Enqueue a parked confirmation, deduped by token (a resync + a live event can
 // both carry the same card).
 function enqueuePending(card) {
@@ -5767,6 +5842,12 @@ async function confirmPending(pa) {
 	try {
 		const r = await api.confirmTool(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
+			if (confirmationStorageUnavailable(r)) {
+				const card = cardById();
+				if (card) card.error = r.error;
+				notify(r.error.message, { type: "error" });
+				return;
+			}
 			// Token gone/expired/used, or the executed tool reported failure. Either
 			// way the card is spent - surface a brief note and dismiss.
 			if (r.error && r.error.type === "InvalidConfirmation") {
@@ -5822,17 +5903,28 @@ async function confirmPending(pa) {
 // Dismiss: consume the token server-side (closes the 15-min replay window and
 // stops the card re-surfacing on reload), leave a durable "discarded" receipt
 // chip, and queue a note so the agent's next turn learns it was vetoed. Fires NO
-// agent turn. Best-effort: even if the call fails, the card drops locally (the
-// token TTL-expires) - only the chip would be missing.
+// agent turn. Storage/transport failures keep the card visible so an outage is
+// not mistaken for a successful discard; the server-side token still self-expires.
 async function discardPending(pa) {
 	if (!pa || pa.busy) return;
 	const token = pa.token;
 	const conv = pa.conversation || currentId.value || "";
 	pa.busy = true;
 	try {
-		await api.dismissTool(token, conv);
+		const r = await api.dismissTool(token, conv);
+		if (r && r.ok === false && confirmationStorageUnavailable(r)) {
+			pa.error = r.error;
+			notify(r.error.message, { type: "error" });
+			return;
+		}
 	} catch (e) {
-		// Swallow - drop the card regardless (the token self-expires server-side).
+		pa.error = {
+			message:
+				(e && e.messages && e.messages[0]) || (e && e.message) || "Could not discard.",
+		};
+		return;
+	} finally {
+		pa.busy = false;
 	}
 	removePending(token);
 	// Re-fetch so the durable "discarded" chip shows in the thread.
@@ -5850,6 +5942,7 @@ async function resyncPendingConfirmations(id) {
 	let items = [];
 	try {
 		const r = await api.listPendingConfirmations(id);
+		if (r && r.ok === false) return;
 		items = (r && r.data && r.data.pending) || [];
 	} catch (e) {
 		return;
@@ -8569,6 +8662,9 @@ onMounted(async () => {
 	if (ui.value.preferred_persona !== undefined) {
 		store.setPreferredPersona(ui.value.preferred_persona, { persist: false });
 	}
+	// First-chat introduction, decided here (before booting flips false) so the
+	// welcome column paints its final shape in one go.
+	initHomeIntro();
 	// Offer recovery of any recording a prior session left un-transcribed (a tab
 	// crash / accidental reload) — only when dictation is actually enabled.
 	// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes
@@ -9366,6 +9462,32 @@ onUnmounted(() => {
 		animation: none;
 	}
 }
+/* Empty-chat welcome viewport. This was inline-styled with justify-content:center,
+   which is UNSAFE centring: once the four-paragraph introduction + suggestion grid
+   is taller than the viewport (short phone, landscape, on-screen keyboard, 200%
+   zoom) flex centring splits the overflow above AND below the scroll origin, and
+   the part above it can never be scrolled back to — the exact first lines a
+   first-time user is meant to read. The fix is centre-when-it-fits /
+   start-when-it-overflows: justify-content:flex-start pins the scroll origin to the
+   top, and block-axis auto margins on the single inner column centre it only while
+   free space exists and collapse to 0 (start alignment) the instant it overflows.
+   Named classes because inline styles cannot be overridden and the responsive tests
+   need a stable target. */
+.jv-welcome-scroll {
+	flex: 1;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: flex-start;
+	padding: 32px;
+}
+.jv-welcome-col {
+	width: 100%;
+	max-width: 680px;
+	text-align: center;
+	margin-block: auto;
+}
 /* mobile layout (UX #12): the chat had fixed 40px desktop paddings + a 2-col
    welcome grid; inline styles win over class rules, so these override with
    !important. The "Connect phone" QR flow ships people straight here. */
@@ -9378,6 +9500,11 @@ onUnmounted(() => {
 	}
 	.jv-greeting-banner {
 		padding: 10px 14px 0 !important;
+	}
+	/* Drop the fixed 32px so the text column is not needlessly narrow on a phone,
+	   matching the 16px the thread/composer use. */
+	.jv-welcome-scroll {
+		padding: 24px 16px;
 	}
 	.jv-welcome-grid {
 		grid-template-columns: 1fr !important;

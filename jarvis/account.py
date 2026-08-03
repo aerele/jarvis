@@ -17,23 +17,423 @@ their published names - no duplicates:
   - jarvis.onboarding.finish_payment  (post-Razorpay confirm)
 """
 
+import hashlib
+
 import frappe
 
-from jarvis import admin_client, release_notice
+from jarvis import admin_client, onboarding_contract, release_notice
+from jarvis.exceptions import AdminAuthError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_admin
 
+SETTINGS = "Jarvis Settings"
+
 # R2-H4 chat-readiness gate, shared by boot, is_ready_for_chat and the send
 # entitlement check. Only "Ready" is cached, so suspension/renewal is still seen
-# promptly; 2 min keeps active-chat admin calls to ~1 per burst.
+# promptly.
+#
+# The cache is keyed by a CONFIG REVISION (see _gate_revision) and the TTL is a
+# belt, not the mechanism. A flat site-wide key with a 2-minute TTL meant a
+# customer who had just saved a broken LLM config could be told "Ready" for two
+# more minutes on the strength of the verdict their PREVIOUS config earned - the
+# save itself busted nothing. 30s bounds how long an ADMIN-side change (a
+# suspension, a container restart) can stay hidden; the revision covers every
+# change this bench makes itself, immediately.
 _CHAT_GATE_CACHE_KEY = "jarvis:chat_readiness_gate"
-_CHAT_GATE_CACHE_TTL_S = 120
+_CHAT_GATE_CACHE_TTL_S = 30
+
+# Every LOCAL input that can change what admin answers about readiness. A change
+# to any of them invalidates the cached verdict outright, because the verdict was
+# about the previous configuration. Kept as raw stored values (see _settings_raw)
+# so the hash is stable and cheap.
+#
+# These are the same fields is_ready_for_chat and _llm_apply_confirmed gate on,
+# plus the ones that decide WHICH container answers (agent_url) and what the last
+# apply did (last_sync_status / last_subscription_status) - a save flips the
+# status to "pending:" before anything else moves, so the revision changes on the
+# save itself rather than only when the async apply lands.
+_GATE_REVISION_FIELDS = (
+	"agent_url",
+	"llm_auth_mode",
+	"llm_provider",
+	"llm_model",
+	"proxy_active",
+	"routing_mode",
+	"preset",
+	"last_sync_status",
+	"last_subscription_status",
+	"llm_pool_synced_at",
+	"llm_direct_synced_at",
+	"llm_oauth_connected_at",
+	# The tenant authority this bench is bound to (Plan 04 generation contract).
+	# A move/repair that changes it must not keep serving the verdict the
+	# PREVIOUS authority earned (P1-09). Read raw: the column may not exist yet
+	# on a bench that predates the generation consumer, in which case _settings_raw
+	# simply omits it and the digest is unchanged - forward-compatible by
+	# construction.
+	"tenant_authority_generation",
+)
+
+# Durable "admin has said Ready about this workspace at least once" marker. It is
+# what separates an ESTABLISHED workspace (whose chat must survive a control-plane
+# outage) from an onboarding-stage one (which must not be told it is ready when
+# nobody could confirm it). See _admin_unreachable_verdict.
+_READY_MARKER_FIELD = "chat_was_ready_at"
+# Re-stamped at most this often. The gate only ever asks "is it set", so the
+# freshness is for operators reading the field; writing on every Ready would put a
+# DB write on every uncached page load for no gate value.
+_READY_MARKER_REFRESH_S = 86400
+
+# The authority the established claim is BOUND to (P0-06 / review §8.6). A digest
+# of (admin principal, container URL, tenant authority generation) captured when
+# the marker was last stamped. _has_been_chat_ready requires it to still match the
+# CURRENT authority before failing open, so a reset / reconnect / principal or
+# container replacement / generation change ends the claim mechanically - the
+# explicit clears in _disconnect_agent_transport and write_connection are belt to
+# this suspenders, not the only fence.
+_READY_ANCHOR_FIELD = "chat_ready_authority"
+
+_GATE_STATE_FIELDS = (
+	*_GATE_REVISION_FIELDS,
+	_READY_MARKER_FIELD,
+	_READY_ANCHOR_FIELD,
+	"jarvis_admin_api_key",
+)
+
+# Not-ready code for "we could not confirm this workspace is ready" - as opposed
+# to container_provisioning / subscription_suspended, which are verdicts admin
+# actually rendered. Callers may retry it; nothing about it is permanent.
+_UNCONFIRMED_REASON = "readiness_unconfirmed"
+_UNCONFIRMED_DETAIL = (
+	"We couldn't confirm your workspace is ready yet. This usually clears in a moment - please retry."
+)
+# Short enough that "retryable" stays true in practice (the wizard's poll is 2.5s
+# and a recovered control plane must be seen within a beat or two), long enough
+# that an outage does not turn one wizard into 30 admin round-trips a minute.
+# Applies to THIS code alone: a real not-ready verdict is never cached.
+_UNCONFIRMED_CACHE_TTL_S = 5
+
+# A customer that has NEVER paid, as named by admin's structured refusal code
+# (jarvis_admin_v2 auth contract). This is the machine signal the never-paid gate
+# reads: a stable code on the 403 envelope, propagated onto AdminAuthError.code by
+# admin_client, so the decision no longer depends on parsing a human sentence that
+# a hardened control plane may omit entirely (P0-05 / review §8.4).
+#
+# An ALLOWLIST: Cancelled, an empty body, a proxy's own 403 and anything
+# unrecognised all fall through to the soft verdict. Being wrong in the hard
+# direction locks a customer out of chat AND /billing; being wrong in the soft
+# direction shows a banner one step too late.
+#
+# CUSTOMER_NOT_PAID is admin's concrete structured code
+# (jarvis_admin_v2.api._responses.CustomerNotPaidError, status 403), raised for a
+# Pending Payment / Pending Verification / any non-Active-non-Suspended customer on
+# the wrapped endpoints and get_connection. Distinct from
+# TENANT_AUTHORITY_REPAIR_REQUIRED, which is NOT never-paid (it is a repair state)
+# and is deliberately absent here.
+_NEVER_PAID_CODES = frozenset({"CUSTOMER_NOT_PAID"})
+
+# TEMPORARY prose fallback for an OLD admin that answers the never-paid 403 with a
+# human sentence and no structured code. REMOVE once every control plane in the
+# fleet emits _NEVER_PAID_CODES (tracked with the Plan 04/05 admin cutover): a
+# hardened admin already sends exc_type alone with no sentence, so this branch is
+# best-effort compatibility, not the mechanism.
+_NEVER_PAID_403_MARKERS = (
+	"customer status: pending payment",
+	"customer status: pending verification",
+	"not a jarvis customer",
+)
+
+
+def _settings_raw(fields: tuple[str, ...]) -> dict:
+	"""Raw ``tabSingles`` values for ``fields`` - exactly as stored, uncast.
+
+	Deliberately NOT ``frappe.db.get_value`` / ``get_single_value`` on the Single:
+	both cast by fieldtype, and casting an EMPTY Datetime single runs it through
+	``get_datetime``, which returns ``now_datetime()`` for None. Every Datetime
+	this function reads is used either as "has this ever been stamped" or as "has
+	this changed since the cached verdict", and that coercion breaks both: an
+	unstamped marker would read as truthy, and a never-applied config would hash
+	differently on every single call. Same trap the v1_10 / v2_00 backfill
+	patches document from the other direction (``datetime(1, 1, 1)``).
+
+	Uncached on purpose: this decides whether a cached readiness verdict may still
+	be served, so it must see a write the moment it lands.
+
+	``jarvis_admin_api_key`` is among the fields callers ask for; the column holds
+	only the mask (jarvis/_password_utils.py), and it is tested for PRESENCE here
+	and never returned to a caller or logged.
+	"""
+	try:
+		rows = frappe.db.sql(
+			"""select `field`, `value` from `tabSingles` where doctype = %s and `field` in %s""",
+			(SETTINGS, tuple(fields)),
+		)
+	except Exception:
+		return {}
+	return {f: v for f, v in rows}
+
+
+def _is_never_paid_403(err) -> bool:
+	"""Does this admin rejection carry admin's OWN evidence that the customer has
+	never paid? Anything less is not evidence.
+
+	Reads the STRUCTURED code first (admin_client tags AdminAuthError.code from the
+	403 envelope's ``error.code``): a machine signal survives a hardened control
+	plane that returns ``exc_type`` alone with no human sentence, which is exactly
+	the shape the old prose match missed (P0-05). The prose markers remain only as
+	a temporary fallback for an admin that predates the code contract - see
+	_NEVER_PAID_403_MARKERS.
+	"""
+	if getattr(err, "status_code", None) != 403:
+		return False
+	code = (getattr(err, "code", "") or "").strip().upper()
+	if code:
+		return code in _NEVER_PAID_CODES
+	# Old-admin compatibility: no structured code, fall back to the sentence.
+	message = str(err or "").strip().lower()
+	return any(marker in message for marker in _NEVER_PAID_403_MARKERS)
+
+
+def _gate_revision(raw: dict) -> str:
+	"""Short digest of the local readiness inputs - the cached verdict's identity.
+
+	A miss costs one admin round-trip, so the digest may be conservative (an
+	unrelated re-save that rewrites the same values keeps the entry) but must
+	never be stale: any changed value must produce a different key.
+	"""
+	joined = "|".join(f"{f}={raw.get(f) or ''}" for f in _GATE_REVISION_FIELDS)
+	return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _authority_anchor(raw: dict) -> str:
+	"""Digest of the AUTHORITY the established claim is bound to (review §8.6).
+
+	Every input is a LOCAL, offline-readable field, because this is recomputed on
+	the fail-open path when admin cannot be asked at all:
+
+	  - the admin principal: a DIGEST of the REAL jarvis_admin_api_key (review F6).
+	    The raw ``tabSingles`` value the caller passes carries only this Password
+	    field's MASK ("**********"), which is a CONSTANT - joining it made the
+	    principal term inert, so a reconnect to a different principal on the same
+	    container + generation produced an IDENTICAL anchor (a fence that did not
+	    fence). We fetch and hash the decrypted credential from __Auth instead (a
+	    local read, so still offline-safe on the fail-open path); the real key is
+	    never stored - only its one-way digest rides into the anchor.
+	  - agent_url: the container. A workspace reset clears it; a container
+	    replacement changes it.
+	  - tenant_authority_generation: the Plan 04 generation. A move/repair bumps
+	    it (empty on a bench that predates the consumer - the digest is then
+	    stable across the two remaining inputs, which is correct).
+
+	A change to any of them means the workspace admin confirmed Ready is no longer
+	the one in front of us, so the claim must not carry across it.
+	"""
+	from frappe.utils.password import get_decrypted_password
+
+	# The REAL admin credential (from __Auth), digested - NOT the masked column value
+	# the raw tabSingles read carries. get_decrypted_password is a local DB read, so
+	# it is safe on the fail-open path. Empty (un-onboarded) -> empty principal term.
+	real_key = (
+		get_decrypted_password(SETTINGS, SETTINGS, "jarvis_admin_api_key", raise_exception=False) or ""
+	).strip()
+	principal = hashlib.sha256(real_key.encode("utf-8")).hexdigest() if real_key else ""
+	joined = "|".join(
+		(
+			principal,
+			(raw.get("agent_url") or "").strip(),
+			str(raw.get("tenant_authority_generation") or ""),
+		)
+	)
+	return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _has_been_chat_ready(raw: dict) -> bool:
+	"""Is this an ESTABLISHED workspace - a stored control-plane connection AND an
+	explicit Ready verdict, for the SAME authority we are looking at now?
+
+	Three halves matter. The marker + admin key say "admin confirmed this
+	workspace Ready once and signup is still in place". The authority anchor is the
+	fence the marker alone was missing (review P0-06): a bare timestamp kept a
+	workspace whose transport was torn down (reset), or whose account was
+	reconnected elsewhere, in the protected cohort - precisely the workspace whose
+	chat cannot work. Binding the claim to (principal, container, generation) ends
+	it the moment any of those move, whether or not the writer that moved them also
+	remembered to clear the marker.
+	"""
+	meta = frappe.get_meta(SETTINGS)
+	if not meta.get_field(_READY_MARKER_FIELD):
+		# Code running ahead of its migration: without the marker field NO
+		# workspace can prove it was ever Ready, so fail CLOSED rather than promote
+		# every site by default (P0-07 - a missing field must not manufacture
+		# established status). The documented deploy order (migrate before restart)
+		# makes this window nil; it self-heals the moment `bench migrate` runs.
+		return False
+	if not (bool(raw.get(_READY_MARKER_FIELD)) and bool((raw.get("jarvis_admin_api_key") or "").strip())):
+		return False
+	if meta.get_field(_READY_ANCHOR_FIELD):
+		stored = (raw.get(_READY_ANCHOR_FIELD) or "").strip()
+		if stored:
+			# The mechanical fence: the claim survives only while its bound
+			# authority is still the current one.
+			return stored == _authority_anchor(raw)
+		# A marker with no stored anchor is a legacy/backfilled claim from before
+		# the fence existed. Honour the presence rule for it - the explicit clears
+		# on reset/reconnect still end it - so a pre-fence established site is not
+		# ejected wholesale on upgrade.
+	return True
+
+
+def _marker_is_fresh(current) -> bool:
+	"""Is the stored marker recent enough to leave alone? An unset or unreadable
+	stamp is NOT fresh - rewriting it is how a corrupted value heals."""
+	if not current:
+		return False
+	try:
+		return frappe.utils.time_diff_in_seconds(frappe.utils.now(), current) < _READY_MARKER_REFRESH_S
+	except Exception:
+		return False
+
+
+def _write_is_durable() -> bool:
+	"""Would a write made right now survive the end of this request?
+
+	Frappe commits only for an UNSAFE method and rolls everything else back
+	(frappe/app.py ``sync_database``, frappe/auth.py ``UNSAFE_HTTP_METHODS``), so a
+	marker written during the desk's boot GET is discarded anyway - and writing it
+	regardless would burn a row-lock on Singles on every page load of every user
+	for nothing. The paths that matter are POSTs (the SPA's readiness call, a chat
+	send) and background jobs, which is where the marker actually becomes durable.
+	"""
+	request = getattr(frappe.local, "request", None)
+	if request is None:
+		return True  # background job, CLI, test: no request to be rolled back
+	return (getattr(request, "method", "") or "").upper() in ("POST", "PUT", "DELETE", "PATCH")
+
+
+def _mark_chat_ready(raw: dict) -> None:
+	"""Record that admin has EXPLICITLY confirmed this workspace Ready, bound to the
+	authority that confirmation was about.
+
+	Called only on an explicit ``chat_readiness == "Ready"`` (never on the
+	v1-tolerant missing-key path - review P0-07): the marker means "admin said
+	Ready", and a response that never said it must not mint that proof.
+
+	Two writes, both best-effort and quiet (readiness is a read path and must not
+	fail because a marker could not be written), both ``update_modified=False`` so
+	the gate's revision does not churn on its own bookkeeping:
+
+	  - the timestamp, refreshed at most daily (the gate only reads "is it set");
+	  - the authority anchor, so the claim is bound to this (principal, container,
+	    generation) and ends when any of them move. Re-stamped whenever the
+	    timestamp is - a rebind onto the current authority is exactly what an
+	    established-through-a-generation-change workspace needs.
+	"""
+	try:
+		if not _write_is_durable():
+			return
+		if _marker_is_fresh(raw.get(_READY_MARKER_FIELD)):
+			# The timestamp is current, but the authority may have moved since it
+			# was stamped (a legacy marker carries no anchor, or a rebind is due).
+			# Keep the anchor in step without rewriting the timestamp.
+			_rebind_anchor(raw)
+			return
+		frappe.db.set_value(
+			SETTINGS, SETTINGS, _READY_MARKER_FIELD, frappe.utils.now(), update_modified=False
+		)
+		_rebind_anchor(raw)
+	except Exception:
+		pass
+
+
+def _rebind_anchor(raw: dict) -> None:
+	"""Point the stored authority anchor at the CURRENT authority. Its own
+	try/except so a missing column (bench mid-migration) never breaks the gate."""
+	try:
+		if not frappe.get_meta(SETTINGS).get_field(_READY_ANCHOR_FIELD):
+			return
+		anchor = _authority_anchor(raw)
+		if (raw.get(_READY_ANCHOR_FIELD) or "").strip() != anchor:
+			frappe.db.set_value(SETTINGS, SETTINGS, _READY_ANCHOR_FIELD, anchor, update_modified=False)
+	except Exception:
+		pass
+
+
+def _admin_unreachable_verdict(raw: dict, diag_code: str = "", retryable: bool | None = None) -> dict:
+	"""Admin could not be asked. Which way is failing WRONG?
+
+	For an ESTABLISHED workspace (see _has_been_chat_ready) the container is
+	almost certainly still serving the config it was already serving, and the
+	control plane is not in the chat path at all - blocking there would take chat
+	away from a working customer over an outage they are not even affected by.
+	Fail OPEN, as this gate always has.
+
+	For a workspace that has NEVER been confirmed ready, the same shrug is what
+	sends a half-onboarded customer into a chat that cannot answer: nothing has
+	ever proven a container is serving them, and "probably fine" is not a thing
+	anybody knows. Fail CLOSED with a RETRYABLE code - not a verdict admin
+	rendered, just an admission that nobody could confirm one - so the wizard
+	keeps polling instead of declaring setup finished.
+
+	The closed branch is cached for _UNCONFIRMED_CACHE_TTL_S (the gate does the
+	caching, since it owns the key) - long enough to stop a 2.5s poll turning one
+	outage into an admin round-trip per beat, short enough that "retryable" is not
+	a lie. A verdict admin actually RENDERED is still never cached.
+	"""
+	if _has_been_chat_ready(raw):
+		return {"ready": True, "reason": None, "billing_notice": {}}
+	verdict = {
+		"ready": False,
+		"reason": _UNCONFIRMED_REASON,
+		"retryable": True if retryable is None else retryable,
+		"detail": _UNCONFIRMED_DETAIL,
+		"billing_notice": {},
+	}
+	if diag_code:
+		# P1-08: keep the diagnostic CLASS the broad catch would otherwise flatten,
+		# so the SPA's recovery copy can tell an admin transport outage (retry) from
+		# an authorization denial (needs the customer to act) from an unexpected
+		# contract shape (support). The code is a fixed, safe token - never admin's
+		# raw exception text. It is carried on the cached entry too, so a polling
+		# wizard gets the same verdict on every beat, not one shape then another.
+		verdict["diag_code"] = diag_code
+	return verdict
+
+
+# Fixed, customer-safe diagnostic tokens for a readiness_unconfirmed verdict, and
+# whether the customer's own action could change the answer (retryable) or not.
+# The token is what the SPA branches its recovery copy on; the raw exception text
+# never crosses this boundary (it can carry admin internals). An unrecognised
+# failure stays retryable - the same optimistic default the rest of this module
+# uses for a control plane it has not classified.
+def _diagnostic_class(err) -> tuple[str, bool]:
+	from jarvis.exceptions import (
+		AdminAuthError,
+		AdminRateLimitedError,
+		AdminUnreachableError,
+		AdminValidationError,
+	)
+
+	if isinstance(err, AdminAuthError):
+		# 401 is a token problem (re-mintable, retryable); 403 is an authorization
+		# denial the same principal will keep hitting until the account changes.
+		if getattr(err, "status_code", None) == 403:
+			return "admin_forbidden", False
+		return "admin_auth", True
+	if isinstance(err, AdminRateLimitedError):
+		return "admin_rate_limited", True
+	if isinstance(err, AdminValidationError):
+		# A structured 4xx business/contract error - not a transient outage. An old
+		# admin whose contract this bench no longer speaks lands here.
+		return "admin_contract", False
+	if isinstance(err, AdminUnreachableError):
+		return "admin_unreachable", True
+	return "admin_error", True
 
 
 def _admin_chat_gate() -> dict:
 	"""Last managed ready-gate: ask admin whether the customer's container is
-	actually provisioned enough to serve chat. Fail-open and v1-tolerant.
+	actually provisioned enough to serve chat. v1-tolerant.
 
 	Called only AFTER the local signup + LLM-credential checks have passed, at
 	the managed ready-exits of ``is_ready_for_chat`` — it is the final gate.
@@ -47,14 +447,22 @@ def _admin_chat_gate() -> dict:
 
 	- v1-tolerance: an ABSENT ``chat_readiness`` key (v1 admin, or a v2 that
 	  doesn't surface it) means the control plane has no opinion → allow.
-	- Resilience: ANY ``get_connection`` failure (unreachable / auth / timeout)
-	  → allow. A control-plane hiccup must never bounce an already-provisioned
-	  customer out of chat. We do NOT negative-cache, so a transient block or
-	  error clears on the very next load rather than sticking for the TTL.
+	- Resilience: a ``get_connection`` failure (unreachable / auth / timeout) is
+	  answered by cohort - fail open for an established workspace, fail closed
+	  with a retryable code for one that has never been confirmed ready. See
+	  ``_admin_unreachable_verdict``. A verdict admin RENDERED is never cached, so
+	  a transient block clears on the very next load; the unconfirmed verdict gets
+	  a few seconds so a polling wizard cannot amplify an outage.
 	"""
+	raw = _settings_raw(_GATE_STATE_FIELDS)
 	cache = frappe.cache()
-	cached = cache.get_value(_CHAT_GATE_CACHE_KEY)
+	cache_key = f"{_CHAT_GATE_CACHE_KEY}:{_gate_revision(raw)}"
+	cached = cache.get_value(cache_key)
 	if cached:
+		if isinstance(cached, dict) and cached.get("unconfirmed"):
+			return _admin_unreachable_verdict(
+				raw, diag_code=cached.get("diag_code") or "", retryable=cached.get("retryable")
+			)
 		# The billing banner rides the cached verdict. Caching a bare flag would
 		# hide an expiring/grace notice for the whole TTL on every ready load.
 		# Tolerate the pre-upgrade shape (a bare 1) rather than re-asking admin.
@@ -62,20 +470,50 @@ def _admin_chat_gate() -> dict:
 		return {"ready": True, "reason": None, "billing_notice": notice or {}}
 	try:
 		conn = admin_client.get_connection(timeout_s=8) or {}
-	except Exception:
+	except Exception as err:
 		# A site whose account was reconnected elsewhere fails auth here forever, so
 		# failing open sends it into a chat that cannot work. Ask the one question it
-		# can still ask before shrugging.
+		# can still ask before deciding.
 		moved = _site_replacement()
 		if moved.get("replaced"):
 			return {"ready": False, "reason": "site_replaced", "replaced_notice": moved, "billing_notice": {}}
-		# Fail open on ANY other admin error; deliberately no negative cache.
-		return {"ready": True, "reason": None, "billing_notice": {}}
-	# Refresh the locally-mirrored release notice on this gate's ~120s cadence so
-	# an active user sees an activate/clear without waiting for the daily sync.
+		diag_code, retryable = _diagnostic_class(err)
+		verdict = _admin_unreachable_verdict(raw, diag_code=diag_code, retryable=retryable)
+		if verdict.get("reason") == _UNCONFIRMED_REASON:
+			# Same revision key as the positive verdict, so a save drops this too -
+			# a customer who fixes their config is never held behind an outage's
+			# leftovers. Only the outage FACT + its diagnostic class are cached (never
+			# the cohort decision), so the cohort is re-evaluated even inside the
+			# window and a polling wizard gets a stable verdict shape.
+			cache.set_value(
+				cache_key,
+				{"unconfirmed": True, "diag_code": diag_code, "retryable": retryable},
+				expires_in_sec=_UNCONFIRMED_CACHE_TTL_S,
+			)
+		return verdict
+	# Refresh the locally-mirrored release notice on this gate's cadence so an
+	# active user sees an activate/clear without waiting for the daily sync.
 	release_notice.persist(conn.get("release_notice") or {})
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
+		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver
+		# found the customer's serving row ambiguous or the pointer invalid, so
+		# there is NO single container we may serve. Admin already returned the
+		# safe TENANT_AUTHORITY_REPAIR_REQUIRED envelope (chat_readiness =
+		# "SupportRequired", every self-service action withdrawn) and paged ops.
+		# The bench must surface that as its own honest not-ready state: NOT
+		# "container_provisioning" (which invites the customer to keep waiting for
+		# a container that isn't coming) and NOT "subscription_suspended" (which
+		# offers a Renew that cannot help and could double-charge). The admin's
+		# own sentence - "your payment is safe, please don't retry" - rides
+		# ``detail`` and is the customer-facing copy.
+		if conn["chat_readiness"] == "SupportRequired":
+			return {
+				"ready": False,
+				"reason": "authority_repair_required",
+				"billing_notice": {},
+				"detail": conn.get("chat_readiness_reason") or "",
+			}
 		suspended = conn["chat_readiness"] == "Suspended"
 		return {
 			"ready": False,
@@ -89,7 +527,13 @@ def _admin_chat_gate() -> dict:
 			"detail": conn.get("chat_readiness_reason") or "",
 		}
 	# Reachable + (Ready, or v1-absent) → allow and cache the positive verdict.
-	cache.set_value(_CHAT_GATE_CACHE_KEY, {"notice": notice}, expires_in_sec=_CHAT_GATE_CACHE_TTL_S)
+	# But only an EXPLICIT Ready earns the established marker (review P0-07): the
+	# v1-tolerant missing-key path allows this page load without minting proof admin
+	# never supplied - a workspace whose control plane has never once said "Ready"
+	# must not be promoted into the cohort whose chat survives an outage.
+	if conn.get("chat_readiness") == "Ready":
+		_mark_chat_ready(raw)
+	cache.set_value(cache_key, {"notice": notice}, expires_in_sec=_CHAT_GATE_CACHE_TTL_S)
 	return {"ready": True, "reason": None, "billing_notice": notice}
 
 
@@ -168,6 +612,16 @@ def is_ready_for_chat() -> dict:
 	  the container isn't chat-ready yet (chat_readiness != "Ready"). Set only by
 	  the final ``_admin_chat_gate`` at the managed ready-exits; fail-open and
 	  v1-tolerant (see ``_admin_chat_gate``).
+	- ``"readiness_unconfirmed"`` - admin could not be asked AND this workspace
+	  has never been confirmed ready, so nothing knows whether a container is
+	  serving it. Carries ``retryable: True``: it is the absence of a verdict,
+	  not one. An ESTABLISHED workspace does not get this - the same failure
+	  leaves it ready (see ``_admin_unreachable_verdict``).
+	- ``"authority_repair_required"`` - admin reports an authority-repair incident
+	  (chat_readiness == "SupportRequired"): the customer's serving container is
+	  ambiguous/invalid and support has been paged. A safe blocked state - the
+	  customer must NOT retry payment or reconnect; ``detail`` carries admin's own
+	  reassurance (see ``_admin_chat_gate``, review plan 04 P0-6).
 	- ``None`` when ``ready`` is True.
 	"""
 	settings = frappe.get_single("Jarvis Settings")
@@ -202,8 +656,15 @@ def is_ready_for_chat() -> dict:
 	# Keyed on pool MODE, not the narrower proxy_active: a BYO api-key pool has
 	# no sidecar but still syncs through /llm-pool and stamps llm_pool_synced_at,
 	# so gating it on the direct marker would strand it forever.
+	#
+	# An unstamped marker means "this bench never RECORDED an apply", which is not
+	# the same as "no apply happened" - the sync job can hand off to the scheduled
+	# reconcile without stamping. So both provisioning exits below ask admin once
+	# before declaring the workspace not ready (_confirm_apply_via_admin, #576);
+	# the reason strings still mean exactly what they say, they are now just also
+	# backed by the control plane declining to confirm.
 	if compute_pool_mode(settings):
-		if getattr(settings, "llm_pool_synced_at", None):
+		if getattr(settings, "llm_pool_synced_at", None) or _confirm_apply_via_admin(settings, is_pool=True):
 			return _admin_chat_gate()
 		return {"ready": False, "reason": "llm_pool_provisioning"}
 
@@ -231,7 +692,9 @@ def is_ready_for_chat() -> dict:
 		# pending/failed is NOT ready — opening chat there guarantees failing turns
 		# while onboarding still shows "applying". Legacy direct tenants are
 		# backfilled by patch v2_00_backfill_llm_direct_synced_at.
-		if not getattr(settings, "llm_direct_synced_at", None):
+		if not getattr(settings, "llm_direct_synced_at", None) and not _confirm_apply_via_admin(
+			settings, is_pool=False
+		):
 			return {"ready": False, "reason": "llm_provisioning"}
 	elif auth_mode in ("subscription", "oauth"):
 		# Both modes use the same local signal: llm_oauth_connected_at is
@@ -244,6 +707,73 @@ def is_ready_for_chat() -> dict:
 		return {"ready": False, "reason": "llm_credentials"}
 
 	return _admin_chat_gate()
+
+
+# Damping for _confirm_apply_via_admin. Only a NEGATIVE outcome is cached: a
+# confirmation stamps the durable marker, which ends the question for good.
+#
+# Needed because the two not-ready exits below are polled hard. OnboardingView's
+# waitUntilReady runs 30 probes at 2.5s (75s) after a Connect, and the desk
+# banner + widget probe on their own schedules — so an unproven tenant would put
+# one admin round-trip on every one of those ticks. 10s costs at most one extra
+# poll before a convergence is noticed against that 75s budget, and cuts the
+# round-trips it can generate by roughly two thirds.
+_APPLY_CONFIRM_MISS_KEY = "jarvis:apply_confirm_miss"
+_APPLY_CONFIRM_MISS_TTL_S = 10
+
+
+def _confirm_apply_via_admin(settings, *, is_pool: bool) -> bool:
+	"""Last chance to confirm an apply this bench never recorded: ask admin.
+
+	The two callers sit at ``is_ready_for_chat``'s provisioning exits, reached
+	when the durable evidence-of-apply marker is unstamped. Those exits are what
+	renders "Chat may not work yet / applying your LLM configuration", and until
+	now they returned that verdict WITHOUT ever asking the control plane — while
+	the neighbouring proven-tenant branch asks it directly via
+	``_admin_chat_gate``. So a tenant whose apply converged after the sync job's
+	in-band poll gave up was told chat would not work while the container was
+	demonstrably serving turns, and nothing could correct it but the ``*/5``
+	``reconcile_pending_llm_sync`` tick (jarvis #576). The surface that reports
+	the problem can now also clear it.
+
+	No new way to become ready: this reuses ``_admin_chat_readiness`` and
+	``_stamp_converged_ok``, the exact pair the scheduled reconcile and the
+	onboarding poller's ``_reconcile_pending_applying`` already use. Admin gates
+	``chat_readiness`` "Ready" on ``applied_version >= desired_version``, so it
+	never reports Ready from intent — the evidentiary bar is unchanged.
+
+	Deliberately does NOT commit, unlike ``_reconcile_pending_applying``. That
+	one runs only from the onboarding poller; this runs from ``boot.py`` too, on
+	a desk-boot GET, and injecting a commit into boot would make this gate commit
+	whatever else that request happens to be carrying. The SPA, the desk widget
+	and the banner all reach ``is_ready_for_chat`` through frappe-ui's ``call``,
+	which POSTs, so the stamp lands durably where it matters; on a GET it rolls
+	back and the next probe simply re-confirms. Correct either way — persistence
+	is the optimisation, not the mechanism.
+
+	Fails closed and never raises: an unreachable admin, a non-Ready verdict or a
+	failed write all leave the provisioning verdict standing.
+	"""
+	try:
+		cache = frappe.cache()
+		if cache.get_value(_APPLY_CONFIRM_MISS_KEY):
+			return False
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			_admin_chat_readiness,
+			_stamp_converged_ok,
+		)
+
+		state, _reason = _admin_chat_readiness()
+		if state != "Ready":
+			cache.set_value(_APPLY_CONFIRM_MISS_KEY, 1, expires_in_sec=_APPLY_CONFIRM_MISS_TTL_S)
+			return False
+		# Stamps the marker for this leg AND clears last_sync_status to a
+		# converged "ok" — which is the second face of #576, the Settings pane
+		# still showing "Applying to your agent" off that same field.
+		_stamp_converged_ok(settings, is_pool=is_pool)
+		return True
+	except Exception:
+		return False
 
 
 def _llm_missing_verdict(settings) -> dict:
@@ -262,7 +792,8 @@ def _llm_missing_verdict(settings) -> dict:
 	``llm_setup`` hard-gates back to the wizard — chat cannot work there, and
 	the half-created signup resumes via start_signup's authenticated fallback.
 	Subscription state comes from admin; fail OPEN to the soft banner when it
-	is unknown/unreachable."""
+	is unknown/unreachable — EXCEPT when admin was reached and refused this site
+	outright (see the 403 branch)."""
 	never_synced = not (
 		getattr(settings, "llm_direct_synced_at", None)
 		or getattr(settings, "llm_pool_synced_at", None)
@@ -274,6 +805,26 @@ def _llm_missing_verdict(settings) -> dict:
 		from jarvis import admin_client
 
 		sub_status = (admin_client.get_connection(timeout_s=8) or {}).get("subscription_status") or ""
+	except AdminAuthError as e:
+		# A 403 is admin REACHED and refusing this site's principal. That refusal is
+		# how the llm_setup gate below came to be UNREACHABLE for the cohort it was
+		# written for: a Pending Payment customer 403s at
+		# jarvis_admin_v2.api._auth.current_customer (allow_pending False) instead of
+		# answering with a subscription_status, so they fell through to the soft
+		# banner and landed in the chat app with a "no AI connected" note rather than
+		# back in the wizard that can finish their payment.
+		#
+		# ONLY the never-paid shapes hard-gate, and only when admin's own words say
+		# so - see _is_never_paid_403. Every other 403 (Cancelled, a bodyless
+		# proxy/WAF rejection, anything unrecognised) stays SOFT, because the
+		# renew/suspension banner owns those states and the wizard would dead-end
+		# them at signup's duplicate guard. Suspended cannot arrive here at all:
+		# Jarvis Customer propagates Suspended to User.enabled=0
+		# (jarvis_admin_v2/.../jarvis_customer.py:81), so that customer's bench is
+		# rejected by Frappe auth with a 401 long before current_customer runs.
+		if _is_never_paid_403(e):
+			return {"ready": False, "reason": "llm_setup"}
+		sub_status = ""
 	except Exception:
 		sub_status = ""
 	# Hard-gate ONLY the never-paid shapes. Active is established (the revoke
@@ -282,6 +833,77 @@ def _llm_missing_verdict(settings) -> dict:
 	if sub_status in ("none", "Pending Payment", "Pending Verification"):
 		return {"ready": False, "reason": "llm_setup"}
 	return {"ready": False, "reason": "llm_credentials"}
+
+
+@frappe.whitelist()
+def get_llm_apply_operation(operation_id: str) -> dict:
+	"""Read-only status of a durable LLM-apply operation (plan-05 D2), for the SPA's
+	single Start-chatting controller to follow one operation to a terminal state.
+
+	A thin System-Manager-gated shim over admin's read-only endpoint (see
+	admin_client.get_llm_apply_operation): it never spends the apply rate bucket, so
+	the controller polls it with backoff. The bench holds no operation state of its
+	own - admin owns the operation's truth - so this forwards the opaque id and
+	surfaces admin's §8.4 status verbatim. Errors arrive as clean frappe.throw
+	toasts via the shared _surface helper; the SPA client seam
+	(frontend/src/lib/llmOperation.js) treats a transport failure as "keep polling",
+	not a verdict.
+
+	Side effect (plan-05 D2 paired follow-up): admin moved the fleet push OFF the
+	synchronous save (admin #193), so ``save_llm_pool`` no longer sees an inline
+	apply result to stamp the AI-models per-model verdicts from. Admin now carries
+	the fleet's probe verdicts on the CONVERGED operation status, so this fold them
+	into the same bench settings cache the settings panel already reads - see
+	``_persist_operation_probe_verdicts``. That makes this poll a (bounded) writer,
+	so it must be reached over POST (frappe-ui's ``call`` always POSTs) for the
+	write to be durable; a read that never converges writes nothing.
+	"""
+	require_jarvis_admin()
+	status = _surface(admin_client.get_llm_apply_operation, operation_id)
+	_persist_operation_probe_verdicts(status)
+	return status
+
+
+def _persist_operation_probe_verdicts(status: dict) -> None:
+	"""Fold the fleet's probe verdicts off a converged operation status into the
+	bench settings cache the AI-models panel reads (``last_subscription_status`` /
+	``last_sync_warnings`` / ``last_model_statuses`` via ``get_llm_config`` ->
+	LlmPoolEditor). Plan-05 D2 paired follow-up: admin #193 moved the fleet push off
+	the synchronous save, so these verdicts arrive on the operation status once the
+	apply has CONVERGED rather than on the save's (now push-less) return - without
+	this, the panel would blank after a save with nothing to repopulate it.
+
+	Present ONLY once converged; ABSENT (still applying, or an old admin) leaves the
+	prior verdicts intact - never blanks them. An ``unchanged`` no-op apply ran no
+	probe, so its "unchecked" / ``[]`` must not discard the last real verdict (same
+	rule as ``jarvis_settings._stamp_pool_applied_ok``). A no-op when the values
+	already match, so a hot poll does not churn the Singles row.
+
+	NOTE: the exact field shape (subscription_status: str, warnings: list,
+	model_statuses: list, unchanged: bool) mirrors the fleet-agent verdict contract
+	the async worker already persists; it must match the shape admin's operation
+	status projection emits (admin plan-05 branch). Never coerces a mismatch."""
+	if not isinstance(status, dict):
+		return
+	# Not converged yet (still applying) / an old admin: no probe fields -> leave the
+	# last real verdict untouched rather than blanking the panel.
+	if not any(k in status for k in ("subscription_status", "warnings", "model_statuses")):
+		return
+	# A byte-identical no-op apply ran no probe (contract 1.10 unchanged=true): its
+	# "unchecked"/[] would discard the last real verdict. Keep the prior values.
+	if status.get("unchanged"):
+		return
+	fields = {
+		"last_subscription_status": str(status.get("subscription_status") or ""),
+		"last_sync_warnings": frappe.as_json(status.get("warnings") or []),
+		"last_model_statuses": frappe.as_json(status.get("model_statuses") or []),
+	}
+	current = (
+		frappe.db.get_value("Jarvis Settings", "Jarvis Settings", list(fields.keys()), as_dict=True) or {}
+	)
+	if all((current.get(k) or "") == v for k, v in fields.items()):
+		return  # unchanged from what is stored - do not churn the Singles row per poll
+	frappe.db.set_value("Jarvis Settings", "Jarvis Settings", fields, update_modified=False)
 
 
 @frappe.whitelist()
@@ -542,7 +1164,13 @@ def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
 	account; non-admin staff shouldn't be able to upgrade the plan.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.start_upgrade, target_plan, provider=provider)
+	# plan-09 WS8: a token-bearing answer is attested against the bench's OWN
+	# configured pay origin so BillingPage can top-level-navigate to the
+	# admin-hosted checkout. Behaviour-neutral on a non-token (raw / settled)
+	# answer - see onboarding_contract.augment_pay_page.
+	return onboarding_contract.augment_pay_page(
+		_surface(admin_client.start_upgrade, target_plan, provider=provider)
+	)
 
 
 @frappe.whitelist()
@@ -576,11 +1204,13 @@ def resume_plan() -> dict:
 def reauthorize_autopay() -> dict:
 	"""Start re-arming auto-renewal; the page then opens a mandate Checkout.
 
-	No chat-gate bust: this only creates a Razorpay object, it changes no
+	No chat-gate bust: this only creates a mandate intent, it changes no
 	entitlement. confirm_payment is what flips autorenew back on.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.reauthorize_autopay)
+	# plan-09 WS8: attest a token answer so BillingPage navigates to the
+	# admin-hosted mandate checkout (behaviour-neutral otherwise).
+	return onboarding_contract.augment_pay_page(_surface(admin_client.reauthorize_autopay))
 
 
 @frappe.whitelist()
@@ -592,29 +1222,50 @@ def preview_downgrade(target_plan: str) -> dict:
 
 @frappe.whitelist()
 def start_downgrade(target_plan: str) -> dict:
-	"""Schedule a downgrade (next cycle). Monthly autopay returns a
-	subscription id for a ₹0 mandate Checkout; Annual just schedules.
+	"""Schedule a downgrade (next cycle). Monthly autopay returns a mandate
+	pay-page token for a ₹0 mandate checkout; Annual just schedules.
 
 	Chat-gate bust: a downgrade never changes entitlement until the boundary,
 	so no bust is needed - the container keeps serving the current plan."""
 	require_jarvis_admin()
-	return _surface(admin_client.start_downgrade, target_plan)
+	# plan-09 WS8: a Monthly downgrade returns a mandate token to navigate to;
+	# an Annual downgrade just schedules (no token) and passes through untouched.
+	return onboarding_contract.augment_pay_page(_surface(admin_client.start_downgrade, target_plan))
 
 
 @frappe.whitelist()
 def cancel_scheduled_downgrade() -> dict:
-	"""Revoke a scheduled downgrade (SM-only)."""
+	"""Revoke a scheduled downgrade (SM-only).
+
+	plan-09 WS8: Monthly re-arms the current plan's mandate, so this can carry a
+	pay-page token; augment_pay_page attests it (behaviour-neutral otherwise)."""
 	require_jarvis_admin()
-	return _surface(admin_client.cancel_scheduled_downgrade)
+	return onboarding_contract.augment_pay_page(_surface(admin_client.cancel_scheduled_downgrade))
 
 
 def _bust_chat_gate() -> None:
-	"""Drop the chat-readiness cache after a billing state change.
+	"""Drop EVERY cached chat-readiness verdict for this site.
 
-	Belt-and-braces: cancelling does not itself change readiness (entitlement
-	runs to period end), but the pane re-reads immediately afterwards and a
-	stale positive verdict would be confusing. Costs one Redis DEL."""
+	Two kinds of caller. A billing state change (cancel / resume) moves nothing
+	the revision covers, so this is the only thing that can drop its entry -
+	cancelling does not itself change readiness (entitlement runs to period end),
+	but the pane re-reads immediately afterwards and a stale positive verdict
+	would be confusing. An LLM save DOES move the revision, so its entry is
+	already unreachable; this still runs there because the revision can return to
+	a previous value within the TTL (a save that is reverted, an apply that lands
+	back on the same status), and a resurrected verdict about a configuration that
+	was replaced in between is exactly what the revision exists to prevent.
+
+	Prefix delete, not a single key: the entry to drop is whichever revision is
+	live, and after a save that is no longer the one this call would compute.
+
+	DO NOT call this from a hot path. ``delete_keys`` is a Redis KEYS scan of the
+	whole keyspace, which is fine for the handful of rare, human-triggered actions
+	that call it (a billing change, an LLM save, a disconnect, a reconnect) and is
+	not fine per request or per chat turn. A caller that needs invalidation on a
+	hot path wants the config revision instead - it costs nothing and is already
+	how every routine change is picked up."""
 	try:
-		frappe.cache().delete_value(_CHAT_GATE_CACHE_KEY)
+		frappe.cache().delete_keys(_CHAT_GATE_CACHE_KEY)
 	except Exception:
 		pass

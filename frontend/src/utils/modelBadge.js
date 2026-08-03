@@ -3,7 +3,7 @@
 // all, and a rule that hides too eagerly fails silently.
 //
 // Background. Jarvis lets a user change the model mid-conversation, and an
-// UNPINNED conversation keeps openclaw's failover chain live, so a reply can
+// UNPINNED conversation keeps the agent's failover chain live, so a reply can
 // come from a model the user never chose. The server now stamps `model` and
 // `provider` on the assistant row at finalize, taken from the model the gateway
 // says actually served the turn. Without a rendering rule that surfaces the

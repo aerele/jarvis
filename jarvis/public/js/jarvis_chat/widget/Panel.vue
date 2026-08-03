@@ -12,7 +12,60 @@
 		:aria-label="`${brandName} chat`"
 		@keydown.esc.stop="$emit('close')"
 	>
-		<div class="jvp-panel" :class="{ 'jvp-panel--dark': isDark }" ref="panelEl" tabindex="-1">
+		<div
+			class="jvp-panel"
+			:class="{ 'jvp-panel--dark': isDark, 'jvp-panel--resizing': resizing }"
+			ref="panelEl"
+			tabindex="-1"
+		>
+			<!-- Resize handles on the three open edges (top / left / right) plus the
+			     two top corners. The panel is anchored at its FAB-side bottom corner,
+			     so a drag grows it toward the open page; each edge shows a grabber so
+			     it reads as resizable. Widget.vue persists the size. -->
+			<template v-if="layout">
+				<div
+					class="jvp-rz jvp-rz--top"
+					aria-hidden="true"
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'y')"
+				>
+					<span class="jvp-rz-grip"></span>
+				</div>
+				<div
+					class="jvp-rz jvp-rz--left"
+					aria-hidden="true"
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'x')"
+				>
+					<span class="jvp-rz-grip"></span>
+				</div>
+				<div
+					class="jvp-rz jvp-rz--right"
+					aria-hidden="true"
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'x')"
+				>
+					<span class="jvp-rz-grip"></span>
+				</div>
+				<div
+					class="jvp-rz jvp-rz--tl"
+					role="button"
+					tabindex="0"
+					aria-label="Resize chat window. Drag, or use arrow keys."
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'both')"
+					@keydown="onResizeKey"
+				></div>
+				<div
+					class="jvp-rz jvp-rz--tr"
+					role="button"
+					tabindex="0"
+					aria-label="Resize chat window. Drag, or use arrow keys."
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'both')"
+					@keydown="onResizeKey"
+				></div>
+			</template>
 			<div class="jvp-head">
 				<div class="jvp-avatar">
 					<img v-if="brandLogoUrl" :src="brandLogoUrl" class="jvp-avatar-img" alt="" />
@@ -114,7 +167,7 @@
 				</button>
 			</div>
 
-			<div class="jvp-body" ref="bodyEl">
+			<div class="jvp-body" ref="bodyEl" @scroll.passive="onBodyScroll">
 				<!-- Never onboarded (readiness === "gate"): the panel cannot possibly
 				     chat, so the whole body - welcome, history, composer below - is
 				     replaced by a compact setup nudge instead of a chat box that can
@@ -211,7 +264,7 @@
 						</div>
 					</div>
 
-					<div v-else class="jvp-msgs">
+					<div v-else class="jvp-msgs" @click="onTranscriptClick">
 						<template v-for="m in shownMessages" :key="m.name">
 							<div v-if="m.role === 'user'" class="jvp-row jvp-row--user">
 								<div class="jvp-m-user">{{ m.content }}</div>
@@ -478,6 +531,7 @@ import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue"
 import { contextLabel } from "./desk_context.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
+import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
 import { classifyReadiness, degradedMessage } from "./panel_readiness.mjs";
 import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
@@ -501,7 +555,80 @@ const props = defineProps({
 	// FAB. The panel is a floating mini window, so it has no fixed home.
 	layout: { type: Object, default: null },
 });
-defineEmits(["close", "open-full", "dismiss-context"]);
+const emit = defineEmits(["close", "open-full", "dismiss-context", "resize", "resize-commit"]);
+
+// ---- Resize: drag any of the three open edges (top / left / right) or a top
+// corner to grow the window. The panel is anchored at its FAB-side bottom corner,
+// so a drag enlarges it toward the open page. Each handle passes a mode ('y' =
+// height only, 'x' = width only, 'both' = a corner); resizeFrom (panel_size.mjs)
+// floors the result at the default and Widget's panelLayout re-clamps it to the
+// viewport, and Widget owns the localStorage. ----
+const resizing = ref(false);
+let resizeStart = null;
+
+function onResizeMove(e) {
+	if (!resizeStart) return;
+	const m = resizeStart.mode;
+	const dx = m === "y" ? 0 : e.clientX - resizeStart.x;
+	const dy = m === "x" ? 0 : e.clientY - resizeStart.y;
+	emit("resize", resizeFrom(resizeStart, resizeStart.side, dx, dy));
+}
+
+function endResize() {
+	if (!resizeStart) return;
+	resizeStart = null;
+	resizing.value = false;
+	window.removeEventListener("pointermove", onResizeMove);
+	window.removeEventListener("pointerup", endResize);
+	window.removeEventListener("pointercancel", endResize);
+	emit("resize-commit");
+}
+
+function onResizeDown(e, mode = "both") {
+	const l = props.layout;
+	if (!l || (e.button != null && e.button !== 0)) return;
+	resizeStart = {
+		x: e.clientX,
+		y: e.clientY,
+		width: l.width,
+		height: l.height,
+		side: l.side,
+		mode,
+	};
+	resizing.value = true;
+	window.addEventListener("pointermove", onResizeMove);
+	window.addEventListener("pointerup", endResize);
+	window.addEventListener("pointercancel", endResize);
+	e.preventDefault();
+}
+
+// Keyboard resize: arrows nudge the size by a step, using the SAME grow/shrink
+// semantics as the drag (up = taller, "outward" = wider), floored at the default
+// by resizeFrom. Each press is its own commit so the choice survives immediately.
+function onResizeKey(e) {
+	const l = props.layout;
+	if (!l) return;
+	const STEP = 24;
+	const map = {
+		ArrowUp: [0, -STEP],
+		ArrowDown: [0, STEP],
+		ArrowLeft: [-STEP, 0],
+		ArrowRight: [STEP, 0],
+	};
+	const d = map[e.key];
+	if (!d) return;
+	e.preventDefault();
+	emit("resize", resizeFrom({ width: l.width, height: l.height }, l.side, d[0], d[1]));
+	emit("resize-commit");
+}
+
+// Delegated click for the in-message "open in full chat" chips that
+// panel_markdown swaps in for content this panel can't draw (diagrams, charts,
+// record cards). The chip lives inside a v-html bubble, so it cannot bind a Vue
+// handler directly.
+function onTranscriptClick(e) {
+	if (e.target?.closest?.(".jvp-view-chip")) emit("open-full");
+}
 
 const panelEl = ref(null);
 const bodyEl = ref(null);
@@ -601,7 +728,15 @@ function useSuggestion(prompt) {
 	});
 }
 
-const thinking = computed(() => sending.value || (stream.value.busy && !stream.value.live));
+// Typing dots while a turn is in flight but has no visible text yet. The last
+// clause is what makes the panel show a "typing" state for a turn it did NOT
+// start (the same conversation open in the full web chat or another tab):
+// jarvis:event frames are published to the user, so run:start reaches every
+// session and sets `live` with empty text before the first token arrives.
+const thinking = computed(() => {
+	const s = stream.value;
+	return sending.value || (s.busy && !s.live) || (!!s.live && !s.live.text);
+});
 const canSend = computed(
 	() =>
 		(draft.value.trim().length > 0 || attachments.value.length > 0) &&
@@ -621,6 +756,25 @@ const hint = computed(() => {
 async function scrollToBottom() {
 	await nextTick();
 	if (bodyEl.value) bodyEl.value.scrollTop = bodyEl.value.scrollHeight;
+}
+
+// Sticky-bottom guard: auto-scroll ONLY while the reader is already at the newest
+// end. Without it, scrollToBottom on every streamed token yanked a long reply back
+// to its tail, so only the last screenful was ever visible in the small panel and
+// the rest could not be read until the turn ended (the full SPA guards the same
+// way via pinnedToBottom). A user scroll updates the flag; a send / load / new
+// chat re-pins so a fresh turn always snaps to the bottom.
+const pinnedToBottom = ref(true);
+function distanceFromBottom() {
+	const el = bodyEl.value;
+	if (!el) return 0;
+	return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+function onBodyScroll() {
+	pinnedToBottom.value = distanceFromBottom() <= 80;
+}
+function stickToBottom() {
+	if (pinnedToBottom.value) scrollToBottom();
 }
 
 function autoGrow() {
@@ -649,6 +803,7 @@ async function load() {
 		}
 		const conv = await getConversation(convId.value);
 		messages.value = Array.isArray(conv?.messages) ? conv.messages : [];
+		pinnedToBottom.value = true;
 		await scrollToBottom();
 	} catch (e) {
 		loadError.value = "Could not load your conversation.";
@@ -667,6 +822,7 @@ function startNewChat() {
 	stream.value = { ...emptyStream(), fence: stream.value.fence };
 	loadError.value = "";
 	draft.value = "";
+	pinnedToBottom.value = true;
 	nextTick(() => textareaEl.value?.focus());
 }
 
@@ -792,6 +948,7 @@ async function send() {
 	attachments.value = [];
 	await nextTick();
 	autoGrow();
+	pinnedToBottom.value = true; // a fresh turn always snaps to the newest
 	await scrollToBottom();
 
 	try {
@@ -861,13 +1018,15 @@ function onRealtime(payload) {
 		});
 	}
 
-	const { state: next, admitted } = applyEventEx(stream.value, payload);
+	const { state: next } = applyEventEx(stream.value, payload);
 
-	// Only an ADMITTED frame proves the winning pump's stream is reaching us.
-	// A fenced-out straggler must not stand the HTTP fallback down: after a
-	// handoff, stale frames can be the ONLY thing this socket ever sees, and
-	// polling is then the sole path to the finished reply.
-	if (admitted) stopPolling();
+	// NB: we deliberately do NOT stop polling when a realtime frame arrives.
+	// Realtime gives the smooth live stream, but the relay can drop the TAIL
+	// (the final deltas / run:end) after delivering the first part — which left
+	// the panel frozen on a partial reply ("only the text up to some word shows")
+	// until a manual reload. Polling stays on as the safety net and settles only
+	// once the DURABLE message is complete (streaming=0, see startPolling), so a
+	// dropped tail self-heals within one poll cycle.
 	if (next.reload) {
 		// Clear the flag before reloading so a second frame cannot double-fetch.
 		stream.value = { ...next, reload: false, error: "" };
@@ -880,7 +1039,7 @@ function onRealtime(payload) {
 	stream.value = next;
 	if (next.live) {
 		sending.value = false;
-		scrollToBottom();
+		stickToBottom();
 	}
 	if (next.error) loadError.value = next.error;
 }
@@ -970,12 +1129,15 @@ function startPolling() {
 			const conv = await getConversation(convId.value);
 			const msgs = Array.isArray(conv && conv.messages) ? conv.messages : [];
 			const next = visibleMessages(msgs);
-			// A new assistant turn landed: adopt it and stop.
+			// A COMPLETE assistant turn landed (streaming=0): adopt it and stop.
+			// The streaming guard is what lets polling run alongside realtime as a
+			// safety net without ever settling on a half-written reply, and it is
+			// what recovers a reply whose streamed tail the relay dropped.
 			const last = next[next.length - 1];
-			if (next.length > before && last && last.role === "assistant") {
+			if (next.length > before && last && last.role === "assistant" && !last.streaming) {
 				messages.value = msgs;
 				settle();
-				scrollToBottom();
+				stickToBottom();
 			}
 		} catch (e) {
 			/* transient - keep polling */
@@ -1002,7 +1164,8 @@ onMounted(() => {
 	isReadyForChat()
 		.then((r) => {
 			readiness.value = classifyReadiness(r);
-			readinessNotice.value = readiness.value === "degraded" ? degradedMessage(r) : "";
+			readinessNotice.value =
+				readiness.value === "degraded" ? degradedMessage(r, brandName) : "";
 		})
 		.catch(() => {
 			// Fail OPEN, same as classifyReadiness(null): a flaky/unreachable check
@@ -1023,6 +1186,10 @@ onBeforeUnmount(() => {
 	}
 	stopPolling();
 	if (rtBound) window.frappe?.realtime?.off?.("jarvis:event", onRealtime);
+	// Drop any drag listeners if we unmount mid-resize (no commit — nothing to save).
+	window.removeEventListener("pointermove", onResizeMove);
+	window.removeEventListener("pointerup", endResize);
+	window.removeEventListener("pointercancel", endResize);
 });
 
 defineExpose({ load, startNewChat, convId });
@@ -1085,6 +1252,7 @@ defineExpose({ load, startNewChat, convId });
 }
 .jvp-panel {
 	pointer-events: auto;
+	position: relative;
 	max-width: 100%;
 	display: flex;
 	flex-direction: column;
@@ -1112,6 +1280,99 @@ defineExpose({ load, startNewChat, convId });
 	to {
 		opacity: 1;
 		transform: scale(1);
+	}
+}
+
+/* ---- resize handles ----
+   Thin strips along the three open edges (top / left / right) plus two top
+   corners. Each edge carries an always-present grabber so the panel plainly
+   reads as resizable; the strips sit in the panel's border zone, inset from the
+   corners, clear of the header buttons and the composer. */
+.jvp-rz {
+	position: absolute;
+	z-index: 6;
+	touch-action: none;
+	user-select: none;
+	-webkit-user-select: none;
+}
+.jvp-rz--top {
+	top: 0;
+	left: 14px;
+	right: 14px;
+	height: 8px;
+	cursor: ns-resize;
+	display: grid;
+	place-items: center;
+}
+.jvp-rz--left {
+	top: 14px;
+	bottom: 14px;
+	left: 0;
+	width: 8px;
+	cursor: ew-resize;
+	display: grid;
+	place-items: center;
+}
+.jvp-rz--right {
+	top: 14px;
+	bottom: 14px;
+	right: 0;
+	width: 8px;
+	cursor: ew-resize;
+	display: grid;
+	place-items: center;
+}
+/* The visible cue: a small grabber bar, always faintly shown, brightening to the
+   accent on hover or while dragging. */
+.jvp-rz-grip {
+	display: block;
+	border-radius: 999px;
+	background: var(--jv-ink-3);
+	opacity: 0.4;
+	transition: opacity 0.12s ease, background-color 0.12s ease;
+}
+.jvp-rz--top .jvp-rz-grip {
+	width: 28px;
+	height: 3px;
+}
+.jvp-rz--left .jvp-rz-grip,
+.jvp-rz--right .jvp-rz-grip {
+	width: 3px;
+	height: 28px;
+}
+.jvp-panel:hover .jvp-rz-grip {
+	opacity: 0.55;
+}
+.jvp-rz:hover .jvp-rz-grip,
+.jvp-panel--resizing .jvp-rz-grip {
+	opacity: 1;
+	background: var(--jv-accent);
+}
+/* Corners sit above the edge strips and resize both axes at once. */
+.jvp-rz--tl,
+.jvp-rz--tr {
+	top: 0;
+	width: 15px;
+	height: 15px;
+	z-index: 7;
+}
+.jvp-rz--tl {
+	left: 0;
+	cursor: nwse-resize;
+}
+.jvp-rz--tr {
+	right: 0;
+	cursor: nesw-resize;
+}
+.jvp-rz--tl:focus-visible,
+.jvp-rz--tr:focus-visible {
+	outline: 2px solid var(--jv-accent);
+	outline-offset: -3px;
+	border-radius: 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+	.jvp-rz-grip {
+		transition: none;
 	}
 }
 
@@ -1473,6 +1734,68 @@ defineExpose({ load, startNewChat, convId });
 	line-height: 1.5;
 	color: var(--jv-ink);
 	overflow-wrap: anywhere;
+}
+
+/* "Open in full chat" chip: stands in for content this panel can't draw
+   (diagram / chart / record cards). Injected inside a v-html bubble, so it is
+   reached with :deep(). */
+.jvp-m-bot :deep(.jvp-view-chip) {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	margin: 4px 0;
+	padding: 9px 11px;
+	border: 1px solid var(--jv-rule-2);
+	border-radius: 11px;
+	background: var(--jv-surface);
+	color: var(--jv-ink);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+.jvp-m-bot :deep(.jvp-view-chip:hover) {
+	border-color: var(--jv-accent);
+	background: var(--jv-chip-3);
+}
+.jvp-m-bot :deep(.jvp-view-chip:focus-visible) {
+	outline: 2px solid var(--jv-accent);
+	outline-offset: 1px;
+}
+.jvp-m-bot :deep(.jvp-view-chip-ic) {
+	width: 26px;
+	height: 26px;
+	flex: 0 0 auto;
+	padding: 5px;
+	border-radius: 8px;
+	background: var(--jv-chip-3);
+	color: var(--jv-accent);
+	box-sizing: border-box;
+}
+.jvp-m-bot :deep(.jvp-view-chip-tx) {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	line-height: 1.3;
+}
+.jvp-m-bot :deep(.jvp-view-chip-t) {
+	font-size: 13.5px;
+	font-weight: 600;
+}
+.jvp-m-bot :deep(.jvp-view-chip-s) {
+	font-size: 12px;
+	color: var(--jv-ink-2);
+}
+.jvp-m-bot :deep(.jvp-view-chip-go) {
+	width: 15px;
+	height: 15px;
+	flex: 0 0 auto;
+	color: var(--jv-ink-3);
+}
+.jvp-m-bot :deep(.jvp-view-chip:hover .jvp-view-chip-go) {
+	color: var(--jv-accent);
 }
 
 /* ---- rendered markdown inside an assistant bubble ----
