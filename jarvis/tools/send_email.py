@@ -28,6 +28,7 @@ Two shapes:
 from __future__ import annotations
 
 import frappe
+from frappe.utils import escape_html
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools import require_doctype_and_name
@@ -103,11 +104,20 @@ def _send_one(
 
 	from frappe.core.doctype.communication.email import make as _make
 
+	# Communication.content is HTML, but the agent composes a PLAIN-TEXT body
+	# with \n newlines (persona: "plain text, \n newlines, no Markdown"). Escape
+	# it and turn newlines into <br> so paragraphs survive delivery instead of
+	# collapsing into one run-on block - and so a stray `<`/`&` (an email address
+	# like <a@b.com>, a doctype name like <Sales Order>, an "a < b" comparison)
+	# renders literally instead of being swallowed by the mail client as a tag.
+	# Always escape: the contract is plain text, and no caller passes real HTML.
+	body = escape_html(content).replace("\n", "<br>\n")
+
 	result = _make(
 		doctype=doctype,
 		name=name,
 		subject=subject,
-		content=content,
+		content=body,
 		sent_or_received="Sent",
 		recipients=recipients,
 		cc=cc,

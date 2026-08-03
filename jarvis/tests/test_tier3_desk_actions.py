@@ -92,6 +92,90 @@ class TestSendEmail(FrappeTestCase):
 		self.assertEqual(out["communication_name"], "COMM-X-001")
 		self.assertEqual(out["subject"], "Hello")
 
+	def test_plain_text_body_becomes_newline_preserving_html(self):
+		# The agent composes a plain-text body with \n newlines (persona:
+		# "plain text, \n newlines, no Markdown"), but Communication.content is
+		# HTML - so without conversion every paragraph collapses into one
+		# run-on block on delivery. The tool must turn newlines into <br>.
+		with (
+			_all_exist(),
+			patch(
+				"frappe.core.doctype.communication.email.make",
+				return_value={"name": "C"},
+			) as mk,
+		):
+			send_email("to@x.com", "Subj", "Para one.\n\nPara two.", "User", "x")
+		sent = mk.call_args.kwargs["content"]
+		self.assertIn("<br>", sent)
+		self.assertIn("Para one.", sent)
+		self.assertIn("Para two.", sent)
+		# the blank line between paragraphs survives as two breaks
+		self.assertGreaterEqual(sent.count("<br>"), 2)
+
+	def test_plain_text_html_special_chars_are_escaped(self):
+		# Plain text is escaped before newline->br so a stray < or & can't
+		# break the HTML body or inject markup.
+		with (
+			_all_exist(),
+			patch(
+				"frappe.core.doctype.communication.email.make",
+				return_value={"name": "C"},
+			) as mk,
+		):
+			send_email("to@x.com", "Subj", "a < b & c", "User", "x")
+		sent = mk.call_args.kwargs["content"]
+		self.assertIn("&lt;", sent)
+		self.assertIn("&amp;", sent)
+
+	def test_html_like_content_is_escaped_not_rendered(self):
+		# The contract is plain text: anything tag-shaped is escaped so it shows
+		# literally rather than being interpreted (or eaten) as HTML.
+		with (
+			_all_exist(),
+			patch(
+				"frappe.core.doctype.communication.email.make",
+				return_value={"name": "C"},
+			) as mk,
+		):
+			send_email("to@x.com", "Subj", "<p>Hi</p>", "User", "x")
+		self.assertEqual(mk.call_args.kwargs["content"], "&lt;p&gt;Hi&lt;/p&gt;")
+
+	def test_angle_bracketed_text_survives(self):
+		# The regression that pushed us off an is_html guard: an email address
+		# or doctype name in angle brackets must NOT vanish as an unknown tag.
+		with (
+			_all_exist(),
+			patch(
+				"frappe.core.doctype.communication.email.make",
+				return_value={"name": "C"},
+			) as mk,
+		):
+			send_email("to@x.com", "Subj", "Reach me at <a@b.com>", "User", "x")
+		self.assertIn("&lt;a@b.com&gt;", mk.call_args.kwargs["content"])
+
+	def test_batch_messages_also_convert_newlines(self):
+		# The batch path routes through _send_one, so it gets the same
+		# conversion - lock it so a refactor can't skip it.
+		with (
+			_all_exist(),
+			patch(
+				"frappe.core.doctype.communication.email.make",
+				return_value={"name": "C"},
+			) as mk,
+		):
+			send_email(
+				messages=[
+					{
+						"recipients": "to@x.com",
+						"subject": "S",
+						"content": "Line one.\n\nLine two.",
+						"doctype": "User",
+						"name": "x",
+					}
+				]
+			)
+		self.assertIn("<br>", mk.call_args.kwargs["content"])
+
 
 # ---------------------------------------------------------------------
 # add_comment / update_comment
