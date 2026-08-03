@@ -156,6 +156,36 @@ class TestMintReliableIndex(FrappeTestCase):
 				self._mint()
 		self.assertEqual(pending_confirm.cards_open_gauge(), before)
 
+	def test_mint_survives_missing_expire_key_on_frappe_v15(self):
+		"""Frappe < 17 (e.g. v15) has no ``RedisWrapper.expire_key``. The owner-index
+		TTL refresh must not depend on it: when it is unavailable the park still
+		succeeds (record persisted + peekable + indexed) instead of the AttributeError
+		being caught by the park's try/except and rolling back a good record - which
+		took down EVERY gated confirmation card on v15 benches."""
+		with patch.object(
+			frappe.cache(),
+			"expire_key",
+			create=True,
+			side_effect=AttributeError("'RedisWrapper' object has no attribute 'expire_key'"),
+		):
+			with patch.object(frappe, "log_error") as mock_log:
+				token = self._mint()
+		self.assertIsNotNone(token, "park must not depend on the Frappe>=17-only expire_key")
+		self.assertFalse(mock_log.called, "a missing expire_key must not trip the error/rollback path")
+		self.assertIsNotNone(pending_confirm.peek(token))
+		self.assertIn(token, {r["token"] for r in pending_confirm.list_for_owner(self._A)})
+
+	def test_mint_refreshes_owner_index_ttl_via_portable_path(self):
+		"""The owner-index set gets a fresh TTL on every mint (so an emptied set
+		self-expires) via the version-portable raw ``expire`` on the make_key'd key -
+		the SAME key ``sadd`` wrote to. Guards the hygiene from silently regressing to
+		a no-op (e.g. targeting an un-namespaced or otherwise wrong key)."""
+		self._mint()
+		cache = frappe.cache()
+		ttl = cache.ttl(cache.make_key(pending_confirm._owner_key(self._A)))
+		self.assertGreater(ttl, 0, "owner-index set must carry a positive TTL after mint")
+		self.assertLessEqual(ttl, pending_confirm._TTL_S)
+
 
 class TestExecUser(FrappeTestCase):
 	def test_exec_user_stored_and_returned(self):
@@ -474,16 +504,16 @@ class TestConsume(FrappeTestCase):
 		self.assertIsNone(pending_confirm.consume(token, owner=OWNER, conversation=CONV))
 
 	def test_concurrent_consumes_exactly_one_wins(self):
-		"""Two threads race to consume the same legitimate token. Redis GETDEL
-		is atomic server-side, so exactly one of the two concurrent consumes
-		must get the record back; the other must get None - never both, never
-		neither.
+		"""Two threads race to consume the same legitimate token. The atomic
+		get-and-delete (_get_and_delete's MULTI/EXEC) is serialized server-side,
+		so exactly one of the two concurrent consumes must get the record back;
+		the other must get None - never both, never neither.
 
 		Without a barrier, nothing forces the two threads to actually overlap:
 		the OS could just run them back-to-back, in which case a naive
 		non-atomic get-then-delete would also pass this test by accident. A
-		threading.Barrier(2) is spliced in front of the real getdel call (the
-		only place consume() mutates the store) so neither thread's getdel can
+		threading.Barrier(2) is spliced in front of the real _get_and_delete call
+		(the only place consume() mutates the store) so neither thread's burn can
 		return until BOTH threads have completed their ownership-check read
 		(the plain get_value earlier in consume()) and are standing right at
 		the delete. That is the actual race window consume()'s docstring
@@ -493,14 +523,14 @@ class TestConsume(FrappeTestCase):
 		token = self._mint()
 		results = [None, None]
 		barrier = threading.Barrier(2)
-		real_getdel = frappe.cache().getdel
+		real_get_and_delete = pending_confirm._get_and_delete
 
-		def _synced_getdel(*args, **kwargs):
+		def _synced_get_and_delete(*args, **kwargs):
 			# Both threads land here only after their own ownership-check
 			# read already matched, so this rendezvous pins both threads
 			# past that read before either delete is allowed to fire.
 			barrier.wait(timeout=5)
-			return real_getdel(*args, **kwargs)
+			return real_get_and_delete(*args, **kwargs)
 
 		def _consume(i):
 			results[i] = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
@@ -513,10 +543,9 @@ class TestConsume(FrappeTestCase):
 		t1 = threading.Thread(target=ctx1.run, args=(_consume, 0))
 		t2 = threading.Thread(target=ctx2.run, args=(_consume, 1))
 
-		# frappe.cache is a process-wide singleton (frappe/__init__.py sets
-		# it via `global cache`, not a thread local), so patching the bound
-		# method on the one instance affects both threads.
-		with patch.object(frappe.cache(), "getdel", side_effect=_synced_getdel):
+		# _get_and_delete is a module-level function, so patching it on the
+		# pending_confirm module affects both threads (they call the same one).
+		with patch.object(pending_confirm, "_get_and_delete", side_effect=_synced_get_and_delete):
 			t1.start()
 			t2.start()
 			t1.join(timeout=5)
@@ -529,24 +558,22 @@ class TestConsume(FrappeTestCase):
 		self.assertEqual(len(winners), 1)
 		self.assertIsNone(pending_confirm.peek(token))
 
-	def test_getdel_connection_error_returns_none_without_burning_token(self):
-		"""Finding #8 (max-effort review of issue #186): the raw
-		``frappe.cache().getdel`` call in consume() is not wrapped in the
-		RedisWrapper's usual ``suppress(redis.exceptions.ConnectionError)``
-		(unlike get_value, used by peek), so a transient redis blip during a
-		Confirm click propagated as an uncaught 500 instead of a graceful
-		None. consume() must itself catch the error and return None - the
-		token must not be burned, so a later consume against a healthy cache
-		still succeeds. This must NOT fall back to a non-atomic
-		get-then-delete: only the same getdel is retried later."""
-		import redis.exceptions
-
+	def test_atomic_burn_connection_error_returns_none_without_burning_token(self):
+		"""Finding #8 (max-effort review of issue #186): the atomic get-and-delete
+		in consume() is a raw redis operation, not one of RedisWrapper's own wrapped
+		methods, so unlike get_value (used by peek) it is NOT auto-suppressed - a
+		transient redis blip during a Confirm click would otherwise propagate as an
+		uncaught 500 instead of a graceful None. consume() must itself catch the
+		error and return None - the token must NOT be burned, so a later consume
+		against a healthy cache still succeeds. It must NOT fall back to a non-atomic
+		get-then-delete (which would reopen the consume race): only the same atomic
+		burn is retried later."""
 		token = self._mint()
 
 		def _raise_once(*args, **kwargs):
 			raise redis.exceptions.ConnectionError("simulated redis blip")
 
-		with patch.object(frappe.cache(), "getdel", side_effect=_raise_once):
+		with patch.object(pending_confirm, "_get_and_delete", side_effect=_raise_once):
 			result = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
 		self.assertIsNone(result)
 		# Token was not burned: still peekable, and a later consume against a
@@ -555,3 +582,43 @@ class TestConsume(FrappeTestCase):
 		record = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
 		self.assertIsNotNone(record)
 		self.assertEqual(record["tool"], TOOL)
+
+	def test_atomic_burn_response_error_returns_none_without_burning_token(self):
+		"""A degraded-write Redis state (e.g. -MISCONF stop-writes-on-bgsave-error,
+		or a read-only replica) makes the DEL inside the MULTI/EXEC raise
+		ResponseError. The whitelisted Confirm endpoint relies on consume()
+		returning None (-> graceful retry toast), so this must NOT propagate as an
+		uncaught 500 - and the token must not be burned, so a later consume against a
+		healthy cache still succeeds."""
+		token = self._mint()
+
+		def _raise_once(*args, **kwargs):
+			raise redis.exceptions.ResponseError("MISCONF Redis is configured to save RDB snapshots")
+
+		with patch.object(pending_confirm, "_get_and_delete", side_effect=_raise_once):
+			result = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
+		self.assertIsNone(result)
+		self.assertIsNotNone(pending_confirm.peek(token))
+		record = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
+		self.assertIsNotNone(record)
+		self.assertEqual(record["tool"], TOOL)
+
+	def test_consume_does_not_require_getdel_redis_62(self):
+		"""GETDEL is a redis-server >= 6.2 command; an older bench (e.g. v6.0)
+		rejects it with ResponseError. A Confirm click must still succeed there, so
+		consume() must NOT depend on GETDEL. Simulate the old server by making the
+		cache's getdel raise ResponseError; the consume must still burn the token and
+		return the record via the portable MULTI/EXEC path (which never calls
+		GETDEL)."""
+		token = self._mint()
+		with patch.object(
+			frappe.cache(),
+			"getdel",
+			create=True,
+			side_effect=redis.exceptions.ResponseError("ERR unknown command 'GETDEL'"),
+		):
+			record = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
+		self.assertIsNotNone(record, "consume must not depend on the redis>=6.2 GETDEL command")
+		self.assertEqual(record["tool"], TOOL)
+		# Really burned (single-use) via the portable path, not left dangling.
+		self.assertIsNone(pending_confirm.peek(token))

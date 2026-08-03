@@ -173,7 +173,6 @@ def mint(
 	try:
 		cache.set_value(_key(token), record, expires_in_sec=_TTL_S)
 		cache.sadd(_owner_key(owner), token)
-		cache.expire_key(_owner_key(owner), _TTL_S)
 		# set_value swallows a redis blip, so confirm the record is really readable
 		# before we let a card be published against this token.
 		if peek(token) is None:
@@ -192,6 +191,18 @@ def mint(
 			except Exception:
 				pass
 		return None
+	# Refresh the owner-index set's TTL so an emptied set self-expires (see the module
+	# docstring). PURE HYGIENE - dead members are pruned on read regardless - so it must
+	# NEVER fail the park: a record that already persisted + verified is live and
+	# confirmable whether or not this TTL lands, which is why it sits OUTSIDE the try
+	# above. Uses the raw redis ``expire`` on the make_key'd set key (present on every
+	# Frappe version) rather than ``RedisWrapper.expire_key`` - Frappe >= 17 only, whose
+	# AttributeError on a v15 bench was caught by the park's try/except and rolled back a
+	# good record, taking down every gated confirmation card.
+	try:
+		cache.expire(cache.make_key(_owner_key(owner)), _TTL_S)
+	except Exception:
+		pass
 	# cards_open gauge +1 (self-healing on expiry via the ZSET score). Bumped only
 	# after a successful persist+index+verify so the gauge never over-counts a
 	# rolled-back park.
@@ -210,6 +221,24 @@ def peek(token: str) -> dict | None:
 	return frappe.cache().get_value(_key(token), use_local_cache=False)
 
 
+def _get_and_delete(full_key):
+	"""Atomically read-and-remove a raw cache key, returning its pickled bytes (or
+	None if absent). Uses a MULTI/EXEC transaction (GET then DEL) rather than the
+	one-shot GETDEL command: GETDEL is redis-server >= 6.2 only, and a customer
+	bench may run older (a v6.0 server rejects it), whereas GET/DEL under MULTI/EXEC
+	run as one indivisible unit on EVERY redis version. That keeps the single-winner
+	consume guarantee - the server serializes the two transactions, so of two racing
+	confirms exactly one sees the value before DEL removes it - without the version
+	floor. ``full_key`` is the already-make_key'd key (raw redis, no re-namespacing),
+	matching what the previous getdel operated on.
+	"""
+	pipe = frappe.cache().pipeline(transaction=True)
+	pipe.get(full_key)
+	pipe.delete(full_key)
+	raw, _deleted = pipe.execute()
+	return raw
+
+
 def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	"""Validate AND atomically single-use-consume. Returns the stored record
 	ONLY when: token exists, record.owner == owner, and (when the record has a
@@ -222,13 +251,14 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 
 	Atomicity: ownership is checked first with a plain (non-destructive)
 	read, so a mismatched call never touches the stored key. Only once
-	ownership matches do we delete - and that delete uses Redis' GETDEL,
-	a single atomic server-side command (get-and-delete in one round trip,
-	no separate check-then-delete on our side). If two confirmed consumes
-	race each other here, the server serializes the two GETDELs: exactly
-	one gets the pickled record back, the other gets None. That is the
-	single-use guarantee - it does not depend on Python-level locking,
-	which would not help anyway across separate worker processes.
+	ownership matches do we delete - and that delete is an atomic
+	get-and-delete (``_get_and_delete``: GET then DEL inside one MULTI/EXEC
+	transaction, portable to redis < 6.2 which lacks GETDEL). If two
+	confirmed consumes race each other here, the server serializes the two
+	transactions: exactly one gets the pickled record back, the other gets
+	None. That is the single-use guarantee - it does not depend on
+	Python-level locking, which would not help anyway across separate
+	worker processes.
 	"""
 	if not token:
 		return None
@@ -251,20 +281,21 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 		return None
 
 	full_key = frappe.cache().make_key(_key(token))
-	# GETDEL is a raw redis-py command, not one of RedisWrapper's own wrapped
-	# methods (get_value/set_value/...), so unlike those it is NOT wrapped in
-	# RedisWrapper's usual suppress(redis.exceptions.ConnectionError) - a
-	# transient redis blip here would otherwise propagate as an uncaught 500
-	# instead of the graceful None the caller expects (treated as
-	# not-consumable -> InvalidConfirmation; the token is not burned, the user
-	# can retry). Also defensively catch ResponseError: GETDEL requires
-	# redis-server >= 6.2, and an older/misconfigured server rejects the
-	# command outright. Either error returns None here WITHOUT falling back to
-	# a non-atomic get-then-delete, which would reintroduce the very race
-	# GETDEL exists to close - only the same atomic getdel is retried on a
-	# later call.
+	# Atomic get-and-delete. GETDEL would be the one-command way but it is
+	# redis-server >= 6.2 ONLY, and a customer bench may run older (a v6.0 server
+	# rejects it outright) - so _get_and_delete uses a MULTI/EXEC transaction
+	# (GET then DEL as one indivisible unit) instead. That keeps the single-winner
+	# guarantee (of two concurrent confirms exactly one sees the value before DEL
+	# removes it) while working on every redis version; a plain get-then-delete
+	# would reopen the very race the atomicity exists to close. Catch both a
+	# transient blip (ConnectionError) AND a degraded-write state (ResponseError -
+	# e.g. -MISCONF stop-writes-on-bgsave-error, or a read-only replica, under which
+	# the write DEL inside the transaction errors) and turn either into a graceful
+	# None (treated as not-consumable -> InvalidConfirmation; the token is NOT
+	# burned, so a retry against a healthy cache still succeeds) rather than an
+	# uncaught 500 on the whitelisted Confirm endpoint.
 	try:
-		raw = frappe.cache().getdel(full_key)
+		raw = _get_and_delete(full_key)
 	except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
 		return None
 	frappe.local.cache.pop(full_key, None)
