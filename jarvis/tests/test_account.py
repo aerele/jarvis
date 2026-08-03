@@ -1131,3 +1131,49 @@ class TestBackfillExcludesOauthPushOnly(FrappeTestCase):
 		raw = account._settings_raw(("chat_was_ready_at", account._READY_ANCHOR_FIELD))
 		self.assertTrue(raw.get("chat_was_ready_at"), "a confirmed direct apply is grandfathered")
 		self.assertTrue(raw.get(account._READY_ANCHOR_FIELD), "the grandfathered claim is anchor-bound")
+
+
+class TestGetLlmApplyOperationShim(FrappeTestCase):
+	"""jarvis.account.get_llm_apply_operation — the read-only bench shim the SPA's
+	single Start-chatting controller polls (plan-05 D2). It forwards the opaque
+	operation id to admin and surfaces the §8.4 status verbatim; it is
+	System-Manager-gated and holds no operation state of its own."""
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_forwards_the_operation_id_and_returns_admin_status(self):
+		status = {
+			"operation_id": "llmapply_abc",
+			"state": "applied_waiting_readiness",
+			"code": "LLM_APPLIED_READINESS_PENDING",
+			"message": "finishing setup",
+			"tenant": "deadbeef" * 4,
+			"tenant_authority_generation": 7,
+			"desired_version": 12,
+			"applied_version": 12,
+			"chat_readiness": "Configuring",
+			"chat_readiness_reason": "Applying the ERP plugin environment.",
+			"retryable": True,
+			"retry_after_seconds": 0,
+		}
+		with patch.object(admin_client, "get_llm_apply_operation", return_value=status) as m:
+			out = account.get_llm_apply_operation("llmapply_abc")
+		m.assert_called_once_with("llmapply_abc")
+		self.assertEqual(out, status)
+
+	def test_admin_validation_error_surfaces_as_frappe_throw(self):
+		# e.g. UnknownOperation (404) -> AdminValidationError -> clean toast.
+		with patch.object(
+			admin_client, "get_llm_apply_operation", side_effect=AdminValidationError("no such operation")
+		):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				account.get_llm_apply_operation("llmapply_missing")
+		self.assertIn("no such operation", str(cm.exception))
+
+	def test_is_system_manager_gated_before_any_admin_round_trip(self):
+		frappe.set_user("Guest")
+		with patch.object(admin_client, "get_llm_apply_operation") as m:
+			with self.assertRaises(frappe.PermissionError):
+				account.get_llm_apply_operation("llmapply_abc")
+		m.assert_not_called()
