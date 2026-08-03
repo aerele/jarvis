@@ -674,7 +674,10 @@ _UNDELIVERABLE_SUFFIXES = (
 
 def _is_undeliverable(email: str) -> bool:
 	"""Whether ``email``'s domain is reserved, so mail to it can never arrive."""
-	domain = email.rpartition("@")[2].strip().lower()
+	# strip("."): "example.com." is the root-anchored form of the same name, and
+	# would otherwise slip through -- ".example.com." does not end with
+	# ".example.com".
+	domain = email.rpartition("@")[2].strip().strip(".").lower()
 	return bool(domain) and f".{domain}".endswith(_UNDELIVERABLE_SUFFIXES)
 
 

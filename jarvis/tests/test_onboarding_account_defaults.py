@@ -47,21 +47,47 @@ class TestUndeliverable(FrappeTestCase):
 		):
 			self.assertFalse(onboarding._is_undeliverable(addr), addr)
 
+	def test_root_anchored_form_is_reserved(self):
+		# "example.com." names the same domain; the trailing dot must not smuggle
+		# it past the suffix match.
+		self.assertTrue(onboarding._is_undeliverable("admin@example.com."))
+
+	def test_case_and_whitespace_are_normalised(self):
+		self.assertTrue(onboarding._is_undeliverable("Admin@EXAMPLE.CoM"))
+		self.assertTrue(onboarding._is_undeliverable("admin@  example.com  "))
+
+	def test_last_at_wins(self):
+		# rpartition: the domain is what follows the FINAL "@".
+		self.assertTrue(onboarding._is_undeliverable("a@b@example.com"))
+		self.assertFalse(onboarding._is_undeliverable("a@example.com@acme.com"))
+
 	def test_blank_is_not_undeliverable(self):
 		# Nothing to reject; the caller already treats "" as "no prefill".
-		self.assertFalse(onboarding._is_undeliverable(""))
+		for addr in ("", "noatsign", "x@", "x@."):
+			self.assertFalse(onboarding._is_undeliverable(addr), addr)
+
+
+def _caller_email(value):
+	"""Mock ONLY the ("User", ..., "email") lookup. A blanket return_value would
+	also answer any other get_value the endpoint grows later, which would then
+	silently receive an email address."""
+
+	def side_effect(doctype, *args, **kwargs):
+		return value if doctype == "User" else None
+
+	return patch("frappe.db.get_value", side_effect=side_effect)
 
 
 class TestAccountDefaults(FrappeTestCase):
 	def test_caller_email_is_prefilled(self):
-		with patch("frappe.db.get_value", return_value="manager@acme.com"):
+		with _caller_email("manager@acme.com"):
 			out = onboarding.get_account_defaults()
 		self.assertEqual(out["email"], "manager@acme.com")
 
 	def test_reserved_caller_email_is_dropped(self):
 		# Mocked, not read off the live site: a bench whose Administrator has a
 		# real address would otherwise fail this while the code is correct.
-		with patch("frappe.db.get_value", return_value="admin@example.com"):
+		with _caller_email("admin@example.com"):
 			out = onboarding.get_account_defaults()
 		self.assertEqual(out["email"], "")
 
