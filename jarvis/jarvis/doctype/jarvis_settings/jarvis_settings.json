@@ -86,6 +86,8 @@
   "agent_token",
   "agent_token_issued_at",
   "agent_token_max_age_days",
+  "tenant_authority_generation",
+  "tenant_authority_handle",
   "chat_device_id",
   "chat_device_public_key",
   "chat_device_private_key",
@@ -652,6 +654,23 @@
    "label": "Agent Token Max Age (days)",
    "default": 90,
    "description": "Reject the bearer token if issued_at + this many days < now. Default 90 days. Set to 0 to disable expiry (not recommended). Operator rotates via the rotate_agent_token endpoint."
+  },
+  {
+   "fieldname": "tenant_authority_generation",
+   "fieldtype": "Int",
+   "label": "Tenant Authority Generation",
+   "default": "0",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "The tenant-authority generation of the connection last accepted from admin (review plan 04 P0-5). Admin bumps its authority generation by 1 on every authority write; this bench refuses to overwrite the connection with a payload carrying a LOWER generation, so a slow poll cannot regress a customer onto their old container after a move/repair. 0 == no authority-fenced connection accepted yet (pre-backfill / fresh)."
+  },
+  {
+   "fieldname": "tenant_authority_handle",
+   "fieldtype": "Data",
+   "label": "Tenant Authority Handle",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Opaque, stable identifier (admin's sha256 of the serving container's docname) of the connection last accepted at tenant_authority_generation. Equal handle iff same container; never the internal TEN-* id. A payload at the SAME generation carrying a DIFFERENT handle is an admin invariant breach - the bench holds the current connection rather than overwrite onto an unverifiable container."
   },
   {
    "fieldname": "chat_device_id",
