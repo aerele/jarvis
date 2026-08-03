@@ -25,6 +25,7 @@ import logging
 import unittest
 
 import frappe
+from frappe.model import data_fieldtypes
 
 from jarvis.chat import list_filters
 from jarvis.chat.list_filters import (
@@ -520,40 +521,16 @@ class TestRangeOperatorsAreTemporalOnly(unittest.TestCase):
 	TEMPORAL = frozenset({"Date", "Datetime", "Time"})
 	CARRIES_RANGE = frozenset({"Date", "Datetime"})
 
-	#: A broad sweep of value-bearing fieldtypes — including the ones with NO
-	#: invalid_condition_map row and no effective-Data conversion (Duration,
-	#: Autocomplete, Geolocation, Rating), which are the whole point of S5.
-	CATALOGABLE = (
-		"Data",
-		"Text",
-		"Small Text",
-		"Long Text",
-		"Text Editor",
-		"Code",
-		"HTML Editor",
-		"Markdown Editor",
-		"Int",
-		"Float",
-		"Currency",
-		"Percent",
-		"Check",
-		"Select",
-		"Link",
-		"Dynamic Link",
-		"Duration",
-		"Rating",
-		"Color",
-		"Phone",
-		"JSON",
-		"Barcode",
-		"Autocomplete",
-		"Geolocation",
-		"Read Only",
-		"Attach",
-		"Attach Image",
-		"Date",
-		"Datetime",
-		"Time",
+	#: EVERY value-bearing fieldtype the schema builder can emit into a catalog,
+	#: enumerated from Frappe's canonical ``data_fieldtypes`` (so a fieldtype Frappe
+	#: adds later is swept the day it lands) minus the two families the builder never
+	#: catalogs: the Table containers and the secret types (Password, deviation D2),
+	#: which is exactly the ``NO_VALUE_FIELDTYPES | SECRET_FIELDTYPES`` gate in
+	#: ``build_field_catalog``. Deriving from the source is the whole point of S5: a
+	#: hand-kept tuple silently omitted Signature/Icon (and Long Int), so promoting
+	#: any of them into ``_TEMPORAL_FIELDTYPES`` by mistake stayed green.
+	CATALOGABLE = tuple(
+		sorted(frozenset(data_fieldtypes) - list_filters.NO_VALUE_FIELDTYPES - list_filters.SECRET_FIELDTYPES)
 	)
 
 	def test_between_or_timespan_implies_temporal(self):
@@ -643,6 +620,43 @@ class TestNumericStrictParse(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# D8 — a child clause with no readable container must NEVER compile to `IN ()`
+# --------------------------------------------------------------------------- #
+class TestEmptyParentfieldsFailClosed(unittest.TestCase):
+	"""A child clause carries the readable parent containers as ``parentfields``
+	(M2). An empty set would bind ``parentfield IN ()`` — a hard MariaDB syntax
+	error (pymysql renders the empty tuple literally) that 500s every child-table
+	filter for up to SCHEMA_CACHE_TTL after a restart-only deploy served a stale
+	pre-v2 cached schema. The compiler must fail closed with the stable
+	invalid-field code instead, independently of the CONTRACT_VERSION bump that
+	discards such caches on deploy."""
+
+	def test_empty_parentfields_raise_unknown_field_not_empty_in(self):
+		clause = _Clause(
+			index=0,
+			entry={"is_child": True, "doctype": STEP, "parentfields": []},
+			operator="=",
+			value="x",
+		)
+		with self.assertRaises(ListFilterError) as caught:
+			list_filters.compile_validated(MACRO, [clause], ref="`m`")
+		self.assertEqual(caught.exception.filter_error_code, list_filters.ERR_UNKNOWN_FIELD)
+
+	def test_missing_parentfields_key_also_fails_closed(self):
+		# A pre-M2 cached entry has no `parentfields` key at all, not just an empty
+		# list — `.get(...) or ()` must land it on the same closed failure.
+		clause = _Clause(
+			index=0,
+			entry={"is_child": True, "doctype": STEP},
+			operator="=",
+			value="x",
+		)
+		with self.assertRaises(ListFilterError) as caught:
+			list_filters.compile_validated(MACRO, [clause], ref="`m`")
+		self.assertEqual(caught.exception.filter_error_code, list_filters.ERR_UNKNOWN_FIELD)
+
+
+# --------------------------------------------------------------------------- #
 # P1-10 — schema_revision hashes the full contract
 # --------------------------------------------------------------------------- #
 class TestSchemaRevisionContract(unittest.TestCase):
@@ -696,6 +710,16 @@ class TestSchemaRevisionContract(unittest.TestCase):
 		a = list_filters._schema_digest([self._field(parentfields=["steps"])])
 		b = list_filters._schema_digest([self._field(parentfields=["steps", "steps_alt"])])
 		self.assertNotEqual(a, b, "a change to a wire key (parentfields) must change the revision")
+
+	def test_group_change_changes_revision(self):
+		# S8: the field-picker GROUP the client renders is not a wire key of its own —
+		# it is derived from `is_child`+`doctype` (filterModel `fieldOptions`). A field
+		# that moves group (a different doctype, or parent→child) must therefore move
+		# the revision, or the picker regroups against a stale ETag. Guards the digest
+		# against a future "hash only some keys" change that dropped either input.
+		a = list_filters._schema_digest([self._field(doctype=MACRO, is_child=False)])
+		b = list_filters._schema_digest([self._field(doctype=STEP, is_child=True)])
+		self.assertNotEqual(a, b, "a change to a field's group (doctype/is_child) must change the revision")
 
 	def test_header_keys_change_revision(self):
 		# S8: schema-LEVEL keys the client renders (root_doctype, is_large_table,
@@ -780,11 +804,24 @@ class TestCapabilityFlag(unittest.TestCase):
 			compiled = compile_list_filters("macros", clause, user=USER_SM)
 		self.assertIn("`macro_name`", compiled.fragment())
 
+	def test_off_false_or_zero_disables_nothing(self):
+		# D4: `false`/`0` is the most natural spelling of "kill switch not engaged"
+		# for a key named `*_off`. Neither equals any of None/""/[]/() under `==`, so
+		# without an explicit allow they fell THROUGH to the fail-closed branch and
+		# silently disabled EVERY migrated view, fleet-wide. They must read as
+		# "disable nothing". `0.0` is included as the JSON-number sibling of `0`.
+		for off in (False, 0, 0.0):
+			with self.subTest(value=off), _conf("jarvis_list_filters_v2_off", off):
+				self.assertTrue(view_filters_enabled("macros"), f"{off!r} disabled macros")
+				self.assertTrue(view_filters_enabled("skills"), f"{off!r} disabled skills")
+
 	def test_malformed_flag_fails_closed_disabling_every_view(self):
 		# M1.1: the kill switch must NEVER fail open. A bool (the classic
 		# `"...v2_off": true` typo) used to raise inside the parse and silently
-		# re-enable everything; now it disables every migrated view.
-		for bad in (True, 1, {"macros": True}, ["macros", 123]):
+		# re-enable everything; now it disables every migrated view. `True`/`1` are
+		# ambiguous junk (distinct from the `false`/`0` = "off" case above) and, with
+		# a dict or a mixed list, must all fail CLOSED.
+		for bad in (True, 1, {"macros": True}, ["macros", 2]):
 			with self.subTest(value=bad), _conf("jarvis_list_filters_v2_off", bad):
 				self.assertFalse(view_filters_enabled("macros"), f"{bad!r} failed OPEN")
 				self.assertFalse(view_filters_enabled("skills"), f"{bad!r} failed OPEN")
