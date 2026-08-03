@@ -212,8 +212,14 @@ def _authority_anchor(raw: dict) -> str:
 	Every input is a LOCAL, offline-readable field, because this is recomputed on
 	the fail-open path when admin cannot be asked at all:
 
-	  - jarvis_admin_api_key: the admin principal. A reconnect to a different
-	    customer replaces it.
+	  - the admin principal: a DIGEST of the REAL jarvis_admin_api_key (review F6).
+	    The raw ``tabSingles`` value the caller passes carries only this Password
+	    field's MASK ("**********"), which is a CONSTANT - joining it made the
+	    principal term inert, so a reconnect to a different principal on the same
+	    container + generation produced an IDENTICAL anchor (a fence that did not
+	    fence). We fetch and hash the decrypted credential from __Auth instead (a
+	    local read, so still offline-safe on the fail-open path); the real key is
+	    never stored - only its one-way digest rides into the anchor.
 	  - agent_url: the container. A workspace reset clears it; a container
 	    replacement changes it.
 	  - tenant_authority_generation: the Plan 04 generation. A move/repair bumps
@@ -223,9 +229,18 @@ def _authority_anchor(raw: dict) -> str:
 	A change to any of them means the workspace admin confirmed Ready is no longer
 	the one in front of us, so the claim must not carry across it.
 	"""
+	from frappe.utils.password import get_decrypted_password
+
+	# The REAL admin credential (from __Auth), digested - NOT the masked column value
+	# the raw tabSingles read carries. get_decrypted_password is a local DB read, so
+	# it is safe on the fail-open path. Empty (un-onboarded) -> empty principal term.
+	real_key = (
+		get_decrypted_password(SETTINGS, SETTINGS, "jarvis_admin_api_key", raise_exception=False) or ""
+	).strip()
+	principal = hashlib.sha256(real_key.encode("utf-8")).hexdigest() if real_key else ""
 	joined = "|".join(
 		(
-			(raw.get("jarvis_admin_api_key") or "").strip(),
+			principal,
 			(raw.get("agent_url") or "").strip(),
 			str(raw.get("tenant_authority_generation") or ""),
 		)

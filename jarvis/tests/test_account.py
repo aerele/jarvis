@@ -819,7 +819,12 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		self.assertEqual(out["reason"], "readiness_unconfirmed")
 
 	def test_an_established_workspace_is_unaffected(self):
-		self._write({"chat_was_ready_at": "2026-01-01 00:00:00"})
+		# A genuinely established workspace: the marker AND a matching authority anchor
+		# for the current (real principal, container, generation). setUp already wrote a
+		# REAL admin credential, so the anchor's principal term (F6) is meaningful and
+		# the recomputed anchor on the fail-open path matches the stamped one.
+		anchor = account._authority_anchor(account._settings_raw(account._GATE_STATE_FIELDS))
+		self._write({"chat_was_ready_at": "2026-01-01 00:00:00", "chat_ready_authority": anchor})
 		with patch.object(admin_client, "get_connection", side_effect=Exception("admin 500")):
 			out = account.is_ready_for_chat()
 		self.assertTrue(out["ready"])
@@ -894,7 +899,13 @@ class TestAuthorityAnchorFence(FrappeTestCase):
 		self._snap = account._settings_raw(self._FIELDS)
 
 	def tearDown(self):
+		from jarvis._password_utils import clear_settings_password
+
 		account._bust_chat_gate()
+		# A test may have written a REAL admin credential to __Auth (the F6 principal
+		# fence): drop it so it cannot leak into another test. The column value is
+		# restored from the snapshot below.
+		clear_settings_password(frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key")
 		for f in self._FIELDS:
 			frappe.db.set_value(
 				"Jarvis Settings", "Jarvis Settings", f, self._snap.get(f), update_modified=False
@@ -927,10 +938,23 @@ class TestAuthorityAnchorFence(FrappeTestCase):
 		)
 
 	def test_a_changed_principal_ends_the_claim(self):
-		self._write(agent_url="ws://container-1", jarvis_admin_api_key="key-A-mask")
+		# Production-shaped: the anchor's principal term binds to the REAL admin
+		# credential (F6), so a reconnect that swaps it must end the established claim.
+		# Uses set_settings_password (encrypts into __Auth, masks the column) - NOT a
+		# db_set of a literal, which only ever writes the constant mask production
+		# emits for every principal, so a db_set-based test could not exercise a real
+		# principal change at all.
+		from jarvis._password_utils import set_settings_password
+
+		s = frappe.get_single("Jarvis Settings")
+		set_settings_password(s, "jarvis_admin_api_key", "real-principal-A")
+		self._write(agent_url="ws://container-1")
 		anchor = account._authority_anchor(account._settings_raw(self._FIELDS))
 		self._write(chat_was_ready_at="2026-01-01 00:00:00", chat_ready_authority=anchor)
-		self._write(jarvis_admin_api_key="key-B-mask")  # reconnected to another account
+		# Reconnected to another account: the REAL admin principal changes (same
+		# container, same generation) - the fence must end the claim on this alone.
+		set_settings_password(s, "jarvis_admin_api_key", "real-principal-B")
+		frappe.db.commit()
 		raw = account._settings_raw(account._GATE_STATE_FIELDS)
 		self.assertFalse(account._has_been_chat_ready(raw))
 
