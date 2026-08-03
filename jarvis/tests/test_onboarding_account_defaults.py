@@ -1,9 +1,11 @@
-"""onboarding.get_account_defaults — prefill for the SPA Account step.
+"""onboarding.get_account_defaults — company prefill for the SPA Account step.
 
 Ports the desk auto-fetch (commit 1507495) to a backend endpoint: the SPA has no
-`frappe.defaults`, so the server resolves the caller's email + a default company
-(user/global default → sole Company, with a datalist list for several). Silent
-no-op on sites without the Company doctype / read permission.
+`frappe.defaults`, so the server resolves a default company (user/global default
+→ sole Company, with a datalist list for several). Silent no-op on sites without
+the Company doctype / read permission.
+
+Email is not part of the payload — see the endpoint's docstring for why.
 """
 
 from unittest.mock import patch
@@ -15,10 +17,10 @@ from jarvis import onboarding
 
 
 class TestAccountDefaults(FrappeTestCase):
-	def test_email_is_the_caller(self):
-		out = onboarding.get_account_defaults()
-		expected = frappe.db.get_value("User", frappe.session.user, "email") or frappe.session.user
-		self.assertEqual(out["email"], expected)
+	def test_email_is_never_returned(self):
+		"""Regression guard: the caller's email used to be prefilled into Work
+		email, which on a fresh site is admin@example.com."""
+		self.assertNotIn("email", onboarding.get_account_defaults())
 
 	def test_user_default_company_wins(self):
 		with (

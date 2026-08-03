@@ -655,19 +655,22 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 
 @frappe.whitelist()
 def get_account_defaults() -> dict:
-	"""Prefill for the onboarding Account step so the customer doesn't retype what
-	the site already knows: the caller's email + a default company. Company is the
-	user/global default when set, else the site's sole Company; ``companies`` lists
-	options for a client datalist when several exist. Silent no-op (blank / empty
-	list) on sites without the Company doctype or read permission.
+	"""Company prefill for the onboarding Account step, so the customer doesn't
+	retype what the site already knows. Company is the user/global default when
+	set, else the site's sole Company; ``companies`` lists options for a client
+	datalist when several exist. Silent no-op (blank / empty list) on sites
+	without the Company doctype or read permission.
+
+	Deliberately does NOT return the caller's email. It used to, and the SPA wrote
+	it into the Work email field — which on a fresh site is admin@example.com, sat
+	in the field as a real value, on the step that says receipts go there. Email is
+	the customer's to type. Do not add it back.
 
 	Ports the desk auto-fetch (jarvis_onboarding.js, commit 1507495) to the server
 	because the SPA has no ``frappe.defaults``. System-Manager only (the onboarding
 	route is SM-gated).
 	"""
 	require_jarvis_admin()
-	user = frappe.session.user
-	email = (frappe.db.get_value("User", user, "email") or user) if user and user != "Guest" else ""
 
 	company, companies = "", []
 	try:
@@ -681,7 +684,7 @@ def get_account_defaults() -> dict:
 		# No Company doctype / no read permission — leave blank so the client keeps
 		# its placeholder, exactly like the desk auto-fetch's silent no-op.
 		company, companies = "", []
-	return {"email": email, "company": company, "companies": companies}
+	return {"company": company, "companies": companies}
 
 
 @frappe.whitelist()
