@@ -2162,8 +2162,9 @@ async function saveConnect() {
 }
 
 // Enter-step triggers: load the plan list on reaching "plan" (first entry
-// from the tour, or a "Back" from details). The checkout SDKs load themselves
-// on demand (useRazorpay/useCashfree), so the Pay step no longer preloads.
+// from the tour, or a "Back" from details). No gateway SDK is preloaded (or
+// loaded at all): the Pay step top-level-navigates to the admin-hosted checkout
+// (plan-09 WS7), so there is no tenant-origin SDK to warm up.
 watch(
 	() => state.step,
 	(s) => {
