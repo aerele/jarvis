@@ -13,12 +13,21 @@ import { isOnboardComplete } from "@/onboarding/steps.js";
 // model from the settings dialog changes this verdict without leaving the page.
 let readyPromise = null;
 
-// Fail-open: if the backend check THROWS, treat the workspace as ready so a
-// flaky/500 check never strands a real user. (Note this only covers thrown
-// errors — a returned {ready:false} is a real verdict, handled below.)
+// Fail-CLOSED-retryable: if the readiness call itself THROWS (the customer's own
+// bench erroring, not admin - the server already resolves an admin outage by
+// cohort and returns a real verdict), do NOT declare the workspace ready. The old
+// thrown->{ready:true} shortcut sent a never-onboarded workspace straight into a
+// chat that cannot answer (review P0-05). Return the same retryable verdict the
+// server uses for "nobody could confirm this", which needsOnboarding() gates on:
+// an established workspace's outage is already handled server-side, so a thrown
+// call here is the severe case and must fail closed with a retry, not open.
 export function checkReady() {
 	if (!readyPromise) {
-		readyPromise = isReadyForChat().catch(() => ({ ready: true }));
+		readyPromise = isReadyForChat().catch(() => ({
+			ready: false,
+			reason: "readiness_unconfirmed",
+			retryable: true,
+		}));
 	}
 	return readyPromise;
 }
@@ -59,16 +68,26 @@ export async function isWorkspaceReady() {
 // half-finished signup (e.g. failed payment), not an established workspace.
 // The soft/hard split lives server-side (_llm_missing_verdict) because only
 // admin knows the subscription state.
+// "readiness_unconfirmed" is COHORT-AWARE by construction: the server returns it
+// ONLY for a workspace nothing has ever confirmed chat-ready (an established one
+// gets ready:true through the same outage - account._admin_unreachable_verdict).
+// So when the SPA sees it, it is the never-ready cohort and must gate closed with
+// a retry, exactly the case the full-screen poster is for (review P0-05). The
+// thrown-call catch above resolves to this same reason for the severe own-bench
+// failure, which also fails closed. It differs from llm_credentials, which fires
+// on an ESTABLISHED workspace's later credential rotation and must stay degraded.
 const NOT_ONBOARDED_REASONS = new Set([
 	"signup",
 	"llm_pool_provisioning",
 	"llm_provisioning",
 	"llm_setup",
+	"readiness_unconfirmed",
 ]);
 
 // True only when the workspace has NOT completed onboarding at all — the single
-// case the full-screen gate poster is for. A ready workspace, a fail-open
-// (thrown) result, or a merely-degraded one (llm_credentials) all return false.
+// case the full-screen gate poster is for. A ready workspace or a merely-degraded
+// one (llm_credentials) returns false; a never-ready workspace the server could
+// not confirm (readiness_unconfirmed) returns true, and the poster offers a retry.
 export async function needsOnboarding() {
 	const resp = await checkReady();
 	if (isOnboardComplete(resp)) return false;

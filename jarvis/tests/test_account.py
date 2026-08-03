@@ -819,7 +819,12 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		self.assertEqual(out["reason"], "readiness_unconfirmed")
 
 	def test_an_established_workspace_is_unaffected(self):
-		self._write({"chat_was_ready_at": "2026-01-01 00:00:00"})
+		# A genuinely established workspace: the marker AND a matching authority anchor
+		# for the current (real principal, container, generation). setUp already wrote a
+		# REAL admin credential, so the anchor's principal term (F6) is meaningful and
+		# the recomputed anchor on the fail-open path matches the stamped one.
+		anchor = account._authority_anchor(account._settings_raw(account._GATE_STATE_FIELDS))
+		self._write({"chat_was_ready_at": "2026-01-01 00:00:00", "chat_ready_authority": anchor})
 		with patch.object(admin_client, "get_connection", side_effect=Exception("admin 500")):
 			out = account.is_ready_for_chat()
 		self.assertTrue(out["ready"])
@@ -828,3 +833,301 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
 			out = account.is_ready_for_chat()
 		self.assertEqual(out, {"ready": True, "reason": None, "billing_notice": {}})
+
+
+class TestExplicitReadyOnlyMarker(FrappeTestCase):
+	"""Review P0-07: only an EXPLICIT admin `Ready` may mint the established marker.
+	A reachable response that never mentions chat_readiness (v1 tolerance) still
+	ALLOWS this page load, but must not promote the workspace into the cohort whose
+	chat survives an outage."""
+
+	def setUp(self):
+		account._bust_chat_gate()
+		self._key_snap = _set_stored_connection(True)
+		self._marker_snap = account._settings_raw((account._READY_MARKER_FIELD,)).get(
+			account._READY_MARKER_FIELD
+		)
+		_set_ready_marker(None)
+
+	def tearDown(self):
+		account._bust_chat_gate()
+		_set_ready_marker(self._marker_snap)
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"jarvis_admin_api_key",
+			self._key_snap,
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	def test_missing_chat_readiness_allows_but_does_not_mint_the_marker(self):
+		with patch.object(
+			admin_client, "get_connection", return_value={"agent_url": "ws://x", "tenant_status": "running"}
+		):
+			out = account._admin_chat_gate()
+		self.assertTrue(out["ready"], "v1-tolerance still allows the page load")
+		self.assertFalse(
+			account._settings_raw((account._READY_MARKER_FIELD,)).get(account._READY_MARKER_FIELD),
+			"a response that never said Ready must not earn the established marker (P0-07)",
+		)
+
+	def test_explicit_ready_mints_the_marker(self):
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
+			account._admin_chat_gate()
+		self.assertTrue(
+			account._settings_raw((account._READY_MARKER_FIELD,)).get(account._READY_MARKER_FIELD),
+			"an explicit Ready earns the marker",
+		)
+
+
+class TestAuthorityAnchorFence(FrappeTestCase):
+	"""Review P0-06 / §8.6: the established claim is bound to (principal, container,
+	generation). It survives an outage only while that authority is still current;
+	when it moves, the claim ends mechanically - no writer has to remember to clear
+	the marker."""
+
+	_FIELDS = (
+		account._READY_MARKER_FIELD,
+		account._READY_ANCHOR_FIELD,
+		"agent_url",
+		"jarvis_admin_api_key",
+	)
+
+	def setUp(self):
+		account._bust_chat_gate()
+		self._snap = account._settings_raw(self._FIELDS)
+
+	def tearDown(self):
+		from jarvis._password_utils import clear_settings_password
+
+		account._bust_chat_gate()
+		# A test may have written a REAL admin credential to __Auth (the F6 principal
+		# fence): drop it so it cannot leak into another test. The column value is
+		# restored from the snapshot below.
+		clear_settings_password(frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key")
+		for f in self._FIELDS:
+			frappe.db.set_value(
+				"Jarvis Settings", "Jarvis Settings", f, self._snap.get(f), update_modified=False
+			)
+		frappe.db.commit()
+
+	def _write(self, **vals):
+		for f, v in vals.items():
+			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", f, v, update_modified=False)
+		frappe.db.commit()
+
+	def test_a_matching_anchor_keeps_the_workspace_established(self):
+		self._write(agent_url="ws://container-1", jarvis_admin_api_key="**********")
+		raw = account._settings_raw(self._FIELDS)
+		anchor = account._authority_anchor(raw)
+		self._write(chat_was_ready_at="2026-01-01 00:00:00", chat_ready_authority=anchor)
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		self.assertTrue(account._has_been_chat_ready(raw), "an unchanged authority keeps the claim")
+
+	def test_a_moved_container_ends_the_claim(self):
+		self._write(agent_url="ws://container-1", jarvis_admin_api_key="**********")
+		anchor = account._authority_anchor(account._settings_raw(self._FIELDS))
+		self._write(chat_was_ready_at="2026-01-01 00:00:00", chat_ready_authority=anchor)
+		# The container is replaced: same marker + admin key, different agent_url.
+		self._write(agent_url="ws://container-2")
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		self.assertFalse(
+			account._has_been_chat_ready(raw),
+			"a marker bound to the old container must not carry to a new one",
+		)
+
+	def test_a_changed_principal_ends_the_claim(self):
+		# Production-shaped: the anchor's principal term binds to the REAL admin
+		# credential (F6), so a reconnect that swaps it must end the established claim.
+		# Uses set_settings_password (encrypts into __Auth, masks the column) - NOT a
+		# db_set of a literal, which only ever writes the constant mask production
+		# emits for every principal, so a db_set-based test could not exercise a real
+		# principal change at all.
+		from jarvis._password_utils import set_settings_password
+
+		s = frappe.get_single("Jarvis Settings")
+		set_settings_password(s, "jarvis_admin_api_key", "real-principal-A")
+		self._write(agent_url="ws://container-1")
+		anchor = account._authority_anchor(account._settings_raw(self._FIELDS))
+		self._write(chat_was_ready_at="2026-01-01 00:00:00", chat_ready_authority=anchor)
+		# Reconnected to another account: the REAL admin principal changes (same
+		# container, same generation) - the fence must end the claim on this alone.
+		set_settings_password(s, "jarvis_admin_api_key", "real-principal-B")
+		frappe.db.commit()
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		self.assertFalse(account._has_been_chat_ready(raw))
+
+	def test_a_legacy_marker_with_no_anchor_honours_the_presence_rule(self):
+		# A pre-fence / backfilled claim carries no anchor; it must not be ejected
+		# wholesale on upgrade - the explicit reset/reconnect clears still end it.
+		self._write(
+			agent_url="ws://container-1",
+			jarvis_admin_api_key="**********",
+			chat_was_ready_at="2026-01-01 00:00:00",
+			chat_ready_authority="",
+		)
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		self.assertTrue(account._has_been_chat_ready(raw))
+
+
+class TestStructuredNeverPaidCode(FrappeTestCase):
+	"""Review P0-05: the never-paid gate reads admin's STRUCTURED code first, so a
+	hardened control plane that omits the human sentence is still classified. The
+	prose markers remain only as old-admin fallback."""
+
+	def _err(self, *, status_code=403, code="", message=""):
+		from jarvis.exceptions import AdminAuthError
+
+		return AdminAuthError(message, status_code=status_code, code=code)
+
+	def test_structured_never_paid_code_hard_gates(self):
+		# admin's concrete contract code (jarvis_admin_v2 CustomerNotPaidError).
+		self.assertTrue(account._is_never_paid_403(self._err(code="CUSTOMER_NOT_PAID")))
+		self.assertTrue(account._is_never_paid_403(self._err(code="customer_not_paid")))  # case-insensitive
+
+	def test_an_unrecognised_code_does_not_hard_gate(self):
+		# Cancelled / a proxy code / the authority-repair refusal / anything else
+		# stays SOFT even on a 403 - only the never-paid code hard-gates.
+		self.assertFalse(account._is_never_paid_403(self._err(code="CANCELLED")))
+		self.assertFalse(account._is_never_paid_403(self._err(code="TENANT_AUTHORITY_REPAIR_REQUIRED")))
+		self.assertFalse(account._is_never_paid_403(self._err(code="SOME_OTHER")))
+
+	def test_prose_fallback_only_when_no_code(self):
+		self.assertTrue(
+			account._is_never_paid_403(self._err(message="Customer status: Pending Payment")),
+			"old admin with no code still matches on the sentence",
+		)
+		# A structured code that is NOT never-paid must WIN over never-paid-looking
+		# prose: the code is the authority once present.
+		self.assertFalse(
+			account._is_never_paid_403(
+				self._err(code="CANCELLED", message="customer status: pending payment")
+			)
+		)
+
+	def test_a_non_403_is_never_a_never_paid(self):
+		self.assertFalse(account._is_never_paid_403(self._err(status_code=401, code="PENDING_PAYMENT")))
+
+
+class TestDiagnosticClass(FrappeTestCase):
+	"""Review P1-08: a readiness_unconfirmed verdict carries a safe structured
+	diagnostic code + retryability, so the SPA can tell a transient outage (retry)
+	from an authorization denial (act) without seeing admin's raw exception text."""
+
+	def setUp(self):
+		account._bust_chat_gate()
+		self._key_snap = _set_stored_connection(True)
+		self._marker_snap = account._settings_raw((account._READY_MARKER_FIELD,)).get(
+			account._READY_MARKER_FIELD
+		)
+		_set_ready_marker(None)  # never-ready cohort, so the outage fails closed
+
+	def tearDown(self):
+		account._bust_chat_gate()
+		_set_ready_marker(self._marker_snap)
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"jarvis_admin_api_key",
+			self._key_snap,
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	def test_transport_outage_is_retryable(self):
+		from jarvis.exceptions import AdminUnreachableError
+
+		with patch.object(admin_client, "get_connection", side_effect=AdminUnreachableError("down")):
+			out = account._admin_chat_gate()
+		self.assertEqual(out["diag_code"], "admin_unreachable")
+		self.assertTrue(out["retryable"])
+
+	def test_a_403_denial_is_not_retryable(self):
+		from jarvis.exceptions import AdminAuthError
+
+		with patch.object(
+			admin_client, "get_connection", side_effect=AdminAuthError("denied", status_code=403)
+		):
+			out = account._admin_chat_gate()
+		self.assertEqual(out["diag_code"], "admin_forbidden")
+		self.assertFalse(out["retryable"])
+
+	def test_the_cached_verdict_carries_the_same_diagnostic(self):
+		from jarvis.exceptions import AdminUnreachableError
+
+		with patch.object(admin_client, "get_connection", side_effect=AdminUnreachableError("down")) as gc:
+			first = account._admin_chat_gate()
+			second = account._admin_chat_gate()
+		gc.assert_called_once()  # second served from the short unconfirmed cache
+		self.assertEqual(first, second, "a polling wizard must get an identical verdict each beat")
+
+
+class TestBackfillExcludesOauthPushOnly(FrappeTestCase):
+	"""Review P0-07: the v2_10 backfill grandfathers ONLY confirmed-apply evidence.
+	llm_oauth_connected_at is a push, not a confirmation, so a workspace whose only
+	evidence is an OAuth push must NOT be manufactured into the established cohort."""
+
+	_FIELDS = (
+		"chat_was_ready_at",
+		"chat_ready_authority",
+		"llm_pool_synced_at",
+		"llm_direct_synced_at",
+		"llm_oauth_connected_at",
+		"agent_url",
+		"jarvis_admin_api_key",
+	)
+
+	def setUp(self):
+		self._snap = account._settings_raw(self._FIELDS)
+		self._key_snap = frappe.get_single("Jarvis Settings").get_password(
+			"jarvis_admin_api_key", raise_exception=False
+		)
+
+	def tearDown(self):
+		for f in self._FIELDS:
+			frappe.db.set_value(
+				"Jarvis Settings", "Jarvis Settings", f, self._snap.get(f), update_modified=False
+			)
+		from jarvis._password_utils import clear_settings_password, set_settings_password
+
+		s = frappe.get_single("Jarvis Settings")
+		# _reset writes a real encrypted key; restore the ORIGINAL (or clear it, so a
+		# site that had none is left with none - otherwise the leaked __Auth row makes
+		# get_password read onboarded for the next test).
+		if self._key_snap:
+			set_settings_password(s, "jarvis_admin_api_key", self._key_snap)
+		else:
+			clear_settings_password(s, "jarvis_admin_api_key")
+		frappe.db.commit()
+
+	def _reset(self, **vals):
+		base = dict.fromkeys(self._FIELDS[:-1], None)
+		base.update(vals)
+		for f, v in base.items():
+			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", f, v, update_modified=False)
+		from jarvis._password_utils import set_settings_password
+
+		set_settings_password(
+			frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key", "backfill-test-key"
+		)
+		frappe.db.commit()
+
+	def test_oauth_push_only_is_not_grandfathered(self):
+		from jarvis.patches.v2_10_backfill_chat_was_ready_at import execute
+
+		self._reset(llm_oauth_connected_at="2026-01-01 00:00:00")
+		execute()
+		self.assertFalse(
+			account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at"),
+			"an OAuth push alone is not a confirmed apply and must not mint the marker",
+		)
+
+	def test_confirmed_apply_is_grandfathered_and_anchor_bound(self):
+		from jarvis.patches.v2_10_backfill_chat_was_ready_at import execute
+
+		self._reset(llm_direct_synced_at="2026-01-01 00:00:00", agent_url="ws://c1")
+		execute()
+		raw = account._settings_raw(("chat_was_ready_at", account._READY_ANCHOR_FIELD))
+		self.assertTrue(raw.get("chat_was_ready_at"), "a confirmed direct apply is grandfathered")
+		self.assertTrue(raw.get(account._READY_ANCHOR_FIELD), "the grandfathered claim is anchor-bound")

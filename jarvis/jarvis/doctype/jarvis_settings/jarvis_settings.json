@@ -96,6 +96,7 @@
   "llm_pool_synced_at",
   "llm_direct_synced_at",
   "chat_was_ready_at",
+  "chat_ready_authority",
   "installed_apps_synced",
   "last_subscription_status",
   "last_sync_warnings",
@@ -719,6 +720,13 @@
    "fieldname": "chat_was_ready_at",
    "fieldtype": "Datetime",
    "label": "Chat Was Ready At",
+   "read_only": 1
+  },
+  {
+   "description": "Authority the established chat-Ready claim is bound to: a digest of (admin principal, container URL, tenant authority generation) captured the last time admin confirmed this workspace Ready. The claim only survives a control-plane outage while this still matches the current authority - a workspace reset, a reconnect to a different principal/container, or an authority-generation change moves it and ends the claim mechanically, without depending on every writer remembering to clear the marker. See account._authority_anchor.",
+   "fieldname": "chat_ready_authority",
+   "fieldtype": "Small Text",
+   "label": "Chat Ready Authority",
    "read_only": 1
   },
   {

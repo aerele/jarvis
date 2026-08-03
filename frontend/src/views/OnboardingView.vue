@@ -896,10 +896,11 @@
 								</div>
 								<div v-show="!state.finishing">
 									<div class="ob-head">
-										<h1>Give {{ agentName }} a brain</h1>
+										<h1>Connect an AI model</h1>
 										<p>
-											Pick which AI powers {{ agentName }}. You can change
-											this anytime in Settings → AI models.
+											Choose which AI powers {{ agentName }} — a chat
+											subscription or your own API key. You can change this
+											anytime in Settings → AI models.
 										</p>
 									</div>
 									<div class="mx-auto max-w-[640px]">
@@ -1021,7 +1022,7 @@ const FRAME_SUBS = {
 	details: "Your details",
 	pay: "Review & pay",
 	reconnect: "Reconnect your subscription",
-	connect: `Give ${agentName} a brain`,
+	connect: "Connect an AI model",
 };
 
 // ---- step machine -----------------------------------------------------------
