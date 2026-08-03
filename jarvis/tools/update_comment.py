@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis._text import plaintext_to_html
 from jarvis.exceptions import InvalidArgumentError
 
 
@@ -27,5 +28,7 @@ def update_comment(name: str, content: str) -> dict:
 
 	from frappe.desk.form.utils import update_comment as _uc
 
-	_uc(name=name, content=content)
+	# Comment.content is an HTML field; convert the agent's plain text so \n
+	# newlines survive instead of collapsing to one line (jarvis._text).
+	_uc(name=name, content=plaintext_to_html(content))
 	return {"comment_name": name, "content": content}

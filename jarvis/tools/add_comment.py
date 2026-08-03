@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis._text import plaintext_to_html
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools import desk_action
 from jarvis.tools._bulk import run_atomic_batch
@@ -60,7 +61,9 @@ def _add_comment_one(doctype: str, name: str, content: str) -> str | None:
 	comment = _ac(
 		reference_doctype=doctype,
 		reference_name=name,
-		content=content,
+		# Comment.content is an HTML field; the agent writes plain text with \n
+		# newlines, so convert or the note collapses to one line (jarvis._text).
+		content=plaintext_to_html(content),
 		comment_email=session_user,
 		comment_by=user_full_name,
 	)
