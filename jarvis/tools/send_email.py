@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis._text import plaintext_to_html
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools import require_doctype_and_name
 from jarvis.tools._bulk import run_atomic_batch
@@ -103,11 +104,14 @@ def _send_one(
 
 	from frappe.core.doctype.communication.email import make as _make
 
+	# Communication.content is HTML; the agent composes plain text with \n
+	# newlines, so convert or every paragraph collapses into one run-on block on
+	# delivery. Shared with the other HTML surfaces - see jarvis._text.
 	result = _make(
 		doctype=doctype,
 		name=name,
 		subject=subject,
-		content=content,
+		content=plaintext_to_html(content),
 		sent_or_received="Sent",
 		recipients=recipients,
 		cc=cc,

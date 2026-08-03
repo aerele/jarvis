@@ -1,0 +1,32 @@
+{
+  "contract_version": 2,
+  "name": "state_verification_required",
+  "description": "The PASSIVE poll's answer while the magic link is still unclicked - the state a wizard sits in longest, and the one it had no fixture for. verification_required.json is the RESUME endpoint's version of this cohort; this is what the poll the page actually runs every couple of seconds returns, and the two differ in what a caller may do next: the capability flags say a payment cannot be initiated and a status check would tell it nothing, because nothing has been charged and no gateway has been asked. Carries the link's expiry so the page can say how long is left instead of 'check your email' forever.",
+  "produced_by": "BENCH-AUTHORED coverage case (not vendored; see PROVENANCE.md). The admin-side twin is ledgered for the next admin round.",
+  "endpoint": "jarvis_admin_v2.billing.signup.get_signup_payment_state",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.attempt_id",
+    "body.message.data.verification_expires_at",
+    "body.message.data.payment_last_checked_at"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "SIGNUP_VERIFICATION_REQUIRED",
+        "pending_verification": true,
+        "verification_expires_at": "2026-08-03 00:00:00.000000",
+        "payment_last_checked_at": "2026-08-02 00:00:00.000000",
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "can_initiate_payment": false,
+        "can_check_status": false,
+        "can_reconnect": false,
+        "attempt_id": "att_placeholder",
+        "generation": 0
+      }
+    }
+  }
+}

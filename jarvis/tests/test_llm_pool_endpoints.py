@@ -430,3 +430,91 @@ class TestBackfillGlmZaiProviderIdPatch(_RT3SettingsTestCase):
 		)
 		self._run_patch()
 		self.assertEqual(frappe.db.get_value("Jarvis LLM Pool Model", name, "provider"), "openai")
+
+
+class TestCoalesceSubscriptionModels(_RT3SettingsTestCase):
+	"""jarvis#575: a second account of a provider the tenant already uses arrived
+	as a SECOND MODEL ROW naming the same model, and every subscription model
+	renders through one shared Bifrost provider entry, so llm_proxy.validate
+	rejected the whole spec with duplicate_subscription_model. The customer only
+	learned that after completing a full OAuth sign-in.
+
+	Pure list transforms. Nothing here touches the DB.
+	"""
+
+	@staticmethod
+	def _sub(model, *accounts):
+		return {
+			"model": model,
+			"credential_type": "subscription",
+			"subscription": {"accounts": list(accounts)},
+		}
+
+	@staticmethod
+	def _acct(ref, upstream="openai", blob='{"t":1}'):
+		return {"account_ref": ref, "upstream": upstream, "oauth_blob": blob, "label": ref}
+
+	def test_two_rows_of_one_model_fold_into_one_with_both_accounts(self):
+		"""The reported repro: add a second ChatGPT account."""
+		out = onboarding._coalesce_subscription_models(
+			[
+				self._sub("gpt-5.5", self._acct("ACC_1")),
+				self._sub("gpt-5.5", self._acct("ACC_2")),
+			]
+		)
+		self.assertEqual(len(out), 1)
+		refs = [a["account_ref"] for a in out[0]["subscription"]["accounts"]]
+		self.assertEqual(refs, ["ACC_1", "ACC_2"])
+
+	def test_a_repeated_account_ref_is_not_duplicated(self):
+		"""validate_models rejects a duplicate account_ref, so folding must not make one."""
+		out = onboarding._coalesce_subscription_models(
+			[self._sub("gpt-5.5", self._acct("ACC_1")), self._sub("gpt-5.5", self._acct("ACC_1"))]
+		)
+		self.assertEqual(len(out[0]["subscription"]["accounts"]), 1)
+
+	def test_a_reloaded_blank_copy_gains_the_posted_credential(self):
+		"""A row reloaded from the DB carries no blob; the freshly connected one does."""
+		out = onboarding._coalesce_subscription_models(
+			[
+				self._sub("gpt-5.5", self._acct("ACC_1", blob="")),
+				self._sub("gpt-5.5", self._acct("ACC_1", blob='{"real":1}')),
+			]
+		)
+		accounts = out[0]["subscription"]["accounts"]
+		self.assertEqual(len(accounts), 1)
+		self.assertEqual(accounts[0]["oauth_blob"], '{"real":1}')
+
+	def test_different_models_are_not_folded(self):
+		out = onboarding._coalesce_subscription_models(
+			[self._sub("gpt-5.5", self._acct("ACC_1")), self._sub("grok-4.3", self._acct("ACC_2"))]
+		)
+		self.assertEqual(len(out), 2)
+
+	def test_rows_of_different_upstreams_are_not_folded(self):
+		"""Folding across upstreams would manufacture the mixed-upstream row
+		validate_models rejects, so the upstream is part of the fold key."""
+		out = onboarding._coalesce_subscription_models(
+			[
+				self._sub("shared-name", self._acct("ACC_1", upstream="openai")),
+				self._sub("shared-name", self._acct("ACC_2", upstream="xai")),
+			]
+		)
+		self.assertEqual(len(out), 2)
+
+	def test_api_key_rows_pass_through_untouched(self):
+		"""validate scopes their duplicate check to (provider, model) and they have
+		no accounts to merge, so they must not be folded."""
+		rows = [
+			{"model": "glm-4.7", "provider": "zai_coding", "credential_type": "api_key"},
+			{"model": "glm-4.7", "provider": "openai_compat", "credential_type": "api_key"},
+		]
+		self.assertEqual(onboarding._coalesce_subscription_models(rows), rows)
+
+	def test_the_input_list_is_not_mutated(self):
+		"""save_llm_pool re-reads its own argument, so folding must copy."""
+		a = self._sub("gpt-5.5", self._acct("ACC_1"))
+		b = self._sub("gpt-5.5", self._acct("ACC_2"))
+		onboarding._coalesce_subscription_models([a, b])
+		self.assertEqual(len(a["subscription"]["accounts"]), 1)
+		self.assertEqual(len(b["subscription"]["accounts"]), 1)

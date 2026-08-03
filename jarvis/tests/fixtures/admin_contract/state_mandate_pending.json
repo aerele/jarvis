@@ -1,0 +1,43 @@
+{
+  "contract_version": 2,
+  "name": "state_mandate_pending",
+  "description": "Authenticated state poll for a Cashfree AUTOPAY signup awaiting mandate authorization. The mandate id is a checkout handle exactly like an order id; before this contract the state endpoint did not look at it and told every mandate customer to start over. The mandate id and the browser session token are GATEWAY-minted per attempt, so only their presence is pinned.",
+  "endpoint": "jarvis_admin_v2.billing.signup.get_signup_payment_state",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.cashfree_app_id",
+    "body.message.data.cashfree_env",
+    "body.message.data.cashfree_subscription_id",
+    "body.message.data.subscription_session_id",
+    "body.message.data.payment_last_checked_at",
+    "body.message.data.attempt_id"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "PAYMENT_CONFIRMATION_PENDING",
+        "pending_verification": false,
+        "payment_provider": "cashfree",
+        "amount_inr": 999.0,
+        "plan": {
+          "name": "oc-test-cf-monthly",
+          "label": "oc-test-cf-monthly"
+        },
+        "signup_fee_inr": 0.0,
+        "due_today_inr": 999.0,
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "cashfree_app_id": "placeholder",
+        "cashfree_env": "sandbox",
+        "cashfree_subscription_id": "jrvs_placeholder",
+        "subscription_session_id": "sub_session_placeholder",
+        "trial_days": 0,
+        "payment_last_checked_at": "2026-08-01 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1
+      }
+    }
+  }
+}

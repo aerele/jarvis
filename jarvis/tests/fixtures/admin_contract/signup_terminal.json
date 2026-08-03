@@ -1,0 +1,27 @@
+{
+  "contract_version": 2,
+  "name": "signup_terminal",
+  "description": "The signup cohort that is past the checkout stage and cannot be driven further by the onboarding flow: cancelled, expired, lapsed into Past Due, or belonging to a suspended account. ONE code for all of them because the caller's decision is the same - this is renewal, reconnect or support, not a payment - and because a wizard with no code for a state renders whatever state it happens to have been left in.",
+  "endpoint": "jarvis_admin_v2.billing.signup.get_signup_payment_state",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.attempt_id",
+    "body.message.data.payment_last_checked_at"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "SIGNUP_TERMINAL",
+        "pending_verification": false,
+        "subscription_status": "Cancelled",
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "payment_last_checked_at": "2026-08-01 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1
+      }
+    }
+  }
+}

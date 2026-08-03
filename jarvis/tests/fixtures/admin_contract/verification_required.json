@@ -1,0 +1,28 @@
+{
+  "contract_version": 2,
+  "name": "verification_required",
+  "description": "Retry against a signup still awaiting email verification. The same dead end as Pending Payment and the same ownership proof, so resume re-serves the state instead of throwing; it does NOT re-send the verification mail (that would make the retry button a mail amplifier). Carries the link's expiry so the wizard can say how long is left instead of 'check your email' forever. NOTE: there is deliberately no resend endpoint yet - a customer whose link expires must start a fresh signup.",
+  "endpoint": "jarvis_admin_v2.billing.signup.resume_pending_signup",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.attempt_id",
+    "body.message.data.verification_expires_at",
+    "body.message.data.payment_last_checked_at"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "SIGNUP_VERIFICATION_REQUIRED",
+        "pending_verification": true,
+        "verification_expires_at": "2026-08-02 00:00:00.000000",
+        "payment_last_checked_at": "2026-08-01 00:00:00.000000",
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "attempt_id": "att_placeholder",
+        "generation": 0
+      }
+    }
+  }
+}

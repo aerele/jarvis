@@ -935,3 +935,78 @@ class TestRepairConvoyCollapse(FrappeTestCase):
 			sess = AgentSession.connect("ws://t")
 		self.assertEqual(clear_called, [], "no clear when we never held the lock")
 		sess.close()
+
+
+# --- TestSessionsListModelIdentity ----------------------------------------
+
+
+class TestSessionsListModelIdentity(FrappeTestCase):
+	"""jarvis#560: the model that answered a turn crosses the wire ONLY on the
+	``sessions.list`` row, so this pins that frame.
+
+	No live event carries it: both live ``emitChatFinal`` implementations in
+	ghcr.io/openclaw/openclaw:2026.6.8 build the terminal chat message fresh as
+	``{role, content, timestamp}``, and the lifecycle end/error frame carries only
+	``phase`` plus terminal metadata. The runtime logs
+	``model=... provider=...`` at agent end but never emits it. The durable
+	session row is therefore the earliest honest source, and these frames are the
+	shape ``buildGatewaySessionRow`` actually sends.
+	"""
+
+	def _sessions_list_frame(self, ws, rows):
+		def _resp():
+			req_id = ws.sent[-1]["id"]
+			return _frame(
+				{
+					"type": "res",
+					"id": req_id,
+					"ok": True,
+					"payload": {
+						"ts": 1785348175440,
+						"count": len(rows),
+						"defaults": {"model": "gemini-3.6-flash", "provider": "gemini"},
+						"sessions": rows,
+					},
+				}
+			)
+
+		return _resp
+
+	def test_row_carries_model_and_provider_through_the_client(self):
+		sess, ws = _build_session()
+		row = {
+			"key": "agent:main",
+			"hasActiveRun": False,
+			"model": "glm-4.7",
+			"modelProvider": "openai_compat",
+			"totalTokens": 41230,
+			"totalTokensFresh": True,
+			"inputTokens": 39102,
+			"outputTokens": 812,
+		}
+		ws._frames.append(self._sessions_list_frame(ws, [row]))
+		rows = sess.list_sessions()
+		self.assertEqual(ws.sent[-1]["method"], "sessions.list")
+		self.assertEqual(len(rows), 1)
+
+		from jarvis.chat.usage import resolved_model_identity
+
+		self.assertEqual(
+			resolved_model_identity(rows[0]),
+			("glm-4.7", "openai_compat"),
+			"the model/provider pair survives the frame and decodes off the wire names",
+		)
+
+	def test_row_that_names_no_model_decodes_as_blank(self):
+		# An agent-direct pool that never resolved a model omits both fields;
+		# the decoder must answer "" rather than invent one, so the assistant row
+		# is left unattributed instead of falsely attributed.
+		sess, ws = _build_session()
+		row = {"key": "agent:main", "hasActiveRun": False, "totalTokensFresh": True}
+		ws._frames.append(self._sessions_list_frame(ws, [row]))
+		rows = sess.list_sessions()
+
+		from jarvis.chat.usage import resolved_model_identity
+
+		self.assertEqual(resolved_model_identity(rows[0]), ("", ""))
+		self.assertEqual(resolved_model_identity(None), ("", ""))

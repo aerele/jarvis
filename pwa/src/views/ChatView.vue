@@ -20,6 +20,7 @@ import { eventFence } from "../lib/pump_fence_state.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
+	countDiagrams,
 	parseAction,
 	parseCards,
 	parseCharts,
@@ -52,6 +53,11 @@ const socket = inject("$socket");
 // its real id.
 const convId = ref(props.id === "new" ? "" : props.id);
 const conversation = ref(null);
+// Deep link to this thread in the desktop web chat (outside the PWA's
+// /jarvis-mobile scope), where the SPA draws diagrams the PWA can't.
+const webChatUrl = computed(() =>
+	convId.value ? `/jarvis/c/${encodeURIComponent(convId.value)}` : "/jarvis/"
+);
 const messages = ref([]);
 const input = ref("");
 const loading = ref(false);
@@ -115,6 +121,8 @@ const view = (m) => {
 		html,
 		cards,
 		charts,
+		// Mermaid diagrams can't be drawn here; surface a chip to the web chat.
+		diagrams: countDiagrams(content),
 		action: parseAction(content),
 		skills: parseSkillsUsed(content),
 		took: spanBetween(m.creation, m.modified),
@@ -654,6 +662,46 @@ onUnmounted(() => {
 					/>
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
+					<a
+						v-if="it.view.diagrams"
+						class="jv-diagram-chip"
+						:href="webChatUrl"
+						target="_blank"
+						rel="noopener"
+					>
+						<svg
+							class="jv-diagram-chip-ic"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.7"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<rect x="3" y="3" width="7" height="6" rx="1" />
+							<rect x="14" y="15" width="7" height="6" rx="1" />
+							<path d="M6.5 9v4a2 2 0 0 0 2 2H14" />
+						</svg>
+						<span class="jv-diagram-chip-tx">
+							<span class="jv-diagram-chip-t">{{
+								it.view.diagrams > 1 ? it.view.diagrams + " diagrams" : "Diagram"
+							}}</span>
+							<span class="jv-diagram-chip-s">Open in web chat</span>
+						</span>
+						<svg
+							class="jv-diagram-chip-go"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.7"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<path d="M7 17 17 7M8 7h9v9" />
+						</svg>
+					</a>
 					<SkillChips :names="it.view.skills" />
 					<div v-if="it.msg.error" class="jv-msg-error">{{ it.msg.error }}</div>
 					<MessageMedia
@@ -933,6 +981,55 @@ onUnmounted(() => {
 	line-height: 1.6;
 	color: var(--ink7);
 	overflow-wrap: anywhere;
+}
+
+/* "Open in web chat" chip for a mermaid diagram the PWA can't draw. */
+.jv-diagram-chip {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 6px 0;
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	background: var(--card);
+	color: var(--ink9);
+	text-decoration: none;
+	-webkit-tap-highlight-color: transparent;
+}
+.jv-diagram-chip:active {
+	background: var(--card2);
+}
+.jv-diagram-chip-ic {
+	width: 30px;
+	height: 30px;
+	flex: 0 0 auto;
+	padding: 6px;
+	border-radius: 8px;
+	background: var(--card2);
+	color: var(--accent);
+	box-sizing: border-box;
+}
+.jv-diagram-chip-tx {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	line-height: 1.3;
+}
+.jv-diagram-chip-t {
+	font-size: 14px;
+	font-weight: 600;
+}
+.jv-diagram-chip-s {
+	font-size: 12.5px;
+	color: var(--ink5);
+}
+.jv-diagram-chip-go {
+	width: 16px;
+	height: 16px;
+	flex: 0 0 auto;
+	color: var(--ink4);
 }
 .jv-md :deep(p) {
 	margin: 0 0 8px;

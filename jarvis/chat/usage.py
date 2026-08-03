@@ -125,6 +125,38 @@ USAGE_VALID_ZERO = "valid_zero"  # a fresh row that legitimately reports no usag
 USAGE_RETRY = "retry"  # stale/missing/no-fresh data — do NOT mark recorded, retry
 
 
+def resolved_model_identity(row: dict | None) -> tuple[str, str]:
+	"""``(model, provider)`` the gateway attributes to this session's LAST
+	COMPLETED run, read off a ``sessions.list`` row.
+
+	This is the ONE place the wire names are decoded, so the per-model usage
+	bucket below and the per-message attribution stamped by
+	``finalize._stamp_reply_model`` (jarvis#560) can never disagree about which
+	model a turn is charged to and which model the transcript credits.
+
+	Wire shape, verified against the shipped bundle of
+	ghcr.io/openclaw/openclaw:2026.6.8 (``buildGatewaySessionRow``): the row
+	carries ``model`` + ``modelProvider``, resolved as the session's SELECTED
+	override when it has one, else the RUNTIME identity persisted on the session
+	entry after the run (``entry.model`` / ``entry.modelProvider``). The runtime
+	half is why an unpinned conversation reports the model that actually answered
+	rather than the chain's primary: the agent only keeps its ``model.fallbacks``
+	chain live for a session with no override (see
+	``turn_handler._session_model_for``), and a failover rewrites the entry.
+
+	No live event carries this. The terminal ``chat`` frame's projected message is
+	built fresh as ``{role, content, timestamp}`` by BOTH live emitters
+	(``emitChatFinal`` in ``dist/embedded-backend-*.js`` and
+	``dist/server-chat-*.js``), and the lifecycle ``end``/``error`` frame carries
+	only ``phase`` + terminal metadata - the runtime logs
+	``model=... provider=...`` at agent end from ``lastAssistant``, but never puts
+	it on the wire. So the durable session row is the earliest honest source, and
+	reading it costs nothing extra: finalize already polls it for usage."""
+	if not isinstance(row, dict):
+		return "", ""
+	return (row.get("model") or "").strip(), (row.get("modelProvider") or "").strip()
+
+
 def record_turn_usage(session_key: str, row: dict | None) -> str:
 	"""Record one completed turn's token delta from a ``sessions.list`` row.
 
@@ -248,7 +280,7 @@ def record_turn_usage(session_key: str, row: dict | None) -> str:
 		# discard the aggregate delta), so this just logs and continues,
 		# letting the aggregate updates reach the commit below regardless of
 		# what happened here.
-		model = (row.get("model") or "").strip()
+		model, _provider = resolved_model_identity(row)
 		if model:
 			try:
 				_upsert_model_usage(user, model, month, input_tokens, output_tokens, now)

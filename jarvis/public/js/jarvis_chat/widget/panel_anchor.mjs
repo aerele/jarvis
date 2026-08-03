@@ -19,10 +19,14 @@ function clamp(n, lo, hi) {
   return Math.min(hi, Math.max(lo, n));
 }
 
-// fab: { x, y, size } — the FAB's top-left in viewport coordinates.
-// vp:  { vw, vh, top } — top is the Desk navbar height the panel must clear.
+// fab:  { x, y, size } — the FAB's top-left in viewport coordinates.
+// vp:   { vw, vh, top } — top is the Desk navbar height the panel must clear.
+// pref: { width, height } | null — the user's saved size. It may only GROW the
+//       panel above the default, never shrink it below (product rule: the mini
+//       chat never gets smaller than its shipped size), and never past the
+//       viewport. Omit for the default 400×624.
 // Returns { left, top, width, height, side }, all in viewport pixels.
-export function panelLayout(fab, vp) {
+export function panelLayout(fab, vp, pref) {
   const v = vp || {};
   const vw = Number.isFinite(v.vw) ? v.vw : 1024;
   const vh = Number.isFinite(v.vh) ? v.vh : 768;
@@ -33,8 +37,20 @@ export function panelLayout(fab, vp) {
   const fx = Number.isFinite(f.x) ? f.x : vw - size - MARGIN;
   const fy = Number.isFinite(f.y) ? f.y : vh - size - MARGIN;
 
-  const width = Math.min(PANEL_W, Math.max(0, vw - MARGIN * 2));
-  const height = Math.min(PANEL_MAX_H, Math.max(0, vh - top - MARGIN * 2));
+  // The viewport ceilings the panel can never exceed, and the default floor
+  // (itself capped to the viewport on a small screen). A saved preference is
+  // clamped into [floor, ceiling]: clamp's lo-wins rule means the floor also
+  // guarantees the panel never shrinks below the default when a preference is
+  // present. No pref → want === floor → identical to the pre-resize behaviour.
+  const maxW = Math.max(0, vw - MARGIN * 2);
+  const maxH = Math.max(0, vh - top - MARGIN * 2);
+  const floorW = Math.min(PANEL_W, maxW);
+  const floorH = Math.min(PANEL_MAX_H, maxH);
+  const p = pref || {};
+  const wantW = Number.isFinite(p.width) ? p.width : floorW;
+  const wantH = Number.isFinite(p.height) ? p.height : floorH;
+  const width = clamp(wantW, floorW, maxW);
+  const height = clamp(wantH, floorH, maxH);
 
   // Prefer the side facing into the page: a right-docked FAB opens leftward.
   const fabCentre = fx + size / 2;

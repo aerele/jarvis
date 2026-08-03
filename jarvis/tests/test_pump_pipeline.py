@@ -1845,3 +1845,177 @@ class TestPrepareActorFencing(_PipelineCase):
 		# The turn is cleanly re-queued with NO stale prepare refs.
 		self.assertEqual(self._state(rid), "queued")
 		self.assertIsNone(self._val(rid, "assistant_message"), "no orphan placeholder attached")
+
+
+# --------------------------------------------------------------------------- #
+# 16. jarvis#560: per-MESSAGE model attribution
+# --------------------------------------------------------------------------- #
+
+
+class _ModelRowSess(_FakeSess):
+	"""``_FakeSess`` whose ``sessions.list`` returns a caller-supplied row.
+
+	The row is the REAL agent payload shape, not a convenience dict: the field
+	names and their casing are what ``buildGatewaySessionRow`` emits in
+	ghcr.io/openclaw/openclaw:2026.6.8 (``key``, ``model``, ``modelProvider``,
+	``totalTokensFresh``, ``inputTokens``, ``outputTokens``, ``totalTokens``), so
+	``fetch_fresh_session_row`` and ``resolved_model_identity`` run for real
+	against the shape the gateway actually sends. A gateway rename would fail
+	these tests the same way it would break production."""
+
+	def __init__(self, session_key: str, **row):
+		super().__init__()
+		self._key = session_key
+		self._row = {"key": session_key, **row}
+
+	def list_sessions(self):
+		return [self._row]
+
+
+class TestReplyModelAttribution(_PipelineCase):
+	"""A reply must be able to name the model that wrote it (jarvis#560).
+
+	Jarvis writes to the customer's ERP, so "which model proposed this journal
+	entry" is a per-MESSAGE question. Every assertion here reads the durable
+	``Jarvis Chat Message`` row (what an auditor or support would read months
+	later), never an in-memory return value.
+
+	Token counters are deliberately zero: that is ``record_turn_usage``'s
+	VALID_ZERO path, which does NOT commit user/monthly counters, so these tests
+	leave no committed state behind a FrappeTestCase rollback cannot undo. The
+	attribution write itself is exercised end to end regardless, because it happens
+	before the counter arithmetic."""
+
+	def _finalizing_turn(self, rid, session_key, *, model_override=""):
+		"""A settled turn with a real assistant row and its usage effect owed."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="ans", streaming=0)
+		frappe.db.set_value(CONV, conv, "session_key", session_key)
+		if model_override:
+			frappe.db.set_value(CONV, conv, "model_override", model_override)
+		self._mk_turn(conv, rid, seed, "finalizing", version=5, assistant_message=amsg)
+		ts.insert_required_effects(rid, ("usage",))
+		frappe.db.commit()
+		return conv, amsg
+
+	def _msg(self, name):
+		return frappe.db.get_value(MSG, name, ["model", "provider", "role"], as_dict=True)
+
+	def _row_sess(self, session_key, **over):
+		row = {"totalTokensFresh": True, "inputTokens": 0, "outputTokens": 0, "totalTokens": 900}
+		row.update(over)
+		return _ModelRowSess(session_key, **row)
+
+	def test_resolved_model_is_stamped_on_the_assistant_row(self):
+		# The happy path: the model the gateway attributes to this turn's session
+		# lands on the assistant row, paired with its provider (two providers can
+		# serve the same model id, so the PAIR is the identity).
+		rid = "pmp_model_stamp"
+		_conv, amsg = self._finalizing_turn(rid, "sess-model-stamp", model_override="glm-4.7")
+		sess = self._row_sess("sess-model-stamp", model="glm-4.7", modelProvider="openai_compat")
+		with self._gateway(sess):
+			finalize.run_finalize(rid, self._target)
+		row = self._msg(amsg)
+		self.assertEqual(row.model, "glm-4.7", "the resolved model is stamped on the reply")
+		self.assertEqual(row.provider, "openai_compat", "paired with the provider that served it")
+		self.assertEqual(self._effects(rid)["usage"], "done")
+
+	def test_failover_records_the_model_that_answered_not_the_requested_one(self):
+		# The case the issue exists for. The conversation asked for
+		# gemini-3.6-flash; the chain fell over and glm-4.7 actually answered.
+		# Nothing else in the system records the substitution, so the row MUST name
+		# the answerer. A stamp that echoed the REQUEST would be worse than no
+		# stamp, because it would look like corroboration.
+		rid = "pmp_model_failover"
+		_conv, amsg = self._finalizing_turn(rid, "sess-model-failover", model_override="gemini-3.6-flash")
+		sess = self._row_sess("sess-model-failover", model="glm-4.7", modelProvider="openai_compat")
+		with self._gateway(sess):
+			finalize.run_finalize(rid, self._target)
+		row = self._msg(amsg)
+		self.assertEqual(row.model, "glm-4.7", "the model that ANSWERED is recorded")
+		self.assertNotEqual(
+			row.model,
+			"gemini-3.6-flash",
+			"the requested model must not be echoed onto a failed-over reply",
+		)
+		self.assertEqual(row.provider, "openai_compat", "the substitute provider is recorded too")
+		self.assertEqual(
+			frappe.db.get_value(CONV, _conv, "model_override"),
+			"gemini-3.6-flash",
+			"the conversation still asks for the model the user picked; only the "
+			"reply knows it was answered by another",
+		)
+
+	def test_row_without_a_model_leaves_the_stamp_blank(self):
+		# An agent-direct pool that never resolved a model reports no model at
+		# all. Writing "" over the field would be indistinguishable from a real
+		# answer of "unknown"; leave it blank and let the UI say nothing.
+		rid = "pmp_model_absent"
+		_conv, amsg = self._finalizing_turn(rid, "sess-model-absent")
+		with self._gateway(self._row_sess("sess-model-absent")):
+			finalize.run_finalize(rid, self._target)
+		row = self._msg(amsg)
+		self.assertFalse(row.model, "no model on the gateway row => nothing stamped")
+		self.assertEqual(self._effects(rid)["usage"], "done", "usage still settles normally")
+
+	def test_stale_token_counters_do_not_cost_the_attribution(self):
+		# The gateway names the model whether or not its token counters have gone
+		# fresh yet, but a stale row makes the usage effect RETRY (CDX-6), which
+		# rolls its transaction back. This pins the recovery: the next cycle
+		# attributes the reply rather than the audit trail being lost to a slow
+		# counter.
+		rid = "pmp_model_stale"
+		_conv, amsg = self._finalizing_turn(rid, "sess-model-stale")
+		stale = self._row_sess(
+			"sess-model-stale",
+			model="gemini-3.6-flash",
+			modelProvider="gemini",
+			totalTokensFresh=False,
+			inputTokens=None,
+			outputTokens=None,
+		)
+		# The freshness poll's own backoff is not under test; skip its sleeps.
+		with self._gateway(stale), patch("jarvis.chat.usage.time.sleep", lambda *_a: None):
+			finalize.run_finalize(rid, self._target)
+		self.assertEqual(self._effects(rid)["usage"], "pending", "stale row leaves usage owed")
+		self.assertFalse(self._msg(amsg).model, "the rolled-back cycle stamped nothing")
+		fresh = self._row_sess("sess-model-stale", model="gemini-3.6-flash", modelProvider="gemini")
+		with self._gateway(fresh):
+			finalize.run_finalize(rid, self._target)
+		row = self._msg(amsg)
+		self.assertEqual(row.model, "gemini-3.6-flash", "the retry cycle attributes the reply")
+		self.assertEqual(row.provider, "gemini")
+
+	def test_only_the_assistant_row_is_stamped(self):
+		# The field is meaningless on a user or tool row, and a mislinked turn must
+		# not be able to write one: the UPDATE carries role='assistant' in its WHERE
+		# clause rather than trusting turn.assistant_message to point at a reply.
+		rid = "pmp_model_role"
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="hi")
+		frappe.db.set_value(CONV, conv, "session_key", "sess-model-role")
+		# assistant_message deliberately points at the USER row.
+		self._mk_turn(conv, rid, seed, "finalizing", version=5, assistant_message=seed)
+		ts.insert_required_effects(rid, ("usage",))
+		frappe.db.commit()
+		sess = self._row_sess("sess-model-role", model="glm-4.7", modelProvider="openai_compat")
+		with self._gateway(sess):
+			finalize.run_finalize(rid, self._target)
+		row = self._msg(seed)
+		self.assertEqual(row.role, "user")
+		self.assertFalse(row.model, "a non-assistant row is never attributed")
+
+	def test_get_conversation_hands_the_attribution_to_the_spa(self):
+		# The chip cannot render off a field the transcript endpoint does not
+		# return; that omission would be invisible server-side.
+		from jarvis.chat import api as chat_api
+
+		conv = self._mk_conv()
+		amsg = self._mk_msg(conv, role="assistant", content="ans", streaming=0)
+		frappe.db.set_value(MSG, amsg, {"model": "glm-4.7", "provider": "openai_compat"})
+		frappe.db.commit()
+		out = chat_api.get_conversation(conv)
+		row = next(m for m in out["messages"] if m["name"] == amsg)
+		self.assertEqual(row["model"], "glm-4.7")
+		self.assertEqual(row["provider"], "openai_compat")

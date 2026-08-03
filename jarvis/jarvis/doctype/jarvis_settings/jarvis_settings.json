@@ -75,6 +75,7 @@
   "jarvis_admin_api_secret",
   "jarvis_admin_customer_email",
   "jarvis_admin_customer_password",
+  "signup_context",
   "operator_section",
   "agent_url",
   "agent_token",
@@ -558,6 +559,14 @@
    "label": "Jarvis Admin Customer Password",
    "read_only": 1,
    "description": "The customer's password on the admin site, exchanged for short-lived OAuth bearer tokens (client_id `jarvis-bench`). Set automatically once the email is verified. Empty for pre-OAuth customers, which fall back to api_key:api_secret."
+  },
+  {
+   "fieldname": "signup_context",
+   "permlevel": 1,
+   "fieldtype": "Long Text",
+   "label": "Signup Context",
+   "read_only": 1,
+   "description": "Non-secret JSON snapshot of the in-flight signup: attempt id, the customer's real email + company as admin holds them, plan/provider, the amount and what is due today, the last contract code, and the contract version. Written by jarvis.onboarding_contract so a reloaded payment page renders whose signup it is showing instead of the site admin's prefill. NO SECRETS EVER GO IN THIS FIELD - permlevel is not a container for one: a Single's value is reachable through frappe.client.get_value / get_single_value by anyone who can read the doctype, and the permlevel only governs the form. Secrets belong in the Password fields above, which encrypt into __Auth. jarvis_admin_customer_email above holds admin's SYNTHETIC login (cust-<hash>@jarvis.invalid), which is not an address and must never be shown to anyone."
   },
   {
    "fieldname": "operator_section",

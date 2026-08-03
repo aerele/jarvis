@@ -585,6 +585,20 @@
 						</div>
 					</div>
 
+					<!-- Say what this sign-in will actually DO before it starts. The customer
+               picked "+ Add a model" for a provider the pool already has, and what
+               they will get is another ACCOUNT on the existing model, not a second
+               model - because every subscription model shares one Bifrost provider
+               entry, so two rows naming one model cannot both exist. Finding that
+               out afterwards used to cost a whole wasted OAuth round trip (#575). -->
+					<p v-if="addFoldsInto" class="jv-pool-foldnote">
+						{{ upstreamLabelOf(panelRow.upstream) }} is already connected here with
+						{{ addFoldsInto.accounts.length }}
+						{{ addFoldsInto.accounts.length === 1 ? "account" : "accounts" }}. Signing
+						in adds another account to that same model, so your agent can spread its
+						work across them. It does not add a second model.
+					</p>
+
 					<!-- Connect account: EDIT-mode re-entry only. In add mode the two-step sign-in
                renders directly (see its v-if below), so a fresh "Add a model" never shows
                this button - clicking "Connect account" and THEN "Open sign-in" was a
@@ -1651,6 +1665,7 @@ import {
 	isCodeOnlyPaste,
 	effectiveApiKey,
 	LOCAL_PROVIDER_IDS,
+	isContainerOnlyRow,
 } from "@/llm/pool";
 import { errMessage as _err } from "@/lib/errors";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
@@ -2006,6 +2021,23 @@ const badgeLabel = computed(() => {
 const applyStatus = computed(() => {
 	if (sync.value.pending) return { kind: "pending", text: "Applying to your agent…" };
 	const st = humaniseSyncStatus(sync.value.last_sync_status);
+	// A teardown is the one outcome the server records that is NOT an apply, and it
+	// used to fall through to "idle" and hide the strip. That left the whole
+	// user-visible result of Disconnect riding on applyResult, a client-only value
+	// that retires itself after six seconds and does not survive the pane
+	// remounting the editor - so a disconnect that deleted every credential could
+	// leave nothing at all on screen (jarvis#574). Reading it off the server makes
+	// the outcome durable: it is still true after the toast expires, after a
+	// reload, and in a tab that was not the one that pressed the button.
+	//
+	// Amber, not red, and for the same reason the Connection badge is: nothing is
+	// broken, the customer asked for this, and the sentence says how to undo it.
+	if (st.kind === "disconnected") {
+		return {
+			kind: "warn",
+			text: "Disconnected. Your keys and connected accounts were deleted. Add a model to use chat again.",
+		};
+	}
 	if (st.kind === "failed") {
 		return { kind: "failed", text: st.detail ? `${st.text}. ${st.detail}` : st.text };
 	}
@@ -2423,6 +2455,19 @@ const panelConnectOpen = computed(() => {
 	return !!c.open || (panel.value.mode === "add" && !(r.accounts || []).length);
 });
 
+// The already-connected row an ADD-mode subscription sign-in will fold into, or
+// null. Drives the notice above the sign-in spine so the customer reads "this adds
+// an account to what you already have" BEFORE they authorize, rather than
+// discovering it from the fold afterwards. Only ever set in add mode: in the edit
+// panel "+ Add account" already says the same thing by where it sits.
+const addFoldsInto = computed(() => {
+	if (!panel.value.open || panel.value.mode !== "add") return null;
+	const r = panelRow.value;
+	if (!r || r.credentialType !== "subscription") return null;
+	const host = subscriptionHostRow(r);
+	return host && (host.accounts || []).length ? host : null;
+});
+
 // True exactly when the spine's own Cancel is standing in for the footer's -
 // the paste-back add flow above (jv-cn-acts), not the device-code flow (that one
 // has no Connect to pair against, so it keeps the footer's Cancel as-is). Read by
@@ -2484,10 +2529,14 @@ async function connectApiKeyRow(row) {
 	}
 	// Probe only what can actually be sent. A stored key is encrypted server-side and
 	// never comes back to the browser, so an untouched row has nothing to probe; and a
-	// local endpoint (ollama, vllm) is reachable from the CONTAINER rather than from
-	// this bench, so a failure here would say nothing about the key while blocking a
+	// container-only endpoint is reachable from the CONTAINER rather than from this
+	// bench, so a failure here would say nothing about the key while blocking a
 	// perfectly good save.
-	if ((row.apiKey || "").trim() && !isLocalProviderRow(row)) {
+	//
+	// Locality is decided by the ADDRESS, not the provider id (jarvis#556). Keying it
+	// on ollama/vllm meant any other provider pointed at a private or loopback URL got
+	// probed from the bench, could not be reached, and silently refused to connect.
+	if ((row.apiKey || "").trim() && !isContainerOnlyRow(row)) {
 		// The probe is part of the Connect, so the editor is inert for it too. Released
 		// before runApply, which puts the overlay straight back up with its own label -
 		// and because nothing awaits in between, the swap costs no repaint.
@@ -2498,9 +2547,22 @@ async function connectApiKeyRow(row) {
 			setBusy("");
 		}
 		const probe = panel.value.testResult;
-		// Nothing else to say: the red Test result block above the button is already
-		// showing the provider's own words for why it refused.
-		if (!probe || !probe.ok) return;
+		// A probe that produced a RESULT needs nothing more from us: the red Test
+		// result block above the button is already showing the provider's own words
+		// for why it refused. A probe that produced NO result at all is different -
+		// the request itself failed, the block stays empty, and returning here left
+		// the customer pressing Connect against total silence (jarvis#556).
+		if (!probe) {
+			setApplyResult({
+				kind: "failed",
+				text: "Could not check this key.",
+				detail:
+					"The check could not be completed, so the model was not connected. " +
+					"Check the base URL and try again.",
+			});
+			return;
+		}
+		if (!probe.ok) return;
 	}
 	// The "add backup models automatically" switch used to be honoured on Close,
 	// which only worked because a Save came afterwards. Expand before the payload is
@@ -2763,7 +2825,24 @@ async function disconnect() {
 	try {
 		await api.disconnectLlm();
 	} catch (e) {
-		setApplyResult({ kind: "failed", text: "Could not disconnect.", detail: _err(e) });
+		// NOT "nothing happened". A disconnect is the one operation in this stack
+		// with NO rollback, deliberately: the fleet's llm_disconnect.deprovision
+		// destroys the key files BEFORE it restarts the container, and admin commits
+		// the blanked credential row BEFORE it calls the host, precisely so that a
+		// credential which could not be confirmed destroyed is never reported as
+		// kept. disconnect_llm then aborts before clearing THIS bench, so a failure
+		// here can genuinely mean the keys are gone from the workspace while the
+		// bench still holds its copy and still lists the model.
+		//
+		// So the honest sentence names both halves and points at the retry. Saying
+		// "Could not disconnect." invited the customer to carry on using a workspace
+		// whose AI was already torn down. Repeating Disconnect is safe: every leg of
+		// it is idempotent.
+		setApplyResult({
+			kind: "failed",
+			text: "Could not confirm the disconnect. Your keys are still stored here, but they may already have been removed from your workspace, so chat may stop working. Try Disconnect again.",
+			detail: _err(e),
+		});
 		return;
 	} finally {
 		setBusy("");
@@ -2771,6 +2850,10 @@ async function disconnect() {
 	// No startPolling: there is no apply to converge on. disconnect_llm calls admin
 	// synchronously and only clears the bench once admin has confirmed, so by the time
 	// it returns the outcome is already final.
+	//
+	// This message is the immediate acknowledgement and it retires itself; the DURABLE
+	// statement of the same fact is applyStatus reading last_sync_status
+	// "disconnected" off the server, so the outcome outlives this toast.
 	setApplyResult({
 		kind: "ok",
 		text: "Disconnected. Your keys and connected accounts have been deleted.",
@@ -3074,9 +3157,55 @@ async function _pollDeviceConnect(m, intervalSecs) {
 	};
 	setTimeout(tick, intervalSecs * 1000);
 }
+// The row a connect on `r` really belongs to: an EXISTING subscription row that
+// already names the same model, or null when `r` is the only one.
+//
+// "+ Add a model" seeds its row on the chosen provider's DEFAULT model id, so a
+// customer connecting a SECOND account of a provider they already use lands on a
+// row naming a model the pool already has. Every subscription model renders
+// through ONE shared Bifrost provider entry ("cliproxy-subs"), so that pair
+// renders duplicate routing targets and llm_proxy.validate() refuses the WHOLE
+// spec with `duplicate_subscription_model` - after the sign-in, which is the worst
+// possible moment to find out (#575). Several accounts of one provider is the
+// point of the subscription tier, so the account belongs on the row that exists.
+//
+// Keyed on the model id, which is what the shared validator keys its own check on;
+// the upstream has to agree too, so a fold can never mix two providers' OAuth
+// accounts onto one row.
+function subscriptionHostRow(r) {
+	if (!r || r.credentialType !== "subscription") return null;
+	const model = (r.model || "").trim();
+	if (!model) return null;
+	return (
+		rows.value.find(
+			(x) =>
+				x !== r &&
+				x.credentialType === "subscription" &&
+				(x.model || "").trim() === model &&
+				(x.upstream || "openai") === (r.upstream || "openai")
+		) || null
+	);
+}
+
 // Shared account placement for both the paste-back (finishConnect) and
 // device-code (_pollDeviceConnect) success paths.
-async function _placeConnectedAccount(m, d) {
+async function _placeConnectedAccount(row, d) {
+	// Fold onto the row that already owns this model, dropping the duplicate the
+	// add-flow seeded. The server folds too (onboarding._coalesce_subscription_models,
+	// which covers desk/API clients), but doing it here keeps the failover list and
+	// the payload honest instead of shipping a pair we know will be refused.
+	const host = subscriptionHostRow(row);
+	const m = host || row;
+	if (host) {
+		if (!host._connect) host._connect = blankConnect();
+		host._connect = { ...host._connect, ...row._connect, reconnectIdx: null };
+		rows.value = rows.value.filter((x) => x !== row);
+		// Keep the open panel on a row that still exists, or its watcher would close
+		// it out from under the apply that is about to start.
+		if (panel.value.open && panel.value.uid === row._uid) {
+			panel.value = { ...panel.value, mode: "edit", uid: host._uid };
+		}
+	}
 	if (!Array.isArray(m.accounts)) m.accounts = [];
 	const acct = {
 		upstream: m.upstream || "openai",
@@ -3087,17 +3216,23 @@ async function _placeConnectedAccount(m, d) {
 		connected: true,
 	};
 	const ri = m._connect.reconnectIdx;
-	// Device-code accounts (Kimi) carry NO email, so byEmail can't fold two
-	// captures of the same account — to REFRESH an existing device account use its
-	// per-slot Reconnect (sets reconnectIdx, replacing that slot); a generic
-	// Connect always appends (intended for pooling a genuinely different account).
-	const byEmail = acct.account_email
-		? m.accounts.findIndex(
-				(a) =>
-					a.account_email &&
-					a.account_email.toLowerCase() === acct.account_email.toLowerCase()
-		  )
-		: -1;
+	// Device-code accounts (Kimi) carry NO email, so this can't fold two captures of
+	// the same account. To REFRESH an existing device account use its per-slot
+	// Reconnect (sets reconnectIdx, replacing that slot); a generic Connect always
+	// appends (intended for pooling a genuinely different account). Their labels are
+	// per-account ("Kimi <last 4 of ref>"), so the label fallback below does not fold
+	// them either.
+	//
+	// A STORED account carries no `account_email` at all: get_llm_config returns only
+	// {upstream, account_ref, label}, and that label IS the email the sign-in
+	// reported. Matching on account_email alone therefore went blind the moment the
+	// page reloaded, so signing in again as the SAME ChatGPT user appended a second
+	// copy of one account - two cliproxy credential files holding one refresh token,
+	// which is the reuse pattern OpenAI revokes whole accounts over. Fall back to the
+	// label so a reloaded account still folds onto itself.
+	const identityOf = (a) => ((a && (a.account_email || a.label)) || "").trim().toLowerCase();
+	const identity = identityOf(acct);
+	const byEmail = identity ? m.accounts.findIndex((a) => identityOf(a) === identity) : -1;
 	if (ri != null && ri >= 0 && ri < m.accounts.length) {
 		m.accounts.splice(ri, 1, acct);
 		if (byEmail >= 0 && byEmail !== ri) m.accounts.splice(byEmail, 1);

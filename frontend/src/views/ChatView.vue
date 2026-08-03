@@ -1361,7 +1361,7 @@
 										v-if="
 											!m.error &&
 											!m.streaming &&
-											(toolCountOf(m) || elapsedOf(m))
+											(toolCountOf(m) || elapsedOf(m) || modelBadgeOf(m))
 										"
 										class="jv-meta"
 									>
@@ -1397,6 +1397,28 @@
 												<circle cx="12" cy="12" r="9" />
 												<path d="M12 7v5l3 2" /></svg
 											>{{ elapsedLabel(m) }}</span
+										>
+										<!-- jarvis#560: names the model that actually wrote this
+										     reply, shown only when it is not the one the chat is
+										     set to now (a mid-thread switch, or a pool failover
+										     the user never chose). -->
+										<span
+											v-if="modelBadgeOf(m)"
+											class="jv-modelchip"
+											:title="modelBadgeTitle(m)"
+											><svg
+												width="12"
+												height="12"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.8"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<rect x="4" y="4" width="16" height="16" rx="4" />
+												<circle cx="12" cy="12" r="2.6" /></svg
+											>{{ modelBadgeOf(m) }}</span
 										>
 									</div>
 									<!-- SUX-7: subtle "finishing…" affordance while the Relay-Pump
@@ -3397,6 +3419,7 @@ import { useConfirm } from "@/composables/useConfirm";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
+import { currentThreadModel, modelBadgeFor, modelBadgeTitleFor } from "@/utils/modelBadge";
 import { renderMarkdown } from "@/markdown";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
@@ -4459,6 +4482,19 @@ function elapsedLabel(m) {
 	const mm = Math.floor(total / 60),
 		ss = total % 60;
 	return ss ? `${mm}m ${ss}s` : `${mm}m`;
+}
+// Per-reply model attribution (jarvis#560). m.model / m.provider are stamped on
+// the assistant row at finalize and name the model that ACTUALLY answered, which
+// is not always the one the user picked: an unpinned thread keeps the agent's
+// failover chain live, so a substitution otherwise leaves no trace anywhere. The
+// show/hide rule lives in @/utils/modelBadge (unit-tested there) because a rule
+// that hides too eagerly would suppress the whole signal without failing.
+const threadModel = computed(() => currentThreadModel(messages.value, modelOverride.value));
+function modelBadgeOf(m) {
+	return modelBadgeFor(m, threadModel.value);
+}
+function modelBadgeTitle(m) {
+	return modelBadgeTitleFor(m);
 }
 // Open state falls back to the pref until the user explicitly toggles a turn.
 function isActivityOpen(name) {
@@ -9222,6 +9258,20 @@ onUnmounted(() => {
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
+}
+/* jarvis#560: per-reply model attribution. Outlined rather than plain text so a
+   reply written by a different model than the chat is set to now reads as a
+   deviation, not as one more timing metric. Both palettes come from the inline
+   paletteVars binding on the view root (the jv-* vars are NOT on :root). */
+.jv-modelchip {
+	padding: 1px 8px 1px 6px;
+	border: 1px solid var(--border-2);
+	border-radius: 20px;
+	color: var(--text-2);
+	font-weight: 600;
+	max-width: 220px;
+	overflow: hidden;
+	white-space: nowrap;
 }
 /* live tool activity rows */
 .jv-toolrow {
