@@ -1153,3 +1153,97 @@ class TestGetLlmApplyOperationShim(FrappeTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				account.get_llm_apply_operation("llmapply_abc")
 		m.assert_not_called()
+
+
+class TestOperationProbeVerdictPersistence(FrappeTestCase):
+	"""Plan-05 D2 paired follow-up: admin moved the fleet push off the synchronous
+	save (admin #193), so the AI-models probe verdicts now arrive on the CONVERGED
+	operation status. Polling get_llm_apply_operation folds them into the same bench
+	settings cache the settings panel already reads (get_llm_config) - without a new
+	endpoint or a second call - and never blanks a prior verdict when they are
+	absent."""
+
+	_FIELDS = ("last_subscription_status", "last_sync_warnings", "last_model_statuses")
+
+	def setUp(self):
+		self._snap = {f: frappe.db.get_value("Jarvis Settings", "Jarvis Settings", f) for f in self._FIELDS}
+		# A prior REAL verdict already on the row (the last confirmed apply's).
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			{
+				"last_subscription_status": "verified",
+				"last_sync_warnings": frappe.as_json(["prior warning"]),
+				"last_model_statuses": frappe.as_json(
+					[{"provider": "openai", "model": "gpt", "status": "ok"}]
+				),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", self._snap, update_modified=False)
+		frappe.db.commit()
+		frappe.set_user("Administrator")
+
+	def _status(self, **over):
+		base = {
+			"operation_id": "llmapply_x",
+			"state": "ready",
+			"code": "LLM_READY",
+			"message": "",
+			"tenant": "d" * 32,
+			"tenant_authority_generation": 7,
+			"desired_version": 12,
+			"applied_version": 12,
+			"chat_readiness": "Ready",
+			"chat_readiness_reason": "",
+			"retryable": False,
+			"retry_after_seconds": 0,
+		}
+		base.update(over)
+		return base
+
+	def _row(self):
+		return frappe.db.get_value("Jarvis Settings", "Jarvis Settings", list(self._FIELDS), as_dict=True)
+
+	def test_converged_poll_persists_probe_verdicts(self):
+		status = self._status(
+			subscription_status="usage_limited",
+			warnings=["quota low"],
+			model_statuses=[{"provider": "openai", "model": "gpt-5.5", "status": "ok"}],
+		)
+		with patch.object(admin_client, "get_llm_apply_operation", return_value=status):
+			account.get_llm_apply_operation("llmapply_x")
+		row = self._row()
+		self.assertEqual(row.last_subscription_status, "usage_limited")
+		self.assertEqual(frappe.parse_json(row.last_sync_warnings), ["quota low"])
+		self.assertEqual(
+			frappe.parse_json(row.last_model_statuses),
+			[{"provider": "openai", "model": "gpt-5.5", "status": "ok"}],
+		)
+
+	def test_poll_without_probe_fields_leaves_prior_verdicts(self):
+		# Still applying (or an old admin): no probe fields on the status -> the last
+		# real verdict must be left intact, never blanked.
+		status = self._status(state="applying", code="LLM_APPLYING", chat_readiness="Configuring")
+		with patch.object(admin_client, "get_llm_apply_operation", return_value=status):
+			account.get_llm_apply_operation("llmapply_x")
+		row = self._row()
+		self.assertEqual(row.last_subscription_status, "verified")
+		self.assertEqual(frappe.parse_json(row.last_sync_warnings), ["prior warning"])
+		self.assertEqual(
+			frappe.parse_json(row.last_model_statuses),
+			[{"provider": "openai", "model": "gpt", "status": "ok"}],
+		)
+
+	def test_unchanged_noop_poll_leaves_prior_verdicts(self):
+		# A byte-identical no-op apply ran no probe: its "unchecked"/[] must not
+		# discard the last real verdict.
+		status = self._status(subscription_status="unchecked", warnings=[], model_statuses=[], unchanged=True)
+		with patch.object(admin_client, "get_llm_apply_operation", return_value=status):
+			account.get_llm_apply_operation("llmapply_x")
+		row = self._row()
+		self.assertEqual(row.last_subscription_status, "verified")
+		self.assertEqual(frappe.parse_json(row.last_sync_warnings), ["prior warning"])
