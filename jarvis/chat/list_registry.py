@@ -21,9 +21,12 @@ What lives here
 ever name a key that already exists in this file.
 
 Registering a surface does NOT grant it filters: ``status`` says whether the
-endpoint speaks the ``filters_v2`` contract yet. Phase 1 migrates exactly two
-(Skills, Macros) as the contract's pilots; the rest stay ``PENDING`` and keep
-their curated filters until their wave.
+endpoint speaks the ``filters_v2`` contract yet. Skills and Macros are the
+contract's pilots; each further surface flips to ``MIGRATED`` as it adopts the
+contract, and the rest stay ``PENDING`` on their curated filters until their wave.
+The exact migrated set and its counts are the registry's own data — asserted by
+:mod:`jarvis.tests.test_list_registry`, never restated as a number in prose here
+(which is how the stale "exactly two" crept in and misreported the split).
 """
 
 from __future__ import annotations
@@ -47,9 +50,7 @@ EXCLUDED_NOT_A_LIST = "excluded_not_a_list"
 # it to DOCUMENT_LIST *and* adopt the contract (plan §7).
 EXCLUDED_DORMANT = "excluded_dormant"
 
-CLASSIFICATIONS = frozenset(
-	{DOCUMENT_LIST, PROJECTION, EXCLUDED_NOT_A_LIST, EXCLUDED_DORMANT}
-)
+CLASSIFICATIONS = frozenset({DOCUMENT_LIST, PROJECTION, EXCLUDED_NOT_A_LIST, EXCLUDED_DORMANT})
 #: Classifications that must carry a ``reason``.
 EXCLUDED_CLASSIFICATIONS = frozenset({EXCLUDED_NOT_A_LIST, EXCLUDED_DORMANT})
 
@@ -181,7 +182,12 @@ _VIEWS: tuple[ListView, ...] = (
 		surface="frontend/src/pages/skills/WikiTab.vue",
 		wave=1,
 		status=MIGRATED,
-		curated_filters={"page_type": "page_type", "scope_filter": None, "attention": None, "archived": "status"},
+		curated_filters={
+			"page_type": "page_type",
+			"scope_filter": None,
+			"attention": None,
+			"archived": "status",
+		},
 		notes="`scope_filter` (all|org|role|mine) and `attention` are view predicates, not single fields; `archived` is a two-valued view switch over `status` (Active vs Archived).",
 	),
 	ListView(
@@ -307,7 +313,11 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.approvals_api.list_approvals_page",),
 		surface="frontend/src/pages/approvals/ApprovalsBoard.vue",
 		wave=2,
-		curated_filters={"status": "status", "document_type": "document_type", "conversation": "conversation"},
+		curated_filters={
+			"status": "status",
+			"document_type": "document_type",
+			"conversation": "conversation",
+		},
 		notes="Computed `shared` flag + DocShare/owner visibility. Its document_type facet deliberately drops its own dimension — the C08-3 rule this module implements.",
 	),
 	ListView(
@@ -462,12 +472,13 @@ _VIEWS: tuple[ListView, ...] = (
 _BY_KEY: dict[str, ListView] = {v.view_key: v for v in _VIEWS}
 
 
-#: Whitelisted ``list_*`` endpoints under ``jarvis/chat`` that are deliberately
-#: NOT document-list views, each with its classification. The new-surface audit
-#: sweeps every such callable and fails unless it appears in a registered view's
-#: ``endpoints`` or here — so a new list endpoint cannot ship unclassified, which
-#: was the registry's one remaining loophole (it could only prove that what IS
-#: registered is well-formed, never that nothing is missing).
+#: Whitelisted COLLECTION-SHAPED endpoints under ``jarvis/chat`` / ``jarvis/support``
+#: that are deliberately NOT document-list views, each with its classification. The
+#: new-surface audit sweeps every such callable — matched by the whole family of
+#: collection name patterns, not ``list_*`` alone (S7) — and fails unless it appears
+#: in a registered view's ``endpoints`` or here, so a list endpoint cannot ship
+#: unclassified whatever it is named (the round-2 loophole: discovery keyed only on
+#: ``list_*``/``admin_list_*``, so a ``search_*`` or ``*_feed`` collection evaded it).
 NON_LIST_ENDPOINTS: dict[str, str] = {
 	# Unpaginated companions of a registered paginated list. They exist for a
 	# dropdown / autocomplete / first-paint and return a capped slice with no
@@ -482,6 +493,52 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 	"jarvis.chat.filebox.list_inbound": "unpaginated companion of file_box (list_inbound_page)",
 	"jarvis.chat.macros_api.list_macros": (
 		"Settings macro-runs dropdown feed; unpaginated companion of the macros view"
+	),
+	# The filters_v2 runtime-capability probe (P1-05): returns the per-view
+	# {view_key: enabled} map so a surface can pick transport at mount. It is
+	# metadata ABOUT the list views, not a list of documents.
+	"jarvis.chat.list_filters.list_filters_capabilities": (
+		"the filters_v2 per-view capability map (P1-05) — a config probe, not a document list"
+	),
+	"jarvis.chat.list_filters.get_list_filter_schema": (
+		"the filters_v2 field-catalog probe for ONE view — schema metadata about a "
+		"list, not a list of documents (its name carries the 'list' token)"
+	),
+	# Search surfaces: collection-SHAPED (they return matches), but they are search
+	# results over a query, not browsable, paginated, filterable document-list views.
+	# Registered here so the S7 sweep forces the distinction rather than letting a
+	# search endpoint pass unclassified.
+	"jarvis.chat.api.search_conversations": (
+		"full-text search over the caller's conversations — a ranked search-results "
+		"feed for the command palette, not a filterable document-list view"
+	),
+	"jarvis.chat.api.search_workspace": (
+		"global command-palette search across entities — a ranked hit list, not a "
+		"single-DocType browsable list view"
+	),
+	# Single-document `*_page` operations. Collection-shaped ONLY by the `_page`
+	# suffix the S7 sweep now recognises; each acts on ONE wiki page by slug and has
+	# no pageable row collection of its own. Registered so the suffix widening does
+	# not let a genuine `get_<thing>_page` list slip past unargued.
+	"jarvis.chat.wiki.get_wiki_page": "reads ONE wiki page by slug — a document getter, not a list",
+	"jarvis.chat.wiki.create_wiki_page": "creates ONE wiki page — a mutation, not a list",
+	"jarvis.chat.wiki.save_wiki_page": "saves ONE wiki page — a mutation, not a list",
+	"jarvis.chat.wiki.archive_wiki_page": "archives ONE wiki page by slug — a mutation, not a list",
+	"jarvis.chat.wiki.delete_wiki_page": "deletes ONE wiki page by slug — a mutation, not a list",
+	"jarvis.chat.wiki.restore_wiki_page": "restores ONE wiki page by slug — a mutation, not a list",
+	# Per-document detail feeds and aggregates: no independent, pageable row
+	# collection of their own.
+	"jarvis.chat.wiki.get_wiki_graph_history": (
+		"the edit-history feed of ONE wiki page — a per-document timeline, not a "
+		"collection (the chat equivalent of a form's version history)"
+	),
+	"jarvis.chat.triggers_api.activity_stats": (
+		"aggregate counters over Trigger Activity (a stats rollup), not a row "
+		"collection — the browsable feed is the registered trigger_activity view"
+	),
+	"jarvis.chat.api.clear_chat_history": (
+		"a MUTATION that deletes the caller's conversations — collection-shaped by "
+		"name (the 'history' token) but it returns nothing to page, sort or filter"
 	),
 	# Not document collections at all: option/name strings for a control.
 	"jarvis.chat.api.list_tools": "tool NAMES available to the caller — strings, not documents",
@@ -529,3 +586,28 @@ def filterable_views() -> tuple[ListView, ...]:
 
 def endpoints_by_view() -> dict[str, tuple[str, ...]]:
 	return {v.view_key: v.endpoints for v in _VIEWS}
+
+
+# --------------------------------------------------------------------------- #
+# Discovery annotation (P0-04)
+# --------------------------------------------------------------------------- #
+#: Attribute a whitelisted callable can carry to declare itself a document-list
+#: endpoint for the Phase-0 discovery sweep, REGARDLESS of its name. The sweep
+#: matches the ``list_*`` / ``admin_list_*`` naming families across the customer
+#: API packages, but a differently-named collection endpoint (``search_records``,
+#: a bespoke feed) would otherwise evade discovery — decorate it with
+#: :func:`list_surface_endpoint` and it is caught and must be classified.
+LIST_SURFACE_ATTR = "_jarvis_list_surface"
+
+
+def list_surface_endpoint(fn):
+	"""Mark a whitelisted callable as a document-list endpoint for the registry
+	audit (see :data:`LIST_SURFACE_ATTR`). Purely declarative — it changes no
+	runtime behaviour, it only makes the endpoint visible to the completeness
+	sweep so it cannot ship unclassified."""
+	setattr(fn, LIST_SURFACE_ATTR, True)
+	return fn
+
+
+def is_list_surface_endpoint(fn) -> bool:
+	return bool(getattr(fn, LIST_SURFACE_ATTR, False))

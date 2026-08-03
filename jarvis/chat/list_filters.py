@@ -67,8 +67,12 @@ from frappe import _
 from jarvis.chat import list_registry
 from jarvis.permissions import require_jarvis_user
 
-#: Bumped when the wire shape of the schema or a clause changes.
-CONTRACT_VERSION = 1
+#: Bumped when the wire shape of the schema or a clause changes. Also bumped to
+#: DISCARD schemas cached by an older build: v1 cached child entries whose
+#: ``parentfields`` list could be empty, which the compiler turned into a
+#: ``parentfield IN ()`` SQL syntax error on a restart-only deploy. v2 rebuilds
+#: the cache cold, and the compiler now fails closed on such an entry regardless.
+CONTRACT_VERSION = 2
 
 # --------------------------------------------------------------------------- #
 # Limits (plan §9). These bound CLIENT input only — a server-authored predicate
@@ -110,6 +114,14 @@ STATEMENT_TIMEOUT_SECONDS = 10
 # --------------------------------------------------------------------------- #
 ERR_UNKNOWN_VIEW = "list_filter_unknown_view"
 ERR_VIEW_NOT_FILTERABLE = "list_filter_view_not_filterable"
+#: The view IS migrated, but an operator rolled it back to legacy transport via the
+#: runtime kill switch (``jarvis_list_filters_v2_off``). Distinct from
+#: ERR_VIEW_NOT_FILTERABLE ("never migrated") so the client can be HONEST about why
+#: the panel is unavailable: a rolled-back list says "filters are turned off for
+#: this list" with no retry (retrying cannot succeed until an operator flips the
+#: flag back), whereas an unmigrated one says "not supported yet". Conflating the
+#: two left a shared link's filters silently un-applied with no truthful notice.
+ERR_VIEW_ROLLED_BACK = "list_filter_view_rolled_back"
 ERR_BAD_PAYLOAD = "list_filter_bad_payload"
 ERR_UNKNOWN_FIELD = "list_filter_unknown_field"
 ERR_INVALID_OPERATOR = "list_filter_invalid_operator"
@@ -253,6 +265,66 @@ INVALID_CONDITIONS: dict[str, tuple[str, ...]] = {
 	"Percent": (OP_LIKE, OP_NOT_LIKE, OP_BETWEEN, OP_IN, OP_NOT_IN, OP_TIMESPAN),
 }
 
+#: Frappe's ``Filter.set_fieldtype`` (filter.js:530-582) rewrites these stored
+#: string-like controls to an EFFECTIVE ``Data`` value control before choosing
+#: conditions, and ``hide_invalid_conditions`` (filter.js:410-413) then picks
+#: ``invalid_condition_map[original_type] || invalid_condition_map[effective]``.
+#: A type WITHOUT its own map row (Small Text, Text, Text Editor, JSON, Dynamic
+#: Link, Attach, Phone, Tag, Comments, Barcode, Read Only, Assign) therefore
+#: inherits Data's ``(Between, Timespan)`` invalid set — the fallback the original
+#: implementation missed (P0-03), so a Small Text ``description`` or a JSON field
+#: was advertising ``Between``/``Timespan`` and the frontend rendered a date
+#: range over a text column.
+#:
+#: Types that DO have their own row (Code, HTML Editor, Markdown Editor, Color,
+#: Password) keep it — ``original_type`` wins in the lookup above — so they are
+#: absent from this map and short-circuit before it. ``Long Text`` is a DELIBERATE
+#: Jarvis addition (deviation D15): Frappe leaves it with no row and no effective
+#: conversion, i.e. it offers ``Between`` on a prose body, which is the exact
+#: non-temporal-date-range nonsense this fix exists to remove.
+_EFFECTIVE_FILTER_FIELDTYPE: dict[str, str] = {
+	ft: "Data"
+	for ft in (
+		"Text",
+		"Small Text",
+		"Text Editor",
+		"Attach",
+		"Attach Image",
+		"Tag",
+		"Phone",
+		"JSON",
+		"Comments",
+		"Barcode",
+		"Dynamic Link",
+		"Read Only",
+		"Assign",
+		"Long Text",  # deviation D15
+	)
+}
+
+
+#: The ONLY families for which a date/time range (``Between``) or a rolling window
+#: (``Timespan``) is meaningful. Defined here (not only down in the value path) so
+#: :func:`allowed_operators` can enforce the temporal-only rule POSITIVELY.
+_TEMPORAL_FIELDTYPES = frozenset({"Date", "Datetime", "Time"})
+
+
+def invalid_conditions(fieldtype: str) -> tuple[str, ...]:
+	"""Frappe's ``invalid_condition_map[original] || invalid_condition_map[effective]``.
+
+	The original type wins when it has its own row; otherwise a string-like control
+	falls back to its effective ``Data`` row (see :data:`_EFFECTIVE_FILTER_FIELDTYPE`).
+	This is the single source both :func:`allowed_operators` and the golden matrix
+	test read, so schema and test cannot drift.
+	"""
+	if fieldtype in INVALID_CONDITIONS:
+		return INVALID_CONDITIONS[fieldtype]
+	effective = _EFFECTIVE_FILTER_FIELDTYPE.get(fieldtype)
+	if effective:
+		return INVALID_CONDITIONS.get(effective, ())
+	return ()
+
+
 #: frappe.model.no_value_type — layout / non-value controls. Table and Table
 #: MultiSelect are containers: not selectable themselves, but their child fields
 #: are (plan §4.3).
@@ -363,10 +435,22 @@ def default_operator(fieldname: str, fieldtype: str, is_large_table: bool = Fals
 
 def allowed_operators(fieldname: str, fieldtype: str) -> tuple[str, ...]:
 	"""Valid operators for a field family (Frappe's invalid_condition_map,
-	inverted), narrowed for the JSON-array standard fields."""
+	inverted), narrowed for the JSON-array standard fields.
+
+	``Between``/``Timespan`` are advertised ONLY for the explicitly temporal
+	families (S5). Frappe's invalid map removes them from the types it knows, but a
+	fieldtype with NO map row and no effective-Data conversion — ``Duration``,
+	``Autocomplete``, ``Geolocation``, any future control — used to inherit the
+	empty invalid set and so advertised the whole vocabulary, offering a date range
+	over a duration. The rule is now stated in the positive: a range operator is a
+	temporal operator, full stop, whether or not Frappe happened to enumerate the
+	type."""
 	if fieldname in _JSON_ARRAY_FIELDS:
 		return _JSON_ARRAY_OPERATORS
-	invalid = INVALID_CONDITIONS.get(fieldtype, ())
+	invalid = set(invalid_conditions(fieldtype))
+	if fieldtype not in _TEMPORAL_FIELDTYPES:
+		invalid.add(OP_BETWEEN)
+		invalid.add(OP_TIMESPAN)
 	return tuple(c for c in CONDITIONS if c not in invalid)
 
 
@@ -437,6 +521,7 @@ def _entry(
 	is_child: bool = False,
 	is_large_table: bool = False,
 	group: str = "",
+	parentfields: tuple[str, ...] = (),
 ) -> dict:
 	fieldname = df["fieldname"]
 	fieldtype = df["fieldtype"]
@@ -461,6 +546,13 @@ def _entry(
 		"json_array": fieldname in _JSON_ARRAY_FIELDS,
 		"default_operator": default_operator(fieldname, fieldtype, is_large_table),
 		"operators": list(allowed_operators(fieldname, fieldtype)),
+		# M2: the READABLE containers (Table fieldnames on the root) through which
+		# this child DocType is reached. Empty for main/standard fields. The
+		# compiler binds ``parentfield IN (these)`` inside the child EXISTS so a
+		# clause via a readable container can never match rows attached to a
+		# container the caller may NOT read (permlevel-raised or view-excluded) —
+		# the same child DocType, same parent, distinguished only by parentfield.
+		"parentfields": list(parentfields),
 	}
 
 
@@ -546,7 +638,15 @@ def build_field_catalog(
 		if getattr(df, "is_virtual", 0):
 			continue
 		if df.fieldtype in TABLE_FIELDTYPES:
-			if df.options:
+			# A Table field is the PERMISSION BOUNDARY around its child rows, not a
+			# mere layout control (P0-02). Discovering its children when the caller
+			# cannot read the container itself — its own permlevel is above the
+			# caller, or the endpoint withholds it via excluded_fields — turns a
+			# readable child field into an oracle over data the container hides.
+			# Both checks run BEFORE the container joins child_containers, so a
+			# withheld container suppresses its entire subtree (the excluded-field
+			# check used to sit after the `continue`, so it never reached a Table).
+			if df.options and fieldname not in excluded_main and int(df.permlevel or 0) in levels:
 				child_containers.append(df)
 			continue
 		if df.fieldtype in NO_VALUE_FIELDTYPES or df.fieldtype in SECRET_FIELDTYPES:
@@ -569,6 +669,19 @@ def build_field_catalog(
 				group=own_group,
 			)
 		)
+
+	# M2: the readable containers grouped by child DocType. When one child DocType
+	# is reached through several Table fields, only the ones that survived the
+	# permlevel / excluded checks above are here — so a floor user who can read
+	# container A but not container B sees {child_dt: ["a"]}, and the compiler will
+	# bind ``parentfield IN ('a')``, never matching B's rows. A System Manager who
+	# reads both sees {child_dt: ["a", "b"]} and keeps matching either, which is the
+	# pre-fix behaviour for the both-readable case.
+	readable_parentfields: dict[str, list[str]] = {}
+	for container in child_containers:
+		readable_parentfields.setdefault(container.options, []).append(container.fieldname)
+	for child_dt in readable_parentfields:
+		readable_parentfields[child_dt] = sorted(set(readable_parentfields[child_dt]))
 
 	children: list[dict] = []
 	for container in child_containers:
@@ -614,6 +727,7 @@ def build_field_catalog(
 					is_child=True,
 					is_large_table=large,
 					group=container_label,
+					parentfields=tuple(readable_parentfields.get(child_dt, ())),
 				)
 			)
 
@@ -628,10 +742,32 @@ def build_field_catalog(
 	return main + children
 
 
-def _schema_digest(fields: list[dict]) -> str:
+def _schema_digest(fields: list[dict], limits: dict | None = None, header: dict | None = None) -> str:
+	"""A revision over the FULL response contract, not a subset (P1-10 / S8).
+
+	The public ``schema_revision`` must change whenever anything the client renders
+	(or the server compiles) from the schema changes, or a caching/ETag consumer
+	would serve a stale panel. Rather than hand-list the field keys — which drifts
+	the instant a new one is added (``parentfields`` is the live example) — this
+	serializes each field dict WHOLE, so every wire key is covered automatically
+	and nothing can be silently omitted. The field-picker ``group`` the client
+	renders is derived purely from ``is_child``+``doctype`` (filterModel
+	``fieldOptions``), both of which are hashed, so it too is covered.
+
+	``header`` carries the schema-LEVEL keys that also decide what the client
+	renders — ``label`` (picker heading), ``root_doctype``, ``is_large_table`` (the
+	changed-Data-default note) and ``contract_version`` — none of which live on a
+	field. Include them, or a relabelled view or a bumped contract would keep a
+	stale revision.
+	"""
 	payload = json.dumps(
-		[[f["doctype"], f["fieldname"], f["fieldtype"], f["default_operator"], f["operators"]] for f in fields],
+		{
+			"fields": list(fields),
+			"limits": limits or {},
+			"header": header or {},
+		},
 		sort_keys=True,
+		default=str,
 	)
 	return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -669,7 +805,9 @@ def _meta_fingerprint(root_doctype: str, user: str) -> str:
 		for df in m.fields:
 			parts.append(f"{df.fieldname}:{df.fieldtype}:{int(df.permlevel or 0)}:{df.options or ''}")
 		for perm in getattr(m, "permissions", []) or []:
-			parts.append(f"P{perm.get('role')}:{int(perm.get('permlevel') or 0)}:{int(perm.get('read') or 0)}")
+			parts.append(
+				f"P{perm.get('role')}:{int(perm.get('permlevel') or 0)}:{int(perm.get('read') or 0)}"
+			)
 	return hashlib.sha256("|".join(parts).encode()).hexdigest()[:24]
 
 
@@ -732,19 +870,27 @@ def _build_schema(view: list_registry.ListView, root: str, user: str) -> dict:
 
 	fields = build_field_catalog(root, user=user, view=view)
 	meta = frappe.get_meta(root)
+	limits = {
+		"max_clauses": MAX_CLAUSES,
+		"max_in_values": MAX_IN_VALUES,
+		"max_value_chars": MAX_VALUE_CHARS,
+		"max_page_length": MAX_PAGE_LENGTH,
+	}
+	is_large_table = _is_large_table(meta)
+	header = {
+		"contract_version": CONTRACT_VERSION,
+		"label": view.label,
+		"root_doctype": root,
+		"is_large_table": is_large_table,
+	}
 	schema = {
 		"contract_version": CONTRACT_VERSION,
 		"view_key": view.view_key,
 		"label": view.label,
 		"root_doctype": root,
-		"is_large_table": _is_large_table(meta),
-		"schema_revision": _schema_digest(fields),
-		"limits": {
-			"max_clauses": MAX_CLAUSES,
-			"max_in_values": MAX_IN_VALUES,
-			"max_value_chars": MAX_VALUE_CHARS,
-			"max_page_length": MAX_PAGE_LENGTH,
-		},
+		"is_large_table": is_large_table,
+		"schema_revision": _schema_digest(fields, limits, header),
+		"limits": limits,
 		"fields": fields,
 	}
 	try:
@@ -752,6 +898,155 @@ def _build_schema(view: list_registry.ListView, root: str, user: str) -> dict:
 	except Exception:
 		pass
 	return schema
+
+
+# --------------------------------------------------------------------------- #
+# Runtime capability flag + structural telemetry (P1-05).
+# --------------------------------------------------------------------------- #
+#: Site-config key holding the list of MIGRATED view keys to roll BACK to legacy
+#: transport, e.g. ``"jarvis_list_filters_v2_off": ["triggers"]`` in
+#: ``site_config.json``. Absent / empty ⇒ every migrated view is ON — the flag is
+#: opt-OUT so a new migration is live by default and the switch is only ever a
+#: rollback. Mirrors the existing ``frappe.conf.get(FLAG)`` pattern
+#: (admission.py). A per-view field would need a DocType write path for what is a
+#: rare operator action, so the site-config map is the smaller honest mechanism.
+CONF_KEY_V2_OFF = "jarvis_list_filters_v2_off"
+
+
+#: How long a flag-misconfiguration Error Log stays deduped. A malformed kill
+#: switch breaks EVERY list load on EVERY migrated view, so an unguarded log_error
+#: would flood the Error Log with one row per request and bury the entry that
+#: explains it.
+FLAG_MISCONFIG_LOG_TTL = 900
+
+
+def _disabled_views() -> set[str]:
+	"""View keys rolled back to legacy transport — a KILL SWITCH that fails CLOSED.
+
+	The valid shapes are a list/tuple of view-key strings, a single view-key
+	string, or absent/empty/off (⇒ nothing disabled, every migrated view ON).
+	``False``/``0`` count as "off": for a key named ``*_off`` they are the most
+	natural spelling of "kill switch not engaged", so they must read as "disable
+	nothing", never fall through to fail-closed. ANYTHING else is a
+	misconfiguration, and a kill switch must never fail OPEN on one: the old code
+	did ``{str(v) for v in off}`` inside a ``try``, so
+	``"jarvis_list_filters_v2_off": true`` (a bool) raised ``TypeError`` and fell
+	through to ``set()`` — silently re-enabling every view the operator meant to
+	turn off. Now a malformed value (``True``/``1``, a dict, a mixed list) disables
+	EVERY migrated view and logs once, loudly. Over-disabling is the safe direction
+	for a rollback switch; a typo can never silently re-enable.
+	"""
+	off = frappe.conf.get(CONF_KEY_V2_OFF)
+	# ``False``/``0`` are listed explicitly: they are NOT equal to any of
+	# ``None``/``""``/``[]``/``()`` under ``==``, so without them a ``false`` or
+	# ``0`` kill switch would fall through to the fail-closed branch and silently
+	# disable every migrated view. ``True``/``1`` deliberately do NOT match here —
+	# they are ambiguous junk and must fail closed.
+	if off in (None, "", [], (), False, 0):
+		return set()
+	if isinstance(off, str):
+		return {off} if off else set()
+	if isinstance(off, list | tuple) and all(isinstance(v, str) and v for v in off):
+		return set(off)
+	# Malformed: fail closed — disable every migrated view.
+	_log_flag_misconfig(off)
+	return {v.view_key for v in list_registry.filterable_views()}
+
+
+def _log_flag_misconfig(value: Any) -> None:
+	key = "jarvis:list-filter-flag-misconfig"
+	try:
+		cache = frappe.cache()
+		if cache.get_value(key):
+			return
+		cache.set_value(key, "1", expires_in_sec=FLAG_MISCONFIG_LOG_TTL)
+	except Exception:
+		pass
+	try:
+		frappe.log_error(
+			title="list filter kill-switch misconfigured",
+			message=(
+				f"{CONF_KEY_V2_OFF} must be a list of view-key strings (or one string); "
+				f"got {type(value).__name__!r}: {value!r}. Failing CLOSED — every migrated "
+				f"list view is rolled back to legacy transport until this is corrected."
+			),
+		)
+	except Exception:
+		pass
+
+
+def view_filters_enabled(view_key: str) -> bool:
+	"""Whether ``view_key`` serves the ``filters_v2`` schema right now (default ON).
+
+	OFF is a rollback: the schema endpoint declines, so the client falls back to
+	legacy transport WITHOUT the Filter mandate disappearing (the button still
+	renders; it just cannot load a catalog). The compile path deliberately does
+	NOT consult this — a clause a stale client still sends is answered or coded,
+	never silently dropped (do-not-regress rule 8).
+	"""
+	return view_key not in _disabled_views()
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def list_filters_capabilities() -> dict:
+	"""Per-view ``{view_key: enabled}`` for every MIGRATED view (P1-05).
+
+	Lets a surface decide transport at mount without probing the schema endpoint
+	first. Jarvis-user gated; carries no field data, only the capability map.
+	"""
+	return {v.view_key: view_filters_enabled(v.view_key) for v in list_registry.filterable_views()}
+
+
+def _duration_bucket(ms: float) -> str:
+	"""Coarse, value-free duration bucket for telemetry."""
+	if ms < 5:
+		return "<5ms"
+	if ms < 25:
+		return "<25ms"
+	if ms < 100:
+		return "<100ms"
+	if ms < 500:
+		return "<500ms"
+	return ">=500ms"
+
+
+def _filter_logger():
+	import logging
+
+	logger = frappe.logger("jarvis.chat.list_filters", allow_site=True)
+	if logger.level == 0 or logger.level > logging.INFO:
+		logger.setLevel(logging.INFO)
+	return logger
+
+
+def emit_filter_telemetry(
+	view_key: str,
+	clauses: list[_Clause],
+	*,
+	duration_ms: float,
+	error_code: str | None = None,
+) -> None:
+	"""Bounded, PII-free structural telemetry (P1-05): view, per-clause
+	fieldtype+operator, whether a child clause was used, a duration BUCKET and the
+	stable error code — never a filter VALUE (do-not-regress rule 4). Mirrors the
+	latency logger: its own INFO logger, so it is visible without flipping levels
+	and does not make any other logger chattier."""
+	try:
+		shape = [{"ft": c.entry["fieldtype"], "op": c.operator} for c in clauses]
+		record = {
+			"view": view_key,
+			"clauses": len(clauses),
+			"child": any(c.entry.get("is_child") for c in clauses),
+			"shape": shape,
+			"bucket": _duration_bucket(duration_ms),
+		}
+		if error_code:
+			record["error"] = error_code
+		_filter_logger().info("list_filter %s", json.dumps(record, sort_keys=True))
+	except Exception:
+		# Telemetry must never break a query.
+		pass
 
 
 @frappe.whitelist()
@@ -767,10 +1062,19 @@ def get_list_filter_schema(view_key: str) -> dict:
 	registered-but-unmigrated view would otherwise hand a client a perfectly
 	valid schema it has nowhere to send — the UI would render a filter panel
 	whose every clause the list endpoint ignores, which is worse than no panel.
+	A view rolled back via the runtime flag (P1-05) declines the same way, so the
+	client degrades to legacy transport with the Filter action still visible.
 	"""
 	view = resolve_view(view_key)
 	if view.status != list_registry.MIGRATED:
+		# Never migrated: the panel genuinely has nowhere to send a clause.
 		_fail(ERR_VIEW_NOT_FILTERABLE, _("This list does not support field filters yet."))
+	if not view_filters_enabled(view_key):
+		# Migrated, then rolled back by the runtime kill switch. A DISTINCT code so
+		# the client tells the truth ("turned off", no retry) instead of "not
+		# supported yet" — and a shared link's filters get an honest "not applied"
+		# notice rather than silently vanishing behind an active-looking badge.
+		_fail(ERR_VIEW_ROLLED_BACK, _("Filters are turned off for this list."))
 	return get_schema(view_key)
 
 
@@ -813,7 +1117,10 @@ def parse_clauses(clauses: Any) -> list[dict]:
 	out: list[dict] = []
 	for item in raw:
 		if not isinstance(item, dict):
-			_fail(ERR_BAD_PAYLOAD, _("Each filter must be an object with doctype, fieldname, operator and value."))
+			_fail(
+				ERR_BAD_PAYLOAD,
+				_("Each filter must be an object with doctype, fieldname, operator and value."),
+			)
 		out.append(item)
 	return out
 
@@ -835,14 +1142,44 @@ def _cap_text(value: Any) -> str:
 
 
 def _as_number(entry: dict, value: Any) -> float | int:
-	from frappe.utils import cint, flt
+	"""Parse a numeric filter value, failing CLOSED on garbage (P1-01).
 
+	``frappe.utils.cint``/``flt`` do NOT raise on a malformed string — ``flt("abc")``
+	is ``0.0`` and ``cint("abc")`` is ``0`` — so the old ``try/except`` was inert for
+	the common case: ``"abc"`` silently became ``0`` and answered a different
+	question, and ``float('inf')``/``nan`` reached the DB binder as a driver error
+	outside the stable filter-error contract. So we parse strictly here.
+
+	- A BLANK value stays ``0`` at Frappe parity (``flt("")``==0), a deliberate
+	  documented deviation (D14): a blank numeric row is held PENDING on the client
+	  and never reaches the wire, so this only fires for a hand-edited URL / direct
+	  API call, where ``0`` is the least-surprising legacy behaviour.
+	- Thousands separators are stripped BEFORE the strict parse, exactly as
+	  ``frappe.utils.flt`` does (``flt`` runs ``s.replace(",", "")``), so a
+	  human-shaped ``"10,500.50"`` is a valid number rather than a rejected one
+	  (D14-b). The stripped value is what we validate AND what we bind — one parser,
+	  so the number the DB sees is the number we proved finite.
+	- A nonblank value that is not a finite number is rejected with the stable
+	  ``list_filter_invalid_value`` code.
+	- ``Int``/``Duration`` truncate a fractional value toward zero once it is known
+	  finite (``int(3.7)``==3, Frappe's ``cint`` parity) — documented, not silent.
+	"""
+	import math
+
+	if value is None or (isinstance(value, str) and not value.strip()):
+		return 0  # blank → 0, Frappe parity (D14)
+
+	cleaned = value.replace(",", "").strip() if isinstance(value, str) else value
 	try:
-		if entry["fieldtype"] in ("Int", "Duration"):
-			return cint(value)
-		return flt(value)
-	except Exception:
+		probe = float(cleaned)
+	except (TypeError, ValueError):
 		_fail(ERR_INVALID_VALUE, _("{0} needs a number.").format(entry["label"]))
+	if not math.isfinite(probe):
+		_fail(ERR_INVALID_VALUE, _("{0} needs a finite number.").format(entry["label"]))
+
+	if entry["fieldtype"] in ("Int", "Duration"):
+		return int(probe)  # finite → truncate any fraction toward zero (cint parity)
+	return probe
 
 
 def _select_options(entry: dict) -> list[str] | None:
@@ -850,9 +1187,6 @@ def _select_options(entry: dict) -> list[str] | None:
 	if entry["fieldtype"] != "Select" or not options or options.startswith("link:"):
 		return None
 	return [o.strip() for o in options.split("\n")]
-
-
-_TEMPORAL_FIELDTYPES = frozenset({"Date", "Datetime", "Time"})
 
 
 def _is_blank_temporal(value: Any) -> bool:
@@ -946,6 +1280,13 @@ def _between_bounds(entry: dict, value: Any) -> tuple[str, str]:
 
 	from frappe.utils import get_datetime, getdate
 
+	# S5 (compile-time belt to the schema's suspenders): a range is temporal-only.
+	# ``allowed_operators`` already withholds ``Between`` from a non-temporal field,
+	# so validate_clauses rejects such a clause with ERR_INVALID_OPERATOR before it
+	# reaches here — but a future caller that bypasses the schema must not be able
+	# to run a date range over a number/duration/text column either.
+	if entry["fieldtype"] not in _TEMPORAL_FIELDTYPES:
+		_fail(ERR_INVALID_OPERATOR, _("{0} does not support a range.").format(entry["label"]))
 	_guard_length(value)
 	if isinstance(value, str):
 		try:
@@ -964,6 +1305,7 @@ def _between_bounds(entry: dict, value: Any) -> tuple[str, str]:
 	frm, to = value[0], value[1]
 
 	if entry["fieldtype"] == "Datetime":
+
 		def _expand(raw, end: bool):
 			if isinstance(raw, str) and " " in raw.strip():
 				return get_datetime(raw)
@@ -985,6 +1327,9 @@ def _between_bounds(entry: dict, value: Any) -> tuple[str, str]:
 def _timespan_bounds(entry: dict, value: Any) -> tuple[str, str]:
 	from frappe.utils.data import get_timespan_date_range
 
+	# S5: a rolling window is temporal-only, same rule as Between.
+	if entry["fieldtype"] not in _TEMPORAL_FIELDTYPES:
+		_fail(ERR_INVALID_OPERATOR, _("{0} does not support a timespan.").format(entry["label"]))
 	token = str(value or "").strip().lower()
 	rng = get_timespan_date_range(token) if token else None
 	if not rng:
@@ -1179,10 +1524,20 @@ class CompiledFilters:
 			# conditions on one child table must be satisfied by the SAME child
 			# row (C08-2). EXISTS also keeps parents un-duplicated, so total /
 			# has_more / pagination stay correct without count fudging.
+			#
+			# ``parentfield IN (...)`` (M2) scopes the subquery to the containers the
+			# caller may READ. Without it, EXISTS matched ANY row of this child
+			# DocType with the same parent+parenttype — including rows attached to a
+			# sibling Table field the caller cannot read (permlevel-raised or
+			# view-excluded), leaking exactly what the container permission hides. The
+			# same-row semantics survive: a matching child row has ONE parentfield, so
+			# two clauses in this EXISTS are still satisfied by the same row under the
+			# same readable container.
 			parts.append(
 				f"EXISTS (SELECT 1 FROM `tab{child_dt}` `{alias}` "
 				f"WHERE `{alias}`.`parent` = {self.ref}.`name` "
-				f"AND `{alias}`.`parenttype` = %({alias}_pt)s AND ({inner}))"
+				f"AND `{alias}`.`parenttype` = %({alias}_pt)s "
+				f"AND `{alias}`.`parentfield` IN %({alias}_pf)s AND ({inner}))"
 			)
 		return parts
 
@@ -1194,8 +1549,26 @@ def compile_validated(root_doctype: str, clauses: list[_Clause], ref: str) -> Co
 	alias_map = {dt: f"jfc{i}" for i, dt in enumerate(child_doctypes)}
 
 	compiled = CompiledFilters(root_doctype=root_doctype, ref=ref, child_alias=alias_map)
+	# M2: the readable containers per child DocType, taken from the resolved schema
+	# entries (all clauses on one child_dt carry the same set). Bound as an IN list
+	# so the EXISTS can only ever see rows under a container the caller may read.
+	parentfields_by_dt: dict[str, tuple[str, ...]] = {}
+	for clause in clauses:
+		if clause.entry["is_child"]:
+			dt = clause.entry["doctype"]
+			parentfields_by_dt[dt] = tuple(sorted(clause.entry.get("parentfields") or ()))
 	for dt, alias in alias_map.items():
+		pf = parentfields_by_dt.get(dt, ())
+		if not pf:
+			# A child clause must carry at least one readable parent container.
+			# Binding an empty tuple would render ``parentfield IN ()`` — a hard
+			# MariaDB syntax error (pymysql prints the empty tuple literally), so a
+			# stale pre-v2 cached schema entry (no ``parentfields``) would otherwise
+			# 500 every child-table filter for up to SCHEMA_CACHE_TTL after a
+			# restart-only deploy. Fail closed with the stable invalid-field code.
+			_fail(ERR_UNKNOWN_FIELD, _("That field cannot be filtered on this list."))
 		compiled.params[f"{alias}_pt"] = root_doctype
+		compiled.params[f"{alias}_pf"] = pf
 	for clause in clauses:
 		entry = clause.entry
 		if entry["is_child"]:
@@ -1233,8 +1606,23 @@ def compile_list_filters(
 	ref = f"`{alias}`" if alias else f"`tab{root}`"
 	if not items:
 		return CompiledFilters(root_doctype=root, ref=ref)
+	import time
+
+	started = time.monotonic()
 	schema = get_schema(view_key, user=user)
-	return compile_validated(root, validate_clauses(schema, items), ref)
+	try:
+		validated = validate_clauses(schema, items)
+	except ListFilterError as e:
+		emit_filter_telemetry(
+			view_key,
+			[],
+			duration_ms=(time.monotonic() - started) * 1000,
+			error_code=getattr(e, "filter_error_code", ERR_BAD_PAYLOAD),
+		)
+		raise
+	compiled = compile_validated(root, validated, ref)
+	emit_filter_telemetry(view_key, validated, duration_ms=(time.monotonic() - started) * 1000)
+	return compiled
 
 
 def compile_filters_v2(
@@ -1308,9 +1696,7 @@ class ListFilterQuery:
 		"""Validate + compile client clauses. Idempotent per query object."""
 		if self._compiled is not None:
 			raise ValueError("filters_v2 already applied to this query")
-		self._compiled = compile_list_filters(
-			self.view_key, clauses, alias=self.alias, user=self.user
-		)
+		self._compiled = compile_list_filters(self.view_key, clauses, alias=self.alias, user=self.user)
 		return self
 
 	@property

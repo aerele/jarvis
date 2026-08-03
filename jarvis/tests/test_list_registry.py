@@ -106,23 +106,79 @@ def _ensure_floor_user() -> str:
 	return FLOOR_USER
 
 
+#: Customer-facing API packages the discovery sweep walks. `jarvis.chat` was the
+#: only one before (P0-04): `jarvis.support.api.list_tickets` lived outside it and
+#: could never be discovered. A collection endpoint added to any of these — or
+#: annotated anywhere via `list_registry.list_surface_endpoint` — must be
+#: classified.
+_SWEPT_PACKAGES = ("jarvis.chat", "jarvis.support")
+
+#: Collection-SHAPED name families (S7). The audit used to key ONLY on
+#: `list_*`/`admin_list_*`, so a collection endpoint named anything else — a
+#: `search_*`, a `*_feed`, a `browse_*`, a `get_*_rows` — evaded discovery
+#: entirely and could ship unclassified. Discovery now recognises the whole family
+#: of collection verbs/suffixes (a prefix, a suffix, or a whole-word token), so a
+#: list endpoint can no longer hide behind its name; the `list_surface_endpoint`
+#: annotation remains the escape hatch for a genuinely oddly-named one.
+_LIST_NAME_PREFIXES = ("list_", "admin_list_", "search_", "browse_", "recent_", "all_")
+_LIST_NAME_SUFFIXES = (
+	"_list",
+	"_feed",
+	"_history",
+	"_activity",
+	"_runs",
+	"_rows",
+	"_records",
+	"_entries",
+	"_results",
+	# The house convention for a paginated list getter is `list_<thing>_page`; the
+	# `list_` prefix already catches those, but a collection endpoint spelled
+	# `get_<thing>_page` (or any `*_page` that is NOT list-prefixed) would slip the
+	# net, so the suffix is swept too. This also pulls in the single-document
+	# `*_page` CRUD verbs (e.g. `get_wiki_page`), which are then argued as non-lists
+	# in `NON_LIST_ENDPOINTS` — exactly the "write down what it is" the audit wants.
+	"_page",
+)
+#: Whole-word tokens (split on `_`) that mark a collection: `search_records`,
+#: `get_activity_feed`, `fetch_rows`.
+_LIST_NAME_TOKENS = frozenset({"list", "search", "browse", "feed", "history", "activity", "roster"})
+
+
+def _looks_like_list_endpoint(name: str, fn) -> bool:
+	if list_registry.is_list_surface_endpoint(fn):
+		return True
+	if any(name.startswith(p) for p in _LIST_NAME_PREFIXES):
+		return True
+	if any(name.endswith(s) for s in _LIST_NAME_SUFFIXES):
+		return True
+	return bool(set(name.split("_")) & _LIST_NAME_TOKENS)
+
+
 def _whitelisted_list_callables() -> dict[str, object]:
-	"""Every whitelisted ``list_*`` callable under ``jarvis/chat``.
+	"""Every whitelisted list-endpoint candidate across the customer API packages.
 
-	Import errors are NOT swallowed: a module that fails to import would silently
-	shrink the sweep, which is exactly the loophole this audit closes."""
-	import jarvis.chat
-
+	Widened for P0-04 and again for S7: it walks `jarvis.chat` AND `jarvis.support`
+	and matches the WHOLE family of collection-shaped names — `list_*`/`admin_list_*`
+	plus `search_*`/`browse_*`/`recent_*`/`all_*` prefixes, `_feed`/`_history`/
+	`_activity`/`_runs`/`_rows`/`_records`/`_results`/`_entries`/`_list` suffixes, and
+	the `list`/`search`/`browse`/`feed`/`history`/`activity`/`roster` whole-word
+	tokens — so a collection endpoint can no longer evade discovery by being named
+	something other than `list_*` (the round-2 hole). `list_surface_endpoint` remains
+	the annotation escape hatch for a genuinely oddly-named one. Import errors are NOT
+	swallowed: a module that fails to import would silently shrink the sweep, which is
+	exactly the loophole this audit closes."""
 	found: dict[str, object] = {}
-	for info in pkgutil.walk_packages(jarvis.chat.__path__, prefix="jarvis.chat."):
-		module = importlib.import_module(info.name)
-		for name, fn in vars(module).items():
-			if not name.startswith("list_") or not callable(fn):
-				continue
-			if getattr(fn, "__module__", None) != module.__name__:
-				continue  # re-export
-			if fn in frappe.whitelisted:
-				found[f"{module.__name__}.{name}"] = fn
+	for package in _SWEPT_PACKAGES:
+		root = importlib.import_module(package)
+		for info in pkgutil.walk_packages(root.__path__, prefix=f"{package}."):
+			module = importlib.import_module(info.name)
+			for name, fn in vars(module).items():
+				if not callable(fn) or not _looks_like_list_endpoint(name, fn):
+					continue
+				if getattr(fn, "__module__", None) != module.__name__:
+					continue  # re-export
+				if fn in frappe.whitelisted:
+					found[f"{module.__name__}.{name}"] = fn
 	return found
 
 
@@ -188,10 +244,13 @@ class TestListRegistryIntegrity(FrappeTestCase):
 		"""The audit's one remaining hole, closed.
 
 		Everything above proves that what IS registered is well-formed; nothing
-		proved that nothing is MISSING. This sweeps every whitelisted ``list_*``
-		callable under jarvis/chat and requires each to be either a registered
-		view's endpoint or an explicitly classified non-list. A new list endpoint
-		therefore cannot ship without someone writing down what it is.
+		proved that nothing is MISSING. This sweeps every whitelisted
+		COLLECTION-SHAPED callable under jarvis/chat and jarvis/support — the full
+		name family, not `list_*` alone (S7) — and requires each to be either a
+		registered view's endpoint or an explicitly classified non-list. A new list
+		endpoint therefore cannot ship without someone writing down what it is, and
+		it can no longer slip past by being named `search_*`, `*_feed`, `*_history`
+		or the like.
 		"""
 		registered = {e for v in list_registry.all_views() for e in v.endpoints}
 		unclassified = sorted(
@@ -230,9 +289,36 @@ class TestListRegistryIntegrity(FrappeTestCase):
 					else:
 						self.assertTrue(
 							meta.get_field(spec),
-							f"{view.view_key} excludes {spec!r}, which is not a field of "
-							f"{view.root_doctype}",
+							f"{view.view_key} excludes {spec!r}, which is not a field of {view.root_doctype}",
 						)
+
+	def test_active_views_are_classified_and_migration_status_is_reported(self):
+		"""Migration completeness, SEPARATE from inventory and wiring (P0-04).
+
+		Waves 2-3 are deferred, so this round does NOT enforce 'no pending active
+		view' — that is the FINAL-round gate. What it enforces now is that every
+		ACTIVE (non-excluded) collection is CLASSIFIED (migrated or pending, never
+		an unknown status), and it prints the truthful migrated-vs-pending split so
+		the handoff cannot claim more than is built.
+		"""
+		active = [v for v in list_registry.all_views() if not v.is_excluded]
+		migrated = [v for v in active if v.status == list_registry.MIGRATED]
+		pending = [v for v in active if v.status == list_registry.PENDING]
+		for view in active:
+			with self.subTest(view=view.view_key):
+				self.assertIn(
+					view.status,
+					{list_registry.MIGRATED, list_registry.PENDING},
+					f"{view.view_key} is active but has no migration classification",
+				)
+		# Every active view is exactly one of the two — nothing unclassified.
+		self.assertEqual(len(migrated) + len(pending), len(active))
+		print(
+			f"\nPlan-08 migration status: {len(migrated)} migrated, {len(pending)} pending, "
+			f"of {len(active)} active views."
+			f"\n  migrated: {sorted(v.view_key for v in migrated)}"
+			f"\n  pending:  {sorted(v.view_key for v in pending)}"
+		)
 
 	def test_migrated_views_actually_accept_filters_v2(self):
 		"""'migrated' is a claim; this checks the wiring behind it."""
@@ -242,7 +328,9 @@ class TestListRegistryIntegrity(FrappeTestCase):
 			for dotted in view.endpoints:
 				with self.subTest(view=view.view_key, endpoint=dotted):
 					params = inspect.signature(_resolve(dotted)).parameters
-					self.assertIn("filters_v2", params, f"{dotted} claims filters_v2 but has no such parameter")
+					self.assertIn(
+						"filters_v2", params, f"{dotted} claims filters_v2 but has no such parameter"
+					)
 					self.assertIn(
 						"filters",
 						params,

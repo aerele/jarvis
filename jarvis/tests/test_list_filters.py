@@ -225,9 +225,7 @@ class TestPermlevelEndToEnd(unittest.TestCase):
 			"Jarvis Custom Skill": set(
 				frappe.get_all("Custom DocPerm", filters={"parent": SKILL}, pluck="name")
 			),
-			"Jarvis Macro": set(
-				frappe.get_all("Custom DocPerm", filters={"parent": MACRO}, pluck="name")
-			),
+			"Jarvis Macro": set(frappe.get_all("Custom DocPerm", filters={"parent": MACRO}, pluck="name")),
 		}
 
 		# (a) a MAIN field pushed above the caller's permlevel …
@@ -398,9 +396,7 @@ class TestViewExcludedFields(unittest.TestCase):
 
 	def test_exclusion_can_name_a_child_field(self):
 		"""The ``Child DocType.fieldname`` form, proven directly on the builder."""
-		catalog = build_field_catalog(
-			MACRO, user=USER_SM, excluded_fields=("Jarvis Macro Step.label",)
-		)
+		catalog = build_field_catalog(MACRO, user=USER_SM, excluded_fields=("Jarvis Macro Step.label",))
 		pairs = {(f["doctype"], f["fieldname"]) for f in catalog}
 		self.assertNotIn(("Jarvis Macro Step", "label"), pairs)
 		self.assertIn(("Jarvis Macro Step", "model_override"), pairs)
@@ -514,9 +510,7 @@ class TestFailsClosed(unittest.TestCase):
 		return caught.exception.filter_error_code
 
 	def test_unknown_view(self):
-		self.assertEqual(
-			self._code(compile_list_filters, "not-a-view", [], user=USER_A), ERR_UNKNOWN_VIEW
-		)
+		self.assertEqual(self._code(compile_list_filters, "not-a-view", [], user=USER_A), ERR_UNKNOWN_VIEW)
 
 	def test_projection_view_is_not_filterable_yet(self):
 		# file_box / approvals / agents_catalog have no declared projection schema
@@ -567,9 +561,7 @@ class TestFailsClosed(unittest.TestCase):
 		self.assertEqual(self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_INVALID_VALUE)
 
 	def test_select_value_must_be_an_option(self):
-		clause = [
-			{"doctype": MACRO, "fieldname": "schedule_frequency", "operator": "=", "value": "hourly"}
-		]
+		clause = [{"doctype": MACRO, "fieldname": "schedule_frequency", "operator": "=", "value": "hourly"}]
 		self.assertEqual(self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_INVALID_VALUE)
 
 	def test_empty_in_list_is_rejected(self):
@@ -632,7 +624,10 @@ class TestFailsClosed(unittest.TestCase):
 		to *today* for any missing bound. A range nobody chose, silently answered.
 		"""
 		blanks = (None, "", "   ", [], ["", ""], [None, None], {}, ["2026-07-01"], [None, "2026-07-01"])
-		cases = ((MACRO, "last_run_at", "macros", USER_A), (self.LEARNED, self.DATE_FIELD, "learning_queue", USER_SM))
+		cases = (
+			(MACRO, "last_run_at", "macros", USER_A),
+			(self.LEARNED, self.DATE_FIELD, "learning_queue", USER_SM),
+		)
 		for doctype, fieldname, view, user in cases:
 			for payload in blanks:
 				with self.subTest(field=fieldname, value=payload):
@@ -677,7 +672,14 @@ class TestFailsClosed(unittest.TestCase):
 		feeds _between_bounds a server-computed two-element range."""
 		compiled = compile_list_filters(
 			"learning_queue",
-			[{"doctype": self.LEARNED, "fieldname": self.DATE_FIELD, "operator": "Timespan", "value": "this month"}],
+			[
+				{
+					"doctype": self.LEARNED,
+					"fieldname": self.DATE_FIELD,
+					"operator": "Timespan",
+					"value": "this month",
+				}
+			],
 			user=USER_SM,
 		)
 		self.assertIn("BETWEEN", compiled.fragment())
@@ -690,9 +692,7 @@ class TestFailsClosed(unittest.TestCase):
 		clause = [
 			{"doctype": MACRO, "fieldname": "last_run_at", "operator": "Between", "value": [huge, huge]}
 		]
-		self.assertEqual(
-			self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_VALUE_TOO_LONG
-		)
+		self.assertEqual(self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_VALUE_TOO_LONG)
 
 	def test_unparseable_date_is_rejected(self):
 		clause = [{"doctype": MACRO, "fieldname": "last_run_at", "operator": ">", "value": "not-a-date"}]
@@ -842,7 +842,9 @@ class TestChildFilters(unittest.TestCase):
 			return list_macros_page(filters_v2=clauses, page_length=50)
 
 	def test_matching_children_do_not_duplicate_the_parent(self):
-		res = self._run([{"doctype": "Jarvis Macro Step", "fieldname": "label", "operator": "=", "value": "gamma"}])
+		res = self._run(
+			[{"doctype": "Jarvis Macro Step", "fieldname": "label", "operator": "=", "value": "gamma"}]
+		)
 		self.assertEqual(res["total"], 1, "two matching child rows must not duplicate the parent")
 		self.assertEqual(len(res["rows"]), 1)
 		self.assertEqual(res["rows"][0]["name"], self.dup)
@@ -1065,7 +1067,9 @@ class TestTypedCompilation(unittest.TestCase):
 		return compile_list_filters(view, [clause], user=USER_A).fragment()
 
 	def test_is_set_and_is_not_set(self):
-		st = self._fragment("macros", {"doctype": MACRO, "fieldname": "description", "operator": "is", "value": "set"})
+		st = self._fragment(
+			"macros", {"doctype": MACRO, "fieldname": "description", "operator": "is", "value": "set"}
+		)
 		self.assertIn("ifnull(`tabJarvis Macro`.`description`, '') != ''", st)
 		unset = self._fragment(
 			"macros", {"doctype": MACRO, "fieldname": "description", "operator": "is", "value": "not set"}
@@ -1103,7 +1107,14 @@ class TestTypedCompilation(unittest.TestCase):
 		with self.assertRaises(ListFilterError) as caught:
 			compile_list_filters(
 				"macros",
-				[{"doctype": MACRO, "fieldname": "creation", "operator": "Timespan", "value": "last fortnight"}],
+				[
+					{
+						"doctype": MACRO,
+						"fieldname": "creation",
+						"operator": "Timespan",
+						"value": "last fortnight",
+					}
+				],
 				user=USER_A,
 			)
 		self.assertEqual(caught.exception.filter_error_code, ERR_INVALID_VALUE)
