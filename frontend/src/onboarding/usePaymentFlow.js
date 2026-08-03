@@ -36,6 +36,7 @@ import {
 	EVENTS,
 	STATES,
 	canOpenCheckout,
+	canSafelyRestart,
 	handlesForProvider,
 	initialState,
 	reduce,
@@ -113,6 +114,23 @@ export function createPaymentFlow(deps) {
 	// minted per action (P1-2), so a late answer from a finished-then-abandoned
 	// action is fenced even without an explicit cancel.
 	let token = 0;
+	// A SECOND counter, bumped ONLY by a hard teardown/reset (cancelInFlight:
+	// leaving Pay, unmount, restart, external-return) - never by beginAction. It
+	// fences the ONE piece of work that must outlive a benign action-token bump: a
+	// gateway sheet that settles AFTER its open-deadline (X1 / B2-1). The action
+	// token is bumped by every ordinary action (a status Check taken after the
+	// timeout), so fencing a late post-deadline PAYMENT on `token` would drop it the
+	// moment the customer checked. `disposeEpoch` moves only when the page is truly
+	// done with this sheet, which is exactly when a late result must be abandoned.
+	// The reducer's identity fence (callbackStale) is the second gate for a late
+	// sheet a NEW intent has superseded.
+	let disposeEpoch = 0;
+	// True while a gateway sheet promise is unsettled. A checkout that timed out but
+	// whose sheet is still open keeps this true (the late continuation may fire);
+	// it goes false only when the sheet actually settles or is torn down. hydrate
+	// reads it (X5 / B2-6) to distinguish a LIVE sheet - which a passive read must
+	// never unseat - from a FROZEN checkout_open with no opener behind it.
+	let openInFlight = false;
 	// The one incompatible-action lock (P1-2). submitReview / initiatePayment /
 	// checkStatus / verifyAndContinue all take it before their first API call, so
 	// a burst of clicks - or a check racing an initiate - produces exactly one
@@ -187,6 +205,10 @@ export function createPaymentFlow(deps) {
 
 	function cancelInFlight() {
 		token += 1;
+		// A hard teardown/reset: abandon the sheet continuation too (X1) and mark no
+		// sheet in flight (X5), so a frozen checkout_open can be safely exited.
+		disposeEpoch += 1;
+		openInFlight = false;
 		// Abandon whatever is in flight: free the lock so a fresh action may start,
 		// and drop the flag those calls were holding. Every release path is fenced
 		// on `my === token`, so the bump that invalidates the in-flight work also
@@ -272,6 +294,22 @@ export function createPaymentFlow(deps) {
 	 * NOT read "has llm_credentials" as "has paid".
 	 */
 	async function hydrate() {
+		// X5 / B2-6: a FROZEN checkout_open (a hard teardown - leaving Pay via
+		// returnFromCheckout, or an unmounted/torn-down instance - abandoned the opener
+		// and left the state stuck) with NO live opener behind it must not trap the
+		// customer on "Opening secure checkout…" forever. Only a teardown that bumps
+		// disposeEpoch clears openInFlight; a REFUSED restart deliberately does NOT
+		// (D3), so a live post-deadline sheet keeps openInFlight true and is never
+		// mistaken for a frozen one here. hydrate otherwise refuses to leave a live
+		// sheet (the passive-read rule below); this narrow exception fires ONLY when
+		// nothing is actually opening, taking the explicit, safe RETURNED_FROM_CHECKOUT
+		// exit so the read below reconciles truth. Scoped to checkout_open (a confirming
+		// state is bounded by the confirm's own deadline and must not be unseated by a
+		// passive read), and it does NOT weaken the normal refusal: a genuinely live
+		// sheet keeps openInFlight true and is still protected.
+		if (state.value.value === STATES.CHECKOUT_OPEN && !openInFlight) {
+			apply({ type: EVENTS.RETURNED_FROM_CHECKOUT }); // now UNKNOWN; the read below reconciles
+		}
 		// The 14th fence point. A mount read is slow (it is the first request of
 		// the page) and can land AFTER the customer has already opened a checkout
 		// sheet from a second tab or a fast click - at which point absorbing it
@@ -481,36 +519,148 @@ export function createPaymentFlow(deps) {
 			attemptId: state.value.attemptId,
 			generation: state.value.generation,
 		};
+
+		apply({ type: EVENTS.CHECKOUT_OPENED });
+
+		// The open is bounded (P0-3) - but a bounded WAIT is NOT a closed SHEET. An
+		// in-page gateway modal (Razorpay netbanking / UPI-collect) can sit open and
+		// PAYABLE for many minutes; our deadline only bounds how long WE wait, not the
+		// sheet. So the open is handled in three deliberate parts (X1 / B2-1):
+		//   1. A teardown-capable AbortSignal is handed to the opener and aborted on
+		//      timeout (best-effort: some SDKs expose a programmatic close, some do
+		//      not - correctness never relies on it).
+		//   2. The ORIGINAL sheet promise keeps a continuation attached, fenced on
+		//      disposeEpoch (NOT the action token), so a payment that lands AFTER the
+		//      deadline still runs the normal confirm path instead of being dropped
+		//      while the page re-arms "start a new payment".
+		//   3. On timeout we enter the checkoutMayBeOpen recovery (CHECKOUT_OPEN_TIMED
+		//      OUT), which vetoes initiate at the machine until the sheet closes.
+		const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+		openInFlight = true;
+		const sheet = Promise.resolve().then(() =>
+			openCheckout(handles, {
+				description: "Jarvis subscription",
+				signal: controller ? controller.signal : undefined,
+			})
+		);
+		const myDispose = disposeEpoch;
+		// `deadlineFired` is the discriminator between the in-time path and the late
+		// continuation, set SYNCHRONOUSLY the instant the deadline elapses so there is
+		// no ordering race: a sheet that resolves before it is owned by the in-time
+		// await; one that resolves after is owned by the continuation below.
+		let deadlineFired = false;
+		// The late continuation, on the ORIGINAL sheet promise. It acts ONLY once the
+		// deadline has fired AND the page has not been torn down (disposeEpoch
+		// unchanged). A benign action-token bump (a status Check taken after the
+		// timeout) does NOT drop it - that is the whole point: a real post-deadline
+		// payment must still confirm. A hard teardown (cancelInFlight) does drop it.
+		sheet.then(
+			(lateOut) => {
+				openInFlight = false;
+				if (!deadlineFired || myDispose !== disposeEpoch) return;
+				return settleSheetResult(
+					lateOut,
+					identity,
+					() => myDispose === disposeEpoch,
+					true
+				);
+			},
+			async () => {
+				// A late open-FAILURE after we already timed out and reconciled (D6). The
+				// sheet is GONE, but the timeout path left checkoutMayBeOpen=true (the veto
+				// that keeps initiate off over a maybe-live sheet). Nothing else lifts it:
+				// no reducer path clears it from `unknown` - RETURNED_FROM_CHECKOUT is a
+				// no-op there - so without firing CHECKOUT_SHEET_CLOSED here the customer's
+				// only escape was a full page reload. Fire it (fenced exactly like the
+				// success continuation) to lift the veto and require a check, then reconcile.
+				openInFlight = false;
+				if (!deadlineFired || myDispose !== disposeEpoch) return;
+				apply({ type: EVENTS.CHECKOUT_SHEET_CLOSED, ...identity });
+				await reconcileAfterFailure();
+			}
+		);
+
 		let out;
+		let timer = null;
 		try {
-			apply({ type: EVENTS.CHECKOUT_OPENED });
-			// The SDK/provider open is bounded too (P0-3): a sheet that never opens
-			// (SDK promise that never settles) times out into a retryable failure
-			// with a mandatory reconcile, rather than a permanent Opening… spinner.
-			out = await deadlined(
-				() => openCheckout(handles, { description: "Jarvis subscription" }),
-				openDeadlineMs,
-				"open"
-			);
+			out = await new Promise((resolve, reject) => {
+				timer = setTimeout(() => {
+					deadlineFired = true;
+					// Attempt a programmatic teardown (X1, best-effort - never relied on).
+					if (controller) {
+						try {
+							controller.abort();
+						} catch (e) {
+							/* SDK/environment without abort support - the veto still protects */
+						}
+					}
+					const err = new Error("payment request timed out: open");
+					err.isTimeout = true;
+					reject(err);
+				}, openDeadlineMs);
+				// Only settle the in-time race while the deadline has NOT fired; a late
+				// settle is handled by the continuation above, never here.
+				sheet.then(
+					(v) => {
+						if (!deadlineFired) resolve(v);
+					},
+					(e) => {
+						if (!deadlineFired) reject(e);
+					}
+				);
+			});
 		} catch (e) {
-			// The sheet could not be opened at all (or the open timed out). Stay on
-			// Pay, retryable, and - mandatory - go and ASK the gateway rather than
-			// guess.
+			if (timer) clearTimeout(timer);
+			if (e && e.isTimeout) {
+				// The sheet did not settle in time and MAY still be open. Do NOT fire
+				// CHECKOUT_FAILED (that re-arms initiate - the double-charge path). Enter
+				// the "may still be open" recovery and reconcile; the late continuation
+				// still processes a genuine post-deadline result.
+				if (my !== token) return;
+				apply({ type: EVENTS.CHECKOUT_OPEN_TIMED_OUT, ...identity });
+				await reconcileAfterFailure();
+				return;
+			}
+			// A genuine open FAILURE (the SDK could not launch at all): stay on Pay,
+			// retryable, and reconcile. Its message is a customer-authored SDK string,
+			// safe to surface; a deadline abort never reaches this branch (it is tagged
+			// isTimeout above), and the reducer sanitizes the note regardless (X2).
 			if (my !== token) return;
 			apply({ type: EVENTS.CHECKOUT_FAILED, message: e && e.message, ...identity });
 			await reconcileAfterFailure();
 			return;
 		}
+		if (timer) clearTimeout(timer);
 		if (my !== token) return;
+		await settleSheetResult(out, identity, () => my === token, false);
+	}
 
-		if (out.leavesPage) return; // Cashfree mandate: the browser is redirecting away
-
+	// Process a settled gateway-sheet result (leaves-page / dismissed / success),
+	// shared by the in-time path and the post-deadline late continuation (X1). The
+	// two differ only in their fence (`isLive`) and in how a dismiss is folded: a
+	// live dismiss is CHECKOUT_DISMISSED (from an open sheet), a LATE dismiss is
+	// CHECKOUT_SHEET_CLOSED (the timed-out sheet finally closed) - which lifts the
+	// checkoutMayBeOpen veto. Both then reconcile server truth.
+	async function settleSheetResult(out, identity, isLive, late) {
+		if (!out || !isLive()) return;
+		if (out.leavesPage) {
+			// An in-time leavesPage is a genuine redirect: the browser is navigating
+			// away, nothing more to do. But a LATE one (post-deadline continuation)
+			// arrives on a page that already timed out and is holding the
+			// checkoutMayBeOpen veto; if the redirect does not actually take (a blocked
+			// navigation, a returned bfcache), that veto would latch initiate off
+			// forever (D6). Lift it the same way a late dismiss does.
+			if (late) apply({ type: EVENTS.CHECKOUT_SHEET_CLOSED, ...identity });
+			return;
+		}
 		if (out.status === "dismissed") {
-			apply({ type: EVENTS.CHECKOUT_DISMISSED, ...identity });
+			apply({
+				type: late ? EVENTS.CHECKOUT_SHEET_CLOSED : EVENTS.CHECKOUT_DISMISSED,
+				...identity,
+			});
 			await reconcileAfterFailure(); // check-on-failure
 			return;
 		}
-
 		// A success from the sheet: confirm it. Cashfree orders have no client
 		// signature and settle only server-side, so they poll the confirm; a
 		// Razorpay success confirms once.
@@ -734,7 +884,16 @@ export function createPaymentFlow(deps) {
 	// caller uses `reset` to decide whether editing details is safe or the customer
 	// should stay on their recovery card.
 	function restart() {
-		cancelInFlight();
+		// Consult the reset predicate FIRST and tear down ONLY on the reset branch
+		// (D3). cancelInFlight bumps disposeEpoch, which is the exact fence the X1 late
+		// continuation rides on: an unconditional cancel here dropped a genuine
+		// post-deadline confirm whenever the restart was REFUSED (money may still be
+		// recoverable, so the customer is correctly kept on recovery - but the sheet
+		// they are still in can settle success later, and that must not be abandoned).
+		// canSafelyRestart is the same predicate the RESTART reducer gates on, so the
+		// teardown decision and `reset` can never disagree.
+		const willReset = canSafelyRestart(state.value);
+		if (willReset) cancelInFlight();
 		const after = apply({ type: EVENTS.RESTART });
 		return { reset: after.value === STATES.REVIEW };
 	}

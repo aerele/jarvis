@@ -89,12 +89,18 @@ export async function openOnboardingCheckout(handles, opts = {}) {
 		openRazorpay = openRazorpaySheet,
 		openCashfree = openCashfreeSheet,
 		openMandate = defaultOpenMandate,
+		// A best-effort teardown signal (X1): the orchestrator aborts it when the
+		// open deadline elapses so an SDK that supports a programmatic close can tear
+		// the sheet down. Never relied on - the machine's checkoutMayBeOpen veto is
+		// what actually protects against a double charge - and only the Razorpay
+		// in-page modal honours it (Cashfree's flows give no such handle).
+		signal,
 	} = opts;
 
 	const kind = classifyOnboardingHandles(handles);
 	switch (kind) {
 		case CHECKOUT_RAZORPAY: {
-			const out = await openRazorpay(handles, description);
+			const out = await openRazorpay(handles, description, { signal });
 			return out;
 		}
 		case CHECKOUT_CASHFREE_ORDER: {

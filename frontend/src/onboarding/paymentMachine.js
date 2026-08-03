@@ -52,6 +52,17 @@ export const EVENTS = {
 	CHECKOUT_OPENED: "CHECKOUT_OPENED",
 	CHECKOUT_DISMISSED: "CHECKOUT_DISMISSED",
 	CHECKOUT_FAILED: "CHECKOUT_FAILED",
+	// The gateway open did not settle inside the (generous) open deadline. Unlike
+	// CHECKOUT_FAILED this is NOT "the sheet could not open" - an in-page modal
+	// (Razorpay netbanking / UPI-collect) can sit open and PAYABLE long past the
+	// deadline, so we must not re-arm "start a new payment" over a live sheet
+	// (B2-1). It leaves the busy screen for a checkable UNKNOWN and VETOES initiate
+	// (checkoutMayBeOpen) until the sheet actually closes and a check has run.
+	CHECKOUT_OPEN_TIMED_OUT: "CHECKOUT_OPEN_TIMED_OUT",
+	// A previously timed-out sheet finally closed WITHOUT a success (a late
+	// dismiss, or a programmatic teardown). Clears the checkoutMayBeOpen veto and
+	// requires a check; never a verdict of its own.
+	CHECKOUT_SHEET_CLOSED: "CHECKOUT_SHEET_CLOSED",
 	// The customer came back to a checkout the page had opened - a bfcache
 	// restore, a top-level redirect return, or a tab regaining focus after a
 	// full-page mandate. NOT a dismissal: it asserts nothing about the money, only
@@ -107,6 +118,17 @@ const GATEWAY_EVENT_SOURCES = new Set([
 	STATES.UNKNOWN,
 	STATES.FAILED_RETRYABLE,
 ]);
+// GATEWAY_CALLBACK has ONE extra legal source over the rest: confirm_required
+// (D7). A post-deadline sheet SUCCESS (the X1 late continuation) can land after a
+// status Check has already resolved the intent to PAYMENT_AUTHORIZED_PENDING_
+// CONFIRM. The authorization exists and the late callback carries the very
+// gateway payment id + signature that confirms it, so it must be allowed to drive
+// the confirm (-> confirming -> paid) rather than counting as an illegal
+// transition and stranding the customer on the pending card while the money IS
+// taken. Kept separate from GATEWAY_EVENT_SOURCES so dismiss/checkout-failed do
+// NOT gain confirm_required (those must never act on a settled recovery). The
+// identity fence (callbackStale) still rejects a genuinely superseded callback.
+const GATEWAY_CALLBACK_SOURCES = new Set([...GATEWAY_EVENT_SOURCES, STATES.CONFIRM_REQUIRED]);
 const DISMISS_SOURCES = new Set([STATES.CHECKOUT_OPEN]);
 const RETURN_SOURCES = new Set([STATES.CHECKOUT_OPEN, STATES.CONFIRMING]);
 
@@ -218,6 +240,12 @@ export function initialState() {
 		// state, or capability over that answer (P0-1). Cleared on a fresh
 		// open/attempt.
 		checkoutNote: "",
+		// Set when an open times out while the sheet MAY still be open and payable
+		// (B2-1). While true, initiate is vetoed at the machine (not just in copy):
+		// the page cannot offer "start a new payment" over a live gateway sheet. It
+		// lifts only when the sheet actually closes (CHECKOUT_SHEET_CLOSED /
+		// GATEWAY_CALLBACK / a fresh open) and a status check has run after closure.
+		checkoutMayBeOpen: false,
 		checkCooldownUntil: 0,
 		supportChecks: emptyCounter(),
 		supportOffered: false,
@@ -364,8 +392,44 @@ export function reduce(state, event, opts = {}) {
 			// the confirm), which is the same class of harm the floor exists for.
 			if (PAID_FLOOR.has(state.value)) return state;
 			if (!canOpenCheckout(state)) return illegal(state, strict, "checkout without handles");
-			// A fresh sheet clears any earlier "the checkout could not open" note.
-			return { ...state, value: STATES.CHECKOUT_OPEN, busy: null, checkoutNote: "" };
+			// A fresh sheet clears any earlier "the checkout could not open" note and
+			// the "a previous sheet may still be open" veto - this IS the new sheet.
+			return {
+				...state,
+				value: STATES.CHECKOUT_OPEN,
+				busy: null,
+				checkoutNote: "",
+				checkoutMayBeOpen: false,
+			};
+		}
+
+		case EVENTS.CHECKOUT_OPEN_TIMED_OUT: {
+			if (PAID_FLOOR.has(state.value)) return state;
+			if (callbackStale(state, event)) return state;
+			if (state.value !== STATES.CHECKOUT_OPEN) {
+				return illegal(state, strict, "open-timeout outside an open checkout");
+			}
+			// The sheet did not settle in time and MAY still be open & payable. Leave
+			// the busy screen for a checkable UNKNOWN, but VETO initiate so the page
+			// cannot re-arm "start a new payment" over a live sheet (B2-1). The veto
+			// lifts on CHECKOUT_SHEET_CLOSED / GATEWAY_CALLBACK, never on a check.
+			return {
+				...state,
+				value: STATES.UNKNOWN,
+				busy: null,
+				checkRequired: true,
+				checkoutMayBeOpen: true,
+			};
+		}
+
+		case EVENTS.CHECKOUT_SHEET_CLOSED: {
+			// A timed-out sheet finally closed with no success (late dismiss / SDK
+			// teardown). It asserts nothing about the money - only that the sheet is
+			// gone - so it clears the veto and requires a check. Legal from any
+			// non-floor state; a stray one on the paid floor is a no-op.
+			if (PAID_FLOOR.has(state.value)) return state;
+			if (callbackStale(state, event)) return state;
+			return { ...state, busy: null, checkRequired: true, checkoutMayBeOpen: false };
 		}
 
 		case EVENTS.CHECKOUT_DISMISSED: {
@@ -394,8 +458,12 @@ export function reduce(state, event, opts = {}) {
 				busy: null,
 				// The SDK/gateway reason is PRESENTATION metadata, not a verdict: it
 				// rides in its own field so the mandatory reconcile that follows can
-				// overwrite message/code/state without losing it (P0-1).
-				checkoutNote: event.message || state.checkoutNote || "",
+				// overwrite message/code/state without losing it (P0-1). It is
+				// SANITIZED first (X2): a deadline abort's internal label ("payment
+				// request timed out: <label>") is a client signal, never a customer
+				// message, so it is dropped here - the one chokepoint that feeds the
+				// note render path - while genuine SDK/customer-authored strings pass.
+				checkoutNote: sanitizeCheckoutNote(event.message) || state.checkoutNote || "",
 				checkRequired: true,
 			};
 		}
@@ -403,10 +471,17 @@ export function reduce(state, event, opts = {}) {
 		case EVENTS.GATEWAY_CALLBACK: {
 			if (PAID_FLOOR.has(state.value)) return state;
 			if (callbackStale(state, event)) return state;
-			if (!GATEWAY_EVENT_SOURCES.has(state.value)) {
+			if (!GATEWAY_CALLBACK_SOURCES.has(state.value)) {
 				return illegal(state, strict, "gateway callback from a settled state");
 			}
-			return { ...state, value: STATES.CONFIRMING, busy: "confirming" };
+			// A callback arriving means the sheet closed - clear any "may still be
+			// open" veto (X1: a late post-deadline payment lands here).
+			return {
+				...state,
+				value: STATES.CONFIRMING,
+				busy: "confirming",
+				checkoutMayBeOpen: false,
+			};
 		}
 
 		case EVENTS.RETURNED_FROM_CHECKOUT: {
@@ -417,7 +492,13 @@ export function reduce(state, event, opts = {}) {
 			// any other state is a no-op (never a regression).
 			if (PAID_FLOOR.has(state.value)) return state;
 			if (!RETURN_SOURCES.has(state.value)) return state;
-			return { ...state, value: STATES.UNKNOWN, busy: null, checkRequired: true };
+			return {
+				...state,
+				value: STATES.UNKNOWN,
+				busy: null,
+				checkRequired: true,
+				checkoutMayBeOpen: false,
+			};
 		}
 
 		case EVENTS.CONFIRM_SUCCEEDED: {
@@ -440,6 +521,7 @@ export function reduce(state, event, opts = {}) {
 				busy: null,
 				checkRequired: false,
 				transportError: false,
+				checkoutMayBeOpen: false,
 				provisioningNote: d.chat_readiness_reason || state.provisioningNote || "",
 				handles: state.handles,
 			};
@@ -597,6 +679,27 @@ function narrowToFamily(handles, family) {
 		if (family.has(k) || NEUTRAL_HANDLE_KEYS.has(k)) out[k] = handles[k];
 	}
 	return out;
+}
+
+// The internal signature a deadline abort stamps on its Error message
+// (usePaymentFlow.deadlined: "payment request timed out: <label>"). It is a
+// CLIENT signal - it says nothing about the gateway - so it must never reach the
+// customer-facing note. Everything else (genuine SDK / customer-authored strings
+// like "An ad blocker stopped the checkout.") passes through unchanged.
+const INTERNAL_TIMEOUT_NOTE_PREFIX = /^\s*payment request timed out/i;
+
+/**
+ * Sanitize a would-be checkout note before it is stored (X2). The stored note is
+ * the single source the render path (OnboardingView.payDetail) reads, so filtering
+ * an untagged internal string here guarantees it can never be shown. A prefix
+ * filter (not an allowlist) is used deliberately: SDK/customer strings are open-
+ * ended and legitimate, while the one internal leak has a fixed, known prefix.
+ */
+export function sanitizeCheckoutNote(msg) {
+	const s = (msg == null ? "" : String(msg)).trim();
+	if (!s) return "";
+	if (INTERNAL_TIMEOUT_NOTE_PREFIX.test(s)) return "";
+	return s;
 }
 
 function illegal(state, strict, why) {
@@ -801,8 +904,12 @@ function applyContract(state, decoded, opts) {
 		busy: null,
 		transportError: false,
 		// A fresh intent (new attempt or advanced generation) also drops the stale
-		// "the checkout could not open" note from the intent it replaces.
+		// "the checkout could not open" note AND the "a previous sheet may still be
+		// open" veto from the intent it replaces. A same-intent answer (a check while
+		// a timed-out sheet is still open) keeps the veto - only the sheet actually
+		// closing lifts it.
 		checkoutNote: replaceHandles ? "" : state.checkoutNote,
+		checkoutMayBeOpen: replaceHandles ? false : state.checkoutMayBeOpen,
 		attemptId: incomingAttempt || state.attemptId,
 		// A new attempt with no generation of its own resets the counter to unknown
 		// rather than inheriting the replaced intent's.
@@ -860,7 +967,13 @@ function applyContract(state, decoded, opts) {
 			? true
 			: state._backendCanCheck;
 	next.canInitiate =
-		backendCanInitiate && !next.awaitingReconciliation && !isTerminalForPayment(next.value);
+		backendCanInitiate &&
+		!next.awaitingReconciliation &&
+		!isTerminalForPayment(next.value) &&
+		// The B2-1 veto: never offer a new payment while a prior sheet may still be
+		// open and payable. It survives the mandatory reconcile (a check does not
+		// clear it), so the page cannot re-arm initiate under a live gateway sheet.
+		!next.checkoutMayBeOpen;
 	next.canCheck = recomputeCanCheck(next, opts.nowMs);
 
 	return next;

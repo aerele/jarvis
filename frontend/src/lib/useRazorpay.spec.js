@@ -184,3 +184,66 @@ describe("openCheckout", () => {
 		await expect(openCheckout(ORDER_HANDLES)).rejects.toThrow("blocked");
 	});
 });
+
+describe("openCheckout teardown (X1)", () => {
+	it("aborting the signal asks Razorpay to close, which resolves a dismissal", async () => {
+		const calls = [];
+		// A stub whose .close() behaves like the real SDK: it fires ondismiss.
+		window.Razorpay = vi.fn(function (opts) {
+			const entry = { opts, closed: false };
+			calls.push(entry);
+			this.open = () => {};
+			this.close = () => {
+				entry.closed = true;
+				opts.modal.ondismiss();
+			};
+		});
+		const controller = new AbortController();
+		const p = openCheckout(ORDER_HANDLES, "Plan upgrade", { signal: controller.signal });
+		await vi.waitFor(() => expect(calls).toHaveLength(1));
+		controller.abort();
+		expect(calls[0].closed).toBe(true);
+		await expect(p).resolves.toEqual({ status: CHECKOUT_DISMISSED });
+	});
+
+	it("an ALREADY-aborted signal closes the sheet immediately on open (D12)", async () => {
+		// The real, delete-sensitive abort behavior: if the open deadline already
+		// elapsed by the time the sheet opens, the `signal.aborted` branch must fire
+		// onAbort synchronously and ask Razorpay to close - which settles a dismissal.
+		// The old test here asserted only "does not throw" against a no-close stub,
+		// which is ALSO true with the signal wiring deleted entirely (a vacuous pass).
+		// This asserts close is actually invoked, so removing the wiring reddens it.
+		const calls = [];
+		window.Razorpay = vi.fn(function (opts) {
+			const entry = { opts, closed: false };
+			calls.push(entry);
+			this.open = () => {};
+			this.close = () => {
+				entry.closed = true;
+				opts.modal.ondismiss();
+			};
+		});
+		const controller = new AbortController();
+		controller.abort(); // the deadline elapsed before the sheet even opened
+		const p = openCheckout(ORDER_HANDLES, "Plan upgrade", { signal: controller.signal });
+		await vi.waitFor(() => expect(calls).toHaveLength(1));
+		expect(calls[0].closed).toBe(true);
+		await expect(p).resolves.toEqual({ status: CHECKOUT_DISMISSED });
+	});
+
+	it("a build with no close() does not throw on abort and leaves the sheet open", async () => {
+		const calls = stubRazorpay(); // this stub instance has no .close
+		const controller = new AbortController();
+		const p = openCheckout(ORDER_HANDLES, "Plan upgrade", { signal: controller.signal });
+		await vi.waitFor(() => expect(calls).toHaveLength(1));
+		let settled = false;
+		p.then(() => (settled = true));
+		expect(() => controller.abort()).not.toThrow();
+		await Promise.resolve();
+		// A no-close build cannot be torn down, so abort must NOT settle the promise -
+		// the sheet is still live; only a real dismiss resolves it.
+		expect(settled).toBe(false);
+		calls[0].opts.modal.ondismiss();
+		await expect(p).resolves.toEqual({ status: CHECKOUT_DISMISSED });
+	});
+});
