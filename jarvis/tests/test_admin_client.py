@@ -68,9 +68,6 @@ class _FakeSettings:
 		for field in self._FIELDS:
 			setattr(self, field, "")
 
-	def get(self, fieldname, default=None):
-		return getattr(self, fieldname, default)
-
 	def get_password(self, fieldname="password", raise_exception=True):
 		value = getattr(self, fieldname, "") or ""
 		if not value and raise_exception:
@@ -118,6 +115,19 @@ def _require_fake_settings():
 			"test_admin_client fixtures require the module-level frappe.get_single patch; "
 			"refusing to touch the real Jarvis Settings (see jarvis #566)"
 		)
+
+
+def _admin_settings():
+	"""The ONLY sanctioned way for a test in this module to hold the settings doc.
+
+	A bare frappe.get_single here would be correct while the module patch is up and
+	catastrophic if it ever is not, and it reads identically in both cases - so the
+	guard has to sit in front of every reach for the doc, not just the three fixture
+	helpers. Checking first also keeps the failure ordered: a test that grabbed the
+	real Single and then wrote to it would blow up in its own `finally` cleanup,
+	AFTER the write it was supposed to prevent."""
+	_require_fake_settings()
+	return frappe.get_single("Jarvis Settings")
 
 
 def _settings_for_admin(
@@ -801,7 +811,7 @@ class TestMissingConfig(FrappeTestCase):
 		"""api_key + api_secret are required; missing either raises early."""
 		from jarvis.exceptions import AdminAuthError
 
-		settings = frappe.get_single("Jarvis Settings")
+		settings = _admin_settings()
 		settings.db_set("jarvis_admin_url", "https://admin.example.com")
 		settings.db_set("jarvis_admin_api_key", "")
 		settings.db_set("jarvis_admin_api_secret", "")
@@ -814,7 +824,7 @@ class TestMissingConfig(FrappeTestCase):
 	def test_no_secret_raises_auth_error(self):
 		from jarvis.exceptions import AdminAuthError
 
-		settings = frappe.get_single("Jarvis Settings")
+		settings = _admin_settings()
 		settings.db_set("jarvis_admin_url", "https://admin.example.com")
 		settings.db_set("jarvis_admin_api_key", "some-key")
 		settings.db_set("jarvis_admin_api_secret", "")
@@ -1558,7 +1568,7 @@ class TestFixturesCannotDestroySiteCredentials(FrappeTestCase):
 		simply blank."""
 		_settings_for_admin(api_key="fixture-key", api_secret="fixture-secret")
 		_settings_clear_admin()
-		settings = frappe.get_single("Jarvis Settings")
+		settings = _admin_settings()
 		for field in ("jarvis_admin_api_key", "jarvis_admin_api_secret", "jarvis_admin_customer_password"):
 			self.assertEqual(settings.get_password(field, raise_exception=False), "")
 
