@@ -949,6 +949,8 @@ class TestSignupResumeFallback(FrappeTestCase):
 			out = onboarding.start_signup("Resume-Me@example.com ", "Co", "some-plan")
 		self.assertEqual(resume.call_count, 1)
 		self.assertEqual(resume.call_args.args[0], "some-plan")
+		self.assertIsNone(resume.call_args.kwargs.get("provider"))
+		self.assertIsNone(resume.call_args.kwargs.get("billing"))
 		self.assertEqual(out["razorpay_order_id"], "order_R2")
 
 	def test_duplicate_resumes_though_the_stored_login_can_never_match(self):
