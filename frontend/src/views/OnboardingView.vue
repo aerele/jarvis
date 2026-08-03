@@ -1843,13 +1843,14 @@ watch(
 	}
 );
 
-// Prefill the Details step's company so the customer doesn't retype it. Never
-// overwrites a typed value; silent on failure.
-// Email is deliberately not prefilled: it resolved to the logged-in user —
-// admin@example.com on a fresh site — and this step routes billing receipts.
+// Prefill the Details step from what the site already knows (caller's email +
+// default/sole company; options list for several) so the customer doesn't
+// retype it. Backend-sourced because the SPA has no frappe.defaults. Never
+// overwrites a value the user already typed; silent on any failure.
 async function prefillAccount() {
 	try {
 		const d = (await getAccountDefaults()) || {};
+		if (d.email && !state.email.trim()) state.email = d.email;
 		if (d.company && !state.company.trim()) state.company = d.company;
 		if (Array.isArray(d.companies)) state.companies = d.companies;
 	} catch (e) {
