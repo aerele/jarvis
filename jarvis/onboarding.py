@@ -653,6 +653,25 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	return {"status": "connected"}
 
 
+# RFC 2606 / 6761 reserved names. Nothing here can receive mail, so none of it is
+# a billing address: Frappe ships Administrator as admin@example.com and Guest as
+# guest@example.com, and admin_v2 mints synthetic customer logins at @jarvis.invalid.
+_UNDELIVERABLE_DOMAINS = ("example.com", "example.net", "example.org", "localhost")
+_UNDELIVERABLE_TLDS = (".test", ".example", ".invalid", ".localhost")
+
+
+def _is_undeliverable(email: str) -> bool:
+	"""Whether ``email``'s domain is reserved, so mail to it can never arrive.
+
+	Matches subdomains too: mail.example.com is as undeliverable as example.com."""
+	domain = email.rpartition("@")[2].strip().lower()
+	if not domain:
+		return False
+	if domain.endswith(_UNDELIVERABLE_TLDS):
+		return True
+	return any(domain == d or domain.endswith(f".{d}") for d in _UNDELIVERABLE_DOMAINS)
+
+
 @frappe.whitelist()
 def get_account_defaults() -> dict:
 	"""Prefill for the onboarding Account step so the customer doesn't retype what
@@ -661,6 +680,11 @@ def get_account_defaults() -> dict:
 	options for a client datalist when several exist. Silent no-op (blank / empty
 	list) on sites without the Company doctype or read permission.
 
+	A reserved-domain email is dropped rather than sent. On a fresh site the caller
+	is Administrator, i.e. admin@example.com, and the step it fills says receipts go
+	to that address — so prefilling it puts an undeliverable address in the field as
+	a real, submittable value. Blank lets the field's own placeholder show.
+
 	Ports the desk auto-fetch (jarvis_onboarding.js, commit 1507495) to the server
 	because the SPA has no ``frappe.defaults``. System-Manager only (the onboarding
 	route is SM-gated).
@@ -668,6 +692,8 @@ def get_account_defaults() -> dict:
 	require_jarvis_admin()
 	user = frappe.session.user
 	email = (frappe.db.get_value("User", user, "email") or user) if user and user != "Guest" else ""
+	if _is_undeliverable(email):
+		email = ""
 
 	company, companies = "", []
 	try:
