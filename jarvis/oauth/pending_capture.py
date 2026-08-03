@@ -132,17 +132,23 @@ def create_capture(
 	Password field, so it is encrypted at rest and never returned by any read.
 	"""
 	subject_hash = _subject_hash(provider_subject)
-	# Fold same-account recaptures on the STABLE subject (never email/label): a
-	# recapture of the same account refreshes the one row instead of leaking a
-	# second live token. Device-code providers (no subject) never fold.
+	# Fold same-account recaptures on (provider, upstream, STABLE subject) - never
+	# email/label (F4). Scoping the fold to the same provider+upstream makes it
+	# impossible for two DIFFERENT providers that happen to share a subject value to
+	# collide onto one row and clobber a live token. A capture with no stable subject
+	# never folds (subject_hash == "" short-circuits below): a duplicate row is safe;
+	# an overwritten unrevocable token is not.
 	existing = None
 	if subject_hash:
 		name = frappe.db.get_value(
 			DT,
 			{
 				"owner_user": frappe.session.user,
+				"provider": provider,
+				"upstream": upstream,
 				"provider_subject_hash": subject_hash,
 				"consumed_at": ["is", "not set"],
+				"revocation_state": "pending",
 			},
 			"name",
 		)
@@ -151,6 +157,7 @@ def create_capture(
 
 	if existing is not None:
 		existing.encrypted_oauth_blob = oauth_blob
+		existing.provider = provider
 		existing.upstream = upstream
 		existing.openclaw_provider = openclaw_provider
 		existing.account_email = account_email or existing.account_email
@@ -186,8 +193,12 @@ def list_active(user: str | None = None) -> list[dict]:
 	editor to rehydrate on load / Retry so a reload resumes without a second
 	sign-in. Never returns a blob."""
 	user = user or frappe.session.user
+	# ignore_permissions: the DocType grants NO role read (it holds live tokens), so
+	# access is only ever through this owner-scoped, whitelisted path - never a raw
+	# get_all a peer System Manager could aim at another user's row.
 	rows = frappe.get_all(
 		DT,
+		ignore_permissions=True,
 		filters={
 			"owner_user": user,
 			"consumed_at": ["is", "not set"],
@@ -376,6 +387,7 @@ def sweep_expired(batch: int = 200) -> None:
 	Best-effort per row so one bad provider never stalls the batch."""
 	names = frappe.get_all(
 		DT,
+		ignore_permissions=True,
 		filters={
 			"consumed_at": ["is", "not set"],
 			"expires_at": ["<=", now_datetime()],

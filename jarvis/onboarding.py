@@ -406,14 +406,15 @@ def save_llm_pool(
 			merged_accounts = []
 			for a in (sub or {}).get("accounts") or []:
 				a = dict(a)
-				# A freshly-connected account carries an opaque capture_id (never the
-				# raw blob - the token stayed server-side; review P0-04). ADOPT the
-				# durable capture exactly once: consume_capture atomically claims it
-				# and returns the decrypted blob, which lands here and is persisted
-				# ENCRYPTED into subscription_accounts by the save below - all in this
-				# one request transaction, so the blob either moved into the saved
-				# config AND the capture was burned, or neither did.
+				# A freshly-connected SPA account carries an opaque capture_id (the token
+				# stayed server-side; review P0-04). ADOPT the durable capture exactly
+				# once: consume_capture atomically claims it and returns the decrypted
+				# blob, which lands here and is persisted ENCRYPTED into
+				# subscription_accounts by the save below - all in this one request
+				# transaction, so the blob either moved into the saved config AND the
+				# capture was burned, or neither did.
 				cap_id = (a.pop("capture_id", "") or "").strip()
+				ref = a.get("account_ref") or ""
 				if cap_id:
 					try:
 						a["oauth_blob"] = pending_capture.consume_capture(cap_id)
@@ -423,11 +424,11 @@ def save_llm_pool(
 						# the same payload): the first attempt already moved this blob
 						# into the stored config, so fall back to it rather than
 						# hard-failing - the credential was adopted, not lost.
-						ref = a.get("account_ref") or ""
 						if ref and prior_blobs.get(ref):
 							a["oauth_blob"] = prior_blobs[ref]
 				elif not (a.get("oauth_blob") or "").strip():
-					ref = a.get("account_ref") or ""
+					# No fresh capture and no re-entered blob: keep the stored one for a
+					# re-saved account.
 					if ref and prior_blobs.get(ref):
 						a["oauth_blob"] = prior_blobs[ref]
 				merged_accounts.append(a)
@@ -477,7 +478,11 @@ def save_llm_pool(
 		apply_operation = outcome.get("apply_operation")
 		resumable = bool(outcome.get("resumable"))
 		retry_after_seconds = int(outcome.get("retry_after_seconds") or 0)
-		mode = "operation"
+		# An OLD admin (no plan-05 apply-operation) that succeeded WITHOUT a descriptor
+		# is a capability degrade, not a failure: report mode:"legacy" so the SPA falls
+		# back to the bounded fail-closed readiness poll instead of a support dead-end
+		# on a genuinely successful apply (F1).
+		mode = "legacy" if (apply_operation is None and outcome.get("legacy_capability")) else "operation"
 		if apply_operation and consumed_capture_ids:
 			# Audit only (best-effort): tie the adopted captures to the operation.
 			pending_capture.mark_consumed_by_operation(

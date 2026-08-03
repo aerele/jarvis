@@ -151,6 +151,99 @@ class TestPendingCapture(FrappeTestCase):
 		b = _mk(account_ref="SUB_k2", provider_subject="", account_email="", safe_label="Kimi 0002")
 		self.assertNotEqual(a["capture_id"], b["capture_id"])
 
+	def test_two_providers_sharing_a_subject_never_collide(self):
+		# F4: a fold must be scoped to (provider, upstream, subject). Two DIFFERENT
+		# providers that happen to share a subject value must NOT fold onto one row -
+		# that clobbered one provider's live, unrevocable token.
+		g_blob = {"type": "oauth", "provider": "google-gemini-cli", "access": "G-AT", "refresh": "G-RT"}
+		x_blob = {"type": "oauth", "provider": "xai", "access": "X-AT", "refresh": "X-RT"}
+		g = pc.create_capture(
+			provider="Google Gemini",
+			upstream="google",
+			openclaw_provider="google-gemini-cli",
+			oauth_blob=json.dumps(g_blob),
+			account_email="u@example.com",
+			account_ref="SUB_g",
+			safe_label="u@example.com",
+			provider_subject="collide",  # SAME subject value as the xai capture below
+		)
+		x = pc.create_capture(
+			provider="xAI Grok",
+			upstream="xai",
+			openclaw_provider="xai",
+			oauth_blob=json.dumps(x_blob),
+			account_email="u@example.com",
+			account_ref="SUB_x",
+			safe_label="u@example.com",
+			provider_subject="collide",
+		)
+		self.assertNotEqual(g["capture_id"], x["capture_id"], "different providers must not fold")
+		from frappe.utils.password import get_decrypted_password
+
+		gname = frappe.db.get_value(DT, {"capture_id": g["capture_id"]}, "name")
+		# The Google token is intact - NOT overwritten by the xai capture.
+		self.assertEqual(
+			json.loads(get_decrypted_password(DT, gname, "encrypted_oauth_blob"))["access"], "G-AT"
+		)
+
+	def test_fold_is_owner_scoped(self):
+		# The fold filter must include owner_user: a peer's capture with the same
+		# provider/subject must never be folded into (or read by) this user.
+		mine = _mk(provider_subject="owned", account_ref="SUB_mine")
+		name = frappe.db.get_value(DT, {"capture_id": mine["capture_id"]}, "name")
+		frappe.db.set_value(DT, name, "owner_user", "peer@example.com", update_modified=False)
+		again = _mk(provider_subject="owned", account_ref="SUB_mine2")  # same subject, my user
+		self.assertNotEqual(again["capture_id"], mine["capture_id"], "must not fold onto a peer's row")
+
+	def test_consume_takes_a_row_lock(self):
+		# The single most security-critical invariant of the store is consume-ONCE, which
+		# rides a locking read. Pin it so a refactor that drops FOR UPDATE is caught even
+		# though a single-connection test harness cannot stage a real two-connection race.
+		view = _mk()
+		seen = []
+		orig = frappe.db.sql
+
+		def _spy(query, *a, **k):
+			seen.append(query if isinstance(query, str) else str(query))
+			return orig(query, *a, **k)
+
+		with patch.object(frappe.db, "sql", side_effect=_spy):
+			pc.consume_capture(view["capture_id"])
+		self.assertTrue(
+			any("FOR UPDATE" in q.upper() for q in seen),
+			"consume_capture must claim the row with a locking read (FOR UPDATE)",
+		)
+
+	def test_sweep_gives_up_and_erases_after_max_attempts(self):
+		import requests as _rq
+
+		view = _mk(openclaw_provider="google-gemini-cli", provider_subject="give-up", account_ref="SUB_gu")
+		name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
+		frappe.db.set_value(
+			DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
+		)
+		frappe.db.commit()
+		from frappe.utils.password import get_decrypted_password
+
+		with patch("jarvis.oauth.pending_capture.requests.post", side_effect=_rq.RequestException("down")):
+			# One shy of the ceiling: still retryable, ciphertext KEPT for a later try.
+			for _ in range(pc.REVOKE_MAX_ATTEMPTS - 1):
+				pc.sweep_expired()
+			self.assertTrue(
+				get_decrypted_password(DT, name, "encrypted_oauth_blob", raise_exception=False),
+				"ciphertext must survive until the retry ceiling",
+			)
+			# The ceiling sweep gives up: erase the ciphertext so a dead provider cannot
+			# strand a live token here forever.
+			pc.sweep_expired()
+		row = frappe.db.get_value(DT, name, ["revocation_state", "revocation_attempts"], as_dict=True)
+		self.assertEqual(row.revocation_state, "failed")
+		self.assertEqual(int(row.revocation_attempts), pc.REVOKE_MAX_ATTEMPTS)
+		self.assertFalse(
+			get_decrypted_password(DT, name, "encrypted_oauth_blob", raise_exception=False),
+			"ciphertext must be erased once revocation gives up",
+		)
+
 	# ---- expiry sweep: revoke + erase ----
 
 	def test_sweep_revokes_and_erases_expired(self):

@@ -152,13 +152,7 @@
  "name": "Jarvis Pending OAuth Capture",
  "naming_rule": "By fieldname",
  "owner": "Administrator",
- "permissions": [
-  {
-   "role": "System Manager",
-   "read": 1,
-   "delete": 1
-  }
- ],
+ "permissions": [],
  "quick_entry": 0,
  "sort_field": "modified",
  "sort_order": "DESC",

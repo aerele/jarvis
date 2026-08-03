@@ -939,16 +939,17 @@ class TestCompletePoolAccountSignin(_OAuthApiBase):
 			if name:
 				frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
 
-	def test_same_account_recapture_folds(self):
-		# Recapturing the SAME account (same email/subject) refreshes ONE capture
-		# rather than minting a second live token (P1-07).
+	def test_same_account_recapture_folds_on_stable_subject(self):
+		# Recapturing the SAME account folds onto ONE capture only on a GENUINELY
+		# STABLE subject (OpenAI's chatgpt_account_id), never the email (F4/P1-07).
+		access_jwt = _jwt({"https://api.openai.com/auth": {"chatgpt_account_id": "acct-fold-1"}})
 		ids = set()
 		for _ in range(2):
 			nonce = self._seed()
 			with patch(
 				"jarvis.oauth.api._exchange_code",
 				return_value={
-					"access_token": "AT",
+					"access_token": access_jwt,
 					"refresh_token": "RT",
 					"expires_in": 3600,
 					"id_token": "ID.T",
@@ -963,6 +964,32 @@ class TestCompletePoolAccountSignin(_OAuthApiBase):
 		self.assertEqual(len(ids), 1, "same-account recapture must fold onto one capture")
 		name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": ids.pop()}, "name")
 		frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
+
+	def test_no_stable_subject_never_folds(self):
+		# No stable subject (non-OpenAI: extract_account_id returns "") → NEVER fold,
+		# even for the same email. Prevents the cross-provider token clobber (F4).
+		ids = set()
+		for _ in range(2):
+			nonce = self._seed()
+			with patch(
+				"jarvis.oauth.api._exchange_code",
+				return_value={
+					"access_token": "AT-not-a-jwt",
+					"refresh_token": "RT",
+					"expires_in": 3600,
+					"email": "same@b.com",
+				},
+			):
+				out = oauth_api.complete_pool_account_signin(
+					nonce=nonce,
+					redirected_url="?code=ABC&state=test-state",
+				)
+			ids.add(out["data"]["capture_id"])
+		self.assertEqual(len(ids), 2, "no stable subject → two distinct captures, no email fold")
+		for cid in ids:
+			name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": cid}, "name")
+			if name:
+				frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
 
 
 class TestPendingCaptureEndpoints(_OAuthApiBase):

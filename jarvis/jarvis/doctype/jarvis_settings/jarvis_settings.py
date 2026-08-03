@@ -720,7 +720,9 @@ class JarvisSettings(Document):
 			return False
 		return (self.get("last_sync_status") or "").startswith("ok")
 
-	def _enqueue_pool_sync(self, *, converge_teardown: bool = False) -> None:
+	def _enqueue_pool_sync(
+		self, *, converge_teardown: bool = False, idempotency_key: str | None = None
+	) -> None:
 		"""Enqueue the pool-sync admin call for the proxy path.
 
 		Mirrors the existing ``on_update`` enqueue pattern:
@@ -735,6 +737,12 @@ class JarvisSettings(Document):
 		  naturally included when the job eventually executes.
 		- Admin errors are caught and written to ``last_sync_status``; the
 		  save is never aborted on an admin failure.
+
+		``idempotency_key`` (plan-05 D2, F2/F3): when the synchronous
+		descriptor-obtain (``sync_pool_now``) hands the long push/converge back to
+		this worker, it passes the SAME key so the worker's admin call dedupes to the
+		operation already created - it converges + stamps the markers WITHOUT driving
+		a second push.
 		"""
 		self.db_set("last_sync_status", "pending: provisioning container (pool)", update_modified=False)
 		run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
@@ -754,6 +762,7 @@ class JarvisSettings(Document):
 			job_id="jarvis_settings_sync:pool:teardown" if converge_teardown else "jarvis_settings_sync:pool",
 			deduplicate=True,
 			converge_teardown=converge_teardown,
+			idempotency_key=idempotency_key,
 		)
 
 	def _on_update_single_model_legacy(self):
@@ -1343,7 +1352,9 @@ def _post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=None):
 
 
 def _enqueued_sync_via_admin_pool(
-	retry_left: int = ADMIN_SYNC_LOCK_RETRIES, converge_teardown: bool = False
+	retry_left: int = ADMIN_SYNC_LOCK_RETRIES,
+	converge_teardown: bool = False,
+	idempotency_key: str | None = None,
 ) -> None:
 	"""Background-queue wrapper for the proxy (pool) sync path.
 
@@ -1410,6 +1421,9 @@ def _enqueued_sync_via_admin_pool(
 					# Carry the teardown intent down the retry chain: a level that
 					# dropped it would re-arm the pool-mode gate and skip (#550).
 					converge_teardown=converge_teardown,
+					# Carry the operation's key so a lock-loss retry still dedupes to
+					# the operation the synchronous descriptor-obtain created (F2/F3).
+					idempotency_key=idempotency_key,
 				)
 				return
 			_frappe.logger().warning(
@@ -1451,7 +1465,7 @@ def _enqueued_sync_via_admin_pool(
 
 		terminal_written = False
 		try:
-			result = _post_pool_with_retry(spec, api_keys, oauth_blobs) or {}
+			result = _post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=idempotency_key) or {}
 			# CONVERGENCE STATUS, not HTTP success (C5/F2 + round-4 R4-P0-6).
 			# Admin deliberately returns HTTP 200 with status="applying" when the
 			# apply lock was busy, the fleet read timed out, or the applied-version
@@ -1621,42 +1635,49 @@ def _enqueued_sync_via_admin_pool(
 					pass
 
 
-# How long the SYNCHRONOUS pool push waits for the admin-sync lock before handing
-# the wait back to the SPA as a resumable follow. Short on purpose: the desired
-# pool is already committed and the operation exists server-side, so a contended
-# save resumes via the operation rather than blocking the Start-chatting click.
+# How long the descriptor-obtain waits for the admin-sync lock before handing the
+# push to the async worker and resume-following. Short on purpose.
 SYNC_PUSH_LOCK_WAIT_S = 10
+# The hard bound on the synchronous descriptor-obtain admin call - WELL under the
+# deployed gunicorn budget (config: gunicorn -t 180, nginx proxy_read_timeout 240).
+# The click must never own the long push (Fable corrected ruling F2/F3); it obtains
+# the operation descriptor within this bound, then follows the operation. A timeout
+# here is not a lost apply - admin commits desired + operation before the fleet
+# push, so the operation exists and the SPA resumes via the same idempotency key
+# while the async worker converges it.
+SYNC_DESCRIPTOR_TIMEOUT_S = 20
 
 
 def sync_pool_now(idempotency_key: str | None = None) -> dict:
-	"""Synchronous /llm-pool push for the onboarding/settings save (Fable ruling,
-	review P0-02): push the just-committed desired pool to admin, capture the
-	durable apply-operation descriptor admin creates in the SAME transaction as
-	its desired-state write, and hand it back so a Start-chatting click follows
-	ONE operation instead of attributing a global ``last_sync_status`` string to a
-	click it cannot be tied to.
-
-	The local async pool-sync worker (``_enqueue_pool_sync``) is SUPPRESSED for this
-	save (see ``JarvisSettings._on_update_unified_llm``): the local queue was only
-	hiding the operation identity, and admin does its own reconcile asynchronously
-	after committing desired state, so nothing is lost. This does the same admin
-	work inline and stamps the SAME markers via ``_stamp_pool_applied_ok`` /
-	``_converge_via_admin`` (``llm_pool_synced_at`` gates ``is_ready_for_chat`` for a
-	pool tenant) so no downstream read regresses.
+	"""SHORT, tightly-bounded round-trip to OBTAIN the durable apply-operation
+	descriptor for the onboarding/settings save (Fable corrected ruling F2/F3,
+	review P0-02). The Start-chatting click owns the OPERATION, not the PUSH: this
+	does ONE bounded admin call (``SYNC_DESCRIPTOR_TIMEOUT_S``, well under the
+	gunicorn budget) and hands ALL long-running push/converge/stamp work to the
+	async worker (``_enqueue_pool_sync``, which keeps its ``finally`` backstop). The
+	SPA then follows the operation via ``get_llm_apply_operation`` exactly as it
+	would anyway.
 
 	Returns ``{"apply_operation": <§8.4 descriptor|None>, "resumable": bool,
-	"retry_after_seconds": int}``:
+	"retry_after_seconds": int, "legacy_capability": bool}``:
 
-	- descriptor present → the SPA follows it to a terminal state.
-	- ``resumable: True`` (lock contention, or an admin read-timeout / rejection
-	  where the operation was already committed server-side) → the SPA re-calls
-	  ``save_llm_pool`` with the SAME ``idempotency_key``; admin dedupes and returns
-	  the existing operation's descriptor (no new desired version, no re-drive).
+	- descriptor present → the SPA follows it to a terminal state. When it is a
+	  still-converging apply, the worker is enqueued to converge + stamp the markers
+	  (``llm_pool_synced_at`` gates ``is_ready_for_chat`` for a pool tenant); a
+	  confirmed apply is stamped inline (fast, no polling).
+	- ``resumable: True`` (lock contention, an admin read-timeout, or a permanent
+	  reject where the operation was already committed) → the SPA re-calls
+	  ``save_llm_pool`` with the SAME ``idempotency_key``; admin dedupes to the
+	  existing operation (no new desired version, no second push). The worker is
+	  enqueued so the config converges regardless of whether the SPA resumes.
+	- ``legacy_capability: True`` → an OLD admin (no plan-05 apply-operation) returned
+	  success WITHOUT a descriptor; ``save_llm_pool`` degrades to the bounded,
+	  fail-closed readiness path rather than a support dead-end (F1).
 	- ``retry_after_seconds`` on a rate-limit refusal (no operation allocated).
 
-	Bounded timeout: on any transport failure the operation exists (admin commits
-	desired+operation before the fleet apply), so this NEVER returns a silent
-	success and NEVER blocks the click indefinitely.
+	Budget invariant: no path here exceeds the gunicorn timeout, and an exception
+	anywhere after the desired-state commit hands the config to the worker rather
+	than stranding it (F3).
 	"""
 	import frappe as _frappe
 
@@ -1664,96 +1685,139 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 	from jarvis._redis_lock import redis_lock
 	from jarvis.jarvis.pool_serialize import build_pool_payload, validate_models
 
-	with redis_lock(
-		"jarvis_settings_admin_sync",
-		timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
-		blocking_timeout_s=SYNC_PUSH_LOCK_WAIT_S,
-	) as acquired:
-		if not acquired:
-			# A sibling container mutation holds the lock. The desired pool is
-			# committed; admin's reconcile (and the operation) will converge it.
-			# Resume-follow rather than double-push.
-			return {"apply_operation": None, "resumable": True}
+	settings = None
+	outcome: dict = {"apply_operation": None, "resumable": True}
+	# The long push/converge is ALWAYS handed to the async worker OUTSIDE the lock
+	# below - never inline here (that is what blew the gunicorn budget, F2/F3) and
+	# never from INSIDE the lock (the worker takes the same lock; an inline test run
+	# would deadlock on it). `handoff` records whether this outcome needs the worker.
+	handoff = True
+	try:
+		with redis_lock(
+			"jarvis_settings_admin_sync",
+			timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
+			blocking_timeout_s=SYNC_PUSH_LOCK_WAIT_S,
+		) as acquired:
+			settings = _frappe.get_single("Jarvis Settings")
+			if not acquired:
+				# A sibling container mutation holds the lock: hand the push/converge to
+				# the worker (dedupes on the key) and resume-follow rather than blocking.
+				outcome = {"apply_operation": None, "resumable": True}
+			elif validate_models(settings) or not _pool_spec_pushable(settings):
+				# Not a pushable pool after the save (e.g. a single-model config routed
+				# through the creds path). No pool operation exists; nothing to converge.
+				outcome = {"apply_operation": None, "resumable": False, "skipped": True}
+				handoff = False
+			else:
+				spec, api_keys, oauth_blobs = build_pool_payload(settings)
+				try:
+					result = (
+						admin_client.post_update_llm_pool(
+							spec=spec,
+							api_keys=api_keys,
+							oauth_blobs=oauth_blobs,
+							idempotency_key=idempotency_key,
+							timeout_s=SYNC_DESCRIPTOR_TIMEOUT_S,
+						)
+						or {}
+					)
+				except admin_client.AdminRateLimitedError as e:
+					retry = int(e.retry_after_seconds or 0)
+					retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
+					settings.db_set(
+						{
+							"last_sync_at": _frappe.utils.now(),
+							"last_sync_status": f"failed: rate-limited; {retry_str}",
+							**_cleared_subscription_status_fields(),
+						}
+					)
+					_commit_terminal_sync_status()
+					# Enforced BEFORE admin allocates an operation: nothing to resume-follow
+					# or converge - surface the cooldown truthfully.
+					outcome = {"apply_operation": None, "resumable": False, "retry_after_seconds": retry}
+					handoff = False
+				except admin_client.AdminRejectedError as e:
+					# Permanent: admin refused the spec (the operation was created before the
+					# fleet apply and is now marked failed). Terminal status for the settings
+					# strip; stay resumable so the SPA resume-by-key reads the REJECTED
+					# descriptor. No reconcile can fix a permanent rejection, so no handoff.
+					settings.db_set(
+						{
+							"last_sync_at": _frappe.utils.now(),
+							"last_sync_status": f"failed: {_admin_rejection_reason(e)}",
+							**_cleared_subscription_status_fields(),
+						}
+					)
+					_commit_terminal_sync_status()
+					outcome = {"apply_operation": None, "resumable": True}
+					handoff = False
+				except admin_client.AdminUnreachableError:
+					# Timeout/5xx is NOT a lost apply: admin committed desired + the operation
+					# before the fleet call. Resume-follow via the operation; the worker
+					# (handed off below, dedupes on the key) converges + stamps.
+					outcome = {"apply_operation": None, "resumable": True}
+				except (admin_client.AdminAuthError, admin_client.AdminValidationError) as e:
+					# Fail BEFORE any operation is allocated (auth / spec validation): a
+					# terminal, non-resumable error, nothing to follow or converge.
+					settings.db_set(
+						{
+							"last_sync_at": _frappe.utils.now(),
+							"last_sync_status": f"failed: {e}",
+							**_cleared_subscription_status_fields(),
+						}
+					)
+					_commit_terminal_sync_status()
+					outcome = {"apply_operation": None, "resumable": False}
+					handoff = False
+				else:
+					op = result.get("apply_operation")
+					# An OLD admin (pre-plan05) returns success with NO apply_operation ->
+					# degrade to the honest bounded-readiness path, not a support dead-end (F1).
+					legacy = op is None
+					status = result.get("status") or "applied"
+					outcome = {"apply_operation": op, "resumable": False, "legacy_capability": legacy}
+					if status == "blocked":
+						settings.db_set(
+							"last_sync_status",
+							"failed: subscription needs re-authentication (blocked)",
+							update_modified=False,
+						)
+						_commit_terminal_sync_status()
+						handoff = False
+					elif _is_applying_result(result) or status != "applied":
+						# Still converging: DO NOT converge inline (the long work that blew
+						# the budget). The worker (handed off below) polls + stamps; the SPA
+						# follows the descriptor meanwhile.
+						pass  # handoff stays True
+					else:
+						# Confirmed applied within the short bound: stamp inline (a fast db
+						# write, no polling) so is_ready_for_chat's pool marker is prompt.
+						_stamp_pool_applied_ok(settings, result)
+						handoff = False
+	except Exception:
+		# F3 backstop: any unexpected failure AFTER save_llm_pool committed the desired
+		# state must not strand the config with nothing converging it.
+		_frappe.log_error(
+			title="jarvis_settings: sync_pool_now unexpected failure (handed to async worker)",
+			message=_frappe.get_traceback(),
+		)
+		outcome = {"apply_operation": None, "resumable": True}
+		handoff = True
 
-		settings = _frappe.get_single("Jarvis Settings")
-		if validate_models(settings) or not _pool_spec_pushable(settings):
-			# Not a pushable pool after the save (e.g. a single-model config the
-			# caller routes through the creds path). No pool operation exists.
-			return {"apply_operation": None, "resumable": False, "skipped": True}
-
-		spec, api_keys, oauth_blobs = build_pool_payload(settings)
+	# Hand the long push/converge to the async worker OUTSIDE the lock (released by the
+	# `with` exit above), so it can take the lock and - in tests, where enqueue runs
+	# inline - not deadlock on a lock this function still held.
+	if handoff:
 		try:
-			result = _post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=idempotency_key) or {}
-		except admin_client.AdminRateLimitedError as e:
-			retry = int(e.retry_after_seconds or 0)
-			retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
-			settings.db_set(
-				{
-					"last_sync_at": _frappe.utils.now(),
-					"last_sync_status": f"failed: rate-limited; {retry_str}",
-					**_cleared_subscription_status_fields(),
-				}
+			(settings or _frappe.get_single("Jarvis Settings"))._enqueue_pool_sync(
+				idempotency_key=idempotency_key
 			)
-			_commit_terminal_sync_status()
-			# The rate limit is enforced BEFORE admin allocates an operation, so
-			# there is nothing to resume-follow: surface the cooldown truthfully.
-			return {"apply_operation": None, "resumable": False, "retry_after_seconds": retry}
-		except admin_client.AdminRejectedError as e:
-			# Permanent: admin validated the spec and refused it (the operation was
-			# created before the fleet apply and is now marked failed). Write a
-			# TERMINAL failed status for the settings status strip, and stay resumable
-			# so the SPA resume-by-key reads the operation's REJECTED descriptor and
-			# routes the customer back to fix their input.
-			settings.db_set(
-				{
-					"last_sync_at": _frappe.utils.now(),
-					"last_sync_status": f"failed: {_admin_rejection_reason(e)}",
-					**_cleared_subscription_status_fields(),
-				}
+		except Exception:
+			_frappe.log_error(
+				title="jarvis_settings: sync_pool_now worker hand-off failed",
+				message=_frappe.get_traceback(),
 			)
-			_commit_terminal_sync_status()
-			return {"apply_operation": None, "resumable": True}
-		except admin_client.AdminUnreachableError:
-			# A transient timeout/5xx is NOT a lost apply: admin committed desired +
-			# the operation before the fleet call, so record pending for the reconcile
-			# and let the SPA resume-by-key to read the operation's live descriptor
-			# (still-applying / applied-late) rather than the bench guessing.
-			settings.db_set("last_sync_status", _PENDING_APPLYING_STATUS, update_modified=False)
-			_frappe.db.commit()
-			return {"apply_operation": None, "resumable": True}
-		except (admin_client.AdminAuthError, admin_client.AdminValidationError) as e:
-			# These fail BEFORE any operation is allocated (auth / spec validation),
-			# so there is nothing to follow: a terminal, non-resumable error.
-			settings.db_set(
-				{
-					"last_sync_at": _frappe.utils.now(),
-					"last_sync_status": f"failed: {e}",
-					**_cleared_subscription_status_fields(),
-				}
-			)
-			_commit_terminal_sync_status()
-			return {"apply_operation": None, "resumable": False}
-
-		op = result.get("apply_operation")
-		status = result.get("status") or "applied"
-		if status == "blocked":
-			settings.db_set(
-				"last_sync_status",
-				"failed: subscription needs re-authentication (blocked)",
-				update_modified=False,
-			)
-			_commit_terminal_sync_status()
-			return {"apply_operation": op, "resumable": False}
-		if _is_applying_result(result) or status != "applied":
-			# Still converging: try a bounded converge (stamps the markers on Ready),
-			# else record pending for the */5 reconcile. Either way the descriptor
-			# carries the live state the SPA follows.
-			if not _converge_via_admin(settings, is_pool=True):
-				settings.db_set("last_sync_status", _PENDING_APPLYING_STATUS, update_modified=False)
-				_commit_terminal_sync_status()
-			return {"apply_operation": op, "resumable": False}
-		_stamp_pool_applied_ok(settings, result)
-		return {"apply_operation": op, "resumable": False}
+	return outcome
 
 
 def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> None:

@@ -1089,7 +1089,12 @@ def reset_workspace_state() -> dict:
 
 
 def post_update_llm_pool(
-	*, spec: dict, api_keys: dict, oauth_blobs: dict, idempotency_key: str | None = None
+	*,
+	spec: dict,
+	api_keys: dict,
+	oauth_blobs: dict,
+	idempotency_key: str | None = None,
+	timeout_s: int | None = None,
 ) -> dict:
 	"""POST a PoolSpec + separated secrets to admin → fleet-agent → openclaw.
 
@@ -1101,6 +1106,11 @@ def post_update_llm_pool(
 	    (no new desired version, refunds the rate token, does not re-drive the
 	    push), so a double-click / lost-response resume converges on one operation.
 	    Omitted (None) preserves the pre-plan05 behaviour for internal callers.
+	``timeout_s`` (plan-05 D2, F2/F3): a SHORT bound for the synchronous
+	    descriptor-obtain from ``sync_pool_now`` - well under the gunicorn budget.
+	    A timeout here is not a lost apply: admin commits desired + operation before
+	    the fleet push, so the operation exists and the caller resumes via the same
+	    idempotency key. None keeps the long DEFAULT_TIMEOUT_S for the async worker.
 
 	The admin endpoint merges the secrets with the spec before forwarding to
 	fleet-agent. Implemented in T3 (jarvis_admin); this stub is the bench-side
@@ -1126,7 +1136,8 @@ def post_update_llm_pool(
 	}
 	if idempotency_key:
 		body["idempotency_key"] = idempotency_key
-	return _post(path=_m("api.tenant.update_llm_pool"), body=body)
+	kw = {"timeout_s": timeout_s} if timeout_s is not None else {}
+	return _post(path=_m("api.tenant.update_llm_pool"), body=body, **kw)
 
 
 def get_llm_apply_operation(operation_id: str, *, timeout_s: int = 8) -> dict:

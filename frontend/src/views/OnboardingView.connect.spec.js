@@ -87,8 +87,18 @@ import OnboardingView from "./OnboardingView.vue";
 const OP_STORE_KEY = "jarvis.llm_apply.operation_id";
 const IDEM_KEY = "jarvis.llm_apply.idempotency_key";
 
-const pending = { operation_id: "op1", state: "pending", code: "LLM_APPLY_PENDING", retry_after_seconds: 0 };
-const readyStatus = { operation_id: "op1", state: "ready", code: "LLM_READY", retry_after_seconds: 0 };
+const pending = {
+	operation_id: "op1",
+	state: "pending",
+	code: "LLM_APPLY_PENDING",
+	retry_after_seconds: 0,
+};
+const readyStatus = {
+	operation_id: "op1",
+	state: "ready",
+	code: "LLM_READY",
+	retry_after_seconds: 0,
+};
 const rejectedStatus = {
 	operation_id: "op1",
 	state: "failed",
@@ -180,7 +190,10 @@ describe("§10.4 one Start = one save = one operation, ready navigates once", ()
 describe("§10.4 resume, resumable, terminal semantics", () => {
 	it("a resumable:true result re-calls save with the SAME key, then follows the descriptor", async () => {
 		saveMock
-			.mockResolvedValueOnce({ ok: true, result: opResult({ apply_operation: null, resumable: true }) })
+			.mockResolvedValueOnce({
+				ok: true,
+				result: opResult({ apply_operation: null, resumable: true }),
+			})
 			.mockResolvedValueOnce({ ok: true, result: opResult() });
 		api.getLlmApplyOperation.mockResolvedValue(readyStatus);
 		vi.useFakeTimers();
@@ -254,7 +267,12 @@ describe("§10.4 resume, resumable, terminal semantics", () => {
 		// branch guard in resolveAndFollow.
 		saveMock.mockResolvedValue({
 			ok: true,
-			result: opResult({ apply_operation: null, resumable: false, mode: "operation", retry_after_seconds: 30 }),
+			result: opResult({
+				apply_operation: null,
+				resumable: false,
+				mode: "operation",
+				retry_after_seconds: 30,
+			}),
 		});
 		vi.useFakeTimers();
 		const w = await mountConnect();
@@ -308,6 +326,29 @@ describe("§10.4 mode:legacy fallback (no durable operation)", () => {
 		expect(forgetReadySpy).toHaveBeenCalledTimes(1);
 		expect(routerReplace).toHaveBeenCalledTimes(1);
 		expect(routerReplace).toHaveBeenCalledWith({ name: "Chat" });
+	});
+
+	it("a support dead-end drops the idempotency key so the next Start is fresh (F1/F8)", async () => {
+		// Descriptor-less, non-resumable, no cooldown → a support dead-end. It must drop
+		// the persisted idempotency key so a later Retry/Start mints a fresh one instead
+		// of re-submitting a poisoned/conflicting key forever.
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({
+				apply_operation: null,
+				resumable: false,
+				mode: "operation",
+				retry_after_seconds: 0,
+			}),
+		});
+		const w = await mountConnect();
+
+		await w.vm.saveConnect();
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("support");
+		expect(sessionStorage.getItem(IDEM_KEY)).toBe(null); // key dropped on the dead-end
+		expect(routerReplace).not.toHaveBeenCalled();
 	});
 
 	it("a never-ready legacy poll is BOUNDED and ends fail-closed on Connect (no nav)", async () => {

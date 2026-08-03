@@ -57,7 +57,12 @@ let serverPool;
 let captures;
 
 function setPool(models) {
-	serverPool = { models: clone(models), preset: "", routing_mode: "failover", proxy_active: true };
+	serverPool = {
+		models: clone(models),
+		preset: "",
+		routing_mode: "failover",
+		proxy_active: true,
+	};
 }
 
 beforeEach(() => {
@@ -107,7 +112,10 @@ async function mountOnboarding() {
 }
 
 // Turn the default onboarding subscription row into a filled API-key row.
-async function makeApiKeyRow(w, { provider = "openai", model = "gpt-4o", apiKey = "sk-live" } = {}) {
+async function makeApiKeyRow(
+	w,
+	{ provider = "openai", model = "gpt-4o", apiKey = "sk-live" } = {}
+) {
 	const r = w.vm.rows[0];
 	w.vm.setCredType(r, "api_key");
 	r.provider = provider;
@@ -181,6 +189,17 @@ describe("§10.3 API-key probe gate (P0-09)", () => {
 		expect(w.vm.startBlockedReason).toBe("");
 	});
 
+	it("a local provider pointed at a REMOTELY-reachable base URL still needs a probe (F7)", async () => {
+		const w = await mountOnboarding();
+		const r = await makeApiKeyRow(w, { provider: "ollama", model: "llama3", apiKey: "sk-x" });
+		r.baseUrl = "https://api.openai.com/v1"; // a public endpoint behind a local provider id
+		await flushPromises();
+		// The local-provider carve-out must NOT short-circuit on the id alone: a
+		// remotely-reachable endpoint has to prove a passing probe like any remote key.
+		expect(w.vm.canStart).toBe(false);
+		expect(w.vm.startBlockedReason).toMatch(/test/i);
+	});
+
 	it("a failed test preserves every entered field (the key is never cleared)", async () => {
 		const w = await mountOnboarding();
 		const r = await makeApiKeyRow(w);
@@ -225,8 +244,18 @@ describe("§10.2 capture rehydrate + wire", () => {
 		const w = await mountOnboarding();
 		const r = w.vm.rows[0]; // subscription by default
 		if (!Array.isArray(r.accounts)) r.accounts = [];
-		r.accounts.push({ upstream: "openai", account_ref: "FRESH", label: "a@x", capture_id: "cap9" });
-		r.accounts.push({ upstream: "openai", account_ref: "STORED", label: "b@x", capture_id: "" });
+		r.accounts.push({
+			upstream: "openai",
+			account_ref: "FRESH",
+			label: "a@x",
+			capture_id: "cap9",
+		});
+		r.accounts.push({
+			upstream: "openai",
+			account_ref: "STORED",
+			label: "b@x",
+			capture_id: "",
+		});
 		await flushPromises();
 
 		const models = w.vm.buildSaveModels(w.vm.rows);
@@ -266,7 +295,12 @@ describe("§10.2 capture rehydrate + wire", () => {
 		const w = await mountOnboarding();
 		const r = w.vm.rows[0];
 		if (!Array.isArray(r.accounts)) r.accounts = [];
-		r.accounts.push({ upstream: "openai", account_ref: "SUB_a", label: "a@x", capture_id: "capA" });
+		r.accounts.push({
+			upstream: "openai",
+			account_ref: "SUB_a",
+			label: "a@x",
+			capture_id: "capA",
+		});
 		await flushPromises();
 
 		const before = api.getLlmSyncStatus.mock.calls.length;
@@ -274,7 +308,11 @@ describe("§10.2 capture rehydrate + wire", () => {
 		await idle();
 
 		expect(res).toMatchObject({ ok: true });
-		expect(res.result).toMatchObject({ idempotency_key: "K", resumable: false, mode: "operation" });
+		expect(res.result).toMatchObject({
+			idempotency_key: "K",
+			resumable: false,
+			mode: "operation",
+		});
 		expect(res.result.apply_operation.operation_id).toBe("op1");
 		// The editor is NOT the observer in footerless mode: it does not poll sync status.
 		expect(api.getLlmSyncStatus.mock.calls.length).toBe(before);

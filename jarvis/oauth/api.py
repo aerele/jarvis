@@ -673,9 +673,12 @@ def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 	# must match ^[A-Za-z0-9_-]{1,64}$; "SUB_" + 16 hex chars = 20 chars.
 	account_ref = "SUB_" + secrets.token_hex(8)
 	blob = result["blob"]
-	# Stable subject for same-account folding (never email/label - review P1-07):
-	# the openclaw accountId claim if present, else the email.
-	subject = (blob.get("accountId") or "").strip() or email
+	# Stable subject for same-account folding (review P1-07 / F4): ONLY a genuinely
+	# stable provider account id (openclaw's accountId claim, populated for OpenAI).
+	# NEVER the email - an email-keyed fold collides two DIFFERENT provider accounts
+	# and silently overwrites one's live, now-unrevocable token. Empty subject ->
+	# create_capture never folds (a duplicate row is safe; a clobbered token is not).
+	subject = (blob.get("accountId") or "").strip()
 
 	# Persist the blob ENCRYPTED before replying, then clear the nonce (single-use,
 	# like complete_paste_signin). No push, no save_llm_creds, no Settings write -

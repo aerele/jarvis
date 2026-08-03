@@ -766,7 +766,11 @@
 										<Banner
 											v-if="state.connectBlockReason"
 											class="mt-3"
-											:type="state.connectPhase === 'rejected' ? 'error' : 'warning'"
+											:type="
+												state.connectPhase === 'rejected'
+													? 'error'
+													: 'warning'
+											"
 											:message="state.connectBlockReason"
 										/>
 									</div>
@@ -1864,6 +1868,11 @@ function enterSupport() {
 	state.connectPhase = "support";
 	state.connectMessage =
 		"We couldn't finish setting up your AI connection. Please try again in a moment.";
+	// A support dead-end is terminal for THIS attempt (F1/F8): drop the idempotency
+	// key so the next Start mints a fresh one. Otherwise a poisoned key (e.g. a 409
+	// IdempotencyKeyConflict, or an old-admin descriptor-less response) would make
+	// every subsequent Retry re-submit the same conflicting key and dead-end again.
+	forgetIdem();
 }
 
 // Follow a descriptor (or a bare op id on resume) to its terminal state. Supersession
@@ -1969,7 +1978,8 @@ function enterSaveRefusal(retryAfterSeconds) {
 	state.finishing = true;
 	if (retryAfterSeconds > 0) {
 		state.connectPhase = "retry";
-		state.connectMessage = "Too many changes in a short time. Please wait a moment, then retry.";
+		state.connectMessage =
+			"Too many changes in a short time. Please wait a moment, then retry.";
 		state.retryAfter = retryAfterSeconds;
 		startRetryCountdown();
 	} else {
