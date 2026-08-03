@@ -19,7 +19,7 @@ their published names - no duplicates:
 
 import frappe
 
-from jarvis import admin_client, release_notice
+from jarvis import admin_client, onboarding_contract, release_notice
 from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_admin
@@ -542,7 +542,13 @@ def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
 	account; non-admin staff shouldn't be able to upgrade the plan.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.start_upgrade, target_plan, provider=provider)
+	# plan-09 WS8: a token-bearing answer is attested against the bench's OWN
+	# configured pay origin so BillingPage can top-level-navigate to the
+	# admin-hosted checkout. Behaviour-neutral on a non-token (raw / settled)
+	# answer - see onboarding_contract.augment_pay_page.
+	return onboarding_contract.augment_pay_page(
+		_surface(admin_client.start_upgrade, target_plan, provider=provider)
+	)
 
 
 @frappe.whitelist()
@@ -576,11 +582,13 @@ def resume_plan() -> dict:
 def reauthorize_autopay() -> dict:
 	"""Start re-arming auto-renewal; the page then opens a mandate Checkout.
 
-	No chat-gate bust: this only creates a Razorpay object, it changes no
+	No chat-gate bust: this only creates a mandate intent, it changes no
 	entitlement. confirm_payment is what flips autorenew back on.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.reauthorize_autopay)
+	# plan-09 WS8: attest a token answer so BillingPage navigates to the
+	# admin-hosted mandate checkout (behaviour-neutral otherwise).
+	return onboarding_contract.augment_pay_page(_surface(admin_client.reauthorize_autopay))
 
 
 @frappe.whitelist()
@@ -592,20 +600,25 @@ def preview_downgrade(target_plan: str) -> dict:
 
 @frappe.whitelist()
 def start_downgrade(target_plan: str) -> dict:
-	"""Schedule a downgrade (next cycle). Monthly autopay returns a
-	subscription id for a ₹0 mandate Checkout; Annual just schedules.
+	"""Schedule a downgrade (next cycle). Monthly autopay returns a mandate
+	pay-page token for a ₹0 mandate checkout; Annual just schedules.
 
 	Chat-gate bust: a downgrade never changes entitlement until the boundary,
 	so no bust is needed - the container keeps serving the current plan."""
 	require_jarvis_admin()
-	return _surface(admin_client.start_downgrade, target_plan)
+	# plan-09 WS8: a Monthly downgrade returns a mandate token to navigate to;
+	# an Annual downgrade just schedules (no token) and passes through untouched.
+	return onboarding_contract.augment_pay_page(_surface(admin_client.start_downgrade, target_plan))
 
 
 @frappe.whitelist()
 def cancel_scheduled_downgrade() -> dict:
-	"""Revoke a scheduled downgrade (SM-only)."""
+	"""Revoke a scheduled downgrade (SM-only).
+
+	plan-09 WS8: Monthly re-arms the current plan's mandate, so this can carry a
+	pay-page token; augment_pay_page attests it (behaviour-neutral otherwise)."""
 	require_jarvis_admin()
-	return _surface(admin_client.cancel_scheduled_downgrade)
+	return onboarding_contract.augment_pay_page(_surface(admin_client.cancel_scheduled_downgrade))
 
 
 def _bust_chat_gate() -> None:

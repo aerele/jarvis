@@ -161,8 +161,8 @@
 			</div>
 		</div>
 
-		<!-- Confirm step. The customer sees the exact amount HERE, before any
-		     payment sheet exists.
+		<!-- Confirm step. The customer sees the exact amount HERE, before they
+		     leave for the admin-hosted pay page.
 
 		     Explicit binding rather than v-model: EVERY close path (Cancel,
 		     Escape, backdrop) has to run closePending so an in-flight preview
@@ -197,10 +197,11 @@
 			</template>
 		</Dialog>
 
-		<!-- Page-blocking wait. Covers the whole surface while the sheet is open
-		     and while verification is in flight, so nothing behind it can be
-		     clicked into an inconsistent state. `phase` is cleared in a finally,
-		     so no path can leave the page stuck here. -->
+		<!-- The copy MOMENT (WS8). Covers the whole surface for the instant
+		     between a payable answer and the top-level navigation to the
+		     admin-hosted pay page, so nothing behind it can be clicked while the
+		     browser is leaving. On a bfcache return it is cleared in onPageShow,
+		     so a restored page can never be left stuck here. -->
 		<div
 			v-if="phase"
 			class="fixed inset-0 z-50 grid place-items-center bg-surface-white/85 backdrop-blur-sm"
@@ -215,13 +216,21 @@
  * The in-SPA replacement for the /app/jarvis-account desk billing page.
  *
  * The backend was never the blocker: preview_*, start_*, cancel_*, resume and
- * reauthorize were all already whitelisted for the desk page. The only thing
- * that lived exclusively in Desk was Razorpay Checkout, which is now
- * @/lib/useRazorpay. This page owns the copy and the choreography; the pay-then
- * -apply half is @/lib/billingCheckout.
+ * reauthorize were all already whitelisted for the desk page.
+ *
+ * plan-09 WS8 (the admin-hosted checkout cutover): this page opens NO gateway
+ * SDK on its own origin. A payable action (renew / upgrade / re-arm autopay / a
+ * Monthly downgrade or its revocation) answers with a pay-page TOKEN plus the
+ * bench's OWN attested origin (account.py augment_pay_page), and the customer is
+ * TOP-LEVEL NAVIGATED to `{origin}/jarvis-checkout#t=<token>` - the exact
+ * mechanism onboarding uses (usePaymentFlow.navigateToPay). There is NO FALLBACK:
+ * a token with no attested origin, or a pre-cutover admin's raw handles with no
+ * token, fails the action CLOSED with honest copy - never an SDK on this origin.
+ * The admin-hosted page + the gateway webhook are authoritative; on return this
+ * page just re-reads the account.
  */
-import { ref, reactive, computed, onMounted } from "vue";
-import { Badge, Breadcrumbs, Button, Dialog, ErrorMessage, toast } from "frappe-ui";
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from "vue";
+import { Badge, Breadcrumbs, Button, Dialog, ErrorMessage } from "frappe-ui";
 import * as api from "@/api";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
@@ -229,19 +238,13 @@ import PlanCard from "./PlanCard.vue";
 import BillingNotice from "./BillingNotice.vue";
 import { useJarvisTheme } from "@/theme";
 import { errMessage as errMsg } from "@/lib/errors";
-import { openCheckout } from "@/lib/useRazorpay";
-import { openCashfreeCheckout } from "@/lib/useCashfree";
-import {
-	payAndApply,
-	accountSnapshot,
-	unwrapData,
-	PAY_APPLIED,
-	PAY_DISMISSED,
-	PAY_PENDING,
-	PAY_UNCONFIRMED,
-	CHECKOUT_CASHFREE_ORDER,
-	UnsupportedCheckoutError,
-} from "@/lib/billingCheckout";
+// plan-09 WS8: the admin-hosted checkout cutover reuses onboarding's WS7 helpers
+// verbatim - the same code-reading (effectiveCode), the same copy table (CODES /
+// copyFor), and the same URL builder (payPageUrl). Nothing gateway-specific is
+// forked here.
+import { effectiveCode } from "@/onboarding/paymentCodec";
+import { CODES, copyFor } from "@/onboarding/paymentCodes";
+import { payPageUrl, STATES as PAY_STATES } from "@/onboarding/paymentMachine";
 import {
 	inr,
 	statusLabel,
@@ -261,15 +264,28 @@ const actionErr = ref("");
 const notice = ref("");
 // Which button is spinning, keyed so only the pressed card shows a loader.
 const busy = ref("");
-// "" | "sheet" | "verifying" | "applying" - drives the blocking overlay.
+// "" | "redirect" - drives the blocking overlay. The only wait this page owns
+// now is the copy MOMENT before the browser leaves for the admin-hosted pay page
+// (WS8); the payment itself happens there, not here.
 const phase = ref("");
 
 const PHASE_LABELS = {
-	sheet: "Waiting for your payment…",
-	verifying: "Confirming your payment…",
-	applying: "Updating your plan…",
+	// Reused verbatim from the payment-code table so onboarding and billing show
+	// the same sentence in the instant before the top-level navigation fires.
+	redirect: copyFor(CODES.PAYMENT_PAGE_REDIRECT).headline,
 };
 const phaseLabel = computed(() => PHASE_LABELS[phase.value] || "Working…");
+
+// admin_client._do_post already unwraps the {ok, data} envelope, so a billing
+// response is normally a flat dict and this is a no-op; kept as the same
+// defensive peel the six call sites used before WS8, so a re-wrapped response
+// from the admin plane cannot silently produce an empty answer.
+function unwrapData(res) {
+	if (res && typeof res === "object" && res.data && typeof res.data === "object") {
+		return res.data;
+	}
+	return res || {};
+}
 
 const currentPlan = computed(() => {
 	const p = account.value.plan;
@@ -340,7 +356,23 @@ async function loadAccount() {
 		loading.value = false;
 	}
 }
-onMounted(loadAccount);
+// Returning from the admin-hosted pay page (WS8). A fresh navigation re-runs
+// onMounted and re-reads below; a bfcache back-button restores the DOM WITHOUT
+// re-mounting, which would strand the frozen "Taking you to the secure payment
+// page…" overlay and show stale plan state. On a persisted restore, clear the
+// overlay and re-read server truth (the pay page + webhook are authoritative).
+function onPageShow(e) {
+	if (e && e.persisted) {
+		phase.value = "";
+		busy.value = "";
+		loadAccount();
+	}
+}
+onMounted(() => {
+	loadAccount();
+	window.addEventListener("pageshow", onPageShow);
+});
+onBeforeUnmount(() => window.removeEventListener("pageshow", onPageShow));
 
 // ---- the confirm step -------------------------------------------------------
 // One dialog serves every flow. `run` is the function to call on confirm, so
@@ -388,7 +420,6 @@ async function doUpgrade(plan) {
 			confirmLabel: `Pay ${inr(d.prorated_inr)}`,
 		}),
 		start: () => api.startUpgrade(plan.name),
-		description: "Plan upgrade",
 	});
 }
 
@@ -409,7 +440,6 @@ async function doDowngrade(plan) {
 			confirmLabel: "Schedule switch",
 		}),
 		start: () => api.startDowngrade(plan.name),
-		description: "Plan change",
 	});
 }
 
@@ -427,7 +457,6 @@ async function doRenew() {
 			runPayment({
 				key: "renew",
 				start: () => api.renewPlan(),
-				description: "Subscription renewal",
 			}),
 	});
 }
@@ -437,7 +466,7 @@ async function doReauthorize() {
 		title: "Set up auto-renewal",
 		amount: "",
 		// Mandate-only checkout. Saying "nothing is charged" is load-bearing: the
-		// sheet still shows a payment form and looks like it will take money.
+		// pay page still shows a payment form and looks like it will take money.
 		message:
 			"You will confirm a payment method. Nothing is charged now - your current period is already paid for.",
 		confirmLabel: "Continue",
@@ -445,7 +474,6 @@ async function doReauthorize() {
 			runPayment({
 				key: "reauth",
 				start: () => api.reauthorizeAutopay(),
-				description: "Auto-renewal setup",
 			}),
 	});
 }
@@ -474,23 +502,18 @@ async function doKeepCurrentPlan() {
 	busy.value = "keep";
 	actionErr.value = "";
 	try {
-		const handles = unwrapData(await api.cancelScheduledDowngrade());
+		const data = unwrapData(await api.cancelScheduledDowngrade());
 		// Monthly: revoking the switch also dropped the cheaper mandate, so the
-		// current plan's mandate has to be re-armed in the same step. Annual
-		// returns nothing to pay and falls through to a plain reload.
+		// current plan's mandate has to be re-armed - the response carries a
+		// pay-page token and we navigate to the admin-hosted mandate checkout.
+		// Annual returns no token and falls through to a plain reload.
 		//
-		// This call ALREADY COMMITTED server-side before any sheet opens: the
-		// scheduled switch is cleared and, on Monthly, the mandate is gone. So a
-		// dismissal here cannot be treated as "nothing happened". Without this the
-		// page kept showing "Switching to X on <date>" and offering this same
-		// button, while the account had actually lost both the schedule and its
-		// autopay, and a second click failed on a schedule that no longer existed.
-		await settleWithCheckout(handles, "Keep current plan", {
-			alreadyCommitted:
-				"Your plan switch is cancelled, so you stay on your current plan. Automatic renewal is " +
-				"not set up yet, because the payment step was not completed. Set up auto-renewal below " +
-				"to keep your plan renewing.",
-		});
+		// The schedule was ALREADY cleared server-side by this call. If the customer
+		// navigates to re-arm and abandons it, the honest state is what loadAccount
+		// shows on return: the switch is gone and, on Monthly, the reauthorize
+		// banner (can_reauthorize) offers auto-renewal again. There is no dismissal
+		// to guess at any more - the pay page owns the outcome.
+		await settleWithRedirect(data);
 	} catch (e) {
 		actionErr.value = errMsg(e);
 	} finally {
@@ -511,7 +534,7 @@ function openConfirm(opts) {
 }
 
 /** Price the change first, then let the customer confirm that exact number. */
-async function priceThenConfirm({ key, preview, title, describe, start, description }) {
+async function priceThenConfirm({ key, preview, title, describe, start }) {
 	busy.value = key;
 	actionErr.value = "";
 	notice.value = "";
@@ -530,7 +553,7 @@ async function priceThenConfirm({ key, preview, title, describe, start, descript
 			amount: d.amount,
 			message: d.message,
 			confirmLabel: d.confirmLabel,
-			run: () => runPayment({ key, start, description }),
+			run: () => runPayment({ key, start }),
 		});
 	} catch (e) {
 		closePending();
@@ -541,14 +564,14 @@ async function priceThenConfirm({ key, preview, title, describe, start, descript
 	}
 }
 
-/** start_* then Checkout then verify then wait for the plan to move. */
-async function runPayment({ key, start, description }) {
+/** start_* then route the answer to the admin-hosted pay page (or fail closed). */
+async function runPayment({ key, start }) {
 	busy.value = key;
 	actionErr.value = "";
 	notice.value = "";
 	try {
-		const handles = unwrapData(await start());
-		await settleWithCheckout(handles, description);
+		const data = unwrapData(await start());
+		await settleWithRedirect(data);
 	} catch (e) {
 		actionErr.value = errMsg(e);
 	} finally {
@@ -557,90 +580,57 @@ async function runPayment({ key, start, description }) {
 }
 
 /**
- * Hand `handles` to Checkout and reconcile the outcome.
- * Every exit clears `phase`, which is what keeps the overlay from stranding
- * the page when the sheet closes by any route.
+ * Route a billing action's response (WS8). This page opens NO gateway SDK; it
+ * reads the answer with onboarding's own `effectiveCode` and either:
+ *
+ *   - PAYMENT_PAGE_REDIRECT: a live pay-page token. Require the bench's OWN
+ *     attested origin, then TOP-LEVEL NAVIGATE to `{origin}/jarvis-checkout#t=…`
+ *     (payPageUrl + window.location.assign) - the exact mechanism
+ *     usePaymentFlow.navigateToPay uses. NO FALLBACK: a token this site cannot
+ *     navigate with fails CLOSED with the honest BENCH_PAY_ORIGIN_UNCONFIGURED
+ *     copy, never an SDK.
+ *   - CLIENT_UPGRADE_REQUIRED: a pre-cutover admin's raw provider handles with no
+ *     token. Fail CLOSED with honest copy - the bench opens no sheet for those.
+ *   - anything else: nothing to pay. The server already settled it (an Annual
+ *     downgrade just schedules), so re-read and show what actually happened.
  */
-async function settleWithCheckout(handles, description, { alreadyCommitted = "" } = {}) {
-	const before = accountSnapshot(account.value);
-	let out;
-	try {
-		out = await payAndApply({
-			handles,
-			description,
-			before,
-			// Which sheet to open is decided by payAndApply from the handles, not
-			// guessed here. The bench never learns a tenant's gateway up front, so
-			// the discriminator only arrives in this response.
-			openCheckout: (h, desc, kind) =>
-				kind === CHECKOUT_CASHFREE_ORDER ? openCashfreeCheckout(h) : openCheckout(h, desc),
-			finishPayment: api.finishPayment,
-			getAccount: api.getAccount,
-			onPhase: (p) => {
-				phase.value = p;
-			},
+async function settleWithRedirect(data) {
+	const d = data || {};
+	const code = effectiveCode({ code: d.code, data: d });
+
+	if (code === CODES.PAYMENT_PAGE_REDIRECT) {
+		// Build the URL from a minimal machine-shaped state so the SAME predicate
+		// onboarding uses (canNavigateToPay, inside payPageUrl) gates it: a live
+		// token, the bench's OWN configured origin, AND admin's attestation that
+		// the two agree. Any missing piece returns "" and we fail closed below.
+		const url = payPageUrl({
+			value: PAY_STATES.UNKNOWN,
+			payPageToken: d.pay_page_token,
+			payOrigin: d.pay_origin,
+			payOriginAttested: d.pay_origin_attested === true,
 		});
-	} catch (e) {
-		// A gateway object we cannot render. Its message is customer-facing copy
-		// and names a way forward, which is the point: the old behaviour reported
-		// success and quietly took no money.
-		if (e instanceof UnsupportedCheckoutError) {
-			actionErr.value = e.message;
+		if (!url) {
+			const copy = copyFor(CODES.BENCH_PAY_ORIGIN_UNCONFIGURED);
+			actionErr.value = `${copy.headline} ${copy.body}`;
 			await loadAccount();
 			return;
 		}
-		throw e;
-	} finally {
-		phase.value = "";
+		// The copy moment (the same sentence onboarding flashes), then leave
+		// top-level in the same tab. bfcache-return re-reads via onPageShow.
+		phase.value = "redirect";
+		window.location.assign(url);
+		return;
 	}
 
-	if (out.status === PAY_DISMISSED) {
-		if (alreadyCommitted) {
-			// The server-side part of this flow ALREADY landed before the sheet
-			// opened, so "look exactly as you left it" would be a lie: the page
-			// would still offer an action that is now done, and a second click
-			// would fail on state that no longer exists. Re-read and say what
-			// actually happened.
-			notice.value = alreadyCommitted;
-			await loadAccount();
-			return;
-		}
-		// Nothing was committed, so explicitly nothing: no toast, no error, no
-		// reload. The customer closed the sheet and the page must look exactly as
-		// they left it.
-		return;
-	}
-	if (out.status === PAY_APPLIED) {
-		account.value = out.account || account.value;
-		// Success is a toast, never an inline green block (design.md anti-pattern 16).
-		toast.success("Your plan is updated.");
-		notice.value = out.verified
-			? ""
-			: "Payment received and your plan is updated. Our confirmation step did not respond, but the change has landed.";
-		return;
-	}
-	if (out.status === PAY_PENDING) {
-		// Money moved but the plan had not flipped before we stopped waiting.
-		// Distinct from a dismissal and distinct from a failure: say what is
-		// true and do not pretend it failed.
-		notice.value =
-			"Your payment was received. Your plan should update within a minute - refresh to check, or contact support if it does not.";
+	if (code === CODES.CLIENT_UPGRADE_REQUIRED) {
+		const copy = copyFor(CODES.CLIENT_UPGRADE_REQUIRED);
+		actionErr.value = `${copy.headline} ${copy.body}`;
 		await loadAccount();
 		return;
 	}
-	if (out.status === PAY_UNCONFIRMED) {
-		// Cashfree only. Its sheet settles the same way whether the customer paid,
-		// closed it, or hit a card error, and our server-side confirm did not come
-		// back either, so we genuinely do not know whether money moved. Saying
-		// "payment received" here would be a claim about the customer's money that
-		// we cannot evidence, and saying "cancelled" could be flatly false.
-		notice.value =
-			"We could not confirm whether your payment went through. Nothing has changed on your plan yet. " +
-			"Check your bank or card statement before trying again, and contact support if you were charged.";
-		await loadAccount();
-		return;
-	}
-	// Nothing to pay: the server settled it (an annual switch just schedules).
+
+	// Nothing to pay: the server settled it (an annual switch just schedules, or
+	// the change already applied). Re-read and let the page reflect the new state.
 	await loadAccount();
 }
 </script>
