@@ -264,7 +264,7 @@
 						</div>
 					</div>
 
-					<div v-else class="jvp-msgs">
+					<div v-else class="jvp-msgs" @click="onTranscriptClick">
 						<template v-for="m in shownMessages" :key="m.name">
 							<div v-if="m.role === 'user'" class="jvp-row jvp-row--user">
 								<div class="jvp-m-user">{{ m.content }}</div>
@@ -620,6 +620,14 @@ function onResizeKey(e) {
 	e.preventDefault();
 	emit("resize", resizeFrom({ width: l.width, height: l.height }, l.side, d[0], d[1]));
 	emit("resize-commit");
+}
+
+// Delegated click for the in-message "open in full chat" chips that
+// panel_markdown swaps in for content this panel can't draw (diagrams, charts,
+// record cards). The chip lives inside a v-html bubble, so it cannot bind a Vue
+// handler directly.
+function onTranscriptClick(e) {
+	if (e.target?.closest?.(".jvp-view-chip")) emit("open-full");
 }
 
 const panelEl = ref(null);
@@ -1717,6 +1725,68 @@ defineExpose({ load, startNewChat, convId });
 	line-height: 1.5;
 	color: var(--jv-ink);
 	overflow-wrap: anywhere;
+}
+
+/* "Open in full chat" chip: stands in for content this panel can't draw
+   (diagram / chart / record cards). Injected inside a v-html bubble, so it is
+   reached with :deep(). */
+.jvp-m-bot :deep(.jvp-view-chip) {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	margin: 4px 0;
+	padding: 9px 11px;
+	border: 1px solid var(--jv-rule-2);
+	border-radius: 11px;
+	background: var(--jv-surface);
+	color: var(--jv-ink);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+.jvp-m-bot :deep(.jvp-view-chip:hover) {
+	border-color: var(--jv-accent);
+	background: var(--jv-chip-3);
+}
+.jvp-m-bot :deep(.jvp-view-chip:focus-visible) {
+	outline: 2px solid var(--jv-accent);
+	outline-offset: 1px;
+}
+.jvp-m-bot :deep(.jvp-view-chip-ic) {
+	width: 26px;
+	height: 26px;
+	flex: 0 0 auto;
+	padding: 5px;
+	border-radius: 8px;
+	background: var(--jv-chip-3);
+	color: var(--jv-accent);
+	box-sizing: border-box;
+}
+.jvp-m-bot :deep(.jvp-view-chip-tx) {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	line-height: 1.3;
+}
+.jvp-m-bot :deep(.jvp-view-chip-t) {
+	font-size: 13.5px;
+	font-weight: 600;
+}
+.jvp-m-bot :deep(.jvp-view-chip-s) {
+	font-size: 12px;
+	color: var(--jv-ink-2);
+}
+.jvp-m-bot :deep(.jvp-view-chip-go) {
+	width: 15px;
+	height: 15px;
+	flex: 0 0 auto;
+	color: var(--jv-ink-3);
+}
+.jvp-m-bot :deep(.jvp-view-chip:hover .jvp-view-chip-go) {
+	color: var(--jv-accent);
 }
 
 /* ---- rendered markdown inside an assistant bubble ----
