@@ -85,14 +85,7 @@ export const TIMESPANS = [
 	"next year",
 ];
 
-const NUMERIC_FIELDTYPES = new Set([
-	"Int",
-	"Float",
-	"Currency",
-	"Percent",
-	"Duration",
-	"Rating",
-]);
+const NUMERIC_FIELDTYPES = new Set(["Int", "Float", "Currency", "Percent", "Duration", "Rating"]);
 
 /** "last 7 days" → "Last 7 days". The WIRE value is never touched. */
 export function timespanLabel(token) {
@@ -101,10 +94,7 @@ export function timespanLabel(token) {
 }
 
 export function operatorLabel(operator, fieldtype) {
-	if (
-		(fieldtype === "Date" || fieldtype === "Datetime") &&
-		TEMPORAL_OPERATOR_LABELS[operator]
-	) {
+	if ((fieldtype === "Date" || fieldtype === "Datetime") && TEMPORAL_OPERATOR_LABELS[operator]) {
 		return TEMPORAL_OPERATOR_LABELS[operator];
 	}
 	return OPERATOR_LABELS[operator] || operator;
@@ -284,7 +274,16 @@ export function controlFor(entry, operator) {
 	const fieldtype = entry.fieldtype;
 	if (operator === "is") return "is";
 	if (operator === "Timespan") return "timespan";
-	if (operator === "Between") return fieldtype === "Datetime" ? "between-datetime" : "between-date";
+	if (operator === "Between") {
+		if (fieldtype === "Datetime") return "between-datetime";
+		if (fieldtype === "Date") return "between-date";
+		// P0-03: the server never offers Between on a non-temporal field (its
+		// effective-Data operator set removes it), so a clause that still carries
+		// Between on one can only be a hand-edited URL or a stale link. Reconcile
+		// drops it; this is the belt — NEVER render a date range over a text/number
+		// column, fall through to the field's own control instead.
+		return "text";
+	}
 	if (operator === "in" || operator === "not in") {
 		if (fieldtype === "Link") return "multi-link";
 		if (fieldtype === "Select" && selectOptions(entry)) return "multi-select";
@@ -396,7 +395,12 @@ export function isShapeComplete(clause) {
 		case "not in":
 			return Array.isArray(value) && value.some((v) => !isBlank(v));
 		case "Between":
-			return Array.isArray(value) && value.length === 2 && !isBlank(value[0]) && !isBlank(value[1]);
+			return (
+				Array.isArray(value) &&
+				value.length === 2 &&
+				!isBlank(value[0]) &&
+				!isBlank(value[1])
+			);
 		case "Timespan":
 			return TIMESPANS.includes(String(value || "").trim());
 		default:
@@ -471,14 +475,28 @@ export function serializeClauses(viewKey, clauses, index) {
 	});
 }
 
-function boundValue(value, limits) {
-	if (Array.isArray(value)) {
-		return value
-			.slice(0, limits.max_in_values)
-			.map((v) => String(v == null ? "" : v).slice(0, limits.max_value_chars));
-	}
+/** Normalize a URL value to its clause shape WITHOUT truncating (P1-02). */
+function shapeValue(value) {
+	if (Array.isArray(value)) return value.map((v) => String(v == null ? "" : v));
 	if (value === null || value === undefined) return "";
-	return String(value).slice(0, limits.max_value_chars);
+	return String(value);
+}
+
+/**
+ * Whether a URL value is over a §9 bound (P1-02). Three distinct cases — an
+ * oversize scalar, an oversize member of a list, or an over-count list — all
+ * mean the same thing to the reader: the clause was mangled in the URL and must
+ * be REJECTED, never silently reshaped into a different valid query. The old
+ * `boundValue` sliced arrays and strings and reported nothing, so "match this
+ * exact value" quietly became "match this prefix".
+ */
+function exceedsBounds(value, limits) {
+	if (Array.isArray(value)) {
+		if (value.length > limits.max_in_values) return true;
+		return value.some((v) => String(v == null ? "" : v).length > limits.max_value_chars);
+	}
+	if (value === null || value === undefined) return false;
+	return String(value).length > limits.max_value_chars;
 }
 
 /** True when a payload is too long to put in a URL that will survive the trip. */
@@ -497,7 +515,7 @@ export function isUrlPayloadTooLarge(param) {
  * looks like an answer to a question it never asked.
  */
 export function unreadableClauses() {
-	return { unreadable: true, viewKey: "", clauses: [], skipped: 0 };
+	return { unreadable: true, viewKey: "", clauses: [], skipped: 0, bounded: 0 };
 }
 
 /**
@@ -527,13 +545,28 @@ export function parseClauseParam(raw, viewKey, schema) {
 	const limits = limitsOf(schema);
 	const clauses = [];
 	let skipped = Math.max(0, data.c.length - limits.max_clauses);
+	// Over-bound values are a DISTINCT outcome from a structurally broken row:
+	// the clause was well-formed but too large to carry, and it is rejected, not
+	// truncated (P1-02).
+	let bounded = 0;
+	// UX2: the (doctype, fieldname) of the rows we set aside, so the notice can
+	// name the affected fields (resolved to labels via the catalog when it is
+	// present). Only the identifiable rows land here — a row too broken to carry a
+	// fieldname stays a bare count.
+	const skippedFields = [];
+	const boundedFields = [];
 	for (const row of data.c.slice(0, limits.max_clauses)) {
 		if (!Array.isArray(row) || row.length < 3) {
 			skipped += 1;
 			continue;
 		}
 		const [doctype, fieldname, operator, value] = row;
-		if (typeof doctype !== "string" || typeof fieldname !== "string" || !doctype || !fieldname) {
+		if (
+			typeof doctype !== "string" ||
+			typeof fieldname !== "string" ||
+			!doctype ||
+			!fieldname
+		) {
 			skipped += 1;
 			continue;
 		}
@@ -542,18 +575,29 @@ export function parseClauseParam(raw, viewKey, schema) {
 		// only produce a filter that silently never applies.
 		if (typeof operator !== "string" || !OPERATORS.includes(operator)) {
 			skipped += 1;
+			skippedFields.push({ doctype, fieldname });
 			continue;
 		}
-		clauses.push(
-			makeClause({
-				doctype,
-				fieldname,
-				operator,
-				value: boundValue(value === undefined ? emptyValueFor(operator) : value, limits),
-			})
-		);
+		const raw = value === undefined ? emptyValueFor(operator) : value;
+		// Reject an oversize scalar, an oversize member, or an over-count list —
+		// never silently reshape "match this exact value" into "match this prefix"
+		// or drop the last member of an `in` (P1-02).
+		if (exceedsBounds(raw, limits)) {
+			bounded += 1;
+			boundedFields.push({ doctype, fieldname });
+			continue;
+		}
+		clauses.push(makeClause({ doctype, fieldname, operator, value: shapeValue(raw) }));
 	}
-	return { unreadable: false, viewKey: data.k || viewKey || "", clauses, skipped };
+	return {
+		unreadable: false,
+		viewKey: data.k || viewKey || "",
+		clauses,
+		skipped,
+		bounded,
+		skippedFields,
+		boundedFields,
+	};
 }
 
 /**
@@ -575,24 +619,95 @@ export function reconcileClauses(clauses, index) {
 	return { kept, dropped };
 }
 
-export function droppedNotice(dropped) {
+/**
+ * "Created On", "Created On and Status", "Created On, Status and 2 more" (UX2).
+ * A friendly, bounded field-name list for a notice.
+ */
+export function nameList(labels) {
+	const names = (labels || []).filter(Boolean);
+	if (!names.length) return "";
+	if (names.length === 1) return names[0];
+	if (names.length === 2) return `${names[0]} and ${names[1]}`;
+	return `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
+}
+
+/**
+ * Resolve field identities to their catalog LABELS via the index (UX2). Falls
+ * back to nothing when a field is absent from the catalog — a raw fieldname is not
+ * a label and naming it would be worse than a count. So the notices name a field
+ * only when the schema can tell us its human label.
+ */
+export function labelsFor(items, index) {
+	const out = [];
+	for (const it of items || []) {
+		const entry = index ? entryFor(index, it) : null;
+		if (entry && entry.label) out.push(entry.label);
+	}
+	return out;
+}
+
+export function droppedNotice(dropped, index) {
 	const n = (dropped || []).length;
 	if (!n) return "";
-	return `${n} filter${n === 1 ? "" : "s"} from this link ${
-		n === 1 ? "is" : "are"
-	} no longer available on this list and ${n === 1 ? "was" : "were"} removed.`;
+	// A dropped clause is dropped BECAUSE its field is absent from the catalog, so
+	// there is rarely a label to name — the count phrasing is the honest one.
+	const names = nameList(labelsFor(dropped, index));
+	const verb = n === 1 ? "is" : "are";
+	const past = n === 1 ? "was" : "were";
+	if (names) return `${names} ${verb} no longer available on this list and ${past} removed.`;
+	return `${n} filter${
+		n === 1 ? "" : "s"
+	} from this link ${verb} no longer available on this list and ${past} removed.`;
 }
 
 /** A payload that arrived but could not be read at all. Never silent. */
 export const UNREADABLE_NOTICE =
 	"The filters in this link couldn't be read, so this list is unfiltered.";
 
-/** Rows inside a readable payload that were not clauses. */
-export function skippedNotice(n) {
+/**
+ * The view is rolled back to legacy transport (M1.4): a shared link's filters are
+ * NOT applied and there is nothing to retry. Honest and distinct from the
+ * transient "couldn't be loaded" copy.
+ */
+export const ROLLED_BACK_NOTICE =
+	"Filters are turned off for this list, so this link's filters weren't applied.";
+
+/** Rows inside a readable payload that were not clauses. `labels` names them (UX2). */
+export function skippedNotice(n, labels) {
 	if (!n) return "";
-	return `${n} filter${n === 1 ? "" : "s"} in this link ${
-		n === 1 ? "was" : "were"
-	} not valid and ${n === 1 ? "was" : "were"} ignored.`;
+	const names = nameList(labels);
+	const was = n === 1 ? "was" : "were";
+	if (names) {
+		const verb = countOf(labels) === 1 ? "wasn't" : "weren't";
+		return `The ${names} filter${
+			countOf(labels) === 1 ? "" : "s"
+		} in this link ${verb} valid and ${was} ignored.`;
+	}
+	return `${n} filter${n === 1 ? "" : "s"} in this link ${was} not valid and ${was} ignored.`;
+}
+
+/**
+ * Clauses in a readable payload whose value was over a size/count bound (P1-02).
+ * Distinct from `skippedNotice`: those rows were malformed, these were well-formed
+ * but too large to carry, and were rejected rather than truncated into a
+ * different question. `labels` names the affected fields (UX2).
+ */
+export function boundedNotice(n, labels) {
+	if (!n) return "";
+	const names = nameList(labels);
+	const was = n === 1 ? "was" : "were";
+	if (names) {
+		return `The ${names} filter${
+			countOf(labels) === 1 ? "" : "s"
+		} in this link ${was} too large to apply and ${was} left off.`;
+	}
+	return `${n} filter${
+		n === 1 ? "" : "s"
+	} in this link ${was} too large to apply and ${was} left off.`;
+}
+
+function countOf(labels) {
+	return (labels || []).filter(Boolean).length;
 }
 
 // The filter set is real and applied, but too big to put in a URL. Two cases,
@@ -606,6 +721,11 @@ export const URL_TOO_LARGE_UNSHARED_NOTICE =
 // ── server error codes → what the panel does about it ───────────────────────
 export const ERR_UNKNOWN_VIEW = "list_filter_unknown_view";
 export const ERR_VIEW_NOT_FILTERABLE = "list_filter_view_not_filterable";
+//: The view IS migrated but an operator rolled it back via the runtime kill
+//: switch. Distinct from ERR_VIEW_NOT_FILTERABLE ("never migrated") so the panel
+//: can say "turned off" with NO retry — retrying cannot succeed until the flag is
+//: flipped back — instead of the transient "couldn't be loaded / Try again" copy.
+export const ERR_VIEW_ROLLED_BACK = "list_filter_view_rolled_back";
 export const ERR_BAD_PAYLOAD = "list_filter_bad_payload";
 export const ERR_UNKNOWN_FIELD = "list_filter_unknown_field";
 export const ERR_INVALID_OPERATOR = "list_filter_invalid_operator";
@@ -625,7 +745,8 @@ export const ERR_QUERY_TOO_EXPENSIVE = "list_filter_query_too_expensive";
  */
 export const FILTER_ERROR_KIND = {
 	[ERR_UNKNOWN_VIEW]: "schema",
-	[ERR_VIEW_NOT_FILTERABLE]: "schema",
+	[ERR_VIEW_NOT_FILTERABLE]: "disabled",
+	[ERR_VIEW_ROLLED_BACK]: "disabled",
 	[ERR_UNKNOWN_FIELD]: "schema",
 	[ERR_INVALID_OPERATOR]: "schema",
 	[ERR_BAD_PAYLOAD]: "row",
@@ -643,7 +764,8 @@ export const FILTER_ERROR_KIND = {
 
 const FALLBACK_COPY = {
 	[ERR_UNKNOWN_VIEW]: "Filters aren't available for this list.",
-	[ERR_VIEW_NOT_FILTERABLE]: "This list doesn't support field filters yet.",
+	[ERR_VIEW_NOT_FILTERABLE]: "Filters aren't available for this list yet.",
+	[ERR_VIEW_ROLLED_BACK]: "Filters are turned off for this list.",
 	[ERR_UNKNOWN_FIELD]: "A filter field is no longer available on this list.",
 	[ERR_INVALID_OPERATOR]: "That condition isn't valid for the field it's on.",
 	[ERR_BAD_PAYLOAD]: "Those filters couldn't be read.",

@@ -91,7 +91,12 @@ describe("P1-1 tab switches must not destroy the filter set", () => {
 		await api.setFilter("enabled", "1");
 		await api.setClauses([
 			...api.filterClauses.value,
-			makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "invoice" }),
+			makeClause({
+				doctype: ROOT,
+				fieldname: "description",
+				operator: "like",
+				value: "invoice",
+			}),
 		]);
 		await flushPromises();
 		expect(api.filterClauses.value).toHaveLength(2);
@@ -118,7 +123,12 @@ describe("P1-1 tab switches must not destroy the filter set", () => {
 		const api = host({ ...opts, route, router });
 		await flushPromises();
 		await api.setClauses([
-			makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "invoice" }),
+			makeClause({
+				doctype: ROOT,
+				fieldname: "description",
+				operator: "like",
+				value: "invoice",
+			}),
 		]);
 		await flushPromises();
 		const fetches = opts.fetchFn.mock.calls.length;
@@ -137,7 +147,9 @@ describe("P1-1 tab switches must not destroy the filter set", () => {
 		const root = resolve(__dirname, "../..");
 		const read = (p) => readFileSync(resolve(root, p), "utf8");
 		const macros = read("src/pages/macros/MacrosList.vue");
-		expect(macros).toMatch(/name: v === "runs" \? "MacroRuns" : "MacrosList",\s*\n\s*query: \{ \.\.\.route\.query \}/);
+		expect(macros).toMatch(
+			/name: v === "runs" \? "MacroRuns" : "MacrosList",\s*\n\s*query: \{ \.\.\.route\.query \}/
+		);
 
 		// Every hash navigation on the Skills shell — the tab strip plus the three
 		// legacy-hash redirects — resolves without the current query unless it
@@ -177,7 +189,14 @@ describe("P1-2 an unreadable link is never a silently unfiltered list", () => {
 	it("says so when a shared link arrives truncated", async () => {
 		const param = serializeClauses(
 			"skills",
-			[makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "invoice" })],
+			[
+				makeClause({
+					doctype: ROOT,
+					fieldname: "description",
+					operator: "like",
+					value: "invoice",
+				}),
+			],
 			INDEX
 		);
 		const opts = base({ storageKey: "a2" });
@@ -197,14 +216,24 @@ describe("P1-2 an unreadable link is never a silently unfiltered list", () => {
 		await flushPromises();
 
 		const small = [
-			makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "invoice" }),
+			makeClause({
+				doctype: ROOT,
+				fieldname: "description",
+				operator: "like",
+				value: "invoice",
+			}),
 		];
 		await api.setClauses(small);
 		const shareable = route.query[URL_PARAM];
 		expect(shareable).toBeTruthy();
 
 		const huge = Array.from({ length: 9 }, () =>
-			makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "x".repeat(1000) })
+			makeClause({
+				doctype: ROOT,
+				fieldname: "description",
+				operator: "like",
+				value: "x".repeat(1000),
+			})
 		);
 		await api.setClauses(huge);
 		await flushPromises();
@@ -225,7 +254,12 @@ describe("P1-2 an unreadable link is never a silently unfiltered list", () => {
 		await flushPromises();
 
 		const huge = Array.from({ length: 9 }, () =>
-			makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "x".repeat(1000) })
+			makeClause({
+				doctype: ROOT,
+				fieldname: "description",
+				operator: "like",
+				value: "x".repeat(1000),
+			})
 		);
 		await api.setClauses(huge);
 		await flushPromises();
@@ -252,7 +286,11 @@ describe("P1-2 an unreadable link is never a silently unfiltered list", () => {
 		const api = host({ ...opts, route, router });
 		await flushPromises();
 		expect(opts.fetchFn.mock.calls[0][0].filters_v2).toHaveLength(1);
-		expect(api.filterNotice.value).toMatch(/1 filter in this link was not valid/);
+		// UX2: the skipped row is a `description` clause with a junk operator, so the
+		// catalog resolves its label and the notice NAMES the affected field.
+		expect(api.filterNotice.value).toMatch(
+			/The Description filter in this link wasn't valid and was ignored/
+		);
 	});
 });
 
@@ -333,7 +371,14 @@ describe("P2-3 typing is one request, not one per keystroke", () => {
 
 		for (const v of ["1", "12", "123", "1234", "12345"]) {
 			api.setClauses(
-				[makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: v })],
+				[
+					makeClause({
+						doctype: ROOT,
+						fieldname: "description",
+						operator: "like",
+						value: v,
+					}),
+				],
 				{ immediate: false }
 			);
 		}
@@ -345,7 +390,9 @@ describe("P2-3 typing is one request, not one per keystroke", () => {
 		expect(router.replace.mock.calls.length).toBe(writes + 1);
 
 		// a discrete pick does not wait
-		api.setClauses([makeClause({ doctype: ROOT, fieldname: "enabled", operator: "=", value: "1" })]);
+		api.setClauses([
+			makeClause({ doctype: ROOT, fieldname: "enabled", operator: "=", value: "1" }),
+		]);
 		expect(opts.fetchFn.mock.calls.length).toBe(before + 2);
 		vi.useRealTimers();
 	});
@@ -357,7 +404,14 @@ describe("P2-4 a URL-seeded mount keeps the page's own quick filters", () => {
 	it("adopts before it reflects", async () => {
 		const param = serializeClauses(
 			"skills",
-			[makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "q" })],
+			[
+				makeClause({
+					doctype: ROOT,
+					fieldname: "description",
+					operator: "like",
+					value: "q",
+				}),
+			],
 			INDEX
 		);
 		const opts = base({
@@ -382,7 +436,12 @@ describe("C2 a sibling tab's payload is left alone", () => {
 		const api = host({ ...opts, route, router });
 		await flushPromises();
 		await api.setClauses([
-			makeClause({ doctype: ROOT, fieldname: "description", operator: "like", value: "keep" }),
+			makeClause({
+				doctype: ROOT,
+				fieldname: "description",
+				operator: "like",
+				value: "keep",
+			}),
 		]);
 		await flushPromises();
 		const fetches = opts.fetchFn.mock.calls.length;
@@ -405,7 +464,9 @@ describe("C3 a schema-kind rejection loop terminates", () => {
 			if (calls > 20) throw new Error("RUNAWAY");
 			if (calls === 1) return { rows: [], total: 0 };
 			const e = new Error("rejected");
-			e.messages = [{ ok: false, error: { code: "list_filter_unknown_field", message: "gone" } }];
+			e.messages = [
+				{ ok: false, error: { code: "list_filter_unknown_field", message: "gone" } },
+			];
 			throw e;
 		});
 		const opts = base({ storageKey: "c3", fetchFn });
@@ -413,7 +474,9 @@ describe("C3 a schema-kind rejection loop terminates", () => {
 		const api = host({ ...opts, route, router });
 		await flushPromises();
 		await api.requestSchema();
-		await api.setClauses([makeClause({ doctype: ROOT, fieldname: "ghost", operator: "=", value: "1" })]);
+		await api.setClauses([
+			makeClause({ doctype: ROOT, fieldname: "ghost", operator: "=", value: "1" }),
+		]);
 		await flushPromises();
 		await flushPromises();
 

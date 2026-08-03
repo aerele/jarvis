@@ -58,12 +58,15 @@ describe("only the migrated surfaces drive FilterGroup", () => {
 		expect(source).not.toContain("view-key");
 	});
 
-	it.each(Object.entries(MIGRATED))("%s drives FilterGroup and drops filterDefs", (key, path) => {
-		const source = read(path);
-		expect(source).toContain(':filter-state="filterState"');
-		expect(source).not.toContain(":filter-defs=");
-		expect(source).toContain(`viewKey: "${key}"`);
-	});
+	it.each(Object.entries(MIGRATED))(
+		"%s drives FilterGroup and drops filterDefs",
+		(key, path) => {
+			const source = read(path);
+			expect(source).toContain(':filter-state="filterState"');
+			expect(source).not.toContain(":filter-defs=");
+			expect(source).toContain(`viewKey: "${key}"`);
+		}
+	);
 
 	// A panel-only narrowing to zero rows must not read as "you have nothing" —
 	// on a knowledge base that reads as data loss (design.md §3.8). Both pages
@@ -180,7 +183,11 @@ describe("the filter notice strip is readable without opening the panel", () => 
 				rows: [],
 				filterState: state({
 					notice: "1 filter from this link is no longer available.",
-					error: { code: "list_filter_invalid_value", kind: "row", message: "Bad value." },
+					error: {
+						code: "list_filter_invalid_value",
+						kind: "row",
+						message: "Bad value.",
+					},
 				}),
 			},
 		});
@@ -199,7 +206,11 @@ describe("the filter notice strip is readable without opening the panel", () => 
 				columns: [],
 				rows: [],
 				filterState: state({
-					error: { code: "list_filter_schema_unavailable", kind: "transient", message: "Down." },
+					error: {
+						code: "list_filter_schema_unavailable",
+						kind: "transient",
+						message: "Down.",
+					},
 				}),
 			},
 		});
@@ -211,7 +222,11 @@ describe("the filter notice strip is readable without opening the panel", () => 
 				columns: [],
 				rows: [],
 				filterState: state({
-					error: { code: "list_filter_invalid_value", kind: "row", message: "Bad value." },
+					error: {
+						code: "list_filter_invalid_value",
+						kind: "row",
+						message: "Bad value.",
+					},
 				}),
 			},
 		});

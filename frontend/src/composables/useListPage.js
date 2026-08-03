@@ -32,10 +32,15 @@ import {
 	reconcileClauses,
 	droppedNotice,
 	skippedNotice,
+	boundedNotice,
+	labelsFor,
 	UNREADABLE_NOTICE,
+	ROLLED_BACK_NOTICE,
 	URL_TOO_LARGE_NOTICE,
 	URL_TOO_LARGE_UNSHARED_NOTICE,
 	filterErrorInfo,
+	ERR_VIEW_NOT_FILTERABLE,
+	ERR_VIEW_ROLLED_BACK,
 } from "@/components/list/filterModel";
 
 function errMsg(e) {
@@ -58,6 +63,7 @@ export function useListPage({
 	route = null, // vue-router route/router; omitted ⇒ no URL state
 	router = null,
 	fetchSchema = null, // injectable for tests; defaults to the real endpoint
+	fetchCapabilities = null, // injectable for tests; defaults to the capability probe
 	// How long a typed value waits before it becomes a request (P2-3). Applies to
 	// the whole clause model, so it covers every control family regardless of what
 	// props the individual input happens to support.
@@ -85,8 +91,70 @@ export function useListPage({
 	const schemaError = ref(null);
 	const filterError = ref(null); // {code, kind, message} from the last request
 	const filterNotice = ref(""); // "N filters ... were removed."
+	// P1-05: the server rolled this view back to legacy transport (its schema
+	// endpoint declined with view_not_filterable). We stop SENDING filters_v2 —
+	// the request goes the legacy way — but the Filter action stays visible; it
+	// simply reports that the catalog is unavailable. The compile path server-side
+	// still honours any v2 a stale tab sends, so nothing is silently dropped.
+	const filtersV2Disabled = ref(false);
 	const index = computed(() => schemaIndex(schema.value));
 	const schemaFetcher = fetchSchema || ((key) => api.getListFilterSchema(key));
+	// The runtime capability probe (P1-05 / M1.3): a single cheap call that returns
+	// {view_key: enabled} for every migrated view, so we can learn this view's v2
+	// availability BEFORE any filters_v2 emission — the quick-filter and URL paths
+	// can otherwise emit before the (lazy) schema fetch would have declined. Defends
+	// against a missing api export in unit tests by resolving null (⇒ assume ON).
+	const capabilityFetcher =
+		fetchCapabilities ||
+		(() =>
+			api.getListFilterCapabilities
+				? api.getListFilterCapabilities()
+				: Promise.resolve(null));
+	let capabilityKnown = false;
+	let capabilityInflight = null;
+
+	/**
+	 * Mark this view rolled back to legacy transport. Idempotent. Sets a DISTINCT
+	 * schema state so the panel shows honest "turned off" copy with no retry (UX1),
+	 * never the transient "couldn't be loaded / Try again" it cannot escape.
+	 */
+	function markRolledBack() {
+		filtersV2Disabled.value = true;
+		schemaState.value = "disabled";
+		schemaError.value = {
+			code: ERR_VIEW_ROLLED_BACK,
+			kind: "disabled",
+			message:
+				"Field filters have been switched off for this list. The list still works without them.",
+		};
+	}
+
+	/**
+	 * Learn this view's v2 capability once (cached). Resolves to whether v2 is
+	 * enabled. Failure or an unreadable map ⇒ assume ON: the default IS on and the
+	 * server's compile path honours a submitted clause anyway, so a probe blip must
+	 * never silently strip a working filter.
+	 */
+	function ensureCapability() {
+		if (!viewKey) return Promise.resolve(true);
+		if (capabilityKnown) return Promise.resolve(!filtersV2Disabled.value);
+		if (capabilityInflight) return capabilityInflight;
+		capabilityInflight = Promise.resolve()
+			.then(() => capabilityFetcher(viewKey))
+			.then((map) => {
+				if (map && typeof map === "object" && map[viewKey] === false) markRolledBack();
+				capabilityKnown = true;
+				return !filtersV2Disabled.value;
+			})
+			.catch(() => {
+				capabilityKnown = true;
+				return true;
+			})
+			.finally(() => {
+				capabilityInflight = null;
+			});
+		return capabilityInflight;
+	}
 
 	// monotonic request id - drops stale responses (same guard as ChatView.loadConversation)
 	let reqId = 0;
@@ -97,7 +165,9 @@ export function useListPage({
 
 	// The URL is parsed BEFORE the first fetch so a shared link's clauses are in
 	// the request that builds page one, not applied a render later.
-	const urlSeed = route ? parseClauseParam(route.query && route.query[URL_PARAM], viewKey) : null;
+	const urlSeed = route
+		? parseClauseParam(route.query && route.query[URL_PARAM], viewKey)
+		: null;
 	if (urlSeed && urlSeed.clauses.length) filterClauses.value = urlSeed.clauses;
 	// The last `fv2` value THIS composable put in the URL. Two jobs: recognising
 	// the router's echo of our own write, and telling an authored clear apart
@@ -105,6 +175,8 @@ export function useListPage({
 	let lastWrittenUrl = (route && route.query && route.query[URL_PARAM]) || "";
 
 	function wireClauses() {
+		// Rolled back to legacy transport (P1-05): send no v2 clauses at all.
+		if (filtersV2Disabled.value) return [];
 		// Only COMPLETE clauses reach the wire; a half-filled row is pending, and
 		// pending is not a filter (plan §6.4: "no fetch until an incomplete clause
 		// becomes valid").
@@ -196,9 +268,20 @@ export function useListPage({
 		return fetchRows("keep");
 	}
 
-	function setFilter(key, value) {
+	// A quick filter becomes a v2 clause only when a root is known WITHOUT the
+	// schema (a declaredRoot). On that path the flag has not been learned from the
+	// schema yet, so learn it here before the clause can reach the wire (M1.3). No
+	// cost once known (ensureCapability short-circuits), and none at all for a
+	// legacy-only quick filter.
+	async function ensureQuickCapability() {
+		if (viewKey && !capabilityKnown && !schema.value && rootDoctype())
+			await ensureCapability();
+	}
+
+	async function setFilter(key, value) {
 		if (value === "" || value == null) delete filters[key];
 		else filters[key] = value;
+		await ensureQuickCapability();
 		materializeQuick([key]);
 		writeUrl();
 		return resetLoad();
@@ -206,7 +289,7 @@ export function useListPage({
 	// Replace the whole filter set (ListPage's update:filters emits a plain
 	// object); empty values are stripped so the backend's strict key/value
 	// whitelists never see blanks.
-	function setFilters(next) {
+	async function setFilters(next) {
 		const before = { ...filters };
 		for (const k of Object.keys(filters)) delete filters[k];
 		for (const [k, v] of Object.entries(next || {})) {
@@ -218,6 +301,7 @@ export function useListPage({
 		const changed = Object.keys(quickClauses).filter(
 			(k) => String(before[k] ?? "") !== String(filters[k] ?? "")
 		);
+		if (changed.length) await ensureQuickCapability();
 		materializeQuick(changed);
 		writeUrl();
 		return resetLoad();
@@ -246,13 +330,28 @@ export function useListPage({
 				if (seq !== schemaSeq) return null;
 				const info = res && res.ok === false ? filterErrorInfo(res) : null;
 				if (info) {
+					// A view rolled back via the runtime flag (or never migrated)
+					// declines here: drop to legacy transport with an HONEST, distinct
+					// "turned off" state — no retry (UX1) — so the list still loads.
+					if (
+						info.code === ERR_VIEW_ROLLED_BACK ||
+						info.code === ERR_VIEW_NOT_FILTERABLE
+					) {
+						markRolledBack();
+						return null;
+					}
 					schemaState.value = "error";
 					schemaError.value = info;
 					return null;
 				}
 				schema.value = res || null;
 				schemaState.value = res ? "ready" : "error";
-				if (!res) schemaError.value = { code: "", kind: "transient", message: "No fields returned." };
+				if (!res)
+					schemaError.value = {
+						code: "",
+						kind: "transient",
+						message: "No fields returned.",
+					};
 				return schema.value;
 			})
 			.catch((e) => {
@@ -271,7 +370,6 @@ export function useListPage({
 		return schemaInflight;
 	}
 
-
 	/**
 	 * Plan §8 steps 3-4: keep what is still filterable, and SAY what was not.
 	 * Returns whether anything was dropped, so a caller can reload.
@@ -281,9 +379,31 @@ export function useListPage({
 		const { kept, dropped } = reconcileClauses(filterClauses.value, index.value);
 		if (!dropped.length) return false;
 		filterClauses.value = kept;
-		noteFilter(droppedNotice(dropped));
+		noteFilter(droppedNotice(dropped, index.value));
 		writeUrl();
 		return true;
+	}
+
+	/**
+	 * ONE combined notice for everything a shared link asked for but did not get
+	 * (N4): values too large to carry (bounded), rows that were not clauses
+	 * (skipped), and fields no longer available (dropped). Each names the affected
+	 * field labels where the catalog can resolve them (UX2). All three are reported
+	 * together rather than one suppressing the others.
+	 */
+	function linkNotice(parsed, dropped) {
+		const parts = [
+			boundedNotice(
+				parsed ? parsed.bounded : 0,
+				labelsFor(parsed && parsed.boundedFields, index.value)
+			),
+			skippedNotice(
+				parsed ? parsed.skipped : 0,
+				labelsFor(parsed && parsed.skippedFields, index.value)
+			),
+			droppedNotice(dropped, index.value),
+		].filter(Boolean);
+		return parts.join(" ");
 	}
 	/** Newest notice wins; they are all "something you asked for did not happen". */
 	function noteFilter(message) {
@@ -365,7 +485,10 @@ export function useListPage({
 	 */
 	function adoptQuickOnSchemaReady() {
 		const keys = Object.keys(quickClauses).filter(
-			(k) => filters[k] !== undefined && String(filters[k]) !== "" && !clausesOn(quickClauses[k]).length
+			(k) =>
+				filters[k] !== undefined &&
+				String(filters[k]) !== "" &&
+				!clausesOn(quickClauses[k]).length
 		);
 		return materializeQuick(keys);
 	}
@@ -458,11 +581,46 @@ export function useListPage({
 			noteFilter(UNREADABLE_NOTICE);
 		} else {
 			filterClauses.value = parsed.clauses;
-			noteFilter(skippedNotice(parsed.skipped));
 		}
 		filterError.value = null;
+		// The view may be rolled back to legacy transport (M1.4): its v2 clauses are
+		// NOT applied and there is nothing to retry. Say so honestly, count nothing,
+		// and do not chase a catalog we will not use. (Learn the flag first if the
+		// mount probe has not run — e.g. a later navigation.)
+		if (!capabilityKnown && filterClauses.value.length) await ensureCapability();
+		if (filtersV2Disabled.value) {
+			if (
+				parsed &&
+				!parsed.unreadable &&
+				(parsed.clauses.length || parsed.bounded || parsed.skipped)
+			)
+				noteFilter(ROLLED_BACK_NOTICE);
+			adoptQuickOnSchemaReady();
+			reflectQuick();
+			return true;
+		}
 		if (filterClauses.value.length && !schema.value) await ensureSchema();
-		if (schema.value) dropUnavailableClauses();
+		if (filtersV2Disabled.value) {
+			// The schema fetch just revealed the rollback: same honest handling.
+			if (
+				parsed &&
+				!parsed.unreadable &&
+				(parsed.clauses.length || parsed.bounded || parsed.skipped)
+			)
+				noteFilter(ROLLED_BACK_NOTICE);
+			adoptQuickOnSchemaReady();
+			reflectQuick();
+			return true;
+		}
+		// Reconcile against the catalog, then report bounded + skipped + dropped
+		// TOGETHER (N4), each naming its fields where resolvable (UX2).
+		let dropped = [];
+		if (schema.value) {
+			const rec = reconcileClauses(filterClauses.value, index.value);
+			dropped = rec.dropped;
+			filterClauses.value = rec.kept;
+		}
+		noteFilter(linkNotice(parsed, dropped));
 		// Adopt BEFORE reflect: see adoptQuickOnSchemaReady.
 		adoptQuickOnSchemaReady();
 		reflectQuick();
@@ -509,10 +667,28 @@ export function useListPage({
 
 	onMounted(async () => {
 		if (viewKey) {
+			// Learn v2 availability BEFORE the first EMISSION (M1.3), but do not delay
+			// first paint for it when nothing emits at mount. Something emits at mount
+			// only when the URL carried clauses or the toolbar arrived with an initial
+			// quick filter; then we AWAIT the probe (correctness over a few ms). A
+			// declaredRoot list with no initial filter emits nothing yet, so we merely
+			// WARM the probe (no await) — it is ready by the time a quick edit could
+			// turn into a v2 clause, and setFilters awaits it if it somehow is not.
+			const initialQuick = Object.keys(quickClauses).some(
+				(k) => filters[k] !== undefined && String(filters[k]) !== ""
+			);
+			const emitsAtMount = (urlSeed && urlSeed.clauses.length) || initialQuick;
+			if (emitsAtMount) await ensureCapability();
+			// D11: warm for EVERY view, not just a declaredRoot one. A lazy view whose
+			// filter panel is opened later (setClauses) would otherwise run NO probe at
+			// mount and could emit a clause on a rolled-back view. Warming is one cheap
+			// call and never delays first paint.
+			else ensureCapability();
 			// A link may have arrived with filters: the catalog decides which of
 			// them this caller may still use, and that answer must precede page one.
 			// Same function the watcher uses, so the two cannot drift.
-			if (urlSeed !== null) await applyUrlClauses((route.query && route.query[URL_PARAM]) || "");
+			if (urlSeed !== null)
+				await applyUrlClauses((route.query && route.query[URL_PARAM]) || "");
 			else {
 				// No payload at all — but the page may still have handed us initial
 				// quick filters, and those are canonical too.
@@ -540,7 +716,10 @@ export function useListPage({
 		clauses: filterClauses.value,
 		error: filterError.value,
 		notice: filterNotice.value,
-		activeCount: activeCount(filterClauses.value, index.value),
+		// Rolled back to legacy transport ⇒ no v2 clause is applied, so the chip must
+		// not show an active count over filters that are NOT in force (M1.4).
+		filtersDisabled: filtersV2Disabled.value,
+		activeCount: filtersV2Disabled.value ? 0 : activeCount(filterClauses.value, index.value),
 	}));
 
 	/**
@@ -549,6 +728,9 @@ export function useListPage({
 	 * request, so a retry has to reopen the door explicitly.
 	 */
 	function requestSchema() {
+		// Rolled back to legacy transport: there is no catalog to fetch and nothing a
+		// retry could achieve, so the panel keeps its honest "turned off" state (UX1).
+		if (filtersV2Disabled.value) return Promise.resolve(null);
 		if (schemaState.value === "loading") return schemaInflight || Promise.resolve(null);
 		if (schemaState.value === "error") {
 			schemaState.value = "idle";

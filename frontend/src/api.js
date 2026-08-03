@@ -2,6 +2,7 @@
 // the session cookie + CSRF). Same backend the Desk chat uses, so conversations
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
+import { listPageArgs as _page } from "./api/listPageArgs";
 
 export const listConversations = () => call("jarvis.chat.api.list_conversations");
 export const listTools = () => call("jarvis.chat.api.list_tools");
@@ -230,12 +231,21 @@ export const getActiveTurn = (conversation) =>
 // plan 08 §9's Link-suggestion cap of 20. Frappe's own search_link enforces the
 // target DocType's read permission + user permissions, which is why plan 08 adds
 // no second search endpoint.
-export const searchLink = (doctype, txt, pageLength) =>
-	call("frappe.desk.search.search_link", {
-		doctype,
-		txt: txt || "",
-		page_length: pageLength || 8,
-	});
+//
+// `referenceDoctype` / `linkFieldname` (plan 08 P1-06) name WHERE the Link is
+// used, so a DocType's custom `search_link` hook and user-permission behaviour
+// can key off the field. They are untrusted CONTEXT — the server still enforces
+// the target's read permission regardless — and are sent only when known
+// (mentions omit them). The list FilterGroup passes the schema entry's own
+// (doctype, fieldname), which the shared schema already knows.
+export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkFieldname) => {
+	const args = { doctype, txt: txt || "", page_length: pageLength || 8 };
+	// Frappe's search_link params (frappe/desk/search.py): reference_doctype +
+	// keyword-only link_fieldname. Sent only when known.
+	if (referenceDoctype) args.reference_doctype = referenceDoctype;
+	if (linkFieldname) args.link_fieldname = linkFieldname;
+	return call("frappe.desk.search.search_link", args);
+};
 
 // Field metadata for the record-edit action card: powers Link/Select/Date
 // controls (returns {ok, doctype, fields:[{fieldname,label,fieldtype,options}]}).
@@ -502,32 +512,21 @@ export const getAgentAdminOverview = () => call(AG + "get_agent_admin_overview")
 //   { rows, total, has_more, start, page_length[, facets] }  (facets: Approvals only;
 //   Approvals first-page responses also carry `awaiting_reply` — chat questions
 //   with no approval row behind them, rendered by ApprovalsBoard's strip)
-// `_page` normalizes the request args (search/filters/sort/paging) exactly as
-// the four backend endpoints expect; `filters` is JSON-encoded here so the SPA
-// passes a plain object and the server `frappe.parse_json`s it.
-const _page = (p = {}) => {
-	const args = {
-		search: p.search || "",
-		filters: JSON.stringify(p.filters || {}),
-		sort_field: p.sort_field || "",
-		sort_dir: p.sort_dir || "",
-		start: p.start || 0,
-		page_length: p.page_length || 20,
-	};
-	// plan 08 §6.2: `filters_v2` is ADDITIVE and only sent when a migrated
-	// surface actually has clauses, so an unmigrated endpoint never sees an
-	// argument it does not declare.
-	if (Array.isArray(p.filters_v2) && p.filters_v2.length) {
-		args.filters_v2 = JSON.stringify(p.filters_v2);
-	}
-	return args;
-};
+// Request args (search/filters/sort/paging + filters_v2) come from the ONE
+// shared encoder `api/listPageArgs.js` (plan 08 P0-01) — imported as `_page` so
+// Skills/Macros/File Box/Approvals and the feature wrappers cannot drift apart.
 
 // plan 08 §6.1: the fields THIS caller may filter `view_key` on, with the
 // per-field operators and defaults. Answers only for MIGRATED views; every
 // rejection carries a stable `list_filter_*` code (see filterModel.js).
 export const getListFilterSchema = (viewKey) =>
 	call("jarvis.chat.list_filters.get_list_filter_schema", { view_key: viewKey });
+// plan 08 §P1-05 / M1.3: the per-view {view_key: enabled} capability map, so a
+// list can learn whether filters_v2 is on for its view BEFORE emitting any clause
+// (a rolled-back view must send zero filters_v2 on every path). Cheap — the flag
+// map only, no field catalog.
+export const getListFilterCapabilities = () =>
+	call("jarvis.chat.list_filters.list_filters_capabilities");
 export const listCustomSkillsPage = (p) => call(SK + "list_custom_skills_page", _page(p));
 export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));

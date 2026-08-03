@@ -24,6 +24,9 @@ import {
 	attributeError,
 	isUrlPayloadTooLarge,
 	skippedNotice,
+	boundedNotice,
+	nameList,
+	labelsFor,
 	OPERATORS,
 	timespanLabel,
 	toDatetimeInput,
@@ -44,7 +47,10 @@ import {
 	SKILLS_SCHEMA,
 } from "./fixtures.js";
 
-const SCHEMA = { ...SKILLS_SCHEMA, fields: [DESCRIPTION, ENABLED, SCOPE, OWNER, CREATION, IDX, STEP_PROMPT] };
+const SCHEMA = {
+	...SKILLS_SCHEMA,
+	fields: [DESCRIPTION, ENABLED, SCOPE, OWNER, CREATION, IDX, STEP_PROMPT],
+};
 
 const index = schemaIndex(SCHEMA);
 
@@ -147,6 +153,20 @@ describe("control families", () => {
 		expect(controlFor(DESCRIPTION, "in")).toBe("multi");
 	});
 
+	it("never renders a date range for a non-temporal field (P0-03)", () => {
+		// Between only produces a date-range control for Date/Datetime. A clause
+		// that carries Between on a text/number field (hand-edited URL, stale link)
+		// must NOT render two date pickers over it — the server never offers it and
+		// reconcile drops it; this is the belt.
+		for (const entry of [DESCRIPTION, IDX, ENABLED, SCOPE, OWNER]) {
+			const control = controlFor(entry, "Between");
+			expect(control).not.toBe("between-date");
+			expect(control).not.toBe("between-datetime");
+		}
+		// …but the temporal families still get their range control.
+		expect(controlFor(CREATION, "Between")).toBe("between-datetime");
+	});
+
 	it("renders a Select's leading blank as 'Not set' instead of an empty row", () => {
 		expect(selectControlOptions(SCOPE)).toEqual([
 			{ label: "Not set", value: "" },
@@ -165,7 +185,9 @@ describe("control families", () => {
 		expect(linkTarget(OWNER)).toBe("User");
 		// Dynamic Link's options name the controlling FIELD, not a DocType.
 		expect(linkTarget({ ...OWNER, fieldtype: "Dynamic Link" })).toBe("");
-		expect(controlFor({ ...OWNER, fieldtype: "Dynamic Link", options: "ref_dt" }, "=")).toBe("text");
+		expect(controlFor({ ...OWNER, fieldtype: "Dynamic Link", options: "ref_dt" }, "=")).toBe(
+			"text"
+		);
 	});
 });
 
@@ -207,7 +229,9 @@ describe("completeness — an incomplete clause is PENDING, not sent", () => {
 		const clause = clauseForEntry(CREATION);
 		expect(isComplete({ ...clause, value: ["2026-01-01", ""] }, CREATION)).toBe(false);
 		expect(isComplete({ ...clause, value: ["", "2026-01-01"] }, CREATION)).toBe(false);
-		expect(isComplete({ ...clause, value: ["2026-01-01", "2026-02-01"] }, CREATION)).toBe(true);
+		expect(isComplete({ ...clause, value: ["2026-01-01", "2026-02-01"] }, CREATION)).toBe(
+			true
+		);
 	});
 
 	it("treats a blank numeric as pending, not as the `= 0` the server would compile (D14)", () => {
@@ -229,16 +253,18 @@ describe("completeness — an incomplete clause is PENDING, not sent", () => {
 		const dateIs = { ...clauseForEntry(CREATION), operator: "is", value: "maybe" };
 		expect(isComplete(dateIs, CREATION)).toBe(false);
 		expect(isComplete({ ...dateIs, value: "not set" }, CREATION)).toBe(true);
-		expect(isComplete({ ...dateIs, operator: "Timespan", value: "last week" }, CREATION)).toBe(true);
-		expect(isComplete({ ...dateIs, operator: "Timespan", value: "last fortnight" }, CREATION)).toBe(
-			false
+		expect(isComplete({ ...dateIs, operator: "Timespan", value: "last week" }, CREATION)).toBe(
+			true
 		);
+		expect(
+			isComplete({ ...dateIs, operator: "Timespan", value: "last fortnight" }, CREATION)
+		).toBe(false);
 	});
 
 	it("rejects an operator the schema does not offer for that field", () => {
-		expect(isComplete({ ...clauseForEntry(ENABLED), operator: "like", value: "x" }, ENABLED)).toBe(
-			false
-		);
+		expect(
+			isComplete({ ...clauseForEntry(ENABLED), operator: "like", value: "x" }, ENABLED)
+		).toBe(false);
 	});
 
 	it("is false for a field that is not in this caller's catalog at all", () => {
@@ -308,7 +334,11 @@ describe("URL state", () => {
 	});
 
 	it("ignores a payload written for a sibling tab's list (C08-7)", () => {
-		const param = serializeClauses("macros", [{ ...clauseForEntry(DESCRIPTION), value: "x" }], index);
+		const param = serializeClauses(
+			"macros",
+			[{ ...clauseForEntry(DESCRIPTION), value: "x" }],
+			index
+		);
 		expect(parseClauseParam(param, "skills", SCHEMA)).toBeNull();
 		expect(parseClauseParam(param, "macros", SCHEMA).clauses).toHaveLength(1);
 	});
@@ -335,9 +365,13 @@ describe("URL state", () => {
 		expect(parseClauseParam("", "skills")).toBeNull();
 		expect(parseClauseParam(undefined, "skills")).toBeNull();
 		// a sibling tab's payload: not ours to read and not ours to complain about
-		expect(parseClauseParam(JSON.stringify({ v: 1, k: "learning", c: [] }), "skills")).toBeNull();
+		expect(
+			parseClauseParam(JSON.stringify({ v: 1, k: "learning", c: [] }), "skills")
+		).toBeNull();
 		// ...even on a contract version we do not know
-		expect(parseClauseParam(JSON.stringify({ v: 9, k: "learning", c: [] }), "skills")).toBeNull();
+		expect(
+			parseClauseParam(JSON.stringify({ v: 9, k: "learning", c: [] }), "skills")
+		).toBeNull();
 	});
 
 	it("knows when a payload is too large to be a URL", () => {
@@ -369,7 +403,11 @@ describe("URL state", () => {
 	it("rejects an operator outside the closed vocabulary", () => {
 		for (const op of ["DROP", "=;--", "BETWEEN", "Like"]) {
 			const parsed = parseClauseParam(
-				JSON.stringify({ v: 1, k: "skills", c: [["Jarvis Custom Skill", "description", op, "x"]] }),
+				JSON.stringify({
+					v: 1,
+					k: "skills",
+					c: [["Jarvis Custom Skill", "description", op, "x"]],
+				}),
 				"skills",
 				SCHEMA
 			);
@@ -382,16 +420,73 @@ describe("URL state", () => {
 
 	it("bounds what a hand-edited URL can inflate", () => {
 		const rows = [];
-		for (let i = 0; i < 40; i += 1) rows.push(["Jarvis Custom Skill", "description", "like", "x"]);
-		const parsed = parseClauseParam(JSON.stringify({ v: 1, k: "skills", c: rows }), "skills", SCHEMA);
+		for (let i = 0; i < 40; i += 1)
+			rows.push(["Jarvis Custom Skill", "description", "like", "x"]);
+		const parsed = parseClauseParam(
+			JSON.stringify({ v: 1, k: "skills", c: rows }),
+			"skills",
+			SCHEMA
+		);
 		expect(parsed.clauses).toHaveLength(20); // schema limits.max_clauses
 		expect(parsed.skipped).toBe(20); // and the overflow is REPORTED
+	});
+
+	it("rejects an oversize value rather than silently truncating it (P1-02)", () => {
+		// An oversize scalar is REJECTED and reported as bounded — never sliced to
+		// max_value_chars, which would turn "match this exact value" into "match
+		// this prefix". (This replaces the old assertion that expected a 2000-char
+		// value to become 1000 with skipped=0 — the misleading spec the review found.)
 		const long = JSON.stringify({
 			v: 1,
 			k: "skills",
 			c: [["Jarvis Custom Skill", "description", "like", "y".repeat(2000)]],
 		});
-		expect(parseClauseParam(long, "skills", SCHEMA).clauses[0].value).toHaveLength(1000);
+		const scalar = parseClauseParam(long, "skills", SCHEMA);
+		expect(scalar.clauses).toHaveLength(0);
+		expect(scalar.bounded).toBe(1);
+
+		// An oversize MEMBER of an `in` list is rejected too.
+		const member = parseClauseParam(
+			JSON.stringify({
+				v: 1,
+				k: "skills",
+				c: [["Jarvis Custom Skill", "description", "in", ["ok", "y".repeat(2000)]]],
+			}),
+			"skills",
+			SCHEMA
+		);
+		expect(member.clauses).toHaveLength(0);
+		expect(member.bounded).toBe(1);
+
+		// An over-COUNT `in` list (more than max_in_values members) is rejected,
+		// not silently sliced.
+		const tooMany = [];
+		for (let i = 0; i < 101; i += 1) tooMany.push(String(i));
+		const list = parseClauseParam(
+			JSON.stringify({
+				v: 1,
+				k: "skills",
+				c: [["Jarvis Custom Skill", "description", "in", tooMany]],
+			}),
+			"skills",
+			SCHEMA
+		);
+		expect(list.clauses).toHaveLength(0);
+		expect(list.bounded).toBe(1);
+
+		// A value AT the bound is kept, unchanged.
+		const ok = parseClauseParam(
+			JSON.stringify({
+				v: 1,
+				k: "skills",
+				c: [["Jarvis Custom Skill", "description", "like", "y".repeat(1000)]],
+			}),
+			"skills",
+			SCHEMA
+		);
+		expect(ok.clauses).toHaveLength(1);
+		expect(ok.clauses[0].value).toHaveLength(1000);
+		expect(ok.bounded).toBe(0);
 	});
 
 	it("skips structurally broken rows without losing the good ones", () => {
@@ -441,7 +536,46 @@ describe("reconciliation against this caller's catalog (plan §8 steps 3-4)", ()
 	it("says how many were dropped, in words a person can read", () => {
 		expect(droppedNotice([])).toBe("");
 		expect(droppedNotice([{}])).toMatch(/^1 filter from this link is no longer available/);
-		expect(droppedNotice([{}, {}])).toMatch(/^2 filters from this link are no longer available/);
+		expect(droppedNotice([{}, {}])).toMatch(
+			/^2 filters from this link are no longer available/
+		);
+	});
+});
+
+describe("notices name the affected fields (UX2)", () => {
+	const index = schemaIndex(SCHEMA);
+
+	it("nameList reads as a person would say it", () => {
+		expect(nameList([])).toBe("");
+		expect(nameList(["Description"])).toBe("Description");
+		expect(nameList(["Description", "Enabled"])).toBe("Description and Enabled");
+		expect(nameList(["A", "B", "C", "D"])).toBe("A, B and 2 more");
+	});
+
+	it("labelsFor resolves catalog labels and skips fields absent from it", () => {
+		expect(
+			labelsFor([{ doctype: "Jarvis Custom Skill", fieldname: "description" }], index)
+		).toEqual([DESCRIPTION.label]);
+		// a field NOT in the catalog yields no label (a raw fieldname is not a label)
+		expect(
+			labelsFor([{ doctype: "Jarvis Custom Skill", fieldname: "skill_bundle" }], index)
+		).toEqual([]);
+	});
+
+	it("boundedNotice / skippedNotice name the fields when the catalog can resolve them", () => {
+		const labels = [DESCRIPTION.label];
+		expect(boundedNotice(1, labels)).toMatch(new RegExp(`The ${DESCRIPTION.label} filter`));
+		expect(boundedNotice(1, labels)).toMatch(/too large to apply/);
+		expect(skippedNotice(1, labels)).toMatch(new RegExp(`The ${DESCRIPTION.label} filter`));
+		// with no resolvable labels it falls back to the honest count
+		expect(boundedNotice(2, [])).toMatch(/^2 filters in this link were too large/);
+		expect(skippedNotice(2, [])).toMatch(/^2 filters in this link were not valid/);
+	});
+
+	it("droppedNotice names a field when it IS still in the catalog", () => {
+		expect(
+			droppedNotice([{ doctype: "Jarvis Custom Skill", fieldname: "description" }], index)
+		).toMatch(new RegExp(`^${DESCRIPTION.label} is no longer available`));
 	});
 });
 
@@ -458,7 +592,9 @@ describe("server error codes → what the panel does", () => {
 	}
 
 	it("digs the stable code out of e.messages", () => {
-		const info = filterErrorInfo(thrownBy("list_filter_invalid_value", "Created On needs a value."));
+		const info = filterErrorInfo(
+			thrownBy("list_filter_invalid_value", "Created On needs a value.")
+		);
 		expect(info).toEqual({
 			code: "list_filter_invalid_value",
 			kind: "row",
@@ -482,7 +618,10 @@ describe("server error codes → what the panel does", () => {
 			list_filter_query_too_expensive: "cost",
 			list_filter_unknown_field: "schema",
 			list_filter_invalid_operator: "schema",
-			list_filter_view_not_filterable: "schema",
+			// A view that is off (never migrated, or rolled back by the flag) is a
+			// DISABLED state — no retry — not a transient schema failure (UX1).
+			list_filter_view_not_filterable: "disabled",
+			list_filter_view_rolled_back: "disabled",
 			list_filter_too_many_clauses: "cap",
 			list_filter_too_many_values: "cap",
 			list_filter_invalid_value: "row",
@@ -497,11 +636,18 @@ describe("server error codes → what the panel does", () => {
 
 	it("also reads the envelope when it arrives as a resolved value or a JSON string", () => {
 		expect(
-			filterErrorInfo({ ok: false, error: { code: "list_filter_too_many_clauses", message: "cap" } })
-				.kind
+			filterErrorInfo({
+				ok: false,
+				error: { code: "list_filter_too_many_clauses", message: "cap" },
+			}).kind
 		).toBe("cap");
 		const e = new Error("x");
-		e.messages = [JSON.stringify({ ok: false, error: { code: "list_filter_bad_payload", message: "b" } })];
+		e.messages = [
+			JSON.stringify({
+				ok: false,
+				error: { code: "list_filter_bad_payload", message: "b" },
+			}),
+		];
 		expect(filterErrorInfo(e).code).toBe("list_filter_bad_payload");
 	});
 
@@ -527,7 +673,11 @@ describe("attributing a row-level rejection", () => {
 	];
 
 	it("blames the row whose field label the server named", () => {
-		const error = { code: "list_filter_invalid_value", kind: "row", message: "Created On needs a start and an end." };
+		const error = {
+			code: "list_filter_invalid_value",
+			kind: "row",
+			message: "Created On needs a start and an end.",
+		};
 		expect(attributeError(error, clauses, index)).toBe(clauses[1].id);
 	});
 
@@ -537,12 +687,16 @@ describe("attributing a row-level rejection", () => {
 		const shortLabel = { ...DESCRIPTION, fieldname: "note", label: "e" };
 		const shortIndex = schemaIndex({ ...SCHEMA, fields: [shortLabel] });
 		const rows = [{ ...clauseForEntry(shortLabel), value: "x" }];
-		const error = { kind: "row", code: "list_filter_invalid_value", message: "Qty must be a number." };
+		const error = {
+			kind: "row",
+			code: "list_filter_invalid_value",
+			message: "Qty must be a number.",
+		};
 		expect(attributeError(error, rows, shortIndex)).toBeNull();
 		// but it still finds the label when the message really names it
-		expect(
-			attributeError({ ...error, message: "e needs a value." }, rows, shortIndex)
-		).toBe(rows[0].id);
+		expect(attributeError({ ...error, message: "e needs a value." }, rows, shortIndex)).toBe(
+			rows[0].id
+		);
 	});
 
 	it("survives a label full of regex punctuation", () => {
@@ -559,7 +713,11 @@ describe("attributing a row-level rejection", () => {
 
 	it("blames nobody when the label is ambiguous or absent", () => {
 		const twice = [clauses[1], { ...clauses[1], id: "other" }];
-		const error = { code: "list_filter_invalid_value", kind: "row", message: "Created On needs a start and an end." };
+		const error = {
+			code: "list_filter_invalid_value",
+			kind: "row",
+			message: "Created On needs a start and an end.",
+		};
 		expect(attributeError(error, twice, index)).toBeNull();
 		expect(attributeError({ ...error, message: "Nope." }, clauses, index)).toBeNull();
 		expect(attributeError({ ...error, kind: "cap" }, clauses, index)).toBeNull();

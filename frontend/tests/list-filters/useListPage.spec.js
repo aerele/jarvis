@@ -102,6 +102,24 @@ describe("request generation", () => {
 		expect(sent.filters_v2).toHaveLength(1);
 	});
 
+	it("falls back to legacy transport when the view is rolled back (P1-05)", async () => {
+		// The server flag turned filters_v2 off for this view: its schema endpoint
+		// declines with view_not_filterable. The list must still load, sending NO
+		// filters_v2 (legacy transport) — never a coded rejection read as empty.
+		const fetchFn = vi.fn(async () => ({ rows: [{ name: "a" }], total: 1 }));
+		const fetchSchema = vi.fn(async () => ({
+			ok: false,
+			error: { code: "list_filter_view_not_filterable", message: "off" },
+		}));
+		const { api } = host({ fetchFn, storageKey: "t3b", viewKey: "macros", fetchSchema });
+		await flushPromises();
+		// A clause is set, but the rollback means it never reaches the wire.
+		await api.requestSchema();
+		await api.setClauses([clause(DESCRIPTION, "x")]);
+		await flushPromises();
+		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
+	});
+
 	it("resets to page one on any clause change", async () => {
 		const fetchFn = vi.fn(async () => ({ rows: [{ name: "a" }], total: 9, has_more: true }));
 		const { api } = host({ fetchFn, storageKey: "t3", viewKey: "skills" });
@@ -212,13 +230,22 @@ describe("URL state", () => {
 			],
 		});
 		const { route, router } = routerDouble({ [URL_PARAM]: param });
-		const { api } = host({ fetchFn, storageKey: "u3", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u3",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 
 		expect(api.filterNotice.value).toBe(
 			"1 filter from this link is no longer available on this list and was removed."
 		);
-		expect(fetchFn.mock.calls[0][0].filters_v2.map((c) => c.fieldname)).toEqual(["description"]);
+		expect(fetchFn.mock.calls[0][0].filters_v2.map((c) => c.fieldname)).toEqual([
+			"description",
+		]);
 		// the URL is rewritten to what is actually in force
 		expect(JSON.parse(route.query[URL_PARAM]).c).toHaveLength(1);
 
@@ -239,7 +266,14 @@ describe("URL state", () => {
 			c: [["Jarvis Custom Skill", "description", "like", "month end"]],
 		});
 		const { route, router } = routerDouble({ [URL_PARAM]: param });
-		const { api } = host({ fetchFn, storageKey: "u4", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u4",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 
 		expect(api.filterSchemaState.value).toBe("error");
@@ -250,7 +284,14 @@ describe("URL state", () => {
 		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
 		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
 		const { route, router, navigate } = routerDouble();
-		const { api } = host({ fetchFn, storageKey: "u5", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u5",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 
 		await api.setClauses([clause(DESCRIPTION, "month end")]);
@@ -282,7 +323,14 @@ describe("URL state", () => {
 		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
 		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
 		const { route, router, navigate } = routerDouble();
-		const { api } = host({ fetchFn, storageKey: "u5b", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u5b",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 		await api.setClauses([clause(DESCRIPTION, "month end")]);
 		await flushPromises();
@@ -300,7 +348,14 @@ describe("URL state", () => {
 		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
 		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
 		const { route, router } = routerDouble();
-		const { api } = host({ fetchFn, storageKey: "u5c", viewKey: "skills", route, router, fetchSchema });
+		const { api } = host({
+			fetchFn,
+			storageKey: "u5c",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
 		await flushPromises();
 		await api.setClauses([clause(DESCRIPTION, "month end")]);
 		await api.setClauses([]);
@@ -423,7 +478,10 @@ describe("quick filters ⇄ clauses", () => {
 describe("coded rejections (never a dead-end toast)", () => {
 	it("surfaces the mapped copy instead of the generic error toast", async () => {
 		const fetchFn = vi.fn(async () => {
-			throw envelopeError("list_filter_invalid_value", "Created On needs a start and an end.");
+			throw envelopeError(
+				"list_filter_invalid_value",
+				"Created On needs a start and an end."
+			);
 		});
 		const { api } = host({ fetchFn, storageKey: "e1", viewKey: "skills" });
 		await flushPromises();
@@ -459,9 +517,15 @@ describe("coded rejections (never a dead-end toast)", () => {
 		expect(api.filterClauses.value).toHaveLength(1);
 
 		// the field is gone from the caller's catalog now
-		schema = { ...SKILLS_SCHEMA, fields: SKILLS_SCHEMA.fields.filter((f) => f.fieldname !== "description") };
+		schema = {
+			...SKILLS_SCHEMA,
+			fields: SKILLS_SCHEMA.fields.filter((f) => f.fieldname !== "description"),
+		};
 		fetchFn.mockImplementationOnce(async () => {
-			throw envelopeError("list_filter_unknown_field", "That field cannot be filtered on this list.");
+			throw envelopeError(
+				"list_filter_unknown_field",
+				"That field cannot be filtered on this list."
+			);
 		});
 		await api.resetLoad();
 		await flushPromises();
@@ -478,7 +542,10 @@ describe("coded rejections (never a dead-end toast)", () => {
 	it("reads a rejection that arrives as a resolved envelope as a rejection", async () => {
 		const fetchFn = vi.fn(async () => ({
 			ok: false,
-			error: { code: "list_filter_too_many_clauses", message: "At most 20 filters at a time." },
+			error: {
+				code: "list_filter_too_many_clauses",
+				message: "At most 20 filters at a time.",
+			},
 		}));
 		const { api } = host({ fetchFn, storageKey: "e4", viewKey: "skills" });
 		await flushPromises();
@@ -489,7 +556,8 @@ describe("coded rejections (never a dead-end toast)", () => {
 	it("clears the rejection once a request succeeds", async () => {
 		let fail = true;
 		const fetchFn = vi.fn(async () => {
-			if (fail) throw envelopeError("list_filter_invalid_value", "Description needs a value.");
+			if (fail)
+				throw envelopeError("list_filter_invalid_value", "Description needs a value.");
 			return { rows: [{ name: "a" }], total: 1 };
 		});
 		const { api } = host({ fetchFn, storageKey: "e5", viewKey: "skills" });
@@ -570,5 +638,174 @@ describe("schema fetching", () => {
 		await api.requestSchema();
 		expect(fetchSchema).not.toHaveBeenCalled();
 		expect(api.filterState.value.viewKey).toBe("");
+	});
+});
+
+describe("rolled-back view (the flag contract, M1)", () => {
+	it("emits ZERO filters_v2 on the quick-filter path when the view is off (S3/M1.3)", async () => {
+		// A declaredRoot lets a quick filter become a v2 clause BEFORE the schema is
+		// fetched — the exact path that used to emit without ever consulting the flag.
+		// The mount-time capability probe closes it.
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		const fetchCapabilities = vi.fn(async () => ({ macros: false }));
+		const { api } = host({
+			fetchFn,
+			storageKey: "cap1",
+			viewKey: "macros",
+			rootDoctype: "Jarvis Macro",
+			quickClauses: { enabled: "enabled" },
+			initialFilters: { enabled: "1" },
+			fetchCapabilities,
+		});
+		await flushPromises();
+		expect(fetchCapabilities).toHaveBeenCalled();
+		expect(fetchFn.mock.calls[0][0].filters_v2).toEqual([]);
+		// legacy transport still carries the quick filter, so the list is not broken
+		expect(fetchFn.mock.calls[0][0].filters).toEqual({ enabled: "1" });
+		// and a RUNTIME quick change still emits no v2
+		await api.setFilters({ enabled: "0" });
+		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
+	});
+
+	it("emits ZERO filters_v2 for a quick filter clicked WHILE the mount probe is in flight (D5)", async () => {
+		// The prior test used initialFilters, which takes the AWAIT-at-mount branch —
+		// so it passed even with `await ensureCapability()` deleted from
+		// ensureQuickCapability. This is the branch that actually exercises the guard:
+		// a declaredRoot list with NO initial filter only WARMS the probe (no await),
+		// and a quick filter clicked before it resolves must still wait for it.
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		let resolveCap;
+		const fetchCapabilities = vi.fn(() => new Promise((r) => (resolveCap = r)));
+		const { api } = host({
+			fetchFn,
+			storageKey: "cap-inflight",
+			viewKey: "macros",
+			rootDoctype: "Jarvis Macro", // declaredRoot: a quick filter can become v2 pre-schema
+			quickClauses: { enabled: "enabled" },
+			// no initialFilters, no URL seed → emitsAtMount is false → probe only WARMED
+			fetchCapabilities,
+		});
+		await nextTick(); // onMounted has warmed the probe; it is still unresolved
+		// The user clicks a quick filter WHILE the probe is in flight.
+		const pending = api.setFilter("enabled", "1");
+		resolveCap({ macros: false }); // the probe now resolves: view is rolled back
+		await pending;
+		await flushPromises();
+		// The clause never reached the wire on filters_v2 — on any call.
+		for (const call of fetchFn.mock.calls) expect(call[0].filters_v2).toEqual([]);
+		// legacy transport still carried the quick filter, so the list is not broken
+		expect(fetchFn.mock.calls.at(-1)[0].filters).toEqual({ enabled: "1" });
+	});
+
+	it("a lazy view (no declaredRoot/URL seed) still warms the probe at mount, so setClauses emits ZERO filters_v2 (D11)", async () => {
+		// A lazy view — no declaredRoot, no URL seed, no initial quick filter — used to
+		// run NO capability probe at mount, so setClauses (the panel's public entry)
+		// could emit a clause on a rolled-back view. The mount now WARMS the probe for
+		// every view, so by the time the panel commits a clause the flag is known.
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		const fetchCapabilities = vi.fn(async () => ({ macros: false }));
+		const { api } = host({
+			fetchFn,
+			storageKey: "d11",
+			viewKey: "macros",
+			fetchCapabilities,
+		});
+		await flushPromises();
+		expect(fetchCapabilities).toHaveBeenCalled(); // warmed at mount even though nothing emitted
+		await api.setClauses([clause(DESCRIPTION, "x")]);
+		await flushPromises();
+		expect(fetchFn.mock.calls.at(-1)[0].filters_v2).toEqual([]);
+	});
+
+	it("does not apply or count a shared link's filters when off, and says so (M1.4)", async () => {
+		const fetchFn = vi.fn(async () => ({ rows: [{ name: "a" }], total: 1 }));
+		const fetchCapabilities = vi.fn(async () => ({ macros: false }));
+		const param = JSON.stringify({
+			v: 1,
+			k: "macros",
+			c: [["Jarvis Macro", "macro_name", "like", "x"]],
+		});
+		const { route, router } = routerDouble({ [URL_PARAM]: param });
+		const fetchSchema = vi.fn();
+		const { api } = host({
+			fetchFn,
+			storageKey: "cap2",
+			viewKey: "macros",
+			route,
+			router,
+			fetchSchema,
+			fetchCapabilities,
+		});
+		await flushPromises();
+		// not applied (unfiltered rows), not counted (zero badge), and honestly noticed
+		expect(fetchFn.mock.calls[0][0].filters_v2).toEqual([]);
+		expect(api.filterState.value.activeCount).toBe(0);
+		expect(api.filterState.value.filtersDisabled).toBe(true);
+		expect(api.filterNotice.value).toMatch(/turned off for this list/);
+		// distinct DISABLED state, and no catalog fetch a retry could chase (UX1)
+		expect(api.filterSchemaState.value).toBe("disabled");
+		await api.requestSchema();
+		expect(fetchSchema).not.toHaveBeenCalled();
+	});
+
+	it("renders a disabled view distinctly from a transient schema failure (UX1)", async () => {
+		const disabled = host({
+			fetchFn: vi.fn(async () => ({ rows: [], total: 0 })),
+			storageKey: "cap3",
+			viewKey: "macros",
+			fetchSchema: vi.fn(async () => ({
+				ok: false,
+				error: { code: "list_filter_view_rolled_back", message: "off" },
+			})),
+		});
+		await flushPromises();
+		await disabled.api.requestSchema();
+		expect(disabled.api.filterSchemaState.value).toBe("disabled");
+
+		let attempts = 0;
+		const transient = host({
+			fetchFn: vi.fn(async () => ({ rows: [], total: 0 })),
+			storageKey: "cap4",
+			viewKey: "skills",
+			fetchSchema: vi.fn(async () => {
+				attempts += 1;
+				throw envelopeError("list_filter_schema_unavailable", "Down.");
+			}),
+		});
+		await flushPromises();
+		await transient.api.requestSchema();
+		expect(transient.api.filterSchemaState.value).toBe("error"); // transient keeps retry
+		await transient.api.requestSchema();
+		expect(attempts).toBe(2); // a transient failure CAN be retried; disabled cannot
+	});
+
+	it("reports bounded AND skipped together, each naming its field (N4/UX2)", async () => {
+		const fetchFn = vi.fn(async () => ({ rows: [], total: 0 }));
+		const fetchSchema = vi.fn(async () => SKILLS_SCHEMA);
+		const big = "x".repeat(1001);
+		const param = JSON.stringify({
+			v: 1,
+			k: "skills",
+			c: [
+				["Jarvis Custom Skill", "description", "like", "keep"],
+				["Jarvis Custom Skill", "description", "like", big], // bounded (too large)
+				["Jarvis Custom Skill", "description", "NOPE", "y"], // skipped (bad operator)
+			],
+		});
+		const { route, router } = routerDouble({ [URL_PARAM]: param });
+		const { api } = host({
+			fetchFn,
+			storageKey: "n4",
+			viewKey: "skills",
+			route,
+			router,
+			fetchSchema,
+		});
+		await flushPromises();
+		const notice = api.filterNotice.value;
+		expect(notice).toMatch(/too large to apply/); // bounded reported
+		expect(notice).toMatch(/wasn't valid|not valid/); // skipped reported — BOTH, not one
+		expect(notice).toMatch(/Description/); // UX2: the field is named
+		expect(fetchFn.mock.calls[0][0].filters_v2).toHaveLength(1); // only the good one
 	});
 });
