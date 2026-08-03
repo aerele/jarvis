@@ -195,8 +195,18 @@ def mint(
 		cache.sadd(_owner_key(owner), token)
 		# set_value swallows a redis blip, so confirm the record is really readable
 		# before we let a card be published against this token. A strict read keeps
-		# an outage distinct from a genuine persist miss; both fail closed here.
-		if peek(token, strict=True) is None:
+		# an outage distinct from a genuine persist miss. Retry one transient read
+		# once so a good park is not immediately torn down because its first verify
+		# reply was lost; a second failure still fails closed through the outer block.
+		try:
+			persisted = peek(token, strict=True)
+		except PendingConfirmStorageError as exc:
+			frappe.logger("jarvis.pending_confirm").error(
+				"park verification read failed; retrying once before rollback: %s",
+				type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
+			)
+			persisted = peek(token, strict=True)
+		if persisted is None:
 			raise RuntimeError("pending-confirm record did not persist")
 	except Exception:
 		frappe.log_error(

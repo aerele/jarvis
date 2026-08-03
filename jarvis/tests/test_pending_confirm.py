@@ -201,6 +201,31 @@ class TestMintReliableIndex(FrappeTestCase):
 		self.assertIsNone(token, "a swallowed set_value write must be caught by the verify -> rollback")
 		self.assertTrue(mock_log.called, "a persist-verify miss must be logged, not swallowed")
 
+	def test_mint_retries_a_transient_verification_read_before_rollback(self):
+		"""A one-off GET timeout must not destroy a record and owner index that
+		both persisted successfully. The strict retry recovers the good park; a
+		sustained failure still follows the fail-closed rollback path."""
+		cache = frappe.cache()
+		real_get = cache.get
+		calls = 0
+
+		def _first_read_times_out(*args, **kwargs):
+			nonlocal calls
+			calls += 1
+			if calls == 1:
+				raise redis.exceptions.TimeoutError("first verify reply lost")
+			return real_get(*args, **kwargs)
+
+		with patch.object(cache, "get", side_effect=_first_read_times_out):
+			with patch.object(frappe, "logger") as mock_logger:
+				with patch.object(frappe, "log_error") as mock_log_error:
+					token = self._mint()
+		self.assertIsNotNone(token)
+		self.assertEqual(calls, 2)
+		self.assertTrue(mock_logger.return_value.error.called)
+		self.assertFalse(mock_log_error.called, "a recovered verification read must not roll back")
+		self.assertIsNotNone(pending_confirm.peek(token))
+
 	def test_list_for_owner_does_not_prune_a_live_token_on_transient_read_blip(self):
 		"""A transient read blip (TimeoutError/ResponseError) on one token during the
 		resync loop must NOT prune it from the owner index: the record is still live,
