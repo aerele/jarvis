@@ -3356,8 +3356,23 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		with patch(self._READINESS_PROBE, return_value=("Provisioning", "")):
 			self.assertFalse(is_ready_for_chat().get("ready"))
 		frappe.cache().delete_value(_APPLY_CONFIRM_MISS_KEY)
-		with patch(self._READINESS_PROBE, return_value=("Ready", "")):
+		# The confirm probe is not the only admin call on the ready path: once
+		# _confirm_apply_via_admin stamps the marker, is_ready_for_chat proceeds to the
+		# final _admin_chat_gate, which asks admin again. In production that is the same
+		# control plane that just answered Ready, so present it consistently - otherwise
+		# the gate's unestablished-workspace fail-closed (a workspace with no
+		# chat_was_ready_at marker gets readiness_unconfirmed on an admin outage), not the
+		# damping under test, is what decides. Bust the gate cache so the fresh verdict is
+		# computed rather than a stale one (the idiom in the grandfather test above).
+		from jarvis import account
+
+		account._bust_chat_gate()
+		with (
+			patch(self._READINESS_PROBE, return_value=("Ready", "")),
+			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
+		):
 			self.assertTrue(is_ready_for_chat().get("ready"))
+		account._bust_chat_gate()
 
 	def test_unproven_direct_tenant_goes_ready_when_admin_confirms(self):
 		"""The single-model leg strands the same way and is rescued by the same
