@@ -62,7 +62,10 @@ vi.mock("@/api/dashboards", () => ({
 	getDashboardConversation: vi.fn(async () => ({})),
 	listDashboardsPage: vi.fn(async () => ({ ok: true, data: { rows: [], total: 0 } })),
 }));
-vi.mock("@/api", () => ({ getCanvas: vi.fn(async () => ({})), searchLink: vi.fn(async () => []) }));
+vi.mock("@/api", () => ({
+	getCanvas: vi.fn(async () => ({})),
+	searchLink: vi.fn(async () => []),
+}));
 vi.mock("@/data/session", () => ({ session: { user: "u@x.com" }, sessionUser: "u@x.com" }));
 vi.mock("@vueuse/core", async () => {
 	const { ref } = await import("vue");

@@ -607,7 +607,10 @@ describe("server error codes → what the panel does", () => {
 		// and retrying an unchanged expensive filter is futile — so it is neither
 		// a row error nor transient.
 		const info = filterErrorInfo(
-			thrownBy("list_filter_query_too_expensive", "That filter is too broad to run on this list.")
+			thrownBy(
+				"list_filter_query_too_expensive",
+				"That filter is too broad to run on this list."
+			)
 		);
 		expect(info.kind).toBe("cost");
 		expect(info.message).toMatch(/too broad/);

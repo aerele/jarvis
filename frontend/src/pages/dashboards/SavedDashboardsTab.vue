@@ -78,8 +78,8 @@ import { useRoute, useRouter } from "vue-router";
 import { Badge, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
+import { dashboardsListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
-import { listDashboardsPage } from "@/api/dashboards";
 
 // /dashboards is a TABBED route (Builder | Saved): the `fv2` payload carries its
 // view key, and every tab navigation carries the query (judgment C08-7).
@@ -146,10 +146,7 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		const { search: q, ...rest } = p.filters || {};
-		return listDashboardsPage({ ...p, search: q || p.search || "", filters: rest });
-	},
+	fetchFn: dashboardsListFetch,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "dashboards",
 	viewKey: "saved_dashboards",

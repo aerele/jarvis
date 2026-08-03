@@ -1468,7 +1468,9 @@ def list_wiki_pages_page(
 	# predicate's value changes what the WHERE means.
 	values = q.params({"limit": pl, "offset": offset})
 
-	total = cint(list_filters.bounded_sql(f"select count(*) from `tabJarvis Wiki Page` where {where}", values)[0][0])
+	total = cint(
+		list_filters.bounded_sql(f"select count(*) from `tabJarvis Wiki Page` where {where}", values)[0][0]
+	)
 	rows = list_filters.bounded_sql(
 		f"""select name, slug, title, page_type, ifnull(scope, 'Org') as scope,
 			target_role, target_user, ref_doctype, ref_name, summary, status,

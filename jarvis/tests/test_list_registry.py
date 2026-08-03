@@ -292,14 +292,20 @@ class TestListRegistryIntegrity(FrappeTestCase):
 							f"{view.view_key} excludes {spec!r}, which is not a field of {view.root_doctype}",
 						)
 
-	def test_active_views_are_classified_and_migration_status_is_reported(self):
-		"""Migration completeness, SEPARATE from inventory and wiring (P0-04).
+	#: The EXACT set of views migrated as of Wave F8 (S2). This is load-bearing, not
+	#: decorative: a drift in either direction fails. If a later wave migrates a view
+	#: it updates this set in the same commit — which is precisely the audit trail
+	#: the stale "exactly two" prose could not give. Counts are derived from it, so
+	#: they cannot disagree with the set.
+	EXPECTED_MIGRATED = {"skills", "macros", "saved_dashboards", "wiki_pages", "triggers"}
 
-		Waves 2-3 are deferred, so this round does NOT enforce 'no pending active
-		view' — that is the FINAL-round gate. What it enforces now is that every
-		ACTIVE (non-excluded) collection is CLASSIFIED (migrated or pending, never
-		an unknown status), and it prints the truthful migrated-vs-pending split so
-		the handoff cannot claim more than is built.
+	def test_active_views_are_classified_and_migration_status_is_reported(self):
+		"""Migration completeness, SEPARATE from inventory and wiring (P0-04 / S2).
+
+		Every ACTIVE (non-excluded) collection is CLASSIFIED (migrated or pending,
+		never an unknown status), AND the migrated set is exactly the one this wave
+		built — asserted, not merely printed, so a handoff can never again claim more
+		(or less) than is real (the "2/19 vs 5/16" drift).
 		"""
 		active = [v for v in list_registry.all_views() if not v.is_excluded]
 		migrated = [v for v in active if v.status == list_registry.MIGRATED]
@@ -313,12 +319,17 @@ class TestListRegistryIntegrity(FrappeTestCase):
 				)
 		# Every active view is exactly one of the two — nothing unclassified.
 		self.assertEqual(len(migrated) + len(pending), len(active))
-		print(
-			f"\nPlan-08 migration status: {len(migrated)} migrated, {len(pending)} pending, "
-			f"of {len(active)} active views."
-			f"\n  migrated: {sorted(v.view_key for v in migrated)}"
-			f"\n  pending:  {sorted(v.view_key for v in pending)}"
+		# The migrated set is EXACT (S2): drift in either direction fails here.
+		self.assertEqual(
+			{v.view_key for v in migrated},
+			self.EXPECTED_MIGRATED,
+			"the migrated view set drifted from what this wave built — update "
+			"EXPECTED_MIGRATED in the SAME commit that migrates a view",
 		)
+		# And the counts follow from it: 5 migrated / 16 pending / 21 active.
+		self.assertEqual(len(migrated), 5)
+		self.assertEqual(len(pending), 16)
+		self.assertEqual(len(active), 21)
 
 	def test_migrated_views_actually_accept_filters_v2(self):
 		"""'migrated' is a claim; this checks the wiring behind it."""

@@ -138,10 +138,36 @@ def _whitelisted(module) -> list:
 
 
 #: The one thing a smoke call must never do.
-_MUTATING = ("create_", "update_", "delete_", "save_", "apply_", "request_", "approve_",
-             "reject_", "archive_", "restore_", "run_", "set_", "promote_", "generate_",
-             "sync_", "rebuild_", "bulk_", "reset_", "clear_", "record_", "confirm_",
-             "start_", "stop_", "cancel_", "retry_", "publish_", "install_", "toggle_")
+_MUTATING = (
+	"create_",
+	"update_",
+	"delete_",
+	"save_",
+	"apply_",
+	"request_",
+	"approve_",
+	"reject_",
+	"archive_",
+	"restore_",
+	"run_",
+	"set_",
+	"promote_",
+	"generate_",
+	"sync_",
+	"rebuild_",
+	"bulk_",
+	"reset_",
+	"clear_",
+	"record_",
+	"confirm_",
+	"start_",
+	"stop_",
+	"cancel_",
+	"retry_",
+	"publish_",
+	"install_",
+	"toggle_",
+)
 
 
 class TestMigratedSurfacesStillAnswer(unittest.TestCase):

@@ -231,7 +231,9 @@ def list_custom_skills_page(
 	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _SKILLS_SORTABLE, "skill_name", "asc")
 
-	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Custom Skill` WHERE {where}", params)[0][0]
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Custom Skill` WHERE {where}", params)[
+		0
+	][0]
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, skill_name, description, user_invocable, enabled, modified, owner,
 			ifnull(scope, 'Org') AS scope

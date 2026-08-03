@@ -309,10 +309,10 @@ import { sessionUser } from "@/data/session";
 import ListPage from "@/components/list/ListPage.vue";
 import WikiPageDialog from "@/components/wiki/WikiPageDialog.vue";
 import { useListPage } from "@/composables/useListPage";
+import { wikiListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import {
-	listWikiPagesPage,
 	getWikiCaps,
 	createWikiPage,
 	archiveWikiPage,
@@ -440,21 +440,7 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		const f = p.filters || {};
-		const pl = p.page_length || 20;
-		return listWikiPagesPage({
-			search: f.search || p.search || "",
-			page_type: f.page_type || "",
-			scope_filter: f.scope || "all",
-			attention: f.attention === "1" ? 1 : 0,
-			archived: f.attention === "archived" ? 1 : 0,
-			// kit sends a start offset; the endpoint takes a page number
-			page: Math.floor((p.start || 0) / pl) + 1,
-			page_length: pl,
-			filters_v2: p.filters_v2,
-		});
-	},
+	fetchFn: wikiListFetch,
 	storageKey: "wiki",
 	viewKey: "wiki_pages",
 	quickClauses: QUICK_CLAUSES,

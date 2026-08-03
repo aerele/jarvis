@@ -6,6 +6,7 @@
 // because their {ok:false, error:{code, message}} arm is load-bearing - the
 // canvas maps those codes onto per-widget errors inside the iframe.
 import { call } from "frappe-ui";
+import { listPageArgs as _page } from "./listPageArgs";
 
 const DB = "jarvis.chat.dashboards_api.";
 
@@ -14,16 +15,11 @@ function unwrap(res) {
 	return res && typeof res === "object" && res.data !== undefined ? res.data : res;
 }
 
-// Same request-arg normalizer as src/api.js `_page` (search/filters/sort/paging;
-// `filters` JSON-encoded so the server `frappe.parse_json`s it).
-const _page = (p = {}) => ({
-	search: p.search || "",
-	filters: JSON.stringify(p.filters || {}),
-	sort_field: p.sort_field || "",
-	sort_dir: p.sort_dir || "",
-	start: p.start || 0,
-	page_length: p.page_length || 20,
-});
+// Request args come from the ONE shared encoder (plan 08 P0-01). This wrapper's
+// private `_page` used to rebuild the request WITHOUT `filters_v2`, so a Saved
+// Dashboards clause silently never reached the endpoint — the exact defect the
+// round-2 review found. It now routes through `listPageArgs` like every other
+// migrated wrapper, so the drift cannot return.
 
 // ── caps probe ────────────────────────────────────────────────────────────────
 // -> {creatable_scopes: ["User", ...], manageable_roles: [...], max_sources,

@@ -729,11 +729,7 @@ class TestFailsClosed(unittest.TestCase):
 		from jarvis.chat import list_registry
 		from jarvis.chat.list_filters import get_list_filter_schema
 
-		pending = [
-			v
-			for v in list_registry.document_list_views()
-			if v.status == list_registry.PENDING
-		]
+		pending = [v for v in list_registry.document_list_views() if v.status == list_registry.PENDING]
 		if not pending:
 			self.skipTest("every document list has migrated — this guard has no subject left")
 
