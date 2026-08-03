@@ -54,6 +54,11 @@ export const checkAccountReconnect = (requestId, code) =>
 	call("jarvis.onboarding.check_account_reconnect", { request_id: requestId, code: code || "" });
 
 export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
+// Read-only poll of a durable LLM-apply operation (plan-05 D2). The single
+// Start-chatting controller (frontend/src/lib/llmOperation.js) follows exactly one
+// operation id to a terminal state through this; it never spends the apply bucket.
+export const getLlmApplyOperation = (operationId) =>
+	call("jarvis.account.get_llm_apply_operation", { operation_id: operationId });
 
 // ---- workspace reset (customer self-serve, admin-gated) --------------------
 export const requestWorkspaceReset = (reason, opts = {}) =>
