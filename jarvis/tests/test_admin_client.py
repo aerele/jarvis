@@ -865,6 +865,93 @@ class TestOnboardingClient(FrappeTestCase):
 		self.assertEqual(out, BUNDLED_PRESET_CATALOG)
 
 
+_EXPECTED_ADVERT = {
+	"pay_page": "admin_pay_page_v1",
+	"provider_shapes": [
+		"razorpay_order",
+		"razorpay_mandate",
+		"cashfree_order",
+		"cashfree_mandate",
+	],
+}
+
+
+class TestClientCapabilityAdvert(FrappeTestCase):
+	"""Plan-09 WS2: behavior-neutral pay-page capability advert.
+
+	The bench advertises ``admin_pay_page_v1`` + the provider checkout shapes it
+	understands on every signup-payment initiation/resume call. Today's admin
+	ignores the field (Frappe drops unknown form_dict keys), so this is purely
+	outbound predeployment — these tests pin (a) the advert rides both seams,
+	(b) the frozen contract names are exact, (c) a reply carrying no new keys
+	decodes byte-for-byte as it did before the advert existed.
+	"""
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def test_advert_constant_matches_frozen_contract(self):
+		self.assertEqual(admin_client.PAY_PAGE_CAPABILITY, "admin_pay_page_v1")
+		self.assertEqual(
+			list(admin_client.PROVIDER_SHAPES),
+			["razorpay_order", "razorpay_mandate", "cashfree_order", "cashfree_mandate"],
+		)
+		self.assertEqual(admin_client._client_capabilities(), _EXPECTED_ADVERT)
+
+	def test_helper_returns_a_fresh_copy(self):
+		# A caller mutating the returned advert (it becomes a request body) must
+		# not corrupt the next call's advert.
+		first = admin_client._client_capabilities()
+		first["pay_page"] = "tampered"
+		first["provider_shapes"].append("tampered")
+		self.assertEqual(admin_client._client_capabilities(), _EXPECTED_ADVERT)
+
+	def test_signup_carries_capability_advert(self):
+		_settings_clear_admin()  # guest signup path
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(captured["json"]["client_capabilities"], _EXPECTED_ADVERT)
+
+	def test_resume_pending_signup_carries_capability_advert(self):
+		_settings_for_admin()  # authenticated resume path
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.resume_pending_signup("Annual Plan")
+		self.assertEqual(captured["json"]["client_capabilities"], _EXPECTED_ADVERT)
+
+	def test_response_without_new_keys_decodes_unchanged(self):
+		# Behavior neutrality: an admin that ignores the advert replies exactly as
+		# before, and the decoded result is the same dict the bench saw pre-WS2.
+		# The advert is outbound-only; it never touches the reply path.
+		_settings_clear_admin()
+		legacy_data = {
+			"api_key": "k",
+			"api_secret": "s",
+			"payment_provider": "razorpay",
+			"razorpay_order_id": "order_R",
+			"razorpay_key_id": "rzp",
+			"amount_inr": 1500,
+		}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			return _mock_response(200, json_body={"message": {"ok": True, "data": dict(legacy_data)}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			out = admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(out, legacy_data)
+
+
 class TestPostUpdateLlmCredsAuthMode(FrappeTestCase):
 	def setUp(self):
 		_settings_for_admin()
