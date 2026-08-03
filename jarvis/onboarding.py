@@ -1141,14 +1141,17 @@ def finish_payment(payload: dict | str) -> dict:
 
 @frappe.whitelist()
 def renew(provider: str | None = None) -> dict:
-	"""Existing customer initiates a renewal payment; returns the provider's
-	checkout handles. The page then completes Checkout and calls finish_payment.
+	"""Existing customer initiates a renewal payment; returns a pay-page token
+	the billing page top-level-navigates to (plan-09 WS8). The admin-hosted
+	checkout completes the payment; the webhook/return activates the plan.
 
 	Gated on System Manager: initiates a billing transaction tied to the
 	site's admin account.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.renew, provider=provider)
+	# plan-09 WS8: attest the token against the bench's OWN pay origin so
+	# BillingPage can navigate (behaviour-neutral on a non-token answer).
+	return onboarding_contract.augment_pay_page(_surface(admin_client.renew, provider=provider))
 
 
 _RESETTING_STATUS = "pending: resetting workspace"
