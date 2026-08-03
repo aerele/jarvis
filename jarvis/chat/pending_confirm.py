@@ -15,8 +15,8 @@ TTL so a token that nobody clicks self-expires instead of leaking forever.
 
 Portability floor: this module runs on the CUSTOMER bench, whose Frappe/Redis
 versions vary. It must stay compatible down to **Frappe 15** and **Redis 6.0**.
-Do NOT reach for a Frappe >= 16/17-only RedisWrapper method (``expire_key``, the
-``use_local_cache`` get_value kwarg) or a Redis >= 6.2-only command (``GETDEL``,
+Do NOT reach for a RedisWrapper method missing from Frappe 15 (``expire_key``,
+the ``use_local_cache`` get_value kwarg) or a Redis >= 6.2-only command (``GETDEL``,
 ``GETEX``, ``COPY``, ``SINTERCARD``, ...) - use an inherited ``redis.Redis``
 builtin or a MULTI/EXEC transaction instead.
 """
@@ -34,6 +34,7 @@ import redis.exceptions
 
 _TTL_S = 900  # 15 min; a confirmation token the user must click within
 _PREFIX = "jarvis:pending_confirm:"
+_CLAIM_PREFIX = "jarvis:pending_confirm:claim:"
 # Per-owner index: a Redis set of the owner's currently-live token ids, so the
 # resync endpoint can enumerate a user's own parked confirmations after a reload
 # or reconnect. TTL discipline: dead members
@@ -48,6 +49,18 @@ def _key(token: str) -> str:
 
 def _owner_key(owner: str) -> str:
 	return _OWNER_PREFIX + owner
+
+
+def _claim_key(token: str) -> str:
+	return _CLAIM_PREFIX + token
+
+
+class PendingConfirmStorageError(RuntimeError):
+	"""Redis could not provide a definite pending-confirmation result."""
+
+
+class PendingConfirmOutcomeUnknown(PendingConfirmStorageError):
+	"""Redis may have committed a consume, but its durable claim is unreadable."""
 
 
 # --------------------------------------------------------------------------- #
@@ -181,8 +194,9 @@ def mint(
 		cache.set_value(_key(token), record, expires_in_sec=_TTL_S)
 		cache.sadd(_owner_key(owner), token)
 		# set_value swallows a redis blip, so confirm the record is really readable
-		# before we let a card be published against this token.
-		if peek(token) is None:
+		# before we let a card be published against this token. A strict read keeps
+		# an outage distinct from a genuine persist miss; both fail closed here.
+		if peek(token, strict=True) is None:
 			raise RuntimeError("pending-confirm record did not persist")
 	except Exception:
 		frappe.log_error(
@@ -203,9 +217,9 @@ def mint(
 	# NEVER fail the park: a record that already persisted + verified is live and
 	# confirmable whether or not this TTL lands, which is why it sits OUTSIDE the try
 	# above. Uses the raw redis ``expire`` on the make_key'd set key (present on every
-	# Frappe version) rather than ``RedisWrapper.expire_key`` - Frappe >= 17 only, whose
-	# AttributeError on a v15 bench was caught by the park's try/except and rolled back a
-	# good record, taking down every gated confirmation card.
+	# supported Frappe version) rather than ``RedisWrapper.expire_key``. That wrapper
+	# is absent on Frappe 15; its AttributeError was caught by the park's old broad
+	# exception handler and rolled back a good record, taking down every gated card.
 	try:
 		cache.expire(cache.make_key(_owner_key(owner)), _TTL_S)
 	except Exception as exc:
@@ -225,60 +239,113 @@ def mint(
 
 
 def _read_record(token: str, *, swallow: bool = True) -> dict | None:
-	"""Read the parked record straight from Redis, bypassing the worker-local
-	cache. Bypassing local is load-bearing: mint()'s post-persist verify must catch
-	the case where set_value swallowed a ConnectionError and the record never landed
-	in Redis (a local copy would falsely read as success), and consume() must never
-	act on a stale local snapshot. Version-portable: Frappe < 16's get_value has no
-	``use_local_cache`` kwarg (passing it TypeErrors on a v15 bench), so instead pop
-	any local entry (forces the read to miss local and hit Redis) and pass
-	``expires=True`` (the token key has a TTL) so the read does not repopulate local -
-	together equivalent to the v17-only ``use_local_cache=False``.
+	"""Read the parked record directly from Redis, bypassing local cache.
 
-	``swallow`` (default True): a RedisError on the read becomes None - the safe,
-	retryable outcome for peek/consume/mint-verify (not-consumable / not-found /
-	persist-miss->rollback), because get_value itself only suppresses ConnectionError,
-	not its TimeoutError sibling or ResponseError, so an uncaught one would be a 500.
-	``list_for_owner`` passes ``swallow=False`` so it can tell a TRANSIENT read blip
-	(skip, leave the member) apart from a genuinely-absent token (prune) - swallowing
-	there would orphan a still-live token from the index (the invisible-card class).
+	The raw inherited ``GET`` is intentional. ``RedisWrapper.get_value`` suppresses
+	``ConnectionError`` and returns ``None``, which makes an outage indistinguishable
+	from an expired token. It can also read a worker-local value. Reading the
+	make_key'd key directly and unpickling it keeps Frappe 15 compatibility while
+	preserving the distinction between "absent" and "storage unavailable".
+
+	When ``swallow`` is false, Redis failures become
+	``PendingConfirmStorageError``. Best-effort background callers may keep the
+	default; user-facing confirm and resync paths use strict reads.
 	"""
 	cache = frappe.cache()
-	frappe.local.cache.pop(cache.make_key(_key(token)), None)
+	full_key = cache.make_key(_key(token))
+	frappe.local.cache.pop(full_key, None)
 	try:
-		return cache.get_value(_key(token), expires=True)
-	except redis.exceptions.RedisError:
+		raw = cache.get(full_key)
+	except redis.exceptions.RedisError as exc:
 		if not swallow:
-			raise
+			raise PendingConfirmStorageError("pending-confirm record read failed") from exc
 		return None
+	return pickle.loads(raw) if raw is not None else None
 
 
-def peek(token: str) -> dict | None:
+def peek(token: str, *, strict: bool = False) -> dict | None:
 	"""Return the stored record (dict) without consuming it, or None if the
 	token is unknown/expired. Used to build the preview/UI event. Does NOT
-	validate ownership - callers that act on it must.
+	validate ownership - callers that act on it must. ``strict=True`` preserves
+	storage failures instead of presenting them as an unknown token.
 	"""
 	if not token:
 		return None
-	return _read_record(token)
+	return _read_record(token, swallow=not strict)
 
 
-def _get_and_delete(full_key) -> bytes | None:
-	"""Atomically read-and-remove a raw cache key, returning its pickled bytes (or
-	None if absent). Uses a MULTI/EXEC transaction (GET then DEL) rather than the
-	one-shot GETDEL command: GETDEL is redis-server >= 6.2 only, and a customer
-	bench may run older (a v6.0 server rejects it), whereas GET/DEL under MULTI/EXEC
-	run as one indivisible unit on EVERY redis version. That keeps the single-winner
-	consume guarantee - the server serializes the two transactions, so of two racing
-	confirms exactly one sees the value before DEL removes it - without the version
-	floor. ``full_key`` is the already-make_key'd key (raw redis, no re-namespacing),
-	matching what the previous getdel operated on.
+def _claim_matches(cache, full_claim_key, claim_id: str) -> tuple[bool, bytes | None]:
+	"""Return whether a durable consume claim belongs to this request."""
+	stored_claim, stored_record = cache.hmget(full_claim_key, "claim", "record")
+	if isinstance(stored_claim, bytes):
+		stored_claim = stored_claim.decode()
+	return stored_claim == claim_id, stored_record
+
+
+def _get_and_delete(full_key, full_claim_key, claim_id: str) -> bytes | None:
+	"""Atomically claim and remove a raw token key, returning its pickled record.
+
+	``WATCH`` + ``MULTI/EXEC`` is supported by the Redis 6.0 floor and preserves a
+	single winner without ``GETDEL`` (Redis 6.2+). The transaction also writes a
+	short-lived claim containing the record. That claim is load-bearing when the
+	server commits ``EXEC`` but the client loses its reply: the same request can
+	recover its result, while a racing request has a different claim id and cannot
+	dispatch the write a second time.
 	"""
-	pipe = frappe.cache().pipeline(transaction=True)
-	pipe.get(full_key)
-	pipe.delete(full_key)
-	raw, _deleted = pipe.execute()
-	return raw
+	cache = frappe.cache()
+	pipe = cache.pipeline(transaction=True)
+	exec_attempted = False
+	try:
+		pipe.watch(full_key, full_claim_key)
+		raw = pipe.get(full_key)
+		if raw is None or pipe.exists(full_claim_key):
+			pipe.unwatch()
+			return None
+		pipe.multi()
+		pipe.hset(full_claim_key, mapping={"claim": claim_id, "record": raw})
+		pipe.expire(full_claim_key, _TTL_S)
+		pipe.delete(full_key)
+		exec_attempted = True
+		pipe.execute()
+		return raw
+	except redis.exceptions.WatchError:
+		return None
+	except redis.exceptions.RedisError as exc:
+		if not exec_attempted:
+			raise PendingConfirmStorageError("pending-confirm consume failed before commit") from exc
+		# EXEC may have committed even though its response never reached this
+		# process. Recover only our own durable claim; never infer success merely
+		# because the token disappeared, since a concurrent request may have won.
+		try:
+			ours, claimed_raw = _claim_matches(cache, full_claim_key, claim_id)
+		except redis.exceptions.RedisError as recovery_exc:
+			raise PendingConfirmOutcomeUnknown(
+				"pending-confirm consume outcome could not be recovered"
+			) from recovery_exc
+		if ours and claimed_raw is not None:
+			frappe.logger("jarvis.pending_confirm").error(
+				"consume transaction reply was lost; recovered this request's durable claim: %s",
+				type(exc).__name__,
+			)
+			return claimed_raw
+		if claimed_raw is not None:
+			return None  # another request's durable claim won
+		try:
+			pending_raw = cache.get(full_key)
+		except redis.exceptions.RedisError as recovery_exc:
+			raise PendingConfirmOutcomeUnknown(
+				"pending-confirm consume outcome could not be recovered"
+			) from recovery_exc
+		if pending_raw is not None:
+			raise PendingConfirmStorageError("pending-confirm consume was not committed") from exc
+		# No token and no durable claim is an indeterminate partial transaction.
+		# Never dispatch from the earlier snapshot and never call it ordinary expiry.
+		raise PendingConfirmOutcomeUnknown("pending-confirm consume outcome is unknown") from exc
+	finally:
+		try:
+			pipe.reset()
+		except redis.exceptions.RedisError:
+			pass
 
 
 def consume(token: str, *, owner: str, conversation: str) -> dict | None:
@@ -294,8 +361,8 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	Atomicity: ownership is checked first with a plain (non-destructive)
 	read, so a mismatched call never touches the stored key. Only once
 	ownership matches do we delete - and that delete is an atomic
-	get-and-delete (``_get_and_delete``: GET then DEL inside one MULTI/EXEC
-	transaction, portable to redis < 6.2 which lacks GETDEL). If two
+	claim-and-delete (``_get_and_delete``: WATCH plus a claim + DEL inside one
+	MULTI/EXEC transaction, portable to Redis < 6.2 which lacks GETDEL). If two
 	confirmed consumes race each other here, the server serializes the two
 	transactions: exactly one gets the pickled record back, the other gets
 	None. That is the single-use guarantee - it does not depend on
@@ -304,7 +371,7 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	"""
 	if not token:
 		return None
-	record = _read_record(token)
+	record = _read_record(token, swallow=False)
 	if not record:
 		return None
 	# Owner is the real security boundary and is always enforced.
@@ -322,35 +389,17 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	if stored_conv and stored_conv != conversation:
 		return None
 
-	full_key = frappe.cache().make_key(_key(token))
+	cache = frappe.cache()
+	full_key = cache.make_key(_key(token))
+	full_claim_key = cache.make_key(_claim_key(token))
 	# Atomic get-and-delete. GETDEL would be the one-command way but it is
 	# redis-server >= 6.2 ONLY, and a customer bench may run older (a v6.0 server
-	# rejects it outright) - so _get_and_delete uses a MULTI/EXEC transaction
-	# (GET then DEL as one indivisible unit) instead. That keeps the single-winner
-	# guarantee (of two concurrent confirms exactly one sees the value before DEL
-	# removes it) while working on every redis version; a plain get-then-delete
-	# would reopen the very race the atomicity exists to close.
-	try:
-		raw = _get_and_delete(full_key)
-	except redis.exceptions.RedisError as exc:
-		# ANY redis-level failure on the burn must degrade to a graceful None, NOT a
-		# 500 on the whitelisted Confirm endpoint: a transient blip (ConnectionError),
-		# a socket timeout (TimeoutError - a SIBLING of ConnectionError, not a
-		# subclass, so the old narrow tuple missed it), or a degraded-write state
-		# (ResponseError - -MISCONF stop-writes-on-bgsave-error, a read-only replica)
-		# under which the DEL inside the transaction errors. None => not-consumable
-		# => retryable InvalidConfirmation, and the token is NOT burned (the DEL never
-		# applied), so a retry against a healthy cache still succeeds. Breadcrumb at
-		# .error (NOT frappe.log_error - that floods the DB Error Log under a sustained
-		# outage; and NOT .warning - a PROD bench's default log level is ERROR, so a
-		# warning is filtered out and never written) so a tenant-wide "Confirm does
-		# nothing" incident is greppable in the log file and distinguishable from
-		# ordinary token expiry.
-		frappe.logger("jarvis.pending_confirm").error(
-			"consume burn failed; treating as not-consumable (retryable): %s",
-			type(exc).__name__,
-		)
-		return None
+	# rejects it outright) - so _get_and_delete uses WATCH + a MULTI/EXEC transaction
+	# (durable claim then DEL as one indivisible unit) instead. That keeps the
+	# single-winner guarantee (of two concurrent confirms exactly one claims the
+	# record before DEL removes it) while working on every supported Redis version;
+	# a plain get-then-delete would reopen the very race the atomicity exists to close.
+	raw = _get_and_delete(full_key, full_claim_key, secrets.token_urlsafe(18))
 	frappe.local.cache.pop(full_key, None)
 	if raw is None:
 		return None
@@ -366,7 +415,7 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	return pickle.loads(raw)
 
 
-def list_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
+def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool = False) -> list[dict]:
 	"""Return the owner's currently-live parked records (each with its ``token``
 	attached), newest-first is NOT guaranteed. Reads the per-owner index, peeks
 	each token, and:
@@ -377,7 +426,9 @@ def list_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
 	    records ("") which carry no binding and surface under any filter (F1).
 
 	Never returns another user's tokens. Used by the resync endpoint so the SPA
-	can re-surface confirmation cards after a reload/reconnect.
+	can re-surface confirmation cards after a reload/reconnect. ``strict=True``
+	raises on any index/record read failure so a user-facing resync cannot mistake
+	an outage for an authoritative empty or partial list.
 	"""
 	if not owner:
 		return []
@@ -386,7 +437,12 @@ def list_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
 			m.decode() if isinstance(m, bytes) else m
 			for m in (frappe.cache().smembers(_owner_key(owner)) or set())
 		}
-	except Exception:
+	except redis.exceptions.RedisError as exc:
+		frappe.logger("jarvis.pending_confirm").error(
+			"owner confirmation index read failed: %s", type(exc).__name__
+		)
+		if strict:
+			raise PendingConfirmStorageError("pending-confirm owner index read failed") from exc
 		return []
 	if not members:
 		return []
@@ -395,11 +451,17 @@ def list_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
 	for token in members:
 		try:
 			record = _read_record(token, swallow=False)
-		except redis.exceptions.RedisError:
+		except PendingConfirmStorageError as exc:
 			# TRANSIENT read blip on this token (Redis reachable enough for smembers,
 			# but this GET failed). Do NOT prune - the record may still be live, and
 			# pruning would orphan it from the index (invisible to every future resync
 			# for its full TTL). Skip it this round; a later clean resync re-surfaces it.
+			frappe.logger("jarvis.pending_confirm").error(
+				"owner confirmation record read failed; card was retained for retry: %s",
+				type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
+			)
+			if strict:
+				raise
 			continue
 		if not record:
 			dead.append(token)
@@ -463,7 +525,7 @@ def _pending_item(
 	}
 
 
-def list_items_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
+def list_items_for_owner(owner: str, conversation: str | None = None, *, strict: bool = False) -> list[dict]:
 	"""Client-facing pending-confirmation items for ``owner`` (optionally filtered to
 	``conversation``), each built through the shared ``_pending_item`` shape so the
 	resync endpoint and the ``run:end`` terminal cannot drift: a card missed on the
@@ -480,7 +542,7 @@ def list_items_for_owner(owner: str, conversation: str | None = None) -> list[di
 			run_id=r.get("run_id"),
 			expires_at=r.get("expires_at"),
 		)
-		for r in list_for_owner(owner, conversation=conversation)
+		for r in list_for_owner(owner, conversation=conversation, strict=strict)
 	]
 
 
@@ -504,6 +566,12 @@ def clear_for_conversation(owner: str, conversation: str, run_id: str | None = N
 			continue  # list_for_owner surfaces conv-less tokens under any filter
 		if run_id and rec.get("run_id") and rec.get("run_id") != run_id:
 			continue  # a sibling run's card (run_id is "" today, so this no-ops)
-		if consume(rec["token"], owner=owner, conversation=conversation) is not None:
-			n += 1
+		try:
+			if consume(rec["token"], owner=owner, conversation=conversation) is not None:
+				n += 1
+		except PendingConfirmStorageError as exc:
+			frappe.logger("jarvis.pending_confirm").error(
+				"conversation confirmation cleanup failed; token retained when possible: %s",
+				type(exc).__name__,
+			)
 	return n

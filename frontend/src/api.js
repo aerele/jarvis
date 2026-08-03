@@ -157,15 +157,16 @@ export const applyAction = (action) =>
 // Write-safety gate (issue #186): confirm a parked ERP write by its one-time
 // token. Pass the conversation the click came from so the server enforces the
 // real conversation guard (#11). Returns the tool result envelope {ok, ...} on
-// success, or {ok:False, error:{type:"InvalidConfirmation", ...}} if the token
-// is gone.
+// success. A gone token returns InvalidConfirmation; a Redis outage returns a
+// ConfirmationUnavailableError/ConfirmationOutcomeUnknownError that the UI must
+// keep on screen because the business action did not run in that request.
 export const confirmTool = (token, conversation) =>
 	call(AC + "confirm_tool", { token, conversation: conversation || "" });
 // Discard a parked ERP write by its one-time token: consumes the token (so it
 // can't replay or re-surface on reload), leaves a durable "discarded" receipt
 // chip in the transcript, and queues a note so the agent's next turn learns it
 // was vetoed. Returns {ok, data:{status:"discarded"|"already_handled"}}; the SPA
-// drops the card either way.
+// drops the card for those success states; storage-error envelopes retain it.
 export const dismissTool = (token, conversation) =>
 	call(AC + "dismiss_tool", { token, conversation: conversation || "" });
 // Resync (issue #186, R3 fix for #3): re-surface the caller's own currently
