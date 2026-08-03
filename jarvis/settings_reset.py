@@ -89,8 +89,10 @@ CONNECTION = ResetSpec(
 		# would keep failing OPEN through the new tenancy's provisioning
 		# (account._has_been_chat_ready) - i.e. the reset site, whose container is
 		# the one thing that definitely is not serving yet, would be the one told
-		# its chat is fine. It re-earns the marker on its first real Ready.
+		# its chat is fine. It re-earns the marker on its first real Ready. The
+		# authority the claim was bound to goes with it.
 		"chat_was_ready_at",
+		"chat_ready_authority",
 		"agent_token_issued_at",
 		"custom_skills_synced_at",
 		"agent_skills_synced_at",

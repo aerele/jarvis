@@ -115,6 +115,27 @@ test("degradedMessage: an unconfirmed readiness verdict says retry, not 'ask you
   );
 });
 
+// P2-02: this widget is white-labelled, so the unconfirmed sentence must name the
+// configured agent, not a hardcoded "Jarvis". The caller passes the boot name;
+// "Jarvis" is only the fallback for a workspace that set none.
+test("degradedMessage: the unconfirmed sentence uses the configured agent name", () => {
+  const named = degradedMessage(
+    { ready: false, reason: "readiness_unconfirmed" },
+    "Aria"
+  );
+  assert.match(named, /Aria/);
+  assert.doesNotMatch(named, /Jarvis/);
+  // No name configured -> the fallback brand.
+  assert.match(
+    degradedMessage({ ready: false, reason: "readiness_unconfirmed" }, ""),
+    /Jarvis/
+  );
+  assert.match(
+    degradedMessage({ ready: false, reason: "readiness_unconfirmed" }),
+    /Jarvis/
+  );
+});
+
 // The reason set belongs to account.py. Printing a raw detail for a reason this
 // module does not recognise would leak whatever wording a future backend change
 // happens to attach, into a banner written for a different situation.

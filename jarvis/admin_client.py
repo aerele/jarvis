@@ -1612,9 +1612,14 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	# fell through to AdminUnreachableError - losing the rate-limit
 	# category entirely. 401/403/429 always win.
 	if resp.status_code in (401, 403):
+		# Carry admin's structured ``error.code`` when the refusal envelope has one,
+		# so callers branch on a stable token rather than the human sentence a
+		# hardened control plane may omit (jarvis.account._is_never_paid_403).
+		err_obj = (envelope or {}).get("error", {}) if isinstance(envelope, dict) else {}
 		raise AdminAuthError(
 			_envelope_message() or f"admin returned {resp.status_code}",
 			status_code=resp.status_code,
+			code=(err_obj.get("code") or "") if isinstance(err_obj, dict) else "",
 		)
 	if resp.status_code == 429:
 		err = (envelope or {}).get("error", {}) if isinstance(envelope, dict) else {}

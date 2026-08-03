@@ -70,8 +70,13 @@ const GENERIC_DEGRADED =
 // to GENERIC_DEGRADED, which tells the customer to ask an administrator to
 // finish reconnecting - wrong twice over, since nothing is misconfigured and no
 // administrator can shorten an outage.
-const UNCONFIRMED_DEGRADED =
-  "We couldn't confirm Jarvis is ready, so replies may fail. This usually clears in a moment - try again shortly.";
+//
+// Named for the configured agent (P2-02): this surface is white-labelled, so a
+// hardcoded "Jarvis" leaks our brand onto a customer who renamed the assistant.
+// The caller passes window.frappe.boot.jarvis_agent_name; "Jarvis" is the
+// fallback for a workspace that set none.
+const unconfirmedDegraded = (agentName) =>
+  `We couldn't confirm ${agentName} is ready, so replies may fail. This usually clears in a moment - try again shortly.`;
 
 // Copy for the degraded banner, structured to match steps.js's suspensionNotice
 // so the two surfaces cannot drift apart on the same verdict.
@@ -94,11 +99,13 @@ const UNCONFIRMED_DEGRADED =
 //                           an unrecognised reason: the reason set is owned by
 //                           account.py and a future addition would leak
 //                           whatever wording it happens to carry.
-export function degradedMessage(resp) {
+export function degradedMessage(resp, agentName = "Jarvis") {
   const reason = (resp && resp.reason) || "";
   const detail = (resp && resp.detail) || "";
+  const brand = (agentName || "").trim() || "Jarvis";
   if (reason === "subscription_suspended") return detail || SUSPENDED_FALLBACK;
   if (reason === "container_provisioning") return detail || GENERIC_DEGRADED;
-  if (reason === "readiness_unconfirmed") return detail || UNCONFIRMED_DEGRADED;
+  if (reason === "readiness_unconfirmed")
+    return detail || unconfirmedDegraded(brand);
   return GENERIC_DEGRADED;
 }

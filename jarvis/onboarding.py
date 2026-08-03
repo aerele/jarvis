@@ -95,6 +95,10 @@ def write_connection(data: dict) -> None:
 	from jarvis._password_utils import set_settings_password
 
 	s = frappe.get_single("Jarvis Settings")
+	# Capture the container this workspace pointed at BEFORE this write, so a
+	# reconnect that repoints it can be told apart from a daily sync that rewrites
+	# the same URL (which must not disturb an established claim).
+	_old_agent_url = (s.get("agent_url") or "").strip()
 	if data.get("api_key"):
 		set_settings_password(s, "jarvis_admin_api_key", data["api_key"])
 	if data.get("api_secret"):
@@ -114,8 +118,20 @@ def write_connection(data: dict) -> None:
 		set_settings_password(s, "agent_token", data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them.
-	if any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password")):
+	principal_change = any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password"))
+	if principal_change:
 		admin_client.clear_cached_token()
+	# End the established chat-Ready claim when this write repoints the workspace at
+	# a DIFFERENT admin principal or a DIFFERENT container (review P0-06): the
+	# workspace admin confirmed Ready is no longer the one we are about to serve, so
+	# the marker must not carry a fail-open verdict across the boundary. A daily
+	# sync that rewrites the SAME agent_url with no new principal is left alone -
+	# clearing there would eject every established customer once a day. The
+	# authority anchor is the mechanical backstop; this is the explicit intent.
+	container_change = bool(data.get("agent_url")) and data["agent_url"].strip() != _old_agent_url
+	if principal_change or container_change:
+		s.db_set("chat_was_ready_at", None)
+		s.db_set("chat_ready_authority", "")
 	# This is the write that can point the workspace at a DIFFERENT container or a
 	# different admin principal, so any cached readiness verdict describes a
 	# connection that is no longer the current one.
@@ -865,6 +881,13 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	settings.db_set("agent_url", "")
 	clear_settings_password(settings, "agent_token")
 	clear_credentials()
+	# End the established chat-Ready claim BEFORE the fail-open policy can see it
+	# (review P0-06). This is the self-serve rebuild path: the container is being
+	# torn down and replaced, so the workspace admin confirmed Ready no longer
+	# exists. Clearing agent_url above already moves the authority anchor, but the
+	# marker is cleared explicitly too so the intent is not left to a side effect.
+	settings.db_set("chat_was_ready_at", None)
+	settings.db_set("chat_ready_authority", "")
 	settings.db_set(
 		"last_sync_status", _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS
 	)
