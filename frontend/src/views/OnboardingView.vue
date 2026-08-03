@@ -653,16 +653,12 @@
 										Checking payment options…
 									</div>
 									<div
-										v-else-if="state.paymentProvider"
+										v-else-if="securedProviderLabel"
 										class="mx-auto mt-3.5 flex max-w-[560px] items-center justify-center gap-1.5 text-center text-xs text-ink-gray-5"
 									>
 										<FeatherIcon name="lock" class="h-3.5 w-3.5" />
 										Secured by
-										{{
-											state.paymentProvider === "cashfree"
-												? "Cashfree"
-												: "Razorpay"
-										}}
+										{{ securedProviderLabel }}
 									</div>
 									<!-- Provider discovery failed (P2-6): never present a gateway
 										 the control plane did not confirm. Offer a Retry instead. -->
@@ -1162,6 +1158,17 @@ const isTrialPlan = computed(() => trialDays.value > 0);
 // single enabled gateway a radiogroup of one is noise: it asks the customer to
 // decide something already decided, and the "Secured by X" line below already
 // names it. Free/trial plans collect no payment at all.
+// The only gateways this wizard can render a chip for and hand a sheet to. The
+// chooser template hard-codes a Razorpay and a Cashfree chip and the checkout
+// dispatcher knows only those two families, so this is the closed set the
+// provider discovery is narrowed against (D10) - never a value the SPA cannot open.
+const KNOWN_PROVIDERS = ["razorpay", "cashfree"];
+// The customer-facing gateway name, or "" for anything not in the known set - so
+// the "Secured by …" line fails CLOSED (renders nothing) rather than defaulting to
+// "Razorpay" for a provider that is not Razorpay (D10).
+const providerLabel = (p) => (p === "razorpay" ? "Razorpay" : p === "cashfree" ? "Cashfree" : "");
+const securedProviderLabel = computed(() => providerLabel(state.paymentProvider));
+
 const providerChoices = computed(() => state.availableProviders || []);
 // Two terms the old template carried are gone, both leftovers of features that
 // were removed (the free plan; dev-signup/sandbox mode) whose identifiers no
@@ -1209,7 +1216,16 @@ async function loadPaymentProviders() {
 	state.providersError = false;
 	try {
 		const r = (await listPaymentProviders()) || {};
-		const providers = Array.isArray(r.providers) ? r.providers.filter(Boolean) : [];
+		// Narrow to the gateways this wizard can actually render and open (D10). The
+		// chooser draws a Razorpay/Cashfree chip and the checkout dispatcher only
+		// knows those two families, so a third gateway the control plane names would
+		// otherwise pass `.filter(Boolean)`, enable the CTA, render an EMPTY chooser
+		// box (no chip matches), and mislabel the "Secured by …" line - then Pay would
+		// post a provider the SPA cannot open. Fail closed instead: an unknown-only
+		// answer narrows to nothing and takes the unavailable/Retry path below.
+		const providers = (Array.isArray(r.providers) ? r.providers : []).filter((p) =>
+			KNOWN_PROVIDERS.includes(p)
+		);
 		if (!providers.length) {
 			state.availableProviders = [];
 			state.paymentProvider = "";
@@ -2323,14 +2339,16 @@ onMounted(async () => {
 	loadPaymentProviders();
 	window.addEventListener("pageshow", onCheckoutPageShow);
 	document.addEventListener("visibilitychange", onCheckoutVisibility);
-	await reconcileMidFlightSignup();
-	// Clear any stale external-checkout marker UNCONDITIONALLY on mount unless a
-	// sheet is genuinely open/confirming (X3): a leftover from a prior attempt must
-	// not survive into this session to trigger a returnFromCheckout during a later
-	// live sheet.
+	// Clear any stale external-checkout marker BEFORE the first await (X3). Left
+	// after `await reconcileMidFlightSignup()`, a visibilitychange/pageshow firing
+	// during that await could honour a prior attempt's leftover marker. A fresh
+	// mount is never mid-sheet (state is review until a sheet is opened), so this
+	// only ever drops a genuinely stale marker; a bfcache restore does not re-run
+	// onMounted, so a live restored sheet is untouched.
 	if (pay.value.value !== S.CHECKOUT_OPEN && pay.value.value !== S.CONFIRMING) {
 		clearExternalCheckoutNav();
 	}
+	await reconcileMidFlightSignup();
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"
 	// and skip it (the step-entry watch still covers every other path).

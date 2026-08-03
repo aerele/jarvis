@@ -36,6 +36,7 @@ import {
 	EVENTS,
 	STATES,
 	canOpenCheckout,
+	canSafelyRestart,
 	handlesForProvider,
 	initialState,
 	reduce,
@@ -293,16 +294,19 @@ export function createPaymentFlow(deps) {
 	 * NOT read "has llm_credentials" as "has paid".
 	 */
 	async function hydrate() {
-		// X5 / B2-6: a FROZEN checkout_open (a cancelInFlight abandoned the opener,
-		// or a torn-down instance left the state stuck) with NO live opener behind it
-		// must not trap the customer on "Opening secure checkout…" forever. hydrate
-		// otherwise refuses to leave a live sheet (the passive-read rule below); this
-		// narrow exception fires ONLY when nothing is actually opening, taking the
-		// explicit, safe RETURNED_FROM_CHECKOUT exit so the read below reconciles
-		// truth. Scoped to checkout_open (a confirming state is bounded by the
-		// confirm's own deadline and must not be unseated by a passive read), and it
-		// does NOT weaken the normal refusal: a genuinely live sheet keeps openInFlight
-		// true and is still protected.
+		// X5 / B2-6: a FROZEN checkout_open (a hard teardown - leaving Pay via
+		// returnFromCheckout, or an unmounted/torn-down instance - abandoned the opener
+		// and left the state stuck) with NO live opener behind it must not trap the
+		// customer on "Opening secure checkout…" forever. Only a teardown that bumps
+		// disposeEpoch clears openInFlight; a REFUSED restart deliberately does NOT
+		// (D3), so a live post-deadline sheet keeps openInFlight true and is never
+		// mistaken for a frozen one here. hydrate otherwise refuses to leave a live
+		// sheet (the passive-read rule below); this narrow exception fires ONLY when
+		// nothing is actually opening, taking the explicit, safe RETURNED_FROM_CHECKOUT
+		// exit so the read below reconciles truth. Scoped to checkout_open (a confirming
+		// state is bounded by the confirm's own deadline and must not be unseated by a
+		// passive read), and it does NOT weaken the normal refusal: a genuinely live
+		// sheet keeps openInFlight true and is still protected.
 		if (state.value.value === STATES.CHECKOUT_OPEN && !openInFlight) {
 			apply({ type: EVENTS.RETURNED_FROM_CHECKOUT }); // now UNKNOWN; the read below reconciles
 		}
@@ -561,10 +565,18 @@ export function createPaymentFlow(deps) {
 					true
 				);
 			},
-			() => {
-				// A late open-FAILURE after we already timed out and reconciled: the
-				// timeout path left a checkable recovery; there is nothing to add.
+			async () => {
+				// A late open-FAILURE after we already timed out and reconciled (D6). The
+				// sheet is GONE, but the timeout path left checkoutMayBeOpen=true (the veto
+				// that keeps initiate off over a maybe-live sheet). Nothing else lifts it:
+				// no reducer path clears it from `unknown` - RETURNED_FROM_CHECKOUT is a
+				// no-op there - so without firing CHECKOUT_SHEET_CLOSED here the customer's
+				// only escape was a full page reload. Fire it (fenced exactly like the
+				// success continuation) to lift the veto and require a check, then reconcile.
 				openInFlight = false;
+				if (!deadlineFired || myDispose !== disposeEpoch) return;
+				apply({ type: EVENTS.CHECKOUT_SHEET_CLOSED, ...identity });
+				await reconcileAfterFailure();
 			}
 		);
 
@@ -631,7 +643,16 @@ export function createPaymentFlow(deps) {
 	// checkoutMayBeOpen veto. Both then reconcile server truth.
 	async function settleSheetResult(out, identity, isLive, late) {
 		if (!out || !isLive()) return;
-		if (out.leavesPage) return; // Cashfree mandate: the browser is redirecting away
+		if (out.leavesPage) {
+			// An in-time leavesPage is a genuine redirect: the browser is navigating
+			// away, nothing more to do. But a LATE one (post-deadline continuation)
+			// arrives on a page that already timed out and is holding the
+			// checkoutMayBeOpen veto; if the redirect does not actually take (a blocked
+			// navigation, a returned bfcache), that veto would latch initiate off
+			// forever (D6). Lift it the same way a late dismiss does.
+			if (late) apply({ type: EVENTS.CHECKOUT_SHEET_CLOSED, ...identity });
+			return;
+		}
 		if (out.status === "dismissed") {
 			apply({
 				type: late ? EVENTS.CHECKOUT_SHEET_CLOSED : EVENTS.CHECKOUT_DISMISSED,
@@ -863,7 +884,16 @@ export function createPaymentFlow(deps) {
 	// caller uses `reset` to decide whether editing details is safe or the customer
 	// should stay on their recovery card.
 	function restart() {
-		cancelInFlight();
+		// Consult the reset predicate FIRST and tear down ONLY on the reset branch
+		// (D3). cancelInFlight bumps disposeEpoch, which is the exact fence the X1 late
+		// continuation rides on: an unconditional cancel here dropped a genuine
+		// post-deadline confirm whenever the restart was REFUSED (money may still be
+		// recoverable, so the customer is correctly kept on recovery - but the sheet
+		// they are still in can settle success later, and that must not be abandoned).
+		// canSafelyRestart is the same predicate the RESTART reducer gates on, so the
+		// teardown decision and `reset` can never disagree.
+		const willReset = canSafelyRestart(state.value);
+		if (willReset) cancelInFlight();
 		const after = apply({ type: EVENTS.RESTART });
 		return { reset: after.value === STATES.REVIEW };
 	}

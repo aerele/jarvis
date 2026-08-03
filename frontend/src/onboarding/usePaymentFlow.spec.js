@@ -1753,3 +1753,97 @@ describe("X5 / B2-6: a frozen checkout_open with no live opener", () => {
 		await p;
 	});
 });
+
+describe("bench re-probe: late-continuation vs recovery actions", () => {
+	const flush = async () => {
+		for (let i = 0; i < 80; i++) await Promise.resolve();
+	};
+
+	test("D3: a REFUSED restart preserves the late continuation - a later success still confirms once", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		// After the timeout, the reconcile answers a plain PENDING (the makeApi
+		// default) - a state that is NOT restart-safe, so "Start again" is refused.
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.checkoutMayBeOpen).toBe(true);
+		// The customer taps "Start again" while the sheet is still open. Money may be
+		// recoverable, so it is REFUSED (the customer stays on recovery).
+		const { reset } = flow.restart();
+		expect(reset).toBe(false);
+		// The still-open sheet finally succeeds AFTER the refused restart. Pre-fix,
+		// restart's UNCONDITIONAL cancelInFlight bumped disposeEpoch and fenced this
+		// continuation out entirely (0 confirms - the money was lost). Post-fix it runs.
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+
+	test("D6: a late sheet FAILURE lifts the may-be-open veto instead of latching it forever", async () => {
+		let rejectSheet;
+		const openCheckout = vi.fn(() => new Promise((_res, rej) => (rejectSheet = rej)));
+		const { flow, api } = makeFlow({ openCheckout, options: { openDeadlineMs: 10 } });
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.checkoutMayBeOpen).toBe(true);
+		const checksBefore = api.checkSignupPaymentStatus.mock.calls.length;
+		// The still-open sheet finally FAILS (an SDK error) long after our deadline.
+		rejectSheet(new Error("sdk exploded late"));
+		await flush();
+		// Pre-fix the rejection handler only cleared openInFlight and never fired
+		// CHECKOUT_SHEET_CLOSED, so checkoutMayBeOpen latched true forever - canInitiate
+		// dead, the only escape a full reload. Post-fix the veto lifts and a check runs.
+		expect(flow.state.value.checkoutMayBeOpen).toBe(false);
+		expect(api.checkSignupPaymentStatus.mock.calls.length).toBeGreaterThan(checksBefore);
+		expect(api.confirmSignupPayment).not.toHaveBeenCalled();
+	});
+
+	test("D7: a late success at confirm_required completes the confirm, not an illegal limbo", async () => {
+		let resolveSheet;
+		const openCheckout = vi.fn(() => new Promise((r) => (resolveSheet = r)));
+		const api = makeApi({
+			// After the timeout, a status Check resolves the intent to authorized-
+			// pending-confirm (a very likely real answer) -> state confirm_required.
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_AUTHORIZED_PENDING_CONFIRM,
+					attempt_id: "att_1",
+					generation: 1,
+					can_initiate_payment: false,
+				})
+			),
+			confirmSignupPayment: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					subscription_status: "Active",
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		// strict:false to observe PRODUCTION behaviour (illegal transitions counted,
+		// not thrown) - the exact shape the probe measured.
+		const { flow } = makeFlow({
+			api,
+			openCheckout,
+			options: { openDeadlineMs: 10, strict: false },
+		});
+		const p = flow.submitReview(SIGNUP);
+		await new Promise((r) => setTimeout(r, 30));
+		await p;
+		expect(flow.state.value.value).toBe(STATES.CONFIRM_REQUIRED);
+		// The still-open sheet finally succeeds, landing at confirm_required. Pre-fix
+		// GATEWAY_CALLBACK and CONFIRM_SUCCEEDED were BOTH illegal from there: the money
+		// was confirmed (1 call) but 2 illegal transitions accrued and the customer was
+		// stranded on the pending card. Post-fix it drives confirm -> paid cleanly.
+		resolveSheet({ status: CHECKOUT_SUCCESS, payload: { razorpay_payment_id: "pay_late" } });
+		await flush();
+		expect(api.confirmSignupPayment).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.PAID);
+		expect(flow.state.value.illegalTransitions).toBe(0);
+	});
+});

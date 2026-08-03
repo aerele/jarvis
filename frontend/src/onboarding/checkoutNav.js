@@ -32,10 +32,14 @@ export function shouldHonorCheckoutReturn({ marker, inCheckout, attemptId } = {}
 	// A return only makes sense while a sheet is actually open/confirming - a stray
 	// pageshow in any other state is not a checkout return.
 	if (!inCheckout) return false;
-	// A marker stamped for a DIFFERENT attempt is attempt N's stale leftover: never
-	// honour it against attempt N+1's live sheet (the confirm-drop). An empty/absent
-	// current attemptId cannot disprove a match, so the marker is allowed then (it
-	// is all we have to go on, and the state guard above already bounds it).
-	if (attemptId != null && attemptId !== "" && marker !== String(attemptId)) return false;
-	return true;
+	// Honour ONLY a marker we can POSITIVELY match to the live sheet's attempt.
+	// A marker stamped for a DIFFERENT attempt is attempt N's stale leftover, and a
+	// live attemptId that is null/"" cannot prove the marker is ours either - so
+	// honouring on an unknown attempt (the X3 residual) let a stale marker drive a
+	// returnFromCheckout that dropped attempt N+1's LIVE confirm. Fail closed: no
+	// verifiable attempt match, no honour. A genuine bfcache-restored sheet carries
+	// its own attemptId, so this refuses only the unverifiable case.
+	const live = attemptId == null ? "" : String(attemptId);
+	if (!live) return false;
+	return marker === live;
 }

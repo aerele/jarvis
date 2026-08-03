@@ -118,6 +118,17 @@ const GATEWAY_EVENT_SOURCES = new Set([
 	STATES.UNKNOWN,
 	STATES.FAILED_RETRYABLE,
 ]);
+// GATEWAY_CALLBACK has ONE extra legal source over the rest: confirm_required
+// (D7). A post-deadline sheet SUCCESS (the X1 late continuation) can land after a
+// status Check has already resolved the intent to PAYMENT_AUTHORIZED_PENDING_
+// CONFIRM. The authorization exists and the late callback carries the very
+// gateway payment id + signature that confirms it, so it must be allowed to drive
+// the confirm (-> confirming -> paid) rather than counting as an illegal
+// transition and stranding the customer on the pending card while the money IS
+// taken. Kept separate from GATEWAY_EVENT_SOURCES so dismiss/checkout-failed do
+// NOT gain confirm_required (those must never act on a settled recovery). The
+// identity fence (callbackStale) still rejects a genuinely superseded callback.
+const GATEWAY_CALLBACK_SOURCES = new Set([...GATEWAY_EVENT_SOURCES, STATES.CONFIRM_REQUIRED]);
 const DISMISS_SOURCES = new Set([STATES.CHECKOUT_OPEN]);
 const RETURN_SOURCES = new Set([STATES.CHECKOUT_OPEN, STATES.CONFIRMING]);
 
@@ -460,7 +471,7 @@ export function reduce(state, event, opts = {}) {
 		case EVENTS.GATEWAY_CALLBACK: {
 			if (PAID_FLOOR.has(state.value)) return state;
 			if (callbackStale(state, event)) return state;
-			if (!GATEWAY_EVENT_SOURCES.has(state.value)) {
+			if (!GATEWAY_CALLBACK_SOURCES.has(state.value)) {
 				return illegal(state, strict, "gateway callback from a settled state");
 			}
 			// A callback arriving means the sheet closed - clear any "may still be
