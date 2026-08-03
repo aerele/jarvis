@@ -3309,11 +3309,13 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 			},
 			update_modified=False,
 		)
-		# Deliberately NOT committed. set_password writes an __Auth row, and a
-		# committed one outlives the rollback that makes these tests safe to run
-		# against a real site - the exact hazard filed as #566. The write is
-		# visible to this connection uncommitted, which is all the gate needs.
-		settings.set_password("llm_api_key", "sk-test-direct")
+		# db_set, not the password store, and deliberately NOT committed. db_set on
+		# a Password field writes the plaintext column and never touches __Auth
+		# (jarvis/_password_utils.py), and get_password prefers that column, so this
+		# is all the gate reads. It also leaves no __Auth row to outlive the rollback
+		# that makes these tests safe to run against a real site - the exact hazard
+		# filed as #566.
+		settings.db_set("llm_api_key", "sk-test-direct", update_modified=False)
 		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
 
 		with patch(self._READINESS_PROBE, return_value=("Ready", "")):
