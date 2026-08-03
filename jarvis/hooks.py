@@ -384,6 +384,11 @@ scheduler_events = {
 		# rate is high enough to suggest a sick gateway (deduped to roughly
 		# once a day inside the function).
 		"jarvis.chat.turn_recovery.recovery_rate_watch",
+		# Plan-05 D2 (review P0-04): revoke + erase expired, unsaved pending OAuth
+		# captures so an abandoned chat-subscription sign-in never leaves a live
+		# provider token at rest. Retries transient revoke failures under a bounded
+		# attempt ceiling, then alerts.
+		"jarvis.oauth.pending_capture.sweep_expired",
 	],
 	"daily": [
 		"jarvis.onboarding.sync_connection",

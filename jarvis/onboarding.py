@@ -293,13 +293,32 @@ def _coalesce_subscription_models(models: list) -> list:
 
 
 @frappe.whitelist()
-def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: str = "failover") -> dict:
+def save_llm_pool(
+	models: str | list,
+	preset: str | None = None,
+	routing_mode: str = "failover",
+	idempotency_key: str | None = None,
+) -> dict:
 	"""Write the customer's multi-model LLM pool into Jarvis Settings.models[]
 	(+ preset, routing_mode) and let the existing on_update pipeline validate
 	(validate_models), derive pool_mode/proxy_active, mirror models[0] into legacy llm_*,
 	and sync DIRECT (/llm-creds) vs PROXY (/llm-pool) via admin.
 
-	``models`` MUST stay annotated: with Frappe's
+	Freshly-connected chat-subscription accounts arrive as an opaque
+	``capture_id`` (never the raw OAuth blob - the minted token stayed
+	server-side; review P0-04); this ADOPTS each capture exactly once into the
+	saved config.
+
+	For a POOL config the /llm-pool push is SYNCHRONOUS (plan-05 D2, Fable ruling
+	/ review P0-02): the durable apply-operation descriptor admin creates in the
+	same transaction as its desired-state write comes back under
+	``apply_operation`` so the SPA follows ONE operation across
+	save -> apply -> readiness. ``idempotency_key`` (opaque, per Start-chatting
+	attempt) makes a double-click / lost-response resume converge on that same
+	operation with no new desired version. A single-model config keeps the
+	async creds path and returns ``apply_operation: null`` with ``mode: "legacy"``.
+
+	All params MUST stay annotated: with Frappe's
 	``require_type_annotated_api_methods`` enforced (declared in hooks.py),
 	an un-annotated whitelisted param 500s the request before the body runs
 	(JARVIS-2026-07-08 incident, fault a).
@@ -329,6 +348,11 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 		_model_accounts,
 		normalize_provider,
 	)
+	from jarvis.oauth import pending_capture
+
+	# capture_ids adopted this save, so consumed_by_operation can be recorded once
+	# admin hands the durable descriptor back (audit only).
+	consumed_capture_ids: list[str] = []
 
 	s = frappe.get_single("Jarvis Settings")
 
@@ -382,7 +406,27 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 			merged_accounts = []
 			for a in (sub or {}).get("accounts") or []:
 				a = dict(a)
-				if not (a.get("oauth_blob") or "").strip():
+				# A freshly-connected account carries an opaque capture_id (never the
+				# raw blob - the token stayed server-side; review P0-04). ADOPT the
+				# durable capture exactly once: consume_capture atomically claims it
+				# and returns the decrypted blob, which lands here and is persisted
+				# ENCRYPTED into subscription_accounts by the save below - all in this
+				# one request transaction, so the blob either moved into the saved
+				# config AND the capture was burned, or neither did.
+				cap_id = (a.pop("capture_id", "") or "").strip()
+				if cap_id:
+					try:
+						a["oauth_blob"] = pending_capture.consume_capture(cap_id)
+						consumed_capture_ids.append(cap_id)
+					except pending_capture.CaptureAlreadyConsumed:
+						# Resume (SPA re-called save with the same idempotency_key and
+						# the same payload): the first attempt already moved this blob
+						# into the stored config, so fall back to it rather than
+						# hard-failing - the credential was adopted, not lost.
+						ref = a.get("account_ref") or ""
+						if ref and prior_blobs.get(ref):
+							a["oauth_blob"] = prior_blobs[ref]
+				elif not (a.get("oauth_blob") or "").strip():
 					ref = a.get("account_ref") or ""
 					if ref and prior_blobs.get(ref):
 						a["oauth_blob"] = prior_blobs[ref]
@@ -402,7 +446,12 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 	s.llm_oauth_account_email = ""
 	s.llm_oauth_connected_at = None
 	# save() -> on_update -> _on_update_unified_llm: validate_models (throws),
-	# compute_pool_mode/compute_proxy_active, mirror models[0], enqueue pool/creds sync.
+	# compute_pool_mode/compute_proxy_active, mirror models[0]. For a POOL config we
+	# SUPPRESS the async enqueue and push synchronously below so we can return the
+	# durable apply-operation descriptor (plan-05 D2, Fable ruling / review P0-02);
+	# a single-model config keeps the existing async creds enqueue.
+	idempotency_key = (idempotency_key or "").strip()
+	s.flags.suppress_pool_enqueue = True
 	s.save(ignore_permissions=True)
 	frappe.db.commit()
 	# The pool this workspace runs on just changed, so the readiness verdict admin
@@ -414,6 +463,32 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 
 	_bust_chat_gate()
 
+	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import sync_pool_now
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+	apply_operation = None
+	resumable = False
+	retry_after_seconds = 0
+	if compute_pool_mode(s):
+		# The durable apply operation lives on the POOL path (admin creates it in
+		# update_llm_pool). Push synchronously and hand its descriptor back so the
+		# SPA follows ONE operation across save -> apply -> readiness.
+		outcome = sync_pool_now(idempotency_key=idempotency_key or None)
+		apply_operation = outcome.get("apply_operation")
+		resumable = bool(outcome.get("resumable"))
+		retry_after_seconds = int(outcome.get("retry_after_seconds") or 0)
+		mode = "operation"
+		if apply_operation and consumed_capture_ids:
+			# Audit only (best-effort): tie the adopted captures to the operation.
+			pending_capture.mark_consumed_by_operation(
+				consumed_capture_ids, apply_operation.get("operation_id")
+			)
+	else:
+		# Single-model (creds) path: on_update enqueued the async creds sync, and
+		# admin's creds endpoint mints no apply operation, so there is no descriptor
+		# to follow - the SPA falls back to the readiness poll for this config.
+		mode = "legacy"
+
 	row = (
 		frappe.db.get_value(
 			"Jarvis Settings", "Jarvis Settings", ["last_sync_at", "last_sync_status"], as_dict=True
@@ -421,6 +496,14 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 		or {}
 	)
 	return {
+		# Plan-05 D2 (review §8.4): the durable operation descriptor the SPA follows,
+		# or null on the legacy single-model path / an unallocated failure.
+		"apply_operation": apply_operation,
+		"idempotency_key": idempotency_key,
+		"resumable": resumable,
+		"retry_after_seconds": retry_after_seconds,
+		"mode": mode,
+		# Legacy fields kept for the settings status strip and older callers.
 		"last_sync_at": str(row.get("last_sync_at") or ""),
 		"last_sync_status": row.get("last_sync_status") or "",
 		"proxy_active": bool(frappe.db.get_single_value("Jarvis Settings", "proxy_active")),

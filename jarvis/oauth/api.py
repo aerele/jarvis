@@ -20,6 +20,7 @@ import requests
 
 from jarvis import admin_client, onboarding
 from jarvis.exceptions import JarvisError
+from jarvis.oauth import pending_capture
 from jarvis.oauth.providers import (
 	UnknownProviderError,
 	accepts_bare_code,
@@ -640,9 +641,15 @@ def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 
 	Gated on System Manager + per-user nonce binding; the nonce must have
 	been minted by ``begin_pool_account_signin`` (carries ``pool=True``).
-	Returns ``{account_ref, label, oauth_blob, account_email}`` where
-	``account_ref`` is a freshly generated ``SUB_<hex>`` id that satisfies
-	``^[A-Za-z0-9_-]{1,64}$`` and ``oauth_blob`` is the JSON-encoded blob.
+
+	The minted blob is PERSISTED ENCRYPTED as a durable pending capture (plan-05
+	D2, review P0-04) BEFORE this replies, and only an opaque ``capture_id`` plus
+	safe display metadata comes back - never the raw token. The blob is adopted
+	into the pool by ``save_llm_pool`` (which consumes the capture exactly once);
+	an unsaved capture is revoked + erased by the expiry sweeper. Returns
+	``{capture_id, account_ref, label, account_email, provider, upstream,
+	provider_subject}`` where ``account_ref`` is a freshly generated ``SUB_<hex>``
+	id that satisfies ``^[A-Za-z0-9_-]{1,64}$``.
 	"""
 	require_jarvis_admin()
 	entry, err = _validate_signin_nonce(nonce)
@@ -665,18 +672,27 @@ def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 	# stored under (and later fed to build_pool_payload -> oauth_blobs). It
 	# must match ^[A-Za-z0-9_-]{1,64}$; "SUB_" + 16 hex chars = 20 chars.
 	account_ref = "SUB_" + secrets.token_hex(8)
+	blob = result["blob"]
+	# Stable subject for same-account folding (never email/label - review P1-07):
+	# the openclaw accountId claim if present, else the email.
+	subject = (blob.get("accountId") or "").strip() or email
 
-	# Capture-only: clear the nonce (single-use, like complete_paste_signin)
-	# and hand the blob back. No push, no save_llm_creds, no Settings write.
-	frappe.cache.hdel(_CACHE_KEY, nonce)
-	return _ok(
-		{
-			"account_ref": account_ref,
-			"label": email,
-			"oauth_blob": json.dumps(result["blob"]),
-			"account_email": email,
-		}
+	# Persist the blob ENCRYPTED before replying, then clear the nonce (single-use,
+	# like complete_paste_signin). No push, no save_llm_creds, no Settings write -
+	# save_llm_pool consumes the capture. The raw token never returns to the wire.
+	view = pending_capture.create_capture(
+		provider=result["provider"],
+		upstream=get_provider(result["provider"])["openclaw_provider"],
+		openclaw_provider=get_provider(result["provider"])["openclaw_provider"],
+		oauth_blob=json.dumps(blob),
+		account_email=email,
+		account_ref=account_ref,
+		safe_label=email,
+		provider_subject=subject,
+		nonce=nonce,
 	)
+	frappe.cache.hdel(_CACHE_KEY, nonce)
+	return _ok(view)
 
 
 @frappe.whitelist()
@@ -770,18 +786,48 @@ def poll_pool_account_signin(nonce: str) -> dict:
 		"device_id": entry.get("device_id", ""),
 	}
 	account_ref = "SUB_" + secrets.token_hex(8)
-	frappe.cache.hdel(_CACHE_KEY, nonce)
 	# Kimi returns no account email, so synthesize a stable non-secret label.
 	label = f"Kimi {account_ref[-4:]}"
-	return _ok(
-		{
-			"status": "ok",
-			"account_ref": account_ref,
-			"label": label,
-			"oauth_blob": json.dumps(blob),
-			"account_email": "",
-		}
+	# Persist the blob ENCRYPTED before replying (review P0-04). Device-code Kimi
+	# carries NO stable subject, so captures never fold - a generic Connect always
+	# appends, exactly as the pre-capture flow behaved. Only the opaque capture_id
+	# and safe label come back; the raw token stays server-side.
+	view = pending_capture.create_capture(
+		provider=entry["provider"],
+		upstream=p["openclaw_provider"],
+		openclaw_provider=p["openclaw_provider"],
+		oauth_blob=json.dumps(blob),
+		account_email="",
+		account_ref=account_ref,
+		safe_label=label,
+		provider_subject="",
+		nonce=nonce,
 	)
+	frappe.cache.hdel(_CACHE_KEY, nonce)
+	return _ok({"status": "ok", **view})
+
+
+@frappe.whitelist()
+def list_pending_captures() -> dict:
+	"""The current user's live (un-consumed, un-expired) pending OAuth captures,
+	safe view only (opaque id + display metadata, never a token). The editor calls
+	this on load() and on error-banner Retry to rehydrate a just-connected account
+	so a reload resumes the SAME capture instead of forcing a second sign-in
+	(review P0-04 / P1-05)."""
+	require_jarvis_admin()
+	return _ok({"captures": pending_capture.list_active()})
+
+
+@frappe.whitelist()
+def cancel_pending_capture(capture_id: str) -> dict:
+	"""Customer discarded an unsaved just-connected account: revoke the provider
+	token where the provider exposes an endpoint we can call, then erase the
+	ciphertext. Owner-gated; opaque on a bad/foreign id."""
+	require_jarvis_admin()
+	try:
+		return _ok(pending_capture.cancel_capture(capture_id))
+	except pending_capture.CaptureError as e:
+		return _err("unknown_capture", str(e))
 
 
 def _exchange_code(*, provider: str, code: str, code_verifier: str, redirect_uri: str = "") -> dict:

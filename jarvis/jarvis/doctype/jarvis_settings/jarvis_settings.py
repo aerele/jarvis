@@ -565,7 +565,18 @@ class JarvisSettings(Document):
 			# "ok" (a failed sync must stay retryable by re-saving). When
 			# skipping, last_sync_status is left untouched (no "pending:"
 			# write - nothing was enqueued to complete it).
-			if self._pool_sync_is_redundant():
+			if self.flags.get("suppress_pool_enqueue"):
+				# save_llm_pool is pushing this pool SYNCHRONOUSLY (plan-05 D2,
+				# sync_pool_now) so it can return the durable apply-operation
+				# descriptor. Suppress the async enqueue here to avoid a second
+				# container mutation; the caller does the same admin work + stamping
+				# inline. Only the onboarding/settings save sets this flag - every
+				# other write of this Single (pattern-learning, chat-device, ...) still
+				# takes the async path below.
+				frappe.logger().debug(
+					"jarvis_settings: skipping async pool enqueue; caller pushes synchronously"
+				)
+			elif self._pool_sync_is_redundant():
 				frappe.logger().debug(
 					"jarvis_settings: skipping pool sync enqueue; pool state unchanged and last sync ok"
 				)
@@ -1245,12 +1256,56 @@ def _pool_spec_pushable(settings, converge_teardown: bool = False) -> bool:
 	return any(m.enabled for m in (settings.models or []))
 
 
-def _post_pool_with_retry(spec, api_keys, oauth_blobs):
+def _stamp_pool_applied_ok(settings, result: dict) -> None:
+	"""Record a CONFIRMED pool apply (status=applied) as a terminal success.
+
+	Extracted so the async pool-sync worker (``_enqueued_sync_via_admin_pool``)
+	and the synchronous onboarding/settings push (``sync_pool_now``) stamp the
+	SAME markers - most importantly ``llm_pool_synced_at``, which is
+	``is_ready_for_chat``'s first-activation gate for a pool tenant (R4-P0-6):
+	proxy_active alone is config INTENT and must never read as provisioning
+	success. ``last_sync_status`` keeps the literal "ok" prefix (the
+	``_pool_sync_is_redundant`` dedup gate + the settings poller both key off it).
+
+	A NO-OP apply (contract 1.10 ``unchanged: true``) ran no probe by design, so
+	the fleet reports subscription_status "unchecked" / warnings [] - persisting
+	those would DISCARD the last real apply's verdict (a healthy "verified" decays
+	to "unchecked", a genuine model_unreachable warning gets cleared). Nothing on
+	the running pool changed, so the prior verdict still describes it: leave those
+	fields alone on an unchanged apply.
+	"""
+	import frappe as _frappe
+
+	resolved_action = result.get("action", "pool_update")
+	_synced = {
+		"last_sync_at": _frappe.utils.now(),
+		"last_sync_status": f"ok ({resolved_action} via admin)",
+		"llm_pool_synced_at": _frappe.utils.now(),
+	}
+	if not result.get("unchanged"):
+		_synced["last_subscription_status"] = str(result.get("subscription_status") or "")
+		_synced["last_sync_warnings"] = _frappe.as_json(result.get("warnings") or [])
+		# Per-model verdicts (contract 1.11/1.12) forwarded verbatim - the AI-models
+		# list keys each api-key row's health off this.
+		_synced["last_model_statuses"] = _frappe.as_json(result.get("model_statuses") or [])
+	settings.db_set(_synced)
+	# Commit every terminal write (matches _sync_via_admin) so a propagating
+	# JobTimeoutException can't roll the terminal status back to "pending:", and so
+	# llm_pool_synced_at is durable.
+	_commit_terminal_sync_status()
+
+
+def _post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=None):
 	"""post_update_llm_pool, retrying only the transient AdminUnreachableError.
 	Re-raises the last unreachable error after exhausting retries; other Admin*
 	errors propagate immediately (not retried) - including AdminRejectedError,
 	which IS an AdminUnreachableError subclass but names a spec admin already
-	refused, so re-POSTing the identical payload can only be refused again."""
+	refused, so re-POSTing the identical payload can only be refused again.
+
+	``idempotency_key`` (plan-05 D2): when threaded, admin dedupes a retry carrying
+	the same key to the SAME durable apply operation, allocating no new desired
+	version - so the unreachable-retry above resumes the existing operation rather
+	than starting a second apply, and the descriptor comes back on the retry."""
 	import time as _time
 
 	import frappe as _frappe
@@ -1264,6 +1319,7 @@ def _post_pool_with_retry(spec, api_keys, oauth_blobs):
 				spec=spec,
 				api_keys=api_keys,
 				oauth_blobs=oauth_blobs,
+				idempotency_key=idempotency_key,
 			)
 			# Stamp ONLY when admin echoes installed_apps_persisted - an
 			# older admin ignored the field and the signal is still stale.
@@ -1430,59 +1486,7 @@ def _enqueued_sync_via_admin_pool(
 					_commit_terminal_sync_status()
 				terminal_written = True
 				return
-			resolved_action = result.get("action", "pool_update")
-			_synced = {
-				"last_sync_at": _frappe.utils.now(),
-				"last_sync_status": f"ok ({resolved_action} via admin)",
-				# Durable "this pool has been APPLIED to the container at
-				# least once" marker — stamped ONLY on a confirmed status=applied
-				# (R4-P0-6). is_ready_for_chat gates pool tenants on it: proxy_active
-				# alone is config INTENT (committed synchronously at save, before
-				# this job runs) and must not be read as provisioning success.
-				"llm_pool_synced_at": _frappe.utils.now(),
-			}
-			# A NO-OP apply (contract 1.10's ``unchanged: true``) changed nothing and,
-			# BY DESIGN, ran no probe: a 1-token completion is a side effect and that
-			# path is side-effect-free, so the fleet reports subscription_status
-			# "unchecked" and warnings [].
-			#
-			# Persisting those would DISCARD the verdict from the last real apply.
-			# A healthy "verified" silently decays to "unchecked" (which reads as a
-			# regression the customer did not cause) and -- far worse -- a genuine
-			# ``model_unreachable`` / ``subscription_unverified`` warning gets CLEARED,
-			# so a dead model looks healthy again after any redundant re-save.
-			#
-			# Nothing about the running pool changed, so the previous verdict still
-			# describes it exactly. Leave both fields alone. (Same reasoning as the
-			# two skip paths above, which also leave them untouched: the container was
-			# never touched, so its last real apply is still the truth.)
-			#
-			# subscription_status/warnings ride the SAME PUT response as action/result
-			# (contract docs: fleet-agent llm-pool). A fleet still on the pre-warnings
-			# contract (1.9) reports neither key, so this lands "" / "[]" - never raise
-			# on their absence, and never assume result is a dict beyond what the
-			# `or {}` above already guarantees.
-			if not result.get("unchanged"):
-				_synced["last_subscription_status"] = str(result.get("subscription_status") or "")
-				_synced["last_sync_warnings"] = _frappe.as_json(result.get("warnings") or [])
-				# Per-model verdicts (contract 1.11: [{provider, model, status}], api-key
-				# models only; contract 1.12 adds an optional "detail" string with the
-				# provider's raw error text, absent on an older fleet) ride the SAME PUT
-				# response. The AI-models list keys each api-key row's health off this;
-				# without persisting it a dead model shows the same green "key set" as a
-				# healthy one. Stored/forwarded verbatim (no field whitelisting), so a new
-				# optional key like "detail" needs no change here to reach the client. Same
-				# no-op reasoning as the two fields above: a "unchanged" apply ran no probe,
-				# so leave the prior verdicts.
-				_synced["last_model_statuses"] = _frappe.as_json(result.get("model_statuses") or [])
-			settings.db_set(_synced)
-			# last_sync_status MUST keep starting with the literal "ok" -
-			# _pool_sync_is_redundant() gates its dedup skip on
-			# startswith("ok"); a warned-but-applied pool is still an "ok"
-			# apply and must stay skippable on an unchanged re-save.
-			# Commit every terminal write - matching _sync_via_admin; see
-			# the comment there. Also makes llm_pool_synced_at durable.
-			_commit_terminal_sync_status()
+			_stamp_pool_applied_ok(settings, result)
 			terminal_written = True
 		except admin_client.AdminAuthError as e:
 			settings.db_set(
@@ -1615,6 +1619,127 @@ def _enqueued_sync_via_admin_pool(
 					_commit_terminal_sync_status()
 				except Exception:
 					pass
+
+
+# How long the SYNCHRONOUS pool push waits for the admin-sync lock before handing
+# the wait back to the SPA as a resumable follow. Short on purpose: the desired
+# pool is already committed and the operation exists server-side, so a contended
+# save resumes via the operation rather than blocking the Start-chatting click.
+SYNC_PUSH_LOCK_WAIT_S = 10
+
+
+def sync_pool_now(idempotency_key: str | None = None) -> dict:
+	"""Synchronous /llm-pool push for the onboarding/settings save (Fable ruling,
+	review P0-02): push the just-committed desired pool to admin, capture the
+	durable apply-operation descriptor admin creates in the SAME transaction as
+	its desired-state write, and hand it back so a Start-chatting click follows
+	ONE operation instead of attributing a global ``last_sync_status`` string to a
+	click it cannot be tied to.
+
+	The local async pool-sync worker (``_enqueue_pool_sync``) is SUPPRESSED for this
+	save (see ``JarvisSettings._on_update_unified_llm``): the local queue was only
+	hiding the operation identity, and admin does its own reconcile asynchronously
+	after committing desired state, so nothing is lost. This does the same admin
+	work inline and stamps the SAME markers via ``_stamp_pool_applied_ok`` /
+	``_converge_via_admin`` (``llm_pool_synced_at`` gates ``is_ready_for_chat`` for a
+	pool tenant) so no downstream read regresses.
+
+	Returns ``{"apply_operation": <§8.4 descriptor|None>, "resumable": bool,
+	"retry_after_seconds": int}``:
+
+	- descriptor present → the SPA follows it to a terminal state.
+	- ``resumable: True`` (lock contention, or an admin read-timeout / rejection
+	  where the operation was already committed server-side) → the SPA re-calls
+	  ``save_llm_pool`` with the SAME ``idempotency_key``; admin dedupes and returns
+	  the existing operation's descriptor (no new desired version, no re-drive).
+	- ``retry_after_seconds`` on a rate-limit refusal (no operation allocated).
+
+	Bounded timeout: on any transport failure the operation exists (admin commits
+	desired+operation before the fleet apply), so this NEVER returns a silent
+	success and NEVER blocks the click indefinitely.
+	"""
+	import frappe as _frappe
+
+	from jarvis import admin_client
+	from jarvis._redis_lock import redis_lock
+	from jarvis.jarvis.pool_serialize import build_pool_payload, validate_models
+
+	with redis_lock(
+		"jarvis_settings_admin_sync",
+		timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
+		blocking_timeout_s=SYNC_PUSH_LOCK_WAIT_S,
+	) as acquired:
+		if not acquired:
+			# A sibling container mutation holds the lock. The desired pool is
+			# committed; admin's reconcile (and the operation) will converge it.
+			# Resume-follow rather than double-push.
+			return {"apply_operation": None, "resumable": True}
+
+		settings = _frappe.get_single("Jarvis Settings")
+		if validate_models(settings) or not _pool_spec_pushable(settings):
+			# Not a pushable pool after the save (e.g. a single-model config the
+			# caller routes through the creds path). No pool operation exists.
+			return {"apply_operation": None, "resumable": False, "skipped": True}
+
+		spec, api_keys, oauth_blobs = build_pool_payload(settings)
+		try:
+			result = _post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=idempotency_key) or {}
+		except admin_client.AdminRateLimitedError as e:
+			retry = int(e.retry_after_seconds or 0)
+			retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
+			settings.db_set(
+				{
+					"last_sync_at": _frappe.utils.now(),
+					"last_sync_status": f"failed: rate-limited; {retry_str}",
+					**_cleared_subscription_status_fields(),
+				}
+			)
+			_commit_terminal_sync_status()
+			# The rate limit is enforced BEFORE admin allocates an operation, so
+			# there is nothing to resume-follow: surface the cooldown truthfully.
+			return {"apply_operation": None, "resumable": False, "retry_after_seconds": retry}
+		except (admin_client.AdminRejectedError, admin_client.AdminUnreachableError):
+			# The operation is created BEFORE the fleet apply, so it exists (and, on
+			# a genuine reject, was marked failed) even though admin raised instead
+			# of returning the descriptor. Record pending for the reconcile and let
+			# the SPA resume-by-key to read the operation's terminal descriptor
+			# (REJECTED / retryable / applied-late) rather than the bench guessing.
+			settings.db_set("last_sync_status", _PENDING_APPLYING_STATUS, update_modified=False)
+			_frappe.db.commit()
+			return {"apply_operation": None, "resumable": True}
+		except (admin_client.AdminAuthError, admin_client.AdminValidationError) as e:
+			# These fail BEFORE any operation is allocated (auth / spec validation),
+			# so there is nothing to follow: a terminal, non-resumable error.
+			settings.db_set(
+				{
+					"last_sync_at": _frappe.utils.now(),
+					"last_sync_status": f"failed: {e}",
+					**_cleared_subscription_status_fields(),
+				}
+			)
+			_commit_terminal_sync_status()
+			return {"apply_operation": None, "resumable": False}
+
+		op = result.get("apply_operation")
+		status = result.get("status") or "applied"
+		if status == "blocked":
+			settings.db_set(
+				"last_sync_status",
+				"failed: subscription needs re-authentication (blocked)",
+				update_modified=False,
+			)
+			_commit_terminal_sync_status()
+			return {"apply_operation": op, "resumable": False}
+		if _is_applying_result(result) or status != "applied":
+			# Still converging: try a bounded converge (stamps the markers on Ready),
+			# else record pending for the */5 reconcile. Either way the descriptor
+			# carries the live state the SPA follows.
+			if not _converge_via_admin(settings, is_pool=True):
+				settings.db_set("last_sync_status", _PENDING_APPLYING_STATUS, update_modified=False)
+				_commit_terminal_sync_status()
+			return {"apply_operation": op, "resumable": False}
+		_stamp_pool_applied_ok(settings, result)
+		return {"apply_operation": op, "resumable": False}
 
 
 def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> None:
