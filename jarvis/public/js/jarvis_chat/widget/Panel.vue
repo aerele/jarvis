@@ -13,6 +13,34 @@
 		@keydown.esc.stop="$emit('close')"
 	>
 		<div class="jvp-panel" :class="{ 'jvp-panel--dark': isDark }" ref="panelEl" tabindex="-1">
+			<!-- Resize grip. Sits on the corner that faces away from the FAB (the
+			     panel is anchored at its FAB-side bottom corner and grows up/out),
+			     so a drag always enlarges into the page. Widget.vue persists it. -->
+			<div
+				v-if="layout"
+				class="jvp-resize"
+				:class="[
+					layout.side === 'left' ? 'jvp-resize--tl' : 'jvp-resize--tr',
+					{ 'jvp-resize--active': resizing },
+				]"
+				role="button"
+				tabindex="0"
+				aria-label="Resize chat window. Drag, or use arrow keys."
+				title="Drag to resize"
+				@pointerdown="onResizeDown"
+				@keydown="onResizeKey"
+			>
+				<svg
+					viewBox="0 0 14 14"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.5"
+					stroke-linecap="round"
+					aria-hidden="true"
+				>
+					<path d="M3 11 L11 3 M6.5 11 L11 6.5" />
+				</svg>
+			</div>
 			<div class="jvp-head">
 				<div class="jvp-avatar">
 					<img v-if="brandLogoUrl" :src="brandLogoUrl" class="jvp-avatar-img" alt="" />
@@ -478,6 +506,7 @@ import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue"
 import { contextLabel } from "./desk_context.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
+import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
 import { classifyReadiness, degradedMessage } from "./panel_readiness.mjs";
 import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
@@ -501,7 +530,70 @@ const props = defineProps({
 	// FAB. The panel is a floating mini window, so it has no fixed home.
 	layout: { type: Object, default: null },
 });
-defineEmits(["close", "open-full", "dismiss-context"]);
+const emit = defineEmits(["close", "open-full", "dismiss-context", "resize", "resize-commit"]);
+
+// ---- Resize: drag the top-outer corner to grow the window. Widget.vue owns
+// the localStorage; this only turns a pointer drag into new-size events. The
+// grip sits on the corner facing away from the FAB (top-left when the panel
+// opens leftward, top-right when it opens rightward), so it always drags "out"
+// into the page. resizeFrom (panel_size.mjs) floors the result at the default,
+// and Widget's panelLayout re-clamps to the viewport every frame. ----
+const resizing = ref(false);
+let resizeStart = null;
+
+function onResizeMove(e) {
+	if (!resizeStart) return;
+	const dx = e.clientX - resizeStart.x;
+	const dy = e.clientY - resizeStart.y;
+	emit("resize", resizeFrom(resizeStart, resizeStart.side, dx, dy));
+}
+
+function endResize() {
+	if (!resizeStart) return;
+	resizeStart = null;
+	resizing.value = false;
+	window.removeEventListener("pointermove", onResizeMove);
+	window.removeEventListener("pointerup", endResize);
+	window.removeEventListener("pointercancel", endResize);
+	emit("resize-commit");
+}
+
+function onResizeDown(e) {
+	const l = props.layout;
+	if (!l || (e.button != null && e.button !== 0)) return;
+	resizeStart = {
+		x: e.clientX,
+		y: e.clientY,
+		width: l.width,
+		height: l.height,
+		side: l.side,
+	};
+	resizing.value = true;
+	window.addEventListener("pointermove", onResizeMove);
+	window.addEventListener("pointerup", endResize);
+	window.addEventListener("pointercancel", endResize);
+	e.preventDefault();
+}
+
+// Keyboard resize: arrows nudge the size by a step, using the SAME grow/shrink
+// semantics as the drag (up = taller, "outward" = wider), floored at the default
+// by resizeFrom. Each press is its own commit so the choice survives immediately.
+function onResizeKey(e) {
+	const l = props.layout;
+	if (!l) return;
+	const STEP = 24;
+	const map = {
+		ArrowUp: [0, -STEP],
+		ArrowDown: [0, STEP],
+		ArrowLeft: [-STEP, 0],
+		ArrowRight: [STEP, 0],
+	};
+	const d = map[e.key];
+	if (!d) return;
+	e.preventDefault();
+	emit("resize", resizeFrom({ width: l.width, height: l.height }, l.side, d[0], d[1]));
+	emit("resize-commit");
+}
 
 const panelEl = ref(null);
 const bodyEl = ref(null);
@@ -1023,6 +1115,10 @@ onBeforeUnmount(() => {
 	}
 	stopPolling();
 	if (rtBound) window.frappe?.realtime?.off?.("jarvis:event", onRealtime);
+	// Drop any drag listeners if we unmount mid-resize (no commit — nothing to save).
+	window.removeEventListener("pointermove", onResizeMove);
+	window.removeEventListener("pointerup", endResize);
+	window.removeEventListener("pointercancel", endResize);
 });
 
 defineExpose({ load, startNewChat, convId });
@@ -1085,6 +1181,7 @@ defineExpose({ load, startNewChat, convId });
 }
 .jvp-panel {
 	pointer-events: auto;
+	position: relative;
 	max-width: 100%;
 	display: flex;
 	flex-direction: column;
@@ -1112,6 +1209,63 @@ defineExpose({ load, startNewChat, convId });
 	to {
 		opacity: 1;
 		transform: scale(1);
+	}
+}
+
+/* ---- resize grip ----
+   A subtle corner handle, revealed on panel hover / keyboard focus. It sits in
+   the outer-top corner padding so it never covers the header's avatar or the
+   action buttons; the diagonal glyph points the way the panel grows. */
+.jvp-resize {
+	position: absolute;
+	top: 3px;
+	z-index: 6;
+	width: 16px;
+	height: 16px;
+	display: grid;
+	place-items: center;
+	color: var(--jv-ink-3);
+	opacity: 0;
+	touch-action: none;
+	user-select: none;
+	-webkit-user-select: none;
+	transition: opacity 0.12s ease, color 0.12s ease;
+}
+/* Inset into the header's outer padding so it clears the avatar (left) and the
+   action buttons (right), which start ~15px in from the edge. */
+.jvp-resize--tl {
+	left: 3px;
+	cursor: nwse-resize;
+}
+.jvp-resize--tr {
+	right: 3px;
+	cursor: nesw-resize;
+}
+.jvp-resize svg {
+	width: 11px;
+	height: 11px;
+}
+/* The glyph is drawn pointing to the top-right; mirror it for the left corner. */
+.jvp-resize--tl svg {
+	transform: scaleX(-1);
+}
+.jvp-panel:hover .jvp-resize {
+	opacity: 0.5;
+}
+.jvp-resize:hover,
+.jvp-resize--active {
+	opacity: 1;
+	color: var(--jv-ink-2);
+}
+.jvp-resize:focus-visible {
+	opacity: 1;
+	outline: 2px solid var(--jv-accent);
+	outline-offset: -2px;
+	border-radius: 7px;
+}
+@media (prefers-reduced-motion: reduce) {
+	.jvp-resize {
+		transition: none;
 	}
 }
 

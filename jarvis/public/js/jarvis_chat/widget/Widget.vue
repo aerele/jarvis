@@ -41,6 +41,8 @@
 			@close="closePanel"
 			@open-full="openFull"
 			@dismiss-context="contextDismissed = true"
+			@resize="onPanelResize"
+			@resize-commit="onPanelResizeCommit"
 		/>
 	</div>
 </template>
@@ -50,6 +52,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { FULL_CHAT_URL, conversationUrl, PANEL_MIN_VIEWPORT_PX } from "./config.mjs";
 import { contextFromRoute } from "./desk_context.mjs";
 import { panelLayout } from "./panel_anchor.mjs";
+import * as panelSize from "./panel_size.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import * as fabPos from "./fab_position.mjs";
 import Panel from "./Panel.vue";
@@ -92,14 +95,35 @@ const effectiveContext = computed(() => (contextDismissed.value ? null : deskCon
 // resize. fabXY is already reactive, which is what makes the panel travel with
 // the launcher instead of being stranded across the screen from it.
 const viewportTick = ref(0);
+// The user's saved window size (null => the shipped default). Loaded from
+// localStorage synchronously below so the first render already has it, and fed
+// to panelLayout, which floors it at the default and caps it to the viewport.
+const prefSize = ref(null);
 const panelBox = computed(() => {
 	viewportTick.value; // re-run on resize / orientation change
 	const topInset = readCssPx(document.documentElement, "--navbar-height", 48);
 	return panelLayout(
 		{ x: fabXY.value.x, y: fabXY.value.y, size: fabPos.FAB_SIZE },
-		{ vw: window.innerWidth, vh: window.innerHeight, top: topInset }
+		{ vw: window.innerWidth, vh: window.innerHeight, top: topInset },
+		prefSize.value
 	);
 });
+
+// Live drag: adopt the new size so the panel re-lays-out each frame (panelLayout
+// re-clamps, so this can never paint a sub-default or off-screen panel).
+function onPanelResize(size) {
+	prefSize.value = size;
+}
+
+// Drag released: persist the choice per browser, mirroring the FAB position.
+function onPanelResizeCommit() {
+	if (!prefSize.value) return;
+	try {
+		localStorage.setItem(panelSize.STORAGE_KEY, panelSize.serializeSize(prefSize.value));
+	} catch (e) {
+		/* localStorage unavailable */
+	}
+}
 
 function readDeskContext() {
 	const route = (window.frappe && frappe.get_route && frappe.get_route()) || [];
@@ -196,6 +220,18 @@ function applyPosition({ animate = false } = {}) {
 	side.value = resolved.side;
 	yRatio.value = resolved.yRatio;
 	applyPosition({ animate: false });
+}
+
+// Restore the saved panel size the same way — synchronously, before first paint
+// — so a grown panel never flashes at the default size on open.
+{
+	let savedRaw = null;
+	try {
+		savedRaw = localStorage.getItem(panelSize.STORAGE_KEY);
+	} catch (e) {
+		savedRaw = null;
+	}
+	prefSize.value = panelSize.parseSavedSize(savedRaw);
 }
 
 function wake() {
