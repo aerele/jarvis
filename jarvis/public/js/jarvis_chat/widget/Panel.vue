@@ -12,35 +12,60 @@
 		:aria-label="`${brandName} chat`"
 		@keydown.esc.stop="$emit('close')"
 	>
-		<div class="jvp-panel" :class="{ 'jvp-panel--dark': isDark }" ref="panelEl" tabindex="-1">
-			<!-- Resize grip. Sits on the corner that faces away from the FAB (the
-			     panel is anchored at its FAB-side bottom corner and grows up/out),
-			     so a drag always enlarges into the page. Widget.vue persists it. -->
-			<div
-				v-if="layout"
-				class="jvp-resize"
-				:class="[
-					layout.side === 'left' ? 'jvp-resize--tl' : 'jvp-resize--tr',
-					{ 'jvp-resize--active': resizing },
-				]"
-				role="button"
-				tabindex="0"
-				aria-label="Resize chat window. Drag, or use arrow keys."
-				title="Drag to resize"
-				@pointerdown="onResizeDown"
-				@keydown="onResizeKey"
-			>
-				<svg
-					viewBox="0 0 14 14"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="1.5"
-					stroke-linecap="round"
+		<div
+			class="jvp-panel"
+			:class="{ 'jvp-panel--dark': isDark, 'jvp-panel--resizing': resizing }"
+			ref="panelEl"
+			tabindex="-1"
+		>
+			<!-- Resize handles on the three open edges (top / left / right) plus the
+			     two top corners. The panel is anchored at its FAB-side bottom corner,
+			     so a drag grows it toward the open page; each edge shows a grabber so
+			     it reads as resizable. Widget.vue persists the size. -->
+			<template v-if="layout">
+				<div
+					class="jvp-rz jvp-rz--top"
 					aria-hidden="true"
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'y')"
 				>
-					<path d="M3 11 L11 3 M6.5 11 L11 6.5" />
-				</svg>
-			</div>
+					<span class="jvp-rz-grip"></span>
+				</div>
+				<div
+					class="jvp-rz jvp-rz--left"
+					aria-hidden="true"
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'x')"
+				>
+					<span class="jvp-rz-grip"></span>
+				</div>
+				<div
+					class="jvp-rz jvp-rz--right"
+					aria-hidden="true"
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'x')"
+				>
+					<span class="jvp-rz-grip"></span>
+				</div>
+				<div
+					class="jvp-rz jvp-rz--tl"
+					role="button"
+					tabindex="0"
+					aria-label="Resize chat window. Drag, or use arrow keys."
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'both')"
+					@keydown="onResizeKey"
+				></div>
+				<div
+					class="jvp-rz jvp-rz--tr"
+					role="button"
+					tabindex="0"
+					aria-label="Resize chat window. Drag, or use arrow keys."
+					title="Drag to resize"
+					@pointerdown="onResizeDown($event, 'both')"
+					@keydown="onResizeKey"
+				></div>
+			</template>
 			<div class="jvp-head">
 				<div class="jvp-avatar">
 					<img v-if="brandLogoUrl" :src="brandLogoUrl" class="jvp-avatar-img" alt="" />
@@ -142,7 +167,7 @@
 				</button>
 			</div>
 
-			<div class="jvp-body" ref="bodyEl">
+			<div class="jvp-body" ref="bodyEl" @scroll.passive="onBodyScroll">
 				<!-- Never onboarded (readiness === "gate"): the panel cannot possibly
 				     chat, so the whole body - welcome, history, composer below - is
 				     replaced by a compact setup nudge instead of a chat box that can
@@ -532,19 +557,20 @@ const props = defineProps({
 });
 const emit = defineEmits(["close", "open-full", "dismiss-context", "resize", "resize-commit"]);
 
-// ---- Resize: drag the top-outer corner to grow the window. Widget.vue owns
-// the localStorage; this only turns a pointer drag into new-size events. The
-// grip sits on the corner facing away from the FAB (top-left when the panel
-// opens leftward, top-right when it opens rightward), so it always drags "out"
-// into the page. resizeFrom (panel_size.mjs) floors the result at the default,
-// and Widget's panelLayout re-clamps to the viewport every frame. ----
+// ---- Resize: drag any of the three open edges (top / left / right) or a top
+// corner to grow the window. The panel is anchored at its FAB-side bottom corner,
+// so a drag enlarges it toward the open page. Each handle passes a mode ('y' =
+// height only, 'x' = width only, 'both' = a corner); resizeFrom (panel_size.mjs)
+// floors the result at the default and Widget's panelLayout re-clamps it to the
+// viewport, and Widget owns the localStorage. ----
 const resizing = ref(false);
 let resizeStart = null;
 
 function onResizeMove(e) {
 	if (!resizeStart) return;
-	const dx = e.clientX - resizeStart.x;
-	const dy = e.clientY - resizeStart.y;
+	const m = resizeStart.mode;
+	const dx = m === "y" ? 0 : e.clientX - resizeStart.x;
+	const dy = m === "x" ? 0 : e.clientY - resizeStart.y;
 	emit("resize", resizeFrom(resizeStart, resizeStart.side, dx, dy));
 }
 
@@ -558,7 +584,7 @@ function endResize() {
 	emit("resize-commit");
 }
 
-function onResizeDown(e) {
+function onResizeDown(e, mode = "both") {
 	const l = props.layout;
 	if (!l || (e.button != null && e.button !== 0)) return;
 	resizeStart = {
@@ -567,6 +593,7 @@ function onResizeDown(e) {
 		width: l.width,
 		height: l.height,
 		side: l.side,
+		mode,
 	};
 	resizing.value = true;
 	window.addEventListener("pointermove", onResizeMove);
@@ -715,6 +742,25 @@ async function scrollToBottom() {
 	if (bodyEl.value) bodyEl.value.scrollTop = bodyEl.value.scrollHeight;
 }
 
+// Sticky-bottom guard: auto-scroll ONLY while the reader is already at the newest
+// end. Without it, scrollToBottom on every streamed token yanked a long reply back
+// to its tail, so only the last screenful was ever visible in the small panel and
+// the rest could not be read until the turn ended (the full SPA guards the same
+// way via pinnedToBottom). A user scroll updates the flag; a send / load / new
+// chat re-pins so a fresh turn always snaps to the bottom.
+const pinnedToBottom = ref(true);
+function distanceFromBottom() {
+	const el = bodyEl.value;
+	if (!el) return 0;
+	return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+function onBodyScroll() {
+	pinnedToBottom.value = distanceFromBottom() <= 80;
+}
+function stickToBottom() {
+	if (pinnedToBottom.value) scrollToBottom();
+}
+
 function autoGrow() {
 	const el = textareaEl.value;
 	if (!el) return;
@@ -741,6 +787,7 @@ async function load() {
 		}
 		const conv = await getConversation(convId.value);
 		messages.value = Array.isArray(conv?.messages) ? conv.messages : [];
+		pinnedToBottom.value = true;
 		await scrollToBottom();
 	} catch (e) {
 		loadError.value = "Could not load your conversation.";
@@ -759,6 +806,7 @@ function startNewChat() {
 	stream.value = { ...emptyStream(), fence: stream.value.fence };
 	loadError.value = "";
 	draft.value = "";
+	pinnedToBottom.value = true;
 	nextTick(() => textareaEl.value?.focus());
 }
 
@@ -884,6 +932,7 @@ async function send() {
 	attachments.value = [];
 	await nextTick();
 	autoGrow();
+	pinnedToBottom.value = true; // a fresh turn always snaps to the newest
 	await scrollToBottom();
 
 	try {
@@ -972,7 +1021,7 @@ function onRealtime(payload) {
 	stream.value = next;
 	if (next.live) {
 		sending.value = false;
-		scrollToBottom();
+		stickToBottom();
 	}
 	if (next.error) loadError.value = next.error;
 }
@@ -1067,7 +1116,7 @@ function startPolling() {
 			if (next.length > before && last && last.role === "assistant") {
 				messages.value = msgs;
 				settle();
-				scrollToBottom();
+				stickToBottom();
 			}
 		} catch (e) {
 			/* transient - keep polling */
@@ -1212,59 +1261,95 @@ defineExpose({ load, startNewChat, convId });
 	}
 }
 
-/* ---- resize grip ----
-   A subtle corner handle, revealed on panel hover / keyboard focus. It sits in
-   the outer-top corner padding so it never covers the header's avatar or the
-   action buttons; the diagonal glyph points the way the panel grows. */
-.jvp-resize {
+/* ---- resize handles ----
+   Thin strips along the three open edges (top / left / right) plus two top
+   corners. Each edge carries an always-present grabber so the panel plainly
+   reads as resizable; the strips sit in the panel's border zone, inset from the
+   corners, clear of the header buttons and the composer. */
+.jvp-rz {
 	position: absolute;
-	top: 3px;
 	z-index: 6;
-	width: 16px;
-	height: 16px;
-	display: grid;
-	place-items: center;
-	color: var(--jv-ink-3);
-	opacity: 0;
 	touch-action: none;
 	user-select: none;
 	-webkit-user-select: none;
-	transition: opacity 0.12s ease, color 0.12s ease;
 }
-/* Inset into the header's outer padding so it clears the avatar (left) and the
-   action buttons (right), which start ~15px in from the edge. */
-.jvp-resize--tl {
-	left: 3px;
+.jvp-rz--top {
+	top: 0;
+	left: 14px;
+	right: 14px;
+	height: 8px;
+	cursor: ns-resize;
+	display: grid;
+	place-items: center;
+}
+.jvp-rz--left {
+	top: 14px;
+	bottom: 14px;
+	left: 0;
+	width: 8px;
+	cursor: ew-resize;
+	display: grid;
+	place-items: center;
+}
+.jvp-rz--right {
+	top: 14px;
+	bottom: 14px;
+	right: 0;
+	width: 8px;
+	cursor: ew-resize;
+	display: grid;
+	place-items: center;
+}
+/* The visible cue: a small grabber bar, always faintly shown, brightening to the
+   accent on hover or while dragging. */
+.jvp-rz-grip {
+	display: block;
+	border-radius: 999px;
+	background: var(--jv-ink-3);
+	opacity: 0.4;
+	transition: opacity 0.12s ease, background-color 0.12s ease;
+}
+.jvp-rz--top .jvp-rz-grip {
+	width: 28px;
+	height: 3px;
+}
+.jvp-rz--left .jvp-rz-grip,
+.jvp-rz--right .jvp-rz-grip {
+	width: 3px;
+	height: 28px;
+}
+.jvp-panel:hover .jvp-rz-grip {
+	opacity: 0.55;
+}
+.jvp-rz:hover .jvp-rz-grip,
+.jvp-panel--resizing .jvp-rz-grip {
+	opacity: 1;
+	background: var(--jv-accent);
+}
+/* Corners sit above the edge strips and resize both axes at once. */
+.jvp-rz--tl,
+.jvp-rz--tr {
+	top: 0;
+	width: 15px;
+	height: 15px;
+	z-index: 7;
+}
+.jvp-rz--tl {
+	left: 0;
 	cursor: nwse-resize;
 }
-.jvp-resize--tr {
-	right: 3px;
+.jvp-rz--tr {
+	right: 0;
 	cursor: nesw-resize;
 }
-.jvp-resize svg {
-	width: 11px;
-	height: 11px;
-}
-/* The glyph is drawn pointing to the top-right; mirror it for the left corner. */
-.jvp-resize--tl svg {
-	transform: scaleX(-1);
-}
-.jvp-panel:hover .jvp-resize {
-	opacity: 0.5;
-}
-.jvp-resize:hover,
-.jvp-resize--active {
-	opacity: 1;
-	color: var(--jv-ink-2);
-}
-.jvp-resize:focus-visible {
-	opacity: 1;
+.jvp-rz--tl:focus-visible,
+.jvp-rz--tr:focus-visible {
 	outline: 2px solid var(--jv-accent);
-	outline-offset: -2px;
-	border-radius: 7px;
+	outline-offset: -3px;
+	border-radius: 8px;
 }
 @media (prefers-reduced-motion: reduce) {
-	.jvp-resize {
+	.jvp-rz-grip {
 		transition: none;
 	}
 }
