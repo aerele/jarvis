@@ -5803,6 +5803,10 @@ function removePending(token) {
 	if (!token) return;
 	pendingActions.value = pendingActions.value.filter((x) => x.token !== token);
 }
+function confirmationStorageUnavailable(response) {
+	const type = response && response.error && response.error.type;
+	return type === "ConfirmationUnavailableError" || type === "ConfirmationOutcomeUnknownError";
+}
 // Enqueue a parked confirmation, deduped by token (a resync + a live event can
 // both carry the same card).
 function enqueuePending(card) {
@@ -5838,6 +5842,12 @@ async function confirmPending(pa) {
 	try {
 		const r = await api.confirmTool(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
+			if (confirmationStorageUnavailable(r)) {
+				const card = cardById();
+				if (card) card.error = r.error;
+				notify(r.error.message, { type: "error" });
+				return;
+			}
 			// Token gone/expired/used, or the executed tool reported failure. Either
 			// way the card is spent - surface a brief note and dismiss.
 			if (r.error && r.error.type === "InvalidConfirmation") {
@@ -5893,17 +5903,28 @@ async function confirmPending(pa) {
 // Dismiss: consume the token server-side (closes the 15-min replay window and
 // stops the card re-surfacing on reload), leave a durable "discarded" receipt
 // chip, and queue a note so the agent's next turn learns it was vetoed. Fires NO
-// agent turn. Best-effort: even if the call fails, the card drops locally (the
-// token TTL-expires) - only the chip would be missing.
+// agent turn. Storage/transport failures keep the card visible so an outage is
+// not mistaken for a successful discard; the server-side token still self-expires.
 async function discardPending(pa) {
 	if (!pa || pa.busy) return;
 	const token = pa.token;
 	const conv = pa.conversation || currentId.value || "";
 	pa.busy = true;
 	try {
-		await api.dismissTool(token, conv);
+		const r = await api.dismissTool(token, conv);
+		if (r && r.ok === false && confirmationStorageUnavailable(r)) {
+			pa.error = r.error;
+			notify(r.error.message, { type: "error" });
+			return;
+		}
 	} catch (e) {
-		// Swallow - drop the card regardless (the token self-expires server-side).
+		pa.error = {
+			message:
+				(e && e.messages && e.messages[0]) || (e && e.message) || "Could not discard.",
+		};
+		return;
+	} finally {
+		pa.busy = false;
 	}
 	removePending(token);
 	// Re-fetch so the durable "discarded" chip shows in the thread.
@@ -5921,6 +5942,7 @@ async function resyncPendingConfirmations(id) {
 	let items = [];
 	try {
 		const r = await api.listPendingConfirmations(id);
+		if (r && r.ok === false) return;
 		items = (r && r.data && r.data.pending) || [];
 	} catch (e) {
 		return;
