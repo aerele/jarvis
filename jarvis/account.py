@@ -722,6 +722,24 @@ def _llm_missing_verdict(settings) -> dict:
 
 
 @frappe.whitelist()
+def get_llm_apply_operation(operation_id: str) -> dict:
+	"""Read-only status of a durable LLM-apply operation (plan-05 D2), for the SPA's
+	single Start-chatting controller to follow one operation to a terminal state.
+
+	A thin System-Manager-gated shim over admin's read-only endpoint (see
+	admin_client.get_llm_apply_operation): it never mutates and never spends the
+	apply rate bucket, so the controller polls it with backoff. The bench holds no
+	operation state of its own - admin owns the operation's truth - so this
+	forwards the opaque id and surfaces admin's §8.4 status verbatim. Errors arrive
+	as clean frappe.throw toasts via the shared _surface helper; the SPA client
+	seam (frontend/src/lib/llmOperation.js) treats a transport failure as
+	"keep polling", not a verdict.
+	"""
+	require_jarvis_admin()
+	return _surface(admin_client.get_llm_apply_operation, operation_id)
+
+
+@frappe.whitelist()
 def get_llm_usage() -> dict:
 	"""Real, curated Bifrost usage for the Monitor tab (System-Manager only,
 	spec 7). Tenants with no Bifrost (proxy_active=0) short-circuit to the empty

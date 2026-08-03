@@ -1122,6 +1122,34 @@ def post_update_llm_pool(*, spec: dict, api_keys: dict, oauth_blobs: dict) -> di
 	)
 
 
+def get_llm_apply_operation(operation_id: str, *, timeout_s: int = 8) -> dict:
+	"""Read-only status of a durable LLM-apply operation (plan-05 D2).
+
+	Wraps admin's ``api.tenant.get_llm_apply_operation``, which never mutates and
+	never spends the 20/hour apply bucket, so the SPA may poll it freely. ``_post``
+	unwraps the admin ``data`` envelope, so this returns the §8.4 status dict
+	directly:
+
+	    {operation_id, state, code, message, tenant (opaque), desired_version,
+	     applied_version, tenant_authority_generation, chat_readiness,
+	     chat_readiness_reason, retryable, retry_after_seconds}
+
+	Short default timeout: this is a hot poll on a converging apply, so a slow
+	admin must not stretch the SPA's follow loop past a beat. UnknownOperation
+	surfaces as AdminValidationError (404); a transport error surfaces as
+	AdminUnreachableError, which the client seam treats as "keep polling", not a
+	verdict.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError
+	"""
+	return _post(
+		path=_m("api.tenant.get_llm_apply_operation"),
+		body={"operation_id": operation_id},
+		timeout_s=timeout_s,
+	)
+
+
 def post_llm_auth_status() -> dict:
 	"""Ask admin (and via admin, fleet-agent) whether the customer's
 	container actually holds a usable OAuth profile right now.
