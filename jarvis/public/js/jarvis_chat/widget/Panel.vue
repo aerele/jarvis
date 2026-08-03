@@ -728,7 +728,15 @@ function useSuggestion(prompt) {
 	});
 }
 
-const thinking = computed(() => sending.value || (stream.value.busy && !stream.value.live));
+// Typing dots while a turn is in flight but has no visible text yet. The last
+// clause is what makes the panel show a "typing" state for a turn it did NOT
+// start (the same conversation open in the full web chat or another tab):
+// jarvis:event frames are published to the user, so run:start reaches every
+// session and sets `live` with empty text before the first token arrives.
+const thinking = computed(() => {
+	const s = stream.value;
+	return sending.value || (s.busy && !s.live) || (!!s.live && !s.live.text);
+});
 const canSend = computed(
 	() =>
 		(draft.value.trim().length > 0 || attachments.value.length > 0) &&
