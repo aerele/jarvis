@@ -217,6 +217,22 @@ class TestAddComment(FrappeTestCase):
 		)
 		self.assertEqual(out["comment_name"], "Comment-001")
 
+	def test_plain_text_newlines_become_html_breaks(self):
+		# Comment.content is an HTML field, so the agent's \n newlines must
+		# become <br> or a multi-line note collapses to one line - and a stray
+		# <a@b.com> must be escaped, not eaten by the timeline as a tag.
+		fake_comment = MagicMock()
+		fake_comment.name = "Comment-002"
+		with (
+			_all_exist(),
+			patch("frappe.desk.form.utils.add_comment", return_value=fake_comment) as ac,
+			patch("frappe.db.get_value", return_value="Admin User"),
+		):
+			add_comment("User", "test@example.com", "Line one.\n\nLine two. <a@b.com>")
+		sent = ac.call_args.kwargs["content"]
+		self.assertIn("<br>", sent)
+		self.assertIn("&lt;a@b.com&gt;", sent)
+
 
 class TestUpdateComment(FrappeTestCase):
 	def test_rejects_empty(self):
@@ -239,6 +255,17 @@ class TestUpdateComment(FrappeTestCase):
 			out = update_comment("Comment-001", "new body")
 		uc.assert_called_once()
 		self.assertEqual(out, {"comment_name": "Comment-001", "content": "new body"})
+
+	def test_plain_text_newlines_become_html_breaks(self):
+		# Same HTML-field conversion as add_comment; the returned envelope keeps
+		# the raw text, only the value written to the Comment is converted.
+		with (
+			_all_exist(),
+			patch("frappe.desk.form.utils.update_comment") as uc,
+		):
+			out = update_comment("Comment-001", "Line one.\n\nLine two.")
+		self.assertIn("<br>", uc.call_args.kwargs["content"])
+		self.assertEqual(out["content"], "Line one.\n\nLine two.")
 
 
 # ---------------------------------------------------------------------
