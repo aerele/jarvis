@@ -202,8 +202,15 @@ def is_ready_for_chat() -> dict:
 	# Keyed on pool MODE, not the narrower proxy_active: a BYO api-key pool has
 	# no sidecar but still syncs through /llm-pool and stamps llm_pool_synced_at,
 	# so gating it on the direct marker would strand it forever.
+	#
+	# An unstamped marker means "this bench never RECORDED an apply", which is not
+	# the same as "no apply happened" - the sync job can hand off to the scheduled
+	# reconcile without stamping. So both provisioning exits below ask admin once
+	# before declaring the workspace not ready (_confirm_apply_via_admin, #576);
+	# the reason strings still mean exactly what they say, they are now just also
+	# backed by the control plane declining to confirm.
 	if compute_pool_mode(settings):
-		if getattr(settings, "llm_pool_synced_at", None):
+		if getattr(settings, "llm_pool_synced_at", None) or _confirm_apply_via_admin(settings, is_pool=True):
 			return _admin_chat_gate()
 		return {"ready": False, "reason": "llm_pool_provisioning"}
 
@@ -231,7 +238,9 @@ def is_ready_for_chat() -> dict:
 		# pending/failed is NOT ready — opening chat there guarantees failing turns
 		# while onboarding still shows "applying". Legacy direct tenants are
 		# backfilled by patch v2_00_backfill_llm_direct_synced_at.
-		if not getattr(settings, "llm_direct_synced_at", None):
+		if not getattr(settings, "llm_direct_synced_at", None) and not _confirm_apply_via_admin(
+			settings, is_pool=False
+		):
 			return {"ready": False, "reason": "llm_provisioning"}
 	elif auth_mode in ("subscription", "oauth"):
 		# Both modes use the same local signal: llm_oauth_connected_at is
@@ -244,6 +253,73 @@ def is_ready_for_chat() -> dict:
 		return {"ready": False, "reason": "llm_credentials"}
 
 	return _admin_chat_gate()
+
+
+# Damping for _confirm_apply_via_admin. Only a NEGATIVE outcome is cached: a
+# confirmation stamps the durable marker, which ends the question for good.
+#
+# Needed because the two not-ready exits below are polled hard. OnboardingView's
+# waitUntilReady runs 30 probes at 2.5s (75s) after a Connect, and the desk
+# banner + widget probe on their own schedules — so an unproven tenant would put
+# one admin round-trip on every one of those ticks. 10s costs at most one extra
+# poll before a convergence is noticed against that 75s budget, and cuts the
+# round-trips it can generate by roughly two thirds.
+_APPLY_CONFIRM_MISS_KEY = "jarvis:apply_confirm_miss"
+_APPLY_CONFIRM_MISS_TTL_S = 10
+
+
+def _confirm_apply_via_admin(settings, *, is_pool: bool) -> bool:
+	"""Last chance to confirm an apply this bench never recorded: ask admin.
+
+	The two callers sit at ``is_ready_for_chat``'s provisioning exits, reached
+	when the durable evidence-of-apply marker is unstamped. Those exits are what
+	renders "Chat may not work yet / applying your LLM configuration", and until
+	now they returned that verdict WITHOUT ever asking the control plane — while
+	the neighbouring proven-tenant branch asks it directly via
+	``_admin_chat_gate``. So a tenant whose apply converged after the sync job's
+	in-band poll gave up was told chat would not work while the container was
+	demonstrably serving turns, and nothing could correct it but the ``*/5``
+	``reconcile_pending_llm_sync`` tick (jarvis #576). The surface that reports
+	the problem can now also clear it.
+
+	No new way to become ready: this reuses ``_admin_chat_readiness`` and
+	``_stamp_converged_ok``, the exact pair the scheduled reconcile and the
+	onboarding poller's ``_reconcile_pending_applying`` already use. Admin gates
+	``chat_readiness`` "Ready" on ``applied_version >= desired_version``, so it
+	never reports Ready from intent — the evidentiary bar is unchanged.
+
+	Deliberately does NOT commit, unlike ``_reconcile_pending_applying``. That
+	one runs only from the onboarding poller; this runs from ``boot.py`` too, on
+	a desk-boot GET, and injecting a commit into boot would make this gate commit
+	whatever else that request happens to be carrying. The SPA, the desk widget
+	and the banner all reach ``is_ready_for_chat`` through frappe-ui's ``call``,
+	which POSTs, so the stamp lands durably where it matters; on a GET it rolls
+	back and the next probe simply re-confirms. Correct either way — persistence
+	is the optimisation, not the mechanism.
+
+	Fails closed and never raises: an unreachable admin, a non-Ready verdict or a
+	failed write all leave the provisioning verdict standing.
+	"""
+	try:
+		cache = frappe.cache()
+		if cache.get_value(_APPLY_CONFIRM_MISS_KEY):
+			return False
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			_admin_chat_readiness,
+			_stamp_converged_ok,
+		)
+
+		state, _reason = _admin_chat_readiness()
+		if state != "Ready":
+			cache.set_value(_APPLY_CONFIRM_MISS_KEY, 1, expires_in_sec=_APPLY_CONFIRM_MISS_TTL_S)
+			return False
+		# Stamps the marker for this leg AND clears last_sync_status to a
+		# converged "ok" — which is the second face of #576, the Settings pane
+		# still showing "Applying to your agent" off that same field.
+		_stamp_converged_ok(settings, is_pool=is_pool)
+		return True
+	except Exception:
+		return False
 
 
 def _llm_missing_verdict(settings) -> dict:
