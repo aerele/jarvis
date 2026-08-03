@@ -606,6 +606,21 @@ test("P1-3: parked money is never wiped by restart", () => {
 	assert.equal(canSafelyRestart(s), false);
 });
 
+test("U4: CLIENT_UPGRADE_REQUIRED is restart-safe (nothing was created)", () => {
+	// The capability/upgrade refusal precedes any provider object, so "Start again"
+	// is safe - and its own copy promises "try again", which without a working RESTART
+	// was a dead end whose only exit was a hard reload.
+	const s = reduce(
+		initialState(),
+		at(CODES.CLIENT_UPGRADE_REQUIRED, { can_check_status: false })
+	);
+	assert.equal(s.value, STATES.FAILED_TERMINAL); // still a terminal hold for THIS attempt
+	assert.equal(canSafelyRestart(s), true);
+	const after = reduce(s, { type: EVENTS.RESTART });
+	assert.equal(after.value, STATES.REVIEW);
+	assert.equal(after.payPageToken, "");
+});
+
 // ---------------------------------------------------------------------------
 // illegal transitions
 // ---------------------------------------------------------------------------

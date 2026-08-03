@@ -1,12 +1,12 @@
 {
   "contract_version": 2,
   "name": "resume_intent",
-  "description": "Authenticated failed-payment retry on a Pending Payment signup: a fresh checkout handle on a NEW intent generation, on the same subscription. Never a second account, never a second subscription. Carries the billing disclosure (plan, signup fee, what is actually due today) and the account identity a reloaded wizard renders.",
+  "description": "Authenticated failed-payment retry on a Pending Payment signup: a fresh checkout handle on a NEW intent generation, on the same subscription. Never a second account, never a second subscription. Carries the billing disclosure (plan, signup fee, what is actually due today) and the account identity a reloaded wizard renders. TOKEN-SHAPED (plan-09 §0.4): the response carries pay_page_token + pay_origin_digest and never a raw gateway handle or key id - the bench navigates to the admin-hosted pay page with the token.",
   "endpoint": "jarvis_admin_v2.billing.signup.resume_pending_signup",
   "http_status": 200,
   "volatile": [
-    "body.message.data.razorpay_key_id",
-    "body.message.data.razorpay_order_id",
+    "body.message.data.pay_page_token",
+    "body.message.data.pay_origin_digest",
     "body.message.data.attempt_id"
   ],
   "body": {
@@ -25,8 +25,8 @@
         "due_today_inr": 12000.0,
         "email": "oc-test-a@example.com",
         "company": "Acme",
-        "razorpay_key_id": "rzp_test_placeholder",
-        "razorpay_order_id": "order_placeholder",
+        "pay_page_token": "pit_placeholder",
+        "pay_origin_digest": "digest_placeholder",
         "attempt_id": "att_placeholder",
         "generation": 2
       }

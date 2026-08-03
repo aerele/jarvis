@@ -1,14 +1,12 @@
 {
   "contract_version": 2,
   "name": "reconcile_unmatched_payment",
-  "description": "A provider-truth check that found money at the gateway which cannot be tied to this exact subscription and generation (the amount, currency or receipt/notes linkage disagrees; a retry superseded the intent mid-check; the row was parked by an operator). NOTHING is activated and ops is paged - either a customer has paid into an intent we cannot credit, or this row points at an order that is not theirs, and both are money questions no automatic rule may answer. The customer is told we are still confirming, on purpose: reporting a decline here invites a SECOND payment on top of the one already unplaceable. The CODE is the ordinary pending one - the incident is an operator's, not the customer's - and `awaiting_manual_reconciliation` is what distinguishes it: while it is true a human is placing money the gateway is holding, so `can_initiate_payment` is FALSE and a surface must suppress its Pay affordance. The alert body tells the operator not to ask the customer to pay again; this is the API saying the same thing.",
+  "description": "A provider-truth check that found money at the gateway which cannot be tied to this exact subscription and generation (the amount, currency or receipt/notes linkage disagrees; a retry superseded the intent mid-check; the row was parked by an operator). NOTHING is activated and ops is paged - either a customer has paid into an intent we cannot credit, or this row points at an order that is not theirs, and both are money questions no automatic rule may answer. The customer is told we are still confirming, on purpose: reporting a decline here invites a SECOND payment on top of the one already unplaceable. The CODE is the ordinary pending one - the incident is an operator's, not the customer's - and `awaiting_manual_reconciliation` is what distinguishes it: while it is true a human is placing money the gateway is holding, so `can_initiate_payment` is FALSE and a surface must suppress its Pay affordance. TOKEN-SHAPED (plan-09 §0.4): no raw gateway handle crosses the wire; the handle is not part of this contract at all - the caller branches on the code + awaiting_manual flag.",
   "endpoint": "jarvis_admin_v2.billing.signup.check_signup_payment_status",
   "http_status": 200,
   "volatile": [
     "body.message.data.attempt_id",
-    "body.message.data.payment_last_checked_at",
-    "body.message.data.razorpay_key_id",
-    "body.message.data.razorpay_order_id"
+    "body.message.data.payment_last_checked_at"
   ],
   "body": {
     "message": {
@@ -20,8 +18,6 @@
         "payment_provider": "razorpay",
         "email": "oc-test-a@example.com",
         "company": "Acme",
-        "razorpay_key_id": "placeholder",
-        "razorpay_order_id": "order_placeholder",
         "can_initiate_payment": false,
         "can_check_status": true,
         "can_reconnect": false,

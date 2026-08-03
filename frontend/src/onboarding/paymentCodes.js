@@ -294,14 +294,18 @@ const TABLE = {
 	},
 	[CODES.CLIENT_UPGRADE_REQUIRED]: {
 		// A pre-cutover control plane answered with raw provider handles and no
-		// token. The bench no longer opens a sheet for those (§R P0-4); this is the
-		// honest hold, never a silent fallback to the old SDK path.
+		// token, OR admin refused this client's capability advert. The bench no longer
+		// opens a sheet for those (§R P0-4); this is the honest hold, never a silent
+		// fallback to the old SDK path. Nothing was created (the refusal precedes any
+		// provider object), so "Start again" is provably safe (U4) - and its own copy
+		// promises "try again", which without a RESTART button was a dead end whose
+		// only exit was a hard reload nobody mentioned.
 		headline: "Secure checkout is temporarily unavailable.",
 		body:
 			"Nothing has been charged. Our payment service is being updated - " +
 			"please try again shortly, or contact support if it persists.",
 		tone: TONE.ALERT,
-		actions: [ACTIONS.SUPPORT],
+		actions: [ACTIONS.RESTART, ACTIONS.SUPPORT],
 	},
 };
 
