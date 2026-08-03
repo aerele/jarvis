@@ -135,7 +135,7 @@ import { useRoute, useRouter } from "vue-router";
 import { Badge, Button, Dropdown, Switch, Tooltip, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
-import { searchSplitArgs } from "@/pages/list/listAdapters";
+import { triggersListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiTriggers from "@/api/triggers";
 
@@ -230,7 +230,7 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => apiTriggers.listTriggersPage(searchSplitArgs(p)),
+	fetchFn: triggersListFetch,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "triggers",
 	viewKey: "triggers",

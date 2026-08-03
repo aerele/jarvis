@@ -309,11 +309,10 @@ import { sessionUser } from "@/data/session";
 import ListPage from "@/components/list/ListPage.vue";
 import WikiPageDialog from "@/components/wiki/WikiPageDialog.vue";
 import { useListPage } from "@/composables/useListPage";
-import { buildWikiListArgs } from "@/pages/list/listAdapters";
+import { wikiListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import {
-	listWikiPagesPage,
 	getWikiCaps,
 	createWikiPage,
 	archiveWikiPage,
@@ -441,7 +440,7 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => listWikiPagesPage(buildWikiListArgs(p)),
+	fetchFn: wikiListFetch,
 	storageKey: "wiki",
 	viewKey: "wiki_pages",
 	quickClauses: QUICK_CLAUSES,

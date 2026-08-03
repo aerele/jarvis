@@ -138,7 +138,7 @@ import { Button, Badge, Tooltip, Dropdown, toast, confirmDialog } from "frappe-u
 import ListPage from "@/components/list/ListPage.vue";
 import TabBar from "@/components/list/TabBar.vue";
 import { useListPage } from "@/composables/useListPage";
-import { searchSplitArgs } from "@/pages/list/listAdapters";
+import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
@@ -243,7 +243,7 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => api.listMacrosPage(searchSplitArgs(p)),
+	fetchFn: macrosListFetch,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "macros",
 	viewKey: "macros",

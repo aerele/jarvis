@@ -119,11 +119,10 @@ import { useRoute, useRouter } from "vue-router";
 import { Button, Badge, Avatar, Tooltip, Dropdown, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
-import { searchSplitArgs } from "@/pages/list/listAdapters";
+import { skillsListFetch } from "@/pages/list/listFetchers";
 import SyncPill from "./SyncPill.vue";
 import { session } from "@/data/session";
 import { timeAgo, exactDate } from "@/utils/datetime";
-import * as api from "@/api";
 import * as apiSkills from "@/api/skills";
 
 const router = useRouter();
@@ -203,9 +202,10 @@ const {
 	requestSchema,
 	dismissFilterNotice,
 } = useListPage({
+	// skillsListFetch (listFetchers) is the EXACT transport the surface spec drives:
 	// searchSplitArgs moves `search` out of the whitelisted `filters` object and
-	// forwards everything else — filters_v2 included — through the spread (S6).
-	fetchFn: (p) => api.listCustomSkillsPage(searchSplitArgs(p)),
+	// forwards everything else — filters_v2 included — through the spread (S6/D1).
+	fetchFn: skillsListFetch,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "skills",
 	viewKey: "skills",
