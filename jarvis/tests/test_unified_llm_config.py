@@ -2943,6 +2943,8 @@ class TestFT4bValidateModelsNeverRaises(_RT3SettingsTestCase):
 
 from unittest.mock import patch
 
+from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import _PENDING_APPLYING_STATUS
+
 
 class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 	"""Pins the incident-class behaviors:
@@ -2959,7 +2961,21 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 	   later re-save's transient pending/failed.
 	4. The sync jobs' RQ envelopes (300s) exceed the admin HTTP budgets they
 	   wrap (120s pool / 90s single-model + lock waits + retries).
+	5. The provisioning exits confirm an unrecorded apply with admin before
+	   declaring the workspace not chat-ready (#576), and damp the probe.
 	"""
+
+	def setUp(self):
+		super().setUp()
+		# _confirm_apply_via_admin caches a MISS for 10s, and this whole class runs
+		# well inside that window. A leftover entry would suppress the probe the
+		# next case is trying to exercise, so a real regression could pass.
+		from jarvis.account import _APPLY_CONFIRM_MISS_KEY
+
+		frappe.cache().delete_value(_APPLY_CONFIRM_MISS_KEY)
+		# Sibling cases here db_set the Single directly; without this a later read
+		# can be served a stale cached doc and the gate judges the wrong state.
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
 
 	def _seed_pool(self):
 		"""Two api_key models -> proxy_active=1, sync job enqueued (mocked ok)."""
@@ -3182,6 +3198,133 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		result = is_ready_for_chat()
 		self.assertFalse(result.get("ready"))
 		self.assertEqual(result.get("reason"), "llm_pool_provisioning")
+
+	# -- jarvis #576: the gate confirms an unrecorded apply with admin ----
+	#
+	# The provisioning exits are what render "Chat may not work yet"; they used
+	# to return that verdict without ever asking the control plane, so an apply
+	# that converged after the sync job's in-band poll gave up left the customer
+	# staring at the banner while the container served turns, until the */5
+	# reconcile happened to tick. These pin the confirm-on-read behaviour AND
+	# its damping.
+
+	_READINESS_PROBE = "jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness"
+
+	def test_unproven_pool_goes_ready_when_admin_confirms(self):
+		"""admin reporting Ready IS the confirmation the marker wants (it gates
+		Ready on applied_version >= desired_version), so the gate must accept it
+		rather than wait for the scheduled reconcile to notice the same fact."""
+		from jarvis.account import is_ready_for_chat
+
+		self._set_pool_gate_state(synced_at=None, status=_PENDING_APPLYING_STATUS)
+		with patch(self._READINESS_PROBE, return_value=("Ready", "")):
+			result = is_ready_for_chat()
+		self.assertTrue(result.get("ready"), f"admin confirmed the apply; got: {result}")
+
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertTrue(
+			settings.llm_pool_synced_at,
+			"the confirmation must stamp the durable marker, or every load re-probes",
+		)
+		# The second face of #576: Settings reads "Applying to your agent" off
+		# last_sync_status, so a confirmation that only moved the gate would
+		# leave the pane still claiming an apply is in flight.
+		self.assertTrue(
+			(settings.last_sync_status or "").startswith("ok"),
+			f"a converged apply must clear the pending status; got: {settings.last_sync_status!r}",
+		)
+
+	def test_unproven_pool_stays_provisioning_when_admin_says_not_ready(self):
+		"""Fails CLOSED. Admin answering with a non-Ready state is a real
+		verdict, not a confirmation - the banner is correct there."""
+		from jarvis.account import is_ready_for_chat
+
+		self._set_pool_gate_state(synced_at=None, status=_PENDING_APPLYING_STATUS)
+		with patch(self._READINESS_PROBE, return_value=("Provisioning", "container starting")):
+			result = is_ready_for_chat()
+		self.assertFalse(result.get("ready"))
+		self.assertEqual(result.get("reason"), "llm_pool_provisioning")
+		self.assertFalse(
+			frappe.get_single("Jarvis Settings").llm_pool_synced_at,
+			"a non-Ready verdict must never stamp the evidence marker",
+		)
+
+	def test_unproven_pool_stays_provisioning_when_admin_is_unreachable(self):
+		"""_admin_chat_readiness returns (None, err) rather than raising; the
+		gate must treat "no answer" as "no confirmation" and never 500."""
+		from jarvis.account import is_ready_for_chat
+
+		self._set_pool_gate_state(synced_at=None, status="failed: admin unreachable: timeout")
+		with patch(self._READINESS_PROBE, return_value=(None, "timeout")):
+			result = is_ready_for_chat()
+		self.assertFalse(result.get("ready"))
+		self.assertEqual(result.get("reason"), "llm_pool_provisioning")
+		self.assertFalse(frappe.get_single("Jarvis Settings").llm_pool_synced_at)
+
+	def test_a_miss_is_damped_so_the_wizard_poll_cannot_hammer_admin(self):
+		"""OnboardingView polls readiness 30 times at 2.5s after a Connect. Without
+		damping each tick would be an admin round-trip; this pins that a miss is
+		cached, so removing the cache turns this test red rather than turning
+		production into a 30x amplifier."""
+		from jarvis.account import is_ready_for_chat
+
+		self._set_pool_gate_state(synced_at=None, status=_PENDING_APPLYING_STATUS)
+		with patch(self._READINESS_PROBE, return_value=("Provisioning", "")) as probe:
+			is_ready_for_chat()
+			is_ready_for_chat()
+			is_ready_for_chat()
+		self.assertEqual(probe.call_count, 1, "a cached miss must suppress the follow-up probes")
+
+	def test_a_confirmation_is_not_damped_by_an_earlier_miss(self):
+		"""The damping is a rate limit on asking, not a lock on the answer: once
+		the cached miss expires the very next probe must be able to confirm.
+		Pinned by clearing the key, which is what its TTL does in production."""
+		from jarvis.account import _APPLY_CONFIRM_MISS_KEY, is_ready_for_chat
+
+		self._set_pool_gate_state(synced_at=None, status=_PENDING_APPLYING_STATUS)
+		with patch(self._READINESS_PROBE, return_value=("Provisioning", "")):
+			self.assertFalse(is_ready_for_chat().get("ready"))
+		frappe.cache().delete_value(_APPLY_CONFIRM_MISS_KEY)
+		with patch(self._READINESS_PROBE, return_value=("Ready", "")):
+			self.assertTrue(is_ready_for_chat().get("ready"))
+
+	def test_unproven_direct_tenant_goes_ready_when_admin_confirms(self):
+		"""The single-model leg strands the same way and is rescued by the same
+		reconcile, so it must be confirmable from the gate too - the marker it
+		stamps is llm_direct_synced_at, not the pool one."""
+		from jarvis.account import is_ready_for_chat
+
+		self._clear_models()
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set(
+			{
+				"llm_pool_synced_at": None,
+				"llm_direct_synced_at": None,
+				"llm_auth_mode": "api_key",
+				"llm_provider": "openai",
+				"llm_model": "gpt-4o-mini",
+				"proxy_active": 0,
+				"preset": "",
+				"last_sync_status": _PENDING_APPLYING_STATUS,
+			},
+			update_modified=False,
+		)
+		# Deliberately NOT committed. set_password writes an __Auth row, and a
+		# committed one outlives the rollback that makes these tests safe to run
+		# against a real site - the exact hazard filed as #566. The write is
+		# visible to this connection uncommitted, which is all the gate needs.
+		settings.set_password("llm_api_key", "sk-test-direct")
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+
+		with patch(self._READINESS_PROBE, return_value=("Ready", "")):
+			result = is_ready_for_chat()
+		self.assertTrue(result.get("ready"), f"admin confirmed the direct apply; got: {result}")
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertTrue(settings.llm_direct_synced_at, "the direct leg's own marker must be stamped")
+		self.assertFalse(
+			settings.llm_pool_synced_at,
+			"a direct tenant must not be stamped as a pool tenant",
+		)
 
 	def test_backfill_patch_grandfathers_pre_marker_tenants(self):
 		"""Tenants provisioned before llm_pool_synced_at existed are
