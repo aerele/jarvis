@@ -123,20 +123,15 @@ _UNCONFIRMED_CACHE_TTL_S = 5
 # An ALLOWLIST: Cancelled, an empty body, a proxy's own 403 and anything
 # unrecognised all fall through to the soft verdict. Being wrong in the hard
 # direction locks a customer out of chat AND /billing; being wrong in the soft
-# direction shows a banner one step too late. FROZEN-CONTRACT NOTE: wire-verify
-# these codes against jarvis_admin_v2's actual auth-refusal codes when the admin
-# half merges; the set is deliberately generous across the plausible spellings.
-_NEVER_PAID_CODES = frozenset(
-	{
-		"NEVER_PAID",
-		"NOT_A_CUSTOMER",
-		"CUSTOMER_NOT_FOUND",
-		"PENDING_PAYMENT",
-		"PENDING_VERIFICATION",
-		"CUSTOMER_PENDING_PAYMENT",
-		"CUSTOMER_PENDING_VERIFICATION",
-	}
-)
+# direction shows a banner one step too late.
+#
+# CUSTOMER_NOT_PAID is admin's concrete structured code
+# (jarvis_admin_v2.api._responses.CustomerNotPaidError, status 403), raised for a
+# Pending Payment / Pending Verification / any non-Active-non-Suspended customer on
+# the wrapped endpoints and get_connection. Distinct from
+# TENANT_AUTHORITY_REPAIR_REQUIRED, which is NOT never-paid (it is a repair state)
+# and is deliberately absent here.
+_NEVER_PAID_CODES = frozenset({"CUSTOMER_NOT_PAID"})
 
 # TEMPORARY prose fallback for an OLD admin that answers the never-paid 403 with a
 # human sentence and no structured code. REMOVE once every control plane in the

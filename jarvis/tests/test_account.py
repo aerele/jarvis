@@ -958,12 +958,15 @@ class TestStructuredNeverPaidCode(FrappeTestCase):
 		return AdminAuthError(message, status_code=status_code, code=code)
 
 	def test_structured_never_paid_code_hard_gates(self):
-		self.assertTrue(account._is_never_paid_403(self._err(code="PENDING_PAYMENT")))
-		self.assertTrue(account._is_never_paid_403(self._err(code="pending_payment")))  # case-insensitive
+		# admin's concrete contract code (jarvis_admin_v2 CustomerNotPaidError).
+		self.assertTrue(account._is_never_paid_403(self._err(code="CUSTOMER_NOT_PAID")))
+		self.assertTrue(account._is_never_paid_403(self._err(code="customer_not_paid")))  # case-insensitive
 
 	def test_an_unrecognised_code_does_not_hard_gate(self):
-		# Cancelled / a proxy code / anything else stays SOFT even on a 403.
+		# Cancelled / a proxy code / the authority-repair refusal / anything else
+		# stays SOFT even on a 403 - only the never-paid code hard-gates.
 		self.assertFalse(account._is_never_paid_403(self._err(code="CANCELLED")))
+		self.assertFalse(account._is_never_paid_403(self._err(code="TENANT_AUTHORITY_REPAIR_REQUIRED")))
 		self.assertFalse(account._is_never_paid_403(self._err(code="SOME_OTHER")))
 
 	def test_prose_fallback_only_when_no_code(self):
