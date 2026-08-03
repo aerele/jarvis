@@ -273,7 +273,12 @@ export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_statu
 // rather than mint a second desired version; resumable:true with
 // apply_operation:null means the descriptor is available under the SAME key on a
 // re-call (a bench→admin timeout after a server-side retry).
-export const saveLlmPool = (models, preset = null, routingMode = "failover", idempotencyKey = "") =>
+export const saveLlmPool = (
+	models,
+	preset = null,
+	routingMode = "failover",
+	idempotencyKey = ""
+) =>
 	call("jarvis.onboarding.save_llm_pool", {
 		models: JSON.stringify(models),
 		preset: preset || "",
@@ -300,9 +305,19 @@ export const listPlans = () => call("jarvis.onboarding.list_plans");
 // operator enabled AND this bench build can render.
 export const listPaymentProviders = () => call("jarvis.onboarding.list_payment_providers");
 export const getAccountDefaults = () => call("jarvis.onboarding.get_account_defaults");
+// ERP-derived billing defaults for the selected Company (Plan 01): its primary
+// Contact phone + primary billing Address (+ optional GSTIN), or a coded error
+// ({ok:false, error:{code}}). Behind the same onboarding-admin gate.
+export const getCompanyOnboardingDefaults = (company) =>
+	call("jarvis.onboarding.get_company_onboarding_defaults", { company });
 export const syncConnection = () => call("jarvis.onboarding.sync_connection");
-export const startSignup = (email, company, plan, provider) =>
-	call("jarvis.onboarding.start_signup", { email, company, plan, provider });
+export const startSignup = (email, company, plan, provider, billing) =>
+	call("jarvis.onboarding.start_signup", { email, company, plan, provider, billing });
+// Authenticated billing-only edit (Plan 01, post-intent Review & Pay "Edit"):
+// updates the owned Pending Payment customer WITHOUT creating/replacing an
+// intent. NEVER guest signup. Returns {billing_saved, billing} (normalized).
+export const updateBilling = (billing) => call("jarvis.onboarding.update_billing", { billing });
+export const checkSignupPaymentState = () => call("jarvis.onboarding.check_signup_payment_state");
 export const finishPayment = (payload) => call("jarvis.onboarding.finish_payment", { payload });
 
 // --- Payment state machine (plan 02 / plan 03 contract) ---------------------

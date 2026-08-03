@@ -42,6 +42,9 @@ const api = vi.hoisted(() => ({
 	},
 }));
 vi.mock("@/api", () => api);
+// The connect controller (plan-05) navigates via useRouter; stub it so mounting
+// the view here does not warn about a missing router injection.
+vi.mock("vue-router", () => ({ useRouter: () => ({ replace: vi.fn() }) }));
 vi.mock("frappe-ui", () => ({
 	Button: { name: "Button", template: "<button><slot /></button>" },
 	FormControl: { name: "FormControl", template: "<input />" },
