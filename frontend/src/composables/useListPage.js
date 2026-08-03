@@ -679,7 +679,11 @@ export function useListPage({
 			);
 			const emitsAtMount = (urlSeed && urlSeed.clauses.length) || initialQuick;
 			if (emitsAtMount) await ensureCapability();
-			else if (declaredRoot) ensureCapability();
+			// D11: warm for EVERY view, not just a declaredRoot one. A lazy view whose
+			// filter panel is opened later (setClauses) would otherwise run NO probe at
+			// mount and could emit a clause on a rolled-back view. Warming is one cheap
+			// call and never delays first paint.
+			else ensureCapability();
 			// A link may have arrived with filters: the catalog decides which of
 			// them this caller may still use, and that answer must precede page one.
 			// Same function the watcher uses, so the two cannot drift.
