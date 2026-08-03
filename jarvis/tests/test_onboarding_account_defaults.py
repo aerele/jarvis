@@ -27,6 +27,12 @@ class TestUndeliverable(FrappeTestCase):
 			"cust-abc@jarvis.invalid",  # admin_v2's synthetic customer logins
 			"x@foo.test",
 			"x@localhost",
+			# The reserved names standing alone, not just as suffixes. Only
+			# localhost used to be caught here; the other three slipped through
+			# because "test" does not end with ".test".
+			"x@test",
+			"x@example",
+			"x@invalid",
 		):
 			self.assertTrue(onboarding._is_undeliverable(addr), addr)
 

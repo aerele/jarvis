@@ -656,20 +656,26 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 # RFC 2606 / 6761 reserved names. Nothing here can receive mail, so none of it is
 # a billing address: Frappe ships Administrator as admin@example.com and Guest as
 # guest@example.com, and admin_v2 mints synthetic customer logins at @jarvis.invalid.
-_UNDELIVERABLE_DOMAINS = ("example.com", "example.net", "example.org", "localhost")
-_UNDELIVERABLE_TLDS = (".test", ".example", ".invalid", ".localhost")
+#
+# Each entry carries a leading dot, and the candidate domain gets one too, so a
+# single suffix test covers both the name itself and any subdomain of it -- with
+# no way to match a longer name that merely ends in the same letters
+# (".examplex.com" does not end with ".example.com").
+_UNDELIVERABLE_SUFFIXES = (
+	".example.com",
+	".example.net",
+	".example.org",
+	".localhost",
+	".test",
+	".example",
+	".invalid",
+)
 
 
 def _is_undeliverable(email: str) -> bool:
-	"""Whether ``email``'s domain is reserved, so mail to it can never arrive.
-
-	Matches subdomains too: mail.example.com is as undeliverable as example.com."""
+	"""Whether ``email``'s domain is reserved, so mail to it can never arrive."""
 	domain = email.rpartition("@")[2].strip().lower()
-	if not domain:
-		return False
-	if domain.endswith(_UNDELIVERABLE_TLDS):
-		return True
-	return any(domain == d or domain.endswith(f".{d}") for d in _UNDELIVERABLE_DOMAINS)
+	return bool(domain) and f".{domain}".endswith(_UNDELIVERABLE_SUFFIXES)
 
 
 @frappe.whitelist()
