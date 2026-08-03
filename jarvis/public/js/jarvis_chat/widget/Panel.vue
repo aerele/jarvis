@@ -1002,13 +1002,15 @@ function onRealtime(payload) {
 		});
 	}
 
-	const { state: next, admitted } = applyEventEx(stream.value, payload);
+	const { state: next } = applyEventEx(stream.value, payload);
 
-	// Only an ADMITTED frame proves the winning pump's stream is reaching us.
-	// A fenced-out straggler must not stand the HTTP fallback down: after a
-	// handoff, stale frames can be the ONLY thing this socket ever sees, and
-	// polling is then the sole path to the finished reply.
-	if (admitted) stopPolling();
+	// NB: we deliberately do NOT stop polling when a realtime frame arrives.
+	// Realtime gives the smooth live stream, but the relay can drop the TAIL
+	// (the final deltas / run:end) after delivering the first part — which left
+	// the panel frozen on a partial reply ("only the text up to some word shows")
+	// until a manual reload. Polling stays on as the safety net and settles only
+	// once the DURABLE message is complete (streaming=0, see startPolling), so a
+	// dropped tail self-heals within one poll cycle.
 	if (next.reload) {
 		// Clear the flag before reloading so a second frame cannot double-fetch.
 		stream.value = { ...next, reload: false, error: "" };
@@ -1111,9 +1113,12 @@ function startPolling() {
 			const conv = await getConversation(convId.value);
 			const msgs = Array.isArray(conv && conv.messages) ? conv.messages : [];
 			const next = visibleMessages(msgs);
-			// A new assistant turn landed: adopt it and stop.
+			// A COMPLETE assistant turn landed (streaming=0): adopt it and stop.
+			// The streaming guard is what lets polling run alongside realtime as a
+			// safety net without ever settling on a half-written reply, and it is
+			// what recovers a reply whose streamed tail the relay dropped.
 			const last = next[next.length - 1];
-			if (next.length > before && last && last.role === "assistant") {
+			if (next.length > before && last && last.role === "assistant" && !last.streaming) {
 				messages.value = msgs;
 				settle();
 				stickToBottom();
