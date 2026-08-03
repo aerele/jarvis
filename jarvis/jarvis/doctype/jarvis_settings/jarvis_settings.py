@@ -1698,12 +1698,26 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 			# The rate limit is enforced BEFORE admin allocates an operation, so
 			# there is nothing to resume-follow: surface the cooldown truthfully.
 			return {"apply_operation": None, "resumable": False, "retry_after_seconds": retry}
-		except (admin_client.AdminRejectedError, admin_client.AdminUnreachableError):
-			# The operation is created BEFORE the fleet apply, so it exists (and, on
-			# a genuine reject, was marked failed) even though admin raised instead
-			# of returning the descriptor. Record pending for the reconcile and let
-			# the SPA resume-by-key to read the operation's terminal descriptor
-			# (REJECTED / retryable / applied-late) rather than the bench guessing.
+		except admin_client.AdminRejectedError as e:
+			# Permanent: admin validated the spec and refused it (the operation was
+			# created before the fleet apply and is now marked failed). Write a
+			# TERMINAL failed status for the settings status strip, and stay resumable
+			# so the SPA resume-by-key reads the operation's REJECTED descriptor and
+			# routes the customer back to fix their input.
+			settings.db_set(
+				{
+					"last_sync_at": _frappe.utils.now(),
+					"last_sync_status": f"failed: {_admin_rejection_reason(e)}",
+					**_cleared_subscription_status_fields(),
+				}
+			)
+			_commit_terminal_sync_status()
+			return {"apply_operation": None, "resumable": True}
+		except admin_client.AdminUnreachableError:
+			# A transient timeout/5xx is NOT a lost apply: admin committed desired +
+			# the operation before the fleet call, so record pending for the reconcile
+			# and let the SPA resume-by-key to read the operation's live descriptor
+			# (still-applying / applied-late) rather than the bench guessing.
 			settings.db_set("last_sync_status", _PENDING_APPLYING_STATUS, update_modified=False)
 			_frappe.db.commit()
 			return {"apply_operation": None, "resumable": True}
