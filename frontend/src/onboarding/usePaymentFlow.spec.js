@@ -14,6 +14,11 @@ import { describe, test, expect, vi } from "vitest";
 
 import { CODES } from "@/onboarding/paymentCodes";
 import { STATES, canNavigateToPay } from "@/onboarding/paymentMachine";
+import {
+	useBillingDetails,
+	STORAGE_PROMISE_SAVED,
+	STORAGE_PROMISE_LOCAL,
+} from "@/onboarding/useBillingDetails";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
 
 const ORIGIN = "https://fleet.klerk.in";
@@ -502,5 +507,105 @@ describe("the provisioning poll", () => {
 		const p = flow.waitForProvisioning();
 		flow.cancelInFlight();
 		expect(await p).toEqual({ status: "superseded" });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Plan 01: the billing round-trip. The customer's contact/address/city/GSTIN
+// ride the FIRST signup call (a guest has no session for the authenticated
+// update_billing facade), and the "kept with your account" promise stays honest
+// until admin acknowledges the durable write with billing_saved:true. These wire
+// the flow to a REAL useBillingDetails so the end-to-end promise flip is proven.
+function memStorage() {
+	const m = new Map();
+	return {
+		getItem: (k) => (m.has(k) ? m.get(k) : null),
+		setItem: (k, v) => m.set(k, String(v)),
+		removeItem: (k) => m.delete(k),
+	};
+}
+
+describe("Plan 01: billing rides the first signup", () => {
+	test("a fresh signup sends the billing object and a billing_saved ack flips the promise", async () => {
+		const billing = useBillingDetails({ site: "s", user: "u", storage: memStorage() });
+		billing.setUserValue("contact", "+91 99999 88888");
+		billing.setUserValue("city", "Chennai");
+		const built = billing.buildBilling();
+		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
+
+		const api = makeApi({
+			startSignup: vi.fn(async () => ENVELOPE(TOKEN_DATA({ billing_saved: true }))),
+		});
+		const { flow } = makeFlow({
+			api,
+			options: { onBillingSaved: (saved) => billing.markBillingSaved(saved) },
+		});
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			billing: built,
+		});
+
+		// The billing object rode start_signup...
+		expect(api.startSignup).toHaveBeenCalledWith(
+			expect.objectContaining({ billing: built }),
+			expect.anything()
+		);
+		// ...and the durable-write ack flipped the promise to the truthful copy.
+		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
+	});
+
+	test("no ack leaves the honest local copy and the local snapshot intact", async () => {
+		const storage = memStorage();
+		const billing = useBillingDetails({ site: "s", user: "u", storage });
+		billing.setUserValue("contact", "+91 99999 88888");
+		const built = billing.buildBilling();
+
+		// A token answer with NO billing_saved (an older admin that ignores the kwarg).
+		const api = makeApi({ startSignup: vi.fn(async () => ENVELOPE(TOKEN_DATA())) });
+		const { flow } = makeFlow({
+			api,
+			options: { onBillingSaved: (saved) => billing.markBillingSaved(saved) },
+		});
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			billing: built,
+		});
+
+		expect(api.startSignup).toHaveBeenCalledWith(
+			expect.objectContaining({ billing: built }),
+			expect.anything()
+		);
+		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
+		// The transitional local snapshot survives an un-acknowledged signup.
+		expect(storage.getItem(billing.storageKey)).toBeTruthy();
+	});
+
+	test("resume hydrates admin's billing snapshot (cross-device recovery)", async () => {
+		const billing = useBillingDetails({ site: "s", user: "u", storage: memStorage() });
+		const summary = { contact_number: "+91 90000 00000", city: "Chennai" };
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+					billing: summary,
+				})
+			),
+		});
+		const { flow } = makeFlow({
+			api,
+			options: { onServerBilling: (s) => billing.hydrateServerSnapshot(s) },
+		});
+		await flow.hydrate();
+
+		expect(billing.fields.contact.value).toBe("+91 90000 00000");
+		expect(billing.fields.city.value).toBe("Chennai");
+		// A stored snapshot is by definition persisted, so the promise is truthful.
+		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
 	});
 });

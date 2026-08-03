@@ -1692,6 +1692,16 @@ const flow = createPaymentFlow({
 	// from the shared error budget so a chatty payment page cannot crowd out real
 	// errors (X6); illegal transitions bypass the cap and always report.
 	telemetry: makeTelemetryReporter(reportError),
+	// Plan 01 billing round-trip. The billing snapshot rides start_signup (see
+	// onPayClick); admin echoes billing_saved:true only when it durably persisted
+	// it, which flips the "kept with your account" promise and retires the local
+	// snapshot. On resume, admin's state read carries the snapshot so a different
+	// device rehydrates the Details form (server truth wins) and, being persisted,
+	// proves an intent exists (billing edits then route through update_billing).
+	onBillingSaved: (saved) => billing.markBillingSaved(saved),
+	onServerBilling: (summary) => {
+		if (billing.hydrateServerSnapshot(summary)) state.intentExists = true;
+	},
 });
 // The reactive machine state the template renders from.
 const pay = computed(() => flow.state.value);
@@ -2027,11 +2037,17 @@ async function onPayClick() {
 		state.step = "details";
 		return;
 	}
+	// Plan 01: the normalized billing snapshot rides this first signup call so it
+	// persists server-side while the customer is still a guest. Omitted (undefined,
+	// never an empty object) when nothing was entered, so a blank Details step sends
+	// no billing key at all.
+	const billingPayload = billing.buildBilling();
 	await flow.submitReview({
 		email: state.email,
 		company: state.company,
 		plan: state.planName,
 		provider: state.paymentProvider,
+		billing: Object.keys(billingPayload).length ? billingPayload : undefined,
 	});
 	// Plan 01: a successful signup left REVIEW for a live intent (verify / checkout /
 	// provisioning / duplicate). An intent now exists, so a subsequent Review & Pay

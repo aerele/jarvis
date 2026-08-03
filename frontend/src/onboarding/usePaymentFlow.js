@@ -100,6 +100,14 @@ export function createPaymentFlow(deps) {
 		// `fetchDeadlineMs`. A deadline is a CLIENT abort, never a server verdict -
 		// every timeout reconciles server truth.
 		fetchDeadlineMs = 30_000,
+		// Plan 01 billing round-trip. `onBillingSaved(true)` fires when a signup
+		// response carries admin's durable-write acknowledgement (billing_saved:true),
+		// so the view's storage promise becomes truthful and the transitional local
+		// snapshot is retired. `onServerBilling(summary)` fires on resume when the
+		// state read carries admin's normalized billing snapshot (cross-device
+		// recovery). Both default to no-ops; NEITHER touches the reducer.
+		onBillingSaved = () => {},
+		onServerBilling = () => {},
 	} = deps;
 
 	const state = ref(initialState());
@@ -315,6 +323,11 @@ export function createPaymentFlow(deps) {
 		// Server truth now names the (attempt, generation): restore any persisted
 		// support count for it, so a refresh between checks does not reset the offer.
 		restoreSupport();
+		// Plan 01 cross-device recovery: admin's state read carries the normalized
+		// billing snapshot for the owned pending signup. Surface it so a resume on a
+		// different device rehydrates the Details form (view owns the merge; server
+		// truth wins there). Pure side-read - the reducer is untouched.
+		if (decoded.data && decoded.data.billing) onServerBilling(decoded.data.billing);
 		if (decoded.notStarted || code === CODES.BENCH_NO_SIGNUP_CONTEXT) {
 			return { paid: false, truthKnown: true, notStarted: true };
 		}
@@ -356,17 +369,23 @@ export function createPaymentFlow(deps) {
 	}
 
 	// ---- submit review: start the signup exactly once ----------------------
-	async function submitReview({ email, company, plan, provider } = {}) {
+	async function submitReview({ email, company, plan, provider, billing } = {}) {
 		const my = beginAction(null); // SUBMIT_REVIEW sets the busy flag itself
 		if (!my) return; // a burst of clicks produces exactly one start (P1-2)
 		try {
 			apply({ type: EVENTS.SUBMIT_REVIEW });
 			let decoded;
 			try {
+				// Plan 01: the billing snapshot rides start_signup (the guest has no
+				// session for the authenticated update_billing facade). Omitted when the
+				// caller passes nothing, so an empty object never crosses the wire.
 				decoded = ingest(
 					await deadlined(
 						(signal) =>
-							api.startSignup({ email, company, plan, provider }, { signal }),
+							api.startSignup(
+								{ email, company, plan, provider, billing },
+								{ signal }
+							),
 						fetchDeadlineMs,
 						"start"
 					)
@@ -380,6 +399,12 @@ export function createPaymentFlow(deps) {
 			if (my !== token) return;
 			const code = absorb(decoded);
 			if (!decoded.ok) return; // parked-money / duplicate / terminal - reducer rendered it
+			// Plan 01: consume admin's durable-write ack. Only a literal `true` flips
+			// the view's storage promise to "kept with your account"; absent/false
+			// leaves the honest local copy and the local snapshot intact. Done BEFORE
+			// the verification return so a billing write is acknowledged even when the
+			// signup still awaits the magic link.
+			if (decoded.data && decoded.data.billing_saved === true) onBillingSaved(true);
 			if (code === CODES.SIGNUP_VERIFICATION_REQUIRED) return; // wait for the magic link
 			navigateToPay(); // navigable answer → pay page; honest hold otherwise (no fallback)
 		} finally {
