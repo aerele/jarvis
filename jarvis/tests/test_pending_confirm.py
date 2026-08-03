@@ -186,6 +186,52 @@ class TestMintReliableIndex(FrappeTestCase):
 		self.assertGreater(ttl, 0, "owner-index set must carry a positive TTL after mint")
 		self.assertLessEqual(ttl, pending_confirm._TTL_S)
 
+	def test_mint_rolls_back_when_set_value_swallows_a_write_error(self):
+		"""_read_record's local-cache pop is LOAD-BEARING: set_value writes
+		frappe.local.cache BEFORE its ConnectionError-suppressed Redis SET, so a
+		swallowed write leaves a stale LOCAL copy while Redis holds nothing. mint()'s
+		post-persist verify must still detect the miss - _read_record's pop forces a
+		fresh Redis read - and roll back rather than publish a card whose record never
+		landed. Guards the pop from being dropped (without it the verify reads the
+		stale local copy and falsely passes). Simulate by making the raw redis SET
+		raise ConnectionError, which set_value suppresses."""
+		with patch.object(frappe.cache(), "set", side_effect=redis.exceptions.ConnectionError("write blip")):
+			with patch.object(frappe, "log_error") as mock_log:
+				token = self._mint()
+		self.assertIsNone(token, "a swallowed set_value write must be caught by the verify -> rollback")
+		self.assertTrue(mock_log.called, "a persist-verify miss must be logged, not swallowed")
+
+	def test_list_for_owner_does_not_prune_a_live_token_on_transient_read_blip(self):
+		"""A transient read blip (TimeoutError/ResponseError) on one token during the
+		resync loop must NOT prune it from the owner index: the record is still live,
+		so pruning orphans it (invisible to every future resync for its TTL = the
+		invisible-card class this module guards). The member is skipped this round and
+		re-surfaces on a later clean resync."""
+		token = self._mint()
+		self.assertIn(token, {r["token"] for r in pending_confirm.list_for_owner(self._A)})
+
+		def _timeout(*a, **k):
+			raise redis.exceptions.TimeoutError("read blip")
+
+		with patch.object(frappe.cache(), "get_value", side_effect=_timeout):
+			blipped = pending_confirm.list_for_owner(self._A)
+		self.assertNotIn(token, {r["token"] for r in blipped}, "blipped token is skipped this round")
+		# NOT orphaned: a later clean resync still finds it (proves it was not pruned).
+		self.assertIn(token, {r["token"] for r in pending_confirm.list_for_owner(self._A)})
+
+	def test_mint_survives_ttl_refresh_failure(self):
+		"""The owner-index TTL refresh is best-effort and sits OUTSIDE the fatal park
+		try; if cache.expire() itself fails (a blip, or a Redis ACL that permits SADD
+		but denies EXPIRE) the park must still succeed and must NOT hit the
+		error/rollback path. Guards against a future edit folding the TTL refresh back
+		into the fatal try (the regression class this PR fixes)."""
+		with patch.object(frappe.cache(), "expire", side_effect=redis.exceptions.ConnectionError("blip")):
+			with patch.object(frappe, "log_error") as mock_log:
+				token = self._mint()
+		self.assertIsNotNone(token, "a TTL-refresh failure must not roll back a good park")
+		self.assertFalse(mock_log.called, "TTL-refresh failure must not trip the park error/rollback path")
+		self.assertIsNotNone(pending_confirm.peek(token))
+
 
 class TestExecUser(FrappeTestCase):
 	def test_exec_user_stored_and_returned(self):
@@ -622,3 +668,62 @@ class TestConsume(FrappeTestCase):
 		self.assertEqual(record["tool"], TOOL)
 		# Really burned (single-use) via the portable path, not left dangling.
 		self.assertIsNone(pending_confirm.peek(token))
+
+	def test_atomic_burn_timeout_error_returns_none_without_burning_token(self):
+		"""redis TimeoutError is a SIBLING of ConnectionError (both subclass
+		RedisError directly, TimeoutError is NOT a subclass), so a socket timeout on
+		the burn must also degrade to a graceful None - not an uncaught 500 - with the
+		token left un-burned for retry."""
+		token = self._mint()
+
+		def _raise_once(*args, **kwargs):
+			raise redis.exceptions.TimeoutError("timed out")
+
+		with patch.object(pending_confirm, "_get_and_delete", side_effect=_raise_once):
+			result = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
+		self.assertIsNone(result)
+		self.assertIsNotNone(pending_confirm.peek(token))
+		record = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
+		self.assertIsNotNone(record)
+		self.assertEqual(record["tool"], TOOL)
+
+	def test_consume_read_timeout_error_returns_none_without_500(self):
+		"""The ownership read (via _read_record -> get_value) must degrade gracefully
+		too: frappe's get_value suppresses only ConnectionError internally, so a
+		TimeoutError (sibling, not subclass) from the read would otherwise propagate
+		as an uncaught 500 on the whitelisted Confirm endpoint. _read_record catches
+		RedisError -> None -> not-consumable, and the token is left un-burned."""
+		token = self._mint()
+
+		def _timeout(*args, **kwargs):
+			raise redis.exceptions.TimeoutError("read timed out")
+
+		with patch.object(frappe.cache(), "get_value", side_effect=_timeout):
+			result = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
+		self.assertIsNone(result)
+		# Not burned - a later consume against a healthy cache still succeeds.
+		self.assertIsNotNone(pending_confirm.peek(token))
+		record = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
+		self.assertIsNotNone(record)
+		self.assertEqual(record["tool"], TOOL)
+
+	def test_confirm_flow_works_without_get_value_use_local_cache_kwarg(self):
+		"""Frappe < 16's RedisWrapper.get_value has NO ``use_local_cache`` kwarg;
+		passing it raises TypeError on a real v15 bench. In mint() that TypeError is
+		caught by the park try/except -> rollback -> None (no card renders - the exact
+		v15 symptom this module exists to fix); in consume() the ownership read is
+		unguarded -> an uncaught 500. Simulate the v15 signature and assert the whole
+		mint+consume flow still works (i.e. the code never passes use_local_cache)."""
+		real_get_value = frappe.cache().get_value
+
+		def v15_get_value(key, *args, **kwargs):
+			if "use_local_cache" in kwargs:
+				raise TypeError("get_value() got an unexpected keyword argument 'use_local_cache'")
+			return real_get_value(key, *args, **kwargs)
+
+		with patch.object(frappe.cache(), "get_value", side_effect=v15_get_value):
+			token = self._mint()
+			self.assertIsNotNone(token, "mint must not pass use_local_cache (TypeErrors on Frappe v15)")
+			record = pending_confirm.consume(token, owner=OWNER, conversation=CONV)
+		self.assertIsNotNone(record, "consume must not pass use_local_cache (500s on Frappe v15)")
+		self.assertEqual(record["tool"], TOOL)

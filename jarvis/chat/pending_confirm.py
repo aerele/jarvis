@@ -12,6 +12,13 @@ confirmation and does not run anything.
 
 Storage: ``frappe.cache()`` (Redis), one key per token, single round trip
 TTL so a token that nobody clicks self-expires instead of leaking forever.
+
+Portability floor: this module runs on the CUSTOMER bench, whose Frappe/Redis
+versions vary. It must stay compatible down to **Frappe 15** and **Redis 6.0**.
+Do NOT reach for a Frappe >= 16/17-only RedisWrapper method (``expire_key``, the
+``use_local_cache`` get_value kwarg) or a Redis >= 6.2-only command (``GETDEL``,
+``GETEX``, ``COPY``, ``SINTERCARD``, ...) - use an inherited ``redis.Redis``
+builtin or a MULTI/EXEC transaction instead.
 """
 
 from __future__ import annotations
@@ -201,14 +208,49 @@ def mint(
 	# good record, taking down every gated confirmation card.
 	try:
 		cache.expire(cache.make_key(_owner_key(owner)), _TTL_S)
-	except Exception:
-		pass
+	except Exception as exc:
+		# Best-effort hygiene (see above): must never fail the park. DEBUG (not a
+		# loud log - it is non-fatal and could be frequent) so a DURABLE failure
+		# (e.g. a Redis ACL that permits SADD but denies EXPIRE) is discoverable
+		# when the log level is raised, rather than silent forever.
+		frappe.logger("jarvis.pending_confirm").debug(
+			"owner-index TTL refresh failed (non-fatal): %s", type(exc).__name__
+		)
 	# cards_open gauge +1 (self-healing on expiry via the ZSET score). Bumped only
 	# after a successful persist+index+verify so the gauge never over-counts a
 	# rolled-back park.
 	_gauge_add(token, record["expires_at"])
 	_emit_cards_open("mint")
 	return token
+
+
+def _read_record(token: str, *, swallow: bool = True) -> dict | None:
+	"""Read the parked record straight from Redis, bypassing the worker-local
+	cache. Bypassing local is load-bearing: mint()'s post-persist verify must catch
+	the case where set_value swallowed a ConnectionError and the record never landed
+	in Redis (a local copy would falsely read as success), and consume() must never
+	act on a stale local snapshot. Version-portable: Frappe < 16's get_value has no
+	``use_local_cache`` kwarg (passing it TypeErrors on a v15 bench), so instead pop
+	any local entry (forces the read to miss local and hit Redis) and pass
+	``expires=True`` (the token key has a TTL) so the read does not repopulate local -
+	together equivalent to the v17-only ``use_local_cache=False``.
+
+	``swallow`` (default True): a RedisError on the read becomes None - the safe,
+	retryable outcome for peek/consume/mint-verify (not-consumable / not-found /
+	persist-miss->rollback), because get_value itself only suppresses ConnectionError,
+	not its TimeoutError sibling or ResponseError, so an uncaught one would be a 500.
+	``list_for_owner`` passes ``swallow=False`` so it can tell a TRANSIENT read blip
+	(skip, leave the member) apart from a genuinely-absent token (prune) - swallowing
+	there would orphan a still-live token from the index (the invisible-card class).
+	"""
+	cache = frappe.cache()
+	frappe.local.cache.pop(cache.make_key(_key(token)), None)
+	try:
+		return cache.get_value(_key(token), expires=True)
+	except redis.exceptions.RedisError:
+		if not swallow:
+			raise
+		return None
 
 
 def peek(token: str) -> dict | None:
@@ -218,10 +260,10 @@ def peek(token: str) -> dict | None:
 	"""
 	if not token:
 		return None
-	return frappe.cache().get_value(_key(token), use_local_cache=False)
+	return _read_record(token)
 
 
-def _get_and_delete(full_key):
+def _get_and_delete(full_key) -> bytes | None:
 	"""Atomically read-and-remove a raw cache key, returning its pickled bytes (or
 	None if absent). Uses a MULTI/EXEC transaction (GET then DEL) rather than the
 	one-shot GETDEL command: GETDEL is redis-server >= 6.2 only, and a customer
@@ -262,7 +304,7 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	"""
 	if not token:
 		return None
-	record = frappe.cache().get_value(_key(token), use_local_cache=False)
+	record = _read_record(token)
 	if not record:
 		return None
 	# Owner is the real security boundary and is always enforced.
@@ -287,16 +329,27 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	# (GET then DEL as one indivisible unit) instead. That keeps the single-winner
 	# guarantee (of two concurrent confirms exactly one sees the value before DEL
 	# removes it) while working on every redis version; a plain get-then-delete
-	# would reopen the very race the atomicity exists to close. Catch both a
-	# transient blip (ConnectionError) AND a degraded-write state (ResponseError -
-	# e.g. -MISCONF stop-writes-on-bgsave-error, or a read-only replica, under which
-	# the write DEL inside the transaction errors) and turn either into a graceful
-	# None (treated as not-consumable -> InvalidConfirmation; the token is NOT
-	# burned, so a retry against a healthy cache still succeeds) rather than an
-	# uncaught 500 on the whitelisted Confirm endpoint.
+	# would reopen the very race the atomicity exists to close.
 	try:
 		raw = _get_and_delete(full_key)
-	except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
+	except redis.exceptions.RedisError as exc:
+		# ANY redis-level failure on the burn must degrade to a graceful None, NOT a
+		# 500 on the whitelisted Confirm endpoint: a transient blip (ConnectionError),
+		# a socket timeout (TimeoutError - a SIBLING of ConnectionError, not a
+		# subclass, so the old narrow tuple missed it), or a degraded-write state
+		# (ResponseError - -MISCONF stop-writes-on-bgsave-error, a read-only replica)
+		# under which the DEL inside the transaction errors. None => not-consumable
+		# => retryable InvalidConfirmation, and the token is NOT burned (the DEL never
+		# applied), so a retry against a healthy cache still succeeds. Breadcrumb at
+		# .error (NOT frappe.log_error - that floods the DB Error Log under a sustained
+		# outage; and NOT .warning - a PROD bench's default log level is ERROR, so a
+		# warning is filtered out and never written) so a tenant-wide "Confirm does
+		# nothing" incident is greppable in the log file and distinguishable from
+		# ordinary token expiry.
+		frappe.logger("jarvis.pending_confirm").error(
+			"consume burn failed; treating as not-consumable (retryable): %s",
+			type(exc).__name__,
+		)
 		return None
 	frappe.local.cache.pop(full_key, None)
 	if raw is None:
@@ -340,7 +393,14 @@ def list_for_owner(owner: str, conversation: str | None = None) -> list[dict]:
 	out: list[dict] = []
 	dead: list[str] = []
 	for token in members:
-		record = peek(token)
+		try:
+			record = _read_record(token, swallow=False)
+		except redis.exceptions.RedisError:
+			# TRANSIENT read blip on this token (Redis reachable enough for smembers,
+			# but this GET failed). Do NOT prune - the record may still be live, and
+			# pruning would orphan it from the index (invisible to every future resync
+			# for its full TTL). Skip it this round; a later clean resync re-surfaces it.
+			continue
 		if not record:
 			dead.append(token)
 			continue
