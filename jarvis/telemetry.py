@@ -123,8 +123,45 @@ def _read_and_clear_turn_flag(conversation: str) -> bool:
 		return False
 
 
+# Process-local random salt, generated once, used ONLY on the rare site that has
+# no encryption_key. Deliberately NOT persisted to the DB: _user_hash runs in the
+# hot, best-effort telemetry path, and a DB write there is both a side effect
+# telemetry must never have and a cache-clearing hazard (frappe.db.set_default
+# clears the defaults cache, which broke an unrelated tool-telemetry turn flag).
+# Per-process is enough here - it is not the public site name (the actual defect),
+# it is not reversible without the secret, and it is stable within a worker so
+# events still group; a best-effort analytics salt need not survive a restart.
+_fallback_salt = ""
+
+
+def _site_salt() -> str:
+	"""A stable secret used to salt user hashes so a bare email digest is not
+	rainbow-reversible over the small, enumerable address space.
+
+	Prefer Frappe's own ``encryption_key`` (per-site, in site_config.json, present
+	on every provisioned site, never emitted to any log). On the rare site missing
+	one, use a process-local random salt generated once - crucially NOT the site
+	name, which the telemetry line itself emits in cleartext (a public salt is
+	equivalent to no salt), and NOT a DB-persisted value (no write in this hot
+	path). Read-only via ``frappe.conf`` (never ``get_encryption_key``, which would
+	WRITE a key). Best-effort: any failure yields "" so telemetry never breaks."""
+	try:
+		key = frappe.conf.get("encryption_key")
+		if key:
+			return key
+		global _fallback_salt
+		if not _fallback_salt:
+			_fallback_salt = frappe.generate_hash(length=32)
+		return _fallback_salt
+	except Exception:
+		return ""
+
+
 def _user_hash(user: str | None) -> str:
-	return hashlib.sha1((user or "").encode()).hexdigest()[:12]
+	"""SHA1 of the caller, SALTED with a per-site secret (never the public site
+	name) and truncated - stable within a site so events can be grouped, but not a
+	bare email digest that a dictionary/rainbow attack could reverse."""
+	return hashlib.sha1(f"{_site_salt()}:{user or ''}".encode()).hexdigest()[:12]
 
 
 def _result_chars(result) -> int:

@@ -11,6 +11,7 @@ import re
 import frappe
 from frappe import _
 
+from jarvis.chat import list_filters
 from jarvis.permissions import require_jarvis_user
 
 MACRO = "Jarvis Macro"
@@ -126,69 +127,25 @@ _MACROS_FILTERS = {"enabled", "schedule_enabled", "schedule_frequency"}
 _FREQUENCIES = {"daily", "weekly", "monthly"}
 
 
-def _lk(s: str) -> str:
-	"""Escape LIKE wildcards in user search input (``\\`` is the default escape)."""
-	return (s or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _clamp_page(start, page_length) -> tuple[int, int]:
-	try:
-		start = max(0, int(start or 0))
-	except (TypeError, ValueError):
-		start = 0
-	try:
-		pl = int(page_length or 20)
-	except (TypeError, ValueError):
-		pl = 20
-	return start, max(1, min(pl, 100))
-
-
-def _bool01(v) -> int:
-	try:
-		iv = int(v)
-	except (TypeError, ValueError):
-		frappe.throw(_("Filter value must be 0 or 1."))
-	if iv not in (0, 1):
-		frappe.throw(_("Filter value must be 0 or 1."))
-	return iv
-
-
-def _load_filters(filters, allowed: set) -> dict:
-	if isinstance(filters, str):
-		if filters.strip():
-			try:
-				raw = frappe.parse_json(filters)
-			except Exception:
-				raw = {}
-		else:
-			raw = {}
-	else:
-		raw = filters or {}
-	if not isinstance(raw, dict):
-		raw = {}
-	out: dict = {}
-	for k, v in raw.items():
-		if k not in allowed:
-			frappe.throw(_("Unknown filter: {0}").format(k))
-		if v in (None, ""):
-			continue
-		out[k] = v
-	return out
-
-
-def _order_by(sort_field, sort_dir, sortable: dict, default_field, default_dir, prefix="") -> str:
-	col = sortable.get(sort_field or "")
-	if not col:
-		return f"{prefix}`{sortable[default_field]}` {default_dir}, {prefix}`name` asc"
-	d = "desc" if (sort_dir or "").lower() == "desc" else "asc"
-	return f"{prefix}`{col}` {d}, {prefix}`name` asc"
+# C08-5: ``_lk`` / ``_clamp_page`` / ``_bool01`` / ``_load_filters`` /
+# ``_order_by`` were copied into six list modules and had begun to drift. The
+# canonical implementations now live in ``jarvis.chat.list_filters``. The private
+# names stay bound here because triggers_api / dashboards_api / app_learning_api
+# import them FROM this module and migrate in their own wave.
+_lk = list_filters.escape_like
+_clamp_page = list_filters.clamp_page
+_bool01 = list_filters.bool01
+_load_filters = list_filters.load_legacy_filters
+_order_by = list_filters.order_by
 
 
 @frappe.whitelist()
 @require_jarvis_user
+@list_filters.filter_errors_to_envelope
 def list_macros_page(
 	search: str = "",
 	filters: str | dict | None = None,
+	filters_v2: str | list | None = None,
 	sort_field: str = "",
 	sort_dir: str = "",
 	start: int = 0,
@@ -196,34 +153,43 @@ def list_macros_page(
 ) -> dict:
 	"""Owner-scoped macros, server-side search/filter/sort/paginate (no step
 	bodies; ``merged_prompt`` body omitted — ``has_summary`` replaces it). Envelope
-	``{rows, total, has_more, start, page_length}``."""
+	``{rows, total, has_more, start, page_length}``.
+
+	``filters_v2`` (plan 08 §6.2) is ADDITIVE: the canonical clause list, validated
+	and compiled against this caller's schema by ``jarvis.chat.list_filters``.
+	Legacy ``filters`` keeps working unchanged for the compatibility window. The
+	owner predicate below is a server-authored condition on the query object, so a
+	user clause can only ever narrow it — never widen it (C08-5).
+	"""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _MACROS_FILTERS)
 
-	conds = ["owner = %(me)s"]
-	params: dict = {"me": me, "start": start, "page_length": pl}
+	q = list_filters.new_query("macros")
+	q.server_condition("owner = %(me)s", me=me)
 
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(macro_name LIKE %(q)s OR description LIKE %(q)s)")
+		q.server_condition("(macro_name LIKE %(q)s OR description LIKE %(q)s)", q=f"%{_lk(search)}%")
 	if "enabled" in f:
-		params["enabled"] = _bool01(f["enabled"])
-		conds.append("enabled = %(enabled)s")
+		q.server_condition("enabled = %(enabled)s", enabled=_bool01(f["enabled"]))
 	if "schedule_enabled" in f:
-		params["schedule_enabled"] = _bool01(f["schedule_enabled"])
-		conds.append("schedule_enabled = %(schedule_enabled)s")
+		q.server_condition(
+			"schedule_enabled = %(schedule_enabled)s", schedule_enabled=_bool01(f["schedule_enabled"])
+		)
 	if "schedule_frequency" in f:
 		if f["schedule_frequency"] not in _FREQUENCIES:
 			frappe.throw(_("Invalid schedule_frequency filter."))
-		params["schedule_frequency"] = f["schedule_frequency"]
-		conds.append("schedule_frequency = %(schedule_frequency)s")
+		q.server_condition(
+			"schedule_frequency = %(schedule_frequency)s", schedule_frequency=f["schedule_frequency"]
+		)
 
-	where = " AND ".join(conds)
+	q.apply(filters_v2)
+	where = q.where()
+	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _MACROS_SORTABLE, "macro_name", "asc")
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
+	rows = list_filters.bounded_sql(
 		f"""SELECT name, macro_name, description, enabled, stop_on_error,
 		schedule_enabled, schedule_frequency, schedule_time, next_run_at,
 		last_run_at, modified, merge_status,

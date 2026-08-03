@@ -71,7 +71,7 @@
 								stroke-linejoin="round"
 							>
 								<path d="M20 6 9 17l-5-5" /></svg
-							>Asks before it changes anything
+							>{{ PERMISSION_TOUR_COPY }}
 						</li>
 					</ul>
 				</div>
@@ -514,6 +514,7 @@
 <script setup>
 import { ref, computed } from "vue";
 import { agentName } from "@/branding";
+import { PERMISSION_TOUR_COPY } from "@/onboarding/permissionCopy";
 
 // 'finish' = the final-slide CTA (or advancing past the last slide);
 // 'skip' = the footer "Skip tour" link. Both land the wizard on the Plan step.

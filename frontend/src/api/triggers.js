@@ -5,6 +5,7 @@
 // the page components plain payloads (the paginated ones return the frozen list
 // envelope {rows, total, has_more, start, page_length}).
 import { call } from "frappe-ui";
+import { listPageArgs as _page } from "./listPageArgs";
 
 const TR = "jarvis.chat.triggers_api.";
 
@@ -13,16 +14,11 @@ function unwrap(res) {
 	return res && typeof res === "object" && res.data !== undefined ? res.data : res;
 }
 
-// Same request-arg normalizer as src/api.js `_page` (search/filters/sort/paging;
-// `filters` JSON-encoded so the server `frappe.parse_json`s it).
-const _page = (p = {}) => ({
-	search: p.search || "",
-	filters: JSON.stringify(p.filters || {}),
-	sort_field: p.sort_field || "",
-	sort_dir: p.sort_dir || "",
-	start: p.start || 0,
-	page_length: p.page_length || 20,
-});
+// Request args come from the ONE shared encoder (plan 08 P0-01). This wrapper's
+// private `_page` used to rebuild the request WITHOUT `filters_v2`, so a Triggers
+// clause silently never reached the endpoint — the exact defect the round-2
+// review found. It now routes through `listPageArgs` like every other migrated
+// wrapper, so the drift cannot return.
 
 // ── caps probe ────────────────────────────────────────────────────────────────
 // -> {can_manage, scripts_enabled, stt_enabled, events: [{value,label}],

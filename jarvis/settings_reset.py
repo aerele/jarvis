@@ -57,6 +57,10 @@ CONNECTION = ResetSpec(
 		# lets a reset bench still authenticate as the previous customer.
 		"jarvis_admin_customer_email",
 		"agent_url",
+		# The opaque handle of the last accepted authority-fenced connection
+		# (review plan 04 P0-5). A reset re-points this bench at a fresh tenancy,
+		# so the previous handle must not linger and trip the identity check.
+		"tenant_authority_handle",
 		"chat_device_id",
 		"chat_device_public_key",
 		# Per-push statuses that otherwise read as "already sent" on a fresh site
@@ -84,13 +88,30 @@ CONNECTION = ResetSpec(
 	),
 	null=(
 		"last_sync_at",
+		# "this workspace has been chat-Ready" is a claim about the TENANCY that
+		# earned it, and a reset ends that tenancy. Left set, the readiness gate
+		# would keep failing OPEN through the new tenancy's provisioning
+		# (account._has_been_chat_ready) - i.e. the reset site, whose container is
+		# the one thing that definitely is not serving yet, would be the one told
+		# its chat is fine. It re-earns the marker on its first real Ready. The
+		# authority the claim was bound to goes with it.
+		"chat_was_ready_at",
+		"chat_ready_authority",
 		"agent_token_issued_at",
 		"custom_skills_synced_at",
 		"agent_skills_synced_at",
 		"learned_skills_synced_at",
 		"wiki_mirror_last_synced_at",
 	),
-	zero=("agent_catalog_dirty", "agent_catalog_version", "release_notice_active"),
+	zero=(
+		"agent_catalog_dirty",
+		"agent_catalog_version",
+		"release_notice_active",
+		# Forget the accepted authority generation so the fresh tenancy's first
+		# connection is accepted on its own terms, not rejected as "older" than
+		# the previous tenancy's generation (review plan 04 P0-5).
+		"tenant_authority_generation",
+	),
 )
 
 FULL = CONNECTION | LLM

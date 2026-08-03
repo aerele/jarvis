@@ -170,6 +170,73 @@ def _admin_url(settings) -> str:
 # (an older bench omits this, and admin falls back to razorpay).
 SUPPORTED_PROVIDERS = ("razorpay", "cashfree")
 
+# Plan-09 WS2 capability advert (frozen contract). Tells admin, in the
+# signup-payment envelope, that this bench understands the admin-hosted pay page
+# (``admin_pay_page_v1``) and which provider checkout SHAPES it can render. This
+# is BEHAVIOR-NEUTRAL predeployment: today's admin ignores keys it does not
+# declare as arguments (Frappe drops unknown form_dict entries — the same
+# mechanism that lets ``supported_providers``/``jarvis_version`` ride an old
+# admin), so nothing changes now. A later admin negotiates a token-only response
+# for capable benches off this advert and hard-fails incapable ones
+# pre-provider-object (plan-09 §R P0-4). The names here are the frozen contract —
+# keep them in lockstep with the admin side; do NOT rename without a coordinated
+# admin change. ``_client_capabilities()`` hands each caller a fresh dict so a
+# body mutation can never corrupt the shared template.
+PAY_PAGE_CAPABILITY = "admin_pay_page_v1"
+PROVIDER_SHAPES = ("razorpay_order", "razorpay_mandate", "cashfree_order", "cashfree_mandate")
+
+
+def _client_capabilities() -> dict:
+	return {"pay_page": PAY_PAGE_CAPABILITY, "provider_shapes": list(PROVIDER_SHAPES)}
+
+
+def _is_production_bench() -> bool:
+	"""True on a bench booted in production mode (supervisor/systemd managed). Used
+	only to decide whether an ``http://`` public origin is a misconfiguration worth
+	warning about — the injection fix below is identical everywhere. Mirrors the
+	admin-side ``origin._is_production_site`` (jarvis_admin_v2 WS5)."""
+	return bool(
+		frappe.conf.get("restart_supervisor_on_update") or frappe.conf.get("restart_systemd_on_update")
+	)
+
+
+def _public_origin() -> str:
+	"""A public site origin for the ``frappe_site_url`` this bench hands admin.
+
+	The bench half of the plan-09 P1-5 ``get_url`` sweep. A bare
+	``frappe.utils.get_url()`` derives the host from the request ``Host`` header
+	when ``host_name`` is unset (``get_url``'s own ``allow_header_override`` path —
+	proven reachable on this very environment), so a guest spoofing ``Host:`` on a
+	signup / reconnect / replacement-lookup POST could choose the
+	``frappe_site_url`` admin records for this tenant and the base of the magic
+	link admin then mails. The load-bearing fix is ``allow_header_override=False``:
+	it kills that injection vector.
+
+	Resolution order mirrors the admin-side ``admin_public_origin`` (jarvis_admin_v2
+	WS5): a configured ``host_name`` (validated https) wins; otherwise the site
+	fallback from ``get_url`` with header override OFF. An ``http://`` base on a
+	production bench is a misconfiguration — but it is caught at DEPLOY time by the
+	readiness gate, NOT by throwing here: throwing would break signup on any bench
+	where ``host_name`` is unset (every dev bench), and the injection vector is
+	already closed regardless of scheme."""
+	from urllib.parse import urlsplit
+
+	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
+	if host_name:
+		if not host_name.startswith(("http://", "https://")):
+			host_name = "https://" + host_name
+		parts = urlsplit(host_name)
+		if parts.scheme == "https" and parts.hostname and "." in parts.hostname:
+			return f"https://{parts.hostname.lower()}"
+
+	base = (frappe.utils.get_url(allow_header_override=False) or "").rstrip("/")
+	if base.startswith("http://") and _is_production_bench():
+		frappe.logger("jarvis.onboarding").warning(
+			"frappe_site_url resolved to an http base on a production bench; "
+			"set host_name to an https origin (deploy readiness gates this)"
+		)
+	return base
+
 
 def signup(
 	email: str,
@@ -177,6 +244,7 @@ def signup(
 	plan: str,
 	coupon: str | None = None,
 	provider: str | None = None,
+	billing: dict | None = None,
 ) -> dict:
 	"""Guest signup against admin. Returns admin's data dict, which carries a
 	``payment_provider`` discriminator plus that gateway's checkout handles:
@@ -198,22 +266,36 @@ def signup(
 
 	``provider`` (optional) requests a specific gateway; admin defaults to
 	razorpay when omitted or unsupported.
+
+	``billing`` (optional, Plan 01) is a typed snapshot admin normalizes and
+	stores on the Customer in the signup transaction; the response echoes
+	``billing_saved: true`` only when a NEW admin persisted it (an older admin
+	drops the unknown kwarg and never echoes it).
 	"""
 	body = {
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
-		"frappe_site_url": frappe.utils.get_url(),
+		"frappe_site_url": _public_origin(),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
+		"client_capabilities": _client_capabilities(),
 	}
 	if coupon:
 		body["coupon"] = coupon
 	if provider:
 		body["provider"] = provider
+	if billing:
+		body["billing"] = billing
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 
-def resume_pending_signup(plan: str, provider: str | None = None, idempotency_key: str | None = None) -> dict:
+def resume_pending_signup(
+	plan: str,
+	provider: str | None = None,
+	*,
+	billing: dict | None = None,
+	idempotency_key: str | None = None,
+) -> dict:
 	"""Authenticated failed-payment resume: re-issues checkout handles for the
 	caller's own Pending Payment signup, optionally on a different plan/provider.
 	Returns the same checkout-fields shape as signup's sync path (no credentials
@@ -231,12 +313,23 @@ def resume_pending_signup(plan: str, provider: str | None = None, idempotency_ke
 	Raises AdminContractError carrying admin's ``code`` on a coded conflict
 	(PAYMENT_ALREADY_ACTIVE, SIGNUP_TERMINAL, ...); a plain AdminValidationError
 	from an admin too old to send one."""
-	body: dict = {"plan": plan}
+	body: dict = {"plan": plan, "client_capabilities": _client_capabilities()}
 	if provider:
 		body["provider"] = provider
+	if billing:
+		body["billing"] = billing
 	if idempotency_key:
 		body["idempotency_key"] = idempotency_key
 	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)
+
+
+def update_pending_billing(billing: dict) -> dict:
+	"""Authenticated billing-only edit: update the caller's owned Pending Payment
+	Customer WITHOUT re-issuing a payment intent (the post-intent Review & Pay
+	"Edit" path). Returns admin's data (``billing_saved`` + normalized ``billing``
+	summary). Raises AdminValidationError on a rejected payload or a non-resumable
+	status."""
+	return _post(path=_m("billing.signup.update_pending_billing"), body={"billing": billing})
 
 
 def reconnect_eligibility(email: str, company_name: str = "") -> dict:
@@ -259,7 +352,7 @@ def site_replacement() -> dict:
 	Returns ``{replaced, at, moved_to}``; treat any failure as "not replaced"."""
 	return _post_guest(
 		path=_m("billing.reconnect.check_site_replaced"),
-		body={"frappe_site_url": frappe.utils.get_url()},
+		body={"frappe_site_url": _public_origin()},
 		timeout_s=8,
 	)
 
@@ -272,7 +365,7 @@ def request_account_reconnect(email: str, company_name: str = "") -> dict:
 	when one email owns several company accounts (multi-company identity)."""
 	return _post_guest(
 		path=_m("billing.reconnect.request_account_reconnect"),
-		body={"email": email, "company_name": company_name, "frappe_site_url": frappe.utils.get_url()},
+		body={"email": email, "company_name": company_name, "frappe_site_url": _public_origin()},
 	)
 
 
@@ -1139,12 +1232,29 @@ def reset_workspace_state() -> dict:
 	return _post(path=_m("api.tenant_request.get_request_state"), body={}, timeout_s=8)
 
 
-def post_update_llm_pool(*, spec: dict, api_keys: dict, oauth_blobs: dict) -> dict:
+def post_update_llm_pool(
+	*,
+	spec: dict,
+	api_keys: dict,
+	oauth_blobs: dict,
+	idempotency_key: str | None = None,
+	timeout_s: int | None = None,
+) -> dict:
 	"""POST a PoolSpec + separated secrets to admin → fleet-agent → openclaw.
 
 	``spec``        : secret-free PoolSpec dict (name, routing_mode, models).
 	``api_keys``    : mapping ref → plaintext key (e.g. {"POOL_KEY_0": "sk-..."}).
 	``oauth_blobs`` : mapping account_ref → parsed OAuth blob dict.
+	``idempotency_key`` (plan-05 D2): opaque per-Start-chatting-attempt key. Admin
+	    dedupes a retry carrying the same key to the SAME durable apply operation
+	    (no new desired version, refunds the rate token, does not re-drive the
+	    push), so a double-click / lost-response resume converges on one operation.
+	    Omitted (None) preserves the pre-plan05 behaviour for internal callers.
+	``timeout_s`` (plan-05 D2, F2/F3): a SHORT bound for the synchronous
+	    descriptor-obtain from ``sync_pool_now`` - well under the gunicorn budget.
+	    A timeout here is not a lost apply: admin commits desired + operation before
+	    the fleet push, so the operation exists and the caller resumes via the same
+	    idempotency key. None keeps the long DEFAULT_TIMEOUT_S for the async worker.
 
 	The admin endpoint merges the secrets with the spec before forwarding to
 	fleet-agent. Implemented in T3 (jarvis_admin); this stub is the bench-side
@@ -1162,14 +1272,43 @@ def post_update_llm_pool(*, spec: dict, api_keys: dict, oauth_blobs: dict) -> di
 	# installed_apps: the pool-safe leg of the migrate-time resync (mirrors
 	# post_update_llm_creds). A new admin persists it before the fleet forward
 	# and echoes installed_apps_persisted; an old admin ignores the extra field.
+	body = {
+		"spec": spec,
+		"api_keys": api_keys,
+		"oauth_blobs": oauth_blobs,
+		"installed_apps": frappe.get_installed_apps(),
+	}
+	if idempotency_key:
+		body["idempotency_key"] = idempotency_key
+	kw = {"timeout_s": timeout_s} if timeout_s is not None else {}
+	return _post(path=_m("api.tenant.update_llm_pool"), body=body, **kw)
+
+
+def get_llm_apply_operation(operation_id: str, *, timeout_s: int = 8) -> dict:
+	"""Read-only status of a durable LLM-apply operation (plan-05 D2).
+
+	Wraps admin's ``api.tenant.get_llm_apply_operation``, which never mutates and
+	never spends the 20/hour apply bucket, so the SPA may poll it freely. ``_post``
+	unwraps the admin ``data`` envelope, so this returns the §8.4 status dict
+	directly:
+
+	    {operation_id, state, code, message, tenant (opaque), desired_version,
+	     applied_version, tenant_authority_generation, chat_readiness,
+	     chat_readiness_reason, retryable, retry_after_seconds}
+
+	Short default timeout: this is a hot poll on a converging apply, so a slow
+	admin must not stretch the SPA's follow loop past a beat. UnknownOperation
+	surfaces as AdminValidationError (404); a transport error surfaces as
+	AdminUnreachableError, which the client seam treats as "keep polling", not a
+	verdict.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError
+	"""
 	return _post(
-		path=_m("api.tenant.update_llm_pool"),
-		body={
-			"spec": spec,
-			"api_keys": api_keys,
-			"oauth_blobs": oauth_blobs,
-			"installed_apps": frappe.get_installed_apps(),
-		},
+		path=_m("api.tenant.get_llm_apply_operation"),
+		body={"operation_id": operation_id},
+		timeout_s=timeout_s,
 	)
 
 
@@ -1734,9 +1873,14 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	# fell through to AdminUnreachableError - losing the rate-limit
 	# category entirely. 401/403/429 always win.
 	if resp.status_code in (401, 403):
+		# Carry admin's structured ``error.code`` when the refusal envelope has one,
+		# so callers branch on a stable token rather than the human sentence a
+		# hardened control plane may omit (jarvis.account._is_never_paid_403).
+		err_obj = (envelope or {}).get("error", {}) if isinstance(envelope, dict) else {}
 		raise AdminAuthError(
 			_envelope_message() or f"admin returned {resp.status_code}",
 			status_code=resp.status_code,
+			code=(err_obj.get("code") or "") if isinstance(err_obj, dict) else "",
 		)
 	if resp.status_code == 429:
 		err = (envelope or {}).get("error", {}) if isinstance(envelope, dict) else {}

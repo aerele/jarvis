@@ -24,7 +24,16 @@ export default defineConfig({
 		// Collecting src/**/*.test.js here instead would drag in every node:test
 		// file and fail them all with "No test suite found", because vitest does
 		// not understand node:test.
-		include: ["tests/support-extraction/**/*.test.js", "src/**/*.spec.js"],
+		// tests/**/*.spec.js is the same *.spec.js convention, for a suite whose
+		// component doubles are shared across several files (tests/list-filters):
+		// the shared double belongs beside its specs, not in src/ where nothing in
+		// the app would ever import it (same reasoning as support-extraction's
+		// fixtures.js).
+		include: [
+			"tests/support-extraction/**/*.test.js",
+			"tests/**/*.spec.js",
+			"src/**/*.spec.js",
+		],
 		globals: true,
 	},
 });

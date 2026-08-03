@@ -2,6 +2,7 @@
 // the session cookie + CSRF). Same backend the Desk chat uses, so conversations
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
+import { listPageArgs as _page } from "./api/listPageArgs";
 
 export const listConversations = () => call("jarvis.chat.api.list_conversations");
 export const listTools = () => call("jarvis.chat.api.list_tools");
@@ -54,6 +55,11 @@ export const checkAccountReconnect = (requestId, code) =>
 	call("jarvis.onboarding.check_account_reconnect", { request_id: requestId, code: code || "" });
 
 export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
+// Read-only poll of a durable LLM-apply operation (plan-05 D2). The single
+// Start-chatting controller (frontend/src/lib/llmOperation.js) follows exactly one
+// operation id to a terminal state through this; it never spends the apply bucket.
+export const getLlmApplyOperation = (operationId) =>
+	call("jarvis.account.get_llm_apply_operation", { operation_id: operationId });
 
 // ---- workspace reset (customer self-serve, admin-gated) --------------------
 export const requestWorkspaceReset = (reason, opts = {}) =>
@@ -72,6 +78,22 @@ const US = "jarvis.chat.user_settings_api.";
 export const getMySettings = () => call(US + "get_my_settings");
 export const updateMySettings = (p) => call(US + "update_my_settings", p || {});
 export const setUserTheme = (theme) => call(US + "set_user_theme", { theme });
+// Best-effort ack that the chat-home introduction (the static welcome bubble)
+// was shown. Idempotent + monotonic server-side; the caller swallows failures,
+// whose only cost is the introduction appearing once more.
+export const markHomeIntroSeen = (version) =>
+	call(US + "mark_home_intro_seen", { version: version || 0 });
+// Bounded, privacy-free chat-home introduction telemetry (displayed /
+// suggestion_selected / first_prompt). The server allow-lists every field and
+// hashes the caller — no message content, prompt text, or user name is sent.
+// Best-effort: the caller swallows failures, telemetry must never affect chat.
+export const recordHomeIntroEvent = (event, payload) =>
+	call(US + "record_home_intro_event", {
+		event,
+		version: (payload && payload.version) || 0,
+		category: (payload && payload.category) || "",
+		bucket: (payload && payload.bucket) || "",
+	});
 // Jarvis Admin (or System Manager) only — server re-checks independently of
 // the client's window.is_jarvis_admin gate.
 export const adminListUserUsage = () => call(US + "admin_list_user_usage");
@@ -210,8 +232,25 @@ export const getActiveTurn = (conversation) =>
 	call("jarvis.chat.admission.active_turn_for_conversation", { conversation });
 
 // Mentions: reuse Frappe's built-in Link-field search (no custom backend).
-export const searchLink = (doctype, txt) =>
-	call("frappe.desk.search.search_link", { doctype, txt: txt || "", page_length: 8 });
+// `pageLength` defaults to the mention picker's 8; the list FilterGroup asks for
+// plan 08 §9's Link-suggestion cap of 20. Frappe's own search_link enforces the
+// target DocType's read permission + user permissions, which is why plan 08 adds
+// no second search endpoint.
+//
+// `referenceDoctype` / `linkFieldname` (plan 08 P1-06) name WHERE the Link is
+// used, so a DocType's custom `search_link` hook and user-permission behaviour
+// can key off the field. They are untrusted CONTEXT — the server still enforces
+// the target's read permission regardless — and are sent only when known
+// (mentions omit them). The list FilterGroup passes the schema entry's own
+// (doctype, fieldname), which the shared schema already knows.
+export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkFieldname) => {
+	const args = { doctype, txt: txt || "", page_length: pageLength || 8 };
+	// Frappe's search_link params (frappe/desk/search.py): reference_doctype +
+	// keyword-only link_fieldname. Sent only when known.
+	if (referenceDoctype) args.reference_doctype = referenceDoctype;
+	if (linkFieldname) args.link_fieldname = linkFieldname;
+	return call("frappe.desk.search.search_link", args);
+};
 
 // Field metadata for the record-edit action card: powers Link/Select/Date
 // controls (returns {ok, doctype, fields:[{fieldname,label,fieldtype,options}]}).
@@ -227,11 +266,24 @@ export const getPresetCatalog = () => call("jarvis.onboarding.get_preset_catalog
 // calls that. See jarvis.chat.api.get_model_catalog_ui.
 export const getModelCatalogUi = () => call("jarvis.chat.api.get_model_catalog_ui");
 export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_status");
-export const saveLlmPool = (models, preset = null, routingMode = "failover") =>
+// Persist the desired pool AND return the durable apply-operation descriptor the
+// Start-chatting controller follows (plan-05 D2). Returns (unwrapped)
+// { apply_operation: <12-key descriptor|null>, idempotency_key, resumable }.
+// The idempotency_key makes a re-call after a lost response dedupe on admin
+// rather than mint a second desired version; resumable:true with
+// apply_operation:null means the descriptor is available under the SAME key on a
+// re-call (a bench→admin timeout after a server-side retry).
+export const saveLlmPool = (
+	models,
+	preset = null,
+	routingMode = "failover",
+	idempotencyKey = ""
+) =>
 	call("jarvis.onboarding.save_llm_pool", {
 		models: JSON.stringify(models),
 		preset: preset || "",
 		routing_mode: routingMode,
+		idempotency_key: idempotencyKey || "",
 	});
 // Tear the whole AI connection down: deletes every stored credential on the
 // bench (models[] rows + the legacy flat fields) and asks admin to delete them
@@ -253,11 +305,96 @@ export const listPlans = () => call("jarvis.onboarding.list_plans");
 // operator enabled AND this bench build can render.
 export const listPaymentProviders = () => call("jarvis.onboarding.list_payment_providers");
 export const getAccountDefaults = () => call("jarvis.onboarding.get_account_defaults");
+// ERP-derived billing defaults for the selected Company (Plan 01): its primary
+// Contact phone + primary billing Address (+ optional GSTIN), or a coded error
+// ({ok:false, error:{code}}). Behind the same onboarding-admin gate.
+export const getCompanyOnboardingDefaults = (company) =>
+	call("jarvis.onboarding.get_company_onboarding_defaults", { company });
 export const syncConnection = () => call("jarvis.onboarding.sync_connection");
-export const startSignup = (email, company, plan, provider) =>
-	call("jarvis.onboarding.start_signup", { email, company, plan, provider });
+export const startSignup = (email, company, plan, provider, billing) =>
+	call("jarvis.onboarding.start_signup", { email, company, plan, provider, billing });
+// Authenticated billing-only edit (Plan 01, post-intent Review & Pay "Edit"):
+// updates the owned Pending Payment customer WITHOUT creating/replacing an
+// intent. NEVER guest signup. Returns {billing_saved, billing} (normalized).
+export const updateBilling = (billing) => call("jarvis.onboarding.update_billing", { billing });
 export const checkSignupPaymentState = () => call("jarvis.onboarding.check_signup_payment_state");
 export const finishPayment = (payload) => call("jarvis.onboarding.finish_payment", { payload });
+
+// --- Payment state machine (plan 02 / plan 03 contract) ---------------------
+// These wrap the SAME whitelisted endpoints, but they must NOT go through
+// frappe-ui's `call`: `call` throws on a 4xx and keeps only a decoded message,
+// while the whole payment contract lives in the RESPONSE BODY - the stamped
+// `error` object on a throw, the `{ok, data, context}` envelope on a coded 4xx.
+// `rawOnboardingCall` returns `{status, body, networkError}` untouched, and
+// @/onboarding/paymentCodec.decode reads it. usePaymentFlow consumes this map.
+async function rawOnboardingCall(method, args, opts = {}) {
+	const headers = {
+		Accept: "application/json",
+		"Content-Type": "application/json; charset=utf-8",
+		"X-Frappe-Site-Name": window.location.hostname,
+	};
+	if (window.csrf_token && window.csrf_token !== "{{ csrf_token }}") {
+		headers["X-Frappe-CSRF-Token"] = window.csrf_token;
+	}
+	try {
+		const res = await fetch(`/api/method/${method}`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(args || {}),
+			// The client-side deadline (plan 02 P0-3). usePaymentFlow races every
+			// payment call against a wall-clock timeout and aborts this signal when it
+			// fires, so a stalled proxy/never-settling fetch cannot leave the customer
+			// on a permanent busy screen. An abort is a CLIENT signal only - the flow
+			// treats it as truth-UNKNOWN and reconciles server truth, never as a
+			// payment verdict, because aborting the browser does not cancel server
+			// work.
+			signal: opts.signal,
+		});
+		let body = null;
+		try {
+			body = await res.json();
+		} catch (e) {
+			body = null; // an HTML error page, an empty 502 - decode() treats it as unreadable
+		}
+		return { status: res.status, body };
+	} catch (e) {
+		// fetch itself rejected: offline, DNS, CORS - OR the deadline aborted it. An
+		// AbortError must propagate so the flow's timeout race sees the timeout (it
+		// is racing this promise against its own timer); everything else is a
+		// networkError, never a payment verdict.
+		if (e && e.name === "AbortError") throw e;
+		return { status: 0, body: null, networkError: true };
+	}
+}
+
+// The raw-response endpoint map usePaymentFlow is constructed with. Kept as one
+// object so the flow's dependency surface is explicit and stubbable in tests.
+// Each method takes an optional `{signal}` so the flow can bound it (P0-3).
+export const onboardingPaymentApi = {
+	getOnboardingState: (opts) =>
+		rawOnboardingCall("jarvis.onboarding.get_onboarding_state", {}, opts),
+	startSignup: ({ email, company, plan, provider, billing }, opts) =>
+		// Plan 01: the normalized billing snapshot rides the FIRST signup call so it
+		// persists server-side while the customer is still a guest (update_billing is
+		// authenticated and unreachable mid-signup). Included only when present - an
+		// empty object is never sent (the caller omits it), so an older admin that
+		// ignores the kwarg is unaffected.
+		rawOnboardingCall(
+			"jarvis.onboarding.start_signup",
+			{ email, company, plan, provider, ...(billing ? { billing } : {}) },
+			opts
+		),
+	initiateSignupPayment: ({ plan, provider }, opts) =>
+		// Deliberately NO idempotency_key: the bench owns that receipt
+		// (onboarding_contract.next_idempotency_key). Passing one from the browser
+		// invites a replay of a dead intent.
+		rawOnboardingCall("jarvis.onboarding.initiate_signup_payment", { plan, provider }, opts),
+	checkSignupPaymentStatus: (opts) =>
+		rawOnboardingCall("jarvis.onboarding.check_signup_payment_status", {}, opts),
+	confirmSignupPayment: (payload, opts) =>
+		rawOnboardingCall("jarvis.onboarding.finish_payment", { payload }, opts),
+	syncConnection: () => call("jarvis.onboarding.sync_connection"),
+};
 export const isOnboarded = () => call("jarvis.account.is_onboarded");
 // args: {provider, model, api_key, base_url, auth_mode, force}
 export const saveLlmCreds = (args) => call("jarvis.onboarding.save_llm_creds", args);
@@ -267,7 +404,9 @@ export const saveLlmCreds = (args) => call("jarvis.onboarding.save_llm_creds", a
 // paste the redirected URL back → complete captures the account (no side effects).
 export const beginPoolAccountSignin = (provider, model) =>
 	call("jarvis.oauth.api.begin_pool_account_signin", { provider, model });
-// complete is capture-only → { account_ref, label, oauth_blob, account_email }
+// complete is capture-only → { capture_id, account_ref, label, account_email,
+// provider, upstream }. The oauth blob NEVER crosses the wire (plan-05 D2): the
+// server holds it under capture_id and merges it by account_ref at save time.
 export const completePoolAccountSignin = (nonce, redirectedUrl) =>
 	call("jarvis.oauth.api.complete_pool_account_signin", {
 		nonce,
@@ -275,9 +414,19 @@ export const completePoolAccountSignin = (nonce, redirectedUrl) =>
 	});
 // Device-code (Kimi) capture: begin returns { device_flow:true, user_code,
 // verification_uri, interval }; poll on `interval` → { status:"pending" } until
-// the user approves, then the same capture-only { account_ref, label, oauth_blob }.
+// the user approves, then the same capture-only { status:"ok", capture_id,
+// account_ref, label, account_email, provider, upstream } (no oauth blob).
 export const pollPoolAccountSignin = (nonce) =>
 	call("jarvis.oauth.api.poll_pool_account_signin", { nonce });
+// The current user's un-consumed, un-expired OAuth captures, so a reload (or the
+// error-banner Retry that re-runs load()) rehydrates a just-connected account
+// without a second sign-in (plan-05 D2). → { captures: [{ capture_id,
+// account_ref, label, account_email, provider, upstream, expires_at }] }.
+export const getPendingOauthCaptures = () => call("jarvis.oauth.api.list_pending_captures");
+// Revoke + erase a pending capture server-side when the customer removes an
+// unsaved just-connected account. → {}.
+export const cancelPendingOauthCapture = (captureId) =>
+	call("jarvis.oauth.api.cancel_pending_capture", { capture_id: captureId });
 
 // --- DIRECT single chat-subscription (legacy flat-field path) ---------------
 // Existing customers who onboarded a single chat subscription keep their creds
@@ -426,17 +575,21 @@ export const getAgentAdminOverview = () => call(AG + "get_agent_admin_overview")
 //   { rows, total, has_more, start, page_length[, facets] }  (facets: Approvals only;
 //   Approvals first-page responses also carry `awaiting_reply` — chat questions
 //   with no approval row behind them, rendered by ApprovalsBoard's strip)
-// `_page` normalizes the request args (search/filters/sort/paging) exactly as
-// the four backend endpoints expect; `filters` is JSON-encoded here so the SPA
-// passes a plain object and the server `frappe.parse_json`s it.
-const _page = (p = {}) => ({
-	search: p.search || "",
-	filters: JSON.stringify(p.filters || {}),
-	sort_field: p.sort_field || "",
-	sort_dir: p.sort_dir || "",
-	start: p.start || 0,
-	page_length: p.page_length || 20,
-});
+// Request args (search/filters/sort/paging + filters_v2) come from the ONE
+// shared encoder `api/listPageArgs.js` (plan 08 P0-01) — imported as `_page` so
+// Skills/Macros/File Box/Approvals and the feature wrappers cannot drift apart.
+
+// plan 08 §6.1: the fields THIS caller may filter `view_key` on, with the
+// per-field operators and defaults. Answers only for MIGRATED views; every
+// rejection carries a stable `list_filter_*` code (see filterModel.js).
+export const getListFilterSchema = (viewKey) =>
+	call("jarvis.chat.list_filters.get_list_filter_schema", { view_key: viewKey });
+// plan 08 §P1-05 / M1.3: the per-view {view_key: enabled} capability map, so a
+// list can learn whether filters_v2 is on for its view BEFORE emitting any clause
+// (a rolled-back view must send zero filters_v2 on every path). Cheap — the flag
+// map only, no field catalog.
+export const getListFilterCapabilities = () =>
+	call("jarvis.chat.list_filters.list_filters_capabilities");
 export const listCustomSkillsPage = (p) => call(SK + "list_custom_skills_page", _page(p));
 export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));

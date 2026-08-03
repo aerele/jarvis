@@ -150,11 +150,17 @@ class AdminAuthError(JarvisError):
 	*authorization* denial (403 - the same customer principal backs both the
 	bearer and the legacy api_key:api_secret, so re-minting and the legacy
 	fallback would just replay into the same 403 while storming the token
-	endpoint). None when the status isn't known."""
+	endpoint). None when the status isn't known.
 
-	def __init__(self, message: str, *, status_code: int | None = None):
+	``code`` carries admin's structured ``error.code`` from the refusal envelope
+	when present (e.g. ``PENDING_PAYMENT``), so a caller can branch on a stable
+	machine token instead of parsing the human sentence a hardened control plane
+	may omit - see jarvis.account._is_never_paid_403. Empty when admin sent none."""
+
+	def __init__(self, message: str, *, status_code: int | None = None, code: str = ""):
 		super().__init__(message)
 		self.status_code = status_code
+		self.code = code
 
 
 class AdminValidationError(JarvisError):
