@@ -77,7 +77,6 @@
 					:node="state.selected"
 					:metrics="state.analysis.metrics"
 					:communities="state.analysis.communities"
-					:show-actions="false"
 					@focus="(id) => (state.focus = id)"
 				/>
 				<AnalysisTabs
@@ -85,10 +84,9 @@
 					:nodes="baseData.nodes"
 					:actions="state.actions"
 					:history="state.history"
-					:can-act="false"
-					:show-priority="false"
-					:show-actions-tab="false"
+					:can-act="!state.linking"
 					@pick="pickId"
+					@add-link="onAddLink"
 				/>
 			</div>
 		</div>
@@ -102,7 +100,18 @@
 // exclusion → worker analysis (structure + TF-IDF similarity) → 3D graph + the
 // four analysis tabs. Productive loop: accept a suggested connection → add_wiki_link
 // (durable, out-of-body) → refetch → the edge appears.
-import { reactive, computed, watch, onMounted } from "vue";
+//
+// That loop used to be described here and switched off in the template: the page
+// passed :show-actions / :can-act / :show-priority / :show-actions-tab as false,
+// three of them overriding a package default of true, so the "+ link" button, the
+// Actions tab and the priority strip never rendered and `addWikiLink` had no
+// caller anywhere in the SPA. The props are gone and `add-link` is wired.
+//
+// `canAct` is not a permission claim. add_wiki_link re-checks edit rights on the
+// source and read rights on the target server-side, and per-page rights vary by
+// scope, so the button is offered to everyone and a denial comes back as a toast
+// (same contract the wiki save/archive buttons already follow).
+import { reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { Badge, Breadcrumbs, Button } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import {
@@ -117,7 +126,7 @@ import {
 	egoGraph,
 	searchGraph,
 } from "wiki-graph-core";
-import { getWikiGraph, getWikiGraphHistory } from "@/api/wiki";
+import { addWikiLink, getWikiGraph, getWikiGraphHistory } from "@/api/wiki";
 import { useJarvisTheme } from "@/theme";
 
 // Same breadcrumb + persistent "Open ERPNext Desk" top bar the other Skills
@@ -143,7 +152,9 @@ const PAGE_TYPES = [
 const state = reactive({
 	data: { nodes: [], edges: [] },
 	analysis: { metrics: {}, lists: {}, communities: {} },
-	actions: {},
+	// Full empty shape, not {}: ActionsTab reads actions.stale.length directly
+	// (no per-key guard), and it is reachable now that the Actions tab renders.
+	actions: { stale: [], orphans: [], busFactor: [], duplicates: [], suggest: [] },
 	history: [],
 	loaded: false,
 	error: null,
@@ -153,6 +164,10 @@ const state = reactive({
 	search: "",
 	focus: null,
 	toast: "",
+	// One curation in flight at a time: the "+ link" buttons are plain package
+	// buttons with no disabled state, so this is what stops a double-click from
+	// firing two writes against a row add_wiki_link locks anyway.
+	linking: false,
 	excluded: readExcluded(),
 });
 // Reactive theme so the 3D graph re-colours on a live light/dark toggle. Reading
@@ -212,12 +227,19 @@ async function recompute() {
 	state.actions = computeActions(data, analysis);
 }
 
+// Refetch + re-analyse in place. Kept separate from `load` so a curation can
+// refresh the graph WITHOUT dropping the page back to its skeleton: the point of
+// the loop is watching the new edge appear, not watching the view blank out.
+async function refetchGraph() {
+	const d = await getWikiGraph();
+	state.data = d || { nodes: [], edges: [] };
+	await recompute();
+}
+
 async function load() {
 	state.loaded = false;
 	state.error = null;
 	try {
-		const d = await getWikiGraph();
-		state.data = d || { nodes: [], edges: [] };
 		// Measured evolution history (best-effort; empty until the daily job runs
 		// or the doctype is migrated in — the Evolution tab reconstructs meanwhile).
 		getWikiGraphHistory()
@@ -225,12 +247,54 @@ async function load() {
 				state.history = Array.isArray(h) ? h : [];
 			})
 			.catch(() => {});
-		await recompute();
+		await refetchGraph();
 	} catch (e) {
 		state.error = (e && e.message) || String(e);
 	} finally {
 		state.loaded = true;
 	}
+}
+
+let _toastTimer = null;
+function toast(message) {
+	state.toast = message;
+	clearTimeout(_toastTimer);
+	_toastTimer = setTimeout(() => (state.toast = ""), 4000);
+}
+
+// Node ids are "page:<slug>"; the node itself carries the real slug, so prefer it
+// and fall back to stripping the prefix.
+function slugOf(id) {
+	const node = (state.data.nodes || []).find((n) => n.id === id);
+	return (node && node.slug) || String(id || "").replace(/^page:/, "");
+}
+
+// The productive loop: a suggested pair from SuggestPanel/ActionsTab -> the
+// curated link -> a refetch that shows the edge. add_wiki_link is idempotent and
+// row-locked, so a repeat is a no-op rather than a duplicate.
+async function onAddLink(suggestion) {
+	if (state.linking || !suggestion) return;
+	const from = slugOf(suggestion.a);
+	const to = slugOf(suggestion.b);
+	if (!from || !to || from === to) return;
+
+	state.linking = true;
+	try {
+		await addWikiLink(from, to);
+	} catch (e) {
+		toast((e && e.message) || "Could not add that link.");
+		return;
+	} finally {
+		state.linking = false;
+	}
+
+	// Past here the link IS stored, so a failing refetch only leaves the view
+	// stale. Reporting that as "could not add that link" would be a lie the user
+	// acts on; the header Refresh button recovers the view.
+	toast(`Linked ${suggestion.aLabel || from} to ${suggestion.bLabel || to}`);
+	try {
+		await refetchGraph();
+	} catch (_) {}
 }
 
 function onNode(node) {
@@ -242,6 +306,7 @@ function pickId(id) {
 }
 watch(() => state.excluded, recompute);
 onMounted(load);
+onBeforeUnmount(() => clearTimeout(_toastTimer));
 </script>
 
 <style scoped>

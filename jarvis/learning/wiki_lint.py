@@ -8,8 +8,10 @@ wiki pages first:
 	those; a manual save clears the flag but may leave the section);
   * stale pages — >90 days since ``last_confirmed_at`` (``modified``
 	fallback), via ``jarvis.chat.wiki.is_stale``;
-  * orphan pages — no inbound ``[[slug]]`` reference from any OTHER Active
-	Org page body;
+  * orphan pages — no inbound reference from any OTHER Active Org page,
+	counting body ``[[slug]]`` links ∪ the page's curated ``manual_links``
+	(``add_wiki_link`` stores those OUT of ``body_md`` on purpose, so a
+	body-only scan calls a curated-only target an orphan forever);
   * near-duplicate titles — normalized-title collisions (failure mode #1 of
 	LLM-maintained wikis: the same entity re-created under a slightly
 	different name).
@@ -78,6 +80,9 @@ def _load_pages() -> list:
 			"last_confirmed_at",
 			"modified",
 			"scope",
+			# curated [[links]] live here, never in body_md (add_wiki_link's R1
+			# durability rule), so the orphan check has to read both halves.
+			"manual_links",
 		],
 		order_by="name asc",
 		limit_page_length=0,
@@ -98,9 +103,25 @@ def _stale_pages(pages: list) -> list:
 	return [p for p in pages if is_stale(p.last_confirmed_at, p.modified)]
 
 
+def _outbound_targets(page) -> set[str]:
+	"""One page's outbound link targets: body ``[[slug]]`` wikilinks ∪ its
+	curated ``manual_links``, minus self-references.
+
+	The union is what ``wiki_graph._build_graph_from_pages`` already applies;
+	reading only ``body_md`` here is what made the health summary contradict
+	the Evolution tab (a curated inbound link left the target an orphan).
+	"""
+	from jarvis.chat.wiki import _parse_manual_links
+
+	targets = set(_WIKILINK_RE.findall(page.body_md or ""))
+	targets |= set(_parse_manual_links(page.get("manual_links")))
+	targets.discard(page.name)
+	return targets
+
+
 def _find_orphans(pages: list) -> list:
-	"""Pages no OTHER Active Org page links to via [[slug]] (self-references
-	don't count; the generated index.md is not a page and never counts).
+	"""Pages no OTHER Active Org page links to (self-references don't count;
+	the generated index.md is not a page and never counts).
 
 	Young wikis have few cross-links, so "orphan" is only a signal once
 	linking is actually practiced: with fewer than 2 linking pages the check
@@ -109,7 +130,7 @@ def _find_orphans(pages: list) -> list:
 	linking_pages = 0
 	inbound: set[str] = set()
 	for p in pages:
-		targets = [t for t in _WIKILINK_RE.findall(p.body_md or "") if t != p.name]
+		targets = _outbound_targets(p)
 		if targets:
 			linking_pages += 1
 		inbound.update(targets)
