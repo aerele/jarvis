@@ -1195,6 +1195,34 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	return {"status": "connected"}
 
 
+# RFC 2606 / 6761 reserved names. Nothing here can receive mail, so none of it is
+# a billing address: Frappe ships Administrator as admin@example.com and Guest as
+# guest@example.com, and admin_v2 mints synthetic customer logins at @jarvis.invalid.
+#
+# Each entry carries a leading dot, and the candidate domain gets one too, so a
+# single suffix test covers both the name itself and any subdomain of it -- with
+# no way to match a longer name that merely ends in the same letters
+# (".examplex.com" does not end with ".example.com").
+_UNDELIVERABLE_SUFFIXES = (
+	".example.com",
+	".example.net",
+	".example.org",
+	".localhost",
+	".test",
+	".example",
+	".invalid",
+)
+
+
+def _is_undeliverable(email: str) -> bool:
+	"""Whether ``email``'s domain is reserved, so mail to it can never arrive."""
+	# strip("."): "example.com." is the root-anchored form of the same name, and
+	# would otherwise slip through -- ".example.com." does not end with
+	# ".example.com".
+	domain = email.rpartition("@")[2].strip().strip(".").lower()
+	return bool(domain) and f".{domain}".endswith(_UNDELIVERABLE_SUFFIXES)
+
+
 @frappe.whitelist()
 def get_account_defaults() -> dict:
 	"""Prefill for the onboarding Account step so the customer doesn't retype what
@@ -1203,6 +1231,11 @@ def get_account_defaults() -> dict:
 	options for a client datalist when several exist. Silent no-op (blank / empty
 	list) on sites without the Company doctype or read permission.
 
+	A reserved-domain email is dropped rather than sent. On a fresh site the caller
+	is Administrator, i.e. admin@example.com, and the step it fills says receipts go
+	to that address — so prefilling it puts an undeliverable address in the field as
+	a real, submittable value. Blank lets the field's own placeholder show.
+
 	Ports the desk auto-fetch (jarvis_onboarding.js, commit 1507495) to the server
 	because the SPA has no ``frappe.defaults``. System-Manager only (the onboarding
 	route is SM-gated).
@@ -1210,6 +1243,8 @@ def get_account_defaults() -> dict:
 	require_jarvis_admin()
 	user = frappe.session.user
 	email = (frappe.db.get_value("User", user, "email") or user) if user and user != "Guest" else ""
+	if _is_undeliverable(email):
+		email = ""
 
 	company, companies = "", []
 	try:
