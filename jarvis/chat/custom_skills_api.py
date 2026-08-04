@@ -785,8 +785,8 @@ def _materialize_promotion(req) -> dict:
 	# A Role promotion writes ``allowed_roles`` ALONGSIDE ``target_role`` (issue #478).
 	# ``target_role`` alone is only honoured by the per-doc read paths
 	# (``user_can_use_skill`` / find_skills / get_skill); every path that answers "which
-	# skills may this user invoke" — ``_role_scoped_invocable_names``, and through it the
-	# ``/slug`` context clause — matches on the ``allowed_roles`` CHILD ROWS. Writing only
+	# skills may this user invoke" (``_role_scoped_invocable_names``, and through it the
+	# ``/slug`` context clause) matches on the ``allowed_roles`` CHILD ROWS. Writing only
 	# ``target_role`` therefore published a skill that no role-holder could ever trigger
 	# deterministically. Both fields carry the SAME single role, so the audience is
 	# unchanged; this only makes the row visible to the role-matched invocation path.

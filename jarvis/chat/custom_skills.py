@@ -159,8 +159,8 @@ def invoked_skill_clause(message: str) -> str:
 	TWO clause shapes, because only SOME invocable skills physically exist in the
 	container (issue #477):
 
-	* skills the push actually writes — Org scope, no ``allowed_roles``, inside
-	  ``MAX_SKILLS_PER_PUSH`` (see :func:`pushed_skill_names`) — keep the original
+	* skills the push actually writes (Org scope, no ``allowed_roles``, inside
+	  ``MAX_SKILLS_PER_PUSH``, see :func:`pushed_skill_names`) keep the original
 	  "apply them" clause: the ``custom-<slug>`` directory really is on disk;
 	* everything else the user may invoke is NOT on disk: a role-restricted body
 	  TASK 11 deliberately keeps off the shared blob, a Role-scope promotion
@@ -384,7 +384,7 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	:func:`pushed_skill_names` and :func:`project_org_promotion_push`, so the
 	reviewer's budget projection can never drift from what Apply actually does.
 	``owner`` scopes tests only; ``fields`` trims the projection for callers that
-	only need identity (``name`` + ``skill_name`` are load-bearing here — the
+	only need identity (``name`` + ``skill_name`` are load-bearing here: the
 	role-restriction filter and the sort key both read them)."""
 	# ("in", ("Org", "")) — not ("!=", "User") — because db_query wraps the
 	# "in" operator in ifnull(scope, ''), so legacy NULL-scope rows match ''.

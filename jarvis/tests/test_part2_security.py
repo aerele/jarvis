@@ -1551,14 +1551,14 @@ class TestSkillPromotionRound4(Part2Base):
 
 
 class TestRoleScopedSkillInvocation(Part2Base):
-	"""Issues #477 + #478 — the two halves of role-scoped /slug invocation.
+	"""Issues #477 + #478: the two halves of role-scoped /slug invocation.
 
 	#478: a Role promotion wrote ``target_role`` only, so
 	``_role_scoped_invocable_names`` (which matches on the ``allowed_roles`` CHILD
 	rows) never saw it and no role-holder's ``/slug`` ever fired.
 
 	#477: every invoked skill was named as an installed ``custom-<slug>``
-	directory, including the role-restricted ones the push DELIBERATELY drops —
+	directory, including the role-restricted ones the push DELIBERATELY drops,
 	so the trusted [Context:] line asserted a container dir that does not exist.
 
 	They ship together: fixing #478 alone routes every Role-promoted skill into
@@ -1571,7 +1571,7 @@ class TestRoleScopedSkillInvocation(Part2Base):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		# A role-holder who does NOT own the source skill — the point of the whole
+		# A role-holder who does NOT own the source skill, the point of the whole
 		# tier. (Owners already match via the owner branch of invoked_skill_clause,
 		# so testing with the owner would pass even with the bug present.)
 		_ensure_user(cls.ROLE_HOLDER, ["Jarvis User", cls.AUD_ROLE])

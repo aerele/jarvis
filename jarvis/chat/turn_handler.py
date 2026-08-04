@@ -652,7 +652,7 @@ def assemble_prompt(
 	# skill is on disk: only the pushed set (Org scope, no allowed_roles, inside
 	# the push cap) has a workspace/skills/custom-<slug>/SKILL.md. Role-scope,
 	# role-restricted, private and over-cap rows are NOT written to the container
-	# — the container has a single role-blind custom_skills dir — so for those the
+	# (the container has a single role-blind custom_skills dir), so for those the
 	# clause tells the agent to fetch the body with jarvis__get_skill rather than
 	# asserting a directory that does not exist.
 	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
