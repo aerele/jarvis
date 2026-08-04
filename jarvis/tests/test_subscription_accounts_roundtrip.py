@@ -319,7 +319,7 @@ class TestOrphanCaptureAdoption(_RT3SettingsTestCase):
 		return pending_capture.create_capture(
 			provider="openai",
 			upstream="openai",
-			openclaw_provider="openai",
+			agent_provider="openai",
 			oauth_blob=blob,
 			account_email="orphan@acme.com",
 			account_ref=account_ref,
