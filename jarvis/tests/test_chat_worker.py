@@ -10,10 +10,10 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import openclaw_session_pool, turn_handler
+from jarvis.chat import agent_session_pool, turn_handler
 from jarvis.chat.api import create_conversation, get_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -27,7 +27,7 @@ MSG = "Jarvis Chat Message"
 def _make_conversation_with_user_message(text: str = "hi") -> tuple[str, str]:
 	"""Helper: create conversation, attach a user message, return (conv, msg).
 
-	send_message no longer creates the openclaw session on the web request
+	send_message no longer creates the agent session on the web request
 	(2026-07 latency plan, Phase 1.1 — the worker creates it on its pooled
 	connection for first turns). These tests drive the worker against a
 	conversation that already has a session, so set the key directly; the
@@ -50,7 +50,7 @@ def _fake_event_stream(events: list[dict]):
 
 class TestRunAgentTurnHappyPath(FrappeTestCase):
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -73,7 +73,7 @@ class TestRunAgentTurnHappyPath(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -96,7 +96,7 @@ class TestRunAgentTurnHappyPath(FrappeTestCase):
 
 class TestRunAgentTurnToolCall(FrappeTestCase):
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -134,7 +134,7 @@ class TestRunAgentTurnToolCall(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -150,7 +150,7 @@ class TestRunAgentTurnToolCall(FrappeTestCase):
 
 class TestRunAgentTurnErrorPaths(FrappeTestCase):
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -162,11 +162,11 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 		frappe.set_user(self._orig_user)
 
 	def test_connect_failure_publishes_run_error_and_marks_message_errored(self):
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		with patch(
-			"jarvis.chat.openclaw_session_pool.OpenclawSession.connect",
-			side_effect=OpenclawUnreachableError("connect refused"),
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
+			side_effect=AgentUnreachableError("connect refused"),
 		):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -198,7 +198,7 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -210,7 +210,7 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 		self.assertIn("model overloaded", assistants[0]["error"])
 
 	def test_unexpected_exception_marks_errored_then_reraises(self):
-		"""Sprint-3 (2026-06-16 review): the inline OpenclawUnreachableError
+		"""Sprint-3 (2026-06-16 review): the inline AgentUnreachableError
 		catches USED to leave every other exception (cryptography.InvalidKey
 		from device signing, ssl.SSLError, programmer bugs in _handle_event)
 		propagating to RQ without _mark_errored or run:error - the
@@ -219,7 +219,7 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 		re-raises so RQ records the job failure.
 		"""
 		fake_sess = MagicMock()
-		# Simulate a non-Openclaw exception escaping from chat_send
+		# Simulate a non-Agent exception escaping from chat_send
 		# (e.g. an SSL handshake mid-stream, or a tool-handler bug).
 		import ssl
 
@@ -231,7 +231,7 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 			published_kinds.append(payload.get("kind"))
 
 		with (
-			patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess),
+			patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess),
 			patch("jarvis.chat.worker.publish_to_user", side_effect=_capture),
 		):
 			with self.assertRaises(ssl.SSLError):
@@ -254,12 +254,12 @@ class TestRunAgentTurnErrorPaths(FrappeTestCase):
 
 class TestRunAgentTurnAugmentsMessage(FrappeTestCase):
 	"""Worker should prepend `[Context: today is ...]` to the user message
-	before sending it to openclaw, so the agent can resolve relative time
+	before sending it to agent, so the agent can resolve relative time
 	expressions ("last quarter") without a clarifying round-trip.
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -280,7 +280,7 @@ class TestRunAgentTurnAugmentsMessage(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -303,7 +303,7 @@ class TestRunAgentTurnAugmentsMessage(FrappeTestCase):
 
 class TestRunAgentTurnModelResolution(FrappeTestCase):
 	"""Worker resolves the effective model from conv.model_override → settings.llm_model
-	and threads it (with the openclaw provider id) into set_session_model
+	and threads it (with the agent provider id) into set_session_model
 	(sessions.patch) before chat_send.
 	"""
 
@@ -330,7 +330,7 @@ class TestRunAgentTurnModelResolution(FrappeTestCase):
 		super().tearDownClass()
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -349,7 +349,7 @@ class TestRunAgentTurnModelResolution(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		# Model overrides are applied to the SESSION (sessions.patch) before
@@ -358,12 +358,12 @@ class TestRunAgentTurnModelResolution(FrappeTestCase):
 
 	def test_no_override_uses_settings_model_and_oauth_provider_id(self):
 		"""conv.model_override empty → effective_model = settings.llm_model;
-		provider id mapped from settings.llm_provider to openclaw provider id."""
+		provider id mapped from settings.llm_provider to agent provider id."""
 		call = self._run_and_capture()
 		args = call.args
 		self.assertEqual(args[0], "agent:fake")
-		# Maps to openclaw's model-provider key, not the OAuth flow id
-		# (which is "openai-codex"). See _PROVIDER_LABEL_TO_OPENCLAW_ID
+		# Maps to agent's model-provider key, not the OAuth flow id
+		# (which is "openai-codex"). See _PROVIDER_LABEL_TO_AGENT_ID
 		# in chat/worker.py for the rationale.
 		self.assertEqual(args[1], "openai/gpt-5.5")
 
@@ -374,8 +374,8 @@ class TestRunAgentTurnModelResolution(FrappeTestCase):
 		call = self._run_and_capture()
 		args = call.args
 		self.assertEqual(args[0], "agent:fake")
-		# Maps to openclaw's model-provider key, not the OAuth flow id
-		# (which is "openai-codex"). See _PROVIDER_LABEL_TO_OPENCLAW_ID
+		# Maps to agent's model-provider key, not the OAuth flow id
+		# (which is "openai-codex"). See _PROVIDER_LABEL_TO_AGENT_ID
 		# in chat/worker.py for the rationale.
 		self.assertEqual(args[1], "openai/gpt-5.4-mini")
 
@@ -408,7 +408,7 @@ class TestRunAgentTurnApiKeyModeOmitsProvider(FrappeTestCase):
 		super().tearDownClass()
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -427,7 +427,7 @@ class TestRunAgentTurnApiKeyModeOmitsProvider(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		# api_key mode has no oauth_provider_id, so the session model patch
@@ -451,7 +451,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -480,7 +480,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		# Five assistant:delta publishes (one per token), even though
@@ -531,7 +531,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 				write_calls.append(args)
 			return real_set_value(*args, **kwargs)
 
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				with patch("frappe.db.set_value", side_effect=tracking_set_value):
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -577,7 +577,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		# Final cumulative content is the last assistant text. The
@@ -623,7 +623,7 @@ class TestAssistantContentBatching(FrappeTestCase):
 				raise RuntimeError("simulated tool-row insert failure")
 			return _orig_get_doc(*args, **kwargs)
 
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				with patch("frappe.get_doc", side_effect=boom_on_tool_msg):
 					with patch("frappe.log_error") as log_err:
@@ -649,7 +649,7 @@ class TestAssistantContentBatcherUnit(FrappeTestCase):
 	"""Unit-level coverage of _AssistantContentBatcher thresholds."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -710,14 +710,14 @@ class TestAssistantContentBatcherUnit(FrappeTestCase):
 
 
 class TestWorkerCreatesSessionOnFirstTurn(FrappeTestCase):
-	"""2026-07 latency plan, Phase 1.1: the WORKER creates the openclaw
+	"""2026-07 latency plan, Phase 1.1: the WORKER creates the agent
 	session for a conversation's first turn on its pooled connection —
 	send_message no longer does it on the browser-awaited POST. The
 	Jarvis Chat Session row (the plugin's sessionKey→user lookup, i.e.
 	the permission moat) must exist BEFORE the stream starts."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -745,7 +745,7 @@ class TestWorkerCreatesSessionOnFirstTurn(FrappeTestCase):
 
 		def _send(session_key, *a, **kw):
 			# Capture the moat invariant at the exact moment the turn
-			# starts (chat_send, the RPC that hands off to openclaw): the
+			# starts (chat_send, the RPC that hands off to agent): the
 			# sessionKey→user row must already be committed.
 			row_exists_at_stream_start["row"] = frappe.db.get_value(
 				"Jarvis Chat Session",
@@ -764,7 +764,7 @@ class TestWorkerCreatesSessionOnFirstTurn(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -783,7 +783,7 @@ class TestWorkerCreatesSessionOnFirstTurn(FrappeTestCase):
 
 
 class TestRunAgentTurnRelayTerminals(FrappeTestCase):
-	"""Task 3 (openclaw-native relay transport): the managed branch now
+	"""Task 3 (agent-native relay transport): the managed branch now
 	drives chat_send + relay_turn_events instead of stream_agent_turn.
 
 	Never-error invariant: after a successful chat_send ack, NO code path
@@ -791,12 +791,12 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 	relay:interrupted (deadline, transport drop, exhausted stream) or an
 	"ok" ack (cached replay of an already-completed run) parks the row via
 	_mark_recovering + best-effort recover_now and returns silently -
-	openclaw's durable transcript is the source of truth, not a guess made
+	agent's durable transcript is the source of truth, not a guess made
 	from a lost stream.
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -832,7 +832,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 				{"kind": "relay:interrupted", "reason": "deadline"},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.turn_recovery.recover_now") as recover_now:
 				with patch("jarvis.chat.worker.publish_to_user") as pub:
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -857,7 +857,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 				{"kind": "relay:error", "state": "error", "error": "provider quota exceeded"},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -873,7 +873,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 		# job re-enqueued). No events will follow - finalize from the
 		# durable transcript instead of calling relay_turn_events at all.
 		fake_sess = self._fake_sess([], ack={"runId": "r1", "status": "ok"})
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.turn_recovery.recover_now") as recover_now:
 				with patch("jarvis.chat.worker.publish_to_user"):
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -884,14 +884,14 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 		self.assertEqual(row["recovering"], 1)
 
 	def test_ack_in_flight_with_different_run_id_is_honored(self):
-		# openclaw may hand back a DIFFERENT runId than our idempotency key
+		# agent may hand back a DIFFERENT runId than our idempotency key
 		# (e.g. an in-flight run from a prior attempt); relay_turn_events
 		# must be driven with the server-assigned id, not ours.
 		fake_sess = self._fake_sess(
 			[{"kind": "relay:final", "text": None}],
 			ack={"runId": "server-assigned-run-id", "status": "in_flight"},
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -902,7 +902,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 
 	def test_relay_final_nonempty_text_overwrites_batcher_content(self):
 		# relay:final's text is authoritative over whatever the batcher
-		# last wrote (openclaw's durable transcript beats our in-flight
+		# last wrote (agent's durable transcript beats our in-flight
 		# delta tail).
 		fake_sess = self._fake_sess(
 			[
@@ -910,7 +910,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 				{"kind": "relay:final", "text": "authoritative final text"},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -919,7 +919,7 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 
 	def test_watermark_captured_before_send_and_stamped_on_assistant_row(self):
 		# Watermark must be read (best-effort, via get_session_messages) BEFORE
-		# chat_send hands the turn to openclaw, and stamped onto the assistant
+		# chat_send hands the turn to agent, and stamped onto the assistant
 		# row as the highest seq seen - so a run that later dies server-side
 		# with zero output can never have recovery finalize from the PREVIOUS
 		# turn's reply (that reply is already in the transcript at this point).
@@ -928,14 +928,14 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 			{"role": "assistant", "content": "old", "__openclaw": {"seq": 3}},
 			{"role": "user", "content": "q", "__openclaw": {"seq": 4}},
 		]
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
 		call_names = [c[0] for c in fake_sess.mock_calls if c[0] in ("get_session_messages", "chat_send")]
 		self.assertEqual(call_names, ["get_session_messages", "chat_send"])
 
-		row = self._assistant_row("openclaw_seq_watermark")
+		row = self._assistant_row("agent_seq_watermark")
 		self.assertEqual(row, 4)
 
 
@@ -949,7 +949,7 @@ class TestRunAgentTurnRelayStreamTelemetry(FrappeTestCase):
 	stats for the events it dispatches."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -978,7 +978,7 @@ class TestRunAgentTurnRelayStreamTelemetry(FrappeTestCase):
 			]
 		)
 		fake_logger = MagicMock()
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				with patch("jarvis.chat.latency.get_logger", return_value=fake_logger):
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -1000,7 +1000,7 @@ class TestRunAgentTurnThinkingDirective(FrappeTestCase):
 	the chat_send ``thinking`` param and leaves user_message unprefixed."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -1021,7 +1021,7 @@ class TestRunAgentTurnThinkingDirective(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -1040,7 +1040,7 @@ class TestRichOutputsRouting(FrappeTestCase):
 	itself (covered by test_canvas.py and generated_media's own tests)."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -1062,7 +1062,7 @@ class TestRichOutputsRouting(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				with patch("jarvis.chat.turn_handler.persist_rich_outputs") as rich:
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -1093,7 +1093,7 @@ class TestRichOutputsRouting(FrappeTestCase):
 				{"kind": "relay:final", "text": None},
 			]
 		)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
@@ -1108,7 +1108,7 @@ class TestRichOutputsRouting(FrappeTestCase):
 
 
 class TestOverflowParksForRecovery(FrappeTestCase):
-	"""A 'Context overflow' lifecycle error must PARK the turn (openclaw
+	"""A 'Context overflow' lifecycle error must PARK the turn (agent
 	auto-compacts and retries; the answer lands in the session shortly
 	after), never surface a terminal run:error to the chat."""
 
@@ -1149,7 +1149,7 @@ class TestOverflowParksForRecovery(FrappeTestCase):
 
 
 class TestChatSendAttachmentTimeout(FrappeTestCase):
-	"""openclaw ingests and preprocesses the message BEFORE acking chat.send,
+	"""agent ingests and preprocesses the message BEFORE acking chat.send,
 	so the ack window must scale with the payload. Two ways a send gets big:
 	vision parts (PDF page raster + resize - 22s measured for a 4-page
 	invoice) and INLINED TEXT (a CSV/TXT/JSON attachment is folded into the
@@ -1197,7 +1197,7 @@ class TestChatSendAttachmentTimeout(FrappeTestCase):
 
 class TestChatSendAckTimeoutParks(FrappeTestCase):
 	"""A chat.send ACK timeout is ambiguous: the request frame was already on
-	the wire, and openclaw routinely accepts the message and runs the whole
+	the wire, and agent routinely accepts the message and runs the whole
 	turn while the bench is still waiting. Erroring there is a false negative
 	(user sees a timeout, transcript shows a finished answer) and invites a
 	retry that re-runs under a fresh run_id and can duplicate writes. It must
@@ -1205,7 +1205,7 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 	reached the agent, so those must still error."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -1219,7 +1219,7 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 	def _run_with_send_raising(self, exc):
 		fake_sess = MagicMock()
 		fake_sess.chat_send.side_effect = exc
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.turn_recovery.recover_now") as recover_now:
 				with patch("jarvis.chat.worker.publish_to_user") as pub:
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
@@ -1233,7 +1233,7 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 
 	def test_ack_timeout_parks_instead_of_erroring(self):
 		row, kinds, recover_now = self._run_with_send_raising(
-			OpenclawUnreachableError("chat.send timed out", code="ack-timeout")
+			AgentUnreachableError("chat.send timed out", code="ack-timeout")
 		)
 		self.assertEqual(row["recovering"], 1)
 		# Spinner stays up; turn_recovery finalizes from the gateway snapshot.
@@ -1246,7 +1246,7 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 	def test_rejection_still_errors(self):
 		"""Guards the blast radius: only the ambiguous timeout parks."""
 		row, kinds, _ = self._run_with_send_raising(
-			OpenclawUnreachableError("chat.send rejected: bad-request: nope", code="bad-request")
+			AgentUnreachableError("chat.send rejected: bad-request: nope", code="bad-request")
 		)
 		self.assertEqual(row["recovering"], 0)
 		self.assertTrue(row["error"])
@@ -1254,14 +1254,14 @@ class TestChatSendAckTimeoutParks(FrappeTestCase):
 		self.assertNotIn("run:recovering", kinds)
 
 	def test_untagged_transport_failure_still_errors(self):
-		row, kinds, _ = self._run_with_send_raising(OpenclawUnreachableError("openclaw WS closed: gone"))
+		row, kinds, _ = self._run_with_send_raising(AgentUnreachableError("agent WS closed: gone"))
 		self.assertEqual(row["recovering"], 0)
 		self.assertTrue(row["error"])
 		self.assertIn("run:error", kinds)
 
 
 class TestRelayOverflowParks(FrappeTestCase):
-	"""relay:error carrying a context overflow must PARK the turn (openclaw
+	"""relay:error carrying a context overflow must PARK the turn (agent
 	auto-compacts + retries; recovery finalizes the retried answer) - the
 	raw overflow error must never reach the chat regardless of the
 	customer plan's context-window size."""
@@ -1284,7 +1284,7 @@ class TestRelayOverflowParks(FrappeTestCase):
 
 
 class TestRunAgentTurnAborted(FrappeTestCase):
-	"""The user hit Stop: stop_run -> openclaw chat.abort -> the relay terminal
+	"""The user hit Stop: stop_run -> agent chat.abort -> the relay terminal
 	arrives as relay:error with state="aborted".
 
 	A stop is a STATE of the turn, not prose: `content` stays exactly what the
@@ -1295,7 +1295,7 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -1314,7 +1314,7 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 			"status": "started",
 		}
 		fake_sess.relay_turn_events.return_value = _fake_event_stream(relay_events)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		return pub
@@ -1404,18 +1404,18 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 
 
 class TestRunAgentTurnFailedFinal(FrappeTestCase):
-	"""A terminal agent failure that openclaw reports as state="final" with an
+	"""A terminal agent failure that agent reports as state="final" with an
 	empty message (stopReason error) - e.g. a precheck context overflow that
 	deletes the session, so there is no auto-compact retry - must land as an
 	honest error on the assistant row, never a silent empty bubble.
 
-	openclaw_client.relay_turn_events remaps that final to a relay:error with
+	agent_client.relay_turn_events remaps that final to a relay:error with
 	state="failed_final"; this exercises the full turn so the row's `error`
 	field and the run:error publish are both verified.
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -1433,7 +1433,7 @@ class TestRunAgentTurnFailedFinal(FrappeTestCase):
 			"status": "started",
 		}
 		fake_sess.relay_turn_events.return_value = _fake_event_stream(relay_events)
-		with patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess):
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		return pub
@@ -1447,7 +1447,7 @@ class TestRunAgentTurnFailedFinal(FrappeTestCase):
 		)
 
 	def test_failed_final_stamps_error_and_is_not_recovering(self):
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		pub = self._run([{"kind": "relay:error", "state": "failed_final", "error": FAILED_FINAL_ERROR}])
 		row = self._assistant_row(["content", "error", "streaming", "recovering"])

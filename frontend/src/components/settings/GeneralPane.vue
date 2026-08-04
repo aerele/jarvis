@@ -309,7 +309,7 @@ async function loadConnStatus() {
 }
 // proxy_active means "a Bifrost + CLIProxyAPI sidecar pair is deployed", which
 // only a chat subscription needs. It is NOT "this is a pool": a pool of BYO api
-// keys renders openclaw-direct and fails over with no sidecar at all. Kept
+// keys renders agent-direct and fails over with no sidecar at all. Kept
 // separate from isPool below for exactly that reason: only a proxied tenant has
 // an OAuth profile expiry to show.
 const isProxy = computed(() => !!(connStatus.value && connStatus.value.proxy_active));

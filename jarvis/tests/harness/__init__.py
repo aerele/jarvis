@@ -2,14 +2,14 @@
 
 NEW FILES ONLY — this package edits no product code. It measures the CURRENT
 (legacy, worker-per-turn) chat transport against a deterministic local WS
-gateway that reproduces the openclaw protocol subset the bench uses (S2), so
+gateway that reproduces the agent protocol subset the bench uses (S2), so
 the owner's six production criteria (C1–C6, BUILD-DIRECTIVE §1) get a clean
 baseline the Relay Pump must later beat.
 
 Layers of fidelity (stated up front, and again in every report):
 
   * Transport / relay / batching — REAL bench code. The harness drives the
-    real ``jarvis.chat.openclaw_client.OpenclawSession`` (real handshake,
+    real ``jarvis.chat.agent_client.AgentSession`` (real handshake,
     ``chat_send``, ``relay_turn_events``) over a real socket into
     ``fake_gateway.FakeGateway``, and feeds the frames through the real
     ``jarvis.chat.turn_handler._AssistantContentBatcher`` +

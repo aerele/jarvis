@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import agent_session_pool
 from jarvis.chat import customizations_clause as cc
-from jarvis.chat import openclaw_session_pool
 from jarvis.chat.worker import run_agent_turn
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
@@ -147,7 +147,7 @@ class TestClauseAssemblyOrdering(FrappeTestCase):
 	(personal deliberately last)."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -169,7 +169,7 @@ class TestClauseAssemblyOrdering(FrappeTestCase):
 			]
 		)
 		with (
-			patch("jarvis.chat.openclaw_session_pool.OpenclawSession.connect", return_value=fake_sess),
+			patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess),
 			patch("jarvis.chat.worker.publish_to_user"),
 			patch("jarvis.chat.wiki.wiki_clause", return_value="; WIKI-SENT"),
 			patch("jarvis.chat.customizations_clause.customizations_clause", return_value="; CUSTOM-SENT"),

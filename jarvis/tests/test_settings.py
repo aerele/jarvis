@@ -149,7 +149,7 @@ class TestOnUpdateAdminDispatch(_SettingsSnapshotTestCase):
 	"""Tests for the admin-path branch added in Plan 3.2.2b.
 
 	When jarvis_admin_url is set, on_update routes through
-	jarvis.admin_client.post_update_llm_creds instead of openclaw_push.
+	jarvis.admin_client.post_update_llm_creds instead of agent_push.
 	Errors land in last_sync_status; save itself never raises.
 	"""
 

@@ -3,7 +3,7 @@ settle -> finalize) + the PANEL matrix rows WP-1d owns.
 
 These drive the REAL prepare / settlement / finalize jobs in-process against the
 real ``turn_state`` CAS library + WP-1b's transport double (only the gateway
-socket + the openclaw pool checkout are faked). The two enrichment side effects
+socket + the agent pool checkout are faked). The two enrichment side effects
 that do real HTTP/gateway work (rich outputs, usage poll) are mocked at their
 boundary so the LEDGER machinery (claim/complete/force-done/finalize_done) runs
 for real.
@@ -46,7 +46,7 @@ SESSION = "Jarvis Chat Session"
 
 
 class _FakeSess:
-	"""In-process stand-in for a pooled OpenclawSession — the bootstrap RPCs
+	"""In-process stand-in for a pooled AgentSession — the bootstrap RPCs
 	(prepare) + the usage poll (finalize) with NO real socket."""
 
 	def __init__(self):
@@ -137,7 +137,7 @@ class _PipelineCase(_PumpTestCase):
 		def _co(url):
 			yield fake
 
-		with patch("jarvis.chat.openclaw_session_pool.checkout", _co):
+		with patch("jarvis.chat.agent_session_pool.checkout", _co):
 			yield
 
 	@contextmanager
@@ -535,7 +535,7 @@ class TestPanel10Draining(_PipelineCase):
 
 class TestSnapshotRecoveryWindow(_PipelineCase):
 	"""OARF-2: missed-terminal snapshot recovery must window the durable tail by
-	the turn's ``openclaw_seq_watermark`` (captured by prepare BEFORE this turn's
+	the turn's ``agent_seq_watermark`` (captured by prepare BEFORE this turn's
 	send). A run that ended with NO output beyond the watermark must NEVER adopt a
 	PRIOR turn's answer — it settles ``errored`` honestly (Amendment D: never
 	fabricate)."""
@@ -543,7 +543,7 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 	def _seed_streaming_gone(self, conv, rid, *, watermark, last_event_seq=3):
 		seed = self._mk_msg(conv, content="second question")
 		amsg = self._mk_msg(
-			conv, role="assistant", content="partial", streaming=1, openclaw_seq_watermark=watermark
+			conv, role="assistant", content="partial", streaming=1, agent_seq_watermark=watermark
 		)
 		epoch = self._acquire_fresh("snaprec")
 		self._mk_turn(
@@ -930,7 +930,7 @@ class TestFailedFinalSettlesAsError(_PipelineCase):
 		rid = "pmp_ff_empty"
 		self._drive(rid, "empty-final-after-tools")
 		err = self._assert_terminal_failure(rid)
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		self.assertEqual(err, FAILED_FINAL_ERROR, "no lifecycle detail -> the generic honest copy")
 
@@ -1315,7 +1315,7 @@ class TestDeltaBatcher(_PipelineCase):
 class TestToolApplierEquivalence(_PipelineCase):
 	"""CDX-5 equivalence RE-RUN: the tool-heavy transcript through the pump with the
 	DEFAULT (production) ``apply_tool`` — NOT the recorder the Stage-B evidence used.
-	Built-in openclaw tools (browser) must produce their durable role=tool receipt +
+	Built-in agent tools (browser) must produce their durable role=tool receipt +
 	tool-end update + start/end publishes; ``jarvis__*`` callback-owned tools must
 	publish lifecycle ONLY (no pump-owned receipt row)."""
 

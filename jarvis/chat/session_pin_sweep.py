@@ -1,6 +1,6 @@
-"""Clear the openclaw session model pins Jarvis wrote on the customer's behalf.
+"""Clear the agent session model pins Jarvis wrote on the customer's behalf.
 
-THE POISON. openclaw stores a per-session model override. From its 2026.6.8
+THE POISON. agent stores a per-session model override. From its 2026.6.8
 bundle, ``resolveEffectiveModelFallbacks``::
 
     if (!params.hasSessionModelOverride) return agentFallbacksOverride;
@@ -8,7 +8,7 @@ bundle, ``resolveEffectiveModelFallbacks``::
 
 so ANY pin that is not flagged automatic zeroes the failover candidate chain for
 that conversation, permanently. The bench pinned sessions on unpinned "Auto"
-turns too (``turn_handler._session_model_for`` names the pool primary so openclaw
+turns too (``turn_handler._session_model_for`` names the pool primary so agent
 does not reject the ``jarvis-pool`` placeholder), and every such patch landed as
 ``modelOverrideSource: "user"`` - ``sessions.patch`` hardcodes that source and
 its param schema is ``additionalProperties: false``, so there is no way to ask
@@ -30,7 +30,7 @@ REMEDY, PER CLASS.
   * conversation on Auto      -> CLEAR. We wrote it; the customer asked for the
                                  default and its fallback chain.
   * conversation pins the same
-    model as the session       -> KEEP. A deliberate pick, and openclaw disabling
+    model as the session       -> KEEP. A deliberate pick, and agent disabling
                                  failover for it is the product behaviour we
                                  want: someone who explicitly chooses one vendor
                                  should see that vendor's error, not a silent
@@ -42,11 +42,11 @@ REMEDY, PER CLASS.
                                  widen the gap. Holds even when the pick names a
                                  model the tenant no longer offers: that is a
                                  conversation to repair, not a pin to drop.
-  * openclaw's own
+  * agent's own
     agent:<id>:main and anything
     under agent:<id>:main:*     -> CLEAR. The built-in poller resumes the
                                  heartbeat on every tick, so a pin there fails
-                                 forever, and openclaw owns that whole
+                                 forever, and agent owns that whole
                                  namespace: none of it is a customer pick.
   * a bench throwaway
     (title / prewarm / polish) -> SKIP. Single-use and reaped within the hour by
@@ -58,7 +58,7 @@ REMEDY, PER CLASS.
 WHAT "PINNED" MEANS HERE, HONESTLY. A sessions.list row carries the RESOLVED
 model, never the raw override, and the gateway puts no override field on the wire
 at all - so "resolves to something other than the agent default" is the only
-signal available, and it is exactly the one openclaw's own control UI uses. It
+signal available, and it is exactly the one agent's own control UI uses. It
 cannot separate a live override from a STALE RUNTIME RECORD: a session that once
 ran under an earlier render keeps that render's provider in entry.model long
 after the override is gone. Measured on jarvis-pool-bf4097 (2026-07-29): 6
@@ -77,14 +77,14 @@ Clearing goes through ``sessions.patch {"model": null}`` rather than an edit of
 ``sessions.json`` on disk: the gateway keeps the store in memory and rewrites it
 on every session update, so a host-side edit either loses the race or needs the
 container stopped. The patch response echoes the resulting store entry, so every
-clear is verified rather than trusted. See ``OpenclawSession.clear_session_model``.
+clear is verified rather than trusted. See ``AgentSession.clear_session_model``.
 
 The listing and the patch are seconds apart, and both facts behind a CLEAR can
 move in that window, so each one is rechecked at patch time: the conversation's
 model_override is re-read (a customer who picked a model in between keeps it),
 and the returned entry's sessionId must be the one that was planned against (the
 lifecycle sweep can free a session mid-run, and patching a freed key makes
-openclaw mint a ghost entry instead of failing).
+agent mint a ghost entry instead of failing).
 
 DRY RUN IS THE DEFAULT. ``run()`` only reports; ``run(apply=True)`` clears, up to
 ``MAX_CLEAR`` pins per invocation::
@@ -123,7 +123,7 @@ MAX_PAGES = 50
 # always "jarvis-chat-<user>-<ms>", so these prefixes can never collide with one.
 _BENCH_LABEL_PREFIXES = ("jarvis-prewarm-", "jarvis-title-", "jarvis-polish-")
 
-# openclaw's own per-agent session: "agent:<id>:main" and its ":heartbeat"
+# agent's own per-agent session: "agent:<id>:main" and its ":heartbeat"
 # sibling. The heartbeat resumes on every tick, so a pin there fails forever.
 _AGENT_MAIN_PREFIX = "agent:"
 
@@ -199,10 +199,10 @@ def run(apply: bool = False, max_clear: int = MAX_CLEAR) -> dict:
 	if not gateway_url:
 		return SweepSummary(apply=bool(apply), aborted="no agent_url").as_dict()
 
-	from jarvis.chat.openclaw_client import OpenclawSession
+	from jarvis.chat.agent_client import AgentSession
 
 	try:
-		sess = OpenclawSession.connect(gateway_url)
+		sess = AgentSession.connect(gateway_url)
 	except Exception:
 		frappe.log_error(title="session_pin_sweep: connect failed", message=frappe.get_traceback())
 		return SweepSummary(apply=bool(apply), aborted="connect failed").as_dict()
@@ -311,14 +311,14 @@ class SessionPinSweep:
 		if row.get("hasActiveRun"):
 			return plan(SKIP, "a run is in flight")
 		if not sid:
-			# Patching an entry with no sessionId makes openclaw mint one and drop
+			# Patching an entry with no sessionId makes agent mint one and drop
 			# the label. Nothing here is worth that.
 			return plan(SKIP, "store entry has no sessionId")
 
 		conv = owners.get(key)
 		if conv is None:
 			if _is_agent_main_key(key):
-				return plan(CLEAR, "openclaw's own main session, never a customer pick")
+				return plan(CLEAR, "agent's own main session, never a customer pick")
 			if label.startswith(_BENCH_LABEL_PREFIXES):
 				return plan(SKIP, "bench throwaway; session_lifecycle reaps it")
 			return plan(REPORT, "no conversation owns this session")
@@ -377,9 +377,9 @@ class SessionPinSweep:
 		"""The patch echoes the resulting store entry, so check it instead of
 		trusting the ack. Two things can be wrong:
 
-		- the override survived, meaning openclaw took a branch we did not expect;
+		- the override survived, meaning agent took a branch we did not expect;
 		- the entry carries a DIFFERENT sessionId, meaning the session was freed
-		  between the listing and the patch and openclaw minted a fresh entry
+		  between the listing and the patch and agent minted a fresh entry
 		  under that key rather than patching the one we planned against. That
 		  ghost has no override, so only the id comparison catches it. It is an
 		  unreferenced session, which the session_lifecycle orphan sweep reaps.
@@ -423,7 +423,7 @@ class SessionPinSweep:
 
 def _model_ref(row: dict) -> str:
 	"""``"provider/model"`` for a sessions.list row or its defaults block, or ""
-	when the gateway resolved neither. Comparison is case-folded; openclaw ids
+	when the gateway resolved neither. Comparison is case-folded; agent ids
 	are lowercase but nothing guarantees it."""
 	provider = (row.get("modelProvider") or "").strip().casefold()
 	model = (row.get("model") or "").strip().casefold()
@@ -433,11 +433,11 @@ def _model_ref(row: dict) -> str:
 
 
 def _is_agent_main_key(key: str) -> bool:
-	"""True for openclaw's own ``agent:<id>:main`` session and anything scoped
+	"""True for agent's own ``agent:<id>:main`` session and anything scoped
 	under it, ``agent:<id>:main:*`` - today that is the ``:heartbeat`` poller.
 	Never a customer chat, which always lands under ``:dashboard:``.
 
-	The trailing wildcard is deliberate: openclaw owns that namespace and may add
+	The trailing wildcard is deliberate: agent owns that namespace and may add
 	siblings, and every one of them is its own bookkeeping."""
 	if not key.startswith(_AGENT_MAIN_PREFIX):
 		return False

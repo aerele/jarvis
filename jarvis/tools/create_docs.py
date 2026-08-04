@@ -1,6 +1,6 @@
 """DEPRECATED shim - bulk create now lives in ``create_doc(docs=[...])``.
 
-Kept as a thin, behaviour-preserving delegate so already-shipped openclaw
+Kept as a thin, behaviour-preserving delegate so already-shipped agent
 plugins / containers that still advertise ``jarvis__create_docs`` keep
 resolving on a newer bench (no ToolNotFoundError during rollout). New callers
 should use ``create_doc(docs=[...])`` - the persona points there. This module

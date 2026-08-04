@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import openclaw_session_pool
+from jarvis.chat import agent_session_pool
 from jarvis.chat.api import create_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
 from jarvis.tests.test_chat_api import (
@@ -21,11 +21,11 @@ from jarvis.tests.test_chat_api import (
 
 
 class TestThinkingDirectiveLeading(FrappeTestCase):
-	"""The /think directive must be the FIRST bytes sent to openclaw
+	"""The /think directive must be the FIRST bytes sent to agent
 	even when _prepend_doc_context prepends a [Viewing: ...] line for
 	floating-widget auto-context (spec 7.3, verification 10.3).
 
-	These tests call run_agent_turn with a mocked openclaw session and
+	These tests call run_agent_turn with a mocked agent session and
 	capture the message argument actually passed to stream_agent_turn.
 
 	test_directive_leads_with_doc_context is the RED-before / GREEN-after
@@ -35,7 +35,7 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -47,7 +47,7 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 				"what is the status?",
 				thinking_override="high",
 			)
-		# send_message no longer creates the openclaw session on the web
+		# send_message no longer creates the agent session on the web
 		# request (2026-07 latency plan, Phase 1.1 — the worker creates it on
 		# its pooled connection). These tests assert message COMPOSITION on an
 		# existing session, so seed the key directly, same as
@@ -79,7 +79,7 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 			]
 		)
 		with patch(
-			"jarvis.chat.openclaw_session_pool.OpenclawSession.connect",
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
 			return_value=fake_sess,
 		):
 			with patch("jarvis.chat.worker.publish_to_user"):

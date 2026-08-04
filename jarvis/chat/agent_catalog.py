@@ -343,7 +343,7 @@ def registry_tools_allow(agent_slug: str) -> list[str]:
 	"""The agent's DECLARED tool surface from the BUNDLED registry, verbatim.
 
 	The same metadata ``build_agent_push_payload`` echoes into the container's
-	enablement signal — the manifest's ``tools_allow``, openclaw-facing ids
+	enablement signal — the manifest's ``tools_allow``, agent-facing ids
 	(``jarvis__get_doc``) plus the container-side tools (``exec``/``canvas``/
 	``message``) the bench never serves. JF-017 snapshots this onto the run at
 	launch and enforces it bench-side, so it is no longer just the container's

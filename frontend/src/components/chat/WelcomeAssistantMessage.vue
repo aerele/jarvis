@@ -9,7 +9,7 @@
   key on "zero messages", and (d) put text the model never produced into the
   turn/pump state. So this component renders inside ChatView's existing
   `showWelcome` branch and writes nothing: no Jarvis Chat Message, no
-  conversation, no openclaw session, no tokens.
+  conversation, no agent session, no tokens.
 
   Consequences of that honesty, all deliberate:
     - no timestamp and no model badge: nothing generated this, so there is

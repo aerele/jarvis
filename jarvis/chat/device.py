@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from jarvis import admin_client
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 
 @dataclass(frozen=True)
@@ -108,7 +108,7 @@ def ensure_paired() -> ChatDeviceCredentials:
 	"""Return current chat device credentials, generating + registering them
 	if missing. Idempotent: a fully-populated Settings row is reused as-is.
 
-	Raises OpenclawUnreachableError if pairing fails (no creds to fall back
+	Raises AgentUnreachableError if pairing fails (no creds to fall back
 	to - the caller has no way to chat without them, so we surface the error
 	cleanly instead of half-persisting an unusable state).
 
@@ -183,11 +183,11 @@ def _generate_and_pair() -> ChatDeviceCredentials:
 	try:
 		resp = admin_client.pair_chat_device(public_key=pub_b64u, device_id=device_id)
 	except Exception as e:
-		raise OpenclawUnreachableError(f"chat device pairing failed: {e}") from e
+		raise AgentUnreachableError(f"chat device pairing failed: {e}") from e
 
 	device_token = (resp or {}).get("device_token") or ""
 	if not device_token:
-		raise OpenclawUnreachableError("admin pair_chat_device returned no device_token")
+		raise AgentUnreachableError("admin pair_chat_device returned no device_token")
 
 	settings = frappe.get_single("Jarvis Settings")
 	_save_credentials(

@@ -1,8 +1,8 @@
-"""FakeGateway — a local WS server speaking the openclaw protocol subset the
+"""FakeGateway — a local WS server speaking the agent protocol subset the
 bench uses, with deterministic transcript playback and configurable faults.
 
 It is a REAL ``websockets`` server on ``127.0.0.1:<port>`` (reachable by the
-real ``jarvis.chat.openclaw_client.OpenclawSession`` over a real socket), so
+real ``jarvis.chat.agent_client.AgentSession`` over a real socket), so
 the whole bench transport + relay path is exercised — no frame mocking.
 
 Protocol subset (grounded in spike S2 + the transport client):
@@ -27,7 +27,7 @@ Config knobs (per gateway, overridable per-run via ``arm``):
   cadence_ms          spacing between streamed frames (token cadence)
   ack_delay_ms        normal ack latency
   ack_timeout_hold_ms hold before responding when ack_behavior == "timeout"
-  max_concurrent      global main-lane cap (openclaw default 4)
+  max_concurrent      global main-lane cap (agent default 4)
   lane_sim            enable the FIFO->lane admission gating (dwell)
   lane_dwell_ms       extra artificial dwell added while holding a lane slot
                       (simulate a busy container even below the cap)
@@ -381,7 +381,7 @@ class FakeGateway:
 		session_key = tl.session_key
 		payload = {"runId": run_id, "sessionKey": session_key}
 		if kind == "final":
-			# Live wire shape (#543): openclaw OMITS ``message`` entirely when the
+			# Live wire shape (#543): the runtime OMITS ``message`` entirely when the
 			# turn produced no assistant text, rather than sending an empty one.
 			text = terminal.get("text")
 			payload.update({"state": "final"})
@@ -391,7 +391,7 @@ class FakeGateway:
 			# Live wire shape (#543): ``stopReason`` is TOP-LEVEL, not inside
 			# ``message``, and a turn with no output carries no ``message`` at all.
 			# The old {"message": {"content": [], "stopReason": "error"}} shape is
-			# one openclaw never sends, and modelling it here is what let the
+			# one the runtime never sends, and modelling it here is what let the
 			# failed-final classifier pass its tests while being dead on the wire.
 			payload.update({"state": "final"})
 			if terminal.get("stopReason"):
@@ -421,7 +421,7 @@ class FakeGateway:
 		# on this session was armed with inject.recover_via == "history", the
 		# durable transcript still holds the complete answer, so surface it as a
 		# role=assistant tail message the way sessions.get / chat.history would
-		# (openclaw stamps __openclaw:{seq,id}). Stage-B recovery probes read it.
+		# (agent stamps __openclaw:{seq,id}). Stage-B recovery probes read it.
 		if not session_key:
 			return []
 		with self._state_lock:

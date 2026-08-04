@@ -86,7 +86,7 @@ LEGACY_CUTOFF_PATCH = "jarvis.patches.v2_07_agent_run_capability_snapshot"
 # because the runs themselves are terminalized by the 3h stale-run reaper.
 LEGACY_GRACE_SECONDS = 6 * 3600
 
-# Registry/manifest tool ids are openclaw-facing (``jarvis__get_doc``); the bench
+# Registry/manifest tool ids are agent-facing (``jarvis__get_doc``); the bench
 # dispatches by the bare tool name (``get_doc``). Entries that are not jarvis tools
 # at all (``exec``, ``canvas``, ``message`` — container-side) simply never match a
 # bench tool name.
@@ -103,7 +103,7 @@ def bench_tools(tools_allow) -> set:
 	"""The BENCH tool names a declared surface authorises.
 
 	ONLY ``jarvis__``-prefixed entries count. The rest of a manifest's
-	``tools_allow`` (``exec``, ``canvas``, ``message``) names openclaw's own tools,
+	``tools_allow`` (``exec``, ``canvas``, ``message``) names agent's own tools,
 	which never reach ``call_tool`` — so an unprefixed entry must never be able to
 	satisfy a bench tool name, today or the day a bench tool happens to be called
 	``message``."""
@@ -315,7 +315,7 @@ def tool_denial(session_key: str | None, tool: str) -> dict | None:
 		**base,
 		"fatal": False,
 		# The no-retry instruction rides in the MESSAGE, not the envelope's ``hint``:
-		# the openclaw plugin relays a failed tool call to the model as
+		# the agent plugin relays a failed tool call to the model as
 		# ``"<code>: <message>"`` and drops every other field, so a hint the delegate
 		# must act on has to be in the message or it never arrives. ``hint`` keeps its
 		# usual role — the human-facing "what you can do" line.

@@ -1,13 +1,13 @@
 """Tests for jarvis.chat.session_lifecycle (idle-session reclaim + empty-chat
 + orphan sweeps).
 
-The hourly cron (1) frees the openclaw session of conversations idle past the
+The hourly cron (1) frees the agent session of conversations idle past the
 configurable retention window (Jarvis Settings.conversation_retention_days) -
 leaving the conversation Active and visible, only reclaiming its working memory;
 (2) hard-deletes Active, non-starred, zero-message chats idle past
 EMPTY_GRACE_DAYS (the abandoned "New Chat" ghost); and (3) reaps orphaned
 throwaway gateway sessions. The gateway is reached only through
-OpenclawSession.connect (a dedicated connection, never the pool), so tests patch
+AgentSession.connect (a dedicated connection, never the pool), so tests patch
 ``connect`` with a fake session exposing list_sessions/delete_session/close.
 Conversations and messages are real rows on the test site.
 """
@@ -141,7 +141,7 @@ class TestSessionLifecycle(FrappeTestCase):
 	def _run(self, sess):
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.OpenclawSession.connect",
+				"jarvis.chat.agent_client.AgentSession.connect",
 				return_value=sess,
 			),
 		):
@@ -628,7 +628,7 @@ class TestSessionLifecycle(FrappeTestCase):
 		self._conv(session_key="test-lc-x", idle_days=40, has_message=True)
 		with (
 			patch(
-				"jarvis.chat.openclaw_client.OpenclawSession.connect",
+				"jarvis.chat.agent_client.AgentSession.connect",
 				side_effect=RuntimeError("refused"),
 			),
 			patch("frappe.log_error"),

@@ -2,7 +2,7 @@
 
 The RQ prepare job (D1 Stage 1, owners #16–#26) that runs BEFORE the pump
 dispatches a turn: it drives ``queued -> preparing -> ready`` and hands the pump a
-fully-assembled prompt + a live openclaw session via the Turn's
+fully-assembled prompt + a live agent session via the Turn's
 ``dispatch_payload``. Enqueued by the pump at promote (``dispatch_prepare`` seam),
 deduped on ``jarvis-prepare::<run_id>`` — a still-``queued`` reserved turn may be
 re-offered each slice, and the idempotent ``claim_preparing`` CAS + the dedupe
@@ -24,7 +24,7 @@ Ruled owners folded in here (WP-D / D1, RULINGS-PA):
     observed ack (R-2); prepare only stashes the drained ids for the pump.
 
 On success: ``preparing -> ready`` then ``ensure_pump`` + wake so the pump picks it
-up. On an ``OpenclawUnreachableError`` bootstrap failure: ``preparing -> errored``
+up. On an ``AgentUnreachableError`` bootstrap failure: ``preparing -> errored``
 (release credit) + a fenced ``run:error`` (no retry — matches legacy). Never
 blocks the pump (it is its own RQ job).
 """
@@ -37,8 +37,9 @@ import time
 import frappe
 
 from jarvis._session import impersonate
+from jarvis.chat import seq_watermark
 from jarvis.chat import turn_state as ts
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
@@ -142,10 +143,10 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		except Exception:
 			pass
 
-	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat import agent_session_pool
 
 	try:
-		with openclaw_session_pool.checkout(gateway_url) as sess:
+		with agent_session_pool.checkout(gateway_url) as sess:
 			session_key = conv.session_key
 			if not session_key:
 				# (#22) create the session on THIS pooled connection and persist the
@@ -156,13 +157,13 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 				session_key = _ensure_session_key(chat_user, sess=sess)
 				frappe.db.set_value(CONV, conversation, "session_key", session_key)
 				frappe.db.commit()
-			# (#23) model patch (stateful — openclaw remembers across turns). A None ref
+			# (#23) model patch (stateful — agent remembers across turns). A None ref
 			# means "reset to the agent default" and MUST still be sent: it is the
 			# instruction that walks back a stale pin. See _session_model_patch.
 			if patch_session_model:
 				try:
 					sess.set_session_model(session_key, session_model_ref)
-				except OpenclawUnreachableError:
+				except AgentUnreachableError:
 					raise
 				except Exception:
 					frappe.log_error(title="prepare.model_patch", message=frappe.get_traceback())
@@ -175,13 +176,11 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 					default=0,
 				)
 				if watermark:
-					frappe.db.set_value(
-						MSG, assistant_msg, "openclaw_seq_watermark", watermark, update_modified=False
-					)
+					seq_watermark.stamp_watermark(assistant_msg, watermark)
 					frappe.db.commit()
 			except Exception:
 				frappe.log_error(title="prepare.watermark", message=frappe.get_traceback())
-	except OpenclawUnreachableError as exc:
+	except AgentUnreachableError as exc:
 		# Pre-dispatch unreachable = a real, retriable error (the run never started).
 		_prepare_error(run_id, version, assistant_msg, conversation, owner, str(exc), exc=exc)
 		return {"ok": False, "reason": "unreachable"}

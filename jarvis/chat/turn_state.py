@@ -73,7 +73,7 @@ FINALIZE_MAX_ATTEMPTS = 3
 # exclusive, so two concurrent finalizers can never run the same effect twice.
 EFFECT_CLAIM_STALE_S = 300
 
-# Per-turn soft deadline stamped at dispatch (openclaw_client.py TURN_TIMEOUT).
+# Per-turn soft deadline stamped at dispatch (agent_client.py TURN_TIMEOUT).
 TURN_TIMEOUT_SECONDS = 600
 
 # The unclaimed-reservation window (mirrors admission.RESERVE_TTL_S). Bounds ONLY
