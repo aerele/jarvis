@@ -4,7 +4,7 @@ import { onBeforeUnmount, watch } from "vue";
  * Dismiss an open dropdown/menu on an outside click, a focusout past the
  * root, or the Escape key.
  *
- * Shared by the composer pills (PersonaPill, ModelEffortPicker) so the
+ * Used by the composer's ModelEffortPicker (persona now lives inside it) so the
  * click-outside + Escape + focusout + listener-cleanup logic lives in one
  * place instead of being re-implemented per component.
  *
