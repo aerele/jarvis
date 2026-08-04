@@ -1548,3 +1548,280 @@ class TestSkillPromotionRound4(Part2Base):
 		self.assertEqual(
 			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-b4race-x", "scope": "Org"})), 1
 		)
+
+
+class TestRoleScopedSkillInvocation(Part2Base):
+	"""Issues #477 + #478: the two halves of role-scoped /slug invocation.
+
+	#478: a Role promotion wrote ``target_role`` only, so
+	``_role_scoped_invocable_names`` (which matches on the ``allowed_roles`` CHILD
+	rows) never saw it and no role-holder's ``/slug`` ever fired.
+
+	#477: every invoked skill was named as an installed ``custom-<slug>``
+	directory, including the role-restricted ones the push DELIBERATELY drops,
+	so the trusted [Context:] line asserted a container dir that does not exist.
+
+	They ship together: fixing #478 alone routes every Role-promoted skill into
+	the phantom-directory clause, which is why #477's split lands with it.
+	"""
+
+	ROLE_HOLDER = "p2-roleholder@example.com"
+	AUD_ROLE = "Sales User"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		# A role-holder who does NOT own the source skill, the point of the whole
+		# tier. (Owners already match via the owner branch of invoked_skill_clause,
+		# so testing with the owner would pass even with the bug present.)
+		_ensure_user(cls.ROLE_HOLDER, ["Jarvis User", cls.AUD_ROLE])
+
+	def _promote_to_role(self, slug: str) -> str:
+		"""Requester USER_A's private skill -> reviewer-approved Role copy. Returns
+		the shared copy's docname."""
+		from jarvis.chat import custom_skills_api
+
+		src = _mk_skill(USER_A, slug, scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(src.name, "Role", target_role=self.AUD_ROLE)
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		return out["materialized"]
+
+	# ── #478: the promotion must write allowed_roles, not just target_role ──────
+	def test_role_promotion_writes_allowed_roles_alongside_target_role(self):
+		shared = self._promote_to_role(f"{PFX}-roleaud")
+		self.assertEqual(frappe.db.get_value(SKILL, shared, "scope"), "Role")
+		self.assertEqual(frappe.db.get_value(SKILL, shared, "target_role"), self.AUD_ROLE)
+		self.assertEqual(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": shared, "parenttype": SKILL},
+				pluck="role",
+			),
+			[self.AUD_ROLE],
+		)
+
+	def test_role_promoted_skill_is_slug_invocable_by_a_role_holder(self):
+		from jarvis.chat.custom_skills import _role_scoped_invocable_names, invoked_skill_clause
+
+		self._promote_to_role(f"{PFX}-roleinv")
+		with _as(self.ROLE_HOLDER):
+			self.assertIn(f"{PFX}-roleinv", _role_scoped_invocable_names(self.ROLE_HOLDER))
+			clause = invoked_skill_clause(f"/{PFX}-roleinv close the month")
+		self.assertIn(prefixed_slug(f"{PFX}-roleinv"), clause)
+
+	def test_role_promoted_skill_stays_invisible_to_a_non_role_holder(self):
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		self._promote_to_role(f"{PFX}-rolepriv")
+		with _as(USER_B):  # Jarvis User only, no Sales User
+			self.assertEqual(invoked_skill_clause(f"/{PFX}-rolepriv go"), "")
+
+	def test_patch_backfills_allowed_roles_on_a_pre_fix_role_skill(self):
+		# The code fix only helps promotions made AFTER deploy. Rows promoted under the
+		# old code carry target_role with an EMPTY allowed_roles, which is exactly the
+		# broken state #478 describes, so the patch has to plant the child row.
+		from jarvis.chat.custom_skills import invoked_skill_clause
+		from jarvis.patches.v2_12_backfill_role_skill_allowed_roles import execute
+
+		pre_fix = _mk_skill(REVIEWER, f"{PFX}-legacyrole", scope="Role", target_role=self.AUD_ROLE)
+
+		def roles_on(skill) -> list:
+			return frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": skill, "parenttype": SKILL},
+				pluck="role",
+			)
+
+		# Manufacture the legacy shape. The controller mirror now fills allowed_roles on
+		# every save, so the only way to reproduce a row written before this fix is to
+		# strip the child rows underneath it.
+		frappe.db.delete("Jarvis Custom Skill Allowed Role", {"parent": pre_fix.name, "parenttype": SKILL})
+		self.assertEqual(roles_on(pre_fix.name), [])  # the pre-fix shape
+		with _as(self.ROLE_HOLDER):
+			self.assertEqual(invoked_skill_clause(f"/{PFX}-legacyrole go"), "")  # dead by /slug
+
+		execute()
+
+		self.assertEqual(roles_on(pre_fix.name), [self.AUD_ROLE])
+		with _as(self.ROLE_HOLDER):
+			clause = invoked_skill_clause(f"/{PFX}-legacyrole go")
+		self.assertIn(prefixed_slug(f"{PFX}-legacyrole"), clause)
+		self.assertIn("jarvis__get_skill", clause)
+
+		execute()  # idempotent: no duplicate child row on a second migrate
+		self.assertEqual(roles_on(pre_fix.name), [self.AUD_ROLE])
+
+	def test_patch_leaves_an_already_populated_row_alone(self):
+		# Empty-only by design: a migration must not delete audience data it cannot prove
+		# is stale. The controller mirror normalizes such a row on its next save instead.
+		from jarvis.patches.v2_12_backfill_role_skill_allowed_roles import execute
+
+		skill = _mk_skill(REVIEWER, f"{PFX}-preset", scope="Role", target_role=self.AUD_ROLE)
+		# Plant a second role directly, bypassing the controller mirror, to model an
+		# operator-set audience the patch must not touch. Only a row with a COMPLETELY
+		# empty allowed_roles is in scope for the backfill.
+		frappe.get_doc(
+			{
+				"doctype": "Jarvis Custom Skill Allowed Role",
+				"parenttype": SKILL,
+				"parentfield": "allowed_roles",
+				"parent": skill.name,
+				"role": "Purchase User",
+			}
+		).insert(ignore_permissions=True)
+		before = sorted(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": skill.name, "parenttype": SKILL},
+				pluck="role",
+			)
+		)
+		execute()
+		self.assertEqual(
+			sorted(
+				frappe.get_all(
+					"Jarvis Custom Skill Allowed Role",
+					filters={"parent": skill.name, "parenttype": SKILL},
+					pluck="role",
+				)
+			),
+			before,
+		)
+
+	def test_desk_retarget_rewrites_the_mirror_and_drops_the_stale_role(self):
+		# The gap a promotion-seam-only fix leaves: a reviewer re-pointing target_role in
+		# Desk or over REST must not leave the old role still able to fire /slug.
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		shared = self._promote_to_role(f"{PFX}-retarget")
+		with _as(self.ROLE_HOLDER):
+			self.assertIn(prefixed_slug(f"{PFX}-retarget"), invoked_skill_clause(f"/{PFX}-retarget go"))
+		with _as(REVIEWER):
+			doc = frappe.get_doc(SKILL, shared)
+			doc.target_role = "Purchase User"
+			doc.save(ignore_permissions=True)
+		self.assertEqual(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": shared, "parenttype": SKILL},
+				pluck="role",
+			),
+			["Purchase User"],
+		)
+		with _as(self.ROLE_HOLDER):  # the re-targeted-away role loses /slug too
+			self.assertEqual(invoked_skill_clause(f"/{PFX}-retarget go"), "")
+
+	def test_role_to_org_widen_clears_allowed_roles_and_stays_pushable(self):
+		# The Role copy's allowed_roles row must NOT survive a widen to Org: an Org
+		# row carrying allowed_roles is "role-restricted" and _pushable_org_rows drops
+		# it, which would silently un-push the skill the reviewer just widened.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		shared = self._promote_to_role(f"{PFX}-widen")
+
+		def roles_on() -> list:
+			return frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": shared, "parenttype": SKILL},
+				pluck="role",
+			)
+
+		# Pin the BEFORE state, so the assertion below proves a clear actually happened
+		# rather than passing vacuously against a row that never carried the role.
+		self.assertEqual(roles_on(), [self.AUD_ROLE])
+		src = frappe.db.get_value(SKILL, shared, "source_skill")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(src, "Org")
+		with _as(REVIEWER):
+			self.assertTrue(custom_skills_api.decide_skill_promotion(req["request"], 1)["ok"])
+		self.assertEqual(frappe.db.get_value(SKILL, shared, "scope"), "Org")
+		self.assertEqual(roles_on(), [])
+		self.assertIn(prefixed_slug(f"{PFX}-widen"), {p["slug"] for p in custom_skills.build_push_payload()})
+
+	# ── #477: two clause shapes, only one of which claims the file is on disk ───
+	def test_pushed_org_skill_keeps_the_apply_them_clause(self):
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		# Owned by the invoker: /slug matches on owner / shared_with / role, so an Org
+		# skill is only ever invocable by someone one of those three admits.
+		_mk_skill(USER_A, f"{PFX}-ondisk", scope="Org")
+		self.assertIn(prefixed_slug(f"{PFX}-ondisk"), {p["slug"] for p in build_push_payload()})
+		with _as(USER_A):
+			clause = invoked_skill_clause(f"/{PFX}-ondisk run it")
+		self.assertIn(f"apply them: {prefixed_slug(f'{PFX}-ondisk')}", clause)
+		self.assertNotIn("jarvis__get_skill", clause)
+
+	def test_role_restricted_org_skill_gets_the_fetch_clause_not_the_on_disk_one(self):
+		# The exact failing scenario in #477: an Org skill narrowed by allowed_roles is
+		# dropped from the push, so naming it as installed pointed the agent at a dir
+		# that the next reconcile deleted.
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		_mk_skill(REVIEWER, f"{PFX}-narrowed", scope="Org", allowed_roles=[self.AUD_ROLE])
+		self.assertNotIn(prefixed_slug(f"{PFX}-narrowed"), {p["slug"] for p in build_push_payload()})
+		with _as(self.ROLE_HOLDER):
+			clause = invoked_skill_clause(f"/{PFX}-narrowed please")
+		self.assertIn(prefixed_slug(f"{PFX}-narrowed"), clause)
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
+		# and it must not imply container-side access to a body that is not there
+		self.assertNotIn("workspace", clause)
+
+	def test_role_promoted_skill_gets_the_fetch_clause(self):
+		# The #478 <-> #477 join: Role scope is excluded from the push outright, so the
+		# skill #478 just made invocable must NOT be announced as an on-disk directory.
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		self._promote_to_role(f"{PFX}-rolefetch")
+		self.assertNotIn(prefixed_slug(f"{PFX}-rolefetch"), {p["slug"] for p in build_push_payload()})
+		with _as(self.ROLE_HOLDER):
+			clause = invoked_skill_clause(f"/{PFX}-rolefetch now")
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
+
+	def test_private_user_skill_invoked_by_its_owner_gets_the_fetch_clause(self):
+		# User-scope rows are excluded from the push too, so the owner's own /slug hit
+		# the same phantom-directory bug.
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		_mk_skill(USER_A, f"{PFX}-mine", scope="User")
+		with _as(USER_A):
+			clause = invoked_skill_clause(f"/{PFX}-mine draft it")
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
+
+	def test_org_skill_past_the_push_cap_gets_the_fetch_clause(self):
+		# pushed_skill_names() must apply the SAME MAX_SKILLS_PER_PUSH truncation
+		# build_push_payload does, or a skill the push silently dropped off the tail
+		# would still be announced as an installed directory.
+		from jarvis.chat import custom_skills
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		_mk_skill(USER_A, f"{PFX}-zzz-capped", scope="Org")
+		base = custom_skills.pushable_org_skill_count()
+		# Shrink the cap so the alphabetically-last row is the one truncated out.
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", base - 1):
+			dropped = {p["slug"] for p in custom_skills.build_push_payload()}
+			self.assertNotIn(prefixed_slug(f"{PFX}-zzz-capped"), dropped)
+			with _as(USER_A):
+				clause = invoked_skill_clause(f"/{PFX}-zzz-capped go")
+		self.assertIn(prefixed_slug(f"{PFX}-zzz-capped"), clause)
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
+
+	def test_one_message_can_carry_both_clause_shapes(self):
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		_mk_skill(self.ROLE_HOLDER, f"{PFX}-bothdisk", scope="Org")  # owned -> pushed
+		_mk_skill(REVIEWER, f"{PFX}-bothrole", scope="Org", allowed_roles=[self.AUD_ROLE])
+		with _as(self.ROLE_HOLDER):
+			clause = invoked_skill_clause(f"/{PFX}-bothdisk then /{PFX}-bothrole")
+		self.assertIn(f"apply them: {prefixed_slug(f'{PFX}-bothdisk')}", clause)
+		self.assertIn("jarvis__get_skill", clause)
+		# each slug appears in exactly ONE shape, never both
+		fetch_half = clause.split("not loaded in this session:", 1)[1]
+		self.assertIn(prefixed_slug(f"{PFX}-bothrole"), fetch_half)
+		self.assertNotIn(prefixed_slug(f"{PFX}-bothdisk"), fetch_half)

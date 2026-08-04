@@ -153,9 +153,25 @@ def render_learned_skill_md(slug: str, description: str, instructions: str) -> s
 
 
 def invoked_skill_clause(message: str) -> str:
-	"""Return a context-line clause naming any enabled custom skills the user
-	invoked via ``/slug`` in ``message`` (so the agent activates the installed
-	``custom-<slug>`` skills deterministically), or ``""`` if none match.
+	"""Return the context-line clause(s) for any enabled custom skills the user
+	invoked via ``/slug`` in ``message``, or ``""`` if none match.
+
+	TWO clause shapes, because only SOME invocable skills physically exist in the
+	container (issue #477):
+
+	* skills the push actually writes (Org scope, no ``allowed_roles``, inside
+	  ``MAX_SKILLS_PER_PUSH``, see :func:`pushed_skill_names`) keep the original
+	  "apply them" clause: the ``custom-<slug>`` directory really is on disk;
+	* everything else the user may invoke is NOT on disk: a role-restricted body
+	  TASK 11 deliberately keeps off the shared blob, a Role-scope promotion
+	  (excluded from the push outright), a private User skill, or a row past the
+	  push cap. Naming those as installed asserted a directory that does not
+	  exist, so they get a fetch-by-tool clause instead, pointing the agent at
+	  ``jarvis__get_skill`` (which is role-gated and DOES serve the body).
+
+	There is no per-role container mount to push them into (one ``custom_skills``
+	dir per container, keyed on container name only), so this degrades the clause
+	rather than pretending the file is there.
 
 	The clause is folded INTO the worker's leading ``[Context: ...]`` line,
 	which the persona's AGENTS.md tells the agent to treat as system, not user.
@@ -202,8 +218,24 @@ def invoked_skill_clause(message: str) -> str:
 	matched = sorted(s for s in slugs if s in enabled)
 	if not matched:
 		return ""
-	names = ", ".join(prefixed_slug(s) for s in matched)
-	return f"; the user invoked these skills, apply them: {names}"
+	installed = pushed_skill_names()
+	on_disk = [s for s in matched if s in installed]
+	off_disk = [s for s in matched if s not in installed]
+	clause = ""
+	if on_disk:
+		names = ", ".join(prefixed_slug(s) for s in on_disk)
+		clause += f"; the user invoked these skills, apply them: {names}"
+	if off_disk:
+		names = ", ".join(prefixed_slug(s) for s in off_disk)
+		# Deliberately says nothing about the workspace or a skill directory: the
+		# agent has no container-side access to these bodies, and the ONLY way it
+		# can read them is the bench tool call named here.
+		clause += (
+			f"; the user invoked these skills, which are not loaded in this session: {names} "
+			"- call the jarvis__get_skill tool with each of those names to read its "
+			"instructions, then follow them"
+		)
+	return clause
 
 
 def _role_scoped_invocable_names(user: str) -> set[str]:
@@ -338,13 +370,22 @@ def personal_skill_clause(user: str | None = None) -> str:
 	)
 
 
-def _pushable_org_rows(owner: str | None = None) -> list:
+_PUSHABLE_FIELDS = ("name", "skill_name", "description", "user_invocable", "instructions")
+# The identity-only projection: enough to rank and name a pushable row, without
+# dragging every Org skill's 20k-char body onto the chat hot path.
+_PUSHABLE_ID_FIELDS = ("name", "skill_name")
+
+
+def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELDS) -> list:
 	"""The enabled Org rows that WOULD be pushed to the shared container, in the
 	exact eligibility set + ``skill_name asc`` order :func:`build_push_payload`
 	renders — MINUS the ``MAX_SKILLS_PER_PUSH`` cap. Single source of truth shared
-	by :func:`build_push_payload`, :func:`pushable_org_skill_count` and
-	:func:`project_org_promotion_push`, so the reviewer's budget projection can
-	never drift from what Apply actually does. ``owner`` scopes tests only."""
+	by :func:`build_push_payload`, :func:`pushable_org_skill_count`,
+	:func:`pushed_skill_names` and :func:`project_org_promotion_push`, so the
+	reviewer's budget projection can never drift from what Apply actually does.
+	``owner`` scopes tests only; ``fields`` trims the projection for callers that
+	only need identity (``name`` + ``skill_name`` are load-bearing here: the
+	role-restriction filter and the sort key both read them)."""
 	# ("in", ("Org", "")) — not ("!=", "User") — because db_query wraps the
 	# "in" operator in ifnull(scope, ''), so legacy NULL-scope rows match ''.
 	filters = {"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))}
@@ -353,7 +394,7 @@ def _pushable_org_rows(owner: str | None = None) -> list:
 	rows = frappe.get_all(
 		"Jarvis Custom Skill",
 		filters=filters,
-		fields=["name", "skill_name", "description", "user_invocable", "instructions"],
+		fields=list(fields),
 		order_by="skill_name asc",
 	)
 	# TASK 11: drop role-restricted Org rows (any with allowed_roles) so a
@@ -398,9 +439,12 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 	role-BLIND container and be readable + auto-activatable by every user's agent
 	(a mass-exfil vector). So this push carries ONLY skills visible to EVERYONE —
 	Org scope with NO ``allowed_roles``. Role-restricted skills stay reachable via
-	the role-gated ``jarvis__find_skills`` / ``jarvis__get_skill`` tools; restoring
-	their /slug container activation needs a per-role workspace mount in the
-	fleet-agent (a follow-up outside the bench).
+	the role-gated ``jarvis__find_skills`` / ``jarvis__get_skill`` tools, and
+	:func:`invoked_skill_clause` routes an invoked-but-unpushed skill to
+	``jarvis__get_skill`` instead of naming a container directory that was never
+	written (issue #477). Restoring true /slug CONTAINER activation for them still
+	needs a per-role workspace mount in the fleet-agent (a follow-up outside the
+	bench).
 
 	Managed learned rows (``managed_by_learning=1``) are EXCLUDED: since the
 	Phase-2 learned namespace they ride their own push
@@ -452,6 +496,29 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 			}
 		)
 	return payload
+
+
+def pushed_skill_names() -> set[str]:
+	"""Bare authored slugs the container push writes: the
+	:func:`_pushable_org_rows` eligibility set truncated by the same
+	``MAX_SKILLS_PER_PUSH`` cap :func:`build_push_payload` applies.
+
+	Anything OUTSIDE this set has no ``custom-<slug>`` directory in the container,
+	so no context clause may tell the agent to apply it as an installed skill
+	(issue #477). Identity-only projection so the chat hot path never loads
+	instruction bodies.
+
+	Read this as push ELIGIBILITY, not confirmed container state. It is recomputed
+	from current DB rows, and Apply is a separate explicit action (see
+	``decide_skill_promotion``: an approved skill joins the shared catalog on the
+	next Apply, never automatically). So between an Org approval and the operator
+	clicking Apply, a newly eligible skill is named as installed while its
+	directory does not exist yet. That window is pre-existing and much narrower
+	than the unconditional mislabelling this function replaced; closing it needs
+	per-row applied-state tracking, which the bench does not have (the sync status
+	is one bench-wide Single)."""
+	rows = _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)
+	return {r.skill_name for r in rows[:MAX_SKILLS_PER_PUSH]}
 
 
 def pushable_org_skill_count() -> int:

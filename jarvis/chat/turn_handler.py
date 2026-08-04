@@ -644,9 +644,15 @@ def assemble_prompt(
 	# confirms by default, so we only signal the non-default "auto" mode.
 	auto_apply = "; auto-apply changes: ON" if conv.auto_apply else ""
 	# Custom-skill invocation: if the user typed /slug for an enabled custom
-	# skill, name the installed custom-<slug> skill(s) in the system context so
-	# the agent activates them deterministically (agent has no documented
-	# user-invocable trigger; the SKILL.md is already in workspace/skills/).
+	# skill, name it in the system context so the agent activates it
+	# deterministically (the agent has no documented user-invocable trigger).
+	# The clause comes in TWO shapes (issue #477), because not every invocable
+	# skill is on disk: only the pushed set (Org scope, no allowed_roles, inside
+	# the push cap) has a workspace/skills/custom-<slug>/SKILL.md. Role-scope,
+	# role-restricted, private and over-cap rows are NOT written to the container
+	# (the container has a single role-blind custom_skills dir), so for those the
+	# clause tells the agent to fetch the body with jarvis__get_skill rather than
+	# asserting a directory that does not exist.
 	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
 
 	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
