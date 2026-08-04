@@ -371,25 +371,27 @@ def _adopt_orphan_capture(account_ref: str, consumed_capture_ids: list) -> str:
 	F10 anchor fence and once-only row lock all still apply; every ``CaptureError``
 	returns "" and the caller refuses exactly as it did before.
 	"""
-	from frappe.utils import now_datetime
-
 	from jarvis.oauth import pending_capture
 
-	cap_id = frappe.db.get_value(
-		pending_capture.DT,
-		{
-			"owner_user": frappe.session.user,
-			"account_ref": account_ref,
-			"consumed_at": ["is", "not set"],
-			"expires_at": [">", now_datetime()],
-			"revocation_state": "pending",
-		},
-		"capture_id",
-	)
+	cap_id = pending_capture.find_live_capture_id(account_ref)
 	if not cap_id:
 		return ""
 	try:
 		blob = pending_capture.consume_capture(cap_id)
+	except pending_capture.CaptureAlreadyConsumed:
+		# A concurrent save (a double-clicked Save, or a retry racing its own
+		# in-flight request) claimed this capture between our lookup and our
+		# consume. Its ciphertext is erased, so THIS save genuinely cannot
+		# complete - but the account did get connected, by the winner. Falling
+		# through to "no OAuth credential stored — reconnect this account" would
+		# tell the customer to sign in again and mint a SECOND live provider
+		# token for an account that is already linked, which is the hazard this
+		# whole module exists to avoid. Say what actually happened instead.
+		frappe.throw(
+			"This account was just connected by another save. Reload the page - "
+			"it is already linked, so there is no need to sign in again.",
+			frappe.ValidationError,
+		)
 	except pending_capture.CaptureError:
 		return ""
 	consumed_capture_ids.append(cap_id)

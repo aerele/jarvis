@@ -407,3 +407,20 @@ class TestOrphanCaptureAdoption(_RT3SettingsTestCase):
 		with self.assertRaises(frappe.ValidationError) as cm:
 			self._save(self._payload("SUB_nothing_here"))
 		self.assertIn("no OAuth credential stored", str(cm.exception))
+
+	def test_race_with_a_concurrent_adopter_says_what_happened(self):
+		"""A double-submitted save loses the race to consume. Its ciphertext is
+		gone, so this save cannot finish - but it must NOT tell the customer to
+		reconnect, which would mint a second live token for an account that is
+		now linked."""
+		from jarvis.oauth import pending_capture
+
+		self._mint("SUB_orphan5")
+		with patch.object(
+			pending_capture, "consume_capture", side_effect=pending_capture.CaptureAlreadyConsumed("x")
+		):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				self._save(self._payload("SUB_orphan5"))
+		msg = str(cm.exception)
+		self.assertIn("just connected by another save", msg)
+		self.assertNotIn("reconnect this account", msg)
