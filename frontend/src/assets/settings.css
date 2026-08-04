@@ -356,10 +356,6 @@
 .jv-settings-overlay.jv-dark {
 	background: rgba(0, 0, 0, 0.55);
 }
-/* Widened dialog + roomier grouped rail. */
-/* NOTE: this block is LAST, so it wins the cascade over the .jv-settings rule at
-   the top of the file. Any width change must be made in BOTH places or it will
-   appear to do nothing. */
 
 /* ===== narrow screens =======================================================
    The rail is `flex: none; width: 230px`, so it never shrinks: at a 390px
@@ -367,7 +363,8 @@
    the dialog — the rail becomes a horizontal, scrollable tab strip above the
    body. Group headings are dropped because they carry no meaning in a single
    row; the items stay in the same order, so the grouping is still implied.
-   Placed at the very end so it outranks BOTH .jv-settings blocks above. */
+   Placed at the very end so it outranks the .jv-settings-overlay padding rule
+   above. */
 @media (max-width: 720px) {
 	.jv-settings-overlay {
 		padding: 12px;
