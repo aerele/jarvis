@@ -824,13 +824,21 @@ test("jarvis#496: a REJECTED send preserves the prefill send context; the retry 
 	chat.input = "discuss this invoice";
 
 	const rejected = chat.send(undefined, undefined, { ok: false, reason: "single_flight" });
-	assert.deepEqual(rejected.sendCtx, prefill, "the rejected attempt DID carry the prefill context");
+	assert.deepEqual(
+		rejected.sendCtx,
+		prefill,
+		"the rejected attempt DID carry the prefill context"
+	);
 	assert.equal(
 		chat.prefillContext,
 		prefill,
 		"a rejected send must NOT clear it — still armed for the retry (jarvis#496)"
 	);
-	assert.equal(chat.input, "discuss this invoice", "the composer text was restored for the retry");
+	assert.equal(
+		chat.input,
+		"discuss this invoice",
+		"the composer text was restored for the retry"
+	);
 
 	// The user hits Retry (a plain resend of the restored composer text).
 	const retried = chat.send(undefined, undefined, { ok: true });
@@ -839,7 +847,11 @@ test("jarvis#496: a REJECTED send preserves the prefill send context; the retry 
 		prefill,
 		"the retry carries the SAME context the first, rejected attempt would have lost"
 	);
-	assert.equal(chat.prefillContext, null, "an ACCEPTED send finally consumes the one-shot context");
+	assert.equal(
+		chat.prefillContext,
+		null,
+		"an ACCEPTED send finally consumes the one-shot context"
+	);
 });
 
 test("jarvis#496: a THROWN send (network error / 500) also preserves the prefill context for retry", () => {
@@ -872,7 +884,11 @@ test("jarvis#496: an ACCEPTED send is still one-shot — it consumes the context
 
 	chat.input = "second, unrelated message";
 	const second = chat.send(undefined, undefined, { ok: true });
-	assert.equal(second.sendCtx, undefined, "a later send with nothing armed goes bare, unchanged");
+	assert.equal(
+		second.sendCtx,
+		undefined,
+		"a later send with nothing armed goes bare, unchanged"
+	);
 });
 
 test("jarvis#496: groundWiki overrides the prefill context in sendCtx, but a rejection still leaves the prefill armed", () => {
@@ -883,7 +899,11 @@ test("jarvis#496: groundWiki overrides the prefill context in sendCtx, but a rej
 	chat.input = "ground this";
 
 	const rejected = chat.send(undefined, undefined, { ok: false });
-	assert.deepEqual(rejected.sendCtx, { ground_wiki: 1 }, "groundWiki wins over the prefill context");
+	assert.deepEqual(
+		rejected.sendCtx,
+		{ ground_wiki: 1 },
+		"groundWiki wins over the prefill context"
+	);
 	assert.equal(
 		chat.prefillContext,
 		prefill,
