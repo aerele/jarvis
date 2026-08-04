@@ -149,6 +149,8 @@ _BODY_EXCERPT_MARKER = (
 	"\n\n[EXCERPT ONLY: {n} further characters of this page are not shown. "
 	'Reply with "append_md" for this page, never a full body.]'
 )
+# How far back an excerpt may snap to end on a whole line.
+_EXCERPT_LINE_SNAP_CHARS = 200
 
 
 # --------------------------------------------------------------------------- #
@@ -811,8 +813,14 @@ def _body_for_prompt(body) -> str:
 	if len(body) <= _MAX_EXISTING_BODY_PROMPT_CHARS:
 		return body
 	head = body[:_MAX_EXISTING_BODY_PROMPT_CHARS]
+	# Snap back to a line boundary, but only a NEARBY one (the _clip_body idiom):
+	# rfind scans the WHOLE window, so a body whose only early newline is followed
+	# by one long unbroken run would otherwise be trimmed to almost nothing,
+	# spending the budget on the marker instead of on context.
 	nl = head.rfind("\n")
-	head = (head[:nl] if nl > 0 else head).rstrip()
+	if nl > len(head) - _EXCERPT_LINE_SNAP_CHARS:
+		head = head[:nl]
+	head = head.rstrip()
 	return head + _BODY_EXCERPT_MARKER.format(n=len(body) - len(head))
 
 
@@ -1160,24 +1168,33 @@ def _merge_update_into_page(
 	if not (doc.ref_name or "").strip() and update.get("ref_name"):
 		doc.ref_name = str(update["ref_name"]).strip()
 
+	# ``append_md`` still wins over ``body_md``, but which key carried the content
+	# no longer decides how a CONTRADICTION lands: a contradicting append used to
+	# slip past the flagged-section path and store contested knowledge as ordinary
+	# prose, leaving neither ``contradiction_flag`` nor the marker text that
+	# jarvis.learning.wiki_lint sweeps for. Only ``body_md`` may replace, and only
+	# when the caller is allowed to.
 	existing = (doc.body_md or "").strip()
+	incoming = ""
+	replaces = False
 	if isinstance(append_md, str) and append_md.strip():
-		doc.body_md = _clip_body(f"{existing}\n\n{append_md.strip()}".strip())
+		incoming = append_md.strip()
 	elif isinstance(body_md, str) and body_md.strip():
 		incoming = body_md.strip()
+		replaces = allow_body_replace
+	if incoming:
 		if contradiction and existing:
 			stamp = now_datetime().strftime("%Y-%m-%d")
 			doc.body_md = _clip_body(f"{existing}\n\n## Contradiction flagged ({stamp})\n\n{incoming}")
 			doc.contradiction_flag = 1
-		elif existing and not allow_body_replace:
-			# An append-only caller sent a body_md anyway (the ingest prompt asks
-			# for append_md, but the model is not bound by it). It only ever saw
-			# an EXCERPT of this page, so swapping the field would delete the
-			# rest. Append instead: a duplicated section is recoverable by a
-			# human editor, a deleted one is not (issue #488).
-			doc.body_md = _clip_body(f"{existing}\n\n{incoming}")
-		else:
+		elif replaces or not existing:
 			doc.body_md = _clip_body(incoming)
+		else:
+			# Either an append, or an append-only caller that sent a body_md
+			# anyway. The ingest only ever saw an EXCERPT of this page, so
+			# swapping the field would delete the rest; a duplicated section is
+			# recoverable by a human editor, a deleted one is not (issue #488).
+			doc.body_md = _clip_body(f"{existing}\n\n{incoming}")
 	append_source(doc, source, ref, user)
 	doc.last_confirmed_at = now_datetime()
 	doc.save(ignore_permissions=True)

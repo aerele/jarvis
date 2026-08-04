@@ -294,6 +294,25 @@ class TestApplyPageUpdates(FrappeTestCase):
 		self.assertIn("prepay everything", doc.body_md)
 		self.assertEqual(frappe.utils.cint(doc.contradiction_flag), 1)
 
+	def test_contradicting_append_is_flagged_too(self):
+		# A contradiction must land in the flagged section whichever key carried
+		# it. The ingest now asks for append_md on an existing page, so a
+		# contradicting append is reachable; an unflagged one would be invisible
+		# to the wiki_lint sweep, which keys off the flag or the marker text.
+		wiki.apply_extracted_page_updates([self._alpha_update()], "voice", "a@test.invalid")
+		applied, failed = wiki.apply_extracted_page_updates(
+			[{"slug": ALPHA_SLUG, "append_md": "They now prepay everything.", "contradiction": True}],
+			"voice",
+			"b@test.invalid",
+			allow_body_replace=False,
+		)
+		self.assertEqual((applied, failed), (1, 0))
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertIn("60-day terms", doc.body_md)
+		self.assertIn("## Contradiction flagged (", doc.body_md)
+		self.assertIn("prepay everything", doc.body_md)
+		self.assertEqual(frappe.utils.cint(doc.contradiction_flag), 1)
+
 	def test_append_md(self):
 		wiki.apply_extracted_page_updates([self._alpha_update()], "voice", "a@test.invalid")
 		applied, failed = wiki.apply_extracted_page_updates(
@@ -627,6 +646,16 @@ class TestIngestNote(_ConversationFixture):
 		self.assertLess(len(cut), len(_long_wiki_body()))
 		self.assertIn("EXCERPT ONLY", cut)
 		self.assertNotIn("TAIL-SENTINEL-KEEP-ME", cut)
+		self.assertTrue(cut.startswith("## Payment"))
+
+	def test_excerpt_spends_its_budget_on_context(self):
+		# The line-boundary snap only reaches BACK a little. A body whose one
+		# early newline is followed by a long unbroken run must still fill the
+		# budget, not collapse to the marker alone.
+		budget = wiki._MAX_EXISTING_BODY_PROMPT_CHARS
+		cut = wiki._body_for_prompt("intro\n" + "X" * (budget * 2))
+		self.assertGreater(len(cut.split("[EXCERPT ONLY")[0]), budget - 200)
+		self.assertIn("EXCERPT ONLY", cut)
 
 	def test_ingest_page_write_failure_leaves_note_new(self):
 		# A failed page write must NOT mark the note Processed — that would
