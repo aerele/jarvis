@@ -13,6 +13,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+RUN = "Jarvis Agent Run"
+
 # Engine-owned audit fields — everything except the user-actionable ``state``.
 # Frozen on any customer save so the audited party cannot rewrite/erase a finding.
 # PP-5 review-provenance fields are included: once the engine/ledger stamps them
@@ -49,6 +51,40 @@ class JarvisAgentFinding(Document):
 	def validate(self):
 		self._guard_result_class_set_once()
 		self._freeze_audit_fields()
+
+	def on_trash(self):
+		self._guard_uninstall_cascade()
+
+	def _guard_uninstall_cascade(self):
+		"""#455 defence in depth — an uninstall cascade may only destroy findings its
+		OWN installation produced.
+
+		``agents_api.uninstall_agent`` names the installation it is cascading for on
+		the delete flags (``frappe.delete_doc(..., flags={...})`` applies them to the
+		fetched doc BEFORE ``on_trash`` runs), and this re-derives membership
+		independently from the row's frozen creation stamps. A mismatch means the
+		caller widened its selection past this installation, so the delete is refused
+		rather than silently destroying another customer's audit history.
+
+		The guard is inert outside a cascade: with no flag present (Desk delete, test
+		teardown, admin cleanup) it does nothing. ``force=True`` and
+		``ignore_permissions=True`` do NOT bypass ``on_trash``, which is precisely why
+		it is the right place for this check — the original defect ran with both.
+		"""
+		installation = self.flags.get("jarvis_uninstall_installation")
+		if not installation:
+			return
+		for field in ("run", "first_seen_run"):
+			run = self.get(field)
+			if run and frappe.db.get_value(RUN, run, "installation") == installation:
+				return
+		frappe.throw(
+			_(
+				"Refusing to delete finding {0}: it was not produced by installation {1}. "
+				"An uninstall may only remove its own installation's findings."
+			).format(self.name, installation),
+			frappe.PermissionError,
+		)
 
 	def _guard_result_class_set_once(self):
 		"""PP-1: ``result_class`` is the immutable epistemic class of the finding —
