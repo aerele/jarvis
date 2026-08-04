@@ -241,3 +241,35 @@ def get_pairing_qr() -> dict:
 		stream.close()
 
 	return {"svg": svg_b64, "payload": payload}
+
+
+@frappe.whitelist()
+def get_pwa_qr() -> dict:
+	"""SVG QR (base64) of the mobile PWA URL, plus the URL. Scanning it opens the
+	PWA on the phone: Android offers to install it (the PWA's own
+	beforeinstallprompt banner), iOS loads it in Safari for Add-to-Home-Screen.
+	No secret - just the public URL."""
+	if not frappe.session.user or frappe.session.user == "Guest":
+		raise frappe.AuthenticationError
+
+	from pyqrcode import create as qrcreate
+
+	# Local dev foolproofing: if the site host is localhost, swap in the LAN IP so
+	# the scanned URL is reachable from a phone. Production hosts are never local.
+	base = frappe.utils.get_url()
+	parsed = urlparse(base)
+	host = parsed.hostname or ""
+	if host in ("127.0.0.1", "localhost") or host.endswith(".localhost"):
+		lan = _lan_ip()
+		if lan:
+			base = f"{parsed.scheme}://{lan}" + (f":{parsed.port}" if parsed.port else "")
+	url = base.rstrip("/") + "/jarvis-mobile"
+	qr = qrcreate(url, error="M")
+	stream = BytesIO()
+	try:
+		qr.svg(stream, scale=5, quiet_zone=2, background="#ffffff", module_color="#111111")
+		svg_b64 = b64encode(stream.getvalue()).decode()
+	finally:
+		stream.close()
+
+	return {"svg": svg_b64, "url": url}
