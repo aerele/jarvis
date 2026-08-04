@@ -174,6 +174,24 @@ describe("demotion is reachable, not just promotion", () => {
 		expect(api.demoteInstallation).toHaveBeenCalledWith("INST-0001", "");
 		expect(w.emitted("demoted")[0][0]).toMatchObject({ activation_state: "shadow" });
 	});
+
+	it("clears the stale promoted-by/at stamp locally even if the response omits it", async () => {
+		// demote_installation's real response only carries {name, activation_state} -
+		// promoted_by/at must not linger from the prior live state.
+		api.demoteInstallation.mockResolvedValue({ data: { activation_state: "shadow" } });
+		const w = mountPanel({
+			state: baseState({
+				activation_state: "live",
+				promoted_by: "admin@x.com",
+				promoted_at: "2026-08-01 10:00:00",
+			}),
+		});
+		await findByText(w, "button", "Demote to shadow").trigger("click");
+		await findByText(w, ".dialog button", "Demote to shadow").trigger("click");
+		await flushPromises();
+
+		expect(w.emitted("demoted")[0][0]).toMatchObject({ promoted_by: null, promoted_at: null });
+	});
 });
 
 describe("a rejection surfaces its reason instead of failing silently", () => {

@@ -215,7 +215,12 @@ async function confirm() {
 		const nextState =
 			mode.value === "promote"
 				? { ...props.state, activation_state: "live" }
-				: { ...props.state, activation_state: "shadow" };
+				: {
+						...props.state,
+						activation_state: "shadow",
+						promoted_by: null,
+						promoted_at: null,
+				  };
 		if (res && res.data) Object.assign(nextState, res.data);
 		toast.success(mode.value === "promote" ? "Promoted to live" : "Demoted to shadow");
 		dialogOpen.value = false;
@@ -238,6 +243,4 @@ watch(
 		dialogOpen.value = false;
 	}
 );
-
-defineExpose({ open });
 </script>
