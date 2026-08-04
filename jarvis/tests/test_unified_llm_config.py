@@ -4219,16 +4219,52 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		)
 		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
 
-	def test_reconcile_noop_on_healthy_tenant(self):
-		"""Inert on a healthy fleet: an 'ok' tenant is never probed or re-stamped."""
+	def test_reconcile_leaves_a_healthy_tenant_alone(self):
+		"""Inert on a healthy fleet: an 'ok' tenant is never re-stamped.
+
+		It IS probed, which this used to assert it was not. The disconnect leg
+		(#534) has to ask admin about a connected-looking workspace, because a bench
+		that lost a disconnect mid-flight looks exactly like a working one from the
+		inside - that indistinguishability is the whole defect. What must stay true
+		is that the answer changes nothing here, which is what this now pins.
+		"""
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 			reconcile_pending_llm_sync,
 		)
 
 		self._seed_pool()
 		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("llm_pool_synced_at", frappe.utils.now(), update_modified=False)
+		synced_at = frappe.utils.now()
+		settings.db_set("llm_pool_synced_at", synced_at, update_modified=False)
 		settings.db_set("last_sync_status", "ok (pool_update via admin)", update_modified=False)
+		frappe.db.commit()
+		self._seed_admin_creds()  # after the commit; stays in the rolled-back txn
+		with patch(
+			"jarvis.admin_client.get_connection",
+			return_value={"chat_readiness": "Ready", "chat_readiness_reason": ""},
+		):
+			reconcile_pending_llm_sync()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(settings.last_sync_status, "ok (pool_update via admin)")
+		self.assertEqual(str(settings.llm_pool_synced_at), str(synced_at))
+		self.assertEqual(len(settings.get("models") or []), 2)
+
+	def test_reconcile_never_probes_a_tenant_with_nothing_to_converge(self):
+		"""The cost gate on the disconnect leg. A workspace holding no credential
+		cannot be the losing half of a split disconnect and has no pending apply, so
+		the */5 tick must cost admin nothing at all for it."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			reconcile_pending_llm_sync,
+		)
+
+		self._clear_models()
+		settings = frappe.get_single("Jarvis Settings")
+		for field in ("llm_provider", "llm_model", "llm_api_key"):
+			settings.db_set(field, "", update_modified=False)
+		settings.db_set("proxy_active", 0, update_modified=False)
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
+		settings.db_set("llm_direct_synced_at", None, update_modified=False)
+		settings.db_set("last_sync_status", "disconnected", update_modified=False)
 		frappe.db.commit()
 		self._seed_admin_creds()  # after the commit; stays in the rolled-back txn
 		with patch("jarvis.admin_client.get_connection") as m:
