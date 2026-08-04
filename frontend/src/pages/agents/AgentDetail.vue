@@ -599,7 +599,8 @@ async function loadActivation() {
 	activationLoading.value = true;
 	activationError.value = "";
 	try {
-		activation.value = (await apiAgents.getInstallationActivation(installation.value.name)) || null;
+		activation.value =
+			(await apiAgents.getInstallationActivation(installation.value.name)) || null;
 	} catch (e) {
 		activation.value = null;
 		activationError.value = errMsg(e);

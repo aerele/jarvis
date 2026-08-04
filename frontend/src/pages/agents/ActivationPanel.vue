@@ -31,7 +31,8 @@
 				<template v-if="state.activation_state === 'live'">
 					Live<template v-if="state.promoted_at">
 						since {{ timeAgo(state.promoted_at) }}</template
-					><template v-if="state.promoted_by"> · signed off by {{ state.promoted_by }}</template
+					><template v-if="state.promoted_by">
+						· signed off by {{ state.promoted_by }}</template
 					>. Its output is a compliant attestation on the owner surface.
 				</template>
 				<template v-else>
@@ -88,11 +89,14 @@
 							<div>
 								This lets <span class="font-medium">{{ agentTitle }}</span> run
 								unattended - on its schedule, with no one watching - as
-								<span class="font-medium">{{ (state && state.run_as_user) || "-" }}</span>.
+								<span class="font-medium">{{
+									(state && state.run_as_user) || "-"
+								}}</span
+								>.
 							</div>
 							<div>
-								Its output becomes a live, compliant attestation on the owner surface
-								immediately, replacing the reviewer-only preview.
+								Its output becomes a live, compliant attestation on the owner
+								surface immediately, replacing the reviewer-only preview.
 							</div>
 							<div>It also counts against this customer's live-module budget.</div>
 						</div>
@@ -103,15 +107,17 @@
 					>
 						<FeatherIcon name="eye-off" class="mt-0.5 size-4 shrink-0" />
 						<div>
-							This stops <span class="font-medium">{{ agentTitle }}</span> from running
-							live. Future runs go back to a reviewer-only preview until it is promoted
-							again; existing live output is not deleted.
+							This stops <span class="font-medium">{{ agentTitle }}</span> from
+							running live. Future runs go back to a reviewer-only preview until it
+							is promoted again; existing live output is not deleted.
 						</div>
 					</div>
 
 					<FormControl
 						type="textarea"
-						:label="mode === 'promote' ? 'Justification (optional)' : 'Reason (optional)'"
+						:label="
+							mode === 'promote' ? 'Justification (optional)' : 'Reason (optional)'
+						"
 						:rows="3"
 						:modelValue="note"
 						@update:modelValue="(v) => (note = v)"
