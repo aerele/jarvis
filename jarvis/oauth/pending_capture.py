@@ -43,7 +43,7 @@ REVOKE_MAX_ATTEMPTS = 5
 _HTTP_TIMEOUT = 10
 
 # Provider token-revocation endpoints we can actually call, keyed by
-# openclaw_provider. ONLY endpoints grounded in the provider's own docs belong
+# agent_provider. ONLY endpoints grounded in the provider's own docs belong
 # here; a wrong revoke URL is worse than none. Google exposes the well-known
 # RFC-7009 endpoint. The pooled chat-subscription upstreams (openai / xai / kimi)
 # publish no revocation endpoint this integration can verify, so their captures
@@ -125,7 +125,7 @@ def create_capture(
 	*,
 	provider: str,
 	upstream: str,
-	openclaw_provider: str,
+	agent_provider: str,
 	oauth_blob: str,
 	account_email: str,
 	account_ref: str,
@@ -141,7 +141,7 @@ def create_capture(
 	for this user rather than minting a second row (review P1-07), reusing that
 	row's ``account_ref`` so the pool row still keys on one stable id.
 
-	``oauth_blob`` is the JSON string of the openclaw blob. It is written to a
+	``oauth_blob`` is the JSON string of the agent blob. It is written to a
 	Password field, so it is encrypted at rest and never returned by any read.
 	"""
 	subject_hash = _subject_hash(provider_subject)
@@ -172,7 +172,7 @@ def create_capture(
 		existing.encrypted_oauth_blob = oauth_blob
 		existing.provider = provider
 		existing.upstream = upstream
-		existing.openclaw_provider = openclaw_provider
+		existing.agent_provider = agent_provider
 		existing.account_email = account_email or existing.account_email
 		existing.safe_label = safe_label or existing.safe_label
 		existing.bound_agent_url = _connection_anchor()
@@ -188,7 +188,7 @@ def create_capture(
 	doc.owner_user = frappe.session.user
 	doc.provider = provider
 	doc.upstream = upstream
-	doc.openclaw_provider = openclaw_provider
+	doc.agent_provider = agent_provider
 	doc.provider_subject_hash = subject_hash
 	doc.safe_label = safe_label or account_email or ""
 	doc.account_email = account_email or ""
@@ -214,14 +214,7 @@ def list_active(user: str | None = None) -> list[dict]:
 	rows = frappe.get_all(
 		DT,
 		ignore_permissions=True,
-		filters={
-			"owner_user": user,
-			"consumed_at": ["is", "not set"],
-			"expires_at": [">", now_datetime()],
-			# Only a still-live capture rehydrates - a cancelled/revoked one (its
-			# ciphertext already erased) must never reappear as resumable.
-			"revocation_state": "pending",
-		},
+		filters=_live_filters(user),
 		fields=[
 			"capture_id",
 			"account_ref",
@@ -235,6 +228,42 @@ def list_active(user: str | None = None) -> list[dict]:
 		order_by="creation desc",
 	)
 	return [_safe_view(r) for r in rows]
+
+
+def _live_filters(user: str) -> dict:
+	"""What makes a capture LIVE. One definition, shared by list_active and
+	find_live_capture_id - a second copy elsewhere would drift the day an
+	intermediate revocation_state is added."""
+	return {
+		"owner_user": user,
+		"consumed_at": ["is", "not set"],
+		"expires_at": [">", now_datetime()],
+		# A cancelled/revoked capture (ciphertext already erased) must never
+		# resurface as resumable.
+		"revocation_state": "pending",
+	}
+
+
+def find_live_capture_id(account_ref: str, user: str | None = None) -> str:
+	"""The id of this user's live capture for ``account_ref``, or "".
+
+	For the save path's fallback when the client did not cite a capture_id.
+	Owner-scoped like list_active, so an account_ref arriving in a request body
+	can never resolve to somebody else's capture. Returns the id only - the
+	claim itself must still go through consume_capture, which owns the owner
+	gate, expiry, anchor fence and once-only lock.
+	"""
+	account_ref = (account_ref or "").strip()
+	if not account_ref:
+		return ""
+	return (
+		frappe.db.get_value(
+			DT,
+			{**_live_filters(user or frappe.session.user), "account_ref": account_ref},
+			"capture_id",
+		)
+		or ""
+	)
 
 
 def consume_capture(capture_id: str) -> str:
@@ -334,11 +363,11 @@ def _erase_ciphertext(name: str) -> None:
 	frappe.db.set_value(DT, name, "encrypted_oauth_blob", "", update_modified=False)
 
 
-def _revoke_token(openclaw_provider: str, blob_json: str) -> str:
+def _revoke_token(agent_provider: str, blob_json: str) -> str:
 	"""Attempt to revoke the provider token. Returns the terminal revocation_state
 	(``revoked`` | ``unsupported``); raises ``_RevokeTransientError`` on a failure
 	worth retrying. Never logs the token."""
-	endpoint = _REVOKE_ENDPOINTS.get(openclaw_provider or "")
+	endpoint = _REVOKE_ENDPOINTS.get(agent_provider or "")
 	if not endpoint:
 		return "unsupported"
 	try:
@@ -368,7 +397,7 @@ def _revoke_and_erase(doc) -> str:
 	blob = get_decrypted_password(DT, doc.name, "encrypted_oauth_blob", raise_exception=False) or ""
 	attempts = int(doc.revocation_attempts or 0) + 1
 	try:
-		state = _revoke_token(doc.openclaw_provider, blob)
+		state = _revoke_token(doc.agent_provider, blob)
 	except _RevokeTransientError as e:
 		# Transient: keep the ciphertext for a retry until the attempt ceiling, then
 		# give up (erase + alert) so a dead provider can't strand a live token here
@@ -383,7 +412,7 @@ def _revoke_and_erase(doc) -> str:
 			_erase_ciphertext(doc.name)
 			frappe.log_error(
 				title="oauth capture: token revoke gave up after retries",
-				message=f"capture={doc.name} provider={doc.openclaw_provider!r} attempts={attempts} err={e!r}",
+				message=f"capture={doc.name} provider={doc.agent_provider!r} attempts={attempts} err={e!r}",
 			)
 			return "failed"
 		frappe.db.set_value(

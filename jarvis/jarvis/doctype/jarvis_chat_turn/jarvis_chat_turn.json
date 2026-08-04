@@ -119,7 +119,7 @@
    "length": 64,
    "search_index": 1,
    "read_only": 1,
-   "description": "The runId openclaw returns at the agent ack; broadcast frames are matched on it. Set at dispatching->streaming; null until ack (D2 #2)."
+   "description": "The runId agent returns at the agent ack; broadcast frames are matched on it. Set at dispatching->streaming; null until ack (D2 #2)."
   },
   {
    "fieldname": "seed_message",

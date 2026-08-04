@@ -31,7 +31,7 @@ def _mk(**over) -> dict:
 	kw = dict(
 		provider="OpenAI",
 		upstream="openai",
-		openclaw_provider="openai",
+		agent_provider="openai",
 		oauth_blob=json.dumps(_BLOB),
 		account_email="user@example.com",
 		account_ref="SUB_deadbeefcafe0001",
@@ -180,7 +180,7 @@ class TestPendingCapture(FrappeTestCase):
 		g = pc.create_capture(
 			provider="Google Gemini",
 			upstream="google",
-			openclaw_provider="google-gemini-cli",
+			agent_provider="google-gemini-cli",
 			oauth_blob=json.dumps(g_blob),
 			account_email="u@example.com",
 			account_ref="SUB_g",
@@ -190,7 +190,7 @@ class TestPendingCapture(FrappeTestCase):
 		x = pc.create_capture(
 			provider="xAI Grok",
 			upstream="xai",
-			openclaw_provider="xai",
+			agent_provider="xai",
 			oauth_blob=json.dumps(x_blob),
 			account_email="u@example.com",
 			account_ref="SUB_x",
@@ -237,7 +237,7 @@ class TestPendingCapture(FrappeTestCase):
 	def test_sweep_gives_up_and_erases_after_max_attempts(self):
 		import requests as _rq
 
-		view = _mk(openclaw_provider="google-gemini-cli", provider_subject="give-up", account_ref="SUB_gu")
+		view = _mk(agent_provider="google-gemini-cli", provider_subject="give-up", account_ref="SUB_gu")
 		name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
 		frappe.db.set_value(
 			DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
@@ -283,7 +283,7 @@ class TestPendingCapture(FrappeTestCase):
 
 	def test_sweep_calls_revoke_endpoint_when_one_exists(self):
 		# Route the capture through a provider WITH a revoke endpoint.
-		view = _mk(openclaw_provider="google-gemini-cli", provider_subject="subj-g", account_ref="SUB_g")
+		view = _mk(agent_provider="google-gemini-cli", provider_subject="subj-g", account_ref="SUB_g")
 		name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
 		frappe.db.set_value(
 			DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
@@ -305,7 +305,7 @@ class TestPendingCapture(FrappeTestCase):
 	def test_sweep_retries_transient_then_gives_up(self):
 		import requests as _rq
 
-		view = _mk(openclaw_provider="google-gemini-cli", provider_subject="subj-t", account_ref="SUB_t")
+		view = _mk(agent_provider="google-gemini-cli", provider_subject="subj-t", account_ref="SUB_t")
 		name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
 		frappe.db.set_value(
 			DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False

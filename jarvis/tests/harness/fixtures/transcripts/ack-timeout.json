@@ -1,6 +1,6 @@
 {
   "name": "ack-timeout",
-  "description": "chat.send ack delayed past the client window -> OpenclawUnreachable(ack-timeout) -> bench parks; the transcript still completes server-side.",
+  "description": "chat.send ack delayed past the client window -> AgentUnreachable(ack-timeout) -> bench parks; the transcript still completes server-side.",
   "ack": {
     "status": "started"
   },

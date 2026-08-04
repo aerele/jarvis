@@ -1,7 +1,7 @@
-"""Render Jarvis Custom Skill rows into openclaw SKILL.md payloads.
+"""Render Jarvis Custom Skill rows into agent SKILL.md payloads.
 
 A customer authors a bare slug (e.g. ``invoicing``); everywhere it reaches
-openclaw it becomes ``custom-invoicing`` so it can never collide with a shared
+agent it becomes ``custom-invoicing`` so it can never collide with a shared
 persona skill (none of which start with ``custom-``). The push payload is a
 list of ``{slug, description, user_invocable, body}`` dicts, where ``body`` is
 the fully-rendered SKILL.md text written verbatim to disk by the fleet-agent.
@@ -96,7 +96,7 @@ def _pushable_sort_key(skill_name: str, docname: str) -> tuple:
 
 
 def prefixed_slug(skill_name: str) -> str:
-	"""Bare authored slug -> the namespaced slug used on disk and in openclaw."""
+	"""Bare authored slug -> the namespaced slug used on disk and in agent."""
 	return f"{RESERVED_PREFIX}{(skill_name or '').strip().lower()}"
 
 

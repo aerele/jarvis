@@ -1,6 +1,6 @@
 """Hosted-embed marker support in the chat canvas pipeline.
 
-openclaw 2026.6+ teaches the model to publish rich HTML as hosted canvas
+agent 2026.6+ teaches the model to publish rich HTML as hosted canvas
 documents referenced by ``[embed ref="<id>" /]`` markers (or an explicit
 ``/__openclaw__/canvas/...`` url). These must resolve to the same gateway
 fetch path as plain ``canvas/<path>.<ext>`` references, and the markers must

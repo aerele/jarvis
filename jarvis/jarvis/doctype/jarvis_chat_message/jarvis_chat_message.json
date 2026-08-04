@@ -15,7 +15,7 @@
     "error",
     "recovering",
     "recovery_started_at",
-    "openclaw_seq_watermark",
+    "agent_seq_watermark",
     "was_recovered",
     "stopped",
     "tool_name",
@@ -80,7 +80,7 @@
       "fieldtype": "Check",
       "label": "Recovering",
       "default": 0,
-      "description": "True while a managed turn timed out or dropped on the bench but openclaw is presumed still working or finished. turn_recovery finalizes it from the gateway snapshot instead of erroring. streaming stays 1 so the UI keeps the spinner."
+      "description": "True while a managed turn timed out or dropped on the bench but agent is presumed still working or finished. turn_recovery finalizes it from the gateway snapshot instead of erroring. streaming stays 1 so the UI keeps the spinner."
     },
     {
       "fieldname": "recovery_started_at",
@@ -89,13 +89,13 @@
       "description": "When this row entered the recovering state. Bounds the recovery window against an absolute ceiling."
     },
     {
-      "fieldname": "openclaw_seq_watermark",
+      "fieldname": "agent_seq_watermark",
       "fieldtype": "Int",
-      "label": "Openclaw Seq Watermark",
+      "label": "Agent Seq Watermark",
       "read_only": 1,
       "hidden": 1,
       "permlevel": 1,
-      "description": "Highest openclaw transcript seq observed before this turn's chat.send; snapshot recovery only finalizes from strictly newer assistant messages. permlevel 1 (server-only; TASK 9): written by the worker via frappe.db.set_value / read via raw SQL, so no user can read/set the watermark through generic REST."
+      "description": "Highest agent transcript seq observed before this turn's chat.send; snapshot recovery only finalizes from strictly newer assistant messages. permlevel 1 (server-only; TASK 9): written by the worker via frappe.db.set_value / read via raw SQL, so no user can read/set the watermark through generic REST."
     },
     {
       "fieldname": "was_recovered",
@@ -147,7 +147,7 @@
       "search_index": 1,
       "no_copy": 1,
       "depends_on": "eval:doc.role=='tool'",
-      "description": "The openclaw tool-call id for this receipt. (session_key->conversation, tool_call_id) is the R-6 out-of-band idempotency key: a duplicate callback for the same tool call dedupes instead of writing a second receipt. Null for legacy callbacks that carry no call id."
+      "description": "The agent tool-call id for this receipt. (session_key->conversation, tool_call_id) is the R-6 out-of-band idempotency key: a duplicate callback for the same tool call dedupes instead of writing a second receipt. Null for legacy callbacks that carry no call id."
     },
     {
       "fieldname": "action_outcome",

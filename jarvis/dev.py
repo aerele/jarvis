@@ -61,7 +61,7 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 	# below wipes jarvis_admin_api_key / agent_url / agent_token (after which the
 	# bench can no longer reach the container). The real access/refresh tokens
 	# live in the container's auth-profiles.json (the bench only holds metadata),
-	# so without this the old codex tokens linger and openclaw keeps serving the
+	# so without this the old codex tokens linger and agent keeps serving the
 	# OLD chat even after a "reset". Best-effort + non-fatal: a dev reset must
 	# still succeed when admin/fleet is down, the tenant was already purged, or
 	# nothing was connected. Only attempted when a container is actually wired up.

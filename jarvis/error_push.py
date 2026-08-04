@@ -1,7 +1,7 @@
 """Out-of-band push of tenant errors to the admin control plane.
 
-Modeled on ``jarvis.chat.usage_push``: self-gating (skip self-hosted /
-un-onboarded), best-effort, and it NEVER raises into the scheduler. Runs on the
+Modeled on ``jarvis.chat.usage_push``: self-gating (skip un-onboarded),
+best-effort, and it NEVER raises into the scheduler. Runs on the
 ``*/5`` cron so the admin's Errors feed and Fleet Console badge stay fresh
 without ever touching the chat hot path.
 

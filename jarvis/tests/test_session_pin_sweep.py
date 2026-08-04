@@ -6,7 +6,7 @@ differs from the agent default the same sessions.list response reports - against
 actually chose. Empty means Auto, so a pin on such a conversation is one the
 bench wrote itself and gets cleared; a matching explicit pick is left alone.
 
-The gateway is reached only through OpenclawSession, so these patch it with a
+The gateway is reached only through AgentSession, so these patch it with a
 fake exposing ``list_sessions_page`` / ``clear_session_model``. Conversations are
 real rows on the test site.
 """
@@ -195,7 +195,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		sess.clear_session_model.assert_not_called()
 
 	def test_entry_without_session_id_is_skipped(self):
-		# Patching one makes openclaw mint a fresh sessionId and drop the label.
+		# Patching one makes agent mint a fresh sessionId and drop the label.
 		key = "agent:main:dashboard:pin-nosid"
 		self._conv(key, model_override="")
 		row = _row(key, provider="openai_compat-0", model="jarvis-pool", sessionId=None)
@@ -331,7 +331,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		frappe.db.set_single_value(SETTINGS, "agent_url", "http://gw.test:18789")
 		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		try:
-			with patch("jarvis.chat.openclaw_client.OpenclawSession.connect", return_value=sess):
+			with patch("jarvis.chat.agent_client.AgentSession.connect", return_value=sess):
 				out = session_pin_sweep.run()
 		finally:
 			frappe.db.set_single_value(SETTINGS, "agent_url", orig or "")
@@ -385,7 +385,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		self.assertEqual(frappe.db.get_value(CONV, name, "model_override"), "gemini-3.6-flash")
 
 	def test_a_replaced_session_is_an_error_not_a_fix(self):
-		# The lifecycle sweep freed the session mid-run, so openclaw minted a
+		# The lifecycle sweep freed the session mid-run, so agent minted a
 		# ghost entry under the key instead of patching the planned one.
 		key = "agent:main:dashboard:pin-ghost"
 		self._conv(key, model_override="")
@@ -439,7 +439,7 @@ class TestSessionPinSweep(FrappeTestCase):
 		for key in (
 			"agent:main:main",
 			"agent:main:main:heartbeat",
-			"agent:main:main:anything-openclaw-adds",
+			"agent:main:main:anything-agent-adds",
 			"agent:other:main",
 		):
 			self.assertTrue(_is_agent_main_key(key), key)

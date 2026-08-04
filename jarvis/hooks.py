@@ -62,16 +62,16 @@ def __getattr__(name: str):
 # ---------------------------------------------------------------------------
 # OAuth client IDs - one per supported chat-subscription provider
 # ---------------------------------------------------------------------------
-# These are openclaw's hardcoded CLI client IDs. We use them (not Aerele-owned
+# These are agent's hardcoded CLI client IDs. We use them (not Aerele-owned
 # PKCE clients) so the refresh tokens our device flow issues are compatible
-# with pi-ai's refresh path inside the container - openclaw's codex provider
+# with pi-ai's refresh path inside the container - agent's codex provider
 # refreshes against the same client_id we used to mint.
 #
 # Source:
 #   OpenAI: openclaw/extensions/openai/openai-codex-device-code.ts:5
 #   Google Gemini: bundled with @google/gemini-cli; override via env if it drifts.
 #
-# Anthropic Claude is deliberately absent - openclaw has no compatible
+# Anthropic Claude is deliberately absent - agent has no compatible
 # adapter for Claude Pro/Max subscriptions.
 def _env_or_default(name: str, default: str) -> str:
 	import os
@@ -315,7 +315,7 @@ scheduler_events = {
 			"jarvis.chat.macros.resume_waiting_capacity_runs",
 			# Forward tenant errors (UI + jarvis-only code-level exceptions) to the
 			# admin control plane for the per-tenant Errors feed. Off the hot path,
-			# self-gating (skips self-hosted / un-onboarded), never raises. Cheap
+			# self-gating (skips un-onboarded), never raises. Cheap
 			# no-op when there is nothing new to push.
 			"jarvis.error_push.push_error_rollup",
 			# GAP 1 dead-man's-switch (Track B): UNCONDITIONAL bench-liveness heartbeat to
@@ -352,7 +352,7 @@ scheduler_events = {
 		],
 	},
 	"hourly": [
-		# Session lifecycle: free dormant conversations' openclaw sessions, reap
+		# Session lifecycle: free dormant conversations' agent sessions, reap
 		# abandoned empty chats, and reap orphaned throwaway sessions
 		# (title/prewarm/polish, deleted conversations). Batch-capped; bench
 		# history untouched.

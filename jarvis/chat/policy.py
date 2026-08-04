@@ -64,7 +64,7 @@ def _release_update_required() -> bool:
 def _workspace_resetting() -> bool:
 	"""True while a self-serve workspace reset is rebuilding the container
 	(transport cleared + resetting marker set). Without this a send throws a raw
-	"openclaw is not configured" instead of a gated state. Fails OPEN."""
+	"agent is not configured" instead of a gated state. Fails OPEN."""
 	try:
 		from jarvis.onboarding import _RESETTING_STATUS
 

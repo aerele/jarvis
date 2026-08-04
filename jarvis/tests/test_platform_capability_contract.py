@@ -261,7 +261,7 @@ class TestDelegateToolAllowGate(_DelegateCase):
 		self.assertEqual(res["error"]["code"], "CapabilityDeniedError")
 
 	def test_container_side_entries_do_not_grant_bench_tools(self):
-		"""``exec``/``canvas``/``message`` are openclaw's own tools. They ride in the
+		"""``exec``/``canvas``/``message`` are agent's own tools. They ride in the
 		manifest list but must never satisfy a bench tool name."""
 		for tool in ("exec", "canvas", "message"):
 			res = self._dispatch(self.aud_key, tool, {})
@@ -368,7 +368,7 @@ class TestDenialCopyAndVocabulary(_DelegateCase):
 		self.assertIn("bundle", hint)
 
 	def test_the_delegate_is_told_that_retrying_cannot_help(self):
-		"""The no-retry instruction has to be in the MESSAGE: the openclaw plugin
+		"""The no-retry instruction has to be in the MESSAGE: the agent plugin
 		relays a failed tool call to the model as ``"<code>: <message>"`` and drops
 		every other envelope field, so a hint-only fix would never reach the delegate
 		and it would retry at the rate limit until the run timed out."""
@@ -754,7 +754,7 @@ class TestLaunchStampsTheContract(unittest.TestCase):
 		self.assertEqual(row.capability_nature, "auditor")
 		self.assertEqual(json.loads(row.capability_writes_json), [])
 		# Stored VERBATIM — the declared list is the run's provenance, so the
-		# openclaw-facing ids and the container-side entries are kept as-is.
+		# agent-facing ids and the container-side entries are kept as-is.
 		self.assertEqual(json.loads(row.tools_allow_json), self.DECLARED)
 
 	def test_the_stamped_contract_is_immutable(self):

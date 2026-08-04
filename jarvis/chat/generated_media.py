@@ -1,6 +1,6 @@
 """Persist codex-generated images into ERP Files + the message canvas.
 
-openclaw's ``imagegen`` skill writes images onto the container's disk under
+agent's ``imagegen`` skill writes images onto the container's disk under
 ``codex-home/generated_images/`` but neither streams them on the WS turn nor
 serves them over HTTP, so the bench can't catch them the way it catches canvas
 artifacts (see ``jarvis/chat/canvas.py``). Instead, after a turn that used

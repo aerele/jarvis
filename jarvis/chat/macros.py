@@ -5,7 +5,7 @@ fresh conversation and executes each prompt as its own agent turn, chained
 server-side: after a turn's ``run:end`` (or an error) the chaining hook in
 ``jarvis.chat.turn_handler`` calls :func:`advance_after_turn`, which enqueues the
 next step. Because the steps run as turns in one conversation they share the
-openclaw session, so context accumulates across the macro — and the run survives
+agent session, so context accumulates across the macro — and the run survives
 a closed browser tab (unlike a frontend-driven loop).
 
 State lives in ``Jarvis Macro Run`` (``current_step`` = 1-based index of the step

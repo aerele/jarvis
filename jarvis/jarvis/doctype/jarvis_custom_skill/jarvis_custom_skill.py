@@ -1,7 +1,7 @@
 """Jarvis Custom Skill DocType controller.
 
 One row per customer-authored skill. Each row renders to a SKILL.md that is
-pushed into the customer's openclaw container (under ``openclaw_state/
+pushed into the customer's agent container (under ``openclaw_state/
 custom_skills/custom-<slug>/SKILL.md``) and loaded ALONGSIDE the shared
 read-only persona skills. Rows are owned by the Frappe user who created them
 (``if_owner`` permission); the push itself is bench-global (a Jarvis bench maps
@@ -20,7 +20,7 @@ from frappe.model.document import Document
 
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
-# openclaw it is prefixed with ``custom-`` (see chat/custom_skills.py) so it can
+# agent it is prefixed with ``custom-`` (see chat/custom_skills.py) so it can
 # never collide with a shared persona skill name.
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MIN_SLUG_LEN = 3

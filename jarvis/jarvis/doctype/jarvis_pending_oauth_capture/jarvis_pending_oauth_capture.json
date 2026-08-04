@@ -11,7 +11,7 @@
   "owner_user",
   "provider",
   "upstream",
-  "openclaw_provider",
+  "agent_provider",
   "provider_subject_hash",
   "safe_label",
   "account_email",
@@ -58,11 +58,11 @@
    "description": "cliproxy pool upstream ('openai' | 'xai' | 'kimi'), the value the pool subscription account row is stored under."
   },
   {
-   "fieldname": "openclaw_provider",
+   "fieldname": "agent_provider",
    "fieldtype": "Data",
-   "label": "Openclaw Provider",
+   "label": "Agent Provider",
    "read_only": 1,
-   "description": "The openclaw_provider key (used only to look up the provider's token-revocation endpoint on expiry/cancel)."
+   "description": "The agent_provider key (used only to look up the provider's token-revocation endpoint on expiry/cancel)."
   },
   {
    "fieldname": "provider_subject_hash",
@@ -110,7 +110,7 @@
    "fieldname": "encrypted_oauth_blob",
    "fieldtype": "Password",
    "label": "Encrypted OAuth Blob",
-   "description": "The minted openclaw OAuth blob (JSON). A Password field, so it lives ENCRYPTED in Frappe's __Auth store - the table column holds only a mask, never plaintext, and it is never returned by any read endpoint. Erased (set blank -> __Auth row dropped) once consumed into a desired-state save, or after the expiry sweeper has revoked the provider token."
+   "description": "The minted agent OAuth blob (JSON). A Password field, so it lives ENCRYPTED in Frappe's __Auth store - the table column holds only a mask, never plaintext, and it is never returned by any read endpoint. Erased (set blank -> __Auth row dropped) once consumed into a desired-state save, or after the expiry sweeper has revoked the provider token."
   },
   {
    "fieldname": "expires_at",
