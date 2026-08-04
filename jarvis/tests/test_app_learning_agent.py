@@ -84,7 +84,11 @@ def _mk_user(email: str, roles: list[str]) -> str:
 
 def _mk_listing(slug: str, nature: str) -> str:
 	if frappe.db.exists(LISTING, slug):
-		frappe.db.set_value(LISTING, slug, "nature", nature)
+		# ``status`` is re-asserted, not just ``nature``: this slug is synthetic, so
+		# any module that runs ``agent_catalog.sync_agent_listings`` retires it to
+		# Deprecated (it is not in the bundled registry), and the fixture means a
+		# PUBLISHED scribe — which the #457 dispatch gate now requires.
+		frappe.db.set_value(LISTING, slug, {"nature": nature, "status": "Published"})
 	else:
 		frappe.get_doc(
 			{

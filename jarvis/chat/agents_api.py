@@ -439,8 +439,18 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 		frappe.throw(_("Status must be one of: {0}.").format(", ".join(_ADMIN_STATUSES)))
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")
+	before = doc.status
 	doc.status = status
 	doc.save()
+	# #457: status is a PUSH-VISIBLE property — ``build_agent_push_payload`` emits
+	# only Published listings — so changing it changes the container's roster just
+	# as install/enable does. Without this the SPA showed no "Apply pending" after a
+	# deprecate, so the roster and the DB silently disagreed until some unrelated
+	# mutation re-dirtied the flag. Only on an actual change, and only when some
+	# install would have carried the slug: a status flip on an agent nobody enabled
+	# pushes exactly the same payload.
+	if before != doc.status and frappe.db.exists(INSTALLATION, {"agent": doc.name, "enabled": 1}):
+		_mark_catalog_dirty()
 	frappe.db.commit()
 	return {"ok": True, "status": doc.status}
 
@@ -969,10 +979,24 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	from jarvis.chat.agent_installability import assert_installable
 
 	assert_installable(doc.agent)
-	nature = frappe.db.get_value(LISTING, doc.agent, "nature")
+	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
+	nature = listing.get("nature")
 	if nature not in ("Auditor", "Scribe"):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
+		)
+	# #457: an unpublished listing is not deployed — the push drops it from the
+	# container roster, so a manual run would reach a delegate that does not exist
+	# and only fail three hours later as a mislabelled timeout. ``_launch_audit``
+	# refuses it authoritatively; refuse here too, before the budget check and the
+	# source-app persistence, so the operator gets the real reason and no side
+	# effects.
+	if (listing.get("status") or "") != "Published":
+		frappe.throw(
+			_(
+				"This agent is no longer published ({0}), so it is not deployed to run. "
+				"Uninstall it, or ask an admin to publish it again."
+			).format(listing.get("status") or "unknown")
 		)
 	# CX5-5: a SHADOW installation means "run it, but its output is not live yet" —
 	# an auditor's findings sit in a shadow set for a reviewer. A scribe has no such

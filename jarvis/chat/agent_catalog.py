@@ -185,12 +185,15 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	enabled installs on the site are pushed; ``owner`` is accepted only to scope
 	tests. An empty list is a valid "remove all agent skills" reconcile.
 
-	RBAC (defense in depth): an enabled install whose OWNER's roles no longer
+	RBAC (defense in depth): an enabled install whose RUN-AS user's roles no longer
 	permit the agent is EXCLUDED from the push — the scheduler / run-now gates
 	already refuse to run it, but its enablement signal must not reach the
-	container either. Identity (CX1-1, the same reasoning): an enabled install with
-	a BLANK run-as user is EXCLUDED too — R1-F3 refuses it at every dispatch path,
-	so pushing it would advertise an agent this bench can never run.
+	container either. The run-as user, not the owner, is the identity that decides
+	(#457): it is the one every dispatch gate applies, so gating the push on
+	anything else advertises a roster the bench will not honour. Identity (CX1-1,
+	the same reasoning): an enabled install with a BLANK run-as user is EXCLUDED
+	too — R1-F3 refuses it at every dispatch path, so pushing it would advertise an
+	agent this bench can never run.
 
 	Installs are per-(owner, agent) but the payload is bench-global and keyed by
 	SLUG, so two users each enabling the SAME agent are ONE entry, not two —
@@ -290,7 +293,17 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		)
 		if not listing or listing.status != "Published":
 			continue
-		if not _user_allowed_for_agent(row.agent, row.owner):
+		# #457: gated on the RUN-AS user, not the row owner. The push and the two
+		# dispatch gates (``agent_scheduler.run_due_agent_audits`` and
+		# ``agents_api.run_agent_now``) must agree on WHICH identity decides, or the
+		# roster describes a bench that does not exist. Gotcha #8 settles which one:
+		# the EXECUTING identity is gated, not the triggerer, and the run-as user is
+		# the identity whose permissions every ``jarvis__*`` read is bounded by.
+		# Owner-gating produced both errors — an install whose owner lost the role
+		# while the run-as user kept it was dropped from the roster yet still
+		# dispatched (the reported phantom run), and the mirror case advertised a
+		# delegate the bench would refuse to run at every cadence.
+		if not _user_allowed_for_agent(row.agent, row.run_as_user):
 			continue
 
 		# Every gate has passed, so this agent is emitted and no later row for it can

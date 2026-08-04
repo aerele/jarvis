@@ -113,8 +113,27 @@ def run_due_agent_audits() -> None:
 		# with a schedule set just consumes its slot (it drafts through the board,
 		# not on a cron). A scribe's schedule is optional (manual run-now is the
 		# primary path) but honoured here when set, so periodic re-learning works.
-		nature = frappe.db.get_value(LISTING, row.agent, "nature")
+		listing = (
+			frappe.db.get_value(LISTING, row.agent, ["nature", "status"], as_dict=True) or frappe._dict()
+		)
+		nature = listing.get("nature")
 		if nature not in ("Auditor", "Scribe"):
+			_advance(row, now)
+			continue
+
+		# #457: an admin who deprecates a listing must stop its schedules. The push
+		# already drops an unpublished agent from the roster, so the container has no
+		# such delegate and a dispatched run can only fail three hours later as a
+		# mislabelled timeout. ``_launch_audit`` is the authoritative gate, but refuse
+		# HERE too and consume the slot: a throw out of _launch_audit lands in the
+		# generic except below, which does NOT advance, so the cadence would retry
+		# hourly and write an Error Log every time for a state only a human can fix.
+		if (listing.get("status") or "") != "Published":
+			_record_failed(
+				row,
+				"scheduled run skipped: this agent is no longer published "
+				f"({listing.get('status') or 'unknown'}); uninstall it or ask an admin to republish it",
+			)
 			_advance(row, now)
 			continue
 
@@ -533,6 +552,27 @@ def _launch_audit(
 	# refusal, never with a bundle-configuration diagnosis (merge ruling, 2026-07-26
 	# composition review).
 	initiating_human = _resolve_initiating_human(trigger, initiating_human)
+
+	# #457: the listing must still be Published. This is the AUTHORITATIVE status
+	# gate — both dispatch paths funnel through here, so no caller can dispatch a
+	# delegate the push has stopped advertising. ``listing.status`` used to be
+	# checked only at INSTALL time, so an admin flipping a live installed agent to
+	# Deprecated changed nothing about its schedule: the next Apply reconciled the
+	# roster without that slug, then every cadence dispatched to a container that
+	# had no such delegate, the container rejected the unknown agent id, the bench
+	# never learned (the completion writeback never fires because the delegate never
+	# starts), and the run sat ``running`` for three hours until the stale-run sweep
+	# terminalized it as a duration timeout it never hit. Refuse at launch instead,
+	# with the real reason and no orphan conversation/run — same discipline as the
+	# run-as guard above, and ORDERED AFTER the authorization check for the same
+	# reason it precedes the bundle-configuration check below.
+	if (listing.status or "") != "Published":
+		frappe.throw(
+			_(
+				"This agent is no longer published ({0}), so it is not deployed to run. "
+				"Uninstall it, or ask an admin to publish it again — nothing was started."
+			).format(listing.status or "unknown")
+		)
 
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
