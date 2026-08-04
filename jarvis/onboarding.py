@@ -356,6 +356,50 @@ def _coalesce_subscription_models(models: list) -> list:
 	return out
 
 
+def _adopt_orphan_capture(account_ref: str, consumed_capture_ids: list) -> str:
+	"""Blob of this user's live capture for ``account_ref``, or "" if there isn't one.
+
+	The client normally cites the capture by its own id. This is the fallback for
+	when it cannot: ``LlmPoolEditor.load()`` blanks ``capture_id`` on every stored
+	account and ``rehydratePendingCaptures`` only re-attaches an orphan one in
+	singleMode, so a settings-pane reload after a failed save leaves a valid,
+	unconsumed capture that no retry can ever cite.
+
+	Scoped to the session user, mirroring ``pending_capture.list_active`` - an
+	``account_ref`` from the request body must never reach another user's row.
+	The claim itself goes through ``consume_capture``, so the owner gate, expiry,
+	F10 anchor fence and once-only row lock all still apply; every ``CaptureError``
+	returns "" and the caller refuses exactly as it did before.
+	"""
+	from jarvis.oauth import pending_capture
+
+	cap_id = pending_capture.find_live_capture_id(account_ref)
+	if not cap_id:
+		return ""
+	try:
+		blob = pending_capture.consume_capture(cap_id)
+	except pending_capture.CaptureAlreadyConsumed:
+		# A concurrent save (a double-clicked Save, or a retry racing its own
+		# in-flight request) claimed this capture between our lookup and our
+		# consume. Its ciphertext is erased, so THIS save genuinely cannot
+		# complete - but the account did get connected, by the winner. Falling
+		# through to "no OAuth credential stored — reconnect this account" would
+		# tell the customer to sign in again and mint a SECOND live provider
+		# token for an account that is already linked, which is the hazard this
+		# whole module exists to avoid. Say what actually happened instead.
+		frappe.throw(
+			"This account was just connected by another save. Reload the page - "
+			"it is already linked, so there is no need to sign in again.",
+			frappe.ValidationError,
+		)
+	except pending_capture.CaptureError:
+		return ""
+	consumed_capture_ids.append(cap_id)
+	# Non-secret breadcrumb: an implicit adoption is worth being able to find later.
+	frappe.logger("jarvis.oauth").info(f"adopted orphan capture for account_ref {account_ref}")
+	return blob
+
+
 @frappe.whitelist()
 def save_llm_pool(
 	models: str | list,
@@ -495,6 +539,32 @@ def save_llm_pool(
 					# re-saved account.
 					if ref and prior_blobs.get(ref):
 						a["oauth_blob"] = prior_blobs[ref]
+					elif ref:
+						# Nothing stored either, so this account is heading straight for
+						# validate_models' "no OAuth credential stored" refusal. Before
+						# that, look for a live capture of THIS account the client failed
+						# to cite: the editor blanks capture_id on every load and only
+						# re-attaches an orphan one in singleMode, so a settings-pane
+						# reload after a failed save drops it and no retry can ever
+						# succeed (the capture sits valid and unconsumed server-side).
+						#
+						# Safe because the lookup is owner-scoped exactly like
+						# list_active, and account_ref is no more privileged than
+						# capture_id - both are server-minted and handed to the same
+						# client in the same sign-in response, so this can only adopt a
+						# capture the caller could already have cited explicitly.
+						# consume_capture still applies the owner gate, the expiry, the
+						# F10 anchor fence and the once-only row lock; any CaptureError
+						# falls through to the same refusal as before.
+						#
+						# Fallback ONLY: a stored blob still wins above, so no
+						# currently-succeeding save changes behaviour.
+						#
+						# Refusing is not the safer choice here - it forces a re-sign-in,
+						# which mints a SECOND live provider token while the first stays
+						# unrevoked (openai/xai/kimi have no entry in _REVOKE_ENDPOINTS),
+						# the duplicate-live-token hazard this module exists to avoid.
+						a["oauth_blob"] = _adopt_orphan_capture(ref, consumed_capture_ids)
 				merged_accounts.append(a)
 			row["subscription_accounts"] = json.dumps(merged_accounts)
 		s.append("models", row)

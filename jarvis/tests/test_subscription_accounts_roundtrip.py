@@ -295,3 +295,132 @@ class TestSubscriptionAccountsRoundTrip(_RT3SettingsTestCase):
 			onboarding.save_llm_pool(frappe.as_json(payload), preset=None, routing_mode="failover")
 		providers = {m.get("provider") for m in pool_calls[0]["spec"]["models"]}
 		self.assertEqual(providers, {"openai", "gemini"})
+
+
+class TestOrphanCaptureAdoption(_RT3SettingsTestCase):
+	"""save_llm_pool adopts a live capture the client failed to cite.
+
+	The editor blanks capture_id on every load and only re-attaches an ORPHAN one
+	in singleMode, so a settings-pane reload after a failed save leaves a valid,
+	unconsumed capture that no retry can cite. Without the fallback the account is
+	permanently unsavable even though its credential is sitting on the server.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		self._clear_models()
+		_reset_settings()
+		frappe.db.delete("Jarvis Pending OAuth Capture")
+		frappe.db.commit()
+
+	def _mint(self, account_ref, blob='{"refresh_token":"fake-rt-ORPHAN"}'):
+		from jarvis.oauth import pending_capture
+
+		return pending_capture.create_capture(
+			provider="openai",
+			upstream="openai",
+			openclaw_provider="openai",
+			oauth_blob=blob,
+			account_email="orphan@acme.com",
+			account_ref=account_ref,
+			safe_label="orphan@acme.com",
+			provider_subject="orphan-subject",
+		)
+
+	def _payload(self, account_ref, **extra):
+		acct = {"upstream": "openai", "account_ref": account_ref, "label": "orphan@acme.com"}
+		acct.update(extra)
+		return [
+			{
+				"model": "gpt-5.5",
+				"tier": "strong",
+				"order": 0,
+				"subscription": {"rotation": "sticky", "accounts": [acct]},
+			}
+		]
+
+	def _save(self, payload):
+		with (
+			patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}),
+			patch("jarvis.admin_client.post_update_llm_creds"),
+		):
+			return onboarding.save_llm_pool(frappe.as_json(payload), preset=None, routing_mode="failover")
+
+	def _stored_blob(self):
+		s = frappe.get_single("Jarvis Settings")
+		row = (s.get("models") or [])[0]
+		accounts = json.loads(row.get_password("subscription_accounts", raise_exception=False) or "[]")
+		return (accounts[0] or {}).get("oauth_blob") or ""
+
+	def test_orphan_capture_is_adopted_without_capture_id(self):
+		"""The regression: account_ref only, no capture_id, nothing stored."""
+		view = self._mint("SUB_orphan1")
+		self._save(self._payload("SUB_orphan1"))
+
+		self.assertIn("fake-rt-ORPHAN", self._stored_blob())
+		row = frappe.db.get_value(
+			"Jarvis Pending OAuth Capture",
+			{"capture_id": view["capture_id"]},
+			["consumed_at", "revocation_state"],
+			as_dict=True,
+		)
+		self.assertTrue(row.consumed_at, "the adopted capture must be burned")
+		self.assertEqual(row.revocation_state, "consumed")
+
+	def test_adopted_account_survives_a_resave(self):
+		"""Second save cites nothing either; the now-STORED blob carries it."""
+		self._mint("SUB_orphan2")
+		self._save(self._payload("SUB_orphan2"))
+		self._save(self._payload("SUB_orphan2"))
+		self.assertIn("fake-rt-ORPHAN", self._stored_blob())
+
+	def test_capture_bound_to_another_connection_is_refused(self):
+		"""The F10 anchor fence still bites - the fallback must not bypass it."""
+		self._mint("SUB_orphan3")
+		frappe.db.set_value(
+			"Jarvis Pending OAuth Capture",
+			{"account_ref": "SUB_orphan3"},
+			"bound_agent_url",
+			"ws://some-other-workspace:1",
+		)
+		frappe.db.commit()
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._save(self._payload("SUB_orphan3"))
+		self.assertIn("no OAuth credential stored", str(cm.exception))
+
+	def test_another_users_capture_is_never_adopted(self):
+		"""Owner scoping: an account_ref from the request body must not reach a
+		capture belonging to somebody else."""
+		self._mint("SUB_orphan4")
+		frappe.db.set_value(
+			"Jarvis Pending OAuth Capture",
+			{"account_ref": "SUB_orphan4"},
+			"owner_user",
+			"Guest",
+		)
+		frappe.db.commit()
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._save(self._payload("SUB_orphan4"))
+		self.assertIn("no OAuth credential stored", str(cm.exception))
+
+	def test_no_capture_at_all_still_refuses(self):
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._save(self._payload("SUB_nothing_here"))
+		self.assertIn("no OAuth credential stored", str(cm.exception))
+
+	def test_race_with_a_concurrent_adopter_says_what_happened(self):
+		"""A double-submitted save loses the race to consume. Its ciphertext is
+		gone, so this save cannot finish - but it must NOT tell the customer to
+		reconnect, which would mint a second live token for an account that is
+		now linked."""
+		from jarvis.oauth import pending_capture
+
+		self._mint("SUB_orphan5")
+		with patch.object(
+			pending_capture, "consume_capture", side_effect=pending_capture.CaptureAlreadyConsumed("x")
+		):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				self._save(self._payload("SUB_orphan5"))
+		msg = str(cm.exception)
+		self.assertIn("just connected by another save", msg)
+		self.assertNotIn("reconnect this account", msg)
