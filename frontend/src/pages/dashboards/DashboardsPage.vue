@@ -51,7 +51,7 @@
 			<div
 				v-show="activeTab === 'builder'"
 				ref="builderEl"
-				class="flex min-h-0 flex-1 flex-col"
+				class="flex min-h-0 flex-1 flex-row"
 			>
 				<!-- canvas pane (the surface's one solid action lives here) -->
 				<div
@@ -59,7 +59,7 @@
 					:class="resizing ? 'pointer-events-none select-none' : ''"
 				>
 					<div
-						class="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-2"
+						class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4"
 					>
 						<div class="flex min-w-0 items-center gap-2">
 							<span class="text-base font-semibold text-ink-gray-9">Canvas</span>
@@ -75,6 +75,12 @@
 							/>
 						</div>
 						<div class="flex shrink-0 items-center gap-3">
+							<Button
+								variant="ghost"
+								:label="chatOpen ? 'Hide chat' : 'Show chat'"
+								iconLeft="message-square"
+								@click="chatOpen = !chatOpen"
+							/>
 							<router-link
 								v-if="savedName"
 								:to="{ name: 'DashboardView', params: { id: savedName } }"
@@ -115,31 +121,33 @@
 				     the canvas wrapper above goes pointer-events-none so the iframe
 				     can't swallow the mousemoves. -->
 				<div
-					class="group relative z-10 flex h-2.5 shrink-0 cursor-row-resize items-center justify-center"
+					class="group relative z-10 flex w-2.5 shrink-0 cursor-col-resize items-center justify-center"
+					v-show="chatOpen"
 					role="separator"
-					aria-orientation="horizontal"
+					aria-orientation="vertical"
 					title="Drag to resize · double-click to reset"
 					@mousedown.prevent="startResize"
 					@dblclick="resetSplit"
 				>
 					<span
-						class="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 transition-colors"
+						class="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors"
 						:class="
 							resizing
 								? 'bg-surface-gray-4'
-								: 'bg-transparent group-hover:bg-surface-gray-4'
+								: 'bg-surface-gray-3 group-hover:bg-surface-gray-5'
 						"
 					/>
 					<span
-						class="relative h-1 w-7 rounded-full bg-surface-gray-4 transition-opacity"
+						class="relative w-1 h-7 rounded-full bg-surface-gray-4 transition-opacity"
 						:class="resizing ? 'opacity-100' : 'opacity-30 group-hover:opacity-100'"
 					/>
 				</div>
 
 				<DashboardChatPane
+					v-show="chatOpen"
 					ref="chatPane"
-					class="shrink-0 border-t"
-					:style="{ height: chatPct + '%' }"
+					class="shrink-0 border-l"
+					:style="{ width: chatPct + '%' }"
 					:caps="caps"
 					:theme="builderTheme"
 					:editing-name="agentEditingName"
@@ -958,32 +966,34 @@ watch(
 	{ flush: "post" }
 );
 
-// ── the drag-split (Sidebar's resize machinery, vertical) ────────────────────
+// ── the drag-split (Sidebar's resize machinery, horizontal right panel) ──
 const builderEl = ref(null);
-const _split = useStorage("jarvis-dash-split", 40);
-const clampPct = (n) => Math.min(70, Math.max(20, Math.round(Number(n) || 40)));
+const _split = useStorage("jarvis-dash-panel-w", 34);
+// GMeet-style right chat panel: persisted width %, plus a show/hide toggle.
+const chatOpen = useStorage("jarvis-dash-chat-open", true);
+const clampPct = (n) => Math.min(60, Math.max(24, Math.round(Number(n) || 34)));
 const chatPct = computed({
 	get: () => clampPct(_split.value),
 	set: (v) => (_split.value = clampPct(v)),
 });
 const resizing = ref(false);
-let startY = 0;
-let startPct = 40;
-let containerH = 1;
+let startX = 0;
+let startPct = 34;
+let containerW = 1;
 
 function startResize(e) {
 	if (e.button !== 0) return;
 	resizing.value = true;
-	startY = e.clientY;
+	startX = e.clientX;
 	startPct = chatPct.value;
-	containerH = (builderEl.value && builderEl.value.getBoundingClientRect().height) || 1;
+	containerW = (builderEl.value && builderEl.value.getBoundingClientRect().width) || 1;
 	window.addEventListener("mousemove", onResize);
 	window.addEventListener("mouseup", stopResize);
 	document.body.style.userSelect = "none";
-	document.body.style.cursor = "row-resize";
+	document.body.style.cursor = "col-resize";
 }
 function onResize(e) {
-	chatPct.value = startPct + ((startY - e.clientY) / containerH) * 100;
+	chatPct.value = startPct + ((startX - e.clientX) / containerW) * 100;
 }
 function stopResize() {
 	if (!resizing.value) return;
@@ -994,7 +1004,7 @@ function stopResize() {
 	document.body.style.cursor = "";
 }
 function resetSplit() {
-	chatPct.value = 40;
+	chatPct.value = 34;
 }
 onBeforeUnmount(stopResize);
 

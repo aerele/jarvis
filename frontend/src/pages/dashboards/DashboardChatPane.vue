@@ -1,11 +1,11 @@
 <template>
 	<div class="flex h-full flex-col overflow-hidden bg-surface-white">
 		<!-- header: title + New chat / Open in chat -->
-		<div class="flex shrink-0 items-start justify-between gap-2 border-b px-4 py-3">
+		<div class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4">
 			<div class="flex min-w-0 flex-col gap-0.5">
 				<span class="text-base font-semibold text-ink-gray-9">Describe a dashboard</span>
 				<span class="text-p-sm text-ink-gray-6"
-					>{{ agentName }} draws it on the canvas above</span
+					>{{ agentName }} draws it on the canvas</span
 				>
 			</div>
 			<div class="flex shrink-0 items-center gap-1">
@@ -184,7 +184,9 @@
 
 <script setup>
 // DashboardChatPane - the embedded assistant chat on the Dashboards builder
-// tab (bottom pane); a fork of triggers/TriggerChatPane.vue. State machine:
+// tab (bottom pane). Dashboards is the only feature that keeps an embedded chat
+// pane; the Triggers one it was originally forked from has been removed in
+// favour of managing triggers from the list UI. State machine:
 //   conversation id  → useStorage("jarvis-dash-conv-<user>") - persisted per
 //                      user; "" means no conversation yet.
 //   first send       → send_message(conversation:"", context {"page":"dashboards"})
