@@ -49,6 +49,13 @@ def _wiki_disabled():
 		frappe.db.set_single_value("Jarvis Settings", "wiki_enabled", 1, update_modified=False)
 
 
+def _long_wiki_body():
+	"""A body comfortably past ``_MAX_EXISTING_BODY_PROMPT_CHARS``, ending in a
+	sentinel the ingest prompt can never show the model."""
+	filler = "\n".join(f"- Escalation contact {i}: ops{i}@alpha.invalid" for i in range(80))
+	return f"## Payment\n\nAlways 60-day terms.\n\n{filler}\n\n## SLA\n\nTAIL-SENTINEL-KEEP-ME"
+
+
 def _make_page(slug, title, page_type="Customer", summary=None, body_md=None, **kwargs):
 	doc = frappe.get_doc(
 		{
@@ -206,22 +213,71 @@ class TestApplyPageUpdates(FrappeTestCase):
 		self.assertEqual(sources[0]["ref"], "NOTE-1")
 		self.assertEqual(sources[0]["user"], "a@test.invalid")
 
-		# Non-contradicting update: body_md is the merged replacement.
+		# Non-contradicting update from an append-only caller (the voice-note
+		# ingest): the new knowledge lands, the old knowledge SURVIVES. The
+		# ingest sees only an excerpt of a long body, so it may never swap the
+		# field out (issue #488).
 		applied, failed = wiki.apply_extracted_page_updates(
 			[self._alpha_update(body_md="## Payment\n\nNow 45-day terms.", summary="45 days.")],
 			"voice",
 			"b@test.invalid",
 			ref="NOTE-2",
+			allow_body_replace=False,
 		)
 		self.assertEqual((applied, failed), (1, 0))
 		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
 		self.assertIn("45-day terms", doc.body_md)
-		self.assertNotIn("60-day terms", doc.body_md)
+		self.assertIn("60-day terms", doc.body_md)
 		self.assertEqual(doc.summary, "45 days.")
 		self.assertEqual(frappe.utils.cint(doc.contradiction_flag), 0)
 		sources = json.loads(doc.sources)
 		self.assertEqual(len(sources), 2)
 		self.assertEqual(sources[1]["ref"], "NOTE-2")
+
+	def test_append_only_caller_keeps_everything_past_the_prompt_excerpt(self):
+		# Issue #488: the ingest prompt carries at most
+		# _MAX_EXISTING_BODY_PROMPT_CHARS of a stored body, so a "full merged
+		# body" reply is a rewrite of the excerpt alone. Appending it keeps the
+		# unseen tail; replacing with it deleted the tail outright.
+		body = _long_wiki_body()
+		self.assertGreater(len(body), wiki._MAX_EXISTING_BODY_PROMPT_CHARS)
+		_make_page(ALPHA_SLUG, ALPHA, body_md=body)
+
+		applied, failed = wiki.apply_extracted_page_updates(
+			[self._alpha_update(body_md="## Payment\n\nNow 45-day terms.")],
+			"voice",
+			"b@test.invalid",
+			allow_body_replace=False,
+		)
+		self.assertEqual((applied, failed), (1, 0))
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertIn("TAIL-SENTINEL-KEEP-ME", doc.body_md)
+		self.assertIn("Escalation contact 79", doc.body_md)
+		self.assertIn("45-day terms", doc.body_md)
+		self.assertGreaterEqual(len(doc.body_md), len(body))
+
+	def test_full_rewrite_caller_still_replaces(self):
+		# The default is deliberately unchanged: the app-learning scribe
+		# composes a page from a source it read in FULL, so a re-run refreshes
+		# its own page in place instead of doubling it every run.
+		_make_page(
+			ALPHA_SLUG,
+			ALPHA,
+			body_md="## Payment\n\nAlways 60-day terms.",
+			sources=frappe.as_json(
+				[{"date": "2026-01-01", "kind": "app-learning-agent:acme", "ref": None, "user": None}]
+			),
+		)
+		applied, failed = wiki.apply_extracted_page_updates(
+			[self._alpha_update(body_md="## Payment\n\nNow 45-day terms.")],
+			"app-learning-agent:acme",
+			"scribe@test.invalid",
+			provenance_prefix="app-learning",
+		)
+		self.assertEqual((applied, failed), (1, 0))
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertIn("45-day terms", doc.body_md)
+		self.assertNotIn("60-day terms", doc.body_md)
 
 	def test_contradiction_appends_flagged_section(self):
 		wiki.apply_extracted_page_updates([self._alpha_update()], "voice", "a@test.invalid", ref="NOTE-1")
@@ -509,6 +565,68 @@ class TestIngestNote(_ConversationFixture):
 		with patch("jarvis.chat.voice.openrouter_complete") as mock_llm:
 			wiki._ingest_note(note.name)
 		mock_llm.assert_not_called()
+
+	def test_ingest_keeps_a_body_longer_than_the_prompt_excerpt(self):
+		# Issue #488 end to end. The stored body is past the prompt budget, so
+		# the model is shown an excerpt and answers with the destructive shape:
+		# contradiction False plus a short "full merged body". Nothing may be
+		# lost, and the model must be told the body it saw was partial.
+		body = _long_wiki_body()
+		self.assertGreater(len(body), wiki._MAX_EXISTING_BODY_PROMPT_CHARS)
+		_make_page(ALPHA_SLUG, ALPHA, body_md=body)
+		note = self._make_note()
+		updates = [
+			{
+				"slug": ALPHA_SLUG,
+				"page_type": "Customer",
+				"title": ALPHA,
+				"summary": "Consolidated monthly invoicing.",
+				"body_md": "## Payment\n\nAlways 60-day terms.\n\n- Consolidated monthly invoices.",
+				"contradiction": False,
+			}
+		]
+		with patch(
+			"jarvis.chat.voice.openrouter_complete",
+			return_value=json.dumps(updates),
+		) as mock_llm:
+			wiki._ingest_note(note.name)
+
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertIn("TAIL-SENTINEL-KEEP-ME", doc.body_md)
+		self.assertIn("Escalation contact 79", doc.body_md)
+		self.assertIn("Consolidated monthly invoices", doc.body_md)
+		self.assertGreaterEqual(len(doc.body_md), len(body))
+		self.assertEqual(frappe.db.get_value(NOTE_DT, note.name, "status"), "Processed")
+
+		system_prompt, user_prompt = (m["content"] for m in mock_llm.call_args.args[0])
+		# The excerpt is marked as such, and the contract asks for append_md on
+		# a page that already exists.
+		self.assertIn("EXCERPT ONLY", user_prompt)
+		self.assertNotIn("TAIL-SENTINEL-KEEP-ME", user_prompt)
+		self.assertIn("append_md", system_prompt)
+
+	def test_ingest_appends_new_knowledge_to_an_existing_page(self):
+		# The shape the prompt now asks for on an existing page.
+		_make_page(ALPHA_SLUG, ALPHA, body_md="## Payment\n\nAlways 60-day terms.")
+		note = self._make_note()
+		updates = [{"slug": ALPHA_SLUG, "append_md": "- Consolidated monthly invoices."}]
+		with patch(
+			"jarvis.chat.voice.openrouter_complete",
+			return_value=json.dumps(updates),
+		):
+			wiki._ingest_note(note.name)
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertIn("60-day terms", doc.body_md)
+		self.assertTrue(doc.body_md.endswith("- Consolidated monthly invoices."))
+
+	def test_short_body_reaches_the_prompt_whole(self):
+		# Only an over-budget body is cut, and the cut lands on a line boundary.
+		short = "## Payment\n\nAlways 60-day terms."
+		self.assertEqual(wiki._body_for_prompt(short), short)
+		cut = wiki._body_for_prompt(_long_wiki_body())
+		self.assertLess(len(cut), len(_long_wiki_body()))
+		self.assertIn("EXCERPT ONLY", cut)
+		self.assertNotIn("TAIL-SENTINEL-KEEP-ME", cut)
 
 	def test_ingest_page_write_failure_leaves_note_new(self):
 		# A failed page write must NOT mark the note Processed — that would
