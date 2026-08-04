@@ -1964,6 +1964,29 @@ def _local_llm_survived_an_admin_disconnect(settings, pool_mode: bool) -> bool:
 	return _has_llm_config(settings) and _llm_apply_confirmed(settings, pool_mode)
 
 
+def _llm_config_revision() -> str:
+	"""Digest of this bench's LOCAL LLM configuration, read uncached.
+
+	The reconcile decides whether to destroy credentials from an answer admin gave
+	up to a probe-timeout ago, holding a ``settings`` doc it loaded before asking.
+	A customer who RECONNECTS inside that window - types a new key, saves, has it
+	pushed - would otherwise have the credential they just entered deleted by a
+	verdict about the connection they replaced. Snapshot this before the probe,
+	compare after, skip the tick if anything moved; the next tick re-reads a
+	consistent pair. A narrow window, but it is the exact failure mode this whole
+	branch exists to avoid, so it does not get to survive as a race.
+
+	Reuses ``account``'s gate-revision digest rather than a bespoke field list: it
+	already covers every field a save or a reconnect moves (provider, model, auth
+	mode, preset, routing, sync status, the three apply markers), it is uncached by
+	construction, and one definition means a field added for the chat gate is
+	respected here for free.
+	"""
+	from jarvis.account import _GATE_REVISION_FIELDS, _gate_revision, _settings_raw
+
+	return _gate_revision(_settings_raw(_GATE_REVISION_FIELDS))
+
+
 def reconcile_pending_llm_sync() -> None:
 	"""Scheduled safety net (*/5, hooks.py): finish a sync the in-band job left
 	PENDING because the admin apply was still converging (F2).
@@ -2035,13 +2058,17 @@ def reconcile_pending_llm_sync() -> None:
 			and (settings.get("llm_auth_mode") or "api_key") == "api_key"
 			and bool((settings.get("llm_provider") or "").strip())
 		)
-		# The disconnect leg's LOCAL precondition (see the docstring). Cheap and
-		# purely local, so the probe below is still skipped on every tenant that
-		# cannot possibly be in the split state.
+		# The disconnect leg's LOCAL precondition (see the docstring). It is true of
+		# every healthy CONNECTED workspace, so this leg does cost one extra
+		# get_connection per tick on those - unavoidable, because a bench that lost
+		# the disconnect looks identical to a working one from the inside, which is
+		# the whole defect. The probe is the same cheap read the SPA already makes
+		# far more often, and every tenant that holds no credential still skips it.
 		may_be_disconnected = _local_llm_survived_an_admin_disconnect(settings, pool_mode)
 		if not (is_applying_pending or is_unproven_pool or is_unproven_direct or may_be_disconnected):
 			return
 
+		revision_before = _llm_config_revision() if may_be_disconnected else ""
 		state, reason = _admin_chat_readiness()
 		if state == "Ready":
 			if is_applying_pending or is_unproven_pool or is_unproven_direct:
@@ -2050,14 +2077,29 @@ def reconcile_pending_llm_sync() -> None:
 				# single-model tenants (is_ready_for_chat's first-activation gates).
 				_stamp_converged_ok(settings, is_pool=pool_mode)
 			return
-		if may_be_disconnected and _admin_says_llm_gone(state, reason):
-			from jarvis.onboarding import apply_local_disconnect
-
-			frappe.logger().warning(
-				"jarvis_settings: admin reports this workspace's LLM credentials are gone "
-				"while the bench still holds them; completing the local disconnect"
+		if not (may_be_disconnected and _admin_says_llm_gone(state, reason)):
+			return
+		if _llm_config_revision() != revision_before:
+			# The customer reconnected while we were asking. Admin's answer is about
+			# the connection they just replaced, and acting on it would delete the
+			# credential they just entered. Drop the tick; the next one re-reads both.
+			frappe.logger().info(
+				"jarvis_settings: local LLM config changed during the disconnect probe; "
+				"discarding a stale admin verdict"
 			)
-			apply_local_disconnect(settings)
+			return
+
+		from jarvis.onboarding import apply_local_disconnect
+
+		frappe.logger().warning(
+			"jarvis_settings: admin reports this workspace's LLM credentials are gone "
+			"while the bench still holds them; completing the local disconnect"
+		)
+		# Safe to write through the doc loaded before the probe: the revision check
+		# above just proved nothing moved, and every write it makes is absolute
+		# (delete the rows, write _DISCONNECTED_LLM_FIELDS' constants) rather than
+		# derived from a field this doc is holding.
+		apply_local_disconnect(settings)
 	except Exception:
 		frappe.log_error(
 			title="Jarvis: reconcile_pending_llm_sync failed",

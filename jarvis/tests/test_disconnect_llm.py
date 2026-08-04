@@ -503,3 +503,24 @@ class TestDisconnectReconcile(_RT3SettingsTestCase):
 				self.assertFalse(_admin_says_llm_gone(state, clause))
 		self.assertFalse(_admin_says_llm_gone("Configuring", None))
 		self.assertFalse(_admin_says_llm_gone("Configuring", "ERP tools not connected"))
+
+	def test_a_reconnect_during_the_probe_discards_the_stale_verdict(self):
+		"""The narrow race the revision snapshot closes. Admin's answer is about the
+		connection the customer just replaced; acting on it would delete the
+		credential they entered while we were asking."""
+		self._split_the_planes()
+
+		def _reconnect_then_answer(*args, **kwargs):
+			# Stands in for the customer saving a new key between the probe leaving
+			# and its answer arriving. Any of the gate-revision fields will do.
+			settings = frappe.get_single("Jarvis Settings")
+			settings.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
+			frappe.db.commit()
+			return {
+				"chat_readiness": "Configuring",
+				"chat_readiness_reason": _ADMIN_DISCONNECTED_REASON,
+			}
+
+		with patch.object(admin_client, "get_connection", side_effect=_reconnect_then_answer):
+			reconcile_pending_llm_sync()
+		self._assert_pool_intact("a verdict about a replaced connection must not be acted on")
