@@ -87,7 +87,11 @@
 				<template v-else-if="column.key === '_actions'">
 					<div class="flex w-full items-center justify-end gap-1" @click.stop.prevent>
 						<Button
-							v-if="row.status === 'running' || row.status === 'queued'"
+							v-if="
+								row.status === 'running' ||
+								row.status === 'queued' ||
+								row.status === 'waiting_capacity'
+							"
 							variant="ghost"
 							theme="red"
 							icon="square"
@@ -175,6 +179,7 @@ const STATUS_OPTIONS = [
 	{ label: "All statuses", value: "" },
 	{ label: "Queued", value: "queued" },
 	{ label: "Running", value: "running" },
+	{ label: "Waiting for capacity", value: "waiting_capacity" },
 	{ label: "Completed", value: "completed" },
 	{ label: "Failed", value: "failed" },
 	{ label: "Stopped", value: "stopped" },
@@ -182,9 +187,14 @@ const STATUS_OPTIONS = [
 const RUN_THEMES = {
 	queued: "gray",
 	running: "blue",
+	waiting_capacity: "orange", // parked, not failed - matches the merge_status "pending" badge elsewhere in Macros
 	completed: "green",
 	failed: "red",
 	stopped: "gray",
+};
+// Statuses whose display label isn't just a capitalized value (e.g. waiting_capacity).
+const STATUS_LABELS = {
+	waiting_capacity: "Waiting for capacity",
 };
 
 const columns = [
@@ -339,7 +349,8 @@ onBeforeUnmount(() => {
 
 // ── formatters ───────────────────────────────────────────────────────────────
 function statusLabel(s) {
-	return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+	if (!s) return "";
+	return STATUS_LABELS[s] || s.charAt(0).toUpperCase() + s.slice(1);
 }
 function fmtDuration(sec) {
 	if (sec == null) return "";
