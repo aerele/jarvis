@@ -1891,6 +1891,85 @@ class TestAccountReconnect(FrappeTestCase):
 			onboarding.check_account_reconnect("rid-1", "ABCD2345")
 		poll.assert_called_once_with("rid-1", "ABCD2345")
 
+	def test_check_ready_on_a_pending_payment_account_routes_to_the_payment_resume(self):
+		"""admin-v2 #162. There is no container behind a recovered checkout, so
+		answering "connected" sends the wizard to sync_connection and it waits on a
+		workspace that never appears. Credentials are persisted either way - what
+		changes is only where the customer is put down."""
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={
+				"status": "ready",
+				"api_key": "pp-key",
+				"api_secret": "pp-secret",
+				"customer": "cust-abc@jarvis.invalid",
+				"customer_password": "pp-pass",
+				"subscription_status": "Pending Payment",
+			},
+		):
+			out = onboarding.check_account_reconnect("rid-1")
+		self.assertEqual(out["status"], "resume_payment")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("jarvis_admin_api_key", raise_exception=False), "pp-key")
+
+	def test_an_active_subscription_status_still_connects(self):
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={
+				"status": "ready",
+				"api_key": "a-key",
+				"api_secret": "a-secret",
+				"customer": "cust-def@jarvis.invalid",
+				"customer_password": "a-pass",
+				"subscription_status": "Active",
+			},
+		):
+			out = onboarding.check_account_reconnect("rid-1")
+		self.assertEqual(out["status"], "connected")
+
+	def test_an_admin_that_never_sends_the_key_still_connects(self):
+		"""Forward compatibility runs one way only: this bench may talk to an admin
+		older than the key. Absent must mean the behaviour that shipped before it."""
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={
+				"status": "ready",
+				"api_key": "o-key",
+				"api_secret": "o-secret",
+				"customer": "cust-ghi@jarvis.invalid",
+				"customer_password": "o-pass",
+			},
+		):
+			out = onboarding.check_account_reconnect("rid-1")
+		self.assertEqual(out["status"], "connected")
+
+	def test_eligibility_forwards_the_same_company_hint(self):
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility",
+			return_value={"eligible": False, "needs_company": False, "company_account_exists": True},
+		):
+			out = onboarding.reconnect_available("someone@acme.example", "Acme")
+		self.assertTrue(out["company_account_exists"])
+		self.assertFalse(out["eligible"], "a colleague's account is NOT this caller's to reconnect")
+
+	def test_eligibility_defaults_the_company_hint_to_false(self):
+		# An older admin sends no such key, and a control-plane failure sends nothing
+		# at all. Both must read as "say nothing", never as "yes".
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility",
+			return_value={"eligible": True, "needs_company": False},
+		):
+			self.assertFalse(onboarding.reconnect_available("a@b.example")["company_account_exists"])
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility",
+			side_effect=RuntimeError("control plane down"),
+		):
+			out = onboarding.reconnect_available("a@b.example")
+		self.assertEqual(out, {"eligible": False, "needs_company": False, "company_account_exists": False})
+
 	def test_check_expired_passthrough(self):
 		with patch(
 			"jarvis.onboarding.admin_client.get_reconnect_state",
