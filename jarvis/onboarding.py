@@ -701,6 +701,20 @@ def disconnect_llm() -> dict:
 	credentials were deleted when they were not, which is the one outcome this
 	feature cannot have.
 
+	That abort is NOT the whole story, and it cannot be. The admin call happens
+	synchronously inside a whitelisted request, so the chain is bounded by
+	gunicorn's ``-t`` on top of every client budget below it. A worker killed at
+	that ceiling AFTER admin already committed its blanked row leaves the planes
+	split the other way: admin (and the container) disconnected, this bench still
+	holding live keys and still advertising a model. Widening timeouts only moves
+	which layer does the killing.
+
+	So the abort is the FAST path, not the only one. The durable half is
+	``reconcile_pending_llm_sync``, which converges from admin's own state on a
+	later pass and finishes the local clear through ``apply_local_disconnect``
+	below. Nothing here records an intent for it to read - admin's state is the
+	authority, and asking it is what makes a killed worker survivable.
+
 	Idempotent: a tenant with nothing configured clears nothing and still succeeds
 	(admin's endpoint is idempotent for the same reason).
 	"""
@@ -713,6 +727,29 @@ def disconnect_llm() -> dict:
 	if _has_admin_credentials(settings):
 		_surface(admin_client.post_disconnect_llm)
 
+	apply_local_disconnect(settings)
+	return {"disconnected": True, "last_sync_status": "disconnected"}
+
+
+def apply_local_disconnect(settings) -> None:
+	"""The LOCAL half of a disconnect: destroy every stored credential, blank the
+	mirrored connection fields, drop the cached readiness verdict.
+
+	Split out of ``disconnect_llm`` because the scheduled reconcile needs the
+	IDENTICAL terminal state when it finds admin already disconnected and this
+	bench still holding secrets. Sharing one implementation is the point: a second,
+	hand-rolled clear would drift from ``_DISCONNECTED_LLM_FIELDS`` and leave a
+	half-cleared row that looks converged to everything downstream.
+
+	Deliberately does NOT call admin. Its only two callers have already established
+	that admin is done: one just got a success back, the other just read admin's
+	state saying so. Re-driving the deletion from here would spend the customer's
+	shared 20/hour rotate-ops bucket on a container admin's own reconcile is
+	already converging.
+
+	Idempotent: on an already-cleared tenant it deletes nothing and rewrites the
+	same values.
+	"""
 	_clear_llm_secrets(settings)
 	for field, value in _DISCONNECTED_LLM_FIELDS.items():
 		settings.db_set(field, value, update_modified=False)
@@ -721,7 +758,6 @@ def disconnect_llm() -> dict:
 	from jarvis.account import _bust_chat_gate
 
 	_bust_chat_gate()
-	return {"disconnected": True, "last_sync_status": "disconnected"}
 
 
 def _has_admin_credentials(settings) -> bool:
