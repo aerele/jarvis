@@ -697,12 +697,27 @@ const running = ref(false);
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
 // backend run_agent_now gate: nature in Auditor/Scribe); operators draft through
 // the Approval Board and never run on demand.
+// A scribe writes the live Org wiki directly (no shadow holding pen - see
+// agents_api.run_agent_now), so the backend refuses it outright while shadow
+// (jarvis#456). Block it here too rather than let the click round-trip into
+// that refusal - an auditor has no such restriction, its findings just land
+// in the reviewer-only preview set instead.
+const shadowScribeBlocked = computed(
+	() =>
+		!!(
+			agent.value &&
+			agent.value.nature === "Scribe" &&
+			activation.value &&
+			activation.value.activation_state !== "live"
+		)
+);
 const runDisabled = computed(
 	() =>
 		!installation.value ||
 		!installation.value.enabled ||
 		(agent.value && !["Auditor", "Scribe"].includes(agent.value.nature)) ||
-		!(agent.value && agent.value.allowed)
+		!(agent.value && agent.value.allowed) ||
+		shadowScribeBlocked.value
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
@@ -711,6 +726,8 @@ const runTooltip = computed(() => {
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "Your roles do not permit this agent";
+	if (shadowScribeBlocked.value)
+		return "Still in shadow preview - promote it to live under Configure first";
 	return nature === "Scribe" ? "Run this agent now" : "Run this audit now";
 });
 
