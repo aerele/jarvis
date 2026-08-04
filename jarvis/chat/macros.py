@@ -11,6 +11,10 @@ a closed browser tab (unlike a frontend-driven loop).
 State lives in ``Jarvis Macro Run`` (``current_step`` = 1-based index of the step
 last started; ``status`` in queued/running/completed/failed/stopped). Progress is
 pushed to the owner's realtime channel as ``macro:progress`` / ``macro:done``.
+
+A run also records the SHAPE it was dispatched in (``run_mode``, #470). Everything
+that re-enters a live run reads that snapshot rather than re-deriving the shape from
+the macro, because the macro is editable while the run is in flight.
 """
 
 from datetime import timedelta
@@ -77,6 +81,18 @@ BLOCK_STEP_BUDGET = "scheduled_step_budget"
 # and has already been terminalized, so the scheduler must not record a second one.
 BLOCK_DISPATCH_FAILED = "dispatch_failed"
 _DISPATCH_FAILED_ERROR = "The agent turn could not be dispatched, so this run never started."
+
+# #470: the two shapes a run can be dispatched in, snapshotted on the run row at insert.
+MODE_STEPPED = "stepped"
+MODE_MERGED = "merged"
+
+# #470: what the owner is told when a mid-park macro edit made the run's dispatch-time
+# shape unrunnable. Ending the run is the honest outcome: the alternatives are executing
+# the OLD summary the user just replaced, or silently switching shape mid-flight.
+_MACRO_CHANGED_ERROR = (
+	"The macro was edited while this run was waiting for capacity, so the run could no "
+	"longer continue the way it started. Run it again."
+)
 
 # Human sentences for the MANUAL path (thrown, so the SPA's existing toast renders
 # them). The scheduled path reports the machine code instead and the scheduler
@@ -190,6 +206,11 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 			"status": "running",
 			"current_step": 0,
 			"total_steps": total,
+			# #470: the shape is decided HERE, once, and every later re-entry into this
+			# run reads it back off the row. It used to be re-derived from the live macro
+			# on each dispatch, so a macro edited while the run sat parked for capacity
+			# flipped the run's shape mid-flight.
+			"run_mode": MODE_MERGED if merged else MODE_STEPPED,
 			"trigger": trigger,
 			"started_at": frappe.utils.now(),
 		}
@@ -551,7 +572,13 @@ def resume_waiting_capacity_runs() -> None:
 	Bounded: ``capacity_attempts`` is incremented each cycle; once it exceeds
 	``_MAX_CAPACITY_ATTEMPTS`` the run takes its NORMAL failure path with an honest reason
 	rather than retrying forever. Serialized + idempotent via the same per-run redis lock
-	the chaining hook uses, so a resume can never race a late step advance. Never raises."""
+	the chaining hook uses, so a resume can never race a late step advance. Never raises.
+
+	#470: the macro is re-read fresh here, but only for its CONTENT. Which shape to
+	dispatch comes from the run's own ``run_mode`` snapshot, never from live macro state.
+	The park window is long (``_MAX_CAPACITY_ATTEMPTS`` x the 5 min cron, ~100 min) and
+	macro edits do not take this lock, so re-deriving the shape let an edit land mid-park
+	and change what a live run executed."""
 	rows = frappe.get_all(RUN, filters={"status": "waiting_capacity"}, pluck="name")
 	if not rows:
 		return
@@ -575,6 +602,22 @@ def resume_waiting_capacity_runs() -> None:
 					)
 					_publish_done(run, macro_doc, "failed")
 					continue
+				# #470: end the run before spending an attempt on work its snapshot can no
+				# longer describe. State-fenced off waiting_capacity so a stop that landed
+				# first is never clobbered.
+				if _resume_incompatible(run, macro_doc):
+					if _cas_run_status(
+						run.name,
+						"waiting_capacity",
+						"failed",
+						finished_at=frappe.utils.now(),
+						error=_MACRO_CHANGED_ERROR,
+					):
+						frappe.db.commit()
+						_publish_done(run, macro_doc, "failed")
+					else:
+						frappe.db.commit()
+					continue
 				# CDX-22: flip waiting_capacity -> running with a STATE-FENCED CAS (not a blind set),
 				# recording the attempt BEFORE re-enqueue so a re-overload keeps the bounded count. The
 				# fence closes the stop-before-resume-write race: a stop that already set ``stopped``
@@ -591,10 +634,15 @@ def resume_waiting_capacity_runs() -> None:
 				# ``stopped``, so no restore is owed.
 				if _run_status_now(run.name) != "running":
 					continue
-				merged = (macro_doc.merged_prompt or "").strip()
 				try:
-					if merged:
-						_run_merged(run, macro_doc, merged)
+					# #470: the run's OWN snapshot decides the shape. This branch used to read
+					# ``macro_doc.merged_prompt`` live, so a summary that landed during the park
+					# turned a part-executed stepped run merged (re-running steps 2..N after the
+					# merged turn), and a step edit that cleared the summary turned a merged run
+					# stepped (one step ran, then ``advance_after_turn`` computed
+					# total=min(1,N)=1 and reported the run COMPLETED).
+					if _run_mode(run, macro_doc) == MODE_MERGED:
+						_run_merged(run, macro_doc, (macro_doc.merged_prompt or "").strip())
 					else:
 						_run_step(run, macro_doc, int(run.current_step or 0))
 				except Exception:
@@ -609,6 +657,49 @@ def resume_waiting_capacity_runs() -> None:
 					_compensate_resume_enqueue_failure(run, macro_doc, attempts)
 		except Exception:
 			frappe.log_error(title="jarvis macro capacity-resume failed", message=frappe.get_traceback())
+
+
+def _run_mode(run, macro_doc) -> str:
+	"""The shape this run was DISPATCHED in (#470).
+
+	An explicit column rather than reusing ``total_steps == 1`` as the merged marker.
+	``total_steps`` is already the loop bound ``advance_after_turn`` reads
+	(``min(run.total_steps or len(steps), len(steps))``), so overloading it would make one
+	column mean two things and tie any future change to either meaning to the other. It is
+	also ambiguous on its own: a genuine ONE-STEP macro run as a sequence has
+	``total_steps == 1`` too.
+
+	A blank value means a row written before the column existed. It can only be a run that
+	was live across the deploy, so the window is at most one park (~100 min), and
+	``total_steps`` is the only dispatch-time record such a row carries. Resolve its
+	one-step ambiguity toward ``stepped``: for a one-step macro the two shapes dispatch
+	near-identical prompts, and ``stepped`` is the branch that can neither re-run a
+	completed step nor complete early."""
+	mode = (run.get("run_mode") or "").strip()
+	if mode in (MODE_MERGED, MODE_STEPPED):
+		return mode
+	steps = macro_doc.steps or []
+	return MODE_MERGED if int(run.total_steps or 0) == 1 and len(steps) > 1 else MODE_STEPPED
+
+
+def _resume_incompatible(run, macro_doc) -> bool:
+	"""#470: True when the macro was edited during the park in a way that leaves the run's
+	dispatch-time shape unrunnable. Macro edits take no per-run lock, so the resume path is
+	where that is noticed.
+
+	* **merged, summary gone.** ``update_macro`` clears ``merged_prompt`` the moment the
+	  steps change, precisely because the summary describes the OLD steps. Running it
+	  anyway would execute the intent the user just replaced. A merged run parks BEFORE its
+	  only turn (``_run_merged`` defers ahead of the ``current_step`` write, and
+	  ``advance_after_turn`` never re-enters merged), so nothing has executed and ending
+	  the run costs no work.
+	* **stepped, step list shrank past the cursor.** ``macro_doc.steps[index]`` would
+	  IndexError, and the CDX-23 compensation would then restore ``waiting_capacity`` and
+	  retry that certain IndexError once per cron cycle until the attempt cap ~100 min
+	  later."""
+	if _run_mode(run, macro_doc) == MODE_MERGED:
+		return not (macro_doc.merged_prompt or "").strip()
+	return int(run.current_step or 0) >= len(macro_doc.steps or [])
 
 
 def _compensate_resume_enqueue_failure(run, macro_doc, attempts: int) -> None:

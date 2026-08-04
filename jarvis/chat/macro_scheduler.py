@@ -15,6 +15,10 @@ the macro's owner (so the result conversation is theirs) and advancing
   Manager can read; ``last_run_at`` is stamped only when the slot was actually
   consumed; and a dispatch that RAISED does not advance the schedule, so the
   missed slot retries on the next tick rather than looking like a success.
+* **#472** — the sweep is per-macro fault-isolated, and ``compute_next_run`` is
+  TOTAL: no ``schedule_time`` value, however malformed, can make it raise. Both
+  limbs matter because the schedule arithmetic used to run OUTSIDE the per-macro
+  try/except, so one bad row aborted the sweep for every other macro on the bench.
 """
 
 import datetime
@@ -28,6 +32,7 @@ MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
 
 _DEFAULT_SECONDS = 9 * 3600  # 09:00 when no schedule_time set
+_MAX_SECONDS = 24 * 3600 - 1  # 23:59:59, the last representable time of day
 
 # #471: the owner cannot act on any of these — Administrator and disabled users
 # are refused by notify_owner anyway, and a role-less owner can no longer reach
@@ -91,61 +96,84 @@ def run_due_macros() -> None:
 	if not due:
 		return
 
+	original_user = frappe.session.user
+	for m in due:
+		# #472: fault-isolate each macro. The per-macro try below covers only the
+		# DISPATCH; the schedule arithmetic, the identity guard and the bookkeeping all
+		# sat outside it, so anything they raised propagated out of the whole sweep and
+		# every macro after this one silently missed its slot. The concrete case was a
+		# `schedule_time` the arithmetic could not use, but the guarantee wanted here is
+		# structural and not specific to that value: no single row can take the sweep
+		# down. The slot is left DUE on this path (#471's rule: a failure never advances
+		# the schedule), so the next hourly tick retries it.
+		try:
+			_sweep_one(m, now, original_user)
+		except Exception:
+			if frappe.session.user != original_user:
+				frappe.set_user(original_user)
+			frappe.db.rollback()
+			frappe.log_error(
+				title=f"jarvis scheduled macro sweep failed: {m.name}",
+				message=frappe.get_traceback(),
+			)
+
+
+def _sweep_one(m, now, original_user: str) -> None:
+	"""Handle ONE due macro. Extracted from the loop so ``run_due_macros`` can wrap it
+	whole (#472); every ``return`` here was a ``continue`` in the loop it came from."""
 	from jarvis.chat import macros
 	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
 
-	original_user = frappe.session.user
-	for m in due:
-		# #471: a macro its owner switched OFF is not a failure, it is the state
-		# they asked for. run_macro's own `enabled` early return was never inspected
-		# here, so the slot was consumed AND last_run_at stamped — leaving the UI
-		# reading "last run: today" for a macro that has not run in months. Move the
-		# schedule on so it does not busy re-fire, write no failed row, and leave
-		# last_run_at alone: nothing ran.
-		if not cint(m.enabled):
-			_consume_slot(m, now, stamp_last_run=False)
-			continue
+	# #471: a macro its owner switched OFF is not a failure, it is the state
+	# they asked for. run_macro's own `enabled` early return was never inspected
+	# here, so the slot was consumed AND last_run_at stamped — leaving the UI
+	# reading "last run: today" for a macro that has not run in months. Move the
+	# schedule on so it does not busy re-fire, write no failed row, and leave
+	# last_run_at alone: nothing ran.
+	if not cint(m.enabled):
+		_consume_slot(m, now, stamp_last_run=False)
+		return
 
-		# MAC-1 (security review PART 3, TASK 23): never run a macro whose owner
-		# has lost Jarvis access (demoted System User, or a Website/portal owner) —
-		# the scheduled turn would otherwise execute jarvis__* tools as an identity
-		# categorically barred from Jarvis.
-		#
-		# #469: has_jarvis_access alone is NOT that guarantee. It returns True for
-		# Administrator before any other check, and NOTHING in permissions.py (nor
-		# frappe.get_roles) reads User.enabled — so on its own it admitted an
-		# unattended, fully perm-bypassing Administrator turn, and kept an
-		# offboarded employee's macros firing with live ERP access forever. Add the
-		# fail-closed identity guard the sibling agent scheduler has always applied
-		# (agent_scheduler._valid_owner). Both checks are required: this one refuses
-		# Administrator/Guest/disabled, has_jarvis_access refuses portal users and
-		# role-less System Users.
-		#
-		# Consume the slot so it does not busy re-fire, but skip the run.
-		if not is_valid_unattended_owner(m.owner) or not has_jarvis_access(m.owner):
-			_record_failed(m, _BARRED_OWNER)
-			_consume_slot(m, now)
-			continue
-		try:
-			frappe.set_user(m.owner)
-			out = macros.run_macro(m.name, trigger="scheduled") or {}
-		except Exception:
+	# MAC-1 (security review PART 3, TASK 23): never run a macro whose owner
+	# has lost Jarvis access (demoted System User, or a Website/portal owner) —
+	# the scheduled turn would otherwise execute jarvis__* tools as an identity
+	# categorically barred from Jarvis.
+	#
+	# #469: has_jarvis_access alone is NOT that guarantee. It returns True for
+	# Administrator before any other check, and NOTHING in permissions.py (nor
+	# frappe.get_roles) reads User.enabled — so on its own it admitted an
+	# unattended, fully perm-bypassing Administrator turn, and kept an
+	# offboarded employee's macros firing with live ERP access forever. Add the
+	# fail-closed identity guard the sibling agent scheduler has always applied
+	# (agent_scheduler._valid_owner). Both checks are required: this one refuses
+	# Administrator/Guest/disabled, has_jarvis_access refuses portal users and
+	# role-less System Users.
+	#
+	# Consume the slot so it does not busy re-fire, but skip the run.
+	if not is_valid_unattended_owner(m.owner) or not has_jarvis_access(m.owner):
+		_record_failed(m, _BARRED_OWNER)
+		_consume_slot(m, now)
+		return
+	try:
+		frappe.set_user(m.owner)
+		out = macros.run_macro(m.name, trigger="scheduled") or {}
+	except Exception:
+		frappe.set_user(original_user)
+		frappe.log_error(
+			title=f"jarvis scheduled macro failed: {m.name}",
+			message=frappe.get_traceback(),
+		)
+		# #471: record the failure where the OWNER can see it, and do NOT consume
+		# the slot — next_run_at stays in the past so the next hourly tick retries
+		# it. Previously the schedule advanced regardless, so a run that never
+		# happened was indistinguishable from one that did.
+		_record_failed(m, _DISPATCH_FAILED)
+		_notify_owner(m, _DISPATCH_FAILED)
+		return
+	finally:
+		if frappe.session.user != original_user:
 			frappe.set_user(original_user)
-			frappe.log_error(
-				title=f"jarvis scheduled macro failed: {m.name}",
-				message=frappe.get_traceback(),
-			)
-			# #471: record the failure where the OWNER can see it, and do NOT consume
-			# the slot — next_run_at stays in the past so the next hourly tick retries
-			# it. Previously the schedule advanced regardless, so a run that never
-			# happened was indistinguishable from one that did.
-			_record_failed(m, _DISPATCH_FAILED)
-			_notify_owner(m, _DISPATCH_FAILED)
-			continue
-		finally:
-			if frappe.session.user != original_user:
-				frappe.set_user(original_user)
-		_settle(m, now, out)
+	_settle(m, now, out)
 
 
 def _settle(m, now, out: dict) -> None:
@@ -241,7 +269,13 @@ def _notify_owner(m, reason: str) -> None:
 
 def compute_next_run(frequency: str, schedule_time, from_dt=None) -> datetime.datetime:
 	"""Next fire time strictly after ``from_dt`` (default now) at ``schedule_time``
-	on the given ``frequency`` (daily/weekly/monthly)."""
+	on the given ``frequency`` (daily/weekly/monthly).
+
+	TOTAL by construction (#472): ``_time_to_seconds`` can only return a real time of
+	day, so ``base.replace(hour=...)`` can no longer raise ``ValueError`` on a value
+	that reached the row before this validation existed. That matters because the
+	function is called from the cron's bookkeeping, where a raise skipped every macro
+	after the offending one."""
 	base = get_datetime(from_dt) if from_dt else now_datetime()
 	secs = _time_to_seconds(schedule_time)
 	cand = base.replace(hour=secs // 3600, minute=(secs % 3600) // 60, second=0, microsecond=0)
@@ -258,16 +292,53 @@ def _advance(dt: datetime.datetime, frequency: str) -> datetime.datetime:
 	return add_to_date(dt, days=1)
 
 
-def _time_to_seconds(t) -> int:
-	if not t:
-		return _DEFAULT_SECONDS
+def parse_schedule_seconds(t) -> int | None:
+	"""Seconds since midnight for a ``schedule_time``, or None when it is not a real
+	time of day (#472).
+
+	STRICT on purpose: this is the reader ``JarvisMacro.validate`` uses to REFUSE a
+	bad value at save with a field error. It has to be strict because Frappe's own
+	Time-field validation runs AFTER the controller (``Document.insert`` calls
+	``run_before_save_methods`` and only then ``_validate``), so by the time the
+	framework would object the controller has already fed the value to the schedule
+	arithmetic.
+
+	MariaDB's TIME column accepts up to 838:59:59, which is why an out-of-range value
+	could be persisted at all: the storage layer is not the guard here.
+
+	``compute_next_run`` is shared with the AGENT scheduler (``agent_scheduler._advance``,
+	``agents_api.set_schedule``, ``agent_runs``), which has the same unguarded shape: the
+	agent sweep calls ``_advance`` from ten sites and only one of them sits inside a try.
+	Making the arithmetic total therefore closes that cron-wide abort too. The trade is
+	that ``agents_api.set_schedule`` no longer 500s on a hand-crafted out-of-range value,
+	it saves it and schedules 09:00; the durable fix there is this same check applied in
+	the Jarvis Agent Installation controller, which is out of scope for #472.
+	"""
+	if t is None or t == "":
+		return None
 	if isinstance(t, datetime.timedelta):
-		return int(t.total_seconds())
-	parts = str(t).split(":")
-	try:
-		h = int(parts[0])
-		m = int(parts[1]) if len(parts) > 1 else 0
-		s = int(parts[2]) if len(parts) > 2 else 0
-		return h * 3600 + m * 60 + s
-	except (ValueError, IndexError):
-		return _DEFAULT_SECONDS
+		secs = int(t.total_seconds())
+	elif isinstance(t, datetime.time):
+		secs = t.hour * 3600 + t.minute * 60 + t.second
+	else:
+		parts = str(t).strip().split(":")
+		if len(parts) > 3:
+			return None
+		try:
+			nums = [int(p) for p in parts]
+		except ValueError:
+			return None
+		nums += [0] * (3 - len(nums))
+		h, m, s = nums
+		if not (0 <= m <= 59 and 0 <= s <= 59):
+			return None
+		secs = h * 3600 + m * 60 + s
+	return secs if 0 <= secs <= _MAX_SECONDS else None
+
+
+def _time_to_seconds(t) -> int:
+	"""TOLERANT reader, for the cron. A value the strict parser rejects has already
+	been persisted, so refusing it here would only take the schedule arithmetic down
+	with it; fall back to the same 09:00 an unset time gets and let the sweep finish."""
+	secs = parse_schedule_seconds(t)
+	return _DEFAULT_SECONDS if secs is None else secs

@@ -12,6 +12,7 @@
     "status",
     "current_step",
     "total_steps",
+    "run_mode",
     "capacity_attempts",
     "trigger",
     "started_at",
@@ -55,6 +56,13 @@
       "fieldtype": "Int",
       "label": "Total Steps",
       "default": "0"
+    },
+    {
+      "fieldname": "run_mode",
+      "fieldtype": "Select",
+      "label": "Run Mode",
+      "options": "\nstepped\nmerged",
+      "description": "#470: the shape this run was DISPATCHED in - the whole step sequence (stepped) or the macro's summarized single prompt (merged). Snapshotted at insert and never rewritten, so a macro edited while the run is parked in waiting_capacity cannot flip it mid-flight. Deliberately has NO default: the blank a pre-#470 row gets on migrate is what tells the resume path to fall back instead of trusting a value nobody wrote."
     },
     {
       "fieldname": "capacity_attempts",

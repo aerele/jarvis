@@ -27,6 +27,7 @@ class JarvisMacro(Document):
 		self._validate_steps()
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
+		self._validate_schedule_time()
 		self._recompute_next_run()
 
 	def _validate_name(self):
@@ -71,6 +72,29 @@ class JarvisMacro(Document):
 		owner = self.owner or frappe.session.user
 		if frappe.db.count("Jarvis Macro", {"owner": owner}) >= MAX_MACROS_PER_OWNER:
 			frappe.throw(_("You can have at most {0} macros.").format(MAX_MACROS_PER_OWNER))
+
+	def _validate_schedule_time(self):
+		"""#472: refuse a ``schedule_time`` that is not a time of day.
+
+		Frappe does not coerce or range-check a Time field before the controller runs
+		(``Document.insert`` runs ``validate`` first and ``_validate`` after), so the raw
+		value reached ``_recompute_next_run`` -> ``compute_next_run`` ->
+		``datetime.replace(hour=...)`` and surfaced as an unhandled ``ValueError``, i.e.
+		an HTTP 500 with a traceback instead of a field error.
+
+		Checked whenever a value is PRESENT, not only when ``schedule_enabled`` is on.
+		With the schedule off the bad value used to persist happily (MariaDB TIME holds
+		up to 838:59:59), which is what armed the cron-wide abort: a later flip of
+		``schedule_enabled`` handed the stored garbage straight to the sweep."""
+		if self.schedule_time in (None, ""):
+			return
+		from jarvis.chat.macro_scheduler import parse_schedule_seconds
+
+		if parse_schedule_seconds(self.schedule_time) is None:
+			frappe.throw(
+				_("Schedule time must be a time of day between 00:00:00 and 23:59:59."),
+				title=_("Invalid schedule time"),
+			)
 
 	def _recompute_next_run(self):
 		"""Keep ``next_run_at`` in sync with the schedule fields. The scheduler
