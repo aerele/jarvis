@@ -32,6 +32,7 @@ from jarvis.chat import agents_api
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
+ACTIVITY = "Jarvis Agent Activity"
 FINDING = "Jarvis Agent Finding"
 PROVENANCE = "Jarvis Agent Provenance Event"
 SETTINGS = "Jarvis Settings"
@@ -139,6 +140,13 @@ def _wipe(slugs) -> None:
 		frappe.delete_doc(FINDING, n, force=True, ignore_permissions=True)
 	for n in frappe.get_all(RUN, filters={"agent": ["in", slugs]}, pluck="name", ignore_permissions=True):
 		frappe.delete_doc(RUN, n, force=True, ignore_permissions=True)
+	# ``uninstall_agent`` writes an ``uninstalled`` activity row and COMMITS, so the
+	# test-case rollback cannot reclaim it — same reason test_platform_capability_contract
+	# wipes ACTIVITY explicitly. Without this the suite leaks rows on every run.
+	for n in frappe.get_all(
+		ACTIVITY, filters={"agent": ["in", slugs]}, pluck="name", ignore_permissions=True
+	):
+		frappe.delete_doc(ACTIVITY, n, force=True, ignore_permissions=True)
 	for n in frappe.get_all(
 		INSTALLATION, filters={"agent": ["in", slugs]}, pluck="name", ignore_permissions=True
 	):
@@ -449,6 +457,18 @@ class TestUninstallCascadeScope(FrappeTestCase):
 		self._uninstall_a()
 		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
 		self.assertEqual(frappe.db.get_value(FINDING, self.f_b, "last_seen_run"), self.run_b)
+
+	def test_either_creation_stamp_alone_establishes_membership(self):
+		"""``run`` and ``first_seen_run`` are written to the same value today, but the
+		cascade ORs them so a row carrying only ONE of the two still resolves. Both
+		half-stamped shapes belong to A and must go; neither may drag in B's row."""
+		only_run = _mk_finding(self.reviewer, self.SLUG, run=self.run_a).name
+		only_first = _mk_finding(self.reviewer, self.SLUG, first_seen_run=self.run_a).name
+		frappe.db.commit()
+		self._uninstall_a()
+		self.assertFalse(frappe.db.exists(FINDING, only_run))
+		self.assertFalse(frappe.db.exists(FINDING, only_first))
+		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
 
 	def test_finding_with_no_run_pointer_is_left_alone(self):
 		"""A row with no run pointer cannot be attributed to any installation, so
