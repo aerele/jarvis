@@ -15,6 +15,8 @@ Kept in its own module (not folded into test_wiki.py) so it stays independent of
 the other wiki suites.
 """
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
@@ -207,3 +209,187 @@ class TestUserScopePageIsolation(FrappeTestCase):
 		self.assertNotEqual(first["slug"], second["slug"])
 		self.assertEqual(frappe.db.get_value(WIKI_DT, first["slug"], "target_user"), TWIN_A)
 		self.assertEqual(frappe.db.get_value(WIKI_DT, second["slug"], "target_user"), TWIN_B)
+
+
+class TestVoiceIngestPreservesHumanEdits(FrappeTestCase):
+	"""Issue #489."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_delete_test_pages()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_delete_test_pages()
+
+	def _voice(self, update):
+		"""One voice write, shaped exactly like the ingest's own call."""
+		return wiki.apply_extracted_page_updates(
+			[update],
+			"voice",
+			"b@test.invalid",
+			allow_body_replace=False,
+			preserve_curated=True,
+		)
+
+	def test_human_edit_survives_a_later_voice_ingest(self):
+		_make_page(ALPHA_SLUG, ALPHA, body_md="## Payment\n\nMachine guess.")
+		wiki.save_wiki_page(
+			slug=ALPHA_SLUG,
+			body_md="## Payment\n\nHUMAN-AUTHORED net 30, no exceptions.",
+			summary="HUMAN-SUMMARY",
+		)
+		applied, failed = self._voice(
+			{
+				"slug": ALPHA_SLUG,
+				"body_md": "## Payment\n\nMACHINE-PARAPHRASE 45 days.",
+				"summary": "MACHINE-SUMMARY",
+			}
+		)
+		self.assertEqual((applied, failed), (1, 0))
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		# The summary REPLACES, so it is the field that still destroyed human
+		# text after issue #488 turned the body into an append. Asserted FIRST
+		# because it is the only surviving data loss, not a presentation detail.
+		self.assertEqual(doc.summary, "HUMAN-SUMMARY")
+		# The human's words survive, the new knowledge still lands, and a reader
+		# can tell which is which.
+		self.assertIn("HUMAN-AUTHORED net 30", doc.body_md)
+		self.assertIn("MACHINE-PARAPHRASE 45 days", doc.body_md)
+		self.assertIn("## Added by Jarvis from a note (", doc.body_md)
+
+	def test_summary_is_still_filled_when_the_human_left_it_empty(self):
+		_make_page(ALPHA_SLUG, ALPHA, body_md="Human body.", sources=_curated_sources())
+		applied, failed = self._voice({"slug": ALPHA_SLUG, "append_md": "- New.", "summary": "Filled in."})
+		self.assertEqual((applied, failed), (1, 0))
+		self.assertEqual(frappe.get_doc(WIKI_DT, ALPHA_SLUG).summary, "Filled in.")
+
+	def test_a_curated_page_is_never_truncated_from_the_head(self):
+		# _clip_body keeps the TAIL, so clipping an over-cap append silently
+		# deletes the human's OLDEST lines. Refuse the update instead: dropping
+		# one note's knowledge is recoverable, deleting a person's text is not.
+		body = "HUMAN-HEAD-SENTINEL\n" + ("h" * (wiki.MAX_BODY_LEN - 200))
+		_make_page(ALPHA_SLUG, ALPHA, body_md=body, sources=_curated_sources())
+		applied, failed = self._voice({"slug": ALPHA_SLUG, "append_md": "m" * 500})
+		self.assertEqual((applied, failed), (0, 0))
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertTrue(doc.body_md.startswith("HUMAN-HEAD-SENTINEL"))
+		self.assertEqual(doc.body_md, body)
+
+	def test_the_ingest_still_owns_the_pages_it_created_itself(self):
+		# Why provenance_prefix="voice" cannot be the fix: "voice" is in
+		# _HUMAN_SOURCE_KINDS AND is what the ingest stamps on every page it
+		# writes, so that fence would refuse its own pages from note two onward.
+		created = self._voice(
+			{
+				"slug": ALPHA_SLUG,
+				"page_type": "Customer",
+				"title": ALPHA,
+				"body_md": "- First note.",
+			}
+		)
+		self.assertEqual(created, (1, 0))
+		self.assertEqual(self._voice({"slug": ALPHA_SLUG, "append_md": "- Second note."}), (1, 0))
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertIn("- First note.", doc.body_md)
+		self.assertIn("- Second note.", doc.body_md)
+		# No attribution heading: nobody curated this page, it is the scribe's.
+		self.assertNotIn("## Added by Jarvis from a note (", doc.body_md)
+		self.assertFalse(wiki._sources_are_curated(doc.sources))
+
+	def test_the_agents_own_tool_writes_do_not_count_as_curation(self):
+		# "tool" (update_wiki) and "chat" name machine-composed text, so they
+		# stay OUT of the curated set even though _HUMAN_SOURCE_KINDS holds them
+		# for the stricter app-learning fence.
+		self.assertFalse(wiki._sources_are_curated(frappe.as_json([{"kind": "tool"}, {"kind": "chat"}])))
+		self.assertTrue(wiki._sources_are_curated(frappe.as_json([{"kind": "promotion"}])))
+		# Unreadable provenance fails CLOSED, toward preserving text.
+		self.assertTrue(wiki._sources_are_curated("{not json"))
+
+	def test_app_learning_fence_is_unchanged(self):
+		# The scribe's fence keeps BOTH halves: it refreshes its own page in
+		# place, and it refuses outright once a human has touched it.
+		_make_page(
+			ALPHA_SLUG,
+			ALPHA,
+			body_md="SCRIBE-V1",
+			sources=frappe.as_json(
+				[{"date": "2026-01-01", "kind": "app-learning-agent:acme", "ref": None, "user": None}]
+			),
+		)
+		applied, failed = wiki.apply_extracted_page_updates(
+			[{"slug": ALPHA_SLUG, "body_md": "SCRIBE-V2"}],
+			"app-learning-agent:acme",
+			"scribe@test.invalid",
+			provenance_prefix="app-learning",
+		)
+		self.assertEqual((applied, failed), (1, 0))
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertEqual(doc.body_md, "SCRIBE-V2")
+		self.assertNotIn("SCRIBE-V1", doc.body_md)
+
+		wiki.save_wiki_page(slug=ALPHA_SLUG, body_md="HUMAN-BODY")
+		applied, failed = wiki.apply_extracted_page_updates(
+			[{"slug": ALPHA_SLUG, "body_md": "SCRIBE-V3"}],
+			"app-learning-agent:acme",
+			"scribe@test.invalid",
+			provenance_prefix="app-learning",
+		)
+		self.assertEqual((applied, failed), (0, 0))
+		self.assertEqual(frappe.get_doc(WIKI_DT, ALPHA_SLUG).body_md, "HUMAN-BODY")
+
+	def test_callers_without_the_flag_are_byte_for_byte_unchanged(self):
+		# preserve_curated defaults off, so no existing caller changes shape.
+		_make_page(
+			ALPHA_SLUG,
+			ALPHA,
+			body_md="HUMAN-BODY",
+			summary="HUMAN-SUMMARY",
+			sources=_curated_sources(),
+		)
+		applied, failed = wiki.apply_extracted_page_updates(
+			[{"slug": ALPHA_SLUG, "body_md": "MACHINE-BODY", "summary": "MACHINE-SUMMARY"}],
+			"voice",
+			"b@test.invalid",
+		)
+		self.assertEqual((applied, failed), (1, 0))
+		doc = frappe.get_doc(WIKI_DT, ALPHA_SLUG)
+		self.assertEqual(doc.body_md, "MACHINE-BODY")
+		self.assertEqual(doc.summary, "MACHINE-SUMMARY")
+
+	def test_the_note_ingest_passes_the_fence(self):
+		# The defect was purely a caller omission, so assert the caller.
+		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "wikifence"}).insert(
+			ignore_permissions=True
+		)
+		note = frappe.get_doc(
+			{
+				"doctype": "Jarvis Voice Note",
+				"transcript": "Wikifence fence wiring.",
+				"context_type": "Conversation",
+				"conversation": conv.name,
+				"entities": frappe.as_json([]),
+				"source": "Chat Nudge",
+				"status": "New",
+			}
+		).insert(ignore_permissions=True)
+		try:
+			with patch("jarvis.chat.wiki._extract_page_updates", return_value=[]):
+				with patch(
+					"jarvis.chat.wiki.apply_extracted_page_updates", return_value=(0, 0)
+				) as apply_mock:
+					wiki._ingest_note(note.name)
+		finally:
+			frappe.db.delete("Jarvis Voice Note", {"name": note.name})
+			frappe.db.delete("Jarvis Conversation", {"name": conv.name})
+		self.assertTrue(apply_mock.call_args.kwargs["preserve_curated"])
+		self.assertFalse(apply_mock.call_args.kwargs["allow_body_replace"])
+
+	def test_the_personalise_ingest_passes_the_fence(self):
+		from jarvis.learning import voice_facts
+
+		facts = [{"domain": "selling", "statement": "Wikifence personalise fact."}]
+		with patch.object(wiki, "apply_extracted_page_updates", return_value=(0, 0)) as apply_mock:
+			voice_facts._apply_personalise_context(facts, "b@test.invalid", ref="NOTE-1")
+		self.assertTrue(apply_mock.call_args.kwargs["preserve_curated"])
+		self.assertEqual(apply_mock.call_args.kwargs["target_user"], "b@test.invalid")
