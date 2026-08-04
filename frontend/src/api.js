@@ -94,6 +94,9 @@ export const recordHomeIntroEvent = (event, payload) =>
 		category: (payload && payload.category) || "",
 		bucket: (payload && payload.bucket) || "",
 	});
+// Persist the sidebar nav order (drag-to-reorder). order = {top:[labels], more:[labels]}.
+export const setSidebarOrder = (order) =>
+	call(US + "set_sidebar_order", { order: JSON.stringify(order || {}) });
 // Jarvis Admin (or System Manager) only — server re-checks independently of
 // the client's window.is_jarvis_admin gate.
 export const adminListUserUsage = () => call(US + "admin_list_user_usage");
@@ -115,6 +118,9 @@ export const updateBranding = (p) => call(BR + "update_branding", p || {});
 // --- Mobile app onboarding: QR the phone scans to learn the site connection
 // details (no secret — just where to reach this site). ---
 export const getPairingQr = () => call("jarvis.mobile.auth.get_pairing_qr");
+// QR of the mobile PWA URL — scanning opens /jarvis-mobile (Android offers to
+// install it, iOS opens it in Safari for Add-to-Home-Screen).
+export const getPwaQr = () => call("jarvis.mobile.auth.get_pwa_qr");
 
 // --- Custom skills (customer-authored, pushed to the container) ---
 const SK = "jarvis.chat.custom_skills_api.";
@@ -204,9 +210,17 @@ export async function sendMessage(conversation, message, modelOverride, attachme
 	const args = { conversation: conversation || "", message };
 	if (modelOverride) args.model_override = modelOverride;
 	if (attachments && attachments.length) args.attachments = JSON.stringify(attachments);
-	// Forward context for a viewing-context doc/report OR the one-shot
-	// "ground on wiki" flag (which can arrive without a doc).
-	if (context && (context.doctype || context.ground_wiki))
+	// Forward context for a viewing-context doc/report, the one-shot "ground on
+	// wiki" flag (which can arrive without a doc), OR a page marker ("triggers" /
+	// "dashboards") that primes the agent for that surface's flow from the main
+	// chat. The backend re-applies the same allow-list (chat.api.send_message).
+	if (
+		context &&
+		(context.doctype ||
+			context.ground_wiki ||
+			context.page === "triggers" ||
+			context.page === "dashboards")
+	)
 		args.context = JSON.stringify(context);
 	return call("jarvis.chat.api.send_message", args);
 }

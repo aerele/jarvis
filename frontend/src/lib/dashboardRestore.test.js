@@ -25,7 +25,6 @@ const paneSrc = read("..", "pages", "dashboards", "DashboardChatPane.vue");
 const pageSrc = read("..", "pages", "dashboards", "DashboardsPage.vue");
 const canvasSrc = read("..", "pages", "dashboards", "DashboardCanvas.vue");
 const saveDialogSrc = read("..", "pages", "dashboards", "SaveDashboardDialog.vue");
-const triggerPaneSrc = read("..", "pages", "triggers", "TriggerChatPane.vue");
 const composerSrc = read("..", "components", "chat", "Composer.vue");
 
 // The composer block of an SFC: from the composer comment to the end of the
@@ -268,11 +267,8 @@ test("the pane follows the sticky conversation slot when the page repoints it", 
 
 // ---- D2: the clarifying questions are answerable on every surface -------
 
-test("both embedded panes render the ask card instead of deleting the block", () => {
-	for (const [label, src] of [
-		["dashboards", paneSrc],
-		["triggers", triggerPaneSrc],
-	]) {
+test("the dashboard pane renders the ask card instead of deleting the block", () => {
+	for (const [label, src] of [["dashboards", paneSrc]]) {
 		assert.match(src, /import AskCard from "@\/components\/chat\/AskCard\.vue";/, label);
 		assert.match(src, /import \{ parseAsk \} from "@\/lib\/chatAsk";/, label);
 		assert.match(src, /<AskCard\n\t+v-if="askFor === m\.name && activeAsk"/, label);
@@ -298,10 +294,7 @@ test("submitting the ask keeps the picks until the answer is actually posted", (
 
 // ---- D1: the composer clears and stays cleared --------------------------
 
-for (const [label, src] of [
-	["dashboards", paneSrc],
-	["triggers", triggerPaneSrc],
-]) {
+for (const [label, src] of [["dashboards", paneSrc]]) {
 	test(`${label} composer: a raw v-model textarea, never a FormControl`, () => {
 		const composer = composerOf(src);
 		assert.match(composer, /<textarea/);
@@ -349,7 +342,6 @@ test("every Enter-to-send handler ignores an IME composition commit", () => {
 	// half-converted reading. keyCode 229 covers the browsers with no isComposing.
 	for (const [label, src, decl] of [
 		["dashboards", paneSrc, "function onKeydown(e) {"],
-		["triggers", triggerPaneSrc, "function onKeydown(e) {"],
 		["composer", composerSrc, "function onKeydownInternal(e) {"],
 	]) {
 		const body = fnBody(src, decl);

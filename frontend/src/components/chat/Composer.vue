@@ -29,9 +29,9 @@
 		@drop.prevent="onDrop"
 		style="
 			position: relative;
-			border: 1.5px solid var(--text);
+			border: 1px solid var(--border);
 			border-radius: 13px;
-			background: var(--surface);
+			background: var(--surface-2);
 			box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
 			padding: 5px 6px 6px 6px;
 			transition: border-color 0.12s, box-shadow 0.12s;
@@ -464,7 +464,7 @@ defineExpose({ el: inputEl, focusInput });
 <style scoped>
 /* black focus highlight on the composer */
 .jv-composer:focus-within {
-	border-color: var(--text);
+	border-color: var(--text-3);
 	box-shadow: 0 0 0 3px rgba(23, 23, 23, 0.07);
 }
 /* The send button inverts to black/white on hover (depends on its base color,

@@ -3,7 +3,7 @@
 exports[`composer renders identically (light) 1`] = `
 "<div class="jv-root" style="--surface: #ffffff; --surface-1: #f7f7f8; --surface-2: #f1f1f3; --surface-3: #ececef; --border: #e8e8ec; --border-2: #dfdfe4; --text: #171717; --text-2: #4a4a4f; --text-3: #6d6d76; --cta: #1c1c22; --cta-fg: #ffffff; --cta-bg: #f1f1f4; --cta-bd: #e2e2e8; --link: #1579d0; --green: #16a34a; --green-bg: #edf8f0; --green-bd: #cdeed8; --red: #dc2626; --red-bg: #fdf0ef; --red-bd: #f5d4d1; --amber: #d97706; --amber-bg: #fdf6ec; --amber-bd: #f3e2c2;">
   <!-- Host content directly above the box, in flow (chat's wiki nudge card). -->
-  <div data-v-680708eb="" class="jv-composer" style="position: relative; border: 1.5px solid var(--text); border-radius: 13px; background: var(--surface); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07); padding: 5px 6px 6px 6px; transition: border-color 0.12s, box-shadow 0.12s;">
+  <div data-v-680708eb="" class="jv-composer" style="position: relative; border: 1px solid var(--border); border-radius: 13px; background: var(--surface-2); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07); padding: 5px 6px 6px 6px; transition: border-color 0.12s, box-shadow 0.12s;">
     <!--v-if-->
     <!-- pending attachments: image thumbnails (Claude-style) + file chips.
 		     Purely a projection of the \`attachments\` prop — an entry with a
@@ -44,7 +44,7 @@ exports[`composer renders identically (light) 1`] = `
 exports[`dark render 1`] = `
 "<div class="jv-root jv-dark" style="--surface: #16161a; --surface-1: #1d1d22; --surface-2: #26262d; --surface-3: #30303a; --border: #2c2c34; --border-2: #3a3a45; --text: #ededf2; --text-2: #b6b6c0; --text-3: #7e7e8a; --cta: #ececf0; --cta-fg: #1c1c22; --cta-bg: #26262d; --cta-bd: #3a3a45; --link: #6e8bff; --green: #34d399; --green-bg: #15271f; --green-bd: #214b38; --red: #f87171; --red-bg: #2a1818; --red-bd: #4a2a2a; --amber: #fbbf24; --amber-bg: #2a2315; --amber-bd: #4a3d1f;">
   <!-- Host content directly above the box, in flow (chat's wiki nudge card). -->
-  <div data-v-680708eb="" class="jv-composer" style="position: relative; border: 1.5px solid var(--text); border-radius: 13px; background: var(--surface); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07); padding: 5px 6px 6px 6px; transition: border-color 0.12s, box-shadow 0.12s;">
+  <div data-v-680708eb="" class="jv-composer" style="position: relative; border: 1px solid var(--border); border-radius: 13px; background: var(--surface-2); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07); padding: 5px 6px 6px 6px; transition: border-color 0.12s, box-shadow 0.12s;">
     <!--v-if-->
     <!-- pending attachments: image thumbnails (Claude-style) + file chips.
 		     Purely a projection of the \`attachments\` prop — an entry with a

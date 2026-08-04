@@ -22,15 +22,14 @@
 				@update:model-value="setTab"
 			/>
 
-			<!-- ============ Triggers tab: chat pane | triggers list ============ -->
-			<div v-if="activeTab === 'triggers'" class="flex min-h-0 flex-1">
-				<TriggerChatPane
-					class="w-[380px] shrink-0 border-r"
-					:caps="caps"
-					@activity="refreshList"
-				/>
-				<TriggersListPane ref="listPane" class="min-w-0 flex-1" :caps="caps" />
-			</div>
+			<!-- ============ Triggers tab: triggers list (full width) ============
+			     The "Create with chat" pane was removed - triggers are created and
+			     managed from the list itself (New trigger -> TriggerDetail form). -->
+			<TriggersListPane
+				v-if="activeTab === 'triggers'"
+				class="min-h-0 flex-1"
+				:caps="caps"
+			/>
 
 			<!-- ============ Activity tab ============ -->
 			<ActivityTab
@@ -47,18 +46,15 @@
 // TriggersPage - the routed component for /triggers: hash-synced tab shell
 // (SkillsPage/Agents precedent; no hash = Triggers, "#activity" = Activity)
 // plus the single get_triggers_caps probe that feeds both tabs. Tab 1 is the
-// core UX: an embedded assistant chat for creating triggers in natural
-// language (left) beside the envelope-fed triggers list (right); the chat
-// pane's run:end / trigger:changed signals refresh the list so a trigger the
-// agent just created appears without a manual refresh. Probe failures follow
-// the SkillsPage rule: a genuine 403 shows the no-access state; a transient
+// full-width triggers list; triggers are created and managed there (New trigger
+// -> TriggerDetail form), not via a chat pane. Probe failures follow the
+// SkillsPage rule: a genuine 403 shows the no-access state; a transient
 // 500/network blip retries once and otherwise proceeds with default caps
 // (read-only rendering) rather than blocking an authorized user.
 import { ref, computed, watch, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { FeatherIcon } from "frappe-ui";
 import TabBar from "@/components/list/TabBar.vue";
-import TriggerChatPane from "./TriggerChatPane.vue";
 import TriggersListPane from "./TriggersListPane.vue";
 import ActivityTab from "./ActivityTab.vue";
 import { getTriggersCaps } from "@/api/triggers";
@@ -123,12 +119,6 @@ watch(
 		if (route.name === "TriggersPage") applyHash();
 	}
 );
-
-// ── the chat-pane → list refresh wire ────────────────────────────────────────
-const listPane = ref(null);
-function refreshList() {
-	listPane.value && listPane.value.refresh && listPane.value.refresh();
-}
 
 // ── caps probe (403 vs transient, SkillsPage pattern) ────────────────────────
 function isPermissionError(e) {
