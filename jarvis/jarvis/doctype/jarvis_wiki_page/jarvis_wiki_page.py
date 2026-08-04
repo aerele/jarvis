@@ -158,11 +158,39 @@ class JarvisWikiPage(Document):
 		caller already suffixed; base is trimmed to keep the total <= 140 and
 		grammar-valid (scrub emits alnum-and-single-hyphen runs only)."""
 		self.slug = (self.slug or "").strip().lower()
+		if self.scope == "User" and self.target_user and self.slug:
+			self.slug = self._pick_user_slug()
+			return
 		suffix = self._scope_slug_suffix()
 		if not self.slug or not suffix or self.slug.endswith(suffix):
 			return
 		base = self.slug[: MAX_SLUG_LEN - len(suffix)].rstrip("-")
 		self.slug = f"{base}{suffix}"
+
+	def _pick_user_slug(self) -> str:
+		"""The audience-suffixed slug this personal page gets.
+
+		``--u-<localpart>`` keys on the email LOCAL PART only, so alice@acme.com
+		and alice@contractor.io derive the SAME slug — and the slug IS the
+		docname (``autoname: field:slug``, unique), so the second user's page
+		collided with the first's (issue #490). The preferred form is kept
+		whenever it is unclaimed or already this user's, so every personal page
+		created before this fix keeps its slug and its docname; only a genuine
+		cross-user collision falls back to ``--u-<localpart>-<digest>``.
+
+		If BOTH forms are taken by someone else the preferred one is returned
+		unchanged and the unique index raises ``DuplicateEntryError``, exactly as
+		before — callers already handle that."""
+		from jarvis.chat.wiki import user_scope_slug_candidates
+
+		candidates = user_scope_slug_candidates(self.slug, self.target_user)
+		for candidate in candidates:
+			row = frappe.db.get_value(
+				self.doctype, {"slug": candidate}, ["name", "target_user"], as_dict=True
+			)
+			if not row or row.target_user == self.target_user:
+				return candidate
+		return candidates[0]
 
 	def _guard_scope_change(self):
 		"""Only a System Manager may re-scope or re-target an existing page —

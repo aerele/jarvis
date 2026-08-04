@@ -42,6 +42,20 @@ tokens, so a "full merged body" reply can never carry a long page back intact �
 replacing with it deleted everything past the excerpt. The prompt now asks for
 ``append_md`` on an existing page, and the merge appends a stray ``body_md``
 instead of swapping it in.
+
+Two fences protect text the machine does not own, and they answer different
+questions. ``provenance_prefix`` (Custom App Learning scribe) asks "is this page
+MINE?" and REFUSES anything else outright. ``preserve_curated`` (every voice
+caller) asks "did a PERSON write this?" and, when the answer is yes, downgrades
+the write to add-only: a dated attribution heading, no summary overwrite, and a
+refusal rather than a head-truncating clip. The voice ingest cannot use the first
+one, because its own writes are stamped ``voice`` and ``voice`` counts as a human
+kind, so the fence would lock it out of the pages it created itself.
+
+Personal (User-scope) pages are resolved by ``resolve_user_scope_page``, never by
+a bare slug lookup: the ``--u-<localpart>`` audience suffix is NOT unique across
+users, so an unfiltered lookup could hand one colleague's private page to
+another.
 """
 
 from __future__ import annotations
@@ -228,14 +242,77 @@ def _suffix_slug(base_slug, suffix: str) -> str:
 
 
 def user_scope_slug(base_slug, user: str) -> str:
-	"""The audience-suffixed slug a User-scope page for ``user`` gets
-	(``<base>--u-<localpart>``), mirroring the controller exactly."""
+	"""The PREFERRED audience-suffixed slug for ``user``'s User-scope page
+	(``<base>--u-<localpart>``) — what the controller gives them when that slug
+	is free or already theirs. It is NOT unique per user: see
+	``user_scope_slug_candidates``."""
 	from jarvis.chat.entities import scrub
 
 	local = scrub(str(user or "").split("@")[0])
 	if not local:
 		return _normalize_slug(base_slug)
 	return _suffix_slug(base_slug, f"--u-{local}")
+
+
+def _user_slug_digest(user: str) -> str:
+	"""A short stable digest of the WHOLE address, used to break a local-part
+	collision. ``scrub`` is lossy (it folds ``@``, ``.``, ``_`` and every other
+	non-alnum run to one hyphen), so no scrubbed form of an email — local part
+	OR full address — is injective. A digest of the raw address is."""
+	import hashlib
+
+	return hashlib.sha256(str(user or "").strip().lower().encode("utf-8")).hexdigest()[:8]
+
+
+def user_scope_slug_candidates(base_slug, user: str) -> list[str]:
+	"""Every slug ``user``'s User-scope page for ``base_slug`` may carry, most
+	preferred first.
+
+	The audience suffix keys on the email LOCAL PART, so alice@acme.com and
+	alice@contractor.io both derive ``--u-alice`` — and since the slug IS the
+	docname (``autoname: field:slug``, unique), the second user's page collided
+	with the first's, which is issue #490. The preferred form is still offered
+	first, so every page created before that fix keeps its slug and its docname
+	(no rename, no orphan); a genuine cross-user collision falls back to
+	``--u-<localpart>-<digest>``.
+
+	Both forms are PURE functions of the base slug and the address, so the
+	controller (which picks one at create time) and the resolvers (which probe
+	them at read time) agree without a shared lookup table."""
+	from jarvis.chat.entities import scrub
+
+	normalized = _normalize_slug(base_slug)
+	preferred = user_scope_slug(base_slug, user)
+	local = scrub(str(user or "").split("@")[0])
+	if not local:
+		return [preferred]
+	alt = _suffix_slug(base_slug, f"--u-{local}-{_user_slug_digest(user)}")
+	# An already-suffixed slug passed back in must not be suffixed twice. The
+	# disambiguated form is checked first: it ENDS WITH the preferred one, so
+	# testing the preferred form first would mis-classify it.
+	if normalized == alt:
+		return [alt]
+	if normalized == preferred:
+		return [preferred]
+	return [preferred, alt]
+
+
+def resolve_user_scope_page(base_slug, target_user: str) -> tuple[str | None, str]:
+	"""Resolve ``target_user``'s OWN User-scope page for ``base_slug``.
+
+	Returns ``(docname or None, slug)``. EVERY probe filters on
+	``scope``/``target_user``, so a slug this user does not own can never
+	resolve here — that unfiltered lookup was how one colleague's private note
+	landed in another's page (issue #490). Mirrors
+	``jarvis.tools.update_wiki._find_existing``, which always got this right."""
+	candidates = user_scope_slug_candidates(base_slug, target_user)
+	for candidate in candidates:
+		name = frappe.db.get_value(
+			WIKI, {"slug": candidate, "scope": "User", "target_user": target_user}, "name"
+		)
+		if name:
+			return name, candidate
+	return None, candidates[0]
 
 
 def role_scope_slug(base_slug, role: str) -> str:
@@ -736,6 +813,9 @@ def _ingest_note(note_name: str) -> None:
 		# path may never replace one: a "full merged body" reply would delete
 		# everything past the excerpt (issue #488).
 		allow_body_replace=False,
+		# ... and on a page a person edited by hand, this write may only ADD:
+		# no summary overwrite, no head-truncating clip (issue #489).
+		preserve_curated=True,
 	)
 	if failed:
 		# A page write failed (already logged per-update): leave the note New
@@ -888,6 +968,21 @@ def _parse_updates(raw: str) -> list | None:
 # clobber a person's edit.
 _HUMAN_SOURCE_KINDS = frozenset({"manual", "chat", "voice", "edit", "promotion", "tool"})
 
+# Provenance kinds that mean a person AUTHORED OR APPROVED this page's text with
+# their own hands: the SPA editor (``create_wiki_page`` / ``save_wiki_page`` stamp
+# "manual") and the reviewed promotion flow ("promotion"). "edit" is reserved for
+# the same meaning.
+#
+# A STRICT SUBSET of _HUMAN_SOURCE_KINDS, and deliberately so (issue #489). The
+# obvious fix — handing the voice ingest ``provenance_prefix="voice"`` — cannot
+# work, because "voice" is itself a human kind AND is what the ingest stamps on
+# every page it writes, so the fence would refuse the ingest's own pages from the
+# second note onward. "voice" and "chat" name a pipeline that DERIVED text from a
+# human utterance; "tool" names the agent's own update_wiki writes. None of those
+# is a person's typing, and none belongs here. _HUMAN_SOURCE_KINDS keeps its full
+# membership for the Custom App Learning fence, which is unchanged.
+_CURATED_SOURCE_KINDS = frozenset({"manual", "edit", "promotion"})
+
 
 def _is_txn_fatal(e: Exception) -> bool:
 	"""A transaction-FATAL DB error — a deadlock or a lock-wait timeout — aborts the
@@ -929,6 +1024,23 @@ def _sources_agent_updatable(raw, prefix: str) -> bool:
 	return any(k.startswith(prefix) for k in kinds)
 
 
+def _sources_are_curated(raw) -> bool:
+	"""Predicate over a page's raw ``sources`` JSON: has a PERSON authored or
+	approved this page's text (a ``kind`` in ``_CURATED_SOURCE_KINDS``)?
+
+	Unlike ``_sources_agent_updatable`` this never refuses the write outright —
+	it downgrades it to add-only (issue #489), so the machine keeps recording
+	what it learned and the human keeps every word they wrote. A missing/corrupt
+	``sources`` reads as CURATED (fails closed toward preserving text)."""
+	try:
+		sources = json.loads(raw) if raw else []
+	except Exception:
+		return True
+	if not isinstance(sources, list):
+		return True
+	return any(str(s.get("kind") or "") in _CURATED_SOURCE_KINDS for s in sources if isinstance(s, dict))
+
+
 def _page_is_agent_updatable(name: str, prefix: str) -> bool:
 	"""``_sources_agent_updatable`` for a page by name (unlocked read — the cheap
 	early-out; the authoritative check is re-run under a row lock at save time)."""
@@ -944,6 +1056,7 @@ def apply_extracted_page_updates(
 	target_user: str | None = None,
 	provenance_prefix: str | None = None,
 	allow_body_replace: bool = True,
+	preserve_curated: bool = False,
 	return_outcomes: bool = False,
 ) -> tuple[int, int] | list[dict]:
 	"""Create/update wiki pages from extracted updates (the note ingest above
@@ -979,6 +1092,17 @@ def apply_extracted_page_updates(
 	recoverable, a deleted one is not. Callers that compose a page from a source
 	they read in full (the app-learning scribe) keep the default True and still
 	replace, so a re-run refreshes its own page in place rather than doubling it.
+
+	``preserve_curated=True`` (every voice caller, issue #489): on a page a
+	PERSON authored or approved (``_sources_are_curated``) this write may only
+	ADD, never SUBTRACT. The body is appended under a dated attribution heading
+	whatever ``allow_body_replace`` says, the summary is only filled when empty,
+	and an append that would push the body past the cap is REFUSED rather than
+	clipped (the clip drops the OLDEST text, which on such a page is the human's
+	own). ``allow_body_replace`` is a property of the CALLER — it says "I only
+	saw an excerpt"; this is a property of the PAGE — it says "someone wrote
+	this by hand". Pages the machine owns are untouched by it, which is what
+	lets the voice ingest keep refreshing the pages it created itself.
 
 	``return_outcomes=True`` (Custom App Learning scribe writeback): returns a
 	PER-UPDATE outcome list ``[{slug, ok, reason}]`` aligned to the accepted
@@ -1031,6 +1155,7 @@ def apply_extracted_page_updates(
 					target_user,
 					provenance_prefix,
 					allow_body_replace,
+					preserve_curated,
 				)
 			)
 			reason = "applied" if ok else "refused"
@@ -1065,6 +1190,7 @@ def _apply_one_update(
 	target_user: str | None = None,
 	provenance_prefix: str | None = None,
 	allow_body_replace: bool = True,
+	preserve_curated: bool = False,
 ) -> bool:
 	slug = _normalize_slug(update.get("slug"))
 	if not slug:
@@ -1083,10 +1209,14 @@ def _apply_one_update(
 
 	# User pages carry the controller's audience suffix in their docname, so a
 	# scope-aware lookup must probe the SUFFIXED slug (a base-slug lookup would
-	# miss the personal page and mint a duplicate).
-	lookup_slug = user_scope_slug(slug, tuser) if scope == "User" else slug
-
-	name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name")
+	# miss the personal page and mint a duplicate) AND filter on the audience (an
+	# unfiltered one resolves to whichever user claimed the local part first,
+	# issue #490).
+	if scope == "User":
+		name, lookup_slug = resolve_user_scope_page(slug, tuser)
+	else:
+		lookup_slug = slug
+		name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name")
 	if not name:
 		title = " ".join(str(update.get("title") or "").split())
 		page_type = (update.get("page_type") or "").strip()
@@ -1116,10 +1246,16 @@ def _apply_one_update(
 			return True
 		except frappe.DuplicateEntryError:
 			# The slug appeared concurrently — merge into it instead (the stored
-			# docname is the suffixed slug for User scope).
-			name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name") or frappe.db.get_value(
-				WIKI, {"slug": doc.slug}, "name"
-			)
+			# docname is the suffixed slug for User scope). The User re-probe stays
+			# audience-filtered: a slug owned by somebody else is NOT ours to merge
+			# into, so it re-raises and the update is counted failed rather than
+			# cross-written (issue #490).
+			if scope == "User":
+				name, _ = resolve_user_scope_page(slug, tuser)
+			else:
+				name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name") or frappe.db.get_value(
+					WIKI, {"slug": doc.slug}, "name"
+				)
 			if not name:
 				raise
 
@@ -1130,12 +1266,13 @@ def _apply_one_update(
 	if provenance_prefix and not _page_is_agent_updatable(name, provenance_prefix):
 		return False
 
+	args = (name, update, source, user, ref, provenance_prefix, allow_body_replace, preserve_curated, tuser)
 	try:
-		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix, allow_body_replace)
+		return _merge_update_into_page(*args)
 	except frappe.TimestampMismatchError:
 		# Concurrent save between our load and save: reload + re-merge once
 		# so ordinary concurrency doesn't drop the update.
-		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix, allow_body_replace)
+		return _merge_update_into_page(*args)
 
 
 def _merge_update_into_page(
@@ -1146,23 +1283,44 @@ def _merge_update_into_page(
 	ref: str | None,
 	provenance_prefix: str | None = None,
 	allow_body_replace: bool = True,
+	preserve_curated: bool = False,
+	expect_target_user: str | None = None,
 ) -> bool:
 	body_md = update.get("body_md")
 	append_md = update.get("append_md")
 	contradiction = bool(update.get("contradiction"))
+	curated = False
 
-	# TOCTOU close (scribe writeback): re-check ownership under a ROW LOCK on the
-	# page immediately before mutating it. A human edit that landed via
-	# ``save_wiki_page`` BETWEEN the unlocked pre-check above and this save would
-	# otherwise be clobbered; the ``for_update`` read serializes against that save,
-	# so a page that gained a human touch in the gap is refused here.
-	if provenance_prefix is not None:
-		locked_sources = frappe.db.get_value(WIKI, name, "sources", for_update=True)
-		if not _sources_agent_updatable(locked_sources, provenance_prefix):
+	# TOCTOU close: re-check under a ROW LOCK on the page immediately before
+	# mutating it. A save that landed BETWEEN the unlocked resolution above and
+	# this save would otherwise be clobbered; the ``for_update`` read serializes
+	# against it.
+	#
+	#  * provenance (scribe writeback): a page that gained a human touch in the
+	#    gap is refused here.
+	#  * audience (issue #490): a User-scope write must land on ITS OWN user's
+	#    page. Merging into a colleague's personal page both discloses the
+	#    writer's private statement and hides it from the writer, and the page
+	#    could have been re-targeted since we resolved it.
+	#  * curation (issue #489): a human edit that landed via ``save_wiki_page``
+	#    in the gap must still downgrade this write to add-only.
+	if provenance_prefix is not None or expect_target_user is not None or preserve_curated:
+		locked = (
+			frappe.db.get_value(WIKI, name, ["sources", "target_user"], as_dict=True, for_update=True) or {}
+		)
+		if provenance_prefix is not None and not _sources_agent_updatable(
+			locked.get("sources"), provenance_prefix
+		):
 			return False
+		if expect_target_user is not None and locked.get("target_user") != expect_target_user:
+			return False
+		curated = bool(preserve_curated) and _sources_are_curated(locked.get("sources"))
 
 	doc = frappe.get_doc(WIKI, name)
-	if update.get("summary"):
+	if update.get("summary") and not (curated and (doc.summary or "").strip()):
+		# A summary REPLACES, so on a curated page it is the one field that could
+		# still destroy a human's words even after issue #488 turned the body into
+		# an append. Fill it only when the human left it empty (issue #489).
 		doc.summary = _clip_summary(update.get("summary"))
 	if not (doc.ref_doctype or "").strip() and update.get("ref_doctype"):
 		doc.ref_doctype = str(update["ref_doctype"]).strip()
@@ -1184,18 +1342,38 @@ def _merge_update_into_page(
 		incoming = body_md.strip()
 		replaces = allow_body_replace
 	if incoming:
+		stamp = now_datetime().strftime("%Y-%m-%d")
 		if contradiction and existing:
-			stamp = now_datetime().strftime("%Y-%m-%d")
-			doc.body_md = _clip_body(f"{existing}\n\n## Contradiction flagged ({stamp})\n\n{incoming}")
+			merged = f"{existing}\n\n## Contradiction flagged ({stamp})\n\n{incoming}"
 			doc.contradiction_flag = 1
-		elif replaces or not existing:
-			doc.body_md = _clip_body(incoming)
+		elif not existing:
+			merged = incoming
+		elif curated:
+			# A person authored or approved this page's text (issue #489). The
+			# machine may ADD to it under its own attributed heading — so the
+			# reader can always tell whose words are whose — but never rewrite
+			# it, whatever ``allow_body_replace`` says.
+			merged = f"{existing}\n\n## Added by Jarvis from a note ({stamp})\n\n{incoming}"
+		elif replaces:
+			merged = incoming
 		else:
 			# Either an append, or an append-only caller that sent a body_md
 			# anyway. The ingest only ever saw an EXCERPT of this page, so
 			# swapping the field would delete the rest; a duplicated section is
 			# recoverable by a human editor, a deleted one is not (issue #488).
-			doc.body_md = _clip_body(f"{existing}\n\n{incoming}")
+			merged = f"{existing}\n\n{incoming}"
+		if curated and existing and len(merged) > MAX_BODY_LEN:
+			# _clip_body keeps the TAIL, so clipping here would silently delete
+			# the human's oldest lines to make room for a machine append. Refuse
+			# the whole update instead and say so: dropping one note's knowledge
+			# is recoverable (the page is still there to edit), deleting a
+			# person's text is not.
+			frappe.log_error(
+				title="wiki: append refused, would truncate a human-edited page",
+				message=f"{name}: {len(existing)} + {len(incoming)} chars exceeds {MAX_BODY_LEN}",
+			)
+			return False
+		doc.body_md = _clip_body(merged)
 	append_source(doc, source, ref, user)
 	doc.last_confirmed_at = now_datetime()
 	doc.save(ignore_permissions=True)

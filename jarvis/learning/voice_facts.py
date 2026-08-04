@@ -650,7 +650,8 @@ def _apply_context_facts(context_facts: list[dict]) -> int:
 			}
 		]
 		try:
-			wiki.apply_extracted_page_updates(updates, "voice", user)
+			# A page a person edited by hand is add-only from here (issue #489).
+			wiki.apply_extracted_page_updates(updates, "voice", user, preserve_curated=True)
 			applied += len(fs)
 		except Exception:
 			frappe.log_error(
@@ -667,7 +668,14 @@ def _apply_context_facts(context_facts: list[dict]) -> int:
 			}
 		]
 		try:
-			wiki.apply_extracted_page_updates(updates, "voice", user, default_scope="User", target_user=user)
+			wiki.apply_extracted_page_updates(
+				updates,
+				"voice",
+				user,
+				default_scope="User",
+				target_user=user,
+				preserve_curated=True,
+			)
 			applied += len(fs)
 		except Exception:
 			frappe.log_error(
@@ -763,7 +771,13 @@ def _apply_personalise_context(context_facts: list[dict], owner: str, ref: str |
 		]
 		try:
 			applied, _failed = wiki.apply_extracted_page_updates(
-				updates, "voice", owner, ref=ref, default_scope="User", target_user=owner
+				updates,
+				"voice",
+				owner,
+				ref=ref,
+				default_scope="User",
+				target_user=owner,
+				preserve_curated=True,
 			)
 		except Exception:
 			frappe.log_error(
@@ -772,8 +786,12 @@ def _apply_personalise_context(context_facts: list[dict], owner: str, ref: str |
 			)
 			continue
 		if applied:
-			slug = wiki.user_scope_slug(base_slug, owner)
-			title = frappe.db.get_value(WIKI, {"slug": slug}, "title")
+			# Audience-filtered (issue #490): looking the title up by the PREDICTED
+			# suffixed slug alone named a colleague's page whenever two addresses
+			# scrub to the same local part, so the receipt advertised a page this
+			# owner cannot even read.
+			name, slug = wiki.resolve_user_scope_page(base_slug, owner)
+			title = frappe.db.get_value(WIKI, name, "title") if name else None
 			if title:
 				pages.append({"slug": slug, "title": title})
 	return pages
