@@ -88,3 +88,38 @@ class JarvisAgentFinding(Document):
 			stored = before.get(field)
 			if self.get(field) != stored:
 				self.set(field, stored)
+
+
+def on_doctype_update():
+	"""Two composite indexes serving the Findings surfaces.
+
+	(owner, agent, fingerprint): ``record_delegate_run`` (agent_runs.py:691)
+	does a per-finding dedupe lookup -- ``frappe.db.get_value(FINDING,
+	{"owner", "agent", "fingerprint", "state": "open"}, "name")`` -- INSIDE the
+	per-run findings loop, so it runs N times per recorded run, each an
+	unindexed scan today. The same (owner, agent) prefix also anchors the
+	"which runs observed this finding" drilldown subquery in ``list_findings``
+	(agents_api.py:1432-1440), filtered ``f.owner = %(me)s AND f.agent =
+	%(agent)s`` before joining Jarvis Agent Run.
+
+	(owner, severity, state): the Findings page load fires FOUR
+	``frappe.db.count`` calls (agents_api.py:1452, 1454) per request -- one
+	true total filtered by ``owner`` (+ optional ``state``), then one per
+	severity (blocker/warning/note) adding ``severity`` on top. Leading with
+	``severity`` (bound in 3 of the 4 calls) ahead of the optional ``state``
+	lets the 2-column prefix serve the common no-state-filter case while the
+	full 3-column index still satisfies a state-filtered page.
+
+	``frappe.db.add_index`` no-ops when an index already exists, so repeated
+	migrates are harmless.
+	"""
+	frappe.db.add_index(
+		"Jarvis Agent Finding",
+		["owner", "agent", "fingerprint"],
+		index_name="owner_agent_fingerprint_index",
+	)
+	frappe.db.add_index(
+		"Jarvis Agent Finding",
+		["owner", "severity", "state"],
+		index_name="owner_severity_state_index",
+	)
