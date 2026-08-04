@@ -28,12 +28,16 @@ export default defineConfig({
 		// component doubles are shared across several files (tests/list-filters):
 		// the shared double belongs beside its specs, not in src/ where nothing in
 		// the app would ever import it (same reasoning as support-extraction's
-		// fixtures.js).
+		// fixtures.js). It also picks up repo-level guards at the top level, like
+		// tests/mobile-responsive.spec.js.
 		include: [
 			"tests/support-extraction/**/*.test.js",
 			"tests/**/*.spec.js",
 			"src/**/*.spec.js",
 		],
+		// tests/e2e/** holds Playwright specs (also *.spec.js) that must NOT run
+		// under vitest — they drive a real browser through @playwright/test.
+		exclude: ["node_modules/**", "tests/e2e/**"],
 		globals: true,
 	},
 });
