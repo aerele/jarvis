@@ -16,7 +16,6 @@ from jarvis.permissions import require_jarvis_user
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
-MSG = "Jarvis Chat Message"
 
 
 def _parse_steps(steps) -> list[dict]:
@@ -519,8 +518,14 @@ def macro_run_stats() -> dict:
 # Macro merge — summarize a 2+ step sequence into one prompt (spec:
 # docs/superpowers/specs/2026-07-03-macro-merge-design.md). The LLM does the
 # merging via the persona /macro-merge skill in a throwaway archived
-# conversation; these endpoints are the deterministic plumbing around it.
+# conversation; this endpoint kicks it off. The SPA reads the result straight
+# off the Macro doc (merge_status/merged_prompt) once the worker's advance
+# hook applies it — there is no separate poll/apply/discard surface.
 # --------------------------------------------------------------------------- #
+# NOTE: _MERGE_RE has no caller in THIS module — jarvis.chat.macros
+# (_apply_merge_after_turn, off-limits here) lazily imports it to parse the
+# assistant reply's ```jarvis-macro-merge``` block. Keep it even though it
+# looks locally dead.
 _MERGE_RE = re.compile(r"```jarvis-macro-merge[ \t]*\n([\s\S]*?)```")
 
 _MERGE_INSTRUCTION = (
@@ -535,14 +540,6 @@ _MERGE_INSTRUCTION = (
 	"mergeable=false when merging would lose a user review checkpoint before "
 	"a data change. Steps:\n\n"
 )
-
-
-def _own_conversation(conversation: str) -> None:
-	owner = frappe.db.get_value("Jarvis Conversation", conversation, "owner")
-	if not owner:
-		frappe.throw(_("Unknown conversation."))
-	if owner != frappe.session.user:
-		frappe.throw(_("Not your conversation."), frappe.PermissionError)
 
 
 @frappe.whitelist()
@@ -614,95 +611,3 @@ def summarize_macro(name: str) -> dict:
 	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
 	frappe.db.commit()
 	return {"ok": True, "conversation": conv.name}
-
-
-@frappe.whitelist()
-@require_jarvis_user
-def get_macro_merge(conversation: str) -> dict:
-	"""Poll target for the merge turn: pending → ready(merge)/error."""
-	_own_conversation(conversation)
-	rows = frappe.get_all(
-		MSG,
-		filters={"conversation": conversation, "role": "assistant"},
-		fields=["content", "streaming", "error"],
-		order_by="seq desc",
-		limit=1,
-	)
-	m = rows[0] if rows else None
-	if m and (m.error or "").strip():
-		return {"status": "error", "error": m.error}
-	if not m or m.streaming or not (m.content or "").strip():
-		return {"status": "pending"}
-	mt = _MERGE_RE.search(m.content)
-	if not mt:
-		return {"status": "error", "error": "no merge block in the reply"}
-	try:
-		merge = frappe.parse_json(mt.group(1).strip())
-	except Exception:
-		merge = None
-	if not isinstance(merge, dict):
-		return {"status": "error", "error": "unparsable merge block"}
-	return {
-		"status": "ready",
-		"merge": {
-			"mergeable": bool(merge.get("mergeable")),
-			"reason": str(merge.get("reason") or ""),
-			"merged_prompt": str(merge.get("merged_prompt") or ""),
-			"dependencies": merge.get("dependencies") if isinstance(merge.get("dependencies"), list) else [],
-		},
-	}
-
-
-@frappe.whitelist()
-@require_jarvis_user
-def apply_macro_merge(name: str, merged_prompt: str, conversation: str = "") -> dict:
-	"""Store ``merged_prompt`` (possibly user-edited) on the macro. The step
-	sequence STAYS as the editable source of truth — but when a merged prompt
-	is set, ``run_macro`` runs IT as a single turn instead of chaining the
-	steps. Cleans up the merge conversation best-effort."""
-	doc = frappe.get_doc(MACRO, name)
-	doc.check_permission("write")
-	merged_prompt = (merged_prompt or "").strip()
-	if not merged_prompt:
-		frappe.throw(_("Merged prompt is empty."))
-	doc.merged_prompt = merged_prompt
-	doc.merge_status = "ready"
-	doc.merge_conversation = ""
-	doc.save()
-	frappe.db.commit()
-	if conversation:
-		try:
-			discard_macro_merge(conversation)
-		except Exception:
-			pass  # best-effort cleanup; the conversation is archived anyway
-	return {"ok": True, "merged": True, "step_count": len(doc.steps or [])}
-
-
-@frappe.whitelist()
-@require_jarvis_user
-def clear_macro_merge(name: str) -> dict:
-	"""Remove the stored merged prompt so the step sequence runs again."""
-	doc = frappe.get_doc(MACRO, name)
-	doc.check_permission("write")
-	doc.merged_prompt = ""
-	doc.merge_status = ""
-	doc.merge_conversation = ""
-	doc.save()
-	frappe.db.commit()
-	return {"ok": True}
-
-
-@frappe.whitelist()
-@require_jarvis_user
-def discard_macro_merge(conversation: str) -> dict:
-	"""Delete the throwaway merge conversation + its messages (Keep sequence /
-	unmergeable / error paths). Best-effort: if a link blocks the delete the
-	conversation stays archived, which is invisible anyway."""
-	_own_conversation(conversation)
-	frappe.db.delete(MSG, {"conversation": conversation})
-	try:
-		frappe.delete_doc("Jarvis Conversation", conversation, force=True, ignore_permissions=True)
-	except Exception:
-		pass
-	frappe.db.commit()
-	return {"ok": True}
