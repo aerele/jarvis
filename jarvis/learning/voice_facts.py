@@ -772,8 +772,12 @@ def _apply_personalise_context(context_facts: list[dict], owner: str, ref: str |
 			)
 			continue
 		if applied:
-			slug = wiki.user_scope_slug(base_slug, owner)
-			title = frappe.db.get_value(WIKI, {"slug": slug}, "title")
+			# Audience-filtered (issue #490): looking the title up by the PREDICTED
+			# suffixed slug alone named a colleague's page whenever two addresses
+			# scrub to the same local part, so the receipt advertised a page this
+			# owner cannot even read.
+			name, slug = wiki.resolve_user_scope_page(base_slug, owner)
+			title = frappe.db.get_value(WIKI, name, "title") if name else None
 			if title:
 				pages.append({"slug": slug, "title": title})
 	return pages

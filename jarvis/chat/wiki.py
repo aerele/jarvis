@@ -42,6 +42,11 @@ tokens, so a "full merged body" reply can never carry a long page back intact �
 replacing with it deleted everything past the excerpt. The prompt now asks for
 ``append_md`` on an existing page, and the merge appends a stray ``body_md``
 instead of swapping it in.
+
+Personal (User-scope) pages are resolved by ``resolve_user_scope_page``, never by
+a bare slug lookup: the ``--u-<localpart>`` audience suffix is NOT unique across
+users, so an unfiltered lookup could hand one colleague's private page to
+another.
 """
 
 from __future__ import annotations
@@ -228,14 +233,77 @@ def _suffix_slug(base_slug, suffix: str) -> str:
 
 
 def user_scope_slug(base_slug, user: str) -> str:
-	"""The audience-suffixed slug a User-scope page for ``user`` gets
-	(``<base>--u-<localpart>``), mirroring the controller exactly."""
+	"""The PREFERRED audience-suffixed slug for ``user``'s User-scope page
+	(``<base>--u-<localpart>``) — what the controller gives them when that slug
+	is free or already theirs. It is NOT unique per user: see
+	``user_scope_slug_candidates``."""
 	from jarvis.chat.entities import scrub
 
 	local = scrub(str(user or "").split("@")[0])
 	if not local:
 		return _normalize_slug(base_slug)
 	return _suffix_slug(base_slug, f"--u-{local}")
+
+
+def _user_slug_digest(user: str) -> str:
+	"""A short stable digest of the WHOLE address, used to break a local-part
+	collision. ``scrub`` is lossy (it folds ``@``, ``.``, ``_`` and every other
+	non-alnum run to one hyphen), so no scrubbed form of an email — local part
+	OR full address — is injective. A digest of the raw address is."""
+	import hashlib
+
+	return hashlib.sha256(str(user or "").strip().lower().encode("utf-8")).hexdigest()[:8]
+
+
+def user_scope_slug_candidates(base_slug, user: str) -> list[str]:
+	"""Every slug ``user``'s User-scope page for ``base_slug`` may carry, most
+	preferred first.
+
+	The audience suffix keys on the email LOCAL PART, so alice@acme.com and
+	alice@contractor.io both derive ``--u-alice`` — and since the slug IS the
+	docname (``autoname: field:slug``, unique), the second user's page collided
+	with the first's, which is issue #490. The preferred form is still offered
+	first, so every page created before that fix keeps its slug and its docname
+	(no rename, no orphan); a genuine cross-user collision falls back to
+	``--u-<localpart>-<digest>``.
+
+	Both forms are PURE functions of the base slug and the address, so the
+	controller (which picks one at create time) and the resolvers (which probe
+	them at read time) agree without a shared lookup table."""
+	from jarvis.chat.entities import scrub
+
+	normalized = _normalize_slug(base_slug)
+	preferred = user_scope_slug(base_slug, user)
+	local = scrub(str(user or "").split("@")[0])
+	if not local:
+		return [preferred]
+	alt = _suffix_slug(base_slug, f"--u-{local}-{_user_slug_digest(user)}")
+	# An already-suffixed slug passed back in must not be suffixed twice. The
+	# disambiguated form is checked first: it ENDS WITH the preferred one, so
+	# testing the preferred form first would mis-classify it.
+	if normalized == alt:
+		return [alt]
+	if normalized == preferred:
+		return [preferred]
+	return [preferred, alt]
+
+
+def resolve_user_scope_page(base_slug, target_user: str) -> tuple[str | None, str]:
+	"""Resolve ``target_user``'s OWN User-scope page for ``base_slug``.
+
+	Returns ``(docname or None, slug)``. EVERY probe filters on
+	``scope``/``target_user``, so a slug this user does not own can never
+	resolve here — that unfiltered lookup was how one colleague's private note
+	landed in another's page (issue #490). Mirrors
+	``jarvis.tools.update_wiki._find_existing``, which always got this right."""
+	candidates = user_scope_slug_candidates(base_slug, target_user)
+	for candidate in candidates:
+		name = frappe.db.get_value(
+			WIKI, {"slug": candidate, "scope": "User", "target_user": target_user}, "name"
+		)
+		if name:
+			return name, candidate
+	return None, candidates[0]
 
 
 def role_scope_slug(base_slug, role: str) -> str:
@@ -1083,10 +1151,14 @@ def _apply_one_update(
 
 	# User pages carry the controller's audience suffix in their docname, so a
 	# scope-aware lookup must probe the SUFFIXED slug (a base-slug lookup would
-	# miss the personal page and mint a duplicate).
-	lookup_slug = user_scope_slug(slug, tuser) if scope == "User" else slug
-
-	name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name")
+	# miss the personal page and mint a duplicate) AND filter on the audience (an
+	# unfiltered one resolves to whichever user claimed the local part first,
+	# issue #490).
+	if scope == "User":
+		name, lookup_slug = resolve_user_scope_page(slug, tuser)
+	else:
+		lookup_slug = slug
+		name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name")
 	if not name:
 		title = " ".join(str(update.get("title") or "").split())
 		page_type = (update.get("page_type") or "").strip()
@@ -1116,10 +1188,16 @@ def _apply_one_update(
 			return True
 		except frappe.DuplicateEntryError:
 			# The slug appeared concurrently — merge into it instead (the stored
-			# docname is the suffixed slug for User scope).
-			name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name") or frappe.db.get_value(
-				WIKI, {"slug": doc.slug}, "name"
-			)
+			# docname is the suffixed slug for User scope). The User re-probe stays
+			# audience-filtered: a slug owned by somebody else is NOT ours to merge
+			# into, so it re-raises and the update is counted failed rather than
+			# cross-written (issue #490).
+			if scope == "User":
+				name, _ = resolve_user_scope_page(slug, tuser)
+			else:
+				name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name") or frappe.db.get_value(
+					WIKI, {"slug": doc.slug}, "name"
+				)
 			if not name:
 				raise
 
@@ -1130,12 +1208,13 @@ def _apply_one_update(
 	if provenance_prefix and not _page_is_agent_updatable(name, provenance_prefix):
 		return False
 
+	args = (name, update, source, user, ref, provenance_prefix, allow_body_replace, tuser)
 	try:
-		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix, allow_body_replace)
+		return _merge_update_into_page(*args)
 	except frappe.TimestampMismatchError:
 		# Concurrent save between our load and save: reload + re-merge once
 		# so ordinary concurrency doesn't drop the update.
-		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix, allow_body_replace)
+		return _merge_update_into_page(*args)
 
 
 def _merge_update_into_page(
@@ -1146,19 +1225,32 @@ def _merge_update_into_page(
 	ref: str | None,
 	provenance_prefix: str | None = None,
 	allow_body_replace: bool = True,
+	expect_target_user: str | None = None,
 ) -> bool:
 	body_md = update.get("body_md")
 	append_md = update.get("append_md")
 	contradiction = bool(update.get("contradiction"))
 
-	# TOCTOU close (scribe writeback): re-check ownership under a ROW LOCK on the
-	# page immediately before mutating it. A human edit that landed via
-	# ``save_wiki_page`` BETWEEN the unlocked pre-check above and this save would
-	# otherwise be clobbered; the ``for_update`` read serializes against that save,
-	# so a page that gained a human touch in the gap is refused here.
-	if provenance_prefix is not None:
-		locked_sources = frappe.db.get_value(WIKI, name, "sources", for_update=True)
-		if not _sources_agent_updatable(locked_sources, provenance_prefix):
+	# TOCTOU close: re-check under a ROW LOCK on the page immediately before
+	# mutating it. A save that landed BETWEEN the unlocked resolution above and
+	# this save would otherwise be clobbered; the ``for_update`` read serializes
+	# against it.
+	#
+	#  * provenance (scribe writeback): a page that gained a human touch in the
+	#    gap is refused here.
+	#  * audience (issue #490): a User-scope write must land on ITS OWN user's
+	#    page. Merging into a colleague's personal page both discloses the
+	#    writer's private statement and hides it from the writer, and the page
+	#    could have been re-targeted since we resolved it.
+	if provenance_prefix is not None or expect_target_user is not None:
+		locked = (
+			frappe.db.get_value(WIKI, name, ["sources", "target_user"], as_dict=True, for_update=True) or {}
+		)
+		if provenance_prefix is not None and not _sources_agent_updatable(
+			locked.get("sources"), provenance_prefix
+		):
+			return False
+		if expect_target_user is not None and locked.get("target_user") != expect_target_user:
 			return False
 
 	doc = frappe.get_doc(WIKI, name)
