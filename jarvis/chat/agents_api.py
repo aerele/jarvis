@@ -536,13 +536,44 @@ def _mark_catalog_dirty() -> None:
 	mutation it annotates."""
 	try:
 		frappe.db.set_single_value(_SETTINGS, "agent_catalog_dirty", 1)
-		frappe.db.set_single_value(
-			_SETTINGS,
-			"agent_catalog_version",
-			frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, "agent_catalog_version")) + 1,
-		)
+		_bump_catalog_version()
 	except Exception:
 		frappe.log_error(title="Jarvis: agent catalog dirty flag failed", message=frappe.get_traceback())
+
+
+def _bump_catalog_version() -> None:
+	"""Increment ``agent_catalog_version`` in ONE statement (#458).
+
+	The obvious read-modify-write (``get_single_value`` + ``set_single_value``)
+	loses updates: two mutations racing both read V and both write V+1, so the
+	second mutation leaves the version looking untouched. The push worker's TOCTOU
+	recheck compares against that version, so a lost increment is exactly the case
+	where the worker clears the dirty flag for a change that never made the
+	payload.
+
+	Frappe stores one Single field as one ``tabSingles`` row, so a single
+	``UPDATE ... SET value = value + 1`` runs under that row's write lock and
+	cannot lose an increment however the two writers interleave.
+	``set_single_value`` survives only as the SEED path: a Single field that was
+	never written has no ``tabSingles`` row at all, and the UPDATE above would
+	silently match nothing.
+	"""
+	params = {"dt": _SETTINGS, "field": "agent_catalog_version"}
+	frappe.db.sql(
+		"""UPDATE `tabSingles`
+		SET `value` = CAST(COALESCE(NULLIF(`value`, ''), '0') AS UNSIGNED) + 1
+		WHERE `doctype` = %(dt)s AND `field` = %(field)s""",
+		params,
+	)
+	if not frappe.db.sql(
+		"""SELECT 1 FROM `tabSingles` WHERE `doctype` = %(dt)s AND `field` = %(field)s LIMIT 1""",
+		params,
+	):
+		frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", 1)
+	# Raw SQL bypasses both the Single's redis document cache and
+	# ``frappe.db.value_cache``, which would otherwise keep serving the
+	# pre-increment value for the rest of this request.
+	frappe.clear_document_cache(_SETTINGS, _SETTINGS)
 
 
 @frappe.whitelist()
@@ -1821,9 +1852,29 @@ def _enqueued_push_agent_skills() -> None:
 			# (``_mark_catalog_dirty``), and we then refuse to clear the dirty
 			# flag below — the change missed this payload; a later Apply
 			# reconciles it.
-			version = frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, "agent_catalog_version"))
+			version = frappe.utils.cint(
+				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
+			)
 			payload = build_agent_push_payload()
 			admin_client.post_push_agent_skills(agent_skills=payload)
+			# #458: END THIS WORKER'S TRANSACTION before the recheck, or the recheck
+			# cannot see a mutation at all and the guard above is inert. Two layers
+			# hid it: ``get_single_value`` defaults to ``cache=True`` and serves
+			# ``frappe.db.value_cache``, which is invalidated ONLY by commit/rollback;
+			# and under REPEATABLE READ every plain SELECT in this transaction reads
+			# the snapshot taken before the push, so even ``cache=False`` would
+			# re-read the snapshot value. Committing clears both. Exactly the reason
+			# ``promote_installation`` commits before ITS re-read.
+			#
+			# SAFE HERE and nowhere earlier: at this point the worker has written
+			# NOTHING (the version read and ``build_agent_push_payload`` are pure
+			# reads, and ``admin_client`` is pure HTTP), so this commits an empty
+			# transaction and can leave no half-written state. It also sits AFTER the
+			# push, so it can never commit a status implying a push that did not
+			# happen. The terminal write below is a single ``set_value`` in the fresh
+			# transaction, still covered by the try/except/finally and the trailing
+			# commit, so the "status is never left pending" invariant is unchanged.
+			frappe.db.commit()
 			values = {
 				"agent_skills_synced_at": frappe.utils.now(),
 				"agent_skills_sync_status": f"ok (applied {len(payload)} via admin)",
@@ -1831,7 +1882,10 @@ def _enqueued_push_agent_skills() -> None:
 			# The container now matches the DB — clear the dirty flag ONLY on a
 			# successful push whose payload saw every mutation (version
 			# unchanged); failures and mid-push mutations leave it set.
-			if frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, "agent_catalog_version")) == version:
+			fresh = frappe.utils.cint(
+				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
+			)
+			if fresh == version:
 				values["agent_catalog_dirty"] = 0
 			frappe.db.set_value(_SETTINGS, _SETTINGS, values)
 			terminal_written = True

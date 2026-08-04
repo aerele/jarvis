@@ -497,3 +497,163 @@ class TestUninstallCascadeScope(FrappeTestCase):
 		"""No cascade flag, no guard — an ordinary admin/Desk delete is unaffected."""
 		frappe.delete_doc(FINDING, self.f_b, ignore_permissions=True, force=True)
 		self.assertFalse(frappe.db.exists(FINDING, self.f_b))
+
+
+# --------------------------------------------------------------------------- #
+# #458 — the agent_catalog_dirty TOCTOU guard
+# --------------------------------------------------------------------------- #
+_TOCTOU_KEYS = (
+	"agent_catalog_dirty",
+	"agent_catalog_version",
+	"agent_skills_sync_status",
+	"agent_skills_synced_at",
+)
+
+
+def _single(field: str):
+	"""Read a Jarvis Settings field bypassing frappe.db.value_cache — the very
+	cache this section is about."""
+	return frappe.db.get_single_value(SETTINGS, field, cache=False)
+
+
+def _second_connection():
+	"""A SEPARATE DB connection, so a write can be committed while the push
+	worker's own transaction is open.
+
+	This is what makes the #458 regression faithful: a same-connection write
+	would be visible to the worker's re-read (read-your-own-writes) and a
+	same-connection commit would clear ``frappe.db.value_cache`` for it, so
+	neither could ever reproduce the bug.
+	"""
+	from frappe.database import get_db
+
+	conf = frappe.conf
+	return get_db(
+		socket=conf.db_socket,
+		host=conf.db_host,
+		port=conf.db_port,
+		user=conf.db_user or conf.db_name,
+		password=conf.db_password,
+		cur_db_name=conf.db_name,
+	)
+
+
+def _concurrent_catalog_mutation() -> None:
+	"""Model a user's ``set_enabled`` landing mid-push: another connection bumps
+	the catalog version and re-marks the catalog dirty, and COMMITS."""
+	conn = _second_connection()
+	try:
+		conn.sql(
+			"""UPDATE `tabSingles`
+			SET `value` = CAST(COALESCE(NULLIF(`value`, ''), '0') AS UNSIGNED) + 1
+			WHERE `doctype` = %(dt)s AND `field` = 'agent_catalog_version'""",
+			{"dt": SETTINGS},
+		)
+		conn.sql(
+			"""UPDATE `tabSingles` SET `value` = '1'
+			WHERE `doctype` = %(dt)s AND `field` = 'agent_catalog_dirty'""",
+			{"dt": SETTINGS},
+		)
+		conn.commit()
+	finally:
+		conn.close()
+
+
+class TestAgentCatalogPushTOCTOU(FrappeTestCase):
+	"""#458: the push worker's version recheck must be able to SEE a mutation that
+	landed after its snapshot. Before the fix it re-read its own
+	``frappe.db.value_cache`` entry (and, under REPEATABLE READ, its own
+	transaction snapshot), so the comparison was tautologically equal and a
+	mid-push mutation was silently marked applied."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls._saved = {k: _single(k) for k in _TOCTOU_KEYS}
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		for k, v in cls._saved.items():
+			frappe.db.set_single_value(SETTINGS, k, v)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_version", 7)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 1)
+		frappe.db.set_single_value(SETTINGS, "agent_skills_sync_status", "pending: applying agents")
+		# Commit the seed so the worker below opens a CLEAN transaction holding no
+		# row locks the second connection would block on.
+		frappe.db.commit()
+
+	def _push(self, side_effect=None):
+		from jarvis import admin_client
+
+		def _fake_push(agent_skills):
+			if side_effect:
+				side_effect()
+			return {"ok": True}
+
+		with patch.object(admin_client, "post_push_agent_skills", side_effect=_fake_push):
+			agents_api._enqueued_push_agent_skills()
+
+	def test_mid_push_mutation_is_detected_not_marked_applied(self):
+		"""A mutation committed by another connection WHILE the push is in flight
+		leaves ``agent_catalog_dirty`` set, so the SPA keeps showing "Apply
+		pending" and the change is not silently lost."""
+		self._push(side_effect=_concurrent_catalog_mutation)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 8)
+		self.assertEqual(
+			frappe.utils.cint(_single("agent_catalog_dirty")),
+			1,
+			"a mid-push mutation must NOT have its dirty flag cleared by that push",
+		)
+		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("ok ("))
+
+	def test_clean_push_still_clears_the_dirty_flag(self):
+		"""Control: with no mid-push mutation the version is unchanged, so the push
+		clears the flag exactly as before. The fix must not make the flag sticky."""
+		self._push()
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 7)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("ok ("))
+
+	def test_failed_push_leaves_the_dirty_flag_set(self):
+		"""Control: a terminal failure never clears the flag, and never leaves the
+		status stuck on ``pending:``."""
+		from jarvis import admin_client
+
+		with patch.object(
+			admin_client,
+			"post_push_agent_skills",
+			side_effect=admin_client.AdminUnreachableError("nope"),
+		):
+			agents_api._enqueued_push_agent_skills()
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
+		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("failed: admin unreachable"))
+
+	def test_version_bump_does_not_depend_on_a_previously_read_value(self):
+		"""#458 lost update: the bump is one statement, so it increments whatever
+		the row currently holds. The old read-modify-write took the value from
+		``get_single_value`` (cached / snapshot) and wrote that + 1, which silently
+		discards a concurrent increment. Poisoning the cache with the stale value
+		reproduces exactly that."""
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_version", 5)
+		frappe.db.commit()
+		# The DB row moves to 9 without touching any cache — stand-in for the
+		# increment a concurrent request already committed.
+		frappe.db.sql(
+			"""UPDATE `tabSingles` SET `value` = '9'
+			WHERE `doctype` = %(dt)s AND `field` = 'agent_catalog_version'""",
+			{"dt": SETTINGS},
+		)
+		frappe.db.value_cache[SETTINGS]["agent_catalog_version"] = 5
+		agents_api._bump_catalog_version()
+		self.assertEqual(
+			frappe.utils.cint(_single("agent_catalog_version")),
+			10,
+			"the increment must be applied to the ROW, never to a stale read",
+		)
