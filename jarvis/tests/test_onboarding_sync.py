@@ -1968,9 +1968,7 @@ class TestAccountReconnect(FrappeTestCase):
 			side_effect=RuntimeError("control plane down"),
 		):
 			out = onboarding.reconnect_available("a@b.example")
-		self.assertEqual(
-			out, {"eligible": False, "needs_company": False, "company_account_exists": False}
-		)
+		self.assertEqual(out, {"eligible": False, "needs_company": False, "company_account_exists": False})
 
 	def test_check_expired_passthrough(self):
 		with patch(
