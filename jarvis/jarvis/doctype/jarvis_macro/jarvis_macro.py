@@ -91,3 +91,26 @@ class JarvisMacro(Document):
 			from jarvis.chat.macro_scheduler import compute_next_run
 
 			self.next_run_at = compute_next_run(self.schedule_frequency, self.schedule_time)
+
+
+def on_doctype_update():
+	"""Composite (owner, macro_name) index.
+
+	No index touches ``owner`` on this table today, so ``_validate_unique_per_owner``
+	(the {"owner", "macro_name", "name": ["!=", ...]} exists() check above) and
+	``_validate_owner_cap`` (a plain ``{"owner": owner}`` count) both scan the
+	WHOLE multi-tenant table on EVERY macro save, not just one owner's rows.
+	``MAX_MACROS_PER_OWNER`` (25) caps a single owner's slice permanently, so
+	this index buys little for any one tenant; its real value is skipping
+	every OTHER tenant's rows, which the per-owner cap does nothing to bound
+	as the number of tenants grows. Low priority relative to Jarvis Macro Run,
+	which has no such cap.
+
+	``frappe.db.add_index`` no-ops when the index already exists, so repeated
+	migrates are harmless.
+	"""
+	frappe.db.add_index(
+		"Jarvis Macro",
+		["owner", "macro_name"],
+		index_name="owner_macro_name_index",
+	)

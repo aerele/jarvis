@@ -53,3 +53,26 @@ class JarvisAgentRun(Document):
 					_("{0} is stamped immutably at launch (PP-5) and cannot be changed.").format(field),
 					frappe.PermissionError,
 				)
+
+
+def on_doctype_update():
+	"""Composite (owner, started_at, creation) index.
+
+	Neither ``owner`` nor ``started_at`` carries a default Frappe index (only
+	``name``, ``creation`` and ``modified`` do), so ``list_runs_page``
+	(agents_api.py:1349) -- the Runs tab's ONLY paging query, called on every
+	page load -- forces a full-table scan sorted in Python: it filters
+	``{"owner": me}`` (+ optional agent/status) and always sorts
+	``started_at desc, creation desc``. This composite lets MariaDB satisfy
+	both the filter and the sort from one index (a backward scan gives the
+	DESC/DESC order); the owner-only case still benefits since started_at and
+	creation are trailing columns of the same index.
+
+	``frappe.db.add_index`` no-ops when the index already exists, so repeated
+	migrates are harmless.
+	"""
+	frappe.db.add_index(
+		"Jarvis Agent Run",
+		["owner", "started_at", "creation"],
+		index_name="owner_started_creation_index",
+	)

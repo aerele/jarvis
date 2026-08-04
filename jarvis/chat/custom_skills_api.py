@@ -782,6 +782,19 @@ def _materialize_promotion(req) -> dict:
 	description = req.get("description_snapshot") or ""
 	user_invocable = int(req.get("user_invocable_snapshot"))
 	target_role = req.target_role if req.to_scope == "Role" else None
+	# A Role promotion writes ``allowed_roles`` ALONGSIDE ``target_role`` (issue #478).
+	# ``target_role`` alone is only honoured by the per-doc read paths
+	# (``user_can_use_skill`` / find_skills / get_skill); every path that answers "which
+	# skills may this user invoke" (``_role_scoped_invocable_names``, and through it the
+	# ``/slug`` context clause) matches on the ``allowed_roles`` CHILD ROWS. Writing only
+	# ``target_role`` therefore published a skill that no role-holder could ever trigger
+	# deterministically. Both fields carry the SAME single role, so the audience is
+	# unchanged; this only makes the row visible to the role-matched invocation path.
+	# An Org promotion clears it: an Org row carrying ``allowed_roles`` is a
+	# "role-restricted Org skill", which ``_pushable_org_rows`` deliberately keeps OFF the
+	# shared container push (TASK 11), so a Role->Org widen that left the child row behind
+	# would silently un-push the skill it just widened.
+	allowed_roles = [{"role": target_role}] if target_role else []
 
 	# R3-SP-2 (lineage by SOURCE link, not slug). The container writes ONE
 	# custom-<slug> dir, so at most one SHARED (Role/Org) copy may carry a given slug —
@@ -844,6 +857,7 @@ def _materialize_promotion(req) -> dict:
 			shared.skill_name = req.skill_name
 			shared.scope = req.to_scope
 			shared.target_role = target_role
+			shared.set("allowed_roles", allowed_roles)
 			shared.description = description
 			shared.instructions = instructions
 			shared.user_invocable = user_invocable
@@ -861,6 +875,7 @@ def _materialize_promotion(req) -> dict:
 					"enabled": 1,
 					"scope": req.to_scope,
 					"target_role": target_role,
+					"allowed_roles": allowed_roles,
 					"source_skill": req.skill,
 				}
 			)

@@ -751,20 +751,89 @@ def set_run_as_user(installation: str, user: str) -> dict:
 	}
 
 
+def _installation_finding_names(run_names: list) -> set:
+	"""#455 — the findings an uninstall cascade may destroy: ONLY those this
+	installation's own runs CREATED.
+
+	Membership is read off the finding's creation stamps, ``run`` and
+	``first_seen_run``. Both are written once at insert
+	(``agent_runs.record_delegate_run``) and are frozen by the finding controller
+	thereafter, so they are the one durable statement of which installation
+	produced the row.
+
+	``last_seen_run`` is deliberately NOT a membership signal even though it too
+	points at a run. It is the only run pointer the engine ever re-points, and the
+	recurrence bump that re-points it matches on ``(owner, agent, fingerprint)``.
+	Under PP-4 a shadow installation's findings are re-homed to the REVIEWER, so a
+	reviewer who also runs their own installation of the same agent can have a
+	DIFFERENT owner's finding bumped onto one of their runs (#454). Treating that
+	as membership would re-open exactly the cross-owner sweep this function
+	exists to close: a bumped row was, by construction, created by somebody else's
+	installation.
+
+	The old ``{"agent": ..., "owner": ["in", [owner, reviewer]]}`` filter is gone
+	entirely. Nothing constrains a reviewer to a single installation (PP-6
+	institutionalises the opposite, see ``_verify_reviewer_two_pack_capacity``), so
+	that clause matched — and ``force=True`` destroyed — live findings belonging to
+	other customers.
+
+	Findings with NO surviving run pointer (a pre-run-tracking row, or one whose
+	runs were already deleted) are left ALONE. There is no evidence tying such a row
+	to this installation rather than to any other install of the same agent, and
+	guessing is what caused #455. An orphan is visible and removable from Desk;
+	another customer's destroyed audit history is neither.
+	"""
+	if not run_names:
+		return set()
+	names = set()
+	for field in ("run", "first_seen_run"):
+		names.update(
+			frappe.get_all(FINDING, filters={field: ["in", run_names]}, pluck="name", ignore_permissions=True)
+		)
+	return names
+
+
+def _detach_last_seen_run(run_names: list) -> None:
+	"""Re-point any SURVIVING finding whose ``last_seen_run`` lands in the runs this
+	cascade is about to force-delete.
+
+	A survivor here is by definition another installation's row that the #454
+	recurrence bump attached to one of our runs. Leaving the pointer would dangle
+	it: ``get_findings``' run drill-down INNER JOINs ``last_seen_run``, so the row
+	would vanish from its real owner's history, and Frappe's link validation would
+	reject that owner's next acknowledge/resolve save outright. Falling back to the
+	row's own ``first_seen_run`` (which belongs to ITS installation and survives, or
+	is empty) keeps the recurrence pointer truthful and the row usable.
+
+	Raw ``db.set_value`` — ``last_seen_run`` is a frozen audit field, so this must
+	bypass the finding controller exactly as the recurrence bump does.
+	"""
+	if not run_names:
+		return
+	for row in frappe.get_all(
+		FINDING,
+		filters={"last_seen_run": ["in", run_names]},
+		fields=["name", "first_seen_run"],
+		ignore_permissions=True,
+	):
+		frappe.db.set_value(
+			FINDING, row.name, "last_seen_run", row.first_seen_run or None, update_modified=False
+		)
+
+
 @frappe.whitelist()
 def uninstall_agent(installation: str) -> dict:
 	"""Delete an installation (owner-gated) plus its run + finding history —
 	bottom-up, mirroring ``macros_api.delete_macro``: findings link runs (via
 	``run`` / ``first_seen_run`` / ``last_seen_run``) and runs link the
-	installation, so leaving either behind would block the delete with
-	LinkExistsError. One install is one (owner, agent) pair, so the owner's
-	findings for the agent go, PLUS (belt-and-braces) any finding whose run
-	pointers land in this install's runs. The ``uninstalled`` activity row is
-	written FIRST — it is Link-free by design, so the history survives the
-	cascade. The bundle leaves the container on the next Apply (the fleet
-	endpoint does a full reconcile); the dirty flag records that an Apply is
-	now pending — but only when the install was ENABLED (a disabled install
-	was never in the pushed set, so removing it changes nothing)."""
+	installation. The cascade is scoped STRICTLY BY INSTALLATION MEMBERSHIP, the
+	way ``_rehome_installation_outputs`` scopes it, never by a broad
+	``(agent, owner)`` match (#455 — see ``_installation_finding_names``). The
+	``uninstalled`` activity row is written FIRST — it is Link-free by design, so
+	the history survives the cascade. The bundle leaves the container on the next
+	Apply (the fleet endpoint does a full reconcile); the dirty flag records that
+	an Apply is now pending — but only when the install was ENABLED (a disabled
+	install was never in the pushed set, so removing it changes nothing)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("delete")  # S3 owner-gate before touching linked rows
 	log_activity(
@@ -779,26 +848,18 @@ def uninstall_agent(installation: str) -> dict:
 	# ignore_permissions here finds every row regardless of its current visibility
 	# owner; the delete itself is already ignore_permissions + owner-gated above.
 	run_names = frappe.get_all(RUN, filters={"installation": doc.name}, pluck="name", ignore_permissions=True)
-	# Findings for this install are owned by the installer (live) OR the reviewer
-	# (shadow) — cover both, plus (belt-and-braces) any finding whose run pointers
-	# land in this install's runs.
-	finding_names = set(
-		frappe.get_all(
+	for name in _installation_finding_names(run_names):
+		# The guard flag rides through ``delete_doc``'s ``flags`` argument, which is
+		# applied to the fetched doc BEFORE ``on_trash`` runs — so the controller can
+		# re-derive membership itself and refuse a row this cascade has no claim on.
+		frappe.delete_doc(
 			FINDING,
-			filters={"agent": doc.agent, "owner": ["in", [doc.owner, doc.reviewer]]},
-			pluck="name",
+			name,
 			ignore_permissions=True,
+			force=True,
+			flags={"jarvis_uninstall_installation": doc.name},
 		)
-	)
-	if run_names:
-		for field in ("run", "first_seen_run", "last_seen_run"):
-			finding_names.update(
-				frappe.get_all(
-					FINDING, filters={field: ["in", run_names]}, pluck="name", ignore_permissions=True
-				)
-			)
-	for name in finding_names:
-		frappe.delete_doc(FINDING, name, ignore_permissions=True, force=True)
+	_detach_last_seen_run(run_names)
 	for name in run_names:
 		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	frappe.delete_doc(INSTALLATION, installation)  # honors if_owner

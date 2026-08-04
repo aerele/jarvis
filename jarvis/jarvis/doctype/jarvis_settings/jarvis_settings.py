@@ -1886,6 +1886,122 @@ def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETR
 		settings._sync_via_admin(action)
 
 
+#: The clause admin puts in ``chat_readiness_reason`` when its OWN tenant row
+#: holds no LLM credential of any kind.
+#:
+#: Source of truth: ``jarvis_admin_v2/fleet/pool.py``. ``compute_chat_readiness``
+#: appends exactly this sentence to ``missing`` when ``_llm_creds_ready(row)`` is
+#: False, i.e. no api key, no pool config and no oauth blob. ``disconnect_llm``
+#: blanks all three as a committed desired generation BEFORE it touches the
+#: container, so this clause appears the moment admin has processed a disconnect
+#: and stays until the customer reconnects.
+#:
+#: Matching a SENTENCE is not something to do lightly (the resume guard that
+#: prose-matched a message admin had stopped sending is the cautionary tale), so
+#: note which way this one fails. If admin rewords it, the clause stops matching,
+#: the branch below never fires, and the bench is back to exactly today's
+#: behaviour - the split persists until someone reconnects. It can never start
+#: firing on a workspace admin is happy with. A drift here loses the fix; it
+#: cannot cost a customer their keys.
+_ADMIN_NO_LLM_CREDS_CLAUSE = "waiting for an llm key or subscription"
+
+
+def _admin_says_llm_gone(state, reason) -> bool:
+	"""Does admin's OWN state say this workspace has no LLM credentials left?
+
+	Not "is the workspace unhealthy" - specifically "admin's tenant row holds
+	nothing". Every other Configuring reason (applying your LLM configuration, ERP
+	tools not connected, a rejected pool spec, an unverified route) describes a
+	tenant whose credentials admin still HAS, and must never reach the clear.
+
+	``state`` is required to be exactly ``Configuring`` on top of the clause:
+	  * ``None``   - the probe failed. Unknown is not disconnected.
+	  * ``Ready``  - contradicts the clause outright.
+	  * ``Provisioning`` / ``Suspended`` / ``SupportRequired`` - admin is answering
+	    about a container, a subscription or an authority incident, and says
+	    nothing about credentials either way. A suspended tenant in particular
+	    still owns its keys and gets them back on renewal.
+	"""
+	if state != "Configuring":
+		return False
+	return _ADMIN_NO_LLM_CREDS_CLAUSE in (reason or "").strip().lower()
+
+
+def _local_llm_survived_an_admin_disconnect(settings, pool_mode: bool) -> bool:
+	"""Could this workspace be the losing half of a split disconnect? Local-only.
+
+	Three conditions. The second and third both exist to keep a working customer's
+	credentials safe, and they cover two different ways admin can legitimately be
+	holding none.
+
+	1. The bench still HOLDS a credential (``_has_llm_config``). Nothing to clear
+	   otherwise, which is also what makes the clear idempotent - a converged
+	   workspace fails here on every later tick.
+
+	2. The fleet has CONFIRMED an apply of the leg this workspace syncs through
+	   (``_llm_apply_confirmed``: llm_pool_synced_at / llm_oauth_connected_at /
+	   llm_direct_synced_at). This is the discriminator between the two ways admin
+	   can be holding no credentials for a container we ARE serving:
+
+	     * admin HAD them and deleted them -> the marker is set, because it was
+	       stamped when admin confirmed the apply and only a completed disconnect
+	       clears it. Converge.
+	     * admin NEVER RECEIVED them -> a customer who just typed a key into a
+	       bench that could not reach admin, or whose first push failed. No marker
+	       was ever stamped. Their key is real, wanted, and MUST NOT be destroyed;
+	       the pending-sync machinery is what carries that case.
+
+	   Without (2) the reconcile would read "admin has no creds" identically in
+	   both and wipe the second, which is the one failure mode strictly worse than
+	   the bug being fixed.
+
+	3. NO WORKSPACE RESET IS IN FLIGHT. (2) is not sufficient alone, because a reset
+	   points the customer at a BRAND NEW container while deliberately keeping the
+	   pool and the ``*_synced_at`` markers - the control plane carries them across,
+	   and ``_prepare_for_reset`` says in as many words that clearing them would
+	   eject the customer into the setup wizard. So between "new container Running"
+	   and "re-pushed spec applied", admin truthfully reports no credentials about a
+	   workspace whose markers are set, and (1) and (2) both pass. Firing there
+	   would destroy a pool nobody asked to disconnect, mid-reset. The reset owns
+	   its own convergence (``reconcile_pending_workspace_reset``); this leg stands
+	   aside until that has finished.
+
+	Deliberately reuses ``account``'s predicates rather than restating them: they
+	are the same evidence ``is_ready_for_chat`` opens chat on and the Connection
+	badge colours itself from, so this branch cannot come to a different
+	conclusion about "connected" than the rest of the app.
+	"""
+	from jarvis.account import _has_llm_config, _llm_apply_confirmed
+	from jarvis.onboarding import _RESETTING_STATUS
+
+	if (settings.get("last_sync_status") or "").startswith(_RESETTING_STATUS):
+		return False
+	return _has_llm_config(settings) and _llm_apply_confirmed(settings, pool_mode)
+
+
+def _llm_config_revision() -> str:
+	"""Digest of this bench's LOCAL LLM configuration, read uncached.
+
+	The reconcile decides whether to destroy credentials from an answer admin gave
+	up to a probe-timeout ago, holding a ``settings`` doc it loaded before asking.
+	A customer who RECONNECTS inside that window - types a new key, saves, has it
+	pushed - would otherwise have the credential they just entered deleted by a
+	verdict about the connection they replaced. Snapshot this before the probe,
+	compare after, skip the tick if anything moved; the next tick re-reads a
+	consistent pair. A narrow window, but it is the exact failure mode this whole
+	branch exists to avoid, so it does not get to survive as a race.
+
+	Reuses ``account``'s gate-revision digest rather than a bespoke field list: it
+	already covers every field a save or a reconnect moves (provider, model, auth
+	mode, preset, routing, sync status, the three apply markers), it is uncached by
+	construction, and one definition means a field added for the chat gate is
+	respected here for free.
+	"""
+	from jarvis.account import _GATE_REVISION_FIELDS, _gate_revision, _settings_raw
+
+	return _gate_revision(_settings_raw(_GATE_REVISION_FIELDS))
+
+
 def reconcile_pending_llm_sync() -> None:
 	"""Scheduled safety net (*/5, hooks.py): finish a sync the in-band job left
 	PENDING because the admin apply was still converging (F2).
@@ -1897,13 +2013,28 @@ def reconcile_pending_llm_sync() -> None:
 	  resolved since the bench last looked: either the explicit
 	  ``pending: admin applying config`` marker, OR a pool whose FIRST apply is
 	  still unproven (pool mode + no llm_pool_synced_at) sitting at a
-	  pending/failed status (the onboarding livelock class).
+	  pending/failed status (the onboarding livelock class), OR a workspace whose
+	  credentials admin has already destroyed (see ``_admin_says_llm_gone``).
 	- Probes admin get_connection EXACTLY ONCE (chat_readiness); stamps the
 	  terminal success markers only on "Ready" (admin gates Ready on
 	  applied_version >= desired_version, so it never reports Ready from intent).
 	- Never flips a status to a new "failed:" and never touches a healthy /
 	  already-"ok" tenant. Swallows every error - a scheduled task must not
 	  raise. Un-onboarded sites short-circuit.
+
+	THE DISCONNECT LEG (#534). ``onboarding.disconnect_llm`` calls admin inside a
+	whitelisted request and clears local secrets only after it answers, so a
+	worker killed at gunicorn's ``-t`` AFTER admin committed its blanked row left
+	admin and the container disconnected while this bench kept advertising a live
+	model. Nothing converged that: the branches above only look at pending/failed
+	states, and a half-disconnected workspace reads perfectly healthy locally.
+
+	This leg closes it WITHOUT a bench-side intent flag - admin deliberately owns
+	that state (jarvis-admin-v2 #136), and a local flag would only reintroduce the
+	same "did the worker survive long enough to write it" question one field
+	earlier. It converges from what admin already publishes instead, so a killed
+	worker, a dropped connection and a customer who closed the tab all land in the
+	same place on the next tick.
 	"""
 	try:
 		settings = frappe.get_single("Jarvis Settings")
@@ -1942,15 +2073,48 @@ def reconcile_pending_llm_sync() -> None:
 			and (settings.get("llm_auth_mode") or "api_key") == "api_key"
 			and bool((settings.get("llm_provider") or "").strip())
 		)
-		if not (is_applying_pending or is_unproven_pool or is_unproven_direct):
+		# The disconnect leg's LOCAL precondition (see the docstring). It is true of
+		# every healthy CONNECTED workspace, so this leg does cost one extra
+		# get_connection per tick on those - unavoidable, because a bench that lost
+		# the disconnect looks identical to a working one from the inside, which is
+		# the whole defect. The probe is the same cheap read the SPA already makes
+		# far more often, and every tenant that holds no credential still skips it.
+		may_be_disconnected = _local_llm_survived_an_admin_disconnect(settings, pool_mode)
+		if not (is_applying_pending or is_unproven_pool or is_unproven_direct or may_be_disconnected):
 			return
 
-		state, _reason = _admin_chat_readiness()
+		revision_before = _llm_config_revision() if may_be_disconnected else ""
+		state, reason = _admin_chat_readiness()
 		if state == "Ready":
-			# Stamps the evidence marker for whichever mode is active:
-			# llm_pool_synced_at for pool tenants, llm_direct_synced_at for
-			# single-model tenants (is_ready_for_chat's first-activation gates).
-			_stamp_converged_ok(settings, is_pool=pool_mode)
+			if is_applying_pending or is_unproven_pool or is_unproven_direct:
+				# Stamps the evidence marker for whichever mode is active:
+				# llm_pool_synced_at for pool tenants, llm_direct_synced_at for
+				# single-model tenants (is_ready_for_chat's first-activation gates).
+				_stamp_converged_ok(settings, is_pool=pool_mode)
+			return
+		if not (may_be_disconnected and _admin_says_llm_gone(state, reason)):
+			return
+		if _llm_config_revision() != revision_before:
+			# The customer reconnected while we were asking. Admin's answer is about
+			# the connection they just replaced, and acting on it would delete the
+			# credential they just entered. Drop the tick; the next one re-reads both.
+			frappe.logger().info(
+				"jarvis_settings: local LLM config changed during the disconnect probe; "
+				"discarding a stale admin verdict"
+			)
+			return
+
+		from jarvis.onboarding import apply_local_disconnect
+
+		frappe.logger().warning(
+			"jarvis_settings: admin reports this workspace's LLM credentials are gone "
+			"while the bench still holds them; completing the local disconnect"
+		)
+		# Safe to write through the doc loaded before the probe: the revision check
+		# above just proved nothing moved, and every write it makes is absolute
+		# (delete the rows, write _DISCONNECTED_LLM_FIELDS' constants) rather than
+		# derived from a field this doc is holding.
+		apply_local_disconnect(settings)
 	except Exception:
 		frappe.log_error(
 			title="Jarvis: reconcile_pending_llm_sync failed",

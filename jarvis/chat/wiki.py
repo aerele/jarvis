@@ -30,9 +30,18 @@ writes behind explicit channel checks + the controller sanitizer).
 Merge discipline (``apply_extracted_page_updates``): ``append_md`` appends,
 ``body_md`` replaces only when the update carries no contradiction; a flagged
 contradiction APPENDS a ``## Contradiction flagged (<date>)`` section and sets
-``contradiction_flag`` — extracted content never silently overwrites contested
-knowledge. Every applied update appends a ``{date, kind, ref, user}`` sources
-entry and refreshes ``last_confirmed_at``.
+``contradiction_flag`` WHICHEVER key carried it — extracted content never
+silently overwrites contested knowledge, and never buries it as ordinary prose
+where ``jarvis.learning.wiki_lint`` cannot find it. Every applied update appends
+a ``{date, kind, ref, user}`` sources entry and refreshes ``last_confirmed_at``.
+
+The voice-note ingest is APPEND-ONLY against pages that already exist
+(``allow_body_replace=False``). It shows the model at most
+``_MAX_EXISTING_BODY_PROMPT_CHARS`` of a stored body and caps the reply at 4000
+tokens, so a "full merged body" reply can never carry a long page back intact —
+replacing with it deleted everything past the excerpt. The prompt now asks for
+``append_md`` on an existing page, and the merge appends a stray ``body_md``
+instead of swapping it in.
 """
 
 from __future__ import annotations
@@ -110,22 +119,39 @@ _INGEST_SYSTEM = (
 	"You maintain an internal business wiki. Given a spoken note transcript, "
 	"the ERP entities in view and the existing wiki pages, output ONLY a JSON "
 	"array of page updates - no prose, no markdown fences. Each item must be "
-	'an object with exactly these keys: "slug" (lowercase-hyphen page id; '
-	'reuse the existing or suggested slug when one is given), "page_type" '
-	'(one of "Customer", "Supplier", "Item", "Process", "Doctype", '
-	'"Exception", "Integration", "People", "Org"), "title", "ref_doctype", '
-	'"ref_name" (the ERP record the page is about, or null), "summary" (one '
-	'paragraph, max 500 characters), "body_md" (markdown) and "contradiction" '
-	'(boolean). When the note does NOT contradict a page, "body_md" must be '
-	"the FULL updated body: the existing body with the new durable knowledge "
-	"merged in - never drop existing content. When the note contradicts what "
-	'a page already says, set "contradiction": true and put ONLY the new '
-	'conflicting information in "body_md" (it is appended as a flagged '
-	"section; the existing body is preserved). Record only durable business "
-	"knowledge - how the org, its customers, suppliers, items and processes "
-	"work; ignore greetings, small talk and one-off tasks. At most "
-	f"{MAX_PAGES_PER_NOTE} pages. Output [] when there is nothing durable."
+	'an object with these keys: "slug" (lowercase-hyphen page id; reuse the '
+	'existing or suggested slug when one is given), "page_type" (one of '
+	'"Customer", "Supplier", "Item", "Process", "Doctype", "Exception", '
+	'"Integration", "People", "Org"), "title", "ref_doctype", "ref_name" (the '
+	'ERP record the page is about, or null), "summary" (one paragraph, max 500 '
+	'characters), "contradiction" (boolean), and EXACTLY ONE body key chosen '
+	"as follows.\n"
+	'The page is NOT in the existing wiki pages: use "body_md" - the full body '
+	"of the new page.\n"
+	'The page IS in the existing wiki pages: use "append_md" - ONLY the new '
+	"durable knowledge, as a short markdown section. It is appended to the "
+	"stored body, so never repeat what the page already says and never send "
+	"the page body back. The body you were shown may be an excerpt, so a "
+	"full-body reply would destroy the part you cannot see.\n"
+	"The note CONTRADICTS what an existing page says: set "
+	'"contradiction": true and put ONLY the new conflicting information in '
+	'"body_md". It is appended as a flagged section for a human to reconcile; '
+	"the existing body is preserved.\n"
+	"Record only durable business knowledge - how the org, its customers, "
+	"suppliers, items and processes work; ignore greetings, small talk and "
+	f"one-off tasks. At most {MAX_PAGES_PER_NOTE} pages. Output [] when there "
+	"is nothing durable."
 )
+
+# Appended to a stored body that did not fit the prompt budget. Without it the
+# model reads a plain slice as the whole page and "merges" against a phantom
+# document (issue #488).
+_BODY_EXCERPT_MARKER = (
+	"\n\n[EXCERPT ONLY: {n} further characters of this page are not shown. "
+	'Reply with "append_md" for this page, never a full body.]'
+)
+# How far back an excerpt may snap to end on a whole line.
+_EXCERPT_LINE_SNAP_CHARS = 200
 
 
 # --------------------------------------------------------------------------- #
@@ -701,7 +727,16 @@ def _ingest_note(note_name: str) -> None:
 	if updates is None:
 		return  # extraction failed (logged); stays New for the sweep
 
-	applied, failed = apply_extracted_page_updates(updates, "voice", note.owner, ref=note.name)
+	applied, failed = apply_extracted_page_updates(
+		updates,
+		"voice",
+		note.owner,
+		ref=note.name,
+		# The prompt showed the model an EXCERPT of any long page body, so this
+		# path may never replace one: a "full merged body" reply would delete
+		# everything past the excerpt (issue #488).
+		allow_body_replace=False,
+	)
 	if failed:
 		# A page write failed (already logged per-update): leave the note New
 		# so the daily voice_facts sweep retries — marking it Processed here
@@ -768,8 +803,26 @@ def _pages_for_prompt(entities: list[dict]) -> tuple[list[dict], list[dict]]:
 		limit_page_length=len(suggested),
 	)
 	for r in rows:
-		r["body_md"] = (r.get("body_md") or "")[:_MAX_EXISTING_BODY_PROMPT_CHARS]
+		r["body_md"] = _body_for_prompt(r.get("body_md"))
 	return suggested, rows
+
+
+def _body_for_prompt(body) -> str:
+	"""The prompt copy of a stored body: whole when it fits the budget, else the
+	head cut on a line boundary plus an explicit excerpt marker."""
+	body = body or ""
+	if len(body) <= _MAX_EXISTING_BODY_PROMPT_CHARS:
+		return body
+	head = body[:_MAX_EXISTING_BODY_PROMPT_CHARS]
+	# Snap back to a line boundary, but only a NEARBY one (the _clip_body idiom):
+	# rfind scans the WHOLE window, so a body whose only early newline is followed
+	# by one long unbroken run would otherwise be trimmed to almost nothing,
+	# spending the budget on the marker instead of on context.
+	nl = head.rfind("\n")
+	if nl > len(head) - _EXCERPT_LINE_SNAP_CHARS:
+		head = head[:nl]
+	head = head.rstrip()
+	return head + _BODY_EXCERPT_MARKER.format(n=len(body) - len(head))
 
 
 def _extract_page_updates(note, entities, suggested, existing) -> list | None:
@@ -890,6 +943,7 @@ def apply_extracted_page_updates(
 	default_scope: str | None = None,
 	target_user: str | None = None,
 	provenance_prefix: str | None = None,
+	allow_body_replace: bool = True,
 	return_outcomes: bool = False,
 ) -> tuple[int, int] | list[dict]:
 	"""Create/update wiki pages from extracted updates (the note ingest above
@@ -916,6 +970,15 @@ def apply_extracted_page_updates(
 	human-authored / other-feature page is REFUSED rather than overwritten — a
 	scribe can create/update only its OWN pages. None (every other caller)
 	preserves today's behavior byte-for-byte.
+
+	``allow_body_replace=False`` (voice-note ingest, issue #488): a ``body_md``
+	aimed at an EXISTING page is APPENDED instead of replacing its body. Callers
+	that only saw an EXCERPT of the stored body (``_pages_for_prompt`` clips at
+	``_MAX_EXISTING_BODY_PROMPT_CHARS``) cannot produce a lossless replacement,
+	so a replace there silently deletes the unseen tail; a duplicated section is
+	recoverable, a deleted one is not. Callers that compose a page from a source
+	they read in full (the app-learning scribe) keep the default True and still
+	replace, so a re-run refreshes its own page in place rather than doubling it.
 
 	``return_outcomes=True`` (Custom App Learning scribe writeback): returns a
 	PER-UPDATE outcome list ``[{slug, ok, reason}]`` aligned to the accepted
@@ -959,7 +1022,16 @@ def apply_extracted_page_updates(
 		frappe.db.savepoint(sp)
 		try:
 			ok = bool(
-				_apply_one_update(update, source, user, ref, default_scope, target_user, provenance_prefix)
+				_apply_one_update(
+					update,
+					source,
+					user,
+					ref,
+					default_scope,
+					target_user,
+					provenance_prefix,
+					allow_body_replace,
+				)
 			)
 			reason = "applied" if ok else "refused"
 			if ok:
@@ -992,6 +1064,7 @@ def _apply_one_update(
 	default_scope: str | None = None,
 	target_user: str | None = None,
 	provenance_prefix: str | None = None,
+	allow_body_replace: bool = True,
 ) -> bool:
 	slug = _normalize_slug(update.get("slug"))
 	if not slug:
@@ -1058,11 +1131,11 @@ def _apply_one_update(
 		return False
 
 	try:
-		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix)
+		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix, allow_body_replace)
 	except frappe.TimestampMismatchError:
 		# Concurrent save between our load and save: reload + re-merge once
 		# so ordinary concurrency doesn't drop the update.
-		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix)
+		return _merge_update_into_page(name, update, source, user, ref, provenance_prefix, allow_body_replace)
 
 
 def _merge_update_into_page(
@@ -1072,6 +1145,7 @@ def _merge_update_into_page(
 	user: str | None,
 	ref: str | None,
 	provenance_prefix: str | None = None,
+	allow_body_replace: bool = True,
 ) -> bool:
 	body_md = update.get("body_md")
 	append_md = update.get("append_md")
@@ -1095,17 +1169,33 @@ def _merge_update_into_page(
 	if not (doc.ref_name or "").strip() and update.get("ref_name"):
 		doc.ref_name = str(update["ref_name"]).strip()
 
+	# ``append_md`` still wins over ``body_md``, but which key carried the content
+	# no longer decides how a CONTRADICTION lands: a contradicting append used to
+	# slip past the flagged-section path and store contested knowledge as ordinary
+	# prose, leaving neither ``contradiction_flag`` nor the marker text that
+	# jarvis.learning.wiki_lint sweeps for. Only ``body_md`` may replace, and only
+	# when the caller is allowed to.
 	existing = (doc.body_md or "").strip()
+	incoming = ""
+	replaces = False
 	if isinstance(append_md, str) and append_md.strip():
-		doc.body_md = _clip_body(f"{existing}\n\n{append_md.strip()}".strip())
+		incoming = append_md.strip()
 	elif isinstance(body_md, str) and body_md.strip():
 		incoming = body_md.strip()
+		replaces = allow_body_replace
+	if incoming:
 		if contradiction and existing:
 			stamp = now_datetime().strftime("%Y-%m-%d")
 			doc.body_md = _clip_body(f"{existing}\n\n## Contradiction flagged ({stamp})\n\n{incoming}")
 			doc.contradiction_flag = 1
-		else:
+		elif replaces or not existing:
 			doc.body_md = _clip_body(incoming)
+		else:
+			# Either an append, or an append-only caller that sent a body_md
+			# anyway. The ingest only ever saw an EXCERPT of this page, so
+			# swapping the field would delete the rest; a duplicated section is
+			# recoverable by a human editor, a deleted one is not (issue #488).
+			doc.body_md = _clip_body(f"{existing}\n\n{incoming}")
 	append_source(doc, source, ref, user)
 	doc.last_confirmed_at = now_datetime()
 	doc.save(ignore_permissions=True)

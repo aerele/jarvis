@@ -13,8 +13,11 @@ last started; ``status`` in queued/running/completed/failed/stopped). Progress i
 pushed to the owner's realtime channel as ``macro:progress`` / ``macro:done``.
 """
 
+from datetime import timedelta
+
 import frappe
 from frappe import _
+from frappe.utils import get_datetime, now_datetime
 
 from jarvis.chat.events import publish_to_user
 
@@ -33,6 +36,60 @@ _MAX_CAPACITY_ATTEMPTS = 20
 # ample headroom; on the pathological miss the state-fenced CAS in the resume path is the hard
 # backstop. Module-level so tests can shorten it.
 _STOP_LOCK_BLOCK_S = 10.0
+
+# #471: how long a run may sit ``running`` WITHOUT FORWARD PROGRESS before the sweep
+# terminalizes it. Sized against the longest a SINGLE step can legitimately take without
+# writing the run row, which is NOT just the RQ turn cap. Worst legitimate case, traced
+# end to end:
+#     api._AGENT_TURN_WORKER_TIMEOUT   720 s   RQ worker envelope for one turn
+#   + stale_scan promotion             720 s   MANAGED_RECOVER_AFTER_SECONDS, on a */5 cron
+#   + turn_recovery._RECOVERY_CEILING_MINUTES  60 min a turn may sit `recovering`
+#   + the next */2 recovery tick
+#   ~= 70-80 min with ZERO writes to Jarvis Macro Run, because recovery works on the chat
+#      MESSAGE and only touches the run when it finalizes into advance_after_turn.
+# 3 h is therefore roughly a 2.5x margin, not the 12x you get by counting the turn cap
+# alone. Do NOT tighten this below ~2 h without re-tracing those four numbers; the
+# recovery ceiling, not the worker timeout, is the binding constraint. Module-level so
+# tests can shorten it.
+STALE_RUN_AFTER_SECONDS = 3 * 3600
+_STALE_RUN_ERROR = "The run stopped making progress and was closed by the stale-run sweep. Run it again."
+
+# #468: the monthly budget for UNATTENDED macro work, per owner. Counted in STEPS,
+# not runs: one run is up to MAX_STEPS (25) agent turns, so a run count would
+# under-bound the real spend by 25x. Read from Jarvis Settings at run time (not a
+# constant) so a bench admin can raise it without a code change, and floored at
+# MIN_ so a misconfigured 0/blank can never wedge every schedule for a month.
+#
+# The uncapped ceiling this replaces: MAX_MACROS_PER_OWNER (25) x MAX_STEPS (25) at
+# the shortest cadence = 625 turns/day/owner, ~19k/month, times the number of users
+# on the bench. The default leaves room for a couple of daily multi-step macros
+# plus headroom; the floor is a full daily schedule of a single-step macro.
+DEFAULT_SCHEDULED_STEP_BUDGET_MONTHLY = 500
+MIN_SCHEDULED_STEP_BUDGET_MONTHLY = 31
+
+# The machine reason ``run_macro`` reports when the budget is spent. The rest come
+# straight from ``policy.validate_can_send`` so a macro and a typed message speak
+# the same vocabulary.
+BLOCK_STEP_BUDGET = "scheduled_step_budget"
+
+# #471: reported when the first turn's dispatch RAISED after the conversation and run
+# row were already committed. Distinct from the codes above because the run row exists
+# and has already been terminalized, so the scheduler must not record a second one.
+BLOCK_DISPATCH_FAILED = "dispatch_failed"
+_DISPATCH_FAILED_ERROR = "The agent turn could not be dispatched, so this run never started."
+
+# Human sentences for the MANUAL path (thrown, so the SPA's existing toast renders
+# them). The scheduled path reports the machine code instead and the scheduler
+# writes its own owner-facing sentence onto the failed run row.
+_BLOCK_MESSAGE = {
+	"usage_limit": "You have reached your monthly usage limit, so this macro cannot run.",
+	"subscription_suspended": "Your subscription does not currently include chat, so this macro cannot run.",
+	"release_update_required": "A Jarvis update is rolling out. Try this macro again in a few minutes.",
+	"workspace_resetting": "Your workspace is being rebuilt. Try this macro again in a few minutes.",
+	"llm_not_configured": "Connect an AI model before running a macro.",
+	BLOCK_STEP_BUDGET: "This month's budget for scheduled macro runs is used up.",
+	BLOCK_DISPATCH_FAILED: "This macro could not be started. Please try again in a few minutes.",
+}
 
 
 def _run_cas(sql: str, params: dict) -> int:
@@ -94,6 +151,16 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	merged = (doc.merged_prompt or "").strip()
 	total = 1 if merged else len(steps)
 
+	# #468: the entitlement + unattended-spend gate, BEFORE anything is created —
+	# a refused run must leave no conversation, no intro message and no run row.
+	blocked = entitlement_block(owner, steps=total, trigger=trigger)
+	if blocked:
+		if trigger == "scheduled":
+			# The scheduler decides what a refusal costs: it records the failure
+			# against the owner and works out whether the slot is consumed.
+			return {"ok": False, "reason": blocked}
+		frappe.throw(_(_BLOCK_MESSAGE.get(blocked, "This macro cannot run right now.")))
+
 	# Fresh conversation titled after the macro, seeded with an intro so the
 	# transcript reads as a self-contained run.
 	conv = frappe.get_doc({"doctype": CONV, "title": doc.macro_name[:140], "status": "Active"})
@@ -151,10 +218,29 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 			},
 		)
 
-	if merged:
-		_run_merged(run, doc, merged)
-	else:
-		_run_step(run, doc, 0)
+	try:
+		if merged:
+			_run_merged(run, doc, merged)
+		else:
+			_run_step(run, doc, 0)
+	except Exception:
+		# #471: the conversation and the run row are already COMMITTED above, but the
+		# first turn never dispatched (``_ensure_session_key`` throws when the gateway
+		# is down). No turn means the chaining hook that terminalizes a run never fires
+		# for it, so without this the row sits `running` until the stale sweep picks it
+		# up three hours later — and the scheduler, seeing the raise, would record a
+		# SECOND failed row, showing the customer two failures for one missed slot.
+		# Terminalize the row that actually carries the conversation, and report the
+		# refusal in the normal return shape instead of raising.
+		frappe.log_error(title=f"jarvis macro dispatch failed: {doc.name}", message=frappe.get_traceback())
+		_finish(run, "failed", error=_DISPATCH_FAILED_ERROR)
+		try:
+			_publish_done(run, doc, "failed")
+		except Exception:
+			pass
+		if trigger == "scheduled":
+			return {"ok": False, "reason": BLOCK_DISPATCH_FAILED}
+		frappe.throw(_(_BLOCK_MESSAGE[BLOCK_DISPATCH_FAILED]))
 	return {"ok": True, "data": {"macro_run": run.name, "conversation": conv.name}}
 
 
@@ -305,9 +391,15 @@ def _skill_invocations(step) -> str:
 	"""Render one STEP's tagged skills (a JSON list of Jarvis Custom Skill
 	row-names on the step row) as a ``/slug`` invocation line appended to that
 	step's prompt — the same mechanism as typing ``/slug`` in the composer, so
-	``invoked_skill_clause`` activates them deterministically at turn time
-	(which also re-checks owner/shared visibility). Disabled or since-deleted
-	skills drop out silently."""
+	``invoked_skill_clause`` names them at turn time (which also re-checks
+	owner/shared visibility). Disabled or since-deleted skills drop out silently.
+
+	How strong that activation is depends on the skill, and the step inherits the
+	difference silently (issue #477). A skill the container push writes is named as
+	an installed ``custom-<slug>`` and activates deterministically. A Role-scope,
+	role-restricted, private or over-cap skill is not on disk, so the clause instead
+	instructs the agent to fetch it with ``jarvis__get_skill``: reliable in practice
+	but model-mediated, not a container guarantee."""
 	try:
 		names = frappe.parse_json(step.skills) if step.skills else []
 	except Exception:
@@ -563,6 +655,225 @@ def _compensate_resume_enqueue_failure(run, macro_doc, attempts: int) -> None:
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis macro capacity-resume compensate", message=frappe.get_traceback())
+
+
+# --------------------------------------------------------------------------- #
+# #468 entitlement + unattended-spend gate
+# --------------------------------------------------------------------------- #
+def entitlement_block(owner: str, *, steps: int, trigger: str) -> str | None:
+	"""The machine reason a macro run for ``owner`` must NOT dispatch, or None.
+
+	Two layers, both missing before #468:
+
+	1. **The same entitlement gate a typed message passes.**
+	   ``policy.validate_can_send`` had exactly three call sites — ``send_message``
+	   (x2) and ``retry_message`` — all human paths. ``api._enqueue_turn``, the SOLE
+	   dispatch path for macro steps, had none, and neither did ``dispatch``,
+	   ``admission``, ``turn_handler`` or ``worker``. So a macro step bypassed the
+	   per-user monthly token cap, the per-model cap and ``subscription_suspended``
+	   while ``turn_handler.record_turn_usage`` metered it anyway. The inversion was
+	   complete: the macro drained the owner's quota and the quota then rejected the
+	   owner's own interactive chat while the macro kept running.
+
+	   The gate is applied at the RUN, not per step, and no model is passed: a
+	   macro's model is resolved per conversation at dispatch time, and the
+	   aggregate monthly cap is the outer gate anyway (policy already documents the
+	   Auto/per-model skip as an accepted gap).
+
+	2. **A monthly step budget, for SCHEDULED runs only.** This is the path with no
+	   human in it and no other bound. A manual run is an explicit, attended click
+	   that the token caps above already price; refusing one on a monthly *run*
+	   quota would break a legitimate workflow with no cost story to justify it.
+	   Manual runs are not counted either, so a heavy interactive month cannot
+	   silently starve the schedule.
+
+	Mirrors ``agent_scheduler._over_run_budget`` in shape, and differs in key: an
+	agent budget is keyed on the INSTALLATION because ``run_as_user`` decouples the
+	executing identity from the owner. A macro has no such split, so the owner is
+	both the executing identity and the metered one."""
+	from jarvis.chat.policy import validate_can_send
+
+	ok, reason = validate_can_send(owner)
+	if not ok:
+		return reason
+	if trigger == "scheduled" and _over_step_budget(owner, steps):
+		return BLOCK_STEP_BUDGET
+	return None
+
+
+def _scheduled_step_budget_monthly() -> int:
+	"""The configured budget, or the default when it is unset.
+
+	A configured value is CLAMPED UP to ``MIN_SCHEDULED_STEP_BUDGET_MONTHLY`` rather
+	than replaced by the default, so an admin who deliberately sets a tight cap gets
+	the tightest cap that still permits a daily single-step schedule, not a silent
+	16x widening to the default. Unset/blank/unreadable means "no opinion" and takes
+	the default."""
+	try:
+		v = frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "macro_step_budget_monthly"))
+	except Exception:
+		v = 0
+	if v <= 0:
+		return DEFAULT_SCHEDULED_STEP_BUDGET_MONTHLY
+	return max(v, MIN_SCHEDULED_STEP_BUDGET_MONTHLY)
+
+
+def _scheduled_steps_this_month(owner: str) -> int:
+	"""Agent turns this owner's SCHEDULED macro runs have dispatched this month.
+
+	EVERY status counts, because ``current_step`` (how many steps a run actually
+	dispatched) is already the honest measure of spend on its own:
+
+	* a refusal recorded by ``macro_scheduler._record_failed`` carries
+	  ``current_step = 0``, so it contributes nothing and the cap can never become
+	  self-perpetuating. That is what the sibling's ``status != 'failed'`` filter
+	  buys, obtained here structurally instead.
+	* a run that failed PART WAY THROUGH really did dispatch and bill its completed
+	  steps, and three paths produce exactly that (``stop_on_error``, the
+	  capacity-attempt cap, and the stale-run sweep). Filtering on status would erase
+	  those turns from the tally, so an owner whose macros keep failing halfway could
+	  spend past the budget indefinitely — reopening the very "spends without ever
+	  being refused by it" inversion #468 exists to close.
+	* a ``stopped`` run likewise billed the steps it ran before the user stopped it.
+
+	So an in-flight or part-failed run contributes honestly, not all-or-nothing."""
+	row = frappe.db.sql(
+		f"""SELECT COALESCE(SUM(current_step), 0) FROM `tab{RUN}`
+		    WHERE owner = %(owner)s AND `trigger` = 'scheduled' AND creation >= %(since)s""",
+		{"owner": owner, "since": frappe.utils.get_first_day(frappe.utils.today())},
+	)
+	return int(row[0][0] or 0) if row else 0
+
+
+def _over_step_budget(owner: str, steps: int) -> bool:
+	"""True iff dispatching ``steps`` more scheduled steps would breach the budget."""
+	return (_scheduled_steps_this_month(owner) + max(int(steps or 1), 1)) > _scheduled_step_budget_monthly()
+
+
+# --------------------------------------------------------------------------- #
+# #471 stale-run reaper (backstop) — hooks cron
+# --------------------------------------------------------------------------- #
+def reap_stale_macro_runs() -> int:
+	"""Terminalize macro runs stuck ``running`` with no forward progress, and return
+	how many were reaped. Runs as Administrator (scheduler); never raises out.
+
+	Without this a run orphaned before its first turn sat ``running`` FOREVER with an
+	empty ``error`` (#471): ``run_macro`` dispatches through ``api._enqueue_turn``,
+	whose ``_ensure_session_key`` throws when the gateway is down, and with no turn
+	dispatched the chaining hook that terminalizes a run never fires for it.
+
+	**Parked is not stranded.** Two independent discriminators keep a legitimately
+	slow or deliberately parked run safe:
+
+	* **Status is an ALLOWLIST of exactly ``running``.** ``waiting_capacity`` is a
+	  live, deliberately parked state (CDX-19): a step that could not be admitted
+	  waits there for ``resume_waiting_capacity_runs``, legitimately for up to
+	  ``_MAX_CAPACITY_ATTEMPTS`` x 5 min (~100 min), and that path has its OWN bound
+	  after which it fails honestly. It is never a candidate here — and because the
+	  filter is an allowlist rather than "not terminal", any future non-terminal
+	  status is excluded by construction too.
+	* **Staleness is measured on ``modified`` (last forward progress), never on
+	  ``started_at``.** A 25-step macro legitimately stays ``running`` for hours;
+	  what it never does is stop making progress, because every step dispatch,
+	  capacity park and capacity resume writes the row.
+
+	Then, before acting, each candidate is re-read UNDER the same per-run redis lock
+	the chaining hook and the capacity resume take, plus a row lock, and transitioned
+	with a compare-and-set on ``status='running'`` — so a run that advanced between
+	the scan and here is left alone rather than having a live step killed under it."""
+	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
+	candidates = _stale_run_candidates(cutoff)
+	if not candidates:
+		return 0
+	from jarvis._redis_lock import redis_lock
+
+	reaped = 0
+	for run_name in candidates:
+		try:
+			with redis_lock(f"jarvis_macro_run:{run_name}", timeout_s=60, blocking_timeout_s=0.0) as acquired:
+				if not acquired:
+					# A chaining advance / capacity resume is INSIDE its critical section for
+					# this run right now, which is proof of life. Leave it for the next sweep.
+					continue
+				# REPEATABLE-READ discipline, matching agent_scheduler.fail_run: commit to
+				# close the current snapshot so the FOR UPDATE read below sees the row as it
+				# is NOW, not as this connection's transaction first saw it.
+				frappe.db.commit()
+				cur = frappe.db.get_value(
+					RUN, run_name, ["status", "modified"], as_dict=True, for_update=True
+				)
+				if not cur or cur.status != "running" or get_datetime(cur.modified) >= cutoff:
+					frappe.db.commit()  # release the row lock; the snapshot was stale
+					continue
+				if not _cas_run_status(
+					run_name, "running", "failed", finished_at=frappe.utils.now(), error=_STALE_RUN_ERROR
+				):
+					frappe.db.commit()
+					continue
+				frappe.db.commit()
+				reaped += 1
+				_announce_reaped(run_name)
+		except Exception:
+			# Roll back explicitly: an exception between the FOR UPDATE read and its
+			# balancing commit would otherwise leave the row lock and any half-applied
+			# state open, to be resolved as a side effect of the NEXT candidate's commit.
+			frappe.db.rollback()
+			frappe.log_error(title="jarvis macro stale-run sweep failed", message=frappe.get_traceback())
+	return reaped
+
+
+def _stale_run_candidates(cutoff) -> list[str]:
+	"""Runs stuck ``running`` with no forward progress since ``cutoff``. Its own
+	function so the re-read-under-lock compare-and-set can be exercised against a
+	deliberately STALE candidate snapshot in tests."""
+	return frappe.get_all(RUN, filters={"status": "running", "modified": ["<", cutoff]}, pluck="name")
+
+
+def _announce_reaped(run_name: str) -> None:
+	"""Surface a reaped run the two ways a live failure is surfaced: the realtime
+	``macro:done`` an open SPA listens for, and a Notification Log for the (likely
+	absent) owner. Best-effort — the durable ``failed`` row is the real record."""
+	try:
+		run = frappe.get_doc(RUN, run_name)
+		macro_doc = frappe.get_doc(MACRO, run.macro)
+		_publish_done(run, macro_doc, "failed")
+		notify_owner(
+			macro_doc.owner,
+			subject=f"Macro run did not finish: {macro_doc.macro_name}",
+			body=_STALE_RUN_ERROR,
+		)
+	except Exception:
+		pass
+
+
+def notify_owner(owner: str, *, subject: str, body: str) -> None:
+	"""Best-effort Notification Log for a macro owner (#471). A scheduled macro that
+	fails at 03:00 reaches nobody through the realtime channel — ``publish_to_user``
+	is delivered only to an open socket, and there is none — and ``frappe.log_error``
+	writes an Error Log only a System Manager can read.
+
+	Skipped for identities that cannot act on one (Administrator / Guest / disabled).
+	Never raises: notification is a courtesy on top of the durable failed run row, and
+	the scheduler's per-macro loop has no outer guard, so an escape here would abort
+	the sweep for every REMAINING due macro. The eligibility check is therefore inside
+	the try too: it reads ``User.enabled`` from the DB and can fail like any query."""
+	try:
+		from jarvis.permissions import is_valid_unattended_owner
+
+		if not is_valid_unattended_owner(owner):
+			return
+		frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": owner,
+				"type": "Alert",
+				"subject": subject[:140],
+				"email_content": body,
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+	except Exception:
+		pass
 
 
 def _finish(run, status: str, error: str | None = None) -> None:

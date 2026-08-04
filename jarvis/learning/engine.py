@@ -21,12 +21,21 @@ Pattern fields:
 
     {
       "detector_id":          str,   # registry id, e.g. "buy-supplier-stockness"
-      "pattern_key":          str,   # REQUIRED, unique dedupe key (detector + company + antecedent + consequent)
+      # REQUIRED, unique dedupe key: sha1(detector_id | antecedent_value |
+      # company) - see executor._pattern_key. The CONSEQUENT is NOT part of the
+      # key (a detector emits at most one candidate per antecedent, so there is
+      # no duplicate to collide with), which also means a later run can carry a
+      # DIFFERENT consequent into the SAME row. Approved rows are protected
+      # from that by approved_draft + lifecycle's redraft staling (#482).
+      "pattern_key":          str,
       "domain":               str,   # selling|buying|stock|accounts|projects|org
       "company":              str|None,
       "roles":                list[str],   # detected role names -> Jarvis Learned Pattern Role child rows (insert only)
       "pattern_statement":    str,   # REQUIRED, plain-English sentence
       "skill_draft":          str,   # REQUIRED, deterministic template body (never overwritten once draft_edited=1)
+                                     # NOTE: this is the LIVE draft. What an
+                                     # approved pattern COMPILES from is the
+                                     # frozen approved_draft snapshot (#482).
       "support_n":            int,   # n_units (independent units, never child rows)
       "n_rows":               int,   # raw rows (drill-down only)
       "exception_n":          int,
@@ -484,8 +493,16 @@ def _execute(run_name: str) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 # per-unit read (fenced) + persist (unfenced)
 # --------------------------------------------------------------------------- #
-def _read_and_persist(spec, company, run, fdr_buffer=None, mined=None, watch=None) -> dict:
+def _read_and_persist(spec, company, run, fdr_buffer, mined=None, watch=None) -> dict:
+	"""``fdr_buffer`` has no default (jarvis#483): pass a live ``DetectorFamilyBuffer``
+	to apply the per-family BH-FDR pass (fdr.py), or the ``fdr.NO_FDR`` sentinel to
+	deliberately skip it. Omitting the argument, or passing ``None`` out of habit,
+	used to silently persist every raw candidate with zero multiple-testing
+	correction - that fail-open default is gone; both now fail loudly instead
+	(a ``TypeError`` on omission, an ``AttributeError`` on a stray ``None``).
+	"""
 	from jarvis.learning.executor import PER_DETECTOR_CANDIDATE_CAP, run_detector
+	from jarvis.learning.fdr import NO_FDR
 
 	frappe.db.commit()  # no pending writes before opening the READ ONLY fence
 	with read_only_transaction() as pdb:
@@ -524,7 +541,7 @@ def _read_and_persist(spec, company, run, fdr_buffer=None, mined=None, watch=Non
 	# persisted survivors; the delta is explained in the run's coverage note.
 	to_persist = norm["candidates"]
 	persist_detector_id = _spec_id(spec)
-	if fdr_buffer is not None:
+	if fdr_buffer is not NO_FDR:
 		released = fdr_buffer.add(_spec_id(spec), norm["candidates"])
 		to_persist = list(released.survivors) if released else []
 		if released is not None:
@@ -703,6 +720,10 @@ def _apply_evidence(doc, cand: dict, run, *, is_new: bool) -> None:
 	# Never overwrite an SM-edited draft (draft_edited freezes it, plan 6.5)
 	# or an LLM-polished one (draft_polished - the polished wording must
 	# survive re-detection and approval; evidence below stays un-frozen).
+	# An APPROVED row's draft is still refreshed here on purpose: the reviewed
+	# text lives in the untouched approved_draft snapshot (what the compiler
+	# ships), so skill_draft stays the current detected wording that the board
+	# diffs against, and lifecycle stales the row when the two diverge (#482).
 	if is_new or not (doc.draft_edited or doc.get("draft_polished")):
 		doc.skill_draft = (cand.get("skill_draft") or "").strip() or doc.pattern_statement
 

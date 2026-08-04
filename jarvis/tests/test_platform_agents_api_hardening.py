@@ -31,6 +31,8 @@ from jarvis.chat import agents_api
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
+RUN = "Jarvis Agent Run"
+ACTIVITY = "Jarvis Agent Activity"
 FINDING = "Jarvis Agent Finding"
 PROVENANCE = "Jarvis Agent Provenance Event"
 SETTINGS = "Jarvis Settings"
@@ -117,9 +119,34 @@ def _mk_finding(owner: str, slug: str, **over) -> object:
 	return frappe.get_doc(FINDING, doc.name)
 
 
+def _mk_run(installation: str, slug: str, owner: str) -> str:
+	doc = frappe.get_doc(
+		{
+			"doctype": RUN,
+			"agent": slug,
+			"installation": installation,
+			"trigger": "manual",
+			"status": "completed",
+		}
+	)
+	doc.flags.ignore_permissions = True
+	doc.insert(ignore_permissions=True)
+	frappe.db.set_value(RUN, doc.name, "owner", owner, update_modified=False)
+	return doc.name
+
+
 def _wipe(slugs) -> None:
 	for n in frappe.get_all(FINDING, filters={"agent": ["in", slugs]}, pluck="name", ignore_permissions=True):
 		frappe.delete_doc(FINDING, n, force=True, ignore_permissions=True)
+	for n in frappe.get_all(RUN, filters={"agent": ["in", slugs]}, pluck="name", ignore_permissions=True):
+		frappe.delete_doc(RUN, n, force=True, ignore_permissions=True)
+	# ``uninstall_agent`` writes an ``uninstalled`` activity row and COMMITS, so the
+	# test-case rollback cannot reclaim it — same reason test_platform_capability_contract
+	# wipes ACTIVITY explicitly. Without this the suite leaks rows on every run.
+	for n in frappe.get_all(
+		ACTIVITY, filters={"agent": ["in", slugs]}, pluck="name", ignore_permissions=True
+	):
+		frappe.delete_doc(ACTIVITY, n, force=True, ignore_permissions=True)
 	for n in frappe.get_all(
 		INSTALLATION, filters={"agent": ["in", slugs]}, pluck="name", ignore_permissions=True
 	):
@@ -347,3 +374,126 @@ class TestPromotionLockSerialization(FrappeTestCase):
 		frappe.set_user("Administrator")
 		self.assertEqual(seen["name"], f"jarvis_agent_activation:{self.owner}")
 		self.assertEqual(frappe.db.get_value(INSTALLATION, self.inst.name, "activation_state"), "live")
+
+
+# --------------------------------------------------------------------------- #
+# #455 — the uninstall cascade is scoped to ITS OWN installation
+# --------------------------------------------------------------------------- #
+class TestUninstallCascadeScope(FrappeTestCase):
+	"""``uninstall_agent`` used to select findings by ``(agent, owner in [owner,
+	reviewer])`` and hard-delete the lot with ``force=True``. A reviewer may be the
+	reviewer-of-record for MANY installations (PP-6 institutionalises exactly that),
+	and PP-4 re-homes a shadow installation's findings TO that reviewer, so one
+	customer's uninstall irreversibly destroyed other customers' audit history.
+	Membership now comes from the run the finding was created on."""
+
+	SLUG = PREFIX + "unin"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner_a = _mk_user("h-unin-a@example.com")
+		cls.owner_b = _mk_user("h-unin-b@example.com")
+		cls.reviewer = _mk_user("h-unin-rev@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		# Three installations of the SAME agent. A and B both name R as reviewer;
+		# R also runs their own install of it. Every finding below is therefore
+		# owned by R (PP-4 shadow re-homing) and carries the same agent — the exact
+		# shape the old (agent, owner) filter swept.
+		self.inst_a = _mk_install(self.owner_a, self.SLUG, self.reviewer)
+		self.inst_b = _mk_install(self.owner_b, self.SLUG, self.reviewer)
+		self.inst_r = _mk_install(self.reviewer, self.SLUG, self.owner_a)
+		self.run_a = _mk_run(self.inst_a.name, self.SLUG, self.reviewer)
+		self.run_b = _mk_run(self.inst_b.name, self.SLUG, self.reviewer)
+		self.run_r = _mk_run(self.inst_r.name, self.SLUG, self.reviewer)
+		self.f_a = self._finding(self.run_a)
+		self.f_b = self._finding(self.run_b)
+		self.f_r = self._finding(self.run_r)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+
+	def _finding(self, run: str) -> str:
+		return _mk_finding(self.reviewer, self.SLUG, run=run, first_seen_run=run, last_seen_run=run).name
+
+	def _uninstall_a(self):
+		frappe.set_user(self.owner_a)
+		try:
+			agents_api.uninstall_agent(self.inst_a.name)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_uninstall_spares_a_co_reviewed_owners_findings(self):
+		"""THE regression: owner A uninstalls; owner B's and the shared reviewer's
+		own findings survive, while A's own history is still fully cascaded."""
+		self._uninstall_a()
+		# A's own history is gone — the cascade still does its job.
+		self.assertFalse(frappe.db.exists(FINDING, self.f_a))
+		self.assertFalse(frappe.db.exists(RUN, self.run_a))
+		self.assertFalse(frappe.db.exists(INSTALLATION, self.inst_a.name))
+		# Nobody else's is.
+		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
+		self.assertTrue(frappe.db.exists(FINDING, self.f_r))
+		self.assertTrue(frappe.db.exists(RUN, self.run_b))
+		self.assertTrue(frappe.db.exists(RUN, self.run_r))
+		self.assertTrue(frappe.db.exists(INSTALLATION, self.inst_b.name))
+		self.assertTrue(frappe.db.exists(INSTALLATION, self.inst_r.name))
+
+	def test_cross_install_recurrence_bump_is_detached_not_deleted(self):
+		"""``last_seen_run`` is not membership. #454's dedupe can bump another
+		owner's finding onto THIS install's run; the row must survive, and its
+		recurrence pointer must fall back to its own first_seen_run rather than
+		dangle at a force-deleted run."""
+		frappe.db.set_value(FINDING, self.f_b, "last_seen_run", self.run_a, update_modified=False)
+		frappe.db.commit()
+		self._uninstall_a()
+		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
+		self.assertEqual(frappe.db.get_value(FINDING, self.f_b, "last_seen_run"), self.run_b)
+
+	def test_either_creation_stamp_alone_establishes_membership(self):
+		"""``run`` and ``first_seen_run`` are written to the same value today, but the
+		cascade ORs them so a row carrying only ONE of the two still resolves. Both
+		half-stamped shapes belong to A and must go; neither may drag in B's row."""
+		only_run = _mk_finding(self.reviewer, self.SLUG, run=self.run_a).name
+		only_first = _mk_finding(self.reviewer, self.SLUG, first_seen_run=self.run_a).name
+		frappe.db.commit()
+		self._uninstall_a()
+		self.assertFalse(frappe.db.exists(FINDING, only_run))
+		self.assertFalse(frappe.db.exists(FINDING, only_first))
+		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
+
+	def test_finding_with_no_run_pointer_is_left_alone(self):
+		"""A row with no run pointer cannot be attributed to any installation, so
+		the cascade leaves it. An orphan is recoverable from Desk; a wrongly
+		destroyed finding is not."""
+		orphan = _mk_finding(self.reviewer, self.SLUG).name
+		frappe.db.commit()
+		self._uninstall_a()
+		self.assertTrue(frappe.db.exists(FINDING, orphan))
+
+	def test_on_trash_refuses_a_foreign_finding_inside_a_cascade(self):
+		"""Defence in depth: even a caller that hand-rolls the old broad selection
+		cannot destroy a foreign finding, because force + ignore_permissions do not
+		bypass on_trash."""
+		with self.assertRaises(frappe.PermissionError):
+			frappe.delete_doc(
+				FINDING,
+				self.f_b,
+				ignore_permissions=True,
+				force=True,
+				flags={"jarvis_uninstall_installation": self.inst_a.name},
+			)
+		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
+
+	def test_on_trash_guard_is_inert_outside_a_cascade(self):
+		"""No cascade flag, no guard — an ordinary admin/Desk delete is unaffected."""
+		frappe.delete_doc(FINDING, self.f_b, ignore_permissions=True, force=True)
+		self.assertFalse(frappe.db.exists(FINDING, self.f_b))

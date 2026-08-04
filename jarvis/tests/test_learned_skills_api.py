@@ -81,7 +81,8 @@ class TestLearnedSkillsCutoverChain(unittest.TestCase):
 			mock.patch("frappe.enqueue") as enq,
 		):
 			learned_skills_api._enqueued_push_learned_skills(chain_custom_reconcile=True)
-		self.assertTrue(self._learned_status().startswith("ok (applied"))
+		self.assertTrue(self._learned_status().startswith("ok ("))
+		self.assertIn("installed via admin", self._learned_status())
 		# the custom pair is stamped pending BEFORE the reconcile is enqueued
 		# (the same stamps the SPA custom apply uses - the board polls them).
 		self.assertEqual(self._custom_status(), "pending: applying skills")
@@ -119,9 +120,28 @@ class TestLearnedSkillsCutoverChain(unittest.TestCase):
 			mock.patch("frappe.enqueue") as enq,
 		):
 			learned_skills_api._enqueued_push_learned_skills()
-		self.assertTrue(self._learned_status().startswith("ok (applied"))
+		self.assertTrue(self._learned_status().startswith("ok ("))
 		self.assertEqual(self._custom_status(), before)
 		enq.assert_not_called()
+
+	# ------------------------------------------------------------------ #
+	# reviewer-facing terminal wording (#479)
+	# ------------------------------------------------------------------ #
+	def test_ok_status_names_the_role_restricted_count(self):
+		# Every compiled managed row carries allowed_roles, so "applied 1" after a
+		# four-domain Apply was the normal reading of a healthy bench and reviewers
+		# would file it as a bug. The status now separates what reached the
+		# container from what is held bench-side and fetched on demand.
+		self.assertEqual(
+			learned_skills_api._ok_status(1, 3),
+			"ok (1 installed via admin, 3 role-restricted and fetched on demand)",
+		)
+		self.assertEqual(
+			learned_skills_api._ok_status(0, 4),
+			"ok (0 installed via admin, 4 role-restricted and fetched on demand)",
+		)
+		# nothing held back -> no clause about it, so the common case stays terse.
+		self.assertEqual(learned_skills_api._ok_status(2, 0), "ok (2 installed via admin)")
 
 
 if __name__ == "__main__":

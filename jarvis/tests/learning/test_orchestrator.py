@@ -326,6 +326,73 @@ class TestDriftStash(FrappeTestCase):
 		self.assertEqual(unit["skipped"], "missing field X.y")
 
 
+class TestReadAndPersistRequiresFdrDecision(FrappeTestCase):
+	"""jarvis#483: ``fdr_buffer`` has no default. Omitting it, or passing a
+	stray ``None``, used to silently persist every raw candidate with zero
+	multiple-testing correction - a detector testing hundreds of suppliers got
+	hundreds of shots at a fluke. Both must now fail loudly, and the ONLY way
+	to deliberately skip the BH pass is the ``fdr.NO_FDR`` sentinel."""
+
+	def _spec(self):
+		return {"id": "det-483", "doctype": "Sales Invoice"}
+
+	def _run_with(self, fdr_buffer, candidates, company="CoA"):
+		from jarvis.learning.executor import DetectorResult
+
+		with mock.patch(
+			"jarvis.learning.executor.run_detector",
+			return_value=DetectorResult(candidates, None, rows_scanned=len(candidates)),
+		):
+			return engine._read_and_persist(self._spec(), company, None, fdr_buffer=fdr_buffer)
+
+	def test_omitting_fdr_buffer_raises(self):
+		"""No default: leaving the argument out is a loud TypeError, never a
+		silent skip of the correction pass (the jarvis#483 bug)."""
+		with self.assertRaises(TypeError):
+			engine._read_and_persist(self._spec(), "CoA", None)
+
+	def test_none_is_not_a_valid_skip(self):
+		"""A stray ``fdr_buffer=None`` (Python's habitual "nothing here" value)
+		must fail loudly too, never quietly persist every raw candidate."""
+		with self.assertRaises(AttributeError):
+			self._run_with(None, [{"pattern_key": "k1", "p_value": 0.9}])
+
+	def test_no_fdr_sentinel_persists_raw_candidates_immediately(self):
+		"""The deliberate, explicit opt-out still works and takes effect right
+		away - no buffering, no correction, exactly as a caller who typed
+		``fdr.NO_FDR`` asked for."""
+		from jarvis.learning.fdr import NO_FDR
+
+		with mock.patch.object(engine, "_persist_candidate", return_value="created"):
+			unit = self._run_with(NO_FDR, [{"pattern_key": "k1", "p_value": 0.9}])
+		self.assertEqual(unit["created"], 1, "NO_FDR persists the raw candidate with no correction")
+
+	def test_a_real_buffer_withholds_the_only_unit_until_a_family_releases(self):
+		"""Proof the correction cannot be silently skipped by ACCIDENT either:
+		passing a real buffer defers persistence until its family releases (a
+		later detector's first unit, or an explicit flush) - the opposite of
+		NO_FDR's immediate persist above, for the exact same input."""
+		from jarvis.learning.fdr import DetectorFamilyBuffer
+
+		fdr_buffer = DetectorFamilyBuffer()
+		with mock.patch.object(engine, "_persist_candidate", return_value="created"):
+			unit = self._run_with(fdr_buffer, [{"pattern_key": "k1", "p_value": 0.9}])
+		self.assertEqual(
+			unit["created"],
+			0,
+			"a real buffer withholds the family's only unit pending release - the BH "
+			"pass is actually gating persistence here, not a no-op",
+		)
+		self.assertEqual(fdr_buffer.pending_n, 1, "the candidate is buffered, not lost")
+
+		# Flushing releases it: a family of one candidate whose only test has
+		# p=0.9 fails BH at q=0.05 and is rejected, not persisted either -
+		# confirming the buffered candidate was really subject to correction.
+		released = fdr_buffer.flush()
+		self.assertEqual(released.survivors, [], "p=0.9 does not survive BH at q=0.05")
+		self.assertEqual(len(released.rejected), 1)
+
+
 class TestRowBudget(FrappeTestCase):
 	"""fix 6: the nightly row budget can actually trip once detectors report a
 	real scanned-row count."""

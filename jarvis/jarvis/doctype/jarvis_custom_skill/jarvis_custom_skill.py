@@ -214,8 +214,22 @@ class JarvisCustomSkill(Document):
 			self.target_role = (self.target_role or "").strip() or None
 			if not self.target_role:
 				frappe.throw(_("Role-scope skills need a Target Role."))
-			# allowed_roles stays meaningful for compiler-managed rows only; an
-			# authored Role skill's audience is target_role.
+			# ``allowed_roles`` MIRRORS ``target_role`` on EVERY write path (issue #478).
+			# ``target_role`` is the audience of record, but the invocation path
+			# (``custom_skills._role_scoped_invocable_names``, and through it the /slug
+			# context clause) matches on the child rows and is blind to target_role, so a
+			# Role skill with an empty allowed_roles can never be triggered by /slug.
+			# Mirroring HERE rather than only at the promotion seam is what makes a Desk
+			# or REST re-target self-heal: re-pointing target_role rewrites the mirror in
+			# the same save, so the two planes can never disagree about the audience.
+			# Assignment (not append) is deliberate. The audience of a Role skill is
+			# exactly one role, so a stale role left behind by an earlier target would
+			# keep granting /slug to holders the reviewer just re-targeted away from.
+			# Compiler-managed rows are pinned to Org scope and never reach this branch,
+			# so their multi-role allowed_roles is untouched. Nothing is widened: every
+			# role named here is the target_role that ``user_can_use_skill`` already
+			# admitted.
+			self.set("allowed_roles", [{"role": self.target_role}])
 		elif self.scope == "User":
 			# A private skill has no role audience — clear both so a stray
 			# allowed_roles/target_role can never leak it to role-holders (TASK 13
