@@ -657,3 +657,236 @@ class TestAgentCatalogPushTOCTOU(FrappeTestCase):
 			10,
 			"the increment must be applied to the ROW, never to a stale read",
 		)
+
+
+# --------------------------------------------------------------------------- #
+# #460 — (owner, agent) uniqueness is a DB constraint, not check-then-act
+# --------------------------------------------------------------------------- #
+def _owner_agent_index() -> list[dict]:
+	"""The (owner, agent) index as the DATABASE reports it.
+
+	Read from ``information_schema`` on purpose: ``bench migrate`` exits 0 whether
+	or not ``on_doctype_update`` ever fired, so its exit code proves nothing about
+	whether the constraint exists.
+	"""
+	return frappe.db.sql(
+		"""
+		SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME, SEQ_IN_INDEX
+		FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE()
+		  AND TABLE_NAME = 'tabJarvis Agent Installation'
+		  AND INDEX_NAME = 'owner_agent'
+		ORDER BY SEQ_IN_INDEX
+		""",
+		as_dict=True,
+	)
+
+
+def _drop_owner_agent_index() -> None:
+	if _owner_agent_index():
+		frappe.db.sql_ddl("ALTER TABLE `tabJarvis Agent Installation` DROP INDEX `owner_agent`")
+
+
+def _add_owner_agent_index() -> None:
+	frappe.db.add_unique(INSTALLATION, ["owner", "agent"], constraint_name="owner_agent")
+
+
+class TestAgentInstallUniqueIndex(FrappeTestCase):
+	"""#460: the constraint must EXIST, and the racing install must lose to it
+	with the friendly message rather than a 500."""
+
+	SLUG = PREFIX + "uniq"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-uniq-owner@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.set_value(LISTING, cls.SLUG, "status", "Published", update_modified=False)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+
+	def test_owner_agent_unique_index_exists(self):
+		"""A fresh install gets the index from ``on_doctype_update``; an existing
+		site gets it from the v2_13 patch. Either way the DB must report it."""
+		cols = _owner_agent_index()
+		self.assertEqual([c["COLUMN_NAME"] for c in cols], ["owner", "agent"])
+		self.assertEqual({c["NON_UNIQUE"] for c in cols}, {0})
+
+	def test_racing_install_produces_one_row_and_a_friendly_error(self):
+		"""Two concurrent installs of the same agent by one owner: both
+		``frappe.db.exists`` checks return None (exactly what the race achieves,
+		since neither transaction has committed), so the DB constraint is the only
+		thing left. It must yield ONE row and the ordinary "already installed"
+		ValidationError, not an unhandled IntegrityError."""
+		real_exists = frappe.db.exists
+
+		def blind_to_installs(dt, *a, **kw):
+			# Only the (owner, agent) clash lookup is blinded; every other existence
+			# check the insert makes (link validation, etc.) runs for real.
+			if dt == INSTALLATION:
+				return None
+			return real_exists(dt, *a, **kw)
+
+		frappe.set_user(self.owner)
+		try:
+			agents_api.install_agent(self.SLUG)
+			with patch.object(frappe.db, "exists", side_effect=blind_to_installs):
+				with self.assertRaises(frappe.ValidationError) as ctx:
+					agents_api.install_agent(self.SLUG)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertNotIsInstance(ctx.exception, frappe.UniqueValidationError)
+		self.assertIn("already installed", str(ctx.exception))
+		rows = frappe.get_all(
+			INSTALLATION, filters={"owner": self.owner, "agent": self.SLUG}, ignore_permissions=True
+		)
+		self.assertEqual(len(rows), 1)
+
+	def test_ordinary_double_install_still_gets_the_friendly_message(self):
+		"""Control: the non-racing path is unchanged — the check-then-act guard
+		still answers first, so the constraint is never reached."""
+		frappe.set_user(self.owner)
+		try:
+			agents_api.install_agent(self.SLUG)
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				agents_api.install_agent(self.SLUG)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIn("already installed", str(ctx.exception))
+
+
+class TestAgentInstallDuplicateMerge(FrappeTestCase):
+	"""#460 migration trap: a bench already carrying duplicate rows from the race
+	would hard-fail the ALTER TABLE, so the patch merges first. What it keeps and
+	what it discards is the part that must not be got wrong."""
+
+	SLUG = PREFIX + "dupe"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-dupe-owner@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		# The duplicates this patch exists to clean up predate the constraint, so
+		# seeding them requires it to be absent.
+		frappe.db.commit()
+		_drop_owner_agent_index()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+		_add_owner_agent_index()
+
+	def _seed(self, *, enabled=0, activation_state="shadow", runs=0):
+		# Deliberately NOT via _mk_install: that reuses an existing row, and the
+		# point here is to produce the SECOND row the race would have produced.
+		# ignore_validate blinds validate(), where the check-then-act guard lives —
+		# which is what the race achieves in production.
+		doc = frappe.get_doc(
+			{
+				"doctype": INSTALLATION,
+				"agent": self.SLUG,
+				"run_as_user": self.owner,
+				"reviewer": self.owner,
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.flags.ignore_validate = True
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value(
+			INSTALLATION,
+			doc.name,
+			{"owner": self.owner, "enabled": enabled, "activation_state": activation_state},
+			update_modified=False,
+		)
+		for _ in range(runs):
+			_mk_run(doc.name, self.SLUG, self.owner)
+		return doc.name
+
+	def test_merge_keeps_the_live_enabled_row_and_rehomes_the_history(self):
+		"""The keeper is the row whose state is most expensive to reconstruct (live
+		beats shadow, enabled beats disabled), and the loser's runs are re-pointed
+		at it — so promoting/enabling is never silently undone AND no run history
+		is destroyed."""
+		from jarvis.patches import v2_13_unique_agent_installation as patch_mod
+
+		loser = self._seed(enabled=0, activation_state="shadow", runs=2)
+		keeper = self._seed(enabled=1, activation_state="live", runs=0)
+		frappe.db.commit()
+
+		merged = patch_mod._merge_duplicate_installs()
+		frappe.db.commit()
+
+		self.assertEqual(merged, 1)
+		self.assertFalse(frappe.db.exists(INSTALLATION, loser))
+		self.assertTrue(frappe.db.exists(INSTALLATION, keeper))
+		survivor = frappe.db.get_value(INSTALLATION, keeper, ["enabled", "activation_state"], as_dict=True)
+		self.assertEqual(frappe.utils.cint(survivor.enabled), 1)
+		self.assertEqual(survivor.activation_state, "live")
+		# Both of the loser's runs now hang off the keeper: nothing was destroyed.
+		self.assertEqual(frappe.db.count(RUN, {"installation": keeper}), 2)
+		self.assertEqual(frappe.db.count(RUN, {"installation": loser}), 0)
+
+	def test_merge_is_idempotent(self):
+		"""Re-running the cleanup is a no-op: nothing left to merge, and the
+		surviving row is untouched."""
+		from jarvis.patches import v2_13_unique_agent_installation as patch_mod
+
+		self._seed(enabled=0, activation_state="shadow", runs=1)
+		self._seed(enabled=1, activation_state="shadow", runs=1)
+		frappe.db.commit()
+
+		self.assertEqual(patch_mod._merge_duplicate_installs(), 1)
+		frappe.db.commit()
+		before = frappe.get_all(
+			INSTALLATION,
+			filters={"owner": self.owner, "agent": self.SLUG},
+			fields=["name", "enabled", "activation_state"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(len(before), 1)
+
+		self.assertEqual(patch_mod._merge_duplicate_installs(), 0)
+		frappe.db.commit()
+		after = frappe.get_all(
+			INSTALLATION,
+			filters={"owner": self.owner, "agent": self.SLUG},
+			fields=["name", "enabled", "activation_state"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(after, before)
+		self.assertEqual(frappe.db.count(RUN, {"installation": before[0]["name"]}), 2)
+
+	def test_the_alter_table_would_fail_without_the_merge(self):
+		"""Why the ordering is mandatory: with live duplicates present the unique
+		index cannot be created at all, so a patch that skipped the cleanup would
+		hard-fail migrate on exactly the benches that hit the race."""
+		self._seed()
+		self._seed()
+		frappe.db.commit()
+		with self.assertRaises(Exception):
+			_add_owner_agent_index()
+		frappe.db.rollback()
+
+		from jarvis.patches import v2_13_unique_agent_installation as patch_mod
+
+		patch_mod._merge_duplicate_installs()
+		frappe.db.commit()
+		_add_owner_agent_index()
+		self.assertTrue(_owner_agent_index())

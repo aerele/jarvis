@@ -636,7 +636,18 @@ def install_agent(agent_slug: str) -> dict:
 			"schedule_frequency": freq,
 		}
 	)
-	doc.insert()  # owner = me; validate() runs the cap/uniqueness/run-as checks
+	try:
+		doc.insert()  # owner = me; validate() runs the cap/uniqueness/run-as checks
+	except frappe.UniqueValidationError:
+		# #460: the (owner, agent) unique index is the authority — the two
+		# ``frappe.db.exists`` checks above it (here and in the controller) cannot
+		# serialize a double-submit, so the LOSER of that race arrives here. Frappe
+		# has already queued its generic "owner_agent must be unique" msgprint from
+		# ``show_unique_validation_message``; drop it and re-raise the same friendly
+		# message the non-racing path gives, so a double click reads as an ordinary
+		# "already installed" rather than a 500.
+		frappe.clear_last_message()
+		frappe.throw(_("You have already installed this agent."))
 	# No _mark_catalog_dirty(): installs start enabled=0, so the container's
 	# ENABLED set is unchanged — only enable/disable (and uninstalling an
 	# ENABLED install) make an Apply pending.
