@@ -4,11 +4,11 @@ Two call sites today:
 
   jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin
       Two close saves enqueue two workers; without the lock both call
-      admin -> fleet -> openclaw in parallel and either clobber each
+      admin -> fleet -> agent in parallel and either clobber each
       other's last_sync_status writes or fire two redundant container
       restarts. The lock serializes one-at-a-time per bench.
 
-  jarvis.chat.openclaw_client.OpenclawSession._attempt_connect
+  jarvis.chat.agent_client.AgentSession._attempt_connect
       After a tenant re-provision, N RQ workers concurrently observe
       "stale pairing" rejections and all race to clear_credentials() +
       re-pair. Each ensure_paired() generates a different Ed25519 keypair;

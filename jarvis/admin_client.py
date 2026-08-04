@@ -911,16 +911,16 @@ def post_rotate_agent_token(new_token: str) -> dict:
 
 
 def post_push_oauth_blob(provider: str, blob: dict) -> dict:
-	"""POST an openclaw OAuthCredential blob to admin → fleet-agent → container.
+	"""POST an agent OAuthCredential blob to admin → fleet-agent → container.
 
-	Called after a successful device-code poll. The container's openclaw
+	Called after a successful device-code poll. The container's agent
 	codex/gemini-cli provider reads the blob from auth-profiles.json and
 	refreshes internally via pi-ai going forward.
 
 	Timeout is bumped above the default 90s because the admin handler
 	chains to fleet-agent's PUT /auth-profile, which now runs
 	``openclaw doctor --fix --non-interactive`` (up to 60s, migrates the
-	legacy JSON store to SQLite on openclaw 2026.6.5+) plus
+	legacy JSON store to SQLite on agent 2026.6.5+) plus
 	``docker compose restart`` + healthz poll. Admin's own bound is 150s;
 	we give bench 180s to allow for the HTTPS round-trip and admin's
 	response serialization on top of that. The earlier 90s default ran
@@ -944,7 +944,7 @@ def post_push_custom_skills(skills: list[dict]) -> dict:
 	``skills`` is the list built by ``jarvis.chat.custom_skills.build_push_payload``
 	(each ``{slug, description, user_invocable, body}``). The fleet-agent does a
 	FULL RECONCILE (writes the desired set, removes the rest) then restarts the
-	container so openclaw re-scans ``workspace/skills``. An empty list is a valid
+	container so agent re-scans ``workspace/skills``. An empty list is a valid
 	"remove all custom skills" reconcile.
 
 	Timeout matches ``post_push_oauth_blob``: the admin handler chains to the
@@ -972,7 +972,7 @@ def post_push_agent_skills(agent_skills: list[dict]) -> dict:
 	``{slug, description, body}`` where ``slug`` is ``agent-<agent_slug>``). The
 	fleet-agent does a FULL RECONCILE of the agent_skills dir (writes the desired
 	set, removes the rest), unions ``agent-*`` into the skill allowlist, then
-	restarts the container so openclaw re-scans ``workspace/skills``. An empty
+	restarts the container so agent re-scans ``workspace/skills``. An empty
 	list is a valid "remove all agent skills" reconcile.
 
 	NOTE: the admin endpoint ``jarvis_admin.api.tenant.push_agent_skills`` and the
@@ -1005,7 +1005,7 @@ def post_push_learned_skills(learned_skills: list[dict]) -> dict:
 	the agent- item shape). The fleet-agent does a FULL RECONCILE of the
 	learned_skills dir (writes the desired set, removes the rest), unions
 	``learned-*`` into the skill allowlist, then restarts the container so
-	openclaw re-scans ``workspace/skills``. An empty list is a valid "remove all
+	agent re-scans ``workspace/skills``. An empty list is a valid "remove all
 	learned skills" reconcile.
 
 	Raises:
@@ -1247,7 +1247,7 @@ def post_update_llm_pool(
 	idempotency_key: str | None = None,
 	timeout_s: int | None = None,
 ) -> dict:
-	"""POST a PoolSpec + separated secrets to admin → fleet-agent → openclaw.
+	"""POST a PoolSpec + separated secrets to admin → fleet-agent → agent.
 
 	``spec``        : secret-free PoolSpec dict (name, routing_mode, models).
 	``api_keys``    : mapping ref → plaintext key (e.g. {"POOL_KEY_0": "sk-..."}).
@@ -1328,7 +1328,7 @@ def post_llm_auth_status() -> dict:
 	push. The on-disk file can be present without the running gateway
 	seeing it (that's the bug class fleet-agent Task 1.2's restart
 	closed), and the bench's last_sync_status only reflects whether the
-	admin call returned 2xx - neither tells you "openclaw resolved the
+	admin call returned 2xx - neither tells you "agent resolved the
 	profile."
 
 	Returns:
@@ -1384,7 +1384,7 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 
 def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
 	"""POST customer's chat device pubkey to admin; admin asks the fleet-agent
-	to write a PairedDevice record into the customer's openclaw container and
+	to write a PairedDevice record into the customer's agent container and
 	returns the issued bearer device-token. Customer keeps the private key.
 
 	Sprint-2 plumb-through (2026-06-16 review): ``request_timeout_s`` is
@@ -1819,7 +1819,7 @@ def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> Adm
 _PERMANENT_REJECTION_CODES = frozenset(
 	{
 		# Bad provider slug, a provider with no resolvable base_url, an
-		# unusable openclaw render - deterministic in the request itself.
+		# unusable agent-config render - deterministic in the request itself.
 		"FleetConfigError",
 		# A pool apply the fleet-agent permanently rejected (its invalid_spec
 		# envelope class). admin's own docstring: retrying the same desired

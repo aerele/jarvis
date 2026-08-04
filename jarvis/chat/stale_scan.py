@@ -4,7 +4,7 @@ If an RQ worker is killed (OOM, deploy, host restart) mid-stream, its
 Jarvis Chat Message row stays at streaming=1. This scan runs on Frappe's
 scheduler every 5 minutes.
 
-Rows with a gateway session_key are RECOVERABLE: openclaw persists the result.
+Rows with a gateway session_key are RECOVERABLE: agent persists the result.
 They are PROMOTED to the recovering state for turn_recovery to finalize from
 the snapshot, but only once they are definitely past any live worker (a live
 turn self-marks recovering at the WS cap and never reaches here), so a

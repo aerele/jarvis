@@ -6,7 +6,7 @@ They used to call ``sessions.delete`` the instant their own call returned,
 which is NOT the same instant the run ends:
 
 - ``stream_agent_turn`` returns on the run's lifecycle-end frame, while
-  openclaw is still finalising the session file;
+  agent is still finalising the session file;
 - it RAISES on every error path with the run still going server side;
 - ``fire_agent`` (prewarm) never waits at all.
 
@@ -19,7 +19,7 @@ a backoff only when the gateway says it is live - because polish's reclaim runs
 inside a synchronous whitelisted request and title's holds one of only three
 pooled connections.
 
-Issue #535 then found the half that probe could not reach: openclaw ACCEPTS a
+Issue #535 then found the half that probe could not reach: agent ACCEPTS a
 run a median 670ms before it STARTS one, and ``hasActiveRun`` is false for the
 whole of that window, so a reclaim firing inside it deletes a session whose run
 is about to begin. ``TestUnstartedRunIsNotDeleted`` below pins the second half
@@ -29,7 +29,7 @@ and an idle answer is only believed once that has aged past
 
 SCOPE NOTE: the transport is stubbed here, as everywhere else in this suite, so
 these tests assert INTENT - which RPCs the bench issues and in what order. They
-cannot observe what openclaw does with a delete that lands mid-run; that was
+cannot observe what agent does with a delete that lands mid-run; that was
 established from the tenant container's own session files and gateway log, not
 from a test.
 """
@@ -49,7 +49,7 @@ SKEY = "agent:main:dashboard:throwaway-1"
 
 
 def _stub_pool_session(*, active_probes, reply="A Nice Title", raises=None):
-	"""A pooled OpenclawSession whose ``is_run_active`` answers ``active_probes``
+	"""A pooled AgentSession whose ``is_run_active`` answers ``active_probes``
 	in order (a bare bool repeats forever)."""
 	sess = MagicMock()
 	sess.create_session.return_value = SKEY
@@ -70,7 +70,7 @@ def _checkout_yielding(sess):
 	def _cm(_gateway_url):
 		yield sess
 
-	with patch("jarvis.chat.openclaw_session_pool.checkout", _cm):
+	with patch("jarvis.chat.agent_session_pool.checkout", _cm):
 		yield
 
 
@@ -174,7 +174,7 @@ class TestReclaimThrowawaySession(FrappeTestCase):
 class TestUnstartedRunIsNotDeleted(FrappeTestCase):
 	"""Issue #535: the window the probe alone cannot close.
 
-	openclaw ACCEPTS a run before it STARTS one, and sessions.list reports
+	agent ACCEPTS a run before it STARTS one, and sessions.list reports
 	"accepted, not started" and "finished" identically - hasActiveRun is false in
 	both. Measured on jarvis-pool-bf4097 over 269 sessions, as the gap between
 	the session file's creation stamp and the run's own session.started
@@ -268,7 +268,7 @@ class TestAutoTitleReclaim(FrappeTestCase):
 
 	def test_title_session_is_not_deleted_while_its_run_is_live(self):
 		"""The regression. stream_agent_turn returning is not the run ending -
-		openclaw is still writing the session file - so a title turn whose run
+		agent is still writing the session file - so a title turn whose run
 		the gateway still reports as active must be left alone."""
 		sess = _stub_pool_session(active_probes=True)
 
@@ -288,13 +288,13 @@ class TestAutoTitleReclaim(FrappeTestCase):
 
 	def test_failed_title_turn_does_not_delete_a_live_session(self):
 		"""The worst of the old paths: stream_agent_turn raises precisely
-		BECAUSE the run is still going (a WS drop leaves openclaw running), and
+		BECAUSE the run is still going (a WS drop leaves agent running), and
 		the finally deleted the session anyway."""
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		sess = _stub_pool_session(
 			active_probes=True,
-			raises=OpenclawUnreachableError("agent turn timed out before lifecycle end"),
+			raises=AgentUnreachableError("agent turn timed out before lifecycle end"),
 		)
 
 		with patch("jarvis.chat.title.frappe.log_error"):
@@ -311,11 +311,11 @@ class TestAutoTitleReclaim(FrappeTestCase):
 		This is the shape the probe-only fix (#530) still gets wrong: a WS drop
 		or a connect error raises within a few hundred ms of the fire, well
 		inside the measured 670ms median start delay."""
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		sess = _stub_pool_session(
 			active_probes=False,
-			raises=OpenclawUnreachableError("connection closed before the first frame"),
+			raises=AgentUnreachableError("connection closed before the first frame"),
 		)
 
 		with patch("jarvis.chat.title.frappe.log_error"):
@@ -363,11 +363,11 @@ class TestPatternPolishReclaim(FrappeTestCase):
 	def test_failed_polish_turn_does_not_delete_a_live_session(self):
 		"""polish's finally has title's exact shape and its exact bug history,
 		so it gets title's raise-path test too."""
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		sess = _stub_pool_session(
 			active_probes=True,
-			raises=OpenclawUnreachableError("agent turn timed out before lifecycle end"),
+			raises=AgentUnreachableError("agent turn timed out before lifecycle end"),
 		)
 
 		with patch("jarvis.learning.polish.frappe.log_error"):
@@ -380,11 +380,11 @@ class TestPatternPolishReclaim(FrappeTestCase):
 		"""Issue #535, polish's copy of title's raise-path gap: the gateway
 		reports the session idle because the run has not started, not because it
 		finished."""
-		from jarvis.exceptions import OpenclawUnreachableError
+		from jarvis.exceptions import AgentUnreachableError
 
 		sess = _stub_pool_session(
 			active_probes=False,
-			raises=OpenclawUnreachableError("connection closed before the first frame"),
+			raises=AgentUnreachableError("connection closed before the first frame"),
 		)
 
 		with patch("jarvis.learning.polish.frappe.log_error"):

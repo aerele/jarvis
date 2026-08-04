@@ -4,7 +4,7 @@
 agent then had no way to read a private File mid-conversation and had to ask
 the customer to re-attach it in chat (chat attachments arrive as vision).
 This tool closes that gap: it rasterizes the File's pages (pypdfium2, same
-caps as the chat vision path) and returns them base64-encoded; the openclaw
+caps as the chat vision path) and returns them base64-encoded; the agent
 plugin lifts ``pages[]`` into image blocks on the tool result, so the model
 reads the pages exactly like chat-attached ones.
 

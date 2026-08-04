@@ -1,7 +1,7 @@
 """Request-scoped carrier for the plugin caller's ``session_key``.
 
 The plugin auth path (``jarvis.api.call_tool`` → ``_dispatch_from_session``)
-resolves the openclaw ``X-Jarvis-Session`` header to a ``session_key`` and then
+resolves the agent ``X-Jarvis-Session`` header to a ``session_key`` and then
 runs the tool under the mapped user. A couple of tools need that same
 ``session_key`` to correlate the call back to the row the bench minted for it —
 notably ``record_agent_run`` (Phase 3), which resolves its ``Jarvis Agent Run``

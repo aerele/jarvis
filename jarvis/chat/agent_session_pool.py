@@ -1,7 +1,7 @@
-"""WebSocket connection pool for OpenclawSession.
+"""WebSocket connection pool for AgentSession.
 
 Each chat worker turn previously opened a fresh WS to the tenant's
-openclaw gateway: DNS + TCP + TLS + WS upgrade + 3-phase signed
+agent gateway: DNS + TCP + TLS + WS upgrade + 3-phase signed
 handshake before sending the agent RPC. The spike (workflow
 ``w0s0vqhqu``) measured this as 50-200ms per turn (recurring) and
 confirmed:
@@ -22,7 +22,7 @@ Concurrency model (Stage B, 2026-07-03): the pool keeps UP TO
 ``POOL_MAX_PER_GATEWAY`` sessions per gateway URL. ``checkout`` hands
 out any free healthy entry, opens a new connection while the gateway is
 below the cap, and blocks on a Condition once every slot is busy. The
-bench-side ``OpenclawSession`` is NOT safe for concurrent
+bench-side ``AgentSession`` is NOT safe for concurrent
 ``stream_agent_turn``/``relay_turn_events`` on the same WS - ``_recv``
 is shared state and would steal frames between turns - so PER-ENTRY
 exclusivity is preserved: one turn per pooled session at a time. What
@@ -53,14 +53,14 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from jarvis.chat.openclaw_client import OpenclawSession
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.chat.agent_client import AgentSession
+from jarvis.exceptions import AgentUnreachableError
 
 logger = logging.getLogger(__name__)
 
 
 # Max idle seconds before a pooled session is discarded on next
-# checkout. Below the typical 5-min openclaw gateway idle disconnect
+# checkout. Below the typical 5-min agent gateway idle disconnect
 # so the WS is fresh when handed out. Aggressive eviction is cheap;
 # the next checkout reconnects.
 IDLE_MAX_S = 240
@@ -80,7 +80,7 @@ class _PooledEntry:
 	Condition; the session object itself is only ever touched by the
 	checkout that marked the entry in-use."""
 
-	session: OpenclawSession
+	session: AgentSession
 	last_used: float
 	gateway_url: str
 	in_use: bool = False
@@ -110,14 +110,14 @@ _POOL_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
-def checkout(gateway_url: str) -> Iterator[OpenclawSession]:
-	"""Acquire a healthy OpenclawSession for ``gateway_url``.
+def checkout(gateway_url: str) -> Iterator[AgentSession]:
+	"""Acquire a healthy AgentSession for ``gateway_url``.
 
 	Hands out any free pooled session (healthchecked, reconnected in
 	place if stale), opens a new connection while the gateway is below
 	``POOL_MAX_PER_GATEWAY``, and blocks until a slot frees once at the
 	cap. The yielded session is exclusive to this caller until the
-	context exits. On ``OpenclawUnreachableError`` inside the block the
+	context exits. On ``AgentUnreachableError`` inside the block the
 	entry is evicted (next checkout reconnects); other exceptions
 	return the entry to the pool intact.
 	"""
@@ -127,7 +127,7 @@ def checkout(gateway_url: str) -> Iterator[OpenclawSession]:
 	try:
 		yield entry.session
 		entry.last_used = time.monotonic()
-	except OpenclawUnreachableError:
+	except AgentUnreachableError:
 		# Connection failed mid-use. Evict so the next checkout opens
 		# a fresh WS rather than handing out the broken one.
 		evict_on_exit = True
@@ -148,7 +148,7 @@ def _acquire_entry(group: _GatewayGroup) -> _PooledEntry:
 
 	Returns an entry already marked ``in_use`` whose session passed the
 	healthcheck (reconnected in place when stale). Raises
-	``OpenclawUnreachableError`` if a needed connect fails - after
+	``AgentUnreachableError`` if a needed connect fails - after
 	releasing the reserved slot so waiters retry."""
 	while True:
 		create_new = False
@@ -190,13 +190,13 @@ def _acquire_entry(group: _GatewayGroup) -> _PooledEntry:
 			# fork-per-job RQ this line should ~never appear - that absence
 			# is itself the signal that the persistent executor is needed.
 			logger.info(
-				"openclaw_session_pool: pool-hit gateway=%s idle_s=%.1f",
+				"agent_session_pool: pool-hit gateway=%s idle_s=%.1f",
 				group.gateway_url,
 				time.monotonic() - entry.last_used,
 			)
 			return entry
 		logger.info(
-			"openclaw_session_pool: stale entry, reconnecting gateway=%s idle_s=%.1f connected=%s",
+			"agent_session_pool: stale entry, reconnecting gateway=%s idle_s=%.1f connected=%s",
 			group.gateway_url,
 			time.monotonic() - entry.last_used,
 			_safe_connected(entry.session),
@@ -239,23 +239,23 @@ def _remove_entry(group: _GatewayGroup, entry: _PooledEntry) -> None:
 		pass
 
 
-def _do_connect(gateway_url: str) -> OpenclawSession:
-	"""Open a fresh WS + handshake. Wraps ``OpenclawSession.connect``
+def _do_connect(gateway_url: str) -> AgentSession:
+	"""Open a fresh WS + handshake. Wraps ``AgentSession.connect``
 	for timing visibility - the actual connect logic stays in the
 	client. Phase-level breakdown is logged inside ``_attempt_connect``
 	itself; this just captures the total."""
 	t0 = time.monotonic()
-	sess = OpenclawSession.connect(gateway_url)
+	sess = AgentSession.connect(gateway_url)
 	elapsed_ms = int((time.monotonic() - t0) * 1000)
 	logger.info(
-		"openclaw_session_pool: pool-miss connect gateway=%s total_ms=%d",
+		"agent_session_pool: pool-miss connect gateway=%s total_ms=%d",
 		gateway_url,
 		elapsed_ms,
 	)
 	return sess
 
 
-def _is_alive(session: OpenclawSession, last_used: float) -> bool:
+def _is_alive(session: AgentSession, last_used: float) -> bool:
 	"""True if the session looks healthy enough to reuse: WS is open
 	and the entry hasn't sat idle past the eviction threshold."""
 	if time.monotonic() - last_used > IDLE_MAX_S:
@@ -263,7 +263,7 @@ def _is_alive(session: OpenclawSession, last_used: float) -> bool:
 	return _safe_connected(session)
 
 
-def _safe_connected(session: OpenclawSession) -> bool:
+def _safe_connected(session: AgentSession) -> bool:
 	"""Defensively read ``session._ws.connected``; some WS libraries
 	don't expose the field, in which case treat as not-connected."""
 	try:
@@ -272,7 +272,7 @@ def _safe_connected(session: OpenclawSession) -> bool:
 		return False
 
 
-def _close_quietly(session: OpenclawSession) -> None:
+def _close_quietly(session: AgentSession) -> None:
 	"""Close a session, swallowing any errors. Used during eviction
 	where the session is already dead / dying."""
 	try:

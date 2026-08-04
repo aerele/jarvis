@@ -294,7 +294,7 @@ async function saveModelLimit(u, m) {
 	}
 }
 
-// "Sync from agent" — sweeps the openclaw gateway's sessions.list to refresh
+// "Sync from agent" — sweeps the agent gateway's sessions.list to refresh
 // per-session snapshots, then reloads the table. Success reports through a
 // toast rather than the old green inline note (design.md §5 anti-pattern 16);
 // failure rides the pane-level error slot.

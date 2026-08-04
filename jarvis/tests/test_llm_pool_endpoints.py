@@ -63,7 +63,7 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 		s = frappe.get_single("Jarvis Settings")
 		self.assertEqual(len(s.get("models")), 2)
 		self.assertEqual(s.models[0].get_password("api_key"), "sk-a")
-		# Pool, but an openclaw-DIRECT one: two BYO api keys get no sidecar, so
+		# Pool, but an agent-DIRECT one: two BYO api keys get no sidecar, so
 		# proxy_active stays 0 while the config still syncs through /llm-pool.
 		self.assertEqual(int(s.proxy_active or 0), 0)
 		self.assertEqual(s.routing_mode, "failover")
@@ -320,7 +320,7 @@ class TestGetLlmConfig(_RT3SettingsTestCase):
 		self.assertNotIn("api_key", cfg["models"][0])
 		self.assertNotIn("sk-a", frappe.as_json(cfg))
 		self.assertEqual(cfg["routing_mode"], "failover")
-		# Two BYO api keys render openclaw-direct: no Bifrost/cliproxy sidecar.
+		# Two BYO api keys render agent-direct: no Bifrost/cliproxy sidecar.
 		self.assertFalse(cfg["proxy_active"])
 
 

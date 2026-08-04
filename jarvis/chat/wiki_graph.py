@@ -5,7 +5,7 @@ STRUCTURE payload — the scope tiers (Org/Role/User), the authored-from-provena
 edges, and user→role membership resolved via ``Has Role`` — and POSTs it to the
 control plane (``jarvis.admin_client.push_wiki_graph`` → jarvis_admin relay →
 ``Jarvis Wiki Graph Snapshot``). Admin overlays READ/WRITE + latent-demand
-activity from openclaw telemetry it already reads; this push carries only the
+activity from agent telemetry it already reads; this push carries only the
 DB-only tiers (roles, scope, page metadata) that never otherwise leave the site
 — Role/User pages are never mirrored to the container. Derived + rebuildable;
 NEVER raises into the save/sync path.

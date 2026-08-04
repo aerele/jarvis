@@ -1,6 +1,6 @@
 """Session lifecycle: idle-session reclaim + empty-chat + orphan sweeps.
 
-Every Jarvis Conversation maps to one openclaw session, created lazily on the
+Every Jarvis Conversation maps to one agent session, created lazily on the
 first turn. Without a sweep, state accumulates forever:
 
 - Dormant conversation sessions: the user stopped chatting weeks ago but the
@@ -17,7 +17,7 @@ first turn. Without a sweep, state accumulates forever:
   sessions/day against a sweep capped at 25/day.
 
 The bench is the durable owner of chat history (Jarvis Chat Message rows); the
-openclaw session is a cache of working context, not the record. Deleting one is
+agent session is a cache of working context, not the record. Deleting one is
 safe: the gateway archives the transcript first (sessions.delete
 deleteTranscript=true default), canvas/media artifacts were pulled to ERP Files
 at turn end, and the next message lazily creates a fresh session through the
@@ -27,7 +27,7 @@ The hourly ``rotate_dormant_sessions`` cron:
 
 1. FREE IDLE SESSIONS: conversations idle past the configured retention window
    (Jarvis Settings.conversation_retention_days; 0 disables) that still hold a
-   live openclaw session, with no in-flight rows -> free the session (delete the
+   live agent session, with no in-flight rows -> free the session (delete the
    gateway session, clear ``conv.session_key``, drop ``Jarvis Chat Session``
    lookup rows). The conversation is LEFT ACTIVE AND VISIBLE - only the
    container-side working memory is reclaimed. Returning to the chat lazily
@@ -75,7 +75,7 @@ CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
 CHAT_SESSION = "Jarvis Chat Session"
 
-# Retention: a conversation idle this long has its openclaw session freed (its
+# Retention: a conversation idle this long has its agent session freed (its
 # working memory reclaimed). The conversation itself stays Active and visible.
 # Configurable per-tenant via Jarvis Settings.conversation_retention_days; these
 # are the fallbacks a reader applies. DEFAULT is used when the Single field is
@@ -149,7 +149,7 @@ THROWAWAY_GRACE_HOURS = 1
 
 
 def rotate_dormant_sessions() -> dict:
-	"""Hourly cron: free idle conversations' openclaw sessions, reap abandoned
+	"""Hourly cron: free idle conversations' agent sessions, reap abandoned
 	empty chats, and reap orphaned throwaway sessions. Returns a summary dict
 	(also logged) so a manual ``bench execute`` run shows what happened. (Name
 	kept for the scheduler entry in hooks.py.)"""
@@ -158,12 +158,12 @@ def rotate_dormant_sessions() -> dict:
 	if not gateway_url:
 		return {"skipped": "no agent_url"}
 
-	from jarvis.chat.openclaw_client import OpenclawSession
+	from jarvis.chat.agent_client import AgentSession
 
 	summary = {"sessions_freed": 0, "empty_reaped": 0, "orphans_reaped": 0, "skipped": 0, "errors": 0}
 	budget = BATCH_MAX
 	try:
-		sess = OpenclawSession.connect(gateway_url)
+		sess = AgentSession.connect(gateway_url)
 	except Exception:
 		frappe.log_error(
 			title="session_lifecycle: connect failed",
@@ -193,7 +193,7 @@ def rotate_dormant_sessions() -> dict:
 
 def _free_idle_sessions(sess, budget: int, summary: dict, days: int) -> int:
 	"""Part 1: conversations idle past the retention window that still hold an
-	openclaw session -> free the session (delete gateway session, null
+	agent session -> free the session (delete gateway session, null
 	``session_key``, drop the lookup rows). The conversation is left Active and
 	visible; only the container-side working memory is reclaimed. Starred and
 	status are irrelevant here - any idle chat with a live session qualifies.
@@ -225,7 +225,7 @@ def _free_idle_sessions(sess, budget: int, summary: dict, days: int) -> int:
 		# the local commit must not strand the sweep - the idempotent not-found
 		# handling in _delete_gateway_session lets the next run finish cleanup.
 		try:
-			# Free the openclaw session FIRST; only detach the bench side once
+			# Free the agent session FIRST; only detach the bench side once
 			# the gateway side is gone, else a crash would strand a live session
 			# under a nulled key. A gateway-delete failure leaves the row intact
 			# for the next run.
@@ -287,7 +287,7 @@ def _reap_empty(sess, budget: int, summary: dict) -> int:
 		  -- reapable. A conversation that holds ANY message - a user message, or
 		  -- even an assistant row from a turn that FAILED (a terminal agent error
 		  -- leaves an errored/empty assistant row; see turn_handler + the
-		  -- openclaw_client failed_final mapping) - is real chat history and is
+		  -- agent_client failed_final mapping) - is real chat history and is
 		  -- never auto-deleted. Do NOT loosen this to reap "conversations whose
 		  -- turns all failed / produced no visible content": that would delete the
 		  -- user's message. Empty ones may go; anything with a message stays.
@@ -436,10 +436,10 @@ def _delete_gateway_session(sess, session_key: str, summary: dict) -> bool:
 # A throwaway one-shot used to call sessions.delete the instant its own turn
 # returned. That is too early, and the gateway paid for it (issue #525):
 #
-# - stream_agent_turn returns on the run's lifecycle-end frame, but openclaw's
+# - stream_agent_turn returns on the run's lifecycle-end frame, but agent's
 #   embedded run is still finalising the session file for a beat after that;
 # - on EVERY error path stream_agent_turn RAISES while the run keeps going
-#   server side (openclaw's run lane deliberately survives a client drop), and
+#   server side (agent's run lane deliberately survives a client drop), and
 #   the delete then ran from a finally with the run mid-flight;
 # - prewarm's fire_agent never waits at all, so its session is by definition
 #   still running when the next warm reclaims it.
@@ -466,7 +466,7 @@ def _delete_gateway_session(sess, session_key: str, summary: dict) -> bool:
 RECLAIM_PROBE_ATTEMPTS = 6
 RECLAIM_PROBE_DELAY_S = 0.5
 
-# ...but a probe alone cannot close the window, because openclaw ACCEPTS a run
+# ...but a probe alone cannot close the window, because agent ACCEPTS a run
 # well before it STARTS one, and sessions.list reports "accepted, not started"
 # exactly like "finished": hasActiveRun is false in both.
 #
@@ -524,7 +524,7 @@ def reclaim_throwaway_session(
 	is the whole defect this function exists to remove.
 
 	RESIDUAL: ``hasActiveRun`` is the strongest finished-signal the gateway
-	exposes, so a session openclaw has stopped counting as active but is still
+	exposes, so a session agent has stopped counting as active but is still
 	writing to would still be deleted underneath. Every case actually observed
 	on jarvis-pool-bf4097 had the run's lane demonstrably still working when the
 	delete landed (it re-created the session file afterwards), so the probe

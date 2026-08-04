@@ -1686,9 +1686,9 @@ def save_llm_creds(
 	  - pushes the OAuth blob (which lives in auth-profiles.json, not
 	    Jarvis Settings, so the bench's diff classifier doesn't see it)
 	  - then needs fleet-agent to re-render openclaw.json AND restart
-	    the container so openclaw picks up the new auth profile.
+	    the container so agent picks up the new auth profile.
 	Without ``force=True``, a customer re-authorizing with the same
-	provider+model gets a stale openclaw.json + no restart, and openclaw
+	provider+model gets a stale openclaw.json + no restart, and agent
 	keeps serving the previous (broken) state. Verified live 2026-06-11.
 
 	Gated on System Manager (Sprint-1 Important from the 2026-06-16 code

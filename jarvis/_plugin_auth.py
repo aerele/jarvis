@@ -41,7 +41,7 @@ the same 400 InvalidArgumentError shape as partial headers.
 
 The single escape hatch is the site_config key
 ``jarvis_plugin_allow_unsigned`` (absent or 0 = enforce; 1 = accept
-unsigned bearer-only requests). It exists only for benches whose openclaw
+unsigned bearer-only requests). It exists only for benches whose agent
 plugin has not been upgraded yet, it WARN-logs the sunset date on every
 request it lets through, and it bumps a per-day Redis counter
 (``jarvis:plugin_unsigned_allowed:<YYYY-MM-DD>``) so an operator can confirm
@@ -204,7 +204,7 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 		frappe.logger().warning(
 			"plugin_auth: DEPRECATED unsigned request allowed by site_config "
 			"%s (removal %s); caller=%s session=%s unsigned_today=%s; upgrade "
-			"the openclaw plugin so it signs every call",
+			"the agent plugin so it signs every call",
 			_ALLOW_UNSIGNED_CONF_KEY,
 			_UNSIGNED_SUNSET_DATE,
 			caller_ip,
@@ -223,7 +223,7 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			code="InvalidArgumentError",
 			message="signature headers required; provide all of "
 			"X-Jarvis-Signature/X-Jarvis-Nonce/X-Jarvis-Timestamp. Upgrade the "
-			"openclaw plugin to a signing build, or run `bench --site <site> "
+			"agent plugin to a signing build, or run `bench --site <site> "
 			f"set-config {_ALLOW_UNSIGNED_CONF_KEY} 1` as a stopgap until that "
 			f"flag is removed on {_UNSIGNED_SUNSET_DATE}.",
 		)

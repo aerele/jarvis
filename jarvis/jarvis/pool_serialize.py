@@ -224,23 +224,23 @@ def has_subscription_model(settings) -> bool:
 
 def compute_proxy_active(settings) -> bool:
 	"""Return True when the fleet actually DEPLOYS a proxy sidecar pair (Bifrost
-	+ CLIProxyAPI) in front of this tenant's openclaw container.
+	+ CLIProxyAPI) in front of this tenant's agent container.
 
 	Mirrors jarvis-fleet-agent's ``pool_render.is_byo_direct``, inverted. A pool
-	whose every enabled model is a BYO **api key** now renders "openclaw-direct":
+	whose every enabled model is a BYO **api key** now renders "agent-direct":
 	each credential becomes its own ``models.providers.<id>`` entry INSIDE
-	openclaw and openclaw drives failover natively through
+	agent and agent drives failover natively through
 	``agents.defaults.model.{primary,fallbacks}``. No sidecar is deployed at all,
 	so there is no Bifrost to expand ``jarvis-pool`` and no cliproxy auth profile
 	to report. A pool holding ANY enabled subscription still takes the
 	Bifrost+cliproxy path, because cliproxy is what serves an OAuth blob.
 
 	This returned True for ANY 2+-model pool, which was right while every pool
-	had a Bifrost and became wrong the day openclaw-direct shipped: a pure
+	had a Bifrost and became wrong the day agent-direct shipped: a pure
 	api-key pool carried ``proxy_active=1`` with no proxy, so every unpinned
-	"Auto" turn patched its openclaw session to the Bifrost-only ``jarvis-pool``
+	"Auto" turn patched its agent session to the Bifrost-only ``jarvis-pool``
 	placeholder and the container rejected it with ``model_not_found``. Being an
-	explicit bad-id rejection rather than an upstream failure, openclaw's native
+	explicit bad-id rejection rather than an upstream failure, agent's native
 	failover did not even engage.
 
 	``proxy_active`` now IMPLIES ``compute_pool_mode`` (a subscription forces
@@ -260,8 +260,8 @@ def pool_primary_model(settings) -> str:
 	primary in step with the container's.
 
 	The id is BARE (``glm-4.6``), like every other model id this app hands
-	openclaw — ``llm_model``, ``model_override``, the Settings model picker —
-	and openclaw resolves a bare id against its registered providers. We
+	agent — ``llm_model``, ``model_override``, the Settings model picker —
+	and agent resolves a bare id against its registered providers. We
 	deliberately do NOT rebuild the fleet's ``<provider>-<idx>/<model>``
 	qualified ref: that id scheme belongs to the fleet's renderer, and a copy
 	here would silently rot the moment its indexing changed.

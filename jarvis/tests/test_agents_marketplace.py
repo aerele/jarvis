@@ -152,7 +152,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 		# Drive the scheduler's exact launch path AS the owner (what
 		# run_due_agent_audits does inside set_user(owner)). Stub the delegate
-		# dispatch (admin -> fleet) so no real admin/openclaw is needed.
+		# dispatch (admin -> fleet) so no real admin/agent is needed.
 		import jarvis.admin_client as admin_client
 
 		orig_run = admin_client.post_agent_run

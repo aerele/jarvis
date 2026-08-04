@@ -298,11 +298,11 @@ def measure_stop_visible(gateway, *, cadence_ms: float = 25.0, abort_after_frame
 	"""Start an abort-transcript turn, let a few frames stream, send chat.abort
 	from a SECOND connection (web process aborting the worker's run), and
 	measure the time to the visible aborted terminal."""
-	from jarvis.chat.openclaw_client import OpenclawSession, OpenclawUnreachableError
+	from jarvis.chat.agent_client import AgentSession, AgentUnreachableError
 
 	run_id = f"stopvis-{uuid.uuid4().hex[:8]}"
 	gateway.arm(run_id, "abort", cadence_ms=cadence_ms)
-	sess = OpenclawSession.connect(gateway.ws_url)
+	sess = AgentSession.connect(gateway.ws_url)
 	try:
 		sk = sess.create_session()
 		ack = sess.chat_send(sk, "export please", run_id)
@@ -315,7 +315,7 @@ def measure_stop_visible(gateway, *, cadence_ms: float = 25.0, abort_after_frame
 				seen += 1
 				if seen == abort_after_frames and t_abort is None:
 					t_abort = time.monotonic()
-					s2 = OpenclawSession.connect(gateway.ws_url)
+					s2 = AgentSession.connect(gateway.ws_url)
 					try:
 						s2.chat_abort(sk)
 					finally:
@@ -325,7 +325,7 @@ def measure_stop_visible(gateway, *, cadence_ms: float = 25.0, abort_after_frame
 					stop_ms = (time.monotonic() - t_abort) * 1000.0
 				return {"terminal": kind, "state": ev.get("state"), "stop_visible_ms": stop_ms}
 		return {"terminal": None, "stop_visible_ms": None}
-	except OpenclawUnreachableError as e:
+	except AgentUnreachableError as e:
 		return {"terminal": "unreachable", "error": str(e), "stop_visible_ms": None}
 	finally:
 		sess.close()
