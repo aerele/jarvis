@@ -912,8 +912,10 @@ test("jarvis#496: groundWiki overrides the prefill context in sendCtx, but a rej
 });
 
 // ── jarvis#496 source pin: ties the mini-model above to the REAL file, so a regression that moves
-//        the clear back before the await (or drops it after the rejection check) fails HERE even if
-//        nobody remembers to update the mini-model. ─────────────────────────────────────────────────
+//        the clear back before the await, OR reinserts it as a statement INSIDE the rejection
+//        block (still textually "after" a bare `if (...)` check, but on the wrong side of its
+//        closing brace — code review caught this gap in an earlier version of this test), fails
+//        HERE even if nobody remembers to update the mini-model. ────────────────────────────────
 test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the accepted path, never before the send POST", () => {
 	const start = chatViewSrc.indexOf("async function send(textArg, resendAck) {");
 	const end = chatViewSrc.indexOf("\nfunction openProactive()", start);
@@ -921,10 +923,15 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 	const sendSrc = chatViewSrc.slice(start, end);
 
 	const awaitIdx = sendSrc.indexOf("await api.sendMessage(sentFrom");
-	const rejectCheckIdx = sendSrc.indexOf("if (r && r.ok === false)");
+	// Anchors the rejection block's CLOSING brace, not just its opening `if (...)` — a scope-aware
+	// check. A regression that clears the context as the FIRST statement inside the rejected branch
+	// (unconditionally wiping it on every rejection, reintroducing the jarvis#496 bug) would still
+	// be textually after a bare "if (r && r.ok === false)" search, but sits BEFORE this closing
+	// sequence, so it fails here.
+	const rejectBlockCloseIdx = sendSrc.indexOf("return;\n\t\t}\n\t\t// Send accepted");
 	const clearIdx = sendSrc.indexOf("_prefillSendContext = null;");
 	assert.ok(
-		awaitIdx > -1 && rejectCheckIdx > -1 && clearIdx > -1,
+		awaitIdx > -1 && rejectBlockCloseIdx > -1 && clearIdx > -1,
 		"all three anchors are present in send()"
 	);
 	assert.ok(
@@ -932,7 +939,9 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 		"the one-shot context must never be cleared before api.sendMessage runs — that was the jarvis#496 bug"
 	);
 	assert.ok(
-		clearIdx > rejectCheckIdx,
-		"the clear must sit AFTER the rejection early-return, so a rejected send never reaches it"
+		clearIdx > rejectBlockCloseIdx,
+		"the clear must sit strictly OUTSIDE the rejection block (after its closing brace), not merely " +
+			"after the `if` condition text — a clear placed inside that block would still wipe the " +
+			"context on every rejection"
 	);
 });
