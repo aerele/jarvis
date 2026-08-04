@@ -332,7 +332,7 @@ class JarvisSettings(Document):
 		self._validate_branding()
 
 	def _validate_conversation_retention(self):
-		"""Retention floor. The daily sweep frees idle chats' openclaw sessions
+		"""Retention floor. The daily sweep frees idle chats' agent sessions
 		past this many days, so a fumbled tiny value would mass-free on the very
 		next cron (the batch cap only spreads that over days). 0 disables (keep
 		sessions forever); otherwise require >= 7. Unset is left untouched -
@@ -396,7 +396,7 @@ class JarvisSettings(Document):
 		"""Each auth mode requires its own credential field.
 
 		REV-1: oauth/subscription mode has no bench-side credential
-		requirement - openclaw owns the credential blob on the container.
+		requirement - agent owns the credential blob on the container.
 
 		Scope: this validates ONLY the legacy single-model DIRECT path (the
 		flat ``llm_*`` fields, with no ``models`` rows and no ``preset``).
@@ -445,7 +445,7 @@ class JarvisSettings(Document):
 			)
 
 	def _resolve_llm_secret_for_push(self) -> str:
-		"""Return the bytes to push to openclaw's llm.key.
+		"""Return the bytes to push to agent's llm.key.
 
 		REV-1: only api_key mode pushes a secret. Oauth mode's credentials
 		live in the container's auth-profiles.json - pushed via the separate
@@ -499,7 +499,7 @@ class JarvisSettings(Document):
 		# pool_mode picks the SYNC LEG (/llm-pool vs /llm-creds); proxy_active is
 		# the narrower "a Bifrost+cliproxy sidecar is deployed" and is persisted
 		# for the chat/monitor surfaces. A BYO api-key pool is pool_mode WITHOUT
-		# proxy_active — the fleet renders it openclaw-direct, no sidecar.
+		# proxy_active — the fleet renders it agent-direct, no sidecar.
 		pool_mode = compute_pool_mode(self)
 		proxy_active = compute_proxy_active(self)
 		enabled_models = [m for m in (self.models or []) if m.enabled]
@@ -546,7 +546,7 @@ class JarvisSettings(Document):
 					self.llm_api_key = "*" * 10
 
 		# Step 4: Route to pool or single-model path. Keyed on pool_mode, NOT
-		# proxy_active: an openclaw-direct pool still has to be pushed as a whole
+		# proxy_active: an agent-direct pool still has to be pushed as a whole
 		# spec through /llm-pool, and pushing its models[0] through /llm-creds
 		# instead would knock the container down to a single credential.
 		if pool_mode:
@@ -807,7 +807,7 @@ class JarvisSettings(Document):
 		)
 
 	def _sync_via_admin(self, action: str) -> None:
-		"""Prod path: route LLM creds through admin → fleet → openclaw container.
+		"""Prod path: route LLM creds through admin → fleet → agent container.
 
 		``action`` is the classifier output:
 		- "reload" calls post_rotate_llm_secret (hot-rotate /secrets/llm.key
@@ -1083,7 +1083,7 @@ class JarvisSettings(Document):
 		"""Return one of: None | 'reload' | 'restart'.
 
 		- None: no LLM field changed; no action needed (in oauth mode this
-		  is the common case - openclaw owns refresh).
+		  is the common case - agent owns refresh).
 		- 'reload': api_key rotation only; hot-reload via rotate-secret.
 		- 'restart': structural change (mode switch, provider/model/base_url).
 
@@ -1118,7 +1118,7 @@ class JarvisSettings(Document):
 			return "restart"
 
 		# Credential-only rotations - api_key only in REV-1. OAuth tokens
-		# are openclaw-owned and don't trip the classifier.
+		# are agent-owned and don't trip the classifier.
 		if self.flags.get("llm_api_key_changed"):
 			return "reload"
 
@@ -1919,7 +1919,7 @@ def reconcile_pending_llm_sync() -> None:
 
 		status = settings.get("last_sync_status") or ""
 		# The evidence marker follows the SYNC LEG, so this is pool mode, not the
-		# narrower proxy_active (an openclaw-direct pool stamps llm_pool_synced_at).
+		# narrower proxy_active (an agent-direct pool stamps llm_pool_synced_at).
 		pool_mode = compute_pool_mode(settings)
 		pool_synced = bool(settings.get("llm_pool_synced_at"))
 		direct_synced = bool(settings.get("llm_direct_synced_at"))

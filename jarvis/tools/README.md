@@ -17,7 +17,7 @@ set is `jarvis/tools/tool-names.json` (see the 3-way invariant below).
 Two tiers, one call mechanism:
 
 1. **Transport (TypeScript):** `jarvis-openclaw-plugin` exposes each tool to the
-   openclaw agent runtime - descriptors in `src/tool-defs.ts`, typed params in
+   agent runtime - descriptors in `src/tool-defs.ts`, typed params in
    `src/schemas.ts`, the contract list in `openclaw.plugin.json`. It calls back
    to the bench over HTTP.
 2. **Execution (Python, in-process):** `jarvis.api.call_tool` is the whitelisted
@@ -48,8 +48,8 @@ listed, with reasons, in the artifact's `backend_only` map.
 - **Standard Frappe auth** - session cookie or
   `Authorization: token <api_key>:<api_secret>`. The tool runs as that user.
 - **Plugin auth** - the plugin presents `X-Jarvis-Token` (the shared
-  `agent_token`, proving the request came from inside the openclaw container) and
-  `X-Jarvis-Session` (the openclaw sessionKey). The user is resolved from
+  `agent_token`, proving the request came from inside the agent container) and
+  `X-Jarvis-Session` (the agent sessionKey). The user is resolved from
   `Jarvis Chat Session` and dispatch runs under that user via `set_user`.
 
 Guest is rejected. Secrets come from site config / env only.

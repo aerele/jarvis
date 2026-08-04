@@ -62,7 +62,7 @@ class _SaveOpBase(_RT3SettingsTestCase):
 		return pc.create_capture(
 			provider="OpenAI",
 			upstream="openai",
-			openclaw_provider="openai",
+			agent_provider="openai",
 			oauth_blob=json.dumps(blob),
 			account_email="op@example.com",
 			account_ref=ref,

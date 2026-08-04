@@ -2,7 +2,7 @@
 
 A harness "turn" runs the REAL bench transport and streaming path:
 
-  checkout/connect (real OpenclawSession)
+  checkout/connect (real AgentSession)
     -> create_session / watermark read (faithful pre-send RPCs)
     -> chat_send                       (real ack)
     -> relay_turn_events               (real relay)
@@ -71,7 +71,7 @@ def install_stubs():
 	"""Swap ensure_paired (avoid real device pairing) + publish_to_user (record
 	the realtime fan-out instead of hitting socketio). Returns a restore fn.
 	Point the recorder with set_active_recorder() per scenario."""
-	import jarvis.chat.openclaw_client as oc
+	import jarvis.chat.agent_client as oc
 	import jarvis.chat.worker as worker
 
 	orig_ensure = oc.ensure_paired
@@ -183,9 +183,9 @@ class TurnResult:
 def run_turn(spec: TurnSpec, gateway, recorder) -> TurnResult:
 	import frappe
 
-	from jarvis.chat import openclaw_session_pool, turn_handler
-	from jarvis.chat.openclaw_client import OpenclawSession
-	from jarvis.exceptions import OpenclawUnreachableError
+	from jarvis.chat import agent_session_pool, turn_handler
+	from jarvis.chat.agent_client import AgentSession
+	from jarvis.exceptions import AgentUnreachableError
 
 	res = TurnResult(run_id=spec.run_id, transcript=spec.transcript, conversation=spec.conversation_id)
 	res.t_submit = spec.t_submit
@@ -204,7 +204,7 @@ def run_turn(spec: TurnSpec, gateway, recorder) -> TurnResult:
 
 	gateway.arm(spec.run_id, spec.transcript, **(spec.overrides or {}))
 
-	def _do(sess: "OpenclawSession") -> None:
+	def _do(sess: "AgentSession") -> None:
 		if not conv.session_key:
 			sk = sess.create_session()
 			frappe.db.set_value(CONV, conv.name, "session_key", sk)
@@ -213,14 +213,14 @@ def run_turn(spec: TurnSpec, gateway, recorder) -> TurnResult:
 		# faithful pre-send watermark read
 		try:
 			sess.get_session_messages(conv.session_key, limit=5)
-		except OpenclawUnreachableError:
+		except AgentUnreachableError:
 			raise
 
 		res.t_send = time.monotonic()
 		ack_to = spec.ack_timeout_s if spec.ack_timeout_s is not None else 30.0
 		try:
 			ack = sess.chat_send(conv.session_key, "harness turn", spec.run_id, timeout_s=ack_to) or {}
-		except OpenclawUnreachableError as e:
+		except AgentUnreachableError as e:
 			if getattr(e, "code", None) != "ack-timeout":
 				raise
 			res.terminal = "relay:interrupted"
@@ -259,15 +259,15 @@ def run_turn(spec: TurnSpec, gateway, recorder) -> TurnResult:
 
 	try:
 		if spec.connect_mode == "pool":
-			with openclaw_session_pool.checkout(gateway.ws_url) as sess:
+			with agent_session_pool.checkout(gateway.ws_url) as sess:
 				_do(sess)
 		else:
-			sess = OpenclawSession.connect(gateway.ws_url)
+			sess = AgentSession.connect(gateway.ws_url)
 			try:
 				_do(sess)
 			finally:
 				sess.close()
-	except OpenclawUnreachableError as e:
+	except AgentUnreachableError as e:
 		res.terminal = "unreachable"
 		res.error = str(e)
 		recorder.job(spec.run_id, "end", {"relay_kind": "unreachable", "error": str(e)})

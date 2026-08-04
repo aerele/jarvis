@@ -61,7 +61,7 @@ DESK_URL = "http://127.0.0.1:8000/api/method/ping"
 DESK_HOST = "patterntest.localhost"
 
 # Baseline-matched gateway cadence (Stage-A run_baseline used 25ms), so the
-# legacy-vs-pump C3 delta is apples-to-apples. The real openclaw ~150ms mirror
+# legacy-vs-pump C3 delta is apples-to-apples. The real agent ~150ms mirror
 # cadence caveat is stated in the report.
 CADENCE_MS = 25.0
 
@@ -177,9 +177,9 @@ class StageB:
 	def warm_session(self, conv: str):
 		"""Pre-create the gateway session so the measured turn is WARM (prepare
 		skips create_session)."""
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import AgentSession
 
-		sess = OpenclawSession.connect(self.gateway.ws_url)
+		sess = AgentSession.connect(self.gateway.ws_url)
 		try:
 			sk = sess.create_session()
 			self.frappe.db.set_value(CONV, conv, "session_key", sk)
@@ -201,16 +201,16 @@ class StageB:
 
 	@contextmanager
 	def _pool_to_gateway(self):
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import AgentSession
 
 		if self._pool_sess is None:
-			self._pool_sess = OpenclawSession.connect(self.gateway.ws_url)
+			self._pool_sess = AgentSession.connect(self.gateway.ws_url)
 
 		@contextmanager
 		def _co(url):
 			yield self._pool_sess
 
-		with patch("jarvis.chat.openclaw_session_pool.checkout", _co):
+		with patch("jarvis.chat.agent_session_pool.checkout", _co):
 			yield
 
 	@contextmanager
@@ -228,13 +228,13 @@ class StageB:
 	def _make_deps(self):
 		from jarvis.chat import finalize, pump
 		from jarvis.chat import prepare as prepare_mod
-		from jarvis.chat.openclaw_client import OpenclawSession
+		from jarvis.chat.agent_client import AgentSession
 		from jarvis.chat.relay_mux import RelayMux
 
 		gw = self.gateway
 
 		def make_mux(target, epoch):
-			mux = RelayMux(OpenclawSession.connect(gw.ws_url), target, on_breaker=pump._on_poison_breaker)
+			mux = RelayMux(AgentSession.connect(gw.ws_url), target, on_breaker=pump._on_poison_breaker)
 			return mux.start()
 
 		def dispatch_prepare(run_id, target):

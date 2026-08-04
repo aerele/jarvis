@@ -1,8 +1,8 @@
 # Jarvis
 
-AI superpowers for Frappe/ERPNext, powered by [openclaw](https://github.com/openclaw/openclaw).
+AI superpowers for Frappe/ERPNext, powered by a per-tenant hosted [agent runtime](https://github.com/openclaw/openclaw).
 
-Jarvis lets ERPNext users — especially business owners and execs — ask plain-English questions over their ERP data and get correct, permission-aware answers grounded in the actual records. It pairs an in-bench Frappe app (settings, permission-aware tool layer, HTTP API, on-save credentials propagation) with an openclaw agent runtime hosted per-tenant on Aerele's infrastructure. Data stays on the customer's bench; the agent brain lives in openclaw; permissions inherit from Frappe's own per-user checks.
+Jarvis lets ERPNext users — especially business owners and execs — ask plain-English questions over their ERP data and get correct, permission-aware answers grounded in the actual records. It pairs an in-bench Frappe app (settings, permission-aware tool layer, HTTP API, on-save credentials propagation) with an agent runtime hosted per-tenant on Aerele's infrastructure. Data stays on the customer's bench; the agent brain lives off the customer's bench; permissions inherit from Frappe's own per-user checks.
 
 **Status:** The end-to-end agent loop + chat UI are live, and the **Phase 3 SaaS control plane is built**: `jarvis_admin` (signup, Razorpay billing, fleet orchestration), the per-host `jarvis-fleet-agent` + Traefik TLS edge, `jarvis-openclaw-plugin` (the agent calling back into Frappe), and a RO-mounted `jarvis-persona`. **11 tools** (5 read + 6 write), identity via a single `X-Jarvis-Session` header (Path A v2). Customers connect via **Jarvis Cloud** (onboarding page); a single-bench dev path also exists. Docs are maintained in the `jarvis_admin` repo (`docs/customer-app/` for this app; `docs/production-deploy.md` for the operator bring-up) — see Documentation below.
 
@@ -23,11 +23,11 @@ bench install-app jarvis
 bench --site <your-site> install-app jarvis
 ```
 Then open **`/app/jarvis-onboarding`** in Desk → sign up + pay → the control
-plane assigns you a managed openclaw container and stores its connection in
+plane assigns you a managed agent container and stores its connection in
 Jarvis Settings. Set your LLM provider/model/key in **Jarvis Settings**, then
 chat at **`/app/jarvis-chat`**. Full walkthrough: **getting-started** (see Documentation).
 
-**Local single-bench dev** (run openclaw yourself, no control plane) → the
+**Local single-bench dev** (run agent yourself, no control plane) → the
 **local-dev** guide (see Documentation).
 
 ## Optional: parallel chat turns (dedicated worker queue)
@@ -71,7 +71,7 @@ bench setup supervisor && sudo supervisorctl reread && sudo supervisorctl update
 
 ## Architecture at a glance
 
-In production the customer site never runs openclaw — saving Jarvis Settings
+In production the customer site never runs agent — saving Jarvis Settings
 POSTs to Aerele's control plane, which provisions/updates the container on the
 fleet; the agent calls back into Frappe (`call_tool`) with per-user identity.
 See the **architecture** guide for the full picture (production vs dev shapes,

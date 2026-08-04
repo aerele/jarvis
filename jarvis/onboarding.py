@@ -356,6 +356,50 @@ def _coalesce_subscription_models(models: list) -> list:
 	return out
 
 
+def _adopt_orphan_capture(account_ref: str, consumed_capture_ids: list) -> str:
+	"""Blob of this user's live capture for ``account_ref``, or "" if there isn't one.
+
+	The client normally cites the capture by its own id. This is the fallback for
+	when it cannot: ``LlmPoolEditor.load()`` blanks ``capture_id`` on every stored
+	account and ``rehydratePendingCaptures`` only re-attaches an orphan one in
+	singleMode, so a settings-pane reload after a failed save leaves a valid,
+	unconsumed capture that no retry can ever cite.
+
+	Scoped to the session user, mirroring ``pending_capture.list_active`` - an
+	``account_ref`` from the request body must never reach another user's row.
+	The claim itself goes through ``consume_capture``, so the owner gate, expiry,
+	F10 anchor fence and once-only row lock all still apply; every ``CaptureError``
+	returns "" and the caller refuses exactly as it did before.
+	"""
+	from jarvis.oauth import pending_capture
+
+	cap_id = pending_capture.find_live_capture_id(account_ref)
+	if not cap_id:
+		return ""
+	try:
+		blob = pending_capture.consume_capture(cap_id)
+	except pending_capture.CaptureAlreadyConsumed:
+		# A concurrent save (a double-clicked Save, or a retry racing its own
+		# in-flight request) claimed this capture between our lookup and our
+		# consume. Its ciphertext is erased, so THIS save genuinely cannot
+		# complete - but the account did get connected, by the winner. Falling
+		# through to "no OAuth credential stored — reconnect this account" would
+		# tell the customer to sign in again and mint a SECOND live provider
+		# token for an account that is already linked, which is the hazard this
+		# whole module exists to avoid. Say what actually happened instead.
+		frappe.throw(
+			"This account was just connected by another save. Reload the page - "
+			"it is already linked, so there is no need to sign in again.",
+			frappe.ValidationError,
+		)
+	except pending_capture.CaptureError:
+		return ""
+	consumed_capture_ids.append(cap_id)
+	# Non-secret breadcrumb: an implicit adoption is worth being able to find later.
+	frappe.logger("jarvis.oauth").info(f"adopted orphan capture for account_ref {account_ref}")
+	return blob
+
+
 @frappe.whitelist()
 def save_llm_pool(
 	models: str | list,
@@ -495,6 +539,32 @@ def save_llm_pool(
 					# re-saved account.
 					if ref and prior_blobs.get(ref):
 						a["oauth_blob"] = prior_blobs[ref]
+					elif ref:
+						# Nothing stored either, so this account is heading straight for
+						# validate_models' "no OAuth credential stored" refusal. Before
+						# that, look for a live capture of THIS account the client failed
+						# to cite: the editor blanks capture_id on every load and only
+						# re-attaches an orphan one in singleMode, so a settings-pane
+						# reload after a failed save drops it and no retry can ever
+						# succeed (the capture sits valid and unconsumed server-side).
+						#
+						# Safe because the lookup is owner-scoped exactly like
+						# list_active, and account_ref is no more privileged than
+						# capture_id - both are server-minted and handed to the same
+						# client in the same sign-in response, so this can only adopt a
+						# capture the caller could already have cited explicitly.
+						# consume_capture still applies the owner gate, the expiry, the
+						# F10 anchor fence and the once-only row lock; any CaptureError
+						# falls through to the same refusal as before.
+						#
+						# Fallback ONLY: a stored blob still wins above, so no
+						# currently-succeeding save changes behaviour.
+						#
+						# Refusing is not the safer choice here - it forces a re-sign-in,
+						# which mints a SECOND live provider token while the first stays
+						# unrevoked (openai/xai/kimi have no entry in _REVOKE_ENDPOINTS),
+						# the duplicate-live-token hazard this module exists to avoid.
+						a["oauth_blob"] = _adopt_orphan_capture(ref, consumed_capture_ids)
 				merged_accounts.append(a)
 			row["subscription_accounts"] = json.dumps(merged_accounts)
 		s.append("models", row)
@@ -1195,6 +1265,34 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	return {"status": "connected"}
 
 
+# RFC 2606 / 6761 reserved names. Nothing here can receive mail, so none of it is
+# a billing address: Frappe ships Administrator as admin@example.com and Guest as
+# guest@example.com, and admin_v2 mints synthetic customer logins at @jarvis.invalid.
+#
+# Each entry carries a leading dot, and the candidate domain gets one too, so a
+# single suffix test covers both the name itself and any subdomain of it -- with
+# no way to match a longer name that merely ends in the same letters
+# (".examplex.com" does not end with ".example.com").
+_UNDELIVERABLE_SUFFIXES = (
+	".example.com",
+	".example.net",
+	".example.org",
+	".localhost",
+	".test",
+	".example",
+	".invalid",
+)
+
+
+def _is_undeliverable(email: str) -> bool:
+	"""Whether ``email``'s domain is reserved, so mail to it can never arrive."""
+	# strip("."): "example.com." is the root-anchored form of the same name, and
+	# would otherwise slip through -- ".example.com." does not end with
+	# ".example.com".
+	domain = email.rpartition("@")[2].strip().strip(".").lower()
+	return bool(domain) and f".{domain}".endswith(_UNDELIVERABLE_SUFFIXES)
+
+
 @frappe.whitelist()
 def get_account_defaults() -> dict:
 	"""Prefill for the onboarding Account step so the customer doesn't retype what
@@ -1203,6 +1301,11 @@ def get_account_defaults() -> dict:
 	options for a client datalist when several exist. Silent no-op (blank / empty
 	list) on sites without the Company doctype or read permission.
 
+	A reserved-domain email is dropped rather than sent. On a fresh site the caller
+	is Administrator, i.e. admin@example.com, and the step it fills says receipts go
+	to that address — so prefilling it puts an undeliverable address in the field as
+	a real, submittable value. Blank lets the field's own placeholder show.
+
 	Ports the desk auto-fetch (jarvis_onboarding.js, commit 1507495) to the server
 	because the SPA has no ``frappe.defaults``. System-Manager only (the onboarding
 	route is SM-gated).
@@ -1210,6 +1313,8 @@ def get_account_defaults() -> dict:
 	require_jarvis_admin()
 	user = frappe.session.user
 	email = (frappe.db.get_value("User", user, "email") or user) if user and user != "Guest" else ""
+	if _is_undeliverable(email):
+		email = ""
 
 	company, companies = "", []
 	try:
@@ -1686,9 +1791,9 @@ def save_llm_creds(
 	  - pushes the OAuth blob (which lives in auth-profiles.json, not
 	    Jarvis Settings, so the bench's diff classifier doesn't see it)
 	  - then needs fleet-agent to re-render openclaw.json AND restart
-	    the container so openclaw picks up the new auth profile.
+	    the container so agent picks up the new auth profile.
 	Without ``force=True``, a customer re-authorizing with the same
-	provider+model gets a stale openclaw.json + no restart, and openclaw
+	provider+model gets a stale openclaw.json + no restart, and agent
 	keeps serving the previous (broken) state. Verified live 2026-06-11.
 
 	Gated on System Manager (Sprint-1 Important from the 2026-06-16 code

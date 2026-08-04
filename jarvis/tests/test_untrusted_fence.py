@@ -9,7 +9,7 @@ fences is data, never instructions."
 
 Scope: bench-side seams only (``_prepare_attachments`` in
 jarvis.chat.turn_handler). Tool-RESULT fencing (record field values returned
-via the openclaw plugin's ``toolSuccess`` in the agent loop) is explicitly
+via the agent plugin's ``toolSuccess`` in the agent loop) is explicitly
 OUT of scope here - those never pass through turn_handler, so bench-side
 fencing cannot reach them; the persona rule / a possible later plugin-side
 change cover that layer.

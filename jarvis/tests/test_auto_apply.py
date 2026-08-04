@@ -16,7 +16,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import openclaw_session_pool
+from jarvis.chat import agent_session_pool
 from jarvis.chat.api import create_conversation, send_message, set_auto_apply
 from jarvis.chat.worker import run_agent_turn
 from jarvis.permissions import ensure_jarvis_user_role
@@ -403,7 +403,7 @@ class TestTurnContextReflectsFlag(FrappeTestCase):
 	"""The turn_handler [Context: ...] line reflects THIS conversation's flag."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -436,7 +436,7 @@ class TestTurnContextReflectsFlag(FrappeTestCase):
 		def _fake_checkout(url):
 			yield fake_sess
 
-		with patch("jarvis.chat.openclaw_session_pool.checkout", _fake_checkout):
+		with patch("jarvis.chat.agent_session_pool.checkout", _fake_checkout):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		first = fake_sess.chat_send.call_args_list[0]

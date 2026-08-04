@@ -611,8 +611,8 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 	def test_compute_proxy_active_false_for_a_pure_api_key_pool(self):
 		"""A pool whose every enabled model is a BYO api key gets NO sidecar.
 
-		jarvis-fleet-agent renders it openclaw-direct (``pool_render.is_byo_direct``):
-		each credential becomes its own provider INSIDE openclaw and openclaw drives
+		jarvis-fleet-agent renders it agent-direct (``pool_render.is_byo_direct``):
+		each credential becomes its own provider INSIDE agent and agent drives
 		failover natively. Reporting proxy_active here is what made every unpinned
 		"Auto" turn patch its session to the Bifrost-only "jarvis-pool" placeholder,
 		which the container rejected with model_not_found.
@@ -1079,7 +1079,7 @@ class TestRT3UnifiedOnUpdateRouting(_RT3SettingsTestCase):
 
 		settings = frappe.get_single("Jarvis Settings")
 		# Two BYO api keys are a POOL (the /llm-pool push above proves the leg) but
-		# an openclaw-DIRECT one: the fleet deploys no Bifrost/cliproxy sidecar, so
+		# an agent-DIRECT one: the fleet deploys no Bifrost/cliproxy sidecar, so
 		# the derived proxy_active must stay 0.
 		self.assertEqual(int(settings.proxy_active or 0), 0, "an all-api-key pool gets no proxy sidecar")
 		# All legacy fields must mirror models[0].
@@ -1180,7 +1180,7 @@ class TestRT3UnifiedOnUpdateRouting(_RT3SettingsTestCase):
 
 		settings = frappe.get_single("Jarvis Settings")
 		# A preset routes through /llm-pool (asserted above) but conjures no sidecar:
-		# the single credential is still a BYO api key, so this renders openclaw-direct.
+		# the single credential is still a BYO api key, so this renders agent-direct.
 		self.assertEqual(int(settings.proxy_active or 0), 0, "an api-key preset pool gets no proxy sidecar")
 
 
@@ -2542,7 +2542,7 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		frappe.db.commit()
 
 	def _pool_of_two(self):
-		"""Two BYO api keys: a pool, but an openclaw-DIRECT one (no sidecar)."""
+		"""Two BYO api keys: a pool, but an agent-DIRECT one (no sidecar)."""
 		self._save_pool(
 			[
 				{
@@ -2632,8 +2632,8 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 	def test_api_key_pool_is_not_proxy_active(self):
 		"""A pool of two BYO api keys deploys NO sidecar, so proxy_active must be 0.
 
-		jarvis-fleet-agent renders it openclaw-direct: each key becomes its own
-		provider inside openclaw, which drives failover itself. Deriving
+		jarvis-fleet-agent renders it agent-direct: each key becomes its own
+		provider inside agent, which drives failover itself. Deriving
 		proxy_active=1 here is the root of the dead "Auto" turn below.
 		"""
 		self._pool_of_two()
@@ -2647,20 +2647,20 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertEqual(int(settings.proxy_active or 0), 1)
 
 	def test_session_model_for_byo_pool_with_no_pin_resets_to_the_agent_default(self):
-		"""An unpinned openclaw-direct pool RESETS the session; it does not name a model.
+		"""An unpinned agent-direct pool RESETS the session; it does not name a model.
 
-		openclaw remembers a session's model across turns, so "" ("send nothing") left a
+		agent remembers a session's model across turns, so "" ("send nothing") left a
 		conversation that had ONCE been pinned pinned forever: selecting "Auto" wrote
-		model_override="" and flipped the pill while openclaw went right on calling the old
+		model_override="" and flipped the pill while agent went right on calling the old
 		model. Clearing a pin has to be an explicit instruction. (jarvis#299)
 
-		The instruction is None -> sessions.patch {"model": null}, which openclaw's
+		The instruction is None -> sessions.patch {"model": null}, which agent's
 		isDefault branch answers by deleting the session's modelOverride and
 		modelOverrideSource.
 
 		It must NOT be the pool's primary model id, which is what this used to return. Any
 		named model leaves the session model-OVERRIDDEN unless it resolves EXACTLY to the
-		rendered agent default; on a mismatch openclaw stores modelOverrideSource:"user"
+		rendered agent default; on a mismatch agent stores modelOverrideSource:"user"
 		and resolveEffectiveModelFallbacks then returns [], so the conversation runs with
 		zero failover candidates. Render races, stale specs and legacy "jarvis-pool" pins
 		make that mismatch real. (Marking the override modelOverrideSource:"auto" would
@@ -2693,7 +2693,7 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 
 	def test_session_model_for_stale_pin_resets_to_the_agent_default(self):
 		"""A pin naming a model the customer has since REMOVED from the pool resets the
-		session rather than leaking a dead model id through to openclaw.
+		session rather than leaking a dead model id through to agent.
 
 		The reset is None (walk back to the agent default), not the primary's id: a
 		customer who deleted their pinned model has expressed no preference, so pinning
@@ -2728,7 +2728,7 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertEqual(model, "gpt-4o")
 
 	def test_session_model_for_honours_a_valid_pin(self):
-		"""A GENUINE pin still pins, and must: openclaw deliberately disables failover
+		"""A GENUINE pin still pins, and must: agent deliberately disables failover
 		for an explicit user pick, and the reset above must not quietly widen that."""
 		from jarvis.chat.worker import _session_model_for
 
@@ -2739,7 +2739,7 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertIsNone(provider)
 
 	def test_session_model_patch_puts_the_byo_pool_reset_on_the_wire(self):
-		"""End of the chain: an unpinned openclaw-direct pool must reach the transport as
+		"""End of the chain: an unpinned agent-direct pool must reach the transport as
 		"patch, with a null model", not as "skip". _session_model_patch is where the
 		three-way answer is folded, so a regression that turned the reset back into a skip
 		would show up here even if _session_model_for still returned None."""
@@ -3197,7 +3197,7 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 	def _set_pool_gate_state(self, *, synced_at, status):
 		# Pool mode is DERIVED from models[], so the gate needs real rows: forcing
 		# proxy_active on an empty pool no longer reads as a pool tenant, and a BYO
-		# api-key pool's proxy_active is 0 by design (openclaw-direct, no sidecar).
+		# api-key pool's proxy_active is 0 by design (agent-direct, no sidecar).
 		settings = frappe.get_single("Jarvis Settings")
 		if len([m for m in (settings.models or []) if m.enabled]) < 2:
 			self._seed_pool()

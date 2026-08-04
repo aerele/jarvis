@@ -22,7 +22,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import policy, usage, user_settings_api
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
 	JARVIS_USER_ROLE,
@@ -406,7 +406,7 @@ class TestAdminSync(_UsageTestBase):
 		self.addCleanup(
 			lambda: frappe.db.set_single_value("Jarvis Settings", "agent_url", orig_agent_url or "")
 		)
-		p = patch.object(user_settings_api.openclaw_session_pool, "checkout", _fake_checkout)
+		p = patch.object(user_settings_api.agent_session_pool, "checkout", _fake_checkout)
 		p.start()
 		self.addCleanup(p.stop)
 
@@ -454,7 +454,7 @@ class TestAdminSync(_UsageTestBase):
 		self.assertEqual(a.total_tokens, 0)
 
 	def test_gateway_unreachable(self):
-		self._patch_gateway(OpenclawUnreachableError("down"))
+		self._patch_gateway(AgentUnreachableError("down"))
 		out = user_settings_api.admin_sync_usage()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["reason"], "gateway_unreachable")

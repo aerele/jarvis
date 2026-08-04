@@ -1,6 +1,6 @@
 {
   "name": "overflow-compaction",
-  "description": "Mid-stream context-overflow lifecycle error, a compaction pause, then the answer streams and terminal final. NOTE: on the MANAGED relay path relay_turn_events drops lifecycle frames, so the bench sees a longer turn that resolves to final (openclaw auto-compacts internally); the run:recovering UX is a legacy-path (stream_agent_turn) behavior. The lifecycle_error frame is retained so the Stage-B differential still exercises it.",
+  "description": "Mid-stream context-overflow lifecycle error, a compaction pause, then the answer streams and terminal final. NOTE: on the MANAGED relay path relay_turn_events drops lifecycle frames, so the bench sees a longer turn that resolves to final (agent auto-compacts internally); the run:recovering UX is a legacy-path (stream_agent_turn) behavior. The lifecycle_error frame is retained so the Stage-B differential still exercises it.",
   "ack": {
     "status": "started"
   },

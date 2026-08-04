@@ -1,6 +1,6 @@
-"""Tests for jarvis.chat.openclaw_session_pool.
+"""Tests for jarvis.chat.agent_session_pool.
 
-The pool itself talks only to ``OpenclawSession.connect`` (which we mock
+The pool itself talks only to ``AgentSession.connect`` (which we mock
 with a fake session exposing ``_ws.connected`` + ``close()``). No real
 WebSocket / Frappe involvement; tests are pure unit.
 """
@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import openclaw_session_pool
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.chat import agent_session_pool
+from jarvis.exceptions import AgentUnreachableError
 
 
 def _fake_session(connected: bool = True) -> MagicMock:
@@ -24,35 +24,31 @@ def _fake_session(connected: bool = True) -> MagicMock:
 	return sess
 
 
-class TestOpenclawSessionPool(FrappeTestCase):
+class TestAgentSessionPool(FrappeTestCase):
 	"""Pool unit tests. Each test resets the module-level pool dict in
 	``setUp`` so suite order doesn't matter."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 
 	def tearDown(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 
 	# ---- happy path -------------------------------------------------
 
 	def test_checkout_creates_new_session(self):
 		sess = _fake_session()
-		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", return_value=sess
-		) as mock_connect:
-			with openclaw_session_pool.checkout("ws://gw") as got:
+		with patch.object(agent_session_pool.AgentSession, "connect", return_value=sess) as mock_connect:
+			with agent_session_pool.checkout("ws://gw") as got:
 				self.assertIs(got, sess)
 			mock_connect.assert_called_once_with("ws://gw")
 
 	def test_checkout_reuses_pooled_session(self):
 		sess = _fake_session()
-		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", return_value=sess
-		) as mock_connect:
-			with openclaw_session_pool.checkout("ws://gw"):
+		with patch.object(agent_session_pool.AgentSession, "connect", return_value=sess) as mock_connect:
+			with agent_session_pool.checkout("ws://gw"):
 				pass
-			with openclaw_session_pool.checkout("ws://gw"):
+			with agent_session_pool.checkout("ws://gw"):
 				pass
 			# One connect total: second checkout reused the pool entry.
 			mock_connect.assert_called_once()
@@ -61,14 +57,14 @@ class TestOpenclawSessionPool(FrappeTestCase):
 		sess_a = _fake_session()
 		sess_b = _fake_session()
 		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", side_effect=[sess_a, sess_b]
+			agent_session_pool.AgentSession, "connect", side_effect=[sess_a, sess_b]
 		) as mock_connect:
-			with openclaw_session_pool.checkout("ws://a"):
+			with agent_session_pool.checkout("ws://a"):
 				pass
-			with openclaw_session_pool.checkout("ws://b"):
+			with agent_session_pool.checkout("ws://b"):
 				pass
 			self.assertEqual(mock_connect.call_count, 2)
-			self.assertEqual(set(openclaw_session_pool._POOL), {"ws://a", "ws://b"})
+			self.assertEqual(set(agent_session_pool._POOL), {"ws://a", "ws://b"})
 
 	# ---- healthcheck + reconnect ------------------------------------
 
@@ -78,13 +74,13 @@ class TestOpenclawSessionPool(FrappeTestCase):
 		sess1 = _fake_session()
 		sess2 = _fake_session()
 		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", side_effect=[sess1, sess2]
+			agent_session_pool.AgentSession, "connect", side_effect=[sess1, sess2]
 		) as mock_connect:
-			with openclaw_session_pool.checkout("ws://gw"):
+			with agent_session_pool.checkout("ws://gw"):
 				pass
 			# Simulate gateway closing our WS.
 			sess1._ws.connected = False
-			with openclaw_session_pool.checkout("ws://gw") as got:
+			with agent_session_pool.checkout("ws://gw") as got:
 				self.assertIs(got, sess2)
 			self.assertEqual(mock_connect.call_count, 2)
 			# First session's close() called during eviction.
@@ -96,17 +92,17 @@ class TestOpenclawSessionPool(FrappeTestCase):
 		sess2 = _fake_session()
 		with (
 			patch.object(
-				openclaw_session_pool.OpenclawSession, "connect", side_effect=[sess1, sess2]
+				agent_session_pool.AgentSession, "connect", side_effect=[sess1, sess2]
 			) as mock_connect,
-			patch.object(openclaw_session_pool.time, "monotonic") as mock_time,
+			patch.object(agent_session_pool.time, "monotonic") as mock_time,
 		):
 			# T=1000: first checkout creates session.
 			mock_time.return_value = 1000.0
-			with openclaw_session_pool.checkout("ws://gw"):
+			with agent_session_pool.checkout("ws://gw"):
 				pass
 			# T=1000 + IDLE_MAX_S + 1: stale, reconnect.
-			mock_time.return_value = 1000.0 + openclaw_session_pool.IDLE_MAX_S + 1
-			with openclaw_session_pool.checkout("ws://gw") as got:
+			mock_time.return_value = 1000.0 + agent_session_pool.IDLE_MAX_S + 1
+			with agent_session_pool.checkout("ws://gw") as got:
 				self.assertIs(got, sess2)
 			self.assertEqual(mock_connect.call_count, 2)
 			sess1.close.assert_called_once()
@@ -114,35 +110,33 @@ class TestOpenclawSessionPool(FrappeTestCase):
 	# ---- error eviction ---------------------------------------------
 
 	def test_unreachable_during_use_evicts(self):
-		"""``OpenclawUnreachableError`` raised inside the ``with`` block
+		"""``AgentUnreachableError`` raised inside the ``with`` block
 		evicts the entry from the pool so the next checkout reconnects."""
 		sess1 = _fake_session()
 		sess2 = _fake_session()
 		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", side_effect=[sess1, sess2]
+			agent_session_pool.AgentSession, "connect", side_effect=[sess1, sess2]
 		) as mock_connect:
-			with self.assertRaises(OpenclawUnreachableError):
-				with openclaw_session_pool.checkout("ws://gw"):
-					raise OpenclawUnreachableError("simulated stream failure")
+			with self.assertRaises(AgentUnreachableError):
+				with agent_session_pool.checkout("ws://gw"):
+					raise AgentUnreachableError("simulated stream failure")
 			# Entry evicted; next checkout opens a fresh session.
-			with openclaw_session_pool.checkout("ws://gw") as got:
+			with agent_session_pool.checkout("ws://gw") as got:
 				self.assertIs(got, sess2)
 			self.assertEqual(mock_connect.call_count, 2)
 			# Evicted session's close() was called.
 			sess1.close.assert_called()
 
 	def test_other_exception_does_not_evict(self):
-		"""A non-Openclaw exception inside the block should NOT evict
+		"""A non-Agent exception inside the block should NOT evict
 		the pool — those are caller bugs, the connection is fine."""
 		sess = _fake_session()
-		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", return_value=sess
-		) as mock_connect:
+		with patch.object(agent_session_pool.AgentSession, "connect", return_value=sess) as mock_connect:
 			with self.assertRaises(ValueError):
-				with openclaw_session_pool.checkout("ws://gw"):
+				with agent_session_pool.checkout("ws://gw"):
 					raise ValueError("caller bug")
 			# Next checkout reuses the same session — no eviction.
-			with openclaw_session_pool.checkout("ws://gw") as got:
+			with agent_session_pool.checkout("ws://gw") as got:
 				self.assertIs(got, sess)
 			mock_connect.assert_called_once()
 
@@ -153,14 +147,14 @@ class TestOpenclawSessionPool(FrappeTestCase):
 		sess1 = _fake_session()
 		sess1.close.side_effect = RuntimeError("already closed")
 		sess2 = _fake_session()
-		with patch.object(openclaw_session_pool.OpenclawSession, "connect", side_effect=[sess1, sess2]):
-			with self.assertRaises(OpenclawUnreachableError):
-				with openclaw_session_pool.checkout("ws://gw"):
-					raise OpenclawUnreachableError("boom")
+		with patch.object(agent_session_pool.AgentSession, "connect", side_effect=[sess1, sess2]):
+			with self.assertRaises(AgentUnreachableError):
+				with agent_session_pool.checkout("ws://gw"):
+					raise AgentUnreachableError("boom")
 			# Entry should have been removed even though close raised.
 			# (The gateway GROUP object stays in the dict; what matters
 			# is that no dead entry remains inside it.)
-			group = openclaw_session_pool._POOL["ws://gw"]
+			group = agent_session_pool._POOL["ws://gw"]
 			self.assertEqual(len(group.entries), 0)
 
 	# ---- concurrent checkout (Stage B: N entries per gateway) --------
@@ -168,7 +162,7 @@ class TestOpenclawSessionPool(FrappeTestCase):
 	def _held_checkout(self, url, acquired_evt, release_evt, out, errors):
 		"""Thread body: hold a checkout open until release_evt fires."""
 		try:
-			with openclaw_session_pool.checkout(url) as got:
+			with agent_session_pool.checkout(url) as got:
 				out.append(got)
 				acquired_evt.set()
 				release_evt.wait(timeout=5)
@@ -181,9 +175,7 @@ class TestOpenclawSessionPool(FrappeTestCase):
 		sessions (per-entry exclusivity kept, per-gateway exclusivity
 		gone - the Stage B point)."""
 		sessions = [_fake_session(), _fake_session(), _fake_session()]
-		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", side_effect=sessions
-		) as mock_connect:
+		with patch.object(agent_session_pool.AgentSession, "connect", side_effect=sessions) as mock_connect:
 			out, errors = [], []
 			acq = [threading.Event() for _ in range(2)]
 			rel = threading.Event()
@@ -211,11 +203,9 @@ class TestOpenclawSessionPool(FrappeTestCase):
 		"""With POOL_MAX_PER_GATEWAY sessions held, the next checkout
 		waits; releasing one slot unblocks it and it reuses that entry
 		(no fourth connect)."""
-		cap = openclaw_session_pool.POOL_MAX_PER_GATEWAY
+		cap = agent_session_pool.POOL_MAX_PER_GATEWAY
 		sessions = [_fake_session() for _ in range(cap + 1)]
-		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", side_effect=sessions
-		) as mock_connect:
+		with patch.object(agent_session_pool.AgentSession, "connect", side_effect=sessions) as mock_connect:
 			out, errors = [], []
 			acq = [threading.Event() for _ in range(cap)]
 			rels = [threading.Event() for _ in range(cap)]
@@ -253,23 +243,23 @@ class TestOpenclawSessionPool(FrappeTestCase):
 			self.assertEqual(errors, [])
 
 	def test_eviction_of_one_entry_does_not_affect_others(self):
-		"""An OpenclawUnreachableError on one held session evicts ONLY
+		"""An AgentUnreachableError on one held session evicts ONLY
 		that entry; the concurrently-held sibling survives in the pool
 		and is reused by the next checkout."""
 		sess_a, sess_b = _fake_session(), _fake_session()
 		with patch.object(
-			openclaw_session_pool.OpenclawSession, "connect", side_effect=[sess_a, sess_b]
+			agent_session_pool.AgentSession, "connect", side_effect=[sess_a, sess_b]
 		) as mock_connect:
 			out, errors = [], []
 			acq_b, rel_b = threading.Event(), threading.Event()
 
 			def failing_holder():
 				try:
-					with openclaw_session_pool.checkout("ws://gw"):
+					with agent_session_pool.checkout("ws://gw"):
 						# Hold until B has its own session, then die.
 						self.assertTrue(acq_b.wait(timeout=5))
-						raise OpenclawUnreachableError("stream died")
-				except OpenclawUnreachableError:
+						raise AgentUnreachableError("stream died")
+				except AgentUnreachableError:
 					pass
 
 			holder_b = threading.Thread(
@@ -284,10 +274,10 @@ class TestOpenclawSessionPool(FrappeTestCase):
 			holder_b.join(timeout=5)
 			self.assertEqual(errors, [])
 
-			group = openclaw_session_pool._POOL["ws://gw"]
+			group = agent_session_pool._POOL["ws://gw"]
 			self.assertEqual(len(group.entries), 1)  # one evicted, one kept
 			# Next checkout reuses the survivor - no third connect.
-			with openclaw_session_pool.checkout("ws://gw") as got:
+			with agent_session_pool.checkout("ws://gw") as got:
 				self.assertIn(got, (sess_a, sess_b))
 			self.assertEqual(mock_connect.call_count, 2)
 
@@ -296,17 +286,17 @@ class TestOpenclawSessionPool(FrappeTestCase):
 		does not leak capacity (the 'connecting' counter)."""
 		sess = _fake_session()
 		with patch.object(
-			openclaw_session_pool.OpenclawSession,
+			agent_session_pool.AgentSession,
 			"connect",
-			side_effect=[OpenclawUnreachableError("refused"), sess],
+			side_effect=[AgentUnreachableError("refused"), sess],
 		) as mock_connect:
-			with self.assertRaises(OpenclawUnreachableError):
-				with openclaw_session_pool.checkout("ws://gw"):
+			with self.assertRaises(AgentUnreachableError):
+				with agent_session_pool.checkout("ws://gw"):
 					pass  # pragma: no cover - never reached
-			group = openclaw_session_pool._POOL["ws://gw"]
+			group = agent_session_pool._POOL["ws://gw"]
 			self.assertEqual(group.connecting, 0)
 			# Retry succeeds and occupies a normal slot.
-			with openclaw_session_pool.checkout("ws://gw") as got:
+			with agent_session_pool.checkout("ws://gw") as got:
 				self.assertIs(got, sess)
 			self.assertEqual(mock_connect.call_count, 2)
 
@@ -315,18 +305,18 @@ class TestOpenclawSessionPool(FrappeTestCase):
 	def test_drain_all_closes_every_pooled_session(self):
 		sess_a = _fake_session()
 		sess_b = _fake_session()
-		with patch.object(openclaw_session_pool.OpenclawSession, "connect", side_effect=[sess_a, sess_b]):
-			with openclaw_session_pool.checkout("ws://a"):
+		with patch.object(agent_session_pool.AgentSession, "connect", side_effect=[sess_a, sess_b]):
+			with agent_session_pool.checkout("ws://a"):
 				pass
-			with openclaw_session_pool.checkout("ws://b"):
+			with agent_session_pool.checkout("ws://b"):
 				pass
-		openclaw_session_pool.drain_all()
+		agent_session_pool.drain_all()
 		sess_a.close.assert_called_once()
 		sess_b.close.assert_called_once()
-		self.assertEqual(len(openclaw_session_pool._POOL), 0)
+		self.assertEqual(len(agent_session_pool._POOL), 0)
 
 	def test_drain_all_is_idempotent(self):
 		"""Calling drain_all on an empty pool should be a no-op, not
 		raise."""
-		openclaw_session_pool.drain_all()
-		openclaw_session_pool.drain_all()
+		agent_session_pool.drain_all()
+		agent_session_pool.drain_all()

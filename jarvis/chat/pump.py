@@ -76,7 +76,7 @@ import frappe
 
 from jarvis.chat import turn_state as ts
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 TURN = "Jarvis Chat Turn"
 PUMP = "Jarvis Relay Pump"
@@ -143,7 +143,7 @@ PREPARE_DISPATCH_DEADLINE_S = 120
 # Bench-side delta batcher cadence (OARF-6 / D1 #28): the legacy
 # `_AssistantContentBatcher` relocated INTO the lane handler — per-frame
 # commit+publish becomes one commit+publish per N frames OR every INTERVAL ms
-# (whichever trips first), coalescing openclaw's ~150ms cumulative mirrors. The
+# (whichever trips first), coalescing agent's ~150ms cumulative mirrors. The
 # first delta always flushes immediately (first-token latency, C1). C3
 # (flush_gap_ms) measures the resulting cadence.
 _DELTA_BATCH_SIZE = 10
@@ -174,7 +174,7 @@ LEASE_MIRROR_TTL_S = 30
 # IMMEDIATE successor, up to this many consecutive transport retries. frappe.enqueue
 # exposes no delayed/scheduled enqueue (no enqueue_in/at; the RQ job scheduler is not
 # run by the bench workers), so the ruled '5s/15s/45s' time-delay is realized as a
-# bounded fast-retry COUNT paced by the OpenclawSession connect timeout, then a
+# bounded fast-retry COUNT paced by the AgentSession connect timeout, then a
 # fall-through to the watchdog-cron / sender ``ensure_pump`` revival for a sustained
 # outage. This preserves the hard invariant (never exit successor-less with live
 # work, within the budget) without a hot reconnect loop. See PUMP-RUNBOOK.md §CDX-1.
@@ -968,7 +968,7 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 	"""CDX-5 + CDX-15 — the REAL, EPOCH+STATE+VERSION-FENCED tool-event applier (D1 rows
 	#30-32). Two ownership classes:
 
-	  * **built-in openclaw tools** (browser/canvas/image-gen — NOT ``jarvis__*``):
+	  * **built-in agent tools** (browser/canvas/image-gen — NOT ``jarvis__*``):
 	    the pump OWNS the durable ``role=tool`` receipt. On ``start`` it inserts the
 	    row (seq allocated UNDER the conversation lock, R-9) keyed idempotently by the
 	    durable ``(conversation, tool_call_id)`` so a hop re-attach / replay never
@@ -1117,7 +1117,7 @@ def _update_tool_end_row(conversation: str, tool_call_id: str, status: str | Non
 	"""CDX-5/CDX-15: close the built-in tool receipt at ``end`` (tool_status +
 	streaming=0) INSIDE the caller's fenced txn — NO commit here (the caller commits the
 	fence + this update atomically). Idempotent by (conversation, tool_call_id). An
-	``end`` with no matching ``start`` row is logged (an openclaw event-ordering
+	``end`` with no matching ``start`` row is logged (an agent event-ordering
 	regression) and returns None — matches legacy ``turn_handler`` orphan handling."""
 	name = frappe.db.get_value(
 		MSG, {"conversation": conversation, "tool_call_id": tool_call_id, "role": "tool"}, "name"
@@ -1217,13 +1217,13 @@ def _default_make_mux(relay_target_id: str, epoch: int) -> RelayMux:
 	(reconnect-per-hop; the pump owns connect, the mux is the I/O adapter). The
 	gateway URL is resolved from Jarvis Settings ``agent_url``. Production
 	(WP-1e) exercises this; tests inject a transport double."""
-	from jarvis.chat.openclaw_client import OpenclawSession
+	from jarvis.chat.agent_client import AgentSession
 
 	settings = frappe.get_cached_doc("Jarvis Settings")
 	gateway_url = (
 		(getattr(settings, "agent_url", "") or "").replace("http://", "ws://").replace("https://", "wss://")
 	)
-	session = OpenclawSession.connect(gateway_url)
+	session = AgentSession.connect(gateway_url)
 	mux = RelayMux(session, relay_target_id, on_breaker=_on_poison_breaker)
 	return mux.start()
 
@@ -1942,7 +1942,7 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 			thinking=dispatch.get("thinking"),
 			attachments=dispatch.get("attachments"),
 		)
-	except OpenclawUnreachableError as exc:
+	except AgentUnreachableError as exc:
 		# Immediate send failure (socket write failed) — resolve inline (rare).
 		_handle_ack_failure(ctx, rs, exc)
 		return False
@@ -1980,7 +1980,7 @@ def _poll_acks(ctx: PumpContext) -> None:
 			# deadline -> result(0) cleans up the mux map and raises the ack-timeout
 			# sentinel (the timeout, not a blocking wait).
 			ack = pa.fut.result(0)
-		except OpenclawUnreachableError as exc:
+		except AgentUnreachableError as exc:
 			_handle_ack_failure(ctx, pa.rs, exc)
 			continue
 		_on_ack_success(ctx, pa, ack)
@@ -2011,7 +2011,7 @@ def _on_ack_success(ctx: PumpContext, pa: _PendingAck, ack: dict) -> None:
 	rs.version = _resync_version(rs.run_id)
 
 
-def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: OpenclawUnreachableError) -> bool:
+def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableError) -> bool:
 	"""Ack did not resolve OK. The ``ack-timeout`` sentinel (also the Closing/WS
 	drop sentinel, OAR-10) is AMBIGUOUS — the request was written, the peer may
 	have accepted it — so park recovering. A DEFINITE pre-ack rejection (ok:false
@@ -2144,7 +2144,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		# Record the latest cumulative text + accumulate the incremental delta, then
 		# flush (one apply_delta CAS + commit + publish for the whole batch) only
 		# when the size (N=10) or time (250ms) threshold trips — the first delta
-		# always flushes immediately (first-token latency, C1). openclaw already
+		# always flushes immediately (first-token latency, C1). agent already
 		# coalesces at ~150ms, so this is bench-side de-duplication of commits+
 		# publishes, not a change to what the user eventually sees (cumulative).
 		if ctx.lease_lost:
@@ -2479,7 +2479,7 @@ def _poll_recoveries(ctx: PumpContext) -> None:
 
 def _recovery_window(r: dict) -> tuple[int, int | None]:
 	"""OARF-2 recovery window for a turn: ``min_seq`` = the turn's
-	``openclaw_seq_watermark`` (captured by prepare BEFORE this turn's chat.send —
+	``agent_seq_watermark`` (captured by prepare BEFORE this turn's chat.send —
 	a transcript message at/below it predates this turn), ``max_seq`` = the next
 	turn's watermark (a message above it belongs to a later turn). Identical bound
 	to the legacy ``turn_recovery`` fix for the same 'recovered with the next
@@ -2487,8 +2487,16 @@ def _recovery_window(r: dict) -> tuple[int, int | None]:
 	am = r.get("assistant_message")
 	if not am:
 		return 0, None
-	row = frappe.db.get_value(MSG, am, ["openclaw_seq_watermark", "seq"], as_dict=True) or {}
-	min_seq = int(row.get("openclaw_seq_watermark") or 0)
+	from jarvis.chat.seq_watermark import wm_expr
+
+	rows = frappe.db.sql(
+		f"""SELECT {wm_expr()} AS agent_seq_watermark, seq
+		FROM `tab{MSG}` WHERE name=%(n)s""",
+		{"n": am},
+		as_dict=True,
+	)
+	row = rows[0] if rows else {}
+	min_seq = int(row.get("agent_seq_watermark") or 0)
 	max_seq = None
 	if row.get("seq"):
 		from jarvis.chat.turn_recovery import _next_turn_watermark

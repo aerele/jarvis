@@ -1,10 +1,10 @@
-"""Unit tests for OpenclawSession.relay_turn_events + set_session_model.
+"""Unit tests for AgentSession.relay_turn_events + set_session_model.
 
-Mirror of test_openclaw_native_rpcs.py's harness: bypass __init__ via
-OpenclawSession.__new__ and stub _recv (fed a scripted frame list; an
+Mirror of test_agent_native_rpcs.py's harness: bypass __init__ via
+AgentSession.__new__ and stub _recv (fed a scripted frame list; an
 Exception instance in the list is raised) / _request.
 
-relay_turn_events is the consumer half of the openclaw-native turn model:
+relay_turn_events is the consumer half of the agent-native turn model:
 token/tool streaming comes from broadcast "agent" event frames retagged
 with the chat.send clientRunId == run_id; completion comes ONLY from the
 run-scoped "chat" event (state final|aborted|error). agent lifecycle
@@ -13,8 +13,8 @@ frames are dropped.
 
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.openclaw_client import OpenclawSession
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.chat.agent_client import AgentSession
+from jarvis.exceptions import AgentUnreachableError
 
 
 def _agent_frame(run_id, stream, data):
@@ -37,7 +37,7 @@ def _chat_frame(run_id, session_key, state, **extra):
 
 class TestRelayTurnEvents(FrappeTestCase):
 	def _sess(self, frames):
-		sess = OpenclawSession.__new__(OpenclawSession)  # bypass __init__/WS
+		sess = AgentSession.__new__(AgentSession)  # bypass __init__/WS
 		queue = list(frames)
 
 		def fake_recv(_timeout):
@@ -177,7 +177,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		# sentinel-stripped message that keeps stopReason="error". It must NOT
 		# read as a silent successful empty final; it must surface as an error
 		# so the turn handler stamps the assistant row's `error` field.
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		sess = self._sess(
 			[
@@ -196,11 +196,11 @@ class TestRelayTurnEvents(FrappeTestCase):
 		)
 
 	def test_final_stream_error_sentinel_content_yields_relay_error(self):
-		# Some openclaw builds leave the sentinel text block in the projected
+		# Some agent builds leave the sentinel text block in the projected
 		# final message instead of stripping it. That is still a failed turn,
 		# not a real answer, so it maps to the same failed_final error rather
 		# than rendering the raw sentinel as the assistant's reply.
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		sess = self._sess(
 			[
@@ -244,11 +244,11 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(out, [{"kind": "relay:final", "text": None}])
 
 	def test_final_with_no_message_at_all_yields_relay_error(self):
-		# #543, the LIVE failure shape. openclaw's relay emitters omit ``message``
+		# #543, the LIVE failure shape. the runtime's relay emitters omit ``message``
 		# entirely when the turn produced no assistant text, so a failed turn
 		# arrives as a bare {"state": "final"}. Both live reproductions settled
 		# this way and wrote an assistant row with no content AND no error.
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		sess = self._sess([_chat_frame("r1", "sk", "final")])
 		out = list(sess.relay_turn_events("sk", "r1"))
@@ -261,7 +261,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		# The same emitters put ``stopReason`` at the TOP LEVEL of the chat
 		# payload, NOT inside ``message`` - reading it only from the message is
 		# what made the original guard dead code on the live wire.
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		sess = self._sess([_chat_frame("r1", "sk", "final", stopReason="error")])
 		out = list(sess.relay_turn_events("sk", "r1"))
@@ -271,7 +271,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		)
 
 	def test_failed_final_names_the_provider_reason_from_the_lifecycle_frame(self):
-		# The lifecycle error frame is the ONLY place openclaw names the failure.
+		# The lifecycle error frame is the ONLY place the runtime names the failure.
 		# It is dropped from the terminal path (the chat event stays the single
 		# terminal) but kept, so the customer is told what to fix.
 		detail = (
@@ -295,7 +295,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		# snapshot recovery. That never lands for a TERMINAL failed final, so a
 		# provider detail carrying the marker must not steer control flow - the
 		# generic copy is used instead and the turn stays terminal.
-		from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 
 		sess = self._sess(
 			[
@@ -311,7 +311,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(out[0]["error"], FAILED_FINAL_ERROR)
 
 	def test_lifecycle_error_then_a_real_answer_stays_a_relay_final(self):
-		# openclaw emits a lifecycle error per FAILED candidate and then fails
+		# The runtime emits a lifecycle error per FAILED candidate and then fails
 		# over. A turn the fallback model rescued must keep its answer.
 		sess = self._sess(
 			[
@@ -348,7 +348,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(out, [{"kind": "relay:final", "text": "here is the partial answer"}])
 
 	def test_transport_drop_yields_interrupted_transport_and_does_not_raise(self):
-		sess = self._sess([OpenclawUnreachableError("ws closed mid-stream")])
+		sess = self._sess([AgentUnreachableError("ws closed mid-stream")])
 		# The generator swallows the exception, so the pool's
 		# discard-on-exception contract never fires; the consumer must close
 		# the dead WS itself so the pool healthcheck evicts it instead of
@@ -363,7 +363,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(closed, [True])
 
 	def test_deadline_yields_interrupted_deadline_on_stalling_recv(self):
-		sess = OpenclawSession.__new__(OpenclawSession)
+		sess = AgentSession.__new__(AgentSession)
 
 		def stalling_recv(_timeout):
 			import time
@@ -378,7 +378,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 
 class TestSetSessionModel(FrappeTestCase):
 	def _capture(self, *args, **kwargs):
-		sess = OpenclawSession.__new__(OpenclawSession)
+		sess = AgentSession.__new__(AgentSession)
 		captured = {}
 
 		def fake_request(method, params, *, timeout_s):
@@ -398,7 +398,7 @@ class TestSetSessionModel(FrappeTestCase):
 	def test_none_sends_an_explicit_null_to_reset_the_session(self):
 		"""None must reach the gateway as ``"model": null`` -- PRESENT, not omitted.
 
-		openclaw only clears a session's modelOverride when it actually sees
+		agent only clears a session's modelOverride when it actually sees
 		``model: null`` (its isDefault branch). Dropping the key instead would leave a
 		stale pin live -- the jarvis#299 bug -- and would leave the session overridden,
 		which is what disables the fallback chain.

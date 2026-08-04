@@ -605,7 +605,7 @@ class TestLegacyCoexistenceGuard(_AdmissionTestCase):
 		before the flag flipped on) on conversation X must block a NEW send on the
 		SAME X from dispatching - it queues instead. The old _conv_legacy_busy was
 		dead (run_id='' sentinel counted the caller's own just-inserted row), so
-		this double-admitted onto one openclaw session."""
+		this double-admitted onto one agent session."""
 		conv = self._mk_conv()
 		self._mk_msg(conv, 1, role="user")
 		# Legacy fresh streaming assistant, NO owning Turn row.

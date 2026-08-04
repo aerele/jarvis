@@ -616,7 +616,7 @@ function wrapAuthorStyles(html) {
 }
 
 // Dashboards saved before the gateway host-client strip landed carry a dead
-// openclaw live-reload script (a WebSocket to /__openclaw__/ws). It can't work
+// agent live-reload script (a WebSocket to /__openclaw__/ws). It can't work
 // inside the sandbox (connect-src 'none' blocks it) and just logs a CSP
 // violation on every view — drop any <script> that references the host socket.
 function stripHostClient(html) {

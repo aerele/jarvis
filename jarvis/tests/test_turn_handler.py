@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import openclaw_session_pool, turn_handler, worker
+from jarvis.chat import agent_session_pool, turn_handler, worker
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -37,7 +37,7 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -60,7 +60,7 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 			]
 		)
 		with patch(
-			"jarvis.chat.openclaw_session_pool.OpenclawSession.connect",
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
 			return_value=fake_sess,
 		):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
@@ -103,7 +103,7 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 			]
 		)
 		with patch(
-			"jarvis.chat.openclaw_session_pool.OpenclawSession.connect",
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
 			return_value=fake_sess,
 		):
 			with patch("jarvis.chat.worker.publish_to_user"):

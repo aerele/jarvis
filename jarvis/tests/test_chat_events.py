@@ -1,4 +1,4 @@
-"""Tests for jarvis.chat.events - openclaw event parsing + realtime publish wrapper."""
+"""Tests for jarvis.chat.events - agent event parsing + realtime publish wrapper."""
 
 from unittest.mock import patch
 

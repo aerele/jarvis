@@ -3,7 +3,7 @@
 The SPA (``/jarvis`` Skills settings tab) calls these whitelisted methods to
 manage ``Jarvis Custom Skill`` rows (owner-scoped) and to APPLY them to the
 running container. Apply is explicit (a button), not on every save: each apply
-restarts the container (the only way openclaw re-scans ``workspace/skills``),
+restarts the container (the only way agent re-scans ``workspace/skills``),
 so reconciling all skills in one push avoids a restart storm.
 
 The apply path mirrors ``JarvisSettings.on_update`` / ``_enqueued_sync_via_admin``

@@ -70,10 +70,6 @@
   "system_tab",
   "deployment_section",
   "deployment_mode",
-  "selfhost_last_validated_at",
-  "selfhost_last_validation",
-  "selfhost_tool_user",
-  "selfhost_stream",
   "admin_connection_section",
   "jarvis_admin_url",
   "jarvis_admin_api_key",
@@ -501,7 +497,7 @@
    "fieldtype": "Int",
    "label": "Reclaim idle chat memory after (days)",
    "default": "30",
-   "description": "A chat you have not opened for this many days keeps its full history but has its agent working-memory (its openclaw session) reclaimed to free container resources. The chat stays in your list and resumes automatically on your next message, starting without the old working context. Chats with history are never deleted. Minimum 7; set to 0 to keep sessions forever (also disables cleanup of abandoned empty chats). Default 30. Readers treat an unset value as 30 (Single defaults are not backfilled on migrate)."
+   "description": "A chat you have not opened for this many days keeps its full history but has its agent working-memory (its agent session) reclaimed to free container resources. The chat stays in your list and resumes automatically on your next message, starting without the old working context. Chats with history are never deleted. Minimum 7; set to 0 to keep sessions forever (also disables cleanup of abandoned empty chats). Default 30. Readers treat an unset value as 30 (Single defaults are not backfilled on migrate)."
   },
   {
    "fieldname": "system_tab",
@@ -522,41 +518,6 @@
    "read_only": 1,
    "hidden": 1,
    "description": "Retired. Jarvis is managed-only; nothing reads this field. Kept so existing sites keep their column until a migration drops it."
-  },
-  {
-   "fieldname": "selfhost_last_validated_at",
-   "fieldtype": "Datetime",
-   "label": "Self-Host Last Validated At",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired with self-hosted deployments; nothing reads this field."
-  },
-  {
-   "fieldname": "selfhost_last_validation",
-   "fieldtype": "Long Text",
-   "label": "Self-Host Last Validation",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired with self-hosted deployments; nothing reads this field."
-  },
-  {
-   "fieldname": "selfhost_tool_user",
-   "fieldtype": "Link",
-   "permlevel": 1,
-   "options": "User",
-   "label": "Self-Host Tool User",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired with self-hosted deployments; nothing reads this field."
-  },
-  {
-   "fieldname": "selfhost_stream",
-   "fieldtype": "Check",
-   "label": "Stream Self-Host Responses",
-   "default": "1",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired with self-hosted deployments; nothing reads this field."
   },
   {
    "fieldname": "vision_attachments_enabled",
@@ -623,7 +584,7 @@
    "fieldname": "operator_section",
    "fieldtype": "Section Break",
    "label": "Agent Operator",
-   "description": "Operator config - populated by jarvis.openclaw_bootstrap.start (dev) or the Jarvis admin signup response (prod)."
+   "description": "Operator config - populated during agent container bootstrap (dev) or the Jarvis admin signup response (prod)."
   },
   {
    "fieldname": "agent_url",
@@ -631,7 +592,7 @@
    "permlevel": 1,
    "label": "Agent URL",
    "read_only": 1,
-   "description": "WebSocket URL for the customer's openclaw agent (e.g. ws://127.0.0.1:18789 in dev; wss://<subdomain>.<admin-host>:443 in prod)"
+   "description": "WebSocket URL for the customer's agent (e.g. ws://127.0.0.1:18789 in dev; wss://<subdomain>.<admin-host>:443 in prod)"
   },
   {
    "fieldname": "agent_token",
@@ -677,14 +638,14 @@
    "fieldtype": "Data",
    "label": "Chat Device ID",
    "read_only": 1,
-   "description": "sha256(rawPublicKey).hex - openclaw deviceId this bench was paired as. Set lazily on first chat; cleared on re-pair."
+   "description": "sha256(rawPublicKey).hex - agent deviceId this bench was paired as. Set lazily on first chat; cleared on re-pair."
   },
   {
    "fieldname": "chat_device_public_key",
    "fieldtype": "Long Text",
    "label": "Chat Device Public Key",
    "read_only": 1,
-   "description": "Base64url-encoded Ed25519 public key registered with openclaw at pair time."
+   "description": "Base64url-encoded Ed25519 public key registered with agent at pair time."
   },
   {
    "fieldname": "chat_device_private_key",
@@ -700,7 +661,7 @@
    "fieldtype": "Password",
    "label": "Chat Device Token",
    "read_only": 1,
-   "description": "Bearer token openclaw issued at pair time. Sent in auth.deviceToken at every chat WS connect."
+   "description": "Bearer token agent issued at pair time. Sent in auth.deviceToken at every chat WS connect."
   },
   {
    "fieldname": "last_sync_section",

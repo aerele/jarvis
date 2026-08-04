@@ -246,8 +246,8 @@ def _run_gateway_turn(prompt: str) -> str:
 	"""One silent throwaway agent turn on its own session_key - it never
 	touches a visible conversation. Returns the assistant text, or '' on any
 	failure (unreachable gateway, timeout, agent error, no gateway_url)."""
-	from jarvis.chat import openclaw_session_pool
-	from jarvis.chat.openclaw_client import oneshot_run_id
+	from jarvis.chat import agent_session_pool
+	from jarvis.chat.agent_client import oneshot_run_id
 	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
 	from jarvis.chat.turn_handler import _resolve_model_and_provider
 
@@ -259,17 +259,17 @@ def _run_gateway_turn(prompt: str) -> str:
 	# the resolver fall through to the site's configured model/provider.
 	model, provider = _resolve_model_and_provider(frappe._dict(model_override=None))
 
-	# Session labels must be unique per call (openclaw rejects a reused label).
+	# Session labels must be unique per call (agent rejects a reused label).
 	label = f"jarvis-polish-{frappe.generate_hash(length=10)}"
 	text = ""
 	try:
-		with openclaw_session_pool.checkout(gateway_url) as sess:
+		with agent_session_pool.checkout(gateway_url) as sess:
 			skey = sess.create_session(label=label)
 			fired_at = time.time()
 			run_ended = False
 			try:
 				# Pinning the resolved model costs this run its failover chain
-				# (#531); the prefixed run id keeps the resulting openclaw
+				# (#531); the prefixed run id keeps the resulting agent
 				# ``next=none`` distinguishable from an exhausted chain.
 				for ev in sess.stream_agent_turn(
 					skey,
@@ -288,7 +288,7 @@ def _run_gateway_turn(prompt: str) -> str:
 				#
 				# NOT a bare sessions.delete (issue #525): the turn is NOT
 				# necessarily finished here. stream_agent_turn returns on the
-				# lifecycle-end frame while openclaw is still finalising the
+				# lifecycle-end frame while agent is still finalising the
 				# session file, and raises on every error path with the run still
 				# alive server side, so deleting here raced the run that owns the
 				# session. reclaim_throwaway_session waits for the gateway to
@@ -297,7 +297,7 @@ def _run_gateway_turn(prompt: str) -> str:
 				# swallowed in there - `text` is already captured.
 				#
 				# The raise path needs more than the probe (issue #535): it can
-				# land inside the ~670ms median openclaw takes to START an
+				# land inside the ~670ms median agent takes to START an
 				# accepted run, and sessions.list reports "not started" and
 				# "finished" identically. Passing the fire time there makes the
 				# helper decline the delete. The normal path watched the run reach

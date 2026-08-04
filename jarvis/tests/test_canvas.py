@@ -1,5 +1,5 @@
 """Unit tests for jarvis.chat.canvas — the pure detection/classification/strip
-helpers that turn an agent reply referencing openclaw artifacts into render
+helpers that turn an agent reply referencing agent artifacts into render
 metadata. Network fetch + File persistence are covered by the worker path.
 """
 

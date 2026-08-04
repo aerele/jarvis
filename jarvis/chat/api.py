@@ -54,7 +54,7 @@ def _att_is_image(att: dict) -> bool:
 # Covers worst case end-to-end: pair (<=90s admin round-trip) +
 # WS connect (10s) + TURN_TIMEOUT_SECONDS (600s) = 700s. 720s gives
 # 20s headroom. Bumped from 300s in lockstep with the
-# TURN_TIMEOUT_SECONDS bump to 600s (see openclaw_client.py for the
+# TURN_TIMEOUT_SECONDS bump to 600s (see agent_client.py for the
 # Frappe-Cloud + Hetzner WAN rationale - the bench RQ envelope has
 # to be larger than the WS turn cap or the worker dies first and
 # the WS cap never gets a chance to enforce). Previously this was
@@ -103,7 +103,7 @@ _DASHBOARD_THEME_KEYS = {"jarvis", "insight", "claude", "graphite", "custom"}
 
 @frappe.whitelist()
 def list_tools() -> list[str]:
-	"""Tool names the agent can call, from the bench registry (the openclaw
+	"""Tool names the agent can call, from the bench registry (the agent
 	plugin registers one ``jarvis__<name>`` per entry). Drives the chat's
 	"Tools available" count + the ``/tool`` autocomplete so they track the
 	registry instead of a hardcoded SPA list that drifts."""
@@ -126,7 +126,7 @@ def list_conversations() -> list[dict]:
 	reuses the hidden empty row.
 	"""
 	require_jarvis_access()
-	# Chat surface loaded: warm the openclaw prefix cache in the background
+	# Chat surface loaded: warm the agent prefix cache in the background
 	# (best-effort, debounced) so the first turn of a new chat skips the cold
 	# provider prefill. Never blocks or fails this read. Since #548 this is the
 	# ONLY prewarm trigger, and it is deliberately a load-correlated one: a warm
@@ -749,7 +749,7 @@ def create_conversation() -> str:
 
 @frappe.whitelist()
 def archive_conversation(conversation: str) -> dict:
-	"""Set status to archived (owner-only). The openclaw-side session is left in place."""
+	"""Set status to archived (owner-only). The agent-side session is left in place."""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
 	doc.status = "Archived"
@@ -815,7 +815,7 @@ import uuid
 
 from frappe import _
 
-from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.policy import validate_can_send
 
 _INFLIGHT_FRESH_SECONDS = 180
@@ -825,7 +825,7 @@ def _conversation_busy(conversation: str) -> bool:
 	"""True when a fresh, actively-streaming turn is already in flight on this
 	conversation - a server-side single-flight guard so a second tab, a
 	double-click, or a retry racing a live turn can't start a concurrent turn on
-	the same openclaw session. A parked-for-recovery row does NOT count (the
+	the same agent session. A parked-for-recovery row does NOT count (the
 	composer is intentionally unlocked while recovering), and a stale streaming
 	row from a crashed worker ages out of the freshness window (stale_scan
 	finalizes it) so it never blocks sends forever."""
@@ -874,7 +874,7 @@ def send_message(
 	plan, Phase 1.3).
 
 	NOTE (2026-07 latency plan, Phase 1.1): this endpoint no longer creates
-	the openclaw session. That used to happen here synchronously — a full
+	the agent session. That used to happen here synchronously — a full
 	unpooled WS connect + sessions.create + close INSIDE the POST the
 	browser awaits. The worker now creates the session on its own pooled
 	connection (see turn_handler.handle_chat_send), so this endpoint only
@@ -963,7 +963,7 @@ def send_message(
 
 	# Single-flight guard: reject a second concurrent turn on the same
 	# conversation (extra tab / double-send / a retry racing a live turn) -
-	# they would otherwise run in parallel on the same openclaw session. Placed
+	# they would otherwise run in parallel on the same agent session. Placed
 	# after ownership so the reject is clean (no user row inserted yet).
 	#
 	# Phase-0 admission (flag ON): the busy case is no longer a reject - the
@@ -1064,7 +1064,7 @@ def send_message(
 
 	# Title is NOT taken from the raw first message anymore. The worker
 	# generates a concise, LLM-summarised title after the first substantive
-	# turn (jarvis.chat.title.maybe_autotitle) — like ChatGPT/openclaw — and
+	# turn (jarvis.chat.title.maybe_autotitle) — like ChatGPT/agent — and
 	# pushes it via a "conversation:renamed" event. We leave it as "New chat"
 	# here so the sidebar never flashes the raw prompt (and greeting-only
 	# openers stay unnamed until a real prompt arrives).
@@ -1434,7 +1434,7 @@ def get_chat_ui_settings() -> dict:
 		"providers": providers,
 		"multi_provider": len(providers) > 1,
 		# Effort levels. Deliberately mirrors ``_ALLOWED_THINKING`` minus the
-		# empty "auto" entry, which the UI renders separately. openclaw itself
+		# empty "auto" entry, which the UI renders separately. agent itself
 		# accepts more levels (off/minimal/xhigh/adaptive/max), but
 		# ``Jarvis Conversation.thinking_override`` is a Select limited to
 		# low/medium/high - offering a level the Select rejects would fail the
@@ -1601,7 +1601,7 @@ def set_auto_apply(conversation: str, value: str | int | bool) -> dict:
 
 def _est_tokens(text: str | None) -> int:
 	"""Rough token estimate for ``text`` (~4 chars/token, the standard English
-	approximation). We can't do better: openclaw's gateway stream doesn't emit
+	approximation). We can't do better: agent's gateway stream doesn't emit
 	real per-turn token counts, so everything here is clearly labelled an
 	estimate in the UI."""
 	if not text:
@@ -1610,7 +1610,7 @@ def _est_tokens(text: str | None) -> int:
 
 
 def _tool_label(name: str | None) -> str:
-	"""Strip the ``jarvis__`` prefix the openclaw plugin registers tools under,
+	"""Strip the ``jarvis__`` prefix the agent plugin registers tools under,
 	so the panes show the same bare name the thread does (ChatView.toolLabel)."""
 	return (name or "tool").replace("jarvis__", "", 1)
 
@@ -1768,7 +1768,7 @@ def get_usage(conversation: str | None = None) -> dict:
 	all-time — plus the monthly budget so the UI can draw a meter.
 
 	ESTIMATE ONLY (see _est_tokens): summed from stored message text
-	(content + tool args/results), not real API token counts, which openclaw
+	(content + tool args/results), not real API token counts, which agent
 	doesn't expose. Owner-scoped: only the caller's own conversations.
 	"""
 	require_jarvis_access()
@@ -1876,7 +1876,7 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 
 @frappe.whitelist()
 def warm_session() -> dict:
-	"""Fire-and-forget: warm this tenant's openclaw prefix cache so the next
+	"""Fire-and-forget: warm this tenant's agent prefix cache so the next
 	new-chat first turn skips the cold prefill. Best-effort; always ok.
 	Unconfigured benches no-op. Runs in a background RQ job so the gunicorn web
 	worker is not blocked.
@@ -1897,7 +1897,7 @@ def warm_session() -> dict:
 def set_conversation_thinking(conversation: str, thinking: str | None = None) -> dict:
 	"""Set or clear the per-conversation thinking effort (low/medium/high).
 
-	Empty / None clears it, so turns fall back to openclaw's default. The
+	Empty / None clears it, so turns fall back to agent's default. The
 	value is plumbed as an inline /think directive in the user message, so it
 	never affects the cacheable system prefix. Returns the effective level
 	(empty resolves to "medium" for display).
@@ -2029,7 +2029,7 @@ def retry_message(message: str) -> dict:
 
 @frappe.whitelist()
 def stop_run(conversation: str, run_id: str | None = None) -> dict:
-	"""Actually abort a running turn (openclaw chat.abort), not just hide it in
+	"""Actually abort a running turn (agent chat.abort), not just hide it in
 	the UI. The gateway authorizes the abort from this web process (shared device
 	id + operator scope) even though the RQ worker started the run. Best-effort:
 	on any failure the Stop button's honest "still finishing in the background"
@@ -2038,7 +2038,7 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	conv = _get_owned_conversation(conversation)
 	# Phase-0 admission (flag ON): record cancel intent on this conversation's
 	# dispatching Turn row (D2's dispatching->cancel-intent transition). This is
-	# NOT terminal - the legacy worker observes openclaw's aborted-terminal and
+	# NOT terminal - the legacy worker observes agent's aborted-terminal and
 	# settles the Turn (cancelled) + promotes the next queued turn there. Marking
 	# intent here just makes support/telemetry honest. Best-effort + flag-gated.
 	admission.mark_cancel_requested(conversation)
@@ -2070,10 +2070,10 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat import agent_session_pool
 
 	try:
-		with openclaw_session_pool.checkout(gateway_url) as sess:
+		with agent_session_pool.checkout(gateway_url) as sess:
 			sess.chat_abort(conv.session_key, run_id or None)
 	except Exception as e:
 		frappe.log_error(title="jarvis stop_run", message=str(e))
@@ -2098,7 +2098,7 @@ def _turn_queue() -> str:
 	it, else ``long``.
 
 	A turn occupies its worker for the turn's whole wall-clock (the worker
-	holds the openclaw event relay), so on ``long`` a batch of File-Box
+	holds the agent event relay), so on ``long`` a batch of File-Box
 	documents serializes behind ``background_workers`` AND starves every
 	other long job behind minutes-long turns. A bench that declares the
 	queue in ``common_site_config.workers`` (Frappe Cloud: bench worker
@@ -2536,8 +2536,8 @@ def enqueue_continuation(conversation: str, receipt: str, *, failed: bool = Fals
 	return _enqueue_turn(conversation, scaffold.format(receipt=safe), hidden=True, exempt_overload=True)
 
 
-def _ensure_session_key(user: str, sess: OpenclawSession | None = None) -> str:
-	"""Create an openclaw session for `user`, persist the Chat Session row,
+def _ensure_session_key(user: str, sess: AgentSession | None = None) -> str:
+	"""Create an agent session for `user`, persist the Chat Session row,
 	and return the session_key. Caller is responsible for storing it on the
 	parent Conversation row.
 
@@ -2549,7 +2549,7 @@ def _ensure_session_key(user: str, sess: OpenclawSession | None = None) -> str:
 	"""
 	if sess is not None:
 		# Reuse the caller's already-connected (pooled) session — no extra
-		# connect/handshake. Label includes a timestamp because openclaw
+		# connect/handshake. Label includes a timestamp because agent
 		# deduplicates sessions by label and rejects collisions.
 		session_key = sess.create_session(label=f"jarvis-chat-{user}-{int(time.time() * 1000)}")
 	else:
@@ -2559,9 +2559,9 @@ def _ensure_session_key(user: str, sess: OpenclawSession | None = None) -> str:
 		)
 		gateway_token = settings_check.get_password("agent_token")
 		if not gateway_url or not gateway_token:
-			frappe.throw(_("openclaw is not configured"))
+			frappe.throw(_("agent is not configured"))
 
-		one_shot = OpenclawSession.connect(gateway_url)
+		one_shot = AgentSession.connect(gateway_url)
 		try:
 			session_key = one_shot.create_session(label=f"jarvis-chat-{user}-{int(time.time() * 1000)}")
 		finally:

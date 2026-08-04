@@ -4,7 +4,7 @@ Transport policy: the suite forbids REAL sockets (``jarvis/tests/__init__.py``
 rebinds ``websocket.create_connection`` to protect a live tenant), and its
 stated remedy is "mock the transport your code uses". So these tests drive the
 mux through an in-process transport double at the exact ``_recv`` / ``_send``
-seam ``OpenclawSession`` exposes (the same seam ``test_relay_consumer.py``
+seam ``AgentSession`` exposes (the same seam ``test_relay_consumer.py``
 stubs), REPLAYING the WP-2 harness transcripts (``jarvis.tests.harness.
 transcripts``) frame-for-frame. Every millisecond of reader-loop demux, lane
 dispatch, integrity-class fault handling, quarantine, and the circuit breaker
@@ -35,9 +35,9 @@ from unittest.mock import patch as mock_patch
 
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.openclaw_client import FAILED_FINAL_ERROR
+from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests.harness import transcripts as _transcripts
 
 # Player cadence (fast; deterministic). Pauses in transcripts are capped so a
@@ -122,7 +122,7 @@ def _chat_final_frame(run_id, session_key, text="hi"):
 
 def _chat_failed_final_frame(run_id, session_key, stop_reason=None):
 	"""The LIVE shape of a chat final for a turn that produced nothing (#543):
-	no ``message`` key at all, and ``stopReason`` (when openclaw resolved one) at
+	no ``message`` key at all, and ``stopReason`` (when the runtime resolved one) at
 	the TOP LEVEL rather than inside the message."""
 	payload = {"runId": run_id, "sessionKey": session_key, "state": "final"}
 	if stop_reason:
@@ -135,7 +135,7 @@ def _term_text(name: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# In-process transport double (mocks OpenclawSession at the _recv/_send seam)
+# In-process transport double (mocks AgentSession at the _recv/_send seam)
 # --------------------------------------------------------------------------- #
 
 
@@ -187,7 +187,7 @@ def _terminal_frame(run_id, session_key, terminal):
 	kind = terminal.get("kind", "final")
 	payload = {"runId": run_id, "sessionKey": session_key}
 	if kind == "final":
-		# Live wire shape (#543): openclaw OMITS ``message`` entirely when the turn
+		# Live wire shape (#543): the runtime OMITS ``message`` entirely when the turn
 		# produced no assistant text, rather than sending an empty one.
 		text = terminal.get("text")
 		payload.update({"state": "final"})
@@ -221,7 +221,7 @@ class _FakeWs:
 
 
 class _DoubleGateway:
-	"""Stands in for a connected ``OpenclawSession``: exposes ``_recv`` (the
+	"""Stands in for a connected ``AgentSession``: exposes ``_recv`` (the
 	sole read seam the mux owns), ``_lock`` (the REAL serialized-send lock),
 	``_ws.send`` (parses the request and plays transcript frames back), and
 	``close``. Frames flow through one thread-safe recv queue — so the mux's
@@ -323,7 +323,7 @@ class _DoubleGateway:
 		if ack_behavior == "drop":
 			# WS-drop MID-ACK: the socket dies with the ack outstanding. The
 			# reader's next _recv raises → Closing fails the pending future.
-			self._push(OpenclawUnreachableError("fake ack-drop", code=None))
+			self._push(AgentUnreachableError("fake ack-drop", code=None))
 			return
 		if ack_behavior == "timeout":
 			# Hold the ack past the caller's window (delivered late; the caller's
@@ -361,7 +361,7 @@ class _DoubleGateway:
 			if payload is not None:
 				self._push({"type": "event", "event": "agent", "payload": payload})
 			if drop_after is not None and idx >= drop_after:
-				self._push(OpenclawUnreachableError("fake mid-stream ws drop", code=None))
+				self._push(AgentUnreachableError("fake mid-stream ws drop", code=None))
 				return
 		self._push(
 			_terminal_frame(
@@ -517,7 +517,7 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Failed-final classification (#543): the LIVE openclaw terminal shapes
+# Failed-final classification (#543): the LIVE runtime terminal shapes
 # --------------------------------------------------------------------------- #
 
 
@@ -552,7 +552,7 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		self.assertEqual(term[1]["error"], FAILED_FINAL_ERROR)
 
 	def test_empty_final_after_tools_is_a_terminal_error(self):
-		# Repro 2: the tools ran, the model returned nothing, openclaw surfaced an
+		# Repro 2: the tools ran, the model returned nothing, the runtime surfaced an
 		# incomplete-turn error, and the final still arrives with no message. Same
 		# terminal as the hard failure above: the two repros are ONE root cause.
 		term = self._terminal_for(
@@ -595,7 +595,7 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		self.assertIn("quota", term[1]["error"])
 
 	def test_lifecycle_error_never_errors_a_turn_that_still_answered(self):
-		# openclaw emits a lifecycle error per FAILED candidate, then fails over. A
+		# The runtime emits a lifecycle error per FAILED candidate, then fails over. A
 		# recovered turn must keep its answer: the remembered detail is only ever
 		# consulted for a final that produced nothing.
 		term = self._terminal_for(
@@ -768,7 +768,7 @@ class TestRelayMuxReaderLoop(FrappeTestCase):
 		rec = _Recorder()
 		fut = mux.send_chat("sess-drop", "hi", "run-drop", rec.handler(), timeout_s=30.0)
 		t0 = time.monotonic()
-		with self.assertRaises(OpenclawUnreachableError) as cm:
+		with self.assertRaises(AgentUnreachableError) as cm:
 			fut.result(30.0)
 		self.assertLess(time.monotonic() - t0, 5.0, "future dead-waited instead of failing on Closing")
 		self.assertEqual(cm.exception.code, "ack-timeout")
@@ -802,7 +802,7 @@ class TestRelayMuxReaderLoop(FrappeTestCase):
 		rec = _Recorder()
 		fut = mux.send_chat("sess-to", "hi", "run-to", rec.handler(), timeout_s=0.4)
 		t0 = time.monotonic()
-		with self.assertRaises(OpenclawUnreachableError) as cm:
+		with self.assertRaises(AgentUnreachableError) as cm:
 			fut.result()  # the future's own 0.4s bound
 		self.assertEqual(cm.exception.code, "ack-timeout")
 		self.assertLess(time.monotonic() - t0, 2.0)
@@ -837,9 +837,9 @@ class TestRelayMuxReaderLoop(FrappeTestCase):
 
 class TestRelayMuxSessionModelParams(FrappeTestCase):
 	"""The pump's transport must put the SAME sessions.patch payload on the wire as the
-	legacy ``OpenclawSession`` one (test_relay_consumer.TestSetSessionModel). If the two
+	legacy ``AgentSession`` one (test_relay_consumer.TestSetSessionModel). If the two
 	drift on the null-model RESET, the pump silently keeps a stale pin -- and an
-	overridden session is the shape that zeroes openclaw's fallback chain. See
+	overridden session is the shape that zeroes agent's fallback chain. See
 	``turn_handler._session_model_for``.
 
 	Stubs ``issue_rpc``, so like its sibling it asserts INTENT only and cannot catch a
