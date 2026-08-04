@@ -388,11 +388,19 @@ def _chunk_files(files: list[dict]) -> list[list[dict]]:
 # --------------------------------------------------------------------------- #
 # triggers
 # --------------------------------------------------------------------------- #
-def enqueue_sync(full: bool = False) -> None:
+def enqueue_sync(full: bool = False, after_commit: bool = False) -> None:
 	"""Queue the deduped mirror sync (short queue, 120s deadline). Suppressed
 	under tests unless ``frappe.flags.jarvis_test_wiki_mirror_enqueue`` is set
 	— fixture inserts must not spray RQ jobs. Enqueue failures (Redis down)
-	are swallowed: this runs inside user save paths via doc_events."""
+	are swallowed: this runs inside user save paths via doc_events.
+
+	``after_commit`` is what the doc_events trigger needs and what the manual
+	endpoint must not use. The worker opens its own DB connection, so a job
+	queued mid-save can read the PRE-save row, find nothing to push or prune,
+	and report success — and with no periodic sweep, a prune lost that way is
+	lost for good. Deferring to the save's commit closes that window. The
+	manual "Sync now" endpoint writes nothing, so its request may never commit
+	and deferring there would drop the job entirely."""
 	if frappe.flags.in_test and not frappe.flags.jarvis_test_wiki_mirror_enqueue:
 		return
 	try:
@@ -402,6 +410,7 @@ def enqueue_sync(full: bool = False) -> None:
 			timeout=JOB_TIMEOUT_S,
 			job_id=JOB_ID_FULL if full else JOB_ID,
 			deduplicate=True,
+			enqueue_after_commit=bool(after_commit),
 			full=bool(full),
 		)
 	except Exception:
@@ -420,7 +429,7 @@ def on_wiki_page_change(doc, method: str | None = None) -> None:
 		prune = _needs_mirror_prune(doc)
 		if not prune and not _is_org_scope(doc.get("scope")):
 			return
-		enqueue_sync(full=(prune or method == "on_trash"))
+		enqueue_sync(full=(prune or method == "on_trash"), after_commit=True)
 	except Exception:
 		frappe.log_error(
 			title="wiki mirror: doc-event trigger failed",

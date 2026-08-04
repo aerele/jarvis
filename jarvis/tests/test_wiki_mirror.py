@@ -361,12 +361,36 @@ class TestSync(WikiMirrorTestCase):
 			doc.save(ignore_permissions=True)
 		frappe.db.commit()
 		self.assertFalse(frappe.db.get_value(WIKI, doc.name, "mirror_hash"))
-		enq.assert_called_once_with(full=True)
+		enq.assert_called_once_with(full=True, after_commit=True)
 
 		with self._mock_push() as push:
 			wiki_mirror.sync(full=True)
 		known = push.call_args_list[-1].kwargs["known_paths"]
 		self.assertNotIn(wire_path, known)
+
+	def test_demotion_that_also_moves_page_type_prunes_the_old_path(self):
+		doc = self._page("acme", page_type="Customer")
+		old_path = f"customers/{doc.name}.md"
+		with self._mock_push() as push:
+			wiki_mirror.sync()
+		self.assertIn(old_path, self._pushed_paths(push))
+
+		# page_path() reads the CURRENT page_type, so a demotion that also moves
+		# the page to another type dir derives a delete path that no file sits
+		# at. The full sync the prune asks for is what actually removes it.
+		doc.reload()
+		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
+			doc.scope = "User"
+			doc.page_type = "Supplier"
+			doc.save(ignore_permissions=True)
+		frappe.db.commit()
+		enq.assert_called_once_with(full=True, after_commit=True)
+
+		with self._mock_push() as push2:
+			wiki_mirror.sync(full=True)
+		known = push2.call_args_list[-1].kwargs["known_paths"]
+		self.assertNotIn(old_path, known)
+		self.assertNotIn(f"suppliers/{doc.name}.md", known)
 
 	def test_repromoted_page_is_pushed_again(self):
 		doc = self._page("acme")
@@ -445,7 +469,7 @@ class TestTriggers(WikiMirrorTestCase):
 			wiki_mirror.on_wiki_page_change(frappe._dict(scope=None), "after_insert")
 			wiki_mirror.on_wiki_page_change(frappe._dict(scope=""), "on_update")
 		self.assertEqual(enq.call_count, 3)
-		enq.assert_called_with(full=False)
+		enq.assert_called_with(full=False, after_commit=True)
 
 		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
 			wiki_mirror.on_wiki_page_change(frappe._dict(scope="User"), "on_update")
@@ -455,7 +479,7 @@ class TestTriggers(WikiMirrorTestCase):
 	def test_doc_event_trash_requests_full_sync(self):
 		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
 			wiki_mirror.on_wiki_page_change(frappe._dict(scope="Org"), "on_trash")
-		enq.assert_called_once_with(full=True)
+		enq.assert_called_once_with(full=True, after_commit=True)
 
 	def test_doc_event_prunes_a_mirrored_non_org_page(self):
 		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
@@ -470,7 +494,7 @@ class TestTriggers(WikiMirrorTestCase):
 		demoted.get_doc_before_save = lambda: frappe._dict(scope="Org")
 		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
 			wiki_mirror.on_wiki_page_change(demoted, "on_update")
-		enq.assert_called_once_with(full=True)
+		enq.assert_called_once_with(full=True, after_commit=True)
 
 		# never mirrored: no hash, and it was already non-Org before the save
 		untouched = frappe._dict(scope="User", mirror_hash="")
@@ -495,17 +519,22 @@ class TestTriggers(WikiMirrorTestCase):
 			frappe.flags.jarvis_test_wiki_mirror_enqueue = True
 			try:
 				with mock.patch("frappe.enqueue") as enq2:
-					wiki_mirror.enqueue_sync(full=True)
+					wiki_mirror.enqueue_sync(full=True, after_commit=True)
 				enq2.assert_called_once()
 				kwargs = enq2.call_args.kwargs
 				self.assertEqual(kwargs["queue"], "short")
 				self.assertEqual(kwargs["job_id"], wiki_mirror.JOB_ID_FULL)
 				self.assertTrue(kwargs["deduplicate"])
 				self.assertTrue(kwargs["full"])
+				# a job queued mid-save would read the pre-save row
+				self.assertTrue(kwargs["enqueue_after_commit"])
 
 				with mock.patch("frappe.enqueue") as enq3:
 					wiki_mirror.enqueue_sync()
 				self.assertEqual(enq3.call_args.kwargs["job_id"], wiki_mirror.JOB_ID)
+				# the manual endpoint writes nothing, so its request may never
+				# commit; deferring there would drop the job
+				self.assertFalse(enq3.call_args.kwargs["enqueue_after_commit"])
 			finally:
 				frappe.flags.jarvis_test_wiki_mirror_enqueue = False
 		finally:
