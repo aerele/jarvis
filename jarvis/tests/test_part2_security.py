@@ -1548,3 +1548,96 @@ class TestSkillPromotionRound4(Part2Base):
 		self.assertEqual(
 			len(frappe.get_all(SKILL, filters={"skill_name": f"{PFX}-b4race-x", "scope": "Org"})), 1
 		)
+
+
+class TestRoleScopedSkillInvocation(Part2Base):
+	"""Issues #477 + #478 — the two halves of role-scoped /slug invocation.
+
+	#478: a Role promotion wrote ``target_role`` only, so
+	``_role_scoped_invocable_names`` (which matches on the ``allowed_roles`` CHILD
+	rows) never saw it and no role-holder's ``/slug`` ever fired.
+
+	#477: every invoked skill was named as an installed ``custom-<slug>``
+	directory, including the role-restricted ones the push DELIBERATELY drops —
+	so the trusted [Context:] line asserted a container dir that does not exist.
+
+	They ship together: fixing #478 alone routes every Role-promoted skill into
+	the phantom-directory clause, which is why #477's split lands with it.
+	"""
+
+	ROLE_HOLDER = "p2-roleholder@example.com"
+	AUD_ROLE = "Sales User"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		# A role-holder who does NOT own the source skill — the point of the whole
+		# tier. (Owners already match via the owner branch of invoked_skill_clause,
+		# so testing with the owner would pass even with the bug present.)
+		_ensure_user(cls.ROLE_HOLDER, ["Jarvis User", cls.AUD_ROLE])
+
+	def _promote_to_role(self, slug: str) -> str:
+		"""Requester USER_A's private skill -> reviewer-approved Role copy. Returns
+		the shared copy's docname."""
+		from jarvis.chat import custom_skills_api
+
+		src = _mk_skill(USER_A, slug, scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(src.name, "Role", target_role=self.AUD_ROLE)
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		return out["materialized"]
+
+	# ── #478: the promotion must write allowed_roles, not just target_role ──────
+	def test_role_promotion_writes_allowed_roles_alongside_target_role(self):
+		shared = self._promote_to_role(f"{PFX}-roleaud")
+		self.assertEqual(frappe.db.get_value(SKILL, shared, "scope"), "Role")
+		self.assertEqual(frappe.db.get_value(SKILL, shared, "target_role"), self.AUD_ROLE)
+		self.assertEqual(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": shared, "parenttype": SKILL},
+				pluck="role",
+			),
+			[self.AUD_ROLE],
+		)
+
+	def test_role_promoted_skill_is_slug_invocable_by_a_role_holder(self):
+		from jarvis.chat.custom_skills import _role_scoped_invocable_names, invoked_skill_clause
+
+		self._promote_to_role(f"{PFX}-roleinv")
+		with _as(self.ROLE_HOLDER):
+			self.assertIn(f"{PFX}-roleinv", _role_scoped_invocable_names(self.ROLE_HOLDER))
+			clause = invoked_skill_clause(f"/{PFX}-roleinv close the month")
+		self.assertIn(prefixed_slug(f"{PFX}-roleinv"), clause)
+
+	def test_role_promoted_skill_stays_invisible_to_a_non_role_holder(self):
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		self._promote_to_role(f"{PFX}-rolepriv")
+		with _as(USER_B):  # Jarvis User only, no Sales User
+			self.assertEqual(invoked_skill_clause(f"/{PFX}-rolepriv go"), "")
+
+	def test_role_to_org_widen_clears_allowed_roles_and_stays_pushable(self):
+		# The Role copy's allowed_roles row must NOT survive a widen to Org: an Org
+		# row carrying allowed_roles is "role-restricted" and _pushable_org_rows drops
+		# it, which would silently un-push the skill the reviewer just widened.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		shared = self._promote_to_role(f"{PFX}-widen")
+		src = frappe.db.get_value(SKILL, shared, "source_skill")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(src, "Org")
+		with _as(REVIEWER):
+			self.assertTrue(custom_skills_api.decide_skill_promotion(req["request"], 1)["ok"])
+		self.assertEqual(frappe.db.get_value(SKILL, shared, "scope"), "Org")
+		self.assertEqual(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": shared, "parenttype": SKILL},
+				pluck="role",
+			),
+			[],
+		)
+		self.assertIn(prefixed_slug(f"{PFX}-widen"), {p["slug"] for p in custom_skills.build_push_payload()})

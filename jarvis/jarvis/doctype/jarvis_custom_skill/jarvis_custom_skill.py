@@ -214,8 +214,12 @@ class JarvisCustomSkill(Document):
 			self.target_role = (self.target_role or "").strip() or None
 			if not self.target_role:
 				frappe.throw(_("Role-scope skills need a Target Role."))
-			# allowed_roles stays meaningful for compiler-managed rows only; an
-			# authored Role skill's audience is target_role.
+			# ``target_role`` is the audience of record. ``allowed_roles`` MIRRORS it on
+			# a promoted Role row (issue #478): the invocation path
+			# (``custom_skills._role_scoped_invocable_names``) matches on the child rows,
+			# not on target_role, so a Role skill with an empty allowed_roles could never
+			# be triggered by /slug. Compiler-managed rows still populate allowed_roles
+			# directly. Neither field is widened here; both name the same single role.
 		elif self.scope == "User":
 			# A private skill has no role audience — clear both so a stray
 			# allowed_roles/target_role can never leak it to role-holders (TASK 13
