@@ -508,6 +508,10 @@ class TestLearnedMissAudit(SkillToolsTestCase):
 		halves can fail independently on a real bench (redis down, Error Log
 		table full), so break each one separately."""
 		slug = self._slug("never-raises")
+		# A separate slug for the caller-level check below: the broken-log call
+		# above still WROTE the throttle key (the cache succeeded, the log did
+		# not), so reusing that slug would take the early return and prove nothing.
+		caller_slug = self._slug("broken-log")
 
 		with patch.object(frappe, "cache", side_effect=RuntimeError("redis is down")):
 			_audit_learned_miss(slug, OWNER, "unknown")
@@ -519,8 +523,7 @@ class TestLearnedMissAudit(SkillToolsTestCase):
 		with patch.object(frappe, "log_error", side_effect=RuntimeError("error log is full")):
 			with _as(OWNER):
 				with self.assertRaises(InvalidArgumentError):
-					get_skill(f"{_LEARNED_PREFIX}{PFX}-broken-log")
-		self._forget(f"{_LEARNED_PREFIX}{PFX}-broken-log")
+					get_skill(caller_slug)
 
 	def test_get_skill_audits_a_learned_miss_and_only_a_learned_miss(self):
 		"""Wire check: the audit fires from the real tool path, on the branch that
