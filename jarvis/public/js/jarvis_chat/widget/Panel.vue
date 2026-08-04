@@ -1164,7 +1164,8 @@ onMounted(() => {
 	isReadyForChat()
 		.then((r) => {
 			readiness.value = classifyReadiness(r);
-			readinessNotice.value = readiness.value === "degraded" ? degradedMessage(r) : "";
+			readinessNotice.value =
+				readiness.value === "degraded" ? degradedMessage(r, brandName) : "";
 		})
 		.catch(() => {
 			// Fail OPEN, same as classifyReadiness(null): a flaky/unreachable check

@@ -1,0 +1,32 @@
+{
+  "contract_version": 1,
+  "name": "billing_snapshot",
+  "description": "Plan 01 billing-object contract, shared byte-for-byte by jarvis and jarvis-admin-v2. request_billing is the typed object the bench sends admin (start_signup -> admin_client.signup / resume_pending_signup / update_pending_billing). normalized_summary is the allowlisted snapshot admin returns (get_signup_payment_state.data.billing and update_pending_billing.data.billing) and keys are IDENTICAL to the request (admin stores each key on a Jarvis Customer field and reads it back out under the same key). ack is the C01-5 version-skew acknowledgement echoed only after a durable write.",
+  "request_billing": {
+    "contact_number": "+91 98765 43210",
+    "address_line1": "12 MG Road",
+    "address_line2": "Suite 4",
+    "city": "Chennai",
+    "state": "Tamil Nadu",
+    "pincode": "600001",
+    "country": "India",
+    "gstin": "33ABCDE1234F1Z7",
+    "source_company": "Aerele",
+    "source_address": "Aerele-Billing"
+  },
+  "normalized_summary": {
+    "contact_number": "+91 98765 43210",
+    "address_line1": "12 MG Road",
+    "address_line2": "Suite 4",
+    "city": "Chennai",
+    "state": "Tamil Nadu",
+    "pincode": "600001",
+    "country": "India",
+    "gstin": "33ABCDE1234F1Z7",
+    "source_company": "Aerele",
+    "source_address": "Aerele-Billing"
+  },
+  "ack": {
+    "billing_saved": true
+  }
+}

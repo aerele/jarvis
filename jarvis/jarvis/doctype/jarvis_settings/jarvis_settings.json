@@ -49,6 +49,7 @@
   "voice_features_enabled",
   "wiki_enabled",
   "persona_enabled",
+  "home_intro_enabled",
   "wiki_nudge_cooldown_hours",
   "voice_notes_last_processed_at",
   "voice_notes_last_process_status",
@@ -81,6 +82,8 @@
   "agent_token",
   "agent_token_issued_at",
   "agent_token_max_age_days",
+  "tenant_authority_generation",
+  "tenant_authority_handle",
   "chat_device_id",
   "chat_device_public_key",
   "chat_device_private_key",
@@ -90,6 +93,8 @@
   "last_sync_status",
   "llm_pool_synced_at",
   "llm_direct_synced_at",
+  "chat_was_ready_at",
+  "chat_ready_authority",
   "installed_apps_synced",
   "last_subscription_status",
   "last_sync_warnings",
@@ -376,6 +381,13 @@
    "description": "Jarvis/Jara voice picker in the composer. An explicit 0 hides the pill and stops the persona clause fleet-wide. Readers treat an unset value as ON."
   },
   {
+   "fieldname": "home_intro_enabled",
+   "fieldtype": "Check",
+   "label": "Enable First-Chat Welcome",
+   "default": "1",
+   "description": "The static, assistant-styled first-chat introduction on the empty chat home. An explicit 0 suppresses it fleet-wide (the compact hero shows instead); it never re-lectures a user who has already seen it. Readers treat an unset value as ON (Single defaults are not backfilled on migrate)."
+  },
+  {
    "fieldname": "wiki_nudge_cooldown_hours",
    "fieldtype": "Int",
    "label": "Wiki Nudge Cooldown (hours)",
@@ -605,6 +617,23 @@
    "description": "Reject the bearer token if issued_at + this many days < now. Default 90 days. Set to 0 to disable expiry (not recommended). Operator rotates via the rotate_agent_token endpoint."
   },
   {
+   "fieldname": "tenant_authority_generation",
+   "fieldtype": "Int",
+   "label": "Tenant Authority Generation",
+   "default": "0",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "The tenant-authority generation of the connection last accepted from admin (review plan 04 P0-5). Admin bumps its authority generation by 1 on every authority write; this bench refuses to overwrite the connection with a payload carrying a LOWER generation, so a slow poll cannot regress a customer onto their old container after a move/repair. 0 == no authority-fenced connection accepted yet (pre-backfill / fresh)."
+  },
+  {
+   "fieldname": "tenant_authority_handle",
+   "fieldtype": "Data",
+   "label": "Tenant Authority Handle",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Opaque, stable identifier (admin's sha256 of the serving container's docname) of the connection last accepted at tenant_authority_generation. Equal handle iff same container; never the internal TEN-* id. A payload at the SAME generation carrying a DIFFERENT handle is an admin invariant breach - the bench holds the current connection rather than overwrite onto an unverifiable container."
+  },
+  {
    "fieldname": "chat_device_id",
    "fieldtype": "Data",
    "label": "Chat Device ID",
@@ -664,6 +693,20 @@
    "fieldname": "llm_direct_synced_at",
    "fieldtype": "Datetime",
    "label": "LLM Direct Synced At",
+   "read_only": 1
+  },
+  {
+   "description": "Set the first time admin confirmed this workspace chat-Ready (refreshed at most daily). Marks the workspace as ESTABLISHED: an unreachable control plane leaves its chat open, while a workspace that has never been confirmed fails closed with a retryable verdict instead of being told it is ready - see _admin_chat_gate in jarvis/account.py.",
+   "fieldname": "chat_was_ready_at",
+   "fieldtype": "Datetime",
+   "label": "Chat Was Ready At",
+   "read_only": 1
+  },
+  {
+   "description": "Authority the established chat-Ready claim is bound to: a digest of (admin principal, container URL, tenant authority generation) captured the last time admin confirmed this workspace Ready. The claim only survives a control-plane outage while this still matches the current authority - a workspace reset, a reconnect to a different principal/container, or an authority-generation change moves it and ends the claim mechanically, without depending on every writer remembering to clear the marker. See account._authority_anchor.",
+   "fieldname": "chat_ready_authority",
+   "fieldtype": "Small Text",
+   "label": "Chat Ready Authority",
    "read_only": 1
   },
   {

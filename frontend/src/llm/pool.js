@@ -133,17 +133,18 @@ export function validatePool(models, preset) {
 	if (!Array.isArray(models) || models.length === 0)
 		return { ok: false, error: "Add at least one model." };
 	for (const m of models) {
-		// Chat-subscription model: needs a model id + at least one connected account
-		// (an account with a non-empty oauth_blob). No provider / api_key required.
+		// Chat-subscription model: needs a model id + at least one connected account.
+		// No provider / api_key required.
 		if (m.subscription) {
 			if (!(m.model || "").trim())
 				return { ok: false, error: "Every model needs a model id." };
 			const accounts = Array.isArray(m.subscription.accounts) ? m.subscription.accounts : [];
-			// Connected = a freshly-captured blob this session OR a previously-connected
-			// account (has an account_ref; its stored blob is merged back on save, so the
-			// user need not re-connect to edit an existing pool).
+			// Connected = a freshly-captured account this session (has a capture_id) OR a
+			// previously-connected account (has an account_ref; its stored blob is merged
+			// back on save). The raw oauth_blob is NEVER a wire field anymore (P0-04), so
+			// it is not consulted here - a stale bundle sending one cannot pass this gate.
 			const connected = accounts.some(
-				(a) => a && ((a.oauth_blob || "").trim() || (a.account_ref || "").trim())
+				(a) => a && ((a.capture_id || "").trim() || (a.account_ref || "").trim())
 			);
 			if (!connected)
 				return {
@@ -288,13 +289,18 @@ export function isContainerOnlyBaseUrl(rawUrl) {
 	return false;
 }
 
-// Row-level form of the above. ollama and vllm keep their carve-out even with no
-// base URL typed yet: they are local by definition and the field is optional for
-// ollama.
+// Row-level form of the above. A local provider (ollama/vllm) is container-only
+// ONLY when its base URL is empty or itself container-only (F4/F7): a local
+// provider id pointed at a remotely-reachable URL (e.g. Ollama with
+// https://api.openai.com/v1) is NOT exempt from the probe - the short-circuit on
+// the provider id alone let a remote endpoint reach desired state untested.
 export function isContainerOnlyRow(row) {
 	if (!row) return false;
-	if (LOCAL_PROVIDER_IDS.has(providerId(row.provider))) return true;
-	return isContainerOnlyBaseUrl(row.baseUrl || row.base_url || "");
+	const url = row.baseUrl || row.base_url || "";
+	if (LOCAL_PROVIDER_IDS.has(providerId(row.provider))) {
+		return !url || isContainerOnlyBaseUrl(url);
+	}
+	return isContainerOnlyBaseUrl(url);
 }
 // The api_key value to persist for one API-key row. A real typed key always
 // wins; an unchanged has_key row sends "" (the merge-on-save convention - see

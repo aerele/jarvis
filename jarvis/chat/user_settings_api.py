@@ -28,6 +28,15 @@ from jarvis.permissions import require_jarvis_access, require_jarvis_admin
 # below; never rely on the declared parameter types for runtime safety.
 USER_SETTINGS = "Jarvis User Settings"
 
+# Version of the chat-home introduction the SPA currently renders (the static,
+# assistant-styled welcome bubble - presentation only, never a Jarvis Chat
+# Message row). The server owns this number, not the client: the boot payload
+# publishes it (get_chat_ui_settings) and mark_home_intro_seen clamps to it, so
+# a client can neither invent a version nor mute a future one. Bump it ONLY
+# when the introduction's content materially changes and every user should see
+# it once more.
+HOME_INTRO_VERSION = 1
+
 
 def _s(x) -> str:
 	"""Coerce a whitelisted string arg to trimmed text. The runtime type gate is
@@ -163,6 +172,119 @@ def update_my_settings(
 	# caller's own row), and only permlevel-0 pref fields are touched here.
 	doc.save(ignore_permissions=True)
 	return {"ok": True, "data": _settings_payload(doc)}
+
+
+@frappe.whitelist()
+def mark_home_intro_seen(version: int = 0) -> dict:
+	"""Record that the caller has been shown the chat-home introduction.
+
+	Fired best-effort by the SPA when the welcome bubble actually renders. It
+	must never block chat, so the client ignores failures - the only cost of a
+	lost ack is the introduction appearing again on the next empty chat home.
+
+	Idempotent and monotonic, and enforced by the DB rather than by a read
+	followed by a write: the whole update is ONE conditional UPDATE whose
+	``home_intro_seen_version < %(v)s`` predicate is the monotonicity guard, so
+	two tabs racing the ack (or a stale tab replaying an older version) cannot
+	interleave into a lowered value. ``version`` is clamped to
+	``HOME_INTRO_VERSION`` first, so a client can neither invent a version nor
+	mute a future introduction by acking one that does not exist yet.
+
+	``get_or_create_user_settings`` is called ONLY to guarantee the row exists -
+	Jarvis User's permlevel-0 grant is ``if_owner`` with NO create, so a user
+	meeting the introduction before they have a row must not 403.
+
+	Deliberately NOT a ``doc.save()``, and deliberately NOT bumping ``modified``.
+	This row is written concurrently by several server paths that use raw,
+	``update_modified=False`` writes on single fields (``admin_set_user_limit``
+	on ``monthly_token_limit``, ``usage``'s atomic counter SQL,
+	``greeting``'s cadence counter). A full-doc save writes back EVERY field
+	from a snapshot taken before those writes, and because they leave
+	``modified`` untouched there is no timestamp mismatch to catch it: an admin
+	setting a user's monthly spend cap in the same moment this user's browser
+	acks the introduction would have the cap silently reverted to the stale
+	value. Touching exactly the two columns this endpoint owns removes that
+	whole class of interaction.
+	"""
+	require_jarvis_access()
+	wanted = min(max(0, cint(version)), HOME_INTRO_VERSION)
+	user = frappe.session.user
+	usage.get_or_create_user_settings(user)  # row existence only; never saved here
+	if wanted:
+		frappe.db.sql(
+			"""
+			UPDATE `tabJarvis User Settings`
+			SET home_intro_seen_version = %(version)s, home_intro_seen_at = %(now)s
+			WHERE user = %(user)s AND home_intro_seen_version < %(version)s
+			""",
+			{"version": wanted, "now": frappe.utils.now_datetime(), "user": user},
+		)
+	seen = cint(frappe.db.get_value(USER_SETTINGS, {"user": user}, "home_intro_seen_version"))
+	return {"ok": True, "data": {"home_intro_seen_version": seen}}
+
+
+# Chat-home introduction telemetry: a bounded, privacy-free product-analytics
+# sink (design section: Plan 06 telemetry). Everything is allow-listed - the
+# event name, the suggestion category, and the time-to-first-prompt bucket - so
+# no message content, no prompt text, and no user name can ever reach the log.
+# The caller is recorded only as a SALTED SHA1 hash (per-site secret, never the
+# email in the clear), via the same jarvis/telemetry._user_hash helper. Emits one
+# JSON line to a dedicated logger and NEVER raises (telemetry must not break the
+# empty-chat home).
+_HOME_INTRO_EVENTS = frozenset({"displayed", "acknowledged", "suggestion_selected", "first_prompt"})
+_HOME_INTRO_CATEGORIES = frozenset({"analyse", "action", "search", "draft"})
+_HOME_INTRO_BUCKETS = frozenset({"0-5s", "5-15s", "15-60s", "1-5m", "5m+", "unknown"})
+_HOME_INTRO_LOGGER = "jarvis.home_intro_telemetry"
+
+
+@frappe.whitelist()
+def record_home_intro_event(
+	event: str,
+	version: int = 0,
+	category: str = "",
+	bucket: str = "",
+) -> dict:
+	"""Record one bounded chat-home introduction telemetry event.
+
+	Fired best-effort by the SPA (welcome displayed, a suggestion category
+	chosen, time-to-first-accepted-prompt bucket). PRIVACY-BOUNDED by
+	construction: the event name, category and bucket are all allow-listed, the
+	version is an int, and the caller is stored only as a hash - no message
+	content, prompt text, or user name is ever emitted. Unknown values are
+	dropped rather than logged. Always returns ``{"ok": True}`` and never raises,
+	so a telemetry failure can never affect chat.
+	"""
+	try:
+		require_jarvis_access()
+		ev = _s(event)
+		if ev not in _HOME_INTRO_EVENTS:
+			return {"ok": True}
+		from jarvis.telemetry import _user_hash
+
+		# Caller recorded only as a SALTED SHA1 (per-site secret, never the public
+		# site name): a bare email digest is trivially reversible by dictionary/
+		# rainbow attack over the small, enumerable address space. Shared with
+		# jarvis/telemetry.py so both sinks hash identically.
+		entry = {
+			"kind": "home_intro",
+			"event": ev,
+			"ts": frappe.utils.now(),
+			"site": getattr(frappe.local, "site", None),
+			"user_hash": _user_hash(frappe.session.user),
+			"version": cint(version),
+		}
+		cat = _s(category)
+		if ev == "suggestion_selected" and cat in _HOME_INTRO_CATEGORIES:
+			entry["category"] = cat
+		bkt = _s(bucket)
+		if ev == "first_prompt" and bkt in _HOME_INTRO_BUCKETS:
+			entry["bucket"] = bkt
+		frappe.logger(_HOME_INTRO_LOGGER).info(frappe.as_json(entry))
+	except Exception:
+		# Telemetry is never load-bearing; swallow everything (incl. an access
+		# failure) so it cannot surface an error onto the empty-chat home.
+		pass
+	return {"ok": True}
 
 
 @frappe.whitelist()

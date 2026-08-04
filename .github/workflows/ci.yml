@@ -65,6 +65,57 @@ jobs:
         with:
           extra_args: --all-files --show-diff-on-failure
 
+  # The frontend Vue SPA carries its own two test suites and, until this job, NOTHING ran either of
+  # them on a PR: `frontend/package.json` defines `test` (vitest) and `test:node` (node's built-in
+  # runner), but no workflow invoked them, so a browser-transport regression once shipped green.
+  # This is that gate. It needs only node — no bench, no container — so it reports fast and
+  # independently of the Python shards above.
+  frontend-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Full-repo checkout, not a sparse frontend/ one: frontend/package.json depends on
+      # ../wiki-graph-core via a `file:` link, so its sibling must be on disk for `npm ci`.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 is this repo's canonical dev/bench version and what the suite is validated
+          # against locally. (The lint job runs 20 because it only shells pre-commit hooks.)
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Vitest (*.spec.js + tests/support-extraction/**/*.test.js)
+        working-directory: frontend
+        env:
+          # Belt-and-braces: vitest already fails a non-watch run on an unhandled rejection, but
+          # make node itself throw on one too so nothing rejects silently.
+          NODE_OPTIONS: --unhandled-rejections=strict
+        run: |
+          # `npm test` is `vitest run` (non-watch). Exactly one file is quarantined:
+          #
+          #   tests/support-extraction/support-thread.test.js
+          #
+          # It has a single PRE-EXISTING, unrelated failure (a mid-flight ticket-switch reply is
+          # asserted against a two-arg uploadTo() signature that has since grown extra args). That
+          # is out of scope for the CI change that added this job and must NOT be "fixed" here.
+          # Excluding the one file lets the other 27 files (306 tests) gate PRs today. DELETE this
+          # --exclude — re-including the file — the moment that assertion is repaired upstream.
+          npm test -- --exclude '**/support-thread.test.js'
+
+      - name: node:test (co-located src/**/*.test.js)
+        working-directory: frontend
+        env:
+          NODE_OPTIONS: --unhandled-rejections=strict
+        # node's runner exits non-zero on any failure or unhandled rejection; no watch mode exists
+        # for `node --test`, so this is inherently a one-shot gate.
+        run: npm run test:node
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 25

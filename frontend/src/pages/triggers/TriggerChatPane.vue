@@ -347,6 +347,7 @@ async function refreshPending() {
 	}
 	try {
 		const env = await listPendingConfirmations(conversation.value);
+		if (env && env.ok === false) return;
 		const items = (env && env.data && env.data.pending) || [];
 		// keep in-flight busy flags across refreshes
 		const busy = new Set(pendingCards.value.filter((c) => c.busy).map((c) => c.token));
@@ -358,6 +359,11 @@ async function refreshPending() {
 
 function removeCard(token) {
 	pendingCards.value = pendingCards.value.filter((c) => c.token !== token);
+}
+
+function confirmationStorageUnavailable(response) {
+	const type = response && response.error && response.error.type;
+	return type === "ConfirmationUnavailableError" || type === "ConfirmationOutcomeUnknownError";
 }
 
 // ── pending-card copy ─────────────────────────────────────────────────────────
@@ -424,15 +430,23 @@ function cardMeta(pa) {
 
 async function approve(pa) {
 	pa.busy = true;
+	let keepCard = false;
 	try {
 		const r = await confirmTool(pa.token, conversation.value);
 		if (r && r.ok === false) {
-			toast.error("Couldn't confirm — it may have expired. Ask again in the chat.");
+			keepCard = confirmationStorageUnavailable(r);
+			toast.error(
+				keepCard
+					? r.error.message
+					: "Couldn't confirm — it may have expired. Ask again in the chat."
+			);
 		}
 	} catch (e) {
+		keepCard = true;
 		toast.error(errMsg(e));
 	} finally {
-		removeCard(pa.token);
+		if (keepCard) pa.busy = false;
+		else removeCard(pa.token);
 		// the parked run resumes server-side after a confirm: refresh both the
 		// transcript (receipt chip) and the triggers list (a row may now exist)
 		scheduleRefetch();
@@ -442,12 +456,19 @@ async function approve(pa) {
 
 async function dismiss(pa) {
 	pa.busy = true;
+	let keepCard = false;
 	try {
-		await dismissTool(pa.token, conversation.value);
+		const r = await dismissTool(pa.token, conversation.value);
+		if (r && r.ok === false) {
+			keepCard = confirmationStorageUnavailable(r);
+			toast.error((r.error && r.error.message) || "Could not discard this confirmation.");
+		}
 	} catch (e) {
+		keepCard = true;
 		toast.error(errMsg(e));
 	} finally {
-		removeCard(pa.token);
+		if (keepCard) pa.busy = false;
+		else removeCard(pa.token);
 		scheduleRefetch();
 	}
 }

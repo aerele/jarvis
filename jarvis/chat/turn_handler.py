@@ -475,8 +475,8 @@ def _assistant_name_clause(settings) -> str:
 	return f"; assistant name: {safe}"
 
 
-def persona_feature_enabled() -> bool:
-	"""The persona kill switch (``Jarvis Settings.persona_enabled``), NULL=ON.
+def _jarvis_settings_flag_null_on(field: str) -> bool:
+	"""Canonical NULL=ON probe for a ``Jarvis Settings`` Check kill switch.
 
 	Probes the ``tabSingles`` row directly instead of
 	``frappe.db.get_single_value``: for a Check field the latter coerces an unset
@@ -486,16 +486,34 @@ def persona_feature_enabled() -> bool:
 	patches) would both read the feature as OFF. Here "no row" is the default
 	(ON); only a stored 0 is OFF. The probe never touches the meta, so it also
 	cannot throw in the migrate window before the field syncs - unlike
-	get_single_value, which raises on a missing meta field and would invert the
-	pill against the clause. Read here AND by the boot payload (N7) so the same
-	switch value drives both."""
+	get_single_value, which raises on a missing meta field.
+
+	Deliberately NOT itself best-effort: it lets a read error propagate so each
+	caller owns its own fail-open (both boot readers - ``_persona_feature_enabled``
+	and ``api._home_intro_feature_enabled`` - wrap it and default to ON). And
+	deliberately NOT per-request cached: an admin can flip a switch and the very
+	next reader in the same worker (and the persona tests, which toggle it and
+	re-read within one process) must observe the new value, so a request cache
+	would serve a stale ON/OFF; the probe is one indexed tabSingles read and every
+	caller runs it at most once per request, so there is nothing to coalesce."""
 	row = frappe.db.sql(
 		"select value from tabSingles where doctype=%s and field=%s",
-		("Jarvis Settings", "persona_enabled"),
+		("Jarvis Settings", field),
 	)
 	if not row:
 		return True
 	return bool(frappe.utils.cint(row[0][0]))
+
+
+def persona_feature_enabled() -> bool:
+	"""The persona kill switch (``Jarvis Settings.persona_enabled``), NULL=ON.
+
+	Delegates to the canonical ``_jarvis_settings_flag_null_on`` probe so the pill
+	(boot payload) and the clause read the switch through one implementation, and
+	so the home-intro kill switch cannot drift from it - see that helper for why it
+	is a tabSingles probe and not get_single_value. Read here AND by the boot
+	payload (N7) so the same switch value drives both."""
+	return _jarvis_settings_flag_null_on("persona_enabled")
 
 
 def _persona_clause(chat_user: str) -> str:

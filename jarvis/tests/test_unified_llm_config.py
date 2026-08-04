@@ -1593,8 +1593,15 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 
 	def test_api_key_onboarding_leaves_is_ready_for_chat_passing(self):
 		"""is_ready_for_chat must return ready=True after a successful (confirmed,
-		status=applied) api_key onboarding via save_llm_creds."""
+		status=applied) api_key onboarding via save_llm_creds AND an explicit admin
+		Ready verdict. A first-onboarding workspace has no established history, so
+		the final managed gate really does ask admin - the test supplies the
+		explicit Ready it needs and then proves that Ready earned the marker (D1
+		cohort proof), rather than leaning on a fail-open the never-ready cohort no
+		longer gets."""
 		from unittest.mock import patch
+
+		from jarvis import account
 
 		with patch(
 			"jarvis.admin_client.post_update_llm_creds",
@@ -1612,7 +1619,15 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 
 		from jarvis.account import is_ready_for_chat
 
-		result = is_ready_for_chat()
+		# Fresh onboarding: nothing has confirmed this workspace before, so clear any
+		# leftover marker and require admin to say Ready explicitly.
+		frappe.db.set_value(
+			"Jarvis Settings", "Jarvis Settings", "chat_was_ready_at", None, update_modified=False
+		)
+		frappe.db.commit()
+		account._bust_chat_gate()
+		with patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}):
+			result = is_ready_for_chat()
 		self.assertTrue(
 			result.get("ready"),
 			f"is_ready_for_chat must return ready=True after api_key onboarding; got: {result}",
@@ -1620,6 +1635,11 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 		self.assertIsNone(
 			result.get("reason"), f"reason must be None when ready; got: {result.get('reason')!r}"
 		)
+		self.assertTrue(
+			account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at"),
+			"an explicit admin Ready must earn the established marker",
+		)
+		account._bust_chat_gate()
 
 	def test_api_key_first_apply_still_applying_is_not_ready(self):
 		"""Round-4 review R4-P0-6 / P1-10: a FIRST direct apply that admin returns
@@ -1696,13 +1716,26 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 			(settings.last_sync_status or "").startswith("ok"),
 			f"a converged apply must read ok; got {settings.last_sync_status!r}",
 		)
+		from jarvis import account
 		from jarvis.account import is_ready_for_chat
 
-		self.assertTrue(is_ready_for_chat().get("ready"), "a converged first direct apply must open chat")
+		# The final managed gate is a fresh admin question (the convergence probe
+		# above was inside the save's own mock scope). This is still first
+		# onboarding, so admin must say Ready explicitly for the gate to open.
+		account._bust_chat_gate()
+		with patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}):
+			self.assertTrue(is_ready_for_chat().get("ready"), "a converged first direct apply must open chat")
+		account._bust_chat_gate()
 
 	def test_established_direct_tenant_stays_ready_through_resave_pending(self):
-		"""An already-confirmed direct tenant (marker set) keeps chatting on its
-		previous key while a re-save is transiently 'applying'."""
+		"""An already-confirmed direct tenant keeps chatting on its previous key
+		while a re-save is transiently 'applying' AND the control plane is briefly
+		unreachable. Establishedness is proven with the explicit chat_was_ready_at
+		marker (D1's cohort proof), not inferred - so the admin-outage fail-open
+		policy is what this exercises, exactly the intended established behaviour."""
+		from unittest.mock import patch
+
+		from jarvis import account
 		from jarvis.account import is_ready_for_chat
 
 		settings = frappe.get_single("Jarvis Settings")
@@ -1718,15 +1751,24 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 				"proxy_active": 0,
 				"llm_direct_synced_at": frappe.utils.now(),
 				"last_sync_status": _PENDING_APPLYING_STATUS,
+				# The established-cohort proof. Left unbound (anchor cleared, in case a
+				# sibling test earned one) so the presence rule applies; the point here
+				# is the outage policy, not the authority fence, which has its own
+				# dedicated tests in test_account.
+				"chat_was_ready_at": "2026-01-01 00:00:00",
+				"chat_ready_authority": "",
 			},
 			update_modified=False,
 		)
 		settings.db_set("llm_api_key", "sk-established")
 		frappe.db.commit()
-		self.assertTrue(
-			is_ready_for_chat().get("ready"),
-			"an established direct tenant must stay ready during a pending re-save",
-		)
+		account._bust_chat_gate()
+		with patch("jarvis.admin_client.get_connection", side_effect=Exception("admin outage")):
+			self.assertTrue(
+				is_ready_for_chat().get("ready"),
+				"an established direct tenant must stay ready through a pending re-save + admin outage",
+			)
+		account._bust_chat_gate()
 
 	# ------------------------------------------------------------------
 	# (e) OAuth mode leaves the models table untouched
@@ -2257,15 +2299,22 @@ class TestFT2ValidateMirrorTiming(_RT3SettingsTestCase):
 		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("llm_oauth_connected_at", None, update_modified=False)
 		settings.db_set("llm_pool_synced_at", frappe.utils.now(), update_modified=False)
+		settings.db_set("chat_was_ready_at", None, update_modified=False)
 		frappe.db.commit()
 
+		from jarvis import account
 		from jarvis.account import is_ready_for_chat
 
-		result = is_ready_for_chat()
+		# An applied pool passes the local pool gate and reaches the final managed
+		# gate; with no established history it asks admin, which says Ready here.
+		account._bust_chat_gate()
+		with patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}):
+			result = is_ready_for_chat()
 		self.assertTrue(
 			result.get("ready"),
 			f"an applied pool must make is_ready_for_chat return ready=True; got: {result}",
 		)
+		account._bust_chat_gate()
 
 
 # ---------------------------------------------------------------------------
@@ -3174,19 +3223,41 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		self.assertEqual(result.get("reason"), "llm_pool_provisioning")
 
 	def test_ever_applied_pool_stays_ready_through_resave_pending(self):
-		"""A tenant whose pool applied once keeps chatting on the container's
-		previous config while a re-save is mid-sync - must NOT be bounced to
-		onboarding over a transient pending/failed."""
+		"""An ESTABLISHED tenant whose pool applied once keeps chatting on the
+		container's previous config while a re-save is mid-sync AND the control
+		plane is briefly unreachable - it must NOT be bounced to onboarding over a
+		transient pending/failed. Establishedness is the explicit chat_was_ready_at
+		proof; the admin outage is what makes this the fail-open cohort test."""
+		from unittest.mock import patch
+
+		from jarvis import account
 		from jarvis.account import is_ready_for_chat
 
-		self._set_pool_gate_state(
-			synced_at=frappe.utils.now(), status="pending: provisioning container (pool)"
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"chat_was_ready_at",
+			"2026-01-01 00:00:00",
+			update_modified=False,
 		)
-		self.assertTrue(is_ready_for_chat().get("ready"))
-		self._set_pool_gate_state(
-			synced_at=frappe.utils.now(), status="failed: rate-limited; retry_after=90s"
+		# Presence-rule established proof: clear any anchor a sibling test earned so
+		# the fence does not reject this artificially-seeded marker (the fence has
+		# dedicated coverage in test_account).
+		frappe.db.set_value(
+			"Jarvis Settings", "Jarvis Settings", "chat_ready_authority", "", update_modified=False
 		)
-		self.assertTrue(is_ready_for_chat().get("ready"))
+		with patch("jarvis.admin_client.get_connection", side_effect=Exception("admin outage")):
+			self._set_pool_gate_state(
+				synced_at=frappe.utils.now(), status="pending: provisioning container (pool)"
+			)
+			account._bust_chat_gate()
+			self.assertTrue(is_ready_for_chat().get("ready"))
+			self._set_pool_gate_state(
+				synced_at=frappe.utils.now(), status="failed: rate-limited; retry_after=90s"
+			)
+			account._bust_chat_gate()
+			self.assertTrue(is_ready_for_chat().get("ready"))
+		account._bust_chat_gate()
 
 	def test_legacy_ok_status_alone_does_not_open_the_gate(self):
 		"""last_sync_status is SHARED with the single-model sync: a stale
@@ -3285,8 +3356,23 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		with patch(self._READINESS_PROBE, return_value=("Provisioning", "")):
 			self.assertFalse(is_ready_for_chat().get("ready"))
 		frappe.cache().delete_value(_APPLY_CONFIRM_MISS_KEY)
-		with patch(self._READINESS_PROBE, return_value=("Ready", "")):
+		# The confirm probe is not the only admin call on the ready path: once
+		# _confirm_apply_via_admin stamps the marker, is_ready_for_chat proceeds to the
+		# final _admin_chat_gate, which asks admin again. In production that is the same
+		# control plane that just answered Ready, so present it consistently - otherwise
+		# the gate's unestablished-workspace fail-closed (a workspace with no
+		# chat_was_ready_at marker gets readiness_unconfirmed on an admin outage), not the
+		# damping under test, is what decides. Bust the gate cache so the fresh verdict is
+		# computed rather than a stale one (the idiom in the grandfather test above).
+		from jarvis import account
+
+		account._bust_chat_gate()
+		with (
+			patch(self._READINESS_PROBE, return_value=("Ready", "")),
+			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
+		):
 			self.assertTrue(is_ready_for_chat().get("ready"))
+		account._bust_chat_gate()
 
 	def test_unproven_direct_tenant_goes_ready_when_admin_confirms(self):
 		"""The single-model leg strands the same way and is rescued by the same
@@ -3333,12 +3419,16 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		grandfathered by patch v1_10 (marker backfilled from last_sync_at
 		when the pool demonstrably applied), NOT by a status heuristic in
 		the gate."""
+		from unittest.mock import patch
+
+		from jarvis import account
 		from jarvis.account import is_ready_for_chat
 		from jarvis.patches.v1_10_backfill_llm_pool_synced_at import execute
 
 		self._set_pool_gate_state(synced_at=None, status="ok (pool_update via admin)")
 		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("last_sync_at", frappe.utils.now(), update_modified=False)
+		settings.db_set("chat_was_ready_at", None, update_modified=False)
 		# v1_10 grandfathers PRE-CHANGE tenants, so reproduce the flag the OLD
 		# "any 2+-model pool is proxied" rule persisted. The patch reads the
 		# stored field on purpose - at migrate time on_update has not re-derived it.
@@ -3349,7 +3439,12 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertTrue(settings.llm_pool_synced_at, "patch must backfill the marker for an applied pool")
-		self.assertTrue(is_ready_for_chat().get("ready"))
+		# v1_10 backfills the POOL marker, not the chat-ready one, so this is still a
+		# workspace with no established history: the final managed gate asks admin.
+		account._bust_chat_gate()
+		with patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}):
+			self.assertTrue(is_ready_for_chat().get("ready"))
+		account._bust_chat_gate()
 
 	def test_backfill_patch_stamps_even_non_ok_pool_tenants(self):
 		"""Grandfathering is unconditional for pre-marker pool tenants: an

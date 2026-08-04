@@ -1278,6 +1278,89 @@
 							placeholder="Base URL (OpenAI-compatible)"
 						/>
 					</div>
+					<!-- Onboarding Test (P0-09): the same live, side-effect-free probe the
+					     Account panel offers, bound to this single row. "Start chatting"
+					     REQUIRES a pass on a freshly-typed remote key (singleModeCanStart);
+					     local/private endpoints and stored keys are exempt (they can't be
+					     probed from the bench). A failed test keeps every field typed. -->
+					<div
+						v-if="singleMode"
+						style="
+							display: flex;
+							align-items: center;
+							gap: 10px;
+							margin-top: 11px;
+							flex-wrap: wrap;
+						"
+					>
+						<button
+							type="button"
+							class="jv-btn jv-btn--sm jv-btn--ghost"
+							:disabled="!editable || smTest.testing || !!testBlockedReason(m)"
+							:title="testBlockedReason(m) || testButtonHint(m)"
+							@click="testSingleModeRow"
+						>
+							{{ smTest.testing ? "Testing…" : "Test" }}
+						</button>
+						<span
+							v-if="testBlockedReason(m)"
+							class="jv-pool-opt"
+							style="font-size: 11.5px"
+							>{{ testBlockedReason(m) }}</span
+						>
+						<span
+							v-else-if="isLocalProviderRow(m)"
+							class="jv-pool-opt"
+							style="font-size: 11.5px"
+							>Local endpoint - only verifiable from inside your Jarvis
+							container</span
+						>
+					</div>
+					<div
+						v-if="singleMode && smTest.result"
+						class="jv-status"
+						:class="smTest.result.ok ? 'jv-status-ok' : 'jv-status-bad'"
+						style="margin-top: 10px"
+					>
+						<span class="jv-status-ic">
+							<svg
+								v-if="smTest.result.ok"
+								width="14"
+								height="14"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.4"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M20 6 9 17l-5-5" />
+							</svg>
+							<svg
+								v-else
+								width="14"
+								height="14"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.4"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M18 6 6 18M6 6l12 12" />
+							</svg>
+						</span>
+						<span class="jv-status-tx"
+							><b>{{ smTest.result.ok ? "Key works." : "Test failed." }}</b>
+							{{ smTest.result.message }}</span
+						>
+					</div>
+					<div
+						v-if="singleMode && smTest.result && smTest.result.caveat"
+						style="font-size: 11px; color: var(--text-3); margin-top: 5px"
+					>
+						{{ smTest.result.caveat }}
+					</div>
 				</div>
 
 				<!-- Chat-subscription credential. In the simplified (onboarding) editor
@@ -1703,7 +1786,10 @@ const props = defineProps({
 	// scrim is unaffected.
 	hostScrim: { type: Boolean, default: false },
 });
-const emit = defineEmits(["saved", "ready", "direct-changed"]);
+// "settings-changed" is the footerless (onboarding) passive notice that the desired
+// pool was persisted - NOT a control-flow signal (the host controller owns the apply
+// transaction). The settings editor keeps using "saved" (runApply) as before.
+const emit = defineEmits(["saved", "ready", "direct-changed", "settings-changed"]);
 
 // ---- state ---------------------------------------------------------------
 const cfg = ref({ models: [], preset: "", routing_mode: "failover", proxy_active: false });
@@ -1799,12 +1885,128 @@ const ready = computed(() => {
 	const r = rows.value[0];
 	if (!r) return false;
 	if (r.credentialType === "subscription")
-		return (r.accounts || []).some((a) => a && (a.oauth_blob || a.account_ref));
+		return (r.accounts || []).some((a) => a && (a.capture_id || a.account_ref));
 	return !!(
 		(r.provider || "").trim() &&
 		(r.model || "").trim() &&
 		((r.apiKey || "").trim() || r.hasKey || isLocalProviderRow(r))
 	);
+});
+
+// ---- singleMode (onboarding) API-key probe --------------------------------
+// The master-detail Test button lives in the !singleMode panel; onboarding's
+// singleMode api-key body needs its own, bound to rows[0] (P0-09). Its state is
+// separate from `panel` (no panel is ever open in singleMode) but mirrors the same
+// stale-guard shape, and `passIdentity` binds a green result to the EXACT fields it
+// was earned on so it cannot outlive an edit.
+const smTest = ref({
+	testing: false,
+	result: null, // { ok, message, caveat } | null
+	gen: 0,
+	passIdentity: "", // fingerprint of the row a PASS is bound to; "" = no live pass
+});
+// A stable fingerprint of the four fields a probe actually sends. Keyed on the
+// provider ID (not its display label) + trimmed model + trimmed key + effective base
+// URL, so two field combos cannot collide and a whitespace-only change is a no-op.
+function probeIdentityOf(row) {
+	if (!row) return "";
+	return JSON.stringify([
+		providerId(row.provider) || "",
+		(row.model || "").trim(),
+		(row.apiKey || "").trim(),
+		effectiveTestBaseUrl(row),
+	]);
+}
+// Live probe of the singleMode row (same provider probe + stale-guard idiom as
+// testApiKeyRow). A PASS binds to the row's current identity; a FAIL leaves every
+// entered field untouched (the key is never cleared) so the customer can fix it.
+async function testSingleModeRow() {
+	const row = rows.value[0];
+	if (!row || smTest.value.testing || testBlockedReason(row)) return;
+	const myGen = ++smTest.value.gen;
+	const boundIdentity = probeIdentityOf(row);
+	const stale = () => smTest.value.gen !== myGen;
+	smTest.value.testing = true;
+	smTest.value.result = null;
+	try {
+		const res = await api.testLlmApiKey({
+			provider: row.provider || "",
+			model: row.model || "",
+			api_key: row.apiKey || "",
+			base_url: effectiveTestBaseUrl(row),
+		});
+		if (stale()) return;
+		const checks = Array.isArray(res && res.checks) ? res.checks : [];
+		const last = checks[checks.length - 1];
+		smTest.value.result = {
+			ok: !!(res && res.ok),
+			message:
+				(last && last.detail) ||
+				(res && res.ok ? "The provider accepted the request." : "The test failed."),
+			caveat: (res && res.caveat) || "",
+		};
+		smTest.value.passIdentity = res && res.ok ? boundIdentity : "";
+	} catch (e) {
+		if (stale()) return;
+		smTest.value.result = { ok: false, message: _err(e), caveat: "" };
+		smTest.value.passIdentity = "";
+	} finally {
+		if (!stale()) smTest.value.testing = false;
+	}
+}
+// Invalidate a stale probe the instant any field it depended on changes (same idiom
+// as the panel watch): drop the visible result AND the stored pass, and abandon an
+// in-flight probe by bumping the generation.
+watch(
+	[
+		() => rows.value[0]?.provider,
+		() => rows.value[0]?.model,
+		() => rows.value[0]?.apiKey,
+		() => rows.value[0]?.baseUrl,
+	],
+	() => {
+		if (!singleMode.value) return;
+		smTest.value.result = null;
+		smTest.value.passIdentity = "";
+		smTest.value.gen++;
+		smTest.value.testing = false;
+	}
+);
+// The onboarding "Start chatting" gate, exposed so the host controller (saveConnect)
+// can REQUIRE a passing probe before it opens an apply operation (P0-09). Truthful
+// exceptions: a subscription needs a capture/stored account, not a probe; a local /
+// container-only endpoint can't be probed from the bench, so provider+model is
+// enough; a stored (un-retyped) remote key can't be re-probed either. A remote row
+// with a freshly-typed key MUST carry a pass bound to its current fields.
+const singleModeCanStart = computed(() => {
+	if (!singleMode.value) return false;
+	const r = rows.value[0];
+	if (!r) return false;
+	if (r.credentialType === "subscription")
+		return (r.accounts || []).some((a) => a && (a.capture_id || a.account_ref));
+	if (!(r.provider || "").trim() || !(r.model || "").trim()) return false;
+	if (isContainerOnlyRow(r)) return true; // local / private endpoint: no bench probe
+	const typed = (r.apiKey || "").trim();
+	if (!typed) return r.hasKey === true; // stored key: nothing to re-probe
+	return smTest.value.passIdentity !== "" && smTest.value.passIdentity === probeIdentityOf(r);
+});
+// Why "Start chatting" is not available yet, or "" when it is - so the host shows a
+// precise inline reason rather than a dead button.
+const startBlockedReason = computed(() => {
+	if (!singleMode.value) return "";
+	const r = rows.value[0];
+	if (!r) return "Connect a model to continue.";
+	if (r.credentialType === "subscription")
+		return (r.accounts || []).some((a) => a && (a.capture_id || a.account_ref))
+			? ""
+			: "Connect your account to continue.";
+	if (!(r.provider || "").trim()) return "Choose a provider to continue.";
+	if (!(r.model || "").trim()) return "Enter a model id to continue.";
+	if (isContainerOnlyRow(r)) return "";
+	const typed = (r.apiKey || "").trim();
+	if (!typed) return r.hasKey ? "" : "Enter an API key to continue.";
+	if (smTest.value.passIdentity === probeIdentityOf(r)) return "";
+	return "Test your API key before you continue.";
 });
 const credTypes = [
 	{
@@ -2879,6 +3081,14 @@ async function removeAccount(m, idx) {
 	const prev = m.accounts || [];
 	if (idx < 0 || idx >= prev.length) return;
 	if (props.footerless) {
+		// Onboarding keeps this local (the wizard footer owns the save). If the account
+		// being removed is a just-connected one whose capture is still held server-side,
+		// revoke + erase it so an abandoned sign-in leaves no live capture behind
+		// (plan-05 D2). Best-effort: a failed cancel must never block the UI removal.
+		const gone = prev[idx];
+		if (gone && gone.capture_id) {
+			api.cancelPendingOauthCapture(gone.capture_id).catch(() => {});
+		}
 		m.accounts = prev.filter((_, j) => j !== idx);
 		return;
 	}
@@ -3212,7 +3422,13 @@ async function _placeConnectedAccount(row, d) {
 		account_ref: d.account_ref,
 		label: d.label || d.account_email || d.account_ref,
 		account_email: d.account_email || "",
-		oauth_blob: d.oauth_blob || "",
+		// The OAuth blob never crosses the wire (plan-05 D2): the server holds it
+		// under this capture id and merges it by account_ref at save time. A stored
+		// (reloaded) account carries neither - the backend keeps its blob.
+		capture_id: d.capture_id || "",
+		// Provider-stable subject (if the provider gave one) — a durable fold key
+		// that survives a reload, unlike the email/label which get_llm_config drops.
+		provider_subject: d.provider_subject || "",
 		connected: true,
 	};
 	const ri = m._connect.reconnectIdx;
@@ -3230,7 +3446,12 @@ async function _placeConnectedAccount(row, d) {
 	// copy of one account - two cliproxy credential files holding one refresh token,
 	// which is the reuse pattern OpenAI revokes whole accounts over. Fall back to the
 	// label so a reloaded account still folds onto itself.
-	const identityOf = (a) => ((a && (a.account_email || a.label)) || "").trim().toLowerCase();
+	// Prefer the provider-stable subject when present (P1-07): it is the same across
+	// every sign-in of one account and survives a reload. Fall back to email/label
+	// for providers/accounts that carry no subject (e.g. device-code upstreams, or a
+	// stored account get_llm_config returned with only {upstream, account_ref, label}).
+	const identityOf = (a) =>
+		((a && (a.provider_subject || a.account_email || a.label)) || "").trim().toLowerCase();
 	const identity = identityOf(acct);
 	const byEmail = identity ? m.accounts.findIndex((a) => identityOf(a) === identity) : -1;
 	if (ri != null && ri >= 0 && ri < m.accounts.length) {
@@ -3354,8 +3575,8 @@ async function copySigninLink(m) {
 // ---- load / save ---------------------------------------------------------
 // Seed the canonical rows from get_llm_config, then augment each with the
 // transient UI-only fields the editor needs (upstream + _connect). Seeded
-// accounts carry no oauth_blob (never returned by the server) - reconnect to
-// change; they render as "connected" via their label.
+// accounts carry no capture_id (a stored account's blob lives server-side, keyed
+// by account_ref) - reconnect to change; they render as "connected" via their label.
 function seedRows(config) {
 	return seedRowsFromConfig(config).map((r) => {
 		const upstream = (r.accounts && r.accounts[0] && r.accounts[0].upstream) || "openai";
@@ -3377,10 +3598,59 @@ function seedRows(config) {
 			_uid: nextUid(),
 			model,
 			upstream,
-			accounts: (r.accounts || []).map((a) => ({ ...a, oauth_blob: "" })),
+			accounts: (r.accounts || []).map((a) => ({ ...a, capture_id: "" })),
 			_connect: blankConnect(),
 		};
 	});
+}
+
+// Re-attach the current user's still-active OAuth captures (server-held, un-
+// consumed, un-expired) so a reload after a sign-in - or the error-banner Retry,
+// which re-runs load() - shows the account connected without a second sign-in
+// (plan-05 D2 / P0-04, P1-05). A capture whose account_ref already sits on a row
+// just backfills that row's capture_id; one with no matching row (a fresh reload
+// where the row was never saved) is attached to the singleMode row so onboarding
+// resumes. Only the capture_id + a safe label are stored - never a blob. Fully
+// best-effort: any error leaves the rows exactly as they loaded.
+async function rehydratePendingCaptures() {
+	let resp;
+	try {
+		resp = await api.getPendingOauthCaptures();
+	} catch (e) {
+		return;
+	}
+	const captures = (resp && resp.data && resp.data.captures) || [];
+	for (const c of captures) {
+		if (!c || !c.capture_id || !c.account_ref) continue;
+		const row = rows.value.find(
+			(r) =>
+				r.credentialType === "subscription" &&
+				(r.accounts || []).some((a) => a && a.account_ref === c.account_ref)
+		);
+		if (row) {
+			const a = row.accounts.find((x) => x && x.account_ref === c.account_ref);
+			if (a && !a.capture_id) a.capture_id = c.capture_id;
+			continue;
+		}
+		// No row holds it: attach to the singleMode (onboarding) row so a reload
+		// mid-onboarding resumes rather than showing an empty connect form.
+		if (singleMode.value && rows.value[0]) {
+			const r0 = rows.value[0];
+			if (r0.credentialType !== "subscription") setCredType(r0, "subscription");
+			if (!Array.isArray(r0.accounts)) r0.accounts = [];
+			if (!r0.accounts.some((a) => a && a.account_ref === c.account_ref)) {
+				r0.accounts.push({
+					upstream: c.upstream || r0.upstream || "openai",
+					account_ref: c.account_ref,
+					label: c.label || c.account_email || c.account_ref,
+					account_email: c.account_email || "",
+					capture_id: c.capture_id,
+					provider_subject: c.provider_subject || "",
+					connected: true,
+				});
+			}
+		}
+	}
 }
 
 // opts.carry: a row to keep across the reseed (the in-progress add row - see
@@ -3452,6 +3722,11 @@ async function load(opts = {}) {
 	} catch (e) {
 		err.value = _err(e);
 	}
+	// Re-attach any still-active server-held OAuth capture (plan-05 D2 / P0-04,
+	// P1-05): a reload after a sign-in - and the error-banner Retry, which re-runs
+	// load() - then resumes the SAME capture without a second sign-in. Runs after the
+	// clean baseline above so a rehydrated capture reads as the unsaved work it is.
+	await rehydratePendingCaptures();
 	// A sync may already be in flight when the editor mounts (page reload
 	// mid-provisioning, wizard resume via reason llm_pool_provisioning): start
 	// the poller for a pending one - polling only from save() left a resumed
@@ -3505,7 +3780,11 @@ function buildSaveModels(sourceRows) {
 						upstream: a.upstream || "openai",
 						account_ref: a.account_ref,
 						label: a.label,
-						oauth_blob: a.oauth_blob || "",
+						// A freshly-captured account sends its capture_id; the server merges
+						// the held blob by it. A STORED account (reloaded from get_llm_config)
+						// sends neither - correct: the backend keeps its blob by account_ref.
+						// The OAuth blob itself is never sent from the browser (plan-05 D2).
+						capture_id: a.capture_id || "",
 					})),
 				},
 			};
@@ -3588,7 +3867,7 @@ function buildSavePayload({ exclude = null } = {}) {
 		if (
 			r0 &&
 			r0.credentialType === "subscription" &&
-			!(r0.accounts || []).some((a) => a && (a.oauth_blob || a.account_ref))
+			!(r0.accounts || []).some((a) => a && (a.capture_id || a.account_ref))
 		) {
 			return { error: "Connect your account to continue." };
 		}
@@ -3598,21 +3877,48 @@ function buildSavePayload({ exclude = null } = {}) {
 	return { models: saveModels, preset: savePreset };
 }
 
-// Persist and return. The apply itself finishes in a background job, so this says
-// nothing about whether the agent picked the config up.
+// Persist and return. The apply itself finishes in a durable background operation,
+// so this says nothing about whether the agent picked the config up.
 //
 // This is the ONBOARDING entry point (footerless: the wizard's own footer button
-// calls it through defineExpose, then runs its own readiness handoff). The settings
-// editor uses runApply below instead, because there a button that says "Connect"
-// must not go quiet while the container is still being rebuilt.
-async function save() {
+// calls it through defineExpose). In footerless mode the editor is NOT the observer:
+// it just persists the desired pool and hands back the durable apply-operation
+// descriptor for the host's single controller (saveConnect) to follow (plan-05 D2,
+// P0-02/P1-01/P1-02). It deliberately does NOT startPolling, does NOT run load()
+// (which would reseed the row out from under a running apply), and does NOT treat
+// its "saved" emit as control flow - it emits a PASSIVE "settings-changed" for any
+// other host that wants to re-read, and returns { ok, result } instead of throwing.
+//
+// idempotencyKey (footerless): the host owns it and persists it for resume, so a
+// re-call after a lost response dedupes on admin rather than minting a second
+// desired version. The settings editor uses runApply below instead, unchanged.
+async function save(idempotencyKey = "") {
 	err.value = "";
 	const payload = buildSavePayload();
 	if (payload.error) {
 		err.value = payload.error;
-		return false;
+		return props.footerless ? { ok: false, error: payload.error } : false;
 	}
 	saving.value = true;
+	if (props.footerless) {
+		try {
+			const result = await api.saveLlmPool(
+				payload.models,
+				payload.preset,
+				"failover",
+				idempotencyKey || ""
+			);
+			// Passive only: NOT the transaction's control flow (the host controller owns
+			// what happens next). A host that only wants to re-read state may listen.
+			emit("settings-changed");
+			return { ok: true, result };
+		} catch (e) {
+			err.value = _err(e);
+			return { ok: false, error: _err(e) };
+		} finally {
+			saving.value = false;
+		}
+	}
 	try {
 		await api.saveLlmPool(payload.models, payload.preset, "failover");
 		try {
@@ -3890,7 +4196,11 @@ onBeforeUnmount(() => {
 
 // Let a host (onboarding, footerless) drive Save from its own footer, and a
 // hostScrim host (AiModelsPane) read the apply-in-flight state for its own scrim.
-defineExpose({ save, busy });
+// canStart / startBlockedReason let the onboarding controller (saveConnect) REQUIRE
+// a savable+validated config - a connected subscription, a stored key, a local
+// endpoint, or a freshly-typed remote key with a PASSING probe bound to it (P0-09) -
+// before it opens an apply operation, and show a precise reason when it can't yet.
+defineExpose({ save, busy, canStart: singleModeCanStart, startBlockedReason });
 </script>
 
 <style scoped>

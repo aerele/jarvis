@@ -108,6 +108,10 @@ def write_connection(data: dict) -> None:
 	from jarvis._password_utils import set_settings_password
 
 	s = frappe.get_single("Jarvis Settings")
+	# Capture the container this workspace pointed at BEFORE this write, so a
+	# reconnect that repoints it can be told apart from a daily sync that rewrites
+	# the same URL (which must not disturb an established claim).
+	_old_agent_url = (s.get("agent_url") or "").strip()
 	if data.get("api_key"):
 		set_settings_password(s, "jarvis_admin_api_key", data["api_key"])
 	if data.get("api_secret"):
@@ -121,14 +125,62 @@ def write_connection(data: dict) -> None:
 		s.db_set("jarvis_admin_customer_email", data["customer"])
 	if data.get("customer_password"):
 		set_settings_password(s, "jarvis_admin_customer_password", data["customer_password"])
+	# Connection block, guarded by the monotonic tenant-authority generation
+	# (review plan 04 P0-5). A slow poll carrying an OLDER authority generation
+	# than the one already accepted must NOT overwrite the connection, or a
+	# customer whose container just moved/repaired is silently regressed onto the
+	# old one. guard() advances the stored (generation, handle) only on ACCEPT, so
+	# the secrets and the authority receipt move together. Credential fields above
+	# are unguarded: they carry no generation and are never part of the race.
 	if data.get("agent_url"):
-		s.db_set("agent_url", data["agent_url"])
-	if data.get("agent_token"):
-		set_settings_password(s, "agent_token", data["agent_token"])
+		from jarvis import tenant_authority
+
+		write_conn = True
+		try:
+			outcome = tenant_authority.guard(s, data)
+		except tenant_authority.AuthorityInvariantError:
+			# Same generation, different serving container: never resolve by
+			# guessing. HOLD the current connection and let the next poll retry
+			# ("hold + re-poll"), never downgrade onto the other container. Recorded
+			# once (deduped) so a divergence that does not clear stays visible.
+			write_conn = False
+			tenant_authority.log_invariant_once(
+				data.get(tenant_authority.GEN_FIELD),
+				s.get(tenant_authority.HANDLE_FIELD),
+				data.get(tenant_authority.HANDLE_FIELD),
+			)
+		else:
+			if outcome == tenant_authority.REJECT:
+				write_conn = False
+				tenant_authority.log_stale_once(
+					s.get(tenant_authority.GEN_FIELD), data.get(tenant_authority.GEN_FIELD)
+				)
+		if write_conn:
+			s.db_set("agent_url", data["agent_url"])
+			if data.get("agent_token"):
+				set_settings_password(s, "agent_token", data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them.
-	if any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password")):
+	principal_change = any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password"))
+	if principal_change:
 		admin_client.clear_cached_token()
+	# End the established chat-Ready claim when this write repoints the workspace at
+	# a DIFFERENT admin principal or a DIFFERENT container (review P0-06): the
+	# workspace admin confirmed Ready is no longer the one we are about to serve, so
+	# the marker must not carry a fail-open verdict across the boundary. A daily
+	# sync that rewrites the SAME agent_url with no new principal is left alone -
+	# clearing there would eject every established customer once a day. The
+	# authority anchor is the mechanical backstop; this is the explicit intent.
+	container_change = bool(data.get("agent_url")) and data["agent_url"].strip() != _old_agent_url
+	if principal_change or container_change:
+		s.db_set("chat_was_ready_at", None)
+		s.db_set("chat_ready_authority", "")
+	# This is the write that can point the workspace at a DIFFERENT container or a
+	# different admin principal, so any cached readiness verdict describes a
+	# connection that is no longer the current one.
+	from jarvis.account import _bust_chat_gate
+
+	_bust_chat_gate()
 	# NB: the release notice is deliberately NOT mirrored here. Several callers
 	# pass a partial payload (a password, a customer email), and an absent notice
 	# key means "cleared" - which would drop a live notice. It is persisted only
@@ -182,16 +234,37 @@ def list_payment_providers() -> dict:
 	blip must not leave a customer unable to pay at all. Razorpay is the gateway
 	that supports every flow, so it is the safe floor.
 	"""
+	ui_v2 = _payment_ui_v2_enabled()
 	try:
 		data = admin_client.get_payment_providers() or {}
 	except Exception:
-		return {"providers": ["razorpay"], "default": "razorpay"}
+		return {"providers": ["razorpay"], "default": "razorpay", "payment_ui_v2": ui_v2}
 
 	providers = [p for p in (data.get("providers") or []) if p in admin_client.SUPPORTED_PROVIDERS]
 	if not providers:
-		return {"providers": ["razorpay"], "default": "razorpay"}
+		return {"providers": ["razorpay"], "default": "razorpay", "payment_ui_v2": ui_v2}
 	default = (data.get("default") or "").strip().lower()
-	return {"providers": providers, "default": default if default in providers else providers[0]}
+	return {
+		"providers": providers,
+		"default": default if default in providers else providers[0],
+		"payment_ui_v2": ui_v2,
+	}
+
+
+def _payment_ui_v2_enabled() -> bool:
+	"""The plan-09 07-c payment-UI rollout flag. Site-level boolean, DEFAULT ON.
+
+	The admin-hosted checkout is the ONLY payment path after cutover (no fallback,
+	owner decision 4), so this flag does NOT toggle old-vs-new behaviour — the old
+	tenant-origin SDK path no longer exists. It gates ROLLOUT MESSAGING only: when
+	explicitly disabled (``jarvis_payment_ui_v2 = 0`` in site config) the pay step
+	shows a maintenance-style honest hold instead of taking the customer to
+	checkout, so an operator can pause new checkouts on a bench without shipping
+	code. Unset / None = ON."""
+	value = frappe.conf.get("jarvis_payment_ui_v2")
+	if value is None:
+		return True
+	return bool(value)
 
 
 @frappe.whitelist()
@@ -284,13 +357,32 @@ def _coalesce_subscription_models(models: list) -> list:
 
 
 @frappe.whitelist()
-def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: str = "failover") -> dict:
+def save_llm_pool(
+	models: str | list,
+	preset: str | None = None,
+	routing_mode: str = "failover",
+	idempotency_key: str | None = None,
+) -> dict:
 	"""Write the customer's multi-model LLM pool into Jarvis Settings.models[]
 	(+ preset, routing_mode) and let the existing on_update pipeline validate
 	(validate_models), derive pool_mode/proxy_active, mirror models[0] into legacy llm_*,
 	and sync DIRECT (/llm-creds) vs PROXY (/llm-pool) via admin.
 
-	``models`` MUST stay annotated: with Frappe's
+	Freshly-connected chat-subscription accounts arrive as an opaque
+	``capture_id`` (never the raw OAuth blob - the minted token stayed
+	server-side; review P0-04); this ADOPTS each capture exactly once into the
+	saved config.
+
+	For a POOL config the /llm-pool push is SYNCHRONOUS (plan-05 D2, Fable ruling
+	/ review P0-02): the durable apply-operation descriptor admin creates in the
+	same transaction as its desired-state write comes back under
+	``apply_operation`` so the SPA follows ONE operation across
+	save -> apply -> readiness. ``idempotency_key`` (opaque, per Start-chatting
+	attempt) makes a double-click / lost-response resume converge on that same
+	operation with no new desired version. A single-model config keeps the
+	async creds path and returns ``apply_operation: null`` with ``mode: "legacy"``.
+
+	All params MUST stay annotated: with Frappe's
 	``require_type_annotated_api_methods`` enforced (declared in hooks.py),
 	an un-annotated whitelisted param 500s the request before the body runs
 	(JARVIS-2026-07-08 incident, fault a).
@@ -320,6 +412,11 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 		_model_accounts,
 		normalize_provider,
 	)
+	from jarvis.oauth import pending_capture
+
+	# capture_ids adopted this save, so consumed_by_operation can be recorded once
+	# admin hands the durable descriptor back (audit only).
+	consumed_capture_ids: list[str] = []
 
 	s = frappe.get_single("Jarvis Settings")
 
@@ -373,8 +470,29 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 			merged_accounts = []
 			for a in (sub or {}).get("accounts") or []:
 				a = dict(a)
-				if not (a.get("oauth_blob") or "").strip():
-					ref = a.get("account_ref") or ""
+				# A freshly-connected SPA account carries an opaque capture_id (the token
+				# stayed server-side; review P0-04). ADOPT the durable capture exactly
+				# once: consume_capture atomically claims it and returns the decrypted
+				# blob, which lands here and is persisted ENCRYPTED into
+				# subscription_accounts by the save below - all in this one request
+				# transaction, so the blob either moved into the saved config AND the
+				# capture was burned, or neither did.
+				cap_id = (a.pop("capture_id", "") or "").strip()
+				ref = a.get("account_ref") or ""
+				if cap_id:
+					try:
+						a["oauth_blob"] = pending_capture.consume_capture(cap_id)
+						consumed_capture_ids.append(cap_id)
+					except pending_capture.CaptureAlreadyConsumed:
+						# Resume (SPA re-called save with the same idempotency_key and
+						# the same payload): the first attempt already moved this blob
+						# into the stored config, so fall back to it rather than
+						# hard-failing - the credential was adopted, not lost.
+						if ref and prior_blobs.get(ref):
+							a["oauth_blob"] = prior_blobs[ref]
+				elif not (a.get("oauth_blob") or "").strip():
+					# No fresh capture and no re-entered blob: keep the stored one for a
+					# re-saved account.
 					if ref and prior_blobs.get(ref):
 						a["oauth_blob"] = prior_blobs[ref]
 				merged_accounts.append(a)
@@ -393,9 +511,52 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 	s.llm_oauth_account_email = ""
 	s.llm_oauth_connected_at = None
 	# save() -> on_update -> _on_update_unified_llm: validate_models (throws),
-	# compute_pool_mode/compute_proxy_active, mirror models[0], enqueue pool/creds sync.
+	# compute_pool_mode/compute_proxy_active, mirror models[0]. For a POOL config we
+	# SUPPRESS the async enqueue and push synchronously below so we can return the
+	# durable apply-operation descriptor (plan-05 D2, Fable ruling / review P0-02);
+	# a single-model config keeps the existing async creds enqueue.
+	idempotency_key = (idempotency_key or "").strip()
+	s.flags.suppress_pool_enqueue = True
 	s.save(ignore_permissions=True)
 	frappe.db.commit()
+	# The pool this workspace runs on just changed, so the readiness verdict admin
+	# gave about the PREVIOUS one is finished. account._admin_chat_gate keys its
+	# cache by config revision and this save moves it, so the old entry is already
+	# unreachable; the explicit drop covers the revision returning to a previous
+	# value inside the TTL (see _bust_chat_gate).
+	from jarvis.account import _bust_chat_gate
+
+	_bust_chat_gate()
+
+	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import sync_pool_now
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+	apply_operation = None
+	resumable = False
+	retry_after_seconds = 0
+	if compute_pool_mode(s):
+		# The durable apply operation lives on the POOL path (admin creates it in
+		# update_llm_pool). Push synchronously and hand its descriptor back so the
+		# SPA follows ONE operation across save -> apply -> readiness.
+		outcome = sync_pool_now(idempotency_key=idempotency_key or None)
+		apply_operation = outcome.get("apply_operation")
+		resumable = bool(outcome.get("resumable"))
+		retry_after_seconds = int(outcome.get("retry_after_seconds") or 0)
+		# An OLD admin (no plan-05 apply-operation) that succeeded WITHOUT a descriptor
+		# is a capability degrade, not a failure: report mode:"legacy" so the SPA falls
+		# back to the bounded fail-closed readiness poll instead of a support dead-end
+		# on a genuinely successful apply (F1).
+		mode = "legacy" if (apply_operation is None and outcome.get("legacy_capability")) else "operation"
+		if apply_operation and consumed_capture_ids:
+			# Audit only (best-effort): tie the adopted captures to the operation.
+			pending_capture.mark_consumed_by_operation(
+				consumed_capture_ids, apply_operation.get("operation_id")
+			)
+	else:
+		# Single-model (creds) path: on_update enqueued the async creds sync, and
+		# admin's creds endpoint mints no apply operation, so there is no descriptor
+		# to follow - the SPA falls back to the readiness poll for this config.
+		mode = "legacy"
 
 	row = (
 		frappe.db.get_value(
@@ -404,6 +565,14 @@ def save_llm_pool(models: str | list, preset: str | None = None, routing_mode: s
 		or {}
 	)
 	return {
+		# Plan-05 D2 (review §8.4): the durable operation descriptor the SPA follows,
+		# or null on the legacy single-model path / an unallocated failure.
+		"apply_operation": apply_operation,
+		"idempotency_key": idempotency_key,
+		"resumable": resumable,
+		"retry_after_seconds": retry_after_seconds,
+		"mode": mode,
+		# Legacy fields kept for the settings status strip and older callers.
 		"last_sync_at": str(row.get("last_sync_at") or ""),
 		"last_sync_status": row.get("last_sync_status") or "",
 		"proxy_active": bool(frappe.db.get_single_value("Jarvis Settings", "proxy_active")),
@@ -478,6 +647,10 @@ def disconnect_llm() -> dict:
 	for field, value in _DISCONNECTED_LLM_FIELDS.items():
 		settings.db_set(field, value, update_modified=False)
 	frappe.db.commit()
+	# There is no connection left for a cached "Ready" to be about.
+	from jarvis.account import _bust_chat_gate
+
+	_bust_chat_gate()
 	return {"disconnected": True, "last_sync_status": "disconnected"}
 
 
@@ -518,7 +691,9 @@ def _clear_llm_secrets(settings) -> None:
 
 
 @frappe.whitelist()
-def start_signup(email: str, company: str, plan: str, provider: str | None = None) -> dict:
+def start_signup(
+	email: str, company: str, plan: str, provider: str | None = None, billing: dict | None = None
+) -> dict:
 	"""Guest signup → store the api_token → return the Razorpay handles for Checkout.
 
 	Gated on ``require_jarvis_admin`` (Sprint-1 Important from the 2026-06-16
@@ -580,9 +755,9 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 		# frappe.throw, and the duplicate check below needs the class and the
 		# contract code that conversion discards. Anything non-resumable then
 		# goes through the identical mapping _surface would have applied.
-		data = admin_client.signup(email, company, plan, provider=provider)
+		data = admin_client.signup(email, company, plan, provider=provider, billing=billing)
 	except _ADMIN_ERRORS as e:
-		resumed = _try_resume_pending_signup(e, plan, provider)
+		resumed = _try_resume_pending_signup(e, email, plan, provider, billing)
 		if resumed is None:
 			_throw_admin_error(e)  # always raises
 		data = resumed
@@ -618,10 +793,17 @@ def start_signup(email: str, company: str, plan: str, provider: str | None = Non
 	# fresh signup. The wizard reads ``pending_verification`` and the checkout
 	# handles and nothing else (OnboardingView runStartPay → launchCheckout);
 	# no key stripped here is read anywhere in frontend/src.
-	return onboarding_contract.strip_credentials(data)
+	#
+	# augment_pay_page is behaviour-neutral unless admin returned a pay-page token
+	# (plan-09 WS7): on a token answer it attaches the bench's OWN attested pay
+	# origin so the wizard top-level-navigates to the admin-hosted checkout instead
+	# of opening a gateway SDK on this origin.
+	return onboarding_contract.augment_pay_page(onboarding_contract.strip_credentials(data))
 
 
-def _try_resume_pending_signup(err, plan: str, provider: str | None) -> dict | None:
+def _try_resume_pending_signup(
+	err, email: str, plan: str, provider: str | None, billing: dict | None = None
+) -> dict | None:
 	"""Failed-payment retry: when guest signup is rejected as a duplicate and
 	this bench holds admin credentials, resume the pending signup through admin's
 	authenticated ``resume_pending_signup`` — same plan or a newly chosen one —
@@ -661,6 +843,7 @@ def _try_resume_pending_signup(err, plan: str, provider: str | None) -> dict | N
 		return admin_client.resume_pending_signup(
 			plan,
 			provider=provider,
+			billing=billing,
 			idempotency_key=_reserve_idempotency_key(context=context),
 		)
 	except Exception:
@@ -932,6 +1115,19 @@ def check_signup_payment_status() -> dict:
 
 
 @frappe.whitelist()
+def update_billing(billing: dict) -> dict:
+	"""Authenticated billing-only edit facade (Plan 01, post-intent Review & Pay
+	"Edit"): forwards to admin's ``update_pending_billing`` on the owned pending
+	Customer. Does NOT create or replace a payment intent and never calls guest
+	signup. Gated on Jarvis Admin like the rest of onboarding; admin re-checks
+	ownership + Pending Payment status. Returns admin's data
+	(``billing_saved`` + normalized ``billing`` summary) un-flattened."""
+	require_jarvis_admin()
+	_require_admin_url()
+	return _surface(admin_client.update_pending_billing, billing)
+
+
+@frappe.whitelist()
 def reconnect_available(email: str, company: str = "") -> dict:
 	"""Would a reconnect for this (email, company) find an account to reconnect?
 
@@ -978,6 +1174,15 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	data = _surface(admin_client.get_reconnect_state, request_id, code) or {}
 	if data.get("status") != "ready":
 		return {"status": data.get("status") or "expired"}
+	# A reconnect deliberately re-points this bench at an existing account's
+	# container, whose authority generation is unrelated to whatever this site
+	# last held. Forget the accepted (generation, handle) BEFORE riding
+	# sync_connection, or a stored generation higher than the reconnected
+	# account's would reject its connection as "older" and strand the site
+	# (review plan 04 P0-5).
+	from jarvis import tenant_authority
+
+	tenant_authority.clear(frappe.get_single("Jarvis Settings"))
 	write_connection(
 		{
 			"api_key": data.get("api_key", ""),
@@ -1019,6 +1224,156 @@ def get_account_defaults() -> dict:
 		# its placeholder, exactly like the desk auto-fetch's silent no-op.
 		company, companies = "", []
 	return {"email": email, "company": company, "companies": companies}
+
+
+def _company_defaults_error(code: str, message: str, http_status: int) -> dict:
+	"""Coded error envelope for get_company_onboarding_defaults, mirroring admin
+	signup.py's {"ok": False, "error": {"code": ...}} shape so the SPA keys on a
+	stable code, never a prose message. ``message`` never carries billing PII."""
+	frappe.local.response.http_status_code = http_status
+	return {"ok": False, "error": {"code": code, "message": message}}
+
+
+def _resolve_company_contact(company: str) -> dict | None:
+	"""Primary Contact for the Company + a phone number.
+
+	``frappe.contacts...get_default_contact`` is raw SQL that checks NO permission
+	(C01-3), so we re-check Contact read permission ourselves and leak nothing if
+	it is not readable. Phone falls back mobile_no -> phone -> child ``phone_nos``
+	rows (C01-4: the denormalized fields are blank unless a child row carries the
+	primary flag)."""
+	from frappe.contacts.doctype.contact.contact import get_default_contact
+
+	try:
+		contact_name = get_default_contact("Company", company)
+	except Exception:
+		contact_name = None
+	if not contact_name or not frappe.has_permission("Contact", "read", doc=contact_name):
+		return None
+	c = frappe.db.get_value(
+		"Contact",
+		contact_name,
+		["name", "first_name", "last_name", "company_name", "mobile_no", "phone"],
+		as_dict=True,
+	)
+	if not c:
+		return None
+	phone = (c.mobile_no or "").strip() or (c.phone or "").strip() or _contact_child_phone(contact_name)
+	display = " ".join(p for p in (c.first_name, c.last_name) if p).strip() or (c.company_name or "")
+	out = {"name": c.name}
+	if display:
+		out["display_name"] = display
+	if phone:
+		out["phone"] = phone
+	return out
+
+
+def _contact_child_phone(contact_name: str) -> str:
+	"""Deterministic phone from a Contact's child ``phone_nos`` rows (C01-4):
+	primary mobile, then primary phone, then the first non-empty row by idx."""
+	rows = frappe.get_all(
+		"Contact Phone",
+		filters={"parent": contact_name, "parenttype": "Contact"},
+		fields=["phone", "is_primary_phone", "is_primary_mobile_no"],
+		order_by="idx asc",
+	)
+	for want in ("is_primary_mobile_no", "is_primary_phone"):
+		for r in rows:
+			if r.get(want) and (r.phone or "").strip():
+				return r.phone.strip()
+	for r in rows:
+		if (r.phone or "").strip():
+			return r.phone.strip()
+	return ""
+
+
+def _resolve_company_billing_address(company: str) -> dict | None:
+	"""Primary billing Address for the Company, as an allowlisted presentation dict.
+
+	ERPNext is OPTIONAL (C01-1): this deliberately does NOT call
+	``erpnext...get_default_company_address`` \u2014 that helper both requires ERPNext
+	(jarvis is a frappe-only app) AND does not select a primary address (its
+	``max()`` over unset ``is_primary_address`` flags returns an arbitrary
+	SQL-order row \u2014 C01-2). Instead we run the frappe-only Dynamic Link query that
+	works on every bench and filter EXPLICITLY on ``is_primary_address = 1``,
+	excluding disabled rows. Nothing flagged primary -> return NOTHING, never a
+	warehouse/shipping address dressed up as billing. Own read-permission check
+	(C01-3). GSTIN is read only when the field exists in Address metadata (India
+	Compliance not installed on frappe-only benches)."""
+	linked = frappe.get_all(
+		"Dynamic Link",
+		filters={"link_doctype": "Company", "link_name": company, "parenttype": "Address"},
+		pluck="parent",
+	)
+	if not linked:
+		return None
+	primary = frappe.get_all(
+		"Address",
+		filters={"name": ["in", linked], "is_primary_address": 1, "disabled": 0},
+		pluck="name",
+		order_by="modified desc",
+		limit=1,
+	)
+	if not primary or not frappe.has_permission("Address", "read", doc=primary[0]):
+		return None
+	has_gstin = frappe.get_meta("Address").has_field("gstin")
+	fields = ["name", "address_line1", "address_line2", "city", "state", "pincode", "country"]
+	if has_gstin:
+		fields.append("gstin")
+	a = frappe.db.get_value("Address", primary[0], fields, as_dict=True)
+	if not a:
+		return None
+	out = {"name": a.name}
+	for k in ("address_line1", "address_line2", "city", "state", "pincode", "country"):
+		if a.get(k):
+			out[k] = a.get(k)
+	if has_gstin and a.get("gstin"):
+		out["gstin"] = a.get("gstin")
+	return out
+
+
+@frappe.whitelist()
+def get_company_onboarding_defaults(company: str) -> dict:
+	"""ERP-derived billing defaults for ONE selected Company (Plan 01): its primary
+	Contact's phone and its primary billing Address (+ optional India Compliance
+	GSTIN). Behind the same onboarding-admin gate as the rest of onboarding.
+
+	Returns an allowlisted PRESENTATION dict \u2014 never whole Contact/Address
+	documents, never unrelated fields:
+
+	    {"ok": True, "data": {"company": "...",
+	        "contact": {"name","display_name","phone"},
+	        "billing_address": {"name","address_line1","address_line2","city",
+	                            "state","pincode","country","gstin"}}}
+
+	``contact`` / ``billing_address`` are omitted when nothing resolves (so a site
+	without linked Contact/Address still onboards). Failures carry a stable code:
+	COMPANY_DEFAULTS_NOT_FOUND (blank/unknown company) or COMPANY_DEFAULTS_FORBIDDEN
+	(company not readable). Neither the Frappe contact helper nor the Dynamic Link
+	query checks permission, so every read gate here is ours (C01-3)."""
+	require_jarvis_admin()
+	company = (company or "").strip()
+	if not company:
+		return _company_defaults_error("COMPANY_DEFAULTS_NOT_FOUND", "company is required", 400)
+	# Company is an ERPNext doctype and jarvis runs on frappe-only benches too
+	# (C01-1). Guard the doctype's existence first so frappe.db.exists("Company", …)
+	# can't 500 on a missing table — a frappe-only site simply has no company to
+	# resolve.
+	if not frappe.db.exists("DocType", "Company") or not frappe.db.exists("Company", company):
+		return _company_defaults_error("COMPANY_DEFAULTS_NOT_FOUND", "unknown company", 404)
+	if not frappe.has_permission("Company", "read", doc=company):
+		return _company_defaults_error(
+			"COMPANY_DEFAULTS_FORBIDDEN", "not permitted to read this company", 403
+		)
+
+	data: dict = {"company": company}
+	contact = _resolve_company_contact(company)
+	if contact:
+		data["contact"] = contact
+	address = _resolve_company_billing_address(company)
+	if address:
+		data["billing_address"] = address
+	return {"ok": True, "data": data}
 
 
 @frappe.whitelist()
@@ -1097,14 +1452,17 @@ def finish_payment(payload: dict | str) -> dict:
 
 @frappe.whitelist()
 def renew(provider: str | None = None) -> dict:
-	"""Existing customer initiates a renewal payment; returns the provider's
-	checkout handles. The page then completes Checkout and calls finish_payment.
+	"""Existing customer initiates a renewal payment; returns a pay-page token
+	the billing page top-level-navigates to (plan-09 WS8). The admin-hosted
+	checkout completes the payment; the webhook/return activates the plan.
 
 	Gated on System Manager: initiates a billing transaction tied to the
 	site's admin account.
 	"""
 	require_jarvis_admin()
-	return _surface(admin_client.renew, provider=provider)
+	# plan-09 WS8: attest the token against the bench's OWN pay origin so
+	# BillingPage can navigate (behaviour-neutral on a non-token answer).
+	return onboarding_contract.augment_pay_page(_surface(admin_client.renew, provider=provider))
 
 
 _RESETTING_STATUS = "pending: resetting workspace"
@@ -1208,13 +1566,25 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	them) the LLM config + ``*_synced_at`` markers — the control plane carries
 	those onto the new container; clearing them would eject the customer into
 	the setup wizard."""
+	from jarvis import tenant_authority
 	from jarvis._password_utils import clear_settings_password
 	from jarvis.account import _bust_chat_gate
 	from jarvis.chat.device import clear_credentials
 
 	settings.db_set("agent_url", "")
 	clear_settings_password(settings, "agent_token")
+	# The rebuilt container is a new authority generation; forget the accepted
+	# (generation, handle) so the poll that re-attaches it is not rejected as
+	# "older" than the pre-reset generation (review plan 04 P0-5).
+	tenant_authority.clear(settings)
 	clear_credentials()
+	# End the established chat-Ready claim BEFORE the fail-open policy can see it
+	# (review P0-06). This is the self-serve rebuild path: the container is being
+	# torn down and replaced, so the workspace admin confirmed Ready no longer
+	# exists. Clearing agent_url above already moves the authority anchor, but the
+	# marker is cleared explicitly too so the intent is not left to a side effect.
+	settings.db_set("chat_was_ready_at", None)
+	settings.db_set("chat_ready_authority", "")
 	settings.db_set(
 		"last_sync_status", _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS
 	)
@@ -1387,6 +1757,11 @@ def save_llm_creds(
 		s.flags.force_admin_sync = True
 	s.save(ignore_permissions=True)
 	frappe.db.commit()
+	# Same reason as save_llm_pool's: the cached readiness verdict was about the
+	# credential this save replaced.
+	from jarvis.account import _bust_chat_gate
+
+	_bust_chat_gate()
 	# on_update writes last_sync_* via frappe.db.set_value so the
 	# in-memory ``s`` doc is stale. Fetch JUST the two fields we
 	# need rather than reloading the entire Singles doc (the previous

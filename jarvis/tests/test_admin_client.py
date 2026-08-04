@@ -965,6 +965,187 @@ class TestOnboardingClient(FrappeTestCase):
 		self.assertEqual(out, BUNDLED_PRESET_CATALOG)
 
 
+_EXPECTED_ADVERT = {
+	"pay_page": "admin_pay_page_v1",
+	"provider_shapes": [
+		"razorpay_order",
+		"razorpay_mandate",
+		"cashfree_order",
+		"cashfree_mandate",
+	],
+}
+
+
+class TestClientCapabilityAdvert(FrappeTestCase):
+	"""Plan-09 WS2: behavior-neutral pay-page capability advert.
+
+	The bench advertises ``admin_pay_page_v1`` + the provider checkout shapes it
+	understands on every signup-payment initiation/resume call. Today's admin
+	ignores the field (Frappe drops unknown form_dict keys), so this is purely
+	outbound predeployment — these tests pin (a) the advert rides both seams,
+	(b) the frozen contract names are exact, (c) a reply carrying no new keys
+	decodes byte-for-byte as it did before the advert existed.
+	"""
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def test_advert_constant_matches_frozen_contract(self):
+		self.assertEqual(admin_client.PAY_PAGE_CAPABILITY, "admin_pay_page_v1")
+		self.assertEqual(
+			list(admin_client.PROVIDER_SHAPES),
+			["razorpay_order", "razorpay_mandate", "cashfree_order", "cashfree_mandate"],
+		)
+		self.assertEqual(admin_client._client_capabilities(), _EXPECTED_ADVERT)
+
+	def test_helper_returns_a_fresh_copy(self):
+		# A caller mutating the returned advert (it becomes a request body) must
+		# not corrupt the next call's advert.
+		first = admin_client._client_capabilities()
+		first["pay_page"] = "tampered"
+		first["provider_shapes"].append("tampered")
+		self.assertEqual(admin_client._client_capabilities(), _EXPECTED_ADVERT)
+
+	def test_signup_carries_capability_advert(self):
+		_settings_clear_admin()  # guest signup path
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(captured["json"]["client_capabilities"], _EXPECTED_ADVERT)
+
+	def test_resume_pending_signup_carries_capability_advert(self):
+		_settings_for_admin()  # authenticated resume path
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.resume_pending_signup("Annual Plan")
+		self.assertEqual(captured["json"]["client_capabilities"], _EXPECTED_ADVERT)
+
+	def test_response_without_new_keys_decodes_unchanged(self):
+		# Behavior neutrality: an admin that ignores the advert replies exactly as
+		# before, and the decoded result is the same dict the bench saw pre-WS2.
+		# The advert is outbound-only; it never touches the reply path.
+		_settings_clear_admin()
+		legacy_data = {
+			"api_key": "k",
+			"api_secret": "s",
+			"payment_provider": "razorpay",
+			"razorpay_order_id": "order_R",
+			"razorpay_key_id": "rzp",
+			"amount_inr": 1500,
+		}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			return _mock_response(200, json_body={"message": {"ok": True, "data": dict(legacy_data)}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			out = admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(out, legacy_data)
+
+	def test_billing_facades_carry_capability_advert(self):
+		"""plan-09 P0-2: the capability advert now rides EVERY billing initiation call,
+		not just signup/resume, because admin's billing facades gate on it too. Without
+		this, a cutover admin refuses every renew/upgrade/downgrade/reauthorize with
+		CLIENT_UPGRADE_REQUIRED. (Bench-first deploy: this advert must ship before admin
+		hard-gates.)"""
+		_settings_for_admin()  # authenticated billing calls
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		calls = [
+			("renew", lambda: admin_client.renew()),
+			("start_upgrade", lambda: admin_client.start_upgrade("Pro Plan")),
+			("reauthorize_autopay", lambda: admin_client.reauthorize_autopay()),
+			("start_downgrade", lambda: admin_client.start_downgrade("Basic Plan")),
+			("cancel_scheduled_downgrade", lambda: admin_client.cancel_scheduled_downgrade()),
+		]
+		for name, call in calls:
+			with self.subTest(call=name):
+				captured.clear()
+				with patch("requests.post", side_effect=_fake_post):
+					call()
+				self.assertEqual(captured["json"].get("client_capabilities"), _EXPECTED_ADVERT, name)
+
+
+class TestPublicOriginSweep(FrappeTestCase):
+	"""plan-09 P1-5: the bench half of the ``get_url`` sweep. The ``frappe_site_url``
+	the bench hands admin must NOT be derivable from the request ``Host`` header (a
+	guest could otherwise choose the tenant's recorded site URL / magic-link base).
+	The fix is ``allow_header_override=False`` on the fallback, with a configured
+	``host_name`` preferred."""
+
+	def tearDown(self):
+		_settings_clear_admin()
+		for k in ("host_name", "hostname", "restart_supervisor_on_update", "restart_systemd_on_update"):
+			frappe.conf.pop(k, None)
+
+	def test_public_origin_prefers_configured_host_name(self):
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
+
+	def test_public_origin_normalizes_a_bare_host_name_to_https(self):
+		frappe.conf["host_name"] = "tenant.example.com"
+		self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
+
+	def test_public_origin_falls_back_with_header_override_OFF(self):
+		# No host_name → the get_url fallback MUST be called with
+		# allow_header_override=False (the load-bearing anti-injection fix).
+		frappe.conf.pop("host_name", None)
+		frappe.conf.pop("hostname", None)
+		with patch("frappe.utils.get_url", return_value="https://fallback.example.com") as gu:
+			out = admin_client._public_origin()
+		gu.assert_called_once_with(allow_header_override=False)
+		self.assertEqual(out, "https://fallback.example.com")
+
+	def test_http_fallback_on_a_production_bench_warns_but_does_not_throw(self):
+		frappe.conf.pop("host_name", None)
+		frappe.conf.pop("hostname", None)
+		frappe.conf["restart_supervisor_on_update"] = 1  # marks a production bench
+		with patch("frappe.utils.get_url", return_value="http://dev.local"):
+			# Must NOT raise (would break signup on an unconfigured bench).
+			out = admin_client._public_origin()
+		self.assertEqual(out, "http://dev.local")
+
+	def test_signup_sends_the_swept_origin_never_the_raw_header(self):
+		_settings_clear_admin()  # guest signup path
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertEqual(captured["json"]["frappe_site_url"], "https://tenant.example.com")
+
+	def test_reconnect_and_replacement_seams_use_the_swept_origin(self):
+		_settings_clear_admin()
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		seen = []
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			seen.append(json.get("frappe_site_url"))
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.site_replacement()
+			admin_client.request_account_reconnect("e@x.com", "Co")
+		self.assertEqual(seen, ["https://tenant.example.com", "https://tenant.example.com"])
+
+
 class TestPostUpdateLlmCredsAuthMode(FrappeTestCase):
 	def setUp(self):
 		_settings_for_admin()

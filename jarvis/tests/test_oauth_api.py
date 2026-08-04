@@ -847,18 +847,29 @@ class TestCompletePoolAccountSignin(_OAuthApiBase):
 		self.assertEqual(data["label"], "pool-acct@acme.com")
 		self.assertEqual(data["account_email"], "pool-acct@acme.com")
 
-		# oauth_blob is a JSON STRING that parses and carries a non-empty
-		# id_token (Task 1 shape reused here).
-		self.assertIsInstance(data["oauth_blob"], str)
-		parsed = json.loads(data["oauth_blob"])
+		# Plan-05 D2 (P0-04): the raw blob NO LONGER comes back - only an opaque
+		# capture_id + safe display metadata. The token stayed server-side.
+		self.assertTrue(data["capture_id"].startswith("oacap_"))
+		self.assertNotIn("oauth_blob", data)
+		flat = json.dumps(data)
+		for secret in ("RT-pool", "ID.POOL.TOKEN", access_jwt):
+			self.assertNotIn(secret, flat, "a token leaked into the capture response")
+
+		# The blob was PERSISTED ENCRYPTED in the capture, decryptable server-side
+		# for the save that adopts it, and carries the id_token (pool shape).
+		from frappe.utils.password import get_decrypted_password
+
+		name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": data["capture_id"]}, "name")
+		parsed = json.loads(
+			get_decrypted_password("Jarvis Pending OAuth Capture", name, "encrypted_oauth_blob")
+		)
 		self.assertEqual(parsed["type"], "oauth")
 		self.assertEqual(parsed["provider"], "openai")
 		self.assertEqual(parsed["access"], access_jwt)
 		self.assertEqual(parsed["refresh"], "RT-pool")
-		self.assertEqual(parsed["email"], "pool-acct@acme.com")
 		self.assertEqual(parsed["accountId"], "acct-pool")
-		self.assertTrue(parsed["id_token"], "oauth_blob must carry a non-empty id_token")
 		self.assertEqual(parsed["id_token"], "ID.POOL.TOKEN")
+		frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
 
 		# DIRECT path untouched: no container push, no creds save.
 		mock_push.assert_not_called()
@@ -897,11 +908,14 @@ class TestCompletePoolAccountSignin(_OAuthApiBase):
 		)
 		self.assertEqual(out["error"]["code"], "unknown_nonce")
 
-	def test_generated_account_refs_are_unique(self):
-		# Each capture mints a fresh account_ref so two accounts in one pool
-		# don't collide (build_pool_payload keys oauth_blobs by account_ref).
+	def test_distinct_accounts_get_distinct_refs(self):
+		# Five DIFFERENT accounts (distinct emails/subjects) get distinct
+		# account_refs so they don't collide (build_pool_payload keys oauth_blobs by
+		# account_ref). Captures fold only on the SAME stable subject (P1-07), which
+		# is exercised separately below.
 		refs = set()
-		for _ in range(5):
+		captured = []
+		for i in range(5):
 			nonce = self._seed()
 			with patch(
 				"jarvis.oauth.api._exchange_code",
@@ -910,7 +924,7 @@ class TestCompletePoolAccountSignin(_OAuthApiBase):
 					"refresh_token": "RT",
 					"expires_in": 3600,
 					"id_token": "ID.T",
-					"email": "a@b.com",
+					"email": f"a{i}@b.com",
 				},
 			):
 				out = oauth_api.complete_pool_account_signin(
@@ -918,7 +932,122 @@ class TestCompletePoolAccountSignin(_OAuthApiBase):
 					redirected_url="?code=ABC&state=test-state",
 				)
 			refs.add(out["data"]["account_ref"])
+			captured.append(out["data"]["capture_id"])
 		self.assertEqual(len(refs), 5)
+		for cid in captured:
+			name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": cid}, "name")
+			if name:
+				frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
+
+	def test_same_account_recapture_folds_on_stable_subject(self):
+		# Recapturing the SAME account folds onto ONE capture only on a GENUINELY
+		# STABLE subject (OpenAI's chatgpt_account_id), never the email (F4/P1-07).
+		access_jwt = _jwt({"https://api.openai.com/auth": {"chatgpt_account_id": "acct-fold-1"}})
+		ids = set()
+		for _ in range(2):
+			nonce = self._seed()
+			with patch(
+				"jarvis.oauth.api._exchange_code",
+				return_value={
+					"access_token": access_jwt,
+					"refresh_token": "RT",
+					"expires_in": 3600,
+					"id_token": "ID.T",
+					"email": "same@b.com",
+				},
+			):
+				out = oauth_api.complete_pool_account_signin(
+					nonce=nonce,
+					redirected_url="?code=ABC&state=test-state",
+				)
+			ids.add(out["data"]["capture_id"])
+		self.assertEqual(len(ids), 1, "same-account recapture must fold onto one capture")
+		name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": ids.pop()}, "name")
+		frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
+
+	def test_no_stable_subject_never_folds(self):
+		# No stable subject (non-OpenAI: extract_account_id returns "") → NEVER fold,
+		# even for the same email. Prevents the cross-provider token clobber (F4).
+		ids = set()
+		for _ in range(2):
+			nonce = self._seed()
+			with patch(
+				"jarvis.oauth.api._exchange_code",
+				return_value={
+					"access_token": "AT-not-a-jwt",
+					"refresh_token": "RT",
+					"expires_in": 3600,
+					"email": "same@b.com",
+				},
+			):
+				out = oauth_api.complete_pool_account_signin(
+					nonce=nonce,
+					redirected_url="?code=ABC&state=test-state",
+				)
+			ids.add(out["data"]["capture_id"])
+		self.assertEqual(len(ids), 2, "no stable subject → two distinct captures, no email fold")
+		for cid in ids:
+			name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": cid}, "name")
+			if name:
+				frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
+
+
+class TestPendingCaptureEndpoints(_OAuthApiBase):
+	"""The rehydrate/cancel wire endpoints over the pending-capture store."""
+
+	def _capture_one(self, email="rehydrate@acme.com"):
+		nonce = "p_" + ("f" * 46)
+		frappe.cache.hset(
+			_CACHE_KEY,
+			nonce,
+			{
+				"provider": "OpenAI",
+				"model": "gpt-5.5",
+				"status": "pending",
+				"expires_at_ts": int(time.time()) + 600,
+				"verifier": "v",
+				"state": "s",
+				"originator_user": frappe.session.user,
+				"pool": True,
+			},
+		)
+		with patch(
+			"jarvis.oauth.api._exchange_code",
+			return_value={"access_token": "AT", "refresh_token": "RT", "expires_in": 3600, "email": email},
+		):
+			return oauth_api.complete_pool_account_signin(nonce, "?code=A&state=s")["data"]
+
+	def _cleanup(self):
+		for name in frappe.get_all("Jarvis Pending OAuth Capture", pluck="name"):
+			frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_list_pending_captures_rehydrates_without_secret(self):
+		try:
+			view = self._capture_one()
+			out = oauth_api.list_pending_captures()
+			self.assertTrue(out["ok"])
+			ids = [c["capture_id"] for c in out["data"]["captures"]]
+			self.assertIn(view["capture_id"], ids)
+			self.assertNotIn("oauth_blob", json.dumps(out["data"]))
+			self.assertNotIn("RT", json.dumps(out["data"]))
+		finally:
+			self._cleanup()
+
+	def test_cancel_pending_capture_erases(self):
+		try:
+			view = self._capture_one()
+			out = oauth_api.cancel_pending_capture(view["capture_id"])
+			self.assertTrue(out["ok"])
+			# Cancelled captures no longer rehydrate.
+			listed = oauth_api.list_pending_captures()["data"]["captures"]
+			self.assertNotIn(view["capture_id"], [c["capture_id"] for c in listed])
+		finally:
+			self._cleanup()
+
+	def test_cancel_unknown_is_opaque(self):
+		out = oauth_api.cancel_pending_capture("oacap_nope")
+		self.assertFalse(out["ok"])
 
 
 class TestPoolSigninScope(_OAuthApiBase):
@@ -1113,7 +1242,18 @@ class TestKimiDeviceFlow(_OAuthApiBase):
 		d = res["data"]
 		self.assertEqual(d["status"], "ok")
 		self.assertTrue(d["account_ref"].startswith("SUB_"))
-		blob = json.loads(d["oauth_blob"])
+		# Plan-05 D2 (P0-04): capture_id, not the raw blob.
+		self.assertTrue(d["capture_id"].startswith("oacap_"))
+		self.assertNotIn("oauth_blob", d)
+		for secret in ("KAT", "KRT"):
+			self.assertNotIn(secret, json.dumps(d))
+		# The blob was persisted ENCRYPTED and decrypts to the Kimi device shape.
+		from frappe.utils.password import get_decrypted_password
+
+		name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": d["capture_id"]}, "name")
+		blob = json.loads(
+			get_decrypted_password("Jarvis Pending OAuth Capture", name, "encrypted_oauth_blob")
+		)
 		# agent blob shape the fleet oauth_blob_to_cliproxy_kimi transform consumes
 		self.assertEqual(blob["provider"], "kimi")
 		self.assertEqual(blob["access"], "KAT")
@@ -1121,6 +1261,7 @@ class TestKimiDeviceFlow(_OAuthApiBase):
 		self.assertEqual(blob["scope"], "kimi:coding")
 		self.assertTrue(blob["device_id"])  # minted at begin
 		self.assertNotIn("id_token", blob)  # device flow has none
+		frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
 		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, nonce))  # nonce consumed
 
 	def test_poll_expired_burns_nonce(self):
@@ -1188,8 +1329,18 @@ class TestXaiPoolCapture(_OAuthApiBase):
 		self.assertTrue(res["ok"])
 		d = res["data"]
 		self.assertTrue(d["account_ref"].startswith("SUB_"))
-		blob = json.loads(d["oauth_blob"])
+		# Plan-05 D2 (P0-04): capture_id, not the raw blob; the blob is persisted
+		# ENCRYPTED and decrypts to the xai shape (id_token retained for the transform).
+		self.assertTrue(d["capture_id"].startswith("oacap_"))
+		self.assertNotIn("oauth_blob", d)
+		from frappe.utils.password import get_decrypted_password
+
+		name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": d["capture_id"]}, "name")
+		blob = json.loads(
+			get_decrypted_password("Jarvis Pending OAuth Capture", name, "encrypted_oauth_blob")
+		)
 		self.assertEqual(blob["provider"], "xai")  # agent_provider
 		self.assertEqual(blob["access"], "XAT")
 		self.assertTrue(blob["id_token"])  # xai transform REQUIRES it
+		frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
 		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, nonce))  # single-use

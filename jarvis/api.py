@@ -1146,10 +1146,19 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		#   tokens under any filter (F1), so re-filter to record.conversation == conv
 		#   - an unrelated conv-less token (a rare session-resolution miss) must not
 		#   block a legitimate new card here.
-		if conv and any(
-			t.get("conversation") == conv
-			for t in pending_confirm.list_for_owner(owner_user, conversation=conv)
-		):
+		try:
+			conversation_pending = conv and any(
+				t.get("conversation") == conv
+				for t in pending_confirm.list_for_owner(owner_user, conversation=conv, strict=True)
+			)
+		except pending_confirm.PendingConfirmStorageError:
+			return _error(
+				"ConfirmationUnavailableError",
+				"could not check whether another confirmation is already pending "
+				"(a storage error). Nothing was changed. You may retry this exact "
+				"call once; if it still fails, tell the user and stop - do not loop.",
+			)
+		if conversation_pending:
 			return _error(
 				"ConfirmationPendingError",
 				"a confirmation card for a previous action is still awaiting the "
