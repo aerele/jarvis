@@ -3,14 +3,15 @@
 // regex/sed — a prior regex-based attempt corrupted this file when a comment
 // swallowed the following selector).
 //
-// A rule (or one comma-branch of a rule's selector list) is deleted only if
-// EVERY .jv-* class token appearing in that selector is in the dead set
-// read from deadClassesFile. This correctly handles compound/descendant
-// selectors like ".jv-dark .jv-settings-navitem.on": jv-dark is a live,
-// widely-used dark-mode scope class, but the rule as a whole can never
-// match anything because .jv-settings-navitem (the other required part of
-// the compound) never appears in the live DOM, so the whole selector is
-// still dead and the rule is removed.
+// A rule (or one comma-branch of a rule's selector list) is deleted as soon
+// as ANY .jv-* class token appearing in that selector is in the dead set
+// read from deadClassesFile, not only when every class in it is dead. This
+// correctly handles compound/descendant selectors like
+// ".jv-dark .jv-settings-navitem.on": jv-dark is a live, widely-used
+// dark-mode scope class, but the rule as a whole can never match anything
+// because .jv-settings-navitem (the other required part of the compound)
+// never appears in the live DOM, so the whole selector is still dead and
+// the rule is removed even though .jv-dark itself is very much alive.
 //
 // After rule removal, any @media block left with no rules and no comments
 // is dropped too. @keyframes are never touched by class-based removal since
@@ -20,11 +21,28 @@
 // `animation: jv-popin` (confirmed live, see PR description), so it must
 // survive even though every settings.css rule using it is being deleted.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import postcss from "postcss";
 
 const CSS_FILE = process.argv[2] || "src/assets/settings.css";
-const DEAD_FILE = process.argv[3] || "/tmp/dead-final.txt";
+// No default path ships in the repo on purpose: the dead-class list is a
+// derived artifact of scan-jv-classes.mjs's output, not something to keep in
+// sync by hand. To reproduce: run
+//   node scan-jv-classes.mjs src src/assets/settings.css
+// take everything under "=== DEAD CLASSES ===", strip the trailing
+// "[only matched inside another file's own <style> block]" notes, and drop
+// the four jv-fade-* lines (runtime-derived by <transition name="jv-fade">
+// in ChatView.vue, so they're live despite showing up dead here — see the
+// PR description). Save the remaining class names one per line, then pass
+// that file's path as this script's second argument.
+const DEAD_FILE = process.argv[3];
+if (!DEAD_FILE || !existsSync(DEAD_FILE)) {
+  console.error(
+    "Usage: node prune-dead-css.mjs <settings.css path> <dead-classes.txt path>\n" +
+      "See the comment at the top of this file for how to (re)generate the dead-classes file."
+  );
+  process.exit(1);
+}
 
 const dead = new Set(
   readFileSync(DEAD_FILE, "utf8").trim().split("\n").filter(Boolean)
