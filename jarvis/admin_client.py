@@ -828,7 +828,14 @@ def renew(provider: str | None = None) -> dict:
 	data dict with the ``payment_provider`` discriminator + that gateway's
 	checkout handles. A sub renews on the gateway it was created with unless
 	``provider`` overrides."""
-	body: dict = {"supported_providers": list(SUPPORTED_PROVIDERS)}
+	body: dict = {
+		"supported_providers": list(SUPPORTED_PROVIDERS),
+		# plan-09 §R P0-4: the billing facades now gate on this advert too (not just
+		# signup/resume). Send it so admin serves a token-only pay page instead of
+		# refusing this capable bench with CLIENT_UPGRADE_REQUIRED. MUST ship before
+		# admin hard-gates billing (bench-first deploy order).
+		"client_capabilities": _client_capabilities(),
+	}
 	if provider:
 		body["provider"] = provider
 	return _post(path=_m("api.tenant.renew"), body=body)
@@ -1424,7 +1431,11 @@ def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
 	discriminator + that gateway's checkout handles (+ target_plan). The order
 	stashes the upgrade intent for confirm_payment to apply after Checkout. A
 	sub upgrades on the gateway it was created with unless ``provider`` overrides."""
-	body: dict = {"target_plan": target_plan, "supported_providers": list(SUPPORTED_PROVIDERS)}
+	body: dict = {
+		"target_plan": target_plan,
+		"supported_providers": list(SUPPORTED_PROVIDERS),
+		"client_capabilities": _client_capabilities(),  # plan-09 §R P0-4 (see renew)
+	}
 	if provider:
 		body["provider"] = provider
 	return _post(path=_m("api.account.start_upgrade"), body=body)
@@ -1454,7 +1465,10 @@ def reauthorize_autopay() -> dict:
 	Returns the subscription id for a mandate-auth Checkout. Nothing is charged
 	now - the first cycle fires at the current period end.
 	"""
-	return _post(path=_m("api.account.reauthorize_autopay"), body={})
+	return _post(
+		path=_m("api.account.reauthorize_autopay"),
+		body={"client_capabilities": _client_capabilities()},  # plan-09 §R P0-4 (see renew)
+	)
 
 
 def preview_downgrade(target_plan: str) -> dict:
@@ -1467,12 +1481,21 @@ def start_downgrade(target_plan: str) -> dict:
 	"""Schedule a downgrade for the next cycle. Monthly autopay returns a
 	razorpay_subscription_id for a (₹0) mandate-auth Checkout; Annual/manual
 	returns {scheduled: 1} with no checkout."""
-	return _post(path=_m("api.account.start_downgrade"), body={"target_plan": target_plan})
+	return _post(
+		path=_m("api.account.start_downgrade"),
+		body={
+			"target_plan": target_plan,
+			"client_capabilities": _client_capabilities(),  # plan-09 §R P0-4 (see renew)
+		},
+	)
 
 
 def cancel_scheduled_downgrade() -> dict:
 	"""Revoke a scheduled (revocable) downgrade - stay on the current plan."""
-	return _post(path=_m("api.account.cancel_scheduled_downgrade"), body={})
+	return _post(
+		path=_m("api.account.cancel_scheduled_downgrade"),
+		body={"client_capabilities": _client_capabilities()},  # plan-09 §R P0-4 (see renew)
+	)
 
 
 def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:

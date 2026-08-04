@@ -1051,6 +1051,33 @@ class TestClientCapabilityAdvert(FrappeTestCase):
 			out = admin_client.signup("e@x.com", "Co", "Annual Plan")
 		self.assertEqual(out, legacy_data)
 
+	def test_billing_facades_carry_capability_advert(self):
+		"""plan-09 P0-2: the capability advert now rides EVERY billing initiation call,
+		not just signup/resume, because admin's billing facades gate on it too. Without
+		this, a cutover admin refuses every renew/upgrade/downgrade/reauthorize with
+		CLIENT_UPGRADE_REQUIRED. (Bench-first deploy: this advert must ship before admin
+		hard-gates.)"""
+		_settings_for_admin()  # authenticated billing calls
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		calls = [
+			("renew", lambda: admin_client.renew()),
+			("start_upgrade", lambda: admin_client.start_upgrade("Pro Plan")),
+			("reauthorize_autopay", lambda: admin_client.reauthorize_autopay()),
+			("start_downgrade", lambda: admin_client.start_downgrade("Basic Plan")),
+			("cancel_scheduled_downgrade", lambda: admin_client.cancel_scheduled_downgrade()),
+		]
+		for name, call in calls:
+			with self.subTest(call=name):
+				captured.clear()
+				with patch("requests.post", side_effect=_fake_post):
+					call()
+				self.assertEqual(captured["json"].get("client_capabilities"), _EXPECTED_ADVERT, name)
+
 
 class TestPublicOriginSweep(FrappeTestCase):
 	"""plan-09 P1-5: the bench half of the ``get_url`` sweep. The ``frappe_site_url``

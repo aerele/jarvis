@@ -1,14 +1,14 @@
 {
   "contract_version": 2,
   "name": "reconcile_pending",
-  "description": "A provider-truth check whose gateway says the intent is alive and undecided - an unopened checkout, a payment still in flight, an e-NACH the bank is still approving. Same code the passive poll returns, deliberately: the caller polls or re-checks, and it must NOT be routed at a retry, which would open a second gateway object alongside a live one. The checkout handle is still served so the customer can simply finish paying.",
+  "description": "A provider-truth check whose gateway says the intent is alive and undecided - an unopened checkout, a payment still in flight, an e-NACH the bank is still approving. Same code the passive poll returns, deliberately: the caller polls or re-checks, and it must NOT be routed at a retry, which would open a second gateway object alongside a live one. TOKEN-SHAPED (plan-09 §0.4): the live intent is re-served as pay_page_token + pay_origin_digest so the customer can simply finish paying on the admin-hosted pay page; no raw gateway handle crosses the wire.",
   "endpoint": "jarvis_admin_v2.billing.signup.check_signup_payment_status",
   "http_status": 200,
   "volatile": [
     "body.message.data.attempt_id",
     "body.message.data.payment_last_checked_at",
-    "body.message.data.razorpay_key_id",
-    "body.message.data.razorpay_order_id"
+    "body.message.data.pay_page_token",
+    "body.message.data.pay_origin_digest"
   ],
   "body": {
     "message": {
@@ -27,8 +27,8 @@
         "due_today_inr": 12000.0,
         "email": "oc-test-a@example.com",
         "company": "Acme",
-        "razorpay_key_id": "placeholder",
-        "razorpay_order_id": "order_placeholder",
+        "pay_page_token": "pit_placeholder",
+        "pay_origin_digest": "digest_placeholder",
         "can_initiate_payment": true,
         "can_check_status": true,
         "can_reconnect": false,

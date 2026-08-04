@@ -1,14 +1,14 @@
 {
   "contract_version": 2,
   "name": "reconcile_declined",
-  "description": "A provider-truth check whose gateway says every payment on this intent was refused. Distinct from PAYMENT_CONFIRMATION_PENDING in exactly one way that matters to the caller: a NEW intent is the recovery here, and polling is not. The dead handle is still reported - the check never replaces an intent, only an explicit retry does - so the caller branches on the code and not on the presence of a handle.",
+  "description": "A provider-truth check whose gateway says every payment on this intent was refused. Distinct from PAYMENT_CONFIRMATION_PENDING in exactly one way that matters to the caller: a NEW intent is the recovery here, and polling is not. TOKEN-SHAPED (plan-09 §0.4): the live intent's pay_page_token is still re-served (the check never replaces an intent, only an explicit retry does), so the caller branches on the CODE, not on the presence of a handle - and no raw gateway handle crosses the wire.",
   "endpoint": "jarvis_admin_v2.billing.signup.check_signup_payment_status",
   "http_status": 200,
   "volatile": [
     "body.message.data.attempt_id",
     "body.message.data.payment_last_checked_at",
-    "body.message.data.razorpay_key_id",
-    "body.message.data.razorpay_order_id"
+    "body.message.data.pay_page_token",
+    "body.message.data.pay_origin_digest"
   ],
   "body": {
     "message": {
@@ -21,8 +21,8 @@
         "amount_inr": 12000.0,
         "email": "oc-test-a@example.com",
         "company": "Acme",
-        "razorpay_key_id": "placeholder",
-        "razorpay_order_id": "order_placeholder",
+        "pay_page_token": "pit_placeholder",
+        "pay_origin_digest": "digest_placeholder",
         "can_initiate_payment": true,
         "can_check_status": true,
         "can_reconnect": false,

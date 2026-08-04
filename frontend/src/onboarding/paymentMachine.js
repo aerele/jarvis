@@ -115,6 +115,9 @@ const RESTART_SAFE_CODES = new Set([
 	CODES.BENCH_NO_SIGNUP_CONTEXT,
 	CODES.NO_CURRENT_INTENT,
 	CODES.ACCOUNT_ALREADY_EXISTS,
+	// The capability/upgrade refusal precedes any provider object, so nothing
+	// recoverable sits behind it - "Start again" is safe (U4).
+	CODES.CLIENT_UPGRADE_REQUIRED,
 ]);
 
 export function isTerminalForPayment(value) {

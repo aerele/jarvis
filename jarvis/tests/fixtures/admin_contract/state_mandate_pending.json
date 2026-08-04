@@ -1,14 +1,12 @@
 {
   "contract_version": 2,
   "name": "state_mandate_pending",
-  "description": "Authenticated state poll for a Cashfree AUTOPAY signup awaiting mandate authorization. The mandate id is a checkout handle exactly like an order id; before this contract the state endpoint did not look at it and told every mandate customer to start over. The mandate id and the browser session token are GATEWAY-minted per attempt, so only their presence is pinned.",
+  "description": "Authenticated state poll for a Cashfree AUTOPAY signup awaiting mandate authorization. TOKEN-SHAPED (plan-09 §0.4): the live intent is served as pay_page_token + pay_origin_digest, never the raw mandate id / browser session token / app id + env - the bench navigates to the admin-hosted pay page with the token. Only the token's and digest's presence is pinned (per-run / origin-derived).",
   "endpoint": "jarvis_admin_v2.billing.signup.get_signup_payment_state",
   "http_status": 200,
   "volatile": [
-    "body.message.data.cashfree_app_id",
-    "body.message.data.cashfree_env",
-    "body.message.data.cashfree_subscription_id",
-    "body.message.data.subscription_session_id",
+    "body.message.data.pay_page_token",
+    "body.message.data.pay_origin_digest",
     "body.message.data.payment_last_checked_at",
     "body.message.data.attempt_id"
   ],
@@ -29,11 +27,8 @@
         "due_today_inr": 999.0,
         "email": "oc-test-a@example.com",
         "company": "Acme",
-        "cashfree_app_id": "placeholder",
-        "cashfree_env": "sandbox",
-        "cashfree_subscription_id": "jrvs_placeholder",
-        "subscription_session_id": "sub_session_placeholder",
-        "trial_days": 0,
+        "pay_page_token": "pit_placeholder",
+        "pay_origin_digest": "digest_placeholder",
         "payment_last_checked_at": "2026-08-01 00:00:00.000000",
         "attempt_id": "att_placeholder",
         "generation": 1
