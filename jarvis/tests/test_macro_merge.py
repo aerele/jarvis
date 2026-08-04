@@ -121,6 +121,57 @@ class TestSummarizeMacro(_MacroMergeBase):
 		with self.assertRaises(frappe.ValidationError):
 			summarize_macro(m.name)
 
+	def test_pending_written_before_dispatch(self):
+		"""Regression: dispatch can complete the turn inline before _enqueue_turn
+		returns, so the advance hook's lookup for {merge_conversation, merge_status
+		== "pending"} must never miss. Assert "pending" is already on the macro
+		at the moment _enqueue_turn is invoked, not after."""
+		m = _mk_macro(
+			[
+				{"label": "a", "prompt": "Sales analytics for last quarter"},
+				{"label": "b", "prompt": "Find the highest outstanding customer"},
+			]
+		)
+		self.addCleanup(
+			lambda: frappe.delete_doc("Jarvis Macro", m.name, force=True, ignore_permissions=True)
+		)
+		seen = {}
+
+		def _capture(conversation, prompt):
+			seen["merge_status"] = frappe.db.get_value("Jarvis Macro", m.name, "merge_status")
+			seen["merge_conversation"] = frappe.db.get_value("Jarvis Macro", m.name, "merge_conversation")
+			return {"run_id": "r1", "message_id": "m1"}
+
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=_capture):
+			r = summarize_macro(m.name)
+		self.addCleanup(
+			lambda: frappe.delete_doc(
+				"Jarvis Conversation", r["conversation"], force=True, ignore_permissions=True
+			)
+		)
+		self.assertEqual(seen["merge_status"], "pending")
+		self.assertEqual(seen["merge_conversation"], r["conversation"])
+
+	def test_overloaded_dispatch_clears_pending_mark(self):
+		"""When dispatch reports overloaded, the pending mark written up front
+		must be rolled back — otherwise Run stays gated forever on a summary
+		turn that never ran (get_macro_merge would poll pending forever)."""
+		m = _mk_macro(
+			[
+				{"label": "a", "prompt": "Sales analytics for last quarter"},
+				{"label": "b", "prompt": "Find the highest outstanding customer"},
+			]
+		)
+		self.addCleanup(
+			lambda: frappe.delete_doc("Jarvis Macro", m.name, force=True, ignore_permissions=True)
+		)
+		overload = {"ok": False, "overloaded": True, "reason": "busy"}
+		with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
+			r = summarize_macro(m.name)
+		self.assertFalse(r["ok"])
+		self.assertEqual(frappe.db.get_value("Jarvis Macro", m.name, "merge_status"), "")
+		self.assertEqual(frappe.db.get_value("Jarvis Macro", m.name, "merge_conversation"), "")
+
 
 class TestGetMacroMerge(_MacroMergeBase):
 	def _cleanup_conv(self, conv):
