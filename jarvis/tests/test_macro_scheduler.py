@@ -205,6 +205,32 @@ class TestScheduledMacroFailures(MacroSchedulerBase):
 		)
 		self.assertTrue(notes, "the owner got no signal at all")
 
+	def test_dispatch_raising_after_the_run_row_exists_leaves_no_orphan(self):
+		# run_macro COMMITS the conversation and the run row, then dispatches. When the
+		# dispatch raises (gateway down, _ensure_session_key throws) no turn exists, so
+		# the chaining hook that terminalizes a run never fires. Without the fix that
+		# row sat `running` for three hours until the sweep, AND the scheduler recorded
+		# a second failed row, showing two failures for one missed slot.
+		m = _mk_macro(OWNER_OK, "orphan", steps=1)
+		before = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("gateway down")):
+			macro_scheduler.run_due_macros()
+		runs = _runs_for(m.name)
+		self.assertEqual(len(runs), 1, f"expected exactly one run row for one slot, got {runs}")
+		self.assertEqual(runs[0].status, "failed", "the run row was left stranded in `running`")
+		self.assertIn("dispatch", runs[0].error.lower())
+		# It is the row that carries the conversation, not a bare scheduler record.
+		self.assertTrue(frappe.db.get_value(RUN, runs[0].name, "conversation"))
+		# Transient: the slot stays due so the next tick retries it.
+		after = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+		self.assertEqual(after, before, "a dispatch failure cost the macro its slot")
+
+	def test_notify_owner_never_escapes_and_aborts_the_sweep(self):
+		# The scheduler's per-macro loop has no outer guard, so an escape from
+		# notify_owner would abort the sweep for every REMAINING due macro.
+		with patch("jarvis.permissions.is_valid_unattended_owner", side_effect=RuntimeError("db blip")):
+			macros.notify_owner(OWNER_OK, subject="x", body="y")  # must not raise
+
 	def test_successful_run_stamps_last_run_at(self):
 		m = _mk_macro(OWNER_OK, "success")
 		self._run_due()
@@ -324,17 +350,44 @@ class TestScheduledMacroCaps(MacroSchedulerBase):
 		manual = self._mk_consumed_run(m.name, 5, trigger="manual")
 		self.addCleanup(frappe.delete_doc, RUN, manual, force=True, ignore_permissions=True)
 		self.assertEqual(macros._scheduled_steps_this_month(OWNER_OK), base + 7)
-		# And a refusal must never make the cap self-perpetuating.
-		refused = self._mk_consumed_run(m.name, 4, status="failed")
+		# And a refusal must never make the cap self-perpetuating. It carries
+		# current_step=0, so it contributes nothing WITHOUT filtering on status.
+		refused = self._mk_consumed_run(m.name, 0, status="failed")
 		self.addCleanup(frappe.delete_doc, RUN, refused, force=True, ignore_permissions=True)
 		self.assertEqual(macros._scheduled_steps_this_month(OWNER_OK), base + 7)
 
-	def test_budget_floor_survives_a_misconfigured_zero(self):
-		frappe.db.set_single_value("Jarvis Settings", "macro_step_budget_monthly", 0)
+	def test_partly_failed_run_still_counts_the_steps_it_billed(self):
+		# A run that failed HALFWAY really dispatched and billed its completed steps
+		# (stop_on_error, the capacity-attempt cap, and the stale sweep all produce
+		# exactly that). Excluding failed rows wholesale would erase those turns, so an
+		# owner whose macros keep failing could spend past the budget indefinitely.
+		m = _mk_macro(OWNER_OK, "part-failed", due=False, steps=3)
+		base = macros._scheduled_steps_this_month(OWNER_OK)
+		partial = self._mk_consumed_run(m.name, 2, status="failed")
+		self.addCleanup(frappe.delete_doc, RUN, partial, force=True, ignore_permissions=True)
+		self.assertEqual(macros._scheduled_steps_this_month(OWNER_OK), base + 2)
+
+	def test_stopped_run_still_counts_the_steps_it_billed(self):
+		m = _mk_macro(OWNER_OK, "stopped-run", due=False, steps=3)
+		base = macros._scheduled_steps_this_month(OWNER_OK)
+		stopped = self._mk_consumed_run(m.name, 2, status="stopped")
+		self.addCleanup(frappe.delete_doc, RUN, stopped, force=True, ignore_permissions=True)
+		self.assertEqual(macros._scheduled_steps_this_month(OWNER_OK), base + 2)
+
+	def test_budget_floor_clamps_up_and_never_widens(self):
 		self.addCleanup(frappe.db.set_single_value, "Jarvis Settings", "macro_step_budget_monthly", None)
+		# Unset/blank means "no opinion" and takes the default.
+		frappe.db.set_single_value("Jarvis Settings", "macro_step_budget_monthly", 0)
 		self.assertEqual(
 			macros._scheduled_step_budget_monthly(), macros.DEFAULT_SCHEDULED_STEP_BUDGET_MONTHLY
 		)
+		# A deliberately tight cap is clamped UP to the floor, never widened to the
+		# default: an admin who configures 10 must not silently get 500.
+		frappe.db.set_single_value("Jarvis Settings", "macro_step_budget_monthly", 10)
+		self.assertEqual(macros._scheduled_step_budget_monthly(), macros.MIN_SCHEDULED_STEP_BUDGET_MONTHLY)
+		# A value above the floor is honoured exactly.
+		frappe.db.set_single_value("Jarvis Settings", "macro_step_budget_monthly", 77)
+		self.assertEqual(macros._scheduled_step_budget_monthly(), 77)
 
 	def test_manual_run_is_entitlement_gated_but_not_budget_gated(self):
 		m = _mk_macro(OWNER_OK, "manual-gate", due=False)

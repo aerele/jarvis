@@ -22,6 +22,8 @@ import datetime
 import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
+from jarvis.chat.macros import BLOCK_DISPATCH_FAILED, BLOCK_STEP_BUDGET
+
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
 
@@ -60,9 +62,13 @@ _BLOCK_SENTENCE = {
 	"workspace_resetting": (
 		"Scheduled run deferred: the workspace is being rebuilt. It will retry on the next hourly tick."
 	),
-	"scheduled_step_budget": (
+	BLOCK_STEP_BUDGET: (
 		"Scheduled run skipped: this month's budget for scheduled macro runs is used up. "
 		"Runs resume next month, or ask an admin to raise the budget in Jarvis Settings."
+	),
+	BLOCK_DISPATCH_FAILED: (
+		"Scheduled run could not be started: the agent turn was not dispatched. It will "
+		"retry on the next hourly tick."
 	),
 }
 
@@ -70,7 +76,7 @@ _BLOCK_SENTENCE = {
 # next hourly tick retries it (the sibling's O4 shape). Everything else is an
 # entitlement decision that cannot clear inside the hour — consume the slot, or the
 # cadence relogs the same dead end 24 times a day.
-_TRANSIENT_BLOCKS = {"release_update_required", "workspace_resetting"}
+_TRANSIENT_BLOCKS = {"release_update_required", "workspace_resetting", BLOCK_DISPATCH_FAILED}
 
 
 def run_due_macros() -> None:
@@ -156,6 +162,12 @@ def _settle(m, now, out: dict) -> None:
 		_consume_slot(m, now, stamp_last_run=False)
 		return
 	sentence = _BLOCK_SENTENCE.get(reason) or f"Scheduled run was refused: {reason or 'unknown'}."
+	if reason == BLOCK_DISPATCH_FAILED:
+		# run_macro already terminalized the run row it had created — the one that
+		# carries the conversation link — so recording a second one here would show the
+		# customer two failures for one missed slot. Notify, and leave the slot due.
+		_notify_owner(m, sentence)
+		return
 	_record_failed(m, sentence)
 	_notify_owner(m, sentence)
 	if reason in _TRANSIENT_BLOCKS:
