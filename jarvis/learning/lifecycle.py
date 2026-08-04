@@ -457,7 +457,16 @@ def revalidate_active(run=None, patterndb=None, mined=None) -> dict:
 		],
 	)
 	out = {"revalidated": 0, "staled": 0, "version_skipped": 0, "unchecked": 0, "cap_deferred": 0}
+	# Rows this run's mining already staled for redraft drift (#482) ride the
+	# SAME summary notification - the mining loop stashes them precisely so they
+	# never become one Notification Log per pattern. Drained BEFORE the
+	# empty-rows return: mining may have staled every Approved/Active row, which
+	# is exactly when `rows` is empty.
+	staled_lines: list[str] = _drain_redraft_stale()
+	out["staled"] += len(staled_lines)
 	if not rows:
+		if staled_lines:
+			_notify_stale(staled_lines)
 		return out
 
 	groups: dict = {}
@@ -465,7 +474,6 @@ def revalidate_active(run=None, patterndb=None, mined=None) -> dict:
 		groups.setdefault((r.detector_id, r.company), []).append(r)
 
 	now = now_datetime()
-	staled_lines: list[str] = []
 	for (detector_id, company), patterns in groups.items():
 		if mined is None and _revalidation_window_closed(run):
 			# Respect the analysis window on the SLOW (checker-re-run) path
@@ -559,13 +567,6 @@ def revalidate_active(run=None, patterndb=None, mined=None) -> dict:
 				out["staled"] += 1
 				staled_lines.append(f"{row.name}: {reason}")
 
-	# Rows this run's mining already staled for redraft drift ride the SAME
-	# summary notification (#482) - the mining loop stashes them precisely so
-	# they do not become one Notification Log per pattern.
-	redraft_lines = _drain_redraft_stale()
-	if redraft_lines:
-		staled_lines.extend(redraft_lines)
-		out["staled"] += len(redraft_lines)
 	if staled_lines:
 		_notify_stale(staled_lines)
 	if out["revalidated"] or out["version_skipped"]:
