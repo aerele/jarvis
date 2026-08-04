@@ -569,27 +569,11 @@ def summarize_macro(name: str) -> dict:
 	from jarvis.chat import api as chat_api
 
 	prompt = _MERGE_INSTRUCTION + frappe.as_json(payload) + "\n\nApply these skills: /macro-merge"
-	out = chat_api._enqueue_turn(conv.name, prompt)
-	# CDX-19: the site's turn queue was momentarily full, so the merge turn was NOT dispatched
-	# (its seed was cleaned up). Do NOT mark the macro merge "pending" — that would strand it
-	# waiting on a summary turn that never runs (get_macro_merge would poll pending forever).
-	# The merge is a one-shot user action (not a chained run), so the honest disposition is a
-	# retryable rejection: tear down the throwaway conversation and let the user re-click.
-	if isinstance(out, dict) and out.get("overloaded"):
-		try:
-			frappe.delete_doc("Jarvis Conversation", conv.name, ignore_permissions=True, force=True)
-			frappe.db.commit()
-		except Exception:
-			frappe.db.rollback()
-		return {
-			"ok": False,
-			"reason": out.get("reason") or _("The site is busy — please try again in a moment."),
-		}
-	# Hide from the sidebar (list_conversations skips Archived).
-	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
-	# Mark the macro "summarizing": run_macro refuses while pending, and the
-	# worker's advance hook applies the summary when this turn finishes — so
-	# the flow completes even if the browser tab is gone.
+	# Mark the macro "summarizing" BEFORE dispatch: run_macro refuses while pending, and
+	# the worker's advance hook applies the summary when this turn finishes. Dispatch can
+	# complete the turn inline (before _enqueue_turn even returns), so writing "pending"
+	# after dispatch loses the race — the advance hook's lookup misses and silently no-ops.
+	# Writing it first guarantees a completed turn always finds the macro already waiting.
 	frappe.db.set_value(
 		MACRO,
 		name,
@@ -599,6 +583,35 @@ def summarize_macro(name: str) -> dict:
 		},
 		update_modified=False,
 	)
+	frappe.db.commit()
+	out = chat_api._enqueue_turn(conv.name, prompt)
+	# CDX-19: the site's turn queue was momentarily full, so the merge turn was NOT dispatched
+	# (its seed was cleaned up). Roll back the "pending" mark set above — there is no summary
+	# turn coming for it to wait on (get_macro_merge would poll pending forever otherwise).
+	# The merge is a one-shot user action (not a chained run), so the honest disposition is a
+	# retryable rejection: tear down the throwaway conversation, clear the mark, and let the
+	# user re-click.
+	if isinstance(out, dict) and out.get("overloaded"):
+		try:
+			frappe.delete_doc("Jarvis Conversation", conv.name, ignore_permissions=True, force=True)
+			frappe.db.set_value(
+				MACRO,
+				name,
+				{
+					"merge_status": "",
+					"merge_conversation": "",
+				},
+				update_modified=False,
+			)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+		return {
+			"ok": False,
+			"reason": out.get("reason") or _("The site is busy — please try again in a moment."),
+		}
+	# Hide from the sidebar (list_conversations skips Archived).
+	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
 	frappe.db.commit()
 	return {"ok": True, "conversation": conv.name}
 
