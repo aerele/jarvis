@@ -70,6 +70,9 @@ INDEX_PATH = "wiki/index.md"
 LOG_PATH = "wiki/log.md"
 _INDEX_SUMMARY_CHARS = 100
 _LOG_MAX_EVENTS = 150
+# Curated links are appended one at a time and never pruned, so the "## Related"
+# tail gets the same defensive cap wiki_graph puts on a page's link set.
+_MAX_RELATED = 50
 
 _PAGE_FIELDS = [
 	"name",
@@ -80,6 +83,9 @@ _PAGE_FIELDS = [
 	"status",
 	"summary",
 	"body_md",
+	# Curated [[links]], kept out of body_md by add_wiki_link; rendered as the
+	# "## Related" tail so they reach the container at all.
+	"manual_links",
 	"sources",
 	"last_confirmed_at",
 	"contradiction_flag",
@@ -115,12 +121,20 @@ def page_path(page) -> str:
 # --------------------------------------------------------------------------- #
 # renders (pure functions of page data; deterministic modulo the stale clock)
 # --------------------------------------------------------------------------- #
-def render_page(doc) -> tuple[str, str]:
+def render_page(doc, mirrored_slugs: set[str] | None = None) -> tuple[str, str]:
 	"""Render one page as Obsidian-style markdown. Returns ``(path, content)``
 	with path ``wiki/<typedir>/<slug>.md``. Frontmatter carries the metadata
 	the agent needs to trust-or-verify (stale/contradiction flags); the body's
-	existing ``[[slug]]`` links pass through untouched; the provenance trail
-	renders as a ``## Sources`` tail."""
+	existing ``[[slug]]`` links pass through untouched; curated out-of-body
+	links render as a ``## Related`` section and the provenance trail as a
+	``## Sources`` tail.
+
+	``mirrored_slugs`` is the set of slugs that actually have a file on the
+	container. ``_sync`` always passes it, because scope discipline runs
+	through Related too: a curated link may point at a Role/User or archived
+	page, and neither its slug nor a dangling ``[[link]]`` belongs in the
+	org-shared mirror. ``None`` (direct/test calls) renders every curated
+	target unfiltered."""
 	from jarvis.chat.wiki import is_stale
 
 	stale = is_stale(doc.get("last_confirmed_at"), doc.get("modified"))
@@ -142,11 +156,37 @@ def render_page(doc) -> tuple[str, str]:
 	body = str(doc.get("body_md") or "").strip("\n")
 	if body:
 		lines += [body, ""]
+	related = _related_lines(doc, mirrored_slugs)
+	if related:
+		lines += ["## Related", ""] + related + [""]
 	source_lines = _source_lines(doc.get("sources"))
 	if source_lines:
 		lines += ["## Sources", ""] + source_lines + [""]
 	content = "\n".join(lines).rstrip("\n") + "\n"
 	return page_path(doc), content
+
+
+def _related_lines(doc, mirrored_slugs: set[str] | None) -> list[str]:
+	"""``manual_links`` -> ``- [[slug]]`` bullets, in curation order.
+
+	Curated links are stored OUT of ``body_md`` so LLM re-ingest can't clobber
+	them, which also meant they never reached the container at all: the agent's
+	two channels are this mirror and ``jarvis__read_wiki``, and neither read the
+	field. Rendering them as real ``[[slug]]`` links keeps every body-based
+	consumer (Obsidian, a grep, the agent itself) working unchanged."""
+	from jarvis.chat.wiki import _parse_manual_links
+
+	self_slug = doc.get("slug") or doc.get("name")
+	out = []
+	for target in _parse_manual_links(doc.get("manual_links")):
+		if target == self_slug:
+			continue
+		if mirrored_slugs is not None and target not in mirrored_slugs:
+			continue
+		out.append(f"- [[{target}]]")
+		if len(out) >= _MAX_RELATED:
+			break
+	return out
 
 
 def _source_lines(raw) -> list[str]:
@@ -285,9 +325,14 @@ def _sync(full: bool) -> dict:
 	rows = frappe.get_all(WIKI, fields=_PAGE_FIELDS, limit_page_length=0)
 	active = [r for r in rows if _is_mirrorable(r)]
 
+	# Only these slugs have a file on the container, so only these may appear in
+	# a "## Related" tail (a curated link out to a Role/User or archived page
+	# would otherwise leak its slug into the org-shared mirror and dangle).
+	mirrored_slugs = {r.name for r in active}
+
 	files: list[dict] = []
 	for r in active:
-		path, content = render_page(r)
+		path, content = render_page(r, mirrored_slugs)
 		digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
 		if full or digest != (r.mirror_hash or ""):
 			files.append(_file_entry(path, content, page=r.name, digest=digest))

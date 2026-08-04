@@ -11,8 +11,10 @@ sync commits mid-run (FrappeTestCase rollback can't undo it).
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
+import json
 from unittest import mock
 
 import frappe
@@ -47,7 +49,16 @@ class WikiMirrorTestCase(FrappeTestCase):
 		frappe.db.commit()
 		super().tearDown()
 
-	def _page(self, slug, page_type="Customer", body="Body.", summary="", scope=None, status="Active"):
+	def _page(
+		self,
+		slug,
+		page_type="Customer",
+		body="Body.",
+		summary="",
+		scope=None,
+		status="Active",
+		manual_links=None,
+	):
 		doc = frappe.get_doc(
 			{
 				"doctype": WIKI,
@@ -60,6 +71,8 @@ class WikiMirrorTestCase(FrappeTestCase):
 				"status": status,
 			}
 		)
+		if manual_links is not None:
+			doc.manual_links = json.dumps(manual_links)
 		doc.insert(ignore_permissions=True)
 		frappe.db.commit()
 		return doc
@@ -79,6 +92,16 @@ class WikiMirrorTestCase(FrappeTestCase):
 		for call in push_mock.call_args_list:
 			paths += [f["path"] for f in call.kwargs["files"]]
 		return paths
+
+	@staticmethod
+	def _pushed_content(push_mock, wire_path: str) -> str:
+		"""The decoded markdown actually sent for one wire path (the file that
+		lands in the container workspace), or "" when it was never pushed."""
+		for call in push_mock.call_args_list:
+			for f in call.kwargs["files"]:
+				if f["path"] == wire_path:
+					return base64.b64decode(f["content_b64"]).decode("utf-8")
+		return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -118,6 +141,40 @@ class TestRenders(WikiMirrorTestCase):
 		self.assertIn("## Sources", content)
 		self.assertIn("- 2026-07-01 · voice · VN-1 · a@x.com", content)
 		self.assertTrue(content.endswith("\n"))
+
+	def test_render_page_emits_curated_links_as_a_related_section(self):
+		"""#494: curated links live in manual_links, out of body_md, so the
+		mirror never carried them and the agent could not see one at all."""
+		row = self._row(manual_links=json.dumps(["item--widget", "process--billing"]))
+		_path, content = wiki_mirror.render_page(row)
+		self.assertIn("## Related", content)
+		self.assertIn("- [[item--widget]]", content)
+		self.assertIn("- [[process--billing]]", content)
+		# curation order is preserved, and Related sits between body and Sources
+		self.assertLess(content.index("- [[item--widget]]"), content.index("- [[process--billing]]"))
+		self.assertLess(content.index("## Related"), content.index("## Sources"))
+		self.assertLess(content.index("Acme buys monthly."), content.index("## Related"))
+
+	def test_render_page_has_no_related_section_without_curated_links(self):
+		for raw in (None, "", "[]", "not json", '{"not": "a list"}'):
+			_path, content = wiki_mirror.render_page(self._row(manual_links=raw))
+			self.assertNotIn("## Related", content)
+
+	def test_render_page_related_is_filtered_to_mirrored_pages(self):
+		"""Scope discipline runs through Related: a curated link out to a
+		Role/User or archived page must not put its slug on the org-shared
+		container, nor leave a dangling [[link]] there."""
+		row = self._row(manual_links=json.dumps(["item--widget", "secret--u-bob"]))
+		_path, content = wiki_mirror.render_page(row, {"item--widget"})
+		self.assertIn("- [[item--widget]]", content)
+		self.assertNotIn("secret--u-bob", content)
+
+	def test_render_page_related_skips_self_and_caps(self):
+		me = f"{SLUG_PREFIX}--acme"
+		targets = [me] + [f"item--w{i}" for i in range(wiki_mirror._MAX_RELATED + 5)]
+		_path, content = wiki_mirror.render_page(self._row(manual_links=json.dumps(targets)))
+		self.assertNotIn(f"- [[{me}]]", content)
+		self.assertEqual(content.count("- [[item--w"), wiki_mirror._MAX_RELATED)
 
 	def test_render_page_stale_and_contradiction_flags(self):
 		row = self._row(last_confirmed_at="2020-01-01 00:00:00", contradiction_flag=1)
@@ -214,6 +271,35 @@ class TestRenders(WikiMirrorTestCase):
 # sync
 # --------------------------------------------------------------------------- #
 class TestSync(WikiMirrorTestCase):
+	def test_sync_pushes_a_file_carrying_the_curated_links(self):
+		"""#494 end to end: the file that reaches the container workspace has
+		the curated links in it, so a native read/grep by the agent finds them."""
+		target = self._page("target")
+		curator = self._page("curator", body="No wikilinks in this body.", manual_links=[target.name])
+
+		with self._mock_push() as push:
+			out = wiki_mirror.sync()
+		self.assertTrue(out["ok"])
+		content = self._pushed_content(push, f"customers/{curator.name}.md")
+		self.assertIn("## Related", content)
+		self.assertIn(f"- [[{target.name}]]", content)
+
+	def test_sync_keeps_non_org_curated_targets_off_the_org_container(self):
+		private = self._page("private", scope="User")
+		archived = self._page("bygone", status="Archived")
+		visible = self._page("visible")
+		curator = self._page(
+			"curator",
+			manual_links=[private.name, archived.name, visible.name],
+		)
+
+		with self._mock_push() as push:
+			wiki_mirror.sync()
+		content = self._pushed_content(push, f"customers/{curator.name}.md")
+		self.assertIn(f"- [[{visible.name}]]", content)
+		self.assertNotIn(private.name, content)
+		self.assertNotIn(archived.name, content)
+
 	def test_sync_pushes_new_page_then_hash_diff_skips_it(self):
 		doc = self._page("acme", summary="Acme summary.")
 		wire_path = f"customers/{doc.name}.md"

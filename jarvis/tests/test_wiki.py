@@ -875,7 +875,10 @@ class TestWikiTools(FrappeTestCase):
 
 		rows = read_wiki(query="Wikitest Tool Page")
 		self.assertTrue(any(r["slug"] == "org--wikitest-tool-page" for r in rows))
-		self.assertEqual(set(rows[0]), {"slug", "title", "page_type", "summary", "stale"})
+		self.assertEqual(
+			set(rows[0]),
+			{"slug", "title", "page_type", "summary", "stale", "manual_links"},
+		)
 
 	def test_search_matches_ref_name_exactly(self):
 		_make_page(

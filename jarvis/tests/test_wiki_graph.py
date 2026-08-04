@@ -8,6 +8,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import wiki as wiki_mod
 from jarvis.chat import wiki_graph
+from jarvis.tools.read_wiki import read_wiki
 
 WIKI = "Jarvis Wiki Page"
 _PREFIX = "graphtest"
@@ -21,7 +22,10 @@ def _delete_pages():
 		frappe.delete_doc(WIKI, name, force=True, ignore_permissions=True)
 
 
-class TestWikiGraphCompute(FrappeTestCase):
+class WikiGraphTestCase(FrappeTestCase):
+	"""Page fixtures swept by slug prefix, shared by the compute tests and the
+	reader-tool tests below."""
+
 	def setUp(self):
 		frappe.set_user("Administrator")
 		_delete_pages()
@@ -66,6 +70,8 @@ class TestWikiGraphCompute(FrappeTestCase):
 			frappe.db.set_value(WIKI, doc.name, vals, update_modified=False)
 		return doc
 
+
+class TestWikiGraphCompute(WikiGraphTestCase):
 	def _graph(self):
 		return wiki_graph.compute_graph()
 
@@ -378,6 +384,52 @@ class TestWikiGraphCompute(FrappeTestCase):
 		frappe.db.set_value(WIKI, doc.name, "status", "Archived", update_modified=False)
 		g = self._graph()
 		self.assertIsNone(self._node(g, f"page:{doc.name}"))
+
+
+class TestCuratedLinksReachReaders(WikiGraphTestCase):
+	"""#494: ``add_wiki_link`` stores curated links in ``manual_links``, never in
+	``body_md``, and for a long time only ``wiki_graph`` read that field. The
+	agent's only two channels into the wiki are ``jarvis__read_wiki`` and the
+	container mirror, so a curated relation reached it through neither.
+
+	The mirror and orphan halves live beside their own modules
+	(``test_wiki_mirror`` / ``test_wiki_lint``); this covers the reader tool,
+	next to the writer it pairs with."""
+
+	def test_read_wiki_surfaces_curated_links_on_both_paths(self):
+		target = self._page(f"{_PREFIX}-crl-target", "Curated Target")
+		source = self._page(
+			f"{_PREFIX}-crl-source",
+			"Curated Source",
+			body_md="Nothing in this body links anywhere.",
+			manual_links=[target.name],
+		)
+
+		page = read_wiki(slug=source.name)
+		self.assertEqual(page["manual_links"], [target.name])
+
+		rows = read_wiki(query=f"{_PREFIX}-crl-source", limit=10)
+		row = next(r for r in rows if r["slug"] == source.name)
+		self.assertEqual(row["manual_links"], [target.name])
+
+	def test_read_wiki_drops_targets_the_caller_cannot_read(self):
+		"""Curated links are bare slugs written once and never re-checked, so
+		echoing them raw would disclose a page whose scope narrowed since the
+		write, and would hand the agent links it cannot follow."""
+		archived = self._page(f"{_PREFIX}-crl-gone", "Curated Archived")
+		frappe.db.set_value(WIKI, archived.name, "status", "Archived", update_modified=False)
+		source = self._page(
+			f"{_PREFIX}-crl-src2",
+			"Curated Source 2",
+			manual_links=[archived.name, f"{_PREFIX}-crl-never-existed"],
+		)
+
+		page = read_wiki(slug=source.name)
+		self.assertEqual(page["manual_links"], [])
+
+	def test_read_wiki_reports_no_curated_links_when_there_are_none(self):
+		source = self._page(f"{_PREFIX}-crl-plain", "Curated Plain")
+		self.assertEqual(read_wiki(slug=source.name)["manual_links"], [])
 
 
 class TestWikiGraphSync(FrappeTestCase):

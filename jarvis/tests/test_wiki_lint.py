@@ -12,6 +12,7 @@ tearDown (the lint stamps settings with a commit, so rollback isn't enough).
 from __future__ import annotations
 
 import contextlib
+import json
 from unittest import mock
 
 import frappe
@@ -65,6 +66,7 @@ class WikiLintTestCase(FrappeTestCase):
 		status="Active",
 		contradiction_flag=0,
 		last_confirmed_at=None,
+		manual_links=None,
 	):
 		doc = frappe.get_doc(
 			{
@@ -78,6 +80,8 @@ class WikiLintTestCase(FrappeTestCase):
 				"contradiction_flag": contradiction_flag,
 			}
 		)
+		if manual_links is not None:
+			doc.manual_links = json.dumps(manual_links)
 		doc.insert(ignore_permissions=True)
 		if last_confirmed_at:
 			frappe.db.set_value(
@@ -177,6 +181,44 @@ class TestDeterministicChecks(WikiLintTestCase):
 		with _mock_llm(key=""):
 			out = wiki_lint.run_lint()
 		self.assertEqual(out["orphans"], [])
+
+	def test_curated_inbound_link_rescues_an_orphan(self):
+		"""#494: add_wiki_link stores curated links in manual_links, never in
+		body_md. A body-only orphan scan therefore kept reporting the target as
+		an orphan while the Evolution tab (which unions both) showed it linked."""
+		adopted = self._page("adopted")
+		# body_md says nothing about `adopted`; only the curated store does.
+		self._page("curator", body="No wikilinks here at all.", manual_links=[adopted.name])
+		# second linking page so the young-wiki orphan gate is open
+		self._page("linker-a", body=f"See [[{SLUG_PREFIX}--linker-b]].")
+		self._page("linker-b", body=f"Back to [[{SLUG_PREFIX}--linker-a]].")
+		with _mock_llm(key=""):
+			out = wiki_lint.run_lint()
+		self.assertNotIn(adopted.name, out["orphans"])
+
+	def test_curated_links_alone_open_the_young_wiki_orphan_gate(self):
+		"""A wiki linked entirely by curation still counts as "linking is
+		practiced" — otherwise the gate silently disables the whole check."""
+		a = self._page("gate-a")
+		b = self._page("gate-b")
+		lonely = self._page("gate-lonely")
+		self._page("gate-c", manual_links=[a.name])
+		self._page("gate-d", manual_links=[b.name])
+		with _mock_llm(key=""):
+			out = wiki_lint.run_lint()
+		self.assertIn(lonely.name, out["orphans"])
+		self.assertNotIn(a.name, out["orphans"])
+		self.assertNotIn(b.name, out["orphans"])
+
+	def test_curated_self_link_does_not_rescue_an_orphan(self):
+		selfie = self._page("curated-selfie")
+		frappe.db.set_value(WIKI, selfie.name, "manual_links", json.dumps([selfie.name]))
+		frappe.db.commit()
+		self._page("linker-a", body=f"See [[{SLUG_PREFIX}--linker-b]].")
+		self._page("linker-b", body=f"Back to [[{SLUG_PREFIX}--linker-a]].")
+		with _mock_llm(key=""):
+			out = wiki_lint.run_lint()
+		self.assertIn(selfie.name, out["orphans"])
 
 	def test_settings_fields_are_stamped(self):
 		self._seed()
