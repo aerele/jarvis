@@ -30,9 +30,10 @@ writes behind explicit channel checks + the controller sanitizer).
 Merge discipline (``apply_extracted_page_updates``): ``append_md`` appends,
 ``body_md`` replaces only when the update carries no contradiction; a flagged
 contradiction APPENDS a ``## Contradiction flagged (<date>)`` section and sets
-``contradiction_flag`` — extracted content never silently overwrites contested
-knowledge. Every applied update appends a ``{date, kind, ref, user}`` sources
-entry and refreshes ``last_confirmed_at``.
+``contradiction_flag`` WHICHEVER key carried it — extracted content never
+silently overwrites contested knowledge, and never buries it as ordinary prose
+where ``jarvis.learning.wiki_lint`` cannot find it. Every applied update appends
+a ``{date, kind, ref, user}`` sources entry and refreshes ``last_confirmed_at``.
 
 The voice-note ingest is APPEND-ONLY against pages that already exist
 (``allow_body_replace=False``). It shows the model at most
