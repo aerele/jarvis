@@ -305,6 +305,14 @@ def parse_schedule_seconds(t) -> int | None:
 
 	MariaDB's TIME column accepts up to 838:59:59, which is why an out-of-range value
 	could be persisted at all: the storage layer is not the guard here.
+
+	``compute_next_run`` is shared with the AGENT scheduler (``agent_scheduler._advance``,
+	``agents_api.set_schedule``, ``agent_runs``), which has the same unguarded shape: the
+	agent sweep calls ``_advance`` from ten sites and only one of them sits inside a try.
+	Making the arithmetic total therefore closes that cron-wide abort too. The trade is
+	that ``agents_api.set_schedule`` no longer 500s on a hand-crafted out-of-range value,
+	it saves it and schedules 09:00; the durable fix there is this same check applied in
+	the Jarvis Agent Installation controller, which is out of scope for #472.
 	"""
 	if t is None or t == "":
 		return None
