@@ -2109,6 +2109,21 @@ async function submitReconnectCode() {
 			state.step = "connect";
 			return;
 		}
+		if (d && d.status === "resume_payment") {
+			// Recovered an UNFINISHED checkout, not a live workspace (admin-v2 #162):
+			// there is no container, so the Connect shortcut above would strand this
+			// customer on a workspace that never appears. What the code bought them is
+			// the ability to AUTHENTICATE, which is the one thing the resume path was
+			// missing - so hand off to the same mount reconciliation a reload runs and
+			// let server truth place the step.
+			state.payBusy = false;
+			await reconcileMidFlightSignup();
+			// Reconciliation lands a mid-signup customer on Pay from real state. If it
+			// established none (a control-plane blip), Details is still forward progress
+			// and never a spinner - the credentials are persisted either way.
+			if (state.step === "reconnect") state.step = "details";
+			return;
+		}
 		state.payErr =
 			d && d.status === "expired"
 				? "The reconnect request expired. Start it again."

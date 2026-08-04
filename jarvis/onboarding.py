@@ -1241,16 +1241,25 @@ def reconnect_available(email: str, company: str = "") -> dict:
 	CLOSED: any admin-side error answers "not available" rather than raising, because
 	this only decides whether to show a hint - a wizard that breaks because the
 	control plane blipped would be a worse trade than a hint that stays hidden.
-	Same System-Manager gating as the rest of onboarding."""
+	Same System-Manager gating as the rest of onboarding.
+
+	``company_account_exists`` is the separate, weaker answer to a separate
+	question (admin-v2 #166): somebody ELSE at this company already has an account.
+	It is not a reconnect offer and must not be rendered as one - this caller
+	cannot recover a colleague's account, and admin will not tell them whose it is.
+	False on an older admin that does not send the key, which is the safe default.
+	"""
 	require_jarvis_admin()
+	blank = {"eligible": False, "needs_company": False, "company_account_exists": False}
 	try:
 		_require_admin_url()
 		d = admin_client.reconnect_eligibility(email, company) or {}
 	except Exception:
-		return {"eligible": False, "needs_company": False}
+		return blank
 	return {
 		"eligible": bool(d.get("eligible")),
 		"needs_company": bool(d.get("needs_company")),
+		"company_account_exists": bool(d.get("company_account_exists")),
 	}
 
 
@@ -1273,9 +1282,24 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	"""Redeem the reconnect code the customer received by email (or from
 	support). Only a correct code releases anything: admin then rotates and
 	delivers the credentials — persist them and
-	grant the onboarding admin role, exactly like a fresh signup would. The
-	wizard then rides the normal sync_connection path to the customer's
-	EXISTING container; only the LLM step needs re-doing on this fresh site."""
+	grant the onboarding admin role, exactly like a fresh signup would.
+
+	Two outcomes, because there are two things a reconnect can recover
+	(admin-v2 #162):
+
+	- ``connected`` - a PAID account whose container is already running. The
+	  wizard rides the normal sync_connection path to it; only the LLM step
+	  needs re-doing on this fresh site.
+	- ``resume_payment`` - an UNFINISHED checkout (declined card, interrupted
+	  payment). There is no container, so sync_connection has nothing to reach
+	  and the wizard would sit on "setting up your workspace" forever. What was
+	  recovered is the ability to authenticate, which is precisely what
+	  ``resume_pending_signup`` needs, so the wizard goes back to Pay.
+
+	Read off admin's ``subscription_status``. An admin that predates that key
+	sends nothing and this answers ``connected``, which is exactly what it
+	answered before and is right for the only population that admin can
+	reconnect."""
 	require_jarvis_admin()
 	data = _surface(admin_client.get_reconnect_state, request_id, code) or {}
 	if data.get("status") != "ready":
@@ -1298,6 +1322,8 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 		}
 	)
 	grant_onboarding_admin()
+	if (data.get("subscription_status") or "").strip() == "Pending Payment":
+		return {"status": "resume_payment"}
 	return {"status": "connected"}
 
 
