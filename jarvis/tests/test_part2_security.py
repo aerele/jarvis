@@ -1641,3 +1641,69 @@ class TestRoleScopedSkillInvocation(Part2Base):
 			[],
 		)
 		self.assertIn(prefixed_slug(f"{PFX}-widen"), {p["slug"] for p in custom_skills.build_push_payload()})
+
+	# ── #477: two clause shapes, only one of which claims the file is on disk ───
+	def test_pushed_org_skill_keeps_the_apply_them_clause(self):
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		# Owned by the invoker: /slug matches on owner / shared_with / role, so an Org
+		# skill is only ever invocable by someone one of those three admits.
+		_mk_skill(USER_A, f"{PFX}-ondisk", scope="Org")
+		self.assertIn(prefixed_slug(f"{PFX}-ondisk"), {p["slug"] for p in build_push_payload()})
+		with _as(USER_A):
+			clause = invoked_skill_clause(f"/{PFX}-ondisk run it")
+		self.assertIn(f"apply them: {prefixed_slug(f'{PFX}-ondisk')}", clause)
+		self.assertNotIn("jarvis__get_skill", clause)
+
+	def test_role_restricted_org_skill_gets_the_fetch_clause_not_the_on_disk_one(self):
+		# The exact failing scenario in #477: an Org skill narrowed by allowed_roles is
+		# dropped from the push, so naming it as installed pointed the agent at a dir
+		# that the next reconcile deleted.
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		_mk_skill(REVIEWER, f"{PFX}-narrowed", scope="Org", allowed_roles=[self.AUD_ROLE])
+		self.assertNotIn(prefixed_slug(f"{PFX}-narrowed"), {p["slug"] for p in build_push_payload()})
+		with _as(self.ROLE_HOLDER):
+			clause = invoked_skill_clause(f"/{PFX}-narrowed please")
+		self.assertIn(prefixed_slug(f"{PFX}-narrowed"), clause)
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
+		# and it must not imply container-side access to a body that is not there
+		self.assertNotIn("workspace", clause)
+
+	def test_role_promoted_skill_gets_the_fetch_clause(self):
+		# The #478 <-> #477 join: Role scope is excluded from the push outright, so the
+		# skill #478 just made invocable must NOT be announced as an on-disk directory.
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		self._promote_to_role(f"{PFX}-rolefetch")
+		self.assertNotIn(prefixed_slug(f"{PFX}-rolefetch"), {p["slug"] for p in build_push_payload()})
+		with _as(self.ROLE_HOLDER):
+			clause = invoked_skill_clause(f"/{PFX}-rolefetch now")
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
+
+	def test_private_user_skill_invoked_by_its_owner_gets_the_fetch_clause(self):
+		# User-scope rows are excluded from the push too, so the owner's own /slug hit
+		# the same phantom-directory bug.
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		_mk_skill(USER_A, f"{PFX}-mine", scope="User")
+		with _as(USER_A):
+			clause = invoked_skill_clause(f"/{PFX}-mine draft it")
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
+
+	def test_one_message_can_carry_both_clause_shapes(self):
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		_mk_skill(self.ROLE_HOLDER, f"{PFX}-bothdisk", scope="Org")  # owned -> pushed
+		_mk_skill(REVIEWER, f"{PFX}-bothrole", scope="Org", allowed_roles=[self.AUD_ROLE])
+		with _as(self.ROLE_HOLDER):
+			clause = invoked_skill_clause(f"/{PFX}-bothdisk then /{PFX}-bothrole")
+		self.assertIn(f"apply them: {prefixed_slug(f'{PFX}-bothdisk')}", clause)
+		self.assertIn("jarvis__get_skill", clause)
+		# each slug appears in exactly ONE shape, never both
+		fetch_half = clause.split("not loaded in this session:", 1)[1]
+		self.assertIn(prefixed_slug(f"{PFX}-bothrole"), fetch_half)
+		self.assertNotIn(prefixed_slug(f"{PFX}-bothdisk"), fetch_half)
