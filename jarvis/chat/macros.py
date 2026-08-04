@@ -305,9 +305,15 @@ def _skill_invocations(step) -> str:
 	"""Render one STEP's tagged skills (a JSON list of Jarvis Custom Skill
 	row-names on the step row) as a ``/slug`` invocation line appended to that
 	step's prompt — the same mechanism as typing ``/slug`` in the composer, so
-	``invoked_skill_clause`` activates them deterministically at turn time
-	(which also re-checks owner/shared visibility). Disabled or since-deleted
-	skills drop out silently."""
+	``invoked_skill_clause`` names them at turn time (which also re-checks
+	owner/shared visibility). Disabled or since-deleted skills drop out silently.
+
+	How strong that activation is depends on the skill, and the step inherits the
+	difference silently (issue #477). A skill the container push writes is named as
+	an installed ``custom-<slug>`` and activates deterministically. A Role-scope,
+	role-restricted, private or over-cap skill is not on disk, so the clause instead
+	instructs the agent to fetch it with ``jarvis__get_skill``: reliable in practice
+	but model-mediated, not a container guarantee."""
 	try:
 		names = frappe.parse_json(step.skills) if step.skills else []
 	except Exception:
