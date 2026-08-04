@@ -674,7 +674,7 @@ def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 	account_ref = "SUB_" + secrets.token_hex(8)
 	blob = result["blob"]
 	# Stable subject for same-account folding (review P1-07 / F4): ONLY a genuinely
-	# stable provider account id (openclaw's accountId claim, populated for OpenAI).
+	# stable provider account id (the agent's accountId claim, populated for OpenAI).
 	# NEVER the email - an email-keyed fold collides two DIFFERENT provider accounts
 	# and silently overwrites one's live, now-unrevocable token. Empty subject ->
 	# create_capture never folds (a duplicate row is safe; a clobbered token is not).
@@ -685,8 +685,8 @@ def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 	# save_llm_pool consumes the capture. The raw token never returns to the wire.
 	view = pending_capture.create_capture(
 		provider=result["provider"],
-		upstream=get_provider(result["provider"])["openclaw_provider"],
-		openclaw_provider=get_provider(result["provider"])["openclaw_provider"],
+		upstream=get_provider(result["provider"])["agent_provider"],
+		agent_provider=get_provider(result["provider"])["agent_provider"],
 		oauth_blob=json.dumps(blob),
 		account_email=email,
 		account_ref=account_ref,
@@ -797,8 +797,8 @@ def poll_pool_account_signin(nonce: str) -> dict:
 	# and safe label come back; the raw token stays server-side.
 	view = pending_capture.create_capture(
 		provider=entry["provider"],
-		upstream=p["openclaw_provider"],
-		openclaw_provider=p["openclaw_provider"],
+		upstream=p["agent_provider"],
+		agent_provider=p["agent_provider"],
 		oauth_blob=json.dumps(blob),
 		account_email="",
 		account_ref=account_ref,

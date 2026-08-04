@@ -318,7 +318,7 @@ class TestLifecycleInvariants(_IntroTestBase):
 	def _counts(self, user: str) -> tuple[int, int, int, int, int]:
 		"""Everything showing the introduction must leave alone: conversations,
 		messages, gateway sessions, and token spend. The last three exist so a
-		variant that spins an openclaw session or calls a model to "generate" the
+		variant that spins an agent session or calls a model to "generate" the
 		greeting fails here too, not just one that persists a row."""
 		convs = frappe.get_all(CONV, filters={"owner": user}, pluck="name")
 		msgs = frappe.db.count(MSG, {"conversation": ["in", convs]}) if convs else 0

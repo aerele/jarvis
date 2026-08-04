@@ -45,13 +45,13 @@ _ALLOWED_PREFIXES = ()
 #     jarvis-openclaw-plugin, render_openclaw_config, DEFAULT_OPENCLAW_IMAGE,
 #     verify-openclaw-assumptions (anchored to real prefixes so a fabricated `openclaw/x`
 #     path can't slip through)
-#   - openclaw_seq_watermark: the old column the rename migration copies from until a later
-#     contract patch drops it
+#   - openclaw_seq_watermark / openclaw_provider: old columns the rename migrations copy
+#     from until a later contract patch drops them
 # `.openclaw` is anchored to the `/`-terminated container-path form so it does NOT mask a
 # dotted attribute/module leak like `x.openclaw_y` (which must be caught).
 _ALLOWED_LITERALS = re.compile(
 	r"openclaw\.plugin\.json|openclaw\.json|__openclaw__|__openclaw|openclaw/(?:src|extensions|docs|openclaw)"
-	r"|\.openclaw/|openclaw_state|openclaw_seq_watermark|jarvis-openclaw-plugin"
+	r"|\.openclaw/|openclaw_state|openclaw_seq_watermark|openclaw_provider|jarvis-openclaw-plugin"
 	r"|render_openclaw_config|DEFAULT_OPENCLAW_IMAGE|verify-openclaw-assumptions"
 	r"|openclaw doctor"  # the runtime's own CLI invocation, cited verbatim in ops docs
 )
