@@ -7006,7 +7006,6 @@ async function send(textArg, resendAck) {
 		// successful send, so a rejected send (and its Retry) keeps grounding armed.
 		const groundWiki = groundNextTurn.value;
 		const sendCtx = groundWiki ? { ground_wiki: 1 } : _prefillSendContext || undefined;
-		_prefillSendContext = null; // one-shot: only the prefill's first send carries it
 		const r = await api.sendMessage(sentFrom, text, undefined, attachments, sendCtx);
 		if (r && r.ok === false) {
 			// The server rejected the send (e.g. the single-flight guard:
@@ -7077,8 +7076,13 @@ async function send(textArg, resendAck) {
 			);
 			return;
 		}
-		// Send accepted — the one-shot grounding is now consumed.
+		// Send accepted — the one-shot grounding/prefill context is now consumed.
+		// Cleared HERE, not before the await: a rejected send (r.ok === false, above)
+		// returns before reaching this line, and a thrown send never reaches it either
+		// (see the catch block below) — so a retry after either failure still carries
+		// the same prefill context instead of silently sending without it.
 		if (groundWiki) groundNextTurn.value = false;
+		_prefillSendContext = null; // one-shot: only the prefill's first send carries it
 		// The payload's voice-derived text is now durably in the conversation — release EXACTLY
 		// the recordings this send captured (audio + leave guard). Payload-bound, so a same-scope
 		// recording that committed while this POST was in flight is NOT released, and a

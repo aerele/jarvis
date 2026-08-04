@@ -15,6 +15,11 @@
 //            the real id and released there, never stranded under the new-chat sentinel.
 //   * R3-3 — failed-bubble resend rejection across ok:false / usage_limit / subscription_suspended /
 //            single-flight: a bubble carrying the SAME voiceAck survives, audio retained, resendable.
+//   * jarvis#496 — the discuss-in-chat / ground-in-wiki one-shot SEND CONTEXT is the SAME bug class:
+//            it must survive a rejected or thrown send so a retry still carries it, consumed only
+//            once the server actually accepts. The mini-model below is extended (groundWiki,
+//            prefillContext, sendCtx) to reproduce that slice of ChatView's send(), and a source-pin
+//            test ties the fix's exact placement to the real ChatView.vue file.
 //
 // A dictation is now ONE recording transcribed in ONE call, so each take below is begin → one
 // timeslice fragment → finish, exactly as useDictationRecorder drives it.
@@ -23,6 +28,9 @@
 // (jarvis/tests/test_voice_send_glue_client.py subprocess-runs it so the contract holds every CI run).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createVoiceDictationStore } from "./voiceDictationStore.js";
 import {
 	promoteNewChatScope,
@@ -30,6 +38,9 @@ import {
 	createPendingSends,
 	injectPendingBubbles,
 } from "./voiceSendGlue.js";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const chatViewSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
 
 const SENTINEL = "__jarvis_new_chat__";
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -117,6 +128,11 @@ function makeChat() {
 		messages: [], // optimistic bubbles
 		queue: null,
 		pending: createPendingSends(), // VR4-2: origin-scoped failed bubbles (survive nav)
+		// jarvis#496: the one-shot SEND CONTEXT (groundNextTurn's ground_wiki flag, or a
+		// discuss-in-chat prefill) — test-settable, mirroring groundNextTurn.value / the module-scope
+		// _prefillSendContext ChatView.vue carries across renders.
+		groundWiki: false,
+		prefillContext: null,
 	};
 	let _bubbleSeq = 0; // stable bubble names (a switch clears messages, so length would collide)
 	const scopeOf = () => chat.currentId || SENTINEL;
@@ -165,6 +181,11 @@ function makeChat() {
 		const sentScope = scopeOf();
 		const fromMain = typeof textArg !== "string";
 		const text = fromMain ? chat.input : textArg;
+		// jarvis#496: sendCtx is COMPUTED here (same as ChatView.vue) but chat.prefillContext is NOT
+		// cleared yet — only the accepted tail below may consume it, so a rejected/thrown send
+		// leaves it armed for a retry.
+		const groundWiki = chat.groundWiki;
+		const sendCtx = groundWiki ? { ground_wiki: 1 } : chat.prefillContext || undefined;
 		const voiceAck =
 			resendAck || (fromMain ? chat.queue.captureSentInPayload(sentScope, text) : null);
 		if (fromMain) chat.input = "";
@@ -175,6 +196,7 @@ function makeChat() {
 			name: `tmp-${_bubbleSeq++}`,
 			content: text,
 			voiceAck: voiceAck && voiceAck.length ? voiceAck : undefined,
+			sendCtx, // jarvis#496: the context this particular attempt carried
 		};
 		chat.messages.push(tmp);
 
@@ -210,6 +232,9 @@ function makeChat() {
 			}
 			return tmp;
 		}
+		// Accepted — jarvis#496: the one-shot send context is consumed ONLY here, mirroring
+		// ChatView.vue's `if (groundWiki) groundNextTurn.value = false;` placement exactly.
+		chat.prefillContext = null;
 		// Accepted: release exactly the captured recordings, then adopt a returned id (promoting the scope).
 		if (voiceAck) chat.queue.acknowledge(voiceAck);
 		if (outcome && outcome.conversation_id) {
@@ -786,5 +811,137 @@ test("VR5-3: injectPendingBubbles dedupes by name, ignores nameless entries, and
 		injectPendingBubbles(undefined, [b]),
 		[b],
 		"a non-array messages input degrades to []"
+	);
+});
+
+// ── jarvis#496: the discuss-in-chat / ground-in-wiki one-shot SEND CONTEXT must survive a
+//        REJECTED or THROWN send exactly like a voice bubble does (R3-3 above) — only a send the
+//        server actually ACCEPTS may consume it, so a retry still carries the same context. ───────
+test("jarvis#496: a REJECTED send preserves the prefill send context; the retry still carries it", () => {
+	const chat = makeChat();
+	const prefill = { doctype: "Sales Invoice", name: "INV-1" };
+	chat.prefillContext = prefill;
+	chat.input = "discuss this invoice";
+
+	const rejected = chat.send(undefined, undefined, { ok: false, reason: "single_flight" });
+	assert.deepEqual(
+		rejected.sendCtx,
+		prefill,
+		"the rejected attempt DID carry the prefill context"
+	);
+	assert.equal(
+		chat.prefillContext,
+		prefill,
+		"a rejected send must NOT clear it — still armed for the retry (jarvis#496)"
+	);
+	assert.equal(
+		chat.input,
+		"discuss this invoice",
+		"the composer text was restored for the retry"
+	);
+
+	// The user hits Retry (a plain resend of the restored composer text).
+	const retried = chat.send(undefined, undefined, { ok: true });
+	assert.deepEqual(
+		retried.sendCtx,
+		prefill,
+		"the retry carries the SAME context the first, rejected attempt would have lost"
+	);
+	assert.equal(
+		chat.prefillContext,
+		null,
+		"an ACCEPTED send finally consumes the one-shot context"
+	);
+});
+
+test("jarvis#496: a THROWN send (network error / 500) also preserves the prefill context for retry", () => {
+	const chat = makeChat();
+	const prefill = { ground_wiki_source: "wiki:123" };
+	chat.prefillContext = prefill;
+	chat.input = "discuss this";
+
+	const failed = chat.send(undefined, undefined, { throw: true });
+	assert.deepEqual(failed.sendCtx, prefill, "the failed attempt carried the context");
+	assert.equal(
+		chat.prefillContext,
+		prefill,
+		"a thrown send is the SAME bug class as a rejection — must not clear it either"
+	);
+
+	// Resend the failed bubble; this time it is accepted.
+	const retried = chat.resendFailed(failed, { ok: true });
+	assert.deepEqual(retried.sendCtx, prefill, "the resend still carries the preserved context");
+	assert.equal(chat.prefillContext, null, "consumed only once a send is actually accepted");
+});
+
+test("jarvis#496: an ACCEPTED send is still one-shot — it consumes the context so a later send goes bare", () => {
+	const chat = makeChat();
+	chat.prefillContext = { doctype: "Purchase Order", name: "PO-9" };
+	chat.input = "first message";
+	const first = chat.send(undefined, undefined, { ok: true });
+	assert.ok(first.sendCtx, "the first send carried the armed context");
+	assert.equal(chat.prefillContext, null, "consumed after acceptance, as before this fix");
+
+	chat.input = "second, unrelated message";
+	const second = chat.send(undefined, undefined, { ok: true });
+	assert.equal(
+		second.sendCtx,
+		undefined,
+		"a later send with nothing armed goes bare, unchanged"
+	);
+});
+
+test("jarvis#496: groundWiki overrides the prefill context in sendCtx, but a rejection still leaves the prefill armed", () => {
+	const chat = makeChat();
+	chat.groundWiki = true;
+	const prefill = { doctype: "Sales Invoice", name: "INV-2" };
+	chat.prefillContext = prefill;
+	chat.input = "ground this";
+
+	const rejected = chat.send(undefined, undefined, { ok: false });
+	assert.deepEqual(
+		rejected.sendCtx,
+		{ ground_wiki: 1 },
+		"groundWiki wins over the prefill context"
+	);
+	assert.equal(
+		chat.prefillContext,
+		prefill,
+		"the prefill stays armed across the rejection regardless of which context sendCtx used"
+	);
+});
+
+// ── jarvis#496 source pin: ties the mini-model above to the REAL file, so a regression that moves
+//        the clear back before the await, OR reinserts it as a statement INSIDE the rejection
+//        block (still textually "after" a bare `if (...)` check, but on the wrong side of its
+//        closing brace — code review caught this gap in an earlier version of this test), fails
+//        HERE even if nobody remembers to update the mini-model. ────────────────────────────────
+test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the accepted path, never before the send POST", () => {
+	const start = chatViewSrc.indexOf("async function send(textArg, resendAck) {");
+	const end = chatViewSrc.indexOf("\nfunction openProactive()", start);
+	assert.ok(start > -1 && end > start, "located ChatView.vue's send() function body");
+	const sendSrc = chatViewSrc.slice(start, end);
+
+	const awaitIdx = sendSrc.indexOf("await api.sendMessage(sentFrom");
+	// Anchors the rejection block's CLOSING brace, not just its opening `if (...)` — a scope-aware
+	// check. A regression that clears the context as the FIRST statement inside the rejected branch
+	// (unconditionally wiping it on every rejection, reintroducing the jarvis#496 bug) would still
+	// be textually after a bare "if (r && r.ok === false)" search, but sits BEFORE this closing
+	// sequence, so it fails here.
+	const rejectBlockCloseIdx = sendSrc.indexOf("return;\n\t\t}\n\t\t// Send accepted");
+	const clearIdx = sendSrc.indexOf("_prefillSendContext = null;");
+	assert.ok(
+		awaitIdx > -1 && rejectBlockCloseIdx > -1 && clearIdx > -1,
+		"all three anchors are present in send()"
+	);
+	assert.ok(
+		clearIdx > awaitIdx,
+		"the one-shot context must never be cleared before api.sendMessage runs — that was the jarvis#496 bug"
+	);
+	assert.ok(
+		clearIdx > rejectBlockCloseIdx,
+		"the clear must sit strictly OUTSIDE the rejection block (after its closing brace), not merely " +
+			"after the `if` condition text — a clear placed inside that block would still wipe the " +
+			"context on every rejection"
 	);
 });
