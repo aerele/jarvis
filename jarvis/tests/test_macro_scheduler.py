@@ -25,7 +25,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
-from jarvis.chat import macro_scheduler
+from jarvis.chat import macro_scheduler, macros
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
@@ -90,6 +90,10 @@ def _purge() -> None:
 		for run in frappe.get_all(RUN, filters={"macro": n}, pluck="name"):
 			frappe.delete_doc(RUN, run, force=True, ignore_permissions=True)
 		frappe.delete_doc(MACRO, n, force=True, ignore_permissions=True)
+	for n in frappe.get_all(
+		"Notification Log", filters={"subject": ["like", f"%{PFX}-%"]}, pluck="name"
+	):
+		frappe.delete_doc("Notification Log", n, force=True, ignore_permissions=True)
 	frappe.db.commit()
 
 
@@ -152,3 +156,130 @@ class TestScheduledMacroIdentity(MacroSchedulerBase):
 		self._run_due()
 		nxt = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
 		self.assertGreater(nxt, now_datetime(), "a refused macro stayed due and would re-fire hourly")
+
+	def test_refusal_is_recorded_as_a_failed_run(self):
+		m = _mk_macro(OWNER_OFF, "disabled-recorded")
+		self._run_due()
+		runs = _runs_for(m.name)
+		self.assertEqual([r.status for r in runs], ["failed"])
+		self.assertEqual(runs[0].owner, OWNER_OFF, "the failed row is not visible to the owner")
+		self.assertIn("unattended", runs[0].error)
+
+
+# --------------------------------------------------------------------------- #
+# #471 — failures are durable, honest, and terminalized
+# --------------------------------------------------------------------------- #
+class TestScheduledMacroFailures(MacroSchedulerBase):
+	def test_dispatch_failure_does_not_advance_the_schedule(self):
+		m = _mk_macro(OWNER_OK, "raises")
+		before = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")):
+			macro_scheduler.run_due_macros()
+		after = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+		self.assertEqual(after, before, "a failed run advanced its schedule and lost the slot")
+		self.assertGreater(now_datetime(), after, "the missed slot is no longer due, so it cannot retry")
+
+	def test_dispatch_failure_is_visible_as_failed_not_successful(self):
+		m = _mk_macro(OWNER_OK, "raises-visible")
+		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")):
+			macro_scheduler.run_due_macros()
+		runs = _runs_for(m.name)
+		self.assertEqual([r.status for r in runs], ["failed"], "the failure left no owner-visible trace")
+		self.assertEqual(runs[0].trigger, "scheduled")
+		self.assertEqual(runs[0].owner, OWNER_OK)
+		# The UI reads last_run_at as "last run"; a run that never happened must not
+		# stamp it (the "actively misleading" limb of #471).
+		self.assertFalse(
+			frappe.db.get_value(MACRO, m.name, "last_run_at"),
+			"last_run_at was stamped for a run that never executed",
+		)
+
+	def test_dispatch_failure_notifies_the_owner(self):
+		m = _mk_macro(OWNER_OK, "raises-notify")
+		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")):
+			macro_scheduler.run_due_macros()
+		notes = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": OWNER_OK, "subject": ["like", f"%{PFX}-raises-notify%"]},
+			pluck="name",
+		)
+		self.assertTrue(notes, "the owner got no signal at all")
+
+	def test_successful_run_stamps_last_run_at(self):
+		m = _mk_macro(OWNER_OK, "success")
+		self._run_due()
+		self.assertTrue(frappe.db.get_value(MACRO, m.name, "last_run_at"))
+		self.assertEqual(_runs_for(m.name), [], "a successful dispatch wrote a spurious failed row")
+
+	def test_disabled_macro_consumes_the_slot_without_claiming_a_run(self):
+		m = _mk_macro(OWNER_OK, "switched-off", enabled=0)
+		self.assertNotIn(m.name, self._run_due(), "a disabled macro was dispatched")
+		nxt = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+		self.assertGreater(nxt, now_datetime(), "a disabled macro stayed due and re-fires hourly forever")
+		self.assertFalse(
+			frappe.db.get_value(MACRO, m.name, "last_run_at"),
+			"a disabled macro stamped last_run_at, so the UI claims it ran",
+		)
+		self.assertEqual(_runs_for(m.name), [], "a deliberately disabled macro is not a failure")
+
+
+# --------------------------------------------------------------------------- #
+# #471 — the stale-run reaper, and what it must NOT reap
+# --------------------------------------------------------------------------- #
+class TestStaleMacroRunReaper(MacroSchedulerBase):
+	def _mk_run(self, tag: str, status: str, *, age_s: int):
+		m = _mk_macro(OWNER_OK, tag, due=False)
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"macro": m.name,
+				"status": status,
+				"current_step": 0,
+				"total_steps": 1,
+				"trigger": "scheduled",
+				"started_at": frappe.utils.now(),
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
+		stamp = add_to_date(now_datetime(), seconds=-age_s)
+		frappe.db.sql(
+			"UPDATE `tabJarvis Macro Run` SET modified=%(t)s, owner=%(o)s WHERE name=%(n)s",
+			{"t": stamp, "o": OWNER_OK, "n": run.name},
+		)
+		frappe.db.commit()
+		return run.name
+
+	def test_stranded_running_run_is_terminalized(self):
+		name = self._mk_run("stranded", "running", age_s=macros.STALE_RUN_AFTER_SECONDS + 600)
+		self.assertEqual(macros.reap_stale_macro_runs(), 1)
+		row = frappe.db.get_value(RUN, name, ["status", "error", "finished_at"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertTrue(row.error, "a reaped run must say WHY, not carry an empty error")
+		self.assertTrue(row.finished_at)
+
+	def test_parked_waiting_capacity_run_is_never_reaped(self):
+		# #470 lets a run sit in waiting_capacity for ~100 min legitimately; the
+		# reaper must not confuse deliberately parked with stranded. Aged far past
+		# the cutoff so only the STATUS allowlist can be saving it.
+		name = self._mk_run("parked", "waiting_capacity", age_s=macros.STALE_RUN_AFTER_SECONDS * 4)
+		self.assertEqual(macros.reap_stale_macro_runs(), 0)
+		self.assertEqual(frappe.db.get_value(RUN, name, "status"), "waiting_capacity")
+
+	def test_recently_progressing_run_is_never_reaped(self):
+		name = self._mk_run("progressing", "running", age_s=macros.STALE_RUN_AFTER_SECONDS // 2)
+		self.assertEqual(macros.reap_stale_macro_runs(), 0)
+		self.assertEqual(frappe.db.get_value(RUN, name, "status"), "running")
+
+	def test_run_that_advanced_after_the_scan_is_left_alone(self):
+		# The candidate snapshot is inherently stale: a step can advance between the
+		# scan and the transition. The re-read under the lock must catch that.
+		name = self._mk_run("raced", "running", age_s=macros.STALE_RUN_AFTER_SECONDS + 600)
+		with patch.object(macros, "_stale_run_candidates", return_value=[name]):
+			frappe.db.sql(
+				"UPDATE `tabJarvis Macro Run` SET modified=%(t)s WHERE name=%(n)s",
+				{"t": now_datetime(), "n": name},
+			)
+			frappe.db.commit()
+			self.assertEqual(macros.reap_stale_macro_runs(), 0)
+		self.assertEqual(frappe.db.get_value(RUN, name, "status"), "running")

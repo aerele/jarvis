@@ -13,8 +13,11 @@ last started; ``status`` in queued/running/completed/failed/stopped). Progress i
 pushed to the owner's realtime channel as ``macro:progress`` / ``macro:done``.
 """
 
+from datetime import timedelta
+
 import frappe
 from frappe import _
+from frappe.utils import get_datetime, now_datetime
 
 from jarvis.chat.events import publish_to_user
 
@@ -33,6 +36,16 @@ _MAX_CAPACITY_ATTEMPTS = 20
 # ample headroom; on the pathological miss the state-fenced CAS in the resume path is the hard
 # backstop. Module-level so tests can shorten it.
 _STOP_LOCK_BLOCK_S = 10.0
+
+# #471: how long a run may sit ``running`` WITHOUT FORWARD PROGRESS before the sweep
+# terminalizes it. Sized against the RQ turn envelope, not the run: a chat turn is capped
+# at ``api._AGENT_TURN_WORKER_TIMEOUT`` (720 s) and a dead one is picked up by the
+# 2-minute turn-recovery sweep, so 3 h is a ~12x margin over the longest legitimate gap
+# between two step advances. Module-level so tests can shorten it.
+STALE_RUN_AFTER_SECONDS = 3 * 3600
+_STALE_RUN_ERROR = (
+	"The run stopped making progress and was closed by the stale-run sweep. Run it again."
+)
 
 
 def _run_cas(sql: str, params: dict) -> int:
@@ -563,6 +576,121 @@ def _compensate_resume_enqueue_failure(run, macro_doc, attempts: int) -> None:
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis macro capacity-resume compensate", message=frappe.get_traceback())
+
+
+# --------------------------------------------------------------------------- #
+# #471 stale-run reaper (backstop) — hooks cron
+# --------------------------------------------------------------------------- #
+def reap_stale_macro_runs() -> int:
+	"""Terminalize macro runs stuck ``running`` with no forward progress, and return
+	how many were reaped. Runs as Administrator (scheduler); never raises out.
+
+	Without this a run orphaned before its first turn sat ``running`` FOREVER with an
+	empty ``error`` (#471): ``run_macro`` dispatches through ``api._enqueue_turn``,
+	whose ``_ensure_session_key`` throws when the gateway is down, and with no turn
+	dispatched the chaining hook that terminalizes a run never fires for it.
+
+	**Parked is not stranded.** Two independent discriminators keep a legitimately
+	slow or deliberately parked run safe:
+
+	* **Status is an ALLOWLIST of exactly ``running``.** ``waiting_capacity`` is a
+	  live, deliberately parked state (CDX-19): a step that could not be admitted
+	  waits there for ``resume_waiting_capacity_runs``, legitimately for up to
+	  ``_MAX_CAPACITY_ATTEMPTS`` x 5 min (~100 min), and that path has its OWN bound
+	  after which it fails honestly. It is never a candidate here — and because the
+	  filter is an allowlist rather than "not terminal", any future non-terminal
+	  status is excluded by construction too.
+	* **Staleness is measured on ``modified`` (last forward progress), never on
+	  ``started_at``.** A 25-step macro legitimately stays ``running`` for hours;
+	  what it never does is stop making progress, because every step dispatch,
+	  capacity park and capacity resume writes the row.
+
+	Then, before acting, each candidate is re-read UNDER the same per-run redis lock
+	the chaining hook and the capacity resume take, plus a row lock, and transitioned
+	with a compare-and-set on ``status='running'`` — so a run that advanced between
+	the scan and here is left alone rather than having a live step killed under it."""
+	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
+	candidates = _stale_run_candidates(cutoff)
+	if not candidates:
+		return 0
+	from jarvis._redis_lock import redis_lock
+
+	reaped = 0
+	for run_name in candidates:
+		try:
+			with redis_lock(f"jarvis_macro_run:{run_name}", timeout_s=60, blocking_timeout_s=0.0) as acquired:
+				if not acquired:
+					# A chaining advance / capacity resume is INSIDE its critical section for
+					# this run right now, which is proof of life. Leave it for the next sweep.
+					continue
+				cur = frappe.db.get_value(
+					RUN, run_name, ["status", "modified"], as_dict=True, for_update=True
+				)
+				if not cur or cur.status != "running" or get_datetime(cur.modified) >= cutoff:
+					frappe.db.commit()  # release the row lock; the snapshot was stale
+					continue
+				if not _cas_run_status(
+					run_name, "running", "failed", finished_at=frappe.utils.now(), error=_STALE_RUN_ERROR
+				):
+					frappe.db.commit()
+					continue
+				frappe.db.commit()
+				reaped += 1
+				_announce_reaped(run_name)
+		except Exception:
+			frappe.log_error(title="jarvis macro stale-run sweep failed", message=frappe.get_traceback())
+	return reaped
+
+
+def _stale_run_candidates(cutoff) -> list[str]:
+	"""Runs stuck ``running`` with no forward progress since ``cutoff``. Its own
+	function so the re-read-under-lock compare-and-set can be exercised against a
+	deliberately STALE candidate snapshot in tests."""
+	return frappe.get_all(RUN, filters={"status": "running", "modified": ["<", cutoff]}, pluck="name")
+
+
+def _announce_reaped(run_name: str) -> None:
+	"""Surface a reaped run the two ways a live failure is surfaced: the realtime
+	``macro:done`` an open SPA listens for, and a Notification Log for the (likely
+	absent) owner. Best-effort — the durable ``failed`` row is the real record."""
+	try:
+		run = frappe.get_doc(RUN, run_name)
+		macro_doc = frappe.get_doc(MACRO, run.macro)
+		_publish_done(run, macro_doc, "failed")
+		notify_owner(
+			macro_doc.owner,
+			subject=f"Macro run did not finish: {macro_doc.macro_name}",
+			body=_STALE_RUN_ERROR,
+		)
+	except Exception:
+		pass
+
+
+def notify_owner(owner: str, *, subject: str, body: str) -> None:
+	"""Best-effort Notification Log for a macro owner (#471). A scheduled macro that
+	fails at 03:00 reaches nobody through the realtime channel — ``publish_to_user``
+	is delivered only to an open socket, and there is none — and ``frappe.log_error``
+	writes an Error Log only a System Manager can read.
+
+	Skipped for identities that cannot act on one (Administrator / Guest / disabled).
+	Never raises: notification is a courtesy on top of the durable failed run row."""
+	from jarvis.permissions import is_valid_unattended_owner
+
+	if not is_valid_unattended_owner(owner):
+		return
+	try:
+		frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": owner,
+				"type": "Alert",
+				"subject": subject[:140],
+				"email_content": body,
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+	except Exception:
+		pass
 
 
 def _finish(run, status: str, error: str | None = None) -> None:

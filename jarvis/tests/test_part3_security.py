@@ -231,6 +231,11 @@ class Part3Base(FrappeTestCase):
 			(MACRO, {"macro_name": ["like", f"{PFX}%"]}),
 		):
 			for n in frappe.get_all(dt, filters=filt, pluck="name"):
+				if dt == MACRO:
+					# The scheduler now COMMITS a failed Macro Run for a slot it refused
+					# (#471), so that row outlives the rollback above too.
+					for r in frappe.get_all(MACRO_RUN, filters={"macro": n}, pluck="name"):
+						frappe.delete_doc(MACRO_RUN, r, force=True, ignore_permissions=True)
 				frappe.delete_doc(dt, n, force=True, ignore_permissions=True)
 		frappe.db.set_single_value("Jarvis Settings", "agent_skills_sync_status", "")
 		frappe.db.commit()
