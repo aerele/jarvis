@@ -29,26 +29,28 @@ def run_due_macros() -> None:
 	if not due:
 		return
 
-	from jarvis.permissions import has_jarvis_access
+	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
 
 	original_user = frappe.session.user
 	for m in due:
 		# MAC-1 (security review PART 3, TASK 23): never run a macro whose owner
 		# has lost Jarvis access (demoted System User, or a Website/portal owner) —
 		# the scheduled turn would otherwise execute jarvis__* tools as an identity
-		# categorically barred from Jarvis. Advance the schedule so it does not busy
-		# re-fire, but skip the run.
-		if not has_jarvis_access(m.owner):
-			frappe.db.set_value(
-				MACRO,
-				m.name,
-				{
-					"last_run_at": now,
-					"next_run_at": compute_next_run(m.schedule_frequency, m.schedule_time, from_dt=now),
-				},
-				update_modified=False,
-			)
-			frappe.db.commit()
+		# categorically barred from Jarvis.
+		#
+		# #469: has_jarvis_access alone is NOT that guarantee. It returns True for
+		# Administrator before any other check, and NOTHING in permissions.py (nor
+		# frappe.get_roles) reads User.enabled — so on its own it admitted an
+		# unattended, fully perm-bypassing Administrator turn, and kept an
+		# offboarded employee's macros firing with live ERP access forever. Add the
+		# fail-closed identity guard the sibling agent scheduler has always applied
+		# (agent_scheduler._valid_owner). Both checks are required: this one refuses
+		# Administrator/Guest/disabled, has_jarvis_access refuses portal users and
+		# role-less System Users.
+		#
+		# Advance the schedule so it does not busy re-fire, but skip the run.
+		if not is_valid_unattended_owner(m.owner) or not has_jarvis_access(m.owner):
+			_consume_slot(m, now)
 			continue
 		try:
 			frappe.set_user(m.owner)
@@ -62,18 +64,24 @@ def run_due_macros() -> None:
 			)
 		finally:
 			frappe.set_user(original_user)
-		# Advance the schedule with a raw set_value (no re-validate, which would
-		# otherwise recompute next_run_at itself).
-		frappe.db.set_value(
-			MACRO,
-			m.name,
-			{
-				"last_run_at": now,
-				"next_run_at": compute_next_run(m.schedule_frequency, m.schedule_time, from_dt=now),
-			},
-			update_modified=False,
-		)
-		frappe.db.commit()
+		_consume_slot(m, now)
+
+
+def _consume_slot(m, now) -> None:
+	"""Consume this macro's schedule slot: stamp ``last_run_at`` and compute the
+	next occurrence with a raw set_value (no re-validate, which would otherwise
+	recompute ``next_run_at`` itself). ``compute_next_run`` is taken from *now*, so
+	even a long outage yields ONE next slot rather than a backfill storm."""
+	frappe.db.set_value(
+		MACRO,
+		m.name,
+		{
+			"last_run_at": now,
+			"next_run_at": compute_next_run(m.schedule_frequency, m.schedule_time, from_dt=now),
+		},
+		update_modified=False,
+	)
+	frappe.db.commit()
 
 
 def compute_next_run(frequency: str, schedule_time, from_dt=None) -> datetime.datetime:

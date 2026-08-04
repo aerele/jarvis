@@ -135,6 +135,31 @@ def is_system_user(user: str | None = None) -> bool:
 	return frappe.db.get_value("User", user, "user_type") == "System User"
 
 
+def is_valid_unattended_owner(user: str | None) -> bool:
+	"""True iff ``user`` may be bound as the identity of an UNATTENDED (cron) turn.
+
+	Strictly narrower than :func:`has_jarvis_access`, which answers "may this
+	identity reach Jarvis at all" and deliberately waves ``Administrator``
+	through. A scheduled turn has no human watching it, so it must never bind to:
+
+	* ``Administrator`` - every DocPerm and User Permission is bypassed, silently,
+	  on a cron.
+	* ``Guest`` - not a real identity.
+	* a **disabled** user - disabling is how an offboarded employee's access is
+	  revoked, but Frappe only clears their browser sessions: their roles survive,
+	  ``frappe.get_roles`` does not filter on ``enabled``, and nothing else in this
+	  module reads ``User.enabled``. Without this check their scheduled work keeps
+	  reaching the ERP forever.
+
+	This is the guard ``agent_scheduler._valid_owner`` has enforced since the agent
+	scheduler shipped; it lives here so every unattended dispatcher shares ONE
+	definition instead of each re-deriving it (jarvis #469: the macro scheduler had
+	not, and admitted exactly the two identities the sibling refuses)."""
+	if not user or user in ("Administrator", "Guest"):
+		return False
+	return bool(frappe.db.get_value("User", user, "enabled"))
+
+
 def require_jarvis_access(user: str | None = None) -> None:
 	"""Raise ``frappe.PermissionError`` (with a clear message) if the user lacks
 	access. Defaults to the current session user.
