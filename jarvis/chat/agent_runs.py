@@ -658,12 +658,13 @@ def record_delegate_run(
 
 	inst = installation if hasattr(installation, "owner") else frappe.get_doc(INSTALLATION, installation)
 	run_doc = run if hasattr(run, "name") else frappe.get_doc(RUN, run)
-	owner = inst.owner
 	# PP-4: WHO the persisted run/findings/dashboard are re-homed to for read
 	# visibility — the reviewer while shadow, the installer once live. The row
 	# ``owner`` is the single axis the agent permission hooks scope on, so this
 	# reassignment IS the shadow-visibility enforcement (owner cannot read shadow
-	# output; the named reviewer can).
+	# output; the named reviewer can). Every read path below MUST filter/re-home
+	# on visibility_owner, not inst.owner directly, or a reviewer != owner
+	# installation silently breaks dedupe/auto-resolve (#454).
 	shadow = (inst.get("activation_state") or "shadow") == "shadow"
 	visibility_owner = _visibility_owner(inst)
 	agent = inst.agent
@@ -690,7 +691,7 @@ def record_delegate_run(
 
 		existing = frappe.db.get_value(
 			FINDING,
-			{"owner": owner, "agent": agent, "fingerprint": fp, "state": "open"},
+			{"owner": visibility_owner, "agent": agent, "fingerprint": fp, "state": "open"},
 			"name",
 		)
 		if existing:
@@ -790,7 +791,7 @@ def record_delegate_run(
 		candidates = frappe.get_all(
 			FINDING,
 			filters={
-				"owner": owner,
+				"owner": visibility_owner,
 				"agent": agent,
 				"state": "open",
 				"rule_id": ["in", list(evaluated_tokens)],

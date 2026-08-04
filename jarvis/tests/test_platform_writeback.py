@@ -98,7 +98,14 @@ def _mk_listing() -> str:
 	return SLUG
 
 
-def _mk_installation(owner: str) -> object:
+def _mk_installation(owner: str, reviewer: str | None = None) -> object:
+	"""``reviewer`` defaults to ``owner`` for the common single-identity case.
+	Pass a DISTINCT ``reviewer`` to exercise the PP-4 shadow visibility_owner
+	read paths (#454): a default install where reviewer == owner can never catch
+	a dedupe/auto-resolve query that filters on plain ``owner`` instead of
+	``_visibility_owner(inst)``, because the two values collapse to the same
+	string."""
+	reviewer = reviewer or owner
 	name = frappe.db.get_value(INSTALLATION, {"agent": SLUG, "owner": owner}, "name")
 	if name:
 		return frappe.get_doc(INSTALLATION, name)
@@ -107,7 +114,7 @@ def _mk_installation(owner: str) -> object:
 			"doctype": INSTALLATION,
 			"agent": SLUG,
 			"run_as_user": owner,
-			"reviewer": owner,
+			"reviewer": reviewer,
 		}
 	)
 	doc.owner = owner
@@ -519,6 +526,104 @@ class TestWritebackIntegration(FrappeTestCase):
 		run.bundle_version = "2.0.0"
 		with self.assertRaises(frappe.PermissionError):
 			run.save(ignore_permissions=True)
+
+
+# --------------------------------------------------------------------------- #
+# PP-4 — #454 regression: dedupe + A16 auto-resolve must read on the SAME
+# identity the write path re-homes findings to (_visibility_owner: the
+# reviewer while shadow), not the plain installer owner. A default
+# installation where reviewer == owner (as in ``TestWritebackIntegration``)
+# cannot distinguish the two, so this exercises a DISTINCT reviewer.
+# --------------------------------------------------------------------------- #
+class TestPP4DedupeAutoResolveVisibilityOwner(FrappeTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("pw-owner2@example.com")
+		cls.reviewer = _mk_user("pw-reviewer2@example.com")
+		_mk_listing()
+		cls.company = _ensure_company()
+		# Shadow by default (the doctype's activation_state default) with a
+		# reviewer distinct from owner — the shape #454 fell over on.
+		cls.inst = _mk_installation(cls.owner, cls.reviewer)
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		_wipe_residue()
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		for n in frappe.get_all(FINDING, filters={"agent": SLUG}, pluck="name"):
+			frappe.delete_doc(FINDING, n, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_dedupe_matches_existing_finding_when_reviewer_differs_from_owner(self):
+		# run 1 raises an open finding. The write path re-homes it to the reviewer
+		# (the shadow visibility_owner), never the installer owner.
+		run1 = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			run1,
+			self.inst,
+			[_finding(result_class="observed_fact")],
+			coverage={TOKEN: "evaluated"},
+			scope={"company": self.company},
+		)
+		open_findings = frappe.get_all(
+			FINDING, filters={"agent": SLUG, "state": "open"}, fields=["name", "owner"]
+		)
+		self.assertEqual(len(open_findings), 1)
+		self.assertEqual(open_findings[0].owner, self.reviewer)
+
+		# run 2 reports the exact same finding again. If dedupe filtered on plain
+		# owner (the installer, never granted the row) it would never match the
+		# reviewer-owned row and would insert a duplicate — the #454 bug.
+		run2 = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			run2,
+			self.inst,
+			[_finding(result_class="observed_fact")],
+			coverage={TOKEN: "evaluated"},
+			scope={"company": self.company},
+		)
+		open_findings_after = frappe.get_all(FINDING, filters={"agent": SLUG, "state": "open"}, pluck="name")
+		self.assertEqual(
+			len(open_findings_after), 1, "dedupe must match the existing reviewer-owned row, not duplicate it"
+		)
+		self.assertEqual(open_findings_after[0], open_findings[0].name)
+		self.assertEqual(frappe.db.get_value(FINDING, open_findings[0].name, "last_seen_run"), run2.name)
+
+	def test_auto_resolve_finds_candidates_when_reviewer_differs_from_owner(self):
+		# run 1 raises an open finding under the company scope, re-homed to the
+		# reviewer exactly like the dedupe test above.
+		run1 = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			run1,
+			self.inst,
+			[_finding(result_class="observed_fact")],
+			coverage={TOKEN: "evaluated"},
+			scope={"company": self.company},
+		)
+		name = frappe.db.get_value(FINDING, {"agent": SLUG, "state": "open"}, "name")
+		self.assertIsNotNone(name)
+		self.assertEqual(frappe.db.get_value(FINDING, name, "owner"), self.reviewer)
+		frappe.db.set_value(FINDING, name, "company", self.company, update_modified=False)
+
+		# run 2 evaluates the same token with the finding no longer present. If the
+		# A16 candidate query filtered on plain owner it would never see this
+		# reviewer-owned row and would leave it open forever — the #454 bug.
+		run2 = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			run2, self.inst, [], coverage={TOKEN: "evaluated"}, scope={"company": self.company}
+		)
+		fd = frappe.get_doc(FINDING, name)
+		self.assertEqual(fd.state, "resolved")
+		self.assertEqual(fd.resolution_kind, "auto_coverage")
+		self.assertTrue(fd.resolved_at)
 
 
 # --------------------------------------------------------------------------- #
