@@ -484,8 +484,16 @@ def _execute(run_name: str) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 # per-unit read (fenced) + persist (unfenced)
 # --------------------------------------------------------------------------- #
-def _read_and_persist(spec, company, run, fdr_buffer=None, mined=None, watch=None) -> dict:
+def _read_and_persist(spec, company, run, fdr_buffer, mined=None, watch=None) -> dict:
+	"""``fdr_buffer`` has no default (jarvis#483): pass a live ``DetectorFamilyBuffer``
+	to apply the per-family BH-FDR pass (fdr.py), or the ``fdr.NO_FDR`` sentinel to
+	deliberately skip it. Omitting the argument, or passing ``None`` out of habit,
+	used to silently persist every raw candidate with zero multiple-testing
+	correction - that fail-open default is gone; both now fail loudly instead
+	(a ``TypeError`` on omission, an ``AttributeError`` on a stray ``None``).
+	"""
 	from jarvis.learning.executor import PER_DETECTOR_CANDIDATE_CAP, run_detector
+	from jarvis.learning.fdr import NO_FDR
 
 	frappe.db.commit()  # no pending writes before opening the READ ONLY fence
 	with read_only_transaction() as pdb:
@@ -524,7 +532,7 @@ def _read_and_persist(spec, company, run, fdr_buffer=None, mined=None, watch=Non
 	# persisted survivors; the delta is explained in the run's coverage note.
 	to_persist = norm["candidates"]
 	persist_detector_id = _spec_id(spec)
-	if fdr_buffer is not None:
+	if fdr_buffer is not NO_FDR:
 		released = fdr_buffer.add(_spec_id(spec), norm["candidates"])
 		to_persist = list(released.survivors) if released else []
 		if released is not None:
