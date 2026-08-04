@@ -499,14 +499,24 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 
 
 def pushed_skill_names() -> set[str]:
-	"""Bare authored slugs of the skills the container push ACTUALLY writes: the
+	"""Bare authored slugs the container push writes: the
 	:func:`_pushable_org_rows` eligibility set truncated by the same
 	``MAX_SKILLS_PER_PUSH`` cap :func:`build_push_payload` applies.
 
 	Anything OUTSIDE this set has no ``custom-<slug>`` directory in the container,
 	so no context clause may tell the agent to apply it as an installed skill
 	(issue #477). Identity-only projection so the chat hot path never loads
-	instruction bodies."""
+	instruction bodies.
+
+	Read this as push ELIGIBILITY, not confirmed container state. It is recomputed
+	from current DB rows, and Apply is a separate explicit action (see
+	``decide_skill_promotion``: an approved skill joins the shared catalog on the
+	next Apply, never automatically). So between an Org approval and the operator
+	clicking Apply, a newly eligible skill is named as installed while its
+	directory does not exist yet. That window is pre-existing and much narrower
+	than the unconditional mislabelling this function replaced; closing it needs
+	per-row applied-state tracking, which the bench does not have (the sync status
+	is one bench-wide Single)."""
 	rows = _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)
 	return {r.skill_name for r in rows[:MAX_SKILLS_PER_PUSH]}
 
