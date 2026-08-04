@@ -129,6 +129,7 @@ def _settings_payload(doc) -> dict:
 		"total_tokens": cint(doc.total_tokens),
 		"last_usage_at": doc.last_usage_at,
 		"last_synced_at": doc.last_synced_at,
+		"sidebar_order": getattr(doc, "sidebar_order", "") or "",
 		"per_model": _per_model_rows(doc.user),
 	}
 
@@ -443,3 +444,29 @@ def set_user_theme(theme: str) -> dict:
 		return {"ok": False, "reason": "invalid_theme"}
 	frappe.db.set_value("User", frappe.session.user, "desk_theme", desk, update_modified=False)
 	return {"ok": True, "data": {"theme": theme, "desk_theme": desk}}
+
+
+@frappe.whitelist()
+def set_sidebar_order(order: str) -> dict:
+	"""Persist the caller's sidebar nav order. ``order`` is JSON
+	``{"top": [labels], "more": [labels]}`` where labels are the SPA's nav-link
+	labels; the client reconciles unknown/missing ones against its own defaults,
+	so a stale label here can never hide or dead-link a nav item."""
+	require_jarvis_access()
+	import json as _json
+
+	def _clean(v) -> list:
+		if not isinstance(v, list):
+			return []
+		return [str(x)[:60] for x in v if isinstance(x, str)][:20]
+
+	try:
+		parsed = _json.loads(order or "{}")
+		if not isinstance(parsed, dict):
+			raise ValueError
+	except Exception:
+		return {"ok": False, "reason": "invalid_order"}
+	clean = {"top": _clean(parsed.get("top")), "more": _clean(parsed.get("more"))}
+	doc = usage.get_or_create_user_settings(frappe.session.user)
+	doc.db_set("sidebar_order", _json.dumps(clean), update_modified=False)
+	return {"ok": True, "data": {"sidebar_order": clean}}
