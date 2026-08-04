@@ -7,6 +7,10 @@ __Auth row is not cleared at all. Frappe cleans __Auth in frappe.delete_doc,
 which never runs for child rows of a Single (Document.update_child_table deletes
 them with a bare SQL DELETE), so these tests read the table directly rather than
 trusting get_password to tell the truth about it.
+
+TestDisconnectReconcile below covers the other half of the feature: the scheduled
+convergence that finishes a disconnect whose synchronous admin call died after
+admin had already processed it (#534).
 """
 
 from unittest.mock import patch
@@ -16,6 +20,10 @@ from frappe.utils.password import get_decrypted_password
 
 from jarvis import account, admin_client, onboarding
 from jarvis.exceptions import AdminUnreachableError
+from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+	_admin_says_llm_gone,
+	reconcile_pending_llm_sync,
+)
 from jarvis.tests.test_settings_on_update import _reset_settings
 from jarvis.tests.test_unified_llm_config import _RT3SettingsTestCase
 
@@ -279,3 +287,219 @@ class TestDisconnectLlm(_RT3SettingsTestCase):
 		m.assert_not_called()
 		self.assertFalse(out["disconnected"])
 		self.assertEqual(out["default_model"], "gpt-4o")
+
+
+# What admin's chat_readiness_reason really looks like the moment it has processed
+# a disconnect: its own no-credentials clause, plus the stale-generation clause the
+# stub re-render is still working through. Composed, not a bare sentence, because
+# that is the shape the reconcile has to survive - see compute_chat_readiness in
+# jarvis-admin-v2 (fleet/pool.py).
+_ADMIN_DISCONNECTED_REASON = "waiting for an LLM key or subscription; applying your LLM configuration"
+
+
+class TestDisconnectReconcile(_RT3SettingsTestCase):
+	"""#534: the disconnect must survive a worker that dies mid-call.
+
+	``disconnect_llm`` asks admin synchronously and clears local secrets only if it
+	answers. Admin commits its blanked row BEFORE it touches the container, so a
+	worker killed anywhere after that commit - by gunicorn's -t, a dropped
+	connection, a restart - leaves admin and the container disconnected while this
+	bench still holds live keys and still advertises a model.
+
+	Every test here drives ``reconcile_pending_llm_sync`` directly. The scheduler is
+	paused on the dev bench and the cron cadence is not what is under test.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		self._clear_models()
+		_reset_settings()
+		frappe.db.commit()
+
+	def _seed_connected_pool(self):
+		"""A pool the fleet CONFIRMED it applied - i.e. an ordinary working customer.
+
+		The confirmed-apply marker is not decoration here: it is the discriminator
+		the reconcile uses to tell "admin deleted these" from "admin never received
+		these", so seeding it is what makes this a connected workspace rather than a
+		half-onboarded one.
+		"""
+		with (
+			patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}),
+			patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "restart"}),
+		):
+			onboarding.save_llm_pool(frappe.as_json(_POOL), preset=None, routing_mode="failover")
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_pool_synced_at", frappe.utils.now(), update_modified=False)
+		settings.db_set("last_sync_status", "ok", update_modified=False)
+		frappe.db.commit()
+
+	def _assert_pool_intact(self, why: str):
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(len(settings.get("models") or []), 2, why)
+		self.assertEqual(settings.models[0].get_password("api_key"), "sk-first", why)
+		self.assertGreaterEqual(_pool_auth_rows(), 2, why)
+		self.assertNotEqual(settings.get("last_sync_status") or "", "disconnected", why)
+
+	def _assert_fully_disconnected(self):
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(settings.get("models") or [], [])
+		self.assertEqual(_pool_auth_rows(), 0, "the ciphertext has to go too, not just the rows")
+		self.assertFalse(
+			get_decrypted_password("Jarvis Settings", "Jarvis Settings", "llm_api_key", False),
+			"the legacy flat key must not survive in __Auth",
+		)
+		self.assertEqual(settings.get("llm_provider") or "", "")
+		self.assertEqual(settings.get("llm_model") or "", "")
+		self.assertEqual(settings.get("last_sync_status") or "", "disconnected")
+		self.assertIsNone(settings.get("llm_pool_synced_at"))
+		self.assertIsNone(settings.get("llm_direct_synced_at"))
+
+	def _split_the_planes(self):
+		"""Reproduce the defect: admin processed the disconnect, the bench never
+		learned. AdminUnreachableError is what a killed read looks like from here,
+		and disconnect_llm aborts on it BEFORE clearing anything locally."""
+		self._seed_connected_pool()
+		with patch(
+			"jarvis.admin_client.post_disconnect_llm",
+			side_effect=AdminUnreachableError("read timeout"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.disconnect_llm()
+		self._assert_pool_intact("the split state is the premise of these tests")
+
+	# ---- it converges ----------------------------------------------------- #
+
+	def test_reconcile_finishes_a_disconnect_the_worker_did_not_survive(self):
+		self._split_the_planes()
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={
+				"chat_readiness": "Configuring",
+				"chat_readiness_reason": _ADMIN_DISCONNECTED_REASON,
+			},
+		):
+			reconcile_pending_llm_sync()
+		self._assert_fully_disconnected()
+
+	def test_reconcile_converges_without_re_driving_the_admin_disconnect(self):
+		"""Admin is already done - it said so. Calling its disconnect again would
+		spend the customer's shared 20/hour rotate-ops bucket on a container admin's
+		own reconcile is converging."""
+		self._split_the_planes()
+		with (
+			patch.object(
+				admin_client,
+				"get_connection",
+				return_value={
+					"chat_readiness": "Configuring",
+					"chat_readiness_reason": _ADMIN_DISCONNECTED_REASON,
+				},
+			),
+			patch.object(admin_client, "post_disconnect_llm") as post,
+		):
+			reconcile_pending_llm_sync()
+		post.assert_not_called()
+		self._assert_fully_disconnected()
+
+	def test_reconcile_is_idempotent(self):
+		self._split_the_planes()
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={
+				"chat_readiness": "Configuring",
+				"chat_readiness_reason": _ADMIN_DISCONNECTED_REASON,
+			},
+		) as conn:
+			reconcile_pending_llm_sync()
+			reconcile_pending_llm_sync()
+			reconcile_pending_llm_sync()
+		self._assert_fully_disconnected()
+		self.assertEqual(
+			conn.call_count,
+			1,
+			"a converged workspace holds no credential, so later ticks must not even probe admin",
+		)
+
+	# ---- and it does NOT clobber a working customer ------------------------ #
+
+	def test_a_connected_workspace_admin_reports_ready_is_untouched(self):
+		self._seed_connected_pool()
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={"chat_readiness": "Ready", "chat_readiness_reason": ""},
+		):
+			reconcile_pending_llm_sync()
+		self._assert_pool_intact("admin says Ready; there is nothing to converge")
+
+	def test_credentials_admin_never_received_are_not_destroyed(self):
+		"""THE clobber case, and the reason the confirmed-apply marker is required.
+
+		A customer types a key into a bench that cannot reach admin. Admin holds no
+		credential and says so in exactly the same words it uses after a disconnect -
+		but here that means "never received", not "deleted", and the key is real and
+		wanted. Without the marker gate the reconcile reads the two states
+		identically and wipes this one.
+		"""
+		self._seed_connected_pool()
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
+		settings.db_set("last_sync_status", "failed: admin unreachable", update_modified=False)
+		frappe.db.commit()
+
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={
+				"chat_readiness": "Configuring",
+				"chat_readiness_reason": _ADMIN_DISCONNECTED_REASON,
+			},
+		):
+			reconcile_pending_llm_sync()
+		self._assert_pool_intact("an unproven first apply is not a disconnect")
+
+	def test_other_configuring_reasons_are_not_a_disconnect(self):
+		"""Every other Configuring reason describes a tenant whose credentials admin
+		still HAS. Reading any of them as "gone" would delete a working key."""
+		for reason in (
+			"applying your LLM configuration",
+			"ERP tools not connected",
+			"pool spec rejected: invalid_spec",
+			"still verifying your subscription route",
+			"",
+		):
+			with self.subTest(reason=reason):
+				self._clear_models()
+				_reset_settings()
+				self._seed_connected_pool()
+				with patch.object(
+					admin_client,
+					"get_connection",
+					return_value={"chat_readiness": "Configuring", "chat_readiness_reason": reason},
+				):
+					reconcile_pending_llm_sync()
+				self._assert_pool_intact(f"reason {reason!r} says nothing about credentials")
+
+	def test_a_probe_failure_is_never_read_as_disconnected(self):
+		self._seed_connected_pool()
+		with patch.object(admin_client, "get_connection", side_effect=AdminUnreachableError("boom")):
+			reconcile_pending_llm_sync()
+		self._assert_pool_intact("unknown is not disconnected")
+
+	# ---- the predicate itself --------------------------------------------- #
+
+	def test_admin_says_llm_gone_requires_the_configuring_state(self):
+		clause = _ADMIN_DISCONNECTED_REASON
+		self.assertTrue(_admin_says_llm_gone("Configuring", clause))
+		# Case-insensitive: the clause is admin's prose, not a protocol token.
+		self.assertTrue(_admin_says_llm_gone("Configuring", clause.upper()))
+		# A state that says nothing about credentials must never qualify - a
+		# suspended tenant in particular still owns its keys and gets them back.
+		for state in ("Ready", "Provisioning", "Suspended", "SupportRequired", "", None):
+			with self.subTest(state=state):
+				self.assertFalse(_admin_says_llm_gone(state, clause))
+		self.assertFalse(_admin_says_llm_gone("Configuring", None))
+		self.assertFalse(_admin_says_llm_gone("Configuring", "ERP tools not connected"))
