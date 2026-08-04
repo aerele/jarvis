@@ -11,7 +11,9 @@ cheap native file reads/greps; ``jarvis__read_wiki`` stays authoritative.
 
 Scope discipline: only Org pages (scope NULL/'' counts as Org) are ever
 mirrored — the container workspace is org-shared, so Role/User pages must
-never land there. Diffing rides ``mirror_hash`` (sha256 of the rendered
+never land there. That runs both ways: narrowing a mirrored page to Role/User
+is a revocation, so its file is deleted on the next sync (there is no periodic
+sweep to fall back on). Diffing rides ``mirror_hash`` (sha256 of the rendered
 content, stamped per page via ``frappe.db.set_value`` — deliberately NOT
 ``doc.save``, which would re-fire the very doc_events that trigger the sync).
 
@@ -89,6 +91,12 @@ _PAGE_FIELDS = [
 def _is_org_scope(scope) -> bool:
 	"""NULL/'' scope (pre-v2 rows) reads as Org everywhere."""
 	return (scope or "").strip() in ("", "Org")
+
+
+def _is_mirrorable(page) -> bool:
+	"""Only Active Org pages belong on the org-shared container. Everything
+	else (archived, or narrowed to Role/User) must have its file removed."""
+	return _is_org_scope(page.get("scope")) and (page.get("status") or "Active") == "Active"
 
 
 def _wire_path(path: str) -> str:
@@ -171,7 +179,7 @@ def render_index() -> tuple[str, str]:
 		order_by="name asc",
 		limit_page_length=0,
 	)
-	pages = [r for r in rows if _is_org_scope(r.scope) and (r.status or "Active") == "Active"]
+	pages = [r for r in rows if _is_mirrorable(r)]
 	by_type: dict[str, list] = {}
 	for r in pages:
 		by_type.setdefault((r.page_type or "").strip() or "Org", []).append(r)
@@ -275,9 +283,7 @@ def _stamp_sync_status(result: dict) -> None:
 
 def _sync(full: bool) -> dict:
 	rows = frappe.get_all(WIKI, fields=_PAGE_FIELDS, limit_page_length=0)
-	org = [r for r in rows if _is_org_scope(r.scope)]
-	active = [r for r in org if (r.status or "Active") == "Active"]
-	inactive = [r for r in org if (r.status or "Active") != "Active"]
+	active = [r for r in rows if _is_mirrorable(r)]
 
 	files: list[dict] = []
 	for r in active:
@@ -292,9 +298,13 @@ def _sync(full: bool) -> dict:
 	files.append(_file_entry(ipath, icontent))
 	files.append(_file_entry(lpath, lcontent))
 
-	# Archived pages whose file is (still) on the container: delete + clear the
-	# hash stamp after a confirmed push so the delete isn't re-sent forever.
-	deletes = [r for r in inactive if (r.mirror_hash or "")]
+	# Every page whose file is (still) on the container but no longer belongs
+	# there: archived, or narrowed out of Org scope. A stamped mirror_hash is
+	# the standing proof a file was pushed, so it drives the delete list no
+	# matter WHY the page stopped being mirrorable; clearing the stamp after a
+	# confirmed push stops the delete being re-sent forever and lets a later
+	# re-promotion push the same content again.
+	deletes = [r for r in rows if (r.mirror_hash or "") and not _is_mirrorable(r)]
 	delete_paths = [_wire_path(page_path(r)) for r in deletes]
 	known_paths = None
 	if full:
@@ -400,17 +410,48 @@ def enqueue_sync(full: bool = False) -> None:
 
 def on_wiki_page_change(doc, method: str | None = None) -> None:
 	"""doc_events hook (after_insert / on_update / on_trash on Jarvis Wiki
-	Page). Only Org-scope pages trigger a sync — Role/User pages are never
-	mirrored. A trash enqueues a FULL sync: the row is gone before the job
-	runs, so only known_paths pruning can remove its file (archival, by
-	contrast, is a status flip the incremental sync sees as a delete).
-	Never raises into the save/delete path."""
+	Page). Org-scope pages trigger a sync; so does a Role/User page that still
+	has a file on the org-shared container, because narrowing a page's scope is
+	a REVOCATION and the file has to go. A trash enqueues a FULL sync: the row
+	is gone before the job runs, so only known_paths pruning can remove its
+	file (archival, by contrast, is a status flip the incremental sync sees as
+	a delete). Never raises into the save/delete path."""
 	try:
-		if not _is_org_scope(doc.get("scope")):
+		prune = _needs_mirror_prune(doc)
+		if not prune and not _is_org_scope(doc.get("scope")):
 			return
-		enqueue_sync(full=(method == "on_trash"))
+		enqueue_sync(full=(prune or method == "on_trash"))
 	except Exception:
 		frappe.log_error(
 			title="wiki mirror: doc-event trigger failed",
 			message=frappe.get_traceback(),
 		)
+
+
+def _needs_mirror_prune(doc) -> bool:
+	"""True when this non-Org page has a mirrored file to revoke.
+
+	Two signals, because each covers the other's blind spot:
+
+	* A stamped ``mirror_hash``. Set only after a confirmed push and cleared
+	  only after a confirmed delete, so it means "a file is out there" without
+	  needing any save history — which is also why it catches pages demoted
+	  BEFORE this guard existed, and why it works in ``on_trash`` (where the
+	  doc is loaded fresh from the DB and there is no pre-save copy).
+	* A pre-save row that was Org scope. ``mirror_hash`` is stamped with
+	  ``update_modified=False``, so a Desk form opened before the last sync
+	  submits a stale empty hash without tripping the timestamp check; the
+	  pre-save row still knows the page was Org. Only ``on_update`` has one.
+
+	The prune rides a FULL sync so the fleet's ``known_paths`` walk removes the
+	file even in that stale-hash case, where no delete path can be derived.
+	"""
+	if _is_org_scope(doc.get("scope")):
+		return False
+	if (doc.get("mirror_hash") or "").strip():
+		return True
+	# callable-checked, not hasattr: frappe._dict answers every attribute with
+	# None, so a plain dict-shaped doc would hasattr-pass and then TypeError.
+	loader = getattr(doc, "get_doc_before_save", None)
+	before = loader() if callable(loader) else None
+	return bool(before and _is_org_scope(before.get("scope")))

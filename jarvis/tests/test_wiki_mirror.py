@@ -293,6 +293,105 @@ class TestSync(WikiMirrorTestCase):
 		last = push2.call_args_list[-1].kwargs
 		self.assertNotIn(wire_path, last["delete"] or [])
 
+	def test_demoted_to_user_scope_page_gets_deleted_and_hash_cleared(self):
+		doc = self._page("acme")
+		wire_path = f"customers/{doc.name}.md"
+		with self._mock_push() as push:
+			wiki_mirror.sync()
+		self.assertIn(wire_path, self._pushed_paths(push))
+		self.assertTrue(frappe.db.get_value(WIKI, doc.name, "mirror_hash"))
+
+		doc.reload()
+		doc.scope = "User"
+		doc.save(ignore_permissions=True)
+		frappe.db.commit()
+		# demotion never re-suffixes the slug, so the orphan sits at the very
+		# path the mirror pushed
+		self.assertEqual(
+			wiki_mirror.page_path(frappe.get_doc(WIKI, doc.name)),
+			f"wiki/{wire_path}",
+		)
+
+		with self._mock_push() as push2:
+			out = wiki_mirror.sync()
+		self.assertTrue(out["ok"])
+		self.assertNotIn(wire_path, self._pushed_paths(push2))
+		self.assertIn(wire_path, push2.call_args_list[-1].kwargs["delete"])
+		self.assertFalse(frappe.db.get_value(WIKI, doc.name, "mirror_hash"))
+
+		# delete confirmed -> not re-sent forever
+		with self._mock_push() as push3:
+			wiki_mirror.sync()
+		self.assertNotIn(wire_path, push3.call_args_list[-1].kwargs["delete"] or [])
+
+	def test_demoted_to_role_scope_page_gets_deleted(self):
+		doc = self._page("shared")
+		wire_path = f"customers/{doc.name}.md"
+		with self._mock_push():
+			wiki_mirror.sync()
+
+		doc.reload()
+		doc.scope = "Role"
+		doc.target_role = "System Manager"
+		doc.save(ignore_permissions=True)
+		frappe.db.commit()
+
+		with self._mock_push() as push:
+			out = wiki_mirror.sync()
+		self.assertTrue(out["ok"])
+		self.assertNotIn(wire_path, self._pushed_paths(push))
+		self.assertIn(wire_path, push.call_args_list[-1].kwargs["delete"])
+		self.assertFalse(frappe.db.get_value(WIKI, doc.name, "mirror_hash"))
+		_path, index = wiki_mirror.render_index()
+		self.assertNotIn(doc.name, index)
+
+	def test_demotion_with_a_stale_hash_still_prunes_on_the_full_sync(self):
+		doc = self._page("acme")
+		wire_path = f"customers/{doc.name}.md"
+		with self._mock_push():
+			wiki_mirror.sync()
+		self.assertTrue(frappe.db.get_value(WIKI, doc.name, "mirror_hash"))
+
+		# `doc` was loaded before the sync stamped mirror_hash, and the stamp
+		# leaves `modified` alone, so this save writes the stale empty hash
+		# back without tripping the timestamp check - exactly what a Desk form
+		# opened before a sync does. The pre-save scope is the only signal left.
+		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
+			doc.scope = "User"
+			doc.save(ignore_permissions=True)
+		frappe.db.commit()
+		self.assertFalse(frappe.db.get_value(WIKI, doc.name, "mirror_hash"))
+		enq.assert_called_once_with(full=True)
+
+		with self._mock_push() as push:
+			wiki_mirror.sync(full=True)
+		known = push.call_args_list[-1].kwargs["known_paths"]
+		self.assertNotIn(wire_path, known)
+
+	def test_repromoted_page_is_pushed_again(self):
+		doc = self._page("acme")
+		wire_path = f"customers/{doc.name}.md"
+		with self._mock_push():
+			wiki_mirror.sync()
+
+		doc.reload()
+		doc.scope = "User"
+		doc.save(ignore_permissions=True)
+		frappe.db.commit()
+		with self._mock_push():
+			wiki_mirror.sync()
+
+		# same content as before the demotion: the re-push only happens because
+		# the delete cleared the stamped hash
+		doc.reload()
+		doc.scope = "Org"
+		doc.save(ignore_permissions=True)
+		frappe.db.commit()
+		with self._mock_push() as push:
+			wiki_mirror.sync()
+		self.assertIn(wire_path, self._pushed_paths(push))
+		self.assertNotIn(wire_path, push.call_args_list[-1].kwargs["delete"] or [])
+
 	def test_sync_chunks_batches_under_payload_cap(self):
 		for i in range(12):
 			self._page(f"big-{i}", body="a" * 19000)
@@ -357,6 +456,28 @@ class TestTriggers(WikiMirrorTestCase):
 		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
 			wiki_mirror.on_wiki_page_change(frappe._dict(scope="Org"), "on_trash")
 		enq.assert_called_once_with(full=True)
+
+	def test_doc_event_prunes_a_mirrored_non_org_page(self):
+		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
+			wiki_mirror.on_wiki_page_change(frappe._dict(scope="User", mirror_hash="deadbeef"), "on_update")
+			wiki_mirror.on_wiki_page_change(frappe._dict(scope="Role", mirror_hash="deadbeef"), "on_trash")
+		self.assertEqual(enq.call_count, 2)
+		for call in enq.call_args_list:
+			self.assertTrue(call.kwargs["full"])
+
+	def test_doc_event_falls_back_to_the_pre_save_scope(self):
+		demoted = frappe._dict(scope="User", mirror_hash="")
+		demoted.get_doc_before_save = lambda: frappe._dict(scope="Org")
+		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
+			wiki_mirror.on_wiki_page_change(demoted, "on_update")
+		enq.assert_called_once_with(full=True)
+
+		# never mirrored: no hash, and it was already non-Org before the save
+		untouched = frappe._dict(scope="User", mirror_hash="")
+		untouched.get_doc_before_save = lambda: frappe._dict(scope="User")
+		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq2:
+			wiki_mirror.on_wiki_page_change(untouched, "on_update")
+		enq2.assert_not_called()
 
 	def test_doc_event_swallows_enqueue_errors(self):
 		with mock.patch.object(wiki_mirror, "enqueue_sync", side_effect=Exception("redis down")):
