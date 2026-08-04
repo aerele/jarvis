@@ -27,7 +27,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agents_api
+from jarvis.chat import agent_scheduler, agents_api
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -497,3 +497,752 @@ class TestUninstallCascadeScope(FrappeTestCase):
 		"""No cascade flag, no guard — an ordinary admin/Desk delete is unaffected."""
 		frappe.delete_doc(FINDING, self.f_b, ignore_permissions=True, force=True)
 		self.assertFalse(frappe.db.exists(FINDING, self.f_b))
+
+
+# --------------------------------------------------------------------------- #
+# #458 — the agent_catalog_dirty TOCTOU guard
+# --------------------------------------------------------------------------- #
+_TOCTOU_KEYS = (
+	"agent_catalog_dirty",
+	"agent_catalog_version",
+	"agent_skills_sync_status",
+	"agent_skills_synced_at",
+)
+
+
+def _single(field: str):
+	"""Read a Jarvis Settings field bypassing frappe.db.value_cache — the very
+	cache this section is about."""
+	return frappe.db.get_single_value(SETTINGS, field, cache=False)
+
+
+def _second_connection():
+	"""A SEPARATE DB connection, so a write can be committed while the push
+	worker's own transaction is open.
+
+	This is what makes the #458 regression faithful: a same-connection write
+	would be visible to the worker's re-read (read-your-own-writes) and a
+	same-connection commit would clear ``frappe.db.value_cache`` for it, so
+	neither could ever reproduce the bug.
+	"""
+	from frappe.database import get_db
+
+	conf = frappe.conf
+	return get_db(
+		socket=conf.db_socket,
+		host=conf.db_host,
+		port=conf.db_port,
+		user=conf.db_user or conf.db_name,
+		password=conf.db_password,
+		cur_db_name=conf.db_name,
+	)
+
+
+def _concurrent_catalog_mutation() -> None:
+	"""Model a user's ``set_enabled`` landing mid-push: another connection bumps
+	the catalog version and re-marks the catalog dirty, and COMMITS."""
+	conn = _second_connection()
+	try:
+		conn.sql(
+			"""UPDATE `tabSingles`
+			SET `value` = CAST(COALESCE(NULLIF(`value`, ''), '0') AS UNSIGNED) + 1
+			WHERE `doctype` = %(dt)s AND `field` = 'agent_catalog_version'""",
+			{"dt": SETTINGS},
+		)
+		conn.sql(
+			"""UPDATE `tabSingles` SET `value` = '1'
+			WHERE `doctype` = %(dt)s AND `field` = 'agent_catalog_dirty'""",
+			{"dt": SETTINGS},
+		)
+		conn.commit()
+	finally:
+		conn.close()
+
+
+class TestAgentCatalogPushTOCTOU(FrappeTestCase):
+	"""#458: the push worker's version recheck must be able to SEE a mutation that
+	landed after its snapshot. Before the fix it re-read its own
+	``frappe.db.value_cache`` entry (and, under REPEATABLE READ, its own
+	transaction snapshot), so the comparison was tautologically equal and a
+	mid-push mutation was silently marked applied."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls._saved = {k: _single(k) for k in _TOCTOU_KEYS}
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		for k, v in cls._saved.items():
+			frappe.db.set_single_value(SETTINGS, k, v)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_version", 7)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 1)
+		frappe.db.set_single_value(SETTINGS, "agent_skills_sync_status", "pending: applying agents")
+		# Commit the seed so the worker below opens a CLEAN transaction holding no
+		# row locks the second connection would block on.
+		frappe.db.commit()
+
+	def _push(self, side_effect=None):
+		from jarvis import admin_client
+
+		def _fake_push(agent_skills):
+			if side_effect:
+				side_effect()
+			return {"ok": True}
+
+		with patch.object(admin_client, "post_push_agent_skills", side_effect=_fake_push):
+			agents_api._enqueued_push_agent_skills()
+
+	def test_mid_push_mutation_is_detected_not_marked_applied(self):
+		"""A mutation committed by another connection WHILE the push is in flight
+		leaves ``agent_catalog_dirty`` set, so the SPA keeps showing "Apply
+		pending" and the change is not silently lost."""
+		self._push(side_effect=_concurrent_catalog_mutation)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 8)
+		self.assertEqual(
+			frappe.utils.cint(_single("agent_catalog_dirty")),
+			1,
+			"a mid-push mutation must NOT have its dirty flag cleared by that push",
+		)
+		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("ok ("))
+
+	def test_clean_push_still_clears_the_dirty_flag(self):
+		"""Control: with no mid-push mutation the version is unchanged, so the push
+		clears the flag exactly as before. The fix must not make the flag sticky."""
+		self._push()
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 7)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("ok ("))
+
+	def test_failed_push_leaves_the_dirty_flag_set(self):
+		"""Control: a terminal failure never clears the flag, and never leaves the
+		status stuck on ``pending:``."""
+		from jarvis import admin_client
+
+		with patch.object(
+			admin_client,
+			"post_push_agent_skills",
+			side_effect=admin_client.AdminUnreachableError("nope"),
+		):
+			agents_api._enqueued_push_agent_skills()
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
+		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("failed: admin unreachable"))
+
+	def test_version_bump_does_not_depend_on_a_previously_read_value(self):
+		"""#458 lost update: the bump is one statement, so it increments whatever
+		the row currently holds. The old read-modify-write took the value from
+		``get_single_value`` (cached / snapshot) and wrote that + 1, which silently
+		discards a concurrent increment. Poisoning the cache with the stale value
+		reproduces exactly that."""
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_version", 5)
+		frappe.db.commit()
+		# The DB row moves to 9 without touching any cache — stand-in for the
+		# increment a concurrent request already committed.
+		frappe.db.sql(
+			"""UPDATE `tabSingles` SET `value` = '9'
+			WHERE `doctype` = %(dt)s AND `field` = 'agent_catalog_version'""",
+			{"dt": SETTINGS},
+		)
+		frappe.db.value_cache[SETTINGS]["agent_catalog_version"] = 5
+		agents_api._bump_catalog_version()
+		self.assertEqual(
+			frappe.utils.cint(_single("agent_catalog_version")),
+			10,
+			"the increment must be applied to the ROW, never to a stale read",
+		)
+
+
+# --------------------------------------------------------------------------- #
+# #460 — (owner, agent) uniqueness is a DB constraint, not check-then-act
+# --------------------------------------------------------------------------- #
+def _owner_agent_index() -> list[dict]:
+	"""The (owner, agent) index as the DATABASE reports it.
+
+	Read from ``information_schema`` on purpose: ``bench migrate`` exits 0 whether
+	or not ``on_doctype_update`` ever fired, so its exit code proves nothing about
+	whether the constraint exists.
+	"""
+	return frappe.db.sql(
+		"""
+		SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME, SEQ_IN_INDEX
+		FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE()
+		  AND TABLE_NAME = 'tabJarvis Agent Installation'
+		  AND INDEX_NAME = 'owner_agent'
+		ORDER BY SEQ_IN_INDEX
+		""",
+		as_dict=True,
+	)
+
+
+def _drop_owner_agent_index() -> None:
+	if _owner_agent_index():
+		frappe.db.sql_ddl("ALTER TABLE `tabJarvis Agent Installation` DROP INDEX `owner_agent`")
+
+
+def _add_owner_agent_index() -> None:
+	frappe.db.add_unique(INSTALLATION, ["owner", "agent"], constraint_name="owner_agent")
+
+
+class TestAgentInstallUniqueIndex(FrappeTestCase):
+	"""#460: the constraint must EXIST, and the racing install must lose to it
+	with the friendly message rather than a 500."""
+
+	SLUG = PREFIX + "uniq"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-uniq-owner@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.set_value(LISTING, cls.SLUG, "status", "Published", update_modified=False)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+
+	def test_owner_agent_unique_index_exists(self):
+		"""A fresh install gets the index from ``on_doctype_update``; an existing
+		site gets it from the v2_13 patch. Either way the DB must report it."""
+		cols = _owner_agent_index()
+		self.assertEqual([c["COLUMN_NAME"] for c in cols], ["owner", "agent"])
+		self.assertEqual({c["NON_UNIQUE"] for c in cols}, {0})
+
+	def test_racing_install_produces_one_row_and_a_friendly_error(self):
+		"""Two concurrent installs of the same agent by one owner: both
+		``frappe.db.exists`` checks return None (exactly what the race achieves,
+		since neither transaction has committed), so the DB constraint is the only
+		thing left. It must yield ONE row and the ordinary "already installed"
+		ValidationError, not an unhandled IntegrityError."""
+		real_exists = frappe.db.exists
+
+		def blind_to_installs(dt, *a, **kw):
+			# Only the (owner, agent) clash lookup is blinded; every other existence
+			# check the insert makes (link validation, etc.) runs for real.
+			if dt == INSTALLATION:
+				return None
+			return real_exists(dt, *a, **kw)
+
+		frappe.set_user(self.owner)
+		try:
+			agents_api.install_agent(self.SLUG)
+			with patch.object(frappe.db, "exists", side_effect=blind_to_installs):
+				with self.assertRaises(frappe.ValidationError) as ctx:
+					agents_api.install_agent(self.SLUG)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertNotIsInstance(ctx.exception, frappe.UniqueValidationError)
+		self.assertIn("already installed", str(ctx.exception))
+		rows = frappe.get_all(
+			INSTALLATION, filters={"owner": self.owner, "agent": self.SLUG}, ignore_permissions=True
+		)
+		self.assertEqual(len(rows), 1)
+
+	def test_ordinary_double_install_still_gets_the_friendly_message(self):
+		"""Control: the non-racing path is unchanged — the check-then-act guard
+		still answers first, so the constraint is never reached."""
+		frappe.set_user(self.owner)
+		try:
+			agents_api.install_agent(self.SLUG)
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				agents_api.install_agent(self.SLUG)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIn("already installed", str(ctx.exception))
+
+
+class TestAgentInstallDuplicateMerge(FrappeTestCase):
+	"""#460 migration trap: a bench already carrying duplicate rows from the race
+	would hard-fail the ALTER TABLE, so the patch merges first. What it keeps and
+	what it discards is the part that must not be got wrong."""
+
+	SLUG = PREFIX + "dupe"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-dupe-owner@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		# The duplicates this patch exists to clean up predate the constraint, so
+		# seeding them requires it to be absent.
+		frappe.db.commit()
+		_drop_owner_agent_index()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+		_add_owner_agent_index()
+
+	def _seed(self, *, enabled=0, activation_state="shadow", runs=0):
+		# Deliberately NOT via _mk_install: that reuses an existing row, and the
+		# point here is to produce the SECOND row the race would have produced.
+		# ignore_validate blinds validate(), where the check-then-act guard lives —
+		# which is what the race achieves in production.
+		doc = frappe.get_doc(
+			{
+				"doctype": INSTALLATION,
+				"agent": self.SLUG,
+				"run_as_user": self.owner,
+				"reviewer": self.owner,
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.flags.ignore_validate = True
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value(
+			INSTALLATION,
+			doc.name,
+			{"owner": self.owner, "enabled": enabled, "activation_state": activation_state},
+			update_modified=False,
+		)
+		for _ in range(runs):
+			_mk_run(doc.name, self.SLUG, self.owner)
+		return doc.name
+
+	def test_merge_keeps_the_live_enabled_row_and_rehomes_the_history(self):
+		"""The keeper is the row whose state is most expensive to reconstruct (live
+		beats shadow, enabled beats disabled), and the loser's runs are re-pointed
+		at it — so promoting/enabling is never silently undone AND no run history
+		is destroyed."""
+		from jarvis.patches import v2_13_unique_agent_installation as patch_mod
+
+		loser = self._seed(enabled=0, activation_state="shadow", runs=2)
+		keeper = self._seed(enabled=1, activation_state="live", runs=0)
+		frappe.db.commit()
+
+		merged = patch_mod._merge_duplicate_installs()
+		frappe.db.commit()
+
+		self.assertEqual(merged, 1)
+		self.assertFalse(frappe.db.exists(INSTALLATION, loser))
+		self.assertTrue(frappe.db.exists(INSTALLATION, keeper))
+		survivor = frappe.db.get_value(INSTALLATION, keeper, ["enabled", "activation_state"], as_dict=True)
+		self.assertEqual(frappe.utils.cint(survivor.enabled), 1)
+		self.assertEqual(survivor.activation_state, "live")
+		# Both of the loser's runs now hang off the keeper: nothing was destroyed.
+		self.assertEqual(frappe.db.count(RUN, {"installation": keeper}), 2)
+		self.assertEqual(frappe.db.count(RUN, {"installation": loser}), 0)
+
+	def test_merge_is_idempotent(self):
+		"""Re-running the cleanup is a no-op: nothing left to merge, and the
+		surviving row is untouched."""
+		from jarvis.patches import v2_13_unique_agent_installation as patch_mod
+
+		self._seed(enabled=0, activation_state="shadow", runs=1)
+		self._seed(enabled=1, activation_state="shadow", runs=1)
+		frappe.db.commit()
+
+		self.assertEqual(patch_mod._merge_duplicate_installs(), 1)
+		frappe.db.commit()
+		before = frappe.get_all(
+			INSTALLATION,
+			filters={"owner": self.owner, "agent": self.SLUG},
+			fields=["name", "enabled", "activation_state"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(len(before), 1)
+
+		self.assertEqual(patch_mod._merge_duplicate_installs(), 0)
+		frappe.db.commit()
+		after = frappe.get_all(
+			INSTALLATION,
+			filters={"owner": self.owner, "agent": self.SLUG},
+			fields=["name", "enabled", "activation_state"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(after, before)
+		self.assertEqual(frappe.db.count(RUN, {"installation": before[0]["name"]}), 2)
+
+	def test_the_alter_table_would_fail_without_the_merge(self):
+		"""Why the ordering is mandatory: with live duplicates present the unique
+		index cannot be created at all, so a patch that skipped the cleanup would
+		hard-fail migrate on exactly the benches that hit the race."""
+		self._seed()
+		self._seed()
+		frappe.db.commit()
+		with self.assertRaises(Exception):
+			_add_owner_agent_index()
+		frappe.db.rollback()
+
+		from jarvis.patches import v2_13_unique_agent_installation as patch_mod
+
+		patch_mod._merge_duplicate_installs()
+		frappe.db.commit()
+		_add_owner_agent_index()
+		self.assertTrue(_owner_agent_index())
+
+
+# --------------------------------------------------------------------------- #
+# #457 — push gate and dispatch gate agree on identity and status
+# --------------------------------------------------------------------------- #
+GATE_ROLE = "Jarvis Hardening Gate Role"
+
+
+def _mk_role(name: str) -> str:
+	if not frappe.db.exists("Role", name):
+		doc = frappe.get_doc({"doctype": "Role", "role_name": name, "desk_access": 1})
+		doc.flags.ignore_permissions = True
+		doc.insert()
+	return name
+
+
+def _set_roles(email: str, role: str, *, held: bool) -> None:
+	user = frappe.get_doc("User", email)
+	has = any(r.role == role for r in user.roles)
+	if held and not has:
+		user.append("roles", {"role": role})
+	elif not held and has:
+		user.set("roles", [r for r in user.roles if r.role != role])
+	else:
+		return
+	user.flags.ignore_permissions = True
+	user.save()
+	frappe.clear_cache(user=email)
+
+
+def _restrict(slug: str, roles: list[str]) -> None:
+	doc = frappe.get_doc(LISTING, slug)
+	doc.set("allowed_roles", [{"role": r} for r in roles])
+	doc.flags.ignore_permissions = True
+	doc.save()
+
+
+def _mk_gate_install(owner: str, slug: str, run_as: str) -> str:
+	doc = frappe.get_doc(
+		{
+			"doctype": INSTALLATION,
+			"agent": slug,
+			"run_as_user": run_as,
+			"reviewer": owner,
+			"enabled": 1,
+		}
+	)
+	doc.flags.ignore_permissions = True
+	doc.insert(ignore_permissions=True)
+	frappe.db.set_value(INSTALLATION, doc.name, "owner", owner, update_modified=False)
+	return doc.name
+
+
+class TestAgentPushGateIdentity(FrappeTestCase):
+	"""#457: the push must advertise exactly the set the dispatch gates will run.
+	Gotcha #8 settles which identity decides — the EXECUTING one — so the push now
+	gates on ``run_as_user``, matching ``agent_scheduler.run_due_agent_audits`` and
+	``agents_api.run_agent_now``."""
+
+	SLUG = PREFIX + "pushid"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-pushid-owner@example.com")
+		cls.runner = _mk_user("h-pushid-runner@example.com")
+		_mk_role(GATE_ROLE)
+		_mk_listing(cls.SLUG)
+		frappe.db.set_value(LISTING, cls.SLUG, "status", "Published", update_modified=False)
+		_restrict(cls.SLUG, [GATE_ROLE])
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.set_value(LISTING, self.SLUG, "status", "Published", update_modified=False)
+		_restrict(self.SLUG, [GATE_ROLE])
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		for u in (self.owner, self.runner):
+			_set_roles(u, GATE_ROLE, held=False)
+		frappe.db.commit()
+
+	def _slugs(self):
+		from jarvis.chat.agent_catalog import build_agent_push_payload
+
+		return [e["slug"] for e in build_agent_push_payload(owner=self.owner)]
+
+	def test_pushed_when_the_run_as_user_holds_the_role_and_the_owner_does_not(self):
+		"""D1 in the issue: the owner lost the restricting role while the run-as
+		user kept it. Dispatch has always allowed this; the push used to drop it, so
+		the bench ran an agent its own roster did not list."""
+		_set_roles(self.owner, GATE_ROLE, held=False)
+		_set_roles(self.runner, GATE_ROLE, held=True)
+		_mk_gate_install(self.owner, self.SLUG, self.runner)
+		frappe.db.commit()
+		self.assertIn(f"agent-{self.SLUG}", self._slugs())
+
+	def test_not_pushed_when_the_owner_holds_the_role_and_the_run_as_user_does_not(self):
+		"""The mirror case: dispatch refuses this install at every cadence, so
+		advertising it would seat a delegate the bench will never run."""
+		_set_roles(self.owner, GATE_ROLE, held=True)
+		_set_roles(self.runner, GATE_ROLE, held=False)
+		_mk_gate_install(self.owner, self.SLUG, self.runner)
+		frappe.db.commit()
+		self.assertNotIn(f"agent-{self.SLUG}", self._slugs())
+
+	def test_self_mapped_install_is_unaffected(self):
+		"""Control: run_as_user defaults to the installer, so for every ordinary
+		install owner == run-as user and the change is a no-op."""
+		_set_roles(self.owner, GATE_ROLE, held=True)
+		_mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.commit()
+		self.assertIn(f"agent-{self.SLUG}", self._slugs())
+
+	def test_unpublished_listing_is_never_pushed(self):
+		"""Unchanged, and the reason the dispatch gate had to learn the same rule."""
+		_set_roles(self.owner, GATE_ROLE, held=True)
+		_mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.set_value(LISTING, self.SLUG, "status", "Deprecated", update_modified=False)
+		frappe.db.commit()
+		self.assertNotIn(f"agent-{self.SLUG}", self._slugs())
+
+
+class TestAgentDispatchStatusGate(FrappeTestCase):
+	"""#457: an unpublished listing must not dispatch. Before this, ``status`` was
+	read only by ``install_agent``, so deprecating a live installed agent left its
+	schedule firing into a container that no longer had the delegate — three hours
+	of ``running`` per cadence, terminalized by the stale-run sweep as a duration
+	timeout it never hit."""
+
+	SLUG = PREFIX + "gate"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-gate-owner@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.set_value(
+			LISTING, cls.SLUG, {"status": "Published", "nature": "Auditor"}, update_modified=False
+		)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.set_value(
+			LISTING, self.SLUG, {"status": "Published", "nature": "Auditor"}, update_modified=False
+		)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+
+	def _due_install(self) -> str:
+		from frappe.utils import add_days, now_datetime
+
+		name = _mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.set_value(
+			INSTALLATION,
+			name,
+			{
+				"schedule_enabled": 1,
+				"schedule_frequency": "daily",
+				"next_run_at": add_days(now_datetime(), -1),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return name
+
+	def _run_cron(self):
+		"""Run the hourly cron with only OUR install due (this is a shared dev site,
+		and other modules leave due rows behind), and with the launch stubbed."""
+		from frappe.utils import add_days, now_datetime
+
+		now = now_datetime()
+		parked = {
+			r.name: r.next_run_at
+			for r in frappe.get_all(
+				INSTALLATION,
+				filters={
+					"enabled": 1,
+					"schedule_enabled": 1,
+					"next_run_at": ["<=", now],
+					"agent": ["!=", self.SLUG],
+				},
+				fields=["name", "next_run_at"],
+				ignore_permissions=True,
+			)
+		}
+		for n in parked:
+			frappe.db.set_value(INSTALLATION, n, "next_run_at", add_days(now, 2), update_modified=False)
+		frappe.db.commit()
+		calls = []
+		try:
+			with patch.object(
+				agent_scheduler,
+				"_launch_audit",
+				side_effect=lambda inst, **kw: calls.append((inst.name, frappe.session.user)),
+			):
+				agent_scheduler.run_due_agent_audits()
+		finally:
+			for n, ts in parked.items():
+				frappe.db.set_value(INSTALLATION, n, "next_run_at", ts, update_modified=False)
+			frappe.db.commit()
+		return calls
+
+	def test_deprecated_listing_does_not_dispatch_on_the_cron(self):
+		"""The reported phantom-run path (D2): an admin deprecates an installed,
+		enabled, scheduled auditor. No turn is dispatched, the reason is recorded on
+		a ``failed`` run the customer can see, and the slot is CONSUMED so the
+		cadence does not busy-retry hourly."""
+		from frappe.utils import now_datetime
+
+		now = now_datetime()
+		inst = self._due_install()
+		frappe.db.set_value(LISTING, self.SLUG, "status", "Deprecated", update_modified=False)
+		frappe.db.commit()
+
+		self.assertEqual(self._run_cron(), [])
+		runs = frappe.get_all(
+			RUN,
+			filters={"installation": inst, "status": "failed"},
+			fields=["owner", "error"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0]["owner"], self.owner)
+		self.assertIn("no longer published", runs[0]["error"])
+		row = frappe.db.get_value(INSTALLATION, inst, ["next_run_at", "last_run_at"], as_dict=True)
+		self.assertIsNotNone(row.last_run_at)
+		self.assertGreater(row.next_run_at, now)
+
+	def test_published_listing_still_dispatches_as_the_run_as_user(self):
+		"""Control: the legitimate case is untouched, and still launches under the
+		RUN-AS identity (the S1 hinge), not the scheduler's Administrator."""
+		inst = self._due_install()
+		calls = self._run_cron()
+		self.assertEqual(calls, [(inst, self.owner)])
+		self.assertEqual(
+			frappe.get_all(RUN, filters={"installation": inst, "status": "failed"}, ignore_permissions=True),
+			[],
+		)
+
+	def test_launch_audit_refuses_a_deprecated_listing_and_creates_no_rows(self):
+		"""The choke point both dispatch paths funnel through: no caller can get a
+		run started for an unpublished agent, and a refused launch leaves no orphan
+		conversation or run behind."""
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.set_value(LISTING, self.SLUG, "status", "Deprecated", update_modified=False)
+		frappe.db.commit()
+		doc = frappe.get_doc(INSTALLATION, inst)
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				agent_scheduler._launch_audit(doc, trigger="scheduled")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIn("no longer published", str(ctx.exception))
+		self.assertEqual(frappe.get_all(RUN, filters={"installation": inst}, ignore_permissions=True), [])
+
+	def test_launch_audit_lets_a_published_listing_past_the_status_gate(self):
+		"""Control + ordering: with the listing Published the launch proceeds to the
+		JF-017 bundle check, proving the new gate is not refusing everything and
+		that it sits BEFORE the bundle-configuration diagnosis."""
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.commit()
+		doc = frappe.get_doc(INSTALLATION, inst)
+		frappe.set_user(self.owner)
+		try:
+			with (
+				patch("jarvis.chat.agent_catalog.registry_tools_allow", return_value=[]),
+				self.assertRaises(frappe.ValidationError) as ctx,
+			):
+				agent_scheduler._launch_audit(doc, trigger="scheduled")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIn("declares no tools", str(ctx.exception))
+
+	def test_run_agent_now_refuses_a_deprecated_listing(self):
+		"""The manual path answers with the availability reason too, before it
+		spends a budget slot or persists anything."""
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.set_value(LISTING, self.SLUG, "status", "Deprecated", update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				agents_api.run_agent_now(inst)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIn("no longer published", str(ctx.exception))
+
+
+class TestSetListingStatusMarksCatalogDirty(FrappeTestCase):
+	"""#457: ``set_listing_status`` changes what the push emits, so it must mark an
+	Apply pending like every other push-visible mutation. Without this the SPA
+	showed "synced" while the container roster still carried the deprecated slug."""
+
+	SLUG = PREFIX + "statusdirty"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-statusdirty-owner@example.com")
+		_mk_listing(cls.SLUG)
+		cls._saved = {k: _single(k) for k in ("agent_catalog_dirty", "agent_catalog_version")}
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		for k, v in cls._saved.items():
+			frappe.db.set_single_value(SETTINGS, k, v)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.set_value(LISTING, self.SLUG, "status", "Published", update_modified=False)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 0)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_version", 3)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+
+	def test_deprecating_an_enabled_agent_marks_an_apply_pending(self):
+		_mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.commit()
+		agents_api.set_listing_status(self.SLUG, "Deprecated")
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 4)
+
+	def test_status_change_with_no_enabled_install_is_not_dirty(self):
+		"""The payload is identical either way, so do not manufacture a pending
+		Apply (and a container restart) out of nothing."""
+		agents_api.set_listing_status(self.SLUG, "Deprecated")
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 3)
+
+	def test_setting_the_same_status_is_not_dirty(self):
+		_mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.commit()
+		agents_api.set_listing_status(self.SLUG, "Published")
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)

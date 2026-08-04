@@ -439,8 +439,18 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 		frappe.throw(_("Status must be one of: {0}.").format(", ".join(_ADMIN_STATUSES)))
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")
+	before = doc.status
 	doc.status = status
 	doc.save()
+	# #457: status is a PUSH-VISIBLE property — ``build_agent_push_payload`` emits
+	# only Published listings — so changing it changes the container's roster just
+	# as install/enable does. Without this the SPA showed no "Apply pending" after a
+	# deprecate, so the roster and the DB silently disagreed until some unrelated
+	# mutation re-dirtied the flag. Only on an actual change, and only when some
+	# install would have carried the slug: a status flip on an agent nobody enabled
+	# pushes exactly the same payload.
+	if before != doc.status and frappe.db.exists(INSTALLATION, {"agent": doc.name, "enabled": 1}):
+		_mark_catalog_dirty()
 	frappe.db.commit()
 	return {"ok": True, "status": doc.status}
 
@@ -536,13 +546,44 @@ def _mark_catalog_dirty() -> None:
 	mutation it annotates."""
 	try:
 		frappe.db.set_single_value(_SETTINGS, "agent_catalog_dirty", 1)
-		frappe.db.set_single_value(
-			_SETTINGS,
-			"agent_catalog_version",
-			frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, "agent_catalog_version")) + 1,
-		)
+		_bump_catalog_version()
 	except Exception:
 		frappe.log_error(title="Jarvis: agent catalog dirty flag failed", message=frappe.get_traceback())
+
+
+def _bump_catalog_version() -> None:
+	"""Increment ``agent_catalog_version`` in ONE statement (#458).
+
+	The obvious read-modify-write (``get_single_value`` + ``set_single_value``)
+	loses updates: two mutations racing both read V and both write V+1, so the
+	second mutation leaves the version looking untouched. The push worker's TOCTOU
+	recheck compares against that version, so a lost increment is exactly the case
+	where the worker clears the dirty flag for a change that never made the
+	payload.
+
+	Frappe stores one Single field as one ``tabSingles`` row, so a single
+	``UPDATE ... SET value = value + 1`` runs under that row's write lock and
+	cannot lose an increment however the two writers interleave.
+	``set_single_value`` survives only as the SEED path: a Single field that was
+	never written has no ``tabSingles`` row at all, and the UPDATE above would
+	silently match nothing.
+	"""
+	params = {"dt": _SETTINGS, "field": "agent_catalog_version"}
+	frappe.db.sql(
+		"""UPDATE `tabSingles`
+		SET `value` = CAST(COALESCE(NULLIF(`value`, ''), '0') AS UNSIGNED) + 1
+		WHERE `doctype` = %(dt)s AND `field` = %(field)s""",
+		params,
+	)
+	if not frappe.db.sql(
+		"""SELECT 1 FROM `tabSingles` WHERE `doctype` = %(dt)s AND `field` = %(field)s LIMIT 1""",
+		params,
+	):
+		frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", 1)
+	# Raw SQL bypasses both the Single's redis document cache and
+	# ``frappe.db.value_cache``, which would otherwise keep serving the
+	# pre-increment value for the rest of this request.
+	frappe.clear_document_cache(_SETTINGS, _SETTINGS)
 
 
 @frappe.whitelist()
@@ -605,7 +646,18 @@ def install_agent(agent_slug: str) -> dict:
 			"schedule_frequency": freq,
 		}
 	)
-	doc.insert()  # owner = me; validate() runs the cap/uniqueness/run-as checks
+	try:
+		doc.insert()  # owner = me; validate() runs the cap/uniqueness/run-as checks
+	except frappe.UniqueValidationError:
+		# #460: the (owner, agent) unique index is the authority — the two
+		# ``frappe.db.exists`` checks above it (here and in the controller) cannot
+		# serialize a double-submit, so the LOSER of that race arrives here. Frappe
+		# has already queued its generic "owner_agent must be unique" msgprint from
+		# ``show_unique_validation_message``; drop it and re-raise the same friendly
+		# message the non-racing path gives, so a double click reads as an ordinary
+		# "already installed" rather than a 500.
+		frappe.clear_last_message()
+		frappe.throw(_("You have already installed this agent."))
 	# No _mark_catalog_dirty(): installs start enabled=0, so the container's
 	# ENABLED set is unchanged — only enable/disable (and uninstalling an
 	# ENABLED install) make an Apply pending.
@@ -927,10 +979,24 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	from jarvis.chat.agent_installability import assert_installable
 
 	assert_installable(doc.agent)
-	nature = frappe.db.get_value(LISTING, doc.agent, "nature")
+	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
+	nature = listing.get("nature")
 	if nature not in ("Auditor", "Scribe"):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
+		)
+	# #457: an unpublished listing is not deployed — the push drops it from the
+	# container roster, so a manual run would reach a delegate that does not exist
+	# and only fail three hours later as a mislabelled timeout. ``_launch_audit``
+	# refuses it authoritatively; refuse here too, before the budget check and the
+	# source-app persistence, so the operator gets the real reason and no side
+	# effects.
+	if (listing.get("status") or "") != "Published":
+		frappe.throw(
+			_(
+				"This agent is no longer published ({0}), so it is not deployed to run. "
+				"Uninstall it, or ask an admin to publish it again."
+			).format(listing.get("status") or "unknown")
 		)
 	# CX5-5: a SHADOW installation means "run it, but its output is not live yet" —
 	# an auditor's findings sit in a shadow set for a reviewer. A scribe has no such
@@ -1821,9 +1887,29 @@ def _enqueued_push_agent_skills() -> None:
 			# (``_mark_catalog_dirty``), and we then refuse to clear the dirty
 			# flag below — the change missed this payload; a later Apply
 			# reconciles it.
-			version = frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, "agent_catalog_version"))
+			version = frappe.utils.cint(
+				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
+			)
 			payload = build_agent_push_payload()
 			admin_client.post_push_agent_skills(agent_skills=payload)
+			# #458: END THIS WORKER'S TRANSACTION before the recheck, or the recheck
+			# cannot see a mutation at all and the guard above is inert. Two layers
+			# hid it: ``get_single_value`` defaults to ``cache=True`` and serves
+			# ``frappe.db.value_cache``, which is invalidated ONLY by commit/rollback;
+			# and under REPEATABLE READ every plain SELECT in this transaction reads
+			# the snapshot taken before the push, so even ``cache=False`` would
+			# re-read the snapshot value. Committing clears both. Exactly the reason
+			# ``promote_installation`` commits before ITS re-read.
+			#
+			# SAFE HERE and nowhere earlier: at this point the worker has written
+			# NOTHING (the version read and ``build_agent_push_payload`` are pure
+			# reads, and ``admin_client`` is pure HTTP), so this commits an empty
+			# transaction and can leave no half-written state. It also sits AFTER the
+			# push, so it can never commit a status implying a push that did not
+			# happen. The terminal write below is a single ``set_value`` in the fresh
+			# transaction, still covered by the try/except/finally and the trailing
+			# commit, so the "status is never left pending" invariant is unchanged.
+			frappe.db.commit()
 			values = {
 				"agent_skills_synced_at": frappe.utils.now(),
 				"agent_skills_sync_status": f"ok (applied {len(payload)} via admin)",
@@ -1831,7 +1917,10 @@ def _enqueued_push_agent_skills() -> None:
 			# The container now matches the DB — clear the dirty flag ONLY on a
 			# successful push whose payload saw every mutation (version
 			# unchanged); failures and mid-push mutations leave it set.
-			if frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, "agent_catalog_version")) == version:
+			fresh = frappe.utils.cint(
+				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
+			)
+			if fresh == version:
 				values["agent_catalog_dirty"] = 0
 			frappe.db.set_value(_SETTINGS, _SETTINGS, values)
 			terminal_written = True

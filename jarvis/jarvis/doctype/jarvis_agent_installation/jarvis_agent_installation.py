@@ -188,9 +188,12 @@ class JarvisAgentInstallation(Document):
 		)
 
 	def _validate_unique_per_owner(self):
-		# One install of a given agent per owner. Frappe has no composite-unique
-		# on (owner, agent), so enforce it here (an owner re-installing the same
-		# agent must reuse / re-enable the existing row).
+		# One install of a given agent per owner. This is the FRIENDLY path only:
+		# check-then-act cannot serialize two concurrent inserts (both see no clash
+		# under REPEATABLE READ and both commit under distinct hash names — #460),
+		# so the real guarantee is the composite unique index created in
+		# ``on_doctype_update`` below. Keep this check first so the ordinary
+		# double-install gets a readable message instead of a constraint error.
 		owner = self.owner or frappe.session.user
 		clash = frappe.db.exists(
 			"Jarvis Agent Installation",
@@ -330,3 +333,37 @@ class JarvisAgentInstallation(Document):
 		except Exception:
 			return False
 		return any(dt in perms for dt in _GL_SCOPED_DIMENSIONS)
+
+
+def on_doctype_update():
+	"""Create the composite unique index on (owner, agent) — #460.
+
+	``_validate_unique_per_owner`` is check-then-act: ``frappe.db.exists`` then
+	``frappe.throw``. The doctype is ``autoname: hash`` / ``naming_rule: Random``
+	and declares no ``unique`` field, so nothing at the DB level serialized two
+	concurrent installs of the same agent by one owner — both saw no clash under
+	REPEATABLE READ and both committed under distinct names. The duplicate
+	inflated ``install_count`` and made a single uninstall leave a phantom row, so
+	the agent still rendered as installed.
+
+	The constraint lives HERE and not only in the patch because
+	``install_app`` runs with ``set_as_patched=True``, which marks every entry in
+	patches.txt executed WITHOUT running it: on any fresh install (CI, a new
+	customer bench, a rebuilt site) the patch is skipped, and a patch-only
+	constraint would silently never exist. Frappe calls ``on_doctype_update()``
+	whenever the DocType document is saved, fresh installs included.
+
+	The converse gap is why ``v2_13_unique_agent_installation`` also exists:
+	``bench migrate`` re-imports a DocType only when its ``.json`` changes, so a
+	``.py``-only change like this one never fires the hook on an EXISTING site.
+	That patch reloads the doctype (and de-dupes first, since ALTER TABLE would
+	fail on live duplicates).
+
+	``add_unique`` no-ops when the index is already present, so a site running
+	both paths is harmless.
+	"""
+	frappe.db.add_unique(
+		"Jarvis Agent Installation",
+		["owner", "agent"],
+		constraint_name="owner_agent",
+	)
