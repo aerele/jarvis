@@ -39,6 +39,7 @@ from frappe.utils import now_datetime
 from jarvis._session import authenticated_user
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
+from jarvis.permissions import is_valid_unattended_owner
 from jarvis.tools import _delegate_capability
 
 INSTALLATION = "Jarvis Agent Installation"
@@ -846,9 +847,11 @@ def _is_app_learning(agent: str) -> bool:
 
 
 def _valid_owner(owner: str) -> bool:
-	if not owner or owner in ("Administrator", "Guest"):
-		return False
-	return bool(frappe.db.get_value("User", owner, "enabled"))
+	"""S1 fail-closed identity guard. The rule itself now lives in
+	``jarvis.permissions.is_valid_unattended_owner`` so the macro scheduler shares
+	one definition with this one instead of re-deriving it (jarvis #469); this
+	wrapper keeps the local name every call site here already uses."""
+	return is_valid_unattended_owner(owner)
 
 
 def _agent_run_budget_monthly() -> int:
