@@ -17,6 +17,7 @@
     "shared_with",
     "allowed_roles",
     "managed_by_learning",
+    "roles_derived",
     "source_skill"
   ],
   "fields": [
@@ -96,6 +97,15 @@
       "default": "0",
       "hidden": 1,
       "description": "Marker only: this row is a consolidated learned-<domain> skill compiled from approved learned patterns; the learning board is its management surface."
+    },
+    {
+      "fieldname": "roles_derived",
+      "fieldtype": "Check",
+      "label": "Roles Derived",
+      "default": "0",
+      "read_only": 1,
+      "hidden": 1,
+      "description": "Provenance for allowed_roles on a compiler-managed row (issue #479): 1 means the role derivation ran to a conclusion for every source doctype, so an EMPTY allowed_roles genuinely means no desk role narrows this skill. 0 means the derivation could not be completed and the empty set is a fallback, not a finding. Recorded only - no code reads it, and an empty allowed_roles still means everyone."
     },
     {
       "fieldname": "source_skill",

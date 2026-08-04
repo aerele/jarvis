@@ -1057,7 +1057,7 @@ class TestLearnedSkillsPush(unittest.TestCase):
 			learned_skills_api.enqueue_learned_skills_push()
 		st = learned_skills_api.get_learned_skills_sync_status()
 		self.assertFalse(st["pending"])
-		self.assertTrue(st["last_sync_status"].startswith("ok (applied 1 via admin)"))
+		self.assertEqual(st["last_sync_status"], "ok (1 installed via admin)")
 		self.assertTrue(st["last_sync_at"])
 		post.assert_called_once()
 		# the wire body key + item shape match the admin/fleet contract.
@@ -1106,7 +1106,7 @@ class TestLearnedSkillsPush(unittest.TestCase):
 			SETTINGS,
 			SETTINGS,
 			{
-				"learned_skills_sync_status": "ok (applied 1 via admin)",
+				"learned_skills_sync_status": "ok (1 installed via admin)",
 				"learned_skills_synced_at": now_datetime(),
 			},
 			update_modified=False,

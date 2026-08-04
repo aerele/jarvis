@@ -33,7 +33,9 @@ from jarvis.permissions import (
 	ensure_support_roles,
 )
 
-_DT_CACHE_KEY = "jarvis_learning_roles_for_doctype"
+# _v2: the cached value is now {"roles": [...], "derived": bool}, not a bare
+# list, so the key changes rather than teaching the reader both shapes.
+_DT_CACHE_KEY = "jarvis_learning_roles_for_doctype_v2"
 _CACHE_TTL_S = 300
 
 
@@ -44,31 +46,45 @@ def roles_for_doctype(doctype: str) -> list[str]:
 	data), and if_owner-only grants (a per-owner read is not org-wide, so it is
 	not a delivery signal for a bench-global learned skill). Deterministic,
 	sorted. Empty on any failure (the caller falls back to declared priors)."""
+	return derive_roles_for_doctype(doctype)[0]
+
+
+def derive_roles_for_doctype(doctype: str) -> tuple[list[str], bool]:
+	"""``(roles, derived)`` - :func:`roles_for_doctype` plus its provenance.
+
+	``derived`` says whether the permission scan actually RAN to a conclusion.
+	True means the answer is a real finding even when it is empty ("no desk role
+	holds an org-wide read here"); False means we determined nothing and the
+	empty list is a fallback. The two are indistinguishable from the return value
+	alone, which is what makes an empty ``allowed_roles`` ambiguous downstream
+	(issue #479, design Q3). Callers recording provenance want this one; everyone
+	else keeps calling :func:`roles_for_doctype`.
+	"""
 	if not doctype:
-		return []
+		return [], False
 
 	use_cache = not frappe.flags.in_test
 	if use_cache:
 		try:
 			cached = frappe.cache().hget(_DT_CACHE_KEY, doctype)
-			if cached is not None:
-				return list(cached)
+			if isinstance(cached, dict):
+				return list(cached.get("roles") or []), bool(cached.get("derived"))
 		except Exception:
 			pass
 
-	result = _compute_roles_for_doctype(doctype)
+	roles, derived = _compute_roles_for_doctype(doctype)
 
 	if use_cache:
 		try:
-			frappe.cache().hset(_DT_CACHE_KEY, doctype, result)
+			frappe.cache().hset(_DT_CACHE_KEY, doctype, {"roles": roles, "derived": derived})
 			# Bound staleness even if the hash is never explicitly cleared.
 			frappe.cache().expire(_make_key(_DT_CACHE_KEY), _CACHE_TTL_S)
 		except Exception:
 			pass
-	return result
+	return roles, derived
 
 
-def _compute_roles_for_doctype(doctype: str) -> list[str]:
+def _compute_roles_for_doctype(doctype: str) -> tuple[list[str], bool]:
 	from frappe.permissions import get_all_perms
 
 	try:
@@ -78,9 +94,10 @@ def _compute_roles_for_doctype(doctype: str) -> list[str]:
 			fields=["name", "desk_access"],
 		)
 	except Exception:
-		return []
+		return [], False
 
 	out: set[str] = set()
+	scanned = 0
 	for role in roles:
 		name = role.get("name")
 		if not name:
@@ -93,9 +110,12 @@ def _compute_roles_for_doctype(doctype: str) -> list[str]:
 			perms = get_all_perms(name) or []
 		except Exception:
 			continue
+		scanned += 1
 		if _grants_orgwide_read(perms, doctype):
 			out.add(name)
-	return sorted(out)
+	# A scan that read NO role's permissions concluded nothing, even though it
+	# returns the same empty list as a scan that read every role and found none.
+	return sorted(out), scanned > 0
 
 
 def _grants_orgwide_read(perms, doctype: str) -> bool:

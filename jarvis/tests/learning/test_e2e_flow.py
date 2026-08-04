@@ -156,6 +156,17 @@ class TestPatternLearningE2E(FrappeTestCase):
 			sales_clause = clause_fn(_user_with_role("Sales User"))
 			self.assertIn("learned-selling", sales_clause)
 			self.assertNotIn("custom-learned-selling", sales_clause)
+			# ...and in the FETCH sub-clause, not the installed one (#479). The row
+			# carries allowed_roles, so it is deliberately never written into the
+			# shared container; asserting only "the slug appears somewhere" passed
+			# either way and would not have caught the move.
+			self.assertIn(
+				"; these learned skills apply to you but are not loaded in this session: "
+				"learned-selling",
+				sales_clause,
+			)
+			self.assertNotIn("; apply these learned skills:", sales_clause)
+			self.assertIn("jarvis__get_skill", sales_clause)
 			# a user without it does not
 			acct_clause = clause_fn(_user_with_role("Accounts User"))
 			self.assertNotIn("learned-selling", acct_clause)

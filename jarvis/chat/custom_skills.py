@@ -152,6 +152,71 @@ def render_learned_skill_md(slug: str, description: str, instructions: str) -> s
 	return "\n".join(lines)
 
 
+def allowed_roles_by_skill(row_names) -> dict[str, set[str]]:
+	"""``{docname: {role, ...}}`` for the rows among ``row_names`` narrowed by an
+	``allowed_roles`` child table. Rows carrying NO child row are absent from the
+	mapping, so ``name in mapping`` is the definition of "role-restricted" and the
+	value is the set to intersect a chat user's roles with.
+
+	Presence, not a non-empty role set: ``user_can_use_skill`` narrows an Org row
+	the moment ANY child row exists, so a child carrying a blank role restricts
+	the row to nobody. Answering both questions from ONE query is what stops the
+	push filter and the context clause from drifting apart - issue #479 is
+	exactly that drift, between the custom push and the learned push.
+	"""
+	names = [n for n in (row_names or []) if n]
+	if not names:
+		return {}
+	out: dict[str, set[str]] = {}
+	for row in frappe.get_all(
+		"Jarvis Custom Skill Allowed Role",
+		filters={"parenttype": "Jarvis Custom Skill", "parent": ["in", names]},
+		fields=["parent", "role"],
+	):
+		bucket = out.setdefault(row.parent, set())
+		if row.role:
+			bucket.add(row.role)
+	return out
+
+
+def role_restricted_names(row_names) -> set[str]:
+	"""Docnames among ``row_names`` that carry at least one ``allowed_roles`` row:
+	the ONE definition of "role-restricted" every container push agrees on
+	(security review PART 2 TASK 11 / issue #479).
+
+	A role-restricted body may never be written into the shared, role-BLIND
+	container, so BOTH pushes drop these rows and let the role-gated
+	``jarvis__get_skill`` serve the body instead: the custom push via
+	:func:`_pushable_org_rows`, the learned push via
+	``jarvis.learning.compiler.build_learned_push_payload``. #479 exists because
+	the learned push never had a copy of this filter at all; one shared
+	definition means a third push cannot re-introduce the divergence.
+	"""
+	return set(allowed_roles_by_skill(row_names))
+
+
+def fetch_required_clause(lead_in: str, names) -> str:
+	"""The context-line clause for skills that apply to this user but are NOT
+	installed in the container, because their bodies are deliberately kept off
+	the shared, role-blind blob. The agent's only way to read one is the bench
+	tool named here, which re-derives the caller's roles at fetch time.
+
+	``lead_in`` is the caller's half-sentence (what these skills ARE); the tail is
+	fixed so every caller issues the same instruction. Shared by
+	:func:`invoked_skill_clause` (issue #477) and :func:`learned_skill_clause`
+	(issue #479). Deliberately says nothing about the workspace or a skill
+	directory: there is no directory to point at.
+	"""
+	names = list(names or [])
+	if not names:
+		return ""
+	return (
+		f"; {lead_in}: {', '.join(names)} "
+		"- call the jarvis__get_skill tool with each of those names to read its "
+		"instructions, then follow them"
+	)
+
+
 def invoked_skill_clause(message: str) -> str:
 	"""Return the context-line clause(s) for any enabled custom skills the user
 	invoked via ``/slug`` in ``message``, or ``""`` if none match.
@@ -225,16 +290,10 @@ def invoked_skill_clause(message: str) -> str:
 	if on_disk:
 		names = ", ".join(prefixed_slug(s) for s in on_disk)
 		clause += f"; the user invoked these skills, apply them: {names}"
-	if off_disk:
-		names = ", ".join(prefixed_slug(s) for s in off_disk)
-		# Deliberately says nothing about the workspace or a skill directory: the
-		# agent has no container-side access to these bodies, and the ONLY way it
-		# can read them is the bench tool call named here.
-		clause += (
-			f"; the user invoked these skills, which are not loaded in this session: {names} "
-			"- call the jarvis__get_skill tool with each of those names to read its "
-			"instructions, then follow them"
-		)
+	clause += fetch_required_clause(
+		"the user invoked these skills, which are not loaded in this session",
+		[prefixed_slug(s) for s in off_disk],
+	)
 	return clause
 
 
@@ -274,14 +333,21 @@ def learned_skill_clause(user: str | None = None) -> str:
 	Enabled ``managed_by_learning`` skills whose ``allowed_roles`` the chat user
 	satisfies (empty = everyone; System Manager / Administrator always pass) are
 	folded into the leading ``[Context: ...]`` line as ``learned-<domain>`` — the
-	dedicated learned-namespace wire slug (Phase 2; the persona interplay clause
-	names both the old ``custom-learned-`` and the new ``learned-`` prefixes, so
-	agent-side behaviour is unchanged across the cutover). Portal users
-	(desk_access=0 roles) never intersect desk-role allowed_roles, so learned
-	skills self-suppress for them at this layer.
+	dedicated learned-namespace wire slug (Phase 2). Portal users (desk_access=0
+	roles) never intersect desk-role allowed_roles, so learned skills
+	self-suppress for them at this layer.
+
+	TWO clause shapes, for the same reason :func:`invoked_skill_clause` has two
+	(issue #479): a role-restricted managed row is NOT pushed into the shared,
+	role-blind container, so naming it as installed points the agent at a
+	directory that does not exist. The split predicate is exactly the push
+	filter's - a row is installed iff it carries no ``allowed_roles`` - so
+	discovery and delivery can never disagree about which bodies are on disk.
 
 	Hot path: ONE cached role lookup + two indexed queries, capped at the <=6
-	managed rows - no per-skill N+1.
+	managed rows - no per-skill N+1. The privileged branch pays the child-row
+	query too: a System Manager skips the role INTERSECTION, never the emptiness
+	test, or they alone would be told a role-restricted skill is on disk.
 	"""
 	from jarvis.learning.roles import roles_for_user
 
@@ -296,31 +362,30 @@ def learned_skill_clause(user: str | None = None) -> str:
 
 	user_roles = roles_for_user(user)
 	privileged = user == "Administrator" or "System Manager" in user_roles
+	roles_by_skill = allowed_roles_by_skill([m.name for m in managed])
 
 	if privileged:
-		matched = [m.skill_name for m in managed]
+		matched = list(managed)
 	else:
-		names = [m.name for m in managed]
-		roles_by_skill: dict[str, set] = {m.name: set() for m in managed}
-		for row in frappe.get_all(
-			"Jarvis Custom Skill Allowed Role",
-			filters={"parent": ["in", names], "parenttype": "Jarvis Custom Skill"},
-			fields=["parent", "role"],
-		):
-			if row.role:
-				roles_by_skill[row.parent].add(row.role)
 		matched = [
-			m.skill_name
+			m
 			for m in managed
-			if not roles_by_skill[m.name] or (roles_by_skill[m.name] & user_roles)
+			if m.name not in roles_by_skill or (roles_by_skill[m.name] & user_roles)
 		]
 	if not matched:
 		return ""
 	# skill_name on a managed row IS the wire slug ("learned-<domain>"): learned
 	# skills ship through the dedicated learned_skills namespace, NOT the custom-
 	# prefixed custom-skills push, so no RESERVED_PREFIX here.
-	slugs = ", ".join(sorted(matched))
-	return f"; apply these learned skills: {slugs}"
+	installed = sorted(m.skill_name for m in matched if m.name not in roles_by_skill)
+	off_disk = sorted(m.skill_name for m in matched if m.name in roles_by_skill)
+	clause = ""
+	if installed:
+		clause += f"; apply these learned skills: {', '.join(installed)}"
+	clause += fetch_required_clause(
+		"these learned skills apply to you but are not loaded in this session", off_disk
+	)
+	return clause
 
 
 PERSONAL_CLAUSE_TTL_S = 300
@@ -399,17 +464,8 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	)
 	# TASK 11: drop role-restricted Org rows (any with allowed_roles) so a
 	# role-scoped body is never written to the shared, role-blind container.
-	restricted = {
-		r.parent
-		for r in frappe.get_all(
-			"Jarvis Custom Skill Allowed Role",
-			filters={
-				"parenttype": "Jarvis Custom Skill",
-				"parent": ["in", [r.name for r in rows] or [""]],
-			},
-			fields=["parent"],
-		)
-	}
+	# Shared with the learned push through :func:`role_restricted_names` (#479).
+	restricted = role_restricted_names([r.name for r in rows])
 	kept = [r for r in rows if r.name not in restricted]
 	# One explicit deterministic comparator AFTER filtering (R2-SP-4): the DB
 	# ``order_by`` above is only a stable baseline — the authoritative rank both
