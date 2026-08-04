@@ -281,6 +281,23 @@ const sidebarCollapsed = computed({
 	},
 });
 
+// Phone layout (< 768px): the sidebar leaves the flow and becomes an off-canvas
+// drawer (AppShell renders the scrim + slide-in; Sidebar drops its resize
+// handle). `mobile` is the single source of truth for that switch — distinct
+// from the 820px rail auto-collapse above, which still governs the 768–820px
+// band. `mobileDrawerOpen` is transient (never persisted) and is forced shut
+// when we leave phone width so it can't leak across the breakpoint.
+const mobile = ref(false);
+const mobileDrawerOpen = ref(false);
+if (typeof window !== "undefined") {
+	const mmq = window.matchMedia("(max-width: 767px)");
+	mobile.value = mmq.matches;
+	mmq.addEventListener("change", (e) => {
+		mobile.value = e.matches;
+		if (!e.matches) mobileDrawerOpen.value = false;
+	});
+}
+
 // Sidebar width when expanded: persisted per device, drag-resizable via the
 // handle in Sidebar.vue. Clamped to [MIN, MAX]; the collapsed rail (48px) is
 // fixed and unaffected. Reads clamp too, so a stale/hand-edited value can't
@@ -445,6 +462,8 @@ const store = reactive({
 	sidebarWidth,
 	SIDEBAR_MIN_W,
 	SIDEBAR_MAX_W,
+	mobile,
+	mobileDrawerOpen,
 	// actions
 	loadConversations,
 	refreshApprovalsCount,

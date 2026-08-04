@@ -2,7 +2,14 @@
 <html lang="en">
 	<head>
 		<meta charset="UTF-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<!-- viewport-fit=cover lets env(safe-area-inset-*) report real notch/
+		     home-indicator insets on phones; interactive-widget keeps the layout
+		     viewport resizing when the on-screen keyboard opens so the composer
+		     stays above it. -->
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+		/>
 		<title>Jarvis Chat</title>
 		<!-- Favicon. The desktop app shipped with NO icon link at all (only the
 		     /jarvis-mobile PWA had one), so the browser tab fell back to whatever
