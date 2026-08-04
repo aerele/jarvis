@@ -121,6 +121,21 @@
 								agent.install_count === 1 ? "" : "s"
 							}}
 						</div>
+						<!-- PP-4: the real activation state, honestly, wherever the agent
+						     is discussed - not only in the passive Runs-tab "Preview" pill
+						     (jarvis#456). The action itself lives in Configure. -->
+						<Badge
+							v-if="activation && activation.activation_state === 'live'"
+							variant="subtle"
+							theme="green"
+							label="Live"
+						/>
+						<span
+							v-else-if="activation"
+							class="inline-flex h-5 shrink-0 select-none items-center whitespace-nowrap rounded-full bg-surface-violet-1 px-2 text-xs text-ink-violet-1"
+						>
+							Shadow (preview)
+						</span>
 						<Switch
 							v-if="installation"
 							label="Enabled"
@@ -242,6 +257,21 @@
 				v-else-if="tab === 'configure' && installation"
 				class="max-w-2xl shrink-0 space-y-10 px-5 py-6"
 			>
+				<section>
+					<ActivationPanel
+						:installation-name="installation.name"
+						:agent-title="agent.title"
+						:is-scribe="agent.nature === 'Scribe'"
+						:state="activation"
+						:loading="activationLoading"
+						:fetch-error="activationError"
+						:can-act="canActOnActivation"
+						@promoted="onActivationChanged"
+						@demoted="onActivationChanged"
+						@retry="loadActivation"
+					/>
+				</section>
+
 				<section>
 					<div class="text-base font-medium text-ink-gray-9">Schedule</div>
 					<div class="mt-3 space-y-4">
@@ -472,10 +502,12 @@ import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
+import ActivationPanel from "@/pages/agents/ActivationPanel.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
+import { session } from "@/data/session";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
@@ -532,6 +564,7 @@ watch(
 		agent.value = null;
 		error.value = "";
 		adminData.value = null;
+		activation.value = null;
 		load().then(applyHash);
 	}
 );
@@ -548,6 +581,50 @@ const updateAvailable = computed(
 			installation.value.installed_version !== agent.value.version
 		)
 );
+
+// ── PP-4 activation (jarvis#456) ─────────────────────────────────────────────
+// activation_state/reviewer/run_as_user/promoted_by/promoted_at aren't in
+// get_agent's frozen §8.3 `installation` shape - fetched separately (see
+// api/agents.getInstallationActivation) so both the hero badge and the
+// Configure-tab ActivationPanel read one shared, always-in-sync value.
+const activation = ref(null);
+const activationLoading = ref(false);
+const activationError = ref("");
+
+async function loadActivation() {
+	if (!installation.value) {
+		activation.value = null;
+		return;
+	}
+	activationLoading.value = true;
+	activationError.value = "";
+	try {
+		activation.value = (await apiAgents.getInstallationActivation(installation.value.name)) || null;
+	} catch (e) {
+		activation.value = null;
+		activationError.value = errMsg(e);
+	} finally {
+		activationLoading.value = false;
+	}
+}
+watch(
+	() => installation.value && installation.value.name,
+	(name) => {
+		if (name) loadActivation();
+		else activation.value = null;
+	},
+	{ immediate: true }
+);
+
+// The named reviewer's sign-off, or a Jarvis Admin (agents_api mirrors this
+// server-side - this only decides whether to show the button, never grants
+// the action itself).
+const canActOnActivation = computed(
+	() => !!activation.value && (session.user === activation.value.reviewer || isSM.value)
+);
+function onActivationChanged(next) {
+	activation.value = next;
+}
 
 // ── hash-synced tabs (useActiveTabManager pattern) ───────────────────────────
 const tab = ref("overview");

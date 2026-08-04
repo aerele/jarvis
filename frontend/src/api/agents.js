@@ -58,3 +58,31 @@ export const listAgentActivityPage = (p = {}) =>
 // Seed a new conversation from a finding and land the user in live chat.
 // -> { ok, conversation, run_id, reason }
 export const takeFindingToChat = (finding) => call(AG + "take_finding_to_chat", { finding });
+
+// ── PP-4 shadow -> live activation (jarvis#456) ──────────────────────────────
+// get_agent's `installation` shape is frozen (§8.3) and two in-flight PRs
+// (#620/#612) are independently editing agents_api.py/agent_runs.py, so this
+// reads the extra fields via frappe.client.get_value (core Frappe, whitelisted)
+// instead of widening that method. It is permission-scoped exactly like every
+// other read here: get_value's filters go through get_list, which applies the
+// DocType's `if_owner` permission condition, so a caller only ever gets their
+// own installation row back.
+export const getInstallationActivation = (installation) =>
+	call("frappe.client.get_value", {
+		doctype: "Jarvis Agent Installation",
+		filters: installation,
+		fieldname: JSON.stringify([
+			"activation_state",
+			"reviewer",
+			"run_as_user",
+			"promoted_by",
+			"promoted_at",
+		]),
+	});
+
+// Reviewer sign-off / kill switch. See agents_api.{promote,demote}_installation
+// for the authority + PP-6 budget checks this wraps.
+export const promoteInstallation = (installation, justification) =>
+	call(AG + "promote_installation", { installation, justification: justification || "" });
+export const demoteInstallation = (installation, reason) =>
+	call(AG + "demote_installation", { installation, reason: reason || "" });
