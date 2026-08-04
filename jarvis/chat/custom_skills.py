@@ -368,9 +368,7 @@ def learned_skill_clause(user: str | None = None) -> str:
 		matched = list(managed)
 	else:
 		matched = [
-			m
-			for m in managed
-			if m.name not in roles_by_skill or (roles_by_skill[m.name] & user_roles)
+			m for m in managed if m.name not in roles_by_skill or (roles_by_skill[m.name] & user_roles)
 		]
 	if not matched:
 		return ""

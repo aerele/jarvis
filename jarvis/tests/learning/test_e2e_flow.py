@@ -161,8 +161,7 @@ class TestPatternLearningE2E(FrappeTestCase):
 			# shared container; asserting only "the slug appears somewhere" passed
 			# either way and would not have caught the move.
 			self.assertIn(
-				"; these learned skills apply to you but are not loaded in this session: "
-				"learned-selling",
+				"; these learned skills apply to you but are not loaded in this session: learned-selling",
 				sales_clause,
 			)
 			self.assertNotIn("; apply these learned skills:", sales_clause)

@@ -281,9 +281,7 @@ class TestLearnedRetrievalGating(FrappeTestCase):
 			doc.insert(ignore_permissions=True)
 		# insert() forces owner=session.user; the clause query is pinned to
 		# Administrator, exactly as the compiler pins its managed rows.
-		frappe.db.set_value(
-			"Jarvis Custom Skill", doc.name, "owner", "Administrator", update_modified=False
-		)
+		frappe.db.set_value("Jarvis Custom Skill", doc.name, "owner", "Administrator", update_modified=False)
 		return doc.name
 
 	@staticmethod
@@ -379,3 +377,40 @@ class TestLearnedRetrievalGating(FrappeTestCase):
 		slugs = {i["slug"] for i in build_learned_push_payload()}
 		self.assertIn("learned-479open", slugs)
 		self.assertNotIn("learned-479restricted", slugs)
+
+	# --- migration: evict bodies already sitting in live containers ---------- #
+	def _run_patch(self, sync_status):
+		from unittest import mock
+
+		from jarvis.patches.v2_13_repush_learned_skills_role_gated import execute
+
+		before = frappe.db.get_single_value("Jarvis Settings", "learned_skills_sync_status")
+		frappe.db.set_single_value(
+			"Jarvis Settings", "learned_skills_sync_status", sync_status, update_modified=False
+		)
+		try:
+			with mock.patch("jarvis.chat.learned_skills_api.enqueue_learned_skills_push") as enqueue:
+				execute()
+			return enqueue
+		finally:
+			frappe.db.set_single_value(
+				"Jarvis Settings", "learned_skills_sync_status", before, update_modified=False
+			)
+
+	def test_patch_repushes_when_a_restricted_body_is_already_in_the_container(self):
+		# The code fix closes the tap; it cannot remove what is already on disk.
+		# One full-reconcile push per affected tenant deletes the dir, drops the
+		# slug from the agent allowlist and restarts the container (the restart is
+		# what rebuilds workspace/skills/ from the now-smaller source dir).
+		self._managed("learned-479restricted", roles=(HOLDER_ROLE,))
+		self._run_patch("ok (1 installed via admin)").assert_called_once()
+
+	def test_patch_skips_a_bench_that_never_pushed(self):
+		# Empty sync status: nothing of ours is in that container, so a restart
+		# would be pure cost.
+		self._managed("learned-479restricted", roles=(HOLDER_ROLE,))
+		self._run_patch("").assert_not_called()
+
+	def test_patch_skips_a_bench_with_nothing_restricted(self):
+		self._managed("learned-479open", roles=())
+		self._run_patch("ok (1 installed via admin)").assert_not_called()

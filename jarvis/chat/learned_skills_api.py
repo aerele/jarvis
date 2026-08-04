@@ -244,8 +244,7 @@ def _ok_status(installed: int, role_restricted: int) -> str:
 	is the whole fix - it says the other three are working, not missing."""
 	if role_restricted:
 		return (
-			f"ok ({installed} installed via admin, "
-			f"{role_restricted} role-restricted and fetched on demand)"
+			f"ok ({installed} installed via admin, {role_restricted} role-restricted and fetched on demand)"
 		)
 	return f"ok ({installed} installed via admin)"
 
