@@ -155,6 +155,7 @@ def compile_domain_skills() -> dict:
 			"company",
 			"pattern_statement",
 			"skill_draft",
+			"approved_draft",
 			"strength_band",
 			"support_n",
 			"detector_id",
@@ -208,7 +209,7 @@ def preview_bullet(pattern_name: str) -> str:
 	row = frappe.db.get_value(
 		JLP,
 		pattern_name,
-		["name", "domain", "skill_draft", "pattern_statement"],
+		["name", "domain", "skill_draft", "approved_draft", "pattern_statement"],
 		as_dict=True,
 	)
 	if not row:
@@ -592,9 +593,16 @@ def _interplay_lines(domain: str) -> list[str]:
 
 def _bullet(row: dict) -> str:
 	"""One compiled bullet: sanitized draft + JLP ref. Injection-shaped drafts
-	are withheld with a board pointer rather than embedded (plan section 6.3)."""
+	are withheld with a board pointer rather than embedded (plan section 6.3).
+
+	Source of truth is ``approved_draft`` - the text frozen when a human
+	approved it (#482). ``skill_draft`` is the LIVE detector render and is
+	rewritten in place by every re-detection, so compiling from it shipped
+	wording no one reviewed. Rows with no snapshot (Proposed previews, and
+	rows approved before the snapshot existed / before the backfill ran) fall
+	back to the live draft, then to the statement."""
 	name = row["name"]
-	draft = (row.get("skill_draft") or "").strip()
+	draft = (row.get("approved_draft") or "").strip() or (row.get("skill_draft") or "").strip()
 	if not draft:
 		draft = "- " + (row.get("pattern_statement") or "").strip()
 

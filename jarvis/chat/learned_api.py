@@ -43,6 +43,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, now_datetime, today
 
+from jarvis.learning.lifecycle import REDRAFT_STALE_PREFIX
 from jarvis.permissions import JARVIS_REVIEWER_ROLES, require_jarvis_admin
 
 JLP = "Jarvis Learned Pattern"
@@ -566,6 +567,10 @@ def get_learned_pattern(name: str) -> dict:
 		"roles": [r.role for r in (doc.roles or [])],
 		"pattern_statement": doc.pattern_statement or "",
 		"skill_draft": doc.skill_draft or "",
+		"approved_draft": doc.get("approved_draft") or "",
+		# What re-detection has changed since the approval, so a reviewer looking
+		# at a redraft-staled row sees exactly which words moved (#482).
+		"approved_draft_diff": _approved_draft_diff(doc),
 		"draft_edited": int(doc.draft_edited or 0),
 		"draft_polished": int(doc.get("draft_polished") or 0),
 		"compiled_preview": _compiled_preview(doc),
@@ -608,6 +613,16 @@ def get_learned_pattern(name: str) -> dict:
 	}
 
 
+def _approved_draft_diff(doc) -> str:
+	"""Unified diff of the frozen approved text vs the latest detected draft.
+	Empty when the row was never approved or nothing moved - reuses the shared
+	``_unified_diff`` the go-to-chat bundle already renders."""
+	approved = (doc.get("approved_draft") or "").strip()
+	if not approved:
+		return ""
+	return _unified_diff(approved, (doc.skill_draft or "").strip(), "approved text", "latest detected draft")
+
+
 def _compiled_preview(doc) -> str:
 	"""The exact bullet THIS pattern would compile into (drill-down preview).
 	Uses ``compiler.preview_bullet(pattern_name)`` - the single-bullet renderer;
@@ -643,7 +658,14 @@ def _load_for_transition(name: str, allowed_sources: tuple, action: str):
 def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) -> dict:
 	"""Proposed->Approved (or Stale->Approved). Optional edit freezes the
 	evidence line (section 6.5): ``draft_edited=1`` and the frozen label is shown
-	on the board. Stamps reviewed_by / approved_by / reviewed_at."""
+	on the board. Stamps reviewed_by / approved_by / reviewed_at.
+
+	Approval also FREEZES the reviewed text into ``approved_draft`` (#482). The
+	compiler ships that snapshot, never the live ``skill_draft`` - nightly
+	re-detection rewrites ``skill_draft`` in place on any row that is not
+	SM-edited or LLM-polished, so without the snapshot a plain "looks good"
+	approve could be silently reworded (e.g. "mostly supplies" -> "supplies
+	only") and pushed org-wide unreviewed."""
 	_guard()
 	doc = _load_for_transition(name, ("Proposed", "Stale"), "approve")
 
@@ -668,11 +690,13 @@ def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) ->
 	# writes clamp to it) and a flag-origin stale_reason; drift-origin reasons
 	# are left for the drift pass to manage.
 	doc.flag_band_cap = ""
-	if (doc.stale_reason or "").startswith(_FLAG_STALE_PREFIX):
+	if (doc.stale_reason or "").startswith((_FLAG_STALE_PREFIX, REDRAFT_STALE_PREFIX)):
 		doc.stale_reason = None
 
 	now = now_datetime()
 	doc.status = "Approved"
+	# Freeze what this reviewer actually read: the compiler reads approved_draft.
+	doc.approved_draft = (doc.skill_draft or "").strip()
 	doc.reviewed_by = frappe.session.user
 	doc.approved_by = frappe.session.user
 	doc.reviewed_at = now
@@ -740,6 +764,8 @@ def unapprove_learned_pattern(name: str) -> dict:
 	doc = _load_for_transition(name, ("Approved",), "un-approve")
 	doc.status = "Proposed"
 	doc.approved_by = None
+	# The approval is withdrawn, so the frozen reviewed text goes with it.
+	doc.approved_draft = None
 	doc.save()
 	frappe.db.commit()
 	return {"ok": True, "status": doc.status}

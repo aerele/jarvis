@@ -27,7 +27,15 @@ Rules (plan section 6.5):
     and moves undetectable / below-threshold / recency-diverged rows to Stale
     (+ ONE summary Notification Log to System Managers). Never a silent edit:
     Stale rows drop out of the next compile (the compiler filters Approved/
-    Active) and the board shows the reason.
+    Active) and the board shows the reason;
+  * REDRAFT drift (#482): the evidence refresh above rewrites ``skill_draft``
+    in place, and the detector's own wording can flip meaning while every
+    statistical axis IMPROVES (the strict "-only" template variant swaps in at
+    n>=60 with zero exceptions, so "mostly supplies" becomes "supplies only"),
+    which ``revalidate_active`` can never catch. An approved row therefore
+    carries an ``approved_draft`` snapshot (the compiler ships that, not the
+    live draft), and ``upsert_candidate`` moves the row to Stale the moment
+    the freshly detected RULE sentence stops matching the approved one.
 """
 
 from __future__ import annotations
@@ -50,6 +58,17 @@ REJECTED_TTL_DAYS = 180
 SUPERSEDED_TTL_DAYS = 90
 
 _MAX_NOTE_LEN = 500
+
+# Redraft drift (#482). Statuses whose text a human signed off on, and the
+# stale_reason prefix stamped when re-detection stops matching that text
+# (learned_api.approve_learned_pattern clears reasons with this prefix, since
+# re-approving IS the resolution).
+_APPROVED_STATUSES = frozenset({"Approved", "Active"})
+REDRAFT_STALE_PREFIX = "the detected rule changed after approval"
+# skill_drafts.render_skill_draft joins the rule sentence to its evidence
+# sentence with this marker. Everything after it is measured numbers that move
+# on every run, so only the head is compared.
+_EVIDENCE_MARKER = " Evidence: "
 
 # Overlap check: ignore short/common words so a warning means real shared wording.
 _OVERLAP_MIN_SHARED = 3
@@ -154,10 +173,20 @@ def upsert_candidate(candidate: dict, run) -> str:
 		else:
 			# Proposed / Approved / Active / Snoozed / Stale: refresh evidence in place.
 			doc = frappe.get_doc(JLP, existing)
+			# Read BEFORE the refresh: _apply_evidence overwrites the statement
+			# and clears draft_polished, so the pre-refresh row is the only
+			# place the approved-vs-detected comparison can be made.
+			redraft = _redraft_reason(doc, candidate)
 			with _engine_flag():
 				eng._apply_evidence(doc, candidate, run, is_new=False)
 				_set_overlap(doc)
+				if redraft:
+					doc.status = "Stale"
+					doc.stale_reason = redraft[:_MAX_NOTE_LEN]
+					doc.last_validated_at = now_datetime()
 				doc.save(ignore_permissions=True)
+			if redraft:
+				_record_redraft_stale(f"{doc.name}: {redraft}")
 			result = "updated"
 
 	# Skills-area rework (DESIGN.md section 3): the moment a learned-pattern row
@@ -167,6 +196,63 @@ def upsert_candidate(candidate: dict, run) -> str:
 	if result == "created":
 		_maybe_materialize_question(pattern_key)
 	return result
+
+
+# --------------------------------------------------------------------------- #
+# redraft drift (#482): the approved wording vs what is detected now
+# --------------------------------------------------------------------------- #
+def rule_sentence(draft) -> str:
+	"""The directive half of a skill-draft bullet: the leading "- " and the
+	trailing "Evidence: 96% of 58 Purchase Receipt since 2024-09." tail removed.
+	That tail is measured numbers which legitimately move on every run, so only
+	the head decides whether the org is being told something different."""
+	text = (draft or "").strip()
+	if text.startswith("- "):
+		text = text[2:]
+	return " ".join(text.split(_EVIDENCE_MARKER, 1)[0].split()).strip()
+
+
+def _redraft_reason(doc, candidate: dict) -> str | None:
+	"""Why this approved row must go back to review, or None to leave it alone.
+
+	Applies to rows whose approved text is the DETECTOR's own wording, which is
+	exactly the set the nightly refresh rewrites (``engine._apply_evidence``
+	only overwrites ``skill_draft`` when neither ``draft_edited`` nor
+	``draft_polished`` is set). An SM-edited or LLM-polished draft is already
+	frozen against that refresh and is not a template render, so comparing it
+	against a fresh template render would flag every night; those rows stay
+	governed by the statistical axes in ``revalidate_active``."""
+	if (doc.get("status") or "") not in _APPROVED_STATUSES:
+		return None
+	if doc.get("draft_edited") or doc.get("draft_polished"):
+		return None
+	approved_rule = rule_sentence(doc.get("approved_draft"))
+	if not approved_rule:
+		# Never approved through the snapshotting path (a row approved before
+		# #482 shipped and not yet backfilled): nothing trustworthy to compare.
+		return None
+	fresh_rule = rule_sentence(candidate.get("skill_draft"))
+	if not fresh_rule or fresh_rule.casefold() == approved_rule.casefold():
+		return None
+	return f'{REDRAFT_STALE_PREFIX}: approved "{approved_rule}" but now detects "{fresh_rule}"'
+
+
+def _record_redraft_stale(line: str) -> None:
+	"""Stash one line for the run's single summary notification. Per-request
+	state, drained by ``revalidate_active`` at the end of the same run - the
+	mining loop touches one candidate at a time and must never send one
+	Notification Log per pattern."""
+	lines = getattr(frappe.local, "jarvis_redraft_stale", None)
+	if lines is None:
+		lines = []
+		frappe.local.jarvis_redraft_stale = lines
+	lines.append(line)
+
+
+def _drain_redraft_stale() -> list:
+	lines = list(getattr(frappe.local, "jarvis_redraft_stale", None) or [])
+	frappe.local.jarvis_redraft_stale = []
+	return lines
 
 
 def _maybe_materialize_question(pattern_key: str) -> None:
@@ -371,7 +457,16 @@ def revalidate_active(run=None, patterndb=None, mined=None) -> dict:
 		],
 	)
 	out = {"revalidated": 0, "staled": 0, "version_skipped": 0, "unchecked": 0, "cap_deferred": 0}
+	# Rows this run's mining already staled for redraft drift (#482) ride the
+	# SAME summary notification - the mining loop stashes them precisely so they
+	# never become one Notification Log per pattern. Drained BEFORE the
+	# empty-rows return: mining may have staled every Approved/Active row, which
+	# is exactly when `rows` is empty.
+	staled_lines: list[str] = _drain_redraft_stale()
+	out["staled"] += len(staled_lines)
 	if not rows:
+		if staled_lines:
+			_notify_stale(staled_lines)
 		return out
 
 	groups: dict = {}
@@ -379,7 +474,6 @@ def revalidate_active(run=None, patterndb=None, mined=None) -> dict:
 		groups.setdefault((r.detector_id, r.company), []).append(r)
 
 	now = now_datetime()
-	staled_lines: list[str] = []
 	for (detector_id, company), patterns in groups.items():
 		if mined is None and _revalidation_window_closed(run):
 			# Respect the analysis window on the SLOW (checker-re-run) path

@@ -14,6 +14,7 @@
     "company",
     "pattern_statement",
     "skill_draft",
+    "approved_draft",
     "draft_edited",
     "draft_polished",
     "support_n",
@@ -99,6 +100,13 @@
       "fieldtype": "Long Text",
       "label": "Skill Draft",
       "reqd": 1
+    },
+    {
+      "fieldname": "approved_draft",
+      "fieldtype": "Long Text",
+      "label": "Approved Draft",
+      "read_only": 1,
+      "description": "The exact bullet text a reviewer approved, frozen at approve time. The compiler ships THIS, never the live skill_draft (which nightly re-detection rewrites in place), so no unreviewed wording can reach the pushed learned skills. Re-stamped on every approve; cleared on un-approve."
     },
     {
       "default": "0",
