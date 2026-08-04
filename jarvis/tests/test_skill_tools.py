@@ -10,6 +10,9 @@ feature — at load time.
 """
 
 import contextlib
+import os
+import shutil
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -24,7 +27,13 @@ from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.permissions import JARVIS_USER_ROLE, ensure_jarvis_user_role
 from jarvis.tools.create_custom_skill import create_custom_skill
 from jarvis.tools.find_skills import find_skills
-from jarvis.tools.get_skill import get_skill
+from jarvis.tools.get_skill import (
+	_LEARNED_PREFIX,
+	_MISS_AUDIT_PREFIX,
+	_MISS_AUDIT_TTL_S,
+	_audit_learned_miss,
+	get_skill,
+)
 
 SKILL = "Jarvis Custom Skill"
 # All fixture slugs share this prefix so leftovers from committed runs are
@@ -36,6 +45,13 @@ PEER = "sttool-peer@example.com"
 THIRD = "sttool-third@example.com"
 WEB = "sttool-web@example.com"
 
+ERROR_LOG = "Error Log"
+AUDIT_TITLE = "Jarvis: learned skill fetch missed"
+# Two stand-ins for "two tenant benches sharing one redis". Never real sites:
+# the point is only that ``frappe.local.site`` differs between the two calls.
+AUDIT_SITE_A = "sttool-tenant-a.test"
+AUDIT_SITE_B = "sttool-tenant-b.test"
+
 
 @contextlib.contextmanager
 def _as(user: str):
@@ -45,6 +61,23 @@ def _as(user: str):
 		yield
 	finally:
 		frappe.set_user(orig)
+
+
+@contextlib.contextmanager
+def _site(name: str):
+	"""Run a block as if this process were serving another tenant's site.
+
+	Safe to do mid-test: Frappe's own cache namespacing keys off
+	``frappe.local.conf.db_name`` (RedisWrapper.make_key), not off
+	``frappe.local.site``, so swapping the site name moves nothing except the
+	hand-built key under test.
+	"""
+	orig = frappe.local.site
+	frappe.local.site = name
+	try:
+		yield
+	finally:
+		frappe.local.site = orig
 
 
 @contextlib.contextmanager
@@ -342,6 +375,168 @@ class TestGetSkill(SkillToolsTestCase):
 		_make_skill(PEER, f"{PFX}-dup-name", "sttool dup peer copy", scope="User")
 		with _as(PEER):
 			self.assertEqual(get_skill(f"{PFX}-dup-name")["description"], "sttool dup peer copy")
+
+
+class TestLearnedMissAudit(SkillToolsTestCase):
+	"""``_audit_learned_miss``: the throttled Error Log row for a missed
+	``learned-`` fetch, and specifically its SITE SCOPING.
+
+	The throttle key is built by hand as ``<prefix><site>:<slug>`` because the
+	raw redis ``set`` it uses is NOT namespaced the way ``frappe.cache().
+	set_value`` is (RedisWrapper.make_key prefixes with ``conf.db_name``;
+	``redis.Redis.set`` prefixes with nothing). Every tenant bench on a shared
+	redis carries the SAME handful of learned slugs, so without that qualifier
+	the first tenant to miss ``learned-selling`` would silence every other
+	tenant's audit row for ten minutes. That is a cross-tenant observability
+	failure whose only symptom is a row that never appears, so nothing but a
+	test can hold the qualifier in place.
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		# ``frappe.log_error`` calls the telemetry hook first, and that hook always
+		# fails outside a request (``frappe.request`` is unbound), which sends it
+		# down ``frappe.logger().error(...)`` -- a SITE-scoped rotating file
+		# handler. Under a site name with no ``logs/`` directory that handler
+		# cannot be constructed, the FileNotFoundError escapes log_error, and no
+		# Error Log row is ever written. So give the two stand-in tenants the one
+		# directory frappe insists on, and take it away again afterwards.
+		for site in (AUDIT_SITE_A, AUDIT_SITE_B):
+			os.makedirs(os.path.join(frappe.local.sites_path, site, "logs"), exist_ok=True)
+
+	@classmethod
+	def tearDownClass(cls):
+		for site in (AUDIT_SITE_A, AUDIT_SITE_B):
+			shutil.rmtree(os.path.join(frappe.local.sites_path, site), ignore_errors=True)
+		super().tearDownClass()
+
+	def _key(self, site: str, slug: str) -> str:
+		return f"{_MISS_AUDIT_PREFIX}{site}:{slug}"
+
+	def _forget(self, slug: str) -> None:
+		"""Clear every key shape this slug could occupy.
+
+		Includes the UNQUALIFIED shape a regression would write, so that running
+		this suite against a reverted ``get_skill`` still leaves redis clean.
+		"""
+		cache = frappe.cache()
+		keys = [f"{_MISS_AUDIT_PREFIX}{slug}"]
+		keys += [self._key(s, slug) for s in (frappe.local.site, AUDIT_SITE_A, AUDIT_SITE_B)]
+		for key in keys:
+			cache.delete(key)
+
+	def _audit_rows(self, slug: str) -> list[dict]:
+		return frappe.get_all(
+			ERROR_LOG,
+			filters={"method": AUDIT_TITLE, "error": ["like", f"%{slug}%"]},
+			fields=["name", "error"],
+			ignore_permissions=True,
+		)
+
+	def _drop_audit_rows(self, slug: str) -> None:
+		for row in self._audit_rows(slug):
+			frappe.delete_doc(ERROR_LOG, row["name"], force=True, ignore_permissions=True)
+
+	def _slug(self, suffix: str) -> str:
+		"""A learned slug that starts every test with an empty throttle and an
+		empty audit trail, and leaves both empty afterwards."""
+		slug = f"{_LEARNED_PREFIX}{PFX}-{suffix}"
+		self._forget(slug)
+		self._drop_audit_rows(slug)
+		self.addCleanup(self._drop_audit_rows, slug)
+		self.addCleanup(self._forget, slug)
+		return slug
+
+	def test_two_sites_each_get_their_own_audit_row(self):
+		"""THE regression: the same slug missed on two different sites must log
+		TWICE. Drop ``frappe.local.site`` from the key and site B's row silently
+		disappears into site A's throttle."""
+		slug = self._slug("cross-site")
+
+		with _site(AUDIT_SITE_A):
+			_audit_learned_miss(slug, OWNER, "unknown")
+		with _site(AUDIT_SITE_B):
+			_audit_learned_miss(slug, OWNER, "denied")
+
+		self.assertEqual(
+			len(self._audit_rows(slug)),
+			2,
+			"one tenant's throttle swallowed another tenant's audit row",
+		)
+		# And the keys really are distinct, so neither site is reading the other's.
+		# ``shared=True`` because RedisWrapper.exists() DOES run make_key while the
+		# raw ``set`` under test does not: that asymmetry is the whole reason the
+		# site qualifier has to be written by hand.
+		cache = frappe.cache()
+		self.assertTrue(cache.exists(self._key(AUDIT_SITE_A, slug), shared=True))
+		self.assertTrue(cache.exists(self._key(AUDIT_SITE_B, slug), shared=True))
+
+	def test_second_miss_on_the_same_site_is_throttled(self):
+		"""Within one site the throttle still does its job: a tenant whose two role
+		checks disagree on every turn gets one row, not one per turn."""
+		slug = self._slug("throttled")
+
+		with _site(AUDIT_SITE_A):
+			_audit_learned_miss(slug, OWNER, "unknown")
+			_audit_learned_miss(slug, OWNER, "denied")
+
+		rows = self._audit_rows(slug)
+		self.assertEqual(len(rows), 1)
+		# The surviving row is the FIRST miss (nx=True never overwrites), and it
+		# carries the reason and the caller, which is the whole diagnostic value.
+		self.assertIn("unknown", rows[0]["error"])
+		self.assertIn(OWNER, rows[0]["error"])
+		# A key with no expiry would silence the audit forever, not for a window.
+		ttl = frappe.cache().ttl(self._key(AUDIT_SITE_A, slug))
+		self.assertGreater(ttl, 0)
+		self.assertLessEqual(ttl, _MISS_AUDIT_TTL_S)
+
+	def test_a_non_learned_slug_is_ignored_entirely(self):
+		"""Narrow on purpose. A missed ``custom-`` slug is usually just the model
+		guessing a name, so it must not reach the cache OR the log."""
+		slug = f"custom-{PFX}-never-audited"
+		self.addCleanup(self._drop_audit_rows, slug)
+
+		with patch.object(frappe, "cache") as fake_cache:
+			_audit_learned_miss(slug, OWNER, "unknown")
+			fake_cache.assert_not_called()
+		self.assertEqual(self._audit_rows(slug), [])
+
+	def test_a_broken_cache_or_log_never_reaches_the_caller(self):
+		"""The docstring's promise: an audit row must not fail a tool call. Both
+		halves can fail independently on a real bench (redis down, Error Log
+		table full), so break each one separately."""
+		slug = self._slug("never-raises")
+
+		with patch.object(frappe, "cache", side_effect=RuntimeError("redis is down")):
+			_audit_learned_miss(slug, OWNER, "unknown")
+		with patch.object(frappe, "log_error", side_effect=RuntimeError("error log is full")):
+			_audit_learned_miss(slug, OWNER, "unknown")
+
+		# And through the real caller: the tool still fails the way it is supposed
+		# to, with its own error, not with the audit's.
+		with patch.object(frappe, "log_error", side_effect=RuntimeError("error log is full")):
+			with _as(OWNER):
+				with self.assertRaises(InvalidArgumentError):
+					get_skill(f"{_LEARNED_PREFIX}{PFX}-broken-log")
+		self._forget(f"{_LEARNED_PREFIX}{PFX}-broken-log")
+
+	def test_get_skill_audits_a_learned_miss_and_only_a_learned_miss(self):
+		"""Wire check: the audit fires from the real tool path, on the branch that
+		matters, and stays silent on the branch that does not."""
+		learned = self._slug("wire-learned")
+		custom = f"custom-{PFX}-wire-miss"
+		self.addCleanup(self._drop_audit_rows, custom)
+
+		with _as(OWNER):
+			with self.assertRaises(InvalidArgumentError):
+				get_skill(learned)
+			with self.assertRaises(InvalidArgumentError):
+				get_skill(custom)
+
+		self.assertEqual(len(self._audit_rows(learned)), 1)
+		self.assertEqual(self._audit_rows(custom), [])
 
 
 class TestCreateCustomSkill(SkillToolsTestCase):
