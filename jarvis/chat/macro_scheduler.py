@@ -37,6 +37,41 @@ _BARRED_OWNER = (
 )
 _DISPATCH_FAILED = "Scheduled run could not be started. It will retry on the next hourly tick."
 
+# #468: what the owner is told when the entitlement / budget gate refused the run.
+# Keyed on the machine codes `policy.validate_can_send` and `macros.entitlement_block`
+# report, so the macro and the chat composer never disagree about why a send is barred.
+_BLOCK_SENTENCE = {
+	"usage_limit": (
+		"Scheduled run skipped: this user's monthly usage limit is reached. Runs resume "
+		"when the limit resets, or when an admin raises it."
+	),
+	"subscription_suspended": (
+		"Scheduled run skipped: the subscription does not currently include chat. Runs "
+		"resume once billing is settled."
+	),
+	"llm_not_configured": (
+		"Scheduled run skipped: no AI model connection is configured. Connect a model and "
+		"runs resume on the next scheduled slot."
+	),
+	"release_update_required": (
+		"Scheduled run deferred: a Jarvis update is rolling out on this workspace. It will "
+		"retry on the next hourly tick."
+	),
+	"workspace_resetting": (
+		"Scheduled run deferred: the workspace is being rebuilt. It will retry on the next hourly tick."
+	),
+	"scheduled_step_budget": (
+		"Scheduled run skipped: this month's budget for scheduled macro runs is used up. "
+		"Runs resume next month, or ask an admin to raise the budget in Jarvis Settings."
+	),
+}
+
+# #468: a refusal that CLEARS ON ITS OWN within minutes leaves the slot due, so the
+# next hourly tick retries it (the sibling's O4 shape). Everything else is an
+# entitlement decision that cannot clear inside the hour — consume the slot, or the
+# cadence relogs the same dead end 24 times a day.
+_TRANSIENT_BLOCKS = {"release_update_required", "workspace_resetting"}
+
 
 def run_due_macros() -> None:
 	"""Run every enabled macro whose next_run_at is due. Runs as Administrator
@@ -120,9 +155,11 @@ def _settle(m, now, out: dict) -> None:
 		# the pre-dispatch branch — no failure, nothing ran.
 		_consume_slot(m, now, stamp_last_run=False)
 		return
-	sentence = reason or "Scheduled run was refused."
+	sentence = _BLOCK_SENTENCE.get(reason) or f"Scheduled run was refused: {reason or 'unknown'}."
 	_record_failed(m, sentence)
 	_notify_owner(m, sentence)
+	if reason in _TRANSIENT_BLOCKS:
+		return  # leave next_run_at in the past: the next tick retries the slot
 	_consume_slot(m, now)
 
 

@@ -110,6 +110,7 @@
   "agent_catalog_dirty",
   "agent_catalog_version",
   "agent_run_budget_monthly",
+  "macro_step_budget_monthly",
   "activation_module_ceiling",
   "learned_skills_synced_at",
   "learned_skills_sync_status",
@@ -827,6 +828,13 @@
    "fieldname": "agent_run_budget_monthly",
    "fieldtype": "Int",
    "label": "Agent Run Budget (monthly, per installation)"
+  },
+  {
+   "default": "500",
+   "description": "#468: monthly budget for UNATTENDED macro work, per macro owner, counted in STEPS (one run is up to 25 agent turns, so a run count would under-bound the real spend by 25x). Scheduled runs only: a manual run is an attended click already priced by the per-user token caps, and manual runs are not counted here either, so a heavy interactive month cannot silently starve the schedule. Failed rows are excluded so a refusal can never self-perpetuate the cap. Floored at 31 (a full daily schedule of a single-step macro) when set below it. Raise it to allow more frequent or longer scheduled macros before runs are skipped.",
+   "fieldname": "macro_step_budget_monthly",
+   "fieldtype": "Int",
+   "label": "Scheduled Macro Step Budget (monthly, per owner)"
   },
   {
    "default": "1",

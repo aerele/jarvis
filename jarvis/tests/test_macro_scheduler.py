@@ -11,10 +11,12 @@ Covers the three defects the hourly ``run_due_macros`` cron shipped with:
 * **#471** — a failed run advanced its schedule anyway, recorded nothing the owner
   could see, and could strand a run in ``running`` forever (no reaper).
 
-``jarvis.chat.macros.run_macro`` is patched in every dispatch test: this suite is
-about the SCHEDULER's decisions, and a real dispatch would need a live gateway.
-``run_due_macros`` sweeps every due macro on the site, so assertions are always
-scoped to this suite's own rows by name.
+Nothing here reaches a live gateway. Tests about the SCHEDULER's own decisions stub
+``macros.run_macro`` wholesale and assert on which macros it dispatched; tests about
+the #468 gate, which lives INSIDE ``run_macro``, stub only the turn dispatch
+(``api._enqueue_turn``) so the real gate executes, and assert on the run rows it
+did or did not leave behind. ``run_due_macros`` sweeps every due macro on the site,
+so assertions are always scoped to this suite's own rows.
 """
 
 from __future__ import annotations
@@ -90,9 +92,7 @@ def _purge() -> None:
 		for run in frappe.get_all(RUN, filters={"macro": n}, pluck="name"):
 			frappe.delete_doc(RUN, run, force=True, ignore_permissions=True)
 		frappe.delete_doc(MACRO, n, force=True, ignore_permissions=True)
-	for n in frappe.get_all(
-		"Notification Log", filters={"subject": ["like", f"%{PFX}-%"]}, pluck="name"
-	):
+	for n in frappe.get_all("Notification Log", filters={"subject": ["like", f"%{PFX}-%"]}, pluck="name"):
 		frappe.delete_doc("Notification Log", n, force=True, ignore_permissions=True)
 	frappe.db.commit()
 
@@ -195,7 +195,7 @@ class TestScheduledMacroFailures(MacroSchedulerBase):
 		)
 
 	def test_dispatch_failure_notifies_the_owner(self):
-		m = _mk_macro(OWNER_OK, "raises-notify")
+		_mk_macro(OWNER_OK, "raises-notify")
 		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")):
 			macro_scheduler.run_due_macros()
 		notes = frappe.get_all(
@@ -221,6 +221,133 @@ class TestScheduledMacroFailures(MacroSchedulerBase):
 			"a disabled macro stamped last_run_at, so the UI claims it ran",
 		)
 		self.assertEqual(_runs_for(m.name), [], "a deliberately disabled macro is not a failure")
+
+
+# --------------------------------------------------------------------------- #
+# #468 — the entitlement gate and the unattended step budget
+# --------------------------------------------------------------------------- #
+class TestScheduledMacroCaps(MacroSchedulerBase):
+	def _run_due_gated(self):
+		"""Run the cron with only the TURN dispatch stubbed, so ``run_macro``'s own
+		gate really executes. A refused run leaves exactly one ``failed`` row and no
+		conversation; a dispatched one leaves a ``running`` row."""
+		with patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r", "message_id": "m"}):
+			macro_scheduler.run_due_macros()
+
+	def _mk_consumed_run(self, macro_name: str, steps: int, *, trigger="scheduled", status="completed"):
+		"""A prior run that already spent ``steps`` turns this month."""
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"macro": macro_name,
+				"status": status,
+				"current_step": steps,
+				"total_steps": steps,
+				"trigger": trigger,
+				"started_at": frappe.utils.now(),
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
+		frappe.db.set_value(RUN, run.name, "owner", OWNER_OK, update_modified=False)
+		frappe.db.commit()
+		return run.name
+
+	def test_over_cap_run_is_refused_recorded_and_consumes_the_slot(self):
+		m = _mk_macro(OWNER_OK, "over-cap")
+		with patch("jarvis.chat.policy.validate_can_send", return_value=(False, "usage_limit")):
+			self._run_due_gated()
+		runs = _runs_for(m.name)
+		self.assertEqual([r.status for r in runs], ["failed"], "a macro ran straight through the cap")
+		self.assertIn("usage limit", runs[0].error)
+		self.assertEqual(runs[0].owner, OWNER_OK)
+		# usage_limit does not clear inside the hour, so the slot is consumed rather
+		# than relogging the same refusal 24 times a day.
+		nxt = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+		self.assertGreater(nxt, now_datetime())
+
+	def test_ungated_run_still_dispatches(self):
+		m = _mk_macro(OWNER_OK, "under-cap")
+		self._run_due_gated()
+		self.assertEqual([r.status for r in _runs_for(m.name)], ["running"], "the gate over-reached")
+
+	def test_suspended_subscription_refuses_the_run(self):
+		m = _mk_macro(OWNER_OK, "suspended")
+		with patch("jarvis.chat.policy.validate_can_send", return_value=(False, "subscription_suspended")):
+			self._run_due_gated()
+		runs = _runs_for(m.name)
+		self.assertEqual([r.status for r in runs], ["failed"])
+		self.assertIn("subscription", runs[0].error)
+
+	def test_transient_block_leaves_the_slot_due_for_a_retry(self):
+		m = _mk_macro(OWNER_OK, "rolling-out")
+		before = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+		with patch("jarvis.chat.policy.validate_can_send", return_value=(False, "release_update_required")):
+			self._run_due_gated()
+		self.assertEqual([r.status for r in _runs_for(m.name)], ["failed"])
+		after = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+		self.assertEqual(after, before, "a rollout that clears in minutes cost the macro its slot")
+
+	def test_the_gate_creates_nothing_before_refusing(self):
+		# A refused run must leave no conversation and no intro message behind —
+		# only the scheduler's own failed record.
+		m = _mk_macro(OWNER_OK, "no-residue")
+		convs_before = frappe.db.count("Jarvis Conversation")
+		with patch("jarvis.chat.policy.validate_can_send", return_value=(False, "usage_limit")):
+			self._run_due_gated()
+		self.assertEqual(frappe.db.count("Jarvis Conversation"), convs_before)
+		self.assertFalse(_runs_for(m.name)[0].get("conversation"))
+
+	def test_step_budget_refuses_once_the_month_is_spent(self):
+		m = _mk_macro(OWNER_OK, "budget", steps=3)
+		frappe.db.set_single_value("Jarvis Settings", "macro_step_budget_monthly", 40)
+		self.addCleanup(frappe.db.set_single_value, "Jarvis Settings", "macro_step_budget_monthly", None)
+		spent = self._mk_consumed_run(m.name, 40 - macros._scheduled_steps_this_month(OWNER_OK) - 1)
+		self.addCleanup(frappe.delete_doc, RUN, spent, force=True, ignore_permissions=True)
+		# One step of headroom left, and this macro wants three.
+		self.assertFalse(macros._over_step_budget(OWNER_OK, 1))
+		self.assertTrue(macros._over_step_budget(OWNER_OK, 3))
+		self._run_due_gated()
+		runs = _runs_for(m.name)
+		failed = [r for r in runs if r.status == "failed"]
+		self.assertTrue(failed, "the unattended step budget did not bind")
+		self.assertNotIn("running", [r.status for r in runs])
+		self.assertIn("budget", failed[0].error)
+
+	def test_meter_counts_steps_not_runs_and_excludes_refusals(self):
+		m = _mk_macro(OWNER_OK, "meter", steps=3)
+		base = macros._scheduled_steps_this_month(OWNER_OK)
+		spent = self._mk_consumed_run(m.name, 7)
+		self.addCleanup(frappe.delete_doc, RUN, spent, force=True, ignore_permissions=True)
+		self.assertEqual(macros._scheduled_steps_this_month(OWNER_OK), base + 7)
+		# A manual run is not unattended work, so it does not spend the budget.
+		manual = self._mk_consumed_run(m.name, 5, trigger="manual")
+		self.addCleanup(frappe.delete_doc, RUN, manual, force=True, ignore_permissions=True)
+		self.assertEqual(macros._scheduled_steps_this_month(OWNER_OK), base + 7)
+		# And a refusal must never make the cap self-perpetuating.
+		refused = self._mk_consumed_run(m.name, 4, status="failed")
+		self.addCleanup(frappe.delete_doc, RUN, refused, force=True, ignore_permissions=True)
+		self.assertEqual(macros._scheduled_steps_this_month(OWNER_OK), base + 7)
+
+	def test_budget_floor_survives_a_misconfigured_zero(self):
+		frappe.db.set_single_value("Jarvis Settings", "macro_step_budget_monthly", 0)
+		self.addCleanup(frappe.db.set_single_value, "Jarvis Settings", "macro_step_budget_monthly", None)
+		self.assertEqual(
+			macros._scheduled_step_budget_monthly(), macros.DEFAULT_SCHEDULED_STEP_BUDGET_MONTHLY
+		)
+
+	def test_manual_run_is_entitlement_gated_but_not_budget_gated(self):
+		m = _mk_macro(OWNER_OK, "manual-gate", due=False)
+		with patch("jarvis.chat.policy.validate_can_send", return_value=(False, "usage_limit")):
+			with self.assertRaises(frappe.ValidationError):
+				macros.run_macro(m.name, trigger="manual")
+		# The budget is scheduled-only: an attended click is never refused by it.
+		with patch.object(macros, "_over_step_budget", return_value=True):
+			self.assertIsNone(macros.entitlement_block(OWNER_OK, steps=3, trigger="manual"))
+			self.assertEqual(
+				macros.entitlement_block(OWNER_OK, steps=3, trigger="scheduled"),
+				macros.BLOCK_STEP_BUDGET,
+			)
 
 
 # --------------------------------------------------------------------------- #

@@ -43,9 +43,37 @@ _STOP_LOCK_BLOCK_S = 10.0
 # 2-minute turn-recovery sweep, so 3 h is a ~12x margin over the longest legitimate gap
 # between two step advances. Module-level so tests can shorten it.
 STALE_RUN_AFTER_SECONDS = 3 * 3600
-_STALE_RUN_ERROR = (
-	"The run stopped making progress and was closed by the stale-run sweep. Run it again."
-)
+_STALE_RUN_ERROR = "The run stopped making progress and was closed by the stale-run sweep. Run it again."
+
+# #468: the monthly budget for UNATTENDED macro work, per owner. Counted in STEPS,
+# not runs: one run is up to MAX_STEPS (25) agent turns, so a run count would
+# under-bound the real spend by 25x. Read from Jarvis Settings at run time (not a
+# constant) so a bench admin can raise it without a code change, and floored at
+# MIN_ so a misconfigured 0/blank can never wedge every schedule for a month.
+#
+# The uncapped ceiling this replaces: MAX_MACROS_PER_OWNER (25) x MAX_STEPS (25) at
+# the shortest cadence = 625 turns/day/owner, ~19k/month, times the number of users
+# on the bench. The default leaves room for a couple of daily multi-step macros
+# plus headroom; the floor is a full daily schedule of a single-step macro.
+DEFAULT_SCHEDULED_STEP_BUDGET_MONTHLY = 500
+MIN_SCHEDULED_STEP_BUDGET_MONTHLY = 31
+
+# The machine reason ``run_macro`` reports when the budget is spent. The rest come
+# straight from ``policy.validate_can_send`` so a macro and a typed message speak
+# the same vocabulary.
+BLOCK_STEP_BUDGET = "scheduled_step_budget"
+
+# Human sentences for the MANUAL path (thrown, so the SPA's existing toast renders
+# them). The scheduled path reports the machine code instead and the scheduler
+# writes its own owner-facing sentence onto the failed run row.
+_BLOCK_MESSAGE = {
+	"usage_limit": "You have reached your monthly usage limit, so this macro cannot run.",
+	"subscription_suspended": "Your subscription does not currently include chat, so this macro cannot run.",
+	"release_update_required": "A Jarvis update is rolling out. Try this macro again in a few minutes.",
+	"workspace_resetting": "Your workspace is being rebuilt. Try this macro again in a few minutes.",
+	"llm_not_configured": "Connect an AI model before running a macro.",
+	BLOCK_STEP_BUDGET: "This month's budget for scheduled macro runs is used up.",
+}
 
 
 def _run_cas(sql: str, params: dict) -> int:
@@ -106,6 +134,16 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	# to the sequence (an unmergeable sequence NEEDS its checkpoints).
 	merged = (doc.merged_prompt or "").strip()
 	total = 1 if merged else len(steps)
+
+	# #468: the entitlement + unattended-spend gate, BEFORE anything is created —
+	# a refused run must leave no conversation, no intro message and no run row.
+	blocked = entitlement_block(owner, steps=total, trigger=trigger)
+	if blocked:
+		if trigger == "scheduled":
+			# The scheduler decides what a refusal costs: it records the failure
+			# against the owner and works out whether the slot is consumed.
+			return {"ok": False, "reason": blocked}
+		frappe.throw(_(_BLOCK_MESSAGE.get(blocked, "This macro cannot run right now.")))
 
 	# Fresh conversation titled after the macro, seeded with an intro so the
 	# transcript reads as a self-contained run.
@@ -576,6 +614,80 @@ def _compensate_resume_enqueue_failure(run, macro_doc, attempts: int) -> None:
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis macro capacity-resume compensate", message=frappe.get_traceback())
+
+
+# --------------------------------------------------------------------------- #
+# #468 entitlement + unattended-spend gate
+# --------------------------------------------------------------------------- #
+def entitlement_block(owner: str, *, steps: int, trigger: str) -> str | None:
+	"""The machine reason a macro run for ``owner`` must NOT dispatch, or None.
+
+	Two layers, both missing before #468:
+
+	1. **The same entitlement gate a typed message passes.**
+	   ``policy.validate_can_send`` had exactly three call sites — ``send_message``
+	   (x2) and ``retry_message`` — all human paths. ``api._enqueue_turn``, the SOLE
+	   dispatch path for macro steps, had none, and neither did ``dispatch``,
+	   ``admission``, ``turn_handler`` or ``worker``. So a macro step bypassed the
+	   per-user monthly token cap, the per-model cap and ``subscription_suspended``
+	   while ``turn_handler.record_turn_usage`` metered it anyway. The inversion was
+	   complete: the macro drained the owner's quota and the quota then rejected the
+	   owner's own interactive chat while the macro kept running.
+
+	   The gate is applied at the RUN, not per step, and no model is passed: a
+	   macro's model is resolved per conversation at dispatch time, and the
+	   aggregate monthly cap is the outer gate anyway (policy already documents the
+	   Auto/per-model skip as an accepted gap).
+
+	2. **A monthly step budget, for SCHEDULED runs only.** This is the path with no
+	   human in it and no other bound. A manual run is an explicit, attended click
+	   that the token caps above already price; refusing one on a monthly *run*
+	   quota would break a legitimate workflow with no cost story to justify it.
+	   Manual runs are not counted either, so a heavy interactive month cannot
+	   silently starve the schedule.
+
+	Mirrors ``agent_scheduler._over_run_budget`` in shape, and differs in key: an
+	agent budget is keyed on the INSTALLATION because ``run_as_user`` decouples the
+	executing identity from the owner. A macro has no such split, so the owner is
+	both the executing identity and the metered one."""
+	from jarvis.chat.policy import validate_can_send
+
+	ok, reason = validate_can_send(owner)
+	if not ok:
+		return reason
+	if trigger == "scheduled" and _over_step_budget(owner, steps):
+		return BLOCK_STEP_BUDGET
+	return None
+
+
+def _scheduled_step_budget_monthly() -> int:
+	try:
+		v = frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "macro_step_budget_monthly"))
+	except Exception:
+		v = 0
+	return v if v >= MIN_SCHEDULED_STEP_BUDGET_MONTHLY else DEFAULT_SCHEDULED_STEP_BUDGET_MONTHLY
+
+
+def _scheduled_steps_this_month(owner: str) -> int:
+	"""Agent turns this owner's SCHEDULED macro runs have dispatched this month.
+
+	``current_step`` is the count of steps a run has actually dispatched, so an
+	in-flight run contributes honestly rather than all-or-nothing. ``failed`` rows
+	are EXCLUDED for the same reason the sibling excludes them: every refusal writes
+	one, so counting them would make the cap self-perpetuating the moment it is
+	first hit."""
+	row = frappe.db.sql(
+		f"""SELECT COALESCE(SUM(current_step), 0) FROM `tab{RUN}`
+		    WHERE owner = %(owner)s AND `trigger` = 'scheduled'
+		      AND status != 'failed' AND creation >= %(since)s""",
+		{"owner": owner, "since": frappe.utils.get_first_day(frappe.utils.today())},
+	)
+	return int(row[0][0] or 0) if row else 0
+
+
+def _over_step_budget(owner: str, steps: int) -> bool:
+	"""True iff dispatching ``steps`` more scheduled steps would breach the budget."""
+	return (_scheduled_steps_this_month(owner) + max(int(steps or 1), 1)) > _scheduled_step_budget_monthly()
 
 
 # --------------------------------------------------------------------------- #
