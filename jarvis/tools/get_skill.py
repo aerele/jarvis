@@ -103,7 +103,12 @@ def _audit_learned_miss(slug: str, user: str, reason: str) -> None:
 		if not (slug or "").startswith(_LEARNED_PREFIX):
 			return
 		cache = frappe.cache()
-		if not cache.set(_MISS_AUDIT_PREFIX + slug, b"1", nx=True, ex=_MISS_AUDIT_TTL_S):
+		# Site-scoped by hand: the raw redis ``set`` is NOT namespaced the way
+		# ``set_value`` is, and every tenant bench shares the same six learned
+		# slugs, so an unqualified key would let one site's throttle silence
+		# another's audit row.
+		key = f"{_MISS_AUDIT_PREFIX}{frappe.local.site}:{slug}"
+		if not cache.set(key, b"1", nx=True, ex=_MISS_AUDIT_TTL_S):
 			return
 		frappe.log_error(
 			title="Jarvis: learned skill fetch missed",
