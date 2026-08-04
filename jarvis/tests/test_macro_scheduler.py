@@ -463,3 +463,108 @@ class TestStaleMacroRunReaper(MacroSchedulerBase):
 			frappe.db.commit()
 			self.assertEqual(macros.reap_stale_macro_runs(), 0)
 		self.assertEqual(frappe.db.get_value(RUN, name, "status"), "running")
+
+
+# --------------------------------------------------------------------------- #
+# #472 — schedule_time is validated, and one bad row cannot abort the sweep
+# --------------------------------------------------------------------------- #
+class TestScheduleTimeValidation(MacroSchedulerBase):
+	"""A ``schedule_time`` Frappe never range-checks reached
+	``datetime.replace(hour=...)`` inside ``validate()``, so the save 500'd, and a
+	value already on a row aborted the WHOLE hourly sweep."""
+
+	def _save(self, tag: str, schedule_time):
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": f"{PFX}-{tag}",
+				"enabled": 1,
+				"schedule_enabled": 1,
+				"schedule_frequency": "daily",
+				"schedule_time": schedule_time,
+				"steps": [{"prompt": "p1"}],
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.insert()
+		return doc
+
+	def test_out_of_range_schedule_time_is_refused_cleanly(self):
+		# frappe.ValidationError is what the SPA renders as a field error; a bare
+		# ValueError from the arithmetic is the 500 this closes.
+		for bad in ("99:00:00", "-01:00:00", "24:00:00", "12:99:00", "not-a-time", "1:2:3:4"):
+			with self.subTest(bad=bad):
+				with self.assertRaises(frappe.ValidationError):
+					self._save(f"bad-{abs(hash(bad))}", bad)
+
+	def test_a_bad_time_is_refused_even_with_the_schedule_off(self):
+		# The latent limb: with schedule_enabled=0 the controller never computed a
+		# next run, so the garbage persisted and armed the sweep for whenever the
+		# schedule was turned on.
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": f"{PFX}-off-but-bad",
+				"enabled": 1,
+				"schedule_enabled": 0,
+				"schedule_time": "99:00:00",
+				"steps": [{"prompt": "p1"}],
+			}
+		)
+		doc.flags.ignore_permissions = True
+		with self.assertRaises(frappe.ValidationError):
+			doc.insert()
+
+	def test_valid_schedule_times_are_accepted_and_scheduled(self):
+		for good in ("00:00:00", "09:30:00", "23:59:59"):
+			with self.subTest(good=good):
+				doc = self._save(f"ok-{good.replace(':', '')}", good)
+				self.assertTrue(doc.next_run_at, "a valid time must still produce a next_run_at")
+
+	def test_bad_persisted_time_does_not_abort_the_sweep(self):
+		# Raw-write past the new validation to recreate a row saved before it existed,
+		# then force it to the FRONT of the sweep (Jarvis Macro sorts modified DESC) so
+		# a sweep that dies on it cannot reach the healthy macro behind it.
+		bad = _mk_macro(OWNER_OK, "poisoned")
+		good = _mk_macro(OWNER_OK, "healthy")
+		frappe.db.sql(
+			"UPDATE `tabJarvis Macro` SET schedule_time='99:00:00', modified=%(t)s WHERE name=%(n)s",
+			{"t": add_to_date(now_datetime(), days=1), "n": bad.name},
+		)
+		frappe.db.commit()
+
+		dispatched = self._run_due()
+
+		self.assertIn(good.name, dispatched, "one bad row aborted the sweep for every other macro")
+		self.assertIn(bad.name, dispatched, "the bad row should fall back, not be skipped")
+		# The poisoned row's slot still advanced, on the 09:00 fallback an unset time gets.
+		nxt = get_datetime(frappe.db.get_value(MACRO, bad.name, "next_run_at"))
+		self.assertEqual((nxt.hour, nxt.minute), (9, 0))
+
+	def test_one_exploding_macro_does_not_abort_the_sweep(self):
+		# The structural guarantee, independent of schedule_time: whatever a single
+		# row raises anywhere in its handling, every OTHER due macro still runs.
+		first = _mk_macro(OWNER_OK, "explodes")
+		second = _mk_macro(OWNER_OK, "survivor")
+		frappe.db.sql(
+			"UPDATE `tabJarvis Macro` SET modified=%(t)s WHERE name=%(n)s",
+			{"t": add_to_date(now_datetime(), days=1), "n": first.name},
+		)
+		frappe.db.commit()
+
+		def boom(m, *a, **kw):
+			if m.name == first.name:
+				raise RuntimeError("bookkeeping blew up")
+
+		with (
+			patch("jarvis.chat.macros.run_macro", return_value={"ok": True}) as mock_run,
+			patch.object(macro_scheduler, "_settle", side_effect=boom),
+		):
+			macro_scheduler.run_due_macros()
+		self.assertIn(second.name, [c.args[0] for c in mock_run.call_args_list])
+
+	def test_compute_next_run_never_raises_on_a_stored_value(self):
+		for bad in ("99:00:00", "-01:00:00", "838:59:59", "garbage"):
+			with self.subTest(bad=bad):
+				nxt = macro_scheduler.compute_next_run("daily", bad)
+				self.assertEqual((nxt.hour, nxt.minute), (9, 0))
