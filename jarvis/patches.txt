@@ -48,3 +48,4 @@ jarvis.patches.v2_12_backfill_role_skill_allowed_roles
 jarvis.patches.v2_12_backfill_approved_draft
 jarvis.patches.v2_12_reload_agent_doctypes_for_indexes
 jarvis.patches.v2_12_reload_macro_doctypes_for_indexes
+jarvis.patches.v2_13_repush_learned_skills_role_gated

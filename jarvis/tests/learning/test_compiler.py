@@ -297,7 +297,7 @@ class TestApplyLearnedSkills(FrappeTestCase):
 		frappe.db.set_value(
 			"Jarvis Settings",
 			"Jarvis Settings",
-			{"learned_skills_sync_status": "ok (applied 0 via admin)"},
+			{"learned_skills_sync_status": "ok (0 installed via admin)"},
 			update_modified=False,
 		)
 		frappe.db.commit()
@@ -517,7 +517,10 @@ class TestApplyLearnedSkills(FrappeTestCase):
 
 	# --- dedicated learned push payload (Phase-2 namespace) ------------------ #
 	def test_learned_push_payload_matches_fleet_contract(self):
-		_mk("selling", "A", roles=("Sales User",))
+		# roles=() is what makes this row PUSHABLE: an unrestricted managed row is
+		# the only shape that still reaches the container after #479, and its item
+		# shape must be byte-for-byte what the fleet contract always took.
+		_mk("selling", "A", roles=())
 		with _patched_pushes():
 			compiler.apply_learned_skills()
 		payload = compiler.build_learned_push_payload()
@@ -537,6 +540,96 @@ class TestApplyLearnedSkills(FrappeTestCase):
 		self.assertIn("user-invocable: false", item["body"])
 		# the compiled instructions ride verbatim in the body.
 		self.assertIn("# Learned selling habits", item["body"])
+
+	# --- #479: role-restricted learned bodies never reach the container ------ #
+	def _managed(self, slug="learned-selling"):
+		return frappe.db.get_value(SKILL, {"managed_by_learning": 1, "skill_name": slug}, "name")
+
+	def _roles_on(self, docname):
+		return sorted(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": docname, "parenttype": SKILL},
+				pluck="role",
+			)
+		)
+
+	def test_role_restricted_learned_row_is_not_pushed(self):
+		# The #479 bug itself: every compiled row carries allowed_roles, and the
+		# learned push wrote all of them into the single role-BLIND container, so a
+		# body only Sales User may read landed where every user's agent can cat it.
+		_mk("selling", "A", roles=("Sales User",))
+		with _patched_pushes():
+			compiler.apply_learned_skills()
+		row = self._managed()
+		self.assertTrue(row, "the managed row must exist - it is held, not dropped")
+		self.assertEqual(self._roles_on(row), ["Sales User"])
+		payload, held_back = compiler.learned_push_split()
+		self.assertEqual(payload, [])
+		self.assertEqual(held_back, 1)
+		self.assertEqual(compiler.build_learned_push_payload(), [])
+
+	def test_unrestricted_learned_row_is_still_pushed_unchanged(self):
+		# The other half of the rule: nothing changes for a row that no role
+		# narrows. Same bytes as before the fix, or this became a regression.
+		from jarvis.chat.custom_skills import render_learned_skill_md
+
+		_mk("selling", "A", roles=())
+		with _patched_pushes():
+			compiler.apply_learned_skills()
+		row = self._managed()
+		self.assertEqual(self._roles_on(row), [])
+		desc, instructions = frappe.db.get_value(SKILL, row, ["description", "instructions"])
+		payload, held_back = compiler.learned_push_split()
+		self.assertEqual(held_back, 0)
+		self.assertEqual(
+			payload,
+			[
+				{
+					"slug": "learned-selling",
+					"description": desc,
+					"body": render_learned_skill_md("learned-selling", desc, instructions),
+				}
+			],
+		)
+
+	def test_mixed_bench_pushes_only_the_unrestricted_rows(self):
+		_mk("selling", "A", roles=("Sales User",))
+		_mk("buying", "A", roles=(), detector_id="buy-supplier-payment-terms-realized")
+		with _patched_pushes():
+			compiler.apply_learned_skills()
+		payload, held_back = compiler.learned_push_split()
+		self.assertEqual([i["slug"] for i in payload], ["learned-buying"])
+		self.assertEqual(held_back, 1)
+
+	def test_roles_derived_is_stamped_and_changes_nothing_about_the_push(self):
+		# The marker is DATA CAPTURE ONLY (#479 decision 4). It must record what the
+		# role derivation concluded, and it must not move a single row between the
+		# pushed and the held-back set - otherwise it is a behaviour change wearing
+		# a marker's clothes.
+		_mk("selling", "A", roles=())
+		with _patched_pushes():
+			compiler.apply_learned_skills()
+		row = self._managed()
+		self.assertEqual(frappe.db.get_value(SKILL, row, "roles_derived"), 1)
+		before = compiler.learned_push_split()
+
+		# Flip the marker to the "we could not determine anything" value. An empty
+		# allowed_roles still means everyone, so the row stays pushed.
+		frappe.db.set_value(SKILL, row, "roles_derived", 0, update_modified=False)
+		self.assertEqual(compiler.learned_push_split(), before)
+		self.assertEqual([i["slug"] for i in before[0]], ["learned-selling"])
+
+	def test_roles_derived_is_zero_when_the_derivation_cannot_conclude(self):
+		# An empty allowed_roles has three causes (design Q3) and only this marker
+		# tells "no desk role narrows this" from "the scan never ran".
+		_mk("selling", "A", roles=())
+		with patch("jarvis.learning.roles.derive_roles_for_doctype", return_value=([], False)):
+			compiled = compiler.compile_domain_skills()
+		self.assertFalse(compiled["selling"]["roles_derived"])
+		with patch("jarvis.learning.roles.derive_roles_for_doctype", return_value=(["x"], True)):
+			compiled = compiler.compile_domain_skills()
+		self.assertTrue(compiled["selling"]["roles_derived"])
 
 	def test_managed_rows_excluded_from_custom_push(self):
 		from jarvis.chat.custom_skills import build_push_payload
@@ -613,7 +706,12 @@ class TestApplyLearnedSkills(FrappeTestCase):
 		# ...the confirmed-ok learned push chained the GRACEFUL custom worker.
 		custom_wire.assert_called_once()
 		st = self._sync_pair()
-		self.assertTrue(st.learned_skills_sync_status.startswith("ok (applied"))
+		# The Sales-User fixture is role-restricted, so NOTHING was installed and
+		# the status has to say so without reading as a failure (#479).
+		self.assertEqual(
+			st.learned_skills_sync_status,
+			"ok (0 installed via admin, 1 role-restricted and fetched on demand)",
+		)
 		self.assertTrue(st.custom_skills_sync_status.startswith("ok (applied"))
 
 		# once the learned sync pair is stamped, later applies push learned ONLY.
@@ -672,7 +770,10 @@ class TestApplyLearnedSkills(FrappeTestCase):
 		learned_wire.assert_called_once()
 		custom_wire.assert_not_called()
 		st = self._sync_pair()
-		self.assertTrue(st.learned_skills_sync_status.startswith("ok (applied"))
+		self.assertEqual(
+			st.learned_skills_sync_status,
+			"ok (0 installed via admin, 1 role-restricted and fetched on demand)",
+		)
 		self.assertEqual(st.custom_skills_sync_status, before.custom_skills_sync_status)
 
 	def test_cutover_reconcile_not_chained_when_learned_push_fails(self):

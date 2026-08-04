@@ -91,9 +91,9 @@ def enqueue_learned_skills_push(chain_custom_reconcile: bool = False) -> dict:
 	skipped - the next custom apply / restart resync's full reconcile
 	self-heals; no status is left pending.
 	"""
-	from jarvis.learning.compiler import build_learned_push_payload
+	from jarvis.learning.compiler import learned_push_split
 
-	payload = build_learned_push_payload()
+	payload, held_back = learned_push_split()
 	frappe.db.set_single_value(
 		_SETTINGS, "learned_skills_sync_status", _PENDING_STATUS, update_modified=False
 	)
@@ -112,7 +112,11 @@ def enqueue_learned_skills_push(chain_custom_reconcile: bool = False) -> dict:
 	return {
 		"ok": True,
 		"learned_skills_sync_status": _PENDING_STATUS,
+		# ``count`` is what actually reaches the container. ``role_restricted`` is
+		# the rest: compiled, live, and served on demand by jarvis__get_skill
+		# instead of written to the shared blob (#479).
 		"count": len(payload),
+		"role_restricted": held_back,
 	}
 
 
@@ -132,7 +136,7 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 	resync self-heals)."""
 	from jarvis import admin_client
 	from jarvis._redis_lock import redis_lock
-	from jarvis.learning.compiler import build_learned_push_payload
+	from jarvis.learning.compiler import learned_push_split
 
 	with redis_lock(_LOCK_NAME, timeout_s=180, blocking_timeout_s=60.0) as acquired:
 		if not acquired:
@@ -148,14 +152,14 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 		terminal_written = False
 		push_ok = False
 		try:
-			payload = build_learned_push_payload()
+			payload, held_back = learned_push_split()
 			admin_client.post_push_learned_skills(learned_skills=payload)
 			frappe.db.set_value(
 				_SETTINGS,
 				_SETTINGS,
 				{
 					"learned_skills_synced_at": frappe.utils.now(),
-					"learned_skills_sync_status": f"ok (applied {len(payload)} via admin)",
+					"learned_skills_sync_status": _ok_status(len(payload), held_back),
 				},
 				update_modified=False,
 			)
@@ -226,6 +230,23 @@ def _enqueue_cutover_custom_reconcile() -> None:
 			title="Jarvis: cutover custom reconcile enqueue failed",
 			message=frappe.get_traceback(),
 		)
+
+
+def _ok_status(installed: int, role_restricted: int) -> str:
+	"""The reviewer-facing terminal status, which has to distinguish two very
+	different outcomes that the old "ok (applied N via admin)" wording merged.
+
+	Since #479 a role-restricted learned skill is deliberately NOT written into
+	the container: it is live, it still applies to its role-holders, and its body
+	is served on demand by ``jarvis__get_skill``. Every compiled row carries
+	``allowed_roles``, so a reviewer who approves four domains and then reads
+	"applied 1" would reasonably file that as a bug. Naming the held-back count
+	is the whole fix - it says the other three are working, not missing."""
+	if role_restricted:
+		return (
+			f"ok ({installed} installed via admin, {role_restricted} role-restricted and fetched on demand)"
+		)
+	return f"ok ({installed} installed via admin)"
 
 
 def _fail(status: str) -> None:
