@@ -524,3 +524,34 @@ class TestDisconnectReconcile(_RT3SettingsTestCase):
 		with patch.object(admin_client, "get_connection", side_effect=_reconnect_then_answer):
 			reconcile_pending_llm_sync()
 		self._assert_pool_intact("a verdict about a replaced connection must not be acted on")
+
+	def test_a_workspace_reset_in_flight_is_not_a_disconnect(self):
+		"""A reset points the customer at a BRAND NEW container and deliberately
+		keeps the pool and the apply markers - _prepare_for_reset says clearing them
+		would eject the customer into the setup wizard. So between "new container
+		Running" and "re-pushed spec applied", admin truthfully reports no
+		credentials about a workspace whose markers are set. Firing there would
+		destroy a pool nobody asked to disconnect.
+		"""
+		from jarvis.onboarding import _RESETTING_RECONNECT_LLM_STATUS, _RESETTING_STATUS
+
+		for status in (_RESETTING_STATUS, _RESETTING_RECONNECT_LLM_STATUS):
+			with self.subTest(status=status):
+				self._clear_models()
+				_reset_settings()
+				self._seed_connected_pool()
+				settings = frappe.get_single("Jarvis Settings")
+				settings.db_set("last_sync_status", status, update_modified=False)
+				frappe.db.commit()
+
+				with patch.object(
+					admin_client,
+					"get_connection",
+					return_value={
+						"chat_readiness": "Configuring",
+						"chat_readiness_reason": _ADMIN_DISCONNECTED_REASON,
+					},
+				) as conn:
+					reconcile_pending_llm_sync()
+				self._assert_pool_intact("a reset must not be read as a disconnect")
+				conn.assert_not_called()

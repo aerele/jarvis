@@ -1930,8 +1930,9 @@ def _admin_says_llm_gone(state, reason) -> bool:
 def _local_llm_survived_an_admin_disconnect(settings, pool_mode: bool) -> bool:
 	"""Could this workspace be the losing half of a split disconnect? Local-only.
 
-	Two conditions, and the second is the one that keeps a working customer's
-	credentials safe:
+	Three conditions. The second and third both exist to keep a working customer's
+	credentials safe, and they cover two different ways admin can legitimately be
+	holding none.
 
 	1. The bench still HOLDS a credential (``_has_llm_config``). Nothing to clear
 	   otherwise, which is also what makes the clear idempotent - a converged
@@ -1940,7 +1941,7 @@ def _local_llm_survived_an_admin_disconnect(settings, pool_mode: bool) -> bool:
 	2. The fleet has CONFIRMED an apply of the leg this workspace syncs through
 	   (``_llm_apply_confirmed``: llm_pool_synced_at / llm_oauth_connected_at /
 	   llm_direct_synced_at). This is the discriminator between the two ways admin
-	   can be holding no credentials:
+	   can be holding no credentials for a container we ARE serving:
 
 	     * admin HAD them and deleted them -> the marker is set, because it was
 	       stamped when admin confirmed the apply and only a completed disconnect
@@ -1954,13 +1955,27 @@ def _local_llm_survived_an_admin_disconnect(settings, pool_mode: bool) -> bool:
 	   both and wipe the second, which is the one failure mode strictly worse than
 	   the bug being fixed.
 
+	3. NO WORKSPACE RESET IS IN FLIGHT. (2) is not sufficient alone, because a reset
+	   points the customer at a BRAND NEW container while deliberately keeping the
+	   pool and the ``*_synced_at`` markers - the control plane carries them across,
+	   and ``_prepare_for_reset`` says in as many words that clearing them would
+	   eject the customer into the setup wizard. So between "new container Running"
+	   and "re-pushed spec applied", admin truthfully reports no credentials about a
+	   workspace whose markers are set, and (1) and (2) both pass. Firing there
+	   would destroy a pool nobody asked to disconnect, mid-reset. The reset owns
+	   its own convergence (``reconcile_pending_workspace_reset``); this leg stands
+	   aside until that has finished.
+
 	Deliberately reuses ``account``'s predicates rather than restating them: they
 	are the same evidence ``is_ready_for_chat`` opens chat on and the Connection
 	badge colours itself from, so this branch cannot come to a different
 	conclusion about "connected" than the rest of the app.
 	"""
 	from jarvis.account import _has_llm_config, _llm_apply_confirmed
+	from jarvis.onboarding import _RESETTING_STATUS
 
+	if (settings.get("last_sync_status") or "").startswith(_RESETTING_STATUS):
+		return False
 	return _has_llm_config(settings) and _llm_apply_confirmed(settings, pool_mode)
 
 
