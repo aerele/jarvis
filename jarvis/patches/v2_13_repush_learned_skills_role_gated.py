@@ -5,8 +5,8 @@ Before this deploy, ``build_learned_push_payload`` wrote EVERY managed
 ``learned-<domain>`` row into the container's ``learned_skills`` dir, including the
 role-restricted ones. The code fix stops NEW pushes from doing that; it cannot
 remove what is already on disk, and a body on disk is readable by every user of
-that tenant's single, role-blind container (openclaw's entrypoint copies it into
-``workspace/skills/`` and ``bash cat`` needs no permission). Shipping the filter
+that tenant's single, role-blind agent container (its entrypoint copies the file
+into ``workspace/skills/`` and ``bash cat`` needs no permission). Shipping the filter
 without this patch closes the tap and leaves the puddle.
 
 The removal mechanism already exists and needs no fleet change: ``PUT
