@@ -9,7 +9,7 @@
 			class="jvc-field"
 			:class="{ 'jvc-open': open, 'jvc-dis': !editable }"
 			role="button"
-			tabindex="0"
+			:tabindex="allowCustom ? -1 : 0"
 			:aria-expanded="open"
 			@click="onFieldClick"
 			@keydown.down.prevent="openAnd(0)"
@@ -226,7 +226,16 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", onDocClick));
 .jvc-field:focus-within {
 	border-color: var(--cta-bd);
 }
-.jvc-field:focus-visible {
+/* Two selectors, because there are two ways this control can hold focus. A plain
+   picker has no inner input, so the wrapper itself is the tab stop and matches
+   :focus-visible directly. An allowCustom combo puts a real <input> inside, and
+   THAT is the element the customer tabs to and types into - the wrapper never
+   matches :focus-visible in that case, so keying the ring off it alone left the
+   editable combos (model id, base URL) with no keyboard focus indicator at all.
+   :has keeps the ring on the wrapper, outside its border, rather than drawing a
+   second box inside it. */
+.jvc-field:focus-visible,
+.jvc-field:has(.jvc-input:focus-visible) {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
