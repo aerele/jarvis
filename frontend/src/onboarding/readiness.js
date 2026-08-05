@@ -110,6 +110,13 @@ export async function replacedNoticeOf() {
 // and a site whose key was rotated away dead-ends at "could not sign in".
 export const RECONNECT_INTENT_URL = "/jarvis/onboarding?reconnect=1";
 
+// Which step the wizard opens on. Explicit reconnect intent beats a resumed
+// step, but never a paid/provisioning one - somebody already set up is not
+// reconnecting.
+export function landingStep({ intent, resumedStep, terminal }) {
+	return intent && !terminal ? "details" : resumedStep;
+}
+
 export function hasReconnectIntent(search) {
 	try {
 		return new URLSearchParams(search || "").get("reconnect") === "1";

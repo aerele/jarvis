@@ -15,6 +15,7 @@ const {
 	forgetReady,
 	replacedBanner,
 	hasReconnectIntent,
+	landingStep,
 	RECONNECT_INTENT_URL,
 } = await import("./readiness.js");
 
@@ -171,5 +172,27 @@ describe("reconnect intent", () => {
 		expect(hasReconnectIntent("")).toBe(false);
 		expect(hasReconnectIntent(null)).toBe(false);
 		expect(hasReconnectIntent(undefined)).toBe(false);
+	});
+});
+
+describe("landing step", () => {
+	it("sends a reconnect intent to the step that carries the offer", () => {
+		expect(landingStep({ intent: true, resumedStep: "pay", terminal: false })).toBe("details");
+		expect(landingStep({ intent: true, resumedStep: "intro", terminal: false })).toBe(
+			"details"
+		);
+	});
+
+	it("leaves the resumed step alone without the intent", () => {
+		expect(landingStep({ intent: false, resumedStep: "pay", terminal: false })).toBe("pay");
+		expect(landingStep({ intent: false, resumedStep: "intro", terminal: false })).toBe(
+			"intro"
+		);
+	});
+
+	it("never drags a paid or provisioning signup into reconnect", () => {
+		expect(landingStep({ intent: true, resumedStep: "connect", terminal: true })).toBe(
+			"connect"
+		);
 	});
 });

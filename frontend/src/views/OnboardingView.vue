@@ -1088,7 +1088,7 @@ import {
 	operationStore,
 	OP_PHASE,
 } from "@/lib/llmOperation.js";
-import { forgetReady, hasReconnectIntent } from "@/onboarding/readiness.js";
+import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
@@ -2753,10 +2753,14 @@ onMounted(async () => {
 	// AFTER the resumes: they set state.step from persisted signup state, and the
 	// customer's explicit intent has to win over that. Never overrides a finished
 	// signup - somebody already paid and provisioned is not reconnecting.
-	if (hasReconnectIntent(window.location.search) && !isTerminalForPayment(pay.value.value)) {
-		state.reconnectIntent = true;
-		state.step = "details";
-	}
+	const intent = hasReconnectIntent(window.location.search);
+	const landing = landingStep({
+		intent,
+		resumedStep: state.step,
+		terminal: isTerminalForPayment(pay.value.value),
+	});
+	state.reconnectIntent = intent && landing === "details";
+	state.step = landing;
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"
 	// and skip it (the step-entry watch still covers every other path).
