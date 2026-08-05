@@ -1668,6 +1668,23 @@ class TestRoleScopedSkillInvocation(Part2Base):
 			rows = list_custom_skills()
 		self.assertEqual([r for r in rows if r["skill_name"] == f"{PFX}-roledisabled"], [])
 
+	def test_shared_by_never_renders_blank(self):
+		"""Shared and role-granted rows go through one display-name lookup. A row whose
+		owner is empty (a legacy row minted by a script) must still render something
+		identifiable rather than a blank author."""
+		from jarvis.chat.custom_skills_api import _attach_shared_by
+
+		rows = [
+			{"name": "x", "owner": self.ROLE_HOLDER},
+			{"name": "y", "owner": ""},
+			{"name": "z", "owner": "nobody@example.invalid"},
+		]
+		_attach_shared_by(rows)
+		self.assertTrue(all(r["shared_by"] for r in rows), "no row may carry a blank shared_by")
+		self.assertNotIn("owner", rows[0], "owner is replaced, not duplicated")
+		# An unknown-but-present owner falls back to the raw id, which is still useful.
+		self.assertEqual(rows[2]["shared_by"], "nobody@example.invalid")
+
 	def test_patch_backfills_allowed_roles_on_a_pre_fix_role_skill(self):
 		# The code fix only helps promotions made AFTER deploy. Rows promoted under the
 		# old code carry target_role with an EMPTY allowed_roles, which is exactly the

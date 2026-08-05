@@ -126,23 +126,8 @@ def list_custom_skills() -> list[dict]:
 			fields=["name", "skill_name", "description", "user_invocable", "enabled", "owner", "modified"],
 			order_by="skill_name asc",
 		)
-		# One query for the owners' display names (was a per-row lookup).
-		full_names = (
-			{
-				u.name: u.full_name
-				for u in frappe.get_all(
-					"User",
-					filters={"name": ["in", list({r.owner for r in rows})]},
-					fields=["name", "full_name"],
-				)
-			}
-			if rows
-			else {}
-		)
 		for s in rows:
 			s["mine"] = 0
-			owner = s.pop("owner")
-			s["shared_by"] = full_names.get(owner) or owner
 			shared.append(s)
 
 	# #628: Role-promoted skills. Invocation already accepted these (#477 / #478 via
@@ -161,26 +146,44 @@ def list_custom_skills() -> list[dict]:
 		if r["name"] not in seen
 	]
 	via_role = []
-	if role_rows:
-		role_full_names = {
+	for s in role_rows:
+		s["mine"] = 0
+		# ``via_role`` lets the composer label these differently from a person-to-person
+		# share: nobody shared it with this user, their ROLE grants it, and revoking the
+		# role removes it. ``shared_by`` is still populated so a client that does not know
+		# the flag renders an author rather than a blank.
+		s["via_role"] = 1
+		via_role.append(s)
+
+	# ONE display-name query for every not-mine row, shared and role-granted alike.
+	# These were two near-identical User lookups; a third source of borrowed rows would
+	# have been a third copy, and nothing enforced looking names up the same way.
+	_attach_shared_by(shared + via_role)
+	return own + shared + via_role
+
+
+def _attach_shared_by(rows: list) -> None:
+	"""Replace each row's ``owner`` with a human ``shared_by`` label, in place.
+
+	One query for all of them. Falls back to the raw owner id, then to a literal, so a
+	row whose owner is empty (a legacy row minted by a script) still renders something
+	identifiable instead of a blank author."""
+	if not rows:
+		return
+	owners = {r.get("owner") for r in rows if r.get("owner")}
+	full_names = (
+		{
 			u.name: u.full_name
 			for u in frappe.get_all(
-				"User",
-				filters={"name": ["in", list({r.owner for r in role_rows})]},
-				fields=["name", "full_name"],
+				"User", filters={"name": ["in", list(owners)]}, fields=["name", "full_name"]
 			)
 		}
-		for s in role_rows:
-			s["mine"] = 0
-			# ``via_role`` lets the composer label these differently from a person-to-person
-			# share: nobody shared it with this user, their ROLE grants it, and revoking the
-			# role removes it. The existing ``shared_by`` is still populated so a client that
-			# does not know the flag renders an author rather than a blank.
-			s["via_role"] = 1
-			owner = s.pop("owner")
-			s["shared_by"] = role_full_names.get(owner) or owner
-			via_role.append(s)
-	return own + shared + via_role
+		if owners
+		else {}
+	)
+	for r in rows:
+		owner = r.pop("owner", None)
+		r["shared_by"] = full_names.get(owner) or owner or _("Unknown")
 
 
 # --------------------------------------------------------------------------- #
