@@ -329,9 +329,6 @@ def strip_credentials(data: dict | None) -> dict:
 # response instead carries a NON-NAVIGABLE origin digest (§R P0-3) the bench
 # cross-checks against its own configured origin before the frontend navigates.
 # --------------------------------------------------------------------------- #
-#: The origin the bench navigates to for checkout. Resolves site_config ->
-#: ``Jarvis Settings.jarvis_pay_origin`` -> the bench's admin URL; a bad value fails closed.
-CONF_PAY_ORIGIN = "jarvis_pay_origin"
 #: The frozen envelope key admin uses for the pay-page token (brief §Frozen
 #: contract). Its presence is what turns a response into a navigate-to-pay one.
 PAY_PAGE_TOKEN_KEY = "pay_page_token"
@@ -367,19 +364,12 @@ def _normalize_pay_origin(raw: str | None) -> str:
 
 
 def _resolved_pay_origin() -> str:
-	"""The bench's pay origin, normalized: site_config -> ``Jarvis Settings`` field ->
-	the bench's admin URL (checkout is hosted on the control plane). Read fresh; never
-	raises. The field is operator-only and MUST NOT be written by the connect/sync flow
-	- it anchors the digest cross-check."""
+	"""The bench's pay origin, normalized: the bench's admin URL (checkout is hosted on
+	the control plane, so the admin URL the bench already knows IS the checkout origin).
+	Read fresh; never raises. This anchors the digest cross-check against admin."""
 	from jarvis.hooks import get_default_admin_url
 
-	raw = (frappe.conf.get(CONF_PAY_ORIGIN) or "").strip()
-	if not raw:
-		try:
-			raw = (frappe.db.get_single_value("Jarvis Settings", "jarvis_pay_origin") or "").strip()
-		except Exception:
-			raw = ""
-	return _normalize_pay_origin(raw or get_default_admin_url())
+	return _normalize_pay_origin(get_default_admin_url())
 
 
 def pay_origin_digest(origin: str) -> str:
@@ -394,9 +384,9 @@ def augment_pay_page(data: dict) -> dict:
 	non-token answer (a coded state, a paid connection payload), is returned
 	untouched. On a token answer it injects two frontend-read fields:
 
-	  * ``pay_origin`` — the bench's resolved, normalized pay origin (site_config ->
-	    ``Jarvis Settings`` -> production default), or "" when invalid. The frontend
-	    builds ``{pay_origin}/jarvis-checkout#t=<token>`` from it; empty fails closed.
+	  * ``pay_origin`` — the bench's resolved, normalized pay origin (its admin URL),
+	    or "" when invalid. The frontend builds ``{pay_origin}/jarvis-checkout#t=<token>``
+	    from it; empty fails closed.
 	  * ``pay_origin_attested`` — True iff ``pay_origin`` is set AND its sha256
 	    digest equals admin's non-navigable ``pay_origin_digest`` (§R P0-3). The
 	    frontend refuses to navigate unless this is True, so a config split-brain
