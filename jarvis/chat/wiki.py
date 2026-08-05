@@ -1109,9 +1109,13 @@ def apply_extracted_page_updates(
 	updates instead of the ``(applied, failed)`` tuple, so the caller can record
 	EXACTLY the pages that were written and count a provenance REFUSAL (a
 	``_apply_one_update`` returning ``False``) as failed — the aggregate tuple
-	cannot distinguish "created page B" from "refused colliding page A". The
-	tuple path is unchanged for every existing caller (a refusal stays silently
-	dropped there, byte-for-byte).
+	cannot distinguish "created page B" from "refused colliding page A".
+
+	#613: the tuple path now LOGS a refusal (it left no trace at all before), but still
+	counts it as neither applied nor failed. Whether a refusal belongs on the retry path
+	is a separate decision that this change deliberately does not take: ``test_wiki``
+	pins the current contract with an explicit comment, and flipping it would retry
+	unsalvageable input forever with no attempt counter to bound it.
 	"""
 	if not isinstance(updates, list):
 		return [] if return_outcomes else (0, 0)
@@ -1161,6 +1165,25 @@ def apply_extracted_page_updates(
 			reason = "applied" if ok else "refused"
 			if ok:
 				applied += 1
+			elif not provenance_prefix:
+				# #613: a refusal left NO trace at all, so knowledge lost this way was
+				# undiagnosable. It is logged now.
+				#
+				# NOT logged on the fenced paths (``provenance_prefix`` set: the Custom App
+				# Learning scribe and app_analysis). There a refusal is the DOCUMENTED
+				# expected outcome of a slug colliding with a human-edited page, the CA2-1
+				# belt working as designed, not knowledge going missing. Logging those
+				# would put a row in the Error Log for every routine collision on every
+				# rerun and bury the entries this is meant to surface.
+				#
+				# Deliberately NOT counted as failed, which is the other half of #613 and
+				# is a decision this change does not take. ``test_wiki`` pins the current
+				# contract with an explicit comment ("a skipped (identity-less) update is
+				# not a FAILURE - the note may still be marked Processed"), and flipping it
+				# would retry unsalvageable junk forever: one of the refusals that pins it
+				# is slug ``"!!!"``, which no amount of retrying repairs, and the note
+				# carries no attempt counter to bound that. See the issue.
+				_log_refused_update(update, source, ref)
 			try:
 				frappe.db.release_savepoint(sp)
 			except Exception:
@@ -1179,6 +1202,40 @@ def apply_extracted_page_updates(
 	if return_outcomes:
 		return [r if r is not None else {"slug": None, "ok": False, "reason": "skipped"} for r in results]
 	return applied, failed
+
+
+def _log_refused_update(update: dict, source: str, ref: str | None) -> None:
+	"""Record WHY an update was refused, so knowledge lost this way is diagnosable (#613).
+
+	``_apply_one_update`` answers a bare bool, so the shape of the refused update is the
+	only evidence available at this layer, and it is the evidence that matters: the
+	common refusal is an update naming no existing page while carrying neither ``title``
+	nor ``page_type``, which cannot mint one. PR #611 made that shape ordinary rather
+	than rare by telling the ingest to emit ``append_md``.
+
+	Field NAMES and CLASSIFICATIONS only, never a raw extracted value. The body of a
+	voice note is the customer's own content and must not be copied into an Error Log,
+	and ``page_type`` / ``scope`` are not safe to echo either: this helper runs precisely
+	when the model failed to produce a valid enum there, so those are the fields most
+	likely to contain a stray transcript fragment. Reporting VALID / INVALID keeps the
+	diagnostic value without the leak."""
+	page_type = (update.get("page_type") or "").strip()
+	scope = (update.get("scope") or "").strip()
+	try:
+		frappe.log_error(
+			title="wiki: page update refused",
+			message=(
+				f"source={source} ref={ref}\n"
+				f"slug={_normalize_slug(update.get('slug'))!r}\n"
+				f"has_title={bool(str(update.get('title') or '').strip())} "
+				f"page_type={'valid' if page_type in PAGE_TYPES else ('absent' if not page_type else 'invalid')}\n"
+				f"scope={scope if scope in ('Org', 'User', 'Role') else ('absent' if not scope else 'invalid')} "
+				f"has_target_user={bool(update.get('target_user'))}\n"
+				f"carries={sorted(k for k in ('body_md', 'append_md', 'summary') if update.get(k))}"
+			),
+		)
+	except Exception:
+		pass
 
 
 def _apply_one_update(
