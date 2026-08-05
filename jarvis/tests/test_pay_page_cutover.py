@@ -23,8 +23,14 @@ class TestNormalizePayOrigin(FrappeTestCase):
 	def test_host_is_lowercased_and_a_trailing_slash_is_dropped(self):
 		self.assertEqual(oc._normalize_pay_origin("https://Fleet.Klerk.IN/"), "https://fleet.klerk.in")
 
-	def test_non_https_is_rejected(self):
-		self.assertEqual(oc._normalize_pay_origin("http://fleet.klerk.in"), "")
+	def test_http_and_port_are_preserved(self):
+		# The bench preserves scheme + port (its test-mode form); the admin enforces
+		# https/allowlist in live mode. Byte-identical to admin origin._preserve_origin.
+		self.assertEqual(oc._normalize_pay_origin("http://fleet.klerk.in"), "http://fleet.klerk.in")
+		self.assertEqual(
+			oc._normalize_pay_origin("http://jarvis_admin_v2.local:8002"),
+			"http://jarvis_admin_v2.local:8002",
+		)
 
 	def test_a_path_query_or_fragment_is_rejected(self):
 		self.assertEqual(oc._normalize_pay_origin("https://fleet.klerk.in/jarvis-checkout"), "")
@@ -68,11 +74,16 @@ class TestAugmentPayPage(FrappeTestCase):
 		self.assertEqual(out["pay_origin"], self.ORIGIN)
 		self.assertFalse(out["pay_origin_attested"])
 
-	def test_token_with_NO_configured_origin_fails_closed(self):
+	def test_token_with_NO_explicit_config_uses_the_production_default(self):
+		# New contract (2026-08-05): with nothing in site_config OR the Settings field,
+		# the origin falls back to the shipped production default instead of failing
+		# closed. self.ORIGIN IS that default and admin minted a token for it, so it
+		# attests. (site_config still overrides; a mismatched default would not attest.)
 		frappe.conf.pop("jarvis_pay_origin", None)
-		out = oc.augment_pay_page({"pay_page_token": "tok", "pay_origin_digest": self.digest})
-		self.assertEqual(out["pay_origin"], "")
-		self.assertFalse(out["pay_origin_attested"])
+		with patch("frappe.db.get_single_value", return_value=""):
+			out = oc.augment_pay_page({"pay_page_token": "tok", "pay_origin_digest": self.digest})
+		self.assertEqual(out["pay_origin"], oc._DEFAULT_PAY_ORIGIN)
+		self.assertTrue(out["pay_origin_attested"])
 
 	def test_token_with_no_admin_digest_cannot_be_attested(self):
 		frappe.conf["jarvis_pay_origin"] = self.ORIGIN
@@ -91,6 +102,28 @@ class TestAugmentPayPage(FrappeTestCase):
 		env = oc.success({"pay_page_token": "tok", "pay_origin_digest": self.digest, "api_secret": "s"})
 		self.assertNotIn("api_secret", env["data"])
 		self.assertTrue(env["data"]["pay_origin_attested"])
+
+
+class TestResolvedPayOrigin(FrappeTestCase):
+	"""_resolved_pay_origin precedence: site_config -> Jarvis Settings field -> default."""
+
+	def tearDown(self):
+		frappe.conf.pop("jarvis_pay_origin", None)
+
+	def test_site_config_wins_over_settings_field(self):
+		frappe.conf["jarvis_pay_origin"] = "https://vignesh-staging.klerk.in"
+		with patch("frappe.db.get_single_value", return_value="https://other.example.com"):
+			self.assertEqual(oc._resolved_pay_origin(), "https://vignesh-staging.klerk.in")
+
+	def test_settings_field_used_when_site_config_empty(self):
+		frappe.conf.pop("jarvis_pay_origin", None)
+		with patch("frappe.db.get_single_value", return_value="https://vignesh-staging.klerk.in"):
+			self.assertEqual(oc._resolved_pay_origin(), "https://vignesh-staging.klerk.in")
+
+	def test_production_default_when_both_empty(self):
+		frappe.conf.pop("jarvis_pay_origin", None)
+		with patch("frappe.db.get_single_value", return_value=""):
+			self.assertEqual(oc._resolved_pay_origin(), oc._DEFAULT_PAY_ORIGIN)
 
 
 class TestPaymentUiV2Flag(FrappeTestCase):

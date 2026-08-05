@@ -290,10 +290,12 @@ def strip_credentials(data: dict | None) -> dict:
 # response instead carries a NON-NAVIGABLE origin digest (§R P0-3) the bench
 # cross-checks against its own configured origin before the frontend navigates.
 # --------------------------------------------------------------------------- #
-#: Site-config-only, NO code default (owner decision 3): the fleet origin the
-#: bench top-level-navigates to for checkout. Missing/mismatched = fail closed
-#: with honest copy, never a fallback (owner decision 4).
+#: The origin the bench navigates to for checkout. Resolves site_config ->
+#: ``Jarvis Settings.jarvis_pay_origin`` -> a production default; a bad value fails closed.
 CONF_PAY_ORIGIN = "jarvis_pay_origin"
+#: Production default (owner decision 2026-08-05), like admin_client._admin_url. A code
+#: constant, not a wire value, so the origin-digest cross-check stays sound.
+_DEFAULT_PAY_ORIGIN = "https://fleet.klerk.in"
 #: The frozen envelope key admin uses for the pay-page token (brief §Frozen
 #: contract). Its presence is what turns a response into a navigate-to-pay one.
 PAY_PAGE_TOKEN_KEY = "pay_page_token"
@@ -305,28 +307,40 @@ PAY_ORIGIN_DIGEST_KEY = "pay_origin_digest"
 
 
 def _normalize_pay_origin(raw: str | None) -> str:
-	"""Normalize a configured pay origin to ``https://<host>`` (lowercased host, no
-	path/query/fragment/credentials), or "" when unusable.
+	"""Normalize a configured pay origin, preserving scheme + port, or "" when unusable.
 
-	Kept in lockstep with the admin-side ``canonical_pay_origin`` normalization
-	(jarvis_admin_v2 ``billing/checkout/origin.py``) so the two sha256 digests
-	agree byte-for-byte. Deliberately does NOT enforce the registered-host
-	allowlist — that is admin's authority; the bench only needs a canonical string
-	to digest and to build its own URL from."""
+	Byte-identical to the admin-side origin._preserve_origin (its test-mode form) so the
+	two sha256 digests agree; a live origin (https, no port) yields the same
+	``https://<host>`` the admin's strict validator produces. Does NOT enforce the
+	registered-host allowlist — that is admin's authority; the bench only needs a
+	canonical string to digest and to build its own URL from."""
 	raw = (raw or "").strip()
 	if not raw:
 		return ""
 	parts = urlsplit(raw)
-	if parts.scheme != "https":
+	scheme = (parts.scheme or "").lower()
+	if scheme not in ("http", "https"):
 		return ""
-	if parts.username or parts.password:
-		return ""
-	if parts.path not in ("", "/") or parts.query or parts.fragment:
+	if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
 		return ""
 	host = (parts.hostname or "").lower()
 	if not host or "." not in host:
 		return ""
-	return f"https://{host}"
+	port = f":{parts.port}" if parts.port else ""
+	return f"{scheme}://{host}{port}"
+
+
+def _resolved_pay_origin() -> str:
+	"""The bench's pay origin, normalized: site_config -> ``Jarvis Settings`` field ->
+	production default. Read fresh; never raises. The field is operator-only and MUST
+	NOT be written by the connect/sync flow - it anchors the digest cross-check."""
+	raw = (frappe.conf.get(CONF_PAY_ORIGIN) or "").strip()
+	if not raw:
+		try:
+			raw = (frappe.db.get_single_value("Jarvis Settings", "jarvis_pay_origin") or "").strip()
+		except Exception:
+			raw = ""
+	return _normalize_pay_origin(raw or _DEFAULT_PAY_ORIGIN)
 
 
 def pay_origin_digest(origin: str) -> str:
@@ -341,11 +355,9 @@ def augment_pay_page(data: dict) -> dict:
 	non-token answer (a coded state, a paid connection payload), is returned
 	untouched. On a token answer it injects two frontend-read fields:
 
-	  * ``pay_origin`` — the bench's configured, normalized ``jarvis_pay_origin``
-	    (``https://<host>``), or "" when unset/invalid. The frontend builds
-	    ``{pay_origin}/jarvis-checkout#t=<token>`` from this; an empty value fails
-	    the pay step CLOSED with honest copy (owner decisions 3/4 — NO default,
-	    NO fallback).
+	  * ``pay_origin`` — the bench's resolved, normalized pay origin (site_config ->
+	    ``Jarvis Settings`` -> production default), or "" when invalid. The frontend
+	    builds ``{pay_origin}/jarvis-checkout#t=<token>`` from it; empty fails closed.
 	  * ``pay_origin_attested`` — True iff ``pay_origin`` is set AND its sha256
 	    digest equals admin's non-navigable ``pay_origin_digest`` (§R P0-3). The
 	    frontend refuses to navigate unless this is True, so a config split-brain
@@ -356,7 +368,7 @@ def augment_pay_page(data: dict) -> dict:
 	its own config, and this is only the cross-check that admin agrees."""
 	if not isinstance(data, dict) or not data.get(PAY_PAGE_TOKEN_KEY):
 		return data
-	origin = _normalize_pay_origin(frappe.conf.get(CONF_PAY_ORIGIN))
+	origin = _resolved_pay_origin()
 	admin_digest = (data.get(PAY_ORIGIN_DIGEST_KEY) or "").strip().lower()
 	attested = (
 		bool(origin) and bool(admin_digest) and hmac.compare_digest(pay_origin_digest(origin), admin_digest)
