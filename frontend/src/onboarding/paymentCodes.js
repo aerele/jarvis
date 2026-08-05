@@ -236,9 +236,12 @@ const TABLE = {
 	},
 	[CODES.BENCH_ADMIN_AUTH_FAILED]: {
 		headline: "This site could not sign in to your account.",
-		body: "Your payment is not affected. We need to look at this with you.",
+		// Reconnect FIRST: the usual cause is the account being reconnected on
+		// another site, which rotates the key this one holds. Reconnect is a guest
+		// call, so it still works from a bench that cannot sign in.
+		body: "Your payment is not affected. If you reconnected your account on another site, reconnect this one to bring it back.",
 		tone: TONE.ALERT,
-		actions: [ACTIONS.SUPPORT],
+		actions: [ACTIONS.RECONNECT, ACTIONS.SUPPORT],
 	},
 	[CODES.BENCH_ADMIN_REJECTED]: {
 		headline: "The payment service refused this request.",

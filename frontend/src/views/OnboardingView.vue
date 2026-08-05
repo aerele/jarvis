@@ -320,6 +320,13 @@
 								/>
 							</div>
 							<p
+								v-if="state.reconnectIntent && !canReconnect"
+								class="mx-auto mt-5 max-w-[620px] text-center text-p-sm text-ink-gray-5"
+							>
+								Enter the email and company this account was registered with, and
+								the reconnect option will appear here.
+							</p>
+							<p
 								v-if="canReconnect"
 								class="mx-auto mt-5 max-w-[620px] text-center text-p-sm text-ink-gray-5"
 							>
@@ -1081,12 +1088,16 @@ import {
 	operationStore,
 	OP_PHASE,
 } from "@/lib/llmOperation.js";
-import { forgetReady } from "@/onboarding/readiness.js";
+import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
-import { STATES as PAY_STATES, remainingCooldownSeconds } from "@/onboarding/paymentMachine";
+import {
+	STATES as PAY_STATES,
+	remainingCooldownSeconds,
+	isTerminalForPayment,
+} from "@/onboarding/paymentMachine";
 import { ACTIONS, ACTION_LABELS, TONE, copyFor } from "@/onboarding/paymentCodes";
 import { CHECKOUT_NAV_KEY, shouldHonorCheckoutReturn } from "@/onboarding/checkoutNav";
 import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
@@ -1151,6 +1162,9 @@ const state = reactive({
 	// card's local choices only.
 	reconnectRequestId: "",
 	reconnectFrom: "",
+	// Arrived from the chat banner: the fields are prefilled from the SITE, which
+	// need not be the account, so say what to type when the offer stays hidden.
+	reconnectIntent: false,
 	reconnectEligible: false,
 	reconnectNeedsCompany: false,
 	reconnectCode: "",
@@ -2736,6 +2750,17 @@ onMounted(async () => {
 	// Resume an apply that was in flight when the page was last closed/reloaded: follow
 	// the SAME operation rather than showing an editable form over a running one (P1-05).
 	await maybeResumeConnect();
+	// AFTER the resumes: they set state.step from persisted signup state, and the
+	// customer's explicit intent has to win over that. Never overrides a finished
+	// signup - somebody already paid and provisioned is not reconnecting.
+	const intent = hasReconnectIntent(window.location.search);
+	const landing = landingStep({
+		intent,
+		resumedStep: state.step,
+		terminal: isTerminalForPayment(pay.value.value),
+	});
+	state.reconnectIntent = intent && landing === "details";
+	state.step = landing;
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"
 	// and skip it (the step-entry watch still covers every other path).
