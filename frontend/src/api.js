@@ -115,11 +115,9 @@ const BR = "jarvis.branding.";
 export const getBranding = () => call(BR + "get_branding");
 export const updateBranding = (p) => call(BR + "update_branding", p || {});
 
-// --- Mobile app onboarding: QR the phone scans to learn the site connection
-// details (no secret — just where to reach this site). ---
-export const getPairingQr = () => call("jarvis.mobile.auth.get_pairing_qr");
-// QR of the mobile PWA URL — scanning opens /jarvis-mobile (Android offers to
-// install it, iOS opens it in Safari for Add-to-Home-Screen).
+// --- Mobile onboarding: QR of the mobile PWA URL (no secret — just the public
+// URL). Scanning opens /jarvis-mobile (Android offers to install it, iOS opens
+// it in Safari for Add-to-Home-Screen). ---
 export const getPwaQr = () => call("jarvis.mobile.auth.get_pwa_qr");
 
 // --- Custom skills (customer-authored, pushed to the container) ---

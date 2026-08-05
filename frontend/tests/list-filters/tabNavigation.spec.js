@@ -39,7 +39,6 @@ const { TAB_BAR, INERT } = vi.hoisted(() => ({
 
 vi.mock("@/components/list/TabBar.vue", () => ({ default: TAB_BAR }));
 vi.mock("@/components/LayoutHeader.vue", () => ({ default: { template: "<div><slot/></div>" } }));
-vi.mock("@/pages/triggers/TriggerChatPane.vue", () => ({ default: INERT }));
 vi.mock("@/pages/triggers/TriggersListPane.vue", () => ({ default: INERT }));
 vi.mock("@/pages/triggers/ActivityTab.vue", () => ({ default: INERT }));
 vi.mock("@/pages/dashboards/DashboardCanvas.vue", () => ({ default: INERT }));

@@ -2,8 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 // Real-browser mobile smoke. Boots the vite dev server, mocks the handful of
 // Frappe boot calls in the specs (no bench needed), and checks the chat shell
-// at phone widths. Browsers come from the shared ms-playwright cache; CI must
-// run `npx playwright install chromium` first.
+// at phone widths. Runs against the system Google Chrome (channel "chrome"
+// below), so CI needs Chrome present, e.g. `npx playwright install chrome` — NOT
+// the bundled chromium.
 export default defineConfig({
 	testDir: "./tests/e2e",
 	timeout: 30000,
