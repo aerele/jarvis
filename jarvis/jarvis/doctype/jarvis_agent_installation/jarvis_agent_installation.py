@@ -155,17 +155,17 @@ class JarvisAgentInstallation(Document):
 		with the schedule off a bad value persists happily, and a later flip of
 		``schedule_enabled`` would hand the stored garbage straight to the sweep.
 
-		Scoped to inserts and to saves that actually TOUCH ``schedule_time``. The whole
-		premise of this fix is that out-of-range values are already on rows out there,
-		so validating every save would make those rows permanently un-saveable: both
-		``agents_api.set_enabled`` and ``set_config`` go through ``doc.save()``, and a
-		customer would be unable to disable or reconfigure the agent without first
-		repairing a field they were not editing. Same reasoning ``_guard_installability``
-		gives for leaving an already-non-installable row saveable so it can still be
-		repaired. A legacy bad value therefore keeps its 09:00 fallback until someone
-		writes the field, and any write of a bad value is refused."""
-		if not (self.is_new() or self.has_value_changed("schedule_time")):
-			return
+		Runs on EVERY save, exactly like the macro sibling, and deliberately not scoped
+		to "only when schedule_time changed". Review asked whether that strands a row
+		holding a legacy bad value, since ``set_enabled`` and ``set_config`` both go
+		through ``doc.save()``. It cannot, because such a row cannot be saved at all
+		either way: the only values this check rejects that MariaDB will still STORE are
+		``>= 24:00:00``, and those come back from a TIME column as a
+		``datetime.timedelta`` with a days component, which Frappe writes back as
+		``"4 days, 3:00:00"`` and MariaDB then refuses with error 1292. So there is no
+		value that is simultaneously persistable, rejected here, and able to survive a
+		read/write round trip. Scoping the check would add a branch for a state that
+		cannot exist, and would split this rule from the macro one it shares."""
 		from jarvis.chat.macro_scheduler import validate_schedule_time_or_throw
 
 		validate_schedule_time_or_throw(self.schedule_time)

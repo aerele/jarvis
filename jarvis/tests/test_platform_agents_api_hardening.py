@@ -1257,35 +1257,41 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 	edit, a data import or a direct ``doc.save()`` could persist a value the sweep
 	could not honour. Separately, ``run_due_agent_audits`` guarded only the DISPATCH,
 	so anything the dedupe, the arithmetic or the bookkeeping raised took down every
-	installation behind it — permanently, since the next tick died on the same row."""
+	installation behind it, permanently, since the next tick died on the same row.
+
+	Two agent slugs, not two installs of one agent: #460 added a unique index on
+	(owner, agent), so a second install of the same agent for the same owner is a
+	duplicate-key error rather than a second due row."""
 
 	SLUG = PREFIX + "schedtime"
+	SLUG2 = PREFIX + "schedtime2"
 
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
 		frappe.set_user("Administrator")
 		cls.owner = _mk_user("h-schedtime-owner@example.com")
-		_mk_listing(cls.SLUG)
-		frappe.db.set_value(
-			LISTING, cls.SLUG, {"status": "Published", "nature": "Auditor"}, update_modified=False
-		)
+		for slug in (cls.SLUG, cls.SLUG2):
+			_mk_listing(slug)
+			frappe.db.set_value(
+				LISTING, slug, {"status": "Published", "nature": "Auditor"}, update_modified=False
+			)
 		frappe.db.commit()
 
 	def setUp(self):
 		frappe.set_user("Administrator")
-		_wipe([self.SLUG])
+		_wipe([self.SLUG, self.SLUG2])
 		frappe.db.commit()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		_wipe([self.SLUG])
+		_wipe([self.SLUG, self.SLUG2])
 		frappe.db.commit()
 
-	def _install(self, **overrides) -> str:
+	def _install(self, slug: str | None = None, **overrides) -> str:
 		from frappe.utils import add_days, now_datetime
 
-		name = _mk_gate_install(self.owner, self.SLUG, self.owner)
+		name = _mk_gate_install(self.owner, slug or self.SLUG, self.owner)
 		values = {
 			"schedule_enabled": 1,
 			"schedule_frequency": "daily",
@@ -1309,7 +1315,7 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 					"enabled": 1,
 					"schedule_enabled": 1,
 					"next_run_at": ["<=", now],
-					"agent": ["!=", self.SLUG],
+					"agent": ["not in", [self.SLUG, self.SLUG2]],
 				},
 				fields=["name", "next_run_at"],
 				ignore_permissions=True,
@@ -1375,19 +1381,32 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 			doc.insert(ignore_permissions=True)
 
 	def test_valid_schedule_times_are_accepted(self):
-		for good in ("00:00:00", "09:30:00", "23:59:59"):
-			with self.subTest(good=good):
-				_wipe([self.SLUG])
-				name = self._install(schedule_time=good)
-				self.assertEqual(str(frappe.db.get_value(INSTALLATION, name, "schedule_time")), good)
+		# Compared as SECONDS, not as strings: MariaDB hands a TIME column back as a
+		# datetime.timedelta, and str(timedelta(0)) is '0:00:00', not '00:00:00'. The
+		# stored value is right either way, so a string compare would only be asserting
+		# timedelta's formatting.
+		from jarvis.chat.macro_scheduler import parse_schedule_seconds
 
-	def test_a_legacy_bad_time_does_not_block_an_unrelated_save(self):
-		"""The whole premise of this fix is that bad values are ALREADY on rows, so
-		validating every save would make those rows permanently un-saveable:
-		``set_enabled`` and ``set_config`` both go through ``doc.save()``, and the
-		customer would be unable to disable or reconfigure the agent without first
-		repairing a field they never touched. Only inserts and saves that actually
-		change ``schedule_time`` are litigated."""
+		for good, secs in (("00:00:00", 0), ("09:30:00", 34200), ("23:59:59", 86399)):
+			with self.subTest(good=good):
+				_wipe([self.SLUG, self.SLUG2])
+				name = self._install(schedule_time=good)
+				stored = frappe.db.get_value(INSTALLATION, name, "schedule_time")
+				self.assertEqual(parse_schedule_seconds(stored), secs)
+
+	def test_a_row_holding_a_legacy_bad_time_cannot_be_saved_by_the_DB_either(self):
+		"""Review asked whether validating on EVERY save strands a row that already
+		holds a bad value, since ``set_enabled`` / ``set_config`` go through
+		``doc.save()``. It cannot, and this pins why, so nobody adds a
+		``has_value_changed`` branch for a state that cannot exist.
+
+		The only values the check rejects that MariaDB will still STORE are
+		``>= 24:00:00``. A TIME column hands those back as a ``timedelta`` carrying a
+		days component, Frappe writes that back as ``"4 days, 3:00:00"``, and MariaDB
+		refuses it with error 1292 before any controller runs. So such a row is
+		un-saveable regardless of this validation."""
+		from jarvis.chat.macro_scheduler import parse_schedule_seconds
+
 		name = self._install()
 		frappe.db.sql(
 			"UPDATE `tabJarvis Agent Installation` SET schedule_time='99:00:00' WHERE name=%(n)s",
@@ -1395,15 +1414,14 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 		)
 		frappe.db.commit()
 
-		doc = frappe.get_doc(INSTALLATION, name)
-		doc.enabled = 0
-		doc.flags.ignore_permissions = True
-		doc.save(ignore_permissions=True)  # must NOT raise
-		self.assertEqual(frappe.utils.cint(frappe.db.get_value(INSTALLATION, name, "enabled")), 0)
+		# Read it back: the value is a timedelta with days, not a time of day.
+		stored = frappe.db.get_value(INSTALLATION, name, "schedule_time")
+		self.assertIsNone(parse_schedule_seconds(stored), "99:00:00 must not read back as a time of day")
+		self.assertIn("day", str(stored), "MariaDB returns an out-of-range TIME as a timedelta")
 
-	def test_writing_a_bad_time_onto_an_existing_row_is_still_refused(self):
-		"""The other half of the same scoping: leaving legacy rows saveable must not
-		open a door for a NEW bad value on an existing row."""
+	def test_writing_a_bad_time_onto_an_existing_row_is_refused(self):
+		"""An existing, healthy row must not be able to take a bad value either: the
+		check runs on every save, not only on insert."""
 		name = self._install(schedule_time="09:00:00")
 		doc = frappe.get_doc(INSTALLATION, name)
 		doc.schedule_time = "99:00:00"
@@ -1420,8 +1438,8 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 		handler then raises are all live ways one row can throw."""
 		from frappe.utils import add_days, now_datetime
 
-		boom = self._install()
-		good = self._install()
+		boom = self._install(self.SLUG)
+		good = self._install(self.SLUG2)
 		# Force the exploding row to the FRONT: get_all has no explicit order_by here, so
 		# pin it by making it the older next_run_at, which is the natural due ordering.
 		frappe.db.set_value(
@@ -1445,8 +1463,8 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 		then confirm the sweep still reaches the healthy installation behind it."""
 		from frappe.utils import add_days, now_datetime
 
-		bad = self._install()
-		good = self._install()
+		bad = self._install(self.SLUG)
+		good = self._install(self.SLUG2)
 		frappe.db.sql(
 			"UPDATE `tabJarvis Agent Installation` SET schedule_time='99:00:00', "
 			"next_run_at=%(t)s WHERE name=%(n)s",
