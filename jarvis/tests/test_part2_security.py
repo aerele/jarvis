@@ -1619,6 +1619,55 @@ class TestRoleScopedSkillInvocation(Part2Base):
 		with _as(USER_B):  # Jarvis User only, no Sales User
 			self.assertEqual(invoked_skill_clause(f"/{PFX}-rolepriv go"), "")
 
+	# ── #628: invocation without discovery is only useful if you already know ────
+	def test_role_promoted_skill_is_listed_for_a_role_holder(self):
+		"""#628: ``/slug`` fired (above) but ``list_custom_skills`` never matched on
+		allowed_roles, so the composer dropdown did not show it. The feature therefore
+		only worked for someone who already knew the slug existed, which is the opposite
+		of what promoting a skill to a Role is for."""
+		from jarvis.chat.custom_skills_api import list_custom_skills
+
+		self._promote_to_role(f"{PFX}-rolelist")
+		with _as(self.ROLE_HOLDER):
+			rows = list_custom_skills()
+		match = [r for r in rows if r["skill_name"] == f"{PFX}-rolelist"]
+		self.assertEqual(len(match), 1, "a Role-promoted skill must be discoverable by a role holder")
+		self.assertEqual(match[0]["mine"], 0)
+		self.assertEqual(match[0].get("via_role"), 1, "the composer needs to tell this apart from a share")
+
+	def test_role_promoted_skill_is_not_listed_for_a_non_role_holder(self):
+		"""Discovery must not widen visibility beyond what invocation already allows."""
+		from jarvis.chat.custom_skills_api import list_custom_skills
+
+		self._promote_to_role(f"{PFX}-rolenolist")
+		with _as(USER_B):  # Jarvis User only, no Sales User
+			rows = list_custom_skills()
+		self.assertEqual([r for r in rows if r["skill_name"] == f"{PFX}-rolenolist"], [])
+
+	def test_a_role_skill_the_user_also_owns_is_not_listed_twice(self):
+		"""The role rows are unioned onto own + shared, so an overlap would otherwise
+		render the same skill twice in the dropdown."""
+		from jarvis.chat.custom_skills_api import list_custom_skills
+
+		_mk_skill(self.ROLE_HOLDER, f"{PFX}-roledup", scope="Role", target_role=self.AUD_ROLE)
+		with _as(self.ROLE_HOLDER):
+			rows = list_custom_skills()
+		match = [r for r in rows if r["skill_name"] == f"{PFX}-roledup"]
+		self.assertEqual(len(match), 1, "own + role must not duplicate the row")
+		self.assertEqual(match[0]["mine"], 1, "ownership wins over the role grant")
+
+	def test_a_disabled_role_skill_is_not_listed(self):
+		"""Same enabled gate the invocation path applies, so a draft promotion does not
+		surface in anyone's dropdown."""
+		from jarvis.chat.custom_skills_api import list_custom_skills
+
+		shared = self._promote_to_role(f"{PFX}-roledisabled")
+		frappe.db.set_value(SKILL, shared, "enabled", 0, update_modified=False)
+		frappe.db.commit()
+		with _as(self.ROLE_HOLDER):
+			rows = list_custom_skills()
+		self.assertEqual([r for r in rows if r["skill_name"] == f"{PFX}-roledisabled"], [])
+
 	def test_patch_backfills_allowed_roles_on_a_pre_fix_role_skill(self):
 		# The code fix only helps promotions made AFTER deploy. Rows promoted under the
 		# old code carry target_role with an EMPTY allowed_roles, which is exactly the

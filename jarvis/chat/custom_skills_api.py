@@ -24,6 +24,7 @@ from jarvis.chat.custom_skills import (
 	build_push_payload,
 	project_org_promotion_push,
 	pushable_org_skill_count,
+	role_scoped_skill_rows,
 )
 from jarvis.permissions import require_jarvis_user
 
@@ -143,7 +144,43 @@ def list_custom_skills() -> list[dict]:
 			owner = s.pop("owner")
 			s["shared_by"] = full_names.get(owner) or owner
 			shared.append(s)
-	return own + shared
+
+	# #628: Role-promoted skills. Invocation already accepted these (#477 / #478 via
+	# PR #619) but discovery did not, so `/slug` fired while the composer dropdown
+	# never listed it. The feature therefore only worked for someone who already knew
+	# the slug existed, which is the opposite of what promoting a skill to a Role is
+	# for. Same match the invocation path uses, read from one shared helper so the two
+	# cannot drift apart again.
+	seen = {s["name"] for s in own} | {s["name"] for s in shared}
+	role_rows = [
+		r
+		for r in role_scoped_skill_rows(
+			me,
+			["name", "skill_name", "description", "user_invocable", "enabled", "owner", "modified"],
+		)
+		if r["name"] not in seen
+	]
+	via_role = []
+	if role_rows:
+		role_full_names = {
+			u.name: u.full_name
+			for u in frappe.get_all(
+				"User",
+				filters={"name": ["in", list({r.owner for r in role_rows})]},
+				fields=["name", "full_name"],
+			)
+		}
+		for s in role_rows:
+			s["mine"] = 0
+			# ``via_role`` lets the composer label these differently from a person-to-person
+			# share: nobody shared it with this user, their ROLE grants it, and revoking the
+			# role removes it. The existing ``shared_by`` is still populated so a client that
+			# does not know the flag renders an author rather than a blank.
+			s["via_role"] = 1
+			owner = s.pop("owner")
+			s["shared_by"] = role_full_names.get(owner) or owner
+			via_role.append(s)
+	return own + shared + via_role
 
 
 # --------------------------------------------------------------------------- #
