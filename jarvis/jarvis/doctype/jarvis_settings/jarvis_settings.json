@@ -553,8 +553,7 @@
    "fieldtype": "Data",
    "permlevel": 1,
    "label": "Pay origin",
-   "default": "https://fleet.klerk.in",
-   "description": "Where the browser is sent for the admin-hosted checkout. Defaults to the production host; override per deployment. site_config 'jarvis_pay_origin' still overrides. Operator-set only — the signup/connect flow never writes it (it anchors the origin-digest cross-check); must match the admin's pay origin. In test mode a plain-http origin is fine for local/staging."
+   "description": "Where the browser is sent for the admin-hosted checkout. Leave blank to follow the bench's admin URL (jarvis_admin_url) — checkout is hosted on the control plane; set it only when the checkout host differs. site_config 'jarvis_pay_origin' still overrides. Operator-set only — the signup/connect flow never writes it (it anchors the origin-digest cross-check); must match the admin's pay origin. In test mode a plain-http origin is fine for local/staging."
   },
   {
    "fieldname": "jarvis_admin_api_key",
