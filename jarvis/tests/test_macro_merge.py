@@ -284,6 +284,30 @@ class TestMergeApplyHook(_MacroMergeBase):
 		self.assertEqual(doc.merge_status, "failed", "a fault must not leave the macro pending")
 		self.assertEqual(doc.merged_prompt or "", "")
 		self.assertEqual(doc.merge_conversation or "", "", "the throwaway link must be cleared")
+		self.assertFalse(
+			frappe.db.exists("Jarvis Conversation", conv),
+			"a fault must not orphan the throwaway conversation",
+		)
+
+	def test_a_fault_still_tells_the_open_tab(self):
+		"""Writing the row but skipping the socket publish would fix the database and
+		not the user: an open tab learns the outcome ONLY from ``macro:merged``, so the
+		Run button would sit disabled on "summarizing" until a manual reload, which is
+		the very symptom #632 is about. Both paths run the same terminal step."""
+		from jarvis.chat import macros
+
+		m, conv = self._pending_macro_with_reply(MERGE_BLOCK)
+		with (
+			patch.object(macros, "_merge_outcome", side_effect=ImportError("boom")),
+			patch.object(macros, "publish_to_user") as pub,
+		):
+			macros.advance_after_turn(conv, errored=False)
+
+		self.assertTrue(pub.called, "the SPA must be told the merge finished, even on a fault")
+		payload = pub.call_args[0][1]
+		self.assertEqual(payload["kind"], "macro:merged")
+		self.assertEqual(payload["macro"], m.name)
+		self.assertEqual(payload["status"], "failed")
 
 	def test_a_fault_in_the_merge_path_is_logged_not_silent(self):
 		"""The other half: the fault is re-raised out of _apply_merge_after_turn so the
