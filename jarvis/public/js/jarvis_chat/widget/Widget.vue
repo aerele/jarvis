@@ -3,7 +3,7 @@
 	     page. Tapping it opens the side chat panel in place; on a narrow
 	     viewport (where a 400px panel would be most of the screen) it falls
 	     back to navigating to the chat SPA. -->
-	<div class="jvw-root" :class="{ 'jvw-root--dark': isDark, 'jvw-leaving': leaving }">
+	<div class="jvw-root" :class="{ 'jvw-root--dark': isDark }">
 		<button
 			type="button"
 			ref="fabEl"
@@ -33,11 +33,20 @@
 			</svg>
 		</button>
 
+		<!-- Dimming backdrop for the expand-into-the-big-chat handoff: fades the
+		     Desk behind the panel as it grows to fullscreen, so the motion reads
+		     as going full. Inert otherwise. -->
+		<div
+			class="jvw-backdrop"
+			:class="{ 'jvw-backdrop--show': leaving }"
+			aria-hidden="true"
+		></div>
 		<Panel
 			ref="panelRef"
 			:open="panelOpen"
 			:context="effectiveContext"
 			:layout="panelBox"
+			:leaving="leaving"
 			@close="closePanel"
 			@open-full="openFull"
 			@dismiss-context="contextDismissed = true"
@@ -99,12 +108,24 @@ const viewportTick = ref(0);
 // localStorage synchronously below so the first render already has it, and fed
 // to panelLayout, which floors it at the default and caps it to the viewport.
 const prefSize = ref(null);
-// Set true while the panel fades out just before we hand off to the full web
-// chat (resized-to-fullscreen), so the transition reads as one motion.
+// Set true while the panel expands to fullscreen just before we hand off to the
+// full web chat (resized-to-fullscreen), so the handoff reads as the panel
+// growing INTO the big chat rather than a hard cut.
 const leaving = ref(false);
 const panelBox = computed(() => {
 	viewportTick.value; // re-run on resize / orientation change
 	const topInset = readCssPx(document.documentElement, "--navbar-height", 48);
+	// Handoff to the big chat: aim the panel at the full content area so the root
+	// animates open to fullscreen (Panel's .jvp-root--expanding does the easing).
+	if (leaving.value) {
+		return {
+			left: 0,
+			top: topInset,
+			width: window.innerWidth,
+			height: Math.max(0, window.innerHeight - topInset),
+			side: side.value,
+		};
+	}
 	return panelLayout(
 		{ x: fabXY.value.x, y: fabXY.value.y, size: fabPos.FAB_SIZE },
 		{ vw: window.innerWidth, vh: window.innerHeight, top: topInset },
@@ -123,13 +144,15 @@ function onPanelResizeCommit() {
 	if (!prefSize.value) return;
 	// Resized to (near) the whole screen: the mini panel is the wrong tool at
 	// that size, so hand off to the full web chat instead of persisting a panel
-	// that blankets the Desk. Fade the widget out first so it reads as one smooth
-	// motion into the SPA, and do NOT persist the fullscreen size (the panel
-	// should reopen at its normal size next time).
+	// that blankets the Desk. Expand the panel to fullscreen first (with a
+	// dimming backdrop) so it reads as growing INTO the full chat, and do NOT
+	// persist the fullscreen size (the panel should reopen at its normal size).
 	const box = panelBox.value;
 	if (box && box.width >= window.innerWidth * 0.9 && box.height >= window.innerHeight * 0.85) {
 		leaving.value = true;
-		setTimeout(openFull, 240);
+		// Navigate just after the 0.32s expand finishes, so the panel has visibly
+		// grown into the full chat before the page swaps.
+		setTimeout(openFull, 360);
 		return;
 	}
 	try {
@@ -409,15 +432,26 @@ onBeforeUnmount(() => {
 	--jvw-safe-bottom: env(safe-area-inset-bottom, 0px);
 	font-family: "Inter", system-ui, -apple-system, sans-serif;
 }
-/* Fade the whole widget out as it hands off to the full web chat (resized to
-   fullscreen). Opacity cascades to the panel + FAB (neither is teleported). */
-.jvw-leaving {
+/* Dimming backdrop behind the panel during the expand-into-the-big-chat handoff.
+   Covers the Desk (under the panel, over the page) and fades in as the panel
+   grows to fullscreen, so the motion reads as going full. */
+.jvw-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 1028; /* just under the panel's 1029 */
+	background: rgba(18, 15, 40, 0.34);
 	opacity: 0;
-	transition: opacity 0.24s ease;
 	pointer-events: none;
+	transition: opacity 0.32s ease;
+}
+.jvw-root--dark .jvw-backdrop {
+	background: rgba(0, 0, 0, 0.5);
+}
+.jvw-backdrop--show {
+	opacity: 1;
 }
 @media (prefers-reduced-motion: reduce) {
-	.jvw-leaving {
+	.jvw-backdrop {
 		transition: none;
 	}
 }

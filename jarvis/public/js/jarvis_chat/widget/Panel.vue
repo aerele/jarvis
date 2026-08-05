@@ -7,6 +7,7 @@
 	<div
 		v-show="open"
 		class="jvp-root"
+		:class="{ 'jvp-root--expanding': leaving }"
 		:style="rootStyle"
 		role="dialog"
 		:aria-label="`${brandName} chat`"
@@ -556,6 +557,10 @@ const props = defineProps({
 	// Computed by panel_anchor.panelLayout from wherever the user dragged the
 	// FAB. The panel is a floating mini window, so it has no fixed home.
 	layout: { type: Object, default: null },
+	// True while handing off to the full web chat: the root animates open to
+	// fullscreen (see .jvp-root--expanding) so the transition reads as the panel
+	// growing INTO the big chat rather than a hard cut.
+	leaving: { type: Boolean, default: false },
 });
 const emit = defineEmits(["close", "open-full", "dismiss-context", "resize", "resize-commit"]);
 
@@ -1268,6 +1273,25 @@ defineExpose({ load, startNewChat, convId });
 	z-index: 1029; /* under Frappe modals (1050), over page content */
 	display: flex;
 	pointer-events: none;
+}
+/* Handoff to the full web chat: the window grows to fill the screen, its
+   corners flatten and its shadow deepens, so it reads as the panel opening INTO
+   the big chat. Widget.vue drives the fullscreen size + a dimming backdrop; this
+   just animates the box. Only during the handoff, so live resizing stays snappy. */
+.jvp-root--expanding {
+	transition: left 0.32s cubic-bezier(0.4, 0, 0.2, 1), top 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+		width 0.32s cubic-bezier(0.4, 0, 0.2, 1), height 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.jvp-root--expanding .jvp-panel {
+	transition: border-radius 0.32s ease, box-shadow 0.32s ease;
+	border-radius: 6px;
+	box-shadow: 0 40px 120px -20px rgba(24, 20, 50, 0.5), 0 12px 40px -8px rgba(24, 20, 50, 0.3);
+}
+@media (prefers-reduced-motion: reduce) {
+	.jvp-root--expanding,
+	.jvp-root--expanding .jvp-panel {
+		transition: none;
+	}
 }
 .jvp-panel {
 	pointer-events: auto;
