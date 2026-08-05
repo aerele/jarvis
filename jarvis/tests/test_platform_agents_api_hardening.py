@@ -1324,9 +1324,7 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 			calls.append(inst.name)
 
 		try:
-			with patch.object(
-				agent_scheduler, "_launch_audit", side_effect=launch_side_effect or _default
-			):
+			with patch.object(agent_scheduler, "_launch_audit", side_effect=launch_side_effect or _default):
 				agent_scheduler.run_due_agent_audits()
 		finally:
 			for n, ts in parked.items():
@@ -1381,9 +1379,7 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 			with self.subTest(good=good):
 				_wipe([self.SLUG])
 				name = self._install(schedule_time=good)
-				self.assertEqual(
-					str(frappe.db.get_value(INSTALLATION, name, "schedule_time")), good
-				)
+				self.assertEqual(str(frappe.db.get_value(INSTALLATION, name, "schedule_time")), good)
 
 	# ---- sweep fault isolation (gap 2) ---------------------------------------- #
 
