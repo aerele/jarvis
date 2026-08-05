@@ -2220,11 +2220,25 @@ const recoveryActions = computed(() => {
 	// lives and is not, forty-five minutes later. Listing it per row would encode a
 	// static answer to a question that is only ever true at a moment in time.
 	//
-	// First, so it outranks INITIATE. Reusing the checkout that already exists is
+	// Placed AFTER a CHECK the row asked for, and only otherwise first.
+	//
+	// RESUME must outrank INITIATE: reusing the checkout that already exists is
 	// strictly safer and cheaper than minting another, which on Razorpay leaves the
-	// previous subscription live and unreferenced (admin-v2#248). Before this the
-	// customer's ONLY forward action was the expensive one.
-	if (canResumeCheckout.value && !acts.includes(ACTIONS.RESUME)) acts.unshift(ACTIONS.RESUME);
+	// previous subscription live and unreferenced (admin-v2#248).
+	//
+	// But it must NOT outrank CHECK, and an earlier version of this that unshifted
+	// unconditionally did. PAYMENT_CONFIRMATION_PENDING can carry a live token AND
+	// mean "money may already have moved" - its own body says "If money was
+	// deducted, check the status before starting another payment." Making RESUME
+	// the primary button there walks the customer back to the payment page ahead of
+	// the read that would tell them they have already paid, which is precisely the
+	// double payment status-first exists to prevent. A row that asks for CHECK
+	// first has a reason; RESUME slots in behind it.
+	if (canResumeCheckout.value && !acts.includes(ACTIONS.RESUME)) {
+		const check = acts.indexOf(ACTIONS.CHECK);
+		if (check >= 0) acts.splice(check + 1, 0, ACTIONS.RESUME);
+		else acts.unshift(ACTIONS.RESUME);
+	}
 	if (pay.value.supportOffered && !acts.includes(ACTIONS.SUPPORT)) acts.push(ACTIONS.SUPPORT);
 	return acts;
 });

@@ -173,3 +173,20 @@ test("a bench that cannot sign in is offered the reconnect that fixes it", () =>
 	assert.equal(entry.actions[0], ACTIONS.RECONNECT, "reconnect is the primary action");
 	assert.ok(entry.actions.includes(ACTIONS.SUPPORT));
 });
+
+// The ordering contract RESUME must respect, asserted on the table rather than on a
+// mounted view so it cannot rot. The view inserts RESUME after CHECK when a row asks
+// for CHECK, and first otherwise; these are the rows that pin why.
+test("rows that warn about money already moving ask for CHECK first", () => {
+	// If RESUME were ever promoted above CHECK on this row, the customer would be
+	// steered back to the payment page ahead of the read that tells them they have
+	// already paid. That is the double payment status-first exists to prevent, and
+	// the row's own body says so out loud.
+	const pending = copyFor(CODES.PAYMENT_CONFIRMATION_PENDING);
+	assert.equal(pending.actions[0], ACTIONS.CHECK);
+	assert.match(pending.body, /check the status before starting another payment/i);
+
+	// The declined row carries the same warning and the same ordering.
+	const declined = copyFor(CODES.PAYMENT_DECLINED);
+	assert.equal(declined.actions[0], ACTIONS.CHECK);
+});
