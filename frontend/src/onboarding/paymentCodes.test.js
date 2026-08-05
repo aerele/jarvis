@@ -128,3 +128,12 @@ test("an unheard-of code falls back to the honest unknown row", () => {
 	assert.equal(entry, UNKNOWN_COPY);
 	assert.ok(entry.actions.includes(ACTIONS.CHECK));
 });
+
+test("a bench that cannot sign in is offered the reconnect that fixes it", () => {
+	// Reconnecting the account on another site rotates the key THIS one holds, so
+	// the remedy is a reconnect - and it is a guest call, reachable without the
+	// credentials that just stopped working. Support stays as the fallback.
+	const entry = copyFor(CODES.BENCH_ADMIN_AUTH_FAILED);
+	assert.equal(entry.actions[0], ACTIONS.RECONNECT, "reconnect is the primary action");
+	assert.ok(entry.actions.includes(ACTIONS.SUPPORT));
+});

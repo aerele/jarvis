@@ -3569,7 +3569,12 @@ import {
 } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner } from "@/account/format.js";
-import { billingNoticeOf, replacedNoticeOf, replacedBanner } from "@/onboarding/readiness.js";
+import {
+	billingNoticeOf,
+	replacedNoticeOf,
+	replacedBanner,
+	RECONNECT_INTENT_URL,
+} from "@/onboarding/readiness.js";
 import { useShellStore } from "@/stores/shell";
 import { useJarvisTheme } from "@/theme";
 import { displayName } from "@/lib/user";
@@ -3669,8 +3674,10 @@ const replacedNotice = ref({});
 const replacedAlert = computed(() => replacedBanner(replacedNotice.value));
 function goReconnect() {
 	// The wizard owns the reconnect flow; land on it rather than duplicating the
-	// code-entry screen here.
-	window.location.assign("/jarvis/onboarding");
+	// code-entry screen here. The flag matters: without it the wizard resumes down
+	// its own path, and a site whose key was rotated away fails to sign in and
+	// lands on a support-only card instead of the reconnect it was sent for.
+	window.location.assign(RECONNECT_INTENT_URL);
 }
 const billingDismissedPhase = ref("");
 // Renewing is gated on require_jarvis_admin(), which accepts Jarvis Admin OR

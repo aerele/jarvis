@@ -105,6 +105,19 @@ export async function replacedNoticeOf() {
 	return r.replaced_notice || { replaced: true };
 }
 
+// Where that banner's action sends the customer, and how the wizard recognises it.
+// One constant for both ends: without the flag the wizard resumes its own path,
+// and a site whose key was rotated away dead-ends at "could not sign in".
+export const RECONNECT_INTENT_URL = "/jarvis/onboarding?reconnect=1";
+
+export function hasReconnectIntent(search) {
+	try {
+		return new URLSearchParams(search || "").get("reconnect") === "1";
+	} catch {
+		return false;
+	}
+}
+
 // Copy for that banner. `moved_to` is the site now holding the account - both
 // belong to the same account holder, so naming it is what makes this actionable.
 export function replacedBanner(notice) {
