@@ -96,20 +96,21 @@
 						</svg>
 					</button>
 					<button
-						class="jvp-ib"
+						class="jvp-fullchat"
 						type="button"
-						aria-label="Open full chat"
+						aria-label="Open in full chat"
 						@click="$emit('open-full')"
 					>
+						<span>Full chat</span>
 						<svg
 							viewBox="0 0 24 24"
 							fill="none"
 							stroke="currentColor"
-							stroke-width="1.6"
+							stroke-width="1.7"
 							stroke-linecap="round"
 							stroke-linejoin="round"
 						>
-							<path d="M15 3h6v6M21 3l-7 7M10 21H4v-6M4 21l7-7" />
+							<path d="M7 17 17 7M8 7h9v9" />
 						</svg>
 					</button>
 					<button
@@ -542,6 +543,7 @@ import {
 	sendMessage,
 	stopRun,
 	confirmTool,
+	listPendingConfirmations,
 	uploadFile,
 	transcribeAudio,
 	getChatUiSettings,
@@ -803,6 +805,23 @@ async function load() {
 		}
 		const conv = await getConversation(convId.value);
 		messages.value = Array.isArray(conv?.messages) ? conv.messages : [];
+		// Resync open write confirmations. Without this a card raised while the
+		// panel was closed (or a dropped realtime frame) never shows here, even
+		// though the full chat has it. Best-effort: chat must work without it.
+		try {
+			const pc = await listPendingConfirmations(convId.value);
+			const rows = (pc && pc.data && pc.data.pending) || [];
+			stream.value = {
+				...stream.value,
+				pending: rows.map((r) => ({
+					token: r.token,
+					tool: r.tool || "",
+					summary: r.summary || r.preview || "",
+				})),
+			};
+		} catch (e) {
+			/* leave whatever the live stream captured */
+		}
 		pinnedToBottom.value = true;
 		await scrollToBottom();
 	} catch (e) {
@@ -1450,6 +1469,38 @@ defineExpose({ load, startNewChat, convId });
 .jvp-ib svg {
 	width: 16px;
 	height: 16px;
+}
+/* Highlighted "go to the full web chat" affordance. Replaces the old bare
+   maximize icon, which people did not notice: a labelled accent pill that fills
+   on hover, so the way out to the big chat reads at a glance. */
+.jvp-fullchat {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 29px;
+	padding: 0 10px;
+	border: 1px solid var(--jv-accent);
+	border-radius: 8px;
+	background: transparent;
+	color: var(--jv-accent);
+	font: inherit;
+	font-size: 12.5px;
+	font-weight: 600;
+	white-space: nowrap;
+	cursor: pointer;
+	transition: background-color 0.12s ease, color 0.12s ease;
+}
+.jvp-fullchat svg {
+	width: 14px;
+	height: 14px;
+}
+.jvp-fullchat:hover {
+	background: var(--jv-accent);
+	color: #fff;
+}
+.jvp-fullchat:focus-visible {
+	outline: 2px solid var(--jv-accent);
+	outline-offset: 2px;
 }
 .jvp-ib--sm {
 	width: 24px;
