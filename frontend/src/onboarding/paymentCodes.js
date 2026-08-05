@@ -428,3 +428,33 @@ export const ACTION_LABELS = {
 	[ACTIONS.SUPPORT]: "Contact support",
 	[ACTIONS.RESTART]: "Start again",
 };
+
+/**
+ * What to tell the customer about how long their checkout link lasts (#669).
+ *
+ * The link dies about 45 minutes after it is minted, and until now that was
+ * disclosed ONLY by the failure message after it had already aged out. Stepping
+ * away to fetch a card is a normal thing to do mid-payment, so the limit belongs
+ * on screen while the link still works.
+ *
+ * Takes SECONDS REMAINING (admin sends a duration, not a deadline, so a customer
+ * whose clock is wrong is still told the truth) and returns "" when there is
+ * nothing honest to say: no live token, or a value that is missing, unparseable
+ * or not positive.
+ *
+ * Rounds DOWN, deliberately. Some seconds always pass between admin computing
+ * this and the customer reading it, so rounding up would be the one direction
+ * that can promise time the link does not have.
+ */
+export function payLinkDeadlineNote(expiresInS) {
+	const secs = Number(expiresInS);
+	if (!Number.isFinite(secs) || secs <= 0) return "";
+	const mins = Math.floor(secs / 60);
+	// Under a minute there is no honest number to give: by the time it is read it
+	// may already be gone, so say that instead of counting down to zero.
+	if (mins < 1) {
+		return "This payment link is about to expire. If it stops working, start the payment again to get a fresh one.";
+	}
+	const unit = mins === 1 ? "minute" : "minutes";
+	return `This payment link works for about ${mins} more ${unit}. If it expires, start the payment again to get a fresh one.`;
+}

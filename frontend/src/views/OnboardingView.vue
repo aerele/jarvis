@@ -1043,6 +1043,18 @@
 											Nothing to pay again.
 										</p>
 									</div>
+									<!-- #669: how long this link lasts, said while it STILL works.
+									     Directly above the pay button because that is where the
+									     customer is looking before they step away to fetch a card,
+									     and stepping away is the whole scenario: the 45 minute limit
+									     used to be disclosed only by the failure message, after the
+									     link had already died. -->
+									<p
+										v-if="payLinkDeadline"
+										class="mx-auto mt-3 max-w-[560px] text-center text-p-sm text-ink-gray-5"
+									>
+										{{ payLinkDeadline }}
+									</p>
 								</div>
 								<div class="ob-foot">
 									<button
@@ -1323,6 +1335,7 @@ import {
 	TONE,
 	actionLabelFor,
 	copyFor,
+	payLinkDeadlineNote,
 } from "@/onboarding/paymentCodes";
 import { CHECKOUT_NAV_KEY, shouldHonorCheckoutReturn } from "@/onboarding/checkoutNav";
 import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
@@ -1628,6 +1641,12 @@ const payCta = computed(() => {
 // paid plan and an autopay trial need one (the trial authorizes a mandate), so
 // the CTA is disabled until then and the unavailable/retry note stands in for it.
 const payProviderReady = computed(() => !!state.paymentProvider);
+// #669: how long the checkout link is good for. Reads the machine's own
+// payTokenExpiresInS, which is cleared with the token it belongs to, so this
+// renders nothing the moment the link stops being openable rather than leaving a
+// reassuring countdown over a dead link. Empty string when there is no honest
+// number to give, and the v-if means no empty paragraph is left behind.
+const payLinkDeadline = computed(() => payLinkDeadlineNote(pay.value.payTokenExpiresInS));
 
 // Review-card labels (preview .rev): "Pro · Monthly" plan row and a plain
 // amount in the emphasized total row.

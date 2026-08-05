@@ -702,3 +702,48 @@ test("'last checked' is read from data, never invented", () => {
 	);
 	assert.equal(s.lastCheckedAt, "2026-08-03 01:02:03");
 });
+
+// ---------------------------------------------------------------------------
+// #669: the pay link's remaining life travels WITH its token
+// ---------------------------------------------------------------------------
+test("a token answer carries how long that token is good for", () => {
+	const s = reduce(initialState(), token({ pay_token_expires_in_s: 2700 }));
+	assert.equal(s.payTokenExpiresInS, 2700);
+});
+
+test("a fresh page claims no deadline", () => {
+	assert.equal(initialState().payTokenExpiresInS, null);
+});
+
+test("the countdown is gated on the token, exactly like the origin is", () => {
+	// An answer with a duration but NO token must not leave a deadline behind: it
+	// would paint a live-looking countdown over a link that cannot be opened.
+	const s = reduce(
+		initialState(),
+		at(CODES.PAYMENT_CONFIRMATION_PENDING, { pay_token_expires_in_s: 2700 })
+	);
+	assert.equal(s.payPageToken, "");
+	assert.equal(s.payTokenExpiresInS, null);
+});
+
+test("only a positive finite duration is kept", () => {
+	// Admin omits the key rather than sending 0 for a dead token, so a 0 or a
+	// negative here is a bug or an older sender. Either way "expires in 0 minutes"
+	// must never appear over a link that still works.
+	for (const bad of [0, -30, "soon", null]) {
+		const s = reduce(initialState(), token({ pay_token_expires_in_s: bad }));
+		assert.equal(s.payPageToken, "tok_1", "the token itself is still honoured");
+		assert.equal(s.payTokenExpiresInS, null, `expected null for ${String(bad)}`);
+	}
+});
+
+test("a later answer without a token clears the earlier countdown", () => {
+	// The regression this pins: a customer sits on the pay step, a later answer
+	// drops the token, and a stale "43 more minutes" keeps reassuring them while
+	// nothing behind it works any more.
+	const live = reduce(initialState(), token({ pay_token_expires_in_s: 2580 }));
+	assert.equal(live.payTokenExpiresInS, 2580);
+	const after = reduce(live, at(CODES.PAYMENT_CONFIRMATION_PENDING, {}));
+	assert.equal(after.payPageToken, "");
+	assert.equal(after.payTokenExpiresInS, null);
+});

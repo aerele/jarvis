@@ -157,6 +157,11 @@ export function initialState() {
 		payPageToken: "",
 		payOrigin: "",
 		payOriginAttested: false,
+		// #669: seconds of life left on payPageToken as of the answer that set it.
+		// A DURATION, never a deadline timestamp - the customer's clock is not the
+		// admin host's, and a wall-clock deadline rendered against a skewed clock
+		// would tell some customers they had an hour left on an already dead link.
+		payTokenExpiresInS: null,
 		summary: null,
 		lastCheckedAt: null,
 		verificationExpiresAt: null,
@@ -498,10 +503,11 @@ function applyContract(state, decoded, opts) {
 			message: decoded.message || state.message,
 			code,
 			// A parked-money refusal is not a navigate answer: drop any stale token so
-			// nothing can navigate off it.
+			// nothing can navigate off it, and its countdown with it (#669).
 			payPageToken: "",
 			payOrigin: "",
 			payOriginAttested: false,
+			payTokenExpiresInS: null,
 		};
 		next.canCheck = recomputeCanCheck(next, null);
 		return next;
@@ -554,10 +560,12 @@ function applyContract(state, decoded, opts) {
 			transportError: true,
 			busy: null,
 			code,
-			// A transport failure carries no token: never leave a stale one navigable.
+			// A transport failure carries no token: never leave a stale one navigable,
+			// nor a countdown implying the link it belonged to is still alive (#669).
 			payPageToken: "",
 			payOrigin: "",
 			payOriginAttested: false,
+			payTokenExpiresInS: null,
 		});
 	}
 
@@ -584,6 +592,17 @@ function applyContract(state, decoded, opts) {
 	const payPageToken = data.pay_page_token || "";
 	const payOrigin = payPageToken ? data.pay_origin || "" : "";
 	const payOriginAttested = payPageToken ? !!data.pay_origin_attested : false;
+	// #669: gated on the token for the SAME fail-closed reason as the two lines
+	// above. A countdown that outlived its token would paint a live-looking
+	// deadline over a dead link, which is worse than showing no deadline at all.
+	// Only a finite POSITIVE number counts: admin omits the key rather than
+	// sending 0 for an expired token, and a 0 or negative here would render as
+	// "expires in 0 minutes" on a link that still works.
+	const rawExpiresIn = Number(data.pay_token_expires_in_s);
+	const payTokenExpiresInS =
+		payPageToken && Number.isFinite(rawExpiresIn) && rawExpiresIn > 0
+			? Math.floor(rawExpiresIn)
+			: null;
 
 	const next = {
 		...state,
@@ -603,6 +622,7 @@ function applyContract(state, decoded, opts) {
 		payPageToken,
 		payOrigin,
 		payOriginAttested,
+		payTokenExpiresInS,
 		lastCheckedAt: data.payment_last_checked_at || state.lastCheckedAt,
 		verificationExpiresAt: data.verification_expires_at || state.verificationExpiresAt,
 		awaitingReconciliation: !!data.awaiting_manual_reconciliation,
