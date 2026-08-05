@@ -46,6 +46,18 @@ JOB_ID_FULL = "wiki-mirror-sync-full"
 QUEUE = "short"
 JOB_TIMEOUT_S = 120
 
+# #622: one mirror sync at a time per bench. The two JOB_IDs above deliberately let an
+# incremental and a FULL sync be QUEUED at once; this serialises their EXECUTION, which
+# is the part that matters. ``_sync`` derives ``known_paths`` from a snapshot taken at
+# its top but the prune only executes on the LAST push, so a file an incremental writes
+# in between is missing from that list and gets pruned even though it is current.
+_LOCK_NAME = "jarvis_wiki_mirror"
+# Longer than the RQ deadline, so a crashed holder's key always expires on its own.
+_LOCK_TTL_S = JOB_TIMEOUT_S + 30
+# Willing to WAIT rather than skip: dropping the work is what strands a change, since
+# there is no periodic sweep to pick it up later (see ``sync``).
+_LOCK_WAIT_S = 15.0
+
 # fleet-agent hard-caps request bodies at 256KB; keep each push call's b64
 # file payload comfortably under it.
 MAX_CALL_PAYLOAD_BYTES = 200 * 1024
@@ -288,9 +300,36 @@ def sync(full: bool = False) -> dict:
 	sha256 diff; ``full`` bypasses the diff so a wiped container rebuilds),
 	delete archived pages' files, always re-send index.md + log.md, and on
 	``full`` send ``known_paths`` so the fleet prunes strays (trashed pages,
-	type/dir moves). Returns a summary dict; NEVER raises into callers."""
+	type/dir moves). Returns a summary dict; NEVER raises into callers.
+
+	#622: serialised per bench. ``_sync`` reads the page table once at its top and
+	derives ``known_paths`` from that snapshot, but the prune only runs on the final
+	push, after every render, hash and earlier batch. A page an incremental sync wrote
+	inside that window is absent from the list and gets pruned even though it is
+	current, which surfaces as a wiki file silently vanishing from the container with
+	no error anywhere.
+
+	A contended call RE-QUEUES rather than skipping. Skipping looks safe because a FULL
+	sync pushes every file anyway, but an incremental skipped while another INCREMENTAL
+	holds the lock has its page change stranded: the holder's snapshot may predate that
+	change and there is no periodic sweep to pick it up (see ``enqueue_sync``). The
+	re-queue cannot pile up because ``enqueue_sync`` dedupes on the two job ids."""
+	from jarvis._redis_lock import redis_lock
+
 	try:
-		result = _sync(full=bool(full))
+		with redis_lock(_LOCK_NAME, timeout_s=_LOCK_TTL_S, blocking_timeout_s=_LOCK_WAIT_S) as acquired:
+			if not acquired:
+				enqueue_sync(full=bool(full))
+				# "skipped" keeps _stamp_sync_status from overwriting the Wiki tab's
+				# "last synced" line with a failure that did not happen.
+				result = {
+					"ok": False,
+					"skipped": True,
+					"requeued": True,
+					"reason": "another sync in flight; re-queued",
+				}
+			else:
+				result = _sync(full=bool(full))
 	except Exception:
 		frappe.log_error(title="wiki mirror: sync crashed", message=frappe.get_traceback())
 		result = {"ok": False, "reason": "sync crashed; see Error Log"}

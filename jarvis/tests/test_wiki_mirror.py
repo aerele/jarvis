@@ -548,6 +548,77 @@ class TestSync(WikiMirrorTestCase):
 # --------------------------------------------------------------------------- #
 # triggers
 # --------------------------------------------------------------------------- #
+class TestSyncSerialisation(WikiMirrorTestCase):
+	"""#622: ``_sync`` derives ``known_paths`` from a snapshot taken at its top, but the
+	prune only executes on the final push, after every render, hash and earlier batch. A
+	page an incremental sync wrote inside that window is absent from the list and is
+	pruned even though it is current, which shows up as a wiki file silently vanishing
+	from the container with no error anywhere.
+
+	The two JOB_IDs deliberately let an incremental and a FULL sync be QUEUED at once, so
+	nothing serialised their EXECUTION before this."""
+
+	@contextlib.contextmanager
+	def _lock_denied(self, *a, **k):
+		"""Stand-in for redis_lock that never grants (another sync is in flight)."""
+		yield False
+
+	def test_a_contended_sync_does_not_run(self):
+		self._page("acme")
+		with (
+			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+			mock.patch.object(wiki_mirror, "_sync") as inner,
+			mock.patch.object(wiki_mirror, "enqueue_sync"),
+		):
+			out = wiki_mirror.sync()
+		self.assertFalse(inner.called, "a second sync must not walk the pages concurrently")
+		self.assertFalse(out["ok"])
+		self.assertTrue(out.get("requeued"))
+
+	def test_a_contended_sync_requeues_instead_of_dropping(self):
+		"""Skipping looks safe because a FULL sync pushes everything anyway, but an
+		incremental skipped while another INCREMENTAL holds the lock has its page change
+		stranded: the holder's snapshot may predate it and there is no periodic sweep."""
+		with (
+			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+			mock.patch.object(wiki_mirror, "_sync"),
+			mock.patch.object(wiki_mirror, "enqueue_sync") as enq,
+		):
+			wiki_mirror.sync()
+		self.assertTrue(enq.called, "contended work must be re-queued, never dropped")
+
+	def test_a_contended_full_sync_requeues_as_full(self):
+		"""A prune request must not be downgraded to an incremental: only a FULL sync
+		sends known_paths, so a downgrade would silently lose the prune."""
+		with (
+			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+			mock.patch.object(wiki_mirror, "_sync"),
+			mock.patch.object(wiki_mirror, "enqueue_sync") as enq,
+		):
+			wiki_mirror.sync(full=True)
+		self.assertTrue(enq.call_args.kwargs.get("full"), "the FULL flag must survive the re-queue")
+
+	def test_a_contended_sync_does_not_overwrite_the_last_synced_line(self):
+		"""``skipped`` keeps _stamp_sync_status quiet, so the Wiki tab does not report a
+		failure that did not happen."""
+		with (
+			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+			mock.patch.object(wiki_mirror, "_sync"),
+			mock.patch.object(wiki_mirror, "enqueue_sync"),
+			mock.patch.object(wiki_mirror, "_stamp_sync_status", wraps=wiki_mirror._stamp_sync_status),
+		):
+			out = wiki_mirror.sync()
+		self.assertTrue(out.get("skipped"), "the skipped flag is what silences the status stamp")
+
+	def test_an_uncontended_sync_still_syncs(self):
+		"""Control: the lock must not change the ordinary path."""
+		doc = self._page("acme")
+		with self._mock_push() as push:
+			out = wiki_mirror.sync()
+		self.assertTrue(out["ok"])
+		self.assertIn(f"customers/{doc.name}.md", self._pushed_paths(push))
+
+
 class TestTriggers(WikiMirrorTestCase):
 	def test_doc_event_triggers_only_for_org_scope(self):
 		with mock.patch.object(wiki_mirror, "enqueue_sync") as enq:
