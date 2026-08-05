@@ -471,3 +471,27 @@ def set_sidebar_order(order: str) -> dict:
 	doc = usage.get_or_create_user_settings(frappe.session.user)
 	doc.db_set("sidebar_order", json.dumps(clean), update_modified=False)
 	return {"ok": True, "data": {"sidebar_order": clean}}
+
+
+@frappe.whitelist()
+def get_prompt_suggestions() -> dict:
+	"""New-chat prompt suggestions for the calling user, synthesised from their own
+	recent chat titles (see ``jarvis.chat.suggestions``).
+
+	Returns the CACHE and, if it is stale and the user has chatted since it was
+	written, queues a background refresh. It never generates inline: the empty chat
+	screen must paint instantly, and a suggestion strip is not worth a model call in
+	the request path. A user with no history yet simply gets an empty list, which
+	the SPA renders as no strip at all.
+	"""
+	require_jarvis_access()
+	user = frappe.session.user
+	from jarvis.chat import suggestions
+
+	try:
+		suggestions.enqueue_refresh(user)
+	except Exception:
+		# Decoration must never break the page - a queue hiccup just means the
+		# cache stays as it is until the next visit.
+		frappe.logger("jarvis.chat.suggestions").debug("refresh enqueue failed", exc_info=True)
+	return {"ok": True, "data": {"suggestions": suggestions.read(user)}}

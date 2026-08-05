@@ -97,6 +97,10 @@ export const recordHomeIntroEvent = (event, payload) =>
 // Persist the sidebar nav order (drag-to-reorder). order = {top:[labels], more:[labels]}.
 export const setSidebarOrder = (order) =>
 	call(US + "set_sidebar_order", { order: JSON.stringify(order || {}) });
+// New-chat prompt suggestions, synthesised from the caller's own recent chat
+// titles. Returns the server-side CACHE (and quietly queues a refresh when it is
+// stale) — never generates inline, so this is a cheap read. {ok, data:{suggestions:[]}}.
+export const getPromptSuggestions = () => call(US + "get_prompt_suggestions");
 // Jarvis Admin (or System Manager) only — server re-checks independently of
 // the client's window.is_jarvis_admin gate.
 export const adminListUserUsage = () => call(US + "admin_list_user_usage");

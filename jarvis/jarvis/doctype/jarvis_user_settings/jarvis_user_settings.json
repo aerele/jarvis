@@ -18,6 +18,8 @@
     "business_greeting_chat_count",
     "business_greeting_hidden_at_count",
     "sidebar_order",
+    "prompt_suggestions",
+    "prompt_suggestions_at",
     "home_intro_seen_version",
     "home_intro_seen_at",
     "usage_limits_tab",
@@ -108,6 +110,22 @@
       "label": "Sidebar Order",
       "no_copy": 1,
       "description": "Per-user sidebar nav order as JSON {\"top\":[labels],\"more\":[labels]}. UI state only; the client reconciles against its defaults."
+    },
+    {
+      "fieldname": "prompt_suggestions",
+      "fieldtype": "Small Text",
+      "label": "Prompt Suggestions",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Cached new-chat prompt suggestions, a JSON array of strings synthesised from this user's own recent chat TITLES by jarvis.chat.suggestions. Server-owned cache, refreshed at most every few days and only when the user has chatted since. Safe to clear - it regenerates."
+    },
+    {
+      "fieldname": "prompt_suggestions_at",
+      "fieldtype": "Datetime",
+      "label": "Prompt Suggestions At",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "When prompt_suggestions was last synthesised; drives the refresh gate."
     },
     {
       "fieldname": "home_intro_seen_version",

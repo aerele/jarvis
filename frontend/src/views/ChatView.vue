@@ -405,9 +405,6 @@
 				</div>
 			</div>
 
-			<!-- Lift the empty-state greeting + composer into the upper third: the bottom
-			     spacer grows more than the top (Claude-style new chat), so it is not dead-centre. -->
-			<div v-if="showWelcome" style="flex: 1"></div>
 			<!-- initial load: a quiet spinner so the welcome screen doesn't flash
 			     before the open conversation finishes loading on refresh -->
 			<div
@@ -452,17 +449,86 @@
 							display: flex;
 							align-items: center;
 							justify-content: center;
-							gap: 14px;
-							font-size: 32px;
+							gap: 16px;
+							font-size: 40px;
 							font-weight: 640;
 							letter-spacing: -0.03em;
 							margin: 0;
 							overflow-wrap: anywhere;
 						"
 					>
-						<JarvisMark :size="34" :radius="10" style="flex: none" />
+						<JarvisMark :size="38" :radius="11" style="flex: none" />
 						<span>{{ greeting }}, {{ firstName }}</span>
 					</h1>
+					<!-- Starter cards, same shape as the original static ones (tinted icon
+					     tile + label over the prompt) — only the CONTENT is now synthesised
+					     from this user's own recent chat titles. They FILL the composer,
+					     never send: the do-not-regress rule the old cards had. -->
+					<div
+						v-if="!showHomeIntro && promptSuggestions.length"
+						class="jv-welcome-grid"
+						style="
+							display: grid;
+							grid-template-columns: 1fr 1fr;
+							gap: 11px;
+							text-align: left;
+							margin-top: 22px;
+						"
+					>
+						<button
+							v-for="(s, i) in promptSuggestions"
+							:key="s.prompt"
+							type="button"
+							class="jv-suggest"
+							@click="fillInput(s.prompt)"
+							style="
+								display: flex;
+								gap: 11px;
+								padding: 14px;
+								background: var(--surface);
+								border: 1px solid var(--border);
+								border-radius: 10px;
+								cursor: pointer;
+								transition: border-color 0.12s, background 0.12s;
+								text-align: left;
+								font-family: inherit;
+								color: inherit;
+								width: 100%;
+							"
+						>
+							<div
+								:style="{
+									width: '30px',
+									height: '30px',
+									flex: 'none',
+									borderRadius: '8px',
+									background: starterTint(i).bg,
+									color: starterTint(i).fg,
+									display: 'flex',
+									alignItems: 'center',
+									justifyContent: 'center',
+								}"
+								v-html="starterTint(i).icon"
+							></div>
+							<div style="min-width: 0">
+								<div
+									v-if="s.title"
+									style="font-size: 13.5px; font-weight: 550; margin-bottom: 2px"
+								>
+									{{ s.title }}
+								</div>
+								<div
+									style="
+										font-size: 12.5px;
+										color: var(--text-3);
+										line-height: 1.4;
+									"
+								>
+									{{ s.prompt }}
+								</div>
+							</div>
+						</button>
+					</div>
 				</div>
 			</div>
 
@@ -1853,24 +1919,12 @@
 			<!-- ===== COMPOSER ===== -->
 			<div
 				class="jv-composer-wrap"
-				:style="
-					showWelcome
-						? {
-								borderTop: 'none',
-								alignSelf: 'center',
-								width: '100%',
-								maxWidth: '720px',
-								paddingLeft: '16px',
-								paddingRight: '16px',
-								background: 'transparent',
-						  }
-						: { borderTop: 'none' }
-				"
 				style="
 					position: relative;
 					flex: none;
 					padding: 12px 40px 16px;
 					background: var(--surface);
+					border-top: none;
 				"
 			>
 				<!-- Billing lifecycle: before expiry, during grace, and after.
@@ -2790,7 +2844,6 @@
 					</Composer>
 				</div>
 			</div>
-			<div v-if="showWelcome" style="flex: 2"></div>
 		</main>
 
 		<!-- ============ PROACTIVE MESSAGE TOAST (Jarvis started a chat) ============ -->
@@ -3560,6 +3613,7 @@ import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.v
 import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
+import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
 import {
 	checkReady,
@@ -4371,14 +4425,63 @@ const jarvisTools = ref([
 // Shared with the shell via @/lib/user (see the cookie double-decode note there).
 const fullName = displayName(session.user);
 const firstName = computed(() => fullName.split(/\s+/)[0]);
-const greeting = computed(() => {
-	const h = new Date().getHours();
-	if (h < 5) return "Night";
-	if (h < 12) return "Morning";
-	if (h < 17) return "Afternoon";
-	if (h < 21) return "Evening";
-	return "Night";
+// The empty-chat greeting. `now` is captured ONCE per mount, not read per render:
+// the phrase must not change under the user while they sit on the screen (and a
+// session left open past midnight keeping its line is the calmer behaviour).
+// lastChatAt is the newest EXISTING conversation's activity — list_conversations
+// only returns conversations that already have a message, so the empty one being
+// started right now cannot mask a real gap. See lib/greeting.js for the rules.
+const _greetingNow = Date.now();
+const lastChatAt = computed(() => {
+	let newest = null;
+	for (const c of store.conversations || []) {
+		const t = c && c.last_active_at;
+		if (t && (!newest || t > newest)) newest = t;
+	}
+	return newest;
 });
+const greeting = computed(() => pickGreeting({ now: _greetingNow, lastChatAt: lastChatAt.value }));
+
+// ---- empty-state history: resume card + synthesised prompt suggestions ----
+
+// Server-cached, model-synthesised starters (jarvis.chat.suggestions). Fetched
+// once per mount and best-effort: an empty list simply renders no strip, which is
+// the correct look for a workspace with no history yet.
+const promptSuggestions = ref([]);
+// The starter cards' icon tiles. The old cards had a fixed category per card;
+// these are synthesised, so the tint cycles by POSITION instead — same visual
+// rhythm, no pretence of knowing the category. Deterministic, so a card keeps
+// its colour across re-renders.
+const _STARTER_TINTS = [
+	{
+		bg: "var(--cta-bg)",
+		fg: "var(--cta)",
+		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 9l-5 5-3-3-4 4"/></svg>',
+	},
+	{
+		bg: "var(--green-bg)",
+		fg: "var(--green)",
+		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>',
+	},
+	{
+		bg: "var(--amber-bg)",
+		fg: "var(--amber)",
+		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
+	},
+	{
+		bg: "rgba(139,92,246,.12)",
+		fg: "#8b5cf6",
+		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+	},
+];
+const starterTint = (i) => _STARTER_TINTS[i % _STARTER_TINTS.length];
+api.getPromptSuggestions()
+	.then((r) => {
+		const list = (r && r.data && r.data.suggestions) || [];
+		if (Array.isArray(list))
+			promptSuggestions.value = list.filter((s) => s && typeof s.prompt === "string");
+	})
+	.catch(() => {});
 // Empty override = "Auto": the backend falls back to Jarvis Settings.llm_model.
 const modelLabel = computed(() => modelOverride.value || "Auto");
 const availableModels = computed(
@@ -6369,13 +6472,33 @@ async function ensureCanvas(m) {
 			/* leave it in the loading state; a reload retries */
 		}
 	}
-	nextTick(scrollBottom);
+	nextTick(scrollBottomIfPinned);
 }
 function scrollBottom(smooth = false) {
 	const el = threadEl.value;
 	if (!el) return;
 	if (smooth && "scrollTo" in el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
 	else el.scrollTop = el.scrollHeight;
+}
+// Content-driven scroll: only follow the newest text while the reader is already
+// parked at the bottom. Streaming a long reply used to call scrollBottom() on
+// every chunk, which dragged the view down mid-sentence and made a big answer
+// unreadable until the turn ended. When the reader HAS scrolled up we leave the
+// viewport alone and let onThreadScroll reveal the jump-to-latest arrow instead.
+// Only user-initiated moments (opening a chat, sending a message) scroll
+// unconditionally.
+function scrollBottomIfPinned() {
+	if (pinnedToBottom.value) {
+		scrollBottom();
+		// While following, we are at the newest text by definition — clear any arrow
+		// a mid-growth scroll event flipped on, or it lingers pointing nowhere.
+		showScrollDown.value = false;
+		return;
+	}
+	// Same rule as the ResizeObserver: streamed text arriving must never RE-PIN a
+	// reader who scrolled up. Only their own scroll does that. Just keep the
+	// jump-to-latest arrow's visibility honest as the thread grows.
+	else showScrollDown.value = distanceFromBottom() > 140;
 }
 // Distance in px from the very bottom of the thread. 0 == pinned to newest.
 function distanceFromBottom() {
@@ -6386,6 +6509,9 @@ function distanceFromBottom() {
 // Runs on every user scroll: decide whether we're "at the bottom" (keep pinning
 // as new content arrives) and whether to reveal the jump-to-latest arrow.
 function onThreadScroll() {
+	// A deliberate scroll always wins over a position being held across a
+	// re-render: stop re-applying it the moment the reader moves themselves.
+	_restoreTop = null;
 	const d = distanceFromBottom();
 	pinnedToBottom.value = d <= 80;
 	showScrollDown.value = d > 140;
@@ -6410,8 +6536,27 @@ watch(threadInnerEl, (el) => {
 	}
 	if (el && typeof ResizeObserver !== "undefined") {
 		threadRO = new ResizeObserver(() => {
-			if (pinnedToBottom.value) scrollBottom();
-			else onThreadScroll();
+			// Re-apply a held position until the thread's real height has arrived, so
+			// a re-render cannot strand the reader at the top by clamping.
+			if (_restoreTop !== null && threadEl.value) {
+				if (performance.now() > _restoreUntil) _restoreTop = null;
+				else if (Math.abs(threadEl.value.scrollTop - _restoreTop) > 2) {
+					threadEl.value.scrollTop = _restoreTop;
+					showScrollDown.value = distanceFromBottom() > 140;
+					return;
+				}
+			}
+			if (pinnedToBottom.value) {
+				scrollBottom();
+				showScrollDown.value = false;
+				return;
+			}
+			// Growing content must never RE-PIN: only a real user scroll may do
+			// that (onThreadScroll, on the @scroll listener). Calling it here let a
+			// mid-render measurement — scrollHeight momentarily short — read as "at
+			// the bottom" and silently re-attach a reader who had scrolled up.
+			// Update only the arrow's visibility from geometry.
+			else showScrollDown.value = distanceFromBottom() > 140;
 		});
 		threadRO.observe(el);
 	}
@@ -6496,7 +6641,24 @@ function onKey(e) {
 	}
 }
 
+// The conversation the thread is currently showing. loadConversation re-runs
+// IN PLACE on the same conversation (after a turn settles, after applying or
+// discarding a card), and those re-runs must not fling a reader who has scrolled
+// up back down to the newest message. Comparing against this tells a genuine
+// chat switch apart from an in-place resync.
+let _shownConvId = null;
+// A scroll position being held across a re-render, and the deadline after which
+// we stop re-applying it. Set by loadConversation, honoured by the thread's
+// ResizeObserver, cancelled by any deliberate scroll.
+let _restoreTop = null;
+let _restoreUntil = 0;
+
 async function loadConversation(id) {
+	// Preserve the reader's position across an in-place resync. Captured BEFORE
+	// the message array is swapped, restored after the re-render.
+	const _sameConv = _shownConvId === id;
+	const _keepScrollTop =
+		_sameConv && !pinnedToBottom.value && threadEl.value ? threadEl.value.scrollTop : null;
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
 	// different conversation (matches how modelOverride/auto-apply reload here).
 	groundNextTurn.value = false;
@@ -6615,12 +6777,37 @@ async function loadConversation(id) {
 	// to the current run/message, so navigating away from a STILL-streaming chat never
 	// clears its live state.
 	if (!_resumed) tearDownActivityIfSettled();
-	// A freshly opened/refreshed chat should land on the newest message and stay
-	// pinned there while late content settles; the ResizeObserver takes over.
-	pinnedToBottom.value = true;
-	showScrollDown.value = false;
+	// A freshly opened chat should land on the newest message and stay pinned
+	// there while late content settles; the ResizeObserver takes over. But an
+	// in-place resync of the chat already on screen must NOT do that: reloading
+	// after a turn settles (or after a card is applied/discarded) used to fling a
+	// reader who had scrolled up back to the bottom, which is exactly what makes a
+	// long reply unreadable. Restore where they were and let the arrow stand.
+	_shownConvId = id;
 	await nextTick();
-	scrollBottom();
+	if (_keepScrollTop !== null && threadEl.value) {
+		// Hold the position while the thread finishes laying out. The message array
+		// was just replaced, so on this tick the content is still short and a single
+		// assignment CLAMPS against a small scrollHeight — which is what threw the
+		// reader up to the top of the conversation. The ResizeObserver re-applies
+		// this target as the real height arrives, and any deliberate scroll cancels
+		// it (see onThreadScroll).
+		_restoreTop = _keepScrollTop;
+		_restoreUntil = performance.now() + 1500;
+		threadEl.value.scrollTop = _keepScrollTop;
+		// Deliberately NOT onThreadScroll() here: the thread is still re-rendering,
+		// so scrollHeight is briefly too small and the derived distance reads as
+		// "at the bottom", which flipped pinnedToBottom back to true — and the next
+		// growth then flung the reader to the newest text. Their intent is already
+		// known (they scrolled up), so state it instead of re-deriving it.
+		pinnedToBottom.value = false;
+		showScrollDown.value = true;
+	} else {
+		// A genuinely fresh open: land on the newest message.
+		pinnedToBottom.value = true;
+		showScrollDown.value = false;
+		scrollBottom();
+	}
 	processMermaid();
 }
 
@@ -6737,7 +6924,7 @@ async function _renderMermaid() {
 			else el.setAttribute("data-try", String(t));
 		}
 	}
-	nextTick(scrollBottom);
+	nextTick(scrollBottomIfPinned);
 }
 // Drop a hover "download PNG" button onto a rendered chart. The chart is raw
 // (markdown-rendered) HTML, not a Vue node, so we wire the button imperatively.
@@ -7098,7 +7285,17 @@ async function send(textArg, resendAck) {
 	};
 	messages.value = [...messages.value, _optBubble];
 	await nextTick();
+	// Two things, in this order, and both matter:
+	//   1. land on the new turn, so you see your question and the answer start
+	//      without reaching for the jump-to-latest arrow;
+	//   2. then STOP following, so the answer grows downward from there instead of
+	//      sliding its own opening up past the top of the viewport as it is
+	//      written. Staying pinned is what made a long reply unreadable.
+	// The arrow appears once the text runs past the bottom; only a scroll back to
+	// the bottom (or that arrow) resumes following.
 	scrollBottom();
+	pinnedToBottom.value = false;
+	showScrollDown.value = false;
 	try {
 		// The conversation we're sending FROM. The user may switch to another chat
 		// while this POST is in flight, so all post-send reconciliation gates on
@@ -7452,7 +7649,7 @@ function onEvent(p) {
 			}
 			m.content = p.text;
 			m.streaming = true;
-			nextTick(scrollBottom);
+			nextTick(scrollBottomIfPinned);
 			break;
 		}
 		case "tool:start": {
@@ -7465,7 +7662,7 @@ function onEvent(p) {
 			];
 			waiting.value = false;
 			statusPhase.value = null;
-			nextTick(scrollBottom);
+			nextTick(scrollBottomIfPinned);
 			break;
 		}
 		case "tool:end": {
@@ -9653,23 +9850,33 @@ onUnmounted(() => {
    Named classes because inline styles cannot be overridden and the responsive tests
    need a stable target. */
 .jv-welcome-scroll {
-	/* Hug the greeting (flex-grow 0) so the composer sits right under it instead
-	   of a tall centred region opening a big gap; still shrink + scroll if the
-	   first-run home intro is taller than the space between the spacers. */
-	flex: 0 1 auto;
+	/* Fill the thread area so the composer keeps its normal place at the BOTTOM
+	   (it is the next flex child); the greeting then centres in the space above
+	   via .jv-welcome-col's margin-block:auto. justify-content stays flex-start so
+	   a tall first-run intro scrolls from its top instead of being clipped. */
+	flex: 1;
 	min-height: 0;
 	overflow-y: auto;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: flex-start;
-	padding: 32px 32px 16px;
+	padding: 32px;
 }
 .jv-welcome-col {
 	width: 100%;
 	max-width: 680px;
 	text-align: center;
 	margin-block: auto;
+}
+/* Starter cards (the original card treatment, now carrying synthesised copy). */
+.jv-suggest:hover {
+	border-color: var(--border-2);
+	background: var(--surface-1);
+}
+.jv-suggest:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
 }
 /* mobile layout (UX #12): the chat had fixed 40px desktop paddings + a 2-col
    welcome grid; inline styles win over class rules, so these override with
@@ -9690,7 +9897,14 @@ onUnmounted(() => {
 		padding: 24px 16px;
 	}
 	.jv-welcome-h1 {
-		font-size: 24px !important;
+		/* Scaled with the desktop bump (32 -> 40), kept a step smaller so a long
+		   "Long time no see, <name>" still fits a phone without wrapping oddly. */
+		font-size: 28px !important;
+	}
+	/* Starter cards stack: two 14px-padded cards side by side are unreadable at
+	   phone width. Inline styles set the grid, so this has to win with !important. */
+	.jv-welcome-grid {
+		grid-template-columns: 1fr !important;
 	}
 }
 /* Phone mode (< 768px, matches the shell store `mobile` flag that swaps the

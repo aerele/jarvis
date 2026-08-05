@@ -201,12 +201,22 @@ describe("ChatView wiring (source tripwires, not behaviour)", () => {
 		expect(src).toContain('v-if="bizGreeting.show && !showHomeIntro"');
 	});
 
-	it("renders the minimal new-chat greeting and no suggestion cards", () => {
-		// Claude-style empty state: the brand mark inline with the greeting, and NO
-		// suggestion grid. A regression that re-adds the cards trips here.
+	it("renders the minimal greeting over SYNTHESISED starter cards", () => {
+		// The empty state is the brand mark inline with the greeting, then starter
+		// cards whose copy comes from the user's own history — never the old
+		// hard-coded four. A regression that reintroduces a static list trips here.
 		expect(src).toContain("<span>{{ greeting }}, {{ firstName }}</span>");
-		expect(src).not.toContain('class="jv-welcome-grid"');
-		expect(src).not.toContain("onWelcomeSuggestion");
+		expect(src).toContain('class="jv-welcome-grid"');
+		expect(src).toContain('v-for="(s, i) in promptSuggestions"');
+		expect(src).not.toContain("const suggestions = [");
+	});
+
+	it("a starter card fills the composer and never sends", () => {
+		// The do-not-regress rule the original cards carried: clicking a suggestion
+		// puts it in the box for the user to edit, it does not fire a turn.
+		expect(src).toContain('@click="fillInput(s.prompt)"');
+		const card = src.slice(src.indexOf('v-for="(s, i) in promptSuggestions"'));
+		expect(card.slice(0, card.indexOf("</button>"))).not.toContain("sendMessage");
 	});
 
 	it("moves the welcome viewport off inline styles onto overflow-safe classes", () => {
