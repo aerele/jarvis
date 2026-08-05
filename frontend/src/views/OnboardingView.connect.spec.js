@@ -51,7 +51,15 @@ const routerReplace = vi.hoisted(() => vi.fn());
 vi.mock("vue-router", () => ({ useRouter: () => ({ replace: routerReplace }) }));
 
 const forgetReadySpy = vi.hoisted(() => vi.fn());
-vi.mock("@/onboarding/readiness.js", () => ({ forgetReady: forgetReadySpy }));
+// These specs assert the CONNECT step, so there is never a reconnect intent here:
+// the landing helpers are stubbed to "no intent, keep the resumed step". Mocked
+// explicitly rather than via importOriginal so the real module's graph (api.js ->
+// frappe-ui) stays out of this file.
+vi.mock("@/onboarding/readiness.js", () => ({
+	forgetReady: forgetReadySpy,
+	hasReconnectIntent: () => false,
+	landingStep: ({ resumedStep }) => resumedStep,
+}));
 
 vi.mock("@/theme", () => ({
 	useJarvisTheme: () => ({ effectiveDark: false, paletteVars: {} }),
