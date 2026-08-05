@@ -46,6 +46,29 @@ JOB_ID_FULL = "wiki-mirror-sync-full"
 QUEUE = "short"
 JOB_TIMEOUT_S = 120
 
+# #622: one mirror sync at a time per bench. The two JOB_IDs above deliberately let an
+# incremental and a FULL sync be QUEUED at once; this serialises their EXECUTION, which
+# is the part that matters. ``_sync`` derives ``known_paths`` from a snapshot taken at
+# its top but the prune only executes on the LAST push, so a file an incremental writes
+# in between is missing from that list and gets pruned even though it is current.
+_LOCK_NAME = "jarvis_wiki_mirror"
+# Longer than the RQ deadline, so a crashed holder's key always expires on its own.
+_LOCK_TTL_S = JOB_TIMEOUT_S + 30
+# WAITING is the primary resolution, not a fallback. A job that waits and then acquires
+# re-reads the page table itself, so its own change is in the snapshot and nothing is
+# lost. Sized to leave headroom inside JOB_TIMEOUT_S for the sync that follows, so
+# contention almost always resolves here rather than on the re-queue path below.
+_LOCK_WAIT_S = 75.0
+# Re-queue ids, DISTINCT from JOB_ID / JOB_ID_FULL on purpose. frappe.enqueue's
+# deduplicate=True declines a job whose id is already QUEUED or STARTED
+# (background_jobs.py: "Not queueing job ... because it is in queue already"), and a
+# contended worker is itself STARTED under its own id - so re-queueing under that id is
+# silently declined and the work is dropped, which is the failure this whole change
+# exists to prevent. A separate id is a different dedup slot, so the retry is really
+# queued while still being deduped against other retries.
+JOB_ID_RETRY = "wiki-mirror-sync-retry"
+JOB_ID_FULL_RETRY = "wiki-mirror-sync-full-retry"
+
 # fleet-agent hard-caps request bodies at 256KB; keep each push call's b64
 # file payload comfortably under it.
 MAX_CALL_PAYLOAD_BYTES = 200 * 1024
@@ -288,14 +311,60 @@ def sync(full: bool = False) -> dict:
 	sha256 diff; ``full`` bypasses the diff so a wiped container rebuilds),
 	delete archived pages' files, always re-send index.md + log.md, and on
 	``full`` send ``known_paths`` so the fleet prunes strays (trashed pages,
-	type/dir moves). Returns a summary dict; NEVER raises into callers."""
+	type/dir moves). Returns a summary dict; NEVER raises into callers.
+
+	#622: serialised per bench. ``_sync`` reads the page table once at its top and
+	derives ``known_paths`` from that snapshot, but the prune only runs on the final
+	push, after every render, hash and earlier batch. A page an incremental sync wrote
+	inside that window is absent from the list and gets pruned even though it is
+	current, which surfaces as a wiki file silently vanishing from the container with
+	no error anywhere.
+
+	Contention is resolved by WAITING, which is the important part: a job that waits and
+	then acquires re-reads the page table itself, so its own change is in the snapshot
+	and nothing is lost. Only a wait that times out falls back to a re-queue, and that
+	re-queue uses a DISTINCT job id (see ``JOB_ID_RETRY``) because Frappe declines a
+	dedup-enqueue under an id that is already STARTED, which a contended worker's own id
+	always is. Dropping the work is not an option: there is no periodic sweep to pick a
+	stranded change up later (see ``enqueue_sync``).
+
+	A real Redis fault is re-queued too, not just logged. ``redis_lock`` propagates those
+	rather than yielding False, and treating one as a plain crash would strand the page
+	edit that triggered the job for exactly the same reason."""
+	from jarvis._redis_lock import redis_lock
+
 	try:
-		result = _sync(full=bool(full))
+		with redis_lock(_LOCK_NAME, timeout_s=_LOCK_TTL_S, blocking_timeout_s=_LOCK_WAIT_S) as acquired:
+			if acquired:
+				result = _sync(full=bool(full))
+			else:
+				result = _requeue_contended(full=bool(full), why="another sync still in flight")
 	except Exception:
 		frappe.log_error(title="wiki mirror: sync crashed", message=frappe.get_traceback())
-		result = {"ok": False, "reason": "sync crashed; see Error Log"}
+		# A fault reaching here may be the lock itself (redis_lock propagates real Redis
+		# errors by design), in which case _sync never ran and the change is unpushed.
+		# Re-queue rather than let it strand; the retry id makes this safe to repeat.
+		result = _requeue_contended(full=bool(full), why="sync crashed; see Error Log")
 	_stamp_sync_status(result)
 	return result
+
+
+def _requeue_contended(full: bool, why: str) -> dict:
+	"""Re-queue a sync that could not run, under the RETRY job id.
+
+	Returns the result dict the caller reports. ``requeued`` reflects what actually
+	happened rather than what was attempted: ``enqueue_sync`` swallows enqueue failures
+	(Redis down), and a result that claims a re-queue which never occurred is worse than
+	one that admits it, because nothing else will come back for this change."""
+	queued = enqueue_sync(full=full, retry=True)
+	# "skipped" keeps _stamp_sync_status from overwriting the Wiki tab's "last synced"
+	# line with a failure that did not happen, but only when the retry is really pending.
+	return {
+		"ok": False,
+		"skipped": bool(queued),
+		"requeued": bool(queued),
+		"reason": f"{why}; {'re-queued' if queued else 'RE-QUEUE FAILED, change may be unpushed'}",
+	}
 
 
 def _stamp_sync_status(result: dict) -> None:
@@ -433,11 +502,14 @@ def _chunk_files(files: list[dict]) -> list[list[dict]]:
 # --------------------------------------------------------------------------- #
 # triggers
 # --------------------------------------------------------------------------- #
-def enqueue_sync(full: bool = False, after_commit: bool = False) -> None:
+def enqueue_sync(full: bool = False, after_commit: bool = False, retry: bool = False) -> bool:
 	"""Queue the deduped mirror sync (short queue, 120s deadline). Suppressed
 	under tests unless ``frappe.flags.jarvis_test_wiki_mirror_enqueue`` is set
 	— fixture inserts must not spray RQ jobs. Enqueue failures (Redis down)
 	are swallowed: this runs inside user save paths via doc_events.
+
+	Returns whether a job was really queued, so a caller that depends on the retry
+	actually existing can say so honestly instead of assuming.
 
 	``after_commit`` is what the doc_events trigger needs and what the manual
 	endpoint must not use. The worker opens its own DB connection, so a job
@@ -445,21 +517,34 @@ def enqueue_sync(full: bool = False, after_commit: bool = False) -> None:
 	and report success — and with no periodic sweep, a prune lost that way is
 	lost for good. Deferring to the save's commit closes that window. The
 	manual "Sync now" endpoint writes nothing, so its request may never commit
-	and deferring there would drop the job entirely."""
+	and deferring there would drop the job entirely.
+
+	``retry=True`` uses the RETRY job ids. A contended worker re-queueing itself must
+	NOT reuse its own id: ``frappe.enqueue`` with ``deduplicate=True`` declines a job
+	whose id is already QUEUED or STARTED (background_jobs.py:119-125), and the caller
+	is itself STARTED under that id, so the enqueue is silently skipped and the work is
+	dropped. A separate id is a separate dedup slot, so the retry is really queued while
+	still being deduped against other retries."""
 	if frappe.flags.in_test and not frappe.flags.jarvis_test_wiki_mirror_enqueue:
-		return
+		return False
+	if retry:
+		job_id = JOB_ID_FULL_RETRY if full else JOB_ID_RETRY
+	else:
+		job_id = JOB_ID_FULL if full else JOB_ID
 	try:
 		frappe.enqueue(
 			JOB_METHOD,
 			queue=QUEUE,
 			timeout=JOB_TIMEOUT_S,
-			job_id=JOB_ID_FULL if full else JOB_ID,
+			job_id=job_id,
 			deduplicate=True,
 			enqueue_after_commit=bool(after_commit),
 			full=bool(full),
 		)
+		return True
 	except Exception:
 		frappe.log_error(title="wiki mirror: enqueue failed", message=frappe.get_traceback())
+		return False
 
 
 def on_wiki_page_change(doc, method: str | None = None) -> None:
