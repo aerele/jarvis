@@ -79,7 +79,6 @@
 			<Dialogs />
 			<SettingsDialog />
 			<JarvisCommandPalette />
-			<MoreMenu />
 			<NotifyToaster />
 			<ConfirmDialog />
 		</div>
@@ -103,7 +102,6 @@ import NotifyToaster from "@/notify/NotifyToaster.vue";
 import { needsOnboarding } from "@/onboarding/readiness.js";
 import Sidebar from "./Sidebar.vue";
 import JarvisCommandPalette from "./JarvisCommandPalette.vue";
-import MoreMenu from "./MoreMenu.vue";
 import SettingsDialog from "./SettingsDialog.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import OnboardingGate from "./OnboardingGate.vue";

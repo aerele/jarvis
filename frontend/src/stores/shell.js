@@ -31,7 +31,6 @@ const settingsOpen = ref(false); // the shell SettingsDialog binds to this
 const settingsSection = ref("general"); // active pane key in the settings dialog
 const pendingNewChat = ref(false); // consumed + cleared by ChatView
 const paletteOpen = ref(false);
-const moreMenuOpen = ref(false); // the sidebar "More" destinations palette (MoreMenu.vue)
 
 // Chat-scoped context published by ChatView WHILE MOUNTED (null otherwise), so
 // the shell-level settings panes can read the current conversation's live stats
@@ -456,7 +455,6 @@ const store = reactive({
 	preferredPersona,
 	pendingNewChat,
 	paletteOpen,
-	moreMenuOpen,
 	sidebarPref,
 	sidebarCollapsed,
 	sidebarWidth,
