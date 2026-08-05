@@ -604,11 +604,87 @@ class TestSyncSerialisation(WikiMirrorTestCase):
 		with (
 			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
 			mock.patch.object(wiki_mirror, "_sync"),
-			mock.patch.object(wiki_mirror, "enqueue_sync"),
+			mock.patch.object(wiki_mirror, "enqueue_sync", return_value=True),
 			mock.patch.object(wiki_mirror, "_stamp_sync_status", wraps=wiki_mirror._stamp_sync_status),
 		):
 			out = wiki_mirror.sync()
 		self.assertTrue(out.get("skipped"), "the skipped flag is what silences the status stamp")
+
+	# ---- the retry must use a DIFFERENT job id, or it is silently declined -------- #
+
+	@contextlib.contextmanager
+	def _real_enqueue(self):
+		"""Patch frappe.enqueue itself, NOT enqueue_sync, so the job_id is exercised."""
+		frappe.flags.jarvis_test_wiki_mirror_enqueue = True
+		try:
+			with mock.patch.object(frappe, "enqueue") as enq:
+				yield enq
+		finally:
+			frappe.flags.jarvis_test_wiki_mirror_enqueue = False
+
+	def test_the_retry_does_not_reuse_the_running_jobs_id(self):
+		"""THE bug the first cut of this fix shipped with. ``frappe.enqueue`` with
+		``deduplicate=True`` declines a job whose id is already QUEUED or STARTED
+		(background_jobs.py: "Not queueing job ... because it is in queue already"), and a
+		contended worker is itself STARTED under its own id. Re-queueing under that id was
+		therefore silently skipped and the work dropped, while the result still claimed
+		``requeued: True``.
+
+		Patched at ``frappe.enqueue`` on purpose: mocking ``enqueue_sync``, as the earlier
+		tests here do, cannot see the job id at all, which is exactly why this shipped
+		green."""
+		with (
+			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+			mock.patch.object(wiki_mirror, "_sync"),
+			self._real_enqueue() as enq,
+		):
+			wiki_mirror.sync()
+		job_id = enq.call_args.kwargs["job_id"]
+		self.assertEqual(job_id, wiki_mirror.JOB_ID_RETRY)
+		self.assertNotEqual(job_id, wiki_mirror.JOB_ID, "the retry must not collide with the running job")
+
+	def test_the_full_retry_uses_the_full_retry_id(self):
+		with (
+			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+			mock.patch.object(wiki_mirror, "_sync"),
+			self._real_enqueue() as enq,
+		):
+			wiki_mirror.sync(full=True)
+		self.assertEqual(enq.call_args.kwargs["job_id"], wiki_mirror.JOB_ID_FULL_RETRY)
+		self.assertTrue(enq.call_args.kwargs["full"], "a prune request must not downgrade")
+
+	def test_a_redis_fault_is_requeued_not_just_logged(self):
+		"""``redis_lock`` propagates real Redis errors rather than yielding False, so a
+		cache blip used to land in the generic handler and be reported as "sync crashed"
+		with no re-queue, stranding the page edit for the same reason as #622 itself."""
+
+		@contextlib.contextmanager
+		def _lock_explodes(*a, **k):
+			raise RuntimeError("redis gone")
+			yield  # pragma: no cover
+
+		with (
+			mock.patch("jarvis._redis_lock.redis_lock", _lock_explodes),
+			mock.patch.object(wiki_mirror, "_sync"),
+			mock.patch.object(wiki_mirror, "enqueue_sync", return_value=True) as enq,
+		):
+			out = wiki_mirror.sync()
+		self.assertTrue(enq.called, "a lock fault must still re-queue the work")
+		self.assertTrue(out.get("requeued"))
+
+	def test_a_failed_requeue_is_reported_honestly(self):
+		"""``enqueue_sync`` swallows enqueue failures (Redis down). Claiming a re-queue
+		that never happened is worse than admitting it: nothing else comes back for this
+		change."""
+		with (
+			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+			mock.patch.object(wiki_mirror, "_sync"),
+			mock.patch.object(wiki_mirror, "enqueue_sync", return_value=False),
+		):
+			out = wiki_mirror.sync()
+		self.assertFalse(out.get("requeued"))
+		self.assertFalse(out.get("skipped"), "a lost change must reach the status line")
+		self.assertIn("RE-QUEUE FAILED", out["reason"])
 
 	def test_an_uncontended_sync_still_syncs(self):
 		"""Control: the lock must not change the ordinary path."""
