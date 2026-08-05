@@ -11,6 +11,7 @@ import {
 	notReadyNote,
 	GENERIC_NOT_READY_NOTE,
 	syncStatusNote,
+	planDueToday,
 	planSubtitleFor,
 } from "./steps.js";
 
@@ -120,4 +121,62 @@ test("isOnboardComplete reads readiness", () => {
 	assert.equal(isOnboardComplete({ ready: false, reason: "llm_credentials" }), false);
 	assert.equal(isOnboardComplete(null), false);
 	assert.equal(isOnboardComplete(undefined), false);
+});
+
+// --------------------------------------------------------------------------- //
+// #671 - what is due TODAY, shown on the Plan card and the Review row
+// --------------------------------------------------------------------------- //
+test("planDueToday: a trial plan leads with zero due now, then the recurring price", () => {
+	assert.equal(
+		planDueToday({
+			plan_name: "Standard",
+			price_inr: 3500,
+			billing_cycle: "Monthly",
+			trial_days: 7,
+		}),
+		"₹0 today · then ₹3,500/mo after 7 days"
+	);
+});
+
+test("planDueToday: a signup fee is what is due now, not zero", () => {
+	// admin's get_plans comment: pricing from price_inr alone understates the charge,
+	// "most visibly on a trial plan, where the fee is the entire amount due now". The
+	// Review row this replaces hardcoded a flat zero for every trial.
+	assert.equal(
+		planDueToday({
+			plan_name: "Standard",
+			price_inr: 3500,
+			billing_cycle: "Monthly",
+			trial_days: 7,
+			signup_fee_inr: 499,
+		}),
+		"₹499 today · then ₹3,500/mo after 7 days"
+	);
+});
+
+test("planDueToday: a plan with no trial just shows its price", () => {
+	// planAmount deliberately omits the cycle suffix: the card already renders the big
+	// price with its own "/mo" directly above this line, and the Review row did the
+	// same before this change. Repeating it would read as a second, different price.
+	assert.equal(
+		planDueToday({ plan_name: "Pro", price_inr: 3500, billing_cycle: "Monthly" }),
+		"₹3,500"
+	);
+});
+
+test("planDueToday: a no-trial plan with a fee shows the combined amount", () => {
+	assert.equal(
+		planDueToday({
+			plan_name: "Pro",
+			price_inr: 3500,
+			billing_cycle: "Monthly",
+			signup_fee_inr: 500,
+		}),
+		"₹4,000 today"
+	);
+});
+
+test("planDueToday: nothing to say without a plan", () => {
+	assert.equal(planDueToday(null), "");
+	assert.equal(planDueToday({}), "");
 });

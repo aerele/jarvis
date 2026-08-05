@@ -160,6 +160,16 @@
 										<div class="text-xs text-ink-gray-5">
 											{{ planCycleLabel(p) }}
 										</div>
+										<!-- #671: what is due TODAY, on the card. The customer
+										     used to meet this only on Review, a screen after
+										     choosing, so nothing told them the trial starts at
+										     zero while they were deciding. -->
+										<div
+											v-if="planDueToday(p)"
+											class="mt-2 text-p-sm font-medium text-ink-gray-8"
+										>
+											{{ planDueToday(p) }}
+										</div>
 										<ul class="mt-3.5 grid gap-2">
 											<li
 												v-for="(f, k) in planFeatures(p)"
@@ -170,12 +180,6 @@
 													name="check"
 													class="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-green-3"
 												/>{{ f }}
-											</li>
-											<li
-												v-if="!planFeatures(p).length"
-												class="text-p-sm text-ink-gray-5"
-											>
-												{{ p.billing_cycle }} plan
 											</li>
 										</ul>
 									</div>
@@ -1238,7 +1242,13 @@ import Banner from "@/components/Banner.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
 import cashfreeLogo from "@/assets/cashfree.png";
-import { STEPS_MANAGED, nextStep, prevStep, planSubtitleFor } from "@/onboarding/steps";
+import {
+	STEPS_MANAGED,
+	nextStep,
+	prevStep,
+	planDueToday,
+	planSubtitleFor,
+} from "@/onboarding/steps";
 import { inr, planAmount, planSuffix } from "@/account/format";
 import {
 	isReadyForChat,
@@ -1590,13 +1600,9 @@ const planRowLabel = computed(() => {
 	if (!p.plan_name) return "";
 	return p.billing_cycle ? `${p.plan_name} · ${p.billing_cycle}` : p.plan_name;
 });
-const dueTodayLabel = computed(() => {
-	if (isTrialPlan.value)
-		return `₹0 · then ${inr(selectedPlan.value.price_inr)}${
-			planSuffix(selectedPlan.value.price_inr, selectedPlan.value.billing_cycle) || ""
-		} after ${trialDays.value} days`;
-	return planAmount(selectedPlan.value.price_inr);
-});
+// #671: planDueToday lives in onboarding/steps.js so the Plan cards and this Review
+// row read ONE definition, and so it is unit-testable under node --test.
+const dueTodayLabel = computed(() => planDueToday(selectedPlan.value));
 
 function goNext() {
 	state.step = nextStep(steps.value, state.step);
@@ -1698,6 +1704,17 @@ async function loadPlans() {
 	state.plansLoading = true;
 	try {
 		state.plans = (await listPlans()) || [];
+		// #671: a single-choice question must not need a click to answer it. With
+		// exactly one plan on offer the card started unselected and Continue was
+		// disabled until you clicked the only thing on screen, which is a dead click.
+		//
+		// Only ever fills an EMPTY selection, so a customer who came Back to this step
+		// keeps whatever they picked, and a real multi-plan catalog is untouched: with
+		// two or more plans the choice is genuine and preselecting one would be us
+		// answering it for them.
+		if (state.plans.length === 1 && !state.planName) {
+			state.planName = state.plans[0].name;
+		}
 	} finally {
 		state.plansLoading = false;
 	}

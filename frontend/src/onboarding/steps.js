@@ -11,6 +11,37 @@
 // plan, so the two are free to swap.
 export const STEPS_MANAGED = ["intro", "details", "plan", "pay", "connect"];
 
+// RELATIVE, not "@/account/format": this file's tests run under `node --test`
+// (package.json test:node), which resolves no bundler alias. format.js is plain ESM
+// with zero imports of its own, so pulling it in here keeps this module cheap to test.
+import { inr, planAmount, planSuffix } from "../account/format.js";
+
+/**
+ * What the customer pays TODAY for one plan, as a sentence (#671).
+ *
+ * ONE definition, used by the Plan cards and the Review row. The customer used to
+ * learn this only on Review, a screen after choosing, so nothing told them the trial
+ * starts at zero while they were still deciding. Two independent renderings of "what
+ * you pay now" is also how the two screens come to disagree.
+ *
+ * ``signup_fee_inr`` is included. admin's own get_plans comment says pricing from
+ * ``price_inr`` alone understates the charge, "most visibly on a trial plan, where the
+ * fee is the entire amount due now", and the Review row this replaces hardcoded a flat
+ * zero for every trial, which is exactly that understatement. The fee is 0 on the
+ * current catalog, so this changes nothing today and stops being wrong the moment a
+ * plan carries one.
+ */
+export function planDueToday(p) {
+	if (!p || !p.plan_name) return "";
+	const fee = Number(p.signup_fee_inr) || 0;
+	const days = Number(p.trial_days) || 0;
+	const suffix = planSuffix(p.price_inr, p.billing_cycle) || "";
+	if (days > 0) {
+		return `${inr(fee)} today · then ${inr(p.price_inr)}${suffix} after ${days} days`;
+	}
+	return fee > 0 ? `${inr(Number(p.price_inr) + fee)} today` : planAmount(p.price_inr);
+}
+
 export function stepIndex(steps, cur) {
 	const i = steps.indexOf(cur);
 	return i < 0 ? 0 : i;
