@@ -3061,6 +3061,26 @@ async function disconnect() {
 		text: "Disconnected. Your keys and connected accounts have been deleted.",
 		detail: "",
 	});
+	// Assert the disconnected state LOCALLY instead of trusting the reseed below to
+	// observe it. load() rebuilds rows from a fresh getLlmConfig(); when that call
+	// throws, its catch sets err and leaves rows UNTOUCHED, so the model that was just
+	// deleted stayed on screen underneath a "Disconnected" banner - and rendered as
+	// "Pending re-check", because a snapshot that was never reconciled reads as dirty.
+	// The server half is already final by this line (see the note above), so stating it
+	// here is not optimism, and it makes the stale row impossible on every path rather
+	// than only on the one where the refetch happens to succeed.
+	//
+	// Success path only: the catch above returns early, so a disconnect that failed
+	// still leaves the row exactly where it was for the customer to retry.
+	cfg.value = { ...(cfg.value || {}), models: [], preset: "", proxy_active: false };
+	rows.value = [];
+	selectedPreset.value = "";
+	keysByVendor.value = {};
+	// An open Edit panel is pointing at a row that no longer exists.
+	panel.value = { ...panel.value, open: false, uid: null, testResult: null };
+	// An empty pool is the SAVED state now, not unsaved work. Without this the editor
+	// reads dirty, which is what flips every health pill to "Pending re-check".
+	savedSnapshot.value = poolSnapshot([]);
 	await load();
 	// Same signal an apply emits, so the host pane re-reads its own state (the DIRECT
 	// subscription probe in particular, which a disconnect also clears).
@@ -3679,7 +3699,12 @@ async function load(opts = {}) {
 			llmMode.value = "custom";
 		else {
 			llmMode.value = "quick";
-			if (!rows.value.length) rows.value = [newRow()];
+			// Deliberately no blank placeholder row here. For an EMPTY pool - no preset,
+			// no rows, which is exactly what a disconnect leaves - this branch is the one
+			// that runs, so this was the line that put a placeholder back no matter which
+			// editor came after it. Onboarding still gets its row from the singleMode
+			// branch immediately below, which is the only place that actually needs one
+			// (its whole UI is rows[0]); the settings list wants its real empty state.
 		}
 		// Onboarding is quick-only (singleMode): the editor shows a single editable
 		// row (editorRows renders rows[0]) but we KEEP any seeded tail rows so a
@@ -3710,7 +3735,12 @@ async function load(opts = {}) {
 			// needs to be "preset" or "quick" here.
 			llmMode.value = "custom";
 			selectedPreset.value = "";
-			if (!rows.value.length) rows.value = [newRow()];
+			// No blank placeholder row here, deliberately. Onboarding (above) needs one
+			// because its whole UI IS rows[0], but this list renders an explicit empty
+			// state ("No models yet. Add one below.") plus an always-present "Add a
+			// model" button. Seeding a blank row instead meant an empty pool - the state
+			// a disconnect leaves behind - showed a half-rendered row numbered "1" with
+			// no provider and no model, which reads as "something is still connected".
 		}
 		// Baseline for the unsaved-changes notice - the pool as just loaded is clean.
 		// The carried row is deliberately NOT in the baseline: it is unsaved work, and

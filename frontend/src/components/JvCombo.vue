@@ -213,6 +213,23 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", onDocClick));
 	font: inherit;
 	padding: 0;
 }
+/* The inner input is not the control the customer sees - .jvc-field is, and it
+   carries the border. Any ring on the input would therefore be drawn INSIDE that
+   border, which is the "box inside a box" look. Focus is signalled on the wrapper
+   instead: a tinted border while anything inside has focus, and for keyboard users
+   a real ring OUTSIDE the border (positive outline-offset), matching the
+   outline: 2px solid var(--cta) / offset 2px idiom used elsewhere in the app. */
+.jvc-input:focus,
+.jvc-input:focus-visible {
+	outline: none;
+}
+.jvc-field:focus-within {
+	border-color: var(--cta-bd);
+}
+.jvc-field:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
+}
 .jvc-val {
 	flex: 1;
 	min-width: 0;
