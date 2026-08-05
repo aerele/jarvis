@@ -306,59 +306,28 @@ PAY_PAGE_TOKEN_KEY = "pay_page_token"
 PAY_ORIGIN_DIGEST_KEY = "pay_origin_digest"
 
 
-def _is_production_bench() -> bool:
-	"""True on a production-mode bench (supervisor/systemd). Mirrors the admin-side gate
-	so the dev-origin relaxation is gated identically on both sides."""
-	return bool(
-		frappe.conf.get("restart_supervisor_on_update") or frappe.conf.get("restart_systemd_on_update")
-	)
-
-
-def _dev_origin(parts) -> str:
-	"""LOCAL-DEV ONLY (gated by _is_production_bench): canonicalize a plain-http .local
-	origin, preserving scheme + port, else "". In lockstep with the admin-side
-	origin._dev_origin so the digests agree over http."""
-	scheme = (parts.scheme or "").lower()
-	if scheme not in ("http", "https"):
-		return ""
-	host = (parts.hostname or "").lower()
-	if not host.endswith(".local"):
-		return ""
-	if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
-		return ""
-	port = f":{parts.port}" if parts.port else ""
-	return f"{scheme}://{host}{port}"
-
-
 def _normalize_pay_origin(raw: str | None) -> str:
-	"""Normalize a configured pay origin to ``https://<host>`` (lowercased host, no
-	path/query/fragment/credentials), or "" when unusable.
+	"""Normalize a configured pay origin, preserving scheme + port, or "" when unusable.
 
-	Kept in lockstep with the admin-side ``canonical_pay_origin`` normalization
-	(jarvis_admin_v2 ``billing/checkout/origin.py``) so the two sha256 digests
-	agree byte-for-byte. Deliberately does NOT enforce the registered-host
-	allowlist — that is admin's authority; the bench only needs a canonical string
-	to digest and to build its own URL from."""
+	Byte-identical to the admin-side origin._preserve_origin (its test-mode form) so the
+	two sha256 digests agree; a live origin (https, no port) yields the same
+	``https://<host>`` the admin's strict validator produces. Does NOT enforce the
+	registered-host allowlist — that is admin's authority; the bench only needs a
+	canonical string to digest and to build its own URL from."""
 	raw = (raw or "").strip()
 	if not raw:
 		return ""
 	parts = urlsplit(raw)
-	# LOCAL-DEV ONLY (gated by _is_production_bench): accept a plain-http .local origin
-	# so onboarding runs over http; matches the admin-side _dev_origin so digests agree.
-	if not _is_production_bench():
-		dev = _dev_origin(parts)
-		if dev:
-			return dev
-	if parts.scheme != "https":
+	scheme = (parts.scheme or "").lower()
+	if scheme not in ("http", "https"):
 		return ""
-	if parts.username or parts.password:
-		return ""
-	if parts.path not in ("", "/") or parts.query or parts.fragment:
+	if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
 		return ""
 	host = (parts.hostname or "").lower()
 	if not host or "." not in host:
 		return ""
-	return f"https://{host}"
+	port = f":{parts.port}" if parts.port else ""
+	return f"{scheme}://{host}{port}"
 
 
 def _resolved_pay_origin() -> str:

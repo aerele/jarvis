@@ -23,8 +23,14 @@ class TestNormalizePayOrigin(FrappeTestCase):
 	def test_host_is_lowercased_and_a_trailing_slash_is_dropped(self):
 		self.assertEqual(oc._normalize_pay_origin("https://Fleet.Klerk.IN/"), "https://fleet.klerk.in")
 
-	def test_non_https_is_rejected(self):
-		self.assertEqual(oc._normalize_pay_origin("http://fleet.klerk.in"), "")
+	def test_http_and_port_are_preserved(self):
+		# The bench preserves scheme + port (its test-mode form); the admin enforces
+		# https/allowlist in live mode. Byte-identical to admin origin._preserve_origin.
+		self.assertEqual(oc._normalize_pay_origin("http://fleet.klerk.in"), "http://fleet.klerk.in")
+		self.assertEqual(
+			oc._normalize_pay_origin("http://jarvis_admin_v2.local:8002"),
+			"http://jarvis_admin_v2.local:8002",
+		)
 
 	def test_a_path_query_or_fragment_is_rejected(self):
 		self.assertEqual(oc._normalize_pay_origin("https://fleet.klerk.in/jarvis-checkout"), "")
@@ -38,24 +44,6 @@ class TestNormalizePayOrigin(FrappeTestCase):
 	def test_the_digest_is_sha256_of_the_normalized_origin(self):
 		origin = "https://fleet.klerk.in"
 		self.assertEqual(oc.pay_origin_digest(origin), hashlib.sha256(origin.encode("utf-8")).hexdigest())
-
-	def test_dev_http_local_origin_is_accepted_on_a_dev_bench(self):
-		# LOCAL-DEV relaxation: a non-production bench accepts a plain-http .local origin,
-		# preserving scheme + port, so it matches the admin-side _dev_origin byte-for-byte.
-		with patch.object(oc, "_is_production_bench", return_value=False):
-			self.assertEqual(
-				oc._normalize_pay_origin("http://jarvis_admin_v2.local:8002"),
-				"http://jarvis_admin_v2.local:8002",
-			)
-
-	def test_dev_http_local_is_rejected_on_a_production_bench(self):
-		with patch.object(oc, "_is_production_bench", return_value=True):
-			self.assertEqual(oc._normalize_pay_origin("http://jarvis_admin_v2.local:8002"), "")
-
-	def test_dev_relaxation_does_not_apply_to_non_local_http(self):
-		# Only .local hosts are relaxed; a plain-http public host is still rejected on dev.
-		with patch.object(oc, "_is_production_bench", return_value=False):
-			self.assertEqual(oc._normalize_pay_origin("http://fleet.klerk.in"), "")
 
 
 class TestAugmentPayPage(FrappeTestCase):
