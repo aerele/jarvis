@@ -214,6 +214,36 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		# dangling manual link (no such page) dropped
 		self.assertFalse(any(e.get("target") == "page:nope-missing-slug" for e in g["edges"]))
 
+	def test_manual_links_are_capped_per_page(self):
+		"""#645: curated links were the only unbounded per-page contributor. PR #642
+		wired the add-link loop, so they accumulate one click at a time and are never
+		pruned; left uncapped, one heavily curated page can take a large share of the
+		global MAX_EDGES budget and crowd every other page out of the graph.
+
+		Exercised against the helper rather than through a real graph, because the
+		interesting input is 60+ existing target pages."""
+		known = {f"slug-{i}" for i in range(60)}
+		raw = json.dumps(sorted(known))
+		out = wiki_graph._manual_link_targets(raw, known)
+		self.assertEqual(len(out), wiki_graph._MAX_LINKS_PER_PAGE)
+
+	def test_the_curated_cap_matches_the_mirrors(self):
+		"""The two must agree, which is the whole point of #645: the mirror already caps
+		its ``## Related`` tail, and the graph is the other consumer of the same field."""
+		from jarvis.chat import wiki_mirror
+
+		self.assertEqual(wiki_graph._MAX_LINKS_PER_PAGE, wiki_mirror._MAX_RELATED)
+
+	def test_body_links_do_not_eat_the_curated_budget(self):
+		"""Capped separately on purpose: a page with many body [[wikilinks]] must not
+		silently swallow a human's deliberate curation."""
+		known = {f"slug-{i}" for i in range(60)}
+		body = " ".join(f"[[slug-{i}]]" for i in range(60))
+		body_out = wiki_graph._extract_link_targets(body, known)
+		manual_out = wiki_graph._manual_link_targets(json.dumps(sorted(known)), known)
+		self.assertEqual(len(body_out), wiki_graph._MAX_LINKS_PER_PAGE)
+		self.assertEqual(len(manual_out), wiki_graph._MAX_LINKS_PER_PAGE)
+
 	def test_get_wiki_graph_scoped_with_content(self):
 		from jarvis.chat import wiki as wiki_mod
 
