@@ -297,15 +297,23 @@ def invoked_skill_clause(message: str) -> str:
 	return clause
 
 
-def _role_scoped_invocable_names(user: str) -> set[str]:
-	"""Bare slugs of enabled, non-managed skills whose (non-empty) allowed_roles
-	intersect ``user``'s roles. One cached role lookup + two indexed queries; no
-	per-skill N+1 (plan section 6.6)."""
+def role_scoped_skill_rows(user: str, fields: list[str]) -> list:
+	"""Enabled, non-managed skills whose (non-empty) allowed_roles intersect ``user``'s
+	roles, projected onto ``fields``.
+
+	The ONE definition of the Role-scope match. Invocation
+	(:func:`_role_scoped_invocable_names`) and discovery
+	(``custom_skills_api.list_custom_skills``) both read it, because #628 was precisely
+	those two disagreeing: ``/slug`` fired for a Role-promoted skill while the composer
+	dropdown never listed it, so the feature only worked for someone who already knew
+	the slug existed.
+
+	One cached role lookup + two indexed queries; no per-skill N+1 (plan section 6.6)."""
 	from jarvis.learning.roles import roles_for_user
 
 	user_roles = roles_for_user(user)
 	if not user_roles:
-		return set()
+		return []
 	parents = {
 		r.parent
 		for r in frappe.get_all(
@@ -315,15 +323,17 @@ def _role_scoped_invocable_names(user: str) -> set[str]:
 		)
 	}
 	if not parents:
-		return set()
-	return {
-		r.skill_name
-		for r in frappe.get_all(
-			"Jarvis Custom Skill",
-			filters={"name": ["in", list(parents)], "enabled": 1, "managed_by_learning": 0},
-			fields=["skill_name"],
-		)
-	}
+		return []
+	return frappe.get_all(
+		"Jarvis Custom Skill",
+		filters={"name": ["in", list(parents)], "enabled": 1, "managed_by_learning": 0},
+		fields=fields,
+	)
+
+
+def _role_scoped_invocable_names(user: str) -> set[str]:
+	"""Bare slugs of the skills :func:`role_scoped_skill_rows` matches."""
+	return {r.skill_name for r in role_scoped_skill_rows(user, ["skill_name"])}
 
 
 def learned_skill_clause(user: str | None = None) -> str:
