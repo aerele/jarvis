@@ -2070,14 +2070,21 @@ const providerOptions = PROVIDER_LABELS.map((p) => p.label);
 // admin-managed catalog (modelCatalog.value.api_key_models, fetched in load())
 // is now the source, so a model added in the admin desk shows up here with no
 // deploy. See modelSuggestionsForProvider below.
+//
+// Every `model` here MUST mirror that provider's api_key is_default in the admin
+// seed (jarvis_admin_v2/fleet/provider_catalog.py PROVIDER_SEED, whose generated
+// mirror is jarvis/_model_catalog.py). Nothing enforces that, so a catalog refresh
+// silently strands this copy: six of these were left behind by the 2026-07-26
+// refresh and preselected deprecated ids until 2026-08-06. Re-check the pair when
+// bumping either side.
 const PROVIDER_DEFAULTS = {
-	Anthropic: { model: "claude-sonnet-4-6", baseUrl: "https://api.anthropic.com" },
-	// "gpt-5.5" is this literal's FALLBACK value only, used before the catalog
+	Anthropic: { model: "claude-sonnet-5", baseUrl: "https://api.anthropic.com" },
+	// "gpt-5.6" is this literal's FALLBACK value only, used before the catalog
 	// fetch lands or if it fails - providerDefaultModel() below prefers the
 	// catalog's is_default flag. Previously a stale "gpt-4o" here (fixed
 	// alongside the catalog wiring: PROVIDER_DEFAULTS.OpenAI predates the
 	// gpt-5.x rollout and was never updated).
-	OpenAI: { model: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
+	OpenAI: { model: "gpt-5.6", baseUrl: "https://api.openai.com/v1" },
 	// Flash, not pro: Google grants pro-tier models zero free quota, so a
 	// gemini-2.5-pro fallback 429s on the free key most customers start with.
 	// Matches the catalog's api_key is_default, which this only stands in for.
@@ -2086,21 +2093,25 @@ const PROVIDER_DEFAULTS = {
 		baseUrl: "https://generativelanguage.googleapis.com",
 	},
 	Mistral: { model: "mistral-large-latest", baseUrl: "https://api.mistral.ai/v1" },
-	Groq: { model: "llama-3.3-70b-versatile", baseUrl: "https://api.groq.com/openai/v1" },
+	// gpt-oss, not llama: Groq deprecated llama-3.3-70b-versatile on 2026-06-17
+	// and points migrations at the gpt-oss routes.
+	Groq: { model: "openai/gpt-oss-120b", baseUrl: "https://api.groq.com/openai/v1" },
 	"Together AI": {
 		model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
 		baseUrl: "https://api.together.xyz/v1",
 	},
-	DeepSeek: { model: "deepseek-chat", baseUrl: "https://api.deepseek.com" },
+	// deepseek-chat was deprecated 2026-07-24 and only maps to deepseek-v4-flash
+	// during a compatibility window, so it must not be what a new key preselects.
+	DeepSeek: { model: "deepseek-v4-flash", baseUrl: "https://api.deepseek.com" },
 	"Moonshot (Kimi)": { model: "kimi-k2.6", baseUrl: "https://api.moonshot.ai/v1" },
 	"xAI Grok": { model: "grok-4.5", baseUrl: "https://api.x.ai/v1" },
-	"GLM / Z.ai": { model: "glm-4.6", baseUrl: "https://api.z.ai/api/paas/v4" },
+	"GLM / Z.ai": { model: "glm-4.7", baseUrl: "https://api.z.ai/api/paas/v4" },
 	// GLM Coding Plan is a separate z.ai subscription from pay-as-you-go "GLM / Z.ai"
 	// above - a coding-plan key 402s with "insufficient balance" on the pay-as-you-go
 	// base URL even though it's perfectly valid on this one (see apiKeyModelHealth's
 	// targeted hint in pool.js for the exact trap this option exists to avoid).
 	"GLM / Z.ai (Coding Plan)": {
-		model: "glm-4.6",
+		model: "glm-4.7",
 		baseUrl: "https://api.z.ai/api/coding/paas/v4",
 	},
 	OpenRouter: { model: "anthropic/claude-sonnet-4-6", baseUrl: "https://openrouter.ai/api/v1" },
@@ -2890,7 +2901,7 @@ function onProviderChange(m, newProvider) {
 	m.provider = newProvider;
 	if (!changed) return;
 	// Snap the model + base URL to the NEW provider's defaults, replacing any
-	// leftover from the previous provider — so picking "GLM / Z.ai" gives glm-4.6,
+	// leftover from the previous provider — so picking "GLM / Z.ai" gives glm-4.7,
 	// not whatever model was there before. Providers with no default model
 	// (OpenAI-Compatible / vLLM) clear the field so the user types their own.
 	const d = PROVIDER_DEFAULTS[m.provider] || {};
