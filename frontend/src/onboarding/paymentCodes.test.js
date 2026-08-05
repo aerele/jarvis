@@ -14,6 +14,7 @@ import {
 	ACTIONS,
 	actionLabelFor,
 	copyFor,
+	payLinkDeadlineNote,
 	UNKNOWN_COPY,
 } from "./paymentCodes.js";
 
@@ -189,4 +190,47 @@ test("rows that warn about money already moving ask for CHECK first", () => {
 	// The declined row carries the same warning and the same ordering.
 	const declined = copyFor(CODES.PAYMENT_DECLINED);
 	assert.equal(declined.actions[0], ACTIONS.CHECK);
+});
+
+// --------------------------------------------------------------------------- //
+// #669: how long the pay link lasts, said while it still works
+// --------------------------------------------------------------------------- //
+
+test("the deadline note states the remaining minutes", () => {
+	assert.match(payLinkDeadlineNote(45 * 60), /about 45 more minutes/);
+	// Singular, because "1 more minutes" on a payment screen reads as a bug in
+	// exactly the moment the customer is being asked to trust us with a card.
+	assert.match(payLinkDeadlineNote(90), /about 1 more minute\b/);
+});
+
+test("the deadline note rounds DOWN, never promising time the link lacks", () => {
+	// 119s is nearly two minutes, but saying "2" would overstate it, and seconds
+	// keep passing between admin computing this and the customer reading it. The
+	// only safe rounding direction is down.
+	assert.match(payLinkDeadlineNote(119), /about 1 more minute\b/);
+	assert.match(payLinkDeadlineNote(59 * 60 + 59), /about 59 more minutes/);
+});
+
+test("under a minute it warns instead of counting to zero", () => {
+	const note = payLinkDeadlineNote(30);
+	assert.match(note, /about to expire/i);
+	// No number at all: whatever we printed could be wrong by the time it is read.
+	assert.doesNotMatch(note, /\d/);
+});
+
+test("every note says how to recover, not just that time is passing", () => {
+	// A deadline with no way out is just a nicer dead end, which is the failure
+	// mode this issue is about in the first place.
+	for (const secs of [45 * 60, 90, 30]) {
+		assert.match(payLinkDeadlineNote(secs), /start the payment again/i);
+	}
+});
+
+test("nothing is claimed when there is no honest number to give", () => {
+	// null/undefined = no live token on the answer. 0 and negatives = expired.
+	// Junk = an older admin that never sent the field. All render nothing rather
+	// than a "0 minutes" scare over a link that still works.
+	for (const bad of [null, undefined, 0, -1, "", "soon", NaN, {}]) {
+		assert.equal(payLinkDeadlineNote(bad), "", `expected "" for ${String(bad)}`);
+	}
 });
