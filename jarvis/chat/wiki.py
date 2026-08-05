@@ -1165,9 +1165,16 @@ def apply_extracted_page_updates(
 			reason = "applied" if ok else "refused"
 			if ok:
 				applied += 1
-			else:
+			elif not provenance_prefix:
 				# #613: a refusal left NO trace at all, so knowledge lost this way was
 				# undiagnosable. It is logged now.
+				#
+				# NOT logged on the fenced paths (``provenance_prefix`` set: the Custom App
+				# Learning scribe and app_analysis). There a refusal is the DOCUMENTED
+				# expected outcome of a slug colliding with a human-edited page, the CA2-1
+				# belt working as designed, not knowledge going missing. Logging those
+				# would put a row in the Error Log for every routine collision on every
+				# rerun and bury the entries this is meant to surface.
 				#
 				# Deliberately NOT counted as failed, which is the other half of #613 and
 				# is a decision this change does not take. ``test_wiki`` pins the current
@@ -1206,8 +1213,14 @@ def _log_refused_update(update: dict, source: str, ref: str | None) -> None:
 	nor ``page_type``, which cannot mint one. PR #611 made that shape ordinary rather
 	than rare by telling the ingest to emit ``append_md``.
 
-	Field NAMES and presence only. The body of a voice note is the customer's own
-	content and must not be copied into an Error Log."""
+	Field NAMES and CLASSIFICATIONS only, never a raw extracted value. The body of a
+	voice note is the customer's own content and must not be copied into an Error Log,
+	and ``page_type`` / ``scope`` are not safe to echo either: this helper runs precisely
+	when the model failed to produce a valid enum there, so those are the fields most
+	likely to contain a stray transcript fragment. Reporting VALID / INVALID keeps the
+	diagnostic value without the leak."""
+	page_type = (update.get("page_type") or "").strip()
+	scope = (update.get("scope") or "").strip()
 	try:
 		frappe.log_error(
 			title="wiki: page update refused",
@@ -1215,8 +1228,8 @@ def _log_refused_update(update: dict, source: str, ref: str | None) -> None:
 				f"source={source} ref={ref}\n"
 				f"slug={_normalize_slug(update.get('slug'))!r}\n"
 				f"has_title={bool(str(update.get('title') or '').strip())} "
-				f"page_type={(update.get('page_type') or '').strip()!r}\n"
-				f"scope={(update.get('scope') or '').strip()!r} "
+				f"page_type={'valid' if page_type in PAGE_TYPES else ('absent' if not page_type else 'invalid')}\n"
+				f"scope={scope if scope in ('Org', 'User', 'Role') else ('absent' if not scope else 'invalid')} "
 				f"has_target_user={bool(update.get('target_user'))}\n"
 				f"carries={sorted(k for k in ('body_md', 'append_md', 'summary') if update.get(k))}"
 			),

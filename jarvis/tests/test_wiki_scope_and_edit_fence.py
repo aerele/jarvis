@@ -441,6 +441,31 @@ class TestRefusedUpdateIsNotSilent(FrappeTestCase):
 		msg = " ".join(str(c.kwargs.get("message", "")) for c in logged.call_args_list)
 		self.assertNotIn(secret, msg)
 
+	def test_the_refusal_log_does_not_echo_page_type_or_scope(self):
+		"""These are the fields MOST likely to carry a stray transcript fragment: the
+		helper runs precisely when the model failed to produce a valid enum there. So they
+		are classified, never echoed."""
+		leak = "TRANSCRIPT-FRAGMENT-THE-MODEL-DUMPED"
+		with patch.object(wiki.frappe, "log_error") as logged:
+			self._voice({"slug": "no-such-page-here", "page_type": leak, "scope": leak})
+		msg = " ".join(str(c.kwargs.get("message", "")) for c in logged.call_args_list)
+		self.assertNotIn(leak, msg)
+		self.assertIn("page_type=invalid", msg, "the diagnosis must survive the redaction")
+
+	def test_a_fenced_refusal_is_not_logged(self):
+		"""On the app-learning / scribe paths a refusal is the DOCUMENTED expected outcome
+		of colliding with a human-edited page (the CA2-1 belt), not knowledge going
+		missing. Logging those would put a row in the Error Log for every routine collision
+		on every rerun and bury the entries this fix exists to surface."""
+		with patch.object(wiki.frappe, "log_error") as logged:
+			wiki.apply_extracted_page_updates(
+				[{"slug": "no-such-page-here", "append_md": "Learned from source."}],
+				"app-learning:someapp",
+				"b@test.invalid",
+				provenance_prefix="app-learning:",
+			)
+		self.assertFalse(logged.called, "an expected fence refusal must not spam the Error Log")
+
 	def test_a_valid_update_is_unaffected(self):
 		"""Control: the ordinary path still reports (1, 0) and logs nothing."""
 		_make_page(ALPHA_SLUG, ALPHA, body_md="Existing.")
