@@ -406,3 +406,29 @@ test("fence survives startNewChat's state reset (dead-banner resurrection guard)
   assert.equal(r.state.error, "");
   assert.equal(r.state.reload, false);
 });
+
+// The mini panel used to show bare typing dots for the whole wait, which reads
+// as hung on a cold start. It now mirrors the web chat's caption, so the coarse
+// phase has to survive the reducer: waking is set pre-flight and cleared the
+// moment the turn actually starts (or ends / fails).
+test("run:status waking sets the phase, run:start clears it", () => {
+  let s = applyEvent(emptyStream(), { kind: "run:status", status: "waking" });
+  assert.equal(s.status, "waking");
+  s = applyEvent(s, { kind: "run:start", run_id: "r1" });
+  assert.equal(s.status, null, "a started turn is no longer waking");
+});
+
+test("run:status ignores any status other than waking", () => {
+  const s = applyEvent(emptyStream(), { kind: "run:status", status: "queued" });
+  assert.equal(s.status, null);
+});
+
+test("a terminal frame clears the waking phase", () => {
+  for (const kind of ["run:end", "run:error"]) {
+    const woke = applyEvent(emptyStream(), {
+      kind: "run:status",
+      status: "waking",
+    });
+    assert.equal(applyEvent(woke, { kind, run_id: "r1" }).status, null, kind);
+  }
+});

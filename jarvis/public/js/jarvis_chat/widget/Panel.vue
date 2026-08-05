@@ -307,15 +307,11 @@
 									/>
 								</svg>
 							</div>
-							<div
-								class="jvp-think"
-								role="status"
-								aria-live="polite"
-								aria-label="Jarvis is typing"
-							>
+							<div class="jvp-think" role="status" aria-live="polite">
 								<span class="jvp-think-dots" aria-hidden="true"
 									><i></i><i></i><i></i
 								></span>
+								<span class="jvp-think-tx">{{ thinkingLabel }}</span>
 							</div>
 						</div>
 
@@ -744,6 +740,15 @@ const thinking = computed(() => {
 	const s = stream.value;
 	return sending.value || (s.busy && !s.live) || (!!s.live && !s.live.text);
 });
+// Caption beside the typing dots. The full web chat labels this wait ("Waking up
+// your assistant…" / "Working on it…"); the mini panel showed bare dots, which
+// read as hung on a slow turn. Same wording as the SPA's liveStatus so the two
+// surfaces say the same thing. (The SPA also names the running tool; the panel
+// is deliberately text-only and does not track tool frames, so it stays generic
+// rather than inventing a phrase it cannot back up.)
+const thinkingLabel = computed(() =>
+	stream.value.status === "waking" ? "Waking up your assistant…" : "Working on it…"
+);
 const canSend = computed(
 	() =>
 		(draft.value.trim().length > 0 || attachments.value.length > 0) &&
@@ -1984,6 +1989,13 @@ defineExpose({ load, startNewChat, convId });
 	border-radius: 5px 15px 15px 15px;
 	padding: 11px 13px;
 	color: var(--jv-ink-2);
+}
+/* The caption beside the dots ("Working on it…"), matching the web chat. */
+.jvp-think-tx {
+	font-size: 13px;
+	line-height: 1.2;
+	color: var(--jv-ink-2);
+	white-space: nowrap;
 }
 .jvp-think-dots {
 	display: inline-flex;
