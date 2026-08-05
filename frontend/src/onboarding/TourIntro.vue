@@ -42,8 +42,8 @@
 									</div>
 									<div class="cb u" v-if="chatAtLeast('bubble1')">
 										For the available stock, which customer orders can I
-										dispatch now, who pays me on time, to keep up my
-										cashflow in a good state? Analyse and list.
+										dispatch now, who pays me on time, to keep up my cashflow
+										in a good state? Analyse and list.
 									</div>
 									<div class="cb a cb-reply" v-if="chatAtLeast('reply1')">
 										<p class="tbl-lead">
@@ -53,15 +53,21 @@
 										<div class="tbl">
 											<div class="tbl-row">
 												<b>Acme Industries · SO-0142</b>
-												<span>₹1.1L · 120/120 ready · pays in 12d avg</span>
+												<span
+													>₹1.1L · 120/120 ready · pays in 12d avg</span
+												>
 											</div>
 											<div class="tbl-row">
 												<b>Vertex Traders · SO-0138</b>
-												<span>₹84,000 · 60/60 ready · pays in 18d avg</span>
+												<span
+													>₹84,000 · 60/60 ready · pays in 18d avg</span
+												>
 											</div>
 											<div class="tbl-row">
 												<b>Sunrise Mills · SO-0151</b>
-												<span>₹47,500 · 200/200 ready · pays in 9d avg</span>
+												<span
+													>₹47,500 · 200/200 ready · pays in 9d avg</span
+												>
 											</div>
 										</div>
 									</div>
@@ -102,15 +108,11 @@
 									</div>
 								</div>
 								<div class="composer">
-									<template
-										v-if="chatStep === 'type1' || chatStep === 'type2'"
-									>
+									<template v-if="chatStep === 'type1' || chatStep === 'type2'">
 										<span
 											class="type-line"
 											:class="chatStep === 'type1' ? 'type-q1' : 'type-q2'"
-											>{{
-												chatStep === "type1" ? chatQ1 : chatQ2
-											}}</span
+											>{{ chatStep === "type1" ? chatQ1 : chatQ2 }}</span
 										><span class="type-caret" aria-hidden="true"></span>
 									</template>
 									<template v-else>Ask a follow-up…</template>

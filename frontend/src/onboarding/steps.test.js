@@ -53,7 +53,8 @@ test("planSubtitleFor: no free or trial plan drops the free-tier promise", () =>
 // is 0, so the naive coercion reported the free-tier wording for a catalog
 // that charges for everything, which is the bug jarvis#536 was filed about.
 test("planSubtitleFor: an absent, null or blank price is not treated as free", () => {
-	const paidOnly = "Pick a plan to get started. Billing continues automatically until you cancel.";
+	const paidOnly =
+		"Pick a plan to get started. Billing continues automatically until you cancel.";
 	assert.equal(planSubtitleFor([{ name: "ob-plan", price_inr: null }]), paidOnly);
 	assert.equal(planSubtitleFor([{ name: "ob-plan" }]), paidOnly);
 	assert.equal(planSubtitleFor([{ name: "ob-plan", price_inr: "" }]), paidOnly);
@@ -87,15 +88,27 @@ test("planSubtitleFor: a trial-gated plan does NOT promise that nothing renews",
 	);
 	// A genuinely free plan still may, because nothing renews on a zero price.
 	assert.equal(
-		planSubtitleFor([{ name: "Free", price_inr: 0 }, { name: "Pro", trial_days: 7 }]),
+		planSubtitleFor([
+			{ name: "Free", price_inr: 0 },
+			{ name: "Pro", trial_days: 7 },
+		]),
 		"Start free. Upgrade whenever you're ready."
 	);
 });
 
 test("planSubtitleFor: an empty or missing plan list is not a false promise", () => {
-	assert.equal(planSubtitleFor([]), "Pick a plan to get started. Billing continues automatically until you cancel.");
-	assert.equal(planSubtitleFor(null), "Pick a plan to get started. Billing continues automatically until you cancel.");
-	assert.equal(planSubtitleFor(undefined), "Pick a plan to get started. Billing continues automatically until you cancel.");
+	assert.equal(
+		planSubtitleFor([]),
+		"Pick a plan to get started. Billing continues automatically until you cancel."
+	);
+	assert.equal(
+		planSubtitleFor(null),
+		"Pick a plan to get started. Billing continues automatically until you cancel."
+	);
+	assert.equal(
+		planSubtitleFor(undefined),
+		"Pick a plan to get started. Billing continues automatically until you cancel."
+	);
 });
 
 // jarvis.account.is_ready_for_chat returns {ready: bool, reason: str|None}

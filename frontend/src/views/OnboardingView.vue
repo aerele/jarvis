@@ -233,14 +233,21 @@
 											autocomplete="email"
 											required
 											aria-required="true"
-											:aria-invalid="detailsFieldErrors.email ? 'true' : undefined"
+											:aria-invalid="
+												detailsFieldErrors.email ? 'true' : undefined
+											"
 											:aria-describedby="
-												detailsFieldErrors.email ? 'jv-ob-email-err' : undefined
+												detailsFieldErrors.email
+													? 'jv-ob-email-err'
+													: undefined
 											"
 											@blur="touchEmailField"
 											@keydown.enter="onDetailsSubmit"
 										/>
-										<ErrorMessage id="jv-ob-email-err" :message="detailsFieldErrors.email" />
+										<ErrorMessage
+											id="jv-ob-email-err"
+											:message="detailsFieldErrors.email"
+										/>
 									</div>
 									<FormControl
 										type="tel"
@@ -264,9 +271,13 @@
 										 no reliable blur signal to hook without editing JvCombo. -->
 									<div
 										class="col-span-2 flex flex-col gap-1.5"
-										:aria-invalid="detailsFieldErrors.company ? 'true' : undefined"
+										:aria-invalid="
+											detailsFieldErrors.company ? 'true' : undefined
+										"
 										:aria-describedby="
-											detailsFieldErrors.company ? 'jv-ob-company-err' : undefined
+											detailsFieldErrors.company
+												? 'jv-ob-company-err'
+												: undefined
 										"
 									>
 										<label for="jv-ob-company" class="text-xs text-ink-gray-5"
@@ -280,7 +291,11 @@
 													state.company = v;
 													billing.setIdentity(undefined, v);
 													state.identityFromUser = true;
-													clearFieldErrorIfValid('company', companyError, v);
+													clearFieldErrorIfValid(
+														'company',
+														companyError,
+														v
+													);
 												}
 											"
 											allow-custom
@@ -290,7 +305,10 @@
 											placeholder="Acme Inc."
 											@enter="onDetailsSubmit"
 										/>
-										<ErrorMessage id="jv-ob-company-err" :message="detailsFieldErrors.company" />
+										<ErrorMessage
+											id="jv-ob-company-err"
+											:message="detailsFieldErrors.company"
+										/>
 									</div>
 									<div
 										class="col-span-2 mt-2 text-base font-semibold text-ink-gray-9"
@@ -338,14 +356,21 @@
 												}
 											"
 											:placeholder="GSTIN_PLACEHOLDER"
-											:aria-invalid="detailsFieldErrors.gstin ? 'true' : undefined"
+											:aria-invalid="
+												detailsFieldErrors.gstin ? 'true' : undefined
+											"
 											:aria-describedby="
-												detailsFieldErrors.gstin ? 'jv-ob-gstin-err' : undefined
+												detailsFieldErrors.gstin
+													? 'jv-ob-gstin-err'
+													: undefined
 											"
 											@blur="touchGstinField"
 											@keydown.enter="onDetailsSubmit"
 										/>
-										<ErrorMessage id="jv-ob-gstin-err" :message="detailsFieldErrors.gstin" />
+										<ErrorMessage
+											id="jv-ob-gstin-err"
+											:message="detailsFieldErrors.gstin"
+										/>
 									</div>
 								</div>
 								<!-- state.detailsErr stays for genuinely form-wide messages (e.g.
@@ -421,16 +446,19 @@
 									<div class="ob-head">
 										<h1>Get help with this</h1>
 										<p v-if="!supportTicket">
-											Tell us what happened and we'll pick it up. We'll attach
-											the technical details of this screen automatically, so
-											you don't have to describe them.
+											Tell us what happened and we'll pick it up. We'll
+											attach the technical details of this screen
+											automatically, so you don't have to describe them.
 										</p>
 										<p v-else role="status">
 											Thanks. We have your request and we'll reply to
 											{{ payEmail }}.
 										</p>
 									</div>
-									<div v-if="!supportTicket" class="mx-auto w-full max-w-[560px]">
+									<div
+										v-if="!supportTicket"
+										class="mx-auto w-full max-w-[560px]"
+									>
 										<FormControl
 											v-model="supportBody"
 											type="textarea"
