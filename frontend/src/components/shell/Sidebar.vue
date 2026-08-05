@@ -84,13 +84,21 @@
 					class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full bg-surface-red-5"
 				/>
 			</div>
+			<!-- trailing drop zone: the only way to drop an item into the LAST slot
+			     (items insert BEFORE themselves) or into an emptied group. Only shown
+			     mid-drag so edit mode has no empty gaps otherwise. -->
+			<div
+				v-if="editing && dragging"
+				class="mx-2 my-[1.5px] h-7 rounded-md border border-dashed border-outline-gray-3 bg-surface-gray-1"
+				@dragover.prevent
+				@drop.prevent="onDrop('top', navLinks.length)"
+			/>
 		</nav>
 
-		<!-- 3b. overflow destinations (Dashboards, …) — opens the MoreMenu palette.
-		     Deliberately NOT a navLinks entry: that loop binds :to and this row is
-		     an action. But it DOES light up when the user is on one of its
-		     destinations, so a first-class page reached via More still reads as a
-		     section (not a transient action). -->
+		<!-- 3b. "More" group: a collapsible section of overflow destinations
+		     (Macros, Triggers). The "More" row toggles the group inline (moreOpen),
+		     it does NOT open a palette. It lights up when the user is on one of its
+		     destinations, so a page reached via More still reads as a section. -->
 		<nav
 			class="flex flex-col rounded-lg transition-colors"
 			:class="editing ? 'bg-surface-gray-1 ring-1 ring-outline-gray-2' : ''"
@@ -141,6 +149,14 @@
 						:is-collapsed="collapsed"
 					/>
 				</div>
+				<!-- trailing drop zone (see the top group). onDragStart forces
+				     moreOpen open, so this is reachable even when More is empty. -->
+				<div
+					v-if="editing && dragging"
+					class="mx-2 my-[1.5px] h-7 rounded-md border border-dashed border-outline-gray-3 bg-surface-gray-1"
+					@dragover.prevent
+					@drop.prevent="onDrop('more', moreLinks.length)"
+				/>
 			</template>
 		</nav>
 
@@ -260,6 +276,7 @@ import { useRoute, useRouter } from "vue-router";
 import { Badge, FeatherIcon, KeyboardShortcut } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { getMySettings, setSidebarOrder } from "@/api";
+import { reconcileOrder, moveOrderItem } from "@/lib/sidebarOrder";
 import UserMenu from "./UserMenu.vue";
 import SidebarLink from "./SidebarLink.vue";
 import ConversationRow from "./ConversationRow.vue";
@@ -376,36 +393,10 @@ const navLinks = ref([...TOP_DEFS]);
 const moreLinks = ref([...MORE_DEFS]);
 const moreOpen = ref(false);
 
-// Apply the saved {top, more} order across ALL defs (items can move between
-// groups). Unknown labels are dropped; any def the saved order didn't place is
-// appended to its DEFAULT group, so a code change can't hide or dead-link a nav
-// item.
+// Reconcile the saved {top, more} order against the current defs
+// (lib/sidebarOrder keeps the "a stale label can never hide a nav item" rule).
 function applySaved(saved) {
-	const all = new Map([...TOP_DEFS, ...MORE_DEFS].map((d) => [d.label, d]));
-	const used = new Set();
-	const resolve = (labels) => {
-		const out = [];
-		for (const lbl of Array.isArray(labels) ? labels : []) {
-			const d = all.get(lbl);
-			if (d && !used.has(lbl)) {
-				out.push(d);
-				used.add(lbl);
-			}
-		}
-		return out;
-	};
-	const top = resolve(saved && saved.top);
-	const more = resolve(saved && saved.more);
-	for (const d of TOP_DEFS)
-		if (!used.has(d.label)) {
-			top.push(d);
-			used.add(d.label);
-		}
-	for (const d of MORE_DEFS)
-		if (!used.has(d.label)) {
-			more.push(d);
-			used.add(d.label);
-		}
+	const { top, more } = reconcileOrder(saved, TOP_DEFS, MORE_DEFS);
 	navLinks.value = top;
 	moreLinks.value = more;
 }
@@ -451,21 +442,16 @@ function onDrop(group, index) {
 	const d = dragging.value;
 	dragging.value = null;
 	if (!d) return;
-	const fromRef = d.group === "top" ? navLinks : moreLinks;
-	const toRef = group === "top" ? navLinks : moreLinks;
-	const fromList = fromRef.value.slice();
-	const [moved] = fromList.splice(d.index, 1);
-	if (!moved) return;
-	if (fromRef === toRef) {
-		const to = d.index < index ? index - 1 : index;
-		fromList.splice(to, 0, moved);
-		fromRef.value = fromList;
-	} else {
-		const toList = toRef.value.slice();
-		toList.splice(index, 0, moved);
-		fromRef.value = fromList;
-		toRef.value = toList;
-	}
+	const { top, more } = moveOrderItem(
+		navLinks.value,
+		moreLinks.value,
+		d.group,
+		d.index,
+		group,
+		index
+	);
+	navLinks.value = top;
+	moreLinks.value = more;
 	persistOrder();
 }
 function onDragEnd() {
