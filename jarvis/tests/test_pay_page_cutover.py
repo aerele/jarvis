@@ -51,9 +51,10 @@ class TestAugmentPayPage(FrappeTestCase):
 
 	def setUp(self):
 		self.digest = hashlib.sha256(self.ORIGIN.encode("utf-8")).hexdigest()
+		# The checkout origin now follows the bench's admin URL alone.
+		frappe.conf["jarvis_admin_url"] = self.ORIGIN
 
 	def tearDown(self):
-		frappe.conf.pop("jarvis_pay_origin", None)
 		frappe.conf.pop("jarvis_admin_url", None)
 
 	def test_no_token_answer_is_returned_untouched(self):
@@ -62,82 +63,61 @@ class TestAugmentPayPage(FrappeTestCase):
 		self.assertNotIn("pay_origin", oc.augment_pay_page(dict(data)))
 
 	def test_token_with_matching_origin_is_attested(self):
-		frappe.conf["jarvis_pay_origin"] = self.ORIGIN
 		out = oc.augment_pay_page({"pay_page_token": "tok", "pay_origin_digest": self.digest})
 		self.assertEqual(out["pay_origin"], self.ORIGIN)
 		self.assertTrue(out["pay_origin_attested"])
 
 	def test_token_with_a_MISMATCHED_digest_is_NOT_attested(self):
-		# The digest assertion / mutation: a split-brain (bench pointed at one
-		# origin, admin minted a token for another) fails closed - never navigates.
-		frappe.conf["jarvis_pay_origin"] = self.ORIGIN
+		# The digest assertion: a split-brain (the bench's admin URL is one origin,
+		# admin minted a token for another) fails closed - never navigates.
 		out = oc.augment_pay_page({"pay_page_token": "tok", "pay_origin_digest": "deadbeef"})
 		self.assertEqual(out["pay_origin"], self.ORIGIN)
 		self.assertFalse(out["pay_origin_attested"])
 
-	def test_token_with_NO_explicit_config_falls_back_to_the_admin_url(self):
-		# New contract (2026-08-05): with nothing in site_config OR the Settings field,
-		# the origin follows the bench's admin URL instead of failing closed - checkout is
-		# hosted on the control plane. Here the admin URL IS self.ORIGIN and admin minted a
-		# token for it, so it attests. (site_config still overrides; a mismatched admin URL
-		# would not attest.)
-		frappe.conf.pop("jarvis_pay_origin", None)
-		frappe.conf["jarvis_admin_url"] = self.ORIGIN
-		with patch("frappe.db.get_single_value", return_value=""):
-			out = oc.augment_pay_page({"pay_page_token": "tok", "pay_origin_digest": self.digest})
-		self.assertEqual(out["pay_origin"], self.ORIGIN)
-		self.assertTrue(out["pay_origin_attested"])
-
 	def test_token_with_no_admin_digest_cannot_be_attested(self):
-		frappe.conf["jarvis_pay_origin"] = self.ORIGIN
 		out = oc.augment_pay_page({"pay_page_token": "tok"})
 		self.assertFalse(out["pay_origin_attested"])
 
 	def test_success_envelope_carries_the_attestation_through(self):
-		frappe.conf["jarvis_pay_origin"] = self.ORIGIN
 		env = oc.success({"pay_page_token": "tok", "pay_origin_digest": self.digest})
 		self.assertEqual(env["data"]["pay_origin"], self.ORIGIN)
 		self.assertTrue(env["data"]["pay_origin_attested"])
 
 	def test_success_envelope_strips_credentials_before_augmenting(self):
 		# augment must run over the credential-stripped copy, not raw admin data.
-		frappe.conf["jarvis_pay_origin"] = self.ORIGIN
 		env = oc.success({"pay_page_token": "tok", "pay_origin_digest": self.digest, "api_secret": "s"})
 		self.assertNotIn("api_secret", env["data"])
 		self.assertTrue(env["data"]["pay_origin_attested"])
 
 
 class TestResolvedPayOrigin(FrappeTestCase):
-	"""_resolved_pay_origin precedence: site_config -> Jarvis Settings field -> admin URL."""
+	"""_resolved_pay_origin now follows the bench's admin URL alone (the dedicated
+	pay-origin field + site_config knob were dropped 2026-08-06)."""
 
 	def tearDown(self):
-		frappe.conf.pop("jarvis_pay_origin", None)
 		frappe.conf.pop("jarvis_admin_url", None)
-
-	def test_site_config_wins_over_settings_field(self):
-		frappe.conf["jarvis_pay_origin"] = "https://vignesh-staging.klerk.in"
-		with patch("frappe.db.get_single_value", return_value="https://other.example.com"):
-			self.assertEqual(oc._resolved_pay_origin(), "https://vignesh-staging.klerk.in")
-
-	def test_settings_field_used_when_site_config_empty(self):
 		frappe.conf.pop("jarvis_pay_origin", None)
-		with patch("frappe.db.get_single_value", return_value="https://vignesh-staging.klerk.in"):
-			self.assertEqual(oc._resolved_pay_origin(), "https://vignesh-staging.klerk.in")
 
-	def test_admin_url_used_when_both_empty(self):
-		frappe.conf.pop("jarvis_pay_origin", None)
+	def test_follows_the_admin_url(self):
 		frappe.conf["jarvis_admin_url"] = "https://fleet.klerk.in"
-		with patch("frappe.db.get_single_value", return_value=""):
-			self.assertEqual(oc._resolved_pay_origin(), "https://fleet.klerk.in")
+		self.assertEqual(oc._resolved_pay_origin(), "https://fleet.klerk.in")
 
-	def test_follows_a_local_http_admin_url_with_no_explicit_pay_origin(self):
-		# The point of the fallback: a bench whose admin URL is a local/staging http host
-		# gets that as its checkout origin with no separate pay-origin config - scheme and
-		# port preserved (test-mode form).
-		frappe.conf.pop("jarvis_pay_origin", None)
+	def test_follows_a_local_http_admin_url(self):
+		# scheme + port preserved (test-mode form) so a local/staging bench needs no
+		# separate checkout config.
 		frappe.conf["jarvis_admin_url"] = "http://jarvis_admin_v2.local:8002"
-		with patch("frappe.db.get_single_value", return_value=""):
-			self.assertEqual(oc._resolved_pay_origin(), "http://jarvis_admin_v2.local:8002")
+		self.assertEqual(oc._resolved_pay_origin(), "http://jarvis_admin_v2.local:8002")
+
+	def test_a_stale_pay_origin_site_config_is_ignored(self):
+		# The dropped knob is truly dead: an old site_config still carrying
+		# jarvis_pay_origin no longer influences the checkout origin.
+		frappe.conf["jarvis_admin_url"] = "https://fleet.klerk.in"
+		frappe.conf["jarvis_pay_origin"] = "https://stale.example.com"
+		self.assertEqual(oc._resolved_pay_origin(), "https://fleet.klerk.in")
+
+	def test_falls_back_to_the_hardcoded_default_when_admin_url_unset(self):
+		frappe.conf.pop("jarvis_admin_url", None)
+		self.assertEqual(oc._resolved_pay_origin(), "https://fleet.klerk.in")
 
 
 class TestPaymentUiV2Flag(FrappeTestCase):

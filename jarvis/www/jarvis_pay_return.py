@@ -3,7 +3,7 @@
 HISTORICAL / pre-cutover route (plan-09 §0.7, P0-8). After the WS7 cutover the
 tenant bench no longer initiates any gateway checkout on its own origin: all
 checkout is top-level navigation to the admin-hosted pay page
-(``{jarvis_pay_origin}/jarvis-checkout``), and a Cashfree mandate now returns
+(``{admin_url}/jarvis-checkout``), and a Cashfree mandate now returns
 cross-site to admin's ``/jarvis-checkout/return`` — never here. This page stays
 alive for the lifetime of mandates authorised BEFORE cutover (a rollback must
 keep return routes serving), which is why it is not removed.
