@@ -28,15 +28,6 @@
 					<div class="rounded-xl border border-outline-gray-2 bg-white p-3">
 						<img :src="qrSrc" alt="Mobile app QR code" class="size-52" />
 					</div>
-					<a
-						v-if="url"
-						:href="url"
-						target="_blank"
-						rel="noopener"
-						class="mt-3 break-all text-center text-sm text-ink-blue-link"
-					>
-						{{ url }}
-					</a>
 				</template>
 			</div>
 		</template>
