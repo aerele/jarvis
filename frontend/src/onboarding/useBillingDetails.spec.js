@@ -4,6 +4,7 @@ import {
 	billingEditAction,
 	billingStorageKey,
 	STORAGE_PROMISE_SAVED,
+	BILLING_SNAPSHOT_TTL_MS,
 	STORAGE_PROMISE_LOCAL,
 } from "./useBillingDetails.js";
 
@@ -359,5 +360,42 @@ describe("edit-after-intent uses the authenticated facade, never guest signup (P
 		expect(billingEditAction(true)).toBe("update_billing");
 		// The action vocabulary never includes a guest-signup verb.
 		expect(billingEditAction(true)).not.toBe("signup");
+	});
+});
+
+describe("the snapshot has a bounded lifetime (retention)", () => {
+	// Moving the clear from the durable-write ack to the end of onboarding fixed
+	// resuming after a checkout round trip, but on its own it meant a customer who
+	// ABANDONED at the pay screen left billing PII in localStorage forever, since
+	// they never reach the end. Retention is therefore bounded by TIME as well,
+	// which holds however the customer leaves.
+	it("restores a fresh snapshot", () => {
+		const t = 1_000_000_000_000;
+		const a = useBillingDetails({ site: "s1", user: "u1", now: () => t });
+		a.setUserValue("city", "Chennai");
+		const b = useBillingDetails({ site: "s1", user: "u1", now: () => t + 60_000 });
+		expect(b.restore()).toBe(true);
+		expect(b.fields.city.value).toBe("Chennai");
+	});
+
+	it("drops and DELETES a snapshot past its window, even if nothing finished", () => {
+		const t = 1_000_000_000_000;
+		const a = useBillingDetails({ site: "s1", user: "u1", now: () => t });
+		a.setUserValue("gstin", "33ABCDE1234F1Z7");
+		expect(window.localStorage.getItem(a.storageKey)).toBeTruthy();
+		const later = t + BILLING_SNAPSHOT_TTL_MS + 1;
+		const b = useBillingDetails({ site: "s1", user: "u1", now: () => later });
+		expect(b.restore()).toBe(false);
+		expect(b.fields.gstin.value).toBe("");
+		// Collected on read: no timer, no lifecycle hook, no cooperation needed from
+		// the session that abandoned.
+		expect(window.localStorage.getItem(b.storageKey)).toBeNull();
+	});
+
+	it("drops an unstamped snapshot written by an older build", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		window.localStorage.setItem(b.storageKey, JSON.stringify({ city: "Chennai" }));
+		expect(b.restore()).toBe(false);
+		expect(window.localStorage.getItem(b.storageKey)).toBeNull();
 	});
 });

@@ -67,6 +67,22 @@ export function billingStorageKey(site, user) {
 	return `${BILLING_LS_PREFIX}::${site || "_"}::${user || "_"}`;
 }
 
+// How long a transitional snapshot may live before it is treated as absent and
+// deleted on sight.
+//
+// This exists because the snapshot no longer dies at the durable-write ack (see
+// markBillingSaved: dying there is what emptied the Details form after a checkout
+// round trip). Moving the clear to the END of onboarding fixed resuming, but a
+// customer who ABANDONS - closes the tab at the pay screen, never comes back -
+// then never reaches the end, and their address, GSTIN and work email would sit
+// in localStorage on a shared or kiosk browser forever. Neither "clear at the ack"
+// nor "clear at the end" is sufficient on its own; retention has to be bounded by
+// TIME, which holds however the customer leaves.
+//
+// 24 hours matches the verification link's own life, so the window never outlives
+// a signup that could still legitimately be resumed.
+export const BILLING_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
+
 // ERP-defaults response (get_company_onboarding_defaults data) -> field values.
 function fieldValuesFromDefaults(data) {
 	const contact = (data && data.contact) || {};
@@ -96,8 +112,10 @@ function fieldValuesFromSummary(s) {
  * @param {string} opts.site  canonical site identity (window.location.host)
  * @param {string} opts.user  logged-in user id (namespaces the transitional key)
  * @param {Storage} [opts.storage]  defaults to window.localStorage
+ * @param {Function} [opts.now]  ms clock, injected so the snapshot TTL is testable
  */
 export function useBillingDetails(opts = {}) {
+	const now = opts.now || (() => Date.now());
 	const site = opts.site || "";
 	const user = opts.user || "";
 	const storage =
@@ -224,6 +242,9 @@ export function useBillingDetails(opts = {}) {
 					gstin: fields.gstin.value,
 					email: identity.email,
 					company: identity.company,
+					// Stamped on every write so restore() can bound how long this PII
+					// lives, whatever happens to the session that wrote it.
+					saved_at: now(),
 				})
 			);
 		} catch (e) {
@@ -243,6 +264,21 @@ export function useBillingDetails(opts = {}) {
 			d = JSON.parse(storage.getItem(key) || "{}");
 		} catch (e) {
 			return false; // corrupt entry — ignore
+		}
+		// Past its window: treat as absent AND delete it. This is the retention bound
+		// that "clear when onboarding finishes" cannot provide on its own, because a
+		// customer who abandons at the pay screen never reaches the finish. Deleting
+		// on READ is deliberate: it needs no timer, no lifecycle hook and no
+		// cooperation from the page that abandoned, and the next visit to any
+		// onboarding screen is what collects it.
+		//
+		// A snapshot with NO stamp is one written by a build older than this change.
+		// It is dropped too, on the same reasoning: its age is unknowable, so it
+		// cannot be shown to be within the window.
+		const savedAt = Number(d && d.saved_at);
+		if (!Number.isFinite(savedAt) || now() - savedAt > BILLING_SNAPSHOT_TTL_MS) {
+			clearStorage();
+			return false;
 		}
 		let any = false;
 		for (const name of BILLING_FIELDS) {
