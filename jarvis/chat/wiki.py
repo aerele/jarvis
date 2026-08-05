@@ -1109,9 +1109,13 @@ def apply_extracted_page_updates(
 	updates instead of the ``(applied, failed)`` tuple, so the caller can record
 	EXACTLY the pages that were written and count a provenance REFUSAL (a
 	``_apply_one_update`` returning ``False``) as failed — the aggregate tuple
-	cannot distinguish "created page B" from "refused colliding page A". The
-	tuple path is unchanged for every existing caller (a refusal stays silently
-	dropped there, byte-for-byte).
+	cannot distinguish "created page B" from "refused colliding page A".
+
+	#613: the tuple path now counts a refusal as FAILED too, and logs it. It used to
+	count it as neither and leave no trace, so an all-refused batch returned (0, 0);
+	``_ingest_note`` retries only on ``failed``, so the voice note was marked Processed
+	with "nothing durable found" and its knowledge was lost for good. Both paths now
+	agree on what a refusal means, which is what stopped this being visible.
 	"""
 	if not isinstance(updates, list):
 		return [] if return_outcomes else (0, 0)
@@ -1161,6 +1165,18 @@ def apply_extracted_page_updates(
 			reason = "applied" if ok else "refused"
 			if ok:
 				applied += 1
+			else:
+				# #613: a refusal used to count as NEITHER applied nor failed and left no
+				# trace at all. ``_ingest_note`` retries only on ``failed``, so an
+				# all-refused batch returned (0, 0), the voice note was marked Processed
+				# with "nothing durable found", and the knowledge was gone for good with
+				# nothing for the tenant to look at.
+				#
+				# Counted as failed so the note stays New for the daily sweep, and so this
+				# path agrees with the ``return_outcomes`` one, which already treats a
+				# refusal as failed. The two disagreeing is what hid this.
+				failed += 1
+				_log_refused_update(update, source, ref)
 			try:
 				frappe.db.release_savepoint(sp)
 			except Exception:
@@ -1179,6 +1195,34 @@ def apply_extracted_page_updates(
 	if return_outcomes:
 		return [r if r is not None else {"slug": None, "ok": False, "reason": "skipped"} for r in results]
 	return applied, failed
+
+
+def _log_refused_update(update: dict, source: str, ref: str | None) -> None:
+	"""Record WHY an update was refused, so knowledge lost this way is diagnosable (#613).
+
+	``_apply_one_update`` answers a bare bool, so the shape of the refused update is the
+	only evidence available at this layer, and it is the evidence that matters: the
+	common refusal is an update naming no existing page while carrying neither ``title``
+	nor ``page_type``, which cannot mint one. PR #611 made that shape ordinary rather
+	than rare by telling the ingest to emit ``append_md``.
+
+	Field NAMES and presence only. The body of a voice note is the customer's own
+	content and must not be copied into an Error Log."""
+	try:
+		frappe.log_error(
+			title="wiki: page update refused",
+			message=(
+				f"source={source} ref={ref}\n"
+				f"slug={_normalize_slug(update.get('slug'))!r}\n"
+				f"has_title={bool(str(update.get('title') or '').strip())} "
+				f"page_type={(update.get('page_type') or '').strip()!r}\n"
+				f"scope={(update.get('scope') or '').strip()!r} "
+				f"has_target_user={bool(update.get('target_user'))}\n"
+				f"carries={sorted(k for k in ('body_md', 'append_md', 'summary') if update.get(k))}"
+			),
+		)
+	except Exception:
+		pass
 
 
 def _apply_one_update(

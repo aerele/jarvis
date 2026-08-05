@@ -393,3 +393,69 @@ class TestVoiceIngestPreservesHumanEdits(FrappeTestCase):
 			voice_facts._apply_personalise_context(facts, "b@test.invalid", ref="NOTE-1")
 		self.assertTrue(apply_mock.call_args.kwargs["preserve_curated"])
 		self.assertEqual(apply_mock.call_args.kwargs["target_user"], "b@test.invalid")
+
+
+class TestRefusedUpdateIsNotSilent(FrappeTestCase):
+	"""#613: a refused update counted as NEITHER applied nor failed and left no trace.
+
+	``_ingest_note`` retries only on ``failed``, so an all-refused batch returned (0, 0),
+	the voice note was marked Processed with "nothing durable found", and the knowledge
+	was gone for good with nothing for the tenant to look at. PR #611 made the refusing
+	shape ordinary rather than rare by telling the ingest to emit ``append_md``."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_delete_test_pages()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_delete_test_pages()
+
+	def _voice(self, update):
+		return wiki.apply_extracted_page_updates(
+			[update], "voice", "b@test.invalid", allow_body_replace=False, preserve_curated=True
+		)
+
+	def test_an_update_that_cannot_mint_a_page_counts_as_failed(self):
+		"""No existing page, and neither ``title`` nor ``page_type`` to create one. This
+		is THE shape that lost knowledge: it used to return (0, 0), which reads as
+		"nothing to do" to the caller."""
+		applied, failed = self._voice({"slug": "no-such-page-here", "append_md": "Real knowledge."})
+		self.assertEqual(applied, 0)
+		self.assertEqual(failed, 1, "a refusal must be visible to _ingest_note's retry check")
+
+	def test_a_refusal_is_logged_with_the_shape_that_caused_it(self):
+		with patch.object(wiki.frappe, "log_error") as logged:
+			self._voice({"slug": "no-such-page-here", "append_md": "Real knowledge."})
+		self.assertTrue(logged.called, "a refusal must leave a trace to diagnose")
+		msg = " ".join(str(c.kwargs.get("message", "")) for c in logged.call_args_list)
+		self.assertIn("has_title=False", msg)
+		self.assertIn("append_md", msg, "the log should say what the update DID carry")
+
+	def test_the_refusal_log_does_not_leak_the_notes_content(self):
+		"""A voice note is the customer's own words. Field names and presence only."""
+		secret = "PATIENT-ZERO-CONFIDENTIAL-BODY"
+		with patch.object(wiki.frappe, "log_error") as logged:
+			self._voice({"slug": "no-such-page-here", "append_md": secret})
+		msg = " ".join(str(c.kwargs.get("message", "")) for c in logged.call_args_list)
+		self.assertNotIn(secret, msg)
+
+	def test_a_valid_update_is_unaffected(self):
+		"""Control: the ordinary path still reports (1, 0) and logs nothing."""
+		_make_page(ALPHA_SLUG, ALPHA, body_md="Existing.")
+		with patch.object(wiki.frappe, "log_error") as logged:
+			applied, failed = self._voice({"slug": ALPHA_SLUG, "append_md": "More knowledge."})
+		self.assertEqual((applied, failed), (1, 0))
+		self.assertFalse(logged.called)
+
+	def test_a_creatable_update_still_creates(self):
+		"""Control: an update carrying an identity mints the page rather than refusing."""
+		applied, failed = self._voice(
+			{
+				"slug": "customer--wikifence-newly-minted",
+				"title": "Wikifence Newly Minted",
+				"page_type": "Customer",
+				"append_md": "First fact.",
+			}
+		)
+		self.assertEqual((applied, failed), (1, 0))
