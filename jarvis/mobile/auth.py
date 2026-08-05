@@ -219,6 +219,20 @@ def _pairing_payload() -> dict:
 	}
 
 
+def _qr_svg_b64(data: str) -> str:
+	"""Render `data` as a base64-encoded SVG QR (dark modules on white, scale 5,
+	quiet zone 2). Shared by the pairing + PWA QR endpoints."""
+	from pyqrcode import create as qrcreate
+
+	qr = qrcreate(data, error="M")
+	stream = BytesIO()
+	try:
+		qr.svg(stream, scale=5, quiet_zone=2, background="#ffffff", module_color="#111111")
+		return b64encode(stream.getvalue()).decode()
+	finally:
+		stream.close()
+
+
 @frappe.whitelist()
 def get_pairing_qr() -> dict:
 	"""Return an SVG QR (base64) encoding the site connection details, plus the
@@ -227,20 +241,9 @@ def get_pairing_qr() -> dict:
 	if not frappe.session.user or frappe.session.user == "Guest":
 		raise frappe.AuthenticationError
 
-	from pyqrcode import create as qrcreate
-
 	payload = _pairing_payload()
 	data = json.dumps(payload, separators=(",", ":"))
-
-	qr = qrcreate(data, error="M")
-	stream = BytesIO()
-	try:
-		qr.svg(stream, scale=5, quiet_zone=2, background="#ffffff", module_color="#111111")
-		svg_b64 = b64encode(stream.getvalue()).decode()
-	finally:
-		stream.close()
-
-	return {"svg": svg_b64, "payload": payload}
+	return {"svg": _qr_svg_b64(data), "payload": payload}
 
 
 @frappe.whitelist()
@@ -252,8 +255,6 @@ def get_pwa_qr() -> dict:
 	if not frappe.session.user or frappe.session.user == "Guest":
 		raise frappe.AuthenticationError
 
-	from pyqrcode import create as qrcreate
-
 	# Local dev foolproofing: if the site host is localhost, swap in the LAN IP so
 	# the scanned URL is reachable from a phone. Production hosts are never local.
 	base = frappe.utils.get_url()
@@ -264,12 +265,4 @@ def get_pwa_qr() -> dict:
 		if lan:
 			base = f"{parsed.scheme}://{lan}" + (f":{parsed.port}" if parsed.port else "")
 	url = base.rstrip("/") + "/jarvis-mobile"
-	qr = qrcreate(url, error="M")
-	stream = BytesIO()
-	try:
-		qr.svg(stream, scale=5, quiet_zone=2, background="#ffffff", module_color="#111111")
-		svg_b64 = b64encode(stream.getvalue()).decode()
-	finally:
-		stream.close()
-
-	return {"svg": svg_b64, "url": url}
+	return {"svg": _qr_svg_b64(url), "url": url}

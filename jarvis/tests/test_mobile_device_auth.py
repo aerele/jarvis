@@ -31,6 +31,7 @@ import contextlib
 import hashlib
 import hmac
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -615,3 +616,47 @@ class TestStorageAndTelemetry(MobileDeviceBase):
 			get_datetime(stale),
 			"an authentication past the window must refresh last_used",
 		)
+
+
+# --------------------------------------------------------------------------- #
+# 7. The onboarding QR endpoints (pairing + PWA) share one SVG renderer.
+# --------------------------------------------------------------------------- #
+class TestQrEndpoints(MobileDeviceBase):
+	"""get_pairing_qr + get_pwa_qr both render through _qr_svg_b64. Pin that each
+	still produces a decodable SVG, stays Guest-gated, and that the PWA URL is the
+	public /jarvis-mobile route (incl. the dev localhost -> LAN-IP swap)."""
+
+	def _svg_bytes(self, b64: str) -> bytes:
+		from base64 import b64decode
+
+		return b64decode(b64)
+
+	def test_pwa_qr_returns_decodable_svg_and_mobile_url(self):
+		with _as(USER_A):
+			out = mobile_auth.get_pwa_qr()
+		self.assertTrue(out["url"].endswith("/jarvis-mobile"))
+		self.assertIn(b"<svg", self._svg_bytes(out["svg"]))
+
+	def test_pairing_qr_still_renders_after_shared_helper(self):
+		with _as(USER_A):
+			out = mobile_auth.get_pairing_qr()
+		self.assertIn("payload", out)
+		self.assertIn(b"<svg", self._svg_bytes(out["svg"]))
+
+	def test_both_qr_endpoints_reject_guest(self):
+		with _as("Guest"):
+			with self.assertRaises(frappe.AuthenticationError):
+				mobile_auth.get_pwa_qr()
+			with self.assertRaises(frappe.AuthenticationError):
+				mobile_auth.get_pairing_qr()
+
+	def test_pwa_url_swaps_localhost_for_lan_ip_in_dev(self):
+		# A localhost site host is unreachable from a phone, so the scanned URL must
+		# carry the LAN IP while preserving scheme, port, and the /jarvis-mobile path.
+		with (
+			_as(USER_A),
+			patch("frappe.utils.get_url", return_value="http://localhost:8002"),
+			patch.object(mobile_auth, "_lan_ip", return_value="192.168.1.50"),
+		):
+			out = mobile_auth.get_pwa_qr()
+		self.assertEqual(out["url"], "http://192.168.1.50:8002/jarvis-mobile")

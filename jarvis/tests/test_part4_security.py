@@ -487,6 +487,7 @@ _OPEN_ALLOWLIST = {
 	"onboarding.list_payment_providers": "public gateway list for the onboarding chooser; keys only, no secret",
 	"onboarding.get_llm_sync_status": "sanitized sync poller, needed pre-role-settle",
 	"mobile.auth.get_pairing_qr": "Guest-rejected; encodes only the site URL, no secret",
+	"mobile.auth.get_pwa_qr": "Guest-rejected; encodes only the public PWA URL, no secret",
 }
 
 _COVERED_MODULES = {
