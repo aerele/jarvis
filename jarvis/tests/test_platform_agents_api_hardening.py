@@ -1381,6 +1381,36 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 				name = self._install(schedule_time=good)
 				self.assertEqual(str(frappe.db.get_value(INSTALLATION, name, "schedule_time")), good)
 
+	def test_a_legacy_bad_time_does_not_block_an_unrelated_save(self):
+		"""The whole premise of this fix is that bad values are ALREADY on rows, so
+		validating every save would make those rows permanently un-saveable:
+		``set_enabled`` and ``set_config`` both go through ``doc.save()``, and the
+		customer would be unable to disable or reconfigure the agent without first
+		repairing a field they never touched. Only inserts and saves that actually
+		change ``schedule_time`` are litigated."""
+		name = self._install()
+		frappe.db.sql(
+			"UPDATE `tabJarvis Agent Installation` SET schedule_time='99:00:00' WHERE name=%(n)s",
+			{"n": name},
+		)
+		frappe.db.commit()
+
+		doc = frappe.get_doc(INSTALLATION, name)
+		doc.enabled = 0
+		doc.flags.ignore_permissions = True
+		doc.save(ignore_permissions=True)  # must NOT raise
+		self.assertEqual(frappe.utils.cint(frappe.db.get_value(INSTALLATION, name, "enabled")), 0)
+
+	def test_writing_a_bad_time_onto_an_existing_row_is_still_refused(self):
+		"""The other half of the same scoping: leaving legacy rows saveable must not
+		open a door for a NEW bad value on an existing row."""
+		name = self._install(schedule_time="09:00:00")
+		doc = frappe.get_doc(INSTALLATION, name)
+		doc.schedule_time = "99:00:00"
+		doc.flags.ignore_permissions = True
+		with self.assertRaises(frappe.ValidationError):
+			doc.save(ignore_permissions=True)
+
 	# ---- sweep fault isolation (gap 2) ---------------------------------------- #
 
 	def test_one_exploding_installation_does_not_abort_the_sweep(self):

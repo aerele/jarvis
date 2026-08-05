@@ -153,16 +153,22 @@ class JarvisAgentInstallation(Document):
 
 		Checked whenever a value is PRESENT, not only when ``schedule_enabled`` is on:
 		with the schedule off a bad value persists happily, and a later flip of
-		``schedule_enabled`` would hand the stored garbage straight to the sweep."""
-		if self.schedule_time in (None, ""):
-			return
-		from jarvis.chat.macro_scheduler import parse_schedule_seconds
+		``schedule_enabled`` would hand the stored garbage straight to the sweep.
 
-		if parse_schedule_seconds(self.schedule_time) is None:
-			frappe.throw(
-				_("Schedule time must be a time of day between 00:00:00 and 23:59:59."),
-				title=_("Invalid schedule time"),
-			)
+		Scoped to inserts and to saves that actually TOUCH ``schedule_time``. The whole
+		premise of this fix is that out-of-range values are already on rows out there,
+		so validating every save would make those rows permanently un-saveable: both
+		``agents_api.set_enabled`` and ``set_config`` go through ``doc.save()``, and a
+		customer would be unable to disable or reconfigure the agent without first
+		repairing a field they were not editing. Same reasoning ``_guard_installability``
+		gives for leaving an already-non-installable row saveable so it can still be
+		repaired. A legacy bad value therefore keeps its 09:00 fallback until someone
+		writes the field, and any write of a bad value is refused."""
+		if not (self.is_new() or self.has_value_changed("schedule_time")):
+			return
+		from jarvis.chat.macro_scheduler import validate_schedule_time_or_throw
+
+		validate_schedule_time_or_throw(self.schedule_time)
 
 	def _validate_schedule_budget(self):
 		"""A14: warn (do not hard-block) when an enabled schedule's expected monthly

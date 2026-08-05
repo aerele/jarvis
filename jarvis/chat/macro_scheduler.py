@@ -336,6 +336,27 @@ def parse_schedule_seconds(t) -> int | None:
 	return secs if 0 <= secs <= _MAX_SECONDS else None
 
 
+def validate_schedule_time_or_throw(value) -> None:
+	"""Refuse a ``schedule_time`` that is not a time of day, with the field error the
+	SPA renders.
+
+	ONE definition of the rule, called by ``JarvisMacro`` (#472) and
+	``JarvisAgentInstallation`` (#648). Both controllers previously carried their own
+	copy, so a change to the range, the message or the empty-value exemption had to be
+	made twice, and missing one would let the two DocTypes accept different values,
+	which is the drift #472 and #648 were both filed to close.
+
+	An empty value is exempt on purpose: ``schedule_time`` is optional and the
+	schedulers already treat an unset time as the 09:00 default."""
+	if value in (None, ""):
+		return
+	if parse_schedule_seconds(value) is None:
+		frappe.throw(
+			frappe._("Schedule time must be a time of day between 00:00:00 and 23:59:59."),
+			title=frappe._("Invalid schedule time"),
+		)
+
+
 def _time_to_seconds(t) -> int:
 	"""TOLERANT reader, for the cron. A value the strict parser rejects has already
 	been persisted, so refusing it here would only take the schedule arithmetic down
