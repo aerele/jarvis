@@ -231,9 +231,12 @@
 				<!-- Host buttons on the RIGHT (chat: dictation mic + model picker),
 				     between the left cluster and the Enter hint + send button. -->
 				<slot name="right-toolbar" />
-				<span style="font-size: 11px; color: var(--text-3); margin-right: 2px">{{
-					busy ? "Stop" : "Enter ↵"
-				}}</span>
+				<!-- Only the "Stop" label survives here: it labels a real action the
+				     user can take mid-reply. The idle "Enter" hint was noise next to a
+				     send button that already says what it does. -->
+				<span v-if="busy" style="font-size: 11px; color: var(--text-3); margin-right: 2px"
+					>Stop</span
+				>
 				<button
 					v-if="busy"
 					@click="emit('stop')"

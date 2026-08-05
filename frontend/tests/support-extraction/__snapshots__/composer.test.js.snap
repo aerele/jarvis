@@ -31,7 +31,11 @@ exports[`composer renders identically (light) 1`] = `
         </svg></button>
       <div data-v-680708eb="" style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
         <!-- Host buttons on the RIGHT (chat: dictation mic + model picker),
-				     between the left cluster and the Enter hint + send button. --><span data-v-680708eb="" style="font-size: 11px; color: var(--text-3); margin-right: 2px;">Enter ↵</span><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+				     between the left cluster and the Enter hint + send button. -->
+        <!-- Only the "Stop" label survives here: it labels a real action the
+				     user can take mid-reply. The idle "Enter" hint was noise next to a
+				     send button that already says what it does. -->
+        <!--v-if--><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <path data-v-680708eb="" d="M12 19V5M5 12l7-7 7 7"></path>
           </svg></button>
       </div>
@@ -72,7 +76,11 @@ exports[`dark render 1`] = `
         </svg></button>
       <div data-v-680708eb="" style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
         <!-- Host buttons on the RIGHT (chat: dictation mic + model picker),
-				     between the left cluster and the Enter hint + send button. --><span data-v-680708eb="" style="font-size: 11px; color: var(--text-3); margin-right: 2px;">Enter ↵</span><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+				     between the left cluster and the Enter hint + send button. -->
+        <!-- Only the "Stop" label survives here: it labels a real action the
+				     user can take mid-reply. The idle "Enter" hint was noise next to a
+				     send button that already says what it does. -->
+        <!--v-if--><button data-v-680708eb="" class="jv-sendbtn ready" style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: var(--cta); border-radius: 8px; cursor: pointer;"><svg data-v-680708eb="" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--cta-fg)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <path data-v-680708eb="" d="M12 19V5M5 12l7-7 7 7"></path>
           </svg></button>
       </div>
