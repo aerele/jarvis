@@ -496,3 +496,91 @@ describe("the status keeps updating past the blocking wait (defect 3)", () => {
 		expect(api.getLlmSyncStatus.mock.calls.length).toBe(before);
 	});
 });
+
+/**
+ * PROVIDER_DEFAULTS is the local fallback for "which api-key model does this
+ * provider preselect", used only while the admin catalog fetch is in flight or
+ * after it fails. It is a hand-maintained mirror of the catalog's api_key
+ * is_default, and nothing enforces the pairing: the 2026-07-26 catalog refresh
+ * moved six ids and left this copy behind, so a customer whose catalog fetch
+ * failed got preselected onto two vendor-DEPRECATED ids (deepseek-chat, retired
+ * 2026-07-24, and llama-3.3-70b-versatile, retired 2026-06-17).
+ *
+ * These lock the fallback to the catalog. If a future refresh moves an id in
+ * jarvis/_model_catalog.py without moving it here, this fails instead of
+ * silently shipping a dead default.
+ */
+describe("api-key model defaults survive a failed catalog fetch", () => {
+	// The six the 2026-07-26 refresh stranded, plus the ones that were already
+	// correct, so the whole table is covered rather than just the regression.
+	const EXPECTED = {
+		OpenAI: "gpt-5.6",
+		Anthropic: "claude-sonnet-5",
+		"Google Gemini": "gemini-3.6-flash",
+		Mistral: "mistral-large-latest",
+		Groq: "openai/gpt-oss-120b",
+		"Together AI": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+		DeepSeek: "deepseek-v4-flash",
+		"Moonshot (Kimi)": "kimi-k2.6",
+		"xAI Grok": "grok-4.5",
+		"GLM / Z.ai": "glm-4.7",
+		"GLM / Z.ai (Coding Plan)": "glm-4.7",
+		OpenRouter: "anthropic/claude-sonnet-4-6",
+		"Ollama (local)": "llama3",
+	};
+
+	it("falls back to the catalog's current api_key default for every provider", async () => {
+		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
+		const w = await mountEditor();
+
+		for (const [label, model] of Object.entries(EXPECTED)) {
+			expect(`${label}=${w.vm.providerDefaultModel(label)}`).toBe(`${label}=${model}`);
+		}
+	});
+
+	it("never falls back to a vendor-deprecated id", async () => {
+		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
+		const w = await mountEditor();
+
+		expect(w.vm.providerDefaultModel("DeepSeek")).not.toBe("deepseek-chat");
+		expect(w.vm.providerDefaultModel("Groq")).not.toBe("llama-3.3-70b-versatile");
+	});
+
+	it("clears the model for providers that have no default", async () => {
+		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
+		const w = await mountEditor();
+
+		expect(w.vm.providerDefaultModel("vLLM (local)")).toBe("");
+		expect(w.vm.providerDefaultModel("OpenAI-Compatible")).toBe("");
+	});
+
+	it("snaps a row's model to the fallback when the provider is switched", async () => {
+		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
+		const w = await mountEditor();
+		const row = w.vm.rows[0] || (w.vm.rows.push(w.vm.newRow?.() ?? {}), w.vm.rows[0]);
+
+		w.vm.onProviderChange(row, "DeepSeek");
+		expect(row.model).toBe("deepseek-v4-flash");
+		expect(row.baseUrl).toBe("https://api.deepseek.com");
+
+		w.vm.onProviderChange(row, "Groq");
+		expect(row.model).toBe("openai/gpt-oss-120b");
+	});
+
+	it("prefers the fetched catalog over the local literal", async () => {
+		// The literal is only a stand-in. When admin answers, admin wins - that is
+		// what lets an operator add a model in the desk with no deploy.
+		api.getModelCatalogUi.mockResolvedValue({
+			api_key_models: {
+				DeepSeek: [{ model_id: "deepseek-v9-future", label: "", is_default: true }],
+			},
+			subscription_models: {},
+			default_models: {},
+		});
+		const w = await mountEditor();
+
+		expect(w.vm.providerDefaultModel("DeepSeek")).toBe("deepseek-v9-future");
+		// A provider the catalog did not mention still uses the literal.
+		expect(w.vm.providerDefaultModel("Groq")).toBe("openai/gpt-oss-120b");
+	});
+});

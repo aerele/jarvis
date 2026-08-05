@@ -2901,7 +2901,7 @@ function onProviderChange(m, newProvider) {
 	m.provider = newProvider;
 	if (!changed) return;
 	// Snap the model + base URL to the NEW provider's defaults, replacing any
-	// leftover from the previous provider — so picking "GLM / Z.ai" gives glm-4.6,
+	// leftover from the previous provider — so picking "GLM / Z.ai" gives glm-4.7,
 	// not whatever model was there before. Providers with no default model
 	// (OpenAI-Compatible / vLLM) clear the field so the user types their own.
 	const d = PROVIDER_DEFAULTS[m.provider] || {};
