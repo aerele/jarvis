@@ -21,8 +21,8 @@
 			<CheckMark v-if="persona === opt.value" />
 		</button>
 		<div class="pop-note">
-			Persona is voice only. It applies to every chat and device, and takes effect from the
-			next message.
+			Persona only changes the assistant's tone, not its tools or answers. It applies to
+			every chat and device, and takes effect from the next message.
 		</div>
 	</div>
 </template>
