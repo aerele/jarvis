@@ -293,9 +293,23 @@
 												: undefined
 										"
 									>
-										<label for="jv-ob-company" class="text-xs text-ink-gray-5"
-											>Company *</label
-										>
+										<!-- #668: hand-rolled because JvCombo has no label prop, so this
+										     mirrors FormLabel's required recipe (red asterisk + sr-only
+										     text), the same way TriggerDetail.vue does for Autocomplete.
+										     A literal "Company *" gave this field a grey asterisk while
+										     Work email, a plain FormControl, got FormLabel's red one - the
+										     two required fields on one form marked themselves differently.
+										     It also read aloud as "Company star" with nothing saying the
+										     field was required. -->
+										<label for="jv-ob-company" class="text-xs text-ink-gray-5">
+											Company
+											<span
+												class="select-none text-ink-red-3"
+												aria-hidden="true"
+												>*</span
+											>
+											<span class="sr-only">(required)</span>
+										</label>
 										<JvCombo
 											id="jv-ob-company"
 											:model-value="state.company"
