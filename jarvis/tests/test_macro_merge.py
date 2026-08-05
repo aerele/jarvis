@@ -267,6 +267,75 @@ class TestMergeApplyHook(_MacroMergeBase):
 		self.assertEqual(doc.merged_prompt or "", "")
 		# failed ≠ blocked: the sequence runs (checked in TestMergedRun fallback)
 
+	def test_a_fault_in_the_merge_path_lands_failed_not_pending(self):
+		"""#632: a code fault used to skip the landing write entirely, leaving
+		merge_status on "pending" forever. "pending" means "still merging", so nothing
+		ever revisits it: the Run button never enables and a genuine bug is
+		indistinguishable from work in progress. The concrete case was an ImportError
+		from the lazy cross-file ``_MERGE_RE`` import, which no test on either side of
+		that boundary noticed."""
+		from jarvis.chat import macros
+
+		m, conv = self._pending_macro_with_reply(MERGE_BLOCK)
+		with patch.object(macros, "_merge_outcome", side_effect=ImportError("boom")):
+			macros.advance_after_turn(conv, errored=False)
+
+		doc = frappe.get_doc("Jarvis Macro", m.name)
+		self.assertEqual(doc.merge_status, "failed", "a fault must not leave the macro pending")
+		self.assertEqual(doc.merged_prompt or "", "")
+		self.assertEqual(doc.merge_conversation or "", "", "the throwaway link must be cleared")
+		self.assertFalse(
+			frappe.db.exists("Jarvis Conversation", conv),
+			"a fault must not orphan the throwaway conversation",
+		)
+
+	def test_a_fault_still_tells_the_open_tab(self):
+		"""Writing the row but skipping the socket publish would fix the database and
+		not the user: an open tab learns the outcome ONLY from ``macro:merged``, so the
+		Run button would sit disabled on "summarizing" until a manual reload, which is
+		the very symptom #632 is about. Both paths run the same terminal step."""
+		from jarvis.chat import macros
+
+		m, conv = self._pending_macro_with_reply(MERGE_BLOCK)
+		with (
+			patch.object(macros, "_merge_outcome", side_effect=ImportError("boom")),
+			patch.object(macros, "publish_to_user") as pub,
+		):
+			macros.advance_after_turn(conv, errored=False)
+
+		self.assertTrue(pub.called, "the SPA must be told the merge finished, even on a fault")
+		payload = pub.call_args[0][1]
+		self.assertEqual(payload["kind"], "macro:merged")
+		self.assertEqual(payload["macro"], m.name)
+		self.assertEqual(payload["status"], "failed")
+
+	def test_a_fault_in_the_merge_path_is_logged_not_silent(self):
+		"""The other half: the fault is re-raised out of _apply_merge_after_turn so the
+		caller records a real traceback. Before this it was swallowed with no log, no
+		failed status and no user-visible error."""
+		from jarvis.chat import macros
+
+		m, conv = self._pending_macro_with_reply(MERGE_BLOCK)
+		with (
+			patch.object(macros, "_merge_outcome", side_effect=ImportError("boom")),
+			patch.object(macros.frappe, "log_error") as logged,
+		):
+			macros.advance_after_turn(conv, errored=False)
+
+		self.assertTrue(logged.called, "a code fault here must reach the Error Log")
+		titles = " ".join(str(c.kwargs.get("title", "")) for c in logged.call_args_list)
+		self.assertIn("merge-apply failed", titles)
+
+	def test_a_fault_still_does_not_strand_the_turn(self):
+		"""The contract advance_after_turn's docstring states: a macro bug must never
+		raise into a normal turn. Re-raising from _apply_merge_after_turn must not
+		change that, so the outer guard is what callers keep relying on."""
+		from jarvis.chat import macros
+
+		_, conv = self._pending_macro_with_reply(MERGE_BLOCK)
+		with patch.object(macros, "_merge_outcome", side_effect=ImportError("boom")):
+			macros.advance_after_turn(conv, errored=False)  # must not raise
+
 	def test_unmergeable_reply_marks_failed(self):
 		from jarvis.chat import macros
 

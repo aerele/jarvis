@@ -310,6 +310,88 @@ def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 		frappe.log_error(title="jarvis macro advance failed", message=frappe.get_traceback())
 
 
+def _merge_outcome(conversation_id: str, *, errored: bool) -> tuple[str, str]:
+	"""``(merge_status, merged_prompt)`` for a finished summarize turn.
+
+	Split out of :func:`_apply_merge_after_turn` (#632) so the landing write can be
+	guaranteed to happen even when reading the outcome throws. ``failed`` is the
+	default, so every path that is not a clean, mergeable answer lands as failed and
+	the macro falls back to its step sequence."""
+	if errored:
+		return "failed", ""
+	rows = frappe.get_all(
+		MSG,
+		filters={"conversation": conversation_id, "role": "assistant"},
+		fields=["content", "streaming", "error"],
+		order_by="seq desc",
+		limit=1,
+	)
+	m = rows[0] if rows else None
+	if not m or m.streaming or (m.error or "").strip():
+		return "failed", ""
+	# Lazily imported across the file boundary, and #632 is precisely the fallout of
+	# that: a cleanup deleted _MERGE_RE from macros_api because it looked unused
+	# THERE, and neither file's tests noticed. The guard in the caller now makes that
+	# class of breakage loud instead of an eternal "pending".
+	from jarvis.chat.macros_api import _MERGE_RE
+
+	mt = _MERGE_RE.search(m.content or "")
+	try:
+		merge = frappe.parse_json(mt.group(1).strip()) if mt else None
+	except Exception:
+		merge = None
+	if isinstance(merge, dict) and merge.get("mergeable") and str(merge.get("merged_prompt") or "").strip():
+		return "ready", str(merge.get("merged_prompt")).strip()
+	return "failed", ""
+
+
+def _finish_merge(macro_name: str, conversation_id: str, status: str, merged: str) -> None:
+	"""Land the terminal merge outcome, bin the throwaway conversation, tell the SPA.
+
+	The ONE place ``merge_status`` leaves ``pending``, and the one place the three
+	terminal steps live, so the success path and the fault path cannot do different
+	amounts of work (#632). Committed immediately: a caller may be about to re-raise,
+	and these writes must survive that.
+
+	Reads the owner with ``get_value`` rather than ``get_doc`` deliberately. The doc
+	fetch used to sit ahead of the guard, so a row deleted in the window between
+	finding it and loading it threw before anything could be written and left
+	``merge_status`` on ``pending``, which is the exact bug this function exists to
+	prevent."""
+	frappe.db.set_value(
+		MACRO,
+		macro_name,
+		{"merged_prompt": merged, "merge_status": status, "merge_conversation": ""},
+		update_modified=False,
+	)
+	frappe.db.commit()
+
+	# The throwaway conversation served its purpose - clean it up best-effort.
+	try:
+		frappe.db.delete(MSG, {"conversation": conversation_id})
+		frappe.delete_doc("Jarvis Conversation", conversation_id, force=True, ignore_permissions=True)
+		frappe.db.commit()
+	except Exception:
+		pass
+
+	# Best-effort too: an open tab learns the outcome ONLY from this event, but a
+	# publish failure must not undo a landed merge or mask the fault being re-raised.
+	try:
+		row = frappe.db.get_value(MACRO, macro_name, ["owner", "macro_name"], as_dict=True)
+		if row:
+			publish_to_user(
+				row.owner,
+				{
+					"kind": "macro:merged",
+					"macro": macro_name,
+					"macro_name": row.macro_name,
+					"status": status,
+				},
+			)
+	except Exception:
+		pass
+
+
 def _apply_merge_after_turn(conversation_id: str, *, errored: bool) -> None:
 	"""When a macro's background summarize turn ends, land the result on the
 	macro — server-side, so the summary arrives even if the user's tab is gone.
@@ -322,58 +404,34 @@ def _apply_merge_after_turn(conversation_id: str, *, errored: bool) -> None:
 	)
 	if not macro_name:
 		return
-	doc = frappe.get_doc(MACRO, macro_name)
-	status, merged = "failed", ""
-	if not errored:
-		rows = frappe.get_all(
-			MSG,
-			filters={"conversation": conversation_id, "role": "assistant"},
-			fields=["content", "streaming", "error"],
-			order_by="seq desc",
-			limit=1,
-		)
-		m = rows[0] if rows else None
-		if m and not m.streaming and not (m.error or "").strip():
-			from jarvis.chat.macros_api import _MERGE_RE
-
-			mt = _MERGE_RE.search(m.content or "")
-			try:
-				merge = frappe.parse_json(mt.group(1).strip()) if mt else None
-			except Exception:
-				merge = None
-			if (
-				isinstance(merge, dict)
-				and merge.get("mergeable")
-				and str(merge.get("merged_prompt") or "").strip()
-			):
-				status, merged = "ready", str(merge.get("merged_prompt")).strip()
-	frappe.db.set_value(
-		MACRO,
-		macro_name,
-		{
-			"merged_prompt": merged,
-			"merge_status": status,
-			"merge_conversation": "",
-		},
-		update_modified=False,
-	)
-	frappe.db.commit()
-	# The throwaway conversation served its purpose — clean it up best-effort.
 	try:
-		frappe.db.delete(MSG, {"conversation": conversation_id})
-		frappe.delete_doc("Jarvis Conversation", conversation_id, force=True, ignore_permissions=True)
-		frappe.db.commit()
+		status, merged = _merge_outcome(conversation_id, errored=errored)
 	except Exception:
-		pass
-	publish_to_user(
-		doc.owner,
-		{
-			"kind": "macro:merged",
-			"macro": macro_name,
-			"macro_name": doc.macro_name,
-			"status": status,
-		},
-	)
+		# #632: finish the macro as `failed` BEFORE re-raising. Everything inside
+		# _merge_outcome can throw - the lazy cross-file _MERGE_RE import most of all,
+		# which no test on either side notices if the symbol disappears - and a throw
+		# used to skip the landing write entirely, leaving merge_status on "pending".
+		#
+		# "pending" means "still merging", so nothing ever revisits it: the user waits
+		# forever on a Run button that will never enable, and a genuine code fault is
+		# indistinguishable from work in progress. "failed" is both true and safe, since
+		# it falls back to running the step sequence, which an unmergeable macro needs
+		# anyway.
+		#
+		# The SAME _finish_merge runs on both paths. Writing the row but skipping the
+		# socket publish would fix the database and not the user: an open tab only
+		# learns the outcome from `macro:merged`, so the Run button would still sit
+		# disabled on "summarizing" until a manual reload, which is the very symptom
+		# being fixed. Skipping the cleanup would likewise orphan a conversation and
+		# its messages on every fault.
+		#
+		# Re-raised on purpose rather than swallowed here. The caller
+		# (``advance_after_turn``) logs the traceback, which is what makes an
+		# ImportError or NameError in this path visible instead of silent, and its
+		# own guard preserves the contract that a macro bug never strands a normal turn.
+		_finish_merge(macro_name, conversation_id, "failed", "")
+		raise
+	_finish_merge(macro_name, conversation_id, status, merged)
 
 
 def stop_macro_run(run_name: str) -> dict:
