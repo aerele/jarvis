@@ -368,6 +368,30 @@
 				</div>
 			</div>
 
+			<!-- Jump to latest. stickToBottom already refuses to drag a reader who
+			     has scrolled up back down mid-reply, so without this arrow a long
+			     streamed answer left them stranded with no way back to the newest
+			     text but a manual scroll. Sits above the composer, over the body. -->
+			<button
+				v-if="showScrollDown && readinessResolved && readiness !== 'gate'"
+				class="jvp-jump"
+				type="button"
+				title="Jump to latest"
+				aria-label="Jump to latest"
+				@click="jumpToBottom"
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path
+						d="M6 9.5 L12 15.5 L18 9.5"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					/>
+				</svg>
+			</button>
+
 			<!-- Hidden entirely in the gate state, not merely disabled: there is
 			     nothing to send to yet, and a live-but-disabled composer would
 			     imply chat almost works. The "degraded" state keeps this, on
@@ -452,7 +476,8 @@
 						v-model="draft"
 						@focus="composerFocused = true"
 						@blur="composerFocused = false"
-						@input="autoGrow"
+						@input="onComposerInput"
+						@keydown="onComposerKey"
 						@keydown.enter.exact.prevent="send"
 					></textarea>
 					<button
@@ -647,6 +672,61 @@ const sending = ref(false);
 const composerFocused = ref(false);
 const resolving = ref("");
 const lastSent = ref("");
+// Prompt recall, matching the full chat: Up walks back through prompts sent from
+// this panel, Down walks forward and finally restores whatever was being typed.
+// Guarded on caret position so it never fights normal multi-line editing.
+const promptHistory = ref([]);
+const histIdx = ref(null);
+const histDraft = ref("");
+function onComposerInput() {
+	// Typing leaves history navigation. Without this, recalling a prompt, editing
+	// it, then pressing Down would throw the edit away for the next entry.
+	histIdx.value = null;
+	autoGrow();
+}
+function onComposerKey(e) {
+	const el = e.target;
+	if (
+		e.key === "ArrowUp" &&
+		(draft.value === "" || el.selectionStart === 0) &&
+		promptHistory.value.length
+	) {
+		e.preventDefault();
+		if (histIdx.value === null) {
+			histDraft.value = draft.value;
+			histIdx.value = promptHistory.value.length;
+		}
+		if (histIdx.value > 0) {
+			histIdx.value -= 1;
+			draft.value = promptHistory.value[histIdx.value];
+			nextTick(() => {
+				const p = draft.value.length;
+				el.setSelectionRange(p, p);
+				autoGrow();
+			});
+		}
+		return;
+	}
+	if (
+		e.key === "ArrowDown" &&
+		histIdx.value !== null &&
+		el.selectionStart === draft.value.length
+	) {
+		e.preventDefault();
+		if (histIdx.value < promptHistory.value.length - 1) {
+			histIdx.value += 1;
+			draft.value = promptHistory.value[histIdx.value];
+		} else {
+			histIdx.value = null;
+			draft.value = histDraft.value;
+		}
+		nextTick(() => {
+			const p = draft.value.length;
+			el.setSelectionRange(p, p);
+			autoGrow();
+		});
+	}
+}
 const isDark = ref(false);
 let unwatchTheme = null;
 const fileEl = ref(null);
@@ -777,16 +857,36 @@ async function scrollToBottom() {
 // way via pinnedToBottom). A user scroll updates the flag; a send / load / new
 // chat re-pins so a fresh turn always snaps to the bottom.
 const pinnedToBottom = ref(true);
+// Reveals the jump-to-latest arrow. Deliberately a wider gap than the pin
+// threshold: between the two the panel has stopped following the reply but the
+// reader is still close enough that an arrow would be noise.
+const showScrollDown = ref(false);
 function distanceFromBottom() {
 	const el = bodyEl.value;
 	if (!el) return 0;
 	return el.scrollHeight - el.scrollTop - el.clientHeight;
 }
 function onBodyScroll() {
-	pinnedToBottom.value = distanceFromBottom() <= 80;
+	const d = distanceFromBottom();
+	pinnedToBottom.value = d <= 80;
+	showScrollDown.value = d > 140;
 }
 function stickToBottom() {
-	if (pinnedToBottom.value) scrollToBottom();
+	// Growing content must never RE-PIN a reader who scrolled up: only their own
+	// scroll does that (onBodyScroll, on the @scroll listener). Just keep the
+	// jump-to-latest arrow's visibility honest as the panel grows.
+	if (pinnedToBottom.value) {
+		scrollToBottom();
+		// Following means we are at the newest text: clear any arrow a mid-growth
+		// scroll event flipped on, or it lingers pointing nowhere.
+		showScrollDown.value = false;
+	} else showScrollDown.value = distanceFromBottom() > 140;
+}
+// Arrow click: re-pin so the panel follows the rest of the reply again.
+function jumpToBottom() {
+	pinnedToBottom.value = true;
+	showScrollDown.value = false;
+	scrollToBottom();
 }
 
 function autoGrow() {
@@ -804,6 +904,13 @@ async function load() {
 	// an existing thread should be invisible.
 	loading.value = messages.value.length === 0;
 	loadError.value = "";
+	// ...and "invisible" has to include the scroll position. load() re-runs in
+	// place when a turn settles, and forcing the panel back to the newest message
+	// there is what yanked a reader away from the answer they were reading.
+	const _convAtEntry = convId.value;
+	const _hadThread = messages.value.length > 0;
+	const _keepScrollTop =
+		_hadThread && !pinnedToBottom.value && bodyEl.value ? bodyEl.value.scrollTop : null;
 	try {
 		if (!convId.value) {
 			const list = await listConversations();
@@ -815,6 +922,14 @@ async function load() {
 		}
 		const conv = await getConversation(convId.value);
 		messages.value = Array.isArray(conv?.messages) ? conv.messages : [];
+		// Seed recall from what was actually asked in this conversation. The panel
+		// is usually opened fresh on a Desk page, so without this Up would do
+		// nothing until you had already sent something in this page load.
+		promptHistory.value = messages.value
+			.filter((m) => m.role === "user" && typeof m.content === "string" && m.content.trim())
+			.map((m) => m.content);
+		histIdx.value = null;
+		histDraft.value = "";
 		// Resync open write confirmations. Without this a card raised while the
 		// panel was closed (or a dropped realtime frame) never shows here, even
 		// though the full chat has it. Best-effort: chat must work without it.
@@ -832,8 +947,32 @@ async function load() {
 		} catch (e) {
 			/* leave whatever the live stream captured */
 		}
-		pinnedToBottom.value = true;
-		await scrollToBottom();
+		if (_keepScrollTop !== null && bodyEl.value && convId.value === _convAtEntry) {
+			// In-place refresh of the thread already on screen, with the reader
+			// parked somewhere in it. Put them back exactly where they were and
+			// leave the blank run alone so it keeps trimming as the answer grows.
+			await nextTick();
+			// Re-apply for a moment: the message list was just replaced, so on this
+			// tick the panel is still short and a single assignment clamps against a
+			// small scrollHeight, which would strand the reader near the top.
+			bodyEl.value.scrollTop = _keepScrollTop;
+			const deadline = Date.now() + 900;
+			const hold = () => {
+				if (!bodyEl.value || pinnedToBottom.value || Date.now() > deadline) return;
+				if (Math.abs(bodyEl.value.scrollTop - _keepScrollTop) > 2) {
+					bodyEl.value.scrollTop = _keepScrollTop;
+				}
+				requestAnimationFrame(hold);
+			};
+			requestAnimationFrame(hold);
+			pinnedToBottom.value = false;
+			showScrollDown.value = true;
+		} else {
+			// A genuinely fresh open: land on the newest message.
+			pinnedToBottom.value = true;
+			showScrollDown.value = false;
+			await scrollToBottom();
+		}
 	} catch (e) {
 		loadError.value = "Could not load your conversation.";
 	} finally {
@@ -851,7 +990,12 @@ function startNewChat() {
 	stream.value = { ...emptyStream(), fence: stream.value.fence };
 	loadError.value = "";
 	draft.value = "";
+	// Recall belongs to the conversation you are in, not to the panel.
+	promptHistory.value = [];
+	histIdx.value = null;
+	histDraft.value = "";
 	pinnedToBottom.value = true;
+	showScrollDown.value = false;
 	nextTick(() => textareaEl.value?.focus());
 }
 
@@ -973,12 +1117,23 @@ async function send() {
 	// Optimistic echo so the panel feels immediate. run:end reloads from the
 	// durable record, which replaces this.
 	messages.value.push({ name: `local-${Date.now()}`, role: "user", content: text });
+	// Recall history: skip an immediate repeat so holding Up isn't a wall of the
+	// same line, and reset the cursor so the next Up starts from the newest.
+	if (promptHistory.value[promptHistory.value.length - 1] !== text)
+		promptHistory.value.push(text);
+	histIdx.value = null;
+	histDraft.value = "";
 	draft.value = "";
 	attachments.value = [];
 	await nextTick();
 	autoGrow();
-	pinnedToBottom.value = true; // a fresh turn always snaps to the newest
+	// Land on the new turn first, so you see your question and the answer start
+	// without reaching for the arrow — then STOP following, so the answer grows
+	// downward instead of sliding its own opening up out of the panel as it is
+	// written. Staying pinned is what made a long reply unreadable here too.
 	await scrollToBottom();
+	pinnedToBottom.value = false;
+	showScrollDown.value = false;
 
 	try {
 		// Context is read at SEND time, not at open time: a conversation outlives
@@ -1084,9 +1239,21 @@ watch(
 	async (isOpen) => {
 		if (!isOpen) return;
 		await nextTick();
-		panelEl.value?.focus();
+		// Focus the box, not the panel shell: opening the widget is always a
+		// prelude to typing, and focusing the shell cost a click every time.
+		// Escape still closes, since the keydown bubbles to the root handler.
+		(textareaEl.value || panelEl.value)?.focus();
 		ensureRealtime();
-		load();
+		await load();
+		// The composer only renders once readiness resolves, so on a cold open the
+		// textarea did not exist for the focus above. Claim it now that it does,
+		// unless the reader has already put focus somewhere else in the panel.
+		await nextTick();
+		const ae = document.activeElement;
+		// Claim focus only when nothing else has meaningfully taken it: a bare
+		// <body> (the usual cold-open state) or somewhere inside the panel.
+		const focusIsLoose = !ae || ae === document.body || !!panelEl.value?.contains(ae);
+		if (props.open && textareaEl.value && focusIsLoose) textareaEl.value.focus();
 	}
 );
 
@@ -1579,6 +1746,41 @@ defineExpose({ load, startNewChat, convId });
 	overflow-y: auto;
 	overflow-x: hidden; /* long tokens wrap; the panel never scrolls sideways */
 	padding: 16px 15px;
+}
+/* Jump-to-latest arrow. The panel is a flex column, so align-self parks it at
+   the right edge and the negative top margin floats it over the last lines of
+   the body. The margins cancel out (-44 + 36 + 8 = 0), so showing or hiding it
+   never shifts the composer below. */
+.jvp-jump {
+	position: relative;
+	z-index: 3;
+	align-self: flex-end;
+	margin: -44px 14px 8px 0;
+	width: 36px;
+	height: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: 1px solid var(--jv-rule-2);
+	border-radius: 50%;
+	background: var(--jv-surface);
+	color: var(--jv-ink-2);
+	cursor: pointer;
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+}
+.jvp-jump:hover {
+	color: var(--jv-ink);
+	border-color: var(--jv-ink-3);
+}
+.jvp-jump:focus-visible {
+	outline: 2px solid var(--jv-accent);
+	outline-offset: 2px;
+}
+.jvp-jump svg {
+	width: 18px;
+	height: 18px;
+	display: block;
 }
 .jvp-center {
 	height: 100%;
