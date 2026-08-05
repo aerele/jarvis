@@ -1,5 +1,6 @@
 """Tests for jarvis.onboarding sync + wrappers (admin_client mocked)."""
 
+import contextlib
 from unittest.mock import patch
 
 import frappe
@@ -45,6 +46,17 @@ _SNAPSHOTTED_FIELDS = (
 	"latest_jarvis_version",
 	"release_notice_message",
 )
+
+# admin's prepare_bench_disconnect report for a teardown that fully succeeded.
+# Spelled out as a literal rather than a MagicMock's truthy default, because the
+# bench BRANCHES on these keys: a bare Mock() would make every key truthy and
+# every abort path silently untestable. See onboarding._teardown_container_via_admin.
+_TEARDOWN_OK = {
+	"profile_cleared": True,
+	"devices_unpaired": True,
+	"removed": 1,
+	"detail": "",
+}
 
 
 def _snapshot_settings() -> dict:
@@ -622,6 +634,10 @@ class TestWorkspaceReset(FrappeTestCase):
 		"preset",
 		"proxy_active",
 		"proxy_recommended",
+		# Only the L4-completion test reaches _clear_admin_connection (CONNECTION
+		# spec), which touches these too - matches TestDisconnectBench's list.
+		"tenant_authority_handle",
+		"tenant_authority_generation",
 	)
 
 	def setUp(self):
@@ -812,13 +828,18 @@ class TestWorkspaceReset(FrappeTestCase):
 		frappe.db.commit()
 		with (
 			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			# L3 includes L2. The ladder is cumulative and the server now enforces
+			# what only the SPA's radio group used to (round-4 MINOR 4). The wipe is
+			# patched out because this test is about the LLM revoke, and
+			# test_reset_wipe_data_deletes_content already owns the wipe.
+			patch("jarvis.onboarding._wipe_workspace_content"),
 			patch(
 				"jarvis.onboarding.admin_client.reset_workspace",
 				return_value={"status": "Applied", "tenant": "t-new"},
 			),
 			patch("jarvis.account._bust_chat_gate"),
 		):
-			onboarding.request_workspace_reset(revoke_llm=True)
+			onboarding.request_workspace_reset(wipe_data=True, revoke_llm=True)
 		s = frappe.get_single("Jarvis Settings")
 		self.assertFalse(s.llm_model)
 		self.assertFalse(s.proxy_active)
@@ -852,6 +873,1999 @@ class TestWorkspaceReset(FrappeTestCase):
 			out = onboarding.workspace_reset_state()
 		self.assertTrue(out["ready"])
 		self.assertEqual(frappe.get_single("Jarvis Settings").last_sync_status, "ok (workspace reset)")
+
+	def test_poll_tears_down_container_before_clearing_connection_on_l4(self):
+		"""BLOCKER 2 regression. _workspace_reset_poll used to bind ``settings``
+		before ``write_connection`` persisted the rebuilt container's agent_url -
+		write_connection takes its OWN uncached frappe.get_single() doc, so the
+		poll's copy kept the "" that _disconnect_agent_transport committed at
+		request time. That made _clear_admin_connection's
+		``if (settings.get("agent_url") or "").strip():`` guard deterministically
+		false, so the container teardown was silently skipped on every L4 and the
+		rebuilt container kept its OAuth auth-profile forever, unreachable once the
+		bench destroyed the credentials that could have torn it down.
+
+		Assert the teardown call actually HAPPENS - not that the guard's inputs
+		look right, which is what let this ship undetected.
+
+		T14 replaced the two current_customer-gated calls with the single
+		authenticated prepare_bench_disconnect, so that is what must fire here."""
+		s = frappe.get_single("Jarvis Settings")
+		# Simulate the state _disconnect_agent_transport leaves behind: agent_url
+		# already cleared, marker carrying the L4 (disconnect_after) suffix.
+		s.db_set("agent_url", "")
+		s.db_set("last_sync_status", onboarding._RESETTING_STATUS + onboarding._DISCONNECT_SUFFIX)
+		frappe.db.commit()
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"status": "Applied"},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={
+					"chat_readiness": "Ready",
+					"agent_url": "ws://localhost:19100",
+					"agent_token": "t2",
+					"tenant_status": "running",
+				},
+			),
+			# T21 re-validates eligibility immediately before the deferred clear -
+			# minutes after the request-time precheck, on the far side of a rebuild.
+			patch(
+				"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+				return_value={"recoverable": True, "needs_company": False, "reason": ""},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value=_TEARDOWN_OK,
+			) as teardown,
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.workspace_reset_state()
+		teardown.assert_called_once()
+		self.assertTrue(out["ready"])
+		self.assertFalse(out["resetting"])
+		s = frappe.get_single("Jarvis Settings")
+		# CONNECTION cleared afterwards: the agent_url the poll just wrote is gone
+		# again, along with the rest of the admin connection.
+		self.assertFalse(s.agent_url)
+		self.assertFalse(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+
+class TestDisconnectBench(FrappeTestCase):
+	"""'Disconnect this bench': the terminal, no-rebuild counterpart to L4.
+	No poll, no resetting marker — leaving, not resetting."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + (
+		"chat_device_id",
+		"chat_device_public_key",
+		"chat_device_private_key",
+		"chat_device_token",
+		"tenant_authority_handle",
+		"tenant_authority_generation",
+		"last_sync_status",
+	)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			v = (
+				s.get_password(f, raise_exception=False)
+				if f.endswith(("_key", "_secret", "_token", "_password"))
+				else s.get(f)
+			)
+			self._snap[f] = v or ""
+		_set_token("tok")
+		s.db_set("agent_url", "ws://localhost:19000")
+		s.db_set("jarvis_admin_customer_email", "cust@example.com")
+		s.db_set("chat_device_id", "dev-1")
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	def test_disconnects_tears_down_and_clears_connection(self):
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value=_TEARDOWN_OK,
+			) as teardown,
+			patch(
+				"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+				return_value={"recoverable": True, "needs_company": False, "reason": ""},
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.disconnect_bench()
+		teardown.assert_called_once()
+		self.assertTrue(out["disconnected"])
+		self.assertFalse(out["already_disconnected"])
+		self.assertFalse(out["needs_company"])
+		self.assertIn("jarvis_admin_customer_email", out["cleared"])
+		self.assertIn("agent_url", out["cleared"])
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.agent_url)
+		self.assertFalse(s.jarvis_admin_customer_email)
+		self.assertFalse(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+	def test_already_disconnected_is_idempotent_and_harmless(self):
+		"""No email, no agent_url: this bench already left. Must succeed WITHOUT
+		reaching _recovery_outlook - that predicate needs a registered email and
+		would throw "no registered customer email" on a bench that already has
+		none, turning a harmless repeat click into an error."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("jarvis_admin_customer_email", "")
+		s.db_set("agent_url", "")
+		frappe.db.commit()
+		with patch("jarvis.onboarding._recovery_outlook") as outlook:
+			out = onboarding.disconnect_bench()
+		outlook.assert_not_called()
+		self.assertTrue(out["disconnected"])
+		self.assertTrue(out["already_disconnected"])
+		self.assertEqual(out["cleared"], [])
+		self.assertFalse(out["needs_company"])
+
+	def test_refuses_when_not_recoverable_and_clears_nothing(self):
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+				return_value={
+					"recoverable": False,
+					"needs_company": False,
+					"reason": "Subscription is Cancelled; reconnect is not available.",
+				},
+			),
+			patch("jarvis.onboarding.admin_client.prepare_bench_disconnect") as teardown,
+		):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				onboarding.disconnect_bench()
+		self.assertEqual(str(ctx.exception), "Subscription is Cancelled; reconnect is not available.")
+		teardown.assert_not_called()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.agent_url, "ws://localhost:19000")
+		self.assertEqual(s.jarvis_admin_customer_email, "cust@example.com")
+		self.assertTrue(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+	def test_needs_company_is_recoverable_not_refused(self):
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+				return_value={"recoverable": True, "needs_company": True, "reason": ""},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value=_TEARDOWN_OK,
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.disconnect_bench()
+		self.assertTrue(out["disconnected"])
+		self.assertFalse(out["already_disconnected"])
+		self.assertTrue(out["needs_company"])
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.agent_url)
+
+	def _recoverable(self):
+		return patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			return_value={"recoverable": True, "needs_company": False, "reason": ""},
+		)
+
+	def _assert_nothing_cleared(self):
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.agent_url, "ws://localhost:19000")
+		self.assertEqual(s.jarvis_admin_customer_email, "cust@example.com")
+		self.assertTrue(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+	# -- T14: refusal vs unreachability -------------------------------------
+	#
+	# Round-2 BLOCKER 1 / round-3 BLOCKER 3, and plan edge case 18. The old code
+	# caught BOTH in one bare ``except Exception`` and logged them in the same
+	# sentence, so the case where the teardown was POSSIBLE and got skipped was
+	# indistinguishable from the case where it was impossible - and the bench
+	# went on to destroy the credentials either way. These four pin the split.
+
+	def test_dead_admin_still_completes_the_clear(self):
+		"""Genuine unreachability - the ONLY thing that authorizes proceeding
+		without a confirmed teardown. Without this escape hatch a bench whose
+		control plane is gone could never leave its tenancy."""
+		from jarvis.admin_client import AdminUnreachableError
+
+		with (
+			self._recoverable(),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				side_effect=AdminUnreachableError("down"),
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.disconnect_bench()
+		self.assertTrue(out["disconnected"])
+		self.assertFalse(out["already_disconnected"])
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.agent_url)
+		self.assertFalse(s.jarvis_admin_customer_email)
+
+	def test_admin_refusal_aborts_the_clear(self):
+		"""T14's acceptance criterion. admin ANSWERED and said no (a 4xx -
+		ResetLocked, MoveInFlight, UnknownProvider all arrive as this class).
+		A retry can still succeed, so nothing may be destroyed."""
+		from jarvis.admin_client import AdminValidationError
+
+		with (
+			self._recoverable(),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				side_effect=AdminValidationError("another workspace operation is in progress"),
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.disconnect_bench()
+		self._assert_nothing_cleared()
+
+	def test_permanent_rejection_aborts_even_though_it_subclasses_unreachable(self):
+		"""AdminRejectedError IS an AdminUnreachableError subclass
+		(jarvis.exceptions), so an except-clause ordered the other way would
+		turn every permanent rejection into a proceed. It is a refusal: admin
+		was reached and said no."""
+		from jarvis.admin_client import AdminRejectedError
+
+		with (
+			self._recoverable(),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				side_effect=AdminRejectedError("refused", code="FleetConfigError", detail="refused"),
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.disconnect_bench()
+		self._assert_nothing_cleared()
+
+	def test_failed_device_unpair_aborts_the_clear(self):
+		"""admin was reached and reported the teardown honestly: the auth
+		profile went, the DEVICE unpair did not. Every paired chat-device token
+		is still live, and clearing CONNECTION now destroys the only credentials
+		that could ever revoke them. Round-3 BLOCKER 1's consequence, reached
+		through a reported failure instead of skipped control flow."""
+		with (
+			self._recoverable(),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value={
+					"profile_cleared": True,
+					"devices_unpaired": False,
+					"removed": 0,
+					"detail": "unpair: TimeoutError: agent unreachable",
+				},
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.disconnect_bench()
+		self._assert_nothing_cleared()
+
+	def test_dead_container_still_completes_the_clear(self):
+		"""The inverse, and the case the disconnect exists for (plan edge case
+		6, T3's acceptance criterion). The container is dead: the auth-profile
+		clear runs doctor + restart and cannot finish, but the device unpair is
+		a file operation that survives a stopped container. Devices provably
+		unpaired, so no third party keeps chat access - proceed. Refusing here
+		would block exactly the customer most likely to be disconnecting."""
+		with (
+			self._recoverable(),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value={
+					"profile_cleared": False,
+					"devices_unpaired": True,
+					"removed": 2,
+					"detail": "auth_profile: TimeoutError: container stopped",
+				},
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.disconnect_bench()
+		self.assertTrue(out["disconnected"])
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.agent_url)
+		self.assertFalse(s.jarvis_admin_customer_email)
+
+
+class TestRecoveryOutlookPrecheck(FrappeTestCase):
+	"""Amendment 1 BLOCKER 1: the disconnect precheck must resolve identity
+	SERVER-SIDE via ``admin_client.reconnect_eligibility_me()`` - never by
+	sending ``jarvis_admin_customer_email``, which holds admin's synthetic
+	OAuth login (``cust-<hash>@jarvis.invalid`` from ``signup._synthetic_login``),
+	not a contact address. The earlier version passed it to the guest
+	``can_reconnect``, which resolves on the real address, so the lookup could
+	never match: L4 and disconnect_bench() refused for 100% of real benches and
+	rendered a value the field is documented as never-to-be-shown into a
+	customer-facing toast."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + ("last_sync_status",)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			self._snap[f] = s.get(f) or ""
+		_set_token("tok")
+		# The synthetic OAuth login this field really holds, modelled exactly -
+		# if the precheck ever leaked it, this is the shape that would appear.
+		s.db_set("jarvis_admin_customer_email", "cust-deadbeef@jarvis.invalid")
+		s.db_set("agent_url", "ws://localhost:19000")
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	def test_sends_no_identity_argument(self):
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			return_value={"recoverable": True, "needs_company": False, "reason": ""},
+		) as elig:
+			onboarding._recovery_outlook()
+		# Zero args, zero kwargs - not even jarvis_admin_customer_email.
+		elig.assert_called_once_with()
+
+	def test_recoverable_true_yields_a_recoverable_outlook(self):
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			return_value={"recoverable": True, "needs_company": False, "reason": ""},
+		):
+			outlook = onboarding._recovery_outlook()
+		self.assertEqual(outlook, onboarding._RecoveryOutlook(True, False, ""))
+
+	def test_needs_company_true_is_recoverable_not_a_refusal(self):
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			return_value={"recoverable": True, "needs_company": True, "reason": ""},
+		):
+			outlook = onboarding._recovery_outlook()
+		self.assertTrue(outlook.recoverable)
+		self.assertTrue(outlook.needs_company)
+
+	def test_recoverable_false_refuses_with_admins_own_reason(self):
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			return_value={
+				"recoverable": False,
+				"needs_company": False,
+				"reason": "Subscription is Cancelled; reconnect is not available.",
+			},
+		):
+			outlook = onboarding._recovery_outlook()
+		self.assertFalse(outlook.recoverable)
+		self.assertEqual(outlook.reason, "Subscription is Cancelled; reconnect is not available.")
+
+	def test_no_customer_facing_string_contains_the_synthetic_login(self):
+		"""Plan edge case 13 - asserted by test, not by inspection."""
+		# Sanity: the fixture really does model the never-to-be-shown shape.
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertIn("@jarvis.invalid", settings.jarvis_admin_customer_email)
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			return_value={"recoverable": False, "needs_company": False, "reason": ""},
+		):
+			outlook = onboarding._recovery_outlook()
+		self.assertNotIn("@jarvis.invalid", outlook.reason)
+		# The disconnect endpoint's thrown message is what actually reaches the
+		# customer's toast - assert the same on that surface, not just the
+		# helper's return value.
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			return_value={"recoverable": False, "needs_company": False, "reason": ""},
+		):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				onboarding.disconnect_bench()
+		self.assertNotIn("@jarvis.invalid", str(ctx.exception))
+
+	def test_admin_unreachable_fails_closed(self):
+		"""Fails CLOSED, deliberately: an unverified recovery path is treated as
+		no recovery path, and disconnect_bench() must refuse rather than clear
+		on a blip it could not confirm."""
+		from jarvis.admin_client import AdminUnreachableError
+
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			side_effect=AdminUnreachableError("down"),
+		):
+			outlook = onboarding._recovery_outlook()
+		self.assertFalse(outlook.recoverable)
+		self.assertNotIn("@jarvis.invalid", outlook.reason)
+		with patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			side_effect=AdminUnreachableError("down"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.disconnect_bench()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.agent_url, "ws://localhost:19000")
+		self.assertTrue(s.jarvis_admin_customer_email)
+		self.assertTrue(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+
+class TestDisconnectBenchInFlightGuard(FrappeTestCase):
+	"""Amendment 1 BLOCKER 3 / MAJOR-1 (T8): disconnect_bench() must refuse
+	SERVER-SIDE while a reset is in flight. The SPA's :disabled button is not
+	enforcement - a second Settings tab never learns a reset started, and once
+	CONNECTION is cleared the resetting marker is blanked with it, leaving
+	reconcile_pending_workspace_reset nothing to converge and the rebuilt
+	container stranded."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + ("last_sync_status",)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			self._snap[f] = s.get(f) or ""
+		_set_token("tok")
+		s.db_set("jarvis_admin_customer_email", "cust-deadbeef@jarvis.invalid")
+		# The state _disconnect_agent_transport leaves mid-reset: agent_url
+		# blanked but the email still present - this is what DEFEATS
+		# _admin_connection_absent's AND (it requires BOTH empty), so the
+		# idempotency short-circuit does not fire here and the in-flight guard
+		# is the only thing standing between this call and a stranding clear.
+		s.db_set("agent_url", "")
+		s.db_set("last_sync_status", onboarding._RESETTING_STATUS)
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	def test_disconnect_mid_reset_is_refused_and_clears_nothing(self):
+		# Patches the endpoint the disconnect path ACTUALLY calls. It used to
+		# patch post_subscription_disconnect / unpair_chat_devices, which T14
+		# removed from this path entirely - assert_not_called() on a target the
+		# code can no longer reach passes whatever the guard does.
+		with (
+			patch("jarvis.onboarding.admin_client.prepare_bench_disconnect") as teardown,
+			patch("jarvis.onboarding.admin_client.reconnect_eligibility_me") as elig,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.disconnect_bench()
+		teardown.assert_not_called()
+		# Refused by the in-flight guard, before the recovery precheck even runs.
+		elig.assert_not_called()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.last_sync_status, onboarding._RESETTING_STATUS)
+		self.assertTrue(s.jarvis_admin_customer_email)
+
+
+class TestRequestWorkspaceResetInFlightGuard(FrappeTestCase):
+	"""Amendment 1 BLOCKER 3 / MAJOR-1 (T8), plan edge case 15: a second
+	request_workspace_reset submission while a reset is already in flight must
+	not silently change its depth. Admin's own named_lock makes the ADMIN-side
+	request idempotent, but the DEPTH lives on this bench's marker, so this
+	bench has to guard it separately."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + ("last_sync_status",)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			self._snap[f] = s.get(f) or ""
+		_set_token("tok")
+		# Transport already cleared by the in-flight reset's own request.
+		s.db_set("agent_url", "")
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	def test_different_depth_while_in_flight_throws_and_does_not_relabel(self):
+		s = frappe.get_single("Jarvis Settings")
+		in_flight_marker = onboarding._reset_marker(reconnect_llm=False, disconnect_after=False)  # L1
+		s.db_set("last_sync_status", in_flight_marker)
+		frappe.db.commit()
+		with patch("jarvis.onboarding.admin_client.reset_workspace") as rw:
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.request_workspace_reset(revoke_llm=True)  # L3 - a different depth
+		rw.assert_not_called()
+		self.assertEqual(frappe.get_single("Jarvis Settings").last_sync_status, in_flight_marker)
+
+	def test_a_non_cumulative_depth_is_refused_server_side(self):
+		"""Round-4 MINOR 4. The ladder is cumulative — each level ADDS to the one
+		above — but the server took three independent booleans, so
+		``disconnect_after=1, revoke_llm=0`` was accepted and produced a depth the
+		ladder has no name for: the marker is "pending: resetting workspace
+		(disconnect)", for which ``_reconnect_llm()`` is false, so the poll demands
+		full chat-Ready before converging while the customer has asked for the
+		connection to be destroyed at the end.
+
+		Only the SPA's radio group enforced this, and a radio group is not
+		enforcement — it computes ``depth >= N`` for each flag, which is exactly the
+		rule now applied here. Nothing that reaches this endpoint by any other route
+		can pick a rung that does not exist."""
+		with patch("jarvis.onboarding.admin_client.reset_workspace") as rw:
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.request_workspace_reset(disconnect_after=True)  # L4 without L2/L3
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.request_workspace_reset(revoke_llm=True)  # L3 without L2
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.request_workspace_reset(wipe_data=True, disconnect_after=True)  # L4 without L3
+		rw.assert_not_called()
+
+	def test_same_depth_resubmission_stays_idempotent(self):
+		# L1 vs L1 (no flags) - deliberately avoids revoke_llm/wipe_data here, so
+		# this stays a guard-only test and does not also exercise (and need to
+		# snapshot/restore) settings_reset.LLM's field list and pool-model wipe,
+		# which TestWorkspaceReset already covers on its own terms.
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._reset_marker(reconnect_llm=False, disconnect_after=False))
+		frappe.db.commit()
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace",
+				return_value={"status": "Applied", "tenant": "t-new"},
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.request_workspace_reset()  # same L1 depth: not refused
+		self.assertEqual(out["status"], "Applied")
+
+
+class TestL4RevalidatesBeforeTheDeferredClear(FrappeTestCase):
+	"""T21 + T24 / round-4 MAJOR 8 and MAJOR 2, Amendment 3.
+
+	request_workspace_reset refuses up front if the customer could not reconnect,
+	which satisfies plan edge case 2 AT REQUEST TIME. But for L4 the clear happens
+	minutes later in the poll, on the far side of a container rebuild - and a
+	subscription that moved to Cancelled in between (NOT Suspended; Cancelled is
+	outside billing.reconnect._ELIGIBLE_STATUSES) would have its credentials
+	destroyed with no emailed-code reconnect able to restore them. One precheck
+	"before clearing anything" cannot cover a gap it sits minutes before."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + (
+		"last_sync_status",
+		"workspace_reset_claimed_at",
+		"reconnect_needs_company",
+		"chat_device_id",
+		"chat_device_public_key",
+		"chat_device_private_key",
+		"chat_device_token",
+		"tenant_authority_handle",
+		"tenant_authority_generation",
+		"llm_oauth_connected_at",
+		"llm_oauth_account_email",
+	)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			v = (
+				s.get_password(f, raise_exception=False)
+				if f.endswith(("_key", "_secret", "_token", "_password"))
+				else s.get(f)
+			)
+			self._snap[f] = v or ""
+		_set_token("tok")
+		s.db_set("jarvis_admin_customer_email", "cust@example.com")
+		s.db_set("agent_url", "")
+		s.db_set("reconnect_needs_company", 0)
+		s.db_set("last_sync_status", onboarding._RESETTING_STATUS + onboarding._DISCONNECT_SUFFIX)
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("workspace_reset_claimed_at", None)
+		s.db_set("reconnect_needs_company", 0)
+		frappe.db.commit()
+
+	def _poll(self, *, eligibility, teardown=None):
+		return (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"status": "Applied"},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={
+					"chat_readiness": "Ready",
+					"agent_url": "ws://localhost:19100",
+					"agent_token": "t2",
+					"tenant_status": "running",
+				},
+			),
+			patch("jarvis.onboarding.admin_client.reconnect_eligibility_me", return_value=eligibility),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value=teardown if teardown is not None else _TEARDOWN_OK,
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		)
+
+	def test_a_subscription_cancelled_mid_rebuild_does_not_lose_its_credentials(self):
+		"""The permanent lockout the plan calls "mandatory, not advisory" to
+		prevent. Eligible at request time, Cancelled by the time the rebuild
+		finishes - the clear must be abandoned, not completed.
+
+		Fails against pre-T21 code, which cleared unconditionally."""
+		reason = "This account cannot be reconnected afterwards. Contact support."
+		with contextlib.ExitStack() as stack:
+			for cm in self._poll(
+				eligibility={"recoverable": False, "needs_company": False, "reason": reason}
+			):
+				stack.enter_context(cm)
+			out = onboarding.workspace_reset_state()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(out["disconnected"], "the clear must be abandoned")
+		self.assertTrue(s.jarvis_admin_customer_email, "credentials must survive")
+		self.assertTrue(s.get_password("jarvis_admin_api_key", raise_exception=False))
+		# The RESET still completed - this is the L3 outcome, not a failed reset.
+		self.assertEqual(s.last_sync_status, "ok (workspace reset)")
+		self.assertEqual(s.agent_url, "ws://localhost:19100")
+
+	def test_the_downgrade_is_reported_not_just_logged(self):
+		"""T24 / round-4 MAJOR 2. The customer chose "reset and disconnect", was
+		shown an irreversibility warning and confirmed it. Silently giving them a
+		shallower reset and toasting "Workspace is back" is not acceptable; an
+		Error Log entry is not telling them."""
+		reason = "This account cannot be reconnected afterwards. Contact support."
+		with contextlib.ExitStack() as stack:
+			for cm in self._poll(
+				eligibility={"recoverable": False, "needs_company": False, "reason": reason}
+			):
+				stack.enter_context(cm)
+			out = onboarding.workspace_reset_state()
+		self.assertEqual(out["disconnect_blocked"], reason)
+
+	def test_a_refused_teardown_is_reported_on_the_same_field(self):
+		"""The other way an L4 becomes an L3. One field, so the SPA has one branch
+		rather than two ways to say the same thing."""
+		with contextlib.ExitStack() as stack:
+			for cm in self._poll(
+				eligibility={"recoverable": True, "needs_company": False, "reason": ""},
+				teardown={
+					"profile_cleared": True,
+					"devices_unpaired": False,
+					"removed": 0,
+					"detail": "unpair: TimeoutError",
+				},
+			):
+				stack.enter_context(cm)
+			out = onboarding.workspace_reset_state()
+		self.assertFalse(out["disconnected"])
+		self.assertTrue(out["disconnect_blocked"])
+		self.assertTrue(frappe.get_single("Jarvis Settings").jarvis_admin_customer_email)
+
+	def test_a_successful_l4_reports_no_blockage(self):
+		with contextlib.ExitStack() as stack:
+			for cm in self._poll(eligibility={"recoverable": True, "needs_company": False, "reason": ""}):
+				stack.enter_context(cm)
+			out = onboarding.workspace_reset_state()
+		self.assertTrue(out["disconnected"])
+		self.assertEqual(out["disconnect_blocked"], "")
+
+	def test_the_l4_clear_holds_a_durable_claim_while_it_runs(self):
+		"""Round-5 BLOCKER. The poll used to retire the marker to
+		"ok (workspace reset)" and commit BEFORE starting the clear - which runs up
+		to ~264s (prepare_bench_disconnect's 240s budget plus the eligibility
+		re-check) while this poll's _RESET_LOCK expires at 60s.
+
+		So from t=60s there was neither lock NOR marker: a second tab's Reset passed
+		every guard, called admin and started a genuine rebuild, and the clear still
+		in flight here then blanked CONNECTION underneath it. That is round-4
+		BLOCKER 1's stranding, reached through the one long section that got the
+		short lock without a durable claim.
+
+		Read from INSIDE the teardown, which is the window that was unguarded."""
+		seen = {}
+
+		def _capture():
+			seen["status"] = frappe.db.get_single_value("Jarvis Settings", "last_sync_status")
+			seen["claimed_at"] = frappe.db.get_single_value("Jarvis Settings", "workspace_reset_claimed_at")
+			seen["blocks_a_reset"] = bool(
+				onboarding._workspace_op_in_flight(frappe.get_single("Jarvis Settings"))
+			)
+			return _TEARDOWN_OK
+
+		with contextlib.ExitStack() as stack:
+			for cm in self._poll(eligibility={"recoverable": True, "needs_company": False, "reason": ""}):
+				stack.enter_context(cm)
+			stack.enter_context(
+				patch("jarvis.onboarding.admin_client.prepare_bench_disconnect", side_effect=_capture)
+			)
+			onboarding.workspace_reset_state()
+		self.assertEqual(seen["status"], onboarding._DISCONNECTING_STATUS)
+		self.assertTrue(seen["claimed_at"], "an unstamped claim cannot be expired later")
+		self.assertTrue(
+			seen["blocks_a_reset"],
+			"a concurrent reset would have passed every guard and stranded this clear",
+		)
+		# ...and the completed clear leaves the terminal state, not the claim.
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.last_sync_status, onboarding._DISCONNECTED_STATUS)
+		self.assertFalse(s.workspace_reset_claimed_at)
+
+	def test_a_downgraded_l4_gives_the_claim_back(self):
+		"""Nothing is going to clear anything, so the claim must not sit there
+		blocking the customer's next reset for the whole expiry window."""
+		with contextlib.ExitStack() as stack:
+			for cm in self._poll(
+				eligibility={
+					"recoverable": False,
+					"needs_company": False,
+					"reason": "Subscription is Cancelled.",
+				}
+			):
+				stack.enter_context(cm)
+			onboarding.workspace_reset_state()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.last_sync_status, "ok (workspace reset)")
+		self.assertFalse(onboarding._workspace_op_in_flight(s))
+		self.assertFalse(s.workspace_reset_claimed_at)
+
+	def test_needs_company_is_persisted_through_the_l4_clear(self):
+		"""T22 / round-4 MAJOR 9. The value is knowable ONLY at this moment - after
+		the sweep there are no credentials left to ask with. bench_connection_state
+		hardcoded False before, so an L4 customer whose address owns several
+		eligible accounts was sent to a reconnect they could not complete."""
+		with contextlib.ExitStack() as stack:
+			for cm in self._poll(eligibility={"recoverable": True, "needs_company": True, "reason": ""}):
+				stack.enter_context(cm)
+			onboarding.workspace_reset_state()
+		# Survives the CONNECTION sweep, like _DISCONNECTED_STATUS does...
+		self.assertTrue(frappe.get_single("Jarvis Settings").reconnect_needs_company)
+		# ...and every later page load can now read it back, with no admin call.
+		self.assertTrue(onboarding.bench_connection_state()["needs_company"])
+
+
+class TestDisconnectClaimsBeforeItTearsDown(FrappeTestCase):
+	"""T29 / Amendment 4. disconnect_bench used to hold _RESET_LOCK across its whole
+	critical section - including a teardown budgeted at 240s. redis_lock's release
+	is a `finally` a SIGKILLed worker never runs, so under a ~120s gunicorn
+	http_timeout the ordinary end of a slow teardown left the lock held for the full
+	TTL, freezing every convergence including the */5 reconcile.
+
+	The lock now covers check-and-claim only, and a durable claim
+	(_DISCONNECTING_STATUS) carries in-flight-ness afterwards, exactly as the
+	reset's pre-flight marker does. That gives the claim three new jobs: block a
+	concurrent reset, block a second disconnect, and be recoverable when its own
+	worker dies."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + (
+		"last_sync_status",
+		"workspace_reset_claimed_at",
+		"chat_device_id",
+		"chat_device_public_key",
+		"chat_device_private_key",
+		"chat_device_token",
+		"tenant_authority_handle",
+		"tenant_authority_generation",
+		"llm_oauth_connected_at",
+		"llm_oauth_account_email",
+	)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			v = (
+				s.get_password(f, raise_exception=False)
+				if f.endswith(("_key", "_secret", "_token", "_password"))
+				else s.get(f)
+			)
+			self._snap[f] = v or ""
+		_set_token("tok")
+		s.db_set("agent_url", "ws://localhost:19000")
+		s.db_set("jarvis_admin_customer_email", "cust@example.com")
+		s.db_set("last_sync_status", "ok")
+		s.db_set("workspace_reset_claimed_at", None)
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.get_single("Jarvis Settings").db_set("workspace_reset_claimed_at", None)
+		frappe.db.commit()
+
+	def _recoverable(self):
+		return patch(
+			"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+			return_value={"recoverable": True, "needs_company": False, "reason": ""},
+		)
+
+	def test_the_claim_is_written_before_the_teardown_runs(self):
+		"""Read from INSIDE the teardown call - the exact window the lock no longer
+		covers. With no claim there, a concurrent reset would sail past its guard
+		while this bench was mid-teardown."""
+		seen = {}
+
+		def _capture():
+			seen["status"] = frappe.db.get_single_value("Jarvis Settings", "last_sync_status")
+			seen["claimed_at"] = frappe.db.get_single_value("Jarvis Settings", "workspace_reset_claimed_at")
+			return _TEARDOWN_OK
+
+		with (
+			self._recoverable(),
+			patch("jarvis.onboarding.admin_client.prepare_bench_disconnect", side_effect=_capture),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding.disconnect_bench()
+		self.assertEqual(seen["status"], onboarding._DISCONNECTING_STATUS)
+		self.assertTrue(seen["claimed_at"], "an unstamped claim cannot be expired later")
+		# ...and the completed clear overwrites it, leaving no stale claim behind.
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.last_sync_status, onboarding._DISCONNECTED_STATUS)
+		self.assertFalse(s.workspace_reset_claimed_at)
+
+	def test_a_reset_is_refused_while_a_disconnect_is_mid_teardown(self):
+		"""The race the shortened lock opens. The disconnect's lock is already
+		released by the time its teardown runs, so this marker is the only thing
+		stopping a reset from starting on a bench about to lose its credentials."""
+		outcome = {}
+
+		def _reentrant():
+			try:
+				onboarding.request_workspace_reset()
+				outcome["refused"] = False
+			except frappe.ValidationError as exc:
+				outcome["refused"] = True
+				outcome["why"] = str(exc)
+			return _TEARDOWN_OK
+
+		with (
+			self._recoverable(),
+			patch("jarvis.onboarding.admin_client.prepare_bench_disconnect", side_effect=_reentrant),
+			patch("jarvis.onboarding.admin_client.reset_workspace") as rw,
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding.disconnect_bench()
+		self.assertTrue(outcome.get("refused"), outcome)
+		self.assertIn("being disconnected", outcome.get("why", ""))
+		rw.assert_not_called()
+
+	def test_a_second_disconnect_is_refused_while_one_is_mid_teardown(self):
+		outcome = {}
+
+		def _reentrant():
+			try:
+				onboarding.disconnect_bench()
+				outcome["refused"] = False
+			except frappe.ValidationError as exc:
+				outcome["refused"] = True
+				outcome["why"] = str(exc)
+			return _TEARDOWN_OK
+
+		with (
+			self._recoverable(),
+			patch("jarvis.onboarding.admin_client.prepare_bench_disconnect", side_effect=_reentrant),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding.disconnect_bench()
+		self.assertTrue(outcome.get("refused"), outcome)
+		self.assertIn("already being disconnected", outcome.get("why", ""))
+
+	def test_a_refused_teardown_gives_the_claim_back(self):
+		"""Nothing was torn down or cleared, so the claim must not linger and block
+		the customer's next attempt."""
+		with (
+			self._recoverable(),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value={
+					"profile_cleared": True,
+					"devices_unpaired": False,
+					"removed": 0,
+					"detail": "unpair: TimeoutError",
+				},
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.disconnect_bench()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.last_sync_status, "ok")
+		self.assertFalse(onboarding._workspace_op_in_flight(s))
+		self.assertFalse(s.workspace_reset_claimed_at)
+		self.assertTrue(s.jarvis_admin_customer_email)
+
+	def test_reconcile_expires_an_orphaned_disconnect_claim(self):
+		"""The SIGKILL case. Nothing else can ever clear this marker and it blocks
+		BOTH entry points, so without the expiry the customer is locked out of
+		resetting AND disconnecting, permanently. Safe to retry: the claim precedes
+		anything destructive, and a completed clear would have overwritten it with
+		_DISCONNECTED_STATUS."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._DISCONNECTING_STATUS)
+		s.db_set(
+			"workspace_reset_claimed_at",
+			frappe.utils.add_to_date(
+				frappe.utils.now_datetime(), minutes=-(onboarding._PREFLIGHT_EXPIRY_MINUTES + 1)
+			),
+		)
+		frappe.db.commit()
+		with patch("jarvis.onboarding._workspace_reset_poll") as poll:
+			onboarding.reconcile_pending_workspace_reset()
+		# Never polled: a disconnect is not a reset and nothing converges it.
+		poll.assert_not_called()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(onboarding._workspace_op_in_flight(s))
+		self.assertIn("did not complete", s.last_sync_status)
+		self.assertTrue(s.jarvis_admin_customer_email, "credentials must be intact")
+
+	def test_reconcile_leaves_a_young_disconnect_claim_alone(self):
+		"""The teardown is budgeted at 240s. Expiring a claim whose worker is merely
+		slow would let a reset start on top of a live teardown."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._DISCONNECTING_STATUS)
+		s.db_set("workspace_reset_claimed_at", frappe.utils.now_datetime())
+		frappe.db.commit()
+		onboarding.reconcile_pending_workspace_reset()
+		self.assertEqual(
+			frappe.get_single("Jarvis Settings").last_sync_status, onboarding._DISCONNECTING_STATUS
+		)
+
+
+class TestDisconnectClearsTheOAuthMarkers(FrappeTestCase):
+	"""T17 / plan edge case 21: a reconnected bench must be routed back through
+	LLM setup, not skip it on a marker whose credential the disconnect destroyed.
+
+	prepare_bench_disconnect tears the container's OAuth auth-profile down, and an
+	L4 rebuild would drop it regardless (OAuth creds never ride a rebuild). Either
+	way the container can no longer answer a turn on an OAuth grant. Left set,
+	llm_oauth_connected_at makes account.is_ready_for_chat skip the whole LLM step
+	for auth_mode oauth/subscription - so the customer reconnects with the emailed
+	code and lands in a chat whose container holds no credential."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + (
+		"last_sync_status",
+		"llm_auth_mode",
+		"llm_oauth_connected_at",
+		"llm_oauth_account_email",
+		"llm_direct_synced_at",
+		"chat_device_id",
+		"chat_device_public_key",
+		"chat_device_private_key",
+		"chat_device_token",
+		"tenant_authority_handle",
+		"tenant_authority_generation",
+	)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			v = (
+				s.get_password(f, raise_exception=False)
+				if f.endswith(("_key", "_secret", "_token", "_password"))
+				else s.get(f)
+			)
+			self._snap[f] = v or ""
+		_set_token("tok")
+		s.db_set("agent_url", "ws://localhost:19000")
+		s.db_set("jarvis_admin_customer_email", "cust@example.com")
+		s.db_set("llm_auth_mode", "oauth")
+		s.db_set("llm_oauth_connected_at", "2026-01-01 00:00:00")
+		s.db_set("llm_oauth_account_email", "person@example.com")
+		s.db_set("llm_direct_synced_at", "2026-01-01 00:00:00")
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	def _disconnect(self):
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+				return_value={"recoverable": True, "needs_company": False, "reason": ""},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value=_TEARDOWN_OK,
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			return onboarding.disconnect_bench()
+
+	def test_the_oauth_markers_are_cleared(self):
+		out = self._disconnect()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.llm_oauth_connected_at)
+		self.assertFalse(s.llm_oauth_account_email)
+		# Reported, so the caller's "what was cleared" list is not a lie.
+		self.assertIn("llm_oauth_connected_at", out["cleared"])
+		self.assertIn("llm_oauth_account_email", out["cleared"])
+
+	def test_readiness_no_longer_reports_a_usable_credential(self):
+		"""The property edge case 21 actually asks for, asserted through the real
+		predicate rather than by re-reading the field the test just cleared."""
+		from jarvis import account
+
+		self._disconnect()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(account._has_llm_config(s))
+
+	def test_a_disconnect_is_not_a_silent_llm_revoke(self):
+		"""OAUTH_MARKERS is deliberately narrower than the LLM spec. The disconnect
+		destroys the container's auth PROFILE; it does not touch an api-key
+		tenant's /secrets/llm.key or a pool's own keys. Clearing llm_api_key,
+		models[] or the direct/pool sync markers here would turn every disconnect
+		into an L3 the customer never asked for."""
+		self._disconnect()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(s.llm_direct_synced_at)
+		# llm_auth_mode is reqd AND load-bearing: it is what routes readiness to
+		# the LLM step rather than to the "unknown auth_mode" verdict.
+		self.assertEqual(s.llm_auth_mode, "oauth")
+
+	def test_the_spec_is_a_strict_subset_of_the_llm_spec(self):
+		"""So the reset-onboarding CLI (which applies FULL = CONNECTION | LLM)
+		cannot drift from the self-serve disconnect. If a marker were ever added
+		to OAUTH_MARKERS without also being in LLM, FULL would stop clearing it
+		and the two paths would silently diverge - the exact class of bug
+		settings_reset exists to prevent."""
+		from jarvis import settings_reset
+
+		full = set(settings_reset.cleared_fields(settings_reset.FULL))
+		for field in settings_reset.cleared_fields(settings_reset.OAUTH_MARKERS):
+			self.assertIn(field, full)
+
+
+class TestResetClaimIsAtomicAndEarly(FrappeTestCase):
+	"""T15 / Amendment 2 BLOCKER 2: the in-flight guard was defeated by ordering.
+
+	``request_workspace_reset`` READ the marker first and WROTE it LAST, inside
+	``_disconnect_agent_transport``, after ``_recovery_outlook`` (8s),
+	``post_subscription_disconnect`` (180s budget), ``admin_client.reset_workspace``
+	(180s, and it STARTS the rebuild) and the content wipe. For that entire
+	multi-minute window ``disconnect_bench``'s guard saw no marker and let the
+	disconnect through - blanking ``last_sync_status`` (it is in
+	``settings_reset.CONNECTION``), leaving ``reconcile_pending_workspace_reset``
+	nothing to converge, and stranding the rebuilt container with no bench able to
+	reach it.
+
+	A guard that reads state it has not yet claimed is not a guard.
+	"""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + ("last_sync_status", "workspace_reset_claimed_at")
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			self._snap[f] = s.get(f) or ""
+		_set_token("tok")
+		s.db_set("agent_url", "ws://localhost:19000")
+		s.db_set("jarvis_admin_customer_email", "cust@example.com")
+		s.db_set("last_sync_status", "ok")
+		frappe.db.commit()
+		self.addCleanup(self._release_lock)
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	@staticmethod
+	def _release_lock():
+		"""Belt and braces: a test that fails mid-lock must not leave the key set
+		for the rest of the suite.
+
+		Deletes through the RAW redis client, not ``frappe.cache().delete_value``.
+		That was round-4 MINOR 5: ``delete_value`` routes through
+		``RedisWrapper.make_key``, which prefixes the site's db name, while
+		redis-py's ``cache.lock(key)`` uses the key VERBATIM. So the old cleanup
+		deleted a key that never existed, and this safety net caught nothing.
+		Pinned by a test below rather than left to inspection — a no-op cleanup
+		looks exactly like a working one until the day it matters."""
+		from jarvis._redis_lock import LOCK_PREFIX
+
+		try:
+			frappe.cache().delete(LOCK_PREFIX + onboarding._RESET_LOCK)
+		except Exception:
+			pass
+
+	def test_the_release_lock_helper_deletes_the_key_the_lock_actually_uses(self):
+		"""Round-4 MINOR 5. Takes the real lock, runs the cleanup, and asserts the
+		lock can then be re-acquired. Fails against the delete_value version, which
+		deleted a db-name-prefixed key redis-py never wrote."""
+		from jarvis._redis_lock import redis_lock
+
+		lock = frappe.cache().lock(f"jarvis:lock:{onboarding._RESET_LOCK}", timeout=60, blocking_timeout=None)
+		self.assertTrue(lock.acquire(blocking=False), "could not take the lock under test")
+		self._release_lock()
+		with redis_lock(onboarding._RESET_LOCK, timeout_s=10) as reacquired:
+			self.assertTrue(reacquired, "the cleanup did not actually free the lock")
+
+	def test_marker_is_claimed_before_the_rebuild_is_requested(self):
+		"""Reads ``last_sync_status`` from INSIDE the reset_workspace call - the
+		exact moment the old code had already started the rebuild with no marker
+		set. Fails against pre-T15 code, where the marker was written afterwards."""
+		seen = {}
+
+		def _capture(reason=""):
+			seen["status"] = frappe.db.get_single_value("Jarvis Settings", "last_sync_status")
+			return {"status": "Applied", "tenant": "t-new"}
+
+		with (
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			patch("jarvis.onboarding.admin_client.reset_workspace", side_effect=_capture),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding.request_workspace_reset()
+		# PRE-FLIGHT at this point: claimed, but admin has not yet accepted the
+		# request, so no poll may converge on it. Promotion happens after
+		# reset_workspace returns.
+		self.assertEqual(seen["status"], onboarding._reset_marker(preflight=True))
+
+	def test_the_l4_depth_is_on_the_claim_not_just_the_final_write(self):
+		"""The marker is where a reset's DEPTH lives. Claiming a bare L1 marker
+		early and only labelling it L4 at the end would leave the whole window
+		looking like a shallower reset to anything that read it."""
+		seen = {}
+
+		def _capture(reason=""):
+			seen["status"] = frappe.db.get_single_value("Jarvis Settings", "last_sync_status")
+			return {"status": "Applied", "tenant": "t-new"}
+
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+				return_value={"recoverable": True, "needs_company": False, "reason": ""},
+			),
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			# Patched for the same reason as above: the assertion is the marker.
+			patch("jarvis.onboarding._wipe_workspace_content"),
+			patch("jarvis.onboarding._revoke_llm_connections"),
+			patch("jarvis.onboarding.admin_client.reset_workspace", side_effect=_capture),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding.request_workspace_reset(wipe_data=True, revoke_llm=True, disconnect_after=True)
+		# A real L4 necessarily carries L3 as well (the ladder is cumulative and the
+		# server enforces it), so the marker carries BOTH suffixes - which is the
+		# combined "(reconnect llm) (disconnect)" case _reset_marker's docstring
+		# calls out by name.
+		l4 = onboarding._reset_marker(reconnect_llm=True, disconnect_after=True)
+		self.assertEqual(
+			seen["status"],
+			onboarding._reset_marker(reconnect_llm=True, disconnect_after=True, preflight=True),
+		)
+		# The depth survives the pre-flight suffix: stripping it must give back
+		# exactly the L4 marker the poll will later converge on.
+		self.assertEqual(onboarding._strip_preflight(seen["status"]), l4)
+		self.assertTrue(onboarding._strip_preflight(seen["status"]).endswith(onboarding._DISCONNECT_SUFFIX))
+		# ...and it is promoted once admin accepts, or the poll could never finish.
+		self.assertEqual(frappe.get_single("Jarvis Settings").last_sync_status, l4)
+
+	def test_a_refused_request_gives_the_claim_back(self):
+		"""admin was REACHED and declined (a 4xx), so nothing was started and the
+		claim must not survive. Left set, it shows a reset that does not exist,
+		blocks disconnect_bench on a guard protecting nothing, and hands the */5
+		reconcile a reset it can never converge."""
+		from jarvis.admin_client import AdminValidationError
+
+		with (
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace",
+				side_effect=AdminValidationError("no subscription found"),
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.request_workspace_reset()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.last_sync_status, "ok")
+		self.assertFalse(onboarding._reset_in_flight(s))
+		# And the transport is untouched, as it was before T15.
+		self.assertEqual(s.agent_url, "ws://localhost:19000")
+
+	def test_a_timeout_KEEPS_the_claim_because_the_rebuild_may_be_running(self):
+		"""Round-4 MAJOR 5. Admin runs the destroy + reprovision SYNCHRONOUSLY
+		inside the HTTP request, committing its request row before it starts, while
+		this bench gives up at timeout_s=180. So AdminUnreachableError here is the
+		ordinary shape of a slow rebuild that IS running - not evidence that none
+		is.
+
+		Releasing the claim there would blank the marker mid-rebuild, leaving
+		reconcile_pending_workspace_reset nothing to converge and disconnect_bench
+		unguarded: the exact stranding the claim exists to prevent, reached through
+		the release path instead of the claim path.
+
+		Fails against the pre-fix code, which released on every exception."""
+		from jarvis.admin_client import AdminUnreachableError
+
+		with (
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace",
+				side_effect=AdminUnreachableError("read timeout"),
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.request_workspace_reset()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.last_sync_status, onboarding._reset_marker(preflight=True))
+		self.assertTrue(
+			onboarding._reset_in_flight(s),
+			"the marker must survive so reconcile can resolve a rebuild that may be running",
+		)
+
+	def test_a_transient_failure_leaves_a_claim_no_poll_will_converge_on(self):
+		"""The defect the two-state marker exists for, and it was INTRODUCED by the
+		round-4 MAJOR 5 fix.
+
+		Keeping the claim on a timeout is right (admin rebuilds synchronously, so a
+		bench timeout is the ordinary shape of a rebuild that IS running). But the
+		raise unwinds `with redis_lock(...)`, whose `finally` DOES release - so if
+		the rebuild never actually started, reconcile arrives five minutes later to
+		a free lock, an old container still answering Ready, and a marker saying
+		"resetting". It converged: a silent no-op for L1-L3, and for L4 a container
+		teardown plus a credential clear against a container that was never rebuilt.
+
+		Pre-flight is what closes it. The claim survives (so the guards hold and
+		reconcile can resolve it), but no poll may converge on it until admin has
+		positively accepted the request.
+
+		Fails against the pre-fix code, where the kept marker was convergeable."""
+		from jarvis.admin_client import AdminUnreachableError
+
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", "ok")
+		frappe.db.commit()
+
+		with (
+			# L4, so the recovery precheck runs FIRST and has to pass - otherwise the
+			# request is refused before it ever claims and this test proves nothing.
+			patch(
+				"jarvis.onboarding.admin_client.reconnect_eligibility_me",
+				return_value={"recoverable": True, "needs_company": False, "reason": ""},
+			),
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			# The two destructive legs are patched out: this test is about the
+			# CLAIM. Cumulativity (round-4 MINOR 4) means an L4 must send them, but
+			# actually running them here would delete workspace content and revoke
+			# LLM config on the real site for no assertion's benefit.
+			patch("jarvis.onboarding._wipe_workspace_content"),
+			patch("jarvis.onboarding._revoke_llm_connections"),
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace",
+				side_effect=AdminUnreachableError("connection reset by peer"),
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			onboarding.request_workspace_reset(wipe_data=True, revoke_llm=True, disconnect_after=True)
+
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(onboarding._is_preflight(s), "the claim must be left PRE-FLIGHT")
+		self.assertTrue(onboarding._reset_in_flight(s), "guards must still see a claim")
+		self.assertTrue(s.workspace_reset_claimed_at, "reconcile needs the claim timestamp")
+
+		# Now the reconcile that used to destroy the credentials: the OLD container
+		# is up and Ready, because it was never rebuilt.
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"status": "Applied"},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={
+					"chat_readiness": "Ready",
+					"agent_url": "ws://localhost:19000",
+					"agent_token": "t",
+					"tenant_status": "running",
+				},
+			),
+			patch("jarvis.onboarding.admin_client.prepare_bench_disconnect") as teardown,
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			out = onboarding.workspace_reset_state()
+
+		teardown.assert_not_called()
+		self.assertFalse(out["disconnected"])
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(s.jarvis_admin_customer_email, "credentials must survive")
+		self.assertTrue(s.get_password("jarvis_admin_api_key", raise_exception=False))
+		self.assertTrue(onboarding._is_preflight(s), "still unresolved, not silently completed")
+
+	# -- T27: no claim may be left unresolvable --------------------------------
+	#
+	# The plan's invariant is "no path may leave last_sync_status on a resetting
+	# marker nothing can clear". Pre-flight satisfies the safety half (nothing
+	# converges on it) but would violate that invariant outright without a
+	# resolver: a worker SIGKILLed between the claim and the promote leaves a
+	# marker no poll acts on and nothing clears. These three cover every branch.
+
+	def _preflight_claim(self, *, age_minutes=0):
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._reset_marker(preflight=True))
+		s.db_set(
+			"workspace_reset_claimed_at",
+			frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-age_minutes),
+		)
+		frappe.db.commit()
+		return frappe.get_single("Jarvis Settings")
+
+	def test_a_claim_admin_really_accepted_is_promoted(self):
+		"""The common case: the bench's HTTP call died but admin went on
+		rebuilding. The claim must become convergeable, or the customer's rebuild
+		completes on the control plane and this bench never notices."""
+		s = self._preflight_claim(age_minutes=1)
+		with patch(
+			"jarvis.onboarding.admin_client.reset_workspace_state",
+			return_value={
+				"request": "REQ-1",
+				"status": "Applying",
+				"requested_at": str(frappe.utils.now_datetime()),
+				# Admin measures this on ADMIN's clock; the bench compares it against
+				# its own claim's age. Two durations, so no timezone can enter it.
+				"requested_age_seconds": 5,
+			},
+		):
+			onboarding._resolve_preflight_claim(s)
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(onboarding._is_preflight(s), "must be promoted")
+		self.assertEqual(s.last_sync_status, onboarding._reset_marker())
+
+	def test_a_settings_save_cannot_clobber_a_claim(self):
+		"""Round-5 MAJOR 6. The whole post-lock design rests on the claim being
+		durable, but Jarvis Settings.on_update writes its own status to the SAME
+		field on every save while pool_mode - and _should_skip_admin_sync requires
+		last_sync_status.startswith("ok"), which a claim never satisfies, so the
+		skip could never apply while one was held.
+
+		One save from a second tab (save_llm_creds, save_llm_pool, or a System
+		Manager on the desk form) destroyed it: a pre-flight claim left
+		workspace_reset_claimed_at with nothing to resolve it; a converging one left
+		the rebuild unconverged, agent_url blank and chat dead until the daily
+		sync_connection.
+
+		All three claim states, because they are written by different code paths and
+		only one of them starts with the resetting prefix."""
+		for claim in (
+			onboarding._reset_marker(preflight=True),
+			onboarding._reset_marker(),
+			onboarding._DISCONNECTING_STATUS,
+		):
+			with self.subTest(claim=claim):
+				frappe.get_single("Jarvis Settings").db_set("last_sync_status", claim)
+				frappe.db.commit()
+				s = frappe.get_single("Jarvis Settings")
+				s.flags.ignore_mandatory = True
+				s.save(ignore_permissions=True)
+				frappe.db.commit()
+				self.assertEqual(
+					frappe.db.get_single_value("Jarvis Settings", "last_sync_status"),
+					claim,
+					"a Jarvis Settings save destroyed the workspace-operation claim",
+				)
+
+	def test_a_claim_does_not_disable_llm_validation_or_the_key_write(self):
+		"""Round-6 MAJOR 2, a regression the round-5 MAJOR 6 fix INTRODUCED.
+
+		That guard returned early from on_update itself, which skipped far more than
+		the admin sync it was aimed at: validate_models (the app's ONLY call site),
+		the derived proxy flags, the legacy models[0] mirror, and the encrypted
+		llm_api_key write. save_llm_creds then returned SUCCESS while the credential
+		was never stored and an invalid config was never rejected.
+
+		The guard now sits at the two PUSH sites instead. This asserts the local
+		bookkeeping still runs while a claim is held - which is what none of the 164
+		tests noticed, because they all assert on the sync, never on validation."""
+		from jarvis.jarvis.pool_serialize import validate_models
+
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._reset_marker(preflight=True))
+		frappe.db.commit()
+
+		# validate_models must still REFUSE a bad config while a claim is held.
+		s = frappe.get_single("Jarvis Settings")
+		s.set(
+			"models",
+			[{"provider": "OpenAI", "model": "gpt-5.5", "credential_type": "api_key", "enabled": 1}],
+		)
+		self.assertTrue(
+			validate_models(s),
+			"an api_key model with no key must not validate - if this passes, the "
+			"fixture stopped modelling the case the regression was about",
+		)
+		with self.assertRaises(frappe.ValidationError):
+			s.save(ignore_permissions=True)
+		frappe.db.rollback()
+
+		# ...and the claim is still standing afterwards.
+		self.assertEqual(
+			frappe.db.get_single_value("Jarvis Settings", "last_sync_status"),
+			onboarding._reset_marker(preflight=True),
+		)
+
+	def test_a_failed_request_does_not_promote_a_claim(self):
+		"""Round-5. Promotion means "a rebuild is happening, go converge it", and a
+		row that already reached a terminal FAILURE proves the opposite. Promoting
+		on one hands the poll a reset that can never complete and, for an L4, a
+		marker that eventually authorises clearing the credentials.
+
+		The timestamp alone was the whole test before, so a Failed row promoted."""
+		s = self._preflight_claim(age_minutes=1)
+		with patch(
+			"jarvis.onboarding.admin_client.reset_workspace_state",
+			return_value={
+				"request": "REQ-1",
+				"status": "Failed",
+				"requested_at": str(frappe.utils.now_datetime()),
+			},
+		):
+			onboarding._resolve_preflight_claim(s)
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(onboarding._is_preflight(s), "a Failed request is not evidence of a rebuild")
+
+	def test_the_card_is_not_ready_while_the_claim_is_pre_flight(self):
+		"""Round-5. `ready` for an L3/L4 is `agent_url and (Ready or
+		_reconnect_llm())`, and _reconnect_llm() matches straight THROUGH the
+		pre-flight suffix - so during pre-flight `ready` collapsed to "the OLD
+		container is up", which is unconditionally true. GeneralPane.pollReset acts
+		on it with a hard reload announcing "Workspace is back", and T33 now starts
+		that poll after a timed-out initiate: the very first tick would announce a
+		completed reset for one that never started."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._reset_marker(reconnect_llm=True, preflight=True))
+		frappe.db.commit()
+		with (
+			patch("jarvis.onboarding.admin_client.reset_workspace_state", return_value={}),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={"chat_readiness": "Configuring", "agent_url": "ws://old:19000"},
+			),
+		):
+			out = onboarding.workspace_reset_state()
+		self.assertFalse(out["ready"], "a pre-flight claim must never read as a finished reset")
+		self.assertTrue(out["resetting"], "but the card still shows progress")
+
+	def test_a_young_claim_with_no_request_is_left_alone(self):
+		"""The call may still be in flight. Deciding now would be guessing, and
+		guessing wrong expires a live rebuild's claim."""
+		s = self._preflight_claim(age_minutes=1)
+		with patch(
+			"jarvis.onboarding.admin_client.reset_workspace_state",
+			return_value={"request": None, "status": None, "requested_at": None},
+		):
+			onboarding._resolve_preflight_claim(s)
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(onboarding._is_preflight(s), "a young claim must not be expired")
+
+	def test_an_expired_claim_with_no_request_is_given_up_honestly(self):
+		"""Past the deadline with no matching request the reset never started.
+		The marker must not mean "resetting" forever - this is the plan's
+		clear-the-marker invariant, and the claim is written before any
+		destructive step, so retrying is safe."""
+		s = self._preflight_claim(age_minutes=onboarding._PREFLIGHT_EXPIRY_MINUTES + 1)
+		with patch(
+			"jarvis.onboarding.admin_client.reset_workspace_state",
+			return_value={"request": None, "status": None, "requested_at": None},
+		):
+			onboarding._resolve_preflight_claim(s)
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(onboarding._reset_in_flight(s), "no marker may outlive its claim")
+		self.assertFalse(s.workspace_reset_claimed_at)
+		self.assertIn("did not start", s.last_sync_status)
+
+	def test_an_old_request_does_not_promote_a_new_claim(self):
+		"""The customer who ran an L1 at 10:00 and an L4 at 10:05. A bare "is
+		there a request row" check would promote the new claim on the OLD row and
+		converge against a container this reset never rebuilt - which is the
+		defect pre-flight exists to stop, re-entered through the resolver."""
+		s = self._preflight_claim(age_minutes=onboarding._PREFLIGHT_EXPIRY_MINUTES + 1)
+		stale = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-3)
+		with patch(
+			"jarvis.onboarding.admin_client.reset_workspace_state",
+			return_value={
+				"request": "REQ-OLD",
+				"status": "Applied",
+				"requested_at": str(stale),
+				# THREE HOURS old against a claim of ~16 minutes: admin's row is
+				# created moments AFTER a genuine claim, so a row far older than the
+				# claim provably predates it.
+				"requested_age_seconds": 3 * 60 * 60,
+			},
+		):
+			onboarding._resolve_preflight_claim(s)
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(onboarding._reset_in_flight(s))
+		self.assertIn("did not start", s.last_sync_status)
+
+	def test_admin_unreachable_is_not_a_verdict(self):
+		""" "Cannot ask" must never be read as "no row" - that would expire a live
+		rebuild's claim on a network blip. Leave it; the next tick retries."""
+		from jarvis.admin_client import AdminUnreachableError
+
+		s = self._preflight_claim(age_minutes=onboarding._PREFLIGHT_EXPIRY_MINUTES + 1)
+		with patch(
+			"jarvis.onboarding.admin_client.reset_workspace_state",
+			side_effect=AdminUnreachableError("down"),
+		):
+			onboarding._resolve_preflight_claim(s)
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(onboarding._is_preflight(s), "an unanswerable question resolves nothing")
+
+	def test_reconcile_does_not_poll_a_preflight_claim(self):
+		"""The */5 backstop must resolve first and only poll a promoted claim.
+		Polling a pre-flight marker converges nothing, forever."""
+		self._preflight_claim(age_minutes=1)
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"request": None, "status": None, "requested_at": None},
+			),
+			patch("jarvis.onboarding._workspace_reset_poll") as poll,
+		):
+			onboarding.reconcile_pending_workspace_reset()
+		poll.assert_not_called()
+
+	def test_reconcile_polls_in_the_same_tick_it_promotes(self):
+		"""Promotion and convergence in one pass, or every recovered reset waits
+		another five minutes for no reason."""
+		self._preflight_claim(age_minutes=1)
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={
+					"request": "REQ-1",
+					"status": "Applying",
+					"requested_at": str(frappe.utils.now_datetime()),
+					"requested_age_seconds": 5,
+				},
+			),
+			patch("jarvis.onboarding._workspace_reset_poll") as poll,
+		):
+			onboarding.reconcile_pending_workspace_reset()
+		poll.assert_called_once()
+
+	def test_the_card_still_says_resetting_while_pre_flight(self):
+		"""Display and convergence are different questions. The customer's card
+		must say "resetting" from the moment they click - not from the moment admin
+		confirms - or a slow initiate looks like nothing happened."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._reset_marker(preflight=True))
+		frappe.db.commit()
+		with (
+			patch("jarvis.onboarding.admin_client.reset_workspace_state", return_value={}),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={"chat_readiness": "Configuring", "agent_url": "ws://x:1"},
+			),
+		):
+			out = onboarding.workspace_reset_state()
+		self.assertTrue(out["resetting"])
+
+	def test_a_disconnect_landing_in_the_pre_rebuild_window_is_refused(self):
+		"""The race itself, end to end: disconnect_bench is called from INSIDE
+		reset_workspace - i.e. after the reset was authorised but before the
+		transport teardown that used to be the first thing to write the marker.
+
+		Against pre-T15 code this window let the disconnect straight through.
+		Both guards close it here: the redis lock (held by the request) and the
+		marker (already claimed)."""
+		outcome = {}
+
+		def _reentrant(reason=""):
+			try:
+				onboarding.disconnect_bench()
+				outcome["refused"] = False
+			except frappe.ValidationError as exc:
+				outcome["refused"] = True
+				outcome["why"] = str(exc)
+			return {"status": "Applied", "tenant": "t-new"}
+
+		with (
+			patch("jarvis.onboarding.admin_client.post_subscription_disconnect"),
+			patch("jarvis.onboarding.admin_client.reset_workspace", side_effect=_reentrant),
+			patch("jarvis.onboarding.admin_client.prepare_bench_disconnect") as teardown,
+			patch("jarvis.onboarding.admin_client.reconnect_eligibility_me") as elig,
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding.request_workspace_reset()
+		self.assertTrue(outcome.get("refused"), outcome)
+		# Refused before it could reach either the eligibility precheck or the
+		# container teardown, so nothing about the tenancy was touched.
+		elig.assert_not_called()
+		teardown.assert_not_called()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(s.jarvis_admin_customer_email)
+
+	def test_the_guard_sees_a_marker_committed_by_another_connection(self):
+		"""Round-4 BLOCKER 1, and the only test here that is not single-transaction.
+
+		Frappe holds ONE MariaDB transaction per request at REPEATABLE READ, so
+		every consistent read returns the snapshot pinned by the FIRST read in it.
+		``settings.reload()`` is a plain consistent read and therefore CANNOT see
+		another worker's commit - which is what the guard has to see. Verified on
+		this bench: a second connection's committed write is invisible to a
+		re-read, and visible immediately after frappe.db.commit().
+
+		Every other T15 test writes the marker itself, in its own transaction, so
+		the guard always sees it and none of them can catch this. This one uses a
+		SECOND CONNECTION to model the other worker, which is the whole point.
+
+		Fails against the pre-fix code (`settings.reload()`), passes with
+		`_reread_inside_lock`'s commit."""
+		from frappe.database import get_db
+
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", "ok")
+		frappe.db.commit()
+
+		# Pin THIS request's read snapshot before the marker exists, exactly as
+		# disconnect_bench's pre-lock read does.
+		frappe.get_single("Jarvis Settings")
+
+		marker = onboarding._reset_marker()
+		other = get_db(
+			socket=frappe.conf.db_socket,
+			host=frappe.conf.db_host,
+			port=frappe.conf.db_port,
+			user=frappe.conf.db_name,
+			password=frappe.conf.db_password,
+			cur_db_name=frappe.conf.db_name,
+		)
+		try:
+			other.connect()
+			other.sql(
+				"UPDATE `tabSingles` SET `value`=%s WHERE `doctype`='Jarvis Settings' "
+				"AND `field`='last_sync_status'",
+				(marker,),
+			)
+			other.commit()
+		finally:
+			try:
+				other.close()
+			except Exception:
+				pass
+
+		# A plain re-read still cannot see it - this is the defect, asserted so the
+		# test fails loudly if someone "simplifies" _reread_inside_lock back to a
+		# reload().
+		stale = frappe.get_single("Jarvis Settings")
+		stale.reload()
+		self.assertEqual(
+			stale.get("last_sync_status"),
+			"ok",
+			"reload() unexpectedly saw the other connection - the isolation "
+			"assumption this fix rests on no longer holds; re-derive it",
+		)
+
+		fresh = onboarding._reread_inside_lock()
+		self.assertEqual(fresh.get("last_sync_status"), marker)
+		self.assertTrue(
+			onboarding._reset_in_flight(fresh),
+			"the in-flight guard must see a marker another worker committed",
+		)
+
+	def test_the_poll_will_not_converge_while_a_request_holds_the_lock(self):
+		"""The hazard the early claim CREATES, and the reason the poll takes the
+		lock too. Between the claim and the rebuild the marker is set while the
+		OLD container is still up and Ready - so a */5
+		reconcile_pending_workspace_reset landing there would declare the reset
+		complete against a container that was never replaced, and for an L4 go on
+		to clear the credentials."""
+		from jarvis._redis_lock import redis_lock
+
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", onboarding._RESETTING_STATUS + onboarding._DISCONNECT_SUFFIX)
+		s.db_set("agent_url", "")
+		frappe.db.commit()
+		with (
+			redis_lock(onboarding._RESET_LOCK, timeout_s=30) as held,
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"status": "Applied"},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={
+					"chat_readiness": "Ready",
+					"agent_url": "ws://localhost:19100",
+					"agent_token": "t2",
+					"tenant_status": "running",
+				},
+			),
+			patch("jarvis.onboarding.admin_client.prepare_bench_disconnect") as teardown,
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			self.assertTrue(held, "test could not take the lock it is asserting about")
+			out = onboarding.workspace_reset_state()
+		# Round-4 MINOR 7: NOT reported ready. This assertion used to read "readiness
+		# is still REPORTED - it is an observation, not a mutation", which was the
+		# defect: GeneralPane.pollReset ACTS on `ready` with stopPoll() and a hard
+		# reload announcing "Workspace is back", so a poll landing during a long L4
+		# clear reloaded the page mid-clear and that tab never saw the terminal
+		# `disconnected: true`. "Ready" is a claim about the workspace being back,
+		# and while a claimed reset has not been finished it is not yet true.
+		self.assertFalse(out["ready"])
+		# The card still says "resetting", so the customer sees progress, not a stall.
+		self.assertTrue(out["resetting"])
+		# And nothing converged - above all, nothing was cleared.
+		self.assertFalse(out["disconnected"])
+		teardown.assert_not_called()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(onboarding._reset_in_flight(s))
+		self.assertTrue(s.jarvis_admin_customer_email)
+
+
+class TestResetMarkerRoundTrip(FrappeTestCase):
+	"""``_reset_marker`` / ``_reset_in_flight``: one definition each, so a
+	reset's depth cannot be silently downgraded by two call sites deriving it
+	separately. All four (reconnect_llm, disconnect_after) combinations,
+	including the combined "(reconnect llm) (disconnect)" case the docstring
+	calls out by name."""
+
+	def setUp(self):
+		self._snap_status = frappe.get_single("Jarvis Settings").get("last_sync_status") or ""
+
+	def tearDown(self):
+		frappe.get_single("Jarvis Settings").db_set("last_sync_status", self._snap_status)
+		frappe.db.commit()
+
+	def test_all_four_depth_combinations_round_trip(self):
+		s = frappe.get_single("Jarvis Settings")
+		cases = (
+			(False, False, onboarding._RESETTING_STATUS),
+			(True, False, onboarding._RESETTING_RECONNECT_LLM_STATUS),
+			(False, True, onboarding._RESETTING_STATUS + onboarding._DISCONNECT_SUFFIX),
+			(True, True, onboarding._RESETTING_RECONNECT_LLM_STATUS + onboarding._DISCONNECT_SUFFIX),
+		)
+		for reconnect_llm, disconnect_after, expected in cases:
+			with self.subTest(reconnect_llm=reconnect_llm, disconnect_after=disconnect_after):
+				marker = onboarding._reset_marker(reconnect_llm, disconnect_after)
+				self.assertEqual(marker, expected)
+				s.db_set("last_sync_status", marker)
+				frappe.db.commit()
+				self.assertEqual(onboarding._reset_in_flight(s), marker)
+
+
+class TestDeferredConnectionClear(FrappeTestCase):
+	"""T2 (plan edge case 1, the central risk the whole L4 design exists to
+	avoid): the CONNECTION clear must be deferred until the poll has observed
+	Ready. Nothing in the suite referenced ``disconnect_after``,
+	``_DISCONNECT_SUFFIX`` or ``_clear_admin_connection`` before this task.
+	The Ready-completes-the-clear half is already covered by
+	``test_poll_tears_down_container_before_clearing_connection_on_l4`` above
+	(BLOCKER 2's regression test); this covers the other half the "ONLY"
+	requires - that a not-ready poll must not clear early."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + ("last_sync_status",)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			self._snap[f] = s.get(f) or ""
+		_set_token("tok")
+		s.db_set("agent_url", "")
+		s.db_set("last_sync_status", onboarding._RESETTING_STATUS + onboarding._DISCONNECT_SUFFIX)
+		frappe.db.commit()
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	def test_marker_survives_and_clear_does_not_fire_while_not_ready(self):
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.reset_workspace_state",
+				return_value={"status": "Pending Capacity"},
+			),
+			patch(
+				"jarvis.onboarding.admin_client.get_connection",
+				return_value={"chat_readiness": "Configuring"},  # no agent_url yet: not ready
+			),
+			patch("jarvis.onboarding._clear_admin_connection") as clear,
+		):
+			out = onboarding.workspace_reset_state()
+		clear.assert_not_called()
+		self.assertFalse(out["ready"])
+		self.assertFalse(out["disconnected"])
+		self.assertTrue(out["resetting"])
+		s = frappe.get_single("Jarvis Settings")
+		# The disconnect intent is still recorded on the marker - the clear has
+		# not consumed it, so a later poll can still finish the job.
+		self.assertEqual(s.last_sync_status, onboarding._RESETTING_STATUS + onboarding._DISCONNECT_SUFFIX)
+		self.assertTrue(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+
+class TestDisconnectedMarkerIsNotAResetToConverge(FrappeTestCase):
+	"""T11 item 1-3: ``_clear_admin_connection`` writes a DURABLE
+	``"disconnected"`` marker (not a blank field) so a reload can tell "lost
+	admin credentials" apart from "never onboarded" - and that marker must
+	never be mistaken for a reset still in flight, or the */5
+	``reconcile_pending_workspace_reset`` backstop would try to poll a bench
+	holding no admin credentials to poll with."""
+
+	# Matches TestDisconnectBench's list: test_clear_admin_connection_leaves_the_
+	# disconnected_marker below calls the real _clear_admin_connection (CONNECTION
+	# spec), which touches all of these on the SAME Jarvis Settings singleton
+	# TestDisconnectBench exercises - not just last_sync_status.
+	_FIELDS = _SNAPSHOTTED_FIELDS + (
+		"chat_device_id",
+		"chat_device_public_key",
+		"chat_device_private_key",
+		"chat_device_token",
+		"tenant_authority_handle",
+		"tenant_authority_generation",
+		"last_sync_status",
+	)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			self._snap[f] = s.get(f) or ""
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	def test_clear_admin_connection_leaves_the_disconnected_marker(self):
+		settings = frappe.get_single("Jarvis Settings")
+		frappe.db.commit()
+		# The teardown is patched, not skipped. Blanking agent_url used to skip it,
+		# which is exactly the guard round-4 BLOCKER 2 removed: admin resolves the
+		# tenant itself, so the bench's agent_url never had any bearing on whether
+		# a container needed tearing down.
+		with (
+			patch(
+				"jarvis.onboarding.admin_client.prepare_bench_disconnect",
+				return_value=_TEARDOWN_OK,
+			),
+			patch("jarvis.account._bust_chat_gate"),
+		):
+			onboarding._clear_admin_connection(settings)
+		self.assertEqual(
+			frappe.get_single("Jarvis Settings").last_sync_status, onboarding._DISCONNECTED_STATUS
+		)
+
+	def test_reset_in_flight_returns_empty_for_the_disconnected_marker(self):
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("last_sync_status", onboarding._DISCONNECTED_STATUS)
+		frappe.db.commit()
+		self.assertEqual(onboarding._reset_in_flight(settings), "")
+
+	def test_reconcile_does_not_poll_a_disconnected_bench(self):
+		frappe.get_single("Jarvis Settings").db_set("last_sync_status", onboarding._DISCONNECTED_STATUS)
+		frappe.db.commit()
+		with patch("jarvis.onboarding._workspace_reset_poll") as poll:
+			onboarding.reconcile_pending_workspace_reset()
+		poll.assert_not_called()
+
+
+class TestBenchConnectionState(FrappeTestCase):
+	"""T11 item 4: ``bench_connection_state()`` is the durable,
+	admin-round-trip-free answer a reload / second tab / tab reconciled later
+	by the */5 backstop falls back to. Its predicate is
+	``_admin_connection_absent`` - deliberately NOT
+	``last_sync_status == "disconnected"``. That literal string is ALSO
+	written by ``jarvis.oauth.api.disconnect`` / ``onboarding.disconnect_llm``
+	for an LLM-only disconnect that leaves admin credentials fully intact, so
+	testing equality against it would tell a customer who merely unplugged
+	their AI model that they need the emailed-code reconnect."""
+
+	_FIELDS = _SNAPSHOTTED_FIELDS + ("last_sync_status",)
+
+	def setUp(self):
+		s = frappe.get_single("Jarvis Settings")
+		self._snap = _snapshot_settings()
+		for f in self._FIELDS:
+			if f in self._snap:
+				continue
+			self._snap[f] = s.get(f) or ""
+
+	def tearDown(self):
+		_restore_settings(self._snap)
+		frappe.db.commit()
+
+	def test_disconnected_true_when_both_email_and_agent_url_are_empty(self):
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("jarvis_admin_customer_email", "")
+		s.db_set("agent_url", "")
+		frappe.db.commit()
+		self.assertEqual(onboarding.bench_connection_state(), {"disconnected": True, "needs_company": False})
+
+	def test_disconnected_false_when_marker_says_so_but_credentials_survive(self):
+		"""Regression: oauth.api.disconnect() / onboarding.disconnect_llm()
+		write the literal "disconnected" to last_sync_status for an LLM-only
+		disconnect that leaves admin credentials intact. Without this, a
+		customer who merely unplugged their LLM would be told to use the
+		emailed-code reconnect - this is the collision T11 found."""
+		_set_token("tok")
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("jarvis_admin_customer_email", "cust-deadbeef@jarvis.invalid")
+		s.db_set("agent_url", "ws://localhost:19000")
+		s.db_set("last_sync_status", onboarding._DISCONNECTED_STATUS)
+		frappe.db.commit()
+		self.assertFalse(onboarding.bench_connection_state()["disconnected"])
+
+	def test_disconnected_false_mid_reset(self):
+		_set_token("tok")
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("jarvis_admin_customer_email", "cust-deadbeef@jarvis.invalid")
+		s.db_set("agent_url", "")
+		s.db_set("last_sync_status", onboarding._RESETTING_STATUS)
+		frappe.db.commit()
+		self.assertFalse(onboarding.bench_connection_state()["disconnected"])
+
+	def test_makes_no_admin_call(self):
+		"""Must work with ZERO credentials - a genuinely disconnected bench
+		holds none, so any authenticated admin call would simply fail."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("jarvis_admin_customer_email", "")
+		s.db_set("agent_url", "")
+		frappe.db.commit()
+		with patch("jarvis.onboarding.admin_client.reconnect_eligibility_me") as elig:
+			onboarding.bench_connection_state()
+		elig.assert_not_called()
+
+	def test_a_caller_without_jarvis_access_is_refused(self):
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				onboarding.bench_connection_state()
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_a_non_admin_jarvis_user_gets_an_answer(self):
+		"""Round-5 MINOR 4, and the POINT of moving this off require_jarvis_admin.
+
+		OnboardingGate is the screen a disconnected bench lands on for EVERY user,
+		and it carries copy telling a non-admin teammate to ask their workspace
+		admin. Behind the admin gate this call 403s for exactly that person, the
+		catch left `disconnected` false, and the generic first-time-setup poster
+		rendered instead — so the branch could never fire in production and its spec
+		test passed only by mocking the API.
+
+		The Guest test above cannot show this: Guest is refused under
+		require_jarvis_access too, so it passes either way. This one needs a real
+		user WITH Jarvis access and WITHOUT System Manager."""
+		email = "minor4-jarvis-user@example.com"
+		if not frappe.db.exists("User", email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": email,
+					"first_name": "Minor4",
+					"send_welcome_email": 0,
+					"roles": [{"role": "Jarvis User"}],
+				}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
+		self.addCleanup(frappe.db.commit)
+		self.addCleanup(frappe.delete_doc, "User", email, force=True, ignore_permissions=True)
+		self.addCleanup(frappe.set_user, "Administrator")
+
+		frappe.set_user(email)
+		self.assertFalse(
+			"System Manager" in frappe.get_roles(), "fixture must not be an admin, or it proves nothing"
+		)
+		out = onboarding.bench_connection_state()
+		self.assertIn("disconnected", out)
+		self.assertIn("needs_company", out)
 
 
 class TestSignupResumeFallback(FrappeTestCase):

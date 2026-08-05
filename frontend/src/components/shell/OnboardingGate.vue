@@ -14,23 +14,31 @@
 			<JarvisMark :size="56" :radius="14" class="mb-6" />
 
 			<h1 class="mb-2.5 text-2xl font-semibold leading-tight text-ink-gray-9">
-				Finish setting up {{ agentName }}
+				{{ disconnected ? `Reconnect ${agentName}` : `Finish setting up ${agentName}` }}
 			</h1>
 
-			<p v-if="isSystemManager" class="mb-7 text-p-base text-ink-gray-6">
+			<!-- MAJOR 1 fix: showGate covers a disconnected bench too - a cleared
+			     admin connection makes is_ready_for_chat return "signup", same as
+			     a first-time bench - and this gate is the only screen it lands on;
+			     every openSettings() call site (GeneralPane included) lives in the
+			     unrendered subtree behind showGate. The two branches below are
+			     byte-identical to the pre-T16 copy so a not-disconnected (or
+			     failed-call) bench renders exactly as it did before. -->
+			<p v-if="!disconnected && isSystemManager" class="mb-7 text-p-base text-ink-gray-6">
 				This workspace isn't connected to an AI agent yet. Complete a short setup to start
 				chatting with {{ agentName }} about your ERPNext data.
 			</p>
-			<p v-else class="mb-7 text-p-base text-ink-gray-6">
+			<p v-else-if="!disconnected" class="mb-7 text-p-base text-ink-gray-6">
 				{{ agentName }} isn't set up for this workspace yet. Please ask your administrator
 				(a System Manager) to complete onboarding.
 			</p>
+			<p v-else class="mb-7 text-p-base text-ink-gray-6">{{ recoveryMessage }}</p>
 
 			<Button
 				v-if="isSystemManager"
 				variant="solid"
 				size="lg"
-				label="Complete setup"
+				:label="disconnected ? 'Reconnect' : 'Complete setup'"
 				iconRight="arrow-right"
 				@click="goOnboard"
 			/>
@@ -49,10 +57,12 @@
 </template>
 
 <script setup>
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { Button } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
 import { agentName } from "@/branding";
+import { benchConnectionState } from "@/api";
 
 const router = useRouter();
 
@@ -65,6 +75,45 @@ const router = useRouter();
 // gets the "ask your administrator" copy instead. PART 4 REVISED TASK 49(c):
 // widened to the Jarvis Admin tenant-admin tier.
 const isSystemManager = !!(window.is_system_manager || window.is_jarvis_admin);
+
+// MAJOR 1: a disconnected bench (L4 reset, or the separate "Disconnect this
+// bench" action) also lands here — is_ready_for_chat returns "signup" for it,
+// same as a workspace that never onboarded, and this gate replaces the whole
+// app for both. Defaults below keep the poster generic until proven otherwise.
+const disconnected = ref(false);
+const needsCompany = ref(false);
+
+onMounted(async () => {
+	// bench_connection_state() reads local settings only and makes no admin
+	// call, so it still answers on a disconnected bench even though that bench
+	// holds no admin credentials — the same property GeneralPane.vue's
+	// resumeResetIfInFlight relies on. A thrown error must leave `disconnected`
+	// at its false default: a first-time bench must never be told it was
+	// disconnected.
+	try {
+		const state = (await benchConnectionState()) || {};
+		disconnected.value = state.disconnected === true;
+		needsCompany.value = state.needs_company === true;
+	} catch (e) {
+		// Local endpoint unavailable — fall through to the generic poster
+		// rather than guessing at a disconnected state.
+	}
+});
+
+// Mirrors GeneralPane.vue's disconnectRecoveryText: same emailed-code
+// reconnect, same "needs_company" clause, worded for whichever role is
+// looking at this gate — the admin who can act on it via the Button below,
+// or the teammate who can only relay it to one.
+const recoveryMessage = computed(() => {
+	const base = isSystemManager
+		? "This workspace still exists — it's just disconnected from your account. Reconnect with the one-time code emailed to this workspace's registered address."
+		: "This workspace still exists — it's just disconnected from your account. Ask your administrator (a System Manager) to reconnect it with the one-time code emailed to this workspace's registered address.";
+	if (!needsCompany.value) return base;
+	const companyClause = isSystemManager
+		? " That address is linked to more than one company, so you'll also need to give the company name."
+		: " That address is linked to more than one company, so they'll also need to give the company name.";
+	return base + companyClause;
+});
 
 function goOnboard() {
 	router.push({ name: "Onboarding" });

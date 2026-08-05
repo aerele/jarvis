@@ -1,9 +1,30 @@
 """One definition of what a reset clears on Jarvis Settings.
 
-Two paths reset this site: the ``bench reset-onboarding`` CLI clears everything,
-the self-serve workspace reset clears only the LLM subset. They kept separate
-field lists that drifted - the CLI missed the credential the bench authenticates
-with, the self-serve path blanked a ``reqd`` field. Both now compose from here.
+Five reset paths exist. Every settings field any of them clears comes from the
+specs below — L1 and L2 clear none of their own (a container rebuild and a
+workspace-content wipe touch nothing on this Single), which is why a spec is
+named only from L3 down:
+
+  1. ``dev.reset_onboarding`` (CLI ``bench reset-onboarding``) applies ``FULL``
+  2-4. ``onboarding.request_workspace_reset`` offers a four-level ladder, each
+       level optionally deeper:
+
+       L1  (no flags)         rebuild the container only
+       L2  wipe_data          + workspace content
+       L3  revoke_llm         + LLM connections  (applies ``LLM``)
+       L4  disconnect_after   + admin connection (applies ``CONNECTION |
+                                OAUTH_MARKERS``, deferred until the rebuilt
+                                container reports Ready)
+
+  5. ``onboarding.disconnect_bench`` terminal action applies ``CONNECTION |
+     OAUTH_MARKERS`` with no rebuild or poll
+
+They kept separate field lists that drifted - the CLI missed the credential the
+bench authenticates with (now ``CONNECTION``), the self-serve path blanked a
+``reqd`` field (``llm_auth_mode``, now in ``LLM.defaults``). All now compose from
+here, so the field lists cannot drift apart. The composition is load-bearing: L1
+rebuilds but clears nothing; L2 adds workspace wipe; L3 adds ``LLM``; L4 and the
+terminal action each add ``CONNECTION``.
 """
 
 from typing import NamedTuple
@@ -112,6 +133,37 @@ CONNECTION = ResetSpec(
 		# the previous tenancy's generation (review plan 04 P0-5).
 		"tenant_authority_generation",
 	),
+)
+
+# The OAuth markers whose backing credential a DISCONNECT itself destroys, and
+# nothing wider.
+#
+# Both paths that clear ``CONNECTION`` first have admin tear the container's OAuth
+# auth-profile down (``api.tenant.prepare_bench_disconnect``), and an L4 rebuild
+# would drop it regardless - OAuth creds never ride a rebuild. So after either,
+# the container can no longer answer a turn on an OAuth grant, while these two
+# fields on this Single still say it can.
+#
+# That is not cosmetic. ``account.is_ready_for_chat`` gates the whole LLM step on
+# ``llm_oauth_connected_at`` for auth_mode oauth/subscription, and
+# ``account._has_llm_config`` reads either field - so a bench that disconnected and
+# then reconnected with the emailed code would SKIP LLM setup and land the customer
+# in a chat whose container holds no credential. Plan edge case 21.
+#
+# Deliberately NOT the whole ``LLM`` spec: a disconnect is not a revoke. An api-key
+# tenant's ``/secrets/llm.key`` and a pool's own keys survive the disconnect, so
+# ``llm_api_key``, the models[] pool and ``llm_direct_synced_at`` /
+# ``llm_pool_synced_at`` must stay - clearing them would make every disconnect a
+# silent L3. ``llm_auth_mode`` stays too, and stays reqd: the workspace WAS set up
+# for OAuth, and leaving it set is what routes readiness back through LLM setup
+# rather than into the "unknown auth_mode" verdict.
+#
+# A strict subset of ``LLM`` (``llm_oauth_account_email`` is in its blank list,
+# ``llm_oauth_connected_at`` in its null list), so ``FULL`` already covers it and
+# the CLI cannot drift from the self-serve paths here.
+OAUTH_MARKERS = ResetSpec(
+	blank=("llm_oauth_account_email",),
+	null=("llm_oauth_connected_at",),
 )
 
 FULL = CONNECTION | LLM

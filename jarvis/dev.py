@@ -4,6 +4,19 @@ Gated by the System Manager role. Exposed as the ``bench reset-onboarding``
 command (``jarvis.commands``) to wipe local state so the operator can run the
 onboarding wizard fresh without manual DB surgery.
 
+This is one of THREE callers that compose from ``jarvis.settings_reset`` -
+``dev.reset_onboarding`` (FULL), ``onboarding._revoke_llm_connections`` (LLM) and
+``onboarding._clear_admin_connection`` (CONNECTION | OAUTH_MARKERS). That module's
+docstring enumerates FIVE reset PATHS, which is a different count and both are
+right: the self-serve ladder is four user-facing depths served by two call sites,
+because L1 and L2 clear no settings field at all. Do not "correct" either number
+to match the other.
+
+Here, ``reset_onboarding`` applies ``settings_reset.FULL`` (the entire
+CONNECTION + LLM spec). The self-serve ladder in
+``onboarding.request_workspace_reset`` offers granular depths; this CLI command is
+the operator's blunt tool.
+
 Companion to ``jarvis_admin_v2.api.dev.purge_customer`` on the admin side -
 the admin button wipes admin-side records; this clears the customer bench.
 
@@ -33,12 +46,18 @@ _RESET_LITERAL_DEFAULTS = dict(_FULL.literals)
 
 
 def reset_onboarding(wipe_data: bool = False) -> dict:
-	"""Wipe local Jarvis Settings connection + LLM credentials so the
-	customer bench can run the onboarding wizard from step 1 again.
+	"""Wipe local Jarvis Settings connection + LLM credentials (apply ``FULL``)
+	so the customer bench can run the onboarding wizard from step 1 again.
+
+	The CLI command ``bench reset-onboarding`` is the operator's blunt tool;
+	``onboarding.request_workspace_reset`` offers customers a four-level ladder
+	(rebuild only → + wipe data → + revoke LLM → + disconnect) so they can
+	choose their reset depth. This function applies the deepest level (equivalent
+	to the ladder's L4 + no rebuild polling).
 
 	``wipe_data`` additionally deletes all workspace content (chats, skills,
 	macros, triggers, learning artifacts, wiki, dashboards — the same
-	``onboarding._WIPE_DOCTYPES`` set the self-serve reset offers) for a true
+	``onboarding._WIPE_DOCTYPES`` set the ladder offers in its L2) for a true
 	factory reset. The ``bench reset-onboarding`` CLI passes it by default;
 	programmatic callers must opt in.
 

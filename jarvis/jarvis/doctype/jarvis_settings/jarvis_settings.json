@@ -95,6 +95,8 @@
   "last_sync_section",
   "last_sync_at",
   "last_sync_status",
+  "workspace_reset_claimed_at",
+  "reconnect_needs_company",
   "llm_pool_synced_at",
   "llm_direct_synced_at",
   "chat_was_ready_at",
@@ -719,6 +721,23 @@
    "fieldtype": "Long Text",
    "label": "Last Sync Status",
    "read_only": 1
+  },
+  {
+   "fieldname": "workspace_reset_claimed_at",
+   "fieldtype": "Datetime",
+   "label": "Workspace Reset Claimed At",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "When request_workspace_reset (or disconnect_bench) CLAIMED last_sync_status, before its long admin calls. Reset bookkeeping, not tenancy state, so it is in NO settings_reset ResetSpec - a disconnect that cleared it would destroy the only thing able to resolve its own orphaned claim. reconcile_pending_workspace_reset needs it to tell admin's fresh request row from an older one, and to know when an unresolvable claim has waited long enough to expire. Cleared on release and on expiry; kept while the operation is genuinely in flight."
+  },
+  {
+   "fieldname": "reconnect_needs_company",
+   "fieldtype": "Check",
+   "label": "Reconnect Needs Company",
+   "default": "0",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Whether the emailed-code reconnect will ALSO require the company name, because this workspace's registered address owns more than one eligible account. Written by _clear_admin_connection at the moment of the clear, AFTER the CONNECTION sweep, and in NO settings_reset ResetSpec - it describes the aftermath of a disconnect, not the tenancy that was disconnected. It cannot be recomputed later: once the admin credentials are gone there is nothing left to ask, which is why bench_connection_state used to hardcode False and send customers to a reconnect they could not complete."
   },
   {
    "description": "Set when a pool (proxy) config was last APPLIED to the container via admin. Distinguishes a provisioned pool from one whose first sync is still pending/failed - is_ready_for_chat gates on it.",

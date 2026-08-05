@@ -545,6 +545,9 @@ class JarvisSettings(Document):
 					# Mask in-memory so nothing downstream re-writes plaintext.
 					self.llm_api_key = "*" * 10
 
+		if self._workspace_op_holds_status():
+			return
+
 		# Step 4: Route to pool or single-model path. Keyed on pool_mode, NOT
 		# proxy_active: an openclaw-direct pool still has to be pushed as a whole
 		# spec through /llm-pool, and pushing its models[0] through /llm-creds
@@ -765,8 +768,46 @@ class JarvisSettings(Document):
 			idempotency_key=idempotency_key,
 		)
 
+	def _workspace_op_holds_status(self) -> bool:
+		"""True when a workspace reset or bench disconnect owns ``last_sync_status``,
+		so the admin SYNC must be skipped.
+
+		The post-lock design in ``jarvis.onboarding`` rests on that claim being
+		durable once the redis lock is released. Every status the sync legs write
+		would overwrite it, and the diff gate that might have saved us
+		(``_should_skip_admin_sync``) requires ``last_sync_status.startswith("ok")``
+		— which a claim never satisfies — so the skip can never apply while one is
+		held. A single save from a second tab destroyed it: a pre-flight claim was
+		left with nothing to resolve it, a converging one left the rebuild
+		unconverged with ``agent_url`` blank and chat dead until the daily sync.
+
+		Skipping the sync is right on its own terms too. During a reset the container
+		is being replaced and during a disconnect it is being torn down, so there is
+		nothing the push could usefully reach; ``onboarding._workspace_reset_poll``
+		re-enqueues the pool sync once the rebuilt container is reachable.
+
+		ONE definition, consulted at the two places that actually push — the unified
+		path's Step 4 and the legacy path — never at the top of ``on_update``. The
+		first cut of this guard returned early from ``on_update`` itself and thereby
+		also skipped ``validate_models`` (the app's ONLY call site), the derived
+		flags, the legacy mirror and the encrypted ``llm_api_key`` write, so
+		``save_llm_creds`` returned SUCCESS while the credential was never stored and
+		an invalid config was never rejected. Local bookkeeping must always run; only
+		the push is conditional.
+		"""
+		from jarvis.onboarding import _workspace_op_in_flight
+
+		if not _workspace_op_in_flight(self):
+			return False
+		frappe.logger().info(
+			"jarvis settings: admin sync skipped — a workspace operation holds the status claim"
+		)
+		return True
+
 	def _on_update_single_model_legacy(self):
 		"""The existing single-model on_update logic, extracted for reuse."""
+		if self._workspace_op_holds_status():
+			return
 		action = self._classify_llm_change()
 		if action is None:
 			return

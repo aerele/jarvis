@@ -161,7 +161,10 @@
 		<!-- Reset workspace (jarvis.onboarding.*): self-serve container rebuild.
 		     Admin-tier only; the red solid lives in the useConfirm dialog, per the
 		     danger-zone rule above. While a reset runs the pane polls back to
-		     Ready and hard-reloads /jarvis (drops the memoized readiness verdict). -->
+		     Ready and hard-reloads /jarvis (drops the memoized readiness verdict) -
+		     UNLESS the poll reports `disconnected` (L4): that bench just lost its
+		     admin credentials, so reloading would strand it behind the onboarding
+		     gate poster instead of showing it how to get back. See benchDisconnected. -->
 		<template v-if="isSM">
 			<div class="mt-6 flex items-start justify-between gap-4">
 				<div class="flex flex-col gap-0.5">
@@ -169,13 +172,12 @@
 					<span class="max-w-lg text-p-sm text-ink-gray-6">
 						Destroys this workspace's container and attaches a fresh one, then
 						reconnects automatically — use it when the workspace is stuck or won't
-						connect. Chat is unavailable while it runs (usually a few minutes). Your
-						subscription, chat history and AI connections are kept unless you tick the
-						options.
+						connect. Chat is unavailable while it runs (usually a few minutes). Pick
+						how deep to go below; each level keeps everything the one above it kept.
 					</span>
 				</div>
 				<Button
-					v-if="!resetting && !resetOpen"
+					v-if="!resetting && !resetOpen && !benchDisconnected"
 					variant="subtle"
 					theme="red"
 					label="Reset workspace"
@@ -183,7 +185,24 @@
 				/>
 			</div>
 
-			<div v-if="resetting" class="mt-3">
+			<div v-if="benchDisconnected" class="mt-3 max-w-lg">
+				<div
+					class="rounded-lg border border-outline-red-2 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
+				>
+					<p class="font-medium">This bench is disconnected.</p>
+					<p class="mt-1">{{ disconnectRecoveryText }}</p>
+				</div>
+				<Button
+					class="mt-3"
+					variant="subtle"
+					theme="red"
+					label="Reconnect this bench"
+					iconLeft="external-link"
+					@click="goReconnect"
+				/>
+			</div>
+
+			<div v-else-if="resetting" class="mt-3">
 				<Badge :label="resetStatusLabel" theme="blue" variant="subtle" />
 				<p class="mt-2 text-p-sm text-ink-gray-6">{{ resetNote }}</p>
 			</div>
@@ -195,35 +214,52 @@
 					class="w-full rounded-md border bg-surface-white p-2 text-p-sm text-ink-gray-8"
 					placeholder="What's wrong? (optional)"
 				/>
-				<label class="mt-3 flex cursor-pointer items-start gap-2.5">
-					<input v-model="wipeData" type="checkbox" class="mt-0.5" />
-					<span>
-						<span class="block text-p-sm font-medium text-ink-gray-8">
-							Also delete workspace content
+				<!-- One escalating choice, not four independent checkboxes: the depths
+				     are cumulative (L2 implies L1's rebuild, L4 implies L1-L3), so
+				     separate toggles could combine into a depth request_workspace_reset
+				     has no name for. A radio ladder makes "L3 without L2" unrepresentable
+				     instead of merely undocumented. -->
+				<fieldset class="mt-3">
+					<legend class="text-p-sm font-medium text-ink-gray-8">How deep?</legend>
+					<label
+						v-for="d in RESET_DEPTHS"
+						:key="d.value"
+						class="mt-2 flex cursor-pointer items-start gap-2.5"
+					>
+						<input
+							v-model="resetDepth"
+							type="radio"
+							name="reset-depth"
+							:value="d.value"
+							class="mt-0.5"
+						/>
+						<span>
+							<span class="block text-p-sm font-medium text-ink-gray-8">{{ d.title }}</span>
+							<span class="block text-p-sm text-ink-gray-6">{{ d.description }}</span>
 						</span>
-						<span class="block text-p-sm text-ink-gray-6">
-							Permanently deletes chats, skills, macros, triggers, learned patterns,
-							wiki pages and dashboards. Cannot be undone.
-						</span>
-					</span>
-				</label>
-				<label class="mt-2 flex cursor-pointer items-start gap-2.5">
-					<input v-model="revokeLlm" type="checkbox" class="mt-0.5" />
-					<span>
-						<span class="block text-p-sm font-medium text-ink-gray-8">
-							Also disconnect AI model connections
-						</span>
-						<span class="block text-p-sm text-ink-gray-6">
-							Removes every connected model and key; you'll set them up again after
-							the reset.
-						</span>
-					</span>
-				</label>
+					</label>
+				</fieldset>
+				<!-- L4 is a lockout path (it ends with no admin credentials on this
+				     bench): shown the moment it is SELECTED, not just inside the confirm
+				     dialog at submit time - the plan requires the cost and the way back
+				     to be visible before the choice can be made, not just before it's
+				     final. -->
+				<div
+					v-if="resetDepth === DEPTH_DISCONNECT"
+					class="mt-3 rounded-lg border border-outline-red-2 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
+				>
+					This is the deepest reset: once the rebuild finishes, this bench also
+					disconnects from your account. Reconnect with the one-time code emailed
+					to this workspace's registered address (plus its company name, if that
+					address covers more than one). Refused up front — before anything is
+					touched — if your subscription would not be eligible to reconnect
+					afterwards.
+				</div>
 				<div ref="resetFormEl" class="mt-4 flex items-center gap-2">
 					<Button
 						variant="subtle"
 						theme="red"
-						label="Reset workspace"
+						:label="resetDepth === DEPTH_DISCONNECT ? 'Reset and disconnect' : 'Reset workspace'"
 						iconLeft="refresh-cw"
 						:loading="resetBusy"
 						@click="doReset"
@@ -235,6 +271,37 @@
 						@click="closeReset"
 					/>
 				</div>
+			</div>
+
+			<!-- Disconnect this bench: the SEPARATE terminal action (T3,
+			     disconnect_bench). Deliberately not a fifth reset depth in the
+			     ladder above - no rebuild, no poll, and it is worded for what it
+			     is (leaving), not folded into "reset". Always a lockout path, so
+			     the cost + recovery text is in the static description, not gated
+			     behind opening a form first. -->
+			<div v-if="!benchDisconnected" class="mt-8 flex items-start justify-between gap-4">
+				<div class="flex flex-col gap-0.5">
+					<span class="text-base font-medium text-ink-gray-8">Disconnect this bench</span>
+					<span class="max-w-lg text-p-sm text-ink-gray-6">
+						Leaves your account rather than resetting anything — no rebuild, no
+						polling. Clears this bench's connection to your subscription; chat stops
+						working immediately. The only way back is a one-time code emailed to
+						this workspace's registered address (plus its company name, if that
+						address covers more than one).
+					</span>
+					<span v-if="resetting" class="max-w-lg text-p-sm text-ink-gray-5">
+						A reset is in progress — wait for it to finish before disconnecting.
+					</span>
+				</div>
+				<Button
+					variant="subtle"
+					theme="red"
+					label="Disconnect"
+					iconLeft="log-out"
+					:loading="disconnectBusy"
+					:disabled="resetting"
+					@click="doDisconnectBench"
+				/>
 			</div>
 		</template>
 	</SettingsPane>
@@ -456,8 +523,66 @@ const resetReason = ref("");
 const resetBusy = ref(false);
 const resetting = ref(false);
 const resetState = ref({});
-const wipeData = ref(false);
-const revokeLlm = ref(false);
+
+// The four depths (jarvis/onboarding.py request_workspace_reset), each adding
+// to the one above — see RESET_DEPTHS below for the ladder itself.
+const DEPTH_REBUILD = 1;
+const DEPTH_WIPE_DATA = 2;
+const DEPTH_REVOKE_LLM = 3;
+const DEPTH_DISCONNECT = 4;
+const resetDepth = ref(DEPTH_REBUILD);
+const wipeData = computed(() => resetDepth.value >= DEPTH_WIPE_DATA);
+const revokeLlm = computed(() => resetDepth.value >= DEPTH_REVOKE_LLM);
+const disconnectAfter = computed(() => resetDepth.value >= DEPTH_DISCONNECT);
+
+const RESET_DEPTHS = [
+	{
+		value: DEPTH_REBUILD,
+		title: "Rebuild the container",
+		description:
+			"Destroys and rebuilds the container, then reconnects automatically. Your subscription, chat history and AI connections are kept.",
+	},
+	{
+		value: DEPTH_WIPE_DATA,
+		title: "+ Delete workspace content",
+		description:
+			"Also permanently deletes chats, skills, macros, triggers, learned patterns, wiki pages and dashboards. Cannot be undone.",
+	},
+	{
+		value: DEPTH_REVOKE_LLM,
+		title: "+ Disconnect AI model connections",
+		description:
+			"Also removes every connected model and key; you'll set them up again after the reset.",
+	},
+	{
+		value: DEPTH_DISCONNECT,
+		title: "+ Disconnect this bench",
+		description:
+			"Also clears this bench's connection to your account once the rebuild finishes. Refused up front if your subscription would not be eligible to reconnect afterwards.",
+	},
+];
+
+// Terminal state shared by L4 (via the poll, see pollReset) and the separate
+// Disconnect action below: this bench has no admin credentials left.
+// benchNeedsCompany is always definitive (true/false), never null — L4's own
+// request/poll fetches it from bench_connection_state() on the poll response,
+// and disconnect_bench() reports it directly (see disconnectRecoveryText).
+const benchDisconnected = ref(false);
+const benchNeedsCompany = ref(false);
+const disconnectRecoveryText = computed(() => {
+	const base =
+		"Reconnect with the one-time code emailed to this workspace's registered address.";
+	if (benchNeedsCompany.value === true) {
+		return `${base} That address is linked to more than one company, so you'll also need to give the company name.`;
+	}
+	return base;
+});
+// The wizard owns the reconnect flow (code entry, company disambiguation);
+// land on it rather than duplicating that screen here — same convention as
+// ChatView.vue's goReconnect for the site_replaced billing notice.
+function goReconnect() {
+	window.location.assign("/jarvis/onboarding");
+}
 
 // Poll every 3s while resetting, up to 15 min; the tenant-side */5 cron backstop
 // converges a closed tab, so timing out here just stops the spinner.
@@ -486,8 +611,7 @@ function openReset() {
 function closeReset() {
 	resetOpen.value = false;
 	resetReason.value = "";
-	wipeData.value = false;
-	revokeLlm.value = false;
+	resetDepth.value = DEPTH_REBUILD;
 }
 
 async function doReset() {
@@ -506,10 +630,15 @@ async function doReset() {
 			"Your AI model connections will be disconnected — you'll set them up again after the reset."
 		);
 	}
+	if (disconnectAfter.value) {
+		parts.push(
+			"Once the rebuild finishes, this bench also disconnects from your account — chat stays unavailable until you reconnect with a one-time code emailed to this workspace's registered address (plus its company name, if that address covers more than one). Refused up front, before anything changes, if your subscription would not be eligible to reconnect."
+		);
+	}
 	const ok = await confirm({
-		title: "Reset workspace?",
+		title: disconnectAfter.value ? "Reset and disconnect this bench?" : "Reset workspace?",
 		message: parts.join(" "),
-		confirmLabel: "Reset workspace",
+		confirmLabel: disconnectAfter.value ? "Reset and disconnect" : "Reset workspace",
 		danger: true,
 	});
 	if (!ok) return;
@@ -519,6 +648,7 @@ async function doReset() {
 			(await api.requestWorkspaceReset(resetReason.value, {
 				wipeData: wipeData.value,
 				revokeLlm: revokeLlm.value,
+				disconnectAfter: disconnectAfter.value,
 			})) || {};
 		closeReset();
 		resetState.value = out;
@@ -526,10 +656,88 @@ async function doReset() {
 		toast.success("Resetting your workspace.");
 		startPoll();
 	} catch (e) {
+		// L4's refusal (ineligible to reconnect) throws BEFORE anything is
+		// rebuilt or cleared (onboarding.py request_workspace_reset) — the
+		// server's message explains why, so it is shown verbatim rather than
+		// replaced with a generic one.
 		toast.error((e && e.messages && e.messages[0]) || "Could not reset the workspace.");
+		// ...but a refusal is not the only way this call fails. Admin rebuilds
+		// SYNCHRONOUSLY inside the request, so a slow reset can outlive the web
+		// worker's own ceiling (gunicorn http_timeout, ~120s by default) and this
+		// call dies while the reset it started proceeds. The bench keeps its claim
+		// on purpose for exactly that case (onboarding.py: a timeout is not
+		// evidence the rebuild did not start), and reconcile_pending_workspace_reset
+		// converges it — but the customer would sit on a bare error toast watching
+		// nothing happen, and reload into a workspace mid-rebuild with no
+		// explanation. Start polling instead: workspace_reset_state is read-only
+		// and reports `resetting: false` almost immediately if there is in fact no
+		// reset, which just stops the spinner.
+		if (isServerUnreachable(e)) {
+			resetting.value = true;
+			startPoll();
+		}
 	} finally {
 		resetBusy.value = false;
 	}
+}
+
+// Disconnect this bench (danger zone, separate from the ladder above) -------
+const disconnectBusy = ref(false);
+
+async function doDisconnectBench() {
+	if (resetting.value) return; // also guarded by the button's :disabled — defensive against a stray click racing the poll
+	const ok = await confirm({
+		title: "Disconnect this bench?",
+		message:
+			"This clears this bench's connection to your account — chat stops working immediately and nothing rebuilds automatically. The only way back is a one-time code emailed to this workspace's registered address (plus its company name, if that address covers more than one). Refused up front, before anything changes, if your subscription would not be eligible to reconnect.",
+		confirmLabel: "Disconnect",
+		danger: true,
+	});
+	if (!ok) return;
+	disconnectBusy.value = true;
+	try {
+		const res = (await api.disconnectBench()) || {};
+		benchNeedsCompany.value = res.needs_company === true;
+		benchDisconnected.value = true;
+		toast.success(
+			res.already_disconnected
+				? "This bench was already disconnected."
+				: "This bench is now disconnected."
+		);
+	} catch (e) {
+		toast.error((e && e.messages && e.messages[0]) || "Could not disconnect this bench.");
+	} finally {
+		disconnectBusy.value = false;
+	}
+}
+
+// Did the call fail because the server never answered, rather than because it
+// answered "no"? Only the former means the reset may be running regardless.
+//
+// A server-side REFUSAL arrives with Frappe's `messages` (from _server_messages,
+// which frappe.throw populates) or an explicit 4xx: request_workspace_reset
+// refuses that way for an ineligible L4, a different-depth reset and a
+// mid-disconnect reset, and in every one of those nothing was started. A dead
+// worker, a proxy timeout or a dropped connection has no message and no 4xx.
+// Defaults to FALSE for anything ambiguous: spuriously polling would leave a
+// spinner over a workspace that is not resetting.
+function isServerUnreachable(e) {
+	const status = (e && (e.status || (e.response && e.response.status))) || 0;
+	// STATUS first, because `messages` is not the reliable discriminator the first
+	// draft assumed: frappe-ui's call.js synthesises `messages: ['Internal Server
+	// Error']` for ANY parseable JSON error body with no _server_messages, so a
+	// JSON-bodied 502/504 carries a message and would have been misread as a
+	// refusal. A 5xx is the server failing regardless of what it says.
+	if (status >= 500) return true;
+	// A 4xx is a decision: request_workspace_reset refuses this way for an
+	// ineligible L4, a different-depth reset, a non-cumulative depth and a
+	// mid-disconnect reset, and in every one of those nothing was started.
+	if (status >= 400) return false;
+	// No status at all: a dead worker, a dropped connection, a proxy that never
+	// answered. Server-side messages here mean the request WAS served, so they
+	// still rule it out.
+	if (e && e.messages && e.messages.length) return false;
+	return status === 0;
 }
 
 function startPoll() {
@@ -557,8 +765,50 @@ async function pollReset() {
 		return; // transient — the container is mid-rebuild; keep polling
 	}
 	resetState.value = s;
+	// L4's admin-connection clear only runs once this same poll has observed
+	// the rebuilt container Ready and persisted the fresh connection
+	// (onboarding.py _workspace_reset_poll), so `disconnected` and `ready` land
+	// on the SAME response. Check `disconnected` FIRST and return: this bench
+	// has no admin credentials on every later poll, and the `ready` reload
+	// below would bounce it behind the onboarding gate poster instead of
+	// showing it the way back — an unreachable-admin blip must never look like
+	// this deliberate, permanent state, and vice versa.
+	if (s.disconnected) {
+		stopPoll();
+		resetting.value = false;
+		// Fetch the definitive needs_company from local settings so the recovery
+		// text is never hedged (bench_connection_state returns {disconnected,
+		// needs_company} read from local settings with no admin call).
+		try {
+			const state = (await api.benchConnectionState()) || {};
+			benchNeedsCompany.value = state.needs_company === true;
+		} catch (e) {
+			// If the endpoint fails, default to false (no company name needed)
+			// rather than hedging. A disconnected bench with no local settings
+			// answer is rare, and "no company needed" is the less disruptive guess.
+			benchNeedsCompany.value = false;
+		}
+		benchDisconnected.value = true;
+		toast.success("Workspace reset — this bench is now disconnected.");
+		return;
+	}
 	if (s.ready) {
 		stopPoll();
+		// The customer asked for L4, confirmed an irreversibility warning, and got
+		// L3: the workspace WAS rebuilt, but this bench is still connected. Say so
+		// rather than toasting plain success, and do NOT reload — the reload would
+		// drop the only message explaining it, and there is nothing to reload for
+		// because the connection is unchanged. Server side: _workspace_reset_poll's
+		// `disconnect_blocked`, set when the eligibility re-check refused (the
+		// subscription went ineligible mid-rebuild) or the container teardown could
+		// not complete.
+		if (s.disconnect_blocked) {
+			resetting.value = false;
+			toast.error(
+				`Your workspace was reset, but this bench could not be disconnected: ${s.disconnect_blocked}`
+			);
+			return;
+		}
 		toast.success("Workspace is back — reloading.");
 		// Full reload drops the memoized readiness verdict (same ending as the
 		// onboarding wizard).
@@ -568,8 +818,54 @@ async function pollReset() {
 
 async function resumeResetIfInFlight() {
 	if (!isSM) return;
+	// The credential-free check comes FIRST, and the ORDER is the fix — but not for
+	// the reason this comment used to give (round-5 MINOR 10). It claimed
+	// workspaceResetState() throws for a disconnected bench. It does not:
+	// require_jarvis_admin is a role check independent of connection state, and the
+	// get_connection failure is caught inside _workspace_reset_poll, which returns a
+	// normal 200 with ready:false.
+	//
+	// The real reason: that 200 says "not resetting, not ready", which is
+	// indistinguishable from "nothing to resume" — so a disconnected bench fell
+	// through to the generic onboarding poster with no way back shown.
+	// bench_connection_state answers the question that actually distinguishes them,
+	// from local settings, with no admin call.
+	try {
+		const local = (await api.benchConnectionState()) || {};
+		if (local.disconnected) {
+			benchNeedsCompany.value = local.needs_company === true;
+			benchDisconnected.value = true;
+			return;
+		}
+	} catch (e) {
+		// Local endpoint unavailable: fall through to the reset poll below rather
+		// than assuming either state.
+	}
 	try {
 		const s = (await api.workspaceResetState()) || {};
+		if (s.disconnected) {
+			// _workspace_reset_poll is not read-only — persisting the fresh
+			// connection and clearing admin creds are side effects of calling it,
+			// not just facts it reports. So THIS mount's own resume call can be
+			// the one that finishes an L4 left mid-poll by a closed tab. Without
+			// this check that leaves the bench disconnected server-side with the
+			// pane showing no trace of it — same distinct-terminal-state
+			// requirement as pollReset below, just reached from a fresh mount
+			// instead of an in-progress poll.
+			resetState.value = s;
+			// Fetch the definitive needs_company from local settings so the
+			// recovery text on reload is never hedged.
+			try {
+				const state = (await api.benchConnectionState()) || {};
+				benchNeedsCompany.value = state.needs_company === true;
+			} catch (e) {
+				// If the endpoint fails, default to false (no company name needed)
+				// rather than hedging.
+				benchNeedsCompany.value = false;
+			}
+			benchDisconnected.value = true;
+			return;
+		}
 		if (s.resetting && !s.ready) {
 			resetState.value = s;
 			resetting.value = true;

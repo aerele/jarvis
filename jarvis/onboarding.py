@@ -3,19 +3,22 @@ Settings, and thin server wrappers the onboarding page calls (so the browser
 never holds admin creds). admin_client returns already-unwrapped admin data."""
 
 import json
+from typing import NamedTuple
 
 import frappe
+from frappe.rate_limiter import rate_limit
 from frappe.utils import cint
 
 from jarvis import admin_client, onboarding_contract, release_notice
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
+	AdminRejectedError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
 from jarvis.hooks import get_default_admin_url
-from jarvis.permissions import grant_onboarding_admin, require_jarvis_admin
+from jarvis.permissions import grant_onboarding_admin, require_jarvis_access, require_jarvis_admin
 
 # Every admin-side failure admin_client raises. One tuple so the onboarding
 # facade's catch sites cannot drift apart from _surface's.
@@ -91,7 +94,7 @@ def _surface(fn, *args, **kwargs):
 		_throw_admin_error(e)
 
 
-def write_connection(data: dict) -> None:
+def write_connection(data: dict) -> bool:
 	"""Persist native admin credentials + container connection into Jarvis
 	Settings via db_set (no on_update creds-push retrigger during onboarding).
 
@@ -104,9 +107,16 @@ def write_connection(data: dict) -> None:
 	encrypts into __Auth first, then db_sets only the mask - preserving the
 	"no on_update retrigger" property this function exists for."""
 	if not isinstance(data, dict):
-		return
+		return False
 	from jarvis._password_utils import set_settings_password
 
+	# Whether the CONNECTION block (agent_url + agent_token) was actually
+	# persisted. False when the payload carried no agent_url, and — the case that
+	# matters — when tenant_authority.guard HELD the write. Callers that go on to
+	# act as if the connection had landed must gate on this; see the L4 poll, which
+	# used to record a reset complete and then destroy the credentials on the
+	# strength of a write that never happened.
+	connection_written = False
 	s = frappe.get_single("Jarvis Settings")
 	# Capture the container this workspace pointed at BEFORE this write, so a
 	# reconnect that repoints it can be told apart from a daily sync that rewrites
@@ -159,6 +169,7 @@ def write_connection(data: dict) -> None:
 			s.db_set("agent_url", data["agent_url"])
 			if data.get("agent_token"):
 				set_settings_password(s, "agent_token", data["agent_token"])
+		connection_written = write_conn
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them.
 	principal_change = any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password"))
@@ -186,6 +197,7 @@ def write_connection(data: dict) -> None:
 	# key means "cleared" - which would drop a live notice. It is persisted only
 	# where a full get_connection payload is in hand: sync_connection and the
 	# chat gate.
+	return connection_written
 
 
 @frappe.whitelist()
@@ -1470,6 +1482,280 @@ _RESETTING_STATUS = "pending: resetting workspace"
 # then completes on "container reachable" (readiness can never reach Ready with
 # no LLM configured) and the wizard gate owns the rest.
 _RESETTING_RECONNECT_LLM_STATUS = _RESETTING_STATUS + " (reconnect llm)"
+# L4 ("reset and start fresh"): the customer asked for the admin connection to go
+# too. It cannot go now — the poll below still has to authenticate to admin to
+# watch the rebuild — so the intent rides the marker and the clear happens once
+# the poll has seen the new container Ready. Suffix, not a third variant, so a
+# reset that is BOTH llm-revoking and disconnecting still satisfies the
+# ``startswith`` in _reconnect_llm.
+_DISCONNECT_SUFFIX = " (disconnect)"
+# Durable "no admin connection" marker: _clear_admin_connection writes this
+# AFTER settings_reset.CONNECTION blanks last_sync_status (CONNECTION.blank
+# includes it), so a reload can tell a bench that lost its admin credentials
+# apart from one that simply never finished onboarding (last_sync_status stays
+# "" for that case). Deliberately does NOT start with _RESETTING_STATUS, so
+# _reset_in_flight() and reconcile_pending_workspace_reset() both correctly
+# treat a disconnected bench as having no reset to converge.
+#
+# WRITE-ONLY BY DESIGN, and round-4 MINOR 2 is right that this is unusual enough
+# to state outright rather than leave as an oddity.
+#
+# Nothing reads it back to ANSWER "is this bench disconnected" — ``_admin_connection_absent``
+# does that, from the two credential fields — because the literal "disconnected"
+# already means something ELSE on this same field: ``jarvis.oauth.api.disconnect``
+# and ``onboarding.disconnect_llm`` both write it for a chat-subscription / LLM
+# disconnect that leaves admin credentials fully intact (account.py's
+# ``_has_llm_config`` docstring documents the same collision). Testing equality
+# against it would tell a customer who merely unplugged their AI model that they
+# need the emailed-code reconnect.
+#
+# It is kept because ``settings_reset.CONNECTION`` blanks ``last_sync_status``, and
+# an empty field is indistinguishable from "never onboarded" for an operator
+# reading the row — which is precisely the question they ask when a customer says
+# chat stopped. Diagnostic value, not control flow. Do not build a predicate on it.
+_DISCONNECTED_STATUS = "disconnected"
+
+
+# A reset has TWO in-flight states, and conflating them is what let a transient
+# failure destroy a customer's credentials.
+#
+# PRE-FLIGHT (this suffix): claimed, but the rebuild has NOT been requested yet —
+# or was attempted and we do not know whether it started. The old container is
+# still up and still Ready.
+# CONVERGING (no suffix): admin accepted the request, so a rebuild really is
+# happening and the poll's job is to watch for it.
+#
+# Why they must differ. The claim is written BEFORE the long calls (Amendment 2
+# BLOCKER 2), so between claim and rebuild the marker says "resetting" while the
+# OLD container still answers Ready. ``_workspace_reset_poll`` converges on
+# ``ready and _resetting()``. With ONE state, a ``*/5``
+# ``reconcile_pending_workspace_reset`` landing in that window declares the reset
+# complete against a container that was never replaced — and for an L4 tears it
+# down and clears the credentials.
+#
+# That window is not just the happy-path gap. When ``reset_workspace`` fails with
+# a timeout or a 5xx the claim is deliberately KEPT (see _release_reset_claim: a
+# bench timeout is the ordinary shape of a rebuild that IS running), the raise
+# unwinds ``with redis_lock(...)`` and its ``finally`` RELEASES the lock. So a
+# single transient network fault used to leave a convergeable marker, a free
+# lock, and an un-rebuilt container — and reconcile would then converge on it five
+# minutes later. No lock scope or TTL closes that; the lock is not even held when
+# it happens. Only positive evidence that admin accepted the request does, which
+# is what promotion is.
+_PREFLIGHT_SUFFIX = " (requested)"
+
+# The disconnect's own claim. Same role the pre-flight reset marker plays, for the
+# same reason: ``disconnect_bench``'s critical section spans a teardown that can
+# run to 240s, so holding the lock across it would freeze every convergence for
+# the whole TTL when the worker is SIGKILLed at ``http_timeout``. The lock now
+# covers only check-and-claim, and THIS carries in-flight-ness afterwards.
+#
+# Deliberately does NOT start with _RESETTING_STATUS: a disconnect is not a reset,
+# nothing polls it, and ``reconcile_pending_workspace_reset`` must not try to
+# converge one. It is matched by ``_workspace_op_in_flight`` instead.
+_DISCONNECTING_STATUS = "pending: disconnecting bench"
+
+
+def _reset_marker(
+	reconnect_llm: bool = False, disconnect_after: bool = False, preflight: bool = False
+) -> str:
+	"""The ``last_sync_status`` marker for a reset at this depth.
+
+	One definition, because the marker is not just display state — it is where a
+	reset's DEPTH lives between the request and the poll that completes it. Two
+	call sites deriving it separately is how an L4 gets silently downgraded.
+
+	``preflight`` appends ``_PREFLIGHT_SUFFIX``: claimed, rebuild not yet known to
+	have started. Guards treat it as in flight; the poll refuses to converge on it.
+	"""
+	marker = _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS
+	if disconnect_after:
+		marker += _DISCONNECT_SUFFIX
+	return marker + _PREFLIGHT_SUFFIX if preflight else marker
+
+
+def _strip_preflight(status: str) -> str:
+	"""The converging marker a pre-flight claim will be promoted to.
+
+	Depth comparisons must go through this. A same-depth resubmission during the
+	pre-flight window is idempotent, not "a reset at a different depth" — comparing
+	the raw strings would refuse it with a message that is simply untrue."""
+	status = status or ""
+	return status[: -len(_PREFLIGHT_SUFFIX)] if status.endswith(_PREFLIGHT_SUFFIX) else status
+
+
+def _is_preflight(settings) -> bool:
+	"""Claimed, but not yet known to be rebuilding. See ``_PREFLIGHT_SUFFIX``."""
+	return (settings.get("last_sync_status") or "").endswith(_PREFLIGHT_SUFFIX)
+
+
+def _reset_in_flight(settings) -> str:
+	"""The marker of a reset this bench has CLAIMED, or "" if none.
+
+	The GUARD predicate — ``disconnect_bench``'s refusal, the depth check, and the
+	poll's ``resetting`` display field. It matches pre-flight AND converging,
+	because from the point of view of "may another workspace operation start", a
+	claimed reset counts whether or not the rebuild has been confirmed.
+
+	Deliberately NOT the same predicate the poll converges on
+	(``_workspace_reset_poll_locked``'s ``_resetting()``), which excludes
+	pre-flight. Guarding and converging are different questions and answering them
+	with one predicate is what made a transient failure destructive — see
+	``_PREFLIGHT_SUFFIX``.
+
+	The bench, not the browser, is the authority on this. An in-flight reset was
+	previously guarded only by a disabled button in the SPA, which two open Settings
+	tabs defeat: the tab that did not start the reset never learns it is running.
+	That matters because the marker lives in ``settings_reset.CONNECTION`` — a
+	concurrent disconnect blanks it, and ``reconcile_pending_workspace_reset`` then
+	has nothing left to converge, stranding the rebuild permanently."""
+	status = settings.get("last_sync_status") or ""
+	return status if status.startswith(_RESETTING_STATUS) else ""
+
+
+def _workspace_op_in_flight(settings) -> str:
+	"""Any claimed workspace operation — a reset at either state, OR a disconnect.
+
+	The reset and the disconnect are mutually exclusive and each must refuse while
+	the other is claimed, so both guards ask THIS rather than only about their own
+	kind. ``_reset_in_flight`` on its own would let a reset start on top of a
+	disconnect that is mid-teardown, and then clear ``CONNECTION`` under it."""
+	status = settings.get("last_sync_status") or ""
+	return _reset_in_flight(settings) or (status if status == _DISCONNECTING_STATUS else "")
+
+
+# The critical section both entry points serialise on: read the marker, decide,
+# and CLAIM it, as one indivisible step.
+#
+# A guard that reads state it has not yet claimed is not a guard.
+# ``request_workspace_reset`` used to read the marker first and write it LAST,
+# inside ``_disconnect_agent_transport``, after ``_recovery_outlook`` (8s),
+# ``post_subscription_disconnect`` (180s budget), ``admin_client.reset_workspace``
+# (180s, and it STARTS the rebuild) and the content wipe. For that whole
+# multi-minute window ``disconnect_bench``'s ``_reset_in_flight`` guard saw no
+# marker and let the disconnect through — blanking ``last_sync_status`` (it is in
+# ``settings_reset.CONNECTION``) and leaving ``reconcile_pending_workspace_reset``
+# nothing to converge, with the rebuilt container stranded and no bench able to
+# reach it.
+#
+# One lock name, not one per action: all three ARE mutually exclusive.
+# Serialising a reset only against other resets would leave exactly the
+# reset-vs-disconnect race this exists to close.
+#
+# THREE holders, and the poll is not an afterthought. Claiming the marker early
+# creates a state the old ordering never had: marker set, rebuild NOT yet
+# requested, OLD container still up and Ready. ``_workspace_reset_poll``'s
+# convergence test is ``ready and _resetting()``, and admin still reports the old
+# container as Ready — so a ``*/5`` ``reconcile_pending_workspace_reset`` landing
+# in that window would declare the reset complete against the container that was
+# never replaced, and for an L4 go on to clear the credentials. The poll takes
+# this lock too, non-blocking: while a request holds it there is by definition
+# nothing to converge.
+_RESET_LOCK = "workspace-reset"
+# TTL: the backstop for a worker that dies holding it.
+#
+# 60s, because the guarded section is now only re-read -> guards -> claim-commit.
+# It was 600s when the lock was held across the whole multi-minute request, and
+# that was the wrong shape: redis_lock's release is a ``finally``, which a
+# SIGKILLed worker never runs, and under a ~120s gunicorn ``http_timeout`` a
+# SIGKILL mid-reset is the ORDINARY end of a slow reset rather than an
+# exceptional one. Every convergence — including the ``*/5`` reconcile — then
+# froze for the full ten minutes, and an L4's credential clear with it.
+#
+# What the lock stopped protecting when it shrank is carried by the marker
+# instead, which is what a durable claim is for: see _PREFLIGHT_SUFFIX.
+_RESET_LOCK_TTL_S = 60
+# Wait: a contender is a second Settings tab clicking a moment later, not a
+# convoy. Long enough that an ordinary overlap queues rather than erroring,
+# short enough that a genuinely stuck holder surfaces as a message the customer
+# can act on instead of a hung request.
+_RESET_LOCK_WAIT_S = 5.0
+
+
+def _reread_inside_lock():
+	"""Re-read Jarvis Settings so a guard sees what ANOTHER worker committed.
+
+	``settings.reload()`` alone does NOT do this, and three call sites used to say
+	it did. Frappe holds ONE MariaDB transaction per request — pymysql's
+	``autocommit`` default is False and ``get_connection_settings`` never
+	overrides it, while ``Database.commit()`` immediately re-opens a transaction
+	with ``START TRANSACTION``. Frappe also never overrides the isolation level
+	for MariaDB, and this deployment reports ``REPEATABLE-READ``. Under InnoDB
+	that means every consistent nonlocking read in a transaction returns the
+	snapshot pinned by the FIRST read in it. ``Document.reload()`` is
+	``load_from_db()`` -> ``get_singles_dict(..., for_update=False)``, a plain
+	consistent read, so it re-issues the identical SELECT and gets the identical
+	rows. Measured, not reasoned: a second connection's committed INSERT is
+	invisible to a re-read and visible immediately after ``frappe.db.commit()``.
+
+	So the snapshot has to END first. ``commit()`` rather than a ``for_update``
+	locking read: the alternative would hold InnoDB row locks on ``tabSingles``
+	for the whole guarded section, which here spans multi-minute admin calls and
+	would block every unrelated writer to Jarvis Settings.
+
+	Safe to commit at these three call sites specifically: each runs at the TOP of
+	its locked section, before the function has written anything, so there is no
+	half-finished work to make durable. Do not move a call to this below a write.
+
+	Returns a freshly-read doc; callers must use the returned object.
+	"""
+	frappe.db.commit()
+	return frappe.get_single("Jarvis Settings")
+
+
+def _claim_reset(settings, marker: str) -> None:
+	"""Write the resetting marker and commit it, so every other request sees it.
+
+	Committed immediately and deliberately: the whole point is that a concurrent
+	``disconnect_bench`` in another worker reads it, and an uncommitted write in
+	this transaction is invisible to that worker.
+
+	Stamps ``workspace_reset_claimed_at`` alongside. A claim with no timestamp
+	cannot be resolved later: ``reconcile_pending_workspace_reset`` needs it both
+	to tell admin's fresh request row from last week's (the customer who runs an L1
+	at 10:00 and an L4 at 10:05 defeats any "is there a recent row" heuristic) and
+	to know when an unresolvable claim has waited long enough to expire."""
+	settings.db_set("last_sync_status", marker)
+	settings.db_set("workspace_reset_claimed_at", frappe.utils.now_datetime())
+	frappe.db.commit()
+
+
+def _promote_reset_claim(settings, marker: str) -> None:
+	"""Turn a PRE-FLIGHT claim into a converging one. Admin accepted the request.
+
+	The single place a marker becomes something ``_workspace_reset_poll`` may
+	converge on, and it is reached only after ``admin_client.reset_workspace``
+	RETURNED — i.e. on positive evidence that a rebuild is actually happening.
+	Everything else leaves the claim pre-flight for reconcile to resolve.
+
+	``workspace_reset_claimed_at`` is kept, not cleared: the reset is still in
+	flight, and a converging marker can still be orphaned by a crash before the
+	poll finishes."""
+	settings.db_set("last_sync_status", marker)
+	frappe.db.commit()
+
+
+def _release_reset_claim(settings, prior: str) -> None:
+	"""Undo a claim whose reset PROVABLY never started.
+
+	Called only when admin was reached and REFUSED — a 4xx/401/403/429 — so nothing
+	was torn down and no rebuild is running, and restoring the previous status is
+	honest. Without it, a refused request would leave the bench displaying
+	"resetting" forever, with ``reconcile_pending_workspace_reset`` polling a reset
+	that does not exist and ``disconnect_bench`` refused by a guard protecting
+	nothing.
+
+	NOT called on a timeout or a 5xx, and that distinction is load-bearing rather
+	than cautious. Admin's ``reset_workspace`` runs the destroy + reprovision
+	synchronously inside the HTTP request and commits its request row before
+	starting, while this bench gives up at ``timeout_s=180``. A bench-side timeout
+	is therefore the ORDINARY shape of a slow rebuild that is running, not evidence
+	of one that is not. Releasing there blanks the marker mid-rebuild and strands
+	the container — the same outcome the claim exists to prevent."""
+	settings.db_set("last_sync_status", prior)
+	settings.db_set("workspace_reset_claimed_at", None)
+	frappe.db.commit()
+
 
 # Customer content wiped by the "also delete my data" reset option. Raw table
 # deletes (single-tenant DB, no hooks) — the dev.reset_onboarding precedent.
@@ -1515,34 +1801,211 @@ _WIPE_DOCTYPES = (
 
 
 @frappe.whitelist()
-def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_llm: bool = False) -> dict:
+def request_workspace_reset(
+	reason: str = "",
+	wipe_data: bool = False,
+	revoke_llm: bool = False,
+	disconnect_after: bool = False,
+) -> dict:
 	"""Self-serve workspace reset: the control plane rebuilds the container NOW
 	(subscription kept), then this site disconnects its agent transport and polls
 	``workspace_reset_state`` back to Ready.
 
-	``wipe_data`` also deletes workspace content (chats, skills, macros,
-	triggers, learning artifacts, wiki, dashboards). ``revoke_llm`` also clears
-	every LLM connection (pool models, subscription accounts, keys, synced
-	markers) so the customer sets up their AI model fresh after the reset.
-	Both run only AFTER the control plane accepted the reset.
+	Four depths, each adding to the one above:
+
+	  L1  (no flags)         rebuild the container
+	  L2  wipe_data          + delete workspace content (chats, skills, macros,
+	                           triggers, learning artifacts, wiki, dashboards)
+	  L3  revoke_llm         + clear every LLM connection (pool models,
+	                           subscription accounts, keys, synced markers) so the
+	                           customer sets their AI model up fresh
+	  L4  disconnect_after   + clear the admin connection itself — full
+	                           ``bench reset-onboarding`` parity
+
+	L2/L3 run only AFTER the control plane accepted the reset. L4 is different: it
+	CANNOT run here, because the poll that watches the rebuild authenticates with
+	the very credentials it clears. Doing it now would leave the reset initiated
+	on the control plane and unobservable from this bench. The intent is recorded
+	on the marker instead and ``_workspace_reset_poll`` performs the clear once
+	the new container reports Ready — see ``_DISCONNECT_SUFFIX``.
+
+	L4 leaves this bench with no credentials; the way back is the emailed-code
+	reconnect. So it is refused up front when that recovery would not work, before
+	anything is rebuilt or cleared — ``_recovery_outlook``.
 
 	Gated on System Manager, like the rest of onboarding."""
+	from jarvis._redis_lock import redis_lock
+
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
+	disconnect_after = bool(cint(disconnect_after))
+	reconnect_llm = bool(cint(revoke_llm))
+	wipe_data = bool(cint(wipe_data))
+	# The ladder is CUMULATIVE — each level adds to the one above — and until now
+	# only the SPA's radio group enforced that. The server took three independent
+	# booleans, so ``disconnect_after=1, revoke_llm=0, wipe_data=0`` was accepted
+	# and produced a depth with no name: the marker is
+	# ``"pending: resetting workspace (disconnect)"``, for which ``_reconnect_llm()``
+	# is false, so the poll requires full chat-Ready before it will converge — while
+	# the customer has asked for the connection to be destroyed at the end. Nothing
+	# in the ladder describes that combination, and no test covers it.
+	#
+	# Enforced here rather than fixed in the poll, because the poll is not what is
+	# wrong: the request is. Round-4 MINOR 4.
+	if disconnect_after and not (wipe_data and reconnect_llm):
+		frappe.throw(
+			"Reset depth is cumulative: disconnecting this bench (L4) includes wiping "
+			"workspace content and revoking LLM connections. Send those too, or choose a "
+			"shallower reset.",
+			frappe.ValidationError,
+		)
+	if reconnect_llm and not wipe_data:
+		frappe.throw(
+			"Reset depth is cumulative: revoking LLM connections (L3) includes wiping "
+			"workspace content. Send wipe_data too, or choose a shallower reset.",
+			frappe.ValidationError,
+		)
+	marker = _reset_marker(reconnect_llm, disconnect_after)
+	prior_status = settings.get("last_sync_status") or ""
+
+	# The lock is held for the WHOLE request, not just the check-and-claim. Two
+	# separate windows need covering and one lock covers both:
+	#
+	#   check -> claim   a concurrent disconnect must not slip between reading the
+	#                    marker and writing it (Amendment 2 BLOCKER 2).
+	#   claim -> rebuild the marker is now set while the OLD container is still up
+	#                    and Ready, so a concurrent poll would "converge" the reset
+	#                    against a container that was never replaced. See _RESET_LOCK.
+	#
+	# The marker claim is still what makes the guard DURABLE — the lock dies with
+	# the worker, the marker does not, and a crash between here and
+	# ``admin_client.reset_workspace`` returning would otherwise leave admin
+	# rebuilding a container this bench has no record of resetting.
+	with redis_lock(
+		_RESET_LOCK, timeout_s=_RESET_LOCK_TTL_S, blocking_timeout_s=_RESET_LOCK_WAIT_S
+	) as acquired:
+		if not acquired:
+			frappe.throw(
+				"Another workspace operation is already running on this site. Wait for it to "
+				"finish, then try again.",
+				frappe.ValidationError,
+			)
+		settings = _reread_inside_lock()
+		prior_status = settings.get("last_sync_status") or ""
+		# A reset already running at a DIFFERENT depth must not be silently
+		# re-labelled. Admin is idempotent (named_lock + return the in-flight
+		# request), so a repeat submission does not start a second rebuild — but
+		# this bench would still overwrite the marker, and the marker is where the
+		# depth lives. Re-submitting the SAME depth stays idempotent; changing it is
+		# refused rather than applied to a rebuild the customer did not choose it for.
+		in_flight = _workspace_op_in_flight(settings)
+		if in_flight == _DISCONNECTING_STATUS:
+			# A disconnect is mid-teardown. Its lock is already released (it only
+			# covers check-and-claim), so this marker is the only thing standing
+			# between a reset and a bench that is about to lose its credentials.
+			frappe.throw(
+				"This bench is being disconnected. Wait for that to finish before resetting.",
+				frappe.ValidationError,
+			)
+		# Compared with the pre-flight suffix STRIPPED. A same-depth resubmission
+		# while the first attempt is still pre-flight is idempotent, not "a reset at
+		# a different depth" — comparing raw strings would refuse it with a message
+		# that is simply untrue.
+		if in_flight and _strip_preflight(in_flight) != marker:
+			frappe.throw(
+				"A workspace reset is already running at a different depth. Wait for it to finish, "
+				"then start the deeper one.",
+				frappe.ValidationError,
+			)
+		if disconnect_after:
+			# Before the rebuild, not after: a customer who cannot reconnect must not
+			# reach a state where the only thing standing between them and a lost
+			# workspace is a code that will never be issued.
+			outlook = _recovery_outlook()
+			if not outlook.recoverable:
+				frappe.throw(outlook.reason, frappe.ValidationError)
+		# CLAIM, before any long call, as PRE-FLIGHT. Committed, so another worker's
+		# ``disconnect_bench`` reads it even though this transaction is still open.
+		# Pre-flight, so no poll can converge on it until admin has actually
+		# accepted the request — see _PREFLIGHT_SUFFIX.
+		_claim_reset(settings, _reset_marker(reconnect_llm, disconnect_after, preflight=True))
+
+	# The lock ends HERE, not after the long calls. It only ever had to make
+	# check-and-claim atomic; the marker carries in-flight-ness from now on, and it
+	# is durable where the lock is not (redis_lock's release is a `finally`, which
+	# a SIGKILLed worker never runs — and under a ~120s gunicorn http_timeout that
+	# is the ORDINARY end of a slow reset, not an exceptional one). Holding it
+	# across the calls below froze every convergence for the whole TTL.
 	# Tear down the container-side OAuth auth-profile while the old container is
 	# still reachable (same ordering as dev.reset_onboarding). Best-effort — a
-	# dead container is often the very reason for the reset.
+	# dead container is often the very reason for the reset, and unlike the L4
+	# disconnect, nothing irreversible follows here: the container is being
+	# replaced wholesale and the bench keeps its credentials either way.
 	if settings.get("agent_url"):
 		try:
 			admin_client.post_subscription_disconnect()
 		except Exception:
 			pass
-	out = _surface(admin_client.reset_workspace, reason)
-	if cint(wipe_data):
+	# NOT via _surface: it maps every admin error onto a bare
+	# frappe.ValidationError, and the CLASS is precisely what decides whether the
+	# claim may be given back. Mapped by hand below through the same
+	# _throw_admin_error, so the customer-facing sentence is unchanged.
+	try:
+		out = admin_client.reset_workspace(reason)
+	except (
+		AdminRejectedError,
+		AdminValidationError,
+		AdminAuthError,
+		AdminRateLimitedError,
+	) as exc:
+		# Admin was REACHED, validated the request and declined it (4xx / 401 / 403 /
+		# 429, or a 5xx carrying a permanent rejection code). Nothing was started, so
+		# the claim must not linger.
+		#
+		# AdminRejectedError is listed FIRST and explicitly: it subclasses
+		# AdminUnreachableError, so without it a permanent refusal fell through to the
+		# generic handler and blocked the customer for 15 minutes on a request admin
+		# had provably declined.
+		_release_reset_claim(settings, prior_status)
+		_throw_admin_error(exc)
+	except Exception as exc:
+		# Everything else — a timeout, a 5xx, a network fault — is NOT evidence that
+		# nothing is running, so the claim STAYS, and stays PRE-FLIGHT.
+		#
+		# Admin runs the destroy + reprovision SYNCHRONOUSLY inside the HTTP request,
+		# committing its "Applying" row before it starts, while this bench gives up at
+		# timeout_s=180. So a bench-side timeout is the ordinary shape of a rebuild
+		# that IS running, and releasing here would blank the marker mid-rebuild and
+		# strand the container.
+		#
+		# But it is equally NOT evidence that one IS running. Leaving a CONVERGING
+		# marker here was the defect: the raise unwinds the lock (redis_lock's
+		# `finally` DOES run on an exception), and five minutes later reconcile would
+		# converge against a container that was never rebuilt — clearing the
+		# credentials on an L4. Pre-flight is the honest state, and
+		# reconcile_pending_workspace_reset resolves it by asking admin whether the
+		# request actually exists.
+		frappe.logger().info(
+			"workspace reset: admin call failed without proving the rebuild did or did not "
+			f"start; leaving the claim PRE-FLIGHT for reconcile to resolve "
+			f"({type(exc).__name__}: {exc})"
+		)
+		if isinstance(exc, _ADMIN_ERRORS):
+			_throw_admin_error(exc)
+		raise
+	# PROMOTE. Admin accepted the request, so a rebuild really is happening and the
+	# poll's job is now to watch for it. This is the positive evidence, and it is the
+	# only thing that turns a claim into something a poll may converge on.
+	_promote_reset_claim(settings, marker)
+	if wipe_data:
 		_wipe_workspace_content()
-	if cint(revoke_llm):
+	if reconnect_llm:
 		_revoke_llm_connections(settings)
-	_disconnect_agent_transport(settings, reconnect_llm=bool(cint(revoke_llm)))
+	_disconnect_agent_transport(
+		settings,
+		reconnect_llm=reconnect_llm,
+		disconnect_after=disconnect_after,
+	)
 	return out
 
 
@@ -1560,7 +2023,9 @@ def _revoke_llm_connections(settings) -> None:
 	settings_reset.apply(settings, settings_reset.LLM)
 
 
-def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
+def _disconnect_agent_transport(
+	settings, reconnect_llm: bool = False, disconnect_after: bool = False
+) -> None:
 	"""Clear the agent transport so chat gates on admin's chat_readiness while
 	the container is rebuilt. Keeps admin creds and (unless the customer revoked
 	them) the LLM config + ``*_synced_at`` markers — the control plane carries
@@ -1585,11 +2050,492 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	# marker is cleared explicitly too so the intent is not left to a side effect.
 	settings.db_set("chat_was_ready_at", None)
 	settings.db_set("chat_ready_authority", "")
-	settings.db_set(
-		"last_sync_status", _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS
-	)
+	settings.db_set("last_sync_status", _reset_marker(reconnect_llm, disconnect_after))
 	_bust_chat_gate()
 	frappe.db.commit()
+
+
+class _RecoveryOutlook(NamedTuple):
+	"""Whether this bench could get back after its admin connection is cleared.
+
+	``needs_company`` is not a refusal — see ``_recovery_outlook``."""
+
+	recoverable: bool
+	needs_company: bool
+	reason: str
+
+
+def _recovery_outlook() -> _RecoveryOutlook:
+	"""Would the emailed-code reconnect return this bench to its account?
+
+	Asks admin's ``billing.reconnect.can_reconnect_me`` (via
+	``admin_client.reconnect_eligibility_me``) rather than re-deriving eligibility
+	here, so the rules — subscription in Active/Suspended, and a live tenant — stay
+	on the side that owns them and are free to change without this bench knowing.
+
+	It is NOT ``_resolve_customer``, and an earlier version of this docstring said
+	it was. ``can_reconnect_me`` applies the same predicates (``_ELIGIBLE_STATUSES``,
+	``_has_live_tenant``) to the SESSION's customer, and shares
+	``_eligible_accounts`` with ``_resolve_customer`` for the ambiguity half — but
+	it is a separate function answering "could the caller reconnect", not
+	"which account does this code reconnect". Those are different questions and
+	only the shared helper keeps their answers aligned; there is no single call
+	that makes drift impossible by construction.
+
+	Fails CLOSED, and for a different reason than ``reconnect_available`` above:
+	that one hides a hint when admin blips, this one refuses an IRREVERSIBLE
+	clear. Refusing costs the customer a retry; clearing on a wrong "yes" costs
+	them their workspace with no self-serve way back.
+
+	``needs_company`` is reconnectable, not refused. It means the customer's contact
+	address owns several accounts reconnect would also accept, so they must name one
+	when they redeem the code. Admin computes it; treating it as "not recoverable"
+	would block a customer who can in fact recover.
+
+	Sends NO identity, deliberately. The obvious-looking
+	``jarvis_admin_customer_email`` holds admin's synthetic OAuth login
+	(``cust-<hash>@jarvis.invalid`` from ``signup._synthetic_login``), never a
+	contact address. An earlier version of this function passed it to the guest
+	``can_reconnect``, which resolves on the real address — so the precheck matched
+	nothing, refused every genuine bench, and rendered a value the Jarvis Settings
+	field documents as never-to-be-shown into a customer toast. Admin derives the
+	customer from this bench's credentials instead, which cannot be got wrong here.
+
+	Takes no arguments. It used to accept ``settings`` and never read it — every
+	fact it needs is derived by admin from this bench's credentials, which is the
+	entire point of the redesign above.
+	"""
+	try:
+		_require_admin_url()
+		data = admin_client.reconnect_eligibility_me() or {}
+	except Exception as exc:
+		# Deliberate degrade: an unverified recovery path is treated as no recovery
+		# path. Same shape as reconnect_available's catch, opposite purpose — that
+		# one hides a hint, this one refuses an irreversible clear.
+		#
+		# Logged WITH the exception, to Error Log rather than the info log. This is
+		# the branch that refuses an irreversible action, and a fixed sentence with
+		# no detail left an operator unable to tell a 403 (this account genuinely
+		# cannot reconnect) from a DNS failure (nothing is known at all) — two very
+		# different things to tell a customer who cannot disconnect.
+		frappe.log_error(
+			title="disconnect precheck: could not confirm reconnect eligibility; refusing",
+			message=f"{type(exc).__name__}: {exc}\n\n{frappe.get_traceback()}",
+		)
+		return _RecoveryOutlook(
+			False,
+			False,
+			"Jarvis Admin could not be reached to confirm this site can be reconnected afterwards. "
+			"Nothing was changed — try again shortly.",
+		)
+	if data.get("recoverable"):
+		return _RecoveryOutlook(True, bool(data.get("needs_company")), "")
+	# Admin owns the refusal wording: it knows the account state, and it is the side
+	# that can phrase one without naming an address this bench holds no legitimate
+	# copy of. Fall back only if it sent none.
+	return _RecoveryOutlook(
+		False,
+		False,
+		data.get("reason")
+		or "This account cannot be reconnected afterwards, so disconnecting now would leave no "
+		"self-serve way back. Contact support.",
+	)
+
+
+class BenchTeardownRefused(frappe.ValidationError):
+	"""admin was REACHED and the container teardown did not complete.
+
+	Distinct from ``AdminUnreachableError`` on purpose, and the distinction is
+	the whole of T14: unreachable is the ONLY condition that authorizes clearing
+	the credentials without a confirmed teardown. Everything else — a refusal, a
+	rate limit, an auth failure, a device unpair that was attempted and failed —
+	means a retry can still succeed, so the clear must abort instead.
+
+	A ``frappe.ValidationError`` subclass so ``disconnect_bench`` surfaces it the
+	same way it surfaces its other two refusals, while ``_workspace_reset_poll``
+	can still catch this class specifically without swallowing unrelated errors.
+	"""
+
+
+def _teardown_container_via_admin() -> dict:
+	"""Have admin tear the container down, and decide whether this bench may
+	proceed to destroy its credentials.
+
+	Replaces the pair of calls this used to make (``post_subscription_disconnect``
+	+ ``unpair_chat_devices``). Both gate on admin's ``current_customer``, which
+	403s a Suspended account — a cohort deliberately admitted to the disconnect —
+	so for exactly that cohort both were refused, and both refusals were caught by
+	a bare ``except`` and logged in the same sentence as a dead container. The
+	container kept its OAuth auth-profile and every paired chat-device token, and
+	this bench then destroyed the only credentials that could ever revoke them.
+
+	Returns admin's report when the clear may proceed. Raises
+	``BenchTeardownRefused`` when it may not.
+
+	The decision, and why each way:
+
+	* ``AdminRejectedError`` — admin was reached and permanently refused. ABORT.
+	  Checked BEFORE AdminUnreachableError because it is a SUBCLASS of it
+	  (``jarvis.exceptions``); ordering these the other way silently turns every
+	  permanent rejection into a proceed.
+	* ``AdminUnreachableError`` — network fault, timeout, or a 5xx with no
+	  recognised code. PROCEED. This is the only escape hatch, and it has to
+	  exist: without it a bench whose control plane is gone can never leave its
+	  tenancy, which is worse than the risk it accepts.
+	* ``AdminValidationError`` (4xx: ResetLocked, MoveInFlight, UnknownProvider),
+	  ``AdminAuthError``, ``AdminRateLimitedError`` — admin answered and said no.
+	  ABORT; the customer retries.
+	* ``devices_unpaired`` false — the unpair was ATTEMPTED and failed. ABORT.
+	  This is the leg that must not be skipped: a surviving auth profile costs
+	  the customer their own LLM credential, a surviving device token gives a
+	  third party chat access to the workspace, and after the clear nothing can
+	  revoke it. NOTE this gate applies only when admin ANSWERED — the
+	  ``AdminUnreachableError`` branch above returns before reaching it, and must,
+	  because nothing is known there and the escape hatch has to exist. So the
+	  device leg is guaranteed against a reachable admin, not unconditionally.
+	* ``profile_cleared`` false with devices unpaired — PROCEED, logged. This is
+	  the ordinary dead-container disconnect: unpair is a file operation that
+	  works on a stopped container, the auth-profile clear runs doctor + restart
+	  and does not. Refusing here would block the case the disconnect exists for
+	  (plan edge case 6), and the cost is bounded to the customer's own credential.
+	* anything else — ABORT. Fail-safe: an unclassified failure is not evidence
+	  that the teardown happened, and the action on the other side is irreversible.
+	"""
+	try:
+		report = admin_client.prepare_bench_disconnect() or {}
+	except AdminRejectedError as exc:
+		raise BenchTeardownRefused(
+			f"Jarvis Admin refused to release this bench ({exc}). Nothing was changed."
+		) from exc
+	except AdminUnreachableError as exc:
+		frappe.logger().info(f"disconnect: admin unreachable during container teardown; proceeding ({exc})")
+		return {"profile_cleared": False, "devices_unpaired": False, "removed": 0, "detail": str(exc)}
+	except (AdminValidationError, AdminAuthError, AdminRateLimitedError) as exc:
+		raise BenchTeardownRefused(
+			f"Jarvis Admin could not release this bench yet: {exc} Nothing was changed — try again shortly."
+		) from exc
+	except Exception as exc:
+		frappe.log_error(
+			title="disconnect: unclassified failure preparing the container teardown",
+			message=frappe.get_traceback(),
+		)
+		raise BenchTeardownRefused(
+			f"Could not confirm this workspace's container was released ({type(exc).__name__}). "
+			"Nothing was changed — try again shortly."
+		) from exc
+
+	if not report.get("devices_unpaired"):
+		raise BenchTeardownRefused(
+			"This workspace's paired chat devices could not be unpaired, so they would keep "
+			"access after this bench loses its credentials. Nothing was changed — try again "
+			f"shortly. ({report.get('detail') or 'no detail'})"
+		)
+	if not report.get("profile_cleared"):
+		# Proceeding deliberately: see the docstring. Logged as an error, not an
+		# info, because it leaves the customer's own LLM credential live on a
+		# container no bench can reach again.
+		frappe.log_error(
+			title="disconnect: container auth-profile survived the teardown",
+			message=f"devices unpaired ({report.get('removed')}); "
+			f"auth profile NOT cleared: {report.get('detail')}",
+		)
+	return report
+
+
+def _clear_admin_connection(settings, *, needs_company: bool = False) -> list:
+	"""Tear this bench off its tenancy: the ``CONNECTION`` field set, plus the
+	container-side state that does not live in Jarvis Settings.
+
+	Ordering is load-bearing and matches ``dev.reset_onboarding``: after the field
+	loop this bench can no longer authenticate to admin, so everything needing
+	admin runs first.
+
+	The teardown is NO LONGER best-effort. It was, and that was the defect: a
+	refusal and a dead container were caught by the same bare ``except`` and
+	logged in the same sentence, so the one case where the teardown was possible
+	and got skipped was indistinguishable from the one where it was impossible.
+	``_teardown_container_via_admin`` makes that distinction and raises
+	``BenchTeardownRefused`` when the clear must not proceed — callers handle it.
+
+	``settings_reset.apply`` covers more than it looks: the chat-device quartet
+	(the same four fields ``chat.device.clear_credentials`` drops, via the same
+	``clear_settings_password`` so the ``__Auth`` rows go too), the authority
+	generation + handle (``tenant_authority.clear``'s pair), and the cached
+	bearer, which it drops itself because ``CONNECTION`` carries passwords. The
+	chat-readiness verdict cache is NOT a settings field, so it is busted here —
+	without it a stale positive verdict outlives the connection it described.
+
+	``needs_company`` is admin's answer from the caller's OWN eligibility check, and
+	both callers have just made one. It is persisted here because this is the last
+	moment it is knowable: after the sweep there are no credentials left to ask
+	with. See ``bench_connection_state``.
+
+	Returns the cleared field list for the caller's report.
+
+	Raises:
+		BenchTeardownRefused: nothing was cleared.
+	"""
+	from jarvis.account import _bust_chat_gate
+
+	# UNCONDITIONAL, and that is the fix. This used to be gated on the bench's own
+	# ``agent_url`` being non-empty — a leftover from the design where the BENCH
+	# called the container-affecting endpoints itself. It is now admin that tears
+	# the container down: it resolves the tenant with _any_tenant_for(customer) and
+	# already answers profile_cleared/devices_unpaired true when there is nothing
+	# to tear down. This bench's agent_url has no bearing on whether a container
+	# exists or must be torn down, so the guard tested the wrong fact — and when it
+	# was false it skipped the teardown with no raise, no log and no report, then
+	# destroyed the credentials anyway, leaving every paired chat-device token live
+	# on a workspace nothing could ever revoke them from.
+	#
+	# Reachable, not theoretical: on the L4 poll, write_connection declines to write
+	# agent_url whenever tenant_authority.guard holds (REJECT, or an
+	# AuthorityInvariantError from an equal generation with a different serving
+	# container — what a reprovision onto a warm-pool container can produce). The
+	# poll then re-read a Single still holding the "" committed at request time.
+	_teardown_container_via_admin()
+
+	from jarvis import settings_reset
+
+	# CONNECTION plus the OAuth markers, because the teardown above just destroyed
+	# the credential those markers describe. Left set, a bench that reconnects with
+	# the emailed code SKIPS the LLM step and lands in a chat whose container holds
+	# no auth profile - see settings_reset.OAUTH_MARKERS, plan edge case 21.
+	spec = settings_reset.CONNECTION | settings_reset.OAUTH_MARKERS
+	settings_reset.apply(settings, spec)
+	# CONNECTION.blank clears last_sync_status to "" as part of the field sweep
+	# above; write the durable disconnected marker AFTER that clear so it
+	# survives it instead of leaving the field blank - see _DISCONNECTED_STATUS.
+	settings.db_set("last_sync_status", _DISCONNECTED_STATUS)
+	# The operation this claim was for is over. Not in any ResetSpec (it is
+	# bookkeeping, not tenancy state), so it has to be cleared explicitly or a
+	# resolved claim keeps a timestamp that reads as a live one.
+	settings.db_set("workspace_reset_claimed_at", None)
+	# T22: persist the ONE fact about recovery that cannot be recomputed once the
+	# credentials are gone. Written here, after the sweep, for the same reason
+	# _DISCONNECTED_STATUS is: CONNECTION.blank would otherwise wipe it. Both
+	# callers have just asked admin, so both can supply it.
+	settings.db_set("reconnect_needs_company", 1 if needs_company else 0)
+	_bust_chat_gate()
+	frappe.db.commit()
+	return settings_reset.cleared_fields(spec)
+
+
+def _admin_connection_absent(settings) -> bool:
+	"""True when this bench holds neither signal a connected admin tenancy
+	always has: the customer identity and the container address. Both are in
+	``settings_reset.CONNECTION`` and both are blanked together by
+	``_clear_admin_connection`` - checking BOTH (not either alone) is what keeps
+	this from firing mid-reset, when ``_disconnect_agent_transport`` blanks
+	``agent_url`` alone for EVERY depth (L1-L4) while ``jarvis_admin_customer_email``
+	stays in place until a reset that actually reaches the CONNECTION clear.
+
+	One definition, shared by ``disconnect_bench``'s idempotency check and
+	``bench_connection_state``, so the two cannot disagree about what "no admin
+	connection" means - same reasoning as ``_reset_marker``."""
+	return (
+		not (settings.get("jarvis_admin_customer_email") or "").strip()
+		and not (settings.get("agent_url") or "").strip()
+	)
+
+
+@frappe.whitelist()
+@rate_limit(limit=5, seconds=3600, ip_based=True)
+def disconnect_bench() -> dict:
+	"""Terminal, no-rebuild counterpart to L4: tear down the container-side OAuth
+	auth-profile + chat devices while still reachable, then clear the admin
+	connection. No rebuild, no poll, no resetting marker - this bench is LEAVING
+	its tenancy, not resetting itself, so it must never be described as one.
+
+	Idempotency comes before the recovery precheck, deliberately: a bench with no
+	``jarvis_admin_customer_email`` and no ``agent_url`` (both in
+	``settings_reset.CONNECTION``) is already disconnected, and letting that fall
+	through to ``_recovery_outlook`` would throw "no registered customer email" -
+	turning a harmless repeat click into an error that hides the real state
+	instead of confirming it.
+
+	Otherwise the same reconnect-eligibility precheck L4 uses runs first, and
+	nothing is torn down or cleared unless it passes: a customer who could not
+	get back in would be permanently locked out. ``needs_company`` is carried
+	through rather than refused - it means the emailed-code reconnect works but
+	needs the customer's company name to disambiguate, which the caller can
+	surface as a heads-up.
+
+	The container teardown then has its own veto: ``_teardown_container_via_admin``
+	aborts the clear unless the paired chat devices were provably unpaired, or
+	admin was genuinely unreachable. A dead CONTAINER still disconnects (the
+	unpair is a file operation that survives it); a dead ADMIN still disconnects
+	(otherwise a lost control plane traps this bench forever); an admin that
+	answers and refuses does not.
+
+	Rate-limited on top of ``require_jarvis_admin``: unlike L1-L4, this action
+	never calls admin's ``reset_workspace``, so it never benefits from that
+	endpoint's own 5/hr/IP budget."""
+	from jarvis._redis_lock import redis_lock
+
+	require_jarvis_admin()
+	# The lock covers CHECK-AND-CLAIM only, exactly as request_workspace_reset's
+	# does, and for the same reason: the teardown below can run to 240s
+	# (admin_client.prepare_bench_disconnect's budget), and redis_lock's release is
+	# a ``finally`` that a SIGKILLed worker never runs. Holding it across the
+	# teardown froze every convergence — including the */5 reconcile — for the whole
+	# TTL whenever gunicorn's http_timeout killed the request, which under a ~120s
+	# ceiling is the ordinary end of a slow teardown, not an exceptional one.
+	#
+	# Taken BEFORE Jarvis Settings is read, not after. A doc fetched outside the
+	# lock is a stale read: a reset could claim its marker and release the lock in
+	# that gap, and this call would then see no marker, proceed, and clear
+	# CONNECTION out from under a rebuild that is already running.
+	with redis_lock(
+		_RESET_LOCK, timeout_s=_RESET_LOCK_TTL_S, blocking_timeout_s=_RESET_LOCK_WAIT_S
+	) as acquired:
+		if not acquired:
+			frappe.throw(
+				"A workspace operation is already running on this site. Wait for it to finish, "
+				"then disconnect.",
+				frappe.ValidationError,
+			)
+		settings = _reread_inside_lock()
+		if _admin_connection_absent(settings):
+			return {
+				"disconnected": True,
+				"already_disconnected": True,
+				"cleared": [],
+				"needs_company": False,
+			}
+		# Refuse while ANY workspace operation is claimed, server-side. A reset in
+		# flight has already blanked ``agent_url`` while the email survives, so the
+		# idempotency test above does not fire and the clear would otherwise proceed
+		# — blanking the marker with it (it is in CONNECTION) and leaving
+		# reconcile_pending_workspace_reset nothing to converge, with the rebuilt
+		# container stranded. The SPA disables the button, but a second Settings tab
+		# never learns the reset started, so the browser cannot enforce this.
+		#
+		# _workspace_op_in_flight, not _reset_in_flight: a second disconnect landing
+		# mid-teardown must be refused too, now that the lock no longer spans it.
+		in_flight = _workspace_op_in_flight(settings)
+		if in_flight == _DISCONNECTING_STATUS:
+			frappe.throw(
+				"This bench is already being disconnected. Wait for that to finish.",
+				frappe.ValidationError,
+			)
+		if in_flight:
+			frappe.throw(
+				"A workspace reset is in progress. Wait for it to finish before disconnecting this bench.",
+				frappe.ValidationError,
+			)
+		prior_status = settings.get("last_sync_status") or ""
+		outlook = _recovery_outlook()
+		if not outlook.recoverable:
+			frappe.throw(outlook.reason, frappe.ValidationError)
+		# CLAIM before the long calls, same as the reset. Nothing destructive has
+		# happened yet, so an orphaned claim is always safe to expire and retry.
+		_claim_reset(settings, _DISCONNECTING_STATUS)
+
+	# Lock released. The claim carries in-flight-ness from here.
+	try:
+		cleared = _clear_admin_connection(settings, needs_company=outlook.needs_company)
+	except BenchTeardownRefused as exc:
+		# Nothing was torn down or cleared, so give the claim back rather than
+		# leaving a marker that blocks the customer's next attempt.
+		_release_reset_claim(settings, prior_status)
+		# Re-thrown rather than raised straight through, so the reason reaches the
+		# customer: the SPA renders ``e.messages[0]``, which comes from
+		# ``_server_messages``, which only ``frappe.throw``'s msgprint populates. A
+		# bare raise of the same class would degrade this to the generic "Could not
+		# disconnect this bench." — the third refusal in this function to be
+		# silently unexplained would be a poor place to end up.
+		frappe.throw(str(exc), BenchTeardownRefused)
+	except Exception:
+		# Any other failure may have died PART WAY through the field sweep.
+		# ROLL BACK FIRST. settings_reset.apply is a sequence of db_sets with no
+		# commit until the end, so a partial clear is uncommitted and would be
+		# discarded — but _release_reset_claim commits, which would make that
+		# half-applied state durable. That is the property "no intermediate commit,
+		# so a partial failure rolls back" depends on, and releasing without a
+		# rollback silently broke it.
+		frappe.db.rollback()
+		# Then release: the bench is still connected and the claim is pointless.
+		# reconcile would otherwise expire it on a 15-minute timer for a request
+		# that already knows it failed.
+		_release_reset_claim(settings, prior_status)
+		raise
+	return {
+		"disconnected": True,
+		"already_disconnected": False,
+		"cleared": cleared,
+		"needs_company": outlook.needs_company,
+	}
+
+
+@frappe.whitelist()
+def bench_connection_state() -> dict:
+	"""Durable answer to "is this bench disconnected from its admin tenancy",
+	read from Jarvis Settings alone - no admin round-trip.
+
+	Exists because both ``disconnect_bench()``'s response and the L4 poll's
+	``disconnected: true`` (``_workspace_reset_poll``) are ONE-SHOT: only the
+	caller that receives them ever sees that answer. Every later page load - a
+	reload, a second tab, a tab that was closed mid-poll and converged later by
+	``reconcile_pending_workspace_reset`` - has nothing to go on and falls
+	through to the generic "isn't connected yet" onboarding poster, which never
+	mentions the emailed-code reconnect: the ONLY way back once credentials are
+	gone. This endpoint gives every later load the same durable answer.
+
+	Making no admin call is not an optimisation here, it is required: a
+	genuinely disconnected bench holds no admin credentials, so any
+	authenticated admin call would simply fail.
+
+	``disconnected`` reuses ``_admin_connection_absent`` - the exact predicate
+	``disconnect_bench``'s own idempotency check uses - rather than testing
+	``last_sync_status == _DISCONNECTED_STATUS``. See that constant's comment:
+	the literal "disconnected" is already written to this same field by
+	``jarvis.oauth.api.disconnect`` and ``onboarding.disconnect_llm`` for a
+	chat-subscription / LLM disconnect that leaves admin credentials fully
+	intact, so equality against it cannot tell that case apart from this one.
+
+	``needs_company`` is admin's answer (``billing.reconnect``'s ambiguity
+	branch, surfaced via ``reconnect_eligibility_me``) and cannot be recomputed
+	here: once admin credentials are gone there is nothing left to ask. So it is
+	PERSISTED at the moment of the clear by ``_clear_admin_connection``, onto
+	``reconnect_needs_company`` — a field of its own, in no ``ResetSpec``,
+	precisely because repurposing one ``settings_reset.CONNECTION`` already
+	clears for an unrelated tenancy concern (release notice, catalog version,
+	authority generation) would corrupt whichever feature owns it next.
+
+	It used to be hardcoded ``False``, with this docstring deferring to "the
+	one-shot ``disconnect_bench()`` / poll response". That deferral was wrong:
+	``_workspace_reset_poll``'s return carried no ``needs_company`` either, and
+	``GeneralPane.pollReset`` resolves the value by calling THIS endpoint — so
+	after an L4 it was always false, and a customer whose registered address owns
+	several eligible accounts was sent to a reconnect that could not complete
+	with what they had been told.
+
+	Gated on ``require_jarvis_access()``, NOT ``require_jarvis_admin()`` like its
+	neighbours, and that difference is deliberate (round-4 MINOR 6).
+
+	``OnboardingGate`` is the screen a disconnected bench actually lands on, for
+	EVERY user — and it has copy for a non-admin teammate telling them to ask their
+	workspace admin. Behind the admin gate that call 403s for exactly the person the
+	copy is written for, so the ``catch`` left ``disconnected`` false and the
+	generic first-time-setup poster rendered instead. The branch could never fire
+	in production, and ``OnboardingGate.spec.js``'s test for it passed only because
+	it mocks the API. Plan edge case 20 was unmet for non-admins.
+
+	Safe to widen: this returns two booleans derived from local settings and makes
+	no admin call. It carries no credential, no address and no tenancy identifier —
+	``disconnected`` is already obvious to any user (chat has stopped working), and
+	``needs_company`` only says a recovery step will ask for a name the user's own
+	organisation owns. Anything that ACTS on this state is gated separately:
+	``disconnect_bench`` and ``request_workspace_reset`` both keep
+	``require_jarvis_admin``.
+	"""
+	require_jarvis_access()
+	settings = frappe.get_single("Jarvis Settings")
+	return {
+		"disconnected": _admin_connection_absent(settings),
+		"needs_company": bool(settings.get("reconnect_needs_company")),
+	}
 
 
 @frappe.whitelist()
@@ -1602,7 +2548,31 @@ def workspace_reset_state() -> dict:
 
 
 def _workspace_reset_poll() -> dict:
-	settings = frappe.get_single("Jarvis Settings")
+	"""Read the reset's state and, when the rebuild is done, finish it.
+
+	Takes ``_RESET_LOCK`` NON-BLOCKING and converges only if it gets it. While
+	``request_workspace_reset`` holds it there is by definition nothing to
+	converge — the marker is claimed but the rebuild has not been requested yet,
+	and admin still reports the OLD container as Ready. Converging there would
+	declare the reset complete against the container that was never replaced, and
+	for an L4 go on to clear the credentials.
+
+	Non-blocking rather than waiting, because both callers are pollers: the SPA
+	re-asks every few seconds and ``reconcile_pending_workspace_reset`` every 5
+	minutes. Reporting "still resetting" for one tick is free; queueing a request
+	worker behind a multi-minute holder is not.
+	"""
+	from jarvis._redis_lock import redis_lock
+
+	with redis_lock(_RESET_LOCK, timeout_s=_RESET_LOCK_TTL_S) as acquired:
+		return _workspace_reset_poll_locked(may_converge=acquired)
+
+
+def _workspace_reset_poll_locked(*, may_converge: bool) -> dict:
+	# reconcile_pending_workspace_reset reads the Single itself before calling
+	# here, so this request's read snapshot is already pinned and predates the
+	# lock. _reread_inside_lock ends it; a plain reload() cannot.
+	settings = _reread_inside_lock()
 	req: dict = {}
 	try:
 		req = admin_client.reset_workspace_state() or {}
@@ -1610,10 +2580,27 @@ def _workspace_reset_poll() -> dict:
 		pass  # audit-row state is advisory; readiness below is the real signal
 
 	def _resetting() -> bool:
-		return (settings.get("last_sync_status") or "").startswith(_RESETTING_STATUS)
+		"""DISPLAY: is a reset claimed? Pre-flight counts — the customer's card
+		should say "resetting" from the moment they click, not from the moment
+		admin confirms."""
+		return bool(_reset_in_flight(settings))
+
+	def _may_converge_marker() -> bool:
+		"""CONVERGENCE: is a rebuild known to be happening? Pre-flight does NOT
+		count. Converging on a claim admin never accepted means declaring the reset
+		complete against the container that was never replaced — and for an L4,
+		tearing it down and clearing the credentials. See ``_PREFLIGHT_SUFFIX``."""
+		return bool(_reset_in_flight(settings)) and not _is_preflight(settings)
 
 	def _reconnect_llm() -> bool:
 		return (settings.get("last_sync_status") or "").startswith(_RESETTING_RECONNECT_LLM_STATUS)
+
+	def _disconnect_after() -> bool:
+		# Stripped, like the depth check in request_workspace_reset. On a pre-flight
+		# L4 marker the raw endswith() is False, because " (requested)" is the last
+		# suffix - correct only by accident today, since this is called past the
+		# pre-flight gate.
+		return _strip_preflight(settings.get("last_sync_status") or "").endswith(_DISCONNECT_SUFFIX)
 
 	try:
 		data = admin_client.get_connection(timeout_s=8) or {}
@@ -1627,14 +2614,177 @@ def _workspace_reset_poll() -> dict:
 	# With the LLM revoked, readiness can never reach Ready (nothing configured);
 	# "container reachable" completes the reset and the wizard gate owns the rest.
 	ready = bool(data.get("agent_url")) and (data.get("chat_readiness") == "Ready" or _reconnect_llm())
-	if ready and _resetting():
+	disconnected = False
+	# T24 / round-4 MAJOR 2. Non-empty when the customer explicitly chose "reset and
+	# disconnect", was shown the irreversibility warning, confirmed it — and then got
+	# a SHALLOWER reset than they asked for. Degrading rather than clearing is the
+	# right safety call; degrading rather than TELLING is not, and an Error Log entry
+	# is not telling. The SPA renders this instead of the plain "Workspace is back"
+	# toast, so the one poll that can answer actually does.
+	disconnect_blocked = ""
+	# Round-4 MINOR 7. ``ready`` used to be reported even when this pass could not
+	# converge, and ``GeneralPane.pollReset`` ACTS on it: stopPoll() plus a hard
+	# reload announcing "Workspace is back". So during a long L4 clear (up to 240s
+	# in the teardown) a concurrent poll reloaded the page mid-clear, and the
+	# terminal ``disconnected: true`` response was never seen by that tab.
+	#
+	# "Ready" is a claim about the customer's WORKSPACE being back, not about what
+	# admin's container currently reports. While a reset is claimed and this pass
+	# has not finished it, that claim is not yet true. Narrowed rather than
+	# suppressed: a bench with no reset in flight is unaffected, so this cannot make
+	# the card flicker on the ordinary path.
+	#
+	# PRE-FLIGHT is the second half of this condition, and gating on
+	# ``not may_converge`` ALONE was wrong — round 5. ``may_converge`` is just "did
+	# this pass get the lock", which is almost always true, so the narrowing hardly
+	# ever fired. Meanwhile ``ready`` for an L3/L4 is
+	# ``agent_url and (Ready or _reconnect_llm())``, and ``_reconnect_llm()`` matches
+	# straight through the pre-flight suffix — so during pre-flight ``ready``
+	# collapsed to "the OLD container is up", which is unconditionally true. With
+	# T33 now starting the poll after a timed-out initiate, the very first tick
+	# would have told the customer "Workspace is back — reloading" for a reset that
+	# never started.
+	if ready and _reset_in_flight(settings) and (not may_converge or _is_preflight(settings)):
+		ready = False
+	if may_converge and ready and _may_converge_marker():
 		from jarvis.account import _bust_chat_gate
 
-		write_connection(data)
-		settings.db_set("last_sync_status", "ok (workspace reset)")
+		disconnect_after = _disconnect_after()
+		# GATED on the connection actually landing. write_connection returns False
+		# when tenant_authority.guard HELD the write (a stale generation, or an equal
+		# generation naming a different serving container). The guard's whole design
+		# is "hold and re-poll" — so retiring the marker here would remove the very
+		# retry it is waiting for, leaving a bench with agent_url still blank, no
+		# marker, dead chat and nothing to converge it. For L4 it was worse: the same
+		# branch went on to destroy the credentials.
+		if not write_connection(data):
+			frappe.logger().info(
+				"workspace reset: connection write held by the authority guard; leaving the "
+				"marker set so the next poll can converge"
+			)
+			return {
+				"ready": ready,
+				"resetting": _resetting(),
+				"status": req.get("status") or "",
+				"message": req.get("message") or "",
+				"tenant_status": data.get("tenant_status") or "",
+				"disconnected": False,
+			}
+		# The reset itself is done. For an L4 the marker does NOT go back to a
+		# resting value here: it becomes the DISCONNECT claim, because the clear
+		# below runs for up to ~264s (prepare_bench_disconnect's 240s budget plus
+		# the eligibility re-check) and this poll's _RESET_LOCK expires at
+		# _RESET_LOCK_TTL_S = 60.
+		#
+		# Retiring the marker first was a real hole: from t=60s there was neither
+		# lock NOR marker, so a second tab's Reset passed every guard, called admin
+		# and started a genuine rebuild — while the clear still in flight here
+		# blanked CONNECTION underneath it. That is exactly the stranding the guards
+		# exist to prevent, reached through the one long section that got the short
+		# lock without a durable claim. T29 gave disconnect_bench this same shape;
+		# the poll needed it too.
 		_bust_chat_gate()
-		frappe.db.commit()
-	elif _resetting() and data.get("agent_url") and not (settings.get("agent_url") or ""):
+		# What the marker rests at once the disconnect half is over, one way or the
+		# other. The RESET succeeded regardless of what the clear does next.
+		reset_done_status = "ok (workspace reset)"
+		if not disconnect_after:
+			settings.db_set("last_sync_status", reset_done_status)
+			frappe.db.commit()
+		else:
+			_claim_reset(settings, _DISCONNECTING_STATUS)
+		if disconnect_after:
+			# _clear_admin_connection overwrites the claim above with
+			# _DISCONNECTED_STATUS on success, which is what stops
+			# reconcile_pending_workspace_reset from picking this site up again —
+			# there is no reset still pending. On either failure path below the
+			# claim is given back to reset_done_status, so an L4-degraded-to-L3
+			# leaves no marker behind; and if this worker dies mid-clear,
+			# _expire_orphaned_disconnect_claim gives it back instead.
+			#
+			# write_connection() above took its OWN uncached frappe.get_single()
+			# doc, so this ``settings`` object never observed that write. Re-read
+			# it, now that the write is committed, before handing it to the clear.
+			#
+			# The round-1 fix here was to make _clear_admin_connection's
+			# ``if agent_url:`` guard see a fresh value. That guard is GONE — it was
+			# testing the wrong fact and skipping the teardown outright — so this
+			# re-read no longer decides whether the container is torn down. It is
+			# kept because settings_reset.apply is about to db_set this doc, and it
+			# should not be a stale one.
+			#
+			# A NEW NAME, not a rebind of ``settings`` (round-4 MINOR 3). The
+			# _resetting() / _reconnect_llm() / _disconnect_after() closures above
+			# all read ``settings``, so rebinding it silently changed what they
+			# returned from this line onward. That was correct only by accident —
+			# ``disconnect_after`` is captured before it — and the next person to
+			# call one of those closures below would have got a different answer for
+			# no visible reason.
+			fresh = frappe.get_single("Jarvis Settings")
+			# T21 / round-4 MAJOR 8: RE-VALIDATE, minutes after the request-time
+			# precheck and on the far side of a container rebuild.
+			#
+			# request_workspace_reset refused up front if the customer could not
+			# reconnect, which satisfies plan edge case 2 AT REQUEST TIME. But for L4
+			# the clear happens here, minutes later. A subscription that moved to
+			# Cancelled during the rebuild — not Suspended; Cancelled is outside
+			# billing.reconnect._ELIGIBLE_STATUSES — would have its credentials
+			# destroyed with no emailed-code reconnect able to restore them. That is
+			# the permanent lockout the plan calls "mandatory, not advisory" to
+			# prevent, and one precheck "before clearing anything" cannot cover a gap
+			# it sits minutes before.
+			outlook = _recovery_outlook()
+			if not outlook.recoverable:
+				disconnect_blocked = outlook.reason
+				# Give the disconnect claim back: the reset is done and nothing is
+				# going to clear anything, so leaving the claim would block the
+				# customer's next reset for the full expiry window.
+				_release_reset_claim(settings, reset_done_status)
+				frappe.log_error(
+					title="workspace reset: L4 downgraded to L3, reconnect no longer available",
+					message=f"the rebuild completed; the clear was abandoned: {outlook.reason}",
+				)
+			else:
+				try:
+					_clear_admin_connection(fresh, needs_company=outlook.needs_company)
+					disconnected = True
+				except BenchTeardownRefused as exc:
+					# The RESET is complete; only the disconnect half could not be
+					# done. Degrade to the L3 outcome — rebuilt container, bench still
+					# connected — rather than 500ing a poll for a reset that succeeded,
+					# and rather than clearing the credentials anyway.
+					#
+					# Raised by _teardown_container_via_admin, which runs BEFORE
+					# settings_reset.apply, so nothing was cleared and the claim can be
+					# given back safely.
+					# Not str(exc) verbatim: those messages end "Nothing was changed",
+					# which is true of the disconnect half and false of the reset half.
+					disconnect_blocked = f"{exc} The workspace reset itself completed."
+					_release_reset_claim(settings, reset_done_status)
+					frappe.log_error(
+						title="workspace reset: L4 completed the rebuild but could not disconnect",
+						message=frappe.get_traceback(),
+					)
+				except Exception:
+					# Anything else may have failed PART WAY through the field sweep.
+					# Roll back first: settings_reset.apply is a sequence of db_sets
+					# with no commit until the end, so an uncommitted partial clear
+					# must not be made durable by the claim release that follows.
+					frappe.db.rollback()
+					disconnect_blocked = (
+						"This bench could not be disconnected. The workspace reset itself "
+						"completed. Nothing was changed — try again shortly."
+					)
+					_release_reset_claim(settings, reset_done_status)
+					frappe.log_error(
+						title="workspace reset: L4 clear failed unexpectedly",
+						message=frappe.get_traceback(),
+					)
+	elif (
+		may_converge
+		and _may_converge_marker()
+		and data.get("agent_url")
+		and not (settings.get("agent_url") or "")
+	):
 		# New container reachable but not Ready yet: reconnect the transport and,
 		# for a pool tenant, re-push the stored spec + subscription blobs — OAuth
 		# creds never ride a rebuild, so without this a subscription pool stays
@@ -1650,14 +2800,231 @@ def _workspace_reset_poll() -> dict:
 		"status": req.get("status") or "",
 		"message": req.get("message") or "",
 		"tenant_status": data.get("tenant_status") or "",
+		# Terminal for L4: this bench just lost its credentials, so this is the
+		# last poll that can answer. Every later one falls into the unreachable
+		# branch above. The UI needs the distinction — "you are disconnected, here
+		# is how to come back" is not the same screen as "admin is down".
+		"disconnected": disconnected,
+		# The L4 the customer asked for became an L3. Reset done, bench still
+		# connected, and this says why. One-shot by nature: the tab that started
+		# the reset is polling at this exact moment, and a customer converged by
+		# the */5 backstop instead sees a completed reset and a connected bench —
+		# true, just unexplained. Persisting it durably is a second schema change
+		# for a strictly rarer case; named in Amendment 3 OQ1 as a decision, not
+		# an oversight.
+		"disconnect_blocked": disconnect_blocked,
 	}
 
 
+# How long a PRE-FLIGHT claim may stay unresolved before it is given up on.
+#
+# Must exceed the worst case for a request that is genuinely still on its way to
+# admin: _recovery_outlook (8s) + post_subscription_disconnect (180s) +
+# reset_workspace (180s) + lock wait, i.e. ~6.5 min. 15 gives comfortable margin
+# while still bounding how long a customer can be stuck behind a claim whose
+# worker was SIGKILLed. Beyond it, a request worker would have to have outlived
+# gunicorn's http_timeout many times over — which is the same premise that makes
+# the SIGKILL ordinary in the first place.
+_PREFLIGHT_EXPIRY_MINUTES = 15
+
+# How long a PROMOTED (converging) claim may go unconverged before the bench gives
+# up on it. Promotion proved a rebuild STARTED; it never promised one would finish,
+# and a request admin abandoned — or a container that never comes back — would
+# otherwise leave the marker outliving everything able to clear it.
+#
+# Deliberately generous: the poll converges the instant the container reports
+# Ready, so this only fires when it never does. A warm-pool claim is seconds and a
+# cold provision minutes, so 60 is far past any real rebuild while still bounded.
+_RECONCILE_GIVE_UP_MINUTES = 60
+
+# Slack on the AGE comparison in _resolve_preflight_claim. Admin's row is created
+# moments after this bench stamps its claim, so a genuine row's age is slightly
+# SMALLER; the slack covers the round trip and any clock rate difference without
+# admitting a row from an earlier reset. Deliberately not a wall-clock tolerance —
+# the comparison is between two durations, each measured on its own host's clock,
+# so a timezone difference cannot enter it at all.
+_CLAIM_CLOCK_SLACK_SECONDS = 120
+
+
+def _resolve_preflight_claim(settings) -> None:
+	"""Decide what a PRE-FLIGHT claim actually was, and leave no claim unresolved.
+
+	A pre-flight marker means "this bench claimed a reset and does not know whether
+	admin accepted it" — the state left by a timeout, a 5xx, or a worker killed
+	between the claim and the promote. Nothing converges on it, deliberately, so
+	without this resolver it would sit forever: exactly the *"no path may leave
+	``last_sync_status`` on a resetting marker nothing can clear"* invariant the
+	plan is built on, violated from the other side.
+
+	Three outcomes:
+
+	* Admin has a request row for THIS claim (``requested_at`` at or after the
+	  claim, within clock slack) -> PROMOTE. The rebuild is real; the poll takes
+	  over from here. This is the case where the bench's HTTP call died but admin
+	  went on rebuilding regardless, which is the common one.
+	* No such row, and the claim is younger than ``_PREFLIGHT_EXPIRY_MINUTES`` ->
+	  leave it. The request may still be in flight; deciding now would be guessing.
+	* No such row past the deadline -> give up honestly. Restore a status the
+	  customer can act on, and clear the stamp. Nothing was torn down (the claim is
+	  written before any destructive step), so this is safe to retry.
+
+	Admin unreachable is NOT a verdict: leave the claim and try again next tick.
+	Treating "cannot ask" as "no row" would expire a live rebuild's claim.
+	"""
+	claimed_at = settings.get("workspace_reset_claimed_at")
+	try:
+		req = admin_client.reset_workspace_state() or {}
+	except Exception as exc:
+		frappe.logger().info(f"reset claim: cannot reach admin to resolve a pre-flight claim ({exc})")
+		return
+
+	status = (req.get("status") or "").strip()
+	# AGES, not wall clocks. Admin stamps ``requested_at`` in the ADMIN site's
+	# timezone and this bench stamps its claim in its OWN, both naive local
+	# datetimes — so comparing them directly makes a timezone difference a CONSTANT
+	# BIAS of hours rather than skew of milliseconds. Bench ahead of admin would
+	# expire every live rebuild's claim; bench behind admin would promote any row of
+	# any age, permanently, which for an L4 is a credential clear against a
+	# container that was never rebuilt. Both sites happen to be Asia/Kolkata today,
+	# which is precisely why nothing caught it.
+	#
+	# ``requested_age_seconds`` is measured by admin on admin's clock; the claim's
+	# age is measured here on ours. Two durations compare correctly across any pair
+	# of timezones and any clock offset.
+	admin_age = req.get("requested_age_seconds")
+	claim_age = None
+	if claimed_at:
+		claim_age = frappe.utils.time_diff_in_seconds(
+			frappe.utils.now_datetime(), frappe.utils.get_datetime(claimed_at)
+		)
+	# STATUS matters as much as the age. Promoting means "a rebuild is happening, go
+	# converge it" — and a row that already reached a terminal FAILURE proves the
+	# opposite. Promoting on one hands the poll a reset that can never complete and,
+	# for an L4, a marker that eventually authorises clearing the credentials.
+	_LIVE = ("Applying", "Pending Capacity", "Applied")
+	if admin_age is not None and claim_age is not None and status in _LIVE:
+		# The row is THIS claim's iff it is no OLDER than the claim, within slack:
+		# admin's row is created moments AFTER the bench claims, so a genuine one has
+		# a SMALLER age. A stale row from an earlier reset has a much larger one.
+		if float(admin_age) <= float(claim_age) + _CLAIM_CLOCK_SLACK_SECONDS:
+			promoted = _strip_preflight(settings.get("last_sync_status") or "")
+			frappe.logger().info(
+				f"reset claim: admin has a {status} request {admin_age}s old against a claim "
+				f"{claim_age}s old; promoting"
+			)
+			_promote_reset_claim(settings, promoted)
+			return
+		frappe.logger().info(
+			f"reset claim: admin's latest request is {admin_age}s old but this claim is only "
+			f"{claim_age}s old — that row predates this claim, so it is not evidence for it"
+		)
+	elif status:
+		frappe.logger().info(
+			f"reset claim: admin's latest request is {status!r}; not evidence of a live rebuild"
+		)
+
+	if claimed_at:
+		deadline = frappe.utils.add_to_date(
+			frappe.utils.get_datetime(claimed_at), minutes=_PREFLIGHT_EXPIRY_MINUTES
+		)
+		if frappe.utils.now_datetime() < deadline:
+			return
+
+	# Past the deadline with no matching request: the reset never started. Say so
+	# in a way the customer can act on rather than leaving a marker that means
+	# "resetting" forever.
+	frappe.log_error(
+		title="workspace reset: claim expired without admin ever accepting the request",
+		message=f"claimed_at={claimed_at!r} admin_request={req!r}",
+	)
+	_release_reset_claim(settings, "workspace reset did not start — try again")
+
+
+def _expire_orphaned_disconnect_claim(settings) -> None:
+	"""Give back a disconnect claim whose worker died before it finished.
+
+	``disconnect_bench`` releases its lock after claiming, so the claim is all that
+	blocks a concurrent reset — and if the worker is SIGKILLed mid-teardown nothing
+	else will ever clear it. Without this the customer is locked out of BOTH
+	actions permanently, which is the plan's clear-the-marker invariant violated by
+	the disconnect path instead of the reset one.
+
+	Safe to expire and retry: the claim is written before anything destructive, and
+	both legs are idempotent — admin's teardown answers vacuous-true when there is
+	nothing left to tear down, and a completed clear would have overwritten this
+	marker with ``_DISCONNECTED_STATUS`` already. Seeing the claim still here means
+	the clear did NOT complete, so the bench still holds its credentials.
+
+	Waits the same ``_PREFLIGHT_EXPIRY_MINUTES`` as a reset claim, which is far
+	longer than the 240s teardown budget — expiring a claim whose worker is merely
+	slow would let a reset start on top of a live teardown."""
+	claimed_at = settings.get("workspace_reset_claimed_at")
+	if claimed_at:
+		deadline = frappe.utils.add_to_date(
+			frappe.utils.get_datetime(claimed_at), minutes=_PREFLIGHT_EXPIRY_MINUTES
+		)
+		if frappe.utils.now_datetime() < deadline:
+			return
+	frappe.log_error(
+		title="bench disconnect: claim expired without completing",
+		message=f"claimed_at={claimed_at!r}; the clear did not complete, credentials survive",
+	)
+	_release_reset_claim(settings, "disconnect did not complete — try again")
+
+
 def reconcile_pending_workspace_reset() -> None:
-	"""*/5 backstop: converge a reset whose tab was closed mid-poll."""
+	"""*/5 backstop: converge a reset whose tab was closed mid-poll, and resolve a
+	claim whose request worker died before it could promote or release."""
 	s = frappe.get_single("Jarvis Settings")
+	# A disconnect claim is not a reset and nothing converges it, but it does block
+	# both entry points, so an orphan has to be given back here or nowhere.
+	if (s.get("last_sync_status") or "") == _DISCONNECTING_STATUS:
+		_expire_orphaned_disconnect_claim(s)
+		return
 	if not (s.get("last_sync_status") or "").startswith(_RESETTING_STATUS):
 		return
+	# A pre-flight claim is not convergeable — polling it would do nothing forever.
+	# Resolve it first; if that promotes, the poll below runs on the promoted
+	# marker in the same tick rather than waiting another five minutes.
+	if _is_preflight(s):
+		# Under the lock: every OTHER writer of this marker takes it, and this one
+		# runs from the */5 cron where a request worker may be promoting or releasing
+		# the same field concurrently. Non-blocking — if a request holds it, that
+		# request is itself resolving the claim and this tick has nothing to add.
+		from jarvis._redis_lock import redis_lock
+
+		with redis_lock(_RESET_LOCK, timeout_s=_RESET_LOCK_TTL_S) as acquired:
+			if not acquired:
+				return
+			s = _reread_inside_lock()
+			if not _is_preflight(s):
+				return
+			_resolve_preflight_claim(s)
+		s = frappe.get_single("Jarvis Settings")
+		if not _reset_in_flight(s) or _is_preflight(s):
+			return
+	else:
+		# A CONVERGING claim needs a deadline too (round-5 MAJOR 2). Promotion
+		# proved a rebuild had started; it did not promise one would finish. A
+		# request that admin abandoned, or a rebuild whose container never comes
+		# back, would otherwise poll forever — the marker outliving everything that
+		# could clear it, which is the plan's own invariant broken from the far end.
+		#
+		# Generous, because the poll converges the moment the container reports
+		# Ready and this only fires when it never does: _RECONCILE_GIVE_UP_MINUTES
+		# is far past any real rebuild.
+		claimed_at = s.get("workspace_reset_claimed_at")
+		if claimed_at:
+			deadline = frappe.utils.add_to_date(
+				frappe.utils.get_datetime(claimed_at), minutes=_RECONCILE_GIVE_UP_MINUTES
+			)
+			if frappe.utils.now_datetime() >= deadline:
+				frappe.log_error(
+					title="workspace reset: rebuild never converged; giving up on the marker",
+					message=f"claimed_at={claimed_at!r} status={s.get('last_sync_status')!r}",
+				)
+				_release_reset_claim(s, "workspace reset did not finish — check your workspace, or try again")
+				return
 	_workspace_reset_poll()
 
 

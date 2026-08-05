@@ -344,6 +344,21 @@ def reconnect_eligibility(email: str, company_name: str = "") -> dict:
 	)
 
 
+def reconnect_eligibility_me() -> dict:
+	"""Authenticated: would the emailed-code reconnect restore THIS bench's account?
+
+	Sends no identity. What this site stores as ``jarvis_admin_customer_email`` is
+	admin's synthetic OAuth login (``cust-<hash>@jarvis.invalid``), not the contact
+	address ``can_reconnect`` resolves on — so passing it, as the guest variant
+	above requires, matches nothing and echoes back a value that must never be
+	shown. Admin derives the customer from these credentials instead.
+
+	Unlike ``reconnect_eligibility``, the caller must NOT treat a failure as a soft
+	"don't offer": this gates an irreversible credential clear, so a failure has to
+	mean "refuse". Returns {recoverable, needs_company, reason}."""
+	return _post(path=_m("billing.reconnect.can_reconnect_me"), body={}, timeout_s=8)
+
+
 def site_replacement() -> dict:
 	"""Guest: was THIS site's account reconnected somewhere else?
 
@@ -1220,6 +1235,52 @@ def unpair_chat_devices() -> dict:
 	"""Drop the container's paired devices. Idempotent; a file op on the agent,
 	so it needs none of the disconnect budget above."""
 	return _post(path=_m("api.tenant.unpair_chat_devices"), body={}, timeout_s=60)
+
+
+def prepare_bench_disconnect() -> dict:
+	"""Ask admin to tear the container down on this bench's behalf, BEFORE the
+	bench destroys the credentials that could ever reach it again.
+
+	One authenticated call replacing ``post_subscription_disconnect`` +
+	``unpair_chat_devices`` on the disconnect path. Those two gate on admin's
+	``current_customer``, which 403s a SUSPENDED account — a cohort that is
+	allowed to disconnect — so for exactly that cohort both teardowns were
+	refused and the refusal was swallowed as if the container were unreachable.
+	admin performs both legs itself, where the caller's status is already known.
+
+	Returns ``{"profile_cleared": bool, "devices_unpaired": bool,
+	"removed": int, "detail": str}``. The two legs are reported separately
+	because they fail independently: see admin's
+	``api.tenant.prepare_bench_disconnect``. The caller gates its credential
+	clear on ``devices_unpaired``.
+
+	Rides ``_DISCONNECT_TIMEOUT_S`` rather than the shared 150s, and this one is
+	not a judgement call — admin's own worst case is arithmetic: up to 30s
+	acquiring ``named_lock`` (``url_alloc._PORT_LOCK_TIMEOUT_S``), 15s for
+	``agent_client.unpair_devices``, then 150s for ``agent_client.
+	delete_auth_profile`` (which runs doctor + restart inside its own budget).
+	That is ~195s before admin's handler overhead and the HTTPS round trip.
+	DEFAULT_TIMEOUT_S = 150 would therefore hang up on a slow teardown while
+	admin was still holding the lock and still working — and the caller would
+	read that ``requests.Timeout`` as AdminUnreachableError, the ONE signal it
+	is entitled to treat as "proceed and clear the credentials". It would then
+	destroy them against a teardown whose outcome was genuinely unknown.
+
+	INVARIANT: keep this strictly above admin's worst case above. The same
+	gunicorn ``http_timeout`` ceiling documented on _DISCONNECT_TIMEOUT_S
+	applies here and is not enforceable from this file.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError — the caller MUST tell a refusal (4xx / a
+		permanent rejection) apart from genuine unreachability. Only the
+		latter authorizes proceeding without a confirmed teardown.
+	"""
+	return _post(
+		path=_m("api.tenant.prepare_bench_disconnect"),
+		body={},
+		timeout_s=_DISCONNECT_TIMEOUT_S,
+	)
 
 
 # --------------------------------------------------------------------------- #

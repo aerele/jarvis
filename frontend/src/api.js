@@ -62,13 +62,31 @@ export const getLlmApplyOperation = (operationId) =>
 	call("jarvis.account.get_llm_apply_operation", { operation_id: operationId });
 
 // ---- workspace reset (customer self-serve, admin-gated) --------------------
+// Four cumulative depths (L1-L4, jarvis/onboarding.py request_workspace_reset):
+// disconnectAfter (L4) additionally clears the bench's OWN admin connection,
+// deferred until the poll below observes the rebuilt container Ready - so it
+// is refused up front (frappe.ValidationError) when the emailed-code reconnect
+// would not be able to restore the site, rather than left half-done.
 export const requestWorkspaceReset = (reason, opts = {}) =>
 	call("jarvis.onboarding.request_workspace_reset", {
 		reason: reason || "",
 		wipe_data: opts.wipeData ? 1 : 0,
 		revoke_llm: opts.revokeLlm ? 1 : 0,
+		disconnect_after: opts.disconnectAfter ? 1 : 0,
 	});
 export const workspaceResetState = () => call("jarvis.onboarding.workspace_reset_state");
+// Terminal, separate from the reset ladder: no rebuild, no poll, just leaves
+// the account. Idempotent - a second call on an already-disconnected bench
+// returns {disconnected:true, already_disconnected:true} rather than erroring.
+// Refused (frappe.ValidationError) up front, same as L4, when the emailed-code
+// reconnect would not be able to restore the site.
+export const disconnectBench = () => call("jarvis.onboarding.disconnect_bench");
+// Poll durable disconnected state: read from local settings with no admin call,
+// so a disconnected bench (which has no credentials) can still answer it. Returns
+// {disconnected: bool, needs_company: bool}. Used on reload to restore the
+// terminal disconnected state with a definitive needs_company answer, so the
+// recovery text never falls back to hedging.
+export const benchConnectionState = () => call("jarvis.onboarding.bench_connection_state");
 
 // --- Per-user chat settings + real (measured) usage tracking, incl. the
 // tenant-admin usage table (design doc §4/§6). All return the house
