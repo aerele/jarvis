@@ -1111,11 +1111,11 @@ def apply_extracted_page_updates(
 	``_apply_one_update`` returning ``False``) as failed — the aggregate tuple
 	cannot distinguish "created page B" from "refused colliding page A".
 
-	#613: the tuple path now counts a refusal as FAILED too, and logs it. It used to
-	count it as neither and leave no trace, so an all-refused batch returned (0, 0);
-	``_ingest_note`` retries only on ``failed``, so the voice note was marked Processed
-	with "nothing durable found" and its knowledge was lost for good. Both paths now
-	agree on what a refusal means, which is what stopped this being visible.
+	#613: the tuple path now LOGS a refusal (it left no trace at all before), but still
+	counts it as neither applied nor failed. Whether a refusal belongs on the retry path
+	is a separate decision that this change deliberately does not take: ``test_wiki``
+	pins the current contract with an explicit comment, and flipping it would retry
+	unsalvageable input forever with no attempt counter to bound it.
 	"""
 	if not isinstance(updates, list):
 		return [] if return_outcomes else (0, 0)
@@ -1166,16 +1166,16 @@ def apply_extracted_page_updates(
 			if ok:
 				applied += 1
 			else:
-				# #613: a refusal used to count as NEITHER applied nor failed and left no
-				# trace at all. ``_ingest_note`` retries only on ``failed``, so an
-				# all-refused batch returned (0, 0), the voice note was marked Processed
-				# with "nothing durable found", and the knowledge was gone for good with
-				# nothing for the tenant to look at.
+				# #613: a refusal left NO trace at all, so knowledge lost this way was
+				# undiagnosable. It is logged now.
 				#
-				# Counted as failed so the note stays New for the daily sweep, and so this
-				# path agrees with the ``return_outcomes`` one, which already treats a
-				# refusal as failed. The two disagreeing is what hid this.
-				failed += 1
+				# Deliberately NOT counted as failed, which is the other half of #613 and
+				# is a decision this change does not take. ``test_wiki`` pins the current
+				# contract with an explicit comment ("a skipped (identity-less) update is
+				# not a FAILURE - the note may still be marked Processed"), and flipping it
+				# would retry unsalvageable junk forever: one of the refusals that pins it
+				# is slug ``"!!!"``, which no amount of retrying repairs, and the note
+				# carries no attempt counter to bound that. See the issue.
 				_log_refused_update(update, source, ref)
 			try:
 				frappe.db.release_savepoint(sp)

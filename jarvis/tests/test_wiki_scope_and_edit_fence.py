@@ -416,13 +416,14 @@ class TestRefusedUpdateIsNotSilent(FrappeTestCase):
 			[update], "voice", "b@test.invalid", allow_body_replace=False, preserve_curated=True
 		)
 
-	def test_an_update_that_cannot_mint_a_page_counts_as_failed(self):
-		"""No existing page, and neither ``title`` nor ``page_type`` to create one. This
-		is THE shape that lost knowledge: it used to return (0, 0), which reads as
-		"nothing to do" to the caller."""
+	def test_a_refusal_still_reports_the_documented_tuple(self):
+		"""The counting half of #613 is NOT taken here. ``test_wiki`` pins this contract
+		with an explicit comment ("a skipped (identity-less) update is not a FAILURE"),
+		and flipping it would retry unsalvageable input forever: one refusal that pins it
+		is slug ``"!!!"``, which no retry repairs, and the note carries no attempt counter
+		to bound that. This test exists so the contract is not changed by accident."""
 		applied, failed = self._voice({"slug": "no-such-page-here", "append_md": "Real knowledge."})
-		self.assertEqual(applied, 0)
-		self.assertEqual(failed, 1, "a refusal must be visible to _ingest_note's retry check")
+		self.assertEqual((applied, failed), (0, 0))
 
 	def test_a_refusal_is_logged_with_the_shape_that_caused_it(self):
 		with patch.object(wiki.frappe, "log_error") as logged:
