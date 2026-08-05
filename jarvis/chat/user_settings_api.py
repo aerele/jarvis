@@ -14,6 +14,8 @@ boot flag is UX only.
 
 from __future__ import annotations
 
+import json
+
 import frappe
 from frappe.utils import cint, sbool
 
@@ -453,7 +455,6 @@ def set_sidebar_order(order: str) -> dict:
 	labels; the client reconciles unknown/missing ones against its own defaults,
 	so a stale label here can never hide or dead-link a nav item."""
 	require_jarvis_access()
-	import json as _json
 
 	def _clean(v) -> list:
 		if not isinstance(v, list):
@@ -461,12 +462,12 @@ def set_sidebar_order(order: str) -> dict:
 		return [str(x)[:60] for x in v if isinstance(x, str)][:20]
 
 	try:
-		parsed = _json.loads(order or "{}")
+		parsed = json.loads(order or "{}")
 		if not isinstance(parsed, dict):
 			raise ValueError
 	except Exception:
 		return {"ok": False, "reason": "invalid_order"}
 	clean = {"top": _clean(parsed.get("top")), "more": _clean(parsed.get("more"))}
 	doc = usage.get_or_create_user_settings(frappe.session.user)
-	doc.db_set("sidebar_order", _json.dumps(clean), update_modified=False)
+	doc.db_set("sidebar_order", json.dumps(clean), update_modified=False)
 	return {"ok": True, "data": {"sidebar_order": clean}}
