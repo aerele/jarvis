@@ -4443,11 +4443,7 @@ const fullName = displayName(session.user);
 const firstName = computed(() => fullName.split(/\s+/)[0]);
 const greeting = computed(() => {
 	const h = new Date().getHours();
-	if (h < 5) return "Night";
-	if (h < 12) return "Morning";
-	if (h < 17) return "Afternoon";
-	if (h < 21) return "Evening";
-	return "Night";
+	return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
 });
 // Empty override = "Auto": the backend falls back to Jarvis Settings.llm_model.
 const modelLabel = computed(() => modelOverride.value || "Auto");
