@@ -12,6 +12,7 @@ import {
 	ADMIN_CODES,
 	BENCH_CODES,
 	ACTIONS,
+	actionLabelFor,
 	copyFor,
 	UNKNOWN_COPY,
 } from "./paymentCodes.js";
@@ -64,15 +65,46 @@ test("awaiting_manual_reconciliation renders as a FLAG-VARIANT of the pending co
 	assert.ok(flagged.actions.includes(ACTIONS.CHECK));
 });
 
+// The ONE code exempt from status-first, and it is exempt on the rule's own terms.
+// Status-first trades a wasted round trip against a double charge, which requires a
+// payment to exist. NO_CURRENT_INTENT means there is none: nothing to check, nothing
+// to double-charge. Leading with the read-only button there gave the customer a
+// control that can only ever answer "nothing has changed" while the one action that
+// moves them forward sat second and greyer. Any OTHER code added to this set is a
+// real regression, which is why the set is asserted rather than the loop skipped.
+const STATUS_FIRST_EXEMPT = new Set([CODES.NO_CURRENT_INTENT]);
+
 test("status-first: check comes before initiate wherever both are offered", () => {
 	for (const code of [...ADMIN_CODES, ...BENCH_CODES]) {
 		const { actions } = copyFor(code);
 		const check = actions.indexOf(ACTIONS.CHECK);
 		const initiate = actions.indexOf(ACTIONS.INITIATE);
-		if (check >= 0 && initiate >= 0) {
+		if (check >= 0 && initiate >= 0 && !STATUS_FIRST_EXEMPT.has(code)) {
 			assert.ok(check < initiate, `${code} offers a payment before a status check`);
 		}
 	}
+});
+
+test("the status-first exemption is exactly one code, and it is the no-intent one", () => {
+	// Pins the carve-out so widening it needs a deliberate edit here, with a reason.
+	assert.deepEqual([...STATUS_FIRST_EXEMPT], [CODES.NO_CURRENT_INTENT]);
+	const { actions } = copyFor(CODES.NO_CURRENT_INTENT);
+	assert.ok(actions.indexOf(ACTIONS.INITIATE) < actions.indexOf(ACTIONS.CHECK));
+	// And it must still offer the check at all - a customer who believes money moved
+	// needs the read-only path even when we think no intent exists.
+	assert.ok(actions.includes(ACTIONS.CHECK));
+});
+
+test("RESUME is never baked into a copy row: it is a property of the live token", () => {
+	// The view unshifts it when canNavigateToPay() holds. A row that hardcoded it
+	// would offer a navigate on a signup whose token has since expired.
+	for (const code of [...ADMIN_CODES, ...BENCH_CODES]) {
+		assert.ok(
+			!copyFor(code).actions.includes(ACTIONS.RESUME),
+			`${code} hardcodes RESUME; it must be offered dynamically instead`
+		);
+	}
+	assert.equal(actionLabelFor({}, ACTIONS.RESUME), "Continue to payment");
 });
 
 test("a rate limit is never rendered as a decline and never offers a payment", () => {

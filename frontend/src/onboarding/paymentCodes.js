@@ -107,6 +107,23 @@ export const ACTIONS = {
 	CHECK: "check",
 	/** Create or reuse a checkout intent and open the gateway. May charge. */
 	INITIATE: "initiate",
+	/**
+	 * Go back to the checkout THIS SIGNUP ALREADY HAS. Creates nothing.
+	 *
+	 * The pay step could hold a live, attested, unexpired token and still offer the
+	 * customer no way to reach it: the only two payment verbs were CHECK and
+	 * INITIATE, and `navigateToPay` was reachable only from the first signup, the
+	 * email-verification return, and INITIATE - all of which mint or replace an
+	 * intent. So a customer who opened checkout, got distracted, and came back
+	 * inside their own 45 minute window had exactly one way forward, and it threw
+	 * away the perfectly good checkout they already had and created a second
+	 * Razorpay subscription (jarvis#685, admin-v2#248).
+	 *
+	 * Offered dynamically wherever `canNavigateToPay` is true rather than listed on
+	 * individual rows, because navigability is a property of the machine's live
+	 * token, not of the code that happens to be showing.
+	 */
+	RESUME: "resume",
 	// There is deliberately NO client-driven CONFIRM affordance. See the
 	// PAYMENT_AUTHORIZED_PENDING_CONFIRM row: admin's confirm_payment
 	// signature-verifies before any branch and needs a gateway-issued
@@ -176,10 +193,19 @@ const TABLE = {
 		actions: [ACTIONS.CONTINUE],
 	},
 	[CODES.NO_CURRENT_INTENT]: {
-		headline: "There is no checkout open for this signup.",
-		body: "Nothing has been charged. Start the payment whenever you are ready.",
+		headline: "Your payment isn't finished yet.",
+		body: "Nothing has been charged. Start the payment when you're ready - it only takes a moment.",
 		tone: TONE.STATUS,
-		actions: [ACTIONS.CHECK, ACTIONS.INITIATE],
+		// INITIATE FIRST, and this is the one row where that is right.
+		//
+		// "Status first" exists because checking a payment that already succeeded
+		// costs a round trip while paying twice costs money. That asymmetry needs a
+		// payment to exist. This code means there is NO current intent, so there is
+		// nothing to check and nothing to double-charge: the read-only button leads
+		// to "we checked, nothing has changed", forever, while the one button that
+		// actually moves the customer forward sits second and greyer. Both of the
+		// owner's stuck sites sat in exactly this state.
+		actions: [ACTIONS.INITIATE, ACTIONS.CHECK],
 	},
 	[CODES.ACCOUNT_RECONNECT_REQUIRED]: {
 		headline: "This paid account belongs to an existing setup.",
@@ -389,7 +415,13 @@ export function actionLabelFor(copy, action) {
 /** Human labels for the affordances. One place, so two screens cannot disagree. */
 export const ACTION_LABELS = {
 	[ACTIONS.CHECK]: "Check payment status",
-	[ACTIONS.INITIATE]: "Initiate payment again",
+	// Names the destination, not the machinery: the customer is going back to the
+	// payment page they already opened, and nothing is created by going there.
+	[ACTIONS.RESUME]: "Continue to payment",
+	// "again" is honest here: INITIATE always mints or replaces an intent, and on
+	// Razorpay that means a new subscription object (admin-v2#248). It must never
+	// be the easy default when RESUME is available.
+	[ACTIONS.INITIATE]: "Start a new payment",
 	[ACTIONS.CONTINUE]: "Continue",
 	[ACTIONS.RECONNECT]: "Reconnect this site",
 	[ACTIONS.VERIFY]: "I've verified my email",
