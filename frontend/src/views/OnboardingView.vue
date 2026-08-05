@@ -170,7 +170,16 @@
 										>
 											{{ planDueToday(p) }}
 										</div>
-										<ul class="mt-3.5 grid gap-2">
+										<!-- #671: not rendered at all when a plan has no features. The
+										     old fallback bullet said "Monthly plan", repeating both the
+										     "/mo" on the price and the cycle line directly above it.
+										     Dropping that bullet without this guard would leave a
+										     featureless plan with an empty list and its margin, a blank
+										     gap that reads as a broken card. -->
+										<ul
+											v-if="planFeatures(p).length"
+											class="mt-3.5 grid gap-2"
+										>
 											<li
 												v-for="(f, k) in planFeatures(p)"
 												:key="k"
