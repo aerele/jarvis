@@ -3,6 +3,22 @@
    win cascade ties against everything declared here. */
 @import "frappe-ui/style.css"; /* = Inter font + @tailwind base/components/utilities */
 
+/* ===== mobile viewport helpers ============================================
+   `h-dvh-safe` is the app-shell height. 100vh first as the fallback, then
+   100dvh (dynamic viewport height) overrides it where supported, so mobile
+   browser chrome and the on-screen keyboard shrink the app instead of pushing
+   the composer off-screen. Kept as a hand-rolled utility (not Tailwind's
+   `h-dvh`) precisely for that layered fallback in one class. */
+.h-dvh-safe {
+	height: 100vh;
+	height: 100dvh;
+}
+/* Bottom safe-area padding for the phone home-indicator, additive to whatever
+   padding the element already carries. */
+.jv-safe-bottom {
+	padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
 /* ===== §2.4 preflight compensations (chat surface) =========================
    Preflight + @tailwindcss/forms restyle bare elements globally; the jv-*
    chat surface predates Tailwind and relies on a handful of UA defaults.

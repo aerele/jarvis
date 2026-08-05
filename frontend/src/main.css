@@ -101,8 +101,8 @@ body {
    which is what lets a confirm still open on top of the settings dialog.
 
    Deliberately app-wide rather than scoped to the settings dialog: every
-   frappe-ui Dialog here (command palette, MoreMenu, ConnectPhoneDialog,
-   WikiPageDialog, FilePreview) portals the same way and is equally
+   frappe-ui Dialog here (command palette, ConnectPhoneDialog, WikiPageDialog,
+   FilePreview) portals the same way and is equally
    paintable-over by the sidebar today, so one floor for portaled modals is the
    right fix. Anything that must sit ABOVE a modal already carries a higher
    z-index (ConfirmDialog 200, toasts above that). */

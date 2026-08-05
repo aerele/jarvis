@@ -10,7 +10,8 @@
     "test:watch": "vitest",
     "test:node": "node --test \"src/**/*.test.js\"",
     "test:snap": "vitest run tests/support-extraction",
-    "test:snap:watch": "vitest tests/support-extraction"
+    "test:snap:watch": "vitest tests/support-extraction",
+    "test:mobile": "playwright test"
   },
   "dependencies": {
     "@vueuse/core": "^10.4.1",
@@ -26,6 +27,7 @@
     "wiki-graph-core": "file:../wiki-graph-core"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
     "@vitejs/plugin-vue": "^5.0.4",
     "@vue/test-utils": "^2",
     "autoprefixer": "^10.4.19",

@@ -28,6 +28,7 @@
 			"
 		>
 			<header
+				class="jv-chat-header"
 				style="
 					height: 52px;
 					flex: none;
@@ -40,6 +41,39 @@
 			>
 				<!-- (no expand button here — the collapsed rail's top button already expands;
 				     two visible "Expand sidebar" controls was confusing) -->
+				<!-- Phone: the sidebar is an off-canvas drawer, so chat carries its own
+				     hamburger to open it (AppShell hosts the one for other routes). -->
+				<button
+					v-if="store.mobile"
+					class="jv-iconbtn jv-hamburger"
+					@click="store.mobileDrawerOpen = true"
+					aria-label="Open navigation"
+					title="Menu"
+					style="
+						flex: none;
+						width: 32px;
+						height: 32px;
+						display: flex;
+						align-items: center;
+						justify-content: center;
+						background: transparent;
+						border: 1px solid var(--border);
+						border-radius: 7px;
+						cursor: pointer;
+					"
+				>
+					<svg
+						width="18"
+						height="18"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="var(--text-2)"
+						stroke-width="1.8"
+						stroke-linecap="round"
+					>
+						<path d="M3 6h18M3 12h18M3 18h18" />
+					</svg>
+				</button>
 				<div
 					style="display: flex; flex-direction: column; line-height: 1.15; min-width: 0"
 				>
@@ -91,40 +125,132 @@
 							<path d="M15 3h6v6M10 14 21 3" />
 						</svg>
 					</button>
-					<!-- Save this conversation's prompts as a reusable macro (opens the /macros editor pre-filled) -->
-					<button
-						v-if="canSaveAsMacro"
-						class="jv-modelpill"
-						@click="saveConversationAsMacro"
-						title="Save this chat's prompts as a macro"
-						style="
-							display: flex;
-							align-items: center;
-							gap: 6px;
-							padding: 5px 10px;
-							background: var(--surface-1);
-							border: 1px solid var(--border);
-							border-radius: 20px;
-							cursor: pointer;
-							font-family: inherit;
-						"
-					>
-						<svg
-							width="13"
-							height="13"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="var(--text-2)"
-							stroke-width="1.7"
-							stroke-linecap="round"
-							stroke-linejoin="round"
+					<!-- Create: save this chat as a macro, or build a trigger from it. -->
+					<div class="jv-create-wrap jv-hide-narrow" style="position: relative">
+						<button
+							class="jv-modelpill"
+							@click.stop="createMenuOpen = !createMenuOpen"
+							:aria-expanded="String(createMenuOpen)"
+							aria-haspopup="menu"
+							title="Actions for this chat"
+							style="
+								display: flex;
+								align-items: center;
+								gap: 6px;
+								padding: 5px 10px;
+								background: var(--surface-1);
+								border: 1px solid var(--border);
+								border-radius: 20px;
+								cursor: pointer;
+								font-family: inherit;
+							"
 						>
-							<path d="M5 3l14 9-14 9V3z" />
-						</svg>
-						<span style="font-size: 12px; color: var(--text-2); font-weight: 500"
-							>Save as macro</span
-						>
-					</button>
+							<svg
+								width="13"
+								height="13"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="var(--text-2)"
+								stroke-width="1.8"
+								stroke-linecap="round"
+							>
+								<path
+									d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"
+								></path>
+							</svg>
+							<span style="font-size: 12px; color: var(--text-2); font-weight: 500"
+								>Action</span
+							>
+							<svg
+								width="12"
+								height="12"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="var(--text-3)"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="m6 9 6 6 6-6" />
+							</svg>
+						</button>
+						<template v-if="createMenuOpen">
+							<div
+								@click="createMenuOpen = false"
+								style="position: fixed; inset: 0; z-index: 40"
+							></div>
+							<div
+								role="menu"
+								style="
+									position: absolute;
+									right: 0;
+									top: calc(100% + 6px);
+									z-index: 41;
+									width: 252px;
+									background: var(--surface);
+									border: 1px solid var(--border);
+									border-radius: 12px;
+									box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+									padding: 6px;
+								"
+							>
+								<button
+									v-if="canSaveAsMacro"
+									role="menuitem"
+									class="jv-create-item"
+									@click="onCreateMacro"
+								>
+									<svg
+										width="17"
+										height="17"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="var(--text-2)"
+										stroke-width="1.7"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+										<polyline points="2 17 12 22 22 17"></polyline>
+										<polyline points="2 12 12 17 22 12"></polyline>
+									</svg>
+									<span class="jv-create-item-txt">
+										<span class="jv-create-item-t">Save as macro</span>
+										<span class="jv-create-item-s"
+											>Reuse these prompts on demand</span
+										>
+									</span>
+								</button>
+								<button
+									role="menuitem"
+									class="jv-create-item"
+									@click="startTriggerCreation"
+								>
+									<svg
+										width="17"
+										height="17"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="var(--cta)"
+										stroke-width="1.7"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<line x1="6" y1="3" x2="6" y2="15"></line>
+										<circle cx="18" cy="6" r="3"></circle>
+										<circle cx="6" cy="18" r="3"></circle>
+										<path d="M18 9a9 9 0 0 1-9 9"></path>
+									</svg>
+									<span class="jv-create-item-txt">
+										<span class="jv-create-item-t">Create a trigger</span>
+										<span class="jv-create-item-s"
+											>Runs by itself on a record event</span
+										>
+									</span>
+								</button>
+							</div>
+						</template>
+					</div>
 					<!-- Connect phone: shows a QR the mobile app scans to onboard -->
 					<button
 						class="jv-iconbtn"
@@ -279,6 +405,8 @@
 				</div>
 			</div>
 
+			<!-- centre the empty-state greeting + composer (top/bottom flex spacers) -->
+			<div v-if="showWelcome" style="flex: 1"></div>
 			<!-- initial load: a quiet spinner so the welcome screen doesn't flash
 			     before the open conversation finishes loading on refresh -->
 			<div
@@ -1223,7 +1351,9 @@
 											stroke-linecap="round"
 											stroke-linejoin="round"
 										>
-											<path d="M5 3l14 9-14 9V3z" />
+											<polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+											<polyline points="2 17 12 22 22 17"></polyline>
+											<polyline points="2 12 12 17 22 12"></polyline>
 										</svg>
 									</div>
 									<div class="jv-macrocard-txt">
@@ -1800,11 +1930,23 @@
 			<!-- ===== COMPOSER ===== -->
 			<div
 				class="jv-composer-wrap"
+				:style="
+					showWelcome
+						? {
+								borderTop: 'none',
+								alignSelf: 'center',
+								width: '100%',
+								maxWidth: '720px',
+								paddingLeft: '16px',
+								paddingRight: '16px',
+								background: 'transparent',
+						  }
+						: { borderTop: '1px solid var(--border)' }
+				"
 				style="
 					position: relative;
 					flex: none;
 					padding: 12px 40px 16px;
-					border-top: 1px solid var(--border);
 					background: var(--surface);
 				"
 			>
@@ -1945,7 +2087,7 @@
 						:busy="busy"
 						:canSend="canSend"
 						:sendTitle="voiceSendBlockReason"
-						:placeholder="`Ask ${agentName}…   @ to mention a user, / for a doctype or tool`"
+						:placeholder="composerPlaceholder"
 						:disclaimer="`${agentName} can make mistakes. Verify important actions before submitting to ERPNext.`"
 						@submit="send()"
 						@stop="stopRun"
@@ -1956,6 +2098,46 @@
 						@remove-attachment="removeFile"
 					>
 						<template #above>
+							<!-- Create menu "Create a trigger": trigger-build mode. While this marker
+							     is up every send carries {page:"triggers"} so the agent stays in
+							     trigger-building mode; the composer shows a faded example placeholder
+							     and the write it proposes lands as the Approve card below. -->
+							<div v-if="triggerMode" class="jv-trigtag">
+								<svg
+									width="13"
+									height="13"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="var(--cta)"
+									stroke-width="1.9"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<line x1="6" y1="3" x2="6" y2="15"></line>
+									<circle cx="18" cy="6" r="3"></circle>
+									<circle cx="6" cy="18" r="3"></circle>
+									<path d="M18 9a9 9 0 0 1-9 9"></path>
+								</svg>
+								<span class="jv-trigtag-t">Trigger</span>
+								<button
+									class="jv-trigtag-x"
+									title="Cancel trigger"
+									aria-label="Cancel trigger creation"
+									@click="triggerMode = false"
+								>
+									<svg
+										width="12"
+										height="12"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+									>
+										<path d="M6 6l12 12M18 6 6 18" />
+									</svg>
+								</button>
+							</div>
 							<!-- wiki nudge: "anything worth remembering?" card (realtime wiki:nudge
 							     event, §voice/wiki). Own block ABOVE the composer so it never
 							     shifts the input while a reply is streaming. -->
@@ -2512,12 +2694,6 @@
 									/>
 								</svg>
 							</button>
-							<!-- persona_enabled is read once at mount (boot payload). If an admin
-							     flips the fleet-wide kill switch mid-session the pill can linger
-							     until reload, but the server clause (_persona_clause) re-reads the
-							     switch every turn, so behaviour is always correct - this is
-							     voice-only cosmetic lag that self-heals on the next boot. -->
-							<PersonaPill v-if="ui.persona_enabled" />
 							<button
 								v-if="ui.wiki_enabled"
 								class="jv-iconbtn"
@@ -2671,6 +2847,11 @@
 								<!-- the transcribing indicator lives in #below-input, where the words
 							     will actually land — one pill per recording, not a count here. -->
 							</template>
+							<!-- persona_enabled is the fleet-wide kill switch, read once at
+							     mount (boot payload). The persona row inside the picker can
+							     linger a session if an admin flips it, but the server clause
+							     (_persona_clause) re-reads it every turn, so behaviour is always
+							     correct - voice-only cosmetic lag that self-heals on next boot. -->
 							<ModelEffortPicker
 								:model-override="modelOverride"
 								:default-model="ui.llm_model || ''"
@@ -2678,6 +2859,7 @@
 								:thinking-levels="thinkingLevels"
 								:models-by-provider="modelsByProvider"
 								:show-providers="showProviders"
+								:persona-enabled="ui.persona_enabled"
 								@select-model="selectModel"
 								@select-thinking="selectThinking"
 							/>
@@ -2685,6 +2867,7 @@
 					</Composer>
 				</div>
 			</div>
+			<div v-if="showWelcome" style="flex: 1"></div>
 		</main>
 
 		<!-- ============ PROACTIVE MESSAGE TOAST (Jarvis started a chat) ============ -->
@@ -3449,7 +3632,6 @@ import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
 import Composer from "@/components/chat/Composer.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
-import PersonaPill from "@/components/chat/PersonaPill.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
 import { useHomeIntro } from "@/composables/useHomeIntro";
@@ -4889,6 +5071,34 @@ function openMacroFromCard(card) {
 		steps: (card.steps || []).map((s) => ({ label: s.label || "", prompt: s.prompt || "" })),
 	});
 	router.push("/macros/new");
+}
+
+// ── Create menu (header): Save as macro | Create a trigger ───────────────────
+// Groups the two things you can make from a chat. "Save as macro" reuses
+// saveConversationAsMacro (routes to the /macros editor, prefilled). "Create a
+// trigger" arms triggerMode: every send then carries {page:"triggers"} so the
+// agent stays in trigger-building mode across the whole Q&A (the same priming
+// the Triggers page's Create-with-chat pane uses), and the gated create it
+// proposes surfaces as the existing action:pending Approve card. Cleared on New
+// chat / conversation switch / dismiss.
+const createMenuOpen = ref(false);
+const triggerMode = ref(false);
+// While building a trigger the composer placeholder becomes a faded example (the
+// "Ask Jarvis" style) instead of a chip list, and a small marker sits above it.
+const TRIGGER_PLACEHOLDER = "e.g. Warn me when a Sales Invoice over 1 lakh is submitted";
+const composerPlaceholder = computed(() =>
+	triggerMode.value
+		? TRIGGER_PLACEHOLDER
+		: `Ask ${agentName}…   @ to mention a user, / for a doctype or tool`
+);
+function onCreateMacro() {
+	createMenuOpen.value = false;
+	saveConversationAsMacro();
+}
+function startTriggerCreation() {
+	createMenuOpen.value = false;
+	triggerMode.value = true;
+	nextTick(() => composerRef.value?.focusInput?.());
 }
 
 function macroCardOf(m) {
@@ -6401,6 +6611,9 @@ async function loadConversation(id) {
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
 	// different conversation (matches how modelOverride/auto-apply reload here).
 	groundNextTurn.value = false;
+	// Trigger-build mode is per-conversation too: switching chats clears it.
+	triggerMode.value = false;
+	createMenuOpen.value = false;
 	if (!id) {
 		messages.value = [];
 		originPage.value = "";
@@ -7005,7 +7218,12 @@ async function send(textArg, resendAck) {
 		// One-shot wiki grounding: pass the armed flag but only CONSUME it on a
 		// successful send, so a rejected send (and its Retry) keeps grounding armed.
 		const groundWiki = groundNextTurn.value;
-		const sendCtx = groundWiki ? { ground_wiki: 1 } : _prefillSendContext || undefined;
+		let sendCtx = groundWiki ? { ground_wiki: 1 } : _prefillSendContext || undefined;
+		// Create → Create a trigger: keep the triggers page marker on every send so
+		// the agent stays in trigger-building mode through the whole Q&A. (The
+		// one-shot _prefillSendContext is cleared after the send is accepted, below,
+		// so a rejected send keeps it armed for retry.)
+		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
 		const r = await api.sendMessage(sentFrom, text, undefined, attachments, sendCtx);
 		if (r && r.ok === false) {
 			// The server rejected the send (e.g. the single-flight guard:
@@ -8932,6 +9150,79 @@ onUnmounted(() => {
 .jv-menuitem.on {
 	background: var(--surface-1);
 }
+/* Create menu (header dropdown): two-line items. */
+.jv-create-item {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	width: 100%;
+	padding: 9px 10px;
+	border: none;
+	background: transparent;
+	border-radius: 9px;
+	font-family: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+.jv-create-item:hover {
+	background: var(--surface-1);
+}
+.jv-create-item svg {
+	flex: none;
+	margin-top: 1px;
+}
+.jv-create-item-txt {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+}
+.jv-create-item-t {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text);
+}
+.jv-create-item-s {
+	font-size: 11.5px;
+	color: var(--text-3);
+	line-height: 1.35;
+}
+/* "Trigger" marker above the composer while building a trigger (Action menu). */
+.jv-trigtag {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 8px;
+	padding: 4px 6px 4px 9px;
+	border: 1px solid var(--cta-bd, var(--border));
+	background: var(--cta-bg, var(--surface-1));
+	border-radius: 999px;
+}
+.jv-trigtag svg {
+	flex: none;
+}
+.jv-trigtag-t {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--cta);
+	letter-spacing: 0.01em;
+}
+.jv-trigtag-x {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	border: none;
+	background: transparent;
+	color: var(--text-3);
+	border-radius: 50%;
+	cursor: pointer;
+}
+.jv-trigtag-x:hover {
+	background: var(--surface-2);
+	color: var(--text);
+}
 /* jump-to-latest arrow — floats just above the composer, centered.
    It lives in .jv-composer-wrap (this view), NOT inside <Composer>, so it and
    its .jv-sd-* transition stay here. */
@@ -9515,6 +9806,23 @@ onUnmounted(() => {
 	}
 	.jv-welcome-h1 {
 		font-size: 24px !important;
+	}
+}
+/* Phone mode (< 768px, matches the shell store `mobile` flag that swaps the
+   sidebar for a drawer): fold the text-wide header pill, tighten header padding
+   so the hamburger + title + actions fit, and lift the composer clear of the
+   home-indicator. Comes after the 640px block so the padding-bottom longhand
+   wins over that block's shorthand at the smallest widths. */
+@media (max-width: 767px) {
+	.jv-hide-narrow {
+		display: none !important;
+	}
+	.jv-chat-header {
+		padding: 0 12px !important;
+		gap: 8px !important;
+	}
+	.jv-composer-wrap {
+		padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
 	}
 }
 

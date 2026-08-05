@@ -572,8 +572,18 @@ describe("SupportThreadPage", () => {
 		await flushPromises();
 
 		expect(storeDouble.reply).toHaveBeenCalledWith("T1", "please help");
-		expect(storeDouble.uploadTo).toHaveBeenCalledWith("T1", expect.anything());
-		expect(storeDouble.uploadTo).not.toHaveBeenCalledWith("T2", expect.anything());
+		// uploadTo(ticket, files, replyComm): the 3rd arg threads the reply
+		// Communication so each File attaches to it (support store uploadTo).
+		expect(storeDouble.uploadTo).toHaveBeenCalledWith(
+			"T1",
+			expect.anything(),
+			expect.anything()
+		);
+		expect(storeDouble.uploadTo).not.toHaveBeenCalledWith(
+			"T2",
+			expect.anything(),
+			expect.anything()
+		);
 
 		// The regression: send()'s post-send DISPLAY refresh must not hijack the
 		// thread back to "T1" once the user is looking at "T2" — the guard

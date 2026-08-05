@@ -98,8 +98,8 @@
 					:class="{ open: effortOpen }"
 					aria-haspopup="menu"
 					:aria-expanded="effortOpen"
-					@click="effortOpen = true"
-					@mouseenter="effortOpen = true"
+					@click="openEffort()"
+					@mouseenter="openEffort()"
 				>
 					<span class="mep-item-body"><span class="mep-name">Effort</span></span>
 					<span class="mep-val">{{ effortLabel }}</span>
@@ -147,6 +147,44 @@
 					</button>
 				</div>
 			</div>
+
+			<!-- persona → side flyout (same pattern as Effort). Only shown when the
+			     fleet-wide persona switch is on. Reuses the standalone picker's
+			     design via <PersonaOptions>, which owns the store I/O. -->
+			<div
+				v-if="personaEnabled"
+				class="mep-sub"
+				@mouseenter="cancelPersonaClose"
+				@mouseleave="schedulePersonaClose"
+			>
+				<button
+					class="mep-item"
+					:class="{ open: personaOpen }"
+					aria-haspopup="menu"
+					:aria-expanded="personaOpen"
+					@click="openPersona()"
+					@mouseenter="openPersona()"
+				>
+					<span class="mep-item-body"><span class="mep-name">Persona</span></span>
+					<span class="mep-val">{{ personaLabel }}</span>
+					<svg
+						width="13"
+						height="13"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.9"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path d="m9 18 6-6-6-6" />
+					</svg>
+				</button>
+
+				<div v-if="personaOpen" class="mep-flyout mep-flyout-persona">
+					<PersonaOptions @pick="close()" />
+				</div>
+			</div>
 		</div>
 	</div>
 </template>
@@ -160,7 +198,9 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { agentName } from "@/branding";
 import { useDismissable } from "@/composables/useDismissable";
+import { useShellStore } from "@/stores/shell";
 import CheckMark from "@/components/chat/CheckMark.vue";
+import PersonaOptions from "@/components/chat/PersonaOptions.vue";
 
 const props = defineProps({
 	modelOverride: { type: String, default: "" },
@@ -169,12 +209,15 @@ const props = defineProps({
 	thinkingLevels: { type: Array, default: () => ["low", "medium", "high"] },
 	modelsByProvider: { type: Array, default: () => [] },
 	showProviders: { type: Boolean, default: false },
+	personaEnabled: { type: Boolean, default: false },
 });
 const emit = defineEmits(["select-model", "select-thinking"]);
 
+const store = useShellStore();
 const assistantName = agentName;
 const open = ref(false);
 const effortOpen = ref(false);
+const personaOpen = ref(false);
 const rootRef = ref(null);
 const triggerRef = ref(null);
 
@@ -183,6 +226,17 @@ const effortLabel = computed(() => {
 	const t = props.thinkingOverride;
 	return t ? t.charAt(0).toUpperCase() + t.slice(1) : "Auto";
 });
+// Persona lives in the shell store (PersonaOptions writes it); the row only
+// needs its current label. The two flyouts are mutually exclusive.
+const personaLabel = computed(() => store.preferredPersona);
+function openEffort() {
+	personaOpen.value = false;
+	effortOpen.value = true;
+}
+function openPersona() {
+	effortOpen.value = false;
+	personaOpen.value = true;
+}
 
 function onModel(m) {
 	emit("select-model", m);
@@ -197,7 +251,9 @@ function onEffort(level) {
 function close() {
 	open.value = false;
 	effortOpen.value = false;
+	personaOpen.value = false;
 	cancelEffortClose();
+	cancelPersonaClose();
 }
 
 // The 8px gap between the "Effort" row and its flyout (.mep-flyout, positioned
@@ -220,7 +276,26 @@ function cancelEffortClose() {
 		effortCloseTimer = null;
 	}
 }
-onBeforeUnmount(cancelEffortClose);
+
+// Same hover-close delay for the persona flyout (see the effort note above).
+let personaCloseTimer = null;
+function schedulePersonaClose() {
+	cancelPersonaClose();
+	personaCloseTimer = setTimeout(() => {
+		personaOpen.value = false;
+		personaCloseTimer = null;
+	}, 180);
+}
+function cancelPersonaClose() {
+	if (personaCloseTimer) {
+		clearTimeout(personaCloseTimer);
+		personaCloseTimer = null;
+	}
+}
+onBeforeUnmount(() => {
+	cancelEffortClose();
+	cancelPersonaClose();
+});
 
 // Outside-click / Escape dismissal via the shared composable; `close()` also
 // collapses the effort flyout. The extra watch covers the pill-toggle path
@@ -229,7 +304,9 @@ useDismissable(rootRef, open, close, triggerRef);
 watch(open, (isOpen) => {
 	if (!isOpen) {
 		effortOpen.value = false;
+		personaOpen.value = false;
 		cancelEffortClose();
+		cancelPersonaClose();
 	}
 });
 </script>
@@ -376,6 +453,10 @@ watch(open, (isOpen) => {
 	box-shadow: 0 12px 34px rgba(20, 20, 30, 0.18);
 	padding: 5px;
 	cursor: default;
+}
+/* the persona rows (orb + name + description) need a touch more room */
+.mep-flyout-persona {
+	width: 250px;
 }
 .mep-fly-head {
 	padding: 8px 9px 10px;

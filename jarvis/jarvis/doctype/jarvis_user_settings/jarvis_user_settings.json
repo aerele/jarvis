@@ -17,6 +17,7 @@
     "business_greeting_state",
     "business_greeting_chat_count",
     "business_greeting_hidden_at_count",
+    "sidebar_order",
     "home_intro_seen_version",
     "home_intro_seen_at",
     "usage_limits_tab",
@@ -100,6 +101,13 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "Merged from Jarvis User Preference. Chat count at which the card was last 'Maybe later'-ed; keeps a refresh from re-showing it. Permlevel 1: server-owned (jarvis.chat.greeting), read-only to a Jarvis User."
+    },
+    {
+      "fieldname": "sidebar_order",
+      "fieldtype": "Small Text",
+      "label": "Sidebar Order",
+      "no_copy": 1,
+      "description": "Per-user sidebar nav order as JSON {\"top\":[labels],\"more\":[labels]}. UI state only; the client reconciles against its defaults."
     },
     {
       "fieldname": "home_intro_seen_version",
