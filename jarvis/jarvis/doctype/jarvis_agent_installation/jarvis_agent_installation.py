@@ -46,6 +46,7 @@ class JarvisAgentInstallation(Document):
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
 		self._validate_run_as_user()
+		self._validate_schedule_time()
 		self._validate_schedule_budget()
 		self._guard_activation_transition()
 
@@ -132,6 +133,42 @@ class JarvisAgentInstallation(Document):
 			_("activation_state flips only via the reviewer promotion / demotion path (PP-4)."),
 			frappe.PermissionError,
 		)
+
+	def _validate_schedule_time(self):
+		"""#648: refuse a ``schedule_time`` that is not a time of day.
+
+		The agent twin of ``JarvisMacro._validate_schedule_time`` (#472), and it has to
+		live here for the same reason: Frappe runs the controller BEFORE its own Time
+		field check (``Document.insert`` calls ``run_before_save_methods`` and only then
+		``_validate``), so by the time the framework would object the value has already
+		reached the schedule arithmetic. MariaDB's TIME column accepts up to 838:59:59,
+		so the storage layer is not the guard either.
+
+		``agents_api.set_schedule`` alone is not enough: it is one write surface among
+		several, and a Desk edit, a data import, a bulk edit or a direct ``doc.save()``
+		all bypass it. Since #472 made ``parse_schedule_seconds`` total, an out-of-range
+		value no longer crashes the sweep, it silently schedules 09:00 instead — so
+		without this check a customer who typed 99:00 would see runs at 09:00 with no
+		explanation. Refusing at save is the honest answer.
+
+		Checked whenever a value is PRESENT, not only when ``schedule_enabled`` is on:
+		with the schedule off a bad value persists happily, and a later flip of
+		``schedule_enabled`` would hand the stored garbage straight to the sweep.
+
+		Runs on EVERY save, exactly like the macro sibling, and deliberately not scoped
+		to "only when schedule_time changed". Review asked whether that strands a row
+		holding a legacy bad value, since ``set_enabled`` and ``set_config`` both go
+		through ``doc.save()``. It cannot, because such a row cannot be saved at all
+		either way: the only values this check rejects that MariaDB will still STORE are
+		``>= 24:00:00``, and those come back from a TIME column as a
+		``datetime.timedelta`` with a days component, which Frappe writes back as
+		``"4 days, 3:00:00"`` and MariaDB then refuses with error 1292. So there is no
+		value that is simultaneously persistable, rejected here, and able to survive a
+		read/write round trip. Scoping the check would add a branch for a state that
+		cannot exist, and would split this rule from the macro one it shares."""
+		from jarvis.chat.macro_scheduler import validate_schedule_time_or_throw
+
+		validate_schedule_time_or_throw(self.schedule_time)
 
 	def _validate_schedule_budget(self):
 		"""A14: warn (do not hard-block) when an enabled schedule's expected monthly

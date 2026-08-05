@@ -85,16 +85,13 @@ class JarvisMacro(Document):
 		Checked whenever a value is PRESENT, not only when ``schedule_enabled`` is on.
 		With the schedule off the bad value used to persist happily (MariaDB TIME holds
 		up to 838:59:59), which is what armed the cron-wide abort: a later flip of
-		``schedule_enabled`` handed the stored garbage straight to the sweep."""
-		if self.schedule_time in (None, ""):
-			return
-		from jarvis.chat.macro_scheduler import parse_schedule_seconds
+		``schedule_enabled`` handed the stored garbage straight to the sweep.
 
-		if parse_schedule_seconds(self.schedule_time) is None:
-			frappe.throw(
-				_("Schedule time must be a time of day between 00:00:00 and 23:59:59."),
-				title=_("Invalid schedule time"),
-			)
+		The rule itself lives in ``macro_scheduler.validate_schedule_time_or_throw`` so
+		this controller and ``JarvisAgentInstallation`` (#648) cannot drift apart."""
+		from jarvis.chat.macro_scheduler import validate_schedule_time_or_throw
+
+		validate_schedule_time_or_throw(self.schedule_time)
 
 	def _recompute_next_run(self):
 		"""Keep ``next_run_at`` in sync with the schedule fields. The scheduler
