@@ -1475,3 +1475,117 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 		dispatched = self._run_cron()
 
 		self.assertIn(good, dispatched, "a bad persisted time aborted the sweep for every other row")
+
+
+# --------------------------------------------------------------------------- #
+# #615 - promote/demote must not re-home a foreign owner's finding
+# --------------------------------------------------------------------------- #
+class TestRehomeMembershipScope(FrappeTestCase):
+	"""``_rehome_installation_outputs`` built its membership set from ``run``,
+	``first_seen_run`` AND ``last_seen_run``. That third pointer is the only one the
+	engine re-points, and the recurrence bump that re-points it matches on
+	``(owner, agent, fingerprint)``, so under PP-4 shadow re-homing it can attach
+	another owner's finding to one of our runs. Promoting or demoting then rewrote
+	that foreign row's visibility ``owner``.
+
+	Same unsafe signal #455/#612 removed from the uninstall cascade, different
+	consequence: the cascade DELETED such a row, this path makes a foreign customer's
+	finding appear under the wrong owner."""
+
+	SLUG = PREFIX + "rehome"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner_a = _mk_user("h-rehome-a@example.com")
+		cls.owner_b = _mk_user("h-rehome-b@example.com")
+		cls.reviewer = _mk_user("h-rehome-rev@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		# Two installations of the SAME agent sharing one reviewer, so PP-4 re-homing
+		# has already put both owners' findings under that reviewer.
+		self.inst_a = _mk_install(self.owner_a, self.SLUG, self.reviewer)
+		self.inst_b = _mk_install(self.owner_b, self.SLUG, self.reviewer)
+		self.run_a = _mk_run(self.inst_a.name, self.SLUG, self.reviewer)
+		self.run_b = _mk_run(self.inst_b.name, self.SLUG, self.reviewer)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+
+	def test_a_foreign_finding_bumped_onto_our_run_is_not_rehomed(self):
+		"""THE regression. B's finding was CREATED by B's installation (run +
+		first_seen_run both point at B's run) but a recurrence bump re-pointed its
+		last_seen_run onto A's run. Re-homing A must leave its owner alone."""
+		foreign = _mk_finding(
+			self.reviewer,
+			self.SLUG,
+			run=self.run_b,
+			first_seen_run=self.run_b,
+			last_seen_run=self.run_a,  # the bump, the only pointer the engine moves
+		).name
+		frappe.db.commit()
+
+		agents_api._rehome_installation_outputs(self.inst_a, self.owner_a)
+
+		self.assertEqual(
+			frappe.db.get_value(FINDING, foreign, "owner"),
+			self.reviewer,
+			"a finding created by another installation must not be re-homed",
+		)
+
+	def test_our_own_findings_are_still_rehomed(self):
+		"""Control: the function must still do its job, or the fix is just a break."""
+		mine = _mk_finding(
+			self.reviewer,
+			self.SLUG,
+			run=self.run_a,
+			first_seen_run=self.run_a,
+			last_seen_run=self.run_a,
+		).name
+		frappe.db.commit()
+
+		agents_api._rehome_installation_outputs(self.inst_a, self.owner_a)
+
+		self.assertEqual(frappe.db.get_value(FINDING, mine, "owner"), self.owner_a)
+		self.assertEqual(frappe.db.get_value(RUN, self.run_a, "owner"), self.owner_a, "runs re-home too")
+
+	def test_a_finding_created_on_our_run_but_bumped_elsewhere_is_rehomed(self):
+		"""The mirror case: origin is what counts, not where the bump currently points.
+		A row A's installation created stays A's even though its last_seen_run has since
+		moved onto B's run."""
+		mine = _mk_finding(
+			self.reviewer,
+			self.SLUG,
+			run=self.run_a,
+			first_seen_run=self.run_a,
+			last_seen_run=self.run_b,
+		).name
+		frappe.db.commit()
+
+		agents_api._rehome_installation_outputs(self.inst_a, self.owner_a)
+
+		self.assertEqual(frappe.db.get_value(FINDING, mine, "owner"), self.owner_a)
+
+	def test_b_findings_are_untouched_when_a_is_rehomed(self):
+		"""Nothing belonging to the co-reviewed installation moves at all."""
+		theirs = _mk_finding(
+			self.reviewer,
+			self.SLUG,
+			run=self.run_b,
+			first_seen_run=self.run_b,
+			last_seen_run=self.run_b,
+		).name
+		frappe.db.commit()
+
+		agents_api._rehome_installation_outputs(self.inst_a, self.owner_a)
+
+		self.assertEqual(frappe.db.get_value(FINDING, theirs, "owner"), self.reviewer)
+		self.assertEqual(frappe.db.get_value(RUN, self.run_b, "owner"), self.reviewer)
