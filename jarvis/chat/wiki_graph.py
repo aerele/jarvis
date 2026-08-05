@@ -107,7 +107,13 @@ def _manual_link_targets(raw, known: set[str]) -> list[str]:
 	Capped separately rather than sharing one budget with the body links, so a page with
 	many ``[[wikilinks]]`` in its body cannot silently swallow a human's deliberate
 	curation. A page therefore contributes at most ``2 * _MAX_LINKS_PER_PAGE`` link
-	edges."""
+	edges.
+
+	Keeps the NEWEST, not the oldest. ``add_wiki_link`` APPENDS, so truncating the head
+	would mean that past the cap a user clicks "+ link", is told it succeeded, the link
+	is durably stored, and it never appears in the graph. Dropping the oldest edge is a
+	bounded, understandable loss; silently discarding the one the user just made is
+	not."""
 	try:
 		arr = json.loads(raw) if isinstance(raw, str) else (raw or [])
 	except Exception:
@@ -119,9 +125,7 @@ def _manual_link_targets(raw, known: set[str]) -> list[str]:
 		s = str(t or "").strip().lower()
 		if s and s in known and s not in out:
 			out.append(s)
-			if len(out) >= _MAX_LINKS_PER_PAGE:
-				break
-	return out
+	return out[-_MAX_LINKS_PER_PAGE:]
 
 
 def _sources_authors(raw) -> dict[str, int]:

@@ -35,6 +35,8 @@ import json
 import frappe
 from frappe.utils import cint
 
+from jarvis.chat.wiki_graph import _MAX_LINKS_PER_PAGE
+
 WIKI = "Jarvis Wiki Page"
 SETTINGS = "Jarvis Settings"
 
@@ -70,9 +72,13 @@ INDEX_PATH = "wiki/index.md"
 LOG_PATH = "wiki/log.md"
 _INDEX_SUMMARY_CHARS = 100
 _LOG_MAX_EVENTS = 150
-# Curated links are appended one at a time and never pruned, so the "## Related"
-# tail gets the same defensive cap wiki_graph puts on a page's link set.
-_MAX_RELATED = 50
+# Curated links are appended one at a time and never pruned, so the "## Related" tail
+# gets the same defensive cap wiki_graph puts on a page's link set.
+#
+# #645: IMPORTED rather than restated. These were two independent literals whose
+# equality only a test enforced, so a future change to either one silently broke the
+# coupling. Now the coupling is structural and there is one number to change.
+_MAX_RELATED = _MAX_LINKS_PER_PAGE
 
 _PAGE_FIELDS = [
 	"name",
@@ -173,7 +179,13 @@ def _related_lines(doc, mirrored_slugs: set[str] | None) -> list[str]:
 	them, which also meant they never reached the container at all: the agent's
 	two channels are this mirror and ``jarvis__read_wiki``, and neither read the
 	field. Rendering them as real ``[[slug]]`` links keeps every body-based
-	consumer (Obsidian, a grep, the agent itself) working unchanged."""
+	consumer (Obsidian, a grep, the agent itself) working unchanged.
+
+	#645: keeps the NEWEST ``_MAX_RELATED``, not the oldest. ``add_wiki_link`` APPENDS,
+	so truncating the head meant that past the cap a user clicks "+ link", is told it
+	succeeded, the link is durably stored, and it never reaches the container. Dropping
+	the oldest bullet is a bounded, understandable loss; silently discarding the one the
+	user just made is not. The graph applies the same rule to the same field."""
 	from jarvis.chat.wiki import _parse_manual_links
 
 	self_slug = doc.get("slug") or doc.get("name")
@@ -184,9 +196,7 @@ def _related_lines(doc, mirrored_slugs: set[str] | None) -> list[str]:
 		if mirrored_slugs is not None and target not in mirrored_slugs:
 			continue
 		out.append(f"- [[{target}]]")
-		if len(out) >= _MAX_RELATED:
-			break
-	return out
+	return out[-_MAX_RELATED:]
 
 
 def _source_lines(raw) -> list[str]:

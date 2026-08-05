@@ -227,12 +227,24 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		out = wiki_graph._manual_link_targets(raw, known)
 		self.assertEqual(len(out), wiki_graph._MAX_LINKS_PER_PAGE)
 
+	def test_the_cap_keeps_the_NEWEST_links(self):
+		"""``add_wiki_link`` APPENDS, so a head-truncating cap means that past 50 links a
+		user clicks "+ link", is told it succeeded, the link is durably stored, and it
+		never appears in the graph. Dropping the oldest is a bounded, understandable
+		loss; silently discarding the one just made is not."""
+		known = {f"slug-{i:03d}" for i in range(60)}
+		ordered = sorted(known)  # oldest first, exactly how add_wiki_link leaves it
+		out = wiki_graph._manual_link_targets(json.dumps(ordered), known)
+		self.assertEqual(len(out), wiki_graph._MAX_LINKS_PER_PAGE)
+		self.assertIn(ordered[-1], out, "the most recently added link must survive the cap")
+		self.assertNotIn(ordered[0], out, "the oldest is the one that falls off")
+
 	def test_the_curated_cap_matches_the_mirrors(self):
-		"""The two must agree, which is the whole point of #645: the mirror already caps
-		its ``## Related`` tail, and the graph is the other consumer of the same field."""
+		"""The two must agree, which is the whole point of #645. Now structural: the
+		mirror IMPORTS this constant rather than restating it, so they cannot drift."""
 		from jarvis.chat import wiki_mirror
 
-		self.assertEqual(wiki_graph._MAX_LINKS_PER_PAGE, wiki_mirror._MAX_RELATED)
+		self.assertIs(wiki_mirror._MAX_RELATED, wiki_graph._MAX_LINKS_PER_PAGE)
 
 	def test_body_links_do_not_eat_the_curated_budget(self):
 		"""Capped separately on purpose: a page with many body [[wikilinks]] must not
