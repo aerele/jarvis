@@ -118,6 +118,11 @@ const RESTART_SAFE_CODES = new Set([
 	// The capability/upgrade refusal precedes any provider object, so nothing
 	// recoverable sits behind it - "Start again" is safe (U4).
 	CODES.CLIENT_UPGRADE_REQUIRED,
+	// A details rejection is raised by admin BEFORE it creates any provider object,
+	// on exactly the same grounds as the refusal above: nothing recoverable can sit
+	// behind it, so walking the customer back to the Details step to correct the
+	// offending field is provably safe and is the ONLY useful recovery.
+	CODES.BENCH_SIGNUP_DETAILS_REJECTED,
 ]);
 
 export function isTerminalForPayment(value) {
@@ -240,6 +245,12 @@ function stateForCode(code, data) {
 			return STATES.UNKNOWN;
 		case CODES.INVALID_REQUEST:
 			return STATES.FAILED_RETRYABLE;
+		// The customer's own details were refused before any gateway existed. It is
+		// retryable in the only sense that matters here: correct the field and the
+		// same submission succeeds. Deliberately NOT terminal - a terminal state
+		// offers no way forward, and this one has an obvious one.
+		case CODES.BENCH_SIGNUP_DETAILS_REJECTED:
+			return STATES.FAILED_RETRYABLE;
 		default:
 			return null;
 	}
@@ -258,6 +269,7 @@ const PAYMENT_STATE_CODES = new Set([
 	CODES.PAYMENT_PAGE_REDIRECT,
 	CODES.CLIENT_UPGRADE_REQUIRED,
 	CODES.BENCH_PAY_ORIGIN_UNCONFIGURED,
+	CODES.BENCH_SIGNUP_DETAILS_REJECTED,
 ]);
 
 function recomputeCanCheck(next, nowMs) {

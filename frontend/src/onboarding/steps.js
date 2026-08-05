@@ -39,12 +39,20 @@ export function planSubtitleFor(plans) {
 	// coerce to NaN here, which fails both comparisons, so the honest paid-only
 	// wording wins whenever the catalog is not explicit about being free.
 	const amount = (v) => (v === null || v === undefined || v === "" ? NaN : Number(v));
-	const hasFreeOrTrial = list.some(
-		(p) => !!p && (amount(p.price_inr) === 0 || amount(p.trial_days) > 0)
-	);
-	return hasFreeOrTrial
-		? "Start free. Upgrade or extend anytime, with no auto-renewal."
-		: "Pick a plan to get started. No auto-renewal.";
+	// A genuinely FREE plan (price zero) and a TRIAL plan are not the same promise,
+	// and collapsing them is how this line came to say the opposite of what happens.
+	// A trial is gated behind a Razorpay RECURRING MANDATE: the card is rejected
+	// unless it is recurring-eligible, and when the trial ends the plan bills
+	// monthly until cancelled. So "no auto-renewal" was, for a trial-only catalog,
+	// billing consent copy that contradicted the instrument being authorized three
+	// screens later. Only a zero-price plan can honestly claim nothing renews.
+	const hasFree = list.some((p) => !!p && amount(p.price_inr) === 0);
+	const hasTrial = list.some((p) => !!p && amount(p.trial_days) > 0);
+	if (hasFree) return "Start free. Upgrade whenever you're ready.";
+	if (hasTrial) {
+		return "Start with a free trial. When it ends, billing continues automatically until you cancel.";
+	}
+	return "Pick a plan to get started. Billing continues automatically until you cancel.";
 }
 
 // jarvis.account.is_ready_for_chat (jarvis/account.py) returns

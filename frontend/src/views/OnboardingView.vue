@@ -215,23 +215,33 @@
 									>
 										Account
 									</div>
-									<FormControl
-										type="email"
-										variant="outline"
-										label="Work email"
-										:model-value="state.email"
-										@update:model-value="
-											(v) => {
-												state.email = v;
-												state.identityFromUser = true;
-											}
-										"
-										placeholder="you@company.com"
-										autocomplete="email"
-										required
-										aria-required="true"
-										@keydown.enter="onDetailsSubmit"
-									/>
+									<div class="flex flex-col gap-1">
+										<FormControl
+											type="email"
+											variant="outline"
+											label="Work email"
+											:model-value="state.email"
+											@update:model-value="
+												(v) => {
+													state.email = v;
+													billing.setIdentity(v, undefined);
+													state.identityFromUser = true;
+													clearFieldErrorIfValid('email', emailError, v);
+												}
+											"
+											placeholder="you@company.com"
+											autocomplete="email"
+											required
+											aria-required="true"
+											:aria-invalid="detailsFieldErrors.email ? 'true' : undefined"
+											:aria-describedby="
+												detailsFieldErrors.email ? 'jv-ob-email-err' : undefined
+											"
+											@blur="touchEmailField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage id="jv-ob-email-err" :message="detailsFieldErrors.email" />
+									</div>
 									<FormControl
 										type="tel"
 										variant="outline"
@@ -244,9 +254,23 @@
 										autocomplete="tel"
 										@keydown.enter="onDetailsSubmit"
 									/>
-									<div class="col-span-2 flex flex-col gap-1.5">
+									<!-- JvCombo (shared, out of scope) has no declared aria-invalid /
+										 aria-describedby / blur props, and does not spread $attrs onto
+										 its inner <input>, so those attrs would silently land on its
+										 root <div> instead of the actual control. The error message and
+										 aria therefore go on THIS wrapper, which we do own, rather than
+										 on JvCombo itself. Its error only clears on input (every
+										 keystroke already reaches us via update:model-value) - there is
+										 no reliable blur signal to hook without editing JvCombo. -->
+									<div
+										class="col-span-2 flex flex-col gap-1.5"
+										:aria-invalid="detailsFieldErrors.company ? 'true' : undefined"
+										:aria-describedby="
+											detailsFieldErrors.company ? 'jv-ob-company-err' : undefined
+										"
+									>
 										<label for="jv-ob-company" class="text-xs text-ink-gray-5"
-											>Company</label
+											>Company *</label
 										>
 										<JvCombo
 											id="jv-ob-company"
@@ -254,7 +278,9 @@
 											@update:model-value="
 												(v) => {
 													state.company = v;
+													billing.setIdentity(undefined, v);
 													state.identityFromUser = true;
+													clearFieldErrorIfValid('company', companyError, v);
 												}
 											"
 											allow-custom
@@ -264,6 +290,7 @@
 											placeholder="Acme Inc."
 											@enter="onDetailsSubmit"
 										/>
+										<ErrorMessage id="jv-ob-company-err" :message="detailsFieldErrors.company" />
 									</div>
 									<div
 										class="col-span-2 mt-2 text-base font-semibold text-ink-gray-9"
@@ -298,18 +325,34 @@
 										autocomplete="address-level2"
 										@keydown.enter="onDetailsSubmit"
 									/>
-									<FormControl
-										type="text"
-										variant="outline"
-										label="GSTIN (optional)"
-										:model-value="billing.fields.gstin.value"
-										@update:model-value="
-											(v) => billing.setUserValue('gstin', v)
-										"
-										placeholder="33ABCDE1234F1Z5"
-										@keydown.enter="onDetailsSubmit"
-									/>
+									<div class="flex flex-col gap-1">
+										<FormControl
+											type="text"
+											variant="outline"
+											label="GSTIN (optional)"
+											:model-value="billing.fields.gstin.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('gstin', v);
+													clearFieldErrorIfValid('gstin', gstinError, v);
+												}
+											"
+											:placeholder="GSTIN_PLACEHOLDER"
+											:aria-invalid="detailsFieldErrors.gstin ? 'true' : undefined"
+											:aria-describedby="
+												detailsFieldErrors.gstin ? 'jv-ob-gstin-err' : undefined
+											"
+											@blur="touchGstinField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage id="jv-ob-gstin-err" :message="detailsFieldErrors.gstin" />
+									</div>
 								</div>
+								<!-- state.detailsErr stays for genuinely form-wide messages (e.g.
+									 onPayClick's "your signup details are missing" guard). Per-field
+									 problems render under their own field above instead - a shared
+									 bottom banner with no tie to the field is what let a resolved
+									 error linger and gave no clue which input it meant. -->
 								<Banner
 									v-if="state.detailsErr"
 									type="error"
@@ -366,11 +409,89 @@
 							 Sub-screens are driven by the machine state (pay.value), never by
 							 an HTTP status or an error message. ===== -->
 						<section v-else-if="state.step === 'pay'" class="ob-screen">
+							<!-- Contact support: a real ticket, filed from here. It sits at the
+								 HEAD of this v-if chain so every screen that offers the support
+								 action (recovery, terminal, maintenance hold) reaches the same
+								 panel, and so it needs no portal - a teleported dialog would lose
+								 the jv-* palette vars this view binds on its own root. The action
+								 it replaces was a bare mailto:, which did nothing at all on a
+								 machine with no mail client. -->
+							<template v-if="supportOpen">
+								<div class="ob-body">
+									<div class="ob-head">
+										<h1>Get help with this</h1>
+										<p v-if="!supportTicket">
+											Tell us what happened and we'll pick it up. We'll attach
+											the technical details of this screen automatically, so
+											you don't have to describe them.
+										</p>
+										<p v-else role="status">
+											Thanks. We have your request and we'll reply to
+											{{ payEmail }}.
+										</p>
+									</div>
+									<div v-if="!supportTicket" class="mx-auto w-full max-w-[560px]">
+										<FormControl
+											v-model="supportBody"
+											type="textarea"
+											variant="outline"
+											label="What happened?"
+											:rows="4"
+											placeholder="I tried to pay and..."
+										/>
+										<details class="mt-3 text-p-xs text-ink-gray-5">
+											<summary class="cursor-pointer">
+												Details we'll attach
+											</summary>
+											<pre
+												class="mt-1.5 whitespace-pre-wrap break-words rounded-md bg-surface-gray-2 p-2.5"
+												>{{ supportContext }}</pre
+											>
+										</details>
+										<!-- Filing failed. Never leave the customer with a dead
+											 button: show the address so there is always a way
+											 through. -->
+										<Banner
+											v-if="supportErr"
+											class="mt-3"
+											type="error"
+											:message="`We couldn't file that for you (${supportErr}). Please email ${SUPPORT_EMAIL} and include the details above.`"
+										/>
+									</div>
+									<div
+										v-else
+										class="mx-auto w-full max-w-[560px] text-center text-p-sm text-ink-gray-5"
+									>
+										Reference
+										<b class="font-medium text-ink-gray-9">{{
+											supportTicket
+										}}</b
+										>. Please don't pay again while we look at it.
+									</div>
+								</div>
+								<div class="ob-foot">
+									<button class="ob-back" @click="closeSupport">
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
+									</button>
+									<Button
+										v-if="!supportTicket"
+										variant="solid"
+										:disabled="supportBusy || !supportBody.trim()"
+										:loading="supportBusy"
+										loading-text="Sending…"
+										label="Send to support"
+										@click="sendSupport"
+									/>
+								</div>
+							</template>
 							<!-- Paid: the payment step is over. Receipt + workspace-setup
 								 projection, rendered separately (plan 02 §Paid/provisioning).
 								 Provisioning belongs to the readiness gate, so this shows status
 								 only and never a payment action. -->
-							<template v-if="showPaidFlash || showProvisioning">
+							<template v-else-if="showPaidFlash || showProvisioning">
 								<div class="ob-body">
 									<div class="ob-head">
 										<h1>
@@ -570,6 +691,16 @@
 									>
 										{{ restartHeldNote }}
 									</p>
+									<!-- The outcome of the last "Check payment status". A check that
+										 changes nothing must still say so, or the button reads as
+										 broken. -->
+									<p
+										v-if="statusCheckNote"
+										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+										role="status"
+									>
+										{{ statusCheckNote }}
+									</p>
 								</div>
 								<div class="ob-foot">
 									<!-- A way back, always. A recovery screen with only forward
@@ -633,6 +764,18 @@
 											}}
 										</p>
 									</div>
+									<!-- A status check can legitimately land the customer back on
+										 this card (admin answers "no signup here" when the attempt
+										 never created an intent). Silently swapping the screen for a
+										 blank form is what made the check button look broken, so the
+										 outcome is stated here too. -->
+									<Banner
+										v-if="statusCheckNote"
+										type="info"
+										:message="statusCheckNote"
+										class="mx-auto mb-4 max-w-[560px]"
+										role="status"
+									/>
 									<div
 										class="mx-auto max-w-[560px] overflow-hidden rounded-lg border border-outline-gray-1"
 									>
@@ -1057,7 +1200,7 @@
 <script setup>
 import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
-import { Button, FormControl, FeatherIcon } from "frappe-ui";
+import { Button, FormControl, FeatherIcon, ErrorMessage } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
@@ -1081,6 +1224,7 @@ import {
 	getCompanyOnboardingDefaults,
 	updateBilling,
 	onboardingPaymentApi,
+	supportCreateTicket,
 } from "@/api";
 import {
 	createOperationController,
@@ -1098,11 +1242,19 @@ import {
 	remainingCooldownSeconds,
 	isTerminalForPayment,
 } from "@/onboarding/paymentMachine";
-import { ACTIONS, ACTION_LABELS, TONE, copyFor } from "@/onboarding/paymentCodes";
+import {
+	ACTIONS,
+	ACTION_LABELS,
+	CODES,
+	TONE,
+	actionLabelFor,
+	copyFor,
+} from "@/onboarding/paymentCodes";
 import { CHECKOUT_NAV_KEY, shouldHonorCheckoutReturn } from "@/onboarding/checkoutNav";
 import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
 import { readCookie } from "@/lib/user";
 import { useBillingDetails, billingEditAction } from "@/onboarding/useBillingDetails";
+import { gstinError, GSTIN_PLACEHOLDER } from "@/onboarding/gstin";
 
 const router = useRouter();
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
@@ -1443,6 +1595,26 @@ function startWizard() {
 // Connect while their payment was never made. So payment truth
 // (get_onboarding_state, via flow.hydrate) is consulted FIRST, and only a paid
 // answer lets the connect shortcut fire. Fails open (default intro) on any error.
+// A PAID customer whose workspace is not chat-ready yet, for a reason that means
+// "the AI model still has to be chosen". Every one of these resumes on Connect,
+// which is the step the customer expects to land on the moment their payment goes
+// through.
+//
+// This used to be an inline two-value check (llm_credentials, llm_pool_provisioning)
+// while readiness.js's own NOT_ONBOARDED_REASONS listed five. The two that were
+// missing are the ones a fresh signup actually hits: `llm_provisioning` is the
+// direct/single-model analogue of llm_pool_provisioning, and `llm_setup` is the
+// half-finished signup whose payment has only just landed. Both fell through to
+// the else-branch below and parked the customer on the Pay step's provisioning
+// spinner instead of taking them to the AI model step, which is the "after payment
+// it did not go to the AI model page" report.
+const PAID_NEEDS_CONNECT_REASONS = new Set([
+	"llm_credentials",
+	"llm_pool_provisioning",
+	"llm_provisioning",
+	"llm_setup",
+]);
+
 async function reconcileMidFlightSignup() {
 	let truth;
 	try {
@@ -1464,10 +1636,7 @@ async function reconcileMidFlightSignup() {
 		} catch (e) {
 			/* readiness is advisory here - fall through to the pay projection */
 		}
-		if (
-			ready &&
-			(ready.reason === "llm_credentials" || ready.reason === "llm_pool_provisioning")
-		) {
+		if (ready && PAID_NEEDS_CONNECT_REASONS.has(ready.reason)) {
 			state.reconciledConnect = true;
 			state.step = "connect";
 			return;
@@ -1537,12 +1706,51 @@ function onPlanContinue() {
 }
 
 // ---- Details (Your Details) -------------------------------------------------
-// Validation matches the old Account step verbatim: email regex + non-empty
-// company. The four billing inputs are provenance-aware state owned by the
-// `billing` composable (Plan 01): edits are user-owned, the transitional
-// localStorage snapshot is namespaced by site+user and cleared only after
-// admin's billing_saved ack, and a Company change fetches ERP-derived defaults
-// behind a stale-response fence (fetchCompanyDefaults below).
+// Email + Company are required; GSTIN is validated (gstin.js) but optional -
+// the four billing inputs are provenance-aware state owned by the `billing`
+// composable (Plan 01): edits are user-owned, the transitional localStorage
+// snapshot is namespaced by site+user and cleared only after admin's
+// billing_saved ack, and a Company change fetches ERP-derived defaults behind
+// a stale-response fence (fetchCompanyDefaults below).
+
+// Per-field validators: each returns "" for a valid (or, where the field is
+// optional, blank) value, else the exact sentence shown under that field. Kept
+// as pure functions of a raw value so onDetailsSubmit's "validate everything
+// at once" and the per-field blur/input handlers below share one source of
+// truth instead of drifting. Email distinguishes EMPTY from MALFORMED - an
+// empty form used to report "Enter a valid email address", which is simply
+// untrue of a field nobody has typed into yet.
+function emailError(value) {
+	const v = (value || "").trim();
+	if (!v) return "Work email is required.";
+	return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v) ? "" : "Enter a valid email address.";
+}
+function companyError(value) {
+	return (value || "").trim() ? "" : "Company name is required.";
+}
+// gstinError (gstin.js) already treats a blank value as "" (GSTIN is optional).
+
+// Details-step field errors, one bucket per field so each renders under its
+// OWN input via ErrorMessage instead of a single shared bar at the bottom with
+// no tie to what's wrong. Set all at once by onDetailsSubmit (every failure
+// shown together, not one submit per error); state.detailsErr stays reserved
+// for genuinely form-wide messages (see onPayClick's missing-details guard).
+const detailsFieldErrors = reactive({ email: "", company: "", gstin: "" });
+function touchEmailField() {
+	detailsFieldErrors.email = emailError(state.email);
+}
+function touchCompanyField() {
+	detailsFieldErrors.company = companyError(state.company);
+}
+function touchGstinField() {
+	detailsFieldErrors.gstin = gstinError(billing.fields.gstin.value);
+}
+// Called on every keystroke: only ever CLEARS an error that no longer applies
+// - it never shows a NEW one while the customer is still typing. Full
+// (re)validation happens on blur (touch*Field above) and on submit.
+function clearFieldErrorIfValid(name, errorFn, value) {
+	if (detailsFieldErrors[name] && !errorFn(value)) detailsFieldErrors[name] = "";
+}
 
 // ERP-derived billing defaults for the selected Company. Debounced (the Company
 // combo emits on every keystroke), fenced (beginCompanyFetch mints a monotonic
@@ -1576,14 +1784,15 @@ function onDetailsSubmit() {
 	state.detailsErr = "";
 	state.email = (state.email || "").trim();
 	state.company = (state.company || "").trim();
-	if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(state.email)) {
-		state.detailsErr = "Enter a valid email address.";
-		return;
-	}
-	if (!state.company) {
-		state.detailsErr = "Company name is required.";
-		return;
-	}
+	// Validate every field AT ONCE, not one submit per error: each failure lands
+	// under its own field via detailsFieldErrors, so a customer sees everything
+	// wrong in one pass instead of fixing email only to have the next click
+	// reveal Company was empty too. A bad GSTIN blocks here too, on this same
+	// step, instead of dead-ending at the pay button three screens later.
+	touchEmailField();
+	touchCompanyField();
+	touchGstinField();
+	if (detailsFieldErrors.email || detailsFieldErrors.company || detailsFieldErrors.gstin) return;
 	billing.persist();
 	// Editing billing after Review & Pay: return straight to Pay, and — once an
 	// intent exists — save the edit through the authenticated update_billing
@@ -1598,6 +1807,22 @@ function onDetailsSubmit() {
 	// sub-state now, and a fresh review renders from its REVIEW state. Clear the
 	// reconnect-code step's own error surface so a stale one does not linger.
 	state.payErr = "";
+	statusCheckNote.value = "";
+	// The customer just edited the details behind a FAILED attempt. Without this,
+	// walking forward from here landed them straight back on the old failure card
+	// with no new request made at all: the machine was still parked on the failed
+	// code, the pay step renders that card ahead of the review card, and the one
+	// button that names the obvious action ("Initiate payment again") is disabled
+	// on the codes this happens for. The corrected value sat in storage, unused,
+	// and the only escape was a non-obvious detour through "Check payment status".
+	//
+	// flow.restart() is exactly the right instrument and needs no new safety
+	// reasoning: it resets ONLY for codes that definitionally have no recoverable
+	// payment behind them (canSafelyRestart), and preserves the attempt and its
+	// recovery affordances for anything where money might exist. So a corrected
+	// GSTIN gets a clean re-submit, and a declined card still cannot be silently
+	// re-charged.
+	if (pay.value.value !== S.REVIEW) flow.restart();
 	goNext();
 }
 
@@ -1667,6 +1892,32 @@ function clearExternalCheckoutNav() {
 	} catch (e) {
 		/* no-op */
 	}
+}
+
+// The admin-hosted pay page now sends the customer back here when the payment
+// settles, rather than leaving them on a result screen whose only exit was a
+// "Back to your workspace" button running history.back(). It appends
+// `?pay=done|failed|pending`; this reads that hint and STRIPS it from the URL in
+// the same breath, so a later reload cannot replay a verdict that has since moved
+// on. The hint is advisory only - it never overrides server truth, it only stops
+// a returning customer being shown the intro tour while the control plane catches
+// up with the gateway.
+const CHECKOUT_OUTCOME_PARAM = "pay";
+const CHECKOUT_OUTCOMES = new Set(["done", "failed", "pending"]);
+function readCheckoutOutcome() {
+	let outcome = "";
+	try {
+		const url = new URL(window.location.href);
+		const raw = url.searchParams.get(CHECKOUT_OUTCOME_PARAM) || "";
+		if (CHECKOUT_OUTCOMES.has(raw)) outcome = raw;
+		if (url.searchParams.has(CHECKOUT_OUTCOME_PARAM)) {
+			url.searchParams.delete(CHECKOUT_OUTCOME_PARAM);
+			window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+		}
+	} catch (e) {
+		/* no URL/history support: the reconcile below still runs on server truth */
+	}
+	return outcome;
 }
 
 const flow = createPaymentFlow({
@@ -1938,9 +2189,105 @@ function onReconnectIdentityInput() {
 // current state, P1-3), say so instead of leaving a silent no-op button.
 const restartHeldNote = ref("");
 
+// ---- "Check payment status" must always say something ----------------------
+// The button used to call flow.checkStatus() and nothing else. That is fine when
+// the answer is a payment state, because the machine repaints. It is NOT fine for
+// the answer this signup actually gets when its start_signup was rejected before
+// an intent existed: admin answers BENCH_NO_SIGNUP_CONTEXT, whose reducer branch
+// resets the machine to a blank REVIEW card. The customer pressed a button, the
+// screen silently became a fresh form, and nothing anywhere said why. That reads
+// as a broken button, and it is the "check payment status not working" report.
+const statusCheckNote = ref("");
+async function runStatusCheck() {
+	statusCheckNote.value = "";
+	const before = pay.value.value;
+	await flow.checkStatus();
+	const after = pay.value.value;
+	if (after === S.REVIEW && pay.value.notStarted) {
+		statusCheckNote.value =
+			"We checked, and there is no payment on this site to look up yet. Nothing has been charged. Enter your details and start the payment when you're ready.";
+		return;
+	}
+	if (after === before && !pay.value.transportError) {
+		// A real answer that changed nothing is still an answer. Saying so beats a
+		// button that appears to do nothing at all.
+		statusCheckNote.value = "We checked just now, and nothing has changed yet.";
+	}
+}
+
+// ---- Contact support: an actual ticket, not a mailto -----------------------
+// This action used to set window.location.href to a mailto: URL. On any machine
+// with no mail client configured - which is most browsers, and every kiosk and
+// most corporate desktops - clicking it did visibly nothing, which is the
+// "contact support not working" report. It also carried no context, so even when
+// it did open a composer the customer had to describe a failure they cannot see
+// the internals of.
+//
+// The app already has a real ticket API (jarvis.support.api.create_ticket) behind
+// @/api's supportCreateTicket, and the onboarding wizard runs authenticated, so
+// there is nothing stopping us filing the ticket properly. Rendered INLINE rather
+// than in a Dialog on purpose: a portaled dialog loses the jv-* palette vars this
+// view binds on its own root (design.md §2.2), and this panel is not worth that
+// risk.
+const SUPPORT_EMAIL = "support@aerele.in";
+const supportOpen = ref(false);
+const supportBody = ref("");
+const supportBusy = ref(false);
+const supportTicket = ref("");
+const supportErr = ref("");
+
+// What support needs to act without a round trip, and nothing a customer would be
+// alarmed to read: the coded state, the masked attempt reference the recovery card
+// already shows, and admin's own sentence. No token, no gateway id, no payload.
+const supportContext = computed(() => {
+	const rows = [
+		`Step: ${state.step}`,
+		`Payment state: ${pay.value.value || "unknown"}`,
+		`Code: ${pay.value.code || "none"}`,
+	];
+	if (maskedIntentRef.value) rows.push(`Reference: ${maskedIntentRef.value}`);
+	if (pay.value.message) rows.push(`Detail: ${pay.value.message}`);
+	return rows.join("\n");
+});
+
+function openSupport() {
+	supportErr.value = "";
+	supportTicket.value = "";
+	supportBody.value = "";
+	supportOpen.value = true;
+}
+
+function closeSupport() {
+	supportOpen.value = false;
+}
+
+async function sendSupport() {
+	if (supportBusy.value) return;
+	supportBusy.value = true;
+	supportErr.value = "";
+	try {
+		const subject = `Onboarding payment help (${pay.value.code || "no code"})`;
+		const body = `${supportBody.value.trim()}\n\n---\n${supportContext.value}`;
+		const d = (await supportCreateTicket(subject, body)) || {};
+		// The API answers {ok, data}; the ticket name is whatever data carries. Show
+		// it when present, but a successful call with an unfamiliar shape is still a
+		// success - never turn one into an error the customer has to act on.
+		supportTicket.value = (d.data && (d.data.name || d.data.ticket)) || "sent";
+	} catch (e) {
+		// Filing failed. Fall back to the address, visibly, so the customer is never
+		// left with a dead button again - which was the whole point of this change.
+		supportErr.value = errMsg(e);
+	} finally {
+		supportBusy.value = false;
+	}
+}
+
 function payActionLabel(a) {
 	if (a === ACTIONS.CHECK) return checkLabel.value;
-	return ACTION_LABELS[a] || "";
+	// actionLabelFor lets a row override a label whose shared wording would mislead
+	// in its own context - "Start again" on a details rejection, where the only
+	// thing being started again is one corrected field.
+	return actionLabelFor(payCopy.value, a);
 }
 function payActionDisabled(a) {
 	// Any mutating call in flight disables BOTH recovery actions (plan 02: server
@@ -1970,7 +2317,7 @@ function payActionVariant(a) {
 	return recoveryActions.value[0] === a ? "solid" : "subtle";
 }
 async function onPayAction(a) {
-	if (a === ACTIONS.CHECK) return flow.checkStatus();
+	if (a === ACTIONS.CHECK) return runStatusCheck();
 	if (a === ACTIONS.INITIATE) {
 		// Provider from SERVER TRUTH, not the local default. A resumed Cashfree
 		// signup renders "Payment method: Cashfree" one line above this button
@@ -1984,11 +2331,16 @@ async function onPayAction(a) {
 	}
 	if (a === ACTIONS.RECONNECT) return startReconnect();
 	if (a === ACTIONS.VERIFY) return flow.verifyAndContinue();
-	if (a === ACTIONS.SUPPORT) {
-		window.location.href = "mailto:support@aerele.in?subject=Jarvis%20onboarding%20payment";
-		return;
-	}
+	if (a === ACTIONS.SUPPORT) return openSupport();
 	if (a === ACTIONS.RESTART) {
+		// A details rejection is not a restart in any meaningful sense: admin named a
+		// field the customer typed wrongly, and the reset below wipes the machine (and
+		// with it admin's sentence) on the way to the Details step. Carry the sentence
+		// across so the step they land on says WHY they are there, instead of looking
+		// like the wizard threw their progress away for no reason.
+		if (pay.value.code === CODES.BENCH_SIGNUP_DETAILS_REJECTED) {
+			state.detailsErr = pay.value.message || payCopy.value.body;
+		}
 		// Server-truth-gated reset (P1-3): the flow resets the machine only when no
 		// recoverable payment can be behind the current code, otherwise it preserves
 		// the attempt and its recovery affordances. Editing details is offered only
@@ -2323,7 +2675,44 @@ function navigateToChat() {
 	forgetIdem();
 	opStore.forget();
 	forgetReady();
+	// Onboarding is over, so the transitional local billing snapshot has finally
+	// outlived its purpose. This is where the "kept in this browser for now" promise
+	// is honoured - NOT at the durable-write ack, which fires while the customer is
+	// still mid-flow and used to destroy the only copy that could survive the
+	// checkout round trip (see useBillingDetails.markBillingSaved).
+	billing.finish();
 	router.replace({ name: "Chat" });
+}
+
+// The AI applied but the workspace is not chat-ready yet. Poll readiness (a read,
+// cheap, no mutation) and navigate the moment it turns true. Bounded, and on
+// expiry it lands on the SAME honest retry state every other non-ready terminal
+// gets - never a silent navigation into a chat that cannot answer.
+const CHAT_READY_ATTEMPTS = 40;
+const CHAT_READY_INTERVAL_MS = 3000;
+async function waitForChatReadiness() {
+	for (let i = 0; i < CHAT_READY_ATTEMPTS; i++) {
+		if (navigated.value) return;
+		// The memoized verdict is what the router guard will read moments from now, so
+		// it has to be dropped before each probe or this loop polls a cached answer.
+		forgetReady();
+		let r = null;
+		try {
+			r = await isReadyForChat();
+		} catch (e) {
+			// A readiness call that throws is not a verdict. Keep waiting.
+		}
+		if (r && r.ready) {
+			navigateToChat();
+			return;
+		}
+		await _sleep(CHAT_READY_INTERVAL_MS);
+	}
+	state.finishing = true;
+	state.connectPhase = "retry";
+	state.connectMessage =
+		"Your AI is connected, but your workspace is taking longer than usual to come online. It's still finishing on its own, so you can keep waiting or retry.";
+	state.retryAfter = 0;
 }
 
 // The terminal handler for a followed operation. READY → navigate once; every other
@@ -2346,6 +2735,21 @@ function onTerminal(status) {
 	const ui = classifyOperation(status);
 	if (ui.canNavigate) {
 		navigateToChat();
+		return;
+	}
+	// The AI connection applied, but admin says the workspace is not chat-ready yet
+	// (chat_readiness === false - typically the serving container still coming up).
+	// This used to navigate anyway, because canNavigate only looked at the operation
+	// state, and the customer landed in a chat that could not answer with nothing on
+	// screen to explain it. Nothing is wrong here, so it is not a failure state: wait
+	// for readiness and then go, with an honest line about what is happening.
+	if (ui.awaitingChatReadiness) {
+		state.finishing = true;
+		state.connectPhase = "working";
+		state.finishSubtitle =
+			ui.chatReadinessReason ||
+			"Your AI is connected. Waiting for your workspace to come online…";
+		waitForChatReadiness();
 		return;
 	}
 	// A non-navigable terminal. onOpUpdate already rendered the matching phase; a
@@ -2721,10 +3125,29 @@ function onCheckoutVisibility() {
 }
 
 onMounted(async () => {
+	// Did we just come back from the admin-hosted checkout? The pay page appends
+	// `?pay=done|failed|pending` on its way out (jarvis_admin_v2's
+	// billing/checkout/workspace.py owns that vocabulary). Read it BEFORE anything
+	// else touches the URL, and strip it immediately so a later reload does not
+	// re-apply a stale verdict.
+	const checkoutReturn = readCheckoutOutcome();
 	// Restore the namespaced local billing snapshot FIRST: restored values are
 	// user-owned (local_restore), so the Company-defaults fetch prefillAccount
 	// triggers can only fill fields the customer left blank.
 	billing.restore();
+	// The identity half of that snapshot (work email, company). Applied before
+	// prefillAccount so what the CUSTOMER typed beats getAccountDefaults, which can
+	// legitimately answer with the SITE ADMINISTRATOR's email - a different person.
+	// Without this, returning from checkout showed the wrong email on the Details
+	// step, or none at all.
+	if (billing.identity.email) {
+		state.email = billing.identity.email;
+		state.identityFromUser = true;
+	}
+	if (billing.identity.company) {
+		state.company = billing.identity.company;
+		state.identityFromUser = true;
+	}
 	// Fired (not awaited) synchronously so providersLoading flips true on this same
 	// tick, before the awaited prefill below — the discovery loading note must show
 	// from first paint (X4), independent of prefill/company.
@@ -2761,6 +3184,15 @@ onMounted(async () => {
 	});
 	state.reconnectIntent = intent && landing === "details";
 	state.step = landing;
+	// Coming back from checkout must NEVER land on the intro tour. reconcile above
+	// already routes from server truth in the normal case, but there are real races
+	// where it cannot: the control plane may not have absorbed the gateway's answer
+	// yet, so a customer who genuinely paid ten seconds ago can hydrate as "nothing
+	// started" and be shown the marketing tour as though they had never signed up.
+	// The pay page told us where they came from, so honour that.
+	if (checkoutReturn && state.step === "intro") {
+		state.step = "pay";
+	}
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"
 	// and skip it (the step-entry watch still covers every other path).

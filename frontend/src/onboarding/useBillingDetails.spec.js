@@ -221,14 +221,72 @@ describe("ack-gated storage promise (P0-01)", () => {
 		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
 	});
 
-	it("clears the local snapshot only after a durable ack", () => {
+	// The durable ack used to ALSO clear the local snapshot. It no longer does, and
+	// that is the fix rather than a regression: the ack arrives from start_signup,
+	// which is the call made immediately before the customer is top-level-navigated
+	// away to the checkout. Clearing there destroyed the only copy that could
+	// survive the round trip, so a customer who came back from a failed payment and
+	// pressed Back found an empty form. The promise is now kept at the END of
+	// onboarding instead, via finish().
+	it("keeps the local snapshot through a durable ack, so a checkout round trip can resume", () => {
 		const b = useBillingDetails({ site: "s1", user: "u1" });
 		b.setUserValue("city", "Chennai");
 		expect(window.localStorage.getItem(b.storageKey)).toBeTruthy();
 		b.markBillingSaved(false);
 		expect(window.localStorage.getItem(b.storageKey)).toBeTruthy(); // kept
 		b.markBillingSaved(true);
+		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED); // the promise still flips
+		expect(window.localStorage.getItem(b.storageKey)).toBeTruthy(); // but the copy stays
+	});
+
+	it("retires the local snapshot when onboarding finishes", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setUserValue("city", "Chennai");
+		b.markBillingSaved(true);
+		expect(window.localStorage.getItem(b.storageKey)).toBeTruthy();
+		b.finish();
 		expect(window.localStorage.getItem(b.storageKey)).toBeNull(); // retired
+	});
+});
+
+describe("identity survives the checkout round trip", () => {
+	it("persists and restores the work email and company", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setIdentity("payer@acme.test", "Acme Inc.");
+		// A fresh instance is what a return from the pay page actually produces: the
+		// tab navigated away, so nothing in memory survived.
+		const after = useBillingDetails({ site: "s1", user: "u1" });
+		expect(after.identity.email).toBe("");
+		after.restore();
+		expect(after.identity.email).toBe("payer@acme.test");
+		expect(after.identity.company).toBe("Acme Inc.");
+	});
+
+	it("stays namespaced: another site or user cannot see it", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setIdentity("payer@acme.test", "Acme Inc.");
+		const otherUser = useBillingDetails({ site: "s1", user: "u2" });
+		otherUser.restore();
+		expect(otherUser.identity.email).toBe("");
+		const otherSite = useBillingDetails({ site: "s2", user: "u1" });
+		otherSite.restore();
+		expect(otherSite.identity.company).toBe("");
+	});
+
+	// restore() fills BLANKS only. The wizard calls it once on mount, before the
+	// customer can type and before prefillAccount runs, which is what stops the site
+	// administrator's email (a different person) from replacing the payer's.
+	it("restore fills only what is still blank", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setIdentity("stored@acme.test", "Stored Co.");
+		const fresh = useBillingDetails({ site: "s1", user: "u1" });
+		fresh.restore();
+		expect(fresh.identity.email).toBe("stored@acme.test");
+		// A value present at restore time is never clobbered by a second restore.
+		fresh.identity.email = "typed@acme.test";
+		fresh.restore();
+		expect(fresh.identity.email).toBe("typed@acme.test");
+		expect(fresh.identity.company).toBe("Stored Co.");
 	});
 });
 
@@ -262,7 +320,7 @@ describe("Review & Pay card equals the normalized payload (P1-03)", () => {
 });
 
 describe("cross-device recovery — server snapshot wins (brief §6)", () => {
-	it("hydrates from admin's normalized summary, overriding local, and clears the remnant", () => {
+	it("hydrates from admin's normalized summary, overriding local, and rewrites the snapshot", () => {
 		const b = useBillingDetails({ site: "s1", user: "u1" });
 		b.setUserValue("city", "LocalCity"); // stale local value
 		expect(window.localStorage.getItem(b.storageKey)).toBeTruthy();
@@ -278,7 +336,10 @@ describe("cross-device recovery — server snapshot wins (brief §6)", () => {
 		expect(b.fields.city.source).toBe("user"); // authoritative, non-overwritable
 		expect(b.billingSaved.value).toBe(true); // stored ⇒ saved
 		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
-		expect(window.localStorage.getItem(b.storageKey)).toBeNull(); // remnant cleared
+		// The remnant is REWRITTEN with server truth rather than deleted: onboarding
+		// is still in flight here, and the checkout round trip that follows would
+		// otherwise leave nothing to restore from (see markBillingSaved).
+		expect(JSON.parse(window.localStorage.getItem(b.storageKey)).city).toBe("ServerCity");
 		// A later ERP default cannot clobber the recovered snapshot.
 		fetchAndApply(b, "Aerele", DEF_A);
 		expect(b.fields.city.value).toBe("ServerCity");
