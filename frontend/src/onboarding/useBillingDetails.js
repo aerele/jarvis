@@ -26,6 +26,17 @@ import { reactive, ref, computed } from "vue";
 // The four Details-step inputs.
 export const BILLING_FIELDS = ["contact", "address", "city", "gstin"];
 
+// The two IDENTITY inputs (work email, company). They are not billing fields and
+// they carry no provenance, but they belong in the same snapshot for one blunt
+// reason: paying TOP-LEVEL NAVIGATES the whole tab away to the admin-hosted
+// checkout, so coming back is a fresh page load. Anything held only in the
+// wizard's in-memory `state` is gone by then. Email and company were held only
+// there, so a customer who came back from a failed payment and pressed Back found
+// the Details step blank, or prefilled with the SITE ADMINISTRATOR's email rather
+// than the one they had typed. Restoring them is the difference between resuming
+// and starting over.
+export const IDENTITY_FIELDS = ["email", "company"];
+
 // SPA field -> key in the shared billing-object contract
 // (jarvis/tests/fixtures/billing_contract/billing_snapshot.json). The bench
 // forwards this object to admin UNMODIFIED; admin owns the normalizer.
@@ -56,6 +67,22 @@ export function billingStorageKey(site, user) {
 	return `${BILLING_LS_PREFIX}::${site || "_"}::${user || "_"}`;
 }
 
+// How long a transitional snapshot may live before it is treated as absent and
+// deleted on sight.
+//
+// This exists because the snapshot no longer dies at the durable-write ack (see
+// markBillingSaved: dying there is what emptied the Details form after a checkout
+// round trip). Moving the clear to the END of onboarding fixed resuming, but a
+// customer who ABANDONS - closes the tab at the pay screen, never comes back -
+// then never reaches the end, and their address, GSTIN and work email would sit
+// in localStorage on a shared or kiosk browser forever. Neither "clear at the ack"
+// nor "clear at the end" is sufficient on its own; retention has to be bounded by
+// TIME, which holds however the customer leaves.
+//
+// 24 hours matches the verification link's own life, so the window never outlives
+// a signup that could still legitimately be resumed.
+export const BILLING_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
+
 // ERP-defaults response (get_company_onboarding_defaults data) -> field values.
 function fieldValuesFromDefaults(data) {
 	const contact = (data && data.contact) || {};
@@ -85,8 +112,10 @@ function fieldValuesFromSummary(s) {
  * @param {string} opts.site  canonical site identity (window.location.host)
  * @param {string} opts.user  logged-in user id (namespaces the transitional key)
  * @param {Storage} [opts.storage]  defaults to window.localStorage
+ * @param {Function} [opts.now]  ms clock, injected so the snapshot TTL is testable
  */
 export function useBillingDetails(opts = {}) {
+	const now = opts.now || (() => Date.now());
 	const site = opts.site || "";
 	const user = opts.user || "";
 	const storage =
@@ -102,6 +131,11 @@ export function useBillingDetails(opts = {}) {
 
 	// C01-5 version-skew acknowledgement: false until admin echoes billing_saved.
 	const billingSaved = ref(false);
+	// The identity half of the snapshot (see IDENTITY_FIELDS). Held here rather
+	// than in the wizard's `state` so it survives the checkout round trip, and kept
+	// deliberately dumb: last write wins, no provenance, because unlike the billing
+	// fields nothing auto-fills these behind the customer's back.
+	const identity = reactive({ email: "", company: "" });
 	// Provenance of the last-applied ERP defaults, forwarded to admin so it can
 	// record where the snapshot originated. Never rendered on Review & Pay.
 	const sourceCompany = ref("");
@@ -187,6 +221,15 @@ export function useBillingDetails(opts = {}) {
 
 	// --- transitional localStorage (namespaced, ack-gated) --------------------
 
+	// Record the identity half of the snapshot. Called on every edit of the work
+	// email / company inputs, so a mid-flow reload or a checkout round trip finds
+	// them again.
+	function setIdentity(email, company) {
+		if (email !== undefined) identity.email = email == null ? "" : String(email);
+		if (company !== undefined) identity.company = company == null ? "" : String(company);
+		persist();
+	}
+
 	function persist() {
 		if (!storage) return;
 		try {
@@ -197,6 +240,11 @@ export function useBillingDetails(opts = {}) {
 					address: fields.address.value,
 					city: fields.city.value,
 					gstin: fields.gstin.value,
+					email: identity.email,
+					company: identity.company,
+					// Stamped on every write so restore() can bound how long this PII
+					// lives, whatever happens to the session that wrote it.
+					saved_at: now(),
 				})
 			);
 		} catch (e) {
@@ -217,12 +265,38 @@ export function useBillingDetails(opts = {}) {
 		} catch (e) {
 			return false; // corrupt entry — ignore
 		}
+		// Past its window: treat as absent AND delete it. This is the retention bound
+		// that "clear when onboarding finishes" cannot provide on its own, because a
+		// customer who abandons at the pay screen never reaches the finish. Deleting
+		// on READ is deliberate: it needs no timer, no lifecycle hook and no
+		// cooperation from the page that abandoned, and the next visit to any
+		// onboarding screen is what collects it.
+		//
+		// A snapshot with NO stamp is one written by a build older than this change.
+		// It is dropped too, on the same reasoning: its age is unknowable, so it
+		// cannot be shown to be within the window.
+		const savedAt = Number(d && d.saved_at);
+		if (!Number.isFinite(savedAt) || now() - savedAt > BILLING_SNAPSHOT_TTL_MS) {
+			clearStorage();
+			return false;
+		}
 		let any = false;
 		for (const name of BILLING_FIELDS) {
 			const v = (d && d[name]) || "";
 			if (v && fields[name].source === "empty") {
 				fields[name].value = v;
 				fields[name].source = "local_restore";
+				any = true;
+			}
+		}
+		// Identity restores unconditionally into whatever is still blank. There is no
+		// provenance to respect here, and the caller reads `identity` to decide
+		// whether to overwrite its own prefill (a restored value the CUSTOMER typed
+		// must beat getAccountDefaults, which can be the site admin's email).
+		for (const name of IDENTITY_FIELDS) {
+			const v = (d && d[name]) || "";
+			if (v && !identity[name]) {
+				identity[name] = v;
 				any = true;
 			}
 		}
@@ -244,8 +318,30 @@ export function useBillingDetails(opts = {}) {
 	function markBillingSaved(ack) {
 		const saved = ack === true;
 		billingSaved.value = saved;
-		if (saved) clearStorage();
+		// Deliberately does NOT clear the local snapshot any more, and this is the
+		// single most load-bearing change in this file.
+		//
+		// It used to, on the reasoning that once admin holds the data durably there
+		// is no reason to leave PII sitting in localStorage. The reasoning is sound;
+		// the TIMING was wrong. The ack arrives from start_signup, which is the call
+		// made immediately BEFORE the customer is navigated away to the checkout - so
+		// the snapshot was destroyed at the exact moment the only copy that could
+		// survive the round trip was needed. A customer whose payment then failed
+		// pressed Back and found the form empty, with nothing left to restore from
+		// except admin's own state read, which carries no snapshot for a signup that
+		// never completed.
+		//
+		// The privacy intent is preserved by clearing at the END of onboarding
+		// instead (see `finish`), which is where "we no longer need this locally"
+		// actually becomes true.
 		return saved;
+	}
+
+	// Onboarding is over: drop the transitional local copy. This is where the
+	// storage promise is finally kept, rather than at the durable-write ack (see
+	// markBillingSaved for why that was too early).
+	function finish() {
+		clearStorage();
 	}
 
 	// Cross-device recovery (P1-03 / brief §6): admin's authenticated state
@@ -269,7 +365,10 @@ export function useBillingDetails(opts = {}) {
 		if (summary.source_address) sourceAddress.value = String(summary.source_address);
 		if (any) {
 			markBillingSaved(true); // a stored snapshot is by definition persisted
-			clearStorage();
+			// The local copy is kept until onboarding finishes (see markBillingSaved):
+			// server truth having won here says nothing about whether the customer is
+			// about to be navigated away to checkout and back.
+			persist();
 		}
 		return any;
 	}
@@ -313,6 +412,9 @@ export function useBillingDetails(opts = {}) {
 
 	return {
 		fields,
+		identity,
+		setIdentity,
+		finish,
 		billingSaved,
 		sourceCompany,
 		sourceAddress,

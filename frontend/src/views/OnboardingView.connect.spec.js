@@ -106,6 +106,11 @@ vi.mock("frappe-ui", () => {
 		Button: stub("Button"),
 		FormControl: stub("FormControl", "input"),
 		FeatherIcon: stub("FeatherIcon", "span"),
+		ErrorMessage: {
+			name: "ErrorMessage",
+			props: ["message"],
+			template: '<div v-if="message">{{ message }}</div>',
+		},
 		dayjs: () => ({ format: () => "", fromNow: () => "" }),
 		toast: { error: vi.fn(), success: vi.fn() },
 	};

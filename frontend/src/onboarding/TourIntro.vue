@@ -1,13 +1,130 @@
 <template>
 	<!-- Intro product tour (onboarding step 1, chromeless: no step rail).
-		 6 slides in SIDEBAR ORDER: Welcome, Chat, Skills, Macros, File Box,
-		 Agents. Translated from the approved preview
-		 (docs/superpowers/specs/onboarding-preview-v6.html); self-contained,
-		 only depends on the app palette vars OnboardingView already applies. -->
+		 6 slides, TOUR order: Chat, Welcome, Skills, Macros, File Box, Agents
+		 (Chat leads with the animated conversation; the mock sidebar nav
+		 rendered inside each slide keeps its own SIDEBAR order: Chat, Skills,
+		 Macros, File Box, Agents - see NAV_ORDER). Translated from the
+		 approved preview (docs/superpowers/specs/onboarding-preview-v6.html);
+		 self-contained, only depends on the app palette vars OnboardingView
+		 already applies. -->
 	<div class="tour">
 		<div class="tour-stage">
-			<!-- slide 1 · welcome -->
+			<!-- slide 1 · chat -->
 			<div v-if="cur === 0" class="slide">
+				<div class="slide-copy">
+					<span class="eyebrow">Chat</span>
+					<h2>Ask anything about your business.</h2>
+					<p>
+						“Which sales orders are overdue?” “Draft a follow-up to this lead.”
+						{{ agentName }}
+						pulls the answer straight from ERPNext and shows its work.
+					</p>
+				</div>
+				<div class="mock">
+					<div class="mock-bar">
+						<i></i><i></i><i></i><span>Chat · Stock &amp; dispatch</span>
+					</div>
+					<div class="mock-body">
+						<div class="m-side" v-html="sideHtml('Chat')"></div>
+						<div class="m-main">
+							<!-- looping animated conversation: chatStep (script) is a tiny
+								 phase clock that toggles which bubbles exist via v-if; the
+								 motion itself (typing reveal, caret blink, tool-dot pulse,
+								 loop fade) is CSS. .chat-flow is pinned to the mock's fixed
+								 content box and bottom-aligned, so new bubbles push older
+								 ones past the top edge where overflow:hidden clips them -
+								 same as a real scrolled-to-bottom chat - and the mock never
+								 grows or jumps. -->
+							<div class="chat-anim" :class="{ fading: chatFading }">
+								<div class="chat-flow">
+									<div class="cb tool" v-if="chatStep === 'tool'">
+										<span class="g"></span>run_report · Sales Order + Bin
+									</div>
+									<div class="cb u" v-if="chatAtLeast('bubble1')">
+										For the available stock, which customer orders can I
+										dispatch now, who pays me on time, to keep up my cashflow
+										in a good state? Analyse and list.
+									</div>
+									<div class="cb a cb-reply" v-if="chatAtLeast('reply1')">
+										<p class="tbl-lead">
+											3 orders can ship today, ₹2.4L total. Ranked by how
+											fast each customer pays.
+										</p>
+										<div class="tbl">
+											<div class="tbl-row">
+												<b>Acme Industries · SO-0142</b>
+												<span
+													>₹1.1L · 120/120 ready · pays in 12d avg</span
+												>
+											</div>
+											<div class="tbl-row">
+												<b>Vertex Traders · SO-0138</b>
+												<span
+													>₹84,000 · 60/60 ready · pays in 18d avg</span
+												>
+											</div>
+											<div class="tbl-row">
+												<b>Sunrise Mills · SO-0151</b>
+												<span
+													>₹47,500 · 200/200 ready · pays in 9d avg</span
+												>
+											</div>
+										</div>
+									</div>
+									<div class="cb u" v-if="chatAtLeast('bubble2')">
+										Create pick list for first order.
+									</div>
+									<div
+										class="cb a confirm-card"
+										v-if="chatStep === 'confirm' || chatStep === 'approve'"
+									>
+										<div class="confirm-t">
+											About to create a Pick List for SO-0142, Acme
+											Industries.
+										</div>
+										<div class="confirm-btns">
+											<span
+												class="confirm-btn confirm-btn--ok"
+												:class="{ pressed: chatStep === 'approve' }"
+												>Approve</span
+											>
+											<span class="confirm-btn">Cancel</span>
+										</div>
+									</div>
+									<div class="cb a cb-done" v-if="chatAtLeast('done')">
+										<svg
+											width="11"
+											height="11"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2.6"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M20 6 9 17l-5-5" />
+										</svg>
+										Pick List PICK-0091 created in draft mode.
+									</div>
+								</div>
+								<div class="composer">
+									<template v-if="chatStep === 'type1' || chatStep === 'type2'">
+										<span
+											class="type-line"
+											:class="chatStep === 'type1' ? 'type-q1' : 'type-q2'"
+											>{{ chatStep === "type1" ? chatQ1 : chatQ2 }}</span
+										><span class="type-caret" aria-hidden="true"></span>
+									</template>
+									<template v-else>Ask a follow-up…</template>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- slide 2 · welcome -->
+			<div v-else-if="cur === 1" class="slide">
 				<div class="slide-copy">
 					<span class="eyebrow">Welcome</span>
 					<h2>Harness AI agents inside your ERPNext.</h2>
@@ -174,38 +291,6 @@
 							<div class="composer">
 								Ask {{ agentName }}… @ to mention a user, / for a doctype or tool
 							</div>
-						</div>
-					</div>
-				</div>
-			</div>
-
-			<!-- slide 2 · chat -->
-			<div v-else-if="cur === 1" class="slide">
-				<div class="slide-copy">
-					<span class="eyebrow">Chat</span>
-					<h2>Ask anything about your business.</h2>
-					<p>
-						“Which sales orders are overdue?” “Draft a follow-up to this lead.”
-						{{ agentName }}
-						pulls the answer straight from ERPNext and shows its work.
-					</p>
-				</div>
-				<div class="mock">
-					<div class="mock-bar">
-						<i></i><i></i><i></i><span>Chat · Overdue orders</span>
-					</div>
-					<div class="mock-body">
-						<div class="m-side" v-html="sideHtml('Chat')"></div>
-						<div class="m-main">
-							<div class="cb u">Which sales orders are overdue this month?</div>
-							<div class="cb tool">
-								<span class="g"></span>run_report · Sales Order
-							</div>
-							<div class="cb a">
-								7 orders are overdue, totalling ₹4.2L. The largest is SO-0142
-								(Acme, ₹1.1L, 9 days late).
-							</div>
-							<div class="composer">Ask a follow-up…</div>
 						</div>
 					</div>
 				</div>
@@ -512,7 +597,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from "vue";
+import { ref, computed, watch, onUnmounted } from "vue";
 import { agentName } from "@/branding";
 import { PERMISSION_TOUR_COPY } from "@/onboarding/permissionCopy";
 
@@ -535,6 +620,104 @@ function step(d) {
 	}
 	go(cur.value + d);
 }
+
+// ---- chat slide (cur === 0): looping animated conversation ----
+// A tiny phase clock steps through the exchange; every visual (typing
+// reveal, caret blink, tool-dot pulse, bubble/card presence) is driven off
+// the current step name and rendered as CSS, so this is a state machine,
+// not a frame-by-frame animator. It only runs while the Chat slide is
+// mounted, and is skipped entirely under prefers-reduced-motion, which
+// instead shows the loop's settled last frame with no motion at all.
+const CHAT_SEQUENCE = [
+	"type1", // composer types the stock/dispatch question
+	"bubble1", // question becomes a user bubble
+	"tool", // brief tool-running chip
+	"reply1", // assistant's ranked customer table
+	"type2", // composer types the pick-list follow-up
+	"bubble2", // follow-up becomes a user bubble
+	"confirm", // confirm card offered
+	"approve", // Approve shows a pressed state
+	"done", // confirmation line
+	"hold", // pause before the loop fades and restarts
+];
+const CHAT_DURATION_MS = {
+	type1: 3200,
+	bubble1: 450,
+	tool: 900,
+	reply1: 2600,
+	type2: 1200,
+	bubble2: 450,
+	confirm: 1100,
+	approve: 450,
+	done: 2600,
+	hold: 2400,
+};
+const CHAT_INDEX = Object.fromEntries(CHAT_SEQUENCE.map((s, i) => [s, i]));
+const chatQ1 =
+	"For the available stock, which customer orders can I dispatch now, who pays me on time, to keep up my cashflow in a good state? Analyse and list.";
+const chatQ2 = "Create pick list for first order.";
+const chatStep = ref(CHAT_SEQUENCE[CHAT_SEQUENCE.length - 1]);
+const chatFading = ref(false);
+function chatAtLeast(step) {
+	return CHAT_INDEX[chatStep.value] >= CHAT_INDEX[step];
+}
+
+let chatTimer = null;
+let chatIdx = 0;
+function clearChatTimer() {
+	if (chatTimer) {
+		clearTimeout(chatTimer);
+		chatTimer = null;
+	}
+}
+function runChatStep() {
+	const stepName = CHAT_SEQUENCE[chatIdx];
+	chatStep.value = stepName;
+	chatTimer = setTimeout(() => {
+		chatIdx += 1;
+		if (chatIdx >= CHAT_SEQUENCE.length) {
+			// loop boundary: fade the whole exchange out, then reset to blank
+			chatFading.value = true;
+			chatTimer = setTimeout(() => {
+				chatIdx = 0;
+				chatFading.value = false;
+				runChatStep();
+			}, 500);
+			return;
+		}
+		runChatStep();
+	}, CHAT_DURATION_MS[stepName]);
+}
+function startChatAnim() {
+	clearChatTimer();
+	chatIdx = 0;
+	chatFading.value = false;
+	runChatStep();
+}
+function prefersReducedMotion() {
+	return (
+		typeof window !== "undefined" &&
+		typeof window.matchMedia === "function" &&
+		window.matchMedia("(prefers-reduced-motion: reduce)").matches
+	);
+}
+// Slides use v-if, so leaving the Chat slide destroys its DOM - but the
+// timer above is JS state on this component, not the DOM, so it needs its
+// own stop here too, on every slide change and again on unmount.
+watch(
+	cur,
+	(slide) => {
+		if (slide === 0 && !prefersReducedMotion()) {
+			startChatAnim();
+		} else {
+			clearChatTimer();
+			chatStep.value = CHAT_SEQUENCE[CHAT_SEQUENCE.length - 1];
+			chatFading.value = false;
+		}
+	},
+	{ immediate: true }
+);
+onUnmounted(clearChatTimer);
 
 // ---- mock sidebar: mirrors the REAL app sidebar (brand + user, New Chat,
 // Search Chat, feather-icon nav, Recent chats), rendered from data exactly
@@ -611,6 +794,22 @@ function sideHtml(active) {
 		transition: none;
 	}
 	.btn {
+		transition: none;
+	}
+	/* belt-and-braces: the chatStep clock in <script setup> already never
+	   starts under this preference, so these never actually mount, but they
+	   stay off here too in case that ever changes. */
+	.chat-anim {
+		transition: none;
+	}
+	.type-caret {
+		animation: none;
+		opacity: 1;
+	}
+	.cb.tool .g {
+		animation: none;
+	}
+	.confirm-btn--ok {
 		transition: none;
 	}
 }
@@ -992,6 +1191,16 @@ button:focus-visible {
 	height: 6px;
 	border-radius: 50%;
 	background: var(--green);
+	animation: jvDotPulse 1.1s ease-in-out infinite;
+}
+@keyframes jvDotPulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
 }
 .composer {
 	position: absolute;
@@ -1009,6 +1218,133 @@ button:focus-visible {
 	color: var(--text-3);
 	white-space: nowrap;
 	overflow: hidden;
+}
+
+/* ---- chat mock: looping animated conversation ----
+   .chat-anim fades the whole exchange out at the loop boundary (script
+   toggles chatFading). .chat-flow is pinned to the mock's fixed content
+   box (top 0, bottom above the composer) and bottom-aligned, so as bubbles
+   accumulate the oldest ones get pushed past the top edge, where
+   overflow: hidden clips them - the same way a real scrolled-to-bottom chat
+   behaves. Nothing here changes the mock's total height. */
+.chat-anim {
+	height: 100%;
+	transition: opacity 0.45s ease;
+	opacity: 1;
+}
+.chat-anim.fading {
+	opacity: 0;
+}
+.chat-flow {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 50px;
+	display: flex;
+	flex-direction: column;
+	justify-content: flex-end;
+	overflow: hidden;
+}
+.cb-reply .tbl-lead {
+	margin: 0 0 7px;
+	font-weight: 600;
+	color: var(--text);
+}
+.tbl {
+	display: grid;
+	gap: 6px;
+}
+.tbl-row b {
+	display: block;
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--text);
+}
+.tbl-row span {
+	display: block;
+	font-size: 9px;
+	color: var(--text-3);
+	margin-top: 1px;
+}
+.confirm-t {
+	margin-bottom: 8px;
+}
+.confirm-btns {
+	display: flex;
+	gap: 8px;
+}
+.confirm-btn {
+	display: inline-flex;
+	align-items: center;
+	padding: 4px 10px;
+	border-radius: 6px;
+	font-size: 9.5px;
+	font-weight: 600;
+	border: 1px solid var(--border-2);
+	color: var(--text-2);
+	background: var(--surface);
+}
+.confirm-btn--ok {
+	border-color: var(--cta);
+	background: var(--cta);
+	color: var(--cta-fg);
+	transition: transform 0.15s ease, filter 0.15s ease;
+}
+.confirm-btn--ok.pressed {
+	transform: scale(0.93);
+	filter: brightness(0.88);
+}
+.cb-done {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.cb-done svg {
+	color: var(--green);
+	flex: none;
+}
+
+/* typing composer: a clip-path reveal reads as characters appearing
+   without depending on font metrics (a ch-width reveal would, since ch is
+   only exact for monospace); the caret just blinks alongside it rather
+   than tracking the reveal edge pixel-for-pixel. */
+.type-line {
+	display: inline-block;
+	max-width: 100%;
+	overflow: hidden;
+	white-space: nowrap;
+	vertical-align: bottom;
+	clip-path: inset(0 100% 0 0);
+	animation-name: jvTypeReveal;
+	animation-fill-mode: forwards;
+}
+.type-q1 {
+	animation-duration: 3.2s;
+	animation-timing-function: steps(46, end);
+}
+.type-q2 {
+	animation-duration: 1.1s;
+	animation-timing-function: steps(20, end);
+}
+@keyframes jvTypeReveal {
+	to {
+		clip-path: inset(0 0 0 0);
+	}
+}
+.type-caret {
+	display: inline-block;
+	width: 1.5px;
+	height: 10px;
+	margin-left: 2px;
+	background: var(--text-2);
+	vertical-align: -1px;
+	animation: jvCaretBlink 0.9s steps(1, end) infinite;
+}
+@keyframes jvCaretBlink {
+	50% {
+		opacity: 0;
+	}
 }
 
 /* ---- rows mock (skills / macros / file box) ---- */

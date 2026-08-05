@@ -482,3 +482,51 @@ class TestFacadeErrorObjects(_ContractCase):
 		self.assertEqual(error["code"], onboarding_contract.BENCH_ADMIN_REJECTED)
 		self.assertEqual(error["exc_type"], "DuplicateEntryError")
 		self.assertEqual(status, 409)
+
+
+class TestDetailsRejectionIsNotAPaymentFailure(_ContractCase):
+	"""Admin refusing what the CUSTOMER typed is a different failure from admin
+	refusing the request, and it used to be answered as the latter.
+
+	`BillingMetadataRejected` is a ValidationError SUBCLASS, and admin_client
+	matches exc_type by exact string, so it fell through the allowlist into the
+	unknown branch and came out as BENCH_ADMIN_REJECTED. That code renders as "the
+	payment service refused this request" over "Check the status, or start a new
+	payment" - and no payment service had been contacted, nothing existed to
+	check, and retrying identical data failed identically forever. The customer
+	dead-ended three screens past the field that caused it."""
+
+	def test_billing_metadata_rejection_gets_its_own_code(self):
+		err = AdminValidationError("billing.gstin is not a valid GSTIN")
+		err.exc_type = "BillingMetadataRejected"
+		error, status = onboarding_contract.error_object(err)
+		self.assertEqual(error["code"], onboarding_contract.BENCH_SIGNUP_DETAILS_REJECTED)
+		self.assertEqual(status, 409)
+		# The precise server sentence is what makes this actionable; it must survive.
+		self.assertEqual(error["message"], "billing.gstin is not a valid GSTIN")
+
+	def test_an_unknown_exc_type_still_routes_on_the_field_prefix(self):
+		"""An admin build whose exception class this bench has never heard of still
+		names the field by admin's own convention, so the customer is not punished
+		for a version skew."""
+		err = AdminValidationError("billing.contact_number is not a valid phone number")
+		err.exc_type = "SomeFutureRejection"
+		error, _status = onboarding_contract.error_object(err)
+		self.assertEqual(error["code"], onboarding_contract.BENCH_SIGNUP_DETAILS_REJECTED)
+
+	def test_an_ordinary_rejection_is_untouched(self):
+		"""The generic path must NOT be widened: a refusal that is not about a field
+		the customer typed still answers BENCH_ADMIN_REJECTED."""
+		err = AdminValidationError("Unsupported payment provider.")
+		err.exc_type = "ValidationError"
+		error, _status = onboarding_contract.error_object(err)
+		self.assertEqual(error["code"], onboarding_contract.BENCH_ADMIN_REJECTED)
+
+	def test_the_predicate_is_not_prose_matching(self):
+		"""It keys on the exception class and on a NAMESPACED field prefix, never on
+		a sentence. A reworded message that still names its field keeps working; a
+		message that merely mentions billing does not qualify."""
+		self.assertTrue(onboarding_contract.is_details_rejection("", "BillingMetadataRejected"))
+		self.assertTrue(onboarding_contract.is_details_rejection("billing.city is too long"))
+		self.assertFalse(onboarding_contract.is_details_rejection("your billing could not be processed"))
+		self.assertFalse(onboarding_contract.is_details_rejection(""))
