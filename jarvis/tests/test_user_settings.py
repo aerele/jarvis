@@ -875,3 +875,99 @@ class TestPersonaPreference(_UsageTestBase):
 		frappe.get_single("Jarvis Settings").save(ignore_permissions=True)
 		self.assertTrue(persona_feature_enabled())
 		frappe.db.set_single_value("Jarvis Settings", "persona_enabled", 1)
+
+
+# --------------------------------------------------------------------------- #
+# 9. set_sidebar_order — per-user nav order (UI state, permlevel 0). It takes a
+#    JSON *string* from the client and must bound/clean it before it is stored,
+#    since it is written straight to the owner's own row.
+# --------------------------------------------------------------------------- #
+class TestSidebarOrder(_UsageTestBase):
+	def _stored(self, user: str) -> str:
+		return frappe.db.get_value(USETT, {"user": user}, "sidebar_order") or ""
+
+	def test_valid_order_persists_and_round_trips(self):
+		import json
+
+		frappe.set_user(USER_A)
+		out = user_settings_api.set_sidebar_order(
+			json.dumps({"top": ["Chat", "Dashboards"], "more": ["Skills"]})
+		)
+		self.assertTrue(out["ok"])
+		self.assertEqual(out["data"]["sidebar_order"], {"top": ["Chat", "Dashboards"], "more": ["Skills"]})
+		# get_my_settings hands the SPA the raw stored JSON string to reconcile.
+		got = user_settings_api.get_my_settings()
+		self.assertEqual(
+			json.loads(got["data"]["sidebar_order"]), {"top": ["Chat", "Dashboards"], "more": ["Skills"]}
+		)
+		frappe.set_user("Administrator")
+
+	def test_malformed_json_rejected_and_nothing_written(self):
+		frappe.set_user(USER_A)
+		out = user_settings_api.set_sidebar_order("{not json")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["reason"], "invalid_order")
+		frappe.set_user("Administrator")
+		# The early return must not have created a row carrying a bad value.
+		self.assertEqual(self._stored(USER_A), "")
+
+	def test_non_dict_json_rejected(self):
+		import json
+
+		frappe.set_user(USER_A)
+		# Valid JSON but not an object (a bare list) is refused, not coerced.
+		out = user_settings_api.set_sidebar_order(json.dumps(["Chat", "Dashboards"]))
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["reason"], "invalid_order")
+		frappe.set_user("Administrator")
+
+	def test_non_string_arg_does_not_500(self):
+		# A hostile non-string (a dict) reaches the handler raw (annotations are not
+		# runtime-enforced here). json.loads on it raises, which the try/except must
+		# turn into a clean invalid_order, never a 500.
+		frappe.set_user(USER_A)
+		out = user_settings_api.set_sidebar_order({"top": ["Chat"]})
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["reason"], "invalid_order")
+		frappe.set_user("Administrator")
+
+	def test_labels_are_bounded_and_typed(self):
+		import json
+
+		frappe.set_user(USER_A)
+		out = user_settings_api.set_sidebar_order(
+			json.dumps(
+				{
+					"top": ["x" * 200] + [f"L{i}" for i in range(40)],  # long label + over the 20 cap
+					"more": ["ok", 123, None, {"a": 1}, "also-ok"],  # non-strings dropped
+				}
+			)
+		)
+		self.assertTrue(out["ok"])
+		top = out["data"]["sidebar_order"]["top"]
+		more = out["data"]["sidebar_order"]["more"]
+		self.assertEqual(len(top), 20)  # capped at 20 entries
+		self.assertEqual(len(top[0]), 60)  # each label clipped to 60 chars
+		self.assertEqual(more, ["ok", "also-ok"])  # only the strings survive
+		frappe.set_user("Administrator")
+
+	def test_missing_keys_default_to_empty_lists(self):
+		import json
+
+		frappe.set_user(USER_A)
+		out = user_settings_api.set_sidebar_order(json.dumps({"top": ["Chat"]}))
+		self.assertTrue(out["ok"])
+		self.assertEqual(out["data"]["sidebar_order"], {"top": ["Chat"], "more": []})
+		frappe.set_user("Administrator")
+
+	def test_writes_only_own_row(self):
+		import json
+
+		usage.get_or_create_user_settings(USER_B)
+		frappe.db.commit()
+		frappe.set_user(USER_A)
+		user_settings_api.set_sidebar_order(json.dumps({"top": ["Chat"], "more": []}))
+		frappe.set_user("Administrator")
+		# B's row must be untouched by A's write.
+		self.assertEqual(self._stored(USER_B), "")
+		self.assertEqual(json.loads(self._stored(USER_A))["top"], ["Chat"])
