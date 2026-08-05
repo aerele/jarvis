@@ -23,8 +23,14 @@ class TestNormalizePayOrigin(FrappeTestCase):
 	def test_host_is_lowercased_and_a_trailing_slash_is_dropped(self):
 		self.assertEqual(oc._normalize_pay_origin("https://Fleet.Klerk.IN/"), "https://fleet.klerk.in")
 
-	def test_non_https_is_rejected(self):
-		self.assertEqual(oc._normalize_pay_origin("http://fleet.klerk.in"), "")
+	def test_http_and_port_are_preserved(self):
+		# The bench preserves scheme + port (its test-mode form); the admin enforces
+		# https/allowlist in live mode. Byte-identical to admin origin._preserve_origin.
+		self.assertEqual(oc._normalize_pay_origin("http://fleet.klerk.in"), "http://fleet.klerk.in")
+		self.assertEqual(
+			oc._normalize_pay_origin("http://jarvis_admin_v2.local:8002"),
+			"http://jarvis_admin_v2.local:8002",
+		)
 
 	def test_a_path_query_or_fragment_is_rejected(self):
 		self.assertEqual(oc._normalize_pay_origin("https://fleet.klerk.in/jarvis-checkout"), "")
@@ -48,6 +54,7 @@ class TestAugmentPayPage(FrappeTestCase):
 
 	def tearDown(self):
 		frappe.conf.pop("jarvis_pay_origin", None)
+		frappe.conf.pop("jarvis_admin_url", None)
 
 	def test_no_token_answer_is_returned_untouched(self):
 		data = {"code": "PAYMENT_CONFIRMATION_PENDING", "amount_inr": 1500}
@@ -68,11 +75,18 @@ class TestAugmentPayPage(FrappeTestCase):
 		self.assertEqual(out["pay_origin"], self.ORIGIN)
 		self.assertFalse(out["pay_origin_attested"])
 
-	def test_token_with_NO_configured_origin_fails_closed(self):
+	def test_token_with_NO_explicit_config_falls_back_to_the_admin_url(self):
+		# New contract (2026-08-05): with nothing in site_config OR the Settings field,
+		# the origin follows the bench's admin URL instead of failing closed - checkout is
+		# hosted on the control plane. Here the admin URL IS self.ORIGIN and admin minted a
+		# token for it, so it attests. (site_config still overrides; a mismatched admin URL
+		# would not attest.)
 		frappe.conf.pop("jarvis_pay_origin", None)
-		out = oc.augment_pay_page({"pay_page_token": "tok", "pay_origin_digest": self.digest})
-		self.assertEqual(out["pay_origin"], "")
-		self.assertFalse(out["pay_origin_attested"])
+		frappe.conf["jarvis_admin_url"] = self.ORIGIN
+		with patch("frappe.db.get_single_value", return_value=""):
+			out = oc.augment_pay_page({"pay_page_token": "tok", "pay_origin_digest": self.digest})
+		self.assertEqual(out["pay_origin"], self.ORIGIN)
+		self.assertTrue(out["pay_origin_attested"])
 
 	def test_token_with_no_admin_digest_cannot_be_attested(self):
 		frappe.conf["jarvis_pay_origin"] = self.ORIGIN
@@ -91,6 +105,39 @@ class TestAugmentPayPage(FrappeTestCase):
 		env = oc.success({"pay_page_token": "tok", "pay_origin_digest": self.digest, "api_secret": "s"})
 		self.assertNotIn("api_secret", env["data"])
 		self.assertTrue(env["data"]["pay_origin_attested"])
+
+
+class TestResolvedPayOrigin(FrappeTestCase):
+	"""_resolved_pay_origin precedence: site_config -> Jarvis Settings field -> admin URL."""
+
+	def tearDown(self):
+		frappe.conf.pop("jarvis_pay_origin", None)
+		frappe.conf.pop("jarvis_admin_url", None)
+
+	def test_site_config_wins_over_settings_field(self):
+		frappe.conf["jarvis_pay_origin"] = "https://vignesh-staging.klerk.in"
+		with patch("frappe.db.get_single_value", return_value="https://other.example.com"):
+			self.assertEqual(oc._resolved_pay_origin(), "https://vignesh-staging.klerk.in")
+
+	def test_settings_field_used_when_site_config_empty(self):
+		frappe.conf.pop("jarvis_pay_origin", None)
+		with patch("frappe.db.get_single_value", return_value="https://vignesh-staging.klerk.in"):
+			self.assertEqual(oc._resolved_pay_origin(), "https://vignesh-staging.klerk.in")
+
+	def test_admin_url_used_when_both_empty(self):
+		frappe.conf.pop("jarvis_pay_origin", None)
+		frappe.conf["jarvis_admin_url"] = "https://fleet.klerk.in"
+		with patch("frappe.db.get_single_value", return_value=""):
+			self.assertEqual(oc._resolved_pay_origin(), "https://fleet.klerk.in")
+
+	def test_follows_a_local_http_admin_url_with_no_explicit_pay_origin(self):
+		# The point of the fallback: a bench whose admin URL is a local/staging http host
+		# gets that as its checkout origin with no separate pay-origin config - scheme and
+		# port preserved (test-mode form).
+		frappe.conf.pop("jarvis_pay_origin", None)
+		frappe.conf["jarvis_admin_url"] = "http://jarvis_admin_v2.local:8002"
+		with patch("frappe.db.get_single_value", return_value=""):
+			self.assertEqual(oc._resolved_pay_origin(), "http://jarvis_admin_v2.local:8002")
 
 
 class TestPaymentUiV2Flag(FrappeTestCase):

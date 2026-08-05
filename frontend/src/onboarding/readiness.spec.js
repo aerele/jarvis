@@ -9,9 +9,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const isReadyForChat = vi.fn();
 vi.mock("@/api.js", () => ({ isReadyForChat: (...a) => isReadyForChat(...a) }));
 
-const { readinessDetailOf, needsLlmConnection, forgetReady, replacedBanner } = await import(
-	"./readiness.js"
-);
+const {
+	readinessDetailOf,
+	needsLlmConnection,
+	forgetReady,
+	replacedBanner,
+	hasReconnectIntent,
+	landingStep,
+	RECONNECT_INTENT_URL,
+} = await import("./readiness.js");
 
 // The verdict is memoized for the page load, so every case has to start clean.
 beforeEach(() => {
@@ -151,5 +157,42 @@ describe("replaced-site banner", () => {
 		expect(replacedBanner({})).toBeNull();
 		expect(replacedBanner(null)).toBeNull();
 		expect(replacedBanner({ replaced: false })).toBeNull();
+	});
+});
+
+describe("reconnect intent", () => {
+	it("recognises only the flag the banner actually sends", () => {
+		expect(hasReconnectIntent(new URL(RECONNECT_INTENT_URL, "http://x").search)).toBe(true);
+		expect(hasReconnectIntent("?reconnect=1&foo=bar")).toBe(true);
+		expect(hasReconnectIntent("?reconnect=0")).toBe(false);
+		expect(hasReconnectIntent("?other=1")).toBe(false);
+	});
+
+	it("treats missing or unparseable input as no intent", () => {
+		expect(hasReconnectIntent("")).toBe(false);
+		expect(hasReconnectIntent(null)).toBe(false);
+		expect(hasReconnectIntent(undefined)).toBe(false);
+	});
+});
+
+describe("landing step", () => {
+	it("sends a reconnect intent to the step that carries the offer", () => {
+		expect(landingStep({ intent: true, resumedStep: "pay", terminal: false })).toBe("details");
+		expect(landingStep({ intent: true, resumedStep: "intro", terminal: false })).toBe(
+			"details"
+		);
+	});
+
+	it("leaves the resumed step alone without the intent", () => {
+		expect(landingStep({ intent: false, resumedStep: "pay", terminal: false })).toBe("pay");
+		expect(landingStep({ intent: false, resumedStep: "intro", terminal: false })).toBe(
+			"intro"
+		);
+	});
+
+	it("never drags a paid or provisioning signup into reconnect", () => {
+		expect(landingStep({ intent: true, resumedStep: "connect", terminal: true })).toBe(
+			"connect"
+		);
 	});
 });

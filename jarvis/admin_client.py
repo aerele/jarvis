@@ -1923,7 +1923,19 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	# by exc_type allowlist; default to AdminUnreachableError when the
 	# class isn't recognised.
 	if exc_type:
-		if exc_type in ("ValidationError", "DuplicateEntryError", "DoesNotExistError"):
+		if exc_type in (
+			"ValidationError",
+			"DuplicateEntryError",
+			"DoesNotExistError",
+			# A ValidationError SUBCLASS admin raises when the customer's own billing
+			# metadata is unusable. This list matches the exc_type STRING, not the
+			# class hierarchy, so a subclass is invisible here unless it is named:
+			# BillingMetadataRejected was therefore falling through to the unknown-
+			# exc_type branch below and being logged as a surprise on every bad
+			# GSTIN. It is a plain rejection with a precise, customer-safe message,
+			# which is exactly what this allowlist is for.
+			"BillingMetadataRejected",
+		):
 			# The THROWN wire shape: admin's contract ``error`` object rides at
 			# the top level next to exc_type. Both survive here - the code for a
 			# reader that has one, exc_type for the pre-contract admin that

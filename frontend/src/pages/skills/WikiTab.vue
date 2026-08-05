@@ -699,9 +699,15 @@ async function changeLanguage(v) {
 function confirmSync() {
 	confirmDialog({
 		title: "Sync wiki to agent now?",
+		// #621: this used to promise "the daily sync". There is no daily sync: wiki_mirror
+		// is wired only as doc events, with no scheduler entry at all. Promising a
+		// fallback that does not exist is worse than promising nothing, because a user
+		// who reads it reasonably decides NOT to press the button, believing the mirror
+		// catches up within a day. It never does.
 		message:
-			"Pushes every active org-scope page into the agent's workspace mirror now, " +
-			"instead of waiting for the next change or the daily sync.",
+			"Pushes every active org-scope page into the agent's workspace mirror now. " +
+			"The mirror is otherwise updated only when a page changes, so use this if it " +
+			"looks out of date.",
 		onConfirm: async ({ hideDialog }) => {
 			syncing.value = true;
 			try {

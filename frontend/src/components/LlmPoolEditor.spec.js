@@ -346,6 +346,39 @@ describe("removing the last model disconnects the workspace", () => {
 		expect(w.vm.applyResult.text).toMatch(/^Disconnected/);
 	});
 
+	it("clears the list instead of leaving the deleted model on screen", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor();
+
+		await w.vm.remove(0);
+		await idle();
+
+		// The whole point of Disconnect: the model is gone, so the list is empty and
+		// the template's "No models yet. Add one below." empty state takes over. A
+		// blank placeholder row here would render as a row numbered "1" carrying no
+		// provider and no model, which reads as though something were still connected.
+		expect(w.vm.rows).toHaveLength(0);
+		// An empty pool is the SAVED state, not unsaved work. While it read as dirty,
+		// accountHealth flipped every pill to "Pending re-check" on an empty pool.
+		expect(w.vm.dirty).toBe(false);
+	});
+
+	it("still clears the list when the reload after the disconnect fails", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor();
+		// The disconnect itself succeeds; only the refetch that follows it falls over.
+		// This is the exact shape of the original defect: load() aborts inside its
+		// catch before reassigning rows, so the just-deleted model survived on screen
+		// underneath the "Disconnected" banner, pill reading "Pending re-check".
+		api.getLlmConfig.mockRejectedValueOnce(new Error("network"));
+
+		await w.vm.remove(0);
+		await idle();
+
+		expect(api.disconnectLlm).toHaveBeenCalledTimes(1);
+		expect(w.vm.rows).toHaveLength(0);
+	});
+
 	it("keeps Remove as an ordinary edit while another model is left", async () => {
 		setPool([keyModel("openai", "gpt-4o", 0), keyModel("anthropic", "claude-sonnet-4", 1)]);
 		const w = await mountEditor();

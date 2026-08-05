@@ -1246,3 +1246,346 @@ class TestSetListingStatusMarksCatalogDirty(FrappeTestCase):
 		frappe.db.commit()
 		agents_api.set_listing_status(self.SLUG, "Published")
 		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+
+
+# --------------------------------------------------------------------------- #
+# #648 — schedule_time is validated on every surface, and one bad installation
+# cannot abort the whole hourly agent sweep (the agent twin of #472)
+# --------------------------------------------------------------------------- #
+class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
+	"""``schedule_time`` was litigated only by ``agents_api.set_schedule``, so a Desk
+	edit, a data import or a direct ``doc.save()`` could persist a value the sweep
+	could not honour. Separately, ``run_due_agent_audits`` guarded only the DISPATCH,
+	so anything the dedupe, the arithmetic or the bookkeeping raised took down every
+	installation behind it, permanently, since the next tick died on the same row.
+
+	Two agent slugs, not two installs of one agent: #460 added a unique index on
+	(owner, agent), so a second install of the same agent for the same owner is a
+	duplicate-key error rather than a second due row."""
+
+	SLUG = PREFIX + "schedtime"
+	SLUG2 = PREFIX + "schedtime2"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-schedtime-owner@example.com")
+		for slug in (cls.SLUG, cls.SLUG2):
+			_mk_listing(slug)
+			frappe.db.set_value(
+				LISTING, slug, {"status": "Published", "nature": "Auditor"}, update_modified=False
+			)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG, self.SLUG2])
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG, self.SLUG2])
+		frappe.db.commit()
+
+	def _install(self, slug: str | None = None, **overrides) -> str:
+		from frappe.utils import add_days, now_datetime
+
+		name = _mk_gate_install(self.owner, slug or self.SLUG, self.owner)
+		values = {
+			"schedule_enabled": 1,
+			"schedule_frequency": "daily",
+			"next_run_at": add_days(now_datetime(), -1),
+		}
+		values.update(overrides)
+		frappe.db.set_value(INSTALLATION, name, values, update_modified=False)
+		frappe.db.commit()
+		return name
+
+	def _run_cron(self, launch_side_effect=None):
+		"""Run the hourly cron with only OUR installs due (shared dev site), launch stubbed."""
+		from frappe.utils import add_days, now_datetime
+
+		now = now_datetime()
+		parked = {
+			r.name: r.next_run_at
+			for r in frappe.get_all(
+				INSTALLATION,
+				filters={
+					"enabled": 1,
+					"schedule_enabled": 1,
+					"next_run_at": ["<=", now],
+					"agent": ["not in", [self.SLUG, self.SLUG2]],
+				},
+				fields=["name", "next_run_at"],
+				ignore_permissions=True,
+			)
+		}
+		for n in parked:
+			frappe.db.set_value(INSTALLATION, n, "next_run_at", add_days(now, 2), update_modified=False)
+		frappe.db.commit()
+		calls = []
+
+		def _default(inst, **kw):
+			calls.append(inst.name)
+
+		try:
+			with patch.object(agent_scheduler, "_launch_audit", side_effect=launch_side_effect or _default):
+				agent_scheduler.run_due_agent_audits()
+		finally:
+			for n, ts in parked.items():
+				frappe.db.set_value(INSTALLATION, n, "next_run_at", ts, update_modified=False)
+			frappe.db.commit()
+		return calls
+
+	# ---- controller validation (gap 1) ---------------------------------------- #
+
+	def test_out_of_range_schedule_time_is_refused_on_every_write_surface(self):
+		"""``frappe.ValidationError`` is what the SPA renders as a field error. Before
+		this the value persisted silently and the scheduler quietly used 09:00."""
+		for bad in ("99:00:00", "-01:00:00", "24:00:00", "12:99:00", "not-a-time", "1:2:3:4"):
+			with self.subTest(bad=bad):
+				doc = frappe.get_doc(
+					{
+						"doctype": INSTALLATION,
+						"agent": self.SLUG,
+						"run_as_user": self.owner,
+						"reviewer": self.owner,
+						"enabled": 1,
+						"schedule_enabled": 1,
+						"schedule_frequency": "daily",
+						"schedule_time": bad,
+					}
+				)
+				doc.flags.ignore_permissions = True
+				with self.assertRaises(frappe.ValidationError):
+					doc.insert(ignore_permissions=True)
+
+	def test_a_bad_time_is_refused_even_with_the_schedule_off(self):
+		"""The latent limb: with ``schedule_enabled=0`` nothing consumed the value, so
+		the garbage persisted and armed the sweep for whenever the schedule was flipped
+		on. MariaDB TIME accepts up to 838:59:59, so storage was never the guard."""
+		doc = frappe.get_doc(
+			{
+				"doctype": INSTALLATION,
+				"agent": self.SLUG,
+				"run_as_user": self.owner,
+				"reviewer": self.owner,
+				"enabled": 1,
+				"schedule_enabled": 0,
+				"schedule_time": "99:00:00",
+			}
+		)
+		doc.flags.ignore_permissions = True
+		with self.assertRaises(frappe.ValidationError):
+			doc.insert(ignore_permissions=True)
+
+	def test_valid_schedule_times_are_accepted(self):
+		# Compared as SECONDS, not as strings: MariaDB hands a TIME column back as a
+		# datetime.timedelta, and str(timedelta(0)) is '0:00:00', not '00:00:00'. The
+		# stored value is right either way, so a string compare would only be asserting
+		# timedelta's formatting.
+		from jarvis.chat.macro_scheduler import parse_schedule_seconds
+
+		for good, secs in (("00:00:00", 0), ("09:30:00", 34200), ("23:59:59", 86399)):
+			with self.subTest(good=good):
+				_wipe([self.SLUG, self.SLUG2])
+				name = self._install(schedule_time=good)
+				stored = frappe.db.get_value(INSTALLATION, name, "schedule_time")
+				self.assertEqual(parse_schedule_seconds(stored), secs)
+
+	def test_a_row_holding_a_legacy_bad_time_cannot_be_saved_by_the_DB_either(self):
+		"""Review asked whether validating on EVERY save strands a row that already
+		holds a bad value, since ``set_enabled`` / ``set_config`` go through
+		``doc.save()``. It cannot, and this pins why, so nobody adds a
+		``has_value_changed`` branch for a state that cannot exist.
+
+		The only values the check rejects that MariaDB will still STORE are
+		``>= 24:00:00``. A TIME column hands those back as a ``timedelta`` carrying a
+		days component, Frappe writes that back as ``"4 days, 3:00:00"``, and MariaDB
+		refuses it with error 1292 before any controller runs. So such a row is
+		un-saveable regardless of this validation."""
+		from jarvis.chat.macro_scheduler import parse_schedule_seconds
+
+		name = self._install()
+		frappe.db.sql(
+			"UPDATE `tabJarvis Agent Installation` SET schedule_time='99:00:00' WHERE name=%(n)s",
+			{"n": name},
+		)
+		frappe.db.commit()
+
+		# Read it back: the value is a timedelta with days, not a time of day.
+		stored = frappe.db.get_value(INSTALLATION, name, "schedule_time")
+		self.assertIsNone(parse_schedule_seconds(stored), "99:00:00 must not read back as a time of day")
+		self.assertIn("day", str(stored), "MariaDB returns an out-of-range TIME as a timedelta")
+
+	def test_writing_a_bad_time_onto_an_existing_row_is_refused(self):
+		"""An existing, healthy row must not be able to take a bad value either: the
+		check runs on every save, not only on insert."""
+		name = self._install(schedule_time="09:00:00")
+		doc = frappe.get_doc(INSTALLATION, name)
+		doc.schedule_time = "99:00:00"
+		doc.flags.ignore_permissions = True
+		with self.assertRaises(frappe.ValidationError):
+			doc.save(ignore_permissions=True)
+
+	# ---- sweep fault isolation (gap 2) ---------------------------------------- #
+
+	def test_one_exploding_installation_does_not_abort_the_sweep(self):
+		"""The structural guarantee, independent of ``schedule_time``: whatever a single
+		row raises, every row behind it still gets its slot. ``_record_failed``,
+		``_notify_owner``, a deleted run-as user and a failing ``_launch_audit`` whose own
+		handler then raises are all live ways one row can throw."""
+		from frappe.utils import add_days, now_datetime
+
+		boom = self._install(self.SLUG)
+		good = self._install(self.SLUG2)
+		# Force the exploding row to the FRONT: get_all has no explicit order_by here, so
+		# pin it by making it the older next_run_at, which is the natural due ordering.
+		frappe.db.set_value(
+			INSTALLATION, boom, "next_run_at", add_days(now_datetime(), -3), update_modified=False
+		)
+		frappe.db.commit()
+
+		seen = []
+
+		def _explode(inst, **kw):
+			seen.append(inst.name)
+			if inst.name == boom:
+				raise RuntimeError("poisoned installation")
+
+		self._run_cron(launch_side_effect=_explode)
+
+		self.assertIn(good, seen, "one exploding installation aborted the sweep for every other row")
+
+	def test_a_bad_persisted_time_does_not_abort_the_sweep(self):
+		"""Recreate a row saved BEFORE the controller check existed by writing past it,
+		then confirm the sweep still reaches the healthy installation behind it."""
+		from frappe.utils import add_days, now_datetime
+
+		bad = self._install(self.SLUG)
+		good = self._install(self.SLUG2)
+		frappe.db.sql(
+			"UPDATE `tabJarvis Agent Installation` SET schedule_time='99:00:00', "
+			"next_run_at=%(t)s WHERE name=%(n)s",
+			{"t": add_days(now_datetime(), -3), "n": bad},
+		)
+		frappe.db.commit()
+
+		dispatched = self._run_cron()
+
+		self.assertIn(good, dispatched, "a bad persisted time aborted the sweep for every other row")
+
+
+# --------------------------------------------------------------------------- #
+# #615 - promote/demote must not re-home a foreign owner's finding
+# --------------------------------------------------------------------------- #
+class TestRehomeMembershipScope(FrappeTestCase):
+	"""``_rehome_installation_outputs`` built its membership set from ``run``,
+	``first_seen_run`` AND ``last_seen_run``. That third pointer is the only one the
+	engine re-points, and the recurrence bump that re-points it matches on
+	``(owner, agent, fingerprint)``, so under PP-4 shadow re-homing it can attach
+	another owner's finding to one of our runs. Promoting or demoting then rewrote
+	that foreign row's visibility ``owner``.
+
+	Same unsafe signal #455/#612 removed from the uninstall cascade, different
+	consequence: the cascade DELETED such a row, this path makes a foreign customer's
+	finding appear under the wrong owner."""
+
+	SLUG = PREFIX + "rehome"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner_a = _mk_user("h-rehome-a@example.com")
+		cls.owner_b = _mk_user("h-rehome-b@example.com")
+		cls.reviewer = _mk_user("h-rehome-rev@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		# Two installations of the SAME agent sharing one reviewer, so PP-4 re-homing
+		# has already put both owners' findings under that reviewer.
+		self.inst_a = _mk_install(self.owner_a, self.SLUG, self.reviewer)
+		self.inst_b = _mk_install(self.owner_b, self.SLUG, self.reviewer)
+		self.run_a = _mk_run(self.inst_a.name, self.SLUG, self.reviewer)
+		self.run_b = _mk_run(self.inst_b.name, self.SLUG, self.reviewer)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+
+	def test_a_foreign_finding_bumped_onto_our_run_is_not_rehomed(self):
+		"""THE regression. B's finding was CREATED by B's installation (run +
+		first_seen_run both point at B's run) but a recurrence bump re-pointed its
+		last_seen_run onto A's run. Re-homing A must leave its owner alone."""
+		foreign = _mk_finding(
+			self.reviewer,
+			self.SLUG,
+			run=self.run_b,
+			first_seen_run=self.run_b,
+			last_seen_run=self.run_a,  # the bump, the only pointer the engine moves
+		).name
+		frappe.db.commit()
+
+		agents_api._rehome_installation_outputs(self.inst_a, self.owner_a)
+
+		self.assertEqual(
+			frappe.db.get_value(FINDING, foreign, "owner"),
+			self.reviewer,
+			"a finding created by another installation must not be re-homed",
+		)
+
+	def test_our_own_findings_are_still_rehomed(self):
+		"""Control: the function must still do its job, or the fix is just a break."""
+		mine = _mk_finding(
+			self.reviewer,
+			self.SLUG,
+			run=self.run_a,
+			first_seen_run=self.run_a,
+			last_seen_run=self.run_a,
+		).name
+		frappe.db.commit()
+
+		agents_api._rehome_installation_outputs(self.inst_a, self.owner_a)
+
+		self.assertEqual(frappe.db.get_value(FINDING, mine, "owner"), self.owner_a)
+		self.assertEqual(frappe.db.get_value(RUN, self.run_a, "owner"), self.owner_a, "runs re-home too")
+
+	def test_a_finding_created_on_our_run_but_bumped_elsewhere_is_rehomed(self):
+		"""The mirror case: origin is what counts, not where the bump currently points.
+		A row A's installation created stays A's even though its last_seen_run has since
+		moved onto B's run."""
+		mine = _mk_finding(
+			self.reviewer,
+			self.SLUG,
+			run=self.run_a,
+			first_seen_run=self.run_a,
+			last_seen_run=self.run_b,
+		).name
+		frappe.db.commit()
+
+		agents_api._rehome_installation_outputs(self.inst_a, self.owner_a)
+
+		self.assertEqual(frappe.db.get_value(FINDING, mine, "owner"), self.owner_a)
+
+	def test_b_findings_are_untouched_when_a_is_rehomed(self):
+		"""Nothing belonging to the co-reviewed installation moves at all."""
+		theirs = _mk_finding(
+			self.reviewer,
+			self.SLUG,
+			run=self.run_b,
+			first_seen_run=self.run_b,
+			last_seen_run=self.run_b,
+		).name
+		frappe.db.commit()
+
+		agents_api._rehome_installation_outputs(self.inst_a, self.owner_a)
+
+		self.assertEqual(frappe.db.get_value(FINDING, theirs, "owner"), self.reviewer)
+		self.assertEqual(frappe.db.get_value(RUN, self.run_b, "owner"), self.reviewer)

@@ -45,6 +45,15 @@ export const CODES = {
 	BENCH_RATE_LIMITED: "BENCH_RATE_LIMITED",
 	BENCH_NO_SIGNUP_CONTEXT: "BENCH_NO_SIGNUP_CONTEXT",
 	BENCH_AWAITING_RECONCILIATION: "BENCH_AWAITING_RECONCILIATION",
+	// BENCH_SIGNUP_DETAILS_REJECTED - admin refused the customer's OWN submitted
+	// details (a malformed GSTIN, an unusable phone number) BEFORE any gateway was
+	// contacted. It used to collapse into BENCH_ADMIN_REJECTED, whose copy says "the
+	// payment service refused this request" and offers Check status / Initiate
+	// again. Every word of that was wrong: no payment service was involved, nothing
+	// existed to check, and retrying with the same data failed identically forever.
+	// The customer was left in an unrecoverable dead end, three screens past the
+	// field that actually caused it.
+	BENCH_SIGNUP_DETAILS_REJECTED: "BENCH_SIGNUP_DETAILS_REJECTED",
 	// plan-09 WS7 (bench-local): the admin-hosted pay-page cutover.
 	//
 	// PAYMENT_PAGE_REDIRECT — a token-bearing answer that is navigable (the bench's
@@ -85,6 +94,7 @@ export const BENCH_CODES = [
 	CODES.BENCH_RATE_LIMITED,
 	CODES.BENCH_NO_SIGNUP_CONTEXT,
 	CODES.BENCH_AWAITING_RECONCILIATION,
+	CODES.BENCH_SIGNUP_DETAILS_REJECTED,
 	// plan-09 WS7 cutover codes
 	CODES.PAYMENT_PAGE_REDIRECT,
 	CODES.BENCH_PAY_ORIGIN_UNCONFIGURED,
@@ -236,9 +246,12 @@ const TABLE = {
 	},
 	[CODES.BENCH_ADMIN_AUTH_FAILED]: {
 		headline: "This site could not sign in to your account.",
-		body: "Your payment is not affected. We need to look at this with you.",
+		// Reconnect FIRST: the usual cause is the account being reconnected on
+		// another site, which rotates the key this one holds. Reconnect is a guest
+		// call, so it still works from a bench that cannot sign in.
+		body: "Your payment is not affected. If you reconnected your account on another site, reconnect this one to bring it back.",
 		tone: TONE.ALERT,
-		actions: [ACTIONS.SUPPORT],
+		actions: [ACTIONS.RECONNECT, ACTIONS.SUPPORT],
 	},
 	[CODES.BENCH_ADMIN_REJECTED]: {
 		headline: "The payment service refused this request.",
@@ -271,6 +284,24 @@ const TABLE = {
 			"and someone here is placing it. Nothing more is owed - please do not pay again.",
 		tone: TONE.STATUS,
 		actions: [ACTIONS.CHECK],
+	},
+	[CODES.BENCH_SIGNUP_DETAILS_REJECTED]: {
+		// A rejection of what the CUSTOMER typed, raised before any gateway existed.
+		// The headline therefore names the details, not a payment service, and the
+		// only sensible action is to go back and fix the field. `message` carries
+		// admin's own specific sentence ("billing.gstin failed its checksum check"),
+		// which the page renders underneath as the detail line, so two different
+		// causes no longer read as one identical failure.
+		headline: "We could not accept some of your details.",
+		body: "Nothing has been charged. Check the highlighted field and continue again.",
+		tone: TONE.ALERT,
+		// RESTART walks back to the Details step. It is safe here by construction:
+		// admin refuses this before it creates any provider object, so there is never
+		// a payment sitting behind it (see RESTART_SAFE_CODES in paymentMachine).
+		actions: [ACTIONS.RESTART, ACTIONS.SUPPORT],
+		// Per-row label override: "Start again" undersells this to the point of being
+		// misleading. Nothing is being started again - one field needs correcting.
+		actionLabels: { [ACTIONS.RESTART]: "Fix your details" },
 	},
 	// ---- plan-09 WS7: the admin-hosted pay-page cutover -----------------
 	[CODES.PAYMENT_PAGE_REDIRECT]: {
@@ -339,6 +370,20 @@ export function copyFor(code, flags = {}) {
 		return PENDING_AWAITING_RECONCILIATION;
 	}
 	return TABLE[code] || UNKNOWN_COPY;
+}
+
+/**
+ * The label to render for one action on one row.
+ *
+ * Defaults to the shared vocabulary below, so two screens still cannot disagree,
+ * but lets a row override a label whose generic wording would mislead in its own
+ * context (see BENCH_SIGNUP_DETAILS_REJECTED, where "Start again" means "correct
+ * one field" and saying the former would send the customer looking for a way to
+ * abandon a signup that is fine).
+ */
+export function actionLabelFor(copy, action) {
+	const override = copy && copy.actionLabels && copy.actionLabels[action];
+	return override || ACTION_LABELS[action] || "";
 }
 
 /** Human labels for the affordances. One place, so two screens cannot disagree. */

@@ -78,9 +78,24 @@
    `outline: none` does not suppress it. */
 .jv-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus,
 .jv-ob-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus {
-	outline: revert;
+	outline: none;
 	box-shadow: none;
 	border-color: revert;
+}
+/* `outline: revert` used to sit above, which was the wrong tool: revert rolls the
+   property back to the USER-AGENT sheet, and the UA's rule for a focused input is
+   the browser's own blue focus ring. So the line meant to suppress a blue ring was
+   the thing painting one - a blue rectangle drawn tight around the inner input,
+   which inside a bordered wrapper (JvCombo) reads as a box inside a box.
+   Suppressing it outright would cost keyboard users their focus indicator, so the
+   ring is re-drawn here in the app's own accent, and only for :focus-visible, so a
+   mouse click leaves the field clean while Tab still shows where you are. */
+.jv-root
+	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible,
+.jv-ob-root
+	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible {
+	outline: 2px solid var(--cta, currentColor);
+	outline-offset: 1px;
 }
 
 /* ===== §2.5 theme bridge: dark value overrides =============================

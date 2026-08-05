@@ -48,6 +48,11 @@ vi.mock("vue-router", () => ({ useRouter: () => ({ replace: vi.fn() }) }));
 vi.mock("frappe-ui", () => ({
 	Button: { name: "Button", template: "<button><slot /></button>" },
 	FormControl: { name: "FormControl", template: "<input />" },
+	ErrorMessage: {
+		name: "ErrorMessage",
+		props: ["message"],
+		template: '<div v-if="message">{{ message }}</div>',
+	},
 	FeatherIcon: { name: "FeatherIcon", template: "<i />" },
 	call: vi.fn(),
 	dayjs: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),

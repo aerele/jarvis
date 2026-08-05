@@ -1176,23 +1176,31 @@ def _rehome_installation_outputs(inst, to_owner: str) -> None:
 	re-homing is how promotion OPENS the owner surface (and demotion re-closes it).
 	Raw ``db.set_value`` bypasses the finding/run immutability controllers. Rows are
 	located precisely by installation membership (never a broad owner+agent match
-	that could sweep a different install of the same agent)."""
+	that could sweep a different install of the same agent).
+
+	#615: findings come from :func:`_installation_finding_names`, the SAME membership
+	rule the uninstall cascade uses since #455/#612, rather than a local variant that
+	also accepted ``last_seen_run``. That extra pointer is not a membership signal: it
+	is the only run pointer the engine re-points, and the recurrence bump that
+	re-points it matches on ``(owner, agent, fingerprint)``, so under PP-4 shadow
+	re-homing it can attach ANOTHER owner's finding to one of our runs. A row reachable
+	only through it was, by construction, created by somebody else's installation.
+
+	The consequence here differs from #455 and is why this needed its own fix: the
+	cascade DELETED such a row, while this path rewrites its visibility ``owner``. So
+	the failure was a foreign customer's finding silently appearing under the wrong
+	owner rather than disappearing."""
 	run_names = frappe.get_all(
 		RUN, filters={"installation": inst.name}, pluck="name", ignore_permissions=True
 	)
-	dash_names, finding_names = set(), set()
+	dash_names = set()
+	finding_names = _installation_finding_names(run_names)
 	if run_names:
 		for r in frappe.get_all(
 			RUN, filters={"name": ["in", run_names]}, fields=["dashboard"], ignore_permissions=True
 		):
 			if r.dashboard:
 				dash_names.add(r.dashboard)
-		for field in ("run", "first_seen_run", "last_seen_run"):
-			finding_names.update(
-				frappe.get_all(
-					FINDING, filters={field: ["in", run_names]}, pluck="name", ignore_permissions=True
-				)
-			)
 	for rn in run_names:
 		frappe.db.set_value(RUN, rn, "owner", to_owner, update_modified=False)
 	for fn in finding_names:

@@ -93,8 +93,27 @@ def _extract_link_targets(body, known: set[str]) -> list[str]:
 
 
 def _manual_link_targets(raw, known: set[str]) -> list[str]:
-	"""``manual_links`` (JSON list of target slugs) → the ones that exist. The
-	durable, out-of-body half of the link set (R1)."""
+	"""``manual_links`` (JSON list of target slugs) → the ones that exist, capped
+	per page. The durable, out-of-body half of the link set (R1).
+
+	#645: capped at the same ``_MAX_LINKS_PER_PAGE`` the body links already use, which
+	is also what the mirror caps its ``## Related`` tail at (``wiki_mirror._MAX_RELATED``).
+	The asymmetry was harmless while nothing wrote ``manual_links``; PR #642 wired the
+	add-link loop, so they now accumulate one click at a time and are never pruned. Left
+	uncapped, one heavily curated page can take a large share of the global ``MAX_EDGES``
+	budget and crowd every other page out of the graph, and the daily push to the control
+	plane grows with no per-page bound.
+
+	Capped separately rather than sharing one budget with the body links, so a page with
+	many ``[[wikilinks]]`` in its body cannot silently swallow a human's deliberate
+	curation. A page therefore contributes at most ``2 * _MAX_LINKS_PER_PAGE`` link
+	edges.
+
+	Keeps the NEWEST, not the oldest. ``add_wiki_link`` APPENDS, so truncating the head
+	would mean that past the cap a user clicks "+ link", is told it succeeded, the link
+	is durably stored, and it never appears in the graph. Dropping the oldest edge is a
+	bounded, understandable loss; silently discarding the one the user just made is
+	not."""
 	try:
 		arr = json.loads(raw) if isinstance(raw, str) else (raw or [])
 	except Exception:
@@ -106,7 +125,7 @@ def _manual_link_targets(raw, known: set[str]) -> list[str]:
 		s = str(t or "").strip().lower()
 		if s and s in known and s not in out:
 			out.append(s)
-	return out
+	return out[-_MAX_LINKS_PER_PAGE:]
 
 
 def _sources_authors(raw) -> dict[str, int]:

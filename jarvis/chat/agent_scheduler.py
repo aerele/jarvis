@@ -87,155 +87,177 @@ def run_due_agent_audits() -> None:
 	if not due:
 		return
 
-	from jarvis.chat.agents_api import _user_allowed_for_agent
-
 	original_user = frappe.session.user
 	seen: set = set()  # O7: dedupe identical (owner, agent, cadence, time)
 	for row in due:
-		key = (row.owner, row.agent, row.schedule_frequency, str(row.schedule_time))
-		if key in seen:
-			_advance(row, now)
-			continue
-		seen.add(key)
-
-		# R5-J8: never dispatch a scheduled run for a non-installable capability. A
-		# reconcile marks an install installable=0 when a min_apps dependency
-		# disappeared after install (the row is kept, not deleted); its run has no
-		# data. Record why + consume the slot so the cadence does not busy-retry.
-		if not frappe.utils.cint(row.installable):
-			_record_failed(
-				row, "scheduled audit skipped: capability not installable (app_absent_or_ineligible)"
-			)
-			_advance(row, now)
-			continue
-
-		# Only auditor + scribe agents run scheduled scans; an operator install
-		# with a schedule set just consumes its slot (it drafts through the board,
-		# not on a cron). A scribe's schedule is optional (manual run-now is the
-		# primary path) but honoured here when set, so periodic re-learning works.
-		listing = (
-			frappe.db.get_value(LISTING, row.agent, ["nature", "status"], as_dict=True) or frappe._dict()
-		)
-		nature = listing.get("nature")
-		if nature not in ("Auditor", "Scribe"):
-			_advance(row, now)
-			continue
-
-		# #457: an admin who deprecates a listing must stop its schedules. The push
-		# already drops an unpublished agent from the roster, so the container has no
-		# such delegate and a dispatched run can only fail three hours later as a
-		# mislabelled timeout. ``_launch_audit`` is the authoritative gate, but refuse
-		# HERE too and consume the slot: a throw out of _launch_audit lands in the
-		# generic except below, which does NOT advance, so the cadence would retry
-		# hourly and write an Error Log every time for a state only a human can fix.
-		if (listing.get("status") or "") != "Published":
-			_record_failed(
-				row,
-				"scheduled run skipped: this agent is no longer published "
-				f"({listing.get('status') or 'unknown'}); uninstall it or ask an admin to republish it",
-			)
-			_advance(row, now)
-			continue
-
-		# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so there is
-		# no such thing as a shadow scribe run — refuse it here exactly as the manual path
-		# does, and consume the slot so the cadence does not busy-retry.
-		if nature == "Scribe" and (row.get("activation_state") or "shadow") == "shadow":
-			_record_failed(
-				row,
-				"scheduled run skipped: this agent writes the wiki directly; promote the "
-				"installation to live to run it",
-			)
-			_advance(row, now)
-			continue
-
-		# CX5-2: a Custom App Learning run may only read the apps an ADMIN authorized.
-		# The cron has no human to ask, so it REUSES the durable selection the last
-		# manual launch persisted on the installation (``source_apps_json``) — and when
-		# there is none (or the selected apps have since been uninstalled) it SKIPS with
-		# a recorded reason rather than launching a run that could read the whole bench.
-		source_apps = None
-		if _is_app_learning(row.agent):
-			from jarvis.learning import app_source
-
-			try:
-				source_apps = app_source.validate_source_apps(row.get("source_apps_json") or [])
-			except ValueError as e:
-				_record_failed(
-					row,
-					f"scheduled app-learning skipped: no valid authorized app selection ({e})",
-				)
-				_advance(row, now)
-				continue
-
-		# Phase 1 identity: the audit executes AS the install's run_as_user (its
-		# jarvis__* reads are permission-bounded to that user).
-		#
-		# R1-F3: there is deliberately NO ``or row.owner`` fallback. A blank
-		# run_as_user means the install is MISCONFIGURED, not that it should run as
-		# the row owner: the owner is an identity ``_validate_run_as_escalation``
-		# never litigated, so binding an unattended run to it would execute ERP
-		# reads under rights nobody vetted. Refuse, record WHY, and CONSUME the slot
-		# — retrying hourly would just relog the same failure 24x/day and can never
-		# fix itself; a human has to set a run-as user or disable the install.
-		run_as = (row.run_as_user or "").strip()
-		if not run_as:
-			_record_failed(
-				row, "scheduled audit skipped: no run-as user on this install (set one, or disable it)"
-			)
-			_advance(row, now)
-			continue
-
-		# S1 fail-closed identity guard — never bind a scheduled audit turn to
-		# Administrator / Guest / a disabled RUN-AS user.
-		if not _valid_owner(run_as):
-			_record_failed(row, "scheduled audit skipped: invalid run-as user (fail-closed guard)")
-			_advance(row, now)
-			continue
-
-		# RBAC: the listing may have been restricted (or the run-as user's roles
-		# revoked) AFTER install. Skip, record WHY, and consume the slot — never
-		# dispatch a turn for a run-as identity the agent no longer permits
-		# (gotcha #8 — the EXECUTING identity is gated, not the triggerer).
-		if not _user_allowed_for_agent(row.agent, run_as):
-			_record_failed(row, "run-as user's roles no longer permit this agent")
-			_advance(row, now)
-			continue
-
-		# A14 cost cap — per installation + per-tenant aggregate (the subscription is
-		# the tenant's). Manual + scheduled counted together; failed rows excluded, so
-		# the _record_failed row we write below can never self-perpetuate the cap.
-		over, why = _over_run_budget(row.name)
-		if over:
-			_record_failed(row, why)
-			_notify_owner(row.owner, row, reason=why)
-			_advance(row, now)
-			continue
-
-		# S1 hinge: mint the run session + create conv/run INSIDE set_user(run_as).
-		# Row ownership is reassigned to the human owner inside _launch_audit; only
-		# the ERP-read identity is the run-as user.
+		# #648: fault-isolate each installation, the agent twin of #472's macro sweep.
+		# The per-row try below covers only the DISPATCH; the dedupe, the schedule
+		# arithmetic, the identity guards and every _record_failed / _notify_owner sat
+		# OUTSIDE it, so anything they raised propagated out of the whole sweep and every
+		# installation behind this one silently missed its slot, for good, since the next
+		# hourly tick re-reads the same due set and dies on the same row again. The
+		# concrete case was a schedule_time the arithmetic could not use, but the
+		# guarantee wanted here is structural: no single poisoned row can starve a
+		# tenant's agents. The slot is left DUE on this path (a failure never advances
+		# the schedule), so the next tick retries it.
 		try:
-			frappe.set_user(run_as)
-			inst = frappe.get_doc(INSTALLATION, row.name)
-			# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
-			# it has no initiating human — the scheduler user (Administrator) is not one.
-			_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
-			frappe.set_user(original_user)
-			_advance(row, now)  # O4: advance ONLY after a successful enqueue
+			_sweep_one(row, now, original_user, seen)
 		except Exception:
-			frappe.set_user(original_user)
-			frappe.log_error(
-				title=f"jarvis scheduled audit failed: {row.name}",
-				message=frappe.get_traceback(),
-			)
-			_record_failed(row, "scheduled audit enqueue failed; see Error Log")
-			_notify_owner(row.owner, row)
-			# Do NOT advance -> retry next hour. compute_next_run(from=now) means
-			# even a long outage yields ONE next slot, never a backfill storm.
-		finally:
 			if frappe.session.user != original_user:
 				frappe.set_user(original_user)
+			frappe.db.rollback()
+			frappe.log_error(
+				title=f"jarvis scheduled agent sweep failed: {row.name}",
+				message=frappe.get_traceback(),
+			)
+
+
+def _sweep_one(row, now, original_user: str, seen: set) -> None:
+	"""Handle ONE due installation. Extracted from the loop so ``run_due_agent_audits``
+	can wrap it whole (#648); every ``return`` here was a ``continue`` in the loop it
+	came from. ``seen`` is the caller's dedupe set and is mutated in place."""
+	from jarvis.chat.agents_api import _user_allowed_for_agent
+
+	key = (row.owner, row.agent, row.schedule_frequency, str(row.schedule_time))
+	if key in seen:
+		_advance(row, now)
+		return
+	seen.add(key)
+
+	# R5-J8: never dispatch a scheduled run for a non-installable capability. A
+	# reconcile marks an install installable=0 when a min_apps dependency
+	# disappeared after install (the row is kept, not deleted); its run has no
+	# data. Record why + consume the slot so the cadence does not busy-retry.
+	if not frappe.utils.cint(row.installable):
+		_record_failed(row, "scheduled audit skipped: capability not installable (app_absent_or_ineligible)")
+		_advance(row, now)
+		return
+
+	# Only auditor + scribe agents run scheduled scans; an operator install
+	# with a schedule set just consumes its slot (it drafts through the board,
+	# not on a cron). A scribe's schedule is optional (manual run-now is the
+	# primary path) but honoured here when set, so periodic re-learning works.
+	listing = frappe.db.get_value(LISTING, row.agent, ["nature", "status"], as_dict=True) or frappe._dict()
+	nature = listing.get("nature")
+	if nature not in ("Auditor", "Scribe"):
+		_advance(row, now)
+		return
+
+	# #457: an admin who deprecates a listing must stop its schedules. The push
+	# already drops an unpublished agent from the roster, so the container has no
+	# such delegate and a dispatched run can only fail three hours later as a
+	# mislabelled timeout. ``_launch_audit`` is the authoritative gate, but refuse
+	# HERE too and consume the slot: a throw out of _launch_audit lands in the
+	# generic except below, which does NOT advance, so the cadence would retry
+	# hourly and write an Error Log every time for a state only a human can fix.
+	if (listing.get("status") or "") != "Published":
+		_record_failed(
+			row,
+			"scheduled run skipped: this agent is no longer published "
+			f"({listing.get('status') or 'unknown'}); uninstall it or ask an admin to republish it",
+		)
+		_advance(row, now)
+		return
+
+	# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so there is
+	# no such thing as a shadow scribe run — refuse it here exactly as the manual path
+	# does, and consume the slot so the cadence does not busy-retry.
+	if nature == "Scribe" and (row.get("activation_state") or "shadow") == "shadow":
+		_record_failed(
+			row,
+			"scheduled run skipped: this agent writes the wiki directly; promote the "
+			"installation to live to run it",
+		)
+		_advance(row, now)
+		return
+
+	# CX5-2: a Custom App Learning run may only read the apps an ADMIN authorized.
+	# The cron has no human to ask, so it REUSES the durable selection the last
+	# manual launch persisted on the installation (``source_apps_json``) — and when
+	# there is none (or the selected apps have since been uninstalled) it SKIPS with
+	# a recorded reason rather than launching a run that could read the whole bench.
+	source_apps = None
+	if _is_app_learning(row.agent):
+		from jarvis.learning import app_source
+
+		try:
+			source_apps = app_source.validate_source_apps(row.get("source_apps_json") or [])
+		except ValueError as e:
+			_record_failed(
+				row,
+				f"scheduled app-learning skipped: no valid authorized app selection ({e})",
+			)
+			_advance(row, now)
+			return
+
+	# Phase 1 identity: the audit executes AS the install's run_as_user (its
+	# jarvis__* reads are permission-bounded to that user).
+	#
+	# R1-F3: there is deliberately NO ``or row.owner`` fallback. A blank
+	# run_as_user means the install is MISCONFIGURED, not that it should run as
+	# the row owner: the owner is an identity ``_validate_run_as_escalation``
+	# never litigated, so binding an unattended run to it would execute ERP
+	# reads under rights nobody vetted. Refuse, record WHY, and CONSUME the slot
+	# — retrying hourly would just relog the same failure 24x/day and can never
+	# fix itself; a human has to set a run-as user or disable the install.
+	run_as = (row.run_as_user or "").strip()
+	if not run_as:
+		_record_failed(
+			row, "scheduled audit skipped: no run-as user on this install (set one, or disable it)"
+		)
+		_advance(row, now)
+		return
+
+	# S1 fail-closed identity guard — never bind a scheduled audit turn to
+	# Administrator / Guest / a disabled RUN-AS user.
+	if not _valid_owner(run_as):
+		_record_failed(row, "scheduled audit skipped: invalid run-as user (fail-closed guard)")
+		_advance(row, now)
+		return
+
+	# RBAC: the listing may have been restricted (or the run-as user's roles
+	# revoked) AFTER install. Skip, record WHY, and consume the slot — never
+	# dispatch a turn for a run-as identity the agent no longer permits
+	# (gotcha #8 — the EXECUTING identity is gated, not the triggerer).
+	if not _user_allowed_for_agent(row.agent, run_as):
+		_record_failed(row, "run-as user's roles no longer permit this agent")
+		_advance(row, now)
+		return
+
+	# A14 cost cap — per installation + per-tenant aggregate (the subscription is
+	# the tenant's). Manual + scheduled counted together; failed rows excluded, so
+	# the _record_failed row we write below can never self-perpetuate the cap.
+	over, why = _over_run_budget(row.name)
+	if over:
+		_record_failed(row, why)
+		_notify_owner(row.owner, row, reason=why)
+		_advance(row, now)
+		return
+
+	# S1 hinge: mint the run session + create conv/run INSIDE set_user(run_as).
+	# Row ownership is reassigned to the human owner inside _launch_audit; only
+	# the ERP-read identity is the run-as user.
+	try:
+		frappe.set_user(run_as)
+		inst = frappe.get_doc(INSTALLATION, row.name)
+		# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
+		# it has no initiating human — the scheduler user (Administrator) is not one.
+		_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
+		frappe.set_user(original_user)
+		_advance(row, now)  # O4: advance ONLY after a successful enqueue
+	except Exception:
+		frappe.set_user(original_user)
+		frappe.log_error(
+			title=f"jarvis scheduled audit failed: {row.name}",
+			message=frappe.get_traceback(),
+		)
+		_record_failed(row, "scheduled audit enqueue failed; see Error Log")
+		_notify_owner(row.owner, row)
+		# Do NOT advance -> retry next hour. compute_next_run(from=now) means
+		# even a long outage yields ONE next slot, never a backfill storm.
+	finally:
+		if frappe.session.user != original_user:
+			frappe.set_user(original_user)
 
 
 # --------------------------------------------------------------------------- #

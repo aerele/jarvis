@@ -16,13 +16,17 @@ import {
 	UNKNOWN_COPY,
 } from "./paymentCodes.js";
 
-test("the vocabulary is 12 admin codes + 9 bench codes = 21", () => {
+test("the vocabulary is 12 admin codes + 10 bench codes = 22", () => {
 	// +3 bench codes from the plan-09 WS7 cutover: PAYMENT_PAGE_REDIRECT (the
 	// navigate-to-pay signal), BENCH_PAY_ORIGIN_UNCONFIGURED (a token we cannot
 	// navigate with) and CLIENT_UPGRADE_REQUIRED (a pre-cutover admin's raw handles).
+	// +1 for BENCH_SIGNUP_DETAILS_REJECTED: admin refusing the customer's own
+	// submitted details used to collapse into BENCH_ADMIN_REJECTED, whose copy blames
+	// a payment service that was never contacted and offers a retry that can only
+	// fail identically forever.
 	assert.equal(ADMIN_CODES.length, 12);
-	assert.equal(BENCH_CODES.length, 9);
-	assert.equal(new Set([...ADMIN_CODES, ...BENCH_CODES]).size, 21);
+	assert.equal(BENCH_CODES.length, 10);
+	assert.equal(new Set([...ADMIN_CODES, ...BENCH_CODES]).size, 22);
 });
 
 test("every code in the vocabulary has its own copy row", () => {
@@ -127,4 +131,13 @@ test("an unheard-of code falls back to the honest unknown row", () => {
 	const entry = copyFor("SOMETHING_ADMIN_ADDED_LAST_WEEK");
 	assert.equal(entry, UNKNOWN_COPY);
 	assert.ok(entry.actions.includes(ACTIONS.CHECK));
+});
+
+test("a bench that cannot sign in is offered the reconnect that fixes it", () => {
+	// Reconnecting the account on another site rotates the key THIS one holds, so
+	// the remedy is a reconnect - and it is a guest call, reachable without the
+	// credentials that just stopped working. Support stays as the fallback.
+	const entry = copyFor(CODES.BENCH_ADMIN_AUTH_FAILED);
+	assert.equal(entry.actions[0], ACTIONS.RECONNECT, "reconnect is the primary action");
+	assert.ok(entry.actions.includes(ACTIONS.SUPPORT));
 });

@@ -88,13 +88,32 @@ export function classifyOperation(op) {
 		phase = code === OP_CODE.REJECTED ? OP_PHASE.REJECTED : OP_PHASE.RETRY;
 	}
 
+	// The operation being READY means "your AI connection applied". It does NOT mean
+	// "chat works": admin reports the workspace's own verdict separately, on
+	// `chat_readiness`, and this projection was reading that field and then ignoring
+	// it. So a customer whose model saved cleanly while their container was still
+	// coming up was navigated into a chat that could not answer, with no error and
+	// no way to tell what had gone wrong. That is the "it went to chat but chat
+	// didn't work" report, and it closes here.
+	//
+	// `false` is the ONLY blocking value. `null`/undefined means admin did not say
+	// (an older control plane, or a path that does not compute it), and refusing to
+	// navigate on silence would strand every customer on that build. Absent
+	// information keeps the old behaviour; a definite "not ready" is now believed.
+	const chatBlocked = chatReadiness === false;
+
 	return {
 		phase,
 		state,
 		code,
 		terminal: isTerminal(state),
-		// Exactly-once navigation is only ever offered on a genuine READY.
-		canNavigate: state === OP_STATE.READY,
+		// Exactly-once navigation is only ever offered on a genuine READY that admin
+		// has not explicitly told us is un-chattable yet.
+		canNavigate: state === OP_STATE.READY && !chatBlocked,
+		// READY, but chat is not up yet. The caller must stay on the setup step and
+		// keep waiting rather than treat this as a failure: nothing is wrong, the
+		// workspace is simply still coming online.
+		awaitingChatReadiness: state === OP_STATE.READY && chatBlocked,
 		// Whether the customer can recover by retrying THIS operation (no new desired
 		// version). A permanent rejection and a superseded op are not retryable here.
 		retryable:
