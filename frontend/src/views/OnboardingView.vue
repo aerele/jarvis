@@ -756,6 +756,18 @@
 									>
 										{{ statusCheckNote }}
 									</p>
+									<!-- The checkout this signup already has is still open. Say so,
+										 because the alternative the customer would otherwise reach for
+										 (start a new payment) silently leaves the previous Razorpay
+										 subscription live and unreferenced. -->
+									<p
+										v-if="canResumeCheckout"
+										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+										role="status"
+									>
+										Your payment page is still open. Continue there to finish
+										without starting over.
+									</p>
 								</div>
 								<div class="ob-foot">
 									<!-- A way back, always. A recovery screen with only forward
@@ -1300,6 +1312,7 @@ import { agentName } from "@/branding";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
 import {
 	STATES as PAY_STATES,
+	canNavigateToPay,
 	remainingCooldownSeconds,
 	isTerminalForPayment,
 } from "@/onboarding/paymentMachine";
@@ -2232,8 +2245,40 @@ const checkLabel = computed(() =>
 // The support affordance is appended when the client-local check ceiling is hit
 // even if the code's own actions don't list it (a pending payment the customer
 // has checked many times).
+// True when this signup ALREADY has a checkout the customer can simply go back to:
+// a live token, the bench's own origin, and admin's attestation that the two agree.
+// Asked of the MACHINE via the same predicate the reducer's own NAVIGATED_TO_PAY
+// guard uses, so the button and the guard can never drift apart - offering a
+// navigate the reducer would refuse is how a customer ends up on a dead token.
+const canResumeCheckout = computed(() => canNavigateToPay(pay.value));
+
 const recoveryActions = computed(() => {
 	const acts = [...payCopy.value.actions];
+	// RESUME is prepended dynamically rather than listed on individual rows, because
+	// navigability is a property of the LIVE TOKEN, not of the code that happens to
+	// be showing: the same PAYMENT_CONFIRMATION_PENDING is resumable while the token
+	// lives and is not, forty-five minutes later. Listing it per row would encode a
+	// static answer to a question that is only ever true at a moment in time.
+	//
+	// Placed AFTER a CHECK the row asked for, and only otherwise first.
+	//
+	// RESUME must outrank INITIATE: reusing the checkout that already exists is
+	// strictly safer and cheaper than minting another, which on Razorpay leaves the
+	// previous subscription live and unreferenced (admin-v2#248).
+	//
+	// But it must NOT outrank CHECK, and an earlier version of this that unshifted
+	// unconditionally did. PAYMENT_CONFIRMATION_PENDING can carry a live token AND
+	// mean "money may already have moved" - its own body says "If money was
+	// deducted, check the status before starting another payment." Making RESUME
+	// the primary button there walks the customer back to the payment page ahead of
+	// the read that would tell them they have already paid, which is precisely the
+	// double payment status-first exists to prevent. A row that asks for CHECK
+	// first has a reason; RESUME slots in behind it.
+	if (canResumeCheckout.value && !acts.includes(ACTIONS.RESUME)) {
+		const check = acts.indexOf(ACTIONS.CHECK);
+		if (check >= 0) acts.splice(check + 1, 0, ACTIONS.RESUME);
+		else acts.unshift(ACTIONS.RESUME);
+	}
 	if (pay.value.supportOffered && !acts.includes(ACTIONS.SUPPORT)) acts.push(ACTIONS.SUPPORT);
 	return acts;
 });
@@ -2366,6 +2411,11 @@ function payActionDisabled(a) {
 	if (checking.value || initiating.value) return true;
 	if (a === ACTIONS.CHECK) return !pay.value.canCheck;
 	if (a === ACTIONS.INITIATE) return !pay.value.canInitiate;
+	// RESUME is gated on the machine alone, never on a backend capability flag:
+	// it creates nothing, so there is no capability to grant. It is offered only
+	// while canNavigateToPay holds, and that is re-evaluated on every answer, so a
+	// token that dies mid-screen removes the button rather than disabling it.
+	if (a === ACTIONS.RESUME) return !canResumeCheckout.value;
 	// Reconnect needs a real identity to send (P1-7): server truth or what the
 	// customer themselves typed - never the site-admin prefill. Disabled until one
 	// exists.
@@ -2382,10 +2432,21 @@ function payActionLoading(a) {
 function payActionVariant(a) {
 	// Status-first: the primary (solid) action is whichever appears first, which
 	// the copy table already orders as Check where double-payment is possible.
+	// RESUME is unshifted to the front when it applies, so it becomes primary on
+	// exactly the screens where going back to the existing checkout is the cheapest
+	// and safest thing the customer can do.
 	return recoveryActions.value[0] === a ? "solid" : "subtle";
 }
 async function onPayAction(a) {
 	if (a === ACTIONS.CHECK) return runStatusCheck();
+	if (a === ACTIONS.RESUME) {
+		// Straight back to the checkout this signup already has. No API call, no new
+		// intent, no new provider object: the flow rebuilds the URL from the token
+		// and origin already in the machine and top-level-navigates. It refuses on
+		// its own if the state stopped being navigable between render and click.
+		flow.navigateToPay();
+		return;
+	}
 	if (a === ACTIONS.INITIATE) {
 		// Provider from SERVER TRUTH, not the local default. A resumed Cashfree
 		// signup renders "Payment method: Cashfree" one line above this button
