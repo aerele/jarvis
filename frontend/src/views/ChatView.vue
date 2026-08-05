@@ -405,7 +405,8 @@
 				</div>
 			</div>
 
-			<!-- centre the empty-state greeting + composer (top/bottom flex spacers) -->
+			<!-- Lift the empty-state greeting + composer into the upper third: the bottom
+			     spacer grows more than the top (Claude-style new chat), so it is not dead-centre. -->
 			<div v-if="showWelcome" style="flex: 1"></div>
 			<!-- initial load: a quiet spinner so the welcome screen doesn't flash
 			     before the open conversation finishes loading on refresh -->
@@ -434,8 +435,7 @@
 			<div v-else-if="showWelcome" class="jv-welcome-scroll">
 				<div class="jv-welcome-col">
 					<!-- First empty chat home (per user, versioned): the assistant-styled
-					     introduction REPLACES the compact hero, then never lectures
-					     again. Static presentation only — see WelcomeAssistantMessage. -->
+					     introduction shows once, then never again. Static presentation only. -->
 					<WelcomeAssistantMessage
 						v-if="showHomeIntro"
 						:speaker="homeIntroSpeakerName"
@@ -443,103 +443,26 @@
 						:firstName="firstName"
 						@seen="ackHomeIntro"
 					/>
-					<template v-else>
-						<!-- The brand mark, from its single source of truth. This was a
-						     hand-pasted copy whose gradient read `var(--cta)` as its first
-						     stop; when #294 repointed --cta from indigo to near-black, this
-						     mark silently became near-black->purple while the sidebar mark
-						     (UserMenu) stayed blue->purple — two different logos on one
-						     screen. The purple glow shadow is dropped (design.md §5 #4). -->
-						<JarvisMark :size="54" :radius="14" style="margin: 0 auto 18px" />
-						<h1
-							class="jv-welcome-h1"
-							style="
-								font-size: 30px;
-								font-weight: 640;
-								letter-spacing: -0.03em;
-								margin: 0 0 8px;
-								overflow-wrap: anywhere;
-							"
-						>
-							{{ greeting }}, {{ firstName }}
-						</h1>
-						<p
-							style="
-								font-size: 14.5px;
-								color: var(--text-2);
-								margin: 0 0 26px;
-								line-height: 1.5;
-							"
-						>
-							Ask about your ERP data, run a workflow, or draft something.
-							{{ agentName }}
-							is connected to your
-							<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
-							instance.
-						</p>
-					</template>
-					<div
-						class="jv-welcome-grid"
+					<!-- Claude-style minimal new chat: the brand mark inline with the
+					     greeting, no hero copy or suggestion cards. -->
+					<h1
+						v-else
+						class="jv-welcome-h1"
 						style="
-							display: grid;
-							grid-template-columns: 1fr 1fr;
-							gap: 11px;
-							text-align: left;
+							display: flex;
+							align-items: center;
+							justify-content: center;
+							gap: 14px;
+							font-size: 32px;
+							font-weight: 640;
+							letter-spacing: -0.03em;
+							margin: 0;
+							overflow-wrap: anywhere;
 						"
 					>
-						<button
-							v-for="s in suggestions"
-							:key="s.title"
-							type="button"
-							class="jv-suggest"
-							@click="onWelcomeSuggestion(s)"
-							style="
-								display: flex;
-								gap: 11px;
-								padding: 14px;
-								background: var(--surface);
-								border: 1px solid var(--border);
-								border-radius: 10px;
-								cursor: pointer;
-								transition: border-color 0.12s, background 0.12s;
-								text-align: left;
-								font-family: inherit;
-								color: inherit;
-								width: 100%;
-							"
-						>
-							<div
-								:style="{
-									width: '30px',
-									height: '30px',
-									flex: 'none',
-									borderRadius: '8px',
-									background: s.bg,
-									color: s.fg,
-									display: 'flex',
-									alignItems: 'center',
-									justifyContent: 'center',
-								}"
-								v-html="s.icon"
-							></div>
-							<div>
-								<div
-									style="font-size: 13.5px; font-weight: 550; margin-bottom: 2px"
-								>
-									{{ s.title }}
-								</div>
-								<div
-									style="
-										font-size: 12.5px;
-										color: var(--text-3);
-										line-height: 1.4;
-									"
-								>
-									{{ s.prompt }}
-								</div>
-							</div>
-						</button>
-					</div>
+						<JarvisMark :size="34" :radius="10" style="flex: none" />
+						<span>{{ greeting }}, {{ firstName }}</span>
+					</h1>
 				</div>
 			</div>
 
@@ -1941,7 +1864,7 @@
 								paddingRight: '16px',
 								background: 'transparent',
 						  }
-						: { borderTop: '1px solid var(--border)' }
+						: { borderTop: 'none' }
 				"
 				style="
 					position: relative;
@@ -2867,7 +2790,7 @@
 					</Composer>
 				</div>
 			</div>
-			<div v-if="showWelcome" style="flex: 1"></div>
+			<div v-if="showWelcome" style="flex: 2"></div>
 		</main>
 
 		<!-- ============ PROACTIVE MESSAGE TOAST (Jarvis started a chat) ============ -->
@@ -4443,7 +4366,11 @@ const fullName = displayName(session.user);
 const firstName = computed(() => fullName.split(/\s+/)[0]);
 const greeting = computed(() => {
 	const h = new Date().getHours();
-	return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+	if (h < 5) return "Night";
+	if (h < 12) return "Morning";
+	if (h < 17) return "Afternoon";
+	if (h < 21) return "Evening";
+	return "Night";
 });
 // Empty override = "Auto": the backend falls back to Jarvis Settings.llm_model.
 const modelLabel = computed(() => modelOverride.value || "Auto");
@@ -4757,7 +4684,6 @@ const {
 	homeIntroSpeakerName,
 	initFromBoot: initHomeIntro,
 	ackHomeIntro,
-	noteSuggestionSelected: noteWelcomeSuggestion,
 } = useHomeIntro({
 	showWelcome,
 	booting,
@@ -4828,50 +4754,6 @@ const busy = computed(() => sending.value || waiting.value);
 // the whole run (unlike `waiting`, which clears at the first streamed token);
 // the button re-enables the instant the parent turn ends. #223 review.
 const convStreaming = computed(() => store.streamingConvId === currentId.value);
-
-const suggestions = [
-	{
-		category: "analyse",
-		title: "Analyse data",
-		prompt: "Which sales orders are overdue this month?",
-		bg: "var(--cta-bg)",
-		fg: "var(--cta)",
-		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 9l-5 5-3-3-4 4"/></svg>',
-	},
-	{
-		category: "action",
-		title: "Take an action",
-		prompt: "Draft a document for me to review",
-		bg: "var(--green-bg)",
-		fg: "var(--green)",
-		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>',
-	},
-	{
-		category: "search",
-		title: "Search records",
-		prompt: "Search for a customer or contact",
-		bg: "var(--amber-bg)",
-		fg: "var(--amber)",
-		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
-	},
-	{
-		category: "draft",
-		title: "Draft content",
-		prompt: "Write a follow-up email to a lead",
-		bg: "rgba(139,92,246,.12)",
-		fg: "#8b5cf6",
-		icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
-	},
-];
-
-// A welcome suggestion card was chosen: record its category (a stable token,
-// never the prompt text) for the intro telemetry, then fill the composer. It
-// fills, never sends — the do-not-regress rule that a suggestion must not
-// auto-send is unchanged.
-function onWelcomeSuggestion(s) {
-	noteWelcomeSuggestion(s.category || s.title);
-	fillInput(s.prompt);
-}
 
 // Inline action blocks the agent emits: a rich ```jarvis-action JSON card (a doc
 // create/update confirm, or an email draft), or a simple ```confirm label as a
@@ -9090,10 +8972,6 @@ onUnmounted(() => {
 .jv-menuitem-danger:hover {
 	background: var(--red-bg);
 }
-.jv-suggest:hover {
-	border-color: var(--border-2);
-	background: var(--surface-1);
-}
 /* buttons invert to black/white on hover (theme-adaptive: black on light,
    white on dark) — var(--text)/var(--surface) flip, with an svg-stroke
    override so the icon stays visible on the inverted background.
@@ -9732,7 +9610,6 @@ onUnmounted(() => {
 	white-space: nowrap;
 }
 /* visible keyboard focus (UX #15) */
-.jv-suggest:focus-visible,
 .jv-iconbtn:focus-visible,
 .jv-retry:focus-visible,
 .jv-modelpill:focus-visible {
@@ -9769,13 +9646,17 @@ onUnmounted(() => {
    Named classes because inline styles cannot be overridden and the responsive tests
    need a stable target. */
 .jv-welcome-scroll {
-	flex: 1;
+	/* Hug the greeting (flex-grow 0) so the composer sits right under it instead
+	   of a tall centred region opening a big gap; still shrink + scroll if the
+	   first-run home intro is taller than the space between the spacers. */
+	flex: 0 1 auto;
+	min-height: 0;
 	overflow-y: auto;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: flex-start;
-	padding: 32px;
+	padding: 32px 32px 16px;
 }
 .jv-welcome-col {
 	width: 100%;
@@ -9800,9 +9681,6 @@ onUnmounted(() => {
 	   matching the 16px the thread/composer use. */
 	.jv-welcome-scroll {
 		padding: 24px 16px;
-	}
-	.jv-welcome-grid {
-		grid-template-columns: 1fr !important;
 	}
 	.jv-welcome-h1 {
 		font-size: 24px !important;

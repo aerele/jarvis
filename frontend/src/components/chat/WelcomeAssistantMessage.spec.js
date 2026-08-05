@@ -201,10 +201,12 @@ describe("ChatView wiring (source tripwires, not behaviour)", () => {
 		expect(src).toContain('v-if="bizGreeting.show && !showHomeIntro"');
 	});
 
-	it("keeps the suggestion cards below the introduction", () => {
-		expect(src.indexOf("<WelcomeAssistantMessage")).toBeLessThan(
-			src.indexOf('class="jv-welcome-grid"')
-		);
+	it("renders the minimal new-chat greeting and no suggestion cards", () => {
+		// Claude-style empty state: the brand mark inline with the greeting, and NO
+		// suggestion grid. A regression that re-adds the cards trips here.
+		expect(src).toContain("<span>{{ greeting }}, {{ firstName }}</span>");
+		expect(src).not.toContain('class="jv-welcome-grid"');
+		expect(src).not.toContain("onWelcomeSuggestion");
 	});
 
 	it("moves the welcome viewport off inline styles onto overflow-safe classes", () => {
@@ -215,15 +217,5 @@ describe("ChatView wiring (source tripwires, not behaviour)", () => {
 		expect(src).toContain('class="jv-welcome-col"');
 		expect(src).toContain("justify-content: flex-start;");
 		expect(src).toContain("margin-block: auto;");
-	});
-
-	it("routes suggestion clicks through the fill+telemetry wrapper and still fills, never sends", () => {
-		expect(src).toContain('@click="onWelcomeSuggestion(s)"');
-		// The wrapper records the category then FILLS the composer — it must not send.
-		const fn = src.slice(src.indexOf("function onWelcomeSuggestion"));
-		const body = fn.slice(0, fn.indexOf("}") + 1);
-		expect(body).toContain("noteWelcomeSuggestion(");
-		expect(body).toContain("fillInput(s.prompt)");
-		expect(body).not.toContain("sendMessage");
 	});
 });
