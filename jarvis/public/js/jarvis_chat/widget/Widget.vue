@@ -3,7 +3,7 @@
 	     page. Tapping it opens the side chat panel in place; on a narrow
 	     viewport (where a 400px panel would be most of the screen) it falls
 	     back to navigating to the chat SPA. -->
-	<div class="jvw-root" :class="{ 'jvw-root--dark': isDark }">
+	<div class="jvw-root" :class="{ 'jvw-root--dark': isDark, 'jvw-leaving': leaving }">
 		<button
 			type="button"
 			ref="fabEl"
@@ -99,6 +99,9 @@ const viewportTick = ref(0);
 // localStorage synchronously below so the first render already has it, and fed
 // to panelLayout, which floors it at the default and caps it to the viewport.
 const prefSize = ref(null);
+// Set true while the panel fades out just before we hand off to the full web
+// chat (resized-to-fullscreen), so the transition reads as one motion.
+const leaving = ref(false);
 const panelBox = computed(() => {
 	viewportTick.value; // re-run on resize / orientation change
 	const topInset = readCssPx(document.documentElement, "--navbar-height", 48);
@@ -118,6 +121,17 @@ function onPanelResize(size) {
 // Drag released: persist the choice per browser, mirroring the FAB position.
 function onPanelResizeCommit() {
 	if (!prefSize.value) return;
+	// Resized to (near) the whole screen: the mini panel is the wrong tool at
+	// that size, so hand off to the full web chat instead of persisting a panel
+	// that blankets the Desk. Fade the widget out first so it reads as one smooth
+	// motion into the SPA, and do NOT persist the fullscreen size (the panel
+	// should reopen at its normal size next time).
+	const box = panelBox.value;
+	if (box && box.width >= window.innerWidth * 0.9 && box.height >= window.innerHeight * 0.85) {
+		leaving.value = true;
+		setTimeout(openFull, 240);
+		return;
+	}
 	try {
 		localStorage.setItem(panelSize.STORAGE_KEY, panelSize.serializeSize(prefSize.value));
 	} catch (e) {
@@ -394,6 +408,18 @@ onBeforeUnmount(() => {
 	--accent-grad: linear-gradient(140deg, #8b7cf7, #6a56e8);
 	--jvw-safe-bottom: env(safe-area-inset-bottom, 0px);
 	font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+/* Fade the whole widget out as it hands off to the full web chat (resized to
+   fullscreen). Opacity cascades to the panel + FAB (neither is teleported). */
+.jvw-leaving {
+	opacity: 0;
+	transition: opacity 0.24s ease;
+	pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+	.jvw-leaving {
+		transition: none;
+	}
 }
 
 /* Follow the Desk theme. Frappe's theme switcher stamps data-theme="dark" on

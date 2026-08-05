@@ -94,6 +94,15 @@ export const stopRun = (conversation, runId) =>
 export const confirmTool = (token, conversation) =>
   call(ACTIONS + "confirm_tool", { token, conversation: conversation || "" });
 
+// Resync the still-open write confirmations for a conversation. The panel gets
+// live cards from the `action:pending` realtime frame, but a card raised while
+// the panel was CLOSED (or a dropped realtime tail) would otherwise never show —
+// so load() calls this to restore them. Returns {ok, data:{pending:[...]}}.
+export const listPendingConfirmations = (conversation) =>
+  call(ACTIONS + "list_pending_confirmations", {
+    conversation: conversation || "",
+  });
+
 // Chat-readiness verdict ({ready, reason, detail, billing_notice}) - see
 // panel_readiness.mjs for how the panel classifies it into gate/degraded/ready.
 export const isReadyForChat = () => call(ACCOUNT + "is_ready_for_chat");
