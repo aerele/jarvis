@@ -234,6 +234,26 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 		_advance(row, now)
 		return
 
+	# #652: idempotency at DISPATCH, which is the only place it actually holds.
+	# ``_launch_audit`` commits its ``running`` Jarvis Agent Run before returning, so
+	# anything that goes wrong between that commit and ``_advance`` below - a failed
+	# set_value, an RQ worker killed mid-sweep, an OOM - leaves the row still DUE with a
+	# live run already going. The next tick then dispatches the SAME slot a second time:
+	# a duplicate audit, billed twice against the A14 budget, for a customer who was
+	# told nothing ran.
+	#
+	# Guarding on the run itself covers every one of those causes, where guarding only
+	# the advance covers one. A legitimately long audit spanning the next tick is
+	# skipped too, which is correct - two concurrent audits of one installation is not a
+	# thing anyone wants - and ``reap_stale_agent_runs`` terminalizes a genuinely stuck
+	# run at 3h, so this can never wedge a schedule permanently.
+	#
+	# The slot IS advanced here: it was really consumed by the launch that is still
+	# running, so this also repairs the ``next_run_at`` that never got written.
+	if frappe.db.exists(RUN, {"installation": row.name, "status": "running"}):
+		_advance(row, now)
+		return
+
 	# S1 hinge: mint the run session + create conv/run INSIDE set_user(run_as).
 	# Row ownership is reassigned to the human owner inside _launch_audit; only
 	# the ERP-read identity is the run-as user.
@@ -243,10 +263,8 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 		# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
 		# it has no initiating human — the scheduler user (Administrator) is not one.
 		_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
-		frappe.set_user(original_user)
-		_advance(row, now)  # O4: advance ONLY after a successful enqueue
 	except Exception:
-		frappe.set_user(original_user)
+		# Nothing durable was created, so this slot really can be retried.
 		frappe.log_error(
 			title=f"jarvis scheduled audit failed: {row.name}",
 			message=frappe.get_traceback(),
@@ -255,9 +273,28 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 		_notify_owner(row.owner, row)
 		# Do NOT advance -> retry next hour. compute_next_run(from=now) means
 		# even a long outage yields ONE next slot, never a backfill storm.
+		return
 	finally:
 		if frappe.session.user != original_user:
 			frappe.set_user(original_user)
+
+	# #652: everything below is PAST the enqueue boundary. ``_launch_audit`` commits
+	# before it returns, so the conversation and the ``running`` Jarvis Agent Run are
+	# durable and this slot is spent. A failure here is therefore NOT a launch failure,
+	# and the handler above would be wrong three times over: it writes a ``failed`` run
+	# for an audit that is actually running, tells the owner it could not be started,
+	# and leaves the row due so the next tick dispatches the SAME slot again. That
+	# duplicate is unrecoverable and is billed a second time against the A14 budget.
+	#
+	# Leaving next_run_at stale is the lesser evil: the row is re-advanced by the next
+	# successful pass, and the stale-run reaper terminalizes anything that hangs.
+	try:
+		_advance(row, now)  # O4: advance ONLY after a successful enqueue
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis advance failed AFTER a successful launch: {row.name}",
+			message=frappe.get_traceback(),
+		)
 
 
 # --------------------------------------------------------------------------- #

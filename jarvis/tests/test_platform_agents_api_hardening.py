@@ -1589,3 +1589,163 @@ class TestRehomeMembershipScope(FrappeTestCase):
 
 		self.assertEqual(frappe.db.get_value(FINDING, theirs, "owner"), self.reviewer)
 		self.assertEqual(frappe.db.get_value(RUN, self.run_b, "owner"), self.reviewer)
+
+
+# --------------------------------------------------------------------------- #
+# #652 - a failure AFTER a successful launch must not re-dispatch the slot
+# --------------------------------------------------------------------------- #
+class TestDispatchIdempotency(FrappeTestCase):
+	"""``_launch_audit`` commits its ``running`` run before returning, so anything that
+	goes wrong between that commit and ``_advance`` leaves the row still DUE with a live
+	run going. The next tick then dispatched the SAME slot again: a duplicate audit,
+	billed twice against the A14 budget, for a customer whose only notification said the
+	run could not be started."""
+
+	SLUG = PREFIX + "dispidem"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-dispidem@example.com")
+		_mk_listing(cls.SLUG)
+		frappe.db.set_value(
+			LISTING, cls.SLUG, {"status": "Published", "nature": "Auditor"}, update_modified=False
+		)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.set_value(
+			LISTING, self.SLUG, {"status": "Published", "nature": "Auditor"}, update_modified=False
+		)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+
+	def _due_install(self) -> str:
+		from frappe.utils import add_days, now_datetime
+
+		name = _mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.set_value(
+			INSTALLATION,
+			name,
+			{
+				"schedule_enabled": 1,
+				"schedule_frequency": "daily",
+				"next_run_at": add_days(now_datetime(), -1),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return name
+
+	def _live_run(self, inst: str) -> str:
+		run = _mk_run(inst, self.SLUG, self.owner)
+		frappe.db.set_value(RUN, run, "status", "running", update_modified=False)
+		frappe.db.commit()
+		return run
+
+	def _run_cron(self, launch_side_effect=None):
+		from frappe.utils import add_days, now_datetime
+
+		now = now_datetime()
+		parked = {
+			r.name: r.next_run_at
+			for r in frappe.get_all(
+				INSTALLATION,
+				filters={
+					"enabled": 1,
+					"schedule_enabled": 1,
+					"next_run_at": ["<=", now],
+					"agent": ["!=", self.SLUG],
+				},
+				fields=["name", "next_run_at"],
+				ignore_permissions=True,
+			)
+		}
+		for n in parked:
+			frappe.db.set_value(INSTALLATION, n, "next_run_at", add_days(now, 2), update_modified=False)
+		frappe.db.commit()
+		calls = []
+
+		def _default(inst, **kw):
+			calls.append(inst.name)
+
+		try:
+			with patch.object(agent_scheduler, "_launch_audit", side_effect=launch_side_effect or _default):
+				agent_scheduler.run_due_agent_audits()
+		finally:
+			for n, ts in parked.items():
+				frappe.db.set_value(INSTALLATION, n, "next_run_at", ts, update_modified=False)
+			frappe.db.commit()
+		return calls
+
+	def test_an_installation_with_a_live_run_is_not_dispatched_again(self):
+		"""THE regression. A live ``running`` row means the launch already happened, so
+		re-dispatching double-charges the customer for one slot."""
+		inst = self._due_install()
+		self._live_run(inst)
+		self.assertEqual(self._run_cron(), [], "a live run must block a second dispatch")
+
+	def test_the_skipped_slot_is_advanced_so_it_self_repairs(self):
+		"""The slot really was consumed by the launch still running, so advancing here
+		repairs the next_run_at a failed _advance never wrote. Without it the row stays
+		due and re-enters this path every hour."""
+		from frappe.utils import now_datetime
+
+		now = now_datetime()
+		inst = self._due_install()
+		self._live_run(inst)
+
+		self._run_cron()
+		nxt = frappe.db.get_value(INSTALLATION, inst, "next_run_at")
+		self.assertGreater(nxt, now, "the stale next_run_at must be repaired, not left due")
+
+	def test_an_advance_failure_after_launch_is_not_reported_as_a_launch_failure(self):
+		"""The handler used to write a `failed` run and tell the owner nothing started,
+		for an audit that was in fact running."""
+		inst = self._due_install()
+		with patch.object(agent_scheduler, "_advance", side_effect=RuntimeError("db blip")):
+			self._run_cron()
+
+		runs = frappe.get_all(
+			RUN, filters={"installation": inst, "status": "failed"}, pluck="name", ignore_permissions=True
+		)
+		self.assertEqual(runs, [], "a post-launch failure must not be recorded as a failed run")
+
+	def test_a_genuine_launch_failure_still_reports_and_retries(self):
+		"""Control: nothing durable was created, so the customer must still be told and
+		the slot must stay due."""
+		from frappe.utils import now_datetime
+
+		now = now_datetime()
+		inst = self._due_install()
+
+		def _boom(inst_doc, **kw):
+			raise RuntimeError("enqueue exploded")
+
+		self._run_cron(launch_side_effect=_boom)
+
+		runs = frappe.get_all(
+			RUN,
+			filters={"installation": inst, "status": "failed"},
+			fields=["error"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(len(runs), 1, "a real launch failure is still recorded")
+		self.assertIn("enqueue failed", runs[0]["error"])
+		self.assertLess(
+			frappe.db.get_value(INSTALLATION, inst, "next_run_at"),
+			now,
+			"a real launch failure leaves the slot due for a retry",
+		)
+
+	def test_a_clean_installation_still_dispatches(self):
+		"""Control: no live run, so the ordinary path is untouched."""
+		inst = self._due_install()
+		self.assertEqual(self._run_cron(), [inst])
