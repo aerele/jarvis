@@ -66,11 +66,45 @@
 			style="display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 4px 2px"
 		>
 			<template v-for="(a, i) in attachments" :key="a.key ?? i">
+				<!-- In-flight: the product's one loading mark, not a bare word. A
+				     recorded clip or a large PDF can take seconds, and a static
+				     "Uploading…" gives no sign anything is still alive. -->
+				<span v-if="a.uploading" class="jv-att-uploading" role="status" aria-live="polite">
+					<JvSpinner :size="20" />
+					<span>{{ a.file_name ? `Uploading ${a.file_name}…` : "Uploading…" }}</span>
+				</span>
+				<!-- Failed: an upload that dies must SAY so. It used to be swallowed,
+				     so the file simply never appeared and the user was left thinking
+				     the picker was broken. -->
 				<span
-					v-if="a.uploading"
-					style="font-size: 11.5px; color: var(--text-3); padding: 3px 6px"
-					>Uploading…</span
+					v-else-if="a.failed"
+					class="jv-att-failed"
+					role="alert"
+					:title="a.error || ''"
 				>
+					<svg
+						width="13"
+						height="13"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+					>
+						<circle cx="12" cy="12" r="9" />
+						<path d="M12 8v4M12 16h.01" />
+					</svg>
+					<span>{{ a.file_name }} failed</span>
+					<button
+						v-if="a.removable"
+						type="button"
+						class="jv-att-failed-x"
+						title="Dismiss"
+						@click="$emit('remove-attachment', i)"
+					>
+						×
+					</button>
+				</span>
 				<span
 					v-else-if="a.preview_url"
 					:title="a.file_name"
@@ -303,6 +337,7 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 
 const props = defineProps({
 	// The composed text. Use with v-model on the host.
@@ -571,5 +606,51 @@ defineExpose({ el: inputEl, focusInput });
 }
 .jv-dark .jv-sendbtn:hover:not(:disabled) svg {
 	stroke: var(--cta-fg) !important;
+}
+
+/* Attachment status pills. Both sit in the same row as the thumbnails/chips, so
+   they match their height and radius rather than introducing a third shape. */
+.jv-att-uploading {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	padding: 4px 9px;
+	font-size: 11.5px;
+	color: var(--text-3);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--surface);
+	max-width: 260px;
+}
+.jv-att-uploading > span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.jv-att-failed {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 9px;
+	font-size: 11.5px;
+	color: var(--red);
+	border: 1px solid var(--red);
+	border-radius: 8px;
+	background: var(--red-bg, transparent);
+	max-width: 260px;
+}
+.jv-att-failed > span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.jv-att-failed-x {
+	border: none;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	font-size: 14px;
+	line-height: 1;
+	padding: 0 0 0 2px;
 }
 </style>
