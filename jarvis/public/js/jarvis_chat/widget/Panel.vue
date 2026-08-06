@@ -321,6 +321,31 @@
 								Retry
 							</button>
 						</div>
+
+						<!-- A turn that failed server-side. Shows the same headline the
+						     full chat uses; the raw provider text (an OAuth 401 arrives
+						     as a JSON blob) stays folded away behind "Show details" so it
+						     cannot swamp a 400px panel. -->
+						<div v-if="turnError" class="jvp-turn-err" role="alert">
+							<div class="jvp-turn-err-h">{{ turnErrorHeadline }}</div>
+							<pre v-if="turnErrorOpen" class="jvp-turn-err-raw">{{
+								turnError
+							}}</pre>
+							<div class="jvp-turn-err-acts">
+								<button class="jvp-btn-subtle" type="button" @click="retryLast">
+									Retry
+								</button>
+								<button
+									v-if="turnErrorHasDetail"
+									class="jvp-btn-subtle"
+									type="button"
+									:aria-expanded="turnErrorOpen ? 'true' : 'false'"
+									@click="turnErrorOpen = !turnErrorOpen"
+								>
+									{{ turnErrorOpen ? "Hide details" : "Show details" }}
+								</button>
+							</div>
+						</div>
 					</div>
 				</template>
 			</div>
@@ -667,6 +692,68 @@ const messages = ref([]);
 const stream = ref(emptyStream());
 const loading = ref(false);
 const loadError = ref("");
+// A turn that FAILED server-side (run:error), kept separate from loadError on
+// purpose. run:error also sets `reload`, and load() clears loadError on entry —
+// so routing a failed turn through loadError meant the message was wiped by the
+// reload it triggers, and the panel showed nothing at all. A dead LLM credential
+// (auth_permanent) looked exactly like a reply that never came.
+const turnError = ref("");
+const turnErrorOpen = ref(false); // "Show details" disclosure
+// Mirrors the full chat's ERROR_HEADLINES / classifyErrorCode (ChatView.vue) so
+// both surfaces name the same failure the same way. Raw provider errors are
+// unreadable here — an OAuth 401 arrives as a multi-line JSON blob — so the
+// headline is what shows and the raw text hides behind "Show details".
+const _ERROR_HEADLINES = {
+	unreachable: "I couldn't reach the assistant",
+	timeout: "That took too long",
+	provider: "The model is busy right now",
+	"recovery-expired": "This took too long, so I stopped waiting",
+	internal: "Something went wrong",
+	cancelled: "This message was cancelled",
+};
+function classifyErrorCode(raw) {
+	const low = (raw || "").toLowerCase();
+	if (
+		low.startsWith("you cancelled this message") ||
+		low.startsWith("waited too long in the queue")
+	)
+		return "cancelled";
+	if (
+		low.includes("ws open failed") ||
+		low.includes("unreachable") ||
+		low.includes("connection timed out")
+	)
+		return "unreachable";
+	if (low.includes("recovery window")) return "recovery-expired";
+	if (low.includes("timed out") || low.includes("timeout") || low.includes("deadline"))
+		return "timeout";
+	if (
+		[
+			"quota",
+			"rate limit",
+			"cooldown",
+			"overloaded",
+			"insufficient",
+			"credit",
+			"billing",
+		].some((k) => low.includes(k))
+	)
+		return "provider";
+	return "internal";
+}
+const turnErrorCode = computed(() => classifyErrorCode(turnError.value));
+const turnErrorHeadline = computed(
+	() => _ERROR_HEADLINES[turnErrorCode.value] || "Something went wrong"
+);
+// Only offer the raw text when it says more than the headline already does.
+const turnErrorHasDetail = computed(() => {
+	const t = (turnError.value || "").trim();
+	return !!t && t !== turnErrorHeadline.value;
+});
+function clearTurnError() {
+	turnError.value = "";
+	turnErrorOpen.value = false;
+}
 const draft = ref("");
 const sending = ref(false);
 const composerFocused = ref(false);
@@ -888,6 +975,36 @@ function jumpToBottom() {
 	showScrollDown.value = false;
 	scrollToBottom();
 }
+// The arrow has to track the CONTENT, not the delivery path. stickToBottom()
+// runs only on live realtime frames (see onRealtime), so when a reply lands via
+// the polling safety net instead, nothing recomputed it: a reader parked at the
+// top of a long answer was stranded with the reply running thousands of pixels
+// past the fold and no arrow to follow it. Watching the thread itself covers
+// every path. MutationObserver, not ResizeObserver: the latter reports the
+// scroll BOX, whose size never changes as the thread inside it grows.
+let bodyMO = null;
+let arrowTick = null;
+function watchBodyGrowth() {
+	if (bodyMO || !bodyEl.value) return;
+	bodyMO = new MutationObserver(() => {
+		// Streaming mutates on nearly every token; one coalesced check per burst
+		// is enough and keeps this off the hot path.
+		if (arrowTick) return;
+		arrowTick = window.setTimeout(() => {
+			arrowTick = null;
+			stickToBottom();
+		}, 120);
+	});
+	bodyMO.observe(bodyEl.value, { subtree: true, childList: true, characterData: true });
+}
+function unwatchBodyGrowth() {
+	bodyMO?.disconnect();
+	bodyMO = null;
+	if (arrowTick) {
+		window.clearTimeout(arrowTick);
+		arrowTick = null;
+	}
+}
 
 function autoGrow() {
 	const el = textareaEl.value;
@@ -989,6 +1106,8 @@ function startNewChat() {
 	// New runs get fresh entries; old entries are three ints per run_id.
 	stream.value = { ...emptyStream(), fence: stream.value.fence };
 	loadError.value = "";
+	// The failure belonged to the conversation being left behind.
+	clearTurnError();
 	draft.value = "";
 	// Recall belongs to the conversation you are in, not to the panel.
 	promptHistory.value = [];
@@ -1112,6 +1231,8 @@ async function send() {
 	if ((!text && !atts.length) || sending.value || stream.value.live) return;
 	sending.value = true;
 	loadError.value = "";
+	// A new attempt supersedes the previous failure's notice.
+	clearTurnError();
 	lastSent.value = text;
 
 	// Optimistic echo so the panel feels immediate. run:end reloads from the
@@ -1154,6 +1275,7 @@ function retryLast() {
 	if (!lastSent.value) return;
 	draft.value = lastSent.value;
 	loadError.value = "";
+	clearTurnError();
 	// Drop the optimistic echo that never made it to the server.
 	const i = messages.value.findIndex((m) => String(m.name).startsWith("local-"));
 	if (i !== -1) messages.value.splice(i, 1);
@@ -1215,7 +1337,10 @@ function onRealtime(payload) {
 		// Clear the flag before reloading so a second frame cannot double-fetch.
 		stream.value = { ...next, reload: false, error: "" };
 		sending.value = false;
-		if (next.error) loadError.value = next.error;
+		// A failed turn has to outlive the reload it just triggered, so it goes to
+		// turnError, which load() leaves alone. Sending it to loadError meant
+		// load()'s own reset erased it before it ever rendered.
+		if (next.error) turnError.value = next.error;
 		load();
 		return;
 	}
@@ -1225,7 +1350,7 @@ function onRealtime(payload) {
 		sending.value = false;
 		stickToBottom();
 	}
-	if (next.error) loadError.value = next.error;
+	if (next.error) turnError.value = next.error;
 }
 
 // Load lazily on first open, not at mount: the FAB is on every Desk page and
@@ -1237,8 +1362,12 @@ function onRealtime(payload) {
 watch(
 	() => props.open,
 	async (isOpen) => {
-		if (!isOpen) return;
+		if (!isOpen) {
+			unwatchBodyGrowth();
+			return;
+		}
 		await nextTick();
+		watchBodyGrowth();
 		// Focus the box, not the panel shell: opening the widget is always a
 		// prelude to typing, and focusing the shell cost a click every time.
 		// Escape still closes, since the keydown bubbles to the root handler.
@@ -1315,9 +1444,13 @@ function startPolling() {
 		pollTicks += 1;
 		// ~2 minutes, then give up rather than hammer the site forever.
 		if (pollTicks > 48) {
-			stopPolling();
-			sending.value = false;
-			if (!stream.value.live) loadError.value = "Jarvis did not reply. Try again.";
+			const gaveUp = !stream.value.live;
+			// settle(), not a bare `sending = false`: giving up has to clear
+			// stream.busy too, or `thinking` stays true and the panel shows the
+			// typing dots and "Jarvis did not reply" at the same time — it claims to
+			// be working on a turn it has just abandoned.
+			settle();
+			if (gaveUp) loadError.value = "Jarvis did not reply. Try again.";
 			return;
 		}
 		if (!convId.value) return;
@@ -1375,6 +1508,7 @@ onBeforeUnmount(() => {
 	// A live recording outlives this component otherwise: the mic stays hot and
 	// the getUserMedia tracks are never released.
 	abortRecording();
+	unwatchBodyGrowth();
 	unwatchTheme?.();
 	if (rtTimer) {
 		window.clearInterval(rtTimer);
@@ -1801,6 +1935,40 @@ defineExpose({ load, startNewChat, convId });
 	display: flex;
 	align-items: center;
 	gap: 10px;
+	flex-wrap: wrap;
+}
+
+/* ---- failed turn ---- */
+.jvp-turn-err {
+	margin: 4px 0 2px;
+	padding: 10px 12px;
+	border: 1px solid var(--jv-danger);
+	border-radius: 10px;
+	background: var(--jv-surface-2, transparent);
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.jvp-turn-err-h {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--jv-danger);
+}
+.jvp-turn-err-raw {
+	margin: 0;
+	max-height: 160px;
+	overflow: auto;
+	font-size: 11px;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--jv-text-2, inherit);
+	opacity: 0.85;
+}
+.jvp-turn-err-acts {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	flex-wrap: wrap;
 }
 
