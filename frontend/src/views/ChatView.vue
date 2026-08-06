@@ -4501,7 +4501,7 @@ const thinkingLabel = computed(() => thinkingOverride.value || "auto");
 // The pool rows come FIRST and keep their order, because row 0 is the primary
 // the container actually defaults to and the rest are its failover chain. The
 // catalog rows appended after them are other models on a provider the customer
-// has ALREADY configured: openclaw serves a model id the pool spec never named,
+// has ALREADY configured: the agent serves a model id the pool spec never named,
 // so switching within a provider needs no re-save (`catalog_models`, keyed by the
 // same provider id these rows carry). They are marked `extra` so the menu can
 // separate "your models" from "also available".

@@ -1303,7 +1303,7 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 	providers this tenant has ALREADY configured.
 
 	The point is that a customer with one saved model is not stuck with it. The
-	container holds a credential per provider, and openclaw serves a model id the
+	container holds a credential per provider, and the agent serves a model id the
 	pool spec never named, so switching within a configured provider costs nothing
 	and needs no re-save.
 

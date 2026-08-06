@@ -136,7 +136,7 @@ def _wire_provider(canonical_id: str) -> str:
 # The container serves a model id its pool spec never named, so a customer does
 # not have to leave chat and re-save Settings to try another model on a provider
 # they already configured. z.ai is the one exception, and it is not cosmetic:
-# measured against openclaw's own resolver, an unnamed model inherits `maxTokens`
+# measured against the agent runtime's own resolver, an unnamed model inherits `maxTokens`
 # and `params` from the provider entry but NOT `reasoning` or `compat`, and GLM's
 # thinking suppression is `compat.thinkingFormat === "zai" && model.reasoning`.
 # Offer an unnamed GLM id and the customer gets a blank assistant bubble (#526).
