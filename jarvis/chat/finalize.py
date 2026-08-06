@@ -199,7 +199,7 @@ def _effect_enrich_cards(ctx: _Ctx) -> None:
 	# when the agent emitted an empty ``fields`` array. Skipped on an errored/
 	# cancelled turn (a partial reply has no real cards). Idempotent + best-effort;
 	# the ``message:enriched`` publish after all effects refreshes the client with
-	# the filled content. Reads run under the message owner's permissions.
+	# the filled content.
 	if ctx.errored:
 		return
 	am = ctx.turn.get("assistant_message")
@@ -207,7 +207,11 @@ def _effect_enrich_cards(ctx: _Ctx) -> None:
 		return
 	from jarvis.chat import cards_enrich
 
-	cards_enrich.enrich_message(am, owner=ctx.owner)
+	# Read as the turn's SENDER (chat_user), not the conversation owner: the whole turn
+	# pipeline scopes permission reads to the sender (prepare.py, _effect_wiki_nudge),
+	# and in a shared conversation the owner may see fields the sender must not.
+	read_as = ctx.payload.get("chat_user") or ctx.owner
+	cards_enrich.enrich_message(am, owner=read_as)
 
 
 def _effect_chat_asks(ctx: _Ctx) -> None:

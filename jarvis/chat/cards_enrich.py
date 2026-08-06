@@ -54,7 +54,12 @@ def _enrich_card(card: dict) -> bool:
 	(``summary_rows`` returns None or no rows)."""
 	if not isinstance(card, dict):
 		return False
-	if card.get("fields"):
+	# Match the SPA/PWA, which render a card's fields only when they are a NON-EMPTY
+	# LIST (``Array.isArray``). A truthy non-list (a dict, a string) reads as empty on
+	# the client, so treat it as empty here too and fill it - otherwise the floor
+	# silently fails to apply to exactly the cards that render id-only.
+	fields = card.get("fields")
+	if isinstance(fields, list) and fields:
 		return False
 	doctype = str(card.get("doctype") or "").strip()
 	name = str(card.get("name") or "").strip()
@@ -80,9 +85,14 @@ def _enrich_block(raw: str) -> tuple[str, bool]:
 		data = json.loads(raw)
 	except (ValueError, TypeError):
 		return raw, False
-	if not isinstance(data, dict):
+	# The SPA/PWA accept BOTH shapes: an object ``{cards: [...]}`` and a bare list
+	# ``[...]``. Enrich either; anything else is not a card payload.
+	if isinstance(data, dict):
+		cards = data.get("cards")
+	elif isinstance(data, list):
+		cards = data
+	else:
 		return raw, False
-	cards = data.get("cards")
 	if not isinstance(cards, list):
 		return raw, False
 	changed = False
@@ -91,7 +101,16 @@ def _enrich_block(raw: str) -> tuple[str, bool]:
 			changed = True
 	if not changed:
 		return raw, False
-	return json.dumps(data, ensure_ascii=False), True
+	new_raw = json.dumps(data, ensure_ascii=False)
+	# A picked field value can legitimately contain a literal ``` (someone pasted a
+	# code block into a Notes/Description field). Injected into the fence it would
+	# truncate the block at the client's non-greedy parser - the card would vanish AND
+	# the JSON tail would leak into the prose. This hazard arrives only with the DB
+	# values we inject, so refuse the rewrite and leave the id-only card intact rather
+	# than corrupt the message.
+	if "```" in new_raw:
+		return raw, False
+	return new_raw, True
 
 
 def enrich_text(content: str, *, owner: str | None = None) -> str:
@@ -131,8 +150,17 @@ def enrich_message(message_name: str, owner: str | None = None) -> None:
 		row = frappe.db.get_value(MSG, message_name, ["content", "owner"], as_dict=True)
 		if not row or not row.get("content"):
 			return
-		new = enrich_text(row["content"], owner=owner or row.get("owner"))
+		# Fail CLOSED: a permission-scoped read must run under a concrete human. With no
+		# owner the finalize worker's ambient identity is Administrator, whose reads
+		# bypass every permission and field-level check - so skip rather than degrade open.
+		read_as = owner or row.get("owner")
+		if not read_as:
+			return
+		new = enrich_text(row["content"], owner=read_as)
 		if new != row["content"]:
-			frappe.db.set_value(MSG, message_name, "content", new)
+			# update_modified=False: a background touch-up, not a real edit. Bumping
+			# modified here would flip modified_by to the worker and reintroduce the
+			# reply-duration inflation the finalize stamps deliberately avoid.
+			frappe.db.set_value(MSG, message_name, "content", new, update_modified=False)
 	except Exception:
 		frappe.clear_messages()
