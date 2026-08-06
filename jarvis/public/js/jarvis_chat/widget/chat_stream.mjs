@@ -16,6 +16,11 @@ export function emptyStream() {
     error: "",
     pending: [],
     reload: false,
+    // Coarse turn phase, mirroring the full SPA's status line: "waking" while a
+    // cold container starts, null otherwise. Panel.vue turns this into the
+    // visible caption ("Waking up your assistant…" / "Working on it…") so the
+    // mini panel says the same thing the web chat does instead of bare dots.
+    status: null,
     fence: {},
   };
 }
@@ -58,6 +63,7 @@ export function applyEventEx(state, payload) {
     error: state.error,
     pending: state.pending.slice(),
     reload: state.reload,
+    status: state.status || null,
     // Shallow copy is enough: admitEvent REPLACES a run's entry, never mutates it.
     fence: { ...(state.fence || {}) },
   };
@@ -76,8 +82,18 @@ export function applyEventEx(state, payload) {
 // `s` is already a safe copy the caller owns.
 function applyAdmitted(s, p) {
   switch (p.kind) {
+    // Pre-flight phase (the container is cold and being woken). Arrives BEFORE
+    // run:start, which is why it gets its own caption: this is the slowest wait
+    // in a turn and bare dots make it look hung.
+    case "run:status":
+      if (p.status === "waking") s.status = "waking";
+      return s;
+
     case "run:start":
       s.busy = false;
+      // Woken: the model is working now, so the caption drops back to the
+      // generic "Working on it…".
+      s.status = null;
       s.live = {
         runId: p.run_id || "",
         messageId: p.message_id || "",
@@ -96,6 +112,7 @@ function applyAdmitted(s, p) {
     case "run:end":
       s.busy = false;
       s.live = null;
+      s.status = null;
       // The reply is durable now; re-fetch rather than trusting the streamed
       // copy, which lacks the final formatting.
       s.reload = true;
@@ -104,6 +121,7 @@ function applyAdmitted(s, p) {
     case "run:error":
       s.busy = false;
       s.live = null;
+      s.status = null;
       s.error = p.error || "That turn failed.";
       s.reload = true;
       return s;

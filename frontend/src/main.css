@@ -109,3 +109,18 @@ body {
 .dialog-overlay {
 	z-index: 60;
 }
+
+/* …and the other half of that story. frappe-ui's Popover renders its content
+   through reka-ui's PopoverPortal into <body> as well, but carries NO z-index at
+   all (.PopoverContent is unstyled for stacking). So once the floor above lifted
+   dialogs to 60, every picker OPENED FROM INSIDE a dialog was painted over by the
+   dialog it belongs to — the role Autocomplete in "Request promotion" looked like
+   a dead control: clicking it opened a list nobody could see.
+
+   120 clears every overlay in the app (dialog 60, DraftPreview 61, skills 62, and
+   ChatView's 70/90 chat layers) while staying below ConfirmDialog's 200, so a
+   confirm still opens over an open picker. App-wide for the same reason the rule
+   above is: every Autocomplete/Dropdown/Select portals identically. */
+.PopoverContent {
+	z-index: 120;
+}
