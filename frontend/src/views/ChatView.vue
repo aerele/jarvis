@@ -440,47 +440,59 @@
 						:firstName="firstName"
 						@seen="ackHomeIntro"
 					/>
-					<!-- Claude-style minimal new chat: the brand mark inline with the
-					     greeting, no hero copy or suggestion cards. -->
-					<h1
-						v-else
-						class="jv-welcome-h1"
-						style="
-							display: flex;
-							align-items: center;
-							justify-content: center;
-							gap: 16px;
-							font-size: 40px;
-							font-weight: 640;
-							letter-spacing: -0.03em;
-							margin: 0;
-							overflow-wrap: anywhere;
-						"
-					>
-						<JarvisMark :size="38" :radius="11" style="flex: none" />
-						<span>{{ greeting }}, {{ firstName }}</span>
-					</h1>
+					<!-- The brand mark inline with the greeting, then one line of
+					     orienting copy. The copy earns its place on an empty screen: it
+					     is the only thing that says what this box is for and that the
+					     agent is wired to real ERP data. -->
+					<template v-else>
+						<h1
+							class="jv-welcome-h1"
+							style="
+								display: flex;
+								align-items: center;
+								justify-content: center;
+								gap: 16px;
+								font-size: 40px;
+								font-weight: 640;
+								letter-spacing: -0.03em;
+								margin: 0;
+								overflow-wrap: anywhere;
+							"
+						>
+							<JarvisMark :size="38" :radius="11" style="flex: none" />
+							<span>{{ greeting }}, {{ firstName }}</span>
+						</h1>
+						<p class="jv-welcome-sub">
+							Ask about your ERP data, run a workflow, or draft something.
+							{{ agentName }}
+							is connected to your
+							<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
+							instance.
+						</p>
+					</template>
 					<!-- Starter cards, same shape as the original static ones (tinted icon
-					     tile + label over the prompt) — only the CONTENT is now synthesised
-					     from this user's own recent chat titles. They FILL the composer,
-					     never send: the do-not-regress rule the old cards had. -->
+					     tile + label over the prompt). The CONTENT is synthesised from this
+					     user's own recent chat titles when there are any, and falls back to
+					     the original four defaults for a workspace with no history yet.
+					     They FILL the composer, never send: the do-not-regress rule the old
+					     cards had. -->
 					<div
-						v-if="!showHomeIntro && promptSuggestions.length"
+						v-if="!showHomeIntro"
 						class="jv-welcome-grid"
 						style="
 							display: grid;
 							grid-template-columns: 1fr 1fr;
 							gap: 11px;
 							text-align: left;
-							margin-top: 22px;
+							margin-top: 26px;
 						"
 					>
 						<button
-							v-for="(s, i) in promptSuggestions"
+							v-for="(s, i) in starterCards"
 							:key="s.prompt"
 							type="button"
 							class="jv-suggest"
-							@click="fillInput(s.prompt)"
+							@click="onWelcomeSuggestion(s)"
 							style="
 								display: flex;
 								gap: 11px;
@@ -1881,11 +1893,22 @@
 											Create <b>{{ a.doctype }}</b> "{{ a.name }}"
 										</li>
 									</ul>
-									<pre
+									<!-- Raw dry-run JSON belongs BEHIND an expander, exactly as
+									     PendingCard puts it behind its own "Details". This branch
+									     is the fallback for when the server built no structured
+									     card, and it used to dump the JSON straight into the card
+									     body - so a confirmation whose preview did not summarise
+									     landed as a wall of JSON above the Confirm button. Same
+									     information, same click to reach it, no dump. -->
+									<details
 										v-else-if="pendingPreviewOf(pa)"
-										class="jv-pending-preview"
-										>{{ pendingPreviewOf(pa) }}</pre
+										class="jv-pending-details"
 									>
+										<summary>Details</summary>
+										<pre class="jv-pending-preview">{{
+											pendingPreviewOf(pa)
+										}}</pre>
+									</details>
 								</template>
 							</template>
 						</div>
@@ -2072,7 +2095,7 @@
 						@keydown="onKey"
 						@paste="onPaste"
 						@files-added="uploadFiles"
-						@remove-attachment="removeFile"
+						@remove-attachment="removeAttachment"
 					>
 						<template #above>
 							<!-- Create menu "Create a trigger": trigger-build mode. While this marker
@@ -3612,6 +3635,8 @@ import AskCard from "@/components/chat/AskCard.vue";
 import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
 import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
+import { normaliseAction } from "@/lib/chatAction";
+import { errMessage } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
@@ -4402,7 +4427,20 @@ const liveElapsedLabel = computed(() => {
 const runMeta = ref({}); // { [message_id]: { ms, tools, names } } — survives reloads
 const canvasContent = ref({}); // { `${msgName}::${canvasName}`: srcdoc html (html/svg) | data-url (pdf/image/file) }
 const pendingFiles = ref([]); // [{ file_url, file_name }] attachments to send
-const uploading = ref(false);
+// Per-file upload state. This was a single `uploading` boolean, which could
+// only ever say "something is happening somewhere" - no file name, no way to
+// show more than one at a time, and no place at all to record a FAILURE (the
+// old code caught upload errors and dropped them on the floor).
+const uploadingFiles = ref([]); // [{ id, name }] in flight
+const failedUploads = ref([]); // [{ id, name, error }] shown until dismissed
+let _uploadSeq = 0;
+// Identity keys of uploads currently in flight, so re-picking the same file
+// while it uploads is a no-op instead of a second copy.
+const _inflightKeys = new Set();
+// Frappe's own default ceiling (frappe/core/api/file.py::get_max_file_size).
+// Checked client-side purely so an oversize file fails with a readable sentence
+// instead of a bare 413; the server remains the authority.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const mention = ref({ open: false, type: "", query: "", start: 0, items: [], index: 0 });
 // Tool names for the "Tools available" count + the /tool autocomplete. Seeded
 // with the core set as a fallback, then replaced on mount with the live bench
@@ -4475,6 +4513,35 @@ const _STARTER_TINTS = [
 	},
 ];
 const starterTint = (i) => _STARTER_TINTS[i % _STARTER_TINTS.length];
+// The original static cards, kept as the no-history fallback. A brand-new
+// workspace has nothing to synthesise from, and four good defaults are a better
+// first impression than a bare screen, and they teach the four things the
+// agent can do. Only the copy lives here: colour and icon come from position via
+// starterTint, which is exactly where these four cards' own tints came from, so
+// the fallback renders pixel-identical to the pre-synthesis design.
+const DEFAULT_STARTERS = [
+	{
+		category: "analyse",
+		title: "Analyse data",
+		prompt: "Which sales orders are overdue this month?",
+	},
+	{ category: "action", title: "Take an action", prompt: "Draft a document for me to review" },
+	{ category: "search", title: "Search records", prompt: "Search for a customer or contact" },
+	{ category: "draft", title: "Draft content", prompt: "Write a follow-up email to a lead" },
+];
+// What the welcome grid renders: this user's synthesised starters when the
+// backend returned any, else the defaults above. Never empty, so the grid always
+// has something to show.
+const starterCards = computed(() =>
+	promptSuggestions.value.length ? promptSuggestions.value : DEFAULT_STARTERS
+);
+// A card was chosen. Fills the composer, never sends (do-not-regress). The
+// bounded intro telemetry gets a category token for a default card and the short
+// synthesised label otherwise. Never the prompt text, never user content.
+function onWelcomeSuggestion(s) {
+	noteWelcomeSuggestion(s.category || s.title || "synthesised");
+	fillInput(s.prompt);
+}
 api.getPromptSuggestions()
 	.then((r) => {
 		const list = (r && r.data && r.data.suggestions) || [];
@@ -4821,6 +4888,7 @@ const {
 	homeIntroSpeakerName,
 	initFromBoot: initHomeIntro,
 	ackHomeIntro,
+	noteSuggestionSelected: noteWelcomeSuggestion,
 } = useHomeIntro({
 	showWelcome,
 	booting,
@@ -5185,12 +5253,15 @@ function chartsOf(m) {
 function askOf(m) {
 	return parseAsk((m && m.content) || "");
 }
+// Canonicalised at the single _ACTION_RE parse point so every consumer (render
+// gate, build watcher, buildDraftModel, edit panel, apply) sees ONE shape. See
+// lib/chatAction.js for which model slips are absorbed and why.
 function actionOf(m) {
 	const mt = ((m && m.content) || "").match(_ACTION_RE);
 	if (!mt) return null;
 	try {
 		const a = JSON.parse(mt[1].trim());
-		return a && typeof a === "object" ? a : null;
+		return a && typeof a === "object" ? normaliseAction(a) : null;
 	} catch (e) {
 		return null;
 	}
@@ -5840,8 +5911,14 @@ function onPreviewEdit() {
 // draft while mid-edit.
 watch(actionFor, () => {
 	const a = activeAction.value;
-	if (!(a && a.kind === "doc" && (a.verb === "create" || a.verb === "update" || !a.verb)))
-		return;
+	// Gate on EXACTLY what the template renders the summary card on: not an email
+	// block, and isEditVerb(). These two used to disagree: the card drew for any
+	// edit verb while the build additionally required kind === "doc", so a block
+	// missing `kind` rendered a card whose model was never built and sat on
+	// "Preparing summary..." indefinitely. Keep them mirrored: whatever draws a
+	// summary card must also attempt its model, so an unbuildable shape produces
+	// the error card instead of a permanent placeholder.
+	if (!a || a.kind === "email" || !isEditVerb(a)) return;
 	ensureActionSummary(a); // keep the summary card in sync with the latest action
 	if (draftPanel.value) {
 		// panel is open (user is editing) and the action re-emitted -> refresh it too
@@ -7013,6 +7090,7 @@ function resetRunState() {
 	currentRunId.value = null;
 	store.streamingConvId = null;
 	pendingFiles.value = [];
+	failedUploads.value = []; // a stale failure pill must not follow the user into a new chat
 	mention.value = { ...mention.value, open: false };
 	histIdx.value = null;
 	histDraft.value = "";
@@ -7261,6 +7339,7 @@ async function send(textArg, resendAck) {
 	if (fromMain) {
 		input.value = "";
 		pendingFiles.value = [];
+		failedUploads.value = [];
 		mention.value = { ...mention.value, open: false };
 	}
 	// A fromMain send clears the composer, so any transcribed recording in this scope whose text
@@ -7732,6 +7811,26 @@ function onEvent(p) {
 						conversation: card.conversation || p.conversation_id,
 					});
 			}
+			// UNCONDITIONAL backstop: re-read the parked list from durable server
+			// state at every terminal, whether or not this payload carried `pending`.
+			//
+			// Why the C2 self-heal above is not enough. A card reached the screen by
+			// one of three best-effort routes, and EVERY one can miss:
+			//   1. the live action:pending push (best-effort; a socket blip loses it,
+			//      and socketio has no replay);
+			//   2. this `p.pending` payload, which only exists on terminals published
+			//      through settlement/finalize (_extra_with_pending). turn_handler's
+			//      own run:end carries no `pending` key at all;
+			//   3. the loadConversation reload below, which on the ORDINARY success
+			//      path (enrichment_pending, not recovered) is deliberately skipped to
+			//      avoid a visible flash — so the resync inside it never runs, and the
+			//      card then waits on message:enriched, itself just another event.
+			// Three independent maybes multiply into the rare miss that shows up as
+			// "about one confirmation in ten never appeared". This makes the card
+			// depend on durable state instead: one cheap read per turn end, deduped by
+			// token in enqueuePending, freshness-guarded against a conversation switch,
+			// and silent on failure.
+			resyncPendingConfirmations(currentId.value);
 			// Defensive: if a promoted turn's run:start was missed, retire the chip.
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
 			const m = messages.value.find((x) => x.name === p.message_id);
@@ -7845,6 +7944,8 @@ function onEvent(p) {
 						conversation: card.conversation || p.conversation_id,
 					});
 			}
+			// …and the unconditional backstop, for the same reason as run:end below.
+			resyncPendingConfirmations(currentId.value);
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
 			if (p.message_id) {
 				errorMeta.value = {
@@ -8692,7 +8793,26 @@ const composerAttachments = computed(() => {
 		preview_url: isImageFile(f) ? f.file_url : "",
 		removable: true,
 	}));
-	if (uploading.value) chips.push({ key: "uploading", uploading: true });
+	// One in-flight pill PER file being uploaded, named, so a slow attach shows
+	// which file the wait belongs to instead of one anonymous "Uploading…" for a
+	// whole multi-file pick.
+	// Scoped to this conversation for the same reason the upload result is: an
+	// upload still running in the chat the user just left must not show its
+	// spinner in the one they opened.
+	for (const u of uploadingFiles.value)
+		if (u.conv === currentId.value)
+			chips.push({ key: `up:${u.id}`, uploading: true, file_name: u.name });
+	// Failures are shown, never swallowed. Indexed AFTER pendingFiles so the
+	// remove-attachment index the composer emits still addresses the right list
+	// (see removeAttachment).
+	for (const f of failedUploads.value)
+		chips.push({
+			key: `fail:${f.id}`,
+			failed: true,
+			file_name: f.name,
+			error: f.error,
+			removable: true,
+		});
 	return chips;
 });
 // Shared upload path for the file picker, clipboard paste, and drag-and-drop.
@@ -8701,16 +8821,59 @@ const composerAttachments = computed(() => {
 async function uploadFiles(list) {
 	const files = Array.from(list || []);
 	if (!files.length) return;
-	uploading.value = true;
-	for (const f of files) {
-		try {
-			pendingFiles.value = [...pendingFiles.value, await api.uploadFile(f)];
-		} catch (err) {
-			/* skip a file that failed to upload */
-		}
-	}
-	uploading.value = false;
+	// Uploads run CONCURRENTLY now. The old loop awaited each file in turn, so
+	// picking five made the fifth wait on the four before it with a single
+	// anonymous pill for the whole batch.
+	await Promise.all(files.map((f) => uploadOne(f)));
 	composerRef.value?.focusInput();
+}
+// The ONE upload path: file picker, drag-drop and clipboard paste all land here,
+// so a fix (the spinner, the failure pill, the size pre-check) applies to every
+// attach type rather than only the one that was reported. Never throws.
+async function uploadOne(file) {
+	const name = (file && file.name) || "file";
+	// Identity of the actual bytes, not just the name: re-picking the SAME file
+	// while its first upload is still running must not start a second one. A
+	// 3-minute voice memo takes long enough that an impatient re-click is the
+	// normal reaction, and each click used to queue another full upload - which
+	// is how one recording ended up attached five times.
+	const key = `${name}|${file && file.size}|${file && file.lastModified}`;
+	if (_inflightKeys.has(key)) {
+		notify(`${name} is already uploading`, { type: "info" });
+		return;
+	}
+	_inflightKeys.add(key);
+	const id = ++_uploadSeq;
+	// The conversation this attachment BELONGS to, captured before the await.
+	const forConv = currentId.value;
+	uploadingFiles.value = [...uploadingFiles.value, { id, name, conv: forConv }];
+	try {
+		// Pre-flight the size so an oversize file fails with a sentence the user
+		// can act on, rather than a bare HTTP 413 from the server.
+		if (MAX_UPLOAD_BYTES && file && file.size > MAX_UPLOAD_BYTES) {
+			throw new Error(`larger than the ${Math.floor(MAX_UPLOAD_BYTES / 1048576)} MB limit`);
+		}
+		const rec = await api.uploadFile(file);
+		// Freshness guard. Without it a slow upload started in one chat resolves
+		// AFTER the user has opened another and pushes itself into that chat's
+		// tray - so a brand-new chat opened mid-upload silently inherited the
+		// previous conversation's attachment. resetRunState() clears the tray on
+		// leave; an in-flight upload has to respect the same boundary.
+		if (currentId.value !== forConv) return;
+		pendingFiles.value = [...pendingFiles.value, rec];
+	} catch (err) {
+		// Previously an empty catch: the file silently never appeared, which read
+		// as "the picker is broken" for anything the server refused (an oversize
+		// recording, a blocked extension, an expired session). Show it instead.
+		const why = errMessage(err) || "upload failed";
+		if (currentId.value === forConv) {
+			failedUploads.value = [...failedUploads.value, { id, name, error: why }];
+			notify(`Could not attach ${name}: ${why}`, { type: "error" });
+		}
+	} finally {
+		_inflightKeys.delete(key);
+		uploadingFiles.value = uploadingFiles.value.filter((u) => u.id !== id);
+	}
 }
 // Transient hint shown when the clipboard holds only a file PATH, not the image
 // bytes (e.g. copying an image FILE from a file manager - the OS exposes only
@@ -8758,23 +8921,32 @@ async function onPaste(e) {
 		return;
 	}
 	e.preventDefault();
-	uploading.value = true;
-	for (let i = 0; i < imgs.length; i++) {
-		const f = imgs[i];
-		const ext = ((f.type || "image/png").split("/")[1] || "png").split("+")[0];
-		// Clipboard images come in unnamed (or all "image.png"); give each a
-		// unique, descriptive name so the upload + dedup behave.
-		const named = new File([f], `pasted-${Date.now()}-${i}.${ext}`, {
-			type: f.type || "image/png",
-		});
-		try {
-			pendingFiles.value = [...pendingFiles.value, await api.uploadFile(named)];
-		} catch (err) {
-			/* skip a file that failed to upload */
-		}
-	}
-	uploading.value = false;
-	composerRef.value?.focusInput();
+	// Same uploader as the picker and drag-drop, so pasted images get the named
+	// spinner and the failure pill too.
+	await uploadFiles(
+		imgs.map((f, i) => {
+			const ext = ((f.type || "image/png").split("/")[1] || "png").split("+")[0];
+			// Clipboard images come in unnamed (or all "image.png"); give each a
+			// unique, descriptive name so the upload + dedup behave.
+			return new File([f], `pasted-${Date.now()}-${i}.${ext}`, {
+				type: f.type || "image/png",
+			});
+		})
+	);
+}
+// The composer emits ONE index across the whole chip list, which is
+// pendingFiles, then the in-flight pills, then the failures. Only real
+// attachments and failures are removable, so map the index onto whichever list
+// owns it. Getting this wrong silently removed the wrong attachment.
+function removeAttachment(i) {
+	if (i < pendingFiles.value.length) return removeFile(i);
+	// Count the pills actually RENDERED, not every in-flight upload: the tray
+	// hides uploads belonging to another conversation, so using the full length
+	// here would shift the failure index and remove the wrong chip.
+	const visibleUploading = uploadingFiles.value.filter((u) => u.conv === currentId.value).length;
+	const failedAt = i - pendingFiles.value.length - visibleUploading;
+	if (failedAt >= 0 && failedAt < failedUploads.value.length)
+		failedUploads.value = failedUploads.value.filter((_, idx) => idx !== failedAt);
 }
 function removeFile(i) {
 	pendingFiles.value = pendingFiles.value.filter((_, idx) => idx !== i);
@@ -9896,6 +10068,14 @@ onUnmounted(() => {
 	text-align: center;
 	margin-block: auto;
 }
+/* The orienting line under the greeting. A class, not an inline style, so the
+   phone rule below can shrink it; inline styles cannot be overridden. */
+.jv-welcome-sub {
+	font-size: 15px;
+	color: var(--text-2);
+	line-height: 1.5;
+	margin: 12px 0 0;
+}
 /* Starter cards (the original card treatment, now carrying synthesised copy). */
 .jv-suggest:hover {
 	border-color: var(--border-2);
@@ -9927,6 +10107,10 @@ onUnmounted(() => {
 		/* Scaled with the desktop bump (32 -> 40), kept a step smaller so a long
 		   "Long time no see, <name>" still fits a phone without wrapping oddly. */
 		font-size: 28px !important;
+	}
+	.jv-welcome-sub {
+		font-size: 14px;
+		margin-top: 10px;
 	}
 	/* Starter cards stack: two 14px-padded cards side by side are unreadable at
 	   phone width. Inline styles set the grid, so this has to win with !important. */
@@ -12113,6 +12297,25 @@ onUnmounted(() => {
 	color: var(--text-3);
 	font-size: 12.5px;
 	line-height: 1.45;
+}
+/* Collapsed wrapper for the raw dry-run JSON in the no-structured-card fallback.
+   Mirrors PendingCard's own .jv-pcard-details so the two confirmation surfaces
+   hide the same thing the same way. */
+.jv-pending-details {
+	margin: 0 14px 8px;
+}
+.jv-pending-details > summary {
+	cursor: pointer;
+	font-size: 11.5px;
+	color: var(--text-3);
+	user-select: none;
+	padding: 2px 0;
+}
+.jv-pending-details > summary:hover {
+	color: var(--text-2);
+}
+.jv-pending-details[open] > summary {
+	margin-bottom: 6px;
 }
 .jv-pending-preview {
 	margin: 0;

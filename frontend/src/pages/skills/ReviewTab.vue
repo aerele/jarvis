@@ -2180,7 +2180,17 @@ function toScopeLabel(p) {
 // Four-eyes cue (shared by the wiki + skill queues): the viewing reviewer
 // authored this request, so the server will reject their own decide. Disable
 // Approve/Reject and say so up front rather than letting the doomed click 403.
+// Four-eyes: a reviewer cannot decide their OWN request. This MIRRORS the server
+// rule (wiki.py::_decide_promotion, custom_skills_api.py::decide_skill_promotion)
+// and must mirror its Administrator carve-out too. Both servers read
+// `reviewer == req.owner and reviewer != "Administrator"`, so Administrator may
+// decide its own request; without the same carve-out here the UI was STRICTER
+// than the server and sat Approve/Reject disabled on a request the server would
+// have accepted, leaving an Administrator-owned pending request undecidable from
+// the page. Keep the two in sync: a gate that over-refuses is as broken as one
+// that under-refuses, it just fails silently instead of with an error.
 function isMyPromo(p) {
+	if (session.user === "Administrator") return false;
 	return !!p && !!p.requested_by && p.requested_by === session.user;
 }
 // The decision is irreversible from the user's side, so Approve confirms with

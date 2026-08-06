@@ -201,22 +201,52 @@ describe("ChatView wiring (source tripwires, not behaviour)", () => {
 		expect(src).toContain('v-if="bizGreeting.show && !showHomeIntro"');
 	});
 
-	it("renders the minimal greeting over SYNTHESISED starter cards", () => {
-		// The empty state is the brand mark inline with the greeting, then starter
-		// cards whose copy comes from the user's own history — never the old
-		// hard-coded four. A regression that reintroduces a static list trips here.
+	it("renders the greeting, one orienting line, then starter cards", () => {
+		// The empty state is the brand mark inline with the greeting, a single line
+		// saying what the box is for and that the agent is wired to real ERP data,
+		// then the starter grid. The line is load-bearing on an otherwise bare
+		// screen: dropping it leaves a name and a text box with no explanation.
 		expect(src).toContain("<span>{{ greeting }}, {{ firstName }}</span>");
+		expect(src).toContain('class="jv-welcome-sub"');
+		expect(src).toContain("Ask about your ERP data, run a workflow, or draft something.");
 		expect(src).toContain('class="jv-welcome-grid"');
-		expect(src).toContain('v-for="(s, i) in promptSuggestions"');
-		expect(src).not.toContain("const suggestions = [");
+		expect(src).toContain('v-for="(s, i) in starterCards"');
+	});
+
+	it("prefers synthesised starters, falling back to the defaults only when there are none", () => {
+		// Precedence IS the invariant, in both directions: a user with history must
+		// never be shown the generic four, and a brand-new workspace must never be
+		// shown an empty grid. Gating the grid on the synthesised list being
+		// non-empty is what produced the bare screen, so that gate must stay gone.
+		expect(src).toContain(
+			"promptSuggestions.value.length ? promptSuggestions.value : DEFAULT_STARTERS"
+		);
+		expect(src).not.toContain('v-if="!showHomeIntro && promptSuggestions.length"');
+		expect(src).toContain("const DEFAULT_STARTERS = [");
 	});
 
 	it("a starter card fills the composer and never sends", () => {
 		// The do-not-regress rule the original cards carried: clicking a suggestion
 		// puts it in the box for the user to edit, it does not fire a turn.
-		expect(src).toContain('@click="fillInput(s.prompt)"');
-		const card = src.slice(src.indexOf('v-for="(s, i) in promptSuggestions"'));
+		expect(src).toContain('@click="onWelcomeSuggestion(s)"');
+		const handler = src.slice(src.indexOf("function onWelcomeSuggestion(s) {"));
+		const body = handler.slice(0, handler.indexOf("\n}"));
+		expect(body).toContain("fillInput(s.prompt)");
+		expect(body).not.toContain("sendMessage");
+		const card = src.slice(src.indexOf('v-for="(s, i) in starterCards"'));
 		expect(card.slice(0, card.indexOf("</button>"))).not.toContain("sendMessage");
+	});
+
+	it("keeps the suggestion telemetry wired to a category token, never prompt text", () => {
+		// The composable still exports noteSuggestionSelected; an earlier redesign
+		// stopped destructuring it, silently killing the signal. Pin the wiring and
+		// the argument: a stable token, never the prompt the user is about to send.
+		expect(composable).toContain("noteSuggestionSelected");
+		expect(src).toContain("noteSuggestionSelected: noteWelcomeSuggestion");
+		const handler = src.slice(src.indexOf("function onWelcomeSuggestion(s) {"));
+		const body = handler.slice(0, handler.indexOf("\n}"));
+		expect(body).toContain("noteWelcomeSuggestion(s.category || s.title");
+		expect(body).not.toContain("noteWelcomeSuggestion(s.prompt");
 	});
 
 	it("moves the welcome viewport off inline styles onto overflow-safe classes", () => {
