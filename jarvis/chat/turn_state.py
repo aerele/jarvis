@@ -98,6 +98,7 @@ QUEUED_MAX_AGE_S = 15 * 60
 EFFECT_NAMES = (
 	"terminal_publish",
 	"rich_outputs",
+	"enrich_cards",
 	"chat_asks",
 	"macro_advance",
 	"auto_title",
