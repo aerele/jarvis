@@ -511,14 +511,11 @@ import { timeAgo, exactDate } from "@/utils/datetime";
 import { getApproval } from "@/api/approvals";
 import * as api from "@/api";
 import { renderMarkdown } from "@/markdown";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── rail config ──────────────────────────────────────────────────────────────
 // "Answered" = a chat ask the user resolved IN CHAT (chat_asks.resolve_on_

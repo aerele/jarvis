@@ -155,10 +155,7 @@ import {
 	acknowledgeLearnedPattern,
 } from "@/api/learning";
 import { agentName } from "@/branding";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },

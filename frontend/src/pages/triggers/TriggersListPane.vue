@@ -138,6 +138,7 @@ import { useListPage } from "@/composables/useListPage";
 import { triggersListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiTriggers from "@/api/triggers";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	caps: { type: Object, default: () => ({}) }, // get_triggers_caps payload
@@ -147,10 +148,6 @@ const router = useRouter();
 // /triggers is a TABBED route (Triggers | Activity); the payload carries its view
 // key so the Activity tab never applies this list's filters (judgment C08-7).
 const route = useRoute();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── list config ──────────────────────────────────────────────────────────────
 const ENABLED_OPTIONS = [

@@ -299,6 +299,7 @@ import { timeAgo, exactDate, formatDate } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";
 import { takeFindingToChat } from "@/api/agents";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	// full row from list_runs_page: {name, status, trigger, started_at,
@@ -313,10 +314,6 @@ const props = defineProps({
 });
 
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const STATUS_THEME = { running: "blue", completed: "green", partial: "orange", failed: "red" };
 const SEVERITY_THEME = { blocker: "red", warning: "orange", note: "gray" };

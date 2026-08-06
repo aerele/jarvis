@@ -1820,13 +1820,10 @@ import { humaniseSyncStatus } from "@/lib/syncStatus";
 // Session user: a reviewer who is ALSO the requester can't decide their own
 // request (four-eyes); we disable + explain up front (SAR-4 / SPX-4).
 import { session } from "@/data/session";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const emit = defineEmits(["changed"]);
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── static config ────────────────────────────────────────────────────────────
 const STATUS_OPTIONS = [

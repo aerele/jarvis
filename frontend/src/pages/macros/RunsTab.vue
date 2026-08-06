@@ -166,13 +166,10 @@ import {
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const router = useRouter();
 const socket = inject("$socket");
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── list config ──────────────────────────────────────────────────────────────
 const STATUS_OPTIONS = [

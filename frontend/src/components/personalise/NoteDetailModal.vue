@@ -129,6 +129,7 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { exactDate } from "@/utils/datetime";
 import { getNote, deleteNote } from "@/api/personalise";
 import { agentName } from "@/branding";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const router = useRouter();
 
@@ -137,10 +138,6 @@ const props = defineProps({
 	name: { type: String, default: "" },
 });
 const emit = defineEmits(["update:modelValue", "changed", "reanswer"]);
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // Same theme map as NotesView's row badges - kept as a local copy (not a
 // shared import) because NotesView's is inline too; both are small enough

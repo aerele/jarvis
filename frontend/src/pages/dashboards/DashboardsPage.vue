@@ -223,13 +223,10 @@ import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardChatPane from "./DashboardChatPane.vue";
 import SavedDashboardsTab from "./SavedDashboardsTab.vue";
 import SaveDashboardDialog from "./SaveDashboardDialog.vue";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const route = useRoute();
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const TABS = [
 	{ label: "Builder", value: "builder" },

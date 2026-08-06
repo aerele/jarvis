@@ -252,6 +252,7 @@ import { connectionModeLabel } from "@/llm/pool";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { agentName } from "@/branding";
 import * as api from "@/api";
+import { errMessage } from "@/lib/errors";
 
 const store = useShellStore();
 
@@ -526,7 +527,12 @@ async function doReset() {
 		toast.success("Resetting your workspace.");
 		startPoll();
 	} catch (e) {
-		toast.error((e && e.messages && e.messages[0]) || "Could not reset the workspace.");
+		const msg = errMessage(e);
+		toast.error(
+			msg === "Something went wrong. Please try again."
+				? "Could not reset the workspace."
+				: msg
+		);
 	} finally {
 		resetBusy.value = false;
 	}

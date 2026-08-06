@@ -181,16 +181,13 @@ import { getDashboard, getDashboardsCaps, deleteDashboard, saveDashboard } from 
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
 import SaveDashboardDialog from "./SaveDashboardDialog.vue";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, required: true },
 });
 
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const detail = ref(null);
 const loading = ref(true);

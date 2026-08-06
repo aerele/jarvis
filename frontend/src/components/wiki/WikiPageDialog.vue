@@ -207,16 +207,13 @@ import {
 import JvSpinner from "@/components/JvSpinner.vue";
 import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
 	slug: { type: String, default: "" },
 });
 const emit = defineEmits(["update:modelValue", "refresh"]);
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" };
 

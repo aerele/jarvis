@@ -97,10 +97,7 @@
 import { ref, computed, watch } from "vue";
 import { Dialog, Button, FormControl, Avatar, FeatherIcon, toast } from "frappe-ui";
 import * as api from "@/api";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },

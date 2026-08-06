@@ -283,6 +283,7 @@ import { timeAgo } from "@/utils/datetime";
 import { useJarvisTheme } from "@/theme";
 import "@/assets/settings.css"; // shared jv-* primitives (overlay, jv-btn) for the discard dialog
 import * as api from "@/api";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -295,10 +296,6 @@ const router = useRouter();
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 const DOCTYPE = "Jarvis Custom Skill";
 const FIELDS = ["skill_name", "description", "instructions", "user_invocable", "enabled"];
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── state ────────────────────────────────────────────────────────────────────
 const skill = ref(null); // last server copy (null while new)

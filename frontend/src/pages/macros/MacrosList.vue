@@ -143,6 +143,7 @@ import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	tab: { type: String, default: "macros" }, // 'runs' on /macros/runs (§9)
@@ -154,10 +155,6 @@ const router = useRouter();
 // Macros tab's filters (judgment C08-7).
 const route = useRoute();
 const socket = inject("$socket");
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── tabs (synced to the route, D32-friendly: real URLs per tab) ──────────────
 const TABS = [

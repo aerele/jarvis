@@ -198,6 +198,7 @@ import { takeMacroPrefill } from "@/composables/macroPrefill";
 import { exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { agentName } from "@/branding";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -213,10 +214,6 @@ const FREQUENCY_OPTIONS = [
 	{ label: "Weekly", value: "weekly" },
 	{ label: "Monthly", value: "monthly" },
 ];
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── state ────────────────────────────────────────────────────────────────────
 const macro = ref(null); // last server copy (null while new)

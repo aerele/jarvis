@@ -303,13 +303,10 @@ import {
 	getLearningStatus,
 } from "@/api/learning";
 import { agentName } from "@/branding";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const emit = defineEmits(["changed"]);
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── state ────────────────────────────────────────────────────────────────────
 const savingSettings = ref(false);

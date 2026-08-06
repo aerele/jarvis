@@ -356,6 +356,7 @@ import ActivityDetailDialog from "./ActivityDetailDialog.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { searchLink } from "@/api";
 import * as apiTriggers from "@/api/triggers";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -366,10 +367,6 @@ const router = useRouter();
 
 const ACTION_TYPES = ["Script", "LLM"];
 const STATUS_THEME = { Success: "green", Failed: "red", Blocked: "orange", Skipped: "gray" };
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── caps (deep-linkable page → its own probe) ────────────────────────────────
 const caps = ref({

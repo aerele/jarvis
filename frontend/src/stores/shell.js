@@ -12,10 +12,7 @@ import { reactive, ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { toast } from "frappe-ui";
 import * as api from "@/api";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errMessage as errMsg } from "@/lib/errors";
 
 // ---- state ------------------------------------------------------------------
 const conversations = ref([]); // [{name,title,last_active_at,starred,message_count}]

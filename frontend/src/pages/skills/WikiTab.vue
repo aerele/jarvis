@@ -323,15 +323,12 @@ import {
 	runWikiLintNow,
 } from "@/api/wiki";
 import { agentName } from "@/branding";
+import { errMessage as errMsg } from "@/lib/errors";
 
 // /skills is a TABBED shell; the `fv2` payload carries its view key so a sibling
 // tab's filters are never half-applied here (judgment C08-7).
 const route = useRoute();
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── static config ────────────────────────────────────────────────────────────
 const WIKI_TYPES = [

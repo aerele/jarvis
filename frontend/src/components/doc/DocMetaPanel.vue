@@ -232,6 +232,7 @@ import {
 } from "frappe-ui";
 import { listShareableUsers } from "@/api";
 import { timeAgo } from "@/utils/datetime";
+import { errMessage } from "@/lib/errors";
 
 const props = defineProps({
 	docmeta: { type: Object, required: true }, // useDocmeta() object
@@ -313,7 +314,6 @@ function onUploadError(e) {
 		"Portal accounts can attach JPG, PNG, GIF, PDF, TXT, CSV and MS Office files only.";
 }
 function uploadErrMsg(e) {
-	if (e && e.messages && e.messages[0]) return e.messages[0];
 	if (e && e._server_messages) {
 		try {
 			return JSON.parse(JSON.parse(e._server_messages)[0]).message;
@@ -321,7 +321,8 @@ function uploadErrMsg(e) {
 			/* fall through */
 		}
 	}
-	return (e && e.message) || "Upload failed";
+	const msg = errMessage(e);
+	return msg === "Something went wrong. Please try again." ? "Upload failed" : msg;
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

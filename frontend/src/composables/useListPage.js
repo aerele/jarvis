@@ -17,6 +17,7 @@ import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue"
 import { useStorage } from "@vueuse/core";
 import { toast } from "frappe-ui";
 import * as api from "@/api";
+import { errMessage as errMsg } from "@/lib/errors";
 import {
 	URL_PARAM,
 	schemaIndex,
@@ -42,10 +43,6 @@ import {
 	ERR_VIEW_NOT_FILTERABLE,
 	ERR_VIEW_ROLLED_BACK,
 } from "@/components/list/filterModel";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 export function useListPage({
 	fetchFn,

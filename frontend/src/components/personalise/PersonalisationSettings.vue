@@ -348,15 +348,12 @@ import {
 } from "@/api/personalise";
 import { timeAgo } from "@/utils/datetime";
 import { agentName } from "@/branding";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	open: { type: Boolean, default: false },
 });
 const emit = defineEmits(["update:open"]);
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 function intOr(v, d) {
 	if (v === null || v === undefined || v === "") return d;
 	const n = Number(v);

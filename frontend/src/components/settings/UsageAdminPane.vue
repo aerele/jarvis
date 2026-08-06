@@ -192,10 +192,7 @@ import { timeAgo } from "@/utils/datetime";
 import { modelDisplayLabel } from "@/utils/usageModel";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import * as api from "@/api";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errMessage as errMsg } from "@/lib/errors";
 
 const users = ref([]);
 const loading = ref(false);

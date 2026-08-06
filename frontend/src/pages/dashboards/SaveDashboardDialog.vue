@@ -96,6 +96,7 @@ import { reactive, ref, computed, watch } from "vue";
 import { Badge, Button, Dialog, ErrorMessage, FormControl } from "frappe-ui";
 import { saveDashboard } from "@/api/dashboards";
 import { themeLabel } from "@/lib/dashboardThemes";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -112,10 +113,6 @@ const props = defineProps({
 });
 
 const emit = defineEmits(["update:modelValue", "saved", "fix-in-chat"]);
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // A theme-standard rejection (ThemeStandardError) is recoverable via the model:
 // surface the human messages AND offer a one-click hand-off to the builder chat.

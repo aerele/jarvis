@@ -330,6 +330,7 @@ import {
 import { renderMarkdown } from "@/markdown";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { agentName } from "@/branding";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const PAGE = 20;
 
@@ -354,10 +355,6 @@ const props = defineProps({
 	// optional seed from SkillsPage (F1); the tab refetches caps on mount too.
 	caps: { type: Object, default: () => ({}) },
 });
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── caps ─────────────────────────────────────────────────────────────────────
 const caps = reactive({

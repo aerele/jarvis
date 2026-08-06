@@ -124,16 +124,13 @@ import SyncPill from "./SyncPill.vue";
 import { session } from "@/data/session";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiSkills from "@/api/skills";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const router = useRouter();
 // /skills is a TABBED shell (Skills | Learning), so the `fv2` query param is
 // shared with a sibling tab; the payload carries its view key and a foreign one
 // is ignored rather than half-applied (judgment C08-7).
 const route = useRoute();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── list config ──────────────────────────────────────────────────────────────
 // "Ownership", not "Scope": scope is the Org/Personal skill field (shown as a

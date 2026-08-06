@@ -41,10 +41,7 @@ import { Badge, Button, Tooltip, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import * as api from "@/api";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errMessage as errMsg } from "@/lib/errors";
 
 const status = ref(""); // last_sync_status: "", "pending: …", "ok …", "failed: …"
 const pending = ref(false);

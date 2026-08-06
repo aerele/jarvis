@@ -11,10 +11,7 @@ import { reactive, ref, isRef, watch } from "vue";
 import { toast } from "frappe-ui";
 import { session } from "@/data/session";
 import * as apiDocmeta from "@/api/docmeta";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errMessage as errMsg } from "@/lib/errors";
 
 export function useDocmeta(doctype, name) {
 	// plain string (B4/B5 contract) or a ref (detail pages whose route param

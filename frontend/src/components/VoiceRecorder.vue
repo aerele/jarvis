@@ -73,6 +73,7 @@ import { ref, computed, onBeforeUnmount } from "vue";
 import { Button, toast } from "frappe-ui";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { transcribeAudio } from "@/api/voice";
+import { errMessage as errMsg } from "@/lib/errors";
 
 defineProps({
 	// Compact/embedded mode for the Personalise ChatComposer toolbar: icon-only
@@ -84,10 +85,6 @@ defineProps({
 });
 
 const emit = defineEmits(["transcript"]);
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const rec = useAudioRecorder({
 	onAutoStop: (r) => {

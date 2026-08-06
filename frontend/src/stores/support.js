@@ -6,6 +6,7 @@
 // so a failed call showed the user nothing at all — that is the defect being fixed.
 import { reactive, ref } from "vue";
 import { toast } from "frappe-ui";
+import { errMessage as errMsg } from "@/lib/errors";
 import {
 	supportListTickets,
 	supportGetThread,
@@ -15,10 +16,6 @@ import {
 	supportAwaitingCount,
 	supportUpload,
 } from "@/api";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // Mirrors jarvis_helpdesk/setup/install.py:39 AWAITING_STATUSES and
 // jarvis_admin_v2/support/awaiting.py:10 AWAITING — both ("Replied", "Resolved").

@@ -217,6 +217,7 @@ import { session } from "@/data/session";
 import { sendDashboardChat, getDashboardConversation } from "@/api/dashboards";
 import { listPendingConfirmations, confirmTool, dismissTool } from "@/api";
 import { agentName } from "@/branding";
+import { errMessage as errMsg } from "@/lib/errors";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
 // dialog; stt_enabled - when the backend sends it - gates the mic)
@@ -239,10 +240,6 @@ const router = useRouter();
 const socket = inject("$socket", null);
 // AskCard styles with the jv-* tokens, which this frappe-ui page does not bind.
 const { paletteVars } = useJarvisTheme();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── conversation persistence (per user, ChatComposer's namespacing idiom) ────
 const conversation = useStorage(`jarvis-dash-conv-${session.user || "anon"}`, "");

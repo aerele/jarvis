@@ -512,6 +512,7 @@ import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { renderMarkdown } from "@/markdown";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	slug: { type: String, required: true },
@@ -519,10 +520,6 @@ const props = defineProps({
 
 const route = useRoute();
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // display metadata (mirrors AgentsList / registry.json domains)
 const DOMAINS = [
