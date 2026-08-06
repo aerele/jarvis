@@ -129,6 +129,62 @@ def _wire_provider(canonical_id: str) -> str:
 	return _WIRE_PROVIDER_OVERRIDES.get(canonical_id, canonical_id)
 
 
+# ---------------------------------------------------------------------------
+# Which providers the chat picker may offer CATALOG models for, beyond the exact
+# rows the customer saved.
+#
+# The container serves a model id its pool spec never named, so a customer does
+# not have to leave chat and re-save Settings to try another model on a provider
+# they already configured. z.ai is the one exception, and it is not cosmetic:
+# measured against the agent runtime's own resolver, an unnamed model inherits `maxTokens`
+# and `params` from the provider entry but NOT `reasoning` or `compat`, and GLM's
+# thinking suppression is `compat.thinkingFormat === "zai" && model.reasoning`.
+# Offer an unnamed GLM id and the customer gets a blank assistant bubble (#526).
+#
+# This MIRRORS jarvis-fleet-agent `pool_render`'s `any_model` marker, which is
+# what actually gates the container. Keep the two in step: offering a model the
+# fleet render did not admit gives `model_not_found`, and because that is an
+# explicit bad-id rejection rather than an upstream failure, native failover does
+# not engage and the turn dies. That is the #498 shape. The fleet side is the
+# authority; this is only the display half.
+#
+# Keyed on provider id AND resolved host: the tenant in #526 reached z.ai through
+# the generic `openai_compat` row, so a provider-id-only test would miss the very
+# pool that reported the bug. Matched on the registrable domain (host is it, or a
+# dot-subdomain of it) so `evilz.ai` and `api.z.ai.attacker.test` do not match.
+# ---------------------------------------------------------------------------
+_ZAI_PROVIDER_IDS = frozenset({"zai", "zai_coding"})
+_ZAI_DOMAINS = ("z.ai", "bigmodel.cn")
+
+
+def _host_of(base_url: str) -> str:
+	from urllib.parse import urlsplit
+
+	try:
+		return (urlsplit((base_url or "").strip()).hostname or "").lower()
+	except ValueError:
+		return ""
+
+
+def is_zai_backed(provider: str, base_url: str = "") -> bool:
+	"""True when this credential talks to z.ai (GLM), by provider id or by host."""
+	if (provider or "").strip().lower() in _ZAI_PROVIDER_IDS:
+		return True
+	host = _host_of(base_url)
+	return any(host == d or host.endswith("." + d) for d in _ZAI_DOMAINS)
+
+
+def accepts_any_model(m) -> bool:
+	"""True when the chat picker may offer catalog models for this pool row.
+
+	False for a subscription row (its model list belongs to the upstream, not the
+	api-key catalog) and for anything z.ai-backed.
+	"""
+	if _credential_type(m) == "subscription":
+		return False
+	return not is_zai_backed(_field(m, "provider"), _field(m, "base_url"))
+
+
 def _model_accounts(m) -> list:
 	"""Return a subscription model's accounts as a list of dicts.
 

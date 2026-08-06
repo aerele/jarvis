@@ -4497,6 +4497,18 @@ const thinkingLabel = computed(() => thinkingOverride.value || "auto");
 // The pickable models: the configured LLM pool when present, else the
 // provider's subscription allowlist. Deduped on provider+model because a
 // subscription pool legitimately holds one row per ACCOUNT, not per model.
+//
+// The pool rows come FIRST and keep their order, because row 0 is the primary
+// the container actually defaults to and the rest are its failover chain. The
+// catalog rows appended after them are other models on a provider the customer
+// has ALREADY configured: the agent serves a model id the pool spec never named,
+// so switching within a provider needs no re-save (`catalog_models`, keyed by the
+// same provider id these rows carry). They are marked `extra` so the menu can
+// separate "your models" from "also available".
+//
+// Only the server decides what lands in catalog_models. Never widen this to every
+// provider in the catalog: a provider with no credential in the container answers
+// model_not_found, which does not fail over, so the turn dies (#498).
 const pickableModels = computed(() => {
 	const pool = ui.value.pool_models || [];
 	if (pool.length) {
@@ -4507,6 +4519,21 @@ const pickableModels = computed(() => {
 			if (seen.has(key)) continue;
 			seen.add(key);
 			out.push(r);
+		}
+		const catalog = ui.value.catalog_models || {};
+		for (const r of pool) {
+			for (const c of catalog[r.provider] || []) {
+				const key = `${r.provider}/${c.model}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				out.push({
+					provider: r.provider,
+					model: c.model,
+					label: c.label,
+					tier: "",
+					extra: true,
+				});
+			}
 		}
 		return out;
 	}

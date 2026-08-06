@@ -75,7 +75,16 @@
 				>
 					<span class="mep-item-body">
 						<span class="mep-name">{{ r.model }}</span>
+						<!-- `tier` belongs to a configured pool row. An `extra` row is another
+						     model on a provider the customer ALREADY configured, offered so they
+						     can switch without re-saving Settings; its catalog label is the more
+						     useful subtitle, skipped when it merely repeats the id. -->
 						<span v-if="r.tier" class="mep-desc">{{ r.tier }}</span>
+						<span
+							v-else-if="r.extra && r.label && r.label !== r.model"
+							class="mep-desc"
+							>{{ r.label }}</span
+						>
 					</span>
 					<CheckMark v-if="r.model === modelOverride" />
 				</button>
