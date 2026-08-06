@@ -94,6 +94,29 @@ export async function needsOnboarding() {
 	return NOT_ONBOARDED_REASONS.has(resp && resp.reason);
 }
 
+// Re-derive the gate for a caller that already holds a verdict and can only
+// change its mind in ONE direction (#691). AppShell mounts once for the whole
+// SPA session and reads needsOnboarding() exactly once, at boot, into a local
+// ref - there is no watcher of any kind on the readiness module, so nothing
+// re-runs that read later. A connect that succeeds while still on the wizard
+// route changes the backend verdict without remounting AppShell; the ONLY
+// thing that follows is a route change (OnboardingView.navigateToChat's
+// forgetReady() + router.replace), which AppShell never notices. The customer
+// then lands on Chat with the gate still rendering the poster it computed
+// minutes earlier, over a workspace the backend already calls ready - fixed
+// only by a hard reload, which nothing on screen suggests.
+//
+// Only worth calling while `current` is still gated: a workspace that has
+// finished onboarding stays onboarded (the NOT_ONBOARDED_REASONS doc above
+// - an established workspace's later credential rotation is a soft
+// llm_credentials degrade, never a reason back in this set), so a `false`
+// verdict never needs re-confirming and this is a no-op for the overwhelming
+// majority of route changes, not an extra round-trip per navigation.
+export async function regateOnboarding(current) {
+	if (current !== true) return current;
+	return needsOnboarding();
+}
+
 // Billing banner payload from the same memoized verdict - no extra round-trip.
 // The account was reconnected on ANOTHER site, so this one lost the workspace.
 // `site_replaced` is deliberately absent from NOT_ONBOARDED_REASONS: this site IS

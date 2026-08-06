@@ -242,13 +242,14 @@ describe("§10.4 resume, resumable, terminal semantics", () => {
 		// Both calls carried the same idempotency key so admin dedupes.
 		expect(saveMock.mock.calls[0][0]).toBe(saveMock.mock.calls[1][0]);
 		expect(routerReplace).toHaveBeenCalledTimes(1);
+		w.unmount();
 	});
 
 	it("a reload mid-apply (operationStore has an id) resumes follow() with NO new save", async () => {
 		sessionStorage.setItem(OP_STORE_KEY, "op1");
 		api.getLlmApplyOperation.mockResolvedValue(readyStatus);
 		vi.useFakeTimers();
-		mount(OnboardingView); // onMounted → maybeResumeConnect
+		const w = mount(OnboardingView); // onMounted → maybeResumeConnect
 		await flushPromises();
 		await vi.advanceTimersByTimeAsync(50);
 		await flushPromises();
@@ -256,6 +257,10 @@ describe("§10.4 resume, resumable, terminal semantics", () => {
 		expect(saveMock).not.toHaveBeenCalled();
 		expect(api.getLlmApplyOperation).toHaveBeenCalledWith("op1");
 		expect(routerReplace).toHaveBeenCalledTimes(1);
+		// Left mounted (a discarded wrapper) a stray follow-loop keeps running under
+		// the shared fake-timer clock and starves a LATER test's own multi-minute
+		// advance - unmount aborts its controller like every other test here does.
+		w.unmount();
 	});
 
 	it("a REJECTED terminal never navigates and restores the editable form", async () => {
@@ -272,6 +277,44 @@ describe("§10.4 resume, resumable, terminal semantics", () => {
 		expect(w.vm.state.finishing).toBe(false); // back to the editable connect form
 		expect(w.vm.state.connectPhase).toBe("rejected");
 		expect(w.vm.state.connectBlockReason).toMatch(/rejected/i);
+		w.unmount();
+	});
+
+	// jarvis#690: a save whose admin round-trip hard-fails (network error) at
+	// EVERY poll for the whole 5-minute deadline must not tell the customer
+	// "It's still finishing on its own" - nothing was ever confirmed applying.
+	// The controller-level computation of `neverConfirmed` (every poll for the
+	// whole deadline failing vs. at least one landing) is already pinned
+	// deterministically in llmOperation.spec.js; driving that same 5-minute
+	// deadline through OnboardingView's real timers here as well was flaky under
+	// full-suite load (many backoff/retry ticks through vitest's fake-timer
+	// microtask flushing), so this calls the host's own terminal handler
+	// directly with the exact status shape the controller resolves with -
+	// exercising precisely the onTerminal branch this fix added, deterministically.
+	it("a save that never once reached admin gets an honest retry message, not 'still finishing'", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: true });
+
+		expect(routerReplace).not.toHaveBeenCalled();
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.connectMessage).toMatch(/couldn't reach/i);
+		expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+		w.unmount();
+	});
+
+	// The sibling of the case above: at least ONE live poll response came back
+	// (admin genuinely is converging it) before the connection dropped for good.
+	// That IS honestly "still finishing on its own", and must keep saying so.
+	it("keeps the 'still finishing' message when at least one poll confirmed real progress", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+
+		expect(routerReplace).not.toHaveBeenCalled();
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.connectMessage).toMatch(/still finishing on its own/i);
+		w.unmount();
 	});
 
 	it("a duplicate terminal cannot navigate twice (one-shot guard)", async () => {

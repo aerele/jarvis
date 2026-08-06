@@ -2872,11 +2872,20 @@ function onTerminal(status) {
 		return;
 	}
 	if (status.timedOut) {
-		// The deadline released us, not the job: it is still finishing server-side.
 		state.finishing = true;
 		state.connectPhase = "retry";
-		state.connectMessage =
-			"Setup is taking longer than usual. It's still finishing on its own — you can keep waiting or retry.";
+		if (status.neverConfirmed) {
+			// jarvis#690: every poll for the whole deadline failed to reach admin -
+			// nothing was ever confirmed applying, so "still finishing on its own" is
+			// not honest (it implies progress that was never observed, and can hide a
+			// save that never landed at all). Say what actually happened instead.
+			state.connectMessage =
+				"We couldn't reach your AI provider's setup service, so nothing has been confirmed. Please retry.";
+		} else {
+			// The deadline released us, not the job: it is still finishing server-side.
+			state.connectMessage =
+				"Setup is taking longer than usual. It's still finishing on its own — you can keep waiting or retry.";
+		}
 		state.retryAfter = 0;
 		return;
 	}

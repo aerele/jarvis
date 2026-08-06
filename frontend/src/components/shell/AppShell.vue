@@ -91,7 +91,7 @@
 // gate (D11), the approvals-badge poll (D12), the global notifier (attention
 // signals for background conversations/routes, NOTIFY-APPROVALS Part 1) and
 // the global shortcuts.
-import { computed, onMounted, onBeforeUnmount, ref, inject } from "vue";
+import { computed, onMounted, onBeforeUnmount, ref, watch, inject } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { FrappeUIProvider, Dialogs, setConfig, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
@@ -99,7 +99,7 @@ import { useShellStore } from "@/stores/shell";
 import { useShortcuts } from "@/composables/useShortcuts";
 import { attachGlobalNotifier } from "@/notify/globalNotifier";
 import NotifyToaster from "@/notify/NotifyToaster.vue";
-import { needsOnboarding } from "@/onboarding/readiness.js";
+import { needsOnboarding, regateOnboarding } from "@/onboarding/readiness.js";
 import Sidebar from "./Sidebar.vue";
 import JarvisCommandPalette from "./JarvisCommandPalette.vue";
 import SettingsDialog from "./SettingsDialog.vue";
@@ -141,6 +141,24 @@ needsOnboarding().then((v) => {
 const shellReady = computed(() => gatedOnboarding.value !== null && !!route.name);
 // The wizard route is exempt so the poster's button can navigate into it.
 const showGate = computed(() => gatedOnboarding.value === true && route.name !== "Onboarding");
+
+// #691: the boot-time read above runs exactly ONCE for the whole SPA session -
+// AppShell never remounts on a client-side navigation (App.vue is just
+// <AppShell/>, owning the single <router-view/>). A connect that succeeds
+// while still on /onboarding changes the backend verdict without remounting
+// this component; the only thing that follows is a route change into Chat, and
+// without this watcher `gatedOnboarding` never hears about it - the customer
+// lands on a ready workspace still showing the "Finish setting up" poster,
+// clearable only by a hard reload that nothing on screen suggests (three
+// production reproductions, jarvis#691). regateOnboarding() is a no-op unless
+// the gate is currently up, so this costs nothing on the routes that make up
+// the overwhelming majority of navigations.
+watch(
+	() => route.name,
+	async () => {
+		gatedOnboarding.value = await regateOnboarding(gatedOnboarding.value);
+	}
+);
 
 // Boot gate: hold the routed page (NOT the shell chrome) until systemTimezone
 // is configured — timeAgo strings render once, so a late setConfig would leave

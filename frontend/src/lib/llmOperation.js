@@ -244,7 +244,8 @@ export function createOperationController(opts) {
 	 *   operation id (used on reload resume). A descriptor is rendered immediately
 	 *   so the UI never flashes empty before the first poll.
 	 * @returns {Promise<object>} resolves with the terminal status (a `timedOut`
-	 *   flag is set if the deadline was hit); rejects {aborted:true} if superseded.
+	 *   flag is set if the deadline was hit, plus `neverConfirmed` - see below);
+	 *   rejects {aborted:true} if superseded.
 	 */
 	function follow(descriptorOrId) {
 		abort(); // supersede any prior run - ONE observer
@@ -256,6 +257,14 @@ export function createOperationController(opts) {
 		store.remember(operationId);
 		deadlineAt = now() + cfg.deadlineMs;
 		let attempt = 0;
+		// Whether ANY poll of THIS run has ever come back with a real admin answer
+		// (jarvis#690). A transport error on the read is correctly absorbed and
+		// retried below - but absorbing it silently for the FULL deadline and then
+		// telling the customer "it's still finishing on its own" is only honest if
+		// we ever actually heard from admin. If every single poll failed, nothing
+		// is known to be finishing; the deadline timeout says so via
+		// `neverConfirmed` rather than implying progress that was never observed.
+		let sawLiveStatus = false;
 
 		// Seed the UI from the save descriptor before the first network poll.
 		if (descriptor) onUpdate(classifyOperation(descriptor), descriptor);
@@ -305,9 +314,17 @@ export function createOperationController(opts) {
 						state: "",
 						code: "",
 						timedOut: true,
+						// jarvis#690: never having heard from admin is a different, more
+						// honest story than "still finishing" - see sawLiveStatus above.
+						neverConfirmed: !sawLiveStatus,
 					};
 					onUpdate(
-						{ ...classifyOperation(null), phase: OP_PHASE.RETRY, timedOut: true },
+						{
+							...classifyOperation(null),
+							phase: OP_PHASE.RETRY,
+							timedOut: true,
+							neverConfirmed: !sawLiveStatus,
+						},
 						timedOut
 					);
 					settleTerminal(timedOut);
@@ -332,6 +349,7 @@ export function createOperationController(opts) {
 					return;
 				}
 				if (stale()) return;
+				sawLiveStatus = true;
 
 				const ui = classifyOperation(status);
 				onUpdate(ui, status);

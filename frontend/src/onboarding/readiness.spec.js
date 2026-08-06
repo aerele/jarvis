@@ -12,6 +12,8 @@ vi.mock("@/api.js", () => ({ isReadyForChat: (...a) => isReadyForChat(...a) }));
 const {
 	readinessDetailOf,
 	needsLlmConnection,
+	needsOnboarding,
+	regateOnboarding,
 	forgetReady,
 	replacedBanner,
 	hasReconnectIntent,
@@ -116,6 +118,45 @@ describe("readiness verdict ownership", () => {
 			const both = !!(await readinessDetailOf()) && (await needsLlmConnection());
 			expect(both, `reason ${reason} is claimed by both accessors`).toBe(false);
 		}
+	});
+});
+
+/**
+ * jarvis#691: AppShell reads needsOnboarding() exactly ONCE at mount (it never
+ * remounts across a client-side navigation) and holds the answer in a local
+ * ref, so nothing re-derives the gate on its own when a connect succeeds while
+ * still on /onboarding - the customer lands on Chat with the poster still up
+ * over a workspace the backend now calls ready. regateOnboarding(current) is
+ * what AppShell calls on every route change to close that gap; these pin its
+ * two behaviours directly, without mounting the (heavy) shell component.
+ */
+describe("regateOnboarding (jarvis#691 stale-gate re-check)", () => {
+	it("re-confirms with the backend when the caller is currently gated", async () => {
+		// The memo held a stale "never onboarded" verdict (captured before an
+		// in-app connect landed); forgetReady() (as navigateToChat() already
+		// calls before it changes the route) clears it, so the re-check below
+		// sees the fresh, ready answer.
+		verdict({ ready: false, reason: "llm_setup" });
+		expect(await needsOnboarding()).toBe(true);
+		forgetReady();
+		verdict({ ready: true, reason: null });
+		expect(await regateOnboarding(true)).toBe(false);
+	});
+
+	it("does not re-check when the caller is not currently gated", async () => {
+		// A false verdict never needs re-confirming (an established workspace's
+		// later degrade is a soft llm_credentials banner, never a return to a
+		// NOT_ONBOARDED_REASONS gate) - regateOnboarding must not spend a
+		// round-trip on every ordinary navigation.
+		isReadyForChat.mockRejectedValue(new Error("must not be called"));
+		expect(await regateOnboarding(false)).toBe(false);
+		expect(await regateOnboarding(null)).toBe(null);
+		expect(isReadyForChat).not.toHaveBeenCalled();
+	});
+
+	it("stays gated when the fresh check still says not onboarded", async () => {
+		verdict({ ready: false, reason: "signup" });
+		expect(await regateOnboarding(true)).toBe(true);
 	});
 });
 
