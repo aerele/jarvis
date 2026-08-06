@@ -92,6 +92,15 @@ def _allowed_pin_models(settings) -> set[str]:
 	allowed |= {
 		(m.model or "").strip() for m in (settings.models or []) if m.enabled and (m.model or "").strip()
 	}
+	# Catalog models on a provider this tenant already configured. The container
+	# serves a model id the pool spec never named, so the picker offers these and
+	# the pin must accept them or every such choice 417s with "not allowed".
+	#
+	# Deliberately the SAME call the picker is fed from, not a parallel rule:
+	# display and validation drifting apart is what made a pin fail while the menu
+	# still offered it. If it is offered, it is pinnable, by construction.
+	for rows in _catalog_models_for_pool(settings).values():
+		allowed |= {r["model"] for r in rows}
 	return allowed
 
 
@@ -1289,6 +1298,53 @@ def _api_key_models() -> dict[str, list[dict]]:
 	return out
 
 
+def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
+	"""Provider id -> api-key catalog models the chat picker may offer, for the
+	providers this tenant has ALREADY configured.
+
+	The point is that a customer with one saved model is not stuck with it. The
+	container holds a credential per provider, and openclaw serves a model id the
+	pool spec never named, so switching within a configured provider costs nothing
+	and needs no re-save.
+
+	Keyed on the canonical provider id the ``pool_models`` rows carry, so the UI
+	can join the two without a second lookup. The catalog's ``catalog_id`` IS that
+	id (``google`` the provider is ``gemini`` on the wire); ``provider_id`` is the
+	fallback for a legacy row.
+
+	Only providers already in the pool appear: a provider with no credential in
+	the container answers ``model_not_found``, and being an explicit bad-id
+	rejection rather than an upstream failure it does not fail over, so the turn
+	dies (#498). Adding a NEW provider stays a Settings operation.
+
+	z.ai rows are excluded by ``accepts_any_model`` -- see the note beside it in
+	pool_serialize, and keep this in step with the fleet render's ``any_model``.
+	"""
+	from jarvis import admin_client
+	from jarvis.jarvis.pool_serialize import accepts_any_model, normalize_provider
+
+	wanted = {
+		normalize_provider(getattr(m, "provider", "") or "")
+		for m in settings.models or []
+		if m.enabled and accepts_any_model(m)
+	}
+	wanted.discard("")
+	if not wanted:
+		return {}
+
+	out: dict[str, list[dict]] = {}
+	for provider in admin_client.get_model_catalog() or []:
+		pid = (provider.get("catalog_id") or provider.get("provider_id") or "").strip()
+		if pid not in wanted:
+			continue
+		rows = [m for m in provider.get("models") or [] if m.get("tier") == "api_key"]
+		rows.sort(key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or ""))
+		# Display fields only. The catalog carries no secrets by construction, but
+		# this endpoint is on the hot chat path, so it stays a narrow projection.
+		out[pid] = [{"model": m["model_id"], "label": m.get("label") or m["model_id"]} for m in rows]
+	return out
+
+
 def _subscription_connect_providers() -> list[dict]:
 	"""Providers offering DirectSubscriptionCard's paste-back OAuth connect flow.
 
@@ -1433,6 +1489,10 @@ def get_chat_ui_settings() -> dict:
 		"pool_models": pool,
 		"providers": providers,
 		"multi_provider": len(providers) > 1,
+		# Catalog models the customer may switch to IN CHAT without re-saving
+		# Settings, keyed by the same provider id the ``pool_models`` rows carry.
+		# See _catalog_models_for_pool.
+		"catalog_models": _catalog_models_for_pool(settings),
 		# Effort levels. Deliberately mirrors ``_ALLOWED_THINKING`` minus the
 		# empty "auto" entry, which the UI renders separately. agent itself
 		# accepts more levels (off/minimal/xhigh/adaptive/max), but

@@ -896,6 +896,87 @@ class TestChatUiSettings(FrappeTestCase):
 			self.assertIn(default, SUBSCRIPTION_MODELS[provider])
 
 
+class TestCatalogModelsForPool(FrappeTestCase):
+	"""The chat picker may offer catalog models on a provider the tenant ALREADY
+	configured, because the container serves a model id the pool spec never named.
+	z.ai is excluded: an unnamed model there loses `reasoning`/`compat` and returns
+	a blank bubble (#526). Mirrors jarvis-fleet-agent pool_render's `any_model`."""
+
+	CATALOG = [
+		{
+			"provider_id": "anthropic",
+			"catalog_id": "anthropic",
+			"models": [
+				{"model_id": "claude-opus-4-8", "label": "Opus", "tier": "api_key", "sort_order": 2},
+				{"model_id": "claude-sonnet-4-6", "label": "Sonnet", "tier": "api_key", "sort_order": 1},
+				{"model_id": "claude-sub", "label": "Sub", "tier": "subscription"},
+			],
+		},
+		{
+			"provider_id": "google",
+			"catalog_id": "gemini",
+			"models": [{"model_id": "gemini-3.6-flash", "label": "Flash", "tier": "api_key"}],
+		},
+		{
+			"provider_id": "zai_coding",
+			"catalog_id": "zai_coding",
+			"models": [{"model_id": "glm-4.6", "label": "GLM 4.6", "tier": "api_key"}],
+		},
+	]
+
+	def _settings(self, rows):
+		return frappe._dict(models=[frappe._dict(r) for r in rows])
+
+	def _run(self, rows):
+		from unittest.mock import patch
+
+		from jarvis.chat import api
+
+		with patch("jarvis.admin_client.get_model_catalog", return_value=self.CATALOG):
+			return api._catalog_models_for_pool(self._settings(rows))
+
+	def test_offers_catalog_models_for_a_configured_provider_only(self):
+		out = self._run([{"enabled": 1, "provider": "anthropic", "model": "claude-sonnet-4-6"}])
+		self.assertEqual(list(out), ["anthropic"], "a provider with no credential must not appear")
+		# sort_order wins over id, and subscription-tier rows are excluded
+		self.assertEqual([r["model"] for r in out["anthropic"]], ["claude-sonnet-4-6", "claude-opus-4-8"])
+		self.assertEqual(out["anthropic"][0]["label"], "Sonnet")
+
+	def test_zai_provider_is_excluded(self):
+		out = self._run([{"enabled": 1, "provider": "zai_coding", "model": "glm-4.7"}])
+		self.assertEqual(out, {}, "an unnamed GLM id returns a blank bubble (#526)")
+
+	def test_zai_reached_through_openai_compat_base_url_is_excluded(self):
+		"""The #526 tenant reached z.ai through the generic openai_compat row, so a
+		provider-id-only test would miss the very pool that reported the bug."""
+		out = self._run(
+			[
+				{
+					"enabled": 1,
+					"provider": "openai_compat",
+					"model": "glm-4.7",
+					"base_url": "https://api.z.ai/api/coding/paas/v4",
+				}
+			]
+		)
+		self.assertEqual(out, {})
+
+	def test_disabled_and_subscription_rows_contribute_nothing(self):
+		self.assertEqual(self._run([{"enabled": 0, "provider": "anthropic", "model": "x"}]), {})
+		self.assertEqual(
+			self._run(
+				[{"enabled": 1, "provider": "anthropic", "model": "x", "credential_type": "subscription"}]
+			),
+			{},
+		)
+
+	def test_legacy_google_provider_id_maps_onto_the_gemini_wire_id(self):
+		"""normalize_provider collapses the legacy `google` id onto `gemini`, which is
+		what pool rows and the catalog's catalog_id both use."""
+		out = self._run([{"enabled": 1, "provider": "google", "model": "gemini-3.6-flash"}])
+		self.assertEqual(list(out), ["gemini"])
+
+
 class TestWarmSessionEndpoint(FrappeTestCase):
 	def tearDown(self):
 		from jarvis.chat import prewarm
