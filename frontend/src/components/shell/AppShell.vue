@@ -99,7 +99,7 @@ import { useShellStore } from "@/stores/shell";
 import { useShortcuts } from "@/composables/useShortcuts";
 import { attachGlobalNotifier } from "@/notify/globalNotifier";
 import NotifyToaster from "@/notify/NotifyToaster.vue";
-import { needsOnboarding, regateOnboarding } from "@/onboarding/readiness.js";
+import { needsOnboarding, regateOnRouteChange } from "@/onboarding/readiness.js";
 import Sidebar from "./Sidebar.vue";
 import JarvisCommandPalette from "./JarvisCommandPalette.vue";
 import SettingsDialog from "./SettingsDialog.vue";
@@ -138,7 +138,14 @@ const gatedOnboarding = ref(null);
 needsOnboarding().then((v) => {
 	gatedOnboarding.value = v;
 });
-const shellReady = computed(() => gatedOnboarding.value !== null && !!route.name);
+// True while a route-triggered re-check (below) is in flight. Folded into
+// `shellReady` so that window holds the SAME neutral surface the initial boot
+// read already uses, rather than ever rendering `showGate`'s stale answer -
+// see the watcher below for why this exists (round-4 review F3).
+const regatingOnboarding = ref(false);
+const shellReady = computed(
+	() => gatedOnboarding.value !== null && !!route.name && !regatingOnboarding.value
+);
 // The wizard route is exempt so the poster's button can navigate into it.
 const showGate = computed(() => gatedOnboarding.value === true && route.name !== "Onboarding");
 
@@ -150,14 +157,17 @@ const showGate = computed(() => gatedOnboarding.value === true && route.name !==
 // without this watcher `gatedOnboarding` never hears about it - the customer
 // lands on a ready workspace still showing the "Finish setting up" poster,
 // clearable only by a hard reload that nothing on screen suggests (three
-// production reproductions, jarvis#691). regateOnboarding() is a no-op unless
-// the gate is currently up, so this costs nothing on the routes that make up
-// the overwhelming majority of navigations.
+// production reproductions, jarvis#691).
+//
+// The actual race/flash-safe logic (round-4 review F3/F4: never write the
+// stale value mid-flight, never let a superseded call win) lives in
+// readiness.js's regateOnRouteChange(), pulled out of this file so it can be
+// pinned by a plain unit test without mounting this (heavy) component. The
+// two refs below ARE its state; passing them by reference is what lets it
+// write straight into AppShell's reactivity.
 watch(
 	() => route.name,
-	async () => {
-		gatedOnboarding.value = await regateOnboarding(gatedOnboarding.value);
-	}
+	() => regateOnRouteChange(gatedOnboarding, regatingOnboarding)
 );
 
 // Boot gate: hold the routed page (NOT the shell chrome) until systemTimezone
