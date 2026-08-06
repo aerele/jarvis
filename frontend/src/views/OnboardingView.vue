@@ -2884,7 +2884,7 @@ function onTerminal(status) {
 		} else {
 			// The deadline released us, not the job: it is still finishing server-side.
 			state.connectMessage =
-				"Setup is taking longer than usual. It's still finishing on its own — you can keep waiting or retry.";
+				"Setup is taking longer than usual. It's still finishing on its own, so you can keep waiting or retry.";
 		}
 		state.retryAfter = 0;
 		return;
