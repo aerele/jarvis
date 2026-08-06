@@ -277,6 +277,43 @@ describe("createOperationController (the ONE observer)", () => {
 		expect(terminal.state).not.toBe(OP_STATE.READY);
 	});
 
+	// jarvis#690: a customer connected an AI model, the save's admin round-trip
+	// hard-failed with a network error, and NOTHING was ever persisted - yet the
+	// frontend watched a 5-minute spinner and then said "It's still finishing on
+	// its own", implying progress that was never observed. A poll transport error
+	// is correctly absorbed and retried (the sibling test above), but if EVERY
+	// poll for the whole deadline fails that way, the terminal status must say so
+	// via `neverConfirmed` rather than claim the operation is still converging.
+	it("marks the deadline timeout neverConfirmed when every single poll failed", async () => {
+		const poll = vi.fn(async () => {
+			throw new Error("network error");
+		});
+		const { clock, updates, controller } = build([], { poll, config: { deadlineMs: 10000 } });
+		const p = controller.follow(saveDescriptor);
+		await clock.advance(60000);
+		const terminal = await p;
+		expect(terminal.timedOut).toBe(true);
+		expect(terminal.neverConfirmed).toBe(true);
+		const last = updates[updates.length - 1];
+		expect(last.ui.neverConfirmed).toBe(true);
+	});
+
+	it("does NOT mark neverConfirmed once at least one poll came back with a real status", async () => {
+		let n = 0;
+		const poll = vi.fn(async () => {
+			n += 1;
+			// One live "applying" answer, then the connection drops for good.
+			if (n === 1) return statusOf("applying");
+			throw new Error("network error");
+		});
+		const { clock, controller } = build([], { poll, config: { deadlineMs: 10000 } });
+		const p = controller.follow(saveDescriptor);
+		await clock.advance(60000);
+		const terminal = await p;
+		expect(terminal.timedOut).toBe(true);
+		expect(terminal.neverConfirmed).toBe(false);
+	});
+
 	it("pauses while hidden and resumes on visibility", async () => {
 		let visible = false;
 		let visCb = null;

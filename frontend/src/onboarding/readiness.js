@@ -94,6 +94,62 @@ export async function needsOnboarding() {
 	return NOT_ONBOARDED_REASONS.has(resp && resp.reason);
 }
 
+// Re-derive the gate for a caller that already holds a verdict and can only
+// change its mind in ONE direction (#691). AppShell mounts once for the whole
+// SPA session and reads needsOnboarding() exactly once, at boot, into a local
+// ref - there is no watcher of any kind on the readiness module, so nothing
+// re-runs that read later. A connect that succeeds while still on the wizard
+// route changes the backend verdict without remounting AppShell; the ONLY
+// thing that follows is a route change (OnboardingView.navigateToChat's
+// forgetReady() + router.replace), which AppShell never notices. The customer
+// then lands on Chat with the gate still rendering the poster it computed
+// minutes earlier, over a workspace the backend already calls ready - fixed
+// only by a hard reload, which nothing on screen suggests.
+//
+// Only worth calling while `current` is still gated: a workspace that has
+// finished onboarding stays onboarded (the NOT_ONBOARDED_REASONS doc above
+// - an established workspace's later credential rotation is a soft
+// llm_credentials degrade, never a reason back in this set), so a `false`
+// verdict never needs re-confirming and this is a no-op for the overwhelming
+// majority of route changes, not an extra round-trip per navigation.
+export async function regateOnboarding(current) {
+	if (current !== true) return current;
+	return needsOnboarding();
+}
+
+// AppShell's actual route-change handler (round-4 review F3/F4), pulled out
+// here rather than left inline so its race semantics can be pinned by a plain
+// unit test without mounting the (heavy) shell component. Takes two
+// `{value}` cells - real Vue refs in production, plain objects in a test -
+// and owns writing both:
+//
+//   - F3 (the flash): `route.name` flips to "Chat" the instant
+//     navigateToChat() calls router.replace(), which is BEFORE
+//     regateOnboarding()'s await resolves. Writing `gated` only once the
+//     fresh verdict is in - never the stale `true` in between - means a
+//     caller folding `regating` into its own "hold rendering" condition
+//     (AppShell's `shellReady`) never derives `showGate` from the stale
+//     value while this is in flight. It only engages when a real re-check is
+//     about to happen (current is actually `true`), so ordinary onboarded
+//     navigation never touches `regating` at all.
+//   - F4 (the race): two route changes in quick succession while still gated
+//     issue two calls. `regateTokenSeq` is bumped once per call, synchronously,
+//     so it orders strictly by ISSUE time; a call whose token no longer
+//     matches the module's current sequence number when its await resolves
+//     was superseded by a later-issued call and must not write `gated` - an
+//     earlier-issued, later-resolving `true` must never overwrite a fresher
+//     `false`.
+let regateTokenSeq = 0;
+export async function regateOnRouteChange(gated, regating) {
+	if (gated.value !== true) return;
+	const myToken = ++regateTokenSeq;
+	regating.value = true;
+	const v = await regateOnboarding(true);
+	if (myToken !== regateTokenSeq) return; // superseded by a newer navigation
+	gated.value = v;
+	regating.value = false;
+}
+
 // Billing banner payload from the same memoized verdict - no extra round-trip.
 // The account was reconnected on ANOTHER site, so this one lost the workspace.
 // `site_replaced` is deliberately absent from NOT_ONBOARDED_REASONS: this site IS

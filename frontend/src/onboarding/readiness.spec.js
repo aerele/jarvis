@@ -12,6 +12,9 @@ vi.mock("@/api.js", () => ({ isReadyForChat: (...a) => isReadyForChat(...a) }));
 const {
 	readinessDetailOf,
 	needsLlmConnection,
+	needsOnboarding,
+	regateOnboarding,
+	regateOnRouteChange,
 	forgetReady,
 	replacedBanner,
 	hasReconnectIntent,
@@ -116,6 +119,151 @@ describe("readiness verdict ownership", () => {
 			const both = !!(await readinessDetailOf()) && (await needsLlmConnection());
 			expect(both, `reason ${reason} is claimed by both accessors`).toBe(false);
 		}
+	});
+});
+
+/**
+ * jarvis#691: AppShell reads needsOnboarding() exactly ONCE at mount (it never
+ * remounts across a client-side navigation) and holds the answer in a local
+ * ref, so nothing re-derives the gate on its own when a connect succeeds while
+ * still on /onboarding - the customer lands on Chat with the poster still up
+ * over a workspace the backend now calls ready. regateOnboarding(current) is
+ * what AppShell calls on every route change to close that gap; these pin its
+ * two behaviours directly, without mounting the (heavy) shell component.
+ */
+describe("regateOnboarding (jarvis#691 stale-gate re-check)", () => {
+	it("re-confirms with the backend when the caller is currently gated", async () => {
+		// The memo held a stale "never onboarded" verdict (captured before an
+		// in-app connect landed); forgetReady() (as navigateToChat() already
+		// calls before it changes the route) clears it, so the re-check below
+		// sees the fresh, ready answer.
+		verdict({ ready: false, reason: "llm_setup" });
+		expect(await needsOnboarding()).toBe(true);
+		forgetReady();
+		verdict({ ready: true, reason: null });
+		expect(await regateOnboarding(true)).toBe(false);
+	});
+
+	it("does not re-check when the caller is not currently gated", async () => {
+		// A false verdict never needs re-confirming (an established workspace's
+		// later degrade is a soft llm_credentials banner, never a return to a
+		// NOT_ONBOARDED_REASONS gate) - regateOnboarding must not spend a
+		// round-trip on every ordinary navigation.
+		isReadyForChat.mockRejectedValue(new Error("must not be called"));
+		expect(await regateOnboarding(false)).toBe(false);
+		expect(await regateOnboarding(null)).toBe(null);
+		expect(isReadyForChat).not.toHaveBeenCalled();
+	});
+
+	it("stays gated when the fresh check still says not onboarded", async () => {
+		verdict({ ready: false, reason: "signup" });
+		expect(await regateOnboarding(true)).toBe(true);
+	});
+});
+
+// A promise the test controls the settlement of, so a call to isReadyForChat
+// can be held open exactly as long as a scenario needs.
+function deferred() {
+	let resolve;
+	const promise = new Promise((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
+}
+
+/**
+ * round-4 review F3/F4: AppShell.vue's route-change handler used to write
+ * `gatedOnboarding` directly and without any sequencing guard. Both defects
+ * are about TIMING, not the eventual value, so these pin the sequence of
+ * states over the course of the async call rather than only its final result
+ * (per the review's own instruction: "tests that pin the timing, not just the
+ * end state").
+ */
+describe("regateOnRouteChange (jarvis#691 round-4 review F3/F4)", () => {
+	it("F3: never writes the stale gated value while the re-check is in flight (no flash)", async () => {
+		const d = deferred();
+		isReadyForChat.mockReturnValue(d.promise);
+		const gated = { value: true };
+		const regating = { value: false };
+
+		const p = regateOnRouteChange(gated, regating);
+		// Synchronously, before the network call resolves: the caller (AppShell's
+		// showGate) reads gated.value === true - if that gets rendered
+		// unconditionally, THAT is the flash this fix exists to close. The hold
+		// flag going up in the SAME microtask is what lets a caller avoid it.
+		await Promise.resolve(); // let regateOnRouteChange reach its first await
+		expect(regating.value).toBe(true);
+		expect(gated.value).toBe(true); // untouched - neither cleared nor rewritten yet
+
+		d.resolve({ ready: true, reason: null });
+		await p;
+
+		expect(regating.value).toBe(false);
+		expect(gated.value).toBe(false); // the fresh verdict, written only now
+	});
+
+	it("F3: a workspace still not onboarded also clears the hold once confirmed, poster stays up honestly", async () => {
+		const d = deferred();
+		isReadyForChat.mockReturnValue(d.promise);
+		const gated = { value: true };
+		const regating = { value: false };
+
+		const p = regateOnRouteChange(gated, regating);
+		await Promise.resolve();
+		expect(regating.value).toBe(true);
+
+		d.resolve({ ready: false, reason: "signup" });
+		await p;
+
+		expect(regating.value).toBe(false);
+		expect(gated.value).toBe(true); // confirmed still gated - the poster is correct here
+	});
+
+	it("is a fast no-op (no hold, no network call) when not currently gated", async () => {
+		isReadyForChat.mockRejectedValue(new Error("must not be called"));
+		const gated = { value: false };
+		const regating = { value: false };
+
+		await regateOnRouteChange(gated, regating);
+
+		expect(regating.value).toBe(false);
+		expect(gated.value).toBe(false);
+		expect(isReadyForChat).not.toHaveBeenCalled();
+	});
+
+	it("F4: only the most recently ISSUED check may write, regardless of resolution order", async () => {
+		const first = deferred();
+		const second = deferred();
+		isReadyForChat.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+		const gated = { value: true };
+		const regating = { value: false };
+
+		// Two route changes in quick succession while still gated: both issue
+		// before either resolves. checkReady() memoizes for the page load, so a
+		// SECOND genuinely independent read needs its own forgetReady() in
+		// between - exactly what happens between two real back-to-back
+		// connect-driven navigations, each of which calls forgetReady() itself
+		// before changing the route (see navigateToChat in OnboardingView.vue).
+		const p1 = regateOnRouteChange(gated, regating);
+		await Promise.resolve();
+		forgetReady();
+		const p2 = regateOnRouteChange(gated, regating);
+		await Promise.resolve();
+
+		// Resolve OUT OF ISSUE ORDER: the second (newer) call answers first, with
+		// the fresh "ready" verdict; the first (now-stale) call answers after,
+		// with a verdict that would wrongly re-gate a ready workspace if it were
+		// allowed to write.
+		second.resolve({ ready: true, reason: null });
+		await p2;
+		expect(gated.value).toBe(false); // the newer call's answer landed
+
+		first.resolve({ ready: false, reason: "signup" });
+		await p1;
+		// The stale, earlier-issued call must NOT have overwritten the fresher
+		// answer, even though it resolved second (last write does not win here -
+		// issue order does).
+		expect(gated.value).toBe(false);
 	});
 });
 
