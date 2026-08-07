@@ -119,7 +119,18 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		# Assembly is all best-effort reads; a hard failure here is unexpected. Error
 		# the turn (release credit) rather than dispatch a broken prompt.
 		frappe.log_error(title="prepare.assemble", message=frappe.get_traceback())
-		_prepare_error(run_id, version, assistant_msg, conversation, owner, "Could not prepare the message.")
+		# #702 review: an explicit "internal" - this is a bug in our own code
+		# (assemble_prompt raised), never a gateway/relay signal, so it must
+		# not fall through _classify_error's text guess into "gateway".
+		_prepare_error(
+			run_id,
+			version,
+			assistant_msg,
+			conversation,
+			owner,
+			"Could not prepare the message.",
+			code="internal",
+		)
 		return {"ok": False, "reason": "assemble_failed"}
 
 	# (#22/#23/#24) session bootstrap + model patch + watermark on a SHORT-LIVED
@@ -286,10 +297,21 @@ def _discard_orphan_placeholder(assistant_msg: str | None) -> None:
 			frappe.log_error(title="prepare.discard_orphan", message=frappe.get_traceback())
 
 
-def _prepare_error(run_id, version, assistant_msg, conversation, owner, error, *, exc=None) -> None:
+def _prepare_error(
+	run_id, version, assistant_msg, conversation, owner, error, *, exc=None, code=None
+) -> None:
 	"""preparing -> errored (release credit) + mark the placeholder errored + fenced
 	run:error. Best-effort; mirrors legacy's pre-ack error surface (changed_data=False
-	— the run never started)."""
+	- the run never started).
+
+	`code` lets a caller that already knows the cause skip the text/exc-based
+	guess entirely (#702 review): _classify_error's taxonomy is aimed at
+	gateway/relay failures, and a local bug in our own prompt-assembly code
+	(caught by a bare `except Exception`, no AgentUnreachableError in hand) has
+	no gateway/relay signal to classify - guessing from generic text like
+	"Could not prepare the message." would otherwise fall into the mid-run
+	"gateway" default and tell the customer to just retry a bug that a retry
+	will most likely reproduce."""
 	try:
 		if assistant_msg:
 			frappe.db.set_value(MSG, assistant_msg, {"streaming": 0, "error": (error or "")[:1000]})
@@ -300,12 +322,13 @@ def _prepare_error(run_id, version, assistant_msg, conversation, owner, error, *
 			frappe.db.rollback()
 		except Exception:
 			pass
-	try:
-		from jarvis.chat.turn_handler import _classify_error
+	if not code:
+		try:
+			from jarvis.chat.turn_handler import _classify_error
 
-		code = _classify_error(error, exc)
-	except Exception:
-		code = "internal"
+			code = _classify_error(error, exc)
+		except Exception:
+			code = "internal"
 	if owner:
 		try:
 			ts.publish_fenced(

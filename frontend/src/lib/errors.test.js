@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { errMessage } from "./errors.js";
+import { errMessage, turnErrorInfo } from "./errors.js";
 
 test("extracts the first server message when present", () => {
 	assert.equal(errMessage({ messages: ["Settings -> Developer"] }), "Settings -> Developer");
@@ -121,4 +121,113 @@ test("a non-auth status keeps its own message", () => {
 		errMessage({ status: 500, message: "Internal Server Error" }),
 		"Internal Server Error"
 	);
+});
+
+// -----------------------------------------------------------------------
+// turnErrorInfo (#702): the counterpart to errMessage() above, for a chat
+// TURN's raw `error` string instead of a Frappe API exception.
+// -----------------------------------------------------------------------
+
+// The exact wire text from #702: the agent's own generic wording for a
+// mid-run failure that was actually a device-pairing file caught mid-
+// rewrite, nothing to do with the network. Must land on "gateway" (retry),
+// not "unreachable" (we never lost the connection) and not "internal" (the
+// old behavior - a dead-end headline with no next step).
+test("#702: the observed string classifies as gateway, not unreachable or internal", () => {
+	const info = turnErrorInfo("LLM request failed: network connection error.");
+	assert.equal(info.code, "gateway");
+	assert.notEqual(info.code, "unreachable");
+	assert.notEqual(info.code, "internal");
+	assert.match(info.hint, /try/i);
+});
+
+test("a genuine transport failure stays unreachable", () => {
+	assert.equal(turnErrorInfo("ws open failed: connect ECONNREFUSED").code, "unreachable");
+	assert.equal(turnErrorInfo("agent unreachable after 3 attempts").code, "unreachable");
+});
+
+test("a provider rejection (quota/billing) stays provider", () => {
+	const info = turnErrorInfo(
+		"Google Generative AI API error (429): You exceeded your current quota."
+	);
+	assert.equal(info.code, "provider");
+});
+
+// The Python mirror (turn_handler._classify_error) matches on both "rate
+// limit" and the hyphenated "rate-limit". Must agree here too, or the same
+// text classifies as provider live and gateway on a reload.
+test("a hyphenated rate-limit reads as provider, matching the Python mirror", () => {
+	assert.equal(turnErrorInfo("upstream rate-limit exceeded").code, "provider");
+});
+
+// classifyTurnErrorCode's "connection timed out" belongs to the unreachable
+// bucket (a transport failure), not the generic timeout bucket - the Python
+// mirror agrees (see test_connection_timed_out_is_unreachable_not_timeout).
+test("connection timed out is unreachable, not a generic timeout", () => {
+	assert.equal(turnErrorInfo("connection timed out").code, "unreachable");
+});
+
+test("a recovery-window expiry and a timeout keep their own codes", () => {
+	assert.equal(
+		turnErrorInfo("Run did not finish within the recovery window.").code,
+		"recovery-expired"
+	);
+	assert.equal(turnErrorInfo("request timed out after 30s").code, "timeout");
+});
+
+// The worker's own explicit code="internal" backstop text - a page refresh
+// only has this persisted string and must reclassify it the same way the
+// live event did, not fall into the new "gateway" default.
+test("the worker backstop's own text stays internal on a reload", () => {
+	assert.equal(turnErrorInfo("unexpected worker error: TypeError").code, "internal");
+});
+
+// The live run:error event's own `code` always wins over reclassifying the
+// text - this is what lets the backend's richer classification (it has the
+// raised exception, not just its stringified message) override the text
+// heuristic.
+test("an explicit live code wins over reclassifying the text", () => {
+	const info = turnErrorInfo("some unrelated message", "provider");
+	assert.equal(info.code, "provider");
+});
+
+// #702 requirement: three failures that need different customer action must
+// not collapse into the same headline+hint.
+test("unreachable, provider and gateway are three distinct headline+hint pairs", () => {
+	const unreachable = turnErrorInfo("ws open failed");
+	const provider = turnErrorInfo("insufficient credit");
+	const gateway = turnErrorInfo("LLM request failed: network connection error.");
+	const pairs = [unreachable, provider, gateway].map((i) => `${i.headline}|${i.hint}`);
+	assert.equal(new Set(pairs).size, 3);
+	// The transient/gateway case is the one #702 asks to specifically tell the
+	// customer to retry.
+	assert.match(gateway.hint, /try/i);
+});
+
+test("cancelled has no hint - it renders as a muted note, never the error card", () => {
+	const info = turnErrorInfo("You cancelled this message.");
+	assert.equal(info.code, "cancelled");
+	assert.equal(info.hint, "");
+});
+
+// MUST be total (same contract as errMessage above): any shape of input
+// returns a usable envelope and never throws, including a truthy non-string
+// that would otherwise crash a naive `.toLowerCase()` call.
+test("turnErrorInfo is total: null, undefined, a number and an object never throw", () => {
+	for (const raw of [null, undefined, 42, { message: "boom" }, []]) {
+		const info = turnErrorInfo(raw);
+		assert.equal(typeof info.code, "string");
+		assert.equal(typeof info.headline, "string");
+		assert.ok(info.headline.length > 0);
+	}
+});
+
+// An unrecognized wire code (e.g. a future server-side taxonomy value this
+// build doesn't know about yet) must degrade to the generic headline with no
+// hint, never crash and never render a blank headline.
+test("an unrecognized explicit code falls back to the generic headline", () => {
+	const info = turnErrorInfo("does not matter", "some-future-code-v2");
+	assert.equal(info.code, "some-future-code-v2");
+	assert.equal(info.headline, "Something went wrong");
+	assert.equal(info.hint, "");
 });

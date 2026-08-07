@@ -870,6 +870,23 @@
 										>
 											No changes were made to your data.
 										</div>
+										<!-- #702: the "what you can do" line - mirrors ActionError.vue's
+										     `.jv-ae-hint`, so a turn failure gets the same headline + hint +
+										     expandable-raw-detail treatment an ACTION-card failure already
+										     does (headline/hint from errorInfo(m); the raw detail is m.error,
+										     shown in the "Show details" block below), instead of a bare
+										     message with no next step. -->
+										<div
+											v-if="errorInfo(m).hint"
+											style="
+												font-size: 12.5px;
+												color: var(--text-2);
+												line-height: 1.5;
+												margin-top: 6px;
+											"
+										>
+											{{ errorInfo(m).hint }}
+										</div>
 										<details style="margin-top: 4px">
 											<summary
 												style="
@@ -3636,7 +3653,7 @@ import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.v
 import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { normaliseAction } from "@/lib/chatAction";
-import { errMessage } from "@/lib/errors";
+import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
@@ -4331,17 +4348,11 @@ const recoveringLabel = computed(() =>
 		? "That was a big one — reorganizing the conversation and retrying…"
 		: "Reconnecting — your answer will appear here when it's ready."
 );
-// Failure taxonomy → a plain-language headline. The raw string still shows
-// behind "Show details". `code` comes from the live run:error event; a refresh
-// (which only has the persisted string) classifies it here.
-const ERROR_HEADLINES = {
-	unreachable: "I couldn't reach the assistant",
-	timeout: "That took too long",
-	provider: "The model is busy right now",
-	"recovery-expired": "This took too long, so I stopped waiting",
-	internal: "Something went wrong",
-	cancelled: "This message was cancelled",
-};
+// Failure taxonomy → a plain-language headline + "what you can do" hint. The
+// raw string still shows behind "Show details". `code` comes from the live
+// run:error event; a refresh (which only has the persisted string)
+// reclassifies it. See lib/errors.js turnErrorInfo (#702) - the single,
+// tested source for this mapping, shared with errorInfo() below.
 // Phase-0 admission (chat concurrency): the ONLY place a Turn's internal state
 // name maps to user-facing copy (SUX-8). No raw internal state name
 // ("dispatching", "queued", …) ever renders in the UI. `queued` takes a
@@ -4349,8 +4360,9 @@ const ERROR_HEADLINES = {
 // Phase-0 WIRES `queued` (the chip) and `cancelled` (cancelQueued toast + the
 // turn:cancelled fallback). `dispatching`/`errored`/`done` are defined for the
 // full state set but are NOT reached in Phase 0 (run:start jumps straight to the
-// pre-existing "Thinking…" UI; reply errors flow through ERROR_HEADLINES; a done
-// reply renders normally) — kept so the mapping is complete for WP-1 (SUXI-7).
+// pre-existing "Thinking…" UI; reply errors flow through turnErrorInfo
+// (lib/errors.js); a done reply renders normally), kept so the mapping is
+// complete for WP-1 (SUXI-7).
 const TURN_STATE_COPY = {
 	queued: (pos) => (pos && pos > 0 ? `Queued — ~${pos} ahead` : "Queued"),
 	// SUXF-3: the pump introduces a queued->preparing->ready window (prompt assembly
@@ -4370,48 +4382,12 @@ function queuedChipLabel(pos, state) {
 	if (state && TURN_STATE_COPY[state] && state !== "queued") return TURN_STATE_COPY[state]();
 	return TURN_STATE_COPY.queued(pos);
 }
-function classifyErrorCode(raw) {
-	const low = (raw || "").toLowerCase();
-	// Phase-0 admission cancel markers (SUXI-4): a queued turn cancelled by the
-	// user or aged out by the system leaves a durable transcript marker so a
-	// later reload shows WHY there's no reply (not a silent drop). Classified as
-	// "cancelled" so it renders as a muted note, NOT a red "something went wrong".
-	if (
-		low.startsWith("you cancelled this message") ||
-		low.startsWith("waited too long in the queue")
-	)
-		return "cancelled";
-	if (
-		low.includes("ws open failed") ||
-		low.includes("unreachable") ||
-		low.includes("connection timed out")
-	)
-		return "unreachable";
-	if (low.includes("recovery window")) return "recovery-expired";
-	if (low.includes("timed out") || low.includes("timeout") || low.includes("deadline"))
-		return "timeout";
-	if (
-		[
-			"quota",
-			"rate limit",
-			"cooldown",
-			"overloaded",
-			"insufficient",
-			"credit",
-			"billing",
-		].some((k) => low.includes(k))
-	)
-		return "provider";
-	return "internal";
-}
+// #702: {code, headline, hint} for one message's turn error - `turnErrorInfo`
+// (lib/errors.js) is the single, tested classifier; this only adds the
+// `noChange` flag, which is per-event metadata, not part of the taxonomy.
 function errorInfo(m) {
 	const meta = errorMeta.value[m.name] || {};
-	const code = meta.code || classifyErrorCode(m.error);
-	return {
-		code,
-		headline: ERROR_HEADLINES[code] || "Something went wrong",
-		noChange: meta.changed_data === false,
-	};
+	return { ...turnErrorInfo(m.error, meta.code), noChange: meta.changed_data === false };
 }
 // Live elapsed timer shown next to the status line so a long turn reads as
 // "still working" (time ticking) rather than a frozen spinner. Hidden for the

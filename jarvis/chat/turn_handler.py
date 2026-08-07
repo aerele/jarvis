@@ -1937,13 +1937,33 @@ def _create_assistant_placeholder(conv) -> "frappe.model.document.Document":
 
 def _classify_error(err_text: str, exc=None) -> str:
 	"""Map a raw error into a small operator-facing taxonomy code the SPA turns
-	into a plain-language headline. The raw text still travels as ``error`` and
-	shows behind a "Show details" disclosure - this only picks the headline."""
+	into a plain-language headline + hint. The raw text still travels as
+	``error`` and shows behind a "Show details" disclosure - this only picks
+	the headline/hint. Mirrored in frontend/src/lib/errors.js
+	(classifyTurnErrorCode) for the no-``code`` refresh path - errorMeta in
+	ChatView.vue is not persisted, so a reload reclassifies from the stored
+	error string alone. Keep both in sync when either changes (#702)."""
 	code = getattr(exc, "code", None)
 	if code == "turn-timeout":
 		return "timeout"
 	low = (err_text or "").lower()
-	if isinstance(exc, AgentUnreachableError) or "ws open failed" in low or "unreachable" in low:
+	# The worker's own last-resort backstop (this module's outer
+	# ``except Exception`` around handle_chat_send) stamps code="internal"
+	# explicitly and never calls this function, but a page refresh only has
+	# the persisted string - match its wording here so the two agree.
+	if low.startswith("unexpected worker error"):
+		return "internal"
+	# "connection timed out" is a transport failure (we could not reach the
+	# gateway), not a generic timeout (the model took too long to answer) -
+	# keep it in this branch, matching classifyTurnErrorCode in
+	# frontend/src/lib/errors.js, so the same text does not classify as
+	# "unreachable" live and "timeout" on a reload.
+	if (
+		isinstance(exc, AgentUnreachableError)
+		or "ws open failed" in low
+		or "unreachable" in low
+		or "connection timed out" in low
+	):
 		return "unreachable"
 	if "recovery window" in low:
 		return "recovery-expired"
@@ -1963,7 +1983,17 @@ def _classify_error(err_text: str, exc=None) -> str:
 		)
 	):
 		return "provider"
-	return "internal"
+	# #702: a run that reached this branch already got an ack and started -
+	# it is a mid-run failure the agent reported for itself (relay:error), not
+	# a case where WE failed to reach the gateway (that is "unreachable",
+	# above) or a specific provider rejection (that is "provider", above).
+	# The agent's own wording here is not reliable: "LLM request failed:
+	# network connection error." was the verbatim text for a turn that
+	# actually failed because the agent's paired-device file was mid-rewrite,
+	# nothing to do with the network. Defaulting to "gateway" instead of the
+	# old "internal" tells the customer this is likely transient and worth a
+	# retry, rather than the unhelpful "something went wrong".
+	return "gateway"
 
 
 def _mark_errored(assistant_msg_name: str, error: str) -> None:

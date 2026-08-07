@@ -2051,7 +2051,14 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 				run_id=run_id,
 				message_id=rs.assistant_message,
 				error=err,
-				code=_classify_error(err),
+				# #702 review: pass `exc` through so this classifies the same way
+				# turn_handler's own pre-ack AgentUnreachableError path does
+				# ("unreachable", via isinstance) instead of guessing from `err`'s
+				# text alone - a rejection code like "policy_denied" matches no
+				# keyword and would otherwise fall into the mid-run "gateway"
+				# default, telling the customer a pre-ack rejection is a brief
+				# hiccup worth retrying, which it is not.
+				code=_classify_error(err, exc),
 				changed_data=False,
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
@@ -3504,13 +3511,16 @@ def _telemetry(event: str, **fields) -> None:
 		pass
 
 
-def _classify_error(err_text: str) -> str:
+def _classify_error(err_text: str, exc=None) -> str:
 	"""Preserve today's Message.error headline classification (SUX-11) for the
-	pump's own error publishes (definite pre-ack rejection)."""
+	pump's own error publishes (definite pre-ack rejection). `exc` is forwarded
+	so a caller holding the raised AgentUnreachableError (e.g. a definite
+	pre-ack rejection) classifies the same way turn_handler's own equivalent
+	path does, rather than only ever guessing from `err_text` (#702 review)."""
 	try:
 		from jarvis.chat.turn_handler import _classify_error as _ce
 
-		return _ce(err_text)
+		return _ce(err_text, exc)
 	except Exception:
 		return "internal"
 
