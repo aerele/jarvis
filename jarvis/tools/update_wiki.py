@@ -25,8 +25,8 @@ Scopes (wiki v2): optional ``scope`` — "Org" (default) or "User".
 import frappe
 
 from jarvis.chat import wiki_permissions
-from jarvis.chat.wiki import PAGE_TYPES, append_source
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.chat.wiki import PAGE_TYPES, WIKI_DISABLED_MESSAGE, append_source, wiki_enabled
+from jarvis.exceptions import FeatureDisabledError, InvalidArgumentError, PermissionDeniedError
 from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE
 
 WIKI = "Jarvis Wiki Page"
@@ -90,6 +90,14 @@ def update_wiki(
 	``scope="User"`` writes the caller's personal page instead of the org
 	wiki (any Jarvis User). Returns a compact summary of the saved page."""
 	_require_system_user()
+	# #493: the operator toggle has to refuse the write channel too, or turning the
+	# wiki off leaves the agent still creating pages on request. api._run_tool
+	# carries the same gate BEFORE the confirmation park (so a workspace with the
+	# wiki off never raises a card whose only outcome is this refusal); this one
+	# catches every other dispatch path, including confirming a card that was
+	# parked before the toggle was flipped.
+	if not wiki_enabled():
+		raise FeatureDisabledError(WIKI_DISABLED_MESSAGE)
 	user = frappe.session.user
 
 	slug = (slug or "").strip().lower()

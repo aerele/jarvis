@@ -9,17 +9,39 @@ activity from agent telemetry it already reads; this push carries only the
 DB-only tiers (roles, scope, page metadata) that never otherwise leave the site
 — Role/User pages are never mirrored to the container. Derived + rebuildable;
 NEVER raises into the save/sync path.
+
+What actually travels to admin, stated plainly (#495: "page metadata" glossed
+over the fact that a title is authored content):
+
+* Org pages: real title and real slug. They are org-wide by definition, and they
+  are what make the vendor console legible.
+* Role pages: real title and real slug, deliberately. A Role page is authored for
+  a named group audience whose role name already travels as its own node, and the
+  console joins its READ/WRITE activity overlay on the slug, so minimising here
+  would go beyond what #495 asked and blind a working view. Widening is one line:
+  add "Role" to ``_MINIMISED_SCOPES``.
+* User pages: NEITHER title nor slug. Both are replaced by a stable opaque ref
+  (``_opaque_page_ref``) because a personal page titled "salary dispute with
+  manager X" is authored free text and the slug derives from the title.
+* Owning + authoring user EMAILS still travel, as ``user:`` node labels. #495
+  rules that out of scope on the ground that the usage rollup ingest already
+  sends them.
+* Page bodies and summaries never travel (``include_content``), and never have.
+
+The whole push is short-circuited when the "Enable Business Wiki" toggle is off
+(#493), before any of the above is computed.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
 import frappe
 from frappe.utils import cint
 
-from jarvis.chat.wiki import PAGE_TYPES, is_stale
+from jarvis.chat.wiki import PAGE_TYPES, WIKI_DISABLED_REASON, is_stale, wiki_enabled
 
 # Obsidian-style wikilink in a page body: [[slug]], [[slug|alias]], [[slug#h]].
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
@@ -62,6 +84,12 @@ _PAGE_FIELDS = [
 
 # Scope value → the node an Org/Role/User page is "covered by".
 _ORG_ID = "org"
+
+# #495: scopes whose page title AND slug are replaced by an opaque ref in the
+# ADMIN push. See the module docstring for why Role is not in here; adding it is
+# the one-line lever if that judgement is ever overruled.
+_MINIMISED_SCOPES = frozenset({"User"})
+_OPAQUE_REF_CHARS = 10
 
 
 def _norm_scope(scope) -> str:
@@ -128,6 +156,51 @@ def _manual_link_targets(raw, known: set[str]) -> list[str]:
 	return out[-_MAX_LINKS_PER_PAGE:]
 
 
+def _opaque_page_ref(p, scope: str) -> tuple[str, str]:
+	"""``(slug, label)`` a scope-minimised page travels to admin under (#495).
+
+	BOTH fields are replaced, because a slug derives from the title
+	(``jarvis_wiki_page._apply_scope_slug_suffix``): minimising the label while
+	still sending the slug would carry the same authored text one field over and
+	defeat the whole change.
+
+	STABLE across pushes by construction. The digest is taken over the docname,
+	which ``autoname: field:slug`` freezes at create time, so the console's graph
+	shows the same node every day and its history stays worth keeping. Nothing here
+	is a counter, a timestamp or an iteration order.
+
+	The audience part (``--u-<localpart>`` / ``--r-<role>``) derives from the
+	target, never from the title, and is kept for legibility: it lets a vendor
+	operator still see WHOSE tier a node sits in, which is what the admin view is
+	for. Both are already on the graph anyway as ``user:``/``role:`` node labels.
+	Two pages of the same owner therefore share a LABEL and differ only by id,
+	which is the intended reading: "this person has four personal pages" without
+	what they are about.
+
+	``SLUG_RE`` forbids a leading dash, so a synthetic ref beginning with ``--``
+	can never collide with a real page's slug and steal its activity overlay."""
+	digest = hashlib.sha256(str(p.name or "").encode("utf-8")).hexdigest()[:_OPAQUE_REF_CHARS]
+	if scope == "Role":
+		role = str(p.target_role or "").strip()
+		return (f"--r-{digest}", f"Role page ({role})" if role else "Role page")
+	local = str(p.target_user or "").split("@", 1)[0].strip().lower()
+	if not local:
+		return f"--u-{digest}", "User page"
+	return f"--u-{local}-{digest}", f"User page (--u-{local})"
+
+
+def _emitted_ref(p, minimise_scopes: bool) -> tuple[str, str]:
+	"""``(slug, label)`` this page is emitted under.
+
+	The real slug and real title unless the CALLER asked for minimisation and the
+	page's scope is in ``_MINIMISED_SCOPES``. The tenant SPA path never asks, so it
+	is byte-identical to before #495."""
+	slug = p.name
+	if minimise_scopes and _norm_scope(p.scope) in _MINIMISED_SCOPES:
+		return _opaque_page_ref(p, _norm_scope(p.scope))
+	return slug, (p.title or slug)
+
+
 def _sources_authors(raw) -> dict[str, int]:
 	"""``sources`` JSON ([{date, kind, ref, user}]) → {user: authored_count}.
 	Corrupt JSON contributes nothing rather than failing the compute."""
@@ -157,10 +230,12 @@ def compute_graph() -> dict:
 		order_by="modified desc",
 		limit=MAX_PAGES,
 	)
-	return _build_graph_from_pages(pages)
+	# minimise_scopes: this is the ADMIN-bound graph (#495). The tenant SPA builds
+	# its own through _build_graph_from_pages and keeps real titles.
+	return _build_graph_from_pages(pages, minimise_scopes=True)
 
 
-def _build_graph_from_pages(pages, include_content: bool = False) -> dict:
+def _build_graph_from_pages(pages, include_content: bool = False, minimise_scopes: bool = False) -> dict:
 	"""Bounded ``{nodes, edges, counts}`` from an already-fetched page list.
 
 	Shared by ``compute_graph`` (org-wide → admin push) and ``get_wiki_graph``
@@ -171,12 +246,20 @@ def _build_graph_from_pages(pages, include_content: bool = False) -> dict:
 	weighted), ``member-of`` (user→role via live ``frappe.get_roles``),
 	``links-to`` (body ``[[links]]`` ∪ durable ``manual_links``). Callers pass a
 	page set already filtered to what they may emit, so edges to pages outside
-	the set are dropped by construction (the isolation invariant, R3)."""
+	the set are dropped by construction (the isolation invariant, R3).
+
+	``minimise_scopes`` (#495, admin push only) replaces the title AND slug of a
+	``_MINIMISED_SCOPES`` page with a stable opaque ref. Left False every node is
+	exactly what it was before #495."""
 	nodes: list[dict] = [{"id": _ORG_ID, "kind": "org", "label": _org_label()}]
 	edges: list[dict] = []
 	role_ids: set[str] = set()
 	user_ids: set[str] = set()
 	known_slugs = {p.name for p in pages}
+	# Resolved for EVERY page UP FRONT (#495): links-to edges address other pages by
+	# id, so a per-page substitution decided inside the loop would leave every
+	# inbound edge still pointing at the authored slug.
+	emitted = {p.name: _emitted_ref(p, minimise_scopes) for p in pages}
 	link_edges = 0
 
 	def _role_node(role: str) -> str:
@@ -195,13 +278,14 @@ def _build_graph_from_pages(pages, include_content: bool = False) -> dict:
 
 	for p in pages:
 		slug = p.name
-		pid = f"page:{slug}"
+		emit_slug, emit_label = emitted[slug]
+		pid = f"page:{emit_slug}"
 		scope = _norm_scope(p.scope)
 		node = {
 			"id": pid,
 			"kind": "page",
-			"label": p.title or slug,
-			"slug": slug,
+			"label": emit_label,
+			"slug": emit_slug,
 			"page_type": p.page_type if p.page_type in PAGE_TYPES else "Org",
 			"scope": scope,
 			"stale": is_stale(p.last_confirmed_at, p.modified),
@@ -247,7 +331,10 @@ def _build_graph_from_pages(pages, include_content: bool = False) -> dict:
 				targets.append(t)
 		for target in targets:
 			if target != slug:
-				edges.append({"source": pid, "target": f"page:{target}", "kind": "links-to"})
+				# Through ``emitted`` (#495), never the raw target: an inbound edge to a
+				# minimised page would otherwise re-publish the slug this change hides.
+				# Every target came from ``known_slugs``, so the lookup always resolves.
+				edges.append({"source": pid, "target": f"page:{emitted[target][0]}", "kind": "links-to"})
 				link_edges += 1
 
 	# member-of: connect each user to the role nodes they actually hold (roles
@@ -288,6 +375,11 @@ def record_history_snapshot() -> dict:
 	— real link growth + orphan decline over time — which the Evolution tab prefers
 	over the reconstructed-from-creation-dates fallback. Derived + rebuildable;
 	never raises into the scheduler."""
+	# #493: a disabled wiki records nothing. Tenant-side only, so no data leaves the
+	# site either way, but the toggle is meant to stop the wiki DOING things and the
+	# issue names this job explicitly.
+	if not wiki_enabled():
+		return {"ok": False, "reason": WIKI_DISABLED_REASON}
 	try:
 		return _record_history_snapshot()
 	except Exception:
@@ -326,6 +418,11 @@ def _record_history_snapshot() -> dict:
 
 def sync() -> dict:
 	"""Compute + push the graph. Swallows + logs; never raises into callers."""
+	# #493: no page metadata leaves a workspace whose wiki is switched off. Checked
+	# BEFORE _sync, so a disabled workspace does no graph computation at all rather
+	# than building a payload (minimisation included) and then discarding it.
+	if not wiki_enabled():
+		return {"ok": False, "reason": WIKI_DISABLED_REASON}
 	try:
 		return _sync()
 	except Exception:
@@ -346,6 +443,10 @@ def _sync() -> dict:
 def enqueue_sync() -> None:
 	"""Queue the deduped graph sync (short queue). Suppressed under tests;
 	enqueue failures (Redis down) are swallowed."""
+	# #493: checked BEFORE the in_test suppression so a test that opts into real
+	# enqueues still sees the kill switch.
+	if not wiki_enabled():
+		return
 	if frappe.flags.in_test and not frappe.flags.get("jarvis_test_wiki_graph_enqueue"):
 		return
 	try:

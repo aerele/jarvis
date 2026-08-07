@@ -1,5 +1,6 @@
 """Tenant-side wiki-utilization graph compute + push (jarvis.chat.wiki_graph)."""
 
+import contextlib
 import json
 from unittest.mock import patch
 
@@ -15,6 +16,17 @@ _PREFIX = "graphtest"
 # Framework built-ins (never tenant data) used as a real Role/User link target.
 _ROLE = "System Manager"
 _USER = "Administrator"
+
+
+@contextlib.contextmanager
+def _wiki_disabled():
+	"""Drive the real operator toggle (#493), never a patched ``wiki_enabled``:
+	the question these tests ask is whether the production callers consult it."""
+	frappe.db.set_single_value("Jarvis Settings", "wiki_enabled", 0, update_modified=False)
+	try:
+		yield
+	finally:
+		frappe.db.set_single_value("Jarvis Settings", "wiki_enabled", 1, update_modified=False)
 
 
 def _delete_pages():
@@ -78,6 +90,11 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 	def _node(self, g, node_id):
 		return next((n for n in g["nodes"] if n["id"] == node_id), None)
 
+	def _pid(self, doc):
+		"""The node id this page travels under in the ADMIN push. Identical to
+		``page:<slug>`` for every scope except the minimised ones (#495)."""
+		return f"page:{wiki_graph._emitted_ref(doc, True)[0]}"
+
 	def test_org_page_scope_edge_and_no_body(self):
 		doc = self._page(f"{_PREFIX}-org", "Org Page")
 		g = self._graph()
@@ -106,7 +123,7 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		doc = self._page(f"{_PREFIX}-usercap", "User Page", scope="User", target_user=_USER)
 		with patch.object(wiki_graph, "MAX_USERS", 0):
 			g = self._graph()
-		pid = f"page:{doc.name}"
+		pid = self._pid(doc)
 		self.assertIsNone(self._node(g, f"user:{_USER}"))  # cap hit, no node
 		self.assertIn({"source": pid, "target": "org", "kind": "scope"}, g["edges"])
 
@@ -121,7 +138,7 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 	def test_user_page_makes_user_node_and_scope_edge(self):
 		doc = self._page(f"{_PREFIX}-user", "User Page", scope="User", target_user=_USER)
 		g = self._graph()
-		pid = f"page:{doc.name}"
+		pid = self._pid(doc)
 		uid = f"user:{_USER}"
 		self.assertIsNotNone(self._node(g, uid))
 		self.assertIn({"source": pid, "target": uid, "kind": "scope"}, g["edges"])
@@ -489,3 +506,163 @@ class TestWikiGraphSync(FrappeTestCase):
 			out = wiki_graph.sync()
 		self.assertTrue(out["ok"])
 		self.assertIn("pages", out)
+
+
+# A title a customer would be upset to find in the vendor's console. Deliberately
+# real free text, not "User Page": the production degenerate case is an authored
+# sentence, and a fixture that supplies a bland value proves nothing.
+_PRIVATE_TITLE = "salary dispute with manager Xavier"
+
+
+class TestWikiGraphMinimisation(WikiGraphTestCase):
+	"""#495: the daily push withheld bodies and summaries and then sent the TITLE
+	and SLUG of every scope, including private User pages. Titles are user-authored
+	free text and slugs derive from them.
+
+	Every assertion here runs over the WHOLE serialized payload rather than the one
+	field that was changed, because the slug carrying the title one field over is
+	exactly the way a half-fix passes."""
+
+	def _payload(self):
+		"""What ``sync`` posts, verbatim (``_sync`` pushes ``compute_graph()``)."""
+		return json.dumps(wiki_graph.compute_graph())
+
+	def _node(self, g, node_id):
+		return next((n for n in g["nodes"] if n["id"] == node_id), None)
+
+	def test_a_user_page_title_and_slug_are_both_absent_from_the_pushed_payload(self):
+		doc = self._page(f"{_PREFIX}-priv", _PRIVATE_TITLE, scope="User", target_user=_USER)
+		payload = self._payload()
+		self.assertNotIn(_PRIVATE_TITLE, payload)
+		# The slug is the other half. It derives from the title, so leaving it in
+		# would publish the same words under a different key.
+		self.assertNotIn(doc.name, payload)
+		# ...and the page is still THERE, as an opaque node. Minimisation, not
+		# deletion: the vendor console still needs to see the User tier exists.
+		node = next(n for n in json.loads(payload)["nodes"] if n.get("scope") == "User")
+		self.assertEqual(node["label"], "User page (--u-administrator)")
+		self.assertTrue(node["slug"].startswith("--u-administrator-"))
+
+	def test_an_org_page_node_is_byte_identical_to_before_the_change(self):
+		"""The regression direction. #495 is the one part of this work that changes
+		the ENABLED path, so an Org node is asserted WHOLE, not by its label."""
+		doc = self._page(f"{_PREFIX}-orgkeep", "Acme Corp Payment Terms")
+		node = self._node(json.loads(self._payload()), f"page:{doc.name}")
+		self.assertEqual(
+			node,
+			{
+				"id": f"page:{doc.name}",
+				"kind": "page",
+				"label": "Acme Corp Payment Terms",
+				"slug": doc.name,
+				"page_type": "Org",
+				"scope": "Org",
+				# freshly inserted, so modified is now and the 90-day window is wide open.
+				"stale": False,
+				"contradiction": False,
+				"created": str(doc.creation)[:10],
+			},
+		)
+
+	def test_a_role_page_keeps_its_real_title(self):
+		"""Deliberate, not an oversight (see the module docstring). A Role page is
+		authored for a named group whose role name already travels as its own node,
+		and admin joins its activity overlay on the slug."""
+		doc = self._page(f"{_PREFIX}-rolekeep", "Approval Limits", scope="Role", target_role=_ROLE)
+		payload = self._payload()
+		self.assertIn("Approval Limits", payload)
+		self.assertIn(doc.name, payload)
+
+	def test_the_opaque_ref_is_stable_across_two_consecutive_pushes(self):
+		"""Whatever is substituted has to derive from the page, never from a counter
+		or a timestamp: a node that changes identity daily makes the console's
+		history worthless, which is the opposite of the point."""
+		self._page(f"{_PREFIX}-stable", _PRIVATE_TITLE, scope="User", target_user=_USER)
+		first = [n for n in wiki_graph.compute_graph()["nodes"] if n.get("scope") == "User"]
+		second = [n for n in wiki_graph.compute_graph()["nodes"] if n.get("scope") == "User"]
+		self.assertEqual(len(first), 1)
+		self.assertEqual(first, second)
+
+	def test_a_link_into_a_user_page_does_not_republish_its_slug(self):
+		"""``links-to`` edges address pages by id. A substitution applied only to the
+		node would leave every inbound edge still carrying the authored slug, so the
+		payload assertion is what catches it."""
+		private = self._page(f"{_PREFIX}-linked", _PRIVATE_TITLE, scope="User", target_user=_USER)
+		public = self._page(f"{_PREFIX}-linker", "Public", body_md=f"see [[{private.name}]]")
+		payload = self._payload()
+		self.assertNotIn(private.name, payload)
+		self.assertNotIn(_PRIVATE_TITLE, payload)
+		g = json.loads(payload)
+		edge = next(e for e in g["edges"] if e["kind"] == "links-to" and e["source"] == f"page:{public.name}")
+		self.assertTrue(edge["target"].startswith("page:--u-administrator-"))
+
+	def test_the_tenant_spa_graph_still_gets_real_titles(self):
+		"""Minimisation is for the ADMIN push only. The customer's own Knowledge
+		Graph is inside their trust boundary and would be unusable without titles."""
+		self._page(f"{_PREFIX}-spa", _PRIVATE_TITLE, scope="User", target_user=_USER)
+		g = wiki_mod.get_wiki_graph()
+		self.assertIn(_PRIVATE_TITLE, json.dumps(g))
+
+	def test_user_emails_still_travel_and_that_is_deliberate(self):
+		"""#495 rules this out of scope: the usage rollup ingest in the same admin
+		file already sends per-tenant user emails. Asserted so a later reader can see
+		it was decided rather than missed."""
+		self._page(f"{_PREFIX}-mail", _PRIVATE_TITLE, scope="User", target_user=_USER)
+		self.assertIn(f"user:{_USER}", self._payload())
+
+
+class TestWikiGraphKillSwitch(WikiGraphTestCase):
+	"""#493: with the wiki switched off, page metadata kept leaving the site daily.
+	The gate runs BEFORE the graph is computed, so a disabled workspace does no work
+	rather than building a payload and discarding it."""
+
+	def test_sync_pushes_nothing_when_the_wiki_is_off(self):
+		self._page(f"{_PREFIX}-ks", "Killswitch")
+		with _wiki_disabled():
+			with patch("jarvis.admin_client.push_wiki_graph") as push:
+				out = wiki_graph.sync()
+		push.assert_not_called()
+		self.assertFalse(out["ok"])
+
+	def test_sync_computes_nothing_when_the_wiki_is_off(self):
+		"""Not merely "does not push": the gate is ahead of compute_graph, so a
+		disabled workspace never builds the payload in the first place."""
+		self._page(f"{_PREFIX}-ks2", "Killswitch")
+		with _wiki_disabled():
+			with patch.object(wiki_graph, "compute_graph") as compute:
+				wiki_graph.sync()
+		compute.assert_not_called()
+
+	def test_sync_still_pushes_when_the_wiki_is_on(self):
+		self._page(f"{_PREFIX}-ks3", "Killswitch")
+		with patch("jarvis.admin_client.push_wiki_graph", return_value={"ok": True}) as push:
+			out = wiki_graph.sync()
+		push.assert_called_once()
+		self.assertTrue(out["ok"])
+
+	def test_history_snapshot_is_a_noop_when_the_wiki_is_off(self):
+		with _wiki_disabled():
+			with patch.object(wiki_graph, "_record_history_snapshot") as work:
+				out = wiki_graph.record_history_snapshot()
+		work.assert_not_called()
+		self.assertFalse(out["ok"])
+
+	def test_history_snapshot_still_runs_when_the_wiki_is_on(self):
+		with patch.object(wiki_graph, "_record_history_snapshot", return_value={"ok": True}) as work:
+			wiki_graph.record_history_snapshot()
+		work.assert_called_once()
+
+	def test_enqueue_is_suppressed_when_the_wiki_is_off(self):
+		"""Checked ahead of the in_test suppression, so opting into real enqueues
+		still sees the kill switch."""
+		frappe.flags.jarvis_test_wiki_graph_enqueue = True
+		try:
+			with _wiki_disabled():
+				with patch("frappe.enqueue") as enq:
+					wiki_graph.enqueue_sync()
+			enq.assert_not_called()
+			with patch("frappe.enqueue") as enq:
+				wiki_graph.enqueue_sync()
+			enq.assert_called_once()
+		finally:
+			frappe.flags.jarvis_test_wiki_graph_enqueue = False

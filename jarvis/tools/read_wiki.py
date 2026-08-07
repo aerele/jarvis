@@ -22,8 +22,8 @@ import frappe
 from frappe.utils import cint
 
 from jarvis.chat import wiki_permissions
-from jarvis.chat.wiki import is_stale
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.chat.wiki import WIKI_DISABLED_MESSAGE, is_stale, wiki_enabled
+from jarvis.exceptions import FeatureDisabledError, InvalidArgumentError, PermissionDeniedError
 
 WIKI = "Jarvis Wiki Page"
 _MAX_LIMIT = 10
@@ -44,6 +44,14 @@ def read_wiki(query: str | None = None, slug: str | None = None, limit: int = 5)
 	for a search returning ``[{slug, title, page_type, summary, stale,
 	manual_links}]``."""
 	_require_system_user()
+	# #493: "Enable Business Wiki" is the operator's only wiki kill switch, and
+	# nothing removes this tool from the agent's surface (registry.py builds a
+	# static tuple at import; the plugin declares it statically), so the toggle has
+	# to be honoured HERE or the agent keeps reading every Org page with the wiki
+	# switched off. After the identity check on purpose: an unauthorised caller
+	# still gets exactly the answer it got before this change.
+	if not wiki_enabled():
+		raise FeatureDisabledError(WIKI_DISABLED_MESSAGE)
 	if slug:
 		return _get_by_slug(str(slug))
 	if query:
