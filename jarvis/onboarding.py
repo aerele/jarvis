@@ -2068,6 +2068,65 @@ def get_llm_sync_status() -> dict:
 	}
 
 
+@frappe.whitelist()
+def resync_llm() -> dict:
+	"""Re-drive this workspace's saved AI configuration through admin. The customer
+	half of #713: a way forward from a sync that failed.
+
+	It exists because a failed sync used to be a dead end with no lever anywhere.
+	Nothing retries on its own once the workspace stops looking outstanding:
+	``on_update`` syncs only what CHANGED, so re-saving the same config is a no-op;
+	``reconcile_pending_llm_sync`` acts on a pending-applying marker or on a first
+	apply that never proved itself, and a workspace that HAS a proven apply (the
+	shape in #713: llm_direct_synced_at already set from an earlier good sync)
+	matches no branch it has. The status said "Last sync failed" and nothing in the
+	product was ever going to try again.
+
+	PROBES BEFORE IT PUSHES. Most of what leaves a workspace on a failed status is
+	bookkeeping that lost a race, not a container that missed its config, so the
+	first thing this does is ask admin whether the container is already serving what
+	was saved (chat_readiness == Ready, the same receipt every other convergence
+	path trusts). If it is, this stamps the success markers and returns: no restart,
+	no re-render, no interruption to a workspace that was working the whole time.
+	The push is only for a workspace admin says is NOT converged.
+
+	Gated on ``require_jarvis_admin`` (it drives a container mutation, like every
+	other write on this module) and safe to click repeatedly: the queued work
+	carries the same job ids and takes the same redis lock as an ordinary save, so
+	a second click coalesces into the first rather than racing it.
+
+	Returns ``get_llm_sync_status()``'s shape, so a caller can render the response
+	directly with no second round trip, plus ``outcome``:
+
+	  * ``converged``      - admin already serves this config; markers stamped.
+	  * ``queued``         - a re-push was enqueued; ``leg`` is "pool" or "direct".
+	  * ``not_configured`` - nothing saved to re-drive; nothing was queued.
+	"""
+	from jarvis.account import _has_llm_config
+	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+		_admin_chat_readiness,
+		_stamp_converged_ok,
+		request_resync,
+	)
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+	require_jarvis_admin()
+	settings = frappe.get_single("Jarvis Settings")
+	# Both halves matter: a credential with no control-plane tenancy has nowhere to
+	# be pushed, and a tenancy with no credential has nothing to push.
+	if not _has_llm_config(settings) or not _has_admin_credentials(settings):
+		return {**get_llm_sync_status(), "outcome": "not_configured", "leg": ""}
+
+	state, _reason = _admin_chat_readiness()
+	if state == "Ready" and _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
+		# The stamp's own commit gate only fires in a worker; this is a request.
+		frappe.db.commit()
+		return {**get_llm_sync_status(), "outcome": "converged", "leg": ""}
+
+	leg = request_resync(settings)
+	return {**get_llm_sync_status(), "outcome": "queued", "leg": leg}
+
+
 def _pending_applying_status() -> str:
 	"""The jarvis_settings pending-applying marker, imported lazily so this
 	module keeps zero import-time coupling to the (heavy) doctype module."""
@@ -2088,8 +2147,15 @@ def _reconcile_pending_applying(settings) -> str | None:
 	opens chat and the poller stops calling admin. Returns the new status string on
 	a flip, else None (stay pending).
 
-	Best-effort: any admin error / non-Ready verdict leaves the pending status
-	untouched; the next poll retries. Never raises out of the poller."""
+	Best-effort: any admin error / non-Ready verdict / lost write-conflict race
+	leaves the pending status untouched; the next poll retries. Never raises out of
+	the poller.
+
+	This poll is one of the FOUR writers that race on the converged-ok markers
+	(#713), and the one that runs most often - every few seconds while a workspace
+	is pending-applying, from the SPA. It is also the fastest way back: the moment a
+	sync worker records the pending marker, this poller is what converges it,
+	seconds later, without waiting for the */5 reconcile."""
 	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 		_admin_chat_readiness,
 		_stamp_converged_ok,
@@ -2101,7 +2167,11 @@ def _reconcile_pending_applying(settings) -> str | None:
 		return None
 	# The marker follows the SYNC LEG, so this is pool mode - a BYO api-key pool
 	# has no sidecar (proxy_active=0) but still stamps llm_pool_synced_at.
-	_stamp_converged_ok(settings, is_pool=compute_pool_mode(settings))
+	if not _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
+		# Whoever won the race wrote the same outcome, so there is nothing to
+		# correct and nothing to tell the customer: stay pending and let the next
+		# poll read the winner's value.
+		return None
 	# _stamp_converged_ok's commit gate only fires in a worker/migrate context;
 	# this runs in a web request, where a GET would otherwise roll the terminal
 	# write back at request end.

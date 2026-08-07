@@ -138,7 +138,127 @@ def _admin_chat_readiness(*, timeout_s: int = _POOL_CONVERGE_PROBE_TIMEOUT_S):
 	return (data.get("chat_readiness") or ""), (data.get("chat_readiness_reason") or "")
 
 
-def _stamp_converged_ok(settings, *, is_pool: bool) -> None:
+#: How many times a Jarvis Settings status write is replayed through a write
+#: conflict before the caller falls back to the reconcile-owned pending state.
+#: Three is enough for a conflict class whose window is one competing commit: each
+#: replay starts from a FRESH snapshot, so it only loses again if another writer
+#: commits inside the few milliseconds the retry takes.
+_SETTINGS_WRITE_ATTEMPTS = 3
+_SETTINGS_WRITE_BACKOFF_S = 0.05
+
+
+def _is_write_conflict(e: BaseException) -> bool:
+	"""Did MariaDB refuse this statement because another connection moved the row
+	after our transaction's snapshot opened (#713)?
+
+	The bench runs MariaDB 11.6+ with ``innodb_snapshot_isolation=ON``, where a
+	LOCKING read or write that meets a record newer than the transaction's read
+	view fails immediately with ER_CHECKREAD 1020 ("Record has changed since last
+	read") rather than waiting or re-reading. Frappe folds that into
+	``QueryDeadlockError`` alongside a true ER_LOCK_DEADLOCK 1213
+	(``frappe/database/mariadb/database.py``: ``is_deadlocked`` tests for both), so
+	one class covers both and both want the same treatment here: the write did not
+	land, nothing downstream of it ran, and a replay from a fresh snapshot is the
+	whole recovery.
+
+	Matching the frappe class rather than the errno is deliberate. The errno is not
+	reachable without unwrapping ``QueryDeadlockError``'s argument, and an older
+	MariaDB that reports the same lost race as a plain 1213 has to take this branch
+	too or the customer-facing half of the fix only works on 11.6+."""
+	return isinstance(e, frappe.QueryDeadlockError)
+
+
+def _refresh_db_snapshot() -> None:
+	"""End the worker's transaction so the NEXT statement opens a fresh REPEATABLE
+	READ snapshot.
+
+	This is the structural half of #713. A sync worker's read view opens at the
+	``frappe.get_single`` that loads the doc and then stays open across the admin
+	push and up to ``_POOL_CONVERGE_DEADLINE_S`` of convergence polling - minutes,
+	most of it spent in ``time.sleep`` and HTTP. Every Jarvis Settings write that
+	commits anywhere in that window (the SPA's readiness POST stamping
+	``chat_was_ready_at``, its sync poller converging a pending apply, the */5
+	reconcile, the apply-operation poll folding in probe verdicts) makes the
+	worker's own terminal write fail. Calling this before each probe shrinks the
+	exposure from "the whole job" to "one HTTP round trip".
+
+	Same real-worker gate as ``_commit_terminal_sync_status``, and for the same
+	reason: outside ``execute_job`` there is no rollback to defeat and committing
+	would break FrappeTestCase isolation. A single-connection context has no
+	competing writer to lose to, so skipping the refresh there costs nothing."""
+	if getattr(frappe.local, "job", None) or frappe.flags.in_migrate:
+		frappe.db.commit()
+
+
+def _write_settings_fields(settings, fields: dict) -> bool:
+	"""Write status/marker fields onto Jarvis Settings so that a concurrent writer
+	cannot turn the write into a customer-visible failure (#713). Returns whether
+	it landed.
+
+	IT IS THE PRE-READ THAT FAILED LIVE, not the write. On the first ``db_set`` of a
+	freshly loaded doc, ``Document.load_doc_before_save`` runs
+
+	    SELECT field,value FROM tabSingles WHERE doctype='Jarvis Settings' FOR UPDATE
+
+	which locks EVERY Jarvis Settings row - 100 of them on a live workspace - to
+	write three. Under snapshot isolation that makes a status stamp conflict with a
+	concurrent write to any unrelated field, which is exactly what happened: a
+	readiness marker killed a sync. ``frappe.db.set_single_value`` is what ``db_set``
+	delegates the actual write to, so going straight to it drops the pre-read and
+	narrows the conflict surface to the fields actually being written. Nothing is
+	lost by skipping ``db_set``: the only other things it does are ``before_change``
+	/ ``on_change``, and neither this controller nor ``hooks.doc_events`` binds
+	either for this doctype (the Jarvis Triggers wildcard covers ``on_update``, not
+	``on_change``). The in-memory doc is still updated so callers reading it back
+	see their own write.
+
+	The residual same-field conflict is REPLAYED. Safe because every field written
+	through here is an ABSOLUTE value - a status string, a timestamp, an apply
+	marker - computed from an outcome already in hand, never a read-modify-write of
+	what is in the row. Replaying one cannot lose an interleaved update the way a
+	compare-and-set would; the last writer of a given outcome wins, which is what
+	last_sync_status has always meant.
+
+	THE ROLLBACK BEFORE EACH REPLAY IS THE POINT, not tidying up. ER_CHECKREAD
+	fails BECAUSE our snapshot is stale, so a retry on that same snapshot fails
+	identically forever. Ending the transaction is what makes the next attempt read
+	the present. It discards nothing: MariaDB aborts the transaction itself on
+	1020/1213, which is directly visible in the #713 trace - the try/finally
+	backstop's own db_set ran 2ms after the failure and SUCCEEDED, which is only
+	possible on a read view the server had already replaced. (jarvis-admin-v2 #264
+	reasoned the other way, that ER_CHECKREAD is statement-level and leaves the
+	transaction usable, and deliberately did not roll back; its recovery path
+	commits first, so it gets a fresh snapshot regardless.)
+
+	The one caller that reaches here holding work worth protecting does not: the
+	request path is ``save_llm_pool``, which COMMITS the customer's saved config
+	before it calls ``sync_pool_now`` at all, so no rollback here can cost anyone
+	the credential they just typed."""
+	import time as _time
+
+	last_error: BaseException | None = None
+	for attempt in range(_SETTINGS_WRITE_ATTEMPTS):
+		try:
+			frappe.db.set_single_value("Jarvis Settings", dict(fields), update_modified=False)
+			settings.update(dict(fields))
+			return True
+		except Exception as e:
+			if not _is_write_conflict(e):
+				raise
+			last_error = e
+			if attempt < _SETTINGS_WRITE_ATTEMPTS - 1:
+				frappe.db.rollback()
+				_time.sleep(_SETTINGS_WRITE_BACKOFF_S * (attempt + 1))
+	frappe.logger().warning(
+		"jarvis_settings: settings write lost %d write-conflict races on fields %s (%s)",
+		_SETTINGS_WRITE_ATTEMPTS,
+		sorted(fields),
+		last_error,
+	)
+	return False
+
+
+def _stamp_converged_ok(settings, *, is_pool: bool) -> bool:
 	"""Record a converged apply as a terminal success. last_sync_status keeps the
 	literal "ok" prefix (the _pool_sync_is_redundant dedup gate + the onboarding
 	poller both key off it); the durable evidence-of-successful-apply marker
@@ -148,7 +268,17 @@ def _stamp_converged_ok(settings, *, is_pool: bool) -> None:
 	exactly the confirmation it wants: admin gates chat_readiness "Ready" on
 	applied_version >= desired_version. Without the direct marker here, a first
 	direct apply that converged via reconcile would flip "ok" yet strand the
-	tenant at llm_provisioning forever (an "ok" status stops every reconcile)."""
+	tenant at llm_provisioning forever (an "ok" status stops every reconcile).
+
+	Returns whether the stamp landed. FOUR callers race on these same three rows -
+	the in-band sync worker's convergence poll, the pool worker's, the */5
+	``reconcile_pending_llm_sync`` and the SPA's own ``get_llm_sync_status`` poller
+	via ``onboarding._reconcile_pending_applying`` - all of them driven by the same
+	event, admin flipping chat_readiness to Ready. Losing that race is ordinary and
+	self-correcting (whoever won wrote the identical outcome, and every one of the
+	four re-probes), so a lost stamp is reported as False and never raised: it is
+	the caller's cue to leave the reconcile-owned pending state behind rather than
+	a failure to put in front of a customer (#713)."""
 	import frappe as _frappe
 
 	now = _frappe.utils.now()
@@ -160,8 +290,10 @@ def _stamp_converged_ok(settings, *, is_pool: bool) -> None:
 		fields["llm_pool_synced_at"] = now
 	else:
 		fields["llm_direct_synced_at"] = now
-	settings.db_set(fields, update_modified=False)
+	if not _write_settings_fields(settings, fields):
+		return False
 	_commit_terminal_sync_status()
+	return True
 
 
 def _converge_via_admin(
@@ -173,19 +305,28 @@ def _converge_via_admin(
 ) -> bool:
 	"""Poll admin get_connection until chat_readiness == "Ready" (bounded by
 	deadline_s). On Ready: stamp the terminal success markers and return True. On
-	deadline: return False so the caller records the pending state for the
-	scheduled safety net to finish. Under frappe.flags.in_test the loop probes
-	exactly once (no sleep) so tests observe a single deterministic outcome."""
+	deadline - or on a stamp that lost a write-conflict race - return False so the
+	caller records the pending state for the scheduled safety net to finish. Under
+	frappe.flags.in_test the loop probes exactly once (no sleep) so tests observe a
+	single deterministic outcome.
+
+	The snapshot refresh at the top of each pass is what keeps the stamp writable
+	(#713). Everything this loop does between passes is HTTP and sleep, so holding
+	the transaction open across it buys nothing and costs the stamp: it is exactly
+	the window in which the SPA's readiness POST - reacting to the SAME Ready this
+	loop is waiting for - commits its own Jarvis Settings write. Refreshing here
+	means the stamp runs on a read view no older than the probe that decided to
+	stamp."""
 	import time as _time
 
 	import frappe as _frappe
 
 	deadline = _time.monotonic() + deadline_s
 	while True:
+		_refresh_db_snapshot()
 		state, _reason = _admin_chat_readiness()
 		if state == "Ready":
-			_stamp_converged_ok(settings, is_pool=is_pool)
-			return True
+			return _stamp_converged_ok(settings, is_pool=is_pool)
 		if _frappe.flags.in_test or _time.monotonic() + interval_s >= deadline:
 			return False
 		_time.sleep(interval_s)
@@ -243,10 +384,8 @@ def _schedule_sync_lock_retry(*, method: str, job_base: str, retry_left: int, **
 	  redis lock.
 	"""
 	settings = frappe.get_single("Jarvis Settings")
-	settings.db_set(
-		"last_sync_status",
-		"pending: waiting for a concurrent sync to finish (will retry)",
-		update_modified=False,
+	_write_settings_fields(
+		settings, {"last_sync_status": "pending: waiting for a concurrent sync to finish (will retry)"}
 	)
 	frappe.enqueue(
 		method,
@@ -744,7 +883,7 @@ class JarvisSettings(Document):
 		operation already created - it converges + stamps the markers WITHOUT driving
 		a second push.
 		"""
-		self.db_set("last_sync_status", "pending: provisioning container (pool)", update_modified=False)
+		_write_settings_fields(self, {"last_sync_status": "pending: provisioning container (pool)"})
 		run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 		# Budget rationale lives on ADMIN_SYNC_RQ_TIMEOUT_S.
 		frappe.enqueue(
@@ -826,6 +965,12 @@ class JarvisSettings(Document):
 		Additionally a try/finally backstop guarantees last_sync_status
 		never stays at "pending: ..." on an unexpected exception path -
 		the UI poller flips off pending no matter what blew up.
+
+		#713: that backstop was reporting a LOST RACE as "failed: unexpected
+		error; see Error Log". Every status write here goes through
+		``_write_settings_fields`` instead, and a write conflict that survives
+		its replays lands on the reconcile-owned pending marker rather than a
+		terminal failure - see the QueryDeadlockError branch below.
 		"""
 		from jarvis import admin_client
 
@@ -855,6 +1000,11 @@ class JarvisSettings(Document):
 
 				record_synced_snapshot()
 				resolved_action = result.get("action", "restart")
+			# The push is the long part of this job, and until now every status
+			# write below still ran on the snapshot taken before it (#713). Ending
+			# the transaction here makes the apps snapshot above durable and gives
+			# the writes that follow a read view minutes younger than the job.
+			_refresh_db_snapshot()
 			# C5/F2 + round-4 R4-P0-6 — CONVERGENCE, not HTTP success: a sync may
 			# come back accepted-but-still-converging. Admin deliberately returns
 			# 200 with status="applying" on a busy apply lock / fleet read-timeout /
@@ -869,15 +1019,12 @@ class JarvisSettings(Document):
 			# old to thread it predates this contract).
 			if _is_applying_result(result) or (result.get("status") or "applied") != "applied":
 				if not _converge_via_admin(self, is_pool=False):
-					self.db_set(
-						"last_sync_status",
-						_PENDING_APPLYING_STATUS,
-						update_modified=False,
-					)
+					_write_settings_fields(self, {"last_sync_status": _PENDING_APPLYING_STATUS})
 					_commit_terminal_sync_status()
 				terminal_written = True
 				return
-			self.db_set(
+			applied_ok = _write_settings_fields(
+				self,
 				{
 					"last_sync_at": frappe.utils.now(),
 					"last_sync_status": f"ok ({resolved_action} via admin)",
@@ -886,8 +1033,15 @@ class JarvisSettings(Document):
 					# direct activation is gated on this so local key/provider/model
 					# presence alone can no longer open chat on an unconfirmed apply.
 					"llm_direct_synced_at": frappe.utils.now(),
-				}
+				},
 			)
+			if not applied_ok:
+				# The apply is CONFIRMED and only the record of it lost a race, so
+				# the recoverable pending state is the honest thing to leave behind:
+				# it names something outstanding (write down an apply that happened)
+				# that three converging paths can finish, and it never reports the
+				# workspace as broken (#713).
+				_write_settings_fields(self, {"last_sync_status": _PENDING_APPLYING_STATUS})
 			# Commit EVERY terminal status (ok and each failed branch), not
 			# just the finally-backstop: the rq SIGALRM can fire at any
 			# later point in this job (log_error, lock release, skills
@@ -905,11 +1059,12 @@ class JarvisSettings(Document):
 				self._resync_custom_skills_after_restart()
 				self._resync_learned_skills_after_restart()
 		except admin_client.AdminAuthError as e:
-			self.db_set(
+			_write_settings_fields(
+				self,
 				{
 					"last_sync_at": frappe.utils.now(),
 					"last_sync_status": f"failed: auth: {e}",
-				}
+				},
 			)
 			_commit_terminal_sync_status()
 			terminal_written = True
@@ -928,11 +1083,12 @@ class JarvisSettings(Document):
 			# already knew the exact reason. Terminal, carrying that reason, like
 			# the neighbouring auth/rate-limit branches.
 			reason = _admin_rejection_reason(e)
-			self.db_set(
+			_write_settings_fields(
+				self,
 				{
 					"last_sync_at": frappe.utils.now(),
 					"last_sync_status": f"failed: {reason}",
-				}
+				},
 			)
 			_commit_terminal_sync_status()
 			terminal_written = True
@@ -949,11 +1105,7 @@ class JarvisSettings(Document):
 			# reconcile, so an unreachable there stays terminal-failed as before.
 			if action == "restart":
 				if not _converge_via_admin(self, is_pool=False):
-					self.db_set(
-						"last_sync_status",
-						_PENDING_APPLYING_STATUS,
-						update_modified=False,
-					)
+					_write_settings_fields(self, {"last_sync_status": _PENDING_APPLYING_STATUS})
 					_commit_terminal_sync_status()
 					frappe.logger().warning(
 						"jarvis_settings: creds sync admin-unreachable; recorded pending for reconcile (%s)",
@@ -961,11 +1113,12 @@ class JarvisSettings(Document):
 					)
 				terminal_written = True
 			else:
-				self.db_set(
+				_write_settings_fields(
+					self,
 					{
 						"last_sync_at": frappe.utils.now(),
 						"last_sync_status": f"failed: admin unreachable: {e}",
-					}
+					},
 				)
 				_commit_terminal_sync_status()
 				terminal_written = True
@@ -976,15 +1129,39 @@ class JarvisSettings(Document):
 		except admin_client.AdminRateLimitedError as e:
 			retry = e.retry_after_seconds or 0
 			retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
-			self.db_set(
+			_write_settings_fields(
+				self,
 				{
 					"last_sync_at": frappe.utils.now(),
 					"last_sync_status": f"failed: rate-limited; {retry_str}",
-				}
+				},
 			)
 			_commit_terminal_sync_status()
 			terminal_written = True
 			frappe.logger().info(f"admin_client: rate-limited; retry_after={retry}s")
+		except frappe.QueryDeadlockError:
+			# #713. A lost write-conflict race is NOT a failed sync, and it must
+			# never read like one: the admin call succeeded, the container has the
+			# config, and the only thing that did not happen is this bench writing
+			# down that it did. The customer's workspace was reported broken for a
+			# race between two writers that had both just been told everything was
+			# fine.
+			#
+			# The pending marker is the RECOVERY, not a softer wording. It is the one
+			# status three independent converging paths act on - the SPA's own
+			# get_llm_sync_status poller (seconds), the */5 reconcile, and a Resync
+			# click - and a "failed:" here reaches NONE of them once
+			# llm_direct_synced_at is already set, which is exactly how the workspace
+			# in #713 was left with no way forward. Swallowed rather than re-raised
+			# for the same reason: the state is recoverable and self-correcting, and
+			# a raise would only hand execute_job an exception to log and re-log.
+			_write_settings_fields(self, {"last_sync_status": _PENDING_APPLYING_STATUS})
+			_commit_terminal_sync_status()
+			terminal_written = True
+			frappe.log_error(
+				title="Jarvis: LLM sync lost a write-conflict race (recorded pending)",
+				message=frappe.get_traceback(),
+			)
 		finally:
 			# Final backstop: if a non-Admin* exception path blew through
 			# (network exception class admin_client doesn't translate,
@@ -998,13 +1175,22 @@ class JarvisSettings(Document):
 			# UNcommitted status write here is silently undone and the
 			# status sticks at "pending:" forever. Committing makes the
 			# terminal write durable before the rollback runs.
+			#
+			# #713 narrowed what reaches this branch rather than reworking it: a
+			# write conflict now has its own handler above, so "unexpected error"
+			# once again means an error nobody anticipated, which is the only thing
+			# that wording can honestly describe. The write itself goes through
+			# _write_settings_fields because the backstop is the LAST chance to move
+			# the status off "pending:", and losing it to the same conflict class
+			# that brought us here is how a status gets stuck.
 			if not terminal_written:
 				try:
-					self.db_set(
+					_write_settings_fields(
+						self,
 						{
 							"last_sync_at": frappe.utils.now(),
 							"last_sync_status": "failed: unexpected error; see Error Log",
-						}
+						},
 					)
 					_commit_terminal_sync_status()
 				except Exception:
@@ -1265,8 +1451,10 @@ def _pool_spec_pushable(settings, converge_teardown: bool = False) -> bool:
 	return any(m.enabled for m in (settings.models or []))
 
 
-def _stamp_pool_applied_ok(settings, result: dict) -> None:
+def _stamp_pool_applied_ok(settings, result: dict) -> bool:
 	"""Record a CONFIRMED pool apply (status=applied) as a terminal success.
+	Returns whether the stamp landed (#713: a lost write-conflict race leaves the
+	caller to record the reconcile-owned pending state instead).
 
 	Extracted so the async pool-sync worker (``_enqueued_sync_via_admin_pool``)
 	and the synchronous onboarding/settings push (``sync_pool_now``) stamp the
@@ -1297,11 +1485,13 @@ def _stamp_pool_applied_ok(settings, result: dict) -> None:
 		# Per-model verdicts (contract 1.11/1.12) forwarded verbatim - the AI-models
 		# list keys each api-key row's health off this.
 		_synced["last_model_statuses"] = _frappe.as_json(result.get("model_statuses") or [])
-	settings.db_set(_synced)
+	if not _write_settings_fields(settings, _synced):
+		return False
 	# Commit every terminal write (matches _sync_via_admin) so a propagating
 	# JobTimeoutException can't roll the terminal status back to "pending:", and so
 	# llm_pool_synced_at is durable.
 	_commit_terminal_sync_status()
+	return True
 
 
 def _post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=None):
@@ -1433,12 +1623,12 @@ def _enqueued_sync_via_admin_pool(
 			# Terminal "failed:" write - clear any stale warnings/subscription_status
 			# from a prior successful apply alongside it (see
 			# _cleared_subscription_status_fields).
-			settings.db_set(
+			_write_settings_fields(
+				settings,
 				{
 					"last_sync_status": "failed: skipped (concurrent sync did not finish in time)",
 					**_cleared_subscription_status_fields(),
 				},
-				update_modified=False,
 			)
 			return
 
@@ -1454,10 +1644,8 @@ def _enqueued_sync_via_admin_pool(
 		revalidation_errors = validate_models(settings)
 		if revalidation_errors or not _pool_spec_pushable(settings, converge_teardown):
 			reason = "; ".join(revalidation_errors) if revalidation_errors else "no longer a pool"
-			settings.db_set(
-				"last_sync_status",
-				f"skipped: no longer pool-valid after re-read ({reason})",
-				update_modified=False,
+			_write_settings_fields(
+				settings, {"last_sync_status": f"skipped: no longer pool-valid after re-read ({reason})"}
 			)
 			return
 
@@ -1466,6 +1654,9 @@ def _enqueued_sync_via_admin_pool(
 		terminal_written = False
 		try:
 			result = _post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=idempotency_key) or {}
+			# The push is the long part of this job; end the transaction so every
+			# status write below runs on a read view younger than it (#713).
+			_refresh_db_snapshot()
 			# CONVERGENCE STATUS, not HTTP success (C5/F2 + round-4 R4-P0-6).
 			# Admin deliberately returns HTTP 200 with status="applying" when the
 			# apply lock was busy, the fleet read timed out, or the applied-version
@@ -1482,33 +1673,34 @@ def _enqueued_sync_via_admin_pool(
 			# to thread it) defaults to "applied" — its own contract predates this.
 			status = result.get("status") or "applied"
 			if status == "blocked":
-				settings.db_set(
-					"last_sync_status",
-					"failed: subscription needs re-authentication (blocked)",
-					update_modified=False,
+				_write_settings_fields(
+					settings,
+					{"last_sync_status": "failed: subscription needs re-authentication (blocked)"},
 				)
 				_commit_terminal_sync_status()
 				terminal_written = True  # preserve this status past the finally backstop
 				return
 			if _is_applying_result(result) or status != "applied":
 				if not _converge_via_admin(settings, is_pool=True):
-					settings.db_set(
-						"last_sync_status",
-						_PENDING_APPLYING_STATUS,
-						update_modified=False,
-					)
+					_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
 					_commit_terminal_sync_status()
 				terminal_written = True
 				return
-			_stamp_pool_applied_ok(settings, result)
+			# A stamp that lost a write-conflict race falls back to the pending
+			# marker so the SPA poller / the */5 reconcile finish it, exactly as a
+			# non-converged apply does (#713).
+			if not _stamp_pool_applied_ok(settings, result):
+				_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
+				_commit_terminal_sync_status()
 			terminal_written = True
 		except admin_client.AdminAuthError as e:
-			settings.db_set(
+			_write_settings_fields(
+				settings,
 				{
 					"last_sync_at": _frappe.utils.now(),
 					"last_sync_status": f"failed: auth: {e}",
 					**_cleared_subscription_status_fields(),
-				}
+				},
 			)
 			_commit_terminal_sync_status()
 			terminal_written = True
@@ -1523,12 +1715,13 @@ def _enqueued_sync_via_admin_pool(
 			# implying it through a "Your ..." sentence. Nothing was persisted, so
 			# no reconcile can ever finish it - terminal, with admin's reason.
 			reason = _admin_rejection_reason(e)
-			settings.db_set(
+			_write_settings_fields(
+				settings,
 				{
 					"last_sync_at": _frappe.utils.now(),
 					"last_sync_status": f"failed: {reason}",
 					**_cleared_subscription_status_fields(),
-				}
+				},
 			)
 			_commit_terminal_sync_status()
 			terminal_written = True
@@ -1553,12 +1746,13 @@ def _enqueued_sync_via_admin_pool(
 			# validation branches, before falling through to F2's converge.
 			reason = _admin_customer_facing_reason(str(e))
 			if reason:
-				settings.db_set(
+				_write_settings_fields(
+					settings,
 					{
 						"last_sync_at": _frappe.utils.now(),
 						"last_sync_status": f"failed: {reason}",
 						**_cleared_subscription_status_fields(),
-					}
+					},
 				)
 				_commit_terminal_sync_status()
 				terminal_written = True
@@ -1575,11 +1769,7 @@ def _enqueued_sync_via_admin_pool(
 			# otherwise record PENDING (not failed) and let the */5 reconcile
 			# finish it. Only genuine auth/validation/rate-limit stay terminal.
 			if not _converge_via_admin(settings, is_pool=True):
-				settings.db_set(
-					"last_sync_status",
-					_PENDING_APPLYING_STATUS,
-					update_modified=False,
-				)
+				_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
 				_commit_terminal_sync_status()
 				_frappe.logger().warning(
 					"jarvis_settings: pool sync admin-unreachable; recorded pending for reconcile (%s)",
@@ -1589,28 +1779,41 @@ def _enqueued_sync_via_admin_pool(
 		except admin_client.AdminRateLimitedError as e:
 			retry = e.retry_after_seconds or 0
 			retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
-			settings.db_set(
+			_write_settings_fields(
+				settings,
 				{
 					"last_sync_at": _frappe.utils.now(),
 					"last_sync_status": f"failed: rate-limited; {retry_str}",
 					**_cleared_subscription_status_fields(),
-				}
+				},
 			)
 			_commit_terminal_sync_status()
 			terminal_written = True
 			_frappe.logger().info(f"admin_client: pool sync rate-limited; retry_after={retry}s")
 		except admin_client.AdminValidationError as e:
-			settings.db_set(
+			_write_settings_fields(
+				settings,
 				{
 					"last_sync_at": _frappe.utils.now(),
 					"last_sync_status": f"failed: validation: {e}",
 					**_cleared_subscription_status_fields(),
-				}
+				},
 			)
 			_commit_terminal_sync_status()
 			terminal_written = True
 			_frappe.log_error(
 				title="Jarvis: admin validation failed (pool sync)",
+				message=_frappe.get_traceback(),
+			)
+		except _frappe.QueryDeadlockError:
+			# #713, the pool twin of the branch in _sync_via_admin. Same reasoning:
+			# admin already has the config, only the bookkeeping lost a race, and the
+			# pending marker is the state three converging paths act on.
+			_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
+			_commit_terminal_sync_status()
+			terminal_written = True
+			_frappe.log_error(
+				title="Jarvis: LLM pool sync lost a write-conflict race (recorded pending)",
 				message=_frappe.get_traceback(),
 			)
 		finally:
@@ -1623,12 +1826,13 @@ def _enqueued_sync_via_admin_pool(
 			# (JARVIS-2026-07-08, fault c).
 			if not terminal_written:
 				try:
-					settings.db_set(
+					_write_settings_fields(
+						settings,
 						{
 							"last_sync_at": _frappe.utils.now(),
 							"last_sync_status": "failed: unexpected error; see Error Log",
 							**_cleared_subscription_status_fields(),
-						}
+						},
 					)
 					_commit_terminal_sync_status()
 				except Exception:
@@ -1724,12 +1928,13 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 				except admin_client.AdminRateLimitedError as e:
 					retry = int(e.retry_after_seconds or 0)
 					retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
-					settings.db_set(
+					_write_settings_fields(
+						settings,
 						{
 							"last_sync_at": _frappe.utils.now(),
 							"last_sync_status": f"failed: rate-limited; {retry_str}",
 							**_cleared_subscription_status_fields(),
-						}
+						},
 					)
 					_commit_terminal_sync_status()
 					# Enforced BEFORE admin allocates an operation: nothing to resume-follow
@@ -1741,12 +1946,13 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 					# fleet apply and is now marked failed). Terminal status for the settings
 					# strip; stay resumable so the SPA resume-by-key reads the REJECTED
 					# descriptor. No reconcile can fix a permanent rejection, so no handoff.
-					settings.db_set(
+					_write_settings_fields(
+						settings,
 						{
 							"last_sync_at": _frappe.utils.now(),
 							"last_sync_status": f"failed: {_admin_rejection_reason(e)}",
 							**_cleared_subscription_status_fields(),
-						}
+						},
 					)
 					_commit_terminal_sync_status()
 					outcome = {"apply_operation": None, "resumable": True}
@@ -1759,12 +1965,13 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 				except (admin_client.AdminAuthError, admin_client.AdminValidationError) as e:
 					# Fail BEFORE any operation is allocated (auth / spec validation): a
 					# terminal, non-resumable error, nothing to follow or converge.
-					settings.db_set(
+					_write_settings_fields(
+						settings,
 						{
 							"last_sync_at": _frappe.utils.now(),
 							"last_sync_status": f"failed: {e}",
 							**_cleared_subscription_status_fields(),
-						}
+						},
 					)
 					_commit_terminal_sync_status()
 					outcome = {"apply_operation": None, "resumable": False}
@@ -1777,10 +1984,9 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 					status = result.get("status") or "applied"
 					outcome = {"apply_operation": op, "resumable": False, "legacy_capability": legacy}
 					if status == "blocked":
-						settings.db_set(
-							"last_sync_status",
-							"failed: subscription needs re-authentication (blocked)",
-							update_modified=False,
+						_write_settings_fields(
+							settings,
+							{"last_sync_status": "failed: subscription needs re-authentication (blocked)"},
 						)
 						_commit_terminal_sync_status()
 						handoff = False
@@ -1792,8 +1998,10 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 					else:
 						# Confirmed applied within the short bound: stamp inline (a fast db
 						# write, no polling) so is_ready_for_chat's pool marker is prompt.
-						_stamp_pool_applied_ok(settings, result)
-						handoff = False
+						# A stamp that lost a write-conflict race keeps the hand-off (#713):
+						# the worker re-drives the same apply and stamps it, which is the
+						# same recovery a still-converging apply already gets.
+						handoff = not _stamp_pool_applied_ok(settings, result)
 	except Exception:
 		# F3 backstop: any unexpected failure AFTER save_llm_pool committed the desired
 		# state must not strand the config with nothing converging it.
@@ -1876,14 +2084,47 @@ def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETR
 				"another worker held the lock past blocking timeout (retries exhausted)",
 				action,
 			)
-			settings.db_set(
-				"last_sync_status",
-				"failed: skipped (concurrent sync did not finish in time)",
-				update_modified=False,
+			_write_settings_fields(
+				settings, {"last_sync_status": "failed: skipped (concurrent sync did not finish in time)"}
 			)
 			return
 		settings = frappe.get_single("Jarvis Settings")
 		settings._sync_via_admin(action)
+
+
+def request_resync(settings) -> str:
+	"""Re-drive the CURRENT LLM configuration through admin and report which leg
+	was queued: ``"pool"`` or ``"direct"``.
+
+	The retry verb behind ``onboarding.resync_llm``. It exists because neither
+	normal path can be re-triggered on demand: ``on_update`` only syncs what
+	``_classify_llm_change`` sees CHANGE, so re-saving an unchanged config is a
+	no-op, and the reconcile only looks at workspaces whose state says something is
+	outstanding. A workspace whose sync failed for a reason that has since passed
+	had nothing left that would ever try again (#713).
+
+	Writes the pending label first so the poller the SPA is already running flips
+	to "Applying your changes" on the same round trip, then enqueues under the SAME
+	job ids and the SAME redis lock as an ordinary save - so a Resync during an
+	in-flight sync coalesces into it instead of racing it or restarting the
+	container twice."""
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+	if compute_pool_mode(settings):
+		settings._enqueue_pool_sync()
+		return "pool"
+	_write_settings_fields(settings, {"last_sync_status": "pending: provisioning container"})
+	frappe.enqueue(
+		"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin",
+		queue="long",
+		timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
+		enqueue_after_commit=not (frappe.flags.in_test or frappe.flags.run_admin_sync_inline),
+		now=bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline),
+		job_id="jarvis_settings_sync:restart",
+		deduplicate=True,
+		action="restart",
+	)
+	return "direct"
 
 
 #: The clause admin puts in ``chat_readiness_reason`` when its OWN tenant row
@@ -2084,12 +2325,20 @@ def reconcile_pending_llm_sync() -> None:
 			return
 
 		revision_before = _llm_config_revision() if may_be_disconnected else ""
+		# End the transaction before the probe (#713). Two things depend on it: the
+		# stamp below has to be writable against whatever committed while we were
+		# asking admin, and the reconnect guard further down has to be able to SEE
+		# that commit - a re-read on the snapshot this tick opened with would answer
+		# "nothing moved" no matter what the customer did.
+		_refresh_db_snapshot()
 		state, reason = _admin_chat_readiness()
 		if state == "Ready":
 			if is_applying_pending or is_unproven_pool or is_unproven_direct:
 				# Stamps the evidence marker for whichever mode is active:
 				# llm_pool_synced_at for pool tenants, llm_direct_synced_at for
 				# single-model tenants (is_ready_for_chat's first-activation gates).
+				# A lost race needs no handling here: this tick changes nothing and
+				# the next one (or the SPA's own poller) re-probes and re-stamps.
 				_stamp_converged_ok(settings, is_pool=pool_mode)
 			return
 		if not (may_be_disconnected and _admin_says_llm_gone(state, reason)):
