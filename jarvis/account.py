@@ -25,7 +25,7 @@ from jarvis import admin_client, onboarding_contract, release_notice
 from jarvis.exceptions import AdminAuthError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 from jarvis.onboarding import _surface
-from jarvis.permissions import require_jarvis_admin
+from jarvis.permissions import require_jarvis_access, require_jarvis_admin
 
 SETTINGS = "Jarvis Settings"
 
@@ -1029,6 +1029,127 @@ def get_llm_connection_status() -> dict:
 		# the fallback for a shape pool_primary_model cannot read.
 		"default_model": pool_primary_model(settings) or data.get("default_model", ""),
 	}
+
+
+# The complete set of values ``get_llm_connection_health`` may ever return. It
+# is the SPA's badge vocabulary minus "disconnected" (see below), and it is
+# named here so the member contract is one readable list rather than something a
+# reader has to reconstruct from branches.
+MEMBER_HEALTH_STATES = ("ok", "applying", "attention", "down")
+
+
+@frappe.whitelist()
+def get_llm_connection_health() -> dict:
+	"""The Settings Status badge for a workspace MEMBER: is this workspace's
+	assistant working right now? Returns exactly one field, ``state``, one of
+	:data:`MEMBER_HEALTH_STATES`. Nothing else, ever.
+
+	This exists because the badge used to be a hardcoded green "Connected" for
+	anyone who was not an admin (jarvis#711). ``get_llm_connection_status`` above
+	is ``require_jarvis_admin``, so a member could not fetch a verdict at all and
+	the SPA rendered a placeholder that read as an answer: a member saw green
+	while chat was failing, while a save was still applying, and while the
+	workspace was disconnected. It was not stale, it was a constant.
+
+	WHAT A MEMBER MAY AND MAY NOT LEARN
+	-----------------------------------
+	A member gets a HEALTH verdict and no description of the workspace. Not the
+	pool shape, model count or routing mode; not model names, provider names or
+	base URLs; not profile or account ids; not whether a key or subscription is
+	present; not billing state; and no error text from a provider or from a
+	failed turn. The admin payload's every other field is deliberately absent
+	rather than blanked, so a future field added there cannot ride along here.
+
+	No branch calls admin. ``get_llm_connection_status`` round-trips to
+	``post_llm_auth_status`` for a proxied tenant, and doing that here would put
+	``proxy_active`` - a topology fact - into the response LATENCY even though it
+	is absent from the body. Every input below is a local read, so the work is
+	the same shape whatever the workspace runs.
+
+	THE DISCLOSURE DECISION (jarvis#711, settled)
+	---------------------------------------------
+	``_llm_health`` returns ``(health, attention_reason)``, and folds three
+	distinct causes into ``attention``: a failed apply (``sync_failed``), a
+	failed chat turn (``turn_error``, added for #678) and a chat subscription the
+	fleet's probe rejected (``subscription_unverified``, split out for #714).
+
+	``health`` on its own carries no shape. It says whether the assistant is
+	serving, which is a workspace-level statement true of an api-key tenant and a
+	subscription tenant alike. ``attention_reason`` is different:
+	``subscription_unverified`` can only ever arise on a workspace that
+	authenticates with a CHAT SUBSCRIPTION rather than an api key, so handing it
+	to a member tells them which kind of credential this workspace runs on. That
+	is pool shape, and shape is exactly what a member may not have.
+
+	The decision: the member gets ``health`` and no cause. ``attention_reason``
+	is dropped here, not upstream, and it is OMITTED rather than mapped:
+
+	* Mapping is the trap. Any member-visible value reachable only from
+	  ``subscription_unverified`` recovers it exactly, and even a lossy mapping
+	  narrows the credential kind by elimination. Omission is the only version
+	  with nothing left to recover.
+	* All three causes therefore produce the byte-identical response ``{"state":
+	  "attention"}``. There is no cause-specific label, no extra state and no
+	  extra field on any branch, so the response cannot be decomposed.
+	* The alternative - dropping the subscription cause from the member verdict
+	  so that workspace reads ``ok`` - was rejected twice over. It reintroduces
+	  the false green #711 is about, and "this workspace never reports attention
+	  from that cause" is itself a shape oracle for anyone who can compare a
+	  broken workspace against a working one.
+
+	Timing cannot recover the cause either. The only variance inside
+	``_llm_health`` is one versus two ``limit 1`` reads of the newest completed
+	chat message (``sync_failed`` returns before either; ``turn_error`` does one;
+	``subscription_unverified`` does two), on the same local table, with no
+	network call on any branch. That is well under the noise floor of an HTTP
+	round trip, and it is the same code path the admin endpoint already runs.
+
+	Nothing above changes ``_llm_health`` itself, the values of
+	``attention_reason``, or what an admin sees (jarvis#713/#714 own that area).
+	This function is a member-visibility filter placed in front of it.
+
+	WHY ``disconnected`` IS NOT A MEMBER STATE
+	------------------------------------------
+	A workspace with no credential at all reports ``down`` here, exactly like a
+	workspace whose config never reached its container. The admin payload keeps
+	them apart because an admin can act on the difference. For a member,
+	``disconnected`` would say "this workspace currently holds no AI credential",
+	which is credential-presence disclosure, and a member can do nothing with it
+	that ``down`` does not already tell them: the assistant is not going to
+	answer, ask an admin. Collapsing the two also keeps the member vocabulary at
+	four values, so no state is unique to one cause.
+
+	GATE
+	----
+	``require_jarvis_access``, not ``require_jarvis_admin``: any authenticated
+	System User of this workspace holding a Jarvis access role. It refuses Guest
+	directly, because ``is_system_user`` rejects Guest by name before roles are
+	even consulted, and refuses Website/portal users for the same reason chat
+	refuses them.
+
+	That in-body call is THE guard, and it is deliberately not left to the
+	framework. ``@frappe.whitelist()`` does NOT wrap the function - the decorator
+	only adds it to Frappe's ``whitelisted`` set - so nothing refuses a Guest
+	until the request dispatcher separately calls ``frappe.is_whitelisted``,
+	which throws for a Guest invoking a method not registered ``allow_guest``.
+	That check therefore exists only on the HTTP path: a direct Python call
+	reaches this body with no framework gate at all. Anyone tempted to drop the
+	line below as redundant should read those two functions first.
+
+	``get_llm_connection_status`` is untouched by this: its guard is unchanged
+	and so is every field it returns to an admin.
+	"""
+	require_jarvis_access()
+	settings = frappe.get_single("Jarvis Settings")
+	if not _has_llm_config(settings):
+		return {"state": "down"}
+	state, _reason = _llm_health(settings, compute_pool_mode(settings))
+	# Belt and braces: _llm_health's contract is the same four values, so this
+	# only fires if that function grows a fifth. A member must get a known state
+	# or the most conservative one, never a value the SPA has no mapping for -
+	# an unmapped state is how a badge falls back to its default, and that
+	# default was the green this issue is about.
+	return {"state": state if state in MEMBER_HEALTH_STATES else "down"}
 
 
 def _llm_health(settings, pool_mode: bool) -> tuple:

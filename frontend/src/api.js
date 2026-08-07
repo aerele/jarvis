@@ -477,6 +477,12 @@ export const disconnectSubscription = () => call("jarvis.oauth.api.disconnect");
 // --- LLM Monitor (System-Manager gated server-side). Real Bifrost usage, NOT the getUsage estimate. ---
 export const getLlmUsage = () => call("jarvis.account.get_llm_usage");
 export const getLlmConnectionStatus = () => call("jarvis.account.get_llm_connection_status");
+// The member-tier half of the same badge (jarvis#711). Returns ONLY { state },
+// one of ok / applying / attention / down - no shape, no model or provider
+// names, no profile ids, and no reason for "attention". Any workspace user may
+// call it; an admin uses getLlmConnectionStatus above instead, which is a
+// superset of this verdict.
+export const getLlmConnectionHealth = () => call("jarvis.account.get_llm_connection_health");
 export const getAccount = () => call("jarvis.account.get_account");
 // BILLING plan lifecycle. Not to be confused with disconnectSubscription
 // above, which drops the LLM PROVIDER subscription (ChatGPT/Claude OAuth).
