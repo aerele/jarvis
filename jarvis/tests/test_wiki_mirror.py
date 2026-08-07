@@ -845,3 +845,20 @@ class TestMirrorKillSwitch(WikiMirrorTestCase):
 			enq.assert_not_called()
 		finally:
 			frappe.flags.jarvis_test_wiki_mirror_enqueue = False
+
+	def test_a_page_saved_with_the_wiki_on_still_triggers_the_mirror_job(self):
+		"""The paired direction, and the one an operator worries about.
+
+		``TestTriggers`` drives ``on_wiki_page_change`` directly with ``enqueue_sync``
+		mocked, so without this the real save-to-enqueue chain was only proven in the
+		OFF direction and a gate that killed it outright would still have looked
+		green. Asserts the queued METHOD too, so a save routed to some other job
+		could not read as a pass."""
+		frappe.flags.jarvis_test_wiki_mirror_enqueue = True
+		try:
+			with mock.patch("frappe.enqueue") as enq:
+				self._page("killswitch-save-on")
+			enq.assert_called()
+			self.assertEqual(enq.call_args[0][0], wiki_mirror.JOB_METHOD)
+		finally:
+			frappe.flags.jarvis_test_wiki_mirror_enqueue = False

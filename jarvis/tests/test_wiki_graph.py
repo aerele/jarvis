@@ -578,6 +578,21 @@ class TestWikiGraphMinimisation(WikiGraphTestCase):
 			},
 		)
 
+	def test_widening_the_lever_to_role_actually_minimises_role_pages(self):
+		"""The module docstring offers "add Role to _MINIMISED_SCOPES" as a one-line
+		lever. Without this, that branch of ``_opaque_page_ref`` is dead code nobody
+		has ever run, and the lever would be a promise rather than a fact.
+
+		Drives the real ``compute_graph`` with the scope set widened, so it exercises
+		the emitted-ref plumbing and not just the helper in isolation."""
+		doc = self._page(f"{_PREFIX}-rolelever", "Approval Limits", scope="Role", target_role=_ROLE)
+		with patch.object(wiki_graph, "_MINIMISED_SCOPES", frozenset({"User", "Role"})):
+			payload = json.dumps(wiki_graph.compute_graph())
+		self.assertNotIn("Approval Limits", payload)
+		self.assertNotIn(doc.name, payload)
+		labels = [n["label"] for n in json.loads(payload)["nodes"] if n.get("scope") == "Role"]
+		self.assertIn(f"Role page ({_ROLE})", labels)
+
 	def test_a_role_page_keeps_its_real_title(self):
 		"""Deliberate, not an oversight (see the module docstring). A Role page is
 		authored for a named group whose role name already travels as its own node,

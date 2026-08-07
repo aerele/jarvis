@@ -172,10 +172,18 @@ def _opaque_page_ref(p, scope: str) -> tuple[str, str]:
 	The audience part (``--u-<localpart>`` / ``--r-<role>``) derives from the
 	target, never from the title, and is kept for legibility: it lets a vendor
 	operator still see WHOSE tier a node sits in, which is what the admin view is
-	for. Both are already on the graph anyway as ``user:``/``role:`` node labels.
-	Two pages of the same owner therefore share a LABEL and differ only by id,
+	for. Two pages of the same owner therefore share a LABEL and differ only by id,
 	which is the intended reading: "this person has four personal pages" without
 	what they are about.
+
+	That audience part is normally redundant, since the same person is already on
+	the graph as a ``user:`` node labelled with their full email. ONE case where it
+	is not: past ``MAX_USERS`` distinct authors ``_user_node`` stops minting nodes
+	and the scope edge falls back to org, so a capped-out owner's local part rides
+	here with no ``user:`` node beside it. Accepted rather than fixed. Suppressing
+	it conditionally would make the ref depend on how many OTHER pages were in the
+	push, which breaks the stability this whole helper exists to provide, and a
+	local part is strictly less than the title that used to travel in its place.
 
 	``SLUG_RE`` forbids a leading dash, so a synthetic ref beginning with ``--``
 	can never collide with a real page's slug and steal its activity overlay."""
