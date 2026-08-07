@@ -89,3 +89,115 @@ export function escapeHtml(v) {
 export function errHtml(e, fallback) {
 	return escapeHtml(errMessage(e, fallback));
 }
+
+// ---------------------------------------------------------------------------
+// Chat TURN failures (#702): the counterpart to errMessage() above, for a
+// chat turn's `error` column instead of a Frappe API exception. That text is
+// raw prose relayed from openclaw over the realtime channel, sometimes
+// verbatim - #702 was openclaw reporting "LLM request failed: network
+// connection error." for a turn that failed for an entirely different reason
+// (a device-pairing file caught mid-rewrite), which the SPA had no way to
+// tell apart from a real network failure. Mirrors the operator-facing
+// taxonomy in jarvis/chat/turn_handler.py::_classify_error - keep both in
+// sync when either changes.
+//
+// A live run:error event carries its own `code` (server-classified, richer
+// context available there - e.g. the raised exception's type). A reloaded
+// conversation only has the persisted error STRING (errorMeta in
+// ChatView.vue is not persisted), so it falls back to classifying that text
+// here. turnErrorInfo() is the single entry point for both cases.
+//
+// MUST be total, same contract as errMessage above: given ANY shape of
+// input, this never throws.
+const TURN_ERROR_HEADLINES = {
+	unreachable: "I couldn't reach the assistant",
+	timeout: "That took too long",
+	provider: "The model is busy right now",
+	"recovery-expired": "This took too long, so I stopped waiting",
+	gateway: "A temporary problem interrupted this",
+	internal: "Something went wrong",
+	cancelled: "This message was cancelled",
+};
+
+// The "what you can do" line (ActionError.vue's `hint` slot; the turn-error
+// card in ChatView.vue mirrors that shape). No entry for `cancelled` - a
+// cancelled turn renders as a muted status note, never the red error card.
+const TURN_ERROR_HINTS = {
+	unreachable: "Check your connection, then try again.",
+	timeout: "This can happen on a large request. Try again, or ask for less at once.",
+	provider:
+		"This looks like a provider limit or billing issue. Check your plan, then try again.",
+	"recovery-expired": "Send your message again to start a fresh run.",
+	gateway: "This is usually a brief hiccup on our side. Try sending your message again.",
+	internal: "Try again. If it keeps happening, contact support.",
+};
+
+function classifyTurnErrorCode(raw) {
+	// String(raw ?? "") rather than `raw || ""`: a truthy non-string (a number,
+	// an object) would otherwise reach .toLowerCase() below and throw, which
+	// classifyErrorCode (the function this replaced) did not guard against.
+	const low = String(raw ?? "").toLowerCase();
+	// Phase-0 admission cancel markers: a queued turn cancelled by the user or
+	// aged out by the system leaves a durable transcript marker so a later
+	// reload shows WHY there's no reply (not a silent drop). Classified as
+	// "cancelled" so it renders as a muted note, not a red "something went
+	// wrong".
+	if (
+		low.startsWith("you cancelled this message") ||
+		low.startsWith("waited too long in the queue")
+	)
+		return "cancelled";
+	// Mirrors the worker's own explicit code="internal" backstop
+	// (turn_handler.py's last-resort `except Exception`) so a reload, which
+	// only has the persisted string, classifies it the same way the live
+	// event did - not as the new "gateway" default below.
+	if (low.startsWith("unexpected worker error")) return "internal";
+	if (
+		low.includes("ws open failed") ||
+		low.includes("unreachable") ||
+		low.includes("connection timed out")
+	)
+		return "unreachable";
+	if (low.includes("recovery window")) return "recovery-expired";
+	if (low.includes("timed out") || low.includes("timeout") || low.includes("deadline"))
+		return "timeout";
+	if (
+		[
+			"quota",
+			"rate limit",
+			"cooldown",
+			"overloaded",
+			"insufficient",
+			"credit",
+			"billing",
+		].some((k) => low.includes(k))
+	)
+		return "provider";
+	// #702: openclaw's own mid-run failure text (e.g. "LLM request failed:
+	// network connection error.", relayed verbatim) is not a reliable signal
+	// that the network was actually the problem - see the module comment
+	// above. A run that got far enough to be accepted and start is
+	// presumptively a transient fault on the gateway/container side, not the
+	// unreachable/provider cases already matched above, and not a bug in our
+	// own code (that path stamps "internal" explicitly and never reaches this
+	// fallback). Defaulting here tells the customer to retry instead of the
+	// unhelpful "something went wrong".
+	return "gateway";
+}
+
+// Combined, TOTAL turn-error envelope: {code, headline, hint}. `explicitCode`
+// is the live run:error event's own `code` field when present, and always
+// wins over re-classifying `raw`; pass "" (or omit it) for a reloaded
+// conversation, which only has the persisted string.
+export function turnErrorInfo(raw, explicitCode) {
+	try {
+		const code = explicitCode || classifyTurnErrorCode(raw);
+		return {
+			code,
+			headline: TURN_ERROR_HEADLINES[code] || TURN_ERROR_HEADLINES.internal,
+			hint: TURN_ERROR_HINTS[code] || "",
+		};
+	} catch {
+		return { code: "internal", headline: TURN_ERROR_HEADLINES.internal, hint: "" };
+	}
+}

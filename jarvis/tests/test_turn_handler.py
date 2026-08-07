@@ -17,6 +17,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_session_pool, turn_handler, worker
+from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -241,3 +242,73 @@ class TestOrgLocaleClause(unittest.TestCase):
 
 	def test_empty_site_yields_empty_clause(self):
 		self.assertEqual(self._run(company=None, default=None), "")
+
+
+class TestClassifyError(unittest.TestCase):
+	"""_classify_error is the single, shared source for a turn error's `code`
+	(#702) - settlement.py, pump.py and prepare.py all delegate to it, and
+	frontend/src/lib/errors.js mirrors it for the no-`code` reload path. Pure
+	string classification, no DB/site access, mirroring TestOrgLocaleClause
+	above."""
+
+	def test_the_702_string_is_gateway_not_internal(self):
+		# The exact wire text observed in #702: openclaw's own generic wording
+		# for a mid-run failure that was actually a device-pairing file caught
+		# mid-rewrite, nothing to do with the network. Must NOT fall into
+		# "unreachable" (that is reserved for OUR OWN failure to reach the
+		# gateway) and must NOT fall into "internal" (that headline offers no
+		# next step; "gateway" tells the customer to retry).
+		code = turn_handler._classify_error("LLM request failed: network connection error.")
+		self.assertEqual(code, "gateway")
+		self.assertNotEqual(code, "unreachable")
+		self.assertNotEqual(code, "internal")
+
+	def test_our_own_unreachable_gateway_stays_unreachable(self):
+		# A genuine pre-ack transport failure (WE couldn't reach openclaw) is a
+		# DIFFERENT failure surface than #702's mid-run gateway hiccup and must
+		# keep its own code - retrying the same way won't help either, but the
+		# customer-facing story ("I couldn't reach the assistant") is honest
+		# about what actually happened.
+		self.assertEqual(turn_handler._classify_error("ws open failed: connect ECONNREFUSED"), "unreachable")
+		exc = AgentUnreachableError("agent WS closed: 1006")
+		self.assertEqual(turn_handler._classify_error("agent WS closed: 1006", exc=exc), "unreachable")
+
+	def test_provider_rejection_stays_provider(self):
+		# An upstream LLM provider's own decline (quota/billing/rate limit) is
+		# actionable in a way a retry is not - must not collapse into "gateway".
+		code = turn_handler._classify_error(
+			"Google Generative AI API error (429): You exceeded your current quota."
+		)
+		self.assertEqual(code, "provider")
+
+	def test_worker_backstop_text_stays_internal_on_a_reload(self):
+		# turn_handler's outer `except Exception` backstop stamps code="internal"
+		# directly (bypassing this function) on the LIVE event; a reloaded
+		# conversation only has the persisted string and must reclassify it the
+		# same way, not fall into the new "gateway" default.
+		code = turn_handler._classify_error("unexpected worker error: TypeError")
+		self.assertEqual(code, "internal")
+
+	def test_recovery_and_timeout_unaffected_by_the_new_default(self):
+		self.assertEqual(
+			turn_handler._classify_error("Run did not finish within the recovery window."),
+			"recovery-expired",
+		)
+		self.assertEqual(turn_handler._classify_error("request timed out after 30s"), "timeout")
+		exc = AgentUnreachableError("chat.send timed out", code="turn-timeout")
+		self.assertEqual(turn_handler._classify_error("chat.send timed out", exc=exc), "timeout")
+
+	def test_three_distinct_customer_actions_are_actually_distinct(self):
+		# #702 requirement: a genuine network/timeout failure, a provider
+		# rejection, and a transient gateway fault must not collapse into the
+		# same code (which is what drives the headline+hint in errors.js).
+		codes = {
+			turn_handler._classify_error("ws open failed"),
+			turn_handler._classify_error("insufficient credit"),
+			turn_handler._classify_error("LLM request failed: network connection error."),
+		}
+		self.assertEqual(codes, {"unreachable", "provider", "gateway"})
+
+	def test_empty_and_none_degrade_to_gateway_not_a_crash(self):
+		self.assertEqual(turn_handler._classify_error(""), "gateway")
+		self.assertEqual(turn_handler._classify_error(None), "gateway")
