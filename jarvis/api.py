@@ -123,7 +123,8 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 				"session is bound to a previous device pairing; "
 				"the bench has re-paired since this session was issued. "
 				"Do not retry this call - it will keep failing. Tell the "
-				"user their conversation needs a restart and stop.",
+				"user in your reply: this conversation needs a restart, "
+				"start a new chat to continue. Then stop.",
 			)
 
 		return _dispatch_from_session(plugin_user, session_key, tool, args)
