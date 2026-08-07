@@ -349,7 +349,7 @@ def _stamp_converged_ok(settings, *, is_pool: bool) -> bool:
 	click - nearly all of them driven by the same event, admin flipping
 	chat_readiness to Ready. Losing that race is ordinary and
 	self-correcting (whoever won wrote the identical outcome, and every one of the
-	four re-probes), so a lost stamp is reported as False and never raised: it is
+	five re-probes), so a lost stamp is reported as False and never raised: it is
 	the caller's cue to leave the reconcile-owned pending state behind rather than
 	a failure to put in front of a customer (#713)."""
 	import frappe as _frappe

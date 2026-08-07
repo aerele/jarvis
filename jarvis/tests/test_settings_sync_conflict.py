@@ -61,6 +61,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import admin_client, onboarding
 from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 	_PENDING_APPLYING_STATUS,
+	_SETTINGS_WRITE_ATTEMPTS,
 	_write_settings_fields,
 	reconcile_pending_llm_sync,
 )
@@ -229,7 +230,7 @@ class TestSettingsWriteSurvivesAConflict(_Base):
 	def test_it_does_not_take_the_doctype_wide_for_update_that_failed_in_713(self):
 		"""The load-bearing structural fix. ``db_set``'s pre-read locks EVERY
 		Jarvis Settings row, so a write of one status field conflicted with a
-		concurrent write of any of the 100 a live workspace has - which is how a readiness marker
+		concurrent write to any of the 100 rows a live workspace has - which is how a readiness marker
 		killed a sync stamp. Asserted against ``db_set`` in the same test so the
 		difference is the claim, not a snapshot of one implementation."""
 		guarded, direct = [], []
@@ -342,10 +343,17 @@ class TestSyncRecoversFromAConflict(_Base):
 		"""The customer-visible defect. "unexpected error" is what
 		``humaniseSyncStatus`` renders as "Last sync failed", on a workspace whose
 		container was serving the new config the whole time."""
-		with self._as_worker(), self._applying_then_ready(), _conflict_on("llm_direct_synced_at"):
+		with self._as_worker(), self._applying_then_ready(), _conflict_on("llm_direct_synced_at") as state:
 			self._settings()._sync_via_admin("restart")
 		self.assertNotIn(_UNEXPECTED, _status())
 		self.assertEqual(_status(), _PENDING_APPLYING_STATUS)
+		# The status alone does NOT prove the replay ran: _sync_via_admin's
+		# _WRITE_CONFLICT_ERRORS backstop writes the same marker, so a version that
+		# never retried would look identical from outside. The attempt count is what
+		# separates them.
+		self.assertEqual(
+			state["raised"], _SETTINGS_WRITE_ATTEMPTS, "the stamp must exhaust its replays first"
+		)
 
 	def test_the_stamp_still_lands_when_the_conflict_clears(self):
 		"""The fix must not make the happy path pessimistic: one lost race is
@@ -478,6 +486,10 @@ class TestResyncLlm(_Base):
 		give. It stays available even straight after a throttled click."""
 		with patch(_READINESS, return_value=("Configuring", "")), patch("frappe.enqueue"):
 			onboarding.resync_llm()
+		# Without this the test could not tell a bypassed cooldown from no cooldown.
+		self.assertTrue(
+			frappe.cache().get_value(onboarding._RESYNC_COOLDOWN_KEY), "the cooldown must be armed"
+		)
 		with patch(_READINESS, return_value=("Ready", "")), patch("frappe.enqueue") as enq:
 			out = onboarding.resync_llm()
 		self.assertEqual(out["outcome"], "converged")
