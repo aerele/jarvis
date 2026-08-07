@@ -2143,13 +2143,76 @@
 							     shifts the input while a reply is streaming. -->
 							<div
 								v-if="nudge && nudge.conversationId === currentId"
-								class="jv-nudge"
+								class="jv-nudge jv-nudge--compact"
 							>
-								<div class="jv-nudge-head">
-									<div class="jv-nudge-q">
-										Anything worth remembering about <b>{{ nudgeLabels }}</b
-										>?
-									</div>
+								<span class="jv-nudge-ico" aria-hidden="true">
+									<svg
+										width="15"
+										height="15"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.6"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<path d="M9 18h6M10 21h4" />
+										<path
+											d="M12 3a6 6 0 0 0-4 10.5c.6.6 1 1.3 1 2.1V16h6v-.4c0-.8.4-1.5 1-2.1A6 6 0 0 0 12 3z"
+										/>
+									</svg>
+								</span>
+
+								<!-- recording: live timer + stop + cancel -->
+								<template v-if="nudge.mode === 'recording'">
+									<span class="jv-mic-live jv-nudge-grow"
+										><span class="jv-mic-dot"></span>{{ nudgeClock }}</span
+									>
+									<button
+										class="jv-btn jv-btn--primary jv-nudge-go"
+										title="Stop and transcribe"
+										@click="stopNudgeMic"
+									>
+										Stop
+									</button>
+									<button
+										class="jv-nudge-x"
+										title="Cancel recording"
+										aria-label="Cancel recording"
+										@click="cancelNudgeMic"
+									>
+										<svg
+											width="13"
+											height="13"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M18 6 6 18M6 6l12 12" />
+										</svg>
+									</button>
+								</template>
+
+								<!-- transcribing: spinner -->
+								<template v-else-if="nudge.mode === 'transcribing'">
+									<span class="jv-nudge-grow jv-nudge-working">
+										<svg
+											class="jv-spin"
+											width="14"
+											height="14"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="var(--cta)"
+											stroke-width="2.4"
+											stroke-linecap="round"
+										>
+											<path d="M12 3a9 9 0 1 0 9 9" />
+										</svg>
+										Transcribing…
+									</span>
 									<button
 										class="jv-nudge-x"
 										title="Dismiss"
@@ -2169,151 +2232,72 @@
 											<path d="M18 6 6 18M6 6l12 12" />
 										</svg>
 									</button>
-								</div>
-								<div v-if="nudge.mode !== 'edit'" class="jv-nudge-actions">
-									<template v-if="ui.stt_enabled && nudgeRec.supported">
-										<button
-											v-if="nudge.mode === 'transcribing'"
-											class="jv-iconbtn jv-micbtn"
-											title="Transcribing…"
-											disabled
-											style="
-												width: 28px;
-												height: 28px;
-												display: flex;
-												align-items: center;
-												justify-content: center;
-												background: transparent;
-												border: none;
-												border-radius: 7px;
-												color: var(--text-3);
-											"
-										>
-											<svg
-												class="jv-spin"
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="var(--cta)"
-												stroke-width="2.4"
-												stroke-linecap="round"
-											>
-												<path d="M12 3a9 9 0 1 0 9 9" />
-											</svg>
-										</button>
-										<!-- labeled, unlike the composer's dictate mic 40px below — two
-										     identical icon-only mics were indistinguishable at a glance -->
-										<button
-											v-else
-											class="jv-iconbtn jv-micbtn"
-											:class="{ rec: nudge.mode === 'recording' }"
-											:title="
-												nudge.mode === 'recording'
-													? 'Stop and transcribe'
-													: `Record a voice note (saved for ${agentName} to learn from)`
-											"
-											@click="
-												nudge.mode === 'recording'
-													? stopNudgeMic()
-													: startNudgeMic()
-											"
-											style="
-												height: 28px;
-												display: flex;
-												align-items: center;
-												justify-content: center;
-												gap: 5px;
-												background: transparent;
-												border: none;
-												border-radius: 7px;
-												cursor: pointer;
-												color: var(--text-3);
-												padding: 0 8px;
-												font-size: 12.5px;
-												font-weight: 600;
-											"
-										>
-											<svg
-												width="15"
-												height="15"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.7"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path
-													d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
-												/>
-												<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-												<path d="M12 19v3" />
-											</svg>
-											<span v-if="nudge.mode !== 'recording'"
-												>Record answer</span
-											>
-										</button>
-										<template v-if="nudge.mode === 'recording'">
-											<span class="jv-mic-live"
-												><span class="jv-mic-dot"></span
-												>{{ nudgeClock }}</span
-											>
-											<button
-												class="jv-mic-cancel"
-												title="Cancel recording (Esc)"
-												aria-label="Cancel recording"
-												@click="cancelNudgeMic"
-											>
-												<svg
-													width="12"
-													height="12"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													stroke-width="2.2"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-												>
-													<path d="M18 6 6 18M6 6l12 12" />
-												</svg>
-											</button>
-										</template>
-									</template>
-									<button
-										v-if="nudge.mode === 'idle'"
-										class="jv-nudge-type"
-										@click="typeNudge"
-									>
-										Type instead
-									</button>
-								</div>
+								</template>
+
+								<!-- idle / edit: the compact note row — the question lives in the placeholder -->
 								<template v-else>
-									<textarea
+									<input
 										ref="nudgeTaEl"
 										v-model="nudge.text"
-										rows="3"
-										class="jv-nudge-ta"
-										:placeholder="`What should ${agentName} remember?`"
-									></textarea>
-									<div class="jv-nudge-foot">
-										<button
-											class="jv-btn jv-btn--ghost"
-											style="height: 30px; padding: 0 12px"
-											:disabled="nudge.saving"
-											@click="nudge.mode = 'idle'"
+										class="jv-nudge-input"
+										:placeholder="`Note something to remember about ${nudgeLabels}…`"
+										:disabled="nudge.saving"
+										@keydown.enter.prevent="saveNudgeNote"
+									/>
+									<button
+										v-if="
+											ui.stt_enabled &&
+											nudgeRec.supported &&
+											!(nudge.text || '').trim()
+										"
+										class="jv-iconbtn jv-nudge-mic"
+										:title="`Record a voice note (saved for ${agentName} to learn from)`"
+										@click="startNudgeMic"
+									>
+										<svg
+											width="15"
+											height="15"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.7"
+											stroke-linecap="round"
+											stroke-linejoin="round"
 										>
-											Cancel
-										</button>
-										<button
-											class="jv-btn jv-btn--primary"
-											style="height: 30px; padding: 0 12px"
-											:disabled="nudge.saving || !nudge.text.trim()"
-											@click="saveNudgeNote"
+											<path
+												d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
+											/>
+											<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+											<path d="M12 19v3" />
+										</svg>
+									</button>
+									<button
+										v-if="(nudge.text || '').trim()"
+										class="jv-btn jv-btn--primary jv-nudge-go"
+										:disabled="nudge.saving"
+										@click="saveNudgeNote"
+									>
+										{{ nudge.saving ? "Saving…" : "Save" }}
+									</button>
+									<button
+										class="jv-nudge-x"
+										title="Dismiss"
+										aria-label="Dismiss"
+										@click="dismissNudge"
+									>
+										<svg
+											width="13"
+											height="13"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
 										>
-											{{ nudge.saving ? "Saving…" : "Save" }}
-										</button>
-									</div>
+											<path d="M18 6 6 18M6 6l12 12" />
+										</svg>
+									</button>
 								</template>
 							</div>
 						</template>
@@ -8742,11 +8726,6 @@ function cancelNudgeMic() {
 	nudgeRec.cancel();
 	if (nudge.value) nudge.value.mode = "idle";
 }
-function typeNudge() {
-	if (!nudge.value) return;
-	nudge.value.mode = "edit";
-	nextTick(() => nudgeTaEl.value?.focus());
-}
 async function saveNudgeNote() {
 	const n = nudge.value;
 	if (!n || n.saving) return;
@@ -9754,7 +9733,8 @@ onUnmounted(() => {
 	background: rgba(127, 127, 127, 0.16);
 	color: var(--text);
 }
-/* wiki nudge card — own block above the composer, never inside it */
+/* the nudge card base — shared by the wiki "remember this?" prompt (compact
+   variant below) and the business-note greeting banner. */
 .jv-nudge {
 	display: flex;
 	flex-direction: column;
@@ -9766,6 +9746,76 @@ onUnmounted(() => {
 	border-radius: 8px;
 	font-size: 13px;
 	color: var(--text);
+}
+/* compact wiki-nudge: one slim row above the composer instead of a stacked card,
+   so the "remember this?" prompt barely takes any height. The sub-classes below
+   are used only by this variant; the shared head/q/actions/type/x stay for the
+   greeting banner. The question rides the input placeholder. */
+.jv-nudge.jv-nudge--compact {
+	flex-direction: row;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 6px 5px 12px;
+	border-radius: 12px;
+	animation: jv-nudge-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+@keyframes jv-nudge-in {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.jv-nudge.jv-nudge--compact {
+		animation: none;
+	}
+}
+.jv-nudge-ico {
+	flex: none;
+	display: inline-flex;
+	color: var(--cta);
+	opacity: 0.9;
+}
+.jv-nudge-input {
+	flex: 1;
+	min-width: 0;
+	height: 34px;
+	border: none;
+	background: transparent;
+	color: var(--text);
+	font-family: inherit;
+	font-size: 13.5px;
+	padding: 0 2px;
+	outline: none;
+}
+.jv-nudge-input::placeholder {
+	color: var(--text-3);
+}
+.jv-nudge-grow {
+	flex: 1;
+	min-width: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	font-variant-numeric: tabular-nums;
+}
+.jv-nudge-working {
+	font-size: 12.5px;
+	color: var(--text-2);
+}
+.jv-nudge-mic {
+	flex: none;
+	width: 32px;
+	height: 32px;
+}
+.jv-nudge-go {
+	height: 32px;
+	padding: 0 14px;
+	border-radius: 8px;
 }
 /* business-note greeting banner — top of the chat area, never over the composer */
 .jv-greeting-banner {
@@ -9820,28 +9870,6 @@ onUnmounted(() => {
 .jv-nudge-type:hover {
 	color: var(--text);
 	background: var(--surface-1);
-}
-.jv-nudge-ta {
-	width: 100%;
-	border: 1px solid var(--border);
-	border-radius: 7px;
-	background: var(--surface);
-	color: var(--text);
-	font-family: inherit;
-	font-size: 13px;
-	line-height: 1.5;
-	padding: 8px 10px;
-	resize: vertical;
-	min-height: 64px;
-	outline: none;
-}
-.jv-nudge-ta:focus {
-	border-color: var(--text-3);
-}
-.jv-nudge-foot {
-	display: flex;
-	justify-content: flex-end;
-	gap: 6px;
 }
 .jv-tool-name {
 	font-weight: 550;
