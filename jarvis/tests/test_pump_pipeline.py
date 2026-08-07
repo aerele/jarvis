@@ -1047,6 +1047,11 @@ class TestSuxf2AckFailureContract(_PipelineCase):
 		self.assertEqual(self._state(rid), "errored")
 		err = next(p for p in self._pubs if p.get("kind") == "run:error")
 		self.assertIs(err.get("changed_data"), False, "SUXF-2: pre-ack rejection => changed_data False")
+		# #702 review: a definite pre-ack rejection ("policy_denied", no keyword
+		# match) must classify like turn_handler's own equivalent pre-ack path
+		# ("unreachable"), not fall into the mid-run "gateway" default and tell
+		# the customer a rejection is a brief hiccup worth retrying.
+		self.assertEqual(err.get("code"), "unreachable")
 
 
 # --------------------------------------------------------------------------- #

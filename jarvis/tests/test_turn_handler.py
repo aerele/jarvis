@@ -319,3 +319,66 @@ class TestClassifyError(unittest.TestCase):
 	def test_empty_and_none_degrade_to_gateway_not_a_crash(self):
 		self.assertEqual(turn_handler._classify_error(""), "gateway")
 		self.assertEqual(turn_handler._classify_error(None), "gateway")
+
+	def test_a_definite_pre_ack_rejection_stays_unreachable_when_exc_is_passed(self):
+		# #702 review: pump._handle_ack_failure holds an AgentUnreachableError for
+		# a definite pre-ack rejection (e.g. "policy_denied", no keyword match in
+		# the text). Passing that exc through (as turn_handler's own equivalent
+		# pre-ack path already does) must classify it "unreachable", not fall
+		# into the new mid-run "gateway" default meant for a run that already
+		# started.
+		exc = AgentUnreachableError("chat.send rejected: policy_denied: nope")
+		code = turn_handler._classify_error("chat.send rejected: policy_denied: nope", exc=exc)
+		self.assertEqual(code, "unreachable")
+
+
+class TestPumpClassifyErrorForwardsExc(unittest.TestCase):
+	"""pump._classify_error (#702 review): must forward `exc` to
+	turn_handler._classify_error rather than only ever guessing from text, or
+	a definite pre-ack rejection it holds an AgentUnreachableError for
+	silently drops that signal and falls into the "gateway" default."""
+
+	def test_exc_is_forwarded_and_changes_the_result(self):
+		from jarvis.chat import pump
+		from jarvis.exceptions import AgentUnreachableError as AUE
+
+		text = "chat.send rejected: policy_denied: nope"
+		self.assertEqual(pump._classify_error(text), "gateway", "text alone has no keyword match")
+		self.assertEqual(
+			pump._classify_error(text, AUE(text)),
+			"unreachable",
+			"the same text with `exc` passed must match turn_handler's own pre-ack path",
+		)
+
+
+class TestPrepareErrorCodeOverride(FrappeTestCase):
+	"""prepare._prepare_error's `code` param (#702 review): a caller that
+	already knows the cause (a local bug, not a gateway/relay signal) must be
+	able to skip _classify_error's guess entirely - otherwise a generic
+	message like "Could not prepare the message." falls into the "gateway"
+	default and tells the customer a bug in our own code is a brief hiccup
+	worth retrying."""
+
+	def _run(self, *, code=None, error="boom"):
+		from jarvis.chat import prepare
+
+		published = {}
+		with (
+			patch("jarvis.chat.turn_state.prepare_errored", return_value=True),
+			patch(
+				"jarvis.chat.turn_state.publish_fenced",
+				side_effect=lambda *a, **kw: published.update(kw),
+			),
+			patch("frappe.db.set_value"),
+			patch("frappe.db.commit"),
+		):
+			prepare._prepare_error("run1", 1, "msg1", "conv1", "user1", error, code=code)
+		return published
+
+	def test_explicit_code_bypasses_classification(self):
+		published = self._run(code="internal", error="Could not prepare the message.")
+		self.assertEqual(published.get("code"), "internal")
+
+	def test_no_explicit_code_falls_back_to_classify_error(self):
+		published = self._run(error="insufficient credit")
+		self.assertEqual(published.get("code"), "provider")
