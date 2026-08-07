@@ -619,4 +619,20 @@ describe("resync retries a failed sync (jarvis#714)", () => {
 
 		expect(api.saveLlmPool).not.toHaveBeenCalled();
 	});
+
+	it("does nothing while the add/edit panel is open", async () => {
+		// A resync mid-edit would submit whatever is half-typed in the open panel
+		// instead of leaving it for the customer to finish (review round 1: the
+		// orderDirty guard above had a test, this sibling guard did not).
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		syncStatus = { ...syncStatus, last_sync_status: "failed: fleet returned 502" };
+		const w = await mountEditor();
+
+		w.vm.openAdd();
+		expect(w.vm.panel.open).toBe(true);
+		await w.vm.resync();
+		await idle();
+
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+	});
 });

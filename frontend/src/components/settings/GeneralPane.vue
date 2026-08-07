@@ -34,8 +34,14 @@
 			     subscription snapshot) had nothing left to do with a chat at all. -->
 			<div v-if="statusHint" class="flex items-center gap-2 pb-2">
 				<p class="text-p-sm text-ink-gray-5">{{ statusHint }}</p>
+				<!-- Every attention cause's copy below points the reader at AI
+				     models EXCEPT turn_error, which names a specific chat to open
+				     instead - so every one of them but that gets the button that
+				     actually takes them there. Review round 1 caught sync_failed
+				     alone getting the button while subscription_unverified's
+				     identical "Open AI models" sentence had no way to act on it. -->
 				<Button
-					v-if="statusState === 'attention' && attentionReason === 'sync_failed'"
+					v-if="statusState === 'attention' && attentionReason !== 'turn_error'"
 					variant="subtle"
 					label="Open AI models"
 					iconLeft="cpu"
