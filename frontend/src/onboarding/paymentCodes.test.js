@@ -57,13 +57,35 @@ test("awaiting_manual_reconciliation renders as a FLAG-VARIANT of the pending co
 	const flagged = copyFor(CODES.PAYMENT_CONFIRMATION_PENDING, {
 		awaitingReconciliation: true,
 	});
-	// Same code, different sentence - the flag is what distinguishes them,
-	// because admin deliberately answers the ordinary pending code so no wizard
-	// invites a second payment.
+	// Same code, different sentence - the flag names WHY the wait is happening.
+	// Neither variant offers to pay again (jarvis#705): admin's own contract gives
+	// PAYMENT_CONFIRMATION_PENDING no recovery action at all, and inventing one is
+	// how a waiting customer gets talked into a second mandate.
 	assert.notEqual(flagged.body, plain.body);
-	assert.ok(plain.actions.includes(ACTIONS.INITIATE));
+	assert.ok(!plain.actions.includes(ACTIONS.INITIATE));
 	assert.ok(!flagged.actions.includes(ACTIONS.INITIATE));
 	assert.ok(flagged.actions.includes(ACTIONS.CHECK));
+});
+
+test("PAYMENT_CONFIRMATION_PENDING is a WAIT state: check only, never a second payment", () => {
+	// admin's own contract (signup.py's _RECOVERY_FOR_CODE) gives this code no
+	// recovery action: "there is nothing for the caller to do but wait, and
+	// inventing an action for it is how a waiting customer gets talked into
+	// paying twice." The wizard used to disagree and offer Initiate here, which
+	// is how a live e2e run authorized a second mandate 84 seconds after the
+	// first while the original subscription was still resolving (jarvis#705).
+	//
+	// Nobody is stranded by dropping Initiate: while the token lives, RESUME
+	// reopens the SAME checkout (added dynamically in OnboardingView.vue, not
+	// listed here), and CHECK itself resolves a genuinely untouched checkout to
+	// NO_CURRENT_INTENT, whose own row offers Initiate.
+	const entry = copyFor(CODES.PAYMENT_CONFIRMATION_PENDING);
+	assert.deepEqual(entry.actions, [ACTIONS.CHECK]);
+	assert.ok(
+		!entry.actions.includes(ACTIONS.INITIATE),
+		"a second intent authorizes a second mandate while the first is still resolving"
+	);
+	assert.ok(/not pay again|don't pay again|do not pay again/i.test(entry.body));
 });
 
 // The ONE code exempt from status-first, and it is exempt on the rule's own terms.
@@ -185,7 +207,7 @@ test("rows that warn about money already moving ask for CHECK first", () => {
 	// the row's own body says so out loud.
 	const pending = copyFor(CODES.PAYMENT_CONFIRMATION_PENDING);
 	assert.equal(pending.actions[0], ACTIONS.CHECK);
-	assert.match(pending.body, /check the status before starting another payment/i);
+	assert.match(pending.body, /check the status before doing anything else/i);
 
 	// The declined row carries the same warning and the same ordering.
 	const declined = copyFor(CODES.PAYMENT_DECLINED);
