@@ -512,6 +512,10 @@ class TestWikiGraphSync(FrappeTestCase):
 # real free text, not "User Page": the production degenerate case is an authored
 # sentence, and a fixture that supplies a bland value proves nothing.
 _PRIVATE_TITLE = "salary dispute with manager Xavier"
+# What a page owned by _USER is labelled once minimised. Written out literally
+# rather than derived from the production helper, so the test still fails if the
+# helper's shape changes.
+_OPAQUE_LABEL = "User page (--u-administrator)"
 
 
 class TestWikiGraphMinimisation(WikiGraphTestCase):
@@ -530,6 +534,15 @@ class TestWikiGraphMinimisation(WikiGraphTestCase):
 	def _node(self, g, node_id):
 		return next((n for n in g["nodes"] if n["id"] == node_id), None)
 
+	def _minimised_nodes(self, g):
+		"""Every node emitted under Administrator's opaque User ref.
+
+		Selected by LABEL, not by "the one node whose scope is User": compute_graph
+		is org-wide with no scope filter, several sibling test modules create their
+		own User-scope pages, and CI's parallel runner orders files differently from
+		the serial one. A positional selector would pick up a neighbour's fixture."""
+		return [n for n in g["nodes"] if n.get("label") == _OPAQUE_LABEL]
+
 	def test_a_user_page_title_and_slug_are_both_absent_from_the_pushed_payload(self):
 		doc = self._page(f"{_PREFIX}-priv", _PRIVATE_TITLE, scope="User", target_user=_USER)
 		payload = self._payload()
@@ -539,9 +552,10 @@ class TestWikiGraphMinimisation(WikiGraphTestCase):
 		self.assertNotIn(doc.name, payload)
 		# ...and the page is still THERE, as an opaque node. Minimisation, not
 		# deletion: the vendor console still needs to see the User tier exists.
-		node = next(n for n in json.loads(payload)["nodes"] if n.get("scope") == "User")
-		self.assertEqual(node["label"], "User page (--u-administrator)")
-		self.assertTrue(node["slug"].startswith("--u-administrator-"))
+		nodes = self._minimised_nodes(json.loads(payload))
+		self.assertTrue(nodes, f"no node labelled {_OPAQUE_LABEL!r} in the payload")
+		for node in nodes:
+			self.assertTrue(node["slug"].startswith("--u-administrator-"))
 
 	def test_an_org_page_node_is_byte_identical_to_before_the_change(self):
 		"""The regression direction. #495 is the one part of this work that changes
@@ -578,9 +592,9 @@ class TestWikiGraphMinimisation(WikiGraphTestCase):
 		or a timestamp: a node that changes identity daily makes the console's
 		history worthless, which is the opposite of the point."""
 		self._page(f"{_PREFIX}-stable", _PRIVATE_TITLE, scope="User", target_user=_USER)
-		first = [n for n in wiki_graph.compute_graph()["nodes"] if n.get("scope") == "User"]
-		second = [n for n in wiki_graph.compute_graph()["nodes"] if n.get("scope") == "User"]
-		self.assertEqual(len(first), 1)
+		first = self._minimised_nodes(wiki_graph.compute_graph())
+		second = self._minimised_nodes(wiki_graph.compute_graph())
+		self.assertTrue(first, f"no node labelled {_OPAQUE_LABEL!r} in the payload")
 		self.assertEqual(first, second)
 
 	def test_a_link_into_a_user_page_does_not_republish_its_slug(self):
