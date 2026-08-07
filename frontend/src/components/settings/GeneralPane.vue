@@ -26,9 +26,28 @@
 			</KvRow>
 			<!-- The badge alone sent people looking in the wrong place (#678): it
 			     names a state but not what to do about it. This says what the
-			     workspace can actually tell, and deliberately does not guess a
-			     cause, because the turn error's own wording is unreliable (#702). -->
-			<p v-if="statusHint" class="pb-2 text-p-sm text-ink-gray-5">{{ statusHint }}</p>
+			     workspace can actually tell. It deliberately does not guess WHY a
+			     turn failed (the turn's own wording is unreliable, #702), but it
+			     does now say WHICH of the three attention causes applies (#714) -
+			     one hint that claimed every cause was a failed chat message kept
+			     reading as current even once the true cause (a stale sync or
+			     subscription snapshot) had nothing left to do with a chat at all. -->
+			<div v-if="statusHint" class="flex items-center gap-2 pb-2">
+				<p class="text-p-sm text-ink-gray-5">{{ statusHint }}</p>
+				<!-- Every attention cause's copy below points the reader at AI
+				     models EXCEPT turn_error, which names a specific chat to open
+				     instead - so every one of them but that gets the button that
+				     actually takes them there. Review round 1 caught sync_failed
+				     alone getting the button while subscription_unverified's
+				     identical "Open AI models" sentence had no way to act on it. -->
+				<Button
+					v-if="statusState === 'attention' && attentionReason !== 'turn_error'"
+					variant="subtle"
+					label="Open AI models"
+					iconLeft="cpu"
+					@click="store.openSettings('aimodels')"
+				/>
+			</div>
 			<KvRow
 				v-if="isProxy && connStatus && connStatus.oauth_expires_at"
 				label="Expires"
@@ -387,24 +406,41 @@ const statusLabel = computed(
 			attention: "Needs attention",
 		}[statusState.value] || "Connected")
 );
+// The server's reason for "attention" (jarvis#714) - see account._llm_health.
+// One of sync_failed / turn_error / subscription_unverified, or "" for every
+// other state. Empty until connStatus loads, same fallback shape as health.
+const attentionReason = computed(
+	() => (connStatus.value && connStatus.value.attention_reason) || ""
+);
 // One line under the badge, for the two states where "what now" is not obvious.
 // "Connected" gets none: a healthy workspace needs no instructions.
 //
-// It names NO cause on purpose. The badge turns red off the bare fact that a
-// turn errored, and turn_handler's #702 comment records that the agent's wording
-// does not identify why - "LLM request failed: network connection error." came
-// from a paired-device file mid-rewrite, nothing to do with the network or the
-// key. Telling an admin to check a key that is fine is the same wasted trip this
-// issue was filed about, so it points at the failed message, whose own inline
-// error is the only first-hand account of what went wrong.
-const statusHint = computed(
-	() =>
-		({
-			attention:
-				"A recent chat message failed. Open that chat to see the error it reported.",
-			down: "This workspace's model settings have not reached your assistant yet.",
-		}[statusState.value] || "")
-);
+// attention now branches on WHICH signal is behind it (jarvis#714): a single
+// sentence claiming every cause was "a recent chat message failed" kept
+// reading as current even once the true cause had stopped being about a chat
+// at all - a stale sync failure or a stale subscription probe, neither of
+// which names a message to open. The turn_error branch still names NO cause
+// beyond "a message failed" on purpose: turn_handler's #702 comment records
+// that the agent's own wording is not reliable, so this points at the failed
+// message, whose own inline error is the only first-hand account.
+const statusHint = computed(() => {
+	if (statusState.value === "attention") {
+		return (
+			{
+				sync_failed:
+					"Your last change to AI models did not reach your agent. Open AI models to check it.",
+				turn_error:
+					"A recent chat message failed. Open that chat to see the error it reported.",
+				subscription_unverified:
+					"Your chat subscription was last flagged as unverified, and no chat has completed since. Open AI models to check it.",
+			}[attentionReason.value] ||
+			"This workspace needs attention. Open AI models to check it."
+		);
+	}
+	if (statusState.value === "down")
+		return "This workspace's model settings have not reached your assistant yet.";
+	return "";
+});
 // design.md §3.6 status map: Success is green, Attention required and Broken are
 // red, Processing is blue. Disconnected is orange (warning), not red: nothing is
 // broken, the customer chose this and can undo it in AI models.

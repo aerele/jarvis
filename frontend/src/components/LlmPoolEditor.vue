@@ -1723,6 +1723,21 @@
 			>
 				<span class="jv-pool-syncpill-ic" aria-hidden="true"></span>{{ statusLine.text }}
 			</span>
+			<!-- jarvis#714: the failed pill had no retry. Hidden while a reorder is
+			     still unapplied (orderDirty) - its own "Apply order" bar above already
+			     owns committing THAT change, and resync() would otherwise apply it as
+			     a side effect with no order-specific confirmation. Hidden while the
+			     add/edit panel is open for the same reason "+ Add a model" is
+			     (line 249 above): a resync mid-edit would submit whatever is
+			     half-typed there instead of leaving it for the customer to finish. -->
+			<button
+				v-if="canEdit && statusLine.kind === 'failed' && !orderDirty && !panel.open"
+				:disabled="!editable"
+				@click="resync"
+				class="jv-btn jv-btn--sm jv-btn--primary"
+			>
+				Resync
+			</button>
 		</div>
 	</div>
 </template>
@@ -2961,6 +2976,21 @@ async function applyOrder() {
 	// Only clear the baseline on a write that landed. If it failed, runApply has
 	// already put the old order back, and the baseline must stay valid for the retry.
 	if (persisted) orderBaseline.value = null;
+}
+
+// jarvis#714: the status strip's "Last sync failed" pill had no way to retry.
+// This re-runs runApply() over the CURRENT rows.value unchanged - the exact
+// re-push applyOrder above already does for an order-only change, and the
+// mechanism jarvis_settings.py's _pool_sync_is_redundant docstring names as the
+// sanctioned lever: "a prior failed/pending/skipped sync means the container
+// may not hold the current pool, so an unchanged re-save is the operator's
+// retry lever and must enqueue." No new endpoint - save_llm_pool already
+// treats a same-content re-save after a failed sync as retryable, not a no-op.
+// If #713 later exposes a dedicated retry endpoint, this call is the one place
+// to point at it instead.
+async function resync() {
+	if (busy.value.active || orderDirty.value || panel.value.open) return;
+	await runApply();
 }
 // The models that actually count as a connection. An open "+ Add a model" panel has
 // already put a placeholder in the list and it must not read as a second model - not
@@ -4663,6 +4693,19 @@ defineExpose({ save, busy, canStart: singleModeCanStart, startBlockedReason });
 	white-space: nowrap;
 }
 .jv-flist-model {
+	/* flex: 1 1 0% (not the flex:none every neighbour on this row uses) so its
+	   HYPOTHETICAL size for the wrap-fitting algorithm is 0, not its full
+	   un-ellipsized text width. Without this, the row's flex-wrap safety net
+	   (meant for genuinely narrow viewports) fired even at this pane's own
+	   MAXIMUM possible width - see the jarvis#714 PR body for the measurement.
+	   max-width: max-content caps the grow side at the same width: with plain
+	   flex:1 the span consumed every pixel of the row's free space, dragging
+	   "key set" / the health dot / the health label away from the model name
+	   they describe. Capped, that free space now sinks into
+	   .jv-flist-acts's own margin-left:auto instead, which is exactly where it
+	   went before this row ever grew a fifth action button. */
+	flex: 1 1 0%;
+	max-width: max-content;
 	font-size: 13.5px;
 	color: var(--text);
 	min-width: 0;

@@ -991,17 +991,20 @@ def get_llm_connection_status() -> dict:
 			"proxy_active": False,
 			"disconnected": True,
 			"health": "down",
+			"attention_reason": "",
 			"auth_present": False,
 			"oauth_expires_at": None,
 			"profile_ids": [],
 			"default_model": "",
 		}
 	if not getattr(settings, "proxy_active", 0):
+		health, attention_reason = _llm_health(settings, pool_mode)
 		return {
 			**shape,
 			"proxy_active": False,
 			"disconnected": False,
-			"health": _llm_health(settings, pool_mode),
+			"health": health,
+			"attention_reason": attention_reason,
 			"auth_present": False,
 			"oauth_expires_at": None,
 			"profile_ids": [],
@@ -1009,11 +1012,13 @@ def get_llm_connection_status() -> dict:
 		}
 	raw = _surface(admin_client.post_llm_auth_status) or {}
 	data = raw.get("data", raw) or {}
+	health, attention_reason = _llm_health(settings, pool_mode)
 	return {
 		**shape,
 		"proxy_active": True,
 		"disconnected": False,
-		"health": _llm_health(settings, pool_mode),
+		"health": health,
+		"attention_reason": attention_reason,
 		"auth_present": bool(data.get("auth_profile_present")),
 		"oauth_expires_at": data.get("openai_profile_expires_ms"),
 		"profile_ids": data.get("profile_ids", []),
@@ -1026,9 +1031,14 @@ def get_llm_connection_status() -> dict:
 	}
 
 
-def _llm_health(settings, pool_mode: bool) -> str:
-	"""``ok`` / ``applying`` / ``attention`` / ``down`` for a workspace that HAS a
-	credential (``_has_llm_config`` has already said so).
+def _llm_health(settings, pool_mode: bool) -> tuple:
+	"""``(health, attention_reason)`` for a workspace that HAS a credential
+	(``_has_llm_config`` has already said so). ``health`` is one of ``ok`` /
+	``applying`` / ``attention`` / ``down``. ``attention_reason`` is one of
+	``sync_failed`` / ``turn_error`` / ``subscription_unverified`` when
+	``health`` is ``attention``, else ``""`` - the SPA's Status hint (#714)
+	picks its copy off this instead of a single sentence that claimed every
+	cause was a failed chat message, which was not always true.
 
 	Every input is local. Nothing here asks admin, because the one thing admin was
 	asked - "does a cliproxy auth profile exist" - turned out not to describe a
@@ -1043,10 +1053,10 @@ def _llm_health(settings, pool_mode: bool) -> str:
 	  attention - the container IS serving, but something downstream is wrong:
 	              the last apply failed, the latest completed turn errored, or the
 	              fleet's own probe reports the chat subscription rejecting
-	              requests. All three are workspace-level verdicts. Per-MODEL
-	              verdicts deliberately stay out: AI models shows them per row, and
-	              one dead member of a healthy failover chain is what failover is
-	              for.
+	              requests with no completed turn since to contradict it. All
+	              three are workspace-level verdicts. Per-MODEL verdicts
+	              deliberately stay out: AI models shows them per row, and one
+	              dead member of a healthy failover chain is what failover is for.
 	  ok        - serving, the last apply came back clean, and the last turn that
 	              finished did not error.
 
@@ -1059,25 +1069,72 @@ def _llm_health(settings, pool_mode: bool) -> str:
 	The status prefixes match @/lib/syncStatus's, which is the SPA's one
 	translator for the same field, so the badge and the sync line cannot disagree
 	about which of the three an audit string means.
+
+	sync_failed does not self-clear on a later successful turn (jarvis#714), and
+	that is deliberate, not a gap this function leaves open: a turn succeeding
+	proves the container is still serving whatever it applied LAST, never that a
+	failed apply since landed. Clearing "sync_failed" off local chat evidence
+	would be the badge lying about the one thing #713's sync path is the actual
+	fix for - see jarvis_settings.py's sync path, which this function does not
+	touch. subscription_unverified is different: that probe result is a
+	workspace-wide snapshot with no causal link to which config is currently
+	applied, so a completed turn succeeding since is first-hand proof the
+	subscription that turn used is fine now, and is allowed to demote it - the
+	same "fresh local evidence over a stale remote snapshot" reasoning #678
+	already established for turn_error below.
 	"""
 	status = (settings.get("last_sync_status") or "").strip().lower()
 	if status.startswith("pending"):
-		return "applying"
+		return "applying", ""
 	if not _llm_apply_confirmed(settings, pool_mode):
-		return "down"
+		return "down", ""
 	if status.startswith("failed"):
-		return "attention"
+		return "attention", "sync_failed"
 	# A confirmed apply says the config REACHED the container, never that the
 	# provider answers. An api-key model pointed at a base URL nothing serves
 	# applies perfectly and then fails every turn, which is how a green badge
 	# came to sit over a dead endpoint (#678). The turns themselves are the only
 	# local evidence that anything actually responded.
 	if _last_turn_errored():
-		return "attention"
+		return "attention", "turn_error"
 	# The fleet's own pool-wide subscription probe. Only an explicit rejection
 	# counts: "unchecked" (and a no-op apply, which runs no probe at all) means
-	# nobody looked, which is not evidence of a problem.
-	return "attention" if (settings.get("last_subscription_status") or "") == "unverified" else "ok"
+	# nobody looked, which is not evidence of a problem. A completed turn that
+	# succeeded SINCE that probe ran is fresher, stronger evidence than a
+	# snapshot only a future apply would otherwise refresh (jarvis#714) - see
+	# _last_turn_succeeded.
+	if (settings.get("last_subscription_status") or "") == "unverified" and not _last_turn_succeeded():
+		return "attention", "subscription_unverified"
+	return "ok", ""
+
+
+def _latest_completed_turn_error():
+	"""``None`` when this workspace has no completed assistant turn yet, else
+	that turn's ``error`` field (``""`` for a clean finish). The one query
+	``_last_turn_errored`` and ``_last_turn_succeeded`` both read, so the
+	filters - the part TestLastTurnErrored's docstring warns silently rots -
+	can only drift in one place.
+
+	Completed means not still streaming and not parked for snapshot recovery; a
+	recovering turn has not failed yet. Cancellation is excluded for free:
+	stopping a turn writes `stopped`, not `error` (turn_handler:1183), so hitting
+	stop cannot paint the badge - that false-alarm shape is exactly what #561 was
+	about.
+
+	Workspace-wide on purpose (this card is admin-only and describes the
+	workspace), and `get_all` is the right call for that since it does not
+	filter by owner.
+	"""
+	rows = frappe.get_all(
+		"Jarvis Chat Message",
+		filters={"role": "assistant", "streaming": 0, "recovering": 0},
+		fields=["error"],
+		order_by="creation desc",
+		limit=1,
+	)
+	if not rows:
+		return None
+	return (rows[0].get("error") or "").strip()
 
 
 def _last_turn_errored() -> bool:
@@ -1093,25 +1150,27 @@ def _last_turn_errored() -> bool:
 	sends the reader to the failed message itself, whose own inline error is the
 	only first-hand account, rather than naming a cause we cannot know.
 
-	Completed means not still streaming and not parked for snapshot recovery; a
-	recovering turn has not failed yet. Cancellation is excluded for free:
-	stopping a turn writes `stopped`, not `error` (turn_handler:1183), so hitting
-	stop cannot paint the badge - that false-alarm shape is exactly what #561 was
-	about.
-
 	Self-clearing: only the LATEST completed turn is read, so the next turn that
-	succeeds takes the badge back to green with no stamp to reset. Workspace-wide
-	on purpose (this card is admin-only and describes the workspace), and
-	`get_all` is the right call for that since it does not filter by owner.
+	succeeds takes the badge back to green with no stamp to reset.
 	"""
-	rows = frappe.get_all(
-		"Jarvis Chat Message",
-		filters={"role": "assistant", "streaming": 0, "recovering": 0},
-		fields=["error"],
-		order_by="creation desc",
-		limit=1,
-	)
-	return bool(rows and (rows[0].get("error") or "").strip())
+	return bool(_latest_completed_turn_error())
+
+
+def _last_turn_succeeded() -> bool:
+	"""Did the most recent COMPLETED assistant turn in this workspace finish
+	clean? The positive counterpart of ``_last_turn_errored`` - a workspace with
+	no completed turn yet reports False here too, same as it does there: absence
+	of evidence must not read as proof of success any more than it reads as proof
+	of failure.
+
+	Used only to demote a stale ``last_subscription_status`` (see _llm_health):
+	that probe is a snapshot from the last APPLY, refreshed only by a future
+	apply (jarvis_settings.py's sync path), never by ordinary chat traffic, so
+	without this a single old rejection kept the badge on "attention" forever
+	regardless of how much chat had worked since (jarvis#714).
+	"""
+	err = _latest_completed_turn_error()
+	return err is not None and err == ""
 
 
 def _llm_apply_confirmed(settings, pool_mode: bool) -> bool:
