@@ -491,6 +491,77 @@ describe("the provisioning poll", () => {
 		await p1;
 	});
 
+	// The per-tick observation the page renders its phase from. Before this the
+	// poll swallowed tenant_status on every non-ready tick, so the screen had
+	// nothing to say for 90 seconds.
+	test("reports what each tick observed, including a tick that answered nothing", async () => {
+		const answers = [null, { synced: false, tenant_status: "pending" }, { synced: true }];
+		let i = 0;
+		const api = makeApi({
+			syncConnection: vi.fn(async () => {
+				const a = answers[i++];
+				if (a === null) throw new Error("network");
+				return a;
+			}),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		const seen = [];
+		const out = await flow.waitForProvisioning({ onObservation: (o) => seen.push(o) });
+
+		expect(out).toEqual({ status: "ready" });
+		expect(seen).toEqual([
+			{ answered: false, tenantStatus: "" },
+			{ answered: true, tenantStatus: "pending" },
+			{ answered: true, tenantStatus: "" },
+		]);
+	});
+
+	// Rendering must never be able to break the wait.
+	test("an observer that throws does not stop the poll", async () => {
+		const api = makeApi({
+			syncConnection: vi.fn(async () => ({ synced: true })),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		const out = await flow.waitForProvisioning({
+			onObservation: () => {
+				throw new Error("render blew up");
+			},
+		});
+		expect(out).toEqual({ status: "ready" });
+	});
+
+	test("no observer at all is still a valid call", async () => {
+		const api = makeApi({
+			syncConnection: vi.fn(async () => ({ synced: true })),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		expect(await flow.waitForProvisioning()).toEqual({ status: "ready" });
+	});
+
 	test("stops when its attempt is superseded", async () => {
 		const api = makeApi({
 			syncConnection: vi.fn(async () => ({ synced: false })),
