@@ -2287,12 +2287,12 @@ const recoveryActions = computed(() => {
 	//
 	// But it must NOT outrank CHECK, and an earlier version of this that unshifted
 	// unconditionally did. PAYMENT_CONFIRMATION_PENDING can carry a live token AND
-	// mean "money may already have moved" - its own body says "If money was
-	// deducted, check the status before starting another payment." Making RESUME
-	// the primary button there walks the customer back to the payment page ahead of
-	// the read that would tell them they have already paid, which is precisely the
-	// double payment status-first exists to prevent. A row that asks for CHECK
-	// first has a reason; RESUME slots in behind it.
+	// mean "money may already have moved" - its own body says "Check the status
+	// before doing anything else." Making RESUME the primary button there walks
+	// the customer back to the payment page ahead of the read that would tell
+	// them they have already paid, which is precisely the double payment
+	// status-first exists to prevent. A row that asks for CHECK first has a
+	// reason; RESUME slots in behind it.
 	if (canResumeCheckout.value && !acts.includes(ACTIONS.RESUME)) {
 		const check = acts.indexOf(ACTIONS.CHECK);
 		if (check >= 0) acts.splice(check + 1, 0, ACTIONS.RESUME);

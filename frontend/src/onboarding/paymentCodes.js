@@ -175,10 +175,20 @@ const TABLE = {
 		actions: [ACTIONS.VERIFY],
 	},
 	[CODES.PAYMENT_CONFIRMATION_PENDING]: {
+		// A WAIT state, same treatment as PAYMENT_AUTHORIZED_PENDING_CONFIRM below
+		// (jarvis#705). This row cannot tell apart a checkout the customer never
+		// touched from a mandate they already authorized whose webhook has not
+		// landed yet, so it must never offer INITIATE for either: a live e2e run
+		// authorized a second mandate by clicking it 84 seconds after the first,
+		// before admin's own committed-money guard had anything to refuse. Nobody
+		// is stranded by CHECK alone - while the token lives, RESUME (added
+		// dynamically, see OnboardingView.vue) reopens the SAME checkout, and CHECK
+		// itself resolves a genuinely untouched one to NO_CURRENT_INTENT, which
+		// offers INITIATE.
 		headline: "We have not confirmed this payment.",
-		body: "If money was deducted, check the status before starting another payment.",
+		body: "Check the status before doing anything else. If money already moved, please do not pay again, as that would authorize a second one.",
 		tone: TONE.STATUS,
-		actions: [ACTIONS.CHECK, ACTIONS.INITIATE],
+		actions: [ACTIONS.CHECK],
 	},
 	[CODES.PAYMENT_DECLINED]: {
 		headline: "The payment was declined. No payment was confirmed.",
@@ -371,8 +381,10 @@ const TABLE = {
  *
  * Deliberately NOT a code of its own: admin answers the ordinary
  * PAYMENT_CONFIRMATION_PENDING when money is parked, because a decline there
- * would invite a second payment. The flag is the only thing that distinguishes
- * the two, and it is the flag - never the code - that suppresses Pay.
+ * would invite a second payment. The flag only changes the SENTENCE now
+ * (jarvis#705 made the plain row check-only too, same as this one); it still
+ * vetoes the backend can_initiate_payment flag one layer down, in
+ * paymentMachine.js.
  */
 const PENDING_AWAITING_RECONCILIATION = Object.freeze({
 	headline: "We are still confirming your payment.",
