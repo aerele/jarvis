@@ -155,10 +155,7 @@ import {
 	acknowledgeLearnedPattern,
 } from "@/api/learning";
 import { agentName } from "@/branding";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -225,7 +222,7 @@ async function load() {
 				: "update";
 	} catch (e) {
 		if (seq !== loadSeq) return;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 		emit("update:modelValue", false);
 	}
 }
@@ -295,7 +292,7 @@ async function confirmApply() {
 		emit("applied", { skill_name: skill });
 		emit("update:modelValue", false);
 	} catch (e) {
-		toast.error(errMsg(e)); // dialog stays open for retry / cancel
+		toast.error(errHtml(e)); // dialog stays open for retry / cancel
 	} finally {
 		applying.value = false;
 	}
@@ -312,7 +309,7 @@ async function acknowledgeInstead() {
 		emit("applied", { acknowledged: true });
 		emit("update:modelValue", false);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acknowledging.value = false;
 	}

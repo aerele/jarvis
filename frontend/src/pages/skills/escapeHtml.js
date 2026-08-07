@@ -6,11 +6,12 @@
 // the reviewer's privileged session on Approve. Pure + importable so it is
 // node-tested (the promotionBudget.js precedent) and reused verbatim at every
 // call site. Server-side neutralization of the wiki title is the second belt.
-export function esc(v) {
-	return String(v ?? "")
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&#39;");
-}
+// The implementation moved to lib/errors.js (#699), which needs the very same
+// escape for the OTHER v-html sink in the app: frappe-ui's Toast binds its
+// `message` prop with v-html too, so an error message decoded back to plain
+// text has to be re-escaped on the way into it. Re-exported here under the
+// original name so every existing call site and this module's own test keep
+// working against ONE implementation instead of two that can drift apart.
+// Relative path, not the "@/" alias: this test is run by plain `node --test`,
+// which does not resolve Vite's aliases.
+export { escapeHtml as esc } from "../../lib/errors.js";

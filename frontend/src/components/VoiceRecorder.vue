@@ -73,6 +73,7 @@ import { ref, computed, onBeforeUnmount } from "vue";
 import { Button, toast } from "frappe-ui";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { transcribeAudio } from "@/api/voice";
+import { errHtml } from "@/lib/errors";
 
 defineProps({
 	// Compact/embedded mode for the Personalise ChatComposer toolbar: icon-only
@@ -84,10 +85,6 @@ defineProps({
 });
 
 const emit = defineEmits(["transcript"]);
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const rec = useAudioRecorder({
 	onAutoStop: (r) => {
@@ -137,7 +134,7 @@ async function transcribe(r) {
 		if (text) emit("transcript", text, r.durationS || 0);
 		else toast.error("Nothing was transcribed - try again closer to the microphone.");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		phase.value = "idle";
 	}

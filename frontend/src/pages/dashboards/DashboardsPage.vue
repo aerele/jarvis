@@ -223,13 +223,10 @@ import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardChatPane from "./DashboardChatPane.vue";
 import SavedDashboardsTab from "./SavedDashboardsTab.vue";
 import SaveDashboardDialog from "./SaveDashboardDialog.vue";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const route = useRoute();
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const TABS = [
 	{ label: "Builder", value: "builder" },
@@ -430,7 +427,7 @@ async function onCanvas({ message_id, items, restore }) {
 		// A restore is best-effort background work the user did not ask for -
 		// a deleted/expired artifact must not raise a toast on page load.
 		if (restore) restoreFailed(message_id);
-		else toast.error(errMsg(e));
+		else toast.error(errHtml(e));
 		return false;
 	}
 }
@@ -668,7 +665,7 @@ async function loadEdit(name, { deepLink = true } = {}) {
 	} catch (e) {
 		// A restored target that has since been deleted is not the user's doing -
 		// forget it silently instead of toasting on every page load.
-		if (deepLink) toast.error(errMsg(e));
+		if (deepLink) toast.error(errHtml(e));
 		else editingSticky.value = "";
 		settle();
 	}
@@ -816,6 +813,8 @@ async function promoteFromChat(conversation, messageId, { fallback = null, dash 
 	// restore would stay blocked for the life of the page. Still synchronous,
 	// nothing awaits above it, so the pane's restore cannot slip in first.
 	promotionPending.value = true;
+	// `msg` lands in a toast, which binds `message` with v-html, so anything
+	// derived from a server error must arrive here already escaped (errHtml).
 	const giveUp = (msg) => {
 		if (msg) toast.error(msg);
 		promotionPending.value = false;
@@ -834,7 +833,7 @@ async function promoteFromChat(conversation, messageId, { fallback = null, dash 
 		const d = (await getDashboardConversation(conversation)) || {};
 		frame = builderCanvasFrame(d.messages || [], messageId);
 	} catch (e) {
-		giveUp(errMsg(e));
+		giveUp(errHtml(e));
 		return;
 	}
 	if (!frame) {

@@ -323,15 +323,12 @@ import {
 	runWikiLintNow,
 } from "@/api/wiki";
 import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
 // /skills is a TABBED shell; the `fv2` payload carries its view key so a sibling
 // tab's filters are never half-applied here (judgment C08-7).
 const route = useRoute();
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── static config ────────────────────────────────────────────────────────────
 const WIKI_TYPES = [
@@ -557,7 +554,7 @@ async function runRowAction(row, fn, successMsg) {
 		toast.success(successMsg);
 		resetLoad();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		rowBusy.value = "";
 	}
@@ -673,7 +670,7 @@ async function doCreate() {
 			openPage(res.slug);
 		}
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		createDialog.saving = false;
 	}
@@ -692,7 +689,7 @@ async function changeLanguage(v) {
 		toast.success(`Knowledge language set to ${v}`);
 	} catch (e) {
 		caps.knowledge_language = previous;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -716,7 +713,7 @@ function confirmSync() {
 				if (r && r.ok === false) toast.error(r.reason || "Could not queue the sync.");
 				else toast.success("Sync queued");
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			} finally {
 				syncing.value = false;
 			}
@@ -741,7 +738,7 @@ function confirmLint() {
 				loadCaps();
 				refreshKeep();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			} finally {
 				linting.value = false;
 			}

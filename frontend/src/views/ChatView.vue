@@ -3956,9 +3956,6 @@ watch(
 // --- Custom skills (Skills settings tab + "/" composer menu) ---
 const customSkills = ref([]);
 
-function _skillErr(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 async function loadCustomSkills() {
 	try {
 		customSkills.value = (await api.listCustomSkills()) || [];
@@ -4070,7 +4067,7 @@ async function rerunFromHistory(run) {
 			status: "running",
 		};
 	} catch (e) {
-		notify(_skillErr(e), { type: "error" });
+		notify(errMessage(e), { type: "error" });
 	}
 }
 async function stopRunFromHistory(run) {
@@ -4079,7 +4076,7 @@ async function stopRunFromHistory(run) {
 		run.status = "stopped"; // optimistic patch
 		loadMacroRunStats();
 	} catch (e) {
-		notify(_skillErr(e), { type: "error" });
+		notify(errMessage(e), { type: "error" });
 	}
 }
 
@@ -4764,7 +4761,7 @@ async function clearAllHistory() {
 		settingsOpen.value = false;
 		newChat(); // also reloads store.conversations
 	} catch (e) {
-		notify(_skillErr(e) || "Could not delete history", { type: "error" });
+		notify(errMessage(e) || "Could not delete history", { type: "error" });
 	} finally {
 		clearingHistory.value = false;
 	}
@@ -6013,12 +6010,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 		}
 	} catch (e) {
 		p.applying = false;
-		p.error = {
-			message:
-				(e && e.messages && e.messages[0]) ||
-				(e && e.message) ||
-				"Could not save — check the values.",
-		};
+		p.error = { message: errMessage(e, "Could not save. Check the values.") };
 	}
 }
 
@@ -6196,11 +6188,7 @@ async function confirmPending(pa) {
 		}
 	} catch (e) {
 		const card = cardById();
-		if (card)
-			card.error = {
-				message:
-					(e && e.messages && e.messages[0]) || (e && e.message) || "Could not confirm.",
-			};
+		if (card) card.error = { message: errMessage(e, "Could not confirm.") };
 	} finally {
 		const card = cardById();
 		if (card) card.busy = false;
@@ -6224,10 +6212,7 @@ async function discardPending(pa) {
 			return;
 		}
 	} catch (e) {
-		pa.error = {
-			message:
-				(e && e.messages && e.messages[0]) || (e && e.message) || "Could not discard.",
-		};
+		pa.error = { message: errMessage(e, "Could not discard.") };
 		return;
 	} finally {
 		pa.busy = false;
@@ -7125,7 +7110,7 @@ async function selectConversation(id) {
 // the extracted reason so a non-string Frappe error payload can't throw inside the
 // caller's catch and re-swallow the very failure we're trying to report.
 function notifyActionError(prefix, e) {
-	notify(`${prefix} — ${String(_skillErr(e)).replace(/\.$/, "")}. Try again.`, {
+	notify(`${prefix} — ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
 		type: "error",
 	});
 }

@@ -11,10 +11,7 @@ import { reactive, ref, isRef, watch } from "vue";
 import { toast } from "frappe-ui";
 import { session } from "@/data/session";
 import * as apiDocmeta from "@/api/docmeta";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 export function useDocmeta(doctype, name) {
 	// plain string (B4/B5 contract) or a ref (detail pages whose route param
@@ -45,7 +42,7 @@ export function useDocmeta(doctype, name) {
 			if (meta.value && row) meta.value.comments = [...(meta.value.comments || []), row];
 			return row || null;
 		} catch (e) {
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 			return null;
 		}
 	}
@@ -60,7 +57,7 @@ export function useDocmeta(doctype, name) {
 			}
 			return true;
 		} catch (e) {
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 			return false;
 		}
 	}
@@ -72,7 +69,7 @@ export function useDocmeta(doctype, name) {
 				meta.value.comments = (meta.value.comments || []).filter((c) => c.name !== id);
 			return true;
 		} catch (e) {
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 			return false;
 		}
 	}
@@ -88,7 +85,7 @@ export function useDocmeta(doctype, name) {
 			meta.value.liked = likedBy.includes(session.user);
 		} catch (e) {
 			meta.value.liked = !next;
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 		}
 	}
 
@@ -104,7 +101,7 @@ export function useDocmeta(doctype, name) {
 			if (meta.value && Array.isArray(assignees)) meta.value.assignees = assignees;
 			return true;
 		} catch (e) {
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 			return false;
 		}
 	}
@@ -120,7 +117,7 @@ export function useDocmeta(doctype, name) {
 			if (meta.value && Array.isArray(assignees)) meta.value.assignees = assignees;
 			return true;
 		} catch (e) {
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 			return false;
 		}
 	}
@@ -136,7 +133,7 @@ export function useDocmeta(doctype, name) {
 			}
 			return true;
 		} catch (e) {
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 			return false;
 		}
 	}
@@ -152,7 +149,7 @@ export function useDocmeta(doctype, name) {
 			}
 			return true;
 		} catch (e) {
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 			return false;
 		}
 	}

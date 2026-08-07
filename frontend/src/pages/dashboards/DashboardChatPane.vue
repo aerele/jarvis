@@ -217,6 +217,7 @@ import { session } from "@/data/session";
 import { sendDashboardChat, getDashboardConversation } from "@/api/dashboards";
 import { listPendingConfirmations, confirmTool, dismissTool } from "@/api";
 import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
 // dialog; stt_enabled - when the backend sends it - gates the mic)
@@ -239,10 +240,6 @@ const router = useRouter();
 const socket = inject("$socket", null);
 // AskCard styles with the jv-* tokens, which this frappe-ui page does not bind.
 const { paletteVars } = useJarvisTheme();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── conversation persistence (per user, ChatComposer's namespacing idiom) ────
 const conversation = useStorage(`jarvis-dash-conv-${session.user || "anon"}`, "");
@@ -457,7 +454,7 @@ async function approve(pa) {
 		}
 	} catch (e) {
 		keepCard = true;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		if (keepCard) pa.busy = false;
 		else removeCard(pa.token);
@@ -479,7 +476,7 @@ async function dismiss(pa) {
 		}
 	} catch (e) {
 		keepCard = true;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		if (keepCard) pa.busy = false;
 		else removeCard(pa.token);
@@ -578,7 +575,7 @@ async function send() {
 	} catch (e) {
 		messages.value = messages.value.filter((m) => m.name !== tmpName);
 		if (!draft.value) draft.value = text;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		sending.value = false;
 	}

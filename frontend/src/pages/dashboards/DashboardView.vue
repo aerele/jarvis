@@ -181,16 +181,13 @@ import { getDashboard, getDashboardsCaps, deleteDashboard, saveDashboard } from 
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
 import SaveDashboardDialog from "./SaveDashboardDialog.vue";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, required: true },
 });
 
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const detail = ref(null);
 const loading = ref(true);
@@ -219,7 +216,7 @@ async function pickTheme(key) {
 		await saveDashboard({ name: detail.value.name, theme: themeLabel(key) });
 		detail.value.theme = themeLabel(key);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -277,7 +274,7 @@ async function doExport(format) {
 	try {
 		await canvas.value.exportAs(format, detail.value && detail.value.dashboard_title);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		exporting.value = false;
 	}
@@ -304,7 +301,7 @@ const deleteDialogOptions = computed(() => {
 						toast.success("Dashboard deleted");
 						goBack();
 					} catch (e) {
-						toast.error(errMsg(e));
+						toast.error(errHtml(e));
 					}
 				},
 			},

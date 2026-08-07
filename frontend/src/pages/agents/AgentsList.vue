@@ -279,13 +279,10 @@ import { useListPage } from "@/composables/useListPage";
 import * as api from "@/api";
 import * as agentsApi from "@/api/agents";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { errHtml } from "@/lib/errors";
 
 const route = useRoute();
 const router = useRouter();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // Display metadata mirroring jarvis/agents/registry.json domains (unknown slugs
 // fall back to a prettified slug).
@@ -507,7 +504,7 @@ async function applyCatalog() {
 		startSyncPoll();
 		return true;
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 		return false;
 	} finally {
 		applying.value = false;

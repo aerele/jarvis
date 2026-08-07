@@ -194,14 +194,11 @@ import { useShellStore } from "@/stores/shell";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { agentName } from "@/branding";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── list config ──────────────────────────────────────────────────────────────
 const STATUS_BADGE = {
@@ -406,7 +403,7 @@ function bulkDelete(selections, unselectAll) {
 				resetLoad();
 				store.refreshApprovalsCount();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});
@@ -426,7 +423,7 @@ function clearProcessed() {
 				hideDialog();
 				resetLoad();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

@@ -198,6 +198,7 @@ import { takeMacroPrefill } from "@/composables/macroPrefill";
 import { exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { agentName } from "@/branding";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -213,10 +214,6 @@ const FREQUENCY_OPTIONS = [
 	{ label: "Weekly", value: "weekly" },
 	{ label: "Monthly", value: "monthly" },
 ];
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── state ────────────────────────────────────────────────────────────────────
 const macro = ref(null); // last server copy (null while new)
@@ -455,7 +452,7 @@ async function save() {
 			await reloadMacro(); // picks up merge_status / cleared summary / next_run_at
 		}
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
 	}
@@ -472,7 +469,7 @@ async function run() {
 		// hand off to the chat - the live macro banner is ChatView's machinery
 		if (data.conversation) router.push("/c/" + data.conversation);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		running.value = false;
 	}
@@ -487,7 +484,7 @@ async function resummarize() {
 			type: "info",
 		});
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -505,7 +502,7 @@ function confirmDelete() {
 				toast.success("Macro deleted");
 				router.push({ name: "MacrosList" });
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

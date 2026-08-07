@@ -80,7 +80,7 @@ import { onMounted, ref } from "vue";
 import { Button, FeatherIcon, toast } from "frappe-ui";
 import { useRouter } from "vue-router";
 import * as api from "@/api";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 
 const router = useRouter();
@@ -115,7 +115,7 @@ async function run(apps) {
 		pickerOpen.value = false;
 		toast.success(`Learning ${apps.length} app(s) — follow it on the agent's Runs tab`);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		running.value = false;
 	}

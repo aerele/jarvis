@@ -192,10 +192,7 @@ import { timeAgo } from "@/utils/datetime";
 import { modelDisplayLabel } from "@/utils/usageModel";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import * as api from "@/api";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const users = ref([]);
 const loading = ref(false);
@@ -268,7 +265,7 @@ async function saveLimit(u) {
 		u._limitDraft = u.monthly_token_limit;
 		toast.success("Limit updated");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		u._saving = false;
 	}
@@ -288,7 +285,7 @@ async function saveModelLimit(u, m) {
 		m._limitDraft = m.monthly_token_limit;
 		toast.success(`Limit updated for ${modelDisplayLabel(m.model)}`);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		m._saving = false;
 	}

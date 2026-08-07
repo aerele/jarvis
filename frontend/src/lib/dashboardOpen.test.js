@@ -803,7 +803,7 @@ test("the promotion is validated against the transcript, not the link", () => {
 	// a message that is gone, or never drew html, says so and leaves the builder
 	// as it was
 	assert.match(promote, /if \(!frame\) \{\n\t\tgiveUp\(/);
-	assert.match(promote, /giveUp\(errMsg\(e\)\);/);
+	assert.match(promote, /giveUp\(errHtml\(e\)\);/);
 	const giveUp = promote.slice(promote.indexOf("const giveUp = "));
 	assert.match(giveUp, /stripPromotionQuery\(\);/);
 	assert.match(giveUp, /if \(fallback\) fallback\(\);/);
@@ -1073,7 +1073,7 @@ test("an adoption whose artifact is gone falls back to the row it adopted", () =
 	assert.match(edit, /canvasMsg\.value = "";/);
 	// a live frame's failure is untouched — it toasts, and there is no stale
 	// identity to fall back from
-	assert.match(onCanvas, /else toast\.error\(errMsg\(e\)\);/);
+	assert.match(onCanvas, /else toast\.error\(errHtml\(e\)\);/);
 });
 
 test("a promotion that would cost the user something confirms first", () => {

@@ -73,6 +73,7 @@ import { buildSrcdoc, parseSourcesBlock } from "@/lib/dashboardSrcdoc";
 import { THEMES, DEFAULT_THEME, themeKey } from "@/lib/dashboardThemes";
 import { loadCaptureLib, downloadPng, downloadPdf } from "@/lib/dashboardExport";
 import { runDashboardSource, callDashboardTool } from "@/api/dashboards";
+import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
 	mode: { type: String, default: "builder" }, // "builder" | "view"
@@ -95,10 +96,6 @@ const loading = ref(false);
 const building = ref(false);
 const buildError = ref("");
 const frameH = ref(480); // view mode: grown by the iframe's height frames
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 function postToFrame(msg) {
 	const fw = frame.value && frame.value.contentWindow;

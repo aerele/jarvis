@@ -12,10 +12,7 @@ import { reactive, ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { toast } from "frappe-ui";
 import * as api from "@/api";
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
+import { errHtml } from "@/lib/errors";
 
 // ---- state ------------------------------------------------------------------
 const conversations = ref([]); // [{name,title,last_active_at,starred,message_count}]
@@ -92,7 +89,7 @@ function setActivityDetail(v, { persist = true } = {}) {
 		// toast (same as renameConversation/toggleStar below) but the local
 		// (localStorage-cached) value already stuck, so the UI stays correct.
 		api.updateMySettings({ activity_detail: activityDetail.value ? 1 : 0 }).catch((e) =>
-			toast.error(errMsg(e))
+			toast.error(errHtml(e))
 		);
 	}
 }
@@ -207,7 +204,7 @@ async function toggleNotify() {
 			// localStorage throws in private mode and when the quota is full.
 			// The preference is a nicety; losing it must never break the toggle.
 		}
-		api.updateMySettings({ notify_enabled: 0 }).catch((e) => toast.error(errMsg(e)));
+		api.updateMySettings({ notify_enabled: 0 }).catch((e) => toast.error(errHtml(e)));
 		return;
 	}
 	let perm = Notification.permission;
@@ -226,7 +223,7 @@ async function toggleNotify() {
 			// localStorage throws in private mode and when the quota is full.
 			// The preference is a nicety; losing it must never break the toggle.
 		}
-		api.updateMySettings({ notify_enabled: 1 }).catch((e) => toast.error(errMsg(e)));
+		api.updateMySettings({ notify_enabled: 1 }).catch((e) => toast.error(errHtml(e)));
 	}
 }
 // Called by GeneralPane's onMounted (get_my_settings) once the server row is
@@ -325,7 +322,7 @@ async function loadConversations() {
 			conversations.value = (await api.listConversations()) || [];
 			refreshApprovalsCount(); // poll-on-activity parity (D12)
 		} catch (e) {
-			toast.error(errMsg(e));
+			toast.error(errHtml(e));
 		} finally {
 			conversationsLoading.value = false;
 			_convsInflight = null;
@@ -362,7 +359,7 @@ async function renameConversation(name, title) {
 		await api.renameConversation(name, title);
 	} catch (e) {
 		if (conv) conv.title = prev;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -375,7 +372,7 @@ async function toggleStar(name) {
 		await api.setStar(name, next);
 	} catch (e) {
 		conv.starred = next ? 0 : 1;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -387,7 +384,7 @@ async function archiveConversation(name) {
 		conversations.value = conversations.value.filter((c) => c.name !== name);
 		toast.success("Chat deleted");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 

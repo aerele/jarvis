@@ -142,12 +142,9 @@ import { listNotesPage } from "@/api/personalise";
 import JvSpinner from "@/components/JvSpinner.vue";
 import NoteDetailModal from "./NoteDetailModal.vue";
 import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
 const emit = defineEmits(["reanswer"]);
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 const KIND_OPTIONS = [
 	{ label: "All", value: "" },
@@ -219,7 +216,7 @@ async function fetchNotes(mode = "reset") {
 		notes.hasMore = !!res.has_more;
 	} catch (e) {
 		if (id !== reqId) return;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		if (id === reqId) notes.loading = false;
 	}

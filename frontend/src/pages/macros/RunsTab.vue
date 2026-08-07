@@ -166,13 +166,10 @@ import {
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
+import { errHtml } from "@/lib/errors";
 
 const router = useRouter();
 const socket = inject("$socket");
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── list config ──────────────────────────────────────────────────────────────
 const STATUS_OPTIONS = [
@@ -267,7 +264,7 @@ async function fetchRuns(mode = "reset") {
 		total.value = res.total != null ? res.total : null;
 	} catch (e) {
 		if (id !== reqId) return;
-		toast.error(errMsg(e)); // keep last-good rows visible
+		toast.error(errHtml(e)); // keep last-good rows visible
 	} finally {
 		if (id === reqId && mode !== "keep") loading.value = false;
 	}
@@ -324,7 +321,7 @@ async function stopRun(row) {
 		fetchRuns("keep");
 		loadStats();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 

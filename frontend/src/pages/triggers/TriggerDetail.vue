@@ -356,6 +356,7 @@ import ActivityDetailDialog from "./ActivityDetailDialog.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { searchLink } from "@/api";
 import * as apiTriggers from "@/api/triggers";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -366,10 +367,6 @@ const router = useRouter();
 
 const ACTION_TYPES = ["Script", "LLM"];
 const STATUS_THEME = { Success: "green", Failed: "red", Blocked: "orange", Skipped: "gray" };
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── caps (deep-linkable page → its own probe) ────────────────────────────────
 const caps = ref({
@@ -626,7 +623,7 @@ async function save() {
 			toast.success("Saved");
 		}
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
 	}
@@ -641,7 +638,7 @@ async function toggleEnabled() {
 		if (snapshot.value) snapshot.value.enabled = next;
 		toast.success(next ? "Trigger enabled" : "Trigger disabled");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -657,7 +654,7 @@ function confirmDelete() {
 				toast.success("Trigger deleted");
 				router.push({ name: "TriggersPage" });
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

@@ -53,6 +53,7 @@ import { ref, computed, watch } from "vue";
 import { Dialog, Button, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
 import { agentName } from "@/branding";
+import { errMessage } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -66,8 +67,9 @@ const url = ref("");
 
 const qrSrc = computed(() => (svg.value ? `data:image/svg+xml;base64,${svg.value}` : ""));
 
+// Feeds `{{ error }}`, a text sink, so the plain-text form is the right one here.
 function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Could not generate the code.";
+	return errMessage(e, "Could not generate the code.");
 }
 
 async function load() {

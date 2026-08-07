@@ -283,6 +283,7 @@ import { timeAgo } from "@/utils/datetime";
 import { useJarvisTheme } from "@/theme";
 import "@/assets/settings.css"; // shared jv-* primitives (overlay, jv-btn) for the discard dialog
 import * as api from "@/api";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -295,10 +296,6 @@ const router = useRouter();
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 const DOCTYPE = "Jarvis Custom Skill";
 const FIELDS = ["skill_name", "description", "instructions", "user_invocable", "enabled"];
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong.";
-}
 
 // ── state ────────────────────────────────────────────────────────────────────
 const skill = ref(null); // last server copy (null while new)
@@ -375,7 +372,7 @@ async function submitPromotion({ to_scope, target_role, note }) {
 		toast.success("Promotion requested — a reviewer will decide.");
 		await loadMyPromo();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		promoBusy.value = false;
 	}
@@ -522,7 +519,7 @@ async function save() {
 			toast.success("Saved");
 		}
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
 	}
@@ -545,7 +542,7 @@ function confirmDelete() {
 				toast.success("Skill deleted");
 				router.push({ name: "SkillsList" });
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

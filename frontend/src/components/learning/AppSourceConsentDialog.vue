@@ -108,7 +108,7 @@ import { ref, watch } from "vue";
 import { Button, Checkbox, Dialog, FeatherIcon, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { listCustomApps } from "@/api/appLearning";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -134,7 +134,7 @@ async function load() {
 		apps.value = (await listCustomApps()) || [];
 	} catch (e) {
 		apps.value = [];
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		loading.value = false;
 	}
