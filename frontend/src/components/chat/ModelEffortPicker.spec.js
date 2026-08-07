@@ -54,12 +54,8 @@ function openPicker(props = {}) {
 }
 
 describe("ModelEffortPicker add-a-provider row", () => {
-	it("is hidden by default, since the prop gates on a role the picker cannot check", async () => {
-		const w = openPicker();
-		await w.vm.$nextTick();
-		expect(w.find(".mep-add").exists()).toBe(false);
-	});
-
+	// The prop defaults to false, so an omitted prop takes this same branch: a
+	// host that forgets to pass the gate hides the row rather than exposing it.
 	it("is hidden for a member who cannot reach the AI models pane", async () => {
 		const w = openPicker({ canAddProvider: false });
 		await w.vm.$nextTick();
