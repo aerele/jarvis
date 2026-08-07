@@ -785,10 +785,9 @@ class TestEnqueuedSyncRedisLock(_SettingsSingletonTestCase):
 class TestCredsWireAuthMode(FrappeTestCase):
 	"""The direct leg's auth-mode vocabulary translation (jarvis#715 step 1b).
 
-	This DocType stores models[0].credential_type, whose options are exactly
-	api_key/subscription. Fleet's /llm-creds wire contract is api_key/oauth and it
-	maps a literal "subscription" onto the API-KEY branch, which for a chat
-	subscription renders a config pointing at a key file that does not exist.
+	Why the two vocabularies differ, and why the translation is wire-only, lives
+	in ``creds_wire_auth_mode``'s own docstring. Kept there rather than copied
+	here: two prose copies of the same reasoning drift the moment one is edited.
 	"""
 
 	def test_a_subscription_is_sent_as_oauth(self):
@@ -823,3 +822,19 @@ class TestCredsWireAuthMode(FrappeTestCase):
 		stored = "subscription"
 		self.assertEqual(creds_wire_auth_mode(stored), "oauth")
 		self.assertEqual(stored, "subscription")
+
+	def test_a_whitespace_only_value_falls_back_to_api_key(self):
+		"""A whitespace-only stored value is TRUTHY, so defaulting before stripping
+		returned "" - not a mode fleet branches on, which lands the tenant on its
+		undefined path instead of the api_key default this promises. Only a
+		validation-bypassing write (db_set, a patch) can produce one, and those are
+		exactly the writes that reach a Single."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import creds_wire_auth_mode
+
+		for blank in ("   ", "\t", "\n", " \t "):
+			self.assertEqual(creds_wire_auth_mode(blank), "api_key", repr(blank))
+
+	def test_surrounding_whitespace_does_not_defeat_the_translation(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import creds_wire_auth_mode
+
+		self.assertEqual(creds_wire_auth_mode("  subscription  "), "oauth")

@@ -134,7 +134,13 @@ def creds_wire_auth_mode(stored: str | None) -> str:
 	pool leg (jarvis#715 step 3): today such a config never reaches this path.
 	It is a prerequisite for that flip, not a behaviour change on its own.
 	"""
-	mode = (stored or "api_key").strip()
+	# Strip BEFORE defaulting. A whitespace-only value is truthy, so defaulting
+	# first would carry " " through and return "" - not a mode fleet branches on,
+	# which silently lands the tenant on whatever its undefined path does rather
+	# than the api_key default this promises. Only a validation-bypassing write
+	# (db_set, a patch) can produce one, since the field is a Select, but that is
+	# exactly the kind of write that reaches a Single.
+	mode = (stored or "").strip() or "api_key"
 	return "oauth" if mode == "subscription" else mode
 
 
