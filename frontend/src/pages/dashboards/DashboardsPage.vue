@@ -813,6 +813,8 @@ async function promoteFromChat(conversation, messageId, { fallback = null, dash 
 	// restore would stay blocked for the life of the page. Still synchronous,
 	// nothing awaits above it, so the pane's restore cannot slip in first.
 	promotionPending.value = true;
+	// `msg` lands in a toast, which binds `message` with v-html, so anything
+	// derived from a server error must arrive here already escaped (errHtml).
 	const giveUp = (msg) => {
 		if (msg) toast.error(msg);
 		promotionPending.value = false;
@@ -831,7 +833,7 @@ async function promoteFromChat(conversation, messageId, { fallback = null, dash 
 		const d = (await getDashboardConversation(conversation)) || {};
 		frame = builderCanvasFrame(d.messages || [], messageId);
 	} catch (e) {
-		giveUp(errMsg(e));
+		giveUp(errHtml(e));
 		return;
 	}
 	if (!frame) {

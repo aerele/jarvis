@@ -127,7 +127,7 @@ test("a restore never overwrites a live canvas, an ?edit target or a promotion",
 	// re-checked AFTER the get_canvas round trip, not just before it
 	assert.equal((onCanvas.match(new RegExp(guard.source, "g")) || []).length, 2);
 	// a failed replay is silent; only a live frame's failure is surfaced
-	assert.match(onCanvas, /else toast\.error\(errMsg\(e\)\);/);
+	assert.match(onCanvas, /else toast\.error\(errHtml\(e\)\);/);
 });
 
 test("an unreadable artifact is retried never, not on every transcript load", () => {
