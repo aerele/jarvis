@@ -88,6 +88,14 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		self._turn_patch = patch.object(account, "_last_turn_errored", return_value=False)
 		self._turn_patch.start()
 		self.addCleanup(self._turn_patch.stop)
+		# Same shared-site hazard for the positive counterpart (jarvis#714): a
+		# real completed turn elsewhere on the site would silently demote a
+		# stale "unverified" case to "ok". Pinned false by default too, so the
+		# existing "needs attention" expectations stay deterministic; only the
+		# test that names the demotion overrides it.
+		self._turn_ok_patch = patch.object(account, "_last_turn_succeeded", return_value=False)
+		self._turn_ok_patch.start()
+		self.addCleanup(self._turn_ok_patch.stop)
 
 	def tearDown(self):
 		for field, value in self._saved.items():
@@ -197,11 +205,13 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
 				out = account.get_llm_connection_status()
 		self.assertEqual(out["health"], "attention")
+		self.assertEqual(out["attention_reason"], "sync_failed")
 
 	def test_a_rejected_subscription_needs_attention(self):
 		"""The fleet's own pool-wide probe said the account rejected a test
-		request. That is a real verdict about the workspace, unlike the auth
-		profile count."""
+		request, and no completed turn has succeeded since to contradict it.
+		That is a real verdict about the workspace, unlike the auth profile
+		count."""
 		self._seed(
 			proxy_active=1,
 			last_sync_status="ok (pool_update via admin)",
@@ -212,6 +222,42 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
 				out = account.get_llm_connection_status()
 		self.assertEqual(out["health"], "attention")
+		self.assertEqual(out["attention_reason"], "subscription_unverified")
+
+	def test_a_later_success_clears_a_stale_unverified_subscription(self):
+		"""jarvis#714: "Needs attention" never cleared after the workspace
+		recovered, because the only signal behind it was a snapshot only a
+		future apply refreshes. A completed turn that succeeded since is
+		first-hand proof the subscription that turn used is fine now."""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="ok (pool_update via admin)",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+			last_subscription_status="unverified",
+		)
+		with patch.object(account, "_last_turn_succeeded", return_value=True):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+					out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "ok")
+		self.assertEqual(out["attention_reason"], "")
+
+	def test_a_failed_sync_does_not_self_clear_on_a_success(self):
+		"""The counterweight to the test above: a later success only proves the
+		container still serves whatever it last applied, never that a FAILED
+		apply since landed. Clearing this off local chat evidence would make the
+		badge lie about the one thing #713's sync-race fix actually repairs."""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="failed: fleet returned 502",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+		)
+		with patch.object(account, "_last_turn_succeeded", return_value=True):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+					out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "attention")
+		self.assertEqual(out["attention_reason"], "sync_failed")
 
 	def test_a_failing_turn_stops_a_clean_apply_reading_green(self):
 		"""#678. Every input a confirmed apply gives us was clean - the config
@@ -230,6 +276,7 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
 					out = account.get_llm_connection_status()
 		self.assertEqual(out["health"], "attention")
+		self.assertEqual(out["attention_reason"], "turn_error")
 
 	def test_a_failing_turn_never_downgrades_past_attention(self):
 		"""It is evidence that something downstream is wrong, never that the
@@ -396,6 +443,27 @@ class TestLastTurnErrored(FrappeTestCase):
 		the #561 false-alarm shape, and this is the guard against it returning."""
 		out, _ = self._call([{"error": None}])
 		self.assertFalse(out)
+
+
+class TestLastTurnSucceeded(FrappeTestCase):
+	"""The positive counterpart (jarvis#714). Shares _latest_completed_turn_error
+	with TestLastTurnErrored above, so the filters are asserted there once rather
+	than a second time here."""
+
+	def _call(self, rows):
+		with patch.object(frappe, "get_all", return_value=rows):
+			return account._last_turn_succeeded()
+
+	def test_a_clean_latest_turn_reports_true(self):
+		self.assertTrue(self._call([{"error": ""}]))
+
+	def test_an_errored_latest_turn_reports_false(self):
+		self.assertFalse(self._call([{"error": "gateway error"}]))
+
+	def test_a_workspace_with_no_turns_yet_reports_false(self):
+		"""Absence of evidence must not read as proof of success any more than
+		TestLastTurnErrored lets it read as proof of failure."""
+		self.assertFalse(self._call([]))
 
 
 class TestHasLlmConfig(FrappeTestCase):

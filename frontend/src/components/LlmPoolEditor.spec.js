@@ -584,3 +584,39 @@ describe("api-key model defaults survive a failed catalog fetch", () => {
 		expect(w.vm.providerDefaultModel("Groq")).toBe("openai/gpt-oss-120b");
 	});
 });
+
+// jarvis#714: the "Last sync failed" pill had no retry. resync() re-pushes the
+// unchanged pool through the same save_llm_pool round trip applyOrder already
+// uses for an order-only change - jarvis_settings.py's _pool_sync_is_redundant
+// treats an unchanged re-save after a failed sync as the retry lever, so this
+// is wiring to an existing endpoint, not new backend behaviour.
+describe("resync retries a failed sync (jarvis#714)", () => {
+	it("re-sends the unchanged pool and clears the failed pill on success", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		syncStatus = { ...syncStatus, last_sync_status: "failed: fleet returned 502" };
+		const w = await mountEditor();
+
+		expect(w.vm.statusLine.kind).toBe("failed");
+
+		syncStatus = { ...syncStatus, last_sync_status: "ok (restart via admin)" };
+		await w.vm.resync();
+		await idle();
+
+		expect(api.saveLlmPool).toHaveBeenCalledTimes(1);
+		expect(savedModels().map((m) => m.model)).toEqual(["gpt-4o"]);
+		expect(w.vm.statusLine.kind).toBe("ok");
+	});
+
+	it("does nothing while a reorder is still unapplied", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0), keyModel("anthropic", "claude-sonnet-4", 1)]);
+		syncStatus = { ...syncStatus, last_sync_status: "failed: fleet returned 502" };
+		const w = await mountEditor();
+
+		w.vm.move(0, 1);
+		expect(w.vm.orderDirty).toBe(true);
+		await w.vm.resync();
+		await idle();
+
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+	});
+});
