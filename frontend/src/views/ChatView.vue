@@ -9781,8 +9781,16 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 8px;
 	padding: 5px 6px 5px 12px;
-	border-radius: 12px;
+	border-radius: 13px;
+	/* Match the composer (Composer.vue root): same soft lift + focus ring, so the
+	   nudge reads as a sibling of the chat input, not a hard-bordered box. */
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+	transition: border-color 0.12s, box-shadow 0.12s;
 	animation: jv-nudge-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+.jv-nudge.jv-nudge--compact:focus-within {
+	border-color: var(--text-3);
+	box-shadow: 0 0 0 3px rgba(23, 23, 23, 0.07);
 }
 @keyframes jv-nudge-in {
 	from {
