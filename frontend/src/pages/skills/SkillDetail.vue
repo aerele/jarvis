@@ -283,7 +283,7 @@ import { timeAgo } from "@/utils/datetime";
 import { useJarvisTheme } from "@/theme";
 import "@/assets/settings.css"; // shared jv-* primitives (overlay, jv-btn) for the discard dialog
 import * as api from "@/api";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -372,7 +372,7 @@ async function submitPromotion({ to_scope, target_role, note }) {
 		toast.success("Promotion requested — a reviewer will decide.");
 		await loadMyPromo();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		promoBusy.value = false;
 	}
@@ -519,7 +519,7 @@ async function save() {
 			toast.success("Saved");
 		}
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
 	}
@@ -542,7 +542,7 @@ function confirmDelete() {
 				toast.success("Skill deleted");
 				router.push({ name: "SkillsList" });
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

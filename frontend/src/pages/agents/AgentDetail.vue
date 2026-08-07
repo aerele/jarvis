@@ -512,7 +512,7 @@ import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { renderMarkdown } from "@/markdown";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	slug: { type: String, required: true },
@@ -763,7 +763,7 @@ async function startRun(sourceApps) {
 		if (runsBoard.value) runsBoard.value.reload({ selectNewest: true });
 		load(); // refresh last_run_at etc. in the background
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		running.value = false;
 	}
@@ -784,7 +784,7 @@ function confirmUninstall() {
 				toast.success(`${agent.value.title} uninstalled`);
 				router.push({ name: "AgentsList" });
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});
@@ -798,7 +798,7 @@ async function setEnabled(v) {
 		await api.setAgentEnabled(installation.value.name, v ? 1 : 0);
 		await load();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		togglingEnabled.value = false;
 	}
@@ -895,7 +895,7 @@ async function saveSchedule() {
 		toast.success("Schedule saved");
 		await load();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		savingSchedule.value = false;
 	}
@@ -925,7 +925,7 @@ async function saveConfig(merged) {
 		toast.success("Configuration saved");
 		await load();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		savingConfig.value = false;
 	}
@@ -945,7 +945,7 @@ async function loadAdmin() {
 	try {
 		adminData.value = (await api.getAgentAdminOverview()) || null;
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		adminLoading.value = false;
 	}
@@ -1007,7 +1007,7 @@ async function saveRoles() {
 		);
 		load(); // refresh allowed/lock state
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		savingRoles.value = false;
 	}

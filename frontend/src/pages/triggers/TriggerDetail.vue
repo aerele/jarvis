@@ -356,7 +356,7 @@ import ActivityDetailDialog from "./ActivityDetailDialog.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { searchLink } from "@/api";
 import * as apiTriggers from "@/api/triggers";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -623,7 +623,7 @@ async function save() {
 			toast.success("Saved");
 		}
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
 	}
@@ -638,7 +638,7 @@ async function toggleEnabled() {
 		if (snapshot.value) snapshot.value.enabled = next;
 		toast.success(next ? "Trigger enabled" : "Trigger disabled");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -654,7 +654,7 @@ function confirmDelete() {
 				toast.success("Trigger deleted");
 				router.push({ name: "TriggersPage" });
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

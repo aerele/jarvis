@@ -330,7 +330,7 @@ import {
 import { renderMarkdown } from "@/markdown";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { agentName } from "@/branding";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const PAGE = 20;
 
@@ -430,7 +430,7 @@ async function fetchQuestions(mode = "reset") {
 		board.total = r.total || 0;
 		board.hasMore = !!r.has_more;
 	} catch (e) {
-		if (my === reqId) toast.error(errMsg(e));
+		if (my === reqId) toast.error(errHtml(e));
 	} finally {
 		if (my === reqId) board.loading = false;
 	}
@@ -474,7 +474,7 @@ async function ignore(row) {
 		fetchQuestions("reset");
 		loadCaps();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -493,7 +493,7 @@ function confirmDelete(row) {
 				fetchQuestions("reset");
 				loadCaps();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});
@@ -516,7 +516,7 @@ async function onSubmit(payload) {
 		if (wasQuestion) fetchQuestions("reset");
 		loadCaps();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		submitting.value = false;
 	}
@@ -540,7 +540,7 @@ async function onReanswer(payload) {
 		full = await getQuestion(name);
 	} catch (e) {
 		if (isDoesNotExist(e)) toast.error("This question is no longer available");
-		else toast.error(errMsg(e));
+		else toast.error(errHtml(e));
 		return; // stay on the Notes view
 	}
 	subTab.value = "questions";

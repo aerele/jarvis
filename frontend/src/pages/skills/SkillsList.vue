@@ -124,7 +124,7 @@ import SyncPill from "./SyncPill.vue";
 import { session } from "@/data/session";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiSkills from "@/api/skills";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const router = useRouter();
 // /skills is a TABBED shell (Skills | Learning), so the `fv2` query param is
@@ -251,7 +251,7 @@ function bulkDelete(selections, unselectAll) {
 				// the server enqueued one skills-apply at the end (§8.3) - show it
 				syncPill.value && syncPill.value.checkNow();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

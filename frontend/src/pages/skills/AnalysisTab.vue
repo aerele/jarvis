@@ -303,7 +303,7 @@ import {
 	getLearningStatus,
 } from "@/api/learning";
 import { agentName } from "@/branding";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const emit = defineEmits(["changed"]);
 const router = useRouter();
@@ -382,7 +382,7 @@ async function loadStatus() {
 		status.latestRun = st.latest_run || null;
 	} catch (e) {
 		// parent mounts this only for SMs; a failure here means no access
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -396,7 +396,7 @@ async function loadSettings() {
 		settings.pattern_max_proposals_per_run = intOr(s.pattern_max_proposals_per_run, 10);
 		settings.pattern_row_budget_per_night = intOr(s.pattern_row_budget_per_night, 500000);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -445,7 +445,7 @@ async function saveSettings() {
 		toast.success("Settings saved");
 		loadStatus();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		savingSettings.value = false;
 	}
@@ -469,7 +469,7 @@ function runNow() {
 				loadStatus();
 				emit("changed");
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			} finally {
 				runningNow.value = false;
 			}

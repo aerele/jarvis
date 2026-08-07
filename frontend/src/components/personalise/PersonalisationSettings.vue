@@ -348,7 +348,7 @@ import {
 } from "@/api/personalise";
 import { timeAgo } from "@/utils/datetime";
 import { agentName } from "@/branding";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	open: { type: Boolean, default: false },
@@ -405,7 +405,7 @@ async function loadRules() {
 	try {
 		rules.value = (await listQuestionRules()) || [];
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		rulesLoading.value = false;
 	}
@@ -440,7 +440,7 @@ async function toggleActive(rule, value) {
 		toast.success(value ? "Question enabled" : "Question paused");
 	} catch (e) {
 		rule.active = prev;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		rowActing.value = "";
 	}
@@ -508,7 +508,7 @@ async function saveEditor() {
 		closeEditor();
 		await loadRules();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		editor.saving = false;
 	}
@@ -525,7 +525,7 @@ function confirmDeleteRule(rule) {
 				toast.success("Question removed");
 				loadRules();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});
@@ -557,7 +557,7 @@ async function loadSettings() {
 		settings.chat_mining_last_run_at = s.chat_mining_last_run_at || null;
 		settings.chat_mining_last_run_status = s.chat_mining_last_run_status || "";
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		settingsLoading.value = false;
 	}
@@ -578,7 +578,7 @@ async function saveSettings() {
 		settings.chat_mining_last_run_status = res.chat_mining_last_run_status || "";
 		toast.success("Settings saved");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		savingSettings.value = false;
 	}
@@ -598,7 +598,7 @@ async function generateNow() {
 			toast.info((res && res.reason) || "Already running.");
 		}
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		generatingNow.value = false;
 	}

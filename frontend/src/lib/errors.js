@@ -32,7 +32,16 @@ function isInternalCrash(e) {
 // wrapping tags via a detached element (never inserted into the live DOM, so
 // nothing in the message - script/img/etc. - ever executes) before handing
 // the string to a caller.
-export function errMessage(e) {
+// The sentence shown when the error carries nothing specific. Exported so a
+// caller never has to spell it out to detect it: an earlier pass at #699 gave
+// each site a custom fallback by comparing errMessage()'s RESULT against this
+// literal, which put 6 fresh copies of the string into components - the exact
+// duplication #699 exists to remove, and one that would have failed silently
+// (falling back to the generic sentence) the day the wording changed. Pass the
+// custom sentence in as `fallback` instead.
+export const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
+
+export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	// The server's OWN explicit message always wins, even on a 401/403 (round-4
 	// review F1): frappe.throw("You do not have permission to disconnect this
 	// model") is a real, actionable remedy, and burying it under a blanket
@@ -43,13 +52,40 @@ export function errMessage(e) {
 	// Only once there is nothing specific to show does a 401/403 get named
 	// plainly, since an expired session / logged-out tab / permission change is
 	// still the single most likely cause of an error this formatter otherwise
-	// cannot explain.
+	// cannot explain. This outranks `fallback` deliberately: "sign in again" is
+	// an actionable remedy, a caller's "Could not save." is not.
 	if (!specific && e && (e.status === 401 || e.status === 403)) {
 		return "Your session has expired. Please sign in again.";
 	}
-	const raw = specific || "Something went wrong. Please try again.";
+	const raw = specific || fallback;
 	if (typeof document === "undefined") return raw;
 	const d = document.createElement("div");
 	d.innerHTML = raw; // decodes &gt; &amp; &#39; etc; detached, so no script/img runs
 	return (d.textContent || d.innerText || raw).trim();
+}
+
+// errMessage() returns PLAIN TEXT: it decodes entities so a text sink renders
+// "Settings -> Developer" rather than "Settings -&gt; Developer". That decode is
+// unsafe in an HTML sink, and frappe-ui's Toast is one - Toast.vue binds its
+// `message` prop with `v-html`. So the round trip through a toast is:
+//
+//   frappe.throw(user_value)  ->  server escapes once  ->  "&lt;img onerror=...&gt;"
+//   errMessage()              ->  decodes              ->  "<img onerror=...>"
+//   toast.error(...)          ->  v-html re-parses     ->  a LIVE <img> element
+//
+// The escaping that made the value safe is exactly what errMessage() removes,
+// so the plain text has to be re-escaped on its way into an HTML sink. Use this
+// for toast.*() and any other v-html binding; use errMessage() for `{{ }}`,
+// textContent, and ChatView's own notify(), which interpolate as text.
+// The single escape implementation in the frontend. pages/skills/escapeHtml.js
+// re-exports this as `esc`, which is the name the skills review flow already
+// imports at its own v-html sink (frappe-ui's ConfirmDialog).
+const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+export function escapeHtml(v) {
+	// One pass over the string, so the "&" rewritten for "<" is never re-escaped.
+	return String(v ?? "").replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+export function errHtml(e, fallback) {
+	return escapeHtml(errMessage(e, fallback));
 }

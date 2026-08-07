@@ -138,7 +138,7 @@ import { useListPage } from "@/composables/useListPage";
 import { triggersListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiTriggers from "@/api/triggers";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	caps: { type: Object, default: () => ({}) }, // get_triggers_caps payload
@@ -265,7 +265,7 @@ async function toggleEnabled(row, value) {
 		await apiTriggers.setTriggerEnabled(row.name, value ? 1 : 0);
 	} catch (e) {
 		row.enabled = prev;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		togglingRow.value = "";
 	}
@@ -304,7 +304,7 @@ function bulkDelete(selections, unselectAll) {
 				hideDialog();
 				resetLoad();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

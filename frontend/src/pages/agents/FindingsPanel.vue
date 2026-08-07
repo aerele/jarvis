@@ -299,7 +299,7 @@ import { timeAgo, exactDate, formatDate } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";
 import { takeFindingToChat } from "@/api/agents";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	// full row from list_runs_page: {name, status, trigger, started_at,
@@ -528,7 +528,7 @@ async function moveFinding(f, state) {
 		}
 	} catch (e) {
 		f.state = prev;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		busy.value = "";
 	}
@@ -545,7 +545,7 @@ async function discussInChat(f) {
 		}
 		router.push("/c/" + res.conversation);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		chatBusy.value = "";
 	}

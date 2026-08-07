@@ -143,7 +143,7 @@ import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	tab: { type: String, default: "macros" }, // 'runs' on /macros/runs (§9)
@@ -270,7 +270,7 @@ async function runRow(row) {
 		// hand off to the chat - the live macro banner is ChatView's machinery
 		if (data.conversation) router.push("/c/" + data.conversation);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		runningRow.value = "";
 	}
@@ -303,7 +303,7 @@ function bulkDelete(selections, unselectAll) {
 				hideDialog();
 				resetLoad();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

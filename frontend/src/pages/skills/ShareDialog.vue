@@ -97,7 +97,7 @@
 import { ref, computed, watch } from "vue";
 import { Dialog, Button, FormControl, Avatar, FeatherIcon, toast } from "frappe-ui";
 import * as api from "@/api";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -143,7 +143,7 @@ async function load() {
 			}
 		}
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 		emit("update:modelValue", false);
 	} finally {
 		loading.value = false;
@@ -181,7 +181,7 @@ async function save() {
 		emit("saved");
 		emit("update:modelValue", false);
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
 	}

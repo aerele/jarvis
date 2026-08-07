@@ -129,7 +129,7 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { exactDate } from "@/utils/datetime";
 import { getNote, deleteNote } from "@/api/personalise";
 import { agentName } from "@/branding";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const router = useRouter();
 
@@ -194,7 +194,7 @@ async function load() {
 		note.value = await getNote(props.name);
 	} catch (e) {
 		show.value = false;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		loading.value = false;
 	}
@@ -216,7 +216,7 @@ function confirmDelete() {
 				toast.success("Note deleted");
 				emit("changed");
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			} finally {
 				deleting.value = false;
 			}

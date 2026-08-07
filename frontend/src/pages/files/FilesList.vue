@@ -194,7 +194,7 @@ import { useShellStore } from "@/stores/shell";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { agentName } from "@/branding";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const route = useRoute();
 const router = useRouter();
@@ -403,7 +403,7 @@ function bulkDelete(selections, unselectAll) {
 				resetLoad();
 				store.refreshApprovalsCount();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});
@@ -423,7 +423,7 @@ function clearProcessed() {
 				hideDialog();
 				resetLoad();
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			}
 		},
 	});

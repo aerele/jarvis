@@ -207,7 +207,7 @@ import {
 import JvSpinner from "@/components/JvSpinner.vue";
 import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -264,7 +264,7 @@ async function submitPromotion({ to_scope, target_role, note }) {
 		toast.success("Promotion requested — a reviewer will decide.");
 		await loadMyPromo();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		promoBusy.value = false;
 	}
@@ -325,7 +325,7 @@ async function load() {
 		loadMyPromo();
 	} catch (e) {
 		show.value = false;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		loading.value = false;
 	}
@@ -359,7 +359,7 @@ async function save() {
 		toast.success("Page saved");
 		emit("refresh");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
 	}
@@ -373,7 +373,7 @@ async function restore() {
 		toast.success("Page restored");
 		emit("refresh");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		archiving.value = false;
 	}
@@ -393,7 +393,7 @@ function confirmArchive() {
 				toast.success("Page archived");
 				emit("refresh");
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			} finally {
 				archiving.value = false;
 			}
@@ -414,7 +414,7 @@ function confirmDelete() {
 				toast.success("Page deleted");
 				emit("refresh");
 			} catch (e) {
-				toast.error(errMsg(e));
+				toast.error(errHtml(e));
 			} finally {
 				deleting.value = false;
 			}

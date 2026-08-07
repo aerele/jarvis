@@ -1820,7 +1820,7 @@ import { humaniseSyncStatus } from "@/lib/syncStatus";
 // Session user: a reviewer who is ALSO the requester can't decide their own
 // request (four-eyes); we disable + explain up front (SAR-4 / SPX-4).
 import { session } from "@/data/session";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const emit = defineEmits(["changed"]);
 const router = useRouter();
@@ -2117,7 +2117,7 @@ async function loadStatus() {
 		pendingCandidates.value = st.pending_patterns || 0;
 	} catch (e) {
 		// parent mounts this only for the reviewer set; a failure here = no access
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 	// Best-effort Analysis niceties for reviewers who ALSO hold the admin role:
 	// the empty-state "enable learning" copy + the Apply dialog's quiet-window
@@ -2157,7 +2157,7 @@ async function fetchPromotions(mode = "reset") {
 		promoLoaded.value = true;
 	} catch (e) {
 		if (id !== promoReq) return;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		if (id === promoReq) promo.loading = false;
 	}
@@ -2233,7 +2233,7 @@ async function decidePromo(p, approve, note) {
 		emit("changed");
 		return true;
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 		return false;
 	} finally {
 		promoActing.value = "";
@@ -2264,7 +2264,7 @@ async function fetchSkillPromotions(mode = "reset") {
 		skillPromoLoaded.value = true;
 	} catch (e) {
 		if (id !== skillPromoReq) return;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		if (id === skillPromoReq) skillPromo.loading = false;
 	}
@@ -2373,7 +2373,7 @@ async function decideSkillPromo(p, approve, note, ackProjection = null) {
 	} catch (e) {
 		// Four-eyes (a reviewer cannot approve their OWN request) + reviewer-gate
 		// come back as a PermissionError - surface the honest server message.
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 		return false;
 	} finally {
 		skillPromoActing.value = "";
@@ -2401,7 +2401,7 @@ async function submitAsk() {
 		toast.success("Added to their questions");
 		askDialog.show = false;
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		askDialog.sending = false;
 	}
@@ -2453,7 +2453,7 @@ async function fetchBoard(mode = "reset") {
 		reviewActivity.value = res.review_activity || { decided: 0, total: 0, last_by_name: "" };
 	} catch (e) {
 		if (id !== boardReq) return;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		if (id === boardReq) board.loading = false;
 	}
@@ -2482,7 +2482,7 @@ async function fetchDecided(mode = "reset") {
 		decided.hasMore = !!res.has_more;
 	} catch (e) {
 		if (id !== decidedReq) return;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		if (id === decidedReq) decided.loading = false;
 	}
@@ -2541,7 +2541,7 @@ async function toggleExpand(name) {
 		expanded[name] = await getLearnedPattern(name);
 	} catch (e) {
 		delete expanded[name];
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 async function toggleDecidedExpand(name) {
@@ -2554,7 +2554,7 @@ async function toggleDecidedExpand(name) {
 		dExpanded[name] = await getLearnedPattern(name);
 	} catch (e) {
 		delete dExpanded[name];
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -2628,7 +2628,7 @@ async function goToChat(kind, name, patternRow) {
 			router.push("/");
 			return;
 		}
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 
@@ -2648,7 +2648,7 @@ async function doBatchApprove() {
 		toast.success(`Approved ${r.count || selectedNames.value.length}`);
 		afterAction();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -2668,7 +2668,7 @@ async function doApprove(row) {
 		toast.success("Approved");
 		afterAction();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -2680,7 +2680,7 @@ async function doUnapprove(row) {
 		toast.success("Un-approved");
 		afterAction();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -2692,7 +2692,7 @@ async function doAcknowledge(row) {
 		toast.success("Acknowledged");
 		afterAction();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -2704,7 +2704,7 @@ async function doRestore(row) {
 		toast.success("Restored");
 		afterAction();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -2719,7 +2719,7 @@ async function doSnooze(row, days) {
 		toast.success(`Snoozed ${days} days`);
 		afterAction();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -2744,7 +2744,7 @@ async function submitReject() {
 		rejectDialog.show = false;
 		afterAction();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -2772,7 +2772,7 @@ async function submitEdit() {
 		editDialog.show = false;
 		afterAction();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		acting.value = "";
 	}
@@ -2798,7 +2798,7 @@ async function confirmApply() {
 		fetchBoard("reset");
 		emit("changed");
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	}
 }
 

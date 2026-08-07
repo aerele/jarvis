@@ -6,7 +6,7 @@
 // so a failed call showed the user nothing at all — that is the defect being fixed.
 import { reactive, ref } from "vue";
 import { toast } from "frappe-ui";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import {
 	supportListTickets,
 	supportGetThread,
@@ -149,7 +149,7 @@ async function createTicket(subject, body) {
 		}
 		return name;
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 		return null;
 	}
 }
@@ -163,7 +163,7 @@ async function reply(name, body) {
 		// callers (the `if (!ok) return` guard in send()) still read this as success.
 		return (r && r.data && r.data.comm) || true;
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 		return false;
 	}
 }
@@ -173,7 +173,7 @@ async function closeTicket(name) {
 		await supportCloseTicket(name);
 		return true;
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 		return false;
 	}
 }
@@ -191,7 +191,9 @@ async function uploadTo(name, files, comm) {
 			await supportUpload(name, f, comm);
 			succeeded.push(f);
 		} catch (e) {
-			toast.error(`Couldn't attach ${f.name}: ${errMsg(e)}`);
+			// Toast binds `message` with v-html, so the FILENAME is a sink here
+			// too: it is user-chosen and reaches this string unescaped (#699).
+			toast.error(`Couldn't attach ${escapeHtml(f.name)}: ${errHtml(e)}`);
 		}
 	}
 	return succeeded;

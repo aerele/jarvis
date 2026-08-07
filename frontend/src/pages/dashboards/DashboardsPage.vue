@@ -223,7 +223,7 @@ import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardChatPane from "./DashboardChatPane.vue";
 import SavedDashboardsTab from "./SavedDashboardsTab.vue";
 import SaveDashboardDialog from "./SaveDashboardDialog.vue";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const route = useRoute();
 const router = useRouter();
@@ -427,7 +427,7 @@ async function onCanvas({ message_id, items, restore }) {
 		// A restore is best-effort background work the user did not ask for -
 		// a deleted/expired artifact must not raise a toast on page load.
 		if (restore) restoreFailed(message_id);
-		else toast.error(errMsg(e));
+		else toast.error(errHtml(e));
 		return false;
 	}
 }
@@ -665,7 +665,7 @@ async function loadEdit(name, { deepLink = true } = {}) {
 	} catch (e) {
 		// A restored target that has since been deleted is not the user's doing -
 		// forget it silently instead of toasting on every page load.
-		if (deepLink) toast.error(errMsg(e));
+		if (deepLink) toast.error(errHtml(e));
 		else editingSticky.value = "";
 		settle();
 	}

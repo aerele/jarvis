@@ -67,11 +67,9 @@ const url = ref("");
 
 const qrSrc = computed(() => (svg.value ? `data:image/svg+xml;base64,${svg.value}` : ""));
 
+// Feeds `{{ error }}`, a text sink, so the plain-text form is the right one here.
 function errMsg(e) {
-	const msg = errMessage(e);
-	return msg === "Something went wrong. Please try again."
-		? "Could not generate the code."
-		: msg;
+	return errMessage(e, "Could not generate the code.");
 }
 
 async function load() {

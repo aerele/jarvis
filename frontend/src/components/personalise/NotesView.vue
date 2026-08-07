@@ -142,7 +142,7 @@ import { listNotesPage } from "@/api/personalise";
 import JvSpinner from "@/components/JvSpinner.vue";
 import NoteDetailModal from "./NoteDetailModal.vue";
 import { agentName } from "@/branding";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const emit = defineEmits(["reanswer"]);
 
@@ -216,7 +216,7 @@ async function fetchNotes(mode = "reset") {
 		notes.hasMore = !!res.has_more;
 	} catch (e) {
 		if (id !== reqId) return;
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		if (id === reqId) notes.loading = false;
 	}

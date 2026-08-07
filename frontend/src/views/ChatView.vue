@@ -6010,13 +6010,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 		}
 	} catch (e) {
 		p.applying = false;
-		const msg = errMessage(e);
-		p.error = {
-			message:
-				msg === "Something went wrong. Please try again."
-					? "Could not save — check the values."
-					: msg,
-		};
+		p.error = { message: errMessage(e, "Could not save. Check the values.") };
 	}
 }
 
@@ -6194,13 +6188,7 @@ async function confirmPending(pa) {
 		}
 	} catch (e) {
 		const card = cardById();
-		if (card) {
-			const msg = errMessage(e);
-			card.error = {
-				message:
-					msg === "Something went wrong. Please try again." ? "Could not confirm." : msg,
-			};
-		}
+		if (card) card.error = { message: errMessage(e, "Could not confirm.") };
 	} finally {
 		const card = cardById();
 		if (card) card.busy = false;
@@ -6224,11 +6212,7 @@ async function discardPending(pa) {
 			return;
 		}
 	} catch (e) {
-		const msg = errMessage(e);
-		pa.error = {
-			message:
-				msg === "Something went wrong. Please try again." ? "Could not discard." : msg,
-		};
+		pa.error = { message: errMessage(e, "Could not discard.") };
 		return;
 	} finally {
 		pa.busy = false;
