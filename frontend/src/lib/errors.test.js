@@ -128,7 +128,7 @@ test("a non-auth status keeps its own message", () => {
 // TURN's raw `error` string instead of a Frappe API exception.
 // -----------------------------------------------------------------------
 
-// The exact wire text from #702: openclaw's own generic wording for a
+// The exact wire text from #702: the agent's own generic wording for a
 // mid-run failure that was actually a device-pairing file caught mid-
 // rewrite, nothing to do with the network. Must land on "gateway" (retry),
 // not "unreachable" (we never lost the connection) and not "internal" (the
@@ -151,6 +151,20 @@ test("a provider rejection (quota/billing) stays provider", () => {
 		"Google Generative AI API error (429): You exceeded your current quota."
 	);
 	assert.equal(info.code, "provider");
+});
+
+// The Python mirror (turn_handler._classify_error) matches on both "rate
+// limit" and the hyphenated "rate-limit". Must agree here too, or the same
+// text classifies as provider live and gateway on a reload.
+test("a hyphenated rate-limit reads as provider, matching the Python mirror", () => {
+	assert.equal(turnErrorInfo("upstream rate-limit exceeded").code, "provider");
+});
+
+// classifyTurnErrorCode's "connection timed out" belongs to the unreachable
+// bucket (a transport failure), not the generic timeout bucket - the Python
+// mirror agrees (see test_connection_timed_out_is_unreachable_not_timeout).
+test("connection timed out is unreachable, not a generic timeout", () => {
+	assert.equal(turnErrorInfo("connection timed out").code, "unreachable");
 });
 
 test("a recovery-window expiry and a timeout keep their own codes", () => {

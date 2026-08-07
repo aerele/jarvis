@@ -1953,7 +1953,17 @@ def _classify_error(err_text: str, exc=None) -> str:
 	# the persisted string - match its wording here so the two agree.
 	if low.startswith("unexpected worker error"):
 		return "internal"
-	if isinstance(exc, AgentUnreachableError) or "ws open failed" in low or "unreachable" in low:
+	# "connection timed out" is a transport failure (we could not reach the
+	# gateway), not a generic timeout (the model took too long to answer) -
+	# keep it in this branch, matching classifyTurnErrorCode in
+	# frontend/src/lib/errors.js, so the same text does not classify as
+	# "unreachable" live and "timeout" on a reload.
+	if (
+		isinstance(exc, AgentUnreachableError)
+		or "ws open failed" in low
+		or "unreachable" in low
+		or "connection timed out" in low
+	):
 		return "unreachable"
 	if "recovery window" in low:
 		return "recovery-expired"
@@ -1974,12 +1984,12 @@ def _classify_error(err_text: str, exc=None) -> str:
 	):
 		return "provider"
 	# #702: a run that reached this branch already got an ack and started -
-	# it is a mid-run failure openclaw reported for itself (relay:error), not
+	# it is a mid-run failure the agent reported for itself (relay:error), not
 	# a case where WE failed to reach the gateway (that is "unreachable",
 	# above) or a specific provider rejection (that is "provider", above).
-	# openclaw's own wording here is not reliable: "LLM request failed:
+	# The agent's own wording here is not reliable: "LLM request failed:
 	# network connection error." was the verbatim text for a turn that
-	# actually failed because openclaw's paired-device file was mid-rewrite,
+	# actually failed because the agent's paired-device file was mid-rewrite,
 	# nothing to do with the network. Defaulting to "gateway" instead of the
 	# old "internal" tells the customer this is likely transient and worth a
 	# retry, rather than the unhelpful "something went wrong".

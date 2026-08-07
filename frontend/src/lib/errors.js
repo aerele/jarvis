@@ -93,8 +93,8 @@ export function errHtml(e, fallback) {
 // ---------------------------------------------------------------------------
 // Chat TURN failures (#702): the counterpart to errMessage() above, for a
 // chat turn's `error` column instead of a Frappe API exception. That text is
-// raw prose relayed from openclaw over the realtime channel, sometimes
-// verbatim - #702 was openclaw reporting "LLM request failed: network
+// raw prose relayed from the agent gateway over the realtime channel, sometimes
+// verbatim - #702 was the agent reporting "LLM request failed: network
 // connection error." for a turn that failed for an entirely different reason
 // (a device-pairing file caught mid-rewrite), which the SPA had no way to
 // tell apart from a real network failure. Mirrors the operator-facing
@@ -165,6 +165,7 @@ function classifyTurnErrorCode(raw) {
 		[
 			"quota",
 			"rate limit",
+			"rate-limit",
 			"cooldown",
 			"overloaded",
 			"insufficient",
@@ -173,7 +174,7 @@ function classifyTurnErrorCode(raw) {
 		].some((k) => low.includes(k))
 	)
 		return "provider";
-	// #702: openclaw's own mid-run failure text (e.g. "LLM request failed:
+	// #702: the agent's own mid-run failure text (e.g. "LLM request failed:
 	// network connection error.", relayed verbatim) is not a reliable signal
 	// that the network was actually the problem - see the module comment
 	// above. A run that got far enough to be accepted and start is

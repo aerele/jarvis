@@ -252,7 +252,7 @@ class TestClassifyError(unittest.TestCase):
 	above."""
 
 	def test_the_702_string_is_gateway_not_internal(self):
-		# The exact wire text observed in #702: openclaw's own generic wording
+		# The exact wire text observed in #702: the agent's own generic wording
 		# for a mid-run failure that was actually a device-pairing file caught
 		# mid-rewrite, nothing to do with the network. Must NOT fall into
 		# "unreachable" (that is reserved for OUR OWN failure to reach the
@@ -264,7 +264,7 @@ class TestClassifyError(unittest.TestCase):
 		self.assertNotEqual(code, "internal")
 
 	def test_our_own_unreachable_gateway_stays_unreachable(self):
-		# A genuine pre-ack transport failure (WE couldn't reach openclaw) is a
+		# A genuine pre-ack transport failure (WE couldn't reach the agent) is a
 		# DIFFERENT failure surface than #702's mid-run gateway hiccup and must
 		# keep its own code - retrying the same way won't help either, but the
 		# customer-facing story ("I couldn't reach the assistant") is honest
@@ -280,6 +280,13 @@ class TestClassifyError(unittest.TestCase):
 			"Google Generative AI API error (429): You exceeded your current quota."
 		)
 		self.assertEqual(code, "provider")
+
+	def test_connection_timed_out_is_unreachable_not_timeout(self):
+		# "connection timed out" names a transport failure (we could not reach
+		# the gateway), not a generic timeout (the model took too long). Must
+		# agree with classifyTurnErrorCode in frontend/src/lib/errors.js, which
+		# already put this phrase under "unreachable".
+		self.assertEqual(turn_handler._classify_error("connection timed out"), "unreachable")
 
 	def test_worker_backstop_text_stays_internal_on_a_reload(self):
 		# turn_handler's outer `except Exception` backstop stamps code="internal"
