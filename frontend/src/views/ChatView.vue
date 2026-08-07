@@ -9782,8 +9782,9 @@ onUnmounted(() => {
 	gap: 8px;
 	padding: 5px 6px 5px 12px;
 	border-radius: 13px;
-	/* Match the composer (Composer.vue root): same soft lift + focus ring, so the
-	   nudge reads as a sibling of the chat input, not a hard-bordered box. */
+	outline: none;
+	/* Match the composer (Composer.vue root): same soft lift, so the nudge reads as
+	   a sibling of the chat input, not a hard-bordered box. */
 	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
 	transition: border-color 0.12s, box-shadow 0.12s;
 	animation: jv-nudge-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
@@ -9829,7 +9830,10 @@ onUnmounted(() => {
 	padding: 6px 2px;
 	resize: none;
 	overflow-y: auto;
-	outline: none;
+	/* !important: a nested frappe-ui/Tailwind focus-visible rule outlines textareas
+	   and beats a plain class selector (the composer escapes it with an inline
+	   outline:none). Match that immunity. */
+	outline: none !important;
 }
 .jv-nudge-input::placeholder {
 	color: var(--text-3);
