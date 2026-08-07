@@ -265,12 +265,26 @@ _STALE_PAIRING_AUTH_REASONS = frozenset(
 	}
 )
 
+# The same rejection also carries a second, more specific machine-readable
+# value at ``error.details.code`` (distinct from the outer, generic
+# ``error.code``): "AUTH_DEVICE_TOKEN_MISMATCH" alongside
+# ``recommendedNextStep: "update_auth_credentials"``. authReason above is
+# the primary signal (every captured live rejection carries it); this is
+# belt-and-braces for a future gateway build that drops authReason but
+# keeps details.code.
+_STALE_PAIRING_DETAIL_CODES = frozenset(
+	{
+		"AUTH_DEVICE_TOKEN_MISMATCH",
+	}
+)
+
 
 def _is_stale_pairing(err: Exception) -> bool:
 	"""Return True iff ``err`` is an AgentUnreachableError that openclaw
-	classified as a stale device pairing - either via error.code (internal
-	reason set) or via error.details.authReason (the real wire shape for
-	connect auth failures, see _STALE_PAIRING_AUTH_REASONS above).
+	classified as a stale device pairing - via error.code (internal reason
+	set), error.details.authReason, or error.details.code (the real wire
+	shape for connect auth failures, see _STALE_PAIRING_AUTH_REASONS /
+	_STALE_PAIRING_DETAIL_CODES above).
 
 	Strictly typed: an error WITHOUT a ``.code``/``.details`` attribute
 	(network-level failure, programmer bug) never triggers the repair
@@ -282,7 +296,9 @@ def _is_stale_pairing(err: Exception) -> bool:
 	details = getattr(err, "details", None)
 	if not isinstance(details, dict):
 		return False
-	return details.get("authReason") in _STALE_PAIRING_AUTH_REASONS
+	if details.get("authReason") in _STALE_PAIRING_AUTH_REASONS:
+		return True
+	return details.get("code") in _STALE_PAIRING_DETAIL_CODES
 
 
 def _chat_final_text(payload: dict) -> str | None:

@@ -565,6 +565,28 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 		self.assertEqual(len(ensure_calls), 2)
 		sess.close()
 
+	def test_wire_shape_details_code_alone_also_triggers_repair(self):
+		"""Belt-and-braces (jarvis #712): a hypothetical future gateway build
+		that drops details.authReason but keeps details.code must still be
+		caught, so the classifier doesn't regress to dead code again."""
+		first_ws, second_ws = self._build_two_ws(
+			"",
+			second_ok=True,
+			first_error={
+				"code": "INVALID_REQUEST",
+				"message": "unauthorized: device token mismatch (rotate/reissue device token)",
+				"details": {
+					"code": "AUTH_DEVICE_TOKEN_MISMATCH",
+					"canRetryWithDeviceToken": False,
+					"recommendedNextStep": "update_auth_credentials",
+				},
+			},
+		)
+		sess, clears, ensure_calls = self._connect_with_two_ws(first_ws, second_ws)
+		self.assertEqual(len(clears), 1)
+		self.assertEqual(len(ensure_calls), 2)
+		sess.close()
+
 	def test_peer_adopted_rotation_skips_the_wipe_but_still_retries(self):
 		"""A gateway token ROTATION keeps the device_id, so when worker B
 		is rejected (it signed with the pre-rotation token) while worker A

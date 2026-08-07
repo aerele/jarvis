@@ -102,15 +102,30 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			).strip()
 		except Exception:
 			row_device = ""
-		if row_device:
-			current_device = (frappe.db.get_single_value("Jarvis Settings", "chat_device_id") or "").strip()
-			if current_device and row_device != current_device:
-				frappe.local.response.http_status_code = 401
-				return _error(
-					"AuthenticationError",
-					"session is bound to a previous device pairing; "
-					"the bench has re-paired since this session was issued",
-				)
+		current_device = (frappe.db.get_single_value("Jarvis Settings", "chat_device_id") or "").strip()
+		from jarvis.chat.device import session_device_is_stale
+
+		if session_device_is_stale(row_device, current_device):
+			frappe.local.response.http_status_code = 401
+			# jarvis #712: this rejection is deliberate (it bounds a leaked
+			# session key's replay window to the next re-pair) and MUST NOT
+			# self-heal here - that would defeat the check. But left as a bare
+			# 401 it was a SILENT permanent outage: no transcript receipt, no
+			# realtime push, nothing telling the customer to start over. The
+			# turn_handler side (handle_chat_send) mints a fresh session for
+			# the NEXT turn on this conversation, so this call_tool rejection
+			# is expected to be transient in practice - but the in-flight turn
+			# that hit it still needs an honest, visible outcome now.
+			tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
+			_notify_stale_pairing(session_key=session_key, tool=tool, tool_call_id=tool_call_id)
+			return _error(
+				"AuthenticationError",
+				"session is bound to a previous device pairing; "
+				"the bench has re-paired since this session was issued. "
+				"Do not retry this call - it will keep failing. Tell the "
+				"user in your reply: this conversation needs a restart, "
+				"start a new chat to continue. Then stop.",
+			)
 
 		return _dispatch_from_session(plugin_user, session_key, tool, args)
 
@@ -240,6 +255,54 @@ def _dispatch_from_session(
 			return result
 	finally:
 		_agent_run_ctx.clear_session_key()
+
+
+_STALE_PAIRING_DEDUPE_TTL_S = 3600
+
+
+def _notify_stale_pairing(*, session_key: str, tool: str, tool_call_id: str | None = None) -> None:
+	"""Make a stale-device-pairing 401 (jarvis #712) visible to the customer
+	instead of a silent permanent outage: persist a normal tool-error receipt
+	into the conversation transcript and push it over the realtime channel,
+	the same way ``_persist_and_publish_tool_call`` does for an ordinary
+	dispatched call. Best-effort and NEVER raises - this runs on the reject
+	path, so a persistence hiccup here must not turn a clean 401 into a 500.
+
+	Deduped per session_key (cache, ``_STALE_PAIRING_DEDUPE_TTL_S``): every
+	tool call the model makes in the SAME broken turn hits this same
+	rejection, and without a guard each one would write another identical
+	row, burying the transcript. One notice per stale session is enough -
+	the model is told in the wire message not to retry, and the next turn on
+	this conversation gets a freshly re-paired session from turn_handler.
+	"""
+	dedupe_key = f"jarvis:stale_pairing_notified:{session_key}"
+	try:
+		if frappe.cache().get_value(dedupe_key):
+			return
+	except Exception:
+		pass  # cache unavailable - fall through and notify anyway
+	message = (
+		"This conversation's connection is out of date: the assistant was "
+		"re-paired after this chat started, so it can no longer run tools "
+		"here. Please start a new chat to continue."
+	)
+	try:
+		_persist_and_publish_tool_call(
+			session_key=session_key,
+			tool=tool,
+			args={},
+			result=_error("AuthenticationError", message),
+			tool_call_id=tool_call_id,
+		)
+	except Exception:
+		frappe.log_error(
+			title="call_tool: stale-pairing notice failed",
+			message=frappe.get_traceback(),
+		)
+	try:
+		frappe.cache().set_value(dedupe_key, 1, expires_in_sec=_STALE_PAIRING_DEDUPE_TTL_S)
+	except Exception:
+		pass
 
 
 def _persist_and_publish_tool_call(

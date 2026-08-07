@@ -289,6 +289,61 @@ class TestCallToolPluginAuth(FrappeTestCase):
 		self.assertEqual(result["error"]["code"], "AuthenticationError")
 		self.assertEqual(frappe.local.response.http_status_code, 401)
 		self.assertIn("previous device pairing", result["error"]["message"])
+		self.assertIn("start a new chat", result["error"]["message"])
+		self.assertIn("Do not retry", result["error"]["message"])
+
+	def test_stale_pairing_rejection_notifies_the_conversation(self):
+		"""jarvis #712: a silent permanent 401 leaves nothing in the
+		transcript and no realtime push - the customer just watches the
+		conversation stop working with no explanation. The rejection must
+		now also persist+publish an honest receipt (the same seam a normal
+		dispatched tool call uses), not just return the bare 401."""
+		session_key = "agent:test:stale-notify"
+		frappe.cache().delete_value(f"jarvis:stale_pairing_notified:{session_key}")
+		gv, gsv = self._patched_session_lookup(
+			row_device="old-device-id-from-before-repair",
+			current_device="current-device-id-after-repair",
+		)
+		with self._with_headers(
+			{
+				"X-Jarvis-Token": "plugin-auth-test-token",
+				"X-Jarvis-Session": session_key,
+			}
+		):
+			with gv, gsv:
+				with patch("frappe.db.exists", return_value=True):
+					with patch("jarvis.api._persist_and_publish_tool_call") as persist_spy:
+						result = call_tool(tool="get_schema", args={"doctype": "Customer"})
+		self.assertFalse(result["ok"])
+		persist_spy.assert_called_once()
+		kwargs = persist_spy.call_args.kwargs
+		self.assertEqual(kwargs["session_key"], session_key)
+		self.assertEqual(kwargs["tool"], "get_schema")
+		self.assertFalse(kwargs["result"]["ok"])
+		self.assertIn("start a new chat", kwargs["result"]["error"]["message"])
+
+	def test_stale_pairing_rejection_is_deduped_per_session(self):
+		"""Every tool call in the same broken turn hits this same
+		rejection - without a guard each would write another identical
+		receipt and bury the transcript. Only the FIRST notifies."""
+		session_key = "agent:test:stale-dedupe"
+		frappe.cache().delete_value(f"jarvis:stale_pairing_notified:{session_key}")
+		gv, gsv = self._patched_session_lookup(
+			row_device="old-device-id-from-before-repair",
+			current_device="current-device-id-after-repair",
+		)
+		with self._with_headers(
+			{
+				"X-Jarvis-Token": "plugin-auth-test-token",
+				"X-Jarvis-Session": session_key,
+			}
+		):
+			with gv, gsv:
+				with patch("frappe.db.exists", return_value=True):
+					with patch("jarvis.api._persist_and_publish_tool_call") as persist_spy:
+						call_tool(tool="get_schema", args={"doctype": "Customer"})
+						call_tool(tool="get_doc", args={"doctype": "Customer", "name": "x"})
+		persist_spy.assert_called_once()
 
 	def test_session_bound_to_current_device_accepted(self):
 		"""Sanity check: a session whose chat_device_id matches the
