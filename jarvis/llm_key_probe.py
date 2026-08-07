@@ -367,7 +367,7 @@ def _stored_api_key(provider: str) -> str:
 
 @frappe.whitelist()
 def test_llm_api_key(
-	provider: str, model: str, api_key: str = "", base_url: str = "", use_stored_key=0
+	provider: str, model: str, api_key: str = "", base_url: str = "", use_stored_key: int = 0
 ) -> dict:
 	"""UI 'Test' button on an API-key LLM pool model row, run BEFORE save.
 
