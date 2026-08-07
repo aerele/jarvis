@@ -871,9 +871,11 @@
 											No changes were made to your data.
 										</div>
 										<!-- #702: the "what you can do" line - mirrors ActionError.vue's
-										     `.jv-ae-hint`, so a turn failure carries the same enriched
-										     {code, headline, hint, detail} shape an ACTION-card failure
-										     already does, instead of a bare message with no next step. -->
+										     `.jv-ae-hint`, so a turn failure gets the same headline + hint +
+										     expandable-raw-detail treatment an ACTION-card failure already
+										     does (headline/hint from errorInfo(m); the raw detail is m.error,
+										     shown in the "Show details" block below), instead of a bare
+										     message with no next step. -->
 										<div
 											v-if="errorInfo(m).hint"
 											style="

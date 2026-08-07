@@ -29,8 +29,9 @@ const props = defineProps({
 });
 
 // Plain-language headline keyed by the wire `code`. This is the ACTION-failure
-// axis - distinct from ChatView's run/transport ERROR_HEADLINES, kept separate
-// on purpose.
+// axis - distinct from ChatView's run/transport taxonomy (lib/errors.js
+// turnErrorInfo, formerly ChatView's own ERROR_HEADLINES before #702), kept
+// separate on purpose.
 const HEADLINES = {
 	PermissionDeniedError: "You don't have permission to do this",
 	InvalidArgumentError: "Some values need attention",
