@@ -39,9 +39,15 @@
 				     instead - so every one of them but that gets the button that
 				     actually takes them there. Review round 1 caught sync_failed
 				     alone getting the button while subscription_unverified's
-				     identical "Open AI models" sentence had no way to act on it. -->
+				     identical "Open AI models" sentence had no way to act on it.
+
+				     isSM-only (jarvis#711): a member has no attention_reason, so
+				     they would pass the turn_error test and get the button, and
+				     AI models is a gated section that falls back to General
+				     silently - the button would look like a dead control. Their
+				     copy names no destination for the same reason. -->
 				<Button
-					v-if="statusState === 'attention' && attentionReason !== 'turn_error'"
+					v-if="isSM && statusState === 'attention' && attentionReason !== 'turn_error'"
 					variant="subtle"
 					label="Open AI models"
 					iconLeft="cpu"
@@ -63,8 +69,10 @@
 			</div>
 			<!-- A failed status fetch must not look like a healthy workspace. Without
 			     this the catch below leaves Status on its placeholder, which reads as
-			     an answer rather than as "we could not ask". Admin-only, because only
-			     an admin can query the endpoint or act on the result. -->
+			     an answer rather than as "we could not ask". Shown to members too
+			     since jarvis#711: they now query a status endpoint of their own, so
+			     the fetch they make can fail the same way, and the badge beside this
+			     stays on its neutral placeholder until a retry lands. -->
 			<div v-if="connErr" class="mt-2 flex items-center gap-2">
 				<span class="text-p-sm text-ink-gray-6">
 					Connection status is unavailable right now.
@@ -306,25 +314,41 @@ const ui = computed(() => (ctx.value && ctx.value.ui) || {});
 const convAutoApply = computed(() => !!(ctx.value && ctx.value.convAutoApply));
 const autoApplyNote = computed(() => (ctx.value && ctx.value.autoApplyNote) || "");
 
-// Real connection status. getLlmConnectionStatus is admin-tier on the server
-// (require_jarvis_admin) and General is an all-user pane, so only tenant-admin
-// users get the live verdict; regular users (who cannot query it and cannot fix
-// it anyway) keep the benign "Connected" the surface implied before, never a
-// 403 rendered as an error.
+// Real connection status, in two tiers. getLlmConnectionStatus is admin-tier on
+// the server (require_jarvis_admin) and returns the whole topology; General is
+// an all-user pane, so a member asks getLlmConnectionHealth instead, which is
+// gated on plain workspace access and answers with { state } and nothing else.
+//
+// Members used to get NEITHER: they could not query the admin endpoint, so the
+// badge was hardcoded to a green "Connected" for them (jarvis#711). That read as
+// a verdict while chat was failing, while a save was applying, and while the
+// workspace was disconnected. It was not stale, it was a constant.
 const isSM = !!(window.is_system_manager || window.is_jarvis_admin);
+// Admin only. Deliberately NOT reused for the member verdict: modeLabel, isPool,
+// disconnected and modelLabel all read this object, so pouring a one-field
+// member payload into it would silently rewrite rows that have nothing to do
+// with the badge.
 const connStatus = ref(null);
+// Member only. "" means no verdict yet, which is the state of EVERY member for
+// the whole first paint - see statusState, which must not read that as health.
+const memberState = ref("");
 const connErr = ref(false);
 const connLoading = ref(false);
 
 // Also ported from the removed ConnectionPane.vue: a fetch failure has to be
 // visible and recoverable. Swallowing it left Status showing its placeholder,
 // which an admin reads as "fine" rather than "we could not ask", and there was
-// no way to retry without reloading the whole app.
+// no way to retry without reloading the whole app. A member's fetch can fail the
+// same way, so both tiers land in the same catch.
 async function loadConnStatus() {
-	if (!isSM) return;
 	connLoading.value = true;
 	try {
-		connStatus.value = await api.getLlmConnectionStatus();
+		if (isSM) {
+			connStatus.value = await api.getLlmConnectionStatus();
+		} else {
+			const res = await api.getLlmConnectionHealth();
+			memberState.value = (res && res.state) || "";
+		}
 		connErr.value = false;
 	} catch (e) {
 		connErr.value = true;
@@ -350,8 +374,9 @@ const expiresLabel = computed(() => {
 });
 // Shared with Billing and metering so the two panes cannot name the same state
 // differently again: that pane called a 2-model api-key pool "Pool (direct
-// failover)" while this one called it "Direct". Blank without a verdict (a
-// non-admin never fetches one), which hides the row rather than guessing.
+// failover)" while this one called it "Direct". Blank without a verdict, which
+// hides the row rather than guessing - and a member never has one: their
+// endpoint answers health only, and topology is precisely what it withholds.
 const modeLabel = computed(() =>
 	connStatus.value
 		? connectionModeLabel(connStatus.value.proxy_active, connStatus.value.model_count)
@@ -389,22 +414,38 @@ const health = computed(() => (connStatus.value && connStatus.value.health) || "
 // easily: adding a health value or moving the disconnected check had to be got
 // right in three places, and a miss would render a colour that disagreed with
 // the line under it.
+//
+// A member resolves to the server's one-field verdict, and to "unknown" until it
+// lands (jarvis#711). There is deliberately no member-only value: the member and
+// admin vocabularies are the same words, so nothing about the badge tells a
+// member's screen apart from an admin's except what the workspace is doing.
+// "disconnected" is simply never reached from the member branch - the member
+// endpoint reports that workspace as "down", so credential presence stays
+// undisclosed.
 const statusState = computed(() => {
-	if (!isSM) return "member";
+	if (!isSM) return memberState.value || "unknown";
 	if (!connStatus.value) return "unknown";
 	if (disconnected.value) return "disconnected";
-	return health.value || "ok";
+	// "unknown", not "ok": the server sends health on every branch, so this only
+	// fires on a truncated payload, and a payload we could not read is not
+	// evidence of a healthy workspace. Same fail-closed rule as the maps below.
+	return health.value || "unknown";
 });
+// Both maps below fall through to the NEUTRAL state, never to green. They used
+// to default to "Connected"/green, which is what made an unmapped or missing
+// verdict indistinguishable from a working workspace - the #711 defect in its
+// general form. "ok" is now an explicit case in each, so a state the server
+// grows later reads as "we do not know" until this pane learns it.
 const statusLabel = computed(
 	() =>
 		({
-			member: "Connected",
+			ok: "Connected",
 			unknown: "—",
 			disconnected: "Disconnected",
 			down: "Not connected",
 			applying: "Applying changes",
 			attention: "Needs attention",
-		}[statusState.value] || "Connected")
+		}[statusState.value] || "—")
 );
 // The server's reason for "attention" (jarvis#714) - see account._llm_health.
 // One of sync_failed / turn_error / subscription_unverified, or "" for every
@@ -424,6 +465,19 @@ const attentionReason = computed(
 // that the agent's own wording is not reliable, so this points at the failed
 // message, whose own inline error is the only first-hand account.
 const statusHint = computed(() => {
+	// A member's two sentences. They are cause-blind by design: the member
+	// endpoint sends no attention_reason at all, because one of its values
+	// (subscription_unverified) can only arise on a workspace running a chat
+	// subscription and so names the credential kind - see
+	// account.get_llm_connection_health. Both point at the one action a member
+	// actually has, and neither names AI models, which they cannot open.
+	if (!isSM) {
+		if (statusState.value === "attention")
+			return "Your workspace needs attention. Ask whoever manages your workspace to check it.";
+		if (statusState.value === "down")
+			return "Your assistant is not ready yet. Ask whoever manages your workspace to set it up.";
+		return "";
+	}
 	if (statusState.value === "attention") {
 		return (
 			{
@@ -446,12 +500,13 @@ const statusHint = computed(() => {
 // broken, the customer chose this and can undo it in AI models.
 const statusTheme = computed(() => {
 	const s = statusState.value;
-	if (s === "member") return "green";
-	if (s === "unknown") return "gray";
+	if (s === "ok") return "green";
 	if (s === "disconnected") return "orange";
 	if (s === "down" || s === "attention") return "red";
 	if (s === "applying") return "blue";
-	return "green";
+	// "unknown" and anything this pane does not recognise. Green is reachable
+	// from exactly one branch above, on purpose.
+	return "gray";
 });
 
 // Estimated token usage — the dialog fetches its own data on open.
