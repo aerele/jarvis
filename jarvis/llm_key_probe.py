@@ -13,7 +13,7 @@ This probe surfaces exactly that message instead of swallowing it.
 
 Shape: synchronous, no persistence, gated, does live HTTP, and NEVER raises
 for a failed check - it always returns a structured
-``{"ok": bool, "checks": [{"check", "ok", "detail"}, ...]}``.
+``{"ok": bool, "verdict": str, "checks": [{"check", "ok", "detail"}, ...]}``.
 
 NOT the same thing as ``PUT /v1/containers/{name}/llm-pool``
 (``jarvis.admin_client.post_update_llm_pool``): that is a MUTATING apply on
@@ -21,10 +21,18 @@ the fleet-agent that rotates secrets, rewrites the tenant's openclaw.json and
 can restart the container (10-30s chat outage). This probe never writes
 Jarvis Settings, never calls admin_client, and never touches the fleet or a
 container - it is a single side-effect-free HTTP round-trip straight from
-THIS bench to the provider's own API, using whatever
-provider/base_url/model/api_key the customer has typed into the panel so far
-(nothing here is persisted, and nothing here may call the mutating pool
-apply).
+THIS bench to the provider's own API, using the provider/base_url/model the
+customer has typed into the panel so far (nothing here is persisted, and
+nothing here may call the mutating pool apply).
+
+STORED KEYS (#679): the key is the one exception to "only what is typed".
+``test_llm_api_key`` will, on explicit request, resolve the saved key for the
+row's provider server-side and probe with it, so that changing ONLY a base
+URL can be tested by a customer who does not have the key to hand - which is
+precisely when a test is worth most. The key is read through
+``pool_serialize.stored_api_keys_by_provider``, the same helper
+``save_llm_pool`` merges with, so Test can never attest to a credential Save
+would not send. It is used in-process and never returned to the browser.
 
 CAVEAT - read before trusting a green check: live tenant chat is actually
 served from INSIDE the tenant's bifrost container, not from this bench. For
@@ -36,6 +44,41 @@ network), this probe cannot confirm reachability from here - see
 render as a disclaimer, never a guarantee. ``test_llm_api_key`` always
 attaches a ``caveat`` string for this reason, whether or not the provider is
 tagged local.
+
+THREE VERDICTS, NOT TWO (#680). That caveat used to be the only hedge, it sat
+underneath a red "Test failed.", and it was routinely disbelieved: a base_url
+only the container can resolve (``http://host.docker.internal:9000/openai/v1``)
+answers HTTP 200 from inside the container and "Could not resolve host" from
+here, so the customer read the red banner and did not click Save. A bench that
+never got a byte back has learned NOTHING about the credential or the endpoint,
+only about its own network, so calling that "failed" was false. ``verdict``
+therefore carries three values::
+
+    pass       - the provider answered 2xx. Real signal.
+    fail       - a definitive rejection: the provider answered non-2xx, or the
+                 input/URL is unusable. The customer must fix something.
+    unverified - this bench could not reach the endpoint at all (DNS, an
+                 address the SSRF guard refuses, or a dead socket). Says
+                 nothing either way; render neutrally, never as a failure.
+
+``ok`` stays strictly ``verdict == "pass"``, so every existing consumer gating
+on it keeps today's strictness - notably the SPA's onboarding "Start chatting"
+gate, which requires a passing probe before it lets a freshly typed key
+through. An endpoint this bench merely could not reach must not unlock a gate
+that a real pass unlocks. The classification comes from
+``LinkFetchError.kind``, set at the raise site, never from matching message
+text.
+
+The honest alternative - probing from inside the container, the network chat
+really uses - was investigated and rejected for now, because no such path
+exists from this plane. ``jarvis_fleet_agent.proxy_probe`` already does the
+right thing (it execs a request inside the tenant's container and even
+distinguishes an inconclusive result from a definitive one), but it runs only
+inside the MUTATING ``PUT /v1/containers/{name}/llm-pool`` apply: after
+secrets are written and the container restarted, which is exactly what a
+pre-save Test must not do. Exposing it standalone needs a new fleet-agent
+route, an admin relay (this bench holds no fleet credentials), and wiring
+here. Three repos, worth doing, but not as a side effect of fixing a banner.
 
 SECURITY: ``base_url`` is customer-supplied, so this is an SSRF vector
 exactly like ``jarvis.chat.link_fetch``'s Personalise link fetch (a prior
@@ -54,7 +97,7 @@ import json
 import frappe
 
 from jarvis.chat import link_fetch
-from jarvis.jarvis.pool_serialize import normalize_provider
+from jarvis.jarvis.pool_serialize import normalize_provider, stored_api_keys_by_provider
 from jarvis.permissions import require_jarvis_admin
 
 _TIMEOUT_S = 15
@@ -77,6 +120,34 @@ LOCAL_PROVIDER_IDS = {"ollama", "vllm"}
 # motivating case.
 _ANTHROPIC_IDS = {"anthropic"}
 _GEMINI_IDS = {"gemini"}
+
+# The three values of the result's `verdict` - see the module docstring.
+VERDICT_PASS = "pass"
+VERDICT_FAIL = "fail"
+VERDICT_UNVERIFIED = "unverified"
+
+# What to tell the customer for each way the bench can fail to reach an
+# endpoint. Each one is a statement about THIS network, never about the key:
+# the same endpoint may well answer from inside the container. Keyed by
+# link_fetch's raise-site classification, so a reworded exception message
+# cannot silently reclassify a result.
+_UNREACHABLE_DETAIL = {
+	link_fetch.ERR_UNRESOLVED: (
+		"This bench could not resolve that hostname, so nothing was sent. "
+		"An endpoint only your Jarvis container can resolve looks exactly like "
+		"this from here, and so does a typo in the base URL."
+	),
+	link_fetch.ERR_BLOCKED_ADDRESS: (
+		"That address is private, and this bench does not connect to private "
+		"addresses. Your Jarvis container can, so an endpoint on your own "
+		"network can only be confirmed from inside it."
+	),
+	link_fetch.ERR_CONNECT_FAILED: (
+		"This bench could not open a connection to that endpoint, so nothing "
+		"was sent. It may still be reachable from inside your Jarvis container, "
+		"which is where chat runs."
+	),
+}
 
 
 def _check(name: str, ok: bool, detail: str) -> dict:
@@ -182,10 +253,12 @@ def probe_api_key(provider: str, model: str, api_key: str, base_url: str = "") -
 	SSRF-blocked endpoint, a network error, a provider rejection) comes back
 	as a failed check with a human-readable, key-scrubbed detail.
 
-	Returns ``{"ok": bool, "checks": [...], "provider": <canonical id>,
-	"local_endpoint": bool}``. See the module docstring for the CAVEAT
-	(probed from the bench, not the tenant's container) and the SECURITY
-	notes (SSRF guard via link_fetch, key scrubbing)."""
+	Returns ``{"ok": bool, "verdict": str, "checks": [...], "provider":
+	<canonical id>, "local_endpoint": bool}``, where ``ok`` is exactly
+	``verdict == "pass"``. See the module docstring for the three verdicts and
+	why an unreachable endpoint is NOT a failure (#680), for the CAVEAT (probed
+	from the bench, not the tenant's container) and for the SECURITY notes (SSRF
+	guard via link_fetch, key scrubbing)."""
 	checks: list[dict] = []
 	provider_id = normalize_provider(provider)
 	is_local = provider_id in LOCAL_PROVIDER_IDS
@@ -194,18 +267,26 @@ def probe_api_key(provider: str, model: str, api_key: str, base_url: str = "") -
 	api_key = (api_key or "").strip()
 	base = (base_url or "").strip()
 
-	def _done(ok: bool) -> dict:
-		return {"ok": ok, "checks": checks, "provider": provider_id, "local_endpoint": is_local}
+	def _done(verdict: str) -> dict:
+		return {
+			"ok": verdict == VERDICT_PASS,
+			"verdict": verdict,
+			"checks": checks,
+			"provider": provider_id,
+			"local_endpoint": is_local,
+		}
 
+	# Missing input is a genuine fail, not "unverified": there is something
+	# concrete for the customer to fix, and nothing was left uncertain.
 	if not model:
 		checks.append(_check("input", False, "Enter a model id before testing."))
-		return _done(False)
+		return _done(VERDICT_FAIL)
 	if not api_key:
 		checks.append(_check("input", False, "Enter an API key before testing."))
-		return _done(False)
+		return _done(VERDICT_FAIL)
 	if not base:
 		checks.append(_check("input", False, "Enter a base URL before testing."))
-		return _done(False)
+		return _done(VERDICT_FAIL)
 
 	kind = _provider_kind(provider_id)
 	req = _build_request(kind, base, model, api_key)
@@ -220,15 +301,16 @@ def probe_api_key(provider: str, model: str, api_key: str, base_url: str = "") -
 			max_bytes=_MAX_BODY_BYTES,
 		)
 	except link_fetch.LinkFetchError as exc:
-		detail = _scrub(str(exc), api_key)
-		if is_local:
-			detail = (
-				f"Can't reach this endpoint from the bench ({detail}). Local/private "
-				"endpoints are only reachable from inside your Jarvis container, so "
-				"this can't be verified from here."
-			)
-		checks.append(_check("probe_request", False, detail))
-		return _done(False)
+		reason = _scrub(str(exc), api_key)
+		kind = getattr(exc, "kind", link_fetch.ERR_RESPONSE)
+		# Never got a byte back. That is a fact about this bench's network and
+		# nothing else, so it must not be dressed up as a verdict on the key or
+		# the endpoint - see #680 and the module docstring's three verdicts.
+		if kind in link_fetch.UNREACHABLE_KINDS:
+			checks.append(_check("probe_request", False, _UNREACHABLE_DETAIL[kind]))
+			return _done(VERDICT_UNVERIFIED)
+		checks.append(_check("probe_request", False, reason))
+		return _done(VERDICT_FAIL)
 
 	if 200 <= status < 300:
 		checks.append(
@@ -238,7 +320,7 @@ def probe_api_key(provider: str, model: str, api_key: str, base_url: str = "") -
 				f"{provider_id or 'The provider'} accepted a 1-token test request (HTTP {status}).",
 			)
 		)
-		return _done(True)
+		return _done(VERDICT_PASS)
 
 	# `body` came back from whatever the customer-supplied base_url points to - a
 	# hostile or merely malformed response must never turn "the test failed" into
@@ -258,11 +340,44 @@ def probe_api_key(provider: str, model: str, api_key: str, base_url: str = "") -
 			f"HTTP {status}: {message}" if message else f"HTTP {status} with no error detail.",
 		)
 	)
-	return _done(False)
+	return _done(VERDICT_FAIL)
+
+
+def _stored_api_key(provider: str) -> str:
+	"""The saved key ``save_llm_pool`` would merge into a row on this provider,
+	decrypted, or "" when there is none.
+
+	Deliberately keyed on provider alone and deliberately NOT a lookup of its
+	own: it is the same ``stored_api_keys_by_provider`` snapshot the save path
+	merges from (see that helper for why per-row identity is not available and
+	would not help). Probing anything else would let a green Test attest to a
+	credential Save then declines to send.
+
+	Never raises. ``_get_password`` propagates a genuine decryption failure,
+	which on the save path is right (better to fail than to wipe a credential
+	with a blank), but here it would turn a Test click into a 500. Degrading to
+	"" instead lands the customer on the honest "no saved key" check below."""
+	try:
+		settings = frappe.get_single("Jarvis Settings")
+		return stored_api_keys_by_provider(settings.get("models")).get(normalize_provider(provider), "")
+	except Exception:
+		# An explicit message is load-bearing, not tidiness. frappe.log_error with
+		# only a title falls back to get_traceback(with_context=True), which dumps
+		# every frame's LOCALS into the Error Log - and the frame that raised here
+		# is the one holding a decrypted key. Passing a message keeps the whole
+		# variable dump out of the log, which is what this module's "never in
+		# frappe.log_error" promise actually requires.
+		frappe.log_error(
+			title="llm_key_probe: stored key lookup failed",
+			message="Could not read the stored API key for this provider. Details omitted on purpose.",
+		)
+		return ""
 
 
 @frappe.whitelist()
-def test_llm_api_key(provider: str, model: str, api_key: str = "", base_url: str = "") -> dict:
+def test_llm_api_key(
+	provider: str, model: str, api_key: str = "", base_url: str = "", use_stored_key: int = 0
+) -> dict:
 	"""UI 'Test' button on an API-key LLM pool model row, run BEFORE save.
 
 	Jarvis Admin / System Manager - the same gate ``jarvis.onboarding.
@@ -270,18 +385,62 @@ def test_llm_api_key(provider: str, model: str, api_key: str = "", base_url: str
 	``editable`` prop is ``isSM || is_jarvis_admin``), so anyone who can edit
 	a row can also test it.
 
-	Operates ONLY on the values passed in (whatever is currently typed into
-	the panel) - it never reads or writes the stored, encrypted key on an
-	existing row, and never persists anything or touches the fleet/container.
-	See the module docstring for why this must never call the mutating
-	``/llm-pool`` apply."""
+	Persists nothing and never touches the fleet/container; see the module
+	docstring for why this must never call the mutating ``/llm-pool`` apply.
+
+	``use_stored_key`` opts into probing the SAVED key for ``provider`` instead
+	of a typed one (#679), so that a customer who changes only the base URL can
+	test it without digging out a credential they pasted months ago - the case
+	where testing before saving is worth the most. A typed ``api_key`` always
+	wins, matching the save-path merge, so a stale flag from an old client
+	cannot override what the customer just entered. This grants no new reach:
+	the same role can already Save, which sends that same stored key to any
+	base URL it likes. The resolved key stays server-side, is scrubbed out of
+	provider error bodies like any other, and is never part of the response."""
 	require_jarvis_admin()
+	api_key = (api_key or "").strip()
+	if not api_key and frappe.utils.cint(use_stored_key):
+		api_key = _stored_api_key(provider)
+		if not api_key:
+			# The row claimed a saved key and there is none under this provider:
+			# it was removed, or the provider was switched since the panel loaded.
+			# Say which, rather than the generic "enter an API key".
+			return {
+				"ok": False,
+				"verdict": VERDICT_FAIL,
+				"checks": [
+					_check(
+						"input",
+						False,
+						"No saved key found for this provider. Enter the API key to test it.",
+					)
+				],
+				"provider": normalize_provider(provider),
+				"local_endpoint": normalize_provider(provider) in LOCAL_PROVIDER_IDS,
+				"caveat": "",
+			}
 	result = probe_api_key(provider, model, api_key, base_url)
-	result["caveat"] = (
-		"Tested from the bench, not from your Jarvis container. Local/private "
-		"endpoints (ollama, vllm) can only be confirmed from inside the container."
-		if result.get("local_endpoint")
-		else "Tested from the bench's network. Live chat runs from inside your Jarvis "
+	result["caveat"] = _caveat_for(result)
+	return result
+
+
+def _caveat_for(result: dict) -> str:
+	"""The small print under the Test result. It has to say something different
+	once the verdict is ``unverified``: the old text ("tested from the bench's
+	network") describes a test that in that case never actually happened."""
+	if result.get("verdict") == VERDICT_UNVERIFIED:
+		return (
+			"Nothing reached the provider, so this is not a verdict on your key. "
+			"Live chat runs from inside your Jarvis container, which reaches "
+			"private and container-only endpoints that this bench cannot. If the "
+			"URL is right for the container, saving is still the way to apply it."
+		)
+	if result.get("local_endpoint"):
+		return (
+			"Tested from the bench, not from your Jarvis container. Local/private "
+			"endpoints (ollama, vllm) can only be confirmed from inside the container."
+		)
+	return (
+		"Tested from the bench's network. Live chat runs from inside your Jarvis "
 		"container - for a public provider these agree."
 	)
-	return result

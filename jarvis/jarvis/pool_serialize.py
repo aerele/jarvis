@@ -107,6 +107,51 @@ def normalize_provider(value: str) -> str:
 	return _PROVIDER_ALIASES.get(v.lower(), v.lower())
 
 
+def stored_api_keys_by_provider(models) -> dict:
+	"""Decrypt every api-key row's stored key, keyed by canonical provider.
+
+	This is the app's ONE answer to "which stored key belongs to provider X".
+	``jarvis.onboarding.save_llm_pool`` uses it to merge a secret back into a
+	row the reloaded editor posted blank (get_llm_config never returns a key,
+	so an untouched row always comes back with ``api_key: ""``), and
+	``jarvis.llm_key_probe.test_llm_api_key`` uses it to probe a stored
+	credential the customer did not retype (#679).
+
+	Both callers MUST agree: if Test probed one key and Save then shipped a
+	different one, a green Test would be a lie. Sharing this function is what
+	makes that impossible, so resist giving either caller its own lookup.
+
+	Keyed by provider ALONE, deliberately - api keys are per-vendor here, and
+	rows carry no durable per-row identity (the child rows are rebuilt, and
+	renamed, on every save, and nothing row-scoped survives on the wire). Two
+	rows on one provider therefore collapse to a single key, LAST non-empty
+	one winning, which is exactly the key both of them will hold after the
+	next save. Blank keys never enter the map, so a half-filled row cannot
+	mask a working credential.
+
+	The local holding a decrypted key is called ``secret`` ON PURPOSE. Frappe's
+	``get_traceback(with_context=True)`` dumps every frame's locals into the
+	Error Log and redacts them by NAME against a fixed blocklist (password,
+	passwd, secret, token, key, pwd). ``_get_password`` re-raises a genuine
+	decryption failure, so if one row's ciphertext is corrupt this frame is on
+	the traceback while the local still holds the PREVIOUS row's working key.
+	Named ``val`` that key is written to the log in cleartext; named ``secret``
+	it is redacted. ``keys`` is already covered by "key". Do not rename either.
+	"""
+	keys: dict = {}
+	for m in models or []:
+		cred = (
+			m.credential_type if hasattr(m, "credential_type") else m.get("credential_type", "")
+		) or "api_key"
+		if cred != "api_key":
+			continue
+		secret = _get_password(m, "api_key")
+		if secret:
+			provider = (m.provider if hasattr(m, "provider") else m.get("provider", "")) or ""
+			keys[normalize_provider(provider)] = secret
+	return keys
+
+
 # ---------------------------------------------------------------------------
 # Wire-time-only provider collapsing (build_pool_payload). Distinct from
 # normalize_provider(): a provider id can be first-class in STORAGE (so the
