@@ -301,7 +301,7 @@ function start() {
 	reset();
 	if (reduced) {
 		// one static calm frame
-		requestAnimationFrame((ts) => {
+		raf = requestAnimationFrame((ts) => {
 			t0 = ts - 9999;
 			draw(ts);
 			cancelAnimationFrame(raf);

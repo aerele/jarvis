@@ -280,7 +280,7 @@ function start() {
 	coreFlash = 0;
 	t0 = null;
 	if (reduced) {
-		requestAnimationFrame((ts) => {
+		raf = requestAnimationFrame((ts) => {
 			t0 = ts;
 			draw(ts);
 			cancelAnimationFrame(raf);
