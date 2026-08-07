@@ -2236,14 +2236,17 @@
 
 								<!-- idle / edit: the compact note row — the question lives in the placeholder -->
 								<template v-else>
-									<input
+									<textarea
 										ref="nudgeTaEl"
 										v-model="nudge.text"
+										rows="1"
 										class="jv-nudge-input"
 										:placeholder="`Note something to remember about ${nudgeLabels}…`"
+										:aria-label="`Note something to remember about ${nudgeLabels}`"
 										:disabled="nudge.saving"
-										@keydown.enter.prevent="saveNudgeNote"
-									/>
+										@input="autoGrowNudge"
+										@keydown.enter="onNudgeEnter"
+									></textarea>
 									<button
 										v-if="
 											ui.stt_enabled &&
@@ -2252,6 +2255,7 @@
 										"
 										class="jv-iconbtn jv-nudge-mic"
 										:title="`Record a voice note (saved for ${agentName} to learn from)`"
+										:aria-label="`Record a voice note about ${nudgeLabels}`"
 										@click="startNudgeMic"
 									>
 										<svg
@@ -8715,7 +8719,10 @@ async function _nudgeTranscribe(r) {
 		if (nudge.value) {
 			nudge.value.text = text;
 			nudge.value.mode = "edit";
-			nextTick(() => nudgeTaEl.value?.focus());
+			nextTick(() => {
+				nudgeTaEl.value?.focus();
+				autoGrowNudge();
+			});
 		}
 	} catch (e) {
 		notifyActionError("Couldn't transcribe audio", e);
@@ -8725,6 +8732,24 @@ async function _nudgeTranscribe(r) {
 function cancelNudgeMic() {
 	nudgeRec.cancel();
 	if (nudge.value) nudge.value.mode = "idle";
+}
+// Enter saves the note; Shift+Enter is a newline. Guarded against IME
+// composition-confirm (isComposing / keyCode 229) the same way Composer.vue and
+// DashboardChatPane.vue are — otherwise committing a CJK candidate with Enter
+// would save a half-composed note.
+function onNudgeEnter(e) {
+	if (e.isComposing || e.keyCode === 229 || e.shiftKey) return;
+	e.preventDefault();
+	saveNudgeNote();
+}
+// Keep the note field growing with a dictated/typed paragraph. It starts at one
+// row (so the idle prompt is a slim strip) and grows up to a few lines, restoring
+// the review surface a voice transcript needs before it is saved to memory.
+function autoGrowNudge(e) {
+	const el = (e && e.target) || nudgeTaEl.value;
+	if (!el) return;
+	el.style.height = "auto";
+	el.style.height = Math.min(el.scrollHeight, 132) + "px";
 }
 async function saveNudgeNote() {
 	const n = nudge.value;
@@ -9783,13 +9808,17 @@ onUnmounted(() => {
 .jv-nudge-input {
 	flex: 1;
 	min-width: 0;
-	height: 34px;
+	min-height: 34px;
+	max-height: 132px;
 	border: none;
 	background: transparent;
 	color: var(--text);
 	font-family: inherit;
 	font-size: 13.5px;
-	padding: 0 2px;
+	line-height: 1.45;
+	padding: 6px 2px;
+	resize: none;
+	overflow-y: auto;
 	outline: none;
 }
 .jv-nudge-input::placeholder {
@@ -9812,7 +9841,7 @@ onUnmounted(() => {
 	width: 32px;
 	height: 32px;
 }
-.jv-nudge-go {
+.jv-nudge--compact .jv-nudge-go {
 	height: 32px;
 	padding: 0 14px;
 	border-radius: 8px;
