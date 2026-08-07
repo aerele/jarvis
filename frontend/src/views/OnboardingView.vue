@@ -707,7 +707,7 @@
 								 back, and we are asking the control plane whether it landed. Money
 								 has left them and no verdict exists yet, so this is the one screen
 								 the payment illustration belongs on (design.md §2.2). It replaces
-								 the recovery card's disabled "Checking…" button, which is what a
+								 the recovery card, whose disabled "Working…" button is what a
 								 customer used to stare at in the seconds right after paying. -->
 							<template v-else-if="showConfirming">
 								<div class="ob-body">
@@ -1321,10 +1321,19 @@
 										 actually happening is that a person has to look. -->
 									<template v-else-if="state.connectPhase === 'blocked'">
 										<div class="ob-head">
-											<h1>We're looking into your workspace</h1>
-											<p>
+											<h1>
+												{{
+													state.connectTitle ||
+													"We couldn't continue setting up"
+												}}
+											</h1>
+											<p v-if="state.connectPaged">
 												Something about your workspace needs a person to
 												check it, and our team has already been notified.
+											</p>
+											<p v-else>
+												Waiting won't clear this one, so we've stopped
+												checking rather than leave you watching a spinner.
 											</p>
 										</div>
 										<div class="mx-auto mt-4 max-w-[560px]">
@@ -1334,6 +1343,7 @@
 												:message="state.connectMessage"
 											/>
 											<p
+												v-if="state.connectPaged"
 												class="mt-4 text-center text-p-sm text-ink-gray-5"
 												role="status"
 											>
@@ -1520,9 +1530,9 @@ import {
 } from "@/lib/llmOperation.js";
 import { readinessWaitExhaustedMessage } from "@/onboarding/readinessWait.js";
 import {
-	PHASE_STATE,
 	provisioningPhase,
 	readinessPhase,
+	inFlightPhase,
 	connectHeadline,
 } from "@/onboarding/waitPhases.js";
 import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
@@ -1664,15 +1674,29 @@ const state = reactive({
 	// "Still finishing setup" sat above all of them and claimed progress the
 	// message underneath deliberately refuses to claim (jarvis#709).
 	connectTitle: "",
+	// True only when the STOP came from a verdict where support was already
+	// notified (authority_repair_required). A paused subscription or a moved
+	// account also stop the wait, but nobody was paged and the customer has to
+	// act, so they must not get the "our team is on it" reassurance.
+	connectPaged: false,
 	connectBlockReason: "",
 	connectSupportOffered: false,
 	retryAfter: 0,
 });
 
 // What the LAST readiness poll observed, projected into the setup screen's
-// phase. Seeded unanswered so the first frame of a wait claims no phase at all.
-const readinessSeen = ref({ answered: false, reason: "", detail: "" });
-const readinessStage = computed(() => readinessPhase(readinessSeen.value));
+// phase. NULL means no poll has reported yet - which is NOT the same as a poll
+// that answered nothing. Seeding it as `answered: false` made the row render
+// "We couldn't reach your workspace to check" on the first frame after a
+// successful save, announcing a failed check before one had been attempted.
+const readinessSeen = ref(null);
+const readinessStage = computed(() =>
+	readinessSeen.value
+		? readinessPhase(readinessSeen.value)
+		: // The apply operation is what is running, and the operation controller
+		  // reported that, so naming it is grounded.
+		  inFlightPhase("Applying your AI connection")
+);
 
 // Plan 01 billing state. Namespaced by site identity + logged-in user so one
 // site's / user's transitional billing PII can never prefill another's on a
@@ -2400,6 +2424,9 @@ async function recheckProvisioning() {
 	if (recheckingSetup.value) return;
 	recheckingSetup.value = true;
 	setupRecheckNote.value = "";
+	// A fresh look starts from "nothing observed": the stale phase from the wait
+	// that already exhausted must not be what this one opens on.
+	provisioningSeen.value = null;
 	try {
 		const out = await flow.waitForProvisioning({ onObservation: noteProvisioning });
 		if (out.status === "ready") {
@@ -2428,11 +2455,15 @@ const showProvisioning = computed(
 );
 const showPaidFlash = computed(() => pay.value.value === S.PAID);
 
-// What the LAST provisioning tick actually saw. Seeded unanswered so the first
-// frame of the wait claims nothing: the poll has not reported yet, and "Jarvis
-// is getting ready for you" must never be a default (see waitPhases.js).
-const provisioningSeen = ref({ answered: false, tenantStatus: "" });
-const provisioningStage = computed(() => provisioningPhase(provisioningSeen.value));
+// What the LAST provisioning tick actually saw. NULL means no tick has reported
+// yet; see readinessSeen for why that is deliberately distinct from a tick that
+// answered nothing. "Jarvis is getting ready for you" must never be a default.
+const provisioningSeen = ref(null);
+const provisioningStage = computed(() =>
+	provisioningSeen.value
+		? provisioningPhase(provisioningSeen.value)
+		: inFlightPhase("Checking on your workspace")
+);
 
 // The FULL-SCREEN busy view is only for the phases where there is genuinely
 // nothing to press: starting the signup, the sheet being open, confirming.
@@ -3142,12 +3173,17 @@ function noteReadiness(o) {
 	};
 	readinessSeen.value = seen;
 	const stage = readinessPhase(seen);
-	// A blocked verdict (admin paged a human) is terminal for this wait: stop
-	// polling and hand the customer a screen with no retry, because retrying
-	// payment or reconnecting is exactly what must not happen here.
-	if (stage.blocked) {
+	// A verdict that waiting cannot resolve is terminal for this wait: stop
+	// polling rather than counting down to a ceiling whose copy invites a retry
+	// that cannot help. Covers a paged authority repair (do nothing, we called
+	// someone), a paused subscription, and an account that has moved to another
+	// site - the last two need the CUSTOMER to act, so they must not be dressed
+	// in the "our team has been notified" reassurance.
+	if (stage.stop) {
 		state.connectPhase = "blocked";
+		state.connectTitle = stage.title || "We couldn't continue setting up";
 		state.connectMessage = stage.detail;
+		state.connectPaged = !!stage.paged;
 		state.connectSupportOffered = true;
 	}
 }
@@ -3161,7 +3197,7 @@ async function waitForChatReadiness() {
 	let lastDetail = "";
 	// A new wait starts from "nothing observed yet", so a stale phase from an
 	// earlier attempt is never the first thing this one renders.
-	readinessSeen.value = { answered: false, reason: "", detail: "" };
+	readinessSeen.value = null;
 	for (let i = 0; i < CHAT_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
 		// A blocked verdict is terminal for this wait (admin paged a human): stop
@@ -3360,7 +3396,7 @@ async function followLegacyReadiness() {
 	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
 	let sawVerdict = false;
 	let lastDetail = "";
-	readinessSeen.value = { answered: false, reason: "", detail: "" };
+	readinessSeen.value = null;
 	for (let i = 0; i < LEGACY_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
 		if (state.connectPhase === "blocked") return;
@@ -3402,6 +3438,10 @@ function enterSaveRefusal(retryAfterSeconds) {
 		state.connectPhase = "retry";
 		state.connectMessage =
 			"Too many changes in a short time. Please wait a moment, then retry.";
+		// Every other terminal sets this; without it this one rendered the generic
+		// "We couldn't confirm your setup" over a rate-limit body, or worse, a
+		// STALE title left behind by an earlier attempt.
+		state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: false });
 		state.retryAfter = retryAfterSeconds;
 		startRetryCountdown();
 	} else {
@@ -3543,7 +3583,7 @@ watch(
 			provisioningRun = true;
 			// A fresh wait starts from "nothing observed yet", so a stale phase from
 			// an earlier run can never be the first thing this one shows.
-			provisioningSeen.value = { answered: false, tenantStatus: "" };
+			provisioningSeen.value = null;
 			const out = await flow.waitForProvisioning({ onObservation: noteProvisioning });
 			if (out.status === "ready") {
 				state.step = "connect";
@@ -3664,6 +3704,24 @@ onMounted(async () => {
 	// else touches the URL, and strip it immediately so a later reload does not
 	// re-apply a stale verdict.
 	const checkoutReturn = readCheckoutOutcome();
+	// Returning from the pay page: show the confirming screen from first paint.
+	// Everything below this line that the customer would otherwise be watching is
+	// real work - a providers fetch, an account prefill, then the reconcile round
+	// trip (hydrate, then a readiness read) - and until that lands `state.step` is
+	// still the default "intro". So a customer who paid ten seconds ago sat
+	// watching the marketing tour while we worked out what had happened to their
+	// money. A correction for that already existed at the end of this hook, but it
+	// ran AFTER the awaits: it fixed where they landed, not what they watched.
+	//
+	// Set before the first await deliberately. Routing to "pay" here reaches the
+	// same landing the correction did (landingStep leaves a resumed "pay" alone),
+	// which is why that guard below is now a no-op rather than a repair. The flag
+	// is cleared in the finally around the reconcile; nothing awaited in between
+	// can reject (prefillAccount swallows its own errors), so it cannot strand.
+	if (checkoutReturn) {
+		state.step = "pay";
+		confirmingReturn.value = true;
+	}
 	// Restore the namespaced local billing snapshot FIRST: restored values are
 	// user-owned (local_restore), so the Company-defaults fetch prefillAccount
 	// triggers can only fill fields the customer left blank.
@@ -3701,19 +3759,6 @@ onMounted(async () => {
 	// onMounted, so a live restored checkout is untouched.
 	if (pay.value.value !== S.CHECKOUT_OPEN) {
 		clearExternalCheckoutNav();
-	}
-	// Returning from the pay page, show the confirming screen from FIRST PAINT.
-	// reconcileMidFlightSignup() below is a real round trip (hydrate, then a
-	// readiness read), and until it lands `state.step` is still the default
-	// "intro" - so a customer who paid ten seconds ago was shown the marketing
-	// tour while we worked out what had happened to their money. The correction
-	// for that already existed further down, but it only ran AFTER the awaits, so
-	// it fixed where they ended up and not what they watched. Routing to "pay"
-	// here reaches the same landing (landingStep leaves a resumed "pay" alone,
-	// and the checkoutReturn guard below is now a no-op rather than a repair).
-	if (checkoutReturn) {
-		state.step = "pay";
-		confirmingReturn.value = true;
 	}
 	try {
 		await reconcileMidFlightSignup();

@@ -40,6 +40,35 @@ export const PHASE_STATE = {
 };
 
 /**
+ * The row to show while a wait is genuinely UNDER WAY but nothing has reported
+ * back yet - the very first poll is still in flight, or (on the Connect step)
+ * the apply operation is running and the readiness wait has not started.
+ *
+ * This exists because the alternative was worse in exactly the way this module
+ * is supposed to prevent. Seeding the "last observation" as `answered: false`
+ * made the row render "We couldn't reach your workspace to check" on the first
+ * frame - announcing a FAILED check before any check had been attempted. That
+ * is a false claim about the system's own state, just inverted from the ones
+ * jarvis#708/#709 were about, and it is a lie the old fixed-sentence screen
+ * never told.
+ *
+ * `observed` is false: nothing has reported. But the STATE is active, not
+ * unknown, because "we are asking right now" is itself true and directly
+ * known - unlike "we asked and got nothing", which is what UNKNOWN means.
+ *
+ * @param {string} label - what is actually being done, in the caller's words.
+ */
+export function inFlightPhase(label) {
+	return {
+		observed: false,
+		state: PHASE_STATE.ACTIVE,
+		label,
+		detail: "",
+		stop: false,
+	};
+}
+
+/**
  * Post-payment provisioning wait.
  *
  * @param {{answered?: boolean, tenantStatus?: string}} [last] - what the most
@@ -97,8 +126,10 @@ export function provisioningPhase({ answered = false, tenantStatus = "" } = {}) 
  *
  * @param {{answered?: boolean, reason?: string, detail?: string}} [last]
  * @returns {{observed: boolean, state: string, label: string, detail: string,
- *   blocked: boolean}} `blocked` marks the state where the customer must be
- *   given no retry affordance at all.
+ *   stop: boolean, paged?: boolean, title?: string}} `stop` means waiting cannot
+ *   resolve this, so the loop must end rather than run to a ceiling whose copy
+ *   invites a retry that cannot help. `paged` distinguishes "support has already
+ *   been notified, do nothing" from "nobody was notified, you must act".
  */
 export function readinessPhase({ answered = false, reason = "", detail = "" } = {}) {
 	const say = String(detail || "").trim();
@@ -108,7 +139,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 			state: PHASE_STATE.UNKNOWN,
 			label: "We couldn't reach your workspace to check",
 			detail: "We'll keep trying.",
-			blocked: false,
+			stop: false,
 		};
 	}
 	switch (String(reason || "").trim()) {
@@ -119,7 +150,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				state: PHASE_STATE.ACTIVE,
 				label: "Applying your AI configuration",
 				detail: say,
-				blocked: false,
+				stop: false,
 			};
 		case "container_provisioning":
 			return {
@@ -127,7 +158,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				state: PHASE_STATE.ACTIVE,
 				label: "Your workspace is coming online",
 				detail: say,
-				blocked: false,
+				stop: false,
 			};
 		case "readiness_unconfirmed":
 			return {
@@ -135,7 +166,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				state: PHASE_STATE.UNKNOWN,
 				label: "Nothing has confirmed your workspace yet",
 				detail: "We'll keep checking.",
-				blocked: false,
+				stop: false,
 			};
 		case "authority_repair_required":
 			return {
@@ -145,7 +176,35 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				// Admin's own reassurance, quoted. Never paraphrased, and never
 				// accompanied by an action.
 				detail: say,
-				blocked: true,
+				stop: true,
+				paged: true,
+				title: "We're looking into your workspace",
+			};
+		// The two reasons that no amount of waiting can resolve. Both used to fall
+		// through to the default below and render as active progress, which is the
+		// same false claim this module exists to prevent - and jarvis/account.py is
+		// explicit about why the first one must stay distinct: "kept distinct so a
+		// suspended customer isn't told to wait for a container that won't come
+		// back". Neither is `paged`: nobody was notified, the customer has to act.
+		case "subscription_suspended":
+			return {
+				observed: true,
+				state: PHASE_STATE.UNKNOWN,
+				label: "Your subscription is paused",
+				detail: say,
+				stop: true,
+				paged: false,
+				title: "Your subscription is paused",
+			};
+		case "site_replaced":
+			return {
+				observed: true,
+				state: PHASE_STATE.UNKNOWN,
+				label: "Your account is connected to a different site",
+				detail: say,
+				stop: true,
+				paged: false,
+				title: "This site no longer has your workspace",
 			};
 		default:
 			// A reason this build does not know about gets the neutral line. It
@@ -155,7 +214,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				state: PHASE_STATE.ACTIVE,
 				label: "Waiting for your workspace to come online",
 				detail: say,
-				blocked: false,
+				stop: false,
 			};
 	}
 }

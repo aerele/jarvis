@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PHASE_STATE, provisioningPhase, readinessPhase, connectHeadline } from "./waitPhases.js";
+import {
+	PHASE_STATE,
+	provisioningPhase,
+	readinessPhase,
+	inFlightPhase,
+	connectHeadline,
+} from "./waitPhases.js";
 
 // ---- provisioning wait ---------------------------------------------------
 
@@ -58,7 +64,7 @@ test("readiness: an unanswered poll never claims a phase", () => {
 	const p = readinessPhase({ answered: false });
 	assert.equal(p.observed, false);
 	assert.equal(p.state, PHASE_STATE.UNKNOWN);
-	assert.equal(p.blocked, false);
+	assert.equal(p.stop, false);
 });
 
 test("readiness: pool and direct provisioning both name the apply phase", () => {
@@ -87,15 +93,61 @@ test("readiness: readiness_unconfirmed is the absence of a verdict, never an act
 	assert.doesNotMatch(p.label, /coming online|applying/i);
 });
 
-test("readiness: authority_repair_required is blocked and quotes admin verbatim", () => {
+test("readiness: authority_repair_required stops the wait, is paged, quotes admin verbatim", () => {
 	const detail = "Your payment is safe. Please don't pay again while we sort this out.";
 	const p = readinessPhase({ answered: true, reason: "authority_repair_required", detail });
-	assert.equal(p.blocked, true);
+	assert.equal(p.stop, true);
+	assert.equal(p.paged, true);
 	assert.equal(p.detail, detail);
 	assert.notEqual(p.state, PHASE_STATE.ACTIVE);
 });
 
-test("readiness: only authority_repair_required is ever blocked", () => {
+// jarvis/account.py keeps subscription_suspended distinct from
+// container_provisioning precisely "so a suspended customer isn't told to wait
+// for a container that won't come back". site_replaced can never be resolved by
+// waiting either - the account lives on another site now. Both used to fall
+// through to the default and render as active progress.
+test("readiness: reasons that waiting cannot fix never render as progress", () => {
+	for (const reason of ["subscription_suspended", "site_replaced"]) {
+		const p = readinessPhase({ answered: true, reason, detail: "why" });
+		assert.equal(p.stop, true, reason);
+		assert.notEqual(p.state, PHASE_STATE.ACTIVE, reason);
+		assert.doesNotMatch(p.label, /coming online|keep (waiting|checking)/i, reason);
+		// Nobody was paged for these: the CUSTOMER has to act.
+		assert.equal(p.paged, false, reason);
+		assert.ok(p.title, reason);
+	}
+});
+
+test("readiness: only a paged repair claims support was already notified", () => {
+	assert.equal(
+		readinessPhase({ answered: true, reason: "authority_repair_required" }).paged,
+		true
+	);
+	for (const reason of [
+		"subscription_suspended",
+		"site_replaced",
+		"container_provisioning",
+		"readiness_unconfirmed",
+		"unmapped",
+	]) {
+		assert.notEqual(readinessPhase({ answered: true, reason }).paged, true, reason);
+	}
+});
+
+// The row shown while a wait is genuinely running but nothing has reported yet.
+// Seeding "last observation" as answered:false instead made the screen announce
+// a FAILED check before one had been attempted.
+test("inFlight: names the act of checking, and claims no observation", () => {
+	const p = inFlightPhase("Checking on your workspace");
+	assert.equal(p.observed, false);
+	assert.equal(p.state, PHASE_STATE.ACTIVE);
+	assert.equal(p.label, "Checking on your workspace");
+	assert.equal(p.stop, false);
+	assert.doesNotMatch(p.label, /couldn't reach|could not reach/i);
+});
+
+test("readiness: a resolvable wait never stops itself", () => {
 	const reasons = [
 		"llm_pool_provisioning",
 		"llm_provisioning",
@@ -105,9 +157,9 @@ test("readiness: only authority_repair_required is ever blocked", () => {
 		"",
 	];
 	for (const reason of reasons) {
-		assert.equal(readinessPhase({ answered: true, reason }).blocked, false, reason);
+		assert.equal(readinessPhase({ answered: true, reason }).stop, false, reason);
 	}
-	assert.equal(readinessPhase({ answered: false }).blocked, false);
+	assert.equal(readinessPhase({ answered: false }).stop, false);
 });
 
 test("readiness: an unknown reason falls back and never echoes itself as a phase name", () => {
@@ -122,6 +174,8 @@ test("readiness: no branch ever claims setup is finishing on its own", () => {
 		"container_provisioning",
 		"readiness_unconfirmed",
 		"authority_repair_required",
+		"subscription_suspended",
+		"site_replaced",
 		"unmapped",
 	];
 	for (const reason of reasons) {

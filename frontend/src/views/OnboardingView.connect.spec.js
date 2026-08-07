@@ -834,3 +834,69 @@ describe("the payment-confirming wait", () => {
 		w.unmount();
 	});
 });
+
+describe("the phase row never claims a check it has not made", () => {
+	// The regression: readinessSeen was seeded {answered:false}, and the phase row
+	// renders during the whole apply operation - a window strictly larger than the
+	// readiness wait. So the first frame after a successful save announced "We
+	// couldn't reach your workspace to check", a FAILED check, before one had been
+	// attempted. That is the same false-claim class jarvis#708/#709 were about,
+	// only inverted, and the old fixed-sentence screen never told that lie.
+	it("shows the apply phase, not a failed check, before any readiness poll runs", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying" });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("working");
+		expect(w.vm.readinessStage.label).not.toMatch(/couldn't reach|could not reach/i);
+		expect(w.vm.readinessStage.observed).toBe(false);
+		expect(w.vm.readinessStage.state).toBe("active");
+		w.unmount();
+	});
+
+	it("a poll that genuinely answered nothing still reports the failed check", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockRejectedValue(new Error("network"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.readinessStage.label).toMatch(/couldn't reach/i);
+		expect(w.vm.readinessStage.state).toBe("unknown");
+		w.unmount();
+	});
+});
+
+describe("every connect terminal carries its own headline", () => {
+	// enterSaveRefusal was the one writer of connectPhase="retry" that never set
+	// connectTitle, so a rate-limited save rendered the generic "We couldn't
+	// confirm your setup" over a rate-limit body - or worse, a STALE headline left
+	// behind by an earlier attempt, since nothing ever clears it.
+	it("a rate-limited save gets a headline that matches its body", async () => {
+		const w = await mountConnect();
+
+		w.vm.enterSaveRefusal(30);
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.connectMessage).toMatch(/too many changes/i);
+		expect(w.vm.state.connectTitle).toBeTruthy();
+		expect(w.vm.state.connectTitle).not.toMatch(/couldn't confirm your setup/i);
+		w.unmount();
+	});
+
+	it("a rate limit after an earlier terminal does not inherit the stale headline", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: true });
+		const stale = w.vm.state.connectTitle;
+		expect(stale).toBeTruthy();
+
+		w.vm.enterSaveRefusal(30);
+		expect(w.vm.state.connectTitle).not.toBe(stale);
+		w.unmount();
+	});
+});

@@ -137,8 +137,11 @@ this is the mapping (use it when porting, never when writing new UI):
 > **Brand-asset exception:** the gradient/purple ban applies to chrome and controls, not to
 > brand-identity assets. The Jarvis mark, and the two sanctioned illustrations of a long
 > onboarding wait, may keep the brand gradient, provided they honor
-> `prefers-reduced-motion` with a calm static frame and read every colour from tokens, never
-> hard-coded rgba. The two, and they are a closed set:
+> `prefers-reduced-motion` with a calm static frame and read their colours from tokens rather
+> than hard-coded rgba. The one carve-out is the white foreground drawn *on* the brand fill
+> (the spark, the rupee glyph): white on the brand gradient is theme-invariant for the same
+> reason `ink-white` is, and there is no token for it. Everything else comes from a var. The
+> two illustrations, and they are a closed set:
 >
 > | Illustration | Renders during | Subject |
 > |---|---|---|

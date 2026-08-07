@@ -52,7 +52,7 @@
  * rail, and no halo. Same contract as SetupNeuralNet and JvSpinner.
  */
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
-import { BRAND_STAR_PATH } from "@/lib/brand";
+import { BRAND_STAR_PATH, alphaHex } from "@/lib/brand";
 
 const props = defineProps({
 	dark: { type: Boolean, default: false },
@@ -102,17 +102,6 @@ function readColors() {
 	C.brand1 = cs.getPropertyValue("--brand-1").trim() || "#6e8bff";
 	C.brand2 = cs.getPropertyValue("--brand-2").trim() || "#8b5cf6";
 	C.rail = cs.getPropertyValue("--border-2").trim() || "#dfdfe4";
-}
-
-/** Hex to rgba(). Kept local so the component never needs a colour library. */
-function alpha(hex, a) {
-	let h = String(hex || "")
-		.trim()
-		.replace("#", "");
-	if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
-	const n = parseInt(h, 16);
-	if (h.length !== 6 || Number.isNaN(n)) return `rgba(31,138,84,${a})`;
-	return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
 function clamp(x) {
@@ -203,10 +192,10 @@ function draw(ts) {
 	// --- the rail: one hairline through the mark, faded at both ends so it
 	//     reads as a track that emerges and dissolves rather than a cut line ---
 	const rg = ctx.createLinearGradient(core.x - railHalf, 0, core.x + railHalf, 0);
-	rg.addColorStop(0, alpha(C.rail, 0));
-	rg.addColorStop(0.28, alpha(C.rail, 0.9));
-	rg.addColorStop(0.72, alpha(C.rail, 0.9));
-	rg.addColorStop(1, alpha(C.rail, 0));
+	rg.addColorStop(0, alphaHex(C.rail, 0));
+	rg.addColorStop(0.28, alphaHex(C.rail, 0.9));
+	rg.addColorStop(0.72, alphaHex(C.rail, 0.9));
+	rg.addColorStop(1, alphaHex(C.rail, 0));
 	ctx.strokeStyle = rg;
 	ctx.lineWidth = 1;
 	ctx.beginPath();
@@ -243,8 +232,8 @@ function draw(ts) {
 		const breathe = 0.5 + 0.5 * Math.sin(el * 1.6);
 		const haloR = 30 + breathe * 7 + coreFlash * 15;
 		const hg = ctx.createRadialGradient(core.x, core.y, 8, core.x, core.y, haloR);
-		hg.addColorStop(0, alpha(C.brand2, 0.24 + coreFlash * 0.32));
-		hg.addColorStop(1, alpha(C.brand2, 0));
+		hg.addColorStop(0, alphaHex(C.brand2, 0.24 + coreFlash * 0.32));
+		hg.addColorStop(1, alphaHex(C.brand2, 0));
 		ctx.fillStyle = hg;
 		ctx.beginPath();
 		ctx.arc(core.x, core.y, haloR, 0, 6.283);

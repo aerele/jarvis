@@ -16,7 +16,7 @@
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
-import { BRAND_STAR_PATH } from "@/lib/brand";
+import { BRAND_STAR_PATH, alphaHex } from "@/lib/brand";
 
 const props = defineProps({
 	dark: { type: Boolean, default: false },
@@ -64,18 +64,6 @@ let pulses = [],
 	coreFlash = 0,
 	t0 = null,
 	raf = 0;
-
-/** Hex to rgba(), so the brand tokens can be used at partial opacity for the
- *  edges, node rings and halo without a second hard-coded copy of each colour. */
-function alpha(hex, a) {
-	let h = String(hex || "")
-		.trim()
-		.replace("#", "");
-	if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
-	const n = parseInt(h, 16);
-	if (h.length !== 6 || Number.isNaN(n)) return `rgba(110,139,255,${a})`;
-	return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
-}
 
 function readColors() {
 	const el = rootEl.value;
@@ -159,7 +147,7 @@ function draw(ts) {
 		const p = P[i],
 			ex = core.x + (p.x - core.x) * dp,
 			ey = core.y + (p.y - core.y) * dp;
-		ctx.strokeStyle = alpha(C.brand1, 0.16);
+		ctx.strokeStyle = alphaHex(C.brand1, 0.16);
 		ctx.beginPath();
 		ctx.moveTo(core.x, core.y);
 		ctx.lineTo(ex, ey);
@@ -167,7 +155,7 @@ function draw(ts) {
 	});
 	const ra = reduced ? 1 : clamp((el - 1.4) / 0.8);
 	if (ra > 0) {
-		ctx.strokeStyle = alpha(C.brand1, 0.1 * ra);
+		ctx.strokeStyle = alphaHex(C.brand1, 0.1 * ra);
 		for (let i = 0; i < nodes.length; i++) {
 			const a = P[i],
 				b = P[(i + 1) % nodes.length];
@@ -219,8 +207,8 @@ function draw(ts) {
 				continue;
 			}
 			const g = ctx.createRadialGradient(x, y, 0, x, y, 9);
-			g.addColorStop(0, alpha(C.brand2, 0.9));
-			g.addColorStop(1, alpha(C.brand2, 0));
+			g.addColorStop(0, alphaHex(C.brand2, 0.9));
+			g.addColorStop(1, alphaHex(C.brand2, 0));
 			ctx.fillStyle = g;
 			ctx.beginPath();
 			ctx.arc(x, y, 9, 0, 6.283);
@@ -246,11 +234,11 @@ function draw(ts) {
 		ctx.fillStyle = C.nodeFill;
 		ctx.fill();
 		ctx.lineWidth = 1.6;
-		ctx.strokeStyle = alpha(C.brand1, 0.55);
+		ctx.strokeStyle = alphaHex(C.brand1, 0.55);
 		ctx.stroke();
 		ctx.beginPath();
 		ctx.arc(p.x, p.y, 2.4, 0, 6.283);
-		ctx.fillStyle = alpha(C.brand1, 0.9);
+		ctx.fillStyle = alphaHex(C.brand1, 0.9);
 		ctx.fill();
 		// label radially outward
 		const lx = p.x + Math.cos(n.a) * 17,
@@ -268,8 +256,8 @@ function draw(ts) {
 	const breathe = reduced ? 0.5 : 0.5 + 0.5 * Math.sin(el * 1.6);
 	const haloR = 34 + breathe * 9 + coreFlash * 16;
 	const hg = ctx.createRadialGradient(core.x, core.y, 8, core.x, core.y, haloR);
-	hg.addColorStop(0, alpha(C.brand2, 0.28 + coreFlash * 0.35));
-	hg.addColorStop(1, alpha(C.brand2, 0));
+	hg.addColorStop(0, alphaHex(C.brand2, 0.28 + coreFlash * 0.35));
+	hg.addColorStop(1, alphaHex(C.brand2, 0));
 	ctx.fillStyle = hg;
 	ctx.beginPath();
 	ctx.arc(core.x, core.y, haloR, 0, 6.283);
@@ -363,8 +351,10 @@ onBeforeUnmount(() => {
 });
 
 // Theme toggle changes the CSS vars this component reads (label/node colors);
-// re-read them so labels stay legible. The edge/pulse/core colors are fixed
-// brand rgba values, unaffected by theme.
+// re-read them so labels stay legible. The edge/pulse/core colors now come from
+// the --brand-1/--brand-2 tokens rather than the rgba literals this file used to
+// carry; those tokens are theme-invariant by design, so re-reading them is a
+// no-op for those layers and only the label/node colours actually change.
 watch(
 	() => props.dark,
 	() => {
