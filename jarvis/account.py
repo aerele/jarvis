@@ -1090,7 +1090,8 @@ def _last_turn_errored() -> bool:
 	failed because a paired-device file was mid-rewrite, nothing to do with the
 	network. So this reads the FACT that a turn errored, which is reliable, and
 	makes no claim about why - "attention", never "down", and the card's copy
-	sends the reader to the logs rather than naming a cause.
+	sends the reader to the failed message itself, whose own inline error is the
+	only first-hand account, rather than naming a cause we cannot know.
 
 	Completed means not still streaming and not parked for snapshot recovery; a
 	recovering turn has not failed yet. Cancellation is excluded for free:

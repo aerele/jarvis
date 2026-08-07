@@ -365,36 +365,56 @@ const disconnected = computed(() => !!(connStatus.value && connStatus.value.disc
 // now derives health from the same evidence is_ready_for_chat gates chat on, so
 // a workspace chat let you into cannot show a failure here.
 const health = computed(() => (connStatus.value && connStatus.value.health) || "");
-const statusLabel = computed(() => {
-	if (!isSM) return "Connected";
-	if (!connStatus.value) return "—";
-	if (disconnected.value) return "Disconnected";
-	if (health.value === "down") return "Not connected";
-	if (health.value === "applying") return "Applying changes";
-	if (health.value === "attention") return "Needs attention";
-	return "Connected";
+// The badge's label, its colour and its hint line all answer the same question,
+// so they resolve it ONCE here. Three copies of this precedence drifted apart
+// easily: adding a health value or moving the disconnected check had to be got
+// right in three places, and a miss would render a colour that disagreed with
+// the line under it.
+const statusState = computed(() => {
+	if (!isSM) return "member";
+	if (!connStatus.value) return "unknown";
+	if (disconnected.value) return "disconnected";
+	return health.value || "ok";
 });
+const statusLabel = computed(
+	() =>
+		({
+			member: "Connected",
+			unknown: "—",
+			disconnected: "Disconnected",
+			down: "Not connected",
+			applying: "Applying changes",
+			attention: "Needs attention",
+		}[statusState.value] || "Connected")
+);
 // One line under the badge, for the two states where "what now" is not obvious.
-// "Connected" gets none: a healthy workspace needs no instructions. The attention
-// copy names the evidence (a turn failed) without naming a cause, since the same
-// wording has come from problems that were not the provider at all (#702).
-const statusHint = computed(() => {
-	if (!isSM || !connStatus.value || disconnected.value) return "";
-	if (health.value === "attention")
-		return "A recent chat message failed. Check the model's key and base URL in AI models.";
-	if (health.value === "down")
-		return "This workspace's model settings have not reached your assistant yet.";
-	return "";
-});
+// "Connected" gets none: a healthy workspace needs no instructions.
+//
+// It names NO cause on purpose. The badge turns red off the bare fact that a
+// turn errored, and turn_handler's #702 comment records that the agent's wording
+// does not identify why - "LLM request failed: network connection error." came
+// from a paired-device file mid-rewrite, nothing to do with the network or the
+// key. Telling an admin to check a key that is fine is the same wasted trip this
+// issue was filed about, so it points at the failed message, whose own inline
+// error is the only first-hand account of what went wrong.
+const statusHint = computed(
+	() =>
+		({
+			attention:
+				"A recent chat message failed. Open that chat to see the error it reported.",
+			down: "This workspace's model settings have not reached your assistant yet.",
+		}[statusState.value] || "")
+);
 // design.md §3.6 status map: Success is green, Attention required and Broken are
 // red, Processing is blue. Disconnected is orange (warning), not red: nothing is
 // broken, the customer chose this and can undo it in AI models.
 const statusTheme = computed(() => {
-	if (!isSM) return "green";
-	if (!connStatus.value) return "gray";
-	if (disconnected.value) return "orange";
-	if (health.value === "down" || health.value === "attention") return "red";
-	if (health.value === "applying") return "blue";
+	const s = statusState.value;
+	if (s === "member") return "green";
+	if (s === "unknown") return "gray";
+	if (s === "disconnected") return "orange";
+	if (s === "down" || s === "attention") return "red";
+	if (s === "applying") return "blue";
 	return "green";
 });
 
