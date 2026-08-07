@@ -70,10 +70,88 @@
 					<div
 						class="w-full overflow-hidden rounded-2xl border border-outline-gray-1 bg-surface-white shadow-2xl"
 					>
+						<!-- ===== Contact support: a real ticket, filed from here. Hoisted
+							 above every step (not just Pay, where it started) so ANY screen
+							 that offers the support action - the payment recovery/terminal/
+							 maintenance-hold cards, and now the Connect step's stuck-waiting
+							 card - reaches the SAME panel, and so it needs no portal: a
+							 teleported dialog would lose the jv-* palette vars this view
+							 binds on its own root. The action it replaces was a bare
+							 mailto:, which did nothing at all on a machine with no mail
+							 client. ===== -->
+						<section v-if="supportOpen" class="ob-screen">
+							<div class="ob-body">
+								<div class="ob-head">
+									<h1>Get help with this</h1>
+									<p v-if="!supportTicket">
+										Tell us what happened and we'll pick it up. We'll attach
+										the technical details of this screen automatically, so you
+										don't have to describe them.
+									</p>
+									<p v-else role="status">
+										Thanks. We have your request and we'll reply to
+										{{ payEmail }}.
+									</p>
+								</div>
+								<div v-if="!supportTicket" class="mx-auto w-full max-w-[560px]">
+									<FormControl
+										v-model="supportBody"
+										type="textarea"
+										variant="outline"
+										label="What happened?"
+										:rows="4"
+										placeholder="I tried to pay and..."
+									/>
+									<details class="mt-3 text-p-xs text-ink-gray-5">
+										<summary class="cursor-pointer">
+											Details we'll attach
+										</summary>
+										<pre
+											class="mt-1.5 whitespace-pre-wrap break-words rounded-md bg-surface-gray-2 p-2.5"
+											>{{ supportContext }}</pre
+										>
+									</details>
+									<!-- Filing failed. Never leave the customer with a dead
+										 button: show the address so there is always a way
+										 through. -->
+									<Banner
+										v-if="supportErr"
+										class="mt-3"
+										type="error"
+										:message="`We couldn't file that for you (${supportErr}). Please email ${SUPPORT_EMAIL} and include the details above.`"
+									/>
+								</div>
+								<div
+									v-else
+									class="mx-auto w-full max-w-[560px] text-center text-p-sm text-ink-gray-5"
+								>
+									Reference
+									<b class="font-medium text-ink-gray-9">{{ supportTicket }}</b
+									>. Please don't pay again while we look at it.
+								</div>
+							</div>
+							<div class="ob-foot">
+								<button class="ob-back" @click="closeSupport">
+									<FeatherIcon
+										name="chevron-left"
+										class="h-3.5 w-3.5 text-ink-gray-5"
+									/>Back
+								</button>
+								<Button
+									v-if="!supportTicket"
+									variant="solid"
+									:disabled="supportBusy || !supportBody.trim()"
+									:loading="supportBusy"
+									loading-text="Sending…"
+									label="Send to support"
+									@click="sendSupport"
+								/>
+							</div>
+						</section>
 						<!-- ===== Intro tour (fresh starts only; reconcile routes mid-flight
 							 signups straight to the right step, past the tour) ===== -->
 						<TourIntro
-							v-if="state.step === 'intro'"
+							v-else-if="state.step === 'intro'"
 							@finish="startWizard"
 							@skip="startWizard"
 						/>
@@ -461,92 +539,11 @@
 							 Sub-screens are driven by the machine state (pay.value), never by
 							 an HTTP status or an error message. ===== -->
 						<section v-else-if="state.step === 'pay'" class="ob-screen">
-							<!-- Contact support: a real ticket, filed from here. It sits at the
-								 HEAD of this v-if chain so every screen that offers the support
-								 action (recovery, terminal, maintenance hold) reaches the same
-								 panel, and so it needs no portal - a teleported dialog would lose
-								 the jv-* palette vars this view binds on its own root. The action
-								 it replaces was a bare mailto:, which did nothing at all on a
-								 machine with no mail client. -->
-							<template v-if="supportOpen">
-								<div class="ob-body">
-									<div class="ob-head">
-										<h1>Get help with this</h1>
-										<p v-if="!supportTicket">
-											Tell us what happened and we'll pick it up. We'll
-											attach the technical details of this screen
-											automatically, so you don't have to describe them.
-										</p>
-										<p v-else role="status">
-											Thanks. We have your request and we'll reply to
-											{{ payEmail }}.
-										</p>
-									</div>
-									<div
-										v-if="!supportTicket"
-										class="mx-auto w-full max-w-[560px]"
-									>
-										<FormControl
-											v-model="supportBody"
-											type="textarea"
-											variant="outline"
-											label="What happened?"
-											:rows="4"
-											placeholder="I tried to pay and..."
-										/>
-										<details class="mt-3 text-p-xs text-ink-gray-5">
-											<summary class="cursor-pointer">
-												Details we'll attach
-											</summary>
-											<pre
-												class="mt-1.5 whitespace-pre-wrap break-words rounded-md bg-surface-gray-2 p-2.5"
-												>{{ supportContext }}</pre
-											>
-										</details>
-										<!-- Filing failed. Never leave the customer with a dead
-											 button: show the address so there is always a way
-											 through. -->
-										<Banner
-											v-if="supportErr"
-											class="mt-3"
-											type="error"
-											:message="`We couldn't file that for you (${supportErr}). Please email ${SUPPORT_EMAIL} and include the details above.`"
-										/>
-									</div>
-									<div
-										v-else
-										class="mx-auto w-full max-w-[560px] text-center text-p-sm text-ink-gray-5"
-									>
-										Reference
-										<b class="font-medium text-ink-gray-9">{{
-											supportTicket
-										}}</b
-										>. Please don't pay again while we look at it.
-									</div>
-								</div>
-								<div class="ob-foot">
-									<button class="ob-back" @click="closeSupport">
-										<FeatherIcon
-											name="chevron-left"
-											class="h-3.5 w-3.5 text-ink-gray-5"
-										/>Back
-									</button>
-									<Button
-										v-if="!supportTicket"
-										variant="solid"
-										:disabled="supportBusy || !supportBody.trim()"
-										:loading="supportBusy"
-										loading-text="Sending…"
-										label="Send to support"
-										@click="sendSupport"
-									/>
-								</div>
-							</template>
 							<!-- Paid: the payment step is over. Receipt + workspace-setup
 								 projection, rendered separately (plan 02 §Paid/provisioning).
 								 Provisioning belongs to the readiness gate, so this shows status
 								 only and never a payment action. -->
-							<template v-else-if="showPaidFlash || showProvisioning">
+							<template v-if="showPaidFlash || showProvisioning">
 								<div class="ob-body">
 									<div class="ob-head">
 										<h1>
@@ -1206,6 +1203,21 @@
 													@click="retryConnect"
 												/>
 											</div>
+											<!-- jarvis#708: offered the moment a bounded readiness wait
+												 runs out with no Ready verdict - never after N retries,
+												 same as jarvis_admin_v2#259's checkout-shell poll ceiling.
+												 A real exit alongside Retry, not instead of it. -->
+											<p
+												v-if="state.connectSupportOffered"
+												class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+												role="status"
+											>
+												Still not resolved?
+												<button class="ob-link" @click="openSupport">
+													Contact support
+												</button>
+												- we'll take a look for you.
+											</p>
 										</div>
 									</template>
 								</div>
@@ -1317,6 +1329,7 @@ import {
 	operationStore,
 	OP_PHASE,
 } from "@/lib/llmOperation.js";
+import { readinessWaitExhaustedMessage } from "@/onboarding/readinessWait.js";
 import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
@@ -1441,11 +1454,18 @@ const state = reactive({
 	// finishSubtitle is the spinner's state-derived line. retryAfter counts down a
 	// per-operation rate-limit cooldown; connectBlockReason is the inline reason the
 	// gate refused (no probe / no account) when the form is still shown.
+	// connectSupportOffered (jarvis#708) is true once a bounded chat-readiness wait
+	// (waitForChatReadiness / followLegacyReadiness) has run out at least once THIS
+	// attempt with no Ready verdict - the same "hand off to a person at the existing
+	// poll ceiling" moment jarvis_admin_v2#259 uses for the checkout shell's own
+	// confirm poll. Reset only in saveConnect (a genuinely new attempt); a Retry that
+	// re-follows the SAME stuck operation must not silently withdraw the offer.
 	finishing: false,
 	finishSubtitle: "",
 	connectPhase: "",
 	connectMessage: "",
 	connectBlockReason: "",
+	connectSupportOffered: false,
 	retryAfter: 0,
 });
 
@@ -2371,7 +2391,20 @@ const supportErr = ref("");
 // What support needs to act without a round trip, and nothing a customer would be
 // alarmed to read: the coded state, the masked attempt reference the recovery card
 // already shows, and admin's own sentence. No token, no gateway id, no payload.
+//
+// Step-aware since the panel now serves both Pay (jarvis#708 hoisted it out of
+// that step) and Connect: a payment code means nothing on a stuck AI-connect
+// wait, and a connect phase means nothing on a stuck payment.
 const supportContext = computed(() => {
+	if (state.step === "connect") {
+		const rows = [
+			`Step: ${state.step}`,
+			`Connect phase: ${state.connectPhase || "none"}`,
+			`Operation: ${currentOpId.value || "none"}`,
+		];
+		if (state.connectMessage) rows.push(`Detail: ${state.connectMessage}`);
+		return rows.join("\n");
+	}
 	const rows = [
 		`Step: ${state.step}`,
 		`Payment state: ${pay.value.value || "unknown"}`,
@@ -2398,7 +2431,10 @@ async function sendSupport() {
 	supportBusy.value = true;
 	supportErr.value = "";
 	try {
-		const subject = `Onboarding payment help (${pay.value.code || "no code"})`;
+		const subject =
+			state.step === "connect"
+				? "Onboarding setup help"
+				: `Onboarding payment help (${pay.value.code || "no code"})`;
 		const body = `${supportBody.value.trim()}\n\n---\n${supportContext.value}`;
 		const d = (await supportCreateTicket(subject, body)) || {};
 		// The API answers {ok, data}; the ticket name is whatever data carries. Show
@@ -2805,6 +2841,10 @@ function onOpUpdate(ui) {
 		state.connectMessage =
 			(ui && ui.message) ||
 			"Your workspace assignment changed. Reload this page and try again.";
+		// A stale offer from an EARLIER readiness wait (jarvis#708) must not survive
+		// into this unrelated terminal - supersession means reload, not "still not
+		// resolved", and this phase already has its own recovery action.
+		state.connectSupportOffered = false;
 	} else {
 		// WORKING (pending / applying), and the descriptor seed.
 		state.connectPhase = "working";
@@ -2839,6 +2879,10 @@ function navigateToChat() {
 const CHAT_READY_ATTEMPTS = 40;
 const CHAT_READY_INTERVAL_MS = 3000;
 async function waitForChatReadiness() {
+	// What this run actually observed, so the exhaustion message below can say
+	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
+	let sawVerdict = false;
+	let lastDetail = "";
 	for (let i = 0; i < CHAT_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
 		// The memoized verdict is what the router guard will read moments from now, so
@@ -2850,6 +2894,10 @@ async function waitForChatReadiness() {
 		} catch (e) {
 			// A readiness call that throws is not a verdict. Keep waiting.
 		}
+		if (r) {
+			sawVerdict = true;
+			if (r.detail) lastDetail = r.detail;
+		}
 		if (r && r.ready) {
 			navigateToChat();
 			return;
@@ -2858,8 +2906,8 @@ async function waitForChatReadiness() {
 	}
 	state.finishing = true;
 	state.connectPhase = "retry";
-	state.connectMessage =
-		"Your AI is connected, but your workspace is taking longer than usual to come online. It's still finishing on its own, so you can keep waiting or retry.";
+	state.connectMessage = readinessWaitExhaustedMessage({ sawVerdict, detail: lastDetail });
+	state.connectSupportOffered = true;
 	state.retryAfter = 0;
 }
 
@@ -2925,6 +2973,9 @@ function enterSupport() {
 	// IdempotencyKeyConflict, or an old-admin descriptor-less response) would make
 	// every subsequent Retry re-submit the same conflicting key and dead-end again.
 	forgetIdem();
+	// This dead-end is unrelated to a chat-readiness wait (jarvis#708): don't let a
+	// stale offer from an earlier one show under a different failure's message.
+	state.connectSupportOffered = false;
 }
 
 // Follow a descriptor (or a bare op id on resume) to its terminal state. Supersession
@@ -3001,6 +3052,10 @@ async function followLegacyReadiness() {
 	state.finishing = true;
 	state.connectPhase = "working";
 	state.finishSubtitle = "Bringing your workspace online, taking you to chat…";
+	// What this run actually observed, so the exhaustion message below can say
+	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
+	let sawVerdict = false;
+	let lastDetail = "";
 	for (let i = 0; i < LEGACY_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
 		let r = null;
@@ -3008,6 +3063,10 @@ async function followLegacyReadiness() {
 			r = await isReadyForChat();
 		} catch (e) {
 			// transient: a readiness call that throws is not a verdict - keep polling
+		}
+		if (r) {
+			sawVerdict = true;
+			if (r.detail) lastDetail = r.detail;
 		}
 		if (r && r.ready) {
 			navigateToChat();
@@ -3017,8 +3076,8 @@ async function followLegacyReadiness() {
 	}
 	state.finishing = true;
 	state.connectPhase = "retry";
-	state.connectMessage =
-		"Setup is taking longer than usual. It's still finishing on its own — you can keep waiting or retry.";
+	state.connectMessage = readinessWaitExhaustedMessage({ sawVerdict, detail: lastDetail });
+	state.connectSupportOffered = true;
 	state.retryAfter = 0;
 }
 
@@ -3056,6 +3115,9 @@ async function saveConnect() {
 		return;
 	}
 	state.connectBlockReason = "";
+	// A genuinely fresh attempt: any earlier attempt's "we couldn't confirm this,
+	// get a person to look into it" offer was about THAT attempt, not this one.
+	state.connectSupportOffered = false;
 	savingConnect.value = true;
 	try {
 		let idem = recallIdem();

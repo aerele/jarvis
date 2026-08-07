@@ -133,6 +133,15 @@ const readyStatus = {
 	code: "LLM_READY",
 	retry_after_seconds: 0,
 };
+// READY, but admin says the workspace itself is not chat-ready yet (chat_readiness
+// === false) - the classifyOperation branch that starts waitForChatReadiness.
+const readyChatBlockedStatus = {
+	operation_id: "op1",
+	state: "ready",
+	code: "LLM_READY",
+	chat_readiness: false,
+	retry_after_seconds: 0,
+};
 const rejectedStatus = {
 	operation_id: "op1",
 	state: "failed",
@@ -469,5 +478,147 @@ describe("§10.4 mode:legacy fallback (no durable operation)", () => {
 		expect(api.isReadyForChat).toHaveBeenCalledTimes(30);
 		expect(routerReplace).not.toHaveBeenCalled();
 		expect(w.vm.state.connectPhase).toBe("retry");
+	});
+});
+
+// jarvis#708: the chat-readiness wait (waitForChatReadiness for the durable-operation
+// path, followLegacyReadiness for mode:"legacy") used to hit its bound and render
+// "It's still finishing on its own, so you can keep waiting or retry" unconditionally
+// - a claim about admin still working the problem that the wait loop cannot see is
+// true, observed false on a tenant admin could never advance. These pin the fix: the
+// message says only what was actually observed, and the SAME poll ceiling that used to
+// offer nothing but another blind wait now also hands off to a person (mirrors
+// jarvis_admin_v2#259's checkout-shell poll ceiling: support offered at the FIRST
+// exhaustion, not after N retries).
+describe("jarvis#708 chat-readiness wait exhaustion: honest copy + a real exit", () => {
+	it("waitForChatReadiness: quotes admin's own detail, offers support, never claims self-healing", async () => {
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "container_provisioning",
+			detail: "applying your LLM configuration",
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear(); // ignore the one mount-time readiness probe
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000); // CHAT_READY_ATTEMPTS * CHAT_READY_INTERVAL_MS
+		await flushPromises();
+
+		expect(api.isReadyForChat).toHaveBeenCalledTimes(40); // exactly CHAT_READY_ATTEMPTS
+		expect(routerReplace).not.toHaveBeenCalled();
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.connectMessage).toMatch(/applying your LLM configuration/);
+		expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+		w.unmount();
+	});
+
+	it("waitForChatReadiness: never hearing from admin says so, not 'still finishing'", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear();
+		api.isReadyForChat.mockRejectedValue(new Error("bench hiccup"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(api.isReadyForChat).toHaveBeenCalledTimes(40);
+		expect(w.vm.state.connectMessage).toMatch(/couldn't reach your workspace/i);
+		expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+		w.unmount();
+	});
+
+	it("followLegacyReadiness: quotes admin's own detail and offers support at the existing ceiling", async () => {
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({ apply_operation: null, resumable: false, mode: "legacy" }),
+		});
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "container_provisioning",
+			detail: "applying your LLM configuration",
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear(); // ignore the one mount-time readiness probe
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(30 * 2500); // LEGACY_READY_ATTEMPTS * LEGACY_READY_INTERVAL_MS
+		await p;
+
+		expect(api.isReadyForChat).toHaveBeenCalledTimes(30);
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.connectMessage).toMatch(/applying your LLM configuration/);
+		expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+	});
+
+	it("a fresh Start withdraws a previous attempt's support offer until this one exhausts too", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "signup" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+
+		// A genuinely new attempt: canStart still true, save parks pending (never
+		// terminal) so this test never has to reach a second exhaustion to prove the
+		// reset happened - saveConnect clears the flag synchronously, before its own
+		// first await.
+		api.getLlmApplyOperation.mockResolvedValue(pending);
+		w.vm.saveConnect();
+		await flushPromises();
+
+		expect(w.vm.state.connectSupportOffered).toBe(false);
+		w.unmount();
+	});
+
+	it("a SUPERSEDED terminal reached AFTER a prior exhaustion withdraws the stale offer", async () => {
+		// Retry re-follows the SAME operation (no fresh saveConnect), so the flag a
+		// prior readiness-wait exhaustion set is still sitting on state when a later
+		// poll of that operation comes back superseded - a different situation
+		// ("reload and retry") that must not inherit an unrelated stale offer.
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "signup" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+
+		w.vm.onOpUpdate({ phase: "superseded", message: "Your workspace assignment changed." });
+
+		expect(w.vm.state.connectPhase).toBe("superseded");
+		expect(w.vm.state.connectSupportOffered).toBe(false);
+		w.unmount();
+	});
+
+	it("the generic support dead-end reached AFTER a prior exhaustion withdraws the stale offer", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "signup" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+
+		w.vm.onTerminal(null); // onTerminal's own dead-end: no status at all
+
+		expect(w.vm.state.connectPhase).toBe("support");
+		expect(w.vm.state.connectSupportOffered).toBe(false);
+		w.unmount();
 	});
 });
