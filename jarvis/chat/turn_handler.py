@@ -969,6 +969,39 @@ def handle_chat_send(payload: dict) -> None:
 		# streamed to the UI by the time the failure surfaces.
 		gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 		patch_session_model, session_model_ref = _session_model_patch(conv)
+
+		# jarvis #712: an EXISTING session_key was minted under a device
+		# pairing that no longer exists (the bench re-paired since - a
+		# tenant re-provision, or the connect-level self-heal in
+		# agent_client.py silently repairing an earlier turn). jarvis.api's
+		# plugin-auth guard would 401 every tool call on that session
+		# forever with no recovery (it deliberately never self-heals -
+		# that guard is a leaked-session-key kill switch, see
+		# jarvis.chat.device.session_device_is_stale). Detecting it HERE,
+		# on the browser-authenticated turn-start path rather than the
+		# replayable plugin session key, is safe to auto-heal: treat it
+		# exactly like "no session yet" so the block below mints a fresh
+		# one under the CURRENT pairing. The old row is left alone and
+		# stays dead, so a genuinely leaked key is still cut off.
+		if conv.session_key:
+			from jarvis.chat.device import session_device_is_stale
+
+			# Same tolerance as the api.py guard: on a bench whose Jarvis
+			# Chat Session DocType hasn't picked up the chat_device_id
+			# column yet (pre-migrate state, mid-deploy), fall back to ""
+			# (== "not stale") instead of 500ing every chat turn.
+			try:
+				row_device = (
+					frappe.db.get_value(
+						"Jarvis Chat Session", {"session_key": conv.session_key}, "chat_device_id"
+					)
+					or ""
+				).strip()
+			except Exception:
+				row_device = ""
+			if session_device_is_stale(row_device, (settings.chat_device_id or "").strip()):
+				conv.session_key = ""
+
 		if not conv.session_key:
 			# First turn of this conversation pays session-create and is the
 			# most cold-start-prone (a dormant container takes ~10-25s to

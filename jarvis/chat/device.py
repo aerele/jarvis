@@ -269,6 +269,37 @@ def clear_credentials() -> None:
 	frappe.db.commit()
 
 
+def session_device_is_stale(row_device_id: str, current_device_id: str) -> bool:
+	"""True iff a chat session's snapshotted ``chat_device_id`` no longer
+	matches the bench's CURRENT pairing.
+
+	Shared by two call sites so they can never drift:
+	  - ``jarvis.api.call_tool`` (the security guard): rejects a plugin
+	    call over a stale session with 401, bounding a leaked-session-key
+	    replay to the window before the next re-pair. That guard must
+	    NEVER auto-heal itself here - doing so would let a leaked session
+	    key survive a re-pair, defeating the whole point of the check.
+	  - ``jarvis.chat.turn_handler.handle_chat_send`` (the recovery): at
+	    the START of a new turn, on the browser-authenticated path (not
+	    the plugin's replayable session key), a stale binding means the
+	    conversation's existing agent session was minted under a device
+	    pairing that no longer exists. Treating it like "no session yet"
+	    mints a FRESH one under the current pairing so the conversation
+	    keeps working without a customer support ticket. The old,
+	    stale-bound session row is left alone and stays dead - the
+	    security property above is untouched.
+
+	Both blank values pass through as "not stale" (pre-migration row /
+	pre-pairing bench), matching the historical backwards-compat rule in
+	``call_tool``.
+	"""
+	row = (row_device_id or "").strip()
+	current = (current_device_id or "").strip()
+	if not row or not current:
+		return False
+	return row != current
+
+
 def update_device_token(new_token: str, *, device_id: str) -> bool:
 	"""Persist a gateway-REISSUED device token for the current pairing.
 

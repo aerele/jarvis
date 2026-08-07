@@ -119,6 +119,67 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 		# the optional fields holds.
 		self.assertTrue(True)
 
+	def test_stale_device_binding_remints_the_session(self):
+		"""jarvis #712: a conversation's session_key was minted under a
+		device pairing that no longer exists (a tenant re-pair happened
+		after this conversation's first turn). Reusing it would leave
+		every tool call on this conversation 401ing forever (jarvis.api's
+		guard deliberately never self-heals). handle_chat_send must treat
+		it like "no session yet" and mint a fresh one under the CURRENT
+		pairing instead."""
+		SESSION = "Jarvis Chat Session"
+		old_key = frappe.db.get_value("Jarvis Conversation", self.conv, "session_key")
+		frappe.get_doc(
+			{
+				"doctype": SESSION,
+				"session_key": old_key,
+				"user": TEST_USER,
+				"chat_device_id": "old-device-before-repair",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+
+		settings = frappe.get_single("Jarvis Settings")
+		original_device_id = settings.chat_device_id
+		settings.db_set("chat_device_id", "new-device-after-repair")
+		frappe.db.commit()
+
+		fake_sess = MagicMock()
+		fake_sess.create_session.return_value = "agent:freshly-minted"
+		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[
+				{"kind": "lifecycle", "phase": "end"},
+				{"kind": "relay:final", "text": None},
+			]
+		)
+		try:
+			with patch(
+				"jarvis.chat.agent_session_pool.AgentSession.connect",
+				return_value=fake_sess,
+			):
+				with patch("jarvis.chat.worker.publish_to_user"):
+					turn_handler.handle_chat_send(
+						{
+							"conversation_id": self.conv,
+							"message_id": self.user_msg,
+							"run_id": "r-stale-repair",
+						}
+					)
+
+			fake_sess.create_session.assert_called_once()
+			new_key = frappe.db.get_value("Jarvis Conversation", self.conv, "session_key")
+			self.assertEqual(new_key, "agent:freshly-minted")
+			self.assertNotEqual(new_key, old_key)
+			new_row_device = frappe.db.get_value(SESSION, {"session_key": new_key}, "chat_device_id")
+			self.assertEqual(new_row_device, "new-device-after-repair")
+		finally:
+			settings.db_set("chat_device_id", original_device_id)
+			frappe.db.commit()
+			frappe.db.delete(SESSION, {"session_key": old_key})
+			frappe.db.delete(SESSION, {"session_key": "agent:freshly-minted"})
+			frappe.db.commit()
+
 
 class TestRunAgentTurnShimForwardsToHandleChatSend(FrappeTestCase):
 	"""The RQ entry point ``worker.run_agent_turn`` is now a thin shim

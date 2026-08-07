@@ -424,3 +424,32 @@ class TestSigning(FrappeTestCase):
 		)
 		# Trailing fields after the nonce: |<platform>|<device_family>
 		self.assertTrue(out.endswith("|darwinarm64|iphone15"))
+
+
+class TestSessionDeviceIsStale(FrappeTestCase):
+	"""jarvis #712: the single source of truth both jarvis.api.call_tool
+	(the security guard, must never auto-heal) and turn_handler.
+	handle_chat_send (the recovery, safe to auto-heal) read to decide
+	whether a session's snapshotted device binding is stale."""
+
+	def test_mismatched_ids_are_stale(self):
+		self.assertTrue(chat_device.session_device_is_stale("old-device", "new-device"))
+
+	def test_matching_ids_are_not_stale(self):
+		self.assertFalse(chat_device.session_device_is_stale("same-device", "same-device"))
+
+	def test_blank_row_device_is_backwards_compat_not_stale(self):
+		"""Pre-migration row (no chat_device_id column populated yet) must
+		keep dispatching - see the C2 backwards-compat note in api.py."""
+		self.assertFalse(chat_device.session_device_is_stale("", "current-device"))
+
+	def test_blank_current_device_is_not_stale(self):
+		"""A bench that has never paired has no current device to compare
+		against - never reject on that alone."""
+		self.assertFalse(chat_device.session_device_is_stale("old-device", ""))
+
+	def test_both_blank_is_not_stale(self):
+		self.assertFalse(chat_device.session_device_is_stale("", ""))
+
+	def test_whitespace_is_stripped_before_comparing(self):
+		self.assertFalse(chat_device.session_device_is_stale("  dev-1  ", "dev-1"))
