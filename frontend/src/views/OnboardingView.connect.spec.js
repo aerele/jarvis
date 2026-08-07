@@ -752,3 +752,85 @@ describe("staged readiness phases: the screen renders what the poll observed", (
 		w.unmount();
 	});
 });
+
+// The payment-confirming screen. This is the moment right after the customer
+// pays: they are sent back to the SPA and the bench asks the control plane
+// whether the payment landed. Before this it rendered the marketing intro tour,
+// because state.step is still the default "intro" until the mount reconcile
+// resolves, and the correction for that ran only AFTER the awaits.
+describe("the payment-confirming wait", () => {
+	function returnFromPayPage() {
+		window.history.replaceState(null, "", "/jarvis/onboarding?pay=done");
+	}
+
+	it("shows the confirming screen, not the intro tour, while the mount reconcile runs", async () => {
+		returnFromPayPage();
+		let release;
+		api.onboardingPaymentApi.getOnboardingState.mockImplementation(
+			() => new Promise((r) => (release = r))
+		);
+
+		const w = mount(OnboardingView);
+		await flushPromises();
+
+		// Mid-reconcile: the round trip has not answered yet.
+		expect(w.vm.showConfirming).toBe(true);
+		expect(w.vm.state.step).toBe("pay");
+
+		release({
+			status: 200,
+			body: {
+				message: {
+					ok: true,
+					contract_version: 2,
+					data: { code: "BENCH_NO_SIGNUP_CONTEXT" },
+					context: {},
+				},
+			},
+		});
+		await flushPromises();
+
+		// Resolved: the confirming screen hands over rather than sticking.
+		expect(w.vm.showConfirming).toBe(false);
+		w.unmount();
+	});
+
+	it("is not shown on an ordinary mount that did not come back from checkout", async () => {
+		window.history.replaceState(null, "", "/jarvis/onboarding");
+		const w = mount(OnboardingView);
+		await flushPromises();
+		expect(w.vm.showConfirming).toBe(false);
+		w.unmount();
+	});
+
+	// The regression this was written against: showConfirming was originally
+	// derived from busy === "checking", which ONLY the explicit "Check payment
+	// status" button sets. The post-checkout reconcile never sets it, so the
+	// screen never appeared on the path it exists for.
+	it("does not depend on the status-check busy flag", async () => {
+		returnFromPayPage();
+		let release;
+		api.onboardingPaymentApi.getOnboardingState.mockImplementation(
+			() => new Promise((r) => (release = r))
+		);
+		const w = mount(OnboardingView);
+		await flushPromises();
+
+		expect(w.vm.pay.busy).not.toBe("checking");
+		expect(w.vm.showConfirming).toBe(true);
+
+		release({
+			status: 200,
+			body: {
+				message: {
+					ok: true,
+					contract_version: 2,
+					data: { code: "BENCH_NO_SIGNUP_CONTEXT" },
+					context: {},
+				},
+			},
+		});
+		await flushPromises();
+		w.unmount();
+	});
+});

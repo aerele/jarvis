@@ -2449,20 +2449,34 @@ const initiating = computed(() => pay.value.busy === "initiating");
 // guard its siblings do; this is the half the customer can see.
 const verifying = computed(() => pay.value.busy === "verifying");
 // The payment-confirming window: the customer paid on the admin-hosted page,
-// came back, and the bench is now asking the control plane whether that payment
-// landed. The machine models it as UNKNOWN + checkRequired with a check in
-// flight - RETURNED_FROM_CHECKOUT deliberately parks on a checkable UNKNOWN
-// rather than assuming paid or dismissed. It is the one moment where money has
-// genuinely left the customer and no verdict exists yet, so it gets its own
-// screen instead of the recovery card's disabled "Checking..." button, which is
-// what a customer used to stare at immediately after paying.
-const showConfirming = computed(
-	() =>
-		!payBusyView.value &&
-		pay.value.value === S.UNKNOWN &&
-		!!pay.value.checkRequired &&
-		checking.value
-);
+// came back, and the bench is asking the control plane whether that payment
+// landed. It is the one moment where money has genuinely left them and no
+// verdict exists yet.
+//
+// Driven by an explicit view-owned flag rather than derived from the machine,
+// for two reasons that both bite:
+//
+//   - `busy === "checking"` belongs to the "Check payment status" BUTTON
+//     (beginAction("checking") in usePaymentFlow.checkStatus). The post-checkout
+//     reconcile - reconcileAfterFailure, and hydrate's frozen-checkout exit -
+//     never sets it, so keying this off it would have meant the screen
+//     essentially never appeared on the one path it exists for.
+//   - even if it did, plan 02 a11y is explicit that an explicit status check
+//     must NOT have its buttons replaced by a full-screen indefinite spinner;
+//     they are disabled in place on the recovery card instead. So this is the
+//     return reconcile only, never any status check.
+const confirmingReturn = ref(false);
+const showConfirming = computed(() => !payBusyView.value && confirmingReturn.value);
+
+/** Hold the confirming screen for the duration of a post-checkout reconcile. */
+async function whileConfirmingReturn(run) {
+	confirmingReturn.value = true;
+	try {
+		return await run();
+	} finally {
+		confirmingReturn.value = false;
+	}
+}
 const showRecovery = computed(
 	() =>
 		!payBusyView.value &&
@@ -3632,7 +3646,7 @@ function handleCheckoutReturn() {
 		return;
 	}
 	clearExternalCheckoutNav();
-	flow.returnFromCheckout();
+	whileConfirmingReturn(() => flow.returnFromCheckout());
 }
 function onCheckoutPageShow(e) {
 	// Only a bfcache restore needs handling here; a normal load re-mounts fresh
@@ -3688,7 +3702,24 @@ onMounted(async () => {
 	if (pay.value.value !== S.CHECKOUT_OPEN) {
 		clearExternalCheckoutNav();
 	}
-	await reconcileMidFlightSignup();
+	// Returning from the pay page, show the confirming screen from FIRST PAINT.
+	// reconcileMidFlightSignup() below is a real round trip (hydrate, then a
+	// readiness read), and until it lands `state.step` is still the default
+	// "intro" - so a customer who paid ten seconds ago was shown the marketing
+	// tour while we worked out what had happened to their money. The correction
+	// for that already existed further down, but it only ran AFTER the awaits, so
+	// it fixed where they ended up and not what they watched. Routing to "pay"
+	// here reaches the same landing (landingStep leaves a resumed "pay" alone,
+	// and the checkoutReturn guard below is now a no-op rather than a repair).
+	if (checkoutReturn) {
+		state.step = "pay";
+		confirmingReturn.value = true;
+	}
+	try {
+		await reconcileMidFlightSignup();
+	} finally {
+		confirmingReturn.value = false;
+	}
 	// Resume an apply that was in flight when the page was last closed/reloaded: follow
 	// the SAME operation rather than showing an editable form over a running one (P1-05).
 	await maybeResumeConnect();
