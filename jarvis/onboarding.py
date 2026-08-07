@@ -2169,9 +2169,15 @@ def resync_llm() -> dict:
 	cache = frappe.cache()
 	if cache.get_value(_RESYNC_COOLDOWN_KEY):
 		return {**get_llm_sync_status(), "outcome": "throttled", "leg": ""}
-	cache.set_value(_RESYNC_COOLDOWN_KEY, 1, expires_in_sec=_RESYNC_COOLDOWN_S)
 
+	# Armed only once a push is actually queued. Arming it first would let a call
+	# that queued NOTHING still lock the customer out for three minutes - the same
+	# "click it again and nothing happens" dead end this endpoint exists to remove.
+	# Fails open when redis is down (RedisWrapper swallows connection errors): that
+	# loses the throttle, never the retry, and admin's own rate limiter is the
+	# backstop that actually protects the rotate-ops budget.
 	leg = request_resync(settings)
+	cache.set_value(_RESYNC_COOLDOWN_KEY, 1, expires_in_sec=_RESYNC_COOLDOWN_S)
 	return {**get_llm_sync_status(), "outcome": "queued", "leg": leg}
 
 

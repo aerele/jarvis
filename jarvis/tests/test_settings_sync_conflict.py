@@ -278,15 +278,29 @@ class TestSettingsWriteSurvivesAConflict(_Base):
 		self.assertGreaterEqual(state["raised"], 2, "the write is replayed, not attempted once")
 		self.assertEqual(_status(), "pending: provisioning container", "the old value stands")
 
-	def test_a_request_re_raises_instead_of_ending_a_transaction_it_does_not_own(self):
-		"""The safety rule behind the replay. In a request or mid-save the caller's
-		transaction is not ours to end, and a 1020/1213 has already destroyed its
-		uncommitted work server-side. Rolling back and re-persisting only OUR field
-		would leave a half-written save that every caller up the stack reports as a
-		success, so the conflict propagates and frappe's own request rollback stays
-		authoritative."""
-		with _conflict_on("last_sync_status"), self.assertRaises(frappe.QueryDeadlockError):
-			_write_settings_fields(self._settings(), {"last_sync_status": "ok (request)"})
+	def test_a_request_reports_the_lost_race_without_ending_a_transaction_it_owns_not(self):
+		"""Half of the safety rule. A request's transaction belongs to the request,
+		so the replay is withheld - but the conflict is REPORTED, not raised. Raising
+		would put a transient race back in front of a customer, which is #713 itself,
+		and it would land hardest on _reconcile_pending_applying: the SPA polls it
+		every few seconds and its contract is that it never raises."""
+		with _conflict_on("last_sync_status"), patch.object(frappe.local.db, "rollback") as rb:
+			landed = _write_settings_fields(self._settings(), {"last_sync_status": "ok (request)"})
+		self.assertFalse(landed)
+		rb.assert_not_called()
+
+	def test_a_conflict_nested_in_a_save_is_raised_so_the_whole_save_fails(self):
+		"""The other half, and the reason the nesting question is asked separately
+		from the job question. on_update writes the pending status while the save
+		still holds uncommitted field writes of its own; swallowing a conflict there
+		would let the save be reported as a success with everything except
+		last_sync_status discarded."""
+		frappe.flags.currently_saving.append((SETTINGS, SETTINGS))
+		try:
+			with _conflict_on("last_sync_status"), self.assertRaises(frappe.QueryDeadlockError):
+				_write_settings_fields(self._settings(), {"last_sync_status": "ok (in save)"})
+		finally:
+			frappe.flags.currently_saving.remove((SETTINGS, SETTINGS))
 
 	def test_it_swallows_nothing_but_a_write_conflict(self):
 		"""A programmer error or a schema fault must not be absorbed into a
@@ -445,6 +459,18 @@ class TestResyncLlm(_Base):
 		self.assertEqual(second["outcome"], "throttled")
 		self.assertEqual(second["leg"], "")
 		self.assertEqual(len(enq.call_args_list), 1, "the second click must enqueue nothing")
+
+	def test_a_push_that_queued_nothing_does_not_arm_the_cooldown(self):
+		"""Arming before the push would turn one failed call into a three-minute
+		lockout - the dead end this endpoint exists to remove, self-inflicted."""
+		with patch(_READINESS, return_value=("Configuring", "")):
+			with patch("frappe.enqueue", side_effect=RuntimeError("queue down")):
+				with self.assertRaises(RuntimeError):
+					onboarding.resync_llm()
+			with patch("frappe.enqueue") as enq:
+				out = onboarding.resync_llm()
+		self.assertEqual(out["outcome"], "queued", "the retry must not be throttled by a failed push")
+		self.assertEqual(len(enq.call_args_list), 1)
 
 	def test_the_cooldown_never_blocks_the_probe_that_costs_nothing(self):
 		"""Throttling the Ready path would be the wrong trade: it neither pushes nor

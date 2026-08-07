@@ -178,20 +178,36 @@ def _is_write_conflict(e: BaseException) -> bool:
 def _owns_transaction() -> bool:
 	"""May this code END the current transaction (commit or roll back)?
 
-	True only in a context that STARTED one and has no caller with uncommitted work
-	riding on it: a background job (``frappe.local.job`` is set exclusively by
+	True only where this process started one and nothing upstream is depending on
+	it: a background job (``frappe.local.job`` is set exclusively by
 	``execute_job``) or a migrate patch, where committing between units is normal.
 
-	False inside a web request and inside a document save, and that distinction is
-	load-bearing rather than cosmetic. A request's transaction belongs to the
-	request: frappe commits it on success and rolls it back on any exception, which
-	is what makes a save all-or-nothing. Code that ends it halfway breaks that
-	contract, and the dangerous shape is not the rollback itself - a genuine 1020 or
-	1213 already destroyed the transaction server-side - but what comes after it. A
-	retry that then re-persists only ITS OWN field leaves the caller's save half
-	written while every caller up the stack carries on and reports success. Raising
-	instead keeps the failure whole and the request's rollback authoritative."""
+	False in a web request, whose transaction belongs to the request: frappe commits
+	it on success and rolls it back on any exception, and code that ends it halfway
+	takes that decision away. False from ``bench execute`` and the CLI too, which is
+	imprecise (they do own their transaction) but harmless: the only thing withheld
+	there is a retry, and every caller treats a skipped retry as a lost race it will
+	re-attempt."""
 	return bool(getattr(frappe.local, "job", None) or frappe.flags.in_migrate)
+
+
+def _inside_a_save() -> bool:
+	"""Is a ``Jarvis Settings`` ``.save()`` in flight further up this stack?
+
+	The precise question ``_owns_transaction`` cannot answer. ``frappe.flags.
+	currently_saving`` holds ``(doctype, name)`` from ``set_user_and_timestamp``
+	until the end of ``run_post_save_methods``, so it spans ``on_update`` - which is
+	exactly where ``_enqueue_pool_sync`` and ``_on_update_single_model_legacy``
+	write their pending status from.
+
+	It matters because that caller has uncommitted field writes of its own in this
+	transaction. A conflict there must be RE-RAISED so the whole save fails as one:
+	rolling back and re-persisting only ``last_sync_status`` would leave the rest of
+	the save discarded while every frame up the stack carries on and reports
+	success. That hazard is about NESTING, not about being in a job, so it is asked
+	separately - a job that ever calls ``settings.save()`` inherits the same
+	protection without anyone having to remember."""
+	return ("Jarvis Settings", "Jarvis Settings") in (frappe.flags.currently_saving or [])
 
 
 def _refresh_db_snapshot() -> None:
@@ -258,15 +274,19 @@ def _write_settings_fields(settings, fields: dict) -> bool:
 	regardless.)
 
 	AND THE REPLAY ONLY RUNS WHERE THE TRANSACTION IS OURS TO END
-	(``_owns_transaction``), which is the whole of the safety argument. In a request
-	or mid-save the conflict is RE-RAISED, exactly as it propagated before this
-	change, so the request's own rollback stays authoritative and an all-or-nothing
-	save stays all-or-nothing. Retrying there would be the genuinely dangerous
-	shape: a 1020 or 1213 has already destroyed the caller's uncommitted work
-	server-side, and quietly re-persisting our one field on a fresh transaction
-	would let a half-written save be reported as a success. #713 happened in a
-	background job, which owns its transaction outright, so the fix loses nothing by
-	scoping the replay to that.
+	(``_owns_transaction``). Elsewhere the conflict is reported, not replayed: a
+	1020 or 1213 has already destroyed the transaction server-side, so rolling back
+	and quietly re-persisting our one field would publish OUR write while the
+	caller's is gone. #713 happened in a background job, which owns its transaction
+	outright, so scoping the replay there costs the fix nothing.
+
+	Reported rather than RAISED, though, and the distinction is the point. Returning
+	False lets a poller or a Resync click carry on and say "still applying", which is
+	true and self-correcting; raising would put a transient race back in front of a
+	customer, which is the entire complaint in #713 and would hit hardest in
+	``_reconcile_pending_applying``, the highest-frequency caller of all. The one
+	place a raise IS correct is nested inside a save (``_inside_a_save``), where the
+	caller's other field writes have to fail with it.
 
 	ALWAYS ``update_modified=False``, which is a real trade-off and not an
 	oversight. Several of these writes previously took ``db_set``'s default and
@@ -288,8 +308,15 @@ def _write_settings_fields(settings, fields: dict) -> bool:
 			settings.update(dict(fields))
 			return True
 		except Exception as e:
-			if not _is_write_conflict(e) or not _owns_transaction():
+			# Three outcomes, and only the first is a raise. Nested in a save, the
+			# caller's uncommitted work makes the failure theirs to own. Otherwise the
+			# lost race is REPORTED, never raised - a poller or a Resync click has no
+			# business turning it into a customer-visible error, which was the whole
+			# of #713 - and the replay is added only where the transaction is ours.
+			if not _is_write_conflict(e) or _inside_a_save():
 				raise
+			if not _owns_transaction():
+				return False
 			last_error = e
 			if attempt < _SETTINGS_WRITE_ATTEMPTS - 1:
 				frappe.db.rollback()
