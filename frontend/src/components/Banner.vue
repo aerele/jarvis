@@ -1,21 +1,38 @@
 <!--
   Reusable inline banner (design.md §3.7 "Banners & notices"). Sits in a fixed
   slot on a screen (a form step, a blocked action) instead of loose colored
-  text. Icon tile + title/message body + an optional #action slot for a
+  text. Icon + title/message body + an optional #action slot for a
   Retry-style button. Wired into onboarding's error/notice surfaces (9 spots
   in OnboardingView.vue) and ChatView's billing/paused banners — the
   type/title/message props and the default/#action slots are a stable API
   that every call site depends on; only the internal styling below changed.
+
+  jarvis#725: the icon used to sit in a bordered size-6.5 (26px) chip next to
+  `items-start`. A single text-sm line is only ~15px tall, so the chip's own
+  centered icon landed well below the text's center - visibly top-heavy on
+  the common single-line case. Two fixes were possible: switch to
+  `items-center` (design.md's literal words), or shrink the icon box to the
+  text's own line-height so `items-start` already centers it. items-center
+  was rejected because it centers the icon against the WHOLE flex item - for
+  a title+message banner (two lines) or a long message that wraps, that
+  drifts the icon toward the block's middle instead of staying on the first
+  line (verified in a throwaway visual harness, not shipped: items-center
+  visibly slides the icon down to straddle both lines once a second line is
+  added). Bare `size-4` (16px, design.md's own icon-size spec, no chip) sits
+  so close to a text-sm line (~15px) that `items-start` alone reads as
+  centered, and - because the icon no longer grows with the content - it
+  stays pinned to line one no matter how many lines follow. This also
+  matches the "Test failed" reference the issue called out as already
+  correct (LlmPoolEditor's .jv-status: a bare icon, no chip).
 -->
 <template>
 	<div class="flex items-start gap-2.5 rounded-md p-2.5" :class="variant.fill">
-		<span
-			class="grid size-6.5 shrink-0 place-items-center rounded-lg border bg-surface-white"
-			:class="variant.border"
+		<FeatherIcon
+			:name="variant.icon"
+			class="size-4 shrink-0"
+			:class="variant.ink"
 			aria-hidden="true"
-		>
-			<FeatherIcon :name="variant.icon" class="size-3.5" :class="variant.ink" />
-		</span>
+		/>
 		<div class="min-w-0 flex-1">
 			<template v-if="title">
 				<div class="text-sm font-semibold" :class="variant.ink">{{ title }}</div>
@@ -61,25 +78,21 @@ const props = defineProps({
 const VARIANTS = {
 	error: {
 		fill: "bg-surface-red-2",
-		border: "border-outline-red-2",
 		ink: "text-ink-red-3",
 		icon: "alert-circle",
 	},
 	warning: {
 		fill: "bg-surface-amber-2",
-		border: "border-outline-amber-2",
 		ink: "text-ink-amber-3",
 		icon: "alert-triangle",
 	},
 	success: {
 		fill: "bg-surface-green-2",
-		border: "border-outline-green-2",
 		ink: "text-ink-green-3",
 		icon: "check-circle",
 	},
 	info: {
 		fill: "bg-surface-blue-2",
-		border: "border-outline-blue-1",
 		ink: "text-ink-blue-3",
 		icon: "info",
 	},

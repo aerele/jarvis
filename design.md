@@ -397,11 +397,19 @@ is theirs.)
 
 ### 3.7 Banners & notices
 
-- Inline alert (press `AlertBanner` shape): `flex items-center justify-between rounded-md p-2`
-  with typed fill — info `bg-surface-blue-2 text-ink-blue-3`, warning `bg-surface-amber-2
+- Inline alert (press `AlertBanner` shape, `Banner.vue`): `flex items-start gap-2.5 rounded-md
+  p-2.5` with typed fill: info `bg-surface-blue-2 text-ink-blue-3`, warning `bg-surface-amber-2
   text-ink-amber-3`, error `bg-surface-red-2 text-ink-red-3`, success green; icon
-  `lucide-info` / `lucide-alert-triangle` at `size-4`; copy `font-medium text-ink-gray-8`;
-  optional action button + ghost `lucide-x` dismiss.
+  `lucide-info` / `lucide-alert-triangle` at bare `size-4` (no chip, border, or background
+  around it; a wrapped icon box taller than one text line is what jarvis#725 was); copy
+  `font-medium text-ink-gray-8`; optional action button + ghost `lucide-x` dismiss.
+  **Alignment (jarvis#725): `items-start`, not `items-center`.** A bare `size-4` icon (16px)
+  sits close enough to a `text-sm` line (~15px) that `items-start` alone already reads as
+  centered on a single line. Because the icon's own height doesn't grow with the content, it
+  also stays pinned to the FIRST line no matter how many lines follow, which `items-center`
+  does not: on a title+message banner or a message that wraps, `items-center` centers the
+  icon against the whole block and visibly drifts it away from line one. Decide by rendering
+  both, not by picking the property that reads better in the one-line case.
 - Quiet informational note (Helpdesk): bordered box, not colored fill —
   `rounded-md p-2 ring-1 ring-outline-gray-modals` + `size-4` icon + `text-xs text-ink-gray-7`
   (`outline-gray-modals` matches `outline-gray-1` in light but diverges in dark).
