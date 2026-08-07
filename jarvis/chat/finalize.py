@@ -193,6 +193,27 @@ def _effect_rich_outputs(ctx: _Ctx) -> None:
 	turn_handler.persist_rich_outputs(am, ctx.conversation, ctx.owner, ctx.run_id, _turn_start_ms(ctx))
 
 
+def _effect_enrich_cards(ctx: _Ctx) -> None:
+	# Fill any id-only ``jarvis-cards`` in the final reply with the record's own
+	# schema fields (B), so a browse-cards block can never render as a bare id even
+	# when the agent emitted an empty ``fields`` array. Skipped on an errored/
+	# cancelled turn (a partial reply has no real cards). Idempotent + best-effort;
+	# the ``message:enriched`` publish after all effects refreshes the client with
+	# the filled content.
+	if ctx.errored:
+		return
+	am = ctx.turn.get("assistant_message")
+	if not am:
+		return
+	from jarvis.chat import cards_enrich
+
+	# Read as the turn's SENDER (chat_user), not the conversation owner: the whole turn
+	# pipeline scopes permission reads to the sender (prepare.py, _effect_wiki_nudge),
+	# and in a shared conversation the owner may see fields the sender must not.
+	read_as = ctx.payload.get("chat_user") or ctx.owner
+	cards_enrich.enrich_message(am, owner=read_as)
+
+
 def _effect_chat_asks(ctx: _Ctx) -> None:
 	# A final reply carrying a ```jarvis-ask fence surfaces on the Approval Board.
 	# Skipped for an errored/cancelled turn (a partial fence is not a real ask).
@@ -433,6 +454,7 @@ def _effect_telemetry(ctx: _Ctx) -> None:
 _RUNNERS = {
 	"terminal_publish": _effect_terminal_publish,
 	"rich_outputs": _effect_rich_outputs,
+	"enrich_cards": _effect_enrich_cards,
 	"chat_asks": _effect_chat_asks,
 	"macro_advance": _effect_macro_advance,
 	"auto_title": _effect_auto_title,
