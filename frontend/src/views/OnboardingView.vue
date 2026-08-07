@@ -553,18 +553,20 @@
 													: "Payment confirmed"
 											}}
 										</h1>
+										<!-- The lead states only what the machine reaching PAID
+											 establishes. What is happening to the workspace is left to
+											 the phase list below, which reports observations rather
+											 than asserting preparation is under way. -->
 										<p v-if="!provisioningDelayed" role="status">
 											{{
 												paySummaryTrial
-													? "Auto-pay authorized — nothing charged until your trial ends."
+													? "Auto-pay authorized, and nothing is charged until your trial ends."
 													: "Payment received."
 											}}
-											We're preparing your {{ agentName }} workspace. This
-											usually takes under a minute…
 										</p>
 										<p v-else role="status">
-											Your workspace is taking a little longer than usual to
-											come online. Your payment is complete — nothing more is
+											Your workspace is taking longer than usual to come
+											online. Your payment is complete and nothing more is
 											owed.
 										</p>
 										<!-- admin's OWN sentence when it recorded the payment but the
@@ -586,15 +588,77 @@
 											{{ setupRecheckNote }}
 										</p>
 									</div>
-									<!-- Deliberately NOT aria-hidden: JvSpinner is its own status
-										 region and, while provisioning runs, the only thing on screen
-										 saying the workspace is still being built. -->
+									<!-- Phase list. Row 1 is a settled fact. Row 2 renders ONLY what
+										 the last provisioning tick observed (waitPhases.js), so
+										 "Jarvis is getting ready for you" appears when admin itself
+										 answered, and an honest "we couldn't check" appears when it
+										 did not. Row 3 names a phase that has not started and says
+										 nothing further about it. -->
+									<ul v-if="!provisioningDelayed" class="ob-phases" role="list">
+										<li class="ob-phase ob-phase--done">
+											<span class="ob-phase-ico">
+												<FeatherIcon name="check" class="h-4 w-4" />
+											</span>
+											<span class="ob-phase-txt">
+												<span class="ob-phase-label"
+													>Payment confirmed</span
+												>
+											</span>
+										</li>
+										<li
+											class="ob-phase"
+											:class="`ob-phase--${provisioningStage.state}`"
+											role="status"
+										>
+											<span class="ob-phase-ico">
+												<JvSpinner
+													v-if="provisioningStage.state === 'active'"
+													:size="20"
+												/>
+												<FeatherIcon
+													v-else
+													name="alert-circle"
+													class="h-4 w-4"
+												/>
+											</span>
+											<span class="ob-phase-txt">
+												<span class="ob-phase-label">{{
+													provisioningStage.label
+												}}</span>
+												<span
+													v-if="provisioningStage.detail"
+													class="ob-phase-detail"
+													>{{ provisioningStage.detail }}</span
+												>
+											</span>
+										</li>
+										<li class="ob-phase ob-phase--waiting">
+											<span class="ob-phase-ico"
+												><i class="ob-phase-dot"></i
+											></span>
+											<span class="ob-phase-txt">
+												<span class="ob-phase-label"
+													>Connecting your AI</span
+												>
+											</span>
+										</li>
+									</ul>
+									<!-- The sanctioned provisioning illustration (design.md §2.2).
+										 min-height, never a percentage height - see SetupNeuralNet's
+										 own comment. Dropped at the delayed ceiling, where there is a
+										 decision to make and motion would compete with it. -->
 									<div
 										v-if="!provisioningDelayed"
-										class="mt-2.5 flex justify-center"
+										class="relative mt-2 min-h-[320px] flex-1"
 									>
-										<JvSpinner :size="72" />
+										<SetupNeuralNet :dark="dark" />
 									</div>
+									<p
+										v-if="!provisioningDelayed"
+										class="mx-auto max-w-[420px] text-center text-p-sm text-ink-gray-5"
+									>
+										Most workspaces are ready within a minute.
+									</p>
 								</div>
 								<div v-if="provisioningDelayed" class="ob-foot justify-end">
 									<Button
@@ -637,6 +701,35 @@
 										label="I've verified my email"
 										@click="onPayAction(A.VERIFY)"
 									/>
+								</div>
+							</template>
+							<!-- Confirming: the customer paid on the admin-hosted page and came
+								 back, and we are asking the control plane whether it landed. Money
+								 has left them and no verdict exists yet, so this is the one screen
+								 the payment illustration belongs on (design.md §2.2). It replaces
+								 the recovery card's disabled "Checking…" button, which is what a
+								 customer used to stare at in the seconds right after paying. -->
+							<template v-else-if="showConfirming">
+								<div class="ob-body">
+									<div class="ob-head">
+										<h1 role="status">Confirming your payment</h1>
+										<p>
+											You've paid. We're checking with our payment provider
+											that it came through.
+										</p>
+									</div>
+									<!-- min-height (not h-full): the canvas fills via absolute +
+										 inset-0 and percentage heights don't resolve against a
+										 min-height parent. Same constraint as SetupNeuralNet. -->
+									<div class="relative mt-2 min-h-[300px] flex-1">
+										<PaymentConfirmingArt :dark="dark" />
+									</div>
+									<p
+										class="mx-auto max-w-[420px] text-center text-p-sm text-ink-gray-5"
+									>
+										This usually takes a few seconds. Please don't close this
+										page or pay again.
+									</p>
 								</div>
 							</template>
 							<!-- In flight: starting signup, checkout open, or confirming.
@@ -1159,12 +1252,103 @@
 												}}
 											</p>
 										</div>
+										<!-- Phase list, driven by is_ready_for_chat's `reason` on the
+											 LAST poll (waitPhases.js). Before this the screen showed one
+											 fixed sentence for the whole two-minute wait, so a workspace
+											 being built and one that was stuck looked identical. -->
+										<ul class="ob-phases" role="list">
+											<li class="ob-phase ob-phase--done">
+												<span class="ob-phase-ico">
+													<FeatherIcon name="check" class="h-4 w-4" />
+												</span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label"
+														>AI connection saved</span
+													>
+												</span>
+											</li>
+											<li
+												class="ob-phase"
+												:class="`ob-phase--${readinessStage.state}`"
+												role="status"
+											>
+												<span class="ob-phase-ico">
+													<JvSpinner
+														v-if="readinessStage.state === 'active'"
+														:size="20"
+													/>
+													<FeatherIcon
+														v-else
+														name="alert-circle"
+														class="h-4 w-4"
+													/>
+												</span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label">{{
+														readinessStage.label
+													}}</span>
+													<span
+														v-if="readinessStage.detail"
+														class="ob-phase-detail"
+														>{{ readinessStage.detail }}</span
+													>
+												</span>
+											</li>
+											<li class="ob-phase ob-phase--waiting">
+												<span class="ob-phase-ico"
+													><i class="ob-phase-dot"></i
+												></span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label"
+														>Opening chat</span
+													>
+												</span>
+											</li>
+										</ul>
 										<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
 											 canvas fills via absolute+inset-0, and percentage heights
 											 don't resolve against a min-height parent - see its own
 											 comment. Don't change this to a fixed h-*. -->
-										<div class="relative mt-2 min-h-[380px] flex-1">
+										<div class="relative mt-2 min-h-[320px] flex-1">
 											<SetupNeuralNet :dark="dark" />
+										</div>
+									</template>
+									<!-- Admin found this workspace ambiguous and paged a human
+										 (authority_repair_required). readiness.js is explicit that the
+										 only safe thing this surface can do is show admin's own
+										 reassurance: no Retry, no Reconnect, and no illustration,
+										 because all three suggest something is in motion when what is
+										 actually happening is that a person has to look. -->
+									<template v-else-if="state.connectPhase === 'blocked'">
+										<div class="ob-head">
+											<h1>We're looking into your workspace</h1>
+											<p>
+												Something about your workspace needs a person to
+												check it, and our team has already been notified.
+											</p>
+										</div>
+										<div class="mx-auto mt-4 max-w-[560px]">
+											<Banner
+												v-if="state.connectMessage"
+												type="warning"
+												:message="state.connectMessage"
+											/>
+											<p
+												class="mt-4 text-center text-p-sm text-ink-gray-5"
+												role="status"
+											>
+												There's nothing for you to do here, and nothing
+												more to pay. We'll email you as soon as it's
+												sorted.
+											</p>
+											<p
+												class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+											>
+												Want to talk to someone now?
+												<button class="ob-link" @click="openSupport">
+													Contact support
+												</button>
+											</p>
 										</div>
 									</template>
 									<!-- A non-ready terminal (retry / superseded / support) or a
@@ -1173,11 +1357,15 @@
 										 answer (review P0-08). -->
 									<template v-else>
 										<div class="ob-head">
+											<!-- Derived (waitPhases.connectHeadline), not hard-coded.
+												 Every one of these terminals used to render under
+												 "Still finishing setup", which asserts the workspace IS
+												 still finishing - the exact claim the message directly
+												 below it refuses to make (jarvis#709). -->
 											<h1>
 												{{
-													state.connectPhase === "superseded"
-														? "Your workspace changed"
-														: "Still finishing setup"
+													state.connectTitle ||
+													"We couldn't confirm your setup"
 												}}
 											</h1>
 											<p>{{ state.connectMessage }}</p>
@@ -1300,6 +1488,7 @@ import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
+import PaymentConfirmingArt from "@/onboarding/PaymentConfirmingArt.vue";
 import cashfreeLogo from "@/assets/cashfree.png";
 import {
 	STEPS_MANAGED,
@@ -1330,6 +1519,12 @@ import {
 	OP_PHASE,
 } from "@/lib/llmOperation.js";
 import { readinessWaitExhaustedMessage } from "@/onboarding/readinessWait.js";
+import {
+	PHASE_STATE,
+	provisioningPhase,
+	readinessPhase,
+	connectHeadline,
+} from "@/onboarding/waitPhases.js";
 import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
@@ -1464,10 +1659,20 @@ const state = reactive({
 	finishSubtitle: "",
 	connectPhase: "",
 	connectMessage: "",
+	// The recovery panel's own heading. Derived from the same place as
+	// connectMessage rather than hard-coded in the template, where a single
+	// "Still finishing setup" sat above all of them and claimed progress the
+	// message underneath deliberately refuses to claim (jarvis#709).
+	connectTitle: "",
 	connectBlockReason: "",
 	connectSupportOffered: false,
 	retryAfter: 0,
 });
+
+// What the LAST readiness poll observed, projected into the setup screen's
+// phase. Seeded unanswered so the first frame of a wait claims no phase at all.
+const readinessSeen = ref({ answered: false, reason: "", detail: "" });
+const readinessStage = computed(() => readinessPhase(readinessSeen.value));
 
 // Plan 01 billing state. Namespaced by site identity + logged-in user so one
 // site's / user's transitional billing PII can never prefill another's on a
@@ -2183,21 +2388,32 @@ function relativeSince(ts) {
 // concurrent loop (the flow now refuses re-entry too - this is the visible half).
 const recheckingSetup = ref(false);
 const setupRecheckNote = ref("");
+// One tick's observation from the provisioning poll. Assigning a fresh object
+// (rather than mutating) is what makes the computed phase re-evaluate.
+function noteProvisioning(o) {
+	provisioningSeen.value = {
+		answered: !!(o && o.answered),
+		tenantStatus: (o && o.tenantStatus) || "",
+	};
+}
 async function recheckProvisioning() {
 	if (recheckingSetup.value) return;
 	recheckingSetup.value = true;
 	setupRecheckNote.value = "";
 	try {
-		const out = await flow.waitForProvisioning();
+		const out = await flow.waitForProvisioning({ onObservation: noteProvisioning });
 		if (out.status === "ready") {
 			state.step = "connect";
 			return;
 		}
 		// Do not discard the outcome: a silent 90 seconds followed by the same
-		// screen reads as a broken button.
+		// screen reads as a broken button. It reports what the re-check OBSERVED -
+		// it deliberately no longer says "still preparing your workspace", which
+		// asserted that preparation is ongoing when all the loop established is
+		// that nothing reported ready.
 		setupRecheckNote.value =
 			out.status === "delayed"
-				? "Still preparing your workspace. Your payment is complete — you can leave this page and come back."
+				? "We checked again and your workspace still isn't ready. Your payment is complete, and you can leave this page and come back."
 				: "";
 	} finally {
 		recheckingSetup.value = false;
@@ -2211,6 +2427,13 @@ const showProvisioning = computed(
 	() => pay.value.value === S.PROVISIONING || pay.value.value === S.PROVISIONING_DELAYED
 );
 const showPaidFlash = computed(() => pay.value.value === S.PAID);
+
+// What the LAST provisioning tick actually saw. Seeded unanswered so the first
+// frame of the wait claims nothing: the poll has not reported yet, and "Jarvis
+// is getting ready for you" must never be a default (see waitPhases.js).
+const provisioningSeen = ref({ answered: false, tenantStatus: "" });
+const provisioningStage = computed(() => provisioningPhase(provisioningSeen.value));
+
 // The FULL-SCREEN busy view is only for the phases where there is genuinely
 // nothing to press: starting the signup, the sheet being open, confirming.
 // A status check or a retry deliberately does NOT hide the recovery card -
@@ -2225,9 +2448,25 @@ const initiating = computed(() => pay.value.busy === "initiating");
 // triple-click stacked three gateway sheets. The flow holds the same in-flight
 // guard its siblings do; this is the half the customer can see.
 const verifying = computed(() => pay.value.busy === "verifying");
+// The payment-confirming window: the customer paid on the admin-hosted page,
+// came back, and the bench is now asking the control plane whether that payment
+// landed. The machine models it as UNKNOWN + checkRequired with a check in
+// flight - RETURNED_FROM_CHECKOUT deliberately parks on a checkable UNKNOWN
+// rather than assuming paid or dismissed. It is the one moment where money has
+// genuinely left the customer and no verdict exists yet, so it gets its own
+// screen instead of the recovery card's disabled "Checking..." button, which is
+// what a customer used to stare at immediately after paying.
+const showConfirming = computed(
+	() =>
+		!payBusyView.value &&
+		pay.value.value === S.UNKNOWN &&
+		!!pay.value.checkRequired &&
+		checking.value
+);
 const showRecovery = computed(
 	() =>
 		!payBusyView.value &&
+		!showConfirming.value &&
 		(pay.value.value === S.UNKNOWN ||
 			pay.value.value === S.FAILED_RETRYABLE ||
 			pay.value.value === S.FAILED_TERMINAL ||
@@ -2834,6 +3073,7 @@ function onOpUpdate(ui) {
 	} else if (phase === OP_PHASE.RETRY) {
 		state.connectPhase = "retry";
 		state.connectMessage = (ui && ui.message) || "We hit a snag applying your AI connection.";
+		state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: false });
 		state.retryAfter = (ui && ui.retryAfterSeconds) || 0;
 		startRetryCountdown();
 	} else if (phase === OP_PHASE.SUPERSEDED) {
@@ -2841,6 +3081,7 @@ function onOpUpdate(ui) {
 		state.connectMessage =
 			(ui && ui.message) ||
 			"Your workspace assignment changed. Reload this page and try again.";
+		state.connectTitle = connectHeadline("superseded");
 		// A stale offer from an EARLIER readiness wait (jarvis#708) must not survive
 		// into this unrelated terminal - supersession means reload, not "still not
 		// resolved", and this phase already has its own recovery action.
@@ -2876,6 +3117,27 @@ function navigateToChat() {
 // cheap, no mutation) and navigate the moment it turns true. Bounded, and on
 // expiry it lands on the SAME honest retry state every other non-ready terminal
 // gets - never a silent navigation into a chat that cannot answer.
+// One poll's observation from the readiness wait, projected into the phase the
+// setup screen renders. Same discipline as noteProvisioning: a poll that threw
+// reports answered:false and gets copy that claims nothing.
+function noteReadiness(o) {
+	const seen = {
+		answered: !!(o && o.answered),
+		reason: (o && o.reason) || "",
+		detail: (o && o.detail) || "",
+	};
+	readinessSeen.value = seen;
+	const stage = readinessPhase(seen);
+	// A blocked verdict (admin paged a human) is terminal for this wait: stop
+	// polling and hand the customer a screen with no retry, because retrying
+	// payment or reconnecting is exactly what must not happen here.
+	if (stage.blocked) {
+		state.connectPhase = "blocked";
+		state.connectMessage = stage.detail;
+		state.connectSupportOffered = true;
+	}
+}
+
 const CHAT_READY_ATTEMPTS = 40;
 const CHAT_READY_INTERVAL_MS = 3000;
 async function waitForChatReadiness() {
@@ -2883,8 +3145,15 @@ async function waitForChatReadiness() {
 	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
 	let sawVerdict = false;
 	let lastDetail = "";
+	// A new wait starts from "nothing observed yet", so a stale phase from an
+	// earlier attempt is never the first thing this one renders.
+	readinessSeen.value = { answered: false, reason: "", detail: "" };
 	for (let i = 0; i < CHAT_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
+		// A blocked verdict is terminal for this wait (admin paged a human): stop
+		// polling rather than counting down to a ceiling whose exhaustion copy
+		// would invite the retry this state must not offer.
+		if (state.connectPhase === "blocked") return;
 		// The memoized verdict is what the router guard will read moments from now, so
 		// it has to be dropped before each probe or this loop polls a cached answer.
 		forgetReady();
@@ -2902,11 +3171,23 @@ async function waitForChatReadiness() {
 			navigateToChat();
 			return;
 		}
+		// Render what THIS poll saw. Previously every one of these 40 answers was
+		// discarded except the last detail, so the screen showed one fixed
+		// sentence for two minutes and a customer could not tell a workspace
+		// being built from one that was stuck.
+		noteReadiness({ answered: !!r, reason: r && r.reason, detail: r && r.detail });
+		if (state.connectPhase === "blocked") return;
 		await _sleep(CHAT_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
 	state.connectPhase = "retry";
+	// jarvis#709: built from what this run OBSERVED, never from elapsed time.
+	// Unchanged.
 	state.connectMessage = readinessWaitExhaustedMessage({ sawVerdict, detail: lastDetail });
+	// The headline used to be a hard-coded "Still finishing setup" in the
+	// template, which asserted the very progress the message above refuses to
+	// claim. It is now derived from the same source.
+	state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: true });
 	state.connectSupportOffered = true;
 	state.retryAfter = 0;
 }
@@ -2922,6 +3203,8 @@ function onTerminal(status) {
 	if (status.timedOut) {
 		state.finishing = true;
 		state.connectPhase = "retry";
+		// A deadline is the absence of a completion, not a reported failure.
+		state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: true });
 		if (status.neverConfirmed) {
 			// jarvis#690: every poll for the whole deadline failed to reach admin -
 			// nothing was ever confirmed applying, so "still finishing on its own" is
@@ -2930,9 +3213,15 @@ function onTerminal(status) {
 			state.connectMessage =
 				"We couldn't reach your AI provider's setup service, so nothing has been confirmed. Please retry.";
 		} else {
-			// The deadline released us, not the job: it is still finishing server-side.
+			// The deadline released us, not the job. jarvis#709 removed the phrase
+			// "it's still finishing on its own" from the readiness wait because it
+			// asserted continuing progress nothing had observed; this branch is the
+			// last place it survived. It is better grounded here (polls DID confirm
+			// the operation in flight before the deadline elapsed) but it is still a
+			// present-tense claim made from a past observation, so it is anchored to
+			// when that observation happened instead of projected forward.
 			state.connectMessage =
-				"Setup is taking longer than usual. It's still finishing on its own, so you can keep waiting or retry.";
+				"Setup was still running when we last checked, and it's taking longer than usual. You can keep waiting and retry.";
 		}
 		state.retryAfter = 0;
 		return;
@@ -2968,6 +3257,7 @@ function enterSupport() {
 	state.connectPhase = "support";
 	state.connectMessage =
 		"We couldn't finish setting up your AI connection. Please try again in a moment.";
+	state.connectTitle = connectHeadline("support");
 	// A support dead-end is terminal for THIS attempt (F1/F8): drop the idempotency
 	// key so the next Start mints a fresh one. Otherwise a poisoned key (e.g. a 409
 	// IdempotencyKeyConflict, or an old-admin descriptor-less response) would make
@@ -3056,8 +3346,10 @@ async function followLegacyReadiness() {
 	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
 	let sawVerdict = false;
 	let lastDetail = "";
+	readinessSeen.value = { answered: false, reason: "", detail: "" };
 	for (let i = 0; i < LEGACY_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
+		if (state.connectPhase === "blocked") return;
 		let r = null;
 		try {
 			r = await isReadyForChat();
@@ -3072,11 +3364,16 @@ async function followLegacyReadiness() {
 			navigateToChat();
 			return;
 		}
+		// Same per-poll phase projection as waitForChatReadiness: this wait is just
+		// as long and was just as silent.
+		noteReadiness({ answered: !!r, reason: r && r.reason, detail: r && r.detail });
+		if (state.connectPhase === "blocked") return;
 		if (i < LEGACY_READY_ATTEMPTS - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
 	state.connectPhase = "retry";
 	state.connectMessage = readinessWaitExhaustedMessage({ sawVerdict, detail: lastDetail });
+	state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: true });
 	state.connectSupportOffered = true;
 	state.retryAfter = 0;
 }
@@ -3230,7 +3527,10 @@ watch(
 	async (v) => {
 		if (v === PAY_STATES.PAID && !provisioningRun) {
 			provisioningRun = true;
-			const out = await flow.waitForProvisioning();
+			// A fresh wait starts from "nothing observed yet", so a stale phase from
+			// an earlier run can never be the first thing this one shows.
+			provisioningSeen.value = { answered: false, tenantStatus: "" };
+			const out = await flow.waitForProvisioning({ onObservation: noteProvisioning });
 			if (out.status === "ready") {
 				state.step = "connect";
 			}
@@ -3496,9 +3796,13 @@ onUnmounted(() => {
 	letter-spacing: 6px;
 	font-weight: 500;
 }
+/* `--accent` is defined in NEITHER palette, so both of these fell through to a
+   raw blue that exists nowhere in the token set - and design.md §2.6 asks for a
+   neutral ring, not a coloured glow. Focus is the near-black CTA edge plus a
+   soft neutral ring, which is what every other focusable control here does. */
 .ob-code:focus {
-	border-color: var(--accent, #2563eb);
-	box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+	border-color: var(--cta);
+	box-shadow: 0 0 0 3px var(--surface-2);
 }
 .ob-code-note {
 	margin: 14px 0 0;
@@ -3508,15 +3812,26 @@ onUnmounted(() => {
 	line-height: 1.55;
 	color: var(--text-2);
 }
+/* ONE definition. There were two: this rule and a second, later block that
+   repainted it 12.5px --text-3 gray. The later one won, so every inline link on
+   these steps - including the "Contact support" handoff jarvis#709 added at the
+   readiness ceiling, and the provider "Retry" - rendered as small gray text that
+   did not look clickable. design.md §1.1 reserves --link for links and §3.1 says
+   links look like links; the old `--accent` fallback was also an undefined var
+   resolving to a raw blue outside the token set. */
 .ob-link {
-	color: var(--accent, #2563eb);
 	font: inherit;
+	font-family: inherit;
+	color: var(--link);
 	background: none;
 	border: 0;
 	padding: 0;
 	cursor: pointer;
 	text-decoration: underline;
 	text-underline-offset: 2px;
+}
+.ob-link:hover {
+	text-decoration-thickness: 2px;
 }
 .ob-head h1 {
 	font-size: 20px; /* text-2xl, 0.1.278 */
@@ -3568,21 +3883,84 @@ onUnmounted(() => {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
-/* quiet inline links on a step footer — links look like links */
-.ob-link {
-	font-size: 12.5px;
-	color: var(--text-3);
-	background: none;
-	border: none;
-	cursor: pointer;
-	font-family: inherit;
-	text-decoration: underline;
-	text-underline-offset: 3px;
-	padding: 4px 2px;
+/* ---- staged wait phases (waitPhases.js) --------------------------------
+   One row per phase. The row's MODIFIER is the honesty contract, not
+   decoration: `active` is only ever set from an observation, `unknown` means a
+   poll answered with nothing (or with the absence of a verdict) and must never
+   look like progress, and `waiting` says nothing at all about a phase that has
+   not started. Colour carries no status here beyond the completed check - the
+   words do that. */
+.ob-phases {
+	list-style: none;
+	margin: 0 auto;
+	padding: 0;
+	max-width: 420px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
 }
-.ob-link:hover {
+.ob-phase {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 7px 8px;
+	border-radius: 8px;
+}
+.ob-phase-ico {
+	width: 20px;
+	height: 20px;
+	flex: none;
+	display: grid;
+	place-items: center;
+}
+.ob-phase-txt {
+	min-width: 0;
+}
+.ob-phase-label {
+	display: block;
+	font-size: 13px;
+	line-height: 1.5;
+}
+.ob-phase-detail {
+	display: block;
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--text-3);
+	margin-top: 2px;
+}
+.ob-phase--done .ob-phase-label {
 	color: var(--text-2);
 }
+.ob-phase--done .ob-phase-ico {
+	color: var(--green);
+}
+.ob-phase--active,
+.ob-phase--unknown {
+	background: var(--surface-1);
+}
+.ob-phase--active .ob-phase-label,
+.ob-phase--unknown .ob-phase-label {
+	color: var(--text);
+	font-weight: 500;
+}
+.ob-phase--active .ob-phase-ico {
+	color: var(--text-2);
+}
+.ob-phase--unknown .ob-phase-ico {
+	color: var(--text-3);
+}
+.ob-phase--waiting .ob-phase-label {
+	color: var(--text-3);
+}
+.ob-phase-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--surface-3);
+	border: 1px solid var(--border-2);
+	display: block;
+}
+
 .ob-note {
 	font-size: 12.5px;
 	color: var(--text-3);

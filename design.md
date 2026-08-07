@@ -135,9 +135,36 @@ this is the mapping (use it when porting, never when writing new UI):
 | brand purple `#8b5cf6`, gradients, glow rgba | **no equivalent — delete from chrome and controls on rewrite** | untokenized; violates §1.1–1.3 |
 
 > **Brand-asset exception:** the gradient/purple ban applies to chrome and controls, not to
-> brand-identity assets. The Jarvis mark, and a single sanctioned "processing" illustration
-> during a long provisioning wait (SetupNeuralNet), may keep the brand gradient — provided
-> they honor `prefers-reduced-motion` and read their colors from tokens, not hard-coded rgba.
+> brand-identity assets. The Jarvis mark, and the two sanctioned illustrations of a long
+> onboarding wait, may keep the brand gradient, provided they honor
+> `prefers-reduced-motion` with a calm static frame and read every colour from tokens, never
+> hard-coded rgba. The two, and they are a closed set:
+>
+> | Illustration | Renders during | Subject |
+> |---|---|---|
+> | `SetupNeuralNet` | the long provisioning/readiness wait | ERP modules connecting to the mark |
+> | `PaymentConfirmingArt` | the payment-confirming wait only | coins and notes arriving at the mark |
+>
+> Rules that come with the second one (product owner authorized it on 2026-08-07, overruling
+> the previous single-illustration wording):
+>
+> - **One illustration per screen, never both at once.** They mean different things: value
+>   arriving versus a workspace being assembled. A screen that showed both would be claiming
+>   both, and a screen that used the wrong one would be claiming the wrong thing.
+> - **Neither is a spinner.** §3.8 still stands: `JvSpinner` is the only loading indicator, and
+>   short waits (a sub-second navigation, a button's own `:loading`) get it, not an
+>   illustration. These two are for waits measured in tens of seconds.
+> - **The money tones are `--money-coin` and `--money-note`, not the semantic ramps.** Green
+>   (`--green`) means success and amber (`--amber`) means warning. The confirming screen renders
+>   while the payment is *unconfirmed*, so it must not be painted in either, and gold leads so
+>   the screen never reads as a green "paid" tick before that is true. Status is carried by the
+>   copy. These two tokens are for this illustration and nothing else: never text, badges,
+>   banners or controls.
+> - **No emoji, here least of all.** §3.9 holds: emoji are platform-drawn, cannot take a token
+>   colour, and do not theme, so they can satisfy none of the conditions above. Money is drawn
+>   as vectors.
+>
+> Adding a third illustration is a change to this table, not a judgement call at the call site.
 
 Coexistence rules: `theme.js#applyTheme()` already stamps `data-theme` on `<html>`, so
 Tailwind semantic tokens work everywhere, including inside legacy subtrees. The reverse is not

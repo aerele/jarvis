@@ -17,6 +17,22 @@
 	--brand-1: #6e8bff;
 	--brand-2: #8b5cf6;
 	--brand-grad: linear-gradient(135deg, var(--brand-1), var(--brand-2));
+
+	/* Money tones, for the payment-confirming illustration ONLY
+	   (PaymentConfirmingArt.vue). Deliberately NOT the semantic ramps:
+
+	   --green (#16a34a) means success/paid and --amber (#d97706) means
+	   warning. The confirming screen renders while the payment is still
+	   UNCONFIRMED, so painting it in either ramp would state an outcome the
+	   screen exists to say we do not have yet. These are duller and warmer
+	   than both, read as coin metal and banknote at a glance, and carry no
+	   status meaning anywhere else in the product.
+
+	   Theme-invariant for the same reason as the brand tokens above: this is
+	   an illustration, not chrome, and it must not restate itself per theme.
+	   Never use them for text, badges, banners or any control. */
+	--money-coin: #c9922b;
+	--money-note: #5a9e73;
 }
 
 /* Native form controls (select dropdowns, date/time pickers, scrollbars)

@@ -34,6 +34,22 @@ test("a whitespace-only detail is treated as no detail", () => {
 	assert.match(msg, /haven't been able to confirm/i);
 });
 
+test("an unpunctuated detail is closed so it does not run into the next sentence", () => {
+	const msg = readinessWaitExhaustedMessage({
+		sawVerdict: true,
+		detail: "applying your LLM configuration",
+	});
+	assert.match(msg, /applying your LLM configuration\. We haven't/);
+});
+
+test("a detail that already ends in punctuation is not double-punctuated", () => {
+	for (const d of ["it is applying.", "are you there?", "stop!"]) {
+		const msg = readinessWaitExhaustedMessage({ sawVerdict: true, detail: d });
+		assert.match(msg, new RegExp(`${d.slice(-1).replace(/[.?!]/, "\\$&")} We haven't`));
+		assert.doesNotMatch(msg, /[.!?]\. We haven't/);
+	}
+});
+
 test("never asserts anything is still finishing on its own, in any branch", () => {
 	const cases = [
 		{ sawVerdict: false, detail: "" },

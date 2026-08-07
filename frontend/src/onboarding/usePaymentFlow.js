@@ -558,18 +558,36 @@ export function createPaymentFlow(deps) {
 	}
 
 	// ---- provisioning: the old proceedAfterPay loop, fenced ----------------
-	async function waitForProvisioning() {
+	/**
+	 * @param {{onObservation?: (o: {answered: boolean, tenantStatus: string}) => void}} [opts]
+	 *   `onObservation` is called once per tick with what that tick actually saw,
+	 *   so the page can render the phase instead of one fixed sentence for the
+	 *   whole 90 seconds. Deliberately a callback rather than a machine event:
+	 *   these are observations, not transitions, and pushing them through apply()
+	 *   would either need new states or trip the strict reducer's
+	 *   illegal-transition telemetry. The poll's own control flow does not read
+	 *   it, so a throwing observer can never break the wait.
+	 */
+	async function waitForProvisioning(opts) {
 		if (provisioningInFlight) return { status: "already_running" };
 		provisioningInFlight = true;
 		try {
-			return await runProvisioningPoll();
+			return await runProvisioningPoll(opts);
 		} finally {
 			provisioningInFlight = false;
 		}
 	}
 
-	async function runProvisioningPoll() {
+	async function runProvisioningPoll({ onObservation } = {}) {
 		const my = token;
+		const observe = (answered, tenantStatus) => {
+			if (typeof onObservation !== "function") return;
+			try {
+				onObservation({ answered, tenantStatus: tenantStatus || "" });
+			} catch (e) {
+				// Rendering must never be able to break the provisioning wait.
+			}
+		};
 		// The transition into provisioning is legal only from paid - the readiness
 		// gate owns this surface, and `unknown -> provisioning` is the illegal move
 		// plan 02 names.
@@ -585,6 +603,7 @@ export function createPaymentFlow(deps) {
 				r = null;
 			}
 			if (my !== token) return { status: "superseded" };
+			observe(!!r, r && r.tenant_status);
 			if (r && (r.synced || r.tenant_status === "running")) {
 				return { status: "ready" };
 			}

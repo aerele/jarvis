@@ -68,6 +68,8 @@ vi.mock("@/lib/errorReporter", () => ({ report: vi.fn() }));
 
 // Heavy / canvas children the connect step would otherwise mount.
 vi.mock("@/onboarding/SetupNeuralNet.vue", () => ({ default: { template: "<div/>" } }));
+// Canvas illustration: jsdom has no 2d context, and neither spec is about the art.
+vi.mock("@/onboarding/PaymentConfirmingArt.vue", () => ({ default: { template: "<div/>" } }));
 vi.mock("@/onboarding/TourIntro.vue", () => ({ default: { template: "<div/>" } }));
 
 // The editor is stubbed: it exposes exactly the seam the host reads (save/canStart/
@@ -313,16 +315,42 @@ describe("§10.4 resume, resumable, terminal semantics", () => {
 	});
 
 	// The sibling of the case above: at least ONE live poll response came back
-	// (admin genuinely is converging it) before the connection dropped for good.
-	// That IS honestly "still finishing on its own", and must keep saying so.
-	it("keeps the 'still finishing' message when at least one poll confirmed real progress", async () => {
+	// (admin genuinely was converging it) before the deadline elapsed. That is a
+	// real observation and the copy still reports it - but it reports it as
+	// something SEEN, anchored to when it was seen, rather than as a promise that
+	// the job is still running now. jarvis#709 removed "it's still finishing on
+	// its own" from the readiness wait for asserting exactly that; this branch was
+	// the last place the phrase survived, and it made the same unverifiable claim
+	// from a past observation.
+	it("reports observed progress in the past tense, never as a self-healing promise", async () => {
 		const w = await mountConnect();
 
 		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
 
 		expect(routerReplace).not.toHaveBeenCalled();
 		expect(w.vm.state.connectPhase).toBe("retry");
-		expect(w.vm.state.connectMessage).toMatch(/still finishing on its own/i);
+		// It still distinguishes this case from the never-confirmed one above.
+		expect(w.vm.state.connectMessage).toMatch(/was still running when we last checked/i);
+		expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+		w.unmount();
+	});
+
+	// The phrase jarvis#709 deleted must not survive anywhere on this screen,
+	// headline included - a short heading asserting progress is the same claim as
+	// a sentence asserting it.
+	it("no connect terminal renders 'still finishing' in its message or its headline", async () => {
+		const w = await mountConnect();
+
+		const terminals = [
+			() => w.vm.onTerminal({ timedOut: true, neverConfirmed: true }),
+			() => w.vm.onTerminal({ timedOut: true, neverConfirmed: false }),
+		];
+		for (const drive of terminals) {
+			drive();
+			expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+			expect(w.vm.state.connectTitle).not.toMatch(/still finishing setup/i);
+			expect(w.vm.state.connectTitle).toBeTruthy();
+		}
 		w.unmount();
 	});
 
@@ -619,6 +647,108 @@ describe("jarvis#708 chat-readiness wait exhaustion: honest copy + a real exit",
 
 		expect(w.vm.state.connectPhase).toBe("support");
 		expect(w.vm.state.connectSupportOffered).toBe(false);
+		w.unmount();
+	});
+});
+
+describe("staged readiness phases: the screen renders what the poll observed", () => {
+	// Every one of these 40 polls used to be discarded except the last detail, so
+	// the wait showed one fixed sentence for two minutes.
+	it("an observed provisioning reason becomes the live phase line", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "container_provisioning",
+			detail: "applying your LLM configuration",
+		});
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.readinessStage.state).toBe("active");
+		expect(w.vm.readinessStage.label).toMatch(/coming online/i);
+		expect(w.vm.readinessStage.detail).toBe("applying your LLM configuration");
+		w.unmount();
+	});
+
+	it("readiness_unconfirmed renders as unknown, never as an active phase", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "readiness_unconfirmed" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.readinessStage.state).toBe("unknown");
+		expect(w.vm.readinessStage.label).not.toMatch(/coming online|applying/i);
+		w.unmount();
+	});
+
+	it("a poll that throws never claims a phase", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockRejectedValue(new Error("network"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.readinessStage.observed).toBe(false);
+		expect(w.vm.readinessStage.state).toBe("unknown");
+		w.unmount();
+	});
+
+	// admin paged a human. Retrying payment or reconnecting here could make it
+	// worse, so the wait must stop rather than run to a ceiling whose copy invites
+	// exactly that.
+	it("authority_repair_required stops the wait and blocks, quoting admin verbatim", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		const detail = "Your payment is safe. Please don't pay again while we sort this out.";
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "authority_repair_required",
+			detail,
+		});
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("blocked");
+		expect(w.vm.state.connectMessage).toBe(detail);
+
+		// Running out the rest of the ceiling must NOT convert it into a retry.
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+		expect(w.vm.state.connectPhase).toBe("blocked");
+		expect(routerReplace).not.toHaveBeenCalled();
+		w.unmount();
+	});
+
+	// jarvis#709's behaviour, unchanged: the ceiling still offers support beside
+	// Retry, and the message is still built from what the run observed.
+	it("the poll ceiling still offers support and still uses the observed-only message", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "signup" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+		expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+		expect(w.vm.state.connectTitle).not.toMatch(/still finishing setup/i);
 		w.unmount();
 	});
 });
