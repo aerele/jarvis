@@ -4358,8 +4358,9 @@ const recoveringLabel = computed(() =>
 // Phase-0 WIRES `queued` (the chip) and `cancelled` (cancelQueued toast + the
 // turn:cancelled fallback). `dispatching`/`errored`/`done` are defined for the
 // full state set but are NOT reached in Phase 0 (run:start jumps straight to the
-// pre-existing "Thinking…" UI; reply errors flow through ERROR_HEADLINES; a done
-// reply renders normally) — kept so the mapping is complete for WP-1 (SUXI-7).
+// pre-existing "Thinking…" UI; reply errors flow through turnErrorInfo
+// (lib/errors.js); a done reply renders normally), kept so the mapping is
+// complete for WP-1 (SUXI-7).
 const TURN_STATE_COPY = {
 	queued: (pos) => (pos && pos > 0 ? `Queued — ~${pos} ahead` : "Queued"),
 	// SUXF-3: the pump introduces a queued->preparing->ready window (prompt assembly
