@@ -435,6 +435,14 @@ def _ensure_member_user() -> None:
 			doc.remove_roles(*stale)
 		if "Jarvis User" not in roles:
 			doc.add_roles("Jarvis User")
+		# Re-assert the two fields has_jarvis_access reads besides roles. Another
+		# suite on this shared site disabling the row, or flipping it to a Website
+		# User, would otherwise fail every test in this class on the guard rather
+		# than on the behaviour each one names.
+		if doc.enabled != 1 or doc.user_type != "System User":
+			doc.enabled = 1
+			doc.user_type = "System User"
+			doc.save(ignore_permissions=True)
 		frappe.db.commit()
 		return
 	doc = frappe.get_doc(
@@ -550,9 +558,15 @@ class TestGetLlmConnectionHealth(FrappeTestCase):
 			self._as_member(account.get_llm_connection_status)
 
 	def test_guest_is_refused(self):
-		"""require_jarvis_access rejects Guest before roles are even consulted
-		(is_system_user names it), and @frappe.whitelist() without allow_guest
-		refuses an anonymous session in front of that."""
+		"""require_jarvis_access rejects Guest before roles are even consulted -
+		is_system_user names Guest explicitly.
+
+		This drives the Python function directly, so it exercises THAT in-body
+		guard and nothing else. Frappe refuses a Guest on the HTTP path too, but
+		the decorator does not wrap the function: that check lives in the request
+		dispatcher (frappe.is_whitelisted), which no direct call reaches. The
+		in-body guard is the one that has to hold, so it is the one under test.
+		"""
 		frappe.set_user("Guest")
 		try:
 			with self.assertRaises(frappe.PermissionError):
@@ -677,6 +691,9 @@ class TestGetLlmConnectionHealth(FrappeTestCase):
 		would have been silently undone - so assert here that the distinction
 		still exists on the admin side, and is only dropped on the way to a
 		member."""
+		# No inline try/finally, unlike _as_member: this switches TO the identity
+		# tearDown restores anyway, and tearDown's first statement is the restore,
+		# so an assertion failing below cannot strand the shared site.
 		frappe.set_user("Administrator")
 		reasons = []
 

@@ -1122,11 +1122,19 @@ def get_llm_connection_health() -> dict:
 	GATE
 	----
 	``require_jarvis_access``, not ``require_jarvis_admin``: any authenticated
-	System User of this workspace holding a Jarvis access role. That gate refuses
-	Guest twice over - ``is_system_user`` rejects Guest by name before roles are
-	consulted, and ``frappe.whitelist()`` without ``allow_guest`` refuses an
-	anonymous session before the body runs. Website/portal users are refused for
-	the same reason chat refuses them.
+	System User of this workspace holding a Jarvis access role. It refuses Guest
+	directly, because ``is_system_user`` rejects Guest by name before roles are
+	even consulted, and refuses Website/portal users for the same reason chat
+	refuses them.
+
+	That in-body call is THE guard, and it is deliberately not left to the
+	framework. ``@frappe.whitelist()`` does NOT wrap the function - the decorator
+	only adds it to Frappe's ``whitelisted`` set - so nothing refuses a Guest
+	until the request dispatcher separately calls ``frappe.is_whitelisted``,
+	which throws for a Guest invoking a method not registered ``allow_guest``.
+	That check therefore exists only on the HTTP path: a direct Python call
+	reaches this body with no framework gate at all. Anyone tempted to drop the
+	line below as redundant should read those two functions first.
 
 	``get_llm_connection_status`` is untouched by this: its guard is unchanged
 	and so is every field it returns to an admin.
