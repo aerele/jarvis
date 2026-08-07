@@ -795,3 +795,106 @@ describe("Test button: an unreachable endpoint is not a failure (#680)", () => {
 		expect(w.vm.singleModeCanStart).toBe(false);
 	});
 });
+
+/**
+ * Two states that only became reachable once #679 made a stored key testable and
+ * #680 added a third verdict. Both are places where the screen would contradict
+ * itself: an amber "nothing is broken" note next to a save that silently refuses,
+ * and a red hard failure next to an enabled Start chatting.
+ */
+describe("the verdict and the surrounding controls agree", () => {
+	it("an unreachable endpoint does not silently cancel Connect", async () => {
+		// The probe result says "saving is still the way to apply it". If Connect
+		// then returns without saving and without a message, the customer is stuck
+		// with no path forward at all.
+		setPool([]);
+		const w = await mountEditor();
+		w.vm.openAdd();
+		const row = w.vm.rows[w.vm.rows.length - 1];
+		w.vm.setCredType(row, "api_key");
+		row.provider = "OpenAI-Compatible";
+		row.model = "gpt-4o";
+		row.apiKey = "sk-typed";
+		row.baseUrl = "https://vpn-only.example.com/v1"; // not container-only by shape
+		await idle();
+		api.testLlmApiKey.mockResolvedValue({
+			ok: false,
+			verdict: "unverified",
+			checks: [{ check: "probe_request", ok: false, detail: "could not resolve" }],
+			caveat: "",
+		});
+
+		await w.vm.connectApiKeyRow(row);
+		await idle();
+
+		expect(api.saveLlmPool).toHaveBeenCalled();
+	});
+
+	it("a real rejection still cancels Connect", async () => {
+		setPool([]);
+		const w = await mountEditor();
+		w.vm.openAdd();
+		const row = w.vm.rows[w.vm.rows.length - 1];
+		w.vm.setCredType(row, "api_key");
+		row.provider = "OpenAI";
+		row.model = "gpt-4o";
+		row.apiKey = "sk-bad";
+		row.baseUrl = "https://api.openai.com/v1";
+		await idle();
+		api.testLlmApiKey.mockResolvedValue({
+			ok: false,
+			verdict: "fail",
+			checks: [{ check: "probe_request", ok: false, detail: "HTTP 401" }],
+			caveat: "",
+		});
+
+		await w.vm.connectApiKeyRow(row);
+		await idle();
+
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+	});
+
+	it("a failed test on a saved key blocks Start chatting", async () => {
+		// The returning customer whose stored key was revoked. Before #679 this row
+		// could not be tested at all, so a red result next to an enabled Start was
+		// impossible; now it has to be handled.
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor({ modes: ["quick"] });
+		const row = w.vm.rows[0];
+		expect(row.hasKey).toBe(true);
+		expect(row.apiKey).toBe("");
+		expect(w.vm.singleModeCanStart).toBe(true); // stored key, nothing probed yet
+
+		api.testLlmApiKey.mockResolvedValue({
+			ok: false,
+			verdict: "fail",
+			checks: [{ check: "probe_request", ok: false, detail: "HTTP 401: revoked" }],
+			caveat: "",
+		});
+		await w.vm.testSingleModeRow();
+		await idle();
+
+		expect(w.vm.singleModeCanStart).toBe(false);
+		expect(w.vm.startBlockedReason).toBe(
+			"That test failed. Update the settings above to continue."
+		);
+	});
+
+	it("an unreachable endpoint does not block Start chatting on a saved key", async () => {
+		// The guard on the above: "unverified" is not a rejection, so it must not
+		// take away a path that a stored key already earned.
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor({ modes: ["quick"] });
+		api.testLlmApiKey.mockResolvedValue({
+			ok: false,
+			verdict: "unverified",
+			checks: [{ check: "probe_request", ok: false, detail: "could not resolve" }],
+			caveat: "",
+		});
+		await w.vm.testSingleModeRow();
+		await idle();
+
+		expect(w.vm.singleModeCanStart).toBe(true);
+		expect(w.vm.startBlockedReason).toBe("");
+	});
+});

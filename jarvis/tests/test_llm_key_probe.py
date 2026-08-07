@@ -555,3 +555,64 @@ class TestProbeWithAStoredKey(_RT3SettingsTestCase):
 		frappe.set_user("Guest")
 		with self.assertRaises(frappe.PermissionError):
 			llm_key_probe.test_llm_api_key("OpenAI", "gpt-4o", "", "https://x.example.com/v1", 1)
+
+
+class TestStoredKeyNeverReachesTheErrorLog(FrappeTestCase):
+	"""A decryption failure on one row must not write ANOTHER row's working key
+	into the Error Log in cleartext.
+
+	frappe.log_error with only a title falls back to get_traceback(with_context=
+	True), which dumps every frame's locals and redacts them by NAME against a
+	fixed blocklist (password, passwd, secret, token, key, pwd). Both halves of
+	the fix are asserted here because either one alone leaves the hole open: the
+	local in stored_api_keys_by_provider must be named to match that blocklist,
+	and _stored_api_key must pass a message so no variable dump is captured at
+	all. This is the module's documented "never in frappe.log_error" invariant.
+	"""
+
+	def test_a_decrypt_failure_logs_no_variable_dump_and_no_key(self):
+		leaked = "sk-other-row-still-working-999"
+		good = frappe._dict({"provider": "openai", "api_key": leaked, "credential_type": "api_key"})
+		boom = frappe._dict({"provider": "anthropic", "api_key": "x", "credential_type": "api_key"})
+
+		def _explode(doc, fieldname, raise_exception=False):
+			# First row decrypts (so the loop local holds a real key), second blows
+			# up - the exact ordering that put a working credential on the traceback.
+			if doc is boom:
+				raise ValueError("decryption failed")
+			return leaked
+
+		class _Settings:
+			def get(self, _f):
+				return [good, boom]
+
+		calls = []
+		with (
+			mock.patch("jarvis.jarvis.pool_serialize._get_password", side_effect=_explode),
+			mock.patch.object(frappe, "get_single", return_value=_Settings()),
+			mock.patch.object(frappe, "log_error", side_effect=lambda **kw: calls.append(kw)),
+		):
+			self.assertEqual(llm_key_probe._stored_api_key("Anthropic"), "")
+
+		self.assertEqual(len(calls), 1)
+		# A message must be supplied, or Frappe captures the locals-bearing traceback.
+		self.assertTrue(calls[0].get("message"))
+		self.assertNotIn(leaked, json.dumps(calls[0]))
+
+	def test_the_decrypted_local_is_named_to_match_frappes_blocklist(self):
+		"""Belt and braces on the above: even if some other caller lets this frame
+		reach Frappe's global unhandled-exception logger, the local must redact."""
+		import inspect
+
+		from jarvis.jarvis import pool_serialize
+
+		src = inspect.getsource(pool_serialize.stored_api_keys_by_provider)
+		blocklist = ("password", "passwd", "secret", "token", "key", "pwd")
+		assigned = [ln.strip().split("=")[0].strip() for ln in src.splitlines() if "_get_password(" in ln]
+		self.assertTrue(assigned, "could not find the decrypt assignment")
+		for name in assigned:
+			self.assertTrue(
+				any(b in name for b in blocklist),
+				f"local {name!r} holding a decrypted key does not match Frappe's "
+				f"traceback blocklist {blocklist}, so it would log in cleartext",
+			)

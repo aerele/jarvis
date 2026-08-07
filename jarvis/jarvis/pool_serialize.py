@@ -128,6 +128,15 @@ def stored_api_keys_by_provider(models) -> dict:
 	one winning, which is exactly the key both of them will hold after the
 	next save. Blank keys never enter the map, so a half-filled row cannot
 	mask a working credential.
+
+	The local holding a decrypted key is called ``secret`` ON PURPOSE. Frappe's
+	``get_traceback(with_context=True)`` dumps every frame's locals into the
+	Error Log and redacts them by NAME against a fixed blocklist (password,
+	passwd, secret, token, key, pwd). ``_get_password`` re-raises a genuine
+	decryption failure, so if one row's ciphertext is corrupt this frame is on
+	the traceback while the local still holds the PREVIOUS row's working key.
+	Named ``val`` that key is written to the log in cleartext; named ``secret``
+	it is redacted. ``keys`` is already covered by "key". Do not rename either.
 	"""
 	keys: dict = {}
 	for m in models or []:
@@ -136,10 +145,10 @@ def stored_api_keys_by_provider(models) -> dict:
 		) or "api_key"
 		if cred != "api_key":
 			continue
-		val = _get_password(m, "api_key")
-		if val:
+		secret = _get_password(m, "api_key")
+		if secret:
 			provider = (m.provider if hasattr(m, "provider") else m.get("provider", "")) or ""
-			keys[normalize_provider(provider)] = val
+			keys[normalize_provider(provider)] = secret
 	return keys
 
 

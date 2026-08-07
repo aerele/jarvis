@@ -361,7 +361,16 @@ def _stored_api_key(provider: str) -> str:
 		settings = frappe.get_single("Jarvis Settings")
 		return stored_api_keys_by_provider(settings.get("models")).get(normalize_provider(provider), "")
 	except Exception:
-		frappe.log_error(title="llm_key_probe: stored key lookup failed")
+		# An explicit message is load-bearing, not tidiness. frappe.log_error with
+		# only a title falls back to get_traceback(with_context=True), which dumps
+		# every frame's LOCALS into the Error Log - and the frame that raised here
+		# is the one holding a decrypted key. Passing a message keeps the whole
+		# variable dump out of the log, which is what this module's "never in
+		# frappe.log_error" promise actually requires.
+		frappe.log_error(
+			title="llm_key_probe: stored key lookup failed",
+			message="Could not read the stored API key for this provider. Details omitted on purpose.",
+		)
 		return ""
 
 

@@ -2022,6 +2022,18 @@ watch(
 // container-only endpoint can't be probed from the bench, so provider+model is
 // enough; a stored (un-retyped) remote key can't be re-probed either. A remote row
 // with a freshly-typed key MUST carry a pass bound to its current fields.
+// A visible, definitive rejection on the row as it stands. The two exempt
+// branches below (a container-only endpoint, and a stored key) skip the
+// pass requirement on the grounds that no useful probe is possible - which
+// stopped being true for a stored key once #679 made it testable. Without
+// this, a returning customer whose saved key has since been revoked can see
+// a red "Test failed. HTTP 401" sitting next to an enabled Start chatting.
+// Any edit to the row clears smTest.result, so this only ever reflects the
+// fields on screen right now.
+function smHardFailure() {
+	const res = smTest.value.result;
+	return !!(res && !res.ok && res.verdict !== "unverified");
+}
 const singleModeCanStart = computed(() => {
 	if (!singleMode.value) return false;
 	const r = rows.value[0];
@@ -2029,6 +2041,7 @@ const singleModeCanStart = computed(() => {
 	if (r.credentialType === "subscription")
 		return (r.accounts || []).some((a) => a && (a.capture_id || a.account_ref));
 	if (!(r.provider || "").trim() || !(r.model || "").trim()) return false;
+	if (smHardFailure()) return false;
 	if (isContainerOnlyRow(r)) return true; // local / private endpoint: no bench probe
 	const typed = (r.apiKey || "").trim();
 	if (!typed) return r.hasKey === true; // stored key: nothing to re-probe
@@ -2046,6 +2059,7 @@ const startBlockedReason = computed(() => {
 			: "Connect your account to continue.";
 	if (!(r.provider || "").trim()) return "Choose a provider to continue.";
 	if (!(r.model || "").trim()) return "Enter a model id to continue.";
+	if (smHardFailure()) return "That test failed. Update the settings above to continue.";
 	if (isContainerOnlyRow(r)) return "";
 	const typed = (r.apiKey || "").trim();
 	if (!typed) return r.hasKey ? "" : "Enter an API key to continue.";
@@ -2848,11 +2862,12 @@ async function connectApiKeyRow(row) {
 			setBusy("");
 		}
 		const probe = panel.value.testResult;
-		// A probe that produced a RESULT needs nothing more from us: the red Test
-		// result block above the button is already showing the provider's own words
-		// for why it refused. A probe that produced NO result at all is different -
-		// the request itself failed, the block stays empty, and returning here left
-		// the customer pressing Connect against total silence (jarvis#556).
+		// A probe that produced a definitive REJECTION needs nothing more from us:
+		// the red Test result block above the button is already showing the
+		// provider's own words for why it refused. A probe that produced NO result
+		// at all is different - the request itself failed, the block stays empty,
+		// and returning here left the customer pressing Connect against total
+		// silence (jarvis#556).
 		if (!probe) {
 			setApplyResult({
 				kind: "failed",
@@ -2863,7 +2878,13 @@ async function connectApiKeyRow(row) {
 			});
 			return;
 		}
-		if (!probe.ok) return;
+		// "unverified" must NOT block the save. It means the bench could not reach
+		// the endpoint, which is the same condition isContainerOnlyRow above skips
+		// the probe entirely for - it just was not predictable from the URL. The
+		// amber block the customer is looking at says saving is how to apply it, so
+		// silently refusing to save here would contradict the screen and leave no
+		// way forward at all (#680).
+		if (!probe.ok && probe.verdict !== "unverified") return;
 	}
 	// The "add backup models automatically" switch used to be honoured on Close,
 	// which only worked because a Save came afterwards. Expand before the payload is
