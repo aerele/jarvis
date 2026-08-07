@@ -9789,8 +9789,10 @@ onUnmounted(() => {
 	animation: jv-nudge-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 .jv-nudge.jv-nudge--compact:focus-within {
-	border-color: var(--text-3);
-	box-shadow: 0 0 0 3px rgba(23, 23, 23, 0.07);
+	/* Keep the border LIGHT on focus (no dark outline on the active field) — the
+	   soft lift alone signals focus; the textarea itself has outline: none. */
+	border-color: var(--border);
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
 }
 @keyframes jv-nudge-in {
 	from {
