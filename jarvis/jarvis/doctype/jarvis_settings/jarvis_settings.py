@@ -113,6 +113,31 @@ _POOL_CONVERGE_INTERVAL_S = 20.0
 _POOL_CONVERGE_PROBE_TIMEOUT_S = 15
 
 
+def creds_wire_auth_mode(stored: str | None) -> str:
+	"""Translate the STORED auth mode into the ``/llm-creds`` wire vocabulary.
+
+	The two vocabularies do not match, and the mismatch is silent. This DocType
+	mirrors ``models[0].credential_type``, whose options are exactly
+	``api_key`` / ``subscription``. The fleet wire contract is
+	``api_key`` / ``oauth``: fleet's own ``models.py`` says "the earlier
+	'subscription' string was the customer-facing UI term; the wire+template
+	contract is 'oauth'", and it maps a literal ``subscription`` to the API-KEY
+	branch. For a chat subscription that renders a config pointing at a key file
+	that does not exist, so the container comes up and fails every turn.
+
+	Translated on the WIRE only. The stored value stays ``subscription`` because
+	other consumers read it, and widening those guards is what force-disconnected
+	healthy pool tenants before (jarvis-admin-v2#89). Nothing here changes what is
+	persisted or what any other reader sees.
+
+	No-op until ``compute_pool_mode`` stops forcing a lone subscription onto the
+	pool leg (jarvis#715 step 3): today such a config never reaches this path.
+	It is a prerequisite for that flip, not a behaviour change on its own.
+	"""
+	mode = (stored or "api_key").strip()
+	return "oauth" if mode == "subscription" else mode
+
+
 def _is_applying_result(result) -> bool:
 	"""True iff an admin apply response is an ACCEPTED-but-still-converging
 	outcome (C5) rather than a confirmed apply. The creds/pool fleet layer
@@ -990,7 +1015,7 @@ class JarvisSettings(Document):
 						model=self.llm_model or "",
 						base_url=self.llm_base_url or "",
 						api_key=secret,
-						auth_mode=self.llm_auth_mode or "api_key",
+						auth_mode=creds_wire_auth_mode(self.llm_auth_mode),
 					)
 					or {}
 				)

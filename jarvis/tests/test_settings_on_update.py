@@ -780,3 +780,46 @@ class TestEnqueuedSyncRedisLock(_SettingsSingletonTestCase):
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertIn("failed", settings.last_sync_status or "")
 		self.assertIn("skipped", settings.last_sync_status or "")
+
+
+class TestCredsWireAuthMode(FrappeTestCase):
+	"""The direct leg's auth-mode vocabulary translation (jarvis#715 step 1b).
+
+	This DocType stores models[0].credential_type, whose options are exactly
+	api_key/subscription. Fleet's /llm-creds wire contract is api_key/oauth and it
+	maps a literal "subscription" onto the API-KEY branch, which for a chat
+	subscription renders a config pointing at a key file that does not exist.
+	"""
+
+	def test_a_subscription_is_sent_as_oauth(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import creds_wire_auth_mode
+
+		self.assertEqual(creds_wire_auth_mode("subscription"), "oauth")
+
+	def test_api_key_is_unchanged(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import creds_wire_auth_mode
+
+		self.assertEqual(creds_wire_auth_mode("api_key"), "api_key")
+
+	def test_an_already_oauth_value_passes_through(self):
+		"""The legacy direct-OAuth path stores "oauth" already; translating twice
+		must not corrupt it."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import creds_wire_auth_mode
+
+		self.assertEqual(creds_wire_auth_mode("oauth"), "oauth")
+
+	def test_empty_defaults_to_api_key(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import creds_wire_auth_mode
+
+		self.assertEqual(creds_wire_auth_mode(""), "api_key")
+		self.assertEqual(creds_wire_auth_mode(None), "api_key")
+
+	def test_it_translates_the_WIRE_only_and_never_the_stored_value(self):
+		"""The stored field stays "subscription" because other consumers read it,
+		and widening those guards is what force-disconnected healthy pool tenants
+		before (jarvis-admin-v2#89). This pins that the helper is pure."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import creds_wire_auth_mode
+
+		stored = "subscription"
+		self.assertEqual(creds_wire_auth_mode(stored), "oauth")
+		self.assertEqual(stored, "subscription")
