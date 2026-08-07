@@ -452,9 +452,9 @@ def save_llm_pool(
 			raise frappe.ValidationError(f"unknown preset '{preset}'")
 
 	from jarvis.jarvis.pool_serialize import (
-		_get_password,
 		_model_accounts,
 		normalize_provider,
+		stored_api_keys_by_provider,
 	)
 	from jarvis.oauth import pending_capture
 
@@ -471,14 +471,16 @@ def save_llm_pool(
 	# model id or reordering) does not silently wipe a previously-working
 	# credential. Keyed by canonical provider (api keys are per-vendor) and by
 	# account_ref (server-stable) respectively.
-	prior_api_keys = {}
+	#
+	# The api-key half is stored_api_keys_by_provider() rather than a loop local
+	# to this function because jarvis.llm_key_probe's Test button now resolves a
+	# stored key through the SAME helper (#679). Test has to probe the credential
+	# this merge would ship, or a green Test would be attesting to a key Save
+	# never sends.
+	prior_api_keys = stored_api_keys_by_provider(s.get("models"))
 	prior_blobs = {}
 	for pm in s.get("models") or []:
-		if (pm.credential_type or "api_key") == "api_key":
-			pk = _get_password(pm, "api_key")
-			if pk:
-				prior_api_keys[normalize_provider(pm.provider)] = pk
-		else:
+		if (pm.credential_type or "api_key") != "api_key":
 			for a in _model_accounts(pm):
 				ref = (a.get("account_ref") if hasattr(a, "get") else "") or ""
 				blob = (a.get("oauth_blob") if hasattr(a, "get") else "") or ""

@@ -432,11 +432,16 @@
 					</div>
 
 					<!-- Pre-save "Test": a live, side-effect-free 1-token request straight from this
-               bench to the provider using whatever is typed above - never saved, never
+               bench to the provider using what is typed above - never saved, never
                touches the fleet/container (jarvis.llm_key_probe.test_llm_api_key). Motivated
                by a real GLM/Z.ai case: a valid key on a zero-balance account saved cleanly and
                only failed AFTER save with a bare "Not working" - this lets the customer catch
-               that (and see the provider's OWN error) before they ever click Save. -->
+               that (and see the provider's OWN error) before they ever click Save.
+               A row with a saved key sends no key at all and asks the server to load its
+               own (#679), so a base URL can be changed and tested without re-pasting a
+               credential. The result has THREE states, not two: an endpoint this bench
+               could not reach is reported neutrally, because chat runs from inside the
+               container and reaches addresses the bench cannot (#680). -->
 					<div
 						style="
 							display: flex;
@@ -472,7 +477,7 @@
 					<div
 						v-if="panel.testResult"
 						class="jv-status"
-						:class="panel.testResult.ok ? 'jv-status-ok' : 'jv-status-bad'"
+						:class="testStatusClass(panel.testResult)"
 						style="margin-top: 10px"
 					>
 						<span class="jv-status-ic">
@@ -490,6 +495,20 @@
 								<path d="M20 6 9 17l-5-5" />
 							</svg>
 							<svg
+								v-else-if="panel.testResult.verdict === 'unverified'"
+								width="14"
+								height="14"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.4"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<circle cx="12" cy="12" r="9" />
+								<path d="M12 11v5M12 8h.01" />
+							</svg>
+							<svg
 								v-else
 								width="14"
 								height="14"
@@ -504,7 +523,7 @@
 							</svg>
 						</span>
 						<span class="jv-status-tx"
-							><b>{{ panel.testResult.ok ? "Key works." : "Test failed." }}</b>
+							><b>{{ testStatusHeadline(panel.testResult) }}</b>
 							{{ panel.testResult.message }}</span
 						>
 					</div>
@@ -1319,7 +1338,7 @@
 					<div
 						v-if="singleMode && smTest.result"
 						class="jv-status"
-						:class="smTest.result.ok ? 'jv-status-ok' : 'jv-status-bad'"
+						:class="testStatusClass(smTest.result)"
 						style="margin-top: 10px"
 					>
 						<span class="jv-status-ic">
@@ -1337,6 +1356,20 @@
 								<path d="M20 6 9 17l-5-5" />
 							</svg>
 							<svg
+								v-else-if="smTest.result.verdict === 'unverified'"
+								width="14"
+								height="14"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.4"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<circle cx="12" cy="12" r="9" />
+								<path d="M12 11v5M12 8h.01" />
+							</svg>
+							<svg
 								v-else
 								width="14"
 								height="14"
@@ -1351,7 +1384,7 @@
 							</svg>
 						</span>
 						<span class="jv-status-tx"
-							><b>{{ smTest.result.ok ? "Key works." : "Test failed." }}</b>
+							><b>{{ testStatusHeadline(smTest.result) }}</b>
 							{{ smTest.result.message }}</span
 						>
 					</div>
@@ -1949,21 +1982,17 @@ async function testSingleModeRow() {
 			model: row.model || "",
 			api_key: row.apiKey || "",
 			base_url: effectiveTestBaseUrl(row),
+			use_stored_key: usesStoredKey(row) ? 1 : 0,
 		});
 		if (stale()) return;
-		const checks = Array.isArray(res && res.checks) ? res.checks : [];
-		const last = checks[checks.length - 1];
-		smTest.value.result = {
-			ok: !!(res && res.ok),
-			message:
-				(last && last.detail) ||
-				(res && res.ok ? "The provider accepted the request." : "The test failed."),
-			caveat: (res && res.caveat) || "",
-		};
+		smTest.value.result = testResultOf(res);
+		// Only a real pass binds. An "unverified" probe reached nothing, so it must
+		// not unlock "Start chatting" the way a pass does (#680) - a typo'd public
+		// host fails DNS exactly like a container-only one does.
 		smTest.value.passIdentity = res && res.ok ? boundIdentity : "";
 	} catch (e) {
 		if (stale()) return;
-		smTest.value.result = { ok: false, message: _err(e), caveat: "" };
+		smTest.value.result = { ok: false, verdict: "fail", message: _err(e), caveat: "" };
 		smTest.value.passIdentity = "";
 	} finally {
 		if (!stale()) smTest.value.testing = false;
@@ -2496,17 +2525,31 @@ function openEdit(i) {
 function isLocalProviderRow(row) {
 	return !!(row && LOCAL_PROVIDER_IDS.has(providerId(row.provider)));
 }
-// Why the Test button is disabled right now, or "" when it's enabled. hasKey +
-// a blank apiKey means an already-saved key that hasn't been re-typed - the
-// probe only ever sees what's in the panel (it never reads the stored,
-// encrypted secret), so it has nothing to send yet.
+// Whether this probe has to ask the server for the row's SAVED key because the
+// customer has not typed one. Only true for a row that really has one stored
+// (hasKey), which onProviderChange resets the moment the provider is switched -
+// a stored key belongs to the old provider's credential, not this one.
+function usesStoredKey(row) {
+	return !!(row && !(row.apiKey || "").trim() && row.hasKey === true);
+}
+// Why the Test button is disabled right now, or "" when it's enabled.
+//
+// hasKey + a blank apiKey used to be blocked with "Re-enter the key to test it",
+// because the probe only ever saw what was in the panel. That made the one edit
+// where a test matters most - changing a base URL on a working model - the one
+// edit that could not be tested, unless the customer still had a key they pasted
+// months ago (#679). The server can resolve that key itself now, so this case is
+// allowed and the reason strings below are each true of a DIFFERENT state rather
+// than one string covering them all.
 function testBlockedReason(row) {
 	if (!row) return "Nothing to test";
 	if (!(row.provider || "").trim()) return "Choose a provider to test";
 	if (!(row.model || "").trim()) return "Enter a model id to test";
 	// Local providers (Ollama, vLLM) take no key - nothing blocks the probe.
-	if (!(row.apiKey || "").trim() && !isLocalProviderRow(row))
-		return row.hasKey ? "Re-enter the key to test it" : "Enter an API key to test";
+	if (isLocalProviderRow(row)) return "";
+	// A saved key the server can load on our behalf. Nothing to re-enter.
+	if (usesStoredKey(row)) return "";
+	if (!(row.apiKey || "").trim()) return "Enter an API key to test";
 	return "";
 }
 function testButtonHint(row) {
@@ -2517,7 +2560,27 @@ function testButtonHint(row) {
 			"doesn't guarantee the container can reach it too."
 		);
 	}
+	if (usesStoredKey(row)) {
+		return (
+			"Sends a minimal live request using your saved key and the settings above. " +
+			"The key stays on the server and nothing is saved."
+		);
+	}
 	return "Sends a minimal live request to this provider using what's typed above. Nothing is saved.";
+}
+// The three ways a probe can come back (jarvis.llm_key_probe's `verdict`).
+// "unverified" means the bench never reached the endpoint, which is a fact about
+// this network and not about the key, so it must not render as a red failure -
+// a container-only base URL hits this every time and is perfectly valid (#680).
+function testStatusClass(result) {
+	if (!result) return "";
+	if (result.ok) return "jv-status-ok";
+	return result.verdict === "unverified" ? "jv-status-warn" : "jv-status-bad";
+}
+function testStatusHeadline(result) {
+	if (!result) return "";
+	if (result.ok) return "Key works.";
+	return result.verdict === "unverified" ? "Could not test from here." : "Test failed.";
 }
 // Effective base_url to send: the row's own value, falling back to the provider's
 // known default. A row a customer saved on a STANDARD provider (OpenAI/Anthropic/...)
@@ -2561,23 +2624,33 @@ async function testApiKeyRow(row) {
 			model: row.model || "",
 			api_key: row.apiKey || "",
 			base_url: effectiveTestBaseUrl(row),
+			// The key itself is never sent back to the browser, so an untyped row
+			// asks the server to load its own saved one (#679).
+			use_stored_key: usesStoredKey(row) ? 1 : 0,
 		});
 		if (stale()) return;
-		const checks = Array.isArray(res && res.checks) ? res.checks : [];
-		const last = checks[checks.length - 1];
-		myPanel.testResult = {
-			ok: !!(res && res.ok),
-			message:
-				(last && last.detail) ||
-				(res && res.ok ? "The provider accepted the request." : "The test failed."),
-			caveat: (res && res.caveat) || "",
-		};
+		myPanel.testResult = testResultOf(res);
 	} catch (e) {
 		if (stale()) return;
-		myPanel.testResult = { ok: false, message: _err(e), caveat: "" };
+		myPanel.testResult = { ok: false, verdict: "fail", message: _err(e), caveat: "" };
 	} finally {
 		if (!stale()) myPanel.testing = false;
 	}
+}
+// Flatten a probe response into what the status block renders. `verdict` is what
+// decides the colour (testStatusClass); `ok` alone cannot, because a failure and
+// an un-run probe are both "not ok" and only one of them is the customer's problem.
+function testResultOf(res) {
+	const checks = Array.isArray(res && res.checks) ? res.checks : [];
+	const last = checks[checks.length - 1];
+	return {
+		ok: !!(res && res.ok),
+		verdict: (res && res.verdict) || (res && res.ok ? "pass" : "fail"),
+		message:
+			(last && last.detail) ||
+			(res && res.ok ? "The provider accepted the request." : "The test failed."),
+		caveat: (res && res.caveat) || "",
+	};
 }
 
 // Resilient-by-default (API KEYS ONLY - no subscription presets exist and
@@ -5208,19 +5281,34 @@ defineExpose({ save, busy, canStart: singleModeCanStart, startBlockedReason });
 	border: 1px solid var(--red-bd);
 	background: var(--red-bg);
 }
+/* "Could not test from here": the probe never reached the endpoint, so this is
+   not a verdict on the customer's key and must not wear the failure colour
+   (#680). Amber is the same "look at this, nothing is broken yet" the sync pill
+   and the account-health dot already use in this editor. */
+.jv-status-warn {
+	border: 1px solid var(--amber-bd);
+	background: var(--amber-bg);
+}
 .jv-status-ic {
 	flex: none;
 	display: flex;
+	align-self: flex-start;
+	margin-top: 2px;
 	color: var(--green);
 }
 .jv-status-bad .jv-status-ic {
 	color: var(--red);
 }
+.jv-status-warn .jv-status-ic {
+	color: var(--amber);
+}
+/* Wraps rather than ellipsing. This block used to be one nowrap line, which was
+   survivable while it only ever said "Key works."/"Test failed.", but the text
+   that now matters most is the explanation of an unreachable endpoint - and a
+   truncated explanation is the same dead end #680 is about. Provider errors
+   (the GLM balance message) stop being clipped for the same reason. */
 .jv-status-tx {
 	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
 	color: var(--text);
 }
 .jv-status-tx b {
@@ -5229,6 +5317,9 @@ defineExpose({ save, busy, canStart: singleModeCanStart, startBlockedReason });
 }
 .jv-status-bad .jv-status-tx b {
 	color: var(--red);
+}
+.jv-status-warn .jv-status-tx b {
+	color: var(--amber);
 }
 .jv-status-acts {
 	margin-left: auto;

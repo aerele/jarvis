@@ -309,8 +309,16 @@ export const saveLlmPool = (
 export const disconnectLlm = () => call("jarvis.onboarding.disconnect_llm");
 // Pre-save "Test" probe for ONE api-key model row (never persists, never
 // touches the fleet/container - see jarvis/llm_key_probe.py). args:
-// {provider, model, api_key, base_url}. Returns
-// {ok, checks:[{check,ok,detail}], provider, local_endpoint, caveat}.
+// {provider, model, api_key, base_url, use_stored_key}. Returns
+// {ok, verdict, checks:[{check,ok,detail}], provider, local_endpoint, caveat}.
+// `verdict` is "pass" | "fail" | "unverified" and is what decides how the result
+// renders: "unverified" means the bench never reached the endpoint, which is a
+// statement about this network and not a failure the customer caused, so it must
+// not show in red (#680). `ok` stays strictly verdict === "pass", so anything
+// gating on it keeps today's strictness.
+// `use_stored_key` asks the server to load the saved key for this provider
+// rather than a typed one (#679). The key is never sent to the browser in either
+// direction, so this flag is the only way to test an already-saved credential.
 export const testLlmApiKey = (args) => call("jarvis.llm_key_probe.test_llm_api_key", args);
 
 // --- Onboarding wizard (managed signup) ---

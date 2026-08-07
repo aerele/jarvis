@@ -107,6 +107,42 @@ def normalize_provider(value: str) -> str:
 	return _PROVIDER_ALIASES.get(v.lower(), v.lower())
 
 
+def stored_api_keys_by_provider(models) -> dict:
+	"""Decrypt every api-key row's stored key, keyed by canonical provider.
+
+	This is the app's ONE answer to "which stored key belongs to provider X".
+	``jarvis.onboarding.save_llm_pool`` uses it to merge a secret back into a
+	row the reloaded editor posted blank (get_llm_config never returns a key,
+	so an untouched row always comes back with ``api_key: ""``), and
+	``jarvis.llm_key_probe.test_llm_api_key`` uses it to probe a stored
+	credential the customer did not retype (#679).
+
+	Both callers MUST agree: if Test probed one key and Save then shipped a
+	different one, a green Test would be a lie. Sharing this function is what
+	makes that impossible, so resist giving either caller its own lookup.
+
+	Keyed by provider ALONE, deliberately - api keys are per-vendor here, and
+	rows carry no durable per-row identity (the child rows are rebuilt, and
+	renamed, on every save, and nothing row-scoped survives on the wire). Two
+	rows on one provider therefore collapse to a single key, LAST non-empty
+	one winning, which is exactly the key both of them will hold after the
+	next save. Blank keys never enter the map, so a half-filled row cannot
+	mask a working credential.
+	"""
+	keys: dict = {}
+	for m in models or []:
+		cred = (
+			m.credential_type if hasattr(m, "credential_type") else m.get("credential_type", "")
+		) or "api_key"
+		if cred != "api_key":
+			continue
+		val = _get_password(m, "api_key")
+		if val:
+			provider = (m.provider if hasattr(m, "provider") else m.get("provider", "")) or ""
+			keys[normalize_provider(provider)] = val
+	return keys
+
+
 # ---------------------------------------------------------------------------
 # Wire-time-only provider collapsing (build_pool_payload). Distinct from
 # normalize_provider(): a provider id can be first-class in STORAGE (so the

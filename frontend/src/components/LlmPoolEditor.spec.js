@@ -636,3 +636,162 @@ describe("resync retries a failed sync (jarvis#714)", () => {
 		expect(api.saveLlmPool).not.toHaveBeenCalled();
 	});
 });
+
+/**
+ * The Test button on an API-key row: which credential it may use (#679) and
+ * what it is allowed to call a failure (#680).
+ *
+ * Both are driven through the real component - mount, open the real edit panel,
+ * call the real click handler - because both defects are about what the editor
+ * decides, not about what the probe endpoint returns. keyModel() already builds
+ * the exact production state #679 lives in: has_key true from the server, and
+ * therefore apiKey "" in the row, since get_llm_config never returns a secret.
+ */
+describe("Test button: stored key (#679)", () => {
+	async function openEditOnKeyRow() {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor();
+		w.vm.openEdit(0);
+		await idle();
+		return w;
+	}
+
+	it("is enabled on a saved row whose key was never re-typed", async () => {
+		const w = await openEditOnKeyRow();
+		const row = w.vm.rows[0];
+		// The production state: the server said has_key, so nothing is typed.
+		expect(row.hasKey).toBe(true);
+		expect(row.apiKey).toBe("");
+
+		expect(w.vm.testBlockedReason(row)).toBe("");
+	});
+
+	it("tests a changed base URL against the stored key, without it in the request", async () => {
+		const w = await openEditOnKeyRow();
+		const row = w.vm.rows[0];
+		row.baseUrl = "https://gateway.example.com/v1"; // the only edit, per #679
+		await idle();
+		api.testLlmApiKey.mockResolvedValue({ ok: true, verdict: "pass", checks: [], caveat: "" });
+
+		await w.vm.testApiKeyRow(row);
+		await idle();
+
+		const sent = api.testLlmApiKey.mock.calls[0][0];
+		expect(sent.base_url).toBe("https://gateway.example.com/v1");
+		// The server loads the key itself; the browser never holds or sends it.
+		expect(sent.use_stored_key).toBeTruthy();
+		expect(sent.api_key).toBe("");
+	});
+
+	it("still blocks a brand new row, and says why", async () => {
+		setPool([]);
+		const w = await mountEditor();
+		w.vm.openAdd();
+		const row = w.vm.rows[w.vm.rows.length - 1];
+		row.credentialType = "api_key";
+		row.provider = "OpenAI";
+		row.model = "gpt-4o";
+		await idle();
+
+		expect(row.hasKey).toBe(false);
+		expect(w.vm.testBlockedReason(row)).toBe("Enter an API key to test");
+	});
+
+	it("stops using the stored key once the provider is switched", async () => {
+		// The stored key belongs to the OLD provider's credential, so it is not a
+		// usable credential for the new one and the button must go back to asking.
+		const w = await openEditOnKeyRow();
+		const row = w.vm.rows[0];
+		w.vm.onProviderChange(row, "Anthropic");
+		await idle();
+
+		expect(row.hasKey).toBe(false);
+		expect(w.vm.usesStoredKey(row)).toBe(false);
+		expect(w.vm.testBlockedReason(row)).toBe("Enter an API key to test");
+	});
+});
+
+describe("Test button: an unreachable endpoint is not a failure (#680)", () => {
+	async function runTestWith(res) {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor();
+		w.vm.openEdit(0);
+		await idle();
+		api.testLlmApiKey.mockResolvedValue(res);
+		await w.vm.testApiKeyRow(w.vm.rows[0]);
+		await idle();
+		return w;
+	}
+
+	it("renders a container-only endpoint neutrally, not in red", async () => {
+		// The #680 repro: host.docker.internal answers 200 inside the container and
+		// does not resolve from the bench. The customer must not see a blocker.
+		const w = await runTestWith({
+			ok: false,
+			verdict: "unverified",
+			checks: [
+				{
+					check: "probe_request",
+					ok: false,
+					detail: "This bench could not resolve that hostname.",
+				},
+			],
+			caveat: "Nothing reached the provider, so this is not a verdict on your key.",
+		});
+
+		const status = w.find(".jv-status");
+		expect(status.exists()).toBe(true);
+		expect(status.classes()).toContain("jv-status-warn");
+		expect(status.classes()).not.toContain("jv-status-bad");
+		expect(status.text()).toContain("Could not test from here.");
+		expect(status.text()).not.toContain("Test failed.");
+	});
+
+	it("still renders a real provider rejection in red", async () => {
+		// The guard on the above: a provider that ANSWERED and said no is a real
+		// failure, and softening that would trade one lie for another.
+		const w = await runTestWith({
+			ok: false,
+			verdict: "fail",
+			checks: [
+				{
+					check: "probe_request",
+					ok: false,
+					detail: "HTTP 401: Incorrect API key provided.",
+				},
+			],
+			caveat: "",
+		});
+
+		const status = w.find(".jv-status");
+		expect(status.classes()).toContain("jv-status-bad");
+		expect(status.text()).toContain("Test failed.");
+		expect(status.text()).toContain("Incorrect API key provided.");
+	});
+
+	it("does not let an unreachable endpoint unlock the onboarding gate", async () => {
+		// singleModeCanStart requires a PASS for a typed key. "unverified" is not one:
+		// a typo'd public host fails DNS exactly like a container-only host does.
+		setPool([]);
+		const w = await mountEditor({ modes: ["quick"] });
+		const row = w.vm.rows[0];
+		row.credentialType = "api_key";
+		row.provider = "OpenAI";
+		row.model = "gpt-4o";
+		row.apiKey = "sk-typed";
+		row.baseUrl = "https://api.openai.com/v1";
+		await idle();
+		api.testLlmApiKey.mockResolvedValue({
+			ok: false,
+			verdict: "unverified",
+			checks: [{ check: "probe_request", ok: false, detail: "could not resolve" }],
+			caveat: "",
+		});
+
+		await w.vm.testSingleModeRow();
+		await idle();
+
+		expect(w.vm.smTest.passIdentity).toBe("");
+		expect(w.vm.singleModeCanStart).toBe(false);
+	});
+});
