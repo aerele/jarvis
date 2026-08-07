@@ -24,6 +24,11 @@
 			<KvRow label="Status">
 				<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
 			</KvRow>
+			<!-- The badge alone sent people looking in the wrong place (#678): it
+			     names a state but not what to do about it. This says what the
+			     workspace can actually tell, and deliberately does not guess a
+			     cause, because the turn error's own wording is unreliable (#702). -->
+			<p v-if="statusHint" class="pb-2 text-p-sm text-ink-gray-5">{{ statusHint }}</p>
 			<KvRow
 				v-if="isProxy && connStatus && connStatus.oauth_expires_at"
 				label="Expires"
@@ -368,6 +373,18 @@ const statusLabel = computed(() => {
 	if (health.value === "applying") return "Applying changes";
 	if (health.value === "attention") return "Needs attention";
 	return "Connected";
+});
+// One line under the badge, for the two states where "what now" is not obvious.
+// "Connected" gets none: a healthy workspace needs no instructions. The attention
+// copy names the evidence (a turn failed) without naming a cause, since the same
+// wording has come from problems that were not the provider at all (#702).
+const statusHint = computed(() => {
+	if (!isSM || !connStatus.value || disconnected.value) return "";
+	if (health.value === "attention")
+		return "A recent chat message failed. Check the model's key and base URL in AI models.";
+	if (health.value === "down")
+		return "This workspace's model settings have not reached your assistant yet.";
+	return "";
 });
 // design.md §3.6 status map: Success is green, Attention required and Broken are
 // red, Processing is blue. Disconnected is orange (warning), not red: nothing is

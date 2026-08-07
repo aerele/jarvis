@@ -1040,12 +1040,21 @@ def _llm_health(settings, pool_mode: bool) -> str:
 	              is not serving it. This is the same evidence is_ready_for_chat
 	              gates chat on, which is what keeps the badge and the gate from
 	              contradicting each other.
-	  attention - the container IS serving, but the last apply failed or the
+	  attention - the container IS serving, but something downstream is wrong:
+	              the last apply failed, the latest completed turn errored, or the
 	              fleet's own probe reports the chat subscription rejecting
-	              requests. Both are workspace-level verdicts. Per-MODEL verdicts
-	              deliberately stay out: AI models shows them per row, and one dead
-	              member of a healthy failover chain is what failover is for.
-	  ok        - serving, and the last apply came back clean.
+	              requests. All three are workspace-level verdicts. Per-MODEL
+	              verdicts deliberately stay out: AI models shows them per row, and
+	              one dead member of a healthy failover chain is what failover is
+	              for.
+	  ok        - serving, the last apply came back clean, and the last turn that
+	              finished did not error.
+
+	``ok`` still does NOT mean the provider was reached just now. Nothing here
+	probes an endpoint, and it should not pretend to: the two open defects about
+	the existing test path (#679, #680) are what a real reachability verdict has
+	to be built on. What changed for #678 is only that a workspace whose turns are
+	visibly failing can no longer read green.
 
 	The status prefixes match @/lib/syncStatus's, which is the SPA's one
 	translator for the same field, so the badge and the sync line cannot disagree
@@ -1058,10 +1067,50 @@ def _llm_health(settings, pool_mode: bool) -> str:
 		return "down"
 	if status.startswith("failed"):
 		return "attention"
+	# A confirmed apply says the config REACHED the container, never that the
+	# provider answers. An api-key model pointed at a base URL nothing serves
+	# applies perfectly and then fails every turn, which is how a green badge
+	# came to sit over a dead endpoint (#678). The turns themselves are the only
+	# local evidence that anything actually responded.
+	if _last_turn_errored():
+		return "attention"
 	# The fleet's own pool-wide subscription probe. Only an explicit rejection
 	# counts: "unchecked" (and a no-op apply, which runs no probe at all) means
 	# nobody looked, which is not evidence of a problem.
 	return "attention" if (settings.get("last_subscription_status") or "") == "unverified" else "ok"
+
+
+def _last_turn_errored() -> bool:
+	"""Did the most recent COMPLETED assistant turn in this workspace fail?
+
+	Deliberately kind-agnostic. `turn_handler._classify` sorts failures into
+	unreachable / timeout / provider / gateway, but its own #702 comment records
+	that the agent's wording is not trustworthy for that split: "LLM request
+	failed: network connection error." was the verbatim text of a turn that
+	failed because a paired-device file was mid-rewrite, nothing to do with the
+	network. So this reads the FACT that a turn errored, which is reliable, and
+	makes no claim about why - "attention", never "down", and the card's copy
+	sends the reader to the logs rather than naming a cause.
+
+	Completed means not still streaming and not parked for snapshot recovery; a
+	recovering turn has not failed yet. Cancellation is excluded for free:
+	stopping a turn writes `stopped`, not `error` (turn_handler:1183), so hitting
+	stop cannot paint the badge - that false-alarm shape is exactly what #561 was
+	about.
+
+	Self-clearing: only the LATEST completed turn is read, so the next turn that
+	succeeds takes the badge back to green with no stamp to reset. Workspace-wide
+	on purpose (this card is admin-only and describes the workspace), and
+	`get_all` is the right call for that since it does not filter by owner.
+	"""
+	rows = frappe.get_all(
+		"Jarvis Chat Message",
+		filters={"role": "assistant", "streaming": 0, "recovering": 0},
+		fields=["error"],
+		order_by="creation desc",
+		limit=1,
+	)
+	return bool(rows and (rows[0].get("error") or "").strip())
 
 
 def _llm_apply_confirmed(settings, pool_mode: bool) -> bool:

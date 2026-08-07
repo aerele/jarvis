@@ -78,6 +78,16 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		# (the stale-Single flake this suite has hit before).
 		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
 		self._saved = {f: frappe.db.get_single_value("Jarvis Settings", f) for f in self._FIELDS}
+		# health now also reads the latest completed turn (#678), which is real
+		# table data on a SHARED test site: one stray errored assistant row would
+		# flip every "ok" case in this class. Pinned false by default so each test
+		# exercises only the signal it names; the cases that care about turn
+		# history override it, and _last_turn_errored has its own class below.
+		# Neutralised by PATCH, not by deleting rows: wiping a shared site's data
+		# from a test is how live tenants were destroyed here before.
+		self._turn_patch = patch.object(account, "_last_turn_errored", return_value=False)
+		self._turn_patch.start()
+		self.addCleanup(self._turn_patch.stop)
 
 	def tearDown(self):
 		for field, value in self._saved.items():
@@ -203,6 +213,55 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 				out = account.get_llm_connection_status()
 		self.assertEqual(out["health"], "attention")
 
+	def test_a_failing_turn_stops_a_clean_apply_reading_green(self):
+		"""#678. Every input a confirmed apply gives us was clean - the config
+		reached the container and the probe saw nothing wrong - while every chat
+		turn failed against a base URL nothing served. A green badge there sent
+		people looking in the wrong place, so the turns themselves have to count.
+		"""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="ok (pool_update via admin)",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+			last_subscription_status="unchecked",
+		)
+		with patch.object(account, "_last_turn_errored", return_value=True):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+					out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "attention")
+
+	def test_a_failing_turn_never_downgrades_past_attention(self):
+		"""It is evidence that something downstream is wrong, never that the
+		config failed to arrive. "down" is reserved for an unconfirmed apply,
+		because that is the value is_ready_for_chat also refuses chat on, and the
+		two must not disagree."""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="ok (pool_update via admin)",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+		)
+		with patch.object(account, "_last_turn_errored", return_value=True):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+					out = account.get_llm_connection_status()
+		self.assertNotEqual(out["health"], "down")
+
+	def test_a_save_in_flight_still_wins_over_a_failing_turn(self):
+		"""Ordering guard: while a save is in flight the container is still on its
+		previous config, so the turn that just failed says nothing about the
+		config being applied now. "applying" has to keep precedence."""
+		self._seed(
+			proxy_active=1,
+			last_sync_status="pending: admin applying config",
+			llm_pool_synced_at="2026-07-30 10:00:00",
+		)
+		with patch.object(account, "_last_turn_errored", return_value=True):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+					out = account.get_llm_connection_status()
+		self.assertEqual(out["health"], "applying")
+
 	def test_an_unchecked_subscription_is_not_treated_as_a_failure(self):
 		"""An "unchecked" verdict means nobody looked (a no-op apply runs no probe
 		at all), which must not read as evidence of a problem."""
@@ -287,6 +346,56 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		m.assert_not_called()
 		self.assertEqual(out["disconnected"], True)
 		self.assertEqual(out["default_model"], "")
+
+
+class TestLastTurnErrored(FrappeTestCase):
+	"""The query itself. Driven through frappe.get_all rather than by writing
+	rows: this suite runs against a SHARED site, and the filters are the part
+	that silently rots (a renamed field would make the call return nothing and
+	the badge go permanently green, which is the bug this was written to fix)."""
+
+	def _call(self, rows):
+		with patch.object(frappe, "get_all", return_value=rows) as m:
+			out = account._last_turn_errored()
+		return out, m.call_args
+
+	def test_an_errored_latest_turn_reports_true(self):
+		out, _ = self._call([{"error": "LLM request failed: network connection error."}])
+		self.assertTrue(out)
+
+	def test_a_clean_latest_turn_reports_false(self):
+		out, _ = self._call([{"error": ""}])
+		self.assertFalse(out)
+
+	def test_a_workspace_with_no_turns_yet_reports_false(self):
+		"""A brand new workspace has never run a turn. That is an absence of
+		evidence, not a failure, and must not paint the badge."""
+		out, _ = self._call([])
+		self.assertFalse(out)
+
+	def test_whitespace_is_not_an_error(self):
+		out, _ = self._call([{"error": "   "}])
+		self.assertFalse(out)
+
+	def test_it_reads_only_the_latest_completed_assistant_turn(self):
+		"""Pins the filters. Assistant rows only (a user message has no error), and
+		neither a streaming nor a recovering row has finished failing yet - a
+		recovering turn is parked for snapshot recovery and may still succeed."""
+		_, call = self._call([])
+		self.assertEqual(call.args[0], "Jarvis Chat Message")
+		self.assertEqual(
+			call.kwargs["filters"],
+			{"role": "assistant", "streaming": 0, "recovering": 0},
+		)
+		self.assertEqual(call.kwargs["order_by"], "creation desc")
+		self.assertEqual(call.kwargs["limit"], 1)
+
+	def test_a_stopped_turn_carries_no_error_so_it_cannot_flag(self):
+		"""Cancelling writes `stopped`, never `error` (turn_handler), so a user
+		hitting stop leaves the badge alone. Painting red on a deliberate stop is
+		the #561 false-alarm shape, and this is the guard against it returning."""
+		out, _ = self._call([{"error": None}])
+		self.assertFalse(out)
 
 
 class TestHasLlmConfig(FrappeTestCase):
