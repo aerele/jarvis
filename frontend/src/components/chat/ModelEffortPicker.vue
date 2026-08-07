@@ -90,6 +90,25 @@
 				</button>
 			</template>
 
+			<!-- Adding a PROVIDER is configuration, not selection. The picker lists
+			     only what this tenant can actually run today (its configured
+			     providers and every catalog model on them); a provider with no
+			     credential cannot be selected at all, since the key must physically
+			     exist in the container. So this links to the AI models pane rather
+			     than restating its contents as dead rows. Hidden for members who
+			     cannot reach that pane - a gated section falls back to General, so
+			     the row would silently bounce them (same reasoning as the
+			     no-AI-connected banner's button). -->
+			<button
+				v-if="canAddProvider"
+				class="mep-item mep-add"
+				type="button"
+				@click="onAddProvider"
+			>
+				<span class="mep-item-body"><span class="mep-name">Add a provider</span></span>
+				<span class="mep-plus" aria-hidden="true">+</span>
+			</button>
+
 			<div class="mep-div" />
 
 			<!-- effort → side flyout (wrapper keeps the flyout a SIBLING of the row
@@ -219,8 +238,9 @@ const props = defineProps({
 	modelsByProvider: { type: Array, default: () => [] },
 	showProviders: { type: Boolean, default: false },
 	personaEnabled: { type: Boolean, default: false },
+	canAddProvider: { type: Boolean, default: false },
 });
-const emit = defineEmits(["select-model", "select-thinking"]);
+const emit = defineEmits(["select-model", "select-thinking", "add-provider"]);
 
 const store = useShellStore();
 const assistantName = agentName;
@@ -254,6 +274,13 @@ function onModel(m) {
 }
 function onEffort(level) {
 	emit("select-thinking", level);
+	close();
+	triggerRef.value?.focus();
+}
+// The host owns where this goes (the settings dialog is shell state, not the
+// picker's), so this only closes and reports the intent.
+function onAddProvider() {
+	emit("add-provider");
 	close();
 	triggerRef.value?.focus();
 }
@@ -437,6 +464,17 @@ watch(open, (isOpen) => {
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
+/* Reads as a way OUT of the list rather than another thing to pick, so it
+   carries the secondary text colour the rows do not. */
+.mep-add .mep-name {
+	color: var(--text-2);
+}
+.mep-plus {
+	color: var(--text-3);
+	font-size: 15px;
+	line-height: 1;
+}
+
 .mep-div {
 	height: 1px;
 	background: var(--border);

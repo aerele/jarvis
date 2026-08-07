@@ -2877,8 +2877,10 @@
 								:models-by-provider="modelsByProvider"
 								:show-providers="showProviders"
 								:persona-enabled="ui.persona_enabled"
+								:can-add-provider="canConnectModel"
 								@select-model="selectModel"
 								@select-thinking="selectThinking"
+								@add-provider="goConnectModel"
 							/>
 						</template>
 					</Composer>
