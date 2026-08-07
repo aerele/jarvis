@@ -581,4 +581,44 @@ describe("jarvis#708 chat-readiness wait exhaustion: honest copy + a real exit",
 		expect(w.vm.state.connectSupportOffered).toBe(false);
 		w.unmount();
 	});
+
+	it("a SUPERSEDED terminal reached AFTER a prior exhaustion withdraws the stale offer", async () => {
+		// Retry re-follows the SAME operation (no fresh saveConnect), so the flag a
+		// prior readiness-wait exhaustion set is still sitting on state when a later
+		// poll of that operation comes back superseded - a different situation
+		// ("reload and retry") that must not inherit an unrelated stale offer.
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "signup" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+
+		w.vm.onOpUpdate({ phase: "superseded", message: "Your workspace assignment changed." });
+
+		expect(w.vm.state.connectPhase).toBe("superseded");
+		expect(w.vm.state.connectSupportOffered).toBe(false);
+		w.unmount();
+	});
+
+	it("the generic support dead-end reached AFTER a prior exhaustion withdraws the stale offer", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "signup" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+
+		w.vm.onTerminal(null); // onTerminal's own dead-end: no status at all
+
+		expect(w.vm.state.connectPhase).toBe("support");
+		expect(w.vm.state.connectSupportOffered).toBe(false);
+		w.unmount();
+	});
 });

@@ -2841,6 +2841,10 @@ function onOpUpdate(ui) {
 		state.connectMessage =
 			(ui && ui.message) ||
 			"Your workspace assignment changed. Reload this page and try again.";
+		// A stale offer from an EARLIER readiness wait (jarvis#708) must not survive
+		// into this unrelated terminal - supersession means reload, not "still not
+		// resolved", and this phase already has its own recovery action.
+		state.connectSupportOffered = false;
 	} else {
 		// WORKING (pending / applying), and the descriptor seed.
 		state.connectPhase = "working";
@@ -2969,6 +2973,9 @@ function enterSupport() {
 	// IdempotencyKeyConflict, or an old-admin descriptor-less response) would make
 	// every subsequent Retry re-submit the same conflicting key and dead-end again.
 	forgetIdem();
+	// This dead-end is unrelated to a chat-readiness wait (jarvis#708): don't let a
+	// stale offer from an earlier one show under a different failure's message.
+	state.connectSupportOffered = false;
 }
 
 // Follow a descriptor (or a bare op id on resume) to its terminal state. Supersession
