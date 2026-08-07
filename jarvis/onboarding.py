@@ -2045,6 +2045,21 @@ def get_llm_sync_status() -> dict:
 	if status.startswith(_pending_applying_status()):
 		status = _reconcile_pending_applying(s) or status
 
+	return _sync_status_payload(s, status)
+
+
+def _sync_status_payload(s, status: str) -> dict:
+	"""Project Jarvis Settings into the poller's response shape. PURE: it reads and
+	formats, and unlike ``get_llm_sync_status`` it never probes admin and never
+	writes.
+
+	Split out so a caller that has already decided what the workspace's state is can
+	report it without the lazy reconcile running underneath and committing a
+	different answer (#713 review). ``resync_llm``'s not-configured branch is the
+	case that needs it: it has just established there is nothing to re-drive, so a
+	status projection that could stamp "ok (converged ...)" on the way out would
+	contradict the very answer it is returning."""
+
 	def _json_list(raw):
 		"""Stored JSON text -> list, degrading a corrupt/empty value to [] rather than
 		ever 500ing this poller."""
@@ -2066,6 +2081,14 @@ def get_llm_sync_status() -> dict:
 		# contract 1.11. The AI-models list keys each api-key row's health off this.
 		"model_statuses": _json_list(s.get("last_model_statuses")),
 	}
+
+
+#: Minimum gap between two Resync PUSHES. Sized to outlast a normal apply so the
+#: second click of an impatient pair is throttled rather than doubling the work,
+#: and to stay well inside the customer's shared 20/hour rotate-ops budget even if
+#: someone clicks steadily for an hour.
+_RESYNC_COOLDOWN_S = 180
+_RESYNC_COOLDOWN_KEY = "jarvis:resync_llm_cooldown"
 
 
 @frappe.whitelist()
@@ -2091,15 +2114,26 @@ def resync_llm() -> dict:
 	The push is only for a workspace admin says is NOT converged.
 
 	Gated on ``require_jarvis_admin`` (it drives a container mutation, like every
-	other write on this module) and safe to click repeatedly: the queued work
-	carries the same job ids and takes the same redis lock as an ordinary save, so
-	a second click coalesces into the first rather than racing it.
+	other write on this module).
+
+	THROTTLED, because "click it again" is what a customer does to a status that has
+	not moved. Frappe's ``deduplicate=True`` only collapses a second click while the
+	first job is still queued or running; once a worker exits without converging -
+	routine, since the in-job poll gives up after ``_POOL_CONVERGE_DEADLINE_S`` - the
+	job id frees and the next click drives a WHOLE new push: another container
+	re-render and another unit of the customer's shared 20/hour rotate-ops budget,
+	until admin starts refusing with a rate-limit the SPA renders as a failure. So a
+	push is allowed at most once per ``_RESYNC_COOLDOWN_S``; inside that window the
+	call reports ``throttled`` with the live status and queues nothing. The Ready
+	probe is NOT throttled - it neither pushes nor restarts, and answering "your
+	config is already live" instantly is the best outcome a Resync click can have.
 
 	Returns ``get_llm_sync_status()``'s shape, so a caller can render the response
 	directly with no second round trip, plus ``outcome``:
 
 	  * ``converged``      - admin already serves this config; markers stamped.
 	  * ``queued``         - a re-push was enqueued; ``leg`` is "pool" or "direct".
+	  * ``throttled``      - a re-push went out moments ago; nothing was queued.
 	  * ``not_configured`` - nothing saved to re-drive; nothing was queued.
 	"""
 	from jarvis.account import _has_llm_config
@@ -2113,17 +2147,37 @@ def resync_llm() -> dict:
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
 	# Both halves matter: a credential with no control-plane tenancy has nowhere to
-	# be pushed, and a tenancy with no credential has nothing to push.
+	# be pushed, and a tenancy with no credential has nothing to push. Projected
+	# WITHOUT get_llm_sync_status's lazy reconcile, which could otherwise stamp an
+	# "ok (converged ...)" on its way out and contradict this very answer.
 	if not _has_llm_config(settings) or not _has_admin_credentials(settings):
-		return {**get_llm_sync_status(), "outcome": "not_configured", "leg": ""}
+		status = settings.get("last_sync_status") or ""
+		return {**_sync_status_payload(settings, status), "outcome": "not_configured", "leg": ""}
 
 	state, _reason = _admin_chat_readiness()
-	if state == "Ready" and _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
-		# The stamp's own commit gate only fires in a worker; this is a request.
-		frappe.db.commit()
+	if state == "Ready":
+		# READY MEANS NEVER PUSH, whether or not our own stamp lands. Making the push
+		# conditional on the stamp succeeding would restart a healthy container in
+		# precisely the situation this endpoint exists to handle gently: five writers
+		# race to record this same Ready, so losing that race is ordinary, and it
+		# means SOMEONE recorded it. The status below carries whatever landed.
+		if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
+			# The stamp's own commit gate only fires in a worker; this is a request.
+			frappe.db.commit()
 		return {**get_llm_sync_status(), "outcome": "converged", "leg": ""}
 
+	cache = frappe.cache()
+	if cache.get_value(_RESYNC_COOLDOWN_KEY):
+		return {**get_llm_sync_status(), "outcome": "throttled", "leg": ""}
+
+	# Armed only once a push is actually queued. Arming it first would let a call
+	# that queued NOTHING still lock the customer out for three minutes - the same
+	# "click it again and nothing happens" dead end this endpoint exists to remove.
+	# Fails open when redis is down (RedisWrapper swallows connection errors): that
+	# loses the throttle, never the retry, and admin's own rate limiter is the
+	# backstop that actually protects the rotate-ops budget.
 	leg = request_resync(settings)
+	cache.set_value(_RESYNC_COOLDOWN_KEY, 1, expires_in_sec=_RESYNC_COOLDOWN_S)
 	return {**get_llm_sync_status(), "outcome": "queued", "leg": leg}
 
 

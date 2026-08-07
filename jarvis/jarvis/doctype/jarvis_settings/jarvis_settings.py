@@ -147,6 +147,13 @@ _SETTINGS_WRITE_ATTEMPTS = 3
 _SETTINGS_WRITE_BACKOFF_S = 0.05
 
 
+#: The exception classes that mean "another connection got there first". ONE
+#: definition, shared by ``_is_write_conflict`` and by the ``except`` clauses in
+#: both sync workers, so a later widening cannot reach the retry loop while
+#: silently missing the handlers, or the reverse.
+_WRITE_CONFLICT_ERRORS: tuple[type[BaseException], ...] = (frappe.QueryDeadlockError,)
+
+
 def _is_write_conflict(e: BaseException) -> bool:
 	"""Did MariaDB refuse this statement because another connection moved the row
 	after our transaction's snapshot opened (#713)?
@@ -165,7 +172,42 @@ def _is_write_conflict(e: BaseException) -> bool:
 	reachable without unwrapping ``QueryDeadlockError``'s argument, and an older
 	MariaDB that reports the same lost race as a plain 1213 has to take this branch
 	too or the customer-facing half of the fix only works on 11.6+."""
-	return isinstance(e, frappe.QueryDeadlockError)
+	return isinstance(e, _WRITE_CONFLICT_ERRORS)
+
+
+def _owns_transaction() -> bool:
+	"""May this code END the current transaction (commit or roll back)?
+
+	True only where this process started one and nothing upstream is depending on
+	it: a background job (``frappe.local.job`` is set exclusively by
+	``execute_job``) or a migrate patch, where committing between units is normal.
+
+	False in a web request, whose transaction belongs to the request: frappe commits
+	it on success and rolls it back on any exception, and code that ends it halfway
+	takes that decision away. False from ``bench execute`` and the CLI too, which is
+	imprecise (they do own their transaction) but harmless: the only thing withheld
+	there is a retry, and every caller treats a skipped retry as a lost race it will
+	re-attempt."""
+	return bool(getattr(frappe.local, "job", None) or frappe.flags.in_migrate)
+
+
+def _inside_a_save() -> bool:
+	"""Is a ``Jarvis Settings`` ``.save()`` in flight further up this stack?
+
+	The precise question ``_owns_transaction`` cannot answer. ``frappe.flags.
+	currently_saving`` holds ``(doctype, name)`` from ``set_user_and_timestamp``
+	until the end of ``run_post_save_methods``, so it spans ``on_update`` - which is
+	exactly where ``_enqueue_pool_sync`` and ``_on_update_single_model_legacy``
+	write their pending status from.
+
+	It matters because that caller has uncommitted field writes of its own in this
+	transaction. A conflict there must be RE-RAISED so the whole save fails as one:
+	rolling back and re-persisting only ``last_sync_status`` would leave the rest of
+	the save discarded while every frame up the stack carries on and reports
+	success. That hazard is about NESTING, not about being in a job, so it is asked
+	separately - a job that ever calls ``settings.save()`` inherits the same
+	protection without anyone having to remember."""
+	return ("Jarvis Settings", "Jarvis Settings") in (frappe.flags.currently_saving or [])
 
 
 def _refresh_db_snapshot() -> None:
@@ -182,11 +224,11 @@ def _refresh_db_snapshot() -> None:
 	worker's own terminal write fail. Calling this before each probe shrinks the
 	exposure from "the whole job" to "one HTTP round trip".
 
-	Same real-worker gate as ``_commit_terminal_sync_status``, and for the same
-	reason: outside ``execute_job`` there is no rollback to defeat and committing
-	would break FrappeTestCase isolation. A single-connection context has no
+	Gated on ``_owns_transaction`` for the reason that predicate exists: ending a
+	transaction we did not start is not ours to do. It also happens to keep
+	FrappeTestCase isolation intact, and a single-connection context has no
 	competing writer to lose to, so skipping the refresh there costs nothing."""
-	if getattr(frappe.local, "job", None) or frappe.flags.in_migrate:
+	if _owns_transaction():
 		frappe.db.commit()
 
 
@@ -225,15 +267,38 @@ def _write_settings_fields(settings, fields: dict) -> bool:
 	the present. It discards nothing: MariaDB aborts the transaction itself on
 	1020/1213, which is directly visible in the #713 trace - the try/finally
 	backstop's own db_set ran 2ms after the failure and SUCCEEDED, which is only
-	possible on a read view the server had already replaced. (jarvis-admin-v2 #264
-	reasoned the other way, that ER_CHECKREAD is statement-level and leaves the
-	transaction usable, and deliberately did not roll back; its recovery path
-	commits first, so it gets a fresh snapshot regardless.)
+	possible on a read view the server had already replaced. (jarvis-admin-v2 PR
+	#264, for its issue #263, reasoned the other way - that ER_CHECKREAD is
+	statement-level and leaves the transaction usable - and deliberately did not
+	roll back; its recovery path commits first, so it gets a fresh snapshot
+	regardless.)
 
-	The one caller that reaches here holding work worth protecting does not: the
-	request path is ``save_llm_pool``, which COMMITS the customer's saved config
-	before it calls ``sync_pool_now`` at all, so no rollback here can cost anyone
-	the credential they just typed."""
+	AND THE REPLAY ONLY RUNS WHERE THE TRANSACTION IS OURS TO END
+	(``_owns_transaction``). Elsewhere the conflict is reported, not replayed: a
+	1020 or 1213 has already destroyed the transaction server-side, so rolling back
+	and quietly re-persisting our one field would publish OUR write while the
+	caller's is gone. #713 happened in a background job, which owns its transaction
+	outright, so scoping the replay there costs the fix nothing.
+
+	Reported rather than RAISED, though, and the distinction is the point. Returning
+	False lets a poller or a Resync click carry on and say "still applying", which is
+	true and self-correcting; raising would put a transient race back in front of a
+	customer, which is the entire complaint in #713 and would hit hardest in
+	``_reconcile_pending_applying``, the highest-frequency caller of all. The one
+	place a raise IS correct is nested inside a save (``_inside_a_save``), where the
+	caller's other field writes have to fail with it.
+
+	ALWAYS ``update_modified=False``, which is a real trade-off and not an
+	oversight. Several of these writes previously took ``db_set``'s default and
+	bumped ``modified``, so a Desk save of Jarvis Settings that straddled one of
+	them was caught by ``check_if_latest`` and refused. That protection is given up
+	deliberately: ``modified`` is the single most contended row in this doctype
+	(every ``db_set`` in the app that does not opt out writes it), so stamping it
+	from four writers already racing each other would reintroduce a good share of
+	the conflict this function exists to remove. It also matches what the rest of
+	the app already does for Jarvis Settings bookkeeping - the oauth, chat-device,
+	suggestions, wiki-mirror and skills writers all pass
+	``update_modified=False``."""
 	import time as _time
 
 	last_error: BaseException | None = None
@@ -243,8 +308,15 @@ def _write_settings_fields(settings, fields: dict) -> bool:
 			settings.update(dict(fields))
 			return True
 		except Exception as e:
-			if not _is_write_conflict(e):
+			# Three outcomes, and only the first is a raise. Nested in a save, the
+			# caller's uncommitted work makes the failure theirs to own. Otherwise the
+			# lost race is REPORTED, never raised - a poller or a Resync click has no
+			# business turning it into a customer-visible error, which was the whole
+			# of #713 - and the replay is added only where the transaction is ours.
+			if not _is_write_conflict(e) or _inside_a_save():
 				raise
+			if not _owns_transaction():
+				return False
 			last_error = e
 			if attempt < _SETTINGS_WRITE_ATTEMPTS - 1:
 				frappe.db.rollback()
@@ -270,13 +342,14 @@ def _stamp_converged_ok(settings, *, is_pool: bool) -> bool:
 	direct apply that converged via reconcile would flip "ok" yet strand the
 	tenant at llm_provisioning forever (an "ok" status stops every reconcile).
 
-	Returns whether the stamp landed. FOUR callers race on these same three rows -
+	Returns whether the stamp landed. FIVE callers race on these same three rows -
 	the in-band sync worker's convergence poll, the pool worker's, the */5
-	``reconcile_pending_llm_sync`` and the SPA's own ``get_llm_sync_status`` poller
-	via ``onboarding._reconcile_pending_applying`` - all of them driven by the same
-	event, admin flipping chat_readiness to Ready. Losing that race is ordinary and
+	``reconcile_pending_llm_sync``, the SPA's own ``get_llm_sync_status`` poller via
+	``onboarding._reconcile_pending_applying``, and a customer's ``resync_llm``
+	click - nearly all of them driven by the same event, admin flipping
+	chat_readiness to Ready. Losing that race is ordinary and
 	self-correcting (whoever won wrote the identical outcome, and every one of the
-	four re-probes), so a lost stamp is reported as False and never raised: it is
+	five re-probes), so a lost stamp is reported as False and never raised: it is
 	the caller's cue to leave the reconcile-owned pending state behind rather than
 	a failure to put in front of a customer (#713)."""
 	import frappe as _frappe
@@ -920,7 +993,10 @@ class JarvisSettings(Document):
 		pending_label = (
 			"pending: provisioning container" if action == "restart" else "pending: rotating credentials"
 		)
-		self.db_set("last_sync_status", pending_label, update_modified=False)
+		# Through the guarded writer like every other status write, so the rule is
+		# uniform: a status write on THIS doctype never uses db_set, whether or not
+		# the caller happens to be inside a save (#713).
+		_write_settings_fields(self, {"last_sync_status": pending_label})
 		# In tests, run inline so existing assertions on the final status
 		# don't have to poll. Set ``frappe.flags.run_admin_sync_inline``
 		# from app code that needs the synchronous behavior (rare).
@@ -1139,9 +1215,13 @@ class JarvisSettings(Document):
 			_commit_terminal_sync_status()
 			terminal_written = True
 			frappe.logger().info(f"admin_client: rate-limited; retry_after={retry}s")
-		except frappe.QueryDeadlockError:
-			# #713. A lost write-conflict race is NOT a failed sync, and it must
-			# never read like one: the admin call succeeded, the container has the
+		except _WRITE_CONFLICT_ERRORS:
+			# #713, a BACKSTOP rather than the primary path: the status writes above
+			# all go through _write_settings_fields, which reports a lost race instead
+			# of raising, so what reaches here is a conflict from some OTHER statement
+			# in this body. Handled the same way, because the reasoning does not depend
+			# on which statement lost. A lost write-conflict race is NOT a failed sync,
+			# and it must never read like one: the admin call succeeded, the container has the
 			# config, and the only thing that did not happen is this bench writing
 			# down that it did. The customer's workspace was reported broken for a
 			# race between two writers that had both just been told everything was
@@ -1805,8 +1885,11 @@ def _enqueued_sync_via_admin_pool(
 				title="Jarvis: admin validation failed (pool sync)",
 				message=_frappe.get_traceback(),
 			)
-		except _frappe.QueryDeadlockError:
-			# #713, the pool twin of the branch in _sync_via_admin. Same reasoning:
+		except _WRITE_CONFLICT_ERRORS:
+			# #713, the pool twin of the branch in _sync_via_admin, and a backstop for
+			# the same reason: the guarded writer already absorbs the status writes, so
+			# this catches a conflict raised by anything else in this body. Same
+			# reasoning either way:
 			# admin already has the config, only the bookkeeping lost a race, and the
 			# pending marker is the state three converging paths act on.
 			_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
@@ -2107,7 +2190,15 @@ def request_resync(settings) -> str:
 	to "Applying your changes" on the same round trip, then enqueues under the SAME
 	job ids and the SAME redis lock as an ordinary save - so a Resync during an
 	in-flight sync coalesces into it instead of racing it or restarting the
-	container twice."""
+	container twice. (Only while that sync is still queued or running; the caller
+	owns the longer-term throttle.)
+
+	The direct leg is always ``"restart"``, never ``_classify_llm_change``'s lighter
+	``"reload"``. Two reasons, and they agree: the classifier needs
+	``get_doc_before_save()``, which is None outside an actual save, and its own
+	rule for a re-push of UNCHANGED creds after a non-ok status is "restart" anyway,
+	because a hot secret rotation cannot repair a container that never took the
+	config."""
 	from jarvis.jarvis.pool_serialize import compute_pool_mode
 
 	if compute_pool_mode(settings):
