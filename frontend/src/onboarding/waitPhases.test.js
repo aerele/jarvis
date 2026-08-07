@@ -7,6 +7,7 @@ import {
 	readinessPhase,
 	inFlightPhase,
 	connectHeadline,
+	phaseProgress,
 } from "./waitPhases.js";
 
 // ---- provisioning wait ---------------------------------------------------
@@ -214,4 +215,80 @@ test("headline: no branch renders the phrase jarvis#709 removed", () => {
 	for (const [phase, opts] of cases) {
 		assert.doesNotMatch(connectHeadline(phase, opts), /still finishing setup/i);
 	}
+});
+
+// ---- progress bar (jarvis#726) --------------------------------------------
+
+test("progress: an ACTIVE phase is 1 of 3, and determinate", () => {
+	const p = phaseProgress(provisioningPhase({ answered: true, tenantStatus: "pending" }));
+	assert.equal(p.done, 1);
+	assert.equal(p.current, 2);
+	assert.equal(p.total, 3);
+	assert.equal(p.percent, 33);
+	assert.equal(p.indeterminate, false);
+});
+
+test("progress: a DONE phase is 2 of 3, and determinate - the only branch that fills segment two", () => {
+	const p = phaseProgress(provisioningPhase({ answered: true, tenantStatus: "running" }));
+	assert.equal(p.done, 2);
+	assert.equal(p.current, 3);
+	assert.equal(p.percent, 67);
+	assert.equal(p.indeterminate, false);
+});
+
+// frappe-ui's Progress re-derives filledIntervalCount as
+// Math.round((value/100)*intervalCount) - confirm the rounding in `percent`
+// never changes which segment count that produces, for both reachable states.
+test("progress: percent survives frappe-ui's own round-trip back to a segment count", () => {
+	for (const [done, total] of [
+		[1, 3],
+		[2, 3],
+	]) {
+		const percent = phaseProgress({
+			state: done === 2 ? PHASE_STATE.DONE : PHASE_STATE.ACTIVE,
+		}).percent;
+		assert.equal(Math.round((percent / 100) * total), done, `done=${done}`);
+	}
+});
+
+test("progress: readinessPhase has no DONE branch, so it never passes 1 of 3 in place", () => {
+	const reasons = [
+		"llm_pool_provisioning",
+		"llm_provisioning",
+		"container_provisioning",
+		"readiness_unconfirmed",
+		"authority_repair_required",
+		"subscription_suspended",
+		"site_replaced",
+		"unmapped",
+	];
+	for (const reason of reasons) {
+		const p = phaseProgress(readinessPhase({ answered: true, reason }));
+		assert.equal(p.done, 1, reason);
+	}
+});
+
+test("progress: UNKNOWN is indeterminate even though it still fills the settled segment", () => {
+	const p = phaseProgress(readinessPhase({ answered: true, reason: "readiness_unconfirmed" }));
+	assert.equal(p.indeterminate, true);
+	assert.equal(p.done, 1); // segment one is a settled fact, not faked by this state
+});
+
+test("progress: an unanswered poll is indeterminate too", () => {
+	assert.equal(phaseProgress(readinessPhase({ answered: false })).indeterminate, true);
+	assert.equal(phaseProgress(provisioningPhase({ answered: false })).indeterminate, true);
+});
+
+test("progress: inFlightPhase is ACTIVE, not UNKNOWN - determinate per the module's own philosophy", () => {
+	const p = phaseProgress(inFlightPhase("Checking on your workspace"));
+	assert.equal(p.indeterminate, false);
+	assert.equal(p.done, 1);
+	assert.equal(p.current, 2);
+	assert.equal(p.label, "Checking on your workspace");
+});
+
+test("progress: no phase read yet (null/undefined) is indeterminate and never throws", () => {
+	assert.equal(phaseProgress(null).indeterminate, true);
+	assert.equal(phaseProgress(undefined).indeterminate, true);
+	assert.equal(phaseProgress(null).done, 1);
 });

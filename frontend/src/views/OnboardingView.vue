@@ -588,6 +588,26 @@
 											{{ setupRecheckNote }}
 										</p>
 									</div>
+									<!-- jarvis#726: a step-counted Progress bar, reading the SAME
+										 phase object the row below already renders - see
+										 waitPhases.phaseProgress for what it measures and why it
+										 goes indeterminate instead of guessing a percentage. Label is
+										 just "Step N of 3", not the phase's own sentence - that
+										 sentence already renders once, in the row below; repeating it
+										 here read as an accidental duplicate rather than emphasis. -->
+									<Progress
+										v-if="!provisioningDelayed"
+										class="ob-progress"
+										:class="{
+											'ob-progress--indeterminate':
+												provisioningProgress.indeterminate,
+										}"
+										:value="provisioningProgress.percent"
+										intervals
+										:interval-count="provisioningProgress.total"
+										size="md"
+										:label="`Step ${provisioningProgress.current} of ${provisioningProgress.total}`"
+									/>
 									<!-- Phase list. Row 1 is a settled fact. Row 2 renders ONLY what
 										 the last provisioning tick observed (waitPhases.js), so
 										 "Jarvis is getting ready for you" appears when admin itself
@@ -1252,6 +1272,24 @@
 												}}
 											</p>
 										</div>
+										<!-- jarvis#726: same step-counted bar as the provisioning wait,
+											 reading readinessStage. readinessPhase has no DONE branch
+											 (waitPhases.js), so this bar stays at 1 of 3 until the
+											 screen navigates to chat - it never fills segment two in
+											 place. Label is "Step N of 3" only, not the phase's own
+											 sentence - see the provisioning bar's comment above. -->
+										<Progress
+											class="ob-progress"
+											:class="{
+												'ob-progress--indeterminate':
+													readinessProgress.indeterminate,
+											}"
+											:value="readinessProgress.percent"
+											intervals
+											:interval-count="readinessProgress.total"
+											size="md"
+											:label="`Step ${readinessProgress.current} of ${readinessProgress.total}`"
+										/>
 										<!-- Phase list, driven by is_ready_for_chat's `reason` on the
 											 LAST poll (waitPhases.js). Before this the screen showed one
 											 fixed sentence for the whole two-minute wait, so a workspace
@@ -1489,7 +1527,7 @@
 <script setup>
 import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
-import { Button, FormControl, FeatherIcon, ErrorMessage } from "frappe-ui";
+import { Button, FormControl, FeatherIcon, ErrorMessage, Progress } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
@@ -1534,6 +1572,7 @@ import {
 	readinessPhase,
 	inFlightPhase,
 	connectHeadline,
+	phaseProgress,
 } from "@/onboarding/waitPhases.js";
 import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
@@ -1697,6 +1736,9 @@ const readinessStage = computed(() =>
 		  // reported that, so naming it is grounded.
 		  inFlightPhase("Applying your AI connection")
 );
+// jarvis#726: the Progress bar next to the phase list above, reading the SAME
+// readinessStage - see waitPhases.phaseProgress.
+const readinessProgress = computed(() => phaseProgress(readinessStage.value));
 
 // Plan 01 billing state. Namespaced by site identity + logged-in user so one
 // site's / user's transitional billing PII can never prefill another's on a
@@ -2464,6 +2506,9 @@ const provisioningStage = computed(() =>
 		? provisioningPhase(provisioningSeen.value)
 		: inFlightPhase("Checking on your workspace")
 );
+// jarvis#726: the Progress bar next to the phase list above, reading the SAME
+// provisioningStage - see waitPhases.phaseProgress.
+const provisioningProgress = computed(() => phaseProgress(provisioningStage.value));
 
 // The FULL-SCREEN busy view is only for the phases where there is genuinely
 // nothing to press: starting the signup, the sheet being open, confirming.
@@ -3959,6 +4004,33 @@ onUnmounted(() => {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
+/* ---- staged wait progress bar (jarvis#726, waitPhases.phaseProgress) ----
+   Segment one (the settled fact) is never touched here - it stays the plain
+   frappe-ui Progress fill in every state, determinate or not. Only the
+   CURRENT segment (nth-child(2) of the three fixed intervals) gets the
+   indeterminate treatment, and only when the phase itself is UNKNOWN: a
+   muted pulse reusing --surface-3, the same colour the waiting dot below
+   already uses for "nothing has reported this yet", so "we don't currently
+   know" reads consistently across both the bar and the phase list next to
+   it instead of inventing a second visual vocabulary for the same idea. */
+.ob-progress {
+	margin: 0 auto;
+	max-width: 420px;
+}
+.ob-progress--indeterminate :deep([role="progressbar"] > div:nth-child(2)) {
+	background: var(--surface-3);
+	animation: ob-progress-pulse 1.6s ease-in-out infinite;
+}
+@keyframes ob-progress-pulse {
+	0%,
+	100% {
+		opacity: 0.5;
+	}
+	50% {
+		opacity: 1;
+	}
+}
+
 /* ---- staged wait phases (waitPhases.js) --------------------------------
    One row per phase. The row's MODIFIER is the honesty contract, not
    decoration: `active` is only ever set from an observation, `unknown` means a
@@ -4092,6 +4164,10 @@ onUnmounted(() => {
 	}
 	.ob-details-form :deep(.jvc-field) {
 		transition: none;
+	}
+	.ob-progress--indeterminate :deep([role="progressbar"] > div:nth-child(2)) {
+		animation: none;
+		opacity: 0.75;
 	}
 }
 </style>
