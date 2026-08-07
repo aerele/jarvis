@@ -143,7 +143,7 @@ this is the mapping (use it when porting, never when writing new UI):
 > | Illustration | Renders during | Subject |
 > |---|---|---|
 > | `SetupNeuralNet` | the long provisioning/readiness wait | ERP modules connecting to the mark |
-> | `PaymentConfirmingArt` | the payment-confirming wait only | coins and notes arriving at the mark |
+> | `PaymentConfirmingArt` | the payment-confirming wait only | banknotes arriving at the mark along a rail |
 >
 > Rules that come with the second one (product owner authorized it on 2026-08-07, overruling
 > the previous single-illustration wording):
@@ -154,15 +154,18 @@ this is the mapping (use it when porting, never when writing new UI):
 > - **Neither is a spinner.** §3.8 still stands: `JvSpinner` is the only loading indicator, and
 >   short waits (a sub-second navigation, a button's own `:loading`) get it, not an
 >   illustration. These two are for waits measured in tens of seconds.
-> - **The money tones are `--money-coin` and `--money-note`, not the semantic ramps.** Green
->   (`--green`) means success and amber (`--amber`) means warning. The confirming screen renders
->   while the payment is *unconfirmed*, so it must not be painted in either, and gold leads so
->   the screen never reads as a green "paid" tick before that is true. Status is carried by the
->   copy. These two tokens are for this illustration and nothing else: never text, badges,
->   banners or controls.
-> - **No emoji, here least of all.** §3.9 holds: emoji are platform-drawn, cannot take a token
->   colour, and do not theme, so they can satisfy none of the conditions above. Money is drawn
->   as vectors.
+> - **The money green is `--money-note` / `--money-note-bd`, never the semantic success ramp.**
+>   `--green` means success/paid. The confirming screen renders while the payment is
+>   *unconfirmed*, so painting it in the success colour would assert the outcome the screen
+>   exists to say we do not have yet. These two tokens flip by theme (a fill that works on a
+>   white card disappears on a near-black one) and are for this illustration and nothing else:
+>   never text, badges, banners or controls. Status is carried by the copy, never by the colour.
+> - **Notes, not coins.** Circles read as a slot machine, which is the wrong note to strike on
+>   the screen that appears right after taking someone's money. Rectangles on a rail read as a
+>   transfer.
+> - **No emoji, here least of all.** §3.9 holds: emoji are platform-drawn, so the same screen
+>   would ship a different picture per OS; they cannot take a token colour, so they cannot meet
+>   the condition above; and they ignore theme. The rupee glyph is drawn as canvas text.
 >
 > Adding a third illustration is a change to this table, not a judgement call at the call site.
 

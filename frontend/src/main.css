@@ -18,21 +18,34 @@
 	--brand-2: #8b5cf6;
 	--brand-grad: linear-gradient(135deg, var(--brand-1), var(--brand-2));
 
-	/* Money tones, for the payment-confirming illustration ONLY
-	   (PaymentConfirmingArt.vue). Deliberately NOT the semantic ramps:
+	/* Money green, for the banknotes in the payment-confirming illustration
+	   ONLY (PaymentConfirmingArt.vue).
 
-	   --green (#16a34a) means success/paid and --amber (#d97706) means
-	   warning. The confirming screen renders while the payment is still
-	   UNCONFIRMED, so painting it in either ramp would state an outcome the
-	   screen exists to say we do not have yet. These are duller and warmer
-	   than both, read as coin metal and banknote at a glance, and carry no
-	   status meaning anywhere else in the product.
+	   Deliberately NOT the semantic success ramp. --green (#16a34a) means
+	   success/paid, and this illustration renders while the payment is still
+	   UNCONFIRMED - the whole point of that screen is that we do not have a
+	   verdict yet. Painting it in the success colour would assert the payment
+	   succeeded before it has, which is the same class of false progress
+	   jarvis#708/#709 were about. It reads as money, it does not read as a
+	   green tick.
 
-	   Theme-invariant for the same reason as the brand tokens above: this is
-	   an illustration, not chrome, and it must not restate itself per theme.
+	   Unlike the brand pair above these DO flip by theme, because a fill dark
+	   enough to sit on a white card disappears on a near-black one. Written as
+	   a :root default plus a [data-theme="dark"] override rather than in
+	   theme.js's paletteVars, so they resolve everywhere - the jv-* vars only
+	   resolve inside a subtree that bound paletteVars, and applyTheme() already
+	   stamps data-theme on <html>.
+
 	   Never use them for text, badges, banners or any control. */
-	--money-coin: #c9922b;
-	--money-note: #5a9e73;
+	--money-note: #1f8a54;
+	--money-note-bd: #34a76a;
+}
+
+[data-theme="dark"] {
+	/* Lifted for legibility on the dark card; the border stays a touch lighter
+	   than the fill so the note keeps its edge. */
+	--money-note: #4fbf85;
+	--money-note-bd: #6fce9a;
 }
 
 /* Native form controls (select dropdowns, date/time pickers, scrollbars)
