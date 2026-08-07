@@ -381,8 +381,10 @@ const TABLE = {
  *
  * Deliberately NOT a code of its own: admin answers the ordinary
  * PAYMENT_CONFIRMATION_PENDING when money is parked, because a decline there
- * would invite a second payment. The flag is the only thing that distinguishes
- * the two, and it is the flag - never the code - that suppresses Pay.
+ * would invite a second payment. The flag only changes the SENTENCE now
+ * (jarvis#705 made the plain row check-only too, same as this one); it still
+ * vetoes the backend can_initiate_payment flag one layer down, in
+ * paymentMachine.js.
  */
 const PENDING_AWAITING_RECONCILIATION = Object.freeze({
 	headline: "We are still confirming your payment.",
