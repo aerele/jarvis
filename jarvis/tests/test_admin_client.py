@@ -935,6 +935,63 @@ class TestOnboardingClient(FrappeTestCase):
 		self.assertIn(admin_client._m("api.tenant.renew"), captured["url"])
 		self.assertEqual(captured["headers"]["Authorization"], "token renew-key:renew-secret")
 
+	def test_renew_sends_target_plan_only_when_given(self):
+		_settings_for_admin(api_key="renew-key", api_secret="renew-secret")
+		captured_with = {}
+		captured_without = {}
+
+		def _fake_post_with(url, json=None, headers=None, timeout=None):
+			captured_with["json"] = json
+			return _mock_response(
+				200, json_body={"message": {"ok": True, "data": {"razorpay_order_id": "order_R"}}}
+			)
+
+		def _fake_post_without(url, json=None, headers=None, timeout=None):
+			captured_without["json"] = json
+			return _mock_response(
+				200, json_body={"message": {"ok": True, "data": {"razorpay_order_id": "order_R"}}}
+			)
+
+		with patch("requests.post", side_effect=_fake_post_with):
+			admin_client.renew(target_plan="Growth")
+		self.assertEqual(captured_with["json"]["target_plan"], "Growth")
+
+		with patch("requests.post", side_effect=_fake_post_without):
+			admin_client.renew()
+		self.assertNotIn("target_plan", captured_without["json"])
+
+	def test_get_billing_payment_state_posts_empty_body(self):
+		_settings_for_admin()
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["url"] = url
+			captured["json"] = json
+			return _mock_response(
+				200, json_body={"message": {"ok": True, "data": {"code": "PAYMENT_ACTIVE"}}}
+			)
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.get_billing_payment_state()
+		self.assertIn(admin_client._m("api.account.get_billing_payment_state"), captured["url"])
+		self.assertEqual(captured["json"], {})
+
+	def test_check_billing_payment_status_posts_empty_body(self):
+		_settings_for_admin()
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["url"] = url
+			captured["json"] = json
+			return _mock_response(
+				200, json_body={"message": {"ok": True, "data": {"code": "PAYMENT_ACTIVE"}}}
+			)
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.check_billing_payment_status()
+		self.assertIn(admin_client._m("api.account.check_billing_payment_status"), captured["url"])
+		self.assertEqual(captured["json"], {})
+
 	def test_guest_call_omits_authorization_header(self):
 		# get_plans is a guest endpoint - no auth header is sent.
 		_settings_clear_admin()

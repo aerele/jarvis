@@ -55,7 +55,7 @@
 								{{
 									planPriceLabel(
 										currentPlan.price_inr,
-										currentPlan.billing_cycle
+										currentPlan.billing_cycle,
 									)
 								}}
 							</span>
@@ -105,6 +105,36 @@
 						@action="doReauthorize"
 					/>
 
+					<!-- F12: next to the controls above that raise it, not the page foot. -->
+					<ErrorMessage v-if="actionErr" class="mb-4" :message="actionErr" />
+
+					<!-- The unknown-code branch's own notice: whatever code the last
+					     billing answer carried, rendered honestly with its declared
+					     actions instead of the silent reload this replaced. -->
+					<div
+						v-if="codeNotice"
+						class="mb-4 rounded-md border border-outline-gray-1 p-4"
+					>
+						<p class="text-p-base font-medium text-ink-gray-8">
+							{{ codeNotice.copy.headline }}
+						</p>
+						<p class="mt-1 text-p-sm text-ink-gray-6">{{ codeNotice.copy.body }}</p>
+						<div
+							v-if="codeNotice.copy.actions.length"
+							class="mt-3 flex flex-wrap gap-2"
+						>
+							<Button
+								v-for="(action, i) in codeNotice.copy.actions"
+								:key="action"
+								:variant="i === 0 ? 'solid' : 'subtle'"
+								:label="actionLabelFor(codeNotice.copy, action)"
+								:loading="action === ACTIONS.CHECK && busy === 'check'"
+								:disabled="!!busy"
+								@click="runCodeAction(action)"
+							/>
+						</div>
+					</div>
+
 					<p
 						v-if="notice"
 						class="mb-4 rounded-md border border-outline-gray-1 p-4 text-p-sm text-ink-gray-7"
@@ -124,39 +154,50 @@
 							:loading="busy === 'renew'"
 							@action="doRenew"
 						/>
-						<PlanCard
-							v-for="p in upgradePlans"
-							:key="'up-' + p.name"
-							:plan="p"
-							action-label="Upgrade"
-							note="You pay only the prorated difference for the days left in this period."
-							:disabled="changesBlocked"
-							:loading="busy === 'up:' + p.name"
-							@action="doUpgrade"
-						/>
-						<PlanCard
-							v-for="p in downgradePlans"
-							:key="'down-' + p.name"
-							:plan="p"
-							action-label="Switch to this plan"
-							note="Applies at your next billing cycle. You keep your current plan until then."
-							:disabled="changesBlocked"
-							:loading="busy === 'down:' + p.name"
-							@action="doDowngrade"
-						/>
+						<!-- can_reactivate: the lapsed cohort buys a plan outright (no
+						     proration, nothing scheduled), so it gets its own grid instead
+						     of the prorated upgrade/downgrade cards below. -->
+						<template v-if="canReactivate">
+							<PlanCard
+								v-for="p in reactivationPlans"
+								:key="'react-' + p.name"
+								:plan="p"
+								action-label="Renew on this plan"
+								:note="REACTIVATION_NOTE"
+								:loading="busy === 'react:' + p.name"
+								@action="doReactivate"
+							/>
+						</template>
+						<template v-else>
+							<PlanCard
+								v-for="p in upgradePlans"
+								:key="'up-' + p.name"
+								:plan="p"
+								action-label="Upgrade"
+								note="You pay only the prorated difference for the days left in this period."
+								:disabled="changesBlocked"
+								:loading="busy === 'up:' + p.name"
+								@action="doUpgrade"
+							/>
+							<PlanCard
+								v-for="p in downgradePlans"
+								:key="'down-' + p.name"
+								:plan="p"
+								action-label="Switch to this plan"
+								note="Applies at your next billing cycle. You keep your current plan until then."
+								:disabled="changesBlocked"
+								:loading="busy === 'down:' + p.name"
+								@action="doDowngrade"
+							/>
+						</template>
 					</div>
 
 					<p v-if="changesBlockedReason" class="mt-3 text-p-sm text-ink-gray-6">
 						{{ changesBlockedReason }}
 					</p>
-					<p
-						v-if="!upgradePlans.length && !downgradePlans.length"
-						class="mt-4 text-p-sm text-ink-gray-6"
-					>
+					<p v-if="noOtherPlans" class="mt-4 text-p-sm text-ink-gray-6">
 						There are no other plans available on your account right now.
 					</p>
-
-					<ErrorMessage v-if="actionErr" class="mt-6" :message="actionErr" />
 				</template>
 			</div>
 		</div>
@@ -242,8 +283,20 @@ import { errMessage as errMsg } from "@/lib/errors";
 // verbatim - the same code-reading (effectiveCode), the same copy table (CODES /
 // copyFor), and the same URL builder (payPageUrl). Nothing gateway-specific is
 // forked here.
-import { effectiveCode } from "@/onboarding/paymentCodec";
-import { CODES, copyFor } from "@/onboarding/paymentCodes";
+import {
+	CLIENT_OFFLINE,
+	CLIENT_UNREADABLE,
+	decode as decodePaymentResponse,
+	effectiveCode,
+} from "@/onboarding/paymentCodec";
+import {
+	ACTIONS,
+	CODES,
+	TONE,
+	UNKNOWN_COPY,
+	actionLabelFor,
+	copyFor,
+} from "@/onboarding/paymentCodes";
 import { payPageUrl, STATES as PAY_STATES } from "@/onboarding/paymentMachine";
 import {
 	inr,
@@ -262,6 +315,10 @@ const loading = ref(true);
 const loadErr = ref("");
 const actionErr = ref("");
 const notice = ref("");
+// The unknown-code branch's own state: the row's copy for whatever code the
+// last billing answer carried, so a code with no dedicated branch below still
+// renders a headline, body and its declared actions instead of nothing.
+const codeNotice = ref(null); // {code, copy} | null
 // Which button is spinning, keyed so only the pressed card shows a loader.
 const busy = ref("");
 // "" | "redirect" - drives the blocking overlay. The only wait this page owns
@@ -295,8 +352,23 @@ const upgradePlans = computed(() => account.value.upgrade_plans || []);
 const downgradePlans = computed(() => account.value.downgrade_plans || []);
 const cancelling = computed(() => !!account.value.cancel_at_period_end);
 const scheduledDowngrade = computed(() => !!account.value.scheduled_plan);
-const ENDED_STATUSES = new Set(["Expired", "Cancelled"]);
-const ended = computed(() => ENDED_STATUSES.has(account.value.subscription_status));
+// The lapsed cohort (Expired/Cancelled/Past-Due-with-no-days-left): a plan
+// change here is a fresh full-price purchase, not a prorated switch, so it
+// gets its own grid instead of upgrade_plans/downgrade_plans.
+const canReactivate = computed(() => !!account.value.can_reactivate);
+// reactivation_plans includes the current plan (server contract); it already
+// has its own card via currentPlan/doRenew above, so drop it here.
+const reactivationPlans = computed(() => {
+	const cur = currentPlan.value && currentPlan.value.name;
+	return (account.value.reactivation_plans || []).filter((p) => p.name !== cur);
+});
+const REACTIVATION_NOTE =
+	"Full price for this plan, whether it costs more or less than today. Nothing is prorated, and nothing is scheduled.";
+const noOtherPlans = computed(() =>
+	canReactivate.value
+		? reactivationPlans.value.length === 0
+		: !upgradePlans.value.length && !downgradePlans.value.length,
+);
 
 // Plan changes are refused server-side while a cancellation or a switch is
 // already pending, so the cards disable rather than offer a button that 400s.
@@ -306,7 +378,7 @@ const changesBlocked = computed(() => cancelling.value || scheduledDowngrade.val
 // colour rule living in two places is how the settings pane and this page end
 // up showing different badges for the same subscription.
 const statusTheme = computed(() =>
-	statusBadgeTheme(account.value.subscription_status, cancelling.value)
+	statusBadgeTheme(account.value.subscription_status, cancelling.value),
 );
 
 // Why the plan actions are inert. The retired pane HID them in these states,
@@ -324,7 +396,11 @@ const changesBlockedReason = computed(() => {
 });
 
 const currentAction = computed(() => {
-	if (ended.value) return { label: "Renew", note: "Renewing restores access straight away." };
+	// can_reactivate covers the FULL lapsed cohort (Expired/Cancelled/Past-Due
+	// with no days left) - Renew-onto-current must work for all three, not just
+	// the two statuses the badge happens to render differently for.
+	if (canReactivate.value)
+		return { label: "Renew", note: "Renewing restores access straight away." };
 	if (cancelling.value) return { label: "", note: "Resume above to keep this plan." };
 	return { label: "", note: "You are on this plan." };
 });
@@ -368,8 +444,29 @@ function onPageShow(e) {
 		loadAccount();
 	}
 }
+// The admin pay page appends ?pay=done|failed|pending on its way back here (WS6
+// workspace.OUTCOME_*). done/pending mean money moved and the seams may still be
+// settling, so a plain read can show the customer the very state they just paid
+// to leave - run the healer once. `failed` has nothing to converge on.
+function payOutcomeFrom(search) {
+	try {
+		return new URLSearchParams(search || "").get("pay") || "";
+	} catch {
+		return "";
+	}
+}
+const SETTLING_OUTCOMES = new Set(["done", "pending"]);
+
 onMounted(() => {
-	loadAccount();
+	const settling = SETTLING_OUTCOMES.has(payOutcomeFrom(window.location.search));
+	// No URL rewrite here. The router already drops the query and hash on mount, so
+	// stripping `pay` was dead code that a spec nonetheless pinned - a test asserting
+	// behaviour the application never exhibits is worse than no test. The healer runs
+	// once from the value read above; a reload cannot re-run it because the parameter
+	// is already gone by then.
+	loadAccount().then(() => {
+		if (settling) doCheckStatus();
+	});
 	window.addEventListener("pageshow", onPageShow);
 });
 onBeforeUnmount(() => window.removeEventListener("pageshow", onPageShow));
@@ -420,6 +517,7 @@ async function doUpgrade(plan) {
 			confirmLabel: `Pay ${inr(d.prorated_inr)}`,
 		}),
 		start: () => api.startUpgrade(plan.name),
+		retry: () => doUpgrade(plan),
 	});
 }
 
@@ -435,11 +533,12 @@ async function doDowngrade(plan) {
 			message: d.effective_on
 				? `Your plan changes on ${
 						String(d.effective_on).split(" ")[0]
-				  }. You keep your current plan until then, and nothing is charged today.`
+					}. You keep your current plan until then, and nothing is charged today.`
 				: "Your plan changes at your next billing cycle. You keep your current plan until then, and nothing is charged today.",
 			confirmLabel: "Schedule switch",
 		}),
 		start: () => api.startDowngrade(plan.name),
+		retry: () => doDowngrade(plan),
 	});
 }
 
@@ -456,7 +555,34 @@ async function doRenew() {
 		run: () =>
 			runPayment({
 				key: "renew",
-				start: () => api.renewPlan(),
+				// The price shown on this card is the current plan's, so name it as the
+				// target: renew then prices the order off the same plan instead of a
+				// scheduled_plan the customer was never shown. A running subscription
+				// sends none - admin refuses a target there (NotLapsed).
+				start: () =>
+					api.renewPlan(canReactivate.value ? currentPlan.value.name : undefined),
+				raw: true,
+				retry: doRenew,
+			}),
+	});
+}
+
+/** The lapsed cohort's plan picker (can_reactivate): a plan change here has no
+ * period left to prorate or schedule against, so it is one full-price payment
+ * that starts a new period - up or down, mechanically identical. */
+async function doReactivate(plan) {
+	openConfirm({
+		title: `Renew on ${plan.plan_name || plan.name}`,
+		amount: inr(plan.price_inr),
+		message:
+			"This charges the plan's full price and starts a new billing period right away. There is no credit for time already lapsed, and nothing is scheduled.",
+		confirmLabel: `Pay ${inr(plan.price_inr)}`,
+		run: () =>
+			runPayment({
+				key: "react:" + plan.name,
+				start: () => api.renewPlan(plan.name),
+				raw: true,
+				retry: () => doReactivate(plan),
 			}),
 	});
 }
@@ -474,6 +600,7 @@ async function doReauthorize() {
 			runPayment({
 				key: "reauth",
 				start: () => api.reauthorizeAutopay(),
+				retry: doReauthorize,
 			}),
 	});
 }
@@ -498,9 +625,50 @@ async function doResume() {
 	}
 }
 
+/** The active healer, then a fresh read of where the checkout stands now
+ * (edge 6: the intent can resolve in between). Both ride settleWithRedirect,
+ * with autoNavigate off (F2): a status check has not just been confirmed by
+ * the customer, so a live token surfaces as Resume rather than an immediate
+ * top-level navigate. */
+async function doCheckStatus() {
+	if (busy.value) return; // edge 1: one Check in flight at a time
+	busy.value = "check";
+	actionErr.value = "";
+	codeNotice.value = null;
+	try {
+		// The healer's refusals are ANSWERS about the payment (rate-limited, under
+		// review), coded under a deliberate 4xx - decode them and render the code
+		// itself. Collapsing them into the transport row would tell a throttled
+		// customer we could not reach a service we did reach.
+		const verdict = decodePaymentResponse(await api.checkBillingPayment());
+		if (!verdict.ok) {
+			const unreadable =
+				verdict.code === CLIENT_OFFLINE || verdict.code === CLIENT_UNREADABLE;
+			const code = unreadable ? CODES.BENCH_ADMIN_UNREACHABLE : verdict.code;
+			codeNotice.value = { code, copy: billingCopyFor(code), retry: doCheckStatus };
+			await loadAccount();
+			return;
+		}
+		const state = unwrapData(await api.billingPaymentState());
+		await settleWithRedirect(state, { autoNavigate: false, retry: doRenew });
+	} catch (e) {
+		// F3: a transport/admin failure says nothing about the payment - render
+		// the bench's own honest code, never _surface's operator prose or a bare
+		// "Failed to fetch".
+		codeNotice.value = {
+			code: CODES.BENCH_ADMIN_UNREACHABLE,
+			copy: copyFor(CODES.BENCH_ADMIN_UNREACHABLE),
+			retry: doCheckStatus,
+		};
+	} finally {
+		busy.value = "";
+	}
+}
+
 async function doKeepCurrentPlan() {
 	busy.value = "keep";
 	actionErr.value = "";
+	codeNotice.value = null;
 	try {
 		const data = unwrapData(await api.cancelScheduledDowngrade());
 		// Monthly: revoking the switch also dropped the cheaper mandate, so the
@@ -513,7 +681,7 @@ async function doKeepCurrentPlan() {
 		// shows on return: the switch is gone and, on Monthly, the reauthorize
 		// banner (can_reauthorize) offers auto-renewal again. There is no dismissal
 		// to guess at any more - the pay page owns the outcome.
-		await settleWithRedirect(data);
+		await settleWithRedirect(data, { retry: doKeepCurrentPlan });
 	} catch (e) {
 		actionErr.value = errMsg(e);
 	} finally {
@@ -531,10 +699,14 @@ function openConfirm(opts) {
 	pending.message = opts.message || "";
 	pending.confirmLabel = opts.confirmLabel || "Confirm";
 	pending.run = opts.run;
+	// F11: a stale error/notice from a previous action must not sit under a
+	// freshly opened dialog.
+	actionErr.value = "";
+	codeNotice.value = null;
 }
 
 /** Price the change first, then let the customer confirm that exact number. */
-async function priceThenConfirm({ key, preview, title, describe, start }) {
+async function priceThenConfirm({ key, preview, title, describe, start, retry }) {
 	busy.value = key;
 	actionErr.value = "";
 	notice.value = "";
@@ -553,7 +725,7 @@ async function priceThenConfirm({ key, preview, title, describe, start }) {
 			amount: d.amount,
 			message: d.message,
 			confirmLabel: d.confirmLabel,
-			run: () => runPayment({ key, start }),
+			run: () => runPayment({ key, start, retry }),
 		});
 	} catch (e) {
 		closePending();
@@ -565,13 +737,34 @@ async function priceThenConfirm({ key, preview, title, describe, start }) {
 }
 
 /** start_* then route the answer to the admin-hosted pay page (or fail closed). */
-async function runPayment({ key, start }) {
+async function runPayment({ key, start, retry, raw = false }) {
 	busy.value = key;
 	actionErr.value = "";
 	notice.value = "";
+	codeNotice.value = null; // F11: a stale notice must not sit beside a new error
 	try {
+		if (raw) {
+			// A coded refusal (money parked under review, a rate limit) is an ANSWER
+			// about the payment and its row carries the next action - render it rather
+			// than reducing it to a red sentence with nowhere to go. A refusal with no
+			// code we know is left to its own server message, which for a plan
+			// validation ("changing billing cycle is not supported") says more than
+			// any generic copy could.
+			const verdict = decodePaymentResponse(await start());
+			if (!verdict.ok) {
+				if (verdict.code && copyFor(verdict.code) !== UNKNOWN_COPY) {
+					codeNotice.value = { code: verdict.code, copy: copyFor(verdict.code), retry };
+				} else {
+					actionErr.value = verdict.message || errMsg(null);
+				}
+				await loadAccount();
+				return;
+			}
+			await settleWithRedirect(verdict.data, { retry });
+			return;
+		}
 		const data = unwrapData(await start());
-		await settleWithRedirect(data);
+		await settleWithRedirect(data, { retry });
 	} catch (e) {
 		actionErr.value = errMsg(e);
 	} finally {
@@ -579,23 +772,57 @@ async function runPayment({ key, start }) {
 	}
 }
 
+// F2: what a passive/active Check shows when it finds a live, resumable
+// checkout it must not silently navigate to - mirrors onboarding's
+// dynamically-added ACTIONS.RESUME ("Continue to payment"), offered instead of
+// an automatic top-level navigate.
+const RESUMABLE_CHECKOUT_COPY = Object.freeze({
+	headline: "You have a payment page open for this subscription.",
+	body: "Continue to it to finish, or check again if you're not sure it's still live.",
+	actions: [ACTIONS.RESUME, ACTIONS.CHECK],
+});
+
+// F4: does this codeless answer carry evidence the payment already settled
+// (an Annual downgrade's schedule, a connection payload, a known status) - as
+// opposed to an admin answer this build simply could not read?
+function looksSettled(d) {
+	return !!(
+		d.scheduled_plan ||
+		d.subscription_status ||
+		"tenant_status" in d ||
+		"agent_url" in d
+	);
+}
+
 /**
  * Route a billing action's response (WS8). This page opens NO gateway SDK; it
- * reads the answer with onboarding's own `effectiveCode` and either:
+ * reads the answer and either:
  *
- *   - PAYMENT_PAGE_REDIRECT: a live pay-page token. Require the bench's OWN
- *     attested origin, then TOP-LEVEL NAVIGATE to `{origin}/jarvis-checkout#t=…`
- *     (payPageUrl + window.location.assign) - the exact mechanism
- *     usePaymentFlow.navigateToPay uses. NO FALLBACK: a token this site cannot
- *     navigate with fails CLOSED with the honest BENCH_PAY_ORIGIN_UNCONFIGURED
- *     copy, never an SDK.
+ *   - a code effectiveCode resolves as navigable (F2: computed FIRST, so a
+ *     stale token riding a code effectiveCode refuses to override - paid,
+ *     terminal, reconnect, money-parked - never navigates): require the
+ *     bench's OWN attested origin, then TOP-LEVEL NAVIGATE to
+ *     `{origin}/jarvis-checkout#t=…` when `autoNavigate` (the caller already
+ *     confirmed a payment); otherwise offer Resume instead of firing the
+ *     navigate itself (a status check has confirmed nothing). NO FALLBACK: a
+ *     token this site cannot navigate with fails CLOSED with the honest
+ *     BENCH_PAY_ORIGIN_UNCONFIGURED copy, never an SDK.
  *   - CLIENT_UPGRADE_REQUIRED: a pre-cutover admin's raw provider handles with no
  *     token. Fail CLOSED with honest copy - the bench opens no sheet for those.
- *   - anything else: nothing to pay. The server already settled it (an Annual
- *     downgrade just schedules), so re-read and show what actually happened.
+ *   - anything else: render that code's own row (headline + body + its
+ *     declared actions) via copyFor when the answer carries a code OR carries
+ *     no settlement evidence (F4) - a code this build has never seen, or an
+ *     unreadable answer, renders the honest unknown row rather than silence;
+ *     a codeless SETTLED answer (an Annual switch just schedules) stays
+ *     quiet - then re-read so the page reflects whatever the server actually
+ *     settled. F5: a SUCCESS-toned row is dropped if that reload proves the
+ *     account is not actually Active - it must never sit above a subscription
+ *     the reload just showed as revoked.
  */
-async function settleWithRedirect(data) {
-	const d = data || {};
+async function settleWithRedirect(data, { autoNavigate = true, retry } = {}) {
+	const d = data && typeof data === "object" ? data : {};
+	codeNotice.value = null;
+
 	const code = effectiveCode({ code: d.code, data: d });
 
 	if (code === CODES.PAYMENT_PAGE_REDIRECT) {
@@ -615,10 +842,15 @@ async function settleWithRedirect(data) {
 			await loadAccount();
 			return;
 		}
-		// The copy moment (the same sentence onboarding flashes), then leave
-		// top-level in the same tab. bfcache-return re-reads via onPageShow.
-		phase.value = "redirect";
-		window.location.assign(url);
+		if (autoNavigate) {
+			// The copy moment (the same sentence onboarding flashes), then leave
+			// top-level in the same tab. bfcache-return re-reads via onPageShow.
+			phase.value = "redirect";
+			window.location.assign(url);
+			return;
+		}
+		codeNotice.value = { code, copy: RESUMABLE_CHECKOUT_COPY, retry, resumeUrl: url };
+		await loadAccount();
 		return;
 	}
 
@@ -629,8 +861,67 @@ async function settleWithRedirect(data) {
 		return;
 	}
 
-	// Nothing to pay: the server settled it (an annual switch just schedules, or
-	// the change already applied). Re-read and let the page reflect the new state.
+	if (d.code || !looksSettled(d)) {
+		codeNotice.value = { code, copy: billingCopyFor(code), retry };
+	}
 	await loadAccount();
+
+	if (
+		codeNotice.value &&
+		codeNotice.value.copy.tone === TONE.SUCCESS &&
+		account.value.subscription_status !== "Active"
+	) {
+		codeNotice.value = null;
+	}
+}
+
+/** F2: straight back to the checkout doCheckStatus already found - no API
+ * call, no new intent, just the token/origin its answer already carried. */
+function doResumeCheckout() {
+	const url = codeNotice.value && codeNotice.value.resumeUrl;
+	if (!url) return;
+	phase.value = "redirect";
+	window.location.assign(url);
+}
+
+/** Dispatch one action off the generic notice's row (edge 3: a row with no
+ * dedicated branch above still does something real for Check/Initiate; any
+ * other declared verb has no billing-page destination of its own yet, so it
+ * acknowledges and re-reads rather than leaving a button that does nothing.
+ * F6: INITIATE retries whichever flow produced this notice, not always renew. */
+function runCodeAction(action) {
+	if (action === ACTIONS.CHECK) return doCheckStatus();
+	if (action === ACTIONS.RESUME) return doResumeCheckout();
+	if (action === ACTIONS.INITIATE) {
+		const retry = codeNotice.value && codeNotice.value.retry;
+		return retry ? retry() : doRenew();
+	}
+	if (action === ACTIONS.CONTINUE) {
+		// An existing customer who just paid has nothing to "continue" HERE - the
+		// setup this action was written for is the signup wizard's. On the billing
+		// page the useful next step is the product itself, so send them to chat.
+		window.location.assign("/jarvis/");
+		return;
+	}
+	codeNotice.value = null;
+	return loadAccount();
+}
+
+// The shared vocabulary is written for the SIGNUP wizard, where "we are continuing
+// your setup" is true. On this page the customer has an account, a container and a
+// plan - they renewed. Same code, different surface, so the surface says its own
+// thing rather than borrowing the wizard's.
+const BILLING_COPY_OVERRIDES = {
+	[CODES.PAYMENT_ALREADY_ACTIVE]: {
+		headline: "Payment confirmed.",
+		body: "Nothing more is owed - your plan is active.",
+		actionLabels: { [ACTIONS.CONTINUE]: "Back to chat" },
+	},
+};
+
+function billingCopyFor(code) {
+	const base = copyFor(code);
+	const over = BILLING_COPY_OVERRIDES[code];
+	return over ? { ...base, ...over } : base;
 }
 </script>

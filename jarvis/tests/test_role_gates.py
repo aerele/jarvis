@@ -39,6 +39,11 @@ GATED_ENDPOINTS = [
 	# are presentation, and neither constrains a direct /api/method call.
 	("jarvis.account", "get_account", {}),
 	("jarvis.account", "preview_upgrade", {"target_plan": "team_monthly"}),
+	# Billing payment-recovery surface: the passive poll re-echoes a live pay-page
+	# token and the check converges provider truth, so an ungated caller could read
+	# another workspace's checkout handle or spend its gateway budget.
+	("jarvis.account", "get_billing_payment_state", {}),
+	("jarvis.account", "check_billing_payment_status", {}),
 	("jarvis.account", "get_llm_usage", {}),
 	("jarvis.account", "get_llm_connection_status", {}),
 	("jarvis.oauth.api", "begin_paste_signin", {"provider": "OpenAI", "model": "gpt-5.5"}),

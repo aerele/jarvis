@@ -493,7 +493,30 @@ export const startUpgrade = (targetPlan) =>
 // desk page called. Its Checkout result is confirmed by `finishPayment` above
 // (declared with the onboarding wrappers), which is the single signature-verify
 // endpoint for EVERY billing flow here, not just renewal and first signup.
-export const renewPlan = () => call("jarvis.onboarding.renew");
+// `targetPlan` reactivates a LAPSED subscription onto another plan (up or down)
+// at that plan's full price; omitted, this is the plain same-plan renewal.
+// RAW: renew answers a parked-money hold, a plan refusal or a rate limit as a
+// CODED envelope under a 4xx. Those are answers about the payment and carry their
+// own next action; call() would reduce them to a red sentence with nowhere to go.
+// `targetPlan` is forwarded whenever it is supplied at all - an empty string is a
+// caller bug and must reach admin's typed refusal, not be silently downgraded to a
+// plain renewal that supersedes the attempt already in flight.
+export const renewPlan = (targetPlan) =>
+	rawOnboardingCall(
+		"jarvis.onboarding.renew",
+		targetPlan === undefined || targetPlan === null ? {} : { target_plan: targetPlan }
+	);
+// Renew's stuck-checkout recovery pair (unlike renewPlan above, these ARE in
+// the account namespace). billingPaymentState is the passive read - re-echoes
+// a live pay-page token so BillingPage can resume the SAME checkout instead of
+// minting a second one. checkBillingPayment is the active healer: reconciles
+// provider truth and never creates or replaces an intent.
+export const billingPaymentState = () => call("jarvis.account.get_billing_payment_state");
+// RAW, like its signup twin: the healer answers a rate limit or an under-review
+// verdict as a CODED envelope under a deliberate 4xx. Those are answers about the
+// payment, not transport errors, and call() would throw the code away.
+export const checkBillingPayment = (opts) =>
+	rawOnboardingCall("jarvis.account.check_billing_payment_status", {}, opts);
 
 // File input: upload to Frappe's File doctype, return {file_url, file_name}.
 export async function uploadFile(file) {

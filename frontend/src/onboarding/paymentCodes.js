@@ -45,6 +45,14 @@ export const CODES = {
 	BENCH_RATE_LIMITED: "BENCH_RATE_LIMITED",
 	BENCH_NO_SIGNUP_CONTEXT: "BENCH_NO_SIGNUP_CONTEXT",
 	BENCH_AWAITING_RECONCILIATION: "BENCH_AWAITING_RECONCILIATION",
+	// Admin's parked-money hold on an EXISTING account (billing, not signup): an
+	// unresolved incident refuses every initiation until an operator places it.
+	PAYMENT_UNDER_REVIEW: "PAYMENT_UNDER_REVIEW",
+	// The losing half of a concurrent double-submit: another initiation for this
+	// same subscription is mid-flight. A timed WAIT, never a decline.
+	INTENT_CREATION_IN_PROGRESS: "INTENT_CREATION_IN_PROGRESS",
+	// Admin has no live checkout to report on for this subscription.
+	BILLING_NO_CURRENT_INTENT: "BILLING_NO_CURRENT_INTENT",
 	// BENCH_SIGNUP_DETAILS_REJECTED - admin refused the customer's OWN submitted
 	// details (a malformed GSTIN, an unusable phone number) BEFORE any gateway was
 	// contacted. It used to collapse into BENCH_ADMIN_REJECTED, whose copy says "the
@@ -85,6 +93,9 @@ export const ADMIN_CODES = [
 	CODES.SIGNUP_TERMINAL,
 	CODES.INVALID_REQUEST,
 	CODES.PAYMENT_CHECK_RATE_LIMITED,
+	CODES.PAYMENT_UNDER_REVIEW,
+	CODES.INTENT_CREATION_IN_PROGRESS,
+	CODES.BILLING_NO_CURRENT_INTENT,
 ];
 
 export const BENCH_CODES = [
@@ -310,6 +321,31 @@ const TABLE = {
 		body: "Pick a plan and enter your details to get going.",
 		tone: TONE.STATUS,
 		actions: [ACTIONS.RESTART],
+	},
+	[CODES.INTENT_CREATION_IN_PROGRESS]: {
+		// Two clicks raced; the other one owns the payment page. Waiting is the whole
+		// instruction - starting again is what would mint a second gateway object.
+		headline: "Your payment page is still opening.",
+		body: "Another attempt for this subscription is already being set up. Give it a moment, then check the status.",
+		tone: TONE.STATUS,
+		actions: [ACTIONS.CHECK],
+	},
+	[CODES.BILLING_NO_CURRENT_INTENT]: {
+		headline: "There is no payment in progress.",
+		body: "Nothing is waiting to be paid on this subscription right now.",
+		tone: TONE.STATUS,
+		actions: [ACTIONS.INITIATE],
+	},
+	[CODES.PAYMENT_UNDER_REVIEW]: {
+		// The billing-page twin of BENCH_AWAITING_RECONCILIATION below. A refusal,
+		// but a temporary one a person is already working on - so it states that
+		// plainly and offers the read-only check, never a second payment.
+		headline: "We are still confirming a payment on this account.",
+		body:
+			"A payment we could not place automatically is being checked by someone here. " +
+			"Nothing more is owed - please do not pay again.",
+		tone: TONE.STATUS,
+		actions: [ACTIONS.CHECK],
 	},
 	[CODES.BENCH_AWAITING_RECONCILIATION]: {
 		// Its OWN row, not a variant: this is the bench refusing before the

@@ -8,7 +8,12 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import account, admin_client
-from jarvis.exceptions import AdminValidationError
+from jarvis.exceptions import (
+	AdminAuthError,
+	AdminRateLimitedError,
+	AdminUnreachableError,
+	AdminValidationError,
+)
 
 _SNAPSHOTTED_FIELDS = (
 	"jarvis_admin_url",
@@ -110,6 +115,32 @@ class TestAccountWrappers(FrappeTestCase):
 			with self.assertRaises(frappe.ValidationError) as cm:
 				account.preview_upgrade("plan-cheap")
 		self.assertIn("downgrade not supported", str(cm.exception))
+
+	def test_check_billing_payment_status_returns_admin_payload(self):
+		fake = {"code": "PAYMENT_ACTIVE", "pay_page_token": None}
+		with patch.object(admin_client, "check_billing_payment_status", return_value=fake) as m:
+			out = account.check_billing_payment_status()
+		m.assert_called_once_with()
+		self.assertTrue(out.get("ok"))
+		self.assertEqual(out["data"]["code"], "PAYMENT_ACTIVE")
+		self.assertIsNone(out["data"]["pay_page_token"])
+
+	def test_check_billing_payment_status_surfaces_rate_limit_as_coded_failure(self):
+		"""AdminRateLimitedError with a code surfaces as a coded error response (ok=false),
+		not a throw. The tenant renders PAYMENT_CHECK_RATE_LIMITED as wait/retry."""
+		from jarvis.exceptions import AdminRateLimitedError
+
+		exc = AdminRateLimitedError(
+			"rate_limited",
+			retry_after_seconds=120,
+			code="PAYMENT_CHECK_RATE_LIMITED",
+			error={"code": "PAYMENT_CHECK_RATE_LIMITED", "retry_after_seconds": 120},
+		)
+		with patch.object(admin_client, "check_billing_payment_status", side_effect=exc):
+			out = account.check_billing_payment_status()
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "PAYMENT_CHECK_RATE_LIMITED")
+		self.assertEqual(out["error"]["retry_after_seconds"], 120)
 
 
 class TestAccountGatesFailClosed(FrappeTestCase):
@@ -1272,3 +1303,92 @@ class TestOperationProbeVerdictPersistence(FrappeTestCase):
 		row = self._row()
 		self.assertEqual(row.last_subscription_status, "verified")
 		self.assertEqual(frappe.parse_json(row.last_sync_warnings), ["prior warning"])
+
+
+class TestBillingPaymentRecovery(FrappeTestCase):
+	"""The two surfaces that get a stuck billing checkout unstuck.
+
+	Plan 2026-08-07-billing-renew-dead-end T1. Both forward to admin and must fail
+	LOUDLY: the defect being fixed is a recovery instruction that reached the bench
+	and was never shown to anyone.
+	"""
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_state_forwards_and_returns_admin_payload(self):
+		fake = {"code": "PAYMENT_CONFIRMATION_PENDING", "recovery": "confirm_payment"}
+		with patch.object(admin_client, "get_billing_payment_state", return_value=fake) as m:
+			out = account.get_billing_payment_state()
+		m.assert_called_once_with()
+		self.assertEqual(out["code"], "PAYMENT_CONFIRMATION_PENDING")
+
+	def test_the_healer_never_echoes_the_signup_context(self):
+		"""Round-3 MINOR 8: wire(None) loads the persisted SIGNUP context, so a
+		gen-2 billing answer reported the signup's amount, generation and code."""
+		from jarvis import onboarding_contract
+
+		onboarding_contract.save({"amount_inr": 100.0, "generation": 1, "code": "PAYMENT_ALREADY_ACTIVE"})
+		self.addCleanup(onboarding_contract.clear)
+		with patch.object(admin_client, "check_billing_payment_status", return_value={"code": "X"}):
+			out = account.check_billing_payment_status()
+		self.assertEqual(out["context"], {})
+
+	def test_check_forwards_and_busts_the_chat_gate(self):
+		# A verified payment reactivates the plan; a stale cached verdict would keep
+		# chat paused for a customer who has just paid.
+		fake = {"code": "PAYMENT_ALREADY_ACTIVE"}
+		with (
+			patch.object(admin_client, "check_billing_payment_status", return_value=fake),
+			patch.object(account, "_bust_chat_gate") as bust,
+		):
+			out = account.check_billing_payment_status()
+		bust.assert_called_once_with()
+		self.assertTrue(out["ok"])
+		self.assertEqual(out["data"]["code"], "PAYMENT_ALREADY_ACTIVE")
+
+	def test_every_admin_failure_surfaces_instead_of_a_silent_success(self):
+		"""Plan edge case 2: admin unreachable / auth / rate-limited / rejected."""
+		failures = [
+			AdminValidationError("a payment on this account is under review"),
+			AdminAuthError("bad creds"),
+			AdminUnreachableError("connection refused"),
+			AdminRateLimitedError("slow down"),
+		]
+		# The passive poll throws, like its signup twin: a transport failure there is
+		# an error, not an answer about the payment.
+		for exc in failures:
+			with self.subTest(endpoint="get_billing_payment_state", error=type(exc).__name__):
+				with patch.object(admin_client, "get_billing_payment_state", side_effect=exc):
+					with self.assertRaises(frappe.ValidationError):
+						account.get_billing_payment_state()
+		# check_billing_payment_status surfaces errors as coded responses, not throws
+		for exc in failures:
+			with self.subTest(endpoint="check_billing_payment_status", error=type(exc).__name__):
+				with patch.object(admin_client, "check_billing_payment_status", side_effect=exc):
+					out = account.check_billing_payment_status()
+					self.assertFalse(out.get("ok"), f"should return error for {type(exc).__name__}")
+					self.assertIn("error", out)
+
+	def test_token_answer_is_attested_so_the_page_can_navigate(self):
+		# augment_pay_page must run on these answers too, or a resumable checkout
+		# arrives without the origin attestation and BillingPage fails closed.
+		fake = {"code": "PAYMENT_PAGE_REDIRECT", "pay_page_token": "t" * 24}
+		with patch.object(admin_client, "get_billing_payment_state", return_value=fake):
+			out = account.get_billing_payment_state()
+		self.assertIn("pay_origin", out)
+		self.assertIn("pay_origin_attested", out)
+
+	def test_gate_runs_before_any_admin_round_trip(self):
+		"""Plan edge case 4: a non-admin must not reach admin or spend its budget."""
+		frappe.set_user("Guest")
+		with (
+			patch.object(admin_client, "get_billing_payment_state") as state,
+			patch.object(admin_client, "check_billing_payment_status") as check,
+		):
+			with self.assertRaises(frappe.PermissionError):
+				account.get_billing_payment_state()
+			with self.assertRaises(frappe.PermissionError):
+				account.check_billing_payment_status()
+		state.assert_not_called()
+		check.assert_not_called()

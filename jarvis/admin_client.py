@@ -437,6 +437,20 @@ def check_signup_payment_status() -> dict:
 	)
 
 
+def get_billing_payment_state() -> dict:
+	"""Passive read of the current BILLING checkout (renew / plan change), the
+	signup poll's sibling. A live attempt re-echoes its pay-page token, so a lost
+	redirect resumes the same pay page instead of minting a second one."""
+	return _post(path=_m("api.account.get_billing_payment_state"), body={})
+
+
+def check_billing_payment_status() -> dict:
+	"""Provider-truth check on the current BILLING checkout, converged through the
+	same apply seam as the browser confirm and the webhook. Never creates or
+	replaces an intent: a decline is a report."""
+	return _post(path=_m("api.account.check_billing_payment_status"), body={})
+
+
 def get_plans() -> list:
 	return _post_guest(path=_m("billing.signup.get_plans"), body={})
 
@@ -823,7 +837,7 @@ def _authenticated_raw(path: str, body: dict, *, timeout_s: int):
 	return _raise_for_admin_raw(_send({**bearer, "Authorization": f"token {api_key}:{api_secret}"}))
 
 
-def renew(provider: str | None = None) -> dict:
+def renew(provider: str | None = None, target_plan: str | None = None) -> dict:
 	"""Existing customer pays again to extend (manual one-shot). Returns admin's
 	data dict with the ``payment_provider`` discriminator + that gateway's
 	checkout handles. A sub renews on the gateway it was created with unless
@@ -838,6 +852,12 @@ def renew(provider: str | None = None) -> dict:
 	}
 	if provider:
 		body["provider"] = provider
+	# A lapsed subscription may renew ONTO another plan (up or down) at full price.
+	# Sent whenever the caller supplied one AT ALL: dropping an empty string here
+	# made admin's InvalidArgument branch unreachable, so a blank target silently
+	# became a plain renewal that superseded the customer's real attempt.
+	if target_plan is not None:
+		body["target_plan"] = target_plan
 	return _post(path=_m("api.tenant.renew"), body=body)
 
 
