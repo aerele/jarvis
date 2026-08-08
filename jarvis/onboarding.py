@@ -112,6 +112,43 @@ def write_connection(data: dict) -> None:
 	# reconnect that repoints it can be told apart from a daily sync that rewrites
 	# the same URL (which must not disturb an established claim).
 	_old_agent_url = (s.get("agent_url") or "").strip()
+	# Credentials just changed (fresh signup, or a reconnect rotating onto another
+	# account): a bearer minted from the old ones would outlive them, and, the part
+	# that used to be missing, the accepted tenant-authority (generation, handle)
+	# must not outlive them either. The generation is a PER-CUSTOMER namespace
+	# (admin-v2 fleet/_tenant_lookup.py: "the generation is an ASSIGNMENT generation,
+	# per customer"), so a stored value left over from a PREVIOUS principal is not a
+	# stale version of the new principal's count, it is a count from an unrelated
+	# series - every fresh customer's first claim is generation 1, so a leftover
+	# stored 1 (or higher) collides with the new customer's own first claim at the
+	# SAME number but a DIFFERENT container handle. guard() cannot tell that apart
+	# from the real invariant breach it exists to catch, so it HOLDS the stale
+	# connection and re-polls forever: every retry carries the same new-customer
+	# generation 1, which can never numerically exceed the stale leftover (jarvis
+	# #693, reproduced end to end on a dev bench re-signed-up after an admin-side
+	# customer purge without a matching bench-side reset). check_account_reconnect
+	# and _disconnect_agent_transport already clear for exactly this reason on their
+	# own paths; plain signup (and anywhere else a fresh principal's credentials
+	# land here) needs the same guard, cleared BEFORE the connection block below so
+	# a payload carrying both new credentials AND a connection in one call is
+	# covered too.
+	#
+	# Deliberately narrower than the ``principal_change`` used below for the
+	# cached-bearer/chat-ready resets: api_key/api_secret/customer are the strong
+	# signal that this IS a different admin login, but a lone ``customer_password``
+	# is not. admin re-serves that field on every poll while its 60-minute cache
+	# entry lives (billing/signup.py ``_serve_signup_password``, "kept until TTL
+	# rather than deleted on read"), including a poll a fully-connected bench could
+	# still make within that window - and a lone customer_password never arrives
+	# for a GENUINELY new principal either: every real new-principal call also
+	# carries api_key/customer, which already trips this clear. Widening the
+	# trigger to customer_password would drop the P0-5 protection for one window on
+	# an otherwise healthy, unrelated connection for no gain.
+	new_admin_login = any(data.get(k) for k in ("api_key", "api_secret", "customer"))
+	if new_admin_login:
+		from jarvis import tenant_authority
+
+		tenant_authority.clear(s)
 	if data.get("api_key"):
 		set_settings_password(s, "jarvis_admin_api_key", data["api_key"])
 	if data.get("api_secret"):
@@ -160,7 +197,11 @@ def write_connection(data: dict) -> None:
 			if data.get("agent_token"):
 				set_settings_password(s, "agent_token", data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
-	# account): a bearer minted from the old ones would outlive them.
+	# account): a bearer minted from the old ones would outlive them. Wider than
+	# ``new_admin_login`` above on purpose - a standalone customer_password (the
+	# verified-poll delivery, no api_key/customer alongside it) still means the
+	# bearer cache key's underlying password rotated, even though it is not by
+	# itself proof of a DIFFERENT admin login.
 	principal_change = any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password"))
 	if principal_change:
 		admin_client.clear_cached_token()
