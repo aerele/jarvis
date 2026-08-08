@@ -169,8 +169,7 @@ class TestTypedConfirmation(FrappeTestCase):
 		shows them - exactly what a real client now sends as ``approval_tokens``.
 		A typed number binds to THIS order, not to a list the server re-fetches."""
 		return [
-			c["token"]
-			for c in sorted(cards, key=lambda c: (c.get("expires_at") or 0, c.get("token") or ""))
+			c["token"] for c in sorted(cards, key=lambda c: (c.get("expires_at") or 0, c.get("token") or ""))
 		]
 
 	def test_a_lone_card_and_a_plain_go_ahead_runs_the_confirmation(self):
@@ -294,7 +293,11 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card()]),
 			patch("jarvis.chat.actions_api._confirm_core") as core,
 		):
-			self.assertIsNone(_typed_confirmation(self.user, self.conv, "yes but change the quantity to 5", self._toks([self._card()])))
+			self.assertIsNone(
+				_typed_confirmation(
+					self.user, self.conv, "yes but change the quantity to 5", self._toks([self._card()])
+				)
+			)
 		# Reading the parked list is harmless; running a write is not.
 		core.assert_not_called()
 

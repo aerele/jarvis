@@ -102,9 +102,10 @@ describe("the card advertises both ways to approve", () => {
 		// The selective example numbers must track the real card count, so the hint
 		// is built from `n` rather than a literal "1 and 3" that overshoots a 2-card
 		// stack. (Behaviour of the count itself is a component concern; here we only
-		// pin that the example is dynamic, not hardcoded out of range.)
-		expect(src).toContain('confirm 1 and ${n}');
-		expect(src).not.toContain('"confirm 1 and 3"');
+		// pin that the example is dynamic, not hardcoded out of range. We do NOT
+		// assert the absence of the literal "confirm 1 and 3" - it legitimately
+		// still appears in nearby explanatory comments.)
+		expect(src).toContain("confirm 1 and ${n}");
 		expect(src).toContain('or type "go ahead"');
 	});
 

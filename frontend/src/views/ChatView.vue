@@ -7714,7 +7714,14 @@ async function send(textArg, resendAck) {
 		// The confirmation cards currently on screen, in the order the numbers are
 		// shown, so a typed "confirm 2" binds to the card the user actually sees.
 		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
-		const r = await api.sendMessage(sentFrom, text, undefined, attachments, sendCtx, approvalTokens);
+		const r = await api.sendMessage(
+			sentFrom,
+			text,
+			undefined,
+			attachments,
+			sendCtx,
+			approvalTokens
+		);
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
 		// must not fall into the rejection branch below even when the confirmation
 		// itself failed. It is handled further down, on the accepted path, where it

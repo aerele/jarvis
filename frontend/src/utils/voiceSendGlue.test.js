@@ -922,7 +922,9 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 	assert.ok(start > -1 && end > start, "located ChatView.vue's send() function body");
 	const sendSrc = chatViewSrc.slice(start, end);
 
-	const awaitIdx = sendSrc.indexOf("await api.sendMessage(sentFrom");
+	// Anchor on the call itself, not its first arg: prettier wraps a long
+	// sendMessage(...) across lines, so "sendMessage(sentFrom" is not contiguous.
+	const awaitIdx = sendSrc.indexOf("await api.sendMessage(");
 	// Anchors the rejection block's CLOSING brace, not just its opening `if (...)` — a scope-aware
 	// check. A regression that clears the context as the FIRST statement inside the rejected branch
 	// (unconditionally wiping it on every rejection, reintroducing the jarvis#496 bug) would still
