@@ -4335,6 +4335,22 @@ function clearStreamingActivity() {
 	currentRunId.value = null;
 	store.streamingConvId = null;
 	recovering.value = null;
+	flushReveal(); // nothing is streaming anymore, so nothing may stay mid-reveal
+}
+// Tool events are only meaningful while their run is live. The CDX-3 pump fence
+// deliberately lets an epoch-less tool event through, so a straggler or replayed
+// tool:start arriving AFTER run:end (which clears activeTools) used to push a
+// fresh `running` entry that no tool:end would ever settle. The live activity
+// block renders on activeTools.length alone, so the user got an expanded tool row
+// with a spinner they never opened, stuck until the next turn. That is the
+// intermittent "the tool list is showing on its own".
+//
+// A tool event is stale when no run is in flight, or when it names a different
+// run than the one on screen. An event with no run_id is trusted while a run is
+// live, which keeps the legacy epoch-less path working.
+function toolEventIsStale(p) {
+	if (!currentRunId.value) return true;
+	return !!p.run_id && p.run_id !== currentRunId.value;
 }
 function tearDownActivityIfSettled() {
 	const rid = currentRunId.value;
@@ -4380,6 +4396,83 @@ onUnmounted(() => enrichmentTracker.reset());
 const recovering = ref(null); // { message_id, reason } while a turn is parked for background recovery — the composer stays UNLOCKED so the user isn't trapped
 const retrying = ref(false); // guards the error-card Retry against a double-enqueue while one is in flight
 const srMessage = ref(""); // visually-hidden aria-live text (turn completion / failure) for screen readers
+// ── Smooth reveal ───────────────────────────────────────────────────────────
+// assistant:delta carries the CUMULATIVE reply, and assigning it straight to the
+// row made the text move at whatever rate the socket delivered it: a word, a
+// stall, then a paragraph in a single frame. The revealer holds the newest text
+// as a target and a frame loop walks the row toward it, absorbing bursts.
+// lib/streamReveal.js owns the cursor arithmetic and the snap rules; this owns
+// the frame loop and the DOM writes.
+const revealer = createRevealer();
+let _revealRaf = 0;
+function _applyRevealed(id, text) {
+	const m = messages.value.find((x) => x.name === id);
+	if (m) m.content = text;
+	return !!m;
+}
+// A painted frame costs a full markdown re-parse plus a v-html rewrite of the
+// whole message, so painting all 60 frames a second is several times the work the
+// old socket-rate rendering did and a long reply visibly stutters. Paint at ~25/s
+// instead, and hand tick() the frames that were skipped so the reveal moves at the
+// same SPEED with a fraction of the render cost. 40ms is still well inside what
+// reads as continuous for text appearing.
+const REVEAL_PAINT_MS = 40;
+const FRAME_MS = 1000 / 60;
+let _lastPaintMs = 0;
+function revealFrame() {
+	_revealRaf = 0;
+	const now = performance.now();
+	const dt = now - _lastPaintMs;
+	if (dt < REVEAL_PAINT_MS) {
+		// Too soon to repaint, but the reveal is not finished: keep the loop alive.
+		_revealRaf = requestAnimationFrame(revealFrame);
+		return;
+	}
+	// Frames' worth of catch-up owed since the last paint, so a slow frame (or a
+	// throttled tab) does not slow the text down, it just moves further per paint.
+	const frames = Math.max(1, Math.round(dt / FRAME_MS));
+	_lastPaintMs = now;
+	let painted = false;
+	for (const id of revealer.pending()) {
+		const step = revealer.tick(id, frames);
+		if (!step) continue;
+		// The row went away (conversation switch, reload). Stop animating into
+		// nothing rather than holding the loop open forever.
+		if (!_applyRevealed(id, step.text)) revealer.drop(id);
+		else painted = true;
+	}
+	// Scroll rides the reveal, not the socket: following the text as it appears
+	// is what keeps a long answer readable while it writes itself.
+	if (painted) scrollBottomIfPinned();
+	if (revealer.pending().length) _revealRaf = requestAnimationFrame(revealFrame);
+}
+function pumpReveal() {
+	if (_revealRaf || !revealer.pending().length) return;
+	// Start the clock now: a timestamp left over from the previous reply would
+	// otherwise make this burst's first paint either instant or a frame late.
+	if (!_lastPaintMs || performance.now() - _lastPaintMs > 1000)
+		_lastPaintMs = performance.now() - REVEAL_PAINT_MS;
+	_revealRaf = requestAnimationFrame(revealFrame);
+}
+// Snap one message (or every message) to its full text. Every terminal calls
+// this: a cursor still mid-walk when the run settles would truncate the answer.
+function flushReveal(id) {
+	if (id) {
+		const full = revealer.flush(id);
+		if (full != null) _applyRevealed(id, full);
+		return;
+	}
+	for (const [mid, full] of revealer.flushAll()) _applyRevealed(mid, full);
+	if (_revealRaf) {
+		cancelAnimationFrame(_revealRaf);
+		_revealRaf = 0;
+	}
+}
+// requestAnimationFrame does not run in a background tab, so an animating reply
+// would freeze there until the user came back. Snap instead.
+function onVisibilityChange() {
+	if (document.hidden) flushReveal();
+}
 const activeTools = ref([]); // [{ id, name, status }] for the in-flight run
 // Live activity shows ONE tool at a time: the most-recently-started tool that's
 // still running, plus a compact count of the ones already finished this turn.
@@ -7205,6 +7298,9 @@ function downloadSvgAsPng(svgEl) {
 // send() bails on sending) because the leaving run's run:end event is dropped
 // by the conversation guard in onEvent.
 function resetRunState() {
+	// Leaving the conversation: apply whatever is mid-reveal to the rows we are
+	// about to drop, so a reload of this chat cannot find a truncated message.
+	flushReveal();
 	sending.value = false;
 	waiting.value = false;
 	activeTools.value = [];
@@ -7874,13 +7970,18 @@ function onEvent(p) {
 				m = { name: p.message_id, role: "assistant", content: "", streaming: true };
 				messages.value = [...messages.value, m];
 			}
-			m.content = p.text;
+			// Reveal paced rather than assigned. The first delta of a message comes
+			// back whole, so the row never renders empty (the view hides an empty
+			// streaming row, which would flicker the reply out just as it arrives).
+			m.content = revealer.receive(p.message_id, p.text);
 			m.streaming = true;
+			pumpReveal();
 			nextTick(scrollBottomIfPinned);
 			break;
 		}
 		case "tool:start": {
 			if (pumpFenceReject(p)) break; // CDX-3 (epoch-less legacy tool events bypass)
+			if (toolEventIsStale(p)) break;
 			pumpFenceAccept(p, false);
 			const id = p.tool_call_id || `${p.tool_name}-${activeTools.value.length}`;
 			activeTools.value = [
@@ -7894,6 +7995,7 @@ function onEvent(p) {
 		}
 		case "tool:end": {
 			if (pumpFenceReject(p)) break; // CDX-3 (epoch-less legacy tool events bypass)
+			if (toolEventIsStale(p)) break;
 			pumpFenceAccept(p, false);
 			const t = activeTools.value.find((x) => x.id === p.tool_call_id);
 			if (t) t.status = p.status || "completed";
@@ -7954,6 +8056,10 @@ function onEvent(p) {
 			resyncPendingConfirmations(currentId.value);
 			// Defensive: if a promoted turn's run:start was missed, retire the chip.
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
+			// Snap BEFORE clearing `streaming`: the SUX-6 identical-skip below assumes
+			// the streamed text already equals the final text, which is only true once
+			// the reveal cursor has caught up.
+			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
 			if (m) m.streaming = false;
 			// SUX-6: the terminal final text is the last cumulative mirror in the normal
@@ -8074,6 +8180,7 @@ function onEvent(p) {
 					[p.message_id]: { code: p.code || "", changed_data: p.changed_data },
 				};
 			}
+			flushReveal(p.message_id); // whatever streamed before the error stays whole
 			recovering.value = null;
 			waiting.value = false;
 			sending.value = false;
@@ -8098,6 +8205,9 @@ function stopRun() {
 	if (currentMsgId.value) stoppedMsgIds.value.add(currentMsgId.value);
 	const m = [...messages.value].reverse().find((x) => x.role === "assistant" && x.streaming);
 	if (m) {
+		// Stop keeps whatever streamed. Snap first so the marker lands on the text
+		// the run actually produced, not on wherever the cursor happened to be.
+		flushReveal(m.name);
 		m.streaming = false;
 		if (m.name) stoppedMsgIds.value.add(m.name);
 		// A stop is a state of the turn, not prose: leave whatever streamed
@@ -9179,6 +9289,9 @@ function onResync() {
 }
 function onVisibility() {
 	if (document.visibilityState === "visible") onResync();
+	// Going to the background stops requestAnimationFrame, so anything mid-reveal
+	// would sit frozen until the user came back. Snap it instead.
+	else flushReveal();
 }
 
 // ---- shell contract (§3.7): New Chat requests, external navigation and
@@ -9407,6 +9520,7 @@ onMounted(async () => {
 	composerRef.value?.focusInput();
 });
 onBeforeUnmount(() => {
+	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("connect", onResync);
 	document.removeEventListener("visibilitychange", onVisibility);
