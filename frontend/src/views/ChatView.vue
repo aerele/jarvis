@@ -2718,6 +2718,51 @@
 									/>
 								</svg>
 							</button>
+							<!-- Empty wiki is the one unavailable state the USER can fix (write a
+							     page, or answer the "worth remembering?" nudge), so it fades with
+							     a self-serve hint instead of "ask your administrator". Feature
+							     switched off / error stay hidden. -->
+							<button
+								v-if="wikiEmpty"
+								class="jv-iconbtn jv-unavailable"
+								aria-disabled="true"
+								title="No wiki pages yet"
+								aria-label="No wiki pages yet"
+								style="
+									width: 30px;
+									height: 30px;
+									display: flex;
+									align-items: center;
+									justify-content: center;
+									background: transparent;
+									border: none;
+									border-radius: 7px;
+									cursor: default;
+									color: var(--text-3);
+								"
+								@click="
+									notify(
+										`No wiki pages yet — I'll ask when something's worth remembering, or add one in Wiki.`,
+										{ type: 'info' }
+									)
+								"
+							>
+								<svg
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.7"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+									<path
+										d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"
+									/>
+								</svg>
+							</button>
 							<button
 								v-if="ui.wiki_enabled"
 								class="jv-iconbtn"
@@ -4709,6 +4754,9 @@ const supportUnconfigured = window.support_state === "unconfigured" && !!window.
 // FLASHING on every page load, since `ui` starts empty and `stt_enabled` is briefly
 // undefined — `stt_state` is simply absent until the settings land.
 const sttUnconfigured = computed(() => ui.value?.stt_state === "unconfigured");
+// The wiki feature is ON but nobody has written a page yet — the one unavailable
+// state the user can resolve themselves, so it earns a faded pill + a nudge.
+const wikiEmpty = computed(() => ui.value?.wiki_state === "empty");
 
 // One message shape for every not-set-up feature, so the wording cannot drift between
 // the surfaces (a user with STT off sees the nudge mic and the composer mic at once).

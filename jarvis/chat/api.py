@@ -1514,6 +1514,9 @@ def get_chat_ui_settings() -> dict:
 		# Composer "ground on wiki" pill gating: shown only when the wiki feature
 		# is on AND the org has at least one Active page (best-effort).
 		"wiki_enabled": _wiki_enabled_flag(),
+		# WHY it is unavailable (ok|off|empty|error) — `empty` is user-fixable, so the
+		# pill fades with a nudge instead of disappearing. See _wiki_state_flag.
+		"wiki_state": _wiki_state_flag(),
 		# Persona pill gating: a real kill switch (Jarvis Settings.persona_enabled,
 		# default on), read here AND in _persona_clause so flipping it off both hides
 		# the pill and stops the clause - never a client-only half-switch (N7).
@@ -1582,12 +1585,25 @@ def _wiki_enabled_flag() -> bool:
 	feature is on AND the org actually has at least one Active page (so the pill
 	can never be a guaranteed-silent no-op on an empty wiki). Best-effort — a
 	bootstrap must never fail on this."""
+	return _wiki_state_flag() == "ok"
+
+
+def _wiki_state_flag() -> str:
+	"""WHY the wiki pill is unavailable: ok | off | empty | error.
+
+	The boolean above collapses two very different things. ``off`` is an operator
+	kill switch (hide it — that is the point of a switch), but ``empty`` just means
+	nobody has written a page yet, and that is fixable BY THE USER — so the pill can
+	be shown faded with a "no pages yet" nudge instead of vanishing. Best-effort: a
+	bootstrap must never fail on this, and an error hides exactly as before."""
 	try:
 		from jarvis.chat.wiki import _has_active_pages, wiki_enabled
 
-		return bool(wiki_enabled() and _has_active_pages())
+		if not wiki_enabled():
+			return "off"
+		return "ok" if _has_active_pages() else "empty"
 	except Exception:
-		return False
+		return "error"
 
 
 def _current_user_persona() -> str | None:

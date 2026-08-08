@@ -166,12 +166,17 @@ def get_dashboards_caps() -> dict:
 	"""Single gating probe for the Dashboards page: which scopes the caller
 	may create in, which roles they may target, and the size caps."""
 	stt_enabled = False
+	# WHY it is off (ok|off|unconfigured|error): only `unconfigured` is an actionable
+	# gap worth showing the user as a faded recorder; the rest stay hidden.
+	stt_state = "error"
 	try:
 		from jarvis.chat import voice
 
 		stt_enabled = bool(voice.stt_config())
+		stt_state = voice.stt_state()
 	except Exception:
 		stt_enabled = False
+		stt_state = "error"
 	return {
 		"ok": True,
 		"data": {
@@ -181,6 +186,7 @@ def get_dashboards_caps() -> dict:
 			"max_html_chars": _MAX_HTML_CHARS,
 			"max_rows": DASHBOARD_MAX_ROWS,
 			"stt_enabled": stt_enabled,
+			"stt_state": stt_state,
 		},
 	}
 
