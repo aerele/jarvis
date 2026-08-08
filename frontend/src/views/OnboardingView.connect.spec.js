@@ -1453,6 +1453,26 @@ describe("jarvis#752 the connect step shows admin's route verdict while still co
 		w.unmount();
 	});
 
+	it("a reason that later cleared is not quoted at the deadline", async () => {
+		// Round-1 review: the remembered reason used to ratchet to the newest
+		// NON-EMPTY value, so a condition that had since resolved (a quota reset)
+		// was still quoted while something else held the operation open. That is a
+		// confidently wrong diagnosis at the exact moment a right one matters most.
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+		// Admin no longer names a reason: the quota cleared, something else is slow.
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: "" });
+		await flushPromises();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+
+		expect(w.vm.state.connectMessage).toMatch(/was still running when we last checked/i);
+		expect(w.vm.state.connectMessage).not.toContain(QUOTA_REASON);
+		w.unmount();
+	});
+
 	it("a timeout with nothing ever heard renders the plain fallback, nothing invented", async () => {
 		const w = await mountConnect();
 

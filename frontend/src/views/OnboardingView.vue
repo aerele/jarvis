@@ -3240,15 +3240,16 @@ const currentOpId = ref("");
 const navigated = ref(false);
 let retryTimer = null;
 
-// jarvis#752: the last NON-EMPTY chat_readiness_reason this attempt's operation
-// polls have seen, kept across the whole follow (unlike opReadinessDetail, which
-// mirrors only the current tick). Needed because the controller's own 5-minute
-// deadline synthesizes a bare timedOut status with no reason on it at all - see
-// createOperationController's tick() - so the only place left to read admin's
-// last word from is what earlier ticks already told onOpUpdate. Reset only on a
-// genuinely fresh attempt (saveConnect, chooseDifferentModel); a Retry re-follows
-// the SAME operation, so the last reason it gave is still about the config on
-// screen.
+// jarvis#752: the chat_readiness_reason the most recent poll carried, held
+// across the follow so the deadline can quote it. Needed because the
+// controller's own 5-minute deadline synthesizes a bare timedOut status with no
+// reason on it at all - see createOperationController's tick() - so the only
+// place left to read admin's last word from is what the ticks already told
+// onOpUpdate. It TRACKS that value, including back to empty: a reason that later
+// cleared is no longer true, and quoting it at a timeout would be a confident
+// wrong answer (round-1 review). Reset on a genuinely fresh attempt (saveConnect,
+// chooseDifferentModel); a Retry re-follows the SAME operation, so what it last
+// said is still about the config on screen.
 let lastOpChatReadinessReason = "";
 
 // The setup screen's headline, following the live phase (jarvis#727) instead of
@@ -3382,7 +3383,15 @@ function onOpUpdate(ui) {
 	// attempt has seen, for the deadline timeout onTerminal renders with no ui of
 	// its own to read from.
 	opReadinessDetail.value = (ui && ui.chatReadinessReason) || "";
-	if (ui && ui.chatReadinessReason) lastOpChatReadinessReason = ui.chatReadinessReason;
+	// Round-1 review: TRACKS the live value rather than ratcheting to the newest
+	// non-empty one. Only holding onto non-empty reasons meant a condition that
+	// later CLEARED (a quota reset, say) while something else kept the operation
+	// from finishing would still be quoted at the deadline, giving the customer a
+	// confidently wrong diagnosis at the exact moment they most need a right one.
+	// A blank tick is admin saying it no longer has a reason, which is itself the
+	// truth, so honour it. Kept as a separate variable because onTerminal's
+	// timeout branch synthesizes a bare status with no ui to read from.
+	lastOpChatReadinessReason = (ui && ui.chatReadinessReason) || "";
 	if (phase === OP_PHASE.REJECTED) {
 		// The input is the problem: return to the editable form with the reason.
 		// This IS the jarvis#727 escape, already built, for the one case admin can
@@ -3854,6 +3863,14 @@ async function saveConnect() {
 	state.connectSupportOffered = false;
 	connectModelChangeOffered.value = false;
 	lastOpChatReadinessReason = "";
+	// Round-1 review: the LIVE detail must clear here too, not only the
+	// remembered one. A timeout ends an attempt through onTerminal, which never
+	// calls onOpUpdate, so nothing blanks it. Until this new operation's first
+	// tick lands, readinessStage falls to its else branch and would render the
+	// PREVIOUS attempt's verdict, describing a credential this attempt has
+	// already replaced. Showing a stale verdict is the exact failure this change
+	// exists to remove.
+	opReadinessDetail.value = "";
 	savingConnect.value = true;
 	try {
 		let idem = recallIdem();
