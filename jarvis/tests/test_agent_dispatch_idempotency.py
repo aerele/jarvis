@@ -304,6 +304,13 @@ class DispatchIdempotencyTestCase(FrappeTestCase):
 			ignore_permissions=True,
 		)
 
+	def _dispatched_for(self, inst: str) -> list:
+		"""Dispatch calls that belong to THIS installation. The sweep is site-wide and
+		CI runs four shards against one site, so a foreign installation falling due
+		mid-test must never read as a second audit of ours."""
+		mine = set(frappe.get_all(RUN, filters={"installation": inst}, pluck="name", ignore_permissions=True))
+		return [kw for kw in self.dispatched if kw.get("run_id") in mine]
+
 	def _next_run_at(self, inst: str):
 		return frappe.db.get_value(INSTALLATION, inst, "next_run_at")
 
@@ -321,7 +328,7 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 		self._sweep(launch=self._launch_then_crash())
 		launched = self._launched(inst)
 		self.assertEqual(len(launched), 1, "the first tick launches exactly one audit")
-		self.assertEqual(len(self.dispatched), 1)
+		self.assertEqual(len(self._dispatched_for(inst)), 1)
 
 		# The writeback lands: the audit is done, minutes into the hour.
 		frappe.db.set_value(RUN, launched[0], "status", "completed", update_modified=False)
@@ -331,7 +338,7 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 		self.assertEqual(
 			self._launched(inst), launched, "the slot was already dispatched; it must not run again"
 		)
-		self.assertEqual(len(self.dispatched), 1, "no second audit reaches the container")
+		self.assertEqual(len(self._dispatched_for(inst)), 1, "no second audit reaches the container")
 
 	def test_a_crash_after_the_launch_is_not_reported_as_a_failure_to_start(self):
 		"""The customer's audit IS running, so a ``failed`` run and a "could not be
@@ -365,7 +372,7 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 			agent_scheduler._sweep_one(stale, now_datetime(), "Administrator", set())
 
 		self.assertEqual(self._launched(inst), launched, "the stale worker must not re-dispatch")
-		self.assertEqual(len(self.dispatched), 1)
+		self.assertEqual(len(self._dispatched_for(inst)), 1)
 
 	def test_a_long_audit_spanning_a_tick_is_not_double_launched(self):
 		"""Control: the ordinary healthy path. The audit is still ``running`` when the
@@ -380,6 +387,42 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 		self._sweep()
 		self.assertEqual(self._launched(inst), launched)
 		self.assertEqual(frappe.db.get_value(RUN, launched[0], "status"), "running")
+
+	def test_a_dispatch_that_fails_for_real_leaves_the_slot_due_and_nothing_running(self):
+		"""The launch reaches the fleet call and THAT fails, which is a different shape
+		from the whole launch failing: the run row is already committed, so
+		``_launch_audit`` stamps it ``failed`` itself and re-raises. Nothing is running,
+		so the slot is genuinely unspent and must go back.
+
+		Known and deliberately not asserted as exactly-one: this attempt leaves TWO
+		``failed`` rows, one from the launch's own writeback and one from the sweep's
+		skip record. That predates the dispatch claim. What matters here is that no run
+		is left alive and the slot returns."""
+		inst = self._due_install()
+		now = now_datetime()
+
+		def _unreachable(**kw):
+			raise RuntimeError("admin unreachable")
+
+		self._sweep(dispatch=_unreachable)
+
+		self.assertEqual(self._runs(inst, "running"), [], "a failed dispatch leaves nothing alive")
+		errors = frappe.get_all(
+			RUN,
+			filters={"installation": inst, "status": "failed"},
+			fields=["error"],
+			ignore_permissions=True,
+		)
+		self.assertTrue(errors, "the failure is recorded for the customer")
+		self.assertTrue(
+			any("dispatch failed" in (e["error"] or "") for e in errors),
+			f"the real dispatch failure is named: {errors}",
+		)
+		self.assertTrue(
+			frappe.get_all(NOTIFICATION, filters={"for_user": self.owner}, pluck="name"),
+			"the owner is told",
+		)
+		self.assertLessEqual(self._next_run_at(inst), now, "the slot goes back for a retry")
 
 	def test_a_genuine_launch_failure_records_notifies_and_leaves_the_slot_due(self):
 		"""Control: nothing durable was created, so the customer must still be told and
@@ -405,7 +448,7 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 			"the owner is told the run could not be started",
 		)
 		self.assertLessEqual(self._next_run_at(inst), now, "the slot stays due for a retry")
-		self.assertEqual(self.dispatched, [], "nothing reached the container")
+		self.assertEqual(self._dispatched_for(inst), [], "nothing reached the container")
 
 
 class TestLaunchAtomicity(DispatchIdempotencyTestCase):
@@ -471,7 +514,7 @@ class TestLaunchAtomicity(DispatchIdempotencyTestCase):
 
 		self._sweep()
 
-		self.assertEqual(len(self.dispatched), 1, "today's slot still runs")
+		self.assertEqual(len(self._dispatched_for(inst)), 1, "today's slot still runs")
 		self.assertEqual(len(self._launched(inst)), 2, "the wedged row plus the new audit")
 
 
@@ -510,14 +553,19 @@ class TestManualAndScheduledCannotInterleave(DispatchIdempotencyTestCase):
 				try:
 					self._run_now(inst)
 					outcome[0] = "launched"
+					outcome.append(None)
 				except Exception as e:
 					outcome[0] = f"refused: {e}"
+					outcome.append(type(e))
 			return self._dispatch_stub(**kw)
 
 		self._sweep(dispatch=_dispatch)
 
 		self.assertTrue(outcome and outcome[0] != "pending", "the manual run must have been attempted")
 		self.assertTrue(outcome[0].startswith("refused"), f"the manual run was not refused: {outcome[0]}")
+		# Refused for the RIGHT reason: any old crash would also read as "refused".
+		self.assertEqual(outcome[1], frappe.ValidationError)
+		self.assertIn("already", outcome[0])
 		self.assertEqual(len(self._launched(inst)), 1, "exactly one audit for the two triggers")
 
 	def test_a_manual_run_is_refused_while_its_own_audit_is_still_running(self):
@@ -531,6 +579,33 @@ class TestManualAndScheduledCannotInterleave(DispatchIdempotencyTestCase):
 			self._run_now(inst)
 		self.assertIn("already running", str(cm.exception))
 		self.assertEqual(len(self._launched(inst)), 1)
+
+	def test_a_tick_arriving_during_a_live_manual_audit_consumes_the_slot(self):
+		"""The non-racing overlap, which is the common one: the manual run started a
+		minute ago and is still going when the hourly tick fires. Nothing is contended,
+		the lock is free, and the tick has to decide on its own. It must not queue a
+		second audit of the same books, it must consume the slot rather than busy-retry
+		every hour behind a long audit, and the deferral has to be visible: every other
+		skip in this sweep records its reason, so a customer never finds a scheduled
+		audit that simply did not appear."""
+		inst = self._due_install()
+		self._run_now(inst)
+		self.assertEqual(len(self._launched(inst)), 1)
+		now = now_datetime()
+
+		self._sweep()
+
+		self.assertEqual(len(self._launched(inst)), 1, "no second concurrent audit")
+		self.assertEqual(len(self._dispatched_for(inst)), 1)
+		self.assertGreater(self._next_run_at(inst), now, "the slot is consumed, not left due")
+		skipped = frappe.get_all(
+			RUN,
+			filters={"installation": inst, "status": "failed"},
+			fields=["error"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(len(skipped), 1, "the deferral is recorded for the customer")
+		self.assertIn("already running", skipped[0]["error"])
 
 	def test_a_manual_run_is_allowed_again_once_the_audit_finishes(self):
 		"""Control: the refusal is about CONCURRENCY, never a lockout. A finished audit

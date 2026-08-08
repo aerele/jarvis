@@ -281,10 +281,24 @@ def _dispatch(row, now, *, run_as: str, original_user: str, source_apps: list[st
 	   freshness, never status alone (see ``_live_run``).
 
 	The failure handling then splits on what the launch actually left behind, because
-	"it raised" does not mean "nothing ran": ``_launch_audit`` commits its ``running``
-	run before it dispatches, so a throw after that point is a failure of the
-	bookkeeping, not of the audit. Handing the slot back there is exactly how the
-	duplicate was reached.
+	"it raised" does not mean "nothing ran". ``_launch_audit`` commits its ``running``
+	run before it dispatches, so a throw AFTER that commit that leaves the run alive is
+	a failure of the bookkeeping, not of the audit, and handing the slot back there is
+	exactly how the duplicate was reached. A throw from the dispatch call itself is the
+	other case: ``_launch_audit`` has already stamped its own run ``failed``, nothing is
+	running, and the slot is genuinely unspent. Reading the run rather than the
+	exception is what tells the two apart.
+
+	NOT covered here: a dispatch call that fails AMBIGUOUSLY, a timeout where admin may
+	already have started the turn. ``_launch_audit`` records that as ``failed`` (it
+	cannot know better), so the retry mints a fresh run id and the fleet's run-id
+	idempotency does not engage. That is a different duplicate with a different cause,
+	pre-dating this path, and closing it needs a decision about what an ambiguous
+	dispatch means rather than another guard here.
+
+	A Redis fault propagates out of the lock instead of dispatching, which is
+	deliberate: without the lock there is no exclusivity to be had, and a slot left due
+	is recoverable where a duplicate is not.
 	"""
 	from jarvis._redis_lock import redis_lock
 
@@ -294,7 +308,10 @@ def _dispatch(row, now, *, run_as: str, original_user: str, source_apps: list[st
 		if _live_run(row.name):
 			# Already auditing: a manual Run Now, or an audit that is genuinely still
 			# going. The slot's work is being done, so CONSUME it instead of queueing a
-			# second concurrent audit of the same installation.
+			# second concurrent audit of the same installation. Recorded like every other
+			# skip in this sweep, so the customer is never left with a scheduled audit
+			# that silently did not appear.
+			_record_failed(row, "scheduled run skipped: an audit for this agent was already running")
 			_advance(row, now)
 			return
 		prev = _claim_slot(row, now)
@@ -308,7 +325,7 @@ def _dispatch(row, now, *, run_as: str, original_user: str, source_apps: list[st
 			frappe.set_user(run_as)
 			inst = frappe.get_doc(INSTALLATION, row.name)
 			# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
-			# it has no initiating human — the scheduler user (Administrator) is not one.
+			# it has no initiating human: the scheduler user (Administrator) is not one.
 			_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
 		except Exception:
 			frappe.set_user(original_user)
