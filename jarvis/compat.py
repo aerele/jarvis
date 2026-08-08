@@ -174,10 +174,8 @@ def itemised_tax(doc, with_tax_account: bool = False) -> dict:
 def permission_conditions(engine, doctype: str, table):
 	"""Row-level permission predicate for a (possibly aliased) table, either major.
 
-	Frappe 16 has ``Engine.get_permission_conditions(doctype, table)``, which
-	builds the predicate against the pypika table it is handed and so is
-	alias-safe. Frappe 15 has no such method at all: its permission logic lives
-	in a separate ``Permission`` class that only does doctype-level
+	Frappe 15 has no ``Engine.get_permission_conditions`` at all: its permission
+	logic lives in a separate ``Permission`` class that only does doctype-level
 	``has_permission`` checks and yields no row predicate. Calling the 16 method
 	on 15 raised ``AttributeError``, escaped the tool layer (the caller catches
 	only ``PermissionError``) and returned HTTP 500 for every ``query`` call.
@@ -185,26 +183,45 @@ def permission_conditions(engine, doctype: str, table):
 	Returns a criterion to AND into the WHERE, or ``None`` when the user is
 	unrestricted. Raises ``frappe.PermissionError`` on both majors when the user
 	has neither role permissions nor shared documents; the caller normalises it.
+
+	**Both majors qualify part of the predicate with the real table name**, so it
+	is built here over an unaliased table and applied to the caller's table as a
+	name-set restriction::
+
+	    `td`.`name` IN (SELECT `name` FROM `tabToDo` WHERE <predicate>)
+
+	Frappe 16 is alias-safe for what it derives from the pypika table it is
+	handed (owner, User Permissions, shared docs), but it wraps
+	``permission_query_conditions`` hook and Server Script output in a
+	``RawCriterion`` that stays ``tab{doctype}``-qualified with no alias
+	substitution. Frappe 15's ``DatabaseQuery`` equivalent returns SQL that is
+	``tab{doctype}``-qualified throughout. Either way the predicate cannot go
+	straight into a WHERE over an aliased table, and this tool always aliases
+	(``FROM `tabToDo` `td```), so MariaDB rejects it with "Unknown column
+	'tabToDo.allocated_to'". Building it over the unaliased table sidesteps both
+	without rewriting anyone's permission SQL, which is the one thing here that
+	could silently widen a rowset instead of erroring.
 	"""
+	inner = frappe.qb.DocType(doctype)
 	if hasattr(engine, "get_permission_conditions"):  # Frappe 16
-		return engine.get_permission_conditions(doctype, table)
-	user = getattr(engine, "user", None) or frappe.session.user
-	return _permission_conditions_v15(doctype, table, user)
+		cond = engine.get_permission_conditions(doctype, inner)
+	else:
+		user = getattr(engine, "user", None) or frappe.session.user
+		cond = _match_conditions_v15(doctype, user)
+	if cond is None:
+		return None
+	sub = frappe.qb.from_(inner).select(inner.name).where(cond)
+	return table.name.isin(sub)
 
 
-def _permission_conditions_v15(doctype: str, table, user: str):
+def _match_conditions_v15(doctype: str, user: str):
 	"""Frappe 15: reuse ``DatabaseQuery.build_match_conditions``, the same engine
 	``frappe.get_list`` runs on, so the composition (role permissions, the
 	shared-only fallback, the if_owner constraint, User Permissions, and
 	``permission_query_conditions`` hooks) is the framework's and not ours.
 
-	It returns SQL qualified with the real table name (``tabToDo``.…), and this
-	tool always aliases its tables (``FROM `tabToDo` `td```), so that fragment
-	cannot go straight into the outer WHERE: MariaDB rejects it with "Unknown
-	column". Rather than rewrite the framework's permission SQL, which would
-	silently corrupt any hook that subqueries the same table, restrict the outer
-	alias to a name set computed over the UNALIASED table. The framework's SQL is
-	then correct exactly as written.
+	Returns a raw-SQL criterion over the unaliased table, or ``None`` when the
+	user is unrestricted.
 	"""
 	from frappe.model.db_query import DatabaseQuery
 	from pypika.terms import LiteralValue
@@ -215,6 +232,4 @@ def _permission_conditions_v15(doctype: str, table, user: str):
 	# frappe.db.sql percent-formats the statement it runs, so a LIKE pattern
 	# coming from a hook has to be escaped or execution dies with "unsupported
 	# format character". This is exactly what frappe's own get_match_cond does.
-	inner = frappe.qb.DocType(doctype)
-	sub = frappe.qb.from_(inner).select(inner.name).where(LiteralValue(cond_sql.replace("%", "%%")))
-	return table.name.isin(sub)
+	return LiteralValue(cond_sql.replace("%", "%%"))

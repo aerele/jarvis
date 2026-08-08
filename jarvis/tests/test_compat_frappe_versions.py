@@ -214,6 +214,14 @@ class TestItemisedTaxAcrossMajors(FrappeTestCase):
 		if "erpnext" not in frappe.get_installed_apps():
 			self.skipTest("erpnext not installed on this site")
 		doc = frappe.new_doc("Sales Invoice")
+		# ERPNext 16 reads doc._item_wise_tax_details, which only exists once
+		# calculate_taxes_and_totals has run; on a fresh doc it is None and
+		# erpnext's own loop raises "'NoneType' object is not iterable". That is
+		# erpnext's behaviour on an uncalculated document, not a dispatch
+		# failure, so give it the empty value a taxless calculation would leave
+		# and keep this test about the shim. On 15 the field is unused.
+		if doc.get("_item_wise_tax_details") is None:
+			doc._item_wise_tax_details = []
 		self.assertEqual(compat.itemised_tax(doc, with_tax_account=True), {})
 
 	def test_sends_the_object_the_installed_signature_asks_for(self):
