@@ -55,7 +55,7 @@
 								{{
 									planPriceLabel(
 										currentPlan.price_inr,
-										currentPlan.billing_cycle,
+										currentPlan.billing_cycle
 									)
 								}}
 							</span>
@@ -367,7 +367,7 @@ const REACTIVATION_NOTE =
 const noOtherPlans = computed(() =>
 	canReactivate.value
 		? reactivationPlans.value.length === 0
-		: !upgradePlans.value.length && !downgradePlans.value.length,
+		: !upgradePlans.value.length && !downgradePlans.value.length
 );
 
 // Plan changes are refused server-side while a cancellation or a switch is
@@ -378,7 +378,7 @@ const changesBlocked = computed(() => cancelling.value || scheduledDowngrade.val
 // colour rule living in two places is how the settings pane and this page end
 // up showing different badges for the same subscription.
 const statusTheme = computed(() =>
-	statusBadgeTheme(account.value.subscription_status, cancelling.value),
+	statusBadgeTheme(account.value.subscription_status, cancelling.value)
 );
 
 // Why the plan actions are inert. The retired pane HID them in these states,
@@ -533,7 +533,7 @@ async function doDowngrade(plan) {
 			message: d.effective_on
 				? `Your plan changes on ${
 						String(d.effective_on).split(" ")[0]
-					}. You keep your current plan until then, and nothing is charged today.`
+				  }. You keep your current plan until then, and nothing is charged today.`
 				: "Your plan changes at your next billing cycle. You keep your current plan until then, and nothing is charged today.",
 			confirmLabel: "Schedule switch",
 		}),

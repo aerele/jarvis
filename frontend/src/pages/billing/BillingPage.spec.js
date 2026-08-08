@@ -125,7 +125,7 @@ describe("acceptance: renew's stuck-payment answer is no longer silent", () => {
 				code: "PAYMENT_CONFIRMATION_PENDING",
 				recovery: "confirm_payment",
 				payment_provider: "razorpay",
-			}),
+			})
 		);
 
 		await wrapper.vm.doRenew();
@@ -252,7 +252,7 @@ describe("edge 5: a token this bench cannot navigate with fails closed", () => {
 		});
 
 		expect(window.location.assign).toHaveBeenCalledWith(
-			"https://admin.example.com/jarvis-checkout#t=tok_123",
+			"https://admin.example.com/jarvis-checkout#t=tok_123"
 		);
 		expect(wrapper.vm.phase).toBe("redirect");
 	});
@@ -412,7 +412,7 @@ describe("feature: reactivate onto any plan", () => {
 				reactivation_plans: [
 					{ name: "pro", plan_name: "Pro", price_inr: 100, billing_cycle: "Monthly" },
 				],
-			}),
+			})
 		);
 		expect(wrapper.vm.reactivationPlans).toEqual([]);
 		expect(wrapper.vm.noOtherPlans).toBe(true);
@@ -453,7 +453,7 @@ describe("feature: reactivate onto any plan", () => {
 				subscription_status: "Active",
 				days_remaining: 12,
 				can_reactivate: false,
-			}),
+			})
 		);
 		api.renewPlan.mockResolvedValue(rawOkBody({ tenant_status: "ready" }));
 
@@ -466,7 +466,7 @@ describe("feature: reactivate onto any plan", () => {
 
 	it("Renew is offered on the top card for a lapsed Past Due account too (not just Expired/Cancelled)", async () => {
 		const wrapper = await mountPage(
-			reactivationAccount({ subscription_status: "Past Due", days_remaining: 0 }),
+			reactivationAccount({ subscription_status: "Past Due", days_remaining: 0 })
 		);
 		expect(wrapper.vm.currentAction.label).toBe("Renew");
 	});
@@ -511,7 +511,7 @@ describe("edge 10: double-submit on a reactivation card", () => {
 describe("edge 11: reactivation controls share the page's own admin gate", () => {
 	it("a refused getAccount call renders no plan controls at all - same gate, no separate fetch", async () => {
 		api.getAccount.mockRejectedValue(
-			new Error("You do not have permission to access this resource"),
+			new Error("You do not have permission to access this resource")
 		);
 		const wrapper = mount(BillingPage, { global: { stubs: STUBS } });
 		await flushPromises();
@@ -538,7 +538,7 @@ describe("edge 12: Active-with-time-left keeps the prorated grid and offers no r
 						billing_cycle: "Monthly",
 					},
 				],
-			}),
+			})
 		);
 
 		expect(wrapper.vm.canReactivate).toBe(false);
@@ -563,7 +563,7 @@ describe("edge 13: admin unreachable / 5xx / rate-limited on reactivate or check
 	it("reactivate: an admin failure surfaces an error, not a silent no-op, and mutates nothing locally", async () => {
 		const wrapper = await mountPage(reactivationAccount());
 		api.renewPlan.mockRejectedValue(
-			new Error("admin is unreachable right now; try again in a moment."),
+			new Error("admin is unreachable right now; try again in a moment.")
 		);
 
 		wrapper.vm.doReactivate(STARTER_PLAN);
@@ -631,7 +631,7 @@ describe("F2: a status check never navigates on its own", () => {
 		wrapper.vm.runCodeAction(ACTIONS.RESUME);
 
 		expect(window.location.assign).toHaveBeenCalledWith(
-			"https://admin.example.com/jarvis-checkout#t=tok_123",
+			"https://admin.example.com/jarvis-checkout#t=tok_123"
 		);
 		expect(wrapper.vm.phase).toBe("redirect");
 	});
@@ -660,7 +660,7 @@ describe("F2: a status check never navigates on its own", () => {
 				pay_page_token: "tok_fresh",
 				pay_origin: "https://admin.example.com",
 				pay_origin_attested: true,
-			}),
+			})
 		);
 
 		await wrapper.vm.doRenew();
@@ -668,7 +668,7 @@ describe("F2: a status check never navigates on its own", () => {
 		await flushPromises();
 
 		expect(window.location.assign).toHaveBeenCalledWith(
-			"https://admin.example.com/jarvis-checkout#t=tok_fresh",
+			"https://admin.example.com/jarvis-checkout#t=tok_fresh"
 		);
 	});
 });
@@ -686,7 +686,7 @@ describe("F6: INITIATE retries the flow that produced the code, not always renew
 						billing_cycle: "Monthly",
 					},
 				],
-			}),
+			})
 		);
 		api.previewUpgrade.mockResolvedValue({ prorated_inr: 150 });
 		api.startUpgrade.mockResolvedValue({ code: "PAYMENT_DECLINED" });
@@ -723,7 +723,7 @@ describe("F6: INITIATE retries the flow that produced the code, not always renew
 describe("F11: stale notice/error cleared when a new action starts", () => {
 	it("opening a new confirm dialog clears a stale actionErr from a previous action", async () => {
 		const wrapper = await mountPage(
-			baseAccount({ cancel_at_period_end: true, can_reauthorize: true }),
+			baseAccount({ cancel_at_period_end: true, can_reauthorize: true })
 		);
 		api.resumePlan.mockRejectedValue(new Error("stale failure"));
 		await wrapper.vm.doResume();
@@ -775,7 +775,7 @@ describe("finding 7: the healer's coded refusals are answers, not transport erro
 	it("renders PAYMENT_CHECK_RATE_LIMITED as wait-and-retry, not 'could not reach'", async () => {
 		const wrapper = await mountPage();
 		api.checkBillingPayment.mockResolvedValue(
-			rawFail("PAYMENT_CHECK_RATE_LIMITED", { retry_after_seconds: 120 }),
+			rawFail("PAYMENT_CHECK_RATE_LIMITED", { retry_after_seconds: 120 })
 		);
 
 		await wrapper.vm.doCheckStatus();
@@ -833,7 +833,7 @@ describe("finding 6: renew's coded refusals get a notice with an action, not red
 			rawFail("CycleSwitchNotSupported", {
 				status: 400,
 				message: "changing billing cycle is not supported",
-			}),
+			})
 		);
 
 		await wrapper.vm.doRenew();
@@ -857,7 +857,7 @@ describe("finding 6: renew's coded refusals get a notice with an action, not red
 						billing_cycle: "Monthly",
 					},
 				],
-			}),
+			})
 		);
 		api.renewPlan.mockResolvedValue(rawFail("PAYMENT_UNDER_REVIEW", { status: 409 }));
 
@@ -938,7 +938,7 @@ describe("the paid notice speaks for the BILLING surface, not the signup wizard"
 			configurable: true,
 		});
 		api.checkBillingPayment.mockResolvedValue(
-			rawFail(CODES.PAYMENT_ALREADY_ACTIVE, { status: 409 }),
+			rawFail(CODES.PAYMENT_ALREADY_ACTIVE, { status: 409 })
 		);
 		const wrapper = await mountPage();
 		await flushPromises();
