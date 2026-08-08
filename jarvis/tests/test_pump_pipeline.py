@@ -950,6 +950,137 @@ class TestFailedFinalSettlesAsError(_PipelineCase):
 
 
 # --------------------------------------------------------------------------- #
+# 7c. jarvis#681: a SUCCESSFUL turn whose follow-up enrichment lane keeps failing
+# --------------------------------------------------------------------------- #
+
+
+class TestStuckFinishingAfterAFailingLane(_PipelineCase):
+	"""jarvis#681 (e2e finding F26). A turn answered, ran its tools and settled. A
+	background lane then died on stale credentials, roughly a minute after an API-key
+	apply the main lane had already picked up. The SPA kept "Finishing..." up forever,
+	which claims the answer is incomplete when it is not.
+
+	The failing shape is driven for real, at the layer that actually breaks: the
+	gateway reports NO row for this turn's session (what a live credential change
+	produces), so the REAL usage effect gets ``USAGE_RETRY`` from the REAL
+	``record_turn_usage`` and raises, exactly as it does in production. Nothing is
+	mocked at the effect boundary, so the test cannot be satisfied by a fixture
+	handing the code a healthy row.
+
+	What that proves, and what the fix adds:
+	  * the turn legitimately stays ``finalizing`` and promises NO ``message:enriched``
+	    while the lane keeps failing. That is by design and is NOT changed here.
+	  * the retry budget eventually force-dones the effect and the turn reaches
+	    ``done``, publishing ``message:enriched`` exactly once. But that ONE publish is
+	    best-effort, and every retry is 5 minutes apart behind the pump watchdog cron.
+	  * so a finalize that arrives AFTER the turn is done now RE-DELIVERS
+	    ``message:enriched`` (the counterpart of the CDX-12 terminal backstop), instead
+	    of returning ``already_done`` in silence and leaving the client stuck.
+	The client-side half of the fix, the deadline that bounds the affordance whatever
+	the server does, is covered by frontend/src/lib/enrichmentPending.test.js.
+	"""
+
+	@contextmanager
+	def _mock_enrichment_except_usage(self):
+		"""``_mock_enrichment`` with the USAGE effect left REAL: this test's whole
+		subject is the real usage retry, and mocking it away would test nothing. The
+		poll's own sleeps are stubbed so the bounded retry costs no wall clock."""
+		recs = {"rich": _Recorder(), "macro": _Recorder(), "applearn": _Recorder(), "title": _Recorder()}
+		with (
+			patch("jarvis.chat.turn_handler.persist_rich_outputs", recs["rich"]),
+			patch("jarvis.chat.macros.advance_after_turn", recs["macro"]),
+			patch("jarvis.learning.app_analysis.on_turn_end", recs["applearn"]),
+			patch("jarvis.chat.title.enqueue_autotitle", recs["title"]),
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=False),
+			patch("jarvis.chat.usage.time.sleep", lambda *a, **k: None),
+		):
+			yield recs
+
+	def _settle_a_successful_turn(self, rid: str) -> str:
+		"""Drive the REAL pipeline to a settled success: prepare -> stream -> terminal
+		-> settlement. Returns the conversation."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="how many sales invoices are open?")
+		self._mk_turn(conv, rid, seed, "queued", version=0, reserved=0)
+		double = self._double()
+		deps = self._deps(double=double, prepare=self._prepare_stub(conv, double, "success"))
+		ctx = self._make_ctx(deps)
+		self._pubs.clear()
+		self._pump_until(ctx, lambda: self._state(rid) in ("finalizing", "done"))
+		self.assertEqual(self._state(rid), "finalizing", "the answer settled; only enrichment is owed")
+		return conv
+
+	def test_a_dead_lane_holds_the_turn_then_the_budget_frees_it_and_the_event_redelivers(self):
+		rid = "pmp_681"
+		self._settle_a_successful_turn(rid)
+		# The gateway has no row for this turn's session: the F26 shape.
+		blind = _FakeSess()
+		blind.list_sessions = lambda: []
+
+		# ---- 1. the reported state: a completed answer, a dead lane, no clear ----
+		with self._gateway(blind), self._mock_enrichment_except_usage():
+			out = finalize.run_finalize(rid, self._target)
+		self.assertTrue(out["ok"], "finalize never errors a settled turn")
+		self.assertFalse(out["done"])
+		self.assertEqual(self._state(rid), "finalizing", "the failing lane holds the turn open")
+		self.assertEqual(self._effects(rid)["usage"], "pending", "released for the next cycle")
+		self.assertEqual(int(self._val(rid, "usage_recorded")), 0, "the guard CAS rolled back")
+		self.assertNotIn(
+			"message:enriched",
+			self._pub_kinds(),
+			"nothing tells the client to stop showing Finishing... while enrichment is owed",
+		)
+		# Everything the USER can see did land: the answer is complete, which is why a
+		# permanent "Finishing..." is a lie rather than merely pessimistic.
+		self.assertEqual(self._effects(rid)["rich_outputs"], "done")
+		self.assertEqual(self._effects(rid)["auto_title"], "done")
+
+		# ---- 2. the retry budget frees it, but only after the watchdog cadence ----
+		for _ in range(ts.FINALIZE_MAX_ATTEMPTS):
+			if self._state(rid) == "done":
+				break
+			with self._gateway(blind), self._mock_enrichment_except_usage():
+				finalize.run_finalize(rid, self._target)
+		self.assertEqual(self._state(rid), "done", "a broken lane can never strand a settled turn")
+		self.assertEqual(
+			self._pub_kinds().count("message:enriched"), 1, "the clear is published exactly once"
+		)
+
+		# ---- 3. THE FIX: that single publish is best-effort, so a later finalize
+		#         re-delivers it instead of returning already_done in silence. ----
+		amsg = self._val(rid, "assistant_message")
+		self._pubs.clear()
+		with self._gateway(blind), self._mock_enrichment_except_usage() as recs:
+			again = finalize.run_finalize(rid, self._target)
+		self.assertEqual(
+			self._pub_kinds(),
+			["message:enriched"],
+			"a finalize on a done turn re-delivers the clear the client is waiting on, "
+			"and nothing else. Before jarvis#681 this was silent, so a client that missed "
+			"the one publish above stayed on Finishing... with the answer already complete",
+		)
+		self.assertEqual(self._pubs[0]["message_id"], amsg, "addressed to the reply on screen")
+		self.assertEqual(self._pubs[0]["run_id"], rid)
+		self.assertTrue(again["already_done"])
+		self.assertTrue(again.get("republished"), "the re-delivery is reported to the caller")
+		self.assertEqual(recs["rich"].count, 0, "re-delivery runs NO effects; it is a publish, not a redo")
+
+	def test_a_done_turn_with_no_assistant_row_publishes_nothing(self):
+		# The re-delivery is addressed to a message. A turn that never got an assistant
+		# row (settled before prepare inserted one) has nothing to enrich, and must not
+		# emit a message:enriched carrying a null message_id for the client to index on.
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		rid = "pmp_681_noamsg"
+		self._mk_turn(conv, rid, seed, "done", version=9)
+		frappe.db.commit()
+		self._pubs.clear()
+		out = finalize.run_finalize(rid, self._target)
+		self.assertEqual(out, {"ok": True, "already_done": True, "republished": False})
+		self.assertEqual(self._pubs, [], "no message:enriched with a null message_id to index on")
+
+
+# --------------------------------------------------------------------------- #
 # 8. Usage (turn_id) idempotency under finalize replay
 # --------------------------------------------------------------------------- #
 
