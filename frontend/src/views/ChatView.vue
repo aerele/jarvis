@@ -663,7 +663,7 @@
 						<Message
 							v-else
 							variant="row"
-							:html="m.error ? '' : render(m.content)"
+							:html="m.error ? '' : render(m.content, m.streaming)"
 							:attachments="m.canvas"
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
@@ -3758,6 +3758,8 @@ import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.v
 import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { normaliseAction } from "@/lib/chatAction";
+import { stripBlocks } from "@/lib/chatBlocks";
+import { createRevealer } from "@/lib/streamReveal";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { pickGreeting } from "@/lib/greeting";
@@ -5178,19 +5180,8 @@ function parseXychart(body) {
 	if (horizontal) spec.options = { horizontal: true };
 	return spec;
 }
-function stripBlocks(text) {
-	return (text || "")
-		.replace(/```jarvis-action[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```confirm[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-ask[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-cards[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-skill[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-macro[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-chart[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```mermaid[ \t]*\n[ \t]*xychart-beta[\s\S]*?```/g, "")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
-}
+// Moved to lib/chatBlocks.js so the streaming rule (hold an unterminated block
+// instead of letting marked render it as raw JSON) is unit-testable.
 const _skillUsedCache = new Map();
 function skillsUsedOf(m) {
 	const content = (m && m.content) || "";
@@ -5420,17 +5411,21 @@ function confirmLabel(m) {
 // identical content in two messages renders identically.
 let _renderCacheRegex = undefined;
 let _renderCache = new Map();
-function render(text) {
+function render(text, streaming = false) {
 	const re = docNameRegex.value;
 	if (re !== _renderCacheRegex) {
 		_renderCacheRegex = re;
 		_renderCache = new Map();
 	}
-	const hit = _renderCache.get(text);
+	// The same text renders two ways: mid-stream an unterminated block is held
+	// back, once settled it is shown. So the flag is part of the cache key, or a
+	// reply would keep the held version for the rest of the session.
+	const key = (streaming ? "S:" : "F:") + text;
+	const hit = _renderCache.get(key);
 	if (hit !== undefined) return hit;
-	const out = linkifyDocs(renderMarkdown(stripBlocks(text)));
+	const out = linkifyDocs(renderMarkdown(stripBlocks(text, streaming)));
 	if (_renderCache.size >= 800) _renderCache.clear();
-	_renderCache.set(text, out);
+	_renderCache.set(key, out);
 	return out;
 }
 // {document name → DocType} harvested from THIS conversation's tool calls
