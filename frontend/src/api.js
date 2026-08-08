@@ -419,6 +419,13 @@ export const onboardingPaymentApi = {
 	confirmSignupPayment: (payload, opts) =>
 		rawOnboardingCall("jarvis.onboarding.finish_payment", { payload }, opts),
 	syncConnection: () => call("jarvis.onboarding.sync_connection"),
+	// jarvis#297 P0-2a: "Resend the link". This bench method does not exist yet -
+	// the wizard only ever calls it when the machine's canResendVerification is
+	// true, and admin never sends that flag today, so this stays unreachable in
+	// production. Wired against the endpoint name the fix's report specifies, so
+	// wiring it up is the only step left once both planes ship their half.
+	resendVerification: (opts) =>
+		rawOnboardingCall("jarvis.onboarding.resend_verification_email", {}, opts),
 };
 export const isOnboarded = () => call("jarvis.account.is_onboarded");
 // args: {provider, model, api_key, base_url, auth_mode, force}

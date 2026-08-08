@@ -81,6 +81,13 @@ export const EVENTS = {
 };
 
 const DEFAULT_COOLDOWN_MS = 30_000;
+// jarvis#297 P0-2a: the client-side cooldown after a successful "Resend the
+// link" send. Self-imposed, not server-driven - unlike DEFAULT_COOLDOWN_MS
+// (which only ever fires from a coded 429), this starts on every send that
+// actually went out, so an impatient customer cannot fire a burst of mail
+// while the first one is still landing. A future server-side rate limit is
+// additive, not a replacement for this.
+const RESEND_COOLDOWN_MS = 30_000;
 
 // States the page must never show a payment action in, because payment is
 // either done or cannot be driven forward from here.
@@ -123,6 +130,15 @@ const RESTART_SAFE_CODES = new Set([
 	// behind it, so walking the customer back to the Details step to correct the
 	// offending field is provably safe and is the ONLY useful recovery.
 	CODES.BENCH_SIGNUP_DETAILS_REJECTED,
+	// jarvis#297 P0-2a: verification precedes payment by construction - admin's
+	// signup() mints no order/mandate on this path ("No Razorpay order yet - that
+	// gets created at confirm time"), so nothing recoverable can be sitting behind
+	// it either. "Start again" (labelled "Use a different email" for this code,
+	// see paymentCodes.js) walks the customer back to Details with their typed
+	// values still in place, so a mistyped address is one field-edit and a fresh
+	// signup away instead of a dead end. The abandoned Pending Verification row is
+	// reclaimed server-side by reap_stale_pending_signups after the token TTL.
+	CODES.SIGNUP_VERIFICATION_REQUIRED,
 ]);
 
 export function isTerminalForPayment(value) {
@@ -165,6 +181,17 @@ export function initialState() {
 		summary: null,
 		lastCheckedAt: null,
 		verificationExpiresAt: null,
+		// jarvis#297 P0-2a: "Resend the link" is a mutating mail-send, not a read
+		// like Check, so unlike _backendCanCheck it fails CLOSED - the button never
+		// renders until an answer explicitly grants it. Admin does not send this
+		// flag today (see usePaymentFlow.resendVerification), so it stays false and
+		// the affordance stays hidden until the control plane ships its half.
+		canResendVerification: false,
+		// The self-imposed post-send cooldown (see RESEND_COOLDOWN_MS). Set by
+		// noteVerificationResent, read live against the clock - no reducer event
+		// is needed to lift it, the same way the countdown label itself just reads
+		// the clock.
+		resendCooldownUntil: 0,
 		canInitiate: false,
 		canCheck: false,
 		canReconnect: false,
@@ -668,6 +695,12 @@ function applyContract(state, decoded, opts) {
 	next.canInitiate =
 		backendCanInitiate && !next.awaitingReconciliation && !isTerminalForPayment(next.value);
 	next.canCheck = recomputeCanCheck(next, opts.nowMs);
+	// jarvis#297 P0-2a: fail CLOSED, unlike _backendCanCheck's fail-open default -
+	// resend is a mutating mail-send, not a read, so an admin that says nothing
+	// must not be read as permission. Recomputed fresh from THIS answer every
+	// time (not sticky like canReconnect): a capability that stops being repeated
+	// is a capability that stopped being true.
+	next.canResendVerification = !!data.can_resend_verification;
 
 	return next;
 }
@@ -675,6 +708,14 @@ function applyContract(state, decoded, opts) {
 /** Seconds left on the check cooldown, rounded UP, never negative. */
 export function remainingCooldownSeconds(state, nowMs) {
 	const left = (state.checkCooldownUntil || 0) - nowMs;
+	if (left <= 0) return 0;
+	return Math.ceil(left / 1000);
+}
+
+/** Seconds left on the post-resend cooldown (jarvis#297 P0-2a), same shape as
+ * remainingCooldownSeconds - rounded UP, never negative. */
+export function remainingResendCooldownSeconds(state, nowMs) {
+	const left = (state.resendCooldownUntil || 0) - nowMs;
 	if (left <= 0) return 0;
 	return Math.ceil(left / 1000);
 }
@@ -690,4 +731,16 @@ export function noteStatusCheck(state) {
 		generation: state.generation,
 	});
 	return { ...state, supportChecks: counter, supportOffered: shouldOfferSupport(counter) };
+}
+
+/**
+ * Record that "Resend the link" actually sent one (jarvis#297 P0-2a): starts
+ * the client-side cooldown so a second click cannot fire before the first
+ * mail has had a chance to land. Called only when the answer that came back
+ * from the resend round trip was itself a fresh SIGNUP_VERIFICATION_REQUIRED
+ * - usePaymentFlow.resendVerification decides that, this just records it, the
+ * same division of labour as noteStatusCheck/checkStatus.
+ */
+export function noteVerificationResent(state, nowMs) {
+	return { ...state, resendCooldownUntil: nowMs + RESEND_COOLDOWN_MS };
 }
