@@ -711,16 +711,29 @@
 										><template v-else>The link expires in 24 hours. </template
 										>Check your spam folder if it doesn't arrive.
 									</p>
+									<!-- jarvis#297 P0-2a: a truthful confirmation for "Resend the
+										 link" - stays up until the customer leaves this screen. -->
+									<p
+										v-if="resendNote"
+										class="mt-1.5 text-center text-p-sm text-ink-gray-5"
+										role="status"
+									>
+										{{ resendNote }}
+									</p>
 								</div>
 								<div class="ob-foot justify-end">
-									<Button
-										variant="solid"
-										:disabled="verifying"
-										:loading="verifying || payBusyView"
-										loading-text="Working…"
-										label="I've verified my email"
-										@click="onPayAction(A.VERIFY)"
-									/>
+									<div class="flex items-center gap-2">
+										<Button
+											v-for="a in verifyActions"
+											:key="a"
+											:variant="payActionVariant(a, verifyActions)"
+											:disabled="payActionDisabled(a)"
+											:loading="payActionLoading(a)"
+											loading-text="Working…"
+											:label="payActionLabel(a)"
+											@click="onPayAction(a)"
+										/>
+									</div>
 								</div>
 							</template>
 							<!-- Confirming: the customer paid on the admin-hosted page and came
@@ -1609,6 +1622,7 @@ import {
 	STATES as PAY_STATES,
 	canNavigateToPay,
 	remainingCooldownSeconds,
+	remainingResendCooldownSeconds,
 	isTerminalForPayment,
 } from "@/onboarding/paymentMachine";
 import {
@@ -2550,6 +2564,10 @@ const initiating = computed(() => pay.value.busy === "initiating");
 // triple-click stacked three gateway sheets. The flow holds the same in-flight
 // guard its siblings do; this is the half the customer can see.
 const verifying = computed(() => pay.value.busy === "verifying");
+// jarvis#297 P0-2a: "Resend the link" takes the SAME one-action lock as verify/
+// check/initiate, so this and verifying can never both be true at once - see
+// payActionDisabled, which disables every button on the card while either is.
+const resending = computed(() => pay.value.busy === "resending");
 // The payment-confirming window: the customer paid on the admin-hosted page,
 // came back, and the bench is asking the control plane whether that payment
 // landed. It is the one moment where money has genuinely left them and no
@@ -2635,6 +2653,17 @@ const checkLabel = computed(() =>
 		: ACTION_LABELS[ACTIONS.CHECK]
 );
 
+// jarvis#297 P0-2a: the post-resend cooldown, same live-clock shape as
+// checkCountdown/checkLabel above - no reducer round trip needed to lift it,
+// the SAME 1s ticker (active whenever state.step === "pay", which covers the
+// verify screen) already recomputes this every tick.
+const resendCountdown = computed(() => remainingResendCooldownSeconds(pay.value, nowMs.value));
+const resendLabel = computed(() =>
+	resendCountdown.value > 0
+		? `Resend in ${resendCountdown.value}s`
+		: ACTION_LABELS[ACTIONS.RESEND]
+);
+
 // The action buttons for the recovery card, in the table's order (status-first).
 // The support affordance is appended when the client-local check ceiling is hit
 // even if the code's own actions don't list it (a pending payment the customer
@@ -2674,6 +2703,21 @@ const recoveryActions = computed(() => {
 		else acts.unshift(ACTIONS.RESUME);
 	}
 	if (pay.value.supportOffered && !acts.includes(ACTIONS.SUPPORT)) acts.push(ACTIONS.SUPPORT);
+	return acts;
+});
+
+// jarvis#297 P0-2a: the verify screen's own action row. VERIFY (from the TABLE
+// row) stays first/solid, unchanged. RESEND is spliced in - never listed
+// statically, same reasoning as RESUME above - only once the machine's
+// canResendVerification says the server actually granted it (fail-closed;
+// see paymentMachine.js). RESTART (labelled "Use a different email" for this
+// code) is always last: it is the one action VERIFY and RESEND can never
+// substitute for.
+const verifyActions = computed(() => {
+	const acts = [...payCopy.value.actions]; // [VERIFY, RESTART]
+	if (pay.value.canResendVerification && !acts.includes(ACTIONS.RESEND)) {
+		acts.splice(1, 0, ACTIONS.RESEND);
+	}
 	return acts;
 });
 
@@ -2720,6 +2764,20 @@ async function runStatusCheck() {
 		// button that appears to do nothing at all.
 		statusCheckNote.value = "We checked just now, and nothing has changed yet.";
 	}
+}
+
+// ---- "Resend the link" (jarvis#297 P0-2a) -----------------------------------
+// A truthful confirmation line, not a toast that could be missed off-screen -
+// same reasoning as statusCheckNote above. Only says "sent" when the flow
+// itself judged the answer a real send (flow.resendVerification's {sent}); a
+// failed or rate-limited attempt says nothing rather than claim one, which is
+// the whole point of building this against a real capability flag instead of
+// a button that always claims success.
+const resendNote = ref("");
+async function runResendVerification() {
+	resendNote.value = "";
+	const { sent } = await flow.resendVerification();
+	resendNote.value = sent ? `We sent a new link to ${payEmail.value}.` : "";
 }
 
 // ---- Contact support: an actual ticket, not a mailto -----------------------
@@ -2807,18 +2865,23 @@ async function sendSupport() {
 
 function payActionLabel(a) {
 	if (a === ACTIONS.CHECK) return checkLabel.value;
+	// The countdown wins the same way checkLabel's does above (jarvis#297 P0-2a).
+	if (a === ACTIONS.RESEND) return resendLabel.value;
 	// actionLabelFor lets a row override a label whose shared wording would mislead
 	// in its own context - "Start again" on a details rejection, where the only
-	// thing being started again is one corrected field.
+	// thing being started again is one corrected field; "Use a different email" on
+	// the verify screen, where nothing else is being restarted either.
 	return actionLabelFor(payCopy.value, a);
 }
 function payActionDisabled(a) {
-	// Any mutating call in flight disables BOTH recovery actions (plan 02: server
-	// idempotency, not button state, is what prevents duplicate intents - but a
-	// double-click should still not fire twice). A status check disables itself
-	// and the retry, so an impatient customer cannot stack concurrent
-	// provider-truth calls into the rate limit.
-	if (checking.value || initiating.value) return true;
+	// Any mutating/checking call in flight disables every action on the CURRENT
+	// card (plan 02: server idempotency, not button state, is what prevents
+	// duplicate intents/mails - but a double-click should still not fire twice).
+	// A status check disables itself and the retry, so an impatient customer
+	// cannot stack concurrent provider-truth calls into the rate limit; verify
+	// and resend take the SAME one action lock (usePaymentFlow.beginAction), so
+	// they disable the same way (jarvis#297 P0-2a).
+	if (checking.value || initiating.value || verifying.value || resending.value) return true;
 	if (a === ACTIONS.CHECK) return !pay.value.canCheck;
 	if (a === ACTIONS.INITIATE) return !pay.value.canInitiate;
 	// RESUME is gated on the machine alone, never on a backend capability flag:
@@ -2832,20 +2895,32 @@ function payActionDisabled(a) {
 	if (a === ACTIONS.RECONNECT) {
 		return !reconnectIdentity.value.email || !reconnectIdentity.value.company;
 	}
+	// RESEND is capability-gated (fail closed, so this only matters once the
+	// backend starts granting it - verifyActions already hides the button
+	// otherwise) AND cooled down client-side after a send, so the button cannot
+	// be spammed into a burst of mail while the first one is still landing.
+	if (a === ACTIONS.RESEND) {
+		return !pay.value.canResendVerification || resendCountdown.value > 0;
+	}
 	return false;
 }
 function payActionLoading(a) {
 	if (a === ACTIONS.CHECK) return checking.value;
 	if (a === ACTIONS.INITIATE) return initiating.value;
+	if (a === ACTIONS.VERIFY) return verifying.value;
+	if (a === ACTIONS.RESEND) return resending.value;
 	return false;
 }
-function payActionVariant(a) {
+// `list` defaults to the recovery card's own actions; the verify screen passes
+// its own verifyActions so VERIFY (always first there) is the one rendered
+// solid, the same "whichever appears first is primary" rule (jarvis#297 P0-2a).
+function payActionVariant(a, list = recoveryActions.value) {
 	// Status-first: the primary (solid) action is whichever appears first, which
 	// the copy table already orders as Check where double-payment is possible.
 	// RESUME is unshifted to the front when it applies, so it becomes primary on
 	// exactly the screens where going back to the existing checkout is the cheapest
 	// and safest thing the customer can do.
-	return recoveryActions.value[0] === a ? "solid" : "subtle";
+	return list[0] === a ? "solid" : "subtle";
 }
 async function onPayAction(a) {
 	if (a === ACTIONS.CHECK) return runStatusCheck();
@@ -2870,6 +2945,7 @@ async function onPayAction(a) {
 	}
 	if (a === ACTIONS.RECONNECT) return startReconnect();
 	if (a === ACTIONS.VERIFY) return flow.verifyAndContinue();
+	if (a === ACTIONS.RESEND) return runResendVerification();
 	if (a === ACTIONS.SUPPORT) return openSupport();
 	if (a === ACTIONS.RESTART) {
 		// A details rejection is not a restart in any meaningful sense: admin named a
@@ -2879,6 +2955,21 @@ async function onPayAction(a) {
 		// like the wizard threw their progress away for no reason.
 		if (pay.value.code === CODES.BENCH_SIGNUP_DETAILS_REJECTED) {
 			state.detailsErr = pay.value.message || payCopy.value.body;
+		}
+		// jarvis#297 P0-2a: "Use a different email" on a signup this session TYPED
+		// through Details already has state.email/company live in memory, but a
+		// customer who RELOADED mid-verification (the exact dead end the issue
+		// names) has none - only the machine's summary carries server truth, and
+		// restart() below is about to wipe it. Copy it across first, and only into
+		// a field the customer has not already typed something else into (never
+		// clobber a live edit, same rule prefillAccount uses).
+		if (pay.value.code === CODES.SIGNUP_VERIFICATION_REQUIRED) {
+			const summary = pay.value.summary || {};
+			if (summary.email && !state.email.trim()) {
+				state.email = summary.email;
+				state.identityFromUser = true;
+			}
+			if (summary.company && !state.company.trim()) state.company = summary.company;
 		}
 		// Server-truth-gated reset (P1-3): the flow resets the machine only when no
 		// recoverable payment can be behind the current code, otherwise it preserves
@@ -2917,8 +3008,12 @@ watch(
 	() => pay.value.value,
 	async () => {
 		// A state change means the machine moved on: drop the stale "we're keeping you
-		// here" note so it never lingers past the state it explained (X8).
+		// here" note so it never lingers past the state it explained (X8), and the
+		// same for the resend confirmation (jarvis#297 P0-2a) - it stays up while
+		// the customer remains on THIS verify screen and disappears once they leave
+		// it (verified, or restarted onto a fresh one).
 		restartHeldNote.value = "";
+		resendNote.value = "";
 		if (!showRecovery.value && !showVerify.value) return;
 		await nextTick();
 		const el = recoveryHeading.value;

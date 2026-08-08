@@ -27,6 +27,8 @@ import {
 	isTerminalForPayment,
 	provisioningOwner,
 	remainingCooldownSeconds,
+	remainingResendCooldownSeconds,
+	noteVerificationResent,
 } from "./paymentMachine.js";
 
 const ORIGIN = "https://fleet.klerk.in";
@@ -746,4 +748,65 @@ test("a later answer without a token clears the earlier countdown", () => {
 	const after = reduce(live, at(CODES.PAYMENT_CONFIRMATION_PENDING, {}));
 	assert.equal(after.payPageToken, "");
 	assert.equal(after.payTokenExpiresInS, null);
+});
+
+// ---------------------------------------------------------------------------
+// jarvis#297 P0-2a: the email-verification dead end - restart-to-change-email
+// and the resend capability flag/cooldown.
+// ---------------------------------------------------------------------------
+test("SIGNUP_VERIFICATION_REQUIRED is restart-safe (no gateway object exists yet)", () => {
+	const s = reduce(
+		initialState(),
+		at(CODES.SIGNUP_VERIFICATION_REQUIRED, { pending_verification: true })
+	);
+	assert.equal(s.value, STATES.VERIFICATION_REQUIRED);
+	assert.equal(canSafelyRestart(s), true);
+	const after = reduce(s, { type: EVENTS.RESTART });
+	assert.equal(after.value, STATES.REVIEW);
+	assert.equal(after.code, "");
+});
+
+test("canResendVerification defaults closed and only opens when the answer grants it", () => {
+	const closed = reduce(
+		initialState(),
+		at(CODES.SIGNUP_VERIFICATION_REQUIRED, { pending_verification: true })
+	);
+	assert.equal(closed.canResendVerification, false);
+	const open = reduce(
+		initialState(),
+		at(CODES.SIGNUP_VERIFICATION_REQUIRED, {
+			pending_verification: true,
+			can_resend_verification: true,
+		})
+	);
+	assert.equal(open.canResendVerification, true);
+});
+
+test("canResendVerification is re-read fresh, never sticky", () => {
+	// Unlike canReconnect (which latches once true), a capability that stops
+	// being repeated must read as false again - the fail-closed default binds on
+	// every answer, not just the first.
+	const first = reduce(
+		initialState(),
+		at(CODES.SIGNUP_VERIFICATION_REQUIRED, {
+			pending_verification: true,
+			can_resend_verification: true,
+		})
+	);
+	assert.equal(first.canResendVerification, true);
+	const second = reduce(
+		first,
+		at(CODES.SIGNUP_VERIFICATION_REQUIRED, { pending_verification: true })
+	);
+	assert.equal(second.canResendVerification, false);
+});
+
+test("noteVerificationResent starts a client-side cooldown read by remainingResendCooldownSeconds", () => {
+	const s = initialState();
+	assert.equal(remainingResendCooldownSeconds(s, 1_000_000), 0);
+	const resent = noteVerificationResent(s, 1_000_000);
+	assert.equal(remainingResendCooldownSeconds(resent, 1_000_000), 30);
+	assert.equal(remainingResendCooldownSeconds(resent, 1_015_000), 15);
+	assert.equal(remainingResendCooldownSeconds(resent, 1_030_000), 0);
+	assert.equal(remainingResendCooldownSeconds(resent, 1_999_999), 0);
 });

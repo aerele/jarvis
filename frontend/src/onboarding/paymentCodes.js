@@ -137,6 +137,14 @@ export const ACTIONS = {
 	RECONNECT: "reconnect",
 	/** Re-poll after the customer clicks the magic link. */
 	VERIFY: "verify",
+	/**
+	 * Send a fresh verification email to the SAME address (jarvis#297 P0-2a). Never
+	 * listed on a row's static `actions` - like RESUME, its availability is a
+	 * property of the LIVE answer (paymentMachine's `canResendVerification`,
+	 * server-granted and fail-closed), not of the code that happens to be showing.
+	 * See OnboardingView's `verifyActions` for where it is spliced in.
+	 */
+	RESEND: "resend",
 	/** A human. Offered on terminal states and after the client-local check ceiling. */
 	SUPPORT: "support",
 	/** Back to the top of the wizard - nothing exists to recover. */
@@ -172,7 +180,15 @@ const TABLE = {
 		headline: "Verify your email to continue.",
 		body: "Click the link we sent you, then come back here. Nothing is charged until you do.",
 		tone: TONE.STATUS,
-		actions: [ACTIONS.VERIFY],
+		// jarvis#297 P0-2a: a wrong address is a real case (Verify alone dead-ends a
+		// typo) and RESEND, the mail-amplifier risk, is capability-gated at the view
+		// instead of listed here (see ACTIONS.RESEND). RESTART is safe on this code
+		// by construction - see paymentMachine's RESTART_SAFE_CODES comment - and
+		// walks the customer back to Details with their typed values still in
+		// place, so "Start again" would undersell it: nothing is being restarted,
+		// one field needs correcting.
+		actions: [ACTIONS.VERIFY, ACTIONS.RESTART],
+		actionLabels: { [ACTIONS.RESTART]: "Use a different email" },
 	},
 	[CODES.PAYMENT_CONFIRMATION_PENDING]: {
 		// A WAIT state, same treatment as PAYMENT_AUTHORIZED_PENDING_CONFIRM below
@@ -437,6 +453,10 @@ export const ACTION_LABELS = {
 	[ACTIONS.CONTINUE]: "Continue",
 	[ACTIONS.RECONNECT]: "Reconnect this site",
 	[ACTIONS.VERIFY]: "I've verified my email",
+	// The countdown variant ("Resend in Ns") is rendered separately in
+	// OnboardingView's resendLabel, the same way checkLabel overrides this one
+	// for ACTIONS.CHECK.
+	[ACTIONS.RESEND]: "Resend the link",
 	[ACTIONS.SUPPORT]: "Contact support",
 	[ACTIONS.RESTART]: "Start again",
 };
