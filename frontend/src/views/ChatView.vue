@@ -4264,8 +4264,12 @@ const enrichmentTracker = createEnrichmentPending({
 	// whose enrichment truly died just loses a label it should never have kept.
 	// Freshness-guarded, since the deadline can fire long after the user moved on.
 	onExpire: (messageId) => {
-		if (currentId.value && messages.value.some((m) => m.name === messageId))
-			loadConversation(currentId.value);
+		if (!currentId.value || !messages.value.some((m) => m.name === messageId)) return;
+		loadConversation(currentId.value);
+		// Same idle re-render pass the other two reload sites do: loadConversation
+		// runs processMermaid once, but a late re-render can swap a freshly-rendered
+		// mermaid node back to raw source, and this catches that race.
+		setTimeout(processMermaid, 300);
 	},
 });
 onUnmounted(() => enrichmentTracker.reset());

@@ -69,7 +69,6 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		return {"ok": False, "reason": "no turn"}
 	state = turn["state"]
 	conversation = turn["conversation"]
-	owner = frappe.db.get_value(CONV, conversation, "owner")
 	if state == "done":
 		# jarvis#681: the enrichment terminal's CDX-12 backstop. ``run:end`` carried
 		# ``enrichment_pending``, which is the SPA's instruction to hold the subtle
@@ -83,13 +82,16 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		return {
 			"ok": True,
 			"already_done": True,
-			"republished": _publish_enriched(run_id, conversation, owner, turn.get("assistant_message")),
+			"republished": _publish_enriched(
+				run_id, conversation, _conversation_owner(conversation), turn.get("assistant_message")
+			),
 		}
 	# Only settled turns own an effect ledger. A turn still pre-terminal (queued/
 	# preparing/.../streaming/terminal_observed) has nothing to enrich yet.
 	if state not in ("finalizing", "errored", "cancelled"):
 		return {"ok": False, "reason": f"not settled ({state})"}
 
+	owner = _conversation_owner(conversation)
 	errored = state in ("errored", "cancelled")
 	ctx = _Ctx(
 		run_id=run_id,
@@ -143,6 +145,12 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 			done = True
 			_publish_enriched(run_id, conversation, owner, turn.get("assistant_message"))
 	return {"ok": True, "ran": ran, "done": done, "state": state}
+
+
+def _conversation_owner(conversation: str) -> str | None:
+	"""Who the turn's realtime events are addressed to. Looked up per branch rather
+	than once up front so the pre-terminal early return below costs no extra read."""
+	return frappe.db.get_value(CONV, conversation, "owner")
 
 
 def _publish_enriched(
