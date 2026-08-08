@@ -53,6 +53,11 @@ _ADMIN_STATUSES = ("Published", "Coming Soon", "Deprecated")
 # are identities, not grantable roles) and never offered in the admin picker.
 _NON_SELECTABLE_ROLES = ("Administrator", "Guest", "All")
 
+# #672: how long a manual "Run now" waits for the per-installation dispatch lock
+# before refusing. Long enough to swallow an ordinary overlap with the hourly sweep,
+# short enough that a human never sits on a spinner.
+DISPATCH_LOCK_WAIT_S = 5.0
+
 
 # --------------------------------------------------------------------------- #
 # role-based access (RBAC)
@@ -1074,17 +1079,44 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# (run_agent_now takes no such parameter) and the launch re-derives + verifies it
 	# against the authenticated session user, so it can only confirm, never forge.
 	triggering_human = authenticated_user()
-	# impersonate is session-safe (a bare frappe.set_user in this HTTP path
-	# would gut the caller's cookie session and log them out) and no-ops when
-	# the run-as user IS the caller (self-mapped manual run). get_doc does NOT
-	# enforce read perms, so the re-fetch under the run-as user is safe even when
-	# run_as is not the (if_owner) row owner.
-	with impersonate(run_as if run_as != original_user else None):
-		if run_as != original_user:
-			doc = frappe.get_doc(INSTALLATION, installation)  # re-fetch under run_as
-		result = _launch_audit(
-			doc, trigger="manual", source_apps=source_apps, initiating_human=triggering_human
-		)
+	# #672: the manual path takes the SAME per-installation dispatch lock as the cron
+	# sweep, and refuses to start a second CONCURRENT audit of one installation.
+	# Without the lock the two paths were an unguarded check-then-act on shared state:
+	# a Run Now landing in the same tick as the hourly sweep had both pass every gate
+	# above and both launch, so one customer paid twice out of one A14 budget for two
+	# audits of the same books. A short wait rather than an immediate refusal, because
+	# the common overlap is a launch already in progress that finishes in well under a
+	# second; only a genuinely concurrent dispatch reaches the refusal.
+	from jarvis._redis_lock import redis_lock
+	from jarvis.chat.agent_scheduler import DISPATCH_LOCK_TTL_S, _dispatch_lock_name, _live_run
+
+	with redis_lock(
+		_dispatch_lock_name(installation),
+		timeout_s=DISPATCH_LOCK_TTL_S,
+		blocking_timeout_s=DISPATCH_LOCK_WAIT_S,
+	) as acquired:
+		if not acquired:
+			frappe.throw(_("A run for this agent is already starting. Try again in a moment."))
+		# Freshness-bounded (see agent_scheduler._live_run), so a wedged run cannot
+		# lock the button out until the 3h reaper clears it.
+		if _live_run(installation):
+			frappe.throw(
+				_(
+					"This agent is already running. Wait for the current run to finish "
+					"before starting another one."
+				)
+			)
+		# impersonate is session-safe (a bare frappe.set_user in this HTTP path
+		# would gut the caller's cookie session and log them out) and no-ops when
+		# the run-as user IS the caller (self-mapped manual run). get_doc does NOT
+		# enforce read perms, so the re-fetch under the run-as user is safe even when
+		# run_as is not the (if_owner) row owner.
+		with impersonate(run_as if run_as != original_user else None):
+			if run_as != original_user:
+				doc = frappe.get_doc(INSTALLATION, installation)  # re-fetch under run_as
+			result = _launch_audit(
+				doc, trigger="manual", source_apps=source_apps, initiating_human=triggering_human
+			)
 	return {"ok": True, "data": result}
 
 

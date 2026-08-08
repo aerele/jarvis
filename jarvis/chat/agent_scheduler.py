@@ -21,9 +21,12 @@ review:
   ``run_as_user`` decouples the executing identity from the owner.
 * **O3:** the turn is dispatched ``background=1`` (unattended), so it never
   jumps ahead of a human's queued question.
-* **O4:** ``next_run_at`` advances ONLY after a successful enqueue; on failure a
-  ``failed`` run is recorded + the owner notified, and the missed slot is NOT
-  backfilled (``compute_next_run`` from *now* yields a single next future slot).
+* **O4 (#672):** the slot is CLAIMED (``next_run_at`` advanced) under a
+  per-installation lock BEFORE the enqueue, so a crash anywhere in the launch
+  leaves the slot spent rather than due; a launch that provably created nothing
+  hands the claim back, records a ``failed`` run and notifies the owner. The
+  missed slot is NOT backfilled (``compute_next_run`` from *now* yields a single
+  next future slot).
 * **O7:** identical ``(owner, agent, cadence, time)`` due rows are deduped.
 
 ``_launch_audit`` is shared with ``agents_api.run_agent_now`` so a manual
@@ -59,7 +62,20 @@ MIN_AGENT_RUN_BUDGET_MONTHLY = 31
 # run worker fails a run on exec/RPC death (A15) and record_agent_run finalizes a
 # live one, so this is a pure BACKSTOP. Sits well above the max bundle
 # ``timeout_s`` (manifest ceiling 5400s) so it can only ever catch orphans.
+#
+# It has a SECOND consumer since #672: ``_live_run`` treats a run older than this as
+# not-in-flight, precisely because this is the age at which the reaper declares it
+# dead. Keep the two answers to "is this run alive?" on one number, or a run becomes
+# too old to count as live and too young to be reaped.
 STALE_RUN_AFTER_SECONDS = 3 * 3600
+
+# #672: TTL on the per-installation DISPATCH lock, which is held across the slot
+# claim AND the whole launch, including the admin call (admin_client.DEFAULT_TIMEOUT_S
+# is 150s). Comfortably above that, because the TTL is a crash backstop and NOT a
+# concurrency budget: expiring it while a launch is still in flight would hand the
+# same installation to a second dispatcher, which is the thing this lock exists to
+# prevent.
+DISPATCH_LOCK_TTL_S = 300
 
 
 # --------------------------------------------------------------------------- #
@@ -234,30 +250,109 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 		_advance(row, now)
 		return
 
-	# S1 hinge: mint the run session + create conv/run INSIDE set_user(run_as).
-	# Row ownership is reassigned to the human owner inside _launch_audit; only
-	# the ERP-read identity is the run-as user.
-	try:
-		frappe.set_user(run_as)
-		inst = frappe.get_doc(INSTALLATION, row.name)
-		# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
-		# it has no initiating human — the scheduler user (Administrator) is not one.
-		_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
-		frappe.set_user(original_user)
-		_advance(row, now)  # O4: advance ONLY after a successful enqueue
-	except Exception:
-		frappe.set_user(original_user)
-		frappe.log_error(
-			title=f"jarvis scheduled audit failed: {row.name}",
-			message=frappe.get_traceback(),
-		)
-		_record_failed(row, "scheduled audit enqueue failed; see Error Log")
-		_notify_owner(row.owner, row)
-		# Do NOT advance -> retry next hour. compute_next_run(from=now) means
-		# even a long outage yields ONE next slot, never a backfill storm.
-	finally:
-		if frappe.session.user != original_user:
+	_dispatch(row, now, run_as=run_as, original_user=original_user, source_apps=source_apps)
+
+
+def _dispatch(row, now, *, run_as: str, original_user: str, source_apps: list[str] | None) -> None:
+	"""Launch this installation's due audit exactly once (#672).
+
+	Dispatch is the one step of the sweep that can be executed twice for a single
+	slot, and the duplicate is unrecoverable: a second real audit, billed a second
+	time against the A14 budget, for a customer whose only notification said the run
+	could not be started. Three things close it and all three are load-bearing.
+
+	1. **The lock.** Dispatch used to be an unlocked check-then-act shared with
+	   ``agents_api.run_agent_now``: a manual Run Now landing in the same tick as the
+	   cron had both pass their checks and both launch. Both paths now take this
+	   per-installation lock, so the check and the act cannot interleave. NOT
+	   acquiring it means another dispatcher owns this installation right now, so
+	   this row is left EXACTLY as it is: the holder's decision is the authoritative
+	   one, and advancing here as well could consume a slot the holder then declines
+	   to run.
+	2. **The claim.** ``_claim_slot`` writes the durable "this slot is spent" marker
+	   BEFORE the launch, so a failed set_value, a killed RQ worker or an OOM leaves
+	   the slot consumed rather than due. That is the safe direction: a lost slot
+	   resumes at the next cadence, a duplicate audit cannot be taken back. Keying
+	   idempotency on the RUN instead does not work: audits finish in minutes and
+	   ticks are hourly, so by the next tick the run is ``completed`` and a liveness
+	   check sees nothing at all.
+	3. **The live-run check**, which stops a SECOND CONCURRENT audit of one
+	   installation rather than a second dispatch of one slot. It is bounded by run
+	   freshness, never status alone (see ``_live_run``).
+
+	The failure handling then splits on what the launch actually left behind, because
+	"it raised" does not mean "nothing ran". ``_launch_audit`` commits its ``running``
+	run before it dispatches, so a throw AFTER that commit that leaves the run alive is
+	a failure of the bookkeeping, not of the audit, and handing the slot back there is
+	exactly how the duplicate was reached. A throw from the dispatch call itself is the
+	other case: ``_launch_audit`` has already stamped its own run ``failed``, nothing is
+	running, and the slot is genuinely unspent. Reading the run rather than the
+	exception is what tells the two apart.
+
+	NOT covered here: a dispatch call that fails AMBIGUOUSLY, a timeout where admin may
+	already have started the turn. ``_launch_audit`` records that as ``failed`` (it
+	cannot know better), so the retry mints a fresh run id and the fleet's run-id
+	idempotency does not engage. That is a different duplicate with a different cause,
+	pre-dating this path, and closing it needs a decision about what an ambiguous
+	dispatch means rather than another guard here.
+
+	A Redis fault propagates out of the lock instead of dispatching, which is
+	deliberate: without the lock there is no exclusivity to be had, and a slot left due
+	is recoverable where a duplicate is not.
+	"""
+	from jarvis._redis_lock import redis_lock
+
+	with redis_lock(_dispatch_lock_name(row.name), timeout_s=DISPATCH_LOCK_TTL_S) as acquired:
+		if not acquired:
+			return
+		if _live_run(row.name):
+			# Already auditing: a manual Run Now, or an audit that is genuinely still
+			# going. The slot's work is being done, so CONSUME it instead of queueing a
+			# second concurrent audit of the same installation. Recorded like every other
+			# skip in this sweep, so the customer is never left with a scheduled audit
+			# that silently did not appear.
+			_record_failed(row, "scheduled run skipped: an audit for this agent was already running")
+			_advance(row, now)
+			return
+		prev = _claim_slot(row, now)
+		if prev is None:
+			return
+
+		# S1 hinge: mint the run session + create conv/run INSIDE set_user(run_as).
+		# Row ownership is reassigned to the human owner inside _launch_audit; only
+		# the ERP-read identity is the run-as user.
+		try:
+			frappe.set_user(run_as)
+			inst = frappe.get_doc(INSTALLATION, row.name)
+			# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
+			# it has no initiating human: the scheduler user (Administrator) is not one.
+			_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
+		except Exception:
 			frappe.set_user(original_user)
+			frappe.log_error(
+				title=f"jarvis scheduled audit failed: {row.name}",
+				message=frappe.get_traceback(),
+			)
+			# Did the audit actually start? Only the launch itself can have written a
+			# live run here (the lock is still held and there was none before the
+			# claim), and ``_launch_audit`` is atomic up to its own commit, so this
+			# answers honestly rather than guessing from the exception.
+			if _live_run(row.name):
+				# It is running. Recording a ``failed`` run, telling the owner nothing
+				# started, and handing the slot back would each be untrue, and the last
+				# one is the duplicate dispatch this whole path exists to prevent. Keep
+				# the claim; the Error Log above is the operator's signal.
+				frappe.db.commit()
+				return
+			# Nothing durable was created, so this slot really is unspent: hand it back
+			# and retry next hour. compute_next_run(from=now) means even a long outage
+			# yields ONE next slot, never a backfill storm.
+			_unclaim_slot(row, prev)
+			_record_failed(row, "scheduled audit enqueue failed; see Error Log")
+			_notify_owner(row.owner, row)
+		finally:
+			if frappe.session.user != original_user:
+				frappe.set_user(original_user)
 
 
 # --------------------------------------------------------------------------- #
@@ -616,83 +711,103 @@ def _launch_audit(
 			)
 		)
 
-	# Fresh conversation. ROW ownership is the human owner (reassigned below) so
-	# if_owner visibility works; the ERP-read identity is the run-as user.
-	# ignore_permissions matches the macro engine.
-	conv = frappe.get_doc({"doctype": CONV, "title": f"{listing.title} audit"[:140], "status": "Active"})
-	conv.flags.ignore_permissions = True
-	conv.insert()
+	# #672: everything from here to the commit below is ONE unit. It used to be a
+	# sequence of pending inserts, so a throw anywhere in it (a rejected insert, a
+	# duplicate session key, a DB blip) left a ``running`` Jarvis Agent Run PENDING in
+	# the transaction, and the caller's own error handling (``_record_failed``, which
+	# commits) flushed it. That phantom run counted against the A14 budget, made
+	# every liveness check believe an audit was in flight, and was finally relabelled
+	# by the 3h stale-run reaper as a duration timeout it never hit. With the
+	# savepoint this function either commits a real ``running`` run or leaves nothing
+	# at all, which is what lets the callers ask "did it actually start?" and get a
+	# true answer. The commit is deliberately OUTSIDE the try: a savepoint does not
+	# survive it, so rolling back to one after it could only ever fail.
+	savepoint = "jv_launch_" + frappe.generate_hash(length=8)
+	frappe.db.savepoint(savepoint)
+	try:
+		# Fresh conversation. ROW ownership is the human owner (reassigned below) so
+		# if_owner visibility works; the ERP-read identity is the run-as user.
+		# ignore_permissions matches the macro engine.
+		conv = frappe.get_doc({"doctype": CONV, "title": f"{listing.title} audit"[:140], "status": "Active"})
+		conv.flags.ignore_permissions = True
+		conv.insert()
 
-	# PP-5: the run's IMMUTABLE launch-time provenance, stamped once at insert (the
-	# controller's _IMMUTABLE_LAUNCH_FIELDS guard refuses any later ORM change):
-	#   * bundle_version — a SNAPSHOT of the version this run actually executes, taken
-	#     from the installation's installed_version (falling back to the listing) so it
-	#     is fixed even though the listing/installation versions are mutable.
-	#   * preparation_mode — a snapshot of the installation's activation_state
-	#     (shadow|live) at launch, so a run made in shadow is forever attributable as
-	#     such even after the install is later promoted.
-	#   * initiating_human — the human who triggered a MANUAL run; None for a
-	#     scheduled cron run (no human initiated it). Resolved above from the caller's
-	#     EXPLICIT argument, never from frappe.session.user: the session here is the
-	#     run-as user, which is a different person whenever the triggerer did not run
-	#     their own self-mapped install (JF-021).
-	bundle_version = inst.installed_version or listing.version or None
-	preparation_mode = inst.activation_state or "shadow"
+		# PP-5: the run's IMMUTABLE launch-time provenance, stamped once at insert (the
+		# controller's _IMMUTABLE_LAUNCH_FIELDS guard refuses any later ORM change):
+		#   * bundle_version — a SNAPSHOT of the version this run actually executes, taken
+		#     from the installation's installed_version (falling back to the listing) so it
+		#     is fixed even though the listing/installation versions are mutable.
+		#   * preparation_mode — a snapshot of the installation's activation_state
+		#     (shadow|live) at launch, so a run made in shadow is forever attributable as
+		#     such even after the install is later promoted.
+		#   * initiating_human — the human who triggered a MANUAL run; None for a
+		#     scheduled cron run (no human initiated it). Resolved above from the caller's
+		#     EXPLICIT argument, never from frappe.session.user: the session here is the
+		#     run-as user, which is a different person whenever the triggerer did not run
+		#     their own self-mapped install (JF-021).
+		bundle_version = inst.installed_version or listing.version or None
+		preparation_mode = inst.activation_state or "shadow"
 
-	# Stamped in the same insert and under the same immutability guard — the
-	# declared ``tools_allow`` resolved above plus the listing's ``nature``/
-	# ``writes`` as they stand RIGHT NOW. From here on the bench authorises this
-	# run's tool calls against the snapshot, never against the mutable listing, so
-	# neither a listing edit mid-run nor a compromised container can widen what an
-	# in-flight run may do.
-	capability = _delegate_capability.contract_for_launch(listing, declared_tools)
+		# Stamped in the same insert and under the same immutability guard — the
+		# declared ``tools_allow`` resolved above plus the listing's ``nature``/
+		# ``writes`` as they stand RIGHT NOW. From here on the bench authorises this
+		# run's tool calls against the snapshot, never against the mutable listing, so
+		# neither a listing edit mid-run nor a compromised container can widen what an
+		# in-flight run may do.
+		capability = _delegate_capability.contract_for_launch(listing, declared_tools)
 
-	run = frappe.get_doc(
-		{
-			"doctype": RUN,
-			"agent": inst.agent,
-			"installation": inst.name,
-			"trigger": trigger,
-			"status": "running",
-			"conversation": conv.name,
-			"started_at": frappe.utils.now(),
-			"bundle_version": bundle_version,
-			"preparation_mode": preparation_mode,
-			"initiating_human": initiating_human,
-			**capability,
-		}
-	)
-	run.flags.ignore_permissions = True
-	run.insert()
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"agent": inst.agent,
+				"installation": inst.name,
+				"trigger": trigger,
+				"status": "running",
+				"conversation": conv.name,
+				"started_at": frappe.utils.now(),
+				"bundle_version": bundle_version,
+				"preparation_mode": preparation_mode,
+				"initiating_human": initiating_human,
+				**capability,
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
 
-	# Defensive: hand the row-owned rows to the intended HUMAN owner (mirrors
-	# macros.run_macro). When run_as_user != owner the session user here is the
-	# run-as user, so this reassignment is what keeps row ownership = owner.
-	if owner != frappe.session.user:
-		for dt, name in ((CONV, conv.name), (RUN, run.name)):
-			frappe.db.set_value(dt, name, "owner", owner, update_modified=False)
+		# Defensive: hand the row-owned rows to the intended HUMAN owner (mirrors
+		# macros.run_macro). When run_as_user != owner the session user here is the
+		# run-as user, so this reassignment is what keeps row ownership = owner.
+		if owner != frappe.session.user:
+			for dt, name in ((CONV, conv.name), (RUN, run.name)):
+				frappe.db.set_value(dt, name, "owner", owner, update_modified=False)
 
-	# Phase 1: mint a per-run Jarvis Chat Session bound to the RUN-AS user and
-	# stamp it on the Run. This is the row the delegate's jarvis__* calls resolve
-	# their identity from (api.py:44-141 → impersonate(run_as_user)). The dispatch
-	# itself is stubbed until Phase 2; the session + scope + watermark are the
-	# Phase-1 deliverable.
-	slug = listing.agent_slug
-	# agent session keys are `agent:<agent-id>:<key>` and the gateway resolves
-	# the session under that agent-id. The delegate agent id is `agent-<slug>`
-	# (fleet-agent compose.agent_delegates), so the id component MUST be the full
-	# delegate id, not the bare slug — otherwise the gateway `agent` RPC's
-	# agentId (`agent-<slug>`) and the session key's embedded id (`<slug>`)
-	# disagree. The bench never parses this shape (it matches the Jarvis Chat
-	# Session row verbatim), so aligning it is free on the bench side and correct
-	# on the agent side.
-	session_key = f"agent:agent-{slug}:{run.name}"
-	_mint_run_session(session_key, run_as_user)
-	frappe.db.set_value(RUN, run.name, "session_key", session_key, update_modified=False)
+		# Phase 1: mint a per-run Jarvis Chat Session bound to the RUN-AS user and
+		# stamp it on the Run. This is the row the delegate's jarvis__* calls resolve
+		# their identity from (api.py:44-141 → impersonate(run_as_user)). The dispatch
+		# itself is stubbed until Phase 2; the session + scope + watermark are the
+		# Phase-1 deliverable.
+		slug = listing.agent_slug
+		# agent session keys are `agent:<agent-id>:<key>` and the gateway resolves
+		# the session under that agent-id. The delegate agent id is `agent-<slug>`
+		# (fleet-agent compose.agent_delegates), so the id component MUST be the full
+		# delegate id, not the bare slug — otherwise the gateway `agent` RPC's
+		# agentId (`agent-<slug>`) and the session key's embedded id (`<slug>`)
+		# disagree. The bench never parses this shape (it matches the Jarvis Chat
+		# Session row verbatim), so aligning it is free on the bench side and correct
+		# on the agent side.
+		session_key = f"agent:agent-{slug}:{run.name}"
+		_mint_run_session(session_key, run_as_user)
+		frappe.db.set_value(RUN, run.name, "session_key", session_key, update_modified=False)
 
-	# A6 explicit scope + A17 consistency watermark + A12 permission profile —
-	# all best-effort (never abort the launch) and computed AS the run-as user.
-	scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
+		# A6 explicit scope + A17 consistency watermark + A12 permission profile —
+		# all best-effort (never abort the launch) and computed AS the run-as user.
+		scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
+
+	except Exception:
+		# Undo every row this launch wrote, so a caller that later commits (and both
+		# of them do, to record the failure) cannot flush a half-built run.
+		frappe.db.rollback(save_point=savepoint)
+		raise
 
 	frappe.db.commit()
 
@@ -964,6 +1079,76 @@ def _over_run_budget(installation: str) -> tuple[bool, str]:
 	if _runs_this_month() >= budget * enabled:
 		return True, "tenant-wide monthly agent run budget exceeded"
 	return False, ""
+
+
+def _dispatch_lock_name(installation: str) -> str:
+	"""The per-installation dispatch lock, shared by the cron sweep and the manual
+	``run_agent_now``. One name in one place: two spellings would serialize each path
+	against itself and neither against the other, which is the race (#672)."""
+	return f"jarvis_agent_dispatch:{installation}"
+
+
+def _live_run(installation: str) -> str | None:
+	"""The name of an IN-FLIGHT run for this installation, or None (#672).
+
+	Liveness is status PLUS freshness, never status alone. A row still ``running``
+	past ``STALE_RUN_AFTER_SECONDS`` is precisely what ``reap_stale_agent_runs``
+	exists to terminalize, so believing it here would let one wedged run suppress
+	every dispatch (and every manual run) until the reaper caught up, silently
+	skipping real slots for up to three hours. The two contracts are deliberately
+	keyed to the SAME cutoff: nothing the reaper would kill counts as in flight, so
+	there is no window where a row is too old to be live and too young to be reaped.
+	The reaper's own behaviour is unchanged.
+
+	``ignore_permissions`` because this is a server-side concurrency guard: runs are
+	owner-scoped by an ``if_owner`` query condition, so a System Manager triggering
+	someone else's install would otherwise be told there is no live run when there
+	is one."""
+	if not installation:
+		return None
+	fresh = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
+	rows = frappe.get_all(
+		RUN,
+		filters={"installation": installation, "status": "running", "started_at": [">", fresh]},
+		pluck="name",
+		limit=1,
+		ignore_permissions=True,
+	)
+	return rows[0] if rows else None
+
+
+def _claim_slot(row, now) -> dict | None:
+	"""Consume this slot durably BEFORE dispatching it, and return what it held so a
+	launch that provably created nothing can hand it back. None means another
+	dispatcher already claimed it.
+
+	Compare-and-set under a ROW LOCK: the sweep's ``frappe.get_all`` does not lock, so
+	two dispatchers can read the same due row; re-reading ``next_run_at`` for update
+	and confirming it is still due is what makes exactly one of them the dispatcher.
+	``compute_next_run`` returns a time strictly after ``now``, so a slot another
+	dispatcher has claimed reads as not-due here even within the same second."""
+	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
+	cur = frappe.db.get_value(
+		INSTALLATION, row.name, ["next_run_at", "last_run_at"], as_dict=True, for_update=True
+	)
+	if not cur or not cur.next_run_at or frappe.utils.get_datetime(cur.next_run_at) > now:
+		frappe.db.commit()  # release the row lock; this slot is not ours to run
+		return None
+	_advance(row, now)  # commits, releasing the row lock
+	return {"next_run_at": cur.next_run_at, "last_run_at": cur.last_run_at}
+
+
+def _unclaim_slot(row, prev: dict) -> None:
+	"""Give a claimed slot back, unchanged, after a launch that created nothing. Only
+	ever called with the dispatch lock held and with a launch that left no live run,
+	so this cannot resurrect a slot some other dispatcher is running."""
+	frappe.db.set_value(
+		INSTALLATION,
+		row.name,
+		{"next_run_at": prev["next_run_at"], "last_run_at": prev["last_run_at"]},
+		update_modified=False,
+	)
+	frappe.db.commit()
 
 
 def _advance(row, now) -> None:
