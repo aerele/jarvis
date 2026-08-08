@@ -2946,6 +2946,11 @@ async function onPayAction(a) {
 	if (a === ACTIONS.RECONNECT) return startReconnect();
 	if (a === ACTIONS.VERIFY) return flow.verifyAndContinue();
 	if (a === ACTIONS.RESEND) return runResendVerification();
+	if (a === ACTIONS.BILLING) {
+		// Hard navigation: AppShell's gate re-renders the poster over an in-SPA route.
+		window.location.assign("/jarvis/billing");
+		return;
+	}
 	if (a === ACTIONS.SUPPORT) return openSupport();
 	if (a === ACTIONS.RESTART) {
 		// A details rejection is not a restart in any meaningful sense: admin named a

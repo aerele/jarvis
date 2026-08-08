@@ -158,6 +158,8 @@ export const ACTIONS = {
 	RESEND: "resend",
 	/** A human. Offered on terminal states and after the client-local check ceiling. */
 	SUPPORT: "support",
+	/** To the billing page, which owns renewal. Routes; never charges. */
+	BILLING: "billing",
 	/** Back to the top of the wizard - nothing exists to recover. */
 	RESTART: "restart",
 };
@@ -275,9 +277,9 @@ const TABLE = {
 	},
 	[CODES.SIGNUP_TERMINAL]: {
 		headline: "This signup cannot be continued.",
-		body: "The subscription it belongs to has ended. Renew from your account, or talk to us and we will sort it out.",
+		body: "The subscription it belongs to has ended. Renew it from your billing page, or talk to us and we will sort it out.",
 		tone: TONE.ALERT,
-		actions: [ACTIONS.SUPPORT],
+		actions: [ACTIONS.BILLING, ACTIONS.SUPPORT],
 	},
 	[CODES.INVALID_REQUEST]: {
 		headline: "That payment request could not be accepted.",
@@ -493,6 +495,7 @@ export const ACTION_LABELS = {
 	// OnboardingView's resendLabel, the same way checkLabel overrides this one
 	// for ACTIONS.CHECK.
 	[ACTIONS.RESEND]: "Resend the link",
+	[ACTIONS.BILLING]: "Renew your plan",
 	[ACTIONS.SUPPORT]: "Contact support",
 	[ACTIONS.RESTART]: "Start again",
 };
