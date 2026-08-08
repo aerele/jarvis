@@ -15,7 +15,7 @@ test("orders by expires_at ascending, earliest-minted is number 1", () => {
   ]);
   assert.deepEqual(
     out.map((c) => c.token),
-    ["a", "z"],
+    ["a", "z"]
   );
 });
 
@@ -28,7 +28,7 @@ test("tie-breaks equal expires_at by token in code-unit order, matching the serv
   ]);
   assert.deepEqual(
     out.map((c) => c.token),
-    ["A0", "z9"],
+    ["A0", "z9"]
   );
 });
 
@@ -41,7 +41,7 @@ test("two cards with differing expires_at do NOT collapse to token order", () =>
   ]);
   assert.deepEqual(
     out.map((c) => c.token),
-    ["z9", "A0"],
+    ["z9", "A0"]
   );
 });
 
@@ -49,6 +49,6 @@ test("treats a missing expires_at as 0 without throwing", () => {
   const out = sortPendingCards([{ token: "b", expires_at: 5 }, { token: "a" }]);
   assert.deepEqual(
     out.map((c) => c.token),
-    ["a", "b"],
+    ["a", "b"]
   );
 });

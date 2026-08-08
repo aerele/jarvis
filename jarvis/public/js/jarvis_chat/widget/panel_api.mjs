@@ -24,7 +24,13 @@ export const getConversation = (conversation) =>
 //
 // `context` is the object from desk_context.contextFromRoute. Send it only when
 // there is one, so a non-record page behaves as a plain chat.
-export const sendMessage = (conversation, message, context, attachments, approvalTokens) =>
+export const sendMessage = (
+  conversation,
+  message,
+  context,
+  attachments,
+  approvalTokens
+) =>
   call(CHAT + "send_message", {
     conversation: conversation || "",
     message,

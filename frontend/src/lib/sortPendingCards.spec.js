@@ -40,8 +40,14 @@ describe("sortPendingCards", () => {
 	});
 
 	it("comparePendingCards is a total order (transitive-safe: distinct tokens never tie)", () => {
-		expect(comparePendingCards({ token: "a", expires_at: 1 }, { token: "b", expires_at: 1 })).toBeLessThan(0);
-		expect(comparePendingCards({ token: "b", expires_at: 1 }, { token: "a", expires_at: 1 })).toBeGreaterThan(0);
-		expect(comparePendingCards({ token: "a", expires_at: 1 }, { token: "a", expires_at: 1 })).toBe(0);
+		expect(
+			comparePendingCards({ token: "a", expires_at: 1 }, { token: "b", expires_at: 1 })
+		).toBeLessThan(0);
+		expect(
+			comparePendingCards({ token: "b", expires_at: 1 }, { token: "a", expires_at: 1 })
+		).toBeGreaterThan(0);
+		expect(
+			comparePendingCards({ token: "a", expires_at: 1 }, { token: "a", expires_at: 1 })
+		).toBe(0);
 	});
 });

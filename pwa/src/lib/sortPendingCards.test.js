@@ -50,7 +50,14 @@ test("does not mutate its input", () => {
 });
 
 test("distinct tokens never tie (total order)", () => {
-	assert.ok(comparePendingCards({ token: "a", expires_at: 1 }, { token: "b", expires_at: 1 }) < 0);
-	assert.ok(comparePendingCards({ token: "b", expires_at: 1 }, { token: "a", expires_at: 1 }) > 0);
-	assert.equal(comparePendingCards({ token: "a", expires_at: 1 }, { token: "a", expires_at: 1 }), 0);
+	assert.ok(
+		comparePendingCards({ token: "a", expires_at: 1 }, { token: "b", expires_at: 1 }) < 0
+	);
+	assert.ok(
+		comparePendingCards({ token: "b", expires_at: 1 }, { token: "a", expires_at: 1 }) > 0
+	);
+	assert.equal(
+		comparePendingCards({ token: "a", expires_at: 1 }, { token: "a", expires_at: 1 }),
+		0
+	);
 });

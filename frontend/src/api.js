@@ -205,7 +205,14 @@ export const dismissTool = (token, conversation) =>
 export const listPendingConfirmations = (conversation) =>
 	call(AC + "list_pending_confirmations", { conversation: conversation || "" });
 
-export async function sendMessage(conversation, message, modelOverride, attachments, context, approvalTokens) {
+export async function sendMessage(
+	conversation,
+	message,
+	modelOverride,
+	attachments,
+	context,
+	approvalTokens
+) {
 	// Empty conversation is allowed: the backend creates (or focuses) an empty
 	// conversation itself and returns its id as `conversation_id` - saves the
 	// SPA a createOrFocusEmpty round-trip before the first send (latency plan).
@@ -217,7 +224,8 @@ export async function sendMessage(conversation, message, modelOverride, attachme
 	// against THESE tokens (what was displayed) rather than a list it re-fetches -
 	// otherwise a card expiring between glance and send renumbers the rest and the
 	// wrong card runs. Server ignores it unless the message parses as an approval.
-	if (approvalTokens && approvalTokens.length) args.approval_tokens = JSON.stringify(approvalTokens);
+	if (approvalTokens && approvalTokens.length)
+		args.approval_tokens = JSON.stringify(approvalTokens);
 	// Forward context for a viewing-context doc/report, the one-shot "ground on
 	// wiki" flag (which can arrive without a doc), OR a page marker ("triggers" /
 	// "dashboards") that primes the agent for that surface's flow from the main

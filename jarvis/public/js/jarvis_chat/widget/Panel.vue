@@ -1326,7 +1326,8 @@ async function send() {
 				// valid, ask again" both misreports it and invites a duplicate retry
 				// of writes that already ran. Fall back only when none was sent.
 				loadError.value =
-					res.error?.message || "That confirmation is no longer valid. Ask again to retry it.";
+					res.error?.message ||
+					"That confirmation is no longer valid. Ask again to retry it.";
 			await load();
 			return;
 		}

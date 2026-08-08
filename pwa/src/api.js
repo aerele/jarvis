@@ -34,7 +34,11 @@ export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
 // model/thinking are sent as per-turn overrides, which is how the new-chat
 // screen applies the device's preferred model without mutating the workspace
 // default.
-export const sendMessage = (conversation, message, { attachments = [], model, thinking, approvalTokens } = {}) =>
+export const sendMessage = (
+	conversation,
+	message,
+	{ attachments = [], model, thinking, approvalTokens } = {}
+) =>
 	call(CHAT + "send_message", {
 		conversation: conversation || "",
 		message,
