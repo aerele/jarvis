@@ -2742,10 +2742,20 @@
 							     standalone support space (Task 6). Gated on the same dual
 							     kill-switch the /support routes guard on. -->
 							<button
-								v-if="supportOn"
+								v-if="supportOn || supportUnconfigured"
 								class="jv-iconbtn"
-								title="Get help from a human"
-								@click="getHumanHelp"
+								:class="{ 'jv-unavailable': supportUnconfigured }"
+								:aria-disabled="supportUnconfigured ? 'true' : undefined"
+								:title="
+									supportUnconfigured
+										? 'Support is not set up on this workspace yet'
+										: 'Get help from a human'
+								"
+								@click="
+									supportUnconfigured
+										? explainSupportUnavailable()
+										: getHumanHelp()
+								"
 								style="
 									width: 30px;
 									height: 30px;
@@ -2779,7 +2789,34 @@
 							</button>
 						</template>
 						<template #right-toolbar>
-							<!-- dictation mic (hidden unless the backend reports STT configured) -->
+							<!-- Dictation mic. Two DIFFERENT unavailable reasons, two treatments:
+							     STT not configured is an actionable gap (an operator can set it
+							     up), so the mic renders FADED and says so on click; a browser
+							     that cannot record is not actionable, so it stays hidden. -->
+							<button
+								v-if="!ui.stt_enabled && micRec.supported"
+								class="jv-iconbtn jv-micbtn jv-unavailable"
+								aria-disabled="true"
+								title="Voice dictation is not set up on this workspace"
+								@click="explainSttUnavailable"
+							>
+								<svg
+									width="18"
+									height="18"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.7"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path
+										d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
+									/>
+									<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+									<path d="M12 19v3" />
+								</svg>
+							</button>
 							<template v-if="ui.stt_enabled && micRec.supported">
 								<button
 									class="jv-iconbtn jv-micbtn"
@@ -4633,6 +4670,26 @@ const currentTitle = computed(
 // supportGuard) — a dead button that redirects straight back to chat is worse
 // than no button.
 const supportOn = window.support_available && window.has_support_access;
+
+// Support is UNCONFIGURED (not merely off/erroring) and this user could otherwise use
+// it: an operator can still set it up, so show the entry faded + explained rather than
+// hiding a feature that exists. "off" (deliberately switched off) and "error" (a
+// transient CP blip that self-heals) both stay hidden — a greyed control for either
+// would be misleading. Permission (`has_support_access`) still hides outright: showing
+// a user a feature they can never use is noise, not discovery.
+const supportUnconfigured = window.support_state === "unconfigured" && !!window.has_support_access;
+
+function explainSupportUnavailable() {
+	notify("Support isn't set up on this workspace yet — ask your administrator.", {
+		type: "info",
+	});
+}
+
+function explainSttUnavailable() {
+	notify(`Voice dictation isn't set up on this workspace — ask your administrator.`, {
+		type: "info",
+	});
+}
 
 // "Get help from a human" — always available (v1). The conversation reference
 // is plain, readable, user-EDITABLE body text: create_ticket takes only
@@ -9800,6 +9857,18 @@ onUnmounted(() => {
 .jv-nudge-x:hover {
 	background: var(--surface-1);
 	color: var(--text);
+}
+/* A control for a feature that exists but is not set up on this workspace: faded, and
+   it EXPLAINS itself on click rather than being inert. Deliberately not the `disabled`
+   attribute — a disabled button is not focusable and its title often will not show, so
+   the user gets a dead grey icon with no reason. aria-disabled + a real click handler
+   keeps it reachable and answerable. */
+.jv-unavailable {
+	opacity: 0.45;
+	cursor: default;
+}
+.jv-unavailable:hover {
+	opacity: 0.6;
 }
 .jv-nudge-actions {
 	display: flex;

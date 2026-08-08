@@ -52,7 +52,7 @@
 // pattern. Dropdown: Settings (D9) · Switch to Desk · Change theme · Log out.
 import { computed, inject, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
-import { Dropdown, FeatherIcon } from "frappe-ui";
+import { Dropdown, FeatherIcon, toast } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
 import { useShellStore } from "@/stores/shell";
 import { useSupportStore } from "@/stores/support";
@@ -80,6 +80,9 @@ const { effectiveDark, toggleTheme } = useJarvisTheme();
 // resting dot and the list read the same value, so they can never disagree.
 const router = useRouter();
 const supportOn = window.support_available && window.has_support_access;
+// Unconfigured (an operator can still set it up) vs off/error (hidden, as before) —
+// see the same flag in ChatView. Permission still hides outright.
+const supportUnconfigured = window.support_state === "unconfigured" && !!window.has_support_access;
 const store = useSupportStore();
 let pollTimer = null;
 async function pollAwaiting() {
@@ -112,6 +115,17 @@ const crossItem = computed(() => {
 			label: `Switch to ${agentName} chat`,
 			icon: "message-circle",
 			onClick: () => router.push({ name: "Chat" }),
+		};
+	}
+	// Unconfigured but usable-by-this-user: keep the entry so the feature is
+	// discoverable, but say why instead of navigating into a space the route guard
+	// would bounce straight back. "off"/"error" stay omitted (see supportUnconfigured).
+	if (supportUnconfigured) {
+		return {
+			label: "Support",
+			icon: "life-buoy",
+			onClick: () =>
+				toast.info("Support isn't set up on this workspace yet — ask your administrator."),
 		};
 	}
 	if (!supportOn) return null;

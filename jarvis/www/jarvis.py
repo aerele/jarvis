@@ -10,29 +10,58 @@ from jarvis.permissions import (
 
 no_cache = 1
 
-_SUPPORT_AVAILABLE_CACHE_KEY = "jarvis:support_available"
+_SUPPORT_AVAILABLE_CACHE_KEY = "jarvis:support_state"
 _SUPPORT_AVAILABLE_TTL_S = 300
 # R1-7: negative-cache a transient CP blip for a shorter window so support reappears promptly.
 _SUPPORT_UNAVAILABLE_TTL_S = 60
 
+# Support states the SPA understands. Only ``unconfigured`` is an ACTIONABLE gap (an
+# operator can still set support up), so that is the one the UI shows as a disabled,
+# explained entry; every other unavailable state hides support exactly as before.
+SUPPORT_OK = "ok"
+SUPPORT_UNCONFIGURED = "unconfigured"
+SUPPORT_OFF = "off"
+SUPPORT_ERROR = "error"
 
-def _support_available() -> bool:
-	"""Fleet-wide support kill switch, Redis-cached (P8) so boot never blocks on a CP round-trip.
+
+def _support_state() -> str:
+	"""Fleet-wide support state, Redis-cached (P8) so boot never blocks on a CP round-trip.
 	Uses support_status (relaxed auth) — NOT get_connection, which 403s suspended customers (P7).
-	Any failure ⇒ False (button hidden, never an error)."""
+
+	Returns one of ``ok`` / ``unconfigured`` / ``off`` / ``error``. The CP has always known
+	which of those it means; the bench used to collapse them into one boolean, so a
+	transient CP blip was indistinguishable from "support was never set up" and both just
+	hid the button. ``error`` is kept distinct precisely so a self-healing blip does NOT
+	render as "support is not set up" — it stays hidden and retries in a minute.
+
+	A CP too old to send ``reason`` degrades safely: unavailable-without-a-reason is
+	treated as ``off`` (hide), which is exactly today's behaviour."""
 	cache = frappe.cache()
 	cached = cache.get_value(_SUPPORT_AVAILABLE_CACHE_KEY)
-	if cached is not None:
-		return cached == "1"
+	if cached:
+		return cached
 	try:
 		from jarvis import admin_client
 
-		available = bool(admin_client.support_status(timeout_s=8).get("available"))
+		res = admin_client.support_status(timeout_s=8) or {}
+		if res.get("available"):
+			state = SUPPORT_OK
+		else:
+			reason = (res.get("reason") or "").strip()
+			# Only a reason we KNOW is trusted; anything else (incl. an old CP that sends
+			# none) falls back to the pre-existing hide-it behaviour.
+			state = reason if reason in (SUPPORT_UNCONFIGURED, SUPPORT_OFF) else SUPPORT_OFF
 	except Exception:
-		available = False
-	ttl = _SUPPORT_AVAILABLE_TTL_S if available else _SUPPORT_UNAVAILABLE_TTL_S
-	cache.set_value(_SUPPORT_AVAILABLE_CACHE_KEY, "1" if available else "0", expires_in_sec=ttl)
-	return available
+		state = SUPPORT_ERROR
+	ttl = _SUPPORT_AVAILABLE_TTL_S if state != SUPPORT_ERROR else _SUPPORT_UNAVAILABLE_TTL_S
+	cache.set_value(_SUPPORT_AVAILABLE_CACHE_KEY, state, expires_in_sec=ttl)
+	return state
+
+
+def _support_available() -> bool:
+	"""Back-compat boolean: support is usable. Kept as its own name because other
+	surfaces (and the PWA) read the boot flag by that meaning."""
+	return _support_state() == SUPPORT_OK
 
 
 def get_context(context):
@@ -97,7 +126,12 @@ def get_context(context):
 	# it in this same request), then expose both the per-user access flag and the fleet kill switch.
 	grant_default_support()
 	context.boot["has_support_access"] = support_scope() is not None
-	context.boot["support_available"] = _support_available()
+	# Both flags, deliberately: `support_available` keeps its exact boolean meaning for
+	# every existing reader, and `support_state` lets the SPA tell an actionable
+	# "unconfigured" (show the entry disabled + explained) from "off"/"error" (hide).
+	state = _support_state()
+	context.boot["support_state"] = state
+	context.boot["support_available"] = state == SUPPORT_OK
 
 	frappe.db.commit()
 	return context
