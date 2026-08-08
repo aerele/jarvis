@@ -146,7 +146,13 @@ this is the mapping (use it when porting, never when writing new UI):
 > | Illustration | Renders during | Subject |
 > |---|---|---|
 > | `SetupNeuralNet` | the long provisioning/readiness wait | ERP modules connecting to the mark |
-> | `PaymentConfirmingArt` | the payment-confirming wait only | banknotes arriving at the mark along a rail |
+> | `PaymentConfirmingArt` | not currently rendered anywhere; see the note below | banknotes arriving at the mark along a rail |
+>
+> jarvis#728 measured the bench's payment-confirming screen against a real payment: the wait
+> behind it is a single reconcile round trip, not a poll, so it resolves well under the
+> tens-of-seconds bar this carve-out sets and now uses JvSpinner instead. The component, its
+> tokens and this table row are kept rather than deleted: retiring or repurposing the asset for
+> a screen whose wait actually earns it is a design-owner call, not a bugfix-PR call.
 >
 > Rules that come with the second one (product owner authorized it on 2026-08-07, overruling
 > the previous single-illustration wording):
