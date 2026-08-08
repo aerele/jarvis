@@ -376,9 +376,11 @@
 			</div>
 
 			<div v-if="stream.pending.length" class="jvp-pending">
-				<div v-for="p in stream.pending" :key="p.token" class="jvp-pending-row">
+				<div v-for="(p, pi) in orderedPending" :key="p.token" class="jvp-pending-row">
 					<div class="jvp-pending-txt">
-						{{ p.summary || "Jarvis wants to make a change." }}
+						<b v-if="orderedPending.length > 1"
+							>{{ pi + 1 }} of {{ orderedPending.length }}: </b
+						>{{ p.summary || "Jarvis wants to make a change." }}
 					</div>
 					<div class="jvp-pending-acts">
 						<button class="jvp-btn-subtle" type="button" @click="$emit('open-full')">
@@ -784,6 +786,17 @@ const draft = ref("");
 const sending = ref(false);
 const composerFocused = ref(false);
 const resolving = ref("");
+// Ordered the SAME way the server orders the parked list: a typed "confirm 2"
+// selects by the number shown here, and the store keeps tokens in a Redis SET
+// with no order of its own. Tokens compare by code unit so the tiebreak matches
+// the server's byte order rather than locale rules.
+const orderedPending = computed(() =>
+	[...(stream.value.pending || [])].sort(
+		(a, b) =>
+			(a.expires_at || 0) - (b.expires_at || 0) ||
+			(a.token < b.token ? -1 : a.token > b.token ? 1 : 0)
+	)
+);
 const lastSent = ref("");
 // Prompt recall, matching the full chat: Up walks back through prompts sent from
 // this panel, Down walks forward and finally restores whatever was being typed.
@@ -1288,6 +1301,18 @@ async function send() {
 		// answering about the wrong record after a navigation.
 		const res = await sendMessage(convId.value, text, props.context, atts);
 		if (res?.conversation_id) convId.value = res.conversation_id;
+		// A go-ahead on the parked card ran the confirmation instead of starting a
+		// turn. No run is coming, so marking the panel busy would spin forever, and
+		// nothing was persisted for the typed words. Reload: the durable receipt
+		// chip is the record of what happened.
+		if (res?.confirmed) {
+			sending.value = false;
+			messages.value = messages.value.filter((m) => !String(m.name).startsWith("local-"));
+			if (res.ok === false)
+				loadError.value = "That confirmation is no longer valid. Ask again to retry it.";
+			await load();
+			return;
+		}
 		stream.value = { ...stream.value, busy: true };
 		ensureRealtime();
 		startPolling();

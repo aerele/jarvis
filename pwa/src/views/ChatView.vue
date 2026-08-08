@@ -65,6 +65,18 @@ const sendBusy = ref(false);
 const errorBanner = ref("");
 const attachments = ref([]);
 const pending = ref([]); // parked writes awaiting approval
+// Ordered the SAME way the server orders the parked list, because a typed
+// "confirm 2" selects by the number shown on the card. The store keeps tokens in
+// a Redis SET, which has no order at all, so without this the numbers on screen
+// and the numbers the server counts could disagree and the wrong write would run.
+// Tokens compare by code unit to match Python's byte order, not localeCompare.
+const orderedPending = computed(() =>
+	[...pending.value].sort(
+		(a, b) =>
+			(a.expires_at || 0) - (b.expires_at || 0) ||
+			(a.token < b.token ? -1 : a.token > b.token ? 1 : 0)
+	)
+);
 const settings = ref(null);
 
 // The turn in flight. Held separately from `messages` because it is not durable
@@ -277,6 +289,22 @@ async function send() {
 		const res = await api.sendMessage(convId.value, text, {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
 		});
+		// The server read this as a go-ahead on the parked card and ran the
+		// confirmation instead of starting a turn, so no run events are coming and
+		// nothing was persisted for the typed words. Take the spinner down here or
+		// it waits forever, and drop the optimistic echo of a message that does not
+		// exist. The receipt chip in the reloaded thread is what the user sees.
+		if (res?.confirmed) {
+			sendBusy.value = false;
+			messages.value = messages.value.filter((m) => !m.optimistic);
+			if (res.ok === false)
+				errorBanner.value =
+					res.error?.message ||
+					"That confirmation is no longer valid. Ask again to retry it.";
+			await load(true);
+			await loadPending();
+			return;
+		}
 		if (res?.ok === false) {
 			sendBusy.value = false;
 			messages.value = messages.value.filter((m) => !m.optimistic);
@@ -739,9 +767,12 @@ onUnmounted(() => {
 		<ThinkingIndicator v-if="sending && !(live && live.text)" />
 
 		<DecisionCard
-			v-for="p in pending"
+			v-for="(p, pi) in orderedPending"
 			:key="p.token"
-			:summary="p.summary || p.tool || `${agentName} needs your approval`"
+			:summary="
+				(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
+				(p.summary || p.tool || `${agentName} needs your approval`)
+			"
 			@open="decision = p"
 		/>
 	</div>

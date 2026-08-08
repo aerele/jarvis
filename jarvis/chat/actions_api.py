@@ -412,6 +412,29 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	browser session's sid + data are always restored - a bare ``frappe.set_user``
 	would gut the cookie session and log the user out.
 	"""
+	return _confirm_core(token, conversation)
+
+
+def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = False) -> dict:
+	"""The confirmation itself, with no HTTP surface of its own.
+
+	Two human paths reach it: the Confirm button (``confirm_tool`` above) and a
+	typed approval in the composer (``jarvis.chat.api.send_message``). Both are
+	the same authenticated session user acting on the same card, so they share
+	one implementation rather than one calling the other's whitelisted endpoint.
+
+	Every guarantee stays below this line, not in the callers: Guest refusal,
+	owner + conversation binding, the atomic single-use ``consume``, execution
+	under the stored ``exec_user``, the transcript receipt and the continuation
+	turn. A second entry point therefore cannot weaken the gate, and two racing
+	approvals (a click and a typed one) still resolve to exactly one winner.
+
+	``batch``: this card is one of several being approved together. The write, the
+	receipt chip and every guard still run per card, so nothing about the gate is
+	relaxed; only the follow-up turn is deferred. The receipt line is returned as
+	``receipt_text`` for the caller to fold into ONE continuation covering the
+	whole batch, instead of N turns queueing against each other.
+	"""
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
 
@@ -500,6 +523,14 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 			from jarvis.chat import admission
 
 			admission.publish_action_confirmed(conv)
+		# In a batch the caller owns the follow-up: N cards approved in one breath
+		# must produce ONE continuation carrying all N receipts, not N turns racing
+		# each other through admission. The receipt line rides out on the envelope
+		# so the caller can compose them.
+		if batch:
+			if isinstance(result, dict):
+				result["receipt_text"] = _confirm_receipt_text(record, result)
+			return result
 		_cont = None
 		try:
 			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
