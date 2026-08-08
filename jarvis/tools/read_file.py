@@ -27,6 +27,7 @@ import io
 
 import frappe
 
+from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
 _TABLE_EXT = {"xlsx", "csv", "tsv"}
@@ -65,11 +66,10 @@ def read_file(
 		raise PermissionDeniedError("no matching file found")
 
 	ext = (fdoc.file_name or "").rsplit(".", 1)[-1].lower() if "." in (fdoc.file_name or "") else ""
-	# encodings=[] -> raw bytes; skip Frappe's text-encoding guess loop, which
-	# lossily decodes small binaries (a PNG/PDF) to a str and corrupts them.
-	content = fdoc.get_content(encodings=[])
-	if isinstance(content, str):
-		content = content.encode("utf-8", "replace")
+	# Raw bytes, on either Frappe major. Calling get_content(encodings=[])
+	# directly is a TypeError on Frappe 15, which used to surface here as an
+	# unhandled HTTP 500 for every file type.
+	content = compat.file_bytes(fdoc)
 
 	max_rows = min(int(max_rows or 500), _MAX_ROWS)
 	max_chars = min(int(max_chars or 20000), _MAX_CHARS)

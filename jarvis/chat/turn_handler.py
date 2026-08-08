@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 
 import frappe
 
+from jarvis import compat
 from jarvis.chat import agent_session_pool, seq_watermark, vision
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode
@@ -1884,14 +1885,14 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 			blocks.append(f"[No permission to read attached file `{name}`.]")
 			continue
 		try:
-			# encodings=[] -> raw bytes; skip Frappe's text-encoding guess loop,
-			# which lossily decodes small binaries (e.g. a PNG) to a str.
-			raw = fdoc.get_content(encodings=[])
+			# Raw bytes, on either Frappe major. Calling
+			# get_content(encodings=[]) directly is a TypeError on Frappe 15,
+			# which this except caught, so EVERY attachment of every type
+			# degraded to the note below.
+			raw = compat.file_bytes(fdoc)
 		except Exception:
 			blocks.append(f"[Could not read attached file `{name}`.]")
 			continue
-		if isinstance(raw, str):
-			raw = raw.encode("utf-8", "replace")
 		ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
 		if ext == "pdf":
