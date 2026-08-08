@@ -2247,16 +2247,35 @@
 										@input="autoGrowNudge"
 										@keydown.enter="onNudgeEnter"
 									></textarea>
+									<!-- Voice notes not set up is an ACTIONABLE gap (an operator can fix
+									     it), so the mic renders faded and says so on click rather than
+									     vanishing; a browser that cannot record is not actionable, so
+									     that case stays hidden. Not the `disabled` attribute — that is
+									     unfocusable and usually swallows the title, leaving a dead grey
+									     icon with no reason. -->
 									<button
-										v-if="
-											ui.stt_enabled &&
-											nudgeRec.supported &&
-											!(nudge.text || '').trim()
-										"
+										v-if="nudgeRec.supported && !(nudge.text || '').trim()"
 										class="jv-iconbtn jv-nudge-mic"
-										:title="`Record a voice note (saved for ${agentName} to learn from)`"
-										:aria-label="`Record a voice note about ${nudgeLabels}`"
-										@click="startNudgeMic"
+										:class="{ 'is-unset': !ui.stt_enabled }"
+										:aria-disabled="!ui.stt_enabled ? 'true' : undefined"
+										:title="
+											ui.stt_enabled
+												? `Record a voice note (saved for ${agentName} to learn from)`
+												: 'Voice notes are not set up on this workspace'
+										"
+										:aria-label="
+											ui.stt_enabled
+												? `Record a voice note about ${nudgeLabels}`
+												: 'Voice notes are not set up on this workspace'
+										"
+										@click="
+											ui.stt_enabled
+												? startNudgeMic()
+												: notify(
+														`Voice notes aren't set up on this workspace — ask your administrator.`,
+														{ type: 'info' }
+												  )
+										"
 									>
 										<svg
 											width="15"
@@ -9854,6 +9873,15 @@ onUnmounted(() => {
 	flex: none;
 	width: 32px;
 	height: 32px;
+}
+/* the feature exists but isn't set up on this workspace — faded, still focusable,
+   and it explains itself on click (see the template note) */
+.jv-nudge-mic.is-unset {
+	opacity: 0.45;
+	cursor: default;
+}
+.jv-nudge-mic.is-unset:hover {
+	opacity: 0.6;
 }
 .jv-nudge--compact .jv-nudge-go {
 	height: 32px;
