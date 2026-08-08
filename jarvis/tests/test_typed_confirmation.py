@@ -11,7 +11,29 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import approval_phrases
-from jarvis.chat.api import _typed_confirmation
+from jarvis.chat.api import _typed_approval_eligible, _typed_confirmation
+
+
+class TestTypedApprovalGate(FrappeTestCase):
+	"""The entry gate: only a human, foreground, attachment-free send may be read
+	as an approval. A refactor that drops one condition could let a scripted or
+	background message consume a real ERP-write card, so pin the whole truth table."""
+
+	def test_a_plain_human_foreground_send_is_eligible(self):
+		self.assertTrue(_typed_approval_eligible(delegated=False, attachments=[], background=0))
+
+	def test_a_delegated_send_is_never_eligible(self):
+		self.assertFalse(_typed_approval_eligible(delegated=True, attachments=[], background=0))
+
+	def test_a_background_send_is_never_eligible(self):
+		self.assertFalse(_typed_approval_eligible(delegated=False, attachments=[], background=1))
+		# Frappe may hand a whitelisted int param through as a string.
+		self.assertFalse(_typed_approval_eligible(delegated=False, attachments=[], background="1"))
+
+	def test_a_send_carrying_attachments_is_never_eligible(self):
+		self.assertFalse(
+			_typed_approval_eligible(delegated=False, attachments=[{"file_url": "/f.png"}], background=0)
+		)
 
 
 class TestApprovalPhrases(FrappeTestCase):
@@ -142,12 +164,21 @@ class TestTypedConfirmation(FrappeTestCase):
 	def _card(self, token="tok-1"):
 		return {"token": token, "tool": "create_doc", "summary": "create Supplier"}
 
+	def _toks(self, cards):
+		"""The tokens a client displays, in the (expires_at, token) order the panel
+		shows them - exactly what a real client now sends as ``approval_tokens``.
+		A typed number binds to THIS order, not to a list the server re-fetches."""
+		return [
+			c["token"]
+			for c in sorted(cards, key=lambda c: (c.get("expires_at") or 0, c.get("token") or ""))
+		]
+
 	def test_a_lone_card_and_a_plain_go_ahead_runs_the_confirmation(self):
 		with (
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card()]),
 			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
 		):
-			out = _typed_confirmation(self.user, self.conv, "go ahead")
+			out = _typed_confirmation(self.user, self.conv, "go ahead", self._toks([self._card()]))
 		core.assert_called_once_with("tok-1", self.conv, batch=False)
 		self.assertTrue(out["confirmed"])
 		self.assertTrue(out["ok"])
@@ -162,7 +193,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
 			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
 		):
-			out = _typed_confirmation(self.user, self.conv, "go ahead")
+			out = _typed_confirmation(self.user, self.conv, "go ahead", self._toks(cards))
 		self.assertEqual(core.call_count, 3)
 		self.assertEqual(out["tokens"], ["a", "b", "c"])
 		self.assertTrue(out["ok"])
@@ -178,7 +209,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			) as core,
 			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}) as cont,
 		):
-			_typed_confirmation(self.user, self.conv, "confirm all")
+			_typed_confirmation(self.user, self.conv, "confirm all", self._toks(cards))
 		# Every card ran in batch mode, so none queued its own follow-up...
 		for call in core.call_args_list:
 			self.assertTrue(call.kwargs["batch"])
@@ -193,7 +224,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
 			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
 		):
-			out = _typed_confirmation(self.user, self.conv, "confirm 1 and 3")
+			out = _typed_confirmation(self.user, self.conv, "confirm 1 and 3", self._toks(cards))
 		self.assertEqual([c.args[0] for c in core.call_args_list], ["a", "c"])
 		self.assertEqual(out["tokens"], ["a", "c"])
 		self.assertEqual([r["position"] for r in out["results"]], [1, 3])
@@ -205,7 +236,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards),
 			patch("jarvis.chat.actions_api._confirm_core") as core,
 		):
-			self.assertIsNone(_typed_confirmation(self.user, self.conv, "confirm 4"))
+			self.assertIsNone(_typed_confirmation(self.user, self.conv, "confirm 4", self._toks(cards)))
 		core.assert_not_called()
 
 	def test_a_partial_batch_failure_is_reported_per_card(self):
@@ -220,10 +251,15 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.actions_api._confirm_core", side_effect=envelopes),
 			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
 		):
-			out = _typed_confirmation(self.user, self.conv, "confirm all")
+			out = _typed_confirmation(self.user, self.conv, "confirm all", self._toks(cards))
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["error"]["type"], "PartialConfirmation")
 		self.assertEqual([r["ok"] for r in out["results"]], [True, False])
+		# The user-facing count AND which card failed, by its number (card b is 2).
+		self.assertEqual(
+			out["error"]["message"],
+			"1 of 2 actions went through; 1 could not be completed (card 2).",
+		)
 
 	def test_cards_are_ordered_so_the_numbers_mean_what_the_screen_shows(self):
 		"""The store is a Redis SET with no order at all.
@@ -240,7 +276,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
 			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
 		):
-			_typed_confirmation(self.user, self.conv, "confirm 1")
+			_typed_confirmation(self.user, self.conv, "confirm 1", self._toks(cards))
 		core.assert_called_once()
 		self.assertEqual(core.call_args.args[0], "early")
 
@@ -249,7 +285,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[]),
 			patch("jarvis.chat.actions_api._confirm_core") as core,
 		):
-			self.assertIsNone(_typed_confirmation(self.user, self.conv, "confirm"))
+			self.assertIsNone(_typed_confirmation(self.user, self.conv, "confirm", ["ghost"]))
 		core.assert_not_called()
 
 	def test_a_qualified_yes_reaches_the_model_even_with_a_card_open(self):
@@ -258,7 +294,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card()]),
 			patch("jarvis.chat.actions_api._confirm_core") as core,
 		):
-			self.assertIsNone(_typed_confirmation(self.user, self.conv, "yes but change the quantity to 5"))
+			self.assertIsNone(_typed_confirmation(self.user, self.conv, "yes but change the quantity to 5", self._toks([self._card()])))
 		# Reading the parked list is harmless; running a write is not.
 		core.assert_not_called()
 
@@ -277,7 +313,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			),
 			patch("jarvis.chat.actions_api._confirm_core") as core,
 		):
-			self.assertIsNone(_typed_confirmation(self.user, self.conv, "yes"))
+			self.assertIsNone(_typed_confirmation(self.user, self.conv, "yes", ["tok-1"]))
 		core.assert_not_called()
 
 	def test_a_failed_confirmation_still_reports_as_handled(self):
@@ -291,7 +327,7 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card()]),
 			patch("jarvis.chat.actions_api._confirm_core", return_value=envelope),
 		):
-			out = _typed_confirmation(self.user, self.conv, "yes")
+			out = _typed_confirmation(self.user, self.conv, "yes", self._toks([self._card()]))
 		self.assertTrue(out["confirmed"])
 		self.assertFalse(out["ok"])
 
@@ -302,10 +338,73 @@ class TestTypedConfirmation(FrappeTestCase):
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card()]),
 			patch("jarvis.chat.actions_api._confirm_core", return_value=envelope),
 		):
-			out = _typed_confirmation(self.user, self.conv, "confirm")
+			out = _typed_confirmation(self.user, self.conv, "confirm", self._toks([self._card()]))
 		self.assertTrue(out["queued"])
 		self.assertEqual(out["queued_position"], 2)
 		self.assertEqual(out["run_id"], "r1")
+
+
+class TestTypedApprovalBindsToDisplayedTokens(FrappeTestCase):
+	"""C2: a typed number selects by the token the client showed at that number,
+	not by a position in a list the server re-fetches. A card expiring between the
+	user's glance and their send must never renumber the rest onto a wrong write."""
+
+	def setUp(self):
+		self.user = frappe.session.user
+		self.conv = "conv-typed-confirm"
+
+	def _card(self, token, tool="create_doc", summary="do it"):
+		return {"token": token, "tool": tool, "summary": summary}
+
+	def test_a_number_pointing_at_an_expired_card_runs_nothing(self):
+		"""The exact wrong-card bug. Client showed [A=submit(1), B=delete(2)]. A
+		expires; the server's live set is now just B. "confirm 1" means A, which is
+		gone - it must NOT fall onto B and run the delete."""
+		displayed = ["A", "B"]  # what the client rendered, positions 1 and 2
+		live_now = [self._card("B", tool="delete_doc", summary="delete Customer")]
+		with (
+			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=live_now),
+			patch("jarvis.chat.actions_api._confirm_core") as core,
+		):
+			out = _typed_confirmation(self.user, self.conv, "confirm 1", displayed)
+		# Falls through to the model; the delete never ran.
+		self.assertIsNone(out)
+		core.assert_not_called()
+
+	def test_a_still_live_number_confirms_that_exact_card_after_a_sibling_expired(self):
+		"""The mirror: "confirm 2" means B, B is still live, so B runs - selection
+		follows what the user saw, not the shrunken server list."""
+		displayed = ["A", "B"]
+		live_now = [self._card("B", tool="delete_doc", summary="delete Customer")]
+		with (
+			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=live_now),
+			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
+		):
+			out = _typed_confirmation(self.user, self.conv, "confirm 2", displayed)
+		core.assert_called_once_with("B", self.conv, batch=False)
+		self.assertEqual(out["tokens"], ["B"])
+
+	def test_without_displayed_tokens_a_typed_approval_falls_through(self):
+		"""A client that sends no token list (an older or third-party client) cannot
+		resolve a number safely, so the message reaches the model and the button
+		still works - never a positional guess against a re-fetched list."""
+		with (
+			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card("A")]),
+			patch("jarvis.chat.actions_api._confirm_core") as core,
+		):
+			self.assertIsNone(_typed_confirmation(self.user, self.conv, "confirm 1", None))
+			self.assertIsNone(_typed_confirmation(self.user, self.conv, "go ahead", []))
+		core.assert_not_called()
+
+	def test_a_malformed_token_list_falls_through(self):
+		"""A garbled position list must never be best-guessed against an ERP write."""
+		for bad in (["A", ""], ["A", 2], "not-json", [""], list(range(60))):
+			with (
+				patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card("A")]),
+				patch("jarvis.chat.actions_api._confirm_core") as core,
+			):
+				self.assertIsNone(_typed_confirmation(self.user, self.conv, "go ahead", bad), bad)
+				core.assert_not_called()
 
 
 class TestConfirmCoreIsShared(FrappeTestCase):

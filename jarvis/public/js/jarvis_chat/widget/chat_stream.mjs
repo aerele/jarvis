@@ -135,6 +135,10 @@ function applyAdmitted(s, p) {
         token: p.token,
         tool: p.tool || "",
         summary: p.summary || "",
+        // expires_at is the primary sort key for numbered typed approval
+        // ("confirm 2"). Dropping it makes orderedPending fall back to token
+        // order, which disagrees with the server and can run the wrong card.
+        expires_at: p.expires_at ?? null,
       });
       return s;
 

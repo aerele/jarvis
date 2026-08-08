@@ -396,6 +396,8 @@
 						</button>
 					</div>
 				</div>
+				<!-- Both ways to approve, shown once under the stack. -->
+				<div class="jvp-typehint">{{ typedApprovalHint }}</div>
 			</div>
 
 			<!-- Jump to latest. stickToBottom already refuses to drag a reader who
@@ -588,6 +590,7 @@ import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
 import { classifyReadiness, degradedMessage } from "./panel_readiness.mjs";
 import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
+import { sortPendingCards } from "./pending_order.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
 import {
 	listConversations,
@@ -790,13 +793,15 @@ const resolving = ref("");
 // selects by the number shown here, and the store keeps tokens in a Redis SET
 // with no order of its own. Tokens compare by code unit so the tiebreak matches
 // the server's byte order rather than locale rules.
-const orderedPending = computed(() =>
-	[...(stream.value.pending || [])].sort(
-		(a, b) =>
-			(a.expires_at || 0) - (b.expires_at || 0) ||
-			(a.token < b.token ? -1 : a.token > b.token ? 1 : 0)
-	)
-);
+// Ordered by the shared, unit-tested comparator so the numbers on screen match
+// the server's (expires_at, token) order a typed "confirm N" resolves against.
+const orderedPending = computed(() => sortPendingCards(stream.value.pending || []));
+// Typed approval works in the widget too, but only the desktop advertised it.
+// The selective example numbers track the real count so it never overshoots.
+const typedApprovalHint = computed(() => {
+	const n = orderedPending.value.length;
+	return n > 1 ? 'or type "confirm all", or "confirm 1 and ' + n + '"' : 'or type "go ahead"';
+});
 const lastSent = ref("");
 // Prompt recall, matching the full chat: Up walks back through prompts sent from
 // this panel, Down walks forward and finally restores whatever was being typed.
@@ -1098,6 +1103,10 @@ async function load() {
 					token: r.token,
 					tool: r.tool || "",
 					summary: r.summary || r.preview || "",
+					// Carry expires_at so orderedPending sorts by (expires_at,
+					// token) the same way the server does; without it a typed
+					// "confirm N" can select a different card than shown.
+					expires_at: r.expires_at ?? null,
 				})),
 			};
 		} catch (e) {
@@ -1299,7 +1308,10 @@ async function send() {
 		// Context is read at SEND time, not at open time: a conversation outlives
 		// the page it started on, and pinning it would leave the agent silently
 		// answering about the wrong record after a navigation.
-		const res = await sendMessage(convId.value, text, props.context, atts);
+		// Tokens of the parked cards in the order shown, so a typed "confirm 2"
+		// binds to the card at that number rather than a server-side re-fetch.
+		const approvalTokens = orderedPending.value.map((p) => p.token);
+		const res = await sendMessage(convId.value, text, props.context, atts, approvalTokens);
 		if (res?.conversation_id) convId.value = res.conversation_id;
 		// A go-ahead on the parked card ran the confirmation instead of starting a
 		// turn. No run is coming, so marking the panel busy would spin forever, and
@@ -1309,7 +1321,12 @@ async function send() {
 			sending.value = false;
 			messages.value = messages.value.filter((m) => !String(m.name).startsWith("local-"));
 			if (res.ok === false)
-				loadError.value = "That confirmation is no longer valid. Ask again to retry it.";
+				// Prefer the server's own message: a partial batch ("2 of 3 went
+				// through") is a success for most cards, so the generic "no longer
+				// valid, ask again" both misreports it and invites a duplicate retry
+				// of writes that already ran. Fall back only when none was sent.
+				loadError.value =
+					res.error?.message || "That confirmation is no longer valid. Ask again to retry it.";
 			await load();
 			return;
 		}
@@ -2505,6 +2522,12 @@ defineExpose({ load, startNewChat, convId });
 	display: flex;
 	gap: 8px;
 	justify-content: flex-end;
+}
+.jvp-typehint {
+	margin: 6px 2px 0;
+	font-size: 12px;
+	line-height: 1.4;
+	opacity: 0.6;
 }
 
 /* ---- composer ---- */

@@ -478,7 +478,10 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 		# through to a graceful failure envelope: the "failed" receipt + continuation
 		# below still fire, so the user sees it and the agent learns.
 		frappe.db.rollback()
-		frappe.log_error(title="confirm_tool dispatch crashed", message=frappe.get_traceback())
+		frappe.log_error(
+			title="confirm dispatch crashed",
+			message=f"token={token} conversation={guard_conv}\n{frappe.get_traceback()}",
+		)
 		result = api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
 
 	# Leave a transcript receipt (#7) so a confirmed delete/submit/email shows on
@@ -507,7 +510,10 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 				action_outcome="confirmed" if ok else "failed",
 			)
 		except Exception:
-			frappe.log_error(title="confirm_tool receipt failed", message=frappe.get_traceback())
+			frappe.log_error(
+				title="confirm receipt failed",
+				message=f"token={token} conversation={conv}\n{frappe.get_traceback()}",
+			)
 
 		# Continue the agent's plan: the model was told only "awaiting the
 		# user's confirmation" and stopped, so without this turn it never
@@ -535,7 +541,10 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 		try:
 			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
 		except Exception:
-			frappe.log_error(title="confirm_tool continuation failed", message=frappe.get_traceback())
+			frappe.log_error(
+				title="confirm continuation failed",
+				message=f"token={token} conversation={conv}\n{frappe.get_traceback()}",
+			)
 		# SUX-3/SUXI-2: thread the queued continuation's position onto a SUCCESSFUL
 		# confirm result so the SPA shows the queued chip (the card doesn't vanish
 		# into silence while the continuation sits queued). A failed confirm keeps

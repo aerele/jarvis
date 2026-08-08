@@ -24,13 +24,19 @@ export const getConversation = (conversation) =>
 //
 // `context` is the object from desk_context.contextFromRoute. Send it only when
 // there is one, so a non-record page behaves as a plain chat.
-export const sendMessage = (conversation, message, context, attachments) =>
+export const sendMessage = (conversation, message, context, attachments, approvalTokens) =>
   call(CHAT + "send_message", {
     conversation: conversation || "",
     message,
     ...(context ? { context: JSON.stringify(context) } : {}),
     ...(attachments && attachments.length
       ? { attachments: JSON.stringify(attachments) }
+      : {}),
+    // Ordered tokens of the on-screen confirmation cards, so a typed "confirm 2"
+    // resolves to the card shown at that number instead of a re-fetched position
+    // that a mid-flight expiry could renumber onto a different write.
+    ...(approvalTokens && approvalTokens.length
+      ? { approval_tokens: JSON.stringify(approvalTokens) }
       : {}),
   });
 

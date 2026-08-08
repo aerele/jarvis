@@ -70,6 +70,19 @@ describe("sendMessage context forwarding", () => {
 		expect(args.model_override).toBe("gpt-x");
 		expect(JSON.parse(args.attachments)).toEqual([{ file_url: "/f.png" }]);
 	});
+
+	it("forwards the displayed confirmation-card tokens, in order, for a typed approval", async () => {
+		// The server resolves a typed "confirm 2" against THIS ordered list, so the
+		// wire contract must carry it verbatim - a dropped or reordered token would
+		// renumber the selection and can run the wrong card. Pins the C2 binding.
+		await sendMessage("C1", "confirm 2", undefined, undefined, undefined, ["tokA", "tokB"]);
+		expect(JSON.parse(lastSendArgs().approval_tokens)).toEqual(["tokA", "tokB"]);
+	});
+
+	it("omits approval_tokens when there are no cards on screen", async () => {
+		await sendMessage("C1", "hi", undefined, undefined, undefined, []);
+		expect(lastSendArgs().approval_tokens).toBeUndefined();
+	});
 });
 
 describe("setSidebarOrder", () => {

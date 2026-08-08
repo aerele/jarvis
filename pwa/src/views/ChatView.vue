@@ -29,6 +29,7 @@ import {
 	toolStatus,
 } from "../lib/blocks";
 import { spanBetween } from "../lib/time";
+import { sortPendingCards } from "../lib/sortPendingCards.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
 import Composer from "../components/Composer.vue";
@@ -70,13 +71,15 @@ const pending = ref([]); // parked writes awaiting approval
 // a Redis SET, which has no order at all, so without this the numbers on screen
 // and the numbers the server counts could disagree and the wrong write would run.
 // Tokens compare by code unit to match Python's byte order, not localeCompare.
-const orderedPending = computed(() =>
-	[...pending.value].sort(
-		(a, b) =>
-			(a.expires_at || 0) - (b.expires_at || 0) ||
-			(a.token < b.token ? -1 : a.token > b.token ? 1 : 0)
-	)
-);
+// Ordered by the shared, unit-tested comparator so the numbers on screen match
+// the server's (expires_at, token) order a typed "confirm N" resolves against.
+const orderedPending = computed(() => sortPendingCards(pending.value));
+// Typed approval works here as on the desktop, but only the desktop advertised
+// it. The selective example numbers track the real count so it never overshoots.
+const typedApprovalHint = computed(() => {
+	const n = orderedPending.value.length;
+	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
+});
 const settings = ref(null);
 
 // The turn in flight. Held separately from `messages` because it is not durable
@@ -288,6 +291,9 @@ async function send() {
 		// screen — same rule as the native app.
 		const res = await api.sendMessage(convId.value, text, {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
+			// Numbers a typed approval selects by must resolve against the cards on
+			// screen, in this order, not a list the server re-fetches at send time.
+			approvalTokens: orderedPending.value.map((p) => p.token),
 		});
 		// The server read this as a go-ahead on the parked card and ran the
 		// confirmation instead of starting a turn, so no run events are coming and
@@ -775,6 +781,8 @@ onUnmounted(() => {
 			"
 			@open="decision = p"
 		/>
+		<!-- Both ways to approve, shown once under the stack. -->
+		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">
@@ -1147,6 +1155,12 @@ onUnmounted(() => {
 	border-radius: 4px;
 }
 
+.jv-typehint {
+	margin: 6px 4px 2px;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--ink5);
+}
 .jv-banner {
 	display: flex;
 	align-items: center;

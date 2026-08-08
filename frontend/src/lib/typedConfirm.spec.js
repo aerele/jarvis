@@ -99,7 +99,12 @@ describe("the card advertises both ways to approve", () => {
 	});
 
 	it("teaches bulk and selective forms only when there is a choice to make", () => {
-		expect(src).toContain('or type "confirm all", or "confirm 1 and 3"');
+		// The selective example numbers must track the real card count, so the hint
+		// is built from `n` rather than a literal "1 and 3" that overshoots a 2-card
+		// stack. (Behaviour of the count itself is a component concern; here we only
+		// pin that the example is dynamic, not hardcoded out of range.)
+		expect(src).toContain('confirm 1 and ${n}');
+		expect(src).not.toContain('"confirm 1 and 3"');
 		expect(src).toContain('or type "go ahead"');
 	});
 
@@ -108,9 +113,12 @@ describe("the card advertises both ways to approve", () => {
 		expect(src).toContain("{{ pi + 1 }} of {{ visiblePendingActions.length }}");
 	});
 
-	it("orders the cards the way the server orders them", () => {
-		// If the screen and the server disagree about which card is number 1, a
-		// typed "confirm 1" runs the wrong write.
-		expect(src).toContain("(a.expires_at || 0) - (b.expires_at || 0) ||");
+	it("orders the cards through the shared, unit-tested comparator", () => {
+		// The order a typed "confirm 1" resolves against is now the single
+		// sortPendingCards() source of truth (behaviour pinned in
+		// sortPendingCards.spec.js with real inputs), not an inline sort grepped
+		// for its text - a source grep passes even when a client drops expires_at,
+		// which is exactly how the Desk-widget wrong-write bug shipped.
+		expect(src).toContain("sortPendingCards(");
 	});
 });

@@ -3773,6 +3773,7 @@ import { parseAsk } from "@/lib/chatAsk";
 import { normaliseAction } from "@/lib/chatAction";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { createRevealer } from "@/lib/streamReveal";
+import { sortPendingCards } from "@/lib/sortPendingCards";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { pickGreeting } from "@/lib/greeting";
@@ -6285,24 +6286,18 @@ const pendingActions = ref([]);
 // What the hint offers depends on how many cards are stacked: with one there
 // is nothing to select, with several the useful thing to teach is that both
 // all-at-once and pick-a-few work.
-const typedApprovalHint = computed(() =>
-	visiblePendingActions.value.length > 1
-		? 'or type "confirm all", or "confirm 1 and 3"'
-		: 'or type "go ahead"'
-);
+const typedApprovalHint = computed(() => {
+	const n = visiblePendingActions.value.length;
+	// The example must reference cards that actually exist: with two parked,
+	// "confirm 1 and 3" names a card 3 that is not there, so a user who copies it
+	// verbatim gets an out-of-range no-op. Use the real first and last numbers.
+	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
+});
 const visiblePendingActions = computed(() =>
-	pendingActions.value
-		.filter((pa) => pa.conversation === currentId.value)
-		// Compared by code unit, NOT localeCompare: the server tiebreaks with
-		// Python's byte order, and localeCompare disagrees with it on mixed-case
-		// tokens. Cards minted in the same second would then be numbered one way
-		// on screen and another on the server, which is the wrong-write bug this
-		// ordering exists to prevent.
-		.sort(
-			(a, b) =>
-				(a.expires_at || 0) - (b.expires_at || 0) ||
-				(a.token < b.token ? -1 : a.token > b.token ? 1 : 0)
-		)
+	// Ordered by the shared, unit-tested comparator (sortPendingCards) so the
+	// numbers on screen match the server's (expires_at, token) order a typed
+	// "confirm N" resolves against. See lib/sortPendingCards.js.
+	sortPendingCards(pendingActions.value.filter((pa) => pa.conversation === currentId.value))
 );
 
 // A legacy container (persona v0.39, pre write-safety) may still emit a
@@ -7077,6 +7072,14 @@ async function loadConversation(id) {
 	// does a single clean load, would put it right. (Root cause of "open a
 	// chat, switch away and back, it shows empty until I refresh".)
 	if (currentId.value !== id) return;
+	// Flush any in-flight reveal BEFORE swapping in the freshly-loaded rows. On a
+	// reconnect resync the socket may have missed a run's terminal (fire-and-forget
+	// pub/sub, no replay), so flushReveal(message_id) never ran for it; a leftover
+	// cursor would otherwise keep ticking and overwrite the DB-correct final text
+	// with its stale, truncated target - a shortened answer with no spinner and no
+	// error, fixable only by a hard refresh. flushReveal() cancels the loop and
+	// clears all reveal state, so nothing survives to touch the new array.
+	flushReveal();
 	messages.value = d?.messages || [];
 	// VR4-2: re-inject any failed optimistic bubbles whose send was rejected while THIS conversation
 	// was off-screen (their rendered copy was dropped when messages was replaced). They are kept
@@ -7708,7 +7711,10 @@ async function send(textArg, resendAck) {
 		// one-shot _prefillSendContext is cleared after the send is accepted, below,
 		// so a rejected send keeps it armed for retry.)
 		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
-		const r = await api.sendMessage(sentFrom, text, undefined, attachments, sendCtx);
+		// The confirmation cards currently on screen, in the order the numbers are
+		// shown, so a typed "confirm 2" binds to the card the user actually sees.
+		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
+		const r = await api.sendMessage(sentFrom, text, undefined, attachments, sendCtx, approvalTokens);
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
 		// must not fall into the rejection branch below even when the confirmation
 		// itself failed. It is handled further down, on the accepted path, where it
