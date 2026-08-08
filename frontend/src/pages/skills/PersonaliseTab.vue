@@ -265,6 +265,7 @@
 			<ChatComposer
 				ref="composer"
 				:stt-enabled="!!caps.stt_enabled"
+				:stt-unconfigured="caps.stt_state === 'unconfigured'"
 				:question="selected"
 				:saving="submitting"
 				@submit="onSubmit"

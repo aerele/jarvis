@@ -82,6 +82,23 @@
 				<div class="flex flex-wrap items-center gap-1.5">
 					<!-- voice first + prominent (design-language §7) -->
 					<VoiceRecorder v-if="sttEnabled" compact @transcript="onTranscript" />
+					<!-- not set up is an ACTIONABLE gap: fade + say so instead of vanishing
+					     (deliberately off / a transient error stay hidden) -->
+					<button
+						v-else-if="sttUnconfigured"
+						class="flex size-7 items-center justify-center rounded text-ink-gray-4 opacity-55"
+						style="cursor: default"
+						aria-disabled="true"
+						title="Voice input is not set up on this workspace"
+						aria-label="Voice input is not set up on this workspace"
+						@click="
+							toast.info(
+								`Voice input isn't set up on this workspace yet — ask your administrator.`
+							)
+						"
+					>
+						<FeatherIcon name="mic" class="size-4" />
+					</button>
 					<FileUploader
 						:upload-args="{ private: 1 }"
 						@success="onUpload"
@@ -152,6 +169,9 @@ import { agentName } from "@/branding";
 const props = defineProps({
 	// STT availability (pass caps.stt_enabled) - hides the recorder when off.
 	sttEnabled: { type: Boolean, default: false },
+	// STT is unconfigured specifically (pass caps.stt_state === "unconfigured") —
+	// renders the recorder faded + explained rather than hiding it.
+	sttUnconfigured: { type: Boolean, default: false },
 	// the selected question ({name, question, …}) or null for free capture.
 	question: { type: Object, default: null },
 	// true while the parent's answer/save call is in flight (Send loading).
