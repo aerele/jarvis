@@ -150,6 +150,29 @@ test("inFlight: names the act of checking, and claims no observation", () => {
 	assert.doesNotMatch(p.label, /couldn't reach|could not reach/i);
 });
 
+// jarvis#752: the apply-operation poll can carry admin's own chat_readiness_reason
+// well before any readiness wait starts (a subscription pool's force-probe verdict
+// lands mid-apply, not only at a terminal). A caller that already has one passes it
+// through unchanged; the phase stays ACTIVE either way, so a route that cannot
+// serve still reads as progress, not as a failure.
+test("inFlight: a caller-supplied detail is carried through unchanged", () => {
+	const p = inFlightPhase(
+		"Applying your AI connection",
+		PHASE_KIND.LLM_APPLY,
+		"Your OpenAI account has reached its usage limit. It resets in 2 hours."
+	);
+	assert.equal(p.state, PHASE_STATE.ACTIVE);
+	assert.equal(
+		p.detail,
+		"Your OpenAI account has reached its usage limit. It resets in 2 hours."
+	);
+});
+
+test("inFlight: no detail argument still defaults to an empty string", () => {
+	const p = inFlightPhase("Checking on your workspace");
+	assert.equal(p.detail, "");
+});
+
 test("readiness: a resolvable wait never stops itself", () => {
 	const reasons = [
 		"llm_pool_provisioning",
