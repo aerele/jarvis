@@ -19,6 +19,9 @@ import { ref } from "vue";
 import { useShellStore } from "@/stores/shell";
 import { session } from "@/data/session";
 import { report as reportError } from "@/lib/errorReporter";
+// The SAME fence ChatView applies to terminals, from the same module, so the two
+// listeners on this socket cannot disagree about what counts as a duplicate.
+import { fenceAccept, fenceReject } from "@/utils/eventFence";
 import { agentName } from "@/branding";
 
 // ---- toast state (rendered by NotifyToaster.vue) -----------------------------
@@ -131,6 +134,16 @@ export function attachGlobalNotifier({ socket, router }) {
 	const trigSignalAt = new Map();
 	const TRIG_SIGNAL_WINDOW_MS = 5000;
 
+	// Terminal fence, per listener. The server publishes a turn's terminal MORE THAN
+	// ONCE (settlement, then the finalize backstop re-publish), and ChatView has always
+	// deduped it one-shot so its announce + reload fire once. This listener did not, so
+	// every doubled terminal became TWO "Reply ready" toasts for one reply.
+	//
+	// Own state, deliberately NOT shared with ChatView's: both listeners see every
+	// frame, and a shared fence would let whichever ran first accept the terminal and
+	// the other reject it, silently breaking one of the two.
+	const fence = {};
+
 	// hidden → browser notification; visible-but-elsewhere → toast;
 	// visible on the conversation → nothing.
 	function signal({ conv, title, body, tag, open, toastAnywhere = false }) {
@@ -146,6 +159,11 @@ export function attachGlobalNotifier({ socket, router }) {
 		switch (p.kind) {
 			case "run:end":
 			case "run:error": {
+				// One-shot per (run, epoch): a re-published terminal must not signal
+				// twice. Placed before reportError too, so a duplicate error frame is
+				// not reported twice either.
+				if (fenceReject(fence, p, true)) return;
+				fenceAccept(fence, p, true);
 				const conv = p.conversation_id;
 				// A failed turn is the most common error a user faces. Report it
 				// (classified, with the run id) regardless of on-screen state - this
