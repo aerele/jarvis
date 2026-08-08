@@ -588,6 +588,26 @@
 											{{ setupRecheckNote }}
 										</p>
 									</div>
+									<!-- jarvis#726: a step-counted Progress bar, reading the SAME
+										 phase object the row below already renders - see
+										 waitPhases.phaseProgress for what it measures and why it
+										 goes indeterminate instead of guessing a percentage. Label is
+										 just "Step N of 3", not the phase's own sentence - that
+										 sentence already renders once, in the row below; repeating it
+										 here read as an accidental duplicate rather than emphasis. -->
+									<Progress
+										v-if="!provisioningDelayed"
+										class="ob-progress"
+										:class="{
+											'ob-progress--indeterminate':
+												provisioningProgress.indeterminate,
+										}"
+										:value="provisioningProgress.percent"
+										intervals
+										:interval-count="provisioningProgress.total"
+										size="md"
+										:label="`Step ${provisioningProgress.current} of ${provisioningProgress.total}`"
+									/>
 									<!-- Phase list. Row 1 is a settled fact. Row 2 renders ONLY what
 										 the last provisioning tick observed (waitPhases.js), so
 										 "Jarvis is getting ready for you" appears when admin itself
@@ -705,12 +725,19 @@
 							</template>
 							<!-- Confirming: the customer paid on the admin-hosted page and came
 								 back, and we are asking the control plane whether it landed. Money
-								 has left them and no verdict exists yet, so this is the one screen
-								 the payment illustration belongs on (design.md §2.2). It replaces
-								 the recovery card, whose disabled "Working…" button is what a
-								 customer used to stare at in the seconds right after paying. -->
+								 has left them and no verdict exists yet.
+								 jarvis#728: this used to render PaymentConfirmingArt here, but the
+								 round trip behind this screen is a single one-shot reconcile
+								 (usePaymentFlow's hydrate/reconcileAfterFailure), never a poll -
+								 it resolves in well under a second on the common path and hands
+								 off to the recovery card on the slow one, so the screen can never
+								 reliably reach the "tens of seconds" bar design.md §2.2 sets for
+								 using an illustration instead of JvSpinner. A short, honest wait
+								 gets the short-wait treatment; a flashed or half-drawn frame is
+								 worse than a plain spinner. PaymentConfirmingArt.vue is unchanged
+								 and kept for a screen whose wait actually earns it. -->
 							<template v-else-if="showConfirming">
-								<div class="ob-body">
+								<div class="ob-body ob-body--center">
 									<div class="ob-head">
 										<h1 role="status">Confirming your payment</h1>
 										<p>
@@ -718,14 +745,11 @@
 											that it came through.
 										</p>
 									</div>
-									<!-- min-height (not h-full): the canvas fills via absolute +
-										 inset-0 and percentage heights don't resolve against a
-										 min-height parent. Same constraint as SetupNeuralNet. -->
-									<div class="relative mt-2 min-h-[300px] flex-1">
-										<PaymentConfirmingArt :dark="dark" />
+									<div class="mt-2.5 flex justify-center">
+										<JvSpinner :size="56" />
 									</div>
 									<p
-										class="mx-auto max-w-[420px] text-center text-p-sm text-ink-gray-5"
+										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
 									>
 										This usually takes a few seconds. Please don't close this
 										page or pay again.
@@ -1244,14 +1268,39 @@
 										"
 									>
 										<div class="ob-head">
-											<h1>Setting up {{ agentName }}</h1>
+											<!-- Follows the live phase (waitPhases.setupHeadline,
+												 jarvis#727): this used to be a fixed "Setting up
+												 {agentName}" sitting above a phase list that jarvis#722
+												 had already made real, so the largest text on the screen
+												 was the only part saying nothing. It falls back to
+												 exactly that sentence whenever the phase names no
+												 subject - a headline is not exempt from jarvis#709. -->
+											<h1>{{ setupTitle }}</h1>
 											<p>
 												{{
 													state.finishSubtitle ||
-													"Bringing your workspace online, taking you to chat…"
+													"We'll take you to chat as soon as your setup is done."
 												}}
 											</p>
 										</div>
+										<!-- jarvis#726: same step-counted bar as the provisioning wait,
+											 reading readinessStage. readinessPhase has no DONE branch
+											 (waitPhases.js), so this bar stays at 1 of 3 until the
+											 screen navigates to chat - it never fills segment two in
+											 place. Label is "Step N of 3" only, not the phase's own
+											 sentence - see the provisioning bar's comment above. -->
+										<Progress
+											class="ob-progress"
+											:class="{
+												'ob-progress--indeterminate':
+													readinessProgress.indeterminate,
+											}"
+											:value="readinessProgress.percent"
+											intervals
+											:interval-count="readinessProgress.total"
+											size="md"
+											:label="`Step ${readinessProgress.current} of ${readinessProgress.total}`"
+										/>
 										<!-- Phase list, driven by is_ready_for_chat's `reason` on the
 											 LAST poll (waitPhases.js). Before this the screen showed one
 											 fixed sentence for the whole two-minute wait, so a workspace
@@ -1386,7 +1435,7 @@
 												type="info"
 												:message="`You can retry in ${state.retryAfter}s.`"
 											/>
-											<div class="mt-4 flex justify-center">
+											<div class="mt-4 flex flex-wrap justify-center gap-2">
 												<Button
 													v-if="state.connectPhase === 'superseded'"
 													variant="solid"
@@ -1399,6 +1448,20 @@
 													:disabled="state.retryAfter > 0"
 													label="Retry"
 													@click="retryConnect"
+												/>
+												<!-- jarvis#727: the way out of a state Retry cannot
+													 resolve. Offered ONLY where this attempt watched the
+													 pipeline stall or fail on the model the customer chose
+													 (see connectModelChangeOffered) - never where nothing
+													 was observed, because that would blame a model no one
+													 examined. Secondary, not primary: Retry can still be
+													 the right answer, it just can no longer be the only
+													 answer. -->
+												<Button
+													v-if="connectModelChangeOffered"
+													variant="subtle"
+													label="Use a different model"
+													@click="chooseDifferentModel"
 												/>
 											</div>
 											<!-- jarvis#708: offered the moment a bounded readiness wait
@@ -1489,7 +1552,7 @@
 <script setup>
 import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
-import { Button, FormControl, FeatherIcon, ErrorMessage } from "frappe-ui";
+import { Button, FormControl, FeatherIcon, ErrorMessage, Progress } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
@@ -1498,7 +1561,6 @@ import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
-import PaymentConfirmingArt from "@/onboarding/PaymentConfirmingArt.vue";
 import cashfreeLogo from "@/assets/cashfree.png";
 import {
 	STEPS_MANAGED,
@@ -1530,10 +1592,13 @@ import {
 } from "@/lib/llmOperation.js";
 import { readinessWaitExhaustedMessage } from "@/onboarding/readinessWait.js";
 import {
+	PHASE_KIND,
 	provisioningPhase,
 	readinessPhase,
 	inFlightPhase,
+	setupHeadline,
 	connectHeadline,
+	phaseProgress,
 } from "@/onboarding/waitPhases.js";
 import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
@@ -1695,8 +1760,11 @@ const readinessStage = computed(() =>
 		? readinessPhase(readinessSeen.value)
 		: // The apply operation is what is running, and the operation controller
 		  // reported that, so naming it is grounded.
-		  inFlightPhase("Applying your AI connection")
+		  inFlightPhase("Applying your AI connection", PHASE_KIND.LLM_APPLY)
 );
+// jarvis#726: the Progress bar next to the phase list above, reading the SAME
+// readinessStage - see waitPhases.phaseProgress.
+const readinessProgress = computed(() => phaseProgress(readinessStage.value));
 
 // Plan 01 billing state. Namespaced by site identity + logged-in user so one
 // site's / user's transitional billing PII can never prefill another's on a
@@ -2464,6 +2532,9 @@ const provisioningStage = computed(() =>
 		? provisioningPhase(provisioningSeen.value)
 		: inFlightPhase("Checking on your workspace")
 );
+// jarvis#726: the Progress bar next to the phase list above, reading the SAME
+// provisioningStage - see waitPhases.phaseProgress.
+const provisioningProgress = computed(() => phaseProgress(provisioningStage.value));
 
 // The FULL-SCREEN busy view is only for the phases where there is genuinely
 // nothing to press: starting the signup, the sheet being open, confirming.
@@ -3061,6 +3132,89 @@ const currentOpId = ref("");
 const navigated = ref(false);
 let retryTimer = null;
 
+// The setup screen's headline, following the live phase (jarvis#727) instead of
+// the fixed "Setting up {agentName}" that used to sit above a phase list which
+// had already become real (jarvis#722). setupHeadline owns every honesty
+// decision; this only supplies what it cannot know: the brand name, and the
+// fact that a ready verdict arrived and we are now navigating.
+const setupTitle = computed(() =>
+	setupHeadline(readinessStage.value, agentName, { navigating: navigated.value })
+);
+
+// jarvis#727. True once THIS attempt has watched the pipeline stall or fail on
+// the AI connection the customer chose, which is the only evidence that makes
+// "use a different model" an honest offer rather than a guess.
+//
+// The bar is deliberately an OBSERVATION, not a reason code, because the reason
+// codes alone cannot carry it: `llm_pool_provisioning` is a perfectly ordinary
+// mid-apply state for the first ninety seconds and a permanent dead end at the
+// hundred and twentieth, and nothing in the code distinguishes those. What does
+// distinguish them is that a bounded wait ran to its ceiling while admin kept
+// answering. So this is set at exactly three places:
+//
+//   - a readiness wait that reached its ceiling having HEARD from admin
+//     (sawVerdict) - admin kept telling us the config was still outstanding and
+//     it never converged;
+//   - an apply-operation deadline that DID confirm the operation in flight
+//     (!neverConfirmed) - the operation to wire this model in existed and never
+//     finished;
+//   - an operation-level RETRY - admin reported a real failure applying it.
+//
+// and deliberately NOT when nothing was observed: a wait that never once
+// reached admin (sawVerdict false), a deadline where no poll ever confirmed
+// anything (neverConfirmed), and the generic support dead-end all know only
+// that we could not ask. Offering a model change there would imply the model is
+// at fault, which is a diagnosis nobody made - the same class of claim
+// jarvis#709 removed. Those states keep Retry, which CAN help them, plus
+// Contact support.
+//
+// Also never on the three stopping verdicts (waitPhases `stop`): a paged
+// authority repair, a paused subscription and a moved account all render the
+// `blocked` panel, and a different model provably cannot resolve any of them.
+const connectModelChangeOffered = ref(false);
+
+// The escape hatch itself: back to the Connect form with the customer's own
+// choice still in it. The editor is v-show'd, never v-if'd, so its state - the
+// provider, the model, a passing key probe - is still mounted and simply
+// becomes visible again; there is nothing to re-fetch or re-fill.
+//
+// It has to be in-wizard. Settings is the obvious home for "add another model",
+// but it is unreachable from here by construction: `llm_pool_provisioning`,
+// `llm_provisioning` and `readiness_unconfirmed` are all in readiness.js's
+// NOT_ONBOARDED_REASONS, so AppShell's `showGate` renders the full-screen
+// onboarding poster over every route except this one. A "go to Settings" link
+// would put the customer back on this wizard by a longer path.
+//
+// The three forgets are load-bearing, not tidying. The customer is about to
+// submit a DIFFERENT configuration, so this attempt's idempotency key must not
+// survive: admin dedupes on it and would hand back the very operation that
+// never converged. currentOpId must go with it, or retryConnect would re-follow
+// that dead operation instead of saving the new config (enterSaveRefusal, the
+// one terminal that can be reached next, never clears it).
+function chooseDifferentModel() {
+	stopRetryCountdown();
+	forgetIdem();
+	opStore.forget();
+	currentOpId.value = "";
+	forgetReady();
+	readinessSeen.value = null;
+	state.connectPhase = "";
+	state.connectTitle = "";
+	state.connectMessage = "";
+	state.connectPaged = false;
+	state.connectSupportOffered = false;
+	state.retryAfter = 0;
+	connectModelChangeOffered.value = false;
+	// Says what was observed - the wait ended without setup finishing - and never
+	// that the chosen model is broken, which nothing here established.
+	state.connectBlockReason =
+		"Setup didn't finish with the AI connection you chose, and waiting hasn't cleared it. Pick a different model and start again.";
+	// Any wait still sleeping between polls stops on its next tick (both loops
+	// re-check this), so a late ceiling cannot yank the customer back out of the
+	// form they were just returned to.
+	state.finishing = false;
+}
+
 function ensureController() {
 	if (opController) return opController;
 	opController = createOperationController({
@@ -3103,8 +3257,11 @@ function onOpUpdate(ui) {
 	const phase = ui && ui.phase;
 	if (phase === OP_PHASE.REJECTED) {
 		// The input is the problem: return to the editable form with the reason.
+		// This IS the jarvis#727 escape, already built, for the one case admin can
+		// name outright - so there is nothing left to offer.
 		state.finishing = false;
 		state.connectPhase = "rejected";
+		connectModelChangeOffered.value = false;
 		state.connectBlockReason =
 			(ui && ui.message) ||
 			"That AI configuration was rejected. Edit your key or connection and try again.";
@@ -3120,6 +3277,10 @@ function onOpUpdate(ui) {
 		state.connectMessage = (ui && ui.message) || "We hit a snag applying your AI connection.";
 		state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: false });
 		state.retryAfter = (ui && ui.retryAfterSeconds) || 0;
+		// Admin reported a real failure applying THIS configuration (jarvis#727).
+		// Retry stays the primary action - the failure is transient by
+		// classification - but it is no longer the only one.
+		connectModelChangeOffered.value = true;
 		startRetryCountdown();
 	} else if (phase === OP_PHASE.SUPERSEDED) {
 		state.connectPhase = "superseded";
@@ -3129,13 +3290,17 @@ function onOpUpdate(ui) {
 		state.connectTitle = connectHeadline("superseded");
 		// A stale offer from an EARLIER readiness wait (jarvis#708) must not survive
 		// into this unrelated terminal - supersession means reload, not "still not
-		// resolved", and this phase already has its own recovery action.
+		// resolved", and this phase already has its own recovery action. The
+		// jarvis#727 offer is withdrawn for the same reason, and one more: a newer
+		// save owns the truth now, so this screen no longer knows which
+		// configuration is even being applied.
 		state.connectSupportOffered = false;
+		connectModelChangeOffered.value = false;
 	} else {
 		// WORKING (pending / applying), and the descriptor seed.
 		state.connectPhase = "working";
 		state.connectMessage = "";
-		state.finishSubtitle = "Bringing your workspace online, taking you to chat…";
+		state.finishSubtitle = "We'll take you to chat as soon as your setup is done.";
 	}
 }
 
@@ -3185,7 +3350,15 @@ function noteReadiness(o) {
 		state.connectMessage = stage.detail;
 		state.connectPaged = !!stage.paged;
 		state.connectSupportOffered = true;
+		// Not one of these three is a model problem: a paged authority repair must
+		// see no self-service action at all, a paused subscription needs a renewal,
+		// and a moved account needs the other site. Offering a different model here
+		// would be a wrong diagnosis dressed as help (jarvis#727).
+		connectModelChangeOffered.value = false;
 	}
+	// Returned so the wait loops can accumulate what their polls NAMED, not just
+	// that the polls answered. See sawNamedSubject in waitForChatReadiness.
+	return stage;
 }
 
 const CHAT_READY_ATTEMPTS = 40;
@@ -3194,6 +3367,20 @@ async function waitForChatReadiness() {
 	// What this run actually observed, so the exhaustion message below can say
 	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
 	let sawVerdict = false;
+	// Whether any poll of THIS wait NAMED what it was waiting on (jarvis#727).
+	// Deliberately not sawVerdict, which the review round showed is far too coarse
+	// to hang a diagnosis on: it means only "a poll returned JSON", and
+	// `readiness_unconfirmed` is a perfectly well-formed 200 whose documented
+	// meaning in jarvis/account.py is that admin COULD NOT BE ASKED. Gating the
+	// model-change offer on sawVerdict therefore told a customer their chosen
+	// connection had failed on the strength of a wait in which nothing about that
+	// connection was ever established - the exact false claim this feature exists
+	// to avoid, and a contradiction of this function's own ceiling comment.
+	// A named subject is `kind !== NONE`, i.e. admin said the outstanding work was
+	// the LLM apply or the container. "At least once", never "on the last poll":
+	// ninety seconds of llm_pool_provisioning followed by one transient unconfirmed
+	// is still a wait that watched this configuration fail to converge.
+	let sawNamedSubject = false;
 	let lastDetail = "";
 	// A new wait starts from "nothing observed yet", so a stale phase from an
 	// earlier attempt is never the first thing this one renders.
@@ -3204,6 +3391,10 @@ async function waitForChatReadiness() {
 		// polling rather than counting down to a ceiling whose exhaustion copy
 		// would invite the retry this state must not offer.
 		if (state.connectPhase === "blocked") return;
+		// The customer took the jarvis#727 escape back to the editor. This wait is
+		// about the configuration they just left behind, so its ceiling must not
+		// fire and pull them back out of the form.
+		if (!state.finishing) return;
 		// The memoized verdict is what the router guard will read moments from now, so
 		// it has to be dropped before each probe or this loop polls a cached answer.
 		forgetReady();
@@ -3225,7 +3416,12 @@ async function waitForChatReadiness() {
 		// discarded except the last detail, so the screen showed one fixed
 		// sentence for two minutes and a customer could not tell a workspace
 		// being built from one that was stuck.
-		noteReadiness({ answered: !!r, reason: r && r.reason, detail: r && r.detail });
+		const stage = noteReadiness({
+			answered: !!r,
+			reason: r && r.reason,
+			detail: r && r.detail,
+		});
+		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		if (state.connectPhase === "blocked") return;
 		await _sleep(CHAT_READY_INTERVAL_MS);
 	}
@@ -3239,6 +3435,12 @@ async function waitForChatReadiness() {
 	// claim. It is now derived from the same source.
 	state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: true });
 	state.connectSupportOffered = true;
+	// jarvis#727: this is the exact state the issue was filed from. Admin named the
+	// outstanding work for this configuration and never said Ready, so Retry
+	// re-runs a thing this run watched fail to converge. Offer the model change
+	// beside it. When nothing was ever named - admin unreachable, or reachable but
+	// unable to answer (readiness_unconfirmed) - only Retry and support are honest.
+	connectModelChangeOffered.value = sawNamedSubject;
 	state.retryAfter = 0;
 }
 
@@ -3273,6 +3475,13 @@ function onTerminal(status) {
 			state.connectMessage =
 				"Setup was still running when we last checked, and it's taking longer than usual. You can keep waiting and retry.";
 		}
+		// jarvis#727. The operation that wires the chosen model in was CONFIRMED in
+		// flight and still did not finish inside its deadline, which is the state
+		// tenant e4qdeprp4r sat in (LLM_APPLY_PENDING, applied_version behind
+		// desired_version, forever). A different model is a real way out of that.
+		// neverConfirmed is the opposite case - nothing was ever reached, so nothing
+		// points at the configuration - and keeps Retry alone.
+		connectModelChangeOffered.value = !status.neverConfirmed;
 		state.retryAfter = 0;
 		return;
 	}
@@ -3292,7 +3501,7 @@ function onTerminal(status) {
 		state.connectPhase = "working";
 		state.finishSubtitle =
 			ui.chatReadinessReason ||
-			"Your AI is connected. Waiting for your workspace to come online…";
+			"Your AI is connected. We're waiting on the last of your setup…";
 		waitForChatReadiness();
 		return;
 	}
@@ -3316,6 +3525,12 @@ function enterSupport() {
 	// This dead-end is unrelated to a chat-readiness wait (jarvis#708): don't let a
 	// stale offer from an earlier one show under a different failure's message.
 	state.connectSupportOffered = false;
+	// And no model-change offer (jarvis#727). Everything that lands here - a
+	// controller that threw, a null terminal, a resume that ran out, a
+	// descriptor-less refusal - is a failure to complete the round trip, not an
+	// observation about the configuration. Retry is the honest primary here
+	// because the round trip is exactly what may work next time.
+	connectModelChangeOffered.value = false;
 }
 
 // Follow a descriptor (or a bare op id on resume) to its terminal state. Supersession
@@ -3326,6 +3541,13 @@ async function followDescriptor(descriptorOrId) {
 			? descriptorOrId
 			: (descriptorOrId && descriptorOrId.operation_id) || "";
 	state.finishing = true;
+	// Third entry point into the "working" screen, and the one that was missing the
+	// invariant the two wait loops each state at their own top: a new attempt must
+	// not open on the LAST attempt's observation. Reached by Retry, which re-follows
+	// the same operation - so without this, a Retry taken from a readiness ceiling
+	// re-rendered that ceiling's stale phase as the live one, and jarvis#727 wired
+	// that phase into the h1, making a stale reading the biggest text on the screen.
+	readinessSeen.value = null;
 	state.connectPhase = "working";
 	let terminal;
 	try {
@@ -3391,15 +3613,21 @@ const LEGACY_READY_INTERVAL_MS = 2500;
 async function followLegacyReadiness() {
 	state.finishing = true;
 	state.connectPhase = "working";
-	state.finishSubtitle = "Bringing your workspace online, taking you to chat…";
+	state.finishSubtitle = "We'll take you to chat as soon as your setup is done.";
 	// What this run actually observed, so the exhaustion message below can say
 	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
 	let sawVerdict = false;
+	// See waitForChatReadiness for why the model-change offer is gated on a NAMED
+	// subject and not on sawVerdict (jarvis#727 review round).
+	let sawNamedSubject = false;
 	let lastDetail = "";
 	readinessSeen.value = null;
 	for (let i = 0; i < LEGACY_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
 		if (state.connectPhase === "blocked") return;
+		// The jarvis#727 escape took the customer back to the editor - see
+		// waitForChatReadiness for why this wait must not outlive it.
+		if (!state.finishing) return;
 		let r = null;
 		try {
 			r = await isReadyForChat();
@@ -3416,7 +3644,12 @@ async function followLegacyReadiness() {
 		}
 		// Same per-poll phase projection as waitForChatReadiness: this wait is just
 		// as long and was just as silent.
-		noteReadiness({ answered: !!r, reason: r && r.reason, detail: r && r.detail });
+		const stage = noteReadiness({
+			answered: !!r,
+			reason: r && r.reason,
+			detail: r && r.detail,
+		});
+		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		if (state.connectPhase === "blocked") return;
 		if (i < LEGACY_READY_ATTEMPTS - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
 	}
@@ -3425,6 +3658,8 @@ async function followLegacyReadiness() {
 	state.connectMessage = readinessWaitExhaustedMessage({ sawVerdict, detail: lastDetail });
 	state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: true });
 	state.connectSupportOffered = true;
+	// Same ceiling, same rule as waitForChatReadiness (jarvis#727).
+	connectModelChangeOffered.value = sawNamedSubject;
 	state.retryAfter = 0;
 }
 
@@ -3442,6 +3677,13 @@ function enterSaveRefusal(retryAfterSeconds) {
 		// "We couldn't confirm your setup" over a rate-limit body, or worse, a
 		// STALE title left behind by an earlier attempt.
 		state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: false });
+		// Explicit for the same reason connectTitle is (jarvis#727 review round). A
+		// rate limit is a refusal to accept the save AT ALL, so nothing about the
+		// configuration was observed and no model change is indicated. It happens to
+		// be false already on both live call paths, but only because each caller
+		// resets it first - an invariant held by the callers is not one this panel
+		// can rely on, and every sibling terminal sets it here rather than assume.
+		connectModelChangeOffered.value = false;
 		state.retryAfter = retryAfterSeconds;
 		startRetryCountdown();
 	} else {
@@ -3468,7 +3710,10 @@ async function saveConnect() {
 	state.connectBlockReason = "";
 	// A genuinely fresh attempt: any earlier attempt's "we couldn't confirm this,
 	// get a person to look into it" offer was about THAT attempt, not this one.
+	// Same for the jarvis#727 model-change offer, which is an observation about a
+	// configuration this attempt has not yet tried.
 	state.connectSupportOffered = false;
+	connectModelChangeOffered.value = false;
 	savingConnect.value = true;
 	try {
 		let idem = recallIdem();
@@ -3513,13 +3758,12 @@ function reloadConnect() {
 	window.location.reload();
 }
 
-// Back to the editable form to fix a rejected configuration.
-function editConnect() {
-	stopRetryCountdown();
-	state.finishing = false;
-	state.connectPhase = "";
-	state.connectMessage = "";
-}
+// (An unreferenced `editConnect` lived here: a partial return-to-the-form that
+// nothing ever called, because onOpUpdate's REJECTED branch inlines its own.
+// Removed rather than reused by jarvis#727's escape - it dropped neither the
+// idempotency key nor the operation id, so wiring it to a button would have sent
+// the customer's NEW configuration under the old attempt's key and had admin
+// dedupe it straight back to the stuck operation.)
 
 // Resume an in-flight apply on mount (reload mid-apply): follow the SAME operation
 // rather than showing an editable form over a running one (review P1-05). If only the
@@ -3959,6 +4203,33 @@ onUnmounted(() => {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
+/* ---- staged wait progress bar (jarvis#726, waitPhases.phaseProgress) ----
+   Segment one (the settled fact) is never touched here - it stays the plain
+   frappe-ui Progress fill in every state, determinate or not. Only the
+   CURRENT segment (nth-child(2) of the three fixed intervals) gets the
+   indeterminate treatment, and only when the phase itself is UNKNOWN: a
+   muted pulse reusing --surface-3, the same colour the waiting dot below
+   already uses for "nothing has reported this yet", so "we don't currently
+   know" reads consistently across both the bar and the phase list next to
+   it instead of inventing a second visual vocabulary for the same idea. */
+.ob-progress {
+	margin: 0 auto;
+	max-width: 420px;
+}
+.ob-progress--indeterminate :deep([role="progressbar"] > div:nth-child(2)) {
+	background: var(--surface-3);
+	animation: ob-progress-pulse 1.6s ease-in-out infinite;
+}
+@keyframes ob-progress-pulse {
+	0%,
+	100% {
+		opacity: 0.5;
+	}
+	50% {
+		opacity: 1;
+	}
+}
+
 /* ---- staged wait phases (waitPhases.js) --------------------------------
    One row per phase. The row's MODIFIER is the honesty contract, not
    decoration: `active` is only ever set from an observation, `unknown` means a
@@ -4092,6 +4363,10 @@ onUnmounted(() => {
 	}
 	.ob-details-form :deep(.jvc-field) {
 		transition: none;
+	}
+	.ob-progress--indeterminate :deep([role="progressbar"] > div:nth-child(2)) {
+		animation: none;
+		opacity: 0.75;
 	}
 }
 </style>

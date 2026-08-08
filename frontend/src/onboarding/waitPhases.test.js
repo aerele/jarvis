@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 
 import {
 	PHASE_STATE,
+	PHASE_KIND,
 	provisioningPhase,
 	readinessPhase,
 	inFlightPhase,
+	setupHeadline,
 	connectHeadline,
+	phaseProgress,
 } from "./waitPhases.js";
 
 // ---- provisioning wait ---------------------------------------------------
@@ -186,6 +189,107 @@ test("readiness: no branch ever claims setup is finishing on its own", () => {
 	}
 });
 
+// ---- setup headline (jarvis#727) -----------------------------------------
+
+test("setup headline: the apply phase is the only thing that earns the brain line", () => {
+	for (const reason of ["llm_pool_provisioning", "llm_provisioning"]) {
+		const p = readinessPhase({ answered: true, reason });
+		assert.equal(p.kind, PHASE_KIND.LLM_APPLY);
+		assert.equal(setupHeadline(p, "Jarvis"), "Giving Jarvis a brain");
+	}
+});
+
+test("setup headline: a live apply operation grounds the brain line before any poll answers", () => {
+	const p = inFlightPhase("Applying your AI connection", PHASE_KIND.LLM_APPLY);
+	assert.equal(setupHeadline(p, "Jarvis"), "Giving Jarvis a brain");
+});
+
+test("setup headline: an inFlight phase with no named subject claims none", () => {
+	assert.equal(
+		setupHeadline(inFlightPhase("Checking on your workspace"), "Jarvis"),
+		"Setting up Jarvis"
+	);
+});
+
+test("setup headline: the container phase names the container, never a workspace", () => {
+	const p = readinessPhase({ answered: true, reason: "container_provisioning" });
+	assert.equal(setupHeadline(p, "Jarvis"), "Bringing your setup online");
+});
+
+// The whole point of jarvis#709/#722: the biggest text on the screen is not
+// exempt from the rule that a phase is named only when something reported it.
+test("setup headline: no unobserved or unnameable phase ever claims a subject", () => {
+	const unnameable = [
+		readinessPhase({ answered: false }),
+		readinessPhase({ answered: true, reason: "readiness_unconfirmed" }),
+		readinessPhase({ answered: true, reason: "authority_repair_required" }),
+		readinessPhase({ answered: true, reason: "subscription_suspended" }),
+		readinessPhase({ answered: true, reason: "site_replaced" }),
+		readinessPhase({ answered: true, reason: "a_reason_this_build_never_heard_of" }),
+		null,
+		undefined,
+	];
+	for (const p of unnameable) {
+		assert.equal(setupHeadline(p, "Jarvis"), "Setting up Jarvis");
+	}
+});
+
+test("setup headline: only navigating (or a DONE phase) opens chat", () => {
+	const applying = readinessPhase({ answered: true, reason: "llm_pool_provisioning" });
+	assert.equal(setupHeadline(applying, "Jarvis", { navigating: true }), "Opening your chat");
+	assert.equal(setupHeadline(null, "Jarvis", { navigating: true }), "Opening your chat");
+	assert.equal(
+		setupHeadline(provisioningPhase({ answered: true, tenantStatus: "running" }), "Jarvis"),
+		"Opening your chat"
+	);
+});
+
+// readinessPhase has no DONE branch (jarvis#726), so the connect wait can never
+// observe a chat-opening phase - `navigating` above is the only route to that
+// headline there. Pinned so a later DONE branch is a deliberate decision.
+test("setup headline: no readiness reason reaches the chat-opening headline on its own", () => {
+	const reasons = [
+		"llm_pool_provisioning",
+		"llm_provisioning",
+		"container_provisioning",
+		"readiness_unconfirmed",
+		"authority_repair_required",
+		"subscription_suspended",
+		"site_replaced",
+		"unmapped",
+	];
+	for (const reason of reasons) {
+		for (const answered of [true, false]) {
+			const h = setupHeadline(readinessPhase({ answered, reason }), "Jarvis");
+			assert.notEqual(h, "Opening your chat", reason);
+		}
+	}
+});
+
+test("setup headline: the brand name is honoured, and a blank one falls back to Jarvis", () => {
+	const p = readinessPhase({ answered: true, reason: "llm_provisioning" });
+	assert.equal(setupHeadline(p, "Aerele AI"), "Giving Aerele AI a brain");
+	assert.equal(setupHeadline(p, "   "), "Giving Jarvis a brain");
+	assert.equal(setupHeadline(p), "Giving Jarvis a brain");
+	assert.equal(setupHeadline(null, ""), "Setting up Jarvis");
+});
+
+// The product owner asked twice to drop "workspace" from onboarding copy: the
+// customer does not have one yet.
+test("setup headline: no headline says workspace", () => {
+	const phases = [
+		inFlightPhase("Applying your AI connection", PHASE_KIND.LLM_APPLY),
+		readinessPhase({ answered: true, reason: "container_provisioning" }),
+		readinessPhase({ answered: true, reason: "readiness_unconfirmed" }),
+		readinessPhase({ answered: false }),
+		null,
+	];
+	for (const p of phases) {
+		assert.doesNotMatch(setupHeadline(p, "Jarvis"), /workspace/i);
+		assert.doesNotMatch(setupHeadline(p, "Jarvis", { navigating: true }), /workspace/i);
+	}
+});
+
 // ---- headline ------------------------------------------------------------
 
 test("headline: the readiness ceiling never says setup is still finishing", () => {
@@ -214,4 +318,80 @@ test("headline: no branch renders the phrase jarvis#709 removed", () => {
 	for (const [phase, opts] of cases) {
 		assert.doesNotMatch(connectHeadline(phase, opts), /still finishing setup/i);
 	}
+});
+
+// ---- progress bar (jarvis#726) --------------------------------------------
+
+test("progress: an ACTIVE phase is 1 of 3, and determinate", () => {
+	const p = phaseProgress(provisioningPhase({ answered: true, tenantStatus: "pending" }));
+	assert.equal(p.done, 1);
+	assert.equal(p.current, 2);
+	assert.equal(p.total, 3);
+	assert.equal(p.percent, 33);
+	assert.equal(p.indeterminate, false);
+});
+
+test("progress: a DONE phase is 2 of 3, and determinate - the only branch that fills segment two", () => {
+	const p = phaseProgress(provisioningPhase({ answered: true, tenantStatus: "running" }));
+	assert.equal(p.done, 2);
+	assert.equal(p.current, 3);
+	assert.equal(p.percent, 67);
+	assert.equal(p.indeterminate, false);
+});
+
+// frappe-ui's Progress re-derives filledIntervalCount as
+// Math.round((value/100)*intervalCount) - confirm the rounding in `percent`
+// never changes which segment count that produces, for both reachable states.
+test("progress: percent survives frappe-ui's own round-trip back to a segment count", () => {
+	for (const [done, total] of [
+		[1, 3],
+		[2, 3],
+	]) {
+		const percent = phaseProgress({
+			state: done === 2 ? PHASE_STATE.DONE : PHASE_STATE.ACTIVE,
+		}).percent;
+		assert.equal(Math.round((percent / 100) * total), done, `done=${done}`);
+	}
+});
+
+test("progress: readinessPhase has no DONE branch, so it never passes 1 of 3 in place", () => {
+	const reasons = [
+		"llm_pool_provisioning",
+		"llm_provisioning",
+		"container_provisioning",
+		"readiness_unconfirmed",
+		"authority_repair_required",
+		"subscription_suspended",
+		"site_replaced",
+		"unmapped",
+	];
+	for (const reason of reasons) {
+		const p = phaseProgress(readinessPhase({ answered: true, reason }));
+		assert.equal(p.done, 1, reason);
+	}
+});
+
+test("progress: UNKNOWN is indeterminate even though it still fills the settled segment", () => {
+	const p = phaseProgress(readinessPhase({ answered: true, reason: "readiness_unconfirmed" }));
+	assert.equal(p.indeterminate, true);
+	assert.equal(p.done, 1); // segment one is a settled fact, not faked by this state
+});
+
+test("progress: an unanswered poll is indeterminate too", () => {
+	assert.equal(phaseProgress(readinessPhase({ answered: false })).indeterminate, true);
+	assert.equal(phaseProgress(provisioningPhase({ answered: false })).indeterminate, true);
+});
+
+test("progress: inFlightPhase is ACTIVE, not UNKNOWN - determinate per the module's own philosophy", () => {
+	const p = phaseProgress(inFlightPhase("Checking on your workspace"));
+	assert.equal(p.indeterminate, false);
+	assert.equal(p.done, 1);
+	assert.equal(p.current, 2);
+	assert.equal(p.label, "Checking on your workspace");
+});
+
+test("progress: no phase read yet (null/undefined) is indeterminate and never throws", () => {
+	assert.equal(phaseProgress(null).indeterminate, true);
+	assert.equal(phaseProgress(undefined).indeterminate, true);
+	assert.equal(phaseProgress(null).done, 1);
 });

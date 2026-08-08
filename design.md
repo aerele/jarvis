@@ -146,7 +146,13 @@ this is the mapping (use it when porting, never when writing new UI):
 > | Illustration | Renders during | Subject |
 > |---|---|---|
 > | `SetupNeuralNet` | the long provisioning/readiness wait | ERP modules connecting to the mark |
-> | `PaymentConfirmingArt` | the payment-confirming wait only | banknotes arriving at the mark along a rail |
+> | `PaymentConfirmingArt` | not currently rendered anywhere; see the note below | banknotes arriving at the mark along a rail |
+>
+> jarvis#728 measured the bench's payment-confirming screen against a real payment: the wait
+> behind it is a single reconcile round trip, not a poll, so it resolves well under the
+> tens-of-seconds bar this carve-out sets and now uses JvSpinner instead. The component, its
+> tokens and this table row are kept rather than deleted: retiring or repurposing the asset for
+> a screen whose wait actually earns it is a design-owner call, not a bugfix-PR call.
 >
 > Rules that come with the second one (product owner authorized it on 2026-08-07, overruling
 > the previous single-illustration wording):
@@ -397,11 +403,19 @@ is theirs.)
 
 ### 3.7 Banners & notices
 
-- Inline alert (press `AlertBanner` shape): `flex items-center justify-between rounded-md p-2`
-  with typed fill — info `bg-surface-blue-2 text-ink-blue-3`, warning `bg-surface-amber-2
+- Inline alert (press `AlertBanner` shape, `Banner.vue`): `flex items-start gap-2.5 rounded-md
+  p-2.5` with typed fill: info `bg-surface-blue-2 text-ink-blue-3`, warning `bg-surface-amber-2
   text-ink-amber-3`, error `bg-surface-red-2 text-ink-red-3`, success green; icon
-  `lucide-info` / `lucide-alert-triangle` at `size-4`; copy `font-medium text-ink-gray-8`;
-  optional action button + ghost `lucide-x` dismiss.
+  `lucide-info` / `lucide-alert-triangle` at bare `size-4` (no chip, border, or background
+  around it; a wrapped icon box taller than one text line is what jarvis#725 was); copy
+  `font-medium text-ink-gray-8`; optional action button + ghost `lucide-x` dismiss.
+  **Alignment (jarvis#725): `items-start`, not `items-center`.** A bare `size-4` icon (16px)
+  sits close enough to a `text-sm` line (~15px) that `items-start` alone already reads as
+  centered on a single line. Because the icon's own height doesn't grow with the content, it
+  also stays pinned to the FIRST line no matter how many lines follow, which `items-center`
+  does not: on a title+message banner or a message that wraps, `items-center` centers the
+  icon against the whole block and visibly drifts it away from line one. Decide by rendering
+  both, not by picking the property that reads better in the one-line case.
 - Quiet informational note (Helpdesk): bordered box, not colored fill —
   `rounded-md p-2 ring-1 ring-outline-gray-modals` + `size-4` icon + `text-xs text-ink-gray-7`
   (`outline-gray-modals` matches `outline-gray-1` in light but diverges in dark).
@@ -556,6 +570,30 @@ Every pane in the Settings dialog owns its own header (there is no global dialog
   else. No gradients, no glow shadows, no pulse animations, no decorative background orbs
   (brand-asset exception: §2.2 — the Jarvis mark and the provisioning illustration only). The
   wizard proves quality through calm, not sparkle.
+- **Long waits: the headline is a phase, not a label (jarvis#727)**. On a wait screen that
+  already renders an observation-driven phase list (`onboarding/waitPhases.js`), the `h1`
+  reads off the SAME phase instead of repeating the step name: "Giving Jarvis a brain" while
+  the AI connection is being applied, "Bringing your setup online" while the container comes
+  up, "Opening your chat" once a ready verdict has actually fired the navigation. The honesty
+  rule from jarvis#709 binds the headline exactly as it binds body copy, so every unobserved
+  or unrecognised state falls back to the plain "Setting up {agentName}". Derive it in the
+  pure module and test it there; never branch on phase label text in the template.
+- **Never say "workspace" during onboarding** (product owner, twice). The customer does not
+  have one yet. Use "setup" or "onboarding", on headlines, subtitles and button labels alike.
+  **Known outstanding violations, not yet fixed:** the `waitPhases.js` phase-row labels ("Your
+  workspace is coming online", "Checking on your workspace" and siblings), the
+  `readinessWaitExhaustedMessage` bodies, and the connect step's `blocked` panel line
+  ("Something about your workspace needs a person to check it"). Those are jarvis#709/#722
+  copy, and jarvis#726's test asserts one of the strings literally, so they need their own
+  change rather than a drive-by rename. Do not add new ones; the rule binds anything you write.
+- **A dead end gets a second action (jarvis#727)**. When a wait ends in a state that retrying
+  cannot resolve, Retry must not be the only button. Offer the action that can actually change
+  the outcome, and offer it ONLY where this attempt observed the thing it would change: a
+  model change belongs on a wait that watched the customer's own configuration stall, and not
+  on one that never reached the control plane at all, where it would blame something nobody
+  examined. Keep it in the wizard, never a link to Settings: `readiness.js`'s
+  `NOT_ONBOARDED_REASONS` puts these states behind AppShell's full-screen gate, so a Settings
+  link is a round trip back to the same screen.
 - **Post-signup activation**: prefer a checklist over a marketing tour — steps registered with
   `useOnboarding(app)`, each step's action **deep-links into the real UI** (opens the settings
   dialog at the right tab, routes to the real form) and is marked complete where the action

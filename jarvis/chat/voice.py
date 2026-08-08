@@ -154,6 +154,38 @@ def stt_config() -> dict | None:
 	return {"enabled": True, "api_key": cfg["api_key"], "model": model or _DEFAULT_STT_MODEL}
 
 
+# Why STT is unavailable — the UI treats these differently, so collapsing them into one
+# boolean (as ``bool(stt_config())`` does) is not enough. Mirrors the support states.
+STT_OK = "ok"
+STT_OFF = "off"  # an admin deliberately turned voice features off
+STT_UNCONFIGURED = "unconfigured"  # no key anywhere — an admin can still set it up
+STT_ERROR = "error"  # transient: the CP lookup blew up; self-heals
+
+
+def stt_state() -> str:
+	"""Which of the FOUR states STT is in, not merely whether it works.
+
+	``stt_config()`` returns None for three very different reasons, and a UI that says
+	"not set up" for all of them lies twice: it tells an admin who deliberately disabled
+	voice to go ask an admin, and it turns a transient CP blip into a permanent-looking
+	misconfiguration. Only ``unconfigured`` is an actionable gap worth surfacing.
+
+	Deliberately does NOT re-implement stt_config's resolution — it asks the same
+	questions in the same order and defers to it for the positive answer, so the two
+	cannot drift."""
+	if not _voice_features_enabled():
+		return STT_OFF
+	try:
+		cfg = stt_config()
+	except Exception:
+		return STT_ERROR
+	if cfg:
+		return STT_OK
+	# Voice is on and nothing raised, so the only remaining reasons are "no key" or an
+	# explicit per-bench stt_enabled=0 — both "an operator has not set this up".
+	return STT_UNCONFIGURED
+
+
 def openrouter_complete(
 	messages: list,
 	model: str | None = None,

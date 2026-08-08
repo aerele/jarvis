@@ -54,6 +54,7 @@ vi.mock("frappe-ui", () => ({
 		template: '<div v-if="message">{{ message }}</div>',
 	},
 	FeatherIcon: { name: "FeatherIcon", template: "<i />" },
+	Progress: { name: "Progress", template: '<div><slot name="hint" /></div>' },
 	call: vi.fn(),
 	dayjs: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
 	toast: { error: vi.fn(), success: vi.fn() },

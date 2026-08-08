@@ -2160,13 +2160,76 @@
 							     shifts the input while a reply is streaming. -->
 							<div
 								v-if="nudge && nudge.conversationId === currentId"
-								class="jv-nudge"
+								class="jv-nudge jv-nudge--compact"
 							>
-								<div class="jv-nudge-head">
-									<div class="jv-nudge-q">
-										Anything worth remembering about <b>{{ nudgeLabels }}</b
-										>?
-									</div>
+								<span class="jv-nudge-ico" aria-hidden="true">
+									<svg
+										width="15"
+										height="15"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.6"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<path d="M9 18h6M10 21h4" />
+										<path
+											d="M12 3a6 6 0 0 0-4 10.5c.6.6 1 1.3 1 2.1V16h6v-.4c0-.8.4-1.5 1-2.1A6 6 0 0 0 12 3z"
+										/>
+									</svg>
+								</span>
+
+								<!-- recording: live timer + stop + cancel -->
+								<template v-if="nudge.mode === 'recording'">
+									<span class="jv-mic-live jv-nudge-grow"
+										><span class="jv-mic-dot"></span>{{ nudgeClock }}</span
+									>
+									<button
+										class="jv-btn jv-btn--primary jv-nudge-go"
+										title="Stop and transcribe"
+										@click="stopNudgeMic"
+									>
+										Stop
+									</button>
+									<button
+										class="jv-nudge-x"
+										title="Cancel recording"
+										aria-label="Cancel recording"
+										@click="cancelNudgeMic"
+									>
+										<svg
+											width="13"
+											height="13"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M18 6 6 18M6 6l12 12" />
+										</svg>
+									</button>
+								</template>
+
+								<!-- transcribing: spinner -->
+								<template v-else-if="nudge.mode === 'transcribing'">
+									<span class="jv-nudge-grow jv-nudge-working">
+										<svg
+											class="jv-spin"
+											width="14"
+											height="14"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="var(--cta)"
+											stroke-width="2.4"
+											stroke-linecap="round"
+										>
+											<path d="M12 3a9 9 0 1 0 9 9" />
+										</svg>
+										Transcribing…
+									</span>
 									<button
 										class="jv-nudge-x"
 										title="Dismiss"
@@ -2186,151 +2249,95 @@
 											<path d="M18 6 6 18M6 6l12 12" />
 										</svg>
 									</button>
-								</div>
-								<div v-if="nudge.mode !== 'edit'" class="jv-nudge-actions">
-									<template v-if="ui.stt_enabled && nudgeRec.supported">
-										<button
-											v-if="nudge.mode === 'transcribing'"
-											class="jv-iconbtn jv-micbtn"
-											title="Transcribing…"
-											disabled
-											style="
-												width: 28px;
-												height: 28px;
-												display: flex;
-												align-items: center;
-												justify-content: center;
-												background: transparent;
-												border: none;
-												border-radius: 7px;
-												color: var(--text-3);
-											"
-										>
-											<svg
-												class="jv-spin"
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="var(--cta)"
-												stroke-width="2.4"
-												stroke-linecap="round"
-											>
-												<path d="M12 3a9 9 0 1 0 9 9" />
-											</svg>
-										</button>
-										<!-- labeled, unlike the composer's dictate mic 40px below — two
-										     identical icon-only mics were indistinguishable at a glance -->
-										<button
-											v-else
-											class="jv-iconbtn jv-micbtn"
-											:class="{ rec: nudge.mode === 'recording' }"
-											:title="
-												nudge.mode === 'recording'
-													? 'Stop and transcribe'
-													: `Record a voice note (saved for ${agentName} to learn from)`
-											"
-											@click="
-												nudge.mode === 'recording'
-													? stopNudgeMic()
-													: startNudgeMic()
-											"
-											style="
-												height: 28px;
-												display: flex;
-												align-items: center;
-												justify-content: center;
-												gap: 5px;
-												background: transparent;
-												border: none;
-												border-radius: 7px;
-												cursor: pointer;
-												color: var(--text-3);
-												padding: 0 8px;
-												font-size: 12.5px;
-												font-weight: 600;
-											"
-										>
-											<svg
-												width="15"
-												height="15"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.7"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path
-													d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
-												/>
-												<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-												<path d="M12 19v3" />
-											</svg>
-											<span v-if="nudge.mode !== 'recording'"
-												>Record answer</span
-											>
-										</button>
-										<template v-if="nudge.mode === 'recording'">
-											<span class="jv-mic-live"
-												><span class="jv-mic-dot"></span
-												>{{ nudgeClock }}</span
-											>
-											<button
-												class="jv-mic-cancel"
-												title="Cancel recording (Esc)"
-												aria-label="Cancel recording"
-												@click="cancelNudgeMic"
-											>
-												<svg
-													width="12"
-													height="12"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													stroke-width="2.2"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-												>
-													<path d="M18 6 6 18M6 6l12 12" />
-												</svg>
-											</button>
-										</template>
-									</template>
-									<button
-										v-if="nudge.mode === 'idle'"
-										class="jv-nudge-type"
-										@click="typeNudge"
-									>
-										Type instead
-									</button>
-								</div>
+								</template>
+
+								<!-- idle / edit: the compact note row — the question lives in the placeholder -->
 								<template v-else>
 									<textarea
 										ref="nudgeTaEl"
 										v-model="nudge.text"
-										rows="3"
-										class="jv-nudge-ta"
-										:placeholder="`What should ${agentName} remember?`"
+										rows="1"
+										class="jv-nudge-input"
+										:placeholder="`Note something to remember about ${nudgeLabels}…`"
+										:aria-label="`Note something to remember about ${nudgeLabels}`"
+										:disabled="nudge.saving"
+										@input="autoGrowNudge"
+										@keydown.enter="onNudgeEnter"
 									></textarea>
-									<div class="jv-nudge-foot">
-										<button
-											class="jv-btn jv-btn--ghost"
-											style="height: 30px; padding: 0 12px"
-											:disabled="nudge.saving"
-											@click="nudge.mode = 'idle'"
+									<!-- Voice notes not set up is an ACTIONABLE gap (an operator can fix
+									     it), so the mic renders faded and says so on click rather than
+									     vanishing; a browser that cannot record is not actionable, so
+									     that case stays hidden. Not the `disabled` attribute — that is
+									     unfocusable and usually swallows the title, leaving a dead grey
+									     icon with no reason. -->
+									<button
+										v-if="nudgeRec.supported && !(nudge.text || '').trim()"
+										class="jv-iconbtn jv-nudge-mic"
+										:class="{ 'is-unset': !ui.stt_enabled }"
+										:aria-disabled="!ui.stt_enabled ? 'true' : undefined"
+										:title="
+											ui.stt_enabled
+												? `Record a voice note (saved for ${agentName} to learn from)`
+												: 'Voice notes are not set up on this workspace'
+										"
+										:aria-label="
+											ui.stt_enabled
+												? `Record a voice note about ${nudgeLabels}`
+												: 'Voice notes are not set up on this workspace'
+										"
+										@click="
+											ui.stt_enabled
+												? startNudgeMic()
+												: notify(
+														`Voice notes aren't set up on this workspace — ask your administrator.`,
+														{ type: 'info' }
+												  )
+										"
+									>
+										<svg
+											width="15"
+											height="15"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.7"
+											stroke-linecap="round"
+											stroke-linejoin="round"
 										>
-											Cancel
-										</button>
-										<button
-											class="jv-btn jv-btn--primary"
-											style="height: 30px; padding: 0 12px"
-											:disabled="nudge.saving || !nudge.text.trim()"
-											@click="saveNudgeNote"
+											<path
+												d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
+											/>
+											<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+											<path d="M12 19v3" />
+										</svg>
+									</button>
+									<button
+										v-if="(nudge.text || '').trim()"
+										class="jv-btn jv-btn--primary jv-nudge-go"
+										:disabled="nudge.saving"
+										@click="saveNudgeNote"
+									>
+										{{ nudge.saving ? "Saving…" : "Save" }}
+									</button>
+									<button
+										class="jv-nudge-x"
+										title="Dismiss"
+										aria-label="Dismiss"
+										@click="dismissNudge"
+									>
+										<svg
+											width="13"
+											height="13"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
 										>
-											{{ nudge.saving ? "Saving…" : "Save" }}
-										</button>
-									</div>
+											<path d="M18 6 6 18M6 6l12 12" />
+										</svg>
+									</button>
 								</template>
 							</div>
 						</template>
@@ -2759,10 +2766,20 @@
 							     standalone support space (Task 6). Gated on the same dual
 							     kill-switch the /support routes guard on. -->
 							<button
-								v-if="supportOn"
+								v-if="supportOn || supportUnconfigured"
 								class="jv-iconbtn"
-								title="Get help from a human"
-								@click="getHumanHelp"
+								:class="{ 'jv-unavailable': supportUnconfigured }"
+								:aria-disabled="supportUnconfigured ? 'true' : undefined"
+								:title="
+									supportUnconfigured
+										? 'Support is not set up on this workspace yet'
+										: 'Get help from a human'
+								"
+								@click="
+									supportUnconfigured
+										? explainSupportUnavailable()
+										: getHumanHelp()
+								"
 								style="
 									width: 30px;
 									height: 30px;
@@ -2796,7 +2813,47 @@
 							</button>
 						</template>
 						<template #right-toolbar>
-							<!-- dictation mic (hidden unless the backend reports STT configured) -->
+							<!-- Dictation mic. Two DIFFERENT unavailable reasons, two treatments:
+							     STT not configured is an actionable gap (an operator can set it
+							     up), so the mic renders FADED and says so on click; a browser
+							     that cannot record is not actionable, so it stays hidden. -->
+							<button
+								v-if="sttUnconfigured && micRec.supported"
+								class="jv-iconbtn jv-micbtn jv-unavailable"
+								aria-disabled="true"
+								title="Voice dictation is not set up on this workspace"
+								aria-label="Voice dictation is not set up on this workspace"
+								style="
+									width: 30px;
+									height: 30px;
+									display: flex;
+									align-items: center;
+									justify-content: center;
+									background: transparent;
+									border: none;
+									border-radius: 7px;
+									cursor: default;
+									color: var(--text-3);
+								"
+								@click="explainSttUnavailable"
+							>
+								<svg
+									width="17"
+									height="17"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.7"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path
+										d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"
+									/>
+									<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+									<path d="M12 19v3" />
+								</svg>
+							</button>
 							<template v-if="ui.stt_enabled && micRec.supported">
 								<button
 									class="jv-iconbtn jv-micbtn"
@@ -3637,6 +3694,7 @@ import { useConfirm } from "@/composables/useConfirm";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
+import { createEnrichmentPending } from "@/lib/enrichmentPending";
 import { currentThreadModel, modelBadgeFor, modelBadgeTitleFor } from "@/utils/modelBadge";
 import { renderMarkdown } from "@/markdown";
 import JvChart from "@/charts/JvChart.vue";
@@ -4244,7 +4302,34 @@ function tearDownActivityIfSettled() {
 // SUX-7: a settled reply whose enrichment (canvas/attachments/title) is still running.
 // run:end carries enrichment_pending; message:enriched clears it. Drives a subtle
 // "finishing…" affordance so a late pop-in is signalled, not silent.
+//
+// jarvis#681: that affordance is BOUNDED, because message:enriched is one best-effort
+// push at the end of a chain of best-effort effects. Any of them stalling (the usage
+// poll retries by design, which is exactly what a live credential change produces)
+// held the line up for as long as the pump watchdog took to burn the retry budget, and
+// forever wherever that cron is not running. A permanent "Finishing…" on a finished
+// answer says the reply is incomplete when it is not, so the deadline in
+// @/lib/enrichmentPending drops it and resyncs once instead. The tracker owns the
+// deadlines; this ref is only what the template reads.
 const enrichmentPending = ref(new Set()); // message_ids awaiting message:enriched
+const enrichmentTracker = createEnrichmentPending({
+	onChange: (ids) => {
+		enrichmentPending.value = ids;
+	},
+	// Nothing told us enrichment finished, so pull the conversation once: whatever
+	// late canvas / attachments / title DID land still gets rendered, and a reply
+	// whose enrichment truly died just loses a label it should never have kept.
+	// Freshness-guarded, since the deadline can fire long after the user moved on.
+	onExpire: (messageId) => {
+		if (!currentId.value || !messages.value.some((m) => m.name === messageId)) return;
+		loadConversation(currentId.value);
+		// Same idle re-render pass the other two reload sites do: loadConversation
+		// runs processMermaid once, but a late re-render can swap a freshly-rendered
+		// mermaid node back to raw source, and this catches that race.
+		setTimeout(processMermaid, 300);
+	},
+});
+onUnmounted(() => enrichmentTracker.reset());
 const recovering = ref(null); // { message_id, reason } while a turn is parked for background recovery — the composer stays UNLOCKED so the user isn't trapped
 const retrying = ref(false); // guards the error-card Retry against a double-enqueue while one is in flight
 const srMessage = ref(""); // visually-hidden aria-live text (turn completion / failure) for screen readers
@@ -4608,6 +4693,36 @@ const currentTitle = computed(
 // supportGuard) — a dead button that redirects straight back to chat is worse
 // than no button.
 const supportOn = window.support_available && window.has_support_access;
+
+// Support is UNCONFIGURED (not merely off/erroring) and this user could otherwise use
+// it: an operator can still set it up, so show the entry faded + explained rather than
+// hiding a feature that exists. "off" (deliberately switched off) and "error" (a
+// transient CP blip that self-heals) both stay hidden — a greyed control for either
+// would be misleading. Permission (`has_support_access`) still hides outright: showing
+// a user a feature they can never use is noise, not discovery.
+const supportUnconfigured = window.support_state === "unconfigured" && !!window.has_support_access;
+
+// STT is UNCONFIGURED specifically — not deliberately off, not a transient CP blip.
+// Only that case earns a faded control: the other two would either nag an admin who
+// switched voice off on purpose, or turn a self-healing hiccup into a permanent-looking
+// misconfiguration. Reading the state (not `!stt_enabled`) also avoids the faded mic
+// FLASHING on every page load, since `ui` starts empty and `stt_enabled` is briefly
+// undefined — `stt_state` is simply absent until the settings land.
+const sttUnconfigured = computed(() => ui.value?.stt_state === "unconfigured");
+
+// One message shape for every not-set-up feature, so the wording cannot drift between
+// the surfaces (a user with STT off sees the nudge mic and the composer mic at once).
+function explainUnavailable(feature) {
+	notify(`${feature} isn't set up on this workspace yet — ask your administrator.`, {
+		type: "info",
+	});
+}
+function explainSupportUnavailable() {
+	explainUnavailable("Support");
+}
+function explainSttUnavailable() {
+	explainUnavailable("Voice dictation");
+}
 
 // "Get help from a human" — always available (v1). The conversation reference
 // is plain, readable, user-EDITABLE body text: create_ticket takes only
@@ -7805,10 +7920,11 @@ function onEvent(p) {
 			if (p.was_recovered) announceSR("Your answer is ready.");
 			// SUX-7: enrichment (canvas/attachments/title) may still be running after the
 			// authoritative terminal. Keep a subtle "finishing…" affordance until the
-			// message:enriched event clears it (a late pop-in is signalled, not silent).
+			// message:enriched event clears it (a late pop-in is signalled, not silent),
+			// or until its deadline expires (jarvis#681: an enrichment that never lands
+			// must not leave a finished answer looking unfinished forever).
 			if (p.message_id) {
-				if (p.enrichment_pending)
-					enrichmentPending.value = new Set(enrichmentPending.value).add(p.message_id);
+				if (p.enrichment_pending) enrichmentTracker.mark(p.message_id);
 				// NB: the CDX-3 fence entry is deliberately NOT cleared here — the
 				// terminated-epoch marker must persist to permanently block a later
 				// lower-epoch straggler (clearing it re-opened the stale-delta window).
@@ -7857,11 +7973,10 @@ function onEvent(p) {
 			// SUX-7: the Relay-Pump finalize job finished the owed enrichment for a
 			// settled reply — clear the "finishing…" affordance and pull the late
 			// attachments/canvas/title in with one reload.
-			if (p.message_id && enrichmentPending.value.has(p.message_id)) {
-				const next = new Set(enrichmentPending.value);
-				next.delete(p.message_id);
-				enrichmentPending.value = next;
-			}
+			// jarvis#681: the server re-delivers this event for a turn that is already
+			// done, so a client whose original push was lost still gets un-stuck. The
+			// tracker no-ops on a message it is not holding, which makes a repeat inert.
+			enrichmentTracker.clear(p.message_id);
 			loadConversation(currentId.value);
 			setTimeout(processMermaid, 300);
 			break;
@@ -8694,7 +8809,10 @@ async function _nudgeTranscribe(r) {
 		if (nudge.value) {
 			nudge.value.text = text;
 			nudge.value.mode = "edit";
-			nextTick(() => nudgeTaEl.value?.focus());
+			nextTick(() => {
+				nudgeTaEl.value?.focus();
+				autoGrowNudge();
+			});
 		}
 	} catch (e) {
 		notifyActionError("Couldn't transcribe audio", e);
@@ -8705,10 +8823,23 @@ function cancelNudgeMic() {
 	nudgeRec.cancel();
 	if (nudge.value) nudge.value.mode = "idle";
 }
-function typeNudge() {
-	if (!nudge.value) return;
-	nudge.value.mode = "edit";
-	nextTick(() => nudgeTaEl.value?.focus());
+// Enter saves the note; Shift+Enter is a newline. Guarded against IME
+// composition-confirm (isComposing / keyCode 229) the same way Composer.vue and
+// DashboardChatPane.vue are — otherwise committing a CJK candidate with Enter
+// would save a half-composed note.
+function onNudgeEnter(e) {
+	if (e.isComposing || e.keyCode === 229 || e.shiftKey) return;
+	e.preventDefault();
+	saveNudgeNote();
+}
+// Keep the note field growing with a dictated/typed paragraph. It starts at one
+// row (so the idle prompt is a slim strip) and grows up to a few lines, restoring
+// the review surface a voice transcript needs before it is saved to memory.
+function autoGrowNudge(e) {
+	const el = (e && e.target) || nudgeTaEl.value;
+	if (!el) return;
+	el.style.height = "auto";
+	el.style.height = Math.min(el.scrollHeight, 132) + "px";
 }
 async function saveNudgeNote() {
 	const n = nudge.value;
@@ -9717,7 +9848,8 @@ onUnmounted(() => {
 	background: rgba(127, 127, 127, 0.16);
 	color: var(--text);
 }
-/* wiki nudge card — own block above the composer, never inside it */
+/* the nudge card base — shared by the wiki "remember this?" prompt (compact
+   variant below) and the business-note greeting banner. */
 .jv-nudge {
 	display: flex;
 	flex-direction: column;
@@ -9729,6 +9861,103 @@ onUnmounted(() => {
 	border-radius: 8px;
 	font-size: 13px;
 	color: var(--text);
+}
+/* compact wiki-nudge: one slim row above the composer instead of a stacked card,
+   so the "remember this?" prompt barely takes any height. The sub-classes below
+   are used only by this variant; the shared head/q/actions/type/x stay for the
+   greeting banner. The question rides the input placeholder. */
+.jv-nudge.jv-nudge--compact {
+	flex-direction: row;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 6px 5px 12px;
+	border-radius: 13px;
+	outline: none;
+	/* Match the composer (Composer.vue root): same soft lift, so the nudge reads as
+	   a sibling of the chat input, not a hard-bordered box. */
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+	transition: border-color 0.12s, box-shadow 0.12s;
+	animation: jv-nudge-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+.jv-nudge.jv-nudge--compact:focus-within {
+	/* Keep the border LIGHT on focus (no dark outline on the active field) — the
+	   soft lift alone signals focus; the textarea itself has outline: none. */
+	border-color: var(--border);
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+}
+@keyframes jv-nudge-in {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.jv-nudge.jv-nudge--compact {
+		animation: none;
+	}
+}
+.jv-nudge-ico {
+	flex: none;
+	display: inline-flex;
+	color: var(--cta);
+	opacity: 0.9;
+}
+.jv-nudge-input {
+	flex: 1;
+	min-width: 0;
+	min-height: 34px;
+	max-height: 132px;
+	border: none;
+	background: transparent;
+	color: var(--text);
+	font-family: inherit;
+	font-size: 13.5px;
+	line-height: 1.45;
+	padding: 6px 2px;
+	resize: none;
+	overflow-y: auto;
+	/* !important: a nested frappe-ui/Tailwind focus-visible rule outlines textareas
+	   and beats a plain class selector (the composer escapes it with an inline
+	   outline:none). Match that immunity. */
+	outline: none !important;
+}
+.jv-nudge-input::placeholder {
+	color: var(--text-3);
+}
+.jv-nudge-grow {
+	flex: 1;
+	min-width: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	font-variant-numeric: tabular-nums;
+}
+.jv-nudge-working {
+	font-size: 12.5px;
+	color: var(--text-2);
+}
+.jv-nudge-mic {
+	flex: none;
+	width: 32px;
+	height: 32px;
+}
+/* the feature exists but isn't set up on this workspace — faded, still focusable,
+   and it explains itself on click (see the template note) */
+.jv-nudge-mic.is-unset {
+	opacity: 0.45;
+	cursor: default;
+}
+.jv-nudge-mic.is-unset:hover {
+	opacity: 0.6;
+}
+.jv-nudge--compact .jv-nudge-go {
+	height: 32px;
+	padding: 0 14px;
+	border-radius: 8px;
 }
 /* business-note greeting banner — top of the chat area, never over the composer */
 .jv-greeting-banner {
@@ -9764,6 +9993,31 @@ onUnmounted(() => {
 	background: var(--surface-1);
 	color: var(--text);
 }
+/* A control for a feature that exists but is not set up on this workspace: faded, and
+   it EXPLAINS itself on click rather than being inert. Deliberately not the `disabled`
+   attribute — a disabled button is not focusable and its title often will not show, so
+   the user gets a dead grey icon with no reason. aria-disabled + a real click handler
+   keeps it reachable and answerable. */
+.jv-unavailable {
+	/* 0.45 measured ~1.8:1 against --surface-2 — under WCAG 1.4.11's 3:1 and, worse for
+	   the point of this pattern, close to invisible. These controls are deliberately
+	   OPERABLE (aria-disabled, not disabled), so the inactive-component exemption does
+	   not really apply: keep them clearly perceptible, just plainly subdued. */
+	opacity: 0.55;
+	cursor: default;
+}
+.jv-unavailable:hover {
+	opacity: 0.8;
+}
+/* .jv-iconbtn:hover inverts to a solid fill with !important — the boldest hover in the
+   UI. On an unavailable control that reads as MORE active than a working button, so
+   opt out and let opacity alone carry the hover. */
+.jv-iconbtn.jv-unavailable:hover,
+.jv-iconbtn.jv-unavailable:hover svg {
+	background: transparent !important;
+	color: var(--text-3) !important;
+	stroke: currentColor !important;
+}
 .jv-nudge-actions {
 	display: flex;
 	align-items: center;
@@ -9783,28 +10037,6 @@ onUnmounted(() => {
 .jv-nudge-type:hover {
 	color: var(--text);
 	background: var(--surface-1);
-}
-.jv-nudge-ta {
-	width: 100%;
-	border: 1px solid var(--border);
-	border-radius: 7px;
-	background: var(--surface);
-	color: var(--text);
-	font-family: inherit;
-	font-size: 13px;
-	line-height: 1.5;
-	padding: 8px 10px;
-	resize: vertical;
-	min-height: 64px;
-	outline: none;
-}
-.jv-nudge-ta:focus {
-	border-color: var(--text-3);
-}
-.jv-nudge-foot {
-	display: flex;
-	justify-content: flex-end;
-	gap: 6px;
 }
 .jv-tool-name {
 	font-weight: 550;

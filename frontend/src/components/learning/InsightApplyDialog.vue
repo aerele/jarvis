@@ -27,7 +27,7 @@
 				v-else-if="phase === 'none'"
 				class="mt-3 flex items-start gap-2 rounded-lg border border-outline-gray-2 bg-surface-gray-1 px-3 py-2 text-sm text-ink-gray-7"
 			>
-				<FeatherIcon name="info" class="mt-0.5 size-4 shrink-0" />
+				<FeatherIcon name="info" class="size-4 shrink-0" />
 				<span>{{
 					draft.reason || "This insight is not worth folding into a skill."
 				}}</span>

@@ -217,7 +217,9 @@ class TestSupportBenchEndpoints(FrappeTestCase):
 
 class TestSupportBoot(FrappeTestCase):
 	def setUp(self):
-		frappe.cache().delete_value("jarvis:support_available")
+		from jarvis.www import jarvis as jw
+
+		frappe.cache().delete_value(jw._SUPPORT_AVAILABLE_CACHE_KEY)
 
 	def test_support_available_false_on_error_and_cached(self):
 		from jarvis.www import jarvis as jw
@@ -232,6 +234,49 @@ class TestSupportBoot(FrappeTestCase):
 
 		with patch("jarvis.admin_client.support_status", return_value={"available": True}):
 			self.assertTrue(jw._support_available())
+
+	# ---- the state the boolean cannot express ----
+
+	def test_error_is_distinct_from_unconfigured_and_retries_sooner(self):
+		# A transient CP blip must NOT read as "support was never set up" — it stays
+		# hidden and re-checks on the short TTL.
+		from jarvis.www import jarvis as jw
+
+		with patch("jarvis.admin_client.support_status", side_effect=Exception("down")):
+			self.assertEqual(jw._support_state(), jw.SUPPORT_ERROR)
+
+	def test_unconfigured_reason_is_carried_through(self):
+		from jarvis.www import jarvis as jw
+
+		with patch(
+			"jarvis.admin_client.support_status",
+			return_value={"available": False, "reason": "unconfigured"},
+		):
+			self.assertEqual(jw._support_state(), jw.SUPPORT_UNCONFIGURED)
+			self.assertFalse(jw._support_available())
+
+	def test_off_reason_is_carried_through(self):
+		from jarvis.www import jarvis as jw
+
+		with patch("jarvis.admin_client.support_status", return_value={"available": False, "reason": "off"}):
+			self.assertEqual(jw._support_state(), jw.SUPPORT_OFF)
+
+	def test_old_cp_without_a_reason_degrades_to_off(self):
+		# A CP that predates `reason` sends only `available` — keep today's hide-it
+		# behaviour rather than claiming the fleet is unconfigured.
+		from jarvis.www import jarvis as jw
+
+		with patch("jarvis.admin_client.support_status", return_value={"available": False}):
+			self.assertEqual(jw._support_state(), jw.SUPPORT_OFF)
+
+	def test_unknown_reason_degrades_to_off(self):
+		from jarvis.www import jarvis as jw
+
+		with patch(
+			"jarvis.admin_client.support_status",
+			return_value={"available": False, "reason": "something-new"},
+		):
+			self.assertEqual(jw._support_state(), jw.SUPPORT_OFF)
 
 
 class TestAuthenticatedRawErrors(FrappeTestCase):
