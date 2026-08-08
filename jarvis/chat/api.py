@@ -864,6 +864,165 @@ def _conversation_busy(conversation: str) -> bool:
 	return age < _INFLIGHT_FRESH_SECONDS
 
 
+def _ordered_parked_cards(user: str, conversation: str) -> list[dict] | None:
+	"""This user's parked cards for this conversation, in the order they are shown.
+
+	Order is load-bearing: a typed "confirm 1 and 3" selects by the number printed
+	on each card, so the server's list and the user's screen must agree or the
+	wrong write runs. The store keeps tokens in a Redis SET, which has no order at
+	all, so an explicit sort is the only thing standing between the numbers and a
+	coin flip. ``expires_at`` is mint time plus a fixed TTL, so it sorts into mint
+	order, and the token breaks ties for cards minted in the same second.
+
+	Returns None when the store cannot answer, which the caller treats as "not an
+	approval" rather than as an empty list.
+	"""
+	from jarvis.chat import pending_confirm
+
+	try:
+		parked = pending_confirm.list_items_for_owner(user, conversation, strict=True)
+	except pending_confirm.PendingConfirmStorageError:
+		# Unknown state is not approval. Falling through is recoverable: the user's
+		# "go ahead" reaches the model. A wrong answer here is a write nobody
+		# authorised, which is not.
+		return None
+	return sorted(parked, key=lambda c: (c.get("expires_at") or 0, c.get("token") or ""))
+
+
+def _typed_confirmation(user: str, conversation: str, message: str) -> dict | None:
+	"""Run the parked confirmations the user approved by typing, or return None.
+
+	The card gives two equal ways to say yes: the Confirm button, and saying so in
+	the composer. This is the second one, and it covers the same ground the buttons
+	do, including several cards at once:
+
+	  * "go ahead" with one card parked confirms it;
+	  * "go ahead" (or "confirm all") with several parked confirms ALL of them,
+	    because a user who lines up three writes and says go ahead means three;
+	  * "confirm 1 and 3" confirms exactly those, by the number on each card, for
+	    when the answer is these but not that one.
+
+	It is a convenience over the buttons, never a widening of them, so all of these
+	must hold or the message falls through and reaches the model as ordinary text:
+
+	  * the WHOLE message parses as an approval (``approval_phrases``). "Yes but
+	    change the quantity to 5" approves nothing and must reach the model;
+	  * every number named exists. "Confirm 4" against three cards is a
+	    misunderstanding, and running three writes on the strength of it would be
+	    exactly the wrong recovery;
+	  * the confirmation store can actually answer;
+	  * the caller is a human, interactive session with no attachments.
+
+	The security property is unchanged from the button, per card: same
+	authenticated session user, same owner-bound single-use ``consume``, same
+	``exec_user`` execution scope, same receipt chip. Approving in bulk runs N
+	independent confirmations; it does not create a path that skips any of them.
+	The model cannot reach this at all, since it arrives only through the human
+	session endpoint and never the plugin callback, and a typed approval racing a
+	click resolves to one winner inside ``consume``.
+
+	Running before the single-flight guard is safe even though the button carries a
+	client-side "wait for the current reply" check: the follow-up goes through
+	``enqueue_continuation``, which enqueues via admission and QUEUES behind a live
+	turn rather than racing it. A batch produces exactly ONE such turn, carrying
+	every receipt, so ten approvals do not become ten turns.
+
+	The numbers can move between the user's glance and their send: a card can
+	expire on its 15-minute TTL, a stopped run clears the tokens it parked (F6),
+	and the run:end resync can add one mid-stack. The ordering makes that
+	renumbering CONSISTENT rather than arbitrary, which is the most any ordinal
+	scheme can offer here. The residual failure is bounded and small: ``consume``
+	is owner-bound and single-use, so the worst case is confirming a different card
+	the same user owns and can see, never someone else's and never twice.
+
+	No user message is persisted, exactly as the buttons persist none. The
+	transcript still reads correctly because each confirmation writes its own
+	receipt chip.
+	"""
+	from jarvis.chat import approval_phrases
+
+	# Cheap reject first: most messages are not approvals, and this costs no I/O.
+	if not approval_phrases.looks_like_approval(message):
+		return None
+
+	parked = _ordered_parked_cards(user, conversation)
+	if not parked:
+		return None
+
+	picked = approval_phrases.parse_approval(message, len(parked))
+	if not picked:
+		return None
+
+	from jarvis.chat.actions_api import _confirm_core
+
+	single = len(picked) == 1
+	results, tokens, receipts = [], [], []
+	solo_envelope = None
+	for i in picked:
+		card = parked[i]
+		# batch=True for every card in a multi-card approval so the follow-up turn
+		# is composed once, below, instead of one per card.
+		res = _confirm_core(card["token"], conversation, batch=not single)
+		if not isinstance(res, dict):
+			res = {"ok": False, "error": {"type": "InternalError", "message": "confirmation failed"}}
+		if single:
+			solo_envelope = res
+		tokens.append(card["token"])
+		results.append(
+			{
+				"token": card["token"],
+				"position": i + 1,
+				"summary": card.get("summary") or "",
+				"ok": bool(res.get("ok")),
+				"error": res.get("error"),
+			}
+		)
+		if res.get("receipt_text"):
+			receipts.append(res["receipt_text"])
+
+	failed = [r for r in results if not r["ok"]]
+	# One continuation for the whole batch. The single-card path already queued its
+	# own inside _confirm_core, so only the batch path composes one here.
+	cont = None
+	if receipts:
+		from jarvis.chat.actions_api import enqueue_continuation as _enqueue_cont
+
+		try:
+			cont = _enqueue_cont(conversation, " ".join(receipts), failed=bool(failed))
+		except Exception:
+			frappe.log_error(
+				title="typed bulk confirmation continuation failed", message=frappe.get_traceback()
+			)
+
+	# The single-card envelope is the tool result itself, so the client keeps the
+	# shape it already handles. A batch reports per card instead: with three
+	# writes, "it worked" is not an answer when one of them did not.
+	if single:
+		# Pass the confirmation's own envelope straight through, so the queued
+		# chip details it already threaded on survive untouched.
+		out = dict(solo_envelope)
+	else:
+		out = {"ok": not failed}
+		if failed:
+			out["error"] = {
+				"type": "PartialConfirmation",
+				"message": (
+					f"{len(results) - len(failed)} of {len(results)} actions went through; "
+					f"{len(failed)} could not be completed."
+				),
+			}
+		if cont and cont.get("queued"):
+			out["queued"] = True
+			out["queued_position"] = cont.get("queued_position")
+			out["run_id"] = cont.get("run_id")
+			out["message_id"] = cont.get("message_id")
+	out["confirmed"] = True
+	out["conversation_id"] = conversation
+	out["tokens"] = tokens
+	out["results"] = results
+	return out
+
+
 @frappe.whitelist()
 def send_message(
 	conversation: str | None = None,
@@ -969,6 +1128,19 @@ def send_message(
 			raise
 		conversation = create_or_focus_empty()
 		conv_doc = _get_owned_conversation(conversation)
+
+	# A typed go-ahead on a parked confirmation card is the SAME act as clicking
+	# Confirm, so it runs the confirmation instead of becoming a chat turn. Placed
+	# here on purpose: ownership of the conversation is settled, but nothing has
+	# been reserved or persisted yet, so an approval never burns a turn credit and
+	# never leaves a user row behind. Returns None whenever anything is less than
+	# unambiguous, and the message then continues as an ordinary send.
+	# A background send is a non-interactive turn, so there is no human at a
+	# composer to be approving anything with it.
+	if not _delegated and not atts and not int(background or 0):
+		_typed = _typed_confirmation(user, conversation, message)
+		if _typed is not None:
+			return _typed
 
 	# Single-flight guard: reject a second concurrent turn on the same
 	# conversation (extra tab / double-send / a retry racing a live turn) -

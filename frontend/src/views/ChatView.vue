@@ -1862,7 +1862,7 @@
 					     carries its own server-minted one-time token. A single turn can
 					     park more than one, so we stack a card per queued token (#4). -->
 					<div
-						v-for="pa in visiblePendingActions"
+						v-for="(pa, pi) in visiblePendingActions"
 						:key="pa.token"
 						class="jv-action jv-pending"
 					>
@@ -1883,6 +1883,11 @@
 								<path d="M12 9v4M12 17h.01" />
 							</svg>
 							<span class="jv-action-title">Confirm before this runs</span>
+							<!-- The number is what a typed "confirm 1 and 3" selects by, so it
+							     only appears when there is actually a choice to make. -->
+							<span v-if="visiblePendingActions.length > 1" class="jv-pending-num">
+								{{ pi + 1 }} of {{ visiblePendingActions.length }}
+							</span>
 						</div>
 						<div class="jv-pending-body">
 							<div v-if="pendingSummaryOf(pa)" class="jv-pending-summary">
@@ -1944,6 +1949,14 @@
 								<span v-if="pa.busy">Confirming…</span
 								><span v-else>✓ Confirm</span>
 							</button>
+							<!-- Two equal ways to approve. Shown once per stack, on the last
+							     card, so a queue of five does not repeat it five times. -->
+							<span
+								v-if="pi === visiblePendingActions.length - 1"
+								class="jv-action-typehint"
+							>
+								{{ typedApprovalHint }}
+							</span>
 							<button
 								class="jv-action-discard"
 								:disabled="pa.busy"
@@ -6263,8 +6276,33 @@ const pendingActions = ref([]);
 // Only the cards belonging to the conversation on screen render (a parked write
 // from another chat must not show here). The queue is already pruned to the
 // current conversation on load, but filter defensively for the template v-for.
+// Sorted the SAME way the server orders the parked list (mint order: expires_at
+// is mint time plus a fixed TTL, with the token breaking a same-second tie).
+// Load-bearing once a typed "confirm 1 and 3" can select by the number printed on
+// each card: if the screen and the server disagree about which card is number 1,
+// the wrong write runs. The queue's own arrival order is close but not identical,
+// since a resync merges cards in whatever order the store returned them.
+// What the hint offers depends on how many cards are stacked: with one there
+// is nothing to select, with several the useful thing to teach is that both
+// all-at-once and pick-a-few work.
+const typedApprovalHint = computed(() =>
+	visiblePendingActions.value.length > 1
+		? 'or type "confirm all", or "confirm 1 and 3"'
+		: 'or type "go ahead"'
+);
 const visiblePendingActions = computed(() =>
-	pendingActions.value.filter((pa) => pa.conversation === currentId.value)
+	pendingActions.value
+		.filter((pa) => pa.conversation === currentId.value)
+		// Compared by code unit, NOT localeCompare: the server tiebreaks with
+		// Python's byte order, and localeCompare disagrees with it on mixed-case
+		// tokens. Cards minted in the same second would then be numbered one way
+		// on screen and another on the server, which is the wrong-write bug this
+		// ordering exists to prevent.
+		.sort(
+			(a, b) =>
+				(a.expires_at || 0) - (b.expires_at || 0) ||
+				(a.token < b.token ? -1 : a.token > b.token ? 1 : 0)
+		)
 );
 
 // A legacy container (persona v0.39, pre write-safety) may still emit a
@@ -6421,6 +6459,43 @@ async function confirmPending(pa) {
 	} finally {
 		const card = cardById();
 		if (card) card.busy = false;
+	}
+}
+// Resolution shared by the typed go-ahead and the Confirm button, so the two
+// ways of approving a card cannot drift apart in what the user then sees.
+// `r` is the envelope from the confirmation itself, already stripped of its card.
+async function onTypedConfirmResolved(r) {
+	if (r && r.ok === false) {
+		// A storage wobble means the write did NOT run, and the card has already
+		// been retired on screen, so say so plainly rather than leave them guessing.
+		if (confirmationStorageUnavailable(r)) {
+			notify(r.error.message, { type: "error" });
+			await resyncPendingConfirmations(currentId.value);
+			return;
+		}
+		if (r.error && r.error.type === "InvalidConfirmation") {
+			notify("That confirmation is no longer valid. Ask me to try the action again.", {
+				type: "error",
+			});
+			return;
+		}
+		// The token was spent and the write failed. A durable "failed" receipt chip
+		// is already in the transcript; reload so it is what the user sees.
+		await loadConversation(currentId.value);
+		store.loadConversations();
+		return;
+	}
+	await loadConversation(currentId.value);
+	store.loadConversations();
+	// The continuation turn queued behind other work. Same chip the button raises,
+	// so an approved action never vanishes into silence.
+	if (r && r.queued) {
+		queuedTurn.value = {
+			run_id: r.run_id,
+			message_id: r.message_id,
+			position: r.queued_position || null,
+		};
+		sending.value = true;
 	}
 }
 // Dismiss: consume the token server-side (closes the 15-min replay window and
@@ -7634,7 +7709,13 @@ async function send(textArg, resendAck) {
 		// so a rejected send keeps it armed for retry.)
 		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
 		const r = await api.sendMessage(sentFrom, text, undefined, attachments, sendCtx);
-		if (r && r.ok === false) {
+		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
+		// must not fall into the rejection branch below even when the confirmation
+		// itself failed. It is handled further down, on the accepted path, where it
+		// shares that path's one-shot context clear and voice release rather than
+		// duplicating them (the lifecycle tests anchor on the FIRST occurrence of
+		// those lines, and a second copy above the rejection block moves the anchor).
+		if (r && r.ok === false && !r.confirmed) {
 			// The server rejected the send (e.g. the single-flight guard:
 			// "a reply is already in progress", or the monthly usage cap).
 			// Nothing was persisted — recover it (below) so no work and no voice audio
@@ -7720,6 +7801,21 @@ async function send(textArg, resendAck) {
 		// chips say so rather than reading like leftover clutter next to an already-answered
 		// message, and so their Retry promises the current draft, not an edit of a sent message.
 		if (voiceStore) for (const _fid of _failedAtSend) voiceStore.markSentWithout(_fid);
+		// The server ran the parked confirmation instead of starting a turn. No run
+		// events are coming, so the spinner comes down here or it hangs forever, and
+		// nothing was persisted for the typed words (the button persists none either)
+		// so the optimistic bubble goes too: the receipt chip and the continuation
+		// reply are the record. Placed after the release above, which a confirmed
+		// message has legitimately earned.
+		if (r && r.confirmed) {
+			if (_currentScope() === _sentScope)
+				messages.value = messages.value.filter((x) => x.name !== tmpName);
+			sending.value = false;
+			waiting.value = false;
+			for (const t of r.tokens || []) removePending(t);
+			await onTypedConfirmResolved(r);
+			return;
+		}
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
@@ -12592,6 +12688,24 @@ onUnmounted(() => {
 	color: var(--cta-fg) !important;
 	border-color: var(--cta) !important;
 	filter: brightness(1.18);
+}
+/* The card's position in the parked stack. It is a selector, not decoration:
+   "confirm 2" means this one. */
+.jv-pending-num {
+	margin-left: auto;
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--amber);
+	white-space: nowrap;
+}
+/* The typed-approval hint. Quiet by design: the button is the primary path and
+   this is the shortcut, so it must not compete with either action beside it. */
+.jv-action-typehint {
+	font-size: 12px;
+	color: var(--text-3);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .jv-action-discard {
 	margin-left: auto;
