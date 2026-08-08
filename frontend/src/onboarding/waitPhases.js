@@ -40,6 +40,31 @@ export const PHASE_STATE = {
 };
 
 /**
+ * WHAT a connect-wait phase is waiting on, as opposed to `state`, which is how
+ * that wait is going. Only the connect wait carries a kind: it is the one screen
+ * whose headline is derived from the live phase (`setupHeadline`, jarvis#727),
+ * and a headline needs to know the subject, not the progress.
+ *
+ * `NONE` is a real member of the vocabulary, not an omission. Every phase this
+ * module refuses to name - a poll that never answered, `readiness_unconfirmed`,
+ * an unrecognised reason, and all three stopping verdicts - is explicitly NONE,
+ * so `setupHeadline` falls back to the generic headline instead of borrowing a
+ * neighbouring phase's words. Naming a subject we did not observe is the same
+ * false claim the rest of this module exists to prevent.
+ *
+ * `provisioningPhase` deliberately carries no kind: its screen's headline is a
+ * settled fact ("Payment confirmed"), never a phase, so there is nothing there
+ * to derive.
+ */
+export const PHASE_KIND = {
+	NONE: "",
+	// The customer's chosen AI connection is being wired into the container.
+	LLM_APPLY: "llm_apply",
+	// The serving container itself is still coming up.
+	CONTAINER: "container",
+};
+
+/**
  * The row to show while a wait is genuinely UNDER WAY but nothing has reported
  * back yet - the very first poll is still in flight, or (on the Connect step)
  * the apply operation is running and the readiness wait has not started.
@@ -57,11 +82,30 @@ export const PHASE_STATE = {
  * known - unlike "we asked and got nothing", which is what UNKNOWN means.
  *
  * @param {string} label - what is actually being done, in the caller's words.
+ * @param {string} [kind] - PHASE_KIND, when the caller can name the SUBJECT of
+ *   this wait from something it already established rather than guessed. The
+ *   connect wait passes LLM_APPLY because reaching it means a save for this
+ *   configuration was ACCEPTED and is now being applied - the AI connection is
+ *   demonstrably being wired in, which is exactly what the phase claims.
+ *
+ *   Stated that way on purpose: an earlier draft of this comment justified it by
+ *   "a save returned an apply-operation descriptor and we are polling that
+ *   operation", which is true of the durable-operation path and false of the
+ *   `mode:"legacy"` one, where admin's creds endpoint mints no operation at all
+ *   (OnboardingView.followLegacyReadiness). Both paths do establish the same
+ *   underlying fact - the configuration was accepted and is being applied - and
+ *   that fact, not the existence of a pollable operation, is what grounds the
+ *   phase. The row and the headline say the same thing on both paths, which is
+ *   the behaviour jarvis#722 shipped and jarvis#727 kept.
+ *
+ *   Defaults to NONE so a caller that cannot ground a subject gets no headline
+ *   derived from one.
  */
-export function inFlightPhase(label) {
+export function inFlightPhase(label, kind = PHASE_KIND.NONE) {
 	return {
 		observed: false,
 		state: PHASE_STATE.ACTIVE,
+		kind,
 		label,
 		detail: "",
 		stop: false,
@@ -137,6 +181,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 		return {
 			observed: false,
 			state: PHASE_STATE.UNKNOWN,
+			kind: PHASE_KIND.NONE,
 			label: "We couldn't reach your workspace to check",
 			detail: "We'll keep trying.",
 			stop: false,
@@ -148,6 +193,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 			return {
 				observed: true,
 				state: PHASE_STATE.ACTIVE,
+				kind: PHASE_KIND.LLM_APPLY,
 				label: "Applying your AI configuration",
 				detail: say,
 				stop: false,
@@ -156,6 +202,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 			return {
 				observed: true,
 				state: PHASE_STATE.ACTIVE,
+				kind: PHASE_KIND.CONTAINER,
 				label: "Your workspace is coming online",
 				detail: say,
 				stop: false,
@@ -164,6 +211,9 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 			return {
 				observed: true,
 				state: PHASE_STATE.UNKNOWN,
+				// The absence of a verdict names no subject: admin could not be
+				// asked, so nothing here knows WHAT is outstanding.
+				kind: PHASE_KIND.NONE,
 				label: "Nothing has confirmed your workspace yet",
 				detail: "We'll keep checking.",
 				stop: false,
@@ -172,6 +222,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 			return {
 				observed: true,
 				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
 				label: "This needs a person to check it",
 				// Admin's own reassurance, quoted. Never paraphrased, and never
 				// accompanied by an action.
@@ -190,6 +241,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 			return {
 				observed: true,
 				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
 				label: "Your subscription is paused",
 				detail: say,
 				stop: true,
@@ -200,6 +252,7 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 			return {
 				observed: true,
 				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
 				label: "Your account is connected to a different site",
 				detail: say,
 				stop: true,
@@ -208,14 +261,71 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 			};
 		default:
 			// A reason this build does not know about gets the neutral line. It
-			// must not be given a phase name invented here.
+			// must not be given a phase name invented here - and, for the same
+			// reason, no kind: a headline derived from a subject this build cannot
+			// identify would be pure invention.
 			return {
 				observed: true,
 				state: PHASE_STATE.ACTIVE,
+				kind: PHASE_KIND.NONE,
 				label: "Waiting for your workspace to come online",
 				detail: say,
 				stop: false,
 			};
+	}
+}
+
+/**
+ * The connect wait's HEADLINE, derived from the live phase (jarvis#727).
+ *
+ * The screen used to render a fixed "Setting up {agentName}" over a phase list
+ * that had already become real (jarvis#722), so the largest text on screen was
+ * the only part of it saying nothing. This maps the phase's SUBJECT - its
+ * `kind`, never its `state` and never its label text - onto a headline that
+ * describes what is actually being done.
+ *
+ * The honesty rule is the same one the rest of this module follows, applied to
+ * a bigger font: **a headline may only name a phase that was observed.** Every
+ * phase whose kind is NONE - a poll that never answered, an absent verdict, an
+ * unrecognised reason, a stopping verdict - falls back to the generic setup
+ * headline. "Giving {agentName} a brain" is reachable only from LLM_APPLY,
+ * which requires either a live apply operation we are polling or admin naming
+ * an apply as the outstanding work.
+ *
+ * `navigating` is the one branch that does not come from a phase, and it is the
+ * only honest source for "Opening your chat": readinessPhase has no DONE branch
+ * (jarvis#726 documents why - every reason it knows maps to ACTIVE or UNKNOWN),
+ * so a chat-opening phase can never be OBSERVED on this screen. What can be
+ * observed is that a ready verdict arrived and navigateToChat() ran; the router
+ * guard then re-checks readiness over the network while this screen is still
+ * painted. During that window "Opening your chat" is a statement about what we
+ * are doing, made from the verdict we just received - not a guess about a phase
+ * nobody reported. The DONE mapping is kept too, so the function stays total
+ * over the phase vocabulary for any caller whose phases can reach it.
+ *
+ * @param {{state?: string, kind?: string}} [phase]
+ * @param {string} [agentName] - the white-label brand name; blank falls back to
+ *   Jarvis, exactly as @/branding does.
+ * @param {{navigating?: boolean}} [opts]
+ * @returns {string} sentence case, per design.md.
+ */
+export function setupHeadline(phase, agentName, { navigating = false } = {}) {
+	const name = String(agentName || "").trim() || "Jarvis";
+	if (navigating || (phase && phase.state === PHASE_STATE.DONE)) return "Opening your chat";
+	switch ((phase && phase.kind) || PHASE_KIND.NONE) {
+		case PHASE_KIND.LLM_APPLY:
+			// The literal act of giving the assistant its model. This is the phase
+			// the whole connect step exists for, and the one a customer waits on
+			// longest.
+			return `Giving ${name} a brain`;
+		case PHASE_KIND.CONTAINER:
+			// The model is settled; what is outstanding is the container. Not
+			// "workspace": the customer does not have one to speak of yet.
+			return "Bringing your setup online";
+		default:
+			// Nothing was observed, or nothing this build can name. The generic
+			// headline is the honest one, and it is what this screen said before.
+			return `Setting up ${name}`;
 	}
 }
 
