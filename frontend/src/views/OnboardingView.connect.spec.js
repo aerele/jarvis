@@ -68,8 +68,6 @@ vi.mock("@/lib/errorReporter", () => ({ report: vi.fn() }));
 
 // Heavy / canvas children the connect step would otherwise mount.
 vi.mock("@/onboarding/SetupNeuralNet.vue", () => ({ default: { template: "<div/>" } }));
-// Canvas illustration: jsdom has no 2d context, and neither spec is about the art.
-vi.mock("@/onboarding/PaymentConfirmingArt.vue", () => ({ default: { template: "<div/>" } }));
 vi.mock("@/onboarding/TourIntro.vue", () => ({ default: { template: "<div/>" } }));
 
 // The editor is stubbed: it exposes exactly the seam the host reads (save/canStart/
@@ -777,6 +775,11 @@ describe("the payment-confirming wait", () => {
 		// Mid-reconcile: the round trip has not answered yet.
 		expect(w.vm.showConfirming).toBe(true);
 		expect(w.vm.state.step).toBe("pay");
+		// jarvis#728: the confirming screen is a single round trip, not a
+		// tens-of-seconds wait, so it gets the short-wait spinner, not the
+		// PaymentConfirmingArt canvas illustration (which no longer mounts here).
+		expect(w.find('[aria-label="Loading"]').exists()).toBe(true);
+		expect(w.find("canvas").exists()).toBe(false);
 
 		release({
 			status: 200,
