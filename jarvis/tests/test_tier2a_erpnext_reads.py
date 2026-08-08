@@ -313,8 +313,15 @@ class TestGetItemisedTaxBreakup(FrappeTestCase):
 	def test_returns_envelope(self):
 		# The wrapper calls frappe.get_doc to load the source; rather
 		# than seed a Sales Invoice (heavy + brittle across releases)
-		# we patch get_doc to return a sentinel and assert
-		# get_itemised_tax was called with it.
+		# we patch get_doc to return a sentinel and assert the loaded doc
+		# was handed to the compat shim.
+		#
+		# Patch the shim, NOT erpnext's get_itemised_tax: ERPNext 15 takes the
+		# taxes child table and 16 takes the document, so a mock standing in for
+		# the erpnext function pins one major's calling convention and passes on
+		# both. That is how the 'SalesInvoice' object is not iterable bug reached
+		# production. Which object each major receives is asserted for real in
+		# tests/test_compat_frappe_versions.py.
 		sentinel_doc = object()
 		with (
 			_all_exist(),
@@ -324,7 +331,7 @@ class TestGetItemisedTaxBreakup(FrappeTestCase):
 				return_value=sentinel_doc,
 			),
 			patch(
-				"erpnext.controllers.taxes_and_totals.get_itemised_tax",
+				"jarvis.compat.itemised_tax",
 				return_value={"_T-Item": {"VAT - X": 18.0}},
 			) as git,
 		):

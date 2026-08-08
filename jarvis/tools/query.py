@@ -74,6 +74,7 @@ from pypika import Order
 from pypika import functions as fn
 from pypika.terms import Criterion
 
+from jarvis import compat
 from jarvis.exceptions import (
 	InvalidArgumentError,
 	PermissionDeniedError,
@@ -726,7 +727,7 @@ def _weave_record_gate(q, engine, alias: str, resolved_dt: str, table, node_spec
 			q = q.where(cond)
 		return q
 	try:
-		cond = engine.get_permission_conditions(resolved_dt, table)
+		cond = compat.permission_conditions(engine, resolved_dt, table)
 	except frappe.PermissionError:
 		raise PermissionDeniedError(f"no read permission on DocType {resolved_dt!r}")
 	if cond is not None:
@@ -892,7 +893,7 @@ def _child_record_scope(child_table, child_dt: str, parent_dt: str):
 		parent_table = frappe.qb.DocType(parent_dt)
 		sub_q = frappe.qb.from_(parent_table).select(parent_table.name)
 		engine = _make_permission_engine(sub_q, [parent_table], parent_dt)
-		cond = engine.get_permission_conditions(parent_dt, parent_table)
+		cond = compat.permission_conditions(engine, parent_dt, parent_table)
 		if cond is not None:
 			sub_q = sub_q.where(cond)
 			scoped = scoped & child_table.parent.isin(sub_q)

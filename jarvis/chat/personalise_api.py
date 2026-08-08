@@ -43,6 +43,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
+from jarvis import compat
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
@@ -524,9 +525,10 @@ def _extract_attachment_text(file_name: str | None) -> str:
 		ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
 		if ext in _ATTACHMENT_BINARY_EXT:
 			return ""
-		raw = fdoc.get_content(encodings=[])
-		if isinstance(raw, str):
-			raw = raw.encode("utf-8", "replace")
+		# Raw bytes, on either Frappe major: get_content(encodings=[]) is a
+		# TypeError on Frappe 15, and the except below swallowed it, so every
+		# note attachment silently extracted to empty text.
+		raw = compat.file_bytes(fdoc)
 		if len(raw) > _ATTACHMENT_EXTRACT_MAX_BYTES:
 			return ""
 		# Attachment bytes are just as untrusted as fetched web content, so

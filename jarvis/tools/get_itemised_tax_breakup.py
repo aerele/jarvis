@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis import compat
 from jarvis.exceptions import (
 	InvalidArgumentError,
 	PermissionDeniedError,
@@ -48,10 +49,11 @@ def get_itemised_tax_breakup(doctype: str, name: str) -> dict:
 	if not frappe.has_permission(doctype, "read", doc=name):
 		raise PermissionDeniedError(f"no read permission on {doctype} {name}")
 
-	from erpnext.controllers.taxes_and_totals import get_itemised_tax
-
 	doc = frappe.get_doc(doctype, name)
-	itemised_tax = get_itemised_tax(doc, with_tax_account=True)
+	# ERPNext 15 wants the taxes child table here, ERPNext 16 wants the parent
+	# doc. Passing `doc` unconditionally was a TypeError ('SalesInvoice' object
+	# is not iterable) on every ERPNext 15 call.
+	itemised_tax = compat.itemised_tax(doc, with_tax_account=True)
 	return {
 		"doctype": doctype,
 		"name": name,
