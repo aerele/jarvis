@@ -1,85 +1,155 @@
-# Code review — 2026-08-08-mandate-authorization-proof — round 3
+# Code review — 2026-08-08-checkout-due-today-row — round 6
 Reviewer: Opus (strict-reviewer)
 Date: 2026-08-08
-Scope: two repos, uncommitted, re-reviewed cold.
-- `apps/jarvis_admin_v2` @ `fix/terminal-cancel-autorenew` — `billing/checkout/{billing,confirm,endpoints,shell,workspace,opener.js}`,
-  `billing/providers/razorpay.py`, `billing/{intent_ledger,intent_resolution,signup,webhook,expiry}.py`,
-  `api/{_billing_actions,account,tenant}.py`, `patches.txt`, `patches/v1_28_clear_autorenew_on_expired_subs.py`,
-  changed/new test modules.
-- `apps/jarvis` @ `fix/billing-renew-recovery` — `frontend/src/pages/billing/BillingPage.vue`,
-  `frontend/src/onboarding/paymentCodes.js`, `BillingPage.spec.js`.
-Plans: `2026-08-08-mandate-authorization-proof` (STATUS: APPROVED), on top of
-`2026-08-08-reactivation-arms-autopay` and `2026-08-07-expired-plan-reactivation`. All three APPROVED — no unplanned work found.
+Scope: `jarvis_admin_v2/billing/checkout/endpoints.py`, `jarvis_admin_v2/billing/checkout/shell.py`,
+`jarvis_admin_v2/tests/billing/test_checkout_due_today_row.py` (untracked),
+`jarvis_admin_v2/tests/frontend/test_due_today_row.mjs` (untracked),
+`jarvis_admin_v2/tests/frontend/test_opener.mjs`, `.github/workflows/ci.yml`.
+`jarvis_admin_v2/www/dashboard.html` excluded (user's separate work, stays uncommitted).
+Plan: `apps/jarvis/.claude/workflow/plans/2026-08-08-checkout-due-today-row.md` (STATUS: APPROVED).
 
-Every round-2 finding was re-verified INDEPENDENTLY by execution on `test_site`, not by reading the fix.
-Both new findings below were REPRODUCED. Nothing was fixed by me.
+## Verification of the "nothing executable changed since r5" claim
 
-## Round-2 fix verification (all 12 checked independently)
+Verified independently, not accepted:
 
-| R2 | Claim | Verified |
-|---|---|---|
-| 1 BLOCKER | `_razorpay_return_signature_ok` runs on every request | **YES — reproduced.** Genuine signed return recorded `pay_GENUINE`; an unsigned replay carrying `pay_ATTACKER` answered `SESSION_INVALID` and the recorded id did not move. The check sits at `confirm.py:1072-1080`, above `already = ...` at `:1082` |
-| 2 BLOCKER | `from_grid` captured before the mandate write | **YES — reproduced.** `_billing_actions.py:246` reads `can_reactivate(sub)` before the `set_value` at `:262`. Drove a Past-Due/0-days sub with a stale `scheduled_plan`: paid for the ₹500 plan, landed on the ₹500 plan, `scheduled_plan` cleared |
-| 2b | webhook backstop inherits the capture | **YES — checked, not assumed.** `webhook.py:268` gates on `can_reactivate` before calling, and `_apply_reactivation_mandate` re-captures at its own line 246 before any write |
-| 3 MAJOR | cycle admitted only when `trial_days == 0` | **YES** (`signup.py:2405-2411`). Trial+fee still proves (set is `(fee,)`); trial+no-fee yields `()` and the provider **fails closed** at `razorpay.py:314-322` (`if not expected: return None`) — genuinely closed, not skipped |
-| 4 MAJOR | commit before `_lock_chain` on both sites | **YES** — `endpoints.py:546-553` and `billing.py:243-246` |
-| 5 MAJOR | fallback prices off `target_plan` | **PARTIAL** — `_billing_actions.py:283-287` now uses `target_plan or sub.plan`, so the wrong-plan case is gone. The webhook still passes no `paid_amount_inr` though it holds the payment entity → finding 3 |
-| 6 MAJOR | `/return` requires capture, rejects refunds | **NO — the predicate keys on the wrong field → finding 2 (reproduced)** |
-| 7 MAJOR | edge case 19 covered | **YES — I executed it.** Drove a SIGNUP mandate through `_process_return` with the REAL `_confirm_payment`: status `Active`, period end exactly +14d (trial window), nominal token recorded `0.0`, auth id on its own column |
-| 8 MINOR | `_expire` clears autorenew + v1_28 | **YES — reproduced.** Expired/autorenew=0 → `has_live_mandate` False → `arms_autopay` True. No code keys off Expired-with-autorenew (grepped) |
-| 9 MINOR | consumed stamp reset on re-issue | **YES** (`confirm.py:911-917`). Tested the R2-9 × R2-1 interaction the invoker flagged: a signed replay after a re-open re-enters the full apply path and converges idempotently (money `AUTHORIZED`, apply `APPLIED`, unchanged) — no double advance |
-| 10 MINOR | dead URL rewrite + its spec deleted | **YES** — no `replaceState`/`searchParams` rewrite remains; healer still gated on `SETTLING_OUTCOMES = {done, pending}` (`BillingPage.vue:457-467`) |
-| 11 MINOR | `reconcile_signup` gets `_authorization_subject` | **YES** (`signup.py:3192`) |
-| 12 MINOR | DECLINED→pending when money committed | **YES** (`confirm.py:1163-1170` + `_money_is_committed`) |
+| File | mtime | vs r5 verdict files (23:18 / 23:19) | Conclusion |
+|---|---|---|---|
+| `shell.py` | 22:43:26 | before | untouched since r5 |
+| `test_checkout_due_today_row.py` | 22:49:35 | before | untouched since r5 |
+| `test_opener.mjs` | 22:49:35 | before | untouched since r5 |
+| `endpoints.py` | 23:21:13 | after | changed |
+| `test_due_today_row.mjs` | 23:20:33 | after | changed |
+| `ci.yml` | 23:20:51 | after | changed |
 
-Suite re-run by me: `test_checkout_confirm` 66 tests OK. The two findings below are not caught by it —
-they are exactly the shapes it does not construct.
+Corroborated by line-number forensics rather than mtime alone. r5 cited `shell.py:243-244` and
+`shell.py:823`; both land on exactly those lines today. r5 cited twelve line numbers inside
+`test_checkout_due_today_row.py` (55, 63, 71, 79, 86, 96, 103, 114, 121, 134, 137, 146); all twelve
+still land on the cited construct. In `endpoints.py`, every executable site r5 cited BEFORE the new
+block is unshifted (`:388`, `:394-396`, `:448`, `:453`, `:461`) and every site AFTER it has moved up
+by exactly 11 lines (`:595` → `:584` `**trial_fields`; rule `:522-526` → `:511-515`) — the precise
+delta of a 32-line comment becoming 21 lines. The change to `endpoints.py` is comment-only;
+the rule, the projection key, the flag read, the row id and the render seam are byte-identical to
+what r5 reviewed. Claim CONFIRMED.
 
 ## Findings
 
 | # | Severity | Location | What breaks | Required fix |
 |---|----------|----------|-------------|--------------|
-| 1 | BLOCKER | `billing/checkout/billing.py:364` (`prove_unrecorded_mandate_money`, `"expected_amounts_minor": (int(intent.amount_minor or 0),)`) | **T3's double-charge door does not shut for a signup-with-a-fee mandate — an acceptance criterion of the plan.** The shim freezes ONLY `amount_minor` (the plan price), but a fee-bearing signup's authorization invoice is the FEE (`expected_auth_minor`). The provider's `amount not in expected` then refuses, the proof answers `None`, the money axis stays `UNKNOWN`, and both guards that depend on it (`handle_open`'s "never re-open a paid attempt" and `ledger.begin`'s committed-money refusal) read an unpaid attempt — so Pay is offered again and a second click mints a second mandate and a second fee charge. **Reproduced on `test_site`:** gateway holding a paid ₹500 fee invoice (`pay_FEE`, captured) → `prove_unrecorded_mandate_money` returned `False`, `money_state` stayed `UNKNOWN`. **Control run in the same script**: an invoice equal to `amount_minor` → `True`, so this is the field, not the fixture. **Reachable on current config** — the live control plane's `Starter` plan is `signup_fee_inr = 2.0, trial_days = 1`, precisely this shape. The plan's own table promises "SIGNUP, `signup_fee_inr > 0` → newly provable", and T3's criterion is "Re-opening the pay page after a lost confirm shows the settled result and no Pay affordance". Neither holds. Note the codebase now carries THREE different expectation sets for the same question — `_authorization_subject` (fee, +cycle when no trial), this shim (`amount_minor` only), and `_amount_is_shape_appropriate` (both + nominal). | Build the shim's expectation set the same way `signup._expected_authorization_amounts` does — admit `expected_auth_minor` as well as `amount_minor` (dropping zeros), so the fee-bearing shape is provable. Better: extract ONE helper both callers use, so the three sets cannot drift again. Add a `prove_unrecorded_mandate_money` test for a fee-bearing signup intent. |
-| 2 | MAJOR | `billing/checkout/confirm.py:652-654` (`if refunded > 0 and amount == int(intent.amount_minor or 0)`) | **The refund guard keys on the wrong field, so refunded money still buys a period.** The carve-out is meant to separate "the nominal validation token, refunded by design" from "real money that was given back", but it tests equality against `intent.amount_minor` — and for every signup-with-a-fee shape the authorization amount is `expected_auth_minor`, not `amount_minor`. `_amount_is_shape_appropriate` admits it, so the refund is invisible. **Reproduced on `test_site`:** intent `amount_minor=300000 / expected_auth_minor=50000`, payment `captured, amount=50000, amount_refunded=50000` (fully refunded) → `/return` answered **PAYMENT_CONFIRMED**, `money_state=AUTHORIZED`, `apply_state=APPLIED`, `provider_payment_id=pay_FEE_REFUNDED`. The customer is fully activated on money they got back. The same holds for fee+no-trial, where the authorization is `fee+price` and `amount_minor` is `price`. The invoice proof at `razorpay.py:337-338` rejects **any** refund — so the two authorities on the same question still disagree, which is the exact asymmetry R2-6 was raised for. `TestReturnMoneyDiscipline` misses it because its fixture leaves `expected_auth_minor` unset, so its refund case is the one shape the predicate does catch. | Key the carve-out on what it actually means: `if refunded > 0 and amount > ledger.nominal_auth_minor(intent.get("provider")): return _declined()`. That keeps the nominal token refundable and disqualifies every real-money shape. Add a refund test with `expected_auth_minor != amount_minor`. |
-| 3 | MINOR | `billing/webhook.py:286-288` | R2-5 residual. The backstop holds the payment entity (it reads `...payment.entity.id` at `:282`) but passes no `paid_amount_inr`, so `_apply_reactivation_mandate` falls back to `target_plan`'s CURRENT list price. The serious half (recording a different plan's price) is fixed; what remains is a price edited between checkout and webhook being recorded as what the customer paid. | Pass `paid_amount_inr` from the payment entity's `amount`, or `intent.amount_minor / 100`. |
-| 4 | MINOR | `billing/signup.py:2409` (`frappe.db.get_value(PLAN_DT, sub.plan, "trial_days")`) | The expectation set is derived from the plan row's LIVE `trial_days`, although the intent froze `trial_days` at claim time (`ClaimContext(trial_days=...)`). An operator editing the plan between checkout and reconcile changes which amounts count as the authorization — editing it to 0 admits a post-trial CYCLE charge as the authorization, which is the very hole R2-3 closed. Same "read live where a frozen value exists" class as R2-5. | Read `intent.trial_days`, consistent with every other frozen term. |
+| 1 | MINOR | `.github/workflows/ci.yml:463-466` (the "Explicit glob, not the directory" paragraph) | The corrected diagnosis is **still wrong**, and this is the second consecutive round it has shipped wrong. The comment says the files "are named test_*.mjs, which matches none of Node's default discovery patterns, **so** `node --test <dir>` runs the directory AS a script", and adds "(Node is fine - a *.test.mjs in the same directory IS discovered.)". Both claims are false on Node 24.12.0, the version this job pins (`setup-node node-version: "24"`). Measured: a directory containing only `thing.test.mjs` → `Error: Cannot find module …/b`, exit 1. Containing only `thing.test.js` → same. Containing `test/plain.mjs` → same. Same result with an absolute path, a `./` path and a trailing slash. Discovery happens only with **no positional argument** (`cd b && node --test` → `pass 1`) or with a glob (`node --test 'b/*.mjs'` → `pass 1`). The filenames are irrelevant to the failure; a positional directory is never searched, it is loaded as a module. Failure scenario: a maintainer trusts the parenthetical, renames the harnesses to `due_today_row.test.mjs`, reverts to `node --test <dir>`, and gets a red build with a MODULE_NOT_FOUND stack that says nothing about test discovery — the natural next move being to weaken or delete the step, which is the only gate standing between a shell regression and a hidden payment disclosure. | Replace the causal claim and the parenthetical with the measured rule: on Node 24 a positional **directory** argument is never searched for test files — it is resolved as a module and fails with `Cannot find module`, whatever the files inside are named. A quoted glob (or no positional argument) is what triggers discovery. Keep the `ls` guard note, which is correct. |
+| 2 | MINOR | `jarvis_admin_v2/billing/checkout/endpoints.py:501-503` | The comment overstates `_due_today_minor` in the direction of inviting deletion of a load-bearing conjunct. It asserts "for ANY order `_due_today_minor` returns `amount_minor` verbatim, so an amounts-differ test is always true". False for `amount_minor <= 0`: `endpoints.py:394-396` replaces the figure with the provider's nominal hold (verified live this round — a zero-amount signup order projects `plan ₹0.00 / due ₹5.00 / show_due_today true`). Secondarily the sentence inverts its own terms: the *amounts-differ* test (`due != amount`) is always **false** for orders; what is always true is the equality. Failure scenario: a maintainer reads "for ANY order … verbatim", concludes the third conjunct `due_today_minor == int(intent.amount_minor or 0)` can never be false on the SIGNUP-order path, and deletes it as dead code; the row then hides on a zero-amount signup order whose real charge is a ₹5 hold, leaving `₹0.00` on the plan row and `Pay ₹5.00` on the button with nothing labelling the gap. Contained to a red suite rather than a shipped defect — `test_zero_amount_signup_order_shows_the_row` fails — hence MINOR, not MAJOR. | Qualify it: "for an order with a positive amount, `_due_today_minor` returns `amount_minor` verbatim, so the equality is always true and the rule degenerates to 'hide on every order'; the zero/negative case falls to the nominal hold, which is the only thing this conjunct decides (EC10)." |
+
+No BLOCKER. No MAJOR. The four r5 findings are all resolved (see below).
+
+## r5 findings — resolution verified
+
+| r5 # | Sev | Status |
+|---|---|---|
+| 1 | MAJOR | RESOLVED. `npx prettier@2.7.1 --check 'jarvis_admin_v2/tests/frontend/*.mjs'` → "All matched files use Prettier code style!", run from the repo root so it resolves `.editorconfig`/config exactly as the pre-commit hook does. `.mjs` is not in `.editorconfig`'s tab-indent glob list, so prettier's 2-space output is stable. |
+| 2 | MINOR | RESOLVED and the guard is load-bearing. Measured: `bash -e` script file, `ls <no-match> > /dev/null` → the script exits **1** and the following line never runs ("REACHED SECOND LINE" not printed). Against the real glob the step runs 23 tests and exits 0. Without the guard, `node --test '<no-match>'` prints `tests 0` and exits 0. GitHub Actions' default shell for `run:` on Linux is `bash -e {0}` — a script file, which is what I reproduced. |
+| 3 | MINOR | NOT RESOLVED — see finding 1. The comment was rewritten to a different wrong diagnosis. |
+| 4 | MINOR | RESOLVED. 32 comment lines → 21. The two paragraphs r5 objected to are gone or folded: the dropped edge-case paragraph (a conjunct that no longer exists) is deleted outright, and the `ClaimContext` point survives as one clause. Nothing load-bearing was lost — "why purpose, not shape", "why not the arithmetic", "RENEW/DUNNING excluded", "snapshot not the Plan doctype" and "unrecognised purpose shows the row" all remain. The `ClaimContext.purpose` claim is accurate: `intent_ledger.py:97 PURPOSE_SIGNUP = "SIGNUP"`, `intent_ledger.py:188 purpose: str = PURPOSE_SIGNUP` inside `class ClaimContext` (`:179`). |
+
+## Plan conformance
+
+The rule is the plan's amended (post-r2) allowlist:
+
+```python
+show_due_today = not (
+    purpose == ledger.PURPOSE_SIGNUP
+    and not is_autopay
+    and due_today_minor == int(intent.amount_minor or 0)
+)
+```
+
+`endpoints.py` adds only the rule and one projection key; `shell.py` adds the flag read, the row
+`id` and the render seam; `test_opener.mjs` is a one-line doc correction; `ci.yml` adds the step r4
+demanded (test infrastructure serving T3's acceptance criterion, not scope creep). Single projection
+path confirmed: `_trial_summary_fields` has exactly one caller (`endpoints.py:572`) and
+`_display_projection` exactly one (`endpoints.py:674`, `handle_session`), so there is no second
+render path that could disagree. `id="due-today-row"` occurs once in `_SHELL_HTML` and once in the
+bootstrap. `www/dashboard.html` is untouched by this change set and must not be staged.
 
 ## Edge-case verification
 
+Every row below re-derived this round from live server output on `test_site` plus execution of the
+real shipped bootstrap — not carried over from r5's table.
+
 | Plan edge case | Handling site | Test | Verified |
 |---|---|---|---|
-| 1 no-add-on mandate unprovable | `razorpay.py:296` (`if not invoices`) | `test_a_mandate_that_charged_nothing_upfront_stays_unproven` | YES |
-| 2 ₹5 validation never the authorization | invoice-driven lookup | same suite | YES |
-| 3 later CYCLE never credited | `razorpay_client.py:264` sort + `razorpay.py:297`; `signup.py:2405` trial gate | `TestATrialSignupCycleIsNotAnAuthorization` | YES — R2-3 closed; empty set fails closed at `razorpay.py:314` |
-| 4 partial payment | `razorpay.py:302` | `test_a_part_paid_invoice_is_not_proof` | YES |
-| 5 gateway down → PENDING | `confirm.py:610-615` | `test_an_unreadable_gateway_is_a_pending_not_a_failure` | YES |
-| 6 healer races confirm + webhook | `_billing_actions.py:398-404` `for_update` | `TestMandateUpgradeIdempotency` | YES |
-| 7 double-submit at the pay page | `endpoints.py:546`; `billing.py:243` | `TestSecondAttemptAfterALostConfirm` | **NO for signup-with-fee — finding 1** (reproduced); YES for the equal-amount shape (control run) |
-| 8 amount agreeing with neither | `razorpay.py:323`; `confirm.py:657` | amount-mismatch tests | YES for the proof; `/return` still admits a REFUNDED in-shape amount — finding 2 |
-| 9 auth boundary unchanged | `account.py:1093` rate limit | endpoint tests | YES |
-| 10 proven AFTER already restored | `_billing_actions.py:250-256` adoption short-circuit | `test_the_same_mandate_applied_twice_does_not_extend_the_period` | YES — and re-confirmed via the R2-9 × R2-1 replay probe |
-| 11 Cashfree untouched | `confirm.py:1172` default | `test_cashfree_still_mints_once_...` | YES |
-| 12 currency | `razorpay.py:306`, `:341`; `confirm.py:655` | `test_a_different_currency_is_not_proof` | YES |
-| 13 exactly one confirm path | `opener.js`; `endpoints.py:489-514` | `test_opener.mjs` (14) | YES (code + node suite); browser half NOT RUN |
-| 14 forged / replayed return POST | `confirm.py:1072-1080` (now unconditional) | `TestReplayCannotRewriteTheRecordedPayment` | **YES — reproduced by me** |
-| 15 return for a superseded attempt | `confirm.py:1098-1110` | `TestConfirmRaceWindows` | YES |
-| 16 tab closed at the bank; layers as layers | T1 proof, T3 door, T7 sweep | server-level probes | PARTIAL — T3 layer broken for the fee shape (finding 1); sweep→activation NOT RUN live |
-| 17 sweep bounds | `billing.py:776-802` | 4 tests in `TestUnconfirmedMandateSweep` | YES |
-| 18 sweep races the customer | adopted-mandate key | `test_a_mandate_already_adopted_...` | YES |
-| 19 signup autopay not collateral damage | `confirm.py:1140-1170` | `test_a_signup_mandate_confirms_through_the_return` | **YES — I executed it with the REAL apply seam**: Active, +14d trial window, `0.0` recorded for the nominal token |
+| EC1 one-time order, due == amount → HIDE | `endpoints.py:511-515` | `test_checkout_due_today_row.py:55`; harness `test_due_today_row.mjs:115` | YES — live projection `plan ₹100.00 / due ₹100.00 / show false / "One-time payment…" / Pay ₹100.00`; real bootstrap sets `rowHidden=true` |
+| EC2 mandate UPGRADE, equal amounts → SHOW | `endpoints.py:512` (purpose conjunct) | `…py:63`; `.mjs:120` | YES — `₹1,234.00`, `trial_note ""`, `show true`, `rowHidden=false`, CTA `Pay ₹1,234.00 and set up auto-pay` |
+| EC3 trial + fee == price → SHOW | `endpoints.py:513` (`not is_autopay`) | `…py:71` | YES — `show true` beside "7-day free trial. Then ₹3,500.00 every month, starting 15 Aug 2026." |
+| EC4 autopay, no trial/fee, equal → SHOW | `endpoints.py:513` | `…py:79` | YES — `show true`, "Billed ₹100.00 every month." |
+| EC5 due != amount (trial/fee/hold) → SHOW | `endpoints.py:514` | `…py:86`, `…py:114` | YES — fee-less trial projects `plan ₹3,500.00` vs `due ₹5.00`, CTA `Set up auto-pay, ₹5.00 refundable today` |
+| EC6 flag absent → SHOW (fail-safe) | `shell.py:243-244` (`=== false`, not falsy) | `…py:146` (source pin) + `.mjs:134,139` | YES — all 9 injections (absent, `null`, `0`, `""`, `"false"`, `"0"`, `true`, `[]`, `{}`) leave `hidden=false` when driven through the real bootstrap |
+| EC7 ORDER-shaped UPGRADE → SHOW | `endpoints.py:512` | `…py:96` | YES — `show true`, `₹1,234.00`, and this branch emits the positive "One-time payment" note, so the row is the only label on the prorated figure |
+| EC8 every `BILLING_FLOWS` purpose, both shapes → SHOW | `endpoints.py:512` | `…py:103` (10 subtests) | YES — all 10 combinations projected live, `show true` in every one |
+| EC9 unrecognised purpose → SHOW | `endpoints.py:512` | `…py:121` | YES at unit level. Not constructible in a browser: `Jarvis Payment Intent.purpose` is a Select limited to the six known flows — an additional defense, not a gap |
+| EC10 (r3) zero-amount signup order → SHOW | `endpoints.py:514` + nominal-hold fallback `endpoints.py:394-396` | `…py:114` | YES — `plan ₹0.00 / due ₹5.00 / show true`. This is the sole behaviour the amount conjunct decides (and the subject of finding 2) |
+| EC11 (r4, conjunct dropped) order signup with `trial_days` | `endpoints.py:461` gates the trial sentence on `is_autopay and trial_days > 0` | live projection | YES — projects `show false` with `trial_note` = "One-time payment. This plan does not auto-renew."; the card promises no trial, so the row has nothing to qualify |
 
-## Things that held up
+## Mutation evidence — reproduced independently, without touching the repo
 
-- R2-1's repair is the right shape. Moving the signature above the `already` branch makes authentication
-  unconditional for the provider whose branch reads the body, and the Cashfree branch keeps its
-  refetch-by-frozen-id posture. Reproduced as sound.
-- R2-2's capture-before-write is correct at BOTH sites, and I confirmed the webhook backstop inherits it
-  rather than assuming it. The Past-Due/0-days cohort now lands on the plan it paid for.
-- The provider proof fails CLOSED on an absent expectation set and refuses ANY refund. That is the
-  standard the `/return` path should have been held to (finding 2).
-- R2-8's `_expire` + v1_28 is narrow, idempotent, reports its rowcount before the commit, and nothing
-  in the tree keys off Expired-with-autorenew.
-- The new `BILLING_COPY_OVERRIDES` is scoped to one code on one surface and merges over the base, so it
-  cannot mask another code's copy or actions; `CONTINUE` now has a real destination.
+Server rule, derived from the live projection matrix rather than by editing the tree (each conjunct
+has a shape whose answer flips when it is removed, and a named test asserting that shape):
 
-VERDICT: RED
+| Conjunct dropped | Shape that flips | Test that goes red |
+|---|---|---|
+| `purpose == PURPOSE_SIGNUP` | EC7 order UPGRADE (`due == amount`, not autopay) → would hide | `test_order_shaped_upgrade_shows_the_row`, plus 5 of the 10 EC8 subtests |
+| `not is_autopay` | EC3/EC4 mandate SIGNUP (`due == amount`) → would hide | `test_autopay_without_trial_or_fee_shows_the_row`, `test_trial_with_a_signup_fee_equal_to_the_price_shows_the_row` |
+| `due == amount` | EC10 zero-amount signup order → would hide | `test_zero_amount_signup_order_shows_the_row` |
+| whole rule inverted | EC1 → would show | `test_one_time_order_hides_the_row` |
+
+Shell: the repo harness was copied to a scratch path and pointed at **mutated copies** of `shell.py`
+(the repo file was never modified — final `git status` and `git diff --stat` are byte-identical to
+the invocation snapshot):
+
+| Mutation of the bootstrap | Repo harness result |
+|---|---|
+| delete the `dueRow.hidden` line | 7 pass / **2 fail** |
+| `=== true` (inverted) | 5 pass / **4 fail** |
+| `dueRow.hidden = true` (always hide) | 2 pass / **7 fail** |
+| `!s.show_due_today` (falsy instead of `=== false`) | 5 pass / **4 fail** |
+| target `$("due-today")` instead of the row | 0 pass / **9 fail** |
+| unmutated control | **9 pass / 0 fail** |
+
+This reproduces r5's table exactly and independently confirms the central claim: the seam plus the
+Node harness distinguish "obeys the flag" from "ignores it", which no source-grep test can.
+Removing `id="due-today-row"` from `_SHELL_HTML` is invisible to the harness (its stub
+`getElementById` manufactures any id) and is caught instead by
+`test_checkout_due_today_row.py:134`. Neither layer alone is sufficient; together they are.
+
+## Attack pass
+
+| Attack | Outcome |
+|---|---|
+| Hiding removes a figure that differs from the plan row | STRUCTURALLY IMPOSSIBLE — the hide fires only when the two minors are equal, and both strings come from the same `_format_amount` with the same `symbol`/`currency` (`endpoints.py:571` and `:453`). Equal minors ⇒ byte-identical strings. Hiding can never drop a different number. |
+| Type confusion (`amount_minor` as `"10000"`, float, `None`) desynchronises the rule from the display | DEFENDED — `_format_amount` itself does `int(amount_minor or 0)` (`endpoints.py:296`), and the rule does `int(intent.amount_minor or 0)` (`:514`). Both sides coerce identically; they cannot disagree for any input. |
+| An order-shaped signup carrying `signup_fee_minor` hides a row that was disclosing the fee | NOT ATTRIBUTABLE AND HARMLESS — `_due_today_minor`'s non-autopay branch ignores `signup_fee_minor` (pre-existing, `endpoints.py:387-388`), so the row would have displayed the *same* string as the plan row anyway. Hiding removes no information. |
+| Second projection path renders the summary without the flag | DEFENDED — one caller each for `_trial_summary_fields` (`:572`) and `_display_projection` (`:674`); `/start` serves only `return_url`, never a summary. Grep-verified across the whole app. |
+| `hidden` defeated by `.row { display: flex }` | DEFENDED — `shell.py:823` `[hidden] { display: none !important; }`. |
+| Sticky hide across re-renders (row hidden once, never restored) | DEFENDED — `shell.py:244` is an unconditional assignment on every `renderSummary`, not a one-way hide. |
+| Row visible for a frame before being hidden (flash of a redundant figure) | DEFENDED — `hidden` is set at `:244`, `show("view-summary")` at `:256`; the view is revealed only after the decision is applied. |
+| Client re-derives the decision from the two amounts (the r1 defect) | DEFENDED — `shell.py:243-244` reads the flag only; pinned by `test_checkout_due_today_row.py:137` and by the harness. |
+| `purpose` case/whitespace drift (`" signup"`, `"signup"`) — not normalised, unlike `shape` at `:448` | SAFE BY DIRECTION — any mismatch fails the equality and SHOWS the row. Only exactly `"SIGNUP"` can hide. |
+| `window.__jarvisRenderSummary` shipped on a payment page | ACCEPTED, NO FINDING — reachable only from same-origin script (post-XSS, where `location = evil` is already available). Every path it drives is inert: `text()` uses `textContent` (`shell.py:53`) and `rememberReturn` → `safeReturn` (`shell.py:87-99`) enforces an http(s) scheme, rejects control characters and rejects any authority containing `@`. It buys real coverage — removing it turns 9 tests red. |
+| `ls` guard passes while one of the two harnesses has been deleted or renamed | ACCEPTED, NO FINDING — the guard closes the empty-glob hole r5 raised; partial deletion is a deliberate act visible in the diff and is out of the guard's remit. |
+| Concurrency / dependency failure | N/A as the plan states — pure computation over an already-read immutable snapshot; no write, no network, no cache. Re-confirmed by reading the function. |
+
+## Test / lint status reproduced independently
+
+- `bench --site test_site run-tests --module …test_checkout_due_today_row` → **12/12 OK**
+- `…test_checkout_shell` → **35/35 OK**; `…test_checkout_transport` → **78/78 OK**
+- `node --test 'jarvis_admin_v2/tests/frontend/*.mjs'` (the exact CI command, from the repo root) → **23/23 pass**, exit 0
+- `ruff 0.14.10` (the pinned version, from the pre-commit cache) — `check` all passed; `check --select=I` all passed; `format --check` 3 files already formatted
+- `prettier 2.7.1 --check` on both `.mjs` → clean
+- `eslint 8.44.0` with the repo `.eslintrc` on both `.mjs` → exit **0**
+- `no-committed-secrets` local hook (`python3 jarvis_admin_v2/tests/test_no_committed_secrets.py`) → exit 0
+- `check-ast` equivalent on the new Python module → parses; no `breakpoint()`/`pdb` in any changed file
+- `trailing-whitespace` (hook regex `jarvis_admin_v2.*`) → no trailing whitespace in any changed file; `.editorconfig` `insert_final_newline`/`trim_trailing_whitespace` satisfied
+- `check-yaml` equivalent → `ci.yml` parses; `frontend-tests` has 4 steps; the new step carries **no** `working-directory`, so it runs from the repo root, which its glob requires
+- New files are not gitignored (`git check-ignore` → no match), so `git add` will pick them up
+- The `tests` job runs `bench --site test_site run-parallel-tests --app jarvis_admin_v2` (`ci.yml:276-277`), which shards per test file — the new module is auto-discovered, no wiring needed
+- Working tree after the review is byte-identical to the invocation snapshot
+
+VERDICT: GREEN
