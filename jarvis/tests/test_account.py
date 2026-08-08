@@ -796,14 +796,21 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 	the reason the customer's browser actually receives when the control plane
 	cannot be asked.
 
-	The workspace is pinned onto the subscription/oauth leg (connected marker set,
+	The workspace is pinned onto the subscription leg (connected marker set,
 	pool mode off) so the run reaches _admin_chat_gate deterministically instead of
 	depending on whatever this site's LLM config happens to be. is_ready_for_chat
 	reads the admin key through get_password, so this class provisions a real
 	encrypted one for the duration rather than the raw mask the gate-level tests
-	use."""
+	use.
 
-	_FIELDS = ("llm_auth_mode", "llm_oauth_connected_at", "chat_was_ready_at")
+	The connected marker is llm_direct_synced_at, not llm_oauth_connected_at
+	(jarvis#755): the subscription branch was regrouped away from the legacy
+	oauth branch onto the same evidence marker api_key direct uses, because
+	save_llm_pool unconditionally clears llm_oauth_connected_at on every
+	models[]-table save - gating on it would never open chat for this leg. See
+	account.is_ready_for_chat's subscription branch."""
+
+	_FIELDS = ("llm_auth_mode", "llm_direct_synced_at", "chat_was_ready_at")
 
 	def setUp(self):
 		from jarvis._password_utils import set_settings_password
@@ -817,7 +824,7 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		self._write(
 			{
 				"llm_auth_mode": "subscription",
-				"llm_oauth_connected_at": "2026-01-01 00:00:00",
+				"llm_direct_synced_at": "2026-01-01 00:00:00",
 				"chat_was_ready_at": None,
 			}
 		)
@@ -864,6 +871,23 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
 			out = account.is_ready_for_chat()
 		self.assertEqual(out, {"ready": True, "reason": None, "billing_notice": {}})
+
+	def test_a_never_configured_subscription_gets_the_missing_verdict_not_provisioning(self):
+		"""jarvis#755 review: a subscription tenant that never configured
+		anything at all used to fall into the SAME generic llm_provisioning
+		verdict as one mid-apply. Distinguishes "nothing to confirm" from
+		"confirmation pending" - the only difference between this test and
+		test_a_never_ready_workspace_is_not_told_it_is_ready is which of those
+		two states this workspace is in, and only the marker changes."""
+		self._write({"llm_direct_synced_at": None})
+		with (
+			patch("jarvis.jarvis.pool_serialize.has_configured_subscription_model", return_value=False),
+			patch.object(admin_client, "get_connection", side_effect=Exception("admin down")),
+		):
+			out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertNotEqual(out["reason"], "llm_provisioning")
+		self.assertEqual(out["reason"], "llm_credentials")
 
 
 class TestExplicitReadyOnlyMarker(FrappeTestCase):

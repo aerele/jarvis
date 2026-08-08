@@ -99,7 +99,24 @@ def _llm_not_configured() -> bool:
 		if s.get("proxy_active"):
 			return False  # a pool is configured; pool health is admin's concern
 		mode = (s.get("llm_auth_mode") or "api_key").strip() or "api_key"
-		if mode in ("subscription", "oauth"):
+		if mode == "subscription":
+			# Unified models[]-table subscription on the DIRECT leg (jarvis#715):
+			# the credential lives in models[], not the flat oauth fields.
+			# llm_oauth_connected_at belongs to the legacy flat-field flow and is
+			# unconditionally cleared by save_llm_pool on every models[]-table
+			# save, so gating on it here would block every send on a
+			# fully-working direct-leg subscription tenant.
+			#
+			# Checks the row is ENABLED, subscription-typed, AND has a connected
+			# account - not merely that the table is non-empty (jarvis#755
+			# review): a bare-presence check let a send queue against a container
+			# with no credential yet (mid-connect, before the OAuth handshake
+			# lands) and hang. Shared with account.is_ready_for_chat's parallel
+			# check and reconcile_pending_llm_sync's direct_leg_configured.
+			from jarvis.jarvis.pool_serialize import has_configured_subscription_model
+
+			return not has_configured_subscription_model(s)
+		if mode == "oauth":
 			return not s.get("llm_oauth_connected_at")
 		key = s.get_password("llm_api_key", raise_exception=False) or ""
 		provider = (s.get("llm_provider") or "").strip()

@@ -28,6 +28,13 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 		s.db_set("preset", "", update_modified=False)
 		s.db_set("routing_mode", "failover", update_modified=False)
 		s.db_set("proxy_active", 0, update_modified=False)
+		# jarvis#715's non-retroactivity gate keys the lone-subscription direct
+		# leg off "has this workspace ever synced through the pool leg" - clear
+		# both apply markers so these tests see a fresh-connect workspace
+		# regardless of what an earlier test in this (shared, DB-polluting)
+		# site left behind.
+		s.db_set("llm_pool_synced_at", None, update_modified=False)
+		s.db_set("llm_direct_synced_at", None, update_modified=False)
 		frappe.db.commit()
 
 	def test_two_models_writes_rows_and_routes_to_the_pool(self):
@@ -89,10 +96,8 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 		s = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(s.proxy_active or 0), 0)
 
-	def test_one_subscription_model_is_proxy(self):
-		"""A single chat-subscription model needs cliproxy → proxy path, NOT the
-		DIRECT llm-creds path (which never serves the OAuth blob). #200 review #1."""
-		models = [
+	def _lone_subscription_models(self, upstream="openai", provider="openai", blob=None):
+		return [
 			{
 				"model": "gpt-5.5",
 				"tier": "strong",
@@ -101,30 +106,135 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 					"rotation": "sticky",
 					"accounts": [
 						{
-							"upstream": "openai",
+							"upstream": upstream,
 							"account_ref": "SUB_deadbeef",
 							"label": "me@x.com",
-							"oauth_blob": '{"refresh_token":"rt"}',
+							"oauth_blob": blob or ('{"provider":"%s","refresh_token":"rt"}' % provider),
 						},
 					],
 				},
 			}
 		]
+
+	def test_one_renderable_subscription_model_is_direct(self):
+		"""jarvis#715: a FRESH lone subscription on a provider agent serves
+		NATIVELY (openai) needs no sidecar at all - it takes the direct
+		llm-creds leg, pushing its own oauth blob, not /llm-pool."""
+		blob_calls = []
+		with (
+			patch("jarvis.admin_client.post_update_llm_pool") as pool,
+			patch(
+				"jarvis.admin_client.post_push_oauth_blob",
+				side_effect=lambda provider, blob: blob_calls.append((provider, blob)) or {},
+			),
+			patch(
+				"jarvis.admin_client.post_update_llm_creds",
+				return_value={"action": "restart", "status": "applied"},
+			) as creds,
+		):
+			onboarding.save_llm_pool(
+				frappe.as_json(self._lone_subscription_models()), preset=None, routing_mode="failover"
+			)
+		pool.assert_not_called()
+		self.assertEqual(len(blob_calls), 1, "the direct leg must push the oauth blob")
+		self.assertEqual(blob_calls[0][0], "openai")
+		creds.assert_called_once()
+		self.assertEqual(creds.call_args.kwargs.get("auth_mode"), "oauth")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(int(s.proxy_active or 0), 0)
+
+	def test_lone_direct_subscription_resolves_its_own_agent_provider(self):
+		"""jarvis#755 critical fix: turn_handler's provider resolution used to
+		gate on ``llm_auth_mode == "oauth"`` only, so every message from a
+		subscription-direct tenant resolved provider=None - agent then either
+		502s ("No API key found for provider ...") or silently mis-routes.
+		The lone account's own oauth_blob already carries the agent-provider id
+		under its "provider" key (the same key _push_direct_subscription_blob
+		relies on), so the turn dispatcher must read it from there."""
+		from jarvis.chat.turn_handler import _resolve_model_and_provider
+
+		with (
+			patch("jarvis.admin_client.post_push_oauth_blob"),
+			patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "restart"}),
+		):
+			onboarding.save_llm_pool(
+				frappe.as_json(self._lone_subscription_models()), preset=None, routing_mode="failover"
+			)
+		conv = frappe._dict(model_override="")
+		effective_model, provider = _resolve_model_and_provider(conv)
+		self.assertEqual(provider, "openai")
+		self.assertEqual(effective_model, "gpt-5.5")
+
+	def test_lone_direct_subscription_with_a_malformed_blob_resolves_no_provider(self):
+		"""A blob missing its "provider" key (or otherwise unreadable) must
+		degrade to None, never raise or crash the turn - see
+		_push_direct_subscription_blob's own guard for the write side of this
+		same invariant."""
+		from jarvis.chat.turn_handler import _resolve_model_and_provider
+
+		with (
+			patch("jarvis.admin_client.post_push_oauth_blob"),
+			patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "restart"}),
+		):
+			onboarding.save_llm_pool(
+				frappe.as_json(self._lone_subscription_models(blob='{"refresh_token":"rt"}')),
+				preset=None,
+				routing_mode="failover",
+			)
+		conv = frappe._dict(model_override="")
+		_, provider = _resolve_model_and_provider(conv)
+		self.assertIsNone(provider)
+
+	def test_direct_subscription_push_validation_error_surfaces_specifically(self):
+		"""jarvis#755 review: _sync_via_admin had no except clause for
+		AdminValidationError, so a concrete "missing or malformed oauth_blob"
+		reason from _push_direct_subscription_blob fell through to the generic
+		"failed: unexpected error; see Error Log" backstop - exactly the
+		failure this exception exists to name. Mirrors the pool-sync twin's own
+		handling of the same exception (jarvis_settings.py ~1975)."""
+		from jarvis import admin_client
+
+		with (
+			patch(
+				"jarvis.admin_client.post_push_oauth_blob",
+				side_effect=admin_client.AdminValidationError("missing or malformed oauth_blob"),
+			),
+			patch("jarvis.admin_client.post_update_llm_creds") as creds,
+		):
+			onboarding.save_llm_pool(
+				frappe.as_json(self._lone_subscription_models()), preset=None, routing_mode="failover"
+			)
+		creds.assert_not_called()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(s.last_sync_status.startswith("failed: validation:"))
+		self.assertIn("missing or malformed oauth_blob", s.last_sync_status)
+
+	def test_one_unrenderable_subscription_model_is_still_proxy(self):
+		"""Kimi has no agent-native auth flow → still needs cliproxy → the
+		proxy pool path, NOT the direct llm-creds path (#200 review #1)."""
 		pool_calls = []
 		with (
 			patch(
 				"jarvis.admin_client.post_update_llm_pool",
 				side_effect=lambda **kw: pool_calls.append(kw) or {"action": "pool_update"},
 			),
+			patch("jarvis.admin_client.post_push_oauth_blob") as blob,
 			patch("jarvis.admin_client.post_update_llm_creds") as creds,
 		):
-			onboarding.save_llm_pool(frappe.as_json(models), preset=None, routing_mode="failover")
-		self.assertTrue(pool_calls, "single subscription model must route to the proxy pool path")
+			onboarding.save_llm_pool(
+				frappe.as_json(self._lone_subscription_models(upstream="kimi", provider="kimi")),
+				preset=None,
+				routing_mode="failover",
+			)
+		self.assertTrue(pool_calls, "a lone Kimi subscription must still route to the proxy pool path")
+		blob.assert_not_called()
 		creds.assert_not_called()
 		s = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(s.proxy_active or 0), 1)
 		# The account's blob reaches the pool push (served via cliproxy).
-		self.assertEqual(pool_calls[0]["oauth_blobs"].get("SUB_deadbeef"), {"refresh_token": "rt"})
+		self.assertEqual(
+			pool_calls[0]["oauth_blobs"].get("SUB_deadbeef"), {"provider": "kimi", "refresh_token": "rt"}
+		)
 
 	def test_legacy_preset_value_normalized_by_patch(self):
 		"""A legacy capitalized Select value is mapped to its lowercase catalog

@@ -596,12 +596,83 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		settings.preset = None
 		self.assertFalse(compute_pool_mode(settings))
 
-	def test_compute_pool_mode_true_for_a_lone_subscription(self):
-		"""A single subscription is still a pool: it needs the cliproxy sidecar."""
+	def test_compute_pool_mode_false_for_a_fresh_lone_renderable_subscription(self):
+		"""jarvis#715: a lone subscription on a provider agent can serve
+		NATIVELY (openai, per the bundled catalog's renderer_id), with no prior
+		pool history, needs no sidecar at all - the direct leg serves it.
+		"""
 		from jarvis.jarvis.pool_serialize import compute_pool_mode
 
-		settings = _make_settings_with_models([_subscription_model(accounts=[_account()])])
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="openai")])])
 		settings.preset = None
+		self.assertFalse(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_false_for_a_fresh_lone_google_subscription(self):
+		"""Google is the second renderable upstream (renderer_id google-gemini-cli)."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="google")])])
+		settings.preset = None
+		self.assertFalse(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_true_for_a_lone_subscription_already_pool_synced(self):
+		"""THE RETROACTIVITY PIN (jarvis#715): an already-provisioned tenant - its
+		OAuth blob sits in cliproxy's auth dir and llm_pool_synced_at is stamped -
+		must NOT be flipped onto a leg it has no evidence of ever having applied,
+		even though its upstream is otherwise renderable. This is the exact
+		scenario the issue's own "Existing" verification run protects.
+		"""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="openai")])])
+		settings.preset = None
+		settings.llm_pool_synced_at = "2026-08-01 00:00:00"
+		self.assertTrue(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_true_for_a_lone_kimi_subscription(self):
+		"""Kimi has NO agent-native auth flow at all (bundled catalog:
+		renderer_id ""), so it stays on the pool leg regardless of history."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="kimi")])])
+		settings.preset = None
+		self.assertTrue(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_true_for_a_lone_xai_subscription(self):
+		"""xAI has no fleet-template arm yet (renderer_id ""), even though
+		agent's own bundle can authenticate it natively - see the jarvis#715
+		thread. Stays on the pool leg until a template arm + catalog id ship."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="xai")])])
+		settings.preset = None
+		self.assertTrue(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_true_for_a_subscription_with_two_accounts(self):
+		"""Two accounts on one subscription model means rotation, which only
+		cliproxy implements - the direct leg has no rotation concept."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		settings = _make_settings_with_models(
+			[
+				_subscription_model(
+					accounts=[
+						_account(upstream="openai", account_ref="ACC_1"),
+						_account(upstream="openai", account_ref="ACC_2"),
+					]
+				)
+			]
+		)
+		settings.preset = None
+		self.assertTrue(compute_pool_mode(settings))
+
+	def test_compute_pool_mode_true_for_a_lone_subscription_with_a_preset(self):
+		"""A preset always routes through the pool leg, even for a single
+		otherwise-renderable subscription."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="openai")])])
+		settings.preset = "Cost-saver"
 		self.assertTrue(compute_pool_mode(settings))
 
 	# ------------------------------------------------------------------ #
@@ -657,6 +728,117 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		settings = _make_settings_with_models([m])
 		settings.preset = None
 		self.assertFalse(compute_proxy_active(settings))
+
+	# ------------------------------------------------------------------ #
+	# (h4) compute_proxy_active mirrors compute_pool_mode's jarvis#715 exception
+	# ------------------------------------------------------------------ #
+
+	def test_compute_proxy_active_false_for_a_fresh_lone_renderable_subscription(self):
+		"""jarvis#715: no sidecar is deployed for the exact config compute_pool_mode
+		now also routes direct - the #498 invariant (proxy_active implies
+		pool_mode) requires both predicates agree."""
+		_, _, compute_proxy_active = self._imports()
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="openai")])])
+		settings.preset = None
+		self.assertFalse(compute_proxy_active(settings))
+
+	def test_compute_proxy_active_true_for_a_lone_subscription_already_pool_synced(self):
+		"""Mirrors the retroactivity pin: an already-provisioned tenant keeps its
+		sidecar reported until it demonstrably has none (a fresh reconnect)."""
+		_, _, compute_proxy_active = self._imports()
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="openai")])])
+		settings.preset = None
+		settings.llm_pool_synced_at = "2026-08-01 00:00:00"
+		self.assertTrue(compute_proxy_active(settings))
+
+	def test_compute_proxy_active_true_for_a_lone_kimi_subscription(self):
+		"""Kimi has no agent-native auth flow - cliproxy is doing genuine work."""
+		_, _, compute_proxy_active = self._imports()
+		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="kimi")])])
+		settings.preset = None
+		self.assertTrue(compute_proxy_active(settings))
+
+	# ------------------------------------------------------------------ #
+	# (h5) The #498 invariant, pinned permanently: proxy_active implies
+	# pool_mode over every settings shape this module can build. jarvis#715's
+	# own postmortem asked for this: "an invariant test... over every settings
+	# shape... assert compute_proxy_active(settings) implies compute_pool_mode
+	# (settings). That pins the #498 class rather than one case of it."
+	# ------------------------------------------------------------------ #
+
+	def test_proxy_active_implies_pool_mode_over_every_shape(self):
+		from jarvis.jarvis.pool_serialize import compute_pool_mode, compute_proxy_active
+
+		def settings_for(models, preset=None, pool_synced=None):
+			s = _make_settings_with_models(models)
+			s.preset = preset
+			if pool_synced is not None:
+				s.llm_pool_synced_at = pool_synced
+			return s
+
+		shapes = [
+			("lone api key", settings_for([_api_key_model(enabled=1)])),
+			(
+				"lone subscription, fresh, openai",
+				settings_for([_subscription_model(accounts=[_account(upstream="openai")])]),
+			),
+			(
+				"lone subscription, fresh, google",
+				settings_for([_subscription_model(accounts=[_account(upstream="google")])]),
+			),
+			(
+				"lone subscription, already pool-synced",
+				settings_for(
+					[_subscription_model(accounts=[_account(upstream="openai")])],
+					pool_synced="2026-08-01 00:00:00",
+				),
+			),
+			(
+				"lone subscription, kimi (no renderer)",
+				settings_for([_subscription_model(accounts=[_account(upstream="kimi")])]),
+			),
+			(
+				"lone subscription, xai (no renderer)",
+				settings_for([_subscription_model(accounts=[_account(upstream="xai")])]),
+			),
+			(
+				"lone subscription, two accounts",
+				settings_for(
+					[
+						_subscription_model(
+							accounts=[
+								_account(upstream="openai", account_ref="A1"),
+								_account(upstream="openai", account_ref="A2"),
+							]
+						)
+					]
+				),
+			),
+			(
+				"lone subscription with a preset",
+				settings_for(
+					[_subscription_model(accounts=[_account(upstream="openai")])], preset="Cost-saver"
+				),
+			),
+			(
+				"two-model api-key pool",
+				settings_for(
+					[_api_key_model(enabled=1), _api_key_model(model="gpt-4-turbo", enabled=1, order=1)]
+				),
+			),
+			(
+				"mixed api-key + subscription pool",
+				settings_for([_api_key_model(enabled=1), _subscription_model(accounts=[_account()])]),
+			),
+			("empty config", settings_for([])),
+		]
+		for label, settings in shapes:
+			with self.subTest(shape=label):
+				if compute_proxy_active(settings):
+					self.assertTrue(
+						compute_pool_mode(settings),
+						f"{label}: proxy_active=True but pool_mode=False (#498 shape)",
+					)
 
 	# ------------------------------------------------------------------ #
 	# (h3) pool_primary_model — what the container runs by DEFAULT
@@ -1182,6 +1364,148 @@ class TestRT3UnifiedOnUpdateRouting(_RT3SettingsTestCase):
 		# A preset routes through /llm-pool (asserted above) but conjures no sidecar:
 		# the single credential is still a BYO api key, so this renders agent-direct.
 		self.assertEqual(int(settings.proxy_active or 0), 0, "an api-key preset pool gets no proxy sidecar")
+
+
+class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
+	"""jarvis#715 step 3: THE DECISION at the seam where it becomes an admin
+	call. A fresh lone renderable (openai) subscription must never reach
+	``/llm-pool`` - no Bifrost/cliproxy push - and instead pushes its oauth
+	blob + creds through the direct ``/llm-creds`` leg."""
+
+	_EXTRA_FIELDS = ("llm_pool_synced_at", "llm_direct_synced_at", "llm_auth_mode")
+
+	def setUp(self):
+		super().setUp()
+		self._clear_models()
+		_reset_settings()
+		s = frappe.get_single("Jarvis Settings")
+		self._extra_snapshot = {f: s.get(f) for f in self._EXTRA_FIELDS}
+		s.db_set("preset", "", update_modified=False)
+		s.db_set("routing_mode", "failover", update_modified=False)
+		s.db_set("proxy_active", 0, update_modified=False)
+		# The non-retroactivity gate: a FRESH connect has never synced via pool.
+		s.db_set("llm_pool_synced_at", None, update_modified=False)
+		s.db_set("llm_direct_synced_at", None, update_modified=False)
+		frappe.db.commit()
+
+	def tearDown(self):
+		s = frappe.get_single("Jarvis Settings")
+		for field, value in self._extra_snapshot.items():
+			s.db_set(field, value, update_modified=False)
+		frappe.db.commit()
+		super().tearDown()
+
+	@staticmethod
+	def _lone_sub_payload(upstream="openai", agent_provider="openai"):
+		blob = json.dumps(
+			{
+				"type": "oauth",
+				"provider": agent_provider,
+				"access": "AT-direct",
+				"refresh": "RT-direct",
+				# fleet's PUT /auth-profile schema is extra_forbidden - the push must
+				# strip this, exactly like complete_paste_signin's direct_blob does.
+				"id_token": "should-be-stripped",
+			}
+		)
+		return [
+			{
+				"model": "gpt-5.5",
+				"tier": "cheap",
+				"order": 0,
+				"subscription": {
+					"rotation": "sticky",
+					"accounts": [
+						{
+							"upstream": upstream,
+							"account_ref": "ACC_DIRECT_1",
+							"label": "solo@example.com",
+							"oauth_blob": blob,
+						}
+					],
+				},
+			}
+		]
+
+	def test_fresh_lone_openai_subscription_never_reaches_the_pool_push(self):
+		from jarvis import onboarding
+		from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+		pool_calls = []
+		blob_calls = []
+		with (
+			frappe_patch(
+				"jarvis.admin_client.post_update_llm_pool",
+				side_effect=lambda **kw: pool_calls.append(kw) or {"action": "pool_update"},
+			),
+			frappe_patch(
+				"jarvis.admin_client.post_push_oauth_blob",
+				side_effect=lambda provider, blob: blob_calls.append((provider, blob)) or {},
+			),
+			frappe_patch(
+				"jarvis.admin_client.post_update_llm_creds",
+				return_value={"action": "restart", "status": "applied"},
+			) as mock_creds,
+		):
+			out = onboarding.save_llm_pool(
+				frappe.as_json(self._lone_sub_payload()),
+				preset=None,
+				routing_mode="failover",
+			)
+
+		# THE DECISION under test: the pool/proxy push is never reached.
+		self.assertEqual(pool_calls, [], "a fresh lone renderable subscription must never push /llm-pool")
+		self.assertEqual(out["mode"], "legacy", "no apply-operation descriptor on the direct leg")
+
+		# The oauth blob is pushed to agent's auth store BEFORE /llm-creds,
+		# with id_token stripped (jarvis#715 step 3, point 4).
+		self.assertEqual(len(blob_calls), 1, "the direct leg must push the oauth blob exactly once")
+		provider, pushed_blob = blob_calls[0]
+		self.assertEqual(provider, "openai")
+		self.assertNotIn("id_token", pushed_blob)
+		self.assertEqual(pushed_blob.get("refresh"), "RT-direct")
+
+		mock_creds.assert_called_once()
+		self.assertEqual(
+			mock_creds.call_args.kwargs.get("auth_mode"),
+			"oauth",
+			"a subscription credential must cross the wire as oauth, not the literal 'subscription'",
+		)
+
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(int(settings.proxy_active or 0), 0, "no sidecar for a lone renderable subscription")
+		self.assertFalse(compute_pool_mode(settings))
+		self.assertIsNotNone(
+			settings.llm_direct_synced_at,
+			"a confirmed direct apply must stamp llm_direct_synced_at (is_ready_for_chat's gate)",
+		)
+
+	def test_lone_kimi_subscription_still_reaches_the_pool_push(self):
+		"""Kimi has no agent-native auth flow, so it must still take the pool
+		leg - the seam-level counterpart to the compute_pool_mode unit test."""
+		from jarvis import onboarding
+
+		pool_calls = []
+		with (
+			frappe_patch(
+				"jarvis.admin_client.post_update_llm_pool",
+				side_effect=lambda **kw: pool_calls.append(kw) or {"action": "pool_update"},
+			),
+			frappe_patch("jarvis.admin_client.post_push_oauth_blob") as mock_blob,
+			frappe_patch("jarvis.admin_client.post_update_llm_creds") as mock_creds,
+		):
+			out = onboarding.save_llm_pool(
+				frappe.as_json(self._lone_sub_payload(upstream="kimi", agent_provider="kimi")),
+				preset=None,
+				routing_mode="failover",
+			)
+
+		self.assertTrue(len(pool_calls) >= 1, "a lone Kimi subscription must still push /llm-pool")
+		self.assertNotEqual(
+			out.get("last_sync_status", ""), "", "the pool leg must have run and stamped a status"
+		)
+		mock_blob.assert_not_called()
+		mock_creds.assert_not_called()
 
 
 class TestRT3LegacyNoModelsBackcompat(_RT3SettingsTestCase):
@@ -4219,6 +4543,37 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		)
 		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
 
+	def test_reconcile_treats_an_unconfigured_subscription_tenant_as_nothing_to_converge(self):
+		"""jarvis#755 review: direct_leg_configured used to key on bare models[]
+		presence (bool(settings.get("models"))), so a leftover row that is
+		disabled, or has no connected account, still read as "configured" and
+		got re-polled forever even though there is nothing to converge. Patches
+		has_configured_subscription_model directly - the exact predicate that
+		changed - rather than fighting the models[]-table save/validate
+		pipeline to construct a disabled row."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			reconcile_pending_llm_sync,
+		)
+
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set(
+			{
+				"llm_auth_mode": "subscription",
+				"llm_pool_synced_at": None,
+				"llm_direct_synced_at": None,
+				"last_sync_status": "failed: admin briefly unreachable",
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		self._seed_admin_creds()  # after the commit; stays in the rolled-back txn
+		with (
+			patch("jarvis.jarvis.pool_serialize.has_configured_subscription_model", return_value=False),
+			patch("jarvis.admin_client.get_connection") as m,
+		):
+			reconcile_pending_llm_sync()
+			m.assert_not_called()
+
 	def test_reconcile_leaves_a_healthy_tenant_alone(self):
 		"""Inert on a healthy fleet: an 'ok' tenant is never re-stamped.
 
@@ -4470,15 +4825,16 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 	(jarvis#566).
 	"""
 
-	def _leaving(self, before_rows, after_rows):
+	def _leaving(self, before_rows, after_rows, before_pool_synced_at=None):
 		from unittest.mock import Mock
 
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
 
+		before_doc = _make_settings_with_models(before_rows) if before_rows is not None else None
+		if before_doc is not None and before_pool_synced_at is not None:
+			before_doc.llm_pool_synced_at = before_pool_synced_at
 		doc = _make_settings_with_models(after_rows)
-		doc.get_doc_before_save = Mock(
-			return_value=(_make_settings_with_models(before_rows) if before_rows is not None else None)
-		)
+		doc.get_doc_before_save = Mock(return_value=before_doc)
 		return JarvisSettings._is_leaving_pool_mode(doc)
 
 	def test_dropping_two_models_to_one_is_leaving_pool_mode(self):
@@ -4495,13 +4851,31 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 		self.assertFalse(self._leaving([_api_key_model(order=0)], [_api_key_model(order=0)]))
 
 	def test_removing_the_last_subscription_is_leaving_pool_mode(self):
-		"""A lone subscription is pool mode, so dropping it also has to converge.
+		"""An ALREADY-PROVISIONED lone subscription is pool mode, so dropping it
+		also has to converge.
 
 		This is the transition that tears the Bifrost and CLIProxyAPI sidecars
-		down, which only the /llm-pool leg does.
+		down, which only the /llm-pool leg does. Stamps llm_pool_synced_at on the
+		before-doc (jarvis#715's retroactivity gate, jarvis#755 review): without
+		it a lone subscription with no sync history reads as
+		_lone_direct_capable and compute_pool_mode(before) is False, which would
+		make this indistinguishable from test_single_model_edit_is_not_leaving_
+		pool_mode's "never was a pool" case - the whole point of this test is a
+		tenant that GENUINELY was on the pool leg.
 		"""
 		before = [_subscription_model(order=0, accounts=[_account()])]
-		self.assertTrue(self._leaving(before, [_api_key_model(order=0)]))
+		self.assertTrue(
+			self._leaving(before, [_api_key_model(order=0)], before_pool_synced_at="2026-08-01 00:00:00")
+		)
+
+	def test_removing_a_fresh_never_synced_lone_subscription_is_not_leaving_pool_mode(self):
+		"""The complement of the test above: a lone subscription that never
+		synced through the pool leg (jarvis#715's _lone_direct_capable shape)
+		was never a pool to begin with, so dropping it tears down nothing and
+		must take the ordinary single-model leg like any other direct-to-direct
+		edit."""
+		before = [_subscription_model(order=0, accounts=[_account()])]
+		self.assertFalse(self._leaving(before, [_api_key_model(order=0)]))
 
 	def test_teardown_push_is_allowed_past_the_pool_mode_gate(self):
 		"""The worker must not skip the job whose whole purpose is the teardown."""
@@ -4527,3 +4901,30 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 
 		pool = _make_settings_with_models([_api_key_model(order=0), _api_key_model(model="glm-4.7", order=1)])
 		self.assertTrue(_pool_spec_pushable(pool, False))
+
+
+class TestPushDirectSubscriptionBlobNoMatchInvariant(FrappeTestCase):
+	"""jarvis#755 review: _push_direct_subscription_blob's docstring promises it
+	raises rather than silently skipping the push when its "exactly one enabled
+	subscription model" invariant is violated. A NO-MATCH loop (every row
+	disabled, or none is a subscription) used to fall off the end and return
+	None instead - the caller would then push /llm-creds with auth:"oauth"
+	against an auth store nothing was ever written to."""
+
+	def test_raises_when_no_enabled_subscription_row_matches(self):
+		from jarvis import admin_client
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		settings = _make_settings_with_models(
+			[_subscription_model(order=0, enabled=0, accounts=[_account()])]
+		)
+		with self.assertRaises(admin_client.AdminValidationError):
+			JarvisSettings._push_direct_subscription_blob(settings)
+
+	def test_raises_when_models_is_empty(self):
+		from jarvis import admin_client
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		settings = _make_settings_with_models([])
+		with self.assertRaises(admin_client.AdminValidationError):
+			JarvisSettings._push_direct_subscription_blob(settings)
