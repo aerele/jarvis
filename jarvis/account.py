@@ -22,7 +22,12 @@ import hashlib
 import frappe
 
 from jarvis import admin_client, onboarding_contract, release_notice
-from jarvis.exceptions import AdminAuthError
+from jarvis.exceptions import (
+	AdminAuthError,
+	AdminRateLimitedError,
+	AdminUnreachableError,
+	AdminValidationError,
+)
 from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_access, require_jarvis_admin
@@ -1441,6 +1446,39 @@ def reauthorize_autopay() -> dict:
 	# plan-09 WS8: attest a token answer so BillingPage navigates to the
 	# admin-hosted mandate checkout (behaviour-neutral otherwise).
 	return onboarding_contract.augment_pay_page(_surface(admin_client.reauthorize_autopay))
+
+
+@frappe.whitelist()
+def get_billing_payment_state() -> dict:
+	"""Where the current billing checkout stands, without asking a gateway.
+
+	A live attempt re-echoes its pay-page token, so a customer whose renew redirect
+	died resumes the SAME pay page instead of minting a second one.
+	"""
+	require_jarvis_admin()
+	return onboarding_contract.augment_pay_page(_surface(admin_client.get_billing_payment_state))
+
+
+@frappe.whitelist()
+def check_billing_payment_status() -> dict:
+	"""Ask the provider what happened to the current billing payment and converge.
+
+	Busts the chat gate: a verified payment reactivates the plan, and the cached
+	verdict would otherwise keep chat paused for a customer who has just paid.
+	"""
+	require_jarvis_admin()
+	try:
+		data = admin_client.check_billing_payment_status()
+	except (AdminValidationError, AdminAuthError, AdminUnreachableError, AdminRateLimitedError) as e:
+		error, status = onboarding_contract.error_object(e)
+		return onboarding_contract.failure(error, status)
+	out = onboarding_contract.augment_pay_page(data)
+	_bust_chat_gate()
+	# Explicitly context-LESS: wire(None) would load the persisted SIGNUP context,
+	# so a gen-2 billing answer echoed the signup's amount, generation and code.
+	# This endpoint reports on the current billing attempt; it has no context of
+	# its own to add, and borrowing signup's would be a lie.
+	return onboarding_contract.success(out, context={})
 
 
 @frappe.whitelist()
