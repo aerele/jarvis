@@ -2794,15 +2794,28 @@
 							     up), so the mic renders FADED and says so on click; a browser
 							     that cannot record is not actionable, so it stays hidden. -->
 							<button
-								v-if="!ui.stt_enabled && micRec.supported"
+								v-if="sttUnconfigured && micRec.supported"
 								class="jv-iconbtn jv-micbtn jv-unavailable"
 								aria-disabled="true"
 								title="Voice dictation is not set up on this workspace"
+								aria-label="Voice dictation is not set up on this workspace"
+								style="
+									width: 30px;
+									height: 30px;
+									display: flex;
+									align-items: center;
+									justify-content: center;
+									background: transparent;
+									border: none;
+									border-radius: 7px;
+									cursor: default;
+									color: var(--text-3);
+								"
 								@click="explainSttUnavailable"
 							>
 								<svg
-									width="18"
-									height="18"
+									width="17"
+									height="17"
 									viewBox="0 0 24 24"
 									fill="none"
 									stroke="currentColor"
@@ -4679,16 +4692,26 @@ const supportOn = window.support_available && window.has_support_access;
 // a user a feature they can never use is noise, not discovery.
 const supportUnconfigured = window.support_state === "unconfigured" && !!window.has_support_access;
 
-function explainSupportUnavailable() {
-	notify("Support isn't set up on this workspace yet — ask your administrator.", {
+// STT is UNCONFIGURED specifically — not deliberately off, not a transient CP blip.
+// Only that case earns a faded control: the other two would either nag an admin who
+// switched voice off on purpose, or turn a self-healing hiccup into a permanent-looking
+// misconfiguration. Reading the state (not `!stt_enabled`) also avoids the faded mic
+// FLASHING on every page load, since `ui` starts empty and `stt_enabled` is briefly
+// undefined — `stt_state` is simply absent until the settings land.
+const sttUnconfigured = computed(() => ui.value?.stt_state === "unconfigured");
+
+// One message shape for every not-set-up feature, so the wording cannot drift between
+// the surfaces (a user with STT off sees the nudge mic and the composer mic at once).
+function explainUnavailable(feature) {
+	notify(`${feature} isn't set up on this workspace yet — ask your administrator.`, {
 		type: "info",
 	});
 }
-
+function explainSupportUnavailable() {
+	explainUnavailable("Support");
+}
 function explainSttUnavailable() {
-	notify(`Voice dictation isn't set up on this workspace — ask your administrator.`, {
-		type: "info",
-	});
+	explainUnavailable("Voice dictation");
 }
 
 // "Get help from a human" — always available (v1). The conversation reference
@@ -9864,11 +9887,24 @@ onUnmounted(() => {
    the user gets a dead grey icon with no reason. aria-disabled + a real click handler
    keeps it reachable and answerable. */
 .jv-unavailable {
-	opacity: 0.45;
+	/* 0.45 measured ~1.8:1 against --surface-2 — under WCAG 1.4.11's 3:1 and, worse for
+	   the point of this pattern, close to invisible. These controls are deliberately
+	   OPERABLE (aria-disabled, not disabled), so the inactive-component exemption does
+	   not really apply: keep them clearly perceptible, just plainly subdued. */
+	opacity: 0.55;
 	cursor: default;
 }
 .jv-unavailable:hover {
-	opacity: 0.6;
+	opacity: 0.8;
+}
+/* .jv-iconbtn:hover inverts to a solid fill with !important — the boldest hover in the
+   UI. On an unavailable control that reads as MORE active than a working button, so
+   opt out and let opacity alone carry the hover. */
+.jv-iconbtn.jv-unavailable:hover,
+.jv-iconbtn.jv-unavailable:hover svg {
+	background: transparent !important;
+	color: var(--text-3) !important;
+	stroke: currentColor !important;
 }
 .jv-nudge-actions {
 	display: flex;

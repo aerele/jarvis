@@ -124,6 +124,11 @@ const crossItem = computed(() => {
 		return {
 			label: "Support",
 			icon: "life-buoy",
+			// A visible cue: without it the entry is pixel-identical to the working one and
+			// clicking it just toasts, which reads as broken. frappe-ui's `disabled` would
+			// set pointer-events:none and swallow the click that carries the explanation,
+			// so use its `description` instead.
+			description: "Not set up - open to see why",
 			onClick: () =>
 				toast.info("Support isn't set up on this workspace yet — ask your administrator."),
 		};

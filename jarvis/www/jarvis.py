@@ -53,7 +53,9 @@ def _support_state() -> str:
 			state = reason if reason in (SUPPORT_UNCONFIGURED, SUPPORT_OFF) else SUPPORT_OFF
 	except Exception:
 		state = SUPPORT_ERROR
-	ttl = _SUPPORT_AVAILABLE_TTL_S if state != SUPPORT_ERROR else _SUPPORT_UNAVAILABLE_TTL_S
+	# R1-7 unchanged: EVERY unavailable state keeps the short TTL, so support appears
+	# within a minute of an operator configuring it or flipping the switch on.
+	ttl = _SUPPORT_AVAILABLE_TTL_S if state == SUPPORT_OK else _SUPPORT_UNAVAILABLE_TTL_S
 	cache.set_value(_SUPPORT_AVAILABLE_CACHE_KEY, state, expires_in_sec=ttl)
 	return state
 
