@@ -696,6 +696,54 @@ class JarvisSettings(Document):
 		"""
 		return self.get_password("llm_api_key", raise_exception=False) or ""
 
+	def _push_direct_subscription_blob(self) -> None:
+		"""Push the DIRECT leg's lone subscription account's OAuth blob to
+		openclaw's auth store, before the ``/llm-creds`` render that depends on it
+		(jarvis#715 step 3, point 4).
+
+		Mirrors ``jarvis.oauth.api.complete_paste_signin``'s push: the blob's own
+		``provider`` key already carries the openclaw auth-profile id
+		(``agent_provider`` - "openai", "google-gemini-cli" - baked in when the
+		blob was minted), so no separate upstream-to-provider table is needed
+		here, and ``id_token`` is stripped because fleet's ``PUT /auth-profile``
+		schema is strict (``extra_forbidden``) and only the POOL path's
+		cliproxy-codex reformat needs it.
+
+		Only ever called for the config ``_lone_direct_capable`` allowed onto this
+		leg, so there is exactly one enabled subscription model with exactly one
+		account and ``validate_models`` has already required a well-formed,
+		non-empty ``oauth_blob`` on it before ``save()`` could reach here. Raises
+		(rather than silently skipping the push) if that invariant is somehow
+		violated - the caller's surrounding try/except in ``_sync_via_admin``
+		reports it exactly like an admin failure, which is safer than rendering
+		``auth: "oauth"`` against a container with no credential behind it.
+		"""
+		import json
+
+		from jarvis import admin_client
+		from jarvis.jarvis.pool_serialize import _model_accounts
+
+		for m in self.models or []:
+			if not m.enabled or (getattr(m, "credential_type", None) or "api_key") != "subscription":
+				continue
+			accounts = _model_accounts(m)
+			if not accounts:
+				raise admin_client.AdminValidationError(
+					"direct subscription leg: no connected account to push"
+				)
+			blob_raw = (accounts[0].get("oauth_blob") if hasattr(accounts[0], "get") else "") or ""
+			try:
+				blob = json.loads(blob_raw) if blob_raw else None
+			except (TypeError, ValueError):
+				blob = None
+			if not isinstance(blob, dict) or not (blob.get("provider") or "").strip():
+				raise admin_client.AdminValidationError(
+					"direct subscription leg: missing or malformed oauth_blob"
+				)
+			direct_blob = {k: v for k, v in blob.items() if k != "id_token"}
+			admin_client.post_push_oauth_blob(blob["provider"], direct_blob)
+			return
+
 	def on_update(self):
 		# ------------------------------------------------------------------ #
 		# Unified LLM path (2026-06-26): models table rows or preset present.
@@ -1088,6 +1136,16 @@ class JarvisSettings(Document):
 				result = admin_client.post_rotate_llm_secret(secret=secret) or {}
 				resolved_action = result.get("action", "reload")
 			else:  # "restart"
+				# A models[]-table subscription on the DIRECT leg (jarvis#715 step 3,
+				# point 4) owns its own credential push: unlike the legacy oauth flow
+				# (whose blob reaches auth-profiles.json via complete_paste_signin
+				# BEFORE this job ever runs), the unified table's oauth_blob just sits
+				# in subscription_accounts until something pushes it. Push it FIRST -
+				# same order complete_paste_signin uses (blob, then creds) - so a
+				# failure here lands in the except clauses below and post_update_llm_creds
+				# never renders auth:"oauth" against an empty auth store.
+				if (self.llm_auth_mode or "") == "subscription":
+					self._push_direct_subscription_blob()
 				# In oauth mode the api_key body is empty - container reads
 				# credentials from auth-profiles.json instead.
 				secret = self._resolve_llm_secret_for_push()
@@ -1398,6 +1456,19 @@ class JarvisSettings(Document):
 			return "restart"
 
 		old = self.get_doc_before_save()
+
+		# A models[]-table subscription RE-AUTH (jarvis#715 direct leg) changes
+		# only the child row's encrypted subscription_accounts - same provider,
+		# same model, same llm_auth_mode - so none of the checks in this function
+		# (structural_fields below, llm_api_key_changed) can see it. Without this,
+		# reconnecting an expired/revoked token would classify as "no change" and
+		# the fresh blob this leg itself pushes (_push_direct_subscription_blob)
+		# would never reach the container.
+		if old is not None and (self.llm_auth_mode or "") == "subscription":
+			current_snap = self.flags.get("pool_state_snapshot")
+			if current_snap is not None and current_snap != self._pool_state_snapshot(old):
+				return "restart"
+
 		if old is None:
 			# First-ever save: treat as restart only if at least one of
 			# provider/model is set now.
@@ -2429,13 +2500,18 @@ def reconcile_pending_llm_sync() -> None:
 		# stranding class as an unproven pool.
 		is_stuck = status.startswith("pending:") or status.startswith("failed:")
 		is_unproven_pool = pool_mode and not pool_synced and is_stuck
-		is_unproven_direct = (
-			not pool_mode
-			and not direct_synced
-			and is_stuck
-			and (settings.get("llm_auth_mode") or "api_key") == "api_key"
-			and bool((settings.get("llm_provider") or "").strip())
-		)
+		# api_key: "configured" means a provider was chosen. subscription (the
+		# jarvis#715 direct leg) has no llm_provider - a subscription model row
+		# carries no provider field - so "configured" means the models[] row
+		# itself exists instead. oauth (the legacy flat-field flow) is excluded
+		# here exactly as before: its evidence marker (llm_oauth_connected_at) is
+		# stamped synchronously inside the same request that pushes it, never
+		# left pending for this scheduled net to pick up.
+		auth_mode = (settings.get("llm_auth_mode") or "api_key").strip()
+		direct_leg_configured = (
+			auth_mode == "api_key" and bool((settings.get("llm_provider") or "").strip())
+		) or (auth_mode == "subscription" and bool(settings.get("models")))
+		is_unproven_direct = not pool_mode and not direct_synced and is_stuck and direct_leg_configured
 		# The disconnect leg's LOCAL precondition (see the docstring). It is true of
 		# every healthy CONNECTED workspace, so this leg does cost one extra
 		# get_connection per tick on those - unavoidable, because a bench that lost

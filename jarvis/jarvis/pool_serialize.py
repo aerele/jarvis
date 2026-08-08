@@ -303,19 +303,27 @@ def compute_pool_mode(settings) -> bool:
 	readiness gate and installed-apps resync follow the pool leg. This is the
 	predicate ``compute_proxy_active`` used to encode.
 
-	True when ≥2 models are enabled OR (a preset is selected AND ≥1 model
-	enabled) OR any enabled model is a chat subscription. An empty enabled-model
-	list with a preset does NOT count as pool-valid.
+	True when >=2 models are enabled OR (a preset is selected AND >=1 model
+	enabled) OR any enabled model is a chat subscription that is NOT
+	``_lone_direct_capable`` (jarvis#715). An empty enabled-model list with a
+	preset does NOT count as pool-valid.
 	"""
 	enabled = _enabled_models(settings)
 	if len(enabled) >= 2 or (bool(settings.preset) and len(enabled) >= 1):
 		return True
-	# A chat-subscription model REQUIRES the cliproxy sidecar, which is
-	# provisioned ONLY on the pool path. The DIRECT (single-model) path just
+	# A chat-subscription model normally REQUIRES the cliproxy sidecar, which is
+	# provisioned ONLY on the pool path - the DIRECT (single-model) path just
 	# pushes llm-creds and has no cliproxy, so a lone subscription model would
 	# never get its OAuth blob served and chat would fail despite a "connected"
-	# UI. Force such a config onto the pool path. (#200 review #1)
-	return has_subscription_model(settings)
+	# UI (#200 review #1). _lone_direct_capable carves out the one shape openclaw
+	# can serve NATIVELY with no sidecar at all: exactly one enabled subscription
+	# model, one connected account, an upstream the fleet template can render on
+	# the direct oauth leg, and (the non-retroactivity gate) a workspace that has
+	# never synced through the pool leg before. See its docstring for why each
+	# condition is there.
+	if has_subscription_model(settings) and not _lone_direct_capable(settings):
+		return True
+	return False
 
 
 def has_subscription_model(settings) -> bool:
@@ -347,8 +355,104 @@ def compute_proxy_active(settings) -> bool:
 	``proxy_active`` now IMPLIES ``compute_pool_mode`` (a subscription forces
 	pool mode) but is strictly narrower. Ask ``compute_pool_mode`` for "which
 	sync / readiness leg does this tenant take".
+
+	Carries the SAME ``_lone_direct_capable`` exception as ``compute_pool_mode``
+	(jarvis#715): a lone renderable subscription takes the direct leg with no
+	sidecar at all, so both predicates must agree it needs none - a mismatch
+	(``pool_mode=False`` with ``proxy_active=True``, or the reverse) is the
+	#498 shape the implication above exists to rule out.
 	"""
-	return has_subscription_model(settings)
+	if not has_subscription_model(settings):
+		return False
+	return not _lone_direct_capable(settings)
+
+
+# ---------------------------------------------------------------------------
+# _lone_direct_capable: the jarvis#715 "no sidecar needed" exception
+# ---------------------------------------------------------------------------
+
+
+# Providers openclaw can authenticate NATIVELY on the direct oauth leg, keyed
+# by the bundled catalog's provider_id/catalog_id (== the models[].accounts[]
+# upstream for every upstream this can ever match - "openai" and "google" are
+# spelled identically in both vocabularies; Kimi's upstream "kimi" has no
+# matching catalog entry at all ("moonshot" is the catalog's own name for it,
+# a preexisting, unrelated vocabulary mismatch), which fails the lookup and
+# reads as "not renderable" - the same, safe answer a real lookup would give
+# since Kimi's catalog renderer_id is blank anyway). A provider with no
+# non-empty renderer_id has no fleet-template arm to render it (jarvis#715
+# thread, live-verified against openclaw 2026.6.8 + the live provider
+# catalog): xai and moonshot are both in that state today, so they stay on
+# the pool leg until a template arm + catalog id ship for them.
+def _upstream_has_renderer(upstream: str) -> bool:
+	"""True when the bundled provider catalog has a non-empty ``renderer_id``
+	for ``upstream``. Deliberately reads the BUNDLED (checked-into-git) catalog,
+	never the live admin one: this feeds a save-time, hot-chat-path decision
+	that must be a pure function of stored settings, and a live-fetched answer
+	would let admin silently move an ALREADY-PROVISIONED tenant between legs on
+	its own schedule - precisely the retroactive-move hazard the activation
+	gate below exists to rule out. Widening the renderable set is a deploy
+	(regenerate the bundle via scripts/gen_bundled_catalog.py), which is the
+	review gate this wants.
+	"""
+	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+
+	needle = (upstream or "").strip().lower()
+	if not needle:
+		return False
+	for provider in BUNDLED_MODEL_CATALOG:
+		pid = (provider.get("provider_id") or "").strip().lower()
+		cid = (provider.get("catalog_id") or "").strip().lower()
+		if needle in (pid, cid):
+			return bool((provider.get("renderer_id") or "").strip())
+	return False
+
+
+def _lone_direct_capable(settings) -> bool:
+	"""True when this settings' lone enabled model needs no Bifrost/cliproxy
+	sidecar at all - it can be served entirely by openclaw's native oauth
+	auth-profile support (jarvis#715).
+
+	ALL of the following must hold:
+
+	- No preset (a preset always routes through the pool leg).
+	- Exactly one enabled model, and it is a chat subscription. Two-plus
+	  models, or a subscription mixed with api-key rows, still needs the pool
+	  leg (failover across N credentials is a pool feature).
+	- Exactly one connected account on that model. Multiple accounts mean
+	  ROTATION, which only cliproxy implements - the direct leg pushes a
+	  single oauth blob and has no rotation concept.
+	- That account's upstream is one the fleet template can render on the
+	  direct oauth leg today (``_upstream_has_renderer``).
+	- ``llm_pool_synced_at`` is unset. This is the NON-RETROACTIVITY gate
+	  (jarvis#715 "step 3 is not a predicate flip" analysis): the predicate is
+	  a pure function of stored settings, so without it this exception would
+	  retroactively flip every ALREADY-PROVISIONED lone-subscription tenant
+	  (OAuth blob sitting in cliproxy's auth dir, ``llm_pool_synced_at``
+	  stamped, ``llm_direct_synced_at`` never stamped) onto a leg it has no
+	  evidence of ever having applied - chat gates shut on a working tenant the
+	  moment this deploys. ``llm_pool_synced_at`` is stamped ONLY by a
+	  CONFIRMED pool apply (``_stamp_converged_ok``) and is never set by
+	  anything on the direct leg, so it is false for exactly the tenants this
+	  exception is safe to apply to: a brand-new connect (never synced through
+	  any leg) and a tenant that went through a full disconnect/reset (which
+	  clears it - see ``onboarding._DISCONNECTED_LLM_FIELDS``) before
+	  reconnecting.
+	"""
+	if bool(settings.preset):
+		return False
+	enabled = _enabled_models(settings)
+	if len(enabled) != 1:
+		return False
+	m = enabled[0]
+	if _credential_type(m) != "subscription":
+		return False
+	accounts = _model_accounts(m)
+	if len(accounts) != 1:
+		return False
+	if not _upstream_has_renderer(_field(accounts[0], "upstream")):
+		return False
+	return not bool(getattr(settings, "llm_pool_synced_at", None))
 
 
 def pool_primary_model(settings) -> str:

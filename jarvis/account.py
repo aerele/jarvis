@@ -701,8 +701,20 @@ def is_ready_for_chat() -> dict:
 			settings, is_pool=False
 		):
 			return {"ready": False, "reason": "llm_provisioning"}
-	elif auth_mode in ("subscription", "oauth"):
-		# Both modes use the same local signal: llm_oauth_connected_at is
+	elif auth_mode == "subscription":
+		# Unified models[]-table subscription on the DIRECT leg (jarvis#715 step
+		# 3): no cliproxy sidecar, so - like api_key direct above - this gates on
+		# a CONFIRMED /llm-creds apply (llm_direct_synced_at), NOT
+		# llm_oauth_connected_at. That marker belongs to the legacy flat-field
+		# oauth flow only: save_llm_pool unconditionally clears it on every
+		# models[]-table save (see its comment), so gating here on it would
+		# never open chat for this leg.
+		if not getattr(settings, "llm_direct_synced_at", None) and not _confirm_apply_via_admin(
+			settings, is_pool=False
+		):
+			return {"ready": False, "reason": "llm_provisioning"}
+	elif auth_mode == "oauth":
+		# The legacy flat-field direct-oauth flow: llm_oauth_connected_at is
 		# set (read-only) when the oauth grant completes and the admin
 		# pushes the auth-profile blob to the container.
 		if not getattr(settings, "llm_oauth_connected_at", None):
@@ -1306,8 +1318,13 @@ def _llm_apply_confirmed(settings, pool_mode: bool) -> bool:
 	them - the whole value of this signal is that chat and the connection badge
 	read the same evidence. Pool marker for a pool (including a BYO api-key pool,
 	which has no sidecar but is still pushed through /llm-pool and still stamps
-	llm_pool_synced_at), the OAuth connect stamp for a direct subscription/oauth
-	tenant, the direct apply marker otherwise.
+	llm_pool_synced_at); the OAuth connect stamp ONLY for the legacy flat-field
+	direct-oauth tenant; the direct apply marker for everything else, including
+	a models[]-table subscription now taking the direct leg (jarvis#715 step 3) -
+	that leg pushes its own oauth blob and stamps llm_direct_synced_at exactly
+	like an api-key direct tenant does, never llm_oauth_connected_at (which
+	save_llm_pool unconditionally clears on every models[]-table save, by
+	design - see its comment).
 
 	Legacy workspaces on both legs are backfilled by patch (v1_10 for the pool,
 	v2_00_backfill_llm_direct_synced_at for direct), so an established tenant does
@@ -1315,7 +1332,7 @@ def _llm_apply_confirmed(settings, pool_mode: bool) -> bool:
 	"""
 	if pool_mode:
 		return bool(settings.get("llm_pool_synced_at"))
-	if (settings.get("llm_auth_mode") or "api_key").strip() in ("subscription", "oauth"):
+	if (settings.get("llm_auth_mode") or "api_key").strip() == "oauth":
 		return bool(settings.get("llm_oauth_connected_at"))
 	return bool(settings.get("llm_direct_synced_at"))
 

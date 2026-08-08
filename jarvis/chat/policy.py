@@ -99,7 +99,16 @@ def _llm_not_configured() -> bool:
 		if s.get("proxy_active"):
 			return False  # a pool is configured; pool health is admin's concern
 		mode = (s.get("llm_auth_mode") or "api_key").strip() or "api_key"
-		if mode in ("subscription", "oauth"):
+		if mode == "subscription":
+			# Unified models[]-table subscription on the DIRECT leg (jarvis#715):
+			# the credential lives in models[], not the flat oauth fields - a
+			# non-empty table IS the credential, mirroring _has_llm_config's
+			# models[] check. llm_oauth_connected_at belongs to the legacy
+			# flat-field flow and is unconditionally cleared by save_llm_pool on
+			# every models[]-table save, so gating on it here would block every
+			# send on a fully-working direct-leg subscription tenant.
+			return not s.get("models")
+		if mode == "oauth":
 			return not s.get("llm_oauth_connected_at")
 		key = s.get_password("llm_api_key", raise_exception=False) or ""
 		provider = (s.get("llm_provider") or "").strip()
