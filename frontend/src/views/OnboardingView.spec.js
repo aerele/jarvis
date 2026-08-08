@@ -39,6 +39,7 @@ const api = vi.hoisted(() => ({
 		),
 		confirmSignupPayment: vi.fn(),
 		syncConnection: vi.fn(async () => ({ synced: false })),
+		resendVerification: vi.fn(),
 	},
 }));
 vi.mock("@/api", () => api);
@@ -54,6 +55,7 @@ vi.mock("frappe-ui", () => ({
 		template: '<div v-if="message">{{ message }}</div>',
 	},
 	FeatherIcon: { name: "FeatherIcon", template: "<i />" },
+	Progress: { name: "Progress", template: '<div><slot name="hint" /></div>' },
 	call: vi.fn(),
 	dayjs: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
 	toast: { error: vi.fn(), success: vi.fn() },
@@ -231,5 +233,122 @@ describe("X8: a refused restart explains itself instead of a silent no-op", () =
 		await wrapper.vm.flow.checkStatus();
 		await flushPromises();
 		expect(wrapper.vm.restartHeldNote).toBe("");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// jarvis#297 P0-2a: the email-verification dead end - resend + change email.
+// ---------------------------------------------------------------------------
+describe("jarvis#297 P0-2a: verification is no longer a dead end", () => {
+	async function mountOnVerify(overrides = {}) {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "SIGNUP_VERIFICATION_REQUIRED",
+				pending_verification: true,
+				attempt_id: "att_1",
+				generation: 0,
+				email: "typo@exmaple.com",
+				...overrides,
+			})
+		);
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.pay.value).toBe(STATES.VERIFICATION_REQUIRED);
+		return wrapper;
+	}
+
+	it("RESEND is absent until the server grants can_resend_verification", async () => {
+		const wrapper = await mountOnVerify();
+		expect(wrapper.vm.verifyActions).toEqual([ACTIONS.VERIFY, ACTIONS.RESTART]);
+		expect(wrapper.vm.pay.canResendVerification).toBe(false);
+	});
+
+	it("RESEND appears once granted, sends, then disables itself for the cooldown", async () => {
+		const wrapper = await mountOnVerify({ can_resend_verification: true });
+		expect(wrapper.vm.verifyActions).toEqual([
+			ACTIONS.VERIFY,
+			ACTIONS.RESEND,
+			ACTIONS.RESTART,
+		]);
+		expect(wrapper.vm.payActionDisabled(ACTIONS.RESEND)).toBe(false);
+
+		api.onboardingPaymentApi.resendVerification.mockResolvedValue(
+			ENVELOPE({
+				code: "SIGNUP_VERIFICATION_REQUIRED",
+				pending_verification: true,
+				attempt_id: "att_1",
+				generation: 0,
+				can_resend_verification: true,
+			})
+		);
+		await wrapper.vm.onPayAction(ACTIONS.RESEND);
+		await flushPromises();
+
+		expect(api.onboardingPaymentApi.resendVerification).toHaveBeenCalledTimes(1);
+		// Truthful confirmation, and the button cannot be spammed while it cools.
+		expect(wrapper.vm.resendNote).toBe("We sent a new link to typo@exmaple.com.");
+		expect(wrapper.vm.payActionDisabled(ACTIONS.RESEND)).toBe(true);
+	});
+
+	it("a failed resend claims nothing sent and starts no cooldown", async () => {
+		const wrapper = await mountOnVerify({ can_resend_verification: true });
+		api.onboardingPaymentApi.resendVerification.mockResolvedValue({
+			status: 0,
+			body: null,
+			networkError: true,
+		});
+		await wrapper.vm.onPayAction(ACTIONS.RESEND);
+		await flushPromises();
+
+		expect(wrapper.vm.resendNote).toBe("");
+		expect(wrapper.vm.payActionDisabled(ACTIONS.RESEND)).toBe(false);
+	});
+
+	it("'Use a different email' walks back to Details, ready to re-request verification", async () => {
+		const wrapper = await mountOnVerify();
+		expect(wrapper.vm.payActionLabel(ACTIONS.RESTART)).toBe("Use a different email");
+		await wrapper.vm.onPayAction(ACTIONS.RESTART);
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.REVIEW);
+		expect(wrapper.vm.state.step).toBe("details");
+		// The mistyped address the customer typed is still there to correct, not
+		// wiped along with the machine.
+		expect(wrapper.vm.state.email).toBe("typo@exmaple.com");
+
+		// Re-submitting a corrected address re-requests verification exactly like
+		// the first attempt did - the existing signup path, unchanged.
+		api.onboardingPaymentApi.startSignup.mockResolvedValue(
+			ENVELOPE({
+				code: "SIGNUP_VERIFICATION_REQUIRED",
+				pending_verification: true,
+				attempt_id: "att_fixed",
+				generation: 0,
+				email: "real@example.com",
+			})
+		);
+		wrapper.vm.state.email = "real@example.com";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.planName = "pro";
+		await wrapper.vm.flow.submitReview({
+			email: "real@example.com",
+			company: "Acme",
+			plan: "pro",
+		});
+		await flushPromises();
+		expect(wrapper.vm.pay.value).toBe(STATES.VERIFICATION_REQUIRED);
+	});
+
+	it("VERIFY still works unchanged", async () => {
+		const wrapper = await mountOnVerify();
+		expect(wrapper.vm.payActionLabel(ACTIONS.VERIFY)).toBe("I've verified my email");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "SIGNUP_VERIFICATION_REQUIRED", pending_verification: true })
+		);
+		await wrapper.vm.onPayAction(ACTIONS.VERIFY);
+		await flushPromises();
+		// verifyAndContinue re-reads state exactly as it did before this change.
+		expect(api.onboardingPaymentApi.getOnboardingState).toHaveBeenCalled();
+		expect(wrapper.vm.pay.value).toBe(STATES.VERIFICATION_REQUIRED);
 	});
 });

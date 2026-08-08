@@ -153,7 +153,7 @@
 					v-if="selectedRun && selectedRun.preparation_mode === 'shadow'"
 					class="flex items-start gap-2 border-b bg-surface-violet-1 px-6 py-2.5 text-sm text-ink-violet-1"
 				>
-					<FeatherIcon name="eye" class="mt-0.5 size-4 shrink-0" />
+					<FeatherIcon name="eye" class="size-4 shrink-0" />
 					<span>
 						Preview (shadow) - this run is visible to the named reviewer only and is
 						not a compliant attestation. Promote the capability to live before relying

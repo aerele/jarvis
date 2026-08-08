@@ -65,7 +65,18 @@ class TestAuthorityDecide(FrappeTestCase):
 
 # Fields the integration tests mutate; snapshot/restore so a run against a real
 # site (Frappe Singles are not rolled back between tests) is left untouched.
-_FIELDS = ("agent_url", GEN, HANDLE, "last_sync_status")
+_FIELDS = ("agent_url", GEN, HANDLE, "last_sync_status", "jarvis_admin_customer_email")
+
+# Password fields the principal-change tests exercise (write_connection's
+# api_key/api_secret path) alongside agent_token, which the pre-existing tests
+# already wrote. Snapshotted/restored the same way: get_password before, drop
+# the __Auth row and re-set it (or clear it) after.
+_PASSWORD_FIELDS = (
+	"agent_token",
+	"jarvis_admin_api_key",
+	"jarvis_admin_api_secret",
+	"jarvis_admin_customer_password",
+)
 
 
 class _SettingsSnapshotCase(FrappeTestCase):
@@ -76,7 +87,7 @@ class _SettingsSnapshotCase(FrappeTestCase):
 		frappe.cache().delete_keys("jarvis:tenant_authority_invariant")
 		s = frappe.get_single("Jarvis Settings")
 		self._snap = {f: s.get(f) for f in _FIELDS}
-		self._token = s.get_password("agent_token", raise_exception=False) or ""
+		self._passwords = {f: s.get_password(f, raise_exception=False) or "" for f in _PASSWORD_FIELDS}
 
 	def tearDown(self):
 		from jarvis._password_utils import clear_settings_password, set_settings_password
@@ -84,10 +95,11 @@ class _SettingsSnapshotCase(FrappeTestCase):
 		s = frappe.get_single("Jarvis Settings")
 		for f, v in self._snap.items():
 			s.db_set(f, v)
-		if self._token:
-			set_settings_password(s, "agent_token", self._token)
-		else:
-			clear_settings_password(s, "agent_token")
+		for f, v in self._passwords.items():
+			if v:
+				set_settings_password(s, f, v)
+			else:
+				clear_settings_password(s, f)
 		frappe.db.commit()
 
 	def _store(self, agent_url, gen, handle):
@@ -149,6 +161,92 @@ class TestWriteConnectionGuard(_SettingsSnapshotCase):
 		self._store("", 0, "")
 		onboarding.write_connection({"agent_url": "ws://A", "agent_token": "tokA", GEN: 3, HANDLE: "A"})
 		self.assertEqual(self._read(), ("ws://A", 3, "A"))
+
+	def test_new_principal_at_the_old_generation_is_accepted_not_held(self):
+		"""jarvis#693: a stale (generation, handle) left over from a PREVIOUS admin
+		principal must not be compared against a fresh principal's own count. The
+		generation is a per-customer namespace, so a brand-new customer's first
+		claim is always generation 1 - identical to whatever the old customer last
+		held if the bench never got past 1 either. Without clearing on principal
+		change, this lands on the equal-generation/different-handle branch and is
+		HELD forever (the exact bug: pinned to a dead pool container forever,
+		reproduced end to end on 2026-08-05/06). A payload carrying new admin
+		credentials AND a connection in the SAME call (the shape a signup response
+		can take) must still land the new container."""
+		# The OLD principal's accepted connection: generation 1, container A.
+		self._store("ws://A", 1, "A")
+		onboarding.write_connection(
+			{
+				"api_key": "new-key",
+				"api_secret": "new-secret",
+				"customer": "cust-new@jarvis.invalid",
+				"agent_url": "ws://B",
+				"agent_token": "tokB",
+				GEN: 1,  # the NEW customer's own first claim - also generation 1
+				HANDLE: "B",  # a different container than the old principal's
+			}
+		)
+		# Accepted: new principal, new container, new generation namespace - not
+		# held as a divergence against the old principal's leftover state.
+		self.assertEqual(self._read(), ("ws://B", 1, "B"))
+
+	def test_principal_change_alone_clears_the_stored_authority(self):
+		"""Isolate the mechanism: credentials for a new principal arriving WITHOUT
+		a connection in the same call (the plain jarvis.onboarding.signup shape -
+		agent_url is not part of a signup response) must still forget the old
+		principal's (generation, handle), so the connection that follows in a
+		LATER call is judged on its own terms."""
+		self._store("ws://A", 6, "A")
+		onboarding.write_connection({"api_key": "new-key", "api_secret": "new-secret"})
+		_url, gen, handle = self._read()
+		self.assertEqual((gen, handle), (0, ""))
+		# The old connection itself is untouched by a credentials-only call - only
+		# the accepted-authority receipt is forgotten, exactly like tenant_authority
+		# .clear()'s documented contract.
+		self.assertEqual(_url, "ws://A")
+
+	def test_plain_agent_url_sync_does_not_clear_authority(self):
+		"""Regression guard: a call with no new principal (a daily sync_connection
+		poll, or a slow/duplicate connection payload) must NOT clear the accepted
+		authority - only credentials arriving trigger the reset."""
+		self._store("ws://A", 6, "A")
+		onboarding.write_connection({"agent_url": "ws://A", "agent_token": "tokA", GEN: 6, HANDLE: "A"})
+		self.assertEqual(self._read(), ("ws://A", 6, "A"))
+
+	def test_standalone_customer_password_does_not_clear_authority(self):
+		"""A lone customer_password is not proof of a new admin login: admin
+		re-serves it on every poll for up to an hour after minting it
+		(billing/signup.py ``_serve_signup_password``, kept-until-TTL not
+		deleted-on-read), and a fully-connected bench can still hit that poll
+		within the window. Clearing on this field alone would drop the P0-5
+		protection on an otherwise healthy connection for no reason - the real
+		new-principal signal is api_key/api_secret/customer, which always
+		accompanies a GENUINE new login and already trips the clear above."""
+		self._store("ws://A", 6, "A")
+		onboarding.write_connection({"customer_password": "rotated-secret"})
+		self.assertEqual(self._read(), ("ws://A", 6, "A"))
+
+	def test_signup_then_confirm_payment_across_two_calls_lands_the_new_container(self):
+		"""The real shape jarvis#693 reproduced in: credentials and the connection
+		arrive in TWO SEPARATE write_connection calls, not one. ``onboarding.signup``
+		persists the new principal's api_key/customer with no agent_url yet (nothing
+		to connect to before payment); ``finish_payment`` writes agent_url later, in
+		its own call, once admin's confirm_payment returns the container. Between
+		them this bench still held a PREVIOUS principal's (generation, handle) from
+		a prior tenancy that was never reset (an admin-side purge_customer with no
+		matching bench-side reset_onboarding, the documented two-step dev recipe run
+		as one step). The new customer's own first claim is generation 1 - the same
+		number the old principal was already sitting at - so without the clear on
+		the credentials-only call, the confirm_payment call's guard() sees an
+		equal-generation/different-handle divergence and holds forever."""
+		self._store("ws://A", 1, "A")
+		# signup(): new principal, no container yet.
+		onboarding.write_connection(
+			{"api_key": "new-key", "api_secret": "new-secret", "customer": "cust-new@jarvis.invalid"}
+		)
+		# finish_payment(): the connection arrives in its OWN call, later.
+		onboarding.write_connection({"agent_url": "ws://B", "agent_token": "tokB", GEN: 1, HANDLE: "B"})
+		self.assertEqual(self._read(), ("ws://B", 1, "B"))
 
 
 class TestResetClearsAuthority(_SettingsSnapshotCase):

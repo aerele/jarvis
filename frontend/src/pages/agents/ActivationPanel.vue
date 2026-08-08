@@ -84,7 +84,7 @@
 						v-if="mode === 'promote'"
 						class="flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
 					>
-						<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
+						<FeatherIcon name="alert-triangle" class="size-4 shrink-0" />
 						<div class="space-y-1">
 							<div>
 								This lets <span class="font-medium">{{ agentTitle }}</span> run
@@ -105,7 +105,7 @@
 						v-else
 						class="flex items-start gap-2 rounded-lg border border-outline-gray-2 bg-surface-gray-1 px-3 py-2 text-sm text-ink-gray-7"
 					>
-						<FeatherIcon name="eye-off" class="mt-0.5 size-4 shrink-0" />
+						<FeatherIcon name="eye-off" class="size-4 shrink-0" />
 						<div>
 							This stops <span class="font-medium">{{ agentTitle }}</span> from
 							running live. Future runs go back to a reviewer-only preview until it

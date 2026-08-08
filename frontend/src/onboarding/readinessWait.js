@@ -36,7 +36,13 @@ export function readinessWaitExhaustedMessage({ sawVerdict = false, detail = "" 
 	}
 	const trimmed = (detail || "").trim();
 	if (trimmed) {
-		return `Your workspace's last status: ${trimmed} We haven't been able to confirm that's finished, and we can't promise it's still progressing on its own. You're welcome to keep waiting and retry, or get a person to look into it.`;
+		// admin's details are phrases, not sentences ("applying your LLM
+		// configuration"), so interpolating one raw ran it straight into the next
+		// sentence: "...last status: applying your LLM configuration We haven't
+		// been able to confirm...". Close it when it does not close itself. This
+		// is punctuation only - the detail is still quoted, never reworded.
+		const closed = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+		return `Your workspace's last status: ${closed} We haven't been able to confirm that's finished, and we can't promise it's still progressing on its own. You're welcome to keep waiting and retry, or get a person to look into it.`;
 	}
 	return "Your AI connection saved, but we haven't been able to confirm your workspace has finished coming online. We can't promise it's still progressing on its own. You're welcome to keep waiting and retry, or get a person to look into it.";
 }

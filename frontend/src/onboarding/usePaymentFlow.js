@@ -50,6 +50,7 @@ import {
 	payPageUrl,
 	reduce,
 	noteStatusCheck,
+	noteVerificationResent,
 	isTerminalForPayment,
 } from "./paymentMachine.js";
 import { counterKey, shouldOfferSupport } from "./supportHandoff.js";
@@ -368,6 +369,50 @@ export function createPaymentFlow(deps) {
 		}
 	}
 
+	// ---- "Resend the link" (jarvis#297 P0-2a) -------------------------------
+	// Currently unreachable in production: the view only renders the button when
+	// the machine's canResendVerification is true, and admin never sends
+	// can_resend_verification today (see paymentCodes.js / paymentMachine.js
+	// comments). Built against the endpoint the control plane still needs to
+	// ship - see api.js's onboardingPaymentApi.resendVerification - so the wiring
+	// is already correct the day it exists and does nothing but time out
+	// (routed through the SAME offline/failure handling as every other call)
+	// until then. Takes the ONE action lock like its siblings, so a resend
+	// cannot race a verify/check/initiate.
+	async function resendVerification() {
+		const my = beginAction("resending");
+		if (!my) return { sent: false }; // an incompatible action already holds the lock
+		try {
+			let decoded;
+			try {
+				decoded = ingest(
+					await deadlined(
+						(signal) => api.resendVerification({ signal }),
+						fetchDeadlineMs,
+						"resend"
+					)
+				);
+			} catch (e) {
+				if (my !== token) return { sent: false };
+				absorb(offlineDecoded());
+				return { sent: false };
+			}
+			if (my !== token) return { sent: false };
+			const code = absorb(decoded);
+			// Only a genuine re-arm of THIS screen counts as a send: a failure, a
+			// rate limit, or an answer that moved the machine elsewhere (verified
+			// out from under the resend, a terminal code) starts no cooldown and
+			// claims nothing sent.
+			if (decoded.ok && code === CODES.SIGNUP_VERIFICATION_REQUIRED) {
+				state.value = noteVerificationResent(state.value, now());
+				return { sent: true };
+			}
+			return { sent: false };
+		} finally {
+			endAction(my);
+		}
+	}
+
 	// ---- submit review: start the signup exactly once ----------------------
 	async function submitReview({ email, company, plan, provider, billing } = {}) {
 		const my = beginAction(null); // SUBMIT_REVIEW sets the busy flag itself
@@ -558,18 +603,36 @@ export function createPaymentFlow(deps) {
 	}
 
 	// ---- provisioning: the old proceedAfterPay loop, fenced ----------------
-	async function waitForProvisioning() {
+	/**
+	 * @param {{onObservation?: (o: {answered: boolean, tenantStatus: string}) => void}} [opts]
+	 *   `onObservation` is called once per tick with what that tick actually saw,
+	 *   so the page can render the phase instead of one fixed sentence for the
+	 *   whole 90 seconds. Deliberately a callback rather than a machine event:
+	 *   these are observations, not transitions, and pushing them through apply()
+	 *   would either need new states or trip the strict reducer's
+	 *   illegal-transition telemetry. The poll's own control flow does not read
+	 *   it, so a throwing observer can never break the wait.
+	 */
+	async function waitForProvisioning(opts) {
 		if (provisioningInFlight) return { status: "already_running" };
 		provisioningInFlight = true;
 		try {
-			return await runProvisioningPoll();
+			return await runProvisioningPoll(opts);
 		} finally {
 			provisioningInFlight = false;
 		}
 	}
 
-	async function runProvisioningPoll() {
+	async function runProvisioningPoll({ onObservation } = {}) {
 		const my = token;
+		const observe = (answered, tenantStatus) => {
+			if (typeof onObservation !== "function") return;
+			try {
+				onObservation({ answered, tenantStatus: tenantStatus || "" });
+			} catch (e) {
+				// Rendering must never be able to break the provisioning wait.
+			}
+		};
 		// The transition into provisioning is legal only from paid - the readiness
 		// gate owns this surface, and `unknown -> provisioning` is the illegal move
 		// plan 02 names.
@@ -585,6 +648,7 @@ export function createPaymentFlow(deps) {
 				r = null;
 			}
 			if (my !== token) return { status: "superseded" };
+			observe(!!r, r && r.tenant_status);
 			if (r && (r.synced || r.tenant_status === "running")) {
 				return { status: "ready" };
 			}
@@ -607,6 +671,7 @@ export function createPaymentFlow(deps) {
 		state,
 		hydrate,
 		verifyAndContinue,
+		resendVerification,
 		submitReview,
 		initiatePayment,
 		checkStatus,

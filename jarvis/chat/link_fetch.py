@@ -97,10 +97,38 @@ _METADATA_IPS = {"169.254.169.254"}
 _USER_AGENT = "JarvisLinkFetch/1.0 (+personalise-note-capture)"
 
 
+# Failure classes carried on LinkFetchError.kind. The distinction that matters
+# to a caller is WHETHER THE REMOTE END EVER SPOKE: the first three kinds mean
+# this bench never got a byte back, which says nothing about the endpoint
+# itself, only about what this network can reach. jarvis.llm_key_probe turns
+# exactly that split into its "could not verify from here" verdict instead of
+# calling a container-only endpoint a failure (#680), so classify at the raise
+# site - matching on the message text would break the day one is reworded.
+ERR_INVALID_URL = "invalid_url"  # caller's URL is unusable (scheme/host/empty)
+ERR_UNRESOLVED = "unresolved"  # DNS gave us nothing
+ERR_BLOCKED_ADDRESS = "blocked_address"  # SSRF guard refused the resolved address
+ERR_CONNECT_FAILED = "connect_failed"  # socket/TLS/timeout before any response
+ERR_RESPONSE = "response"  # the remote DID answer; we rejected what it said
+
+# The three kinds that mean "this bench could not reach the endpoint at all".
+UNREACHABLE_KINDS = frozenset({ERR_UNRESOLVED, ERR_BLOCKED_ADDRESS, ERR_CONNECT_FAILED})
+
+
 class LinkFetchError(Exception):
 	"""Raised for any guard rejection or fetch failure. Callers treat this
 	(and any other exception this module might let through, defensively) as
-	"skip extraction, keep the note" - see the module docstring."""
+	"skip extraction, keep the note" - see the module docstring.
+
+	``kind`` is one of the ``ERR_*`` constants above. It defaults to
+	``ERR_RESPONSE`` rather than to an unreachable kind so that anything
+	constructed without an explicit class is treated as a definitive answer,
+	never silently softened into "we could not check" - a caller that grants
+	leniency on the unreachable kinds must only do so where this module really
+	said the network failed."""
+
+	def __init__(self, message: str, *, kind: str = ERR_RESPONSE):
+		super().__init__(message)
+		self.kind = kind
 
 
 # --------------------------------------------------------------------------- #
@@ -139,18 +167,21 @@ def _validate_host(hostname: str) -> list[str]:
 	extract`` connect to an address it already checked instead of letting the
 	HTTP client resolve the name a second, unchecked time."""
 	if not hostname:
-		raise LinkFetchError("URL has no host to validate.")
+		raise LinkFetchError("URL has no host to validate.", kind=ERR_INVALID_URL)
 	try:
 		infos = socket.getaddrinfo(hostname, None)
 	except Exception as exc:
-		raise LinkFetchError(f"Could not resolve host: {hostname}") from exc
+		raise LinkFetchError(f"Could not resolve host: {hostname}", kind=ERR_UNRESOLVED) from exc
 	if not infos:
-		raise LinkFetchError(f"Could not resolve host: {hostname}")
+		raise LinkFetchError(f"Could not resolve host: {hostname}", kind=ERR_UNRESOLVED)
 	addrs: list[str] = []
 	for info in infos:
 		addr = info[4][0]
 		if _is_blocked_ip(addr):
-			raise LinkFetchError(f"Host {hostname} resolves to a disallowed address ({addr}).")
+			raise LinkFetchError(
+				f"Host {hostname} resolves to a disallowed address ({addr}).",
+				kind=ERR_BLOCKED_ADDRESS,
+			)
 		addrs.append(addr)
 	return addrs
 
@@ -162,9 +193,11 @@ def _validate_url(url: str):
 	safe as any)."""
 	parsed = urlparse(url)
 	if parsed.scheme not in _ALLOWED_SCHEMES:
-		raise LinkFetchError(f"URL scheme must be http or https (got {parsed.scheme!r}).")
+		raise LinkFetchError(
+			f"URL scheme must be http or https (got {parsed.scheme!r}).", kind=ERR_INVALID_URL
+		)
 	if not parsed.hostname:
-		raise LinkFetchError("URL has no host.")
+		raise LinkFetchError("URL has no host.", kind=ERR_INVALID_URL)
 	vetted = _validate_host(parsed.hostname)
 	return parsed, vetted[0]
 
@@ -352,7 +385,7 @@ def fetch_and_extract(
 	docstring for why this raises instead of returning ``""``."""
 	current = (url or "").strip()
 	if not current:
-		raise LinkFetchError("No URL given.")
+		raise LinkFetchError("No URL given.", kind=ERR_INVALID_URL)
 
 	redirects = 0
 	while True:
@@ -360,7 +393,7 @@ def fetch_and_extract(
 		try:
 			resp, pool = _open_pinned(parsed, ip, timeout)
 		except (urllib3.exceptions.HTTPError, OSError) as exc:
-			raise LinkFetchError(f"Fetch failed: {exc}") from exc
+			raise LinkFetchError(f"Fetch failed: {exc}", kind=ERR_CONNECT_FAILED) from exc
 
 		try:
 			if resp.status in _REDIRECT_STATUSES:
@@ -430,7 +463,7 @@ def request_pinned(
 	"""
 	current = (url or "").strip()
 	if not current:
-		raise LinkFetchError("No URL given.")
+		raise LinkFetchError("No URL given.", kind=ERR_INVALID_URL)
 
 	parsed, ip = _validate_url(current)
 
@@ -443,7 +476,7 @@ def request_pinned(
 	try:
 		resp, pool = _open_pinned(parsed, ip, timeout, method=method, body=body, extra_headers=hdrs)
 	except (urllib3.exceptions.HTTPError, OSError) as exc:
-		raise LinkFetchError(f"Request failed: {exc}") from exc
+		raise LinkFetchError(f"Request failed: {exc}", kind=ERR_CONNECT_FAILED) from exc
 
 	try:
 		data = _read_capped(resp, max_bytes)

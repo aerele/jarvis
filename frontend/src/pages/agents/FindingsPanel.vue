@@ -45,20 +45,22 @@
 		     Show the pages it wrote (with links) instead of a findings list, so a
 		     successful run reads as "N pages written", never a failure / "0 findings". -->
 		<template v-if="isScribe">
+			<!-- x-circle, not Banner's fixed error icon: matches AgentActivityTab's own
+				 run_failed convention (icon: "x-circle"), which Banner has no prop to
+				 select. -->
 			<div
 				v-if="run.status === 'failed'"
 				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
 			>
-				<FeatherIcon name="x-circle" class="mt-0.5 size-4 shrink-0" />
+				<FeatherIcon name="x-circle" class="size-4 shrink-0" />
 				<span>{{ run.error || "This run failed before writing any pages." }}</span>
 			</div>
-			<div
+			<Banner
 				v-else-if="run.coverage_note"
-				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
-			>
-				<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
-				<span>{{ coverageNote }}.</span>
-			</div>
+				class="mt-4"
+				type="warning"
+				:message="`${coverageNote}.`"
+			/>
 
 			<div class="mt-5 text-base font-medium text-ink-gray-9">
 				{{ scribePages.length || run.pages_written || 0 }} wiki page{{
@@ -92,22 +94,20 @@
 
 		<template v-else>
 			<!-- coverage-honesty banner: a truncated scan must NEVER read as all-clear -->
-			<div
+			<Banner
 				v-if="coverageWarning"
-				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
-			>
-				<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
-				<span>
-					Partial scan - {{ coverageNote }}. Treat gaps as unreviewed, not clean.
-				</span>
-			</div>
+				class="mt-4"
+				type="warning"
+				:message="`Partial scan - ${coverageNote}. Treat gaps as unreviewed, not clean.`"
+			/>
 
-			<!-- failed run: surface the error; no findings snapshot was recorded -->
+			<!-- failed run: surface the error; no findings snapshot was recorded.
+				 x-circle, not Banner's fixed error icon: see the scribe branch above. -->
 			<div
 				v-if="run.status === 'failed'"
 				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
 			>
-				<FeatherIcon name="x-circle" class="mt-0.5 size-4 shrink-0" />
+				<FeatherIcon name="x-circle" class="size-4 shrink-0" />
 				<span>{{ run.error || "This run failed before recording findings." }}</span>
 			</div>
 
@@ -295,6 +295,7 @@ import { ref, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
+import Banner from "@/components/Banner.vue";
 import { timeAgo, exactDate, formatDate } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";

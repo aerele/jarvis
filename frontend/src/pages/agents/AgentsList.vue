@@ -47,17 +47,15 @@
 		<TabBar class="shrink-0" :tabs="TABS" :model-value="tab" @update:model-value="setTab" />
 
 		<!-- persistent apply-failure banner: the reason must survive the toast and
-		     be reachable without hovering a badge (keyboard/SR access) -->
+		     be reachable without hovering a badge (keyboard/SR access). x-circle, not
+		     Banner's fixed error icon: matches AgentActivityTab's own run_failed
+		     convention, which Banner has no prop to select. -->
 		<div
 			v-if="canApply && syncFailed && !sync.pending"
 			class="mx-5 mt-3 flex shrink-0 items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
 		>
-			<FeatherIcon name="x-circle" class="mt-0.5 size-4 shrink-0" />
-			<span>
-				Applying agents to your assistant failed<template v-if="syncFailureReason">
-					- {{ syncFailureReason }}</template
-				>. Use Retry apply to try again.
-			</span>
+			<FeatherIcon name="x-circle" class="size-4 shrink-0" />
+			<span>{{ syncFailureMessage }}</span>
 		</div>
 
 		<!-- Activity: self-contained feed (own search + pagination) -->
@@ -467,6 +465,12 @@ const sync = reactive({ pending: false, dirty: false, status: "" });
 const syncHuman = computed(() => humaniseSyncStatus(sync.status));
 const syncFailed = computed(() => syncHuman.value.kind === "failed");
 const syncFailureReason = computed(() => syncHuman.value.detail);
+const syncFailureMessage = computed(
+	() =>
+		`Applying agents to your assistant failed${
+			syncFailureReason.value ? ` - ${syncFailureReason.value}` : ""
+		}. Use Retry apply to try again.`
+);
 
 let syncTimer = null;
 async function loadSyncStatus() {

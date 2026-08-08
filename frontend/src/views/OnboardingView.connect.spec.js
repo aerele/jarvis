@@ -111,6 +111,7 @@ vi.mock("frappe-ui", () => {
 			props: ["message"],
 			template: '<div v-if="message">{{ message }}</div>',
 		},
+		Progress: { name: "Progress", template: '<div><slot name="hint" /></div>' },
 		dayjs: () => ({ format: () => "", fromNow: () => "" }),
 		toast: { error: vi.fn(), success: vi.fn() },
 	};
@@ -313,16 +314,42 @@ describe("§10.4 resume, resumable, terminal semantics", () => {
 	});
 
 	// The sibling of the case above: at least ONE live poll response came back
-	// (admin genuinely is converging it) before the connection dropped for good.
-	// That IS honestly "still finishing on its own", and must keep saying so.
-	it("keeps the 'still finishing' message when at least one poll confirmed real progress", async () => {
+	// (admin genuinely was converging it) before the deadline elapsed. That is a
+	// real observation and the copy still reports it - but it reports it as
+	// something SEEN, anchored to when it was seen, rather than as a promise that
+	// the job is still running now. jarvis#709 removed "it's still finishing on
+	// its own" from the readiness wait for asserting exactly that; this branch was
+	// the last place the phrase survived, and it made the same unverifiable claim
+	// from a past observation.
+	it("reports observed progress in the past tense, never as a self-healing promise", async () => {
 		const w = await mountConnect();
 
 		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
 
 		expect(routerReplace).not.toHaveBeenCalled();
 		expect(w.vm.state.connectPhase).toBe("retry");
-		expect(w.vm.state.connectMessage).toMatch(/still finishing on its own/i);
+		// It still distinguishes this case from the never-confirmed one above.
+		expect(w.vm.state.connectMessage).toMatch(/was still running when we last checked/i);
+		expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+		w.unmount();
+	});
+
+	// The phrase jarvis#709 deleted must not survive anywhere on this screen,
+	// headline included - a short heading asserting progress is the same claim as
+	// a sentence asserting it.
+	it("no connect terminal renders 'still finishing' in its message or its headline", async () => {
+		const w = await mountConnect();
+
+		const terminals = [
+			() => w.vm.onTerminal({ timedOut: true, neverConfirmed: true }),
+			() => w.vm.onTerminal({ timedOut: true, neverConfirmed: false }),
+		];
+		for (const drive of terminals) {
+			drive();
+			expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+			expect(w.vm.state.connectTitle).not.toMatch(/still finishing setup/i);
+			expect(w.vm.state.connectTitle).toBeTruthy();
+		}
 		w.unmount();
 	});
 
@@ -619,6 +646,730 @@ describe("jarvis#708 chat-readiness wait exhaustion: honest copy + a real exit",
 
 		expect(w.vm.state.connectPhase).toBe("support");
 		expect(w.vm.state.connectSupportOffered).toBe(false);
+		w.unmount();
+	});
+});
+
+// jarvis#727: a customer whose only model cannot be verified reached a screen
+// whose single action was Retry, re-running the exact thing that had just been
+// watched fail to converge - and could not reach Settings to add another model,
+// because readiness.js puts llm_pool_provisioning / llm_provisioning /
+// readiness_unconfirmed in NOT_ONBOARDED_REASONS, so AppShell's gate covers
+// every route but this wizard. The exit therefore has to live here. These pin
+// BOTH halves of the rule: it appears where the pipeline was observed to stall
+// on the chosen configuration, and it stays away where nothing was observed at
+// all (offering it there would blame a model nobody examined).
+describe("jarvis#727 an unverifiable model has a way out, not only a Retry", () => {
+	function labels(w) {
+		return w.findAll("button").map((b) => b.attributes("label") || b.text());
+	}
+
+	it("the reproduced dead end (op confirmed in flight, never finished) offers a different model", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		expect(labels(w)).toContain("Use a different model");
+		w.unmount();
+	});
+
+	it("a deadline that never confirmed anything keeps Retry alone: nothing points at the model", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: true });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		expect(labels(w)).not.toContain("Use a different model");
+		expect(labels(w)).toContain("Retry"); // still an exit, just an honest one
+		w.unmount();
+	});
+
+	it("a readiness ceiling where admin kept answering offers the model change", async () => {
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "llm_pool_provisioning",
+			detail: "applying your LLM configuration",
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		w.unmount();
+	});
+
+	// Review round. The offer used to be gated on `sawVerdict`, which means only
+	// "a poll returned JSON". readiness_unconfirmed IS a well-formed 200, and
+	// jarvis/account.py documents it as "admin could not be asked" - so the old
+	// gate told a customer their chosen connection had failed on the strength of a
+	// wait in which nothing about that connection was ever established.
+	it("a ceiling where every poll answered readiness_unconfirmed does NOT offer it", async () => {
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "readiness_unconfirmed",
+			retryable: true,
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		expect(labels(w)).not.toContain("Use a different model");
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+		w.unmount();
+	});
+
+	// The judgement call, recorded: container_provisioning is admin saying "not
+	// Ready" for anything that is neither Suspended nor SupportRequired, and in the
+	// reproduced class of failure admin's own detail rides that code ("Still
+	// verifying your OpenAI subscription"). So a named container counts.
+	it("a ceiling that only ever saw container_provisioning DOES offer it", async () => {
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "container_provisioning",
+			detail: "Still verifying your OpenAI subscription.",
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		w.unmount();
+	});
+
+	// "At least once", never "on the last poll": ninety seconds of a named apply
+	// followed by one transient unconfirmed is still a wait that watched this
+	// configuration fail to converge.
+	it("one late unconfirmed poll does not erase a wait that DID name the apply", async () => {
+		let n = 0;
+		api.isReadyForChat.mockImplementation(async () => {
+			n += 1;
+			return n < 40
+				? { ready: false, reason: "llm_pool_provisioning" }
+				: { ready: false, reason: "readiness_unconfirmed", retryable: true };
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		w.unmount();
+	});
+
+	it("a readiness ceiling that never reached admin does NOT offer it", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockRejectedValue(new Error("bench hiccup"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+		w.unmount();
+	});
+
+	// The three verdicts waitPhases marks `stop`. A different model resolves none
+	// of them, and authority_repair_required must show no self-service action at
+	// all, so the blocked panel keeps its own shape.
+	it("a stopping verdict never offers a model change", async () => {
+		for (const reason of [
+			"authority_repair_required",
+			"subscription_suspended",
+			"site_replaced",
+		]) {
+			const w = await mountConnect();
+			w.vm.connectModelChangeOffered = true; // a stale offer from an earlier attempt
+			w.vm.noteReadiness({ answered: true, reason, detail: "admin's own sentence" });
+			await flushPromises();
+
+			expect(w.vm.state.connectPhase).toBe("blocked");
+			expect(w.vm.connectModelChangeOffered).toBe(false);
+			expect(labels(w)).not.toContain("Use a different model");
+			w.unmount();
+		}
+	});
+
+	it("an operation-level failure offers the change beside Retry, not instead of it", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "retry", message: "We hit a snag applying your AI connection." });
+		await flushPromises();
+
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		expect(labels(w)).toEqual(expect.arrayContaining(["Retry", "Use a different model"]));
+		w.unmount();
+	});
+
+	// The whole point: the customer lands back on their own choice, and the next
+	// Start is a genuinely NEW attempt. Reusing this attempt's idempotency key
+	// would have admin dedupe the new configuration straight back to the stuck
+	// operation, and a surviving currentOpId would make Retry re-follow it.
+	it("taking the exit returns to the editable form and starts a genuinely fresh attempt", async () => {
+		// A transient apply failure: terminal (so saveConnect resolves) and, unlike
+		// a rejection or a supersession, one that deliberately KEEPS the idempotency
+		// key so a Retry re-follows the same operation. That is exactly the state
+		// the exit has to undo.
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "failed",
+			code: "LLM_APPLY_FAILED",
+			message: "We hit a snag applying your AI connection.",
+			retry_after_seconds: 0,
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(50);
+		await p;
+		const firstKey = saveMock.mock.calls[0][0];
+		expect(firstKey).toBeTruthy();
+		expect(sessionStorage.getItem(IDEM_KEY)).toBe(firstKey);
+		expect(w.vm.currentOpId).toBe("op1");
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		sessionStorage.setItem(OP_STORE_KEY, "op1"); // as a mid-apply reload would leave it
+
+		w.vm.chooseDifferentModel();
+		await flushPromises();
+
+		expect(w.vm.state.finishing).toBe(false); // the editor, with their choice still in it
+		expect(w.vm.state.connectPhase).toBe("");
+		expect(w.vm.state.connectBlockReason).toMatch(/pick a different model/i);
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		expect(w.vm.currentOpId).toBe("");
+		expect(sessionStorage.getItem(IDEM_KEY)).toBe(null);
+		expect(sessionStorage.getItem(OP_STORE_KEY)).toBe(null);
+
+		const p2 = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(50);
+		await p2;
+		expect(saveMock.mock.calls[1][0]).not.toBe(firstKey);
+		w.unmount();
+	});
+
+	// A live wait must not outlive the exit: without this, the ceiling of the wait
+	// the customer just walked away from fires minutes later and yanks them back
+	// out of the form.
+	it("a wait still in flight stops when the customer takes the exit", async () => {
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "llm_pool_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3 * 3000);
+		await flushPromises();
+		const pollsBefore = api.isReadyForChat.mock.calls.length;
+		expect(pollsBefore).toBeGreaterThan(0);
+
+		w.vm.chooseDifferentModel();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(api.isReadyForChat.mock.calls.length).toBeLessThanOrEqual(pollsBefore + 1);
+		expect(w.vm.state.finishing).toBe(false);
+		expect(w.vm.state.connectPhase).toBe("");
+		w.unmount();
+	});
+
+	// The mode:"legacy" twin of the two tests above. Both jarvis#727 edits were
+	// applied to followLegacyReadiness with a comment claiming parity, and the
+	// review round showed BOTH could be reverted with the whole suite still green.
+	function legacySave() {
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({ apply_operation: null, resumable: false, mode: "legacy" }),
+		});
+	}
+
+	it("legacy: a ceiling that named the apply offers the model change", async () => {
+		legacySave();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "llm_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(30 * 2500);
+		await p;
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		expect(labels(w)).toContain("Use a different model");
+		w.unmount();
+	});
+
+	it("legacy: a ceiling that named nothing does NOT offer the model change", async () => {
+		legacySave();
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "readiness_unconfirmed",
+			retryable: true,
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(30 * 2500);
+		await p;
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		w.unmount();
+	});
+
+	it("legacy: a wait still in flight stops when the customer takes the exit", async () => {
+		legacySave();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "llm_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear();
+
+		w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3 * 2500);
+		await flushPromises();
+		const pollsBefore = api.isReadyForChat.mock.calls.length;
+		expect(pollsBefore).toBeGreaterThan(0);
+
+		w.vm.chooseDifferentModel();
+		await vi.advanceTimersByTimeAsync(30 * 2500);
+		await flushPromises();
+
+		expect(api.isReadyForChat.mock.calls.length).toBeLessThanOrEqual(pollsBefore + 1);
+		expect(w.vm.state.finishing).toBe(false);
+		expect(w.vm.state.connectPhase).toBe("");
+		w.unmount();
+	});
+
+	it("a genuinely fresh Start withdraws the offer until this attempt earns it too", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+
+		w.vm.saveConnect();
+		await flushPromises();
+
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		w.unmount();
+	});
+});
+
+// jarvis#727 part 2. The headline used to be a fixed "Setting up Jarvis" above a
+// phase list jarvis#722 had already made real. waitPhases.setupHeadline owns the
+// mapping and its honesty rule; these pin the WIRING - that the view feeds it the
+// live phase, and that the never-observed states still render the generic line.
+describe("jarvis#727 the setup headline follows the live phase", () => {
+	it("names the brain phase while the apply operation is being followed", async () => {
+		const w = await mountConnect();
+
+		w.vm.saveConnect();
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("working");
+		expect(w.vm.setupTitle).toBe("Giving Jarvis a brain");
+		w.unmount();
+	});
+
+	it("follows admin's own reason once the readiness wait starts answering", async () => {
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "container_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.setupTitle).toBe("Bringing your setup online");
+		w.unmount();
+	});
+
+	// Recorded decision, not an accident: mode:"legacy" mints NO durable apply
+	// operation, and still shows the brain headline. What grounds the phase is that
+	// the save for this configuration was accepted and is being applied, which is
+	// equally true on both paths - and the phase ROW beneath the headline has said
+	// exactly this on the legacy path since jarvis#722.
+	it("legacy mode shows the brain headline too, matching the row beneath it", async () => {
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({ apply_operation: null, resumable: false, mode: "legacy" }),
+		});
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "llm_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.saveConnect();
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("working");
+		expect(w.vm.setupTitle).toBe("Giving Jarvis a brain");
+		// The row names the same subject as the headline. Which of the two apply
+		// labels is showing depends on whether the first poll has landed yet (the
+		// inFlight fallback before it, readinessPhase's after) - both are LLM_APPLY,
+		// and it is the KIND, not the wording, that the headline is derived from.
+		expect(w.vm.readinessStage.kind).toBe("llm_apply");
+		expect(w.vm.readinessStage.label).toMatch(/applying your AI/i);
+		w.unmount();
+	});
+
+	// Review round: a Retry re-follows the SAME operation via followDescriptor,
+	// which flips back to the working screen. Without clearing the last attempt's
+	// observation there, the ceiling's stale phase was re-rendered as the live one
+	// - and this PR wires that phase into the h1, so the stale reading became the
+	// biggest text on the screen.
+	it("a Retry after a ceiling does not re-render the previous wait's phase", async () => {
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "container_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.setupTitle).toBe("Bringing your setup online"); // the wait that just ended
+
+		// Never terminal, so the re-follow parks on the working screen.
+		api.getLlmApplyOperation.mockResolvedValue(pending);
+		w.vm.retryConnect();
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("working");
+		expect(w.vm.setupTitle).toBe("Giving Jarvis a brain");
+		w.unmount();
+	});
+
+	it("claims nothing when the poll answered nothing", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockRejectedValue(new Error("bench hiccup"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.setupTitle).toBe("Setting up Jarvis");
+		w.unmount();
+	});
+
+	it("says it is opening chat only once a ready verdict has actually navigated", async () => {
+		api.getLlmApplyOperation.mockResolvedValue(readyStatus);
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(50);
+		await p;
+
+		expect(routerReplace).toHaveBeenCalledTimes(1);
+		expect(w.vm.setupTitle).toBe("Opening your chat");
+		w.unmount();
+	});
+
+	// The product owner asked twice to drop "workspace" from onboarding copy: at
+	// this point the customer does not have one.
+	it("no wait-screen headline or subtitle says workspace", async () => {
+		const w = await mountConnect();
+
+		w.vm.saveConnect();
+		await flushPromises();
+		expect(w.vm.setupTitle).not.toMatch(/workspace/i);
+		expect(w.vm.state.finishSubtitle).not.toMatch(/workspace/i);
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		expect(w.vm.setupTitle).not.toMatch(/workspace/i);
+		expect(w.vm.state.finishSubtitle).not.toMatch(/workspace/i);
+		w.unmount();
+	});
+});
+
+describe("staged readiness phases: the screen renders what the poll observed", () => {
+	// Every one of these 40 polls used to be discarded except the last detail, so
+	// the wait showed one fixed sentence for two minutes.
+	it("an observed provisioning reason becomes the live phase line", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "container_provisioning",
+			detail: "applying your LLM configuration",
+		});
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.readinessStage.state).toBe("active");
+		expect(w.vm.readinessStage.label).toMatch(/coming online/i);
+		expect(w.vm.readinessStage.detail).toBe("applying your LLM configuration");
+		w.unmount();
+	});
+
+	it("readiness_unconfirmed renders as unknown, never as an active phase", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "readiness_unconfirmed" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.readinessStage.state).toBe("unknown");
+		expect(w.vm.readinessStage.label).not.toMatch(/coming online|applying/i);
+		w.unmount();
+	});
+
+	it("a poll that throws never claims a phase", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockRejectedValue(new Error("network"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.readinessStage.observed).toBe(false);
+		expect(w.vm.readinessStage.state).toBe("unknown");
+		w.unmount();
+	});
+
+	// admin paged a human. Retrying payment or reconnecting here could make it
+	// worse, so the wait must stop rather than run to a ceiling whose copy invites
+	// exactly that.
+	it("authority_repair_required stops the wait and blocks, quoting admin verbatim", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		const detail = "Your payment is safe. Please don't pay again while we sort this out.";
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "authority_repair_required",
+			detail,
+		});
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("blocked");
+		expect(w.vm.state.connectMessage).toBe(detail);
+
+		// Running out the rest of the ceiling must NOT convert it into a retry.
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+		expect(w.vm.state.connectPhase).toBe("blocked");
+		expect(routerReplace).not.toHaveBeenCalled();
+		w.unmount();
+	});
+
+	// jarvis#709's behaviour, unchanged: the ceiling still offers support beside
+	// Retry, and the message is still built from what the run observed.
+	it("the poll ceiling still offers support and still uses the observed-only message", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "signup" });
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+		expect(w.vm.state.connectMessage).not.toMatch(/still finishing on its own/i);
+		expect(w.vm.state.connectTitle).not.toMatch(/still finishing setup/i);
+		w.unmount();
+	});
+});
+
+// The payment-confirming screen. This is the moment right after the customer
+// pays: they are sent back to the SPA and the bench asks the control plane
+// whether the payment landed. Before this it rendered the marketing intro tour,
+// because state.step is still the default "intro" until the mount reconcile
+// resolves, and the correction for that ran only AFTER the awaits.
+describe("the payment-confirming wait", () => {
+	function returnFromPayPage() {
+		window.history.replaceState(null, "", "/jarvis/onboarding?pay=done");
+	}
+
+	it("shows the confirming screen, not the intro tour, while the mount reconcile runs", async () => {
+		returnFromPayPage();
+		let release;
+		api.onboardingPaymentApi.getOnboardingState.mockImplementation(
+			() => new Promise((r) => (release = r))
+		);
+
+		const w = mount(OnboardingView);
+		await flushPromises();
+
+		// Mid-reconcile: the round trip has not answered yet.
+		expect(w.vm.showConfirming).toBe(true);
+		expect(w.vm.state.step).toBe("pay");
+		// jarvis#728: the confirming screen is a single round trip, not a
+		// tens-of-seconds wait, so it gets the short-wait spinner, not the
+		// PaymentConfirmingArt canvas illustration (which no longer mounts here).
+		expect(w.find('[aria-label="Loading"]').exists()).toBe(true);
+		expect(w.find("canvas").exists()).toBe(false);
+
+		release({
+			status: 200,
+			body: {
+				message: {
+					ok: true,
+					contract_version: 2,
+					data: { code: "BENCH_NO_SIGNUP_CONTEXT" },
+					context: {},
+				},
+			},
+		});
+		await flushPromises();
+
+		// Resolved: the confirming screen hands over rather than sticking.
+		expect(w.vm.showConfirming).toBe(false);
+		w.unmount();
+	});
+
+	it("is not shown on an ordinary mount that did not come back from checkout", async () => {
+		window.history.replaceState(null, "", "/jarvis/onboarding");
+		const w = mount(OnboardingView);
+		await flushPromises();
+		expect(w.vm.showConfirming).toBe(false);
+		w.unmount();
+	});
+
+	// The regression this was written against: showConfirming was originally
+	// derived from busy === "checking", which ONLY the explicit "Check payment
+	// status" button sets. The post-checkout reconcile never sets it, so the
+	// screen never appeared on the path it exists for.
+	it("does not depend on the status-check busy flag", async () => {
+		returnFromPayPage();
+		let release;
+		api.onboardingPaymentApi.getOnboardingState.mockImplementation(
+			() => new Promise((r) => (release = r))
+		);
+		const w = mount(OnboardingView);
+		await flushPromises();
+
+		expect(w.vm.pay.busy).not.toBe("checking");
+		expect(w.vm.showConfirming).toBe(true);
+
+		release({
+			status: 200,
+			body: {
+				message: {
+					ok: true,
+					contract_version: 2,
+					data: { code: "BENCH_NO_SIGNUP_CONTEXT" },
+					context: {},
+				},
+			},
+		});
+		await flushPromises();
+		w.unmount();
+	});
+});
+
+describe("the phase row never claims a check it has not made", () => {
+	// The regression: readinessSeen was seeded {answered:false}, and the phase row
+	// renders during the whole apply operation - a window strictly larger than the
+	// readiness wait. So the first frame after a successful save announced "We
+	// couldn't reach your workspace to check", a FAILED check, before one had been
+	// attempted. That is the same false-claim class jarvis#708/#709 were about,
+	// only inverted, and the old fixed-sentence screen never told that lie.
+	it("shows the apply phase, not a failed check, before any readiness poll runs", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying" });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("working");
+		expect(w.vm.readinessStage.label).not.toMatch(/couldn't reach|could not reach/i);
+		expect(w.vm.readinessStage.observed).toBe(false);
+		expect(w.vm.readinessStage.state).toBe("active");
+		w.unmount();
+	});
+
+	it("a poll that genuinely answered nothing still reports the failed check", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockRejectedValue(new Error("network"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.readinessStage.label).toMatch(/couldn't reach/i);
+		expect(w.vm.readinessStage.state).toBe("unknown");
+		w.unmount();
+	});
+});
+
+describe("every connect terminal carries its own headline", () => {
+	// enterSaveRefusal was the one writer of connectPhase="retry" that never set
+	// connectTitle, so a rate-limited save rendered the generic "We couldn't
+	// confirm your setup" over a rate-limit body - or worse, a STALE headline left
+	// behind by an earlier attempt, since nothing ever clears it.
+	it("a rate-limited save gets a headline that matches its body", async () => {
+		const w = await mountConnect();
+
+		w.vm.enterSaveRefusal(30);
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.state.connectMessage).toMatch(/too many changes/i);
+		expect(w.vm.state.connectTitle).toBeTruthy();
+		expect(w.vm.state.connectTitle).not.toMatch(/couldn't confirm your setup/i);
+		w.unmount();
+	});
+
+	it("a rate limit after an earlier terminal does not inherit the stale headline", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: true });
+		const stale = w.vm.state.connectTitle;
+		expect(stale).toBeTruthy();
+
+		w.vm.enterSaveRefusal(30);
+		expect(w.vm.state.connectTitle).not.toBe(stale);
 		w.unmount();
 	});
 });

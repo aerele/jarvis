@@ -309,8 +309,16 @@ export const saveLlmPool = (
 export const disconnectLlm = () => call("jarvis.onboarding.disconnect_llm");
 // Pre-save "Test" probe for ONE api-key model row (never persists, never
 // touches the fleet/container - see jarvis/llm_key_probe.py). args:
-// {provider, model, api_key, base_url}. Returns
-// {ok, checks:[{check,ok,detail}], provider, local_endpoint, caveat}.
+// {provider, model, api_key, base_url, use_stored_key}. Returns
+// {ok, verdict, checks:[{check,ok,detail}], provider, local_endpoint, caveat}.
+// `verdict` is "pass" | "fail" | "unverified" and is what decides how the result
+// renders: "unverified" means the bench never reached the endpoint, which is a
+// statement about this network and not a failure the customer caused, so it must
+// not show in red (#680). `ok` stays strictly verdict === "pass", so anything
+// gating on it keeps today's strictness.
+// `use_stored_key` asks the server to load the saved key for this provider
+// rather than a typed one (#679). The key is never sent to the browser in either
+// direction, so this flag is the only way to test an already-saved credential.
 export const testLlmApiKey = (args) => call("jarvis.llm_key_probe.test_llm_api_key", args);
 
 // --- Onboarding wizard (managed signup) ---
@@ -411,6 +419,13 @@ export const onboardingPaymentApi = {
 	confirmSignupPayment: (payload, opts) =>
 		rawOnboardingCall("jarvis.onboarding.finish_payment", { payload }, opts),
 	syncConnection: () => call("jarvis.onboarding.sync_connection"),
+	// jarvis#297 P0-2a: "Resend the link". This bench method does not exist yet -
+	// the wizard only ever calls it when the machine's canResendVerification is
+	// true, and admin never sends that flag today, so this stays unreachable in
+	// production. Wired against the endpoint name the fix's report specifies, so
+	// wiring it up is the only step left once both planes ship their half.
+	resendVerification: (opts) =>
+		rawOnboardingCall("jarvis.onboarding.resend_verification_email", {}, opts),
 };
 export const isOnboarded = () => call("jarvis.account.is_onboarded");
 // args: {provider, model, api_key, base_url, auth_mode, force}
@@ -469,6 +484,12 @@ export const disconnectSubscription = () => call("jarvis.oauth.api.disconnect");
 // --- LLM Monitor (System-Manager gated server-side). Real Bifrost usage, NOT the getUsage estimate. ---
 export const getLlmUsage = () => call("jarvis.account.get_llm_usage");
 export const getLlmConnectionStatus = () => call("jarvis.account.get_llm_connection_status");
+// The member-tier half of the same badge (jarvis#711). Returns ONLY { state },
+// one of ok / applying / attention / down - no shape, no model or provider
+// names, no profile ids, and no reason for "attention". Any workspace user may
+// call it; an admin uses getLlmConnectionStatus above instead, which is a
+// superset of this verdict.
+export const getLlmConnectionHealth = () => call("jarvis.account.get_llm_connection_health");
 export const getAccount = () => call("jarvis.account.get_account");
 // BILLING plan lifecycle. Not to be confused with disconnectSubscription
 // above, which drops the LLM PROVIDER subscription (ChatGPT/Claude OAuth).

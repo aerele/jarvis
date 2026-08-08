@@ -170,7 +170,7 @@
 						>
 							<FeatherIcon
 								name="alert-triangle"
-								class="mt-0.5 size-4 shrink-0 text-ink-amber-3"
+								class="size-4 shrink-0 text-ink-amber-3"
 							/>
 							<span class="text-sm font-medium text-ink-gray-8">
 								Server scripts are disabled on this bench — deterministic actions
@@ -284,7 +284,7 @@
 						Condition is valid.
 					</div>
 					<div v-else class="flex items-start gap-2 text-sm text-ink-red-4" role="alert">
-						<FeatherIcon name="alert-circle" class="mt-0.5 size-4 shrink-0" />
+						<FeatherIcon name="alert-circle" class="size-4 shrink-0" />
 						<span>{{ testResult.error || "Condition is not valid." }}</span>
 					</div>
 					<div

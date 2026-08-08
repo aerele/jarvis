@@ -1,8 +1,10 @@
 """TDD tests for customer-side LLM monitor wrappers (Plan 3 Phase F).
 
 Tests: account.get_llm_usage (short-circuit for direct tenants; passthrough
-for proxy tenants; admin error surfaces as frappe.ValidationError) and
-account.get_llm_connection_status (field remapping; no token material).
+for proxy tenants; admin error surfaces as frappe.ValidationError),
+account.get_llm_connection_status (field remapping; no token material) and
+account.get_llm_connection_health (the member-tier verdict, jarvis#711: what a
+non-admin may learn about the workspace, and what the payload must never carry).
 """
 
 from unittest.mock import patch
@@ -13,6 +15,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import account, admin_client
 from jarvis.account import _has_llm_config
 from jarvis.exceptions import AdminValidationError
+from jarvis.permissions import ensure_jarvis_user_role
 
 
 class TestGetLlmUsage(FrappeTestCase):
@@ -393,6 +396,356 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		m.assert_not_called()
 		self.assertEqual(out["disconnected"], True)
 		self.assertEqual(out["default_model"], "")
+
+
+MEMBER_USER = "jarvis-connhealth-member@example.com"
+
+# Every field get_llm_connection_status hands an admin. The member endpoint must
+# return NONE of them, and the assertion is written against this list rather than
+# against a handful of names so a field added to the admin payload is covered the
+# day it lands.
+ADMIN_ONLY_FIELDS = (
+	"pool_mode",
+	"model_count",
+	"routing_mode",
+	"sync_status",
+	"proxy_active",
+	"disconnected",
+	"health",
+	"attention_reason",
+	"auth_present",
+	"oauth_expires_at",
+	"profile_ids",
+	"default_model",
+)
+
+
+def _ensure_member_user() -> None:
+	"""A plain workspace MEMBER: a System User holding "Jarvis User" (as every
+	real chat user does) and NOT System Manager or Jarvis Admin. Idempotent, and
+	it strips the admin roles if a previous run or another suite granted them -
+	this site is shared, and a member who quietly became an admin would turn the
+	whole class into a tautology."""
+	ensure_jarvis_user_role()  # the test site may not have run after_migrate
+	if frappe.db.exists("User", MEMBER_USER):
+		doc = frappe.get_doc("User", MEMBER_USER)
+		roles = set(frappe.get_roles(MEMBER_USER))
+		stale = {"System Manager", "Jarvis Admin"} & roles
+		if stale:
+			doc.remove_roles(*stale)
+		if "Jarvis User" not in roles:
+			doc.add_roles("Jarvis User")
+		# Re-assert the two fields has_jarvis_access reads besides roles. Another
+		# suite on this shared site disabling the row, or flipping it to a Website
+		# User, would otherwise fail every test in this class on the guard rather
+		# than on the behaviour each one names.
+		if doc.enabled != 1 or doc.user_type != "System User":
+			doc.enabled = 1
+			doc.user_type = "System User"
+			doc.save(ignore_permissions=True)
+		frappe.db.commit()
+		return
+	doc = frappe.get_doc(
+		{
+			"doctype": "User",
+			"email": MEMBER_USER,
+			"first_name": "Conn",
+			"last_name": "Member",
+			"enabled": 1,
+			"send_welcome_email": 0,
+			"user_type": "System User",
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	doc.add_roles("Jarvis User")
+	frappe.db.commit()
+
+
+class TestGetLlmConnectionHealth(FrappeTestCase):
+	"""The member-tier Status badge (jarvis#711).
+
+	The badge used to be a hardcoded green "Connected" for anyone who was not an
+	admin, because get_llm_connection_status is require_jarvis_admin and a member
+	could not fetch a verdict at all. get_llm_connection_health is the member's
+	own endpoint, and these tests pin the two halves of its contract: it tells a
+	member the truth about whether chat works, and it tells them nothing else.
+
+	Driven as a REAL non-admin session (frappe.set_user) through the whitelisted
+	function, never by patching the guard and inspecting the body. The guard is
+	half of what is being tested, so stubbing it would assert nothing.
+	"""
+
+	_FIELDS = (
+		"proxy_active",
+		"llm_model",
+		"routing_mode",
+		"last_sync_status",
+		"last_subscription_status",
+		"llm_pool_synced_at",
+	)
+
+	def setUp(self):
+		_ensure_member_user()
+		self._orig_user = frappe.session.user
+		# frappe.get_single serves a CACHED doc, so a db.set_single_value written
+		# here is invisible to the endpoint unless the cache is dropped first
+		# (the stale-Single flake this suite has hit before).
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		self._saved = {f: frappe.db.get_single_value("Jarvis Settings", f) for f in self._FIELDS}
+		# Same shared-site hazard the sibling class documents: health reads the
+		# latest completed turn, which is real table data here, so one stray
+		# errored assistant row would flip every "ok" case in this class. Pinned
+		# by PATCH, never by deleting rows - wiping a shared site's data from a
+		# test is how live tenants were destroyed here before. The cases that care
+		# about turn history override these.
+		for attr in ("_last_turn_errored", "_last_turn_succeeded"):
+			p = patch.object(account, attr, return_value=False)
+			p.start()
+			self.addCleanup(p.stop)
+
+	def tearDown(self):
+		# Restore the session FIRST: everything below writes.
+		frappe.set_user(self._orig_user)
+		for field, value in self._saved.items():
+			frappe.db.set_single_value("Jarvis Settings", field, value)
+		frappe.db.commit()
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+
+	def _seed(self, **values):
+		"""Write Single fields and make them visible to frappe.get_single."""
+		for field, value in values.items():
+			frappe.db.set_single_value("Jarvis Settings", field, value)
+		frappe.db.commit()
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+
+	def _as_member(self, fn=None):
+		"""Run ``fn`` (default: the member endpoint) in a real MEMBER_USER
+		session and restore the caller's identity whatever happens."""
+		fn = fn or account.get_llm_connection_health
+		frappe.set_user(MEMBER_USER)
+		try:
+			return fn()
+		finally:
+			frappe.set_user(self._orig_user)
+
+	def _seed_serving_pool(self, **overrides):
+		"""A pool the container has confirmed and is serving. The base state every
+		health case below perturbs by exactly one field."""
+		values = {
+			"proxy_active": 1,
+			"last_sync_status": "ok (pool_update via admin)",
+			"llm_pool_synced_at": "2026-07-30 10:00:00",
+			"last_subscription_status": "",
+		}
+		values.update(overrides)
+		self._seed(**values)
+
+	# ---- the gate -------------------------------------------------------- #
+
+	def test_a_member_may_call_it(self):
+		"""The premise of the whole fix. A member could not reach any verdict
+		before, which is why the badge was a constant."""
+		self._seed_serving_pool()
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			out = self._as_member()
+		self.assertEqual(out["state"], "ok")
+
+	def test_a_member_still_cannot_reach_the_admin_endpoint(self):
+		"""The new endpoint is ADDITIVE. get_llm_connection_status's guard is
+		untouched, so the payload with the pool shape, model names and profile
+		ids stays admin-only."""
+		with self.assertRaises(frappe.PermissionError):
+			self._as_member(account.get_llm_connection_status)
+
+	def test_guest_is_refused(self):
+		"""require_jarvis_access rejects Guest before roles are even consulted -
+		is_system_user names Guest explicitly.
+
+		This drives the Python function directly, so it exercises THAT in-body
+		guard and nothing else. Frappe refuses a Guest on the HTTP path too, but
+		the decorator does not wrap the function: that check lives in the request
+		dispatcher (frappe.is_whitelisted), which no direct call reaches. The
+		in-body guard is the one that has to hold, so it is the one under test.
+		"""
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				account.get_llm_connection_health()
+		finally:
+			frappe.set_user(self._orig_user)
+
+	# ---- what the payload may contain ------------------------------------ #
+
+	def test_the_payload_is_exactly_one_field(self):
+		"""Key-set equality, not a spot check of a few names: a field added here
+		later has to be a deliberate edit to this assertion."""
+		self._seed_serving_pool()
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			out = self._as_member()
+		self.assertEqual(set(out.keys()), {"state"})
+
+	def test_no_admin_field_appears_in_the_member_payload(self):
+		"""Named forbidden fields, so a failure says WHICH one leaked. Shape
+		(pool_mode / model_count / routing_mode / sync_status / proxy_active),
+		credential presence (disconnected / auth_present / profile_ids), model
+		names (default_model), OAuth timing (oauth_expires_at) and the reason
+		behind "attention" are all absent."""
+		self._seed_serving_pool()
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			out = self._as_member()
+		for field in ADMIN_ONLY_FIELDS:
+			self.assertNotIn(field, out, f"member payload leaked {field}")
+
+	def test_the_state_is_always_from_the_member_vocabulary(self):
+		self._seed_serving_pool()
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			out = self._as_member()
+		self.assertIn(out["state"], account.MEMBER_HEALTH_STATES)
+		self.assertNotIn("disconnected", account.MEMBER_HEALTH_STATES)
+
+	def test_it_never_round_trips_to_admin(self):
+		"""A proxied tenant is where get_llm_connection_status calls
+		post_llm_auth_status. Doing that here would put proxy_active - a topology
+		fact absent from the body - into the response LATENCY."""
+		self._seed_serving_pool()
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status") as m:
+				self._as_member()
+		m.assert_not_called()
+
+	# ---- the verdict itself ---------------------------------------------- #
+
+	def test_a_member_sees_attention_not_green_when_a_save_failed(self):
+		"""The defect, from the member's seat: a workspace whose last apply
+		failed used to render green for them."""
+		self._seed_serving_pool(last_sync_status="failed: fleet returned 502")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			out = self._as_member()
+		self.assertEqual(out["state"], "attention")
+
+	def test_a_member_sees_applying_while_a_save_is_in_flight(self):
+		self._seed_serving_pool(last_sync_status="pending: admin applying config")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			out = self._as_member()
+		self.assertEqual(out["state"], "applying")
+
+	def test_a_member_sees_down_when_the_container_never_got_the_config(self):
+		self._seed_serving_pool(llm_pool_synced_at="")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			out = self._as_member()
+		self.assertEqual(out["state"], "down")
+
+	def test_a_disconnected_workspace_is_down_with_no_state_of_its_own(self):
+		""" "disconnected" is an admin-only distinction. Telling a member their
+		workspace holds no credential is credential-presence disclosure, and it
+		buys them nothing "down" does not already say. So the two workspaces are
+		indistinguishable here - asserted as payload equality, not as two separate
+		expectations that could drift apart."""
+		with patch.object(account, "_has_llm_config", return_value=False):
+			no_credential = self._as_member()
+		self._seed_serving_pool(llm_pool_synced_at="")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			never_applied = self._as_member()
+		self.assertEqual(no_credential, {"state": "down"})
+		self.assertEqual(no_credential, never_applied)
+
+	# ---- the disclosure decision ----------------------------------------- #
+
+	def test_every_attention_cause_gives_the_member_one_identical_payload(self):
+		"""The settled disclosure question (jarvis#711).
+
+		_llm_health splits "attention" three ways for an admin, and one of those
+		values - subscription_unverified - can only arise on a workspace that
+		authenticates with a CHAT SUBSCRIPTION rather than an api key, so it names
+		the credential kind. That is pool shape. A member therefore gets the
+		verdict and no cause, and the cause is OMITTED rather than mapped: any
+		member-visible value reachable only from subscription_unverified would
+		recover it exactly.
+
+		The three payloads are compared to each other, so this fails if a future
+		change makes ANY of them distinguishable, not merely if a named field
+		reappears.
+		"""
+		payloads = {}
+
+		self._seed_serving_pool(last_sync_status="failed: fleet returned 502")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			payloads["sync_failed"] = self._as_member()
+
+		self._seed_serving_pool()
+		with patch.object(account, "_last_turn_errored", return_value=True):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				payloads["turn_error"] = self._as_member()
+
+		self._seed_serving_pool(last_subscription_status="unverified")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			payloads["subscription_unverified"] = self._as_member()
+
+		for cause, out in payloads.items():
+			self.assertEqual(out, {"state": "attention"}, f"{cause} was not collapsed")
+		self.assertEqual(len({tuple(sorted(p.items())) for p in payloads.values()}), 1)
+
+	def test_the_admin_can_still_tell_those_three_apart(self):
+		"""The control for the test above. If _llm_health stopped distinguishing
+		the causes, the collapse assertion would pass vacuously and #714's work
+		would have been silently undone - so assert here that the distinction
+		still exists on the admin side, and is only dropped on the way to a
+		member."""
+		# No inline try/finally, unlike _as_member: this switches TO the identity
+		# tearDown restores anyway, and tearDown's first statement is the restore,
+		# so an assertion failing below cannot strand the shared site.
+		frappe.set_user("Administrator")
+		reasons = []
+
+		self._seed_serving_pool(last_sync_status="failed: fleet returned 502")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+				reasons.append(account.get_llm_connection_status()["attention_reason"])
+
+		self._seed_serving_pool()
+		with patch.object(account, "_last_turn_errored", return_value=True):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+					reasons.append(account.get_llm_connection_status()["attention_reason"])
+
+		self._seed_serving_pool(last_subscription_status="unverified")
+		with patch.object(account, "compute_pool_mode", return_value=True):
+			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+				reasons.append(account.get_llm_connection_status()["attention_reason"])
+
+		self.assertEqual(reasons, ["sync_failed", "turn_error", "subscription_unverified"])
+
+	# ---- fail closed ------------------------------------------------------ #
+
+	def test_an_unrecognised_health_value_degrades_to_down(self):
+		"""The clamp. _llm_health is stubbed here BECAUSE the subject is what
+		happens when it grows a fifth value the member vocabulary has no word
+		for - there is no way to reach that branch through real settings. A state
+		the SPA cannot map is how a badge falls back to its default, and the
+		default this issue is about was green."""
+		self._seed_serving_pool()
+		with patch.object(account, "_llm_health", return_value=("quiescent", "")):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				out = self._as_member()
+		self.assertEqual(out, {"state": "down"})
+
+
+class TestGetLlmConnectionStatusIsUnchanged(FrappeTestCase):
+	"""jarvis#711 added a member endpoint alongside the admin one and must not
+	have touched the admin one. This pins the admin payload's exact key set, so
+	a member-tier change that trimmed a field an admin still needs fails here."""
+
+	def test_an_admin_still_gets_every_field(self):
+		frappe.set_user("Administrator")
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		with patch.object(account, "_has_llm_config", return_value=True):
+			with patch.object(account, "compute_pool_mode", return_value=True):
+				with patch.object(account, "_last_turn_errored", return_value=False):
+					with patch.object(account, "_last_turn_succeeded", return_value=False):
+						with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
+							out = account.get_llm_connection_status()
+		self.assertEqual(set(out.keys()), set(ADMIN_ONLY_FIELDS))
+		self.assertNotIn("state", out)
 
 
 class TestLastTurnErrored(FrappeTestCase):

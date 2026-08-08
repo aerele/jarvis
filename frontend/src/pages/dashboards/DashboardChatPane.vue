@@ -153,6 +153,24 @@
 			<div class="mt-2 flex items-center justify-between gap-2">
 				<div class="flex items-center gap-1.5">
 					<VoiceRecorder v-if="caps.stt_enabled" compact @transcript="onTranscript" />
+					<!-- Voice not set up is an ACTIONABLE gap, so show it faded and say so
+					     rather than vanishing; deliberately off / a transient error stay
+					     hidden (see voice.stt_state). -->
+					<button
+						v-else-if="caps.stt_state === 'unconfigured'"
+						class="flex size-7 items-center justify-center rounded text-ink-gray-4 opacity-55"
+						style="cursor: default"
+						aria-disabled="true"
+						title="Voice input is not set up on this workspace"
+						aria-label="Voice input is not set up on this workspace"
+						@click="
+							toast.info(
+								`Voice input isn't set up on this workspace yet — ask your administrator.`
+							)
+						"
+					>
+						<FeatherIcon name="mic" class="size-4" />
+					</button>
 					<!-- explicit data-mode: Auto leaves it to the opening interview
 					     (the agent asks before the first build); Static bakes the
 					     numbers in (one-time report); Live declares view-time sources.

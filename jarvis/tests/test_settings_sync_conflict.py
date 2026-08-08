@@ -37,7 +37,7 @@ inside ``frappe.db.sql`` at the statement that can still conflict after the fix
 the statement, so no test here exercises a genuine engine-produced ER_CHECKREAD,
 and nothing here would catch a divergence between the real error and this
 reconstruction. That is the same limitation the admin-plane fix
-(jarvis-admin-v2 #264) recorded, and it is not fixable in this repo's CI: CI runs
+(jarvis-admin-v2 PR #264) recorded, and it is not fixable in this repo's CI: CI runs
 MariaDB 10.11, which has no ``innodb_snapshot_isolation`` at all and cannot raise
 1020 for this reason under any query. Reproducing the real error needs MariaDB
 11.6+ and two connections:
@@ -61,11 +61,13 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import admin_client, onboarding
 from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 	_PENDING_APPLYING_STATUS,
+	_SETTINGS_WRITE_ATTEMPTS,
 	_write_settings_fields,
 	reconcile_pending_llm_sync,
 )
 
 SETTINGS = "Jarvis Settings"
+POOL_MODEL_DT = "Jarvis LLM Pool Model"
 _READINESS = "jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness"
 _UNEXPECTED = "failed: unexpected error; see Error Log"
 
@@ -83,6 +85,11 @@ _TOUCHED = (
 	"llm_base_url",
 	"proxy_active",
 	"chat_was_ready_at",
+	"preset",
+	# _sync_via_admin's restart leg calls installed_apps_sync.record_synced_snapshot,
+	# which writes this. Snapshotted so a test run leaves the operator's real record
+	# exactly as it found it.
+	"installed_apps_synced",
 )
 _SECRETS = ("llm_api_key", "jarvis_admin_api_key", "jarvis_admin_api_secret")
 
@@ -143,6 +150,13 @@ class _Base(FrappeTestCase):
 		s = frappe.get_single(SETTINGS)
 		self._snap = {f: s.get(f) for f in _TOUCHED}
 		self._snap_secrets = {f: (s.get_password(f, raise_exception=False) or "") for f in _SECRETS}
+		# A leftover pool row - from the v1_seed_llm_models migration on a configured
+		# site, or from another module's pool tests against this same shared Single -
+		# flips compute_pool_mode and _has_llm_config, which would route these
+		# single-model assertions down the pool leg and fail them ORDER-DEPENDENTLY.
+		# The sibling suites (test_settings_on_update, test_save_llm_pool_operation)
+		# clear the same state for the same reason.
+		frappe.db.delete(POOL_MODEL_DT, {"parenttype": SETTINGS, "parent": SETTINGS})
 		# A connected SINGLE-MODEL workspace mid-apply: exactly #713's shape.
 		frappe.db.set_single_value(
 			SETTINGS,
@@ -151,6 +165,7 @@ class _Base(FrappeTestCase):
 				"llm_model": "deepseek-v4-flash",
 				"llm_auth_mode": "api_key",
 				"llm_base_url": "",
+				"preset": "",
 				"proxy_active": 0,
 				"last_sync_status": "pending: provisioning container",
 				"llm_direct_synced_at": None,
@@ -165,6 +180,7 @@ class _Base(FrappeTestCase):
 		s.db_set("jarvis_admin_api_key", "adminkey")
 		s.db_set("jarvis_admin_api_secret", "adminsecret")
 		frappe.db.commit()
+		self._clear_cooldown()
 
 	def tearDown(self):
 		from frappe.utils.password import remove_encrypted_password
@@ -174,6 +190,32 @@ class _Base(FrappeTestCase):
 			remove_encrypted_password(SETTINGS, SETTINGS, f)
 			frappe.db.set_single_value(SETTINGS, f, v, update_modified=False)
 		frappe.db.commit()
+		self._clear_cooldown()
+
+	@staticmethod
+	@contextlib.contextmanager
+	def _as_worker():
+		"""Run the body as a background job, which is where #713 happened and the
+		only context that owns its transaction outright.
+
+		Not a convenience: ``_write_settings_fields`` replays a conflict ONLY when
+		``_owns_transaction()`` is true, precisely so a request or a mid-save never
+		has its transaction ended underneath it. ``frappe.local.job`` is what
+		``execute_job`` sets, so setting it is what makes these tests exercise the
+		real worker path rather than a shape production never takes."""
+		previous = getattr(frappe.local, "job", None)
+		frappe.local.job = frappe._dict(method="test", job_name="test", after_job=None)
+		try:
+			yield
+		finally:
+			frappe.local.job = previous
+
+	@staticmethod
+	def _clear_cooldown():
+		"""The Resync push cooldown lives in redis, which no test transaction rolls
+		back. Left behind, one test's push throttles the next test's for three
+		minutes - and which tests those are depends on execution order."""
+		frappe.cache().delete_value(onboarding._RESYNC_COOLDOWN_KEY)
 
 	def _settings(self):
 		return frappe.get_single(SETTINGS)
@@ -188,7 +230,7 @@ class TestSettingsWriteSurvivesAConflict(_Base):
 	def test_it_does_not_take_the_doctype_wide_for_update_that_failed_in_713(self):
 		"""The load-bearing structural fix. ``db_set``'s pre-read locks EVERY
 		Jarvis Settings row, so a write of one status field conflicted with a
-		concurrent write of any of the ~200 - which is how a readiness marker
+		concurrent write to any of the 100 rows a live workspace has - which is how a readiness marker
 		killed a sync stamp. Asserted against ``db_set`` in the same test so the
 		difference is the claim, not a snapshot of one implementation."""
 		guarded, direct = [], []
@@ -221,7 +263,7 @@ class TestSettingsWriteSurvivesAConflict(_Base):
 		"""The ordinary case. The competing writer has committed and moved on, so
 		the replay - which runs on a FRESH snapshot, because the rollback is what
 		ends the doomed transaction - simply succeeds."""
-		with _conflict_on("last_sync_status", times=1) as state:
+		with self._as_worker(), _conflict_on("last_sync_status", times=1) as state:
 			landed = _write_settings_fields(self._settings(), {"last_sync_status": "ok (replayed)"})
 		self.assertTrue(landed)
 		self.assertEqual(state["raised"], 1)
@@ -231,11 +273,35 @@ class TestSettingsWriteSurvivesAConflict(_Base):
 		"""Bounded, and it does not raise: the caller decides what a lost race
 		means for the customer, and for every caller here the answer is a
 		recoverable state, never an exception on its way to an Error Log."""
-		with _conflict_on("last_sync_status") as state:
+		with self._as_worker(), _conflict_on("last_sync_status") as state:
 			landed = _write_settings_fields(self._settings(), {"last_sync_status": "ok (never)"})
 		self.assertFalse(landed)
 		self.assertGreaterEqual(state["raised"], 2, "the write is replayed, not attempted once")
 		self.assertEqual(_status(), "pending: provisioning container", "the old value stands")
+
+	def test_a_request_reports_the_lost_race_without_ending_a_transaction_it_owns_not(self):
+		"""Half of the safety rule. A request's transaction belongs to the request,
+		so the replay is withheld - but the conflict is REPORTED, not raised. Raising
+		would put a transient race back in front of a customer, which is #713 itself,
+		and it would land hardest on _reconcile_pending_applying: the SPA polls it
+		every few seconds and its contract is that it never raises."""
+		with _conflict_on("last_sync_status"), patch.object(frappe.local.db, "rollback") as rb:
+			landed = _write_settings_fields(self._settings(), {"last_sync_status": "ok (request)"})
+		self.assertFalse(landed)
+		rb.assert_not_called()
+
+	def test_a_conflict_nested_in_a_save_is_raised_so_the_whole_save_fails(self):
+		"""The other half, and the reason the nesting question is asked separately
+		from the job question. on_update writes the pending status while the save
+		still holds uncommitted field writes of its own; swallowing a conflict there
+		would let the save be reported as a success with everything except
+		last_sync_status discarded."""
+		frappe.flags.currently_saving.append((SETTINGS, SETTINGS))
+		try:
+			with _conflict_on("last_sync_status"), self.assertRaises(frappe.QueryDeadlockError):
+				_write_settings_fields(self._settings(), {"last_sync_status": "ok (in save)"})
+		finally:
+			frappe.flags.currently_saving.remove((SETTINGS, SETTINGS))
 
 	def test_it_swallows_nothing_but_a_write_conflict(self):
 		"""A programmer error or a schema fault must not be absorbed into a
@@ -277,15 +343,22 @@ class TestSyncRecoversFromAConflict(_Base):
 		"""The customer-visible defect. "unexpected error" is what
 		``humaniseSyncStatus`` renders as "Last sync failed", on a workspace whose
 		container was serving the new config the whole time."""
-		with self._applying_then_ready(), _conflict_on("llm_direct_synced_at"):
+		with self._as_worker(), self._applying_then_ready(), _conflict_on("llm_direct_synced_at") as state:
 			self._settings()._sync_via_admin("restart")
 		self.assertNotIn(_UNEXPECTED, _status())
 		self.assertEqual(_status(), _PENDING_APPLYING_STATUS)
+		# The status alone does NOT prove the replay ran: _sync_via_admin's
+		# _WRITE_CONFLICT_ERRORS backstop writes the same marker, so a version that
+		# never retried would look identical from outside. The attempt count is what
+		# separates them.
+		self.assertEqual(
+			state["raised"], _SETTINGS_WRITE_ATTEMPTS, "the stamp must exhaust its replays first"
+		)
 
 	def test_the_stamp_still_lands_when_the_conflict_clears(self):
 		"""The fix must not make the happy path pessimistic: one lost race is
 		replayed into a normal, fully stamped success."""
-		with self._applying_then_ready(), _conflict_on("llm_direct_synced_at", times=1):
+		with self._as_worker(), self._applying_then_ready(), _conflict_on("llm_direct_synced_at", times=1):
 			self._settings()._sync_via_admin("restart")
 		self.assertTrue(_status().startswith("ok"))
 		self.assertTrue(_direct_marker())
@@ -294,7 +367,7 @@ class TestSyncRecoversFromAConflict(_Base):
 		"""Why the pending marker rather than softer failure wording: it is the
 		state ``reconcile_pending_llm_sync`` (and the SPA's own poller) converges.
 		The apply is real, so recording it is the only thing outstanding."""
-		with self._applying_then_ready(), _conflict_on("llm_direct_synced_at"):
+		with self._as_worker(), self._applying_then_ready(), _conflict_on("llm_direct_synced_at"):
 			self._settings()._sync_via_admin("restart")
 		self.assertEqual(_status(), _PENDING_APPLYING_STATUS)
 
@@ -381,6 +454,46 @@ class TestResyncLlm(_Base):
 			out = onboarding.resync_llm()
 		self.assertEqual(out["leg"], "pool")
 		self.assertEqual([c.kwargs.get("job_id") for c in enq.call_args_list], ["jarvis_settings_sync:pool"])
+
+	def test_a_second_click_inside_the_cooldown_pushes_nothing(self):
+		"""A status that has not moved is exactly what makes someone click again, and
+		frappe's job dedupe stops covering the moment the first worker exits. Without
+		the cooldown each further click is another container re-render against the
+		customer's shared rotate-ops budget."""
+		with patch(_READINESS, return_value=("Configuring", "")), patch("frappe.enqueue") as enq:
+			first = onboarding.resync_llm()
+			second = onboarding.resync_llm()
+		self.assertEqual(first["outcome"], "queued")
+		self.assertEqual(second["outcome"], "throttled")
+		self.assertEqual(second["leg"], "")
+		self.assertEqual(len(enq.call_args_list), 1, "the second click must enqueue nothing")
+
+	def test_a_push_that_queued_nothing_does_not_arm_the_cooldown(self):
+		"""Arming before the push would turn one failed call into a three-minute
+		lockout - the dead end this endpoint exists to remove, self-inflicted."""
+		with patch(_READINESS, return_value=("Configuring", "")):
+			with patch("frappe.enqueue", side_effect=RuntimeError("queue down")):
+				with self.assertRaises(RuntimeError):
+					onboarding.resync_llm()
+			with patch("frappe.enqueue") as enq:
+				out = onboarding.resync_llm()
+		self.assertEqual(out["outcome"], "queued", "the retry must not be throttled by a failed push")
+		self.assertEqual(len(enq.call_args_list), 1)
+
+	def test_the_cooldown_never_blocks_the_probe_that_costs_nothing(self):
+		"""Throttling the Ready path would be the wrong trade: it neither pushes nor
+		restarts, and "your config is already live" is the best answer a Resync can
+		give. It stays available even straight after a throttled click."""
+		with patch(_READINESS, return_value=("Configuring", "")), patch("frappe.enqueue"):
+			onboarding.resync_llm()
+		# Without this the test could not tell a bypassed cooldown from no cooldown.
+		self.assertTrue(
+			frappe.cache().get_value(onboarding._RESYNC_COOLDOWN_KEY), "the cooldown must be armed"
+		)
+		with patch(_READINESS, return_value=("Ready", "")), patch("frappe.enqueue") as enq:
+			out = onboarding.resync_llm()
+		self.assertEqual(out["outcome"], "converged")
+		enq.assert_not_called()
 
 	def test_it_refuses_a_workspace_with_nothing_to_re_drive(self):
 		"""No credential means no configuration to push; queueing one would spend a

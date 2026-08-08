@@ -46,6 +46,13 @@ GATED_ENDPOINTS = [
 	("jarvis.account", "check_billing_payment_status", {}),
 	("jarvis.account", "get_llm_usage", {}),
 	("jarvis.account", "get_llm_connection_status", {}),
+	# MEMBER-tier, unlike every other entry in this list: gated by
+	# require_jarvis_access, so an ordinary workspace user is MEANT to pass it.
+	# It is listed for the other half of that gate - Guest must still be refused,
+	# and the Guest case below is what proves it. That a real non-admin can call
+	# it, and gets back a verdict carrying no shape, is asserted separately in
+	# test_llm_monitor.TestGetLlmConnectionHealth (jarvis#711).
+	("jarvis.account", "get_llm_connection_health", {}),
 	("jarvis.oauth.api", "begin_paste_signin", {"provider": "OpenAI", "model": "gpt-5.5"}),
 	(
 		"jarvis.oauth.api",

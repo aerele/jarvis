@@ -256,3 +256,24 @@ test("nothing is claimed when there is no honest number to give", () => {
 		assert.equal(payLinkDeadlineNote(bad), "", `expected "" for ${String(bad)}`);
 	}
 });
+
+// ---------------------------------------------------------------------------
+// jarvis#297 P0-2a: the email-verification dead end.
+// ---------------------------------------------------------------------------
+test("verification offers a way past a mistyped address, not just VERIFY", () => {
+	const entry = copyFor(CODES.SIGNUP_VERIFICATION_REQUIRED);
+	assert.ok(entry.actions.includes(ACTIONS.VERIFY));
+	assert.ok(entry.actions.includes(ACTIONS.RESTART));
+	assert.equal(actionLabelFor(entry, ACTIONS.RESTART), "Use a different email");
+	// "Start again" would undersell it - nothing else about the signup is being
+	// restarted, only the address.
+	assert.notEqual(actionLabelFor(entry, ACTIONS.RESTART), "Start again");
+});
+
+test("RESEND is never baked into the verification row either: it is a granted capability", () => {
+	// Same reasoning paymentCodes.test.js already asserts for RESUME (above): the
+	// view splices it in only once paymentMachine's canResendVerification says
+	// the server actually granted it, never listed statically here.
+	assert.ok(!copyFor(CODES.SIGNUP_VERIFICATION_REQUIRED).actions.includes(ACTIONS.RESEND));
+	assert.equal(actionLabelFor({}, ACTIONS.RESEND), "Resend the link");
+});

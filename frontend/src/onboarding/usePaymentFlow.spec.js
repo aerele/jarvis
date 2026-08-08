@@ -274,6 +274,118 @@ describe("verification continues in one round trip", () => {
 });
 
 // ---------------------------------------------------------------------------
+// jarvis#297 P0-2a: the email-verification dead end - resend + change email.
+// ---------------------------------------------------------------------------
+describe("resend the verification link", () => {
+	test("a successful resend reports {sent:true} and starts the cooldown", async () => {
+		const api = makeApi({
+			resendVerification: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+					pending_verification: true,
+					attempt_id: "att_1",
+					generation: 0,
+					can_resend_verification: true,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, now: () => 1_000_000 });
+		const out = await flow.resendVerification();
+		expect(out).toEqual({ sent: true });
+		expect(flow.state.value.resendCooldownUntil).toBe(1_030_000);
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+	});
+
+	test("a failed resend reports {sent:false} and starts no cooldown", async () => {
+		const api = makeApi({
+			resendVerification: vi.fn(async () => ({ status: 0, body: null, networkError: true })),
+		});
+		const { flow } = makeFlow({ api });
+		const out = await flow.resendVerification();
+		expect(out).toEqual({ sent: false });
+		expect(flow.state.value.resendCooldownUntil).toBe(0);
+	});
+
+	test("the resend button guards its own round trip (a triple-click is one call)", async () => {
+		const api = makeApi({
+			resendVerification: vi.fn(async () =>
+				ENVELOPE({ code: CODES.SIGNUP_VERIFICATION_REQUIRED, pending_verification: true })
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await Promise.all([
+			flow.resendVerification(),
+			flow.resendVerification(),
+			flow.resendVerification(),
+		]);
+		expect(api.resendVerification).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("change the email address and restart verification (jarvis#297 P0-2a)", () => {
+	test("restart from VERIFICATION_REQUIRED, then a fresh submit with the corrected address re-requests verification", async () => {
+		const api = makeApi({
+			startSignup: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+					pending_verification: true,
+					attempt_id: "att_typo",
+					generation: 0,
+					email: "typo@exmaple.com",
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.submitReview({ email: "typo@exmaple.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+
+		// "Use a different email": restart is safe here (canSafelyRestart) because
+		// no gateway object exists yet on this code - the reset lands back on a
+		// fresh review, exactly like any other restart-safe code.
+		const { reset } = flow.restart();
+		expect(reset).toBe(true);
+		expect(flow.state.value.value).toBe(STATES.REVIEW);
+
+		// The corrected address is a DIFFERENT (email, company) pair from admin's
+		// point of view, so it is a fresh signup, not the duplicate-resume path -
+		// it lands on its own new VERIFICATION_REQUIRED, not a re-serve of the
+		// old attempt.
+		api.startSignup.mockResolvedValueOnce(
+			ENVELOPE({
+				code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+				pending_verification: true,
+				attempt_id: "att_fixed",
+				generation: 0,
+				email: "real@example.com",
+			})
+		);
+		await flow.submitReview({ email: "real@example.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+		expect(flow.state.value.summary.email).toBe("real@example.com");
+		expect(api.startSignup).toHaveBeenCalledTimes(2);
+	});
+
+	test("restart is refused while a real payment could still be behind the code", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.checkStatus();
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		const { reset } = flow.restart();
+		expect(reset).toBe(false);
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+	});
+});
+
+// ---------------------------------------------------------------------------
 describe("the machine decides what navigates", () => {
 	test("a GENERATION-FENCED answer navigates nothing (the reducer refused it)", async () => {
 		// Seed a live intent at generation 5.
@@ -489,6 +601,77 @@ describe("the provisioning poll", () => {
 		expect(await p2).toEqual({ status: "already_running" });
 		release({ synced: true });
 		await p1;
+	});
+
+	// The per-tick observation the page renders its phase from. Before this the
+	// poll swallowed tenant_status on every non-ready tick, so the screen had
+	// nothing to say for 90 seconds.
+	test("reports what each tick observed, including a tick that answered nothing", async () => {
+		const answers = [null, { synced: false, tenant_status: "pending" }, { synced: true }];
+		let i = 0;
+		const api = makeApi({
+			syncConnection: vi.fn(async () => {
+				const a = answers[i++];
+				if (a === null) throw new Error("network");
+				return a;
+			}),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		const seen = [];
+		const out = await flow.waitForProvisioning({ onObservation: (o) => seen.push(o) });
+
+		expect(out).toEqual({ status: "ready" });
+		expect(seen).toEqual([
+			{ answered: false, tenantStatus: "" },
+			{ answered: true, tenantStatus: "pending" },
+			{ answered: true, tenantStatus: "" },
+		]);
+	});
+
+	// Rendering must never be able to break the wait.
+	test("an observer that throws does not stop the poll", async () => {
+		const api = makeApi({
+			syncConnection: vi.fn(async () => ({ synced: true })),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		const out = await flow.waitForProvisioning({
+			onObservation: () => {
+				throw new Error("render blew up");
+			},
+		});
+		expect(out).toEqual({ status: "ready" });
+	});
+
+	test("no observer at all is still a valid call", async () => {
+		const api = makeApi({
+			syncConnection: vi.fn(async () => ({ synced: true })),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		expect(await flow.waitForProvisioning()).toEqual({ status: "ready" });
 	});
 
 	test("stops when its attempt is superseded", async () => {

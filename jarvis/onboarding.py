@@ -112,6 +112,43 @@ def write_connection(data: dict) -> None:
 	# reconnect that repoints it can be told apart from a daily sync that rewrites
 	# the same URL (which must not disturb an established claim).
 	_old_agent_url = (s.get("agent_url") or "").strip()
+	# Credentials just changed (fresh signup, or a reconnect rotating onto another
+	# account): a bearer minted from the old ones would outlive them, and, the part
+	# that used to be missing, the accepted tenant-authority (generation, handle)
+	# must not outlive them either. The generation is a PER-CUSTOMER namespace
+	# (admin-v2 fleet/_tenant_lookup.py: "the generation is an ASSIGNMENT generation,
+	# per customer"), so a stored value left over from a PREVIOUS principal is not a
+	# stale version of the new principal's count, it is a count from an unrelated
+	# series - every fresh customer's first claim is generation 1, so a leftover
+	# stored 1 (or higher) collides with the new customer's own first claim at the
+	# SAME number but a DIFFERENT container handle. guard() cannot tell that apart
+	# from the real invariant breach it exists to catch, so it HOLDS the stale
+	# connection and re-polls forever: every retry carries the same new-customer
+	# generation 1, which can never numerically exceed the stale leftover (jarvis
+	# #693, reproduced end to end on a dev bench re-signed-up after an admin-side
+	# customer purge without a matching bench-side reset). check_account_reconnect
+	# and _disconnect_agent_transport already clear for exactly this reason on their
+	# own paths; plain signup (and anywhere else a fresh principal's credentials
+	# land here) needs the same guard, cleared BEFORE the connection block below so
+	# a payload carrying both new credentials AND a connection in one call is
+	# covered too.
+	#
+	# Deliberately narrower than the ``principal_change`` used below for the
+	# cached-bearer/chat-ready resets: api_key/api_secret/customer are the strong
+	# signal that this IS a different admin login, but a lone ``customer_password``
+	# is not. admin re-serves that field on every poll while its 60-minute cache
+	# entry lives (billing/signup.py ``_serve_signup_password``, "kept until TTL
+	# rather than deleted on read"), including a poll a fully-connected bench could
+	# still make within that window - and a lone customer_password never arrives
+	# for a GENUINELY new principal either: every real new-principal call also
+	# carries api_key/customer, which already trips this clear. Widening the
+	# trigger to customer_password would drop the P0-5 protection for one window on
+	# an otherwise healthy, unrelated connection for no gain.
+	new_admin_login = any(data.get(k) for k in ("api_key", "api_secret", "customer"))
+	if new_admin_login:
+		from jarvis import tenant_authority
+
+		tenant_authority.clear(s)
 	if data.get("api_key"):
 		set_settings_password(s, "jarvis_admin_api_key", data["api_key"])
 	if data.get("api_secret"):
@@ -160,7 +197,11 @@ def write_connection(data: dict) -> None:
 			if data.get("agent_token"):
 				set_settings_password(s, "agent_token", data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
-	# account): a bearer minted from the old ones would outlive them.
+	# account): a bearer minted from the old ones would outlive them. Wider than
+	# ``new_admin_login`` above on purpose - a standalone customer_password (the
+	# verified-poll delivery, no api_key/customer alongside it) still means the
+	# bearer cache key's underlying password rotated, even though it is not by
+	# itself proof of a DIFFERENT admin login.
 	principal_change = any(data.get(k) for k in ("api_key", "api_secret", "customer", "customer_password"))
 	if principal_change:
 		admin_client.clear_cached_token()
@@ -452,9 +493,9 @@ def save_llm_pool(
 			raise frappe.ValidationError(f"unknown preset '{preset}'")
 
 	from jarvis.jarvis.pool_serialize import (
-		_get_password,
 		_model_accounts,
 		normalize_provider,
+		stored_api_keys_by_provider,
 	)
 	from jarvis.oauth import pending_capture
 
@@ -471,14 +512,16 @@ def save_llm_pool(
 	# model id or reordering) does not silently wipe a previously-working
 	# credential. Keyed by canonical provider (api keys are per-vendor) and by
 	# account_ref (server-stable) respectively.
-	prior_api_keys = {}
+	#
+	# The api-key half is stored_api_keys_by_provider() rather than a loop local
+	# to this function because jarvis.llm_key_probe's Test button now resolves a
+	# stored key through the SAME helper (#679). Test has to probe the credential
+	# this merge would ship, or a green Test would be attesting to a key Save
+	# never sends.
+	prior_api_keys = stored_api_keys_by_provider(s.get("models"))
 	prior_blobs = {}
 	for pm in s.get("models") or []:
-		if (pm.credential_type or "api_key") == "api_key":
-			pk = _get_password(pm, "api_key")
-			if pk:
-				prior_api_keys[normalize_provider(pm.provider)] = pk
-		else:
+		if (pm.credential_type or "api_key") != "api_key":
 			for a in _model_accounts(pm):
 				ref = (a.get("account_ref") if hasattr(a, "get") else "") or ""
 				blob = (a.get("oauth_blob") if hasattr(a, "get") else "") or ""
@@ -2045,6 +2088,21 @@ def get_llm_sync_status() -> dict:
 	if status.startswith(_pending_applying_status()):
 		status = _reconcile_pending_applying(s) or status
 
+	return _sync_status_payload(s, status)
+
+
+def _sync_status_payload(s, status: str) -> dict:
+	"""Project Jarvis Settings into the poller's response shape. PURE: it reads and
+	formats, and unlike ``get_llm_sync_status`` it never probes admin and never
+	writes.
+
+	Split out so a caller that has already decided what the workspace's state is can
+	report it without the lazy reconcile running underneath and committing a
+	different answer (#713 review). ``resync_llm``'s not-configured branch is the
+	case that needs it: it has just established there is nothing to re-drive, so a
+	status projection that could stamp "ok (converged ...)" on the way out would
+	contradict the very answer it is returning."""
+
 	def _json_list(raw):
 		"""Stored JSON text -> list, degrading a corrupt/empty value to [] rather than
 		ever 500ing this poller."""
@@ -2066,6 +2124,14 @@ def get_llm_sync_status() -> dict:
 		# contract 1.11. The AI-models list keys each api-key row's health off this.
 		"model_statuses": _json_list(s.get("last_model_statuses")),
 	}
+
+
+#: Minimum gap between two Resync PUSHES. Sized to outlast a normal apply so the
+#: second click of an impatient pair is throttled rather than doubling the work,
+#: and to stay well inside the customer's shared 20/hour rotate-ops budget even if
+#: someone clicks steadily for an hour.
+_RESYNC_COOLDOWN_S = 180
+_RESYNC_COOLDOWN_KEY = "jarvis:resync_llm_cooldown"
 
 
 @frappe.whitelist()
@@ -2091,15 +2157,26 @@ def resync_llm() -> dict:
 	The push is only for a workspace admin says is NOT converged.
 
 	Gated on ``require_jarvis_admin`` (it drives a container mutation, like every
-	other write on this module) and safe to click repeatedly: the queued work
-	carries the same job ids and takes the same redis lock as an ordinary save, so
-	a second click coalesces into the first rather than racing it.
+	other write on this module).
+
+	THROTTLED, because "click it again" is what a customer does to a status that has
+	not moved. Frappe's ``deduplicate=True`` only collapses a second click while the
+	first job is still queued or running; once a worker exits without converging -
+	routine, since the in-job poll gives up after ``_POOL_CONVERGE_DEADLINE_S`` - the
+	job id frees and the next click drives a WHOLE new push: another container
+	re-render and another unit of the customer's shared 20/hour rotate-ops budget,
+	until admin starts refusing with a rate-limit the SPA renders as a failure. So a
+	push is allowed at most once per ``_RESYNC_COOLDOWN_S``; inside that window the
+	call reports ``throttled`` with the live status and queues nothing. The Ready
+	probe is NOT throttled - it neither pushes nor restarts, and answering "your
+	config is already live" instantly is the best outcome a Resync click can have.
 
 	Returns ``get_llm_sync_status()``'s shape, so a caller can render the response
 	directly with no second round trip, plus ``outcome``:
 
 	  * ``converged``      - admin already serves this config; markers stamped.
 	  * ``queued``         - a re-push was enqueued; ``leg`` is "pool" or "direct".
+	  * ``throttled``      - a re-push went out moments ago; nothing was queued.
 	  * ``not_configured`` - nothing saved to re-drive; nothing was queued.
 	"""
 	from jarvis.account import _has_llm_config
@@ -2113,17 +2190,37 @@ def resync_llm() -> dict:
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
 	# Both halves matter: a credential with no control-plane tenancy has nowhere to
-	# be pushed, and a tenancy with no credential has nothing to push.
+	# be pushed, and a tenancy with no credential has nothing to push. Projected
+	# WITHOUT get_llm_sync_status's lazy reconcile, which could otherwise stamp an
+	# "ok (converged ...)" on its way out and contradict this very answer.
 	if not _has_llm_config(settings) or not _has_admin_credentials(settings):
-		return {**get_llm_sync_status(), "outcome": "not_configured", "leg": ""}
+		status = settings.get("last_sync_status") or ""
+		return {**_sync_status_payload(settings, status), "outcome": "not_configured", "leg": ""}
 
 	state, _reason = _admin_chat_readiness()
-	if state == "Ready" and _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
-		# The stamp's own commit gate only fires in a worker; this is a request.
-		frappe.db.commit()
+	if state == "Ready":
+		# READY MEANS NEVER PUSH, whether or not our own stamp lands. Making the push
+		# conditional on the stamp succeeding would restart a healthy container in
+		# precisely the situation this endpoint exists to handle gently: five writers
+		# race to record this same Ready, so losing that race is ordinary, and it
+		# means SOMEONE recorded it. The status below carries whatever landed.
+		if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
+			# The stamp's own commit gate only fires in a worker; this is a request.
+			frappe.db.commit()
 		return {**get_llm_sync_status(), "outcome": "converged", "leg": ""}
 
+	cache = frappe.cache()
+	if cache.get_value(_RESYNC_COOLDOWN_KEY):
+		return {**get_llm_sync_status(), "outcome": "throttled", "leg": ""}
+
+	# Armed only once a push is actually queued. Arming it first would let a call
+	# that queued NOTHING still lock the customer out for three minutes - the same
+	# "click it again and nothing happens" dead end this endpoint exists to remove.
+	# Fails open when redis is down (RedisWrapper swallows connection errors): that
+	# loses the throttle, never the retry, and admin's own rate limiter is the
+	# backstop that actually protects the rotate-ops budget.
 	leg = request_resync(settings)
+	cache.set_value(_RESYNC_COOLDOWN_KEY, 1, expires_in_sec=_RESYNC_COOLDOWN_S)
 	return {**get_llm_sync_status(), "outcome": "queued", "leg": leg}
 
 
