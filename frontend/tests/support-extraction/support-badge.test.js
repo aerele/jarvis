@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount } from "@vue/test-utils";
 
 vi.mock("frappe-ui", () => ({
+	toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
 	// Expose `options` so the variant tests can assert the menu items; the stub
 	// still renders only the trigger slot (the button), like the real closed Dropdown.
 	Dropdown: {

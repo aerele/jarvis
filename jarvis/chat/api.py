@@ -1405,7 +1405,7 @@ def get_chat_ui_settings() -> dict:
 	settings = frappe.get_single("Jarvis Settings")
 	# Lazy import: keeps this hot endpoint's module import light and avoids
 	# a jarvis.chat.api <-> jarvis.chat.voice cycle.
-	from jarvis.chat.voice import stt_config
+	from jarvis.chat.voice import stt_config, stt_state
 
 	# default_models lets callers (jarvis_onboarding.js,
 	# jarvis_account.js subscription-tab) skip duplicating the
@@ -1507,6 +1507,10 @@ def get_chat_ui_settings() -> dict:
 		# Mic button gating: stt_config() is None when voice features / STT
 		# are off or no key resolves (admin path is Redis-cached, never raises).
 		"stt_enabled": bool(stt_config()),
+		# WHY it is unavailable (ok|off|unconfigured|error). The boolean above cannot
+		# distinguish "an admin switched voice off" from "nobody set it up" from "a
+		# transient CP blip", and the UI must not claim the middle one for all three.
+		"stt_state": stt_state(),
 		# Composer "ground on wiki" pill gating: shown only when the wiki feature
 		# is on AND the org has at least one Active page (best-effort).
 		"wiki_enabled": _wiki_enabled_flag(),
