@@ -725,12 +725,19 @@
 							</template>
 							<!-- Confirming: the customer paid on the admin-hosted page and came
 								 back, and we are asking the control plane whether it landed. Money
-								 has left them and no verdict exists yet, so this is the one screen
-								 the payment illustration belongs on (design.md §2.2). It replaces
-								 the recovery card, whose disabled "Working…" button is what a
-								 customer used to stare at in the seconds right after paying. -->
+								 has left them and no verdict exists yet.
+								 jarvis#728: this used to render PaymentConfirmingArt here, but the
+								 round trip behind this screen is a single one-shot reconcile
+								 (usePaymentFlow's hydrate/reconcileAfterFailure), never a poll -
+								 it resolves in well under a second on the common path and hands
+								 off to the recovery card on the slow one, so the screen can never
+								 reliably reach the "tens of seconds" bar design.md §2.2 sets for
+								 using an illustration instead of JvSpinner. A short, honest wait
+								 gets the short-wait treatment; a flashed or half-drawn frame is
+								 worse than a plain spinner. PaymentConfirmingArt.vue is unchanged
+								 and kept for a screen whose wait actually earns it. -->
 							<template v-else-if="showConfirming">
-								<div class="ob-body">
+								<div class="ob-body ob-body--center">
 									<div class="ob-head">
 										<h1 role="status">Confirming your payment</h1>
 										<p>
@@ -738,14 +745,11 @@
 											that it came through.
 										</p>
 									</div>
-									<!-- min-height (not h-full): the canvas fills via absolute +
-										 inset-0 and percentage heights don't resolve against a
-										 min-height parent. Same constraint as SetupNeuralNet. -->
-									<div class="relative mt-2 min-h-[300px] flex-1">
-										<PaymentConfirmingArt :dark="dark" />
+									<div class="mt-2.5 flex justify-center">
+										<JvSpinner :size="56" />
 									</div>
 									<p
-										class="mx-auto max-w-[420px] text-center text-p-sm text-ink-gray-5"
+										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
 									>
 										This usually takes a few seconds. Please don't close this
 										page or pay again.
@@ -1557,7 +1561,6 @@ import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
-import PaymentConfirmingArt from "@/onboarding/PaymentConfirmingArt.vue";
 import cashfreeLogo from "@/assets/cashfree.png";
 import {
 	STEPS_MANAGED,
