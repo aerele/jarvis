@@ -100,14 +100,22 @@ export const PHASE_KIND = {
  *
  *   Defaults to NONE so a caller that cannot ground a subject gets no headline
  *   derived from one.
+ * @param {string} [detail] - admin's own live explanation for this same phase,
+ *   when the caller already has one (jarvis#752). The apply-operation poll
+ *   carries `chat_readiness_reason` on every non-terminal status once a
+ *   subscription pool's force-probe verdict lands (fleet contract 1.23), so a
+ *   route that cannot serve (a quota-exhausted account, an unverified
+ *   credential) is nameable well before the readiness wait that used to be
+ *   the only source `readinessPhase` read a detail from. Defaults to "" so
+ *   every other caller, and every tick where admin sent nothing, is unchanged.
  */
-export function inFlightPhase(label, kind = PHASE_KIND.NONE) {
+export function inFlightPhase(label, kind = PHASE_KIND.NONE, detail = "") {
 	return {
 		observed: false,
 		state: PHASE_STATE.ACTIVE,
 		kind,
 		label,
-		detail: "",
+		detail,
 		stop: false,
 	};
 }

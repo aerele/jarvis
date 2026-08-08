@@ -1373,3 +1373,147 @@ describe("every connect terminal carries its own headline", () => {
 		w.unmount();
 	});
 });
+
+// jarvis#752: the apply operation's own chat_readiness_reason (fleet contract 1.23,
+// force_probe) reaches this screen on every non-terminal poll, well before any
+// readiness wait starts - so a subscription pool's route verdict (out of quota,
+// unverified, still probing) is nameable during the ordinary "Applying"/"Finishing"
+// state instead of only surfacing at a five-minute deadline. Previously onOpUpdate
+// read ui.chatReadinessReason nowhere and rendered fixed copy for the whole wait.
+describe("jarvis#752 the connect step shows admin's route verdict while still converging", () => {
+	const QUOTA_REASON = "Your OpenAI account has reached its usage limit. It resets in 2 hours.";
+
+	it("a live reason during Applying renders in the phase row, still as progress", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("working");
+		expect(w.vm.readinessStage.detail).toBe(QUOTA_REASON);
+		// Still progress, not a failure: the row stays ACTIVE (spinner), the same
+		// state it would be in with no reason to show at all.
+		expect(w.vm.readinessStage.state).toBe("active");
+		expect(w.find(".ob-phase-detail").text()).toBe(QUOTA_REASON);
+		w.unmount();
+	});
+
+	it("the same reason renders during Finishing (applied_waiting_readiness)", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "finishing", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("finishing");
+		expect(w.vm.readinessStage.detail).toBe(QUOTA_REASON);
+		expect(w.find(".ob-phase-detail").text()).toBe(QUOTA_REASON);
+		w.unmount();
+	});
+
+	it("a later tick that names nothing blanks the row rather than keeping the earlier reason", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+		expect(w.vm.readinessStage.detail).toBe(QUOTA_REASON);
+
+		w.vm.onOpUpdate({ phase: "applying" });
+		await flushPromises();
+
+		expect(w.vm.readinessStage.detail).toBe("");
+		w.unmount();
+	});
+
+	it("a retry terminal does not leave a stale reason on the (now hidden) phase row", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		w.vm.onOpUpdate({ phase: "retry", message: "We hit a snag applying your AI connection." });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.readinessStage.detail).toBe("");
+		w.unmount();
+	});
+
+	it("the deadline timeout quotes the last reason this attempt heard, past tense", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		// The existing sentence is preserved verbatim, not replaced.
+		expect(w.vm.state.connectMessage).toMatch(/was still running when we last checked/i);
+		expect(w.vm.state.connectMessage).toContain(QUOTA_REASON);
+		w.unmount();
+	});
+
+	it("a reason that later cleared is not quoted at the deadline", async () => {
+		// Round-1 review: the remembered reason used to ratchet to the newest
+		// NON-EMPTY value, so a condition that had since resolved (a quota reset)
+		// was still quoted while something else held the operation open. That is a
+		// confidently wrong diagnosis at the exact moment a right one matters most.
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+		// Admin no longer names a reason: the quota cleared, something else is slow.
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: "" });
+		await flushPromises();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+
+		expect(w.vm.state.connectMessage).toMatch(/was still running when we last checked/i);
+		expect(w.vm.state.connectMessage).not.toContain(QUOTA_REASON);
+		w.unmount();
+	});
+
+	it("a timeout with nothing ever heard renders the plain fallback, nothing invented", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+
+		expect(w.vm.state.connectMessage).toBe(
+			"Setup was still running when we last checked, and it's taking longer than usual. You can keep waiting and retry."
+		);
+		w.unmount();
+	});
+
+	it("a never-confirmed timeout does not quote a reason: nothing was ever heard from admin", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: true });
+
+		expect(w.vm.state.connectMessage).toMatch(/couldn't reach your AI provider/i);
+		expect(w.vm.state.connectMessage).not.toContain(QUOTA_REASON);
+		w.unmount();
+	});
+
+	it("a genuinely fresh Start forgets the previous attempt's last-heard reason", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+		expect(w.vm.state.connectMessage).toContain(QUOTA_REASON);
+
+		// A genuinely new attempt: never terminal, so it parks on the working screen
+		// without needing a full follow to resolve.
+		api.getLlmApplyOperation.mockResolvedValue(pending);
+		w.vm.saveConnect();
+		await flushPromises();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+		expect(w.vm.state.connectMessage).not.toContain(QUOTA_REASON);
+		w.unmount();
+	});
+});

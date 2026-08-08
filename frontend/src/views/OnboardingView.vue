@@ -1769,12 +1769,25 @@ const state = reactive({
 // "We couldn't reach your workspace to check" on the first frame after a
 // successful save, announcing a failed check before one had been attempted.
 const readinessSeen = ref(null);
+// jarvis#752: the apply-operation poll's OWN chat_readiness_reason, mirrored from
+// the last onOpUpdate tick. This is a DIFFERENT source than readinessSeen above -
+// the operation carries admin's free-text explanation from the moment a save is
+// accepted (well before the readiness wait that seeds readinessSeen ever starts),
+// so a route that cannot serve (an exhausted subscription, an unverified account)
+// is nameable during the ordinary "Applying"/"Finishing" phase instead of only
+// after a five-minute deadline. Mirrors the CURRENT tick exactly - see onOpUpdate -
+// so a tick that named nothing blanks it rather than sticking an earlier one.
+const opReadinessDetail = ref("");
 const readinessStage = computed(() =>
 	readinessSeen.value
 		? readinessPhase(readinessSeen.value)
 		: // The apply operation is what is running, and the operation controller
 		  // reported that, so naming it is grounded.
-		  inFlightPhase("Applying your AI connection", PHASE_KIND.LLM_APPLY)
+		  inFlightPhase(
+				"Applying your AI connection",
+				PHASE_KIND.LLM_APPLY,
+				opReadinessDetail.value
+		  )
 );
 // jarvis#726: the Progress bar next to the phase list above, reading the SAME
 // readinessStage - see waitPhases.phaseProgress.
@@ -3232,6 +3245,18 @@ const currentOpId = ref("");
 const navigated = ref(false);
 let retryTimer = null;
 
+// jarvis#752: the chat_readiness_reason the most recent poll carried, held
+// across the follow so the deadline can quote it. Needed because the
+// controller's own 5-minute deadline synthesizes a bare timedOut status with no
+// reason on it at all - see createOperationController's tick() - so the only
+// place left to read admin's last word from is what the ticks already told
+// onOpUpdate. It TRACKS that value, including back to empty: a reason that later
+// cleared is no longer true, and quoting it at a timeout would be a confident
+// wrong answer (round-1 review). Reset on a genuinely fresh attempt (saveConnect,
+// chooseDifferentModel); a Retry re-follows the SAME operation, so what it last
+// said is still about the config on screen.
+let lastOpChatReadinessReason = "";
+
 // The setup screen's headline, following the live phase (jarvis#727) instead of
 // the fixed "Setting up {agentName}" that used to sit above a phase list which
 // had already become real (jarvis#722). setupHeadline owns every honesty
@@ -3298,6 +3323,8 @@ function chooseDifferentModel() {
 	currentOpId.value = "";
 	forgetReady();
 	readinessSeen.value = null;
+	opReadinessDetail.value = "";
+	lastOpChatReadinessReason = "";
 	state.connectPhase = "";
 	state.connectTitle = "";
 	state.connectMessage = "";
@@ -3355,6 +3382,21 @@ function startRetryCountdown() {
 // copy. Navigation lives in onTerminal, never here.
 function onOpUpdate(ui) {
 	const phase = ui && ui.phase;
+	// jarvis#752: mirror THIS tick's chat_readiness_reason for the live phase row
+	// (blank when this tick named nothing, never a stale earlier one - see
+	// opReadinessDetail), and separately remember the last NON-EMPTY one this
+	// attempt has seen, for the deadline timeout onTerminal renders with no ui of
+	// its own to read from.
+	opReadinessDetail.value = (ui && ui.chatReadinessReason) || "";
+	// Round-1 review: TRACKS the live value rather than ratcheting to the newest
+	// non-empty one. Only holding onto non-empty reasons meant a condition that
+	// later CLEARED (a quota reset, say) while something else kept the operation
+	// from finishing would still be quoted at the deadline, giving the customer a
+	// confidently wrong diagnosis at the exact moment they most need a right one.
+	// A blank tick is admin saying it no longer has a reason, which is itself the
+	// truth, so honour it. Kept as a separate variable because onTerminal's
+	// timeout branch synthesizes a bare status with no ui to read from.
+	lastOpChatReadinessReason = (ui && ui.chatReadinessReason) || "";
 	if (phase === OP_PHASE.REJECTED) {
 		// The input is the problem: return to the editable form with the reason.
 		// This IS the jarvis#727 escape, already built, for the one case admin can
@@ -3574,6 +3616,16 @@ function onTerminal(status) {
 			// when that observation happened instead of projected forward.
 			state.connectMessage =
 				"Setup was still running when we last checked, and it's taking longer than usual. You can keep waiting and retry.";
+			// jarvis#752: quote admin's own last word, if this attempt ever got one.
+			// The deadline itself carries no reason (createOperationController's
+			// synthetic timedOut status has none to read), so this is the one place
+			// left that remembers it. Never reworded, only punctuation-closed, same
+			// idiom as readinessWait.js's readinessWaitExhaustedMessage.
+			const lastReason = lastOpChatReadinessReason.trim();
+			if (lastReason) {
+				const closed = /[.!?]$/.test(lastReason) ? lastReason : `${lastReason}.`;
+				state.connectMessage += ` The last thing we heard: ${closed}`;
+			}
 		}
 		// jarvis#727. The operation that wires the chosen model in was CONFIRMED in
 		// flight and still did not finish inside its deadline, which is the state
@@ -3811,9 +3863,19 @@ async function saveConnect() {
 	// A genuinely fresh attempt: any earlier attempt's "we couldn't confirm this,
 	// get a person to look into it" offer was about THAT attempt, not this one.
 	// Same for the jarvis#727 model-change offer, which is an observation about a
-	// configuration this attempt has not yet tried.
+	// configuration this attempt has not yet tried. Same for the jarvis#752 last-
+	// heard reason: it described the operation this attempt is about to replace.
 	state.connectSupportOffered = false;
 	connectModelChangeOffered.value = false;
+	lastOpChatReadinessReason = "";
+	// Round-1 review: the LIVE detail must clear here too, not only the
+	// remembered one. A timeout ends an attempt through onTerminal, which never
+	// calls onOpUpdate, so nothing blanks it. Until this new operation's first
+	// tick lands, readinessStage falls to its else branch and would render the
+	// PREVIOUS attempt's verdict, describing a credential this attempt has
+	// already replaced. Showing a stale verdict is the exact failure this change
+	// exists to remove.
+	opReadinessDetail.value = "";
 	savingConnect.value = true;
 	try {
 		let idem = recallIdem();
