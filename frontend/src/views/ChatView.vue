@@ -3637,6 +3637,7 @@ import { useConfirm } from "@/composables/useConfirm";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
+import { createEnrichmentPending } from "@/lib/enrichmentPending";
 import { currentThreadModel, modelBadgeFor, modelBadgeTitleFor } from "@/utils/modelBadge";
 import { renderMarkdown } from "@/markdown";
 import JvChart from "@/charts/JvChart.vue";
@@ -4244,7 +4245,34 @@ function tearDownActivityIfSettled() {
 // SUX-7: a settled reply whose enrichment (canvas/attachments/title) is still running.
 // run:end carries enrichment_pending; message:enriched clears it. Drives a subtle
 // "finishing…" affordance so a late pop-in is signalled, not silent.
+//
+// jarvis#681: that affordance is BOUNDED, because message:enriched is one best-effort
+// push at the end of a chain of best-effort effects. Any of them stalling (the usage
+// poll retries by design, which is exactly what a live credential change produces)
+// held the line up for as long as the pump watchdog took to burn the retry budget, and
+// forever wherever that cron is not running. A permanent "Finishing…" on a finished
+// answer says the reply is incomplete when it is not, so the deadline in
+// @/lib/enrichmentPending drops it and resyncs once instead. The tracker owns the
+// deadlines; this ref is only what the template reads.
 const enrichmentPending = ref(new Set()); // message_ids awaiting message:enriched
+const enrichmentTracker = createEnrichmentPending({
+	onChange: (ids) => {
+		enrichmentPending.value = ids;
+	},
+	// Nothing told us enrichment finished, so pull the conversation once: whatever
+	// late canvas / attachments / title DID land still gets rendered, and a reply
+	// whose enrichment truly died just loses a label it should never have kept.
+	// Freshness-guarded, since the deadline can fire long after the user moved on.
+	onExpire: (messageId) => {
+		if (!currentId.value || !messages.value.some((m) => m.name === messageId)) return;
+		loadConversation(currentId.value);
+		// Same idle re-render pass the other two reload sites do: loadConversation
+		// runs processMermaid once, but a late re-render can swap a freshly-rendered
+		// mermaid node back to raw source, and this catches that race.
+		setTimeout(processMermaid, 300);
+	},
+});
+onUnmounted(() => enrichmentTracker.reset());
 const recovering = ref(null); // { message_id, reason } while a turn is parked for background recovery — the composer stays UNLOCKED so the user isn't trapped
 const retrying = ref(false); // guards the error-card Retry against a double-enqueue while one is in flight
 const srMessage = ref(""); // visually-hidden aria-live text (turn completion / failure) for screen readers
@@ -7805,10 +7833,11 @@ function onEvent(p) {
 			if (p.was_recovered) announceSR("Your answer is ready.");
 			// SUX-7: enrichment (canvas/attachments/title) may still be running after the
 			// authoritative terminal. Keep a subtle "finishing…" affordance until the
-			// message:enriched event clears it (a late pop-in is signalled, not silent).
+			// message:enriched event clears it (a late pop-in is signalled, not silent),
+			// or until its deadline expires (jarvis#681: an enrichment that never lands
+			// must not leave a finished answer looking unfinished forever).
 			if (p.message_id) {
-				if (p.enrichment_pending)
-					enrichmentPending.value = new Set(enrichmentPending.value).add(p.message_id);
+				if (p.enrichment_pending) enrichmentTracker.mark(p.message_id);
 				// NB: the CDX-3 fence entry is deliberately NOT cleared here — the
 				// terminated-epoch marker must persist to permanently block a later
 				// lower-epoch straggler (clearing it re-opened the stale-delta window).
@@ -7857,11 +7886,10 @@ function onEvent(p) {
 			// SUX-7: the Relay-Pump finalize job finished the owed enrichment for a
 			// settled reply — clear the "finishing…" affordance and pull the late
 			// attachments/canvas/title in with one reload.
-			if (p.message_id && enrichmentPending.value.has(p.message_id)) {
-				const next = new Set(enrichmentPending.value);
-				next.delete(p.message_id);
-				enrichmentPending.value = next;
-			}
+			// jarvis#681: the server re-delivers this event for a turn that is already
+			// done, so a client whose original push was lost still gets un-stuck. The
+			// tracker no-ops on a message it is not holding, which makes a repeat inert.
+			enrichmentTracker.clear(p.message_id);
 			loadConversation(currentId.value);
 			setTimeout(processMermaid, 300);
 			break;

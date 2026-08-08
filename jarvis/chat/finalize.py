@@ -55,9 +55,10 @@ class _UsageRetry(Exception):
 
 def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> dict:
 	"""Run every pending enrichment effect for ``run_id`` (idempotent, force-done at
-	3), then finalize the turn to ``done`` (success path). Safe to re-run: a done
-	turn is a no-op; a partially-failed run leaves the rest pending for the next
-	cycle. Never raises out (best-effort)."""
+	3), then finalize the turn to ``done`` (success path). Safe to re-run: a done turn
+	runs no effects and only RE-DELIVERS ``message:enriched`` (jarvis#681, see below);
+	a partially-failed run leaves the rest pending for the next cycle. Never raises out
+	(best-effort)."""
 	turn = frappe.db.get_value(
 		TURN,
 		run_id,
@@ -67,15 +68,30 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 	if not turn:
 		return {"ok": False, "reason": "no turn"}
 	state = turn["state"]
+	conversation = turn["conversation"]
 	if state == "done":
-		return {"ok": True, "already_done": True}
+		# jarvis#681: the enrichment terminal's CDX-12 backstop. ``run:end`` carried
+		# ``enrichment_pending``, which is the SPA's instruction to hold the subtle
+		# "Finishing..." line until ``message:enriched`` lands. That made the line depend
+		# on ONE best-effort push, so losing it (socket blip, a client on another route,
+		# a hidden tab) left a permanent "Finishing..." on a reply that was already
+		# complete. Any finalize that arrives after the turn is done now re-delivers the
+		# same event from durable truth; the client clears on set membership, so a
+		# duplicate is inert. This heals only when finalize runs again, which is why the
+		# SPA bounds the affordance on its own side too.
+		return {
+			"ok": True,
+			"already_done": True,
+			"republished": _publish_enriched(
+				run_id, conversation, _conversation_owner(conversation), turn.get("assistant_message")
+			),
+		}
 	# Only settled turns own an effect ledger. A turn still pre-terminal (queued/
 	# preparing/.../streaming/terminal_observed) has nothing to enrich yet.
 	if state not in ("finalizing", "errored", "cancelled"):
 		return {"ok": False, "reason": f"not settled ({state})"}
 
-	conversation = turn["conversation"]
-	owner = frappe.db.get_value(CONV, conversation, "owner")
+	owner = _conversation_owner(conversation)
 	errored = state in ("errored", "cancelled")
 	ctx = _Ctx(
 		run_id=run_id,
@@ -127,15 +143,36 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		if ts.finalize_done(run_id, v):
 			frappe.db.commit()
 			done = True
-			if owner and turn.get("assistant_message"):
-				ts.publish_fenced(
-					owner,
-					"message:enriched",
-					conversation_id=conversation,
-					run_id=run_id,
-					message_id=turn["assistant_message"],
-				)
+			_publish_enriched(run_id, conversation, owner, turn.get("assistant_message"))
 	return {"ok": True, "ran": ran, "done": done, "state": state}
+
+
+def _conversation_owner(conversation: str) -> str | None:
+	"""Who the turn's realtime events are addressed to. Looked up per branch rather
+	than once up front so the pre-terminal early return below costs no extra read."""
+	return frappe.db.get_value(CONV, conversation, "owner")
+
+
+def _publish_enriched(
+	run_id: str, conversation: str, owner: str | None, assistant_message: str | None
+) -> bool:
+	"""SUX-7: tell the client the owed enrichment for this reply is finished, so it
+	drops the "Finishing..." affordance and pulls the late attachments/canvas/title in.
+
+	One publish site for both callers: the finalize that flips ``finalizing -> done``,
+	and the jarvis#681 re-delivery for a turn that was ALREADY done when this finalize
+	ran. Returns whether anything was published (a turn with no assistant row, e.g. a
+	turn that errored before prepare inserted one, has no message to enrich)."""
+	if not (owner and assistant_message):
+		return False
+	ts.publish_fenced(
+		owner,
+		"message:enriched",
+		conversation_id=conversation,
+		run_id=run_id,
+		message_id=assistant_message,
+	)
+	return True
 
 
 class _Ctx:
