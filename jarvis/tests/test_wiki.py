@@ -14,9 +14,10 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis import api
 from jarvis.chat import entities as entities_mod
 from jarvis.chat import wiki
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.exceptions import FeatureDisabledError, InvalidArgumentError, PermissionDeniedError
 from jarvis.tools.read_wiki import read_wiki
 from jarvis.tools.update_wiki import update_wiki
 
@@ -989,3 +990,123 @@ class TestWikiEnabledDefault(FrappeTestCase):
 			frappe.db.delete("Singles", {"doctype": "Jarvis Settings", "field": "wiki_enabled"})
 			if original is not None:
 				frappe.db.set_single_value("Jarvis Settings", "wiki_enabled", original, update_modified=False)
+
+
+class TestWikiKillSwitchTools(FrappeTestCase):
+	"""#493: "Enable Business Wiki" is the operator's ONLY wiki kill switch, and it
+	used to gate every automatic behaviour and none of the agent-facing ones. With
+	the wiki off the agent still read every Org page and still created pages on
+	request.
+
+	Nothing removes the two tools from the agent's surface (``registry._TOOL_NAMES``
+	is a static tuple built at import; the plugin declares them statically in
+	another repo), so the refusal has to happen at dispatch. These tests therefore
+	drive the REAL entry point, ``jarvis.api._run_tool``, rather than calling the
+	tool functions and asserting the gate returns what the gate returns."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_delete_test_pages()
+		self.page = _make_page("customer--wikitest-killswitch", ALPHA, summary="terms are 60 days")
+
+	def tearDown(self):
+		# both fixture slugs carry "wikitest", so the shared sweeper covers them.
+		_delete_test_pages()
+
+	# --- read_wiki ---------------------------------------------------------
+	def test_read_wiki_is_refused_through_dispatch_when_the_wiki_is_off(self):
+		with _wiki_disabled():
+			r = api._run_tool("read_wiki", {"slug": self.page.name})
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "FeatureDisabledError")
+		self.assertEqual(r["error"]["message"], wiki.WIKI_DISABLED_MESSAGE)
+		# The whole envelope, not just the field we remembered to check: a refusal
+		# that still leaked the page's title or summary would defeat the point.
+		self.assertNotIn(ALPHA, json.dumps(r))
+		self.assertNotIn("terms are 60 days", json.dumps(r))
+
+	def test_read_wiki_search_is_refused_too_not_just_the_slug_path(self):
+		with _wiki_disabled():
+			r = api._run_tool("read_wiki", {"query": "wikitest"})
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "FeatureDisabledError")
+
+	def test_read_wiki_is_unchanged_when_the_wiki_is_on(self):
+		"""The normal state. Behaviour here must be indistinguishable from before."""
+		r = api._run_tool("read_wiki", {"slug": self.page.name})
+		self.assertTrue(r["ok"])
+		self.assertEqual(r["data"]["title"], ALPHA)
+		self.assertEqual(r["data"]["summary"], "terms are 60 days")
+
+	def test_the_direct_call_is_gated_as_well_as_the_dispatch(self):
+		"""``api._run_tool`` is not the only way in, so the tool carries the gate
+		itself. A dispatch-only guard would leave every other caller open."""
+		with _wiki_disabled():
+			with self.assertRaises(FeatureDisabledError):
+				read_wiki(slug=self.page.name)
+
+	# --- update_wiki -------------------------------------------------------
+	def test_update_wiki_is_refused_and_parks_no_card_when_the_wiki_is_off(self):
+		"""``update_wiki`` is a _GATED_WRITES tool, so before this change a
+		disabled workspace still raised a confirmation card whose only possible
+		outcome was a refusal, on a workspace where the wiki UI is hidden. The card
+		IS the bug, so the assertion is that no card was parked, not merely that
+		the write did not land."""
+		with _wiki_disabled():
+			with patch("jarvis.chat.events.publish_to_user") as pub:
+				r = api._run_tool(
+					"update_wiki",
+					{
+						"slug": "org--wikitest-ks-new",
+						"title": "Killswitch New Page",
+						"page_type": "Org",
+						"append_md": "written with the wiki switched off",
+					},
+				)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "FeatureDisabledError")
+		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
+		pub.assert_not_called()
+		self.assertFalse(frappe.db.exists(WIKI_DT, "org--wikitest-ks-new"))
+
+	def test_update_wiki_still_parks_a_confirmation_card_when_the_wiki_is_on(self):
+		"""The regression direction: with the toggle ON the gated-write park is
+		exactly what it always was."""
+		with patch("jarvis.chat.events.publish_to_user") as pub:
+			r = api._run_tool(
+				"update_wiki",
+				{
+					"slug": "org--wikitest-ks-new",
+					"title": "Killswitch New Page",
+					"page_type": "Org",
+					"append_md": "written with the wiki switched on",
+				},
+			)
+		self.assertTrue(r["ok"])
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		pub.assert_called_once()
+		self.assertEqual(pub.call_args[0][1]["kind"], "action:pending")
+
+	def test_update_wiki_direct_call_is_gated(self):
+		"""Covers confirming a card that was parked BEFORE the operator flipped
+		the toggle: ``dispatch_confirmed`` runs the tool function, not the
+		pre-park gate."""
+		with _wiki_disabled():
+			with self.assertRaises(FeatureDisabledError):
+				update_wiki(slug="org--wikitest-ks-new", title="X", page_type="Org", append_md="x")
+		self.assertFalse(frappe.db.exists(WIKI_DT, "org--wikitest-ks-new"))
+
+	# --- the shape of the refusal -----------------------------------------
+	def test_the_refusal_is_not_a_permission_error_and_tells_the_model_not_to_retry(self):
+		"""A bare permission error reads to the agent like a bug worth retrying and
+		sends the user hunting through roles for what is a settings checkbox."""
+		self.assertFalse(issubclass(FeatureDisabledError, PermissionDeniedError))
+		msg = wiki.WIKI_DISABLED_MESSAGE.lower()
+		self.assertIn("turned off", msg)
+		self.assertIn("will not help", msg)
+		self.assertIn("enable business wiki", msg)
+		# The plugin relays only code + message to the model, so the no-retry
+		# instruction has to be in the MESSAGE, not the hint.
+		hint = api._ERROR_HINTS.get("FeatureDisabledError", "")
+		self.assertTrue(hint)
+		self.assertNotIn("permission", hint.lower())

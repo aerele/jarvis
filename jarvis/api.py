@@ -8,7 +8,12 @@ from jarvis import audit, telemetry
 from jarvis._http import validate_bearer as _validate_bearer
 from jarvis._plugin_auth import PluginAuthError, validate_plugin_request
 from jarvis._session import impersonate
-from jarvis.exceptions import CapabilityDeniedError, InvalidArgumentError, JarvisError
+from jarvis.exceptions import (
+	CapabilityDeniedError,
+	FeatureDisabledError,
+	InvalidArgumentError,
+	JarvisError,
+)
 from jarvis.permissions import has_jarvis_access
 from jarvis.tools.registry import dispatch
 
@@ -658,6 +663,11 @@ _GATED_WRITES = frozenset(
 		"assign_to",
 	}
 )
+# #493: the agent-facing wiki surface, refused wholesale when the operator has
+# switched "Enable Business Wiki" off. Deliberately just the two tools the issue
+# names - record_app_wiki (the app-learning scribe's audited-not-gated writeback)
+# is a different feature's pipeline and is out of scope here.
+_WIKI_TOOLS = frozenset({"read_wiki", "update_wiki"})
 # Irreversible/consequential subset - gated even when a user has auto-apply
 # on (Task 4 uses this; define it here so the sets live together).
 _DESTRUCTIVE = frozenset({"delete_doc", "cancel_doc", "amend_doc", "send_email", "apply_workflow_action"})
@@ -889,6 +899,12 @@ _ERROR_HINTS = {
 		"This agent can only use the tools it was published with. Ask your "
 		"administrator to review the agent's bundle if it needs another one."
 	),
+	# #493. A settings checkbox, not a role, so pointing at permissions would send
+	# the user looking in the wrong place entirely.
+	"FeatureDisabledError": (
+		"This feature is switched off for your workspace. Ask your administrator to "
+		"turn it back on in Jarvis Settings if you need it."
+	),
 }
 # Frappe's User-Permission link denial reads "...not allowed to access this X
 # record because it is linked to Y '...' in field Z" - a more specific hint than
@@ -1066,6 +1082,20 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	into one to match the reviewer's "native handler" pattern note
 	from the 2026-06-16 punch list.
 	"""
+	# #493: "Enable Business Wiki" is the operator's only wiki kill switch, so it
+	# must refuse the agent-facing wiki tools too, not only the automatic
+	# behaviours. Checked HERE, ahead of everything, because update_wiki is a
+	# _GATED_WRITES tool: without this it parks a confirmation card on a workspace
+	# whose wiki UI is hidden, and the card's only possible outcome is the very
+	# refusal below. The tools carry the same gate themselves, so no dispatch path
+	# is left open; this one exists to stop the card, not to be the only guard.
+	if tool in _WIKI_TOOLS:
+		from jarvis.chat.wiki import WIKI_DISABLED_MESSAGE, wiki_enabled
+
+		if not wiki_enabled():
+			code = FeatureDisabledError.__name__
+			return _error(code, WIKI_DISABLED_MESSAGE, hint=_hint_for(code, ""))
+
 	is_write = tool in _WRITE_TOOLS
 	try:
 		args = _parse_args(raw_args)

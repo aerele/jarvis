@@ -171,6 +171,29 @@ _EXCERPT_LINE_SNAP_CHARS = 200
 # --------------------------------------------------------------------------- #
 # shared helpers
 # --------------------------------------------------------------------------- #
+# #493: the single refusal every agent-facing wiki surface hands back when the
+# operator has switched "Enable Business Wiki" off. Defined beside the toggle it
+# reports so the two tools and the dispatch gate cannot drift into wording the
+# others do not use.
+#
+# The no-retry instruction is IN the message on purpose: the agent plugin relays a
+# failed tool call to the model as "<code>: <message>" and drops every other field,
+# so a hint the model must act on arrives no other way (the same reason
+# _delegate_capability puts it there). The envelope's ``hint`` keeps its usual
+# human-facing "what you can do" role.
+WIKI_DISABLED_MESSAGE = (
+	"The business wiki is turned off for this workspace, so wiki pages cannot be "
+	"read or written. This is an operator setting rather than a permission problem, "
+	"so retrying, changing the arguments or calling the other wiki tool will not "
+	"help. Answer from what you already know, and if the user needs the wiki, tell "
+	'them an administrator can switch it back on with "Enable Business Wiki" in '
+	"Jarvis Settings."
+)
+# What a short-circuited background job (mirror push, graph push, history snapshot)
+# reports instead. Read by an operator in a job result, never by the model.
+WIKI_DISABLED_REASON = "the business wiki is turned off for this workspace"
+
+
 def wiki_enabled() -> bool:
 	"""Operator toggle; NULL=ON (the vision_attachments_enabled idiom — Single
 	defaults are not backfilled on migrate, so a pre-existing Settings row has

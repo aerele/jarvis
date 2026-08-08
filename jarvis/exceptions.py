@@ -23,6 +23,20 @@ class CapabilityDeniedError(JarvisError):
 	"""
 
 
+class FeatureDisabledError(JarvisError):
+	"""#493 - a tool for a feature the OPERATOR has switched off for this workspace.
+
+	Deliberately NOT a ``PermissionDeniedError``: nothing about the caller's Frappe
+	rights is wrong, and that hint ("ask your administrator to review your
+	permissions") would send them hunting through roles for what is a settings
+	checkbox. Like ``CapabilityDeniedError`` the answer is FIXED while the toggle is
+	off, so retrying, changing the arguments or reaching for a sibling tool can never
+	turn it into a yes. That instruction rides in the MESSAGE, because the plugin
+	relays only code + message to the model; the ``_ERROR_HINTS`` entry carries the
+	human-facing "what you can do" line.
+	"""
+
+
 class InvalidArgumentError(JarvisError):
 	"""Raised when tool arguments fail validation."""
 

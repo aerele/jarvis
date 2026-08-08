@@ -35,6 +35,7 @@ import json
 import frappe
 from frappe.utils import cint
 
+from jarvis.chat.wiki import WIKI_DISABLED_REASON, wiki_enabled
 from jarvis.chat.wiki_graph import _MAX_LINKS_PER_PAGE
 
 WIKI = "Jarvis Wiki Page"
@@ -341,6 +342,13 @@ def sync(full: bool = False) -> dict:
 	A real Redis fault is re-queued too, not just logged. ``redis_lock`` propagates those
 	rather than yielding False, and treating one as a plain crash would strand the page
 	edit that triggered the job for exactly the same reason."""
+	# #493: a disabled wiki pushes nothing into the container. First statement in the
+	# function, so a short-circuited sync takes no lock, renders no page and makes no
+	# admin call. ``wiki_mirror_last_sync_status`` is deliberately NOT stamped: it
+	# reports the last real reconciliation, and overwriting it here would erase the
+	# operator's record of it.
+	if not wiki_enabled():
+		return {"ok": False, "reason": WIKI_DISABLED_REASON}
 	from jarvis._redis_lock import redis_lock
 
 	try:
@@ -535,6 +543,11 @@ def enqueue_sync(full: bool = False, after_commit: bool = False, retry: bool = F
 	is itself STARTED under that id, so the enqueue is silently skipped and the work is
 	dropped. A separate id is a separate dedup slot, so the retry is really queued while
 	still being deduped against other retries."""
+	# #493: checked BEFORE the in_test suppression so a test that opts into real
+	# enqueues still sees the kill switch. The doc_events trigger reaches the mirror
+	# through here, so this is where "every save re-pushes markdown" stops.
+	if not wiki_enabled():
+		return False
 	if frappe.flags.in_test and not frappe.flags.jarvis_test_wiki_mirror_enqueue:
 		return False
 	if retry:

@@ -772,3 +772,93 @@ class TestTriggers(WikiMirrorTestCase):
 				frappe.flags.jarvis_test_wiki_mirror_enqueue = False
 		finally:
 			frappe.flags.in_test = prev_in_test
+
+
+@contextlib.contextmanager
+def _wiki_disabled():
+	"""Drive the real operator toggle (#493), never a patched ``wiki_enabled``:
+	the question these tests ask is whether the production callers consult it."""
+	frappe.db.set_single_value(SETTINGS, "wiki_enabled", 0, update_modified=False)
+	try:
+		yield
+	finally:
+		frappe.db.set_single_value(SETTINGS, "wiki_enabled", 1, update_modified=False)
+
+
+class TestMirrorKillSwitch(WikiMirrorTestCase):
+	"""#493: the mirror's doc_events fire on every save, tool write and archive,
+	so with the wiki switched off the container kept receiving page markdown. The
+	workspace ``wiki/`` folder is the agent's cheap native read channel, which is
+	precisely what an operator reaching for the kill switch wants stopped."""
+
+	def test_sync_pushes_nothing_when_the_wiki_is_off(self):
+		self._page("killswitch")
+		with _wiki_disabled():
+			with self._mock_push() as push:
+				out = wiki_mirror.sync()
+		push.assert_not_called()
+		self.assertFalse(out["ok"])
+
+	def test_sync_still_pushes_when_the_wiki_is_on(self):
+		"""The regression direction: nothing about the normal state moved."""
+		self._page("killswitch-on")
+		with self._mock_push() as push:
+			out = wiki_mirror.sync()
+		push.assert_called()
+		self.assertTrue(out["ok"])
+		self.assertIn(f"customers/{SLUG_PREFIX}--killswitch-on.md", self._pushed_paths(push))
+
+	def test_a_short_circuited_sync_does_not_overwrite_the_last_sync_status(self):
+		"""It reports the last real reconciliation. Stamping "disabled" over it
+		would erase the operator's record of when the mirror last actually ran."""
+		self._page("killswitch-status")
+		with self._mock_push():
+			wiki_mirror.sync()
+		before = frappe.db.get_single_value(SETTINGS, "wiki_mirror_last_sync_status")
+		with _wiki_disabled():
+			wiki_mirror.sync()
+		self.assertEqual(frappe.db.get_single_value(SETTINGS, "wiki_mirror_last_sync_status"), before)
+
+	def test_enqueue_is_suppressed_when_the_wiki_is_off(self):
+		"""Checked ahead of the in_test suppression, so opting into real enqueues
+		still sees the kill switch. This is the doc_events path: on_wiki_page_change
+		reaches the mirror through enqueue_sync."""
+		frappe.flags.jarvis_test_wiki_mirror_enqueue = True
+		try:
+			with _wiki_disabled():
+				with mock.patch("frappe.enqueue") as enq:
+					self.assertFalse(wiki_mirror.enqueue_sync())
+			enq.assert_not_called()
+			with mock.patch("frappe.enqueue") as enq:
+				self.assertTrue(wiki_mirror.enqueue_sync())
+			enq.assert_called_once()
+		finally:
+			frappe.flags.jarvis_test_wiki_mirror_enqueue = False
+
+	def test_a_page_saved_with_the_wiki_off_triggers_no_mirror_job(self):
+		"""The whole doc_events chain, driven by a real save."""
+		frappe.flags.jarvis_test_wiki_mirror_enqueue = True
+		try:
+			with _wiki_disabled():
+				with mock.patch("frappe.enqueue") as enq:
+					self._page("killswitch-save")
+			enq.assert_not_called()
+		finally:
+			frappe.flags.jarvis_test_wiki_mirror_enqueue = False
+
+	def test_a_page_saved_with_the_wiki_on_still_triggers_the_mirror_job(self):
+		"""The paired direction, and the one an operator worries about.
+
+		``TestTriggers`` drives ``on_wiki_page_change`` directly with ``enqueue_sync``
+		mocked, so without this the real save-to-enqueue chain was only proven in the
+		OFF direction and a gate that killed it outright would still have looked
+		green. Asserts the queued METHOD too, so a save routed to some other job
+		could not read as a pass."""
+		frappe.flags.jarvis_test_wiki_mirror_enqueue = True
+		try:
+			with mock.patch("frappe.enqueue") as enq:
+				self._page("killswitch-save-on")
+			enq.assert_called()
+			self.assertEqual(enq.call_args[0][0], wiki_mirror.JOB_METHOD)
+		finally:
+			frappe.flags.jarvis_test_wiki_mirror_enqueue = False
