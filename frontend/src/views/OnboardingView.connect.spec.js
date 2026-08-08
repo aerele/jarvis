@@ -652,6 +652,278 @@ describe("jarvis#708 chat-readiness wait exhaustion: honest copy + a real exit",
 	});
 });
 
+// jarvis#727: a customer whose only model cannot be verified reached a screen
+// whose single action was Retry, re-running the exact thing that had just been
+// watched fail to converge - and could not reach Settings to add another model,
+// because readiness.js puts llm_pool_provisioning / llm_provisioning /
+// readiness_unconfirmed in NOT_ONBOARDED_REASONS, so AppShell's gate covers
+// every route but this wizard. The exit therefore has to live here. These pin
+// BOTH halves of the rule: it appears where the pipeline was observed to stall
+// on the chosen configuration, and it stays away where nothing was observed at
+// all (offering it there would blame a model nobody examined).
+describe("jarvis#727 an unverifiable model has a way out, not only a Retry", () => {
+	function labels(w) {
+		return w.findAll("button").map((b) => b.attributes("label") || b.text());
+	}
+
+	it("the reproduced dead end (op confirmed in flight, never finished) offers a different model", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		expect(labels(w)).toContain("Use a different model");
+		w.unmount();
+	});
+
+	it("a deadline that never confirmed anything keeps Retry alone: nothing points at the model", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: true });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		expect(labels(w)).not.toContain("Use a different model");
+		expect(labels(w)).toContain("Retry"); // still an exit, just an honest one
+		w.unmount();
+	});
+
+	it("a readiness ceiling where admin kept answering offers the model change", async () => {
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "llm_pool_provisioning",
+			detail: "applying your LLM configuration",
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		w.unmount();
+	});
+
+	it("a readiness ceiling that never reached admin does NOT offer it", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockRejectedValue(new Error("bench hiccup"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		expect(w.vm.state.connectSupportOffered).toBe(true);
+		w.unmount();
+	});
+
+	// The three verdicts waitPhases marks `stop`. A different model resolves none
+	// of them, and authority_repair_required must show no self-service action at
+	// all, so the blocked panel keeps its own shape.
+	it("a stopping verdict never offers a model change", async () => {
+		for (const reason of [
+			"authority_repair_required",
+			"subscription_suspended",
+			"site_replaced",
+		]) {
+			const w = await mountConnect();
+			w.vm.connectModelChangeOffered = true; // a stale offer from an earlier attempt
+			w.vm.noteReadiness({ answered: true, reason, detail: "admin's own sentence" });
+			await flushPromises();
+
+			expect(w.vm.state.connectPhase).toBe("blocked");
+			expect(w.vm.connectModelChangeOffered).toBe(false);
+			expect(labels(w)).not.toContain("Use a different model");
+			w.unmount();
+		}
+	});
+
+	it("an operation-level failure offers the change beside Retry, not instead of it", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "retry", message: "We hit a snag applying your AI connection." });
+		await flushPromises();
+
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		expect(labels(w)).toEqual(expect.arrayContaining(["Retry", "Use a different model"]));
+		w.unmount();
+	});
+
+	// The whole point: the customer lands back on their own choice, and the next
+	// Start is a genuinely NEW attempt. Reusing this attempt's idempotency key
+	// would have admin dedupe the new configuration straight back to the stuck
+	// operation, and a surviving currentOpId would make Retry re-follow it.
+	it("taking the exit returns to the editable form and starts a genuinely fresh attempt", async () => {
+		// A transient apply failure: terminal (so saveConnect resolves) and, unlike
+		// a rejection or a supersession, one that deliberately KEEPS the idempotency
+		// key so a Retry re-follows the same operation. That is exactly the state
+		// the exit has to undo.
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "failed",
+			code: "LLM_APPLY_FAILED",
+			message: "We hit a snag applying your AI connection.",
+			retry_after_seconds: 0,
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(50);
+		await p;
+		const firstKey = saveMock.mock.calls[0][0];
+		expect(firstKey).toBeTruthy();
+		expect(sessionStorage.getItem(IDEM_KEY)).toBe(firstKey);
+		expect(w.vm.currentOpId).toBe("op1");
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+		sessionStorage.setItem(OP_STORE_KEY, "op1"); // as a mid-apply reload would leave it
+
+		w.vm.chooseDifferentModel();
+		await flushPromises();
+
+		expect(w.vm.state.finishing).toBe(false); // the editor, with their choice still in it
+		expect(w.vm.state.connectPhase).toBe("");
+		expect(w.vm.state.connectBlockReason).toMatch(/pick a different model/i);
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		expect(w.vm.currentOpId).toBe("");
+		expect(sessionStorage.getItem(IDEM_KEY)).toBe(null);
+		expect(sessionStorage.getItem(OP_STORE_KEY)).toBe(null);
+
+		const p2 = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(50);
+		await p2;
+		expect(saveMock.mock.calls[1][0]).not.toBe(firstKey);
+		w.unmount();
+	});
+
+	// A live wait must not outlive the exit: without this, the ceiling of the wait
+	// the customer just walked away from fires minutes later and yanks them back
+	// out of the form.
+	it("a wait still in flight stops when the customer takes the exit", async () => {
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "llm_pool_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3 * 3000);
+		await flushPromises();
+		const pollsBefore = api.isReadyForChat.mock.calls.length;
+		expect(pollsBefore).toBeGreaterThan(0);
+
+		w.vm.chooseDifferentModel();
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(api.isReadyForChat.mock.calls.length).toBeLessThanOrEqual(pollsBefore + 1);
+		expect(w.vm.state.finishing).toBe(false);
+		expect(w.vm.state.connectPhase).toBe("");
+		w.unmount();
+	});
+
+	it("a genuinely fresh Start withdraws the offer until this attempt earns it too", async () => {
+		const w = await mountConnect();
+
+		w.vm.onTerminal({ timedOut: true, neverConfirmed: false });
+		expect(w.vm.connectModelChangeOffered).toBe(true);
+
+		w.vm.saveConnect();
+		await flushPromises();
+
+		expect(w.vm.connectModelChangeOffered).toBe(false);
+		w.unmount();
+	});
+});
+
+// jarvis#727 part 2. The headline used to be a fixed "Setting up Jarvis" above a
+// phase list jarvis#722 had already made real. waitPhases.setupHeadline owns the
+// mapping and its honesty rule; these pin the WIRING - that the view feeds it the
+// live phase, and that the never-observed states still render the generic line.
+describe("jarvis#727 the setup headline follows the live phase", () => {
+	it("names the brain phase while the apply operation is being followed", async () => {
+		const w = await mountConnect();
+
+		w.vm.saveConnect();
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("working");
+		expect(w.vm.setupTitle).toBe("Giving Jarvis a brain");
+		w.unmount();
+	});
+
+	it("follows admin's own reason once the readiness wait starts answering", async () => {
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "container_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.setupTitle).toBe("Bringing your setup online");
+		w.unmount();
+	});
+
+	it("claims nothing when the poll answered nothing", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockRejectedValue(new Error("bench hiccup"));
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.vm.setupTitle).toBe("Setting up Jarvis");
+		w.unmount();
+	});
+
+	it("says it is opening chat only once a ready verdict has actually navigated", async () => {
+		api.getLlmApplyOperation.mockResolvedValue(readyStatus);
+		vi.useFakeTimers();
+		const w = await mountConnect();
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(50);
+		await p;
+
+		expect(routerReplace).toHaveBeenCalledTimes(1);
+		expect(w.vm.setupTitle).toBe("Opening your chat");
+		w.unmount();
+	});
+
+	// The product owner asked twice to drop "workspace" from onboarding copy: at
+	// this point the customer does not have one.
+	it("no wait-screen headline or subtitle says workspace", async () => {
+		const w = await mountConnect();
+
+		w.vm.saveConnect();
+		await flushPromises();
+		expect(w.vm.setupTitle).not.toMatch(/workspace/i);
+		expect(w.vm.state.finishSubtitle).not.toMatch(/workspace/i);
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		expect(w.vm.setupTitle).not.toMatch(/workspace/i);
+		expect(w.vm.state.finishSubtitle).not.toMatch(/workspace/i);
+		w.unmount();
+	});
+});
+
 describe("staged readiness phases: the screen renders what the poll observed", () => {
 	// Every one of these 40 polls used to be discarded except the last detail, so
 	// the wait showed one fixed sentence for two minutes.

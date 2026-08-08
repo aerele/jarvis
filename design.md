@@ -564,6 +564,24 @@ Every pane in the Settings dialog owns its own header (there is no global dialog
   else. No gradients, no glow shadows, no pulse animations, no decorative background orbs
   (brand-asset exception: §2.2 — the Jarvis mark and the provisioning illustration only). The
   wizard proves quality through calm, not sparkle.
+- **Long waits: the headline is a phase, not a label (jarvis#727)**. On a wait screen that
+  already renders an observation-driven phase list (`onboarding/waitPhases.js`), the `h1`
+  reads off the SAME phase instead of repeating the step name: "Giving Jarvis a brain" while
+  the AI connection is being applied, "Bringing your setup online" while the container comes
+  up, "Opening your chat" once a ready verdict has actually fired the navigation. The honesty
+  rule from jarvis#709 binds the headline exactly as it binds body copy, so every unobserved
+  or unrecognised state falls back to the plain "Setting up {agentName}". Derive it in the
+  pure module and test it there; never branch on phase label text in the template.
+- **Never say "workspace" during onboarding** (product owner, twice). The customer does not
+  have one yet. Use "setup" or "onboarding", on headlines, subtitles and button labels alike.
+- **A dead end gets a second action (jarvis#727)**. When a wait ends in a state that retrying
+  cannot resolve, Retry must not be the only button. Offer the action that can actually change
+  the outcome, and offer it ONLY where this attempt observed the thing it would change: a
+  model change belongs on a wait that watched the customer's own configuration stall, and not
+  on one that never reached the control plane at all, where it would blame something nobody
+  examined. Keep it in the wizard, never a link to Settings: `readiness.js`'s
+  `NOT_ONBOARDED_REASONS` puts these states behind AppShell's full-screen gate, so a Settings
+  link is a round trip back to the same screen.
 - **Post-signup activation**: prefer a checklist over a marketing tour — steps registered with
   `useOnboarding(app)`, each step's action **deep-links into the real UI** (opens the settings
   dialog at the right tab, routes to the real form) and is marked complete where the action

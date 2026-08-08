@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 
 import {
 	PHASE_STATE,
+	PHASE_KIND,
 	provisioningPhase,
 	readinessPhase,
 	inFlightPhase,
+	setupHeadline,
 	connectHeadline,
 	phaseProgress,
 } from "./waitPhases.js";
@@ -184,6 +186,107 @@ test("readiness: no branch ever claims setup is finishing on its own", () => {
 			const p = readinessPhase({ answered, reason });
 			assert.doesNotMatch(p.label + " " + p.detail, /finishing on its own/i);
 		}
+	}
+});
+
+// ---- setup headline (jarvis#727) -----------------------------------------
+
+test("setup headline: the apply phase is the only thing that earns the brain line", () => {
+	for (const reason of ["llm_pool_provisioning", "llm_provisioning"]) {
+		const p = readinessPhase({ answered: true, reason });
+		assert.equal(p.kind, PHASE_KIND.LLM_APPLY);
+		assert.equal(setupHeadline(p, "Jarvis"), "Giving Jarvis a brain");
+	}
+});
+
+test("setup headline: a live apply operation grounds the brain line before any poll answers", () => {
+	const p = inFlightPhase("Applying your AI connection", PHASE_KIND.LLM_APPLY);
+	assert.equal(setupHeadline(p, "Jarvis"), "Giving Jarvis a brain");
+});
+
+test("setup headline: an inFlight phase with no named subject claims none", () => {
+	assert.equal(
+		setupHeadline(inFlightPhase("Checking on your workspace"), "Jarvis"),
+		"Setting up Jarvis"
+	);
+});
+
+test("setup headline: the container phase names the container, never a workspace", () => {
+	const p = readinessPhase({ answered: true, reason: "container_provisioning" });
+	assert.equal(setupHeadline(p, "Jarvis"), "Bringing your setup online");
+});
+
+// The whole point of jarvis#709/#722: the biggest text on the screen is not
+// exempt from the rule that a phase is named only when something reported it.
+test("setup headline: no unobserved or unnameable phase ever claims a subject", () => {
+	const unnameable = [
+		readinessPhase({ answered: false }),
+		readinessPhase({ answered: true, reason: "readiness_unconfirmed" }),
+		readinessPhase({ answered: true, reason: "authority_repair_required" }),
+		readinessPhase({ answered: true, reason: "subscription_suspended" }),
+		readinessPhase({ answered: true, reason: "site_replaced" }),
+		readinessPhase({ answered: true, reason: "a_reason_this_build_never_heard_of" }),
+		null,
+		undefined,
+	];
+	for (const p of unnameable) {
+		assert.equal(setupHeadline(p, "Jarvis"), "Setting up Jarvis");
+	}
+});
+
+test("setup headline: only navigating (or a DONE phase) opens chat", () => {
+	const applying = readinessPhase({ answered: true, reason: "llm_pool_provisioning" });
+	assert.equal(setupHeadline(applying, "Jarvis", { navigating: true }), "Opening your chat");
+	assert.equal(setupHeadline(null, "Jarvis", { navigating: true }), "Opening your chat");
+	assert.equal(
+		setupHeadline(provisioningPhase({ answered: true, tenantStatus: "running" }), "Jarvis"),
+		"Opening your chat"
+	);
+});
+
+// readinessPhase has no DONE branch (jarvis#726), so the connect wait can never
+// observe a chat-opening phase - `navigating` above is the only route to that
+// headline there. Pinned so a later DONE branch is a deliberate decision.
+test("setup headline: no readiness reason reaches the chat-opening headline on its own", () => {
+	const reasons = [
+		"llm_pool_provisioning",
+		"llm_provisioning",
+		"container_provisioning",
+		"readiness_unconfirmed",
+		"authority_repair_required",
+		"subscription_suspended",
+		"site_replaced",
+		"unmapped",
+	];
+	for (const reason of reasons) {
+		for (const answered of [true, false]) {
+			const h = setupHeadline(readinessPhase({ answered, reason }), "Jarvis");
+			assert.notEqual(h, "Opening your chat", reason);
+		}
+	}
+});
+
+test("setup headline: the brand name is honoured, and a blank one falls back to Jarvis", () => {
+	const p = readinessPhase({ answered: true, reason: "llm_provisioning" });
+	assert.equal(setupHeadline(p, "Aerele AI"), "Giving Aerele AI a brain");
+	assert.equal(setupHeadline(p, "   "), "Giving Jarvis a brain");
+	assert.equal(setupHeadline(p), "Giving Jarvis a brain");
+	assert.equal(setupHeadline(null, ""), "Setting up Jarvis");
+});
+
+// The product owner asked twice to drop "workspace" from onboarding copy: the
+// customer does not have one yet.
+test("setup headline: no headline says workspace", () => {
+	const phases = [
+		inFlightPhase("Applying your AI connection", PHASE_KIND.LLM_APPLY),
+		readinessPhase({ answered: true, reason: "container_provisioning" }),
+		readinessPhase({ answered: true, reason: "readiness_unconfirmed" }),
+		readinessPhase({ answered: false }),
+		null,
+	];
+	for (const p of phases) {
+		assert.doesNotMatch(setupHeadline(p, "Jarvis"), /workspace/i);
+		assert.doesNotMatch(setupHeadline(p, "Jarvis", { navigating: true }), /workspace/i);
 	}
 });
 
