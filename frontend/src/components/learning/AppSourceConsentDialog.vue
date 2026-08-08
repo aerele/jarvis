@@ -13,7 +13,7 @@
 			<div
 				class="mt-3 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
 			>
-				<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
+				<FeatherIcon name="alert-triangle" class="size-4 shrink-0" />
 				<div class="space-y-1">
 					<div>
 						The <span class="font-medium">source code</span> of every app you select -

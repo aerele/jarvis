@@ -208,10 +208,7 @@
 								v-if="hasActionableB"
 								class="flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
 							>
-								<FeatherIcon
-									name="alert-triangle"
-									class="mt-0.5 size-4 shrink-0"
-								/>
+								<FeatherIcon name="alert-triangle" class="size-4 shrink-0" />
 								<span>
 									Rows marked <b>B</b> contain exact text every chat user on this
 									site can read once approved - expand a row for its role
@@ -387,7 +384,7 @@
 									>
 										<FeatherIcon
 											name="trending-down"
-											class="mt-0.5 size-4 shrink-0"
+											class="size-4 shrink-0"
 										/>
 										<span>
 											{{
@@ -407,7 +404,7 @@
 									<!-- shown on the EXPANDED decidable card only: repeated verbatim on
 								     every collapsed B row it trains the exact banner blindness it
 								     warns about (a group-level note above the list covers the rest) -->
-									<div
+									<Banner
 										v-if="
 											row.effective_sensitivity === 'B' &&
 											['Proposed', 'Stale', 'Snoozed'].includes(
@@ -415,14 +412,10 @@
 											) &&
 											expanded[row.name]
 										"
-										class="mt-2.5 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
-									>
-										<FeatherIcon
-											name="alert-triangle"
-											class="mt-0.5 size-4 shrink-0"
-										/>
-										<span>{{ disclosureText(bRoles(row)) }}</span>
-									</div>
+										class="mt-2.5"
+										type="warning"
+										:message="disclosureText(bRoles(row))"
+									/>
 
 									<!-- drill-down toggle -->
 									<button
@@ -1581,15 +1574,10 @@
 		>
 			<template #body-content>
 				<div class="flex flex-col gap-3 text-sm">
-					<div
-						class="flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-ink-amber-3"
-					>
-						<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
-						<span>
-							Applying restarts the assistant for everyone for up to ~3 min. Active
-							chats may be briefly interrupted.
-						</span>
-					</div>
+					<Banner
+						type="warning"
+						message="Applying restarts the assistant for everyone for up to ~3 min. Active chats may be briefly interrupted."
+					/>
 					<p class="text-ink-gray-6">
 						Recompiles approved patterns into the learned-&lt;domain&gt; skills and
 						pushes them to your assistant. Only A-class (aggregate-safe) patterns are
@@ -1776,6 +1764,7 @@ import LayoutHeader from "@/components/LayoutHeader.vue";
 import SyncPill from "./SyncPill.vue";
 import InsightApplyDialog from "@/components/learning/InsightApplyDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
+import Banner from "@/components/Banner.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { setChatPrefill } from "@/composables/chatPrefill";
 import { getSkillsAreaCaps } from "@/api/personalise";

@@ -239,3 +239,72 @@ export function connectHeadline(phase, { fromReadinessCeiling = false } = {}) {
 	// a different (and honestly reportable) thing from never getting an answer.
 	return "Setup hit a snag";
 }
+
+/**
+ * Progress-bar reading of a phase (jarvis#726), for the fixed 3-step shape
+ * already drawn as the phase list next to it: a settled prior fact (the save
+ * persisted / the payment cleared), the CURRENT phase (this function's
+ * argument), and a step that resolves only by leaving this screen entirely -
+ * `navigateToChat()` fires the instant `ready` is true, so that step is never
+ * rendered done in place. Reads the SAME phase object the row already
+ * renders (provisioningPhase / readinessPhase / inFlightPhase) - no separate
+ * source of truth, and in particular no ordering inferred across `reason`
+ * codes, which waitPhases.js does not encode and never has: a phase counts
+ * as done ONLY when the model itself says PHASE_STATE.DONE.
+ *
+ * That means the two waits behave differently here, honestly:
+ * provisioningPhase has a DONE branch (tenant_status === "running"), so the
+ * provisioning wait's bar can and does advance to 2 of 3 mid-screen.
+ * readinessPhase has NO done branch at all - every reason it knows about
+ * maps to ACTIVE or UNKNOWN - so the connect wait's bar stays at 1 of 3
+ * until the moment is_ready_for_chat says ready and the screen navigates
+ * away; it never fills to 2 in place. Both waits still get the bar: the
+ * provisioning wait makes the determinate case real and demonstrable, and
+ * the connect wait's honestly-stuck-at-1/3 bar is exactly the indeterminate
+ * case this function has to tell apart from real progress.
+ *
+ * `indeterminate` is true whenever the phase carries nothing to act on -
+ * PHASE_STATE.UNKNOWN, or no phase read yet. It must render differently from
+ * the ACTIVE case: ACTIVE means the last poll told us specifically what's
+ * running (or, for inFlightPhase, that we are genuinely asking right now -
+ * itself known, not guessed, which is why inFlightPhase's state is ACTIVE
+ * and this counts it as determinate, matching the rest of this module's
+ * philosophy). UNKNOWN means the last poll told us nothing. A bar that looks
+ * identical for both would fake the confidence the honest phase label next
+ * to it already refuses to claim.
+ *
+ * The bar's own visible label is deliberately just "Step {current} of
+ * {total}" (built by the caller from `current`/`total`, not from `label`
+ * below) - never the phase's own sentence. The phase row right next to the
+ * bar already renders that sentence (waitPhases.js's whole reason for
+ * existing); repeating it as the bar's label too read as an unintentional
+ * duplicate rather than a deliberate echo. `label` is kept on the return
+ * value for callers that want it (tests, a future non-duplicating layout),
+ * not because OnboardingView.vue's bar renders it directly.
+ *
+ * @param {{state?: string, label?: string}} [phase]
+ * @returns {{done: number, current: number, total: number, percent: number,
+ *   label: string, indeterminate: boolean}} `done` is how many of `total`
+ *   segments fill. `current` is the 1-indexed step the customer is ON
+ *   (done + 1, capped at total) - never `done` itself, because a customer
+ *   watching this is on the step that ISN'T done yet. `percent` is `done` /
+ *   `total` rounded to an integer, for the Progress component's numeric
+ *   `value` prop (frappe-ui's own `filledIntervalCount` re-derives the
+ *   segment count from this by rounding it back against `total`, so the
+ *   rounding here never changes which segments fill) - it exists only so
+ *   the rendered `aria-valuenow` is a clean integer instead of a repeating
+ *   fraction; it is never displayed to the customer as a percentage.
+ */
+export function phaseProgress(phase) {
+	const total = 3;
+	const state = phase && phase.state;
+	const done = state === PHASE_STATE.DONE ? 2 : 1;
+	return {
+		done,
+		current: Math.min(done + 1, total),
+		total,
+		percent: Math.round((done / total) * 100),
+		label: (phase && phase.label) || "",
+		indeterminate: !phase || state === PHASE_STATE.UNKNOWN,
+	};
+}

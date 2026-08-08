@@ -12,7 +12,7 @@
 		<div
 			class="mt-3 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
 		>
-			<FeatherIcon name="alert-triangle" class="mt-0.5 size-4 shrink-0" />
+			<FeatherIcon name="alert-triangle" class="size-4 shrink-0" />
 			<span>
 				A run reads only the apps you pick, and their source code is sent to the AI model
 				provider configured for this site. Source text — including comments and docstrings
