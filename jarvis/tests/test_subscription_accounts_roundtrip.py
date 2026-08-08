@@ -313,7 +313,7 @@ class TestOrphanCaptureAdoption(_RT3SettingsTestCase):
 		frappe.db.delete("Jarvis Pending OAuth Capture")
 		frappe.db.commit()
 
-	def _mint(self, account_ref, blob='{"refresh_token":"fake-rt-ORPHAN"}'):
+	def _mint(self, account_ref, blob='{"provider":"openai","refresh_token":"fake-rt-ORPHAN"}'):
 		from jarvis.oauth import pending_capture
 
 		return pending_capture.create_capture(
@@ -342,7 +342,19 @@ class TestOrphanCaptureAdoption(_RT3SettingsTestCase):
 	def _save(self, payload):
 		with (
 			patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}),
-			patch("jarvis.admin_client.post_update_llm_creds"),
+			# status="applied" is load-bearing: a bare Mock's .get("status") is
+			# truthy-and-not-"applied", which routes _sync_via_admin into the
+			# converge branch and calls the UNMOCKED admin_client.get_connection.
+			patch(
+				"jarvis.admin_client.post_update_llm_creds",
+				return_value={"action": "restart", "status": "applied"},
+			),
+			# jarvis#715's lone-direct-capable exception routes a single
+			# renderable subscription (this class's whole fixture shape) onto
+			# the DIRECT leg, which pushes its own oauth blob before /llm-creds
+			# (_push_direct_subscription_blob) - unmocked, that is a real admin
+			# call attempt from inside _sync_via_admin.
+			patch("jarvis.admin_client.post_push_oauth_blob"),
 		):
 			return onboarding.save_llm_pool(frappe.as_json(payload), preset=None, routing_mode="failover")
 

@@ -597,7 +597,7 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		self.assertFalse(compute_pool_mode(settings))
 
 	def test_compute_pool_mode_false_for_a_fresh_lone_renderable_subscription(self):
-		"""jarvis#715: a lone subscription on a provider openclaw can serve
+		"""jarvis#715: a lone subscription on a provider agent can serve
 		NATIVELY (openai, per the bundled catalog's renderer_id), with no prior
 		pool history, needs no sidecar at all - the direct leg serves it.
 		"""
@@ -630,7 +630,7 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		self.assertTrue(compute_pool_mode(settings))
 
 	def test_compute_pool_mode_true_for_a_lone_kimi_subscription(self):
-		"""Kimi has NO openclaw-native auth flow at all (bundled catalog:
+		"""Kimi has NO agent-native auth flow at all (bundled catalog:
 		renderer_id ""), so it stays on the pool leg regardless of history."""
 		from jarvis.jarvis.pool_serialize import compute_pool_mode
 
@@ -640,7 +640,7 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 
 	def test_compute_pool_mode_true_for_a_lone_xai_subscription(self):
 		"""xAI has no fleet-template arm yet (renderer_id ""), even though
-		openclaw's own bundle can authenticate it natively - see the jarvis#715
+		agent's own bundle can authenticate it natively - see the jarvis#715
 		thread. Stays on the pool leg until a template arm + catalog id ship."""
 		from jarvis.jarvis.pool_serialize import compute_pool_mode
 
@@ -752,7 +752,7 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		self.assertTrue(compute_proxy_active(settings))
 
 	def test_compute_proxy_active_true_for_a_lone_kimi_subscription(self):
-		"""Kimi has no openclaw-native auth flow - cliproxy is doing genuine work."""
+		"""Kimi has no agent-native auth flow - cliproxy is doing genuine work."""
 		_, _, compute_proxy_active = self._imports()
 		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="kimi")])])
 		settings.preset = None
@@ -1457,7 +1457,7 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		self.assertEqual(pool_calls, [], "a fresh lone renderable subscription must never push /llm-pool")
 		self.assertEqual(out["mode"], "legacy", "no apply-operation descriptor on the direct leg")
 
-		# The oauth blob is pushed to openclaw's auth store BEFORE /llm-creds,
+		# The oauth blob is pushed to agent's auth store BEFORE /llm-creds,
 		# with id_token stripped (jarvis#715 step 3, point 4).
 		self.assertEqual(len(blob_calls), 1, "the direct leg must push the oauth blob exactly once")
 		provider, pushed_blob = blob_calls[0]
@@ -1481,7 +1481,7 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		)
 
 	def test_lone_kimi_subscription_still_reaches_the_pool_push(self):
-		"""Kimi has no openclaw-native auth flow, so it must still take the pool
+		"""Kimi has no agent-native auth flow, so it must still take the pool
 		leg - the seam-level counterpart to the compute_pool_mode unit test."""
 		from jarvis import onboarding
 
@@ -4543,6 +4543,37 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		)
 		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
 
+	def test_reconcile_treats_an_unconfigured_subscription_tenant_as_nothing_to_converge(self):
+		"""jarvis#755 review: direct_leg_configured used to key on bare models[]
+		presence (bool(settings.get("models"))), so a leftover row that is
+		disabled, or has no connected account, still read as "configured" and
+		got re-polled forever even though there is nothing to converge. Patches
+		has_configured_subscription_model directly - the exact predicate that
+		changed - rather than fighting the models[]-table save/validate
+		pipeline to construct a disabled row."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			reconcile_pending_llm_sync,
+		)
+
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set(
+			{
+				"llm_auth_mode": "subscription",
+				"llm_pool_synced_at": None,
+				"llm_direct_synced_at": None,
+				"last_sync_status": "failed: admin briefly unreachable",
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		self._seed_admin_creds()  # after the commit; stays in the rolled-back txn
+		with (
+			patch("jarvis.jarvis.pool_serialize.has_configured_subscription_model", return_value=False),
+			patch("jarvis.admin_client.get_connection") as m,
+		):
+			reconcile_pending_llm_sync()
+			m.assert_not_called()
+
 	def test_reconcile_leaves_a_healthy_tenant_alone(self):
 		"""Inert on a healthy fleet: an 'ok' tenant is never re-stamped.
 
@@ -4794,15 +4825,16 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 	(jarvis#566).
 	"""
 
-	def _leaving(self, before_rows, after_rows):
+	def _leaving(self, before_rows, after_rows, before_pool_synced_at=None):
 		from unittest.mock import Mock
 
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
 
+		before_doc = _make_settings_with_models(before_rows) if before_rows is not None else None
+		if before_doc is not None and before_pool_synced_at is not None:
+			before_doc.llm_pool_synced_at = before_pool_synced_at
 		doc = _make_settings_with_models(after_rows)
-		doc.get_doc_before_save = Mock(
-			return_value=(_make_settings_with_models(before_rows) if before_rows is not None else None)
-		)
+		doc.get_doc_before_save = Mock(return_value=before_doc)
 		return JarvisSettings._is_leaving_pool_mode(doc)
 
 	def test_dropping_two_models_to_one_is_leaving_pool_mode(self):
@@ -4819,13 +4851,31 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 		self.assertFalse(self._leaving([_api_key_model(order=0)], [_api_key_model(order=0)]))
 
 	def test_removing_the_last_subscription_is_leaving_pool_mode(self):
-		"""A lone subscription is pool mode, so dropping it also has to converge.
+		"""An ALREADY-PROVISIONED lone subscription is pool mode, so dropping it
+		also has to converge.
 
 		This is the transition that tears the Bifrost and CLIProxyAPI sidecars
-		down, which only the /llm-pool leg does.
+		down, which only the /llm-pool leg does. Stamps llm_pool_synced_at on the
+		before-doc (jarvis#715's retroactivity gate, jarvis#755 review): without
+		it a lone subscription with no sync history reads as
+		_lone_direct_capable and compute_pool_mode(before) is False, which would
+		make this indistinguishable from test_single_model_edit_is_not_leaving_
+		pool_mode's "never was a pool" case - the whole point of this test is a
+		tenant that GENUINELY was on the pool leg.
 		"""
 		before = [_subscription_model(order=0, accounts=[_account()])]
-		self.assertTrue(self._leaving(before, [_api_key_model(order=0)]))
+		self.assertTrue(
+			self._leaving(before, [_api_key_model(order=0)], before_pool_synced_at="2026-08-01 00:00:00")
+		)
+
+	def test_removing_a_fresh_never_synced_lone_subscription_is_not_leaving_pool_mode(self):
+		"""The complement of the test above: a lone subscription that never
+		synced through the pool leg (jarvis#715's _lone_direct_capable shape)
+		was never a pool to begin with, so dropping it tears down nothing and
+		must take the ordinary single-model leg like any other direct-to-direct
+		edit."""
+		before = [_subscription_model(order=0, accounts=[_account()])]
+		self.assertFalse(self._leaving(before, [_api_key_model(order=0)]))
 
 	def test_teardown_push_is_allowed_past_the_pool_mode_gate(self):
 		"""The worker must not skip the job whose whole purpose is the teardown."""
@@ -4851,3 +4901,30 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 
 		pool = _make_settings_with_models([_api_key_model(order=0), _api_key_model(model="glm-4.7", order=1)])
 		self.assertTrue(_pool_spec_pushable(pool, False))
+
+
+class TestPushDirectSubscriptionBlobNoMatchInvariant(FrappeTestCase):
+	"""jarvis#755 review: _push_direct_subscription_blob's docstring promises it
+	raises rather than silently skipping the push when its "exactly one enabled
+	subscription model" invariant is violated. A NO-MATCH loop (every row
+	disabled, or none is a subscription) used to fall off the end and return
+	None instead - the caller would then push /llm-creds with auth:"oauth"
+	against an auth store nothing was ever written to."""
+
+	def test_raises_when_no_enabled_subscription_row_matches(self):
+		from jarvis import admin_client
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		settings = _make_settings_with_models(
+			[_subscription_model(order=0, enabled=0, accounts=[_account()])]
+		)
+		with self.assertRaises(admin_client.AdminValidationError):
+			JarvisSettings._push_direct_subscription_blob(settings)
+
+	def test_raises_when_models_is_empty(self):
+		from jarvis import admin_client
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		settings = _make_settings_with_models([])
+		with self.assertRaises(admin_client.AdminValidationError):
+			JarvisSettings._push_direct_subscription_blob(settings)

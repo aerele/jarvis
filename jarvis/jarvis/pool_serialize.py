@@ -315,7 +315,7 @@ def compute_pool_mode(settings) -> bool:
 	# provisioned ONLY on the pool path - the DIRECT (single-model) path just
 	# pushes llm-creds and has no cliproxy, so a lone subscription model would
 	# never get its OAuth blob served and chat would fail despite a "connected"
-	# UI (#200 review #1). _lone_direct_capable carves out the one shape openclaw
+	# UI (#200 review #1). _lone_direct_capable carves out the one shape agent
 	# can serve NATIVELY with no sidecar at all: exactly one enabled subscription
 	# model, one connected account, an upstream the fleet template can render on
 	# the direct oauth leg, and (the non-retroactivity gate) a workspace that has
@@ -329,6 +329,26 @@ def compute_pool_mode(settings) -> bool:
 def has_subscription_model(settings) -> bool:
 	"""True when at least one ENABLED models[] row is a chat subscription."""
 	return any(_credential_type(m) == "subscription" for m in _enabled_models(settings))
+
+
+def has_configured_subscription_model(settings) -> bool:
+	"""True when at least one ENABLED subscription model row also has a
+	CONNECTED account - not merely that the row exists.
+
+	Stronger than ``has_subscription_model``, which only checks the row is
+	there: a subscription model can be enabled with zero accounts (mid-connect,
+	before the OAuth handshake lands), and gating a send or a readiness verdict
+	on row-presence alone lets that half-configured state read as "configured"
+	when there is nothing to serve. Shared by the three call sites that used to
+	each answer "is a subscription credential present" differently (jarvis#715
+	review, "gates that check a models[] row merely EXISTS rather than that a
+	credential is confirmed, enabled and usable"): ``chat.policy._llm_not_configured``,
+	``account.is_ready_for_chat``'s subscription branch, and
+	``jarvis_settings.reconcile_pending_llm_sync``'s ``direct_leg_configured``.
+	"""
+	return any(
+		_credential_type(m) == "subscription" and _model_accounts(m) for m in _enabled_models(settings)
+	)
 
 
 def compute_proxy_active(settings) -> bool:
@@ -372,7 +392,7 @@ def compute_proxy_active(settings) -> bool:
 # ---------------------------------------------------------------------------
 
 
-# Providers openclaw can authenticate NATIVELY on the direct oauth leg, keyed
+# Providers agent can authenticate NATIVELY on the direct oauth leg, keyed
 # by the bundled catalog's provider_id/catalog_id (== the models[].accounts[]
 # upstream for every upstream this can ever match - "openai" and "google" are
 # spelled identically in both vocabularies; Kimi's upstream "kimi" has no
@@ -381,7 +401,7 @@ def compute_proxy_active(settings) -> bool:
 # reads as "not renderable" - the same, safe answer a real lookup would give
 # since Kimi's catalog renderer_id is blank anyway). A provider with no
 # non-empty renderer_id has no fleet-template arm to render it (jarvis#715
-# thread, live-verified against openclaw 2026.6.8 + the live provider
+# thread, live-verified against agent 2026.6.8 + the live provider
 # catalog): xai and moonshot are both in that state today, so they stay on
 # the pool leg until a template arm + catalog id ship for them.
 def _upstream_has_renderer(upstream: str) -> bool:
@@ -410,7 +430,7 @@ def _upstream_has_renderer(upstream: str) -> bool:
 
 def _lone_direct_capable(settings) -> bool:
 	"""True when this settings' lone enabled model needs no Bifrost/cliproxy
-	sidecar at all - it can be served entirely by openclaw's native oauth
+	sidecar at all - it can be served entirely by agent's native oauth
 	auth-profile support (jarvis#715).
 
 	ALL of the following must hold:

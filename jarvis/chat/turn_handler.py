@@ -285,6 +285,50 @@ _PROVIDER_LABEL_TO_AGENT_ID = {
 POOL_VIRTUAL_MODEL = "jarvis-pool"
 
 
+def _subscription_agent_provider(settings) -> str | None:
+	"""Return the agent-provider id for the DIRECT subscription leg's lone
+	connected account, or None on any error.
+
+	The models[]-table subscription leg (jarvis#715) carries no ``llm_provider`` -
+	a subscription row has only a model id, not a provider field - so
+	``_PROVIDER_LABEL_TO_AGENT_ID``'s ``llm_provider`` lookup (the oauth-mode path
+	below) can never resolve it, and skipping it left ``provider`` at None for
+	every subscription-direct turn: agent-direct chat either 502s ("No API key
+	found for provider ...") or silently mis-routes, exactly on the tenants this
+	leg exists to serve.
+
+	The account's own oauth_blob already carries the agent provider id under its
+	``provider`` key (``"openai"``, ``"google-gemini-cli"`` - baked in when the
+	blob was minted by ``jarvis.oauth.api._exchange_and_build_blob``), so read it
+	from there instead of standing up a second upstream-to-provider table - see
+	``jarvis_settings.py``'s ``_push_direct_subscription_blob``, which relies on
+	the same key for the same reason.
+
+	Fails closed to None on ANY error - a malformed or missing blob must degrade
+	to "no opinion" (agent falls back to resolving its one registered model),
+	never crash the turn.
+	"""
+	import json
+
+	from jarvis.jarvis.pool_serialize import _credential_type, _enabled_models, _model_accounts
+
+	try:
+		for m in _enabled_models(settings):
+			if _credential_type(m) != "subscription":
+				continue
+			accounts = _model_accounts(m)
+			if not accounts:
+				return None
+			blob_raw = accounts[0].get("oauth_blob") if hasattr(accounts[0], "get") else ""
+			blob = json.loads(blob_raw) if blob_raw else None
+			if not isinstance(blob, dict):
+				return None
+			return (blob.get("provider") or "").strip() or None
+		return None
+	except Exception:
+		return None
+
+
 def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 	"""Return (effective_model, agent_provider_id_or_None) for this conv.
 
@@ -312,9 +356,14 @@ def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 		return "", None  # Let the pool route
 
 	effective_model = conv.model_override or settings.llm_model or ""
-	provider = (
-		_PROVIDER_LABEL_TO_AGENT_ID.get(settings.llm_provider) if settings.llm_auth_mode == "oauth" else None
-	)
+	if settings.llm_auth_mode == "oauth":
+		provider = _PROVIDER_LABEL_TO_AGENT_ID.get(settings.llm_provider)
+	elif settings.llm_auth_mode == "subscription":
+		# The models[]-table DIRECT leg (jarvis#715 step 3): compute_pool_mode
+		# already routed us here, so this IS the lone-direct-capable shape.
+		provider = _subscription_agent_provider(settings)
+	else:
+		provider = None
 	return effective_model, provider
 
 

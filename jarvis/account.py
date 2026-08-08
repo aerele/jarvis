@@ -709,10 +709,23 @@ def is_ready_for_chat() -> dict:
 		# oauth flow only: save_llm_pool unconditionally clears it on every
 		# models[]-table save (see its comment), so gating here on it would
 		# never open chat for this leg.
-		if not getattr(settings, "llm_direct_synced_at", None) and not _confirm_apply_via_admin(
-			settings, is_pool=False
-		):
-			return {"ready": False, "reason": "llm_provisioning"}
+		#
+		# The marker short-circuits BOTH inner checks below, same as the plain
+		# `not getattr(...) and not _confirm_apply_via_admin(...)` shape used
+		# everywhere else in this function - an established tenant never pays a
+		# has_configured_subscription_model call, let alone an admin round-trip.
+		if not getattr(settings, "llm_direct_synced_at", None):
+			# jarvis#755 review: a tenant that never configured a subscription at
+			# all used to fall straight into the generic llm_provisioning
+			# verdict below, identical to one mid-apply. Distinguish "nothing to
+			# confirm" from "confirmation pending" first, mirroring the
+			# api_key/oauth branches' own missing-verdict exit above.
+			from jarvis.jarvis.pool_serialize import has_configured_subscription_model
+
+			if not has_configured_subscription_model(settings):
+				return _llm_missing_verdict(settings)
+			if not _confirm_apply_via_admin(settings, is_pool=False):
+				return {"ready": False, "reason": "llm_provisioning"}
 	elif auth_mode == "oauth":
 		# The legacy flat-field direct-oauth flow: llm_oauth_connected_at is
 		# set (read-only) when the oauth grant completes and the admin

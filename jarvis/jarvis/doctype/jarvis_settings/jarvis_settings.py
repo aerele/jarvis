@@ -698,11 +698,11 @@ class JarvisSettings(Document):
 
 	def _push_direct_subscription_blob(self) -> None:
 		"""Push the DIRECT leg's lone subscription account's OAuth blob to
-		openclaw's auth store, before the ``/llm-creds`` render that depends on it
+		agent's auth store, before the ``/llm-creds`` render that depends on it
 		(jarvis#715 step 3, point 4).
 
 		Mirrors ``jarvis.oauth.api.complete_paste_signin``'s push: the blob's own
-		``provider`` key already carries the openclaw auth-profile id
+		``provider`` key already carries the agent auth-profile id
 		(``agent_provider`` - "openai", "google-gemini-cli" - baked in when the
 		blob was minted), so no separate upstream-to-provider table is needed
 		here, and ``id_token`` is stripped because fleet's ``PUT /auth-profile``
@@ -716,7 +716,11 @@ class JarvisSettings(Document):
 		(rather than silently skipping the push) if that invariant is somehow
 		violated - the caller's surrounding try/except in ``_sync_via_admin``
 		reports it exactly like an admin failure, which is safer than rendering
-		``auth: "oauth"`` against a container with no credential behind it.
+		``auth: "oauth"`` against a container with no credential behind it. That
+		guarantee covers a NO-MATCH loop too (jarvis#755 review): if nothing
+		enabled turns out to be a subscription row when this runs, falling off
+		the loop without raising would be exactly the silent skip this docstring
+		promises never happens, so the loop's tail raises the same way.
 		"""
 		import json
 
@@ -743,6 +747,9 @@ class JarvisSettings(Document):
 			direct_blob = {k: v for k, v in blob.items() if k != "id_token"}
 			admin_client.post_push_oauth_blob(blob["provider"], direct_blob)
 			return
+		raise admin_client.AdminValidationError(
+			"direct subscription leg: no enabled subscription model to push"
+		)
 
 	def on_update(self):
 		# ------------------------------------------------------------------ #
@@ -1304,6 +1311,27 @@ class JarvisSettings(Document):
 			_commit_terminal_sync_status()
 			terminal_written = True
 			frappe.logger().info(f"admin_client: rate-limited; retry_after={retry}s")
+		except admin_client.AdminValidationError as e:
+			# jarvis#755 review: with no handler here this fell through to the
+			# generic "unexpected error" backstop below, discarding the concrete
+			# reason _push_direct_subscription_blob raised (e.g. "missing or
+			# malformed oauth_blob") right when a customer needs it most - the
+			# save already committed the models[] row, so this status is the only
+			# place that reason can still reach them. Mirrors the pool sync
+			# twin's handling of the same exception.
+			_write_settings_fields(
+				self,
+				{
+					"last_sync_at": frappe.utils.now(),
+					"last_sync_status": f"failed: validation: {e}",
+				},
+			)
+			_commit_terminal_sync_status()
+			terminal_written = True
+			frappe.log_error(
+				title="Jarvis: admin validation failed (direct sync)",
+				message=frappe.get_traceback(),
+			)
 		except _WRITE_CONFLICT_ERRORS:
 			# #713, a BACKSTOP rather than the primary path: the status writes above
 			# all go through _write_settings_fields, which reports a lost race instead
@@ -2480,7 +2508,7 @@ def reconcile_pending_llm_sync() -> None:
 		if not admin_api_key and not customer_pw:
 			return
 
-		from jarvis.jarvis.pool_serialize import compute_pool_mode
+		from jarvis.jarvis.pool_serialize import compute_pool_mode, has_configured_subscription_model
 
 		status = settings.get("last_sync_status") or ""
 		# The evidence marker follows the SYNC LEG, so this is pool mode, not the
@@ -2502,15 +2530,18 @@ def reconcile_pending_llm_sync() -> None:
 		is_unproven_pool = pool_mode and not pool_synced and is_stuck
 		# api_key: "configured" means a provider was chosen. subscription (the
 		# jarvis#715 direct leg) has no llm_provider - a subscription model row
-		# carries no provider field - so "configured" means the models[] row
-		# itself exists instead. oauth (the legacy flat-field flow) is excluded
-		# here exactly as before: its evidence marker (llm_oauth_connected_at) is
-		# stamped synchronously inside the same request that pushes it, never
-		# left pending for this scheduled net to pick up.
+		# carries no provider field - so "configured" means an ENABLED
+		# subscription row with a connected account instead (jarvis#755 review:
+		# bare row-presence would misclassify a disabled leftover row as
+		# unproven-direct and re-poll it forever). oauth (the legacy flat-field
+		# flow) is excluded here exactly as before: its evidence marker
+		# (llm_oauth_connected_at) is stamped synchronously inside the same
+		# request that pushes it, never left pending for this scheduled net to
+		# pick up.
 		auth_mode = (settings.get("llm_auth_mode") or "api_key").strip()
 		direct_leg_configured = (
 			auth_mode == "api_key" and bool((settings.get("llm_provider") or "").strip())
-		) or (auth_mode == "subscription" and bool(settings.get("models")))
+		) or (auth_mode == "subscription" and has_configured_subscription_model(settings))
 		is_unproven_direct = not pool_mode and not direct_synced and is_stuck and direct_leg_configured
 		# The disconnect leg's LOCAL precondition (see the docstring). It is true of
 		# every healthy CONNECTED workspace, so this leg does cost one extra

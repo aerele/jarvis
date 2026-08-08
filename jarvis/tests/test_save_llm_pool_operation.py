@@ -66,7 +66,7 @@ class _SaveOpBase(_RT3SettingsTestCase):
 		frappe.db.commit()
 
 	def _capture(self, ref="SUB_op0001", subject="acct-op-1"):
-		# Kimi (Moonshot), DELIBERATELY: it has no openclaw-native auth flow, so a
+		# Kimi (Moonshot), DELIBERATELY: it has no agent-native auth flow, so a
 		# lone Kimi subscription always stays on the pool leg regardless of
 		# jarvis#715's new lone-renderable-subscription exception. These tests are
 		# about POOL-leg plumbing (capture consumption, resumability, idempotency

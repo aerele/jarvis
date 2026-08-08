@@ -232,3 +232,22 @@ class TestLlmConfiguredGate(FrappeTestCase):
 		ok, reason = validate_can_send("Administrator")
 		self.assertTrue(ok)
 		self.assertIsNone(reason)
+
+	def test_subscription_row_with_no_connected_account_still_rejects_the_send(self):
+		"""jarvis#755 review: bare models[] presence used to be the whole check,
+		so a subscription row enabled but not yet connected (mid-OAuth-handshake,
+		before it has an account) read as configured and let a send queue
+		against a container with no credential, where it hangs. Now the gate
+		must require a connected account too."""
+		self._set(llm_provider="", llm_model="", llm_auth_mode="subscription", proxy_active=0)
+		with patch("jarvis.jarvis.pool_serialize.has_configured_subscription_model", return_value=False):
+			ok, reason = validate_can_send("Administrator")
+		self.assertFalse(ok)
+		self.assertEqual(reason, "llm_not_configured")
+
+	def test_subscription_with_a_connected_account_sends(self):
+		self._set(llm_provider="", llm_model="", llm_auth_mode="subscription", proxy_active=0)
+		with patch("jarvis.jarvis.pool_serialize.has_configured_subscription_model", return_value=True):
+			ok, reason = validate_can_send("Administrator")
+		self.assertTrue(ok)
+		self.assertIsNone(reason)
