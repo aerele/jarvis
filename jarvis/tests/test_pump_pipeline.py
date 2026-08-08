@@ -1076,8 +1076,11 @@ class TestStuckFinishingAfterAFailingLane(_PipelineCase):
 		frappe.db.commit()
 		self._pubs.clear()
 		out = finalize.run_finalize(rid, self._target)
-		self.assertEqual(out, {"ok": True, "already_done": True, "republished": False})
 		self.assertEqual(self._pubs, [], "no message:enriched with a null message_id to index on")
+		self.assertTrue(out["already_done"])
+		# assertIs, not assertFalse: before jarvis#681 this branch reported no outcome at
+		# all, and a missing key must not read the same as a considered "nothing to send".
+		self.assertIs(out.get("republished"), False, "the skipped re-delivery is reported honestly")
 
 
 # --------------------------------------------------------------------------- #

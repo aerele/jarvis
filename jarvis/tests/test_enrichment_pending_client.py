@@ -21,11 +21,19 @@ frontend CI job. Mirrors test_event_fence_client.py.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import unittest
 
 import frappe
+
+# The walk this file guards is only meaningful if it actually RAN. `node --test` counts
+# the FILE itself as one passing unit, so an emptied or import-broken test file still
+# prints "pass 1" with a zero exit: asserting merely that a pass line exists, or that the
+# count is at least 1, proves nothing. Hold a floor comfortably above 1 (the file ships
+# 11 tests) so a gutted suite fails loudly instead of reading as green.
+_MIN_EXPECTED_PASSES = 8
 
 
 def _test_path() -> str:
@@ -57,6 +65,14 @@ class TestEnrichmentPendingClient(unittest.TestCase):
 			"client enrichment-pending node test FAILED (jarvis#681 bounded affordance):\n"
 			f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
 		)
-		# Belt-and-suspenders: a silently-skipped suite (0 tests) must not read as green.
-		self.assertIn("pass ", proc.stdout, f"node test produced no pass summary:\n{proc.stdout}")
-		self.assertNotIn("fail 1", proc.stdout)
+		# Belt-and-suspenders: prove the walk RAN, not just that nothing failed. See
+		# _MIN_EXPECTED_PASSES for why a floor above 1 is what makes this assertion real.
+		passes = re.search(r"\bpass (\d+)\b", proc.stdout)
+		self.assertIsNotNone(passes, f"node test produced no pass summary:\n{proc.stdout}")
+		self.assertGreaterEqual(
+			int(passes.group(1)),
+			_MIN_EXPECTED_PASSES,
+			f"the jarvis#681 client walk ran only {passes.group(1)} assertions, expected at least "
+			f"{_MIN_EXPECTED_PASSES}. An emptied or import-broken test file still exits 0 with "
+			f"'pass 1'.\n{proc.stdout}",
+		)
