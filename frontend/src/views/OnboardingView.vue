@@ -2946,6 +2946,14 @@ async function onPayAction(a) {
 	if (a === ACTIONS.RECONNECT) return startReconnect();
 	if (a === ACTIONS.VERIFY) return flow.verifyAndContinue();
 	if (a === ACTIONS.RESEND) return runResendVerification();
+	if (a === ACTIONS.BILLING) {
+		// A hard navigation, not a router push: the wizard is rendered by AppShell's
+		// gate on a workspace it considers unready, and routing inside that shell
+		// lands back on the same poster. Leaving the SPA entirely is what actually
+		// reaches the billing page.
+		window.location.assign("/jarvis/billing");
+		return;
+	}
 	if (a === ACTIONS.SUPPORT) return openSupport();
 	if (a === ACTIONS.RESTART) {
 		// A details rejection is not a restart in any meaningful sense: admin named a

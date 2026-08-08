@@ -158,6 +158,17 @@ export const ACTIONS = {
 	RESEND: "resend",
 	/** A human. Offered on terminal states and after the client-local check ceiling. */
 	SUPPORT: "support",
+	/**
+	 * Leave the wizard for the billing page, which CAN renew.
+	 *
+	 * SIGNUP_TERMINAL told a lapsed customer to "renew from your account" and then
+	 * offered only Contact support - an instruction with no way to follow it. The
+	 * wizard deliberately does not grow its own reactivation flow: renewal already
+	 * exists on the billing page, with the cohort rules (can_reactivate) and the
+	 * plan grid, and a second checkout-initiation path for the same money is how
+	 * two surfaces drift apart. So this ROUTES rather than rebuilds.
+	 */
+	BILLING: "billing",
 	/** Back to the top of the wizard - nothing exists to recover. */
 	RESTART: "restart",
 };
@@ -275,9 +286,9 @@ const TABLE = {
 	},
 	[CODES.SIGNUP_TERMINAL]: {
 		headline: "This signup cannot be continued.",
-		body: "The subscription it belongs to has ended. Renew from your account, or talk to us and we will sort it out.",
+		body: "The subscription it belongs to has ended. Renew it from your billing page, or talk to us and we will sort it out.",
 		tone: TONE.ALERT,
-		actions: [ACTIONS.SUPPORT],
+		actions: [ACTIONS.BILLING, ACTIONS.SUPPORT],
 	},
 	[CODES.INVALID_REQUEST]: {
 		headline: "That payment request could not be accepted.",
@@ -493,6 +504,7 @@ export const ACTION_LABELS = {
 	// OnboardingView's resendLabel, the same way checkLabel overrides this one
 	// for ACTIONS.CHECK.
 	[ACTIONS.RESEND]: "Resend the link",
+	[ACTIONS.BILLING]: "Renew your plan",
 	[ACTIONS.SUPPORT]: "Contact support",
 	[ACTIONS.RESTART]: "Start again",
 };

@@ -277,3 +277,24 @@ test("RESEND is never baked into the verification row either: it is a granted ca
 	assert.ok(!copyFor(CODES.SIGNUP_VERIFICATION_REQUIRED).actions.includes(ACTIONS.RESEND));
 	assert.equal(actionLabelFor({}, ACTIONS.RESEND), "Resend the link");
 });
+
+test("a lapsed signup is offered the page that can actually renew it", () => {
+	// The dead end the owner hit by navigating to /onboarding on an Expired site:
+	// the copy said "renew from your account" and the only button was Contact
+	// support. An instruction with no way to follow it.
+	const copy = copyFor(CODES.SIGNUP_TERMINAL);
+	assert.equal(copy.actions[0], ACTIONS.BILLING, "renewing is the PRIMARY way out");
+	assert.ok(copy.actions.includes(ACTIONS.SUPPORT), "support stays available");
+	assert.equal(actionLabelFor(copy, ACTIONS.BILLING), "Renew your plan");
+	// ...and the copy points at where that button goes.
+	assert.match(copy.body, /billing page/i);
+});
+
+test("the wizard never grows its own renewal verb", () => {
+	// Renewal lives on the billing page, with the cohort rules and the plan grid.
+	// A second checkout-initiation path for the same money is how two surfaces
+	// drift apart - so this action ROUTES, it does not charge.
+	const copy = copyFor(CODES.SIGNUP_TERMINAL);
+	assert.equal(copy.actions.includes(ACTIONS.INITIATE), false);
+	assert.equal(copy.actions.includes(ACTIONS.RESUME), false);
+});
