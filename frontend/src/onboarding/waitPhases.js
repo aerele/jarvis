@@ -84,11 +84,22 @@ export const PHASE_KIND = {
  * @param {string} label - what is actually being done, in the caller's words.
  * @param {string} [kind] - PHASE_KIND, when the caller can name the SUBJECT of
  *   this wait from something it already established rather than guessed. The
- *   connect wait passes LLM_APPLY because reaching it means a save returned an
- *   apply-operation descriptor and we are polling that operation - the AI
- *   connection is demonstrably being wired in, which is exactly what the phase
- *   claims. Defaults to NONE so a caller that cannot ground a subject gets no
- *   headline derived from one.
+ *   connect wait passes LLM_APPLY because reaching it means a save for this
+ *   configuration was ACCEPTED and is now being applied - the AI connection is
+ *   demonstrably being wired in, which is exactly what the phase claims.
+ *
+ *   Stated that way on purpose: an earlier draft of this comment justified it by
+ *   "a save returned an apply-operation descriptor and we are polling that
+ *   operation", which is true of the durable-operation path and false of the
+ *   `mode:"legacy"` one, where admin's creds endpoint mints no operation at all
+ *   (OnboardingView.followLegacyReadiness). Both paths do establish the same
+ *   underlying fact - the configuration was accepted and is being applied - and
+ *   that fact, not the existence of a pollable operation, is what grounds the
+ *   phase. The row and the headline say the same thing on both paths, which is
+ *   the behaviour jarvis#722 shipped and jarvis#727 kept.
+ *
+ *   Defaults to NONE so a caller that cannot ground a subject gets no headline
+ *   derived from one.
  */
 export function inFlightPhase(label, kind = PHASE_KIND.NONE) {
 	return {

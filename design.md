@@ -574,6 +574,12 @@ Every pane in the Settings dialog owns its own header (there is no global dialog
   pure module and test it there; never branch on phase label text in the template.
 - **Never say "workspace" during onboarding** (product owner, twice). The customer does not
   have one yet. Use "setup" or "onboarding", on headlines, subtitles and button labels alike.
+  **Known outstanding violations, not yet fixed:** the `waitPhases.js` phase-row labels ("Your
+  workspace is coming online", "Checking on your workspace" and siblings), the
+  `readinessWaitExhaustedMessage` bodies, and the connect step's `blocked` panel line
+  ("Something about your workspace needs a person to check it"). Those are jarvis#709/#722
+  copy, and jarvis#726's test asserts one of the strings literally, so they need their own
+  change rather than a drive-by rename. Do not add new ones; the rule binds anything you write.
 - **A dead end gets a second action (jarvis#727)**. When a wait ends in a state that retrying
   cannot resolve, Retry must not be the only button. Offer the action that can actually change
   the outcome, and offer it ONLY where this attempt observed the thing it would change: a

@@ -3353,6 +3353,9 @@ function noteReadiness(o) {
 		// would be a wrong diagnosis dressed as help (jarvis#727).
 		connectModelChangeOffered.value = false;
 	}
+	// Returned so the wait loops can accumulate what their polls NAMED, not just
+	// that the polls answered. See sawNamedSubject in waitForChatReadiness.
+	return stage;
 }
 
 const CHAT_READY_ATTEMPTS = 40;
@@ -3361,6 +3364,20 @@ async function waitForChatReadiness() {
 	// What this run actually observed, so the exhaustion message below can say
 	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
 	let sawVerdict = false;
+	// Whether any poll of THIS wait NAMED what it was waiting on (jarvis#727).
+	// Deliberately not sawVerdict, which the review round showed is far too coarse
+	// to hang a diagnosis on: it means only "a poll returned JSON", and
+	// `readiness_unconfirmed` is a perfectly well-formed 200 whose documented
+	// meaning in jarvis/account.py is that admin COULD NOT BE ASKED. Gating the
+	// model-change offer on sawVerdict therefore told a customer their chosen
+	// connection had failed on the strength of a wait in which nothing about that
+	// connection was ever established - the exact false claim this feature exists
+	// to avoid, and a contradiction of this function's own ceiling comment.
+	// A named subject is `kind !== NONE`, i.e. admin said the outstanding work was
+	// the LLM apply or the container. "At least once", never "on the last poll":
+	// ninety seconds of llm_pool_provisioning followed by one transient unconfirmed
+	// is still a wait that watched this configuration fail to converge.
+	let sawNamedSubject = false;
 	let lastDetail = "";
 	// A new wait starts from "nothing observed yet", so a stale phase from an
 	// earlier attempt is never the first thing this one renders.
@@ -3396,7 +3413,12 @@ async function waitForChatReadiness() {
 		// discarded except the last detail, so the screen showed one fixed
 		// sentence for two minutes and a customer could not tell a workspace
 		// being built from one that was stuck.
-		noteReadiness({ answered: !!r, reason: r && r.reason, detail: r && r.detail });
+		const stage = noteReadiness({
+			answered: !!r,
+			reason: r && r.reason,
+			detail: r && r.detail,
+		});
+		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		if (state.connectPhase === "blocked") return;
 		await _sleep(CHAT_READY_INTERVAL_MS);
 	}
@@ -3410,11 +3432,12 @@ async function waitForChatReadiness() {
 	// claim. It is now derived from the same source.
 	state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: true });
 	state.connectSupportOffered = true;
-	// jarvis#727: this is the exact state the issue was filed from. Admin kept
-	// answering for the whole wait and never said Ready, so Retry re-runs a thing
-	// this run watched fail to converge. Offer the model change beside it. When
-	// admin was never reached at all, only Retry and support are honest.
-	connectModelChangeOffered.value = sawVerdict;
+	// jarvis#727: this is the exact state the issue was filed from. Admin named the
+	// outstanding work for this configuration and never said Ready, so Retry
+	// re-runs a thing this run watched fail to converge. Offer the model change
+	// beside it. When nothing was ever named - admin unreachable, or reachable but
+	// unable to answer (readiness_unconfirmed) - only Retry and support are honest.
+	connectModelChangeOffered.value = sawNamedSubject;
 	state.retryAfter = 0;
 }
 
@@ -3515,6 +3538,13 @@ async function followDescriptor(descriptorOrId) {
 			? descriptorOrId
 			: (descriptorOrId && descriptorOrId.operation_id) || "";
 	state.finishing = true;
+	// Third entry point into the "working" screen, and the one that was missing the
+	// invariant the two wait loops each state at their own top: a new attempt must
+	// not open on the LAST attempt's observation. Reached by Retry, which re-follows
+	// the same operation - so without this, a Retry taken from a readiness ceiling
+	// re-rendered that ceiling's stale phase as the live one, and jarvis#727 wired
+	// that phase into the h1, making a stale reading the biggest text on the screen.
+	readinessSeen.value = null;
 	state.connectPhase = "working";
 	let terminal;
 	try {
@@ -3584,6 +3614,9 @@ async function followLegacyReadiness() {
 	// What this run actually observed, so the exhaustion message below can say
 	// exactly that and nothing more (jarvis#708) - see readinessWaitExhaustedMessage.
 	let sawVerdict = false;
+	// See waitForChatReadiness for why the model-change offer is gated on a NAMED
+	// subject and not on sawVerdict (jarvis#727 review round).
+	let sawNamedSubject = false;
 	let lastDetail = "";
 	readinessSeen.value = null;
 	for (let i = 0; i < LEGACY_READY_ATTEMPTS; i++) {
@@ -3608,7 +3641,12 @@ async function followLegacyReadiness() {
 		}
 		// Same per-poll phase projection as waitForChatReadiness: this wait is just
 		// as long and was just as silent.
-		noteReadiness({ answered: !!r, reason: r && r.reason, detail: r && r.detail });
+		const stage = noteReadiness({
+			answered: !!r,
+			reason: r && r.reason,
+			detail: r && r.detail,
+		});
+		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		if (state.connectPhase === "blocked") return;
 		if (i < LEGACY_READY_ATTEMPTS - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
 	}
@@ -3618,7 +3656,7 @@ async function followLegacyReadiness() {
 	state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: true });
 	state.connectSupportOffered = true;
 	// Same ceiling, same rule as waitForChatReadiness (jarvis#727).
-	connectModelChangeOffered.value = sawVerdict;
+	connectModelChangeOffered.value = sawNamedSubject;
 	state.retryAfter = 0;
 }
 
@@ -3636,6 +3674,13 @@ function enterSaveRefusal(retryAfterSeconds) {
 		// "We couldn't confirm your setup" over a rate-limit body, or worse, a
 		// STALE title left behind by an earlier attempt.
 		state.connectTitle = connectHeadline("retry", { fromReadinessCeiling: false });
+		// Explicit for the same reason connectTitle is (jarvis#727 review round). A
+		// rate limit is a refusal to accept the save AT ALL, so nothing about the
+		// configuration was observed and no model change is indicated. It happens to
+		// be false already on both live call paths, but only because each caller
+		// resets it first - an invariant held by the callers is not one this panel
+		// can rely on, and every sibling terminal sets it here rather than assume.
+		connectModelChangeOffered.value = false;
 		state.retryAfter = retryAfterSeconds;
 		startRetryCountdown();
 	} else {
