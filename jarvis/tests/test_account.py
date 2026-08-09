@@ -930,6 +930,17 @@ class TestRejectedSyncVerdictClassification(FrappeTestCase):
 		self.assertIsNotNone(out)
 		self.assertEqual(out["reason"], "llm_rejected")
 
+	def test_the_pool_legs_validation_failure_is_flagged_rejected_too(self):
+		# Round-1 review of jarvis#760: sync_pool_now wrote a BARE "failed: {e}"
+		# for AdminValidationError while the direct leg wrote
+		# "failed: validation: {e}", so a pool config admin had PERMANENTLY
+		# rejected read as still applying and ground to the wizard's five minute
+		# ceiling before offering a Retry that could never succeed. Both legs now
+		# prefix the same way; this pins that they stay in step.
+		out = self._verdict("failed: validation: unknown llm_provider 'gemini'")
+		self.assertIsNotNone(out)
+		self.assertEqual(out["reason"], "llm_rejected")
+
 	def test_a_blocked_subscription_needing_reauth_is_flagged_rejected(self):
 		# The pool leg's "blocked" apply status: only a fresh re-auth (on this
 		# same editable form) can ever clear it, so it belongs with the other

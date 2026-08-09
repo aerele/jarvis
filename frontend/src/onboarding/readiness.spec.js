@@ -131,6 +131,20 @@ describe("readiness verdict ownership", () => {
  * what AppShell calls on every route change to close that gap; these pin its
  * two behaviours directly, without mounting the (heavy) shell component.
  */
+describe("llm_rejected still gates (jarvis#757, round-1 review of #760)", () => {
+	it("keeps a never-connected customer on the onboarding gate", async () => {
+		// llm_rejected fires in the SAME structural position as the two
+		// provisioning reasons, a first sync that never succeeded, and it only
+		// ever REPLACES one of them. Adding the reason without listing it in
+		// NOT_ONBOARDED_REASONS silently reopened the gate, dropping a customer
+		// whose connection was never accepted into a chat shell that cannot
+		// answer them.
+		forgetReady();
+		verdict({ ready: false, reason: "llm_rejected", detail: "provider + model required" });
+		expect(await needsOnboarding()).toBe(true);
+	});
+});
+
 describe("regateOnboarding (jarvis#691 stale-gate re-check)", () => {
 	it("re-confirms with the backend when the caller is currently gated", async () => {
 		// The memo held a stale "never onboarded" verdict (captured before an

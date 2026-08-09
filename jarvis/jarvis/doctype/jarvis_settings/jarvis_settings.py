@@ -2178,11 +2178,21 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 				except (admin_client.AdminAuthError, admin_client.AdminValidationError) as e:
 					# Fail BEFORE any operation is allocated (auth / spec validation): a
 					# terminal, non-resumable error, nothing to follow or converge.
+					#
+					# PREFIXED the way the direct leg already prefixes its own two
+					# handlers (jarvis#757, round-1 review). This wrote a bare
+					# "failed: {e}" for both, which account.py's
+					# _is_genuine_rejection_status could not distinguish from a
+					# transient failure, so a pool config admin had PERMANENTLY
+					# rejected read as still applying and ground to the wizard's five
+					# minute ceiling before offering a Retry that could never succeed.
+					# Auth and validation are different facts and now say so.
+					_prefix = "validation: " if isinstance(e, admin_client.AdminValidationError) else "auth: "
 					_write_settings_fields(
 						settings,
 						{
 							"last_sync_at": _frappe.utils.now(),
-							"last_sync_status": f"failed: {e}",
+							"last_sync_status": f"failed: {_prefix}{e}",
 							**_cleared_subscription_status_fields(),
 						},
 					)
