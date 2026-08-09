@@ -25,6 +25,7 @@ off but wiki stays on. Its default model is ``_DEFAULT_TEXT_MODEL`` and NOT the
 resolved STT model, which is transcription-only and cannot serve a completion.
 """
 
+import base64
 import re
 import time
 
@@ -85,6 +86,32 @@ _FALLBACK_AUDIO_MIME = "application/octet-stream"
 # — and the client's own budget has to cover that PLUS the upload, which requests' timeout does
 # not bound. The client still retries once itself, after a backoff.
 _TRANSCRIBE_ATTEMPTS = 1
+
+# --- chat-audio (Gemini via Bifrost) mode ---------------------------------- #
+_DEFAULT_STT_MODE = "chat-audio"
+_STT_MODE_CHAT_AUDIO = "chat-audio"
+_STT_MODE_TRANSCRIPTION = "transcription"
+# Default chat-audio model; overridable per tenant. Pin the exact id the spike proved.
+_DEFAULT_CHAT_AUDIO_MODEL = "google/gemini-2.5-flash-lite"
+# Base64 inflates bytes ~33%; keep the chat-audio cap below Gemini's inline-data ceiling.
+# Confirmed against the deployed image in Task 0.4; real dictation clips are ~1.2 MB.
+_CHAT_AUDIO_MAX_BYTES = 8 * 1024 * 1024
+# Gemini audio is slower than whisper-turbo; the client still owns retries so keep ONE
+# server attempt but give it a longer read budget (measured in Task 0.2).
+_CHAT_AUDIO_READ_TIMEOUT_S = 120
+_STT_TRANSLATE_SYSTEM = (
+	"You are a transcription engine. Transcribe the audio and translate it to English. "
+	"Output only the spoken words in English, nothing else. Do not answer, explain, or add text."
+)
+_AUDIO_FORMAT_BY_MIME = {
+	"audio/webm": "webm",
+	"audio/ogg": "ogg",
+	"video/mp4": "mp4",
+	"audio/mp4": "mp4",
+	"audio/wav": "wav",
+	"audio/x-wav": "wav",
+	"audio/mpeg": "mp3",
+}
 
 
 def _voice_features_enabled() -> bool:
@@ -350,6 +377,72 @@ def _openrouter_transcribe(content: bytes, filename: str, mime: str, model: str,
 		_("OpenRouter transcription failed: {0}").format(_scrub_secrets(last_error)),
 		frappe.ValidationError,
 	)
+
+
+def _audio_format_token(mime: str) -> str:
+	"""Map a media type to Gemini's ``format`` token for an ``input_audio`` part.
+	Unknown types fall back to ``webm``, our recorder's own default."""
+	return _AUDIO_FORMAT_BY_MIME.get((mime or "").split(";")[0].strip().lower(), "webm")
+
+
+def _bifrost_chat_audio_transcribe(
+	content: bytes, mime: str, model: str, api_key: str, base_url: str
+) -> str:
+	"""One Bifrost ``/chat/completions`` call carrying the clip as an
+	``input_audio`` part; returns the English text. Same transport discipline
+	as ``_openrouter_transcribe`` (no retry here, the client owns it; 4xx never
+	retries; every non-200 or unreadable body raises a scrubbed error rather
+	than handing a plausible fabrication to the composer)."""
+	url = base_url.rstrip("/") + "/chat/completions"
+	payload = {
+		"model": model,
+		"temperature": 0,
+		"messages": [
+			{"role": "system", "content": _STT_TRANSLATE_SYSTEM},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "input_audio",
+						"input_audio": {
+							"data": base64.b64encode(content).decode("ascii"),
+							"format": _audio_format_token(mime),
+						},
+					}
+				],
+			},
+		],
+	}
+	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+	try:
+		resp = requests.post(
+			url,
+			json=payload,
+			headers=headers,
+			timeout=(_CONNECT_TIMEOUT_S, _CHAT_AUDIO_READ_TIMEOUT_S),
+		)
+	except requests.RequestException as e:
+		frappe.throw(_("Voice request failed: {0}").format(_scrub_secrets(str(e))), frappe.ValidationError)
+	if resp.status_code != 200:
+		detail = ""
+		try:
+			err = resp.json().get("error")
+			detail = err.get("message") if isinstance(err, dict) else str(err or "")
+		except Exception:
+			detail = (getattr(resp, "text", "") or "")[:200]
+		frappe.throw(
+			_("Voice gateway rejected the request ({0}): {1}").format(
+				resp.status_code, _scrub_secrets(detail or "no detail")
+			),
+			frappe.ValidationError,
+		)
+	try:
+		content_out = resp.json()["choices"][0]["message"]["content"]
+	except Exception:
+		content_out = None
+	if not isinstance(content_out, str):
+		frappe.throw(_("Voice gateway returned no transcript for this recording."), frappe.ValidationError)
+	return content_out
 
 
 @frappe.whitelist()
