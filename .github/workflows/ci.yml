@@ -116,6 +116,23 @@ jobs:
         # for `node --test`, so this is inherently a one-shot gate.
         run: npm run test:node
 
+  # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
+  # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
+  # runs the exact deploy-contract build (`npm run build` from the app root = install-frontend + Vite SPA
+  # + PWA), mirroring what Frappe Cloud runs on deploy.
+  frontend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build the SPA + PWA (Frappe Cloud deploy contract)
+        run: npm run build
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 25
