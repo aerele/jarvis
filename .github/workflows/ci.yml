@@ -116,6 +116,30 @@ jobs:
         # for `node --test`, so this is inherently a one-shot gate.
         run: npm run test:node
 
+  # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
+  # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
+  # builds the SPA (the /jarvis artifact) the way the deploy does. (The PWA build resolves the bench site
+  # config via a bench-relative path a bare runner lacks, so it is not gated here — a follow-up.)
+  frontend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Stub the bench site config the SPA build reads (no bench in CI)
+        # src/socket.js imports sites/common_site_config.json at build time (for the socketio
+        # port); a bare runner has no bench, so provide a minimal stub. Frappe Cloud builds
+        # INSIDE a real bench where this file already exists — this only reproduces that for CI.
+        run: |
+          mkdir -p "$HOME/sites"
+          printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
+      - name: Build the SPA (Vite) — the /jarvis deploy artifact
+        run: npm run install-frontend && npm run build-frontend
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 25
