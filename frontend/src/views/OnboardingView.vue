@@ -1476,21 +1476,33 @@
 													label="Use a different model"
 													@click="chooseDifferentModel"
 												/>
+												<!-- jarvis#758: a real button, weighted alongside Retry /
+													 Use a different model - at the point a customer has hit
+													 a wall (and already paid), support is the action most
+													 likely to matter and must not read as the least
+													 prominent one. `subtle`, matching "Use a different
+													 model": design.md 3.1 allows exactly one `solid` button
+													 per surface. -->
+												<Button
+													v-if="state.connectSupportOffered"
+													variant="subtle"
+													label="Contact support"
+													@click="openSupport"
+												/>
 											</div>
 											<!-- jarvis#708: offered the moment a bounded readiness wait
 												 runs out with no Ready verdict - never after N retries,
 												 same as jarvis_admin_v2#259's checkout-shell poll ceiling.
-												 A real exit alongside Retry, not instead of it. -->
+												 A real exit alongside Retry, not instead of it. The button
+												 above is the action; this stays as the reassurance line
+												 (jarvis#758 moved the link itself into that button, out of
+												 this sentence). -->
 											<p
 												v-if="state.connectSupportOffered"
 												class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
 												role="status"
 											>
-												Still not resolved?
-												<button class="ob-link" @click="openSupport">
-													Contact support
-												</button>
-												- we'll take a look for you.
+												Still not resolved? We'll take a look for you.
 											</p>
 										</div>
 									</template>
@@ -3480,6 +3492,24 @@ function noteReadiness(o) {
 	};
 	readinessSeen.value = seen;
 	const stage = readinessPhase(seen);
+	// jarvis#757: a hard rejection (admin permanently refused this config; see
+	// readinessPhase's "llm_rejected" case) is EARLIER than the jarvis#752
+	// operation-verdict case above and unlike the three "blocked" stop-cases
+	// below - the fix IS in the customer's hands (the connection they chose), so
+	// this returns to the EDITABLE form with admin's own reason, mirroring
+	// exactly what onOpUpdate's OP_PHASE.REJECTED branch already does for the
+	// pool/operation path (jarvis#727). Never Retry: retrying the identical
+	// rejected config cannot succeed, which is the false promise this state
+	// exists to stop making.
+	if (stage.editable) {
+		state.finishing = false;
+		state.connectPhase = "rejected";
+		connectModelChangeOffered.value = false;
+		state.connectBlockReason =
+			stage.detail ||
+			"That AI configuration was rejected. Edit your connection and try again.";
+		return stage;
+	}
 	// A verdict that waiting cannot resolve is terminal for this wait: stop
 	// polling rather than counting down to a ceiling whose copy invites a retry
 	// that cannot help. Covers a paged authority repair (do nothing, we called
@@ -3564,7 +3594,10 @@ async function waitForChatReadiness() {
 			detail: r && r.detail,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
-		if (state.connectPhase === "blocked") return;
+		// jarvis#757: stage.editable already returned to the form (noteReadiness
+		// set state.finishing = false) - stop polling THIS tick rather than
+		// sleeping once more on a config the customer may already be re-editing.
+		if (state.connectPhase === "blocked" || stage.editable) return;
 		await _sleep(CHAT_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
@@ -3802,7 +3835,8 @@ async function followLegacyReadiness() {
 			detail: r && r.detail,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
-		if (state.connectPhase === "blocked") return;
+		// jarvis#757: see the matching comment in waitForChatReadiness.
+		if (state.connectPhase === "blocked" || stage.editable) return;
 		if (i < LEGACY_READY_ATTEMPTS - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
 	}
 	state.finishing = true;

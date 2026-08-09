@@ -76,10 +76,18 @@ export async function isWorkspaceReady() {
 // thrown-call catch above resolves to this same reason for the severe own-bench
 // failure, which also fails closed. It differs from llm_credentials, which fires
 // on an ESTABLISHED workspace's later credential rotation and must stay degraded.
+// "llm_rejected" (jarvis#757) belongs here for the same reason the two
+// provisioning reasons do: it fires in the SAME structural position, a first sync
+// that never succeeded, and it only ever REPLACES one of them. Round-1 review of
+// jarvis#760 caught that adding the reason without listing it here silently
+// reopened the gate: needsOnboarding() returned false, so AppShell rendered the
+// normal chat shell for a customer whose connection was never accepted and whose
+// chat therefore cannot answer.
 const NOT_ONBOARDED_REASONS = new Set([
 	"signup",
 	"llm_pool_provisioning",
 	"llm_provisioning",
+	"llm_rejected",
 	"llm_setup",
 	"readiness_unconfirmed",
 ]);

@@ -176,12 +176,29 @@ export function provisioningPhase({ answered = false, tenantStatus = "" } = {}) 
  *     thing this surface can do is show admin's own reassurance, never an
  *     action, because retrying payment or reconnecting could make it worse.
  *
+ * A third, `llm_rejected` (jarvis#757), must never render as either of the two
+ * shapes above knows how to show it. Admin permanently refused the config the
+ * customer just submitted (a terminal `last_sync_status` of `"failed: ..."`,
+ * nothing left to converge) - waiting cannot resolve that either, so it stops
+ * the wait like the paged/suspended/moved verdicts do, but the fix is IN the
+ * customer's hands (the connection they chose), unlike those three. `editable`
+ * marks that difference for the caller: route back to the editable form with
+ * admin's own reason, not the support-only "we've stopped checking" screen -
+ * the same distinction OP_PHASE.REJECTED already draws for the pool/operation
+ * path (jarvis#727). This case is EARLIER than jarvis#752's route verdict
+ * (`inFlightPhase`'s `detail` param): that one names a route problem on a
+ * config admin already accepted and probed, while this one means the config
+ * was never accepted at all, so there is no operation and no probe, only this.
+ *
  * @param {{answered?: boolean, reason?: string, detail?: string}} [last]
  * @returns {{observed: boolean, state: string, label: string, detail: string,
- *   stop: boolean, paged?: boolean, title?: string}} `stop` means waiting cannot
- *   resolve this, so the loop must end rather than run to a ceiling whose copy
- *   invites a retry that cannot help. `paged` distinguishes "support has already
- *   been notified, do nothing" from "nobody was notified, you must act".
+ *   stop: boolean, paged?: boolean, editable?: boolean, title?: string}} `stop`
+ *   means waiting cannot resolve this, so the loop must end rather than run to
+ *   a ceiling whose copy invites a retry that cannot help. `paged` distinguishes
+ *   "support has already been notified, do nothing" from "nobody was notified,
+ *   you must act". `editable` (only ever true alongside `stop`) means the fix
+ *   is a config change, so the caller must return to the form, not stay on a
+ *   dead-end screen.
  */
 export function readinessPhase({ answered = false, reason = "", detail = "" } = {}) {
 	const say = String(detail || "").trim();
@@ -266,6 +283,18 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				stop: true,
 				paged: false,
 				title: "This site no longer has your workspace",
+			};
+		case "llm_rejected":
+			// jarvis#757: a hard rejection, not a timeout. Admin's own reason (`say`)
+			// is the whole point of this case - never replace it with generic copy.
+			return {
+				observed: true,
+				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
+				label: "That connection was rejected",
+				detail: say,
+				stop: true,
+				editable: true,
 			};
 		default:
 			// A reason this build does not know about gets the neutral line. It

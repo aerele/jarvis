@@ -613,6 +613,18 @@ def is_ready_for_chat() -> dict:
 	- ``"llm_pool_provisioning"`` - a pool is configured (pool mode) but
 	  no sync has ever applied it to the container (first sync pending or
 	  failed).
+	- ``"llm_rejected"`` - the pool/api_key/subscription config's FIRST sync ended
+	  in a terminal ``last_sync_status`` of ``"failed: ..."`` AND admin's own
+	  refusal is what produced it (an unusable spec, a validation error, a
+	  subscription needing re-authentication) - re-submitting the SAME config
+	  would just be refused again. ``detail`` carries the recorded reason
+	  verbatim (jarvis#757; see ``_rejected_sync_verdict``). A terminal
+	  ``"failed: ..."`` from a transient cause instead (admin unreachable,
+	  rate-limited, a lock timeout, an unclassified error) is deliberately
+	  NOT this reason - retrying could clear it, so it falls through to the
+	  same ``llm_pool_provisioning``/``llm_provisioning`` verdict a
+	  still-converging sync gets, which is what lets the wizard keep polling
+	  and, at its ceiling, offer Retry (jarvis#757 review, gap 1).
 	- ``"container_provisioning"`` - all local checks passed, but admin reports
 	  the container isn't chat-ready yet (chat_readiness != "Ready"). Set only by
 	  the final ``_admin_chat_gate`` at the managed ready-exits; fail-open and
@@ -671,7 +683,7 @@ def is_ready_for_chat() -> dict:
 	if compute_pool_mode(settings):
 		if getattr(settings, "llm_pool_synced_at", None) or _confirm_apply_via_admin(settings, is_pool=True):
 			return _admin_chat_gate()
-		return {"ready": False, "reason": "llm_pool_provisioning"}
+		return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_pool_provisioning"}
 
 	auth_mode = (getattr(settings, "llm_auth_mode", "") or "api_key").strip()
 
@@ -700,7 +712,7 @@ def is_ready_for_chat() -> dict:
 		if not getattr(settings, "llm_direct_synced_at", None) and not _confirm_apply_via_admin(
 			settings, is_pool=False
 		):
-			return {"ready": False, "reason": "llm_provisioning"}
+			return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_provisioning"}
 	elif auth_mode == "subscription":
 		# Unified models[]-table subscription on the DIRECT leg (jarvis#715 step
 		# 3): no cliproxy sidecar, so - like api_key direct above - this gates on
@@ -725,7 +737,7 @@ def is_ready_for_chat() -> dict:
 			if not has_configured_subscription_model(settings):
 				return _llm_missing_verdict(settings)
 			if not _confirm_apply_via_admin(settings, is_pool=False):
-				return {"ready": False, "reason": "llm_provisioning"}
+				return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_provisioning"}
 	elif auth_mode == "oauth":
 		# The legacy flat-field direct-oauth flow: llm_oauth_connected_at is
 		# set (read-only) when the oauth grant completes and the admin
@@ -804,6 +816,104 @@ def _confirm_apply_via_admin(settings, *, is_pool: bool) -> bool:
 		return True
 	except Exception:
 		return False
+
+
+# jarvis#757 review, gap 1: a terminal ``"failed: ..."`` status is not one fact,
+# it is at least two, and the first shipped ``_rejected_sync_verdict`` treated
+# them as the same:
+#
+# - genuinely REJECTED: admin looked at this exact config and refused it (an
+#   unusable spec, a validation error, a subscription that needs
+#   re-authentication). Re-submitting the identical config will be refused
+#   again - there is nothing to wait for, and the wizard must say so and send
+#   the customer back to the form, with no Retry.
+# - merely FAILED, transiently: admin was unreachable, rate-limited, a sync
+#   lock timed out, or something unclassified blew up. The config itself may
+#   be perfectly fine - a retry (the customer's own Retry click, or the next
+#   sync a re-save enqueues) could clear it outright. Telling this customer
+#   "that connection was rejected" and refusing to let them retry is simply
+#   false, and it is the false claim gap 1 of the #757 review exists to stop.
+#
+# ``last_sync_status`` is one free-text field with no second field to carry
+# this distinction, and jarvis_settings.py's ``_sync_via_admin`` / ``sync_pool_now``
+# do not hand this function the exception that produced it - only the flattened
+# string, written long before (a prior poll, possibly a prior process). So the
+# only signal available is the literal text those two functions write, and this
+# allowlist leans on it deliberately, NOT on admin's own free-form prose (matching
+# an admin-authored sentence is exactly what broke the failed-payment resume -
+# see ``AdminValidationError``'s docstring in jarvis/exceptions.py): every
+# terminal write in those two functions uses one of a small, closed set of
+# literal tokens right after ``"failed:"``, tokens THIS codebase wrote, not
+# admin's. Two of those shapes are structurally guaranteed, not guessed: both
+# ``_admin_rejection_reason`` and ``_admin_customer_facing_reason`` (jarvis_settings.py)
+# check their own output starts with "Your " before using it, and they are the
+# ONLY writers of the bare ``f"failed: {reason}"`` shape (no other token in
+# front of the reason) - so ``"failed: Your "`` reliably means one of those two
+# ran, and both only run for a genuine, admin-decided refusal.
+#
+# This is an ALLOWLIST, not a denylist: an unrecognised "failed:" shape (a
+# status format a future change adds without updating this list) stays on the
+# side that was already correct before jarvis#757 existed - falls through as
+# "still provisioning", retryable - rather than a newly-invented "rejected"
+# telling a customer their working connection was refused. The coupling this
+# creates is real: change one of the literal prefixes in jarvis_settings.py
+# without updating this list and a case silently reclassifies. The fix that
+# removes the coupling is a dedicated field (e.g. a Check
+# ``last_sync_is_rejection`` stamped by jarvis_settings.py at each of these
+# same call sites) so this function reads a fact instead of re-deriving one
+# from text shape - that needs a doctype change and a migration, which this
+# fix deliberately avoids; see the #757 gap-1 report for the tradeoff.
+def _is_genuine_rejection_status(status: str) -> bool:
+	if status.startswith("failed: validation: "):
+		# AdminValidationError (jarvis_settings.py's _sync_via_admin /
+		# sync_pool_now): the pushed payload itself was invalid (e.g. a
+		# missing/malformed oauth_blob) - the customer's config is the problem.
+		return True
+	if status == "failed: subscription needs re-authentication (blocked)":
+		# The pool leg's "blocked" apply status: only a fresh re-auth (which
+		# happens on this same editable form) can ever clear it.
+		return True
+	if status.startswith("failed: Your "):
+		# _admin_rejection_reason / _admin_customer_facing_reason: a config
+		# admin was REACHED and PERMANENTLY refused (AdminRejectedError, or the
+		# pool leg's structured-rejection AdminUnreachableError branch).
+		return True
+	return False
+
+
+def _rejected_sync_verdict(settings) -> dict | None:
+	"""jarvis#757 (gap-1 hardening): a terminal ``last_sync_status`` of
+	``"failed: ..."`` is not the same fact as "still provisioning", but it is
+	also not ONE fact either - see ``_is_genuine_rejection_status`` above for
+	the split and why it is drawn where it is.
+
+	``is_ready_for_chat``'s three provisioning exits (pool, api_key, subscription)
+	each answer "nothing has confirmed this leg applied yet" with the SAME generic
+	reason whether the last attempt is genuinely still converging (``last_sync_status``
+	is ``"pending: ..."`` or unset), transiently failed (unreachable, rate-limited,
+	a lock timeout - a retry could clear it), or admin permanently refused it. Only
+	the last of those three is a rejection: waiting AND retrying are both useless
+	against it, so the Connect step's readiness wait stops rather than grinding to
+	its five-minute ceiling over a config admin had already, explicitly, turned
+	down. The other two stay on the generic provisioning reason, unchanged, so the
+	wizard keeps polling and a genuinely stuck one still reaches its own Retry at
+	the ceiling - a transient failure must never be told "rejected, no retry".
+
+	Returns the ``{"ready": False, "reason": "llm_rejected", "detail": ...}`` verdict
+	only for a genuine rejection (``_is_genuine_rejection_status``), or ``None``
+	otherwise - a blank/``"pending: ..."`` status, an unrecognised "failed:" shape,
+	or a known-transient one all fall through to the caller's own generic
+	provisioning reason unchanged.
+	"""
+	status = (settings.get("last_sync_status") or "").strip()
+	if not status.startswith("failed:") or not _is_genuine_rejection_status(status):
+		return None
+	detail = status[len("failed:") :].strip()
+	return {
+		"ready": False,
+		"reason": "llm_rejected",
+		"detail": detail or "Your AI configuration was rejected.",
+	}
 
 
 def _llm_missing_verdict(settings) -> dict:

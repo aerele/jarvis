@@ -890,6 +890,188 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		self.assertEqual(out["reason"], "llm_credentials")
 
 
+class TestRejectedSyncVerdictClassification(FrappeTestCase):
+	"""jarvis#757 review, gap 1: _rejected_sync_verdict had no test at all, and
+	its first cut keyed on the ``"failed:"`` prefix ALONE - so a rate-limit or an
+	admin-unreachable failure read exactly like a genuine spec rejection: no
+	Retry, "that connection was rejected", sent back to re-edit a config that
+	was never the problem. This pins the fixed classifier
+	(account._is_genuine_rejection_status) against every literal shape
+	jarvis_settings.py's ``_sync_via_admin`` / ``sync_pool_now`` actually write,
+	so a future rewording of one of those literals without updating the
+	allowlist fails HERE instead of silently reclassifying a live customer.
+
+	Calls ``_rejected_sync_verdict`` directly against a bare ``frappe._dict`` -
+	it only ever reads ``last_sync_status`` off whatever it is handed, so this
+	needs no Jarvis Settings fixture at all."""
+
+	def _verdict(self, status):
+		return account._rejected_sync_verdict(frappe._dict({"last_sync_status": status}))
+
+	# --- genuine rejections: the config is the problem, no retry can help ---
+
+	def test_an_admin_rejected_config_is_flagged_rejected_with_detail_verbatim(self):
+		detail = "Your AI configuration was rejected: unknown llm_provider: 'gemini'"
+		out = self._verdict(f"failed: {detail}")
+		self.assertIsNotNone(out)
+		self.assertEqual(out["reason"], "llm_rejected")
+		self.assertEqual(out["detail"], detail, "admin's own sentence must reach the customer unedited")
+
+	def test_a_rejection_with_no_admin_sentence_still_gets_a_readable_default_detail(self):
+		out = self._verdict("failed: Your AI configuration was rejected")
+		self.assertIsNotNone(out)
+		self.assertEqual(out["reason"], "llm_rejected")
+		self.assertEqual(out["detail"], "Your AI configuration was rejected")
+
+	def test_a_push_validation_failure_is_flagged_rejected(self):
+		# AdminValidationError, e.g. a malformed oauth_blob: the pushed payload
+		# itself is invalid, which is the customer's config, not a transient blip.
+		out = self._verdict("failed: validation: missing or malformed oauth_blob")
+		self.assertIsNotNone(out)
+		self.assertEqual(out["reason"], "llm_rejected")
+
+	def test_the_pool_legs_validation_failure_is_flagged_rejected_too(self):
+		# Round-1 review of jarvis#760: sync_pool_now wrote a BARE "failed: {e}"
+		# for AdminValidationError while the direct leg wrote
+		# "failed: validation: {e}", so a pool config admin had PERMANENTLY
+		# rejected read as still applying and ground to the wizard's five minute
+		# ceiling before offering a Retry that could never succeed. Both legs now
+		# prefix the same way; this pins that they stay in step.
+		out = self._verdict("failed: validation: unknown llm_provider 'gemini'")
+		self.assertIsNotNone(out)
+		self.assertEqual(out["reason"], "llm_rejected")
+
+	def test_a_blocked_subscription_needing_reauth_is_flagged_rejected(self):
+		# The pool leg's "blocked" apply status: only a fresh re-auth (on this
+		# same editable form) can ever clear it, so it belongs with the other
+		# genuine rejections even though no AdminRejectedError was raised.
+		out = self._verdict("failed: subscription needs re-authentication (blocked)")
+		self.assertIsNotNone(out)
+		self.assertEqual(out["reason"], "llm_rejected")
+
+	# --- transient failures: a retry could clear these, must not read as rejected ---
+
+	def test_admin_unreachable_is_not_flagged_rejected(self):
+		self.assertIsNone(self._verdict("failed: admin unreachable: timeout"))
+
+	def test_rate_limited_is_not_flagged_rejected(self):
+		self.assertIsNone(self._verdict("failed: rate-limited; retry_after=30s"))
+
+	def test_an_auth_token_failure_is_not_flagged_rejected(self):
+		# AdminAuthError: a bench-to-admin token problem, not the customer's LLM
+		# config - re-minting the token (or a retry after it refreshes) can clear it.
+		self.assertIsNone(self._verdict("failed: auth: 401 unauthorized"))
+
+	def test_a_lock_timeout_is_not_flagged_rejected(self):
+		self.assertIsNone(self._verdict("failed: skipped (concurrent sync did not finish in time)"))
+
+	def test_the_unexpected_error_backstop_is_not_flagged_rejected(self):
+		# An unclassified exception: we do not know it was the customer's fault,
+		# so the safe default is "retryable", not "rejected".
+		self.assertIsNone(self._verdict("failed: unexpected error; see Error Log"))
+
+	# --- non-failures: must fall through unchanged ---
+
+	def test_a_pending_status_is_not_flagged_rejected(self):
+		self.assertIsNone(self._verdict("pending: provisioning container (pool)"))
+
+	def test_a_blank_status_is_not_flagged_rejected(self):
+		self.assertIsNone(self._verdict(""))
+
+	def test_an_ok_status_is_not_flagged_rejected(self):
+		self.assertIsNone(self._verdict("ok (restart via admin)"))
+
+
+class TestRejectedSyncVerdictWiring(FrappeTestCase):
+	"""jarvis#757 review, gap 1: the classification above is only half the
+	story - none of is_ready_for_chat's three provisioning exits (pool,
+	api_key, subscription) that CALL _rejected_sync_verdict had a test either,
+	so nothing proved the wiring actually reaches it. Pinned on the
+	subscription leg (same fixture TestIsReadyForChatCohorts uses) as the one
+	representative exit: all three call sites share the identical
+	``_rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_..."}``
+	line, and the classifier itself (covered exhaustively above) is leg-agnostic."""
+
+	_FIELDS = ("llm_auth_mode", "llm_direct_synced_at", "chat_was_ready_at", "last_sync_status")
+
+	def setUp(self):
+		from jarvis._password_utils import set_settings_password
+
+		account._bust_chat_gate()
+		self._snap = account._settings_raw(self._FIELDS)
+		self._key_snap = account._settings_raw(("jarvis_admin_api_key",)).get("jarvis_admin_api_key")
+		set_settings_password(
+			frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key", "test-only-rejected-key"
+		)
+		self._write(
+			{
+				"llm_auth_mode": "subscription",
+				"llm_direct_synced_at": None,
+				"chat_was_ready_at": None,
+			}
+		)
+		self._pool_off = patch.object(account, "compute_pool_mode", return_value=False)
+		self._pool_off.start()
+		self._has_sub_model = patch(
+			"jarvis.jarvis.pool_serialize.has_configured_subscription_model", return_value=True
+		)
+		self._has_sub_model.start()
+		# Forces the exit past _confirm_apply_via_admin without needing to fake
+		# an admin_client round-trip - only last_sync_status is under test here.
+		self._confirm_miss = patch.object(account, "_confirm_apply_via_admin", return_value=False)
+		self._confirm_miss.start()
+
+	def tearDown(self):
+		from jarvis._password_utils import clear_settings_password
+
+		self._confirm_miss.stop()
+		self._has_sub_model.stop()
+		self._pool_off.stop()
+		clear_settings_password(frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key")
+		self._write({f: self._snap.get(f) for f in self._FIELDS})
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"jarvis_admin_api_key",
+			self._key_snap,
+			update_modified=False,
+		)
+		account._bust_chat_gate()
+
+	def _write(self, values: dict) -> None:
+		for f, v in values.items():
+			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", f, v, update_modified=False)
+
+	def test_a_terminal_rejection_reaches_the_customer_as_llm_rejected_with_detail_verbatim(self):
+		detail = "Your AI configuration was rejected: unknown llm_provider: 'gemini'"
+		self._write({"last_sync_status": f"failed: {detail}"})
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_rejected")
+		self.assertEqual(out["detail"], detail)
+
+	def test_a_transient_failure_does_not_reach_the_customer_as_llm_rejected(self):
+		self._write({"last_sync_status": "failed: admin unreachable: timeout"})
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertNotEqual(
+			out["reason"], "llm_rejected", "gap 1: a retry could clear this, must not read as rejected"
+		)
+		self.assertEqual(out["reason"], "llm_provisioning")
+
+	def test_a_pending_status_falls_through_to_provisioning_unchanged(self):
+		self._write({"last_sync_status": "pending: applying subscription blob"})
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_provisioning")
+
+	def test_a_blank_status_falls_through_to_provisioning_unchanged(self):
+		self._write({"last_sync_status": ""})
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_provisioning")
+
+
 class TestExplicitReadyOnlyMarker(FrappeTestCase):
 	"""Review P0-07: only an EXPLICIT admin `Ready` may mint the established marker.
 	A reachable response that never mentions chat_readiness (v1 tolerance) still
