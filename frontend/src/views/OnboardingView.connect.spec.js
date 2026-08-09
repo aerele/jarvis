@@ -1221,6 +1221,82 @@ describe("staged readiness phases: the screen renders what the poll observed", (
 	});
 });
 
+// jarvis#757 review, gap 2: readinessPhase's "llm_rejected" case (waitPhases.js,
+// waitPhases.test.js) was only ever exercised as a pure function. Nothing asserted
+// that OnboardingView ITSELF routes an llm_rejected readiness answer back to the
+// editable form and shows admin's reason - the whole customer-visible point of
+// jarvis#757. These pin the routing, not just the copy: the wait must stop on the
+// FIRST poll that names a rejection (never grind to the 40-poll ceiling the way an
+// ordinary transient reason does), the form must become visible again
+// (`state.finishing === false`, mirroring the jarvis#727 REJECTED operation path),
+// and it must never offer the ceiling's Retry/support pair - retrying the exact
+// config admin just refused cannot succeed.
+describe("jarvis#757 llm_rejected routes back to the editable form", () => {
+	it("stops the wait on the first poll, returns to the form, and shows admin's reason verbatim", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		const detail = "Your AI configuration was rejected: unknown llm_provider: 'gemini'";
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "llm_rejected", detail });
+		api.isReadyForChat.mockClear(); // ignore the one mount-time readiness probe
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+
+		expect(api.isReadyForChat).toHaveBeenCalledTimes(1); // no ceiling-grinding on a rejection
+		expect(w.vm.state.finishing).toBe(false); // the editable form is showing again
+		expect(w.vm.state.connectPhase).toBe("rejected");
+		expect(w.vm.state.connectBlockReason).toBe(detail);
+		expect(routerReplace).not.toHaveBeenCalled();
+		w.unmount();
+	});
+
+	it("never reaches the retry/support ceiling copy, even if the wait is left to run out", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockResolvedValue({
+			ready: false,
+			reason: "llm_rejected",
+			detail: "Your AI configuration was rejected: provider + model required in oauth mode",
+		});
+
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		// Running out the rest of the would-be ceiling must not convert this into a
+		// retry: the loop already returned on the first poll (see the test above).
+		await vi.advanceTimersByTimeAsync(40 * 3000);
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("rejected");
+		expect(w.vm.state.connectPhase).not.toBe("retry");
+		expect(w.vm.state.connectSupportOffered).not.toBe(true);
+		w.unmount();
+	});
+
+	it("followLegacyReadiness (mode:legacy) routes the same llm_rejected answer back to the form", async () => {
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({ apply_operation: null, resumable: false, mode: "legacy" }),
+		});
+		const detail = "Your AI configuration was rejected: unknown llm_provider: 'gemini'";
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "llm_rejected", detail });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear();
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+
+		expect(api.isReadyForChat).toHaveBeenCalledTimes(1);
+		expect(w.vm.state.finishing).toBe(false);
+		expect(w.vm.state.connectPhase).toBe("rejected");
+		expect(w.vm.state.connectBlockReason).toBe(detail);
+		await vi.advanceTimersByTimeAsync(30 * 2500);
+		await p;
+		expect(w.vm.state.connectPhase).toBe("rejected"); // still not "retry" at the would-be ceiling
+		w.unmount();
+	});
+});
+
 // The payment-confirming screen. This is the moment right after the customer
 // pays: they are sent back to the SPA and the bench asks the control plane
 // whether the payment landed. Before this it rendered the marketing intro tour,

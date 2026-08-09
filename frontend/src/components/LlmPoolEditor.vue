@@ -3937,6 +3937,23 @@ function buildSaveModels(sourceRows) {
 	return (sourceRows || []).map((r, i) => {
 		if (r.credentialType === "subscription") {
 			return {
+				// jarvis#756: the Provider select for a subscription row writes to
+				// r.upstream (onUpstreamChange), never to r.provider - so this row's
+				// OWN `provider` field is never touched by the UI. Without this line
+				// the posted row carried no `provider` key at all, save_llm_pool's
+				// normalize_provider(m.get("provider")) then defaulted to "", and the
+				// STORED row saved a subscription with an empty provider even though
+				// the customer had picked one. Admin later rejected the apply with
+				// "provider + model required in oauth mode", but by then the wizard
+				// had already told the customer their connection was saved.
+				// UPSTREAM_OAUTH_PROVIDER is the same upstream-value -> label map the
+				// OAuth sign-in call already uses (line ~3455), so a row that never
+				// resolves a label (should not happen - setCredType defaults upstream
+				// to "openai") posts an EMPTY provider here rather than a silently
+				// invented one - validatePool (jarvis/llm/pool.js) then refuses the
+				// save locally with a clear message instead of letting admin be the
+				// only thing that ever checks this.
+				provider: UPSTREAM_OAUTH_PROVIDER[r.upstream] || "",
 				model: (r.model || "").trim(),
 				order: i,
 				subscription: {

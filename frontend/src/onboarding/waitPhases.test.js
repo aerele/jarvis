@@ -130,11 +130,45 @@ test("readiness: only a paged repair claims support was already notified", () =>
 	for (const reason of [
 		"subscription_suspended",
 		"site_replaced",
+		"llm_rejected",
 		"container_provisioning",
 		"readiness_unconfirmed",
 		"unmapped",
 	]) {
 		assert.notEqual(readinessPhase({ answered: true, reason }).paged, true, reason);
+	}
+});
+
+// jarvis#757: a hard rejection (admin permanently refused the config; jarvis/
+// account.py's is_ready_for_chat returns "llm_rejected" only when the last sync
+// ended in a terminal "failed: ..." status) must read as a rejection, quoting
+// admin's own reason, and must not be confused with either the ordinary
+// still-provisioning phases OR the three "blocked, nothing to do" stop cases
+// above (authority_repair_required / subscription_suspended / site_replaced):
+// unlike those three, the fix here IS a config change, so the caller is told to
+// go back to the editable form (`editable: true`) instead of a dead end.
+test("readiness: llm_rejected stops the wait, is editable, quotes admin verbatim, never claims progress", () => {
+	const detail = "Your AI configuration was rejected: provider + model required in oauth mode";
+	const p = readinessPhase({ answered: true, reason: "llm_rejected", detail });
+	assert.equal(p.stop, true);
+	assert.equal(p.editable, true);
+	assert.equal(p.detail, detail);
+	assert.notEqual(p.state, PHASE_STATE.ACTIVE);
+	assert.notEqual(p.paged, true);
+	assert.doesNotMatch(
+		p.label + " " + p.detail,
+		/couldn't confirm|coming online|still progressing/i
+	);
+});
+
+test("readiness: only llm_rejected is editable - the three blocked stop cases are not", () => {
+	assert.equal(readinessPhase({ answered: true, reason: "llm_rejected" }).editable, true);
+	for (const reason of [
+		"authority_repair_required",
+		"subscription_suspended",
+		"site_replaced",
+	]) {
+		assert.notEqual(readinessPhase({ answered: true, reason }).editable, true, reason);
 	}
 });
 
@@ -202,6 +236,7 @@ test("readiness: no branch ever claims setup is finishing on its own", () => {
 		"authority_repair_required",
 		"subscription_suspended",
 		"site_replaced",
+		"llm_rejected",
 		"unmapped",
 	];
 	for (const reason of reasons) {
@@ -279,6 +314,7 @@ test("setup headline: no readiness reason reaches the chat-opening headline on i
 		"authority_repair_required",
 		"subscription_suspended",
 		"site_replaced",
+		"llm_rejected",
 		"unmapped",
 	];
 	for (const reason of reasons) {

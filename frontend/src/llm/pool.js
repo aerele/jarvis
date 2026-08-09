@@ -133,9 +133,14 @@ export function validatePool(models, preset) {
 	if (!Array.isArray(models) || models.length === 0)
 		return { ok: false, error: "Add at least one model." };
 	for (const m of models) {
-		// Chat-subscription model: needs a model id + at least one connected account.
-		// No provider / api_key required.
+		// Chat-subscription model: needs a provider + a model id + at least one
+		// connected account. No api_key required (jarvis#756: a subscription row
+		// that reaches here with no provider is refused HERE, with a clear
+		// message, rather than accepted locally and rejected later by admin once
+		// the OAuth capture already went through).
 		if (m.subscription) {
+			if (!(m.provider || "").trim())
+				return { ok: false, error: "Choose a provider for your chat subscription." };
 			if (!(m.model || "").trim())
 				return { ok: false, error: "Every model needs a model id." };
 			const accounts = Array.isArray(m.subscription.accounts) ? m.subscription.accounts : [];

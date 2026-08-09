@@ -193,8 +193,9 @@ test("validatePool: rejects empty pool", () => {
 		true
 	);
 });
-test("validatePool: subscription model valid with a connected account (no provider/api_key)", () => {
+test("validatePool: subscription model valid with a provider + a connected account (no api_key)", () => {
 	const sub = {
+		provider: "OpenAI",
 		model: "gpt-5.5",
 		order: 0,
 		subscription: {
@@ -211,12 +212,46 @@ test("validatePool: subscription model valid with a connected account (no provid
 	};
 	assert.equal(validatePool([sub], null).ok, true);
 });
+// jarvis#756: buildSaveModels used to omit `provider` entirely for a subscription
+// row (the Provider select writes to r.upstream, never to r.provider), so a
+// customer's chosen provider never reached the saved payload - admin later
+// rejected the apply with "provider + model required in oauth mode" while the
+// wizard had already told the customer their connection was saved. This is the
+// save-path refusal that closes the gap: a provider-less subscription row is
+// invalid LOCALLY, with a clear message, rather than accepted here and rejected
+// only later by admin.
+test("validatePool: subscription model with no provider is refused locally, with a clear message", () => {
+	const sub = {
+		model: "gpt-5.5",
+		order: 0,
+		subscription: {
+			rotation: "sticky",
+			accounts: [
+				{
+					upstream: "openai",
+					account_ref: "SUB_abc123",
+					label: "me@x.com",
+					oauth_blob: '{"token":"t"}',
+				},
+			],
+		},
+	};
+	const v = validatePool([sub], null);
+	assert.equal(v.ok, false);
+	assert.match(v.error, /provider/i);
+});
 test("validatePool: subscription model invalid with no accounts", () => {
-	const sub = { model: "gpt-5.5", order: 0, subscription: { rotation: "sticky", accounts: [] } };
+	const sub = {
+		provider: "OpenAI",
+		model: "gpt-5.5",
+		order: 0,
+		subscription: { rotation: "sticky", accounts: [] },
+	};
 	assert.equal(validatePool([sub], null).ok, false);
 });
 test("validatePool: subscription account with account_ref but blank blob is valid (previously connected; blob merged back on save)", () => {
 	const sub = {
+		provider: "OpenAI",
 		model: "gpt-5.5",
 		order: 0,
 		subscription: {
