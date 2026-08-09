@@ -118,8 +118,8 @@ jobs:
 
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
   # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
-  # runs the exact deploy-contract build (`npm run build` from the app root = install-frontend + Vite SPA
-  # + PWA), mirroring what Frappe Cloud runs on deploy.
+  # builds the SPA (the /jarvis artifact) the way the deploy does. (The PWA build resolves the bench site
+  # config via a bench-relative path a bare runner lacks, so it is not gated here — a follow-up.)
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -137,8 +137,8 @@ jobs:
         run: |
           mkdir -p "$HOME/sites"
           printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
-      - name: Build the SPA + PWA (Frappe Cloud deploy contract)
-        run: npm run build
+      - name: Build the SPA (Vite) — the /jarvis deploy artifact
+        run: npm run install-frontend && npm run build-frontend
 
   tests:
     runs-on: ubuntu-latest
