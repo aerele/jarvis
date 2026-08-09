@@ -93,7 +93,16 @@ class TestSttConfig(FrappeTestCase):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model="test/model-x"):
 			with patch("jarvis.admin_client.get_stt_config") as mock_admin:
 				cfg = voice.stt_config()
-		self.assertEqual(cfg, {"enabled": True, "api_key": TEST_KEY, "model": "test/model-x"})
+		self.assertEqual(
+			cfg,
+			{
+				"enabled": True,
+				"api_key": TEST_KEY,
+				"model": "test/model-x",
+				"base_url": "",
+				"mode": "transcription",
+			},
+		)
 		mock_admin.assert_not_called()
 
 	def test_site_config_default_model(self):
@@ -526,11 +535,20 @@ class TestTranscribeAudio(FrappeTestCase):
 		self.assertEqual(payload, data)
 		self.assertEqual(mime, "audio/webm")
 
-	def test_never_calls_chat_completions(self):
-		"""Regression pin for the paraphrase defect: STT rides the transcription
-		API only. On chat-completions a chat model 'transcribes' by inventing
-		fluent text and returning it as a 200."""
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
+	def test_transcription_mode_never_posts_to_chat_completions(self):
+		"""Regression pin for the paraphrase defect: transcription-mode STT
+		rides the transcription API only. On chat-completions a chat model
+		'transcribes' by inventing fluent text and returning it as a 200."""
+		with patch(
+			"jarvis.chat.voice.stt_config",
+			return_value={
+				"enabled": True,
+				"api_key": TEST_KEY,
+				"model": voice._DEFAULT_STT_MODEL,
+				"base_url": "",
+				"mode": "transcription",
+			},
+		):
 			with _audio_request():
 				with patch("jarvis.chat.voice.requests.post", return_value=_ok_response()) as mock_post:
 					voice.transcribe_audio()
@@ -540,6 +558,32 @@ class TestTranscribeAudio(FrappeTestCase):
 			self.assertNotEqual(url, voice._OPENROUTER_URL)
 			self.assertNotIn("chat/completions", url)
 			self.assertNotIn("json", call.kwargs)
+
+	def test_chat_audio_mode_never_posts_to_audio_transcriptions(self):
+		"""Mirror image: chat-audio mode must hit /chat/completions only,
+		never the multipart transcription endpoint. The new chat-audio default
+		deliberately sends the clip to a chat model, so this is a mode-scoped
+		guardrail, not a blanket ban on chat/completions."""
+		with patch(
+			"jarvis.chat.voice.stt_config",
+			return_value={
+				"enabled": True,
+				"api_key": "vk",
+				"model": "google/gemini-2.5-flash-lite",
+				"base_url": "https://bifrost.internal/v1",
+				"mode": "chat-audio",
+			},
+		):
+			with _audio_request():
+				with patch(
+					"jarvis.chat.voice.requests.post", return_value=_ok_completion("hello world")
+				) as mock_post:
+					voice.transcribe_audio()
+		self.assertTrue(mock_post.call_args_list)
+		for call in mock_post.call_args_list:
+			url = call.args[0] if call.args else call.kwargs.get("url", "")
+			self.assertNotIn("audio/transcriptions", url)
+			self.assertNotIn("files", call.kwargs)
 
 	def test_browser_container_forwarded_verbatim(self):
 		"""No mime->format table any more: whatever the browser recorded is
@@ -684,7 +728,10 @@ class TestAdminGetSttConfig(FrappeTestCase):
 		) as mock_post:
 			first = admin_client.get_stt_config()
 			second = admin_client.get_stt_config()
-		self.assertEqual(first, {"enabled": True, "api_key": "k1", "model": "m1"})
+		self.assertEqual(
+			first,
+			{"enabled": True, "api_key": "k1", "model": "m1", "base_url": "", "mode": ""},
+		)
 		self.assertEqual(second, first)
 		self.assertEqual(mock_post.call_count, 1)
 
