@@ -111,7 +111,6 @@ vi.mock("frappe-ui", () => {
 			props: ["message"],
 			template: '<div v-if="message">{{ message }}</div>',
 		},
-		Progress: { name: "Progress", template: '<div><slot name="hint" /></div>' },
 		dayjs: () => ({ format: () => "", fromNow: () => "" }),
 		toast: { error: vi.fn(), success: vi.fn() },
 	};
