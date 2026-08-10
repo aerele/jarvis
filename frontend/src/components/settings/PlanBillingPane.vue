@@ -126,8 +126,8 @@
 
 			     Cancel is a red SUBTLE button, never red solid: the confirm dialog
 			     owns the deliberate red step, and a solid red resting on the pane
-			     just makes it hostile (design.md §4.1 danger zone). Hidden while
-			     cancelling (Resume is above) or ended (nothing left to cancel). -->
+			     just makes it hostile (design.md §4.1 danger zone). Server gates on
+			     can_cancel: when autopay is off there is nothing left to cancel. -->
 			<div class="flex items-center justify-between gap-4">
 				<Button
 					variant="solid"
@@ -136,7 +136,7 @@
 					@click="goBilling"
 				/>
 				<Button
-					v-if="!cancelling && !ended"
+					v-if="canShowCancel"
 					variant="subtle"
 					theme="red"
 					:label="cancelActionLabel(account.has_mandate)"
@@ -208,6 +208,10 @@ const statusTheme = computed(() =>
 );
 const busy = ref(false);
 const reauthNotice = ref("");
+// Fallback for admins predating can_cancel field: old rule was !cancelled && !ended.
+const canShowCancel = computed(
+	() => account.value.can_cancel ?? (!cancelling.value && !ended.value)
+);
 
 async function loadAccount() {
 	accountLoading.value = true;
@@ -224,11 +228,21 @@ async function loadAccount() {
 async function doCancel() {
 	const label = cancelActionLabel(account.value.has_mandate);
 	const endsOn = (account.value.access_ends_on || "").split(" ")[0];
+	let message;
+	if (account.value.has_mandate) {
+		// AutoPay branch: turn off auto-renewal, keep full access, can re-arm anytime.
+		message = endsOn
+			? `Auto-renewal will turn off. You'll keep full access until ${endsOn}, and can set it up again anytime.`
+			: "Auto-renewal will turn off. You'll keep full access until the end of your current period, and can set it up again anytime.";
+	} else {
+		// No-mandate branch: period-end cancellation unchanged.
+		message = endsOn
+			? `You'll keep full access until ${endsOn}. You can resume any time before then.`
+			: "You'll keep full access until the end of your current period, and can resume any time before then.";
+	}
 	const ok = await confirm({
 		title: `${label}?`,
-		message: endsOn
-			? `You'll keep full access until ${endsOn}. You can resume any time before then.`
-			: "You'll keep full access until the end of your current period, and can resume any time before then.",
+		message,
 		confirmLabel: label,
 		danger: true,
 	});
@@ -265,8 +279,6 @@ async function doResume() {
 	try {
 		const out = (await resumePlan()) || {};
 		if (out.requires_reauthorization) {
-			// Cancelling released the autopay mandate and there is no way to
-			// re-arm it silently; say so rather than let them assume it renews.
 			const endsOn = (account.value.access_ends_on || "").split(" ")[0];
 			reauthNotice.value = endsOn
 				? `Auto-renewal is off. Set up payment again before ${endsOn} to stay subscribed.`
