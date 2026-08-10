@@ -1,16 +1,244 @@
 <template>
 	<!-- Intro product tour (onboarding step 1, chromeless: no step rail).
-		 6 slides, TOUR order: Chat, Welcome, Skills, Macros, File Box, Agents
-		 (Chat leads with the animated conversation; the mock sidebar nav
-		 rendered inside each slide keeps its own SIDEBAR order: Chat, Skills,
-		 Macros, File Box, Agents - see NAV_ORDER). Translated from the
-		 approved preview (docs/superpowers/specs/onboarding-preview-v6.html);
-		 self-contained, only depends on the app palette vars OnboardingView
-		 already applies. -->
+		 6 slides, TOUR order: Welcome, Chat, Skills, Macros, File Box, Agents
+		 (Welcome opens on what Jarvis does for the business - an ERP
+		 teammate, not a generic chatbot - then Chat follows with the animated
+		 conversation as the proof; the mock sidebar nav rendered inside each
+		 slide keeps its own SIDEBAR order: Chat, Skills, Macros, File Box,
+		 Agents - see NAV_ORDER). Every slide runs its own small animation via
+		 the shared phase-clock driver (see createPhaseClock in <script>):
+		 Welcome cycles the suggestion spotlight, Chat is the original looping
+		 exchange, Skills builds its list row by row, Macros collapses three
+		 routine steps into one run, File Box drops a file in and turns it
+		 into structured fields, and Agents surfaces a finding on its own.
+		 Translated from the approved preview
+		 (docs/superpowers/specs/onboarding-preview-v6.html); self-contained,
+		 only depends on the app palette vars OnboardingView already applies. -->
 	<div class="tour">
 		<div class="tour-stage">
-			<!-- slide 1 · chat -->
+			<!-- slide 1 · welcome (the opener: what Jarvis does for the
+				 business, not a generic agent pitch - see the file header) -->
 			<div v-if="cur === 0" class="slide">
+				<div class="slide-copy">
+					<span class="eyebrow">Welcome</span>
+					<h2>Harness AI agents inside your ERPNext.</h2>
+					<p>
+						{{ agentName }} is an AI teammate that lives in your ERP. Ask a question,
+						hand off a task, or let it watch the books, all in plain language.
+					</p>
+					<ul class="pts">
+						<li>
+							<svg
+								width="15"
+								height="15"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.4"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M20 6 9 17l-5-5" /></svg
+							>Reads your real data, trusting the ledger over guesses
+						</li>
+						<li>
+							<svg
+								width="15"
+								height="15"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.4"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M20 6 9 17l-5-5" /></svg
+							>Builds a personalized knowledge base of your business as you work
+						</li>
+						<li>
+							<svg
+								width="15"
+								height="15"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.4"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M20 6 9 17l-5-5" /></svg
+							>Respects each user’s Frappe permissions, so everyone sees only what
+							they’re allowed to
+						</li>
+						<li>
+							<svg
+								width="15"
+								height="15"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.4"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M20 6 9 17l-5-5" /></svg
+							>{{ PERMISSION_TOUR_COPY }}
+						</li>
+					</ul>
+				</div>
+				<div class="mock">
+					<div class="mock-bar">
+						<i></i><i></i><i></i><span>{{ agentName }} · New chat</span>
+					</div>
+					<div class="mock-body">
+						<div class="m-side" v-html="sideHtml('Chat')"></div>
+						<div class="m-main">
+							<div class="m-welcome">
+								<!-- fill is #fff, not var(--surface): the chip is the brand gradient in
+								     both themes, so a theme-flipping fill would put a dark star on it. -->
+								<div class="m-welcome-mk">
+									<svg width="15" height="15" viewBox="0 0 24 24" fill="#fff">
+										<path
+											d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"
+										/>
+									</svg>
+								</div>
+								<div class="m-welcome-hi">Good morning, Priya</div>
+								<div class="m-welcome-sub">
+									Ask about your ERP data, run a workflow, or draft something.
+								</div>
+							</div>
+							<!-- spotlight cycle: welcomeStep (script) lights up one suggestion
+								 at a time and types its example query into the composer, showing
+								 the range of ERP work Jarvis does before Chat proves it in the
+								 next slide. -->
+							<div class="phase-fade" :class="{ fading: welcomeFading }">
+								<div class="m-sugg-grid">
+									<div
+										class="m-sugg"
+										:class="{ active: welcomeStep === 'analyse' }"
+									>
+										<b class="mi mi-blue"
+											><svg
+												width="12"
+												height="12"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.5"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M3 3v18h18" />
+												<path d="m19 9-5 5-4-4-3 3" /></svg
+										></b>
+										<div>
+											<i>Analyse data</i
+											><u>Which sales orders are overdue?</u>
+										</div>
+									</div>
+									<div
+										class="m-sugg"
+										:class="{ active: welcomeStep === 'action' }"
+									>
+										<b class="mi mi-green"
+											><svg
+												width="12"
+												height="12"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.5"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M12 5v14M5 12h14" /></svg
+										></b>
+										<div>
+											<i>Take an action</i><u>Create a new Sales Order</u>
+										</div>
+									</div>
+									<div
+										class="m-sugg"
+										:class="{ active: welcomeStep === 'search' }"
+									>
+										<b class="mi mi-amber"
+											><svg
+												width="12"
+												height="12"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.5"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<circle cx="11" cy="11" r="8" />
+												<path d="m21 21-4.35-4.35" /></svg
+										></b>
+										<div>
+											<i>Search records</i><u>Find a customer or contact</u>
+										</div>
+									</div>
+									<div
+										class="m-sugg"
+										:class="{ active: welcomeStep === 'draft' }"
+									>
+										<b class="mi mi-violet"
+											><svg
+												width="12"
+												height="12"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.5"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path
+													d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"
+												/></svg
+										></b>
+										<div>
+											<i>Draft content</i><u>Follow-up email to a lead</u>
+										</div>
+									</div>
+								</div>
+								<div class="composer">
+									<template v-if="welcomeStep === 'analyse'"
+										><span class="type-line type-w1" key="w-analyse"
+											>Which sales orders are overdue?</span
+										><span class="type-caret" aria-hidden="true"></span
+									></template>
+									<template v-else-if="welcomeStep === 'action'"
+										><span class="type-line type-w2" key="w-action"
+											>Create a new Sales Order</span
+										><span class="type-caret" aria-hidden="true"></span
+									></template>
+									<template v-else-if="welcomeStep === 'search'"
+										><span class="type-line type-w3" key="w-search"
+											>Find a customer or contact</span
+										><span class="type-caret" aria-hidden="true"></span
+									></template>
+									<template v-else-if="welcomeStep === 'draft'"
+										><span class="type-line type-w4" key="w-draft"
+											>Follow-up email to a lead</span
+										><span class="type-caret" aria-hidden="true"></span
+									></template>
+									<template v-else
+										>Ask {{ agentName }}… @ to mention a user, / for a doctype
+										or tool</template
+									>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- slide 2 · chat (the proof: the exchange the Welcome slide just
+				 promised, animated end to end) -->
+			<div v-else-if="cur === 1" class="slide">
 				<div class="slide-copy">
 					<span class="eyebrow">Chat</span>
 					<h2>Ask anything about your business.</h2>
@@ -123,179 +351,6 @@
 				</div>
 			</div>
 
-			<!-- slide 2 · welcome -->
-			<div v-else-if="cur === 1" class="slide">
-				<div class="slide-copy">
-					<span class="eyebrow">Welcome</span>
-					<h2>Harness AI agents inside your ERPNext.</h2>
-					<p>
-						{{ agentName }} is an AI teammate that lives in your ERP. Ask a question,
-						hand off a task, or let it watch the books, all in plain language.
-					</p>
-					<ul class="pts">
-						<li>
-							<svg
-								width="15"
-								height="15"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2.4"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<path d="M20 6 9 17l-5-5" /></svg
-							>Reads your real data, trusting the ledger over guesses
-						</li>
-						<li>
-							<svg
-								width="15"
-								height="15"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2.4"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<path d="M20 6 9 17l-5-5" /></svg
-							>Builds a personalized knowledge base of your business as you work
-						</li>
-						<li>
-							<svg
-								width="15"
-								height="15"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2.4"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<path d="M20 6 9 17l-5-5" /></svg
-							>Respects each user’s Frappe permissions, so everyone sees only what
-							they’re allowed to
-						</li>
-						<li>
-							<svg
-								width="15"
-								height="15"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2.4"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<path d="M20 6 9 17l-5-5" /></svg
-							>{{ PERMISSION_TOUR_COPY }}
-						</li>
-					</ul>
-				</div>
-				<div class="mock">
-					<div class="mock-bar">
-						<i></i><i></i><i></i><span>{{ agentName }} · New chat</span>
-					</div>
-					<div class="mock-body">
-						<div class="m-side" v-html="sideHtml('Chat')"></div>
-						<div class="m-main">
-							<div class="m-welcome">
-								<!-- fill is #fff, not var(--surface): the chip is the brand gradient in
-								     both themes, so a theme-flipping fill would put a dark star on it. -->
-								<div class="m-welcome-mk">
-									<svg width="15" height="15" viewBox="0 0 24 24" fill="#fff">
-										<path
-											d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"
-										/>
-									</svg>
-								</div>
-								<div class="m-welcome-hi">Good morning, Priya</div>
-								<div class="m-welcome-sub">
-									Ask about your ERP data, run a workflow, or draft something.
-								</div>
-							</div>
-							<div class="m-sugg-grid">
-								<div class="m-sugg">
-									<b class="mi mi-blue"
-										><svg
-											width="12"
-											height="12"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.5"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M3 3v18h18" />
-											<path d="m19 9-5 5-4-4-3 3" /></svg
-									></b>
-									<div>
-										<i>Analyse data</i><u>Which sales orders are overdue?</u>
-									</div>
-								</div>
-								<div class="m-sugg">
-									<b class="mi mi-green"
-										><svg
-											width="12"
-											height="12"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.5"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M12 5v14M5 12h14" /></svg
-									></b>
-									<div><i>Take an action</i><u>Create a new Sales Order</u></div>
-								</div>
-								<div class="m-sugg">
-									<b class="mi mi-amber"
-										><svg
-											width="12"
-											height="12"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.5"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<circle cx="11" cy="11" r="8" />
-											<path d="m21 21-4.35-4.35" /></svg
-									></b>
-									<div>
-										<i>Search records</i><u>Find a customer or contact</u>
-									</div>
-								</div>
-								<div class="m-sugg">
-									<b class="mi mi-violet"
-										><svg
-											width="12"
-											height="12"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.5"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path
-												d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"
-											/></svg
-									></b>
-									<div><i>Draft content</i><u>Follow-up email to a lead</u></div>
-								</div>
-							</div>
-							<div class="composer">
-								Ask {{ agentName }}… @ to mention a user, / for a doctype or tool
-							</div>
-						</div>
-					</div>
-				</div>
-			</div>
-
 			<!-- slide 3 · skills -->
 			<div v-else-if="cur === 2" class="slide">
 				<div class="slide-copy">
@@ -312,27 +367,35 @@
 					<div class="mock-body">
 						<div class="m-side" v-html="sideHtml('Skills')"></div>
 						<div class="m-main">
-							<div class="m-row">
-								<span class="pill">core</span>
-								<div class="t">Customer ledger lookup</div>
-								<div class="meta"></div>
+							<!-- skillsStep (script) builds the list row by row, then the
+								 New skill invite lights up: the catalog is already loaded,
+								 and open to more. -->
+							<div class="phase-fade" :class="{ fading: skillsFading }">
+								<div class="m-row m-row-skill" v-if="skillsAtLeast('row1')">
+									<span class="pill">core</span>
+									<div class="t">Customer ledger lookup</div>
+									<div class="meta"></div>
+								</div>
+								<div class="m-row m-row-skill" v-if="skillsAtLeast('row2')">
+									<span class="pill">sales</span>
+									<div class="t">Sales order follow-up</div>
+									<div class="meta"></div>
+								</div>
+								<div class="m-row m-row-skill" v-if="skillsAtLeast('row3')">
+									<span class="pill amber">custom</span>
+									<div class="t">Invoice data entry</div>
+									<div class="meta"></div>
+								</div>
+								<div class="m-row m-row-skill" v-if="skillsAtLeast('row4')">
+									<span class="pill amber">custom</span>
+									<div class="t">GST reconciliation</div>
+									<div class="meta"></div>
+								</div>
 							</div>
-							<div class="m-row">
-								<span class="pill">sales</span>
-								<div class="t">Sales order follow-up</div>
-								<div class="meta"></div>
-							</div>
-							<div class="m-row">
-								<span class="pill amber">custom</span>
-								<div class="t">Invoice data entry</div>
-								<div class="meta"></div>
-							</div>
-							<div class="m-row">
-								<span class="pill amber">custom</span>
-								<div class="t">GST reconciliation</div>
-								<div class="meta"></div>
-							</div>
-							<div class="m-row m-row-dashed">
+							<div
+								class="m-row m-row-dashed"
+								:class="{ active: skillsAtLeast('cta') }"
+							>
 								<span class="m-row-cta"
 									><svg
 										width="11"
@@ -369,10 +432,37 @@
 					<div class="mock-body">
 						<div class="m-side" v-html="sideHtml('Macros')"></div>
 						<div class="m-main">
-							<div class="m-row">
-								<span class="pill amber">running</span>
-								<div class="t">Month-end close</div>
-								<div class="meta"></div>
+							<!-- macrosStep (script) collapses three routine steps into one
+								 run, then plays the run out (queued -> done): the "one click"
+								 promise, shown rather than told. -->
+							<div class="phase-fade" :class="{ fading: macrosFading }">
+								<div class="m-row m-row-macro">
+									<div
+										class="chip-row"
+										v-if="macrosStep === 'chips' || macrosStep === 'collapse'"
+										:class="{ collapsing: macrosStep === 'collapse' }"
+									>
+										<span class="chip">GST</span
+										><span class="chip">Reminders</span
+										><span class="chip">Close</span>
+									</div>
+									<template v-else>
+										<span class="pill amber" v-if="macrosStep === 'running'"
+											>running</span
+										>
+										<span class="pill" v-else>done</span>
+									</template>
+									<div class="t">Month-end close</div>
+									<div class="meta">
+										<span
+											class="meta-fill"
+											:class="{
+												on: macrosStep === 'running',
+												done: macrosAtLeast('done'),
+											}"
+										></span>
+									</div>
+								</div>
 							</div>
 							<div class="m-row">
 								<span class="pill">done</span>
@@ -410,10 +500,29 @@
 					<div class="mock-body">
 						<div class="m-side" v-html="sideHtml('File Box')"></div>
 						<div class="m-main">
-							<div class="m-row">
-								<span class="pill amber">reading</span
-								><span class="fname">INV-ACME-0921.pdf</span>
-								<div class="meta"></div>
+							<!-- fileboxStep (script) drops a file in, reads it, then turns
+								 the placeholder meta bar into the real extracted fields:
+								 the raw-to-clean transform the slide promises. -->
+							<div class="phase-fade" :class="{ fading: fileboxFading }">
+								<div
+									class="m-row file-row"
+									:class="{ dropping: fileboxStep === 'drop' }"
+								>
+									<span class="pill amber" v-if="fileboxStep === 'reading'"
+										><span class="g"></span>reading</span
+									>
+									<span
+										class="pill amber"
+										v-else-if="fileboxStep === 'extracted'"
+										>extracted</span
+									>
+									<span class="pill" v-else-if="fileboxAtLeast('filed')"
+										>filed</span
+									>
+									<span class="fname">INV-ACME-0921.pdf</span>
+									<div class="meta" v-if="!fileboxAtLeast('extracted')"></div>
+									<div class="meta-info" v-else>₹42,500 · Acme Industries</div>
+								</div>
 							</div>
 							<div class="m-row">
 								<span class="pill">extracted</span
@@ -490,8 +599,28 @@
 										</svg>
 									</div>
 									<div class="nm">Close Auditor</div>
-									<div class="ds">
-										Read-only period-end integrity checks on your books
+									<!-- agentsStep (script): the installed agent works unattended and
+										 surfaces a finding on its own, proving "before you ask". The
+										 status replaces the description IN PLACE (same line, same
+										 box) rather than adding a new one, so the fixed-height mock
+										 never has to grow or clip a card below it. -->
+									<div
+										class="ds phase-fade"
+										:class="{
+											fading: agentsFading,
+											'ds-alert': agentsAtLeast('found'),
+										}"
+									>
+										<template v-if="agentsStep === 'scanning'"
+											><span class="g"></span>Checking the books</template
+										>
+										<template v-else-if="agentsAtLeast('found')"
+											>1 finding surfaced</template
+										>
+										<template v-else
+											>Read-only period-end integrity checks on your
+											books</template
+										>
 									</div>
 									<span class="m-inst on">Installed</span>
 								</div>
@@ -621,13 +750,93 @@ function step(d) {
 	go(cur.value + d);
 }
 
-// ---- chat slide (cur === 0): looping animated conversation ----
-// A tiny phase clock steps through the exchange; every visual (typing
-// reveal, caret blink, tool-dot pulse, bubble/card presence) is driven off
-// the current step name and rendered as CSS, so this is a state machine,
-// not a frame-by-frame animator. It only runs while the Chat slide is
-// mounted, and is skipped entirely under prefers-reduced-motion, which
-// instead shows the loop's settled last frame with no motion at all.
+// ---- phase clock: shared animation driver for every slide ----
+// A tiny phase clock steps through a named sequence with per-step
+// durations; every visual (typing reveal, dot pulse, row presence,
+// highlight) is driven off the current step name and rendered as CSS, so
+// this is a state machine, not a frame-by-frame animator. At the loop
+// boundary it fades the slide's dynamic content out, resets to the first
+// step, then fades back in (`fading`); it never restarts mid-view because
+// the reset happens while invisible. Only the clock for the visible slide
+// runs (see the dispatcher below); every other clock sits stopped on its
+// settled last step, which is also what prefers-reduced-motion shows,
+// since it never starts a clock at all. This is the exact technique the
+// Chat slide originated, extracted so every slide can reuse it.
+function createPhaseClock(sequence, durationMs) {
+	const INDEX = Object.fromEntries(sequence.map((name, i) => [name, i]));
+	const step = ref(sequence[sequence.length - 1]);
+	const fading = ref(false);
+	let timer = null;
+	let idx = 0;
+
+	function clear() {
+		if (timer) {
+			clearTimeout(timer);
+			timer = null;
+		}
+	}
+	function atLeast(name) {
+		return INDEX[step.value] >= INDEX[name];
+	}
+	function runStep() {
+		const name = sequence[idx];
+		step.value = name;
+		timer = setTimeout(() => {
+			idx += 1;
+			if (idx >= sequence.length) {
+				// loop boundary: fade the whole thing out, then reset to the start
+				fading.value = true;
+				timer = setTimeout(() => {
+					idx = 0;
+					fading.value = false;
+					runStep();
+				}, 500);
+				return;
+			}
+			runStep();
+		}, durationMs[name]);
+	}
+	function start() {
+		clear();
+		idx = 0;
+		fading.value = false;
+		runStep();
+	}
+	function stop() {
+		clear();
+		step.value = sequence[sequence.length - 1];
+		fading.value = false;
+	}
+	return { step, fading, atLeast, start, stop };
+}
+
+function prefersReducedMotion() {
+	return (
+		typeof window !== "undefined" &&
+		typeof window.matchMedia === "function" &&
+		window.matchMedia("(prefers-reduced-motion: reduce)").matches
+	);
+}
+
+// ---- welcome slide (cur === 0): spotlight cycle ----
+// Lights up one suggestion at a time and types its example query into the
+// composer, showing the range of ERP work Jarvis does before Chat proves
+// it in the next slide.
+const WELCOME_SEQUENCE = ["analyse", "action", "search", "draft", "hold"];
+const WELCOME_DURATION_MS = {
+	analyse: 2200,
+	action: 1900,
+	search: 1900,
+	draft: 2200,
+	hold: 1600,
+};
+const welcomeClock = createPhaseClock(WELCOME_SEQUENCE, WELCOME_DURATION_MS);
+const welcomeStep = welcomeClock.step;
+const welcomeFading = welcomeClock.fading;
+
+// ---- chat slide (cur === 1): looping animated conversation ----
+// Typing reveal, caret blink, tool-dot pulse and bubble/card presence are
+// all CSS keyed off chatStep.
 const CHAT_SEQUENCE = [
 	"type1", // composer types the stock/dispatch question
 	"bubble1", // question becomes a user bubble
@@ -652,72 +861,96 @@ const CHAT_DURATION_MS = {
 	done: 2600,
 	hold: 2400,
 };
-const CHAT_INDEX = Object.fromEntries(CHAT_SEQUENCE.map((s, i) => [s, i]));
 const chatQ1 =
 	"For the available stock, which customer orders can I dispatch now, who pays me on time, to keep up my cashflow in a good state? Analyse and list.";
 const chatQ2 = "Create pick list for first order.";
-const chatStep = ref(CHAT_SEQUENCE[CHAT_SEQUENCE.length - 1]);
-const chatFading = ref(false);
-function chatAtLeast(step) {
-	return CHAT_INDEX[chatStep.value] >= CHAT_INDEX[step];
-}
+const chatClock = createPhaseClock(CHAT_SEQUENCE, CHAT_DURATION_MS);
+const chatStep = chatClock.step;
+const chatFading = chatClock.fading;
+const chatAtLeast = chatClock.atLeast;
 
-let chatTimer = null;
-let chatIdx = 0;
-function clearChatTimer() {
-	if (chatTimer) {
-		clearTimeout(chatTimer);
-		chatTimer = null;
-	}
-}
-function runChatStep() {
-	const stepName = CHAT_SEQUENCE[chatIdx];
-	chatStep.value = stepName;
-	chatTimer = setTimeout(() => {
-		chatIdx += 1;
-		if (chatIdx >= CHAT_SEQUENCE.length) {
-			// loop boundary: fade the whole exchange out, then reset to blank
-			chatFading.value = true;
-			chatTimer = setTimeout(() => {
-				chatIdx = 0;
-				chatFading.value = false;
-				runChatStep();
-			}, 500);
-			return;
-		}
-		runChatStep();
-	}, CHAT_DURATION_MS[stepName]);
-}
-function startChatAnim() {
-	clearChatTimer();
-	chatIdx = 0;
-	chatFading.value = false;
-	runChatStep();
-}
-function prefersReducedMotion() {
-	return (
-		typeof window !== "undefined" &&
-		typeof window.matchMedia === "function" &&
-		window.matchMedia("(prefers-reduced-motion: reduce)").matches
-	);
-}
-// Slides use v-if, so leaving the Chat slide destroys its DOM - but the
+// ---- skills slide (cur === 2): the list builds itself ----
+// Rows appear one by one, then the New skill invite lights up: the catalog
+// is already loaded, and open to more.
+const SKILLS_SEQUENCE = ["row1", "row2", "row3", "row4", "cta", "hold"];
+const SKILLS_DURATION_MS = {
+	row1: 500,
+	row2: 450,
+	row3: 450,
+	row4: 450,
+	cta: 1500,
+	hold: 1800,
+};
+const skillsClock = createPhaseClock(SKILLS_SEQUENCE, SKILLS_DURATION_MS);
+const skillsFading = skillsClock.fading;
+const skillsAtLeast = skillsClock.atLeast;
+
+// ---- macros slide (cur === 3): three steps collapse into one run ----
+// The chips converge into the row's pill, then the run plays out
+// (queued -> done): the "one click" promise, shown rather than told.
+const MACROS_SEQUENCE = ["chips", "collapse", "running", "done", "hold"];
+const MACROS_DURATION_MS = {
+	chips: 900,
+	collapse: 650,
+	running: 1500,
+	done: 1600,
+	hold: 1400,
+};
+const macrosClock = createPhaseClock(MACROS_SEQUENCE, MACROS_DURATION_MS);
+const macrosStep = macrosClock.step;
+const macrosFading = macrosClock.fading;
+const macrosAtLeast = macrosClock.atLeast;
+
+// ---- file box slide (cur === 4): raw file becomes clean fields ----
+// A file drops in, gets read, then the placeholder meta bar turns into the
+// real extracted fields: the raw-to-clean transform the slide promises.
+const FILEBOX_SEQUENCE = ["drop", "reading", "extracted", "filed", "hold"];
+const FILEBOX_DURATION_MS = {
+	drop: 500,
+	reading: 1500,
+	extracted: 1800,
+	filed: 1400,
+	hold: 1600,
+};
+const fileboxClock = createPhaseClock(FILEBOX_SEQUENCE, FILEBOX_DURATION_MS);
+const fileboxStep = fileboxClock.step;
+const fileboxFading = fileboxClock.fading;
+const fileboxAtLeast = fileboxClock.atLeast;
+
+// ---- agents slide (cur === 5): background work, surfaced unprompted ----
+// The already-installed agent runs a check on its own and posts a finding,
+// proving "they watch and surface findings before you ask".
+const AGENTS_SEQUENCE = ["scanning", "found", "hold"];
+const AGENTS_DURATION_MS = {
+	scanning: 1800,
+	found: 2600,
+	hold: 1600,
+};
+const agentsClock = createPhaseClock(AGENTS_SEQUENCE, AGENTS_DURATION_MS);
+const agentsStep = agentsClock.step;
+const agentsFading = agentsClock.fading;
+const agentsAtLeast = agentsClock.atLeast;
+
+// Slides use v-if, so leaving a slide destroys its DOM - but each clock's
 // timer above is JS state on this component, not the DOM, so it needs its
-// own stop here too, on every slide change and again on unmount.
+// own stop here too. Index-aligned with the v-if chain in the template:
+// only the clock for the visible slide runs, every other one is stopped,
+// so at most one animation loop is ever active at a time.
+const CLOCKS = [welcomeClock, chatClock, skillsClock, macrosClock, fileboxClock, agentsClock];
 watch(
 	cur,
 	(slide) => {
-		if (slide === 0 && !prefersReducedMotion()) {
-			startChatAnim();
-		} else {
-			clearChatTimer();
-			chatStep.value = CHAT_SEQUENCE[CHAT_SEQUENCE.length - 1];
-			chatFading.value = false;
-		}
+		CLOCKS.forEach((clock, i) => {
+			if (i === slide && !prefersReducedMotion()) {
+				clock.start();
+			} else {
+				clock.stop();
+			}
+		});
 	},
 	{ immediate: true }
 );
-onUnmounted(clearChatTimer);
+onUnmounted(() => CLOCKS.forEach((clock) => clock.stop()));
 
 // ---- mock sidebar: mirrors the REAL app sidebar (brand + user, New Chat,
 // Search Chat, feather-icon nav, Recent chats), rendered from data exactly
@@ -796,21 +1029,43 @@ function sideHtml(active) {
 	.btn {
 		transition: none;
 	}
-	/* belt-and-braces: the chatStep clock in <script setup> already never
-	   starts under this preference, so these never actually mount, but they
-	   stay off here too in case that ever changes. */
-	.chat-anim {
+	/* belt-and-braces: every phase clock in <script setup> already never
+	   starts under this preference, so none of this ever actually plays, but
+	   it stays off here too in case that ever changes. */
+	.chat-anim,
+	.phase-fade {
 		transition: none;
 	}
 	.type-caret {
 		animation: none;
 		opacity: 1;
 	}
-	.cb.tool .g {
+	.cb.tool .g,
+	.pill .g,
+	.ds .g {
 		animation: none;
 	}
 	.confirm-btn--ok {
 		transition: none;
+	}
+	.m-sugg {
+		transition: none;
+	}
+	.m-row-skill,
+	.meta-info {
+		animation: none;
+	}
+	.m-row-dashed {
+		transition: none;
+	}
+	.chip {
+		transition: none;
+	}
+	.meta-fill {
+		transition: none;
+	}
+	.file-row.dropping {
+		animation: none;
 	}
 }
 
@@ -1091,8 +1346,8 @@ button:focus-visible {
 	padding-top: 10px;
 }
 /* The mock's welcome mark must show what the real welcome screen shows: the
-   brand gradient. It was `var(--text)` — near-black in light, near-white in dark
-   — so the tour advertised a mark the product doesn't have. */
+   brand gradient. It was `var(--text)`, near-black in light, near-white in
+   dark, so the tour advertised a mark the product doesn't have. */
 .m-welcome-mk {
 	width: 30px;
 	height: 30px;
@@ -1126,6 +1381,13 @@ button:focus-visible {
 	border-radius: 9px;
 	background: var(--surface);
 	padding: 8px 9px;
+	transition: border-color 0.25s ease, background 0.25s ease, transform 0.25s ease;
+}
+/* welcome slide spotlight: the suggestion whose query is "typed" below */
+.m-sugg.active {
+	border-color: var(--cta);
+	background: var(--surface-2);
+	transform: translateY(-1px);
 }
 .m-sugg b {
 	font-size: 11px;
@@ -1218,6 +1480,19 @@ button:focus-visible {
 	color: var(--text-3);
 	white-space: nowrap;
 	overflow: hidden;
+}
+
+/* ---- shared phase-clock fade: every animated slide but Chat wraps its
+   dynamic content in this (Chat keeps its own .chat-anim below, same rule,
+   named first since it's the original). Fades the content out at the loop
+   boundary while the script resets to the first step underneath, so the
+   reset is never visible. */
+.phase-fade {
+	transition: opacity 0.45s ease;
+	opacity: 1;
+}
+.phase-fade.fading {
+	opacity: 0;
 }
 
 /* ---- chat mock: looping animated conversation ----
@@ -1327,6 +1602,23 @@ button:focus-visible {
 	animation-duration: 1.1s;
 	animation-timing-function: steps(20, end);
 }
+/* welcome slide's four example queries, one per suggestion */
+.type-w1 {
+	animation-duration: 1.3s;
+	animation-timing-function: steps(22, end);
+}
+.type-w2 {
+	animation-duration: 1s;
+	animation-timing-function: steps(16, end);
+}
+.type-w3 {
+	animation-duration: 1.1s;
+	animation-timing-function: steps(18, end);
+}
+.type-w4 {
+	animation-duration: 1.1s;
+	animation-timing-function: steps(17, end);
+}
 @keyframes jvTypeReveal {
 	to {
 		clip-path: inset(0 0 0 0);
@@ -1402,11 +1694,116 @@ button:focus-visible {
 .m-row-dashed {
 	border-style: dashed;
 	justify-content: center;
+	transition: border-color 0.3s ease, background 0.3s ease;
 }
 .m-row-cta {
 	font-size: 10px;
 	font-weight: 600;
 	color: var(--text-2);
+}
+/* skills slide: the list building itself, row by row */
+.m-row-skill {
+	animation: jvRowIn 0.35s ease;
+}
+@keyframes jvRowIn {
+	from {
+		opacity: 0;
+		transform: translateY(5px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+/* skills slide: the New skill invite lighting up once the list is built */
+.m-row-dashed.active {
+	border-color: var(--cta);
+	background: var(--surface-2);
+}
+.m-row-dashed.active .m-row-cta {
+	color: var(--text);
+}
+
+/* macros slide: three routine steps collapsing into one run */
+.chip-row {
+	display: flex;
+	gap: 6px;
+}
+.chip {
+	font-size: 8.5px;
+	font-weight: 600;
+	padding: 2px 7px;
+	border-radius: 99px;
+	background: var(--surface-2);
+	color: var(--text-2);
+	border: 1px solid var(--border);
+	transition: transform 0.4s ease, opacity 0.4s ease;
+}
+.chip-row.collapsing .chip:nth-child(1) {
+	transform: translateX(16px) scale(0.4);
+	opacity: 0;
+}
+.chip-row.collapsing .chip:nth-child(2) {
+	transform: scale(0.3);
+	opacity: 0;
+}
+.chip-row.collapsing .chip:nth-child(3) {
+	transform: translateX(-16px) scale(0.4);
+	opacity: 0;
+}
+/* macros slide: the run's progress, filling while it's running and
+   settling to full once it's done */
+.meta-fill {
+	display: block;
+	height: 100%;
+	width: 0%;
+	border-radius: 4px;
+	background: var(--amber);
+	transition: width 1.3s linear, background 0.3s ease;
+}
+.meta-fill.on {
+	width: 100%;
+}
+.meta-fill.done {
+	width: 100%;
+	background: var(--green);
+}
+
+/* file box slide: a file dropping in */
+.file-row.dropping {
+	animation: jvFileDrop 0.5s ease;
+}
+@keyframes jvFileDrop {
+	from {
+		opacity: 0;
+		transform: translateY(-12px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+/* file box slide: the "reading" dot, same idiom as the chat tool chip */
+.pill .g {
+	display: inline-block;
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: currentColor;
+	margin-right: 4px;
+	vertical-align: middle;
+	animation: jvDotPulse 1.1s ease-in-out infinite;
+}
+/* file box slide: the placeholder meta bar becoming the real extracted
+   fields, the raw-to-clean transform the slide promises */
+.meta-info {
+	margin-left: auto;
+	font-size: 9px;
+	color: var(--text-2);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	animation: jvRowIn 0.3s ease;
 }
 
 /* ---- agents mock ---- */
@@ -1470,6 +1867,24 @@ button:focus-visible {
 	background: var(--green-bg);
 	color: var(--green);
 	border: 1px solid var(--green-bd);
+}
+/* agents slide: the installed agent working unattended, then surfacing a
+   finding, both swapped IN PLACE of the static description so the card
+   never grows and the fixed-height mock never has to clip the row below
+   it. Same pulse-dot idiom as the chat tool chip and the File Box row. */
+.ds .g {
+	display: inline-block;
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: var(--green);
+	margin-right: 5px;
+	vertical-align: middle;
+	animation: jvDotPulse 1.1s ease-in-out infinite;
+}
+.ds.ds-alert {
+	color: var(--amber);
+	font-weight: 600;
 }
 
 /* ---- footer: dots + nav ---- */
