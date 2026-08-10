@@ -1520,7 +1520,9 @@
 											:editable="true"
 											:modes="['quick']"
 											:footerless="true"
+											:host-busy="savingConnect"
 											@ready="connectReady = $event"
+											@subscription-testing="subscriptionTesting = $event"
 										/>
 										<!-- Why the last Start was refused: a rejected apply verdict
 											 (error) or the start gate (no passing probe / no account). -->
@@ -1554,10 +1556,15 @@
 								</button>
 								<span v-else></span>
 								<!-- Always rendered; disabled until the editor reports a savable config,
-									 so the step never shows without a primary action. -->
+									 so the step never shows without a primary action. Also disabled
+									 while the editor's own subscription Test is running (see
+									 subscriptionTesting above) - the two must never push the same
+									 desired pool at once. -->
 								<Button
 									variant="solid"
-									:disabled="!connectReady || savingConnect"
+									:disabled="
+										!connectReady || savingConnect || subscriptionTesting
+									"
 									:loading="savingConnect"
 									loading-text="Connecting…"
 									label="Start chatting"
@@ -3227,6 +3234,11 @@ const savingConnect = ref(false);
 // STRICTER start gate (a passing probe for a freshly-typed remote key) is enforced in
 // saveConnect via the editor's exposed canStart, with an inline reason when it refuses.
 const connectReady = ref(false);
+// Mirrors LlmPoolEditor's own subscription Test (subscription-testing emit): while
+// it is running, "Start chatting" is disabled - the two would otherwise push the
+// same desired pool through two independent idempotency keys at once. The editor's
+// hostBusy prop (bound to savingConnect below) is the other half of this guard.
+const subscriptionTesting = ref(false);
 
 // Persist ONLY opaque handles across a reload: the operation id (operationStore) and
 // the idempotency key. Never a credential, never a token.

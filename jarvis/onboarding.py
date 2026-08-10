@@ -447,6 +447,7 @@ def save_llm_pool(
 	preset: str | None = None,
 	routing_mode: str = "failover",
 	idempotency_key: str | None = None,
+	force_probe: str | int | bool = False,
 ) -> dict:
 	"""Write the customer's multi-model LLM pool into Jarvis Settings.models[]
 	(+ preset, routing_mode) and let the existing on_update pipeline validate
@@ -467,6 +468,18 @@ def save_llm_pool(
 	operation with no new desired version. A single-model config keeps the
 	async creds path and returns ``apply_operation: null`` with ``mode: "legacy"``.
 
+	``force_probe`` (jarvis_admin_v2#297): threaded straight into the synchronous
+	``sync_pool_now`` call so the subscription Test button can ask admin to run a
+	real probe even against a byte-identical config, instead of admin's
+	byte-identical no-op path answering from the last verdict on record. Defaults
+	False so every ordinary save, including "Start chatting", is unchanged: the
+	admin request body gains the ``force_probe`` key ONLY when this is true, so a
+	false-default call is byte-identical to the request this endpoint sent before
+	the flag existed. It is not part of admin's idempotency fingerprint, so a
+	repeat Test must mint a fresh ``idempotency_key`` on every press, never reuse
+	one - a reused key resolves through admin's idempotent-reuse path regardless
+	of this flag.
+
 	All params MUST stay annotated: with Frappe's
 	``require_type_annotated_api_methods`` enforced (declared in hooks.py),
 	an un-annotated whitelisted param 500s the request before the body runs
@@ -475,6 +488,11 @@ def save_llm_pool(
 	System-Manager-gated. routing_mode is always 'failover' in v1. preset is an
 	admin-catalog key or None; validated against the fetched catalog."""
 	require_jarvis_admin()
+	# Same coercion convention as jarvis.chat.api.set_star / set_auto_apply: a
+	# whitelisted call arrives over HTTP as a string most of the time, so an
+	# annotated `bool` param is trusted only after an explicit allowlist read,
+	# never truthy-cast directly.
+	force_probe = str(force_probe) in ("1", "true", "True", "on", "yes")
 	if isinstance(models, str):
 		models = json.loads(models)
 	if not isinstance(models, list) or not models:
@@ -651,7 +669,7 @@ def save_llm_pool(
 		# The durable apply operation lives on the POOL path (admin creates it in
 		# update_llm_pool). Push synchronously and hand its descriptor back so the
 		# SPA follows ONE operation across save -> apply -> readiness.
-		outcome = sync_pool_now(idempotency_key=idempotency_key or None)
+		outcome = sync_pool_now(idempotency_key=idempotency_key or None, force_probe=force_probe)
 		apply_operation = outcome.get("apply_operation")
 		resumable = bool(outcome.get("resumable"))
 		retry_after_seconds = int(outcome.get("retry_after_seconds") or 0)

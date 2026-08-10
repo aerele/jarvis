@@ -1498,6 +1498,48 @@
 								+ Add account
 							</button>
 						</div>
+						<!-- Onboarding Test: the same live probe "Start chatting" runs, fired
+						     on demand once an account is connected instead of only at the end
+						     of the step. See testSubscriptionRow's docstring for why this
+						     cannot be a side-effect-free check the way the API-key Test above
+						     is. `subtle`/ghost weight only - design.md 3.1 reserves the one
+						     `solid` button per surface for "Start chatting". -->
+						<div
+							v-if="singleMode"
+							style="
+								display: flex;
+								align-items: center;
+								gap: 10px;
+								margin-top: 11px;
+								flex-wrap: wrap;
+							"
+						>
+							<button
+								type="button"
+								class="jv-btn jv-btn--sm jv-btn--ghost"
+								:disabled="
+									!editable ||
+									hostBusy ||
+									subTest.testing ||
+									subTest.cooling ||
+									!!subTestBlockedReason(m)
+								"
+								:title="
+									subTestBlockedReason(m) ||
+									'Sends a real message through your subscription to confirm it works. Costs one message from your plan.'
+								"
+								@click="testSubscriptionRow(m)"
+							>
+								{{ subTest.testing ? "Testing…" : "Test" }}
+							</button>
+						</div>
+						<Banner
+							v-if="singleMode && subTest.result"
+							role="status"
+							style="margin-top: 10px"
+							:type="subTestBannerType(subTest.result)"
+							:message="subTest.result.message"
+						/>
 					</div>
 					<div
 						v-else-if="!singleMode"
@@ -1800,11 +1842,13 @@ import {
 } from "@/llm/pool";
 import { errMessage as _err } from "@/lib/errors";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { classifyOperation } from "@/lib/llmOperation.js";
 import { useConfirm } from "@/composables/useConfirm";
 import JvCombo from "@/components/JvCombo.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import DirectSubscriptionCard from "@/components/DirectSubscriptionCard.vue";
 import ProviderLogo from "@/components/ProviderLogo.vue";
+import Banner from "@/components/Banner.vue";
 import { agentName } from "@/branding";
 
 const { confirm } = useConfirm();
@@ -1833,11 +1877,28 @@ const props = defineProps({
 	// to read; other consumers (onboarding, ChatView) never pass this, so their
 	// scrim is unaffected.
 	hostScrim: { type: Boolean, default: false },
+	// Onboarding's own apply (saveConnect / "Start chatting") is in flight. Gates
+	// the singleMode subscription Test button (below) so the two can never run
+	// concurrently - both would push the same desired pool, and letting them race
+	// would mean two idempotency keys chasing one config, each blind to the
+	// other's operation. `subscriptionTesting` (exposed below) is the mirror: the
+	// host reads it to disable its own "Start chatting" while a Test is in flight.
+	hostBusy: { type: Boolean, default: false },
 });
 // "settings-changed" is the footerless (onboarding) passive notice that the desired
 // pool was persisted - NOT a control-flow signal (the host controller owns the apply
 // transaction). The settings editor keeps using "saved" (runApply) as before.
-const emit = defineEmits(["saved", "ready", "direct-changed", "settings-changed"]);
+const emit = defineEmits([
+	"saved",
+	"ready",
+	"direct-changed",
+	"settings-changed",
+	// The subscription Test above is in flight - the host (OnboardingView) mirrors
+	// this into its own "Start chatting" disabled state, same watch+emit idiom as
+	// `ready` above, rather than reading the exposed ref reactively through the
+	// template ref.
+	"subscription-testing",
+]);
 
 // ---- state ---------------------------------------------------------------
 const cfg = ref({ models: [], preset: "", routing_mode: "failover", proxy_active: false });
@@ -2105,6 +2166,227 @@ const upstreamLabels = upstreamOpts.map((o) => o.label);
 const upstreamLabelOf = (v) =>
 	(upstreamOpts.find((o) => o.value === v) || {}).label || v || "your provider";
 const upstreamValueOf = (l) => (upstreamOpts.find((o) => o.label === l) || {}).value || l;
+
+// ---- singleMode (onboarding) chat-subscription Test -----------------------
+// The API-key Test above (smTest) is a stateless bench-side probe: it never
+// touches the fleet or the container. A chat-subscription credential has no
+// such side-effect-free check - "does this account work" can only be answered
+// by actually routing a real chat completion through the tenant's own running
+// pool, which is exactly what a normal apply does. So this Test does not
+// invent a second, different check: it fires the SAME save_llm_pool -> admin
+// update_llm_pool -> fleet-agent /llm-pool round trip "Start chatting" uses,
+// and reads the SAME apply-operation status (chat_readiness_reason and all) -
+// then simply does not navigate. A test pass and a real apply can therefore
+// never disagree; they are the same probe.
+//
+// Deliberately its OWN poll loop, separate from the host's single
+// createOperationController (OnboardingView's saveConnect owns that one): this
+// follows only the operation ITS OWN save_llm_pool call opened, with its own
+// idempotency key, so a Test can never dedupe onto - or get superseded by - a
+// concurrent Start-chatting attempt. `hostBusy` (passed down from the host) and
+// `subscriptionTesting` (exposed up, below) are the two halves of the guard
+// that keeps only one of Test / Start-chatting running at a time.
+//
+// Costs the customer a real chat completion on EVERY click, byte-changing or
+// not: it passes force_probe: true (jarvis_admin_v2#297), asking admin to run
+// a real probe even against a config identical to the last one, rather than
+// let a repeat click reach the fleet-agent's byte-identical no-op path and
+// answer from the last verdict on record. So it is never run except on an
+// explicit click: no auto-run on mount, no re-run on every keystroke, disabled
+// for the request's duration plus a short cooldown after it lands
+// (SUB_TEST_COOLDOWN_MS). Each click also mints its OWN fresh idempotency key
+// (subTestIdemKey, below): force_probe is not part of admin's idempotency
+// fingerprint, so a reused key would resolve through admin's idempotent-reuse
+// path and carry the previous verdict forward no matter what force_probe says.
+// A host below fleet-agent contract 1.23 does not honour the flag; the polled
+// operation's force_probed says whether THIS press actually got a fresh probe
+// (see describeTestOutcome), so a customer is never told a carried-forward
+// answer is new.
+const subTest = ref({
+	testing: false,
+	cooling: false, // short post-result lockout, see SUB_TEST_COOLDOWN_MS
+	result: null, // { kind: "ok"|"fail"|"pending", message } | null
+	gen: 0,
+});
+const SUB_TEST_POLL_MS = 2000;
+// Bounded the same as the full editor's own apply wait (APPLY_TIMEOUT_MS,
+// above) - a first subscription activation can spend real time bringing up
+// the proxy sidecar, and this must not give up sooner than that path does.
+const SUB_TEST_TIMEOUT_MS = APPLY_TIMEOUT_MS;
+const SUB_TEST_COOLDOWN_MS = 15000;
+let subTestCoolTimer = null;
+watch(
+	() => subTest.value.testing,
+	(v) => emit("subscription-testing", v)
+);
+
+function subTestIdemKey() {
+	try {
+		if (typeof crypto !== "undefined" && crypto.randomUUID)
+			return `test-${crypto.randomUUID()}`;
+	} catch (e) {
+		/* fall through to the timestamp+random fallback */
+	}
+	return `test-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+// Why the button is disabled, or "" when it isn't. Cooling/testing are read
+// directly in the template alongside this (they are timing-based, not a fact
+// about the row), so this only ever names a fact about the row itself.
+function subTestBlockedReason(m) {
+	if (!m || !(m.accounts || []).some((a) => a && (a.capture_id || a.account_ref)))
+		return "Connect your account before testing.";
+	return "";
+}
+function subTestBannerType(result) {
+	if (!result) return "info";
+	if (result.kind === "ok") return "success";
+	if (result.kind === "fail") return "error";
+	return "warning";
+}
+// Poll ONE apply-operation to a terminal state, entirely separate from the
+// host's createOperationController (no shared timers, no shared store, no
+// visibility handling - a Test is a short, bounded, one-off wait, not the
+// durable resume-across-reload machinery "Start chatting" needs). Returns the
+// classifyOperation() descriptor, plus the raw force_probed carried alongside
+// it (see describeTestOutcome), on a terminal state, or null on the bounded
+// timeout / staleness (a newer Test superseded this one).
+async function pollTestOperation(operationId, stale) {
+	const deadline = Date.now() + SUB_TEST_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if (stale()) return null;
+		let status = null;
+		try {
+			status = await api.getLlmApplyOperation(operationId);
+		} catch (e) {
+			// Transient read failure: keep polling until the deadline rather than
+			// reporting a fail for a status call that simply hiccuped.
+		}
+		if (stale()) return null;
+		if (status) {
+			const ui = classifyOperation(status);
+			// force_probed (jarvis_admin_v2#297) rides the raw polled status, not the
+			// generic classifyOperation() projection shared with the host's own
+			// createOperationController (which never asks for a forced probe and so
+			// never reads this). Carried alongside ui rather than folded into the
+			// shared shape.
+			if (ui.terminal) return { ...ui, forceProbed: status.force_probed };
+		}
+		await new Promise((r) => setTimeout(r, SUB_TEST_POLL_MS));
+	}
+	return null;
+}
+// Turn a terminal (or timed-out) operation into the one line the customer sees.
+// `canNavigate` is the EXACT condition "Start chatting" itself uses to decide the
+// route is real (state ready AND admin has not flagged chat as blocked) - reused
+// here rather than re-deriving "did it work" a second way. A failure quotes
+// `chatReadinessReason` verbatim, never reworded: that is the same sentence the
+// Connect step's own banner renders elsewhere, so a Test failure and a real one
+// never read differently for the identical underlying cause. A stale verdict
+// (see `stale` below) still shows that same verbatim sentence, with one extra
+// sentence of our own appended after it.
+//
+// `forceProbed === false` (strict: admin always sends a real boolean here per
+// jarvis_admin_v2#297, never null) means THIS press asked for a fresh probe and
+// did not get one, most often a host below fleet-agent contract 1.23. The
+// verdict below is then whatever admin already had on record, not a new
+// answer, and the customer must never be told otherwise - a quota-limited
+// customer who just fixed their quota and pressed Test again must not read
+// "answered just now" about a check that never re-ran.
+function describeTestOutcome(ui, m) {
+	const provider = upstreamLabelOf(m && m.upstream);
+	if (!ui) {
+		return {
+			kind: "pending",
+			message: "Still checking. This can take a minute, then test again.",
+		};
+	}
+	const stale = ui.forceProbed === false;
+	if (ui.canNavigate) {
+		return {
+			kind: "ok",
+			message: stale
+				? `This is the result of ${provider}'s last check. A fresh check could not be run this time. Select Start chatting to continue.`
+				: `${provider} answered a live check just now. Select Start chatting to continue.`,
+		};
+	}
+	if (ui.phase === "retry" || ui.phase === "rejected") {
+		const reason = ui.chatReadinessReason || ui.message || "The check failed. Try again.";
+		return {
+			kind: "fail",
+			message: stale
+				? `${reason} This is the previous result. A fresh check could not be run this time.`
+				: reason,
+		};
+	}
+	// Ready-but-chat-blocked, superseded, or still finishing at our own bound:
+	// nothing definitive yet, and this must never assert a pass or a fail it did
+	// not earn.
+	return {
+		kind: "pending",
+		message:
+			ui.chatReadinessReason || "Still checking. This can take a minute, then test again.",
+	};
+}
+async function testSubscriptionRow(m) {
+	if (!m || subTest.value.testing || subTest.value.cooling || props.hostBusy) return;
+	if (subTestBlockedReason(m)) return;
+	const myGen = ++subTest.value.gen;
+	const stale = () => subTest.value.gen !== myGen;
+	subTest.value.testing = true;
+	subTest.value.result = null;
+	try {
+		const payload = buildSavePayload();
+		if (payload.error) {
+			if (!stale()) subTest.value.result = { kind: "fail", message: payload.error };
+			return;
+		}
+		const res = await api.saveLlmPool(
+			payload.models,
+			payload.preset,
+			"failover",
+			subTestIdemKey(),
+			true // force_probe: an explicit Test press always asks admin for a fresh probe.
+		);
+		if (stale()) return;
+		if (!res || !res.apply_operation) {
+			subTest.value.result = {
+				kind: "fail",
+				message:
+					res && res.retry_after_seconds
+						? "Too many changes in a short time. Wait a moment, then try again."
+						: "Could not start the check. Try again.",
+			};
+			return;
+		}
+		const ui = await pollTestOperation(res.apply_operation.operation_id, stale);
+		if (stale()) return;
+		subTest.value.result = describeTestOutcome(ui, m);
+	} catch (e) {
+		if (!stale()) subTest.value.result = { kind: "fail", message: _err(e) };
+	} finally {
+		if (!stale()) {
+			subTest.value.testing = false;
+			subTest.value.cooling = true;
+			clearTimeout(subTestCoolTimer);
+			subTestCoolTimer = setTimeout(() => {
+				subTest.value.cooling = false;
+			}, SUB_TEST_COOLDOWN_MS);
+		}
+	}
+}
+// Invalidate a stale/visible result the instant the connected-account set
+// changes (a Disconnect, or a fresh OAuth paste-back) - a verdict about the
+// PREVIOUS account must never linger under the new one. Does not touch an
+// in-flight request (bumping gen alone abandons it, same idiom as smTest above).
+watch(
+	() => (rows.value[0] && rows.value[0].accounts && rows.value[0].accounts.length) || 0,
+	() => {
+		if (!singleMode.value) return;
+		subTest.value.result = null;
+		subTest.value.gen++;
+	}
+);
+
 // Upstreams whose approval screen hands back a BARE authorization code instead
 // of redirecting to a callback URL the customer can copy from the address bar.
 // isCodeOnlyPaste (xAI) is imported from @/llm/pool so the pool editor and the
@@ -4374,6 +4656,7 @@ onBeforeUnmount(() => {
 	stopPolling();
 	stopBackgroundWatch();
 	clearTimeout(applyResultTimer);
+	clearTimeout(subTestCoolTimer);
 });
 
 // Let a host (onboarding, footerless) drive Save from its own footer, and a
@@ -4382,7 +4665,16 @@ onBeforeUnmount(() => {
 // a savable+validated config - a connected subscription, a stored key, a local
 // endpoint, or a freshly-typed remote key with a PASSING probe bound to it (P0-09) -
 // before it opens an apply operation, and show a precise reason when it can't yet.
-defineExpose({ save, busy, canStart: singleModeCanStart, startBlockedReason });
+// subscriptionTesting: the host (OnboardingView) reads this to disable "Start
+// chatting" while the subscription Test above is running, the other half of the
+// hostBusy prop's mutual-exclusion guard.
+defineExpose({
+	save,
+	busy,
+	canStart: singleModeCanStart,
+	startBlockedReason,
+	subscriptionTesting: computed(() => subTest.value.testing),
+});
 </script>
 
 <style scoped>

@@ -189,3 +189,77 @@ class TestSaveReturnsDescriptor(_SaveOpBase):
 		self.assertFalse(out["resumable"])
 		self.assertEqual(pool_calls, [], "single-model must NOT hit /llm-pool")
 		creds.assert_called()
+
+
+class TestSaveLlmPoolForceProbe(_SaveOpBase):
+	"""jarvis_admin_v2#297: force_probe reaches admin's update_llm_pool ONLY when
+	the caller (the subscription Test button) explicitly asks for it, so an
+	ordinary save's request is unchanged."""
+
+	def test_force_probe_true_reaches_post_update_llm_pool(self):
+		view = self._capture()
+		calls = []
+		with patch(
+			"jarvis.admin_client.post_update_llm_pool",
+			side_effect=lambda **kw: calls.append(kw) or _pool_ok(),
+		):
+			onboarding.save_llm_pool(
+				frappe.as_json(self._sub_models(view["capture_id"])),
+				preset=None,
+				routing_mode="failover",
+				idempotency_key="idem-force-1",
+				force_probe=True,
+			)
+		self.assertEqual(len(calls), 1)
+		self.assertIs(calls[0].get("force_probe"), True)
+
+	def test_force_probe_default_is_false_and_ordinary_saves_never_send_it_true(self):
+		view = self._capture()
+		calls = []
+		with patch(
+			"jarvis.admin_client.post_update_llm_pool",
+			side_effect=lambda **kw: calls.append(kw) or _pool_ok(),
+		):
+			# No force_probe kwarg at all - the same call shape "Start chatting"
+			# and every settings-pane save already make.
+			onboarding.save_llm_pool(
+				frappe.as_json(self._sub_models(view["capture_id"])),
+				preset=None,
+				routing_mode="failover",
+				idempotency_key="idem-ordinary",
+			)
+		self.assertEqual(len(calls), 1)
+		self.assertIs(calls[0].get("force_probe"), False)
+
+	def test_force_probe_accepts_the_wire_strings_a_frappe_call_actually_sends(self):
+		# Same allowlist convention as jarvis.chat.api.set_star: an HTTP form post
+		# arrives as a string, and only these exact spellings mean true.
+		view = self._capture()
+		for wire_value, expected in (
+			("1", True),
+			("true", True),
+			(1, True),
+			(True, True),
+			("0", False),
+			("false", False),
+			(0, False),
+			(False, False),
+			("", False),
+		):
+			calls = []
+			with patch(
+				"jarvis.admin_client.post_update_llm_pool",
+				side_effect=lambda **kw: calls.append(kw) or _pool_ok(),
+			):
+				onboarding.save_llm_pool(
+					frappe.as_json(self._sub_models(view["capture_id"])),
+					preset=None,
+					routing_mode="failover",
+					idempotency_key=f"idem-wire-{wire_value!r}",
+					force_probe=wire_value,
+				)
+			self.assertIs(
+				calls[0].get("force_probe"),
+				expected,
+				f"force_probe={wire_value!r} should coerce to {expected!r}",
+			)
