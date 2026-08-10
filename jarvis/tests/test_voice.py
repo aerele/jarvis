@@ -847,6 +847,19 @@ class TestSttConfigModeResolution(FrappeTestCase):
 		self.assertEqual(cfg["mode"], "chat-audio")
 		self.assertEqual(cfg["base_url"], "https://bifrost.internal/v1")
 
+	def test_site_config_chat_audio_defaults_to_gemini_model(self):
+		"""A dev bench that sets base_url but no model must default to the
+		chat-audio model, not the whisper transcription model."""
+		with _conf(
+			jarvis_stt_openrouter_api_key=TEST_KEY,
+			jarvis_stt_base_url="https://bifrost.internal/v1",
+			jarvis_stt_mode="",
+			jarvis_stt_model="",
+		):
+			cfg = voice.stt_config()
+		self.assertEqual(cfg["mode"], "chat-audio")
+		self.assertEqual(cfg["model"], "google/gemini-2.5-flash-lite")
+
 	def test_site_config_without_base_url_stays_transcription(self):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_base_url="", jarvis_stt_mode=""):
 			cfg = voice.stt_config()

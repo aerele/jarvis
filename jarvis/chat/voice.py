@@ -100,7 +100,6 @@ _FALLBACK_AUDIO_MIME = "application/octet-stream"
 _TRANSCRIBE_ATTEMPTS = 1
 
 # --- chat-audio (Gemini via Bifrost) mode ---------------------------------- #
-_DEFAULT_STT_MODE = "chat-audio"
 _STT_MODE_CHAT_AUDIO = "chat-audio"
 _STT_MODE_TRANSCRIPTION = "transcription"
 # Default chat-audio model; overridable per tenant. Pin the exact id the spike proved.
@@ -166,6 +165,20 @@ def _credentials() -> tuple[str, str]:
 	return "", model
 
 
+def _resolve_stt_mode_and_model(raw_mode: str, raw_model: str, base_url: str) -> tuple[str, str]:
+	"""Resolve ``(mode, model)`` from raw config, shared by both ``stt_config``
+	branches so dev-bench and managed-tenant defaults never drift.
+
+	``mode`` defaults to ``chat-audio`` only when a ``base_url`` is set, else
+	``transcription``. ``model`` defaults mode-aware: the Gemini chat-audio
+	model for chat-audio, the whisper transcription model otherwise — an
+	explicit model always wins.
+	"""
+	mode = (raw_mode or "").strip() or (_STT_MODE_CHAT_AUDIO if base_url else _STT_MODE_TRANSCRIPTION)
+	default_model = _DEFAULT_CHAT_AUDIO_MODEL if mode == _STT_MODE_CHAT_AUDIO else _DEFAULT_STT_MODEL
+	return mode, (raw_model or "").strip() or default_model
+
+
 def stt_config() -> dict | None:
 	"""Resolved speech-to-text config
 	``{"enabled", "api_key", "model", "base_url", "mode"}`` or None when voice
@@ -187,15 +200,14 @@ def stt_config() -> dict | None:
 		# NULL=ON: a bench that set only the key clearly wants STT.
 		if enabled is not None and not cint(enabled):
 			return None
-		model = (frappe.conf.get("jarvis_stt_model") or "").strip()
 		base_url = (frappe.conf.get("jarvis_stt_base_url") or "").strip()
-		mode = (frappe.conf.get("jarvis_stt_mode") or "").strip() or (
-			_STT_MODE_CHAT_AUDIO if base_url else _STT_MODE_TRANSCRIPTION
+		mode, model = _resolve_stt_mode_and_model(
+			frappe.conf.get("jarvis_stt_mode") or "", frappe.conf.get("jarvis_stt_model") or "", base_url
 		)
 		return {
 			"enabled": True,
 			"api_key": key,
-			"model": model or _DEFAULT_STT_MODEL,
+			"model": model,
 			"base_url": base_url,
 			"mode": mode,
 		}
@@ -204,14 +216,12 @@ def stt_config() -> dict | None:
 	cfg = admin_client.get_stt_config()
 	if not cfg or not cfg.get("enabled") or not cfg.get("api_key"):
 		return None
-	model = (cfg.get("model") or "").strip()
 	base_url = (cfg.get("base_url") or "").strip()
-	mode = (cfg.get("mode") or "").strip() or (_STT_MODE_CHAT_AUDIO if base_url else _STT_MODE_TRANSCRIPTION)
-	default_model = _DEFAULT_CHAT_AUDIO_MODEL if mode == _STT_MODE_CHAT_AUDIO else _DEFAULT_STT_MODEL
+	mode, model = _resolve_stt_mode_and_model(cfg.get("mode") or "", cfg.get("model") or "", base_url)
 	return {
 		"enabled": True,
 		"api_key": cfg["api_key"],
-		"model": model or default_model,
+		"model": model,
 		"base_url": base_url,
 		"mode": mode,
 	}
