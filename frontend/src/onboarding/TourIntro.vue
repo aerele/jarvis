@@ -937,20 +937,35 @@ const agentsAtLeast = agentsClock.atLeast;
 // only the clock for the visible slide runs, every other one is stopped,
 // so at most one animation loop is ever active at a time.
 const CLOCKS = [welcomeClock, chatClock, skillsClock, macrosClock, fileboxClock, agentsClock];
-watch(
-	cur,
-	(slide) => {
-		CLOCKS.forEach((clock, i) => {
-			if (i === slide && !prefersReducedMotion()) {
-				clock.start();
-			} else {
-				clock.stop();
-			}
-		});
-	},
-	{ immediate: true }
-);
-onUnmounted(() => CLOCKS.forEach((clock) => clock.stop()));
+
+function runOnly(slide) {
+	CLOCKS.forEach((clock, i) => {
+		if (i === slide && !prefersReducedMotion()) {
+			clock.start();
+		} else {
+			clock.stop();
+		}
+	});
+}
+
+watch(cur, runOnly, { immediate: true });
+
+// Restart the visible slide's clock when the tab comes back (round-1 review of
+// #762). Every mock here gates its rows on how far its clock has advanced, so a
+// browser that throttled our timers while the tab was hidden, which Chrome and
+// Safari both do aggressively, would show a HALF-DRAWN mock on return: one skill
+// row of four, a file with no extracted fields. The old static markup could not
+// do that because it always rendered complete. `start()` re-enters at the top of
+// the sequence, so the slide is whole immediately rather than resuming mid-way.
+function onVisibility() {
+	if (!document.hidden) runOnly(cur.value);
+}
+document.addEventListener("visibilitychange", onVisibility);
+
+onUnmounted(() => {
+	document.removeEventListener("visibilitychange", onVisibility);
+	CLOCKS.forEach((clock) => clock.stop());
+});
 
 // ---- mock sidebar: mirrors the REAL app sidebar (brand + user, New Chat,
 // Search Chat, feather-icon nav, Recent chats), rendered from data exactly

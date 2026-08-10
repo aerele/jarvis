@@ -86,6 +86,23 @@ describe("TourIntro animation timers", () => {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
+	it("restarts the visible slide's clock when the tab comes back", () => {
+		// Round-1 review of #762: every mock gates its rows on how far its clock has
+		// advanced, so a tab returning from throttled timers would show a half-drawn
+		// slide. Coming back must re-enter the sequence, and must not stack a second
+		// clock on top of the one already running.
+		vi.useFakeTimers();
+		const wrapper = mount(TourIntro);
+		expect(vi.getTimerCount()).toBe(1);
+
+		vi.advanceTimersByTime(1200);
+		document.dispatchEvent(new Event("visibilitychange"));
+
+		expect(vi.getTimerCount()).toBe(1);
+		wrapper.unmount();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it("never starts a clock under prefers-reduced-motion", () => {
 		vi.useFakeTimers();
 		vi.stubGlobal("matchMedia", (query) => ({
