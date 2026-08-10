@@ -308,7 +308,9 @@ class TestBifrostChatAudioTranscribe(FrappeTestCase):
 	endpoint, and returns the English text from the completion."""
 
 	def test_posts_input_audio_to_chat_completions(self):
-		with patch("jarvis.chat.voice.requests.post", return_value=_ok_completion("hello world")) as mock_post:
+		with patch(
+			"jarvis.chat.voice.requests.post", return_value=_ok_completion("hello world")
+		) as mock_post:
 			out = voice._bifrost_chat_audio_transcribe(
 				b"AUDIOBYTES",
 				"audio/webm",
@@ -377,7 +379,12 @@ class TestBifrostChatAudioTranscribe(FrappeTestCase):
 		self.assertNotIn(TEST_KEY, str(ctx.exception))
 
 	def test_missing_content_raises(self):
-		for body in ({"choices": []}, {"choices": [{"message": {}}]}, {"choices": [{"message": {"content": 1}}]}, {}):
+		for body in (
+			{"choices": []},
+			{"choices": [{"message": {}}]},
+			{"choices": [{"message": {"content": 1}}]},
+			{},
+		):
 			with patch("jarvis.chat.voice.requests.post", return_value=_response(200, body)):
 				with self.assertRaises(frappe.ValidationError):
 					voice._bifrost_chat_audio_transcribe(
@@ -876,7 +883,10 @@ class TestTranscribeAudioModeRouting(FrappeTestCase):
 					with _audio_request():
 						out = voice.transcribe_audio()
 		mock_bifrost.assert_called_once_with(
-			b"\x1aEfake-webm-bytes", "audio/webm", "google/gemini-2.5-flash-lite", "vk",
+			b"\x1aEfake-webm-bytes",
+			"audio/webm",
+			"google/gemini-2.5-flash-lite",
+			"vk",
 			"https://bifrost.internal/v1",
 		)
 		mock_openrouter.assert_not_called()
@@ -894,9 +904,7 @@ class TestTranscribeAudioModeRouting(FrappeTestCase):
 				"mode": "transcription",
 			},
 		):
-			with patch(
-				"jarvis.chat.voice._openrouter_transcribe", return_value="hola"
-			) as mock_openrouter:
+			with patch("jarvis.chat.voice._openrouter_transcribe", return_value="hola") as mock_openrouter:
 				with patch("jarvis.chat.voice._bifrost_chat_audio_transcribe") as mock_bifrost:
 					with _audio_request():
 						out = voice.transcribe_audio()

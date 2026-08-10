@@ -206,9 +206,7 @@ def stt_config() -> dict | None:
 		return None
 	model = (cfg.get("model") or "").strip()
 	base_url = (cfg.get("base_url") or "").strip()
-	mode = (cfg.get("mode") or "").strip() or (
-		_STT_MODE_CHAT_AUDIO if base_url else _STT_MODE_TRANSCRIPTION
-	)
+	mode = (cfg.get("mode") or "").strip() or (_STT_MODE_CHAT_AUDIO if base_url else _STT_MODE_TRANSCRIPTION)
 	default_model = _DEFAULT_CHAT_AUDIO_MODEL if mode == _STT_MODE_CHAT_AUDIO else _DEFAULT_STT_MODEL
 	return {
 		"enabled": True,
@@ -431,9 +429,7 @@ def _audio_format_token(mime: str) -> str:
 	return _AUDIO_FORMAT_BY_MIME.get((mime or "").split(";")[0].strip().lower(), "webm")
 
 
-def _bifrost_chat_audio_transcribe(
-	content: bytes, mime: str, model: str, api_key: str, base_url: str
-) -> str:
+def _bifrost_chat_audio_transcribe(content: bytes, mime: str, model: str, api_key: str, base_url: str) -> str:
 	"""One Bifrost ``/chat/completions`` call carrying the clip as an
 	``input_audio`` part; returns the English text. Same transport discipline
 	as ``_openrouter_transcribe`` (no retry here, the client owns it; 4xx never
