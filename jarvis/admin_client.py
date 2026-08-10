@@ -604,12 +604,12 @@ _STT_CONFIG_MISS = {"__stt_unavailable__": True}
 
 def get_stt_config() -> dict | None:
 	"""Fetch the tenant's speech-to-text config from admin
-	(``{"enabled": bool, "api_key": str, "model": str}``), cache it, and
-	return None on ANY failure — voice features must degrade to
-	"not configured" rather than break callers (``get_chat_ui_settings``
-	runs on every SPA load). Failures are negative-cached briefly so a
-	slow/down admin can't make every SPA load pay a fresh round-trip.
-	Never raises."""
+	(``{"enabled": bool, "api_key": str, "model": str, "base_url": str,
+	"mode": str}``), cache it, and return None on ANY failure: voice
+	features must degrade to "not configured" rather than break callers
+	(``get_chat_ui_settings`` runs on every SPA load). Failures are
+	negative-cached briefly so a slow/down admin can't make every SPA load
+	pay a fresh round-trip. Never raises."""
 	cache = frappe.cache()
 	cached = cache.get_value(_STT_CONFIG_CACHE_KEY)
 	if cached == _STT_CONFIG_MISS:
@@ -630,6 +630,8 @@ def get_stt_config() -> dict | None:
 		"enabled": bool(cfg.get("enabled")),
 		"api_key": cfg.get("api_key") or "",
 		"model": cfg.get("model") or "",
+		"base_url": cfg.get("base_url") or "",
+		"mode": cfg.get("mode") or "",
 	}
 	cache.set_value(_STT_CONFIG_CACHE_KEY, out, expires_in_sec=_STT_CONFIG_TTL_S)
 	return out

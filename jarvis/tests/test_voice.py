@@ -5,6 +5,7 @@ All HTTP is mocked (requests.post is patched); every test runs on a bare
 site with no network and no admin onboarding.
 """
 
+import base64
 import contextlib
 from unittest.mock import MagicMock, patch
 
@@ -92,7 +93,16 @@ class TestSttConfig(FrappeTestCase):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model="test/model-x"):
 			with patch("jarvis.admin_client.get_stt_config") as mock_admin:
 				cfg = voice.stt_config()
-		self.assertEqual(cfg, {"enabled": True, "api_key": TEST_KEY, "model": "test/model-x"})
+		self.assertEqual(
+			cfg,
+			{
+				"enabled": True,
+				"api_key": TEST_KEY,
+				"model": "test/model-x",
+				"base_url": "",
+				"mode": "transcription",
+			},
+		)
 		mock_admin.assert_not_called()
 
 	def test_site_config_default_model(self):
@@ -269,6 +279,129 @@ class TestTextModelDecoupledFromStt(FrappeTestCase):
 		self.assertEqual(mock_post.call_args.kwargs["json"]["model"], voice._DEFAULT_TEXT_MODEL)
 
 
+class TestAudioFormatToken(FrappeTestCase):
+	"""``_audio_format_token`` maps a clip's media type to Gemini's ``format``
+	token for an ``input_audio`` part; unknown types default to webm, our
+	recorder's own default."""
+
+	def test_maps_known_and_defaults(self):
+		self.assertEqual(voice._audio_format_token("audio/webm"), "webm")
+		self.assertEqual(voice._audio_format_token("video/mp4"), "mp4")
+		self.assertEqual(voice._audio_format_token("audio/mp4"), "mp4")
+		self.assertEqual(voice._audio_format_token("audio/ogg"), "ogg")
+		self.assertEqual(voice._audio_format_token("audio/wav"), "wav")
+		self.assertEqual(voice._audio_format_token("audio/x-wav"), "wav")
+		self.assertEqual(voice._audio_format_token("audio/mpeg"), "mp3")
+		self.assertEqual(voice._audio_format_token("application/octet-stream"), "webm")
+
+	def test_strips_parameters_and_is_case_insensitive(self):
+		self.assertEqual(voice._audio_format_token("AUDIO/WEBM;codecs=opus"), "webm")
+
+	def test_empty_or_none_defaults_to_webm(self):
+		self.assertEqual(voice._audio_format_token(""), "webm")
+		self.assertEqual(voice._audio_format_token(None), "webm")
+
+
+class TestBifrostChatAudioTranscribe(FrappeTestCase):
+	"""``_bifrost_chat_audio_transcribe`` posts the clip as an ``input_audio``
+	part to Bifrost's ``/chat/completions``, never to the transcription
+	endpoint, and returns the English text from the completion."""
+
+	def test_posts_input_audio_to_chat_completions(self):
+		with patch(
+			"jarvis.chat.voice.requests.post", return_value=_ok_completion("hello world")
+		) as mock_post:
+			out = voice._bifrost_chat_audio_transcribe(
+				b"AUDIOBYTES",
+				"audio/webm",
+				"google/gemini-2.5-flash-lite",
+				"vk",
+				"https://bifrost.internal/v1",
+			)
+		self.assertEqual(out, "hello world")
+		self.assertEqual(mock_post.call_args.args[0], "https://bifrost.internal/v1/chat/completions")
+		payload = mock_post.call_args.kwargs["json"]
+		self.assertEqual(payload["temperature"], 0)
+		self.assertEqual(payload["model"], "google/gemini-2.5-flash-lite")
+		part = payload["messages"][1]["content"][0]
+		self.assertEqual(part["type"], "input_audio")
+		self.assertEqual(part["input_audio"]["format"], "webm")
+		self.assertEqual(
+			part["input_audio"]["data"],
+			base64.b64encode(b"AUDIOBYTES").decode("ascii"),
+		)
+		self.assertEqual(mock_post.call_args.kwargs["headers"]["Authorization"], "Bearer vk")
+		self.assertEqual(
+			mock_post.call_args.kwargs["timeout"],
+			(voice._CONNECT_TIMEOUT_S, voice._CHAT_AUDIO_READ_TIMEOUT_S),
+		)
+
+	def test_base_url_trailing_slash_is_normalised(self):
+		with patch("jarvis.chat.voice.requests.post", return_value=_ok_completion()) as mock_post:
+			voice._bifrost_chat_audio_transcribe(
+				b"x", "audio/webm", "m", "vk", "https://bifrost.internal/v1/"
+			)
+		self.assertEqual(mock_post.call_args.args[0], "https://bifrost.internal/v1/chat/completions")
+
+	def test_mp4_format_token_sent_for_safari_clips(self):
+		with patch("jarvis.chat.voice.requests.post", return_value=_ok_completion()) as mock_post:
+			voice._bifrost_chat_audio_transcribe(b"x", "video/mp4", "m", "vk", "https://bifrost.internal/v1")
+		part = mock_post.call_args.kwargs["json"]["messages"][1]["content"][0]
+		self.assertEqual(part["input_audio"]["format"], "mp4")
+
+	def test_never_posts_to_audio_transcriptions(self):
+		with patch("jarvis.chat.voice.requests.post", return_value=_ok_completion()) as mock_post:
+			voice._bifrost_chat_audio_transcribe(b"x", "audio/webm", "m", "vk", "https://bifrost.internal/v1")
+		url = mock_post.call_args.args[0]
+		self.assertNotIn("audio/transcriptions", url)
+		self.assertNotIn("files", mock_post.call_args.kwargs)
+
+	def test_non_200_raises_scrubbed_error(self):
+		with patch(
+			"jarvis.chat.voice.requests.post",
+			return_value=_response(401, {"error": {"message": f"api_key={TEST_KEY} is invalid"}}),
+		):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				voice._bifrost_chat_audio_transcribe(
+					b"x", "audio/webm", "m", TEST_KEY, "https://bifrost.internal/v1"
+				)
+		self.assertNotIn(TEST_KEY, str(ctx.exception))
+
+	def test_request_exception_raises_scrubbed_error(self):
+		with patch(
+			"jarvis.chat.voice.requests.post",
+			side_effect=requests.ConnectionError(f"connection failed, api_key={TEST_KEY}"),
+		):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				voice._bifrost_chat_audio_transcribe(
+					b"x", "audio/webm", "m", "vk", "https://bifrost.internal/v1"
+				)
+		self.assertNotIn(TEST_KEY, str(ctx.exception))
+
+	def test_missing_content_raises(self):
+		for body in (
+			{"choices": []},
+			{"choices": [{"message": {}}]},
+			{"choices": [{"message": {"content": 1}}]},
+			{},
+		):
+			with patch("jarvis.chat.voice.requests.post", return_value=_response(200, body)):
+				with self.assertRaises(frappe.ValidationError):
+					voice._bifrost_chat_audio_transcribe(
+						b"x", "audio/webm", "m", "vk", "https://bifrost.internal/v1"
+					)
+
+	def test_non_json_response_raises(self):
+		with patch(
+			"jarvis.chat.voice.requests.post",
+			return_value=_response(200, None, text="<html>gateway</html>"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				voice._bifrost_chat_audio_transcribe(
+					b"x", "audio/webm", "m", "vk", "https://bifrost.internal/v1"
+				)
+
+
 class TestTranscribeAudio(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
@@ -409,11 +542,20 @@ class TestTranscribeAudio(FrappeTestCase):
 		self.assertEqual(payload, data)
 		self.assertEqual(mime, "audio/webm")
 
-	def test_never_calls_chat_completions(self):
-		"""Regression pin for the paraphrase defect: STT rides the transcription
-		API only. On chat-completions a chat model 'transcribes' by inventing
-		fluent text and returning it as a 200."""
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
+	def test_transcription_mode_never_posts_to_chat_completions(self):
+		"""Regression pin for the paraphrase defect: transcription-mode STT
+		rides the transcription API only. On chat-completions a chat model
+		'transcribes' by inventing fluent text and returning it as a 200."""
+		with patch(
+			"jarvis.chat.voice.stt_config",
+			return_value={
+				"enabled": True,
+				"api_key": TEST_KEY,
+				"model": voice._DEFAULT_STT_MODEL,
+				"base_url": "",
+				"mode": "transcription",
+			},
+		):
 			with _audio_request():
 				with patch("jarvis.chat.voice.requests.post", return_value=_ok_response()) as mock_post:
 					voice.transcribe_audio()
@@ -423,6 +565,32 @@ class TestTranscribeAudio(FrappeTestCase):
 			self.assertNotEqual(url, voice._OPENROUTER_URL)
 			self.assertNotIn("chat/completions", url)
 			self.assertNotIn("json", call.kwargs)
+
+	def test_chat_audio_mode_never_posts_to_audio_transcriptions(self):
+		"""Mirror image: chat-audio mode must hit /chat/completions only,
+		never the multipart transcription endpoint. The new chat-audio default
+		deliberately sends the clip to a chat model, so this is a mode-scoped
+		guardrail, not a blanket ban on chat/completions."""
+		with patch(
+			"jarvis.chat.voice.stt_config",
+			return_value={
+				"enabled": True,
+				"api_key": "vk",
+				"model": "google/gemini-2.5-flash-lite",
+				"base_url": "https://bifrost.internal/v1",
+				"mode": "chat-audio",
+			},
+		):
+			with _audio_request():
+				with patch(
+					"jarvis.chat.voice.requests.post", return_value=_ok_completion("hello world")
+				) as mock_post:
+					voice.transcribe_audio()
+		self.assertTrue(mock_post.call_args_list)
+		for call in mock_post.call_args_list:
+			url = call.args[0] if call.args else call.kwargs.get("url", "")
+			self.assertNotIn("audio/transcriptions", url)
+			self.assertNotIn("files", call.kwargs)
 
 	def test_browser_container_forwarded_verbatim(self):
 		"""No mime->format table any more: whatever the browser recorded is
@@ -567,6 +735,211 @@ class TestAdminGetSttConfig(FrappeTestCase):
 		) as mock_post:
 			first = admin_client.get_stt_config()
 			second = admin_client.get_stt_config()
-		self.assertEqual(first, {"enabled": True, "api_key": "k1", "model": "m1"})
+		self.assertEqual(
+			first,
+			{"enabled": True, "api_key": "k1", "model": "m1", "base_url": "", "mode": ""},
+		)
 		self.assertEqual(second, first)
 		self.assertEqual(mock_post.call_count, 1)
+
+
+class TestAdminClientSttConfigCarriesBaseUrlAndMode(FrappeTestCase):
+	"""``get_stt_config``'s ``out`` dict is the bench-side leg of the 3-place
+	base_url/mode lockstep: a key admin sends but this dict drops silently
+	falls back to defaults for every managed tenant."""
+
+	def setUp(self):
+		frappe.cache().delete_value(admin_client._STT_CONFIG_CACHE_KEY)
+
+	def tearDown(self):
+		frappe.cache().delete_value(admin_client._STT_CONFIG_CACHE_KEY)
+
+	def test_carries_base_url_and_mode(self):
+		with patch(
+			"jarvis.admin_client._post",
+			return_value={
+				"enabled": True,
+				"api_key": "vk",
+				"model": "google/gemini-2.5-flash-lite",
+				"base_url": "https://bifrost.internal/v1",
+				"mode": "chat-audio",
+			},
+		):
+			out = admin_client.get_stt_config()
+		self.assertEqual(out["base_url"], "https://bifrost.internal/v1")
+		self.assertEqual(out["mode"], "chat-audio")
+
+	def test_missing_keys_default_to_empty_string(self):
+		"""Back-compat: an admin response that has not shipped the new keys
+		yet must not KeyError the managed path."""
+		with patch(
+			"jarvis.admin_client._post",
+			return_value={"enabled": True, "api_key": "vk", "model": "m"},
+		):
+			out = admin_client.get_stt_config()
+		self.assertEqual(out["base_url"], "")
+		self.assertEqual(out["mode"], "")
+
+
+class TestSttConfigModeResolution(FrappeTestCase):
+	"""``mode`` defaults to chat-audio only once a base_url is set; every
+	config without one (today's whisper/Sarvam tenants and dev benches) keeps
+	resolving to the transcription transport unchanged."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def test_defaults_mode_to_chat_audio_when_base_url_set(self):
+		with _conf(jarvis_stt_openrouter_api_key=""):
+			with patch(
+				"jarvis.admin_client.get_stt_config",
+				return_value={
+					"enabled": True,
+					"api_key": "vk",
+					"model": "google/gemini-2.5-flash-lite",
+					"base_url": "https://bifrost.internal/v1",
+					"mode": "",
+				},
+			):
+				cfg = voice.stt_config()
+		self.assertEqual(cfg["mode"], "chat-audio")
+		self.assertEqual(cfg["base_url"], "https://bifrost.internal/v1")
+
+	def test_defaults_mode_to_transcription_without_base_url(self):
+		with _conf(jarvis_stt_openrouter_api_key=""):
+			with patch(
+				"jarvis.admin_client.get_stt_config",
+				return_value={
+					"enabled": True,
+					"api_key": "k",
+					"model": "openai/whisper-large-v3-turbo",
+					"base_url": "",
+					"mode": "",
+				},
+			):
+				cfg = voice.stt_config()
+		self.assertEqual(cfg["mode"], "transcription")
+		self.assertEqual(cfg["base_url"], "")
+
+	def test_explicit_mode_from_admin_is_not_overridden(self):
+		with _conf(jarvis_stt_openrouter_api_key=""):
+			with patch(
+				"jarvis.admin_client.get_stt_config",
+				return_value={
+					"enabled": True,
+					"api_key": "k",
+					"model": "openai/whisper-large-v3-turbo",
+					"base_url": "https://bifrost.internal/v1",
+					"mode": "transcription",
+				},
+			):
+				cfg = voice.stt_config()
+		self.assertEqual(cfg["mode"], "transcription")
+
+	def test_site_config_resolves_mode_from_base_url(self):
+		"""Dev benches can point at Bifrost too via jarvis_stt_base_url."""
+		with _conf(
+			jarvis_stt_openrouter_api_key=TEST_KEY,
+			jarvis_stt_base_url="https://bifrost.internal/v1",
+			jarvis_stt_mode="",
+		):
+			cfg = voice.stt_config()
+		self.assertEqual(cfg["mode"], "chat-audio")
+		self.assertEqual(cfg["base_url"], "https://bifrost.internal/v1")
+
+	def test_site_config_chat_audio_defaults_to_gemini_model(self):
+		"""A dev bench that sets base_url but no model must default to the
+		chat-audio model, not the whisper transcription model."""
+		with _conf(
+			jarvis_stt_openrouter_api_key=TEST_KEY,
+			jarvis_stt_base_url="https://bifrost.internal/v1",
+			jarvis_stt_mode="",
+			jarvis_stt_model="",
+		):
+			cfg = voice.stt_config()
+		self.assertEqual(cfg["mode"], "chat-audio")
+		self.assertEqual(cfg["model"], "google/gemini-2.5-flash-lite")
+
+	def test_site_config_without_base_url_stays_transcription(self):
+		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_base_url="", jarvis_stt_mode=""):
+			cfg = voice.stt_config()
+		self.assertEqual(cfg["mode"], "transcription")
+		self.assertEqual(cfg["base_url"], "")
+
+
+class TestTranscribeAudioModeRouting(FrappeTestCase):
+	"""``transcribe_audio`` must dispatch on the resolved ``mode``: chat-audio
+	calls the Bifrost client and never the OpenRouter transcription client,
+	and transcription mode is the mirror image."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_chat_audio_mode_calls_bifrost(self):
+		with patch(
+			"jarvis.chat.voice.stt_config",
+			return_value={
+				"enabled": True,
+				"api_key": "vk",
+				"model": "google/gemini-2.5-flash-lite",
+				"base_url": "https://bifrost.internal/v1",
+				"mode": "chat-audio",
+			},
+		):
+			with patch(
+				"jarvis.chat.voice._bifrost_chat_audio_transcribe", return_value="english text"
+			) as mock_bifrost:
+				with patch("jarvis.chat.voice._openrouter_transcribe") as mock_openrouter:
+					with _audio_request():
+						out = voice.transcribe_audio()
+		mock_bifrost.assert_called_once_with(
+			b"\x1aEfake-webm-bytes",
+			"audio/webm",
+			"google/gemini-2.5-flash-lite",
+			"vk",
+			"https://bifrost.internal/v1",
+		)
+		mock_openrouter.assert_not_called()
+		self.assertEqual(out["text"], "english text")
+		self.assertEqual(out["model"], "google/gemini-2.5-flash-lite")
+
+	def test_transcription_mode_calls_openrouter_not_bifrost(self):
+		with patch(
+			"jarvis.chat.voice.stt_config",
+			return_value={
+				"enabled": True,
+				"api_key": TEST_KEY,
+				"model": voice._DEFAULT_STT_MODEL,
+				"base_url": "",
+				"mode": "transcription",
+			},
+		):
+			with patch("jarvis.chat.voice._openrouter_transcribe", return_value="hola") as mock_openrouter:
+				with patch("jarvis.chat.voice._bifrost_chat_audio_transcribe") as mock_bifrost:
+					with _audio_request():
+						out = voice.transcribe_audio()
+		mock_openrouter.assert_called_once()
+		mock_bifrost.assert_not_called()
+		self.assertEqual(out["text"], "hola")
+
+	def test_transcription_mode_with_base_url_still_uses_openrouter_client(self):
+		"""A Sarvam/whisper tenant routed through Bifrost still uses the
+		transcription transport, just against the Bifrost base_url, so the
+		parameterised ``_openrouter_transcribe`` gets it as an argument."""
+		with patch(
+			"jarvis.chat.voice.stt_config",
+			return_value={
+				"enabled": True,
+				"api_key": "vk",
+				"model": "sarvam/saaras:v3",
+				"base_url": "https://bifrost.internal/v1",
+				"mode": "transcription",
+			},
+		):
+			with patch("jarvis.chat.voice.requests.post", return_value=_ok_response("hola")) as mock_post:
+				with _audio_request():
+					voice.transcribe_audio()
+		self.assertEqual(mock_post.call_args.args[0], "https://bifrost.internal/v1/audio/transcriptions")

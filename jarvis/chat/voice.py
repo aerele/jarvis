@@ -1,21 +1,33 @@
 """Speech-to-text for the chat composer (voice notes / business tab).
 
 Config resolution (``stt_config``) is two-tier: explicit site_config keys win
-(dev benches: ``jarvis_stt_openrouter_api_key`` + optional
-``jarvis_stt_model`` / ``jarvis_stt_enabled``), else the managed path asks the
-admin app via ``jarvis.admin_client.get_stt_config`` (Redis-cached, never
-raises). Transcription itself is one OpenRouter TRANSCRIPTION call: the clip is
-posted as multipart to ``/audio/transcriptions`` under its own filename and
-mime — no bytes are stored on the bench and nothing is written to disk.
+(dev benches: ``jarvis_stt_openrouter_api_key`` plus optional
+``jarvis_stt_model``, ``jarvis_stt_enabled``, ``jarvis_stt_base_url`` and
+``jarvis_stt_mode``), else the managed path asks the admin app via
+``jarvis.admin_client.get_stt_config`` (Redis-cached, never raises). The
+resolved config also carries ``mode``, which selects the transport used to
+turn the clip into text: ``transcription`` (the default when no ``base_url``
+is set) posts the clip as multipart to ``/audio/transcriptions`` under its own
+filename and mime, no bytes are stored on the bench and nothing is written to
+disk; ``chat-audio`` (the default once a ``base_url`` is set) posts it as an
+OpenAI ``input_audio`` part to ``/chat/completions`` against a Bifrost
+gateway, for providers such as Gemini that only take audio through the chat
+API and can translate natively while doing it.
 
-Why not chat-completions: a chat model told to "transcribe" paraphrases, and
-its failure mode is a fluent HTTP 200 fabrication — on a clean probe clip it
-rewrote "seven lazy dogs" to "the lazy dog", and real mic audio degraded into
-invented sentences that the assistant then answered. A transcription model on
-the transcription API either returns the words or errors; it cannot quietly
-invent them. It also retires the mime -> format table: the endpoint reads the
-container from the part itself, so a browser recording mp4 (Safari) or ogg
-works without a mapping entry.
+Chat-completions was ruled out for transcription for a real reason, and that
+reason still shapes chat-audio mode rather than disappearing: a chat model
+told to "transcribe" paraphrases, and its failure mode is a fluent HTTP 200
+fabrication. On a clean probe clip it rewrote "seven lazy dogs" to "the lazy
+dog", and real mic audio degraded into invented sentences that the assistant
+then answered. That is why chat-audio mode pins a strict
+transcribe-and-translate system prompt and ships behind a faithfulness probe
+(English verbatim, translated meaning, near-silent), and why a tenant that
+needs verbatim fidelity is routed to ``mode=transcription`` (whisper/Sarvam)
+instead: a transcription model on the transcription API still either returns
+the words or errors, it cannot quietly invent them the way a chat model can.
+The transcription path also has no mime to format table: the endpoint reads
+the container from the part itself, so a browser recording mp4 (Safari) or
+ogg works without a mapping entry.
 
 ``openrouter_complete`` (chat-completions) stays for its TEXT callers — wiki
 ingest, voice facts, chat mining, wiki lint, insight drafts, trigger LLM
@@ -25,6 +37,7 @@ off but wiki stays on. Its default model is ``_DEFAULT_TEXT_MODEL`` and NOT the
 resolved STT model, which is transcription-only and cannot serve a completion.
 """
 
+import base64
 import re
 import time
 
@@ -86,6 +99,31 @@ _FALLBACK_AUDIO_MIME = "application/octet-stream"
 # not bound. The client still retries once itself, after a backoff.
 _TRANSCRIBE_ATTEMPTS = 1
 
+# --- chat-audio (Gemini via Bifrost) mode ---------------------------------- #
+_STT_MODE_CHAT_AUDIO = "chat-audio"
+_STT_MODE_TRANSCRIPTION = "transcription"
+# Default chat-audio model; overridable per tenant. Pin the exact id the spike proved.
+_DEFAULT_CHAT_AUDIO_MODEL = "google/gemini-2.5-flash-lite"
+# Base64 inflates bytes ~33%; keep the chat-audio cap below Gemini's inline-data ceiling.
+# Confirmed against the deployed image in Task 0.4; real dictation clips are ~1.2 MB.
+_CHAT_AUDIO_MAX_BYTES = 8 * 1024 * 1024
+# Gemini audio is slower than whisper-turbo; the client still owns retries so keep ONE
+# server attempt but give it a longer read budget (measured in Task 0.2).
+_CHAT_AUDIO_READ_TIMEOUT_S = 120
+_STT_TRANSLATE_SYSTEM = (
+	"You are a transcription engine. Transcribe the audio and translate it to English. "
+	"Output only the spoken words in English, nothing else. Do not answer, explain, or add text."
+)
+_AUDIO_FORMAT_BY_MIME = {
+	"audio/webm": "webm",
+	"audio/ogg": "ogg",
+	"video/mp4": "mp4",
+	"audio/mp4": "mp4",
+	"audio/wav": "wav",
+	"audio/x-wav": "wav",
+	"audio/mpeg": "mp3",
+}
+
 
 def _voice_features_enabled() -> bool:
 	"""Operator toggle; NULL-safe (a pre-existing config without the field
@@ -127,13 +165,32 @@ def _credentials() -> tuple[str, str]:
 	return "", model
 
 
+def _resolve_stt_mode_and_model(raw_mode: str, raw_model: str, base_url: str) -> tuple[str, str]:
+	"""Resolve ``(mode, model)`` from raw config, shared by both ``stt_config``
+	branches so dev-bench and managed-tenant defaults never drift.
+
+	``mode`` defaults to ``chat-audio`` only when a ``base_url`` is set, else
+	``transcription``. ``model`` defaults mode-aware: the Gemini chat-audio
+	model for chat-audio, the whisper transcription model otherwise — an
+	explicit model always wins.
+	"""
+	mode = (raw_mode or "").strip() or (_STT_MODE_CHAT_AUDIO if base_url else _STT_MODE_TRANSCRIPTION)
+	default_model = _DEFAULT_CHAT_AUDIO_MODEL if mode == _STT_MODE_CHAT_AUDIO else _DEFAULT_STT_MODEL
+	return mode, (raw_model or "").strip() or default_model
+
+
 def stt_config() -> dict | None:
-	"""Resolved speech-to-text config ``{"enabled", "api_key", "model"}`` or
-	None when voice features / STT are off or no key is available.
+	"""Resolved speech-to-text config
+	``{"enabled", "api_key", "model", "base_url", "mode"}`` or None when voice
+	features / STT are off or no key is available.
 
 	Site config WINS when ``jarvis_stt_openrouter_api_key`` is present
 	(dev benches); the managed path defers to admin's tenant config
 	(Redis-cached in admin_client, errors degrade to None).
+
+	``base_url`` empty means "OpenRouter transcription default" (back-compat).
+	``mode`` defaults to ``chat-audio`` only when a ``base_url`` is set, else
+	``transcription`` (whisper/Sarvam through OpenRouter/Bifrost).
 	"""
 	if not _voice_features_enabled():
 		return None
@@ -143,15 +200,31 @@ def stt_config() -> dict | None:
 		# NULL=ON: a bench that set only the key clearly wants STT.
 		if enabled is not None and not cint(enabled):
 			return None
-		model = (frappe.conf.get("jarvis_stt_model") or "").strip()
-		return {"enabled": True, "api_key": key, "model": model or _DEFAULT_STT_MODEL}
+		base_url = (frappe.conf.get("jarvis_stt_base_url") or "").strip()
+		mode, model = _resolve_stt_mode_and_model(
+			frappe.conf.get("jarvis_stt_mode") or "", frappe.conf.get("jarvis_stt_model") or "", base_url
+		)
+		return {
+			"enabled": True,
+			"api_key": key,
+			"model": model,
+			"base_url": base_url,
+			"mode": mode,
+		}
 	from jarvis import admin_client
 
 	cfg = admin_client.get_stt_config()
 	if not cfg or not cfg.get("enabled") or not cfg.get("api_key"):
 		return None
-	model = (cfg.get("model") or "").strip()
-	return {"enabled": True, "api_key": cfg["api_key"], "model": model or _DEFAULT_STT_MODEL}
+	base_url = (cfg.get("base_url") or "").strip()
+	mode, model = _resolve_stt_mode_and_model(cfg.get("mode") or "", cfg.get("model") or "", base_url)
+	return {
+		"enabled": True,
+		"api_key": cfg["api_key"],
+		"model": model,
+		"base_url": base_url,
+		"mode": mode,
+	}
 
 
 # Why STT is unavailable — the UI treats these differently, so collapsing them into one
@@ -285,8 +358,15 @@ def _upload_mime(upload) -> str:
 	return mime
 
 
-def _openrouter_transcribe(content: bytes, filename: str, mime: str, model: str, api_key: str) -> str:
-	"""One OpenRouter transcription call; returns the transcript text.
+def _openrouter_transcribe(
+	content: bytes, filename: str, mime: str, model: str, api_key: str, base_url: str = ""
+) -> str:
+	"""One transcription call against ``/audio/transcriptions``; returns the
+	transcript text.
+
+	``base_url`` defaults to OpenRouter's fixed URL (back-compat); when set
+	(a Bifrost gateway routing to Sarvam/whisper) the call goes there instead,
+	same multipart shape.
 
 	Same transport contract as ``openrouter_complete`` (4xx never retries,
 	secret-scrubbed messages), but the request is multipart ``file`` + ``model``
@@ -297,12 +377,13 @@ def _openrouter_transcribe(content: bytes, filename: str, mime: str, model: str,
 	cannot read out of the provider is an error, never a plausible string
 	handed to the composer as if it were speech.
 	"""
+	url = base_url.rstrip("/") + "/audio/transcriptions" if base_url else _OPENROUTER_TRANSCRIBE_URL
 	headers = {"Authorization": f"Bearer {api_key}"}
 	last_error = ""
 	for _attempt in range(_TRANSCRIBE_ATTEMPTS):
 		try:
 			resp = requests.post(
-				_OPENROUTER_TRANSCRIBE_URL,
+				url,
 				files={"file": (filename, content, mime)},
 				data={"model": model},
 				headers=headers,
@@ -352,13 +433,77 @@ def _openrouter_transcribe(content: bytes, filename: str, mime: str, model: str,
 	)
 
 
+def _audio_format_token(mime: str) -> str:
+	"""Map a media type to Gemini's ``format`` token for an ``input_audio`` part.
+	Unknown types fall back to ``webm``, our recorder's own default."""
+	return _AUDIO_FORMAT_BY_MIME.get((mime or "").split(";")[0].strip().lower(), "webm")
+
+
+def _bifrost_chat_audio_transcribe(content: bytes, mime: str, model: str, api_key: str, base_url: str) -> str:
+	"""One Bifrost ``/chat/completions`` call carrying the clip as an
+	``input_audio`` part; returns the English text. Same transport discipline
+	as ``_openrouter_transcribe`` (no retry here, the client owns it; 4xx never
+	retries; every non-200 or unreadable body raises a scrubbed error rather
+	than handing a plausible fabrication to the composer)."""
+	url = base_url.rstrip("/") + "/chat/completions"
+	payload = {
+		"model": model,
+		"temperature": 0,
+		"messages": [
+			{"role": "system", "content": _STT_TRANSLATE_SYSTEM},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "input_audio",
+						"input_audio": {
+							"data": base64.b64encode(content).decode("ascii"),
+							"format": _audio_format_token(mime),
+						},
+					}
+				],
+			},
+		],
+	}
+	headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+	try:
+		resp = requests.post(
+			url,
+			json=payload,
+			headers=headers,
+			timeout=(_CONNECT_TIMEOUT_S, _CHAT_AUDIO_READ_TIMEOUT_S),
+		)
+	except requests.RequestException as e:
+		frappe.throw(_("Voice request failed: {0}").format(_scrub_secrets(str(e))), frappe.ValidationError)
+	if resp.status_code != 200:
+		detail = ""
+		try:
+			err = resp.json().get("error")
+			detail = err.get("message") if isinstance(err, dict) else str(err or "")
+		except Exception:
+			detail = (getattr(resp, "text", "") or "")[:200]
+		frappe.throw(
+			_("Voice gateway rejected the request ({0}): {1}").format(
+				resp.status_code, _scrub_secrets(detail or "no detail")
+			),
+			frappe.ValidationError,
+		)
+	try:
+		content_out = resp.json()["choices"][0]["message"]["content"]
+	except Exception:
+		content_out = None
+	if not isinstance(content_out, str):
+		frappe.throw(_("Voice gateway returned no transcript for this recording."), frappe.ValidationError)
+	return content_out
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def transcribe_audio() -> dict:
 	"""Transcribe one recorded clip (multipart field ``audio`` + form
 	``duration_s``). Desk (System User) only; bytes are size/duration capped
-	and streamed straight to OpenRouter's transcription endpoint — never
-	persisted on the bench.
+	and streamed straight to the resolved STT transport (chat-audio via
+	Bifrost, or a transcription endpoint), never persisted on the bench.
 
 	Returns ``{"ok": True, "text", "stt_ms", "model"}``.
 	"""
@@ -393,14 +538,23 @@ def transcribe_audio() -> dict:
 			frappe.ValidationError,
 		)
 
+	mode = cfg.get("mode") or _STT_MODE_TRANSCRIPTION
 	t_stt = time.monotonic()
-	text = _openrouter_transcribe(
-		content,
-		_upload_filename(upload),
-		_upload_mime(upload),
-		cfg["model"],
-		cfg["api_key"],
-	)
+	if mode == _STT_MODE_CHAT_AUDIO and cfg.get("base_url"):
+		if len(content) > _CHAT_AUDIO_MAX_BYTES:
+			frappe.throw(_("Audio is too large for voice translation."), frappe.ValidationError)
+		text = _bifrost_chat_audio_transcribe(
+			content, _upload_mime(upload), cfg["model"], cfg["api_key"], cfg["base_url"]
+		)
+	else:
+		text = _openrouter_transcribe(
+			content,
+			_upload_filename(upload),
+			_upload_mime(upload),
+			cfg["model"],
+			cfg["api_key"],
+			cfg.get("base_url") or "",
+		)
 	stt_ms = int((time.monotonic() - t_stt) * 1000)
 
 	from jarvis.chat.latency import get_logger
