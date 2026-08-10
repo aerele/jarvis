@@ -36,35 +36,8 @@
 					<!-- step rail: flat progress segments with labels (design.md §4.3 —
 					 no numbered circles, no connector lines). Hidden on the intro
 					 tour (chromeless). -->
-					<div
-						v-if="railIndex >= 0"
-						class="my-4 flex w-full max-w-[720px] items-stretch gap-2"
-						role="list"
-						aria-label="Setup steps"
-					>
-						<div
-							v-for="(s, i) in RAIL"
-							:key="s.id"
-							role="listitem"
-							class="flex flex-1 flex-col gap-1.5"
-							:aria-current="i === railIndex ? 'step' : undefined"
-						>
-							<span
-								class="text-p-sm"
-								:class="
-									i === railIndex
-										? 'font-medium text-ink-gray-9'
-										: i < railIndex
-										? 'text-ink-gray-7'
-										: 'text-ink-gray-5'
-								"
-								>{{ s.label }}</span
-							>
-							<span
-								class="h-1 rounded-full"
-								:class="i <= railIndex ? 'bg-surface-gray-7' : 'bg-surface-gray-3'"
-							></span>
-						</div>
+					<div v-if="railIndex >= 0" class="my-4 w-full max-w-[720px]">
+						<StepProgress :steps="RAIL" :current-index="railIndex" />
 					</div>
 
 					<div
@@ -588,26 +561,21 @@
 											{{ setupRecheckNote }}
 										</p>
 									</div>
-									<!-- jarvis#726: a step-counted Progress bar, reading the SAME
+									<!-- jarvis#726: a step-counted progress bar, reading the SAME
 										 phase object the row below already renders - see
 										 waitPhases.phaseProgress for what it measures and why it
 										 goes indeterminate instead of guessing a percentage. Label is
 										 just "Step N of 3", not the phase's own sentence - that
 										 sentence already renders once, in the row below; repeating it
 										 here read as an accidental duplicate rather than emphasis. -->
-									<Progress
-										v-if="!provisioningDelayed"
-										class="ob-progress"
-										:class="{
-											'ob-progress--indeterminate':
-												provisioningProgress.indeterminate,
-										}"
-										:value="provisioningProgress.percent"
-										intervals
-										:interval-count="provisioningProgress.total"
-										size="md"
-										:label="`Step ${provisioningProgress.current} of ${provisioningProgress.total}`"
-									/>
+									<div v-if="!provisioningDelayed" class="ob-progress">
+										<StepProgress
+											:steps="WAIT_STEPS"
+											:current-index="provisioningProgress.current - 1"
+											:indeterminate="provisioningProgress.indeterminate"
+											:label="`Step ${provisioningProgress.current} of ${provisioningProgress.total}`"
+										/>
+									</div>
 									<!-- Phase list. Row 1 is a settled fact. Row 2 renders ONLY what
 										 the last provisioning tick observed (waitPhases.js), so
 										 "Jarvis is getting ready for you" appears when admin itself
@@ -1298,22 +1266,20 @@
 										</div>
 										<!-- jarvis#726: same step-counted bar as the provisioning wait,
 											 reading readinessStage. readinessPhase has no DONE branch
-											 (waitPhases.js), so this bar stays at 1 of 3 until the
-											 screen navigates to chat - it never fills segment two in
-											 place. Label is "Step N of 3" only, not the phase's own
-											 sentence - see the provisioning bar's comment above. -->
-										<Progress
-											class="ob-progress"
-											:class="{
-												'ob-progress--indeterminate':
-													readinessProgress.indeterminate,
-											}"
-											:value="readinessProgress.percent"
-											intervals
-											:interval-count="readinessProgress.total"
-											size="md"
-											:label="`Step ${readinessProgress.current} of ${readinessProgress.total}`"
-										/>
+											 (waitPhases.js), so the label stays "Step 2 of 3" until the
+											 screen navigates to chat: segment two renders as the CURRENT
+											 step (filled, design.md §4.3), never as done, and segment
+											 three only fills once the screen actually leaves. Label is
+											 "Step N of 3" only, not the phase's own sentence - see the
+											 provisioning bar's comment above. -->
+										<div class="ob-progress">
+											<StepProgress
+												:steps="WAIT_STEPS"
+												:current-index="readinessProgress.current - 1"
+												:indeterminate="readinessProgress.indeterminate"
+												:label="`Step ${readinessProgress.current} of ${readinessProgress.total}`"
+											/>
+										</div>
 										<!-- Phase list, driven by is_ready_for_chat's `reason` on the
 											 LAST poll (waitPhases.js). Before this the screen showed one
 											 fixed sentence for the whole two-minute wait, so a workspace
@@ -1577,13 +1543,14 @@
 <script setup>
 import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
-import { Button, FormControl, FeatherIcon, ErrorMessage, Progress } from "frappe-ui";
+import { Button, FormControl, FeatherIcon, ErrorMessage } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
+import StepProgress from "@/components/StepProgress.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
 import cashfreeLogo from "@/assets/cashfree.png";
@@ -1663,6 +1630,16 @@ const RAIL = [
 	{ id: "pay", label: "Pay" },
 	{ id: "connect", label: "Connect" },
 ];
+
+// Unlabelled StepProgress segments for the two wait bars below, which count
+// steps (waitPhases.phaseProgress) without naming them the way RAIL does.
+//
+// A module constant, not two computeds (round-1 review of #763). Both bars read
+// their total from phaseProgress, which counts to 3 and only 3, so a per-bar
+// computed rebuilt an identical array on every poll tick and left two places to
+// keep in step when one of them changed. If a bar ever needs a different length,
+// give it its own named constant rather than reintroducing the pair.
+const WAIT_STEPS = Object.freeze(Array.from({ length: 3 }, (_, i) => Object.freeze({ id: i })));
 
 // Frame subtitle next to the brand mark, mirroring the active step's title.
 const FRAME_SUBS = {
@@ -1801,9 +1778,12 @@ const readinessStage = computed(() =>
 				opReadinessDetail.value
 		  )
 );
-// jarvis#726: the Progress bar next to the phase list above, reading the SAME
+// jarvis#726: the progress bar next to the phase list above, reading the SAME
 // readinessStage - see waitPhases.phaseProgress.
 const readinessProgress = computed(() => phaseProgress(readinessStage.value));
+// StepProgress wants a segment per step; this wait has no named steps of its
+// own (waitPhases.phaseProgress only ever counts to 3), so the segments carry
+// no per-step label and the bar's own "Step N of 3" caption does the talking.
 
 // Plan 01 billing state. Namespaced by site identity + logged-in user so one
 // site's / user's transitional billing PII can never prefill another's on a
@@ -2571,7 +2551,7 @@ const provisioningStage = computed(() =>
 		? provisioningPhase(provisioningSeen.value)
 		: inFlightPhase("Checking on your workspace")
 );
-// jarvis#726: the Progress bar next to the phase list above, reading the SAME
+// jarvis#726: the progress bar next to the phase list above, reading the SAME
 // provisioningStage - see waitPhases.phaseProgress.
 const provisioningProgress = computed(() => phaseProgress(provisioningStage.value));
 
@@ -4400,30 +4380,12 @@ onUnmounted(() => {
 	outline-offset: 2px;
 }
 /* ---- staged wait progress bar (jarvis#726, waitPhases.phaseProgress) ----
-   Segment one (the settled fact) is never touched here - it stays the plain
-   frappe-ui Progress fill in every state, determinate or not. Only the
-   CURRENT segment (nth-child(2) of the three fixed intervals) gets the
-   indeterminate treatment, and only when the phase itself is UNKNOWN: a
-   muted pulse reusing --surface-3, the same colour the waiting dot below
-   already uses for "nothing has reported this yet", so "we don't currently
-   know" reads consistently across both the bar and the phase list next to
-   it instead of inventing a second visual vocabulary for the same idea. */
+   Layout wrapper only - the segments themselves, including the indeterminate
+   pulse on the current one, are StepProgress.vue's (design.md §4.3, one
+   shared component for every stepped indicator in the app). */
 .ob-progress {
 	margin: 0 auto;
 	max-width: 420px;
-}
-.ob-progress--indeterminate :deep([role="progressbar"] > div:nth-child(2)) {
-	background: var(--surface-3);
-	animation: ob-progress-pulse 1.6s ease-in-out infinite;
-}
-@keyframes ob-progress-pulse {
-	0%,
-	100% {
-		opacity: 0.5;
-	}
-	50% {
-		opacity: 1;
-	}
 }
 
 /* ---- staged wait phases (waitPhases.js) --------------------------------
@@ -4560,9 +4522,7 @@ onUnmounted(() => {
 	.ob-details-form :deep(.jvc-field) {
 		transition: none;
 	}
-	.ob-progress--indeterminate :deep([role="progressbar"] > div:nth-child(2)) {
-		animation: none;
-		opacity: 0.75;
-	}
+	/* StepProgress.vue owns its own reduced-motion fallback for the
+	   indeterminate segment. */
 }
 </style>
