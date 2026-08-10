@@ -1640,15 +1640,29 @@ describe("jarvis wait-phases-horizontal: detail hoisted out of the phase columns
 		w.unmount();
 	});
 
-	it("keeps role=status on the active phase AND gives the hoisted detail its own", async () => {
+	it("announces the phase and its detail as ONE live region, not two", async () => {
+		// Round-1 review: giving the hoisted detail its own role="status" made a
+		// screen reader hear the phase and the sentence explaining that phase as
+		// two unrelated announcements. Worse, that region was v-if gated, so it
+		// mounted already populated, and a live region announces CHANGES to a
+		// region that is already present, not its initial content. One shared
+		// wrapper fixes both at once.
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
 		const active = w.find(".ob-phase--active");
-		expect(active.attributes("role")).toBe("status");
-		expect(w.find(".ob-phase-detail").attributes("role")).toBe("status");
+		const detail = w.find(".ob-phase-detail");
+		expect(active.attributes("role")).toBeUndefined();
+		expect(detail.attributes("role")).toBeUndefined();
+
+		const owning = w
+			.findAll('[role="status"]')
+			.filter(
+				(r) => r.element.contains(active.element) && r.element.contains(detail.element)
+			);
+		expect(owning.length).toBe(1);
 		w.unmount();
 	});
 

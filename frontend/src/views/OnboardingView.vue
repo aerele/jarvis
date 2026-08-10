@@ -589,57 +589,64 @@
 										 sentence, too long for a column a third of this width, so it
 										 renders once, full width, below every column rather than
 										 inside one of them. -->
-									<ul v-if="!provisioningDelayed" class="ob-phases" role="list">
-										<li class="ob-phase ob-phase--done">
-											<span class="ob-phase-ico">
-												<FeatherIcon name="check" class="h-4 w-4" />
-											</span>
-											<span class="ob-phase-txt">
-												<span class="ob-phase-label"
-													>Payment confirmed</span
-												>
-											</span>
-										</li>
-										<li
-											class="ob-phase"
-											:class="`ob-phase--${provisioningStage.state}`"
-											role="status"
-										>
-											<span class="ob-phase-ico">
-												<JvSpinner
-													v-if="provisioningStage.state === 'active'"
-													:size="20"
-												/>
-												<FeatherIcon
-													v-else
-													name="alert-circle"
-													class="h-4 w-4"
-												/>
-											</span>
-											<span class="ob-phase-txt">
-												<span class="ob-phase-label">{{
-													provisioningStage.label
-												}}</span>
-											</span>
-										</li>
-										<li class="ob-phase ob-phase--waiting">
-											<span class="ob-phase-ico"
-												><i class="ob-phase-dot"></i
-											></span>
-											<span class="ob-phase-txt">
-												<span class="ob-phase-label"
-													>Connecting your AI</span
-												>
-											</span>
-										</li>
-									</ul>
-									<p
-										v-if="!provisioningDelayed && provisioningStage.detail"
-										class="ob-phase-detail"
-										role="status"
-									>
-										{{ provisioningStage.detail }}
-									</p>
+									<!-- ONE live region over the phases AND the detail (round-1 review
+										 of the horizontal change). Hoisting the detail out of the
+										 active row had given it its own role="status", so a screen
+										 reader heard the phase and the sentence explaining that phase
+										 as two unrelated announcements. Worse, that region was v-if
+										 gated, so it MOUNTED already populated, and a live region
+										 announces changes to a region that is already present, not
+										 its initial content. Wrapping both means one coherent
+										 announcement per tick, and the region outlives the sentence
+										 appearing inside it. -->
+									<div v-if="!provisioningDelayed" role="status">
+										<ul class="ob-phases" role="list">
+											<li class="ob-phase ob-phase--done">
+												<span class="ob-phase-ico">
+													<FeatherIcon name="check" class="h-4 w-4" />
+												</span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label"
+														>Payment confirmed</span
+													>
+												</span>
+											</li>
+											<li
+												class="ob-phase"
+												:class="`ob-phase--${provisioningStage.state}`"
+											>
+												<span class="ob-phase-ico">
+													<JvSpinner
+														v-if="provisioningStage.state === 'active'"
+														:size="20"
+													/>
+													<FeatherIcon
+														v-else
+														name="alert-circle"
+														class="h-4 w-4"
+													/>
+												</span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label">{{
+														provisioningStage.label
+													}}</span>
+												</span>
+											</li>
+											<li class="ob-phase ob-phase--waiting">
+												<span class="ob-phase-ico"
+													><i class="ob-phase-dot"></i
+												></span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label"
+														>Connecting your AI</span
+													>
+												</span>
+											</li>
+										</ul>
+										<p v-if="provisioningStage.detail" class="ob-phase-detail">
+											{{ provisioningStage.detail }}
+										</p>
+									</div>
 									<!-- The sanctioned provisioning illustration (design.md §2.2).
 										 min-height, never a percentage height - see SetupNeuralNet's
 										 own comment. Dropped at the delayed ceiling, where there is a
@@ -1296,58 +1303,68 @@
 											 side by side under the bar's segments, same as the
 											 provisioning wait above: the active phase's `detail` is a
 											 full admin sentence (jarvis#752/#754), so it renders once,
-											 full width, below every column rather than inside one. -->
-										<ul class="ob-phases" role="list">
-											<li class="ob-phase ob-phase--done">
-												<span class="ob-phase-ico">
-													<FeatherIcon name="check" class="h-4 w-4" />
-												</span>
-												<span class="ob-phase-txt">
-													<span class="ob-phase-label"
-														>AI connection saved</span
-													>
-												</span>
-											</li>
-											<li
-												class="ob-phase"
-												:class="`ob-phase--${readinessStage.state}`"
-												role="status"
+											 full width, below every column rather than inside one.
+
+											 ONE live region over the phases AND that detail, same
+											 reason as the provisioning block: two role="status"
+											 regions made a screen reader hear the phase and the
+											 sentence explaining it as unrelated announcements. -->
+										<div role="status">
+											<ul class="ob-phases" role="list">
+												<li class="ob-phase ob-phase--done">
+													<span class="ob-phase-ico">
+														<FeatherIcon
+															name="check"
+															class="h-4 w-4"
+														/>
+													</span>
+													<span class="ob-phase-txt">
+														<span class="ob-phase-label"
+															>AI connection saved</span
+														>
+													</span>
+												</li>
+												<li
+													class="ob-phase"
+													:class="`ob-phase--${readinessStage.state}`"
+												>
+													<span class="ob-phase-ico">
+														<JvSpinner
+															v-if="
+																readinessStage.state === 'active'
+															"
+															:size="20"
+														/>
+														<FeatherIcon
+															v-else
+															name="alert-circle"
+															class="h-4 w-4"
+														/>
+													</span>
+													<span class="ob-phase-txt">
+														<span class="ob-phase-label">{{
+															readinessStage.label
+														}}</span>
+													</span>
+												</li>
+												<li class="ob-phase ob-phase--waiting">
+													<span class="ob-phase-ico"
+														><i class="ob-phase-dot"></i
+													></span>
+													<span class="ob-phase-txt">
+														<span class="ob-phase-label"
+															>Opening chat</span
+														>
+													</span>
+												</li>
+											</ul>
+											<p
+												v-if="readinessStage.detail"
+												class="ob-phase-detail"
 											>
-												<span class="ob-phase-ico">
-													<JvSpinner
-														v-if="readinessStage.state === 'active'"
-														:size="20"
-													/>
-													<FeatherIcon
-														v-else
-														name="alert-circle"
-														class="h-4 w-4"
-													/>
-												</span>
-												<span class="ob-phase-txt">
-													<span class="ob-phase-label">{{
-														readinessStage.label
-													}}</span>
-												</span>
-											</li>
-											<li class="ob-phase ob-phase--waiting">
-												<span class="ob-phase-ico"
-													><i class="ob-phase-dot"></i
-												></span>
-												<span class="ob-phase-txt">
-													<span class="ob-phase-label"
-														>Opening chat</span
-													>
-												</span>
-											</li>
-										</ul>
-										<p
-											v-if="readinessStage.detail"
-											class="ob-phase-detail"
-											role="status"
-										>
-											{{ readinessStage.detail }}
-										</p>
+												{{ readinessStage.detail }}
+											</p>
+										</div>
 										<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
 											 canvas fills via absolute+inset-0, and percentage heights
 											 don't resolve against a min-height parent - see its own
