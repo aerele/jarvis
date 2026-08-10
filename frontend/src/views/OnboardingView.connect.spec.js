@@ -1592,3 +1592,76 @@ describe("jarvis#752 the connect step shows admin's route verdict while still co
 		w.unmount();
 	});
 });
+
+// jarvis wait-phases-horizontal: the wait block widened to 75% and the three
+// phases moved from a stacked list to equal-width columns under the bar. The
+// admin-authored detail sentence (jarvis#752/#754) no longer fits inside a
+// column a third of that width, so it was hoisted out of the phase row and
+// now renders once, full width, below the phase columns instead. These tests
+// pin the DOM shape that hoist depends on, not pixel layout (jsdom does not
+// compute CSS): the detail is a sibling of the phase list, not nested in any
+// `<li>`, and both the active phase and the detail keep their own
+// `role="status"` so a screen reader still hears each independently.
+describe("jarvis wait-phases-horizontal: detail hoisted out of the phase columns", () => {
+	const QUOTA_REASON = "Your OpenAI account has reached its usage limit. It resets in 2 hours.";
+
+	it("renders the detail as a sibling of the phase list, not inside a phase row", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		const phases = w.find(".ob-phases");
+		const detail = w.find(".ob-phase-detail");
+		expect(detail.exists()).toBe(true);
+		expect(detail.text()).toBe(QUOTA_REASON);
+		// Hoisted OUT: no longer a descendant of the phase list or any row.
+		expect(detail.element.closest("ul")).toBeNull();
+		expect(detail.element.closest("li")).toBeNull();
+		// Reads as belonging to the same block: immediately after the phase list.
+		expect(phases.element.nextElementSibling).toBe(detail.element);
+		w.unmount();
+	});
+
+	it("still lays out exactly three phase columns, each its own row item", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		const columns = w.findAll(".ob-phases > .ob-phase");
+		expect(columns).toHaveLength(3);
+		// Every column still carries only its label, never the detail sentence -
+		// the hoist removed the ONLY per-row detail span, it did not just add a
+		// duplicate copy alongside it.
+		for (const column of columns) {
+			expect(column.find(".ob-phase-detail").exists()).toBe(false);
+		}
+		w.unmount();
+	});
+
+	it("keeps role=status on the active phase AND gives the hoisted detail its own", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		const active = w.find(".ob-phase--active");
+		expect(active.attributes("role")).toBe("status");
+		expect(w.find(".ob-phase-detail").attributes("role")).toBe("status");
+		w.unmount();
+	});
+
+	it("the active phase's spinner and the waiting phase's dot are unchanged by the hoist", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		// design.md §3.8: JvSpinner is the only loading indicator, never a
+		// bespoke one - it renders `.jv-spin` with its own role="status".
+		expect(w.find(".ob-phase--active .jv-spin").exists()).toBe(true);
+		expect(w.find(".ob-phase--waiting .ob-phase-dot").exists()).toBe(true);
+		w.unmount();
+	});
+});
