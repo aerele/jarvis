@@ -304,17 +304,28 @@ export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_statu
 // rather than mint a second desired version; resumable:true with
 // apply_operation:null means the descriptor is available under the SAME key on a
 // re-call (a bench→admin timeout after a server-side retry).
+// `forceProbe` (jarvis_admin_v2#297) asks admin to run a real probe even against
+// a byte-identical config, so a repeat subscription Test does not just answer
+// from the last verdict on record. Defaults false: every ordinary save,
+// including "Start chatting", calls this with fewer than five arguments and so
+// never sends it. Reused for a fresh probe on demand only by
+// LlmPoolEditor.vue's testSubscriptionRow, which also mints a fresh
+// idempotencyKey on every press - force_probe is not part of admin's
+// idempotency fingerprint, so a repeated key would resolve through admin's
+// idempotent-reuse path regardless of this flag.
 export const saveLlmPool = (
 	models,
 	preset = null,
 	routingMode = "failover",
-	idempotencyKey = ""
+	idempotencyKey = "",
+	forceProbe = false
 ) =>
 	call("jarvis.onboarding.save_llm_pool", {
 		models: JSON.stringify(models),
 		preset: preset || "",
 		routing_mode: routingMode,
 		idempotency_key: idempotencyKey || "",
+		force_probe: forceProbe ? 1 : 0,
 	});
 // Tear the whole AI connection down: deletes every stored credential on the
 // bench (models[] rows + the legacy flat fields) and asks admin to delete them

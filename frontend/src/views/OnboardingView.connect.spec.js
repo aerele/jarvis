@@ -77,8 +77,8 @@ const canStartRef = vi.hoisted(() => ({ value: true }));
 vi.mock("@/components/LlmPoolEditor.vue", () => ({
 	default: {
 		name: "LlmPoolEditor",
-		props: ["editable", "modes", "footerless"],
-		emits: ["ready", "settings-changed"],
+		props: ["editable", "modes", "footerless", "hostBusy"],
+		emits: ["ready", "settings-changed", "subscription-testing"],
 		setup(_props, { emit, expose }) {
 			emit("ready", true);
 			// A real ref so the host's `poolRef.value.canStart` unwraps to a boolean, seeded
@@ -89,6 +89,7 @@ vi.mock("@/components/LlmPoolEditor.vue", () => ({
 				busy: { active: false },
 				canStart,
 				startBlockedReason: ref("Test your API key before you continue."),
+				subscriptionTesting: ref(false),
 			});
 			return () => h("div", "editor-stub");
 		},
@@ -1676,6 +1677,42 @@ describe("jarvis wait-phases-horizontal: detail hoisted out of the phase columns
 		// bespoke one - it renders `.jv-spin` with its own role="status".
 		expect(w.find(".ob-phase--active .jv-spin").exists()).toBe(true);
 		expect(w.find(".ob-phase--waiting .ob-phase-dot").exists()).toBe(true);
+		w.unmount();
+	});
+});
+
+describe("subscription Test / Start-chatting mutual exclusion", () => {
+	// LlmPoolEditor's own subscription Test button fires the same save_llm_pool ->
+	// apply_operation round trip "Start chatting" does, via its OWN idempotency key
+	// and poll loop (see LlmPoolEditor.connect.spec.js). The two must never run at
+	// once - this checks the host's half of that guard: the editor's
+	// "subscription-testing" emit disables the host's own gate, and the host feeds
+	// its busy state back down as hostBusy.
+	it("disables Start chatting while the editor reports a subscription Test in flight", async () => {
+		const w = await mountConnect();
+		expect(w.vm.subscriptionTesting).toBe(false);
+
+		const editor = w.findComponent({ name: "LlmPoolEditor" });
+		editor.vm.$emit("subscription-testing", true);
+		await flushPromises();
+		expect(w.vm.subscriptionTesting).toBe(true);
+
+		editor.vm.$emit("subscription-testing", false);
+		await flushPromises();
+		expect(w.vm.subscriptionTesting).toBe(false);
+		w.unmount();
+	});
+
+	it("passes its own saving state down to the editor as hostBusy", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		const editor = w.findComponent({ name: "LlmPoolEditor" });
+		expect(editor.props("hostBusy")).toBe(false);
+
+		api.getLlmApplyOperation.mockResolvedValue(pending);
+		w.vm.saveConnect();
+		await flushPromises();
+		expect(editor.props("hostBusy")).toBe(true);
 		w.unmount();
 	});
 });

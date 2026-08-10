@@ -1266,6 +1266,7 @@ def post_update_llm_pool(
 	oauth_blobs: dict,
 	idempotency_key: str | None = None,
 	timeout_s: int | None = None,
+	force_probe: bool = False,
 ) -> dict:
 	"""POST a PoolSpec + separated secrets to admin → fleet-agent → agent.
 
@@ -1282,6 +1283,16 @@ def post_update_llm_pool(
 	    A timeout here is not a lost apply: admin commits desired + operation before
 	    the fleet push, so the operation exists and the caller resumes via the same
 	    idempotency key. None keeps the long DEFAULT_TIMEOUT_S for the async worker.
+	``force_probe`` (jarvis_admin_v2#297): asks admin to run a real probe even
+	    against a byte-identical config, instead of its byte-identical no-op path
+	    answering from the last verdict on record. Admin allowlist-coerces the
+	    wire value; only a real ``true`` counts, so this is sent ONLY when the
+	    caller passed a truthy value - an ordinary (False) call posts a body with
+	    no ``force_probe`` key at all, byte-identical to before this parameter
+	    existed. Not part of admin's idempotency fingerprint: a caller that wants
+	    a fresh probe on every press must also mint a fresh ``idempotency_key``,
+	    since a reused key resolves through admin's idempotent-reuse path
+	    regardless of this flag.
 
 	The admin endpoint merges the secrets with the spec before forwarding to
 	fleet-agent. Implemented in T3 (jarvis_admin); this stub is the bench-side
@@ -1307,6 +1318,12 @@ def post_update_llm_pool(
 	}
 	if idempotency_key:
 		body["idempotency_key"] = idempotency_key
+	# Omitted (not merely False) on an ordinary call: admin allowlist-coerces
+	# anything but a real `true` to false anyway, but leaving the key out
+	# entirely on the common path keeps this body byte-identical to the one
+	# sent before force_probe existed.
+	if force_probe:
+		body["force_probe"] = True
 	kw = {"timeout_s": timeout_s} if timeout_s is not None else {}
 	return _post(path=_m("api.tenant.update_llm_pool"), body=body, **kw)
 

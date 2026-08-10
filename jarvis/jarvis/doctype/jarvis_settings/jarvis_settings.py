@@ -2065,7 +2065,7 @@ SYNC_PUSH_LOCK_WAIT_S = 10
 SYNC_DESCRIPTOR_TIMEOUT_S = 20
 
 
-def sync_pool_now(idempotency_key: str | None = None) -> dict:
+def sync_pool_now(idempotency_key: str | None = None, force_probe: bool = False) -> dict:
 	"""SHORT, tightly-bounded round-trip to OBTAIN the durable apply-operation
 	descriptor for the onboarding/settings save (Fable corrected ruling F2/F3,
 	review P0-02). The Start-chatting click owns the OPERATION, not the PUSH: this
@@ -2095,6 +2095,13 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 	Budget invariant: no path here exceeds the gunicorn timeout, and an exception
 	anywhere after the desired-state commit hands the config to the worker rather
 	than stranding it (F3).
+
+	``force_probe`` (jarvis_admin_v2#297) reaches ONLY this one synchronous
+	``post_update_llm_pool`` call, never the async worker hand-off below: the
+	worker re-dedupes to the SAME durable operation via the same
+	``idempotency_key``, which admin resolves through its idempotent-reuse path
+	regardless of ``force_probe`` - so passing it there would spend nothing and
+	risk nothing, it is simply moot.
 	"""
 	import frappe as _frappe
 
@@ -2135,6 +2142,7 @@ def sync_pool_now(idempotency_key: str | None = None) -> dict:
 							oauth_blobs=oauth_blobs,
 							idempotency_key=idempotency_key,
 							timeout_s=SYNC_DESCRIPTOR_TIMEOUT_S,
+							force_probe=force_probe,
 						)
 						or {}
 					)

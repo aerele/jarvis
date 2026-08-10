@@ -31,6 +31,7 @@ const api = vi.hoisted(() => ({
 	pollPoolAccountSignin: vi.fn(),
 	getPendingOauthCaptures: vi.fn(),
 	cancelPendingOauthCapture: vi.fn(),
+	getLlmApplyOperation: vi.fn(),
 }));
 vi.mock("@/api", () => api);
 
@@ -40,6 +41,8 @@ vi.mock("frappe-ui", () => ({
 	dayjsLocal: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
 	getConfig: () => null,
 	toast: { error: vi.fn(), success: vi.fn() },
+	// Banner.vue (the subscription Test result banner, below) needs this.
+	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: "<span/>" },
 }));
 
 const answer = vi.hoisted(() => ({ confirm: true }));
@@ -316,5 +319,284 @@ describe("§10.2 capture rehydrate + wire", () => {
 		expect(res.result.apply_operation.operation_id).toBe("op1");
 		// The editor is NOT the observer in footerless mode: it does not poll sync status.
 		expect(api.getLlmSyncStatus.mock.calls.length).toBe(before);
+	});
+});
+
+// Connect a fresh subscription account onto the onboarding row the same way §10.2's
+// capture-rehydrate tests do, so testSubscriptionRow has something to run against.
+async function connectSubscriptionRow(w, { upstream = "openai" } = {}) {
+	const r = w.vm.rows[0];
+	r.credentialType = "subscription";
+	r.upstream = upstream;
+	if (!Array.isArray(r.accounts)) r.accounts = [];
+	r.accounts.push({ upstream, account_ref: "SUB_a", label: "a@x", capture_id: "capA" });
+	await flushPromises();
+	return r;
+}
+
+describe("subscription Test (same probe the apply path uses)", () => {
+	it("is blocked before an account is connected, and never calls saveLlmPool", async () => {
+		const w = await mountOnboarding();
+		expect(w.vm.subTestBlockedReason(w.vm.rows[0])).toMatch(/connect/i);
+		await w.vm.testSubscriptionRow(w.vm.rows[0]);
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+	});
+
+	it("a genuine READY verdict reports success without navigating anywhere itself", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "ready",
+			code: "LLM_READY",
+			chat_readiness: true,
+		});
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(api.saveLlmPool).toHaveBeenCalledTimes(1);
+		expect(w.vm.subTest.result.kind).toBe("ok");
+		expect(w.vm.subTest.result.message).toMatch(/openai/i);
+		expect(w.vm.subTest.result.message).toMatch(/start chatting/i);
+	});
+
+	it("a rejected verdict shows admin's chat_readiness_reason VERBATIM, not a reworded copy", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		const adminReason = "Your OpenAI subscription was rejected. Reconnect the account.";
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "failed",
+			code: "LLM_APPLY_REJECTED",
+			chat_readiness_reason: adminReason,
+		});
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(w.vm.subTest.result.kind).toBe("fail");
+		expect(w.vm.subTest.result.message).toBe(adminReason);
+	});
+
+	it("mints its own idempotency key, distinct from any host save() key", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({ operation_id: "op1", state: "ready" });
+
+		await w.vm.testSubscriptionRow(r);
+		await w.vm.save("host-idem-key");
+
+		const testCallKey = api.saveLlmPool.mock.calls[0][3];
+		const hostCallKey = api.saveLlmPool.mock.calls[1][3];
+		expect(testCallKey).not.toBe("");
+		expect(testCallKey).not.toBe(hostCallKey);
+		expect(hostCallKey).toBe("host-idem-key");
+	});
+
+	it("a second click while one is already in flight is a no-op (only one saveLlmPool call)", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		let resolveOp;
+		api.getLlmApplyOperation.mockImplementation(
+			() => new Promise((resolve) => (resolveOp = resolve))
+		);
+
+		const first = w.vm.testSubscriptionRow(r);
+		await flushPromises();
+		expect(w.vm.subTest.testing).toBe(true);
+		const second = w.vm.testSubscriptionRow(r); // must be swallowed, not queued
+
+		resolveOp({ operation_id: "op1", state: "ready", chat_readiness: true });
+		await Promise.all([first, second]);
+
+		expect(api.saveLlmPool).toHaveBeenCalledTimes(1);
+	});
+
+	it("hostBusy (Start-chatting in flight) blocks Test from firing", async () => {
+		const w = mount(LlmPoolEditor, {
+			props: { modes: ["quick"], footerless: true, hostBusy: true },
+		});
+		await idle();
+		const r = await connectSubscriptionRow(w);
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+	});
+
+	it("cools down after a result lands, then allows a fresh Test", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({ operation_id: "op1", state: "ready" });
+
+		await w.vm.testSubscriptionRow(r);
+		expect(w.vm.subTest.cooling).toBe(true);
+
+		await w.vm.testSubscriptionRow(r); // still cooling: swallowed
+		expect(api.saveLlmPool).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(15000);
+		expect(w.vm.subTest.cooling).toBe(false);
+
+		await w.vm.testSubscriptionRow(r);
+		expect(api.saveLlmPool).toHaveBeenCalledTimes(2);
+	});
+
+	it("emits subscription-testing(true) while running and (false) once settled, for the host's cross-guard", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		let resolveOp;
+		api.getLlmApplyOperation.mockImplementation(
+			() => new Promise((resolve) => (resolveOp = resolve))
+		);
+
+		const p = w.vm.testSubscriptionRow(r);
+		await flushPromises();
+		expect(w.emitted("subscription-testing")).toEqual([[true]]);
+
+		resolveOp({ operation_id: "op1", state: "ready", chat_readiness: true });
+		await p;
+
+		expect(w.emitted("subscription-testing")).toEqual([[true], [false]]);
+	});
+
+	it("a bounded timeout with no terminal state reports a neutral pending message, never a false pass or fail", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({ operation_id: "op1", state: "pending" });
+
+		const p = w.vm.testSubscriptionRow(r);
+		await vi.advanceTimersByTimeAsync(95000); // past SUB_TEST_TIMEOUT_MS
+		await p;
+
+		expect(w.vm.subTest.result.kind).toBe("pending");
+	});
+});
+
+// jarvis_admin_v2#297: admin now accepts force_probe on update_llm_pool so a
+// repeat Test can ask for a real re-check instead of admin's byte-identical
+// no-op path answering from the last verdict on record. Every ordinary save
+// (the settings-pane apply, and "Start chatting" via footerless save()) must
+// keep calling saveLlmPool with FEWER than five arguments, so force_probe
+// silently defaults to false there and the request they send is unchanged.
+describe("subscription Test force_probe (jarvis_admin_v2#297): no repeat can carry a stale verdict", () => {
+	it("every Test press asks admin for a forced probe, as the 5th saveLlmPool argument", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "ready",
+			chat_readiness: true,
+			force_probed: true,
+		});
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(api.saveLlmPool.mock.calls[0][4]).toBe(true);
+	});
+
+	it("footerless save() (Start chatting's path) never asks for a forced probe", async () => {
+		const w = await mountOnboarding();
+		await connectSubscriptionRow(w);
+
+		await w.vm.save("host-idem-key");
+
+		expect(api.saveLlmPool).toHaveBeenCalledTimes(1);
+		// Fewer than 5 args: force_probe is not even mentioned on the ordinary path.
+		expect(api.saveLlmPool.mock.calls[0].length).toBeLessThan(5);
+	});
+
+	it("two Test presses in a row each mint their OWN fresh idempotency key, both requesting a forced probe", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "ready",
+			chat_readiness: true,
+			force_probed: true,
+		});
+
+		await w.vm.testSubscriptionRow(r);
+		w.vm.subTest.cooling = false; // bypass the post-result cooldown, tested elsewhere
+		await w.vm.testSubscriptionRow(r);
+
+		const firstKey = api.saveLlmPool.mock.calls[0][3];
+		const secondKey = api.saveLlmPool.mock.calls[1][3];
+		expect(firstKey).not.toBe("");
+		expect(secondKey).not.toBe("");
+		expect(secondKey).not.toBe(firstKey);
+		expect(api.saveLlmPool.mock.calls[0][4]).toBe(true);
+		expect(api.saveLlmPool.mock.calls[1][4]).toBe(true);
+	});
+
+	it("force_probed: true reports the fresh-check copy, never the stale one", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "ready",
+			chat_readiness: true,
+			force_probed: true,
+		});
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(w.vm.subTest.result.kind).toBe("ok");
+		expect(w.vm.subTest.result.message).toMatch(/just now/i);
+	});
+
+	it("force_probed: false on a PASS says this is the last check, not a fresh one, without claiming failure", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "ready",
+			chat_readiness: true,
+			force_probed: false, // host below fleet-agent contract 1.23 ignored the ask
+		});
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(w.vm.subTest.result.kind).toBe("ok");
+		expect(w.vm.subTest.result.message).not.toMatch(/just now/i);
+		expect(w.vm.subTest.result.message).toMatch(/last check/i);
+		expect(w.vm.subTest.result.message).toMatch(/start chatting/i);
+	});
+
+	it("force_probed: false on a FAILURE still quotes admin's reason verbatim, with a stale notice appended after it", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		const adminReason = "Your OpenAI account has reached its usage limit.";
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "failed",
+			code: "LLM_APPLY_REJECTED",
+			chat_readiness_reason: adminReason,
+			force_probed: false,
+		});
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(w.vm.subTest.result.kind).toBe("fail");
+		expect(w.vm.subTest.result.message.startsWith(adminReason)).toBe(true);
+		expect(w.vm.subTest.result.message).not.toBe(adminReason);
+	});
+
+	it("a mocked status with no force_probed field at all (older fixture) is treated as fresh, not stale", async () => {
+		// Guards the existing verbatim-reason and just-now tests above this describe
+		// block, none of which set force_probed: undefined must never satisfy the
+		// strict === false stale check.
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "ready",
+			chat_readiness: true,
+		});
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(w.vm.subTest.result.message).toMatch(/just now/i);
 	});
 });
