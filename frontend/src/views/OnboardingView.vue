@@ -570,7 +570,7 @@
 										 here read as an accidental duplicate rather than emphasis. -->
 									<div v-if="!provisioningDelayed" class="ob-progress">
 										<StepProgress
-											:steps="provisioningSteps"
+											:steps="WAIT_STEPS"
 											:current-index="provisioningProgress.current - 1"
 											:indeterminate="provisioningProgress.indeterminate"
 											:label="`Step ${provisioningProgress.current} of ${provisioningProgress.total}`"
@@ -1274,7 +1274,7 @@
 											 provisioning bar's comment above. -->
 										<div class="ob-progress">
 											<StepProgress
-												:steps="readinessSteps"
+												:steps="WAIT_STEPS"
 												:current-index="readinessProgress.current - 1"
 												:indeterminate="readinessProgress.indeterminate"
 												:label="`Step ${readinessProgress.current} of ${readinessProgress.total}`"
@@ -1633,9 +1633,13 @@ const RAIL = [
 
 // Unlabelled StepProgress segments for the two wait bars below, which count
 // steps (waitPhases.phaseProgress) without naming them the way RAIL does.
-function stepPlaceholders(total) {
-	return Array.from({ length: total }, (_, i) => ({ id: i }));
-}
+//
+// A module constant, not two computeds (round-1 review of #763). Both bars read
+// their total from phaseProgress, which counts to 3 and only 3, so a per-bar
+// computed rebuilt an identical array on every poll tick and left two places to
+// keep in step when one of them changed. If a bar ever needs a different length,
+// give it its own named constant rather than reintroducing the pair.
+const WAIT_STEPS = Object.freeze(Array.from({ length: 3 }, (_, i) => Object.freeze({ id: i })));
 
 // Frame subtitle next to the brand mark, mirroring the active step's title.
 const FRAME_SUBS = {
@@ -1780,7 +1784,6 @@ const readinessProgress = computed(() => phaseProgress(readinessStage.value));
 // StepProgress wants a segment per step; this wait has no named steps of its
 // own (waitPhases.phaseProgress only ever counts to 3), so the segments carry
 // no per-step label and the bar's own "Step N of 3" caption does the talking.
-const readinessSteps = computed(() => stepPlaceholders(readinessProgress.value.total));
 
 // Plan 01 billing state. Namespaced by site identity + logged-in user so one
 // site's / user's transitional billing PII can never prefill another's on a
@@ -2551,7 +2554,6 @@ const provisioningStage = computed(() =>
 // jarvis#726: the progress bar next to the phase list above, reading the SAME
 // provisioningStage - see waitPhases.phaseProgress.
 const provisioningProgress = computed(() => phaseProgress(provisioningStage.value));
-const provisioningSteps = computed(() => stepPlaceholders(provisioningProgress.value.total));
 
 // The FULL-SCREEN busy view is only for the phases where there is genuinely
 // nothing to press: starting the signup, the sheet being open, confirming.
