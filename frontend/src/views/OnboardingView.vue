@@ -576,61 +576,77 @@
 											:label="`Step ${provisioningProgress.current} of ${provisioningProgress.total}`"
 										/>
 									</div>
-									<!-- Phase list. Row 1 is a settled fact. Row 2 renders ONLY what
-										 the last provisioning tick observed (waitPhases.js), so
-										 "Jarvis is getting ready for you" appears when admin itself
-										 answered, and an honest "we couldn't check" appears when it
-										 did not. Row 3 names a phase that has not started and says
-										 nothing further about it. -->
-									<ul v-if="!provisioningDelayed" class="ob-phases" role="list">
-										<li class="ob-phase ob-phase--done">
-											<span class="ob-phase-ico">
-												<FeatherIcon name="check" class="h-4 w-4" />
-											</span>
-											<span class="ob-phase-txt">
-												<span class="ob-phase-label"
-													>Payment confirmed</span
-												>
-											</span>
-										</li>
-										<li
-											class="ob-phase"
-											:class="`ob-phase--${provisioningStage.state}`"
-											role="status"
-										>
-											<span class="ob-phase-ico">
-												<JvSpinner
-													v-if="provisioningStage.state === 'active'"
-													:size="20"
-												/>
-												<FeatherIcon
-													v-else
-													name="alert-circle"
-													class="h-4 w-4"
-												/>
-											</span>
-											<span class="ob-phase-txt">
-												<span class="ob-phase-label">{{
-													provisioningStage.label
-												}}</span>
-												<span
-													v-if="provisioningStage.detail"
-													class="ob-phase-detail"
-													>{{ provisioningStage.detail }}</span
-												>
-											</span>
-										</li>
-										<li class="ob-phase ob-phase--waiting">
-											<span class="ob-phase-ico"
-												><i class="ob-phase-dot"></i
-											></span>
-											<span class="ob-phase-txt">
-												<span class="ob-phase-label"
-													>Connecting your AI</span
-												>
-											</span>
-										</li>
-									</ul>
+									<!-- Phase columns, side by side under the bar's segments (jarvis
+										 wait-phases-horizontal): same three phases as before, laid out
+										 as equal-width columns instead of stacked rows so segment one
+										 sits above phase one. Column 1 is a settled fact. Column 2
+										 renders ONLY what the last provisioning tick observed
+										 (waitPhases.js), so "Jarvis is getting ready for you" appears
+										 when admin itself answered, and an honest "we couldn't check"
+										 appears when it did not. Column 3 names a phase that has not
+										 started and says nothing further about it. The active phase's
+										 `detail` (waitPhases.js's own provisioningPhase copy) is a full
+										 sentence, too long for a column a third of this width, so it
+										 renders once, full width, below every column rather than
+										 inside one of them. -->
+									<!-- ONE live region over the phases AND the detail (round-1 review
+										 of the horizontal change). Hoisting the detail out of the
+										 active row had given it its own role="status", so a screen
+										 reader heard the phase and the sentence explaining that phase
+										 as two unrelated announcements. Worse, that region was v-if
+										 gated, so it MOUNTED already populated, and a live region
+										 announces changes to a region that is already present, not
+										 its initial content. Wrapping both means one coherent
+										 announcement per tick, and the region outlives the sentence
+										 appearing inside it. -->
+									<div v-if="!provisioningDelayed" role="status">
+										<ul class="ob-phases" role="list">
+											<li class="ob-phase ob-phase--done">
+												<span class="ob-phase-ico">
+													<FeatherIcon name="check" class="h-4 w-4" />
+												</span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label"
+														>Payment confirmed</span
+													>
+												</span>
+											</li>
+											<li
+												class="ob-phase"
+												:class="`ob-phase--${provisioningStage.state}`"
+											>
+												<span class="ob-phase-ico">
+													<JvSpinner
+														v-if="provisioningStage.state === 'active'"
+														:size="20"
+													/>
+													<FeatherIcon
+														v-else
+														name="alert-circle"
+														class="h-4 w-4"
+													/>
+												</span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label">{{
+														provisioningStage.label
+													}}</span>
+												</span>
+											</li>
+											<li class="ob-phase ob-phase--waiting">
+												<span class="ob-phase-ico"
+													><i class="ob-phase-dot"></i
+												></span>
+												<span class="ob-phase-txt">
+													<span class="ob-phase-label"
+														>Connecting your AI</span
+													>
+												</span>
+											</li>
+										</ul>
+										<p v-if="provisioningStage.detail" class="ob-phase-detail">
+											{{ provisioningStage.detail }}
+										</p>
+									</div>
 									<!-- The sanctioned provisioning illustration (design.md §2.2).
 										 min-height, never a percentage height - see SetupNeuralNet's
 										 own comment. Dropped at the delayed ceiling, where there is a
@@ -1280,59 +1296,75 @@
 												:label="`Step ${readinessProgress.current} of ${readinessProgress.total}`"
 											/>
 										</div>
-										<!-- Phase list, driven by is_ready_for_chat's `reason` on the
+										<!-- Phase columns, driven by is_ready_for_chat's `reason` on the
 											 LAST poll (waitPhases.js). Before this the screen showed one
 											 fixed sentence for the whole two-minute wait, so a workspace
-											 being built and one that was stuck looked identical. -->
-										<ul class="ob-phases" role="list">
-											<li class="ob-phase ob-phase--done">
-												<span class="ob-phase-ico">
-													<FeatherIcon name="check" class="h-4 w-4" />
-												</span>
-												<span class="ob-phase-txt">
-													<span class="ob-phase-label"
-														>AI connection saved</span
-													>
-												</span>
-											</li>
-											<li
-												class="ob-phase"
-												:class="`ob-phase--${readinessStage.state}`"
-												role="status"
+											 being built and one that was stuck looked identical. Laid out
+											 side by side under the bar's segments, same as the
+											 provisioning wait above: the active phase's `detail` is a
+											 full admin sentence (jarvis#752/#754), so it renders once,
+											 full width, below every column rather than inside one.
+
+											 ONE live region over the phases AND that detail, same
+											 reason as the provisioning block: two role="status"
+											 regions made a screen reader hear the phase and the
+											 sentence explaining it as unrelated announcements. -->
+										<div role="status">
+											<ul class="ob-phases" role="list">
+												<li class="ob-phase ob-phase--done">
+													<span class="ob-phase-ico">
+														<FeatherIcon
+															name="check"
+															class="h-4 w-4"
+														/>
+													</span>
+													<span class="ob-phase-txt">
+														<span class="ob-phase-label"
+															>AI connection saved</span
+														>
+													</span>
+												</li>
+												<li
+													class="ob-phase"
+													:class="`ob-phase--${readinessStage.state}`"
+												>
+													<span class="ob-phase-ico">
+														<JvSpinner
+															v-if="
+																readinessStage.state === 'active'
+															"
+															:size="20"
+														/>
+														<FeatherIcon
+															v-else
+															name="alert-circle"
+															class="h-4 w-4"
+														/>
+													</span>
+													<span class="ob-phase-txt">
+														<span class="ob-phase-label">{{
+															readinessStage.label
+														}}</span>
+													</span>
+												</li>
+												<li class="ob-phase ob-phase--waiting">
+													<span class="ob-phase-ico"
+														><i class="ob-phase-dot"></i
+													></span>
+													<span class="ob-phase-txt">
+														<span class="ob-phase-label"
+															>Opening chat</span
+														>
+													</span>
+												</li>
+											</ul>
+											<p
+												v-if="readinessStage.detail"
+												class="ob-phase-detail"
 											>
-												<span class="ob-phase-ico">
-													<JvSpinner
-														v-if="readinessStage.state === 'active'"
-														:size="20"
-													/>
-													<FeatherIcon
-														v-else
-														name="alert-circle"
-														class="h-4 w-4"
-													/>
-												</span>
-												<span class="ob-phase-txt">
-													<span class="ob-phase-label">{{
-														readinessStage.label
-													}}</span>
-													<span
-														v-if="readinessStage.detail"
-														class="ob-phase-detail"
-														>{{ readinessStage.detail }}</span
-													>
-												</span>
-											</li>
-											<li class="ob-phase ob-phase--waiting">
-												<span class="ob-phase-ico"
-													><i class="ob-phase-dot"></i
-												></span>
-												<span class="ob-phase-txt">
-													<span class="ob-phase-label"
-														>Opening chat</span
-													>
-												</span>
-											</li>
-										</ul>
+												{{ readinessStage.detail }}
+											</p>
+										</div>
 										<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
 											 canvas fills via absolute+inset-0, and percentage heights
 											 don't resolve against a min-height parent - see its own
@@ -4382,29 +4414,58 @@ onUnmounted(() => {
 /* ---- staged wait progress bar (jarvis#726, waitPhases.phaseProgress) ----
    Layout wrapper only - the segments themselves, including the indeterminate
    pulse on the current one, are StepProgress.vue's (design.md §4.3, one
-   shared component for every stepped indicator in the app). */
+   shared component for every stepped indicator in the app).
+
+   Width (jarvis wait-phases-horizontal): a live run called the old 420px cap
+   "very congested". 75% of the card reads roomy without turning into an
+   unreadably long line on a wide monitor - 640px caps that, chosen so the
+   longest phase label ("Applying your AI configuration") still gets a
+   sensible column width at 3-up rather than the columns ballooning past what
+   the text needs. `.ob-phases` and `.ob-phase-detail` below share the exact
+   same width/gap so the phase columns line up under the bar's segments and
+   the detail line reads as belonging to the same block. */
 .ob-progress {
 	margin: 0 auto;
-	max-width: 420px;
+	width: 75%;
+	max-width: 640px;
 }
 
 /* ---- staged wait phases (waitPhases.js) --------------------------------
-   One row per phase. The row's MODIFIER is the honesty contract, not
-   decoration: `active` is only ever set from an observation, `unknown` means a
-   poll answered with nothing (or with the absence of a verdict) and must never
-   look like progress, and `waiting` says nothing at all about a phase that has
-   not started. Colour carries no status here beyond the completed check - the
-   words do that. */
+   One column per phase, side by side under the bar's segments so the whole
+   block reads as one horizontal progression rather than a bar with an
+   unrelated list under it (jarvis wait-phases-horizontal). Segment one sits
+   above phase one for free: both this row and StepProgress.vue's own row are
+   a 3-up flex with equal (`flex: 1`) children and the same 8px gap over the
+   same width, so they align without the phase labels having to become the
+   bar's own per-step labels - that route was considered and rejected, see
+   WAIT_STEPS's comment below (script section): the bar is deliberately
+   unlabelled per jarvis#763, and reintroducing labels there would require a
+   per-bar computed the same comment already warns against reintroducing.
+
+   The MODIFIER on each column is the honesty contract, not decoration:
+   `active` is only ever set from an observation, `unknown` means a poll
+   answered with nothing (or with the absence of a verdict) and must never
+   look like progress, and `waiting` says nothing at all about a phase that
+   has not started. Colour carries no status here beyond the completed check -
+   the words do that.
+
+   Below 720px there is no room for three icon+label columns without wrapping
+   into a cramped, unreadable tower, so the media query at the bottom of this
+   file reverts to the original stacked single column. */
 .ob-phases {
 	list-style: none;
 	margin: 0 auto;
 	padding: 0;
-	max-width: 420px;
+	width: 75%;
+	max-width: 640px;
 	display: flex;
-	flex-direction: column;
-	gap: 2px;
+	flex-direction: row;
+	align-items: stretch;
+	gap: 8px;
 }
 .ob-phase {
+	flex: 1 1 0;
+	min-width: 0;
 	display: flex;
 	align-items: flex-start;
 	gap: 10px;
@@ -4426,12 +4487,25 @@ onUnmounted(() => {
 	font-size: 13px;
 	line-height: 1.5;
 }
+/* Hoisted OUT of the phase column (jarvis wait-phases-horizontal): the active
+   phase's `detail` is admin's own full sentence (jarvis#752/#754, e.g. "Your
+   OpenAI account has reached its usage limit. It resets in 2 hours."), too
+   long for a column a third of this block's width without wrecking the row.
+   Only one phase is ever active, so there is only ever one detail: it renders
+   once, full width, centered below every column. Its own `role="status"`
+   keeps detail changes announced now that they are no longer inside the
+   active column's status region. */
 .ob-phase-detail {
 	display: block;
+	width: 75%;
+	max-width: 640px;
+	margin: 6px auto 0;
+	padding: 0 8px;
 	font-size: 12px;
 	line-height: 1.5;
 	color: var(--text-3);
-	margin-top: 2px;
+	text-align: center;
+	box-sizing: border-box;
 }
 .ob-phase--done .ob-phase-label {
 	color: var(--text-2);
@@ -4513,6 +4587,30 @@ onUnmounted(() => {
 	}
 	.ob-head h1 {
 		font-size: 18px;
+	}
+}
+/* Narrow window (jarvis wait-phases-horizontal): three icon+label columns
+   plus the bar above them do not fit a phone-width card without the labels
+   wrapping into a cramped tower, so below 720px the phase columns revert to
+   the original single-column stack and the block itself uses the full
+   available width instead of 75% of an already-small card. 720, not the
+   block's own 640px cap: right at that cap the card is not yet wide enough
+   for 75% of it to give each column real breathing room (the ob-body's own
+   padding and the card's max-width still leave the card under ~700px in that
+   band), so the fallback range is deliberately wider than the point the cap
+   stops mattering. */
+@media (max-width: 720px) {
+	.ob-progress,
+	.ob-phases,
+	.ob-phase-detail {
+		width: 100%;
+	}
+	.ob-phases {
+		flex-direction: column;
+		gap: 2px;
+	}
+	.ob-phase {
+		flex: none;
 	}
 }
 @media (prefers-reduced-motion: reduce) {
