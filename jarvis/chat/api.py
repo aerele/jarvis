@@ -864,6 +864,266 @@ def _conversation_busy(conversation: str) -> bool:
 	return age < _INFLIGHT_FRESH_SECONDS
 
 
+def _ordered_parked_cards(user: str, conversation: str) -> list[dict] | None:
+	"""This user's currently-live parked cards for this conversation.
+
+	Used by ``_typed_confirmation`` to (a) know whether any named token is still
+	live and (b) source each card's summary for the receipt. Selection numbering
+	is NOT taken from this list's order any more - a typed number binds to the
+	token the CLIENT displayed (``approval_tokens``), which is what closes the
+	renumber-between-glance-and-send hole. The sort is kept only so the returned
+	list is deterministic; the caller reads it as a token->card map, not by index.
+
+	Returns None when the store cannot answer, which the caller treats as "not an
+	approval" rather than as an empty list.
+	"""
+	from jarvis.chat import pending_confirm
+
+	try:
+		parked = pending_confirm.list_items_for_owner(user, conversation, strict=True)
+	except pending_confirm.PendingConfirmStorageError:
+		# Unknown state is not approval. Falling through is recoverable: the user's
+		# "go ahead" reaches the model. A wrong answer here is a write nobody
+		# authorised, which is not.
+		#
+		# Leave ONE greppable line: this path silently turns a typed approval into
+		# an ordinary chat turn, so during a store outage a user's "go ahead" reaches
+		# the model with no card context and gets a confused reply. Without this,
+		# that failure is indistinguishable in the logs from a normal message. WARNING
+		# (not log_error): it is an expected degradation, not a bug, and the store is
+		# already unhealthy so a Desk Error Log row per send would pile on.
+		frappe.logger("jarvis.pending_confirm").warning(
+			"typed approval degraded to an ordinary turn: store unavailable (user=%s conversation=%s)",
+			user,
+			conversation,
+		)
+		return None
+	return sorted(parked, key=lambda c: (c.get("expires_at") or 0, c.get("token") or ""))
+
+
+#: Cap on how many displayed tokens a client may send. A confirmation stack is a
+#: handful of cards; a longer list is a malformed or hostile payload, not a real
+#: screen, so it is rejected rather than trusted.
+_MAX_APPROVAL_TOKENS = 50
+
+
+def _clean_approval_tokens(raw: str | list | None) -> list[str] | None:
+	"""The ordered tokens a client displayed for numbered typed approval, or None.
+
+	The list is load-bearing: a typed "confirm 2" indexes into THIS order, so it
+	must be exactly what the user saw. Returns None (caller falls through to the
+	model) on anything untrustworthy - not a list, empty, oversized, or any element
+	that is not a non-empty string - because a garbled position list must never be
+	best-guessed against a real ERP write. Order is preserved and never mutated;
+	dropping or reordering an element would silently renumber the selection, which
+	is the whole failure this exists to prevent.
+	"""
+	if raw is None:
+		return None
+	if isinstance(raw, str):
+		try:
+			raw = json.loads(raw)
+		except Exception:
+			return None
+	if not isinstance(raw, list) or not raw or len(raw) > _MAX_APPROVAL_TOKENS:
+		return None
+	out: list[str] = []
+	for t in raw:
+		if not isinstance(t, str):
+			return None
+		t = t.strip()
+		if not t:
+			return None
+		out.append(t)
+	return out
+
+
+def _typed_approval_eligible(delegated, attachments, background) -> bool:
+	"""Whether a send may be read as a typed approval of a parked card.
+
+	Only a human, interactive, foreground composer send with no attachments
+	qualifies. Delegated/system re-entries (scheduler, agent runs, File-Box drops)
+	and background turns have no human at a composer, and an attachment means the
+	user is sending a file, not answering a card. Extracted and named so the gate
+	is unit-testable on its own - a refactor that quietly drops one of these
+	conditions could otherwise let a scripted/background message consume a card,
+	and no test would fail. ``int(background or 0)`` tolerates the "0"/"1" string
+	forms Frappe may pass a whitelisted int param.
+	"""
+	return not delegated and not attachments and not int(background or 0)
+
+
+def _typed_confirmation(
+	user: str, conversation: str, message: str, approval_tokens: str | list | None = None
+) -> dict | None:
+	"""Run the parked confirmations the user approved by typing, or return None.
+
+	The card gives two equal ways to say yes: the Confirm button, and saying so in
+	the composer. This is the second one, and it covers the same ground the buttons
+	do, including several cards at once:
+
+	  * "go ahead" with one card parked confirms it;
+	  * "go ahead" (or "confirm all") with several parked confirms ALL of them,
+	    because a user who lines up three writes and says go ahead means three;
+	  * "confirm 1 and 3" confirms exactly those, by the number on each card, for
+	    when the answer is these but not that one.
+
+	It is a convenience over the buttons, never a widening of them, so all of these
+	must hold or the message falls through and reaches the model as ordinary text:
+
+	  * the WHOLE message parses as an approval (``approval_phrases``). "Yes but
+	    change the quantity to 5" approves nothing and must reach the model;
+	  * every number named exists. "Confirm 4" against three cards is a
+	    misunderstanding, and running three writes on the strength of it would be
+	    exactly the wrong recovery;
+	  * the confirmation store can actually answer;
+	  * the caller is a human, interactive session with no attachments.
+
+	The security property is unchanged from the button, per card: same
+	authenticated session user, same owner-bound single-use ``consume``, same
+	``exec_user`` execution scope, same receipt chip. Approving in bulk runs N
+	independent confirmations; it does not create a path that skips any of them.
+	The model cannot reach this at all, since it arrives only through the human
+	session endpoint and never the plugin callback, and a typed approval racing a
+	click resolves to one winner inside ``consume``.
+
+	Running before the single-flight guard is safe even though the button carries a
+	client-side "wait for the current reply" check: the follow-up goes through
+	``enqueue_continuation``, which enqueues via admission and QUEUES behind a live
+	turn rather than racing it. A batch produces exactly ONE such turn, carrying
+	every receipt, so ten approvals do not become ten turns.
+
+	A card can expire between the user's glance and their send (its 15-minute TTL,
+	a stopped run clearing the tokens it parked (F6), a resync). A typed number
+	binds to the token the client showed at that number (``approval_tokens``), NOT
+	to a position in a list the server re-fetches, so an expired card cannot
+	renumber the rest onto a different write. If the token behind a named number is
+	no longer live it fails ITS OWN card inside the owner-bound single-use
+	``consume`` (never a substitution); if none of the named tokens is live the
+	whole message falls through to the model instead. This is the same guarantee
+	the Confirm button has - it too carries a specific token, not a position.
+
+	No user message is persisted, exactly as the buttons persist none. The
+	transcript still reads correctly because each confirmation writes its own
+	receipt chip.
+	"""
+	from jarvis.chat import approval_phrases
+
+	# Cheap reject first: most messages are not approvals, and this costs no I/O.
+	if not approval_phrases.looks_like_approval(message):
+		return None
+
+	# Bind the selection to the exact tokens the CLIENT displayed at each number,
+	# not to a position in a list the server re-fetches at send time. A card can
+	# expire between the user's glance and their send; the server list would then
+	# renumber and "confirm 2" could run a different, possibly more destructive
+	# card. Numbering the client's own displayed tokens makes the typed path
+	# token-bound like the Confirm button: a stale/foreign token fails its own
+	# card inside the owner-bound consume, and can never select another card.
+	client_tokens = _clean_approval_tokens(approval_tokens)
+	if not client_tokens:
+		# No displayed-token context (an older/other client, or a client that sent
+		# nothing): a number cannot be resolved safely, so fall through to the model
+		# and leave the user the Confirm button.
+		return None
+
+	# The server's own live set: needed so a selection that names ONLY cards the
+	# server no longer holds falls through (nothing valid to confirm) rather than
+	# reporting a batch of failures, and to source summaries for the receipts.
+	parked = _ordered_parked_cards(user, conversation)
+	if not parked:
+		return None
+	by_token = {c.get("token"): c for c in parked}
+
+	picked = approval_phrases.parse_approval(message, len(client_tokens))
+	if not picked:
+		return None
+
+	tokens_to_confirm = [client_tokens[i] for i in picked]
+	# If not one named token is still live server-side, treat it as "not an approval
+	# right now" and fall through - same outcome as the old no-cards-parked case.
+	if not any(t in by_token for t in tokens_to_confirm):
+		return None
+
+	from jarvis.chat.actions_api import _confirm_core
+
+	single = len(picked) == 1
+	results, tokens, receipts = [], [], []
+	solo_envelope = None
+	for i in picked:
+		token = client_tokens[i]
+		card = by_token.get(token) or {}
+		# batch=True for every card in a multi-card approval so the follow-up turn
+		# is composed once, below, instead of one per card. A token no longer live
+		# (card gone since the client rendered it) reaches _confirm_core and fails
+		# its own card via the single-use consume - never a substitution.
+		res = _confirm_core(token, conversation, batch=not single)
+		if not isinstance(res, dict):
+			res = {"ok": False, "error": {"type": "InternalError", "message": "confirmation failed"}}
+		if single:
+			solo_envelope = res
+		tokens.append(token)
+		results.append(
+			{
+				"token": token,
+				"position": i + 1,
+				"summary": card.get("summary") or "",
+				"ok": bool(res.get("ok")),
+				"error": res.get("error"),
+			}
+		)
+		if res.get("receipt_text"):
+			receipts.append(res["receipt_text"])
+
+	failed = [r for r in results if not r["ok"]]
+	# One continuation for the whole batch. The single-card path already queued its
+	# own inside _confirm_core, so only the batch path composes one here.
+	cont = None
+	if receipts:
+		from jarvis.chat.actions_api import enqueue_continuation as _enqueue_cont
+
+		try:
+			cont = _enqueue_cont(conversation, " ".join(receipts), failed=bool(failed))
+		except Exception:
+			frappe.log_error(
+				title="typed bulk confirmation continuation failed", message=frappe.get_traceback()
+			)
+
+	# The single-card envelope is the tool result itself, so the client keeps the
+	# shape it already handles. A batch reports per card instead: with three
+	# writes, "it worked" is not an answer when one of them did not.
+	if single:
+		# Pass the confirmation's own envelope straight through, so the queued
+		# chip details it already threaded on survive untouched.
+		out = dict(solo_envelope)
+	else:
+		out = {"ok": not failed}
+		if failed:
+			# Name the cards that failed by the number the user saw, so a partial
+			# batch is actionable ("card 2 could not be completed") instead of a
+			# bare count. The per-card results[] carries the same detail for a
+			# client that wants to render each chip; this is the at-a-glance line.
+			failed_positions = ", ".join(str(r["position"]) for r in failed)
+			out["error"] = {
+				"type": "PartialConfirmation",
+				"message": (
+					f"{len(results) - len(failed)} of {len(results)} actions went through; "
+					f"{len(failed)} could not be completed "
+					f"(card{'s' if len(failed) != 1 else ''} {failed_positions})."
+				),
+			}
+		if cont and cont.get("queued"):
+			out["queued"] = True
+			out["queued_position"] = cont.get("queued_position")
+			out["run_id"] = cont.get("run_id")
+			out["message_id"] = cont.get("message_id")
+	out["confirmed"] = True
+	out["conversation_id"] = conversation
+	out["tokens"] = tokens
+	out["results"] = results
+	return out
+
+
 @frappe.whitelist()
 def send_message(
 	conversation: str | None = None,
@@ -873,8 +1133,22 @@ def send_message(
 	context: str | None = None,
 	thinking_override: str | None = None,
 	background: int = 0,
+	approval_tokens: str | list | None = None,
 ) -> dict:
 	"""Validate, persist the user message, enqueue the worker.
+
+	RETURN SHAPE - two forms, and callers MUST branch on ``confirmed``:
+	  * ordinary send -> ``{ok, conversation_id, run_id, message_id, ...}`` (a turn
+	    was enqueued; run events follow over the socket).
+	  * typed approval of a parked confirmation card -> ``{ok, confirmed: True,
+	    conversation_id, tokens, results, ...}`` (the message WAS a go-ahead and ran
+	    the confirmation instead of a turn; NO run events follow, so a client that
+	    ignores ``confirmed`` and waits for run:start spins forever). ``ok`` can be
+	    False here with ``confirmed`` True (a batch where some cards failed), so a
+	    client must check ``confirmed`` BEFORE treating ``ok:False`` as a send error.
+	  See ``approval_tokens`` and ``_typed_confirmation``. A client that does not
+	  send ``approval_tokens`` never triggers the second form for a numbered
+	  selection, so an un-updated client degrades safely to ordinary sends.
 
 	`conversation` (optional): when empty, an empty active conversation is
 	created (or the existing empty one focused) server-side and its id is
@@ -969,6 +1243,19 @@ def send_message(
 			raise
 		conversation = create_or_focus_empty()
 		conv_doc = _get_owned_conversation(conversation)
+
+	# A typed go-ahead on a parked confirmation card is the SAME act as clicking
+	# Confirm, so it runs the confirmation instead of becoming a chat turn. Placed
+	# here on purpose: ownership of the conversation is settled, but nothing has
+	# been reserved or persisted yet, so an approval never burns a turn credit and
+	# never leaves a user row behind. Returns None whenever anything is less than
+	# unambiguous, and the message then continues as an ordinary send.
+	# A background send is a non-interactive turn, so there is no human at a
+	# composer to be approving anything with it.
+	if _typed_approval_eligible(_delegated, atts, background):
+		_typed = _typed_confirmation(user, conversation, message, approval_tokens)
+		if _typed is not None:
+			return _typed
 
 	# Single-flight guard: reject a second concurrent turn on the same
 	# conversation (extra tab / double-send / a retry racing a live turn) -

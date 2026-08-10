@@ -412,6 +412,29 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	browser session's sid + data are always restored - a bare ``frappe.set_user``
 	would gut the cookie session and log the user out.
 	"""
+	return _confirm_core(token, conversation)
+
+
+def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = False) -> dict:
+	"""The confirmation itself, with no HTTP surface of its own.
+
+	Two human paths reach it: the Confirm button (``confirm_tool`` above) and a
+	typed approval in the composer (``jarvis.chat.api.send_message``). Both are
+	the same authenticated session user acting on the same card, so they share
+	one implementation rather than one calling the other's whitelisted endpoint.
+
+	Every guarantee stays below this line, not in the callers: Guest refusal,
+	owner + conversation binding, the atomic single-use ``consume``, execution
+	under the stored ``exec_user``, the transcript receipt and the continuation
+	turn. A second entry point therefore cannot weaken the gate, and two racing
+	approvals (a click and a typed one) still resolve to exactly one winner.
+
+	``batch``: this card is one of several being approved together. The write, the
+	receipt chip and every guard still run per card, so nothing about the gate is
+	relaxed; only the follow-up turn is deferred. The receipt line is returned as
+	``receipt_text`` for the caller to fold into ONE continuation covering the
+	whole batch, instead of N turns queueing against each other.
+	"""
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
 
@@ -455,7 +478,10 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 		# through to a graceful failure envelope: the "failed" receipt + continuation
 		# below still fire, so the user sees it and the agent learns.
 		frappe.db.rollback()
-		frappe.log_error(title="confirm_tool dispatch crashed", message=frappe.get_traceback())
+		frappe.log_error(
+			title="confirm dispatch crashed",
+			message=f"token={token} conversation={guard_conv}\n{frappe.get_traceback()}",
+		)
 		result = api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
 
 	# Leave a transcript receipt (#7) so a confirmed delete/submit/email shows on
@@ -484,7 +510,10 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 				action_outcome="confirmed" if ok else "failed",
 			)
 		except Exception:
-			frappe.log_error(title="confirm_tool receipt failed", message=frappe.get_traceback())
+			frappe.log_error(
+				title="confirm receipt failed",
+				message=f"token={token} conversation={conv}\n{frappe.get_traceback()}",
+			)
 
 		# Continue the agent's plan: the model was told only "awaiting the
 		# user's confirmation" and stopped, so without this turn it never
@@ -500,11 +529,22 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 			from jarvis.chat import admission
 
 			admission.publish_action_confirmed(conv)
+		# In a batch the caller owns the follow-up: N cards approved in one breath
+		# must produce ONE continuation carrying all N receipts, not N turns racing
+		# each other through admission. The receipt line rides out on the envelope
+		# so the caller can compose them.
+		if batch:
+			if isinstance(result, dict):
+				result["receipt_text"] = _confirm_receipt_text(record, result)
+			return result
 		_cont = None
 		try:
 			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
 		except Exception:
-			frappe.log_error(title="confirm_tool continuation failed", message=frappe.get_traceback())
+			frappe.log_error(
+				title="confirm continuation failed",
+				message=f"token={token} conversation={conv}\n{frappe.get_traceback()}",
+			)
 		# SUX-3/SUXI-2: thread the queued continuation's position onto a SUCCESSFUL
 		# confirm result so the SPA shows the queued chip (the card doesn't vanish
 		# into silence while the continuation sits queued). A failed confirm keeps

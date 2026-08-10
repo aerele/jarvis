@@ -133,19 +133,46 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
     token: "t1",
     tool: "create_doc",
     summary: "Create ToDo",
+    expires_at: 1700,
   });
   s = applyEvent(s, {
     kind: "action:pending",
     token: "t1",
     tool: "create_doc",
     summary: "Create ToDo",
+    expires_at: 1700,
   });
   assert.equal(s.pending.length, 1);
   assert.deepEqual(s.pending[0], {
     token: "t1",
     tool: "create_doc",
     summary: "Create ToDo",
+    expires_at: 1700,
   });
+});
+
+test("action:pending carries expires_at so numbered typed approval sorts by mint time", () => {
+  // expires_at is the primary sort key the panel numbers cards by. If it is
+  // dropped here, orderedPending falls back to token order and diverges from the
+  // server, so a typed "confirm 2" can run the wrong card. Pin that it survives.
+  const s = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "abc",
+    tool: "delete_doc",
+    summary: "Delete Customer",
+    expires_at: 1902,
+  });
+  assert.equal(s.pending[0].expires_at, 1902);
+});
+
+test("action:pending with no expires_at on the wire falls back to null, not undefined", () => {
+  const s = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "z",
+    tool: "submit_doc",
+    summary: "Submit SO",
+  });
+  assert.equal(s.pending[0].expires_at, null);
 });
 
 test("action:pending without a token is ignored", () => {

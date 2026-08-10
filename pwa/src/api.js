@@ -34,13 +34,23 @@ export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
 // model/thinking are sent as per-turn overrides, which is how the new-chat
 // screen applies the device's preferred model without mutating the workspace
 // default.
-export const sendMessage = (conversation, message, { attachments = [], model, thinking } = {}) =>
+export const sendMessage = (
+	conversation,
+	message,
+	{ attachments = [], model, thinking, approvalTokens } = {}
+) =>
 	call(CHAT + "send_message", {
 		conversation: conversation || "",
 		message,
 		...(attachments.length ? { attachments: JSON.stringify(attachments) } : {}),
 		...(model ? { model_override: model } : {}),
 		...(thinking ? { thinking_override: thinking } : {}),
+		// Ordered tokens of the on-screen confirmation cards, so a typed "confirm 2"
+		// binds to the card shown at that number rather than a server-re-fetched
+		// position that a mid-flight expiry could renumber onto the wrong write.
+		...(approvalTokens && approvalTokens.length
+			? { approval_tokens: JSON.stringify(approvalTokens) }
+			: {}),
 	});
 
 export const stopRun = (conversation, runId) =>

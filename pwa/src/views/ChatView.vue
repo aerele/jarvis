@@ -29,6 +29,7 @@ import {
 	toolStatus,
 } from "../lib/blocks";
 import { spanBetween } from "../lib/time";
+import { sortPendingCards } from "../lib/sortPendingCards.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
 import Composer from "../components/Composer.vue";
@@ -65,6 +66,20 @@ const sendBusy = ref(false);
 const errorBanner = ref("");
 const attachments = ref([]);
 const pending = ref([]); // parked writes awaiting approval
+// Ordered the SAME way the server orders the parked list, because a typed
+// "confirm 2" selects by the number shown on the card. The store keeps tokens in
+// a Redis SET, which has no order at all, so without this the numbers on screen
+// and the numbers the server counts could disagree and the wrong write would run.
+// Tokens compare by code unit to match Python's byte order, not localeCompare.
+// Ordered by the shared, unit-tested comparator so the numbers on screen match
+// the server's (expires_at, token) order a typed "confirm N" resolves against.
+const orderedPending = computed(() => sortPendingCards(pending.value));
+// Typed approval works here as on the desktop, but only the desktop advertised
+// it. The selective example numbers track the real count so it never overshoots.
+const typedApprovalHint = computed(() => {
+	const n = orderedPending.value.length;
+	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
+});
 const settings = ref(null);
 
 // The turn in flight. Held separately from `messages` because it is not durable
@@ -276,7 +291,26 @@ async function send() {
 		// screen — same rule as the native app.
 		const res = await api.sendMessage(convId.value, text, {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
+			// Numbers a typed approval selects by must resolve against the cards on
+			// screen, in this order, not a list the server re-fetches at send time.
+			approvalTokens: orderedPending.value.map((p) => p.token),
 		});
+		// The server read this as a go-ahead on the parked card and ran the
+		// confirmation instead of starting a turn, so no run events are coming and
+		// nothing was persisted for the typed words. Take the spinner down here or
+		// it waits forever, and drop the optimistic echo of a message that does not
+		// exist. The receipt chip in the reloaded thread is what the user sees.
+		if (res?.confirmed) {
+			sendBusy.value = false;
+			messages.value = messages.value.filter((m) => !m.optimistic);
+			if (res.ok === false)
+				errorBanner.value =
+					res.error?.message ||
+					"That confirmation is no longer valid. Ask again to retry it.";
+			await load(true);
+			await loadPending();
+			return;
+		}
 		if (res?.ok === false) {
 			sendBusy.value = false;
 			messages.value = messages.value.filter((m) => !m.optimistic);
@@ -739,11 +773,16 @@ onUnmounted(() => {
 		<ThinkingIndicator v-if="sending && !(live && live.text)" />
 
 		<DecisionCard
-			v-for="p in pending"
+			v-for="(p, pi) in orderedPending"
 			:key="p.token"
-			:summary="p.summary || p.tool || `${agentName} needs your approval`"
+			:summary="
+				(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
+				(p.summary || p.tool || `${agentName} needs your approval`)
+			"
 			@open="decision = p"
 		/>
+		<!-- Both ways to approve, shown once under the stack. -->
+		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">
@@ -1116,6 +1155,12 @@ onUnmounted(() => {
 	border-radius: 4px;
 }
 
+.jv-typehint {
+	margin: 6px 4px 2px;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--ink5);
+}
 .jv-banner {
 	display: flex;
 	align-items: center;

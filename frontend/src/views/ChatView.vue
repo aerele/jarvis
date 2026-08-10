@@ -663,7 +663,7 @@
 						<Message
 							v-else
 							variant="row"
-							:html="m.error ? '' : render(m.content)"
+							:html="m.error ? '' : render(m.content, m.streaming)"
 							:attachments="m.canvas"
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
@@ -1862,7 +1862,7 @@
 					     carries its own server-minted one-time token. A single turn can
 					     park more than one, so we stack a card per queued token (#4). -->
 					<div
-						v-for="pa in visiblePendingActions"
+						v-for="(pa, pi) in visiblePendingActions"
 						:key="pa.token"
 						class="jv-action jv-pending"
 					>
@@ -1883,6 +1883,11 @@
 								<path d="M12 9v4M12 17h.01" />
 							</svg>
 							<span class="jv-action-title">Confirm before this runs</span>
+							<!-- The number is what a typed "confirm 1 and 3" selects by, so it
+							     only appears when there is actually a choice to make. -->
+							<span v-if="visiblePendingActions.length > 1" class="jv-pending-num">
+								{{ pi + 1 }} of {{ visiblePendingActions.length }}
+							</span>
 						</div>
 						<div class="jv-pending-body">
 							<div v-if="pendingSummaryOf(pa)" class="jv-pending-summary">
@@ -1944,6 +1949,14 @@
 								<span v-if="pa.busy">Confirming…</span
 								><span v-else>✓ Confirm</span>
 							</button>
+							<!-- Two equal ways to approve. Shown once per stack, on the last
+							     card, so a queue of five does not repeat it five times. -->
+							<span
+								v-if="pi === visiblePendingActions.length - 1"
+								class="jv-action-typehint"
+							>
+								{{ typedApprovalHint }}
+							</span>
 							<button
 								class="jv-action-discard"
 								:disabled="pa.busy"
@@ -3758,6 +3771,9 @@ import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.v
 import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { normaliseAction } from "@/lib/chatAction";
+import { stripBlocks } from "@/lib/chatBlocks";
+import { createRevealer } from "@/lib/streamReveal";
+import { sortPendingCards } from "@/lib/sortPendingCards";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import { pickGreeting } from "@/lib/greeting";
@@ -4333,6 +4349,22 @@ function clearStreamingActivity() {
 	currentRunId.value = null;
 	store.streamingConvId = null;
 	recovering.value = null;
+	flushReveal(); // nothing is streaming anymore, so nothing may stay mid-reveal
+}
+// Tool events are only meaningful while their run is live. The CDX-3 pump fence
+// deliberately lets an epoch-less tool event through, so a straggler or replayed
+// tool:start arriving AFTER run:end (which clears activeTools) used to push a
+// fresh `running` entry that no tool:end would ever settle. The live activity
+// block renders on activeTools.length alone, so the user got an expanded tool row
+// with a spinner they never opened, stuck until the next turn. That is the
+// intermittent "the tool list is showing on its own".
+//
+// A tool event is stale when no run is in flight, or when it names a different
+// run than the one on screen. An event with no run_id is trusted while a run is
+// live, which keeps the legacy epoch-less path working.
+function toolEventIsStale(p) {
+	if (!currentRunId.value) return true;
+	return !!p.run_id && p.run_id !== currentRunId.value;
 }
 function tearDownActivityIfSettled() {
 	const rid = currentRunId.value;
@@ -4378,6 +4410,83 @@ onUnmounted(() => enrichmentTracker.reset());
 const recovering = ref(null); // { message_id, reason } while a turn is parked for background recovery — the composer stays UNLOCKED so the user isn't trapped
 const retrying = ref(false); // guards the error-card Retry against a double-enqueue while one is in flight
 const srMessage = ref(""); // visually-hidden aria-live text (turn completion / failure) for screen readers
+// ── Smooth reveal ───────────────────────────────────────────────────────────
+// assistant:delta carries the CUMULATIVE reply, and assigning it straight to the
+// row made the text move at whatever rate the socket delivered it: a word, a
+// stall, then a paragraph in a single frame. The revealer holds the newest text
+// as a target and a frame loop walks the row toward it, absorbing bursts.
+// lib/streamReveal.js owns the cursor arithmetic and the snap rules; this owns
+// the frame loop and the DOM writes.
+const revealer = createRevealer();
+let _revealRaf = 0;
+function _applyRevealed(id, text) {
+	const m = messages.value.find((x) => x.name === id);
+	if (m) m.content = text;
+	return !!m;
+}
+// A painted frame costs a full markdown re-parse plus a v-html rewrite of the
+// whole message, so painting all 60 frames a second is several times the work the
+// old socket-rate rendering did and a long reply visibly stutters. Paint at ~25/s
+// instead, and hand tick() the frames that were skipped so the reveal moves at the
+// same SPEED with a fraction of the render cost. 40ms is still well inside what
+// reads as continuous for text appearing.
+const REVEAL_PAINT_MS = 40;
+const FRAME_MS = 1000 / 60;
+let _lastPaintMs = 0;
+function revealFrame() {
+	_revealRaf = 0;
+	const now = performance.now();
+	const dt = now - _lastPaintMs;
+	if (dt < REVEAL_PAINT_MS) {
+		// Too soon to repaint, but the reveal is not finished: keep the loop alive.
+		_revealRaf = requestAnimationFrame(revealFrame);
+		return;
+	}
+	// Frames' worth of catch-up owed since the last paint, so a slow frame (or a
+	// throttled tab) does not slow the text down, it just moves further per paint.
+	const frames = Math.max(1, Math.round(dt / FRAME_MS));
+	_lastPaintMs = now;
+	let painted = false;
+	for (const id of revealer.pending()) {
+		const step = revealer.tick(id, frames);
+		if (!step) continue;
+		// The row went away (conversation switch, reload). Stop animating into
+		// nothing rather than holding the loop open forever.
+		if (!_applyRevealed(id, step.text)) revealer.drop(id);
+		else painted = true;
+	}
+	// Scroll rides the reveal, not the socket: following the text as it appears
+	// is what keeps a long answer readable while it writes itself.
+	if (painted) scrollBottomIfPinned();
+	if (revealer.pending().length) _revealRaf = requestAnimationFrame(revealFrame);
+}
+function pumpReveal() {
+	if (_revealRaf || !revealer.pending().length) return;
+	// Start the clock now: a timestamp left over from the previous reply would
+	// otherwise make this burst's first paint either instant or a frame late.
+	if (!_lastPaintMs || performance.now() - _lastPaintMs > 1000)
+		_lastPaintMs = performance.now() - REVEAL_PAINT_MS;
+	_revealRaf = requestAnimationFrame(revealFrame);
+}
+// Snap one message (or every message) to its full text. Every terminal calls
+// this: a cursor still mid-walk when the run settles would truncate the answer.
+function flushReveal(id) {
+	if (id) {
+		const full = revealer.flush(id);
+		if (full != null) _applyRevealed(id, full);
+		return;
+	}
+	for (const [mid, full] of revealer.flushAll()) _applyRevealed(mid, full);
+	if (_revealRaf) {
+		cancelAnimationFrame(_revealRaf);
+		_revealRaf = 0;
+	}
+}
+// requestAnimationFrame does not run in a background tab, so an animating reply
+// would freeze there until the user came back. Snap instead.
+function onVisibilityChange() {
+	if (document.hidden) flushReveal();
+}
 const activeTools = ref([]); // [{ id, name, status }] for the in-flight run
 // Live activity shows ONE tool at a time: the most-recently-started tool that's
 // still running, plus a compact count of the ones already finished this turn.
@@ -5178,19 +5287,8 @@ function parseXychart(body) {
 	if (horizontal) spec.options = { horizontal: true };
 	return spec;
 }
-function stripBlocks(text) {
-	return (text || "")
-		.replace(/```jarvis-action[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```confirm[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-ask[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-cards[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-skill[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-macro[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```jarvis-chart[ \t]*\n[\s\S]*?```/g, "")
-		.replace(/```mermaid[ \t]*\n[ \t]*xychart-beta[\s\S]*?```/g, "")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
-}
+// Moved to lib/chatBlocks.js so the streaming rule (hold an unterminated block
+// instead of letting marked render it as raw JSON) is unit-testable.
 const _skillUsedCache = new Map();
 function skillsUsedOf(m) {
 	const content = (m && m.content) || "";
@@ -5420,17 +5518,21 @@ function confirmLabel(m) {
 // identical content in two messages renders identically.
 let _renderCacheRegex = undefined;
 let _renderCache = new Map();
-function render(text) {
+function render(text, streaming = false) {
 	const re = docNameRegex.value;
 	if (re !== _renderCacheRegex) {
 		_renderCacheRegex = re;
 		_renderCache = new Map();
 	}
-	const hit = _renderCache.get(text);
+	// The same text renders two ways: mid-stream an unterminated block is held
+	// back, once settled it is shown. So the flag is part of the cache key, or a
+	// reply would keep the held version for the rest of the session.
+	const key = (streaming ? "S:" : "F:") + text;
+	const hit = _renderCache.get(key);
 	if (hit !== undefined) return hit;
-	const out = linkifyDocs(renderMarkdown(stripBlocks(text)));
+	const out = linkifyDocs(renderMarkdown(stripBlocks(text, streaming)));
 	if (_renderCache.size >= 800) _renderCache.clear();
-	_renderCache.set(text, out);
+	_renderCache.set(key, out);
 	return out;
 }
 // {document name → DocType} harvested from THIS conversation's tool calls
@@ -6175,8 +6277,27 @@ const pendingActions = ref([]);
 // Only the cards belonging to the conversation on screen render (a parked write
 // from another chat must not show here). The queue is already pruned to the
 // current conversation on load, but filter defensively for the template v-for.
+// Sorted the SAME way the server orders the parked list (mint order: expires_at
+// is mint time plus a fixed TTL, with the token breaking a same-second tie).
+// Load-bearing once a typed "confirm 1 and 3" can select by the number printed on
+// each card: if the screen and the server disagree about which card is number 1,
+// the wrong write runs. The queue's own arrival order is close but not identical,
+// since a resync merges cards in whatever order the store returned them.
+// What the hint offers depends on how many cards are stacked: with one there
+// is nothing to select, with several the useful thing to teach is that both
+// all-at-once and pick-a-few work.
+const typedApprovalHint = computed(() => {
+	const n = visiblePendingActions.value.length;
+	// The example must reference cards that actually exist: with two parked,
+	// "confirm 1 and 3" names a card 3 that is not there, so a user who copies it
+	// verbatim gets an out-of-range no-op. Use the real first and last numbers.
+	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
+});
 const visiblePendingActions = computed(() =>
-	pendingActions.value.filter((pa) => pa.conversation === currentId.value)
+	// Ordered by the shared, unit-tested comparator (sortPendingCards) so the
+	// numbers on screen match the server's (expires_at, token) order a typed
+	// "confirm N" resolves against. See lib/sortPendingCards.js.
+	sortPendingCards(pendingActions.value.filter((pa) => pa.conversation === currentId.value))
 );
 
 // A legacy container (persona v0.39, pre write-safety) may still emit a
@@ -6333,6 +6454,43 @@ async function confirmPending(pa) {
 	} finally {
 		const card = cardById();
 		if (card) card.busy = false;
+	}
+}
+// Resolution shared by the typed go-ahead and the Confirm button, so the two
+// ways of approving a card cannot drift apart in what the user then sees.
+// `r` is the envelope from the confirmation itself, already stripped of its card.
+async function onTypedConfirmResolved(r) {
+	if (r && r.ok === false) {
+		// A storage wobble means the write did NOT run, and the card has already
+		// been retired on screen, so say so plainly rather than leave them guessing.
+		if (confirmationStorageUnavailable(r)) {
+			notify(r.error.message, { type: "error" });
+			await resyncPendingConfirmations(currentId.value);
+			return;
+		}
+		if (r.error && r.error.type === "InvalidConfirmation") {
+			notify("That confirmation is no longer valid. Ask me to try the action again.", {
+				type: "error",
+			});
+			return;
+		}
+		// The token was spent and the write failed. A durable "failed" receipt chip
+		// is already in the transcript; reload so it is what the user sees.
+		await loadConversation(currentId.value);
+		store.loadConversations();
+		return;
+	}
+	await loadConversation(currentId.value);
+	store.loadConversations();
+	// The continuation turn queued behind other work. Same chip the button raises,
+	// so an approved action never vanishes into silence.
+	if (r && r.queued) {
+		queuedTurn.value = {
+			run_id: r.run_id,
+			message_id: r.message_id,
+			position: r.queued_position || null,
+		};
+		sending.value = true;
 	}
 }
 // Dismiss: consume the token server-side (closes the 15-min replay window and
@@ -6914,6 +7072,14 @@ async function loadConversation(id) {
 	// does a single clean load, would put it right. (Root cause of "open a
 	// chat, switch away and back, it shows empty until I refresh".)
 	if (currentId.value !== id) return;
+	// Flush any in-flight reveal BEFORE swapping in the freshly-loaded rows. On a
+	// reconnect resync the socket may have missed a run's terminal (fire-and-forget
+	// pub/sub, no replay), so flushReveal(message_id) never ran for it; a leftover
+	// cursor would otherwise keep ticking and overwrite the DB-correct final text
+	// with its stale, truncated target - a shortened answer with no spinner and no
+	// error, fixable only by a hard refresh. flushReveal() cancels the loop and
+	// clears all reveal state, so nothing survives to touch the new array.
+	flushReveal();
 	messages.value = d?.messages || [];
 	// VR4-2: re-inject any failed optimistic bubbles whose send was rejected while THIS conversation
 	// was off-screen (their rendered copy was dropped when messages was replaced). They are kept
@@ -7210,6 +7376,9 @@ function downloadSvgAsPng(svgEl) {
 // send() bails on sending) because the leaving run's run:end event is dropped
 // by the conversation guard in onEvent.
 function resetRunState() {
+	// Leaving the conversation: apply whatever is mid-reveal to the rows we are
+	// about to drop, so a reload of this chat cannot find a truncated message.
+	flushReveal();
 	sending.value = false;
 	waiting.value = false;
 	activeTools.value = [];
@@ -7542,8 +7711,24 @@ async function send(textArg, resendAck) {
 		// one-shot _prefillSendContext is cleared after the send is accepted, below,
 		// so a rejected send keeps it armed for retry.)
 		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
-		const r = await api.sendMessage(sentFrom, text, undefined, attachments, sendCtx);
-		if (r && r.ok === false) {
+		// The confirmation cards currently on screen, in the order the numbers are
+		// shown, so a typed "confirm 2" binds to the card the user actually sees.
+		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
+		const r = await api.sendMessage(
+			sentFrom,
+			text,
+			undefined,
+			attachments,
+			sendCtx,
+			approvalTokens
+		);
+		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
+		// must not fall into the rejection branch below even when the confirmation
+		// itself failed. It is handled further down, on the accepted path, where it
+		// shares that path's one-shot context clear and voice release rather than
+		// duplicating them (the lifecycle tests anchor on the FIRST occurrence of
+		// those lines, and a second copy above the rejection block moves the anchor).
+		if (r && r.ok === false && !r.confirmed) {
 			// The server rejected the send (e.g. the single-flight guard:
 			// "a reply is already in progress", or the monthly usage cap).
 			// Nothing was persisted — recover it (below) so no work and no voice audio
@@ -7629,6 +7814,21 @@ async function send(textArg, resendAck) {
 		// chips say so rather than reading like leftover clutter next to an already-answered
 		// message, and so their Retry promises the current draft, not an edit of a sent message.
 		if (voiceStore) for (const _fid of _failedAtSend) voiceStore.markSentWithout(_fid);
+		// The server ran the parked confirmation instead of starting a turn. No run
+		// events are coming, so the spinner comes down here or it hangs forever, and
+		// nothing was persisted for the typed words (the button persists none either)
+		// so the optimistic bubble goes too: the receipt chip and the continuation
+		// reply are the record. Placed after the release above, which a confirmed
+		// message has legitimately earned.
+		if (r && r.confirmed) {
+			if (_currentScope() === _sentScope)
+				messages.value = messages.value.filter((x) => x.name !== tmpName);
+			sending.value = false;
+			waiting.value = false;
+			for (const t of r.tokens || []) removePending(t);
+			await onTypedConfirmResolved(r);
+			return;
+		}
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
@@ -7879,13 +8079,18 @@ function onEvent(p) {
 				m = { name: p.message_id, role: "assistant", content: "", streaming: true };
 				messages.value = [...messages.value, m];
 			}
-			m.content = p.text;
+			// Reveal paced rather than assigned. The first delta of a message comes
+			// back whole, so the row never renders empty (the view hides an empty
+			// streaming row, which would flicker the reply out just as it arrives).
+			m.content = revealer.receive(p.message_id, p.text);
 			m.streaming = true;
+			pumpReveal();
 			nextTick(scrollBottomIfPinned);
 			break;
 		}
 		case "tool:start": {
 			if (pumpFenceReject(p)) break; // CDX-3 (epoch-less legacy tool events bypass)
+			if (toolEventIsStale(p)) break;
 			pumpFenceAccept(p, false);
 			const id = p.tool_call_id || `${p.tool_name}-${activeTools.value.length}`;
 			activeTools.value = [
@@ -7899,6 +8104,7 @@ function onEvent(p) {
 		}
 		case "tool:end": {
 			if (pumpFenceReject(p)) break; // CDX-3 (epoch-less legacy tool events bypass)
+			if (toolEventIsStale(p)) break;
 			pumpFenceAccept(p, false);
 			const t = activeTools.value.find((x) => x.id === p.tool_call_id);
 			if (t) t.status = p.status || "completed";
@@ -7959,6 +8165,10 @@ function onEvent(p) {
 			resyncPendingConfirmations(currentId.value);
 			// Defensive: if a promoted turn's run:start was missed, retire the chip.
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
+			// Snap BEFORE clearing `streaming`: the SUX-6 identical-skip below assumes
+			// the streamed text already equals the final text, which is only true once
+			// the reveal cursor has caught up.
+			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
 			if (m) m.streaming = false;
 			// SUX-6: the terminal final text is the last cumulative mirror in the normal
@@ -8079,6 +8289,7 @@ function onEvent(p) {
 					[p.message_id]: { code: p.code || "", changed_data: p.changed_data },
 				};
 			}
+			flushReveal(p.message_id); // whatever streamed before the error stays whole
 			recovering.value = null;
 			waiting.value = false;
 			sending.value = false;
@@ -8103,6 +8314,9 @@ function stopRun() {
 	if (currentMsgId.value) stoppedMsgIds.value.add(currentMsgId.value);
 	const m = [...messages.value].reverse().find((x) => x.role === "assistant" && x.streaming);
 	if (m) {
+		// Stop keeps whatever streamed. Snap first so the marker lands on the text
+		// the run actually produced, not on wherever the cursor happened to be.
+		flushReveal(m.name);
 		m.streaming = false;
 		if (m.name) stoppedMsgIds.value.add(m.name);
 		// A stop is a state of the turn, not prose: leave whatever streamed
@@ -9184,6 +9398,9 @@ function onResync() {
 }
 function onVisibility() {
 	if (document.visibilityState === "visible") onResync();
+	// Going to the background stops requestAnimationFrame, so anything mid-reveal
+	// would sit frozen until the user came back. Snap it instead.
+	else flushReveal();
 }
 
 // ---- shell contract (§3.7): New Chat requests, external navigation and
@@ -9412,6 +9629,7 @@ onMounted(async () => {
 	composerRef.value?.focusInput();
 });
 onBeforeUnmount(() => {
+	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("connect", onResync);
 	document.removeEventListener("visibilitychange", onVisibility);
@@ -12483,6 +12701,24 @@ onUnmounted(() => {
 	color: var(--cta-fg) !important;
 	border-color: var(--cta) !important;
 	filter: brightness(1.18);
+}
+/* The card's position in the parked stack. It is a selector, not decoration:
+   "confirm 2" means this one. */
+.jv-pending-num {
+	margin-left: auto;
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--amber);
+	white-space: nowrap;
+}
+/* The typed-approval hint. Quiet by design: the button is the primary path and
+   this is the shortcut, so it must not compete with either action beside it. */
+.jv-action-typehint {
+	font-size: 12px;
+	color: var(--text-3);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .jv-action-discard {
 	margin-left: auto;
