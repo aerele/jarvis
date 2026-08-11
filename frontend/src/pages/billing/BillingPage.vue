@@ -546,15 +546,21 @@ async function doDowngrade(plan) {
 }
 
 async function doRenew() {
-	const price = currentPlan.value ? currentPlan.value.price_inr : 0;
 	// Renew has no preview_* sibling: the amount is simply the plan's price, so
 	// the confirm step reads it off the plan rather than minting an order the
-	// customer has not agreed to yet.
+	// customer has not agreed to yet. Renew/reactivate charge tax-inclusive
+	// server-side, so the confirm dialog must show total_inr (price_inr + GST),
+	// not the pre-tax price_inr - otherwise the number shown here understates
+	// what actually gets charged. Fall back to price_inr against an older
+	// backend that has not started sending total_inr yet.
+	const charge = currentPlan.value
+		? currentPlan.value.total_inr ?? currentPlan.value.price_inr
+		: 0;
 	openConfirm({
 		title: "Renew subscription",
-		amount: inr(price),
+		amount: inr(charge),
 		message: "Renewing restores access straight away for another full billing period.",
-		confirmLabel: `Pay ${inr(price)}`,
+		confirmLabel: `Pay ${inr(charge)}`,
 		run: () =>
 			runPayment({
 				key: "renew",
@@ -574,12 +580,16 @@ async function doRenew() {
  * period left to prorate or schedule against, so it is one full-price payment
  * that starts a new period - up or down, mechanically identical. */
 async function doReactivate(plan) {
+	// Same tax-inclusive rule as doRenew above: total_inr is what gets charged,
+	// price_inr is only the pre-tax base, so the dialog leads with total_inr and
+	// falls back to price_inr against an older backend.
+	const charge = plan.total_inr ?? plan.price_inr;
 	openConfirm({
 		title: `Renew on ${plan.plan_name || plan.name}`,
-		amount: inr(plan.price_inr),
+		amount: inr(charge),
 		message:
 			"This charges the plan's full price and starts a new billing period right away. There is no credit for time already lapsed, and nothing is scheduled.",
-		confirmLabel: `Pay ${inr(plan.price_inr)}`,
+		confirmLabel: `Pay ${inr(charge)}`,
 		run: () =>
 			runPayment({
 				key: "react:" + plan.name,
