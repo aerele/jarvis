@@ -992,6 +992,33 @@
 											}}</b>
 										</div>
 										<div
+											v-if="pricing.gstPercent"
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Subtotal</span
+											><b class="font-medium text-ink-gray-9">{{
+												inr(pricing.subtotal)
+											}}</b>
+										</div>
+										<div
+											v-if="pricing.gstPercent"
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">GST ({{ pricing.gstPercent }}%)</span
+											><b class="font-medium text-ink-gray-9">{{
+												inr(pricing.gstAmount)
+											}}</b>
+										</div>
+										<div
+											v-if="pricing.gstPercent"
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Total</span
+											><b class="font-medium text-ink-gray-9">{{
+												inr(pricing.total)
+											}}</b>
+										</div>
+										<div
 											class="flex items-center justify-between gap-3 bg-surface-gray-1 px-4 py-3 text-p-sm"
 										>
 											<span class="text-ink-gray-5">Due today</span
@@ -1598,6 +1625,7 @@ import {
 	nextStep,
 	prevStep,
 	planDueToday,
+	planPricing,
 	planSubtitleFor,
 } from "@/onboarding/steps";
 import { inr, planAmount, planSuffix } from "@/account/format";
@@ -2033,6 +2061,10 @@ const planRowLabel = computed(() => {
 // #671: planDueToday lives in onboarding/steps.js so the Plan cards and this Review
 // row read ONE definition, and so it is unit-testable under node --test.
 const dueTodayLabel = computed(() => planDueToday(selectedPlan.value));
+// GST tax breakdown (2026-08): base/GST/total split for the Review card's
+// Subtotal/GST/Total rows. Same canonical formula as planDueToday's `total` -
+// planPricing is the one place that math lives.
+const pricing = computed(() => planPricing(selectedPlan.value));
 
 function goNext() {
 	state.step = nextStep(steps.value, state.step);

@@ -351,3 +351,80 @@ describe("jarvis#297 P0-2a: verification is no longer a dead end", () => {
 		expect(wrapper.vm.pay.value).toBe(STATES.VERIFICATION_REQUIRED);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// GST tax breakdown (2026-08): Review & pay card's Subtotal/GST/Total rows.
+// ---------------------------------------------------------------------------
+describe("GST tax breakdown: Review & pay Subtotal/GST/Total rows", () => {
+	it("a trial Standard plan with gst_percent 18 shows the base/GST/total split and a ₹0 due-today", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.plans = [
+			{
+				name: "standard",
+				plan_name: "Standard",
+				price_inr: 3500,
+				gst_percent: 18,
+				billing_cycle: "Monthly",
+				trial_days: 7,
+				signup_fee_inr: 0,
+			},
+		];
+		wrapper.vm.state.planName = "standard";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.email = "acme@example.com";
+		wrapper.vm.state.step = "pay";
+		await flushPromises();
+
+		// The default pay machine state is STATES.REVIEW (initialState()), so a fresh
+		// mount with none of the paid/verify/confirming/busy/recovery/maintenance
+		// branches triggered lands on the Review & pay summary card.
+		expect(wrapper.vm.pay.value).toBe(STATES.REVIEW);
+		expect(wrapper.vm.pricing).toEqual({
+			subtotal: 3500,
+			gstPercent: 18,
+			gstAmount: 630,
+			total: 4130,
+		});
+		expect(wrapper.vm.dueTodayLabel).toBe("₹0 today · then ₹4,130/mo after 7 days");
+
+		const text = wrapper.text();
+		const html = wrapper.html();
+		expect(text).toContain("Subtotal");
+		expect(text).toContain("GST (18%)");
+		expect(text).toContain("₹630");
+		// A plain toContain("Total") would also pass if the Total row went missing,
+		// since "Subtotal" and "₹4,130" (from the due-today label) are already on
+		// the page - match the row's own span so it verifies the row itself renders.
+		expect(html).toMatch(/<span[^>]*class="text-ink-gray-5">Total<\/span>/);
+		expect(text).toContain("₹4,130");
+		expect(text).toContain("Due today");
+		expect(text).toContain("₹0 today");
+	});
+
+	it("a plan without gst_percent renders no Subtotal/GST/Total rows", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.plans = [
+			{
+				name: "legacy",
+				plan_name: "Legacy",
+				price_inr: 3500,
+				billing_cycle: "Monthly",
+				trial_days: 0,
+				signup_fee_inr: 0,
+			},
+		];
+		wrapper.vm.state.planName = "legacy";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.email = "acme@example.com";
+		wrapper.vm.state.step = "pay";
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.REVIEW);
+		expect(wrapper.vm.pricing.gstPercent).toBe(0);
+		const text = wrapper.text();
+		expect(text).not.toContain("Subtotal");
+		expect(text).not.toContain("GST (");
+	});
+});

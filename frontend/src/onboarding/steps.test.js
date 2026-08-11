@@ -12,6 +12,7 @@ import {
 	GENERIC_NOT_READY_NOTE,
 	syncStatusNote,
 	planDueToday,
+	planPricing,
 	planSubtitleFor,
 } from "./steps.js";
 
@@ -124,55 +125,96 @@ test("isOnboardComplete reads readiness", () => {
 });
 
 // --------------------------------------------------------------------------- //
-// #671 - what is due TODAY, shown on the Plan card and the Review row
+// GST tax breakdown (2026-08) - base/GST/total split, canonical rounding
 // --------------------------------------------------------------------------- //
-test("planDueToday: a trial plan leads with zero due now, then the recurring price", () => {
-	assert.equal(
-		planDueToday({
-			plan_name: "Standard",
-			price_inr: 3500,
-			billing_cycle: "Monthly",
-			trial_days: 7,
-		}),
-		"₹0 today · then ₹3,500/mo after 7 days"
+test("planPricing splits base + GST with canonical rounding", () => {
+	assert.deepEqual(
+		planPricing({ plan_name: "Standard", price_inr: 3500, gst_percent: 18, billing_cycle: "Monthly" }),
+		{ subtotal: 3500, gstPercent: 18, gstAmount: 630, total: 4130 }
 	);
 });
 
-test("planDueToday: a signup fee is what is due now, not zero", () => {
-	// admin's get_plans comment: pricing from price_inr alone understates the charge,
-	// "most visibly on a trial plan, where the fee is the entire amount due now". The
-	// Review row this replaces hardcoded a flat zero for every trial.
+test("planPricing: no gst_percent (absent or zero) collapses to identity", () => {
+	assert.deepEqual(planPricing({ price_inr: 3500 }), {
+		subtotal: 3500,
+		gstPercent: 0,
+		gstAmount: 0,
+		total: 3500,
+	});
+	assert.deepEqual(planPricing({ price_inr: 3500, gst_percent: 0 }), {
+		subtotal: 3500,
+		gstPercent: 0,
+		gstAmount: 0,
+		total: 3500,
+	});
+});
+
+test("planPricing: a missing plan is a zeroed split, not a crash", () => {
+	assert.deepEqual(planPricing(null), { subtotal: 0, gstPercent: 0, gstAmount: 0, total: 0 });
+});
+
+// --------------------------------------------------------------------------- //
+// #671 - what is due TODAY, shown on the Plan card and the Review row
+// --------------------------------------------------------------------------- //
+test("planDueToday: a trial plan leads with zero due now, then the tax-inclusive recurring price", () => {
 	assert.equal(
 		planDueToday({
 			plan_name: "Standard",
 			price_inr: 3500,
+			gst_percent: 18,
+			billing_cycle: "Monthly",
+			trial_days: 7,
+		}),
+		"₹0 today · then ₹4,130/mo after 7 days"
+	);
+});
+
+test("planDueToday: a signup fee is what is due now, not zero (fee itself is untaxed)", () => {
+	// admin's get_plans comment: pricing from price_inr alone understates the charge,
+	// "most visibly on a trial plan, where the fee is the entire amount due now". The
+	// Review row this replaces hardcoded a flat zero for every trial. The signup fee is
+	// NOT taxed in this scope - GST applies to the recurring plan price only.
+	assert.equal(
+		planDueToday({
+			plan_name: "Standard",
+			price_inr: 3500,
+			gst_percent: 18,
 			billing_cycle: "Monthly",
 			trial_days: 7,
 			signup_fee_inr: 499,
 		}),
-		"₹499 today · then ₹3,500/mo after 7 days"
+		"₹499 today · then ₹4,130/mo after 7 days"
 	);
 });
 
-test("planDueToday: a plan with no trial just shows its price", () => {
-	// planAmount deliberately omits the cycle suffix: the card already renders the big
-	// price with its own "/mo" directly above this line, and the Review row did the
-	// same before this change. Repeating it would read as a second, different price.
+test("planDueToday: a plan with no trial and no gst_percent just shows its pre-tax price", () => {
+	// Backward-compat: a plan that never carries gst_percent (or carries 0) behaves
+	// exactly as before GST existed. inr(total) collapses to inr(subtotal) here.
+	// The card already renders the big price with its own "/mo" directly above this
+	// line, so no cycle suffix is repeated here either.
 	assert.equal(
 		planDueToday({ plan_name: "Pro", price_inr: 3500, billing_cycle: "Monthly" }),
 		"₹3,500"
 	);
 });
 
-test("planDueToday: a no-trial plan with a fee shows the combined amount", () => {
+test("planDueToday: a no-trial plan shows the tax-inclusive price when gst_percent is present", () => {
+	assert.equal(
+		planDueToday({ plan_name: "Pro", price_inr: 3500, gst_percent: 18, billing_cycle: "Monthly" }),
+		"₹4,130"
+	);
+});
+
+test("planDueToday: a no-trial plan with a fee shows the combined tax-inclusive amount", () => {
 	assert.equal(
 		planDueToday({
 			plan_name: "Pro",
 			price_inr: 3500,
+			gst_percent: 18,
 			billing_cycle: "Monthly",
 			signup_fee_inr: 500,
 		}),
-		"₹4,000 today"
+		"₹4,630 today"
 	);
 });
 
