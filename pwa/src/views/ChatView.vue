@@ -390,6 +390,19 @@ function removeAttachment(key) {
 	attachments.value = attachments.value.filter((a) => a.key !== key);
 }
 
+// Preview a pending (not-yet-sent) attachment the user taps in the composer.
+// Reuses the same bottom sheet as sent-message media; a synthesized canvas-like
+// item lets previewKind route by the file_url extension. messageName is empty
+// (no message exists yet) - only the html/svg CanvasFrame path needs one, and
+// image/PDF (the common case) render straight from the session-authed file_url.
+function onPreviewPending(a) {
+	if (!a || !a.file_url) return;
+	preview.value = {
+		item: { file_url: a.file_url, title: a.name, name: a.file_url },
+		messageName: "",
+	};
+}
+
 function onTranscript(text) {
 	input.value = input.value ? `${input.value} ${text}` : text;
 }
@@ -824,6 +837,7 @@ onUnmounted(() => {
 		@stop="stop"
 		@attach="attach"
 		@remove="removeAttachment"
+		@preview="onPreviewPending"
 		@mic="voiceOpen = true"
 	/>
 

@@ -110,21 +110,37 @@
 					:title="a.file_name"
 					style="position: relative; display: inline-block; line-height: 0"
 				>
-					<img
-						:src="a.preview_url"
-						alt=""
+					<!-- A real <button> so the thumbnail is keyboard-focusable and
+					     Enter/Space open the preview, not just a mouse click. -->
+					<button
+						type="button"
+						:title="'Preview ' + a.file_name"
+						@click="a.file_url && emit('preview-attachment', a)"
 						style="
-							width: 52px;
-							height: 52px;
-							object-fit: cover;
-							border-radius: 9px;
-							border: 1px solid var(--border);
+							border: none;
+							padding: 0;
+							background: transparent;
+							cursor: zoom-in;
 							display: block;
+							line-height: 0;
 						"
-					/>
+					>
+						<img
+							:src="a.preview_url"
+							alt=""
+							style="
+								width: 52px;
+								height: 52px;
+								object-fit: cover;
+								border-radius: 9px;
+								border: 1px solid var(--border);
+								display: block;
+							"
+						/>
+					</button>
 					<button
 						v-if="a.removable"
-						@click="emit('remove-attachment', i)"
+						@click.stop="emit('remove-attachment', i)"
 						title="Remove"
 						style="
 							position: absolute;
@@ -161,10 +177,35 @@
 						background: var(--surface-1);
 						border: 1px solid var(--border);
 					"
-					>📎 {{ a.file_name
-					}}<button
+				>
+					<!-- The label is a real <button> so a keyboard user can open the
+					     preview; the remove × is a sibling, never nested inside it. -->
+					<button
+						v-if="a.file_url"
+						type="button"
+						:title="'Preview ' + a.file_name"
+						@click="emit('preview-attachment', a)"
+						style="
+							border: none;
+							background: transparent;
+							padding: 0;
+							font: inherit;
+							color: inherit;
+							cursor: pointer;
+							display: inline-flex;
+							align-items: center;
+							gap: 5px;
+						"
+					>
+						📎 {{ a.file_name }}
+					</button>
+					<span v-else style="display: inline-flex; align-items: center; gap: 5px"
+						>📎 {{ a.file_name }}</span
+					>
+					<button
 						v-if="a.removable"
-						@click="emit('remove-attachment', i)"
+						@click.stop="emit('remove-attachment', i)"
+						title="Remove"
 						style="
 							border: none;
 							background: transparent;
@@ -175,8 +216,8 @@
 						"
 					>
 						×
-					</button></span
-				>
+					</button>
+				</span>
 			</template>
 		</div>
 		<!-- Host popovers anchored to the box (chat's @/ mention dropdown, which
@@ -370,6 +411,10 @@ const emit = defineEmits([
 	"files-added",
 	// (index) — into the `attachments` array as passed in.
 	"remove-attachment",
+	// (attachment) — the host opens a preview of an already-uploaded pending
+	// attachment (image thumbnail or file chip). Only fired for entries with a
+	// file_url; the host owns the preview surface.
+	"preview-attachment",
 	// Raw DOM events, emitted BEFORE this component acts on them, so a host can
 	// preventDefault to take the interaction over (chat's mention navigation,
 	// prompt history and clipboard-image upload all do exactly that).

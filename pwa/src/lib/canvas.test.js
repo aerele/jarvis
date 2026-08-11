@@ -38,6 +38,22 @@ test("previewKind: anything unrecognised is still shown as a file", () => {
 	assert.equal(previewKind({ file_url: "/files/archive.zip" }), "file");
 });
 
+// The exact canvas items send_message now stores for a USER attachment
+// (_att_canvas_item: { name, type, file_url, title }). MessageMedia routes each
+// by previewKind - image -> inline thumbnail, everything else -> a chip that
+// opens the preview sheet. Pinned so a backend `type` change can't silently
+// strand a user's attachment as an unrenderable item.
+// (plan: 2026-08-11-chat-attachment-preview, PWA side of T1/T5)
+test("previewKind: routes stored user-attachment canvas items", () => {
+	const item = (type, url, title) => ({ name: "h", type, file_url: url, title });
+	assert.equal(previewKind(item("image", "/private/files/photo.png", "photo.png")), "image");
+	assert.equal(previewKind(item("pdf", "/private/files/invoice.pdf", "invoice.pdf")), "pdf");
+	// a generic "file" type (docx) falls to the extension chip, never dropped
+	assert.equal(previewKind(item("file", "/private/files/report.docx", "report.docx")), "file");
+	// csv/xlsx get the server-rendered sheet preview
+	assert.equal(previewKind(item("file", "/private/files/ledger.csv", "ledger.csv")), "sheet");
+});
+
 test("fileExt: uppercased extension, or FILE when there is none", () => {
 	assert.equal(fileExt({ name: "INVOICE.pdf" }), "PDF");
 	assert.equal(fileExt({ name: "sheet.XLSX" }), "XLSX");

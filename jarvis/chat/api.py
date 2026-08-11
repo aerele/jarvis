@@ -38,15 +38,46 @@ def _get_owned_conversation(conversation: str):
 	return doc
 
 
-# Image attachments are stored as canvas items on the user message so the SPA
-# renders them inline as clickable thumbnails (same preview path as generated
-# images) instead of a bare "📎 name" marker.
+# Every attachment (image or not) is stored as a canvas item on the user message
+# so the SPA and the PWA render it as a clickable, previewable card - images as
+# inline thumbnails, other files as a chip that opens the file preview.
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg")
+
+# Non-image extension -> canvas `type`. svg is already an image (it is in
+# _IMAGE_EXTS) so it never reaches this map. Anything unlisted is a generic
+# "file" (sheets, docs, csv, txt): the preview components (SPA openArtifact /
+# PWA previewKind) route those to a server-side table/text/download preview.
+_EXT_CANVAS_TYPE = {"pdf": "pdf", "html": "html", "htm": "html"}
 
 
 def _att_is_image(att: dict) -> bool:
 	name = (att.get("file_name") or att.get("file_url") or "").lower()
 	return name.endswith(_IMAGE_EXTS)
+
+
+def _att_type(att: dict) -> str:
+	"""Canvas ``type`` for an attachment: ``"image"`` for images (rendered as a
+	thumbnail), else a kind derived from the file extension
+	(``"pdf"``/``"html"``/``"file"``) so the SPA (``openArtifact``) and the PWA
+	(``previewKind``) render the right preview affordance."""
+	if _att_is_image(att):
+		return "image"
+	name = (att.get("file_name") or att.get("file_url") or "").lower()
+	ext = name.rsplit(".", 1)[-1] if "." in name else ""
+	return _EXT_CANVAS_TYPE.get(ext, "file")
+
+
+def _att_canvas_item(att: dict) -> dict:
+	"""One canvas item for a stored attachment. ``title`` is the display label /
+	image alt-text; ``file_url`` is the private, session-authed URL the preview
+	loads over the user's own cookie."""
+	kind = _att_type(att)
+	return {
+		"name": frappe.generate_hash(length=10),
+		"type": kind,
+		"file_url": att["file_url"],
+		"title": att.get("file_name") or ("image" if kind == "image" else "file"),
+	}
 
 
 # Wall-clock budget for the RQ worker that runs one agent turn.
@@ -661,6 +692,14 @@ def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 
 	typ = item.get("type")
 	fdoc = frappe.get_doc("File", {"file_url": item.get("file_url")})
+	# Conversation ownership authorizes reading the TRANSCRIPT, not an arbitrary
+	# File whose url happens to sit on a canvas item. Without this gate a crafted
+	# (or replayed) file_url is a private-File exfil path: the bytes are returned
+	# below as srcdoc content (html/svg) or a base64 data_url (pdf/image/file).
+	# Mirror the File-read gate turn_handler._prepare_attachments enforces before
+	# it reads attachment bytes, and read_file enforces before serving one.
+	if not frappe.has_permission("File", "read", doc=fdoc.name):
+		frappe.throw(_t("no permission to read this file"), frappe.PermissionError)
 	raw = fdoc.get_content()
 	out = {
 		"name": item.get("name"),
@@ -1213,8 +1252,8 @@ def send_message(
 
 	# Attachments arrive as a JSON string of [{file_url, file_name}, ...] from
 	# the composer's file picker (already uploaded to the Frappe File doctype).
-	# The worker inlines their text content into the prompt; here we only keep
-	# a "📎 name" marker on the visible message.
+	# The worker inlines their bytes/text into the prompt; here we store each as
+	# a canvas item so the message renders a previewable card (see below).
 	atts = []
 	if attachments:
 		try:
@@ -1312,29 +1351,15 @@ def send_message(
 	if not ok:
 		return {"ok": False, "reason": reason}
 
-	# Non-image files keep a compact "📎 name" marker on the visible message;
-	# image attachments are stored as canvas items so the SPA shows them inline
-	# as clickable thumbnails (same preview as generated images). Either way the
-	# file bytes are inlined for the agent in the worker, not stored here.
-	image_atts = [a for a in atts if _att_is_image(a)]
-	other_atts = [a for a in atts if not _att_is_image(a)]
+	# Every attachment is stored as a canvas item so both the SPA and the PWA
+	# render it as a clickable, previewable card (images inline, other files as a
+	# preview chip). The visible message text is just what the user typed - it can
+	# be empty for an attachments-only message (images already produced empty
+	# content this way). The file BYTES reach the agent in the worker from the
+	# `attachments` enqueue kwarg via _prepare_attachments, decoupled from both
+	# this text and the stored canvas, so no "📎 name" marker is needed here.
 	display_content = message.strip()
-	if other_atts:
-		names = ", ".join((a.get("file_name") or "file") for a in other_atts)
-		display_content = (display_content + "\n\n" if display_content else "") + "📎 " + names
-	canvas_json = None
-	if image_atts:
-		canvas_json = frappe.as_json(
-			[
-				{
-					"name": frappe.generate_hash(length=10),
-					"type": "image",
-					"file_url": a["file_url"],
-					"title": a.get("file_name") or "image",
-				}
-				for a in image_atts
-			]
-		)
+	canvas_json = frappe.as_json([_att_canvas_item(a) for a in atts]) if atts else None
 
 	# Persist the user message with next seq value
 	seq = _next_seq(conversation)
