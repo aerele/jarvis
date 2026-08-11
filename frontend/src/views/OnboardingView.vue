@@ -208,8 +208,12 @@
 												}}</span
 											>
 										</div>
+										<!-- GST-exclusive pricing: the headline price above is the base
+										     rate, not what gets charged, so this line says so plainly.
+										     The due-today line right below IS tax-inclusive (it's a real
+										     charge amount) - only the base rate needs the caveat. -->
 										<div class="text-xs text-ink-gray-5">
-											{{ planCycleLabel(p) }}
+											{{ planCycleLabel(p) }} · excl. GST
 										</div>
 										<!-- #671: what is due TODAY, on the card. The customer
 										     used to meet this only on Review, a screen after

@@ -59,6 +59,9 @@
 									)
 								}}
 							</span>
+							<!-- GST-exclusive pricing: the price above is the base rate, not
+							     what gets charged, so this says so plainly. -->
+							<span class="text-p-sm text-ink-gray-5">excl. GST</span>
 							<Badge
 								variant="subtle"
 								:theme="statusTheme"

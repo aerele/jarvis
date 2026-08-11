@@ -27,7 +27,10 @@
 				{{ planSuffix(plan.price_inr, plan.billing_cycle) }}</span
 			>
 		</div>
-		<div class="text-xs text-ink-gray-5">{{ cycleLabel }}</div>
+		<!-- GST-exclusive pricing: the headline price above is the base rate, not
+		     what gets charged, so this line says so plainly - same treatment as
+		     the onboarding plan-selection card this one mirrors. -->
+		<div class="text-xs text-ink-gray-5">{{ cycleLabel }} · excl. GST</div>
 
 		<ul v-if="features.length" class="mt-3.5 grid gap-2">
 			<li
