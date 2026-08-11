@@ -249,6 +249,12 @@ async function doCancel() {
 			? `You'll keep full access until ${endsOn}. You can resume any time before then.`
 			: "You'll keep full access until the end of your current period, and can resume any time before then.";
 	}
+	// A scheduled downgrade is dropped when you cancel (it doesn't survive to fire on a
+	// later renewal), so say so - the customer arranged it deliberately.
+	if (account.value.scheduled_plan) {
+		const to = account.value.scheduled_plan_name || "your scheduled plan change";
+		message += ` Your scheduled switch to ${to} will also be cancelled.`;
+	}
 	const ok = await confirm({
 		title: `${label}?`,
 		message,
