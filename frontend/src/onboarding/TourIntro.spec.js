@@ -4,16 +4,15 @@ import { mount } from "@vue/test-utils";
 import TourIntro from "./TourIntro.vue";
 
 // The tour's own comment header (see TourIntro.vue) claims a fixed slide
-// order: Welcome, Chat, Skills, Macros, File Box, Agents. These tests pin
-// that order, since a reorder that silently regresses would only ever be
-// caught by eyeballing the wizard.
+// order: Welcome, Skills & Knowledge, Macros, File Box, Dashboards. These
+// tests pin that order, since a reorder that silently regresses would only
+// ever be caught by eyeballing the wizard.
 const SLIDE_HEADINGS = [
 	"Harness AI agents inside your ERPNext.",
-	"Ask anything about your business.",
-	"It already knows Frappe & ERPNext.",
+	"It learns how your business runs.",
 	"Turn a routine into one click.",
 	"Drop files in, get clean entries out.",
-	"Put specialists to work in the background.",
+	"Ask for a chart. Watch it build.",
 ];
 
 function heading(wrapper) {
