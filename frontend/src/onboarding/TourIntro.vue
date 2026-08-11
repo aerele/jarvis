@@ -544,10 +544,10 @@ import { PERMISSION_TOUR_COPY } from "@/onboarding/permissionCopy";
 // 'skip' = the footer "Skip tour" link. Both land the wizard on the Plan step.
 const emit = defineEmits(["finish", "skip"]);
 
-// TODO(docs): replace with the real product docs / features URL. The final
-// slide's "Browse all features" link opens this in a new tab so the curious
+// The final slide's "Browse all features" link opens this in a new tab (a
+// same-tab nav would drop the user out of the signup wizard) so the curious
 // can read everything without the tour having to show every surface.
-const DOCS_URL = "https://docs.example.com/jarvis";
+const DOCS_URL = "https://jarvis.aerele.in/docs";
 
 const SLIDE_COUNT = 5;
 const LAST = SLIDE_COUNT - 1;
