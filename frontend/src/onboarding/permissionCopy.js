@@ -30,5 +30,5 @@ export function permissionCopyFor(policy = {}) {
 	if (destructiveAlwaysConfirms) {
 		return "Applies changes automatically; destructive actions always require confirmation.";
 	}
-	return "May change things automatically — review your automation settings.";
+	return "May change things automatically. Review your automation settings.";
 }

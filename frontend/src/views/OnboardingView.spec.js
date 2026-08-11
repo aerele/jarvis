@@ -428,3 +428,34 @@ describe("GST tax breakdown: Review & pay Subtotal/GST/Total rows", () => {
 		expect(text).not.toContain("GST (");
 	});
 });
+
+describe("B3: gateway picker shows on trial plans", () => {
+	it("a trial plan with one available provider still renders the gateway chooser", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.plans = [
+			{
+				name: "standard",
+				plan_name: "Standard",
+				price_inr: 3500,
+				gst_percent: 18,
+				billing_cycle: "Monthly",
+				trial_days: 7,
+				signup_fee_inr: 0,
+			},
+		];
+		wrapper.vm.state.planName = "standard";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.email = "acme@example.com";
+		wrapper.vm.state.availableProviders = ["razorpay"];
+		wrapper.vm.state.paymentProvider = "razorpay";
+		wrapper.vm.state.step = "pay";
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.REVIEW);
+		expect(wrapper.vm.isTrialPlan).toBe(true);
+		expect(wrapper.vm.showProviderChooser).toBe(true);
+		expect(wrapper.find(".ob-provseg").exists()).toBe(true);
+		expect(wrapper.find('[aria-label="Payment method: Razorpay"]').exists()).toBe(true);
+	});
+});
