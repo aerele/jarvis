@@ -52,3 +52,6 @@ docs/superpowers/
 .venv/
 logs/
 *.log
+
+# Claude Code config, tooling, and workflow artifacts (kept local, not tracked)
+.claude/
