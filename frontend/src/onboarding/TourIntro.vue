@@ -801,7 +801,7 @@ const ICON_MORE =
 function sideHtml(active) {
 	const inMore = MORE_ORDER.includes(active);
 	const topNav = NAV_ORDER.map(
-		(n) => `<div class="m-nav${n === active ? " on" : ""}">${FI(NAV_ICONS[n])}${n}</div>`,
+		(n) => `<div class="m-nav${n === active ? " on" : ""}">${FI(NAV_ICONS[n])}${n}</div>`
 	).join("");
 	// More row lights up on a More-destination, matching the real onMoreDestination.
 	const moreRow = `<div class="m-nav${inMore ? " on" : ""}">${FI(ICON_MORE)}More</div>`;
@@ -809,15 +809,15 @@ function sideHtml(active) {
 		? MORE_ORDER.map(
 				(n) =>
 					`<div class="m-nav m-sub${n === active ? " on" : ""}">${FI(
-						MORE_ICONS[n],
-					)}${n}</div>`,
-			).join("")
+						MORE_ICONS[n]
+					)}${n}</div>`
+		  ).join("")
 		: "";
 	return (
 		`<div class="m-brand"><span class="d"><svg width="10" height="10" viewBox="0 0 24 24" fill="#fff"><path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"/></svg></span><span class="col"><b>${agentName}</b><small>Administrator</small></span></div>` +
 		`<div class="m-act">${FI('<path d="M12 5v14M5 12h14"/>')}New Chat</div>` +
 		`<div class="m-act">${FI(
-			'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>',
+			'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>'
 		)}Search Chat</div>` +
 		topNav +
 		moreRow +
@@ -1023,10 +1023,7 @@ button:focus-visible {
 	line-height: 1;
 	cursor: pointer;
 	white-space: nowrap;
-	transition:
-		background-color 0.15s ease,
-		color 0.15s ease,
-		border-color 0.15s ease;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 .btn--primary {
 	background: var(--text);
@@ -1065,9 +1062,7 @@ button:focus-visible {
 	border-radius: 14px;
 	background: var(--surface-1);
 	overflow: hidden;
-	box-shadow:
-		0 0 1px rgba(0, 0, 0, 0.2),
-		0 12px 24px -6px rgba(0, 0, 0, 0.08);
+	box-shadow: 0 0 1px rgba(0, 0, 0, 0.2), 0 12px 24px -6px rgba(0, 0, 0, 0.08);
 	aspect-ratio: 16/11;
 }
 .mock-bar {
@@ -1313,9 +1308,7 @@ button:focus-visible {
 	border-color: var(--cta);
 	background: var(--cta);
 	color: var(--cta-fg);
-	transition:
-		transform 0.15s ease,
-		filter 0.15s ease;
+	transition: transform 0.15s ease, filter 0.15s ease;
 }
 .confirm-btn--ok.pressed {
 	transform: scale(0.93);
@@ -1493,9 +1486,7 @@ button:focus-visible {
 .m-row-dashed {
 	border-style: dashed;
 	justify-content: center;
-	transition:
-		border-color 0.3s ease,
-		background 0.3s ease;
+	transition: border-color 0.3s ease, background 0.3s ease;
 }
 .m-row-cta {
 	font-size: 10px;
@@ -1538,9 +1529,7 @@ button:focus-visible {
 	background: var(--surface-2);
 	color: var(--text-2);
 	border: 1px solid var(--border);
-	transition:
-		transform 0.4s ease,
-		opacity 0.4s ease;
+	transition: transform 0.4s ease, opacity 0.4s ease;
 }
 .chip-row.collapsing .chip:nth-child(1) {
 	transform: translateX(16px) scale(0.4);
@@ -1562,9 +1551,7 @@ button:focus-visible {
 	width: 0%;
 	border-radius: 4px;
 	background: var(--amber);
-	transition:
-		width 1.3s linear,
-		background 0.3s ease;
+	transition: width 1.3s linear, background 0.3s ease;
 }
 .meta-fill.on {
 	width: 100%;
@@ -1712,9 +1699,7 @@ button:focus-visible {
 	background: var(--border-2);
 	cursor: pointer;
 	padding: 0;
-	transition:
-		width 0.2s,
-		background 0.2s;
+	transition: width 0.2s, background 0.2s;
 }
 .dots button.on {
 	width: 22px;
