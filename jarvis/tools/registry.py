@@ -57,6 +57,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# Tier 1 artifact producers: hand the agent a file/URL the customer
 	# can act on, instead of a wall of JSON.
 	"download_pdf",
+	"report_pdf",
 	"export_excel",
 	# Composed report/summary (not a single record) → downloadable PDF / HTML /
 	# PNG. download_pdf prints an existing record; this renders agent-composed
