@@ -104,6 +104,8 @@
 					:href="cv.file_url"
 					target="_blank"
 					rel="noopener"
+					:title="'Preview ' + cv.title"
+					@click.prevent="emit('open-attachment', cv)"
 				>
 					<svg
 						class="jv-file-clip"

@@ -11,7 +11,15 @@ const props = defineProps({
 	micEnabled: { type: Boolean, default: false },
 	placeholder: { type: String, default: () => `Message ${agentName}…` },
 });
-const emit = defineEmits(["update:modelValue", "send", "stop", "attach", "remove", "mic"]);
+const emit = defineEmits([
+	"update:modelValue",
+	"send",
+	"stop",
+	"attach",
+	"remove",
+	"mic",
+	"preview",
+]);
 
 const inputEl = ref(null);
 const fileEl = ref(null);
@@ -63,8 +71,27 @@ defineExpose({ reset });
 	<div class="jv-composer jv-safe-bottom">
 		<div v-if="props.attachments.length" class="jv-atts">
 			<div v-for="a in props.attachments" :key="a.key" class="jv-att">
-				<img v-if="a.preview" class="jv-att-img" :src="a.preview" :alt="a.name" />
-				<div v-else class="jv-att-file">
+				<!-- Preview triggers are real <button>s: keyboard-focusable and
+				     activated by Enter/Space. Disabled until upload completes (no
+				     file_url yet), so an in-flight attachment is inert. -->
+				<button
+					v-if="a.preview"
+					type="button"
+					class="jv-att-imgbtn"
+					:disabled="!a.file_url"
+					:aria-label="'Preview ' + a.name"
+					@click="emit('preview', a)"
+				>
+					<img class="jv-att-img" :src="a.preview" :alt="a.name" />
+				</button>
+				<button
+					v-else
+					type="button"
+					class="jv-att-file jv-att-filebtn"
+					:disabled="!a.file_url"
+					:aria-label="'Preview ' + a.name"
+					@click="emit('preview', a)"
+				>
 					<svg
 						viewBox="0 0 24 24"
 						width="16"
@@ -79,12 +106,12 @@ defineExpose({ reset });
 						<path d="M14 2v6h6" />
 					</svg>
 					<span class="jv-att-name">{{ a.name }}</span>
-				</div>
+				</button>
 				<div v-if="a.uploading" class="jv-att-busy"><span class="jv-spinner" /></div>
 				<button
 					class="jv-att-x"
 					aria-label="Remove attachment"
-					@click="emit('remove', a.key)"
+					@click.stop="emit('remove', a.key)"
 				>
 					<svg
 						viewBox="0 0 24 24"
@@ -292,6 +319,25 @@ defineExpose({ reset });
 	border-radius: 9px;
 	background: var(--card2);
 	color: var(--ink6);
+}
+/* The preview trigger is a real <button>; it taps through to the preview sheet
+   when uploaded and is disabled (inert, not focusable) while still in flight. */
+.jv-att-imgbtn {
+	display: block;
+	padding: 0;
+	border: 0;
+	background: none;
+	line-height: 0;
+	cursor: pointer;
+}
+.jv-att-filebtn {
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+.jv-att-imgbtn:disabled,
+.jv-att-filebtn:disabled {
+	cursor: default;
 }
 .jv-att-name {
 	font-size: 11.5px;

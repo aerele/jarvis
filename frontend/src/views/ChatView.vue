@@ -2126,6 +2126,7 @@
 						@paste="onPaste"
 						@files-added="uploadFiles"
 						@remove-attachment="removeAttachment"
+						@preview-attachment="openUserFile"
 					>
 						<template #above>
 							<!-- Create menu "Create a trigger": trigger-build mode. While this marker
@@ -3711,6 +3712,16 @@
 		/>
 
 		<ConnectPhoneDialog v-model="showConnect" />
+
+		<!-- Preview a file the user attached in the composer (before send). Images
+		     enlarge, PDFs/others render in-app; loads over the session cookie so a
+		     private File just works. Sent-message attachments use the artifact
+		     panel above via @open-attachment. -->
+		<FilePreview
+			v-model="userFilePreviewOpen"
+			:fileUrl="userFilePreview.file_url"
+			:fileName="userFilePreview.file_name"
+		/>
 	</div>
 </template>
 
@@ -3765,6 +3776,7 @@ import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
 import Composer from "@/components/chat/Composer.vue";
+import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
@@ -9145,8 +9157,12 @@ const composerAttachments = computed(() => {
 	const chips = pendingFiles.value.map((f, i) => ({
 		key: i,
 		file_name: f.file_name,
-		// Only images get a preview; everything else renders as a 📎 chip.
+		// Only images get a thumbnail; everything else renders as a 📎 chip.
 		preview_url: isImageFile(f) ? f.file_url : "",
+		// Every uploaded file carries its url so a click opens the preview
+		// dialog (images enlarge, PDFs/others render in-app). In-flight and
+		// failed entries below deliberately omit it - they are not previewable.
+		file_url: f.file_url,
 		removable: true,
 	}));
 	// One in-flight pill PER file being uploaded, named, so a slow attach shows
@@ -9309,6 +9325,18 @@ function removeFile(i) {
 }
 function isImageFile(f) {
 	return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test((f && (f.file_name || f.file_url)) || "");
+}
+
+// Composer file preview: a pending (not-yet-sent) attachment the user clicks to
+// view. Reuses the shared FilePreview dialog (image/pdf/sheet/text/download); it
+// fetches over the session cookie so the private File just works. Sent-message
+// attachments open the artifact panel instead (openArtifact), by design.
+const userFilePreviewOpen = ref(false);
+const userFilePreview = ref({ file_url: "", file_name: "" });
+function openUserFile(a) {
+	if (!a || !a.file_url) return;
+	userFilePreview.value = { file_url: a.file_url, file_name: a.file_name || "" };
+	userFilePreviewOpen.value = true;
 }
 
 // ---- mentions (@ user, / doctype·tool) ----

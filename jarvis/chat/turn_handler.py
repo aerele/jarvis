@@ -852,8 +852,9 @@ def handle_chat_send(payload: dict) -> None:
 	``attachments`` (optional): list of {file_url, file_name} dicts. Text files are
 	inlined into the prompt; images/PDFs are sent to the model as native vision
 	(managed pool + a vision-capable model) - see _prepare_attachments. The
-	persisted/visible user message keeps only the "📎 name" marker, so file
-	bytes never bloat the chat history.
+	persisted/visible user message stores each attachment as a canvas item
+	(a previewable card), not the bytes, so file bytes never bloat the chat
+	history.
 
 	``context`` (optional): {doctype, name} of the ERP document the user was
 	viewing when they asked (floating-widget auto-context). Prepended to the
