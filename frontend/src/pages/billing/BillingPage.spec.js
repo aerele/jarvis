@@ -554,6 +554,46 @@ describe("GO-LIVE: the confirm dialog shows the tax-inclusive charge, not the pr
 	});
 });
 
+// #10-e review: "excl. GST" used to render unconditionally next to the current
+// plan's price, which wrongly claimed an exemption for a 0-GST plan and for
+// EVERY plan before get_plans starts sending gst_percent at all.
+describe("excl. GST label tracks the current plan's own gst_percent", () => {
+	it("is absent when gst_percent is undefined (pre-companion-PR get_plans row)", async () => {
+		const wrapper = await mountPage(baseAccount()); // no gst_percent on plan
+		expect(wrapper.text()).not.toContain("excl. GST");
+	});
+
+	it("is absent when gst_percent is 0", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				plan: {
+					plan_name: "Pro",
+					name: "pro",
+					price_inr: 100,
+					billing_cycle: "Monthly",
+					gst_percent: 0,
+				},
+			})
+		);
+		expect(wrapper.text()).not.toContain("excl. GST");
+	});
+
+	it("is present when gst_percent is a positive number", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				plan: {
+					plan_name: "Pro",
+					name: "pro",
+					price_inr: 100,
+					billing_cycle: "Monthly",
+					gst_percent: 18,
+				},
+			})
+		);
+		expect(wrapper.text()).toContain("excl. GST");
+	});
+});
+
 describe("edge 6/8: a cheaper reactivation charges full price, never implies a prorated switch", () => {
 	it("the card's own note names full price and explicitly rules out proration/scheduling", async () => {
 		const wrapper = await mountPage(reactivationAccount());

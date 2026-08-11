@@ -129,7 +129,12 @@ test("isOnboardComplete reads readiness", () => {
 // --------------------------------------------------------------------------- //
 test("planPricing splits base + GST with canonical rounding", () => {
 	assert.deepEqual(
-		planPricing({ plan_name: "Standard", price_inr: 3500, gst_percent: 18, billing_cycle: "Monthly" }),
+		planPricing({
+			plan_name: "Standard",
+			price_inr: 3500,
+			gst_percent: 18,
+			billing_cycle: "Monthly",
+		}),
 		{ subtotal: 3500, gstPercent: 18, gstAmount: 630, total: 4130 }
 	);
 });
@@ -151,6 +156,22 @@ test("planPricing: no gst_percent (absent or zero) collapses to identity", () =>
 
 test("planPricing: a missing plan is a zeroed split, not a crash", () => {
 	assert.deepEqual(planPricing(null), { subtotal: 0, gstPercent: 0, gstAmount: 0, total: 0 });
+});
+
+// price_inr=3475, gst_percent=18 -> gstAmount=625.5, total=4100.5: a genuine
+// paise-precision result (gstAmount is NOT a whole rupee). The backend charges
+// this exact value (to_paise -> 410050), so the split - and everything
+// downstream of it - must carry the fraction rather than rounding it away.
+test("planPricing: a fractional GST result keeps its paise precision", () => {
+	assert.deepEqual(
+		planPricing({
+			plan_name: "Standard",
+			price_inr: 3475,
+			gst_percent: 18,
+			billing_cycle: "Monthly",
+		}),
+		{ subtotal: 3475, gstPercent: 18, gstAmount: 625.5, total: 4100.5 }
+	);
 });
 
 // --------------------------------------------------------------------------- //
@@ -200,7 +221,12 @@ test("planDueToday: a plan with no trial and no gst_percent just shows its pre-t
 
 test("planDueToday: a no-trial plan shows the tax-inclusive price when gst_percent is present", () => {
 	assert.equal(
-		planDueToday({ plan_name: "Pro", price_inr: 3500, gst_percent: 18, billing_cycle: "Monthly" }),
+		planDueToday({
+			plan_name: "Pro",
+			price_inr: 3500,
+			gst_percent: 18,
+			billing_cycle: "Monthly",
+		}),
 		"₹4,130"
 	);
 });
@@ -221,4 +247,33 @@ test("planDueToday: a no-trial plan with a fee shows the combined tax-inclusive 
 test("planDueToday: nothing to say without a plan", () => {
 	assert.equal(planDueToday(null), "");
 	assert.equal(planDueToday({}), "");
+});
+
+// A fractional total (price_inr=3475, gst_percent=18 -> total=4100.5) must
+// display the EXACT charged value, not inr()'s bare one-decimal "₹4,100.5"
+// nor a rounded-off "₹4,101" - either would diverge from the paise-precise
+// amount the backend actually charges (to_paise -> 410050).
+test("planDueToday: a fractional GST total renders its exact paise-precise value, not rounded", () => {
+	assert.equal(
+		planDueToday({
+			plan_name: "Standard",
+			price_inr: 3475,
+			gst_percent: 18,
+			billing_cycle: "Monthly",
+		}),
+		"₹4,100.50"
+	);
+});
+
+test("planDueToday: a fractional GST total on a trial plan renders exactly in the 'then' clause too", () => {
+	assert.equal(
+		planDueToday({
+			plan_name: "Standard",
+			price_inr: 3475,
+			gst_percent: 18,
+			billing_cycle: "Monthly",
+			trial_days: 7,
+		}),
+		"₹0 today · then ₹4,100.50/mo after 7 days"
+	);
 });

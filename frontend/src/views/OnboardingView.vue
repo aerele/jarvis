@@ -209,11 +209,17 @@
 											>
 										</div>
 										<!-- GST-exclusive pricing: the headline price above is the base
-										     rate, not what gets charged, so this line says so plainly.
+										     rate, not what gets charged, so this line says so plainly -
+										     but only for a plan that actually carries GST (planHasGst).
+										     A 0-GST plan, and every plan before get_plans sends
+										     gst_percent at all, must not claim "excl. GST" they don't owe.
 										     The due-today line right below IS tax-inclusive (it's a real
 										     charge amount) - only the base rate needs the caveat. -->
 										<div class="text-xs text-ink-gray-5">
-											{{ planCycleLabel(p) }} · excl. GST
+											{{ planCycleLabel(p)
+											}}<template v-if="planHasGst(p)">
+												· excl. GST</template
+											>
 										</div>
 										<!-- #671: what is due TODAY, on the card. The customer
 										     used to meet this only on Review, a screen after
@@ -483,8 +489,8 @@
 									:disabled="state.payBusy"
 									@click="startReconnect"
 								>
-									Reconnect instead
-								</button>. We'll email a code to confirm it's you. Nothing to pay again.
+									Reconnect instead</button
+								>. We'll email a code to confirm it's you. Nothing to pay again.
 							</p>
 							<p
 								v-else-if="state.reconnectNeedsCompany"
@@ -816,8 +822,8 @@
 									>
 										Still not resolved after a few checks?
 										<button class="ob-link" @click="onPayAction(A.SUPPORT)">
-											Contact support
-										</button>. We'll place it for you. Please don't pay again.
+											Contact support</button
+										>. We'll place it for you. Please don't pay again.
 									</p>
 									<!-- X7 (defensive): Reconnect is offered but no identity exists to send
 										 it with. Rather than a dead disabled button, ask for the email and
@@ -996,16 +1002,17 @@
 										>
 											<span class="text-ink-gray-5">Subtotal</span
 											><b class="font-medium text-ink-gray-9">{{
-												inr(pricing.subtotal)
+												inrExact(pricing.subtotal)
 											}}</b>
 										</div>
 										<div
 											v-if="pricing.gstPercent"
 											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
 										>
-											<span class="text-ink-gray-5">GST ({{ pricing.gstPercent }}%)</span
+											<span class="text-ink-gray-5"
+												>GST ({{ pricing.gstPercent }}%)</span
 											><b class="font-medium text-ink-gray-9">{{
-												inr(pricing.gstAmount)
+												inrExact(pricing.gstAmount)
 											}}</b>
 										</div>
 										<div
@@ -1014,7 +1021,7 @@
 										>
 											<span class="text-ink-gray-5">Total</span
 											><b class="font-medium text-ink-gray-9">{{
-												inr(pricing.total)
+												inrExact(pricing.total)
 											}}</b>
 										</div>
 										<div
@@ -1229,9 +1236,9 @@
 								<div class="ob-head">
 									<h1>Enter your reconnect code</h1>
 									<p>
-										Sent to <b>{{ state.email || "your email" }}</b>. Connects
-										this site to your existing subscription, nothing to pay
-										again.
+										Sent to <b>{{ state.email || "your email" }}</b
+										>. Connects this site to your existing subscription,
+										nothing to pay again.
 									</p>
 								</div>
 								<input
@@ -1626,7 +1633,7 @@ import {
 	planPricing,
 	planSubtitleFor,
 } from "@/onboarding/steps";
-import { inr, planAmount, planSuffix } from "@/account/format";
+import { inrExact, planAmount, planSuffix, planHasGst } from "@/account/format";
 import {
 	isReadyForChat,
 	getLlmApplyOperation,
@@ -2533,7 +2540,10 @@ const paySummaryRows = computed(() => {
 	if (s.dueTodayInr != null && !Number.isNaN(s.dueTodayInr)) {
 		rows.push({
 			label: "Amount",
-			value: paySummaryTrial.value ? "₹0 today" : inr(s.dueTodayInr),
+			// inrExact, not inr: dueTodayInr is a real charge (server-computed,
+			// GST-inclusive) and can carry paise precision - same reasoning as
+			// planDueToday/the subtotal-GST-total rows above.
+			value: paySummaryTrial.value ? "₹0 today" : inrExact(s.dueTodayInr),
 		});
 	}
 	const ref = maskedIntentRef.value;

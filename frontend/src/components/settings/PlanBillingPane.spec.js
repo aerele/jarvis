@@ -241,4 +241,38 @@ describe("PlanBillingPane", () => {
 			expect(api.cancelPlanAtPeriodEnd).not.toHaveBeenCalled();
 		});
 	});
+
+	// #10-e review: "excl. GST" used to render unconditionally next to the
+	// plan's price, which wrongly claimed an exemption for a 0-GST plan and
+	// for EVERY plan before get_plans starts sending gst_percent at all.
+	describe("excl. GST label tracks the plan's own gst_percent", () => {
+		it("is absent when gst_percent is undefined (pre-companion-PR get_plans row)", async () => {
+			const w = await mountPane(); // baseAccount's plan has no gst_percent
+			expect(w.text()).not.toContain("excl. GST");
+		});
+
+		it("is absent when gst_percent is 0", async () => {
+			const w = await mountPane({
+				plan: {
+					plan_name: "Pro",
+					price_inr: 3999,
+					billing_cycle: "Monthly",
+					gst_percent: 0,
+				},
+			});
+			expect(w.text()).not.toContain("excl. GST");
+		});
+
+		it("is present when gst_percent is a positive number", async () => {
+			const w = await mountPane({
+				plan: {
+					plan_name: "Pro",
+					price_inr: 3999,
+					billing_cycle: "Monthly",
+					gst_percent: 18,
+				},
+			});
+			expect(w.text()).toContain("excl. GST");
+		});
+	});
 });

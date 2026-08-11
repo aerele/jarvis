@@ -60,8 +60,13 @@
 								}}
 							</span>
 							<!-- GST-exclusive pricing: the price above is the base rate, not
-							     what gets charged, so this says so plainly. -->
-							<span class="text-p-sm text-ink-gray-5">excl. GST</span>
+							     what gets charged, so this says so plainly - but only for a
+							     plan that actually carries GST. A 0-GST plan, or any plan
+							     before get_plans sends gst_percent at all, must not claim an
+							     exemption it doesn't have. -->
+							<span v-if="planHasGst(currentPlan)" class="text-p-sm text-ink-gray-5"
+								>excl. GST</span
+							>
 							<Badge
 								variant="subtle"
 								:theme="statusTheme"
@@ -302,10 +307,11 @@ import {
 } from "@/onboarding/paymentCodes";
 import { payPageUrl, STATES as PAY_STATES } from "@/onboarding/paymentMachine";
 import {
-	inr,
+	inrExact,
 	statusLabel,
 	statusBadgeTheme,
 	planPriceLabel,
+	planHasGst,
 	renewalLabel,
 	cancelPillLabel,
 	cancellationNotice,
@@ -513,11 +519,15 @@ async function doUpgrade(plan) {
 		preview: () => api.previewUpgrade(plan.name),
 		title: `Upgrade to ${plan.plan_name || plan.name}`,
 		// The prorated figure is the whole point of previewing, so it leads.
+		// inrExact, not inr: prorated_inr is a real charge computed server-side
+		// (days-left * GST-inclusive daily rate) and can land on paise, same as
+		// total_inr below - inr()'s bare toLocaleString would show a stray
+		// one-decimal amount instead of the exact figure charged.
 		describe: (d) => ({
-			amount: inr(d.prorated_inr),
+			amount: inrExact(d.prorated_inr),
 			message:
 				"Charged now for the days left in your current billing period. Your new plan starts immediately.",
-			confirmLabel: `Pay ${inr(d.prorated_inr)}`,
+			confirmLabel: `Pay ${inrExact(d.prorated_inr)}`,
 		}),
 		start: () => api.startUpgrade(plan.name),
 		retry: () => doUpgrade(plan),
@@ -558,9 +568,12 @@ async function doRenew() {
 		: 0;
 	openConfirm({
 		title: "Renew subscription",
-		amount: inr(charge),
+		// inrExact, not inr: charge is total_inr (or its price_inr fallback),
+		// which can carry GST-driven paise precision - the exact figure charged
+		// has to render exactly, not with inr()'s bare toLocaleString.
+		amount: inrExact(charge),
 		message: "Renewing restores access straight away for another full billing period.",
-		confirmLabel: `Pay ${inr(charge)}`,
+		confirmLabel: `Pay ${inrExact(charge)}`,
 		run: () =>
 			runPayment({
 				key: "renew",
@@ -586,10 +599,11 @@ async function doReactivate(plan) {
 	const charge = plan.total_inr ?? plan.price_inr;
 	openConfirm({
 		title: `Renew on ${plan.plan_name || plan.name}`,
-		amount: inr(charge),
+		// inrExact, not inr: same paise-precision reasoning as doRenew above.
+		amount: inrExact(charge),
 		message:
 			"This charges the plan's full price and starts a new billing period right away. There is no credit for time already lapsed, and nothing is scheduled.",
-		confirmLabel: `Pay ${inr(charge)}`,
+		confirmLabel: `Pay ${inrExact(charge)}`,
 		run: () =>
 			runPayment({
 				key: "react:" + plan.name,

@@ -14,7 +14,7 @@ export const STEPS_MANAGED = ["intro", "details", "plan", "pay", "connect"];
 // RELATIVE, not "@/account/format": this file's tests run under `node --test`
 // (package.json test:node), which resolves no bundler alias. format.js is plain ESM
 // with zero imports of its own, so pulling it in here keeps this module cheap to test.
-import { inr, planSuffix } from "../account/format.js";
+import { inrExact, planSuffix } from "../account/format.js";
 
 /**
  * Base/GST/total split for one plan (GST tax breakdown, 2026-08).
@@ -61,10 +61,15 @@ export function planDueToday(p) {
 	const days = Number(p.trial_days) || 0;
 	const { total } = planPricing(p);
 	const suffix = planSuffix(p.price_inr, p.billing_cycle) || "";
+	// inrExact, not inr: `total` carries GST-driven paise precision (e.g.
+	// price_inr=3475, gst_percent=18 -> total=4100.5), and this must render the
+	// exact value the backend charges rather than inr()'s bare toLocaleString,
+	// which would show a stray one-decimal "₹4,100.5". It is a strict superset
+	// of inr()'s output for whole-rupee amounts, so this is safe on `fee` too.
 	if (days > 0) {
-		return `${inr(fee)} today · then ${inr(total)}${suffix} after ${days} days`;
+		return `${inrExact(fee)} today · then ${inrExact(total)}${suffix} after ${days} days`;
 	}
-	return fee > 0 ? `${inr(total + fee)} today` : inr(total);
+	return fee > 0 ? `${inrExact(total + fee)} today` : inrExact(total);
 }
 
 export function stepIndex(steps, cur) {

@@ -29,8 +29,12 @@
 		</div>
 		<!-- GST-exclusive pricing: the headline price above is the base rate, not
 		     what gets charged, so this line says so plainly - same treatment as
-		     the onboarding plan-selection card this one mirrors. -->
-		<div class="text-xs text-ink-gray-5">{{ cycleLabel }} · excl. GST</div>
+		     the onboarding plan-selection card this one mirrors. Gated on
+		     hasGst: a 0-GST plan, or any plan before get_plans sends
+		     gst_percent at all, must not claim an exemption it doesn't have. -->
+		<div class="text-xs text-ink-gray-5">
+			{{ cycleLabel }}<template v-if="hasGst"> · excl. GST</template>
+		</div>
 
 		<ul v-if="features.length" class="mt-3.5 grid gap-2">
 			<li
@@ -68,7 +72,13 @@
 // a returning customer recognises the surface they first bought on.
 import { computed } from "vue";
 import { Badge, Button, FeatherIcon } from "frappe-ui";
-import { planAmount, planSuffix, planFeatures, planCycleLabel } from "@/account/format.js";
+import {
+	planAmount,
+	planSuffix,
+	planFeatures,
+	planCycleLabel,
+	planHasGst,
+} from "@/account/format.js";
 
 const props = defineProps({
 	plan: { type: Object, required: true },
@@ -84,4 +94,5 @@ const emit = defineEmits(["action"]);
 
 const features = computed(() => planFeatures(props.plan));
 const cycleLabel = computed(() => planCycleLabel(props.plan));
+const hasGst = computed(() => planHasGst(props.plan));
 </script>

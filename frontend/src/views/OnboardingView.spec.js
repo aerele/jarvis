@@ -427,6 +427,95 @@ describe("GST tax breakdown: Review & pay Subtotal/GST/Total rows", () => {
 		expect(text).not.toContain("Subtotal");
 		expect(text).not.toContain("GST (");
 	});
+
+	// #10-e: gstAmount/total can be a genuine fraction (price_inr=3475,
+	// gst_percent=18 -> gstAmount=625.5, total=4100.5), and the backend charges
+	// exactly that paise-precise value (to_paise -> 410050). The Review card
+	// must render the SAME value it will be charged - inrExact, not inr()'s
+	// bare one-decimal "₹4,100.5" and never a rounded-off "₹4,101".
+	it("a fractional GST split renders its exact paise-precise value on every row", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.plans = [
+			{
+				name: "standard",
+				plan_name: "Standard",
+				price_inr: 3475,
+				gst_percent: 18,
+				billing_cycle: "Monthly",
+				trial_days: 0,
+				signup_fee_inr: 0,
+			},
+		];
+		wrapper.vm.state.planName = "standard";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.email = "acme@example.com";
+		wrapper.vm.state.step = "pay";
+		await flushPromises();
+
+		expect(wrapper.vm.pricing).toEqual({
+			subtotal: 3475,
+			gstPercent: 18,
+			gstAmount: 625.5,
+			total: 4100.5,
+		});
+		expect(wrapper.vm.dueTodayLabel).toBe("₹4,100.50");
+
+		const text = wrapper.text();
+		expect(text).toContain("₹3,475");
+		expect(text).toContain("₹625.50");
+		expect(text).toContain("₹4,100.50");
+		// Neither the collapsed one-decimal form nor a rounded integer may appear.
+		expect(text).not.toContain("₹625.5 ");
+		expect(text).not.toContain("₹4,101");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #10-e review: the plan-selection card's "excl. GST" caveat must track the
+// plan's own gst_percent, not render unconditionally.
+// ---------------------------------------------------------------------------
+describe("Plan step: excl. GST label tracks the plan's own gst_percent", () => {
+	async function mountOnPlanStep(plan) {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.plans = [plan];
+		wrapper.vm.state.step = "plan";
+		await flushPromises();
+		return wrapper;
+	}
+
+	it("is absent when gst_percent is undefined (pre-companion-PR get_plans row)", async () => {
+		const wrapper = await mountOnPlanStep({
+			name: "legacy",
+			plan_name: "Legacy",
+			price_inr: 3999,
+			billing_cycle: "Monthly",
+		});
+		expect(wrapper.text()).not.toContain("excl. GST");
+	});
+
+	it("is absent when gst_percent is 0", async () => {
+		const wrapper = await mountOnPlanStep({
+			name: "zero-gst",
+			plan_name: "Zero GST",
+			price_inr: 3999,
+			billing_cycle: "Monthly",
+			gst_percent: 0,
+		});
+		expect(wrapper.text()).not.toContain("excl. GST");
+	});
+
+	it("is present when gst_percent is a positive number", async () => {
+		const wrapper = await mountOnPlanStep({
+			name: "standard",
+			plan_name: "Standard",
+			price_inr: 3999,
+			billing_cycle: "Monthly",
+			gst_percent: 18,
+		});
+		expect(wrapper.text()).toContain("excl. GST");
+	});
 });
 
 describe("B3: gateway picker shows on trial plans", () => {
