@@ -618,9 +618,45 @@ def _notify_skill_reviewers(request_name: str | None = None) -> None:
 		pass
 
 
+def _normalize_promotion_roles(target_roles, target_role) -> list[str]:
+	"""Order-preserving, de-duplicated role list from the multi-select payload,
+	falling back to the single ``target_role``. Accepts a Python list or a
+	JSON-encoded list string (Frappe form-data delivers arrays as strings)."""
+	raw = target_roles
+	if isinstance(raw, str):
+		try:
+			raw = frappe.parse_json(raw)
+		except Exception:
+			raw = [raw]
+	if not isinstance(raw, (list, tuple)):
+		raw = []
+	seen: set[str] = set()
+	out: list[str] = []
+	for r in list(raw) + ([target_role] if target_role else []):
+		r = str(r).strip() if r else ""
+		if r and r not in seen:
+			seen.add(r)
+			out.append(r)
+	return out
+
+
+def _promotion_roles(req_name: str, target_role: str = "") -> list[str]:
+	"""The ordered role names of a promotion request's ``target_roles`` child
+	table; falls back to the single ``target_role`` for legacy single-role rows."""
+	rows = frappe.get_all(
+		"Jarvis Custom Skill Allowed Role",
+		filters={"parenttype": PROMO, "parent": req_name},
+		pluck="role",
+		order_by="idx asc",
+	)
+	return rows or ([target_role] if target_role else [])
+
+
 @frappe.whitelist()
 @require_jarvis_user
-def request_skill_promotion(name: str, to_scope: str, target_role: str = "", note: str = "") -> dict:
+def request_skill_promotion(
+	name: str, to_scope: str, target_role: str = "", note: str = "", target_roles: list | None = None
+) -> dict:
 	"""Ask a reviewer to widen one of the caller's OWN skills up the scope ladder
 	(User->Role->Org). Files a Pending ``Jarvis Skill Promotion Request`` and
 	pings the reviewer set — the skill itself is untouched; promotion is a
@@ -641,9 +677,23 @@ def request_skill_promotion(name: str, to_scope: str, target_role: str = "", not
 		frappe.throw(_("Promotion target must be Role or Org."))
 	if _SCOPE_RANK.get(to_scope, 0) <= _SCOPE_RANK.get(from_scope, 0):
 		frappe.throw(_("Promotion can only widen a skill's scope."))
-	target_role = (str(target_role).strip() if target_role else "") or None
-	if to_scope == "Role" and not target_role:
-		frappe.throw(_("Promoting to Role scope needs a target role."))
+	# Multi-role: a Role-scope request may name several roles; ``target_role`` is
+	# kept as the primary (first) for display + backward compatibility, and the
+	# full requested audience is ``target_roles``. Only roles the requester may
+	# actually target are accepted - never trust the client's list (this is the
+	# server-side gate the old single-role path lacked).
+	roles = _normalize_promotion_roles(target_roles, target_role)
+	if to_scope == "Role":
+		if not roles:
+			frappe.throw(_("Promoting to Role scope needs a target role."))
+		allowed = set(promotable_target_roles().get("roles") or [])
+		bad = [r for r in roles if r not in allowed]
+		if bad:
+			frappe.throw(_("You cannot promote to these role(s): {0}.").format(", ".join(bad)))
+		target_role = roles[0]
+	else:
+		roles = []
+		target_role = None
 
 	req = frappe.get_doc(
 		{
@@ -661,6 +711,7 @@ def request_skill_promotion(name: str, to_scope: str, target_role: str = "", not
 			"from_scope": from_scope,
 			"to_scope": to_scope,
 			"target_role": target_role if to_scope == "Role" else None,
+			"target_roles": [{"role": r} for r in roles],
 			"note": (note or "").strip()[:140] or None,
 			"status": "Pending",
 		}
@@ -821,20 +872,24 @@ def _materialize_promotion(req) -> dict:
 	instructions = req.get("instructions_snapshot")
 	description = req.get("description_snapshot") or ""
 	user_invocable = int(req.get("user_invocable_snapshot"))
-	target_role = req.target_role if req.to_scope == "Role" else None
-	# A Role promotion writes ``allowed_roles`` ALONGSIDE ``target_role`` (issue #478).
-	# ``target_role`` alone is only honoured by the per-doc read paths
-	# (``user_can_use_skill`` / find_skills / get_skill); every path that answers "which
-	# skills may this user invoke" (``_role_scoped_invocable_names``, and through it the
-	# ``/slug`` context clause) matches on the ``allowed_roles`` CHILD ROWS. Writing only
-	# ``target_role`` therefore published a skill that no role-holder could ever trigger
-	# deterministically. Both fields carry the SAME single role, so the audience is
-	# unchanged; this only makes the row visible to the role-matched invocation path.
-	# An Org promotion clears it: an Org row carrying ``allowed_roles`` is a
-	# "role-restricted Org skill", which ``_pushable_org_rows`` deliberately keeps OFF the
-	# shared container push (TASK 11), so a Role->Org widen that left the child row behind
-	# would silently un-push the skill it just widened.
-	allowed_roles = [{"role": target_role}] if target_role else []
+	# The request's ``target_roles`` child rows are the FULL audience of a Role
+	# promotion; ``target_role`` is the primary (first). Legacy single-role requests
+	# carry no child rows, so fall back to the scalar ``target_role``.
+	if req.to_scope == "Role":
+		roles = [r.role for r in (req.get("target_roles") or []) if r.role]
+		if not roles and req.target_role:
+			roles = [req.target_role]
+	else:
+		roles = []
+	target_role = roles[0] if roles else None
+	# ``allowed_roles`` carries the WHOLE set: every path that answers "which skills
+	# may this user invoke" (``_role_scoped_invocable_names`` / the ``/slug`` clause /
+	# the list query) matches on the child rows, and ``user_can_use_skill`` OR-s
+	# ``target_role`` with the ``allowed_roles`` intersection - so all named roles get
+	# access, not just the primary. An Org promotion clears it (an Org row carrying
+	# allowed_roles is a role-restricted Org skill kept OFF the shared container push -
+	# see ``_pushable_org_rows`` / TASK 11).
+	allowed_roles = [{"role": r} for r in roles]
 
 	# R3-SP-2 (lineage by SOURCE link, not slug). The container writes ONE
 	# custom-<slug> dir, so at most one SHARED (Role/Org) copy may carry a given slug —
@@ -983,6 +1038,22 @@ def list_skill_promotion_requests(
 		params,
 		as_dict=True,
 	)
+
+	# Multi-role: attach every request's FULL target_roles set (one batched query),
+	# so the reviewer sees exactly which roles their approval grants access to - not
+	# just the primary target_role. Legacy single-role rows fall back to target_role.
+	_req_names = [r["name"] for r in rows]
+	_role_map: dict[str, list[str]] = {}
+	if _req_names:
+		for _cr in frappe.get_all(
+			"Jarvis Custom Skill Allowed Role",
+			filters={"parenttype": PROMO, "parent": ("in", _req_names)},
+			fields=["parent", "role"],
+			order_by="idx asc",
+		):
+			_role_map.setdefault(_cr.parent, []).append(_cr.role)
+	for r in rows:
+		r["target_roles"] = _role_map.get(r["name"]) or ([r["target_role"]] if r.get("target_role") else [])
 
 	owner_names = list({r["owner"] for r in rows if r.get("owner")})
 	fullnames = {
@@ -1163,6 +1234,7 @@ def my_skill_promotion(name: str) -> dict:
 		"from_scope": r.from_scope or "",
 		"to_scope": r.to_scope or "",
 		"target_role": r.target_role or "",
+		"target_roles": _promotion_roles(r.name, r.target_role or ""),
 		"note": r.note or "",
 		"reviewer": r.reviewer or "",
 		"reviewer_name": _full_name(r.reviewer) if r.reviewer else "",

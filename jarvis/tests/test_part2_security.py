@@ -1603,6 +1603,61 @@ class TestRoleScopedSkillInvocation(Part2Base):
 			[self.AUD_ROLE],
 		)
 
+	def test_role_promotion_to_multiple_roles(self):
+		"""Multi-role (#478 extended): one request naming SEVERAL roles materializes a
+		Role skill whose allowed_roles is the WHOLE set (target_role = the first). A
+		holder of ANY named role - not only the primary - can use it, and a stranger
+		holding neither still cannot."""
+		from jarvis.chat import custom_skills_api
+		from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import user_can_use_skill
+
+		second = "Accounts User"
+		owner = _ensure_user("p2-multiowner@example.com", ["Jarvis User", self.AUD_ROLE, second])
+		holder2 = _ensure_user("p2-multiholder@example.com", ["Jarvis User", second])  # NOT Sales User
+		self.addCleanup(lambda: frappe.db.delete(SKILL, {"owner": owner}))
+		self.addCleanup(lambda: frappe.db.delete("Jarvis Skill Promotion Request", {"owner": owner}))
+
+		src = _mk_skill(owner, f"{PFX}-multirole", scope="User")
+		with _as(owner):
+			req = custom_skills_api.request_skill_promotion(
+				src.name, "Role", target_roles=[self.AUD_ROLE, second]
+			)
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		shared = out["materialized"]
+
+		# target_role is the primary (first); allowed_roles is the FULL set.
+		self.assertEqual(frappe.db.get_value(SKILL, shared, "target_role"), self.AUD_ROLE)
+		self.assertEqual(
+			set(
+				frappe.get_all(
+					"Jarvis Custom Skill Allowed Role",
+					filters={"parent": shared, "parenttype": SKILL},
+					pluck="role",
+				)
+			),
+			{self.AUD_ROLE, second},
+		)
+		# A holder of the SECOND role (never the primary) can use it - the whole point.
+		doc = frappe.get_doc(SKILL, shared)
+		self.assertTrue(user_can_use_skill(doc, holder2, frappe.get_roles(holder2)))
+		# A Jarvis-User-only stranger still cannot.
+		self.assertFalse(user_can_use_skill(doc, USER_B, frappe.get_roles(USER_B)))
+
+	def test_role_promotion_rejects_a_role_the_requester_cannot_target(self):
+		"""Server-side gate: a requester may only name roles in their OWN promotable
+		set - a hand-crafted request for a role they do not hold is refused, even
+		though the old single-role path validated presence only."""
+		from jarvis.chat import custom_skills_api
+
+		src = _mk_skill(USER_A, f"{PFX}-badrole", scope="User")
+		with _as(USER_A), self.assertRaises(frappe.ValidationError):
+			# USER_A holds Sales User, never "System Manager"; naming it must be refused.
+			custom_skills_api.request_skill_promotion(
+				src.name, "Role", target_roles=[self.AUD_ROLE, "System Manager"]
+			)
+
 	def test_role_promoted_skill_is_slug_invocable_by_a_role_holder(self):
 		from jarvis.chat.custom_skills import _role_scoped_invocable_names, invoked_skill_clause
 

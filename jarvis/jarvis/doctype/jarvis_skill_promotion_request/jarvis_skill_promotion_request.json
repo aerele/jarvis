@@ -17,6 +17,7 @@
     "from_scope",
     "to_scope",
     "target_role",
+    "target_roles",
     "note",
     "status",
     "reviewer",
@@ -96,7 +97,16 @@
       "label": "Target Role",
       "options": "Role",
       "depends_on": "eval:doc.to_scope=='Role'",
-      "mandatory_depends_on": "eval:doc.to_scope=='Role'"
+      "mandatory_depends_on": "eval:doc.to_scope=='Role'",
+      "description": "Primary target role (the first of target_roles). Kept for backward compatibility and single-role display; the full audience is target_roles."
+    },
+    {
+      "fieldname": "target_roles",
+      "fieldtype": "Table",
+      "label": "Target Roles",
+      "options": "Jarvis Custom Skill Allowed Role",
+      "depends_on": "eval:doc.to_scope=='Role'",
+      "description": "Roles this request asks to share the skill with (Role scope). One approved request materializes a Role skill whose allowed_roles is this whole set; target_role holds the first as the primary."
     },
     {
       "fieldname": "note",
