@@ -1658,6 +1658,39 @@ class TestRoleScopedSkillInvocation(Part2Base):
 				src.name, "Role", target_roles=[self.AUD_ROLE, "System Manager"]
 			)
 
+	def test_role_promotion_accepts_json_string_target_roles(self):
+		"""Regression: the SPA sends target_roles as a JSON-encoded STRING (the
+		deleteCustomSkillsBulk convention), so the whitelisted endpoint must accept a
+		str and decode it. The original ``list``-only annotation made Frappe's type
+		validator reject the live request with a FrappeTypeError before any code ran."""
+		import json
+
+		from jarvis.chat import custom_skills_api
+
+		second = "Accounts User"
+		owner = _ensure_user("p2-jsonroles@example.com", ["Jarvis User", self.AUD_ROLE, second])
+		self.addCleanup(lambda: frappe.db.delete(SKILL, {"owner": owner}))
+		self.addCleanup(lambda: frappe.db.delete("Jarvis Skill Promotion Request", {"owner": owner}))
+
+		src = _mk_skill(owner, f"{PFX}-jsonroles", scope="User")
+		with _as(owner):
+			req = custom_skills_api.request_skill_promotion(
+				src.name, "Role", target_roles=json.dumps([self.AUD_ROLE, second])
+			)
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		self.assertEqual(
+			set(
+				frappe.get_all(
+					"Jarvis Custom Skill Allowed Role",
+					filters={"parent": out["materialized"], "parenttype": SKILL},
+					pluck="role",
+				)
+			),
+			{self.AUD_ROLE, second},
+		)
+
 	def test_role_promoted_skill_is_slug_invocable_by_a_role_holder(self):
 		from jarvis.chat.custom_skills import _role_scoped_invocable_names, invoked_skill_clause
 

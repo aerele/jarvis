@@ -655,7 +655,11 @@ def _promotion_roles(req_name: str, target_role: str = "") -> list[str]:
 @frappe.whitelist()
 @require_jarvis_user
 def request_skill_promotion(
-	name: str, to_scope: str, target_role: str = "", note: str = "", target_roles: list | None = None
+	name: str,
+	to_scope: str,
+	target_role: str = "",
+	note: str = "",
+	target_roles: list | str | None = None,
 ) -> dict:
 	"""Ask a reviewer to widen one of the caller's OWN skills up the scope ladder
 	(User->Role->Org). Files a Pending ``Jarvis Skill Promotion Request`` and
