@@ -411,6 +411,19 @@ const currentAction = computed(() => {
 	if (canReactivate.value)
 		return { label: "Renew", note: "Renewing restores access straight away." };
 	if (cancelling.value) return { label: "", note: "Resume above to keep this plan." };
+	// Pre-expiry pay-now-to-extend. The server (can_renew / _may_renew) accepts a
+	// manual renewal on a still-running subscription that is not autocharging, and
+	// activate_and_assign stacks the new period onto the days already left rather
+	// than resetting from now. doRenew (the card's @action) sends no target_plan
+	// here, which is the same-plan renewal renew() accepts. This is a distinct
+	// offer from the "Set up auto-renewal" banner: pay once now vs arm a future
+	// mandate. Without it, an Active-with-days-left or Past-Due customer whose
+	// autorenew is off had no way to pay before lapsing.
+	if (account.value.can_renew)
+		return {
+			label: "Renew now",
+			note: "Adds a full billing period on top of the days you have left.",
+		};
 	return { label: "", note: "You are on this plan." };
 });
 
@@ -672,7 +685,15 @@ async function doCheckStatus() {
 			const unreadable =
 				verdict.code === CLIENT_OFFLINE || verdict.code === CLIENT_UNREADABLE;
 			const code = unreadable ? CODES.BENCH_ADMIN_UNREACHABLE : verdict.code;
-			codeNotice.value = { code, copy: billingCopyFor(code), retry: doCheckStatus };
+			// A coded refusal here whose row offers INITIATE ("Start a new
+			// payment") - e.g. BILLING_NO_CURRENT_INTENT - must start a renewal,
+			// NOT re-run the status check. Binding retry to doCheckStatus made
+			// INITIATE re-check the same absent intent, answering the same 409
+			// forever: a button that looked dead. doRenew mirrors this function's
+			// own success path (settleWithRedirect below) and runCodeAction's
+			// no-notice fallback. Codes whose only action is CHECK are unaffected
+			// - runCodeAction routes CHECK straight to doCheckStatus, not retry.
+			codeNotice.value = { code, copy: billingCopyFor(code), retry: doRenew };
 			await loadAccount();
 			return;
 		}
@@ -684,7 +705,7 @@ async function doCheckStatus() {
 		// "Failed to fetch".
 		codeNotice.value = {
 			code: CODES.BENCH_ADMIN_UNREACHABLE,
-			copy: copyFor(CODES.BENCH_ADMIN_UNREACHABLE),
+			copy: billingCopyFor(CODES.BENCH_ADMIN_UNREACHABLE),
 			retry: doCheckStatus,
 		};
 	} finally {
@@ -780,7 +801,11 @@ async function runPayment({ key, start, retry, raw = false }) {
 			const verdict = decodePaymentResponse(await start());
 			if (!verdict.ok) {
 				if (verdict.code && copyFor(verdict.code) !== UNKNOWN_COPY) {
-					codeNotice.value = { code: verdict.code, copy: copyFor(verdict.code), retry };
+					codeNotice.value = {
+						code: verdict.code,
+						copy: billingCopyFor(verdict.code),
+						retry,
+					};
 				} else {
 					actionErr.value = verdict.message || errMsg(null);
 				}
@@ -944,11 +969,31 @@ const BILLING_COPY_OVERRIDES = {
 		body: "Nothing more is owed - your plan is active.",
 		actionLabels: { [ACTIONS.CONTINUE]: "Back to chat" },
 	},
+	[CODES.BILLING_NO_CURRENT_INTENT]: {
+		headline: "No renewal is in progress.",
+		body: "Nothing is waiting to be paid on this subscription right now. Renew to extend it.",
+	},
+};
+
+// The action vocabulary in paymentCodes.js is written for the SIGNUP wizard
+// ("Start a new payment", "Check payment status"). On the billing page every
+// payment is a RENEWAL of an existing subscription, so the surface renames the
+// affordances to say exactly that - without touching the shared labels the
+// wizard still relies on. A code's own override (above) wins over these, which
+// win over the shared signup defaults.
+const BILLING_ACTION_LABELS = {
+	[ACTIONS.INITIATE]: "Renew now",
+	[ACTIONS.CHECK]: "Check renewal status",
 };
 
 function billingCopyFor(code) {
 	const base = copyFor(code);
-	const over = BILLING_COPY_OVERRIDES[code];
-	return over ? { ...base, ...over } : base;
+	const over = BILLING_COPY_OVERRIDES[code] || {};
+	const actionLabels = {
+		...BILLING_ACTION_LABELS,
+		...(base.actionLabels || {}),
+		...(over.actionLabels || {}),
+	};
+	return { ...base, ...over, actionLabels };
 }
 </script>
