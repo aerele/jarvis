@@ -238,7 +238,13 @@ async function doCancel() {
 	const label = cancelActionLabel(account.value.has_mandate);
 	const endsOn = (account.value.access_ends_on || "").split(" ")[0];
 	let message;
-	if (account.value.has_mandate) {
+	if (account.value.is_trial) {
+		// Trial cancel is IMMEDIATE (server: cancel-during-trial ends access now). No
+		// runway to trial end - turning off auto-renewal in the trial is declining to
+		// convert, so say so plainly rather than promising access until a date.
+		message =
+			"This ends your free trial right now - access stops immediately and auto-renewal is cancelled. You won't be charged. You can subscribe again anytime.";
+	} else if (account.value.has_mandate) {
 		// AutoPay branch: turn off auto-renewal, keep full access, can re-arm anytime.
 		message = endsOn
 			? `Auto-renewal will turn off. You'll keep full access until ${endsOn}, and can set it up again anytime.`
