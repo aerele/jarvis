@@ -692,7 +692,7 @@ async function doCheckStatus() {
 		// "Failed to fetch".
 		codeNotice.value = {
 			code: CODES.BENCH_ADMIN_UNREACHABLE,
-			copy: copyFor(CODES.BENCH_ADMIN_UNREACHABLE),
+			copy: billingCopyFor(CODES.BENCH_ADMIN_UNREACHABLE),
 			retry: doCheckStatus,
 		};
 	} finally {
@@ -788,7 +788,11 @@ async function runPayment({ key, start, retry, raw = false }) {
 			const verdict = decodePaymentResponse(await start());
 			if (!verdict.ok) {
 				if (verdict.code && copyFor(verdict.code) !== UNKNOWN_COPY) {
-					codeNotice.value = { code: verdict.code, copy: copyFor(verdict.code), retry };
+					codeNotice.value = {
+						code: verdict.code,
+						copy: billingCopyFor(verdict.code),
+						retry,
+					};
 				} else {
 					actionErr.value = verdict.message || errMsg(null);
 				}
@@ -952,11 +956,31 @@ const BILLING_COPY_OVERRIDES = {
 		body: "Nothing more is owed - your plan is active.",
 		actionLabels: { [ACTIONS.CONTINUE]: "Back to chat" },
 	},
+	[CODES.BILLING_NO_CURRENT_INTENT]: {
+		headline: "No renewal is in progress.",
+		body: "Nothing is waiting to be paid on this subscription right now. Renew to extend it.",
+	},
+};
+
+// The action vocabulary in paymentCodes.js is written for the SIGNUP wizard
+// ("Start a new payment", "Check payment status"). On the billing page every
+// payment is a RENEWAL of an existing subscription, so the surface renames the
+// affordances to say exactly that - without touching the shared labels the
+// wizard still relies on. A code's own override (above) wins over these, which
+// win over the shared signup defaults.
+const BILLING_ACTION_LABELS = {
+	[ACTIONS.INITIATE]: "Renew now",
+	[ACTIONS.CHECK]: "Check renewal status",
 };
 
 function billingCopyFor(code) {
 	const base = copyFor(code);
-	const over = BILLING_COPY_OVERRIDES[code];
-	return over ? { ...base, ...over } : base;
+	const over = BILLING_COPY_OVERRIDES[code] || {};
+	const actionLabels = {
+		...BILLING_ACTION_LABELS,
+		...(base.actionLabels || {}),
+		...(over.actionLabels || {}),
+	};
+	return { ...base, ...over, actionLabels };
 }
 </script>
