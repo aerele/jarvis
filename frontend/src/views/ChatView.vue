@@ -283,6 +283,70 @@
 							<path d="M11 18h2" />
 						</svg>
 					</button>
+					<!-- Support: hidden outright when off/error (see supportEntryVisible);
+					     shown-but-explanatory when an operator hasn't finished configuring
+					     it yet, same two states UserMenu's old menu entry handled - this
+					     button replaces that entry rather than duplicating it. Unconfigured
+					     gets the same jv-unavailable + aria-disabled treatment the STT/wiki
+					     buttons use for their own "visible but not usable yet" state, so a
+					     screen-reader user hears it's inert before clicking, not after. -->
+					<button
+						v-if="supportEntryVisible"
+						class="jv-iconbtn jv-support-btn"
+						:class="{ 'jv-unavailable': supportUnconfigured }"
+						:aria-disabled="supportUnconfigured ? 'true' : undefined"
+						@click="openSupport"
+						:title="
+							supportUnconfigured
+								? 'Support is not set up on this workspace yet'
+								: 'Support'
+						"
+						:aria-label="
+							supportUnconfigured
+								? 'Support is not set up on this workspace yet'
+								: 'Support'
+						"
+						style="
+							position: relative;
+							width: 32px;
+							height: 32px;
+							display: flex;
+							align-items: center;
+							justify-content: center;
+							background: transparent;
+							border: 1px solid var(--border);
+							border-radius: 7px;
+							cursor: pointer;
+						"
+					>
+						<svg
+							width="16"
+							height="16"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="var(--text-2)"
+							stroke-width="1.7"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
+							<path d="M3 18v-6a9 9 0 0 1 18 0v6" />
+							<path
+								d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"
+							/>
+						</svg>
+						<!-- Resting badge: a waiting reply has to register while the user is
+						     heads-down in chat. Moved here from UserMenu's avatar (Support
+						     lived only in the menu before) so the dot sits on the control
+						     that actually opens Support. -->
+						<span
+							v-if="supportOn && supportStore.awaitingCount"
+							class="jv-support-dot"
+							:aria-label="`${supportStore.awaitingCount} ${
+								supportStore.awaitingCount === 1 ? 'ticket' : 'tickets'
+							} awaiting your reply`"
+							role="status"
+						/>
+					</button>
 					<button
 						class="jv-iconbtn"
 						@click="toggleTheme"
@@ -2821,55 +2885,13 @@
 								</svg>
 								<span v-if="groundNextTurn">Wiki</span>
 							</button>
-							<!-- "Get help from a human" — always-available chat hook into the
-							     standalone support space (Task 6). Gated on the same dual
-							     kill-switch the /support routes guard on. -->
-							<button
-								v-if="supportOn || supportUnconfigured"
-								class="jv-iconbtn"
-								:class="{ 'jv-unavailable': supportUnconfigured }"
-								:aria-disabled="supportUnconfigured ? 'true' : undefined"
-								:title="
-									supportUnconfigured
-										? 'Support is not set up on this workspace yet'
-										: 'Get help from a human'
-								"
-								@click="
-									supportUnconfigured
-										? explainSupportUnavailable()
-										: getHumanHelp()
-								"
-								style="
-									width: 30px;
-									height: 30px;
-									display: flex;
-									align-items: center;
-									justify-content: center;
-									background: transparent;
-									border: none;
-									border-radius: 7px;
-									cursor: pointer;
-									color: var(--text-3);
-								"
-							>
-								<svg
-									width="17"
-									height="17"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<circle cx="12" cy="12" r="10" />
-									<circle cx="12" cy="12" r="4" />
-									<line x1="4.93" y1="4.93" x2="9.17" y2="9.17" />
-									<line x1="14.83" y1="14.83" x2="19.07" y2="19.07" />
-									<line x1="14.83" y1="9.17" x2="19.07" y2="4.93" />
-									<line x1="4.93" y1="19.07" x2="9.17" y2="14.83" />
-								</svg>
-							</button>
+							<!-- The composer's own "Get help from a human" button used to live
+							     here (Task 6) - it's gone now that Support has one entry point,
+							     the headphones icon in the header (see supportEntryVisible near
+							     openSupport), which also carries the new copy-last-messages
+							     prompt this composer button never had. Two controls opening the
+							     same space would just be the button this request asked to move,
+							     left behind a second time. -->
 						</template>
 						<template #right-toolbar>
 							<!-- Dictation mic. Two DIFFERENT unavailable reasons, two treatments:
@@ -3722,6 +3744,12 @@
 			:fileUrl="userFilePreview.file_url"
 			:fileName="userFilePreview.file_name"
 		/>
+		<!-- SupportCopyPromptDialog now mounts once in AppShell (above the router
+		     view), not here - a route change away from Chat used to unmount it
+		     mid-prompt and permanently wedge promptSupportCopy()'s module-scope
+		     resolver (review finding: the copy-into-ticket feature going silently
+		     dead for the rest of the session). Same fix ConfirmDialog already had
+		     by living in AppShell from the start. -->
 	</div>
 </template>
 
@@ -3760,6 +3788,9 @@ import {
 import { setMacroPrefill } from "@/composables/macroPrefill";
 import { takeChatPrefill } from "@/composables/chatPrefill";
 import { useConfirm } from "@/composables/useConfirm";
+import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
+import { useSupportStore } from "@/stores/support";
+import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
@@ -3989,6 +4020,80 @@ function announceSR(msg) {
 // dismissal and rendering are owned by that component.
 const { confirm } = useConfirm();
 const showConnect = ref(false);
+
+// Support entry point (header icon). Same two-flag model UserMenu's old menu
+// entry used - supportOn (usable) vs supportUnconfigured (an operator can still
+// set it up, so stay visible and say why rather than vanishing outright); a
+// site with support truly off/erroring shows neither and the button is absent.
+const supportOn = window.support_available && window.has_support_access;
+const supportUnconfigured = window.support_state === "unconfigured" && !!window.has_support_access;
+const supportEntryVisible = supportOn || supportUnconfigured;
+// Singleton store (stores/support.js) - already kept fresh by the sidebar's
+// UserMenu poll timer (always mounted alongside chat), so this view just reads
+// it rather than running a second poller.
+const supportStore = supportOn ? useSupportStore() : null;
+
+// "Copy this chat into your ticket?" - only asked when there IS a chat to copy
+// (an active conversation with visible messages) and the user hasn't already
+// answered "don't ask again". Formats the last few turns as plain text; the
+// New Ticket page's existing ?body= prefill (query.body -> plainToHtml) does
+// the rest, same mechanism a macro/prefill link already uses. The formatting
+// itself lives in lib/supportCopyFormat.js (pure, unit-tested on its own).
+function recentMessagesForSupport() {
+	return formatRecentMessagesForSupport(messages.value, agentName);
+}
+// Guards the async gap below (a settings fetch, maybe a dialog await) against
+// a double-click firing openSupport() twice concurrently: without this, a
+// second click could race the first to SupportNew before the first's prompt
+// even resolves.
+let openSupportInFlight = false;
+async function openSupport() {
+	if (!supportOn) {
+		// Unconfigured-but-visible state (see supportEntryVisible): explain rather
+		// than navigate into a route the guard would just bounce back from. Same
+		// helper + toast as every other "not set up yet" control in this header.
+		explainUnavailable("Support");
+		return;
+	}
+	// A resting badge means tickets are waiting on the user's reply - the click
+	// has to land where those tickets actually are (the old UserMenu entry did
+	// this), not on a blank new-ticket form the badge gave no reason to expect.
+	if (supportStore.awaitingCount) {
+		router.push({ name: "Support" });
+		return;
+	}
+	if (openSupportInFlight) return;
+	openSupportInFlight = true;
+	try {
+		const recent = recentMessagesForSupport();
+		if (!recent.length) {
+			router.push({ name: "SupportNew" });
+			return;
+		}
+		let copyBody = "";
+		// Cached on the support store (fetched once, updated locally on write)
+		// rather than a fresh getMySettings() on every click - see setCopyPref.
+		const pref = await supportStore.getCopyPref();
+		if (pref === "Yes") {
+			copyBody = recent.join("\n\n");
+		} else if (pref === "No") {
+			copyBody = "";
+		} else {
+			const answer = await promptSupportCopy({ preview: recent.join("\n\n") });
+			if (answer === "yes") copyBody = recent.join("\n\n");
+			if (answer === "dontask") {
+				// Don't-ask-again defaults to not copying: a permanent, silent "share my
+				// chat" default is the wrong side to fail toward for conversation content
+				// that can carry anything the user typed, including things they'd want to
+				// choose to include rather than have auto-attached from now on.
+				supportStore.setCopyPref("No");
+			}
+		}
+		router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
+	} finally {
+		openSupportInFlight = false;
+	}
+}
 // One-shot "ground on wiki": when armed, the NEXT message carries a
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).
@@ -4855,18 +4960,11 @@ const currentTitle = computed(
 	() => store.conversations.find((c) => c.name === currentId.value)?.title || "New chat"
 );
 
-// Same dual kill-switch the support routes guard on (router/index.js
-// supportGuard) — a dead button that redirects straight back to chat is worse
-// than no button.
-const supportOn = window.support_available && window.has_support_access;
-
-// Support is UNCONFIGURED (not merely off/erroring) and this user could otherwise use
-// it: an operator can still set it up, so show the entry faded + explained rather than
-// hiding a feature that exists. "off" (deliberately switched off) and "error" (a
-// transient CP blip that self-heals) both stay hidden — a greyed control for either
-// would be misleading. Permission (`has_support_access`) still hides outright: showing
-// a user a feature they can never use is noise, not discovery.
-const supportUnconfigured = window.support_state === "unconfigured" && !!window.has_support_access;
+// supportOn/supportUnconfigured (the same dual kill-switch router/index.js's
+// supportGuard uses) now live once, near openSupport - this file used to
+// declare them a second time down here for the composer's own "Get help from
+// a human" button, which duplicated the header entry point and has been
+// removed.
 
 // STT is UNCONFIGURED specifically — not deliberately off, not a transient CP blip.
 // Only that case earns a faded control: the other two would either nag an admin who
@@ -4886,23 +4984,8 @@ function explainUnavailable(feature) {
 		type: "info",
 	});
 }
-function explainSupportUnavailable() {
-	explainUnavailable("Support");
-}
 function explainSttUnavailable() {
 	explainUnavailable("Voice dictation");
-}
-
-// "Get help from a human" — always available (v1). The conversation reference
-// is plain, readable, user-EDITABLE body text: create_ticket takes only
-// (subject, body), has no context params, and derives the tenant server-side
-// from the API key. An operator-actionable deep-link is v2.
-function getHumanHelp() {
-	const title = (currentTitle.value || "").trim();
-	// "New chat" is currentTitle's fallback, not a real title — carrying it
-	// would put a meaningless quote in front of a support agent.
-	const ref = title && title !== "New chat" ? `\n\n- From Jarvis chat: "${title}"` : "";
-	router.push({ name: "SupportNew", query: ref ? { body: ref } : {} });
 }
 
 // A FAILED tool call with no assistant turn ahead of it in the thread, keyed by
@@ -9783,6 +9866,18 @@ onUnmounted(() => {
 }
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
+}
+/* Resting badge on the Support button: mirrors the "Awaiting you" ticket
+   badge's amber, so the same colour means the same thing everywhere. */
+.jv-support-dot {
+	position: absolute;
+	top: 3px;
+	right: 3px;
+	width: 8px;
+	height: 8px;
+	border-radius: 999px;
+	background: var(--amber);
+	border: 1.5px solid var(--surface);
 }
 .jv-ctxbtn:hover {
 	background: var(--surface-2);

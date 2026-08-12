@@ -12,7 +12,7 @@
 			     badge + Resolve instead of a blank header contradicting the panel. -->
 			<Badge
 				v-if="ticketStatus"
-				variant="subtle"
+				:variant="badge.variant"
 				:theme="badge.theme"
 				:label="badge.label"
 			/>
@@ -47,27 +47,35 @@
 				     so bubbles/rows read as a chat thread instead of stretching
 				     full-bleed with the user's replies hugging the far edge. -->
 				<div class="jv-sup-thread-inner">
-					<div v-if="ticketAttachments.length" class="jv-sup-files">
-						<a
-							v-for="a in ticketAttachments"
-							:key="a.name"
-							class="jv-sup-file"
-							:class="{ 'jv-sup-file-img': a.type === 'image' }"
-							:href="a.file_url"
-							target="_blank"
-							rel="noopener"
+					<!-- Ticket-level fallback only: files a NEW ticket's opening message
+					     attaches now ride the opening Communication and render inline
+					     in that bubble instead (see SupportNewPage's openingComm). This
+					     block only ever fires for a ticket opened before that shipped,
+					     or on a Helpdesk build that doesn't auto-mirror the opening
+					     message - hence the caption, so a legacy cluster of files reads
+					     as "from opening this ticket", not as an unexplained orphan list. -->
+					<div v-if="ticketAttachments.length" class="jv-sup-files-wrap">
+						<span class="jv-sup-files-label"
+							>Attached when this ticket was opened</span
 						>
-							<img
-								v-if="a.type === 'image'"
-								:src="a.file_url"
-								:alt="a.title"
-								loading="lazy"
-								class="jv-sup-thumb"
-							/>
-							<template v-else>
-								<FeatherIcon name="paperclip" class="size-3.5" />{{ a.title }}
-							</template>
-						</a>
+						<div class="jv-sup-files">
+							<!-- Same filename-chip treatment as every other attachment (see
+							     Message's imagesAsChips) - an image here used to get a bare
+							     56px crop with no name at all, worse than the "vague" preview
+							     everything else was fixed for. -->
+							<a
+								v-for="a in ticketAttachments"
+								:key="a.name"
+								class="jv-sup-file"
+								:href="a.file_url"
+								target="_blank"
+								rel="noopener"
+							>
+								<FeatherIcon name="paperclip" class="jv-sup-file-clip" />{{
+									a.title
+								}}
+							</a>
+						</div>
 					</div>
 
 					<!-- Reachable: a brand-new ticket created with an empty body and no
@@ -91,7 +99,7 @@
 							:timestamp="m.timestamp"
 							:timestamp-full="m.timestampFull"
 							:copyable="false"
-							@open-attachment="openAttachment"
+							images-as-chips
 						>
 							<template v-if="m.fromSupport" #avatar>
 								<div class="jv-sup-avatar" aria-hidden="true">S</div>
@@ -202,14 +210,6 @@ const disclaimer = computed(() => {
 	return "";
 });
 
-// Message emits the RAW attachment record it was given ({file_url, title,
-// type, name}) — file_url is already the proxied download URL (classifyAttachment
-// below), so this is a plain new-tab open, same as the real ticket-level
-// attachment links a few lines up in the template.
-function openAttachment(a) {
-	if (a && a.file_url) window.open(a.file_url, "_blank", "noopener");
-}
-
 // "Sent" means the support side sent it (helpdesk_client.py queries
 // sent_or_received directly). Anything else — including a missing value — is
 // this user's own message.
@@ -258,11 +258,12 @@ function attachmentsOf(m) {
 	return ((m && m.attachments) || []).map(classifyAttachment);
 }
 
-// Ticket-level attachments (shown above the message list) used to render as a
-// plain download chip with no image check at all — a regression from the old
-// SupportPage, which did classify these. Message.vue already proves the image
-// vs. file split for per-message attachments; this brings ticket-level ones up
-// to the same standard instead of leaving them a second, worse code path.
+// Ticket-level attachments (shown above the message list) share classifyAttachment
+// with the per-message path below, so `.type` still gets computed here - but the
+// template no longer branches on it (every support attachment, ticket-level or
+// per-message, renders as a plain paperclip+filename chip now; no image preview).
+// Left in rather than forked so ticket-level and per-message attachments can never
+// silently classify the same file differently.
 const ticketAttachments = computed(() => store.thread.attachments.map(classifyAttachment));
 
 function downloadUrl(fileUrl) {
@@ -614,37 +615,45 @@ watch(ticketName, (n) => open(n));
 	padding: 48px 0;
 	color: var(--text-2);
 }
+.jv-sup-files-wrap {
+	margin-bottom: 12px;
+}
+.jv-sup-files-label {
+	display: block;
+	margin-bottom: 6px;
+	font-size: 11.5px;
+	color: var(--text-3);
+}
 .jv-sup-files {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 8px;
-	margin-bottom: 12px;
 }
+/* Same shape as a per-message attachment chip (Message.vue's .jv-file-chip) -
+   radius, padding, font-size, icon size all match, so a file attached at
+   ticket-open time and one attached in a reply read as the same kind of
+   object, not two different ones a few pixels apart. */
 .jv-sup-file {
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
-	padding: 4px 10px;
+	padding: 6px 11px;
 	border: 1px solid var(--border);
-	border-radius: 999px;
+	border-radius: 10px;
+	background: var(--surface-2);
 	color: var(--link);
-	font-size: 12px;
+	font-size: 12.5px;
+	line-height: 1.3;
 	text-decoration: none;
+	overflow-wrap: anywhere;
 }
-/* Image variant: a thumbnail instead of the icon+filename pill, same border
-   treatment as Message's per-attachment image thumbnail so the two don't look
-   like unrelated features. */
-.jv-sup-file-img {
-	padding: 0;
-	border-radius: 8px;
-	overflow: hidden;
-	line-height: 0;
+.jv-sup-file:hover {
+	text-decoration: underline;
 }
-.jv-sup-thumb {
-	display: block;
-	width: 56px;
-	height: 56px;
-	object-fit: cover;
+.jv-sup-file-clip {
+	flex: 0 0 auto;
+	width: 13px;
+	height: 13px;
 }
 .jv-sup-avatar {
 	display: flex;

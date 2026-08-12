@@ -81,6 +81,7 @@
 			<JarvisCommandPalette />
 			<NotifyToaster />
 			<ConfirmDialog />
+			<SupportCopyPromptDialog />
 		</div>
 	</FrappeUIProvider>
 </template>
@@ -104,6 +105,9 @@ import Sidebar from "./Sidebar.vue";
 import JarvisCommandPalette from "./JarvisCommandPalette.vue";
 import SettingsDialog from "./SettingsDialog.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
+// Mounted here (not in ChatView) so a route change away from Chat can never
+// unmount it mid-prompt - same reasoning as ConfirmDialog living here.
+import SupportCopyPromptDialog from "@/components/support/SupportCopyPromptDialog.vue";
 import OnboardingGate from "./OnboardingGate.vue";
 import UpdateNoticeGate from "./UpdateNoticeGate.vue";
 import { showNotice } from "@/noticeGate";

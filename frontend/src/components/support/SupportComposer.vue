@@ -56,22 +56,24 @@
 					class="hidden"
 					@change="onFileInput"
 				/>
-				<span
-					v-for="(p, i) in pending"
-					:key="p.key"
-					class="jv-supc-chip inline-flex max-w-[14rem] items-center gap-1.5 rounded-md bg-surface-gray-2 px-2 py-1 text-sm text-ink-gray-7"
-				>
-					<span class="truncate">{{ p.file_name }}</span>
+				<span v-for="(p, i) in pending" :key="p.key" class="jv-supc-chip">
+					<FeatherIcon name="paperclip" class="jv-supc-chip-clip" />
+					<span class="jv-supc-chip-name">{{ p.file_name }}</span>
 					<button
 						type="button"
 						:aria-label="`Remove ${p.file_name}`"
-						class="shrink-0 text-ink-gray-5 hover:text-ink-gray-8"
+						class="jv-supc-chip-remove"
 						@click="emit('remove-attachment', i)"
 					>
 						<FeatherIcon name="x" class="size-3.5" />
 					</button>
 				</span>
-				<div class="ml-auto">
+				<div class="ml-auto flex items-center gap-2">
+					<!-- Self-documenting, same spot Helpdesk's own reply box puts it (on the
+					     Send button itself) - here as its own span since submitLabel is
+					     host-owned ("Send" on a reply, "Create ticket" on a new one) and
+					     baking the chord into that string would read oddly on the latter. -->
+					<span class="jv-supc-hint">Ctrl + Enter to send</span>
 					<Button
 						variant="solid"
 						:label="submitLabel"
@@ -278,5 +280,47 @@ function rejectInlineUpload(file) {
 	font-size: 10.5px;
 	color: var(--text-3, #6b7280);
 	margin-top: 8px;
+}
+.jv-supc-hint {
+	font-size: 11px;
+	color: var(--ink-gray-5, #8d99a8);
+	white-space: nowrap;
+}
+/* Staged-file chip - same shape family as the row's Attach button (rounded-md,
+   border-outline-gray-2, text-sm) so a chip reads as "the same control, now
+   holding a file" rather than a different visual language bolted on. Kept as a
+   real named rule (frappe-ui tokens, not jv-* vars - this mounts outside jv-root
+   on the new-ticket page, see the file-level comment) rather than a pile of
+   inline utility classes, matching .jv-supc-disclaimer's pattern above. */
+.jv-supc-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 14rem;
+	padding: 0.25rem 0.5rem;
+	border: 1px solid var(--outline-gray-2, #d1d5db);
+	border-radius: 0.375rem;
+	background-color: var(--surface-gray-2, #f4f5f6);
+	font-size: 0.875rem;
+	color: var(--ink-gray-7, #4b5563);
+}
+.jv-supc-chip-clip {
+	flex: 0 0 auto;
+	width: 13px;
+	height: 13px;
+	color: var(--ink-gray-5, #8d99a8);
+}
+.jv-supc-chip-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.jv-supc-chip-remove {
+	flex: 0 0 auto;
+	display: flex;
+	color: var(--ink-gray-5, #8d99a8);
+}
+.jv-supc-chip-remove:hover {
+	color: var(--ink-gray-8, #1c2126);
 }
 </style>

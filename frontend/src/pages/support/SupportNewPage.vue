@@ -120,15 +120,19 @@ async function create() {
 		if (stripped) {
 			toast.info("Embedded images were removed - add them with the Attach button instead.");
 		}
-		const name = await store.createTicket(subject.value.trim().slice(0, 140), body);
-		if (!name) return; // the store toasted; keep the draft so nothing is lost
+		const created = await store.createTicket(subject.value.trim().slice(0, 140), body);
+		if (!created) return; // the store toasted; keep the draft so nothing is lost
+		const { name, openingComm } = created;
 
 		if (staged.length) {
 			// Upload only files STILL staged: a chip removed during this in-flight
-			// submit must not be uploaded (Helpdesk has no un-attach).
+			// submit must not be uploaded (Helpdesk has no un-attach). Threaded onto
+			// openingComm (the ticket's own auto-mirrored opening message) so these
+			// render inline in the first bubble instead of as a floating ticket-level
+			// pill row, the same inline treatment a reply's attachment already gets.
 			const live = staged.filter((f) => files.value.includes(f));
 			if (live.length) {
-				const uploaded = await store.uploadTo(name, live);
+				const uploaded = await store.uploadTo(name, live, openingComm);
 				settleUpload(uploaded);
 			}
 		}

@@ -17,9 +17,12 @@
 				     exactly what let the chat welcome mark drift to a different colour
 				     (design.md §2.2). -->
 				<JarvisMark :size="28" :radius="7" />
-				<!-- Resting badge: a waiting reply has to register while the user is
-				     heads-down in chat, without opening the menu. Mirrors the
-				     collapsed-sidebar dot in Sidebar.vue:57-62. -->
+				<!-- Resting badge: a waiting reply has to register on every route, not
+				     only while the user happens to be in Chat - restoring this (it was
+				     briefly dropped when ChatView grew its own header jv-support-dot,
+				     which stayed too: both showing the same thing on the chat route is
+				     harmless duplication, losing it everywhere else was not). Mirrors
+				     the collapsed-sidebar dot in Sidebar.vue:57-62. -->
 				<div
 					v-if="supportOn && store.awaitingCount"
 					class="absolute left-7 top-1 size-2 rounded-full bg-surface-amber-2"
@@ -52,7 +55,7 @@
 // pattern. Dropdown: Settings (D9) · Switch to Desk · Change theme · Log out.
 import { computed, inject, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
-import { Dropdown, FeatherIcon, toast } from "frappe-ui";
+import { Dropdown, FeatherIcon } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
 import { useShellStore } from "@/stores/shell";
 import { useSupportStore } from "@/stores/support";
@@ -75,14 +78,12 @@ const shellStore = useShellStore();
 const session = inject("$session");
 const { effectiveDark, toggleTheme } = useJarvisTheme();
 
-// Support panel (Plan 3 C3/C4): dual kill-switch + a store-driven awaiting-count
-// badge. `store` is the shared support-store singleton (Task 1) — both this
-// resting dot and the list read the same value, so they can never disagree.
+// Support panel: `store` is the shared support-store singleton, kept fresh here
+// by this poll timer so ChatView's header Support button (its jv-support-dot)
+// and the ticket list always read the same awaiting-count value without each
+// needing to run its own poller.
 const router = useRouter();
 const supportOn = window.support_available && window.has_support_access;
-// Unconfigured (an operator can still set it up) vs off/error (hidden, as before) —
-// see the same flag in ChatView. Permission still hides outright.
-const supportUnconfigured = window.support_state === "unconfigured" && !!window.has_support_access;
 const store = useSupportStore();
 let pollTimer = null;
 async function pollAwaiting() {
@@ -106,9 +107,10 @@ function cookie(name) {
 }
 const fullName = cookie("full_name") || session.user || "User";
 
-// Cross-surface link: from chat -> Support (with the awaiting count); from the
-// support rail -> back to chat (we're already in support, so a "Support" link is
-// pointless). `null` = omit (chat with support switched off).
+// Cross-surface link: from the support rail -> back to chat (we're already in
+// support, so a "Support" link is pointless there). The chat-side "Support" entry
+// used to live here too, but it now lives in ChatView's header icon button
+// instead - keeping both would show Support twice on the chat side.
 const crossItem = computed(() => {
 	if (props.variant === "support") {
 		return {
@@ -117,28 +119,7 @@ const crossItem = computed(() => {
 			onClick: () => router.push({ name: "Chat" }),
 		};
 	}
-	// Unconfigured but usable-by-this-user: keep the entry so the feature is
-	// discoverable, but say why instead of navigating into a space the route guard
-	// would bounce straight back. "off"/"error" stay omitted (see supportUnconfigured).
-	if (supportUnconfigured) {
-		return {
-			label: "Support",
-			icon: "life-buoy",
-			// A visible cue: without it the entry is pixel-identical to the working one and
-			// clicking it just toasts, which reads as broken. frappe-ui's `disabled` would
-			// set pointer-events:none and swallow the click that carries the explanation,
-			// so use its `description` instead.
-			description: "Not set up - open to see why",
-			onClick: () =>
-				toast.info("Support isn't set up on this workspace yet — ask your administrator."),
-		};
-	}
-	if (!supportOn) return null;
-	return {
-		label: store.awaitingCount ? `Support (${store.awaitingCount})` : "Support",
-		icon: "life-buoy",
-		onClick: () => router.push({ name: "Support" }),
-	};
+	return null;
 });
 
 const menuOptions = computed(() => [

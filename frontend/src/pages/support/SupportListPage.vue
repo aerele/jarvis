@@ -66,7 +66,7 @@
 
 			<template #cell-status="{ row }">
 				<Badge
-					variant="subtle"
+					:variant="badgeFor(row.status).variant"
 					:theme="badgeFor(row.status).theme"
 					:label="badgeFor(row.status).label"
 				/>

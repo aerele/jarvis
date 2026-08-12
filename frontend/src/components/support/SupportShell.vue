@@ -102,6 +102,27 @@ const { effectiveDark, paletteVars } = useJarvisTheme();
 	color: var(--text);
 	background: var(--surface);
 }
+/* Support-only retint: --link is chat's hyperlink blue (theme.js), which is what
+   both Message.vue's file-attachment chips AND embedded links in a rendered reply
+   body read their colour from. On the support surface that read as "some blue
+   color". A first pass retinted it to the brand's own purple instead - still not
+   what was asked for: filenames and in-message wording read clearest as plain
+   ink text, not a second accent colour competing with the brand mark. --text is
+   theme.js's primary ink token (near-black in light, near-white in dark), so
+   this stays correct in both themes without a hardcoded hex. Scoped to this
+   subtree only - main chat keeps its blue links, and this is a scoped custom-
+   property override, not an edit to Message.vue, so it can never drift the two
+   apart by accident.
+
+   Declared on the CHILDREN, not on .jv-sup-content.jv-root itself: that element
+   carries paletteVars as an inline style (:style="chatSurface ? paletteVars :
+   null" above), which already sets --link, and an inline style always wins over
+   an author stylesheet rule on the SAME element regardless of selector
+   specificity. A custom property re-declared one level down is a normal
+   inheritance override, not a specificity fight, so it applies. */
+.jv-sup-content.jv-root > * {
+	--link: var(--text);
+}
 .jv-sup-center {
 	flex: 1;
 	min-width: 0;
