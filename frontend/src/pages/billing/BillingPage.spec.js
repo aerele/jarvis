@@ -160,6 +160,39 @@ describe("acceptance: renew's stuck-payment answer is no longer silent", () => {
 
 		expect(order).toEqual(["check", "state"]);
 	});
+
+	// Regression: a status check that answers BILLING_NO_CURRENT_INTENT (409)
+	// renders a notice whose ONLY action is INITIATE ("Start a new payment").
+	// doCheckStatus used to bind that notice's retry to itself, so clicking
+	// "Start a new payment" re-ran the status check - which answers the same 409
+	// against the same absent intent forever. The button looked dead: no
+	// redirect, no change. INITIATE here must start a renewal instead.
+	it("routes 'Start a new payment' on a no-intent 409 to renew, not back into the status check", async () => {
+		const wrapper = await mountPage();
+		api.checkBillingPayment.mockResolvedValue(
+			rawFail("BILLING_NO_CURRENT_INTENT", { status: 409 })
+		);
+		await wrapper.vm.doCheckStatus();
+		await flushPromises();
+
+		expect(wrapper.vm.codeNotice.code).toBe(CODES.BILLING_NO_CURRENT_INTENT);
+		const initiate = findByText(wrapper, "button", "Start a new payment");
+		expect(initiate).toBeTruthy();
+
+		const checksBefore = api.checkBillingPayment.mock.calls.length;
+		api.renewPlan.mockResolvedValue(rawOkBody({ tenant_status: "ready" }));
+		await initiate.trigger("click");
+		await flushPromises();
+
+		// The click must NOT re-run the healer, and it must open the renew
+		// confirm dialog so the customer can actually pay.
+		expect(api.checkBillingPayment.mock.calls.length).toBe(checksBefore);
+		const pay = findByText(wrapper, ".dialog button", "Pay");
+		expect(pay).toBeTruthy();
+		await pay.trigger("click");
+		await flushPromises();
+		expect(api.renewPlan).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("edge 1: double-click cannot open a second gateway object", () => {

@@ -672,7 +672,15 @@ async function doCheckStatus() {
 			const unreadable =
 				verdict.code === CLIENT_OFFLINE || verdict.code === CLIENT_UNREADABLE;
 			const code = unreadable ? CODES.BENCH_ADMIN_UNREACHABLE : verdict.code;
-			codeNotice.value = { code, copy: billingCopyFor(code), retry: doCheckStatus };
+			// A coded refusal here whose row offers INITIATE ("Start a new
+			// payment") - e.g. BILLING_NO_CURRENT_INTENT - must start a renewal,
+			// NOT re-run the status check. Binding retry to doCheckStatus made
+			// INITIATE re-check the same absent intent, answering the same 409
+			// forever: a button that looked dead. doRenew mirrors this function's
+			// own success path (settleWithRedirect below) and runCodeAction's
+			// no-notice fallback. Codes whose only action is CHECK are unaffected
+			// - runCodeAction routes CHECK straight to doCheckStatus, not retry.
+			codeNotice.value = { code, copy: billingCopyFor(code), retry: doRenew };
 			await loadAccount();
 			return;
 		}
