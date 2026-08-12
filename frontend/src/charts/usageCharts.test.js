@@ -96,3 +96,11 @@ test("formatUsd: sub-cent nonzero amounts get extra precision instead of reading
 	assert.equal(formatUsd(0.003), "$0.0030");
 	assert.equal(formatUsd(0.0099), "$0.0099");
 });
+test("formatUsd: negative (credit/refund) puts the sign before the $", () => {
+	assert.equal(formatUsd(-12.3), "-$12.30");
+	assert.equal(formatUsd(-0.005), "-$0.0050");
+});
+test("perModelBarSpec: cost metric renders when values are nonzero-but-negative (credits), not hidden", () => {
+	const rows = [{ model: "gpt-5.5", cost_usd: -0.5 }];
+	assert.notEqual(perModelBarSpec(rows, "cost"), null);
+});

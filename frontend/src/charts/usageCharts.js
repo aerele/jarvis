@@ -56,7 +56,9 @@ export function perModelBarSpec(perModel, metric = "tokens") {
 		// would otherwise render the same "axes with no bars" pathology this file
 		// exists to fix - chartTheme only nulls out a chart when a series has no
 		// data POINTS, and [0, 0, ...] still has points. Skip the chart instead.
-		if (!data.some((v) => v > 0)) return null;
+		// Hide only when there is NO cost signal at all (every value exactly 0).
+		// A negative value (a credit/refund adjustment) is real data, not "empty".
+		if (!data.some((v) => v !== 0)) return null;
 		return {
 			type: "bar",
 			x,
@@ -84,7 +86,9 @@ export function formatUsd(v) {
 	const n = Number(v);
 	if (!Number.isFinite(n)) return "$0.00";
 	const decimals = n !== 0 && Math.abs(n) < 0.01 ? 4 : 2;
-	return `$${n.toLocaleString("en-US", {
+	// Sign before the $ ("-$12.30", not "$-12.30") for the credit/refund case.
+	const sign = n < 0 ? "-" : "";
+	return `${sign}$${Math.abs(n).toLocaleString("en-US", {
 		minimumFractionDigits: decimals,
 		maximumFractionDigits: decimals,
 	})}`;
