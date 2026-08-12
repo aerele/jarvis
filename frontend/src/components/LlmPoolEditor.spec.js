@@ -909,10 +909,9 @@ describe("the verdict and the surrounding controls agree", () => {
  */
 describe("a subscription row's collapsed account identity (jarvis account-name bug)", () => {
 	it("gives two label-less, email-less accounts distinct identifiers via accountLabel()", async () => {
-		// Real refs are secrets.token_hex(8): lowercase hex, letters included. Ending
-		// each in a distinct letter-bearing suffix (not all-digits) is what actually
-		// exercises accountLabel()'s .toUpperCase() - digits uppercase to themselves,
-		// so an all-digit suffix would pass this test with or without that call.
+		// Real refs are secrets.token_hex(8): lowercase hex. The fallback shows the last
+		// 6 chars of the ref (lowercase, matching the server-side Kimi convention), so
+		// two refs that differ within their last 6 render as distinct labels.
 		setPool([
 			subModel("gpt-5", 0, [
 				account("SUB_aaaaaaaaabcd", ""),
@@ -924,8 +923,8 @@ describe("a subscription row's collapsed account identity (jarvis account-name b
 		// accountLabel is a <script setup> binding, not part of defineExpose - reachable
 		// through the component's setupState the way @vue/test-utils exposes it on `vm`.
 		const [a, b] = w.vm.rows[0].accounts;
-		expect(w.vm.accountLabel(a)).toBe("Account ABCD");
-		expect(w.vm.accountLabel(b)).toBe("Account EF01");
+		expect(w.vm.accountLabel(a)).toBe("Account aaabcd");
+		expect(w.vm.accountLabel(b)).toBe("Account bbef01");
 		expect(w.vm.accountLabel(a)).not.toBe(w.vm.accountLabel(b));
 	});
 
@@ -941,7 +940,7 @@ describe("a subscription row's collapsed account identity (jarvis account-name b
 		const chip = w.find(".jv-flist-acct");
 		expect(chip.exists()).toBe(true);
 		// Two accounts folded onto one row: only the first is named, the rest counted.
-		expect(chip.text()).toBe("Account ABCD +1 more");
+		expect(chip.text()).toBe("Account aaabcd +1 more");
 	});
 
 	it("shows the real email when the account has one", async () => {
@@ -953,13 +952,12 @@ describe("a subscription row's collapsed account identity (jarvis account-name b
 		expect(chip.text()).toBe("a@example.com");
 	});
 
-	it("never surfaces the raw SUB_<hex> token, and uppercases the last 4 chars", async () => {
+	it("never surfaces the raw SUB_<hex> token, and shows the last 6 chars of the ref", async () => {
 		setPool([subModel("gpt-5", 0, [account("SUB_aaaaaaaaabcd", "")])]);
 		const w = await mountEditor();
 
 		const chip = w.find(".jv-flist-acct");
-		expect(chip.text()).toBe("Account ABCD");
+		expect(chip.text()).toBe("Account aaabcd");
 		expect(chip.text()).not.toContain("SUB_");
-		expect(chip.text()).not.toContain("abcd"); // must be the uppercased form, not a raw substring
 	});
 });

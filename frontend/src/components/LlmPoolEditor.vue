@@ -3620,11 +3620,12 @@ function accountLabel(a) {
 	if (email) return email;
 	// Accounts connected before the backend email fix carry neither a label nor an
 	// email, so two of them used to both fall through to the same generic string and
-	// stay visually identical. Fall back to a short per-account identifier derived
-	// from account_ref (mirrors how Kimi's device-code accounts are already named,
-	// "Kimi <last 4>") - just the last 4 chars, never the full SUB_<hex> token.
+	// stay visually identical. Fall back to a short per-account identifier from the
+	// account_ref tail (same convention as Kimi's server-side "Kimi <tail>" label,
+	// lowercase). Six chars, not four, so two distinct refs are very unlikely to
+	// collide back into one label; never the full SUB_<hex> token.
 	const ref = (a && a.account_ref) || "";
-	if (ref) return "Account " + ref.slice(-4).toUpperCase();
+	if (ref) return "Account " + ref.slice(-6);
 	return "Account connected";
 }
 function firstWarningMessage() {

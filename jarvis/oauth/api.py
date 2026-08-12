@@ -921,12 +921,10 @@ def _email_from_id_token(id_token: str) -> str:
 	if not id_token or id_token.count(".") < 2:
 		return ""
 	try:
-		import json as _json
-
 		_, payload, _ = id_token.split(".", 2)
 		padding = "=" * (-len(payload) % 4)
 		decoded = base64.urlsafe_b64decode(payload + padding)
-		return _json.loads(decoded).get("email", "") or ""
+		return json.loads(decoded).get("email", "") or ""
 	except Exception:
 		# ValueError used to be listed explicitly but it's a subclass
 		# of Exception - the union was redundant. Anything that goes
@@ -950,6 +948,11 @@ def _fetch_account_email(provider: str, access_token: str, id_token: str) -> str
 	without special-casing OpenAI. Providers with no id_token (Google
 	Gemini's DIRECT flow) still fall through to the userinfo call, which
 	works for them.
+
+	Called only at the initial code exchange (``_exchange_and_build_blob``),
+	so the id_token was minted by the provider in this same exchange and its
+	email claim is current - there is no refresh path that could hand this a
+	stale id_token. If one is ever added, prefer userinfo there.
 	"""
 	email = _email_from_id_token(id_token)
 	if email:
