@@ -600,3 +600,65 @@ describe("subscription Test force_probe (jarvis_admin_v2#297): no repeat can car
 		expect(w.vm.subTest.result.message).toMatch(/just now/i);
 	});
 });
+
+// Connect-error copy: jarvis/oauth/api.py's {ok:false, error:{code, message}} envelope
+// carries a raw developer `message` ("nonce not recognized" etc.) alongside a `code`.
+// finishConnect (and startConnect / _pollDeviceConnect, same envelope) must show the
+// customer the friendly CONNECT_ERROR_COPY text keyed on `code`, not that raw message
+// verbatim - and must still show SOMETHING (the raw message) for a code it doesn't know.
+describe("connect-flow error copy (finishConnect)", () => {
+	async function beginSignin(w, { model = "gpt-4o", upstream = "openai" } = {}) {
+		const r = w.vm.rows[0];
+		r.credentialType = "subscription";
+		r.upstream = upstream;
+		r.model = model;
+		api.beginPoolAccountSignin.mockResolvedValue({
+			ok: true,
+			data: { nonce: "nonce1", authorize_url: "https://provider.example/authorize" },
+		});
+		// openTab: false skips the popup window.open() this test has no need to drive.
+		await w.vm.startConnect(r, null, { openTab: false });
+		await flushPromises();
+		expect(r._connect.nonce).toBe("nonce1"); // sanity: signin actually began
+		r._connect.pastedUrl = "https://app.example/callback?code=abc&state=xyz";
+		return r;
+	}
+
+	it("maps a known code (unknown_nonce) to friendly copy, not the raw backend message", async () => {
+		const w = await mountOnboarding();
+		const r = await beginSignin(w);
+		api.completePoolAccountSignin.mockResolvedValue({
+			ok: false,
+			error: { code: "unknown_nonce", message: "nonce not recognized" },
+		});
+
+		await w.vm.finishConnect(r);
+
+		expect(r._connect.error).not.toBe("nonce not recognized");
+		expect(r._connect.error).toMatch(/sign-in session was lost/i);
+		expect(r._connect.error).toMatch(/open sign-in/i);
+	});
+
+	it("falls back to the backend's own message for an unmapped/unknown code", async () => {
+		const w = await mountOnboarding();
+		const r = await beginSignin(w);
+		api.completePoolAccountSignin.mockResolvedValue({
+			ok: false,
+			error: { code: "some_future_code", message: "some raw backend text" },
+		});
+
+		await w.vm.finishConnect(r);
+
+		expect(r._connect.error).toBe("some raw backend text");
+	});
+
+	it("falls back to the generic Connect failure copy when the error has no code or message at all", async () => {
+		const w = await mountOnboarding();
+		const r = await beginSignin(w);
+		api.completePoolAccountSignin.mockResolvedValue({ ok: false });
+
+		await w.vm.finishConnect(r);
+
+		expect(r._connect.error).toMatch(/couldn't connect the account/i);
+	});
+});

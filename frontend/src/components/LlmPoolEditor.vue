@@ -3822,6 +3822,42 @@ function openConnectPanel(m, reconnectIdx = null) {
 	m._connect = { ...blankConnect(), open: true, reconnectIdx, pastedUrl: carried };
 }
 
+// Connect-flow error codes -> customer-facing copy. jarvis/oauth/api.py's _err(code,
+// message) sends the RAW developer message ("nonce not recognized", "nonce has
+// expired; generate a new sign-in URL", ...) as `message`; showing that verbatim to a
+// customer is meaningless jargon. This maps the small, closed set of codes the
+// connect/complete/device-poll paths can return to something a non-technical customer
+// can actually act on. A code that isn't in this map (unknown_provider,
+// device_flow_required - both rare, and already readable) deliberately falls through
+// to the backend's own message in connectErrorMessage() below, so nothing is ever
+// hidden or silently dropped.
+const CONNECT_ERROR_COPY = {
+	unknown_nonce:
+		'Your sign-in session was lost. Click "Open sign-in" and finish the steps in one go without pausing.',
+	expired: 'Your sign-in link expired. Click "Open sign-in" to get a fresh one.',
+	state_mismatch:
+		'That sign-in didn\'t match this attempt. Click "Open sign-in" and paste the new link.',
+	missing_code:
+		"That doesn't look like the callback URL. After approving, copy the FULL URL from the address bar and paste it here.",
+	not_pending: 'This sign-in was already used. Click "Open sign-in" to start a new one.',
+	token_exchange_failed:
+		'The provider rejected the sign-in. Click "Open sign-in" and try again.',
+	code_invalid: 'The provider rejected the sign-in. Click "Open sign-in" and try again.',
+	auth_failed: 'The provider rejected the sign-in. Click "Open sign-in" and try again.',
+	network_error:
+		"Couldn't reach the sign-in provider. Check your connection and try again in a minute.",
+	device_start_failed: "Couldn't start sign-in with the provider. Try again.",
+};
+// Pull a customer-facing message out of the {ok:false, error:{code, message}} envelope
+// startConnect/finishConnect/_pollDeviceConnect all get back on failure. A known code
+// wins; an unmapped code (or a response with no code at all, e.g. a plain network
+// throw) falls back to the backend's own `message`, and only then to the caller's
+// generic `fallback` - so this can never crash and never hides a real error.
+function connectErrorMessage(res, fallback) {
+	const err = res && res.error;
+	if (!err) return fallback;
+	return CONNECT_ERROR_COPY[err.code] || err.message || fallback;
+}
 async function startConnect(m, reconnectIdx = null, opts = {}) {
 	if (!m._connect) m._connect = blankConnect();
 	// Simplified editor hides the model field - make sure a subscription row always
@@ -3871,8 +3907,7 @@ async function startConnect(m, reconnectIdx = null, opts = {}) {
 		// hanging on "Starting sign-in…".
 		if (!res || res.ok === false) {
 			m._connect.loading = false;
-			m._connect.error =
-				(res && res.error && res.error.message) || "Couldn't start sign-in. Try again.";
+			m._connect.error = connectErrorMessage(res, "Couldn't start sign-in. Try again.");
 			if (win) win.close();
 			return;
 		}
@@ -3921,8 +3956,7 @@ async function _pollDeviceConnect(m, intervalSecs) {
 		}
 		if (!m._connect || m._connect.nonce !== nonce) return;
 		if (!res || res.ok === false) {
-			m._connect.error =
-				(res && res.error && res.error.message) || "Sign-in failed. Start again.";
+			m._connect.error = connectErrorMessage(res, "Sign-in failed. Start again.");
 			m._connect.polling = false;
 			return;
 		}
@@ -4072,11 +4106,12 @@ async function finishConnect(m) {
 	// Same {ok, data} envelope as begin - unwrap + surface errors.
 	if (!res || res.ok === false) {
 		m._connect.loading = false;
-		m._connect.error =
-			(res && res.error && res.error.message) ||
-			(isCodeOnlyPaste(m.upstream)
+		m._connect.error = connectErrorMessage(
+			res,
+			isCodeOnlyPaste(m.upstream)
 				? "Couldn't connect the account. Check the pasted code and try again."
-				: "Couldn't connect the account. Check the pasted URL and try again.");
+				: "Couldn't connect the account. Check the pasted URL and try again."
+		);
 		return;
 	}
 	// Place the (re)connected account. The backend mints a fresh account_ref on
