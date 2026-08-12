@@ -372,7 +372,19 @@
 						d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
 					/>
 				</svg>
-				<span>{{ readinessNotice }}</span>
+				<div class="jvp-notice-body">
+					<span>{{ readinessNotice }}</span>
+					<!-- Only an admin gets a CTA (readinessCta stays null for a member -
+					     see degradedActionable in panel_readiness.mjs). -->
+					<button
+						v-if="readinessCta"
+						type="button"
+						class="jvp-btn-solid jvp-notice-cta"
+						@click="goReadinessCta"
+					>
+						{{ readinessCta.label }}
+					</button>
+				</div>
 			</div>
 
 			<div v-if="stream.pending.length" class="jvp-pending">
@@ -588,7 +600,7 @@ import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
 import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
-import { classifyReadiness, degradedMessage } from "./panel_readiness.mjs";
+import { classifyReadiness, degradedActionable } from "./panel_readiness.mjs";
 import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
 import { sortPendingCards } from "./pending_order.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
@@ -885,6 +897,11 @@ let recStartedAt = 0;
 const readiness = ref(null);
 const readinessResolved = computed(() => readiness.value !== null);
 const readinessNotice = ref("");
+// Set alongside readinessNotice when the degraded verdict is one an admin can
+// actually fix (see degradedActionable in panel_readiness.mjs) - {label, href}
+// or null. A member never gets one: canOnboard below gates it off before the
+// widget even asks for actionable copy.
+const readinessCta = ref(null);
 // Only an admin who can actually reach the wizard gets the CTA button in the
 // gate state, mirroring OnboardingGate.vue's isSystemManager split. Read off
 // frappe.boot.user.roles - core Frappe bootinfo (User.load_user), already
@@ -1196,6 +1213,13 @@ function removeAttachment(url) {
 // full navigation since the wizard lives in the SPA, not this widget.
 function goOnboard() {
 	window.location.assign(ONBOARDING_URL);
+}
+
+// The degraded banner's CTA (readinessCta), when present. Same full-navigation
+// pattern as goOnboard above - the AI models settings pane lives in the SPA,
+// not this widget.
+function goReadinessCta() {
+	if (readinessCta.value?.href) window.location.assign(readinessCta.value.href);
 }
 
 // The mic button lives in the footer, and the footer unmounts the moment the
@@ -1562,14 +1586,24 @@ onMounted(() => {
 	isReadyForChat()
 		.then((r) => {
 			readiness.value = classifyReadiness(r);
-			readinessNotice.value =
-				readiness.value === "degraded" ? degradedMessage(r, brandName) : "";
+			if (readiness.value === "degraded") {
+				// canOnboard already matches JARVIS_ADMIN_ROLES (System Manager or
+				// Jarvis Admin - jarvis/permissions.py), so it doubles as the
+				// "can this person actually reconnect a model" check here.
+				const actionable = degradedActionable(r, brandName, canOnboard);
+				readinessNotice.value = actionable.text;
+				readinessCta.value = actionable.cta;
+			} else {
+				readinessNotice.value = "";
+				readinessCta.value = null;
+			}
 		})
 		.catch(() => {
 			// Fail OPEN, same as classifyReadiness(null): a flaky/unreachable check
 			// must never strand a real user behind the gate.
 			readiness.value = classifyReadiness(null);
 			readinessNotice.value = "";
+			readinessCta.value = null;
 		});
 });
 
@@ -2501,6 +2535,18 @@ defineExpose({ load, startNewChat, convId });
 	height: 15px;
 	flex: none;
 	margin-top: 1px;
+}
+.jvp-notice-body {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 7px;
+	flex: 1;
+}
+.jvp-notice-cta {
+	height: 26px;
+	padding: 0 11px;
+	font-size: 12px;
 }
 
 /* ---- pending write confirmation ---- */

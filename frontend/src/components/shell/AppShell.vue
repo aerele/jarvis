@@ -174,6 +174,40 @@ watch(
 	() => regateOnRouteChange(gatedOnboarding, regatingOnboarding)
 );
 
+// Deep-link contract: desk surfaces outside the SPA (the onboarding banner
+// bundle, the floating chat widget's degraded-connection CTA) can't call
+// store.openSettings() directly - they navigate here instead, to
+// "/jarvis/?settings=aimodels" and the like, and this reads the param once on
+// mount. Kept as a plain Set rather than importing SettingsDialog.vue's PANES
+// (a stack of defineAsyncComponent imports this file has no other reason to
+// pull in) - keep it in sync with that object BY HAND, same duplication
+// tradeoff panel_readiness.mjs makes against readiness.js.
+const SETTINGS_DEEP_LINK_KEYS = new Set([
+	"general",
+	"usage",
+	"activity",
+	"shortcuts",
+	"plan",
+	"aimodels",
+	"billing",
+	"branding",
+	"usageadmin",
+]);
+// Only ever OPENS a pane - an absent or unrecognised key is silently ignored
+// so a plain "/jarvis/" load is untouched. Strips the param either way it
+// matched or not is irrelevant once read; leaving it in the URL would reopen
+// the dialog on every refresh, which is the one thing a deep link must not do.
+function openSettingsFromQuery() {
+	const params = new URLSearchParams(window.location.search);
+	const key = params.get("settings");
+	if (key && SETTINGS_DEEP_LINK_KEYS.has(key)) store.openSettings(key);
+	if (!params.has("settings")) return;
+	params.delete("settings");
+	const query = params.toString();
+	const url = window.location.pathname + (query ? `?${query}` : "") + window.location.hash;
+	history.replaceState(history.state, "", url);
+}
+
 // Boot gate: hold the routed page (NOT the shell chrome) until systemTimezone
 // is configured — timeAgo strings render once, so a late setConfig would leave
 // stale future-tense timestamps on the first paint. Production boot injects
@@ -231,6 +265,7 @@ const removeAfterEach = router.afterEach(() => {
 let _detachNotifier = null;
 
 onMounted(async () => {
+	openSettingsFromQuery();
 	document.addEventListener("visibilitychange", onVisibility);
 	if (document.visibilityState === "visible") startInterval();
 	_detachNotifier = attachGlobalNotifier({ socket, router });

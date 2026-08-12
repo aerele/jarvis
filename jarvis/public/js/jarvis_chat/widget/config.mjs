@@ -16,6 +16,12 @@ export const conversationUrl = (id) =>
 // here rather than duplicating the wizard in 400px.
 export const ONBOARDING_URL = "/jarvis/onboarding";
 
+// Deep link that opens the SPA straight to the AI models settings tab
+// (AppShell.vue's onMounted `settings` query-param handler). Used by the
+// degraded banner's "Connect a model" CTA: a disconnected-but-onboarded
+// workspace needs the settings dialog, not the onboarding wizard above.
+export const AI_MODELS_SETTINGS_URL = "/jarvis/?settings=aimodels";
+
 // Below this viewport width a 400px docked panel is most of the screen, so the
 // FAB falls back to navigating to the SPA instead of opening in place.
 export const PANEL_MIN_VIEWPORT_PX = 640;

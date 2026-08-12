@@ -8,6 +8,8 @@
 // for the full reasoning behind each reason's placement - repeated here only
 // to the extent this module needs it to classify a verdict.
 
+import { AI_MODELS_SETTINGS_URL } from "./config.mjs";
+
 // Reasons meaning the workspace has NEVER completed onboarding at all - the
 // only case that should replace the whole panel with a setup nudge.
 //
@@ -108,4 +110,41 @@ export function degradedMessage(resp, agentName = "Jarvis") {
   if (reason === "readiness_unconfirmed")
     return detail || unconfirmedDegraded(brand);
   return GENERIC_DEGRADED;
+}
+
+// Role-aware wrapper around degradedMessage() for the one case an admin can
+// actually do something about: no AI attached at all. That is exactly the
+// case degradedMessage() flattens into the generic "ask your administrator"
+// sentence (subscription_suspended, container_provisioning and
+// readiness_unconfirmed all have their own dedicated copy above and are left
+// untouched - none of them are fixed by reconnecting a model, so none of them
+// get this CTA). An admin gets actionable copy plus a link to the AI models
+// settings pane; a member still can't act on it, so they keep
+// degradedMessage()'s member wording with no button.
+export function degradedActionable(
+  resp,
+  agentName = "Jarvis",
+  isAdmin = false
+) {
+  const reason = (resp && resp.reason) || "";
+  const text = degradedMessage(resp, agentName);
+  const hasOwnCopy =
+    reason === "subscription_suspended" ||
+    reason === "container_provisioning" ||
+    reason === "readiness_unconfirmed" ||
+    // Neither of these is a "no AI attached" problem the AI models pane can
+    // fix. site_replaced has its own reconnect-the-SITE flow (readiness.js's
+    // replacedBanner, RECONNECT_INTENT_URL) - the account moved elsewhere, no
+    // model to connect here. authority_repair_required is admin's own
+    // reassurance after paging support; readiness.js is explicit that this
+    // reason must NEVER offer a Renew or Reconnect action, which could make
+    // an ambiguous/invalid container worse. Both keep degradedMessage's plain
+    // text, no CTA - same as the three reasons above.
+    reason === "authority_repair_required" ||
+    reason === "site_replaced";
+  if (!isAdmin || hasOwnCopy) return { text, cta: null };
+  return {
+    text: "No AI connected. Connect a model to start chatting again.",
+    cta: { label: "Connect a model", href: AI_MODELS_SETTINGS_URL },
+  };
 }

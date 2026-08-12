@@ -185,6 +185,39 @@
 		document.head.appendChild(st);
 	}
 
+	// Which bubble to show, decided from frappe.boot.jarvis_ready_reason (set in
+	// jarvis.boot.set_jarvis_boot, same round trip as jarvis_onboarded). A
+	// workspace that was NEVER onboarded and one that finished onboarding but
+	// later lost its AI connection ("llm_credentials") both read jarvis_onboarded
+	// === false, and would look identical to this nudge without the reason -
+	// but the first needs the full wizard and the second only needs a model
+	// reconnected, so they get different copy and a different destination.
+	function nudgeVariant() {
+		var reason = (window.frappe && frappe.boot && frappe.boot.jarvis_ready_reason) || "";
+		// White-label: the reconnect copy names the agent, so it must not say
+		// "Jarvis" for a tenant that renamed it. The never-onboarded copy below
+		// is left as literal "Jarvis" text - unchanged, per the existing pitch.
+		var agentName =
+			(window.frappe && frappe.boot && frappe.boot.jarvis_agent_name) || "Jarvis";
+		if (reason === "llm_credentials") {
+			return {
+				text:
+					"Your AI connection dropped, so " +
+					agentName +
+					" can't reply right now. Reconnect a model to pick up where you left off.",
+				ctaLabel: "Reconnect a model →",
+				href: "/jarvis/?settings=aimodels",
+			};
+		}
+		// Every other reason (never onboarded, or an empty/unknown reason from an
+		// older boot payload) keeps the original pitch and destination.
+		return {
+			text: "Hey 👋 I'm Jarvis. Set me up and I'll handle the ERP busywork like quotes, invoices, and reports.",
+			ctaLabel: "Set up Jarvis →",
+			href: "/jarvis/onboarding",
+		};
+	}
+
 	function bubbleRow(cls, buildBubble) {
 		var row = document.createElement("div");
 		row.className = "jvn-row " + cls;
@@ -200,6 +233,8 @@
 		wrap.id = NUDGE_ID;
 		wrap.setAttribute("role", "complementary");
 		wrap.setAttribute("aria-label", "Set up Jarvis");
+
+		var variant = nudgeVariant();
 
 		// Single bubble — greeting + pitch + CTA + dismiss.
 		wrap.appendChild(
@@ -221,14 +256,13 @@
 				b.appendChild(n);
 
 				var t = document.createElement("div");
-				t.textContent =
-					"Hey 👋 I'm Jarvis. Set me up and I'll handle the ERP busywork like quotes, invoices, and reports.";
+				t.textContent = variant.text;
 				b.appendChild(t);
 
 				var cta = document.createElement("a");
 				cta.className = "jvn-btn";
-				cta.href = "/jarvis/onboarding";
-				cta.textContent = "Set up Jarvis →";
+				cta.href = variant.href;
+				cta.textContent = variant.ctaLabel;
 				b.appendChild(cta);
 				return b;
 			})
