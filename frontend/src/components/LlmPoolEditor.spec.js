@@ -1057,3 +1057,16 @@ describe("grouped subscription rows (2+ accounts)", () => {
 		expect(spy).toHaveBeenCalledWith(0);
 	});
 });
+
+describe("subscription source chip labels the real provider", () => {
+	it("maps each upstream to its provider, not always OpenAI", async () => {
+		const w = await mountEditor();
+		const chip = (upstream) => w.vm.sourceChip({ credentialType: "subscription", upstream });
+		expect(chip("openai")).toBe("Subscription · OpenAI");
+		expect(chip("google")).toBe("Subscription · Google Gemini");
+		expect(chip("xai")).toBe("Subscription · xAI Grok");
+		expect(chip("kimi")).toBe("Subscription · Kimi (Moonshot)");
+		// an unknown upstream must never fall back to a wrong vendor
+		expect(chip("someday")).toBe("Subscription · someday");
+	});
+});

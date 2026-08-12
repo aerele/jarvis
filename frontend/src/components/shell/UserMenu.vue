@@ -16,7 +16,7 @@
 				     a hand-pasted copy of its gradient + path data. That duplication is
 				     exactly what let the chat welcome mark drift to a different colour
 				     (design.md §2.2). -->
-				<JarvisMark :size="28" :radius="7" />
+				<JarvisMark :size="28" :radius="7" hover-peek />
 				<!-- Resting badge: a waiting reply has to register on every route, not
 				     only while the user happens to be in Chat - restoring this (it was
 				     briefly dropped when ChatView grew its own header jv-support-dot,
