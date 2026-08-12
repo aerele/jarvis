@@ -132,15 +132,13 @@ const markStyle = computed(() => ({
 	display: none;
 }
 
-/* --- when a face mood is active: hide the star, show the face --- */
-.jv-mood-thinking .jv-star,
-.jv-mood-listening .jv-star,
-.jv-mood-happy .jv-star {
+/* Any active mood hides the star and shows the face. Written as
+   :not(.jv-mood-star) so a mood added later toggles correctly on its own,
+   without having to be appended to a per-mood list here. */
+.jv-mark:not(.jv-mood-star) .jv-star {
 	opacity: 0;
 }
-.jv-mood-thinking .jv-face,
-.jv-mood-listening .jv-face,
-.jv-mood-happy .jv-face {
+.jv-mark:not(.jv-mood-star) .jv-face {
 	opacity: 1;
 }
 
@@ -208,6 +206,9 @@ const markStyle = computed(() => ({
    lingering mood prop can't leave it bouncing forever. */
 .jv-mood-happy .jv-face {
 	gap: calc(var(--jv-mark-size) * 0.05);
+	/* Plays once, ~1.5s. ChatView's markAnswerLanded (HAPPY_HOLD_MS) clears the
+	   mood after the same 1500ms, so the smile reverts to the resting star exactly
+	   as it finishes; keep the two durations in sync. */
 	animation: jvm-cheer 1.5s ease-in-out 1 both;
 }
 .jv-mood-happy .jv-eye {

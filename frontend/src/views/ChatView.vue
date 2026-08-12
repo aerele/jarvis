@@ -2997,12 +2997,6 @@
 									</svg>
 								</button>
 								<template v-if="micState === 'recording'">
-									<JarvisMark
-										:size="22"
-										:radius="6"
-										mood="listening"
-										style="margin-right: 4px"
-									/>
 									<span class="jv-mic-live"
 										><span class="jv-mic-dot"></span>{{ micClock }}</span
 									>
@@ -8453,6 +8447,9 @@ function onEvent(p) {
 // A brief "answer landed" smile on the assistant avatar, success path only.
 // Keyed by message id and self-clearing (~1.5s) so a historical message never
 // smiles on load and a lingering flag can't leave the mark grinning.
+// One play of JarvisMark's jvm-cheer smile (1.5s); keep in sync with that
+// animation's duration in JarvisMark.vue.
+const HAPPY_HOLD_MS = 1500;
 const justCompletedId = ref(null);
 let happyTimer = null;
 function markAnswerLanded(id) {
@@ -8461,7 +8458,7 @@ function markAnswerLanded(id) {
 	if (happyTimer) clearTimeout(happyTimer);
 	happyTimer = setTimeout(() => {
 		if (justCompletedId.value === id) justCompletedId.value = null;
-	}, 1500);
+	}, HAPPY_HOLD_MS);
 }
 
 function stopRun() {
