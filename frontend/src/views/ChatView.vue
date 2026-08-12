@@ -736,7 +736,18 @@
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
-								<JarvisMark :size="28" :radius="7" style="margin-top: 2px" />
+								<JarvisMark
+									:size="28"
+									:radius="7"
+									:mood="
+										m.streaming
+											? 'thinking'
+											: justCompletedId === m.name
+											? 'happy'
+											: 'star'
+									"
+									style="margin-top: 2px"
+								/>
 							</template>
 							<template #above-body>
 								<!-- Activity: the tool calls (with input + output) that produced
@@ -1718,7 +1729,12 @@
 						v-if="(activeTools.length || waiting) && !queuedTurn"
 						style="display: flex; gap: 12px"
 					>
-						<JarvisMark :size="28" :radius="7" style="margin-top: 2px" />
+						<JarvisMark
+							:size="28"
+							:radius="7"
+							mood="thinking"
+							style="margin-top: 2px"
+						/>
 						<div style="flex: 1; min-width: 0; padding-top: 3px">
 							<!-- the single tool running right now -->
 							<div
@@ -1814,7 +1830,12 @@
 					     hiccup / compaction). The composer stays UNLOCKED and the answer
 					     lands later via the recovery path — fixes the silent limbo. -->
 					<div v-if="recovering" style="display: flex; gap: 12px">
-						<JarvisMark :size="28" :radius="7" style="margin-top: 2px" />
+						<JarvisMark
+							:size="28"
+							:radius="7"
+							mood="thinking"
+							style="margin-top: 2px"
+						/>
 						<div style="flex: 1; min-width: 0; padding-top: 3px">
 							<div
 								role="status"
@@ -8284,6 +8305,11 @@ function onEvent(p) {
 			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
 			if (m) m.streaming = false;
+			// One-off smile on the brand avatar the moment the answer lands. Success
+			// terminal only: the stop/abort path (stopRun) and the error case never
+			// reach here, and we still skip a row that resolved to an error or stopped
+			// state so a failed reply never grins.
+			if (m && !m.error && !m.stopped) markAnswerLanded(m.name);
 			// SUX-6: the terminal final text is the last cumulative mirror in the normal
 			// case, so a re-render would be identical — skip the visible churn. A VISIBLE
 			// replacement is legitimate only when the answer actually changed via snapshot
@@ -8414,6 +8440,23 @@ function onEvent(p) {
 			loadConversation(currentId.value);
 			break;
 	}
+}
+
+// A brief "answer landed" smile on the assistant avatar, success path only.
+// Keyed by message id and self-clearing (~1.5s) so a historical message never
+// smiles on load and a lingering flag can't leave the mark grinning.
+// One play of JarvisMark's jvm-cheer smile (1.5s); keep in sync with that
+// animation's duration in JarvisMark.vue.
+const HAPPY_HOLD_MS = 1500;
+const justCompletedId = ref(null);
+let happyTimer = null;
+function markAnswerLanded(id) {
+	if (!id) return;
+	justCompletedId.value = id;
+	if (happyTimer) clearTimeout(happyTimer);
+	happyTimer = setTimeout(() => {
+		if (justCompletedId.value === id) justCompletedId.value = null;
+	}, HAPPY_HOLD_MS);
 }
 
 function stopRun() {
