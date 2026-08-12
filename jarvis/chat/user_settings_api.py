@@ -214,7 +214,7 @@ def mark_home_intro_seen(version: int = 0) -> dict:
 	``greeting``'s cadence counter). A full-doc save writes back EVERY field
 	from a snapshot taken before those writes, and because they leave
 	``modified`` untouched there is no timestamp mismatch to catch it: an admin
-	setting a user's monthly spend cap in the same moment this user's browser
+	setting a user's token spend cap in the same moment this user's browser
 	acks the introduction would have the cap silently reverted to the stale
 	value. Touching exactly the two columns this endpoint owns removes that
 	whole class of interaction.
@@ -360,8 +360,10 @@ def admin_list_user_usage() -> dict:
 
 @frappe.whitelist()
 def admin_set_user_limit(user: str, monthly_token_limit: int = 0) -> dict:
-	"""Set a user's monthly token cap (0 = unlimited), creating the settings
-	row if absent. Admins only."""
+	"""Set a user's all-time token cap (0 = unlimited), creating the settings
+	row if absent. Admins only. NOTE: arg/field name ``monthly_token_limit`` is
+	legacy (kept as the wire contract) - the cap it sets is all-time, not
+	monthly."""
 	require_jarvis_admin()
 	# Coerce before the db calls: a dict `user` would turn the identity check into
 	# a filter match (see the module NOTE / N10).

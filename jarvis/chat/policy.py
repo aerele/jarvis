@@ -2,7 +2,7 @@
 
 Called by jarvis.chat.api.send_message before enqueuing the agent worker.
 It rejects empty users and Guest, and (design section 5) enforces the
-per-user monthly token cap set via ``Jarvis User Settings``. Phase 3's
+per-user all-time token cap set via ``Jarvis User Settings``. Phase 3's
 jarvis_admin app may layer real subscription gating on top by overriding
 this module's contract.
 
@@ -22,8 +22,8 @@ def validate_can_send(user: str, model: str | None = None) -> tuple[bool, str | 
 		return False, "no authenticated user"
 	if user == "Guest":
 		return False, "Guest users cannot use Jarvis chat"
-	# Aggregate monthly cap is the OUTER gate — checked first (fleet spec §7).
-	if _over_monthly_limit(user):
+	# Aggregate all-time cap is the OUTER gate — checked first (fleet spec §7).
+	if _over_total_limit(user):
 		return False, "usage_limit"
 	if _subscription_suspended():
 		return False, "subscription_suspended"
@@ -214,17 +214,23 @@ def _over_model_limit(user: str, model: str) -> bool:
 		return False
 
 
-def _over_monthly_limit(user: str) -> bool:
-	"""True iff ``user`` has a positive monthly token cap and this month's
+def _over_total_limit(user: str) -> bool:
+	"""True iff ``user`` has a positive all-time token cap and their all-time
 	recorded usage has reached it. Dependency-light: one ``db.get_value`` on the
-	settings row, no lazy create (a missing row = no limit). Rollover-aware: a
-	stale ``usage_month`` means this month's usage is effectively 0. Fails open
-	on any error — an accounting lookup bug must never block a legitimate send."""
+	settings row, no lazy create (a missing row = no limit). No rollover: unlike
+	the per-model gate, this cap never resets, so it compares against
+	``total_tokens`` (the cumulative, never-reset counter) rather than a
+	month-scoped bucket. Fails open on any error — an accounting lookup bug
+	must never block a legitimate send.
+
+	NOTE: the field is still named ``monthly_token_limit`` (kept to avoid a
+	migration for ~15 existing references / the wire contract) but the cap it
+	now enforces is all-time, not monthly."""
 	try:
 		row = frappe.db.get_value(
 			"Jarvis User Settings",
 			{"user": user},
-			["monthly_token_limit", "usage_month", "month_tokens"],
+			["monthly_token_limit", "total_tokens"],
 			as_dict=True,
 		)
 		if not row:
@@ -232,11 +238,7 @@ def _over_monthly_limit(user: str) -> bool:
 		limit = int(row.monthly_token_limit or 0)
 		if limit <= 0:
 			return False
-		# Stale month ⇒ this month's usage hasn't started ⇒ 0 used. One shared
-		# bucket-key helper (jarvis.chat.usage) so writer and gate can't drift.
-		from jarvis.chat.usage import current_month_key
-
-		used = int(row.month_tokens or 0) if row.usage_month == current_month_key() else 0
+		used = int(row.total_tokens or 0)
 		return used >= limit
 	except Exception:
 		# See _over_model_limit: don't let a logging failure defeat fail-open.

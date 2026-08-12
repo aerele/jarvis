@@ -19,12 +19,12 @@
 					<div class="h-full bg-surface-gray-7" :style="{ width: measuredPct + '%' }" />
 				</div>
 				<p class="mt-2 text-p-sm text-ink-gray-5">
-					{{ fmtTokens(measured.month_tokens) }} of
-					{{ fmtTokens(measured.monthly_token_limit) }} this month, {{ measuredPct }}%
+					{{ fmtTokens(measured.total_tokens) }} of
+					{{ fmtTokens(measured.monthly_token_limit) }} all time, {{ measuredPct }}%
 				</p>
 			</template>
 			<p v-else class="mt-2 text-p-sm text-ink-gray-5">
-				No monthly limit set on your account.
+				No token limit set on your account.
 			</p>
 
 			<template v-if="perModel.length">
@@ -192,12 +192,14 @@ const measured = computed(() => (usage.value && usage.value.measured) || null);
 // showing both once real counters exist. So the block appears only once there is
 // something measured to show.
 const hasMeasured = computed(() => !!(measured.value && Number(measured.value.total_tokens || 0)));
+// All-time: compares against total_tokens (the cumulative, never-reset
+// counter), not month_tokens. See jarvis.chat.policy._over_total_limit.
 const measuredPct = computed(() => {
 	const m = measured.value;
 	if (!m || !m.monthly_token_limit) return 0;
 	return Math.min(
 		100,
-		Math.round((Number(m.month_tokens || 0) / Number(m.monthly_token_limit)) * 100)
+		Math.round((Number(m.total_tokens || 0) / Number(m.monthly_token_limit)) * 100)
 	);
 });
 
