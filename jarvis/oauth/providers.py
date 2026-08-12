@@ -145,6 +145,18 @@ def accepts_bare_code(label: str) -> bool:
 	return bool(_PROVIDER_OAUTH_MAP.get(label, {}).get("code_only_paste"))
 
 
+def agent_provider_for(label: str) -> str:
+	"""The ``agent_provider`` (cliproxy upstream id — ``openai`` /
+	``google-gemini-cli`` / ``xai`` / ``kimi``) for a subscription provider label,
+	or "" when the label is not a known OAuth/subscription provider.
+
+	Metadata only: unlike ``get_provider`` it never resolves the client id/secret,
+	so it is cheap enough for the chat hot path (``_catalog_models_for_pool`` maps
+	a catalog entry's ``subscription_label`` to the upstream a pool row carries).
+	"""
+	return (_PROVIDER_OAUTH_MAP.get(label) or {}).get("agent_provider", "")
+
+
 def get_provider(label: str) -> dict:
 	"""Look up provider metadata, including the lazy-resolved client_id +
 	client_secret. ``client_secret`` is an empty string for PKCE-only

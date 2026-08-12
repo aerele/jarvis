@@ -1611,49 +1611,96 @@ def _api_key_models() -> dict[str, list[dict]]:
 
 
 def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
-	"""Provider id -> api-key catalog models the chat picker may offer, for the
-	providers this tenant has ALREADY configured.
+	"""Provider id -> catalog models the chat picker may offer BEYOND the exact ids
+	saved in the pool, for the providers this tenant has ALREADY configured.
 
-	The point is that a customer with one saved model is not stuck with it. The
-	container holds a credential per provider, and the agent serves a model id the
-	pool spec never named, so switching within a configured provider costs nothing
-	and needs no re-save.
+	The point is that a customer with one saved model is not stuck with it: the
+	container already holds the credential and serves a model id the pool spec
+	never named, so switching within a configured provider costs nothing and needs
+	no re-save. Two kinds of provider contribute, each keyed by the SAME id its
+	``pool_models`` rows carry so the UI joins them without a second lookup:
 
-	Keyed on the canonical provider id the ``pool_models`` rows carry, so the UI
-	can join the two without a second lookup. The catalog's ``catalog_id`` IS that
-	id (``google`` the provider is ``gemini`` on the wire); ``provider_id`` is the
-	fallback for a legacy row.
+	* api-key providers (``accepts_any_model``): every ``api_key``-tier catalog
+	  model on the provider. Keyed on the catalog's ``catalog_id`` (``google`` the
+	  provider is ``gemini`` on the wire); ``provider_id`` is the legacy fallback.
+
+	* chat-subscription providers: every ``subscription``-tier catalog model on a
+	  provider the tenant has a connected account for. One cliproxy account serves
+	  the whole subscription tier, so the same "switch without re-saving" applies.
+	  Keyed on the account ``upstream`` (== the provider's ``agent_provider``:
+	  ``openai`` / ``google-gemini-cli`` / ...) derived from the encrypted accounts
+	  blob EXACTLY as the pool build does (chat/api.py:1757, raw — no
+	  ``normalize_provider``), so a subscription row and its extra models join.
+
+	OpenAI's ``catalog_id`` and ``agent_provider`` are both ``openai``, so a tenant
+	with an OpenAI key AND a ChatGPT subscription lands both tiers on one key: they
+	MERGE (dedup by id), they must not clobber.
 
 	Only providers already in the pool appear: a provider with no credential in
 	the container answers ``model_not_found``, and being an explicit bad-id
 	rejection rather than an upstream failure it does not fail over, so the turn
 	dies (#498). Adding a NEW provider stays a Settings operation.
 
-	z.ai rows are excluded by ``accepts_any_model`` -- see the note beside it in
-	pool_serialize, and keep this in step with the fleet render's ``any_model``.
+	z.ai api-key rows are excluded by ``accepts_any_model`` -- see the note beside
+	it in pool_serialize, and keep this in step with the fleet render's
+	``any_model``. Feeds BOTH the picker (``catalog_models``) and the pin
+	validation (``_allowed_pin_models``): if it is offered, it is pinnable.
 	"""
 	from jarvis import admin_client
-	from jarvis.jarvis.pool_serialize import accepts_any_model, normalize_provider
+	from jarvis.jarvis.pool_serialize import (
+		_credential_type,
+		_model_accounts,
+		accepts_any_model,
+		normalize_provider,
+	)
+	from jarvis.oauth.providers import agent_provider_for
 
-	wanted = {
+	# api-key providers whose whole api_key tier the picker may offer.
+	wanted_api = {
 		normalize_provider(getattr(m, "provider", "") or "")
 		for m in settings.models or []
 		if m.enabled and accepts_any_model(m)
 	}
-	wanted.discard("")
-	if not wanted:
+	wanted_api.discard("")
+
+	# Subscription upstreams the tenant actually has a connected account for. Only
+	# subscription rows are touched, so a pure api-key tenant decrypts nothing.
+	wanted_sub: set[str] = set()
+	for m in settings.models or []:
+		if not (m.enabled and _credential_type(m) == "subscription"):
+			continue
+		for a in _model_accounts(m):
+			up = (a.get("upstream") or "").strip() if isinstance(a, dict) else ""
+			if up:
+				wanted_sub.add(up)
+
+	if not wanted_api and not wanted_sub:
 		return {}
 
+	# Display fields only. The catalog carries no secrets by construction, but this
+	# endpoint is on the hot chat path, so the projection stays narrow. Merge by
+	# model id (see the OpenAI two-tier case in the docstring).
 	out: dict[str, list[dict]] = {}
+
+	def _add(key: str, models: list[dict]) -> None:
+		bucket = out.setdefault(key, [])
+		seen = {r["model"] for r in bucket}
+		for m in sorted(models, key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or "")):
+			mid = m.get("model_id")
+			if not mid or mid in seen:
+				continue
+			seen.add(mid)
+			bucket.append({"model": mid, "label": m.get("label") or mid})
+
 	for provider in admin_client.get_model_catalog() or []:
+		models = provider.get("models") or []
 		pid = (provider.get("catalog_id") or provider.get("provider_id") or "").strip()
-		if pid not in wanted:
-			continue
-		rows = [m for m in provider.get("models") or [] if m.get("tier") == "api_key"]
-		rows.sort(key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or ""))
-		# Display fields only. The catalog carries no secrets by construction, but
-		# this endpoint is on the hot chat path, so it stays a narrow projection.
-		out[pid] = [{"model": m["model_id"], "label": m.get("label") or m["model_id"]} for m in rows]
+		if pid and pid in wanted_api:
+			_add(pid, [m for m in models if m.get("tier") == "api_key"])
+		if wanted_sub:
+			upstream = agent_provider_for(provider.get("subscription_label") or provider.get("label") or "")
+			if upstream and upstream in wanted_sub:
+				_add(upstream, [m for m in models if m.get("tier") == "subscription"])
 	return out
 
 
