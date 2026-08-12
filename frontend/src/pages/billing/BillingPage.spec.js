@@ -472,6 +472,128 @@ describe("feature: reactivate onto any plan", () => {
 	});
 });
 
+describe("GO-LIVE: the confirm dialog shows the tax-inclusive charge, not the pre-tax price", () => {
+	// Renew/reactivate charge tax-inclusive server-side (price_inr + 18% GST).
+	// get_account_summary now additively exposes that as total_inr on both the
+	// current-plan object and each reactivation_plans row; price_inr stays the
+	// pre-tax base. The "Pay ₹X" figure the customer confirms before paying must
+	// equal what actually gets charged, so it has to read total_inr - falling
+	// back to price_inr only when an older backend has not started sending it.
+
+	it("doRenew's dialog shows total_inr (tax-inclusive) when the backend sends it, not price_inr", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				plan: {
+					plan_name: "Pro",
+					name: "pro",
+					price_inr: 100,
+					total_inr: 118,
+					billing_cycle: "Monthly",
+				},
+			})
+		);
+
+		await wrapper.vm.doRenew();
+
+		expect(wrapper.vm.pending.amount).toBe(inrLabel(118));
+		expect(wrapper.vm.pending.confirmLabel).toBe(`Pay ${inrLabel(118)}`);
+	});
+
+	it("doRenew falls back to price_inr when an older backend omits total_inr", async () => {
+		const wrapper = await mountPage(baseAccount()); // plan.price_inr: 100, no total_inr
+
+		await wrapper.vm.doRenew();
+
+		expect(wrapper.vm.pending.amount).toBe(inrLabel(100));
+		expect(wrapper.vm.pending.confirmLabel).toBe(`Pay ${inrLabel(100)}`);
+	});
+
+	it("doReactivate's dialog shows the row's total_inr (tax-inclusive), not price_inr", async () => {
+		const wrapper = await mountPage(reactivationAccount());
+		const plan = { name: "growth", plan_name: "Growth", price_inr: 500, total_inr: 590 };
+
+		wrapper.vm.doReactivate(plan);
+
+		expect(wrapper.vm.pending.amount).toBe(inrLabel(590));
+		expect(wrapper.vm.pending.confirmLabel).toBe(`Pay ${inrLabel(590)}`);
+	});
+
+	it("doReactivate falls back to price_inr when the row has no total_inr", async () => {
+		const wrapper = await mountPage(reactivationAccount());
+
+		wrapper.vm.doReactivate(GROWTH_PLAN); // no total_inr on this fixture
+
+		expect(wrapper.vm.pending.amount).toBe(inrLabel(500));
+		expect(wrapper.vm.pending.confirmLabel).toBe(`Pay ${inrLabel(500)}`);
+	});
+
+	it("what get_account_summary actually returns for renew charges the exact amount shown", async () => {
+		// End-to-end through the mocked api boundary: the amount shown pre-pay
+		// and the amount the payment call is asked to charge must be the same
+		// server truth, not two different reads of the plan object.
+		const wrapper = await mountPage(
+			baseAccount({
+				plan: {
+					plan_name: "Pro",
+					name: "pro",
+					price_inr: 100,
+					total_inr: 118,
+					billing_cycle: "Monthly",
+				},
+			})
+		);
+		api.renewPlan.mockResolvedValue(rawOkBody({ tenant_status: "ready" }));
+
+		await wrapper.vm.doRenew();
+		expect(wrapper.vm.pending.amount).toBe(inrLabel(118));
+
+		await wrapper.vm.confirmPending();
+		await flushPromises();
+
+		expect(api.renewPlan).toHaveBeenCalled();
+	});
+});
+
+// #10-e review: "excl. GST" used to render unconditionally next to the current
+// plan's price, which wrongly claimed an exemption for a 0-GST plan and for
+// EVERY plan before get_plans starts sending gst_percent at all.
+describe("excl. GST label tracks the current plan's own gst_percent", () => {
+	it("is absent when gst_percent is undefined (pre-companion-PR get_plans row)", async () => {
+		const wrapper = await mountPage(baseAccount()); // no gst_percent on plan
+		expect(wrapper.text()).not.toContain("excl. GST");
+	});
+
+	it("is absent when gst_percent is 0", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				plan: {
+					plan_name: "Pro",
+					name: "pro",
+					price_inr: 100,
+					billing_cycle: "Monthly",
+					gst_percent: 0,
+				},
+			})
+		);
+		expect(wrapper.text()).not.toContain("excl. GST");
+	});
+
+	it("is present when gst_percent is a positive number", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				plan: {
+					plan_name: "Pro",
+					name: "pro",
+					price_inr: 100,
+					billing_cycle: "Monthly",
+					gst_percent: 18,
+				},
+			})
+		);
+		expect(wrapper.text()).toContain("excl. GST");
+	});
+});
+
 describe("edge 6/8: a cheaper reactivation charges full price, never implies a prorated switch", () => {
 	it("the card's own note names full price and explicitly rules out proration/scheduling", async () => {
 		const wrapper = await mountPage(reactivationAccount());

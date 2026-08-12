@@ -33,6 +33,14 @@
 					<span class="text-base text-ink-gray-6">
 						{{ planPriceLabel(account.plan.price_inr, account.plan.billing_cycle) }}
 					</span>
+					<!-- GST-exclusive pricing: the price above is the base rate, not
+					     what gets charged, so this says so plainly - but only for a
+					     plan that actually carries GST. A 0-GST plan, or any plan
+					     before get_plans sends gst_percent at all, must not claim an
+					     exemption it doesn't have. -->
+					<span v-if="planHasGst(account.plan)" class="text-p-sm text-ink-gray-5"
+						>excl. GST</span
+					>
 					<Badge
 						variant="subtle"
 						:theme="statusTheme"
@@ -158,6 +166,7 @@ import {
 	statusBadgeTheme,
 	planPriceLabel,
 	planFeatures,
+	planHasGst,
 	renewalLabel,
 	cancelActionLabel,
 	cancelPillLabel,

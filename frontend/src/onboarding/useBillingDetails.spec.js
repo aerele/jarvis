@@ -5,7 +5,6 @@ import {
 	billingStorageKey,
 	STORAGE_PROMISE_SAVED,
 	BILLING_SNAPSHOT_TTL_MS,
-	STORAGE_PROMISE_LOCAL,
 } from "./useBillingDetails.js";
 
 // A default ERP-defaults response for "Aerele" (company A) and one for "Beta".
@@ -199,27 +198,27 @@ describe("re-fetch discipline (back/continue does not lose edits)", () => {
 	});
 });
 
-describe("ack-gated storage promise (P0-01)", () => {
-	it("shows the honest local copy until billing_saved: true is observed", () => {
-		const b = useBillingDetails({ site: "s1", user: "u1" });
-		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
-		b.markBillingSaved(true);
-		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
-	});
-
+// The "ack-gated storage promise (P0-01)" suite that lived here is gone: the
+// rendered promise copy (billing.promiseCopy) is no longer shown anywhere in
+// the UI (see OnboardingView.vue B4). promiseCopy/STORAGE_PROMISE_* remain
+// exported from useBillingDetails.js only because usePaymentFlow.spec.js
+// still imports and asserts on them directly; that file was left untouched.
+//
+// Two behaviors this suite covered are NOT re-tested for promiseCopy itself,
+// but the underlying mechanics they exercised (unrelated to the promise text)
+// are still covered below: markBillingSaved's "only a literal true flips the
+// ack" guard, and the local snapshot surviving a durable ack but being
+// retired by finish().
+describe("markBillingSaved / local snapshot lifecycle", () => {
 	// Mutation guard for the ack gate: only a literal boolean true may flip it.
 	// A truthy-but-not-true ack (older admin echoing 1, or a "true" string) must
 	// NOT claim persistence.
-	it("only a literal true ack flips the promise", () => {
+	it("only a literal true ack returns true", () => {
 		const b = useBillingDetails({ site: "s1", user: "u1" });
 		expect(b.markBillingSaved(1)).toBe(false);
-		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
 		expect(b.markBillingSaved("true")).toBe(false);
-		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
 		expect(b.markBillingSaved(undefined)).toBe(false);
-		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
 		expect(b.markBillingSaved(true)).toBe(true);
-		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
 	});
 
 	// The durable ack used to ALSO clear the local snapshot. It no longer does, and
@@ -227,7 +226,7 @@ describe("ack-gated storage promise (P0-01)", () => {
 	// which is the call made immediately before the customer is top-level-navigated
 	// away to the checkout. Clearing there destroyed the only copy that could
 	// survive the round trip, so a customer who came back from a failed payment and
-	// pressed Back found an empty form. The promise is now kept at the END of
+	// pressed Back found an empty form. The snapshot is now retired at the END of
 	// onboarding instead, via finish().
 	it("keeps the local snapshot through a durable ack, so a checkout round trip can resume", () => {
 		const b = useBillingDetails({ site: "s1", user: "u1" });
@@ -236,8 +235,7 @@ describe("ack-gated storage promise (P0-01)", () => {
 		b.markBillingSaved(false);
 		expect(window.localStorage.getItem(b.storageKey)).toBeTruthy(); // kept
 		b.markBillingSaved(true);
-		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED); // the promise still flips
-		expect(window.localStorage.getItem(b.storageKey)).toBeTruthy(); // but the copy stays
+		expect(window.localStorage.getItem(b.storageKey)).toBeTruthy(); // still kept
 	});
 
 	it("retires the local snapshot when onboarding finishes", () => {

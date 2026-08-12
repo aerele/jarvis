@@ -14,7 +14,28 @@ export const STEPS_MANAGED = ["intro", "details", "plan", "pay", "connect"];
 // RELATIVE, not "@/account/format": this file's tests run under `node --test`
 // (package.json test:node), which resolves no bundler alias. format.js is plain ESM
 // with zero imports of its own, so pulling it in here keeps this module cheap to test.
-import { inr, planAmount, planSuffix } from "../account/format.js";
+import { inrExact, planSuffix } from "../account/format.js";
+
+/**
+ * Base/GST/total split for one plan (GST tax breakdown, 2026-08).
+ *
+ * CANONICAL formula, identical to the backend's `jarvis_admin_v2.billing.catalog`
+ * (`gst_amount_inr` / `total_inr`): `gstAmount = round(subtotal * gstPercent / 100, 2)`,
+ * `total = subtotal + gstAmount`. Rounding order must match the backend exactly - the
+ * gateway order is created at `total` and later verified against it, so a drift here
+ * would reject a real payment as an amount mismatch.
+ *
+ * `price_inr` is always the pre-tax base (its own field description says so); a plan
+ * with no `gst_percent` (or 0) collapses to `total === subtotal`, so callers written
+ * before GST existed keep behaving exactly as before.
+ */
+export function planPricing(p) {
+	const plan = p || {};
+	const subtotal = Number(plan.price_inr) || 0;
+	const gstPercent = Number(plan.gst_percent) || 0;
+	const gstAmount = Math.round(subtotal * gstPercent) / 100; // round(base*pct/100, 2)
+	return { subtotal, gstPercent, gstAmount, total: subtotal + gstAmount };
+}
 
 /**
  * What the customer pays TODAY for one plan, as a sentence (#671).
@@ -30,16 +51,25 @@ import { inr, planAmount, planSuffix } from "../account/format.js";
  * zero for every trial, which is exactly that understatement. The fee is 0 on the
  * current catalog, so this changes nothing today and stops being wrong the moment a
  * plan carries one.
+ *
+ * The recurring/charged amount is `planPricing(p).total` (tax-inclusive) - the fee
+ * itself is NOT taxed in this scope (GST applies to the recurring plan price only).
  */
 export function planDueToday(p) {
 	if (!p || !p.plan_name) return "";
 	const fee = Number(p.signup_fee_inr) || 0;
 	const days = Number(p.trial_days) || 0;
+	const { total } = planPricing(p);
 	const suffix = planSuffix(p.price_inr, p.billing_cycle) || "";
+	// inrExact, not inr: `total` carries GST-driven paise precision (e.g.
+	// price_inr=3475, gst_percent=18 -> total=4100.5), and this must render the
+	// exact value the backend charges rather than inr()'s bare toLocaleString,
+	// which would show a stray one-decimal "₹4,100.5". It is a strict superset
+	// of inr()'s output for whole-rupee amounts, so this is safe on `fee` too.
 	if (days > 0) {
-		return `${inr(fee)} today · then ${inr(p.price_inr)}${suffix} after ${days} days`;
+		return `${inrExact(fee)} today · then ${inrExact(total)}${suffix} after ${days} days`;
 	}
-	return fee > 0 ? `${inr(Number(p.price_inr) + fee)} today` : planAmount(p.price_inr);
+	return fee > 0 ? `${inrExact(total + fee)} today` : inrExact(total);
 }
 
 export function stepIndex(steps, cur) {

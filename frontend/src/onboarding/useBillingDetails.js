@@ -56,7 +56,7 @@ const USER_OWNED = new Set(["user", "local_restore"]);
 export const STORAGE_PROMISE_SAVED =
 	"Billing details are kept with your account for upcoming invoicing.";
 export const STORAGE_PROMISE_LOCAL =
-	"Saved in this browser for now — kept with your account once your signup is confirmed.";
+	"Saved in this browser for now. Kept with your account once your signup is confirmed.";
 
 // Transitional-storage key scheme (P0-02/C01-6): namespaced by site identity and
 // user so one site's or user's billing PII can never prefill another's on a

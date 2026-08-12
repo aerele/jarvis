@@ -6,8 +6,10 @@ import {
 	planPriceLabel,
 	renewalLabel,
 	inr,
+	inrExact,
 	planAmount,
 	planSuffix,
+	planHasGst,
 	cancelActionLabel,
 	cancellationNotice,
 	shortDate,
@@ -31,6 +33,34 @@ test("inr: localizes amounts, coerces junk to 0", () => {
 	assert.equal(inr(150000), "₹1,50,000");
 	assert.equal(inr(null), "₹0");
 	assert.equal(inr("abc"), "₹0");
+});
+// inrExact: same localisation as inr(), but a fractional amount (GST math can
+// yield paise precision) always renders at 2dp instead of inr()'s bare
+// toLocaleString, which would show "₹4,100.5" - correct in value, but
+// inconsistent next to a whole-rupee row and easy to misread as rounded off.
+test("inrExact: a fractional amount always renders at 2dp", () => {
+	assert.equal(inrExact(4100.5), "₹4,100.50");
+	assert.equal(inrExact(625.5), "₹625.50");
+});
+test("inrExact: a whole-rupee amount renders exactly like inr(), no decimals", () => {
+	assert.equal(inrExact(4130), "₹4,130");
+	assert.equal(inrExact(0), "₹0");
+	assert.equal(inrExact(3999), "₹3,999");
+});
+test("inrExact: junk coerces to ₹0, same as inr()", () => {
+	assert.equal(inrExact(null), "₹0");
+	assert.equal(inrExact("abc"), "₹0");
+});
+test("planHasGst: true only when gst_percent is a positive number", () => {
+	assert.equal(planHasGst({ gst_percent: 18 }), true);
+	assert.equal(planHasGst({ gst_percent: "18" }), true); // stringified API row
+});
+test("planHasGst: false for 0, absent, undefined or missing gst_percent - never claims 'excl. GST' without one", () => {
+	assert.equal(planHasGst({ gst_percent: 0 }), false);
+	assert.equal(planHasGst({ gst_percent: "0" }), false);
+	assert.equal(planHasGst({}), false); // pre-companion-PR get_plans row: field absent
+	assert.equal(planHasGst({ gst_percent: undefined }), false);
+	assert.equal(planHasGst(null), false);
 });
 test("planAmount: INR amount, zero/junk coerces to ₹0", () => {
 	assert.equal(planAmount(0), "₹0");
