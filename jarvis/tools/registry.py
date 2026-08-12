@@ -45,6 +45,12 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# Batch, atomic create for a doc's missing dependencies (one gated card).
 	"create_docs",
 	"preview_doc",
+	# CSV / file import: preview_import (read-only) shows what a raw file load would
+	# produce; run_import (gated) stages a Frappe Data Import and starts it. For data
+	# that needs any processing first, create_doc(docs=[...]) stays the path - import
+	# is only for loading a file AS-IS.
+	"preview_import",
+	"run_import",
 	"submit_doc",
 	"cancel_doc",
 	"delete_doc",

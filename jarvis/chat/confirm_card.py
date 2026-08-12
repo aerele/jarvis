@@ -115,6 +115,8 @@ def build_card(tool: str, args, preview) -> dict | None:
 			return _wiki_card(args)
 		if tool == "run_method":
 			return _method_card(args)
+		if tool == "run_import":
+			return _import_card(args, preview)
 	except Exception:
 		frappe.log_error(title="build_card failed", message=frappe.get_traceback())
 	return None
@@ -648,3 +650,56 @@ def _method_card(args: dict) -> dict:
 		# No meta for a run_method arg bag, so this is the key-name check only.
 		shown[str(k)] = "[hidden]" if is_secret(None, k) else fmt(v)
 	return {"kind": "method", "method": fmt(args.get("method") or ""), "args": shown}
+
+
+_MAX_SAMPLE_COLS = 8  # columns rendered in the import sample table (20 is unusable)
+
+
+def _import_card(args: dict, preview) -> dict | None:
+	"""Rich confirmation card for run_import, rendered from the read-only import preview
+	the park stashed at ``preview["import"]`` (already secret-masked, permission-checked).
+	Shows WHAT is imported - target doctype, record vs row count, the file, the sample
+	rows, the column mapping, advisory warnings - not a function path. Returns None on a
+	malformed preview so build_card's caller shows the described-intent floor (the park
+	always attaches a ``note``), never a blank card."""
+	imp = preview.get("import") if isinstance(preview, dict) else None
+	if not isinstance(imp, dict):
+		return None
+
+	columns = imp.get("columns") or []
+	mapped = [
+		(f"{c.get('header')} -> {c.get('label')}" if c.get("label") else c.get("header"))
+		for c in columns
+		if c.get("mapped")
+	]
+	unmapped = [c.get("header") for c in columns if not c.get("mapped")]
+
+	sample = imp.get("sample") if isinstance(imp.get("sample"), dict) else {}
+	sample_cols = sample.get("columns") or []
+	sample_rows = sample.get("rows") or []
+	col_cap = min(len(sample_cols), _MAX_SAMPLE_COLS)
+	shown_cols = sample_cols[:col_cap]
+	shown_rows = [{"cells": (r.get("cells") or [])[:col_cap]} for r in sample_rows]
+
+	advisory = [
+		w.get("message") for w in (imp.get("warnings") or {}).get("advisory") or [] if w.get("message")
+	]
+
+	return {
+		"kind": "import",
+		"doctype": imp.get("doctype"),
+		"import_type": imp.get("import_type"),
+		"file": (imp.get("file") or {}).get("name"),
+		"total_rows": imp.get("total_rows"),
+		"total_records": imp.get("total_records"),
+		# Only claim "will submit" when the target is actually submittable (else the card
+		# lies: submit_after_import silently no-ops on a non-submittable doctype).
+		"submit_after_import": bool(args.get("submit_after_import")) and bool(imp.get("submittable")),
+		"columns": {"mapped": mapped[:_MAX_ROWS], "unmapped": unmapped[:_MAX_ROWS]},
+		"sample": {
+			"columns": shown_cols,
+			"rows": shown_rows,
+			"extra_cols": max(0, len(sample_cols) - col_cap),
+		},
+		"advisory": advisory[:_MAX_ROWS],
+	}

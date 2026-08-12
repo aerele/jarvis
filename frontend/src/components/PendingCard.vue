@@ -3,9 +3,9 @@
 // write's confirmation card - replacing the raw-JSON dump. The structured card
 // comes from jarvis/chat/confirm_card.py (kind = create | update | bulk_update |
 // verb | email | bulk_email | share | assign | skill | wiki | method |
-// batch_create) and is already perm-filtered + size-capped server-side. All values
-// render through escaped interpolation (no v-html); the raw dry-run preview stays
-// available behind a collapsed Details expander.
+// batch_create | import) and is already perm-filtered + size-capped server-side.
+// All values render through escaped interpolation (no v-html); the raw dry-run
+// preview stays available behind a collapsed Details expander.
 //
 // A kind rendered here ALSO needs an entry in CARD_KINDS (@/lib/actionSummary):
 // pendingCardOf returns null for a kind not in that set and the SPA falls back to
@@ -462,6 +462,56 @@ function tableNote(t) {
 			</div>
 			<div v-if="card.extra > 0" class="jv-pcard-more">
 				+{{ card.extra }} more · full list in Details
+			</div>
+		</template>
+
+		<!-- import: run_import (bulk load via Frappe's Data Import). Rows vs records
+		     shown distinctly - a flat file with a mapped child table can fan out into
+		     more records than sheet rows (confirm_card.py::_import_card). Cells are
+		     already secret-masked server-side ("[hidden]"); escaped interpolation
+		     only, never v-html. -->
+		<template v-else-if="card.kind === 'import'">
+			<div class="jv-pcard-head">Import into {{ card.doctype }}</div>
+			<div class="jv-pcard-kv">
+				<span>Import type</span><b>{{ card.import_type }}</b>
+			</div>
+			<div class="jv-pcard-kv">
+				<span>File</span><b>{{ card.file }}</b>
+			</div>
+			<div class="jv-pcard-kv">
+				<span>Rows → records</span><b>{{ card.total_rows }} → {{ card.total_records }}</b>
+			</div>
+			<div v-if="card.submit_after_import" class="jv-pcard-warn">
+				Will submit each record after import
+			</div>
+			<div v-if="(card.sample?.rows || []).length" class="jv-pcard-table">
+				<div class="jv-pcard-table-head">Preview</div>
+				<div class="jv-pcard-table-scroll">
+					<table>
+						<thead>
+							<tr>
+								<th v-for="(c, ci) in card.sample.columns" :key="'ic' + ci">
+									{{ c }}
+								</th>
+							</tr>
+						</thead>
+						<tbody>
+							<tr v-for="(r, ri) in card.sample.rows" :key="'ir' + ri">
+								<td v-for="(cell, di) in r.cells" :key="'id' + di">{{ cell }}</td>
+							</tr>
+						</tbody>
+					</table>
+				</div>
+				<div v-if="card.sample.extra_cols > 0" class="jv-pcard-more">
+					+{{ card.sample.extra_cols }} more columns
+				</div>
+			</div>
+			<div v-else class="jv-pcard-empty">No preview rows.</div>
+			<ul v-if="(card.advisory || []).length" class="jv-pcard-list">
+				<li v-for="(a, i) in card.advisory" :key="'ia' + i">{{ a }}</li>
+			</ul>
+			<div v-if="(card.columns?.unmapped || []).length" class="jv-pcard-more">
+				Unmapped columns ignored: {{ card.columns.unmapped.join(", ") }}
 			</div>
 		</template>
 

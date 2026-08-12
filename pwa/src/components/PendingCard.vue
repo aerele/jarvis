@@ -2,10 +2,10 @@
 // Renders the server-built "what will change" summary (F9) for a parked write's
 // approval sheet - replacing the raw-JSON dump. The structured card comes from
 // jarvis/chat/confirm_card.py (kind = create | update | bulk_update | verb | email |
-// bulk_email | share | assign | skill | wiki | method | batch_create), already
-// perm-filtered + size-capped + secret-masked server-side. Logic (verbSentence) is
-// the SAME helper the desktop uses (@shared). All values render as escaped text;
-// the raw dry-run JSON stays behind a Details expander.
+// bulk_email | share | assign | skill | wiki | method | batch_create | import),
+// already perm-filtered + size-capped + secret-masked server-side. Logic
+// (verbSentence) is the SAME helper the desktop uses (@shared). All values render
+// as escaped text; the raw dry-run JSON stays behind a Details expander.
 //
 // A kind rendered here ALSO needs an entry in CARD_KINDS
 // (@shared/lib/actionSummary.js): pendingCardOf returns null for a kind not in that
@@ -447,6 +447,56 @@ function tableNote(t) {
 			</div>
 			<div v-if="card.extra > 0" class="jv-pc-more">
 				+{{ card.extra }} more · full list in Details
+			</div>
+		</template>
+
+		<!-- import: run_import (bulk load via Frappe's Data Import). Rows vs records
+		     shown distinctly - a flat file with a mapped child table can fan out into
+		     more records than sheet rows (confirm_card.py::_import_card). Cells are
+		     already secret-masked server-side ("[hidden]"); escaped text only, never
+		     v-html. -->
+		<template v-else-if="card.kind === 'import'">
+			<div class="jv-pc-head">Import into {{ card.doctype }}</div>
+			<div class="jv-pc-kv">
+				<span>Import type</span><b>{{ card.import_type }}</b>
+			</div>
+			<div class="jv-pc-kv">
+				<span>File</span><b>{{ card.file }}</b>
+			</div>
+			<div class="jv-pc-kv">
+				<span>Rows → records</span><b>{{ card.total_rows }} → {{ card.total_records }}</b>
+			</div>
+			<div v-if="card.submit_after_import" class="jv-pc-warn">
+				Will submit each record after import
+			</div>
+			<div v-if="(card.sample?.rows || []).length" class="jv-pc-table">
+				<div class="jv-pc-table-head">Preview</div>
+				<div class="jv-pc-table-scroll">
+					<table>
+						<thead>
+							<tr>
+								<th v-for="(c, ci) in card.sample.columns" :key="'ic' + ci">
+									{{ c }}
+								</th>
+							</tr>
+						</thead>
+						<tbody>
+							<tr v-for="(r, ri) in card.sample.rows" :key="'ir' + ri">
+								<td v-for="(cell, di) in r.cells" :key="'id' + di">{{ cell }}</td>
+							</tr>
+						</tbody>
+					</table>
+				</div>
+				<div v-if="card.sample.extra_cols > 0" class="jv-pc-more">
+					+{{ card.sample.extra_cols }} more columns
+				</div>
+			</div>
+			<div v-else class="jv-pc-empty">No preview rows.</div>
+			<ul v-if="(card.advisory || []).length" class="jv-pc-list">
+				<li v-for="(a, i) in card.advisory" :key="'ia' + i">{{ a }}</li>
+			</ul>
+			<div v-if="(card.columns?.unmapped || []).length" class="jv-pc-more">
+				Unmapped columns ignored: {{ card.columns.unmapped.join(", ") }}
 			</div>
 		</template>
 

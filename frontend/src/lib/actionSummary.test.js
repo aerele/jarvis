@@ -188,6 +188,7 @@ test("pendingCardOf: every kind build_card emits is whitelisted", () => {
 		"assign",
 		"skill",
 		"wiki",
+		"import",
 	]) {
 		assert.ok(pendingCardOf({ preview: { card: { kind } } }), `${kind} is not in CARD_KINDS`);
 	}
