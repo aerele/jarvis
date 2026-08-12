@@ -7903,8 +7903,12 @@ async function send(textArg, resendAck) {
 				return;
 			}
 			notify(
+				// Period-neutral copy: "usage_limit" fires from BOTH the all-time
+				// aggregate cap (jarvis.chat.policy._over_total_limit) and the
+				// still-monthly per-model cap (_over_model_limit) - the toast can't
+				// say "monthly" or "all-time" without being wrong for one of them.
 				r.reason === "usage_limit"
-					? `Monthly usage limit reached. Ask your ${agentName} admin to raise your limit.`
+					? `You've reached your usage limit. Ask your ${agentName} admin to raise it.`
 					: r.reason || "Couldn't send your message.",
 				{ type: "error" }
 			);
