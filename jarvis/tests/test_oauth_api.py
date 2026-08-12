@@ -1344,3 +1344,31 @@ class TestXaiPoolCapture(_OAuthApiBase):
 		self.assertTrue(blob["id_token"])  # xai transform REQUIRES it
 		frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
 		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, nonce))  # single-use
+
+
+class TestFetchAccountEmail(_OAuthApiBase):
+	"""Regression for the pool-signin "Account connected" bug: OpenAI's POOL
+	access_token has aud=chatgpt.com/backend-api, so a userinfo call with it
+	fails, but the id_token (scope includes ``email``) carries the email
+	claim directly. _fetch_account_email must try the id_token first and
+	only fall back to userinfo when there's no usable id_token."""
+
+	def test_id_token_email_used_without_http_call(self):
+		id_token = _jwt({"email": "alice@example.com"})
+		with patch("jarvis.oauth.api.requests.get") as mock_get:
+			email = oauth_api._fetch_account_email("OpenAI", "AT", id_token)
+		mock_get.assert_not_called()
+		self.assertEqual(email, "alice@example.com")
+
+	def test_no_id_token_falls_back_to_userinfo(self):
+		resp = _FakeResp(ok=True, status=200, json_body={"email": "bob@example.com"})
+		with patch("jarvis.oauth.api.requests.get", return_value=resp) as mock_get:
+			email = oauth_api._fetch_account_email("OpenAI", "AT", "")
+		mock_get.assert_called_once()
+		self.assertEqual(email, "bob@example.com")
+
+	def test_malformed_id_token_falls_through_to_userinfo(self):
+		resp = _FakeResp(ok=True, status=200, json_body={"email": "carol@example.com"})
+		with patch("jarvis.oauth.api.requests.get", return_value=resp):
+			email = oauth_api._fetch_account_email("OpenAI", "AT", "not-a-jwt")
+		self.assertEqual(email, "carol@example.com")

@@ -909,26 +909,15 @@ def _exchange_code(*, provider: str, code: str, code_verifier: str, redirect_uri
 	return resp.json()
 
 
-def _fetch_account_email(provider: str, access_token: str, id_token: str) -> str:
-	"""Best-effort email lookup via the provider's Bearer-authenticated
-	userinfo endpoint (OpenAI + Gemini). The id_token JWT branch below is
-	retained as a defensive fallback for any future provider configured
-	with ``userinfo: None`` - no current provider takes that path."""
-	p = get_provider(provider)
-	if p["userinfo"]:
-		try:
-			resp = requests.get(
-				p["userinfo"],
-				headers={"Authorization": f"Bearer {access_token}"},
-				timeout=_HTTP_TIMEOUT,
-			)
-			if resp.ok:
-				return resp.json().get("email") or ""
-		except requests.RequestException:
-			pass
-		return ""
-	# Fallback for providers with userinfo=None - parse id_token JWT for email.
-	# No current provider takes this path; retained defensively.
+def _email_from_id_token(id_token: str) -> str:
+	"""Best-effort parse of the ``email`` claim out of an id_token JWT.
+
+	Deliberately unverified (no signature check): this is a display label,
+	not an auth decision, and it lands in the container blob as the same
+	value userinfo would give. There's precedent - ``extract_account_id``
+	decodes tokens unverified too. Never raises: malformed base64, broken
+	JSON, or a missing/short id_token all just fall through to "".
+	"""
 	if not id_token or id_token.count(".") < 2:
 		return ""
 	try:
@@ -945,6 +934,41 @@ def _fetch_account_email(provider: str, access_token: str, id_token: str) -> str
 		# missing dots) is non-fatal: id_token is a best-effort source
 		# for the email hint, callers always have a fallback.
 		return ""
+
+
+def _fetch_account_email(provider: str, access_token: str, id_token: str) -> str:
+	"""Best-effort email lookup, preferring the id_token JWT's ``email``
+	claim over the provider's Bearer-authenticated userinfo endpoint.
+
+	This is not merely defensive: POOL sign-ins (OpenAI/ChatGPT chat
+	subscriptions) request scope ``openid email profile offline_access``,
+	so the id_token carries an email claim, but the pool access_token's
+	audience is ``chatgpt.com/backend-api`` (see the OpenAI provider entry
+	in providers.py) - it's the wrong audience for
+	``https://api.openai.com/v1/userinfo``, so that call fails and used to
+	leave the account unlabeled. Trying the id_token first fixes that
+	without special-casing OpenAI. Providers with no id_token (Google
+	Gemini's DIRECT flow) still fall through to the userinfo call, which
+	works for them.
+	"""
+	email = _email_from_id_token(id_token)
+	if email:
+		return email
+
+	p = get_provider(provider)
+	if not p["userinfo"]:
+		return ""
+	try:
+		resp = requests.get(
+			p["userinfo"],
+			headers={"Authorization": f"Bearer {access_token}"},
+			timeout=_HTTP_TIMEOUT,
+		)
+		if resp.ok:
+			return resp.json().get("email") or ""
+	except requests.RequestException:
+		pass
+	return ""
 
 
 @frappe.whitelist()

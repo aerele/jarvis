@@ -898,3 +898,68 @@ describe("the verdict and the surrounding controls agree", () => {
 		expect(w.vm.startBlockedReason).toBe("");
 	});
 });
+
+/**
+ * Two ChatGPT subscriptions used to render as identical collapsed rows: the same
+ * "Subscription · OpenAI" chip and the same model id, with no way to tell which
+ * account is which. accountLabel() falls all the way to a generic "Account
+ * connected" for accounts with neither a label nor an email (the pre-fix accounts
+ * this bug is about), so the row template needs its own per-account fallback -
+ * this covers both halves: the label logic and what the row actually renders.
+ */
+describe("a subscription row's collapsed account identity (jarvis account-name bug)", () => {
+	it("gives two label-less, email-less accounts distinct identifiers via accountLabel()", async () => {
+		// Real refs are secrets.token_hex(8): lowercase hex, letters included. Ending
+		// each in a distinct letter-bearing suffix (not all-digits) is what actually
+		// exercises accountLabel()'s .toUpperCase() - digits uppercase to themselves,
+		// so an all-digit suffix would pass this test with or without that call.
+		setPool([
+			subModel("gpt-5", 0, [
+				account("SUB_aaaaaaaaabcd", ""),
+				account("SUB_bbbbbbbbef01", ""),
+			]),
+		]);
+		const w = await mountEditor();
+
+		// accountLabel is a <script setup> binding, not part of defineExpose - reachable
+		// through the component's setupState the way @vue/test-utils exposes it on `vm`.
+		const [a, b] = w.vm.rows[0].accounts;
+		expect(w.vm.accountLabel(a)).toBe("Account ABCD");
+		expect(w.vm.accountLabel(b)).toBe("Account EF01");
+		expect(w.vm.accountLabel(a)).not.toBe(w.vm.accountLabel(b));
+	});
+
+	it("renders two distinct account identifiers for two label-less, email-less accounts", async () => {
+		setPool([
+			subModel("gpt-5", 0, [
+				account("SUB_aaaaaaaaabcd", ""),
+				account("SUB_bbbbbbbbef01", ""),
+			]),
+		]);
+		const w = await mountEditor();
+
+		const chip = w.find(".jv-flist-acct");
+		expect(chip.exists()).toBe(true);
+		// Two accounts folded onto one row: only the first is named, the rest counted.
+		expect(chip.text()).toBe("Account ABCD +1 more");
+	});
+
+	it("shows the real email when the account has one", async () => {
+		setPool([subModel("gpt-5", 0, [account("SUB_aaaaaaaaabcd", "a@example.com")])]);
+		const w = await mountEditor();
+
+		const chip = w.find(".jv-flist-acct");
+		expect(chip.exists()).toBe(true);
+		expect(chip.text()).toBe("a@example.com");
+	});
+
+	it("never surfaces the raw SUB_<hex> token, and uppercases the last 4 chars", async () => {
+		setPool([subModel("gpt-5", 0, [account("SUB_aaaaaaaaabcd", "")])]);
+		const w = await mountEditor();
+
+		const chip = w.find(".jv-flist-acct");
+		expect(chip.text()).toBe("Account ABCD");
+		expect(chip.text()).not.toContain("SUB_");
+		expect(chip.text()).not.toContain("abcd"); // must be the uppercased form, not a raw substring
+	});
+});
