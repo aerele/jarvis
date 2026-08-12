@@ -130,5 +130,19 @@ export function recordEvent(e) {
 			at,
 			read: false,
 		});
+	} else if (e.kind === "import:finished" && conv) {
+		// Slice B: the completion message already landed in the conversation
+		// (this event carries no filename/tally — just the pointer); the feed
+		// entry just tells the user something finished while they were away.
+		// No push toast here, only the bell feed.
+		push({
+			id: `imp:${e.message_id || conv}`,
+			kind: "import-finished",
+			title: "Import finished",
+			body: `${agentName} finished processing your import.`,
+			conversation: conv,
+			at,
+			read: false,
+		});
 	}
 }

@@ -328,6 +328,39 @@ def _persist_and_publish_tool_call(
 	persist_tool_receipt(conv_name, tool, args, result, tool_call_id=tool_call_id)
 
 
+def _locked_insert_chat_message(
+	conv_name: str, fields: dict, *, dedupe_filters: dict | None = None
+) -> str | None:
+	"""Allocate the next ``seq`` for ``conv_name`` UNDER a ``Jarvis Conversation``
+	``FOR UPDATE`` lock and insert one ``Jarvis Chat Message`` with ``fields`` merged
+	onto ``{conversation, seq}``. Returns the message name, or ``None`` when
+	``dedupe_filters`` already matches a row (nothing inserted).
+
+	MUST be called inside an ``impersonate(conv_owner)`` block that has already
+	``commit``ed, so this ``FOR UPDATE`` is the first statement of the transaction
+	(REPEATABLE-READ discipline). The caller commits AFTER (releasing the lock) and
+	publishes post-commit. This is the ONE ``FOR UPDATE`` + ``MAX(seq)+1`` critical
+	section in the codebase - shared by ``persist_tool_receipt`` (inline + confirmed
+	receipts) and ``import_announce._post_completion`` (the import auto-tell) so the
+	seq-collision guard is never forked (PC-1)."""
+	frappe.db.sql(
+		"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE",
+		{"c": conv_name},
+	)
+	if dedupe_filters and frappe.db.exists("Jarvis Chat Message", dedupe_filters):
+		return None
+	seq = (
+		frappe.db.sql(
+			"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s",
+			{"c": conv_name},
+		)[0][0]
+		or 0
+	) + 1
+	doc = frappe.get_doc({"doctype": "Jarvis Chat Message", "conversation": conv_name, "seq": seq, **fields})
+	doc.insert(ignore_permissions=True)
+	return doc.name
+
+
 def persist_tool_receipt(
 	conv_name: str,
 	tool: str,
@@ -397,29 +430,9 @@ def persist_tool_receipt(
 		# callback for the same tool call is a no-op. Commit-first so the FOR UPDATE
 		# is the first statement (REPEATABLE-READ discipline).
 		frappe.db.commit()
-		frappe.db.sql(
-			"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE",
-			{"c": conv_name},
-		)
-		if tool_call_id and frappe.db.exists(
-			"Jarvis Chat Message", {"conversation": conv_name, "tool_call_id": tool_call_id}
-		):
-			# Duplicate callback for the same tool call — already recorded. Release
-			# the lock and return; the out-of-band writer is idempotent (R-6).
-			frappe.db.commit()
-			return
-		seq = (
-			frappe.db.sql(
-				"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s",
-				{"c": conv_name},
-			)[0][0]
-			or 0
-		) + 1
-		doc = frappe.get_doc(
+		msg_name = _locked_insert_chat_message(
+			conv_name,
 			{
-				"doctype": "Jarvis Chat Message",
-				"conversation": conv_name,
-				"seq": seq,
 				"role": "tool",
 				"tool_name": tool,
 				"tool_args": frappe.as_json(args),
@@ -430,14 +443,22 @@ def persist_tool_receipt(
 				"ref_doctype": ref_doctype,
 				"ref_name": ref_name,
 				"content": f"{tool} → {action_outcome or status}",
-			}
+			},
+			# ``(conversation, tool_call_id)`` dedupe — a duplicate callback for the SAME
+			# tool call is a no-op (R-6 out-of-band idempotency). Null id: no dedupe, but
+			# the seq race is still fixed by the shared FOR UPDATE.
+			dedupe_filters=(
+				{"conversation": conv_name, "tool_call_id": tool_call_id} if tool_call_id else None
+			),
 		)
-		doc.insert(ignore_permissions=True)
 		frappe.db.commit()
+		if msg_name is None:
+			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
+			return
 		publish_realtime_tool_result(
 			user=conv_owner,
 			conversation_id=conv_name,
-			tool_message_id=doc.name,
+			tool_message_id=msg_name,
 			tool_name=tool,
 			args=args,
 			result=result,

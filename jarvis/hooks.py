@@ -326,6 +326,12 @@ scheduler_events = {
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
+			# Slice B auto-tell: the CORRECTNESS GUARANTEE for import-completion
+			# announcements (the after_job hook is only a latency shortcut and cannot
+			# survive a worker/container death). Drains a bounded worklist of
+			# un-announced Data Imports, posts each finished/blocked/stuck/dead one into
+			# its chat, and self-gates cheaply (one COUNT) when nothing is pending.
+			"jarvis.chat.import_announce.announce_finished_imports",
 		],
 		# Learn-from-custom-apps has been REPLACED by the Custom App Learning
 		# *scribe* delegate agent (marketplace slug ``custom-app-learning``): it
@@ -512,7 +518,12 @@ doc_events["Jarvis Personalise Question Rule"] = {
 # leave orphaned Jarvis Chat Turn rows behind (they would linger as ghost queued/
 # dispatching rows in the admission shard). Cascade-delete them on trash.
 doc_events["Jarvis Conversation"] = {
-	"on_trash": "jarvis.chat.admission.on_conversation_trash",
+	"on_trash": [
+		"jarvis.chat.admission.on_conversation_trash",
+		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
+		# Link never blocks deletion (LinkExistsError) or orphans the poll.
+		"jarvis.chat.import_announce.on_conversation_trash",
+	],
 }
 
 # ---------------------------------------------------------------------------
@@ -547,7 +558,19 @@ for _trigger_event in (
 # clear_old_logs mirrors core's WebhookRequestLog).
 default_log_clearing_doctypes = {
 	"Jarvis Trigger Activity": 90,
+	# Slice B: reap TERMINAL (announced=1) import-announcement rows after 30 days.
+	# The controller's clear_old_logs filters announced=1 AND modified<cutoff, so a
+	# still-live (announced=0) row is never swept.
+	"Jarvis Import Announcement": 30,
 }
+
+# Slice B fast-path: runs in the `finally` of EVERY background job on the bench (Frappe
+# calls it with no surrounding try/except), so the handler MUST stay import-safe on every
+# version and MUST NEVER raise - see import_announce.on_after_job. When a Data Import job
+# ends it enqueues a scoped completion-classify so a finished import pings in seconds.
+# LATENCY-ONLY; the `*/2` poll (scheduler_events) is the correctness guarantee and must
+# never be removed even though it looks redundant once the hook is working.
+after_job = ["jarvis.chat.import_announce.on_after_job"]
 
 # ---------------------------------------------------------------------------
 # Wiki page scoping (wiki v2)

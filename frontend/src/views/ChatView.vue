@@ -8382,6 +8382,18 @@ function onEvent(p) {
 			setTimeout(processMermaid, 300);
 			break;
 		}
+		case "import:finished": {
+			// Slice B: a background CSV import finished and the bench already
+			// posted the "✓ ..." completion message into this conversation
+			// (durably committed, published only to the conversation owner).
+			// The conversation-id guard above already confirmed this is the
+			// conversation on screen, so mirror message:enriched's re-read
+			// rather than trying to splice the message in by hand — an
+			// off-screen import instead reaches the sidebar unread dot via
+			// globalNotifier.js's own listener on this same socket.
+			loadConversation(currentId.value);
+			break;
+		}
 		case "wiki:nudge": {
 			// Post-turn "remember this?" prompt. Don't clobber a card the user is
 			// already recording into / editing — only replace an idle (or absent)

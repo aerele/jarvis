@@ -68,6 +68,13 @@ function onEvent(p) {
 			const title = store.conversations.find((c) => c.name === conv)?.title || agentName;
 			notify(`${agentName} finished`, title, conv);
 		}
+	} else if (p.kind === "import:finished") {
+		// Slice B: a background CSV import finished; the completion message is
+		// already durable in the conversation. ChatView live-renders it when
+		// that chat is open — this shell-level handler owns only the
+		// off-screen unread dot. Deliberately no browser push for this event,
+		// this wave (unlike run:end above).
+		if (conv && conv !== openConversationId()) store.markUnread(conv);
 	} else if (p.kind === "action:pending" && prefs.notifyDecision) {
 		notify(
 			`${agentName} needs your approval`,

@@ -292,6 +292,19 @@ export function attachGlobalNotifier({ socket, router }) {
 				}
 				return;
 			}
+			case "import:finished": {
+				// Slice B: a background CSV import finished; the bench already
+				// posted the "✓ ..." completion message into the conversation and
+				// committed it durably. ChatView (this same socket, a separate
+				// listener) re-reads the transcript live when that conversation is
+				// on screen — this listener owns only the off-screen unread dot,
+				// and deliberately calls markUnread DIRECTLY, bypassing signal()/
+				// browserNotify: no push toast/browser notification for this
+				// event, this wave.
+				const conv = p.conversation_id;
+				if (conv && conv !== onScreenConv()) store.markUnread(conv);
+				return;
+			}
 		}
 	}
 

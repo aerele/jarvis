@@ -71,6 +71,7 @@ beforeEach(() => {
 	for (const t of [...useToasts().value]) dismissToast(t.id);
 	vi.clearAllMocks();
 	setHidden(false);
+	store.currentConvId = null;
 	socket = fakeSocket();
 	detach = attachGlobalNotifier({ socket, router });
 });
@@ -145,5 +146,57 @@ describe("a hidden tab takes the browser-notification branch, not the toast", ()
 		socket.emit(terminal());
 		socket.emit(terminal());
 		expect(useToasts().value).toHaveLength(0);
+	});
+});
+
+// Slice B ("auto-tell import completion"): a background Data Import posts its
+// "✓ ..." message into the conversation and publishes
+// { kind: "import:finished", conversation_id, message_id } to the owner. This
+// listener owns only the OFF-SCREEN half (the sidebar unread dot) — ChatView's
+// own onEvent (see importFinishedRender.spec.js) re-reads the transcript when
+// that conversation is the one on screen. The plan is explicit that this wave
+// ships NO push toast/browser notification for this event, so these tests pin
+// markUnread as a DIRECT call, bypassing signal()/browserNotify entirely.
+describe("import:finished marks the sidebar unread, never a toast", () => {
+	it("calls store.markUnread directly for an off-screen conversation", () => {
+		socket.emit({ kind: "import:finished", conversation_id: "conv-a", message_id: "msg-1" });
+		expect(store.markUnread).toHaveBeenCalledWith("conv-a");
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("still only marks unread — no toast — even while the tab is hidden", () => {
+		// The hidden branch is where run:end/run:error escalate to a browser
+		// notification (signal()'s first branch). import:finished must never
+		// reach signal() at all, so nothing renders here either.
+		setHidden(true);
+		socket.emit({ kind: "import:finished", conversation_id: "conv-a", message_id: "msg-1" });
+		expect(store.markUnread).toHaveBeenCalledWith("conv-a");
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("does nothing for a conversation-less event, rather than marking ambiently", () => {
+		socket.emit({ kind: "import:finished", message_id: "msg-1" });
+		expect(store.markUnread).not.toHaveBeenCalled();
+	});
+
+	it("leaves the ON-screen conversation alone — that's ChatView's job, not this listener's", () => {
+		const savedRoute = router.currentRoute.value;
+		store.currentConvId = "conv-a";
+		router.currentRoute.value = {
+			name: "Chat",
+			params: { id: "conv-a" },
+			meta: { chat: true },
+		};
+		try {
+			socket.emit({
+				kind: "import:finished",
+				conversation_id: "conv-a",
+				message_id: "msg-1",
+			});
+			expect(store.markUnread).not.toHaveBeenCalled();
+		} finally {
+			router.currentRoute.value = savedRoute;
+			store.currentConvId = null;
+		}
 	});
 });
