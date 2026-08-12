@@ -643,6 +643,31 @@ class TestRunDashboardSource(_DashboardsApiTestCase):
 		self.assertTrue(data["rows"])
 		self.assertIsInstance(data["took_ms"], int)
 
+	def test_run_report_prepared_at_runtime_rejected(self):
+		# Run-time backstop: a report toggled to prepared AFTER a source was saved
+		# must still be rejected. run_report now returns a {prepared_report: True,
+		# status: ...} envelope; the tile must not serve it (dashboards_api guards
+		# on res.get("prepared_report")).
+		self._mk_todo("Administrator")
+		frappe.set_user("Administrator")
+		created = self._save(
+			{
+				"dashboard_title": f"rt-{frappe.generate_hash(length=8)}",
+				"html": "<h1>rt</h1>",
+				"sources": [
+					{"source_name": "rep", "tool": "run_report", "spec": {"report_name": REPORT_NAME}}
+				],
+			}
+		)
+		frappe.db.set_value("Report", REPORT_NAME, "prepared_report", 1)
+		try:
+			with patch("frappe.core.doctype.prepared_report.prepared_report.enqueue"):
+				r = run_dashboard_source(created["name"], "rep")
+		finally:
+			frappe.db.set_value("Report", REPORT_NAME, "prepared_report", 0)
+		self.assertFalse(r.get("ok"))
+		self.assertIn("inline", frappe.as_json(r).lower())
+
 	def test_truncation_cap(self):
 		self._mk_todo("Administrator", "truncate one")
 		self._mk_todo("Administrator", "truncate two")
