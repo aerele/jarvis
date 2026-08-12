@@ -33,11 +33,20 @@ import { AI_MODELS_SETTINGS_URL } from "./config.mjs";
 // "llm_setup" is the server-decided HARD variant of llm_credentials (creds
 // missing + nothing ever synced + subscription never Active): a half-finished
 // signup, where chat cannot work at all.
+// "llm_rejected" (jarvis#757): a first pool/direct sync the server explicitly
+// refused. readiness.js lists it here for the same reason as the two
+// provisioning reasons (a first sync that never succeeded), and the desk
+// onboarding banner routes it to setup too, so the widget must agree or the two
+// desk surfaces show contradictory recovery paths for one verdict (jarvis
+// review). "readiness_unconfirmed" is deliberately NOT added: it is transient
+// (the control plane could not answer yet), and degradedMessage below gives it
+// a dedicated "try again shortly" line that a one-way setup gate would bury.
 const NOT_ONBOARDED_REASONS = new Set([
   "signup",
   "llm_setup",
   "llm_pool_provisioning",
   "llm_provisioning",
+  "llm_rejected",
 ]);
 
 // Three-way verdict the panel renders around:
@@ -112,39 +121,35 @@ export function degradedMessage(resp, agentName = "Jarvis") {
   return GENERIC_DEGRADED;
 }
 
-// Role-aware wrapper around degradedMessage() for the one case an admin can
-// actually do something about: no AI attached at all. That is exactly the
-// case degradedMessage() flattens into the generic "ask your administrator"
-// sentence (subscription_suspended, container_provisioning and
-// readiness_unconfirmed all have their own dedicated copy above and are left
-// untouched - none of them are fixed by reconnecting a model, so none of them
-// get this CTA). An admin gets actionable copy plus a link to the AI models
-// settings pane; a member still can't act on it, so they keep
-// degradedMessage()'s member wording with no button.
+// Role-aware wrapper around degradedMessage() for the ONE reason an admin can
+// fix from here: "llm_credentials", a workspace whose AI was disconnected or
+// whose credential expired, so no model is attached at all. An admin gets
+// actionable "no AI connected" copy plus a link to the AI models settings pane;
+// a member cannot act on it, so they keep degradedMessage()'s member wording
+// with no button.
+//
+// ALLOWLIST, not a denylist (jarvis review). Every OTHER reason keeps
+// degradedMessage()'s own copy and gets no CTA. Listing instead the reasons that
+// have dedicated copy silently handed this "Connect a model" button - and threw
+// away the reason's real detail - to "llm_rejected" (a config the server
+// refused, where a model IS attached; now gated to setup above) and to any
+// reason account.py grows later. Only the reason this button actually fixes
+// opts in.
+//
+// The "No AI connected..." string is duplicated verbatim from ChatView.vue's
+// noAiConnectedMessage (the SPA banner for the same condition). Keep the two in
+// sync BY HAND, same as NOT_ONBOARDED_REASONS above.
 export function degradedActionable(
   resp,
   agentName = "Jarvis",
   isAdmin = false
 ) {
   const reason = (resp && resp.reason) || "";
-  const text = degradedMessage(resp, agentName);
-  const hasOwnCopy =
-    reason === "subscription_suspended" ||
-    reason === "container_provisioning" ||
-    reason === "readiness_unconfirmed" ||
-    // Neither of these is a "no AI attached" problem the AI models pane can
-    // fix. site_replaced has its own reconnect-the-SITE flow (readiness.js's
-    // replacedBanner, RECONNECT_INTENT_URL) - the account moved elsewhere, no
-    // model to connect here. authority_repair_required is admin's own
-    // reassurance after paging support; readiness.js is explicit that this
-    // reason must NEVER offer a Renew or Reconnect action, which could make
-    // an ambiguous/invalid container worse. Both keep degradedMessage's plain
-    // text, no CTA - same as the three reasons above.
-    reason === "authority_repair_required" ||
-    reason === "site_replaced";
-  if (!isAdmin || hasOwnCopy) return { text, cta: null };
-  return {
-    text: "No AI connected. Connect a model to start chatting again.",
-    cta: { label: "Connect a model", href: AI_MODELS_SETTINGS_URL },
-  };
+  if (isAdmin && reason === "llm_credentials") {
+    return {
+      text: "No AI connected. Connect a model to start chatting again.",
+      cta: { label: "Connect a model", href: AI_MODELS_SETTINGS_URL },
+    };
+  }
+  return { text: degradedMessage(resp, agentName), cta: null };
 }
