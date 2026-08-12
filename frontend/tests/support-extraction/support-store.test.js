@@ -10,6 +10,8 @@ vi.mock("@/api", () => ({
 	supportAwaitingCount: vi.fn(),
 	supportUpload: vi.fn(),
 	supportDownloadUrl: (t, f) => `/proxy?ticket=${t}&file_url=${f}`,
+	getMySettings: vi.fn(),
+	updateMySettings: vi.fn(),
 }));
 vi.mock("frappe-ui", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
@@ -269,6 +271,64 @@ describe("support store", () => {
 			const s = useSupportStore();
 			expect(await s.closeTicket("T1")).toBe(false);
 			expect(toast.error).toHaveBeenCalled();
+		});
+	});
+
+	// copyPref is module-scope singleton state (not a `tickets`-style array the
+	// outer beforeEach can reset), and it starts null exactly once per test
+	// FILE. So unlike every describe above, this one is ONE deliberately
+	// sequential narrative, not independent cases - splitting it into
+	// order-agnostic `it()`s would either need a way to reset the cache back to
+	// null (there isn't one outside a fresh module load) or fake that reset by
+	// calling setCopyPref(null), which isn't a real call site makes. Each step
+	// is still a distinct assertion; only their ORDER is load-bearing, same
+	// idea as "toasts on a failed list AND keeps the last-good rows" above.
+	describe("getCopyPref / setCopyPref (sequential: the cache starts null once)", () => {
+		it("a failed first fetch resolves '' but leaves the cache unset, so the very next call retries", async () => {
+			const s = useSupportStore();
+			api.getMySettings.mockRejectedValueOnce(new Error("network"));
+			expect(await s.getCopyPref()).toBe("");
+			expect(api.getMySettings).toHaveBeenCalledTimes(1);
+		});
+
+		it("concurrent callers before a fetch resolves share ONE request, not one each", async () => {
+			const s = useSupportStore();
+			let resolve;
+			api.getMySettings.mockReturnValue(new Promise((r) => (resolve = r)));
+			const a = s.getCopyPref();
+			const b = s.getCopyPref();
+			resolve({ data: { support_context_copy_pref: "Yes" } });
+			expect(await a).toBe("Yes");
+			expect(await b).toBe("Yes");
+			expect(api.getMySettings).toHaveBeenCalledTimes(1);
+		});
+
+		it("a later call reads the now-populated cache - no further round-trip", async () => {
+			// Review finding: this path used to be an uncached fetch on every
+			// click, with no loading indicator, before this caching was added.
+			const s = useSupportStore();
+			expect(await s.getCopyPref()).toBe("Yes");
+			expect(api.getMySettings).not.toHaveBeenCalled();
+		});
+
+		it("setCopyPref overrides the cache locally AND writes through via updateMySettings", async () => {
+			const s = useSupportStore();
+			api.updateMySettings.mockResolvedValue({});
+			s.setCopyPref("No");
+			expect(api.updateMySettings).toHaveBeenCalledWith({ support_context_copy_pref: "No" });
+			expect(await s.getCopyPref()).toBe("No");
+			expect(api.getMySettings).not.toHaveBeenCalled();
+		});
+
+		it("a failed write-through does not throw and does not roll back the local cache", async () => {
+			const s = useSupportStore();
+			api.updateMySettings.mockRejectedValue(new Error("offline"));
+			expect(() => s.setCopyPref("Yes")).not.toThrow();
+			// Local-first: the user already made the choice that drove this call;
+			// nothing in the UI awaits the write-through, so a failed save stays
+			// silent rather than rolling back what the user just saw take effect
+			// (review finding, deferred as a MINOR - not retried, not surfaced).
+			expect(await s.getCopyPref()).toBe("Yes");
 		});
 	});
 });

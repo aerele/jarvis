@@ -189,7 +189,7 @@ async function createTicket(subject, body) {
 		// openingComm (null on an older Helpdesk that doesn't auto-mirror the opening
 		// message, or an empty body): let the caller thread it into uploadTo so files
 		// attached at ticket-creation time land on that Communication and render inline,
-		// the same as a reply's — see reply()'s `comm` for the established pattern.
+		// the same as a reply's; see reply()'s `comm` for the established pattern.
 		return { name, openingComm: (r.data && r.data.opening_comm) || null };
 	} catch (e) {
 		toast.error(errHtml(e));

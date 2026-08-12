@@ -3766,7 +3766,6 @@ import {
 	watchEffect,
 } from "vue";
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
-import { toast } from "frappe-ui";
 import * as api from "@/api";
 import * as voice from "@/api/voice";
 import { agentName, isWhitelabeled } from "@/branding";
@@ -3791,6 +3790,7 @@ import { takeChatPrefill } from "@/composables/chatPrefill";
 import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
+import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
@@ -4037,38 +4037,22 @@ const supportStore = supportOn ? useSupportStore() : null;
 // (an active conversation with visible messages) and the user hasn't already
 // answered "don't ask again". Formats the last few turns as plain text; the
 // New Ticket page's existing ?body= prefill (query.body -> plainToHtml) does
-// the rest, same mechanism a macro/prefill link already uses.
-const SUPPORT_COPY_COUNT = 4;
-const SUPPORT_COPY_CHARS = 400;
+// the rest, same mechanism a macro/prefill link already uses. The formatting
+// itself lives in lib/supportCopyFormat.js (pure, unit-tested on its own).
 function recentMessagesForSupport() {
-	const visible = messages.value.filter(
-		(m) => (m.role === "user" || m.role === "assistant") && (m.content || "").trim()
-	);
-	return visible.slice(-SUPPORT_COPY_COUNT).map((m) => {
-		const who = m.role === "user" ? "You" : agentName;
-		const text = m.content.trim();
-		// Code-point-aware clip: text.slice() indexes UTF-16 code units, which
-		// can cut an astral character (e.g. an emoji) in half and leave an
-		// unpaired surrogate in both the preview and, if copied, the ticket
-		// body support staff read. The spread operator iterates by code point.
-		const chars = [...text];
-		const clipped =
-			chars.length > SUPPORT_COPY_CHARS
-				? chars.slice(0, SUPPORT_COPY_CHARS).join("") + "…"
-				: text;
-		return `${who}: ${clipped}`;
-	});
+	return formatRecentMessagesForSupport(messages.value, agentName);
 }
 // Guards the async gap below (a settings fetch, maybe a dialog await) against
-// a double-click firing openSupport() twice concurrently — without this, a
+// a double-click firing openSupport() twice concurrently: without this, a
 // second click could race the first to SupportNew before the first's prompt
 // even resolves.
 let openSupportInFlight = false;
 async function openSupport() {
 	if (!supportOn) {
 		// Unconfigured-but-visible state (see supportEntryVisible): explain rather
-		// than navigate into a route the guard would just bounce back from.
-		toast.info("Support isn't set up on this workspace yet — ask your administrator.");
+		// than navigate into a route the guard would just bounce back from. Same
+		// helper + toast as every other "not set up yet" control in this header.
+		explainUnavailable("Support");
 		return;
 	}
 	// A resting badge means tickets are waiting on the user's reply - the click
@@ -9883,7 +9867,7 @@ onUnmounted(() => {
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
 }
-/* Resting badge on the Support button — mirrors the "Awaiting you" ticket
+/* Resting badge on the Support button: mirrors the "Awaiting you" ticket
    badge's amber, so the same colour means the same thing everywhere. */
 .jv-support-dot {
 	position: absolute;

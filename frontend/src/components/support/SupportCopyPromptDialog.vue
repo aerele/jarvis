@@ -67,7 +67,7 @@ function settle(val) {
 	settleSupportCopyPrompt(val);
 }
 
-// Escape = "no" (same as declining), not "dontask" — dismissing once shouldn't
+// Escape = "no" (same as declining), not "dontask": dismissing once shouldn't
 // silently opt out of ever being asked again.
 function onKey(e) {
 	if (e.key === "Escape" && state.value) {

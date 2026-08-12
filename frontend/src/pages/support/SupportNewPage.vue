@@ -129,7 +129,7 @@ async function create() {
 			// submit must not be uploaded (Helpdesk has no un-attach). Threaded onto
 			// openingComm (the ticket's own auto-mirrored opening message) so these
 			// render inline in the first bubble instead of as a floating ticket-level
-			// pill row — the same inline treatment a reply's attachment already gets.
+			// pill row, the same inline treatment a reply's attachment already gets.
 			const live = staged.filter((f) => files.value.includes(f));
 			if (live.length) {
 				const uploaded = await store.uploadTo(name, live, openingComm);

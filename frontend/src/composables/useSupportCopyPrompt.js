@@ -1,4 +1,4 @@
-// Promise-based "copy this chat into your new ticket?" prompt — same shared-
+// Promise-based "copy this chat into your new ticket?" prompt, the same shared-
 // state pattern as useConfirm.js (a single mounted dialog driven by module-scope
 // state), kept as its own composable rather than a 3rd useConfirm() button
 // because this one also renders a preview of what would be copied, and its

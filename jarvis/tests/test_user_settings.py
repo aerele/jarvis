@@ -878,7 +878,7 @@ class TestPersonaPreference(_UsageTestBase):
 
 
 # --------------------------------------------------------------------------- #
-# 8.5 support_context_copy_pref — the "copy this chat into your ticket?"
+# 8.5 support_context_copy_pref: the "copy this chat into your ticket?"
 #     don't-ask-again answer ("" | "Yes" | "No"). Direct analog of
 #     preferred_persona above (same owner-scoped save/echo path, same
 #     fixed-enum-message validation), but with no [Context:]/turn_handler
