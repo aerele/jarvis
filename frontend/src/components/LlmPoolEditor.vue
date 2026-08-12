@@ -160,48 +160,49 @@
 			     before `row` exists in scope. See pendingAddUid's doc above for what
 			     this v-if is hiding and why. -->
 			<template v-for="(row, i) in rows" :key="row._uid ?? i">
-				<div v-if="row._uid !== pendingAddUid" class="jv-flist-row">
-					<span class="jv-pool-badge">{{ i + 1 }}</span>
-					<ProviderLogo :provider="row.provider" :upstream="row.upstream" :size="18" />
-					<span class="jv-flist-chip">{{ sourceChip(row) }}</span>
-					<span
-						class="jv-flist-model"
-						:class="{ 'jv-flist-model--unset': !row.model }"
-						>{{ rowModelLabel(row) }}</span
-					>
-					<!-- Two subscriptions to the same provider/model otherwise render as identical
-					     rows ("Subscription · OpenAI" + the model id, nothing else) - the connected
-					     account's own identity is what tells them apart. A subscription row can fold
-					     MULTIPLE accounts, so only the first is named and the rest are counted. -->
-					<span
-						v-if="row.credentialType === 'subscription' && row.accounts?.length"
-						class="jv-flist-acct"
-						:title="row.accounts.map(accountLabel).join(', ')"
-						>{{
-							accountLabel(row.accounts[0]) +
-							(row.accounts.length > 1
-								? " +" + (row.accounts.length - 1) + " more"
-								: "")
-						}}</span
-					>
-					<span
-						v-if="row.credentialType !== 'subscription' && row.hasKey"
-						style="font-size: 11px; color: var(--text-3)"
-						>key set</span
-					>
-					<span
-						class="jv-pool-dot"
-						:class="'jv-pool-dot--' + accountHealth(row).level"
-						aria-hidden="true"
-					></span>
-					<span
-						v-if="accountHealth(row).label"
-						class="jv-pool-acct-health"
-						:class="'jv-pool-acct-health--' + accountHealth(row).level"
-						:title="accountHealth(row).title"
-						>{{ accountHealth(row).label }}</span
-					>
-					<!-- Reorder + [Edit][Reconnect|Replace key][Remove], always right-aligned.
+				<template v-if="row._uid !== pendingAddUid">
+					<!-- Common case (0/1 accounts, or an api-key row): unchanged single row. -->
+					<div v-if="!isGroupedRow(row)" class="jv-flist-row">
+						<span class="jv-pool-badge">{{ i + 1 }}</span>
+						<ProviderLogo
+							:provider="row.provider"
+							:upstream="row.upstream"
+							:size="18"
+						/>
+						<span class="jv-flist-chip">{{ sourceChip(row) }}</span>
+						<span
+							class="jv-flist-model"
+							:class="{ 'jv-flist-model--unset': !row.model }"
+							>{{ rowModelLabel(row) }}</span
+						>
+						<!-- The connected account's own identity is what tells two subscriptions
+						     to the same provider/model apart. isGroupedRow already routed 2+
+						     accounts to the grouped rendering below, so this is always exactly
+						     the one account on this row - no more "+N more" to fold in. -->
+						<span
+							v-if="row.credentialType === 'subscription' && row.accounts?.length"
+							class="jv-flist-acct"
+							:title="accountLabel(row.accounts[0])"
+							>{{ accountLabel(row.accounts[0]) }}</span
+						>
+						<span
+							v-if="row.credentialType !== 'subscription' && row.hasKey"
+							style="font-size: 11px; color: var(--text-3)"
+							>key set</span
+						>
+						<span
+							class="jv-pool-dot"
+							:class="'jv-pool-dot--' + accountHealth(row).level"
+							aria-hidden="true"
+						></span>
+						<span
+							v-if="accountHealth(row).label"
+							class="jv-pool-acct-health"
+							:class="'jv-pool-acct-health--' + accountHealth(row).level"
+							:title="accountHealth(row).title"
+							>{{ accountHealth(row).label }}</span
+						>
+						<!-- Reorder + [Edit][Reconnect|Replace key][Remove], always right-aligned.
              All stay LIVE while the config panel is open. The panel used to track its
              target row by ARRAY INDEX, so reordering or removing underneath it silently
              repointed it at a different row (open Edit on row 2, start OAuth, reorder
@@ -211,88 +212,222 @@
              blank seeded one could not be saved OR emptied while the panel was open.
              The panel now tracks its row by IDENTITY (panel.uid -> row._uid), so the
              array can be mutated freely and the panel always follows its own row. -->
-					<span class="jv-flist-acts">
-						<button
-							@click="move(i, -1)"
-							:disabled="!editable || i === 0"
-							title="Up"
-							class="jv-pool-iconbtn"
-						>
-							<svg
-								viewBox="0 0 24 24"
-								width="14"
-								height="14"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="1.8"
-								stroke-linecap="round"
-								stroke-linejoin="round"
+						<span class="jv-flist-acts">
+							<button
+								@click="move(i, -1)"
+								:disabled="!editable || i === 0"
+								title="Up"
+								class="jv-pool-iconbtn"
 							>
-								<path d="M18 15l-6-6-6 6" />
-							</svg>
-						</button>
-						<button
-							@click="move(i, 1)"
-							:disabled="!editable || i === rows.length - 1"
-							title="Down"
-							class="jv-pool-iconbtn"
-						>
-							<svg
-								viewBox="0 0 24 24"
-								width="14"
-								height="14"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="1.8"
-								stroke-linecap="round"
-								stroke-linejoin="round"
+								<svg
+									viewBox="0 0 24 24"
+									width="14"
+									height="14"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.8"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path d="M18 15l-6-6-6 6" />
+								</svg>
+							</button>
+							<button
+								@click="move(i, 1)"
+								:disabled="!editable || i === rows.length - 1"
+								title="Down"
+								class="jv-pool-iconbtn"
 							>
-								<path d="M6 9l6 6 6-6" />
-							</svg>
-						</button>
-						<button
-							v-if="canEdit"
-							:disabled="!editable"
-							@click="openEdit(i)"
-							class="jv-btn jv-btn--sm jv-btn--ghost"
-						>
-							Edit
-						</button>
-						<button
-							v-if="canEdit && row.credentialType === 'subscription'"
-							:disabled="!editable"
-							@click="quickReconnect(i)"
-							class="jv-btn jv-btn--sm jv-btn--ghost"
-						>
-							Reconnect
-						</button>
-						<button
-							v-else-if="canEdit"
-							:disabled="!editable"
-							@click="openEdit(i)"
-							class="jv-btn jv-btn--sm jv-btn--ghost"
-						>
-							Replace key
-						</button>
-						<!-- One button, two meanings, and the label says which BEFORE it is
-			         pressed: with other models left this drops one entry from the
-			         failover list; on the last one there is no list left to edit and it
-			         tears the whole connection down instead. -->
-						<button
-							v-if="canEdit"
-							:disabled="!editable"
-							@click="remove(i)"
-							class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
-							:title="
-								isLastConnectedRow(row)
-									? 'Delete your keys and connected accounts everywhere'
-									: 'Remove this model from the failover list'
-							"
-						>
-							{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
-						</button>
-					</span>
-				</div>
+								<svg
+									viewBox="0 0 24 24"
+									width="14"
+									height="14"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.8"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path d="M6 9l6 6 6-6" />
+								</svg>
+							</button>
+							<button
+								v-if="canEdit"
+								:disabled="!editable"
+								@click="openEdit(i)"
+								class="jv-btn jv-btn--sm jv-btn--ghost"
+							>
+								Edit
+							</button>
+							<button
+								v-if="canEdit && row.credentialType === 'subscription'"
+								:disabled="!editable"
+								@click="quickReconnect(i)"
+								class="jv-btn jv-btn--sm jv-btn--ghost"
+							>
+								Reconnect
+							</button>
+							<button
+								v-else-if="canEdit"
+								:disabled="!editable"
+								@click="openEdit(i)"
+								class="jv-btn jv-btn--sm jv-btn--ghost"
+							>
+								Replace key
+							</button>
+							<!-- One button, two meanings, and the label says which BEFORE it is
+				         pressed: with other models left this drops one entry from the
+				         failover list; on the last one there is no list left to edit and it
+				         tears the whole connection down instead. -->
+							<button
+								v-if="canEdit"
+								:disabled="!editable"
+								@click="remove(i)"
+								class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
+								:title="
+									isLastConnectedRow(row)
+										? 'Delete your keys and connected accounts everywhere'
+										: 'Remove this model from the failover list'
+								"
+							>
+								{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
+							</button>
+						</span>
+					</div>
+
+					<!-- 2+ accounts on a subscription row: a model row (no account chip, no
+					     per-account Disconnect - just Edit/Reconnect) followed by one sub-row
+					     per account. accountHealth(row) is POOL-WIDE, not per-account (see its
+					     own doc), so the health dot/label lives once on the model row; the
+					     sub-rows below are identity + order + Disconnect only. -->
+					<template v-else>
+						<!-- One hoverable wrapper around the model row + all its sub-rows, so
+				     hovering anywhere on the card highlights it as one unit (a plain
+				     sibling :hover can't reach backwards from a sub-row to the model
+				     row above it). -->
+						<div class="jv-flist-group">
+							<div class="jv-flist-row jv-flist-row--grouped">
+								<span class="jv-pool-badge">{{ i + 1 }}</span>
+								<ProviderLogo
+									:provider="row.provider"
+									:upstream="row.upstream"
+									:size="18"
+								/>
+								<span class="jv-flist-chip">{{ sourceChip(row) }}</span>
+								<span
+									class="jv-flist-model"
+									:class="{ 'jv-flist-model--unset': !row.model }"
+									>{{ rowModelLabel(row) }}</span
+								>
+								<span
+									class="jv-pool-dot"
+									:class="'jv-pool-dot--' + accountHealth(row).level"
+									aria-hidden="true"
+								></span>
+								<span
+									v-if="accountHealth(row).label"
+									class="jv-pool-acct-health"
+									:class="'jv-pool-acct-health--' + accountHealth(row).level"
+									:title="accountHealth(row).title"
+									>{{ accountHealth(row).label }}</span
+								>
+								<!-- Reorder arrows stay here: this row's POSITION in the failover chain
+			         (relative to the other models) is unaffected by its account count.
+			         Only the per-model Remove/Disconnect drops out - that already moved
+			         to the per-account Disconnect on the sub-rows below. -->
+								<span class="jv-flist-acts">
+									<button
+										@click="move(i, -1)"
+										:disabled="!editable || i === 0"
+										title="Up"
+										class="jv-pool-iconbtn"
+									>
+										<svg
+											viewBox="0 0 24 24"
+											width="14"
+											height="14"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.8"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M18 15l-6-6-6 6" />
+										</svg>
+									</button>
+									<button
+										@click="move(i, 1)"
+										:disabled="!editable || i === rows.length - 1"
+										title="Down"
+										class="jv-pool-iconbtn"
+									>
+										<svg
+											viewBox="0 0 24 24"
+											width="14"
+											height="14"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.8"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M6 9l6 6 6-6" />
+										</svg>
+									</button>
+									<button
+										v-if="canEdit"
+										:disabled="!editable"
+										@click="openEdit(i)"
+										class="jv-btn jv-btn--sm jv-btn--ghost"
+									>
+										Edit
+									</button>
+									<button
+										v-if="canEdit"
+										:disabled="!editable"
+										@click="quickReconnect(i)"
+										class="jv-btn jv-btn--sm jv-btn--ghost"
+									>
+										Reconnect
+									</button>
+								</span>
+							</div>
+							<div
+								v-for="(account, ai) in row.accounts"
+								:key="account.account_ref || ai"
+								class="jv-flist-subrow"
+								:class="{
+									'jv-flist-subrow--last': ai === row.accounts.length - 1,
+								}"
+							>
+								<span class="jv-flist-subrow-indent" aria-hidden="true">{{
+									ai === row.accounts.length - 1 ? "└─" : "├─"
+								}}</span>
+								<span class="jv-flist-subrow-avatar" aria-hidden="true">{{
+									(accountLabel(account) || "?").charAt(0).toUpperCase()
+								}}</span>
+								<span
+									class="jv-flist-subrow-email"
+									:title="accountLabel(account)"
+									>{{ accountLabel(account) }}</span
+								>
+								<span class="jv-flist-subrow-order">{{
+									ai === 0 ? "primary" : "backup"
+								}}</span>
+								<span class="jv-flist-subrow-acts">
+									<button
+										v-if="canEdit"
+										:disabled="!editable"
+										@click="removeAccount(row, ai)"
+										class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
+									>
+										Disconnect
+									</button>
+								</span>
+							</div>
+						</div>
+					</template>
+				</template>
 			</template>
 
 			<!-- Ordering is the one change in this editor that does not apply itself
@@ -3334,6 +3469,14 @@ function rowModelLabel(row) {
 	return row.provider || "—";
 }
 
+// A subscription row with 2+ accounts expands into a model row + one sub-row per
+// account (the "devhub@aerele.in +1 more" collapse was too terse to tell two
+// connected accounts apart). 0/1-account rows keep the plain single-row rendering -
+// this must stay false for those so today's common case is pixel-identical.
+function isGroupedRow(row) {
+	return row.credentialType === "subscription" && (row.accounts?.length || 0) > 1;
+}
+
 // Monotonic client-only row handle. Every row that can reach the failover list gets
 // one so the config panel can hold a stable reference across reorder/remove.
 let _uidSeq = 0;
@@ -5283,6 +5426,102 @@ defineExpose({
 	white-space: nowrap;
 	font-size: 11px;
 	color: var(--text-3);
+}
+
+/* ---- grouped subscription row (2+ accounts) -----------------------------
+   .jv-flist-group wraps a model row (.jv-flist-row--grouped, bottom edge
+   squared off) plus one .jv-flist-subrow per account - the pair reads as one
+   bordered card instead of two separate rows. Only the last sub-row closes
+   the card (rounded bottom corners); the group wrapper carries the bottom
+   margin the single .jv-flist-row would otherwise supply itself. The group
+   is the :hover target (not the individual rows) precisely so hovering
+   anywhere on the card highlights the model row AND every sub-row together -
+   a bare sibling hover can't reach backwards from a sub-row to the model
+   row above it. */
+.jv-flist-group {
+	margin-bottom: 8px;
+}
+.jv-flist-row--grouped {
+	margin-bottom: 0;
+	border-bottom: none;
+	border-bottom-left-radius: 0;
+	border-bottom-right-radius: 0;
+	transition: border-color 0.15s;
+}
+.jv-flist-subrow {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 11px;
+	border: 1px solid var(--border);
+	border-top: none;
+	background: var(--surface-2);
+	transition: border-color 0.15s;
+}
+.jv-flist-subrow--last {
+	border-bottom-left-radius: 9px;
+	border-bottom-right-radius: 9px;
+}
+.jv-flist-group:hover .jv-flist-row--grouped,
+.jv-flist-group:hover .jv-flist-subrow {
+	border-color: var(--border-2);
+}
+@media (prefers-reduced-motion: reduce) {
+	.jv-flist-row--grouped,
+	.jv-flist-subrow {
+		transition: none;
+	}
+}
+/* Fixed-width tree glyph column, sized to land under the model row's badge
+   (22px badge + 9px gap ≈ this column) so the sub-row identity lines up
+   visually beneath the model it belongs to. */
+.jv-flist-subrow-indent {
+	flex: none;
+	width: 31px;
+	text-align: center;
+	font-size: 12px;
+	line-height: 1;
+	color: var(--border-2);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.jv-flist-subrow-avatar {
+	flex: none;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: var(--cta-bg);
+	color: var(--cta);
+	font-size: 9px;
+	font-weight: 700;
+	display: grid;
+	place-items: center;
+}
+.jv-flist-subrow-email {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12.5px;
+	color: var(--text);
+}
+/* account[0] is "primary", the rest "backup" - reflects the sticky rotation
+   (always sticky; the rotation control itself was removed from the UI, see
+   panel.mode's own comment). Informational only, no reordering hangs off it. */
+.jv-flist-subrow-order {
+	flex: none;
+	font-size: 10.5px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--text-3);
+}
+.jv-flist-subrow-acts {
+	flex: none;
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 6px;
 }
 
 /* ---- explainer + add affordance + failover nudge (settings editor only) ----

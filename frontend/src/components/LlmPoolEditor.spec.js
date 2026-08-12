@@ -937,10 +937,14 @@ describe("a subscription row's collapsed account identity (jarvis account-name b
 		]);
 		const w = await mountEditor();
 
-		const chip = w.find(".jv-flist-acct");
-		expect(chip.exists()).toBe(true);
-		// Two accounts folded onto one row: only the first is named, the rest counted.
-		expect(chip.text()).toBe("Account aaabcd +1 more");
+		// 2+ accounts now expand into sub-rows instead of a "+1 more" collapsed chip -
+		// see the "grouped subscription rows" describe block below for the full
+		// model-row/sub-row shape this replaced.
+		expect(w.find(".jv-flist-acct").exists()).toBe(false);
+		const emails = w.findAll(".jv-flist-subrow-email");
+		expect(emails).toHaveLength(2);
+		expect(emails[0].text()).toBe("Account aaabcd");
+		expect(emails[1].text()).toBe("Account bbef01");
 	});
 
 	it("shows the real email when the account has one", async () => {
@@ -959,5 +963,68 @@ describe("a subscription row's collapsed account identity (jarvis account-name b
 		const chip = w.find(".jv-flist-acct");
 		expect(chip.text()).toBe("Account aaabcd");
 		expect(chip.text()).not.toContain("SUB_");
+	});
+});
+
+/**
+ * A pooled subscription's accounts as grouped sub-rows. 0/1-account rows stay the
+ * plain single row unchanged (the common case); 2+ accounts expand into a model row
+ * plus one sub-row per account, each with its own Disconnect wired to the same
+ * removeAccount() the Edit panel's account chips already use.
+ */
+describe("grouped subscription rows (2+ accounts)", () => {
+	it("renders exactly one row and no sub-rows for a 1-account subscription", async () => {
+		setPool([subModel("gpt-5", 0, [account("SUB_a", "solo@x.com")])]);
+		const w = await mountEditor();
+
+		expect(w.findAll(".jv-flist-row")).toHaveLength(1);
+		expect(w.findAll(".jv-flist-subrow")).toHaveLength(0);
+		expect(w.find(".jv-flist-acct").text()).toBe("solo@x.com");
+	});
+
+	it("renders a model row plus one sub-row per account for a 2-account subscription", async () => {
+		setPool([
+			subModel("gpt-5", 0, [
+				account("SUB_a", "devhub@aerele.in"),
+				account("SUB_b", "backup@aerele.in"),
+			]),
+		]);
+		const w = await mountEditor();
+
+		// The model row itself: no account chip, no "+N more".
+		expect(w.findAll(".jv-flist-row--grouped")).toHaveLength(1);
+		expect(w.find(".jv-flist-acct").exists()).toBe(false);
+
+		const subrows = w.findAll(".jv-flist-subrow");
+		expect(subrows).toHaveLength(2);
+		const emails = w.findAll(".jv-flist-subrow-email");
+		expect(emails[0].text()).toBe("devhub@aerele.in");
+		expect(emails[1].text()).toBe("backup@aerele.in");
+
+		const orders = w.findAll(".jv-flist-subrow-order");
+		expect(orders[0].text()).toBe("primary");
+		expect(orders[1].text()).toBe("backup");
+	});
+
+	it("wires a sub-row's Disconnect to removeAccount with that account's index", async () => {
+		setPool([
+			subModel("gpt-5", 0, [
+				account("SUB_a", "devhub@aerele.in"),
+				account("SUB_b", "backup@aerele.in"),
+			]),
+			keyModel("openai", "gpt-4o", 1),
+		]);
+		const w = await mountEditor();
+		const spy = vi.spyOn(w.vm, "removeAccount").mockResolvedValue();
+
+		const disconnectBtns = w
+			.findAll(".jv-flist-subrow .jv-pool-disc")
+			.filter((b) => b.text() === "Disconnect");
+		expect(disconnectBtns).toHaveLength(2);
+
+		await disconnectBtns[1].trigger("click");
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]).toBe(1);
+		expect(spy.mock.calls[0][0]).toMatchObject({ _uid: w.vm.rows[0]._uid });
 	});
 });
