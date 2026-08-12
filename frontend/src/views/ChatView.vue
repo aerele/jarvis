@@ -8304,14 +8304,12 @@ function onEvent(p) {
 			// the reveal cursor has caught up.
 			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
-			if (m) {
-				m.streaming = false;
-				// One-off smile on the brand avatar the moment the answer lands.
-				// Success terminal only: the stop/abort path (stopRun) and the error
-				// case never reach here, and we still skip a row that resolved to an
-				// error or stopped state so a failed reply never grins.
-				if (!m.error && !m.stopped) markAnswerLanded(m.name);
-			}
+			if (m) m.streaming = false;
+			// One-off smile on the brand avatar the moment the answer lands. Success
+			// terminal only: the stop/abort path (stopRun) and the error case never
+			// reach here, and we still skip a row that resolved to an error or stopped
+			// state so a failed reply never grins.
+			if (m && !m.error && !m.stopped) markAnswerLanded(m.name);
 			// SUX-6: the terminal final text is the last cumulative mirror in the normal
 			// case, so a re-render would be identical — skip the visible churn. A VISIBLE
 			// replacement is legitimate only when the answer actually changed via snapshot
