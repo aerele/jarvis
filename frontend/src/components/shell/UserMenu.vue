@@ -11,12 +11,14 @@
 						: 'w-full px-2 hover:bg-surface-gray-3'
 				"
 				:aria-label="`${cardTitle} menu`"
+				@mouseenter="brandPeek = true"
+				@mouseleave="brandPeek = false"
 			>
 				<!-- the jarvis mark, 28×28 rounded — rendered from JarvisMark rather than
 				     a hand-pasted copy of its gradient + path data. That duplication is
 				     exactly what let the chat welcome mark drift to a different colour
 				     (design.md §2.2). -->
-				<JarvisMark :size="28" :radius="7" hover-peek />
+				<JarvisMark :size="28" :radius="7" :peek="brandPeek" />
 				<!-- Resting badge: a waiting reply has to register on every route, not
 				     only while the user happens to be in Chat - restoring this (it was
 				     briefly dropped when ChatView grew its own header jv-support-dot,
@@ -53,7 +55,7 @@
 <script setup>
 // Sidebar header (DESIGN-V3 §3.2.1): brand + session user, HD's UserMenu
 // pattern. Dropdown: Settings (D9) · Switch to Desk · Change theme · Log out.
-import { computed, inject, onMounted, onUnmounted } from "vue";
+import { computed, inject, onMounted, onUnmounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { Dropdown, FeatherIcon } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
@@ -68,6 +70,11 @@ const props = defineProps({
 	// "Jarvis Support" title + a "Switch to Jarvis chat" link (we're already in support).
 	variant: { type: String, default: "chat" },
 });
+
+// Whole-card peek: hovering anywhere on the brand button (mark + name), not just
+// the mark itself, reveals the blinking eyes. Two tiny handlers because the
+// hover surface is the parent button, wider than the mark JarvisMark owns.
+const brandPeek = ref(false);
 
 // Card title: agentName ("Jarvis") in chat; "<agentName> Support" on the support rail.
 const cardTitle = computed(() =>
