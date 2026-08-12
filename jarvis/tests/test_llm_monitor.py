@@ -80,6 +80,23 @@ class TestGetLlmUsage(FrappeTestCase):
 		self.assertEqual(out["per_model"], [])
 		self.assertEqual(out["used_vs_limit"], {"used_usd": 0.0, "limit_usd": None})
 
+	def test_blank_auth_mode_routes_to_direct_cost_not_empty(self):
+		# A legacy/blank llm_auth_mode coerces to "api_key" (the field's own default,
+		# and how account.py:688/:1511 read it too), so it must reach the direct-cost
+		# path with applicable:True, not fall through to the empty applicable:False.
+		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
+		frappe.db.set_single_value("Jarvis Settings", "llm_auth_mode", "")
+		frappe.db.commit()
+		if hasattr(frappe.local, "_jarvis_model_price_map"):
+			del frappe.local._jarvis_model_price_map
+		with (
+			patch.object(admin_client, "get_llm_usage") as proxy,
+			patch.object(admin_client, "get_model_catalog", return_value=[]),
+		):
+			out = account.get_llm_usage()
+		proxy.assert_not_called()  # never the proxy path
+		self.assertIs(out["applicable"], True)  # routed to direct, not the empty shape
+
 	def test_proxy_tenant_passes_admin_payload_through(self):
 		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 1)
 		frappe.db.commit()

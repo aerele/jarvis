@@ -1060,7 +1060,11 @@ def get_llm_usage() -> dict:
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
 	if not getattr(settings, "proxy_active", 0):
-		if (getattr(settings, "llm_auth_mode", "") or "") == "api_key":
+		# Blank/unset llm_auth_mode coerces to "api_key" — the field is reqd with
+		# that default, and the two other reads in this file (account.py:688, :1511)
+		# treat a blank the same way, so a legacy row with no auth mode must still
+		# get its BYO-key cost, not fall through to the empty shape.
+		if (getattr(settings, "llm_auth_mode", "") or "api_key").strip() == "api_key":
 			return _direct_llm_usage()
 		return {
 			"applicable": False,
