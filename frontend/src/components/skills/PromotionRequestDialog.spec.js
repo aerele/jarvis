@@ -34,7 +34,13 @@ vi.mock("frappe-ui", () => ({
 			<option v-for="o in options || []" :key="o.value" :value="o.value">{{ o.label }}</option>
 		</select><input v-else class="fc-input" :type="type" :placeholder="placeholder" @input="$emit('update:modelValue', $event.target.value)" />`,
 	},
-	Button: { name: "Button", props: ["label", "loading", "disabled"], template: "<button />" },
+	Button: {
+		name: "Button",
+		props: ["label", "loading", "disabled"],
+		emits: ["click"],
+		template: "<button :disabled='disabled' @click=\"$emit('click')\">{{ label }}</button>",
+	},
+	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: "<i class='feather' />" },
 	toast: { error: vi.fn(), success: vi.fn() },
 }));
 
@@ -108,6 +114,67 @@ describe("PromotionRequestDialog role picker", () => {
 		await chooseScope(w, "Role");
 		expect(w.findComponent({ name: "Button" }).props("disabled")).toBe(true);
 		await pickRole(w, "Accounts");
+		expect(w.findComponent({ name: "Button" }).props("disabled")).toBe(false);
+	});
+
+	it("emits a single target_role and no target_roles in single-select mode", async () => {
+		const w = await openDialog();
+		await chooseScope(w, "Role");
+		await pickRole(w, "Accounts");
+		const send = w.findAll("button").find((b) => b.text() === "Send request");
+		await send.trigger("click");
+		const payload = w.emitted("submit")[0][0];
+		expect(payload.target_role).toBe("Accounts");
+		expect(payload.target_roles).toBeUndefined();
+	});
+});
+
+describe("PromotionRequestDialog multiselect (skills only)", () => {
+	const openMulti = async () => {
+		const w = mount(PromotionRequestDialog, {
+			props: { modelValue: false, noun: "skill", multiple: true },
+		});
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+		return w;
+	};
+	// In multiselect mode the rows are checkboxes, not single-select options.
+	const boxes = (w) => w.findAll('[role="checkbox"]');
+	const pickBox = async (w, name) => {
+		const b = boxes(w).find((x) => x.text() === name);
+		await b.trigger("click");
+		await flushPromises();
+	};
+	const send = (w) => w.findAll("button").find((b) => b.text() === "Send request");
+
+	it("renders roles as toggleable checkboxes and counts the selection", async () => {
+		const w = await openMulti();
+		await chooseScope(w, "Role");
+		expect(boxes(w).map((b) => b.text())).toEqual(["Sales Manager", "Accounts"]);
+		await pickBox(w, "Sales Manager");
+		await pickBox(w, "Accounts");
+		expect(w.text()).toContain("2 roles selected");
+		await pickBox(w, "Sales Manager"); // toggling a selected role removes it
+		expect(w.text()).toContain("1 role selected");
+	});
+
+	it("emits the full target_roles set plus the primary target_role", async () => {
+		const w = await openMulti();
+		await chooseScope(w, "Role");
+		await pickBox(w, "Sales Manager");
+		await pickBox(w, "Accounts");
+		await send(w).trigger("click");
+		const payload = w.emitted("submit")[0][0];
+		expect(payload.to_scope).toBe("Role");
+		expect(payload.target_roles).toEqual(["Sales Manager", "Accounts"]);
+		expect(payload.target_role).toBe("Sales Manager");
+	});
+
+	it("stays un-submittable until at least one role is chosen", async () => {
+		const w = await openMulti();
+		await chooseScope(w, "Role");
+		expect(w.findComponent({ name: "Button" }).props("disabled")).toBe(true);
+		await pickBox(w, "Accounts");
 		expect(w.findComponent({ name: "Button" }).props("disabled")).toBe(false);
 	});
 });
