@@ -2,24 +2,17 @@
 	<SettingsPane title="General" description="Chat behavior, notifications and token usage.">
 		<h3 class="text-base font-semibold text-ink-gray-9">Connection</h3>
 		<div class="mt-2">
-			<!-- Mode names the TOPOLOGY, Status reports its HEALTH. They used to be
-			     the same row, which is how a 2-model pool came to be labelled
-			     "Direct" here while Billing and metering called the identical state
-			     "Pool (direct failover)". Both panes now read the one
-			     connectionModeLabel(). -->
-			<KvRow v-if="modeLabel" label="Mode" :value="modeLabel" />
-			<!-- A failover pool has no single Model/Provider/Auth mode. Those three
-			     rows were filled from the legacy models[0] mirror, so a 4-model pool
-			     described member one and presented it as the whole connection, under
-			     a Model row naming the synthetic Bifrost endpoint nobody chose. AI
-			     models owns the per-model story (every model in failover order, with
-			     its own status); this is a summary that points at it. The triple
-			     stays for a single-credential tenant, where it is accurate. -->
+			<!-- A failover pool has no single Model/Provider. Those rows were filled
+			     from the legacy models[0] mirror, so a 4-model pool described member
+			     one and presented it as the whole connection, under a Model row
+			     naming the synthetic Bifrost endpoint nobody chose. AI models owns
+			     the per-model story (every model in failover order, with its own
+			     status); this is a summary that points at it. The pair stays for a
+			     single-credential tenant, where it is accurate. -->
 			<KvRow v-if="isPool" label="Models" :value="poolSummary" />
 			<template v-else>
 				<KvRow label="Model" :value="modelLabel" />
 				<KvRow label="Provider" :value="ui.llm_provider || '—'" />
-				<KvRow label="Auth mode" :value="ui.llm_auth_mode || '—'" />
 			</template>
 			<KvRow label="Status">
 				<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
@@ -280,7 +273,6 @@ import { useConfirm } from "@/composables/useConfirm";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
 import ToggleRow from "@/components/settings/ToggleRow.vue";
-import { connectionModeLabel } from "@/llm/pool";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { agentName } from "@/branding";
 import * as api from "@/api";
@@ -372,17 +364,7 @@ const expiresLabel = computed(() => {
 	const ms = connStatus.value && connStatus.value.oauth_expires_at;
 	return ms ? new Date(Number(ms)).toLocaleString() : "—";
 });
-// Shared with Billing and metering so the two panes cannot name the same state
-// differently again: that pane called a 2-model api-key pool "Pool (direct
-// failover)" while this one called it "Direct". Blank without a verdict, which
-// hides the row rather than guessing - and a member never has one: their
-// endpoint answers health only, and topology is precisely what it withholds.
-const modeLabel = computed(() =>
-	connStatus.value
-		? connectionModeLabel(connStatus.value.proxy_active, connStatus.value.model_count)
-		: ""
-);
-// The one line that replaces the triple for a pool: how many models, how they
+// The one line that replaces the pair for a pool: how many models, how they
 // are routed, and whether the container has the current set. humaniseSyncStatus
 // is the same translator Billing and metering's Sync row uses, so the two cannot
 // describe one last_sync_status differently. Its text is a standalone label

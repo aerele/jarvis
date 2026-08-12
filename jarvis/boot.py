@@ -11,6 +11,12 @@ Keys we set:
   setup wizard, used by the desk's not-onboarded banner
   (``jarvis_onboarding_banner.bundle.js``) to decide whether to nag a
   System Manager toward ``/jarvis/onboarding``.
+- ``jarvis_ready_reason`` - the ``reason`` from the same readiness check,
+  set only when NOT ready. Lets desk surfaces tell "never onboarded"
+  apart from "was onboarded, lost its AI connection" (``reason ==
+  "llm_credentials"``) without a second round trip, so the banner can
+  send the second case to the AI models settings pane instead of
+  restarting the wizard.
 - ``jarvis_has_access`` - whether the current user may reach Jarvis at
   all (``jarvis.permissions.has_jarvis_access``). Lets the desk's
   floating Jarvis button send an unauthorized user to
@@ -36,9 +42,14 @@ def set_jarvis_boot(bootinfo):
 	try:
 		from jarvis.account import is_ready_for_chat
 
-		bootinfo.jarvis_onboarded = bool((is_ready_for_chat() or {}).get("ready"))
+		# Captured once: jarvis_ready_reason below reads the same dict rather
+		# than calling is_ready_for_chat() a second time.
+		readiness = is_ready_for_chat() or {}
+		bootinfo.jarvis_onboarded = bool(readiness.get("ready"))
+		bootinfo.jarvis_ready_reason = "" if bootinfo.jarvis_onboarded else (readiness.get("reason") or "")
 	except Exception:
 		bootinfo.jarvis_onboarded = True  # fail-safe: never nag on a boot error
+		bootinfo.jarvis_ready_reason = ""
 
 	# Drives the desk's floating Jarvis button: an unauthorized user is routed
 	# to /jarvis-no-access instead of the chat panel opening. Import kept

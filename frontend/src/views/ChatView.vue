@@ -2116,7 +2116,7 @@
 					v-else-if="noAiConnected"
 					type="warning"
 					title="No AI connected"
-					message="Connect a model to start chatting again"
+					:message="noAiConnectedMessage"
 					style="margin-bottom: 10px"
 				>
 					<template #action>
@@ -3923,6 +3923,16 @@ const noAiConnected = ref(false);
 // they should know why), just without a button that would only bounce them back to
 // General.
 const canConnectModel = !!(window.is_jarvis_admin || window.is_system_manager);
+// The button above is already role-gated; the COPY needs to be too. The original
+// single message ("Connect a model to start chatting again") told a member to do
+// something the server would refuse, with the one button that could have routed
+// them anywhere already hidden - just a dead-end sentence. A member gets told to
+// ask an admin instead; an admin keeps the original actionable wording.
+const noAiConnectedMessage = computed(() =>
+	canConnectModel
+		? "Connect a model to start chatting again"
+		: "Ask your administrator to reconnect a model"
+);
 function goConnectModel() {
 	store.openSettings("aimodels");
 }
@@ -7718,7 +7728,15 @@ async function send(textArg, resendAck) {
 	// at all. With no model connected the turn can only fail at the agent, so refuse it
 	// here and keep the banner's own wording rather than surfacing a backend error.
 	if (noAiConnected.value) {
-		notify("No AI connected. Connect a model to start chatting again.", { type: "info" });
+		// Same role split as the banner above (noAiConnectedMessage): a member
+		// cannot open the AI models pane, so telling them to "connect a model"
+		// is a dead end.
+		notify(
+			canConnectModel
+				? "No AI connected. Connect a model to start chatting again."
+				: "No AI connected. Ask your administrator to reconnect a model.",
+			{ type: "info" }
+		);
 		return;
 	}
 	if (text && promptHistory.value[promptHistory.value.length - 1] !== text) {

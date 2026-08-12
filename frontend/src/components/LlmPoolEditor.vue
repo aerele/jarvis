@@ -100,51 +100,108 @@
 				/>
 			</div>
 
-			<div
-				v-if="!rows.length && !showDirectRow"
-				style="font-size: 13px; color: var(--text-3); padding: 8px 0"
-			>
-				No models yet. Add one below.
+			<!-- Empty/disconnected state. Used to be a left-aligned "No models yet"
+	           line with the Add button pushed to the pane's far RIGHT edge (see the
+	           end-aligned button below) - and when the pool was empty because of a
+	           disconnect, the actual reason ("Your keys and connected accounts were
+	           deleted") sat in an unrelated pill down at the pane's bottom, so the
+	           two facts read as unrelated instead of one. This box says why (reusing
+	           applyStatus's own pill markup verbatim - never a second copy of that
+	           sentence) and puts the one way out directly under it. Hidden while the
+	           add panel is open: that panel IS the next step, so a second "Add a
+	           model" trigger above it would compete with it, not help (mirrors the
+	           end-aligned button's own !panel.open guard). -->
+			<div v-if="!rows.length && !showDirectRow && !panel.open" class="jv-flist-empty">
+				<!-- 'failed' is deliberately excluded here: the savebar below owns that
+	             status (it is the one place with a Resync button), so painting it a
+	             second time in this box - with no way to retry from it - would be the
+	             exact duplication this box exists to remove. Anything else non-idle
+	             (today, only 'warn'/disconnected) has no action to offer either way,
+	             so it is safe, and more honest, to surface here instead of at the
+	             very bottom of the pane. -->
+				<span
+					v-if="applyStatus.kind !== 'idle' && applyStatus.kind !== 'failed'"
+					class="jv-pool-syncpill"
+					:class="'jv-pool-syncpill--' + applyStatus.kind"
+					role="status"
+				>
+					<span class="jv-pool-syncpill-ic" aria-hidden="true"></span
+					>{{ applyStatus.text }}</span
+				>
+				<!-- A pool that was simply never set up (fresh tenant, nothing ever
+	             applied) has no status to report - "No models yet" is the neutral
+	             line for that, not a hardcoded stand-in for the warning above. Also
+	             the fallback for 'failed', which the savebar below reports instead. -->
+				<p v-else class="jv-flist-empty__msg">No models yet.</p>
+				<button
+					v-if="canEdit"
+					:disabled="!editable"
+					@click="openAdd"
+					class="jv-btn jv-btn--primary jv-flist-addbtn"
+				>
+					<svg
+						viewBox="0 0 24 24"
+						width="15"
+						height="15"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.9"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path d="M12 5v14M5 12h14" />
+					</svg>
+					Add a model
+				</button>
 			</div>
 
-			<div v-for="(row, i) in rows" :key="row._uid ?? i" class="jv-flist-row">
-				<span class="jv-pool-badge">{{ i + 1 }}</span>
-				<ProviderLogo :provider="row.provider" :upstream="row.upstream" :size="18" />
-				<span class="jv-flist-chip">{{ sourceChip(row) }}</span>
-				<span class="jv-flist-model" :class="{ 'jv-flist-model--unset': !row.model }">{{
-					rowModelLabel(row)
-				}}</span>
-				<!-- Two subscriptions to the same provider/model otherwise render as identical
-				     rows ("Subscription · OpenAI" + the model id, nothing else) - the connected
-				     account's own identity is what tells them apart. A subscription row can fold
-				     MULTIPLE accounts, so only the first is named and the rest are counted. -->
-				<span
-					v-if="row.credentialType === 'subscription' && row.accounts?.length"
-					class="jv-flist-acct"
-					:title="row.accounts.map(accountLabel).join(', ')"
-					>{{
-						accountLabel(row.accounts[0]) +
-						(row.accounts.length > 1 ? " +" + (row.accounts.length - 1) + " more" : "")
-					}}</span
-				>
-				<span
-					v-if="row.credentialType !== 'subscription' && row.hasKey"
-					style="font-size: 11px; color: var(--text-3)"
-					>key set</span
-				>
-				<span
-					class="jv-pool-dot"
-					:class="'jv-pool-dot--' + accountHealth(row).level"
-					aria-hidden="true"
-				></span>
-				<span
-					v-if="accountHealth(row).label"
-					class="jv-pool-acct-health"
-					:class="'jv-pool-acct-health--' + accountHealth(row).level"
-					:title="accountHealth(row).title"
-					>{{ accountHealth(row).label }}</span
-				>
-				<!-- Reorder + [Edit][Reconnect|Replace key][Remove], always right-aligned.
+			<!-- template wrapper, not v-if on the row div itself: Vue 3 gives v-if
+			     higher precedence than v-for on the SAME element, so it would run
+			     before `row` exists in scope. See pendingAddUid's doc above for what
+			     this v-if is hiding and why. -->
+			<template v-for="(row, i) in rows" :key="row._uid ?? i">
+				<div v-if="row._uid !== pendingAddUid" class="jv-flist-row">
+					<span class="jv-pool-badge">{{ i + 1 }}</span>
+					<ProviderLogo :provider="row.provider" :upstream="row.upstream" :size="18" />
+					<span class="jv-flist-chip">{{ sourceChip(row) }}</span>
+					<span
+						class="jv-flist-model"
+						:class="{ 'jv-flist-model--unset': !row.model }"
+						>{{ rowModelLabel(row) }}</span
+					>
+					<!-- Two subscriptions to the same provider/model otherwise render as identical
+					     rows ("Subscription · OpenAI" + the model id, nothing else) - the connected
+					     account's own identity is what tells them apart. A subscription row can fold
+					     MULTIPLE accounts, so only the first is named and the rest are counted. -->
+					<span
+						v-if="row.credentialType === 'subscription' && row.accounts?.length"
+						class="jv-flist-acct"
+						:title="row.accounts.map(accountLabel).join(', ')"
+						>{{
+							accountLabel(row.accounts[0]) +
+							(row.accounts.length > 1
+								? " +" + (row.accounts.length - 1) + " more"
+								: "")
+						}}</span
+					>
+					<span
+						v-if="row.credentialType !== 'subscription' && row.hasKey"
+						style="font-size: 11px; color: var(--text-3)"
+						>key set</span
+					>
+					<span
+						class="jv-pool-dot"
+						:class="'jv-pool-dot--' + accountHealth(row).level"
+						aria-hidden="true"
+					></span>
+					<span
+						v-if="accountHealth(row).label"
+						class="jv-pool-acct-health"
+						:class="'jv-pool-acct-health--' + accountHealth(row).level"
+						:title="accountHealth(row).title"
+						>{{ accountHealth(row).label }}</span
+					>
+					<!-- Reorder + [Edit][Reconnect|Replace key][Remove], always right-aligned.
              All stay LIVE while the config panel is open. The panel used to track its
              target row by ARRAY INDEX, so reordering or removing underneath it silently
              repointed it at a different row (open Edit on row 2, start OAuth, reorder
@@ -154,88 +211,89 @@
              blank seeded one could not be saved OR emptied while the panel was open.
              The panel now tracks its row by IDENTITY (panel.uid -> row._uid), so the
              array can be mutated freely and the panel always follows its own row. -->
-				<span class="jv-flist-acts">
-					<button
-						@click="move(i, -1)"
-						:disabled="!editable || i === 0"
-						title="Up"
-						class="jv-pool-iconbtn"
-					>
-						<svg
-							viewBox="0 0 24 24"
-							width="14"
-							height="14"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="1.8"
-							stroke-linecap="round"
-							stroke-linejoin="round"
+					<span class="jv-flist-acts">
+						<button
+							@click="move(i, -1)"
+							:disabled="!editable || i === 0"
+							title="Up"
+							class="jv-pool-iconbtn"
 						>
-							<path d="M18 15l-6-6-6 6" />
-						</svg>
-					</button>
-					<button
-						@click="move(i, 1)"
-						:disabled="!editable || i === rows.length - 1"
-						title="Down"
-						class="jv-pool-iconbtn"
-					>
-						<svg
-							viewBox="0 0 24 24"
-							width="14"
-							height="14"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="1.8"
-							stroke-linecap="round"
-							stroke-linejoin="round"
+							<svg
+								viewBox="0 0 24 24"
+								width="14"
+								height="14"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M18 15l-6-6-6 6" />
+							</svg>
+						</button>
+						<button
+							@click="move(i, 1)"
+							:disabled="!editable || i === rows.length - 1"
+							title="Down"
+							class="jv-pool-iconbtn"
 						>
-							<path d="M6 9l6 6 6-6" />
-						</svg>
-					</button>
-					<button
-						v-if="canEdit"
-						:disabled="!editable"
-						@click="openEdit(i)"
-						class="jv-btn jv-btn--sm jv-btn--ghost"
-					>
-						Edit
-					</button>
-					<button
-						v-if="canEdit && row.credentialType === 'subscription'"
-						:disabled="!editable"
-						@click="quickReconnect(i)"
-						class="jv-btn jv-btn--sm jv-btn--ghost"
-					>
-						Reconnect
-					</button>
-					<button
-						v-else-if="canEdit"
-						:disabled="!editable"
-						@click="openEdit(i)"
-						class="jv-btn jv-btn--sm jv-btn--ghost"
-					>
-						Replace key
-					</button>
-					<!-- One button, two meanings, and the label says which BEFORE it is
+							<svg
+								viewBox="0 0 24 24"
+								width="14"
+								height="14"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M6 9l6 6 6-6" />
+							</svg>
+						</button>
+						<button
+							v-if="canEdit"
+							:disabled="!editable"
+							@click="openEdit(i)"
+							class="jv-btn jv-btn--sm jv-btn--ghost"
+						>
+							Edit
+						</button>
+						<button
+							v-if="canEdit && row.credentialType === 'subscription'"
+							:disabled="!editable"
+							@click="quickReconnect(i)"
+							class="jv-btn jv-btn--sm jv-btn--ghost"
+						>
+							Reconnect
+						</button>
+						<button
+							v-else-if="canEdit"
+							:disabled="!editable"
+							@click="openEdit(i)"
+							class="jv-btn jv-btn--sm jv-btn--ghost"
+						>
+							Replace key
+						</button>
+						<!-- One button, two meanings, and the label says which BEFORE it is
 			         pressed: with other models left this drops one entry from the
 			         failover list; on the last one there is no list left to edit and it
 			         tears the whole connection down instead. -->
-					<button
-						v-if="canEdit"
-						:disabled="!editable"
-						@click="remove(i)"
-						class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
-						:title="
-							isLastConnectedRow(row)
-								? 'Delete your keys and connected accounts everywhere'
-								: 'Remove this model from the failover list'
-						"
-					>
-						{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
-					</button>
-				</span>
-			</div>
+						<button
+							v-if="canEdit"
+							:disabled="!editable"
+							@click="remove(i)"
+							class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
+							:title="
+								isLastConnectedRow(row)
+									? 'Delete your keys and connected accounts everywhere'
+									: 'Remove this model from the failover list'
+							"
+						>
+							{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
+						</button>
+					</span>
+				</div>
+			</template>
 
 			<!-- Ordering is the one change in this editor that does not apply itself
            (see move() for why), so it has to say so and offer a way to commit.
@@ -258,8 +316,11 @@
            (Edit / Reconnect / Remove). The dashed treatment is reserved for an EMPTY
            SLOT the content will fill -- which is what "+ Connect account" is, inside
            the panel, where the account itself then appears. -->
+			<!-- Guarded by (rows.length || showDirectRow): an empty pool already has its
+	           OWN centered "Add a model" button in the box above - this end-aligned
+	           one is only for a pool that already has something to list. -->
 			<button
-				v-if="canEdit && !panel.open"
+				v-if="canEdit && !panel.open && (rows.length || showDirectRow)"
 				:disabled="!editable"
 				@click="openAdd"
 				class="jv-btn jv-btn--primary jv-flist-addbtn jv-flist-addbtn--end"
@@ -1803,7 +1864,15 @@
 	         your agent…" next to its spinner, and this strip says the exact same
 	         sentence, so showing both is a duplicate, not a second, more useful
 	         status (jarvis#559). -->
-		<div v-if="!footerless && statusLine && !busy.active" class="jv-pool-savebar">
+		<div
+			v-if="
+				!footerless &&
+				statusLine &&
+				!busy.active &&
+				(!emptyBoxShowing || statusLine.kind === 'failed')
+			"
+			class="jv-pool-savebar"
+		>
 			<span
 				class="jv-pool-syncpill"
 				:class="'jv-pool-syncpill--' + statusLine.kind"
@@ -2784,6 +2853,19 @@ function pendingAddRow() {
 	const r = rows.value.find((x) => x._uid === panel.value.uid);
 	return r && !r._committed ? r : null;
 }
+// _uid of the row above, or null. The list below hides that ONE row while it is
+// the pool's only entry: rendered as a normal list row it reads as an already-
+// connected model ("1 | Subscription · OpenAI | gpt-5.5 | Reconnect / Edit /
+// Remove") when nothing has been connected yet -- worst right after a disconnect,
+// where "+ Add a model" on an empty pool produced exactly that phantom row. Scoped
+// to rows.length === 1 (not every in-progress add) because a SECOND model being
+// added to an already-populated pool relies on staying visible in the list, and
+// hiding it there would desync the Down-arrow's `i === rows.length - 1` bound and
+// move()'s raw-index reorder (both index into the real, unfiltered `rows` array).
+const pendingAddUid = computed(() => {
+	const r = pendingAddRow();
+	return r && rows.value.length === 1 ? r._uid : null;
+});
 // Append a blank row up-front (not on a later "commit") so finishConnect's
 // !footerless auto-save - which can fire while this panel is still open -
 // already includes it instead of silently dropping an in-progress connect.
@@ -3401,12 +3483,39 @@ function isLastConnectedRow(row) {
 async function remove(i) {
 	const r = rows.value[i];
 	if (!r || busy.value.active) return;
+	// An add-in-progress row was never saved (pendingAddRow's doc above explains
+	// why it sits in rows.value at all): there is nothing on the server to confirm
+	// removing and nothing to persist by dropping it, so this IS closePanel's
+	// Cancel, not a Remove. Without this branch it fell into the generic
+	// confirm+filter+runApply path below like any committed row, and on a pool
+	// with nothing else in it that meant SAVING an empty pool - validatePool
+	// (jarvis/llm/pool.js) rejects that with "Add at least one model.", a save-path
+	// error surfacing on an action that was never a save (jarvis phantom-row bug:
+	// disconnect -> "+ Add a model" -> Remove on the still-unconnected draft).
+	const pending = pendingAddRow();
+	if (pending && pending._uid === r._uid) {
+		rows.value = rows.value.filter((x) => x._uid !== r._uid);
+		panel.value = closedPanel();
+		return;
+	}
 	// save_llm_pool rejects an empty pool server-side, and so does the fleet agent.
 	// Taking the agent's last model away is therefore a different operation, not a
 	// smaller edit: it goes through disconnect_llm, which deletes the credentials
 	// everywhere instead of writing a pool nobody will accept.
 	if (isLastConnectedRow(r)) {
 		await disconnect();
+		return;
+	}
+	// A row with no account/key/has_key was never persisted either -
+	// seedRowsFromConfig (jarvis/llm/pool.js) only ever builds a row FROM one of
+	// those, so isRowEmpty is proof this row is local-only regardless of how it
+	// got here (e.g. closePanel's own source==="preset" exception can leave one
+	// behind after Cancel). If nothing else in the pool would survive removing it,
+	// dropping it locally already matches what the server has - there is nothing
+	// to apply, and nothing to warn the customer they are about to lose.
+	const after = rows.value.filter((x) => x._uid !== r._uid);
+	if (isRowEmpty(r) && !after.some((row) => !isRowEmpty(row))) {
+		rows.value = after;
 		return;
 	}
 	const label = rowModelLabel(r);
@@ -4540,6 +4649,17 @@ const statusLine = computed(() => {
 	if (applyStatus.value.kind !== "idle") return applyStatus.value;
 	return null;
 });
+// True exactly when the empty/disconnected box (rows list, !singleMode only -
+// onboarding always seeds a row, see load()) is on screen. That box already
+// shows applyStatus's own text, so the savebar below repeating the identical
+// pill would be the same duplication busy.active already avoids for "Applying
+// to your agent..." above. Read by the savebar's v-if, which still shows a
+// failed status regardless: its Resync button lives only there, and a failed
+// apply is not what put the pool in this empty state, so hiding it here would
+// bury the one apply that still needs a retry.
+const emptyBoxShowing = computed(
+	() => !singleMode.value && !rows.value.length && !showDirectRow.value && !panel.value.open
+);
 
 // The ONE sync poller. Fire-and-forget callers (load, save) ignore the return
 // value and get the old behaviour: refresh sync.value every few seconds until the
@@ -5239,12 +5359,42 @@ defineExpose({
 	text-transform: uppercase;
 }
 
+/* Empty/disconnected box (see the template note above it). Framed like
+   .jv-cfgpanel below so it reads as an intentional state, not a stray line of
+   text -- message centered, action directly under it, nothing new invented:
+   the pill is .jv-pool-syncpill verbatim and the button is .jv-flist-addbtn
+   verbatim, just laid out centered instead of end-aligned. */
+.jv-flist-empty {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	text-align: center;
+	gap: 10px;
+	padding: 22px 16px;
+	border: 1px solid var(--border-2);
+	border-radius: 11px;
+	background: var(--surface);
+}
+.jv-flist-empty__msg {
+	margin: 0;
+	max-width: 46ch;
+	font-size: 13px;
+	line-height: 1.55;
+	color: var(--text-3);
+}
 /* "+ Add a model" is a .jv-btn (see the template note): only its spacing and the
    plus glyph's tint are local. Everything else — height, radius, type, hover — comes
    from the shared button system, so it can never drift from Edit / Remove / Save. */
 .jv-flist-addbtn {
 	margin-top: 10px;
 	gap: 6px;
+}
+/* Inside the centered empty box the button already sits under the message
+   with the box's own `gap`, so the button's own top margin (needed for the
+   end-aligned case below, where nothing else provides that spacing) would
+   just double it. */
+.jv-flist-empty .jv-flist-addbtn {
+	margin-top: 0;
 }
 /* "Add a model" trails the failover LIST, so it sits at the list's right edge --
    the same edge Save configuration occupies, which is where the eye already is

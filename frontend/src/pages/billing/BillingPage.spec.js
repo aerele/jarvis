@@ -133,10 +133,10 @@ describe("acceptance: renew's stuck-payment answer is no longer silent", () => {
 		await flushPromises();
 
 		expect(wrapper.text()).toContain("We have not confirmed this payment.");
-		expect(findByText(wrapper, "button", "Check payment status")).toBeTruthy();
+		expect(findByText(wrapper, "button", "Check renewal status")).toBeTruthy();
 		// PAYMENT_CONFIRMATION_PENDING's row declares Check only - INITIATE must
 		// never appear here, or a stuck payment gets paid twice.
-		expect(findByText(wrapper, "button", "Start a new payment")).toBeUndefined();
+		expect(findByText(wrapper, "button", "Renew now")).toBeUndefined();
 	});
 
 	it("wires the rendered Check button to the healer then the passive re-read, in that order", async () => {
@@ -155,10 +155,113 @@ describe("acceptance: renew's stuck-payment answer is no longer silent", () => {
 			order.push("state");
 			return { code: "PAYMENT_CONFIRMATION_PENDING" };
 		});
-		await findByText(wrapper, "button", "Check payment status").trigger("click");
+		await findByText(wrapper, "button", "Check renewal status").trigger("click");
 		await flushPromises();
 
 		expect(order).toEqual(["check", "state"]);
+	});
+
+	// Regression: a status check that answers BILLING_NO_CURRENT_INTENT (409)
+	// renders a notice whose ONLY action is INITIATE ("Renew now" on billing).
+	// doCheckStatus used to bind that notice's retry to itself, so clicking
+	// "Renew now" re-ran the status check - which answers the same 409 against
+	// the same absent intent forever. The button looked dead: no redirect, no
+	// change. INITIATE here must start a renewal instead.
+	it("routes the no-intent 409 notice's Renew now to renew, not back into the status check", async () => {
+		const wrapper = await mountPage();
+		api.checkBillingPayment.mockResolvedValue(
+			rawFail("BILLING_NO_CURRENT_INTENT", { status: 409 })
+		);
+		await wrapper.vm.doCheckStatus();
+		await flushPromises();
+
+		expect(wrapper.vm.codeNotice.code).toBe(CODES.BILLING_NO_CURRENT_INTENT);
+		const initiate = findByText(wrapper, "button", "Renew now");
+		expect(initiate).toBeTruthy();
+
+		const checksBefore = api.checkBillingPayment.mock.calls.length;
+		api.renewPlan.mockResolvedValue(rawOkBody({ tenant_status: "ready" }));
+		await initiate.trigger("click");
+		await flushPromises();
+
+		// The click must NOT re-run the healer, and it must open the renew
+		// confirm dialog so the customer can actually pay.
+		expect(api.checkBillingPayment.mock.calls.length).toBe(checksBefore);
+		const pay = findByText(wrapper, ".dialog button", "Pay");
+		expect(pay).toBeTruthy();
+		await pay.trigger("click");
+		await flushPromises();
+		expect(api.renewPlan).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("pre-expiry renew: pay now to extend before lapsing", () => {
+	// The backend (renew() / can_renew) already accepts a manual renewal on a
+	// still-running subscription and stacks the new period onto the days left.
+	// The button was the only missing piece: an Active/Past-Due customer with
+	// autorenew off used to see no pay-now action at all. The current-plan card
+	// (PlanCard) is stubbed here, so these assert on currentAction - the label the
+	// card renders - and drive doRenew directly, the same way the other renew
+	// tests in this file do.
+	it("labels the current-plan action 'Renew now' for an Active, autorenew-off, can_renew sub", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 1,
+				autorenew: 0,
+				can_reactivate: false,
+				can_renew: true,
+			})
+		);
+		expect(wrapper.vm.currentAction.label).toBe("Renew now");
+	});
+
+	it("routes the renew to the same-plan pay flow (no target_plan)", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 1,
+				autorenew: 0,
+				can_reactivate: false,
+				can_renew: true,
+			})
+		);
+		api.renewPlan.mockResolvedValue(rawOkBody({ tenant_status: "ready" }));
+
+		await wrapper.vm.doRenew();
+		await findByText(wrapper, ".dialog button", "Pay").trigger("click");
+		await flushPromises();
+
+		// A running subscription renews onto its OWN plan: no target_plan, or admin
+		// refuses it (NotLapsed).
+		expect(api.renewPlan).toHaveBeenCalledWith(undefined);
+	});
+
+	it("also labels 'Renew now' for a Past Due customer who otherwise had no CTA", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Past Due",
+				days_remaining: 2,
+				autorenew: 0,
+				can_reactivate: false,
+				can_reauthorize: false,
+				can_renew: true,
+			})
+		);
+		expect(wrapper.vm.currentAction.label).toBe("Renew now");
+	});
+
+	it("shows no renew action when the server withholds can_renew", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 10,
+				autorenew: 1,
+				can_reactivate: false,
+				can_renew: false,
+			})
+		);
+		expect(wrapper.vm.currentAction.label).toBe("");
 	});
 });
 
@@ -200,7 +303,7 @@ describe("edge 3: a code with no branch and no copy-table entry", () => {
 		expect(wrapper.vm.codeNotice.copy.headline).toBe(UNKNOWN_COPY.headline);
 		expect(wrapper.vm.codeNotice.copy.actions.length).toBeGreaterThan(0);
 		expect(wrapper.text()).toContain(UNKNOWN_COPY.headline);
-		expect(findByText(wrapper, "button", "Check payment status")).toBeTruthy();
+		expect(findByText(wrapper, "button", "Check renewal status")).toBeTruthy();
 	});
 });
 
@@ -272,7 +375,7 @@ describe("edge 6: the intent resolves between Check and the re-read", () => {
 		// PAYMENT_ALREADY_ACTIVE declares CONTINUE only - never CHECK/INITIATE, so
 		// no path back into a second payment is offered.
 		expect(wrapper.vm.codeNotice.copy.actions).not.toContain(ACTIONS.INITIATE);
-		expect(findByText(wrapper, "button", "Start a new payment")).toBeUndefined();
+		expect(findByText(wrapper, "button", "Renew now")).toBeUndefined();
 	});
 });
 
@@ -907,7 +1010,7 @@ describe("finding 7: the healer's coded refusals are answers, not transport erro
 		// The service WAS reached; saying otherwise would be a lie.
 		expect(wrapper.text()).not.toContain(copyFor("BENCH_ADMIN_UNREACHABLE").headline);
 		// A throttled check must never read as a decline - that invites a 2nd payment.
-		expect(findByText(wrapper, "button", "Start a new payment")).toBeUndefined();
+		expect(findByText(wrapper, "button", "Renew now")).toBeUndefined();
 	});
 
 	it("does not run the passive re-read when the healer refused", async () => {
@@ -933,7 +1036,7 @@ describe("finding 7: the healer's coded refusals are answers, not transport erro
 });
 
 describe("finding 6: renew's coded refusals get a notice with an action, not red prose", () => {
-	it("renders PAYMENT_UNDER_REVIEW as a notice carrying Check payment status", async () => {
+	it("renders PAYMENT_UNDER_REVIEW as a notice carrying Check renewal status", async () => {
 		const wrapper = await mountPage();
 		api.renewPlan.mockResolvedValue(rawFail("PAYMENT_UNDER_REVIEW", { status: 409 }));
 
@@ -945,7 +1048,7 @@ describe("finding 6: renew's coded refusals get a notice with an action, not red
 		expect(wrapper.vm.codeNotice).toBeTruthy();
 		expect(wrapper.vm.codeNotice.code).toBe("PAYMENT_UNDER_REVIEW");
 		expect(wrapper.vm.actionErr).toBe("");
-		expect(findByText(wrapper, "button", "Check payment status")).toBeTruthy();
+		expect(findByText(wrapper, "button", "Check renewal status")).toBeTruthy();
 	});
 
 	it("leaves a plan-validation refusal as the server's own sentence", async () => {
