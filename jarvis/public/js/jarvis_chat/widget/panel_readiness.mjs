@@ -8,6 +8,8 @@
 // for the full reasoning behind each reason's placement - repeated here only
 // to the extent this module needs it to classify a verdict.
 
+import { AI_MODELS_SETTINGS_URL } from "./config.mjs";
+
 // Reasons meaning the workspace has NEVER completed onboarding at all - the
 // only case that should replace the whole panel with a setup nudge.
 //
@@ -31,11 +33,20 @@
 // "llm_setup" is the server-decided HARD variant of llm_credentials (creds
 // missing + nothing ever synced + subscription never Active): a half-finished
 // signup, where chat cannot work at all.
+// "llm_rejected" (jarvis#757): a first pool/direct sync the server explicitly
+// refused. readiness.js lists it here for the same reason as the two
+// provisioning reasons (a first sync that never succeeded), and the desk
+// onboarding banner routes it to setup too, so the widget must agree or the two
+// desk surfaces show contradictory recovery paths for one verdict (jarvis
+// review). "readiness_unconfirmed" is deliberately NOT added: it is transient
+// (the control plane could not answer yet), and degradedMessage below gives it
+// a dedicated "try again shortly" line that a one-way setup gate would bury.
 const NOT_ONBOARDED_REASONS = new Set([
   "signup",
   "llm_setup",
   "llm_pool_provisioning",
   "llm_provisioning",
+  "llm_rejected",
 ]);
 
 // Three-way verdict the panel renders around:
@@ -108,4 +119,37 @@ export function degradedMessage(resp, agentName = "Jarvis") {
   if (reason === "readiness_unconfirmed")
     return detail || unconfirmedDegraded(brand);
   return GENERIC_DEGRADED;
+}
+
+// Role-aware wrapper around degradedMessage() for the ONE reason an admin can
+// fix from here: "llm_credentials", a workspace whose AI was disconnected or
+// whose credential expired, so no model is attached at all. An admin gets
+// actionable "no AI connected" copy plus a link to the AI models settings pane;
+// a member cannot act on it, so they keep degradedMessage()'s member wording
+// with no button.
+//
+// ALLOWLIST, not a denylist (jarvis review). Every OTHER reason keeps
+// degradedMessage()'s own copy and gets no CTA. Listing instead the reasons that
+// have dedicated copy silently handed this "Connect a model" button - and threw
+// away the reason's real detail - to "llm_rejected" (a config the server
+// refused, where a model IS attached; now gated to setup above) and to any
+// reason account.py grows later. Only the reason this button actually fixes
+// opts in.
+//
+// The "No AI connected..." string is duplicated verbatim from ChatView.vue's
+// noAiConnectedMessage (the SPA banner for the same condition). Keep the two in
+// sync BY HAND, same as NOT_ONBOARDED_REASONS above.
+export function degradedActionable(
+  resp,
+  agentName = "Jarvis",
+  isAdmin = false
+) {
+  const reason = (resp && resp.reason) || "";
+  if (isAdmin && reason === "llm_credentials") {
+    return {
+      text: "No AI connected. Connect a model to start chatting again.",
+      cta: { label: "Connect a model", href: AI_MODELS_SETTINGS_URL },
+    };
+  }
+  return { text: degradedMessage(resp, agentName), cta: null };
 }

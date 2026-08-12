@@ -31,6 +31,11 @@
 	// Same check the SPA gate and the widget popup use, so all three surfaces
 	// agree on what "set up" means.
 	var READY_METHOD = "jarvis.account.is_ready_for_chat";
+	// Deep link to the AI models settings tab, used by the reconnect variant's
+	// CTA. Must match config.mjs's AI_MODELS_SETTINGS_URL: this standalone desk
+	// bundle is loaded via app_include_js and cannot import from the widget
+	// module graph, so the string is kept in sync here by hand.
+	var AI_MODELS_SETTINGS_URL = "/jarvis/?settings=aimodels";
 	// Floor between server re-checks for the chatty triggers (route change,
 	// tab focus). A bfcache restore bypasses it: that is the exact moment the
 	// flag is most likely stale and the user is looking straight at it.
@@ -185,6 +190,44 @@
 		document.head.appendChild(st);
 	}
 
+	// Which bubble to show, decided from frappe.boot.jarvis_ready_reason (set in
+	// jarvis.boot.set_jarvis_boot, same round trip as jarvis_onboarded). A
+	// workspace that was NEVER onboarded and one that finished onboarding but
+	// later lost its AI connection ("llm_credentials") both read jarvis_onboarded
+	// === false, and would look identical to this nudge without the reason -
+	// but the first needs the full wizard and the second only needs a model
+	// reconnected, so they get different copy and a different destination.
+	function nudgeVariant() {
+		var reason = (window.frappe && frappe.boot && frappe.boot.jarvis_ready_reason) || "";
+		// White-label: the reconnect copy names the agent, so its whole bubble -
+		// text, header and aria-label - must not say "Jarvis" for a tenant that
+		// renamed it. The never-onboarded pitch below is left as literal "Jarvis",
+		// unchanged, per the existing copy.
+		var agentName =
+			(window.frappe && frappe.boot && frappe.boot.jarvis_agent_name) || "Jarvis";
+		if (reason === "llm_credentials") {
+			return {
+				name: agentName,
+				aria: "Reconnect " + agentName,
+				text:
+					"Your AI connection dropped, so " +
+					agentName +
+					" can't reply right now. Reconnect a model to pick up where you left off.",
+				ctaLabel: "Reconnect a model →",
+				href: AI_MODELS_SETTINGS_URL,
+			};
+		}
+		// Every other reason (never onboarded, or an empty/unknown reason from an
+		// older boot payload) keeps the original pitch and destination.
+		return {
+			name: "Jarvis",
+			aria: "Set up Jarvis",
+			text: "Hey 👋 I'm Jarvis. Set me up and I'll handle the ERP busywork like quotes, invoices, and reports.",
+			ctaLabel: "Set up Jarvis →",
+			href: "/jarvis/onboarding",
+		};
+	}
+
 	function bubbleRow(cls, buildBubble) {
 		var row = document.createElement("div");
 		row.className = "jvn-row " + cls;
@@ -196,10 +239,12 @@
 		if (document.getElementById(NUDGE_ID)) return;
 		ensureStyles();
 
+		var variant = nudgeVariant();
+
 		var wrap = document.createElement("div");
 		wrap.id = NUDGE_ID;
 		wrap.setAttribute("role", "complementary");
-		wrap.setAttribute("aria-label", "Set up Jarvis");
+		wrap.setAttribute("aria-label", variant.aria);
 
 		// Single bubble — greeting + pitch + CTA + dismiss.
 		wrap.appendChild(
@@ -217,18 +262,17 @@
 
 				var n = document.createElement("div");
 				n.className = "jvn-name";
-				n.textContent = "Jarvis";
+				n.textContent = variant.name;
 				b.appendChild(n);
 
 				var t = document.createElement("div");
-				t.textContent =
-					"Hey 👋 I'm Jarvis. Set me up and I'll handle the ERP busywork like quotes, invoices, and reports.";
+				t.textContent = variant.text;
 				b.appendChild(t);
 
 				var cta = document.createElement("a");
 				cta.className = "jvn-btn";
-				cta.href = "/jarvis/onboarding";
-				cta.textContent = "Set up Jarvis →";
+				cta.href = variant.href;
+				cta.textContent = variant.ctaLabel;
 				b.appendChild(cta);
 				return b;
 			})
