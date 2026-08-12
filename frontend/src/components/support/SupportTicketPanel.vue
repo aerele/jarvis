@@ -35,7 +35,7 @@
 				<span class="jv-suptp-value">
 					<Badge
 						v-if="meta?.status"
-						variant="subtle"
+						:variant="statusBadge.variant"
 						:theme="statusBadge.theme"
 						:label="statusBadge.label"
 					/>

@@ -23,7 +23,7 @@ vi.mock("frappe-ui", () => ({
 }));
 
 const storeDouble = {
-	createTicket: vi.fn(async () => "TKT-9"),
+	createTicket: vi.fn(async () => ({ name: "TKT-9", openingComm: null })),
 	// uploadTo returns the succeeded FILE REFERENCES, not a count.
 	uploadTo: vi.fn(async (name, files) => files),
 	loadTickets: vi.fn(),
@@ -120,7 +120,7 @@ describe("SupportNewPage", () => {
 		const order = [];
 		storeDouble.createTicket.mockImplementation(async () => {
 			order.push("create");
-			return "TKT-9";
+			return { name: "TKT-9", openingComm: null };
 		});
 		storeDouble.uploadTo.mockImplementation(async (name, files) => {
 			order.push("upload");
@@ -188,7 +188,7 @@ describe("SupportNewPage", () => {
 	it("keeps staged files pending when uploadTo reports fewer successes than requested", async () => {
 		// uploadTo returns the succeeded FILE REFERENCES; a silent clear-all would
 		// discard attachments the user still needs to retry.
-		storeDouble.createTicket = vi.fn(async () => "TKT-9");
+		storeDouble.createTicket = vi.fn(async () => ({ name: "TKT-9", openingComm: null }));
 		storeDouble.uploadTo = vi.fn(async () => []); // nothing succeeded
 		const w = mount(SupportNewPage, opts);
 		await subjectInput(w).setValue("Broken invoice");
@@ -204,7 +204,7 @@ describe("SupportNewPage", () => {
 	});
 
 	it("stages every selected file by name, and removes exactly the chip whose X is clicked", async () => {
-		storeDouble.createTicket = vi.fn(async () => "TKT-9");
+		storeDouble.createTicket = vi.fn(async () => ({ name: "TKT-9", openingComm: null }));
 		storeDouble.uploadTo = vi.fn(async (n, f) => f);
 		const w = mount(SupportNewPage, opts);
 		await addFiles(w, [
@@ -264,7 +264,7 @@ describe("SupportNewPage", () => {
 	});
 
 	it("strips inline data:/blob: images from the body before sending (they can't render server-side)", async () => {
-		storeDouble.createTicket = vi.fn(async () => "TKT-9");
+		storeDouble.createTicket = vi.fn(async () => ({ name: "TKT-9", openingComm: null }));
 		const w = mount(SupportNewPage, opts);
 		await subjectInput(w).setValue("Screenshot issue");
 		await setDescription(w, '<p>see <img src="data:image/png;base64,AAAA"> here</p>');
@@ -287,7 +287,7 @@ describe("SupportNewPage", () => {
 	});
 
 	it("caps the subject at 140 chars (a ?subject= prefill bypasses the input maxlength)", async () => {
-		storeDouble.createTicket = vi.fn(async () => "TKT-9");
+		storeDouble.createTicket = vi.fn(async () => ({ name: "TKT-9", openingComm: null }));
 		const w = mount(SupportNewPage, opts);
 		await subjectInput(w).setValue("x".repeat(200));
 		await setDescription(w, "<p>d</p>");
@@ -317,13 +317,13 @@ describe("SupportNewPage", () => {
 		submitBtn(w).trigger("click"); // create() now awaits createTicket
 		await flushPromises();
 		await w.findAll(".jv-supc-chip")[1].find("button").trigger("click"); // remove drop.png
-		resolveCreate("TKT-9");
+		resolveCreate({ name: "TKT-9", openingComm: null });
 		await flushPromises();
 		expect(storeDouble.uploadTo.mock.calls[0][1].map((f) => f.name)).toEqual(["keep.png"]);
 	});
 
 	it("does not replace the router if unmounted during the post-create list refresh (I5 tail)", async () => {
-		storeDouble.createTicket = vi.fn(async () => "TKT-9");
+		storeDouble.createTicket = vi.fn(async () => ({ name: "TKT-9", openingComm: null }));
 		storeDouble.uploadTo = vi.fn(async (n, f) => f);
 		let resolveLoad;
 		storeDouble.loadTickets = vi.fn(() => new Promise((r) => (resolveLoad = r)));
@@ -348,7 +348,7 @@ describe("SupportNewPage", () => {
 		submitBtn(w).trigger("click"); // awaiting createTicket, nothing staged yet
 		await flushPromises();
 		await addFiles(w, [{ name: "late.png", type: "image/png" }]); // attached mid-submit
-		resolveCreate("TKT-9");
+		resolveCreate({ name: "TKT-9", openingComm: null });
 		await flushPromises();
 		expect(storeDouble.uploadTo).not.toHaveBeenCalled(); // nothing was staged at submit start
 		expect(toast.info).toHaveBeenCalled(); // user told the late file wasn't attached
@@ -370,7 +370,7 @@ describe("SupportNewPage", () => {
 		submitBtn(w).trigger("click");
 		await flushPromises();
 		w.unmount(); // user pressed Back while create was in flight
-		resolveCreate("TKT-9");
+		resolveCreate({ name: "TKT-9", openingComm: null });
 		await flushPromises();
 		expect(replace).not.toHaveBeenCalled();
 	});

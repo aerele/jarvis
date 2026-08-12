@@ -90,7 +90,7 @@
 			<!-- attached images → same clickable thumbnail + preview as generated ones -->
 			<template v-for="cv in attachments || []" :key="cv.name">
 				<button
-					v-if="cv.type === 'image' && cv.file_url"
+					v-if="!imagesAsChips && cv.type === 'image' && cv.file_url"
 					class="jv-img-artifact"
 					@click="emit('open-attachment', cv)"
 					:title="'Open ' + cv.title"
@@ -219,7 +219,7 @@
 				<template v-if="!hasBelowBody">
 					<template v-for="cv in attachments || []" :key="cv.name">
 						<button
-							v-if="cv.type === 'image' && cv.file_url"
+							v-if="!imagesAsChips && cv.type === 'image' && cv.file_url"
 							class="jv-img-artifact"
 							@click="emit('open-attachment', cv)"
 							:title="'Open ' + cv.title"
@@ -331,6 +331,13 @@ defineProps({
 	// A failed-to-send user message: shows "Not sent" + Retry instead of the
 	// hover bar.
 	failed: { type: Boolean, default: false },
+	// Render an image attachment as the same filename chip as every other file
+	// (click through to view it) instead of an inline cropped thumbnail. Chat's
+	// generated-canvas images (charts/diagrams) rely on the thumbnail staying
+	// visible inline, so this defaults false there; Support turns it on - a
+	// customer's photo attachment showing a preview read as a worse "vague"
+	// crop than just naming the file, per feedback.
+	imagesAsChips: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["edit", "copy", "retry", "open-attachment"]);

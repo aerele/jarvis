@@ -123,6 +123,10 @@ def _settings_payload(doc) -> dict:
 		# syncs onto the doc's meta, doc.preferred_persona would AttributeError and
 		# 500 get_my_settings / update_my_settings. Default to Jarvis like the rest.
 		"preferred_persona": getattr(doc, "preferred_persona", None) or "Jarvis",
+		# "" = ask every time (the New Ticket popup's default); "Yes"/"No" = the
+		# user's own permanent "don't ask again" answer, per Jarvis User Settings'
+		# migrate-window guard above (getattr, not a bare read).
+		"support_context_copy_pref": getattr(doc, "support_context_copy_pref", None) or "",
 		"monthly_token_limit": cint(doc.monthly_token_limit),
 		"usage_month": doc.usage_month,
 		"month_tokens": _month_tokens_effective(doc.usage_month, doc.month_tokens),
@@ -150,6 +154,7 @@ def update_my_settings(
 	notify_enabled: int | None = None,
 	activity_detail: int | None = None,
 	preferred_persona: str | None = None,
+	support_context_copy_pref: str | None = None,
 ) -> dict:
 	"""Update the caller's own chat preferences only. The usage limit and
 	counters (permlevel 1 / read-only) are never writable here."""
@@ -171,6 +176,11 @@ def update_my_settings(
 			# and reflecting nothing removes the self-XSS vector entirely.
 			frappe.throw(frappe._("Persona must be Jarvis or Jara."))
 		doc.preferred_persona = persona
+	if support_context_copy_pref is not None:
+		pref = _s(support_context_copy_pref)
+		if pref not in ("", "Yes", "No"):
+			frappe.throw(frappe._("support_context_copy_pref must be Yes, No, or blank."))
+		doc.support_context_copy_pref = pref
 	# ignore_permissions: the row is owner-scoped by construction (we loaded the
 	# caller's own row), and only permlevel-0 pref fields are touched here.
 	doc.save(ignore_permissions=True)

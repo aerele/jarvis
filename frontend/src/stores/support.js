@@ -15,6 +15,8 @@ import {
 	supportCloseTicket,
 	supportAwaitingCount,
 	supportUpload,
+	getMySettings,
+	updateMySettings,
 } from "@/api";
 
 // Mirrors jarvis_helpdesk/setup/install.py:39 AWAITING_STATUSES and
@@ -35,10 +37,17 @@ export function isClosed(status) {
 // by the design system rather than hand-rolled colours. This also retires the
 // spec's AA-contrast workaround: the failure was raw --amber on --amber-bg, and
 // Badge's own token pairs are the system's answer to exactly that.
+//
+// No `blue` here: frappe-ui's Badge themes (gray/blue/green/orange/red) don't
+// include the brand's own purple, and a generic blue read as off-theme next to
+// it (the rest of the app's accent is neutral black/white - see --cta in
+// theme.js). Open uses `solid` gray instead of `subtle` so it still reads as
+// the "active" state at a glance, distinct from Closed's quiet subtle gray,
+// without reaching for a colour the brand doesn't use.
 export function badgeFor(status) {
-	if (isAwaiting(status)) return { label: "Awaiting you", theme: "orange" };
-	if (isClosed(status)) return { label: "Closed", theme: "gray" };
-	return { label: "Open", theme: "blue" };
+	if (isAwaiting(status)) return { label: "Awaiting you", theme: "orange", variant: "subtle" };
+	if (isClosed(status)) return { label: "Closed", theme: "gray", variant: "subtle" };
+	return { label: "Open", theme: "gray", variant: "solid" };
 }
 
 const tickets = ref([]);
@@ -126,6 +135,36 @@ function fingerprintOf(name) {
 	return row ? JSON.stringify(row) : "";
 }
 
+// Jarvis User Settings' support_context_copy_pref ("" | "Yes" | "No"), cached
+// here so ChatView's Support button reads it without a fresh network round-
+// trip on every click (it used to run api.getMySettings() unconditionally on
+// every click, with no loading indicator - review finding). null = not yet
+// loaded; loadingCopyPref de-dupes overlapping first-load callers rather than
+// firing one request per concurrent caller.
+const copyPref = ref(null);
+let loadingCopyPref = null;
+async function getCopyPref() {
+	if (copyPref.value !== null) return copyPref.value;
+	if (!loadingCopyPref) {
+		loadingCopyPref = getMySettings()
+			.then((r) => {
+				copyPref.value = (r && r.data && r.data.support_context_copy_pref) || "";
+				return copyPref.value;
+			})
+			.catch(() => "") // best-effort: a failed read just falls back to asking, and
+			// leaves copyPref.value at null so the NEXT call retries rather than
+			// caching a transient failure as a permanent "always ask".
+			.finally(() => {
+				loadingCopyPref = null;
+			});
+	}
+	return loadingCopyPref;
+}
+function setCopyPref(v) {
+	copyPref.value = v;
+	updateMySettings({ support_context_copy_pref: v }).catch(() => {});
+}
+
 async function refreshAwaiting() {
 	try {
 		const r = await supportAwaitingCount();
@@ -147,7 +186,11 @@ async function createTicket(subject, body) {
 			toast.error("The ticket couldn't be created. Please try again.");
 			return null;
 		}
-		return name;
+		// openingComm (null on an older Helpdesk that doesn't auto-mirror the opening
+		// message, or an empty body): let the caller thread it into uploadTo so files
+		// attached at ticket-creation time land on that Communication and render inline,
+		// the same as a reply's — see reply()'s `comm` for the established pattern.
+		return { name, openingComm: (r.data && r.data.opening_comm) || null };
 	} catch (e) {
 		toast.error(errHtml(e));
 		return null;
@@ -213,6 +256,8 @@ const store = reactive({
 	loadTickets,
 	loadThread,
 	refreshAwaiting,
+	getCopyPref,
+	setCopyPref,
 	createTicket,
 	reply,
 	closeTicket,

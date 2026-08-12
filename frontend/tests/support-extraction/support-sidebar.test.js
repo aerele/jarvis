@@ -70,14 +70,9 @@ describe("SupportSidebar", () => {
 		expect(linkBy(w, "Jarvis chat").props("to")).toEqual({ name: "Chat" });
 	});
 
-	it("has a prominent New-ticket Button (like the top bar) that navigates to the new-ticket page", async () => {
+	it("has no New-ticket Button - that CTA is redundant across every support page and now lives only on the list page's own toolbar", () => {
 		const w = mountSidebar();
-		const btn = w.findComponent({ name: "Button" });
-		expect(btn.exists()).toBe(true);
-		expect(btn.props("label")).toBe("New ticket");
-		expect(btn.props("variant")).toBe("solid");
-		btn.vm.$emit("click");
-		expect(push).toHaveBeenCalledWith({ name: "SupportNew" });
+		expect(w.findComponent({ name: "Button" }).exists()).toBe(false);
 	});
 
 	it("marks 'Support tickets' active across support routes, not otherwise", () => {

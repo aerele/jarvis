@@ -213,8 +213,11 @@ describe("SupportThreadPage", () => {
 		expect(atts[1]).toMatchObject({ type: "file", title: "log.txt" });
 		// …and they must actually REACH the DOM: Message renders a file chip for
 		// them, which is the amendment this page depends on.
-		const chip = w.find(".jv-file-chip");
-		expect(chip.exists()).toBe(true);
+		const chips = w.findAll(".jv-file-chip");
+		expect(chips).toHaveLength(2);
+		expect(chips[0].text()).toContain("shot.png");
+		expect(chips[0].attributes("href")).toContain("jarvis.support.media.download");
+		const chip = chips[1];
 		expect(chip.text()).toContain("log.txt");
 		expect(chip.attributes("href")).toContain("jarvis.support.media.download");
 		// The clip icon must be an SVG (house design forbids emoji-as-icon), not
@@ -238,26 +241,6 @@ describe("SupportThreadPage", () => {
 		expect(atts[0].type).toBe("file");
 	});
 
-	it("opens a message attachment in a new tab via its proxied file_url (CRITICAL fix)", () => {
-		// Message renders an image attachment as a <button @click="emit('open-attachment', cv)">
-		// — before this fix, nothing on this page listened, so an agent's
-		// screenshot was a dead, unopenable thumbnail (unlike ticket-level
-		// attachments, which are real <a> links).
-		const openSpy = vi.spyOn(window, "open").mockImplementation(() => {});
-		const w = mountWith([
-			{
-				sent_or_received: "Sent",
-				content: "<p>see attached</p>",
-				attachments: [{ file_url: "/files/shot.png", file_name: "shot.png" }],
-			},
-		]);
-		w.findComponent({ name: "Message" }).vm.$emit("open-attachment", {
-			file_url: "/proxied/shot.png",
-		});
-		expect(openSpy).toHaveBeenCalledWith("/proxied/shot.png", "_blank", "noopener");
-		openSpy.mockRestore();
-	});
-
 	it("links ticket-level attachments through the authenticated proxy", () => {
 		storeDouble.thread.attachments = [{ file_url: "/files/spec.pdf", file_name: "spec.pdf" }];
 		const w = mountWith([{ sent_or_received: "Sent", content: "<p>hi</p>" }]);
@@ -268,24 +251,22 @@ describe("SupportThreadPage", () => {
 		storeDouble.thread.attachments = [];
 	});
 
-	it("renders a ticket-level image attachment inline and a non-image as a chip", () => {
-		// Proof of fix 3: ticket-level attachments used to render as a plain
-		// download chip with no image check at all, unlike per-message
-		// attachments a few lines below (attachmentsOf) which already classify
-		// via IMAGE_EXT. Both shapes are {file_url, file_name} from the CP.
+	it("renders every ticket-level attachment as the same file chip, images included", () => {
+		// Images get no special inline-thumbnail treatment here (or per-message,
+		// see images-as-chips above) - a cropped preview read worse than a plain
+		// filename the user clicks, per support feedback. Both shapes are
+		// {file_url, file_name} from the CP.
 		storeDouble.thread.attachments = [
 			{ file_url: "/files/shot.png", file_name: "shot.png" },
 			{ file_url: "/files/spec.pdf", file_name: "spec.pdf" },
 		];
 		const w = mountWith([{ sent_or_received: "Sent", content: "<p>hi</p>" }]);
 
-		const img = w.find(".jv-sup-thumb");
-		expect(img.exists()).toBe(true);
-		expect(img.attributes("src")).toContain("jarvis.support.media.download");
-		expect(img.attributes("src")).toContain("shot.png");
-
 		const links = w.findAll(".jv-sup-file");
 		expect(links).toHaveLength(2);
+		expect(links[0].text()).toContain("shot.png");
+		expect(links[0].attributes("href")).toContain("jarvis.support.media.download");
+		expect(links[0].find("img").exists()).toBe(false);
 		expect(links[1].text()).toContain("spec.pdf");
 		expect(links[1].find("img").exists()).toBe(false);
 

@@ -13,6 +13,7 @@
     "notify_enabled",
     "activity_detail",
     "preferred_persona",
+    "support_context_copy_pref",
     "app_state_section",
     "business_greeting_state",
     "business_greeting_chat_count",
@@ -72,6 +73,13 @@
       "options": "Jarvis\nJara",
       "default": "Jarvis",
       "description": "Which persona voice this user chats with: Jarvis (default) or Jara (calmer, more jovial). Voice only - same tools, permissions, and behaviour."
+    },
+    {
+      "fieldname": "support_context_copy_pref",
+      "fieldtype": "Select",
+      "label": "Copy Chat Into Support Ticket",
+      "options": "\nYes\nNo",
+      "description": "Remembered answer to \"copy the last few chat messages into a new support ticket?\" - blank means ask every time (the default); Yes/No is a permanent 'don't ask again' the New Ticket flow reads before showing that popup. Set by the popup itself, not editable elsewhere."
     },
     { "fieldname": "app_state_section", "fieldtype": "Section Break", "label": "App State" },
     {

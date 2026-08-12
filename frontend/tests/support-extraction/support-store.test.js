@@ -20,20 +20,34 @@ describe("badgeFor", () => {
 	// The AWAITING set mirrors jarvis_helpdesk/setup/install.py:39 and
 	// jarvis_admin_v2/support/awaiting.py:10 — both ("Replied", "Resolved").
 	it("treats Replied and Resolved as awaiting the customer", () => {
-		expect(badgeFor("Replied")).toMatchObject({ label: "Awaiting you", theme: "orange" });
-		expect(badgeFor("Resolved")).toMatchObject({ label: "Awaiting you", theme: "orange" });
+		expect(badgeFor("Replied")).toMatchObject({
+			label: "Awaiting you",
+			theme: "orange",
+			variant: "subtle",
+		});
+		expect(badgeFor("Resolved")).toMatchObject({
+			label: "Awaiting you",
+			theme: "orange",
+			variant: "subtle",
+		});
 	});
 
 	it("treats Closed as closed", () => {
-		expect(badgeFor("Closed")).toMatchObject({ label: "Closed", theme: "gray" });
+		expect(badgeFor("Closed")).toMatchObject({
+			label: "Closed",
+			theme: "gray",
+			variant: "subtle",
+		});
 	});
 
 	it("falls back to Open for every other status, including unknown ones", () => {
 		// The catch-all is load-bearing: Paused exists today and Helpdesk can add
 		// statuses without a frontend deploy. An unknown status must never render
-		// blank or crash a row.
+		// blank or crash a row. No `blue` theme (frappe-ui's Badge themes don't
+		// include the brand's purple, and a generic blue read as off-theme next to
+		// it) - `solid` gray instead, distinct from Closed's `subtle` gray.
 		for (const s of ["Open", "Paused", "Escalated", "", null, undefined]) {
-			expect(badgeFor(s)).toMatchObject({ label: "Open", theme: "blue" });
+			expect(badgeFor(s)).toMatchObject({ label: "Open", theme: "gray", variant: "solid" });
 		}
 	});
 });
@@ -189,11 +203,24 @@ describe("support store", () => {
 	});
 
 	describe("createTicket", () => {
-		it("unwraps the ticket name from {ok,data} and returns it", async () => {
+		it("unwraps the ticket name AND the opening comm from {ok,data}", async () => {
+			// openingComm lets the caller thread ticket-creation-time attachments onto
+			// the auto-mirrored opening message so they render inline, same as a
+			// reply's - see reply()'s `comm` for the established pattern.
+			api.supportCreateTicket.mockResolvedValue({
+				ok: true,
+				data: { ticket: "T9", opening_comm: "COMM-1" },
+			});
+			const s = useSupportStore();
+			const result = await s.createTicket("Subject", "Body");
+			expect(result).toEqual({ name: "T9", openingComm: "COMM-1" });
+		});
+
+		it("falls back openingComm to null when the CP doesn't echo one (older Helpdesk)", async () => {
 			api.supportCreateTicket.mockResolvedValue({ ok: true, data: { ticket: "T9" } });
 			const s = useSupportStore();
-			const name = await s.createTicket("Subject", "Body");
-			expect(name).toBe("T9");
+			const result = await s.createTicket("Subject", "Body");
+			expect(result).toEqual({ name: "T9", openingComm: null });
 		});
 
 		it("toasts and returns null on failure", async () => {

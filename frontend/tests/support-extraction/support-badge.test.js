@@ -102,12 +102,12 @@ describe("UserMenu variant (chat vs support)", () => {
 		store.awaitingCount = 0;
 	});
 
-	it("chat (default): title is the agent name; menu links to Support, not chat", () => {
+	it("chat (default): title is the agent name; no Support menu item (it lives in ChatView's header icon now, not the dropdown)", () => {
 		const w = mount(UserMenu, opts);
 		expect(w.text()).toContain(agentName);
 		expect(w.text()).not.toContain(`${agentName} Support`);
 		const labels = menuLabels(w);
-		expect(labels).toContain("Support");
+		expect(labels).not.toContain("Support");
 		expect(labels).not.toContain(`Switch to ${agentName} chat`);
 		expect(labels).toContain("Change theme");
 		expect(labels).toContain("Settings"); // chat/LLM settings belong here

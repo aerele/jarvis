@@ -878,6 +878,99 @@ class TestPersonaPreference(_UsageTestBase):
 
 
 # --------------------------------------------------------------------------- #
+# 8.5 support_context_copy_pref — the "copy this chat into your ticket?"
+#     don't-ask-again answer ("" | "Yes" | "No"). Direct analog of
+#     preferred_persona above (same owner-scoped save/echo path, same
+#     fixed-enum-message validation), but with no [Context:]/turn_handler
+#     integration - it never reaches the LLM prompt at all.
+# --------------------------------------------------------------------------- #
+class TestSupportContextCopyPreference(_UsageTestBase):
+	def test_default_is_blank(self):
+		# No row at all: the lazy-created default is "" (ask every time), not
+		# some other falsy value that would read as an explicit answer.
+		frappe.set_user(USER_A)
+		out = user_settings_api.get_my_settings()
+		self.assertEqual(out["data"]["support_context_copy_pref"], "")
+		frappe.set_user("Administrator")
+
+	def test_update_to_yes_persists_and_echoes(self):
+		frappe.set_user(USER_A)
+		out = user_settings_api.update_my_settings(support_context_copy_pref="Yes")
+		self.assertEqual(out["data"]["support_context_copy_pref"], "Yes")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "support_context_copy_pref"), "Yes")
+
+	def test_update_to_no_persists_and_echoes(self):
+		frappe.set_user(USER_A)
+		out = user_settings_api.update_my_settings(support_context_copy_pref="No")
+		self.assertEqual(out["data"]["support_context_copy_pref"], "No")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "support_context_copy_pref"), "No")
+
+	def test_blank_explicitly_resets_to_ask_every_time(self):
+		# Unlike preferred_persona (blank -> "Jarvis" default), blank here is
+		# itself a valid, meaningful value - "go back to asking" - not merely
+		# "no change". A user who answered "No" must be able to opt back in.
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(support_context_copy_pref="No")
+		out = user_settings_api.update_my_settings(support_context_copy_pref="")
+		self.assertEqual(out["data"]["support_context_copy_pref"], "")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "support_context_copy_pref"), "")
+
+	def test_unknown_value_rejected(self):
+		frappe.set_user(USER_A)
+		with self.assertRaises(frappe.ValidationError):
+			user_settings_api.update_my_settings(support_context_copy_pref="Maybe")
+		frappe.set_user("Administrator")
+		# Nothing persisted from the rejected write.
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "support_context_copy_pref") or "", "")
+
+	def test_unknown_value_message_does_not_reflect_input(self):
+		# Fixed-enum message, same self-XSS guard as preferred_persona's (F11):
+		# a hostile value must never be reflected back.
+		frappe.set_user(USER_A)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			user_settings_api.update_my_settings(support_context_copy_pref="<img src=x onerror=alert(1)>")
+		frappe.set_user("Administrator")
+		msg = str(cm.exception)
+		self.assertNotIn("<img", msg)
+		self.assertNotIn("onerror", msg)
+		self.assertIn("Yes, No, or blank", msg)
+
+	def test_non_string_value_does_not_500(self):
+		# Same arg-type-gate gap as preferred_persona (from __future__ import
+		# annotations disables runtime coercion here - see the module NOTE): a
+		# hostile non-string must reject cleanly, never 500 on AttributeError.
+		frappe.set_user(USER_A)
+		for bad in (["Yes"], {"pref": "Yes"}):
+			with self.assertRaises(frappe.ValidationError):
+				user_settings_api.update_my_settings(support_context_copy_pref=bad)
+		# Falsy non-strings take the blank path (store "").
+		for falsy in (0, False, []):
+			user_settings_api.update_my_settings(support_context_copy_pref=falsy)
+			self.assertEqual(user_settings_api.get_my_settings()["data"]["support_context_copy_pref"], "")
+		frappe.set_user("Administrator")
+
+	def test_update_touches_only_own_row(self):
+		usage.get_or_create_user_settings(USER_B)
+		frappe.db.commit()
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(support_context_copy_pref="Yes")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_B}, "support_context_copy_pref") or "", "")
+
+	def test_leaves_other_prefs_untouched(self):
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(notify_enabled=0)
+		user_settings_api.update_my_settings(support_context_copy_pref="Yes")
+		out = user_settings_api.get_my_settings()
+		self.assertEqual(out["data"]["notify_enabled"], 0)
+		self.assertEqual(out["data"]["support_context_copy_pref"], "Yes")
+		frappe.set_user("Administrator")
+
+
+# --------------------------------------------------------------------------- #
 # 9. set_sidebar_order — per-user nav order (UI state, permlevel 0). It takes a
 #    JSON *string* from the client and must bound/clean it before it is stored,
 #    since it is written straight to the owner's own row.
