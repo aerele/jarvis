@@ -35,6 +35,7 @@ const UNFENCED_IN_CHATVIEW = new Set([
 	"action:pending", // a parked write — losing it strands the approval
 	"canvas",
 	"conversation:renamed",
+	"import:finished", // Slice B: a background-poll completion signal, not a pump-sequenced turn frame
 ]);
 
 function onEventBody() {

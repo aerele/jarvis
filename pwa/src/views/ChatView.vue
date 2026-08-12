@@ -575,6 +575,15 @@ function onEvent(p) {
 		case "conversation:renamed":
 			load();
 			break;
+
+		case "import:finished":
+			// Slice B: a background CSV import finished; the bench already posted
+			// the "✓ ..." completion message into this conversation. The guard
+			// above already confirmed this is the open conversation, so pull it
+			// in the same way canvas/conversation:renamed do — a durable reload,
+			// since this frame carries no message body to splice in by hand.
+			load();
+			break;
 	}
 }
 

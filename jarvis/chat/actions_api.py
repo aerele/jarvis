@@ -484,6 +484,14 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 		)
 		result = api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
 
+	# Slice B: bind a Jarvis Import Announcement so the import's completion is
+	# announced back into this chat unprompted. Best-effort + self-gating (tool ==
+	# run_import + ok); binds to the token's OWN guarded conversation (PC-4), never
+	# the client-supplied passed_conv.
+	from jarvis.chat import import_announce
+
+	import_announce.bind_after_run_import(record, result)
+
 	# Leave a transcript receipt (#7) so a confirmed delete/submit/email shows on
 	# reload, matching the inline model-write path's tool card. Best-effort: the
 	# write already committed, so a receipt hiccup must not report failure.

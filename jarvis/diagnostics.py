@@ -193,3 +193,56 @@ def reset_agent_pairing() -> dict:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
 	except Exception as e:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}
+
+
+@frappe.whitelist()
+def import_announce_stats() -> dict:
+	"""Operator visibility into the Slice B import auto-tell (import_announce). Surfaces
+	the pending/stuck backlog broken out by reason, and the fast-path ATTRIBUTION so a
+	silently-dead after_job hook is visible: if ``hook_rate_24h`` collapses toward 0 while
+	imports keep finishing (``total`` > 0), the fast path is down and the ``*/2`` poll is
+	carrying everything - act on it.
+
+	Gated on ``require_jarvis_admin``: the raw COUNTs span ALL users' announcements
+	(tenant-wide operational metadata), and the doctype has NO user-facing read grant."""
+	require_jarvis_admin()
+	ann = "Jarvis Import Announcement"
+	if not frappe.db.exists("DocType", ann):
+		return {"pending": 0, "note": "doctype not migrated"}
+	now = frappe.utils.now_datetime()
+	grace_cutoff = frappe.utils.add_to_date(now, minutes=-30)
+	pending = frappe.db.count(ann, {"announced": 0})
+	stuck = frappe.db.count(ann, {"announced": 0, "kicked_off_at": ["<", grace_cutoff]})
+	oldest = frappe.db.get_value(ann, {"announced": 0}, "kicked_off_at", order_by="kicked_off_at asc")
+	oldest_age_min = (
+		round((now - frappe.utils.get_datetime(oldest)).total_seconds() / 60.0, 1) if oldest else 0
+	)
+	since_24h = frappe.utils.add_to_date(now, hours=-24)
+	win = frappe.db.sql(
+		"""
+		SELECT COUNT(*) AS total,
+			   SUM(CASE WHEN announced_via = 'hook' THEN 1 ELSE 0 END) AS via_hook,
+			   SUM(CASE WHEN announced_via = 'poll' THEN 1 ELSE 0 END) AS via_poll
+		FROM `tabJarvis Import Announcement`
+		WHERE announced = 1 AND modified >= %(since)s
+		""",
+		{"since": since_24h},
+		as_dict=True,
+	)[0]
+	total = win.total or 0
+	reasons = frappe.db.sql(
+		"""
+		SELECT reason, COUNT(*) AS c FROM `tabJarvis Import Announcement`
+		WHERE announced = 1 AND modified >= %(since)s GROUP BY reason
+		""",
+		{"since": since_24h},
+		as_dict=True,
+	)
+	return {
+		"pending": pending,
+		"stuck_past_grace": stuck,
+		"oldest_pending_age_min": oldest_age_min,
+		"24h": {"total": total, "via_hook": win.via_hook or 0, "via_poll": win.via_poll or 0},
+		"hook_rate_24h": (win.via_hook / total) if total else 0,
+		"by_reason_24h": {(r.reason or "unknown"): r.c for r in reasons},
+	}
