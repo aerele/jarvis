@@ -1627,10 +1627,15 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 	* chat-subscription providers: every ``subscription``-tier catalog model on a
 	  provider the tenant has a connected account for. One cliproxy account serves
 	  the whole subscription tier, so the same "switch without re-saving" applies.
-	  Keyed on the account ``upstream`` (== the provider's ``agent_provider``:
-	  ``openai`` / ``google-gemini-cli`` / ...) derived from the encrypted accounts
-	  blob EXACTLY as the pool build does (chat/api.py:1757, raw — no
-	  ``normalize_provider``), so a subscription row and its extra models join.
+	  Keyed EXACTLY as the ``pool_models`` projection keys a subscription row
+	  (get_chat_ui_settings, ~line 1749): an explicit ``row.provider`` wins,
+	  otherwise each account's raw ``upstream`` (== the provider's
+	  ``agent_provider``: ``openai`` / ``google-gemini-cli`` / ...). The SPA stores
+	  ``provider=""`` for subscriptions today, so the upstream path is the common
+	  one, but honoring an explicit provider keeps the two projections in step no
+	  matter which shape the row has. A catalog entry is therefore matched by
+	  EITHER its ``catalog_id`` (explicit rows) or its ``agent_provider`` (derived
+	  rows), and offered under whichever key this tenant actually uses.
 
 	OpenAI's ``catalog_id`` and ``agent_provider`` are both ``openai``, so a tenant
 	with an OpenAI key AND a ChatGPT subscription lands both tiers on one key: they
@@ -1655,24 +1660,31 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 	)
 	from jarvis.oauth.providers import agent_provider_for
 
-	# api-key providers whose whole api_key tier the picker may offer.
-	wanted_api = {
-		normalize_provider(getattr(m, "provider", "") or "")
-		for m in settings.models or []
-		if m.enabled and accepts_any_model(m)
-	}
-	wanted_api.discard("")
-
-	# Subscription upstreams the tenant actually has a connected account for. Only
-	# subscription rows are touched, so a pure api-key tenant decrypts nothing.
+	# One pass over the pool: classify each enabled row into the provider key(s)
+	# its pool_models projection carries, so catalog_models joins by the SAME key.
+	wanted_api: set[str] = set()
 	wanted_sub: set[str] = set()
 	for m in settings.models or []:
-		if not (m.enabled and _credential_type(m) == "subscription"):
+		if not m.enabled:
 			continue
-		for a in _model_accounts(m):
-			up = (a.get("upstream") or "").strip() if isinstance(a, dict) else ""
-			if up:
-				wanted_sub.add(up)
+		if _credential_type(m) == "subscription":
+			# Mirror the pool_models derivation: explicit provider wins, else the
+			# raw account upstream. A BLANK upstream is skipped, NOT defaulted to
+			# "openai" -- pool_models keys such a row as "" too, so offering under
+			# "openai" would never join (build_pool_payload's "openai" default is
+			# wire-only, a different projection). Explicit rows need no decrypt.
+			explicit = normalize_provider(getattr(m, "provider", "") or "")
+			if explicit:
+				wanted_sub.add(explicit)
+			else:
+				for a in _model_accounts(m):
+					up = (a.get("upstream") or "").strip() if isinstance(a, dict) else ""
+					if up:
+						wanted_sub.add(up)
+		elif accepts_any_model(m):
+			pid = normalize_provider(getattr(m, "provider", "") or "")
+			if pid:
+				wanted_api.add(pid)
 
 	if not wanted_api and not wanted_sub:
 		return {}
@@ -1698,9 +1710,17 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 		if pid and pid in wanted_api:
 			_add(pid, [m for m in models if m.get("tier") == "api_key"])
 		if wanted_sub:
-			upstream = agent_provider_for(provider.get("subscription_label") or provider.get("label") or "")
-			if upstream and upstream in wanted_sub:
-				_add(upstream, [m for m in models if m.get("tier") == "subscription"])
+			sub_rows = [m for m in models if m.get("tier") == "subscription"]
+			if sub_rows:
+				# A subscription row keys on EITHER the catalog id (explicit
+				# provider) or the agent_provider upstream (derived). Offer under
+				# whichever this tenant actually uses so the pool_models join lands.
+				upstream = agent_provider_for(
+					provider.get("subscription_label") or provider.get("label") or ""
+				)
+				for key in {pid, upstream}:
+					if key and key in wanted_sub:
+						_add(key, sub_rows)
 	return out
 
 

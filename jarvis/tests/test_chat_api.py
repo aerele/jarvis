@@ -915,7 +915,11 @@ class TestCatalogModelsForPool(FrappeTestCase):
 		{
 			"provider_id": "google",
 			"catalog_id": "gemini",
-			"models": [{"model_id": "gemini-3.6-flash", "label": "Flash", "tier": "api_key"}],
+			"subscription_label": "Google Gemini",
+			"models": [
+				{"model_id": "gemini-3.6-flash", "label": "Flash", "tier": "api_key"},
+				{"model_id": "gemini-2.5-pro", "label": "Pro", "tier": "subscription", "sort_order": 1},
+			],
 		},
 		{
 			"provider_id": "zai_coding",
@@ -991,13 +995,25 @@ class TestCatalogModelsForPool(FrappeTestCase):
 
 	def test_disabled_rows_contribute_nothing(self):
 		self.assertEqual(self._run([{"enabled": 0, "provider": "anthropic", "model": "x"}]), {})
-		# A subscription row with NO connected account yields no upstream to key on.
+		# A subscription row with empty provider AND no connected account has no
+		# upstream to key on (pool_models keys such a row as "" too, so nothing to
+		# join against).
 		self.assertEqual(
-			self._run(
-				[{"enabled": 1, "provider": "anthropic", "model": "x", "credential_type": "subscription"}]
-			),
+			self._run([{"enabled": 1, "provider": "", "model": "x", "credential_type": "subscription"}]),
 			{},
 		)
+
+	def test_explicit_provider_subscription_keys_on_catalog_id_not_upstream(self):
+		"""A subscription row that carries an explicit `provider` keys its pool_models
+		entry on that provider (like an api-key row), NOT the account upstream. So
+		catalog_models must key it the same way (`gemini`), or the picker's join
+		silently omits the tenant's extra models (review #0)."""
+		row = self._sub_row("gemini-2.5-pro", "google-gemini-cli")
+		row["provider"] = "gemini"
+		out = self._run([row])
+		self.assertEqual(list(out), ["gemini"])
+		self.assertEqual([r["model"] for r in out["gemini"]], ["gemini-2.5-pro"])
+		self.assertNotIn("google-gemini-cli", out)
 
 	def test_offers_subscription_tier_for_a_connected_subscription(self):
 		"""A ChatGPT-subscription tenant sees the whole subscription tier, keyed by
