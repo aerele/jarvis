@@ -1,8 +1,10 @@
+import json
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import frappe
 from frappe.core.doctype.prepared_report.prepared_report import (
-	create_json_gz_file,
+	PreparedReport,
 	process_filters_for_prepared_report,
 )
 from frappe.tests.utils import FrappeTestCase
@@ -19,11 +21,6 @@ PREP_REPORT = "Jarvis Test Prepared Report"
 # tests we never want it to run (and it wouldn't inline anyway), so we no-op the
 # enqueue at the module where it is bound.
 _ENQUEUE = "frappe.core.doctype.prepared_report.prepared_report.enqueue"
-
-# Sentinel: _make_pr with result=_NOGZ stores NO gz attachment (an in-flight or
-# corrupt-copy row); result=None stores a gz whose result is null (a genuine
-# 0-row completed report); result=[...] stores rows.
-_NOGZ = object()
 
 
 def _ensure_report(name: str, prepared: int) -> None:
@@ -44,9 +41,11 @@ def _ensure_report(name: str, prepared: int) -> None:
 	).insert(ignore_permissions=True)
 
 
-def _make_pr(status, *, owner="Administrator", filters=None, result=_NOGZ, columns=None, age_seconds=0):
-	"""Create a Prepared Report row for PREP_REPORT in a given state, optionally
-	with stored gz data and a back-dated creation."""
+def _make_pr(status, *, owner="Administrator", filters=None, age_seconds=0):
+	"""Create a Prepared Report row for PREP_REPORT in a given state and back-date
+	its creation. Stores NO gz attachment - completed-copy reads are simulated by
+	patching get_prepared_data (see _completed), because the real
+	create_json_gz_file physical-file round-trip is flaky under run-parallel-tests."""
 	with patch(_ENQUEUE):
 		pr = frappe.get_doc(
 			{
@@ -67,11 +66,19 @@ def _make_pr(status, *, owner="Administrator", filters=None, result=_NOGZ, colum
 			add_to_date(now(), seconds=-age_seconds),
 			update_modified=False,
 		)
-	if result is not _NOGZ:
-		create_json_gz_file(
-			{"result": result, "columns": columns or []}, "Prepared Report", pr.name, PREP_REPORT
-		)
 	return pr.name
+
+
+@contextmanager
+def _completed(result, *, columns=None, filters=None, owner="Administrator"):
+	"""A Completed Prepared Report row whose stored output is `result`, made
+	readable WITHOUT touching disk: get_prepared_data returns the decompressed
+	json bytes the real method would (its physical gz round-trip is unreliable
+	under run-parallel-tests). Yields the row name."""
+	dn = _make_pr("Completed", owner=owner, filters=filters)
+	payload = json.dumps({"result": result, "columns": columns or []}).encode("utf-8")
+	with patch.object(PreparedReport, "get_prepared_data", return_value=payload):
+		yield dn
 
 
 class TestRunReportInline(FrappeTestCase):
@@ -137,9 +144,9 @@ class TestRunReportPrepared(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
 		_ensure_report(PREP_REPORT, prepared=1)
-		# A prepared report's gz File.save() breaks the per-test transaction
-		# rollback, so a Prepared Report created by one test can leak into the
-		# next and make the completed-copy path win. Start each test clean.
+		# A Prepared Report row does not roll back with the test transaction, so a
+		# row from one test would leak into the next; start each test from a clean
+		# slate (scoped to this fixture report, so it's parallel-safe).
 		frappe.db.delete("Prepared Report", {"report_name": PREP_REPORT})
 		frappe.db.commit()
 
@@ -179,30 +186,30 @@ class TestRunReportPrepared(FrappeTestCase):
 
 	# ---- completed copy reuse -----------------------------------------------
 	def test_ready_from_completed_copy(self):
-		_make_pr("Completed", result=[{"name": "T1", "description": "hi"}], columns=[{"label": "Name"}])
-		env = run_report(report_name=PREP_REPORT)
+		with _completed([{"name": "T1", "description": "hi"}], columns=[{"label": "Name"}]):
+			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
 		self.assertEqual(env["result"], [{"name": "T1", "description": "hi"}])
 		self.assertTrue(env["as_of"])
 
 	def test_empty_completed_is_ready_with_zero_rows(self):
-		_make_pr("Completed", result=[])
-		env = run_report(report_name=PREP_REPORT)
+		with _completed([]):
+			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
 		self.assertEqual(env["result"], [])  # 0 rows is a COMPLETE answer, not "no data"
 
 	def test_null_result_completed_is_ready_with_zero_rows(self):
 		# A report that stores result=None (columns but no rows) is a genuine 0-row
 		# answer - it must be `ready`, not fall through and regenerate forever.
-		_make_pr("Completed", result=None, columns=[{"label": "Name"}])
-		env = run_report(report_name=PREP_REPORT)
+		with _completed(None, columns=[{"label": "Name"}]):
+			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
 		self.assertEqual(env["result"], [])
 
-	def test_completed_with_missing_gz_is_not_ready(self):
-		# Completed but no stored gz -> get_prepared_data throws -> must NOT be
-		# "ready"; it falls through and (re)generates instead.
-		_make_pr("Completed", result=_NOGZ)
+	def test_completed_with_unreadable_output_is_not_ready(self):
+		# Completed but its stored output won't read (get_prepared_data throws) ->
+		# must NOT be "ready"; it falls through and (re)generates instead.
+		_make_pr("Completed")  # no attachment -> real get_prepared_data throws
 		with patch(_ENQUEUE):
 			env = run_report(report_name=PREP_REPORT)
 		self.assertNotEqual(env["status"], "ready")
@@ -210,8 +217,8 @@ class TestRunReportPrepared(FrappeTestCase):
 	def test_row_cap_applied_and_note_reports_true_total(self):
 		total = _prepared_reports._MAX_ROWS + 25
 		big = [{"name": f"T{i}"} for i in range(total)]
-		_make_pr("Completed", result=big)
-		env = run_report(report_name=PREP_REPORT)
+		with _completed(big):
+			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
 		self.assertEqual(len(env["result"]), _prepared_reports._MAX_ROWS)
 		self.assertIn(str(total), env["row_note"])  # note reports the UNCAPPED total
@@ -219,11 +226,11 @@ class TestRunReportPrepared(FrappeTestCase):
 	def test_canonical_filters_round_trip_reuses_completed_copy(self):
 		# A completed copy stored for {"company":"Acme"} must be reused when the
 		# agent passes the same logical filters plus a bookkeeping/empty key.
-		_make_pr("Completed", filters={"company": "Acme"}, result=[{"name": "X"}])
-		env = run_report(
-			report_name=PREP_REPORT,
-			filters={"company": "Acme", "prepared_report_name": "junk", "cost_center": ""},
-		)
+		with _completed([{"name": "X"}], filters={"company": "Acme"}):
+			env = run_report(
+				report_name=PREP_REPORT,
+				filters={"company": "Acme", "prepared_report_name": "junk", "cost_center": ""},
+			)
 		self.assertEqual(env["status"], "ready")
 		self.assertEqual(env["result"], [{"name": "X"}])
 
@@ -296,22 +303,23 @@ class TestRunReportPrepared(FrappeTestCase):
 
 	# ---- C1: completed copy is readable WITHOUT the Prepared Report role -----
 	def test_read_completed_needs_no_prepared_report_role(self):
-		dn = _make_pr("Completed", owner="reportless2@example.com", result=[{"name": "T1"}])
-		if not frappe.db.exists("User", "reportless2@example.com"):
-			frappe.get_doc(
-				{
-					"doctype": "User",
-					"email": "reportless2@example.com",
-					"first_name": "Reportless2",
-					"send_welcome_email": 0,
-				}
-			).insert(ignore_permissions=True)
-		frappe.set_user("reportless2@example.com")
-		try:
-			# get_doc-based read must not raise the Prepared Report read-perm error
-			env = _prepared_reports._read_completed(dn)
-		finally:
-			frappe.set_user("Administrator")
+		# _read_completed uses frappe.get_doc (no Prepared Report read role needed),
+		# never run()-by-name (which throws for a roleless user).
+		with _completed([{"name": "T1"}], owner="reportless2@example.com") as dn:
+			if not frappe.db.exists("User", "reportless2@example.com"):
+				frappe.get_doc(
+					{
+						"doctype": "User",
+						"email": "reportless2@example.com",
+						"first_name": "Reportless2",
+						"send_welcome_email": 0,
+					}
+				).insert(ignore_permissions=True)
+			frappe.set_user("reportless2@example.com")
+			try:
+				env = _prepared_reports._read_completed(dn)
+			finally:
+				frappe.set_user("Administrator")
 		self.assertEqual(env["status"], "ready")
 		self.assertEqual(env["result"], [{"name": "T1"}])
 
