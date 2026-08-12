@@ -43,8 +43,8 @@
 				style="grid-template-columns: 1.5fr 1.8fr 1.3fr 0.9fr"
 			>
 				<div>User</div>
-				<div>This month</div>
-				<div>Monthly limit</div>
+				<div>Usage</div>
+				<div>Token limit</div>
 				<div>Last activity</div>
 			</div>
 
@@ -86,15 +86,12 @@
 								/>
 							</div>
 							<div class="mt-1 text-xs text-ink-gray-5">
-								{{ fmtTokens(u.month_tokens) }} of
+								{{ fmtTokens(u.total_tokens) }} of
 								{{ fmtTokens(u.monthly_token_limit) }} · {{ pct(u) }}%
 							</div>
 						</template>
 						<div v-else class="text-xs text-ink-gray-5">
-							{{ fmtTokens(u.month_tokens) }} this month · unlimited
-						</div>
-						<div class="mt-0.5 text-xs text-ink-gray-4">
-							{{ fmtTokens(u.total_tokens) }} total
+							{{ fmtTokens(u.total_tokens) }} total · unlimited
 						</div>
 					</div>
 
@@ -236,11 +233,13 @@ function fmtTokens(n) {
 	if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
 	return String(n);
 }
+// All-time: compares against total_tokens (the cumulative, never-reset
+// counter), not month_tokens. See jarvis.chat.policy._over_total_limit.
 function pct(u) {
 	if (!u || !u.monthly_token_limit) return 0;
 	return Math.min(
 		100,
-		Math.round((Number(u.month_tokens || 0) / Number(u.monthly_token_limit)) * 100)
+		Math.round((Number(u.total_tokens || 0) / Number(u.monthly_token_limit)) * 100)
 	);
 }
 function modelPct(m) {

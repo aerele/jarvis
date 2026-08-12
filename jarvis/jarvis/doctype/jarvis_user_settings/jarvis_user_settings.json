@@ -163,10 +163,10 @@
     {
       "fieldname": "monthly_token_limit",
       "fieldtype": "Int",
-      "label": "Monthly Token Limit",
+      "label": "Token Limit",
       "permlevel": 1,
       "default": "0",
-      "description": "Per-user monthly token cap. 0 = unlimited. Admins only."
+      "description": "Per-user all-time token cap. 0 = unlimited. Admins only. Fieldname is legacy-named (\"monthly\") but the cap does not reset - it is an all-time budget."
     },
     {
       "fieldname": "usage_section",

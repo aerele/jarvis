@@ -470,11 +470,13 @@ class TestEnforcement(_UsageTestBase):
 		self.assertIsNone(reason)
 
 	def test_over_limit_rejects_with_usage_limit(self):
+		# All-time cap: compares against total_tokens (never resets), not
+		# month_tokens. 150 >= 100 ⇒ blocked.
 		user_settings_api.admin_set_user_limit(user=USER_A, monthly_token_limit=100)
 		frappe.db.set_value(
 			USETT,
 			{"user": USER_A},
-			{"usage_month": usage.current_month_key(), "month_tokens": 150},
+			{"total_tokens": 150},
 			update_modified=False,
 		)
 		frappe.db.commit()
@@ -487,7 +489,7 @@ class TestEnforcement(_UsageTestBase):
 		frappe.db.set_value(
 			USETT,
 			{"user": USER_A},
-			{"usage_month": usage.current_month_key(), "month_tokens": 50},
+			{"total_tokens": 50},
 			update_modified=False,
 		)
 		frappe.db.commit()
@@ -495,25 +497,28 @@ class TestEnforcement(_UsageTestBase):
 		self.assertTrue(ok)
 		self.assertIsNone(reason)
 
-	def test_stale_month_allows_despite_high_count(self):
+	def test_stale_usage_month_does_not_matter(self):
+		# The cap is all-time now, so a stale (or absent) usage_month/month_tokens
+		# rollover state must NOT protect a user whose all-time total is over the
+		# cap - unlike the old monthly gate, there is no rollover to reset.
 		user_settings_api.admin_set_user_limit(user=USER_A, monthly_token_limit=100)
 		frappe.db.set_value(
 			USETT,
 			{"user": USER_A},
-			{"usage_month": "2020-01", "month_tokens": 9999},
+			{"usage_month": "2020-01", "month_tokens": 9999, "total_tokens": 150},
 			update_modified=False,
 		)
 		frappe.db.commit()
 		ok, reason = policy.validate_can_send(USER_A)
-		self.assertTrue(ok)  # rollover ⇒ this month's usage is 0
-		self.assertIsNone(reason)
+		self.assertFalse(ok)  # all-time total is over the cap regardless of usage_month
+		self.assertEqual(reason, "usage_limit")
 
 	def test_zero_limit_is_unlimited(self):
 		user_settings_api.admin_set_user_limit(user=USER_A, monthly_token_limit=0)
 		frappe.db.set_value(
 			USETT,
 			{"user": USER_A},
-			{"usage_month": usage.current_month_key(), "month_tokens": 999999},
+			{"total_tokens": 999999},
 			update_modified=False,
 		)
 		frappe.db.commit()
@@ -526,7 +531,7 @@ class TestEnforcement(_UsageTestBase):
 		frappe.db.set_value(
 			USETT,
 			{"user": USER_A},
-			{"usage_month": usage.current_month_key(), "month_tokens": 150},
+			{"total_tokens": 150},
 			update_modified=False,
 		)
 		frappe.db.commit()

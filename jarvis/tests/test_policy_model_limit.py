@@ -146,13 +146,13 @@ class TestPerModelGate(_Base):
 		self.assertTrue(ok)
 
 	def test_aggregate_gate_fires_first(self):
-		# Aggregate over-limit blocks regardless of model, and even with no
-		# per-model row for the passed model.
+		# Aggregate (all-time) over-limit blocks regardless of model, and even
+		# with no per-model row for the passed model.
 		user_settings_api.admin_set_user_limit(user=USER_A, monthly_token_limit=100)
 		frappe.db.set_value(
 			USETT,
 			{"user": USER_A},
-			{"usage_month": usage.current_month_key(), "month_tokens": 150},
+			{"total_tokens": 150},
 			update_modified=False,
 		)
 		frappe.db.commit()
