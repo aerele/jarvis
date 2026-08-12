@@ -241,35 +241,52 @@ describe("SupportThreadPage", () => {
 		expect(atts[0].type).toBe("file");
 	});
 
-	it("links ticket-level attachments through the authenticated proxy", () => {
+	it("merges ticket-level opening attachments into the opening message, proxy-authenticated", () => {
+		// The opening file used to render in a captioned slab ABOVE the thread; it
+		// now rides the opening message itself (the message the customer opened the
+		// ticket with — "Received"), still through the authenticated download proxy.
 		storeDouble.thread.attachments = [{ file_url: "/files/spec.pdf", file_name: "spec.pdf" }];
-		const w = mountWith([{ sent_or_received: "Sent", content: "<p>hi</p>" }]);
-		const link = w.find(".jv-sup-file");
-		expect(link.exists()).toBe(true);
-		expect(link.attributes("href")).toContain("jarvis.support.media.download");
-		expect(link.attributes("href")).toContain("spec.pdf");
+		const w = mountWith([{ sent_or_received: "Received", content: "<p>hi</p>" }]);
+		const atts = w.findComponent({ name: "Message" }).props("attachments");
+		const spec = atts.find((a) => a.title === "spec.pdf");
+		expect(spec).toBeTruthy();
+		expect(spec.file_url).toContain("jarvis.support.media.download");
+		expect(spec.file_url).toContain("spec.pdf");
 		storeDouble.thread.attachments = [];
 	});
 
-	it("renders every ticket-level attachment as the same file chip, images included", () => {
-		// Images get no special inline-thumbnail treatment here (or per-message,
-		// see images-as-chips above) - a cropped preview read worse than a plain
-		// filename the user clicks, per support feedback. Both shapes are
-		// {file_url, file_name} from the CP.
+	it("renders every opening attachment as the same file chip, images included", () => {
+		// Images get no special inline-thumbnail treatment (images-as-chips) - a
+		// cropped preview read worse than a plain filename the user clicks. Both
+		// shapes are {file_url, file_name} from the CP.
 		storeDouble.thread.attachments = [
 			{ file_url: "/files/shot.png", file_name: "shot.png" },
 			{ file_url: "/files/spec.pdf", file_name: "spec.pdf" },
 		];
-		const w = mountWith([{ sent_or_received: "Sent", content: "<p>hi</p>" }]);
+		const w = mountWith([{ sent_or_received: "Received", content: "<p>hi</p>" }]);
 
-		const links = w.findAll(".jv-sup-file");
-		expect(links).toHaveLength(2);
-		expect(links[0].text()).toContain("shot.png");
-		expect(links[0].attributes("href")).toContain("jarvis.support.media.download");
-		expect(links[0].find("img").exists()).toBe(false);
-		expect(links[1].text()).toContain("spec.pdf");
-		expect(links[1].find("img").exists()).toBe(false);
+		const atts = w.findComponent({ name: "Message" }).props("attachments");
+		const titles = atts.map((a) => a.title);
+		expect(titles).toContain("shot.png");
+		expect(titles).toContain("spec.pdf");
+		// image renders as a file chip, never an inline <img>
+		const chips = w.findAll(".jv-file-chip");
+		expect(chips.some((c) => c.text().includes("shot.png"))).toBe(true);
+		expect(w.find(".jv-file-chip img").exists()).toBe(false);
 
+		storeDouble.thread.attachments = [];
+	});
+
+	it("carries opening attachments in a synthetic customer bubble when the first message is a Support reply", () => {
+		// If the opening text was never mirrored to a Communication, the first
+		// Communication can be a Support reply. The customer's opening files must
+		// NOT land on the agent's bubble — they get their own opening bubble.
+		storeDouble.thread.attachments = [{ file_url: "/files/spec.pdf", file_name: "spec.pdf" }];
+		const w = mountWith([{ sent_or_received: "Sent", content: "<p>agent first</p>" }]);
+		const msgs = w.findAllComponents({ name: "Message" });
+		expect(msgs).toHaveLength(2);
+		expect(msgs[0].props("variant")).toBe("bubble");
+		expect(msgs[0].props("attachments").some((a) => a.title === "spec.pdf")).toBe(true);
 		storeDouble.thread.attachments = [];
 	});
 

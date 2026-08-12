@@ -17,19 +17,44 @@
 
 				<div v-if="toScope === 'Role'" class="flex flex-col gap-1">
 					<span class="block text-xs text-ink-gray-5">Role</span>
-					<!-- Autocomplete: same role-picker idiom the wiki create dialog
-					     uses; options are the requester's OWN targetable roles. -->
-					<Autocomplete
-						placeholder="Search your roles"
-						:options="roleOptions"
-						:modelValue="targetRole"
-						@update:modelValue="(v) => (targetRole = (v && v.value) || '')"
-					/>
-					<p
-						v-if="!rolesLoading && !roleOptions.length"
-						class="text-p-sm text-ink-gray-5"
-					>
-						You hold no roles that can be targeted — promote to the whole org instead,
+					<template v-if="roleOptions.length">
+						<!-- Inline search + list, NOT the frappe-ui Autocomplete: its search
+						     box renders in a popover portaled OUTSIDE this reka-ui Dialog, where
+						     the Dialog's focus scope left it unclickable. A plain input and an
+						     inline list both sit inside the Dialog, so search AND selection work. -->
+						<FormControl
+							type="text"
+							placeholder="Search your roles"
+							:modelValue="roleQuery"
+							@update:modelValue="(v) => (roleQuery = v)"
+						/>
+						<div class="max-h-44 overflow-y-auto rounded border" role="listbox">
+							<button
+								v-for="r in filteredRoles"
+								:key="r"
+								type="button"
+								role="option"
+								:aria-selected="targetRole === r"
+								class="flex w-full px-3 py-2 text-left text-sm hover:bg-surface-gray-2"
+								:class="
+									targetRole === r
+										? 'bg-surface-gray-3 font-medium text-ink-gray-9'
+										: 'text-ink-gray-7'
+								"
+								@click="targetRole = r"
+							>
+								{{ r }}
+							</button>
+							<p
+								v-if="!filteredRoles.length"
+								class="px-3 py-2 text-p-sm text-ink-gray-5"
+							>
+								No roles match your search.
+							</p>
+						</div>
+					</template>
+					<p v-else-if="!rolesLoading" class="text-p-sm text-ink-gray-5">
+						You hold no roles that can be targeted - promote to the whole org instead,
 						or ask an admin to add you to the role first.
 					</p>
 				</div>
@@ -67,7 +92,7 @@
 // busy flag. Role options are the requester's OWN targetable roles
 // (promotable_target_roles) — a requester widens to a team they belong to.
 import { ref, computed, watch } from "vue";
-import { Autocomplete, Button, Dialog, FormControl, toast } from "frappe-ui";
+import { Button, Dialog, FormControl, toast } from "frappe-ui";
 import { promotableTargetRoles } from "@/api/skills";
 
 const props = defineProps({
@@ -98,6 +123,13 @@ const rolesLoading = ref(false);
 
 const dialogTitle = computed(() => `Request promotion — ${props.noun}`);
 const roleOptions = computed(() => roles.value.map((r) => ({ label: r, value: r })));
+const roleQuery = ref("");
+// Client-side filter for the inline role list (see the template note on why this
+// is a plain input + list rather than the portaled Autocomplete search).
+const filteredRoles = computed(() => {
+	const q = roleQuery.value.trim().toLowerCase();
+	return q ? roles.value.filter((r) => r.toLowerCase().includes(q)) : roles.value;
+});
 const canSubmit = computed(
 	() => !!toScope.value && (toScope.value !== "Role" || !!targetRole.value)
 );
@@ -130,6 +162,7 @@ watch(
 		if (!open) return;
 		toScope.value = "Org";
 		targetRole.value = "";
+		roleQuery.value = "";
 		note.value = "";
 		loadRoles();
 	}
