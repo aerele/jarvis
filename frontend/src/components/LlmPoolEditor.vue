@@ -295,11 +295,11 @@
 						</span>
 					</div>
 
-					<!-- 2+ accounts on a subscription row: a model row (no account chip, no
-					     per-account Disconnect - just Edit/Reconnect) followed by one sub-row
-					     per account. accountHealth(row) is POOL-WIDE, not per-account (see its
+					<!-- 2+ accounts on a subscription row: a model row (no account chip, but
+					     the SAME Remove the ungrouped row has) followed by one sub-row per
+					     account. accountHealth(row) is POOL-WIDE, not per-account (see its
 					     own doc), so the health dot/label lives once on the model row; the
-					     sub-rows below are identity + order + Disconnect only. -->
+					     sub-rows below are identity + order + per-account Disconnect only. -->
 					<template v-else>
 						<!-- One hoverable wrapper around the model row + all its sub-rows, so
 				     hovering anywhere on the card highlights it as one unit (a plain
@@ -331,10 +331,11 @@
 									:title="accountHealth(row).title"
 									>{{ accountHealth(row).label }}</span
 								>
-								<!-- Reorder arrows stay here: this row's POSITION in the failover chain
-			         (relative to the other models) is unaffected by its account count.
-			         Only the per-model Remove/Disconnect drops out - that already moved
-			         to the per-account Disconnect on the sub-rows below. -->
+								<!-- Reorder arrows + Edit/Reconnect/Remove, identical to the ungrouped
+			         row: this row's position in the failover chain and its whole-model
+			         removal are unaffected by its account count. Only the account-level
+			         chip/Disconnect drops out here - that lives on the sub-rows below,
+			         alongside (not instead of) this row's own Remove. -->
 								<span class="jv-flist-acts">
 									<button
 										@click="move(i, -1)"
@@ -389,6 +390,23 @@
 										class="jv-btn jv-btn--sm jv-btn--ghost"
 									>
 										Reconnect
+									</button>
+									<!-- Whole-model removal, identical to the ungrouped row's Remove: tears
+					         down this model and ALL its accounts atomically via remove(i). The
+					         sub-row Disconnect below is the other half - it drops one account,
+					         not the model - the two are not alternatives, both stay available. -->
+									<button
+										v-if="canEdit"
+										:disabled="!editable"
+										@click="remove(i)"
+										class="jv-btn jv-btn--sm jv-btn--ghost jv-pool-disc"
+										:title="
+											isLastConnectedRow(row)
+												? 'Delete your keys and connected accounts everywhere'
+												: 'Remove this model from the failover list'
+										"
+									>
+										{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
 									</button>
 								</span>
 							</div>

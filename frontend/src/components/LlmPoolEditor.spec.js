@@ -1027,4 +1027,33 @@ describe("grouped subscription rows (2+ accounts)", () => {
 		expect(spy.mock.calls[0][1]).toBe(1);
 		expect(spy.mock.calls[0][0]).toMatchObject({ _uid: w.vm.rows[0]._uid });
 	});
+
+	// Regression: the grouped model row briefly shipped with only Up/Down/Edit/
+	// Reconnect, losing the ungrouped row's single-click whole-model Remove. Without
+	// it, tearing down a 2+-account model required Disconnecting every sub-row one
+	// at a time (N confirm+apply round-trips, and a partial state if the customer
+	// stopped part-way). Remove and the per-account Disconnect must coexist: this
+	// only asserts the model-row Remove wires to remove(i), not that it replaces
+	// the sub-row Disconnect (covered above).
+	it("renders a Remove on the model row that calls remove with the row index", async () => {
+		setPool([
+			subModel("gpt-5", 0, [
+				account("SUB_a", "devhub@aerele.in"),
+				account("SUB_b", "backup@aerele.in"),
+			]),
+			keyModel("openai", "gpt-4o", 1),
+		]);
+		const w = await mountEditor();
+		const spy = vi.spyOn(w.vm, "remove").mockResolvedValue();
+
+		const modelRow = w.find(".jv-flist-row--grouped");
+		const removeBtn = modelRow
+			.findAll(".jv-pool-disc")
+			.find((b) => b.text() === "Remove" || b.text() === "Disconnect");
+		expect(removeBtn).toBeTruthy();
+
+		await removeBtn.trigger("click");
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy).toHaveBeenCalledWith(0);
+	});
 });
