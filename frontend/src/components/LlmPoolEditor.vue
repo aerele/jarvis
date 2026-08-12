@@ -169,6 +169,21 @@
 						:class="{ 'jv-flist-model--unset': !row.model }"
 						>{{ rowModelLabel(row) }}</span
 					>
+					<!-- Two subscriptions to the same provider/model otherwise render as identical
+					     rows ("Subscription · OpenAI" + the model id, nothing else) - the connected
+					     account's own identity is what tells them apart. A subscription row can fold
+					     MULTIPLE accounts, so only the first is named and the rest are counted. -->
+					<span
+						v-if="row.credentialType === 'subscription' && row.accounts?.length"
+						class="jv-flist-acct"
+						:title="row.accounts.map(accountLabel).join(', ')"
+						>{{
+							accountLabel(row.accounts[0]) +
+							(row.accounts.length > 1
+								? " +" + (row.accounts.length - 1) + " more"
+								: "")
+						}}</span
+					>
 					<span
 						v-if="row.credentialType !== 'subscription' && row.hasKey"
 						style="font-size: 11px; color: var(--text-3)"
@@ -3710,7 +3725,17 @@ function accountLabel(a) {
 	// Show a real label / email; never surface the internal SUB_<hex> account ref.
 	const l = (a && a.label) || "";
 	if (l && !/^SUB_/i.test(l)) return l;
-	return (a && a.account_email) || "Account connected";
+	const email = (a && a.account_email) || "";
+	if (email) return email;
+	// Accounts connected before the backend email fix carry neither a label nor an
+	// email, so two of them used to both fall through to the same generic string and
+	// stay visually identical. Fall back to a short per-account identifier from the
+	// account_ref tail (same convention as Kimi's server-side "Kimi <tail>" label,
+	// lowercase). Six chars, not four, so two distinct refs are very unlikely to
+	// collide back into one label; never the full SUB_<hex> token.
+	const ref = (a && a.account_ref) || "";
+	if (ref) return "Account " + ref.slice(-6);
+	return "Account connected";
 }
 function firstWarningMessage() {
 	return (sync.value.warnings && sync.value.warnings[0] && sync.value.warnings[0].message) || "";
@@ -5245,6 +5270,19 @@ defineExpose({
 .jv-flist-model--unset {
 	color: var(--text-3);
 	font-style: italic;
+}
+/* Connected-account identity on a collapsed subscription row - a muted sub-label,
+   not a chip, so it reads as detail on the model name rather than a second badge.
+   Capped and ellipsized like its neighbours (.jv-flist-model, .jv-pool-acct-health)
+   so a long email can never push the row's actions off the edge. */
+.jv-flist-acct {
+	flex: none;
+	max-width: 160px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 11px;
+	color: var(--text-3);
 }
 
 /* ---- explainer + add affordance + failover nudge (settings editor only) ----
