@@ -39,17 +39,57 @@ export function budgetGaugeOption(used, limit, dark = false) {
 	};
 }
 
+// Real per-model rows (jarvis.account.get_llm_usage -> fleet-agent payload)
+// are {model, provider, tokens_in, tokens_out, cost_usd} - there is no flat
+// `tokens` or `cost` field. metric="tokens" (default) splits each model into
+// its in/out bars (stacked, so the bar length is still the model's total)
+// rather than collapsing to one number, which also gives the axis-trigger
+// tooltip (chartTheme.js) real "Tokens in" / "Tokens out" values to show
+// instead of a single hardcoded "Tokens" series. metric="cost" reads
+// cost_usd for a per-model spend view.
 export function perModelBarSpec(perModel, metric = "tokens") {
 	const rows = Array.isArray(perModel) ? perModel : [];
+	const x = rows.map((r) => String((r && r.model) || ""));
+	if (metric === "cost") {
+		const data = rows.map((r) => Number(r && r.cost_usd) || 0);
+		// All-zero cost is real (BYO-key pools may not compute per-model spend) but
+		// would otherwise render the same "axes with no bars" pathology this file
+		// exists to fix - chartTheme only nulls out a chart when a series has no
+		// data POINTS, and [0, 0, ...] still has points. Skip the chart instead.
+		// Hide only when there is NO cost signal at all (every value exactly 0).
+		// A negative value (a credit/refund adjustment) is real data, not "empty".
+		if (!data.some((v) => v !== 0)) return null;
+		return {
+			type: "bar",
+			x,
+			series: [{ name: "Cost ($)", data }],
+			options: { horizontal: true },
+		};
+	}
 	return {
 		type: "bar",
-		x: rows.map((r) => String(r.model || "")),
+		x,
 		series: [
-			{
-				name: metric === "cost" ? "Cost ($)" : "Tokens",
-				data: rows.map((r) => Number(r[metric]) || 0),
-			},
+			{ name: "Tokens in", data: rows.map((r) => Number(r && r.tokens_in) || 0) },
+			{ name: "Tokens out", data: rows.map((r) => Number(r && r.tokens_out) || 0) },
 		],
-		options: { horizontal: true },
+		options: { horizontal: true, stacked: true },
 	};
+}
+
+// Shared USD formatter for the Cost tile (and any per-model cost readout).
+// null/undefined/NaN and 0 all render as "$0.00" rather than "$NaN" or a bare
+// "$". Sub-cent spend would otherwise round to the same "$0.00" as no spend
+// at all, so a genuinely nonzero-but-tiny amount gets extra precision instead
+// of silently reading as free.
+export function formatUsd(v) {
+	const n = Number(v);
+	if (!Number.isFinite(n)) return "$0.00";
+	const decimals = n !== 0 && Math.abs(n) < 0.01 ? 4 : 2;
+	// Sign before the $ ("-$12.30", not "$-12.30") for the credit/refund case.
+	const sign = n < 0 ? "-" : "";
+	return `${sign}$${Math.abs(n).toLocaleString("en-US", {
+		minimumFractionDigits: decimals,
+		maximumFractionDigits: decimals,
+	})}`;
 }

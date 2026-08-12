@@ -76,13 +76,22 @@
 						</div>
 						<div class="rounded-md border p-4">
 							<div class="text-2xl font-medium text-ink-gray-8">
-								${{ usage.cost_usd }}
+								{{ formatUsd(usage.cost_usd) }}
 							</div>
 							<div class="mt-1 text-sm text-ink-gray-6">Cost</div>
 						</div>
 					</div>
 					<div class="mt-4 flex flex-col gap-4">
-						<JvChart v-if="perModelSpec" :spec="perModelSpec" :dark="dark" />
+						<div v-if="perModelSpec">
+							<h4 class="mb-1 text-sm font-medium text-ink-gray-7">
+								Tokens by model
+							</h4>
+							<JvChart :spec="perModelSpec" :dark="dark" />
+						</div>
+						<div v-if="perModelCostSpec">
+							<h4 class="mb-1 text-sm font-medium text-ink-gray-7">Cost by model</h4>
+							<JvChart :spec="perModelCostSpec" :dark="dark" />
+						</div>
 						<EChart v-if="gaugeOption" :option="gaugeOption" />
 					</div>
 				</template>
@@ -100,7 +109,7 @@ import { ref, computed, onMounted } from "vue";
 import { Badge, Button } from "frappe-ui";
 import JvChart from "@/charts/JvChart.vue";
 import EChart from "@/charts/EChart.vue";
-import { budgetGaugeOption, perModelBarSpec } from "@/charts/usageCharts.js";
+import { budgetGaugeOption, perModelBarSpec, formatUsd } from "@/charts/usageCharts.js";
 import { getLlmConfig, getLlmUsage, getLlmSyncStatus } from "@/api";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { connectionModeLabel } from "@/llm/pool";
@@ -141,6 +150,11 @@ const syncLabel = computed(() => humaniseSyncStatus(sync.value.last_sync_status)
 
 const perModelSpec = computed(() =>
 	(usage.value.per_model || []).length ? perModelBarSpec(usage.value.per_model, "tokens") : null
+);
+// Cost breakdown alongside the tokens chart - same rows, already-supported
+// "cost" metric, no new data plumbing.
+const perModelCostSpec = computed(() =>
+	(usage.value.per_model || []).length ? perModelBarSpec(usage.value.per_model, "cost") : null
 );
 const gaugeOption = computed(() => {
 	const uv = usage.value.used_vs_limit || {};
