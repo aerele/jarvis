@@ -1048,13 +1048,24 @@ def _persist_operation_probe_verdicts(status: dict) -> None:
 
 @frappe.whitelist()
 def get_llm_usage() -> dict:
-	"""Real, curated Bifrost usage for the Monitor tab (System-Manager only,
-	spec 7). Tenants with no Bifrost (proxy_active=0) short-circuit to the empty
-	shape — no pointless admin round-trip. That now includes a BYO api-key POOL,
-	which the fleet renders agent-direct with no sidecar at all."""
+	"""Real LLM usage for the Monitor tab (System-Manager only, spec 7).
+
+	Two tenants report real $/token cost: a proxied (Bifrost) tenant, curated
+	from admin below, and a DIRECT api-key tenant, computed locally in
+	``_direct_llm_usage`` from this bench's own per-model token counters
+	against the admin-maintained catalog's prices - there is no Bifrost ledger
+	for it to read. Every other shape (subscription, oauth - no per-tenant
+	$/token exists for either) short-circuits to the empty ``applicable:False``
+	shape with no admin round-trip."""
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
 	if not getattr(settings, "proxy_active", 0):
+		# Blank/unset llm_auth_mode coerces to "api_key" — the field is reqd with
+		# that default, and the two other reads in this file (account.py:688, :1511)
+		# treat a blank the same way, so a legacy row with no auth mode must still
+		# get its BYO-key cost, not fall through to the empty shape.
+		if (getattr(settings, "llm_auth_mode", "") or "api_key").strip() == "api_key":
+			return _direct_llm_usage()
 		return {
 			"applicable": False,
 			"period": None,
@@ -1067,6 +1078,52 @@ def get_llm_usage() -> dict:
 	data = _surface(admin_client.get_llm_usage) or {}
 	data["applicable"] = True
 	return data
+
+
+def _direct_llm_usage() -> dict:
+	"""Real cost for a DIRECT (BYO api-key, no Bifrost sidecar) tenant: this
+	month's tenant-wide per-model token totals, priced off the admin
+	catalog's ``input_price_per_1m_usd`` / ``output_price_per_1m_usd``.
+
+	Returns the SAME shape ``get_llm_usage`` returns for a proxied tenant, so
+	the Billing/Metering chart renders it with no frontend change - see
+	``frontend/src/charts/usageCharts.js`` for the ``per_model`` row contract
+	(``{model, provider, tokens_in, tokens_out, cost_usd}``) this must match."""
+	from jarvis.chat import pricing, usage
+
+	month = usage.current_month_key()
+	per_model = []
+	tokens_in_total = 0
+	tokens_out_total = 0
+	cost_total = 0.0
+	for row in usage.tenant_wide_per_model_tokens(month):
+		model = row.get("model")
+		tokens_in = int(row.get("in_") or 0)
+		tokens_out = int(row.get("out_") or 0)
+		price_in, price_out = pricing.price_for_model(model)
+		cost = (tokens_in / 1_000_000) * price_in + (tokens_out / 1_000_000) * price_out
+		per_model.append(
+			{
+				"model": model,
+				"provider": "",
+				"tokens_in": tokens_in,
+				"tokens_out": tokens_out,
+				"cost_usd": round(cost, 6),
+			}
+		)
+		tokens_in_total += tokens_in
+		tokens_out_total += tokens_out
+		cost_total += cost
+	cost_total = round(cost_total, 6)
+	return {
+		"applicable": True,
+		"period": month,
+		"tokens_in": tokens_in_total,
+		"tokens_out": tokens_out_total,
+		"cost_usd": cost_total,
+		"per_model": per_model,
+		"used_vs_limit": {"used_usd": cost_total, "limit_usd": None},
+	}
 
 
 @frappe.whitelist()

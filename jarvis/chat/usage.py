@@ -49,6 +49,27 @@ def current_month_key() -> str:
 	return frappe.utils.now_datetime().strftime("%Y-%m")
 
 
+def tenant_wide_per_model_tokens(month: str) -> list[dict]:
+	"""Tenant-wide (ALL users, not just the caller) per-model token totals for
+	``month``, one row per model: ``[{model, in_, out_}, ...]``.
+
+	Deliberately no ``parent IN (...)`` / session-user filter (contrast
+	``jarvis.chat.usage_push._per_model_totals``, which sums per named user for
+	the admin rollup push): a bench site IS one tenant, and the direct-tenant
+	cost figure (``jarvis.account._direct_llm_usage``) is a tenant-wide $/token
+	total, not a per-user one."""
+	return frappe.db.sql(
+		"""
+		SELECT model, SUM(month_input_tokens) AS in_, SUM(month_output_tokens) AS out_
+		FROM `tabJarvis User Model Usage`
+		WHERE parenttype = %(ptype)s AND parentfield = %(pfield)s AND month_key = %(month)s
+		GROUP BY model
+		""",
+		{"ptype": USER_SETTINGS, "pfield": MODEL_USAGE_FIELD, "month": month},
+		as_dict=True,
+	)
+
+
 def get_or_create_user_settings(user: str):
 	"""Return the ``Jarvis User Settings`` doc for ``user``, creating it if
 	absent. Insert is ``ignore_permissions`` with an explicit ``owner=user`` so
