@@ -915,14 +915,46 @@ class TestCatalogModelsForPool(FrappeTestCase):
 		{
 			"provider_id": "google",
 			"catalog_id": "gemini",
-			"models": [{"model_id": "gemini-3.6-flash", "label": "Flash", "tier": "api_key"}],
+			"subscription_label": "Google Gemini",
+			"models": [
+				{"model_id": "gemini-3.6-flash", "label": "Flash", "tier": "api_key"},
+				{"model_id": "gemini-2.5-pro", "label": "Pro", "tier": "subscription", "sort_order": 1},
+			],
 		},
 		{
 			"provider_id": "zai_coding",
 			"catalog_id": "zai_coding",
 			"models": [{"model_id": "glm-4.6", "label": "GLM 4.6", "tier": "api_key"}],
 		},
+		# OpenAI carries BOTH tiers under one entry: catalog_id "openai" for the
+		# api-key join and subscription_label "OpenAI" (-> agent_provider "openai")
+		# for the subscription join. Both land on the same output key, so the two
+		# tiers must merge rather than clobber.
+		{
+			"provider_id": "openai",
+			"catalog_id": "openai",
+			"subscription_label": "OpenAI",
+			"models": [
+				{"model_id": "gpt-5.5", "label": "GPT-5.5", "tier": "subscription", "sort_order": 1},
+				{"model_id": "gpt-5.4", "label": "GPT-5.4", "tier": "subscription", "sort_order": 2},
+				{"model_id": "gpt-5-api", "label": "GPT-5 API", "tier": "api_key", "sort_order": 1},
+			],
+		},
 	]
+
+	@staticmethod
+	def _sub_row(model, upstream, enabled=1):
+		"""A subscription pool row whose encrypted accounts blob carries `upstream`,
+		matching how the pool build derives the provider (chat/api.py:1757)."""
+		import json
+
+		return {
+			"enabled": enabled,
+			"provider": "",
+			"model": model,
+			"credential_type": "subscription",
+			"subscription_accounts": json.dumps([{"upstream": upstream}]),
+		}
 
 	def _settings(self, rows):
 		return frappe._dict(models=[frappe._dict(r) for r in rows])
@@ -961,14 +993,49 @@ class TestCatalogModelsForPool(FrappeTestCase):
 		)
 		self.assertEqual(out, {})
 
-	def test_disabled_and_subscription_rows_contribute_nothing(self):
+	def test_disabled_rows_contribute_nothing(self):
 		self.assertEqual(self._run([{"enabled": 0, "provider": "anthropic", "model": "x"}]), {})
+		# A subscription row with empty provider AND no connected account has no
+		# upstream to key on (pool_models keys such a row as "" too, so nothing to
+		# join against).
 		self.assertEqual(
-			self._run(
-				[{"enabled": 1, "provider": "anthropic", "model": "x", "credential_type": "subscription"}]
-			),
+			self._run([{"enabled": 1, "provider": "", "model": "x", "credential_type": "subscription"}]),
 			{},
 		)
+
+	def test_explicit_provider_subscription_keys_on_catalog_id_not_upstream(self):
+		"""A subscription row that carries an explicit `provider` keys its pool_models
+		entry on that provider (like an api-key row), NOT the account upstream. So
+		catalog_models must key it the same way (`gemini`), or the picker's join
+		silently omits the tenant's extra models (review #0)."""
+		row = self._sub_row("gemini-2.5-pro", "google-gemini-cli")
+		row["provider"] = "gemini"
+		out = self._run([row])
+		self.assertEqual(list(out), ["gemini"])
+		self.assertEqual([r["model"] for r in out["gemini"]], ["gemini-2.5-pro"])
+		self.assertNotIn("google-gemini-cli", out)
+
+	def test_offers_subscription_tier_for_a_connected_subscription(self):
+		"""A ChatGPT-subscription tenant sees the whole subscription tier, keyed by
+		the account upstream (`openai`) the pool row carries — not just its one
+		saved model. api_key-tier ids on the same provider must NOT leak in."""
+		out = self._run([self._sub_row("gpt-5.5", "openai")])
+		self.assertEqual(list(out), ["openai"])
+		self.assertEqual([r["model"] for r in out["openai"]], ["gpt-5.5", "gpt-5.4"])
+		self.assertEqual(out["openai"][0]["label"], "GPT-5.5")
+
+	def test_api_key_and_subscription_on_openai_merge_under_one_key(self):
+		"""catalog_id == agent_provider == "openai": both tiers land on one key and
+		must union (not clobber). The api-key row lets the picker offer gpt-5-api;
+		the subscription account lets it offer gpt-5.5 / gpt-5.4."""
+		out = self._run(
+			[
+				{"enabled": 1, "provider": "openai", "model": "gpt-5-api"},
+				self._sub_row("gpt-5.5", "openai"),
+			]
+		)
+		self.assertEqual(list(out), ["openai"])
+		self.assertEqual(sorted(r["model"] for r in out["openai"]), ["gpt-5-api", "gpt-5.4", "gpt-5.5"])
 
 	def test_legacy_google_provider_id_maps_onto_the_gemini_wire_id(self):
 		"""normalize_provider collapses the legacy `google` id onto `gemini`, which is
@@ -1185,3 +1252,41 @@ class TestAllowedPinModels(unittest.TestCase):
 		with patch.object(api, "_SUBSCRIPTION_MODELS", {"OpenAI": ["gpt-5.6", "gpt-5.5"]}):
 			allowed = api._allowed_pin_models(self._settings("OpenAI", []))
 		self.assertEqual(allowed, {"gpt-5.6", "gpt-5.5"})
+
+	def test_connected_subscription_tier_is_pinnable(self):
+		"""A ChatGPT-subscription tenant (llm_provider="") stores one model but may
+		PIN any model in the connected upstream's subscription tier — display and
+		validation share _catalog_models_for_pool, so the picker and the pin agree."""
+		import json
+
+		from jarvis.chat import api
+
+		catalog = [
+			{
+				"catalog_id": "openai",
+				"subscription_label": "OpenAI",
+				"models": [
+					{"model_id": "gpt-5.5", "tier": "subscription"},
+					{"model_id": "gpt-5.4", "tier": "subscription"},
+				],
+			}
+		]
+		sub_row = SimpleNamespace(
+			model="gpt-5.5",
+			enabled=1,
+			provider="",
+			credential_type="subscription",
+			subscription_accounts=json.dumps([{"upstream": "openai"}]),
+		)
+		settings = SimpleNamespace(llm_provider="", models=[sub_row])
+		# Patch _SUBSCRIPTION_MODELS too: leaving the real lazy map in place would
+		# resolve it against the tiny patched catalog and cache that on frappe.local,
+		# truncating the subscription catalogue for later tests. It is "" here anyway.
+		with (
+			patch("jarvis.admin_client.get_model_catalog", return_value=catalog),
+			patch.object(api, "_SUBSCRIPTION_MODELS", {}),
+		):
+			allowed = api._allowed_pin_models(settings)
+		# the saved model AND its sibling in the same subscription tier
+		self.assertIn("gpt-5.5", allowed)
+		self.assertIn("gpt-5.4", allowed)
