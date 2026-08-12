@@ -136,7 +136,12 @@ def creatable_scopes(user: str | None = None) -> list[str]:
 		return ["Org", "Role", "User"]
 	roles = set(frappe.get_roles(user))
 	out: list[str] = []
-	if _is_wiki_manager(roles):
+	# Only offer Role when the curator actually holds a targetable role. A wiki
+	# manager who holds only blanket roles (e.g. a Jarvis Admin with no
+	# department role) has an empty manageable_roles(); offering "Role" there
+	# stranded the New-page dialog on scope=Role with an empty, unsubmittable
+	# role picker (creatable_scopes and manageable_roles must agree).
+	if _is_wiki_manager(roles) and manageable_roles(user):
 		out.append("Role")
 	if _is_wiki_user(roles):
 		out.append("User")

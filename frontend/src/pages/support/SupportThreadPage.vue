@@ -47,36 +47,9 @@
 				     so bubbles/rows read as a chat thread instead of stretching
 				     full-bleed with the user's replies hugging the far edge. -->
 				<div class="jv-sup-thread-inner">
-					<!-- Ticket-level fallback only: files a NEW ticket's opening message
-					     attaches now ride the opening Communication and render inline
-					     in that bubble instead (see SupportNewPage's openingComm). This
-					     block only ever fires for a ticket opened before that shipped,
-					     or on a Helpdesk build that doesn't auto-mirror the opening
-					     message - hence the caption, so a legacy cluster of files reads
-					     as "from opening this ticket", not as an unexplained orphan list. -->
-					<div v-if="ticketAttachments.length" class="jv-sup-files-wrap">
-						<span class="jv-sup-files-label"
-							>Attached when this ticket was opened</span
-						>
-						<div class="jv-sup-files">
-							<!-- Same filename-chip treatment as every other attachment (see
-							     Message's imagesAsChips) - an image here used to get a bare
-							     56px crop with no name at all, worse than the "vague" preview
-							     everything else was fixed for. -->
-							<a
-								v-for="a in ticketAttachments"
-								:key="a.name"
-								class="jv-sup-file"
-								:href="a.file_url"
-								target="_blank"
-								rel="noopener"
-							>
-								<FeatherIcon name="paperclip" class="jv-sup-file-clip" />{{
-									a.title
-								}}
-							</a>
-						</div>
-					</div>
+					<!-- Opening (ticket-level) attachments are merged into the opening
+					     message by displayMessages, so they read as part of that message
+					     instead of a captioned slab above the thread. -->
 
 					<!-- Reachable: a brand-new ticket created with an empty body and no
 					     files has zero Communications (the initial text is the HD Ticket's
@@ -258,7 +231,8 @@ function attachmentsOf(m) {
 	return ((m && m.attachments) || []).map(classifyAttachment);
 }
 
-// Ticket-level attachments (shown above the message list) share classifyAttachment
+// Ticket-level attachments (merged into the opening message by displayMessages)
+// share classifyAttachment
 // with the per-message path below, so `.type` still gets computed here - but the
 // template no longer branches on it (every support attachment, ticket-level or
 // per-message, renders as a plain paperclip+filename chip now; no image preview).
@@ -285,7 +259,7 @@ function downloadUrl(fileUrl) {
 // chat) so it can never split a day group of its own accord.
 const displayMessages = computed(() => {
 	let prevDay = "";
-	return store.thread.messages.map((m) => {
+	const rows = store.thread.messages.map((m) => {
 		const support = fromSupport(m);
 		const day = dayLabel(m.creation);
 		const dayDivider = day && day !== prevDay ? day : "";
@@ -302,6 +276,40 @@ const displayMessages = computed(() => {
 			dayDivider,
 		};
 	});
+	// Opening (ticket-level) files render WITH the opening message, not in a
+	// captioned slab above the thread: the CP only lists a file ticket-level when
+	// the opening message wasn't auto-mirrored to a Communication, so from the
+	// user's seat those files belong to the message they opened the ticket with.
+	// Merge them onto the first message when it is the customer's (never a Support
+	// reply); if the opening text isn't a Communication at all, carry them in a
+	// synthetic opening bubble. Dedup by file_url so a file already inline on a
+	// message never double-renders (guard for a CP that BOTH threads AND lists it).
+	const opening = ticketAttachments.value;
+	if (opening.length) {
+		const inline = new Set(
+			rows.flatMap((r) => r.attachments.map((a) => a.file_url)).filter(Boolean)
+		);
+		const fresh = opening.filter((a) => !inline.has(a.file_url));
+		if (fresh.length) {
+			const first = rows[0];
+			if (first && !first.fromSupport) {
+				first.attachments = [...fresh, ...first.attachments];
+			} else {
+				rows.unshift({
+					key: "__opening-attachments__",
+					variant: "bubble",
+					html: "",
+					attachments: fresh,
+					sender: "",
+					timestamp: "",
+					timestampFull: "",
+					fromSupport: false,
+					dayDivider: "",
+				});
+			}
+		}
+	}
+	return rows;
 });
 
 // M10: named for what this actually does — it calls store.closeTicket and the
@@ -614,46 +622,6 @@ watch(ticketName, (n) => open(n));
 	gap: 10px;
 	padding: 48px 0;
 	color: var(--text-2);
-}
-.jv-sup-files-wrap {
-	margin-bottom: 12px;
-}
-.jv-sup-files-label {
-	display: block;
-	margin-bottom: 6px;
-	font-size: 11.5px;
-	color: var(--text-3);
-}
-.jv-sup-files {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 8px;
-}
-/* Same shape as a per-message attachment chip (Message.vue's .jv-file-chip) -
-   radius, padding, font-size, icon size all match, so a file attached at
-   ticket-open time and one attached in a reply read as the same kind of
-   object, not two different ones a few pixels apart. */
-.jv-sup-file {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-	padding: 6px 11px;
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	background: var(--surface-2);
-	color: var(--link);
-	font-size: 12.5px;
-	line-height: 1.3;
-	text-decoration: none;
-	overflow-wrap: anywhere;
-}
-.jv-sup-file:hover {
-	text-decoration: underline;
-}
-.jv-sup-file-clip {
-	flex: 0 0 auto;
-	width: 13px;
-	height: 13px;
 }
 .jv-sup-avatar {
 	display: flex;

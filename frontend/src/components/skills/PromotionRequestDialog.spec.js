@@ -6,19 +6,20 @@ import path from "node:path";
 /**
  * The "Request promotion" dialog's role picker.
  *
- * Two failure modes are pinned here, because the bug that prompted them was
- * invisible to a normal unit test: the picker RENDERED fine and was simply
- * painted over. So the behaviour half is mounted, and the stacking half is
- * asserted against the stylesheet — the only place it can be checked without a
- * real browser.
+ * The picker is an INLINE search box + clickable list, NOT the frappe-ui
+ * Autocomplete: the Autocomplete's search box renders in a popover portaled
+ * OUTSIDE this reka-ui Dialog, where the Dialog's focus scope left it
+ * unclickable. The behaviour half is mounted here; the stacking half (the
+ * app-wide z-index guard other portaled pickers still rely on) is asserted
+ * against the stylesheet.
  */
 
 const rolesMock = vi.fn(async () => ({ roles: ["Sales Manager", "Accounts"] }));
 vi.mock("@/api/skills", () => ({ promotableTargetRoles: () => rolesMock() }));
 
 // frappe-ui's ESM entry does not resolve under vitest (every other spec here
-// stubs it the same way). The stubs keep the contracts this dialog relies on:
-// FormControl emits update:modelValue, Autocomplete emits an {label,value}.
+// stubs it the same way). The stub keeps the contracts this dialog relies on:
+// FormControl select emits the value on change; a text field emits on input.
 vi.mock("frappe-ui", () => ({
 	Dialog: {
 		name: "Dialog",
@@ -31,13 +32,7 @@ vi.mock("frappe-ui", () => ({
 		emits: ["update:modelValue"],
 		template: `<select v-if="type === 'select'" class="fc-select" @change="$emit('update:modelValue', $event.target.value)">
 			<option v-for="o in options || []" :key="o.value" :value="o.value">{{ o.label }}</option>
-		</select><textarea v-else class="fc-textarea" />`,
-	},
-	Autocomplete: {
-		name: "Autocomplete",
-		props: ["options", "modelValue", "placeholder"],
-		emits: ["update:modelValue"],
-		template: "<div class='autocomplete' />",
+		</select><input v-else class="fc-input" :type="type" :placeholder="placeholder" @input="$emit('update:modelValue', $event.target.value)" />`,
 	},
 	Button: { name: "Button", props: ["label", "loading", "disabled"], template: "<button />" },
 	toast: { error: vi.fn(), success: vi.fn() },
@@ -60,27 +55,44 @@ const chooseScope = async (w, value) => {
 	await flushPromises();
 };
 
+// Type into the inline role search box (a plain input, clickable inside the Dialog).
+const typeSearch = async (w, value) => {
+	const input = w.find('input[placeholder="Search your roles"]');
+	input.element.value = value;
+	await input.trigger("input");
+	await flushPromises();
+};
+
+// The role list is inline clickable options (role="option"), not a portaled popover.
+const roleOptionTexts = (w) => w.findAll('[role="option"]').map((b) => b.text());
+const pickRole = async (w, name) => {
+	const btn = w.findAll('[role="option"]').find((b) => b.text() === name);
+	await btn.trigger("click");
+	await flushPromises();
+};
+
 beforeEach(() => rolesMock.mockClear());
 
 describe("PromotionRequestDialog role picker", () => {
-	it("hides the role picker on the default Org scope", async () => {
+	it("shows no role options on the default Org scope", async () => {
 		const w = await openDialog();
-		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(false);
+		expect(roleOptionTexts(w)).toEqual([]);
 	});
 
-	it("reveals the role picker when the scope becomes Role", async () => {
+	it("lists the requester's own targetable roles when the scope becomes Role", async () => {
 		const w = await openDialog();
 		await chooseScope(w, "Role");
-		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(true);
+		expect(roleOptionTexts(w)).toEqual(["Sales Manager", "Accounts"]);
 	});
 
-	it("offers the requester's own targetable roles", async () => {
+	it("filters the list as the requester types in the (clickable) search box", async () => {
 		const w = await openDialog();
 		await chooseScope(w, "Role");
-		expect(w.findComponent({ name: "Autocomplete" }).props("options")).toEqual([
-			{ label: "Sales Manager", value: "Sales Manager" },
-			{ label: "Accounts", value: "Accounts" },
-		]);
+		await typeSearch(w, "sales");
+		expect(roleOptionTexts(w)).toEqual(["Sales Manager"]);
+		await typeSearch(w, "zzz");
+		expect(roleOptionTexts(w)).toEqual([]);
+		expect(w.text()).toContain("No roles match your search");
 	});
 
 	it("explains itself instead of showing an empty picker when the user holds no roles", async () => {
@@ -88,17 +100,14 @@ describe("PromotionRequestDialog role picker", () => {
 		const w = await openDialog();
 		await chooseScope(w, "Role");
 		expect(w.text()).toContain("You hold no roles that can be targeted");
+		expect(roleOptionTexts(w)).toEqual([]);
 	});
 
-	it("cannot submit a Role promotion until a role is chosen", async () => {
+	it("cannot submit a Role promotion until a role is picked", async () => {
 		const w = await openDialog();
 		await chooseScope(w, "Role");
 		expect(w.findComponent({ name: "Button" }).props("disabled")).toBe(true);
-		w.findComponent({ name: "Autocomplete" }).vm.$emit("update:modelValue", {
-			label: "Accounts",
-			value: "Accounts",
-		});
-		await flushPromises();
+		await pickRole(w, "Accounts");
 		expect(w.findComponent({ name: "Button" }).props("disabled")).toBe(false);
 	});
 });

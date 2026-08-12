@@ -16,7 +16,7 @@ from frappe.utils import add_to_date, now_datetime
 
 from jarvis.chat import wiki
 from jarvis.exceptions import PermissionDeniedError
-from jarvis.permissions import JARVIS_USER_ROLE
+from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE
 from jarvis.tools.read_wiki import read_wiki
 from jarvis.tools.update_wiki import update_wiki
 
@@ -191,6 +191,29 @@ class TestWikiCapsAndLanguage(_WikiScopeFixture):
 		self.assertTrue(caps["is_sm"])
 		self.assertEqual(set(caps["creatable_scopes"]), {"Org", "Role", "User"})
 		self.assertIn(TEST_ROLE, caps["manageable_roles"])
+
+	def test_manager_with_no_targetable_roles_hides_role_scope(self):
+		# A wiki manager (here a Jarvis Admin) who holds only blanket roles has an
+		# empty manageable_roles: JARVIS_ADMIN_ROLE / JARVIS_USER_ROLE / "Desk User"
+		# are all in _NON_TARGETABLE_ROLES. creatable_scopes must NOT offer "Role"
+		# then, or the New-page dialog strands on scope=Role with an empty,
+		# unsubmittable picker. "User" is still offered (an admin is a wiki user).
+		email = "wkscope-admin@test.invalid"
+		_ensure_user(email, "Wkscope Admin", ["Desk User", JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE])
+		frappe.clear_cache(user=email)
+		frappe.db.commit()
+		try:
+			frappe.set_user(email)
+			caps = wiki.get_wiki_caps()
+			self.assertFalse(caps["is_sm"])
+			self.assertEqual(caps["manageable_roles"], [])
+			self.assertNotIn("Role", caps["creatable_scopes"])
+			self.assertIn("User", caps["creatable_scopes"])
+		finally:
+			frappe.set_user("Administrator")
+			if frappe.db.exists("User", email):
+				frappe.delete_doc("User", email, ignore_permissions=True, force=True)
+			frappe.db.commit()
 
 	def test_caps_guest_rejected(self):
 		frappe.set_user("Guest")
