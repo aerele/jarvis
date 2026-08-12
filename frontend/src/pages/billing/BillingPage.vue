@@ -411,6 +411,19 @@ const currentAction = computed(() => {
 	if (canReactivate.value)
 		return { label: "Renew", note: "Renewing restores access straight away." };
 	if (cancelling.value) return { label: "", note: "Resume above to keep this plan." };
+	// Pre-expiry pay-now-to-extend. The server (can_renew / _may_renew) accepts a
+	// manual renewal on a still-running subscription that is not autocharging, and
+	// activate_and_assign stacks the new period onto the days already left rather
+	// than resetting from now. doRenew (the card's @action) sends no target_plan
+	// here, which is the same-plan renewal renew() accepts. This is a distinct
+	// offer from the "Set up auto-renewal" banner: pay once now vs arm a future
+	// mandate. Without it, an Active-with-days-left or Past-Due customer whose
+	// autorenew is off had no way to pay before lapsing.
+	if (account.value.can_renew)
+		return {
+			label: "Renew now",
+			note: "Adds a full billing period on top of the days you have left.",
+		};
 	return { label: "", note: "You are on this plan." };
 });
 

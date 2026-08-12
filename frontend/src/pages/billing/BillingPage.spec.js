@@ -195,6 +195,76 @@ describe("acceptance: renew's stuck-payment answer is no longer silent", () => {
 	});
 });
 
+describe("pre-expiry renew: pay now to extend before lapsing", () => {
+	// The backend (renew() / can_renew) already accepts a manual renewal on a
+	// still-running subscription and stacks the new period onto the days left.
+	// The button was the only missing piece: an Active/Past-Due customer with
+	// autorenew off used to see no pay-now action at all. The current-plan card
+	// (PlanCard) is stubbed here, so these assert on currentAction - the label the
+	// card renders - and drive doRenew directly, the same way the other renew
+	// tests in this file do.
+	it("labels the current-plan action 'Renew now' for an Active, autorenew-off, can_renew sub", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 1,
+				autorenew: 0,
+				can_reactivate: false,
+				can_renew: true,
+			})
+		);
+		expect(wrapper.vm.currentAction.label).toBe("Renew now");
+	});
+
+	it("routes the renew to the same-plan pay flow (no target_plan)", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 1,
+				autorenew: 0,
+				can_reactivate: false,
+				can_renew: true,
+			})
+		);
+		api.renewPlan.mockResolvedValue(rawOkBody({ tenant_status: "ready" }));
+
+		await wrapper.vm.doRenew();
+		await findByText(wrapper, ".dialog button", "Pay").trigger("click");
+		await flushPromises();
+
+		// A running subscription renews onto its OWN plan: no target_plan, or admin
+		// refuses it (NotLapsed).
+		expect(api.renewPlan).toHaveBeenCalledWith(undefined);
+	});
+
+	it("also labels 'Renew now' for a Past Due customer who otherwise had no CTA", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Past Due",
+				days_remaining: 2,
+				autorenew: 0,
+				can_reactivate: false,
+				can_reauthorize: false,
+				can_renew: true,
+			})
+		);
+		expect(wrapper.vm.currentAction.label).toBe("Renew now");
+	});
+
+	it("shows no renew action when the server withholds can_renew", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 10,
+				autorenew: 1,
+				can_reactivate: false,
+				can_renew: false,
+			})
+		);
+		expect(wrapper.vm.currentAction.label).toBe("");
+	});
+});
+
 describe("edge 1: double-click cannot open a second gateway object", () => {
 	it("double-clicking Check runs the healer exactly once", async () => {
 		const wrapper = await mountPage();
