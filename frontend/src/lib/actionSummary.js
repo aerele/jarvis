@@ -77,6 +77,7 @@ const CARD_KINDS = new Set([
 	"assign",
 	"skill",
 	"wiki",
+	"import",
 ]);
 
 // The structured card for a parked action ({kind, ...}), or null when the server
@@ -126,6 +127,10 @@ const RECEIPT_VERB = {
 	amend_doc: { past: "Amended", present: "amend" },
 	apply_workflow_action: { past: "Applied", present: "apply" },
 	send_email: { past: "Emailed", present: "email" },
+	// The import is only QUEUED at confirm (form_start_import kicks off a background
+	// job) - "Ran"/"Created" would falsely claim it already finished (Slice A ends at
+	// the queue; the completion tell is Slice B).
+	run_import: { past: "Queued", present: "queue" },
 };
 
 function pluralize(word, n) {

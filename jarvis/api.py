@@ -578,6 +578,7 @@ _WRITE_TOOLS = frozenset(
 		"amend_doc",
 		"delete_doc",
 		"run_method",
+		"run_import",
 		"apply_workflow_action",
 		"send_email",
 		"add_comment",
@@ -655,6 +656,7 @@ _GATED_WRITES = frozenset(
 		"amend_doc",
 		"delete_doc",
 		"run_method",
+		"run_import",
 		"apply_workflow_action",
 		"send_email",
 		"create_custom_skill",
@@ -670,7 +672,9 @@ _GATED_WRITES = frozenset(
 _WIKI_TOOLS = frozenset({"read_wiki", "update_wiki"})
 # Irreversible/consequential subset - gated even when a user has auto-apply
 # on (Task 4 uses this; define it here so the sets live together).
-_DESTRUCTIVE = frozenset({"delete_doc", "cancel_doc", "amend_doc", "send_email", "apply_workflow_action"})
+_DESTRUCTIVE = frozenset(
+	{"delete_doc", "cancel_doc", "amend_doc", "send_email", "apply_workflow_action", "run_import"}
+)
 # Writes that auto-apply may fast-path without a confirmation click. Strictly
 # the reversible create/update pair, per spec. submit_doc, run_method and every
 # _DESTRUCTIVE tool ALWAYS park even with auto-apply on: run_method's
@@ -865,6 +869,94 @@ def _pending_preview(tool: str, args: dict) -> dict:
 		# than blocking the park, so the human sees why before confirming.
 		described["note"] = f"preview unavailable: {e}"
 		return described
+
+
+def _import_park(args: dict) -> tuple[dict | None, dict | None]:
+	"""Park-time validation for ``run_import`` (analogous to the ``_DRY_RUN_ON_PARK``
+	pre-park block, but for a tool that cannot be sandbox-run). Computes the read-only
+	import preview AS THE CALLER and REFUSES - returns an error envelope, mints no token,
+	shows no card - when the import cannot run:
+
+	  * a non-importable doctype (blocked / ``allow_import`` off),
+	  * blocking warnings (invalid values / an unmapped mandatory field / Update-Upsert
+	    without an ID column) - so the human never confirms a card that imports nothing,
+	  * a caller who cannot create Data Imports (usually not a System Manager) - so a
+	    non-admin never gets a confirm-then-fail.
+
+	On success returns ``(None, preview)`` where ``preview`` carries the whole import
+	payload the card renders from (``preview["import"]``) and a described-intent note
+	(so a build_card miss still shows the guaranteed floor, never a blank card)."""
+	from jarvis.tools._import_preview import build_import_preview
+
+	if not isinstance(args, dict):
+		return _error("InvalidArgumentError", "run_import needs arguments"), None
+	# Kill-switch honored AT PARK: refuse before showing a card, never confirm-then-fail.
+	if frappe.conf.get("jarvis_import_disabled"):
+		return (
+			_error(
+				"FeatureDisabledError",
+				"imports are switched off on this site right now; ask an administrator to re-enable them.",
+			),
+			None,
+		)
+	try:
+		prev = build_import_preview(
+			doctype=args.get("doctype"),
+			file_url=args.get("file_url"),
+			filename=args.get("filename"),
+			import_type=args.get("import_type") or "Insert New Records",
+			mapping=args.get("mapping"),
+		)
+	except (JarvisError, frappe.PermissionError, frappe.ValidationError) as e:
+		return _preview_error(e), None
+
+	if not prev.get("importable"):
+		return _error(
+			"InvalidArgumentError", prev.get("reason") or "this doctype does not allow import"
+		), None
+
+	blocking = (prev.get("warnings") or {}).get("blocking") or []
+	if blocking:
+		reasons = "; ".join(b.get("message", "") for b in blocking if b.get("message"))
+		return (
+			_error(
+				"ImportBlockedError",
+				f"the import can't run yet - {reasons}. Fix the file or adjust the column "
+				"mapping (call preview_import to see the details), then try again.",
+			),
+			None,
+		)
+
+	if not prev.get("can_run"):
+		return (
+			_error(
+				"PermissionDeniedError",
+				"you don't have permission to run imports on this site (it needs the Data "
+				"Import create permission, usually System Manager); ask an administrator.",
+			),
+			None,
+		)
+
+	# Thread the RESOLVED file identity into the stored args so confirm imports the EXACT
+	# file the card showed. A bare ``filename`` re-resolves to "most recent readable match"
+	# at confirm and could drift to a different file uploaded meanwhile. ``args`` is the
+	# same dict api.py stores in the confirmation token, so this canonicalizes both.
+	resolved = prev.get("resolved_file_url")
+	if resolved:
+		args["file_url"] = resolved
+		args.pop("filename", None)
+
+	# Nothing here should surface a validation msgprint on the success path.
+	frappe.clear_messages()
+
+	preview = {
+		"preview": False,
+		"described": True,
+		"summary": _describe_call("run_import", args),
+		"note": f"not a dry run - this imports the file into {prev.get('doctype')} on confirm",
+		"import": prev,
+	}
+	return None, preview
 
 
 # --- Enriched write-error translation (shared by the model/confirm path here
@@ -1270,7 +1362,15 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# preview_doc). Every other gated write (submit/cancel/delete/amend get a
 		# sandboxed preview; send_email/run_method/create_custom_skill/update_wiki
 		# a described-intent one) parks via _pending_preview exactly as before.
-		if tool in _DRY_RUN_ON_PARK:
+		if tool == "run_import":
+			# run_import cannot be sandbox-run (staging + a background job), so it has its
+			# own pre-park validation: refuse a blocked / non-importable / non-admin import
+			# BEFORE minting a token, exactly as _DRY_RUN_ON_PARK refuses a doomed create.
+			rejected, preview = _import_park(args)
+			if rejected is not None:
+				frappe.clear_messages()
+				return rejected
+		elif tool in _DRY_RUN_ON_PARK:
 			try:
 				preview = _run_preview(tool, args)
 			except (
