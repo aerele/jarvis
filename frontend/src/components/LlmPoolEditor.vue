@@ -2758,10 +2758,20 @@ function copyTextWithFallback(text) {
 
 // Compact "source" label for a list row (unified failover list, !singleMode
 // only) - e.g. "Subscription · OpenAI" / "API key · Anthropic".
+// Subscription upstream key (openai / google / xai / kimi — what the pool editor
+// stores, same keys ProviderLogo maps to a logo) -> its display label. Without the
+// full map, Kimi/xAI/Gemini rows all mislabelled as "OpenAI" while showing the
+// correct logo. Unknown upstream falls back to the raw value, never a wrong vendor.
+const SUB_UPSTREAM_LABELS = {
+	openai: "OpenAI",
+	google: "Google Gemini",
+	xai: "xAI Grok",
+	kimi: "Kimi (Moonshot)",
+};
 function sourceChip(row) {
 	if (!row) return "";
 	if (row.credentialType === "subscription")
-		return "Subscription · " + (row.upstream === "google" ? "Google" : "OpenAI");
+		return "Subscription · " + (SUB_UPSTREAM_LABELS[row.upstream] || row.upstream || "OpenAI");
 	return "API key · " + (row.provider || "—");
 }
 
