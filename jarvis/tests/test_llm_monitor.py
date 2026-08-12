@@ -5,6 +5,11 @@ for proxy tenants; admin error surfaces as frappe.ValidationError),
 account.get_llm_connection_status (field remapping; no token material) and
 account.get_llm_connection_health (the member-tier verdict, jarvis#711: what a
 non-admin may learn about the workspace, and what the payload must never carry).
+
+Also: account._direct_llm_usage (real $/token cost for a DIRECT api-key
+tenant - tenant-wide per-model token aggregation x admin-catalog pricing),
+and its two building blocks, jarvis.chat.pricing.price_for_model and
+jarvis.chat.usage.tenant_wide_per_model_tokens.
 """
 
 from unittest.mock import patch
@@ -14,20 +19,59 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import account, admin_client
 from jarvis.account import _has_llm_config
+from jarvis.chat import pricing, usage
 from jarvis.exceptions import AdminValidationError
 from jarvis.permissions import ensure_jarvis_user_role
+
+DIRECT_COST_USER_A = "jarvis-directcost-a@example.test"
+DIRECT_COST_USER_B = "jarvis-directcost-b@example.test"
+_DIRECT_COST_USERS = (DIRECT_COST_USER_A, DIRECT_COST_USER_B)
+
+
+def _ensure_direct_cost_user(email: str) -> None:
+	if not frappe.db.exists("User", email):
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Jarvis",
+				"last_name": "DirectCostTest",
+				"enabled": 1,
+				"send_welcome_email": 0,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
+
+
+def _seed_model_usage(user: str, model: str, month: str, tokens_in: int, tokens_out: int) -> None:
+	"""Seed one (user, model, month) ``Jarvis User Model Usage`` row via the
+	same insert-or-merge path ``record_turn_usage`` uses, so the fixture is
+	shaped exactly like real accumulated usage."""
+	usage.get_or_create_user_settings(user)
+	usage._upsert_model_usage(user, model, month, tokens_in, tokens_out, frappe.utils.now_datetime())
+
+
+def _cleanup_direct_cost_rows() -> None:
+	for email in _DIRECT_COST_USERS:
+		for name in frappe.get_all(usage.USER_SETTINGS, filters={"user": email}, pluck="name"):
+			frappe.delete_doc(usage.USER_SETTINGS, name, ignore_permissions=True, force=True)
 
 
 class TestGetLlmUsage(FrappeTestCase):
 	def setUp(self):
 		self._proxy = frappe.db.get_single_value("Jarvis Settings", "proxy_active")
+		self._auth_mode = frappe.db.get_single_value("Jarvis Settings", "llm_auth_mode")
 
 	def tearDown(self):
 		frappe.db.set_single_value("Jarvis Settings", "proxy_active", self._proxy or 0)
+		frappe.db.set_single_value("Jarvis Settings", "llm_auth_mode", self._auth_mode or "api_key")
 		frappe.db.commit()
 
-	def test_direct_tenant_returns_empty_shape_without_admin_call(self):
+	def test_non_api_key_direct_tenant_returns_empty_shape_without_admin_call(self):
+		# subscription/oauth tenants have no per-tenant $/token figure to report -
+		# only a BYO api-key direct tenant does (see TestDirectLlmUsage below).
 		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
+		frappe.db.set_single_value("Jarvis Settings", "llm_auth_mode", "subscription")
 		frappe.db.commit()
 		with patch.object(admin_client, "get_llm_usage") as m:
 			out = account.get_llm_usage()
@@ -63,6 +107,207 @@ class TestGetLlmUsage(FrappeTestCase):
 		):
 			with self.assertRaises(frappe.ValidationError):
 				account.get_llm_usage()
+
+
+# --------------------------------------------------------------------------- #
+# Direct-tenant (BYO api-key, no Bifrost) real cost: account._direct_llm_usage
+# --------------------------------------------------------------------------- #
+# Model ids unique to this test module (never real catalog/provider ids): the
+# aggregation under test is DELIBERATELY tenant-wide with no fixture-user
+# filter (see usage.tenant_wide_per_model_tokens's docstring), and a shared
+# local dev site can already carry real per-model usage rows for the current
+# month. Using ids no real traffic would ever report keeps these assertions
+# exact without requiring - or risking - a clean table.
+_PRICED_MODEL = "zz-jarvis-test-direct-cost-priced"
+_ZERO_PRICED_MODEL = "zz-jarvis-test-direct-cost-zero-priced"
+_UNKNOWN_MODEL = "zz-jarvis-test-direct-cost-unknown"
+
+_FAKE_CATALOG = [
+	{
+		"provider_id": "openai",
+		"label": "OpenAI",
+		"models": [
+			{
+				"model_id": _PRICED_MODEL,
+				"label": _PRICED_MODEL,
+				"input_price_per_1m_usd": 2.0,
+				"output_price_per_1m_usd": 10.0,
+			},
+			{
+				# Present in the catalog but explicitly priced at 0 - a second
+				# shape of "unpriced" alongside a model absent from the catalog
+				# entirely (TestDirectLlmUsage.test_unpriced_model_costs_zero).
+				"model_id": _ZERO_PRICED_MODEL,
+				"label": _ZERO_PRICED_MODEL,
+				"input_price_per_1m_usd": 0,
+				"output_price_per_1m_usd": 0,
+			},
+		],
+	}
+]
+
+
+class TestDirectLlmUsage(FrappeTestCase):
+	def setUp(self):
+		self._proxy = frappe.db.get_single_value("Jarvis Settings", "proxy_active")
+		self._auth_mode = frappe.db.get_single_value("Jarvis Settings", "llm_auth_mode")
+		frappe.set_user("Administrator")
+		_ensure_direct_cost_user(DIRECT_COST_USER_A)
+		_ensure_direct_cost_user(DIRECT_COST_USER_B)
+		_cleanup_direct_cost_rows()
+		frappe.db.set_single_value("Jarvis Settings", "proxy_active", 0)
+		frappe.db.set_single_value("Jarvis Settings", "llm_auth_mode", "api_key")
+		frappe.db.commit()
+		# Per-request pricing cache (jarvis.chat.pricing) must not leak a stale
+		# map from an earlier test's mocked catalog into this one.
+		if hasattr(frappe.local, "_jarvis_model_price_map"):
+			del frappe.local._jarvis_model_price_map
+
+	def tearDown(self):
+		_cleanup_direct_cost_rows()
+		frappe.db.set_single_value("Jarvis Settings", "proxy_active", self._proxy or 0)
+		frappe.db.set_single_value("Jarvis Settings", "llm_auth_mode", self._auth_mode or "api_key")
+		frappe.db.commit()
+		if hasattr(frappe.local, "_jarvis_model_price_map"):
+			del frappe.local._jarvis_model_price_map
+
+	def test_direct_tenant_reports_real_tenant_wide_cost(self):
+		month = usage.current_month_key()
+		# Two DIFFERENT users, same model: usage must be SUMMED tenant-wide,
+		# not scoped to one user.
+		_seed_model_usage(DIRECT_COST_USER_A, _PRICED_MODEL, month, tokens_in=1000, tokens_out=500)
+		_seed_model_usage(DIRECT_COST_USER_B, _PRICED_MODEL, month, tokens_in=2000, tokens_out=1000)
+		# A model this catalog never priced (0 = unpriced) on a third user.
+		_seed_model_usage(DIRECT_COST_USER_B, _UNKNOWN_MODEL, month, tokens_in=100, tokens_out=50)
+		frappe.db.commit()
+
+		with patch.object(admin_client, "get_model_catalog", return_value=_FAKE_CATALOG):
+			out = account.get_llm_usage()
+
+		self.assertIs(out["applicable"], True)
+		self.assertEqual(out["period"], month)
+
+		# The shared local site already carries real usage for OTHER models
+		# this month (see the module docstring above), so assert only on this
+		# test's own fixture rows, not on the full per_model set/totals.
+		by_model = {row["model"]: row for row in out["per_model"]}
+		self.assertIn(_PRICED_MODEL, by_model)
+		self.assertIn(_UNKNOWN_MODEL, by_model)
+
+		priced = by_model[_PRICED_MODEL]
+		self.assertEqual(set(priced), {"model", "provider", "tokens_in", "tokens_out", "cost_usd"})
+		self.assertEqual(priced["provider"], "")
+		self.assertEqual(priced["tokens_in"], 3000)
+		self.assertEqual(priced["tokens_out"], 1500)
+		# (3000/1e6)*2.0 + (1500/1e6)*10.0 = 0.006 + 0.015 = 0.021
+		self.assertAlmostEqual(priced["cost_usd"], 0.021, places=6)
+
+		unknown = by_model[_UNKNOWN_MODEL]
+		self.assertEqual(unknown["tokens_in"], 100)
+		self.assertEqual(unknown["tokens_out"], 50)
+		self.assertEqual(unknown["cost_usd"], 0.0)
+
+		# Tenant-wide totals must be AT LEAST this fixture's contribution (the
+		# site may carry other real usage this month on top of it).
+		self.assertGreaterEqual(out["tokens_in"], 3100)
+		self.assertGreaterEqual(out["tokens_out"], 1550)
+		self.assertGreaterEqual(out["cost_usd"], 0.021 - 1e-9)
+		self.assertEqual(out["used_vs_limit"], {"used_usd": out["cost_usd"], "limit_usd": None})
+
+	def test_unpriced_model_costs_zero(self):
+		month = usage.current_month_key()
+		_seed_model_usage(DIRECT_COST_USER_A, _ZERO_PRICED_MODEL, month, tokens_in=10_000, tokens_out=5_000)
+		frappe.db.commit()
+
+		with patch.object(admin_client, "get_model_catalog", return_value=_FAKE_CATALOG):
+			out = account.get_llm_usage()
+
+		by_model = {row["model"]: row for row in out["per_model"]}
+		self.assertIn(_ZERO_PRICED_MODEL, by_model)
+		self.assertEqual(by_model[_ZERO_PRICED_MODEL]["tokens_in"], 10_000)
+		self.assertEqual(by_model[_ZERO_PRICED_MODEL]["tokens_out"], 5_000)
+		self.assertEqual(by_model[_ZERO_PRICED_MODEL]["cost_usd"], 0.0)
+
+	def test_calls_the_direct_path_and_never_the_proxy_path(self):
+		# No fixture rows seeded here: this only exercises the code path
+		# (applicable / shape / which admin_client call fires), since the
+		# shared local site's tenant-wide total is never guaranteed to be
+		# zero (see the module docstring above).
+		with (
+			patch.object(admin_client, "get_model_catalog", return_value=_FAKE_CATALOG),
+			patch.object(admin_client, "get_llm_usage") as proxy_mock,
+		):
+			out = account.get_llm_usage()
+		self.assertIs(out["applicable"], True)
+		self.assertIsInstance(out["per_model"], list)
+		self.assertGreaterEqual(out["tokens_in"], 0)
+		self.assertGreaterEqual(out["cost_usd"], 0.0)
+		# The direct path never touches the proxy-path admin_client call.
+		proxy_mock.assert_not_called()
+
+
+class TestPriceForModel(FrappeTestCase):
+	def setUp(self):
+		if hasattr(frappe.local, "_jarvis_model_price_map"):
+			del frappe.local._jarvis_model_price_map
+
+	def tearDown(self):
+		if hasattr(frappe.local, "_jarvis_model_price_map"):
+			del frappe.local._jarvis_model_price_map
+
+	def test_known_model_returns_its_catalog_price(self):
+		with patch.object(admin_client, "get_model_catalog", return_value=_FAKE_CATALOG):
+			self.assertEqual(pricing.price_for_model(_PRICED_MODEL), (2.0, 10.0))
+
+	def test_unknown_model_returns_zero(self):
+		with patch.object(admin_client, "get_model_catalog", return_value=_FAKE_CATALOG):
+			self.assertEqual(pricing.price_for_model("nonexistent-model-xyz"), (0.0, 0.0))
+
+	def test_catalog_failure_never_raises(self):
+		with patch.object(admin_client, "get_model_catalog", side_effect=RuntimeError("boom")):
+			self.assertEqual(pricing.price_for_model(_PRICED_MODEL), (0.0, 0.0))
+
+	def test_result_is_cached_per_request(self):
+		with patch.object(admin_client, "get_model_catalog", return_value=_FAKE_CATALOG) as m:
+			pricing.price_for_model(_PRICED_MODEL)
+			pricing.price_for_model(_ZERO_PRICED_MODEL)
+		m.assert_called_once()
+
+
+class TestTenantWidePerModelTokens(FrappeTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_ensure_direct_cost_user(DIRECT_COST_USER_A)
+		_ensure_direct_cost_user(DIRECT_COST_USER_B)
+		_cleanup_direct_cost_rows()
+
+	def tearDown(self):
+		_cleanup_direct_cost_rows()
+		frappe.db.commit()
+
+	def test_sums_across_users_and_keeps_models_separate(self):
+		month = usage.current_month_key()
+		_seed_model_usage(DIRECT_COST_USER_A, _PRICED_MODEL, month, tokens_in=1000, tokens_out=500)
+		_seed_model_usage(DIRECT_COST_USER_B, _PRICED_MODEL, month, tokens_in=2000, tokens_out=1000)
+		_seed_model_usage(DIRECT_COST_USER_B, _UNKNOWN_MODEL, month, tokens_in=300, tokens_out=100)
+		frappe.db.commit()
+
+		rows = {r["model"]: r for r in usage.tenant_wide_per_model_tokens(month)}
+		self.assertEqual(rows[_PRICED_MODEL]["in_"], 3000)
+		self.assertEqual(rows[_PRICED_MODEL]["out_"], 1500)
+		self.assertEqual(rows[_UNKNOWN_MODEL]["in_"], 300)
+		self.assertEqual(rows[_UNKNOWN_MODEL]["out_"], 100)
+
+	def test_no_rows_returns_empty_list(self):
+		# A month nothing (real or fixture) ever posts to.
+		self.assertEqual(usage.tenant_wide_per_model_tokens("1999-01"), [])
+
+	def test_a_different_month_is_not_included(self):
+		month = usage.current_month_key()
+		_seed_model_usage(DIRECT_COST_USER_A, _PRICED_MODEL, month, tokens_in=1000, tokens_out=500)
+		frappe.db.commit()
+		rows = usage.tenant_wide_per_model_tokens("1999-01")
+		self.assertEqual(rows, [])
 
 
 class TestGetLlmConnectionStatus(FrappeTestCase):
