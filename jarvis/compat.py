@@ -174,6 +174,18 @@ def itemised_tax(doc, with_tax_account: bool = False) -> dict:
 	taxless document, not a stale one. ``get_itemised_tax`` has no ``None``
 	guard of its own, so seed the empty case directly rather than let that
 	iterate a ``None`` too.
+
+	The recompute can ALSO raise on its own, for reasons that have nothing to
+	do with tax breakup: ``calculate_taxes_and_totals`` reaches
+	``get_round_off_applicable_accounts(self.doc.company, ...)``, and that
+	callee's ``company: str`` type annotation rejects ``None`` outright on a
+	document that never had a company set - real on a bare ``frappe.new_doc()``
+	(the CI bench, no default company configured; a customer's local dev bench
+	with one configured never hits this, which is exactly how it first shipped
+	green). A document this incomplete has nothing to report either way, so
+	swallow the failure the same way missing items already degrades to `[]` -
+	this dispatch's contract is "never raise on a taxless/incomplete
+	document," not "compute totals correctly for one."
 	"""
 	from erpnext.controllers.taxes_and_totals import get_itemised_tax
 
@@ -188,7 +200,10 @@ def itemised_tax(doc, with_tax_account: bool = False) -> dict:
 	if first_param == "taxes":
 		return get_itemised_tax(doc.get("taxes"), with_tax_account=with_tax_account)
 	if doc.get("_item_wise_tax_details") is None and hasattr(doc, "calculate_taxes_and_totals"):
-		doc.calculate_taxes_and_totals()
+		try:
+			doc.calculate_taxes_and_totals()
+		except Exception:
+			pass  # incomplete document; the None-guard below reports "no taxes"
 	if doc.get("_item_wise_tax_details") is None:
 		doc._item_wise_tax_details = []
 	return get_itemised_tax(doc, with_tax_account=with_tax_account)
@@ -198,9 +213,21 @@ def permission_conditions(engine, doctype: str, table):
 	"""Row-level permission predicate for a (possibly aliased) table, either major.
 
 	Frappe 16 has ``Engine.get_permission_conditions(doctype, table)``, which
-	builds the predicate against the pypika table it is handed and so is
-	alias-safe. Frappe 15 has no such method at all: its permission logic lives
-	in a separate ``Permission`` class that only does doctype-level
+	builds ITS OWN role/user-permission conditions against the pypika table it
+	is handed - genuinely alias-safe. But it also ANDs in this doctype's
+	``permission_query_conditions`` hooks (``get_permission_query_conditions()``),
+	and those return raw SQL strings hardcoded to the REAL table name (e.g.
+	``ToDo``'s is literally ``` `tabToDo`.allocated_to = ... ```, byte-identical
+	on 15 and 16). Handed our caller's aliased table, the 16 method ANDs that raw
+	fragment straight into the outer WHERE with no protection, and MariaDB
+	rejects it with "Unknown column" the moment a restricted user hits a hooked
+	doctype through ``jarvis.tools.query``'s alias-everything convention. See
+	``_permission_conditions_v16_with_hook`` for the fix, applied only when this
+	doctype actually has such a hook (a small minority - most doctypes have none,
+	and the direct 16 path stays the fast, no-subquery path for them).
+
+	Frappe 15 has no ``Engine.get_permission_conditions`` at all: its permission
+	logic lives in a separate ``Permission`` class that only does doctype-level
 	``has_permission`` checks and yields no row predicate. Calling the 16 method
 	on 15 raised ``AttributeError``, escaped the tool layer (the caller catches
 	only ``PermissionError``) and returned HTTP 500 for every ``query`` call.
@@ -209,10 +236,41 @@ def permission_conditions(engine, doctype: str, table):
 	unrestricted. Raises ``frappe.PermissionError`` on both majors when the user
 	has neither role permissions nor shared documents; the caller normalises it.
 	"""
-	if hasattr(engine, "get_permission_conditions"):  # Frappe 16
-		return engine.get_permission_conditions(doctype, table)
-	user = getattr(engine, "user", None) or frappe.session.user
-	return _permission_conditions_v15(doctype, table, user)
+	if not hasattr(engine, "get_permission_conditions"):  # Frappe 15
+		user = getattr(engine, "user", None) or frappe.session.user
+		return _permission_conditions_v15(doctype, table, user)
+	if _has_raw_permission_query_condition_hook(doctype):
+		return _permission_conditions_v16_with_hook(engine, doctype, table)
+	return engine.get_permission_conditions(doctype, table)
+
+
+def _has_raw_permission_query_condition_hook(doctype: str) -> bool:
+	"""True iff any installed app registers a ``permission_query_conditions``
+	hook for this doctype (doctype-specific or the ``"*"`` wildcard) - the same
+	lookup ``Engine.get_permission_query_conditions`` makes internally, so this
+	probe sees exactly the hooks that would fire."""
+	hooks = frappe.get_hooks("permission_query_conditions", {})
+	return bool(hooks.get(doctype) or hooks.get("*"))
+
+
+def _permission_conditions_v16_with_hook(engine, doctype: str, table):
+	"""Frappe 16, doctype has a raw-SQL permission_query_conditions hook.
+
+	Ask ``Engine.get_permission_conditions`` for the condition against the
+	REAL (unaliased) table instead of the caller's ``table`` - every part of the
+	result, the pypika-built role/user-permission terms AND the raw-SQL hook
+	fragment, then consistently reference the real table name, so the composed
+	criterion is valid SQL on its own. Scope it in a subquery over that real
+	table (mirrors ``_permission_conditions_v15`` exactly, just sourcing the
+	condition from the 16 engine instead of ``DatabaseQuery``), and restrict the
+	caller's (possibly aliased) ``table`` by name membership - alias-safe
+	either way, since ``.isin()`` never depends on the left side's alias."""
+	real_table = frappe.qb.DocType(doctype)
+	cond = engine.get_permission_conditions(doctype, real_table)
+	if cond is None:
+		return None
+	sub = frappe.qb.from_(real_table).select(real_table.name).where(cond)
+	return table.name.isin(sub)
 
 
 def _permission_conditions_v15(doctype: str, table, user: str):

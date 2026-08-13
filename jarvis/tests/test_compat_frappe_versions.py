@@ -184,15 +184,27 @@ class TestPermissionConditionsAcrossMajors(FrappeTestCase):
 		self.assertLess(len(rows), frappe.db.count("ToDo"))
 
 	def test_gate_survives_an_aliased_spec(self):
-		"""The v15 predicate is built over the unaliased table on purpose: the
-		framework emits `tabToDo`-qualified SQL, which cannot resolve against
-		``FROM `tabToDo` `td```."""
+		"""ToDo's own permission_query_conditions hook emits raw
+		``tabToDo``-qualified SQL (byte-identical on 15 and 16), which cannot
+		resolve against ``FROM `tabToDo` `td```. Both majors' branches of
+		``compat.permission_conditions`` route a hooked doctype's condition
+		through a subquery on the UNALIASED table for exactly this reason - see
+		``_permission_conditions_v15`` and ``_permission_conditions_v16_with_hook``."""
 		from jarvis.tools.query import query
 
 		frappe.set_user(self.USER)
 		plain = {r["name"] for r in query({"from": "ToDo", "fields": ["name"], "limit": 500})["rows"]}
 		aliased = query({"from": "ToDo", "alias": "td", "fields": ["td.name"], "limit": 500})["rows"]
 		self.assertEqual({r["name"] for r in aliased}, plain)
+
+	def test_hook_probe_is_selective(self):
+		"""The subquery wrap (this class, above) is a real SQL-shape cost - it
+		must apply ONLY to a doctype that actually has a raw-SQL
+		permission_query_conditions hook (ToDo is one), not to every doctype on
+		Frappe 16. No mocking: reads the real installed hooks, same lookup
+		``Engine.get_permission_query_conditions`` makes internally."""
+		self.assertTrue(compat._has_raw_permission_query_condition_hook("ToDo"))
+		self.assertFalse(compat._has_raw_permission_query_condition_hook("Currency"))
 
 	def test_unreadable_doctype_is_denied_cleanly(self):
 		"""frappe.PermissionError from the framework must arrive as our own
