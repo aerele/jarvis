@@ -17,8 +17,9 @@
 				<!-- the jarvis mark, 28×28 rounded — rendered from JarvisMark rather than
 				     a hand-pasted copy of its gradient + path data. That duplication is
 				     exactly what let the chat welcome mark drift to a different colour
-				     (design.md §2.2). -->
-				<JarvisMark :size="28" :radius="7" :peek="brandPeek" />
+				     (design.md §2.2). idlePeek: this is the one mark that sits resting on
+				     every route, so it's the chosen surface for the designed idle blink. -->
+				<JarvisMark :size="28" :radius="7" :peek="brandPeek" idlePeek />
 				<!-- Resting badge: a waiting reply has to register on every route, not
 				     only while the user happens to be in Chat - restoring this (it was
 				     briefly dropped when ChatView grew its own header jv-support-dot,

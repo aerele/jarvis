@@ -22,7 +22,7 @@
 	<span
 		v-else
 		class="jv-mark"
-		:class="[`jv-mood-${mood}`, { 'jv-hoverpeek': hoverPeek, 'jv-peek-on': peek }]"
+		:class="[`jv-mood-${mood}`, { 'jv-hoverpeek': hoverPeek, 'jv-peek-on': peek || autoPeek }]"
 		:style="markStyle"
 	>
 		<svg
@@ -42,7 +42,7 @@
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { brandLogoUrl } from "@/branding";
 import { BRAND_STAR_PATH } from "@/lib/brand";
 
@@ -66,11 +66,98 @@ const props = defineProps({
 	    surface (e.g. the whole sidebar brand card) drive the same reveal that
 	    hoverPeek gives on the mark alone. */
 	peek: { type: Boolean, default: false },
+	/** Opt-in: while resting ("star"), blink on its own every few seconds via
+	    the same peek reveal hover/hoverPeek trigger on demand — the "idle"
+	    animation the mark was designed to have. Off by default: message rows
+	    render dozens of marks at once and only a chosen resting surface (the
+	    sidebar brand mark) should breathe unprompted. Tracks prefers-reduced-motion
+	    LIVE via a matchMedia change listener (not just at mount): the timer
+	    stops the moment the OS preference flips on mid-session, and resumes if
+	    it flips off again, so a mid-session toggle is always honored. */
+	idlePeek: { type: Boolean, default: false },
 });
 
-// The face element only exists when something can show it: an active mood, or a
-// hover-peek surface (where mood stays "star" but hover reveals the eyes).
-const hasFace = computed(() => props.mood !== "star" || props.hoverPeek || props.peek);
+// The face element only exists when something can show it: an active mood, a
+// hover-peek surface (where mood stays "star" but hover reveals the eyes), or
+// an idle auto-peek cycle.
+const hasFace = computed(
+	() => props.mood !== "star" || props.hoverPeek || props.peek || autoPeek.value
+);
+
+// ---- idle auto-peek: the same friendly blink hoverPeek/peek give on demand,
+// but self-triggered every IDLE_PEEK_INTERVAL_MS while nothing else is
+// driving the face. Only meaningful while mood is "star" - an active mood
+// already owns the face.
+const IDLE_PEEK_INTERVAL_MS = 8000;
+const IDLE_PEEK_HOLD_MS = 1800; // one jvm-blink cycle, then back to resting
+const autoPeek = ref(false);
+let idleTimeoutId = null;
+let idleHoldTimeoutId = null;
+let reducedMotionMql = null;
+
+function stopIdlePeek() {
+	if (idleTimeoutId) {
+		window.clearTimeout(idleTimeoutId);
+		idleTimeoutId = null;
+	}
+	if (idleHoldTimeoutId) {
+		window.clearTimeout(idleHoldTimeoutId);
+		idleHoldTimeoutId = null;
+	}
+	autoPeek.value = false;
+}
+
+function scheduleIdlePeek() {
+	idleTimeoutId = window.setTimeout(() => {
+		if (props.mood === "star") {
+			autoPeek.value = true;
+			idleHoldTimeoutId = window.setTimeout(() => {
+				autoPeek.value = false;
+			}, IDLE_PEEK_HOLD_MS);
+		}
+		scheduleIdlePeek();
+	}, IDLE_PEEK_INTERVAL_MS);
+}
+
+// Reacts to the OS preference changing mid-session, not just its value at
+// mount: reduced-motion turning on stops the timer and clears any peek in
+// progress; turning back off resumes scheduling.
+function handleReducedMotionChange(e) {
+	if (e.matches) {
+		stopIdlePeek();
+	} else if (props.idlePeek) {
+		scheduleIdlePeek();
+	}
+}
+
+// A mood taking over the face (e.g. a reply starts streaming) mid-hold must
+// not leave jv-peek-on layered on top of it - the new mood should own the
+// face immediately, not after the peek's own hold timer runs out.
+watch(
+	() => props.mood,
+	(mood) => {
+		if (mood !== "star" && autoPeek.value) {
+			if (idleHoldTimeoutId) {
+				window.clearTimeout(idleHoldTimeoutId);
+				idleHoldTimeoutId = null;
+			}
+			autoPeek.value = false;
+		}
+	}
+);
+
+onMounted(() => {
+	if (!props.idlePeek) return;
+	if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+	reducedMotionMql = window.matchMedia("(prefers-reduced-motion: reduce)");
+	reducedMotionMql.addEventListener("change", handleReducedMotionChange);
+	if (!reducedMotionMql.matches) scheduleIdlePeek();
+});
+
+onBeforeUnmount(() => {
+	stopIdlePeek();
+	reducedMotionMql?.removeEventListener("change", handleReducedMotionChange);
+});
 
 const markStyle = computed(() => ({
 	width: `${props.size}px`,
@@ -239,9 +326,11 @@ const markStyle = computed(() => ({
 }
 
 /* PEEK - resting star until triggered, then a friendly blink. Triggered by
-   hovering the mark itself (hoverPeek) or by the `peek` prop, so a larger
-   surface (e.g. the whole sidebar brand card) can drive the same reveal. Only
-   meaningful while mood is "star" (the face is otherwise hidden). */
+   hovering the mark itself (hoverPeek), by the `peek` prop (so a larger
+   surface, e.g. the whole sidebar brand card, can drive the same reveal), or
+   by `idlePeek`'s own timer toggling the same `jv-peek-on` class (see
+   scheduleIdlePeek in <script>) so the mark blinks on its own while resting.
+   Only meaningful while mood is "star" (the face is otherwise hidden). */
 .jv-hoverpeek:hover .jv-star,
 .jv-peek-on .jv-star {
 	opacity: 0;

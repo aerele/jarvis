@@ -13,6 +13,7 @@
 				'jvw-fab--dragging': dragging,
 				'jvw-fab--faded': faded && !dragging,
 				'jvw-fab--dock-left': side === 'left',
+				'jvw-fab--peek': autoPeek,
 			}"
 			:style="fabStyle"
 			:aria-label="panelOpen ? `Close ${brandName}` : `Ask ${brandName}`"
@@ -31,6 +32,18 @@
 			<svg v-if="!brandLogoUrl" viewBox="0 0 24 24" width="24" height="24" fill="#fff">
 				<path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z" />
 			</svg>
+			<!-- Blink face: DUPLICATED from JarvisMark.vue's jv-face/jv-eye + PEEK
+			     block, by necessity not choice — this widget cannot import from
+			     frontend/src or use JarvisMark itself (see panel_readiness.mjs for
+			     why). Keep this markup, the CSS below, and the idle-blink timing in
+			     ./Widget.vue's <script> in sync with JarvisMark.vue by hand. Hover
+			     and focus reveal it like JarvisMark's hoverPeek; jvw-fab--peek
+			     (autoPeek below) blinks it on its own while resting, like
+			     JarvisMark's idlePeek. A whitelabel logo gets no face, same as
+			     JarvisMark's img branch. -->
+			<span v-if="!brandLogoUrl" class="jvw-face" aria-hidden="true">
+				<i class="jvw-eye"></i><i class="jvw-eye"></i>
+			</span>
 		</button>
 
 		<!-- Dimming backdrop for the expand-into-the-big-chat handoff: fades the
@@ -57,7 +70,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { FULL_CHAT_URL, conversationUrl, PANEL_MIN_VIEWPORT_PX } from "./config.mjs";
 import { contextFromRoute } from "./desk_context.mjs";
 import { panelLayout } from "./panel_anchor.mjs";
@@ -82,6 +95,59 @@ let suppressClick = false;
 let idleTimer = null;
 let snapTimeoutHandle = null;
 
+// ---- Idle blink: DUPLICATED from JarvisMark.vue's idlePeek timer, by
+// necessity not choice (see the jvw-face comment in <template> for why this
+// file can't just import JarvisMark). Keep the constants and behavior in
+// sync with JarvisMark.vue by hand. Distinct from idleTimer above, which
+// fades the whole FAB on page-wide inactivity; this one blinks the face on
+// its own regardless of that fade.
+const IDLE_PEEK_INTERVAL_MS = 8000;
+const IDLE_PEEK_HOLD_MS = 1800; // one jvw-blink cycle, then back to resting
+const autoPeek = ref(false);
+let idlePeekTimeoutId = null;
+let idlePeekHoldTimeoutId = null;
+let reducedMotionMql = null;
+
+function stopIdlePeek() {
+	if (idlePeekTimeoutId) {
+		window.clearTimeout(idlePeekTimeoutId);
+		idlePeekTimeoutId = null;
+	}
+	if (idlePeekHoldTimeoutId) {
+		window.clearTimeout(idlePeekHoldTimeoutId);
+		idlePeekHoldTimeoutId = null;
+	}
+	autoPeek.value = false;
+}
+
+function scheduleIdlePeek() {
+	idlePeekTimeoutId = window.setTimeout(() => {
+		// Dragging or an open panel must never grow eyes mid-interaction -
+		// mirrors idleTimer's own `if (!dragging.value)` guard on its onIdle
+		// fade above. Still reschedules either way so the cadence keeps ticking
+		// and simply resumes blinking once the FAB is resting again.
+		if (!dragging.value && !panelOpen.value) {
+			autoPeek.value = true;
+			idlePeekHoldTimeoutId = window.setTimeout(() => {
+				autoPeek.value = false;
+			}, IDLE_PEEK_HOLD_MS);
+		}
+		scheduleIdlePeek();
+	}, IDLE_PEEK_INTERVAL_MS);
+}
+
+// Reacts to the OS preference changing mid-session, not just its value at
+// mount: reduced-motion turning on stops the timer and clears any peek in
+// progress; turning back off resumes scheduling. Kept in sync with
+// JarvisMark.vue's handleReducedMotionChange by hand.
+function handleReducedMotionChange(e) {
+	if (e.matches) {
+		stopIdlePeek();
+	} else if (!brandLogoUrl) {
+		scheduleIdlePeek();
+	}
+}
+
 // Access gate: desk boot sets this once for the session (see Task B).
 const hasAccess = Boolean(window.frappe?.boot?.jarvis_has_access);
 // Whitelabel FAB label + mark (set_jarvis_boot); blank => Jarvis defaults.
@@ -95,6 +161,20 @@ let unwatchTheme = null;
 const panelOpen = ref(false);
 const deskContext = ref(null);
 const contextDismissed = ref(false);
+
+// A drag starting (or the panel opening) mid-hold must cancel an in-progress
+// idle peek immediately rather than let it ride out its 1.8s hold - same
+// posture as JarvisMark.vue's mood watcher taking the face back the instant
+// something else needs to own it.
+watch([dragging, panelOpen], ([isDragging, isPanelOpen]) => {
+	if (isDragging || isPanelOpen) {
+		if (idlePeekHoldTimeoutId) {
+			window.clearTimeout(idlePeekHoldTimeoutId);
+			idlePeekHoldTimeoutId = null;
+		}
+		autoPeek.value = false;
+	}
+});
 
 // Dismissing the chip suppresses context for the current page only; a new
 // route is a new subject, so the dismissal does not carry over.
@@ -394,6 +474,11 @@ onMounted(() => {
 			if (!dragging.value) faded.value = true;
 		},
 	});
+	if (!brandLogoUrl && typeof window.matchMedia === "function") {
+		reducedMotionMql = window.matchMedia("(prefers-reduced-motion: reduce)");
+		reducedMotionMql.addEventListener("change", handleReducedMotionChange);
+		if (!reducedMotionMql.matches) scheduleIdlePeek();
+	}
 	window.addEventListener("resize", onResize);
 	window.addEventListener("orientationchange", onResize);
 	document.addEventListener("mousemove", onDocumentActivity, { passive: true });
@@ -419,6 +504,8 @@ onBeforeUnmount(() => {
 		window.clearTimeout(snapTimeoutHandle);
 		snapTimeoutHandle = null;
 	}
+	stopIdlePeek();
+	reducedMotionMql?.removeEventListener("change", handleReducedMotionChange);
 });
 </script>
 
@@ -547,12 +634,69 @@ onBeforeUnmount(() => {
 	opacity: 0.55;
 }
 
+/* ---- blink face ----
+   DUPLICATED from JarvisMark.vue's PEEK block (jv-face/jv-eye + jvm-blink),
+   by necessity not choice — see the jvw-face comment in <template>. This is a
+   deliberate, scoped divergence from design.md 1.3 (no hover motion) the same
+   way the accent gradient above already is: the mark's face reveal already
+   ships as a sanctioned exception elsewhere (UserMenu.vue's sidebar brand
+   mark), so hover/focus revealing it here keeps the FAB consistent with the
+   rest of the brand mark rather than introducing a new pattern. Keep this
+   block, the template markup, and the idle-blink timing in <script> in sync
+   with JarvisMark.vue by hand. */
+.jvw-face {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	opacity: 0;
+	transition: opacity 0.25s ease;
+}
+.jvw-eye {
+	width: 7px;
+	height: 11px;
+	background: #fff;
+	border-radius: 999px;
+}
+.jvw-fab:hover > svg,
+.jvw-fab:focus-visible > svg,
+.jvw-fab--peek > svg {
+	opacity: 0;
+}
+.jvw-fab:hover .jvw-face,
+.jvw-fab:focus-visible .jvw-face,
+.jvw-fab--peek .jvw-face {
+	opacity: 1;
+}
+
+@keyframes jvw-blink {
+	0%,
+	46%,
+	100% {
+		transform: scaleY(1);
+	}
+	49%,
+	52% {
+		transform: scaleY(0.14);
+	}
+}
+
 @media (prefers-reduced-motion: no-preference) {
-	.jvw-fab > svg {
-		transition: transform 0.12s ease;
+	.jvw-fab:hover .jvw-eye,
+	.jvw-fab:focus-visible .jvw-eye,
+	.jvw-fab--peek .jvw-eye {
+		animation: jvw-blink 1.8s ease-in-out infinite;
+	}
+	.jvw-fab > svg,
+	.jvw-face {
+		transition: transform 0.12s ease, opacity 0.25s ease;
 	}
 	.jvw-fab:active > svg,
-	.jvw-fab--dragging > svg {
+	.jvw-fab--dragging > svg,
+	.jvw-fab:active .jvw-face,
+	.jvw-fab--dragging .jvw-face {
 		transform: scale(0.98);
 	}
 }
