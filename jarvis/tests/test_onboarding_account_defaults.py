@@ -165,3 +165,25 @@ class TestAccountDefaults(FrappeTestCase):
 			out = onboarding.get_account_defaults()
 		self.assertEqual(out["company"], "")
 		self.assertEqual(out["companies"], [])
+
+	def test_erpnext_installed_true_when_present(self):
+		# Uses the onboarding._installed_apps seam (see jarvis#812), never
+		# frappe.get_installed_apps directly.
+		with (
+			patch.object(onboarding, "_installed_apps", return_value={"frappe", "erpnext"}),
+			patch("frappe.defaults.get_user_default", return_value=None),
+			patch("frappe.defaults.get_global_default", return_value=None),
+			_company_rows([frappe._dict(name="Acme")]),
+		):
+			out = onboarding.get_account_defaults()
+		self.assertTrue(out["erpnext_installed"])
+
+	def test_erpnext_installed_false_when_absent(self):
+		with (
+			patch.object(onboarding, "_installed_apps", return_value={"frappe"}),
+			patch("frappe.defaults.get_user_default", return_value=None),
+			patch("frappe.defaults.get_global_default", return_value=None),
+			_company_rows([]),
+		):
+			out = onboarding.get_account_defaults()
+		self.assertFalse(out["erpnext_installed"])

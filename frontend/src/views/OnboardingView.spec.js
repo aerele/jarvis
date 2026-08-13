@@ -548,3 +548,63 @@ describe("B3: gateway picker shows on trial plans", () => {
 		expect(wrapper.find('[aria-label="Payment method: Razorpay"]').exists()).toBe(true);
 	});
 });
+
+describe("812: Company field is constrained once ERPNext has real Company records", () => {
+	it("prefillAccount captures erpnext_installed and companies from the server", async () => {
+		api.getAccountDefaults.mockResolvedValue({
+			email: "",
+			company: "Acme",
+			companies: ["Acme", "Beta"],
+			erpnext_installed: true,
+		});
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.state.erpnextInstalled).toBe(true);
+		expect(wrapper.vm.state.companies).toEqual(["Acme", "Beta"]);
+	});
+
+	it("ERPNext installed with Company records: the field is a constrained picker", async () => {
+		api.getAccountDefaults.mockResolvedValue({
+			email: "",
+			company: "",
+			companies: ["Acme", "Beta"],
+			erpnext_installed: true,
+		});
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+		const combo = wrapper.find("jv-combo-stub");
+		expect(combo.attributes("allowcustom")).toBe("false");
+	});
+
+	it("ERPNext absent: the field stays free text even with no companies", async () => {
+		api.getAccountDefaults.mockResolvedValue({
+			email: "",
+			company: "",
+			companies: [],
+			erpnext_installed: false,
+		});
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+		const combo = wrapper.find("jv-combo-stub");
+		expect(combo.attributes("allowcustom")).toBe("true");
+	});
+
+	it("ERPNext installed but zero Company rows: the field stays free text (no dead end)", async () => {
+		api.getAccountDefaults.mockResolvedValue({
+			email: "",
+			company: "",
+			companies: [],
+			erpnext_installed: true,
+		});
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+		const combo = wrapper.find("jv-combo-stub");
+		expect(combo.attributes("allowcustom")).toBe("true");
+	});
+});
