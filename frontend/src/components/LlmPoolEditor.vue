@@ -1164,7 +1164,7 @@
 									"
 									class="jv-btn jv-btn--primary"
 								>
-									<JvSpinner v-if="panelRow._connect.loading" />
+									<JvSpinner v-if="panelRow._connect.loading" color="currentColor" />
 									{{ panelRow._connect.loading ? "Connecting…" : "Connect" }}
 								</button>
 								<button

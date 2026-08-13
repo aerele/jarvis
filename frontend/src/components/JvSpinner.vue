@@ -2,7 +2,7 @@
 	<!-- With a label: a column so the text sits under the spinner and the whole
 	     thing is announced once, as a single status region. -->
 	<div v-if="label" class="jv-spin-stack" role="status" aria-live="polite">
-		<span class="jv-spin" :class="tier" :style="sizeStyle" aria-hidden="true">
+		<span class="jv-spin" :class="tier" :style="rootStyle" aria-hidden="true">
 			<span class="jv-spin-halo"></span>
 			<span class="jv-spin-dots"><i></i><i></i><i></i></span>
 			<span class="jv-spin-core">
@@ -20,7 +20,7 @@
 		v-else
 		class="jv-spin"
 		:class="tier"
-		:style="sizeStyle"
+		:style="rootStyle"
 		role="status"
 		aria-label="Loading"
 	>
@@ -45,12 +45,17 @@
  * on their workspace being built are looking at the same product, not two.
  *
  * Every layer follows currentColor rather than the brand gradient (jarvis#559):
- * a caller sets `color` (or inherits one), and the spark, its dots and its halo
- * all tint to that. The spark itself is always drawn at full strength; the halo
- * and core backdrop behind it are a soft, partial-opacity wash of the same
- * colour, so the spark reads clearly against them on ANY surface - dark text on
- * a light card, white on a black button, an accent tone inside a coloured
- * badge - without ever needing to know what colour it is.
+ * the spark, its dots and its halo all tint to one colour. By default that
+ * colour is the brand accent (--brand-2), so a plain <JvSpinner /> reads as the
+ * Jarvis mark rather than as flat black-on-white text. The spark itself is
+ * always drawn at full strength; the halo and core backdrop behind it are a
+ * soft, partial-opacity wash of the same colour, so the spark reads clearly
+ * against them on ANY surface without ever needing to know what colour it is.
+ *
+ * A caller on a surface where the brand tone would not read - a spinner sitting
+ * inside a filled primary button, say, whose background is already near the
+ * brand tone - passes `color="currentColor"` (or any explicit colour) to opt
+ * back into inheriting the surrounding text colour, exactly as before.
  *
  * Do not add a second spinner. If a surface cannot fit this one, resize the
  * surface.
@@ -77,6 +82,13 @@ const props = defineProps({
 	size: { type: Number, default: MIN_SIZE },
 	/** Optional caption rendered beneath the spinner and announced politely. */
 	label: { type: String, default: "" },
+	/**
+	 * The tint every layer follows. Defaults to the brand accent so the spinner
+	 * reads as the Jarvis mark. Pass "currentColor" (or any CSS colour) on a
+	 * surface where the brand tone would not stand out - e.g. inside a filled
+	 * primary button - to inherit the surrounding text colour instead.
+	 */
+	color: { type: String, default: "var(--brand-2)" },
 });
 
 const resolvedSize = computed(() => {
@@ -100,7 +112,10 @@ const resolvedSize = computed(() => {
  */
 const tier = computed(() => (resolvedSize.value < LG_SIZE ? "jv-spin--md" : "jv-spin--lg"));
 
-const sizeStyle = computed(() => ({ "--jv-spin-size": `${resolvedSize.value}px` }));
+const rootStyle = computed(() => ({
+	"--jv-spin-size": `${resolvedSize.value}px`,
+	color: props.color,
+}));
 </script>
 
 <style scoped>
