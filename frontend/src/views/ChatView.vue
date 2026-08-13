@@ -8375,7 +8375,19 @@ function onEvent(p) {
 			waiting.value = false;
 			sending.value = false;
 			statusPhase.value = null;
-			activeTools.value = [];
+			// jarvis#808: deferred one tick past the mood->happy flip above
+			// (markAnswerLanded). Clearing activeTools synchronously here unmounts
+			// the sibling "thinking" JarvisMark (v-if on activeTools.length) in the
+			// SAME tick the landed message's own JarvisMark starts its one-shot
+			// cheer animation, so two overflow:hidden avatars mid-transition
+			// collide and paint a clipped frame. nextTick lets the cheer's mood
+			// change commit first, so the sibling's teardown lands a frame later
+			// instead of colliding with it. Guarded on currentRunId so a new run
+			// that starts (and pushes its own tool) before this callback fires is
+			// never clobbered by a stale clear from the run that just ended.
+			nextTick(() => {
+				if (!currentRunId.value) activeTools.value = [];
+			});
 			currentRunId.value = null;
 			store.streamingConvId = null;
 			// (browser notification moved to the app-scoped global notifier —
