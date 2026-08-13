@@ -101,8 +101,8 @@ let snapTimeoutHandle = null;
 // sync with JarvisMark.vue by hand. Distinct from idleTimer above, which
 // fades the whole FAB on page-wide inactivity; this one blinks the face on
 // its own regardless of that fade.
-const IDLE_PEEK_INTERVAL_MS = 8000;
-const IDLE_PEEK_HOLD_MS = 1800; // one jvw-blink cycle, then back to resting
+const IDLE_PEEK_INTERVAL_MS = 9000;
+const IDLE_PEEK_HOLD_MS = 4800; // ~1.4 jvw-lookaround cycles: a visible "thinking" glance, then back to resting
 const autoPeek = ref(false);
 let idlePeekTimeoutId = null;
 let idlePeekHoldTimeoutId = null;
@@ -683,11 +683,39 @@ onBeforeUnmount(() => {
 	}
 }
 
+/* The "thinking" glance, mirrored from JarvisMark.vue's jvm-lookaround (kept in
+   sync by hand). Magnitudes are a touch smaller since the FAB face box is the
+   full button, not just the eyes. */
+@keyframes jvw-lookaround {
+	0%,
+	100% {
+		transform: translate(-11%, -6%);
+	}
+	28% {
+		transform: translate(-11%, -6%);
+	}
+	52% {
+		transform: translate(12%, -3%);
+	}
+	70% {
+		transform: translate(0, -8%) scale(0.96, 1.04);
+	}
+}
+
 @media (prefers-reduced-motion: no-preference) {
 	.jvw-fab:hover .jvw-eye,
 	.jvw-fab:focus-visible .jvw-eye,
 	.jvw-fab--peek .jvw-eye {
 		animation: jvw-blink 1.8s ease-in-out infinite;
+	}
+	/* Idle peek does the thinking glance (look around) rather than a quick
+	   blink, so the resting popup logo is clearly alive. Scoped to --peek so
+	   hover and focus keep the snappier blink. */
+	.jvw-fab--peek .jvw-face {
+		animation: jvw-lookaround 3.4s ease-in-out infinite;
+	}
+	.jvw-fab--peek .jvw-eye {
+		animation: jvw-blink 3.4s ease-in-out infinite;
 	}
 	.jvw-fab > svg,
 	.jvw-face {
