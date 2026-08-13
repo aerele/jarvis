@@ -14,7 +14,9 @@
 					     keyboard/SR users -->
 					<Badge v-if="sync.pending" theme="orange" variant="subtle" size="lg">
 						<template #prefix>
-							<JvSpinner />
+							<!-- currentColor so the spinner takes the orange badge tone,
+							     not the brand accent (JvSpinner's default). -->
+							<JvSpinner color="currentColor" />
 						</template>
 						Applying agents - ~30s, one restart
 					</Badge>

@@ -622,8 +622,12 @@
 												:class="`ob-phase--${provisioningStage.state}`"
 											>
 												<span class="ob-phase-ico">
+													<!-- currentColor so the active step matches its
+													     sibling step icons (.ob-phase-ico sets the
+													     colour), not JvSpinner's brand default. -->
 													<JvSpinner
 														v-if="provisioningStage.state === 'active'"
+														color="currentColor"
 														:size="20"
 													/>
 													<FeatherIcon
@@ -1361,10 +1365,14 @@
 													:class="`ob-phase--${readinessStage.state}`"
 												>
 													<span class="ob-phase-ico">
+														<!-- currentColor so the active step matches its
+														     sibling step icons (.ob-phase-ico sets the
+														     colour), not JvSpinner's brand default. -->
 														<JvSpinner
 															v-if="
 																readinessStage.state === 'active'
 															"
+															color="currentColor"
 															:size="20"
 														/>
 														<FeatherIcon
