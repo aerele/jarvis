@@ -433,6 +433,50 @@
 									ai === 0 ? "primary" : "backup"
 								}}</span>
 								<span class="jv-flist-subrow-acts">
+									<!-- jarvis#807: promote/demote an account within this row. account[0]
+							         is the primary the pool tries first, so Up on the second row makes
+							         it primary. Same icon buttons and disabled-at-the-ends rule as the
+							         model-row reorder above; the shared order bar commits it. -->
+									<button
+										v-if="canEdit && row.accounts.length > 1"
+										@click="moveAccount(row, ai, -1)"
+										:disabled="!editable || ai === 0"
+										title="Move up (primary is first)"
+										class="jv-pool-iconbtn"
+									>
+										<svg
+											viewBox="0 0 24 24"
+											width="14"
+											height="14"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.8"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M18 15l-6-6-6 6" />
+										</svg>
+									</button>
+									<button
+										v-if="canEdit && row.accounts.length > 1"
+										@click="moveAccount(row, ai, 1)"
+										:disabled="!editable || ai === row.accounts.length - 1"
+										title="Move down"
+										class="jv-pool-iconbtn"
+									>
+										<svg
+											viewBox="0 0 24 24"
+											width="14"
+											height="14"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.8"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M6 9l6 6 6-6" />
+										</svg>
+									</button>
 									<button
 										v-if="canEdit"
 										:disabled="!editable"
@@ -1698,6 +1742,50 @@
 									>{{ accountHealth(m).label }}</span
 								>
 								<span class="jv-pool-acctacts">
+									<!-- jarvis#807: promote/demote this account. account[0] is the primary
+								         the pool tries first, so Up makes it primary. Same icon buttons and
+								         end-disabling as the model-row reorder; shown only when there is
+								         more than one account to order. -->
+									<button
+										v-if="canEdit && m.accounts.length > 1"
+										@click="moveAccount(m, ai, -1)"
+										:disabled="!editable || ai === 0"
+										title="Move up (primary is first)"
+										class="jv-pool-iconbtn"
+									>
+										<svg
+											viewBox="0 0 24 24"
+											width="14"
+											height="14"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.8"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M18 15l-6-6-6 6" />
+										</svg>
+									</button>
+									<button
+										v-if="canEdit && m.accounts.length > 1"
+										@click="moveAccount(m, ai, 1)"
+										:disabled="!editable || ai === m.accounts.length - 1"
+										title="Move down"
+										class="jv-pool-iconbtn"
+									>
+										<svg
+											viewBox="0 0 24 24"
+											width="14"
+											height="14"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.8"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M6 9l6 6 6-6" />
+										</svg>
+									</button>
 									<button
 										v-if="canEdit && !singleMode"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -2586,13 +2674,34 @@ async function testSubscriptionRow(m) {
 			true // force_probe: an explicit Test press always asks admin for a fresh probe.
 		);
 		if (stale()) return;
-		if (!res || !res.apply_operation) {
+		if (!res) {
 			subTest.value.result = {
 				kind: "fail",
+				message: "Could not start the check. Try again.",
+			};
+			return;
+		}
+		if (res.retry_after_seconds) {
+			subTest.value.result = {
+				kind: "fail",
+				message: "Too many changes in a short time. Wait a moment, then try again.",
+			};
+			return;
+		}
+		if (!res.apply_operation) {
+			// jarvis#806: a lone chat subscription (one model, one account) is routed to
+			// the direct/legacy leg by compute_pool_mode's _lone_direct_capable carve-out
+			// (jarvis#715). save_llm_pool answers that path with mode:"legacy" and
+			// apply_operation:null: no pool apply operation was minted and no separate
+			// probe was run (the creds sync is enqueued async, fire-and-forget). Treating
+			// the missing operation as a failure showed a red "Could not start the check"
+			// on a perfectly healthy connection. There is genuinely nothing to poll here,
+			// so report the honest neutral outcome rather than claiming a check passed that
+			// never ran, or a failure that did not happen.
+			subTest.value.result = {
+				kind: "ok",
 				message:
-					res && res.retry_after_seconds
-						? "Too many changes in a short time. Wait a moment, then try again."
-						: "Could not start the check. Try again.",
+					"Saved. This connection uses a direct setup, so there is no separate check to run. Select Start chatting to continue.",
 			};
 			return;
 		}
@@ -3621,6 +3730,34 @@ async function applyOrder() {
 	// Only clear the baseline on a write that landed. If it failed, runApply has
 	// already put the old order back, and the baseline must stay valid for the retry.
 	if (persisted) orderBaseline.value = null;
+}
+// jarvis#807: reorder the accounts WITHIN one subscription row. account[0] is the
+// primary the pool falls to first (see get_llm_config / the .jv-flist-subrow-order
+// comment), and the backend round-trips the accounts[] array order verbatim
+// (save_llm_pool json.dumps'es them in order; _model_accounts json.loads them back),
+// so persisting the reordered array is the whole change - no backend edit needed.
+//
+// Mirrors move() above: onboarding (footerless) keeps it local for the wizard footer's
+// single save, and the settings editor defers to the SAME order bar / applyOrder() a
+// model-row move uses, so a promote does not restart the container on every click.
+// Where move() leans on reorder() copying the OUTER array to keep orderBaseline a valid
+// revert target, an account move lives INSIDE a row, so it swaps in a CLONED row (new
+// accounts array) and leaves the pre-move row untouched in the baseline for revert.
+function moveAccount(m, ai, d) {
+	if (busy.value.active) return;
+	const accts = (m && m.accounts) || [];
+	const to = ai + d;
+	if (to < 0 || to >= accts.length) return;
+	if (props.footerless) {
+		m.accounts = reorder(accts, ai, to);
+		return;
+	}
+	const idx = rows.value.indexOf(m);
+	if (idx === -1) return;
+	if (!orderBaseline.value) orderBaseline.value = rows.value;
+	const next = rows.value.slice();
+	next[idx] = { ...m, accounts: reorder(accts, ai, to) };
+	rows.value = next;
 }
 
 // jarvis#714: the status strip's "Last sync failed" pill had no way to retry.
@@ -4855,7 +4992,14 @@ const statusLine = computed(() => {
 	if (r && !(r.kind === "failed" && panel.value.open)) {
 		return { kind: r.kind, text: applyMessage.value };
 	}
-	if (applyStatus.value.kind !== "idle") return applyStatus.value;
+	// jarvis#809: applyStatus falls back to the durable server field
+	// last_sync_status, so a plain "ok" ("Applied") kept resurfacing on every Settings
+	// open even when nothing was applied this session. The transient success-after-a-
+	// real-apply arrives via applyResult (describeOutcome) above, not this fallback, so
+	// dropping the plain ok here retires the stale badge while keeping that flash. Failed
+	// + Resync (jarvis#714), Disconnected/warn (jarvis#574) and pending still surface.
+	if (applyStatus.value.kind !== "idle" && applyStatus.value.kind !== "ok")
+		return applyStatus.value;
 	return null;
 });
 // True exactly when the empty/disconnected box (rows list, !singleMode only -
@@ -5573,7 +5717,8 @@ defineExpose({
 }
 /* account[0] is "primary", the rest "backup" - reflects the sticky rotation
    (always sticky; the rotation control itself was removed from the UI, see
-   panel.mode's own comment). Informational only, no reordering hangs off it. */
+   panel.mode's own comment). The label is read-only; reordering is done with the
+   Up/Down arrows beside it (moveAccount, jarvis#807), not by clicking the label. */
 .jv-flist-subrow-order {
 	flex: none;
 	font-size: 10.5px;
