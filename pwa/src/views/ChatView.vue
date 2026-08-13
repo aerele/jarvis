@@ -218,10 +218,23 @@ function atBottom() {
 	if (!el) return true;
 	return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
 }
-// Follow the stream only if the user is already at the bottom; yanking them
-// down while they scroll back through a long reply is the classic chat sin.
+// Whether new content should keep the view pinned to the newest text. Sending a
+// message drops this (see send): the reply then grows DOWNWARD from where the
+// turn landed instead of sliding its own opening up past the top of the viewport
+// on every streamed chunk — the "large paragraph slides upward" bug. A real
+// scroll back to the bottom resumes following; a fresh load restores it.
+const follow = ref(true);
+function onScroll() {
+	follow.value = atBottom();
+}
+// Follow the newest text only while `follow` holds (parked at the bottom) AND no
+// reply is streaming (`live`): chasing the bottom mid-stream drags the line you
+// are reading up and off the top, so a long reply never settles enough to read.
+// While streaming the reply grows downward and you scroll at your own pace; a
+// forced scroll (open / send / stop) always lands, and once the turn ends normal
+// follow resumes so late content still keeps a bottom-parked reader pinned.
 async function scrollToBottom(force = false) {
-	const stick = force || atBottom();
+	const stick = force || (follow.value && !live.value);
 	await nextTick();
 	if (stick && scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight;
 }
@@ -229,6 +242,9 @@ async function scrollToBottom(force = false) {
 // ── loading ─────────────────────────────────────────────────────────────────
 async function load(force = false) {
 	if (!convId.value) return;
+	// A fresh open / refresh follows the newest content again (streaming replies
+	// arrive via socket events, never load(), so this never re-pins mid-reply).
+	follow.value = true;
 	loading.value = true;
 	try {
 		const d = await api.getConversation(convId.value);
@@ -283,6 +299,9 @@ async function send() {
 		optimistic: true,
 	});
 	await scrollToBottom(true);
+	// Land on the new turn, then stop following so the reply grows downward
+	// instead of dragging the view up as it streams (see `follow`).
+	follow.value = false;
 
 	try {
 		// No model/effort override here: an existing chat keeps whatever it was
@@ -660,7 +679,7 @@ onUnmounted(() => {
 		</button>
 	</div>
 
-	<div ref="scroller" class="jv-scroll jv-thread">
+	<div ref="scroller" class="jv-scroll jv-thread" @scroll.passive="onScroll">
 		<div v-if="!items.length && !live && !loading" class="jv-empty">
 			<BrandMark :size="52" />
 			<div style="font-size: 16px; font-weight: 600; color: var(--ink9)">
