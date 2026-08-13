@@ -9,7 +9,7 @@
 			v-if="renaming"
 			ref="renameEl"
 			v-model="renameText"
-			class="h-6 w-full rounded border border-outline-gray-2 bg-surface-white px-1 text-sm text-ink-gray-8 focus:outline-none"
+			class="h-6 w-full rounded border border-outline-gray-2 bg-surface-white px-1 text-sm text-ink-gray-8 focus:border-outline-gray-3 focus:outline-none focus:ring-0"
 			@click.stop
 			@keydown.enter.stop.prevent="commitRename"
 			@keydown.esc.stop.prevent="cancelRename"

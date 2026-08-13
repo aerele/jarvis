@@ -82,6 +82,18 @@
 	box-shadow: none;
 	border-color: revert;
 }
+/* App-wide, but ONLY the plugin's class-strategy targets (.form-input /
+   .form-select). Those are used by frappe-ui internals like Autocomplete's search
+   box, which carry NO focus border/shadow of their own, so they leak the blue on
+   every surface. Neutralise just those. This is deliberately NOT extended to bare
+   input/textarea/select app-wide: frappe-ui's own TextInput/Select self-protect
+   (they set focus:border/shadow/ring themselves), and a blanket reset stripped
+   that and left a bare UA-grey border on plain click focus. */
+:root :where(.form-input, .form-select):focus {
+	outline: none;
+	box-shadow: none;
+	border-color: revert;
+}
 /* `outline: revert` used to sit above, which was the wrong tool: revert rolls the
    property back to the USER-AGENT sheet, and the UA's rule for a focused input is
    the browser's own blue focus ring. So the line meant to suppress a blue ring was
@@ -94,7 +106,11 @@
 	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible,
 .jv-ob-root
 	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible {
-	outline: 2px solid var(--cta, currentColor);
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 1px;
+}
+:root :where(.form-input, .form-select):focus-visible {
+	outline: 2px solid var(--focus-ring);
 	outline-offset: 1px;
 }
 
