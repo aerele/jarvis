@@ -119,7 +119,7 @@ BENCH_SIGNUP_DETAILS_REJECTED = "BENCH_SIGNUP_DETAILS_REJECTED"
 #: are matched on the wire ``exc_type`` string, so a class admin renames must be
 #: added here too - which is the same append-only discipline every other code in
 #: this module follows.
-_DETAILS_REJECTION_EXC_TYPES = frozenset({"BillingMetadataRejected"})
+_DETAILS_REJECTION_EXC_TYPES = frozenset({"BillingMetadataRejected", "PartnerCodeRejected"})
 
 #: Field prefixes admin uses when it names the offending input. A message starting
 #: with one of these is, by admin's own convention, about a value the customer
