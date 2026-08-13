@@ -587,14 +587,21 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		settings.preset = "Cost-saver"
 		self.assertTrue(compute_pool_mode(settings))
 
-	def test_compute_pool_mode_false_when_one_model_no_preset(self):
-		"""compute_pool_mode is False for exactly 1 enabled model and no preset."""
-		from jarvis.jarvis.pool_serialize import compute_pool_mode
+	def test_compute_pool_mode_true_for_a_lone_api_key(self):
+		"""jarvis#794: a lone api-key model takes the POOL leg (byo-direct), NOT the
+		DIRECT /llm-creds leg. The direct leg renders a legacy single-provider config
+		with no native adapter, so an anthropic/gemini api key is sent to the wrong
+		endpoint and 404s (model_not_found) on the first turn; the pool render sets
+		the right per-vendor adapter. And proxy_active stays False (no sidecar): a
+		lone api-key is agent-direct, not a cliproxy pool.
+		"""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode, compute_proxy_active
 
 		m = _api_key_model(enabled=1)
 		settings = _make_settings_with_models([m])
 		settings.preset = None
-		self.assertFalse(compute_pool_mode(settings))
+		self.assertTrue(compute_pool_mode(settings))
+		self.assertFalse(compute_proxy_active(settings))
 
 	def test_compute_pool_mode_false_for_a_fresh_lone_renderable_subscription(self):
 		"""jarvis#715: a lone subscription on a provider agent can serve

@@ -323,6 +323,16 @@ def compute_pool_mode(settings) -> bool:
 	# condition is there.
 	if has_subscription_model(settings) and not _lone_direct_capable(settings):
 		return True
+	# jarvis#794: a lone api-key model must ALSO take the pool leg. The DIRECT
+	# (/llm-creds) leg renders a legacy single-provider agent config with NO native
+	# adapter, so an anthropic/gemini api key is sent an OpenAI-format request to the
+	# wrong endpoint and 404s (model_not_found) on the first turn. The byo-direct pool
+	# render (build_pool_providers/_VENDOR) sets the right per-vendor adapter, and
+	# compute_proxy_active stays False for it (no sidecar deployed). The DIRECT leg
+	# now serves ONLY native single models (codex/gemini-cli OAuth), which it renders
+	# correctly.
+	if any(_credential_type(m) == "api_key" for m in enabled):
+		return True
 	return False
 
 
