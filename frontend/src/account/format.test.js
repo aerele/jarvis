@@ -166,3 +166,13 @@ test("billingBanner: tone escalates across the lifecycle", () => {
 test("billingBanner: says nothing when this audience has no copy", () => {
 	assert.equal(billingBanner({ phase: "grace", admin_message: "x" }, false), null);
 });
+
+test("billingBanner: retrying is an amber, persistent dunning banner", () => {
+	// Slice 2: a failed auto-renewal in the gateway's retry window.
+	const b = billingBanner(_notice("retrying"), true);
+	assert.equal(b.type, "warning");
+	assert.equal(b.title, "Payment retrying");
+	assert.equal(b.message, "ADMIN COPY");
+	assert.equal(b.dismissible, false); // persistent - only the pre-expiry nudge dismisses
+	assert.equal(billingBanner(_notice("retrying"), false).message, "MEMBER COPY");
+});
