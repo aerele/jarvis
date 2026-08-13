@@ -193,7 +193,12 @@ export function renewalLabel(currentPeriodEnd, daysRemaining) {
 // Billing lifecycle banner, or null when there is nothing to say. The server
 // sends BOTH audiences' wording because it authenticates the customer, not the
 // individual - only the bench knows who is looking, so the pick happens here.
-const BILLING_TONE = { expiring: "info", grace: "warning", expired: "warning", retrying: "warning" };
+const BILLING_TONE = {
+	expiring: "info",
+	grace: "warning",
+	expired: "warning",
+	retrying: "warning",
+};
 const BILLING_TITLE = {
 	expiring: "Plan ending soon",
 	grace: "Payment overdue",
